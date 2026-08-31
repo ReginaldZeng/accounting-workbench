@@ -41,11 +41,10 @@ conf.ini
 04_部署包/
 # 兼容旧习惯：打包脚本若仍在根目录产出该 zip，移入 04_部署包/ 前也先忽略
 finance_workbench_backend_上传腾讯云.zip
-# 前端构建产物（V2.171 起出库）：Vite 按内容 hash 命名 assets/index-<hash>.js，
-# 每条并行分支都产出不同文件名，static/index.html 每次合并必冲突。源码在 frontend/ 随时能重打，
-# 故不入库。重打：双击 01_Current_Deliverables/app/build_frontend.bat（启动.bat 检测到缺失会自动调）。
-# 只忽略在跑的这一份；02_Revision_History/ 下的历史快照维持原样，不动历史。
-01_Current_Deliverables/app/backend/static/
+# 前端构建产物 static/：迁 GitHub 后【纳入版本管理】——服务器无 node、build 不了，
+# git 部署必须带上构建物（同 BP 提交 dist 的思路）。本机 build 后 commit+push，git pull 即带上。
+# 注意：并行分支上 assets/index-<hash>.js 命名不同、合并可能冲突，冲突时以 build 结果为准重打即可。
+# （故此处不再忽略 01_Current_Deliverables/app/backend/static/）
 
 # ── 生成物：台账合并视图（由 00_Change_Log/_合并视图.py 生成，随时可重生成）──
 00_Change_Log_合并视图.md
