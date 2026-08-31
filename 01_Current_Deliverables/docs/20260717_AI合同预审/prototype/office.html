@@ -1,0 +1,302 @@
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数字员工办公室 · 桌面端</title>
+<style>
+  :root{
+    --oat:#EAE4D8; --oat-deep:#DED7C6; --oat-line:#D3CAB6;
+    --green:#758043; --green-deep:#415800; --green-soft:#8A9455;
+    --ink:#333333; --ink-soft:#565656; --ink-mute:#8A8A82;
+    --ok:#3F7D3B; --warn:#B7791F; --idle:#9A9A92;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:var(--oat)}
+  body{font-family:"MiSans","MiSans Normal","Microsoft YaHei",微软雅黑,Arial,sans-serif;color:var(--ink)}
+  #app{width:100%;height:100%;background:var(--oat);
+    display:grid;grid-template-columns:236px minmax(0,1fr) 316px;overflow:hidden}
+
+  /* ── 侧栏 ── */
+  aside{background:#fff;border-right:1px solid var(--oat-line);padding:22px 16px;display:flex;flex-direction:column}
+  .brand{display:flex;align-items:center;gap:11px;padding:0 8px 22px}
+  .logo{width:26px;height:26px;border:4px solid var(--green-deep);border-radius:50%;flex:none}
+  .brand b{font-size:16px}
+  .brand span{display:block;font-size:11px;color:var(--ink-mute);font-weight:400;margin-top:1px}
+  nav{display:flex;flex-direction:column;gap:2px}
+  .nv{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:9px;
+    font-size:14px;color:var(--ink-soft);cursor:pointer;transition:background .18s,color .18s}
+  .nv:hover{background:var(--oat)}
+  .nv.on{background:var(--green);color:#fff;font-weight:700}
+  .nv.on svg{stroke:#fff}
+  .nv svg{width:17px;height:17px;stroke:var(--ink-mute);fill:none;stroke-width:1.7;flex:none}
+  .nv .ct{margin-left:auto;font-size:12px;background:var(--oat-deep);color:var(--ink-soft);
+    padding:1px 7px;border-radius:99px;font-weight:700}
+  .nv.on .ct{background:rgba(255,255,255,.25);color:#fff}
+  .grp{font-size:11px;color:var(--ink-mute);letter-spacing:.1em;padding:20px 12px 8px;font-weight:700}
+  .foot{margin-top:auto;padding:12px;border-top:1px solid var(--oat-line);
+    display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-mute)}
+  .lamp{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+
+  /* ── 主区 ── */
+  main{padding:22px 24px;display:flex;flex-direction:column;min-width:0}
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+  .kpi{background:#fff;border-radius:14px;padding:15px 17px}
+  .kpi .k{font-size:12px;color:var(--ink-mute)}
+  .kpi .v{font-size:32px;font-weight:700;line-height:1.15;margin-top:3px;
+    font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .kpi .v small{font-size:14px;font-weight:400;color:var(--ink-mute);margin-left:3px}
+  .kpi .d{font-size:11px;color:var(--ink-mute);margin-top:1px}
+  .kpi.hero .v{color:var(--green-deep)}
+
+  .stage{flex:1;margin-top:14px;background:#fff;border-radius:18px;position:relative;
+    overflow:hidden;min-height:0;display:grid;place-items:center}
+  .stage-h{position:absolute;top:16px;left:20px;z-index:5}
+  .stage-h b{font-size:14px}
+  .stage-h span{font-size:12px;color:var(--ink-mute);margin-left:8px}
+  .hint{position:absolute;bottom:14px;left:0;right:0;text-align:center;
+    font-size:11px;color:var(--ink-mute);z-index:5}
+
+  .canvas{position:relative;width:720px;height:500px}
+  .canvas svg{position:absolute;inset:0;width:720px;height:500px}
+
+  /* ── 标签层（正对观众）── */
+  .tag{position:absolute;transform:translate(-50%,-100%);text-align:center;cursor:pointer;z-index:4}
+  .av{width:38px;height:38px;border-radius:50%;margin:0 auto 6px;position:relative;
+    background:var(--green);display:grid;place-items:center;
+    box-shadow:0 3px 10px rgba(80,72,50,.24);transition:box-shadow .2s}
+  .tag:hover .av{box-shadow:0 6px 18px rgba(80,72,50,.36)}
+  .av svg{position:static;width:20px;height:20px;stroke:#fff;fill:none;stroke-width:1.8}
+  .av .st{position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;border:2px solid #fff}
+  .st.run{background:var(--ok)} .st.wait{background:var(--idle)}
+  .nm{font-size:12px;font-weight:700;white-space:nowrap;background:#fff;padding:3px 9px;
+    border-radius:99px;box-shadow:0 1px 6px rgba(80,72,50,.18);display:inline-block}
+  .do{font-size:11px;color:var(--ink-soft);white-space:nowrap;background:var(--oat);
+    padding:2px 8px;border-radius:99px;display:inline-block;margin-top:4px}
+  .tag.v{cursor:default}
+  .tag.v .av{background:transparent;border:2px dashed var(--oat-line);box-shadow:none}
+  .tag.v .av svg{stroke:var(--ink-mute)}
+  .tag.v .nm{color:var(--ink-mute);font-weight:400;box-shadow:none;background:transparent}
+
+  /* ── 右栏 ── */
+  .rail{background:#fff;border-left:1px solid var(--oat-line);padding:22px 18px;
+    overflow:hidden;display:flex;flex-direction:column}
+  .rh{font-size:13px;font-weight:700;margin-bottom:12px}
+  .flow{display:flex;flex-direction:column;gap:10px}
+  .fw{background:var(--oat);border-radius:12px;padding:13px 14px}
+  .fw .r1{display:flex;align-items:center;gap:8px}
+  .fw .n{font-size:13px;font-weight:700}
+  .pill{margin-left:auto;font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px}
+  .pill.run{background:var(--green);color:#fff}
+  .pill.wait{background:var(--oat-deep);color:var(--ink-soft)}
+  .fw .w{font-size:11px;color:var(--ink-mute);margin:4px 0 9px}
+  .bar{height:5px;background:var(--oat-deep);border-radius:99px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--green);border-radius:99px}
+  .pc{font-size:10px;color:var(--ink-mute);text-align:right;margin-top:4px;font-variant-numeric:tabular-nums}
+  .feed{margin-top:22px;overflow:hidden}
+  .ev{display:flex;gap:9px;padding:9px 0;border-bottom:1px solid var(--oat)}
+  .ev:last-child{border:0}
+  .ed{width:6px;height:6px;border-radius:50%;background:var(--green-soft);margin-top:6px;flex:none}
+  .ed.w{background:var(--warn)}
+  .ev .x{font-size:12px;line-height:1.45}
+  .ev .tm{font-size:10px;color:var(--ink-mute);margin-top:2px;font-variant-numeric:tabular-nums}
+  .privacy{margin-top:auto;background:var(--oat);border-radius:11px;padding:11px 12px;
+    font-size:11px;color:var(--ink-soft);line-height:1.55}
+  .privacy b{color:var(--green-deep)}
+  @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+  .caret{animation:blink 1.1s steps(1) infinite}
+  @media (prefers-reduced-motion:reduce){.caret{animation:none}}
+</style>
+
+<div id="app">
+  <aside>
+    <div class="brand">
+      <div class="logo"></div>
+      <div><b>数字员工办公室</b><span>星期零 · 财务部</span></div>
+    </div>
+    <nav>
+      <div class="nv on"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 4l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>办公室</div>
+      <div class="nv"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>员工<span class="ct">2</span></div>
+      <div class="nv"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M9 9h6M9 13h6M9 17h3"/></svg>任务队列<span class="ct">3</span></div>
+      <div class="nv"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>处理留痕</div>
+      <div class="grp">显 示</div>
+      <div class="nv"><svg viewBox="0 0 24 24"><path d="M3 5h18v11H3z"/><path d="M8 20h8M12 16v4"/></svg>大屏模式</div>
+      <div class="nv"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>设置</div>
+    </nav>
+    <div class="foot"><span class="lamp"></span>钉钉已连接 · 事件订阅正常</div>
+  </aside>
+
+  <main>
+    <div class="kpis">
+      <div class="kpi hero"><div class="k">今日已预审</div><div class="v">7<small>份</small></div><div class="d">昨日 9 份</div></div>
+      <div class="kpi"><div class="k">标出待关注</div><div class="v">23<small>条</small></div><div class="d">平均 3.3 条/份</div></div>
+      <div class="kpi"><div class="k">队列中</div><div class="v">3<small>份</small></div><div class="d">最长等待 4 分钟</div></div>
+      <div class="kpi"><div class="k">在岗员工</div><div class="v">2<small>/2</small></div><div class="d">全部正常</div></div>
+      <div class="kpi hero"><div class="k">本月为法务省下</div><div class="v">31.5<small>小时</small></div><div class="d">累计 86 份</div></div>
+    </div>
+
+    <div class="stage">
+      <div class="stage-h"><b>合同预审组</b><span>财务侧 → 法务侧 · 串行</span></div>
+      <div class="canvas" id="canvas"><svg id="scene" viewBox="0 0 720 500"></svg></div>
+      <div class="hint">点击任一工位查看该员工的处理详情与留痕</div>
+    </div>
+  </main>
+
+  <div class="rail">
+    <div class="rh">当前任务流</div>
+    <div class="flow">
+      <div class="fw">
+        <div class="r1"><span class="n">采购合同</span><span class="pill run">预审中</span></div>
+        <div class="w">合同预审员 · 财务侧</div>
+        <div class="bar"><i style="width:37%"></i></div>
+        <div class="pc">37% · 第 3 章 / 共 8 章</div>
+      </div>
+      <div class="fw">
+        <div class="r1"><span class="n">服务合同</span><span class="pill run">回原文核对</span></div>
+        <div class="w">合同预审员 · 财务侧</div>
+        <div class="bar"><i style="width:82%"></i></div>
+        <div class="pc">82% · 第二遍</div>
+      </div>
+      <div class="fw">
+        <div class="r1"><span class="n">采购合同</span><span class="pill wait">等待交接</span></div>
+        <div class="w">合同预审员 · 法务侧</div>
+        <div class="bar"><i style="width:0"></i></div>
+        <div class="pc">0%</div>
+      </div>
+    </div>
+    <div class="rh" style="margin-top:22px">实时动态</div>
+    <div class="feed">
+      <div class="ev"><span class="ed"></span><div><div class="x"><b>财务侧</b> 开始预审一份采购合同</div><div class="tm">14:22</div></div></div>
+      <div class="ev"><span class="ed"></span><div><div class="x"><b>法务侧</b> 已贴回审批单 · 标出 4 条</div><div class="tm">13:58</div></div></div>
+      <div class="ev"><span class="ed w"></span><div><div class="x"><b>财务侧</b> 跳过一份租赁合同 · 扫描件</div><div class="tm">13:31</div></div></div>
+      <div class="ev"><span class="ed"></span><div><div class="x"><b>财务侧</b> 交接给法务侧 · 基于第 2 版</div><div class="tm">13:14</div></div></div>
+      <div class="ev"><span class="ed"></span><div><div class="x"><b>财务侧</b> 已贴回审批单 · 标出 6 条</div><div class="tm">11:47</div></div></div>
+    </div>
+    <div class="privacy"><b>本页可见合同名称与相对方</b>，仅限已授权账号。<br>大屏模式一律脱敏。</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('scene');
+  const canvas = document.getElementById('canvas');
+  const OX = 360, OY = 96, K = 0.866;           // 等距投影原点
+  const iso = (x, y, z = 0) => [OX + (x - y) * K, OY + (x + y) * 0.5 - z];
+  const pts = arr => arr.map(p => iso(...p).join(',')).join(' ');
+  const poly = (p, fill, extra = {}) => {
+    const e = document.createElementNS(NS, 'polygon');
+    e.setAttribute('points', pts(p));
+    e.setAttribute('fill', fill);
+    for (const k in extra) e.setAttribute(k, extra[k]);
+    svg.appendChild(e); return e;
+  };
+  // 一个等距立方体：顶面 + 右面(x+w) + 前面(y+d)
+  const box = (x, y, z, w, d, h, top, right, front) => {
+    poly([[x,y+d,z],[x+w,y+d,z],[x+w,y+d,z+h],[x,y+d,z+h]], front);
+    poly([[x+w,y,z],[x+w,y+d,z],[x+w,y+d,z+h],[x+w,y,z+h]], right);
+    poly([[x,y,z+h],[x+w,y,z+h],[x+w,y+d,z+h],[x,y+d,z+h]], top);
+  };
+
+  const W = 380;                                 // 房间边长
+
+  /* 墙 */
+  poly([[0,0,0],[W,0,0],[W,0,104],[0,0,104]], '#F2EEE4');      // 右后墙
+  poly([[0,0,0],[0,W,0],[0,W,104],[0,0,104]], '#E9E4D8');      // 左后墙
+  /* 地板 */
+  poly([[0,0],[W,0],[W,W],[0,W]], '#E4DECF');
+  /* 地板网格 */
+  for (let i = 0; i <= W; i += 95) {
+    const a = iso(i,0), b = iso(i,W), c = iso(0,i), d = iso(W,i);
+    for (const [p,q] of [[a,b],[c,d]]) {
+      const l = document.createElementNS(NS,'line');
+      l.setAttribute('x1',p[0]); l.setAttribute('y1',p[1]);
+      l.setAttribute('x2',q[0]); l.setAttribute('y2',q[1]);
+      l.setAttribute('stroke','#D8D1BF'); l.setAttribute('stroke-width','1');
+      svg.appendChild(l);
+    }
+  }
+  /* 墙上的品牌圆环 */
+  (() => {
+    const c = iso(120, 0, 66);
+    const g = document.createElementNS(NS,'g');
+    g.setAttribute('transform', `translate(${c[0]},${c[1]}) matrix(${K},0.5,${-K},0.5,0,0)`);
+    const r = document.createElementNS(NS,'rect');
+    r.setAttribute('x',-19); r.setAttribute('y',-19); r.setAttribute('width',38);
+    r.setAttribute('height',38); r.setAttribute('fill','#fff'); g.appendChild(r);
+    const o = document.createElementNS(NS,'circle');
+    o.setAttribute('r',10); o.setAttribute('fill','none');
+    o.setAttribute('stroke','#758043'); o.setAttribute('stroke-width',4); g.appendChild(o);
+    svg.appendChild(g);
+  })();
+
+  /* 工位：先画远的（x+y 小），再画近的 —— 保证遮挡正确 */
+  const DESKS = [
+    {x:38,  y:34,  id:'fin',  busy:true,  papers:3},
+    {x:216, y:34,  id:'legal',busy:false, papers:0},
+    {x:38,  y:216, id:'v1',   vacant:true},
+    {x:216, y:216, id:'v2',   vacant:true},
+  ].sort((a,b) => (a.x+a.y) - (b.x+b.y));
+
+  const DW = 118, DD = 74, DH = 30;
+  for (const d of DESKS) {
+    if (d.vacant) {
+      const e = document.createElementNS(NS,'polygon');
+      e.setAttribute('points', pts([[d.x,d.y],[d.x+DW,d.y],[d.x+DW,d.y+DD],[d.x,d.y+DD]]));
+      e.setAttribute('fill','none'); e.setAttribute('stroke','#CFC7B3');
+      e.setAttribute('stroke-width','2'); e.setAttribute('stroke-dasharray','7 6');
+      svg.appendChild(e);
+      continue;
+    }
+    /* 地面投影 */
+    poly([[d.x-4,d.y-4],[d.x+DW+4,d.y-4],[d.x+DW+4,d.y+DD+4],[d.x-4,d.y+DD+4]], 'rgba(90,80,60,.07)');
+
+    /* 椅背 + 人（坐在桌子后方 = y 更小） */
+    box(d.x+40, d.y-30, 0, 38, 10, 46, '#8C7F63', '#7A6E55', '#8C7F63');            // 椅背
+    box(d.x+42, d.y-26, 26, 34, 22, 30, '#8A9455', '#66713A', '#758043');           // 身体
+    box(d.x+48, d.y-22, 56, 22, 16, 20, '#EFCBA4', '#D7AC85', '#E8C39E');           // 头
+    box(d.x+47, d.y-23, 72, 24, 18, 5,  '#4A3B2E', '#3B2F25', '#42342A');           // 头发
+
+    /* 桌子 */
+    box(d.x, d.y, 0, DW, DD, DH, '#C9B99C', '#AD9C79', '#BBAA8A');
+
+    /* 显示器（朝向人） */
+    box(d.x+62, d.y+8, DH, 44, 8, 34, '#3A3A38', '#2C2C2A', '#333333');
+    poly([[d.x+64,d.y+8,DH+4],[d.x+104,d.y+8,DH+4],[d.x+104,d.y+8,DH+30],[d.x+64,d.y+8,DH+30]], '#1F2418');
+    poly([[d.x+68,d.y+8,DH+24],[d.x+90,d.y+8,DH+24],[d.x+90,d.y+8,DH+26],[d.x+68,d.y+8,DH+26]], '#8A9455');
+    poly([[d.x+68,d.y+8,DH+19],[d.x+98,d.y+8,DH+19],[d.x+98,d.y+8,DH+21],[d.x+68,d.y+8,DH+21]], '#5C6636');
+    poly([[d.x+68,d.y+8,DH+14],[d.x+84,d.y+8,DH+14],[d.x+84,d.y+8,DH+16],[d.x+68,d.y+8,DH+16]], '#5C6636')
+    poly([[d.x+86,d.y+8,DH+14],[d.x+90,d.y+8,DH+14],[d.x+90,d.y+8,DH+16],[d.x+86,d.y+8,DH+16]], '#B7D169')
+      .setAttribute('class','caret');
+
+    /* 键盘 */
+    box(d.x+64, d.y+40, DH, 40, 14, 2, '#DCD6C8', '#C8C2B2', '#D2CCBD');
+
+    /* 待处理文件堆 —— 高度＝队列 */
+    for (let i = 0; i < d.papers; i++)
+      box(d.x+12, d.y+20, DH + i*5, 30, 38, 5, '#FFFFFF', '#E6E0D2', '#F4F0E6');
+
+    /* 台灯 */
+    box(d.x+100, d.y+52, DH, 6, 6, 26, '#9A9A92', '#83837C', '#8E8E86');
+    box(d.x+94,  d.y+46, DH+26, 18, 18, 6, '#758043', '#5D6636', '#69733D');
+  }
+
+  /* ── 标签：与桌子同一套投影，永不错位 ── */
+  const label = (d, cls, icon, st, name, doing) => {
+    const [lx, ly] = iso(d.x + DW/2, d.y + DD/2, 118);
+    const el = document.createElement('div');
+    el.className = 'tag' + cls;
+    el.style.left = lx + 'px'; el.style.top = ly + 'px';
+    el.innerHTML =
+      `<div class="av">${icon}${st ? `<span class="st ${st}"></span>` : ''}</div>` +
+      `<div class="nm">${name}</div>` +
+      (doing ? `<div class="do">${doing}</div>` : '');
+    canvas.appendChild(el);
+  };
+  const ICON_FIN = '<svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></svg>';
+  const ICON_LAW = '<svg viewBox="0 0 24 24"><path d="M12 4v16M6 8l6-4 6 4"/><path d="M3 12h6l-3 5zM15 12h6l-3 5z"/></svg>';
+  const ICON_ADD = '<svg viewBox="0 0 24 24"><path d="M12 7v10M7 12h10"/></svg>';
+  const by = id => DESKS.find(d => d.id === id);
+
+  label(by('fin'),   '', ICON_FIN, 'run',  '合同预审员 · 财务侧', '预审中 · 采购合同 3/8 章');
+  label(by('legal'), '', ICON_LAW, 'wait', '合同预审员 · 法务侧', '等待财务侧交接');
+  label(by('v1'), ' v', ICON_ADD, null, '空工位 · 待认领');
+  label(by('v2'), ' v', ICON_ADD, null, '空工位 · 待认领');
+})();
+</script>

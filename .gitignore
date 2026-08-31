@@ -1,0 +1,81 @@
+# ── 依赖与缓存（可重新安装/生成）────────────────
+node_modules/
+__pycache__/
+*.pyc
+.vite/
+dist/
+
+# ── 本地运行数据（每台机器不同，且含敏感信息）──────
+# SQLite 本地库（含 users 表密码哈希）
+*.db
+# 上传的银行流水等运行时文件
+bank_uploads/
+ec_uploads/
+tempatt_uploads/
+# 账户台账/认领/覆盖/期间配置（运行时数据，含真实银行账号与账户映射，每机不同）——严禁进 git
+# 结构参考见同目录 ledger_authoritative.sample.json（脱敏）；真实文件留本机、不入库
+**/sample_data/ledger_authoritative.json
+**/sample_data/ledger.json
+**/sample_data/account_overrides.json
+**/sample_data/claims.json
+**/sample_data/config.json
+# 取件机（tools/pull_reports.*）在运行目录产生的文件——每台机器不同，不入库
+# pull_reports.ini 含取件码，敏感度同 conf.ini（.example 模板不受影响，照常入库）
+pull_state.json
+pull_reports.log
+pull_reports.ini
+# V2.246 之前老 bug 的产物：$STATE 路径被同名哈希表覆盖，Out-File 拿对象类型名当了文件名。
+# 代码已修，但试跑仍可能在旧目录留下此文件，挡住别再误提交（V2.240 就这么进过库一次）
+System.Collections.Hashtable
+# 临时/散落文件
+scratch_*.json
+~$*
+
+# ── 金蝶授权凭证（含 AppSec 应用密钥，严禁进 git 历史）──
+conf.ini
+# AI 网关密钥（GW_* 厂商 key 与管理令牌，V2.302）——严禁进 git 历史
+.env
+
+# ── 构建产物 / 部署包（每次可重新打包，统一放 04_部署包/）──────
+# 部署包＝构建产物，源码在库、随时能重打，版本史见 00_Change_Log.md，故整夹不入库
+04_部署包/
+# 兼容旧习惯：打包脚本若仍在根目录产出该 zip，移入 04_部署包/ 前也先忽略
+finance_workbench_backend_上传腾讯云.zip
+# 前端构建产物（V2.171 起出库）：Vite 按内容 hash 命名 assets/index-<hash>.js，
+# 每条并行分支都产出不同文件名，static/index.html 每次合并必冲突。源码在 frontend/ 随时能重打，
+# 故不入库。重打：双击 01_Current_Deliverables/app/build_frontend.bat（启动.bat 检测到缺失会自动调）。
+# 只忽略在跑的这一份；02_Revision_History/ 下的历史快照维持原样，不动历史。
+01_Current_Deliverables/app/backend/static/
+
+# ── 生成物：台账合并视图（由 00_Change_Log/_合并视图.py 生成，随时可重生成）──
+00_Change_Log_合并视图.md
+
+# ── 操作系统杂项 ──────────────────────────────
+Thumbs.db
+.DS_Store
+
+# ── 版本戳（pack_deploy.py 打包时生成，本地有 git 用不上它，不入库）──
+01_Current_Deliverables/app/backend/version_stamp.json
+
+# ═══════════════════════════════════════════════════════════════════
+#  新建干净基线（2026-08-31，迁 GitHub）—— 额外排除
+#  旧 385 commit 历史留本地 .git.bak_旧基线；真实财务/个人薪酬数据绝不上 GitHub
+# ═══════════════════════════════════════════════════════════════════
+# 历史修订夹（本地留痕；含 sample_data 真实数据快照）——不进 GitHub
+02_Revision_History/
+# 真实数据集中地：金蝶取数输出（账户台账/科目余额表）、源料（物流计提/成本台账/临工薪酬考勤/序时账）、需求确认书（含真实报表）
+00_金蝶配置文件/取数输出参考/
+03_Source_Materials/
+需求确认书/
+# Excel/CSV 数据文件默认全忽略；仅放行后端运行期加载的模板母版
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+!01_Current_Deliverables/app/backend/templates/*.xlsx
+# 承运商价格卡配置（内嵌真实供应商运价，Owner 定不进 GitHub；工作副本留本机，一份脱敏样例可后补）
+**/sample_data/logistics_recon_*.json
+# git worktrees（每个副本各带一份真实金蝶数据；重建后不再自动忽略，必须显式挡掉）
+.claude/worktrees/
+# 旧 .git 备份（迁移时把旧历史备份成 .git.bak_*，绝不能被加回新仓库）
+.git.bak*

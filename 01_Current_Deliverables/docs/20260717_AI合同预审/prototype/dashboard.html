@@ -1,0 +1,558 @@
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数字员工办公室 · 驾驶舱大屏</title>
+<style>
+  :root{
+    --oat:#EAE4D8; --oat-2:#EFEADF; --oat-deep:#DED7C6; --line:#D9D1BF;
+    --green:#758043; --green-deep:#415800; --green-soft:#8A9455; --green-lite:#B7D169;
+    --ink:#333333; --ink-soft:#5B5B54; --ink-mute:#8E8E86;
+    --ok:#3F8A46; --warn:#B7791F; --bad:#C0492F; --idle:#B4B0A4;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;
+    background:radial-gradient(140% 120% at 50% -10%, #EAE9E0 0%, #D8D2C4 100%)}
+  body{font-family:"MiSans","MiSans Normal","Microsoft YaHei",微软雅黑,Arial,sans-serif;
+    color:var(--ink);display:grid;place-items:center}
+  #stage{width:1920px;height:1080px;border-radius:34px;overflow:hidden;
+    box-shadow:0 24px 70px rgba(70,62,40,.22),0 0 0 1px rgba(120,110,80,.10);
+    background:radial-gradient(120% 120% at 50% 0%, #F3EEE3 0%, var(--oat) 62%, var(--oat-deep) 100%);
+    display:grid;grid-template-rows:auto 1fr auto;padding:30px 34px 24px;transform-origin:center}
+
+  header{display:flex;align-items:center;gap:18px;padding-bottom:22px}
+  .logo{width:52px;height:52px;border-radius:14px;background:linear-gradient(150deg,var(--green-soft),var(--green-deep));
+    display:grid;place-items:center;flex:none;box-shadow:0 6px 18px rgba(65,88,0,.28)}
+  .logo div{width:22px;height:22px;border:4px solid #fff;border-radius:50%}
+  .htxt b{font-size:30px;letter-spacing:.01em}
+  .htxt b span{color:var(--green-deep)}
+  .htxt small{display:block;font-size:14px;color:var(--ink-mute);letter-spacing:.16em;margin-top:3px;font-weight:400}
+  .hstat{margin-left:auto;display:flex;align-items:center;gap:11px;background:#fff;border-radius:999px;
+    padding:11px 20px;font-size:16px;color:var(--ink-soft);box-shadow:0 2px 10px rgba(90,80,55,.08)}
+  .hstat .d{width:11px;height:11px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px rgba(63,138,70,.16);
+    animation:pulse 2.6s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .clock{margin-left:20px;text-align:right}
+  .clock b{font-size:38px;font-variant-numeric:tabular-nums;letter-spacing:.02em;font-weight:700}
+  .clock small{display:block;font-size:14px;color:var(--ink-mute);margin-top:1px}
+
+  main{display:grid;grid-template-columns:352px 1fr 400px;gap:20px;min-height:0}
+  .col{display:flex;flex-direction:column;gap:16px;min-height:0}
+  .panel{background:#fff;border-radius:20px;box-shadow:0 3px 16px rgba(90,80,55,.07)}
+
+  .kpis{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .kpi{padding:22px 24px}
+  .kpi .cap{font-size:13px;color:var(--ink-mute);letter-spacing:.12em;font-weight:700}
+  .kpi .v{font-size:52px;font-weight:700;line-height:1.05;margin-top:8px;color:var(--green-deep);
+    font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .kpi .v small{font-size:20px;color:var(--ink-mute);font-weight:400;margin-left:5px}
+  .kpi .d{font-size:13px;color:var(--ink-mute);margin-top:5px}
+  .kpi .d i{color:var(--ok);font-style:normal;font-weight:700}
+
+  .comp{padding:24px;flex:1;display:flex;flex-direction:column}
+  .comp h3{font-size:15px;letter-spacing:.02em}
+  .comp h3 span{color:var(--ink-mute);font-weight:400;font-size:12px;letter-spacing:.14em;margin-left:8px}
+  .crow{margin-top:20px}
+  .crow .t{display:flex;align-items:center;gap:9px;font-size:15px}
+  .crow .t b{margin-left:auto;font-variant-numeric:tabular-nums}
+  .swatch{width:11px;height:11px;border-radius:3px}
+  .track{height:8px;background:var(--oat);border-radius:99px;margin-top:9px;overflow:hidden}
+  .track i{display:block;height:100%;border-radius:99px}
+  .comp .big{margin-top:auto;display:flex;gap:40px;padding-top:20px}
+  .comp .big div{font-size:13px;color:var(--ink-mute)}
+  .comp .big b{display:block;font-size:30px;color:var(--green-deep);font-weight:700;letter-spacing:-.01em}
+  .comp .big b.g{color:var(--green-soft)}
+
+  .stagewrap{position:relative;overflow:hidden;flex:1;display:flex;flex-direction:column}
+  .sw-h{display:flex;align-items:baseline;gap:12px;padding:22px 26px 0}
+  .sw-h b{font-size:17px}
+  .sw-h span{font-size:13px;color:var(--ink-mute);letter-spacing:.1em}
+  .sw-legend{margin-left:auto;display:flex;gap:16px;font-size:13px;color:var(--ink-soft)}
+  .sw-legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .scene{flex:1;min-height:0}
+  .scene svg{width:100%;height:100%;display:block}
+  .privacy{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:13px;color:var(--ink-mute)}
+
+  .rail{display:flex;flex-direction:column;gap:16px;min-height:0}
+  .feed{padding:22px 22px 16px;flex:1;display:flex;flex-direction:column;min-height:0}
+  .feed h3{font-size:15px;letter-spacing:.02em;display:flex;align-items:center}
+  .feed h3 span{color:var(--ink-mute);font-weight:400;font-size:12px;letter-spacing:.14em;margin-left:8px}
+  .feed h3 .live{margin-left:auto;width:9px;height:9px;border-radius:50%;background:var(--bad);animation:pulse 1.6s infinite}
+  .feed .hist{margin-top:10px;padding:12px 14px;background:var(--oat);border-radius:12px;
+    font-size:13px;color:var(--ink-soft)}
+  .evs{margin-top:12px;overflow:hidden;flex:1}
+  .ev{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--oat-2)}
+  .ev .tm{font-size:13px;color:var(--ink-mute);font-variant-numeric:tabular-nums;flex:none;width:52px}
+  .ev .role{font-weight:700;font-size:15px;flex:none}
+  .ev .txt{font-size:14px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ev .tag{margin-left:auto;font-size:12px;font-weight:700;padding:3px 10px;border-radius:99px;flex:none}
+  .tag.run{background:rgba(117,128,67,.14);color:var(--green-deep)}
+  .tag.done{background:rgba(63,138,70,.14);color:var(--ok)}
+  .tag.warn{background:rgba(183,121,31,.15);color:var(--warn)}
+
+  .alerts{padding:20px 22px}
+  .alerts h3{font-size:15px}
+  .alerts h3 span{color:var(--ink-mute);font-weight:400;font-size:12px;letter-spacing:.14em;margin-left:8px}
+  .al{display:flex;gap:12px;padding:12px 0;border-bottom:1px solid var(--oat-2)}
+  .al:last-child{border:0}
+  .al .dot{width:9px;height:9px;border-radius:50%;margin-top:6px;flex:none}
+  .al .m{font-size:14px;line-height:1.5}
+  .al .m .sub{color:var(--ink-mute);font-size:12px;margin-top:2px}
+
+  footer{margin:20px 0 0;background:#20241a;color:#EAE9E2;height:56px;border-radius:16px;
+    display:flex;align-items:center;overflow:hidden;box-shadow:0 6px 18px rgba(40,44,26,.22)}
+  .flag{flex:none;display:flex;align-items:center;gap:9px;background:var(--green-deep);align-self:stretch;
+    padding:0 22px;font-size:14px;font-weight:700;letter-spacing:.1em;border-radius:16px 0 0 16px}
+  .flag i{width:9px;height:9px;border-radius:50%;background:var(--green-lite);animation:pulse 1.4s infinite}
+  .marquee{flex:1;overflow:hidden;white-space:nowrap}
+  .track2{display:inline-block;padding-left:100%;animation:scroll 34s linear infinite}
+  .track2 span{margin:0 34px;font-size:15px;color:#D7D5C8}
+  .track2 span b{color:#fff;font-weight:700}
+  .track2 span em{color:var(--green-lite);font-style:normal;margin-left:8px}
+  @keyframes scroll{to{transform:translateX(-100%)}}
+  @media (prefers-reduced-motion:reduce){.track2{animation:none}.hstat .d,.feed h3 .live,.flag i{animation:none}}
+</style>
+
+<div id="stage">
+  <header>
+    <div class="logo"><div></div></div>
+    <div class="htxt"><b>STARFIELD · <span>数字员工办公室</span></b>
+      <small>星期零 · DIGITAL EMPLOYEE OFFICE · 实时驾驶舱</small></div>
+    <div class="hstat"><span class="d"></span>SYSTEMS ONLINE · 系统运行中</div>
+    <div class="clock"><b id="clk">--:--:--</b><small id="dt">—</small></div>
+  </header>
+
+  <main>
+    <div class="col">
+      <div class="kpis">
+        <div class="panel kpi"><div class="cap">在岗员工</div><div class="v">2<small>/9</small></div><div class="d">工位 <i>2 在岗 · 7 待认领</i></div></div>
+        <div class="panel kpi"><div class="cap">今日预审</div><div class="v">7<small>份</small></div><div class="d">昨日 9 份</div></div>
+        <div class="panel kpi"><div class="cap">本月累计</div><div class="v">86<small>份</small></div><div class="d">标出 <i>271 条</i></div></div>
+        <div class="panel kpi"><div class="cap">为法务省下</div><div class="v">31.5<small>h</small></div><div class="d">本月 <i>▲16h</i></div></div>
+      </div>
+      <div class="panel comp">
+        <h3>合同预审组 <span>WORKGROUP</span></h3>
+        <div class="crow">
+          <div class="t"><span class="swatch" style="background:var(--green)"></span>合同预审员 · 财务侧<b>在岗</b></div>
+          <div class="track"><i style="width:100%;background:var(--green)"></i></div>
+        </div>
+        <div class="crow">
+          <div class="t"><span class="swatch" style="background:var(--green-soft)"></span>合同预审员 · 法务侧<b>在岗</b></div>
+          <div class="track"><i style="width:100%;background:var(--green-soft)"></i></div>
+        </div>
+        <div class="crow">
+          <div class="t"><span class="swatch" style="background:var(--idle)"></span>空工位 · 待认领<b>7</b></div>
+          <div class="track"><i style="width:22%;background:var(--idle)"></i></div>
+        </div>
+        <div class="big">
+          <div><b>钉钉</b>审批事件驱动</div>
+          <div><b class="g">两遍</b>提取 + 回原文核对</div>
+          <div><b>24/7</b>全天在岗</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="panel stagewrap">
+        <div class="sw-h"><b>办公现场</b><span>按组分区 · 空工位可随时认领</span>
+          <div class="sw-legend">
+            <span><i style="background:var(--ok)"></i>在岗处理(亮屏)</span>
+            <span><i style="background:var(--warn)"></i>待命</span>
+            <span><i style="background:var(--idle)"></i>空工位(暗屏)</span>
+          </div>
+        </div>
+        <div class="scene"><svg id="scene" viewBox="0 0 1040 720" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="privacy">本屏不显示合同名称与相对方名称 · 明细需登录法务工作台查看</div>
+      </div>
+    </div>
+
+    <div class="col rail">
+      <div class="panel feed">
+        <h3>实时任务流 <span>LIVE ACTIVITY</span><span class="live"></span></h3>
+        <div class="evs" id="evs"></div>
+        <div class="hist">▤ 历史任务全量留痕 · 登录法务工作台查看</div>
+      </div>
+      <div class="panel alerts">
+        <h3>待人工处理 <span>ALERTS</span></h3>
+        <div class="al"><span class="dot" style="background:var(--warn)"></span>
+          <div class="m">一份租赁合同为<b>扫描件</b>,已跳过预审<div class="sub">13:31 · 需人工通读</div></div></div>
+        <div class="al"><span class="dot" style="background:var(--bad)"></span>
+          <div class="m">财务侧标出一条<b>付款条款</b>建议关注<div class="sub">13:58 · 已随意见贴回审批单</div></div></div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="flag"><i></i>实时动态 LIVE</div>
+    <div class="marquee"><div class="track2" id="tk"></div></div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const NS='http://www.w3.org/2000/svg';
+  const svgEl=document.getElementById('scene');
+  const el=(t,a={})=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
+
+  // 等距投影
+  const OX=350, OY=140, C=0.9, S=0.5;
+  const iso=(x,y,z=0)=>[OX+(x-y)*C, OY+(x+y)*S - z];
+  const pts=a=>a.map(p=>iso(...p).join(',')).join(' ');
+  let curParent;   // poly/box 默认画到内容组；临时改指向可把若干块归进一个子组
+  const poly=(p,fill,ex={})=>{const e=el('polygon',{points:pts(p),fill,...ex});curParent.appendChild(e);return e;};
+  // 立方体：顶 + 前(y+d) + 右(x+w)
+  const box=(x,y,z,w,d,h,top,right,front)=>{
+    poly([[x,y+d,z],[x+w,y+d,z],[x+w,y+d,z+h],[x,y+d,z+h]],front);
+    poly([[x+w,y,z],[x+w,y+d,z],[x+w,y+d,z+h],[x+w,y,z+h]],right);
+    poly([[x,y,z+h],[x+w,y,z+h],[x+w,y+d,z+h],[x,y+d,z+h]],top);
+  };
+
+  const defs=el('defs');
+  defs.innerHTML=`
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="9"/></filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="7"/></filter>`;
+  svgEl.appendChild(defs);
+
+  // 分层：背景铺底（不参与居中）→ root（整体居中缩放）→ 网格组 + 内容组
+  svgEl.appendChild(el('rect',{x:0,y:0,width:1040,height:720,fill:'#F1ECE1'}));
+  const root=el('g'); svgEl.appendChild(root);
+  const gridG=el('g'); root.appendChild(gridG);
+  const svg=el('g');  root.appendChild(svg);   // 之后所有绘制都进这个内容组
+  curParent=svg;
+
+  // ── 地台网格（跟随内容一起平移缩放，家具永远踩在格子上）──
+  const GX0=-700,GX1=1100,GY0=-700,GY1=900;
+  for(let gx=GX0;gx<=GX1;gx+=95){const a=iso(gx,GY0),b=iso(gx,GY1);
+    gridG.appendChild(el('line',{x1:a[0],y1:a[1],x2:b[0],y2:b[1],stroke:'#E7E0D0','stroke-width':1.3}));}
+  for(let gy=GY0;gy<=GY1;gy+=95){const a=iso(GX0,gy),b=iso(GX1,gy);
+    gridG.appendChild(el('line',{x1:a[0],y1:a[1],x2:b[0],y2:b[1],stroke:'#E7E0D0','stroke-width':1.3}));}
+
+  // ── 分区地面（按组着色，新组进来就开一块新区）──
+  poly([[8,100],[274,100],[274,336],[8,336]],'rgba(117,128,67,.075)');       // 合同预审组
+  poly([[292,100],[434,100],[434,336],[292,336]],'rgba(140,140,130,.05)');   // 待建（前排右）
+  poly([[8,-266],[434,-266],[434,80],[8,80]],'rgba(140,140,130,.042)');      // 待建（后两排）
+
+  // ── 环境：后墙 / 窗 / 挂画 / 绿植 ──
+  const WX=-40, WY=-250, WH=135, XM=560, YM=330;
+  poly([[WX,WY,0],[WX,YM,0],[WX,YM,WH],[WX,WY,WH]],'#EBE6DA');      // 左后墙
+  poly([[WX,WY,0],[XM,WY,0],[XM,WY,WH],[WX,WY,WH]],'#F2EEE4');      // 右后墙
+  poly([[WX,WY,0],[WX,YM,0],[WX,YM,9],[WX,WY,9]],'#D9D1C0');        // 踢脚线
+  poly([[WX,WY,0],[XM,WY,0],[XM,WY,9],[WX,WY,9]],'#E0D8C7');
+  const win=(x0,x1)=>{poly([[x0,WY,48],[x1,WY,48],[x1,WY,112],[x0,WY,112]],'#C9DCE4');
+    poly([[x0+4,WY,52],[x1-4,WY,52],[x1-4,WY,108],[x0+4,WY,108]],'#E6F1F5');
+    poly([[(x0+x1)/2-1.5,WY,52],[(x0+x1)/2+1.5,WY,52],[(x0+x1)/2+1.5,WY,108],[(x0+x1)/2-1.5,WY,108]],'#C9DCE4');};
+  win(40,170); win(230,360); win(420,545);
+  const pic=(y0,y1,c)=>{poly([[WX,y0,58],[WX,y1,58],[WX,y1,112],[WX,y0,112]],'#CFC7B4');
+    poly([[WX,y0+5,63],[WX,y1-5,63],[WX,y1-5,107],[WX,y0+5,107]],c);};
+  pic(30,110,'#DCE3C8'); pic(150,230,'#EDE2CC');
+  const plant=(px,py,s)=>{const p=iso(px,py,0);
+    const g=el('g',{transform:`translate(${p[0]},${p[1]}) scale(${s})`});
+    g.innerHTML='<ellipse cx="0" cy="0" rx="19" ry="9" fill="rgba(120,108,80,.18)"/>'+
+      '<path d="M-13,-2 L13,-2 L9,-30 L-9,-30 Z" fill="#C6A583"/>'+
+      '<ellipse cx="0" cy="-30" rx="9" ry="3.5" fill="#A98A6A"/>'+
+      '<circle cx="-9" cy="-46" r="13" fill="#7E8A4B"/>'+
+      '<circle cx="10" cy="-50" r="12" fill="#8E9A57"/>'+
+      '<circle cx="0" cy="-61" r="13" fill="#6E7A3F"/>';
+    svg.appendChild(g);};
+  plant(-5,-200,1); plant(-5,285,1.05);
+
+  // ── 茶水台（靠后墙，填补右后空白）──
+  const TX=440,TY=-243,TW=150,TD=46,TH=40;
+  poly([[TX,WY,58],[TX+TW,WY,58],[TX+TW,WY,96],[TX,WY,96]],'#DED6C4');          // 吊柜
+  poly([[TX+4,WY,62],[TX+TW-4,WY,62],[TX+TW-4,WY,92],[TX+4,WY,92]],'#E9E2D2');
+  box(TX,TY,0,TW,TD,TH,'#EAE4D7','#CBC2AE','#D8D0BE');                          // 台面
+  box(TX+14,TY+13,TH,17,17,23,'#8E9A57','#6E7A3F','#7E8A4B');                   // 水壶
+  for(let i=0;i<3;i++) box(TX+50+i*17,TY+15,TH,11,11,12,'#FFFFFF','#E2DCCE','#F2EEE4'); // 杯子
+  box(TX+112,TY+11,TH,28,24,18,'#D8D0BE','#BFB7A3','#CBC3B1');                  // 咖啡机
+  (()=>{const p=iso(TX+TW/2,TY+TD,TH+4);
+    const g=el('g',{transform:`translate(${p[0]},${p[1]})`});
+    g.innerHTML='<rect x="-30" y="-16" width="60" height="20" rx="6" fill="#F5F1E9" stroke="#D6CEBD" stroke-width="1"/>'+
+      '<text x="0" y="-2" font-size="11" font-weight="700" text-anchor="middle" fill="#7A756A">茶水台</text>';
+    svg.appendChild(g);})();
+
+  // ── 桌面小卡：上行身份 + 下行状态色点，与桌面同色系；停在桌子高度，人再多也不叠 ──
+  const deskSign=(d)=>{
+    const p=iso(d.x+DW-2, d.y+DD-2, DTOP+2);
+    const g=el('g',{transform:`translate(${p[0]},${p[1]})`});
+    const name = d.id==='fin'?'财务预审员' : d.id==='law'?'法务预审员' : '空工位';
+    const st = d.id==='fin'?['#3F8A46','工作中'] : d.id==='law'?['#B7791F','待命中'] : ['#B4B0A4','待认领'];
+    const w=90, h=36;
+    g.appendChild(el('rect',{x:-w,y:-h,width:w,height:h,rx:7,fill:'#F5F1E9',stroke:'#D6CEBD','stroke-width':1}));
+    const t1=el('text',{x:-w+11,y:-h+16,'font-size':12.5,'font-weight':700,fill:'#3E4A2A'});
+    t1.textContent=name;g.appendChild(t1);
+    g.appendChild(el('circle',{cx:-w+15,cy:-9,r:4,fill:st[0]}));
+    const t2=el('text',{x:-w+24,y:-5,'font-size':11,fill:'#7A756A'});t2.textContent=st[1];g.appendChild(t2);
+    svg.appendChild(g);
+  };
+
+  // ── 工位 3×3（工位竖置：进深大于面宽；前排 y 大）──
+  const DW=78, DD=118, DTOP=30;
+  const COLX=[30,175,320];        // 左→右
+  const ROWY=[140,-40,-220];      // 前→后
+  const desks=[];
+  for(let r=0;r<3;r++)for(let c=0;c<3;c++){
+    let id='v'+(r*3+c+1), busy=false, role='', task='';
+    // 同组的人坐同一区（合同预审组＝前排左侧两个工位）
+    if(r===0&&c===0){id='fin';busy=true;role='合同预审员 · 财务侧';task='工作中';}
+    if(r===0&&c===1){id='law';busy=true;role='合同预审员 · 法务侧';task='待命中';}
+    desks.push({x:COLX[c],y:ROWY[r],id,busy,role,task});
+  }
+  desks.sort((a,b)=>(a.x+a.y)-(b.x+b.y));   // 远→近
+
+  for(const d of desks){
+    // 深度锚点：走动的人按 (x+y) 插到正确的图层，走到后排就该被前排桌子挡住
+    svg.appendChild(el('g',{class:'dmark','data-depth':d.x+d.y}));
+    const cx=d.x+DW/2;
+    // 落地阴影（罩住桌子+椅子）
+    const sh=iso(cx,d.y+DD/2+16,0);
+    svg.appendChild(el('ellipse',{cx:sh[0],cy:sh[1]+8,rx:92,ry:48,fill:'rgba(120,108,80,.15)',filter:'url(#soft)'}));
+
+    // 桌子
+    box(d.x, d.y, 0, DW, DD, DTOP, '#EDE8DC', '#CFC6B2', '#DBD3C1');
+
+    // ── 显示器：坐在桌面上，屏幕朝前（朝人/观众）──
+    const mw=58, mh=34, ms=8;              // 屏宽/屏高/支架高
+    const mx=d.x+(DW-mw)/2, my=d.y+14, zb=DTOP;
+    // 屏幕在桌面上打出的反光（先画,压在桌面,人与屏之间）
+    if(d.busy){
+      const rf=iso(cx,my+30,zb+1);
+      svg.appendChild(el('ellipse',{cx:rf[0],cy:rf[1],rx:50,ry:24,fill:'rgba(150,185,70,.34)',filter:'url(#glow)'}));
+    }
+    // 支架 + 底座
+    box(mx+mw/2-9,my+3,zb,18,7,3,'#43473C','#33372D','#3A3E32');
+    box(mx+mw/2-4,my+4,zb,8,5,ms,'#3A3E34','#2C3026','#33372D');
+    // 屏幕外框
+    box(mx,my,zb+ms,mw,5,mh,'#40443A','#2C3026','#31352B');
+    // 屏幕正面（+y 面，朝人）
+    poly([[mx+3,my+5,zb+ms+3],[mx+mw-3,my+5,zb+ms+3],[mx+mw-3,my+5,zb+ms+mh-3],[mx+3,my+5,zb+ms+mh-3]],
+      d.busy?'#93AC4B':'#252A20');
+    if(d.busy){
+      // 屏前辉光
+      const g=iso(cx,my+7,zb+ms+mh/2);
+      svg.appendChild(el('ellipse',{cx:g[0],cy:g[1],rx:42,ry:30,fill:'rgba(160,195,80,.42)',filter:'url(#glow)'}));
+      // 屏上文字行
+      poly([[mx+8,my+5,zb+ms+mh-9],[mx+34,my+5,zb+ms+mh-9],[mx+34,my+5,zb+ms+mh-7],[mx+8,my+5,zb+ms+mh-7]],'#EAF2CE');
+      poly([[mx+8,my+5,zb+ms+mh-14],[mx+46,my+5,zb+ms+mh-14],[mx+46,my+5,zb+ms+mh-12],[mx+8,my+5,zb+ms+mh-12]],'#D2E3A0');
+      poly([[mx+8,my+5,zb+ms+mh-19],[mx+28,my+5,zb+ms+mh-19],[mx+28,my+5,zb+ms+mh-17],[mx+8,my+5,zb+ms+mh-17]],'#D2E3A0');
+    }
+    // 键盘（桌面上，人前）+ 文件夹
+    box(d.x+(DW-46)/2,my+34,zb,46,13,2,'#E4DECF','#CFC7B4','#D8D0BE');
+    box(d.x+10,my+30,zb,20,18,4,'#EFE9DB','#D8CFBB','#E4DBC8');
+
+    // ── 椅子 + 人（前沿外）──
+    const bc=d.x+DW/2, by=d.y+DD+20, bp=iso(bc,by,0);
+    if(d.busy){
+      svg.appendChild(el('ellipse',{cx:bp[0],cy:bp[1],rx:35,ry:17,fill:'none',stroke:'#B9B3A5','stroke-width':4}));
+      box(bc-5,by-5,0,10,10,20,'#9A9488','#847E72','#8F897D');       // 立柱
+      box(bc-24,by-22,20,48,42,11,'#4B4F45','#3A3E36','#42463C');    // 座垫
+      const seatG = d.id==='fin' ? el('g',{id:'finSeat'}) : null;   // 财务侧的人单独成组，交接时可隐藏
+      if(seatG){svg.appendChild(seatG);curParent=seatG;}
+      box(bc-20,by-16,31,40,28,32,'#7E8A4B','#5F6A34','#6E7A3F');    // 身体
+      box(bc-14,by-10,63,28,20,24,'#3B4230','#2C3226','#333A2B');    // 头
+      curParent=svg;
+      box(bc-27,by+6,18,54,11,58,'#54584C','#43473D','#4B4F44');     // 椅背
+    }else{
+      svg.appendChild(el('ellipse',{cx:bp[0],cy:bp[1],rx:33,ry:16,fill:'none',stroke:'#CFC8BA','stroke-width':4}));
+      box(bc-5,by-5,0,10,10,20,'#C6BFB0','#B2AB9C','#BCB5A6');
+      box(bc-22,by-20,20,44,40,10,'#D6CFC0','#BFB8A8','#CBC4B4');
+      box(bc-25,by+6,18,50,11,52,'#DAD3C4','#C5BEAE','#D0C9B9');
+    }
+
+    // 桌面小卡：身份 + 状态（取代头顶浮牌，最后画，永在最上层）
+    deskSign(d);
+  }
+
+  // ── 收件箱：钉钉审批来的合同落在这里，等预审员来领 ──
+  const IBX=-22, IBY=256, IBW=46, IBD=62, IBH=36;
+  poly([[IBX-7,IBY-7],[IBX+IBW+7,IBY-7],[IBX+IBW+7,IBY+IBD+7],[IBX-7,IBY+IBD+7]],'rgba(120,108,80,.10)');
+  box(IBX,IBY,0,IBW,IBD,IBH,'#E7E1D4','#CBC2AE','#D8D0BE');                    // 柜体
+  box(IBX+8,IBY+13,IBH,30,36,3,'#DAD2C1','#C3BAA6','#CEC6B4');                 // 托盘
+  for(let i=0;i<3;i++) box(IBX+10,IBY+15,IBH+3+i*4,26,32,4,'#FFFFFF','#E4DED0','#F5F1E7'); // 待领文件
+  (()=>{const l=iso(IBX+IBW/2,IBY+6,IBH+26);                                    // 指示灯（有件时亮）
+    svg.appendChild(el('ellipse',{cx:l[0],cy:l[1],rx:17,ry:12,fill:'rgba(160,195,80,.55)',filter:'url(#glow)'}));
+    svg.appendChild(el('circle',{cx:l[0],cy:l[1],r:4.5,fill:'#8CA24A'}));
+    const p=iso(IBX+IBW/2,IBY+IBD,IBH+8);
+    const g=el('g',{transform:`translate(${p[0]},${p[1]})`});
+    g.innerHTML='<rect x="-38" y="-17" width="76" height="21" rx="6" fill="#EDF0E2" stroke="#C6CDA8" stroke-width="1"/>'+
+      '<circle cx="-26" cy="-6.5" r="4" fill="#3F8A46"/>'+
+      '<text x="4" y="-2.5" font-size="11" font-weight="700" text-anchor="middle" fill="#415800">收件箱 3</text>';
+    svg.appendChild(g);})();
+
+  // ── 洽谈区（填补右下空白；深度最大，画在桌子之后）──
+  const MX=500, MY=110, MW=124, MD=80;
+  poly([[MX-20,MY-20],[MX+MW+20,MY-20],[MX+MW+20,MY+MD+20],[MX-20,MY+MD+20]],'rgba(120,108,80,.06)');
+  const mchair=(cx,cy)=>{const p=iso(cx,cy,0);
+    svg.appendChild(el('ellipse',{cx:p[0],cy:p[1],rx:25,ry:12,fill:'none',stroke:'#CFC8BA','stroke-width':3.5}));
+    box(cx-4,cy-4,0,8,8,17,'#C6BFB0','#B2AB9C','#BCB5A6');
+    box(cx-17,cy-15,17,34,30,9,'#D6CFC0','#BFB8A8','#CBC4B4');};
+  mchair(MX+MW/2,MY-34); mchair(MX-34,MY+MD/2);          // 远侧两把先画
+  box(MX,MY,0,MW,MD,30,'#EAE4D7','#CBC2AE','#D8D0BE');   // 会议桌
+  box(MX+40,MY+26,30,30,24,4,'#EFE9DB','#D8CFBB','#E4DBC8');
+  box(MX+80,MY+30,30,14,14,13,'#FFFFFF','#E2DCCE','#F2EEE4');
+  mchair(MX+MW+34,MY+MD/2); mchair(MX+MW/2,MY+MD+34);    // 近侧两把后画
+  (()=>{const p=iso(MX+MW/2,MY+MD+52,0);
+    const g=el('g',{transform:`translate(${p[0]},${p[1]})`});
+    g.innerHTML='<ellipse cx="0" cy="0" rx="13" ry="6" fill="rgba(120,108,80,.16)"/>'+
+      '<rect x="-2" y="-30" width="4" height="30" fill="#B9B3A5"/>'+
+      '<rect x="-44" y="-57" width="88" height="28" rx="8" fill="#F3F0E9" stroke="#D9D1C0" stroke-width="1"/>'+
+      '<text x="0" y="-38" font-size="13" font-weight="700" text-anchor="middle" fill="#8E877A">洽谈区</text>';
+    svg.appendChild(g);})();
+
+  // ── 分区立牌（新组进来就加一块）──
+  const zoneSign=(wx,wy,txt,bg,br,fg)=>{
+    const p=iso(wx,wy,0);
+    const g=el('g',{transform:`translate(${p[0]},${p[1]})`});
+    g.innerHTML='<ellipse cx="0" cy="0" rx="13" ry="6" fill="rgba(120,108,80,.16)"/>'+
+      '<rect x="-2" y="-30" width="4" height="30" fill="#B9B3A5"/>'+
+      `<rect x="-58" y="-57" width="116" height="28" rx="8" fill="${bg}" stroke="${br}" stroke-width="1"/>`+
+      `<text x="0" y="-38" font-size="13" font-weight="700" text-anchor="middle" fill="${fg}">${txt}</text>`;
+    svg.appendChild(g);};
+  zoneSign(60,348,'合同预审组','#EDF0E2','#C6CDA8','#415800');
+  zoneSign(360,348,'待建工位区','#F3F0E9','#D9D1C0','#8E877A');
+
+  // ── 整体居中并缩放到面板内（量出内容实际范围，以后加家具会自动重算）──
+  (()=>{const bb=svg.getBBox(), pad=26;
+    if(!bb.width||!bb.height)return;
+    const s=Math.min(1,(1040-pad*2)/bb.width,(720-pad*2)/bb.height);
+    const tx=(1040-bb.width*s)/2-bb.x*s, ty=(720-bb.height*s)/2-bb.y*s;
+    root.setAttribute('transform',`translate(${tx},${ty}) scale(${s})`);})();
+
+  // ── 交接演示：领件 → 回工位处理 → 送法务 → 交件 → 走回 ──
+  // 真实上线是「事件触发」：只有财务审完真的移交那一刻才走一趟；此处循环示意。
+  const mkPath=WP=>{const segL=[];let total=0;
+    for(let i=0;i<WP.length-1;i++){
+      const L=Math.hypot(WP[i+1][0]-WP[i][0],WP[i+1][1]-WP[i][1]);segL.push(L);total+=L;}
+    const at=s=>{let acc=0;
+      for(let i=0;i<segL.length;i++){
+        if(s<=acc+segL[i]||i===segL.length-1){const u=Math.max(0,Math.min(1,(s-acc)/segL[i]));
+          return [WP[i][0]+(WP[i+1][0]-WP[i][0])*u, WP[i][1]+(WP[i+1][1]-WP[i][1])*u];}
+        acc+=segL[i];}
+      return WP[WP.length-1];};
+    return {at,total};};
+  const P_IN =mkPath([[69,300],[69,330],[42,330],[42,316]]);   // 工位 → 收件箱
+  const P_LAW=mkPath([[69,300],[69,330],[142,330],[142,285]]); // 工位 → 法务工位
+
+  // ── 有骨架的小人：躯干 + 双腿双臂（可摆动）+ 朝向翻转 ──
+  const walker=el('g'); walker.style.opacity=0;
+  walker.innerHTML=
+    '<ellipse cx="0" cy="2" rx="15" ry="6" fill="rgba(120,108,80,.20)"/>'+
+    '<g class="rig">'+
+      '<g class="legB"><rect x="-3.5" y="-1" width="7" height="18" rx="3.5" fill="#4F5A2C"/></g>'+
+      '<g class="armB"><rect x="-3" y="-1" width="6" height="16" rx="3" fill="#68743A"/></g>'+
+      '<rect x="-11" y="-50" width="22" height="27" rx="6" fill="#7E8A4B"/>'+
+      '<g class="legF"><rect x="-3.5" y="-1" width="7" height="18" rx="3.5" fill="#5F6A34"/></g>'+
+      '<g class="armF"><rect x="-3" y="-1" width="6" height="16" rx="3" fill="#8E9A57"/></g>'+
+      '<rect class="hf" x="9" y="-44" width="14" height="15" rx="2" fill="#EFE9DB" stroke="#CFC7B4" stroke-width="1"/>'+
+      '<circle cx="0" cy="-57" r="10.5" fill="#3B4230"/>'+
+      '<g class="face"><circle cx="0" cy="-55" r="7.5" fill="#E8C39E"/>'+
+        '<circle cx="-2.6" cy="-56" r="1.3" fill="#3B4230"/><circle cx="2.6" cy="-56" r="1.3" fill="#3B4230"/></g>'+
+    '</g>';
+  svg.appendChild(walker);
+  const rig=walker.querySelector('.rig'), hf=walker.querySelector('.hf'), face=walker.querySelector('.face');
+  const legF=walker.querySelector('.legF'), legB=walker.querySelector('.legB');
+  const armF=walker.querySelector('.armF'), armB=walker.querySelector('.armB');
+  const lawP=iso(142,285,0);
+  const ring=el('circle',{cx:lawP[0],cy:lawP[1]-22,r:6,fill:'none',stroke:'#8CA24A','stroke-width':3,opacity:0});
+  svg.appendChild(ring);
+  const seat=()=>document.getElementById('finSeat');
+
+  // 落位：世界坐标 → 屏幕；按 (x+y) 深度插层；按行进方向定朝向；四肢按步相摆动
+  const place=(wx,wy,phase,carry,dx,dy)=>{
+    const p=iso(wx,wy,0), bob=Math.abs(Math.sin(phase))*2.5;
+    walker.setAttribute('transform',`translate(${p[0]},${p[1]-bob})`);
+    // 朝向：屏幕左右由 (dx-dy) 决定；正面/背面由 (dx+dy) 决定（往近处走＝看得见脸）
+    const sx=(dx-dy)>=0?1:-1, toward=(dx+dy)>0;
+    rig.setAttribute('transform',`scale(${sx},1)`);
+    face.style.opacity = toward?1:0;
+    // 四肢摆动：左右腿反相，手臂与同侧腿反相
+    const a=Math.sin(phase)*26;
+    legF.setAttribute('transform',`translate(4,-24) rotate(${a})`);
+    legB.setAttribute('transform',`translate(-4,-24) rotate(${-a})`);
+    armF.setAttribute('transform',`translate(10,-46) rotate(${carry?8:-a*0.85})`);
+    armB.setAttribute('transform',`translate(-10,-46) rotate(${a*0.85})`);
+    if(hf)hf.style.opacity=carry?1:0;
+    const D=wx+wy, t=[...svg.querySelectorAll('.dmark')].find(m=>+m.getAttribute('data-depth')>D);
+    if(t)svg.insertBefore(walker,t); else svg.appendChild(walker);
+  };
+
+  if(matchMedia('(prefers-reduced-motion: reduce)').matches){
+    if(seat())seat().style.opacity=1;
+  }else{
+    // 完整流程：坐着 → 去收件箱领件 → 拿回工位处理 → 送去法务 → 交件 → 走回坐下
+    const PH=[
+      {t:1600,k:'sit'},
+      {t:2200,k:'walk',p:P_IN, dir:1, carry:false},
+      {t:1100,k:'pick'},
+      {t:2200,k:'walk',p:P_IN, dir:-1,carry:true},
+      {t:2800,k:'sit'},                                   // 在工位处理
+      {t:2000,k:'walk',p:P_LAW,dir:1, carry:true},
+      {t:1300,k:'hand'},
+      {t:2000,k:'walk',p:P_LAW,dir:-1,carry:false},
+    ];
+    const cyc=PH.reduce((s,x)=>s+x.t,0);
+    let t0=null;
+    const frame=ts=>{
+      if(t0==null)t0=ts; let e=(ts-t0)%cyc; const s=seat();
+      let ph=PH[0], local=0;
+      for(const x of PH){ if(e<x.t){ph=x;local=e;break;} e-=x.t; }
+      if(ph.k==='sit'){ if(s)s.style.opacity=1; walker.style.opacity=0; ring.setAttribute('opacity',0); }
+      else{
+        if(s)s.style.opacity=0; walker.style.opacity=1;
+        if(ph.k==='walk'){
+          const u=local/ph.t, d=ph.dir>0? ph.p.total*u : ph.p.total*(1-u);
+          const c=ph.p.at(d), n=ph.p.at(Math.max(0,Math.min(ph.p.total,d+ph.dir*4)));
+          place(c[0],c[1], d/10, ph.carry, n[0]-c[0], n[1]-c[1]);
+          ring.setAttribute('opacity',0);
+        }else if(ph.k==='pick'){
+          const c=P_IN.at(P_IN.total);
+          place(c[0],c[1],0, local>ph.t*0.45, 1,1);        // 取件：中途手上多出文件
+          ring.setAttribute('opacity',0);
+        }else{ // hand
+          const c=P_LAW.at(P_LAW.total);
+          place(c[0],c[1],0, local<ph.t*0.4, 1,-1);        // 交件：中途文件交出去
+          const k=local/ph.t; ring.setAttribute('r',6+k*24); ring.setAttribute('opacity',(1-k)*0.7);
+        }
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
+
+  // ── 时钟 ──
+  const clk=document.getElementById('clk'), dt=document.getElementById('dt');
+  const p=n=>String(n).padStart(2,'0');
+  const tick=()=>{const t=new Date();clk.textContent=`${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+    dt.textContent=`${t.getFullYear()}年${t.getMonth()+1}月${t.getDate()}日 · 周${'日一二三四五六'[t.getDay()]}`;};
+  tick();setInterval(tick,1000);
+
+  // ── 实时任务流 ──
+  const feed=[
+    ['14:22','财务侧','开始预审一份采购合同','run','进行中'],
+    ['13:58','法务侧','已贴回审批单 · 标出 4 条','done','完成'],
+    ['13:41','财务侧','回原文核对第二遍','run','进行中'],
+    ['13:31','财务侧','跳过一份租赁合同 · 扫描件','warn','已跳过'],
+    ['13:14','财务侧','交接给法务侧 · 基于第 2 版','done','交接'],
+    ['11:47','财务侧','已贴回审批单 · 标出 6 条','done','完成'],
+    ['11:20','法务侧','标出违约责任 · 建议关注','done','完成'],
+    ['10:58','财务侧','开始预审一份服务合同','run','进行中'],
+  ];
+  const evs=document.getElementById('evs');
+  feed.forEach(([tm,role,txt,cls,tag])=>{
+    const e=document.createElement('div');e.className='ev';
+    e.innerHTML=`<span class="tm">${tm}</span><span class="role">${role}</span>
+      <span class="txt">${txt}</span><span class="tag ${cls}">${tag}</span>`;
+    evs.appendChild(e);
+  });
+
+  // ── 底部滚动 ──
+  document.getElementById('tk').innerHTML=feed.map(([tm,role,txt,,tag])=>
+    `<span><b>${role}</b> ${txt}<em>${tag}</em> · ${tm}</span>`).join('');
+
+  // 缩放（防止视口未就绪时算出 0）
+  const stage=document.getElementById('stage');
+  const fit=()=>{const w=innerWidth||document.documentElement.clientWidth,
+    h=innerHeight||document.documentElement.clientHeight;
+    if(!w||!h)return;stage.style.zoom=Math.min(1,w/1920,h/1080)*0.965;};
+  addEventListener('resize',fit);addEventListener('load',fit);
+  fit();requestAnimationFrame(fit);setTimeout(fit,60);
+})();
+</script>

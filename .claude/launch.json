@@ -1,0 +1,47 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wt-cost-ledger-blockers",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app:app",
+        "--app-dir",
+        "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\cost-ledger-blockers-0c45ee\\01_Current_Deliverables\\app\\backend",
+        "--port",
+        "8062"
+      ],
+      "port": 8062
+    },
+    {
+      "name": "wt-ecom",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app:app",
+        "--app-dir",
+        "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\ecommerce-data-reconciliation-66af7c\\01_Current_Deliverables\\app\\backend",
+        "--port",
+        "8084"
+      ],
+      "port": 8084
+    },
+    {
+      "name": "wt-temp-attendance",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app:app",
+        "--app-dir",
+        "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\temp-worker-hours-review-bc2a78\\01_Current_Deliverables\\app\\backend",
+        "--port",
+        "8071"
+      ],
+      "port": 8071
+    }
+  ]
+}

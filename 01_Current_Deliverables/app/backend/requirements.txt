@@ -1,0 +1,11 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+requests>=2.31
+openpyxl>=3.1.5   # pandas 读 xlsx 要求 >=3.1.5（低于此版报 "requires version 3.1.5 or newer"）
+pandas>=2.0   # 读 xlsx（app.py suppliers-check、logistics_accrual.process_workbook）——缺此干净环境 ImportError
+SQLAlchemy>=2.0
+PyMySQL>=1.1
+PyMuPDF>=1.24   # 理财对账单 PDF 渲染（理财对账用，免 poppler 系统依赖）
+rapidocr_onnxruntime>=1.3   # 理财对账单离线中文 OCR（扫描件识别）
+pyzipper>=0.3   # 加密流水包解压（支持 AES + 老式 ZipCrypto）
+xlrd>=2.0   # 读老式 .xls 账单（物流对账·诚煜账单 parse_chengyu_bill）

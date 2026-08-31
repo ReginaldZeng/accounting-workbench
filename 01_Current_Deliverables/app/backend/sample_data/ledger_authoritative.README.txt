@@ -1,0 +1,1 @@
+// 这是脱敏示例（结构参考），非真实数据。应用实际读取的是 ledger_authoritative.json，该文件含真实银行账号、已从版本控制中移除（见 .gitignore「本地运行数据」段）。如需在新环境跑通取数，把本机真实台账另存为 ledger_authoritative.json（不入 git）。

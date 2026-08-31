@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>财务核算工作台</title>
+<script>
+/* 双色调(V-draft)：进页面第一时间定主题，防"先白后黑"闪屏。
+   fw_theme = light | dark | auto(默认,跟随系统)；真正的令牌切换靠 html[data-theme]，见 styles.css。 */
+(function () {
+  try {
+    var m = localStorage.getItem('fw_theme') || 'auto';
+    var dark = m === 'dark' || (m === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  } catch (e) { document.documentElement.dataset.theme = 'light'; }
+})();
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
