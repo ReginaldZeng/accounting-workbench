@@ -192,6 +192,19 @@ class TestRenameFallback(unittest.TestCase):
         self.assertEqual(len(rows), 5)   # 财资2 + 中行2 + 建行1
 
 
+class TestRarCmd(unittest.TestCase):
+    """RAR 解压命令拼装：unar 恒带 -p（空密码探测加密包→上层能报"请填密码"而非通用天书）。
+    2026-09-01 服务器实测背景：7z 无 Rar 码流、unrar-free 解不了 RAR5，unar 是唯一 RAR5 退路。"""
+
+    def test_unar_probes_with_empty_password(self):
+        self.assertEqual(bi._rar_cmd("unar", "/usr/bin/unar", "a.rar", "/d", None)[-2:], ["-p", ""])
+        self.assertEqual(bi._rar_cmd("unar", "/usr/bin/unar", "a.rar", "/d", "s3cret")[-2:], ["-p", "s3cret"])
+
+    def test_other_tools_unchanged(self):
+        self.assertIn("-p", bi._rar_cmd("7z", "7z", "a.rar", "/d", None)[3])       # 7z 本就恒带 -p
+        self.assertIn("-p-", bi._rar_cmd("unrar", "unrar", "a.rar", "/d", None))   # unrar 无密码用 -p-
+
+
 class TestTreasuryMultiExport(unittest.TestCase):
     """财资多份导出按账户取最全（复刻 2026-08 真实流水包：出纳导了三次、一次比一次全，
     「1」是被行数上限截断的残版；旧逻辑只并第一份，静默漏账）。"""

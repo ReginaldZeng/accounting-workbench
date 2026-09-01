@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-09-01 | Author: Claude / c | Version: V2.418
+# Description: 服务器 RAR5 实测（8月真实包）：7z 无 Rar 码流、unrar-free 解不了 RAR5，unar 是唯一退路。
+#              unar 改恒带 -p（空密码探测）：加密包未填密码时能被识别成"请填密码"而非通用失败天书。
 # Date: 2026-09-01 | Author: Claude / c | Version: V2.416
 # Description: 财资平台多份导出不再只认第一份——按【账户】整户择优并入（笔数最多、并列看收支合计）。
 #              实证（2026-08 流水包）：出纳把财资流水导了三次（财资银行流水 1/2/3.xlsx），一次比一次全；
@@ -519,7 +522,11 @@ def _rar_cmd(name, exe, path, dest, password):
     if name == "unrar":
         return [exe, "x", "-y", "-p" + (password or "-"), path, dest + os.sep]
     if name == "unar":
-        return [exe, "-f", "-o", dest, path] + (["-p", password] if password else [])
+        # 恒带 -p（无密码时传空串）：加密包+空密码 → unar 逐文件报 "Missing or wrong password"，
+        # 上层据此识别"包已加密"并提示用户填密码；不带 -p 时 unar 的失败输出没有密码字样，
+        # 会掉进天书般的通用失败（2026-09-01 服务器实测：7z 无 Rar 码流、unrar-free 解不了 RAR5，
+        # unar 是唯一能解 RAR5 的退路，这条探测路径必须可靠）。空密码对未加密包无副作用。
+        return [exe, "-f", "-o", dest, path, "-p", password or ""]
     return [exe, "-xf", path, "-C", dest] + (["--passphrase", password] if password else [])  # bsdtar
 
 
