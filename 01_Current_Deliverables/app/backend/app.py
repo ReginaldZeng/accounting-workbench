@@ -2583,17 +2583,45 @@ async def bank_import_upload(request: Request):
     bank_ym = ymc.most_common(1)[0][0] if ymc else ""
     sel_ym = _period_str()
     mismatch = bool(bank_ym and bank_ym != sel_ym)
+    # 财资多份导出出现让位/重复/疑漏 → 打"重复待确认"标记：查重只是系统初核，须人工弹窗确认留痕
+    dup_pending = bimp.needs_dup_confirm(manifest)
+    meta = {"笔数": len(rows), "文件数": len(manifest), "流水月份": bank_ym}
+    if dup_pending:
+        meta["重复待确认"] = True
     db.set_period_input(CFG["source"], CFG["year"], CFG["period"], "bank",
                         {"rows": rows, "manifest": manifest, "channels": channels, "dir": extract_dir},
-                        {"笔数": len(rows), "文件数": len(manifest), "流水月份": bank_ym}, u["name"])
+                        meta, u["name"])
     db.audit(u["name"], "上传银行流水", _period_str(),
-             "并入 %d 笔 / %d 个文件%s" % (len(rows), len(manifest), ("（⚠流水月份=%s）" % bank_ym) if mismatch else ""))
+             "并入 %d 笔 / %d 个文件%s%s" % (len(rows), len(manifest),
+                                            ("（⚠流水月份=%s）" % bank_ym) if mismatch else "",
+                                            "（财资重复判定待人工确认）" if dup_pending else ""))
     CFG["bank_import_dir"] = extract_dir     # 兼容旧字段（渠道/理财等仍读它当本期目录）
     save_cfg(CFG)
     _cache_clear()
     return {"ok": True, "并入笔数": len(rows), "manifest": manifest, "dir": extract_dir,
             "period": sel_ym, "updated_by": u["name"], "updated_at": _now(),
-            "bank_ym": bank_ym, "sel_ym": sel_ym, "period_mismatch": mismatch}
+            "bank_ym": bank_ym, "sel_ym": sel_ym, "period_mismatch": mismatch,
+            "need_dup_confirm": dup_pending}
+
+
+@app.post("/api/bank-import/confirm-dup")
+async def bank_import_confirm_dup(request: Request):
+    """人工确认财资归并的重复/让位判定（需求方 2026-09-01 定：系统查重只是初核，不独自背锅——
+    必须有人点确认，确认人/时间写进本期 meta 并入审计；只改 meta，不动数据与上传留痕）。"""
+    u = _require_perm(request, "bank_upload")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「上传资金流水」权限，请联系管理员"}, status_code=403)
+    rec = db.get_period_input(CFG["source"], CFG["year"], CFG["period"], "bank")
+    if rec is None:
+        return {"ok": False, "msg": "本期还没有已上传的银行流水"}
+    if not (rec.get("meta") or {}).get("重复待确认"):
+        return {"ok": True, "msg": "本期没有待确认的重复判定"}
+    now = _now()
+    db.update_period_input_meta(CFG["source"], CFG["year"], CFG["period"], "bank",
+                                {"重复待确认": None, "重复确认人": u["name"], "重复确认时间": now})
+    db.audit(u["name"], "确认财资重复", _period_str(), "人工确认多份财资导出的重复/让位判定（弹窗逐条核对后确认）")
+    _cache_clear()
+    return {"ok": True, "确认人": u["name"], "确认时间": now}
 
 
 @app.post("/api/kingdee/refresh")

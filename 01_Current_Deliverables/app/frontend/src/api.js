@@ -51,6 +51,7 @@ export const getChannelAdjust = () => j('/api/channel-adjust')
 export const syncChannelAdjust = () => j('/api/channel-adjust/sync', {method:'POST'})
 // 密码走请求头(不进 URL/日志)；用 encodeURIComponent 兼容非 ASCII 密码
 export const uploadBankZip = (file, password) => j('/api/bank-import/upload', {method:'POST', body:file, headers: password ? {'X-Zip-Password': encodeURIComponent(password)} : {}})
+export const confirmBankDup = () => jp('/api/bank-import/confirm-dup', {})
 export const getSubjectBalance = () => j('/api/subject-balance')
 // 报表仪表盘（子公司报表）：GET 读缓存，POST 强刷金蝶（V2.248）
 export const getReportDashboard = () => j('/api/report/dashboard')

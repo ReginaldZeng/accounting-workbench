@@ -2915,6 +2915,24 @@ def get_period_input(source, year, period, kind):
     return {"payload": payload, "meta": meta, "updated_by": r[2] or "", "updated_at": r[3] or ""}
 
 
+def update_period_input_meta(source, year, period, kind, updates):
+    """只合并更新本期输入的 meta，不动 payload/上传人/上传时间——供"人工确认"类批注留痕。
+    updates 里值为 None 的键表示移除该标记。没有该期记录返回 False。"""
+    with _engine.begin() as c:
+        w = _period_where(period_inputs, source, year, period) & (period_inputs.c.kind == kind)
+        r = c.execute(select(period_inputs.c.meta).where(w)).first()
+        if not r:
+            return False
+        try:
+            meta = json.loads(r[0]) if r[0] else {}
+        except Exception:
+            meta = {}
+        meta.update(updates or {})
+        meta = {k: v for k, v in meta.items() if v is not None}
+        c.execute(update(period_inputs).where(w).values(meta=json.dumps(meta, ensure_ascii=False, default=str)))
+    return True
+
+
 def list_period_inputs(source, kind):
     """该源该 kind 存过数据的期间清单（新→旧）。不解 payload。V2.119/V2.122：成本台账用它找"最近有数据的一期"。"""
     with _engine.connect() as c:

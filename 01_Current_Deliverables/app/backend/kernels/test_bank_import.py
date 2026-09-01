@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-09-01 | Author: Claude / c | Version: V2.416
+# Description: 新增财资多份导出归并回归（TestTreasuryMultiExport）：截断版让位、同账户取最全、
+#              同日同额真实重复交易不被误杀、清单说明讲人话。复刻 2026-08 真实流水包形态。
 # Date: 2026-08-03 | Author: Claude / c | Version: V2.167
 # Description: 银行流水导入·识别层单元测试。重点回归"改名兜底"：文件名对不上时按内容认
 #   （财资平台 xlsx 表头 / 中行 HISQRY 块头），建行 csv 不被误抢、乱文件仍跳过、原名快路不读文件。
@@ -30,6 +33,19 @@ def make_treasury_xlsx(path):
     ws.append(["", "2026-07-01 19:12:01", "测试食品科技有限公司", "73110122000157061",
                "31,200.00", "", "396,642.33", "农业科技（上海）有限公司", "50131000927752036",
                "人民币", "货款", "网银转账"])
+    wb.save(path)
+
+
+def make_treasury_multi(path, accounts):
+    """多账户财资导出夹具：一个明细表头 + 各账户若干笔。accounts = [(账号, 户名, [(日期, 收入, 支出)])]。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["", "交易时间", "本方户名", "本方账号", "收入", "支出", "账户余额",
+               "对方户名", "对方账号", "币种", "交易备注", "交易类型"])
+    for acct, holder, rows in accounts:
+        for d, inc, out in rows:
+            ws.append(["", d + " 10:00:00", holder, acct, inc, out, "0.00",
+                       "某某对方公司", "999", "人民币", "备注", "转账"])
     wb.save(path)
 
 
@@ -174,6 +190,115 @@ class TestRenameFallback(unittest.TestCase):
         self.assertIn("中国银行", banks)
         self.assertIn("建设银行", banks)
         self.assertEqual(len(rows), 5)   # 财资2 + 中行2 + 建行1
+
+
+class TestTreasuryMultiExport(unittest.TestCase):
+    """财资多份导出按账户取最全（复刻 2026-08 真实流水包：出纳导了三次、一次比一次全，
+    「1」是被行数上限截断的残版；旧逻辑只并第一份，静默漏账）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_pick_fullest_per_account(self):
+        A, B, C = "73110122000157061", "86041110000117736", "755965480410106"
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 1.xlsx"), [
+            (A, "星期零", [("2026-08-01", "100.00", ""), ("2026-08-02", "", "50.00")]),      # 截断：少第3笔
+        ])
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 2.xlsx"), [
+            (A, "星期零", [("2026-08-01", "100.00", ""), ("2026-08-02", "", "50.00"),
+                           ("2026-08-03", "7.00", "")]),                                     # A 的全版
+            (B, "星期九", [("2026-08-10", "1,865,786.33", ""), ("2026-08-10", "1,865,786.33", "")]),  # 同日同额真实两笔
+        ])
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 3.xlsx"), [
+            (B, "星期九", [("2026-08-10", "1,865,786.33", ""), ("2026-08-10", "1,865,786.33", "")]),  # 与文件2并列
+            (C, "星期十", [("2026-08-20", "", "25.00")]),                                    # 只有这份有
+        ])
+        rows, manifest = bi.load_bank_dir(self.dir)
+        by = {}
+        for x in rows:
+            by.setdefault(x["账号"], []).append(x)
+        self.assertEqual(len(by[A]), 3)      # 取全版，不是截断版
+        self.assertEqual(len(by[B]), 2)      # 同日同额两笔都在——整户整取，没被按行"去重"误杀
+        self.assertEqual(len(by[C]), 1)
+        self.assertEqual(len(rows), 6)
+        man = {m["文件"]: m for m in manifest}
+        m1, m2, m3 = (man["财资银行流水 %d.xlsx" % i] for i in (1, 2, 3))
+        self.assertFalse(m1["并入逐笔"])                              # 残版整份让位
+        self.assertEqual(m1["类型"], "财资平台·宁波+招商")             # 但不再被归为"PDF/理财跳过"
+        self.assertIn("逐笔核对", m1.get("说明", ""))
+        self.assertTrue(m2["并入逐笔"])
+        self.assertEqual((m2["笔数"], m2["账户数"]), (5, 2))          # A全版3 + B两笔（并列取排序靠前的文件）
+        self.assertTrue(m3["并入逐笔"])
+        self.assertEqual((m3["笔数"], m3["账户数"]), (1, 1))          # 只并 C；B 让位给文件2
+        self.assertIn("更全", m3.get("说明", ""))
+        self.assertTrue(bi.needs_dup_confirm(manifest))               # 出现让位 → 必须弹窗人工确认
+
+    def test_tie_goes_to_fuller_file(self):
+        # 复刻 8 月困惑点：同账户两份一模一样时，归到【整体更全的文件】名下——
+        # 页面显示"全集那份并入全部、残版重复"，与人的直觉（"直接用 3"）一致
+        r1, r2 = ("2026-08-01", "100.00", ""), ("2026-08-02", "", "50.00")
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 1.xlsx"), [
+            ("111", "星期零", [r1, r2]),                              # 残版：只有 111
+        ])
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 2.xlsx"), [
+            ("111", "星期零", [r1, r2]),                              # 与残版一模一样
+            ("222", "星期九", [("2026-08-05", "7.00", "")]),          # 多出的账户 → 整体更全
+        ])
+        rows, manifest = bi.load_bank_dir(self.dir)
+        man = {m["文件"]: m for m in manifest}
+        self.assertEqual((man["财资银行流水 2.xlsx"]["笔数"], man["财资银行流水 2.xlsx"]["账户数"]), (3, 2))
+        self.assertNotIn("说明", man["财资银行流水 2.xlsx"])          # 全集干干净净一行，无让位说明
+        self.assertFalse(man["财资银行流水 1.xlsx"]["并入逐笔"])       # 残版整份"重复"
+        self.assertEqual(len(rows), 3)
+
+    def test_non_subset_flags_warning(self):
+        # 两次导出范围不同：让位文件里有 1 笔不在被采用的导出里 → 必须飘红提示，不许静默丢
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 1.xlsx"), [
+            ("111", "星期零", [("2026-08-01", "100.00", ""), ("2026-08-15", "", "88.00")]),  # 8-15 只有这份有
+        ])
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 2.xlsx"), [
+            ("111", "星期零", [("2026-08-01", "100.00", ""), ("2026-08-02", "", "50.00"),
+                               ("2026-08-03", "7.00", "")]),                                 # 更全（3笔）但缺 8-15
+        ])
+        rows, manifest = bi.load_bank_dir(self.dir)
+        self.assertEqual(len(rows), 3)                       # 仍按整户择优并入更全那份
+        man = {m["文件"]: m for m in manifest}
+        m1 = man["财资银行流水 1.xlsx"]
+        self.assertFalse(m1["并入逐笔"])
+        self.assertIn("⚠", m1["说明"])                       # 疑漏必须飘红
+        self.assertIn("1 笔", m1["说明"])
+        self.assertIn("人工核对", m1["说明"])
+
+    def test_subset_says_checked(self):
+        # 真子集：让位文件的说明要讲清"已逐笔核对、无遗漏"，不能让人以为没解析
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 1.xlsx"), [
+            ("111", "星期零", [("2026-08-01", "100.00", "")]),
+        ])
+        make_treasury_multi(os.path.join(self.dir, "财资银行流水 2.xlsx"), [
+            ("111", "星期零", [("2026-08-01", "100.00", ""), ("2026-08-02", "", "50.00")]),
+        ])
+        _rows, manifest = bi.load_bank_dir(self.dir)
+        m1 = {m["文件"]: m for m in manifest}["财资银行流水 1.xlsx"]
+        self.assertNotIn("⚠", m1["说明"])
+        self.assertIn("逐笔核对", m1["说明"])
+
+    def test_single_file_unchanged(self):
+        # 单份导出走老口径：全并入、无让位说明
+        make_treasury_multi(os.path.join(self.dir, "宁波+招商.xlsx"), [
+            ("111", "星期零", [("2026-08-01", "1.00", "")]),
+            ("222", "星期九", [("2026-08-02", "", "2.00")]),
+        ])
+        rows, manifest = bi.load_bank_dir(self.dir)
+        self.assertEqual(len(rows), 2)
+        m = manifest[0]
+        self.assertTrue(m["并入逐笔"])
+        self.assertEqual((m["笔数"], m["账户数"]), (2, 2))
+        self.assertNotIn("说明", m)
+        self.assertFalse(bi.needs_dup_confirm(manifest))              # 单份干净导出 → 不弹确认窗
 
 
 if __name__ == "__main__":

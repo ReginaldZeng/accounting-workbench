@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-09-01 | Author: Claude / c | Version: V2.416
+# Description: 财资平台多份导出不再只认第一份——按【账户】整户择优并入（笔数最多、并列看收支合计）。
+#              实证（2026-08 流水包）：出纳把财资流水导了三次（财资银行流水 1/2/3.xlsx），一次比一次全；
+#              「1」只有 1 个账户且被 200 行导出上限截断，「3」才是 11 个账户的全集。旧的 seen_treasury
+#              单例逻辑恰好只并入了最残的「1」，其余两份掉进"PDF/理财等跳过"，静默漏 10 个账户。
+#              整户整取、绝不跨文件按行拼——按行去重会误杀同日同额的真实重复交易（如同额来回划转）。
 # Date: 2026-08-06 | Author: Claude / c | Version: V2.199
 # Description: 修中行HISQRY对方户名读错——开户行名称(含"公司")抢先被当对手。改按块内表头认列：
 #              来账=付款人名称、往账=收款人名称（个人名也能取对）；无表头退回启发式并排除银行名。
@@ -576,27 +582,106 @@ def extract_archive(path, dest, password=None):
         return _extract_rar(path, dest, password)
 
 
+def _merge_treasury(paths):
+    """归并同一包里的多份财资平台导出。出纳会把财资流水导出多次（每次勾选范围不同，且单次导出
+    有行数上限会截断），同一账户在不同文件里可能一份全、一份残——【每份都解析】，按【账户】整户择优：
+    取笔数最多的那份（并列比收支合计；再并列取【整体更全的文件】——让"3 是全集"时页面直接显示
+    "3 并入全部、1/2 重复"，与人的直觉一致；最后才看文件名排序），整户整取、
+    绝不跨文件按行拼行——按行去重会误杀同日同额的真实重复交易（如同额来回划转）。
+    让位的每一份还要过【逐笔查重】：其每笔都必须能在被采用的那份里找到（多重集包含），
+    找不到的计入"疑漏笔数"——防"两次导出范围不同"时整户择优悄悄丢行，疑漏必须飘红给人看。
+    返回 (rows, stats)。stats: {path: {"账户数","笔数","让位账户数","疑漏笔数"} 或 {"error": 原因}}。"""
+    parsed, stats = [], {}
+    for p in paths:
+        try:
+            by_acct = {}
+            for r in parse_treasury(p):
+                by_acct.setdefault(r["账号"], []).append(r)
+            parsed.append((p, by_acct))
+        except Exception as e:
+            stats[p] = {"error": str(e)[:120]}
+    totals = [sum(len(rs) for rs in by_acct.values()) for _p, by_acct in parsed]   # 各文件整体笔数
+    best = {}   # 账号 -> (完整度, 文件序)；完整度 = (账户笔数, 账户收支合计, 文件整体笔数)
+    for i, (_p, by_acct) in enumerate(parsed):
+        for acct, rs in by_acct.items():
+            score = (len(rs), sum(x["收入"] + x["支出"] for x in rs), totals[i])
+            if acct not in best or score > best[acct][0]:
+                best[acct] = (score, i)
+    def _key(r):        # 逐笔查重键：除来源文件外的全部字段（连余额都相同才算同一笔）
+        return (r["交易日期"], r["收入"], r["支出"], r["对方户名"], r["摘要"], r.get("余额"))
+
+    from collections import Counter
+    chosen_keys = {}    # 账号 -> Counter(被采用那份的逐笔键)
+    for acct, (_s, i) in best.items():
+        chosen_keys[acct] = Counter(_key(r) for r in parsed[i][1][acct])
+    rows = []
+    for i, (p, by_acct) in enumerate(parsed):
+        take = [a for a in by_acct if best[a][1] == i]
+        for a in take:
+            rows += by_acct[a]
+        missing = 0     # 让位账户逐笔查重：此文件独有、未被并入的笔数
+        for a in by_acct:
+            if best[a][1] != i:
+                extra = Counter(_key(r) for r in by_acct[a]) - chosen_keys[a]
+                missing += sum(extra.values())
+        stats[p] = {"账户数": len(take), "笔数": sum(len(by_acct[a]) for a in take),
+                    "让位账户数": len(by_acct) - len(take), "疑漏笔数": missing}
+    return rows, stats
+
+
+def needs_dup_confirm(manifest) -> bool:
+    """财资归并出现"让位/重复/疑漏"时为 True——需求方定的责任口径（2026-09-01）：
+    查重判定只是系统初核，必须弹窗经【人工确认】并留痕（确认人/时间），系统不独自背锅。"""
+    for m in manifest or []:
+        if str(m.get("类型", "")).startswith("财资平台"):
+            if (not m.get("并入逐笔")) or m.get("说明"):
+                return True
+    return False
+
+
 def load_bank_dir(folder, include_hisqry=True):
     """扫描目录(递归，兼容上传zip解压后的嵌套子目录)，解析可逐笔的结构化源(财资/中行)，
-    返回 (rows, manifest)。支付宝/微信/抖音只登记不并入(走渠道总额)；其余(PDF/理财/余额表)跳过。"""
+    返回 (rows, manifest)。财资平台允许多份导出，按账户取最全的并入（_merge_treasury）；
+    支付宝/微信/抖音只登记不并入(走渠道总额)；其余(PDF/理财/余额表)跳过。"""
     rows, manifest = [], []
-    seen_treasury = False
     all_files = []
     for root, _dirs, fnames in os.walk(folder):
         for fn in fnames:
             all_files.append(os.path.join(root, fn))
-    for path in sorted(all_files):
+    all_files = sorted(all_files)
+    kinds = {p: _classify(p) for p in all_files}
+    t_rows, t_stats = _merge_treasury([p for p in all_files if kinds[p] == "treasury"])
+    rows += t_rows
+    for path in all_files:
         if os.path.isdir(path):
             continue
-        kind = _classify(path)
+        kind = kinds[path]
         name = os.path.basename(path)
         try:
-            if kind == "treasury" and not seen_treasury:
-                r = parse_treasury(path)
-                rows += r
-                seen_treasury = True
-                manifest.append({"文件": name, "类型": "财资平台·宁波+招商", "并入逐笔": True,
-                                 "笔数": len(r), "账户数": len({x["账号"] for x in r})})
+            if kind == "treasury":
+                st = t_stats.get(path) or {}
+                if "error" in st:
+                    manifest.append({"文件": name, "类型": "解析失败", "并入逐笔": False,
+                                     "说明": st["error"]})
+                elif st.get("笔数"):
+                    m = {"文件": name, "类型": "财资平台·宁波+招商", "并入逐笔": True,
+                         "笔数": st["笔数"], "账户数": st["账户数"]}
+                    if st.get("让位账户数"):
+                        m["说明"] = ("还有 %d 个账户这份里也有，但别的文件里更全——那部分按更全的并入了"
+                                     "（逐笔核对过，一笔没丢）" % st["让位账户数"])
+                        if st.get("疑漏笔数"):
+                            m["说明"] = ("还有 %d 个账户按别的文件并入；⚠ 但有 %d 笔只有这份里有、没被并入"
+                                         "——两次导出范围可能不同，请人工核对是否漏账"
+                                         % (st["让位账户数"], st["疑漏笔数"]))
+                    manifest.append(m)
+                else:
+                    if st.get("疑漏笔数"):
+                        note = ("⚠ 解析核对后发现：有 %d 笔只有这份里有、没被并入——两次导出范围可能不同，"
+                                "请人工核对是否漏账" % st["疑漏笔数"])
+                    else:
+                        note = "这份里的每一笔，别的文件里都有（已逐笔核对）——为防同一笔记两遍，不再并入"
+                    manifest.append({"文件": name, "类型": "财资平台·宁波+招商", "并入逐笔": False,
+                                     "笔数": 0, "说明": note})
             elif kind == "hisqry" and include_hisqry:
                 r, blocks = parse_hisqry(path)
                 rows += r

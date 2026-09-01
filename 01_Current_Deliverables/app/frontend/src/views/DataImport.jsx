@@ -1,7 +1,11 @@
+// [Change Log] Date:2026-09-01 Author:Claude/c Version:V2.416
+// 解析清单收纳：跳过的文件（第三方支付/回单/证明/理财等）折叠进「展开逐个看」，不再一屏十几行；
+// 但「解析失败」和「财资未并入」不折叠——没并入的真流水必须一眼看见。财资未并入分两态：
+// 「重复」=已解析且逐笔查重、内容全在更全导出里（灰字）；「⚠核对」=有笔数只在此文件、疑似漏账（红字）。
 // [Change Log] Date:2026-07-04 Author:Claude/c Version:V1.3
 // 数据接入页（四步工作流第1步，独立成页）：银行流水来源(导入目录+解析清单) / 金蝶序时账 / 每家银行覆盖对照。
 import React, { useEffect, useState } from 'react'
-import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee } from '../api.js'
+import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee, confirmBankDup } from '../api.js'
 import Steps from '../components/Steps.jsx'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
@@ -16,8 +20,11 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
   const [zpwd, setZpwd] = useState('')
   const [busy, setBusy] = useState(false), [up, setUp] = useState(false), [ref, setRef] = useState(false)
   const [msg, setMsg] = useState(null)
+  const [dupOpen, setDupOpen] = useState(false), [dupBusy, setDupBusy] = useState(false)
   useEffect(() => { getDataSources().then(x => { _cache = x; setD(x) }).catch(() => {}) }, [cfg.source, cfg.year, cfg.period])
   useEffect(() => { setDir(cfg.bank_import_dir || '') }, [cfg.bank_import_dir])
+  // 财资重复判定待人工确认：只要标记还挂着，进页面就再弹——不确认不算完，刷新躲不掉
+  useEffect(() => { if (d && d.bank_meta && d.bank_meta['重复待确认']) setDupOpen(true) }, [d])
 
   const syncStatus = async () => { try { const c = await getConfig(); onChange && onChange(c) } catch (e) {} }  // 刷新胶囊/侧栏封存态
   const doUpload = async () => {
@@ -27,6 +34,7 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
       const r = await uploadBankZip(file, zpwd)
       if (r.ok) {
         const x = await syncDataSources(); _cache = x; setD(x); setDir(r.dir); await syncStatus()
+        if (r.need_dup_confirm) setDupOpen(true)
         if (r.period_mismatch) {
           // 流水实际月份 ≠ 所选期间：多半选错月份了，红字提醒（数据已存进所选期间，需切对月份重传）
           setMsg({ ok: false, t: `⚠ 月份不符！你选的期间是 ${r.sel_ym}，但上传的流水主要是 ${r.bank_ym} 的。已按你选的 ${r.sel_ym} 存入——若选错了，请把上方期间切到 ${r.bank_ym} 再重新上传。` })
@@ -49,13 +57,25 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
     try { await refreshKingdee(); const x = await syncDataSources(); _cache = x; setD(x); await syncStatus() }
     finally { setRef(false) }
   }
+  const doConfirmDup = async () => {
+    setDupBusy(true)
+    try {
+      const r = await confirmBankDup()
+      if (r.ok) { const x = await getDataSources(); _cache = x; setD(x); setDupOpen(false) }
+    } catch (e) { /* 失败保持弹窗，用户可重试 */ } finally { setDupBusy(false) }
+  }
 
   const inp = { flex: 1, height: 34, borderRadius: 8, border: '1px solid var(--line-strong)', background: 'var(--bg)', color: 'var(--ink)', padding: '0 12px', fontSize: 13, fontFamily: 'inherit' }
   const kd = cfg.source === 'kingdee'
   const man = (d && d.manifest) || []
   const joined = man.filter(m => m['并入逐笔'])
-  const third = man.filter(m => !m['并入逐笔'] && m['类型'] !== '跳过')
-  const skipped = man.filter(m => !m['并入逐笔'] && m['类型'] === '跳过')
+  // 未并入但必须看见的：解析失败 / 财资让位（多份导出里较不全的那份）——折叠会把问题藏起来
+  const attention = man.filter(m => !m['并入逐笔'] && (m['类型'] === '解析失败' || String(m['类型'] || '').startsWith('财资平台')))
+  // 其余未并入的（第三方支付走渠道总额 + 回单/证明/理财等）统一折叠
+  const folded = man.filter(m => !m['并入逐笔'] && !attention.includes(m))
+  const foldedThird = folded.filter(m => m['类型'] !== '跳过').length
+  // 财资归并涉及的全部文件（并入/重复/⚠核对）——重复确认弹窗逐条列示用
+  const fzRows = man.filter(m => String(m['类型'] || '').startsWith('财资平台'))
   const cov = (d && d.coverage) || []
   const bankCount = joined.reduce((s, m) => s + (Number(m['笔数']) || 0), 0)
   // 本期数据状态：银行流水(谁/何时上传)、金蝶数据(取自何时)——按期间存，切期间就看那个月的
@@ -98,7 +118,12 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
               {bankReady
                 ? <>{bMeta && bMeta.updated_at ? <>{bMeta.updated_by || '?'} 上传于 {bMeta.updated_at}　·　</> : null}并入逐笔 {bankCount} 笔
                   {bMeta && bMeta['流水月份'] && bMeta['流水月份'] !== (d ? d.period : '') &&
-                    <b style={{ color: 'var(--red)', marginLeft: 8 }}>⚠ 流水月份 {bMeta['流水月份']} 与本期({d && d.period})不符，可能选错月份</b>}</>
+                    <b style={{ color: 'var(--red)', marginLeft: 8 }}>⚠ 流水月份 {bMeta['流水月份']} 与本期({d && d.period})不符，可能选错月份</b>}
+                  {bMeta && bMeta['重复待确认'] &&
+                    <b style={{ color: 'var(--amber)', marginLeft: 8, cursor: 'pointer', textDecoration: 'underline' }}
+                      onClick={() => setDupOpen(true)}>⚠ 财资重复判定待人工确认（点此确认）</b>}
+                  {bMeta && bMeta['重复确认人'] &&
+                    <span style={{ color: 'var(--ink-3)', marginLeft: 8 }}>· 财资重复判定已由 {bMeta['重复确认人']} 于 {bMeta['重复确认时间']} 确认</span>}</>
                 : '本期还没上传银行流水包（下方①上传）'}</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -126,7 +151,7 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
           <button className="btn btn-pri" onClick={doUpload} disabled={!file || up || !kd || !canUpload}>{up ? '上传解析中…' : '上传并解析'}</button>
           {kd && !canUpload && <span className="foot" style={{ color: 'var(--red)' }}>无「上传资金流水」权限</span>}
         </div>
-        <div className="foot" style={{ marginTop: 8 }}>把出纳月底导出的<b>整个流水文件夹打成一个压缩包</b>（<b>.zip / .rar</b> 都行）传上来即可。<b>加密包</b>在右侧填「压缩包密码」自动解压（ZIP 支持 AES；RAR 需服务器装 7-Zip/p7zip）。财资平台（宁波+招商）、中行 HISQRY 自动逐笔并入；支付宝/微信/抖音归第三方（走渠道总额）；PDF/理财/余额表自动跳过。</div>
+        <div className="foot" style={{ marginTop: 8 }}>把出纳月底导出的<b>整个流水文件夹打成一个压缩包</b>（<b>.zip / .rar</b> 都行）传上来即可。<b>加密包</b>在右侧填「压缩包密码」自动解压（ZIP 支持 AES；RAR 需服务器装 7-Zip/p7zip）。财资平台（宁波+招商，同一包里导了多份会自动按账户取最全的那份）、中行 HISQRY 自动逐笔并入；支付宝/微信/抖音归第三方（走渠道总额）；PDF/理财/余额表自动跳过。</div>
         {msg && <div style={{ marginTop: 8, fontSize: 12.5, color: msg.ok ? 'var(--green)' : 'var(--red)' }}>{msg.t}</div>}
         <details style={{ marginTop: 10 }}>
           <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--ink-3)' }}>或：直接填本机文件夹路径（本地调试用）</summary>
@@ -143,11 +168,27 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
             <span style={{ minWidth: 120 }}>[{m['类型']}]</span>
             <span style={{ flex: '1 1 200px', wordBreak: 'break-all' }}>{m['文件']}</span>
             <span style={{ color: 'var(--ink-3)' }}>{m['笔数']} 笔{m['自校验'] ? ' · ' + m['自校验'] : ''}</span>
+            {m['说明'] && <span style={{ color: String(m['说明']).includes('⚠') ? 'var(--red)' : 'var(--ink-3)' }}>{m['说明']}</span>}
           </div>)}
-          {third.map((m, i) => <div key={i} style={{ display: 'flex', gap: 8, padding: '2px 0', color: 'var(--muted)', flexWrap: 'wrap' }}>
-            <span style={{ width: 46 }}>跳过</span><span style={{ minWidth: 120 }}>[{m['类型']}]</span>
-            <span style={{ flex: '1 1 200px', wordBreak: 'break-all' }}>{m['文件']}</span><span>{m['说明'] || ''}</span></div>)}
-          {skipped.length > 0 && <div style={{ marginTop: 4, color: 'var(--muted)' }}>其余 {skipped.length} 个文件跳过（PDF 对账单 / 余额表 / 回单 / 资产证明等，本轮不解析）。</div>}
+          {attention.map((m, i) => {
+            const warn = m['类型'] === '解析失败' || String(m['说明'] || '').includes('⚠')
+            // 未并入的真流水（重复/⚠核对/失败）整行红字加粗——必须显眼，不许看漏
+            return <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', flexWrap: 'wrap', color: 'var(--red)', fontWeight: 600 }}>
+              <span style={{ width: 46 }}>{m['类型'] === '解析失败' ? '⚠失败' : (warn ? '⚠核对' : '重复')}</span>
+              <span style={{ minWidth: 120 }}>[{m['类型']}]</span>
+              <span style={{ flex: '1 1 200px', wordBreak: 'break-all' }}>{m['文件']}</span>
+              <span>{m['说明'] || ''}</span></div>
+          })}
+          {folded.length > 0 && <details style={{ marginTop: 6 }}>
+            <summary style={{ cursor: 'pointer', color: 'var(--muted)' }}>
+              跳过 {folded.length} 个文件（第三方支付走渠道总额 {foldedThird} 个 · 回单/证明/理财等不解析 {folded.length - foldedThird} 个）—— 展开逐个看
+            </summary>
+            <div style={{ marginTop: 4 }}>
+              {folded.map((m, i) => <div key={i} style={{ display: 'flex', gap: 8, padding: '2px 0', color: 'var(--muted)', flexWrap: 'wrap' }}>
+                <span style={{ width: 46 }}>跳过</span><span style={{ minWidth: 120 }}>[{m['类型']}]</span>
+                <span style={{ flex: '1 1 200px', wordBreak: 'break-all' }}>{m['文件']}</span><span>{m['说明'] || ''}</span></div>)}
+            </div>
+          </details>}
         </div>}
       </div>
 
@@ -188,5 +229,34 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
         </div>
       </div>}
     </div>
+
+    {/* 财资重复判定 · 人工确认弹窗：系统查重只是初核，是否重复由人确认并留痕（确认人+时间入审计） */}
+    {dupOpen && <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,18,25,.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: 'var(--bg)', border: '1px solid var(--line-strong)', borderRadius: 12, padding: '20px 22px', width: 'min(680px, 92vw)', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 12px 40px rgba(0,0,0,.25)' }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>财资流水重复判定 · 需人工确认</div>
+        <div style={{ fontSize: 12.5, color: 'var(--ink-2)', lineHeight: 1.7 }}>
+          本期包里发现<b>多份财资平台导出</b>。系统已逐份解析、按账户取最全并入，未并入部分做了逐笔查重——但查重只是机器初核，<b style={{ color: 'var(--red)' }}>是否重复由你确认；确认留痕（确认人＋时间，入审计）</b>。
+        </div>
+        <div style={{ margin: '12px 0', fontSize: 12.5 }}>
+          {fzRows.map((m, i) => { const warn = String(m['说明'] || '').includes('⚠'); return (
+            <div key={i} style={{ display: 'flex', gap: 8, padding: '5px 0', borderBottom: '1px solid var(--line)', flexWrap: 'wrap' }}>
+              <span style={{ width: 46, color: m['并入逐笔'] ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>{m['并入逐笔'] ? '▶并入' : (warn ? '⚠核对' : '重复')}</span>
+              <span style={{ flex: '1 1 180px', wordBreak: 'break-all' }}>{m['文件']}</span>
+              <span style={{ color: warn ? 'var(--red)' : 'var(--ink-3)', flex: '2 1 260px' }}>
+                {m['并入逐笔'] ? `${m['笔数']} 笔 / ${m['账户数']} 个账户${m['说明'] ? ' · ' + m['说明'] : ''}` : (m['说明'] || '')}</span>
+            </div>) })}
+        </div>
+        {fzRows.some(m => String(m['说明'] || '').includes('⚠'))
+          ? <div style={{ fontSize: 12.5, color: 'var(--red)', fontWeight: 600, marginBottom: 12 }}>
+              ⚠ 存在"只在让位文件里的笔数"（疑漏）——请先人工核对；确属重复/无碍再点确认，若是导出范围问题请退回出纳重新全量导出后重传。</div>
+          : <div style={{ fontSize: 12.5, color: 'var(--ink-3)', marginBottom: 12 }}>
+              逐笔查重结论：未并入文件的每一笔都能在已并入数据里找到（疑漏 0 笔）。</div>}
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+          <button className="btn" onClick={() => setDupOpen(false)} disabled={dupBusy}>暂不确认（下次进入仍会提醒）</button>
+          <button className="btn btn-pri" onClick={doConfirmDup} disabled={dupBusy || !canUpload}
+            title={!canUpload ? '需「上传资金流水」权限' : ''}>{dupBusy ? '确认中…' : '我已逐条核对，确认重复判定'}</button>
+        </div>
+      </div>
+    </div>}
   </div>)
 }

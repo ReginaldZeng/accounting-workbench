@@ -2,6 +2,21 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "wt-is-this-wrong",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app:app",
+        "--app-dir",
+        "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\is-this-wrong-31da83\\01_Current_Deliverables\\app\\backend",
+        "--port",
+        "8091",
+        "--reload"
+      ],
+      "port": 8091
+    },
+    {
       "name": "wt-cost-ledger-blockers",
       "runtimeExecutable": "python",
       "runtimeArgs": [
