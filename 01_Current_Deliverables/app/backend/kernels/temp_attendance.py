@@ -803,7 +803,10 @@ def compute(summary, punch, params=None, contract=None):
                                 "原因": pay["合同缺档"]})
         agg = {"少记日": 0, "少记时": 0.0, "弹性内日": 0, "异常日": 0, "异常时": 0.0,
                "一致日": 0, "硬伤日": 0, "混合日": 0, "未计日": 0, "薄卡日": 0,
-               "多出日": 0, "多出时": 0.0, "上报": 0.0, "重算": 0.0}
+               "多出日": 0, "多出时": 0.0, "上报": 0.0, "重算": 0.0,
+               # 净多记＝「判过的班日」上 Σ(上报−重算)，>0 即公司整期多付；已消化日＝逐日超弹性但整期没超、被降级的天
+               "净多记": 0.0, "已消化日": 0}
+        _row_start = len(rows)          # 本人在 rows 里的起点，供整期判定后回头给逐日降级用
         for d in sorted(set(person["days"]) | set(shifts) | set(pdays)):
             rep = float(person["days"].get(d, 0.0))
             sh = shifts.get(d)
@@ -879,6 +882,8 @@ def compute(summary, punch, params=None, contract=None):
                 judge += f"（当天 {len(ts)} 次卡分属前后两个班，切不出完整班次）"
             agg["上报"] += rep
             agg["重算"] += cal
+            if cls in ("ok", "over_out"):     # 只累「判过的班日」（上报>0、比过在厂）；中性天不参与整期净额相抵
+                agg["净多记"] += (rep - cal)
             agg[{"under": "少记日", "over_in": "弹性内日", "over_out": "异常日",
                  "ok": "一致日", "mixed": "混合日", "unbilled": "未计日",
                  "thin": "薄卡日"}.get(cls, "硬伤日")] += 1
@@ -912,6 +917,20 @@ def compute(summary, punch, params=None, contract=None):
                 "金额影响": round(diff * rate, 2) if rep > 0 else 0.0,
                 "判定": judge, "档": cls,
             })
+        # ── 人级「整期总量」判定（与成本会计底表一致：按人合起来比，弹性 0.5，白/夜各自成型）──
+        # 逐日照算差异；异常与否看**这个人整期净多记**是否超弹性。整期没超 → 把逐日那几天的
+        # 「超弹性异常」降级为中性（仍显示多记几小时，但不红、不必查、不计异常金额）。
+        # 白夜混合的人在厂重算本就只摆不判，整期净额不可靠 → 维持「单独交人工」，不进此判定。
+        _net = round(agg["净多记"], 2)
+        _over = kind != "mixed" and _net > tol + 1e-9
+        if not _over:
+            for _r in rows[_row_start:]:
+                if _r["档"] == "over_out":
+                    _r["档"] = "over_absorbed"
+                    _r["判定"] = f"○ 多记 {-_r['差异']:.1f} 小时（整期在弹性内，不单独判）"
+                    agg["已消化日"] += 1
+            agg["异常日"] = 0
+            agg["异常时"] = 0.0
         people.append({
             "序号": person["no"], "姓名": person["name"], "部门": person["dept"], "归属": person["agency"],
             "岗位": person["kind"] or "普工", "班型": {"day": "白班", "night": "夜班", "mixed": "白夜混合"}[kind],
@@ -921,8 +940,12 @@ def compute(summary, punch, params=None, contract=None):
             "差额金额": round((agg["重算"] - agg["上报"]) * rate, 2),
             "少记日次": agg["少记日"], "少记小时": round(agg["少记时"], 2),
             "弹性内多记日次": agg["弹性内日"],
-            "异常多记日次": agg["异常日"], "异常多记小时": round(agg["异常时"], 2),
-            "异常多记金额": round(agg["异常时"] * rate, 2),
+            # 整期口径：超弹性＝这个人整期净多记 > 弹性（白夜混合除外，维持交人工）。
+            "超弹性": _over, "整期净多记小时": round(max(0.0, _net), 2),
+            "异常多记日次": agg["异常日"],          # 仍在异常档的逐日天数（整期没超时已全部降级为 0）
+            "整期已消化多记日次": agg["已消化日"],   # 逐日冒尖、但整期没超被降级的天
+            "异常多记小时": round(_net, 2) if _over else 0.0,      # 超弹性时＝整期净多记（公司整期多付的量）
+            "异常多记金额": round(_net * rate, 2) if _over else 0.0,
             "一致日次": agg["一致日"], "待查日次": agg["硬伤日"], "白夜混合日次": agg["混合日"],
             "未计工时日次": agg["未计日"] + agg["薄卡日"],
             "打卡多于上报日次": agg["多出日"], "打卡多于上报小时": round(agg["多出时"], 2),
@@ -981,8 +1004,13 @@ def _stats(rows, people, summary, punch, p, unmatched, ambiguous, no_contract=No
         "少记小时": s("under", "差异"), "少记金额": s("under", "金额影响"),
         "弹性内多记日次": sum(1 for r in rows if r["档"] == "over_in"),
         "弹性内多记小时": s("over_in", "差异"), "弹性内多记金额": s("over_in", "金额影响"),
+        # 整期口径（与成本会计一致）：异常＝按人整期净多记超弹性。逐日日次仍给（供下钻定位），
+        # 但小时/金额按**人级整期净多记**算，不再逐日累加。
+        "超弹性人数": sum(1 for x in people if x.get("超弹性")),
         "异常多记日次": sum(1 for r in rows if r["档"] == "over_out"),
-        "异常多记小时": s("over_out", "差异"), "异常多记金额": s("over_out", "金额影响"),
+        "异常多记小时": round(sum(x["异常多记小时"] for x in people), 2),
+        "异常多记金额": round(sum(x["异常多记金额"] for x in people), 2),
+        "整期已消化多记日次": sum(1 for r in rows if r["档"] == "over_absorbed"),
         # 待查只留**真该查的**：报了工时、却一次卡都没有。「没记工时」的那些归下面「未计工时」
         "待查日次": sum(1 for r in rows if r["档"] == "hard"),
         "白夜混合日次": sum(1 for r in rows if r["档"] == "mixed"),
