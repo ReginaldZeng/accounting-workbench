@@ -425,7 +425,7 @@ class TestAggregateTolerance(unittest.TestCase):
         r = self._person([(11, "07:00\n18:00"), (10, "07:00\n19:00")])
         d1 = next(x for x in r["rows"] if x["日"] == 1)
         self.assertEqual(d1["档"], "over_absorbed")            # 逐日降级
-        self.assertIn("整期在弹性内", d1["判定"])
+        self.assertIn("整期已消化", d1["判定"])
         p = r["people"][0]
         self.assertFalse(p["超弹性"])                           # 逐人不报异常
         self.assertEqual(p["异常多记小时"], 0.0)

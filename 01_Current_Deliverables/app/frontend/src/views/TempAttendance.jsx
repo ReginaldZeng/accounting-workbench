@@ -36,9 +36,9 @@ const BAND = {
   ok: { label: '✓ 与口径一致', color: '#6b7280', bg: 'transparent' },
   under: { label: '△ 少记', color: '#92400e', bg: '#fffbe6' },
   over_in: { label: '○ 多记（弹性内）', color: '#1d4ed8', bg: '#eff6ff' },
-  over_out: { label: '⚠ 多记（异常）', color: '#b91c1c', bg: '#fef2f2' },
+  over_out: { label: '⚠ 撑不起上报（整期超弹性）', color: '#b91c1c', bg: '#fef2f2' },
   // 逐日冒尖、但这个人整期没超弹性 → 降级为中性（不红、不必查）。与成本会计「按人合起来判」一致。
-  over_absorbed: { label: '○ 多记（整期已消化）', color: '#6b7280', bg: 'transparent' },
+  over_absorbed: { label: '○ 撑不起上报（整期已消化）', color: '#6b7280', bg: 'transparent' },
   hard: { label: '⚠ 待查', color: '#b91c1c', bg: '#fef2f2' },
   thin: { label: '△ 待查', color: '#92400e', bg: '#fffbe6' },
   // 白夜混合：shift 口径下已按切班窗口逐日切开、正常判档，这一档正常是 0；

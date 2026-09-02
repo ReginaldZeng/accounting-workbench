@@ -864,7 +864,7 @@ def compute(summary, punch, params=None, contract=None):
                 judge, cls = J_UNBILLED, "unbilled"
             elif basis == "shift":
                 if diff < -tol - 1e-9:      # 在厂时长不够覆盖上报的班次
-                    judge, cls = f"{J_OVER_OUT} {-diff:.1f} 小时(打卡撑不起上报,异常)", "over_out"
+                    judge, cls = f"{J_OVER_OUT} {-diff:.1f} 小时(撑不起上报，整期超弹性)", "over_out"
                 else:
                     judge, cls = (f"{J_BACKED}（在厂 {cal:.1f}h ≥ 上报 {rep:.1f}h）"
                                   if diff > 1e-9 else J_BACKED), "ok"
@@ -927,7 +927,7 @@ def compute(summary, punch, params=None, contract=None):
             for _r in rows[_row_start:]:
                 if _r["档"] == "over_out":
                     _r["档"] = "over_absorbed"
-                    _r["判定"] = f"○ 多记 {-_r['差异']:.1f} 小时（整期在弹性内，不单独判）"
+                    _r["判定"] = f"○ 多记 {-_r['差异']:.1f} 小时(撑不起上报，整期已消化)"
                     agg["已消化日"] += 1
             agg["异常日"] = 0
             agg["异常时"] = 0.0
