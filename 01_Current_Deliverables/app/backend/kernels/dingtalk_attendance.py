@@ -44,7 +44,7 @@ import re
 import threading
 import time
 from calendar import monthrange
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
@@ -86,8 +86,9 @@ def _sess():
     return s
 
 
-def _api(path, body, tries=5):
-    """POST 一个 oapi 接口。限流自动退避重试；其它错误原样抛出，不吞。"""
+def _api(path, body, tries=5, result_key="result"):
+    """POST 一个 oapi 接口。限流自动退避重试；其它错误原样抛出，不吞。
+    result_key：取结果的顶层字段名——多数接口是 result，listRecord 的记录在 recordresult。"""
     conf = notifier.load_dingtalk_conf()
     if not conf:
         raise DingError("钉钉未配置：conf.ini 缺 [dingtalk] 段的 appkey/appsecret/agentid")
@@ -105,7 +106,7 @@ def _api(path, body, tries=5):
             continue
         code = r.get("errcode")
         if code == 0:
-            return r.get("result")
+            return r.get(result_key)
         last = f"errcode={code} {r.get('sub_msg') or r.get('errmsg')}"
         if code in _ERR_BUSY and "权限" not in str(r.get("sub_msg") or ""):
             time.sleep(0.3 * (i + 1))                   # 限流：退避重试
@@ -551,9 +552,72 @@ def resolve_dups(dup, month, worked_days=None, progress=None):
 BND_PREV, BND_NEXT = 0, 32
 
 
+def _beijing(ms):
+    """钉钉返回的 epoch 毫秒 → 北京时刻（绝对时间 +8，不看服务器时区，服务器设 UTC 也不会错）。"""
+    return datetime.utcfromtimestamp(ms / 1000) + timedelta(hours=8)
+
+
 def fetch_punches(uid_days, progress=None):
-    """[(userid, date)] → {userid: {日: [分钟…]}}。4 线程并发，限流自动退避。"""
+    """[(userid, date[, 键])] → {userid: {键: [分钟…]}}。
+    优先走**批量** listRecord（一批人一段日期一次取，比逐人逐日快约两个数量级）；
+    批量口不可用（无权限/报错）时自动**回退逐日** getupdatedata，功能不受影响。"""
     say = progress or (lambda *a, **k: None)
+    try:
+        return _fetch_punches_batch(uid_days, say)
+    except Exception as e:                              # 批量口有任何闪失都不影响出数
+        say(f"批量取数不可用（{e}），改用逐日口…", 40)
+        return _fetch_punches_perday(uid_days, say)
+
+
+def _fetch_punches_batch(uid_days, say):
+    """批量口 listRecord：每条记录自带 workDate（考勤日/班次归属），按它归格——
+    夜班次日凌晨的卡会归到上班那天，与逐日 getupdatedata 逐格一致（2026-08 六人全月实测 114/114）。
+    调用数：从「人×天」（整月全量 9000+ 次）降到「人批(≤50) × 日窗(≤7天)」（整月约几十次）。
+    输出契约与逐日口完全相同：{userid: {键: [分钟…]}}。"""
+    want = {}                                           # (uid, date) → 键（日号 或 BND_*）
+    for job in uid_days:
+        want[(str(job[0]), job[1])] = job[2] if len(job) > 2 else job[1].day
+    if not want:
+        return {}
+    uids = sorted({u for u, _ in want})
+    ds = sorted({d for _, d in want})
+    lo, hi = ds[0], ds[-1] + timedelta(days=1)          # +1 天：接住末日夜班落在次日的下班卡
+    wins, s = [], lo                                    # ≤7 天日窗（listRecord 跨度上限）
+    while s <= hi:
+        e = min(s + timedelta(days=6), hi)
+        wins.append((s, e)); s = e + timedelta(days=1)
+    ubs = [uids[i:i + 50] for i in range(0, len(uids), 50)]   # 人按 50 分批
+    calls = [(ub, a, b) for ub in ubs for (a, b) in wins]
+    out, lock, done = {}, threading.Lock(), [0]
+    total = max(1, len(calls))
+
+    def one(job):
+        ub, a, b = job
+        recs = _api("attendance/listRecord",
+                    {"userIds": ub,
+                     "checkDateFrom": a.strftime("%Y-%m-%d 00:00:00"),
+                     "checkDateTo": b.strftime("%Y-%m-%d 23:59:59")},
+                    result_key="recordresult") or []
+        with lock:
+            for r in recs:
+                u = str(r.get("userId"))
+                wd = _beijing(r["workDate"]).date()
+                key = want.get((u, wd))                 # 只留请求过的(人,考勤日)，多余记录自然丢弃
+                if key is None:
+                    continue
+                ct = _beijing(r["userCheckTime"])
+                mins = (ct.date() - wd).days * 1440 + ct.hour * 60 + ct.minute
+                out.setdefault(u, {}).setdefault(key, set()).add(mins)
+            done[0] += 1
+            say(f"取打卡 {done[0]}/{total} 批", 40 + int(50 * done[0] / total))
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        list(ex.map(one, calls))
+    return {u: {k: sorted(v) for k, v in days.items()} for u, days in out.items()}
+
+
+def _fetch_punches_perday(uid_days, say):
+    """逐日口 getupdatedata（批量口不可用时的兜底）。一人一天一调，4–6 线程并发、限流退避。"""
     out, lock = {}, threading.Lock()
     done = [0]
     total = max(1, len(uid_days))
