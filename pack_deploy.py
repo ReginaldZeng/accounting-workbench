@@ -114,9 +114,12 @@ def main():
     # dirty 只看「应用目录内已跟踪文件的改动」——别处的未跟踪草稿(-uno 排除)不影响部署包成色
     dirty = bool(_git("status", "--porcelain", "-uno", "--", "01_Current_Deliverables/app"))
     cands = []
-    m = re.search(r"[Vv]\d+\.\d+", _git("log", "-1", "--format=%s"))
-    if m:
-        cands.append(m.group(0))
+    # 扫最近 30 条提交标题的 V 号（不止 HEAD）——合并到 main 后 HEAD 常是无 V 号的 merge 提交，
+    # 只看 HEAD 会把版本戳漏回台账旧片段号（实翻车：服务器页脚卡 V2.422）
+    for line in _git("log", "-30", "--format=%s").split("\n"):
+        m = re.search(r"[Vv]\d+\.\d+", line)
+        if m:
+            cands.append(m.group(0))
     frag = os.path.join(ROOT, "00_Change_Log")
     if os.path.isdir(frag):
         for fn in os.listdir(frag):

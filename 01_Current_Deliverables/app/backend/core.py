@@ -375,10 +375,13 @@ def _compute_version_info():
         info["commit"] = _git("rev-parse", "--short", "HEAD")
         info["dirty"] = bool(_git("status", "--porcelain"))
         # 版本号 = max(台账片段最大号, 最近提交标题里的 V 号)——片段是正编制，提交标题是兜底
+        # 扫最近 30 条提交标题（不止 HEAD）：合并到 main 后 HEAD 常是无 V 号的 merge 提交，
+        # 只看 HEAD 会把版本号漏回台账旧片段号（实翻车：页脚卡 V2.422）
         cands = []
-        m = re.search(r"[Vv]\d+\.\d+", _git("log", "-1", "--format=%s"))
-        if m:
-            cands.append(m.group(0))
+        for line in _git("log", "-30", "--format=%s").split("\n"):
+            m = re.search(r"[Vv]\d+\.\d+", line)
+            if m:
+                cands.append(m.group(0))
         frag_dir = os.path.join(BASE, "..", "..", "..", "00_Change_Log")
         if os.path.isdir(frag_dir):
             for fn in os.listdir(frag_dir):
