@@ -446,6 +446,83 @@ ec_excl_notes = Table(              # 剔除留痕·定性登记（V2.274 需求
     Column("operator", String(50)),
     Column("ts", String(20)),
 )
+# ── BOM报价审核（V-draft）：钉钉「BOM表报价」审批附件 → 解析 → 复核 → 定稿 → BP 消费 ──
+# 版本粒度：一版一行（同产品多次入账=多行，归组键=product_key）。不走期间/封存机制（非月结，是台账累积）。
+# source 命名空间：跟平台数据源（sample/kingdee）走——样例种子写 sample，真取数写当前源，切源天然隔离。
+bom_quote_entry = Table(
+    "bom_quote_entry", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("source", String(30), index=True),        # 数据源命名空间（sample/kingdee…）
+    Column("product_key", String(200), index=True),  # 归组键=产品名|客户（客户空用CP码兜底）
+    Column("cp_code", String(60)), Column("erp_code", String(60)),
+    Column("product_name", String(160)), Column("customer", String(160)),
+    Column("pack_spec", String(120)), Column("supplier", String(160)),   # supplier=生产工厂
+    Column("calc_date", String(12)), Column("order_qty", Float),
+    Column("channel", String(20)),                   # 电商/通品/TOB/TOC（可空、可复核期改）
+    Column("semi", Integer),                         # 1=半成品(SZF…) 0=成品(CP…)
+    Column("mat_subtotal_excl", Float), Column("pack_subtotal_excl", Float),
+    Column("fee_mfg", Float), Column("fee_load", Float), Column("fee_adm", Float),   # 台账费用参数(含税)
+    Column("full_cost_incl", Float), Column("src_full", Float),
+    Column("src_fee", Text),                         # JSON 源表推的默认费用（蓝点基线）
+    Column("summary", Text), Column("materials", Text().with_variant(LONGTEXT(), "mysql")),
+    Column("checks", Text),  # JSON（materials 逐料明细可较大，MySQL 用 LONGTEXT）
+    Column("bom_list", Text),   # JSON：配套研发 BOM清单 的物料清单（用量/结构），供核算表 vs BOM清单 自洽校验
+    Column("craft", Text),      # JSON：BOM 文件里「工艺流程」页 {steps:[{step,detail}], head, imageCount}（复核②工艺流程）
+    Column("review_steps", Text),   # JSON：复核两步确认状态 {"qty":{by,at},"price":{by,at}}（改数据后清空、需重新确认）
+    Column("num_fp", String(80), index=True),        # 数字指纹：去重「排版差异版」用（quirk#9）
+    Column("source_type", String(20)),               # 渠道：dingtalk_form/dingtalk_comment/manual_upload
+    Column("origin", String(20)),                    # 来源方：research研发BOM / procurement采购商务版 / costacct成本会计商品版 / manual手工 / comment评论区
+    Column("src_label", String(80)),                 # 钉钉表单控件原标注（成本核算表（商务输出）/（商品版本）等），留痕溯源
+    Column("goods_version", Text().with_variant(LONGTEXT(), "mysql")),   # JSON：成本会计商品版留档 {materials,summary,srcFile,diff:[价/税调整],hasDiff}
+    # ── 审核定性（业务方 2026-09-03 定：编码规律不固定，改由成本会计在审核弹窗里指定）──
+    Column("mat_category", String(20)),              # 物料类别：复配料/自产半成品/自产成品/委外半成品/委外成品（人工指定，优先于 classify 建议值）
+    Column("quotable", Integer),                     # 是否建议/允许对外报价：1建议 0不建议 NULL未定性
+    Column("quote_reason", String(300)),             # 不建议报价的原因（quotable=0 时必填，如「包材不全」「XX物料暂定」）
+    Column("classified_by", String(50)), Column("classified_at", String(20)),   # 定性人/时间
+    Column("stale_note", String(120)),               # 上游被替换→本下游打回未复核时挂的提醒（如「上游已更新·请复核」），下次复核清空
+    Column("group_id", String(80), index=True),      # 组锚点＝hash(源+审批号+成品编码)：一个核算表文件（成品+半成品+复配料）=一组；替换后同成品落回同组
+    Column("active", Integer, server_default="1"),   # 1=当前版 0=已退出（被替换 或 被标记作废）——留痕、不进标准库/不参与定稿
+    Column("inactive_kind", String(10)),             # active=0 的原因类型：replaced 被替换 / voided 标记作废（业务方定：作废不删除、只标记）
+    # 作废走**申请 + 终审批准**两步（业务方定 2026-09-04：防成本会计一个人把不该舍弃的舍弃掉）。
+    # JSON：{state: pending/voided/rejected, reason, by, at, reviewBy, reviewAt, note}。申请期间记录**照常有效**，批准才真作废。
+    Column("void_req", Text),
+    # 定稿知悉（业务方定 2026-09-04）：成本会计每定稿一条，财务经理都要过一遍做**形式审核/知悉**——
+    # 因为经理要拿这个成本对外报价。JSON {by, at, note}；**重新定稿会清空**（新版必须重新知悉）。
+    Column("ack", Text),
+    Column("superseded_at", String(20)),             # 退出时间（active=0 时填）
+    Column("supersede_reason", String(200)),         # 退出原因/说明（谁替换换成第几号 / 谁因何作废）
+    Column("approval_no", String(40)), Column("src_file", String(200)), Column("sheet", String(80)),
+    Column("status", String(12)),                    # 未复核/已复核/已定稿
+    Column("created_by", String(50)), Column("created_at", String(20)),
+    Column("reviewed_by", String(50)), Column("reviewed_at", String(20)),
+    Column("finalized_by", String(50)), Column("finalized_at", String(20)),
+)
+bom_quote_pending = Table(                           # 「待修」批次：整组因勾稽不平/上游不平被拦、一条也没入账时，
+    "bom_quote_pending", _md,                        # 台账里没有它 → 待办会整单消失。用本表把它留在**待办**里（不进台账、不进标准库）。
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("source", String(30), index=True), Column("approval_no", String(40), index=True),
+    Column("group_id", String(80), index=True),
+    Column("src_file", String(200)), Column("stash_path", String(400)),   # 源核算表留档（供重解析出名册/下钻/替换）
+    Column("reasons", Text),                         # JSON：[{productName,cpCode,reason,blockedBy}]
+    Column("created_by", String(50)), Column("created_at", String(20)),
+    Column("void_req", Text),                        # 待修批次同样走「申请作废 + 终审批准」（作废不删除、只标记）
+    UniqueConstraint("source", "approval_no", "group_id", name="uq_bom_pending_grp"),
+)
+bom_quote_audit = Table(                             # 复核留痕（改税率/费用/渠道逐项）
+    "bom_quote_audit", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("entry_id", Integer, index=True),
+    Column("ts", String(20)), Column("user", String(50)),
+    Column("field", String(40)), Column("old_value", String(200)), Column("new_value", String(200)),
+)
+bom_quote_final = Table(                             # 定稿指针：每(源,产品)哪一版是生效版。
+    "bom_quote_final", _md,                          # **独立存**——避免整表 PUT 冲掉（吸取 BP perfTargetPtr 教训）。
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("source", String(30), index=True), Column("product_key", String(200), index=True),
+    Column("entry_id", Integer),
+    Column("finalized_by", String(50)), Column("finalized_at", String(20)),
+    UniqueConstraint("source", "product_key", name="uq_bom_final_src_pk"),
+)
 _md.create_all(_engine)
 
 # 细粒度权限能力清单 —— 代码持有的**静态**注册表：加一条动作权限只改这里，账号页按 ws/group 自动渲染。
@@ -497,6 +574,31 @@ CAP_META_STATIC = [
      "group": "存货台账", "sensitive": True, "tier": "act", "mod": "costledger"},
     {"key": "cost_ledger_wh", "label": "存货台账·维护基础资料", "ws": "accounting", "group": "存货台账",
      "tier": "act", "mod": "clwh"},
+    # ── BOM报价审核：钉钉「BOM表报价」审批附件→解析→复核→定稿→BP消费（确认书 v1.0，2026-09-03 定）──
+    # 三级菜单：待办与复核(bomdraft，未审核工作台) / 标准成本台账(bomstd，已审核公开)。准入点由菜单树自动生成
+    #   enter:bomdraft（敏感·只给成本会计/Owner=「看未审核」的闸）、enter:bomstd（广·能进即能查已定稿列表）。
+    # 动作点全标【敏感】＝默认不给、须显式授予、不进岗位模板自动补发（沿 cost_ledger_fetch / logistics_post 惯例），
+    #   查阅/导出不敏感。复核+定稿合一 bom:audit（业务方定）。dingtalk:fetch 照 kingdee:fetch 惯例命名、归 accounting。
+    {"key": "bom:view_sheet", "label": "BOM报价·核算表查阅（下钻逐料明细）", "ws": "accounting", "group": "BOM报价审核",
+     "tier": "act", "mod": "bomstd"},
+    {"key": "bom:export", "label": "BOM报价·导出（原版附件/重排版）", "ws": "accounting", "group": "BOM报价审核",
+     "tier": "act", "mod": "bomstd"},
+    {"key": "dingtalk:fetch", "label": "BOM报价·抓取钉钉附件/手工上传/入账", "ws": "accounting", "group": "BOM报价审核",
+     "sensitive": True, "tier": "act", "mod": "bomdraft"},
+    {"key": "bom:audit", "label": "BOM报价·审核（改税率费用渠道·留痕+定稿发布）", "ws": "accounting", "group": "BOM报价审核",
+     "sensitive": True, "tier": "act", "mod": "bomdraft"},
+    {"key": "bom:price_check", "label": "BOM报价·查金蝶实采价（价格校验）", "ws": "accounting", "group": "BOM报价审核",
+     "sensitive": True, "tier": "act", "mod": "bomdraft"},
+    {"key": "bom:attach_bom", "label": "BOM报价·补挂BOM清单", "ws": "accounting", "group": "BOM报价审核",
+     "sensitive": True, "tier": "act", "mod": "bomdraft"},
+    {"key": "bom:config", "label": "BOM报价·基础设置（公开版脱敏规则等）", "ws": "accounting", "group": "BOM报价审核",
+     "sensitive": True, "tier": "act", "mod": "bomconfig"},
+    # 财务BP终审（业务方定 2026-09-04）＝财务BP这一层，两件事：
+    #   ①**终审**：成本会计每初审一条，财务BP终审盖「已审核」戳——**只有终审通过的才对外开放**（供BP报价消费）；
+    #   ②**作废批准**：成本会计只能「申请」作废，财务BP批准才真作废（防一人闭环把不该舍弃的舍弃掉）。
+    # 申请人不得自批（代码强制），故此权限不宜与 bom:audit 授予同一人。
+    {"key": "bom:final_review", "label": "BOM报价·终审（终审通过对外开放 + 作废批准）", "ws": "accounting",
+     "group": "BOM报价审核", "sensitive": True, "tier": "act", "mod": "bomstd"},
     {"key": "cost_ledger_close", "label": "存货台账·封存本期", "ws": "accounting", "group": "存货台账", "sensitive": True,
      "tier": "act", "mod": "costledger"},
     # 报表导出（V2.241）。导出本身只读金蝶、不写金蝶，故非敏感；
@@ -3002,3 +3104,240 @@ def audit_exists(action, target):
     with _engine.connect() as c:
         return bool(c.execute(select(audit_log.c.id).where(
             (audit_log.c.action == action) & (audit_log.c.target == target)).limit(1)).first())
+
+
+# ==================== BOM报价审核（V-draft）CRUD ====================
+# 表在文件上方（bom_quote_entry/audit/final）。JSON 字段(summary/materials/checks/src_fee)在此层统一序列化，
+# 路由拿到的永远是 dict/list，不必各自 json.loads。定稿指针独立表，不随 entry 更新被冲掉。
+_BOM_JSON_COLS = ("summary", "materials", "checks", "src_fee", "bom_list", "craft", "review_steps", "goods_version", "void_req", "ack")
+
+
+def _ensure_bom_columns():
+    """给既有 bom_quote_entry 补新列（create_all 不改既有表；仅开发库需要，服务器建新表自带）。"""
+    try:
+        from sqlalchemy import inspect as _inspect, text as _text
+        cols = {c["name"] for c in _inspect(_engine).get_columns("bom_quote_entry")}
+        for col in ("bom_list", "review_steps", "origin", "src_label", "goods_version",
+                    "group_id", "superseded_at", "supersede_reason",
+                    "mat_category", "quote_reason", "classified_by", "classified_at", "craft",
+                    "inactive_kind", "void_req", "ack", "stale_note"):
+            if col not in cols:
+                with _engine.begin() as c:
+                    c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s TEXT" % col))
+        for col, ddl in (("active", "INTEGER DEFAULT 1"), ("quotable", "INTEGER")):
+            if col not in cols:
+                with _engine.begin() as c:
+                    c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s %s" % (col, ddl)))
+    except Exception:
+        pass
+
+
+_ensure_bom_columns()
+
+
+def _bom_row(r):
+    d = dict(r._mapping)
+    for k in _BOM_JSON_COLS:
+        v = d.get(k)
+        if isinstance(v, str) and v:
+            try:
+                d[k] = json.loads(v)
+            except Exception:
+                pass
+    return d
+
+
+def bom_insert_entry(e):
+    """插一版台账记录。e 里的 JSON 字段传 dict/list，本函数负责 dumps。返回新 id。"""
+    row = dict(e)
+    for k in _BOM_JSON_COLS:
+        if k in row and not isinstance(row[k], str):
+            row[k] = json.dumps(row[k], ensure_ascii=False, default=str)
+    row.setdefault("created_at", _now())
+    row.setdefault("status", "未复核")
+    with _engine.begin() as c:
+        return int(c.execute(insert(bom_quote_entry).values(**row)).inserted_primary_key[0])
+
+
+def bom_get_entry(entry_id):
+    with _engine.connect() as c:
+        r = c.execute(select(bom_quote_entry).where(bom_quote_entry.c.id == int(entry_id))).first()
+    return _bom_row(r) if r else None
+
+
+def bom_list_entries(source, product_key=None, include_superseded=False):
+    """某数据源下的台账记录（可按 product_key 过滤），按 核算日期↓、created_at↓ 排。
+    默认只出当前版（active!=0）；include_superseded=True 才带被替换的旧版（审核历史用）。"""
+    with _engine.connect() as c:
+        q = select(bom_quote_entry).where(bom_quote_entry.c.source == source)
+        if product_key is not None:
+            q = q.where(bom_quote_entry.c.product_key == product_key)
+        if not include_superseded:
+            q = q.where((bom_quote_entry.c.active == 1) | (bom_quote_entry.c.active.is_(None)))
+        rows = c.execute(q.order_by(bom_quote_entry.c.calc_date.desc(), bom_quote_entry.c.id.desc())).fetchall()
+    return [_bom_row(r) for r in rows]
+
+
+def bom_group_entries(source, group_id, include_superseded=True):
+    """一个组（group_id）下的记录。审核历史默认带被替换旧版。"""
+    with _engine.connect() as c:
+        q = select(bom_quote_entry).where(
+            (bom_quote_entry.c.source == source) & (bom_quote_entry.c.group_id == group_id))
+        if not include_superseded:
+            q = q.where((bom_quote_entry.c.active == 1) | (bom_quote_entry.c.active.is_(None)))
+        rows = c.execute(q.order_by(bom_quote_entry.c.id.asc())).fetchall()
+    return [_bom_row(r) for r in rows]
+
+
+def bom_find_dup(source, num_fp):
+    """数字指纹相同的**当前版**既存记录（quirk#9：只吞数字完全一致的排版差异版）。返回 dict 或 None。
+    只认 active（被替换的旧版不算重复，好让替换回旧内容也能重新入）。"""
+    if not num_fp:
+        return None
+    with _engine.connect() as c:
+        r = c.execute(select(bom_quote_entry).where(
+            (bom_quote_entry.c.source == source) & (bom_quote_entry.c.num_fp == num_fp)
+            & ((bom_quote_entry.c.active == 1) | (bom_quote_entry.c.active.is_(None)))).limit(1)).first()
+    return _bom_row(r) if r else None
+
+
+def bom_update_entry(entry_id, fields):
+    row = dict(fields)
+    for k in _BOM_JSON_COLS:
+        if k in row and not isinstance(row[k], str):
+            row[k] = json.dumps(row[k], ensure_ascii=False, default=str)
+    with _engine.begin() as c:
+        c.execute(update(bom_quote_entry).where(bom_quote_entry.c.id == int(entry_id)).values(**row))
+
+
+def bom_pending_upsert(source, approval_no, group_id, src_file, stash_path, reasons, operator=""):
+    """记一个「待修」组（整组被拦、没入账）。同组重复记则覆盖。"""
+    v = json.dumps(reasons, ensure_ascii=False, default=str)
+    w = ((bom_quote_pending.c.source == source) & (bom_quote_pending.c.approval_no == approval_no)
+         & (bom_quote_pending.c.group_id == group_id))
+    with _engine.begin() as c:
+        if c.execute(select(bom_quote_pending.c.id).where(w)).first():
+            c.execute(update(bom_quote_pending).where(w).values(
+                src_file=src_file, stash_path=stash_path, reasons=v, created_by=operator, created_at=_now()))
+        else:
+            c.execute(insert(bom_quote_pending).values(
+                source=source, approval_no=approval_no, group_id=group_id, src_file=src_file,
+                stash_path=stash_path, reasons=v, created_by=operator, created_at=_now()))
+
+
+def bom_pending_list(source, approval_no=None):
+    with _engine.connect() as c:
+        q = select(bom_quote_pending).where(bom_quote_pending.c.source == source)
+        if approval_no is not None:
+            q = q.where(bom_quote_pending.c.approval_no == approval_no)
+        rows = c.execute(q.order_by(bom_quote_pending.c.id.desc())).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r._mapping)
+        for k, dflt in (("reasons", []), ("void_req", None)):
+            try:
+                d[k] = json.loads(d.get(k) or "null") if k == "void_req" else json.loads(d.get(k) or "[]")
+            except Exception:
+                d[k] = dflt
+        out.append(d)
+    return out
+
+
+def bom_pending_set_void(source, approval_no, group_id, void_req):
+    """给待修批次写作废申请/终审结果（JSON）。"""
+    with _engine.begin() as c:
+        c.execute(update(bom_quote_pending).where(
+            (bom_quote_pending.c.source == source) & (bom_quote_pending.c.approval_no == approval_no)
+            & (bom_quote_pending.c.group_id == group_id)
+        ).values(void_req=json.dumps(void_req, ensure_ascii=False, default=str)))
+
+
+def bom_pending_clear(source, approval_no, group_id):
+    """该组已有产品入账（修好了）→ 撤下待修标记。"""
+    with _engine.begin() as c:
+        c.execute(delete(bom_quote_pending).where(
+            (bom_quote_pending.c.source == source) & (bom_quote_pending.c.approval_no == approval_no)
+            & (bom_quote_pending.c.group_id == group_id)))
+
+
+def bom_supersede_entry(entry_id, reason, kind="replaced"):
+    """把某记录退出当前版（active=0，留痕、退出标准库/定稿）。kind: replaced 被替换 / voided 标记作废。
+    同时清定稿指针（若它是定稿版）——不能让已退出的版本继续供 BP 消费。"""
+    e = bom_get_entry(entry_id)
+    if not e:
+        return
+    with _engine.begin() as c:
+        c.execute(update(bom_quote_entry).where(bom_quote_entry.c.id == int(entry_id))
+                  .values(active=0, inactive_kind=kind, superseded_at=_now(),
+                          supersede_reason=(reason or "")[:200]))
+    # 若被替换的正是某产品的定稿指针 → 清掉（不能让已作废版继续供 BP 消费）
+    fin = bom_get_final(e.get("source"), e.get("product_key"))
+    if fin and fin.get("entry_id") == int(entry_id):
+        bom_clear_final(e.get("source"), e.get("product_key"))
+
+
+def bom_delete_entry(entry_id):
+    with _engine.begin() as c:
+        c.execute(delete(bom_quote_audit).where(bom_quote_audit.c.entry_id == int(entry_id)))
+        c.execute(delete(bom_quote_final).where(bom_quote_final.c.entry_id == int(entry_id)))
+        c.execute(delete(bom_quote_entry).where(bom_quote_entry.c.id == int(entry_id)))
+
+
+def bom_add_audit(entry_id, user, field, old_value, new_value):
+    with _engine.begin() as c:
+        c.execute(insert(bom_quote_audit).values(
+            entry_id=int(entry_id), ts=_now(), user=user or "",
+            field=field, old_value="" if old_value is None else str(old_value),
+            new_value="" if new_value is None else str(new_value)))
+
+
+def bom_audits(entry_id, limit=50):
+    with _engine.connect() as c:
+        rows = c.execute(select(bom_quote_audit).where(bom_quote_audit.c.entry_id == int(entry_id))
+                         .order_by(bom_quote_audit.c.id.desc()).limit(limit)).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+def bom_set_final(source, product_key, entry_id, user):
+    """把某产品的定稿指针指向 entry_id（独立表，覆盖旧指针）。"""
+    with _engine.begin() as c:
+        w = (bom_quote_final.c.source == source) & (bom_quote_final.c.product_key == product_key)
+        if c.execute(select(bom_quote_final.c.id).where(w)).first():
+            c.execute(update(bom_quote_final).where(w).values(
+                entry_id=int(entry_id), finalized_by=user or "", finalized_at=_now()))
+        else:
+            c.execute(insert(bom_quote_final).values(
+                source=source, product_key=product_key, entry_id=int(entry_id),
+                finalized_by=user or "", finalized_at=_now()))
+
+
+def bom_get_final(source, product_key):
+    with _engine.connect() as c:
+        r = c.execute(select(bom_quote_final).where(
+            (bom_quote_final.c.source == source) & (bom_quote_final.c.product_key == product_key)).limit(1)).first()
+    return dict(r._mapping) if r else None
+
+
+def bom_finals(source):
+    """某源下全部定稿指针 → {product_key: entry_id}。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(bom_quote_final).where(bom_quote_final.c.source == source)).fetchall()
+    return {r._mapping["product_key"]: r._mapping["entry_id"] for r in rows}
+
+
+def bom_clear_final(source, product_key):
+    with _engine.begin() as c:
+        c.execute(delete(bom_quote_final).where(
+            (bom_quote_final.c.source == source) & (bom_quote_final.c.product_key == product_key)))
+
+
+def bom_clear_final_if(source, product_key, entry_id):
+    """只有当定稿指针**确实指向 entry_id** 时才清（审查 M9：防竞态清掉『另一版』的指针）。
+    退回/撤销定稿/审核态失效都该用它——同产品可并存多个活动版本，按 product_key 盲清会误伤当前定稿版。返回是否清了。"""
+    with _engine.begin() as c:
+        w = ((bom_quote_final.c.source == source) & (bom_quote_final.c.product_key == product_key)
+             & (bom_quote_final.c.entry_id == int(entry_id)))
+        if c.execute(select(bom_quote_final.c.id).where(w)).first():
+            c.execute(delete(bom_quote_final).where(w))
+            return True
+    return False

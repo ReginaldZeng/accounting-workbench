@@ -280,3 +280,40 @@ export const tempattContractImport = (fd) => fetch('/api/tempatt/contract/import
 export const tempattContractImportApply = (fd) => fetch('/api/tempatt/contract/import/apply', { method:'POST', body: fd }).then(r => r.json())
 export const yuan = n => '¥'+Number(n||0).toLocaleString('en-US',{maximumFractionDigits:2})
 export const yuan4 = n => Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:4})
+// ── BOM报价审核（V-draft）：钉钉审批附件→解析→复核→定稿→BP消费 ──
+export const getBomConfig = () => j('/api/bom/config')
+export const getBomLedger = (mode = 'std') => j('/api/bom/ledger?mode=' + mode)
+export const getBomEntry = (id) => j(`/api/bom/entry/${id}`)
+export const bomFetchApproval = (approvalNo) => jp('/api/bom/fetch-approval', { approvalNo })
+export const bomUpload = (files, approvalNo) => { const fd = new FormData(); (Array.isArray(files) ? files : [files]).forEach(f => f && fd.append('file', f)); if (approvalNo) fd.append('approvalNo', approvalNo); return fetch('/api/bom/upload', { method: 'POST', body: fd }).then(r => r.json()) }
+export const bomBook = (stagingId, indexes) => jp('/api/bom/book', { stagingId, indexes })
+export const bomReview = (entryId, fee, channel, materials) => jp('/api/bom/review', { entryId, fee, channel, materials })
+export const bomConfirmStep = (entryId, step, on = true) => jp('/api/bom/confirm-step', { entryId, step, on })
+export const bomApplyGoods = (entryId) => jp('/api/bom/apply-goods', { entryId })
+export const bomClassify = (entryId, category, quotable, reason) =>
+  jp('/api/bom/classify', { entryId, category, quotable, reason })
+export const getBomApproval = (no) => j('/api/bom/approval?no=' + encodeURIComponent(no))
+export const bomIntake = (approvalNo) => jp('/api/bom/intake', { approvalNo })
+export const bomFinalReview = (entryId, approve, note) => jp('/api/bom/final-review', { entryId, approve, note })
+export const bomVoidRequest = (payload) => jp('/api/bom/void-request', payload)
+export const bomVoidReview = (payload) => jp('/api/bom/void-review', payload)
+export const getBomPending = (groupId, productKey) =>
+  j(`/api/bom/pending?groupId=${encodeURIComponent(groupId)}&productKey=${encodeURIComponent(productKey)}`)
+export const bomRefetchReplace = (groupId, approvalNo) => jp('/api/bom/refetch-replace', { groupId, approvalNo })
+export const bomReplaceSheet = (groupId, approvalNo, file) => {
+  const fd = new FormData(); fd.append('groupId', groupId); fd.append('approvalNo', approvalNo || ''); fd.append('file', file)
+  return fetch('/api/bom/replace-sheet', { method: 'POST', body: fd }).then(r => r.json())
+}
+export const getBomSettings = () => j('/api/bom/settings')
+export const setBomSettings = (cfg) => jp('/api/bom/settings', cfg)
+export const bomFinalize = (entryId) => jp('/api/bom/finalize', { entryId })
+export const bomUnfinalize = (entryId) => jp('/api/bom/unfinalize', { entryId })
+export const bomAttachBomList = (entryId, file) => { const fd = new FormData(); fd.append('entryId', entryId); fd.append('file', file); return fetch('/api/bom/attach-bomlist', { method: 'POST', body: fd }).then(r => r.json()) }
+export const getBomKdPurchase = (code, months = 12) => j(`/api/bom/kd-purchase?code=${encodeURIComponent(code)}&months=${months}`)
+export const getBomMaterialUsage = (code, exclude) => j(`/api/bom/material-usage?code=${encodeURIComponent(code)}${exclude ? `&exclude=${exclude}` : ''}`)
+export const bomSetMatType = (entryId, mat, subType) => jp('/api/bom/set-mat-type', { entryId, subType, matCode: mat.matCode, matName: mat.matName, seg: mat.seg })
+export const getBomUsageSpreads = (entryId) => j(`/api/bom/usage-spreads?entryId=${entryId}`)
+export const getBomInvoiceRules = () => j('/api/bom/invoice-rules')
+export const setBomInvoiceRules = (rules) => jp('/api/bom/invoice-rules', { rules })
+export const bomExportPrettyUrl = (id) => `/api/bom/export/pretty?entry_id=${id}`
+export const bomExportOriginalUrl = (id) => `/api/bom/export/original?entry_id=${id}`

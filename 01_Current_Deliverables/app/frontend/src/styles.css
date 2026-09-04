@@ -666,3 +666,199 @@ html[data-theme=dark] .ta-board{
 .tempatt .ta-ctr .addrow .ops{display:flex; gap:10px; align-items:center; margin-top:12px; font-size:12.5px;}
 .tempatt .ta-ctr .addrow .ops .ok{color:var(--ok, #15803d);}
 .tempatt .ta-ctr .addrow .ops .warn{color:#b91c1c;}
+
+/* ============ BOM报价审核（V-draft）—— 皮肤用本项目令牌，布局/交互照样机 ============ */
+.bomv{position:relative;}
+.bom-toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:var(--ink); color:#fff;
+  padding:10px 18px; border-radius:10px; font-size:13px; z-index:200; box-shadow:0 6px 22px rgba(0,0,0,.25);}
+/* 统计条 */
+.bom-stats{display:flex; gap:0; padding:0; overflow-x:auto;}
+.bom-stat{flex:1; min-width:150px; padding:14px 18px;} .bom-stat + .bom-stat{border-left:1px solid var(--line);}
+.bom-stat-l{font-size:11px; color:var(--ink-3); letter-spacing:.03em;}
+.bom-stat-v{font-size:24px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:3px; line-height:1.2;}
+.bom-stat small{font-size:11px; color:var(--ink-3);}
+/* 过滤条 */
+.bom-filterbar{display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:12px 14px;}
+.bom-search{height:32px; border:1px solid var(--line-strong); border-radius:8px; padding:0 12px; font-size:12.5px;
+  background:var(--bg); color:var(--ink); min-width:220px;}
+.bom-search:focus{outline:none; border-color:var(--accent);}
+/* 分段器 */
+.bom-seg{display:inline-flex; background:var(--bg-rail); border:1px solid var(--line); border-radius:9px; padding:2px;}
+.bom-seg button{border:none; background:transparent; color:var(--ink-2); font-size:12px; padding:5px 12px; border-radius:7px;
+  cursor:pointer; font-weight:500; white-space:nowrap;}
+.bom-seg button.on{background:var(--bg); color:var(--ink); font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.08);}
+/* 台账表 */
+.bom-ledger td{white-space:nowrap;}
+.bom-dot{display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--blue); margin-left:5px; vertical-align:middle;}
+/* 涨跌：红▲=涨 绿▼=跌（中国财务惯例） */
+.bom-tri{font-size:10px; margin-left:4px;} .bom-tri.up,.up{color:var(--red);} .bom-tri.down,.down{color:var(--green);}
+.bom-cbadge{font-size:10px; margin-left:6px; padding:1px 5px; border-radius:5px; font-weight:600;}
+.bom-cbadge.up{color:var(--red); background:var(--red-bg);} .bom-cbadge.down{color:var(--green); background:var(--green-bg);}
+.bom-cbadge.new{color:var(--teal); background:var(--teal-bg);}
+.bom-up{color:var(--red); background:var(--red-bg); font-weight:600;}
+.bom-down{color:var(--green); background:var(--green-bg); font-weight:600;}
+.bom-old{color:var(--ink-3); background:var(--bg-rail);}
+.bom-noteic{cursor:help; color:var(--ink-3); font-style:normal;}
+/* 详情两栏 */
+.bom-crumbs{font-size:12px; color:var(--ink-3);}
+.bom-detwrap{display:flex; gap:16px; align-items:flex-start;}
+.bom-detmain{flex:1; min-width:0; display:flex; flex-direction:column; gap:16px;}
+.bom-rail{flex:0 0 300px; position:sticky; top:14px;}
+@media(max-width:1280px){.bom-detwrap{flex-direction:column;} .bom-rail{position:static; width:100%; flex-basis:auto;}}
+.bom-fgrid{display:grid; grid-template-columns:repeat(4,1fr); gap:0; padding:0;}
+@media(max-width:1280px){.bom-fgrid{grid-template-columns:repeat(2,1fr);}}
+.bom-fcell{padding:11px 14px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); min-width:0;}
+.bom-flab{font-size:11px; color:var(--ink-3);}
+.bom-fval{font-size:13px; font-weight:600; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+/* 分段 */
+.bom-sect{padding:0; overflow:hidden;}
+.bom-secthead{display:flex; align-items:center; gap:9px; padding:11px 14px; border-bottom:1px solid var(--line);}
+.bom-no{width:20px; height:20px; border-radius:6px; background:var(--accent); color:#fff; font-size:12px; font-weight:700;
+  display:inline-flex; align-items:center; justify-content:center;}
+.bom-subrow td{background:var(--accent-soft); font-weight:600;}
+/* 右栏单卡 */
+.bom-railcard{padding:15px;}
+.bom-rh{display:flex; justify-content:space-between; font-size:12px; color:var(--ink-2);}
+.bom-rh span{font-family:var(--font-mono); font-size:11px; color:var(--ink-3);}
+.bom-bigprice{font-size:30px; font-weight:700; color:var(--teal); font-variant-numeric:tabular-nums; margin:5px 0;}
+.bom-bigprice small{font-size:14px; color:var(--ink-3); font-weight:500;}
+.bom-rspec{font-size:11.5px; color:var(--ink-3);}
+.bom-rlines{margin-top:12px; display:flex; flex-direction:column; gap:2px;}
+.bom-rline{display:flex; justify-content:space-between; align-items:center; padding:5px 0; font-size:12.5px;}
+.bom-rline > span{color:var(--ink-2);} .bom-rline > b{font-family:var(--font-mono); font-variant-numeric:tabular-nums; text-align:right;}
+.bom-rline.total{border-top:1px solid var(--line); margin-top:4px; padding-top:9px;}
+.bom-rline.total b{font-size:15px; color:var(--teal);}
+.bom-srcv{display:block; font-size:10px; color:var(--ink-3); font-style:normal; font-weight:400;}
+.bom-feeinp{width:96px; height:28px; text-align:right; border:1px solid var(--accent); border-radius:6px; padding:0 8px;
+  font-family:var(--font-mono); background:var(--bg); color:var(--ink);}
+.bom-rdiv{height:1px; background:var(--line); margin:12px 0;}
+.bom-ah{font-size:10.5px; letter-spacing:.08em; color:var(--ink-3); font-weight:700; text-transform:uppercase; margin-bottom:8px;}
+.bom-audit{font-size:11.5px; margin-bottom:7px;} .bom-audit-h{color:var(--ink-3); font-size:10.5px;}
+.bom-refline{font-size:11.5px; color:var(--green); background:var(--green-bg); border:1px solid var(--green-line);
+  border-radius:8px; padding:7px 10px; margin-bottom:8px;}
+.bom-refbtns{display:flex; gap:8px;} .bom-refbtns .btn-sec{flex:1; font-size:11.5px; height:30px; padding:0 8px;}
+/* 导出下拉 */
+.bom-menu{position:absolute; top:38px; right:120px; z-index:60; background:var(--bg); border:1px solid var(--line-strong);
+  border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,.14); overflow:hidden; min-width:240px;}
+.bom-menu a{display:block; padding:10px 13px; text-decoration:none; border-bottom:1px solid var(--line); cursor:pointer;}
+.bom-menu a:last-child{border-bottom:none;} .bom-menu a:hover{background:var(--bg-sub);}
+.bom-menu a b{display:block; color:var(--ink); font-size:12.5px;} .bom-menu a span{display:block; color:var(--ink-3); font-size:11px; margin-top:2px;}
+/* 手工入账弹窗 */
+.bom-mask{position:fixed; inset:0; background:rgba(20,24,30,.42); z-index:150; display:flex; align-items:flex-start; justify-content:center; padding:52px 16px; overflow-y:auto;}
+.bom-modal{background:var(--bg); border:1px solid var(--line); border-radius:14px; width:min(640px,100%); padding:20px 22px; box-shadow:0 18px 50px rgba(0,0,0,.28);}
+.bom-mhead{display:flex; justify-content:space-between; align-items:center;}
+.bom-mhead b{font-size:16px;} .bom-x{cursor:pointer; color:var(--ink-3); font-size:16px;}
+.bom-msub{font-size:12px; color:var(--ink-2); margin:4px 0 14px;}
+.bom-mstep{display:flex; gap:12px; padding:12px 0;}
+.bom-mno{flex:0 0 auto; width:22px; height:22px; border-radius:50%; background:var(--accent); color:#fff; font-size:12px; font-weight:700; display:inline-flex; align-items:center; justify-content:center;}
+.bom-mstep > div{flex:1; min-width:0;} .bom-mstep b{font-size:13px;}
+.bom-mor{text-align:center; font-size:11px; color:var(--ink-3); border-top:1px dashed var(--line-strong); margin:6px 0; position:relative;}
+.bom-mor{padding-top:8px;}
+.bom-drop{display:block; border:1.5px dashed var(--line-strong); border-radius:10px; padding:18px; text-align:center; color:var(--ink-2); font-size:12.5px; cursor:pointer; background:var(--bg-rail);}
+.bom-drop:hover{border-color:var(--accent); color:var(--accent);}
+.bom-mfoot{display:flex; justify-content:flex-end; gap:8px; margin-top:16px; border-top:1px solid var(--line); padding-top:14px;}
+
+/* BOM报价审核·增量：复核两步曲条 / 明细税率内联编辑 / 弹窗不换行+分页 */
+.bomv .bom-steps2{display:flex; align-items:center; gap:10px; font-size:12.5px; padding:2px;}
+.bomv .bom-steps2 button{padding:7px 15px; border-radius:9px; background:var(--bg-rail); color:var(--ink-3); font-weight:600;
+  border:1px solid var(--line); cursor:pointer; font-size:12.5px; position:relative;}
+.bomv .bom-steps2 button:hover{color:var(--ink); border-color:var(--line-strong);}
+.bomv .bom-steps2 button.on{background:var(--accent-soft); color:var(--accent); border-color:var(--accent);}
+.bomv .bom-steps2 .arw{color:var(--ink-3); font-weight:400;}
+.bomv .bom-warndot{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--amber); margin-left:5px; vertical-align:middle;}
+.bomv .bom-taxedit{display:inline-flex; align-items:center; gap:2px; justify-content:flex-end; color:var(--ink-3);}
+.bomv .bom-taxedit input{width:52px; height:26px; text-align:right; border:1px solid var(--accent); border-radius:6px; padding:0 6px;
+  font-family:var(--font-mono); background:var(--bg); color:var(--ink);}
+.bomv .bom-nowrap td, .bomv .bom-nowrap th{white-space:nowrap;}
+.bomv .bom-pager{display:flex; align-items:center; justify-content:center; gap:14px; padding:10px 0 2px; font-size:12px;}
+.bomv .bom-pager .btn-sec{height:28px; padding:0 12px;}
+
+/* BOM报价审核·复核步骤确认 + 已审核盖章 */
+.bomv .bom-stepok{color:var(--green); font-weight:800; margin-left:5px;}
+.bomv .bom-stepconfirm{display:flex; align-items:center; gap:10px; padding:11px 14px; margin-top:2px;
+  border:1px solid var(--line); border-radius:var(--radius); background:var(--bg-sub);}
+.bomv .bom-railcard{position:relative;}
+.bomv .bom-stamp{position:absolute; top:14px; right:14px; transform:rotate(-12deg); z-index:2; pointer-events:none;
+  border:2.5px solid var(--red); color:var(--red); border-radius:8px; padding:4px 11px; text-align:center;
+  font-weight:800; font-size:15px; letter-spacing:3px; opacity:.72; line-height:1.15; background:rgba(192,57,43,.06);}
+.bomv .bom-stamp span{display:block; font-size:9px; font-weight:600; letter-spacing:0; opacity:.9; margin-top:1px;}
+/* 来源方徽标（谁出的数据）：研发/采购/成本会计/手工 分色 */
+.bomv .bom-org{display:inline-block; font-size:11px; font-weight:600; padding:1px 7px; border-radius:6px; border:1px solid transparent; white-space:nowrap;}
+.bomv .bom-org.sm{font-size:10px; padding:0 6px;}
+.bomv .bom-org-research{color:var(--teal); background:var(--teal-bg); border-color:var(--teal);}
+.bomv .bom-org-proc{color:var(--accent); background:var(--accent-soft); border-color:var(--accent);}
+.bomv .bom-org-cost{color:var(--purple); background:var(--purple-bg); border-color:var(--purple-line);}
+.bomv .bom-org-manual{color:var(--ink-3); background:var(--bg-sub); border-color:var(--line);}
+.bomv .bom-srcline{font-size:10.5px; color:var(--ink-3); margin-top:2px;}
+.bomv .bom-gvtag{display:inline-block; font-size:10px; font-weight:600; color:var(--purple); background:var(--purple-bg);
+  border:1px solid var(--purple-line); border-radius:5px; padding:0 5px; margin-left:5px; white-space:nowrap;}
+.bomv .bom-goods{border-left:3px solid var(--purple);}
+.bomv .bom-cfgrow{display:flex; align-items:center; gap:11px; padding:11px 4px; border-bottom:1px solid var(--line);}
+.bomv .bom-cfgrow:last-child{border-bottom:none;}
+.bomv .bom-cfgrow input[type=checkbox]{width:16px; height:16px; flex:none;}
+.bom-chkfail{font-size:11.5px; line-height:1.7; color:var(--amber); background:var(--amber-bg);
+  border:1px solid var(--amber-line); border-radius:8px; padding:7px 11px; margin:2px 0 6px;}
+.bom-chkfail b{color:var(--amber);}
+/* 待办按钉钉单号归堆 */
+.bomv .bom-apprhead{background:var(--bg-sub); font-weight:600;}
+.bomv .bom-apprhead td{padding:8px 10px; border-top:1px solid var(--line);}
+.bomv .bom-apprno{font-family:var(--mono,monospace); color:var(--accent); font-size:12px; font-weight:600;}
+/* 处理页：组卡 + 组内动作条 + 小文件按钮 */
+.bomv .bom-grp{border-left:3px solid var(--accent); margin-bottom:14px;}
+.bomv .bom-grpact{display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+  padding:10px 14px; border-top:1px solid var(--line); background:var(--bg-sub);}
+.bomv .bom-minifile{display:inline-block; cursor:pointer; font-size:11.5px; font-weight:600; padding:4px 10px;
+  border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--ink-2); white-space:nowrap;}
+.bomv .bom-minifile:hover{border-color:var(--accent); color:var(--accent);}
+.bomv .bom-minifile.pri{background:var(--accent); border-color:var(--accent); color:#fff;}
+.bomv .bom-minifile.pri:hover{opacity:.9; color:#fff;}
+/* 审核定性：物料类别 / 报价建议 / 疑似分类不符 */
+.bomv .bom-cat{display:inline-block; font-size:11px; font-weight:600; padding:1px 7px; border-radius:6px;
+  color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent); white-space:nowrap;}
+.bomv .bom-cat.out{color:var(--purple); background:var(--purple-bg); border-color:var(--purple-line);}
+.bomv .bom-catsug{display:inline-block; font-size:10.5px; padding:1px 6px; border-radius:6px;
+  color:var(--ink-3); background:var(--bg-sub); border:1px dashed var(--line); white-space:nowrap;}
+.bomv .bom-noquote{display:inline-block; font-size:10px; font-weight:700; margin-left:4px; padding:0 5px;
+  border-radius:5px; color:var(--red); background:var(--red-bg); border:1px solid var(--red); white-space:nowrap;}
+.bomv .bom-kdoubt{color:var(--amber); font-weight:800; margin-left:4px; cursor:help;}
+.bomv .bom-catpick{display:flex; gap:7px; flex-wrap:wrap;}
+.bomv .bom-catpick button{font-size:12px; font-weight:600; padding:6px 13px; border-radius:8px; cursor:pointer;
+  border:1px solid var(--line); background:var(--bg); color:var(--ink-2);}
+.bomv .bom-catpick button:hover{border-color:var(--accent); color:var(--accent);}
+.bomv .bom-catpick button.sm{font-size:11px; font-weight:500; padding:3px 9px;}
+.bomv .bom-catpick button.on{background:var(--accent); border-color:var(--accent); color:#fff;}
+.bomv .bom-catpick button.on.ok{background:var(--green); border-color:var(--green);}
+.bomv .bom-catpick button.on.no{background:var(--red); border-color:var(--red);}
+.bomv .bom-ta{width:100%; box-sizing:border-box; font-family:inherit; font-size:12.5px; padding:8px 10px;
+  border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); resize:vertical;}
+.bomv .bom-ta:focus{outline:none; border-color:var(--accent);}
+/* 复核四步页签 + 组内四步小圈 + 未入账行 */
+.bomv .bom-steps4{display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin:2px 0 10px;}
+.bomv .bom-steps4 .arw{color:var(--ink-3); font-size:12px;}
+.bomv .bom-steps4 button{display:inline-flex; align-items:center; gap:4px; font-size:12.5px; font-weight:600;
+  padding:7px 13px; border-radius:9px; cursor:pointer; border:1px solid var(--line);
+  background:var(--bg); color:var(--ink-2); white-space:nowrap;}
+.bomv .bom-steps4 button:hover{border-color:var(--accent); color:var(--accent);}
+.bomv .bom-steps4 button.on{background:var(--accent-soft); border-color:var(--accent); color:var(--accent);}
+.bomv .bom-step4c span{display:inline-block; width:17px; text-align:center; font-size:12px; font-weight:700; cursor:help;}
+.bomv .bom-step4c span.ok{color:var(--green);}
+.bomv .bom-step4c span.wait{color:var(--ink-3); opacity:.5;}
+.bomv .bom-nbrow{background:var(--red-bg);}
+.bomv .bom-nbrow td{opacity:.92;}
+.bomv .bom-craftno{display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-size:10px;font-weight:700;margin-right:6px;}
+/* 组内嵌套结构 / 审核顺序链路条 + 行内层级 */
+.bomv .bom-chain{display:flex; align-items:center; gap:7px; flex-wrap:wrap; padding:8px 14px;
+  border-top:1px solid var(--line); background:var(--bg-sub); font-size:11.5px;}
+.bomv .bom-chain .arw{color:var(--ink-3);}
+.bomv .bom-chainlv{display:inline-flex; align-items:center; gap:5px;}
+.bomv .bom-chainlv em{font-style:normal; font-size:10px; color:var(--ink-3); margin-right:2px;}
+.bomv .bom-chainitem{display:inline-block; padding:2px 8px; border-radius:7px; font-weight:600; white-space:nowrap;
+  border:1px solid var(--line); background:var(--bg); color:var(--ink-2);}
+.bomv .bom-chainitem b{margin-left:4px;}
+.bomv .bom-chainitem.ok{border-color:var(--amber); color:var(--amber); background:var(--amber-bg);}
+.bomv .bom-chainitem.fin{border-color:var(--green); color:var(--green); background:var(--green-bg);}
+.bomv .bom-chainitem.bad{border-color:var(--red); color:var(--red); background:var(--red-bg);}
+.bomv .bom-lv{color:var(--ink-3); margin-right:4px; font-size:11px;}
+/* 双戳：初审（成本会计）+ 已审核（财务BP复审）。两个都在时初审戳上移让位 */
+.bomv .bom-stamp.first{top:auto; bottom:auto; transform:rotate(-12deg) translateY(-4px); opacity:.5; border-color:var(--ink-3); color:var(--ink-3); background:transparent; right:96px;}
+.bomv .bom-stamp.fin2{border-color:var(--green); color:var(--green); background:rgba(22,125,94,.06);}

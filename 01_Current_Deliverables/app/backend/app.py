@@ -779,7 +779,14 @@ NAV_MODULES = [
     # 准入闸只有 enter:costledger 一个；进组后基础资料见不见，看 act_cap=cost_ledger_wh。
     {"key": "clwh", "label": "基础资料", "sec": "cost", "order": 13, "parent": "costledger",
      "act_cap": "cost_ledger_wh", "default": "待验收"},
-    {"key": "bomprice", "label": "BOM报价审核", "sec": "cost", "order": 20, "default": "敬请期待"},
+    # BOM报价审核（确认书 v1.0，2026-09-03）：二级分组 + 两个三级。分组不设共用闸 → 两子各自生成准入点
+    #   （可见性口径不同：待办与复核=未审核只权限人看、标准成本台账=已审核公开）。
+    #   待办与复核=未审核工作台（钉钉抓取/入账/复核/定稿/价格校验，enter:bomdraft 敏感、只给成本会计/Owner）；
+    #   标准成本台账=已审核成品库（只放已定稿、公开可查、供 BP 消费，enter:bomstd 广授）。
+    {"key": "bomprice", "label": "BOM报价审核", "sec": "cost", "order": 20, "default": "待验收", "group_only": True},
+    {"key": "bomdraft", "label": "待办与复核", "sec": "cost", "order": 21, "parent": "bomprice", "default": "待验收"},
+    {"key": "bomstd", "label": "标准成本台账", "sec": "cost", "order": 22, "parent": "bomprice", "default": "待验收"},
+    {"key": "bomconfig", "label": "基础设置", "sec": "cost", "order": 23, "parent": "bomprice", "default": "待验收"},
     {"key": "prodbrief", "label": "生产简报复核", "sec": "cost", "order": 30, "default": "敬请期待"},
     # V2.318：临时工考勤升为纯分组父项（group_only＝本身没页面、没准入点），下挂两个三级：
     #   复核工具   tempattrev   —— 上报工时 vs 打卡，逐日重算与四档判定
@@ -2718,7 +2725,7 @@ def orgs_delete(body: dict, request: Request):
 # 一条工具线一个模块，改某条线只动 routers/<线>.py，app.py 不再是并行开发的冲突源。
 # 必须在下面的 SPA 兜底路由之前注册：兜底吃掉所有非 /api 路径，注册晚了会被它抢走。
 from routers import (logistics_accrual, archive, fxrate, logistics_recon, cost_ledger,
-                     rptexport, report_dashboard, ec, llm_hub, temp_attendance)
+                     rptexport, report_dashboard, ec, llm_hub, temp_attendance, bom_quote)
 
 app.include_router(logistics_accrual.router)
 app.include_router(archive.router)
@@ -2730,6 +2737,7 @@ app.include_router(report_dashboard.router)
 app.include_router(ec.router)
 app.include_router(llm_hub.router)   # V2.301 门户模型配置 P0.5 聚合看板
 app.include_router(temp_attendance.router)
+app.include_router(bom_quote.router)   # V-draft BOM报价审核
 
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,

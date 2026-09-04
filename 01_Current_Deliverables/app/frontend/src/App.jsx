@@ -15,6 +15,7 @@ import CostLedger from './views/CostLedger.jsx'
 import CostLedgerWh from './views/CostLedgerWh.jsx'
 import CostLedgerDash from './views/CostLedgerDash.jsx'
 import TempAttendance from './views/TempAttendance.jsx'
+import BomPrice from './views/BomPrice.jsx'
 import TempAttBoard from './views/TempAttBoard.jsx'
 import Reconcile from './views/Reconcile.jsx'
 import ResultExport from './views/ResultExport.jsx'
@@ -144,6 +145,9 @@ export default function App() {
         {view === 'clwh' && canView('clwh') && <CostLedgerWh user={user} />}
         {view === 'rptexport' && canView('rptexport') && <RptExport user={user} />}
         {view === 'tempattrev' && canView('tempattrev') && <TempAttendance user={user} />}
+        {view === 'bomdraft' && canView('bomdraft') && <BomPrice user={user} mode="draft" />}
+        {view === 'bomstd' && canView('bomstd') && <BomPrice user={user} mode="std" />}
+        {view === 'bomconfig' && canView('bomconfig') && <BomPrice user={user} mode="config" />}
         {view === 'tempattboard' && canView('tempattboard') && <TempAttBoard user={user} />}
         {view === 'archive' && canView('archive') && <Archive user={user} />}
         {view === 'basicdata' && canView('basicdata') && <BasicData user={user} />}
@@ -177,7 +181,7 @@ export default function App() {
 const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodclose', 'fundboard',
   'rptexport', 'rptdash',
   'logistics', 'logibase', 'logiupload', 'logisticspay', 'logisticscost',
-  'clexport', 'cldash', 'clwh',
+  'clexport', 'cldash', 'clwh', 'bomdraft', 'bomstd', 'bomconfig',
   'ecomsettle', 'ecombase',
   'tempattrev', 'tempattboard',
   'archive', 'basicdata', 'settings'])

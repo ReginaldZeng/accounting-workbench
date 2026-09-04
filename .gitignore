@@ -12,6 +12,8 @@ dist/
 bank_uploads/
 ec_uploads/
 tempatt_uploads/
+bom_uploads/
+
 # 账户台账/认领/覆盖/期间配置（运行时数据，含真实银行账号与账户映射，每机不同）——严禁进 git
 # 结构参考见同目录 ledger_authoritative.sample.json（脱敏）；真实文件留本机、不入库
 **/sample_data/ledger_authoritative.json

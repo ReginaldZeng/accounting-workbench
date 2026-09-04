@@ -1,0 +1,683 @@
+<meta charset="utf-8">
+<title>BOM报价审核操作说明</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --paper:#F5F2EA; --ink:#211E18; --muted:#786F5F; --faint:#9A9484;
+  --line:#E4DDCF; --line-soft:#EDE7DA; --card:#FCFAF4; --card-2:#F0EBDF;
+  --go:#1E5945; --go-fill:#E4EFE8; --go-line:#BCD6C9; --go-ink:#154034;
+  --hold:#A76E14; --hold-fill:#F6EAD1; --hold-line:#E6CE9C; --hold-ink:#7A4F0C;
+  --stop:#A83529; --stop-fill:#F4E0DB; --stop-line:#E4BAB1; --stop-ink:#7E271D;
+  --shadow:0 1px 2px rgba(40,32,15,.05), 0 10px 30px -16px rgba(40,32,15,.22);
+  --shadow-sm:0 1px 2px rgba(40,32,15,.06);
+  --serif:"Noto Serif SC","Songti SC","SimSun",serif;
+  --sans:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","SFMono-Regular",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#15130D; --ink:#ECE6D8; --muted:#A39A87; --faint:#6E6656;
+  --line:#332F26; --line-soft:#2A261E; --card:#1E1B14; --card-2:#262218;
+  --go:#57AC90; --go-fill:#132820; --go-line:#2C4A3E; --go-ink:#8FCBB5;
+  --hold:#D6A24A; --hold-fill:#2A2213; --hold-line:#4C3E20; --hold-ink:#E7C079;
+  --stop:#D67366; --stop-fill:#2C1815; --stop-line:#4E2C26; --stop-ink:#E39A8F;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 12px 34px -16px rgba(0,0,0,.65);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+}}
+:root[data-theme="dark"]{
+  --paper:#15130D; --ink:#ECE6D8; --muted:#A39A87; --faint:#6E6656;
+  --line:#332F26; --line-soft:#2A261E; --card:#1E1B14; --card-2:#262218;
+  --go:#57AC90; --go-fill:#132820; --go-line:#2C4A3E; --go-ink:#8FCBB5;
+  --hold:#D6A24A; --hold-fill:#2A2213; --hold-line:#4C3E20; --hold-ink:#E7C079;
+  --stop:#D67366; --stop-fill:#2C1815; --stop-line:#4E2C26; --stop-ink:#E39A8F;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 12px 34px -16px rgba(0,0,0,.65);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+}
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.7;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.wrap{max-width:940px;margin:0 auto;padding:0 24px 96px}
+h1,h2,h3{font-family:var(--serif);text-wrap:balance;line-height:1.25;font-weight:700}
+p{max-width:68ch}
+a{color:var(--go);text-underline-offset:3px}
+code,.k{font-family:var(--mono);font-size:.86em}
+.k{background:var(--card-2);border:1px solid var(--line);border-radius:5px;padding:.06em .42em;color:var(--muted);white-space:nowrap}
+
+/* top bar */
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:20px 0 0;max-width:940px;margin:0 auto}
+.brandmark{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12px;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.brandmark .dot{width:9px;height:9px;border-radius:50%;background:var(--go);box-shadow:0 0 0 3px var(--go-fill)}
+.toggle{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--card);
+  border:1px solid var(--line);border-radius:999px;padding:6px 14px;cursor:pointer;transition:.15s}
+.toggle:hover{color:var(--ink);border-color:var(--muted)}
+.toggle:focus-visible{outline:2px solid var(--go);outline-offset:2px}
+
+/* hero */
+.hero{padding:34px 0 8px}
+.eyebrow{font-family:var(--mono);font-size:12.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--hold);margin:0 0 16px;font-weight:600}
+.hero h1{font-size:clamp(32px,5.4vw,52px);font-weight:900;margin:0 0 18px;letter-spacing:-.01em}
+.hero .lede{font-size:clamp(17px,2.2vw,20px);color:var(--muted);max-width:64ch;margin:0}
+.hero .meta{display:flex;flex-wrap:wrap;gap:8px 22px;margin-top:24px;font-family:var(--mono);
+  font-size:12.5px;color:var(--faint)}
+.hero .meta b{color:var(--muted);font-weight:500}
+
+/* traffic-light legend */
+.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:30px 0 8px}
+.lg{border:1px solid var(--line);border-radius:14px;padding:16px 18px;background:var(--card);box-shadow:var(--shadow-sm)}
+.lg .swatch{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;
+  letter-spacing:.06em;text-transform:uppercase;font-weight:600;margin-bottom:8px}
+.lg .chip{width:15px;height:15px;border-radius:4px;flex:none}
+.lg.go .chip{background:var(--go)} .lg.go .swatch{color:var(--go)}
+.lg.hold .chip{background:var(--hold)} .lg.hold .swatch{color:var(--hold)}
+.lg.stop .chip{background:var(--stop)} .lg.stop .swatch{color:var(--stop)}
+.lg .t{font-family:var(--serif);font-weight:700;font-size:15px;margin:0 0 3px}
+.lg .d{font-size:13px;color:var(--muted);line-height:1.5;margin:0}
+
+/* section frame */
+section{margin-top:64px;scroll-margin-top:20px}
+.sec-head{display:flex;align-items:baseline;gap:16px;border-bottom:2px solid var(--ink);
+  padding-bottom:12px;margin-bottom:26px}
+.sec-num{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--go);
+  flex:none;padding-top:4px}
+.sec-head h2{font-size:clamp(21px,3vw,27px);margin:0}
+.sec-head .sub{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--faint);
+  align-self:flex-end;padding-bottom:2px}
+.lead{font-size:16.5px;color:var(--muted);margin:0 0 24px}
+
+/* figure band */
+figure{margin:28px 0;background:var(--card);border:1px solid var(--line);border-radius:16px;
+  padding:22px 20px 16px;box-shadow:var(--shadow)}
+.figscroll{overflow-x:auto;overflow-y:hidden}
+figure svg{display:block;min-width:640px;width:100%;height:auto}
+figcaption{font-size:12.5px;color:var(--faint);font-family:var(--mono);margin-top:12px;
+  padding-top:12px;border-top:1px dashed var(--line);letter-spacing:.02em}
+figcaption b{color:var(--muted);font-weight:500}
+
+/* step cards */
+.steps{display:flex;flex-direction:column;gap:14px;margin:24px 0}
+.step{display:grid;grid-template-columns:auto 1fr;gap:18px;background:var(--card);
+  border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow-sm)}
+.step .idx{font-family:var(--serif);font-weight:900;font-size:26px;line-height:1;color:var(--go);
+  width:34px;text-align:center;padding-top:2px}
+.step.hold .idx{color:var(--hold)} .step.stop .idx{color:var(--stop)}
+.step h3{font-size:16.5px;margin:0 0 6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.step p{font-size:14.5px;color:var(--muted);margin:6px 0 0;max-width:none}
+.step .who{font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+  padding:2px 9px;border-radius:999px;font-weight:600;flex:none}
+.who.acc{background:var(--hold-fill);color:var(--hold-ink);border:1px solid var(--hold-line)}
+.who.bp{background:var(--go-fill);color:var(--go-ink);border:1px solid var(--go-line)}
+.who.sys{background:var(--card-2);color:var(--muted);border:1px solid var(--line)}
+
+/* inline chip flow (steps within a card) */
+.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:10px;margin:22px 0}
+.node{flex:1 1 150px;min-width:140px;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;padding:13px 15px;position:relative;box-shadow:var(--shadow-sm)}
+.node .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--faint);font-weight:600;margin-bottom:5px}
+.node .nt{font-family:var(--serif);font-weight:700;font-size:15px;line-height:1.3}
+.node .nd{font-size:12.5px;color:var(--muted);margin-top:4px;line-height:1.45}
+.node.look{border-style:dashed;background:var(--card-2)}
+.node.look .tag{color:var(--faint)}
+.node.confirm{border-color:var(--go-line)}
+.node.confirm .tag{color:var(--go)}
+
+/* stamp badge */
+.stamp{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-weight:600;
+  font-size:11px;letter-spacing:.08em;padding:3px 10px;border-radius:6px;transform:rotate(-1.5deg)}
+.stamp.first{background:var(--hold-fill);color:var(--hold-ink);border:1.5px solid var(--hold)}
+.stamp.fin{background:var(--go-fill);color:var(--go-ink);border:1.5px solid var(--go)}
+.stamp::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.7}
+
+/* callouts */
+.note{border-radius:14px;padding:16px 18px 16px 20px;margin:22px 0;font-size:14.5px;position:relative;
+  border:1px solid var(--line);background:var(--card)}
+.note::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:4px;border-radius:4px}
+.note .lab{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  font-weight:700;display:block;margin-bottom:5px}
+.note p{margin:0;max-width:none;color:var(--muted)}
+.note.stop{background:var(--stop-fill)} .note.stop::before{background:var(--stop)} .note.stop .lab{color:var(--stop-ink)}
+.note.go{background:var(--go-fill)} .note.go::before{background:var(--go)} .note.go .lab{color:var(--go-ink)}
+.note.hold{background:var(--hold-fill)} .note.hold::before{background:var(--hold)} .note.hold .lab{color:var(--hold-ink)}
+
+/* two-lane roles */
+.lanes{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:24px 0}
+.lane{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--card);box-shadow:var(--shadow-sm)}
+.lane header{padding:14px 18px;display:flex;align-items:center;gap:10px}
+.lane.acc header{background:var(--hold-fill);border-bottom:1px solid var(--hold-line)}
+.lane.bp header{background:var(--go-fill);border-bottom:1px solid var(--go-line)}
+.lane header .role{font-family:var(--serif);font-weight:700;font-size:16px}
+.lane.acc header .role{color:var(--hold-ink)} .lane.bp header .role{color:var(--go-ink)}
+.lane header .cap{margin-left:auto;font-family:var(--mono);font-size:11px}
+.lane.acc header .cap{color:var(--hold)} .lane.bp header .cap{color:var(--go)}
+.lane ul{list-style:none;margin:0;padding:14px 18px;display:flex;flex-direction:column;gap:9px}
+.lane li{font-size:14px;color:var(--muted);padding-left:20px;position:relative;line-height:1.5}
+.lane li::before{content:"";position:absolute;left:2px;top:9px;width:7px;height:7px;border-radius:50%}
+.lane.acc li::before{background:var(--hold)} .lane.bp li::before{background:var(--go)}
+.lane li b{color:var(--ink);font-weight:600}
+
+/* five-part formula card */
+.formula{background:var(--card-2);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:22px 0}
+.formula .ft{font-family:var(--serif);font-weight:700;font-size:15px;margin:0 0 12px}
+.frow{display:grid;grid-template-columns:120px 1fr;gap:6px 16px;font-size:13.5px;padding:7px 0;
+  border-top:1px dashed var(--line);align-items:baseline}
+.frow:first-of-type{border-top:0}
+.frow .fk{font-family:var(--serif);font-weight:700;color:var(--ink)}
+.frow .fv{font-family:var(--mono);font-size:12.5px;color:var(--muted);line-height:1.5}
+.frow .fv em{font-style:normal;color:var(--go);font-weight:600}
+
+/* reference tables */
+.tbl{width:100%;border-collapse:collapse;margin:22px 0;font-size:13.5px}
+.tbl th,.tbl td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+.tbl thead th{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--faint);border-bottom:2px solid var(--line);font-weight:600}
+.tbl tbody tr:hover{background:var(--card)}
+.tbl td b{font-weight:600}
+.tbl .mono{font-family:var(--mono);font-size:12px;color:var(--muted);white-space:nowrap}
+.tbl .yes{color:var(--go);font-weight:600} .tbl .no{color:var(--stop);font-weight:600}
+.tblscroll{overflow-x:auto}
+.tblscroll .tbl{min-width:560px}
+
+/* footer */
+.foot{margin-top:72px;padding-top:24px;border-top:1px solid var(--line);font-family:var(--mono);
+  font-size:12px;color:var(--faint);line-height:1.8}
+.foot b{color:var(--muted);font-weight:500}
+
+@media (max-width:680px){
+  .legend{grid-template-columns:1fr}
+  .lanes{grid-template-columns:1fr}
+  .sec-head .sub{display:none}
+  .step{grid-template-columns:1fr}
+  .step .idx{text-align:left}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="top">
+  <div class="brandmark"><span class="dot"></span>核算工作台 · 工具线 08</div>
+  <button class="toggle" id="tg" aria-label="切换深浅色">◐ 深/浅</button>
+</div>
+
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">操作说明 · Operation Manual</p>
+    <h1>BOM 报价审核工具<br>怎么用</h1>
+    <p class="lede">从钉钉「BOM表报价」审批的附件，到成本会计初审、财务BP终审，再到对外报价消费——一条链上，谁在哪一步、点哪个按钮、盖哪个戳，这份说明讲清楚。</p>
+    <div class="meta">
+      <span><b>版本</b>　v1.0 · 2026-09-04</span>
+      <span><b>使用者</b>　成本会计 / 财务BP</span>
+      <span><b>菜单</b>　待办与复核 · 标准成本台账 · 基础设置</span>
+    </div>
+
+    <div class="legend">
+      <div class="lg go">
+        <div class="swatch"><span class="chip"></span>绿 · GO</div>
+        <p class="t">终审通过 · 对外开放</p>
+        <p class="d">财务BP 盖「已审核」戳。只有这一版进对外报价口，BP 定价才拿得到。</p>
+      </div>
+      <div class="lg hold">
+        <div class="swatch"><span class="chip"></span>琥珀 · HOLD</div>
+        <p class="t">初审 · 仅内部可见</p>
+        <p class="d">成本会计盖「初审」戳＝定稿。台账内部看得到管线，但<b>还没终审，绝不外发</b>。</p>
+      </div>
+      <div class="lg stop">
+        <div class="swatch"><span class="chip"></span>红 · STOP</div>
+        <p class="t">不平 / 待修 / 作废</p>
+        <p class="d">勾稽不平、上游链路被连带拦下、或标记作废——挡在对外之前，不静默放行。</p>
+      </div>
+    </div>
+    <p class="lead" style="margin-top:22px">这三种颜色贯穿全篇。看到颜色，就知道这一版能不能对外。</p>
+  </header>
+
+  <!-- 全链路 -->
+  <section id="chain">
+    <div class="sec-head">
+      <span class="sec-num">总览</span>
+      <h2>一条链，两个戳</h2>
+      <span class="sub">source → 立项 → 复核 → 初审 → 终审 → 消费</span>
+    </div>
+    <p class="lead">钉钉审批里躺着采购的商务版核算表、有时还有成本会计的商品版、评论区补传的 BOM。工具把它们抓下来、解析成含税五分项、做勾稽自检；然后走两个戳的审核：<b>成本会计初审</b>（琥珀）→ <b>财务BP终审</b>（绿）。只有绿戳版对外。</p>
+
+    <figure>
+      <div class="figscroll">
+        <svg viewBox="0 0 1220 168" role="img" aria-label="全链路流程图">
+          <defs>
+            <marker id="ar" markerWidth="10" markerHeight="10" refX="7" refY="3.2" orient="auto">
+              <path d="M0,0 L7,3.2 L0,6.4 Z" fill="var(--faint)"/>
+            </marker>
+          </defs>
+          <!-- arrows -->
+          <g stroke="var(--faint)" stroke-width="1.6" marker-end="url(#ar)" fill="none">
+            <line x1="182" y1="74" x2="214" y2="74"/>
+            <line x1="382" y1="74" x2="414" y2="74"/>
+            <line x1="582" y1="74" x2="614" y2="74"/>
+            <line x1="782" y1="74" x2="814" y2="74"/>
+            <line x1="982" y1="74" x2="1014" y2="74"/>
+          </g>
+          <!-- nodes -->
+          <g font-family="var(--serif)" font-weight="700">
+            <g>
+              <rect x="20" y="34" width="162" height="80" rx="13" fill="var(--card-2)" stroke="var(--line)"/>
+              <text x="101" y="60" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--faint)" letter-spacing="1">SOURCE · 钉钉</text>
+              <text x="101" y="82" text-anchor="middle" font-size="15" fill="var(--ink)">BOM表报价</text>
+              <text x="101" y="101" text-anchor="middle" font-size="11.5" font-family="var(--sans)" fill="var(--muted)">审批附件</text>
+            </g>
+            <g>
+              <rect x="220" y="34" width="162" height="80" rx="13" fill="var(--card)" stroke="var(--line)"/>
+              <text x="301" y="60" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--faint)" letter-spacing="1">01 · 立项</text>
+              <text x="301" y="82" text-anchor="middle" font-size="15" fill="var(--ink)">录单号·入账</text>
+              <text x="301" y="101" text-anchor="middle" font-size="11.5" font-family="var(--sans)" fill="var(--muted)">解析＋勾稽自检</text>
+            </g>
+            <g>
+              <rect x="420" y="34" width="162" height="80" rx="13" fill="var(--card)" stroke="var(--line)"/>
+              <text x="501" y="60" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--faint)" letter-spacing="1">02 · 复核</text>
+              <text x="501" y="82" text-anchor="middle" font-size="15" fill="var(--ink)">复核四步</text>
+              <text x="501" y="101" text-anchor="middle" font-size="11.5" font-family="var(--sans)" fill="var(--muted)">③④要确认</text>
+            </g>
+            <g>
+              <rect x="620" y="34" width="162" height="80" rx="13" fill="var(--hold-fill)" stroke="var(--hold)" stroke-width="1.6"/>
+              <text x="701" y="60" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--hold)" letter-spacing="1">03 · 初审</text>
+              <text x="701" y="82" text-anchor="middle" font-size="15" fill="var(--hold-ink)">盖「初审」戳</text>
+              <text x="701" y="101" text-anchor="middle" font-size="11.5" font-family="var(--sans)" fill="var(--hold-ink)">成本会计 · 仅内部</text>
+            </g>
+            <g>
+              <rect x="820" y="34" width="162" height="80" rx="13" fill="var(--go-fill)" stroke="var(--go)" stroke-width="1.6"/>
+              <text x="901" y="60" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--go)" letter-spacing="1">04 · 终审</text>
+              <text x="901" y="82" text-anchor="middle" font-size="15" fill="var(--go-ink)">盖「已审核」戳</text>
+              <text x="901" y="101" text-anchor="middle" font-size="11.5" font-family="var(--sans)" fill="var(--go-ink)">财务BP · 对外开放</text>
+            </g>
+            <g>
+              <rect x="1020" y="34" width="180" height="80" rx="13" fill="var(--card-2)" stroke="var(--line)"/>
+              <text x="1110" y="60" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--faint)" letter-spacing="1">消费</text>
+              <text x="1110" y="82" text-anchor="middle" font-size="15" fill="var(--ink)">BP 报价</text>
+              <text x="1110" y="101" text-anchor="middle" font-size="11.5" font-family="var(--sans)" fill="var(--muted)">只见终审版</text>
+            </g>
+          </g>
+        </svg>
+      </div>
+      <figcaption><b>门控红线：</b>对外报价口 <span class="k">GET /api/bom/final</span> 只放 <span class="k">status=已审核</span>——初审已盖但终审没盖的，标准台账内部看得到，对外一律拿不到。</figcaption>
+    </figure>
+  </section>
+
+  <!-- 谁用 -->
+  <section id="roles">
+    <div class="sec-head">
+      <span class="sec-num">00</span>
+      <h2>谁用它 · 各管一段</h2>
+    </div>
+    <p class="lead">两个人、两个戳、两套权限。分工是刻意的：终审要当第二双眼睛，所以<b>初审权和终审权不宜给同一人，且初审人不能自己终审</b>（代码强制）。</p>
+    <div class="lanes">
+      <div class="lane acc">
+        <header><span class="role">成本会计</span><span class="cap">bom:audit</span></header>
+        <ul>
+          <li>录钉钉单号<b>立项</b>，把审批附件拉进待办</li>
+          <li>走<b>复核四步</b>：③用量自洽、④报价核算逐项确认</li>
+          <li><b>审核定性</b>：定物料类别、判是否允许对外报价</li>
+          <li>盖<b>「初审」戳</b>＝定稿（琥珀，仅内部可见）</li>
+          <li>发起<b>作废申请</b>（不能自己批）</li>
+        </ul>
+      </div>
+      <div class="lane bp">
+        <header><span class="role">财务BP</span><span class="cap">bom:final_review</span></header>
+        <ul>
+          <li>对初审版做<b>形式审核</b>（拿去报价前过一遍）</li>
+          <li>盖<b>「已审核」戳</b>＝终审（绿，<b>对外开放</b>）</li>
+          <li>发现问题<b>退回</b>成本会计重做（撤下定稿）</li>
+          <li><b>批准 / 驳回</b>作废申请</li>
+          <li>在 BP 工作台只读消费终审成本，对外报价</li>
+        </ul>
+      </div>
+    </div>
+    <div class="note hold">
+      <span class="lab">怎么进</span>
+      <p>核算门户登录 → 左侧菜单 <span class="k">待办与复核</span>（要 <span class="k">enter:bomdraft</span>）做初审；<span class="k">标准成本台账</span>（要 <span class="k">enter:bomstd</span>）看已审核成品库。权限点默认都不给，逐一显式授予。</p>
+    </div>
+  </section>
+
+  <!-- 立项 -->
+  <section id="intake">
+    <div class="sec-head">
+      <span class="sec-num">01</span>
+      <h2>立项 · 录单号，生成待办</h2>
+      <span class="sub">成本会计</span>
+    </div>
+    <p class="lead">不批量扫描、不回灌历史——一次一个单号，按需立项。一个核算表文件＝一组（复配料/半成品/成品同源归一组），审核顺序自下而上。</p>
+    <div class="steps">
+      <div class="step">
+        <div class="idx">A</div>
+        <div>
+          <h3>录入钉钉审批编号 <span class="who acc">成本会计</span></h3>
+          <p>在待办页填「BOM表报价」的审批编号（形如 <span class="k">2026…251965</span>）。工具按编号定位实例，抓表单附件 + 评论区补传的 BOM，一个都不漏。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="idx">B</div>
+        <div>
+          <h3>解析成含税五分项 <span class="who sys">系统</span></h3>
+          <p>识别来源方（采购商务版 / 成本会计商品版 / 研发BOM / 评论区），一单两版会自动配对补料。解析后立刻做勾稽自检。</p>
+        </div>
+      </div>
+      <div class="step stop">
+        <div class="idx">C</div>
+        <div>
+          <h3>勾稽不平 → 拦在门外 <span class="who sys">系统</span></h3>
+          <p>原料小计＝Σ明细 等 6 项对不上，或侦测到疑似漏加料，这一批进<b>「待修」</b>，红标显示不平原因明细（可点进去下钻），<b>不静默入账</b>。修好替换文件后再入。</p>
+        </div>
+      </div>
+    </div>
+    <div class="note stop">
+      <span class="lab">红线</span>
+      <p>勾稽不平的成本<b>绝不静默放行</b>。这是这条线最硬的一条——错数入了账，一路带到对外报价就是真金白银的错。</p>
+    </div>
+  </section>
+
+  <!-- 复核四步 -->
+  <section id="review">
+    <div class="sec-head">
+      <span class="sec-num">02</span>
+      <h2>复核四步 · 前两步看，后两步确认</h2>
+      <span class="sub">成本会计</span>
+    </div>
+    <p class="lead">详情页四个可点页签。①②是研发给的参考材料，<b>只看不确认</b>；真正要成本会计签字负责的是 ③④。</p>
+
+    <div class="flow">
+      <div class="node look">
+        <div class="tag">① 只看</div>
+        <div class="nt">BOM清单</div>
+        <div class="nd">研发清单本身：到位没、哪一版、结构与用量。缺清单可上传补挂。</div>
+      </div>
+      <div class="node look">
+        <div class="tag">② 只看 · 参考</div>
+        <div class="nt">工艺流程</div>
+        <div class="nd">就在 BOM 里，随附。有时带照片，仅参考，不做确认。</div>
+      </div>
+      <div class="node confirm">
+        <div class="tag">③ 要确认</div>
+        <div class="nt">用量自洽</div>
+        <div class="nd">添加量勾稽：明细加总＝小计，同名分段求和一致（食盐 5＝3＋2）。</div>
+      </div>
+      <div class="node confirm">
+        <div class="tag">④ 要确认</div>
+        <div class="nt">报价核算</div>
+        <div class="nd">含税五分项逐项核。改了费用/税率，审核态自动失效、要重审。</div>
+      </div>
+    </div>
+
+    <div class="formula">
+      <p class="ft">含税五分项 · 这一步核的就是它</p>
+      <div class="frow"><span class="fk">原料 / 包材</span><span class="fv">添加量 × 含税价 ÷ (1+税率)；对外含税 <em>×1.13</em></span></div>
+      <div class="frow"><span class="fk">加工费</span><span class="fv">(制造费用 ＋ 工厂费用) <em>×1.13</em>　※加工费并入工厂费用口径</span></div>
+      <div class="frow"><span class="fk">装卸费</span><span class="fv">(运输 ＋ 装卸) <em>×1.13</em></span></div>
+      <div class="frow"><span class="fk">管理费</span><span class="fv">按加成计入</span></div>
+      <div class="frow"><span class="fk">全成本</span><span class="fv">五项合计 · 台账列强调显示</span></div>
+    </div>
+  </section>
+
+  <!-- 初审定性 -->
+  <section id="classify">
+    <div class="sec-head">
+      <span class="sec-num">03</span>
+      <h2>初审 · 定性弹窗，一盖即定稿</h2>
+      <span class="sub">成本会计</span>
+    </div>
+    <p class="lead">③④确认完，点审核 → 跳出<b>定性弹窗</b>。定完性就盖「初审」戳、同时定稿——审核和定稿是同一个动作，不是两件事。</p>
+    <div class="steps">
+      <div class="step hold">
+        <div class="idx">1</div>
+        <div>
+          <h3>选物料类别（五选一）<span class="who acc">成本会计</span></h3>
+          <p>复配料 / 自产半成品 / 自产成品 / 委外半成品 / 委外成品。编码判定只当建议值，最终由人定——规律稳了以后再回填自动化。</p>
+        </div>
+      </div>
+      <div class="step hold">
+        <div class="idx">2</div>
+        <div>
+          <h3>判是否允许对外报价 <span class="who acc">成本会计</span></h3>
+          <p>不建议报价的<b>必须写明原因</b>（如「包材不全」「XX物料暂定」）。台账标红「禁报价」，原因一并带给 BP 定价侧，避免拿不完整的成本对外。</p>
+        </div>
+      </div>
+      <div class="step hold">
+        <div class="idx">3</div>
+        <div>
+          <h3>盖「初审」戳＝定稿 <span class="stamp first">初审</span></h3>
+          <p>这一版毕业进标准台账（内部可见），但<b>还差终审</b>，对外口拿不到。接着轮到财务BP。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 终审 + 状态机 -->
+  <section id="final">
+    <div class="sec-head">
+      <span class="sec-num">04</span>
+      <h2>终审 · 财务BP 盖章，才对外</h2>
+      <span class="sub">财务BP</span>
+    </div>
+    <p class="lead">财务BP 拿初审成本对外报价前过一遍形式审核。盖「已审核」戳，这一版才进对外报价口。改过成本的版本会被强制打回，不让旧戳偷偷对外。</p>
+
+    <figure>
+      <div class="figscroll">
+        <svg viewBox="0 0 1180 250" role="img" aria-label="两个戳的状态机">
+          <defs>
+            <marker id="ar2" markerWidth="10" markerHeight="10" refX="7" refY="3.2" orient="auto">
+              <path d="M0,0 L7,3.2 L0,6.4 Z" fill="var(--faint)"/>
+            </marker>
+            <marker id="arS" markerWidth="10" markerHeight="10" refX="7" refY="3.2" orient="auto">
+              <path d="M0,0 L7,3.2 L0,6.4 Z" fill="var(--stop)"/>
+            </marker>
+          </defs>
+          <!-- forward arrows -->
+          <g stroke="var(--faint)" stroke-width="1.6" marker-end="url(#ar2)" fill="none">
+            <line x1="238" y1="66" x2="286" y2="66"/>
+            <line x1="536" y1="66" x2="584" y2="66"/>
+            <line x1="834" y1="66" x2="882" y2="66"/>
+          </g>
+          <!-- forward labels -->
+          <g font-family="var(--mono)" font-size="11" fill="var(--muted)" text-anchor="middle">
+            <text x="262" y="56">复核④确认</text>
+            <text x="560" y="56">定性·盖初审</text>
+            <text x="858" y="56">形式审核·盖已审核</text>
+          </g>
+          <!-- states -->
+          <g font-family="var(--serif)" font-weight="700" text-anchor="middle">
+            <g>
+              <rect x="40" y="40" width="198" height="52" rx="12" fill="var(--card-2)" stroke="var(--line)"/>
+              <text x="139" y="64" font-size="15" fill="var(--ink)">未复核</text>
+              <text x="139" y="82" font-size="10.5" font-family="var(--mono)" fill="var(--faint)">刚入账</text>
+            </g>
+            <g>
+              <rect x="288" y="40" width="198" height="52" rx="12" fill="var(--card)" stroke="var(--line)"/>
+              <text x="387" y="64" font-size="15" fill="var(--ink)">已复核</text>
+              <text x="387" y="82" font-size="10.5" font-family="var(--mono)" fill="var(--faint)">四步核过</text>
+            </g>
+            <g>
+              <rect x="586" y="40" width="198" height="52" rx="12" fill="var(--hold-fill)" stroke="var(--hold)" stroke-width="1.8"/>
+              <text x="685" y="64" font-size="15" fill="var(--hold-ink)">初审 = 定稿</text>
+              <text x="685" y="82" font-size="10.5" font-family="var(--mono)" fill="var(--hold-ink)">仅内部可见</text>
+            </g>
+            <g>
+              <rect x="884" y="40" width="256" height="52" rx="12" fill="var(--go-fill)" stroke="var(--go)" stroke-width="1.8"/>
+              <text x="1012" y="64" font-size="15" fill="var(--go-ink)">已审核 = 终审</text>
+              <text x="1012" y="82" font-size="10.5" font-family="var(--mono)" fill="var(--go-ink)">对外开放 · BP可消费</text>
+            </g>
+          </g>
+          <!-- return edges (改成本/退回 → 已复核) -->
+          <g stroke="var(--stop)" stroke-width="1.5" marker-end="url(#arS)" fill="none" stroke-dasharray="5 4">
+            <path d="M 685 92 C 685 150, 387 150, 387 96"/>
+            <path d="M 1012 92 C 1012 200, 387 200, 387 100"/>
+          </g>
+          <g font-family="var(--mono)" font-size="11" fill="var(--stop)" text-anchor="middle">
+            <text x="536" y="140">改费用/税率 → 失效审核态</text>
+            <text x="700" y="222">终审退回 · 重审也清初审戳</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption><b>失效审核态：</b>复核改费用、采纳商品版调价，或终审退回——都把这一版降回「已复核」、清掉戳和定稿指针，强制重走。改过成本的旧版<b>不可能</b>顶着旧戳对外。</figcaption>
+    </figure>
+
+    <div class="note go">
+      <span class="lab">双人闸</span>
+      <p><span class="k">bom:audit</span>（初审）与 <span class="k">bom:final_review</span>（终审）是两个默认不给的敏感权限，不宜给同一人；<b>初审人不得自己终审</b>——系统拦下，确保终审是第二双眼睛。</p>
+    </div>
+  </section>
+
+  <!-- 上游拦截 -->
+  <section id="chainlock">
+    <div class="sec-head">
+      <span class="sec-num">05</span>
+      <h2>上游链路 · 一环不平，整链拦下</h2>
+      <span class="sub">系统守卫</span>
+    </div>
+    <p class="lead">复配料 → 半成品 → 成品，成本一层建在一层上。任一层勾稽不平，它上面的所有产品都被<b>传导式连带拦截</b>——不让成本建在错数上的成品偷偷对外。</p>
+
+    <figure>
+      <div class="figscroll">
+        <svg viewBox="0 0 1180 210" role="img" aria-label="上游链路传导拦截">
+          <defs>
+            <marker id="ar3" markerWidth="10" markerHeight="10" refX="7" refY="3.2" orient="auto">
+              <path d="M0,0 L7,3.2 L0,6.4 Z" fill="var(--stop)"/>
+            </marker>
+          </defs>
+          <!-- depend arrows bottom→up -->
+          <g stroke="var(--stop)" stroke-width="1.8" marker-end="url(#ar3)" fill="none">
+            <line x1="288" y1="105" x2="330" y2="105"/>
+            <line x1="628" y1="105" x2="670" y2="105"/>
+          </g>
+          <g font-family="var(--mono)" font-size="11" fill="var(--stop)" text-anchor="middle">
+            <text x="309" y="94">支撑</text>
+            <text x="649" y="94">支撑</text>
+          </g>
+          <!-- 复配料: 不平 -->
+          <g text-anchor="middle" font-family="var(--serif)" font-weight="700">
+            <rect x="48" y="72" width="240" height="66" rx="13" fill="var(--stop-fill)" stroke="var(--stop)" stroke-width="1.8"/>
+            <text x="168" y="98" font-size="10.5" font-family="var(--mono)" fill="var(--stop)" letter-spacing="1">复配料 · 最底层</text>
+            <text x="168" y="120" font-size="15" fill="var(--stop-ink)">✕ 勾稽不平</text>
+          </g>
+          <!-- 半成品: 连带 -->
+          <g text-anchor="middle" font-family="var(--serif)" font-weight="700">
+            <rect x="388" y="72" width="240" height="66" rx="13" fill="var(--stop-fill)" stroke="var(--stop)" stroke-width="1.4" stroke-dasharray="6 4"/>
+            <text x="508" y="98" font-size="10.5" font-family="var(--mono)" fill="var(--stop)" letter-spacing="1">半成品</text>
+            <text x="508" y="120" font-size="15" fill="var(--stop-ink)">连带拦下</text>
+          </g>
+          <!-- 成品: 连带 -->
+          <g text-anchor="middle" font-family="var(--serif)" font-weight="700">
+            <rect x="728" y="72" width="240" height="66" rx="13" fill="var(--stop-fill)" stroke="var(--stop)" stroke-width="1.4" stroke-dasharray="6 4"/>
+            <text x="848" y="98" font-size="10.5" font-family="var(--mono)" fill="var(--stop)" letter-spacing="1">成品 · 隔级也拦</text>
+            <text x="848" y="120" font-size="15" fill="var(--stop-ink)">连带拦下</text>
+          </g>
+          <!-- 待修 -->
+          <g text-anchor="middle" font-family="var(--serif)" font-weight="700">
+            <rect x="1000" y="80" width="150" height="50" rx="12" fill="var(--card-2)" stroke="var(--line)"/>
+            <text x="1075" y="103" font-size="13.5" fill="var(--ink)">进「待修」</text>
+            <text x="1075" y="120" font-size="10" font-family="var(--mono)" fill="var(--faint)">整组不消失</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>顺序自下而上：先审复配料、再半成品、最后成品。整组被拦时进<b>「待修」批次</b>，留在待办不消失，直到底层修平。</figcaption>
+    </figure>
+  </section>
+
+  <!-- 作废 -->
+  <section id="void">
+    <div class="sec-head">
+      <span class="sec-num">06</span>
+      <h2>作废 · 标记不删除，两步批</h2>
+      <span class="sub">成本会计申请 → 财务BP批准</span>
+    </div>
+    <p class="lead">一个钉钉单里若有多个作废版本，不是删掉——是<b>标记作废</b>（留痕不消失）。为防成本会计舍弃了不该舍弃的，作废走申请+终审两步，申请人不得自批。</p>
+    <div class="flow">
+      <div class="node">
+        <div class="tag">① 成本会计</div>
+        <div class="nt">申请作废</div>
+        <div class="nd">详情页「⌦ 申请作废」，写原因。记录标为待作废，不立即生效。</div>
+      </div>
+      <div class="node">
+        <div class="tag">② 待终审</div>
+        <div class="nt">待终审 banner</div>
+        <div class="nd">页面挂出待作废提示，等财务BP处置。</div>
+      </div>
+      <div class="node confirm">
+        <div class="tag">③ 财务BP</div>
+        <div class="nt">作废终审</div>
+        <div class="nd">「⌦ 作废终审」批准或驳回。批准后标记 active=0，历史仍可查。</div>
+      </div>
+    </div>
+    <div class="note hold">
+      <span class="lab">为什么不删</span>
+      <p>钉钉审批本身也是这么走的：成本会计每单审完，财务BP都会再形式审核一遍（相当于知悉，因为要拿这数据去报价）。作废同理，留痕比删除安全。</p>
+    </div>
+  </section>
+
+  <!-- 速查 -->
+  <section id="ref">
+    <div class="sec-head">
+      <span class="sec-num">附</span>
+      <h2>速查 · 状态与权限</h2>
+    </div>
+
+    <h3 style="font-size:16px;margin:8px 0 0">状态 → 谁盖的戳 → 能不能对外</h3>
+    <div class="tblscroll">
+    <table class="tbl">
+      <thead><tr><th>状态</th><th>谁盖的戳</th><th>在哪个页面</th><th>对外报价口</th></tr></thead>
+      <tbody>
+        <tr><td><b>未复核 / 已复核</b></td><td>—</td><td>待办与复核</td><td class="no">✕ 不外发</td></tr>
+        <tr><td><b>初审</b>（=定稿）</td><td>成本会计 <span class="stamp first" style="transform:none">初审</span></td><td>标准台账（内部）+ 待办</td><td class="no">✕ 未终审不外发</td></tr>
+        <tr><td><b>已审核</b>（终审）</td><td>财务BP <span class="stamp fin" style="transform:none">已审核</span></td><td>标准台账</td><td class="yes">✓ 只有此版对外</td></tr>
+        <tr><td><b>待修</b></td><td>—（勾稽不平/连带）</td><td>待办 · 待修批次</td><td class="no">✕ 拦下</td></tr>
+        <tr><td><b>作废</b></td><td>BP批准（active=0）</td><td>标记不删除</td><td class="no">✕ 退出</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 style="font-size:16px;margin:28px 0 0">权限点 · 默认全不给，逐一显式授予</h3>
+    <div class="tblscroll">
+    <table class="tbl">
+      <thead><tr><th>权限点</th><th>能做什么</th><th>岗位</th><th>敏感</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">enter:bomdraft</td><td>进「待办与复核」</td><td>成本会计</td><td class="yes">敏感</td></tr>
+        <tr><td class="mono">enter:bomstd</td><td>进「标准成本台账」</td><td>成本会计 / 财务BP / 定价</td><td>—</td></tr>
+        <tr><td class="mono">bom:view_sheet</td><td>看核算表明细</td><td>成本会计 / 财务BP</td><td>—</td></tr>
+        <tr><td class="mono">bom:audit</td><td>复核 + <b>初审</b>（盖初审戳）+ 申请作废</td><td>成本会计</td><td class="yes">敏感</td></tr>
+        <tr><td class="mono">bom:final_review</td><td><b>终审</b>（盖已审核戳·对外）+ 作废批准</td><td>财务BP</td><td class="yes">敏感</td></tr>
+        <tr><td class="mono">bom:price_check</td><td>查金蝶实采价</td><td>成本会计</td><td class="yes">敏感</td></tr>
+        <tr><td class="mono">dingtalk:fetch</td><td>抓钉钉审批附件</td><td>成本会计</td><td class="yes">敏感</td></tr>
+        <tr><td class="mono">bom:export</td><td>导出原版/重排版</td><td>成本会计</td><td>—</td></tr>
+        <tr><td class="mono">bom:attach_bom</td><td>缺清单时补挂 BOM</td><td>成本会计</td><td class="yes">敏感</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note go">
+      <span class="lab">岗位模板速记</span>
+      <p><b>成本会计</b>＝enter:bomdraft + enter:bomstd + bom:view_sheet + dingtalk:fetch + bom:audit + bom:price_check + bom:export + bom:attach_bom。<b>财务BP</b>＝enter:bomstd + bom:view_sheet + bom:final_review（终审+作废批准）。<b>一般浏览/定价</b>＝enter:bomstd + bom:view_sheet。</p>
+    </div>
+  </section>
+
+  <div class="foot">
+    <b>BOM报价审核工具 · 操作说明 v1.0 · 2026-09-04</b><br>
+    配套《需求确认书 v1.1》。凭据只从 conf.ini 读、不落文档不落代码；0 数据上库。<br>
+    首版全链路已落地、真机验过，已过一轮 6 维度对抗式代码审查（确证 13 条已全部修复）。
+  </div>
+
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement, btn=document.getElementById('tg');
+  function cur(){
+    var t=root.getAttribute('data-theme');
+    if(t) return t;
+    return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+  }
+  try{var s=localStorage.getItem('bom-theme'); if(s) root.setAttribute('data-theme',s);}catch(e){}
+  btn.addEventListener('click',function(){
+    var n=cur()==='dark'?'light':'dark';
+    root.setAttribute('data-theme',n);
+    try{localStorage.setItem('bom-theme',n);}catch(e){}
+  });
+})();
+</script>

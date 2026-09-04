@@ -631,6 +631,62 @@ def fetch_outbound_docs(date_from, date_to, forms=None, s=None, conf=None):
     return out
 
 
+# ---------------- BOM报价审核·价格校验：按物料编码查金蝶实际采购价（V-draft，只读） ----------------
+# 用途：成本会计核研发填的含税采购价 vs 金蝶实际。应付单为主（最接近实际结算含税单价），
+#       采购订单/入库单兜底（供应商报价+型号规格）。字段Key 按通用规则给一版、逐字段自愈降级——
+#       确切 FormId/字段名要在服务器按本账套实测一轮（同平台其它金蝶取数惯例）。
+# 字段Key 按本账套元数据实测（2026-09-02）：应付单 含税单价=FPRICE_P、数量=FQTY_P、税率=FTaxRate。
+# 采购订单 含税单价字段本账套物料行未探明（标准 FTaxPrice 返回空）——暂以应付单为准（业务方定「应付单为主」），
+# 采购订单先不并入以免出空价行；日后探明其字段再加。
+_PRICE_FORMS = [
+    ("AP_Payable", "应付单",
+     [("FBillNo", "单号"), ("FDate", "日期"), ("FSupplierId.FName", "供应商"),
+      ("FMaterialId.FNumber", "物料编码"), ("FMaterialId.FName", "物料"),
+      ("FMaterialId.FSpecification", "规格"),
+      ("FQTY_P", "数量"), ("FPRICE_P", "含税单价"), ("FTaxRate", "税率")]),
+]
+
+
+def fetch_material_prices(code, months=12, forms=None, limit=30, s=None, conf=None):
+    """按物料编码查金蝶近 months 个月已审核单据的含税单价（应付单为主）。只读。
+    返回 list[dict]：form_name/单号/日期/供应商/物料编码/物料/规格/型号/数量/含税单价/单价/税率（缺列为 None），按日期倒序。
+    编码字段Key、单据类型本账套不认时逐字段/逐单据降级，不抛垮页面。"""
+    import datetime as _dt
+    if s is None or conf is None:
+        s, conf = login()
+    code = str(code or "").strip().replace("'", "''")
+    if not code:
+        return []
+    cutoff = (_dt.date.today() - _dt.timedelta(days=int(months) * 31)).strftime("%Y-%m-%d")
+    out = []
+    for form_id, form_name, fields in _PRICE_FORMS:
+        if forms and form_id not in forms:
+            continue
+        cols = list(fields)
+        filt = "FMaterialId.FNumber = '%s' and FDocumentStatus = 'C' and FDate >= '%s'" % (code, cutoff)
+        rows = None
+        while cols:
+            try:
+                rows = _query(s, conf, form_id, cols, filt, order="FDate desc")
+                break
+            except KingdeeError:
+                # 先丢价格/规格等非关键列；只剩「物料编码/日期」两列还失败 → 该单据类型放弃
+                if len(cols) <= 2:
+                    rows = []
+                    break
+                cols = cols[:-1]
+        for r in (rows or []):
+            for k in ("供应商", "物料", "规格", "型号", "数量", "含税单价", "单价", "税率"):
+                r.setdefault(k, None)
+            p = r.get("含税单价")
+            if p is None or (isinstance(p, (int, float)) and p <= 0):
+                continue                         # 跳过核销/调整/负数等零价行，只留有意义的实采
+            r["form_name"] = form_name
+            out.append(r)
+    out.sort(key=lambda r: str(r.get("日期") or ""), reverse=True)
+    return out[:limit]
+
+
 # 二期付款对账：按回填单号直查的 7 类单据（前 4 类同上，新增 3 类 2026-07-14 实单探查确认）。
 # 字段Key 大小写各单据不同（库存基本数量：FBaseunitQty/FBaseUnitQty/FBASEUNITQTY），逐单据写死+缺列降级。
 _RETURN_FORMS = [
