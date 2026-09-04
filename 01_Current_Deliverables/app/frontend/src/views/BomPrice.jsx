@@ -854,9 +854,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           {!isStd && !edit && cfg?.canAudit && entry.isFinal && <button className="btn-sec" onClick={() => setAuditM(true)}>⚑ 改定性</button>}
           {!edit && cfg?.canAudit && entry.isFinal && <button className="btn-sec" onClick={unfinalize}>撤销定稿</button>}
           {/* 作废：申请（成本会计）/ 终审批准（财务BP）——作废=标记不删除，两步防一人闭环 */}
-          {/* 申请作废：业务方 2026-09-04 暂时关闭；要恢复把下面的 false 去掉即可 */}
-          {false && !edit && entry.active && !entry.voidPending && cfg?.canAudit &&
-            <button className="btn-sec" onClick={() => setVoidM('request')} title="申请作废本版（留痕不删除，须财务BP终审批准）">⌦ 申请作废</button>}
+          {/* 申请作废：V2.431 恢复（业务方要清残留单）——作废=标记不删、须终审批准；主管理员可自批（同终审口径） */}
+          {!edit && entry.active && !entry.voidPending && cfg?.canAudit &&
+            <button className="btn-sec" onClick={() => setVoidM('request')} title="申请作废本版（留痕不删除，须财务BP终审批准；主管理员可自批）">⌦ 申请作废</button>}
           {!edit && entry.voidPending && cfg?.canFinalReview &&
             <button className="btn-pri" style={{ background: 'var(--red)', borderColor: 'var(--red)' }}
               onClick={() => setVoidM('review')}>⌦ 作废终审（有待批准）</button>}

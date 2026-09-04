@@ -1677,18 +1677,21 @@ async def bom_void_review(request: Request):
         if vr.get("state") != "pending":
             skipped.append("#%d 无待终审的作废申请" % e["id"])
             continue
-        if (vr.get("by") or "") == u["name"]:            # 硬规则：申请人不得自批
+        self_void = (vr.get("by") or "") == u["name"]     # 硬规则：申请人不得自批（主管理员例外，同终审口径 V2.430）
+        if self_void and not db.is_super(u):
             skipped.append("#%d 申请人与终审人同为 %s，不得自批" % (e["id"], u["name"]))
             continue
         vr2 = dict(vr, state=("voided" if approve else "rejected"),
                    reviewBy=u["name"], reviewAt=_now(), note=note[:300])
+        if self_void:
+            vr2["selfReview"] = True                       # 自批留痕：这次作废没经第二人
         if approve:
             db.bom_update_entry(e["id"], {"void_req": vr2})
-            db.bom_supersede_entry(e["id"], "作废：%s（申请 %s，终审 %s）" % (vr.get("reason"), vr.get("by"), u["name"]),
-                                   kind="voided")
+            db.bom_supersede_entry(e["id"], "作废：%s（申请 %s，终审 %s%s）" % (
+                vr.get("reason"), vr.get("by"), u["name"], "·自批" if self_void else ""), kind="voided")
         else:
             db.bom_update_entry(e["id"], {"void_req": vr2})
-        db.bom_add_audit(e["id"], u["name"], "作废终审", "申请：" + (vr.get("reason") or ""),
+        db.bom_add_audit(e["id"], u["name"], "作废终审" + ("·自批" if self_void else ""), "申请：" + (vr.get("reason") or ""),
                          ("批准作废" if approve else "驳回") + ("（%s）" % note if note else ""))
         done += 1
     # 待修批次
@@ -1699,12 +1702,14 @@ async def bom_void_review(request: Request):
             vr = p.get("void_req") or {}
             if vr.get("state") != "pending":
                 continue
-            if (vr.get("by") or "") == u["name"]:
+            self_void = (vr.get("by") or "") == u["name"]
+            if self_void and not db.is_super(u):          # 申请人不得自批（主管理员例外）
                 skipped.append("待修批次：申请人不得自批")
                 continue
             db.bom_pending_set_void(src, p["approval_no"], gid,
                                     dict(vr, state=("voided" if approve else "rejected"),
-                                         reviewBy=u["name"], reviewAt=_now(), note=note[:300]))
+                                         reviewBy=u["name"], reviewAt=_now(), note=note[:300],
+                                         **({"selfReview": True} if self_void else {})))
             done += 1
     db.audit(u["name"], "bom_void_review", target=str(eid or gid),
              detail=("批准作废" if approve else "驳回") + " %d 条" % done)
