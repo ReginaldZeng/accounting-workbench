@@ -410,11 +410,15 @@ def invoice_cost_excl(qty, price, tax, invoice_type, rules=None):
 
 
 def product_key(rec):
-    """版本归组键 = (产品名, 客户；客户为空用 CP 码兜底)。quirk #7：CP 码跨版本跳号，
-    又有同名双产品，故归组不认 CP。产品名/客户先 strip（源数据有杂散空格）。"""
+    """产品身份键（业务方 2026-09-04 定：**CP 码就是产品身份**，改口径）：
+    有 CP 码 → 「产品名|CP码」——不同 CP（变体如印刷袋 …-2 / 空白袋 …、或改配方跳号）**各自成产品、各自定稿入库**，
+    互不顶替；**同 CP** 才是同产品的版本链（如同一核算表重算/替换）。CP 码为空 → 退回「产品名|客户」（同名双产品靠客户分）。
+    ⚠ 旧记录存的是老键(名+客户)；改键后**新入账/重连才走新键**，两者不互成版本——现存撞车单需重新立项/重连一次。"""
     pn = norm(rec.get("productName"))
-    cust = norm(rec.get("customer"))
-    return pn + "|" + (cust or norm(rec.get("cpCode")))
+    cp = norm(rec.get("cpCode"))
+    if cp:
+        return pn + "|" + cp
+    return pn + "|" + norm(rec.get("customer"))
 
 
 def fee_from_summary(summary):
@@ -956,9 +960,8 @@ def match_bom_entry(rec, bom_lists):
             if norm(b.get("cpCode")) == cp:
                 return b
     pk = product_key(rec)
-    for b in bl:                                    # ② 归组键（名+客户；CP 跨修订跳号时靠它，quirk#7）
-        bk = norm(b.get("productName")) + "|" + (norm(b.get("customer")) or norm(b.get("cpCode")))
-        if bk == pk:
+    for b in bl:                                    # ② 产品身份键兜底（CP 空时按名+客户；同口径 product_key）
+        if product_key(b) == pk:
             return b
     for b in bl:                                    # ③ 产品名/页名对齐
         if norm(b.get("productName")) == pn or norm(b.get("sheet")) == pn:
