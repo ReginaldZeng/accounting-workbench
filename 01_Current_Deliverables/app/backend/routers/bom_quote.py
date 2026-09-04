@@ -1569,12 +1569,19 @@ async def bom_final_review(request: Request):
         return JSONResponse({"ok": False, "msg": "退回请写明原因（成本会计要据此改）"}, status_code=400)
     # 终审是「对外开放」的最后一道门 → **初审人不得自己终审**（代码强制，审查加固；镜像作废流的自批闸）。
     # 退回不受此限（谁都能打回）；只有「盖已审核戳·对外」这一步要求两个人。
-    if approve and (e.get("finalized_by") or "") == u["name"]:
-        return JSONResponse({"ok": False, "msg": "本版初审人是您本人，不能自己终审——终审须由另一人（财务BP）把关，方可对外开放。"}, status_code=400)
+    # 例外（业务方定 2026-09-04）：**主管理员**可自审自终——小团队常一人身兼初审+终审，
+    #   与其逼着造个假的第二账号(反而污染审计)，不如允许主管理员自审、但戳与留痕明记「自审·单人」。
+    self_review = approve and (e.get("finalized_by") or "") == u["name"]
+    if self_review and not db.is_super(u):
+        return JSONResponse({"ok": False, "msg": "本版初审人是您本人，不能自己终审——终审须由另一人（财务BP）把关，方可对外开放。（仅主管理员可自审）"}, status_code=400)
     if approve:
-        db.bom_update_entry(e["id"], {"status": "已审核", "ack": {"by": u["name"], "at": _now(), "note": note[:200]}})
-        db.bom_add_audit(e["id"], u["name"], "终审（财务BP）", "初审", "已审核·对外开放" + ("（%s）" % note if note else ""))
-        msg = "已终审通过，盖「已审核」戳，对外开放给 BP 报价"
+        ack = {"by": u["name"], "at": _now(), "note": note[:200]}
+        if self_review:
+            ack["selfReview"] = True          # 自审留痕：这版没经第二人，谁看台账都认得出
+        db.bom_update_entry(e["id"], {"status": "已审核", "ack": ack})
+        did = "已审核·对外开放" + ("·自审(主管理员单人)" if self_review else "") + ("（%s）" % note if note else "")
+        db.bom_add_audit(e["id"], u["name"], "终审（财务BP）" + ("·自审" if self_review else ""), "初审", did)
+        msg = "已终审通过，盖「已审核」戳，对外开放给 BP 报价" + ("（主管理员自审）" if self_review else "")
     else:
         db.bom_clear_final_if(_src(), e["product_key"], e["id"])   # 退回 → 撤下定稿指针(按id校验，审查M9)，不再供 BP 消费
         db.bom_update_entry(e["id"], {"status": "已复核", "ack": None, "finalized_by": "", "finalized_at": ""})

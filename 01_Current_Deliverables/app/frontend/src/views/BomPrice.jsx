@@ -371,6 +371,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
         <td className="sub">{r.approval ? <span className="bom-apprno">{r.approval}</span> : <span className="muted">—</span>}</td>
         <td>{r.customer || <span className="muted">—</span>}</td>
         <td><span className={'tag ' + (STATUS[r.status]?.cls || 'unmap')}>{STATUS[r.status]?.txt || r.status}</span>
+          {r.ack?.selfReview && <span className="bom-gvtag" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }} title="主管理员自审：初审与终审为同一人（单人模式），未经第二人把关">自审</span>}
           {r.hasGoodsVersion && <span className="bom-gvtag" title="附有成本会计商品版（脱敏公开版），已留档">＋商品版</span>}</td>
         <td style={{ whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
           <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>核算表 ›</a>
