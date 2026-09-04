@@ -409,6 +409,41 @@ class TestReportBasis(unittest.TestCase):
         self.assertEqual(r["stats"]["待查日次"], 1)
 
 
+class TestAggregateTolerance(unittest.TestCase):
+    """与成本会计底表一致：异常按**人整期净多记**判（白/夜各自，弹性 0.5），逐日只作明细。
+    整期没超 → 逐日那几天的「超弹性异常」降级为中性「已消化」，逐人不报异常；整期超 → 逐日保留供定位。"""
+
+    def _person(self, days):
+        reps = [d[0] for d in days] + [0] * (7 - len(days))
+        puns = [d[1] for d in days] + [""] * (7 - len(days))
+        sm = ta.parse_summary(_summary_book([("甲", "植物肉", "锦绣", "", reps, round(sum(reps), 1), 0)]))
+        pk = ta.parse_punch(_punch_book([("甲", "组", "临时普工-锦绣人力", puns)]))
+        return ta.compute(sm, pk, contract=ta.RATE_TABLE_OBSERVED)
+
+    def test_within_tolerance_downgrades_the_day(self):
+        # 1日 上报11/在厂10 → 逐日多记1(超弹性)；2日 上报10/在厂11 → 撑得住。整期净多记 = 1−1 = 0 ≤ 0.5
+        r = self._person([(11, "07:00\n18:00"), (10, "07:00\n19:00")])
+        d1 = next(x for x in r["rows"] if x["日"] == 1)
+        self.assertEqual(d1["档"], "over_absorbed")            # 逐日降级
+        self.assertIn("整期已消化", d1["判定"])
+        p = r["people"][0]
+        self.assertFalse(p["超弹性"])                           # 逐人不报异常
+        self.assertEqual(p["异常多记小时"], 0.0)
+        self.assertEqual(r["stats"]["超弹性人数"], 0)
+        self.assertEqual(r["stats"]["异常多记日次"], 0)
+        self.assertEqual(r["stats"]["整期已消化多记日次"], 1)
+
+    def test_exceeds_tolerance_stays_abnormal(self):
+        # 1日 多记1；2日 上报8/在厂8 撑得住(净0)。整期净多记 = 1 > 0.5 → 真异常，逐日保留
+        r = self._person([(11, "07:00\n18:00"), (8, "07:00\n16:00")])
+        d1 = next(x for x in r["rows"] if x["日"] == 1)
+        self.assertEqual(d1["档"], "over_out")
+        p = r["people"][0]
+        self.assertTrue(p["超弹性"])
+        self.assertAlmostEqual(p["异常多记小时"], 1.0, places=1)
+        self.assertEqual(r["stats"]["超弹性人数"], 1)
+
+
 class TestMixedShift(unittest.TestCase):
     def test_mixed_is_flagged(self):
         """同月既有白班又有夜班的人，切班规则未定，必须显式标出来而不是硬算。"""
