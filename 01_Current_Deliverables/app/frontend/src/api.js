@@ -1,6 +1,16 @@
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1  前端 API 封装（加 reconcile/sync + 4位金额格式）
 // cache:'no-store' —— 接口永不吃浏览器缓存，避免后端更新后前端拿到旧数据（字段对不上）
-const j = async (url, opt) => { const r = await fetch(url, { cache: 'no-store', ...opt }); if(!r.ok) throw new Error(url+' '+r.status); return r.json(); }
+// 非 2xx：尽量把后端 {ok:false,msg} 的业务原因抛出来（如「初审人是您本人，不能自己终审」），
+// 别只剩「url 400」——否则各处 catch(e)=>flash(e.message) 全显通用错误码，用户不知道为啥被拒。
+const j = async (url, opt) => {
+  const r = await fetch(url, { cache: 'no-store', ...opt })
+  if (!r.ok) {
+    let m = ''
+    try { const b = await r.json(); m = (b && (b.msg || b.detail)) || '' } catch { /* 无 JSON 体 */ }
+    throw new Error(m || (url + ' ' + r.status))
+  }
+  return r.json()
+}
 export const getFund = () => j('/api/fund-dashboard')
 export const syncFund = () => j('/api/fund-dashboard/sync', {method:'POST'})
 export const getLedger = () => j('/api/account-ledger')
