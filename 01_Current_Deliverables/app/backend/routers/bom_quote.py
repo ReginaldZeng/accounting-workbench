@@ -910,6 +910,25 @@ async def bom_set_mat_type(request: Request):
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
 
 
+@router.post("/api/bom/set-erp-code")
+async def bom_set_erp_code(request: Request):
+    """补/改产品的 ERP 物料编码（钉钉解析常缺此码，成本会计在台账行手工补录）。
+    只动标识不动成本；改动逐条留痕（谁、原值→新值），已审核记录也可补——ERP 码是身份不是金额。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「复核」权限"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    code = str(body.get("erpCode") or "").strip()
+    old = (e.get("erp_code") or "").strip()
+    if code != old:
+        db.bom_update_entry(e["id"], {"erp_code": code})
+        db.bom_add_audit(e["id"], u["name"], "补物料编码", old or "（空）", code or "（清空）")
+    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+
+
 @router.get("/api/bom/usage-spreads")
 async def bom_usage_spreads(request: Request):
     """BOM反查·批量价差（④报价行上红点用）：本记录每个**真实编码**物料，在本数据源全部记录里研发填的含税价

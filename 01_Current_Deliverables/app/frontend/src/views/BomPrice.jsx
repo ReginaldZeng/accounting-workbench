@@ -8,7 +8,7 @@ import {
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
-  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, getBomUsageSpreads,
+  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads,
   getBomInvoiceRules, setBomInvoiceRules,
 } from '../api.js'
 
@@ -337,41 +337,47 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
     const s = (a.approvalNo + ' ' + (a.products || []).map(p => p.productName + p.cpCode).join(' ')).toLowerCase()
     return s.includes(q.trim().toLowerCase())
   })
+  // 审核日期 = 定稿/审核通过日期（终审 ack.at 优先，其次初审 finalizedAt，再次复核 reviewedAt）——只取日期段
+  const auditDate = (r) => (((r.ack && r.ack.at) || r.finalizedAt || r.reviewedAt || '').slice(0, 10)) || '—'
+  // 补物料编码：成本会计在台账行手工补/改产品 ERP 物料编码（写库+留痕，只动标识不动成本）
+  const fillErp = async (r) => {
+    const cur = (r.erpCode || '').trim()
+    const v = window.prompt(`补 / 改 ERP物料编码\n产品：${r.productName}（${r.cpCode}）`, cur)
+    if (v == null) return
+    const code = v.trim()
+    if (code === cur) return
+    const res = await bomSetErpCode(r.id, code)
+    if (res && res.ok) { flash && flash('物料编码已更新'); onRefresh && onRefresh() }
+    else flash && flash((res && res.msg) || '更新失败')
+  }
   const renderRow = (r) => {
     const nver = versionsOf(r.productKey).length
     const dot = (v, src) => Math.abs((v || 0) - (src || 0)) > 1e-9
     return (
       <tr key={r.id} className="row" onClick={() => onOpen(r.id)} title="查看成本核算表">
+        <td className="mono sub">{r.erpCode || <span className="muted">—</span>}</td>
         <td className="mono" style={{ fontWeight: 600 }}>{r.cpCode}</td>
         <td style={{ fontWeight: 600 }}>{r.productName}
-          {r.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + r.quoteReason}>禁报价</span>}</td>
-        <td><CatCell p={r} /></td>
-        <td>{r.channelLabel ? <span className="tag ok" style={{ color: 'var(--teal)', background: 'var(--teal-bg)', borderColor: 'var(--teal)' }}>{r.channelLabel}</span> : <span className="muted">—</span>}</td>
-        <td className="sub">{r.packSpec || '—'}</td>
-        <td>{r.customer || <span className="muted">—</span>}</td>
+          {r.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + r.quoteReason}>禁报价</span>}
+          {nver > 1 && <a className="lk" style={{ marginLeft: 6, fontSize: 11, fontWeight: 400 }} onClick={e => { e.stopPropagation(); onOpen(r.id) }}>{nver} 版</a>}</td>
+        <td className="sub" style={{ whiteSpace: 'nowrap' }}>{r.packSpec || '—'}</td>
         <td className="num">{fmt(r.comp.mat)}</td>
         <td className="num">{fmt(r.comp.pack)}</td>
         <td className="num">{fmt(r.comp.mfg)}{dot(r.fee.mfg, r.srcFee.mfg) && <b className="bom-dot" title="已调整" />}</td>
         <td className="num" title="小料类标准 0.18 元/kg 含税">{fmt(r.comp.load)}{dot(r.fee.load, r.srcFee.load) && <b className="bom-dot" title="已调整" />}</td>
         <td className="num">{fmt(r.comp.adm)}{dot(r.fee.adm, r.srcFee.adm) && <b className="bom-dot" title="已调整" />}</td>
         <td className="num" style={{ fontWeight: 700, color: 'var(--teal)' }}>{fmt(r.comp.full)}</td>
-        <td className="sub">{r.calcDate}</td>
-        <td className="sub">
-          {r.origin ? <Origin o={r.origin} small /> : (SRC_LABEL[r.sourceType] || r.sourceType)}
-          <div className="bom-srcline">{SRC_LABEL[r.sourceType] || r.sourceType}
-            {r.hasGoodsVersion && <span className="bom-gvtag" title="附有成本会计商品版（脱敏公开版），已留档">＋商品版</span>}</div>
-          {nver > 1 && <a className="lk" onClick={e => { e.stopPropagation(); onOpen(r.id) }}>{nver} 版</a>}</td>
+        <td className="sub" style={{ whiteSpace: 'nowrap' }} title="定稿/审核通过日期（终审优先，其次初审）">{auditDate(r)}</td>
+        <td className="sub">{r.approval ? <span className="bom-apprno">{r.approval}</span> : <span className="muted">—</span>}</td>
+        <td>{r.customer || <span className="muted">—</span>}</td>
         <td><span className={'tag ' + (STATUS[r.status]?.cls || 'unmap')}>{STATUS[r.status]?.txt || r.status}</span>
-          {r.quotable === false && <span className="bom-noquote" title={r.quoteReason}>禁报价</span>}</td>
-        <td>{r.finalPassed
-          ? <span className="tag ok" title={'终审：' + (r.ack?.by || '') + ' ' + (r.ack?.at || '') + (r.ack?.note ? '｜' + r.ack.note : '')}>已审核·对外 ✓</span>
-          : r.needFinalReview
-            ? (onFinalReview
-              ? <a className="lk" style={{ fontWeight: 700, color: 'var(--green)' }}
-                onClick={e => { e.stopPropagation(); onFinalReview(r) }}>⚑ 终审 ›</a>
-              : <span className="tag late">待终审</span>)
-            : <span className="muted" style={{ fontSize: 11 }}>—</span>}</td>
-        <td><a className="lk" onClick={e => { e.stopPropagation(); onOpen(r.id) }}>核算表 ›</a></td>
+          {r.hasGoodsVersion && <span className="bom-gvtag" title="附有成本会计商品版（脱敏公开版），已留档">＋商品版</span>}</td>
+        <td style={{ whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
+          <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>核算表 ›</a>
+          <a className="lk" style={{ marginRight: 10 }} title="补/改本产品的 ERP 物料编码" onClick={() => fillErp(r)}>补物料编码</a>
+          {r.needFinalReview && onFinalReview &&
+            <a className="lk" style={{ fontWeight: 700, color: 'var(--green)' }} onClick={() => onFinalReview(r)}>⚑ 终审 ›</a>}
+        </td>
       </tr>
     )
   }
@@ -458,16 +464,16 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
           : <div className="tbl-wrap">
             <table className="bom-ledger">
               <thead><tr>
-                <th className="th">CP码/编号</th><th className="th">产品名称</th><th className="th">类型</th><th className="th">渠道</th>
-                <th className="th">规格</th><th className="th">客户</th>
+                <th className="th">物料编码</th><th className="th">CP码</th><th className="th">产品名称</th>
+                <th className="th">规格</th>
                 <th className="th" style={{ textAlign: 'right' }}>原料</th><th className="th" style={{ textAlign: 'right' }}>包材</th>
                 <th className="th" style={{ textAlign: 'right' }}>加工费</th><th className="th" style={{ textAlign: 'right' }}>装卸费</th>
                 <th className="th" style={{ textAlign: 'right' }}>管理费</th><th className="th" style={{ textAlign: 'right' }}>全成本（含税）</th>
-                <th className="th">核算日期</th><th className="th">来源</th><th className="th">状态</th>
-                <th className="th">终审</th><th className="th"></th>
+                <th className="th">审核日期</th><th className="th">钉钉单号</th><th className="th">客户</th>
+                <th className="th">当前状态</th><th className="th">操作</th>
               </tr></thead>
               <tbody>
-                {shown.length === 0 && <tr><td colSpan={17} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 30 }}>
+                {shown.length === 0 && <tr><td colSpan={15} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 30 }}>
                   暂无匹配的台账产品{fch !== 'all' ? `（渠道：${CH[fch]}）` : ''}</td></tr>}
                 {shown.map(renderRow)}
               </tbody>
