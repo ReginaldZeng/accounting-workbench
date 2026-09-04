@@ -942,21 +942,25 @@ def parse_bom_list(data, src_filename=None):
 
 
 def match_bom_entry(rec, bom_lists):
-    """同 match_bom_list，但返回**整条 BOM 条目**（含 materials 与该文件的 craft 工艺流程）。找不到 → None。"""
-    pk = product_key(rec)
+    """同 match_bom_list，但返回**整条 BOM 条目**（含 materials 与该文件的 craft 工艺流程）。找不到 → None。
+    ⚠ **CP 码精确匹配放最前**（业务方 2026-09-04 实证 059207）：同名同客户的两个**包装版本**——
+    「空白袋+工厂打印标签」(CP…) 与「印刷袋」(CP…-2)，归组键(名+客户)会撞、把 -2 配到空白袋那份 BOM → 假报缺/多料。
+    CP 码(…vs …-2)是唯一能区分两版的键，必须先按它配。"""
     pn = norm(rec.get("productName"))
     if not pn:
         return None
-    for b in bom_lists or []:                      # ① 归组键精确对齐
+    bl = bom_lists or []
+    cp = norm(rec.get("cpCode"))
+    if cp:                                          # ① CP码精确对齐（区分同名不同包装版）
+        for b in bl:
+            if norm(b.get("cpCode")) == cp:
+                return b
+    pk = product_key(rec)
+    for b in bl:                                    # ② 归组键（名+客户；CP 跨修订跳号时靠它，quirk#7）
         bk = norm(b.get("productName")) + "|" + (norm(b.get("customer")) or norm(b.get("cpCode")))
         if bk == pk:
             return b
-    cp = norm(rec.get("cpCode"))                   # ② CP码精确对齐
-    if cp:
-        for b in bom_lists or []:
-            if norm(b.get("cpCode")) == cp:
-                return b
-    for b in bom_lists or []:                      # ③ 产品名/页名对齐
+    for b in bl:                                    # ③ 产品名/页名对齐
         if norm(b.get("productName")) == pn or norm(b.get("sheet")) == pn:
             return b
     return None
