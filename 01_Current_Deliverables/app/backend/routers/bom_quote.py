@@ -768,6 +768,8 @@ async def bom_approval(request: Request):
                        "coreCp": anchor.get("cp_code") or core.get("cpCode") or "",
                        "coreFile": anchor.get("src_file") or (pd or {}).get("src_file") or "",
                        "allPending": not active and bool(pd),
+                       # 纯历史组：无 active、无待修，只剩被替换/作废的旧记录 → 处理页不当编号「组」，收进「历史留痕」块
+                       "historyOnly": (not active) and (not pd),
                        "pendingAt": (pd or {}).get("created_at") or "", "pendingBy": (pd or {}).get("created_by") or "",
                        "date": anchor.get("calc_date") or core.get("calcDate") or "",
                        "products": pv, "superseded": hist,

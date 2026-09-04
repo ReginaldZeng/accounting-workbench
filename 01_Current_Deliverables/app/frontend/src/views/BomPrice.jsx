@@ -572,7 +572,9 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
   }
 
   const groups = d?.groups || []
-  const prodCount = groups.reduce((s, g) => s + g.products.length, 0)
+  const liveGroups = groups.filter(g => !g.historyOnly)   // 纯历史组(0 active、无待修，只剩作废/被替换)不占组号
+  const deadHist = groups.filter(g => g.historyOnly).flatMap(g => g.superseded)
+  const prodCount = liveGroups.reduce((s, g) => s + g.products.length, 0)
   const histCount = groups.reduce((s, g) => s + g.superseded.length, 0)
 
   return (
@@ -580,8 +582,8 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
       <div className="head">
         <div>
           <div className="h-title">处理审批单　<span className="bom-apprno">{no || '（手工/无单号）'}</span>
-            {groups.length === 0 && <span className="tag unmap">无记录</span>}</div>
-          <div className="h-sub">一个成本核算表文件（含成品+半成品+复配料）＋ 它的 BOM 清单 ＝ <b>一组</b>；本单共 {groups.length} 组 · {prodCount} 个产品{histCount ? ` · ${histCount} 条替换留痕` : ''}</div>
+            {liveGroups.length === 0 && <span className="tag unmap">无记录</span>}</div>
+          <div className="h-sub">一个成本核算表文件（含成品+半成品+复配料）＋ 它的 BOM 清单 ＝ <b>一组</b>；本单共 {liveGroups.length} 组 · {prodCount} 个产品{histCount ? ` · ${histCount} 条替换留痕` : ''}</div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn-sec" onClick={onBack}>返回待办</button>
@@ -604,10 +606,10 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
           </div>
         </div>}
 
-        {groups.length === 0 && <div className="card" style={{ padding: 24, textAlign: 'center', color: 'var(--ink-3)' }}>
+        {liveGroups.length === 0 && deadHist.length === 0 && <div className="card" style={{ padding: 24, textAlign: 'center', color: 'var(--ink-3)' }}>
           该单号下暂无已入账记录。请回待办用「手工入账 / 从钉钉取数」先入账。</div>}
 
-        {groups.map((g, gi) => (
+        {liveGroups.map((g, gi) => (
           <div key={g.groupId} className="card bom-sect bom-grp">
             <div className="bom-secthead">
               <span className="bom-no">{gi + 1}</span>
@@ -718,6 +720,24 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
                 </div>))}
             </div>}
           </div>))}
+
+        {deadHist.length > 0 && (
+          <div className="card bom-sect">
+            <div className="bom-secthead">
+              <span className="bom-no" style={{ background: 'var(--ink-3)', color: '#fff' }}>史</span>
+              <b>历史留痕（已全部作废 / 被替换的旧版）</b>
+              <span className="mono muted" style={{ fontSize: 11, marginLeft: 6 }}>{deadHist.length} 条 · 不在台账、不占组号与产品数</span>
+            </div>
+            <div style={{ padding: '4px 14px 12px' }}>
+              {deadHist.slice().sort((a, b) => a.id - b.id).map(h => (
+                <div key={h.id} className="bom-audit">
+                  <div className="bom-audit-h">#{h.id} {h.cpCode} · {h.productName}　<span className="tag unmap">已被替换 / 作废</span></div>
+                  <div className="muted" style={{ fontSize: 11 }}>{h.supersededAt}　{h.reason}</div>
+                  <div className="muted" style={{ fontSize: 10.5 }}>原文件：{h.srcFile || '—'}　·　入账 {h.createdAt} by {h.createdBy}</div>
+                </div>))}
+            </div>
+          </div>
+        )}
 
         <div className="foot">组＝一个成本核算表文件（成品+半成品+复配料）＋ 匹配的 BOM 清单。替换核算表时：新文件里勾稽平的产品顶替同组同产品旧版（旧版标「已被替换」留痕、退出标准成本库与定稿指针）；仍不平的不入账并回报原因；原先因不平未入的产品（如半成品）修好后会作「组内新增」补入。<b>定性</b>＝物料类别（复配料/自产·委外 半成品·成品）+ 是否建议对外报价（不建议须写原因），定稿前必须完成。</div>
       </div>
