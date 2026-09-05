@@ -1887,22 +1887,74 @@ def _xlsx_response(data, filename):
 
 
 def _xlsx_to_html(data, title=""):
-    """把 xlsx 字节渲染成只读 HTML 预览（原版/重排版通用）——服务端转，前端无需 xlsx 库、离线可用。
-    openpyxl 读值；合并单元格按 rowspan/colspan 合并；空白尾行/尾列裁掉。"""
+    """xlsx 字节 → 只读 HTML 预览（原版/重排版通用）——服务端转，前端无需 xlsx 库、离线可用。
+    尽量还原排版：数字按单元格格式格式化（小数收位/百分比/整数不加千分位免断编码），搬加粗/底色/对齐/列宽，
+    合并单元格 rowspan/colspan。"""
     import io
     import html as _html
     from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
     wb = load_workbook(io.BytesIO(data), data_only=True)
     esc = _html.escape
+
+    def fmt(v, nf):
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "是" if v else "否"
+        if isinstance(v, (int, float)):
+            low = (nf or "").lower()
+            if "%" in low:
+                d = low.split(".")[1].count("0") if "." in low else 0
+                return ("{:.%df}%%" % d).format(v * 100)
+            if float(v).is_integer():
+                return str(int(v))                     # 整数(含 ERP 码)不加千分位，免把编码断开
+            if "." in (nf or ""):
+                d = (nf.split(".")[1].count("0")) or 2
+                return "{:.{}f}".format(v, d)
+            return ("{:.4f}".format(v)).rstrip("0").rstrip(".")
+        return str(v)
+
+    def hexof(c):
+        try:
+            if c is None or getattr(c, "type", None) != "rgb":
+                return None
+            rgb = c.rgb
+            return rgb[-6:].upper() if isinstance(rgb, str) and len(rgb) >= 6 else None
+        except Exception:
+            return None
+
+    def style(cell, spanned):
+        s = []
+        f = cell.font
+        if f and f.bold:
+            s.append("font-weight:700")
+        fc = hexof(f.color) if f else None
+        if fc and fc != "000000":
+            s.append("color:#" + fc)
+        fl = cell.fill
+        if fl is not None and getattr(fl, "patternType", None) == "solid":
+            bg = hexof(fl.fgColor)
+            if bg and bg != "FFFFFF":
+                s.append("background:#" + bg)
+        al = cell.alignment
+        if al and al.horizontal in ("left", "center", "right"):
+            s.append("text-align:" + al.horizontal)
+        elif isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+            s.append("text-align:right")
+        if spanned:
+            s.append("white-space:normal;max-width:none")   # 跨列标题/长说明整段展开，不截断
+        return ";".join(s)
+
     out = ['<!doctype html><html lang="zh"><head><meta charset="utf-8">',
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
            '<title>', esc(title or "核算表预览"), '</title><style>',
-           'body{font:13px/1.55 -apple-system,Segoe UI,"Microsoft YaHei",sans-serif;margin:16px;color:#1a1a1a;background:#fff}',
-           'h2{font-size:14px;margin:18px 0 6px;color:#333}',
-           'table{border-collapse:collapse;margin:0 0 10px;font-size:12px}',
-           'td{border:1px solid #d5d5d5;padding:3px 8px;white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis;vertical-align:top}',
-           'tr:nth-child(even) td{background:#fafafa}td.n{text-align:right;font-variant-numeric:tabular-nums}',
-           '.hint{color:#888;font-size:12px;margin-bottom:10px}</style></head><body>']
+           'body{font:13px/1.5 -apple-system,Segoe UI,"Microsoft YaHei",sans-serif;margin:18px;color:#1a2430;background:#f6f7f9}',
+           '.sheet{background:#fff;border:1px solid #e3e6ea;border-radius:8px;padding:14px 16px;margin:0 0 14px;box-shadow:0 1px 3px rgba(0,0,0,.04);overflow-x:auto}',
+           'h2{font-size:13px;margin:0 0 8px;color:#5a6b7b;font-weight:600}',
+           'table{border-collapse:collapse;font-size:12px}',
+           'td{border:1px solid #e6e9ed;padding:4px 9px;white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;font-variant-numeric:tabular-nums}',
+           '.hint{color:#8a94a0;font-size:12px;margin:0 0 12px}</style></head><body>']
     if title:
         out.append('<div class="hint">%s · 只读预览（留档核对请下载 xlsx 原件）</div>' % esc(title))
     for ws in wb.worksheets:
@@ -1914,24 +1966,32 @@ def _xlsx_to_html(data, title=""):
                     if (r, c) != (mr.min_row, mr.min_col):
                         skip.add((r, c))
         maxr, maxc = ws.max_row or 0, ws.max_column or 0
-        out.append('<h2>%s</h2><table>' % esc(ws.title))
+        out.append('<div class="sheet"><h2>%s</h2><table>' % esc(ws.title))
+        cols = []
+        for c in range(1, maxc + 1):
+            dim = ws.column_dimensions.get(get_column_letter(c))
+            w = int(min(340, max(38, dim.width * 7))) if (dim and dim.width) else 0
+            cols.append('<col style="width:%dpx">' % w if w else '<col>')
+        out.append('<colgroup>' + ''.join(cols) + '</colgroup>')
         for r in range(1, maxr + 1):
             out.append('<tr>')
             for c in range(1, maxc + 1):
                 if (r, c) in skip:
                     continue
-                v = ws.cell(row=r, column=c).value
-                attr = ''
+                cell = ws.cell(row=r, column=c)
                 sp = span.get((r, c))
+                attr = ''
                 if sp:
                     if sp[0] > 1:
                         attr += ' rowspan="%d"' % sp[0]
                     if sp[1] > 1:
                         attr += ' colspan="%d"' % sp[1]
-                cls = ' class="n"' if isinstance(v, (int, float)) else ''
-                out.append('<td%s%s>%s</td>' % (attr, cls, esc("" if v is None else str(v))))
+                st = style(cell, bool(sp and sp[1] > 1))
+                if st:
+                    attr += ' style="%s"' % st
+                out.append('<td%s>%s</td>' % (attr, esc(fmt(cell.value, cell.number_format))))
             out.append('</tr>')
-        out.append('</table>')
+        out.append('</table></div>')
     out.append('</body></html>')
     return "".join(out)
 
