@@ -8,7 +8,7 @@ import {
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
-  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, bomSetNetWeight, getBomUsageSpreads, getBomErpLookup,
+  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup,
   getBomInvoiceRules, setBomInvoiceRules,
 } from '../api.js'
 
@@ -1082,7 +1082,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               <div className="bom-bigprice">¥ {fmt(full)} <small>/kg</small></div>
               <div className="bom-rspec">{entry.packSpec}　·　核算日期 {entry.calcDate}</div>
               <ErpCodeRow entry={entry} canEdit={!!cfg?.canAudit} onChanged={onChanged} flash={flash} />
-              <NetWeightRow entry={entry} />
+              {/* 单位净重不在核算侧体现（业务方定 2026-09-05）：最小销售单元/净重是 BP 定价的事；接口仍带规格解析参考值给 BP */}
               <div className="bom-rlines">
                 <RLine k={entry.semi ? '原料' : '原料（含复配料）'} v={`¥ ${fmt(comp.mat)}`} />
                 <RLine k="包材" v={`¥ ${fmt(comp.pack)}`} />
@@ -1297,15 +1297,6 @@ function ErpCodeRow({ entry, canEdit, onChanged, flash }) {
     </div>}
     {cmp && <CompareEntriesModal entry={entry} lk={lk} others={others(cmp.first)} onAdopt={adopt} onClose={() => setCmp(null)} flash={flash} />}
   </>
-}
-// 规格解析净重（参考）：V2.445 起**不再是成本会计要填/确认的闸**——业务方定「成本会计不知道最小销售单元」（一袋/一盒/一组几袋是 BP 定价的事）。
-// 这里只把规格里解析出的每袋净重摆出来给 BP 参考，随接口带出；BP 侧在自己的物料表维护「最小销售单元 + 净重」，以 BP 为准。
-function NetWeightRow({ entry }) {
-  const v = entry.netWeightKg
-  return <div className="bom-rline" style={{ margin: '4px 0 6px' }} title="按包装规格文本解析出的每袋/盒净重，仅供 BP 定价侧参考；最小销售单元与净重由 BP 维护，核算侧不确认、不设闸">
-    <span>规格解析净重<em className="bom-srcv">供 BP 参考</em></span>
-    <b className="muted" style={{ fontWeight: 500 }}>{v != null ? `${v} kg/袋` : '规格解析不出'}</b>
-  </div>
 }
 function FeeRow({ label, k, fee, edit, setF, dot, src }) {
   return <div className="bom-rline">
