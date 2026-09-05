@@ -158,8 +158,10 @@ def _classified(e):
 
 
 def _net_weight(e):
-    """单位净重 kg（BP 元/kg→袋/盒换算，对接 2026-09-05 §2）：存值(成本会计确认) 优先，否则按 pack_spec 预填（待确认）。
-    → (kg 或 None, 'manual' | 'auto' | '')"""
+    """单位净重 kg（BP 元/kg→袋/盒换算，对接 2026-09-05 §2）：存值 优先，否则按 pack_spec 解析。
+    → (kg 或 None, 'manual' | 'auto' | '')
+    ⚠ V2.445 起**只是参考值、不是闸**（业务方定：成本会计不知道最小销售单元——一袋还是一箱、一组几袋，是 BP 定价侧的事）。
+      接口照带 netWeightKg/netWeightSrc，BP 侧在自己的物料表维护「最小销售单元 + 净重」，以 BP 的为准。"""
     v = e.get("net_weight_kg")
     if v is not None:
         try:
@@ -976,13 +978,16 @@ async def bom_erp_lookup(request: Request):
         cands = _erp_lookup(cp)
     except Exception as ex:
         return {"ok": True, "offline": True, "cp": cp, "candidates": [], "msg": "金蝶未连接或字段待联调：%s" % str(ex)[:160]}
-    if cands:
-        others = [x for x in db.bom_list_entries(_src()) if not (e and x["id"] == e["id"])]
-        for c in cands:
-            c["inLedger"] = [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "status": x.get("status") or "",
-                              "productName": (x.get("product_name") or "").strip()}
-                             for x in others if (x.get("erp_code") or "").strip() == c["erpCode"]]
-    return {"ok": True, "cp": cp, "current": (e.get("erp_code") or "").strip() if e else "", "candidates": cands}
+    others = [x for x in db.bom_list_entries(_src()) if not (e and x["id"] == e["id"])]
+    brief = lambda x: {"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "status": x.get("status") or "",
+                       "productName": (x.get("product_name") or "").strip(), "erpCode": (x.get("erp_code") or "").strip(),
+                       "calcDate": x.get("calc_date") or ""}
+    for c in cands:
+        c["inLedger"] = [brief(x) for x in others if (x.get("erp_code") or "").strip() == c["erpCode"]]
+    cur = (e.get("erp_code") or "").strip() if e else ""
+    # 台账里与本记录**同物料编码**的其它有效记录——「核对」弹窗拿它们做两张核算表的用量/价格对比（V2.444）
+    same_code = [brief(x) for x in others if cur and (x.get("erp_code") or "").strip() == cur]
+    return {"ok": True, "cp": cp, "current": cur, "candidates": cands, "sameCode": same_code}
 
 
 @router.get("/api/bom/material-usage")
@@ -1958,8 +1963,8 @@ async def bom_classify(request: Request):
     ub = _upstream_block(_upstream_status(e2))   # 上游未就绪 → 存定性但不定稿
     if ub:
         miss = miss + ["上游：" + "；".join(ub)]
-    if not ((_net_weight(e2)[0] or 0) > 0):      # 净重闸（BP 对接 2026-09-05 §2，与勾稽同级）：单位净重空/≤0 不定稿
-        miss = miss + ["单位净重(kg)未填或≤0——右栏「单位净重」填好并确认再定稿"]
+    # （V2.445 撤：单位净重不再是定稿闸——业务方定「成本会计不知道最小销售单元」，净重/销售单元由 BP 定价侧维护；
+    #   核算侧只按规格解析出参考值随接口带出，见 _net_weight。）
     # 换码承接闸（业务方定 2026-09-05）：同 CP / 同物料编码已有审核版 → **必须先答「原版是否失效」**（confirmObsolete=true）才定稿；
     # 没答 → 只存定性，把候选回给前端弹确认。答「否」= 不定稿，先核对。
     cands = _obsolete_candidates(e2) if not miss else []
@@ -2032,8 +2037,7 @@ async def bom_finalize(request: Request):
     ub = _upstream_block(_upstream_status(e))   # 上游链路闸：上游未定稿/价格对不上 → 下游不许先定稿
     if ub:
         return JSONResponse({"ok": False, "msg": "上游半成品/复配料未就绪，不能先定稿本品：%s" % "；".join(ub)}, status_code=400)
-    if not ((_net_weight(e)[0] or 0) > 0):       # 净重闸（BP 对接 2026-09-05 §2，与勾稽同级）
-        return JSONResponse({"ok": False, "msg": "单位净重(kg)未填或≤0，不能定稿——BP 定价要按袋/盒换算，请在右栏「单位净重」填好并确认。"}, status_code=400)
+    # （V2.445 撤净重闸：成本会计不知道最小销售单元，净重由 BP 定价侧维护；核算侧只带规格解析参考值。）
     cands = _obsolete_candidates(e)              # 换码承接闸（V2.440）：同 CP / 同物料编码已有审核版 → 先答「原版是否失效」
     if cands and not bool(body.get("confirmObsolete")):
         return {"ok": False, "needConfirm": cands,

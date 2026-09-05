@@ -180,7 +180,8 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   const [q, setQ] = useState(entry.quotable === null || entry.quotable === undefined ? null : entry.quotable)
   const [reason, setReason] = useState(entry.quoteReason || '')
   const [busy, setBusy] = useState(false)
-  useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
+  const subRef = React.useRef(false)     // 里面套着「核对/对比」子弹窗时，Esc 只关子弹窗
+  useEffect(() => { const h = (e) => { if (e.key === 'Escape' && !subRef.current) onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
   const PRESET = ['包材不全', '物料暂定价', '配方未定版', '缺半成品核算表', '勾稽存疑']
   const missing = CONFIRM_STEPS.filter(([k]) => !entry.steps?.[k]).map(([, l]) => l)
   // 换码承接（业务方定 2026-09-05）：同CP再核算 / 不同CP同物料编码 → 定稿前必须答「原来那个是否失效」
@@ -193,9 +194,11 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   useEffect(() => { if (!entry.erpCode) getBomErpLookup(entry.id).then(setErpLk).catch(e => setErpLk({ offline: true, msg: e.message })) }, [entry.id, entry.erpCode])
   const adoptErp = async (code) => {
     setErpBusy(true)
-    try { const r = await adoptErpCode(entry.id, code, flash); if (r) { flash('物料编码已采用 ' + code); setEntry(r.entry); setObs(null) } }
+    try { const r = await adoptErpCode(entry.id, code, flash); if (r) { flash('物料编码已采用 ' + code); setEntry(r.entry); setObs(null); setCmpFirst(null) } }
     catch (e) { flash('更新失败：' + e.message) } finally { setErpBusy(false) }
   }
+  const [cmpFirst, setCmpFirst] = useState(null)   // 「对比 ›」弹窗：和哪条换码候选逐料对比
+  subRef.current = !!cmpFirst
   const save = async () => {
     if (!cat) return flash('请选择物料类别')
     if (q === null) return flash('请选择是否建议对外报价')
@@ -235,6 +238,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           <div style={{ margin: '6px 0 8px' }}>{cands.map(c => (
             <div key={c.entryId} className="mono" style={{ fontSize: 11.5 }}>
               {c.cpCode} {c.productName}{c.erpCode ? `　物料编码 ${c.erpCode}` : ''}　·　{c.why}　·　{c.status} {c.auditAt || ''}　·　全成本 ¥{fmt(c.fullIncl)}/kg
+              　<a className="lk" onClick={() => setCmpFirst(c.entryId)} title="两张核算表逐料对比用量与价格，再决定是新旧版还是两个产品">对比 ›</a>
             </div>))}</div>
           <b style={{ fontSize: 12 }}>原来的版本是否失效？</b>
           <div className="bom-catpick" style={{ marginTop: 6 }}>
@@ -274,6 +278,8 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
             {busy ? '保存中…' : ((willFinalize && obs !== false) ? '✓ 保存定性并定稿' : '仅保存定性')}</button>
         </div>
       </div>
+      {cmpFirst && <CompareEntriesModal entry={entry} lk={erpLk} onAdopt={adoptErp} flash={flash} onClose={() => setCmpFirst(null)}
+        others={[...cands.filter(c => c.entryId === cmpFirst), ...cands.filter(c => c.entryId !== cmpFirst)].map(c => ({ entryId: c.entryId, cpCode: c.cpCode, productName: c.productName, status: c.status }))} />}
     </div>
   )
 }
@@ -1076,7 +1082,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               <div className="bom-bigprice">¥ {fmt(full)} <small>/kg</small></div>
               <div className="bom-rspec">{entry.packSpec}　·　核算日期 {entry.calcDate}</div>
               <ErpCodeRow entry={entry} canEdit={!!cfg?.canAudit} onChanged={onChanged} flash={flash} />
-              <NetWeightRow entry={entry} canEdit={!isStd && !!cfg?.canAudit} onChanged={onChanged} flash={flash} />
+              <NetWeightRow entry={entry} />
               <div className="bom-rlines">
                 <RLine k={entry.semi ? '原料' : '原料（含复配料）'} v={`¥ ${fmt(comp.mat)}`} />
                 <RLine k="包材" v={`¥ ${fmt(comp.pack)}`} />
@@ -1125,8 +1131,108 @@ async function adoptErpCode(entryId, code, flash) {
   if (!r || !r.ok) { flash && flash((r && r.msg) || '更新失败'); return null }
   return r
 }
-// 金蝶物料档案反查候选列表（按 CP 码 → 研发编码字段）。只展示，成本会计点「采用」才写。
-function ErpCandidates({ lk, onAdopt, busy, compact }) {
+// 「核对」弹窗（业务方 2026-09-05 提）：上半＝金蝶物料档案反查候选；下半＝与台账里同物料编码 / 同 CP 的另一条核算表**逐料对比**
+// （核算表添加量 + 含税采购价 + 成本，都有 BOM 清单时再并 BOM 用量），五分项汇总也并排。判断"是同一个东西的新旧版，还是两个不同产品"就看这张表。
+function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash }) {
+  const list = useMemo(() => { const seen = new Set(); return (others || []).filter(o => o && o.entryId && !seen.has(o.entryId) && seen.add(o.entryId)) }, [others])
+  const [sel, setSel] = useState(list[0]?.entryId || null)
+  const [other, setOther] = useState(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
+  useEffect(() => {
+    if (!sel) return
+    setOther(null)
+    getBomEntry(sel).then(r => setOther(r.entry)).catch(e => flash('打不开对方核算表：' + e.message))
+  }, [sel])
+  const adopt = async (code) => { setBusy(true); try { await onAdopt(code) } finally { setBusy(false) } }
+  // 对齐口径同后端 compare_bom：真实编码优先（「XX系列」占位不算），退名字
+  const keyOf = (m) => { const c = clean(m.matCode); return (c && !c.includes('系列') && c !== '0') ? 'c:' + c : 'n:' + clean(m.matName) }
+  const rows = useMemo(() => {
+    if (!other) return []
+    const A = entry.materials || [], B = other.materials || []
+    const bByKey = new Map(), bByName = new Map()
+    B.forEach(m => { bByKey.set(keyOf(m), m); bByName.set(clean(m.matName), m) })
+    const used = new Set(), out = []
+    const bomQ = (e, m) => { const bl = e.bomList || []; const k = keyOf(m); const hit = bl.find(b => keyOf(b) === k) || bl.find(b => clean(b.matName) === clean(m.matName)); return hit ? hit.qty : null }
+    A.forEach(a => {
+      let b = bByKey.get(keyOf(a)); if (!b || used.has(b)) b = bByName.get(clean(a.matName))
+      if (b && used.has(b)) b = null
+      if (b) used.add(b)
+      const qa = a.qtyPerKg ?? null, qb = b ? (b.qtyPerKg ?? null) : null
+      const pa = a.priceIncl ?? null, pb = b ? (b.priceIncl ?? null) : null
+      let st = '仅本单'
+      if (b) { const dq = qa != null && qb != null && Math.abs(qa - qb) > 1e-6; const dp = pa != null && pb != null && Math.abs(pa - pb) > 0.005; st = dq && dp ? '用量·价格不同' : dq ? '用量不符' : dp ? '价格不同' : '一致' }
+      out.push({ seg: a.seg, name: a.matName, code: a.matCode, qa, qb, pa, pb, ca: a.costExcl, cb: b ? b.costExcl : null, bqa: bomQ(entry, a), bqb: b ? bomQ(other, b) : null, st })
+    })
+    B.forEach(b => { if (!used.has(b)) out.push({ seg: b.seg, name: b.matName, code: b.matCode, qa: null, qb: b.qtyPerKg ?? null, pa: null, pb: b.priceIncl ?? null, ca: null, cb: b.costExcl, bqa: null, bqb: bomQ(other, b), st: '仅对方' }) })
+    const rank = { '仅本单': 0, '仅对方': 0, '用量·价格不同': 1, '用量不符': 2, '价格不同': 3, '一致': 9 }
+    return out.sort((x, y) => (rank[x.st] - rank[y.st]) || (x.seg === '包材') - (y.seg === '包材'))
+  }, [entry, other])
+  const nDiff = rows.filter(r => r.st !== '一致').length
+  const showBom = !!(entry.hasBomList && other && other.hasBomList)
+  const cls = (st) => st === '一致' ? 'ok' : (st.startsWith('仅') ? 'werr' : 'late')
+  const d = (a, b, dec = 4) => (a == null || b == null) ? '' : (Math.abs(a - b) < 1e-9 ? '' : (a - b > 0 ? '▲' : '▼') + fmt(Math.abs(a - b), dec))
+  const SUM = [['mat', '原料'], ['pack', '包材'], ['mfg', '加工费'], ['load', '装卸费'], ['adm', '管理费'], ['full', '全成本']]
+  return (
+    // stopPropagation：本弹窗可能套在「审核定稿」弹窗里，点背景关自己就好，别把外层也关了
+    <div className="bom-mask" onClick={e => { e.stopPropagation(); if (e.target.classList.contains('bom-mask')) onClose() }}>
+      <div className="bom-modal" style={{ width: 'min(1120px,100%)' }}>
+        <div className="bom-mhead"><b>核对 · {entry.productName} <span className="mono">{entry.cpCode}</span></b><span className="bom-x" onClick={onClose}>✕</span></div>
+        <div className="bom-msub">物料编码 <b className="mono">{entry.erpCode || '（未建档）'}</b>　·　规格 {entry.packSpec || '—'}　·　核算日期 {entry.calcDate}　·　{entry.status}</div>
+        <div style={{ maxHeight: '70vh', overflowY: 'auto', paddingRight: 4 }}>
+          <div className="bom-chkfail" style={{ background: 'var(--bg-sub)', color: 'var(--ink-2)', borderColor: 'var(--line)', marginTop: 8 }}>
+            <b style={{ fontSize: 12 }}>① 金蝶物料档案（按 CP 反查研发编码）</b>
+            <div style={{ marginTop: 6 }}><ErpCandidates lk={lk} onAdopt={adopt} busy={busy} onCompare={(id) => setSel(id)} /></div>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <b style={{ fontSize: 12 }}>② 台账里同物料编码 / 同 CP 的其它核算表——逐料对比</b>
+            {list.length === 0 && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>台账里没有别的记录挂同一物料编码或同一 CP，无需对比。</div>}
+            {list.length > 1 && <div className="bom-catpick" style={{ margin: '6px 0' }}>{list.map(o => (
+              <button key={o.entryId} className={sel === o.entryId ? 'on' : ''} onClick={() => setSel(o.entryId)}>{o.cpCode} {o.productName}{o.status ? ` · ${o.status}` : ''}</button>))}</div>}
+            {list.length === 1 && <div className="muted" style={{ fontSize: 12, margin: '4px 0' }}>对方：<b>{list[0].cpCode} {list[0].productName}</b>{list[0].status ? ` · ${list[0].status}` : ''}{list[0].calcDate ? ` · ${list[0].calcDate}` : ''}</div>}
+            {sel && !other && <div className="loading" style={{ padding: 16 }}>读取对方核算表…</div>}
+            {other && <>
+              <div className="tbl-wrap" style={{ marginTop: 6 }}>
+                <table className="bom-ledger" style={{ fontSize: 12 }}>
+                  <thead><tr><th className="th">含税五分项 元/kg</th>{SUM.map(([k, l]) => <th key={k} className="th" style={{ textAlign: 'right' }}>{l}</th>)}</tr></thead>
+                  <tbody>
+                    <tr><td><b>本单</b> {entry.cpCode}</td>{SUM.map(([k]) => <td key={k} className="num">{fmt(entry.comp?.[k])}</td>)}</tr>
+                    <tr><td><b>对方</b> {other.cpCode}</td>{SUM.map(([k]) => <td key={k} className="num">{fmt(other.comp?.[k])}</td>)}</tr>
+                    <tr><td className="muted">本单 − 对方</td>{SUM.map(([k]) => <td key={k} className="num" style={{ color: (entry.comp?.[k] || 0) - (other.comp?.[k] || 0) > 0.005 ? 'var(--red)' : ((entry.comp?.[k] || 0) - (other.comp?.[k] || 0) < -0.005 ? 'var(--green)' : 'var(--ink-3)') }}>{d(entry.comp?.[k], other.comp?.[k], 2) || '—'}</td>)}</tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="muted" style={{ fontSize: 11.5, margin: '8px 0 4px' }}>逐料 {rows.length} 项，<b style={{ color: nDiff ? 'var(--amber)' : 'var(--green)' }}>{nDiff ? `${nDiff} 项有差异` : '全部一致'}</b>；差异排前。添加量＝核算表 kg/kg；{showBom ? 'BOM 用量＝研发清单；' : ''}含税价＝研发填的采购价。</div>
+              <div className="tbl-wrap">
+                <table className="bom-ledger" style={{ fontSize: 12 }}>
+                  <thead><tr>
+                    <th className="th">段</th><th className="th">物料</th><th className="th">编码</th>
+                    <th className="th" style={{ textAlign: 'right' }}>本单添加量</th><th className="th" style={{ textAlign: 'right' }}>对方添加量</th><th className="th" style={{ textAlign: 'right' }}>Δ量</th>
+                    {showBom && <><th className="th" style={{ textAlign: 'right' }}>本单BOM</th><th className="th" style={{ textAlign: 'right' }}>对方BOM</th></>}
+                    <th className="th" style={{ textAlign: 'right' }}>本单含税价</th><th className="th" style={{ textAlign: 'right' }}>对方含税价</th><th className="th" style={{ textAlign: 'right' }}>Δ价</th>
+                    <th className="th" style={{ textAlign: 'right' }}>本单成本</th><th className="th" style={{ textAlign: 'right' }}>对方成本</th><th className="th">判定</th>
+                  </tr></thead>
+                  <tbody>{rows.map((r, i) => (
+                    <tr key={i} className={r.st === '一致' ? '' : 'bom-nbrow'}>
+                      <td className="sub">{r.seg}</td><td>{r.name}</td><td className="mono sub">{r.code || '—'}</td>
+                      <td className="num">{r.qa != null ? Number(r.qa).toFixed(4) : '—'}</td><td className="num">{r.qb != null ? Number(r.qb).toFixed(4) : '—'}</td><td className="num sub">{d(r.qa, r.qb, 4)}</td>
+                      {showBom && <><td className="num sub">{r.bqa != null ? Number(r.bqa).toFixed(4) : '—'}</td><td className="num sub">{r.bqb != null ? Number(r.bqb).toFixed(4) : '—'}</td></>}
+                      <td className="num">{fmt(r.pa)}</td><td className="num">{fmt(r.pb)}</td><td className="num sub">{d(r.pa, r.pb, 2)}</td>
+                      <td className="num">{fmt(r.ca, 4)}</td><td className="num">{fmt(r.cb, 4)}</td>
+                      <td><span className={'tag ' + cls(r.st)}>{r.st}</span></td>
+                    </tr>))}</tbody>
+                </table>
+              </div>
+            </>}
+          </div>
+        </div>
+        <div className="bom-mfoot"><span className="muted" style={{ fontSize: 11.5, marginRight: 'auto' }}>对比只看不改；要换编码点上面「采用」，要判定新旧版在「审核定稿」弹窗答「原版是否失效」。</span><button className="btn-sec" onClick={onClose}>关闭</button></div>
+      </div>
+    </div>
+  )
+}
+// 金蝶物料档案反查候选列表（按 CP 码 → 研发编码字段）。只展示，成本会计点「采用」才写。onCompare(entryId)：点「已挂 CPxx」跳到与那条的逐料对比。
+function ErpCandidates({ lk, onAdopt, busy, compact, onCompare }) {
   if (!lk) return <div className="muted" style={{ fontSize: 11 }}>查金蝶物料档案中…</div>
   if (lk.offline) return <div className="muted" style={{ fontSize: 11 }}>金蝶未连接，无法反查（可手填）</div>
   const cs = lk.candidates || []
@@ -1140,8 +1246,9 @@ function ErpCandidates({ lk, onAdopt, busy, compact }) {
           {c.rdCode && !c.exact && <span className="mono muted"> · 研发编码 {c.rdCode}</span>}
           {c.erpCode.toUpperCase().startsWith('T') && <span className="tag late" style={{ marginLeft: 4 }}>T 开头</span>}
           {c.forbidden && <span className="tag werr" style={{ marginLeft: 4 }}>金蝶已禁用</span>}
-          {(c.inLedger || []).length > 0 && <span className="tag late" style={{ marginLeft: 4 }} title={'台账里已挂此编码的记录：' + c.inLedger.map(x => `${x.cpCode}（${x.status}）`).join('、') + '——采用后按「后审核的替代先审核的」提示确认'}>
-            已挂 {c.inLedger.map(x => x.cpCode).join('、')}</span>}
+          {(c.inLedger || []).map(x => <span key={x.entryId} className="tag late" style={{ marginLeft: 4, cursor: onCompare ? 'pointer' : undefined }}
+            title={`台账里 ${x.cpCode} ${x.productName}（${x.status}）已挂此编码——采用后按「后审核的替代先审核的」提示确认${onCompare ? '；点击看两张核算表逐料对比' : ''}`}
+            onClick={onCompare ? () => onCompare(x.entryId) : undefined}>已挂 {x.cpCode}{onCompare ? ' ›' : ''}</span>)}
         </span>
       </div>))}
   </div>
@@ -1151,16 +1258,25 @@ function ErpCandidates({ lk, onAdopt, busy, compact }) {
 function ErpCodeRow({ entry, canEdit, onChanged, flash }) {
   const [lk, setLk] = useState(null)
   const [busy, setBusy] = useState(false)
-  const [open, setOpen] = useState(false)
+  const [cmp, setCmp] = useState(null)      // 「核对」弹窗：null 关 / {first: entryId} 开（first=优先对比哪条）
+  const lookup = () => getBomErpLookup(entry.id).then(r => { setLk(r); return r }).catch(e => { const r = { offline: true, msg: e.message }; setLk(r); return r })
   useEffect(() => {
-    setLk(null); setOpen(false)
-    if (canEdit && !entry.erpCode) getBomErpLookup(entry.id).then(setLk).catch(e => setLk({ offline: true, msg: e.message }))
+    setLk(null); setCmp(null)
+    if (canEdit && !entry.erpCode) lookup()
   }, [entry.id, entry.erpCode, canEdit])
   const adopt = async (code) => {
     setBusy(true)
-    try { const r = await adoptErpCode(entry.id, code, flash); if (r) { flash('物料编码已采用 ' + code); await onChanged() } }
+    try { const r = await adoptErpCode(entry.id, code, flash); if (r) { flash('物料编码已采用 ' + code); setCmp(null); await onChanged() } }
     catch (e) { flash('更新失败：' + e.message) } finally { setBusy(false) }
   }
+  // 对比对象＝台账里同物料编码的（sameCode）+ 金蝶候选已挂的（inLedger）+ 同 CP 的换码候选（obsoleteCandidates）
+  const others = (first) => {
+    const o = [...((lk && lk.sameCode) || []), ...(((lk && lk.candidates) || []).flatMap(c => c.inLedger || [])),
+               ...((entry.obsoleteCandidates || []).map(c => ({ entryId: c.entryId, cpCode: c.cpCode, productName: c.productName, status: c.status })))]
+    if (first) { const i = o.findIndex(x => x.entryId === first); if (i > 0) o.unshift(o.splice(i, 1)[0]) }
+    return o
+  }
+  const openCmp = async (first) => { if (!lk) await lookup(); setCmp({ first: first || null }) }
   const manual = async () => {
     const v = window.prompt(`补 / 改 ERP物料编码\n产品：${entry.productName}（${entry.cpCode}）`, entry.erpCode || '')
     if (v == null || v.trim() === (entry.erpCode || '')) return
@@ -1172,37 +1288,23 @@ function ErpCodeRow({ entry, canEdit, onChanged, flash }) {
       <b style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="mono">{entry.erpCode || '—'}</span>
         {canEdit && <button className="btn-sec" disabled={busy} onClick={manual} style={{ padding: '0 8px' }}>{entry.erpCode ? '改' : '手填'}</button>}
-        {canEdit && entry.erpCode && <button className="btn-sec" disabled={busy} style={{ padding: '0 8px' }} title="到金蝶物料档案按 CP 码核对"
-          onClick={() => { setOpen(o => !o); if (!lk) getBomErpLookup(entry.id).then(setLk).catch(e => setLk({ offline: true, msg: e.message })) }}>核对</button>}
+        {canEdit && <button className="btn-sec" disabled={busy} style={{ padding: '0 8px' }} title="弹窗：金蝶物料档案按 CP 反查 + 与台账里同编码/同CP的核算表逐料对比用量与价格"
+          onClick={() => openCmp()}>核对</button>}
       </b>
     </div>
-    {canEdit && (!entry.erpCode || open) && <div style={{ margin: '0 0 8px', padding: '6px 8px', background: 'var(--bg-sub)', borderRadius: 6 }}>
-      <ErpCandidates lk={lk} onAdopt={adopt} busy={busy} compact />
+    {canEdit && !entry.erpCode && <div style={{ margin: '0 0 8px', padding: '6px 8px', background: 'var(--bg-sub)', borderRadius: 6 }}>
+      <ErpCandidates lk={lk} onAdopt={adopt} busy={busy} compact onCompare={(id) => openCmp(id)} />
     </div>}
+    {cmp && <CompareEntriesModal entry={entry} lk={lk} others={others(cmp.first)} onAdopt={adopt} onClose={() => setCmp(null)} flash={flash} />}
   </>
 }
-// 单位净重(kg)：BP 定价按袋/盒换算要用（对接需求 2026-09-05 §2）。auto=按包装规格预填「待确认」；成本会计填/确认后存库留痕；空或≤0 不能定稿。
-function NetWeightRow({ entry, canEdit, onChanged, flash }) {
-  const [v, setV] = useState(entry.netWeightKg ?? '')
-  const [busy, setBusy] = useState(false)
-  useEffect(() => { setV(entry.netWeightKg ?? '') }, [entry.id, entry.netWeightKg])
-  const src = entry.netWeightSrc
-  const save = async () => {
-    const n = parseFloat(v)
-    if (!(n > 0)) return flash('单位净重须大于 0（kg）')
-    setBusy(true)
-    try { const r = await bomSetNetWeight(entry.id, n); if (!r.ok) return flash(r.msg || '保存失败'); flash('单位净重已确认'); await onChanged() }
-    catch (e) { flash('保存失败：' + e.message) } finally { setBusy(false) }
-  }
-  return <div className="bom-rline" style={{ margin: '4px 0 6px' }} title="一个销售单位(袋/盒)的净重，BP 定价 元/kg→元/袋 用；空或≤0 不能定稿">
-    <span>单位净重(kg)
-      {src === 'auto' && <em className="bom-srcv" style={{ color: 'var(--amber)' }}>按规格预填·待确认</em>}
-      {!src && <em className="bom-srcv" style={{ color: 'var(--red)' }}>未填·不能定稿</em>}</span>
-    {canEdit
-      ? <b style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-        <input className="bom-feeinp" type="number" step="0.001" min="0" value={v} onChange={e => setV(e.target.value)} />
-        <button className="btn-sec" disabled={busy} onClick={save} style={{ padding: '0 8px' }}>{src === 'manual' ? '改' : '确认'}</button></b>
-      : <b>{entry.netWeightKg != null ? entry.netWeightKg + ' kg' : '—'}</b>}
+// 规格解析净重（参考）：V2.445 起**不再是成本会计要填/确认的闸**——业务方定「成本会计不知道最小销售单元」（一袋/一盒/一组几袋是 BP 定价的事）。
+// 这里只把规格里解析出的每袋净重摆出来给 BP 参考，随接口带出；BP 侧在自己的物料表维护「最小销售单元 + 净重」，以 BP 为准。
+function NetWeightRow({ entry }) {
+  const v = entry.netWeightKg
+  return <div className="bom-rline" style={{ margin: '4px 0 6px' }} title="按包装规格文本解析出的每袋/盒净重，仅供 BP 定价侧参考；最小销售单元与净重由 BP 维护，核算侧不确认、不设闸">
+    <span>规格解析净重<em className="bom-srcv">供 BP 参考</em></span>
+    <b className="muted" style={{ fontWeight: 500 }}>{v != null ? `${v} kg/袋` : '规格解析不出'}</b>
   </div>
 }
 function FeeRow({ label, k, fee, edit, setF, dot, src }) {
