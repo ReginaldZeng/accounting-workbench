@@ -606,6 +606,11 @@ CAP_META_STATIC = [
     # 申请人不得自批（代码强制），故此权限不宜与 bom:audit 授予同一人。
     {"key": "bom:final_review", "label": "BOM报价·终审（终审通过对外开放 + 作废批准）", "ws": "accounting",
      "group": "BOM报价审核", "sensitive": True, "tier": "act", "mod": "bomstd"},
+    # 核算表全量查阅（业务方定 2026-09-06，V2.452）：BP 工作台默认只看脱敏版（遮供应商/型号/规格）；
+    # 主管理员天然全量；**非主管理员要在 BP 侧原地看全量**就勾这个点——等于让他看到供应商和采购价，故敏感、逐人手勾。
+    # 由核算侧 /api/bomcost/sheet|export 的 full=1 校验（BP 后台代拉时用 X-On-Behalf-Of 报人名），每次全量查看留 audit。
+    {"key": "bom:view_full", "label": "BOM报价·核算表全量查阅（BP侧原地看全量，含供应商/型号/规格）", "ws": "accounting",
+     "group": "BOM报价审核", "sensitive": True, "tier": "act", "mod": "bomstd"},
     {"key": "cost_ledger_close", "label": "存货台账·封存本期", "ws": "accounting", "group": "存货台账", "sensitive": True,
      "tier": "act", "mod": "costledger"},
     # 报表导出（V2.241）。导出本身只读金蝶、不写金蝶，故非敏感；

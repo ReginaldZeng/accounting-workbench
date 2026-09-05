@@ -131,7 +131,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.2 —— 在 v1.1 基
 
 ## 3. 权限点 ✅
 
-（表同 v1.1）`enter:bomdraft`✅敏感 / `enter:bomstd` / `bom:view_sheet` / `dingtalk:fetch`✅ / `bom:audit`✅（复核+初审+申请作废+补物料编码+单位净重）/ `bom:final_review`✅（终审+作废批准）/ `bom:price_check`✅ / `bom:export` / `bom:attach_bom`✅ / `bom:config`✅。
+（表同 v1.1，加一项）`enter:bomdraft`✅敏感 / `enter:bomstd` / `bom:view_sheet` / `dingtalk:fetch`✅ / `bom:audit`✅（复核+初审+申请作废+补物料编码+并行关联）/ `bom:final_review`✅（终审+作废批准）/ `bom:price_check`✅ / `bom:export` / `bom:attach_bom`✅ / `bom:config`✅ / **`bom:view_full`✅（V2.452：BP 侧原地看全量核算表，含供应商/型号/规格）**。
 
 - **主管理员例外**（§2.3/§2.4）：`db.is_super` 可自审终审、自批作废，留痕明记。
 - **财务BP 账号**：给 `enter:bomstd + bom:view_sheet + bom:final_review`（+ 需下载再给 `bom:export`），在核算工作台做终审。
@@ -160,7 +160,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.2 —— 在 v1.1 基
 - **BP 侧的人在 BP 工作台看核算表，看的是脱敏版**；只有主管理员（Owner / 总监）跳核算工作台看全量。**下载也分版本**：核算侧全量重排版 / 原版附件（需 `bom:export`），BP 侧脱敏版重排版（文件名带「脱敏版」）、不给原版附件。
 - 脱敏口径＝成本会计商品版删法：物料行 **型号 / 规格 / 供应商** 置空（默认开），报价说明默认不遮；数值、五分项、勾稽、上游链路全给。基础设置四个开关（`bom:config`）只管这个脱敏版；核算侧内部永远全量。
 - 服务端遮（`/api/bomcost/sheet`、`/api/bomcost/export`），不是前端藏；核算侧全量导出接口对 BP 内部令牌 403。
-- 不新增权限点：BP 侧的人不拿核算账号；核算侧 `enter:bomstd + bom:view_sheet + bom:export` 即全量。
+- **BP 侧原地看全量**（V2.452，业务方定）：主管理员（Owner / 总监）天然可切全量；非主管理员要看全量 → 账号管理勾敏感点 **`bom:view_full`「核算表全量查阅」**（等于让他看到供应商和采购价，逐人手勾）。BP 后台代拉时报 `X-On-Behalf-Of`，核算侧查人后决定给全量还是脱敏；每次全量查看留审计。核算侧内部账号仍是 `enter:bomstd + bom:view_sheet + bom:export` 即全量。
 
 ---
 

@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import time
+import urllib.parse
 import uuid
 from io import BytesIO
 
@@ -40,6 +41,7 @@ CAP_ATTACH = "bom:attach_bom"          # 补挂BOM清单
 CAP_VIEW_SHEET = "bom:view_sheet"      # 核算表查阅（下钻）
 CAP_CONFIG = "bom:config"              # 基础设置（公开版脱敏规则等）
 CAP_FINAL_REVIEW = "bom:final_review"  # 财务BP终审：①终审通过盖已审核戳（只有终审的才对外开放）②作废批准
+CAP_VIEW_FULL = "bom:view_full"        # 核算表全量查阅（BP 侧原地看全量；主管理员天然有）——V2.452
 ENTER_DRAFT = "enter:bomdraft"         # 进「待办与复核」＝看未审核（敏感）
 ENTER_STD = "enter:bomstd"             # 进「标准成本台账」＝查已定稿公开
 
@@ -2483,7 +2485,8 @@ _CH_BY_LABEL = {v: k for k, v in CH_LABELS.items()}     # 电商/通品/TOB/TOC 
 def _bp_links(e):
     """BP 只读台账用的链接（V2.442 建，V2.451 改口径）——路径相对核算门户根。
     业务方定 2026-09-06：**BP 侧的人在 BP 工作台看核算表、看脱敏版**；只有主管理员（Owner/总监）才跳核算工作台看全量。
-    - sheetUrl / previewUrl / downloadUrl：**脱敏版**（BP 后台带内部令牌回环拉，再渲染/回给用户），只有已审核版。
+    - sheetUrl / previewUrl / downloadUrl：默认**脱敏版**（BP 后台带内部令牌回环拉，再渲染/回给用户），只有已审核版；
+      加 `&full=1` + 请求头 `X-On-Behalf-Of=<姓名>` → 该人是主管理员或有 bom:view_full 时给**全量**（V2.452），否则照旧脱敏。
     - adminDetailUrl / adminCompareUrl：核算工作台深链，**只给主管理员**放，普通 BP 用户不显示。
     - 源附件原件不给 BP（含供应商信息、无法脱敏）。"""
     i = int(e["id"])
@@ -2513,36 +2516,67 @@ def _pending_final_rows(src):
     return out
 
 
+def _bp_actor(request, who):
+    """这次拉核算表的**人**是谁、能不能看全量（V2.452）。
+    - 门户登录：就是登录人；
+    - 内部令牌（BP 后台代拉）：请求头 `X-On-Behalf-Of`（URL 编码的姓名，同 X-BP-User 写法）报上替谁拉，核算侧到账号管理查这个人。
+    全量＝主管理员，或有 `bom:view_full`。查不到人 / 没报人 → 只能脱敏。→ (name, full_ok, via)"""
+    if not who:
+        return "", False, ""
+    if who.get("internal"):
+        raw = (request.headers.get("X-On-Behalf-Of") or "").strip()
+        name = urllib.parse.unquote(raw) if raw else ""
+        u = db.get_user(name) if name else None
+        if not u or not u.get("active"):
+            return name, False, "bp"
+        return name, bool(db.is_super(u) or db.user_can(u, CAP_VIEW_FULL)), "bp"
+    return who.get("name") or "", bool(db.is_super(who) or db.user_can(who, CAP_VIEW_FULL)), "portal"
+
+
 def _bp_sheet_entry(request, eid):
-    """BP 脱敏版核算表两个口共用的取件：鉴权（内部令牌/门户登录）→ 记录存在 → **只准已审核版**。→ (e, err)"""
+    """BP 核算表两个口共用的取件：鉴权（内部令牌/门户登录）→ 记录存在 → **只准已审核版** → 判本次能否全量。
+    → (e, err, ctx)；ctx={actor, fullAllowed, full(本次实际给全量), via}。`full=1` 只在 fullAllowed 时生效，否则照旧脱敏。"""
     who = _internal_or_user(request)
     if not who:
-        return None, JSONResponse({"ok": False, "msg": "未授权：需 X-Internal-Token（回环调用）或门户登录"}, status_code=401)
+        return None, JSONResponse({"ok": False, "msg": "未授权：需 X-Internal-Token（回环调用）或门户登录"}, status_code=401), None
     try:
         e = db.bom_get_entry(int(eid))
     except (TypeError, ValueError):
         e = None
     if not e or e.get("source") != _src():
-        return None, JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+        return None, JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404), None
     if e.get("status") != "已审核" or e.get("active") not in (1, None):
-        return None, JSONResponse({"ok": False, "msg": "该版尚未终审（或已作废/替换），不对外"}, status_code=403)
-    return e, None
+        return None, JSONResponse({"ok": False, "msg": "该版尚未终审（或已作废/替换），不对外"}, status_code=403), None
+    actor, full_ok, via = _bp_actor(request, who)
+    want_full = (request.query_params.get("full") or "").strip().lower() in ("1", "true", "yes")
+    return e, None, {"actor": actor, "fullAllowed": full_ok, "full": bool(want_full and full_ok), "via": via}
+
+
+def _bp_rec(e, ctx, what):
+    """按 ctx 给全量或脱敏版记录；给全量则留审计（谁、经哪条通道、看了哪条）。→ (rec, hidden)"""
+    if ctx and ctx.get("full"):
+        db.audit(ctx.get("actor") or "?", "bom_view_full", target=str(e["id"]),
+                 detail="%s · via %s · %s %s" % (what, ctx.get("via"), e.get("cp_code") or "", (e.get("product_name") or "").strip()))
+        return _rec_from_entry(e), []
+    return _masked_rec(e)
 
 
 @router.get("/api/bomcost/sheet")
 async def bomcost_sheet(request: Request):
     """**脱敏版核算表**（V2.451，业务方定「BP 侧的人在 BP 侧看核算表」）：BP 工作台自己渲染用。
     物料行按基础设置遮 型号/规格/供应商/报价说明（`hiddenColumns` 告诉 BP 遮了哪几列）；数值、勾稽、五分项全给。只准已审核版。"""
-    e, err = _bp_sheet_entry(request, request.query_params.get("entryId"))
+    e, err, ctx = _bp_sheet_entry(request, request.query_params.get("entryId"))
     if err:
         return err
-    rec, hidden = _masked_rec(e)
+    rec, hidden = _bp_rec(e, ctx, "sheet")
     fee = _fee_of(e)
     comp = bq.compose(rec, fee)
     ack = e.get("ack") or {}
     others = db.bom_list_entries(_src())
     vg = (e.get("variant_group") or "").strip()
-    return {"ok": True, "masked": True, "hiddenColumns": hidden,
+    return {"ok": True, "masked": not ctx["full"], "hiddenColumns": hidden,
+            # V2.452：本次拉取人能否看全量（主管理员或有 bom:view_full）——BP 据此显不显示「切全量」；full=1 未获准则照旧脱敏
+            "fullAllowed": ctx["fullAllowed"], "viewer": ctx["actor"],
             "entryId": e["id"], "productKey": e["product_key"], "cpCode": (e.get("cp_code") or "").strip(),
             "erpCode": (e.get("erp_code") or "").strip(), "productName": (e.get("product_name") or "").strip(),
             "packSpec": e.get("pack_spec") or "", "calcDate": e.get("calc_date") or "", "factory": e.get("supplier") or "",
@@ -2564,16 +2598,19 @@ async def bomcost_sheet(request: Request):
 async def bomcost_export(request: Request, entryId: int, preview: int = 0):
     """**脱敏版重排版核算表**下载 / 网页预览（V2.451，业务方定「下载的核算表要分版本」）。
     同一 build_pretty，只是物料行按基础设置置空 型号/规格/供应商/报价说明；文件名与页面标题带「脱敏版」。只准已审核版。"""
-    e, err = _bp_sheet_entry(request, entryId)
+    e, err, ctx = _bp_sheet_entry(request, entryId)
     if err:
         return err
-    rec, hidden = _masked_rec(e)
+    rec, hidden = _bp_rec(e, ctx, "export" if not preview else "preview")
     data = bq.build_pretty(rec, _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview, rules=_invoice_rules())
     nm = (e.get("product_name") or "").strip()
-    tag = "脱敏版" + ("（已遮 %s）" % "/".join(hidden) if hidden else "")
+    if ctx["full"]:
+        tag, fn_tag = "全量版", "全量版"
+    else:
+        tag, fn_tag = "脱敏版" + ("（已遮 %s）" % "/".join(hidden) if hidden else ""), "脱敏版"
     if preview:
         return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s · %s %s" % (tag, e.get("cp_code") or "", nm)))
-    return _xlsx_response(data, "重排版核算表_脱敏版_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
+    return _xlsx_response(data, "重排版核算表_%s_%s_%s.xlsx" % (fn_tag, e.get("cp_code") or "", nm))
 
 
 @router.get("/api/bomcost/pending-final")
@@ -2674,7 +2711,9 @@ async def bomcost_final(request: Request):
         })
     rows.sort(key=lambda r: (r["finalizedAt"], r["entryId"]))
     from core import _now
+    _actor, _full_ok, _via = _bp_actor(request, who)      # V2.452：带 X-On-Behalf-Of 时告诉 BP 这个人能否看全量
     return {"ok": True, "asOf": _now(), "count": len(rows), "rows": rows, "warnings": warnings,
+            "viewer": _actor, "fullAllowed": _full_ok,
             # V2.442：BP 只读台账顶部「有 N 条待你终审」——明细走 /api/bomcost/pending-final
             "pendingFinalCount": len(_pending_final_rows(src)), "pendingFinalUrl": "/api/bomcost/pending-final"}
 
