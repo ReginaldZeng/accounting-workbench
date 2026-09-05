@@ -317,13 +317,13 @@ def effective_kind(cp_code, product_name="", category=None):
 
 def suggest_category(cp_code, product_name="", supplier=""):
     """物料类别建议值（仅供弹窗预选，成本会计须确认）：基础分类由编码/名字建议；
-    自产/委外这一维**编码里没有**——核算表带「生产工厂/供应商」时倾向委外（星期九等代工厂），否则自产。
-    复配料不分自产委外。"""
+    自产/委外这一维**编码里没有**——**默认自产**（业务方定 2026-09-05：「物料类别默认是自产成品」），委外由成本会计手点。
+    ⚠ V2.448 前按「核算表带生产工厂/供应商→倾向委外」预选，实测核算表几乎都写着星期九工厂，等于全预选委外，与实际相反，撤。
+    复配料不分自产委外。supplier 参数保留以兼容调用方，不再参与判断。"""
     base = classify(cp_code, product_name)
     if base == "复配料":
         return "复配料"
-    pref = "委外" if str(supplier or "").strip() else "自产"
-    return pref + ("半成品" if base == "半成品" else "成品")
+    return "自产" + ("半成品" if base == "半成品" else "成品")
 
 
 def kind_doubt(cp_code, product_name="", category=None):

@@ -229,21 +229,28 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           : <div className="banner" style={{ background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)', marginBottom: 10 }}>
             ✓ ③用量自洽、④报价核算 均已确认——保存定性即<b>定稿</b>，毕业进标准成本台账。</div>}
         {!entry.erpCode && erpLk && !erpLk.offline && (erpLk.candidates || []).length > 0 &&
-          <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--ink)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
-            <ErpCandidates lk={erpLk} onAdopt={adoptErp} busy={erpBusy} />
-            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>本记录尚无物料编码。建议先采用再定稿（BP 按物料编码关联）；不强制——未中试的产品可无编码定稿。</div>
+          <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--ink)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
+            <ErpCandidates lk={erpLk} onAdopt={adoptErp} busy={erpBusy} onCompare={(id) => setCmpFirst(id)} />
+            <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>本记录尚无物料编码。建议先采用再定稿（BP 按物料编码关联）；不强制——未中试的产品可无编码定稿。</div>
           </div>}
-        {willFinalize && cands.length > 0 && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
-          <b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>——本版定稿后，原版本将<b>失效</b>（退出对外台账；引用它的 BP 定价方案会收到「成本已更新」提示，终审通过那一刻切换）。
-          <div style={{ margin: '6px 0 8px' }}>{cands.map(c => (
-            <div key={c.entryId} className="mono" style={{ fontSize: 11.5 }}>
-              {c.cpCode} {c.productName}{c.erpCode ? `　物料编码 ${c.erpCode}` : ''}　·　{c.why}　·　{c.status} {c.auditAt || ''}　·　全成本 ¥{fmt(c.fullIncl)}/kg
-              　<a className="lk" onClick={() => setCmpFirst(c.entryId)} title="两张核算表逐料对比用量与价格，再决定是新旧版还是两个产品">对比 ›</a>
+        {/* .banner 默认是横向 flex，这里内容多行 → display:block 分三段：说明 / 候选清单 / 问句+两个按钮 */}
+        {willFinalize && cands.length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10, lineHeight: 1.6 }}>
+          <div><b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>——本版定稿后，原版本将<b>失效</b>：退出对外台账，引用它的 BP 定价方案会收到「成本已更新」提示（终审通过那一刻切换）。</div>
+          <div style={{ margin: '8px 0', padding: '6px 10px', background: 'rgba(255,255,255,.55)', borderRadius: 8 }}>{cands.map(c => (
+            <div key={c.entryId} style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '2px 12px', alignItems: 'baseline', color: 'var(--ink)' }}>
+              <b className="mono">{c.cpCode}</b><span>{c.productName}</span>
+              {c.erpCode && <span className="mono muted">物料编码 {c.erpCode}</span>}
+              <span className="muted">{c.why}</span>
+              <span className="muted">{c.status} {c.auditAt || ''}</span>
+              <span>全成本 <b>¥{fmt(c.fullIncl)}</b>/kg</span>
+              <a className="lk" onClick={() => setCmpFirst(c.entryId)} title="两张核算表逐料对比用量与价格，再决定是新旧版还是两个产品">对比 ›</a>
             </div>))}</div>
-          <b style={{ fontSize: 12 }}>原来的版本是否失效？</b>
-          <div className="bom-catpick" style={{ marginTop: 6 }}>
-            <button className={obs === true ? 'on no' : ''} onClick={() => setObs(true)}>是，原版失效，本版定稿</button>
-            <button className={obs === false ? 'on' : ''} onClick={() => setObs(false)}>否，先核对（只存定性，不定稿）</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <b style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>原来的版本是否失效？</b>
+            <div className="bom-catpick">
+              <button className={obs === true ? 'on no' : ''} onClick={() => setObs(true)}>是，原版失效，本版定稿</button>
+              <button className={obs === false ? 'on' : ''} onClick={() => setObs(false)}>否，先核对（只存定性，不定稿）</button>
+            </div>
           </div>
         </div>}
 
@@ -988,11 +995,11 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           ⚠ <b>{entry.staleNote}</b>：本品所依赖的上游核算表被替换过，成本可能已变——已把本品打回<b>未复核</b>，请重新走 ③用量自洽 / ④报价核算 确认。确认后此提醒自动消失。</div>}
         {/* 换码承接（V2.440）：本版被新版替代 / 本版替代了旧版 */}
         {entry.obsoleteBy && <div className="banner" style={entry.obsoleteBy.live
-          ? { background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }
-          : { background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
+          ? { display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }
+          : { display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
           {entry.obsoleteBy.live ? '⊘ ' : '⏳ '}<b>{entry.obsoleteBy.live ? '本版已失效' : '本版待替代'}</b>：被 <a className="lk" onClick={() => onOpen(entry.obsoleteBy.entryId)}>{entry.obsoleteBy.cpCode} {entry.obsoleteBy.productName}</a> 替代（{entry.obsoleteBy.at}，{entry.obsoleteBy.note}）。
           {entry.obsoleteBy.live ? '已退出对外台账，BP 不再拿到本版；记录与留痕照常可查。' : `新版当前「${entry.obsoleteBy.status}」，其终审通过后本版退出对外台账；在此之前 BP 仍用本版。`}</div>}
-        {(entry.replaces || []).length > 0 && <div className="banner" style={{ background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }}>
+        {(entry.replaces || []).length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }}>
           ⇄ <b>本版替代了 {entry.replaces.length} 个旧版</b>：{entry.replaces.map((c, i) => (
             <span key={c.entryId}>{i > 0 ? '；' : ''}<a className="lk" onClick={() => onOpen(c.entryId)}>{c.cpCode}</a>（{c.why || '—'} · 审核 {c.auditAt || '—'} · 全成本 ¥{fmt(c.fullIncl)}/kg）</span>))}
           。{entry.finalPassed ? '本版已终审，旧版已退出对外台账；引用旧版的 BP 定价方案会收到「成本已更新」提示。' : '本版终审通过后旧版才退出对外台账；BP 那边随之收到「成本已更新」提示。'}</div>}
@@ -2111,7 +2118,7 @@ function FinalReviewModal({ row, onClose, onDone, flash }) {
           </div>
           {row.quotable === false && <div className="banner err" style={{ marginTop: 8, fontSize: 11.5 }}>
             ⚠ 成本会计标了<b>不建议对外报价</b>——理由：{row.quoteReason}。报价前请留意。</div>}
-          {(row.replaces || []).length > 0 && <div className="banner" style={{ marginTop: 8, fontSize: 11.5, background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)' }}>
+          {(row.replaces || []).length > 0 && <div className="banner" style={{ display: 'block', marginTop: 8, fontSize: 11.5, background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)' }}>
             ⇄ <b>本版通过后将替代 {row.replaces.length} 个旧版</b>：{row.replaces.map(c => `${c.cpCode}（${c.why || ''} · 审核 ${c.auditAt || '—'} · 全成本 ¥${fmt(c.fullIncl)}/kg）`).join('；')}
             ——旧版退出对外台账，<b>引用旧版的 BP 定价方案会收到「成本已更新」提示</b>，需要重新确认。</div>}
         </div></div>
