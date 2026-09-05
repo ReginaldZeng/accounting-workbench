@@ -312,6 +312,31 @@ function BomLedgerView({ user, mode = 'std' }) {
     catch (e) { flash('打开失败：' + e.message) }
   }, [])
   const openCompare = () => { setView('compare'); window.scrollTo(0, 0) }
+  // 深链（V2.442，BP 只读台账 → 核算）：#/bomstd?entry=17[&compare=1] 直开详情/对比；?entry=17&final=1 直开终审弹窗（无终审权限则开详情）。
+  // 只消费一次，消费后把 hash 收回到 #/bomstd，刷新不再重放。
+  const deepRef = React.useRef(false)
+  useEffect(() => {
+    if (deepRef.current || !data) return
+    const h = window.location.hash || ''
+    const m = h.match(/^#\/(bomstd|bomdraft)\?(.+)$/)
+    if (!m) return
+    deepRef.current = true
+    const p = new URLSearchParams(m[2])
+    const id = parseInt(p.get('entry') || '', 10)
+    ;(async () => {
+      try {
+        if (id) {
+          if (p.get('final') === '1' && data.canFinalReview) {
+            const row = (data.rows || []).find(r => r.id === id)
+            if (row && row.needFinalReview) { setFinalRow(row); return }
+          }
+          const r = await getBomEntry(id)
+          setEntry(r.entry); setCurId(id); setView(p.get('compare') === '1' ? 'compare' : 'detail'); window.scrollTo(0, 0)
+        }
+      } catch (e) { flash('打开失败：' + e.message) }
+      finally { try { window.history.replaceState(null, '', '#/' + m[1]) } catch { /* 忽略 */ } }
+    })()
+  }, [data])
   const backToList = () => { setView('list'); load() }
   const openApproval = (no) => { setCurAppr(no); setView('approval'); window.scrollTo(0, 0) }
   // 从处理页点进产品详情后，返回要回处理页（不是回列表）

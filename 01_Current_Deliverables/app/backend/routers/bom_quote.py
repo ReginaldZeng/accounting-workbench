@@ -2247,14 +2247,29 @@ def _xlsx_to_html(data, title=""):
     return "".join(out)
 
 
+def _export_auth(request, e):
+    """导出/预览放行：门户用户须有「导出」权限；BP 后台（内部令牌+回环）**只准拿已审核（对外）版**——初审未终审的绝不外发。
+    → (who, err_response)"""
+    who = _internal_or_user(request)
+    if not who:
+        return None, JSONResponse({"ok": False, "msg": "未授权：需登录并有「导出」权限，或 X-Internal-Token（回环调用）"}, status_code=401)
+    if who.get("internal"):
+        if e is not None and e.get("status") != "已审核":
+            return None, JSONResponse({"ok": False, "msg": "该版尚未终审，不对外"}, status_code=403)
+        return who, None
+    if not db.user_can(who, CAP_EXPORT):
+        return None, JSONResponse({"ok": False, "msg": "无「导出」权限"}, status_code=403)
+    return who, None
+
+
 @router.get("/api/bom/export/pretty")
 async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
-    u = _require_perm(request, CAP_EXPORT)
-    if not u:
-        return JSONResponse({"ok": False, "msg": "无「导出」权限"}, status_code=403)
     e = db.bom_get_entry(entry_id)
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    u, err = _export_auth(request, e)
+    if err:
+        return err
     # 下载=活公式版（改黄底参数全表联动，同原版）；预览=计算值版（openpyxl 写的公式无缓存值，网页只能走值）
     data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview,
                            rules=_invoice_rules())      # 成本不含税公式/M列下拉 按台账当前发票规则生成
@@ -2266,12 +2281,12 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
 
 @router.get("/api/bom/export/original")
 async def bom_export_original(request: Request, entry_id: int, preview: int = 0):
-    u = _require_perm(request, CAP_EXPORT)
-    if not u:
-        return JSONResponse({"ok": False, "msg": "无「导出」权限"}, status_code=403)
     e = db.bom_get_entry(entry_id)
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    u, err = _export_auth(request, e)
+    if err:
+        return err
     pdir = os.path.join(UPLOAD_DIR, _src())
     match = None
     if os.path.isdir(pdir):
@@ -2355,6 +2370,49 @@ def _internal_or_user(request):
 _CH_BY_LABEL = {v: k for k, v in CH_LABELS.items()}     # 电商/通品/TOB/TOC → ecom/common/tob/toc
 
 
+def _bp_links(e):
+    """BP 只读台账用的深链（V2.442）——路径相对核算门户根，BP 拼上门户域名即可。
+    页面深链走 SPA hash 路由 `#/bomstd?entry=…`（App.jsx 解析）；文件类走导出接口（BP 后台带内部令牌回环代拉，也可让用户浏览器直开、走门户登录）。
+    「入口在 BP，动作在核算」：BP 页面只放链接，审核/对比/下载都在核算侧完成。"""
+    i = int(e["id"])
+    return {"detailUrl": "/#/bomstd?entry=%d" % i,                            # 核算表详情（四步复核状态、留痕、上游链路）
+            "compareUrl": "/#/bomstd?entry=%d&compare=1" % i,                # 版本对比（同产品各版本涨跌）
+            "previewUrl": "/api/bom/export/pretty?entry_id=%d&preview=1" % i,  # 重排版网页预览（值版）
+            "downloadUrl": "/api/bom/export/pretty?entry_id=%d" % i,          # 重排版 xlsx（活公式）
+            "originalUrl": "/api/bom/export/original?entry_id=%d" % i}        # 源附件原样（无留档时 404）
+
+
+def _pending_final_rows(src):
+    """待财务BP终审的行：定稿指针指向、状态＝初审、有效。BP 只读台账顶部「有 N 条待你终审 → 去核算终审」用。"""
+    out = []
+    entries = {x["id"]: x for x in db.bom_list_entries(src)}
+    for pkey, eid in db.bom_finals(src).items():
+        e = entries.get(eid)
+        if not e or e.get("status") != "初审":
+            continue
+        comp = bq.compose(_rec_from_entry(e), _fee_of(e))
+        out.append({"entryId": e["id"], "productKey": pkey, "cpCode": (e.get("cp_code") or "").strip(),
+                    "productName": (e.get("product_name") or "").strip(), "erpCode": (e.get("erp_code") or "").strip(),
+                    "channel": CH_LABELS.get(e.get("channel") or "", e.get("channel") or ""),
+                    "fullIncl": comp["full"], "firstReviewedBy": e.get("finalized_by") or "", "firstReviewedAt": e.get("finalized_at") or "",
+                    "replaces": [(x.get("cp_code") or "").strip() for x in entries.values() if x.get("obsolete_by") == e["id"]],
+                    "finalReviewUrl": "/#/bomstd?entry=%d&final=1" % e["id"]})
+    out.sort(key=lambda r: (r["firstReviewedAt"], r["entryId"]))
+    return out
+
+
+@router.get("/api/bomcost/pending-final")
+async def bomcost_pending_final(request: Request):
+    """BP 只读台账的「待终审」入口数据（V2.442）：财务BP 在核算工作台做终审（入口在 BP，动作在核算）。
+    鉴权同 /api/bomcost/final。返回 count + rows（每行带 finalReviewUrl 深链，点开即核算侧终审弹窗）+ listUrl。"""
+    who = _internal_or_user(request)
+    if not who:
+        return JSONResponse({"ok": False, "msg": "未授权：需 X-Internal-Token（回环调用）或门户登录"}, status_code=401)
+    rows = _pending_final_rows(_src())
+    from core import _now
+    return {"ok": True, "asOf": _now(), "count": len(rows), "rows": rows, "listUrl": "/#/bomstd"}
+
+
 @router.get("/api/bomcost/final")
 async def bomcost_final(request: Request):
     """BP 定价测算消费接口（契约：对接需求_BP消费接口_20260905 §1）。只返回**终审通过(status=已审核)**的定稿版，
@@ -2414,7 +2472,7 @@ async def bomcost_final(request: Request):
         nw, nw_src = _net_weight(e)
         sups = [_sup(x) for x in entries.values() if x.get("obsolete_by") == e["id"]] + [_sup(x) for x in dropped.get(e["id"], [])]
         rows.append({
-            "supersedes": sups,
+            "supersedes": sups, "links": _bp_links(e),
             "entryId": e["id"], "productKey": pkey, "erpCode": erp,
             "cpCode": e.get("cp_code") or "", "productName": (e.get("product_name") or "").strip(),
             "customer": e.get("customer") or "",
@@ -2432,7 +2490,9 @@ async def bomcost_final(request: Request):
         })
     rows.sort(key=lambda r: (r["finalizedAt"], r["entryId"]))
     from core import _now
-    return {"ok": True, "asOf": _now(), "count": len(rows), "rows": rows, "warnings": warnings}
+    return {"ok": True, "asOf": _now(), "count": len(rows), "rows": rows, "warnings": warnings,
+            # V2.442：BP 只读台账顶部「有 N 条待你终审」——明细走 /api/bomcost/pending-final
+            "pendingFinalCount": len(_pending_final_rows(src)), "pendingFinalUrl": "/api/bomcost/pending-final"}
 
 
 # ============ 样例数据种子（仅本机演示，绝不入库/入 git）============
