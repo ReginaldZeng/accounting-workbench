@@ -1888,14 +1888,20 @@ def _xlsx_response(data, filename):
 
 def _xlsx_to_html(data, title=""):
     """xlsx 字节 → 只读 HTML 预览（原版/重排版通用）——服务端转，前端无需 xlsx 库、离线可用。
-    尽量还原排版：数字按单元格格式格式化（小数收位/百分比/整数不加千分位免断编码），搬加粗/底色/对齐/列宽，
-    合并单元格 rowspan/colspan。"""
+    尽量还原 Excel 观感（预览与下载同版）：逐格边框（无边框处不画线，对应 showGridLines=False）、字号/加粗/字色、底色、
+    水平/垂直对齐与换行、行高列宽、合并 rowspan/colspan、数字格式（三段式 0 显 "-"、百分比、显式小数位、整数不加千分位护编码）、
+    条件格式数据条（用渐变背景模拟）。"""
     import io
     import html as _html
+    import re as _re
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
     wb = load_workbook(io.BytesIO(data), data_only=True)
     esc = _html.escape
+
+    def _dec(s):                                                    # 小数位＝小数点后连续 0 的个数
+        m = _re.match(r"0*", s.split(".", 1)[1]) if "." in s else None
+        return len(m.group(0)) if m else 0
 
     def fmt(v, nf):
         if v is None:
@@ -1903,18 +1909,16 @@ def _xlsx_to_html(data, title=""):
         if isinstance(v, bool):
             return "是" if v else "否"
         if isinstance(v, (int, float)):
-            import re as _re
-            low = (nf or "").lower()
-
-            def _dec(s):                               # 小数位＝小数点后**连续**的 0 个数（会计格式带多段";"，不能全数）
-                m = _re.match(r"0*", s.split(".", 1)[1]) if "." in s else None
-                return len(m.group(0)) if m else 0
+            secs = (nf or "").split(";")
+            if len(secs) >= 3 and v == 0:                           # 三段式格式：0 用第三段（如 "-"）
+                return secs[2].strip().strip('"')
+            low = secs[0].lower()
             if "%" in low:
                 return ("{:.%df}%%" % _dec(low)).format(v * 100)
-            if "." in (nf or ""):                      # 显式小数位格式优先：1.0 按 0.0000 显 1.0000，同原版
-                return "{:.{}f}".format(v, _dec(nf) or 2)
+            if "." in secs[0]:                                      # 显式小数位优先（1.0 按 0.0000 显 1.0000）
+                return "{:.{}f}".format(v, _dec(secs[0]) or 2)
             if float(v).is_integer():
-                return str(int(v))                     # 无小数格式的整数(含 ERP 码)不加千分位，免把编码断开
+                return str(int(v))                                  # 无小数格式的整数(含 ERP 码)不加千分位
             return ("{:.4f}".format(v)).rstrip("0").rstrip(".")
         return str(v)
 
@@ -1927,39 +1931,56 @@ def _xlsx_to_html(data, title=""):
         except Exception:
             return None
 
-    def style(cell, spanned):
+    def style(cell, spanned, bar):
         s = []
         f = cell.font
-        if f and f.bold:
-            s.append("font-weight:700")
-        fc = hexof(f.color) if f else None
-        if fc and fc != "000000":
-            s.append("color:#" + fc)
+        if f:
+            if f.bold:
+                s.append("font-weight:700")
+            if f.sz:
+                s.append("font-size:%dpx" % round(float(f.sz) * 1.33))
+            fc = hexof(f.color)
+            if fc and fc != "000000":
+                s.append("color:#" + fc)
+        bg = None
         fl = cell.fill
         if fl is not None and getattr(fl, "patternType", None) == "solid":
             bg = hexof(fl.fgColor)
-            if bg and bg != "FFFFFF":
-                s.append("background:#" + bg)
+            if bg == "FFFFFF":
+                bg = None
+        if bar is not None:                                         # 数据条：绿色占 pct，其余为原底色
+            col, pct = bar
+            s.append("background:linear-gradient(90deg,#%s %.0f%%,%s %.0f%%)"
+                     % (col, pct * 100, ("#" + bg) if bg else "transparent", pct * 100))
+        elif bg:
+            s.append("background:#" + bg)
         al = cell.alignment
         if al and al.horizontal in ("left", "center", "right"):
             s.append("text-align:" + al.horizontal)
         elif isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
             s.append("text-align:right")
+        if al and al.vertical in ("top", "bottom"):
+            s.append("vertical-align:" + al.vertical)
+        if al and al.wrap_text:
+            s.append("white-space:normal")
+        b = cell.border
+        for side in ("left", "right", "top", "bottom"):
+            sd = getattr(b, side, None)
+            if sd is not None and sd.style:
+                s.append("border-%s:1px solid #%s" % (side, hexof(sd.color) or "808080"))
         if spanned:
-            s.append("white-space:normal;max-width:none")   # 跨列标题/长说明整段展开，不截断
+            s.append("max-width:none")
         return ";".join(s)
 
     out = ['<!doctype html><html lang="zh"><head><meta charset="utf-8">',
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
            '<title>', esc(title or "核算表预览"), '</title><style>',
-           'body{font:13px/1.5 -apple-system,Segoe UI,"Microsoft YaHei",sans-serif;margin:18px;color:#1a2430;background:#f6f7f9}',
-           '.sheet{background:#fff;border:1px solid #e3e6ea;border-radius:8px;padding:14px 16px;margin:0 0 14px;box-shadow:0 1px 3px rgba(0,0,0,.04);overflow-x:auto}',
-           'h2{font-size:13px;margin:0 0 8px;color:#5a6b7b;font-weight:600}',
-           'table{border-collapse:collapse;font-size:12px}',
-           'td{border:1px solid #e6e9ed;padding:4px 9px;white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;font-variant-numeric:tabular-nums}',
-           '.hint{color:#8a94a0;font-size:12px;margin:0 0 12px}</style></head><body>']
+           'body{font:12px/1.35 "Microsoft YaHei",微软雅黑,-apple-system,"Segoe UI",sans-serif;margin:14px 18px;color:#1a1a1a;background:#fff}',
+           'table{border-collapse:collapse;border-spacing:0;font-size:12px}',
+           'td{border:0;padding:1px 6px;white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;font-variant-numeric:tabular-nums}',
+           '.hint{color:#8a94a0;font-size:12px;margin:0 0 10px}</style></head><body>']
     if title:
-        out.append('<div class="hint">%s · 只读预览（留档核对请下载 xlsx 原件）</div>' % esc(title))
+        out.append('<div class="hint">%s · 只读预览（与下载 xlsx 同版；xlsx 为活公式，预览为计算值）</div>' % esc(title))
     for ws in wb.worksheets:
         skip, span = set(), {}
         for mr in ws.merged_cells.ranges:
@@ -1968,16 +1989,36 @@ def _xlsx_to_html(data, title=""):
                 for c in range(mr.min_col, mr.max_col + 1):
                     if (r, c) != (mr.min_row, mr.min_col):
                         skip.add((r, c))
+        bars = {}                                                   # 条件格式数据条 → {(r,c): (颜色, 0~1)}
+        try:
+            for cf in ws.conditional_formatting:
+                for rule in cf.rules:
+                    if rule.type != "dataBar" or rule.dataBar is None:
+                        continue
+                    col = hexof(rule.dataBar.color) or "63BE7B"
+                    cfv = list(rule.dataBar.cfvo or [])
+                    lo = float(cfv[0].val) if (cfv and cfv[0].type == "num" and cfv[0].val is not None) else 0.0
+                    hi = float(cfv[1].val) if (len(cfv) > 1 and cfv[1].type == "num" and cfv[1].val is not None) else 1.0
+                    for rng in cf.sqref.ranges:
+                        for r in range(rng.min_row, rng.max_row + 1):
+                            for c in range(rng.min_col, rng.max_col + 1):
+                                v = ws.cell(row=r, column=c).value
+                                if isinstance(v, (int, float)) and not isinstance(v, bool) and hi > lo:
+                                    bars[(r, c)] = (col, max(0.0, min(1.0, (float(v) - lo) / (hi - lo))))
+        except Exception:
+            pass
         maxr, maxc = ws.max_row or 0, ws.max_column or 0
-        out.append('<div class="sheet"><h2>%s</h2><table>' % esc(ws.title))
+        out.append('<table>')
         cols = []
         for c in range(1, maxc + 1):
             dim = ws.column_dimensions.get(get_column_letter(c))
-            w = int(min(340, max(38, dim.width * 7))) if (dim and dim.width) else 0
+            w = int(min(340, max(18, dim.width * 7.2))) if (dim and dim.width) else 0
             cols.append('<col style="width:%dpx">' % w if w else '<col>')
         out.append('<colgroup>' + ''.join(cols) + '</colgroup>')
         for r in range(1, maxr + 1):
-            out.append('<tr>')
+            rd = ws.row_dimensions.get(r)
+            h = rd.height if (rd is not None and rd.height) else None
+            out.append('<tr%s>' % (' style="height:%dpx"' % round(h * 1.33) if h else ''))
             for c in range(1, maxc + 1):
                 if (r, c) in skip:
                     continue
@@ -1989,12 +2030,12 @@ def _xlsx_to_html(data, title=""):
                         attr += ' rowspan="%d"' % sp[0]
                     if sp[1] > 1:
                         attr += ' colspan="%d"' % sp[1]
-                st = style(cell, bool(sp and sp[1] > 1))
+                st = style(cell, bool(sp and sp[1] > 1), bars.get((r, c)))
                 if st:
                     attr += ' style="%s"' % st
                 out.append('<td%s>%s</td>' % (attr, esc(fmt(cell.value, cell.number_format))))
             out.append('</tr>')
-        out.append('</table></div>')
+        out.append('</table>')
     out.append('</body></html>')
     return "".join(out)
 
@@ -2007,7 +2048,8 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
     e = db.bom_get_entry(entry_id)
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
-    data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "")
+    # 下载=活公式版（改黄底参数全表联动，同原版）；预览=计算值版（openpyxl 写的公式无缓存值，网页只能走值）
+    data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview)
     nm = (e.get("product_name") or "").strip()
     if preview:
         return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s %s" % (e.get("cp_code") or "", nm)))
