@@ -80,7 +80,7 @@ def _rec_from_entry(e):
             "materials": e.get("materials") or [], "checks": e.get("checks") or []}
 
 
-def _upstream_status(e, finals=None):
+def _upstream_status(e, finals=None, others=None):
     """已入账记录的**上游链路**：料行里引用的半成品/复配料，在台账里是什么状态。
     口径 quirk#5：下层「全成本含税」＝上层料行的「含税价」，对不上就是链路串了。
 
@@ -93,7 +93,7 @@ def _upstream_status(e, finals=None):
     src = e.get("source")
     finals = finals if finals is not None else db.bom_finals(src)
     by_name = {}
-    for x in db.bom_list_entries(src):
+    for x in (others if others is not None else db.bom_list_entries(src)):
         if x["id"] == e["id"]:
             continue
         pn = (x.get("product_name") or "").strip()
@@ -144,6 +144,7 @@ def _invalidate_review(e, fields):
     fields["finalized_by"] = ""
     fields["finalized_at"] = ""
     db.bom_clear_final_if(e.get("source"), e.get("product_key"), e["id"])
+    db.bom_clear_obsolete_by(e["id"])       # 本版退出审核态 → 它替代过的旧版恢复为当前版（换码承接 V2.440）
     return "%s → 已复核（改了成本）" % st
 
 
@@ -171,6 +172,64 @@ def _net_weight(e):
     return (g, "auto") if g else (None, "")
 
 
+# ---- 换码承接（业务方定 2026-09-05，V2.440）----
+# 规则：① CP 码正常不重复；同 CP 再来一张核算表＝同一产品重核，成本会计初审时**要跳出来问「原来那个是否失效」**。
+#      ② 不同 CP 但**同 ERP 物料编码**（研发改配方换 CP、卖的还是同一 SKU）：后审核的替代先审核的；
+#         BP 眼里物料编码才是身份 → 凡引用旧 CP 的定价都要重新提示 BP（对外口带 supersedes）。
+# 落法：初审（定性即定稿 / finalize）与补物料编码两处检测冲突 → 前端确认 → 旧版 obsolete_by=新版（留痕双向）。
+#      对外（/api/bomcost/final）只发当前版：旧版在其替代者**终审通过**那一刻退出——终审前 BP 仍拿旧版，不会出现「没成本」的空档。
+def _audit_at(x):
+    """一条记录的审核时刻（终审 ack.at 优先，其次初审 finalized_at）——「后审核的替代先审核的」按它比。"""
+    return ((x.get("ack") or {}).get("at") or x.get("finalized_at") or "")
+
+
+def _obs_brief(x, why=""):
+    comp = bq.compose(_rec_from_entry(x), _fee_of(x))
+    return {"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "productKey": x.get("product_key"),
+            "productName": (x.get("product_name") or "").strip(), "erpCode": (x.get("erp_code") or "").strip(),
+            "status": x.get("status") or "", "auditAt": _audit_at(x)[:10], "fullIncl": comp["full"],
+            "approvalNo": x.get("approval_no") or "", "why": why}
+
+
+def _obsolete_candidates(e, others=None):
+    """本版定稿会**替代失效**哪些已审核版本：同 CP，或（本版有物料编码时）同物料编码而 CP 不同。
+    只认当前有效(active)、已初审/已审核、尚未失效、非本条的记录。→ [brief]（why=同CP / 同物料编码）。"""
+    cp = (e.get("cp_code") or "").strip()
+    erp = (e.get("erp_code") or "").strip()
+    out = []
+    for x in (others if others is not None else db.bom_list_entries(e.get("source"))):
+        if x["id"] == e["id"] or x.get("obsolete_by") or x.get("status") not in ("初审", "已审核"):
+            continue
+        if cp and (x.get("cp_code") or "").strip() == cp:
+            out.append(_obs_brief(x, "同CP码"))
+        elif erp and (x.get("erp_code") or "").strip() == erp:
+            out.append(_obs_brief(x, "同物料编码 %s" % erp))
+    return out
+
+
+def _mark_obsolete(e, cands, user):
+    """把候选旧版标失效（obsolete_by=本版），两边都留痕（旧版记「被谁替代」、新版记「替代了谁」）。"""
+    me = "#%d %s %s" % (e["id"], (e.get("cp_code") or "").strip(), (e.get("product_name") or "").strip())
+    for c in cands:
+        db.bom_mark_obsolete(c["entryId"], e["id"], "被 %s 替代（%s · %s）" % (me, c["why"], user))
+        db.bom_add_audit(c["entryId"], user, "失效·被新版替代", c["status"], "被 %s 替代 · %s" % (me, c["why"]))
+        db.bom_add_audit(e["id"], user, "替代旧版", "",
+                         "#%d %s（%s · 审核 %s · 全成本 %s）→ 失效" % (c["entryId"], c["cpCode"], c["why"], c["auditAt"] or "—", c["fullIncl"]))
+
+
+def _live_finals(src):
+    """对外版集合：定稿指针 + 状态已审核 + **没被一条当前对外的新版替代**。
+    → (served: [entry], entries: {id: entry}(active 全体))。链式（CP3 替 CP2 替 CP1）也正确：CP1 的替代者 CP2 仍是已审核指针 → CP1 退出。"""
+    entries = {x["id"]: x for x in db.bom_list_entries(src)}
+    live = {}
+    for pkey, eid in db.bom_finals(src).items():
+        e = entries.get(eid)
+        if e and e.get("status") == "已审核":
+            live[eid] = e
+    served = [e for e in live.values() if not (e.get("obsolete_by") and e.get("obsolete_by") in live)]
+    return served, entries
+
+
 def _goods_view(gv):
     """成本会计商品版留档 → 前端投影（diff/是否已采纳/源文件；不外发全量 materials，明细走 diff 即可）。"""
     if not gv:
@@ -186,11 +245,22 @@ def _entry_view(e, finals):
     fee = _fee_of(e)
     comp = bq.compose(_rec_from_entry(e), fee)
     is_final = finals.get(e["product_key"]) == e["id"]
-    ups = _upstream_status(e, finals)
+    others = db.bom_list_entries(e.get("source"))       # 同源 active 全体：上游链路 + 换码承接 共用一次查询
+    ups = _upstream_status(e, finals, others)
     bom_mats = e.get("bom_list")
     bom_check = bq.compare_bom(e.get("materials") or [], bom_mats) if bom_mats else None
     nw = _net_weight(e)          # 单位净重(kg)：manual=成本会计确认 / auto=按规格预填(待确认) / ''=未填；空或≤0 不能定稿
+    # 换码承接（V2.440）：obsoleteBy=本版被谁替代（live=替代者已终审→本版已退出对外；否则「待替代」仍对外）
+    #                   replaces=本版替代了谁；obsoleteCandidates=本版若现在定稿会让谁失效（初审弹窗据此问「原版是否失效」）
+    ob = e.get("obsolete_by")
+    succ = (next((x for x in others if x["id"] == ob), None) or db.bom_get_entry(ob)) if ob else None
     return {
+        "obsoleteBy": ({"entryId": succ["id"], "cpCode": (succ.get("cp_code") or "").strip(),
+                        "productName": (succ.get("product_name") or "").strip(), "status": succ.get("status") or "",
+                        "live": succ.get("status") == "已审核" and succ.get("active") in (1, None),
+                        "at": e.get("obsolete_at") or "", "note": e.get("obsolete_note") or ""} if succ else None),
+        "replaces": [_obs_brief(x) for x in others if x.get("obsolete_by") == e["id"]],
+        "obsoleteCandidates": ([] if ob else _obsolete_candidates(e, others)),
         "netWeightKg": nw[0], "netWeightSrc": nw[1],
         "bomCheck": bom_check, "hasBomList": bool(bom_mats),
         # ①BOM清单 整表原样（研发出品）：类型/编码/物料/型号/规格/单位/供应商/用量（业务方 2026-09-04 定列序）
@@ -942,9 +1012,31 @@ async def bom_set_erp_code(request: Request):
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
     code = str(body.get("erpCode") or "").strip()
     old = (e.get("erp_code") or "").strip()
-    if code != old:
-        db.bom_update_entry(e["id"], {"erp_code": code})
-        db.bom_add_audit(e["id"], u["name"], "补物料编码", old or "（空）", code or "（清空）")
+    if code == old:
+        return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+    # 换码承接（V2.440）：给**已审核**的行补物料编码时，若别的 CP 已挂同一编码且也在审核态 →
+    # 「后审核的替代先审核的」——先问确认（confirmObsolete），确认后写码并把先审核的标失效。未审核的草稿行留到初审时再判。
+    clash = []
+    if code and e.get("status") in ("初审", "已审核"):
+        clash = [x for x in db.bom_list_entries(_src())
+                 if x["id"] != e["id"] and not x.get("obsolete_by") and x.get("status") in ("初审", "已审核")
+                 and (x.get("erp_code") or "").strip() == code]
+    if clash and not bool(body.get("confirmObsolete")):
+        ranked = sorted(clash + [e], key=lambda x: (_audit_at(x), x["id"]))
+        newest = ranked[-1]
+        losers = [_obs_brief(x, "同物料编码 %s" % code) for x in ranked[:-1]]
+        return {"ok": False, "needConfirm": losers, "newest": _obs_brief(newest),
+                "msg": "物料编码 %s 已挂在 %s。按规则「后审核的替代先审核的」：%s 为当前版，%s 将失效退出对外台账（BP 引用它的定价会收到成本更新提示）。确认？"
+                       % (code, "、".join("%s（审核 %s）" % ((x.get("cp_code") or "").strip(), _audit_at(x)[:10] or "—") for x in clash),
+                          (newest.get("cp_code") or "").strip(),
+                          "、".join(c["cpCode"] for c in losers))}
+    db.bom_update_entry(e["id"], {"erp_code": code})
+    db.bom_add_audit(e["id"], u["name"], "补物料编码", old or "（空）", code or "（清空）")
+    if clash:
+        e2 = db.bom_get_entry(e["id"])
+        ranked = sorted(clash + [e2], key=lambda x: (_audit_at(x), x["id"]))
+        newest, losers = ranked[-1], ranked[:-1]
+        _mark_obsolete(newest, [_obs_brief(x, "同物料编码 %s" % code) for x in losers], u["name"])
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
 
 
@@ -1630,6 +1722,8 @@ async def bom_final_review(request: Request):
         db.bom_clear_final_if(_src(), e["product_key"], e["id"])   # 退回 → 撤下定稿指针(按id校验，审查M9)，不再供 BP 消费
         db.bom_update_entry(e["id"], {"status": "已复核", "ack": None, "finalized_by": "", "finalized_at": ""})
         db.bom_add_audit(e["id"], u["name"], "终审（财务BP）", "初审", "退回成本会计：" + note[:180])
+        for rid in db.bom_clear_obsolete_by(e["id"]):                # 它替代过的旧版恢复为当前版（换码承接 V2.440）
+            db.bom_add_audit(rid, u["name"], "恢复为当前版", "失效", "替代它的 #%d 被终审退回" % e["id"])
         msg = "已退回成本会计（该版撤出标准台账）"
     db.audit(u["name"], "bom_final_review", target=str(e["id"]), detail=msg)
     finals = db.bom_finals(_src())
@@ -1818,16 +1912,24 @@ async def bom_classify(request: Request):
         miss = miss + ["上游：" + "；".join(ub)]
     if not ((_net_weight(e2)[0] or 0) > 0):      # 净重闸（BP 对接 2026-09-05 §2，与勾稽同级）：单位净重空/≤0 不定稿
         miss = miss + ["单位净重(kg)未填或≤0——右栏「单位净重」填好并确认再定稿"]
+    # 换码承接闸（业务方定 2026-09-05）：同 CP / 同物料编码已有审核版 → **必须先答「原版是否失效」**（confirmObsolete=true）才定稿；
+    # 没答 → 只存定性，把候选回给前端弹确认。答「否」= 不定稿，先核对。
+    cands = _obsolete_candidates(e2) if not miss else []
+    need_confirm = bool(cands) and not bool(body.get("confirmObsolete"))
     finalized, affected = False, None
-    if not miss:
+    if not miss and not need_confirm:
         prev_final = db.bom_get_final(_src(), e2["product_key"])
-        db.bom_update_entry(e2["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None})
+        db.bom_update_entry(e2["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
+                                       "obsolete_by": None, "obsolete_at": None, "obsolete_note": None})   # 本版重新成为当前版
         db.bom_set_final(_src(), e2["product_key"], e2["id"], u["name"])
         db.audit(u["name"], "bom_finalize", target=str(e2["id"]), detail="随审核定性定稿 · " + (e2.get("product_name") or ""))
+        if cands:
+            _mark_obsolete(e2, cands, u["name"])
         affected = _affected_pricing(e2)
         finalized = True
     finals = db.bom_finals(_src())
     return {"ok": True, "finalized": finalized, "missingSteps": miss,
+             "needConfirm": cands if need_confirm else [], "obsoleted": cands if finalized else [],
              "affectedPricing": affected, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
 
 
@@ -1884,17 +1986,25 @@ async def bom_finalize(request: Request):
         return JSONResponse({"ok": False, "msg": "上游半成品/复配料未就绪，不能先定稿本品：%s" % "；".join(ub)}, status_code=400)
     if not ((_net_weight(e)[0] or 0) > 0):       # 净重闸（BP 对接 2026-09-05 §2，与勾稽同级）
         return JSONResponse({"ok": False, "msg": "单位净重(kg)未填或≤0，不能定稿——BP 定价要按袋/盒换算，请在右栏「单位净重」填好并确认。"}, status_code=400)
+    cands = _obsolete_candidates(e)              # 换码承接闸（V2.440）：同 CP / 同物料编码已有审核版 → 先答「原版是否失效」
+    if cands and not bool(body.get("confirmObsolete")):
+        return {"ok": False, "needConfirm": cands,
+                "msg": "台账里已有 %d 个同CP/同物料编码的审核版本（%s）。本版定稿后它们将失效、退出对外台账。请确认「原版本是否失效」。"
+                       % (len(cands), "、".join("%s %s" % (c["cpCode"], c["auditAt"]) for c in cands))}
     from core import _now
     prev_final = db.bom_get_final(_src(), e["product_key"])
-    db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None})
+    db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
+                                  "obsolete_by": None, "obsolete_at": None, "obsolete_note": None})
     db.bom_set_final(_src(), e["product_key"], e["id"], u["name"])
     db.audit(u["name"], "bom_finalize", target=str(e["id"]), detail=e.get("product_name") or "")
+    if cands:
+        _mark_obsolete(e, cands, u["name"])
     # 定稿变更通知（BP 消费提示）——留痕，前端据此弹「成本已更新，N 个定价方案受影响」。不静默变价。
     affected = _affected_pricing(e)
     finals = db.bom_finals(_src())
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals),
             "replacedFinal": bool(prev_final and prev_final.get("entry_id") != e["id"]),
-            "affectedPricing": affected}
+            "obsoleted": cands, "affectedPricing": affected}
 
 
 @router.post("/api/bom/unfinalize")
@@ -1909,6 +2019,9 @@ async def bom_unfinalize(request: Request):
     db.bom_clear_final_if(_src(), e["product_key"], e["id"])   # 按id校验清指针(审查M9)
     db.bom_update_entry(e["id"], {"status": "已复核" if e.get("reviewed_by") else "未复核", "ack": None,
                                   "finalized_by": "", "finalized_at": ""})
+    restored = db.bom_clear_obsolete_by(e["id"])               # 它替代过的旧版恢复（换码承接 V2.440）
+    for rid in restored:
+        db.bom_add_audit(rid, u["name"], "恢复为当前版", "失效", "替代它的 #%d 撤销定稿" % e["id"])
     db.audit(u["name"], "bom_unfinalize", target=str(e["id"]))
     finals = db.bom_finals(_src())
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
@@ -2138,14 +2251,10 @@ async def bom_final_feed(request: Request):
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     channel = (request.query_params.get("channel") or "").strip()
     src = _src()
-    finals = db.bom_finals(src)
+    served, _ = _live_finals(src)               # 已审核指针 且 未被当前对外新版替代（换码承接 V2.440）
     out = []
-    for pkey, eid in finals.items():
-        e = db.bom_get_entry(eid)
-        if not e:
-            continue
-        if e.get("status") != "已审核":        # 只对外开放终审通过的（初审版不外发）
-            continue
+    for e in served:
+        pkey = e["product_key"]
         if channel and (e.get("channel") or "") != channel:
             continue
         comp = bq.compose(_rec_from_entry(e), _fee_of(e))
@@ -2216,11 +2325,34 @@ async def bomcost_final(request: Request):
     since = (qp.get("since") or "").strip()
     codes = {c.strip() for c in (qp.get("erpCodes") or "").split(",") if c.strip()}
     src = _src()
+    # 换码承接（业务方定 2026-09-05，V2.440）：只发**当前版**——被一条已终审新版替代的旧版不再出现；
+    # 新版带 supersedes=[它替代的旧版]，BP 拿去翻「引用旧 CP 的定价方案」重新提示。
+    served, entries = _live_finals(src)
+    # 兜底去重：同一物料编码若仍有多条对外版（老数据没标替代关系 / 两边都没走确认）→ 按审核时间只发最新，其余列进 warnings，
+    # 让成本会计回核算侧补「补物料编码」确认；BP 永远不会收到同一编码两条。
+    by_erp, warnings, dropped = {}, [], {}
+    for e in served:
+        erp = (e.get("erp_code") or "").strip()
+        if erp:
+            by_erp.setdefault(erp, []).append(e)
+    for erp, es in by_erp.items():
+        if len(es) > 1:
+            es.sort(key=lambda x: (_audit_at(x), x["id"]))
+            dropped[es[-1]["id"]] = es[:-1]
+            warnings.append("物料编码 %s 有 %d 个对外版本（%s），已按审核时间只发 %s；请成本会计在核算侧确认替代关系（补物料编码时会提示）"
+                            % (erp, len(es), "/".join((x.get("cp_code") or "").strip() for x in es),
+                               (es[-1].get("cp_code") or "").strip()))
+    drop_ids = {x["id"] for lst in dropped.values() for x in lst}
+
+    def _sup(x):
+        return {"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "productKey": x.get("product_key"),
+                "erpCode": (x.get("erp_code") or "").strip(), "finalizedAt": (x.get("ack") or {}).get("at") or "",
+                "obsoleteAt": x.get("obsolete_at") or ""}
     rows = []
-    for pkey, eid in db.bom_finals(src).items():
-        e = db.bom_get_entry(eid)
-        if not e or e.get("status") != "已审核":            # 只对外终审通过的（初审版不外发）
+    for e in served:
+        if e["id"] in drop_ids:
             continue
+        pkey = e["product_key"]
         if ch and (e.get("channel") or "") != ch:
             continue
         erp = (e.get("erp_code") or "").strip()
@@ -2232,7 +2364,9 @@ async def bomcost_final(request: Request):
             continue
         comp = bq.compose(_rec_from_entry(e), _fee_of(e))
         nw, nw_src = _net_weight(e)
+        sups = [_sup(x) for x in entries.values() if x.get("obsolete_by") == e["id"]] + [_sup(x) for x in dropped.get(e["id"], [])]
         rows.append({
+            "supersedes": sups,
             "entryId": e["id"], "productKey": pkey, "erpCode": erp,
             "cpCode": e.get("cp_code") or "", "productName": (e.get("product_name") or "").strip(),
             "customer": e.get("customer") or "",
@@ -2250,7 +2384,7 @@ async def bomcost_final(request: Request):
         })
     rows.sort(key=lambda r: (r["finalizedAt"], r["entryId"]))
     from core import _now
-    return {"ok": True, "asOf": _now(), "count": len(rows), "rows": rows}
+    return {"ok": True, "asOf": _now(), "count": len(rows), "rows": rows, "warnings": warnings}
 
 
 # ============ 样例数据种子（仅本机演示，绝不入库/入 git）============

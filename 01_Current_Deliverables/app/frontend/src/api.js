@@ -300,8 +300,9 @@ export const bomBook = (stagingId, indexes) => jp('/api/bom/book', { stagingId, 
 export const bomReview = (entryId, fee, channel, materials) => jp('/api/bom/review', { entryId, fee, channel, materials })
 export const bomConfirmStep = (entryId, step, on = true) => jp('/api/bom/confirm-step', { entryId, step, on })
 export const bomApplyGoods = (entryId) => jp('/api/bom/apply-goods', { entryId })
-export const bomClassify = (entryId, category, quotable, reason) =>
-  jp('/api/bom/classify', { entryId, category, quotable, reason })
+// confirmObsolete（V2.440 换码承接）：同CP/同物料编码已有审核版时，须明确答「原版失效」才定稿；不传→只存定性并回 needConfirm
+export const bomClassify = (entryId, category, quotable, reason, confirmObsolete = false) =>
+  jp('/api/bom/classify', { entryId, category, quotable, reason, confirmObsolete })
 export const getBomApproval = (no) => j('/api/bom/approval?no=' + encodeURIComponent(no))
 export const bomIntake = (approvalNo) => jp('/api/bom/intake', { approvalNo })
 export const bomFinalReview = (entryId, approve, note) => jp('/api/bom/final-review', { entryId, approve, note })
@@ -316,13 +317,13 @@ export const bomReplaceSheet = (groupId, approvalNo, file) => {
 }
 export const getBomSettings = () => j('/api/bom/settings')
 export const setBomSettings = (cfg) => jp('/api/bom/settings', cfg)
-export const bomFinalize = (entryId) => jp('/api/bom/finalize', { entryId })
+export const bomFinalize = (entryId, confirmObsolete = false) => jp('/api/bom/finalize', { entryId, confirmObsolete })
 export const bomUnfinalize = (entryId) => jp('/api/bom/unfinalize', { entryId })
 export const bomAttachBomList = (entryId, file) => { const fd = new FormData(); fd.append('entryId', entryId); fd.append('file', file); return fetch('/api/bom/attach-bomlist', { method: 'POST', body: fd }).then(r => r.json()) }
 export const getBomKdPurchase = (code, months = 12) => j(`/api/bom/kd-purchase?code=${encodeURIComponent(code)}&months=${months}`)
 export const getBomMaterialUsage = (code, exclude) => j(`/api/bom/material-usage?code=${encodeURIComponent(code)}${exclude ? `&exclude=${exclude}` : ''}`)
 export const bomSetMatType = (entryId, mat, subType) => jp('/api/bom/set-mat-type', { entryId, subType, matCode: mat.matCode, matName: mat.matName, seg: mat.seg })
-export const bomSetErpCode = (entryId, erpCode) => jp('/api/bom/set-erp-code', { entryId, erpCode })
+export const bomSetErpCode = (entryId, erpCode, confirmObsolete = false) => jp('/api/bom/set-erp-code', { entryId, erpCode, confirmObsolete })
 export const bomSetNetWeight = (entryId, netWeightKg) => jp('/api/bom/set-net-weight', { entryId, netWeightKg })
 export const getBomUsageSpreads = (entryId) => j(`/api/bom/usage-spreads?entryId=${entryId}`)
 export const getBomInvoiceRules = () => j('/api/bom/invoice-rules')

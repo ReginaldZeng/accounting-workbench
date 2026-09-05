@@ -181,18 +181,25 @@ function AuditModal({ entry, onClose, onDone, flash }) {
   useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
   const PRESET = ['包材不全', '物料暂定价', '配方未定版', '缺半成品核算表', '勾稽存疑']
   const missing = CONFIRM_STEPS.filter(([k]) => !entry.steps?.[k]).map(([, l]) => l)
+  // 换码承接（业务方定 2026-09-05）：同CP再核算 / 不同CP同物料编码 → 定稿前必须答「原来那个是否失效」
+  const cands = entry.obsoleteCandidates || []
+  const [obs, setObs] = useState(null)     // null 未答 / true 原版失效并定稿 / false 原版保留、只存定性不定稿
+  const willFinalize = missing.length === 0
   const save = async () => {
     if (!cat) return flash('请选择物料类别')
     if (q === null) return flash('请选择是否建议对外报价')
     if (!q && !reason.trim()) return flash('不建议对外报价时必须写明原因')
+    if (willFinalize && cands.length > 0 && obs === null) return flash('请先回答：原来的审核版本是否失效？')
     setBusy(true)
     try {
-      const r = await bomClassify(entry.id, cat, q, reason.trim())
+      const r = await bomClassify(entry.id, cat, q, reason.trim(), obs === true)
       if (!r.ok) flash(r.msg || '保存失败')
       else {
         flash(r.finalized
-          ? `已定稿：${cat} · ${q ? '建议报价' : '不建议报价'}　${r.affectedPricing?.note || ''}`
-          : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
+          ? `已定稿：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}　${r.affectedPricing?.note || ''}`
+          : (r.needConfirm || []).length
+            ? `已存定性，未定稿：原版本 ${r.needConfirm.map(c => c.cpCode).join('、')} 保留为当前版，请先核对再定稿`
+            : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
         onDone(r.entry)
       }
     } catch (e) { flash('保存失败：' + e.message) } finally { setBusy(false) }
@@ -207,6 +214,18 @@ function AuditModal({ entry, onClose, onDone, flash }) {
           ? <div className="banner err" style={{ marginBottom: 10 }}>⚠ 还有 {missing.length} 步未确认：<b>{missing.join('、')}</b>。可以先存定性，但要 ③④ 都确认了才会定稿。</div>
           : <div className="banner" style={{ background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)', marginBottom: 10 }}>
             ✓ ③用量自洽、④报价核算 均已确认——保存定性即<b>定稿</b>，毕业进标准成本台账。</div>}
+        {willFinalize && cands.length > 0 && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
+          <b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>——本版定稿后，原版本将<b>失效</b>（退出对外台账；引用它的 BP 定价方案会收到「成本已更新」提示，终审通过那一刻切换）。
+          <div style={{ margin: '6px 0 8px' }}>{cands.map(c => (
+            <div key={c.entryId} className="mono" style={{ fontSize: 11.5 }}>
+              {c.cpCode} {c.productName}{c.erpCode ? `　物料编码 ${c.erpCode}` : ''}　·　{c.why}　·　{c.status} {c.auditAt || ''}　·　全成本 ¥{fmt(c.fullIncl)}/kg
+            </div>))}</div>
+          <b style={{ fontSize: 12 }}>原来的版本是否失效？</b>
+          <div className="bom-catpick" style={{ marginTop: 6 }}>
+            <button className={obs === true ? 'on no' : ''} onClick={() => setObs(true)}>是，原版失效，本版定稿</button>
+            <button className={obs === false ? 'on' : ''} onClick={() => setObs(false)}>否，先核对（只存定性，不定稿）</button>
+          </div>
+        </div>}
 
         <div className="bom-mstep"><span className="bom-mno">1</span><div style={{ flex: 1 }}>
           <b>物料类别</b>
@@ -235,8 +254,8 @@ function AuditModal({ entry, onClose, onDone, flash }) {
         <div className="bom-mfoot">
           <button className="btn-sec" onClick={onClose}>取消</button>
           <button className="btn-pri" disabled={busy} onClick={save}
-            style={missing.length === 0 ? { background: 'var(--green)', borderColor: 'var(--green)' } : undefined}>
-            {busy ? '保存中…' : (missing.length === 0 ? '✓ 保存定性并定稿' : '仅保存定性')}</button>
+            style={(willFinalize && obs !== false) ? { background: 'var(--green)', borderColor: 'var(--green)' } : undefined}>
+            {busy ? '保存中…' : ((willFinalize && obs !== false) ? '✓ 保存定性并定稿' : '仅保存定性')}</button>
         </div>
       </div>
     </div>
@@ -311,10 +330,14 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
   const [ftype, setFtype] = useState('all')     // all | fin | semi
   const [fch, setFch] = useState('all')         // all | ecom | common | tob | toc
   const [q, setQ] = useState('')
+  const [showObs, setShowObs] = useState(false) // 换码承接：已失效（被已终审新版替代）的旧版默认收起
   const rows = data.rows || []
   const versionsOf = (pk) => (data.all || []).filter(x => x.productKey === pk)
+  const isDead = (r) => !!(r.obsoleteBy && r.obsoleteBy.live)
+  const deadCount = rows.filter(isDead).length
 
   const shown = rows.filter(r => {
+    if (isStd && !showObs && isDead(r)) return false
     if (ftype !== 'all' && (r.kind || '成品') !== ftype) return false
     if (fch !== 'all' && r.channel !== fch) return false
     if (q.trim()) { const s = (r.cpCode + r.productName + r.customer).toLowerCase(); if (!s.includes(q.trim().toLowerCase())) return false }
@@ -346,19 +369,29 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
     if (v == null) return
     const code = v.trim()
     if (code === cur) return
-    const res = await bomSetErpCode(r.id, code)
+    let res = await bomSetErpCode(r.id, code)
+    // 换码承接：同一物料编码已挂在别的 CP 上 → 后端先问「后审核的替代先审核的，确认？」，同意后再写并标失效
+    if (res && !res.ok && res.needConfirm) {
+      if (!window.confirm(res.msg + '\n\n确定 = 写入编码并使旧版失效；取消 = 不改')) return
+      res = await bomSetErpCode(r.id, code, true)
+    }
     if (res && res.ok) { flash && flash('物料编码已更新'); onRefresh && onRefresh() }
     else flash && flash((res && res.msg) || '更新失败')
   }
   const renderRow = (r) => {
     const nver = versionsOf(r.productKey).length
     const dot = (v, src) => Math.abs((v || 0) - (src || 0)) > 1e-9
+    const dead = isDead(r)
     return (
-      <tr key={r.id} className="row" onClick={() => onOpen(r.id)} title="查看成本核算表">
+      <tr key={r.id} className="row" onClick={() => onOpen(r.id)} title="查看成本核算表" style={dead ? { opacity: 0.55 } : undefined}>
         <td className="mono sub">{r.erpCode || <span className="muted">—</span>}</td>
         <td className="mono" style={{ fontWeight: 600 }}>{r.cpCode}</td>
         <td style={{ fontWeight: 600 }}>{r.productName}
           {r.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + r.quoteReason}>禁报价</span>}
+          {r.obsoleteBy && (dead
+            ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
+            : <span className="tag late" style={{ marginLeft: 6 }} title={`${r.obsoleteBy.cpCode} 已初审、待终审；其终审通过后本版退出对外台账。在此之前 BP 仍用本版`}>待替代 · {r.obsoleteBy.cpCode} 待终审</span>)}
+          {(r.replaces || []).length > 0 && <span className="bom-gvtag" title={'本版替代了：' + r.replaces.map(c => `${c.cpCode}（${c.why || ''} 审核 ${c.auditAt || '—'}）`).join('；')}>替代 {r.replaces.map(c => c.cpCode).join('、')}</span>}
           {nver > 1 && <a className="lk" style={{ marginLeft: 6, fontSize: 11, fontWeight: 400 }} onClick={e => { e.stopPropagation(); onOpen(r.id) }}>{nver} 版</a>}</td>
         <td className="sub" style={{ whiteSpace: 'nowrap' }}>{r.packSpec || '—'}</td>
         <td className="num">{fmt(r.comp.mat)}</td>
@@ -427,6 +460,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
           {isStd && <>
             <Seg value={ftype} onChange={setFtype} opts={[['all', '全部'], ['成品', '成品'], ['半成品', '半成品'], ['复配料', '复配料']]} />
             <Seg value={fch} onChange={setFch} opts={[['all', '全部渠道'], ['ecom', '只看电商'], ['common', '只看通品'], ['tob', 'TOB'], ['toc', 'TOC']]} />
+            {deadCount > 0 && <button className={'btn-sec' + (showObs ? ' on' : '')} style={{ fontSize: 11.5 }} onClick={() => setShowObs(v => !v)}
+              title="被已终审新版替代（同CP重核 / 不同CP同物料编码）的旧版：记录与历史都在，只是不再对外">
+              {showObs ? '隐藏' : '显示'}已失效 {deadCount}</button>}
           </>}
           <span style={{ flex: 1 }} />
           <span className="pill-src">口径：<b style={{ color: 'var(--ink)' }}>含税 元/kg</b></span>
@@ -815,8 +851,15 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
     catch (e) { flash('保存失败：' + e.message) } finally { setSaving(false) }
   }
   const finalize = async () => {
-    try { const r = await bomFinalize(entry.id); flash('已定稿 · ' + (r.affectedPricing?.note || '')); await onChanged() }
-    catch (e) { flash('定稿失败：' + e.message) }
+    try {
+      let r = await bomFinalize(entry.id)
+      if (!r.ok && r.needConfirm) {          // 换码承接：先答「原版是否失效」
+        if (!window.confirm(r.msg + '\n\n确定 = 原版失效、本版定稿；取消 = 不定稿')) return
+        r = await bomFinalize(entry.id, true)
+      }
+      if (!r.ok) return flash(r.msg || '定稿失败')
+      flash('已定稿 · ' + (r.affectedPricing?.note || '')); await onChanged()
+    } catch (e) { flash('定稿失败：' + e.message) }
   }
   const unfinalize = async () => { try { await bomUnfinalize(entry.id); flash('已撤销定稿'); await onChanged() } catch (e) { flash(e.message) } }
   const confirmStep = async (s, on) => {
@@ -888,6 +931,16 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
         <div className="bom-crumbs"><a className="lk" onClick={onBack}>成本台账</a> / {entry.productName}</div>
         {entry.staleNote && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
           ⚠ <b>{entry.staleNote}</b>：本品所依赖的上游核算表被替换过，成本可能已变——已把本品打回<b>未复核</b>，请重新走 ③用量自洽 / ④报价核算 确认。确认后此提醒自动消失。</div>}
+        {/* 换码承接（V2.440）：本版被新版替代 / 本版替代了旧版 */}
+        {entry.obsoleteBy && <div className="banner" style={entry.obsoleteBy.live
+          ? { background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }
+          : { background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
+          {entry.obsoleteBy.live ? '⊘ ' : '⏳ '}<b>{entry.obsoleteBy.live ? '本版已失效' : '本版待替代'}</b>：被 <a className="lk" onClick={() => onOpen(entry.obsoleteBy.entryId)}>{entry.obsoleteBy.cpCode} {entry.obsoleteBy.productName}</a> 替代（{entry.obsoleteBy.at}，{entry.obsoleteBy.note}）。
+          {entry.obsoleteBy.live ? '已退出对外台账，BP 不再拿到本版；记录与留痕照常可查。' : `新版当前「${entry.obsoleteBy.status}」，其终审通过后本版退出对外台账；在此之前 BP 仍用本版。`}</div>}
+        {(entry.replaces || []).length > 0 && <div className="banner" style={{ background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }}>
+          ⇄ <b>本版替代了 {entry.replaces.length} 个旧版</b>：{entry.replaces.map((c, i) => (
+            <span key={c.entryId}>{i > 0 ? '；' : ''}<a className="lk" onClick={() => onOpen(c.entryId)}>{c.cpCode}</a>（{c.why || '—'} · 审核 {c.auditAt || '—'} · 全成本 ¥{fmt(c.fullIncl)}/kg）</span>))}
+          。{entry.finalPassed ? '本版已终审，旧版已退出对外台账；引用旧版的 BP 定价方案会收到「成本已更新」提示。' : '本版终审通过后旧版才退出对外台账；BP 那边随之收到「成本已更新」提示。'}</div>}
         {entry.voidPending && <div className="banner" style={{ background: 'var(--red-bg)', color: 'var(--red)', border: '1px solid var(--red)', marginBottom: 10 }}>
           ⌦ <b>有待终审的作废申请</b>：{entry.voidReq?.by} 于 {entry.voidReq?.at} 申请作废，理由「{entry.voidReq?.reason}」——
           申请期间本版<b>照常有效</b>，须财务BP终审批准才真作废。{cfg?.canFinalReview
@@ -1849,6 +1902,9 @@ function FinalReviewModal({ row, onClose, onDone, flash }) {
           </div>
           {row.quotable === false && <div className="banner err" style={{ marginTop: 8, fontSize: 11.5 }}>
             ⚠ 成本会计标了<b>不建议对外报价</b>——理由：{row.quoteReason}。报价前请留意。</div>}
+          {(row.replaces || []).length > 0 && <div className="banner" style={{ marginTop: 8, fontSize: 11.5, background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)' }}>
+            ⇄ <b>本版通过后将替代 {row.replaces.length} 个旧版</b>：{row.replaces.map(c => `${c.cpCode}（${c.why || ''} · 审核 ${c.auditAt || '—'} · 全成本 ¥${fmt(c.fullIncl)}/kg）`).join('；')}
+            ——旧版退出对外台账，<b>引用旧版的 BP 定价方案会收到「成本已更新」提示</b>，需要重新确认。</div>}
         </div></div>
         <div className="bom-mstep"><span className="bom-mno">2</span><div style={{ flex: 1 }}>
           <b>终审意见（退回必填）</b>

@@ -492,6 +492,9 @@ bom_quote_entry = Table(
     Column("ack", Text),
     Column("superseded_at", String(20)),             # 退出时间（active=0 时填）
     Column("supersede_reason", String(200)),         # 退出原因/说明（谁替换换成第几号 / 谁因何作废）
+    # 换码承接（业务方定 2026-09-05，V2.440）：本版被哪条**新版替代而失效**——①同 CP 再核算 ②不同 CP 但同 ERP 物料编码（BP 眼里物料编码才是身份）。
+    # 记录留着、active 仍=1、状态不动（历史可查），只是不再是对外版；新版退出审核态（退回/撤销/作废）时自动恢复。
+    Column("obsolete_by", Integer), Column("obsolete_at", String(20)), Column("obsolete_note", String(200)),
     Column("approval_no", String(40)), Column("src_file", String(200)), Column("sheet", String(80)),
     Column("status", String(12)),                    # 未复核/已复核/已定稿
     Column("created_by", String(50)), Column("created_at", String(20)),
@@ -3121,11 +3124,12 @@ def _ensure_bom_columns():
         for col in ("bom_list", "review_steps", "origin", "src_label", "goods_version",
                     "group_id", "superseded_at", "supersede_reason",
                     "mat_category", "quote_reason", "classified_by", "classified_at", "craft",
-                    "inactive_kind", "void_req", "ack", "stale_note"):
+                    "inactive_kind", "void_req", "ack", "stale_note", "obsolete_at", "obsolete_note"):
             if col not in cols:
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s TEXT" % col))
-        for col, ddl in (("active", "INTEGER DEFAULT 1"), ("quotable", "INTEGER"), ("net_weight_kg", "FLOAT")):
+        for col, ddl in (("active", "INTEGER DEFAULT 1"), ("quotable", "INTEGER"), ("net_weight_kg", "FLOAT"),
+                         ("obsolete_by", "INTEGER")):
             if col not in cols:
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s %s" % (col, ddl)))
@@ -3275,6 +3279,27 @@ def bom_supersede_entry(entry_id, reason, kind="replaced"):
     fin = bom_get_final(e.get("source"), e.get("product_key"))
     if fin and fin.get("entry_id") == int(entry_id):
         bom_clear_final(e.get("source"), e.get("product_key"))
+    bom_clear_obsolete_by(entry_id)      # 它替代过的旧版恢复（新版没了，旧版重新是当前版）
+
+
+# ---- 换码承接（V2.440）：新版替代旧版 → 旧版失效；新版退出审核态 → 旧版恢复 ----
+def bom_mark_obsolete(old_id, new_id, note):
+    """把旧版标为「被 new_id 替代而失效」。不改 active/status——记录与历史照常可查，只是不再是对外版。"""
+    with _engine.begin() as c:
+        c.execute(update(bom_quote_entry).where(bom_quote_entry.c.id == int(old_id))
+                  .values(obsolete_by=int(new_id), obsolete_at=_now(), obsolete_note=(note or "")[:200]))
+
+
+def bom_clear_obsolete_by(new_id):
+    """new_id 退出审核态（退回/撤销定稿/改成本失效/作废/被替换）→ 凡被它替代的旧版**恢复**为当前版。返回恢复的 id 列表。
+    再次初审 new_id 时会重新跳确认，不会静默再替代。"""
+    with _engine.begin() as c:
+        ids = [r[0] for r in c.execute(select(bom_quote_entry.c.id)
+                                       .where(bom_quote_entry.c.obsolete_by == int(new_id))).fetchall()]
+        if ids:
+            c.execute(update(bom_quote_entry).where(bom_quote_entry.c.obsolete_by == int(new_id))
+                      .values(obsolete_by=None, obsolete_at=None, obsolete_note=None))
+    return ids
 
 
 def bom_delete_entry(entry_id):
