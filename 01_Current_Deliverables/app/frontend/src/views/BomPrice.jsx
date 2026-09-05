@@ -710,24 +710,24 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
             </div>}
 
             {/* 被替换留痕 */}
-            {g.superseded.length > 0 && <div style={{ padding: '0 14px 12px' }}>
-              <div className="bom-ah" style={{ marginTop: 4 }}>替换留痕 · 审核历史（{g.superseded.length}）</div>
+            {g.superseded.length > 0 && <details style={{ padding: '0 14px 12px' }}>
+              <summary className="bom-ah" style={{ marginTop: 4, cursor: 'pointer' }}>替换留痕 · 审核历史（{g.superseded.length}）<span className="muted" style={{ fontSize: 10.5, fontWeight: 400 }}> · 点开查看</span></summary>
               {g.superseded.map(h => (
                 <div key={h.id} className="bom-audit">
                   <div className="bom-audit-h">#{h.id} {h.cpCode} · {h.productName}　<span className="tag unmap">已被替换</span></div>
                   <div className="muted" style={{ fontSize: 11 }}>{h.supersededAt}　{h.reason}</div>
                   <div className="muted" style={{ fontSize: 10.5 }}>原文件：{h.srcFile || '—'}　·　入账 {h.createdAt} by {h.createdBy}</div>
                 </div>))}
-            </div>}
+            </details>}
           </div>))}
 
         {deadHist.length > 0 && (
-          <div className="card bom-sect">
-            <div className="bom-secthead">
+          <details className="card bom-sect">
+            <summary className="bom-secthead" style={{ cursor: 'pointer' }}>
               <span className="bom-no" style={{ background: 'var(--ink-3)', color: '#fff' }}>史</span>
               <b>历史留痕（已全部作废 / 被替换的旧版）</b>
-              <span className="mono muted" style={{ fontSize: 11, marginLeft: 6 }}>{deadHist.length} 条 · 不在台账、不占组号与产品数</span>
-            </div>
+              <span className="mono muted" style={{ fontSize: 11, marginLeft: 6 }}>{deadHist.length} 条 · 不在台账、不占组号与产品数 · 点开查看</span>
+            </summary>
             <div style={{ padding: '4px 14px 12px' }}>
               {deadHist.slice().sort((a, b) => a.id - b.id).map(h => (
                 <div key={h.id} className="bom-audit">
@@ -736,7 +736,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
                   <div className="muted" style={{ fontSize: 10.5 }}>原文件：{h.srcFile || '—'}　·　入账 {h.createdAt} by {h.createdBy}</div>
                 </div>))}
             </div>
-          </div>
+          </details>
         )}
 
         <div className="foot">组＝一个成本核算表文件（成品+半成品+复配料）＋ 匹配的 BOM 清单。替换核算表时：新文件里勾稽平的产品顶替同组同产品旧版（旧版标「已被替换」留痕、退出标准成本库与定稿指针）；仍不平的不入账并回报原因；原先因不平未入的产品（如半成品）修好后会作「组内新增」补入。<b>定性</b>＝物料类别（复配料/自产·委外 半成品·成品）+ 是否建议对外报价（不建议须写原因），定稿前必须完成。</div>
