@@ -2049,7 +2049,8 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
     # 下载=活公式版（改黄底参数全表联动，同原版）；预览=计算值版（openpyxl 写的公式无缓存值，网页只能走值）
-    data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview)
+    data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview,
+                           rules=_invoice_rules())      # 成本不含税公式/M列下拉 按台账当前发票规则生成
     nm = (e.get("product_name") or "").strip()
     if preview:
         return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s %s" % (e.get("cp_code") or "", nm)))

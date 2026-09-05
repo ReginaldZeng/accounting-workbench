@@ -538,16 +538,19 @@ def richness(rec):
 
 
 # ---------------- 重排版核算表导出（移植 tools/build_pretty_sheet.py，参数可覆盖为复核后值）----------------
-def build_pretty(rec, fee=None, approval="", formulas=True):
+def build_pretty(rec, fee=None, approval="", formulas=True, rules=None):
     """一条记录 → 重排版核算表 xlsx 字节，对齐星期九「成本核算表（财务版本）」原版。
     formulas=True（下载）：派生数字全写 **Excel 活公式**，参数一改全表联动；formulas=False（网页预览）：同布局写计算值。
     配色（业务方定 2026-09-05）：A6A6A6＝标题+公式格；D9D9D9＝填写格；**按汇总链路着色**——汇入「变动成本合计=N14+N19」的
     原料/包材小计 N 格 FDE9D9；汇入「6、成本合计=N20+N30+N33+N34+N35」的 变动成本合计/制造小计/工厂小计/运输/装卸 N 格 FABF8F；
-    变动成本合计行 A6A6A6（仅 N 格 FABF8F）；6~10 FFFF00；预估订单需求红字。"""
+    变动成本合计行 A6A6A6（仅 N 格 FABF8F）；6~10 FFFF00；预估订单需求红字。
+    成本不含税：按台账发票规则（rules=[{type,mode,rate}]，同 invoice_cost_excl）生成 Excel 嵌套 IF 公式引 M 列发票类型，
+    M 列数据验证下拉限选配置类型——下载者改发票类型，公式自动切算法（成本会计口径不丢）。"""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.formatting.rule import DataBarRule
+    from openpyxl.worksheet.datavalidation import DataValidation
 
     F = "微软雅黑"
     INK, MUTED, BLUE = "1A1A1A", "6F7A86", "2D70C9"
@@ -601,12 +604,33 @@ def build_pretty(rec, fee=None, approval="", formulas=True):
     mats = [m for m in p.get("materials", []) if m.get("seg") == "原料"]
     packs = [m for m in p.get("materials", []) if m.get("seg") == "包材"]
 
+    rules = rules or INVOICE_RULE_DEFAULTS                # 发票类型→成本不含税 算法（台账基础设置，成本会计口径）
+
     def cost_excl(m):
-        q, pr, t = num(m.get("qtyPerKg")), num(m.get("priceIncl")), num(m.get("taxRate"))
-        return q * pr / (1 + t) if (1 + t) else 0.0
+        return invoice_cost_excl(num(m.get("qtyPerKg")), num(m.get("priceIncl")), num(m.get("taxRate")),
+                                 m.get("invoiceType") or "专票", rules)
+
+    def excl_formula(r):
+        """成本不含税 Excel 公式：按 M{r} 发票类型分支，与 invoice_cost_excl 同算法；未匹配→价税分离；ROUND 4 位同内核。"""
+        I_, K_, L_, M_ = "I%d" % r, "K%d" % r, "L%d" % r, "M%d" % r
+        base = "%s/(1+%s)*%s" % (K_, L_, I_)                                  # 价税分离（专票/默认）
+        expr = base
+        for rule in reversed([x for x in rules if x.get("mode") != "价税分离"]):
+            rate, mode = float(rule.get("rate") or 0), rule.get("mode")
+            if mode == "全额":
+                br = "%s*%s" % (K_, I_)
+            elif mode == "买价扣除":
+                br = "%s*(1-%s)*%s" % (K_, rate, I_)
+            elif mode == "农产品专票":
+                br = "IF(%s>0.01,(%s-%s/(1+%s)*%s)*%s,%s)" % (L_, K_, K_, L_, rate, I_, base)
+            else:
+                continue
+            expr = 'IF(%s="%s",%s,%s)' % (M_, str(rule.get("type") or ""), br, expr)
+        return "=ROUND(%s,4)" % expr
     mat_excl = sum(cost_excl(m) for m in mats)
     pack_excl = sum(cost_excl(m) for m in packs)
-    mfg_x, load_x = mfg / TAX_GROSS, load / (1 + LOAD_TAX)
+    mfg_x = mfg / TAX_GROSS
+    load_x = invoice_cost_excl(1.0, load, LOAD_TAX, "专票", rules)          # 装卸：与公式同走发票规则（专票→价税分离）
     var_x = mat_excl + pack_excl
     total_x = var_x + mfg_x + load_x
     total_incl = total_x * TAX_GROSS
@@ -718,7 +742,7 @@ def build_pretty(rec, fee=None, approval="", formulas=True):
             put(r, 11, None, pr, NUM, bg=INPUT)
             put(r, 12, None, t, "0%", align=CEN, bg=INPUT)
             # 公式格 A6A6A6
-            put(r, 14, "=I%d*K%d/(1+L%d)" % (r, r, r), ce, NUM, bg=HEAD)
+            put(r, 14, excl_formula(r), ce, NUM, bg=HEAD)                      # 成本不含税：按 M 列发票类型分支
             put(r, 15, "=N%d/%s" % (r, FULL), pct(ce), PCT, bg=HEAD)
             put(r, 17, '=IF(%s="","",I%d*%s)' % (OQ, r, OQ), (oq_val if oq_val else ""), NUM, bg=HEAD)
             ws.cell(r, 3).border = BOX
@@ -812,15 +836,26 @@ def build_pretty(rec, fee=None, approval="", formulas=True):
         a = ws.cell(r, 2, text); a.font = ff(10, True); a.fill = fill(HEAD); a.alignment = LFT; a.border = BOX
 
     na_row(R_FR, "运输费用"); fee_tax_cols(R_FR, FREIGHT_TAX)
-    put(R_FR, 14, "=I%d*K%d/(1+L%d)" % (R_FR, R_FR, R_FR), 0.0, NUM0, bg=ORANGE)
+    put(R_FR, 14, excl_formula(R_FR), 0.0, NUM0, bg=ORANGE)
     put(R_FR, 15, "=N%d/%s" % (R_FR, FULL), 0.0, PCT, bg=HEAD)
     side_label(R_FR, "4、运输费用")
 
     na_row(R_LD, "装卸费用"); fee_tax_cols(R_LD, LOAD_TAX)
     put(R_LD, 11, None, load, NUM, bg=INPUT)
-    put(R_LD, 14, "=I%d*K%d/(1+L%d)" % (R_LD, R_LD, R_LD), load_x, NUM, font=ff(9, True), bg=ORANGE)
+    put(R_LD, 14, excl_formula(R_LD), load_x, NUM, font=ff(9, True), bg=ORANGE)
     put(R_LD, 15, "=N%d/%s" % (R_LD, FULL), pct(load_x), PCT, bg=HEAD)
     side_label(R_LD, "5、装卸费")
+
+    # 发票类型下拉（M 列）：选项＝台账配置的发票类型；改类型后成本不含税公式自动切算法
+    dv = DataValidation(type="list", allow_blank=True,
+                        formula1='"%s"' % ",".join(str(x.get("type") or "") for x in rules if x.get("type")))
+    dv.errorTitle, dv.error = "发票类型", "请选择台账「基础设置」里配置的发票类型"
+    ws.add_data_validation(dv)
+    if nm:
+        dv.add("M%d:M%d" % (R_MAT0, R_MAT0 + nm - 1))
+    if npk:
+        dv.add("M%d:M%d" % (R_PACK0, R_PACK0 + npk - 1))
+    dv.add("M%d:M%d" % (R_FR, R_LD))
 
     # ── 6~10：B 标签 A6A6A6 / C:N 合并值 + O + P 整行 FFFF00 ──
     summ = [(R6, "6、成本合计（不含税）", "=N%d+N%d+N%d+N%d+N%d" % (R_VAR, R_MFGSUB, R_FACSUB, R_FR, R_LD), total_x, None),
@@ -857,7 +892,7 @@ def build_pretty(rec, fee=None, approval="", formulas=True):
     # ── 脚注 ──
     r = R_SRC + 2
     for tnote in [
-        "口径：①成本不含税＝添加量×含税含运价÷(1+税率)；②加工费不含税＝含税÷1.13，装卸不含税＝含税÷1.06；成本合计(含税)＝不含税合计×1.13。",
+        "口径：①成本不含税按发票类型取算法（专票价税分离÷(1+税率)／普票全额／自产自销农产品买价扣除／农产品专票先分离再扣）×添加量，发票类型可下拉改、公式自动切换；②加工费不含税＝含税÷1.13，装卸不含税＝含税÷1.06；成本合计(含税)＝不含税合计×1.13。",
         "③本表为「含税不含运」标准成本＝原料+包材+加工费+装卸+管理费（含税）；制造/工厂/运输为原版分区，台账未拆存者以 N/A 占位、加工费归入制造费用。",
         "④灰底(D9D9D9)＝填写格，深灰(A6A6A6)＝标题与公式格；改加工费/装卸单价/管理费/预估订单需求，全表公式联动。"
         + "　生成：核算工作台·BOM报价审核　审批 %s　核算日期 %s" % (approval or "—", txt(p.get("calcDate")) or "—"),
