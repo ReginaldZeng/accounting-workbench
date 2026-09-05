@@ -8,7 +8,7 @@ import {
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
-  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, bomSetNetWeight, getBomUsageSpreads,
+  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, bomSetNetWeight, getBomUsageSpreads, getBomErpLookup,
   getBomInvoiceRules, setBomInvoiceRules,
 } from '../api.js'
 
@@ -173,7 +173,9 @@ function PendingDetailModal({ groupId, product, onClose, flash }) {
 
 // ============ 审核定性弹窗（点「审核」弹出）============
 // ①物料类别五选一 ②是否建议/允许对外报价——不建议**必须写原因**（如包材不全、XX物料暂定）。定稿前置。
-function AuditModal({ entry, onClose, onDone, flash }) {
+function AuditModal({ entry: entry0, onClose, onDone, flash }) {
+  // entry 可在弹窗内被更新（采用金蝶物料编码后后端回新视图，含新的换码候选）
+  const [entry, setEntry] = useState(entry0)
   const [cat, setCat] = useState(entry.matCategory || entry.catSuggest || '')
   const [q, setQ] = useState(entry.quotable === null || entry.quotable === undefined ? null : entry.quotable)
   const [reason, setReason] = useState(entry.quoteReason || '')
@@ -185,6 +187,15 @@ function AuditModal({ entry, onClose, onDone, flash }) {
   const cands = entry.obsoleteCandidates || []
   const [obs, setObs] = useState(null)     // null 未答 / true 原版失效并定稿 / false 原版保留、只存定性不定稿
   const willFinalize = missing.length === 0
+  // 无物料编码 → 到金蝶物料档案按 CP 反查（业务方 2026-09-05 定：检测到就提示确认）。只提示不拦：未中试的本来没编码。
+  const [erpLk, setErpLk] = useState(null)
+  const [erpBusy, setErpBusy] = useState(false)
+  useEffect(() => { if (!entry.erpCode) getBomErpLookup(entry.id).then(setErpLk).catch(e => setErpLk({ offline: true, msg: e.message })) }, [entry.id, entry.erpCode])
+  const adoptErp = async (code) => {
+    setErpBusy(true)
+    try { const r = await adoptErpCode(entry.id, code, flash); if (r) { flash('物料编码已采用 ' + code); setEntry(r.entry); setObs(null) } }
+    catch (e) { flash('更新失败：' + e.message) } finally { setErpBusy(false) }
+  }
   const save = async () => {
     if (!cat) return flash('请选择物料类别')
     if (q === null) return flash('请选择是否建议对外报价')
@@ -214,6 +225,11 @@ function AuditModal({ entry, onClose, onDone, flash }) {
           ? <div className="banner err" style={{ marginBottom: 10 }}>⚠ 还有 {missing.length} 步未确认：<b>{missing.join('、')}</b>。可以先存定性，但要 ③④ 都确认了才会定稿。</div>
           : <div className="banner" style={{ background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)', marginBottom: 10 }}>
             ✓ ③用量自洽、④报价核算 均已确认——保存定性即<b>定稿</b>，毕业进标准成本台账。</div>}
+        {!entry.erpCode && erpLk && !erpLk.offline && (erpLk.candidates || []).length > 0 &&
+          <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--ink)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
+            <ErpCandidates lk={erpLk} onAdopt={adoptErp} busy={erpBusy} />
+            <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>本记录尚无物料编码。建议先采用再定稿（BP 按物料编码关联）；不强制——未中试的产品可无编码定稿。</div>
+          </div>}
         {willFinalize && cands.length > 0 && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
           <b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>——本版定稿后，原版本将<b>失效</b>（退出对外台账；引用它的 BP 定价方案会收到「成本已更新」提示，终审通过那一刻切换）。
           <div style={{ margin: '6px 0 8px' }}>{cands.map(c => (
@@ -365,18 +381,26 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
   // 补物料编码：成本会计在台账行手工补/改产品 ERP 物料编码（写库+留痕，只动标识不动成本）
   const fillErp = async (r) => {
     const cur = (r.erpCode || '').trim()
-    const v = window.prompt(`补 / 改 ERP物料编码\n产品：${r.productName}（${r.cpCode}）`, cur)
+    // 先到金蝶物料档案按 CP 反查「研发编码」→ 把候选写进提示、默认值填第一个正式码（只提示，成本会计改/确认才写）
+    let hint = ''
+    let dflt = cur
+    try {
+      const lk = await getBomErpLookup(r.id)
+      const cs = (lk && lk.candidates) || []
+      if (lk && lk.offline) hint = '\n（金蝶未连接，无法反查）'
+      else if (!cs.length) hint = '\n（金蝶物料档案未登此 CP——未中试/未建档？）'
+      else {
+        hint = '\n金蝶物料档案登了此 CP' + (cs[0].exact ? '' : '（前缀近似）') + '：\n' +
+          cs.map(c => `  ${c.erpCode}  ${c.name}${c.spec ? ' · ' + c.spec : ''}${c.forbidden ? '（已禁用）' : ''}${(c.inLedger || []).length ? '（台账已挂 ' + c.inLedger.map(x => x.cpCode).join('、') + '）' : ''}`).join('\n')
+        if (!cur) dflt = cs[0].erpCode
+      }
+    } catch { /* 反查失败不挡手填 */ }
+    const v = window.prompt(`补 / 改 ERP物料编码\n产品：${r.productName}（${r.cpCode}）${hint}`, dflt)
     if (v == null) return
     const code = v.trim()
     if (code === cur) return
-    let res = await bomSetErpCode(r.id, code)
-    // 换码承接：同一物料编码已挂在别的 CP 上 → 后端先问「后审核的替代先审核的，确认？」，同意后再写并标失效
-    if (res && !res.ok && res.needConfirm) {
-      if (!window.confirm(res.msg + '\n\n确定 = 写入编码并使旧版失效；取消 = 不改')) return
-      res = await bomSetErpCode(r.id, code, true)
-    }
-    if (res && res.ok) { flash && flash('物料编码已更新'); onRefresh && onRefresh() }
-    else flash && flash((res && res.msg) || '更新失败')
+    const res = await adoptErpCode(r.id, code, flash)
+    if (res) { flash && flash('物料编码已更新'); onRefresh && onRefresh() }
   }
   const renderRow = (r) => {
     const nver = versionsOf(r.productKey).length
@@ -1026,6 +1050,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               <div className="bom-rh">全成本（含税）<span>{entry.cpCode}</span></div>
               <div className="bom-bigprice">¥ {fmt(full)} <small>/kg</small></div>
               <div className="bom-rspec">{entry.packSpec}　·　核算日期 {entry.calcDate}</div>
+              <ErpCodeRow entry={entry} canEdit={!!cfg?.canAudit} onChanged={onChanged} flash={flash} />
               <NetWeightRow entry={entry} canEdit={!isStd && !!cfg?.canAudit} onChanged={onChanged} flash={flash} />
               <div className="bom-rlines">
                 <RLine k={entry.semi ? '原料' : '原料（含复配料）'} v={`¥ ${fmt(comp.mat)}`} />
@@ -1065,6 +1090,72 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
   )
 }
 function RLine({ k, v }) { return <div className="bom-rline"><span>{k}</span><b>{v}</b></div> }
+// 采用某物料编码（补物料编码 + 换码承接确认一条龙）：撞码 → 后端回 needConfirm → 人确认 → 带 confirmObsolete 重发
+async function adoptErpCode(entryId, code, flash) {
+  let r = await bomSetErpCode(entryId, code)
+  if (r && !r.ok && r.needConfirm) {
+    if (!window.confirm(r.msg + '\n\n确定 = 写入编码并使旧版失效；取消 = 不改')) return null
+    r = await bomSetErpCode(entryId, code, true)
+  }
+  if (!r || !r.ok) { flash && flash((r && r.msg) || '更新失败'); return null }
+  return r
+}
+// 金蝶物料档案反查候选列表（按 CP 码 → 研发编码字段）。只展示，成本会计点「采用」才写。
+function ErpCandidates({ lk, onAdopt, busy, compact }) {
+  if (!lk) return <div className="muted" style={{ fontSize: 11 }}>查金蝶物料档案中…</div>
+  if (lk.offline) return <div className="muted" style={{ fontSize: 11 }}>金蝶未连接，无法反查（可手填）</div>
+  const cs = lk.candidates || []
+  if (!cs.length) return <div className="muted" style={{ fontSize: 11 }}>金蝶物料档案未登此 CP 的研发编码——多为<b>未中试 / 未建档</b>，可先无编码定稿，建档后再补</div>
+  return <div style={{ fontSize: 11.5 }}>
+    <div style={{ color: 'var(--amber)', marginBottom: 4 }}>⚑ 金蝶物料档案登了此 CP{cs[0].exact ? '' : '（前缀近似，请核对括号后缀）'}，{cs.length > 1 ? `有 ${cs.length} 个物料编码，请选一个：` : '请确认采用：'}</div>
+    {cs.map(c => (
+      <div key={c.erpCode} style={{ display: 'flex', gap: 6, alignItems: 'center', margin: '3px 0', flexWrap: compact ? 'wrap' : 'nowrap' }}>
+        <button className="btn-sec" disabled={busy} style={{ padding: '0 8px', fontFamily: 'monospace' }} onClick={() => onAdopt(c.erpCode)}>采用 {c.erpCode}</button>
+        <span>{c.name}{c.spec ? ' · ' + c.spec : ''}{c.category ? ' · ' + c.category : ''}
+          {c.rdCode && !c.exact && <span className="mono muted"> · 研发编码 {c.rdCode}</span>}
+          {c.erpCode.toUpperCase().startsWith('T') && <span className="tag late" style={{ marginLeft: 4 }}>T 开头</span>}
+          {c.forbidden && <span className="tag werr" style={{ marginLeft: 4 }}>金蝶已禁用</span>}
+          {(c.inLedger || []).length > 0 && <span className="tag late" style={{ marginLeft: 4 }} title={'台账里已挂此编码的记录：' + c.inLedger.map(x => `${x.cpCode}（${x.status}）`).join('、') + '——采用后按「后审核的替代先审核的」提示确认'}>
+            已挂 {c.inLedger.map(x => x.cpCode).join('、')}</span>}
+        </span>
+      </div>))}
+  </div>
+}
+// 物料编码行（右栏）：有码显示可改；无码 → 自动到金蝶物料档案按 CP 反查候选，成本会计确认采用（业务方 2026-09-05 定）。
+// 不是定稿闸：未中试的产品本来就没有编码。
+function ErpCodeRow({ entry, canEdit, onChanged, flash }) {
+  const [lk, setLk] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    setLk(null); setOpen(false)
+    if (canEdit && !entry.erpCode) getBomErpLookup(entry.id).then(setLk).catch(e => setLk({ offline: true, msg: e.message }))
+  }, [entry.id, entry.erpCode, canEdit])
+  const adopt = async (code) => {
+    setBusy(true)
+    try { const r = await adoptErpCode(entry.id, code, flash); if (r) { flash('物料编码已采用 ' + code); await onChanged() } }
+    catch (e) { flash('更新失败：' + e.message) } finally { setBusy(false) }
+  }
+  const manual = async () => {
+    const v = window.prompt(`补 / 改 ERP物料编码\n产品：${entry.productName}（${entry.cpCode}）`, entry.erpCode || '')
+    if (v == null || v.trim() === (entry.erpCode || '')) return
+    await adopt(v.trim())
+  }
+  return <>
+    <div className="bom-rline" style={{ margin: '4px 0 2px' }} title="ERP 物料编码＝BP 定价侧关联键；未中试的产品可能尚无编码">
+      <span>物料编码{!entry.erpCode && <em className="bom-srcv" style={{ color: 'var(--amber)' }}>未建档</em>}</span>
+      <b style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+        <span className="mono">{entry.erpCode || '—'}</span>
+        {canEdit && <button className="btn-sec" disabled={busy} onClick={manual} style={{ padding: '0 8px' }}>{entry.erpCode ? '改' : '手填'}</button>}
+        {canEdit && entry.erpCode && <button className="btn-sec" disabled={busy} style={{ padding: '0 8px' }} title="到金蝶物料档案按 CP 码核对"
+          onClick={() => { setOpen(o => !o); if (!lk) getBomErpLookup(entry.id).then(setLk).catch(e => setLk({ offline: true, msg: e.message })) }}>核对</button>}
+      </b>
+    </div>
+    {canEdit && (!entry.erpCode || open) && <div style={{ margin: '0 0 8px', padding: '6px 8px', background: 'var(--bg-sub)', borderRadius: 6 }}>
+      <ErpCandidates lk={lk} onAdopt={adopt} busy={busy} compact />
+    </div>}
+  </>
+}
 // 单位净重(kg)：BP 定价按袋/盒换算要用（对接需求 2026-09-05 §2）。auto=按包装规格预填「待确认」；成本会计填/确认后存库留痕；空或≤0 不能定稿。
 function NetWeightRow({ entry, canEdit, onChanged, flash }) {
   const [v, setV] = useState(entry.netWeightKg ?? '')

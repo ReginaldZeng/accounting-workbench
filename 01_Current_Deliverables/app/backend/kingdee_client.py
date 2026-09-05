@@ -687,6 +687,59 @@ def fetch_material_prices(code, months=12, forms=None, limit=30, s=None, conf=No
     return out[:limit]
 
 
+# ---- 物料档案按「研发编码」反查物料编码（BOM报价审核 · 补物料编码提示，2026-09-05）----
+# 本账套元数据实测：BD_MATERIAL 自定义字段 **F_ora_Text1 中文名「研发编码」**，值即研发 CP 码（如 300600092 → CP05113401-1（SN2））。
+# 全账套 9630 个物料中 892 个带研发编码（产成品 827 / 自制半成品 64 / 委外半成品 1；前缀 CP/SZF/SZB/SZY/SHB/SHF/SHY）。
+# ⚠ **同一研发编码可挂多个物料编码**（97 例，如 SZF004027 → 200000174 与 200000184、CP04119903 → 300200025 与 T00000207 临时码并存）
+#   → 这里只回候选，**绝不自动写**，由成本会计确认（业务方 2026-09-05 定「检测到就提示成本会计确认」）。
+# 同一物料按使用组织(101/105/107)出多行 → 按物料编码去重。标准字段 FOldNumber/FMnemonicCode/FDescription 实测皆空，不是 CP 码所在。
+MATERIAL_RD_CODE_FIELD = "F_ora_Text1"
+_MAT_LOOKUP_FIELDS = [("FNumber", "erpCode"), ("FName", "name"), ("FSpecification", "spec"),
+                      (MATERIAL_RD_CODE_FIELD, "rdCode"), ("FCategoryID.FName", "category"),
+                      ("FForbidStatus", "forbid"), ("FDocumentStatus", "doc"), ("FUseOrgId.FNumber", "org")]
+
+
+def normalize_rd_code(cp):
+    """研发编码比对口径：去空白、全角括号→半角、大写。"""
+    return re.sub(r"\s+", "", str(cp or "")).replace("（", "(").replace("）", ")").upper()
+
+
+def fetch_materials_by_rd_code(cp, s=None, conf=None):
+    """按研发编码(CP 码)查金蝶物料档案 → 候选 [{erpCode,name,spec,rdCode,category,forbidden,orgs,exact}]。只读。
+    精确匹配优先（原样 + 全/半角括号两种写法）；一个都没有再按**去括号前缀**近似
+    （台账 CP04108204(SN5) 金蝶只有 CP04108204 / (SN2) / (SN3) → 列出来让人判）。"""
+    if s is None or conf is None:
+        s, conf = login()
+    raw = str(cp or "").strip()
+    if not raw:
+        return []
+    esc = lambda x: x.replace("'", "''")
+    variants = {raw, raw.replace("（", "(").replace("）", ")"), raw.replace("(", "（").replace(")", "）")}
+    filt = " or ".join("%s = '%s'" % (MATERIAL_RD_CODE_FIELD, esc(v)) for v in sorted(variants))
+    rows = _query(s, conf, "BD_MATERIAL", _MAT_LOOKUP_FIELDS, filt, "FNumber")
+    exact = True
+    if not rows:
+        base = re.sub(r"[（(].*$", "", raw).strip()
+        if len(base) >= 6:                       # 太短的前缀不近似（避免 CP 打头全命中）
+            rows = _query(s, conf, "BD_MATERIAL", _MAT_LOOKUP_FIELDS, "%s like '%s%%'" % (MATERIAL_RD_CODE_FIELD, esc(base)), "FNumber")
+            exact = False
+    by = {}
+    for r in rows:
+        code = str(r.get("erpCode") or "").strip()
+        if not code:
+            continue
+        o = by.setdefault(code, {"erpCode": code, "name": str(r.get("name") or "").strip(), "spec": str(r.get("spec") or "").strip(),
+                                 "rdCode": str(r.get("rdCode") or "").strip(), "category": str(r.get("category") or "").strip(),
+                                 "forbidden": str(r.get("forbid") or "") == "B", "orgs": [], "exact": exact})
+        org = str(r.get("org") or "").strip()
+        if org and org not in o["orgs"]:
+            o["orgs"].append(org)
+    out = list(by.values())
+    # 精确命中的排前；临时码(T 开头)排后，正式编码优先给成本会计看
+    out.sort(key=lambda o: (not o["exact"], o["erpCode"].upper().startswith("T"), o["forbidden"], o["erpCode"]))
+    return out
+
+
 # 二期付款对账：按回填单号直查的 7 类单据（前 4 类同上，新增 3 类 2026-07-14 实单探查确认）。
 # 字段Key 大小写各单据不同（库存基本数量：FBaseunitQty/FBaseUnitQty/FBASEUNITQTY），逐单据写死+缺列降级。
 _RETURN_FORMS = [

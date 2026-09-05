@@ -937,6 +937,54 @@ async def bom_kd_purchase(request: Request):
                 "msg": "金蝶未连接或字段待联调：%s" % str(e)[:160]}
 
 
+# ---- 按 CP 码到金蝶物料档案反查物料编码（业务方 2026-09-05 定：「检测到就提示成本会计确认」，不自动写）----
+# 金蝶物料档案自定义字段「研发编码」(kingdee_client.MATERIAL_RD_CODE_FIELD) 登的就是 CP 码；一个 CP 可能挂多个物料编码
+# （正式码 + T 开头临时码并存）→ 只出候选让成本会计选。10 分钟进程内缓存，避免每次开页都打金蝶。
+_ERP_LOOKUP_CACHE = {}
+_ERP_LOOKUP_TTL = 600
+
+
+def _erp_lookup(cp):
+    import kingdee_client as kc
+    key = kc.normalize_rd_code(cp)
+    hit = _ERP_LOOKUP_CACHE.get(key)
+    if hit and time.time() - hit[0] < _ERP_LOOKUP_TTL:
+        return hit[1]
+    res = kc.fetch_materials_by_rd_code(cp)
+    _ERP_LOOKUP_CACHE[key] = (time.time(), res)
+    return res
+
+
+@router.get("/api/bom/erp-lookup")
+async def bom_erp_lookup(request: Request):
+    """按记录的 CP 码查金蝶物料档案「研发编码」字段，回候选物料编码供成本会计确认（补物料编码 / 初审弹窗 / 右栏都用它）。
+    每个候选附 `inLedger`＝台账里已挂该编码的其它记录（选它会触发换码承接的「后审核替代先审核」确认）。
+    金蝶连不上 → offline（本机 worktree 常态），前端提示手填。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限"}, status_code=403)
+    eid = request.query_params.get("entryId")
+    cp = (request.query_params.get("cp") or "").strip()
+    e = db.bom_get_entry(eid) if eid else None
+    if eid and (not e or e.get("source") != _src()):
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    if e:
+        cp = (e.get("cp_code") or "").strip()
+    if not cp:
+        return {"ok": True, "cp": "", "candidates": [], "msg": "本记录没有 CP 码，无法反查"}
+    try:
+        cands = _erp_lookup(cp)
+    except Exception as ex:
+        return {"ok": True, "offline": True, "cp": cp, "candidates": [], "msg": "金蝶未连接或字段待联调：%s" % str(ex)[:160]}
+    if cands:
+        others = [x for x in db.bom_list_entries(_src()) if not (e and x["id"] == e["id"])]
+        for c in cands:
+            c["inLedger"] = [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "status": x.get("status") or "",
+                              "productName": (x.get("product_name") or "").strip()}
+                             for x in others if (x.get("erp_code") or "").strip() == c["erpCode"]]
+    return {"ok": True, "cp": cp, "current": (e.get("erp_code") or "").strip() if e else "", "candidates": cands}
+
+
 @router.get("/api/bom/material-usage")
 async def bom_material_usage(request: Request):
     """BOM反查：本数据源下，其他记录用同一物料编码时研发填的含税价（看研发跨产品定价是否一致）。

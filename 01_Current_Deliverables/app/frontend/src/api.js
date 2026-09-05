@@ -324,6 +324,8 @@ export const getBomKdPurchase = (code, months = 12) => j(`/api/bom/kd-purchase?c
 export const getBomMaterialUsage = (code, exclude) => j(`/api/bom/material-usage?code=${encodeURIComponent(code)}${exclude ? `&exclude=${exclude}` : ''}`)
 export const bomSetMatType = (entryId, mat, subType) => jp('/api/bom/set-mat-type', { entryId, subType, matCode: mat.matCode, matName: mat.matName, seg: mat.seg })
 export const bomSetErpCode = (entryId, erpCode, confirmObsolete = false) => jp('/api/bom/set-erp-code', { entryId, erpCode, confirmObsolete })
+// 按 CP 码到金蝶物料档案「研发编码」字段反查物料编码候选（只查不写，成本会计确认后再 bomSetErpCode）
+export const getBomErpLookup = (entryId) => j('/api/bom/erp-lookup?entryId=' + entryId)
 export const bomSetNetWeight = (entryId, netWeightKg) => jp('/api/bom/set-net-weight', { entryId, netWeightKg })
 export const getBomUsageSpreads = (entryId) => j(`/api/bom/usage-spreads?entryId=${entryId}`)
 export const getBomInvoiceRules = () => j('/api/bom/invoice-rules')
