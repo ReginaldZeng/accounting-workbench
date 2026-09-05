@@ -19,7 +19,7 @@ import uuid
 from io import BytesIO
 
 from fastapi import APIRouter, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
 
 from kernels import bom_quote as bq
 
@@ -1886,8 +1886,58 @@ def _xlsx_response(data, filename):
                     headers={"Content-Disposition": "attachment; filename*=UTF-8''%s" % quote(filename)})
 
 
+def _xlsx_to_html(data, title=""):
+    """把 xlsx 字节渲染成只读 HTML 预览（原版/重排版通用）——服务端转，前端无需 xlsx 库、离线可用。
+    openpyxl 读值；合并单元格按 rowspan/colspan 合并；空白尾行/尾列裁掉。"""
+    import io
+    import html as _html
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), data_only=True)
+    esc = _html.escape
+    out = ['<!doctype html><html lang="zh"><head><meta charset="utf-8">',
+           '<meta name="viewport" content="width=device-width,initial-scale=1">',
+           '<title>', esc(title or "核算表预览"), '</title><style>',
+           'body{font:13px/1.55 -apple-system,Segoe UI,"Microsoft YaHei",sans-serif;margin:16px;color:#1a1a1a;background:#fff}',
+           'h2{font-size:14px;margin:18px 0 6px;color:#333}',
+           'table{border-collapse:collapse;margin:0 0 10px;font-size:12px}',
+           'td{border:1px solid #d5d5d5;padding:3px 8px;white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis;vertical-align:top}',
+           'tr:nth-child(even) td{background:#fafafa}td.n{text-align:right;font-variant-numeric:tabular-nums}',
+           '.hint{color:#888;font-size:12px;margin-bottom:10px}</style></head><body>']
+    if title:
+        out.append('<div class="hint">%s · 只读预览（留档核对请下载 xlsx 原件）</div>' % esc(title))
+    for ws in wb.worksheets:
+        skip, span = set(), {}
+        for mr in ws.merged_cells.ranges:
+            span[(mr.min_row, mr.min_col)] = (mr.max_row - mr.min_row + 1, mr.max_col - mr.min_col + 1)
+            for r in range(mr.min_row, mr.max_row + 1):
+                for c in range(mr.min_col, mr.max_col + 1):
+                    if (r, c) != (mr.min_row, mr.min_col):
+                        skip.add((r, c))
+        maxr, maxc = ws.max_row or 0, ws.max_column or 0
+        out.append('<h2>%s</h2><table>' % esc(ws.title))
+        for r in range(1, maxr + 1):
+            out.append('<tr>')
+            for c in range(1, maxc + 1):
+                if (r, c) in skip:
+                    continue
+                v = ws.cell(row=r, column=c).value
+                attr = ''
+                sp = span.get((r, c))
+                if sp:
+                    if sp[0] > 1:
+                        attr += ' rowspan="%d"' % sp[0]
+                    if sp[1] > 1:
+                        attr += ' colspan="%d"' % sp[1]
+                cls = ' class="n"' if isinstance(v, (int, float)) else ''
+                out.append('<td%s%s>%s</td>' % (attr, cls, esc("" if v is None else str(v))))
+            out.append('</tr>')
+        out.append('</table>')
+    out.append('</body></html>')
+    return "".join(out)
+
+
 @router.get("/api/bom/export/pretty")
-async def bom_export_pretty(request: Request, entry_id: int):
+async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
     u = _require_perm(request, CAP_EXPORT)
     if not u:
         return JSONResponse({"ok": False, "msg": "无「导出」权限"}, status_code=403)
@@ -1895,12 +1945,14 @@ async def bom_export_pretty(request: Request, entry_id: int):
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
     data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "")
-    fn = "重排版核算表_%s_%s.xlsx" % (e.get("cp_code") or "", (e.get("product_name") or "").strip())
-    return _xlsx_response(data, fn)
+    nm = (e.get("product_name") or "").strip()
+    if preview:
+        return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s %s" % (e.get("cp_code") or "", nm)))
+    return _xlsx_response(data, "重排版核算表_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
 
 
 @router.get("/api/bom/export/original")
-async def bom_export_original(request: Request, entry_id: int):
+async def bom_export_original(request: Request, entry_id: int, preview: int = 0):
     u = _require_perm(request, CAP_EXPORT)
     if not u:
         return JSONResponse({"ok": False, "msg": "无「导出」权限"}, status_code=403)
@@ -1917,7 +1969,10 @@ async def bom_export_original(request: Request, entry_id: int):
     if not match:
         return JSONResponse({"ok": False, "msg": "源附件未留档（样例种子或旧记录可能无原文件）。可导出重排版核算表替代。"}, status_code=404)
     data = open(match, "rb").read()
-    return _xlsx_response(data, os.path.basename(match).split("__", 1)[-1])
+    fn = os.path.basename(match).split("__", 1)[-1]
+    if preview:
+        return HTMLResponse(_xlsx_to_html(data, "原版核算表 · " + fn))
+    return _xlsx_response(data, fn)
 
 
 # ============ BP 消费口：定稿版分项（handoff GET /cost-ledger/final?channel=）============

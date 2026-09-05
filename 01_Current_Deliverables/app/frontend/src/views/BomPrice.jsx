@@ -860,7 +860,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           {cfg?.canExport && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)}>导出 ▾</button>
           {expMenu && <div className="bom-menu" onMouseLeave={() => setExpMenu(false)}>
             <a href={bomExportOriginalUrl(entry.id)}><b>原版核算表（源附件）</b><span>审批附件 xlsx 原样下载，供留档核对</span></a>
+            <a href={bomExportOriginalUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览原版</b><span>不下载，在新标签页查看</span></a>
             <a href={bomExportPrettyUrl(entry.id)}><b>重排版核算表（美化）</b><span>台账口径重排版，含费用参数与勾稽说明</span></a>
+            <a href={bomExportPrettyUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览重排版</b><span>不下载，在新标签页查看</span></a>
           </div>}</>}
           {!isStd && !edit && cfg?.canAudit && <button className="btn-sec" onClick={startEdit}>✎ 复核（改税率/费用）</button>}
           {edit && <><button className="btn-pri" disabled={saving} onClick={save}>保存并留痕</button>
