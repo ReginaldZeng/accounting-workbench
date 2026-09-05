@@ -178,7 +178,10 @@ async def _auth_gate(request, call_next):
     p = request.url.path
     if p.startswith("/api/") and p not in _OPEN_API:
         u = _current_user(request)
-        if not u and not (p in _PULL_PATHS and pull_token_ok(request)):
+        # 例外（V2.443）：BP 后端同机调 BOM 消费口/导出——内部令牌对得上且来源回环才放过登录门，
+        # 之后由路由自己再验一遍（导出只准已审核版）。此前漏了这条，令牌请求在这里就被 401「未登录」。
+        bp_internal = p.startswith(bom_quote.INTERNAL_PATH_PREFIXES) and bom_quote.internal_token_ok(request)
+        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal:
             return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
         # 初始密码闸（V2.330）：账号被新建/重置密码后 must_change_pwd=1——改密之前除 /api/change-pwd
         # 外一律 403（含 /api/bp-authz，BP 也进不去）。前端据 code 弹强制改密页；服务端拦，直连 API 也绕不过。

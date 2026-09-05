@@ -2357,12 +2357,22 @@ def _internal_token():
     return ""
 
 
-def _internal_or_user(request):
-    """放行二选一：①X-Internal-Token 正确 **且** 来源回环地址（BP 后端同机调用）；②门户登录用户。→ 身份 dict 或 None。"""
+def internal_token_ok(request):
+    """X-Internal-Token 正确 **且** 来源回环地址（BP 后端同机调用）。空令牌恒 False——没配＝通道关闭，不是放行。
+    ⚠ app.py 的登录门 `_auth_gate` 也靠它放行 INTERNAL_PATH_PREFIXES（V2.443 修：此前令牌请求在到路由之前就被登录门 401「未登录」）。"""
     tok = (request.headers.get("X-Internal-Token") or "").strip()
     want = _internal_token()
     host = (getattr(getattr(request, "client", None), "host", "") or "")
-    if tok and want and tok == want and host in ("127.0.0.1", "::1", "localhost"):
+    return bool(tok and want and tok == want and host in ("127.0.0.1", "::1", "localhost"))
+
+
+# 登录门放行前缀（仅当 internal_token_ok）：BP 消费口 + 导出/预览（导出另在 _export_auth 里限定只准已审核版）
+INTERNAL_PATH_PREFIXES = ("/api/bomcost/", "/api/bom/export/")
+
+
+def _internal_or_user(request):
+    """放行二选一：①X-Internal-Token 正确 **且** 来源回环地址（BP 后端同机调用）；②门户登录用户。→ 身份 dict 或 None。"""
+    if internal_token_ok(request):
         return {"name": "bp-internal", "internal": True}
     return _current_user(request)
 
