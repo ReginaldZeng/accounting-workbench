@@ -539,205 +539,284 @@ def richness(rec):
 
 # ---------------- 重排版核算表导出（移植 tools/build_pretty_sheet.py，参数可覆盖为复核后值）----------------
 def build_pretty(rec, fee=None, approval=""):
-    """一条记录 → 重排版核算表 xlsx 字节。rec=camelCase 解析结构；fee={mfg,load,adm} 覆盖为台账复核值。
-    加工费口径 = (制造+工厂)×1.13（与 compose 一致）；派生数字全为公式，改费用参数全表联动。"""
+    """一条记录 → 重排版核算表 xlsx 字节，对齐星期九「成本核算表（财务版本）」排版（含 2~10 费用分区）。
+    写**计算后的值**（非公式）——网页预览也能显数。台账口径＝含税不含运标准成本
+    （原料+包材+加工费+装卸+管理费，含税），全成本按此重算（与原版分区结构一致；数值差异仅因台账费用参数与源表不同）。"""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
     F = "微软雅黑"
-    NAVY, NAVY2 = "202A35", "2B3644"
-    BLUE, BLUE_SOFT = "2D70C9", "EAF2FC"
-    GREEN, GREEN_SOFT = "167D5E", "E7F4EF"
-    ORANGE_SOFT = "FAEDDB"
-    PURPLE = "7353A5"
-    LINE, SOFT = "DCE2E8", "F8FAFB"
-    MUTED = "6F7A86"
-    thin = Side(style="thin", color=LINE)
+    NAVY, NAVY2 = "1F3B57", "2B4A68"
+    INK, MUTED = "1A2430", "6F7A86"
+    HEAD_BG, SUB_BG = "EAEFF4", "F4F7FA"
+    GREY = "EDF0F3"        # 标签/类别/费用块统一底色（对齐原版：凡原版有灰底处一律铺）
+    YELLOW = "FFF6CC"      # 6~10 行汇总值格（对齐原版黄底，用柔和调）
+    BLUE, GREEN, AMBER = "2D70C9", "167D5E", "B7791F"
+    thin = Side(style="thin", color="C9D2DB")
     BOX = Border(thin, thin, thin, thin)
     BOTTOM = Border(bottom=thin)
 
-    def ff(sz=10, b=False, c="202830", it=False):
+    def ff(sz=10, b=False, c=INK, it=False):
         return Font(name=F, size=sz, bold=b, color=c, italic=it)
 
     def fill(hexc):
         return PatternFill("solid", fgColor=hexc)
-    CEN = Alignment(horizontal="center", vertical="center")
-    LFT = Alignment(horizontal="left", vertical="center")
-    RGT = Alignment(horizontal="right", vertical="center")
-    WRAP = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    CEN = Alignment("center", "center", wrap_text=True)
+    LFT = Alignment("left", "center", wrap_text=True)
+    RGT = Alignment("right", "center")
+    TOP = Alignment("center", "top", wrap_text=True)
 
-    NCOLS = 10
-    WIDTHS = [12, 24, 18, 16, 11, 11, 7, 12, 8, 34]
-    src_fee = fee_from_summary(rec.get("summary"))
-    fe = {**src_fee, **(fee or {})}
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
 
-    wb = Workbook()
-    wb.remove(wb.active)
+    fe = {**fee_from_summary(rec.get("summary")), **(fee or {})}
+    mfg, load, adm = num(fe.get("mfg")), num(fe.get("load")), num(fe.get("adm"))
     p = rec
     semi = is_semi(p.get("cpCode"))
     name = norm(p.get("productName")) or "核算表"
+    order_qty = num(p.get("orderQty"))
+
+    mats = [m for m in p.get("materials", []) if m.get("seg") == "原料"]
+    packs = [m for m in p.get("materials", []) if m.get("seg") == "包材"]
+
+    def cost_excl(m):
+        q, pr, t = num(m.get("qtyPerKg")), num(m.get("priceIncl")), num(m.get("taxRate"))
+        return q * pr / (1 + t) if (1 + t) else 0.0
+    mat_excl = sum(cost_excl(m) for m in mats)
+    pack_excl = sum(cost_excl(m) for m in packs)
+    mat_incl, pack_incl = mat_excl * TAX_GROSS, pack_excl * TAX_GROSS
+    FREIGHT_TAX, LOAD_TAX = 0.09, 0.06                   # 运输/装卸 税率：星期九模板惯例（台账未存，按原版填）
+    mfg_x, load_x = mfg / TAX_GROSS, load / (1 + LOAD_TAX)   # 加工费÷1.13、装卸÷1.06 → 不含税（与原版 0.18→0.17 同法）
+    var_x = mat_excl + pack_excl                         # 变动成本不含税
+    total_x = var_x + mfg_x + load_x                     # 成本合计不含税
+    total_incl = total_x * TAX_GROSS                     # 成本合计含税
+    full = total_incl + adm                              # 全成本含税（含税不含运，台账口径）＝原料+包材+加工费+装卸+管理费
+
+    # A间隔 B C类别 D编码 E名称 F型号 G规格 H品牌 I添加量 J单位 K含税采购价 L税率 M发票 N成本不含税 O占比 P报价说明 Q订单用量
+    WIDTHS = [2.5, 22, 12.5, 14, 26, 11, 14, 12, 12, 7, 16, 8, 11, 12, 10, 30, 13]
+    NC = len(WIDTHS)   # 17
+
+    wb = Workbook()
+    wb.remove(wb.active)
     ws = wb.create_sheet(name[:28])
     for i, w in enumerate(WIDTHS, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.sheet_view.showGridLines = False
 
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NCOLS)
-    c = ws.cell(1, 1, "成本核算表（重排版）｜%s" % name)
-    c.font = ff(15, True, "FFFFFF"); c.fill = fill(NAVY); c.alignment = LFT
-    ws.row_dimensions[1].height = 34
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=NCOLS)
-    c = ws.cell(2, 1, "%s　·　来源：钉钉审批 %s　·　%s［%s］　·　程序解析生成"
-                % ("半成品 · 作原料进入成品" if semi else "成品", approval or "—",
+    def mc(r, c1, c2):
+        ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
+
+    def vmerge(c, r1, r2, val, numfmt="#,##0.00", amber=False, pct=False, font=None):
+        ws.merge_cells(start_row=r1, start_column=c, end_row=r2, end_column=c)
+        cc = ws.cell(r1, c, val); cc.number_format = ("0.00%" if pct else numfmt); cc.alignment = RGT
+        cc.font = font or (ff(9, True, AMBER) if amber else ff(9))
+        if amber:
+            cc.fill = fill("FFF7E6")
+
+    # 标题条
+    mc(1, 2, NC)
+    t = ws.cell(1, 2, "成本核算表（财务版本）｜%s" % name)
+    t.font = ff(15, True, "FFFFFF"); t.alignment = LFT
+    for c in range(2, NC + 1):
+        ws.cell(1, c).fill = fill(NAVY)
+    ws.row_dimensions[1].height = 30
+    mc(2, 2, NC)
+    s = ws.cell(2, 2, "%s　·　来源：钉钉审批 %s　·　%s［%s］　·　核算工作台程序生成"
+                % ("半成品·作原料进入成品" if semi else "成品", approval or "—",
                    norm(p.get("srcFile")), norm(p.get("sheet"))))
-    c.font = ff(9, False, "C3CDD8"); c.fill = fill(NAVY2); c.alignment = LFT
-    ws.row_dimensions[2].height = 18
-    for col in range(1, NCOLS + 1):
-        ws.cell(1, col).fill = fill(NAVY); ws.cell(2, col).fill = fill(NAVY2)
+    s.font = ff(9, False, "D7DEE6"); s.alignment = LFT
+    for c in range(2, NC + 1):
+        ws.cell(2, c).fill = fill(NAVY2)
+    ws.row_dimensions[2].height = 16
 
-    info = [("产品编号", p.get("cpCode")), ("产品名称", name), ("ERP物料编码", p.get("erpCode") or "—"),
-            ("包装规格", p.get("packSpec")), ("客户", p.get("customer") or "—"), ("核算日期", p.get("calcDate")),
-            ("订单量", ("%s kg" % format(int(p["orderQty"]), ",")) if p.get("orderQty") else "—"),
-            ("生产工厂", p.get("supplier"))]
-    slots = [(4, 1), (4, 3), (4, 6), (4, 8), (6, 1), (6, 3), (6, 6), (6, 8)]
-    for (lab, val), (rr, cc) in zip(info, slots):
-        c = ws.cell(rr, cc, lab); c.font = ff(9, False, MUTED)
-        span = 2 if cc in (3, 8) else 1
-        ws.merge_cells(start_row=rr + 1, start_column=cc, end_row=rr + 1, end_column=cc + span)
-        c = ws.cell(rr + 1, cc, val); c.font = ff(10, True); c.alignment = LFT
-        for k in range(span + 1):
-            ws.cell(rr + 1, cc + k).border = BOTTOM
-    ws.row_dimensions[4].height = 14; ws.row_dimensions[6].height = 14
+    # 信息区（行3-6）
+    def info(r, lb, lv, rb, rv):
+        ws.cell(r, 2, lb).font = ff(9.5, False, MUTED)
+        mc(r, 3, 8)
+        cv = ws.cell(r, 3, lv); cv.font = ff(10, True); cv.alignment = LFT
+        ws.cell(r, 9, rb).font = ff(9.5, False, MUTED)
+        mc(r, 11, NC)
+        rc = ws.cell(r, 11, rv); rc.font = ff(10, True); rc.alignment = LFT
+        for c in list(range(3, 9)) + list(range(11, NC + 1)):
+            ws.cell(r, c).border = BOTTOM
+        ws.row_dimensions[r].height = 18
+    info(3, "供应商名称", p.get("supplier") or "—", "审核日期", p.get("calcDate") or "—")
+    info(4, "产品名称", name, "包装规格", p.get("packSpec") or "—")
+    info(5, "物料编码(ERP)", p.get("erpCode") or "—", "研发编码", p.get("cpCode") or "—")
+    info(6, "客户", p.get("customer") or "—", "预估订单需求",
+         ("%s kg" % format(int(order_qty), ",")) if order_qty else "—")
 
-    r = 9
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NCOLS)
-    ws.cell(r, 1, "成本构成（含税 · 元/kg）").font = ff(11, True); ws.row_dimensions[r].height = 20
-    strip = [("原料", BLUE_SOFT), ("包材", ORANGE_SOFT), ("加工费", GREEN_SOFT),
-             ("装卸费", GREEN_SOFT), ("管理费", GREEN_SOFT), ("全成本（含税）", BLUE_SOFT)]
-    spans = [(1, 2), (3, 4), (5, 5), (6, 6), (7, 8), (9, 10)]
-    r_lab, r_val = r + 1, r + 2
-    for (lab, hexc), (c1, c2) in zip(strip, spans):
-        ws.merge_cells(start_row=r_lab, start_column=c1, end_row=r_lab, end_column=c2)
-        cc = ws.cell(r_lab, c1, lab); cc.font = ff(9, True, "3D4C5E"); cc.alignment = CEN
-        ws.merge_cells(start_row=r_val, start_column=c1, end_row=r_val, end_column=c2)
-        vv = ws.cell(r_val, c1); vv.alignment = CEN; vv.number_format = "#,##0.00"
-        for col in range(c1, c2 + 1):
-            ws.cell(r_lab, col).fill = fill(hexc); ws.cell(r_lab, col).border = BOX
-            ws.cell(r_val, col).fill = fill(hexc); ws.cell(r_val, col).border = BOX
-    ws.row_dimensions[r_val].height = 24
-    strip_cells = {lab: "%s%d" % (get_column_letter(c1), r_val) for (lab, _), (c1, _c2) in zip(strip, spans)}
-    for (lab, _), (c1, _c2) in zip(strip, spans):
-        ws.cell(r_val, c1).font = ff(13, True, BLUE if lab.startswith(("原料", "全成本")) else GREEN)
+    # ①变动成本 表头（行8）
+    HEADS = [(3, "类别"), (4, "物料编码"), (5, "物料名称"), (6, "型号"), (7, "规格"), (8, "品牌"),
+             (9, "添加量(kg)"), (10, "单位"), (11, "含税含运采购价\n(元/kg)"), (12, "税率"), (13, "发票类别"),
+             (14, "成本不含税\n(元/kg)"), (15, "占比"), (16, "报价说明"), (17, "订单对应用量")]
+    hr = 8
+    ws.cell(hr, 2, "1、变动成本").font = ff(10.5, True)
+    ws.cell(hr, 2).fill = fill(HEAD_BG); ws.cell(hr, 2).border = BOX
+    for c, h in HEADS:
+        cell = ws.cell(hr, c, h)
+        cell.font = ff(9, True, "3D4C5E"); cell.fill = fill(HEAD_BG); cell.border = BOX; cell.alignment = CEN
+    ws.row_dimensions[hr].height = 30
 
-    def block(r, title, seg_rows, seg_label):
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NCOLS)
-        ws.cell(r, 1, title).font = ff(11, True)
-        for col in range(1, NCOLS + 1):
-            ws.cell(r, col).fill = fill(SOFT); ws.cell(r, col).border = Border(top=thin, bottom=thin)
-        ws.row_dimensions[r].height = 20
-        r += 1
-        heads = ["物料编码", "物料名称", "型号/规格", "品牌", "添加量kg/kg", "含税价(元)", "税率",
-                 "成本不含税", "占全成本", "起订量 / 报价说明"]
-        for j, h in enumerate(heads, 1):
-            c = ws.cell(r, j, h); c.font = ff(9, True, MUTED); c.fill = fill("F5F7F9")
-            c.border = BOX; c.alignment = RGT if 5 <= j <= 9 else LFT
+    r = hr
+
+    def seg_block(items, cat_label):
+        nonlocal r
         first = r + 1
-        for m in seg_rows:
+        for m in items:
             r += 1
-            note = "　".join(x for x in [("起订：%s" % m["moq"]) if m.get("moq") else "",
-                                        (m.get("priceNote") or "").replace("|", "；")] if x)
-            model = " / ".join(x for x in [m.get("model"), m.get("spec")] if x and x != "0")
-            nested = m.get("matName") == "复合调味料" and not str(p.get("cpCode", "")).startswith("SZF")
-            vals = [m.get("matCode") or "—", m.get("matName"), model or "—",
-                    (m.get("brand") or "—") if m.get("brand") != "0" else "—",
-                    m.get("qtyPerKg"), m.get("priceIncl"), m.get("taxRate"),
-                    "=ROUND(E%d*F%d/(1+G%d),4)" % (r, r, r),
-                    "=ROUND(H%d*%s/%s,4)" % (r, TAX_GROSS, strip_cells["全成本（含税）"]), note or "—"]
-            for j, v in enumerate(vals, 1):
-                c = ws.cell(r, j, v); c.border = BOX
-                c.font = ff(9, j == 2, PURPLE if (nested and j == 2) else ("202830" if j != 10 else MUTED))
-                c.alignment = WRAP if j == 10 else (RGT if 5 <= j <= 9 else LFT)
-                if j == 5: c.number_format = "0.0000"
-                if j == 6: c.number_format = "#,##0.00"
-                if j == 7: c.number_format = "0%"
-                if j == 8: c.number_format = "0.0000"
-                if j == 9: c.number_format = "0.0%"
+            q, pr, t = num(m.get("qtyPerKg")), num(m.get("priceIncl")), num(m.get("taxRate"))
+            ce = cost_excl(m)
+            oq = num(m.get("orderQty")) or (q * order_qty)
+            model, spec, brand = norm(m.get("model")), norm(m.get("spec")), norm(m.get("brand"))
+            note = "　".join(x for x in [("起订：%s" % norm(m.get("moq"))) if norm(m.get("moq")) else "",
+                                        norm(m.get("priceNote")).replace("|", "；")] if x)
+            row = {4: norm(m.get("matCode")) or "—", 5: norm(m.get("matName")), 6: model or "—", 7: spec or "—",
+                   8: brand if brand not in ("", "0") else "—", 9: q, 10: norm(m.get("unit")) or "kg",
+                   11: pr, 12: t, 13: norm(m.get("invoiceType")) or "专票",
+                   14: ce, 15: (ce / full if full else 0), 16: note or "—", 17: oq}
+            for c in range(3, NC + 1):
+                cell = ws.cell(r, c, row.get(c, "")); cell.border = BOX; cell.font = ff(9, c == 5)
+                if c == 9:
+                    cell.number_format = "0.0000"
+                elif c in (11, 14, 17):
+                    cell.number_format = "#,##0.00"
+                elif c == 12:
+                    cell.number_format = "0%"
+                elif c == 15:
+                    cell.number_format = "0.00%"
+                cell.alignment = LFT if c in (5, 6, 7, 16) else (RGT if c in (9, 11, 14, 15, 17) else CEN)
+        if r >= first:
+            ws.merge_cells(start_row=first, start_column=3, end_row=r, end_column=3)
+            cc = ws.cell(first, 3, cat_label); cc.font = ff(9.5, True); cc.alignment = CEN; cc.fill = fill(GREY)
         r += 1
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
-        c = ws.cell(r, 1, "%s小计（不含税）" % seg_label); c.font = ff(10, True, GREEN)
-        c.fill = fill(GREEN_SOFT); c.alignment = LFT
-        ws.cell(r, 8, "=SUM(H%d:H%d)" % (first, r - 1)).number_format = "0.0000"
-        ws.cell(r, 8).font = ff(10, True, GREEN)
-        for col in range(1, NCOLS + 1):
-            ws.cell(r, col).fill = fill(GREEN_SOFT); ws.cell(r, col).border = BOX
-        return r
+        sub = sum(cost_excl(m) for m in items)
+        ws.cell(r, 3, "小计").font = ff(9.5, True, GREEN)
+        a = ws.cell(r, 9, sum(num(m.get("qtyPerKg")) for m in items)); a.number_format = "0.0000"; a.font = ff(9.5, True); a.alignment = RGT
+        b = ws.cell(r, 14, sub); b.number_format = "#,##0.00"; b.font = ff(9.5, True, GREEN); b.alignment = RGT
+        d = ws.cell(r, 15, (sub / full if full else 0)); d.number_format = "0.00%"; d.font = ff(9.5, True); d.alignment = RGT
+        for c in range(3, NC + 1):
+            ws.cell(r, c).fill = fill(GREY); ws.cell(r, c).border = BOX
+        return sub
 
-    mats = [m for m in p.get("materials", []) if m.get("seg") == "原料"]
-    packs = [m for m in p.get("materials", []) if m.get("seg") == "包材"]
-    r = r_val + 2
-    r_mat_sub = block(r, "1｜原料明细（%d 项）　成本不含税＝添加量×含税价÷(1+税率)" % len(mats), mats, "原料")
-    r_pack_sub = block(r_mat_sub + 2, "2｜包材明细（%d 项）" % len(packs), packs, "包材")
+    seg_block(mats, "原料成本")
+    seg_block(packs, "包装成本")
+    r += 1
+    ws.cell(r, 3, "变动成本合计").font = ff(10, True, BLUE)
+    b = ws.cell(r, 14, var_x); b.number_format = "#,##0.00"; b.font = ff(10, True, BLUE); b.alignment = RGT
+    d = ws.cell(r, 15, (var_x / full if full else 0)); d.number_format = "0.00%"; d.font = ff(10, True, BLUE); d.alignment = RGT
+    for c in range(3, NC + 1):
+        ws.cell(r, c).fill = fill("E7F0FB"); ws.cell(r, c).border = BOX
+    ws.merge_cells(start_row=hr, start_column=2, end_row=r, end_column=2)
+    ws.cell(hr, 2).alignment = TOP
 
-    r = r_pack_sub + 2
-    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NCOLS)
-    ws.cell(r, 1, "3｜费用参数与汇总（含税 · 元/kg）　黄底＝台账费用参数，改后全表自动重算").font = ff(11, True)
-    for col in range(1, NCOLS + 1):
-        ws.cell(r, col).fill = fill(SOFT); ws.cell(r, col).border = Border(top=thin, bottom=thin)
-    ws.row_dimensions[r].height = 20
-    rows = [
-        ("原料（含税）", "=ROUND(H%d*%s,4)" % (r_mat_sub, TAX_GROSS), "＝原料小计不含税 × 1.13", False),
-        ("包材（含税）", "=ROUND(H%d*%s,4)" % (r_pack_sub, TAX_GROSS), "＝包材小计不含税 × 1.13", False),
-        ("加工费（含税）", fe["mfg"], "＝(制造+工厂)费用×1.13；可按工厂协议改", True),
-        ("装卸费（含税）", fe["load"], "含运输+装卸；小料类标准 0.18 元/kg 含税", True),
-        ("管理费（含税）", fe["adm"], "星期九固定加成惯例 1.5 元/kg（半成品不加成）", True),
-    ]
-    first = r + 1
-    for i, (lab, v, note, editable) in enumerate(rows):
-        rr = r + 1 + i
-        ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=4)
-        ws.cell(rr, 1, lab).font = ff(10, False)
-        c = ws.cell(rr, 8, v); c.number_format = "0.0000"
-        c.font = ff(10, True, BLUE if editable else "202830")
-        if editable:
-            c.fill = fill("FFF9E6")
-        ws.merge_cells(start_row=rr, start_column=9, end_row=rr, end_column=NCOLS)
-        ws.cell(rr, 9, note).font = ff(8.5, False, MUTED)
-        for col in range(1, NCOLS + 1):
-            ws.cell(rr, col).border = BOX
-    rr = r + 6
-    ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=4)
-    ws.cell(rr, 1, "全成本（含税）").font = ff(11, True, BLUE)
-    c = ws.cell(rr, 8, "=SUM(H%d:H%d)" % (first, rr - 1)); c.number_format = "0.0000"; c.font = ff(12, True, BLUE)
-    ws.merge_cells(start_row=rr, start_column=9, end_row=rr, end_column=NCOLS)
-    ws.cell(rr, 9, "＝五分项相加").font = ff(8.5, False, MUTED)
-    for col in range(1, NCOLS + 1):
-        ws.cell(rr, col).fill = fill(BLUE_SOFT); ws.cell(rr, col).border = BOX
-    rr += 1
-    ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=4)
-    ws.cell(rr, 1, "源表全成本（对账）").font = ff(9, False, MUTED)
-    c = ws.cell(rr, 8, (p.get("summary") or {}).get("全成本含税")); c.number_format = "0.0000"; c.font = ff(9, False, MUTED)
-    ws.merge_cells(start_row=rr, start_column=9, end_row=rr, end_column=NCOLS)
-    ws.cell(rr, 9, "差异＝").font = ff(8.5, False, MUTED)
-    ws.cell(rr + 1, 8, "=ROUND(H%d-H%d,4)" % (rr - 1, rr)).number_format = "0.0000"
-    ws.cell(rr + 1, 8).font = ff(9, True, GREEN)
-    ws.merge_cells(start_row=rr + 1, start_column=1, end_row=rr + 1, end_column=4)
-    ws.cell(rr + 1, 1, "差异（参数未调时应为 0）").font = ff(9, False, MUTED)
+    # ===== 费用与汇总：对齐原版「2、制造费用 … 10、全成本」=====
+    def fee_head(rr):
+        for c in range(3, NC + 1):                      # 整条连续灰条（不留空档）
+            ws.cell(rr, c).fill = fill(HEAD_BG); ws.cell(rr, c).border = BOX
+        for c, h in [(3, "类别"), (5, "项目"), (10, "每公斤产品\n消耗量"), (11, "单价含税\n元/单位"),
+                     (14, "成本不含税\n(元/kg)"), (15, "占比")]:
+            cell = ws.cell(rr, c, h); cell.font = ff(8.5, True, "3D4C5E"); cell.alignment = CEN
 
-    ws[strip_cells["原料"]] = "=H%d" % first
-    ws[strip_cells["包材"]] = "=H%d" % (first + 1)
-    ws[strip_cells["加工费"]] = "=H%d" % (first + 2)
-    ws[strip_cells["装卸费"]] = "=H%d" % (first + 3)
-    ws[strip_cells["管理费"]] = "=H%d" % (first + 4)
-    ws[strip_cells["全成本（含税）"]] = "=H%d" % (r + 6)
+    def na_row(rr, item, cat=None, zero=False):
+        if cat:
+            ws.cell(rr, 3, cat).font = ff(9.5, True); ws.cell(rr, 3).alignment = CEN
+        ws.cell(rr, 4, "N/A").font = ff(9, False, MUTED); ws.cell(rr, 4).alignment = CEN
+        ws.cell(rr, 5, item).font = ff(9); ws.cell(rr, 5).alignment = LFT
+        if zero:
+            z = ws.cell(rr, 14, 0.0); z.number_format = "#,##0.00"; z.alignment = RGT
+            o = ws.cell(rr, 15, 0.0); o.number_format = "0.00%"; o.alignment = RGT
+        for c in range(3, NC + 1):                       # 费用块数据区不铺底（业务方：这块底色去掉），只 C 列类别留灰
+            ws.cell(rr, c).border = BOX
+        ws.cell(rr, 3).fill = fill(GREY)
 
-    fr = rr + 3
-    for i, t in enumerate([
-        "口径说明：①含税分项＝不含税×1.13（与源表『成本合计（含税）＝不含税×1.13』同一惯例）；②明细成本不含税＝添加量×含税含运价÷(1+税率)；",
-        "③复合调味料为独立核算的半成品，其全成本含税作为原料价进入成品页；④黄色底为台账费用参数，可直接修改，全表公式联动。",
-        "生成：核算工作台 · BOM报价审核　来源审批 %s　核算日期 %s" % (approval or "—", p.get("calcDate")),
-    ]):
-        ws.merge_cells(start_row=fr + i, start_column=1, end_row=fr + i, end_column=NCOLS)
-        ws.cell(fr + i, 1, t).font = ff(8.5, False, "98A3AF")
+    def subtotal(rr, val):
+        ws.cell(rr, 3, "小计").font = ff(9.5, True, GREEN)
+        a = ws.cell(rr, 14, val); a.number_format = "#,##0.00"; a.font = ff(9.5, True, GREEN); a.alignment = RGT
+        o = ws.cell(rr, 15, (val / full if full else 0)); o.number_format = "0.00%"; o.alignment = RGT
+        for c in range(3, NC + 1):
+            ws.cell(rr, c).border = BOX
+        ws.cell(rr, 3).fill = fill(GREY)                 # 费用段小计同数据区：只 C 列留灰
+
+    r += 2
+    fee_head(r)
+    sec2 = r
+    ls = r + 1
+    for i, item in enumerate(["生产人员数量", "月均工资", "产量（kg/天）"]):
+        r += 1; na_row(r, item, "人工成本" if i == 0 else None)
+    ws.merge_cells(start_row=ls, start_column=3, end_row=r, end_column=3)
+    ws.cell(ls, 3, "人工成本").font = ff(9.5, True); ws.cell(ls, 3).alignment = CEN
+    vmerge(11, ls, r, mfg)                                              # K 单价含税＝加工费（不再琥珀高亮）
+    vmerge(14, ls, r, mfg_x)                                            # N 成本不含税
+    vmerge(15, ls, r, (mfg_x / full if full else 0), pct=True)          # O 占比
+    ms = r + 1
+    for i, item in enumerate(["水-m³", "电-度", "燃气", "折旧"]):
+        r += 1; na_row(r, item, "制造成本" if i == 0 else None, zero=True)
+    ws.merge_cells(start_row=ms, start_column=3, end_row=r, end_column=3)
+    ws.cell(ms, 3, "制造成本").font = ff(9.5, True); ws.cell(ms, 3).alignment = CEN
+    r += 1; subtotal(r, mfg_x)
+    ws.merge_cells(start_row=sec2, start_column=2, end_row=r, end_column=2)
+    ws.cell(sec2, 2, "2、制造费用").font = ff(10, True); ws.cell(sec2, 2).alignment = TOP; ws.cell(sec2, 2).fill = fill(GREY)
+
+    fs = r + 1
+    for i, item in enumerate(["管理费用", "厂商利润"]):
+        r += 1; na_row(r, item, zero=True)
+    r += 1; subtotal(r, 0.0)
+    ws.merge_cells(start_row=fs, start_column=2, end_row=r, end_column=2)
+    ws.cell(fs, 2, "3、工厂费用").font = ff(10, True); ws.cell(fs, 2).alignment = TOP; ws.cell(fs, 2).fill = fill(GREY)
+
+    def fee_tax_cols(rr, tax):                          # 运输/装卸：每公斤消耗量=1、税率、发票类别（对齐原版）
+        j = ws.cell(rr, 10, 1.0); j.number_format = "0.0000"; j.alignment = RGT; j.font = ff(9)
+        l = ws.cell(rr, 12, tax); l.number_format = "0%"; l.alignment = CEN; l.font = ff(9)
+        m = ws.cell(rr, 13, "专票"); m.alignment = CEN; m.font = ff(9)
+
+    r += 1; na_row(r, "运输费用", zero=True); fee_tax_cols(r, FREIGHT_TAX)
+    ws.cell(r, 2, "4、运输费用").font = ff(10, True); ws.cell(r, 2).border = BOX; ws.cell(r, 2).fill = fill(GREY)
+
+    r += 1; na_row(r, "装卸费用"); fee_tax_cols(r, LOAD_TAX)
+    k = ws.cell(r, 11, load); k.number_format = "#,##0.00"; k.alignment = RGT; k.font = ff(9)
+    n = ws.cell(r, 14, load_x); n.number_format = "#,##0.00"; n.alignment = RGT
+    o = ws.cell(r, 15, (load_x / full if full else 0)); o.number_format = "0.00%"; o.alignment = RGT
+    ws.cell(r, 2, "5、装卸费").font = ff(10, True); ws.cell(r, 2).border = BOX; ws.cell(r, 2).fill = fill(GREY)
+
+    summ = [("6、成本合计（不含税）", total_x, total_x / full if full else 0, None),
+            ("7、增值税合计", total_x * 0.13, (total_x * 0.13) / full if full else 0, "＝不含税 × 13%"),
+            ("8、成本合计（含税）", total_incl, total_incl / full if full else 0, "＝不含税 × 1.13"),
+            ("9、管理费（含税）", adm, adm / full if full else 0, "台账固定加成"),
+            ("10、全成本（含税·不含运）", full, 1.0, "＝ 8 + 9")]
+    for i, (lb, val, pct, note) in enumerate(summ):
+        r += 1
+        last = (i == len(summ) - 1)
+        lc = ws.cell(r, 2, lb); lc.font = ff(11 if last else 10, True, BLUE if last else INK); lc.fill = fill(GREY)
+        mc(r, 3, 14)                                     # 值跨 C:N 合并居中（对齐原版 C35:N35 合并单元格）
+        cc = ws.cell(r, 3, val); cc.number_format = "#,##0.00"; cc.font = ff(12 if last else 10, True, BLUE if last else INK)
+        cc.alignment = Alignment("center", "center"); cc.fill = fill(YELLOW)   # 6~10 值格统一黄底（对齐原版）
+        oc = ws.cell(r, 15, pct); oc.number_format = "0.00%"; oc.alignment = RGT; oc.font = ff(10, last, BLUE if last else INK)
+        mc(r, 16, NC)
+        nc_ = ws.cell(r, 16, note or ""); nc_.font = ff(8.5, False, MUTED); nc_.alignment = LFT
+        for c in (2, 3, 15, 16):                         # 描边：标签/合并值/占比/说明
+            ws.cell(r, c).border = BOX
+
+    src_full = num((p.get("summary") or {}).get("全成本含税"))
+    if src_full:
+        r += 1
+        ws.cell(r, 2, "源表全成本（对账）").font = ff(9, False, MUTED); ws.cell(r, 2).fill = fill(GREY)
+        cc = ws.cell(r, 3, src_full); cc.number_format = "#,##0.00"; cc.font = ff(9, False, MUTED); cc.alignment = RGT
+        mc(r, 16, NC); ws.cell(r, 16, "差异 %+.4f（参数未调时应≈0）" % (full - src_full)).font = ff(8.5, False, MUTED)
+
+    r += 2
+    for tnote in [
+        "口径：①成本不含税＝添加量×含税含运价÷(1+税率)；②各费用不含税＝含税÷1.13，含税合计＝不含税×1.13。",
+        "③本表为「含税不含运」标准成本＝原料+包材+加工费+装卸+管理费（含税）；制造/工厂/运输为原版分区，台账未拆存者以 N/A 占位、加工费归入制造费用。",
+        "④黄色底＝台账费用参数，服务器复核可改，改后重新导出即更新。生成：核算工作台·BOM报价审核　审批 %s　核算日期 %s" % (approval or "—", p.get("calcDate") or "—"),
+    ]:
+        mc(r, 2, NC)
+        ws.cell(r, 2, tnote).font = ff(8.5, False, "98A3AF"); ws.cell(r, 2).alignment = LFT
+        r += 1
 
     buf = io.BytesIO()
     wb.save(buf)

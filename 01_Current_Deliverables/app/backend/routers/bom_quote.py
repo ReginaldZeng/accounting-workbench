@@ -1903,15 +1903,18 @@ def _xlsx_to_html(data, title=""):
         if isinstance(v, bool):
             return "是" if v else "否"
         if isinstance(v, (int, float)):
+            import re as _re
             low = (nf or "").lower()
+
+            def _dec(s):                               # 小数位＝小数点后**连续**的 0 个数（会计格式带多段";"，不能全数）
+                m = _re.match(r"0*", s.split(".", 1)[1]) if "." in s else None
+                return len(m.group(0)) if m else 0
             if "%" in low:
-                d = low.split(".")[1].count("0") if "." in low else 0
-                return ("{:.%df}%%" % d).format(v * 100)
+                return ("{:.%df}%%" % _dec(low)).format(v * 100)
+            if "." in (nf or ""):                      # 显式小数位格式优先：1.0 按 0.0000 显 1.0000，同原版
+                return "{:.{}f}".format(v, _dec(nf) or 2)
             if float(v).is_integer():
-                return str(int(v))                     # 整数(含 ERP 码)不加千分位，免把编码断开
-            if "." in (nf or ""):
-                d = (nf.split(".")[1].count("0")) or 2
-                return "{:.{}f}".format(v, d)
+                return str(int(v))                     # 无小数格式的整数(含 ERP 码)不加千分位，免把编码断开
             return ("{:.4f}".format(v)).rstrip("0").rstrip(".")
         return str(v)
 
