@@ -542,15 +542,38 @@ async def bom_config(request: Request):
             "dingtalkConfigured": bool(dtb and dtb.configured())}
 
 
-# ---------------- 基础设置：公开版脱敏规则（第三页；暂全不遮，日后在此配）----------------
-# 公开台账(标准成本台账/给BP)相比复核底稿要遮哪些敏感列。默认口径＝成本会计手工「商品版」的脱敏法：
-#   删 型号(model)/规格(spec)/供应商品牌(brand) 三列。现阶段全 False＝不遮（先占位，用户日后开）。
-_CFG_DEFAULT = {"hideModel": False, "hideSpec": False, "hideSupplier": False, "hidePriceNote": False}
+# ---------------- 基础设置：脱敏版核算表遮哪几列（V2.451 起真正生效）----------------
+# 业务方定 2026-09-06：**BP 侧的人在 BP 工作台看核算表，看的是脱敏版**（核算工作台的全量核算表只给成本会计/财务BP/主管理员）；
+# 下载的核算表也分版本。脱敏口径＝成本会计手工「商品版」的删法：型号(model)/规格(spec)/供应商品牌(brand) 三列，
+# 报价说明默认不遮。这四个开关只管**给 BP 的脱敏版**（/api/bomcost/sheet、/api/bomcost/export）；核算侧内部永远全量。
+_CFG_DEFAULT = {"hideModel": True, "hideSpec": True, "hideSupplier": True, "hidePriceNote": False}
+_MASK_LABELS = (("hideModel", "型号"), ("hideSpec", "规格"), ("hideSupplier", "供应商"), ("hidePriceNote", "报价说明"))
 
 
 def _bom_settings():
     s = db.get_setting("bom_config", None) or {}
     return {**_CFG_DEFAULT, **s}
+
+
+def _masked_rec(e, cfg=None):
+    """给 BP 的脱敏版记录：按基础设置把物料行的 型号/规格/供应商/报价说明 置空（服务端遮，前端藏没用）。
+    → (rec, 遮掉的列名列表)。头部「生产工厂」不遮（是自家工厂，不是采购供应商）。"""
+    cfg = cfg or _bom_settings()
+    rec = _rec_from_entry(e)
+    mats = []
+    for m in rec.get("materials") or []:
+        m = dict(m)
+        if cfg.get("hideModel"):
+            m["model"] = ""
+        if cfg.get("hideSpec"):
+            m["spec"] = ""
+        if cfg.get("hideSupplier"):
+            m["brand"] = ""
+        if cfg.get("hidePriceNote"):
+            m["priceNote"] = ""
+        mats.append(m)
+    rec["materials"] = mats
+    return rec, [lab for k, lab in _MASK_LABELS if cfg.get(k)]
 
 
 @router.get("/api/bom/settings")
@@ -559,7 +582,7 @@ async def bom_get_settings(request: Request):
     if not u:
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     return {"ok": True, "config": _bom_settings(), "canConfig": bool(db.user_can(u, CAP_CONFIG)),
-            "hint": "默认口径＝成本会计商品版脱敏法：遮 型号/规格/供应商。现全不遮（占位），按需开启后公开台账即隐藏对应列。"}
+            "hint": "只管给 BP 工作台的脱敏版核算表（网页与下载）遮哪几列；核算侧内部核算表永远全量。默认＝商品版口径：遮 型号/规格/供应商，报价说明不遮。"}
 
 
 @router.post("/api/bom/settings")
@@ -2325,15 +2348,14 @@ def _xlsx_to_html(data, title=""):
 
 
 def _export_auth(request, e):
-    """导出/预览放行：门户用户须有「导出」权限；BP 后台（内部令牌+回环）**只准拿已审核（对外）版**——初审未终审的绝不外发。
+    """核算侧**全量**导出/预览：门户用户须有「导出」权限。
+    ⚠ V2.451 起 BP 后台（内部令牌）**不再放行这里**——业务方定「下载的核算表要分版本」：BP 只拿脱敏版，走 /api/bomcost/export。
     → (who, err_response)"""
     who = _internal_or_user(request)
     if not who:
-        return None, JSONResponse({"ok": False, "msg": "未授权：需登录并有「导出」权限，或 X-Internal-Token（回环调用）"}, status_code=401)
+        return None, JSONResponse({"ok": False, "msg": "未授权：需登录并有「导出」权限"}, status_code=401)
     if who.get("internal"):
-        if e is not None and e.get("status") != "已审核":
-            return None, JSONResponse({"ok": False, "msg": "该版尚未终审，不对外"}, status_code=403)
-        return who, None
+        return None, JSONResponse({"ok": False, "msg": "BP 侧请走 /api/bomcost/export（脱敏版）；全量核算表只给核算工作台内部账号"}, status_code=403)
     if not db.user_can(who, CAP_EXPORT):
         return None, JSONResponse({"ok": False, "msg": "无「导出」权限"}, status_code=403)
     return who, None
@@ -2443,8 +2465,9 @@ def internal_token_ok(request):
     return bool(tok and want and tok == want and host in ("127.0.0.1", "::1", "localhost"))
 
 
-# 登录门放行前缀（仅当 internal_token_ok）：BP 消费口 + 导出/预览（导出另在 _export_auth 里限定只准已审核版）
-INTERNAL_PATH_PREFIXES = ("/api/bomcost/", "/api/bom/export/")
+# 登录门放行前缀（仅当 internal_token_ok）：只有 BP 消费口 /api/bomcost/*（含脱敏版核算表 sheet/export）。
+# V2.451 起核算侧全量导出 /api/bom/export/* 不再对内部令牌开放（BP 只拿脱敏版）。
+INTERNAL_PATH_PREFIXES = ("/api/bomcost/",)
 
 
 def _internal_or_user(request):
@@ -2458,15 +2481,17 @@ _CH_BY_LABEL = {v: k for k, v in CH_LABELS.items()}     # 电商/通品/TOB/TOC 
 
 
 def _bp_links(e):
-    """BP 只读台账用的深链（V2.442）——路径相对核算门户根，BP 拼上门户域名即可。
-    页面深链走 SPA hash 路由 `#/bomstd?entry=…`（App.jsx 解析）；文件类走导出接口（BP 后台带内部令牌回环代拉，也可让用户浏览器直开、走门户登录）。
-    「入口在 BP，动作在核算」：BP 页面只放链接，审核/对比/下载都在核算侧完成。"""
+    """BP 只读台账用的链接（V2.442 建，V2.451 改口径）——路径相对核算门户根。
+    业务方定 2026-09-06：**BP 侧的人在 BP 工作台看核算表、看脱敏版**；只有主管理员（Owner/总监）才跳核算工作台看全量。
+    - sheetUrl / previewUrl / downloadUrl：**脱敏版**（BP 后台带内部令牌回环拉，再渲染/回给用户），只有已审核版。
+    - adminDetailUrl / adminCompareUrl：核算工作台深链，**只给主管理员**放，普通 BP 用户不显示。
+    - 源附件原件不给 BP（含供应商信息、无法脱敏）。"""
     i = int(e["id"])
-    return {"detailUrl": "/#/bomstd?entry=%d" % i,                            # 核算表详情（四步复核状态、留痕、上游链路）
-            "compareUrl": "/#/bomstd?entry=%d&compare=1" % i,                # 版本对比（同产品各版本涨跌）
-            "previewUrl": "/api/bom/export/pretty?entry_id=%d&preview=1" % i,  # 重排版网页预览（值版）
-            "downloadUrl": "/api/bom/export/pretty?entry_id=%d" % i,          # 重排版 xlsx（活公式）
-            "originalUrl": "/api/bom/export/original?entry_id=%d" % i}        # 源附件原样（无留档时 404）
+    return {"sheetUrl": "/api/bomcost/sheet?entryId=%d" % i,                  # 脱敏版核算表 JSON（BP 自己渲染）
+            "previewUrl": "/api/bomcost/export?entryId=%d&preview=1" % i,     # 脱敏版重排版网页预览
+            "downloadUrl": "/api/bomcost/export?entryId=%d" % i,              # 脱敏版重排版 xlsx（活公式，文件名带「脱敏版」）
+            "adminDetailUrl": "/#/bomstd?entry=%d" % i,                        # 仅主管理员：核算侧全量详情
+            "adminCompareUrl": "/#/bomstd?entry=%d&compare=1" % i}             # 仅主管理员：核算侧版本对比
 
 
 def _pending_final_rows(src):
@@ -2486,6 +2511,69 @@ def _pending_final_rows(src):
                     "finalReviewUrl": "/#/bomstd?entry=%d&final=1" % e["id"]})
     out.sort(key=lambda r: (r["firstReviewedAt"], r["entryId"]))
     return out
+
+
+def _bp_sheet_entry(request, eid):
+    """BP 脱敏版核算表两个口共用的取件：鉴权（内部令牌/门户登录）→ 记录存在 → **只准已审核版**。→ (e, err)"""
+    who = _internal_or_user(request)
+    if not who:
+        return None, JSONResponse({"ok": False, "msg": "未授权：需 X-Internal-Token（回环调用）或门户登录"}, status_code=401)
+    try:
+        e = db.bom_get_entry(int(eid))
+    except (TypeError, ValueError):
+        e = None
+    if not e or e.get("source") != _src():
+        return None, JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    if e.get("status") != "已审核" or e.get("active") not in (1, None):
+        return None, JSONResponse({"ok": False, "msg": "该版尚未终审（或已作废/替换），不对外"}, status_code=403)
+    return e, None
+
+
+@router.get("/api/bomcost/sheet")
+async def bomcost_sheet(request: Request):
+    """**脱敏版核算表**（V2.451，业务方定「BP 侧的人在 BP 侧看核算表」）：BP 工作台自己渲染用。
+    物料行按基础设置遮 型号/规格/供应商/报价说明（`hiddenColumns` 告诉 BP 遮了哪几列）；数值、勾稽、五分项全给。只准已审核版。"""
+    e, err = _bp_sheet_entry(request, request.query_params.get("entryId"))
+    if err:
+        return err
+    rec, hidden = _masked_rec(e)
+    fee = _fee_of(e)
+    comp = bq.compose(rec, fee)
+    ack = e.get("ack") or {}
+    others = db.bom_list_entries(_src())
+    vg = (e.get("variant_group") or "").strip()
+    return {"ok": True, "masked": True, "hiddenColumns": hidden,
+            "entryId": e["id"], "productKey": e["product_key"], "cpCode": (e.get("cp_code") or "").strip(),
+            "erpCode": (e.get("erp_code") or "").strip(), "productName": (e.get("product_name") or "").strip(),
+            "packSpec": e.get("pack_spec") or "", "calcDate": e.get("calc_date") or "", "factory": e.get("supplier") or "",
+            "customer": e.get("customer") or "", "channel": CH_LABELS.get(e.get("channel") or "", e.get("channel") or ""),
+            "approvalNo": e.get("approval_no") or "", "status": "final",
+            "finalizedBy": ack.get("by") or "", "finalizedAt": ack.get("at") or "",
+            "firstReviewedBy": e.get("finalized_by") or "", "firstReviewedAt": e.get("finalized_at") or "",
+            "matCategory": e.get("mat_category") or "", "quotable": (None if e.get("quotable") is None else bool(e.get("quotable"))),
+            "quoteReason": e.get("quote_reason") or "", "unit": "元/kg", "taxIncluded": True,
+            "fee": fee, "srcFee": comp.get("srcFee"), "comp": comp,
+            "materials": rec["materials"], "checks": e.get("checks") or [],
+            "variantGroup": vg,
+            "variants": [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "packSpec": x.get("pack_spec") or ""}
+                         for x in others if vg and x["id"] != e["id"] and (x.get("variant_group") or "").strip() == vg],
+            "links": _bp_links(e)}
+
+
+@router.get("/api/bomcost/export")
+async def bomcost_export(request: Request, entryId: int, preview: int = 0):
+    """**脱敏版重排版核算表**下载 / 网页预览（V2.451，业务方定「下载的核算表要分版本」）。
+    同一 build_pretty，只是物料行按基础设置置空 型号/规格/供应商/报价说明；文件名与页面标题带「脱敏版」。只准已审核版。"""
+    e, err = _bp_sheet_entry(request, entryId)
+    if err:
+        return err
+    rec, hidden = _masked_rec(e)
+    data = bq.build_pretty(rec, _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview, rules=_invoice_rules())
+    nm = (e.get("product_name") or "").strip()
+    tag = "脱敏版" + ("（已遮 %s）" % "/".join(hidden) if hidden else "")
+    if preview:
+        return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s · %s %s" % (tag, e.get("cp_code") or "", nm)))
+    return _xlsx_response(data, "重排版核算表_脱敏版_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
 
 
 @router.get("/api/bomcost/pending-final")

@@ -178,8 +178,8 @@ async def _auth_gate(request, call_next):
     p = request.url.path
     if p.startswith("/api/") and p not in _OPEN_API:
         u = _current_user(request)
-        # 例外（V2.443）：BP 后端同机调 BOM 消费口/导出——内部令牌对得上且来源回环才放过登录门，
-        # 之后由路由自己再验一遍（导出只准已审核版）。此前漏了这条，令牌请求在这里就被 401「未登录」。
+        # 例外（V2.443）：BP 后端同机调 BOM 消费口 /api/bomcost/*——内部令牌对得上且来源回环才放过登录门，
+        # 之后由路由自己再验一遍（只准已审核版；V2.451 起核算侧全量导出不再放行，BP 只拿脱敏版）。
         bp_internal = p.startswith(bom_quote.INTERNAL_PATH_PREFIXES) and bom_quote.internal_token_ok(request)
         if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal:
             return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
