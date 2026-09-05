@@ -458,6 +458,7 @@ bom_quote_entry = Table(
     Column("product_name", String(160)), Column("customer", String(160)),
     Column("pack_spec", String(120)), Column("supplier", String(160)),   # supplier=生产工厂
     Column("calc_date", String(12)), Column("order_qty", Float),
+    Column("net_weight_kg", Float),                  # 单位净重(kg)：一个销售单位(袋/盒)的净重，BP 元/kg→元/袋 换算用；成本会计确认后存，空=按 pack_spec 预填待确认（V2.439）
     Column("channel", String(20)),                   # 电商/通品/TOB/TOC（可空、可复核期改）
     Column("semi", Integer),                         # 1=半成品(SZF…) 0=成品(CP…)
     Column("mat_subtotal_excl", Float), Column("pack_subtotal_excl", Float),
@@ -3124,7 +3125,7 @@ def _ensure_bom_columns():
             if col not in cols:
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s TEXT" % col))
-        for col, ddl in (("active", "INTEGER DEFAULT 1"), ("quotable", "INTEGER")):
+        for col, ddl in (("active", "INTEGER DEFAULT 1"), ("quotable", "INTEGER"), ("net_weight_kg", "FLOAT")):
             if col not in cols:
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s %s" % (col, ddl)))

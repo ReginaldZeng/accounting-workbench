@@ -8,7 +8,7 @@ import {
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
-  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads,
+  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, bomSetNetWeight, getBomUsageSpreads,
   getBomInvoiceRules, setBomInvoiceRules,
 } from '../api.js'
 
@@ -973,6 +973,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               <div className="bom-rh">全成本（含税）<span>{entry.cpCode}</span></div>
               <div className="bom-bigprice">¥ {fmt(full)} <small>/kg</small></div>
               <div className="bom-rspec">{entry.packSpec}　·　核算日期 {entry.calcDate}</div>
+              <NetWeightRow entry={entry} canEdit={!isStd && !!cfg?.canAudit} onChanged={onChanged} flash={flash} />
               <div className="bom-rlines">
                 <RLine k={entry.semi ? '原料' : '原料（含复配料）'} v={`¥ ${fmt(comp.mat)}`} />
                 <RLine k="包材" v={`¥ ${fmt(comp.pack)}`} />
@@ -1011,6 +1012,30 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
   )
 }
 function RLine({ k, v }) { return <div className="bom-rline"><span>{k}</span><b>{v}</b></div> }
+// 单位净重(kg)：BP 定价按袋/盒换算要用（对接需求 2026-09-05 §2）。auto=按包装规格预填「待确认」；成本会计填/确认后存库留痕；空或≤0 不能定稿。
+function NetWeightRow({ entry, canEdit, onChanged, flash }) {
+  const [v, setV] = useState(entry.netWeightKg ?? '')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setV(entry.netWeightKg ?? '') }, [entry.id, entry.netWeightKg])
+  const src = entry.netWeightSrc
+  const save = async () => {
+    const n = parseFloat(v)
+    if (!(n > 0)) return flash('单位净重须大于 0（kg）')
+    setBusy(true)
+    try { const r = await bomSetNetWeight(entry.id, n); if (!r.ok) return flash(r.msg || '保存失败'); flash('单位净重已确认'); await onChanged() }
+    catch (e) { flash('保存失败：' + e.message) } finally { setBusy(false) }
+  }
+  return <div className="bom-rline" style={{ margin: '4px 0 6px' }} title="一个销售单位(袋/盒)的净重，BP 定价 元/kg→元/袋 用；空或≤0 不能定稿">
+    <span>单位净重(kg)
+      {src === 'auto' && <em className="bom-srcv" style={{ color: 'var(--amber)' }}>按规格预填·待确认</em>}
+      {!src && <em className="bom-srcv" style={{ color: 'var(--red)' }}>未填·不能定稿</em>}</span>
+    {canEdit
+      ? <b style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+        <input className="bom-feeinp" type="number" step="0.001" min="0" value={v} onChange={e => setV(e.target.value)} />
+        <button className="btn-sec" disabled={busy} onClick={save} style={{ padding: '0 8px' }}>{src === 'manual' ? '改' : '确认'}</button></b>
+      : <b>{entry.netWeightKg != null ? entry.netWeightKg + ' kg' : '—'}</b>}
+  </div>
+}
 function FeeRow({ label, k, fee, edit, setF, dot, src }) {
   return <div className="bom-rline">
     <span>{label}{dot && <b className="bom-dot" title="已调整，见变更记录" />}</span>

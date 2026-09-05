@@ -156,6 +156,21 @@ def _classified(e):
     return bool(q) or bool((e.get("quote_reason") or "").strip())
 
 
+def _net_weight(e):
+    """单位净重 kg（BP 元/kg→袋/盒换算，对接 2026-09-05 §2）：存值(成本会计确认) 优先，否则按 pack_spec 预填（待确认）。
+    → (kg 或 None, 'manual' | 'auto' | '')"""
+    v = e.get("net_weight_kg")
+    if v is not None:
+        try:
+            f = float(v)
+            if f > 0:
+                return f, "manual"
+        except (TypeError, ValueError):
+            pass
+    g = bq.net_weight_from_spec(e.get("pack_spec"))
+    return (g, "auto") if g else (None, "")
+
+
 def _goods_view(gv):
     """成本会计商品版留档 → 前端投影（diff/是否已采纳/源文件；不外发全量 materials，明细走 diff 即可）。"""
     if not gv:
@@ -174,7 +189,9 @@ def _entry_view(e, finals):
     ups = _upstream_status(e, finals)
     bom_mats = e.get("bom_list")
     bom_check = bq.compare_bom(e.get("materials") or [], bom_mats) if bom_mats else None
+    nw = _net_weight(e)          # 单位净重(kg)：manual=成本会计确认 / auto=按规格预填(待确认) / ''=未填；空或≤0 不能定稿
     return {
+        "netWeightKg": nw[0], "netWeightSrc": nw[1],
         "bomCheck": bom_check, "hasBomList": bool(bom_mats),
         # ①BOM清单 整表原样（研发出品）：类型/编码/物料/型号/规格/单位/供应商/用量（业务方 2026-09-04 定列序）
         "bomList": [{"seg": b.get("seg"), "matType": b.get("matType"), "matCode": b.get("matCode"),
@@ -928,6 +945,31 @@ async def bom_set_erp_code(request: Request):
     if code != old:
         db.bom_update_entry(e["id"], {"erp_code": code})
         db.bom_add_audit(e["id"], u["name"], "补物料编码", old or "（空）", code or "（清空）")
+    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+
+
+@router.post("/api/bom/set-net-weight")
+async def bom_set_net_weight(request: Request):
+    """成本会计填/确认**单位净重(kg)**（BP 对接 2026-09-05 §2）：一个销售单位(袋/盒)的净重，BP 元/kg→元/袋 换算用。
+    按规格预填的值是「待确认」，确认即存库；空或≤0 不能定稿。改动逐条留痕。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「复核」权限"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    try:
+        kg = float(body.get("netWeightKg"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "msg": "单位净重须为数字（kg）"}, status_code=400)
+    if not kg > 0:
+        return JSONResponse({"ok": False, "msg": "单位净重须大于 0（kg）"}, status_code=400)
+    kg = round(kg, 4)
+    old_v, old_src = _net_weight(e)
+    db.bom_update_entry(e["id"], {"net_weight_kg": kg})
+    db.bom_add_audit(e["id"], u["name"], "单位净重(kg)",
+                     ("%s（%s）" % (old_v, "按规格预填" if old_src == "auto" else "已确认")) if old_v else "（未填）", str(kg))
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
 
 
@@ -1774,6 +1816,8 @@ async def bom_classify(request: Request):
     ub = _upstream_block(_upstream_status(e2))   # 上游未就绪 → 存定性但不定稿
     if ub:
         miss = miss + ["上游：" + "；".join(ub)]
+    if not ((_net_weight(e2)[0] or 0) > 0):      # 净重闸（BP 对接 2026-09-05 §2，与勾稽同级）：单位净重空/≤0 不定稿
+        miss = miss + ["单位净重(kg)未填或≤0——右栏「单位净重」填好并确认再定稿"]
     finalized, affected = False, None
     if not miss:
         prev_final = db.bom_get_final(_src(), e2["product_key"])
@@ -1838,6 +1882,8 @@ async def bom_finalize(request: Request):
     ub = _upstream_block(_upstream_status(e))   # 上游链路闸：上游未定稿/价格对不上 → 下游不许先定稿
     if ub:
         return JSONResponse({"ok": False, "msg": "上游半成品/复配料未就绪，不能先定稿本品：%s" % "；".join(ub)}, status_code=400)
+    if not ((_net_weight(e)[0] or 0) > 0):       # 净重闸（BP 对接 2026-09-05 §2，与勾稽同级）
+        return JSONResponse({"ok": False, "msg": "单位净重(kg)未填或≤0，不能定稿——BP 定价要按袋/盒换算，请在右栏「单位净重」填好并确认。"}, status_code=400)
     from core import _now
     prev_final = db.bom_get_final(_src(), e["product_key"])
     db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None})
@@ -2117,6 +2163,94 @@ async def bom_final_feed(request: Request):
                     "loading": comp["load"], "admin": comp["adm"], "fullCostIncl": comp["full"],
                     "finalizedBy": e.get("finalized_by") or "", "finalizedAt": e.get("finalized_at") or ""})
     return {"ok": True, "source": src, "channel": channel, "items": out}
+
+
+# ============ BP 消费接口（对接需求 2026-09-05 §1–§3）：GET /api/bomcost/final ============
+# 与上面 /api/bom/final 同一选择口径（定稿指针 + 只放终审「已审核」），字段/参数按 BP 文档契约；
+# 服务间调用用内部令牌（BP 后端同机回环调），门户登录用户亦可读。/api/bom/final 保持不动。
+def _internal_token():
+    """BOMCOST_INTERNAL_TOKEN：先看进程环境变量（与 DB_URL 同机制），没有则读 backend/.env 的 KEY=VALUE。凭据不进代码不进文档。"""
+    t = os.environ.get("BOMCOST_INTERNAL_TOKEN", "").strip()
+    if t:
+        return t
+    try:
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        if os.path.exists(p):
+            for line in open(p, encoding="utf-8"):
+                line = line.strip()
+                if line.startswith("BOMCOST_INTERNAL_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def _internal_or_user(request):
+    """放行二选一：①X-Internal-Token 正确 **且** 来源回环地址（BP 后端同机调用）；②门户登录用户。→ 身份 dict 或 None。"""
+    tok = (request.headers.get("X-Internal-Token") or "").strip()
+    want = _internal_token()
+    host = (getattr(getattr(request, "client", None), "host", "") or "")
+    if tok and want and tok == want and host in ("127.0.0.1", "::1", "localhost"):
+        return {"name": "bp-internal", "internal": True}
+    return _current_user(request)
+
+
+_CH_BY_LABEL = {v: k for k, v in CH_LABELS.items()}     # 电商/通品/TOB/TOC → ecom/common/tob/toc
+
+
+@router.get("/api/bomcost/final")
+async def bomcost_final(request: Request):
+    """BP 定价测算消费接口（契约：对接需求_BP消费接口_20260905 §1）。只返回**终审通过(status=已审核)**的定稿版，
+    同一 productKey 一版（定稿指针即最新定稿）。数值含税 元/kg，与列表页同口径。
+    Query：channel（电商/通品/TOB/TOC 或 ecom/common/tob/toc）· since（与 asOf/finalizedAt 同格式字符串，只回 finalizedAt>since）·
+          erpCodes（逗号分隔，按需拉少量）。
+    口径：finalizedAt/By＝**终审**（成为 final 对外的时刻，since 按它增量）；firstReviewedAt/By＝初审另给。
+          erpCode 空照返 ""，BP 跳过并告警，两边不猜。netWeightKg=单位净重(kg)，null=未填（老定稿行可能没有）。
+          transIncl 恒 0：台账「装卸费」已含运输（源表运输+装卸合并入账），不单拆。"""
+    who = _internal_or_user(request)
+    if not who:
+        return JSONResponse({"ok": False, "msg": "未授权：需 X-Internal-Token（回环调用）或门户登录"}, status_code=401)
+    qp = request.query_params
+    ch_in = (qp.get("channel") or "").strip()
+    ch = _CH_BY_LABEL.get(ch_in, ch_in)
+    since = (qp.get("since") or "").strip()
+    codes = {c.strip() for c in (qp.get("erpCodes") or "").split(",") if c.strip()}
+    src = _src()
+    rows = []
+    for pkey, eid in db.bom_finals(src).items():
+        e = db.bom_get_entry(eid)
+        if not e or e.get("status") != "已审核":            # 只对外终审通过的（初审版不外发）
+            continue
+        if ch and (e.get("channel") or "") != ch:
+            continue
+        erp = (e.get("erp_code") or "").strip()
+        if codes and erp not in codes:
+            continue
+        ack = e.get("ack") or {}
+        fin_at = ack.get("at") or ""
+        if since and not (fin_at > since):
+            continue
+        comp = bq.compose(_rec_from_entry(e), _fee_of(e))
+        nw, nw_src = _net_weight(e)
+        rows.append({
+            "entryId": e["id"], "productKey": pkey, "erpCode": erp,
+            "cpCode": e.get("cp_code") or "", "productName": (e.get("product_name") or "").strip(),
+            "customer": e.get("customer") or "",
+            "channel": CH_LABELS.get(e.get("channel") or "", e.get("channel") or ""),
+            "packSpec": e.get("pack_spec") or "", "netWeightKg": nw, "netWeightSrc": nw_src,
+            "unit": "元/kg", "taxIncluded": True,
+            "matIncl": comp["mat"], "packIncl": comp["pack"], "mfgIncl": comp["mfg"],
+            "transIncl": 0.0, "loadIncl": comp["load"], "admIncl": comp["adm"], "fullIncl": comp["full"],
+            "calcDate": e.get("calc_date") or "", "approvalNo": e.get("approval_no") or "",
+            "status": "final",
+            "finalizedBy": ack.get("by") or "", "finalizedAt": fin_at,
+            "firstReviewedBy": e.get("finalized_by") or "", "firstReviewedAt": e.get("finalized_at") or "",
+            "quotable": (None if e.get("quotable") is None else bool(e.get("quotable"))),
+            "quoteReason": e.get("quote_reason") or "",
+        })
+    rows.sort(key=lambda r: (r["finalizedAt"], r["entryId"]))
+    from core import _now
+    return {"ok": True, "asOf": _now(), "count": len(rows), "rows": rows}
 
 
 # ============ 样例数据种子（仅本机演示，绝不入库/入 git）============

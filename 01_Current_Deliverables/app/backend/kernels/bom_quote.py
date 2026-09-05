@@ -409,6 +409,19 @@ def invoice_cost_excl(qty, price, tax, invoice_type, rules=None):
     return round(invoice_unit_excl(price, tax, mode, rate) * float(qty or 0), 4)
 
 
+def net_weight_from_spec(pack_spec):
+    """从包装规格文本预填**单位净重(kg)**（BP 对接 2026-09-05 §2）：抓「数字 kg|g / 袋|盒|瓶|包|罐」，g 换算 kg；
+    抓不到→None（不猜，留给成本会计填）。如「1kg/袋，10袋/箱」→1.0，「500g/盒」→0.5，「10袋/箱」→None。"""
+    import re
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(kg|g)\s*/\s*(袋|盒|瓶|包|罐)", str(pack_spec or ""), re.I)
+    if not m:
+        return None
+    v = float(m.group(1))
+    if m.group(2).lower() == "g":
+        v = v / 1000.0
+    return round(v, 4) if v > 0 else None
+
+
 def product_key(rec):
     """产品身份键（业务方 2026-09-04 定：**CP 码就是产品身份**，改口径）：
     有 CP 码 → 「产品名|CP码」——不同 CP（变体如印刷袋 …-2 / 空白袋 …、或改配方跳号）**各自成产品、各自定稿入库**，

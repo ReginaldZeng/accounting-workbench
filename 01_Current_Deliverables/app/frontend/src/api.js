@@ -323,6 +323,7 @@ export const getBomKdPurchase = (code, months = 12) => j(`/api/bom/kd-purchase?c
 export const getBomMaterialUsage = (code, exclude) => j(`/api/bom/material-usage?code=${encodeURIComponent(code)}${exclude ? `&exclude=${exclude}` : ''}`)
 export const bomSetMatType = (entryId, mat, subType) => jp('/api/bom/set-mat-type', { entryId, subType, matCode: mat.matCode, matName: mat.matName, seg: mat.seg })
 export const bomSetErpCode = (entryId, erpCode) => jp('/api/bom/set-erp-code', { entryId, erpCode })
+export const bomSetNetWeight = (entryId, netWeightKg) => jp('/api/bom/set-net-weight', { entryId, netWeightKg })
 export const getBomUsageSpreads = (entryId) => j(`/api/bom/usage-spreads?entryId=${entryId}`)
 export const getBomInvoiceRules = () => j('/api/bom/invoice-rules')
 export const setBomInvoiceRules = (rules) => jp('/api/bom/invoice-rules', { rules })
