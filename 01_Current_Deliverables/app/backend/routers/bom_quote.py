@@ -198,10 +198,13 @@ def _obsolete_candidates(e, others=None):
     只认当前有效(active)、已初审/已审核、尚未失效、非本条的记录。→ [brief]（why=同CP / 同物料编码）。"""
     cp = (e.get("cp_code") or "").strip()
     erp = (e.get("erp_code") or "").strip()
+    vg = (e.get("variant_group") or "").strip()
     out = []
     for x in (others if others is not None else db.bom_list_entries(e.get("source"))):
         if x["id"] == e["id"] or x.get("obsolete_by") or x.get("status") not in ("初审", "已审核"):
             continue
+        if vg and (x.get("variant_group") or "").strip() == vg:
+            continue                                   # 已标「并行关联」的同组成员：并存，不再问替代
         if cp and (x.get("cp_code") or "").strip() == cp:
             out.append(_obs_brief(x, "同CP码"))
         elif erp and (x.get("erp_code") or "").strip() == erp:
@@ -217,6 +220,24 @@ def _mark_obsolete(e, cands, user):
         db.bom_add_audit(c["entryId"], user, "失效·被新版替代", c["status"], "被 %s 替代 · %s" % (me, c["why"]))
         db.bom_add_audit(e["id"], user, "替代旧版", "",
                          "#%d %s（%s · 审核 %s · 全成本 %s）→ 失效" % (c["entryId"], c["cpCode"], c["why"], c["auditAt"] or "—", c["fullIncl"]))
+
+
+def _link_parallel(e, cands, user):
+    """并行关联（业务方定 2026-09-05）：本版与候选旧版是**同一产品的并行版本**（火腿片各版本 CP 不同 / 印刷袋 vs 空白袋），
+    都对外、互不替代，只用 variant_group 串起来。若任一方已在某组，并进那组（多组则合并）。双向留痕。返回组键。"""
+    src = e.get("source")
+    ids = [e["id"]] + [c["entryId"] for c in cands]
+    groups = {(db.bom_get_entry(i) or {}).get("variant_group") or "" for i in ids} - {""}
+    group = sorted(groups)[0] if groups else "vg-%d" % e["id"]
+    members = set(ids)
+    for g in groups:                                   # 合并已有组：把各组全部成员一起并进 group
+        members |= {m["id"] for m in db.bom_variant_members(src, g)}
+    db.bom_set_variant_group(sorted(members), group)
+    me = "#%d %s" % (e["id"], (e.get("cp_code") or "").strip())
+    for c in cands:
+        db.bom_add_audit(c["entryId"], user, "并行关联", "", "与 %s 并行（同一产品不同版本/包装，都对外）· 组 %s" % (me, group))
+        db.bom_add_audit(e["id"], user, "并行关联", "", "与 #%d %s 并行 · 组 %s" % (c["entryId"], c["cpCode"], group))
+    return group
 
 
 def _live_finals(src):
@@ -256,7 +277,13 @@ def _entry_view(e, finals):
     #                   replaces=本版替代了谁；obsoleteCandidates=本版若现在定稿会让谁失效（初审弹窗据此问「原版是否失效」）
     ob = e.get("obsolete_by")
     succ = (next((x for x in others if x["id"] == ob), None) or db.bom_get_entry(ob)) if ob else None
+    vg = (e.get("variant_group") or "").strip()
     return {
+        # 并行关联（V2.449）：同组＝同一产品的并行版本（都对外、不替代）
+        "variantGroup": vg,
+        "variants": [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "productName": (x.get("product_name") or "").strip(),
+                      "erpCode": (x.get("erp_code") or "").strip(), "status": x.get("status") or "", "packSpec": x.get("pack_spec") or ""}
+                     for x in others if vg and x["id"] != e["id"] and (x.get("variant_group") or "").strip() == vg],
         "obsoleteBy": ({"entryId": succ["id"], "cpCode": (succ.get("cp_code") or "").strip(),
                         "productName": (succ.get("product_name") or "").strip(), "status": succ.get("status") or "",
                         "live": succ.get("status") == "已审核" and succ.get("active") in (1, None),
@@ -1071,9 +1098,11 @@ async def bom_set_erp_code(request: Request):
     # 「后审核的替代先审核的」——先问确认（confirmObsolete），确认后写码并把先审核的标失效。未审核的草稿行留到初审时再判。
     clash = []
     if code and e.get("status") in ("初审", "已审核"):
+        vg = (e.get("variant_group") or "").strip()
         clash = [x for x in db.bom_list_entries(_src())
                  if x["id"] != e["id"] and not x.get("obsolete_by") and x.get("status") in ("初审", "已审核")
-                 and (x.get("erp_code") or "").strip() == code]
+                 and (x.get("erp_code") or "").strip() == code
+                 and not (vg and (x.get("variant_group") or "").strip() == vg)]     # 已并行关联的同组成员共用编码是正常的，不问
     if clash and not bool(body.get("confirmObsolete")):
         ranked = sorted(clash + [e], key=lambda x: (_audit_at(x), x["id"]))
         newest = ranked[-1]
@@ -1967,9 +1996,11 @@ async def bom_classify(request: Request):
     #   核算侧只按规格解析出参考值随接口带出，见 _net_weight。）
     # 换码承接闸（业务方定 2026-09-05）：同 CP / 同物料编码已有审核版 → **必须先答「原版是否失效」**（confirmObsolete=true）才定稿；
     # 没答 → 只存定性，把候选回给前端弹确认。答「否」= 不定稿，先核对。
+    # 两个答案（业务方定 2026-09-05）：A confirmObsolete=原版失效（替代）；B parallelLink=并行但关联（都对外，串成一组）。都没答→只存定性。
     cands = _obsolete_candidates(e2) if not miss else []
-    need_confirm = bool(cands) and not bool(body.get("confirmObsolete"))
-    finalized, affected = False, None
+    parallel = bool(body.get("parallelLink"))
+    need_confirm = bool(cands) and not bool(body.get("confirmObsolete")) and not parallel
+    finalized, affected, linked = False, None, ""
     if not miss and not need_confirm:
         prev_final = db.bom_get_final(_src(), e2["product_key"])
         db.bom_update_entry(e2["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
@@ -1977,12 +2008,16 @@ async def bom_classify(request: Request):
         db.bom_set_final(_src(), e2["product_key"], e2["id"], u["name"])
         db.audit(u["name"], "bom_finalize", target=str(e2["id"]), detail="随审核定性定稿 · " + (e2.get("product_name") or ""))
         if cands:
-            _mark_obsolete(e2, cands, u["name"])
+            if parallel:
+                linked = _link_parallel(e2, cands, u["name"])
+            else:
+                _mark_obsolete(e2, cands, u["name"])
         affected = _affected_pricing(e2)
         finalized = True
     finals = db.bom_finals(_src())
     return {"ok": True, "finalized": finalized, "missingSteps": miss,
-             "needConfirm": cands if need_confirm else [], "obsoleted": cands if finalized else [],
+             "needConfirm": cands if need_confirm else [], "obsoleted": (cands if (finalized and not parallel) else []),
+             "linked": (cands if (finalized and parallel) else []), "variantGroup": linked,
              "affectedPricing": affected, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
 
 
@@ -2038,10 +2073,11 @@ async def bom_finalize(request: Request):
     if ub:
         return JSONResponse({"ok": False, "msg": "上游半成品/复配料未就绪，不能先定稿本品：%s" % "；".join(ub)}, status_code=400)
     # （V2.445 撤净重闸：成本会计不知道最小销售单元，净重由 BP 定价侧维护；核算侧只带规格解析参考值。）
-    cands = _obsolete_candidates(e)              # 换码承接闸（V2.440）：同 CP / 同物料编码已有审核版 → 先答「原版是否失效」
-    if cands and not bool(body.get("confirmObsolete")):
+    cands = _obsolete_candidates(e)              # 换码承接闸（V2.440）：同 CP / 同物料编码已有审核版 → 先答「原版是否失效」或「并行但关联」
+    parallel = bool(body.get("parallelLink"))
+    if cands and not bool(body.get("confirmObsolete")) and not parallel:
         return {"ok": False, "needConfirm": cands,
-                "msg": "台账里已有 %d 个同CP/同物料编码的审核版本（%s）。本版定稿后它们将失效、退出对外台账。请确认「原版本是否失效」。"
+                "msg": "台账里已有 %d 个同CP/同物料编码的审核版本（%s）。请答：A 原版失效（本版替代）/ B 并行但关联（都对外）。"
                        % (len(cands), "、".join("%s %s" % (c["cpCode"], c["auditAt"]) for c in cands))}
     from core import _now
     prev_final = db.bom_get_final(_src(), e["product_key"])
@@ -2049,14 +2085,51 @@ async def bom_finalize(request: Request):
                                   "obsolete_by": None, "obsolete_at": None, "obsolete_note": None})
     db.bom_set_final(_src(), e["product_key"], e["id"], u["name"])
     db.audit(u["name"], "bom_finalize", target=str(e["id"]), detail=e.get("product_name") or "")
+    linked = ""
     if cands:
-        _mark_obsolete(e, cands, u["name"])
+        if parallel:
+            linked = _link_parallel(e, cands, u["name"])
+        else:
+            _mark_obsolete(e, cands, u["name"])
     # 定稿变更通知（BP 消费提示）——留痕，前端据此弹「成本已更新，N 个定价方案受影响」。不静默变价。
     affected = _affected_pricing(e)
     finals = db.bom_finals(_src())
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals),
             "replacedFinal": bool(prev_final and prev_final.get("entry_id") != e["id"]),
-            "obsoleted": cands, "affectedPricing": affected}
+            "obsoleted": ([] if parallel else cands), "linked": (cands if parallel else []), "variantGroup": linked,
+            "affectedPricing": affected}
+
+
+@router.post("/api/bom/link-parallel")
+async def bom_link_parallel(request: Request):
+    """把两条记录标为**并行关联**（同一产品的不同版本/包装，都对外、互不替代）或解除。CAP_AUDIT。
+    body: {entryId, otherId, on:true|false}。解除＝把 entryId 移出组（组内只剩一条时那条也清空）。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    on = body.get("on", True)
+    if on:
+        o = db.bom_get_entry(body.get("otherId"))
+        if not o or o.get("source") != _src() or o["id"] == e["id"]:
+            return JSONResponse({"ok": False, "msg": "对方记录不存在"}, status_code=404)
+        g = _link_parallel(e, [_obs_brief(o)], u["name"])
+        msg = "已标为并行关联（组 %s）：两条都对外、互不替代" % g
+    else:
+        g = (e.get("variant_group") or "").strip()
+        if not g:
+            return JSONResponse({"ok": False, "msg": "本记录没有并行关联"}, status_code=400)
+        rest = [m["id"] for m in db.bom_variant_members(_src(), g) if m["id"] != e["id"]]
+        db.bom_set_variant_group([e["id"]], None)
+        if len(rest) == 1:
+            db.bom_set_variant_group(rest, None)       # 组里只剩一条 → 没有"并行"可言，一并清
+        db.bom_add_audit(e["id"], u["name"], "解除并行关联", g, "")
+        msg = "已解除并行关联；再初审时会重新问「原版是否失效」"
+    db.audit(u["name"], "bom_link_parallel", target=str(e["id"]), detail=msg)
+    return {"ok": True, "msg": msg, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
 
 
 @router.post("/api/bom/unfinalize")
@@ -2457,9 +2530,12 @@ async def bomcost_final(request: Request):
             by_erp.setdefault(erp, []).append(e)
     for erp, es in by_erp.items():
         if len(es) > 1:
+            vgs = {(x.get("variant_group") or "").strip() for x in es}
+            if len(vgs) == 1 and next(iter(vgs)):
+                continue                               # 并行关联（V2.449）：同组变体共用编码，全部照发，BP 按 productKey/CP 区分
             es.sort(key=lambda x: (_audit_at(x), x["id"]))
             dropped[es[-1]["id"]] = es[:-1]
-            warnings.append("物料编码 %s 有 %d 个对外版本（%s），已按审核时间只发 %s；请成本会计在核算侧确认替代关系（补物料编码时会提示）"
+            warnings.append("物料编码 %s 有 %d 个对外版本（%s）且未标并行关联，已按审核时间只发 %s；请成本会计在核算侧答「原版失效」或「并行但关联」"
                             % (erp, len(es), "/".join((x.get("cp_code") or "").strip() for x in es),
                                (es[-1].get("cp_code") or "").strip()))
     drop_ids = {x["id"] for lst in dropped.values() for x in lst}
@@ -2485,8 +2561,14 @@ async def bomcost_final(request: Request):
         comp = bq.compose(_rec_from_entry(e), _fee_of(e))
         nw, nw_src = _net_weight(e)
         sups = [_sup(x) for x in entries.values() if x.get("obsolete_by") == e["id"]] + [_sup(x) for x in dropped.get(e["id"], [])]
+        vg = (e.get("variant_group") or "").strip()
+        variants = [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "productKey": x.get("product_key"),
+                     "packSpec": x.get("pack_spec") or ""}
+                    for x in served if vg and x["id"] != e["id"] and (x.get("variant_group") or "").strip() == vg]
         rows.append({
             "supersedes": sups, "links": _bp_links(e),
+            # 并行关联（V2.449）：同一产品的并行版本（不同 CP / 包装），都对外、可能共用 erpCode——BP 按 productKey 区分，别按 erpCode 去重
+            "variantGroup": vg, "variants": variants,
             "entryId": e["id"], "productKey": pkey, "erpCode": erp,
             "cpCode": e.get("cp_code") or "", "productName": (e.get("product_name") or "").strip(),
             "customer": e.get("customer") or "",

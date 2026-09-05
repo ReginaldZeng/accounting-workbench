@@ -301,8 +301,10 @@ export const bomReview = (entryId, fee, channel, materials) => jp('/api/bom/revi
 export const bomConfirmStep = (entryId, step, on = true) => jp('/api/bom/confirm-step', { entryId, step, on })
 export const bomApplyGoods = (entryId) => jp('/api/bom/apply-goods', { entryId })
 // confirmObsolete（V2.440 换码承接）：同CP/同物料编码已有审核版时，须明确答「原版失效」才定稿；不传→只存定性并回 needConfirm
-export const bomClassify = (entryId, category, quotable, reason, confirmObsolete = false) =>
-  jp('/api/bom/classify', { entryId, category, quotable, reason, confirmObsolete })
+// parallelLink（V2.449）：答 B「并行但关联」——都对外、互不替代，串成一个并行组
+export const bomClassify = (entryId, category, quotable, reason, confirmObsolete = false, parallelLink = false) =>
+  jp('/api/bom/classify', { entryId, category, quotable, reason, confirmObsolete, parallelLink })
+export const bomLinkParallel = (entryId, otherId, on = true) => jp('/api/bom/link-parallel', { entryId, otherId, on })
 export const getBomApproval = (no) => j('/api/bom/approval?no=' + encodeURIComponent(no))
 export const bomIntake = (approvalNo) => jp('/api/bom/intake', { approvalNo })
 export const bomFinalReview = (entryId, approve, note) => jp('/api/bom/final-review', { entryId, approve, note })
@@ -317,7 +319,7 @@ export const bomReplaceSheet = (groupId, approvalNo, file) => {
 }
 export const getBomSettings = () => j('/api/bom/settings')
 export const setBomSettings = (cfg) => jp('/api/bom/settings', cfg)
-export const bomFinalize = (entryId, confirmObsolete = false) => jp('/api/bom/finalize', { entryId, confirmObsolete })
+export const bomFinalize = (entryId, confirmObsolete = false, parallelLink = false) => jp('/api/bom/finalize', { entryId, confirmObsolete, parallelLink })
 export const bomUnfinalize = (entryId) => jp('/api/bom/unfinalize', { entryId })
 export const bomAttachBomList = (entryId, file) => { const fd = new FormData(); fd.append('entryId', entryId); fd.append('file', file); return fetch('/api/bom/attach-bomlist', { method: 'POST', body: fd }).then(r => r.json()) }
 export const getBomKdPurchase = (code, months = 12) => j(`/api/bom/kd-purchase?code=${encodeURIComponent(code)}&months=${months}`)

@@ -495,6 +495,9 @@ bom_quote_entry = Table(
     # 换码承接（业务方定 2026-09-05，V2.440）：本版被哪条**新版替代而失效**——①同 CP 再核算 ②不同 CP 但同 ERP 物料编码（BP 眼里物料编码才是身份）。
     # 记录留着、active 仍=1、状态不动（历史可查），只是不再是对外版；新版退出审核态（退回/撤销/作废）时自动恢复。
     Column("obsolete_by", Integer), Column("obsolete_at", String(20)), Column("obsolete_note", String(200)),
+    # 并行关联（业务方定 2026-09-05，V2.449）：同一产品的多个并行版本（火腿片各版本 CP 不同、印刷袋/空白袋）——**都对外、不互相替代**，
+    # 只用一个组键把它们串起来（同组＝并行变体）；换码承接问「原版是否失效」时答 B「并行但关联」即落此列。
+    Column("variant_group", String(40), index=True),
     Column("approval_no", String(40)), Column("src_file", String(200)), Column("sheet", String(80)),
     Column("status", String(12)),                    # 未复核/已复核/已定稿
     Column("created_by", String(50)), Column("created_at", String(20)),
@@ -3124,7 +3127,7 @@ def _ensure_bom_columns():
         for col in ("bom_list", "review_steps", "origin", "src_label", "goods_version",
                     "group_id", "superseded_at", "supersede_reason",
                     "mat_category", "quote_reason", "classified_by", "classified_at", "craft",
-                    "inactive_kind", "void_req", "ack", "stale_note", "obsolete_at", "obsolete_note"):
+                    "inactive_kind", "void_req", "ack", "stale_note", "obsolete_at", "obsolete_note", "variant_group"):
             if col not in cols:
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s TEXT" % col))
@@ -3288,6 +3291,26 @@ def bom_mark_obsolete(old_id, new_id, note):
     with _engine.begin() as c:
         c.execute(update(bom_quote_entry).where(bom_quote_entry.c.id == int(old_id))
                   .values(obsolete_by=int(new_id), obsolete_at=_now(), obsolete_note=(note or "")[:200]))
+
+
+def bom_set_variant_group(entry_ids, group):
+    """把这些记录并进同一个并行组（group 为空＝解除）。"""
+    ids = [int(i) for i in entry_ids if i]
+    if not ids:
+        return
+    with _engine.begin() as c:
+        c.execute(update(bom_quote_entry).where(bom_quote_entry.c.id.in_(ids)).values(variant_group=(group or None)))
+
+
+def bom_variant_members(source, group):
+    """某并行组的全部有效记录。"""
+    if not group:
+        return []
+    with _engine.connect() as c:
+        rows = c.execute(select(bom_quote_entry).where(
+            (bom_quote_entry.c.source == source) & (bom_quote_entry.c.variant_group == group)
+            & ((bom_quote_entry.c.active == 1) | (bom_quote_entry.c.active.is_(None)))).order_by(bom_quote_entry.c.id.asc())).fetchall()
+    return [_bom_row(r) for r in rows]
 
 
 def bom_clear_obsolete_by(new_id):

@@ -8,7 +8,7 @@ import {
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
-  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup,
+  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel,
   getBomInvoiceRules, setBomInvoiceRules,
 } from '../api.js'
 
@@ -186,7 +186,8 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   const missing = CONFIRM_STEPS.filter(([k]) => !entry.steps?.[k]).map(([, l]) => l)
   // 换码承接（业务方定 2026-09-05）：同CP再核算 / 不同CP同物料编码 → 定稿前必须答「原来那个是否失效」
   const cands = entry.obsoleteCandidates || []
-  const [obs, setObs] = useState(null)     // null 未答 / true 原版失效并定稿 / false 原版保留、只存定性不定稿
+  // 两个答案（业务方定 2026-09-05）：'replace'=A 原版失效（本版替代）/ 'parallel'=B 并行但关联（都对外，同一产品不同版本/包装）。null 未答→只存定性不定稿
+  const [obs, setObs] = useState(null)
   const willFinalize = missing.length === 0
   // 无物料编码 → 到金蝶物料档案按 CP 反查（业务方 2026-09-05 定：检测到就提示确认）。只提示不拦：未中试的本来没编码。
   const [erpLk, setErpLk] = useState(null)
@@ -203,14 +204,14 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
     if (!cat) return flash('请选择物料类别')
     if (q === null) return flash('请选择是否建议对外报价')
     if (!q && !reason.trim()) return flash('不建议对外报价时必须写明原因')
-    if (willFinalize && cands.length > 0 && obs === null) return flash('请先回答：原来的审核版本是否失效？')
+    if (willFinalize && cands.length > 0 && obs === null) return flash('请先回答：原来的版本是失效，还是并行但关联？')
     setBusy(true)
     try {
-      const r = await bomClassify(entry.id, cat, q, reason.trim(), obs === true)
+      const r = await bomClassify(entry.id, cat, q, reason.trim(), obs === 'replace', obs === 'parallel')
       if (!r.ok) flash(r.msg || '保存失败')
       else {
         flash(r.finalized
-          ? `已定稿：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}　${r.affectedPricing?.note || ''}`
+          ? `已定稿：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`
           : (r.needConfirm || []).length
             ? `已存定性，未定稿：原版本 ${r.needConfirm.map(c => c.cpCode).join('、')} 保留为当前版，请先核对再定稿`
             : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
@@ -235,7 +236,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           </div>}
         {/* .banner 默认是横向 flex，这里内容多行 → display:block 分三段：说明 / 候选清单 / 问句+两个按钮 */}
         {willFinalize && cands.length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10, lineHeight: 1.6 }}>
-          <div><b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>——本版定稿后，原版本将<b>失效</b>：退出对外台账，引用它的 BP 定价方案会收到「成本已更新」提示（终审通过那一刻切换）。</div>
+          <div><b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>。请判断它和本版的关系：<b>A 新旧版</b>——原版失效、退出对外，引用它的 BP 定价收到「成本已更新」（终审通过那一刻切换）；<b>B 并行版本</b>——同一产品的不同版本/包装（如火腿片各版、印刷袋 vs 空白袋），都对外、互不替代，串成一组。</div>
           <div style={{ margin: '8px 0', padding: '6px 10px', background: 'rgba(255,255,255,.55)', borderRadius: 8 }}>{cands.map(c => (
             <div key={c.entryId} style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '2px 12px', alignItems: 'baseline', color: 'var(--ink)' }}>
               <b className="mono">{c.cpCode}</b><span>{c.productName}</span>
@@ -248,9 +249,10 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <b style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>原来的版本是否失效？</b>
             <div className="bom-catpick">
-              <button className={obs === true ? 'on no' : ''} onClick={() => setObs(true)}>是，原版失效，本版定稿</button>
-              <button className={obs === false ? 'on' : ''} onClick={() => setObs(false)}>否，先核对（只存定性，不定稿）</button>
+              <button className={obs === 'replace' ? 'on no' : ''} onClick={() => setObs('replace')} title="本版替代原版：原版退出对外台账，BP 收到成本更新提示">A 是，原版失效</button>
+              <button className={obs === 'parallel' ? 'on ok' : ''} onClick={() => setObs('parallel')} title="两条是同一产品的并行版本（不同 CP / 不同包装），都对外、互不替代；台账标「并行」并串成一组">B 否，并行但关联</button>
             </div>
+            <span className="muted" style={{ fontSize: 11 }}>拿不准先点「对比 ›」看两张核算表差在哪；不答则只存定性、不定稿。</span>
           </div>
         </div>}
 
@@ -281,11 +283,12 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
         <div className="bom-mfoot">
           <button className="btn-sec" onClick={onClose}>取消</button>
           <button className="btn-pri" disabled={busy} onClick={save}
-            style={(willFinalize && obs !== false) ? { background: 'var(--green)', borderColor: 'var(--green)' } : undefined}>
-            {busy ? '保存中…' : ((willFinalize && obs !== false) ? '✓ 保存定性并定稿' : '仅保存定性')}</button>
+            style={(willFinalize && (cands.length === 0 || obs)) ? { background: 'var(--green)', borderColor: 'var(--green)' } : undefined}>
+            {busy ? '保存中…' : ((willFinalize && (cands.length === 0 || obs)) ? '✓ 保存定性并定稿' : '仅保存定性')}</button>
         </div>
       </div>
       {cmpFirst && <CompareEntriesModal entry={entry} lk={erpLk} onAdopt={adoptErp} flash={flash} onClose={() => setCmpFirst(null)}
+        canLink onLinked={(en) => { setEntry(en); setObs(null) }}
         others={[...cands.filter(c => c.entryId === cmpFirst), ...cands.filter(c => c.entryId !== cmpFirst)].map(c => ({ entryId: c.entryId, cpCode: c.cpCode, productName: c.productName, status: c.status }))} />}
     </div>
   )
@@ -454,6 +457,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
             ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
             : <span className="tag late" style={{ marginLeft: 6 }} title={`${r.obsoleteBy.cpCode} 已初审、待终审；其终审通过后本版退出对外台账。在此之前 BP 仍用本版`}>待替代 · {r.obsoleteBy.cpCode} 待终审</span>)}
           {(r.replaces || []).length > 0 && <span className="bom-gvtag" title={'本版替代了：' + r.replaces.map(c => `${c.cpCode}（${c.why || ''} 审核 ${c.auditAt || '—'}）`).join('；')}>替代 {r.replaces.map(c => c.cpCode).join('、')}</span>}
+          {(r.variants || []).length > 0 && <span className="bom-gvtag" style={{ color: 'var(--green)', borderColor: 'var(--green)' }} title={'并行版本（同一产品不同版本/包装，都对外）：' + r.variants.map(v => `${v.cpCode} ${v.productName}${v.packSpec ? ' · ' + v.packSpec : ''}`).join('；')}>⇉ 并行 {r.variants.map(v => v.cpCode).join('、')}</span>}
           {nver > 1 && <a className="lk" style={{ marginLeft: 6, fontSize: 11, fontWeight: 400 }} onClick={e => { e.stopPropagation(); onOpen(r.id) }}>{nver} 版</a>}</td>
         <td className="sub" style={{ whiteSpace: 'nowrap' }}>{r.packSpec || '—'}</td>
         <td className="num">{fmt(r.comp.mat)}</td>
@@ -999,6 +1003,10 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           : { display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
           {entry.obsoleteBy.live ? '⊘ ' : '⏳ '}<b>{entry.obsoleteBy.live ? '本版已失效' : '本版待替代'}</b>：被 <a className="lk" onClick={() => onOpen(entry.obsoleteBy.entryId)}>{entry.obsoleteBy.cpCode} {entry.obsoleteBy.productName}</a> 替代（{entry.obsoleteBy.at}，{entry.obsoleteBy.note}）。
           {entry.obsoleteBy.live ? '已退出对外台账，BP 不再拿到本版；记录与留痕照常可查。' : `新版当前「${entry.obsoleteBy.status}」，其终审通过后本版退出对外台账；在此之前 BP 仍用本版。`}</div>}
+        {(entry.variants || []).length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)', marginBottom: 10 }}>
+          ⇉ <b>并行版本</b>：与 {entry.variants.map((v, i) => (
+            <span key={v.entryId}>{i > 0 ? '、' : ''}<a className="lk" onClick={() => onOpen(v.entryId)}>{v.cpCode} {v.productName}</a>{v.packSpec ? `（${v.packSpec}）` : ''}</span>))}
+          是同一产品的不同版本/包装——都对外、互不替代；BP 按 CP 区分。</div>}
         {(entry.replaces || []).length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }}>
           ⇄ <b>本版替代了 {entry.replaces.length} 个旧版</b>：{entry.replaces.map((c, i) => (
             <span key={c.entryId}>{i > 0 ? '；' : ''}<a className="lk" onClick={() => onOpen(c.entryId)}>{c.cpCode}</a>（{c.why || '—'} · 审核 {c.auditAt || '—'} · 全成本 ¥{fmt(c.fullIncl)}/kg）</span>))}
@@ -1140,11 +1148,18 @@ async function adoptErpCode(entryId, code, flash) {
 }
 // 「核对」弹窗（业务方 2026-09-05 提）：上半＝金蝶物料档案反查候选；下半＝与台账里同物料编码 / 同 CP 的另一条核算表**逐料对比**
 // （核算表添加量 + 含税采购价 + 成本，都有 BOM 清单时再并 BOM 用量），五分项汇总也并排。判断"是同一个东西的新旧版，还是两个不同产品"就看这张表。
-function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash }) {
+function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLink, onLinked }) {
   const list = useMemo(() => { const seen = new Set(); return (others || []).filter(o => o && o.entryId && !seen.has(o.entryId) && seen.add(o.entryId)) }, [others])
   const [sel, setSel] = useState(list[0]?.entryId || null)
   const [other, setOther] = useState(null)
   const [busy, setBusy] = useState(false)
+  // 并行关联（V2.449）：对比完认定是同一产品的并行版本 → 直接在这里标；已同组 → 可解除
+  const linked = !!(other && entry.variantGroup && other.variantGroup === entry.variantGroup)
+  const link = async (on) => {
+    setBusy(true)
+    try { const r = await bomLinkParallel(entry.id, other.id, on); if (!r.ok) return flash(r.msg || '操作失败'); flash(r.msg); onLinked && onLinked(r.entry) }
+    catch (e) { flash('操作失败：' + e.message) } finally { setBusy(false) }
+  }
   useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
   useEffect(() => {
     if (!sel) return
@@ -1233,7 +1248,14 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash }) {
             </>}
           </div>
         </div>
-        <div className="bom-mfoot"><span className="muted" style={{ fontSize: 11.5, marginRight: 'auto' }}>对比只看不改；要换编码点上面「采用」，要判定新旧版在「审核定稿」弹窗答「原版是否失效」。</span><button className="btn-sec" onClick={onClose}>关闭</button></div>
+        <div className="bom-mfoot">
+          <span className="muted" style={{ fontSize: 11.5, marginRight: 'auto' }}>换编码点上面「采用」；判定新旧版在「审核定稿」弹窗答 A；认定是并行版本可直接在此标。</span>
+          {canLink && other && (linked
+            ? <button className="btn-sec" disabled={busy} onClick={() => link(false)} title="解除后再初审会重新问「原版是否失效」">解除并行关联</button>
+            : <button className="btn-sec" disabled={busy} style={{ color: 'var(--green)', borderColor: 'var(--green)' }} onClick={() => link(true)}
+              title="两条是同一产品的并行版本（不同 CP / 包装），都对外、互不替代">⇉ 标为并行关联</button>)}
+          <button className="btn-sec" onClick={onClose}>关闭</button>
+        </div>
       </div>
     </div>
   )
@@ -1302,7 +1324,8 @@ function ErpCodeRow({ entry, canEdit, onChanged, flash }) {
     {canEdit && !entry.erpCode && <div style={{ margin: '0 0 8px', padding: '6px 8px', background: 'var(--bg-sub)', borderRadius: 6 }}>
       <ErpCandidates lk={lk} onAdopt={adopt} busy={busy} compact onCompare={(id) => openCmp(id)} />
     </div>}
-    {cmp && <CompareEntriesModal entry={entry} lk={lk} others={others(cmp.first)} onAdopt={adopt} onClose={() => setCmp(null)} flash={flash} />}
+    {cmp && <CompareEntriesModal entry={entry} lk={lk} others={others(cmp.first)} onAdopt={adopt} onClose={() => setCmp(null)} flash={flash}
+      canLink onLinked={async () => { setCmp(null); await onChanged() }} />}
   </>
 }
 function FeeRow({ label, k, fee, edit, setF, dot, src }) {
