@@ -411,12 +411,19 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
       approvals: approvals.size, versions: allV.length, okChecks, finalized }
   }, [rows, data.all])
 
-  // 待办＝按钉钉单号立项（后端 _approval_summ 汇总组数/产品数/进度），搜索按单号或产品名过滤
-  const apprRows = (data.approvals || []).filter(a => {
+  // 待办＝按钉钉单号立项（后端 _approval_summ 汇总组数/产品数/进度），搜索按单号或产品名过滤。
+  // 业务方定 2026-09-05：这页只管到**初审结束**——一单的产品全部初审（且无待修）＝成本会计任务完成，从待办消失（可切「显示已完成」回看）。
+  const [showDone, setShowDone] = useState(false)
+  const isDone = (a) => (a.pending || 0) === 0 && (a.blocked || 0) === 0
+  const allAppr = data.approvals || []
+  const doneCount = allAppr.filter(isDone).length
+  const apprRows = allAppr.filter(a => {
+    if (!showDone && isDone(a)) return false
     if (!q.trim()) return true
     const s = (a.approvalNo + ' ' + (a.products || []).map(p => p.productName + p.cpCode).join(' ')).toLowerCase()
     return s.includes(q.trim().toLowerCase())
   })
+  const openAppr = allAppr.filter(a => !isDone(a))
   // 审核日期 = 定稿/审核通过日期（终审 ack.at 优先，其次初审 finalizedAt，再次复核 reviewedAt）——只取日期段
   const auditDate = (r) => (((r.ack && r.ack.at) || r.finalizedAt || r.reviewedAt || '').slice(0, 10)) || '—'
   // 补物料编码：成本会计在台账行手工补/改产品 ERP 物料编码（写库+留痕，只动标识不动成本）
@@ -513,10 +520,10 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
               <Stat lab="勾稽校验" v="全平" green suf={`${stats.versions} 版 × 6 项`} />
               <Stat lab={data.canFinalReview ? '待我终审' : '待终审'} v={data.needAck || 0}
                 suf={`/ ${stats.total} 产品`} /></>
-            : <><Stat lab="待办单号" v={(data.approvals || []).length} suf="单" />
-              <Stat lab="组" v={(data.approvals || []).reduce((s, a) => s + a.groupCount, 0)}
+            : <><Stat lab="待办单号" v={openAppr.length} suf={doneCount ? `单 · 另 ${doneCount} 单已完成初审` : '单'} />
+              <Stat lab="组" v={openAppr.reduce((s, a) => s + a.groupCount, 0)}
                 suf="一个核算表文件=一组" />
-              <Stat lab="待复核" v={(data.approvals || []).reduce((s, a) => s + a.pending, 0)}
+              <Stat lab="待复核" v={openAppr.reduce((s, a) => s + a.pending, 0)}
                 suf={`/ ${stats.total} 产品`} /></>}
         </div>
 
@@ -530,6 +537,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
               title="被已终审新版替代（同CP重核 / 不同CP同物料编码）的旧版：记录与历史都在，只是不再对外">
               {showObs ? '隐藏' : '显示'}已失效 {deadCount}</button>}
           </>}
+          {!isStd && doneCount > 0 && <button className={'btn-sec' + (showDone ? ' on' : '')} style={{ fontSize: 11.5 }} onClick={() => setShowDone(v => !v)}
+            title="产品已全部初审（成本会计任务完成）的钉钉单：默认不占待办；终审在「标准成本台账」由财务BP做">
+            {showDone ? '隐藏' : '显示'}已完成 {doneCount}</button>}
           <span style={{ flex: 1 }} />
           <span className="pill-src">口径：<b style={{ color: 'var(--ink)' }}>含税 元/kg</b></span>
         </div>
@@ -545,7 +555,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
               </tr></thead>
               <tbody>
                 {(apprRows.length === 0) && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 30 }}>
-                  暂无待办审批单{q.trim() ? '（搜索：' + q + '）' : ''}</td></tr>}
+                  {q.trim() ? `没有匹配的待办单（搜索：${q}）` : (doneCount ? `待办已清空 —— ${doneCount} 单已全部初审，成本会计任务完成；终审由财务BP在「标准成本台账」做。点上方「显示已完成」可回看。` : '暂无待办审批单')}</td></tr>}
                 {apprRows.map(a => (
                   <tr key={a.approvalNo || '__manual__'} className="row" onClick={() => onApproval(a.approvalNo)} title="进入处理页">
                     <td>{a.approvalNo ? <span className="bom-apprno">{a.approvalNo}</span> : <span className="muted">手工上传 / 无单号</span>}</td>
@@ -557,8 +567,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
                     <td className="sub">{a.date}</td>
                     <td>{a.pending > 0
                       ? <span className="tag werr">待复核 {a.pending}</span>
-                      : <span className="tag ok">全部已定稿</span>}
-                      {a.finalized > 0 && a.pending > 0 && <span className="tag ok" style={{ marginLeft: 4 }}>已定稿 {a.finalized}</span>}</td>
+                      : (a.blocked > 0 ? <span className="tag werr">待修 {a.blocked}</span> : <span className="tag ok">全部已初审 · 已完成</span>)}
+                      {a.finalized > 0 && a.pending > 0 && <span className="tag ok" style={{ marginLeft: 4 }}>已初审 {a.finalized}</span>}
+                      {a.blocked > 0 && a.pending > 0 && <span className="tag late" style={{ marginLeft: 4 }}>待修 {a.blocked}</span>}</td>
                     <td><a className="lk" onClick={e => { e.stopPropagation(); onApproval(a.approvalNo) }}>进入处理 ›</a></td>
                   </tr>))}
               </tbody>
