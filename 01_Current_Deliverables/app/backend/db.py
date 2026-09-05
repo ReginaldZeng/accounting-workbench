@@ -690,6 +690,13 @@ CAP_META_STATIC = [
      "tier": "act", "mod": "bp:board:budgetCockpit"},
     {"key": "budget:unlock", "label": "解锁已锁定的预算版本", "ws": "bp", "group": "销售预算", "sensitive": True,
      "tier": "act", "mod": "bp:board:budgetPrep"},
+    # ── BP V2.412 电商定价工作台两个岗位专属点（物流 / IT），Owner 定岗位分离：BP 有 bp:edit 也不能确认物流、不能填码 ──
+    # （核算侧 V2.453 登记，按 BP 线《对接需求_电商定价权限点登记_20260906》原文；同时进 BP_SENSITIVE_CODES，
+    #   否则 '*' 不覆盖敏感码 → 主管理员也失权。）
+    {"key": "logistics:confirm", "label": "电商定价·物流费确认（物流部）", "ws": "bp", "group": "定价测算", "sensitive": True,
+     "tier": "act", "mod": "bp:board:pricingEcom"},
+    {"key": "combo:code", "label": "电商定价·组合编码维护（IT）", "ws": "bp", "group": "定价测算", "sensitive": True,
+     "tier": "act", "mod": "bp:board:pricingEcom"},
     # ── V2.296 补登记三个功能点（BP 侧 V2.146/V2.178 就有，这边漏登记 → 一直勾不到、静默不可用）──
     # ⚠ 这里的 sensitive 与 BP 的 SENSITIVE_PERMS 是**两件事**，别按 BP 抄：
     #   · BP_SENSITIVE_CODES（本文件下方）＝ BP 的 SENSITIVE_PERMS 镜像，管的是「'*' 不覆盖、主管理员须逐个显式透传」，
@@ -1070,7 +1077,8 @@ def set_cap_escalated(cap, on, operator=""):
 # BP 侧的敏感码（BP auth.py::SENSITIVE_PERMS）——'*' 不覆盖，主管理员须显式透传。
 # 真相源是 BP 的 GET /api/perms/registry；此处是**透传用的静态副本**，漂了由 bp_registry_drift() 报出来。
 BP_SENSITIVE_CODES = ["bp:edit", "master:write", "master:reseed",
-                      "period:close", "perf:setTarget", "budget:unlock"]
+                      "period:close", "perf:setTarget", "budget:unlock",
+                      "logistics:confirm", "combo:code"]          # BP V2.412（核算侧 V2.453 登记）
 
 BP_API_BASE = os.getenv("BP_API_BASE", "http://127.0.0.1:8010")
 
