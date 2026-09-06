@@ -192,6 +192,57 @@ def download_url(tok_v2, tok_old, iid, file_id):
     return None, "；".join(x.strip() for x in reasons if x.strip()) or None
 
 
+_STORAGE_SCOPE = "Storage.DownloadInfo.Read"
+
+
+def _live_users(tok_old, inst, limit=4):
+    """实例的审批/抄送/操作人里**账号仍存在**的 (userid, unionid, name)——发起人没了时，借他们的身份去钉盘要文件。"""
+    out, seen = [], set()
+    for o in inst.get("operation_records") or []:
+        uid = o.get("userid")
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        r = (_oapi(tok_old, "topapi/v2/user/get", {"userid": uid}).get("result") or {})
+        if r.get("unionid"):
+            out.append((uid, r["unionid"], r.get("name") or uid))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def storage_download(tok_v2, tok_old, iid, file_id, space_id, inst):
+    """备用通道（V2.469，实证 186641 发起人已离职）：**审批附件下载接口按发起人放行，发起人账号没了就一律「用户不存在」**。
+    绕法＝①`processinstance/cspace/preview` 把该附件授权给一个仍在职的审批人（实测回 errcode 0）
+         ②以其 unionId 调钉盘 `/v1.0/storage/spaces/{spaceId}/dentries/{fileId}/downloadInfos/query` 拿带签名的下载地址
+    ②需要应用开通权限 **Storage.DownloadInfo.Read**（实测回 403 指名此权限；开通后本函数即通）。
+    返回 (url, headers, via) 或 (None, None, 原因)。"""
+    if not space_id:
+        return None, None, "附件无 spaceId"
+    reason = ""
+    for uid, union, name in _live_users(tok_old, inst):
+        try:
+            _oapi(tok_old, "topapi/processinstance/cspace/preview",
+                  {"request": {"process_instance_id": iid, "file_id": str(file_id), "userid": uid}})
+            resp = requests.post(VAPI + "/v1.0/storage/spaces/%s/dentries/%s/downloadInfos/query?unionId=%s" % (space_id, file_id, union),
+                                 headers={"x-acs-dingtalk-access-token": tok_v2},
+                                 json={"withInternalResourceUrl": False}, timeout=30)
+            j = resp.json() if resp.content else {}
+            if resp.status_code == 200:
+                sig = j.get("headerSignatureInfo") or j
+                urls = sig.get("resourceUrls") or j.get("resourceUrls") or []
+                if urls:
+                    return urls[0], (sig.get("headers") or {}), "storage(代下载·%s)" % name
+                reason = "钉盘回应无下载地址"
+            else:
+                reason = "%s %s" % (j.get("code") or resp.status_code, (j.get("message") or "")[:120])
+                if "Permission" in str(j.get("code") or "") or _STORAGE_SCOPE in str(j.get("message") or ""):
+                    return None, None, "需开通应用权限 %s（钉钉开发者后台 › 应用 › 权限管理），开通后重新立项即自动代下载" % _STORAGE_SCOPE
+        except Exception as e:
+            reason = str(e)[:100]
+    return None, None, reason or "无可用的在职审批人身份"
+
+
 def _day_window(business_id, start=None, end=None):
     day = str(business_id)[:8]
     d0 = "%s-%s-%s" % (day[:4], day[4:6], day[6:8])
@@ -226,17 +277,27 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
         atts = collect_attachments(inst)
         if download:
             tok_v2 = _v2_token(ak, sk)
+            storage_hint = ""
             for a in atts:
                 url, via = download_url(tok_v2, tok, iid, a["fileId"])
+                headers = {}
+                if not url and via and any(k in via for k in ("用户不存在", "找不到该用户", "userNotExist", "noPermission", "无访问权限")):
+                    # 发起人账号没了 / 评论区附件无访问权限 → 备用通道：授权在职审批人 + 钉盘代下载（需 Storage.DownloadInfo.Read）
+                    url2, headers2, via2 = storage_download(tok_v2, tok, iid, a["fileId"], a.get("spaceId"), inst)
+                    if url2:
+                        url, via, headers = url2, via2, headers2 or {}
+                    else:
+                        storage_hint = via2 or ""
+                        via = "%s；备用通道：%s" % (via, via2 or "失败")
                 if url:
                     try:
-                        a["bytes"] = requests.get(url, timeout=120).content
+                        a["bytes"] = requests.get(url, headers=headers or None, timeout=120).content
                         a["via"] = via
                     except Exception as e:
                         a["error"] = "下载失败：%s" % _scrub(e, ak, sk)
                 else:
                     a["error"] = "拿不到下载链接" + ("（%s）" % via if via else "")
-        # 发起人账号已不存在（离职/注销）→ 钉钉对该单所有附件都回「用户不存在」。上层据此给人话提示。
+        # 发起人账号已不存在（离职/注销）且备用通道也没拿到 → 上层据此给人话提示（含要开的权限名）
         originator_gone = False
         errs = [a.get("error") or "" for a in atts]
         if atts and all(("用户不存在" in e or "找不到该用户" in e or "userNotExist" in e) for e in errs):
@@ -244,6 +305,7 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
         return {"ok": True, "instanceId": iid, "title": inst.get("title"),
                 "businessId": str(business_id), "status": inst.get("status"),
                 "originatorGone": originator_gone, "originatorUserId": inst.get("originator_userid"),
+                "storageHint": (storage_hint if download else ""),
                 "attachments": atts, "instance": inst}
     except Exception as e:
         return {"ok": False, "msg": "钉钉取数失败：%s" % _scrub(e, ak, sk)}   # 抹掉可能带的 appkey/appsecret（审查 H7）

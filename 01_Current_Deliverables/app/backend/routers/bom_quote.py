@@ -1587,8 +1587,12 @@ async def bom_intake(request: Request):
     if not files:
         if res.get("originatorGone"):
             names = [a.get("fileName") for a in res.get("attachments", []) if a.get("fileName")]
-            msg = ("这单的发起人钉钉账号已不存在（离职/注销），钉钉按发起人身份放附件，人没了接口就拿不到——不是权限问题、加权限也无解。"
-                   "请管理员在 OA 后台打开该单下载 %d 个附件，用下方「上传成本核算表」手工立项（单号照填）。" % len(names))
+            hint = res.get("storageHint") or ""
+            if "Storage.DownloadInfo.Read" in hint:
+                fix = "两条路：①让钉钉管理员给本应用开通权限「Storage.DownloadInfo.Read」（钉钉开发者后台 › 应用 › 权限管理），开通后重新立项即可自动以在职审批人身份代下载；②或在 OA 后台打开该单下载 %d 个附件，用下方「上传成本核算表」手工立项（单号照填）。" % len(names)
+            else:
+                fix = "备用通道也没拿到（%s）。请在 OA 后台打开该单下载 %d 个附件，用下方「上传成本核算表」手工立项（单号照填）。" % (hint or "无在职审批人身份可借", len(names))
+            msg = "这单的发起人钉钉账号已不存在（离职/注销），钉钉按发起人身份放附件，常规接口拿不到。" + fix
             return JSONResponse({"ok": False, "msg": msg, "originatorGone": True, "attachmentNames": names,
                                  "commentPending": comment_pending}, status_code=400)
         msg = "该审批未取到可解析的 xlsx 表单附件。"
