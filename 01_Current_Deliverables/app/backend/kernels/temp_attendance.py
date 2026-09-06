@@ -353,11 +353,12 @@ def parse_punch(data):
             "dup_key": sorted(k for k, v in by_key.items() if len(v) > 1)}
 
 
-def match_punch(punch, name):
+def match_punch(punch, name, picks=None):
     """结算表姓名 → 打卡行。三段式，**歧义时不猜**：
        ① 原名完全一致且唯一 → 用它（「黄亚军0415」在打卡表里原样存在时直接命中）
        ② 去尾归一后唯一 → 用它（覆盖「鲁保军」↔「鲁保军（离职）」这类）
-       ③ 归一后撞上多个人 → 返回 None + 歧义候选，交人工指认。
+       ③ 归一后撞上多个人 → 若成本会计在结算风险页**已指认某尾号**（picks[姓名]=尾号）就用那一行；
+          否则返回 None + 歧义候选，交人工指认。
     归一是把不同写法拉到一起，但也会把「张博」和「张博G（离职）」拉成一个——那是两个人，猜错就是算错工资。"""
     raw = str(name or "").strip()
     hit = punch["by_raw"].get(raw)
@@ -368,6 +369,12 @@ def match_punch(punch, name):
         return cand[0], None
     if not cand:
         return None, None
+    # 人工指认：成本会计在结算风险页选了某尾号（张三=尾号6755）→ 用那一行，不再算歧义
+    want = str((picks or {}).get(raw) or "").strip()
+    if want:
+        for c in cand:
+            if str(c.get("标识") or "").strip() == want:
+                return c, None
     # 歧义：把每个候选的**钉钉部门 + 手机尾号 + 打卡天数**一并带出——
     # 成本会计一看部门（「临时普工-天幕人力」vs「销售中心」）就分得出谁是临时工，不用工具猜。
     return None, [{"原名": c["raw"], "部门": c.get("部门") or "",
@@ -740,8 +747,10 @@ def dev_rate(person, shift, contract):
 
 
 # ==================== 主流程 ====================
-def compute(summary, punch, params=None, contract=None):
+def compute(summary, punch, params=None, contract=None, picks=None):
     """逐日比对 + 四档判定 + 逐人汇总 + 全表统计。summary/punch 为上面两个 parse_* 的返回值。
+
+    picks={姓名: 尾号}：成本会计在结算风险页对同名待指认的人工指认，match_punch 据此定人。
 
     contract：本期适用的合同价表 {派遣方: {岗位: 档}}，来自成本会计的合同价登记表（路由层按生效期挑好再传进来）。
     ⚠ 单价只有两个来路，各司其职：
@@ -769,7 +778,7 @@ def compute(summary, punch, params=None, contract=None):
     _used_by_row, _rows_of = {}, {}
     for _p in summary["people"]:
         _rows_of.setdefault(same_person_key(_p["name"]), []).append(id(_p))
-        _rec, _ = match_punch(punch, _p["name"])
+        _rec, _ = match_punch(punch, _p["name"], picks)
         if not _rec:
             continue
         _own = {int(d) for d, h in (_p.get("days") or {}).items() if h and float(h) > 0}
@@ -783,7 +792,7 @@ def compute(summary, punch, params=None, contract=None):
             if _h and float(_h) > 0:
                 _hours_that_day[(same_person_key(_p["name"]), int(_d))] = True
     for person in summary["people"]:
-        rec, cand = match_punch(punch, person["name"])
+        rec, cand = match_punch(punch, person["name"], picks)
         _ambig = bool(cand)          # 归一后撞上多个人：逐日判「同名待指认」，不判「无打卡」
         if cand:
             ambiguous.append({"姓名": person["name"], "候选": cand})
@@ -966,7 +975,7 @@ def compute(summary, punch, params=None, contract=None):
             # 应付按**上报工时 × 合同价**算，与上面的偏离统计各走各的——一个是要付的钱，一个是要查的差
             **pay,
         })
-    stats = _stats(rows, people, summary, punch, p, unmatched, ambiguous, no_contract, no_dev_rate)
+    stats = _stats(rows, people, summary, punch, p, unmatched, ambiguous, no_contract, no_dev_rate, picks)
     stats["单价不符人数"] = sum(1 for x in people if x.get("单价不符"))
     # ⚠ 「按人去重」的口径只有这一个。contract_vs_actual 里那个「人数」是**按格×班次累加的人次**，
     #    白夜混合的人两班都不符就会被数两次——页面报「涉及 N 人」必须用下面这个，别拿格里的加总
@@ -998,9 +1007,9 @@ def compute(summary, punch, params=None, contract=None):
                       "表头未解析行": summary.get("rate_notes") or []}}
 
 
-def _stats(rows, people, summary, punch, p, unmatched, ambiguous, no_contract=None, no_dev_rate=None):
+def _stats(rows, people, summary, punch, p, unmatched, ambiguous, no_contract=None, no_dev_rate=None, picks=None):
     _dups = cross_agency(summary, punch)
-    _AGM = agency_mismatch(summary, punch)
+    _AGM = agency_mismatch(summary, punch, picks)
     def s(cls, field):
         return round(sum(abs(r[field]) for r in rows if r["档"] == cls), 2)
     mixed = [x["姓名"] for x in people if x["班型"] == "白夜混合"]
@@ -1211,7 +1220,7 @@ class _MismatchList(list):
     blind = ()
 
 
-def agency_mismatch(summary, punch):
+def agency_mismatch(summary, punch, picks=None):
     """结算表的「归属」与打卡表部门里写的派遣方对不上。
     对不上不等于错——打卡部门可能写「浮动组」这类调配名目（7 月两位保洁就是），
     但结算按哪家出钱、考勤挂在哪家，两边长期不一致就该问一句。
@@ -1222,7 +1231,7 @@ def agency_mismatch(summary, punch):
       钉钉取数那份 0 行——**别以为没部门是钉钉的毛病，恰恰相反**。"""
     out, blind = [], []
     for p in summary["people"]:
-        rec, _ = match_punch(punch, p["name"])
+        rec, _ = match_punch(punch, p["name"], picks)
         if not rec:
             continue
         dept = rec.get("部门") or ""

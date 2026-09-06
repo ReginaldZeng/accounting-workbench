@@ -296,10 +296,15 @@ export default function TempAttendance() {
     setBusy(true); setErr('')
     try {
       const r = await tempattAck({ month, 类型: ackAsk.类型, 键: ackAsk.键,
-        理由: ackWhy.trim(), 范围: (ackLong && ackAsk.可长期) ? '长期' : '本期' })
+        理由: ackWhy.trim(), 范围: (ackLong && ackAsk.可长期) ? '长期' : '本期',
+        // 同名指认要把选中的钉钉尾号/部门带过去，后端存下来、compute 据此定人
+        尾号: ackAsk.尾号, 部门: ackAsk.部门 })
       if (!r.ok) { setErr(r.msg || '认定失败'); return }
+      const wasPick = ackAsk.类型 === '同名指认'
       setAckAsk(null); setAckWhy(''); setAckLong(false)
-      await reloadCur(); loadLedger()
+      // 同名指认改的是「这个人是钉钉哪一个」→ 影响 compute 定人，必须重跑才生效（reloadCur 只重贴认定、不重算）
+      if (wasPick) { await rerun(); setStep('risk') } else { await reloadCur() }
+      loadLedger()
     } catch (e) { setErr(String(e)) } finally { setBusy(false) }
   }
   const doUndo = async (x) => {
@@ -683,7 +688,11 @@ export default function TempAttendance() {
 
         {/* 同名待指认在这一页（④结算风险）处理：所有「定人」都在结算风险页，不在取数/总览页。 */}
         {has && RISK_CARD_STEPS.includes(step) && st?.待指认人数 > 0 &&
-          <AmbigTable rows={st.待人工指认 || []} n={st.待指认人数} />}
+          <AmbigTable rows={st.待人工指认 || []} n={st.待指认人数} busy={busy} onPick={(nm, c) => askAck({
+            类型: '同名指认', 键: nm, 尾号: c.手机尾号, 部门: c.部门, 可长期: true,
+            标题: `认定 ${nm} = 尾号 ${c.手机尾号}`,
+            说明: `钉钉部门：${c.部门 || '（无）'}。认定后 ${nm} 的工时按这个人（尾号 ${c.手机尾号}）的打卡算；同一人跨月不变，可勾「长期认定」。`,
+          })} />}
 
         {/* 认定弹层：理由必填——将来翻这份底稿的人要知道当时为什么认为它不是问题 */}
         {ackAsk && ACK_STEPS.includes(step) && <div className="ta-ackmask"
@@ -2194,31 +2203,44 @@ function CostNote({ c, month }) {
   </div>
 }
 
-// 同名待指认：都在打卡、部门也定不了的真两可，摆成一张可折叠的表让成本会计按部门定——
-// 别再像早先那样塞进一条 Note 挤成一长段（使用者 2026-09-06：「那一长段谁去理你」）。
-function AmbigTable({ rows, n }) {
-  const [open, setOpen] = useState(false)
+// 钉钉部门全称太长（「深圳市星期零…-孝感市星期九…-生产制造部-临时普工-锦绣人力」），
+// 只留有用的尾巴「临时普工-锦绣人力」——深圳星期零那截是公司抬头，看的人不关心。
+const shortDept = d => {
+  const s = String(d || '')
+  const i = s.indexOf('临时普工')
+  return i >= 0 ? s.slice(i) : (s.split('-').slice(-2).join('-') || s)
+}
+
+// 同名待指认：都在打卡、部门也定不了的真两可，摆成一张可折叠的表，**每个候选一个「就是TA」按钮**——
+// 成本会计点一下就定人（那个人的工时随即按 TA 的打卡算）。默认展开，就几个人，不用再点开（使用者：「这个要展开啊」）。
+function AmbigTable({ rows, n, onPick, busy }) {
+  const [open, setOpen] = useState(true)
   return <div style={{ marginTop: 8, border: '1px solid #e9d5ff', borderRadius: 8, overflow: 'hidden' }}>
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
       padding: '6px 10px', background: '#faf5ff', color: '#6b21a8' }}>
       <b>◇ 同名待指认 {n} 人</b>
-      <span style={{ fontSize: 12 }}>都在打卡、部门也分不清的真两可——请按<b>钉钉部门</b>定谁是临时工
-        （「临时普工-…人力」才是；「销售/研发…中心」是正式工）。本期这些人判「同名待指认」，定人后再谈工时。</span>
+      <span style={{ fontSize: 12 }}>都在打卡、部门也分不清的真两可——看<b>钉钉部门 / 当月打卡</b>，点<b>「就是TA」</b>定人；
+        定完这人的工时就按 TA 的打卡算。</span>
       <button className="btn" style={{ padding: '2px 10px', fontSize: 12, marginLeft: 'auto' }}
-        onClick={() => setOpen(!open)}>{open ? '收起' : '展开逐个看'}</button>
+        onClick={() => setOpen(!open)}>{open ? '收起' : '展开'}</button>
     </div>
-    {open && <div style={{ maxHeight: 300, overflow: 'auto' }}>
+    {open && <div style={{ maxHeight: 340, overflow: 'auto' }}>
       <table className="tbl" style={{ fontSize: 12, width: '100%' }}>
-        <thead><tr><th>姓名</th><th>候选钉钉部门</th><th>尾号</th><th>当月打卡</th></tr></thead>
+        <thead><tr><th>姓名</th><th>候选钉钉部门</th><th>尾号</th><th>当月打卡</th><th>命中上工日</th><th></th></tr></thead>
         <tbody>
-          {rows.map((x, i) => (x.候选 || []).map((c, j) => (
-            <tr key={`${i}-${j}`}>
+          {rows.map((x, i) => (x.候选 || []).map((c, j) => {
+            const obj = typeof c === 'string' ? { 部门: c } : c
+            return <tr key={`${i}-${j}`}>
               <td>{j === 0 ? <b>{x.姓名}</b> : ''}</td>
-              <td>{typeof c === 'string' ? c : (c.部门 || '（打卡表没写部门）')}</td>
-              <td>{typeof c === 'string' ? '' : (c.手机尾号 || '?')}</td>
-              <td>{typeof c === 'string' ? '' : `${c.打卡日数} 天`}</td>
+              <td title={obj.部门 || ''}>{shortDept(obj.部门) || '（打卡表没写部门）'}</td>
+              <td><b>{obj.手机尾号 || '?'}</b></td>
+              <td>{obj.打卡日数 != null ? `${obj.打卡日数} 天` : '—'}</td>
+              <td>{obj.命中上工日 != null && x.上工日数 != null ? `${obj.命中上工日} / ${x.上工日数}` : '—'}</td>
+              <td>{onPick && obj.手机尾号 && <button className="btn primary" disabled={busy}
+                style={{ padding: '2px 10px', fontSize: 12 }}
+                onClick={() => onPick(x.姓名, obj)}>就是TA →</button>}</td>
             </tr>
-          )))}
+          }))}
         </tbody>
       </table>
     </div>}

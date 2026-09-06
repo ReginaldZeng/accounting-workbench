@@ -455,29 +455,40 @@ class TestDupResolveTempVsRegular(unittest.TestCase):
     就定得出临时工。原先按打卡日 F1 自动定人的规则（含 V2.458）已作废（2026-09 业务定案）。
     唯一的例外：合并手机号后只剩一个人（同一人的多个账号）→ 无需选，直接认。"""
 
-    def test_two_different_people_defer_to_cost_accountant_with_dept(self):
+    def test_regular_employee_candidate_is_ignored(self):
+        # 临时工撞名一个深圳星期零正式工（销售中心）→ 正式工不是临时工，直接忽略，认临时工那个（丁菊华式）
         from kernels import dingtalk_attendance as dta
         LIN, ZSH = "linshi_uid", "zhengshi_uid"
-        worked = set(range(1, 23))                                  # 报工 22 天
-        punch = {LIN: {d: [8 * 60, 18 * 60] for d in worked},       # 临时工：只在上工日打卡（F1≈1）
-                 ZSH: {d: [8 * 60, 18 * 60] for d in range(1, 30)}} # 正式工：整月天天打卡
-        roster = {LIN: {"部门": ["临时普工-锦绣人力"]}, ZSH: {"部门": ["销售中心"]}}
+        worked = set(range(1, 23))
+        punch = {LIN: {d: [8 * 60, 18 * 60] for d in worked},       # 临时工
+                 ZSH: {d: [8 * 60, 18 * 60] for d in range(1, 30)}} # 正式工：整月天天打卡（不该被选）
+        roster = {LIN: {"部门": ["…-临时普工-锦绣人力"]}, ZSH: {"部门": ["…-销售中心"]}}
         _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
         dta.fetch_mobiles = lambda cands: {LIN: "13800009276", ZSH: "13800002969"}
         dta.fetch_punches = lambda jobs, progress=None: punch
         try:
-            hit, still, _got, _rec = dta.resolve_dups(
+            hit, still, _got, rec = dta.resolve_dups(
                 {"甲": [LIN, ZSH]}, "2026-08", worked_days={"甲": worked}, roster=roster)
         finally:
             dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
-        self.assertNotIn("甲", hit)             # 工具不猜：不自动定人
-        self.assertIn("甲", still)
-        # 两个候选都退回、都带钉钉部门（决定性线索）+ 各自打卡，交成本会计判
-        depts = {c["部门"] for c in still["甲"]["候选"]}
-        self.assertEqual(depts, {"临时普工-锦绣人力", "销售中心"})
-        tails = {c["手机尾号"] for c in still["甲"]["候选"]}
-        self.assertEqual(tails, {"9276", "2969"})
-        self.assertTrue(all("days" in c for c in still["甲"]["候选"]))   # 打卡带出来，上游好写成行
+        self.assertIn("甲", hit)                          # 正式工被忽略 → 只剩一个临时工 → 认它
+        self.assertEqual(hit["甲"]["账号"], [LIN])
+        self.assertEqual(still, {})
+        self.assertIn("正式工", rec[0]["定人理由"])
+        # 摆出来的候选只有临时工那个（深圳星期零正式工已忽略，不出现）
+        self.assertEqual({c["手机尾号"] for c in rec[0]["候选"]}, {"9276"})
+
+    def test_pick_resolves_ambiguous_to_chosen_tail(self):
+        # 成本会计在结算风险页指认「张威=尾号0376」→ match_punch 命中那一行，不再算歧义
+        c1 = {"raw": "张威", "标识": "2931", "days": {1: [1]}, "部门": "临时普工-锦绣人力"}
+        c2 = {"raw": "张威", "标识": "0376", "days": {2: [1]}, "部门": "临时普工-锦绣人力"}
+        punch = {"by_raw": {"张威": [c1, c2]}, "by_key": {ta.norm_name("张威"): [c1, c2]}}
+        rec, cand = ta.match_punch(punch, "张威")
+        self.assertIsNone(rec)                       # 没指认 → 歧义，返回候选
+        self.assertEqual(len(cand), 2)
+        rec2, cand2 = ta.match_punch(punch, "张威", picks={"张威": "0376"})
+        self.assertIsNone(cand2)                     # 指认后不再歧义
+        self.assertEqual(rec2["标识"], "0376")        # 命中指认的那一行
 
     def test_same_person_multiple_accounts_still_auto_merged(self):
         # 唯一不必人工的情形：手机号相同＝同一人的多个钉钉账号（离职再入职），合并、直接认

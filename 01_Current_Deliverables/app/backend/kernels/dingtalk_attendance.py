@@ -553,17 +553,26 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None, agenc
         def _cand_agencies(grp):        # 该候选钉钉部门里的派遣方集合（「锦绣人力」→「锦绣」）
             return {_agency_leaf(d) for d in _dept(grp).split("、") if _agency_leaf(d)}
 
-        # 定人只认「一眼能定、有据可查」的三类，**不靠打卡日 F1 猜**（原先甩开一倍、V2.458 近乎完美领先都作废）：
-        #   ① 合并手机号后只剩一个人（同一人的多个钉钉账号，根本不涉及在两个人里挑）；
-        #   ② 本月**只有一个候选在打卡**——另一个当月 0 打卡＝本月没来上班，不可能是报了工时的人；
-        #   ③ 有打卡的候选里，**恰好一个钉钉部门派遣方 = 上报归属**——两系统标签自洽，如上报「锦绣」、
-        #      钉钉也只有「锦绣人力」这一个在打卡（使用者 2026-09-06：「上报在锦绣、钉钉锦绣唯一一个打卡也该放行」）。
-        # 三条都不满足（≥2 个候选都在打卡、部门也定不了）才是真两可 → 交成本会计，按钉钉部门定。
-        punched = [s for s in scored if len(s[2]) > 0]      # s=(得分, 账号组, 打卡)；本月有打卡的候选
+        def _is_temp(grp):
+            # 临时工都在「孝感星期九-…-临时普工」下面；深圳星期零直属（销售/研发/品牌…中心）是正式工。
+            return "临时普工" in _dept(grp)
+
+        # 先剔掉「深圳星期零的正式工」候选——临时工必在「临时普工」部门（使用者 2026-09-06：
+        # 「临时工都在孝感星期九下面，可以直接忽略深圳星期零的」）。撞名撞到正式工的，一律只留临时工。
+        temp_pool = [s for s in scored if _is_temp(s[1])]
+        pool = temp_pool if temp_pool else scored          # 一个临时工候选都没有才退回全体，别把人搞丢
+        _reg = len(scored) - len(temp_pool)                # 忽略掉几个正式工（仅用于说明理由）
+        # 再在临时工候选里认「一眼能定、有据可查」的（**不靠打卡日 F1 猜**）：
+        #   ① 只剩一个（含同一人多账号合并）；② 本月只有一个在打卡（其余 0 打卡＝没来）；
+        #   ③ 恰好一个钉钉部门派遣方 = 上报归属（两系统标签自洽，上报「锦绣」↔ 钉钉唯一一个「锦绣人力」在打卡）。
+        # 都不满足（≥2 个临时工候选都在打卡、部门也定不了）才是真两可 → 交成本会计。
+        punched = [s for s in pool if len(s[2]) > 0]        # s=(得分, 账号组, 打卡)
         ag_rep = str((agencies or {}).get(nm) or "").strip()
         ag_match = [s for s in punched if ag_rep and ag_rep in _cand_agencies(s[1])]
-        if len(scored) == 1:
-            chosen, why = best, "只一个候选"
+        if len(pool) == 1:
+            chosen = pool[0]
+            why = ("只一个候选" if len(scored) == 1
+                   else f"只有一个临时工候选（其余 {_reg} 个是深圳星期零正式工，已忽略）")
         elif len(punched) == 1:
             chosen, why = punched[0], "本月只有这个候选在打卡（其余候选当月 0 打卡）"
         elif len(ag_match) == 1:
@@ -572,14 +581,16 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None, agenc
             chosen, why = None, ""
         ok = chosen is not None
 
-        item = {"姓名": nm, "候选人数": len(people), "钉钉账号数": len(uids),
+        item = {"姓名": nm, "候选人数": len(pool), "钉钉账号数": len(uids),
                 "上工日数": len(w), "已定": bool(ok), "定人理由": why,
+                "忽略正式工": _reg,          # 深圳星期零正式工候选被忽略几个（不摆出来）
                 "合并账号": sum(1 for g in people if len(g) > 1),
+                # 只摆临时工候选（深圳星期零正式工已忽略，不写进打卡表、不摆给成本会计）
                 "候选": [{"账号": g, "手机尾号": tail(mob.get(g[0])), "部门": _dept(g),
                           "打卡日数": len(d), "命中上工日": len(w & set(d)),
                           "得分": round(sc, 2), "选中": bool(ok and chosen and g is chosen[1]),
                           "days": d}
-                         for sc, g, d in scored]}
+                         for sc, g, d in pool]}
         rec.append(item)
         if ok:
             hit[nm] = {"账号": chosen[1], "days": chosen[2]}

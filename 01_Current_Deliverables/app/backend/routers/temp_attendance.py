@@ -317,7 +317,7 @@ def _period_files(month):
 _ACK_KEY = "tempatt_ack_"              # + YYYY-MM，本期认定
 _ACK_STANDING = "tempatt_ack_standing"  # 长期认定
 # 能长期认定的只有「身份类」发现；逐日类带日期，长期无意义
-_ACK_LONG_OK = ("归属不符", "同名", "打卡重名")
+_ACK_LONG_OK = ("归属不符", "同名", "打卡重名", "同名指认")   # 同名指认＝选定钉钉哪个尾号是本人，同一人跨月不变→可长期
 _ACK_TYPES = _ACK_LONG_OK + ("多记", "待查", "金额核对", "奖罚")
 
 
@@ -930,9 +930,13 @@ async def tempatt_ack(request: Request):
     cur = db.get_setting(store) or {}
     if not isinstance(cur, dict):
         cur = {}
-    cur[f"{t}|{key}"] = {"理由": why, "认定人": u["name"],
-                         "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                         "月份": month}
+    rec = {"理由": why, "认定人": u["name"],
+           "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "月份": month}
+    # 同名指认：把选中的钉钉尾号（及部门，供台账展示）一并存下——compute 靠尾号定人
+    if t == "同名指认" and b.get("尾号"):
+        rec["尾号"] = str(b.get("尾号"))
+        rec["部门"] = str(b.get("部门") or "")
+    cur[f"{t}|{key}"] = rec
     db.set_setting(store, cur, u["name"])
     try:
         db.audit(u["name"], "临时工考勤-认定无误", f"{month} {t} {key}", f"{scope}｜{why}")
@@ -1190,7 +1194,10 @@ def _run(summary_bytes, punch_bytes, params, rates=None, month=""):
     # 月份优先用前端选的；没选就用汇总表标题里的，再不行用打卡表统计区间的
     month = month or sm.get("period") or pk.get("period") or ""
     contract, info = _contract_with_info(month)
-    res = ta.compute(sm, pk, params, contract=contract)
+    # 同名指认（成本会计在结算风险页选定的尾号）：{姓名: 尾号}，compute 据此给撞名的人定人
+    picks = {key: v.get("尾号") for (t, key), v in _acks(month).items()
+             if t == "同名指认" and v.get("尾号")}
+    res = ta.compute(sm, pk, params, contract=contract, picks=picks)
     res["month"] = month
     # 期中调价（本期内换过价，按覆盖期末那行核）和登记表里的重叠/空档行，页面与报告都要讲清楚
     res["rates"]["期中调价"] = info.get("期中调价") or []
