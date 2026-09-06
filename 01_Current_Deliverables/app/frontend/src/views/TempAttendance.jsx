@@ -473,8 +473,12 @@ export default function TempAttendance() {
   const dfRows = (res?.rows || []).filter(_dfMatch)
   // 「只看异常」＝撑不起上报 + 报了工时无打卡 + 同名待指认（都是要处理的），比原来的「仅不一致」多带待指认
   const _isBad = c => ['over_out', 'hard', 'ambig'].includes(c)
+  // 整表固定按 归属·部门·姓名·手机尾号·日 排序（使用者 2026-09-06）——同一个人的日子连在一起，好逐日看
+  const _zc = (x, y) => String(x ?? '').localeCompare(String(y ?? ''), 'zh')
+  const _cmpRow = (a, b) => _zc(a.归属, b.归属) || _zc(a.部门, b.部门) || _zc(a.姓名, b.姓名)
+    || _zc(a.手机尾号, b.手机尾号) || (Number(a.日) - Number(b.日))
   const rows = dfRows.filter(r => filter === 'all' ? true
-    : filter === 'issue' ? _isBad(r.档) : r.档 === filter)
+    : filter === 'issue' ? _isBad(r.档) : r.档 === filter).slice().sort(_cmpRow)
   const pickFilter = k => { setFilter(k); setPgRow(v => ({ ...v, page: 1 })) }
   // 逐日明细里可认定的行（撑不起/待查/仅1次卡），键＝姓名|日；批量选中集按此算
   const dConf = r => ['over_out', 'hard', 'thin'].includes(r.档)
@@ -1192,7 +1196,13 @@ export default function TempAttendance() {
                   <td>{r.下班打卡 || '—'}</td>
                   <td>{r.打卡次数}</td><td>{r.跨度 == null ? '—' : h1(r.跨度)}</td>
                   <td style={{ color: 'var(--ink-3)' }}>{r.规则扣减 == null ? '—' : h1(r.规则扣减)}</td>
-                  <td>{h1(r.上报工时)}</td><td>{h1(r.重算工时)}</td>
+                  <td>{h1(r.上报工时)}</td>
+                  {/* 逐行算式：跨度按0.5向下取整，再扣规则扣减 ＝ 重算。悬停看这一行怎么算出来的 */}
+                  <td title={r.跨度 != null
+                    ? `(下班−上班)=跨度 ${h1(r.跨度)}h → 按0.5小时向下取整 ${h1(Math.floor((r.跨度 + 1e-9) * 2) / 2)}h → 扣规则扣减 ${h1(r.规则扣减 || 0)}h ＝ 重算 ${h1(r.重算工时)}h`
+                    : '没切出完整班次（缺上班或下班卡）→ 重算记 0'}
+                    style={{ cursor: 'help', borderBottom: r.跨度 != null ? '1px dotted var(--ink-3)' : 'none' }}>
+                    {h1(r.重算工时)}</td>
                   <td>{(r.差异 > 0 ? '+' : '') + h1(r.差异)}</td>
                   {(() => {
                     const 不符 = 单价不符者.has(`${r.姓名}|${r.归属}`)
