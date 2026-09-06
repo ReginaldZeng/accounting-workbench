@@ -47,7 +47,7 @@ from core import (  # noqa: F401  部分名供 routers/ 与本文件共用
     _is_closed, _kd_fetch_store, _kd_get, _kd_sync_info, _kd_synced_at, _now, _period_bank,
     _period_data_status, _period_str, _require_perm, _user_public, save_cfg, sid_name, VERSION_INFO,
     _compute_version_info,
-    _PULL_PATHS, pull_token_ok, can_enter_dev, dev_users_info,
+    _PULL_PATHS, pull_token_ok, pull_token, can_enter_dev, dev_users_info,
 )
 
 
@@ -1797,7 +1797,8 @@ def _reconcile():
 def _data_sources():
     """数据接入页：银行导入 manifest + 每家银行 金蝶↔银行 覆盖对照（不跑逐笔）。"""
     base = {"source": CFG["source"], "period": _period_str(),
-            "bank_import_dir": CFG.get("bank_import_dir", ""), "updated_at": _now()}
+            "bank_import_dir": CFG.get("bank_import_dir", ""), "updated_at": _now(),
+            "bank_pull": _bankpull_view(), "pull_enabled": bool(pull_token())}
     if CFG["source"] != "kingdee":
         return {**base, "bank_source": "样例数据", "manifest": [], "coverage": [],
                 "kd_count": 0, "balance_count": 0, "balance_by_subject": []}
@@ -2581,7 +2582,17 @@ async def bank_import_upload(request: Request):
         if (not pwd) and ("password" in s or "encrypt" in s):
             return {"ok": False, "msg": "该压缩包已加密，请在下方「压缩包密码」填入密码后再上传"}
         return {"ok": False, "msg": f"解压失败：{e}"}
-    # 解析并按期间定格入库：逐笔 rows + manifest + 第三方渠道 channels，一次算好存死
+    # 解析并按期间定格入库（与取件机自动推送共用同一条管线，见 _ingest_bank_dir）
+    res = _ingest_bank_dir(extract_dir, u["name"], via="手工上传")
+    res["dir"] = extract_dir
+    return {"ok": True, **res}
+
+
+def _ingest_bank_dir(extract_dir, operator, via="手工上传"):
+    """把一个已解压/已就绪的银行流水目录解析并【按期间定格入库】。
+    手工上传（bank_import_upload）与取件机自动推送（bank_import_pull_push）共用此函数——
+    保证 财资归并 / 逐笔查重 / 重复待确认弹窗 / 月份不符警告 走同一条口径，不会有一条绕过闸门的旁路。
+    via＝'手工上传' | '取件机自动'，落进审计与来源标记。返回给接口用的结果 dict（不含 dir）。"""
     rows, manifest = bimp.load_bank_dir(extract_dir)
     try:
         channels = bimp.parse_channels(extract_dir)
@@ -2599,21 +2610,21 @@ async def bank_import_upload(request: Request):
     mismatch = bool(bank_ym and bank_ym != sel_ym)
     # 财资多份导出出现让位/重复/疑漏 → 打"重复待确认"标记：查重只是系统初核，须人工弹窗确认留痕
     dup_pending = bimp.needs_dup_confirm(manifest)
-    meta = {"笔数": len(rows), "文件数": len(manifest), "流水月份": bank_ym}
+    meta = {"笔数": len(rows), "文件数": len(manifest), "流水月份": bank_ym, "来源": via}
     if dup_pending:
         meta["重复待确认"] = True
     db.set_period_input(CFG["source"], CFG["year"], CFG["period"], "bank",
                         {"rows": rows, "manifest": manifest, "channels": channels, "dir": extract_dir},
-                        meta, u["name"])
-    db.audit(u["name"], "上传银行流水", _period_str(),
-             "并入 %d 笔 / %d 个文件%s%s" % (len(rows), len(manifest),
+                        meta, operator)
+    db.audit(operator, "上传银行流水", _period_str(),
+             "%s · 并入 %d 笔 / %d 个文件%s%s" % (via, len(rows), len(manifest),
                                             ("（⚠流水月份=%s）" % bank_ym) if mismatch else "",
                                             "（财资重复判定待人工确认）" if dup_pending else ""))
     CFG["bank_import_dir"] = extract_dir     # 兼容旧字段（渠道/理财等仍读它当本期目录）
     save_cfg(CFG)
     _cache_clear()
-    return {"ok": True, "并入笔数": len(rows), "manifest": manifest, "dir": extract_dir,
-            "period": sel_ym, "updated_by": u["name"], "updated_at": _now(),
+    return {"并入笔数": len(rows), "manifest": manifest,
+            "period": sel_ym, "updated_by": operator, "updated_at": _now(),
             "bank_ym": bank_ym, "sel_ym": sel_ym, "period_mismatch": mismatch,
             "need_dup_confirm": dup_pending}
 
@@ -2636,6 +2647,142 @@ async def bank_import_confirm_dup(request: Request):
     db.audit(u["name"], "确认财资重复", _period_str(), "人工确认多份财资导出的重复/让位判定（弹窗逐条核对后确认）")
     _cache_clear()
     return {"ok": True, "确认人": u["name"], "确认时间": now}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 银行流水【上行】通道：取件机反向推送（V2.486）
+# ──────────────────────────────────────────────────────────────────────
+# 报表取件机把云端报表拉回内网共享盘（下行）；这里反过来——取件机扫共享盘的
+# 月度流水目录，把散件【推】给服务器，服务器落进本期专属目录，收齐后调
+# 同一条 _ingest_bank_dir 管线（财资归并/逐笔查重/重复待确认弹窗一并继承）。
+# 出纳零操作（文件本来就在共享盘）：打包、加密、填密码整段消失。
+# 复用同一个 pull_token（core._PULL_PATHS 已放行这四条），另加权限：
+#   页面点「立即扫描」= bank_upload 权限；取件机推送/提交 = pull_token。
+# 铁律：自动推【不覆盖】本期已有的人工上传；解析后【保留人工确认闸】不自动确认。
+_BANKPULL_WANT = "bank_pull_want"      # 页面点「立即扫描」的标记（取件机下轮消费）
+_BANKPULL_SYNC = "bank_pull_sync"      # 取件机最近一次回报
+_BANKPULL_STAGE = "bank_pull_stage"    # 取件机推送落地目录（tag → 目录），收齐前的暂存区
+_BANKPULL_ALIVE_SEC = 4000             # 每小时一轮，容 1 轮多一点才算"停了"
+
+
+def _bankpull_dir(tag):
+    """某期取件机推送的暂存目录（与手工上传的 extracted 平级、不互相覆盖）。"""
+    return os.path.join(UPLOAD_DIR, tag, "pull_pushed")
+
+
+@app.get("/api/bank-pull/pending")
+def bank_pull_pending(request: Request):
+    """取件机每轮先问：有没有人点过「立即扫描」。响应极小、可勤问。"""
+    if not pull_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "取件令牌无效"}, status_code=403)
+    w = db.get_setting(_BANKPULL_WANT, None)
+    return {"ok": True, "pending": bool(w), "at": (w or {}).get("at", ""), "by": (w or {}).get("by", "")}
+
+
+@app.post("/api/bank-pull/push")
+async def bank_pull_push(request: Request):
+    """取件机推一个流水散件：期间 + 相对文件名走请求头，原始字节走请求体。
+    只落盘到本期暂存目录，不解析（解析等 commit 收齐后一次做）。防路径穿越。"""
+    if not pull_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "取件令牌无效"}, status_code=403)
+    from urllib.parse import unquote
+    period = unquote(request.headers.get("x-bank-period", "")).strip()   # 形如 2026-08
+    relname = unquote(request.headers.get("x-bank-relname", "")).strip()
+    m = re.match(r"^(\d{4})-(\d{2})$", period)
+    if not m or not relname:
+        return {"ok": False, "msg": "缺期间(x-bank-period=YYYY-MM)或文件名(x-bank-relname)"}
+    tag = "%s_%s_%02d" % (CFG["source"], m.group(1), int(m.group(2)))
+    dest_root = _bankpull_dir(tag)
+    os.makedirs(dest_root, exist_ok=True)
+    safe = relname.replace("\\", "/")
+    target = os.path.normpath(os.path.join(dest_root, safe))
+    if not target.startswith(os.path.normpath(dest_root)):
+        return {"ok": False, "msg": "文件名越界，拒收"}
+    data = await request.body()
+    if not data:
+        return {"ok": False, "msg": "空文件"}
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, target)
+    return {"ok": True, "saved": safe, "bytes": len(data), "tag": tag}
+
+
+@app.post("/api/bank-pull/commit")
+def bank_pull_commit(body: dict, request: Request):
+    """取件机报「这个月的文件都推完了」→ 服务器把暂存目录当本期流水解析定格。
+    铁律：本期已有【人工上传】的数据则【不覆盖】，只标记待人工处置——自动化不越过人。"""
+    if not pull_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "取件令牌无效"}, status_code=403)
+    period = str(body.get("period", "")).strip()
+    m = re.match(r"^(\d{4})-(\d{2})$", period)
+    if not m:
+        return {"ok": False, "msg": "缺期间(period=YYYY-MM)"}
+    year, mon = int(m.group(1)), int(m.group(2))
+    if year != CFG["year"] or mon != CFG["period"]:
+        # 取件机按共享盘月份推，未必是当前所选期间——不擅自切期，交回待页面切到该期再提交
+        return {"ok": False, "msg": "本期(%s)非服务器当前所选期间(%d-%02d)，未提交" % (period, CFG["year"], CFG["period"]),
+                "need_switch_period": True}
+    tag = "%s_%d_%02d" % (CFG["source"], year, mon)
+    stage = _bankpull_dir(tag)
+    if not (os.path.isdir(stage) and os.listdir(stage)):
+        return {"ok": False, "msg": "本期暂存目录没有推上来的文件"}
+    rec = db.get_period_input(CFG["source"], CFG["year"], CFG["period"], "bank")
+    if rec is not None and (rec.get("meta") or {}).get("来源") != "取件机自动":
+        # 已有人工上传（或历史数据）→ 不覆盖，只记一笔待处置，留给核算组决定
+        db.set_setting(_BANKPULL_SYNC, {"at": _now(), "host": body.get("host", "?"),
+                                        "period": period, "note": "本期已有人工数据，自动推未覆盖", "staged": True},
+                       "取件机")
+        return {"ok": True, "skipped": True,
+                "msg": "本期已有人工上传的流水，自动推的数据已暂存但未覆盖（避免盖掉人工确认过的账）"}
+    res = _ingest_bank_dir(stage, "取件机", via="取件机自动")
+    db.set_setting(_BANKPULL_SYNC, {"at": _now(), "host": body.get("host", "?"), "period": period,
+                                    "并入笔数": res["并入笔数"], "need_dup_confirm": res["need_dup_confirm"],
+                                    "staged": False}, "取件机")
+    return {"ok": True, **res}
+
+
+@app.post("/api/bank-pull/report")
+def bank_pull_report(body: dict, request: Request):
+    """取件机回报本轮扫描结果（内网往外发，不需入口）。页面据此显示"取件机在跑·最近扫描时间"。"""
+    if not pull_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "取件令牌无效"}, status_code=403)
+    rec = dict(body or {})
+    rec["at"] = _now()
+    db.set_setting(_BANKPULL_SYNC, rec, "取件机")
+    # 回报即视为消费掉「立即扫描」请求
+    db.set_setting(_BANKPULL_WANT, None, "取件机")
+    return {"ok": True}
+
+
+@app.post("/api/bank-pull/request-scan")
+def bank_pull_request_scan(request: Request):
+    """页面点「立即扫描共享盘」＝留个话，取件机下轮来问 pending 时看到就马上扫。
+    服务器主动连内网仍被防火墙挡，故只能留标记（与报表取件同理）。"""
+    u = _require_perm(request, "bank_upload")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「上传资金流水」权限"}, status_code=403)
+    if not pull_token():
+        return {"ok": False, "msg": "服务器没配取件码（conf.ini [rptexport] pull_token），取件通道未启用。"}
+    db.set_setting(_BANKPULL_WANT, {"at": _now(), "by": u["name"]}, u["name"])
+    return {"ok": True, "msg": "已通知取件机，下一轮来取时会立即扫共享盘（间隔取决于取件机轮询）。"}
+
+
+def _bankpull_view():
+    """给页面看的取件机上行状态：最近扫描时间 + 还在不在干活。"""
+    rec = db.get_setting(_BANKPULL_SYNC, None)
+    if not rec:
+        return None
+    out = dict(rec)
+    try:
+        t = datetime.datetime.strptime(rec.get("at", ""), "%Y-%m-%d %H:%M:%S")
+        ago = max(0, int((datetime.datetime.now() - t).total_seconds()))
+    except Exception:
+        ago = None
+    out["ago_sec"] = ago
+    out["alive"] = (ago is not None and ago <= _BANKPULL_ALIVE_SEC)
+    return out
 
 
 @app.post("/api/kingdee/refresh")

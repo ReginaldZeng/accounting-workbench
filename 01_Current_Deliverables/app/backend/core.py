@@ -269,7 +269,10 @@ _OPEN_API = {"/api/login", "/api/logout", "/api/me", "/api/health"}
 # 但**不是无条件放行**：令牌必须已配置且完全一致，否则照旧走登录门。
 # 令牌只能下载已导出的报表，登录不了工作台、动不了别的任何东西（爆炸半径就这么大）。
 _PULL_PATHS = {"/api/rptexport/files", "/api/rptexport/download",
-               "/api/rptexport/sync-report", "/api/rptexport/pending"}
+               "/api/rptexport/sync-report", "/api/rptexport/pending",
+               # 银行流水【上行】通道（取件机反向推送共享盘散件→服务器，同一个 pull_token）
+               "/api/bank-pull/pending", "/api/bank-pull/push",
+               "/api/bank-pull/commit", "/api/bank-pull/report"}
 
 
 def pull_token():

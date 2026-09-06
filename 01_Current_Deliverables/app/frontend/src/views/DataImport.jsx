@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-09-06 Author:Claude/c Version:V2.486
+// 银行流水上行取件机：①上传区加「取件机自动接入」状态条+「立即扫描共享盘」按钮；②自动推来源在状态行显示。
 // [Change Log] Date:2026-09-01 Author:Claude/c Version:V2.416
 // 解析清单收纳：跳过的文件（第三方支付/回单/证明/理财等）折叠进「展开逐个看」，不再一屏十几行；
 // 但「解析失败」和「财资未并入」不折叠——没并入的真流水必须一眼看见。财资未并入分两态：
@@ -5,7 +7,7 @@
 // [Change Log] Date:2026-07-04 Author:Claude/c Version:V1.3
 // 数据接入页（四步工作流第1步，独立成页）：银行流水来源(导入目录+解析清单) / 金蝶序时账 / 每家银行覆盖对照。
 import React, { useEffect, useState } from 'react'
-import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee, confirmBankDup } from '../api.js'
+import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee, confirmBankDup, requestBankScan } from '../api.js'
 import Steps from '../components/Steps.jsx'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
@@ -21,6 +23,7 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
   const [busy, setBusy] = useState(false), [up, setUp] = useState(false), [ref, setRef] = useState(false)
   const [msg, setMsg] = useState(null)
   const [dupOpen, setDupOpen] = useState(false), [dupBusy, setDupBusy] = useState(false)
+  const [scanBusy, setScanBusy] = useState(false), [scanMsg, setScanMsg] = useState('')
   useEffect(() => { getDataSources().then(x => { _cache = x; setD(x) }).catch(() => {}) }, [cfg.source, cfg.year, cfg.period])
   useEffect(() => { setDir(cfg.bank_import_dir || '') }, [cfg.bank_import_dir])
   // 财资重复判定待人工确认：只要标记还挂着，进页面就再弹——不确认不算完，刷新躲不掉
@@ -56,6 +59,11 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
     setRef(true)
     try { await refreshKingdee(); const x = await syncDataSources(); _cache = x; setD(x); await syncStatus() }
     finally { setRef(false) }
+  }
+  const doScan = async () => {
+    setScanBusy(true); setScanMsg('')
+    try { const r = await requestBankScan(); setScanMsg(r.msg || (r.ok ? '已通知取件机' : '通知失败')) }
+    catch (e) { setScanMsg('通知失败：' + String(e)) } finally { setScanBusy(false) }
   }
   const doConfirmDup = async () => {
     setDupBusy(true)
@@ -123,8 +131,10 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
                     <b style={{ color: 'var(--amber)', marginLeft: 8, cursor: 'pointer', textDecoration: 'underline' }}
                       onClick={() => setDupOpen(true)}>⚠ 财资重复判定待人工确认（点此确认）</b>}
                   {bMeta && bMeta['重复确认人'] &&
-                    <span style={{ color: 'var(--ink-3)', marginLeft: 8 }}>· 财资重复判定已由 {bMeta['重复确认人']} 于 {bMeta['重复确认时间']} 确认</span>}</>
-                : '本期还没上传银行流水包（下方①上传）'}</span>
+                    <span style={{ color: 'var(--ink-3)', marginLeft: 8 }}>· 财资重复判定已由 {bMeta['重复确认人']} 于 {bMeta['重复确认时间']} 确认</span>}
+                  {bMeta && bMeta['来源'] === '取件机自动' &&
+                    <span style={{ color: 'var(--ink-3)', marginLeft: 8, padding: '1px 7px', borderRadius: 10, background: 'var(--bg-sub)', border: '1px solid var(--line)' }}>取件机自动接入</span>}</>
+                : '本期还没上传银行流水包（下方①上传，或由取件机自动接入）'}</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <span style={{ width: 78, color: 'var(--ink-3)', fontSize: 12.5 }}>金蝶数据</span>
@@ -161,6 +171,28 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
             <button className="btn" onClick={reparse} disabled={busy || !kd}>{busy ? '解析中…' : '重新解析'}</button>
           </div>
         </details>
+
+        {/* 取件机自动接入（V2.486）：出纳把流水放共享盘，取件机每小时扫→推给服务器→自动解析定格。
+            服务器进不了内网，此按钮只是"留个话"，取件机下轮来问时看到就立即扫（延迟＝取件机轮询间隔）。 */}
+        {kd && d && d.pull_enabled && <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-sub)', border: '1px solid var(--line)', fontSize: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600 }}>共享盘取件机</span>
+            {d.bank_pull
+              ? <span style={{ color: d.bank_pull.alive ? 'var(--green)' : 'var(--amber)' }}>
+                  {d.bank_pull.alive ? '● 在跑' : '○ 可能已停'}
+                  <span style={{ color: 'var(--ink-3)', marginLeft: 6 }}>
+                    最近扫描 {d.bank_pull.at || '—'}{d.bank_pull.host ? ` · ${d.bank_pull.host}` : ''}
+                    {typeof d.bank_pull.pushed === 'number' ? ` · 上轮推 ${d.bank_pull.pushed} 个` : ''}</span>
+                </span>
+              : <span style={{ color: 'var(--ink-3)' }}>尚无回报（取件机未部署或未跑过）</span>}
+            <button className="btn" style={{ marginLeft: 'auto', height: 28, fontSize: 12 }}
+              onClick={doScan} disabled={scanBusy || !canUpload}
+              title={!canUpload ? '需「上传资金流水」权限' : ''}>{scanBusy ? '通知中…' : '立即扫描共享盘'}</button>
+          </div>
+          {(d.bank_pull && (d.bank_pull.waiting || []).length > 0) &&
+            <div style={{ marginTop: 4, color: 'var(--ink-3)' }}>等待：{(d.bank_pull.waiting || []).join('；')}</div>}
+          {scanMsg && <div style={{ marginTop: 4, color: 'var(--ink-2)' }}>{scanMsg}</div>}
+        </div>}
 
         {d && kd && <div style={{ marginTop: 12, fontSize: 12.5 }}>
           {joined.map((m, i) => <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', flexWrap: 'wrap' }}>
