@@ -166,8 +166,9 @@ def collect_attachments(inst):
 def download_url(tok_v2, tok_old, iid, file_id):
     """先新版 workflow 接口（现有应用已具备权限），失败回退老版 TOP。返回 (url, via)；失败 → (None, 原因)。
     ⚠ 实证 2026-09-06（202607011742000186641）：**发起人钉钉账号已不存在**（离职/注销，v2/user/get 60121）时，
-      两个接口都回「用户不存在 / 找不到该用户」——钉钉按发起人身份放附件，人没了附件就 API 拿不到，
-      与应用权限无关；只能从 OA 后台下载后手工上传。原因要带回去让页面讲清楚，别只说「拿不到下载链接」。"""
+      两个接口都回「用户不存在 / 找不到该用户」——钉钉按发起人身份放附件，人没了这两个接口就拿不到。
+      V2.469 起由 storage_download() 走钉盘代下载兜底（应用已开 Storage.DownloadInfo.Read，2026-09-06 实证 8 附件全通）。
+      原因要带回去让页面讲清楚，别只说「拿不到下载链接」。"""
     reasons = []
     try:
         j = requests.post(VAPI + "/v1.0/workflow/processInstances/spaces/files/urls/download",
@@ -281,8 +282,9 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
             for a in atts:
                 url, via = download_url(tok_v2, tok, iid, a["fileId"])
                 headers = {}
-                if not url and via and any(k in via for k in ("用户不存在", "找不到该用户", "userNotExist", "noPermission", "无访问权限")):
-                    # 发起人账号没了 / 评论区附件无访问权限 → 备用通道：授权在职审批人 + 钉盘代下载（需 Storage.DownloadInfo.Read）
+                if not url and via and any(k in via for k in ("用户不存在", "找不到该用户", "userNotExist")):
+                    # 发起人账号没了 → 备用通道：授权在职审批人 + 钉盘代下载（需 Storage.DownloadInfo.Read）
+                    # ⚠ 评论区附件的 noPermission 不走这里：实测 cspace/preview 本身就回 400020，评论者本人也不行——官方不给 API
                     url2, headers2, via2 = storage_download(tok_v2, tok, iid, a["fileId"], a.get("spaceId"), inst)
                     if url2:
                         url, via, headers = url2, via2, headers2 or {}
