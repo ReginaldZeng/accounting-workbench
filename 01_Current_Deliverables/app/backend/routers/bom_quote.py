@@ -104,7 +104,7 @@ def _upstream_status(e, finals=None, others=None):
     老规则一律取「核算日期最新」→ 拿 1 月的 64.99 去卡 12 月的单，假报「价格对不上」、补录历史单永远定不了稿。
     现在按远近挑：① 同组（同一核算表文件）② 同钉钉单 ③ 该产品的定稿版 ④ 核算日期 ≤ 本单的最近一版 ⑤ 最新版。pick 标明挑的是哪级。
 
-    **同名配不上时按 CP 码兜底**（V2.477，业务方 2026-09-06 实证 CP27115303）：料行写「钵钵鸡复合调味酱」、台账入的是「钵钵鸡风味复合调味料」，
+    **同名配不上时按 CP 码兜底**（V2.478，业务方 2026-09-06 实证 CP27115303）：料行写「钵钵鸡复合调味酱」、台账入的是「钵钵鸡风味复合调味料」，
     名字差一个字就被当成外购料漏掉，三个复配料只列两个。料行型号/编码栏里带研发码（SZY227003）时，与台账 cp_code 对上也算同一产品；
     matchBy 标「名称 / CP码」，upName 带回台账名供页面提示"名字不一致"。"""
     src = e.get("source")
@@ -137,7 +137,7 @@ def _upstream_status(e, finals=None, others=None):
         if not nm or m.get("seg") == "包材":       # 包材不可能是半成品
             continue
         cands, match_by = by_name.get(nm), "名称"
-        if not cands:                              # 同名配不上 → 料行型号/编码栏带的研发码与台账 cp_code 对（V2.477）
+        if not cands:                              # 同名配不上 → 料行型号/编码栏带的研发码与台账 cp_code 对（V2.478）
             for c in (_ncp(m.get("model")), _ncp(m.get("matCode"))):
                 if c and c in by_cp:
                     cands, match_by = by_cp[c], "CP码"

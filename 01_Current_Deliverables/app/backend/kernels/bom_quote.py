@@ -500,7 +500,7 @@ def upstream_refs(rec, recs):
     out = []
     for m in (rec.get("materials") or []):
         up = by_name.get(norm(m.get("matName")))
-        if not up:      # 同名配不上 → 料行型号/编码栏带的研发码与页的 CP 对（V2.477：「…调味酱」vs「…调味料」差一字）
+        if not up:      # 同名配不上 → 料行型号/编码栏带的研发码与页的 CP 对（V2.478：「…调味酱」vs「…调味料」差一字）
             up = next((by_cp[c] for c in (_ncp(m.get("model")), _ncp(m.get("matCode"))) if c and c in by_cp), None)
         if not up:
             continue
