@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-09-06 Author:Claude/c Version:V2.494
+// 取件机停机钉钉告警：卡片加「🔔停机钉钉告警」收件人配置（前端配手机号，停了自动发风控AI机器人钉钉）。
 // [Change Log] Date:2026-09-06 Author:Claude/c Version:V2.486
 // 银行流水上行取件机：①上传区加「取件机自动接入」状态条+「立即扫描共享盘」按钮；②自动推来源在状态行显示。
 // [Change Log] Date:2026-09-01 Author:Claude/c Version:V2.416
@@ -7,7 +9,7 @@
 // [Change Log] Date:2026-07-04 Author:Claude/c Version:V1.3
 // 数据接入页（四步工作流第1步，独立成页）：银行流水来源(导入目录+解析清单) / 金蝶序时账 / 每家银行覆盖对照。
 import React, { useEffect, useState } from 'react'
-import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee, confirmBankDup, requestBankScan } from '../api.js'
+import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee, confirmBankDup, requestBankScan, setBankAlertRecipients } from '../api.js'
 import Steps from '../components/Steps.jsx'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
@@ -24,6 +26,8 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
   const [msg, setMsg] = useState(null)
   const [dupOpen, setDupOpen] = useState(false), [dupBusy, setDupBusy] = useState(false)
   const [scanBusy, setScanBusy] = useState(false), [scanMsg, setScanMsg] = useState('')
+  const [alertOpen, setAlertOpen] = useState(false), [alertMob, setAlertMob] = useState(''), [alertMsg, setAlertMsg] = useState('')
+  useEffect(() => { if (d && d.bank_pull_alert_mobiles) setAlertMob((d.bank_pull_alert_mobiles || []).join('，')) }, [d && d.bank_pull_alert_mobiles])
   useEffect(() => { getDataSources().then(x => { _cache = x; setD(x) }).catch(() => {}) }, [cfg.source, cfg.year, cfg.period])
   useEffect(() => { setDir(cfg.bank_import_dir || '') }, [cfg.bank_import_dir])
   // 财资重复判定待人工确认：只要标记还挂着，进页面就再弹——不确认不算完，刷新躲不掉
@@ -64,6 +68,14 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
     setScanBusy(true); setScanMsg('')
     try { const r = await requestBankScan(); setScanMsg(r.msg || (r.ok ? '已通知取件机' : '通知失败')) }
     catch (e) { setScanMsg('通知失败：' + String(e)) } finally { setScanBusy(false) }
+  }
+  const doSaveAlert = async () => {
+    setAlertMsg('')
+    try {
+      const r = await setBankAlertRecipients(alertMob)
+      setAlertMsg(r.ok ? '✓ ' + (r.msg || '已保存') : '⚠ ' + (r.msg || '保存失败'))
+      if (r.ok) { const x = await getDataSources(); _cache = x; setD(x) }
+    } catch (e) { setAlertMsg('⚠ ' + String(e)) }
   }
   const doConfirmDup = async () => {
     setDupBusy(true)
@@ -203,7 +215,7 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
             </div>
             {down
               ? <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--red)', fontWeight: 600, lineHeight: 1.7 }}>
-                  ⚠ 取件机{bp ? '超过约 1 小时没有回报，可能那台内网电脑关机了、或定时任务停了' : '还没部署'}——
+                  ⚠ 取件机{bp ? '超过约 2 小时没有回报，可能那台内网电脑关机了、或定时任务停了' : '还没部署'}——
                   <b>此时共享盘的新流水不会自动接入，请联系管理员检查取件机</b>（那台常开内网电脑）。
                   期间可照旧用上方①手工上传流水包兜底。
                 </div>
@@ -213,6 +225,28 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
             {(bp && (bp.waiting || []).length > 0) &&
               <div style={{ marginTop: 6, fontSize: 12, color: 'var(--ink-3)' }}>等待中：{(bp.waiting || []).join('；')}</div>}
             {scanMsg && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>{scanMsg}</div>}
+
+            {/* 停机钉钉告警收件人（前端配）：停了自动发钉钉给这些人，不必盯着页面 */}
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--line)' }}>
+              <span style={{ fontSize: 12, color: 'var(--ink-2)', cursor: 'pointer' }} onClick={() => setAlertOpen(o => !o)}>
+                🔔 停机钉钉告警：{(d.bank_pull_alert_mobiles || []).length > 0
+                  ? <b style={{ color: 'var(--green)' }}>已开（{(d.bank_pull_alert_mobiles || []).length} 人）</b>
+                  : <b style={{ color: 'var(--amber)' }}>未设</b>}
+                <span style={{ color: 'var(--ink-3)', marginLeft: 6 }}>{alertOpen ? '收起 ▲' : '设置 ▼'}</span>
+              </span>
+              {alertOpen && <div style={{ marginTop: 6 }}>
+                <div style={{ fontSize: 11.5, color: 'var(--ink-3)', marginBottom: 4 }}>
+                  取件机停了（超约 2 小时没回报）会自动用风控AI机器人发钉钉提醒这些人。多个手机号用逗号隔开；留空＝关闭告警。
+                  {d.dingtalk_configured === false && <b style={{ color: 'var(--red)' }}> ⚠ 服务器未配钉钉（conf.ini [dingtalk]），配好收件人也发不出，需管理员先配钉钉应用。</b>}
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input type="text" value={alertMob} onChange={e => setAlertMob(e.target.value)} placeholder="钉钉手机号，多个用逗号隔开"
+                    style={{ ...inp, flex: '1 1 260px', height: 32 }} disabled={!canUpload} />
+                  <button className="btn" onClick={doSaveAlert} disabled={!canUpload} style={{ height: 32 }}>保存</button>
+                </div>
+                {alertMsg && <div style={{ marginTop: 4, fontSize: 12, color: alertMsg[0] === '✓' ? 'var(--green)' : 'var(--red)' }}>{alertMsg}</div>}
+              </div>}
+            </div>
           </div>
         })()}
 

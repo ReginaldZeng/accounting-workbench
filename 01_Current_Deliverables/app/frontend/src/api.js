@@ -63,6 +63,8 @@ export const syncChannelAdjust = () => j('/api/channel-adjust/sync', {method:'PO
 export const uploadBankZip = (file, password) => j('/api/bank-import/upload', {method:'POST', body:file, headers: password ? {'X-Zip-Password': encodeURIComponent(password)} : {}})
 export const confirmBankDup = () => jp('/api/bank-import/confirm-dup', {})
 export const requestBankScan = () => jp('/api/bank-pull/request-scan', {})
+export const getBankAlertRecipients = () => j('/api/bank-pull/alert-recipients')
+export const setBankAlertRecipients = (mobiles) => jp('/api/bank-pull/alert-recipients', { mobiles })
 export const getSubjectBalance = () => j('/api/subject-balance')
 // 报表仪表盘（子公司报表）：GET 读缓存，POST 强刷金蝶（V2.248）
 export const getReportDashboard = () => j('/api/report/dashboard')

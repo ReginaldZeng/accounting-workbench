@@ -1959,9 +1959,12 @@ def _reconcile():
 
 def _data_sources():
     """数据接入页：银行导入 manifest + 每家银行 金蝶↔银行 覆盖对照（不跑逐笔）。"""
+    _bankpull_alert_check()   # 有人打开数据接入页＝一次自检机会（页面加载时也能发现取件机停了）
     base = {"source": CFG["source"], "period": _period_str(),
             "bank_import_dir": CFG.get("bank_import_dir", ""), "updated_at": _now(),
-            "bank_pull": _bankpull_view(), "pull_enabled": bool(pull_token())}
+            "bank_pull": _bankpull_view(), "pull_enabled": bool(pull_token()),
+            "bank_pull_alert_mobiles": db.get_setting(_BANKPULL_ALERT_MOB, None) or [],
+            "dingtalk_configured": notifier.dingtalk_configured()}
     if CFG["source"] != "kingdee":
         return {**base, "bank_source": "样例数据", "manifest": [], "coverage": [],
                 "kd_count": 0, "balance_count": 0, "balance_by_subject": []}
@@ -2825,7 +2828,11 @@ async def bank_import_confirm_dup(request: Request):
 _BANKPULL_WANT = "bank_pull_want"      # 页面点「立即扫描」的标记（取件机下轮消费）
 _BANKPULL_SYNC = "bank_pull_sync"      # 取件机最近一次回报
 _BANKPULL_STAGE = "bank_pull_stage"    # 取件机推送落地目录（tag → 目录），收齐前的暂存区
-_BANKPULL_ALIVE_SEC = 4000             # 每小时一轮，容 1 轮多一点才算"停了"
+_BANKPULL_ALERTED = "bank_pull_alerted"          # 停机告警去重标记（已发过 → 不重复刷屏；恢复后清）
+_BANKPULL_ALERT_MOB = "bank_pull_alert_mobiles"  # 停机钉钉告警收件人（手机号列表，前端配）
+# 每小时一轮 → 正常每 60 分钟才回报一次。阈值必须 > 1 轮间隔，否则每轮正常间隔前都会误判"停了"。
+# 取 130 分钟：漏跑约 2 轮才算停，既不误报、真停了也能在两小时内发现。页面红灯与钉钉告警共用此阈值。
+_BANKPULL_ALIVE_SEC = 130 * 60
 
 
 def _bankpull_dir(tag):
@@ -2838,6 +2845,7 @@ def bank_pull_pending(request: Request):
     """取件机每轮先问：有没有人点过「立即扫描」。响应极小、可勤问。"""
     if not pull_token_ok(request):
         return JSONResponse({"ok": False, "msg": "取件令牌无效"}, status_code=403)
+    _bankpull_alert_check()   # 顺手自检停机告警（取件机来问＝它还活着，主要靠别处入口发现它"没来问"）
     w = db.get_setting(_BANKPULL_WANT, None)
     return {"ok": True, "pending": bool(w), "at": (w or {}).get("at", ""), "by": (w or {}).get("by", "")}
 
@@ -2949,6 +2957,95 @@ def _bankpull_view():
     out["ago_sec"] = ago
     out["alive"] = (ago is not None and ago <= _BANKPULL_ALIVE_SEC)
     return out
+
+
+def _bankpull_alert_check():
+    """取件机停机的钉钉告警自检（服务器侧，需求方定 2026-09-06）。
+    取件机停了它自己不会上报（都停了怎么报），故由服务器主动判：最近回报超阈值＝停了。
+    **只在"从在跑变成停了"那一刻发一次**（去重标记防刷屏），恢复后清标记、下次真停才再发。
+    收件人在前端配（DB bank_pull_alert_mobiles）；没配收件人则不发、也不置标记（配好后仍能首次告警）。
+    本函数被多处高频入口调用（bank-pull/pending、报表取件机每分钟的 pending、页面 data-sources），
+    故必须极轻且绝不抛错——判定只是读一个 setting 比时间戳，真要发时才走钉钉。"""
+    try:
+        rec = db.get_setting(_BANKPULL_SYNC, None)
+        if not rec:
+            return   # 从未回报过（未部署）——不在此告警，页面已显"未部署"，避免把"没装"当"停机"骚扰
+        ago = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                ago = max(0, int((datetime.datetime.now() - datetime.datetime.strptime(rec.get("at", ""), fmt)).total_seconds()))
+                break
+            except Exception:
+                continue
+        if ago is None:
+            return
+        down = ago > _BANKPULL_ALIVE_SEC
+        alerted = db.get_setting(_BANKPULL_ALERTED, None)
+        if down and not alerted:
+            mobiles = db.get_setting(_BANKPULL_ALERT_MOB, None) or []
+            if not mobiles:
+                return   # 没配收件人：不发也不置标记，待配好后仍能对当前这次停机首告警
+            host = rec.get("host", "?")
+            last = rec.get("at", "?")
+            mins = round(ago / 60)
+            text = ("⚠ 银行流水取件机可能已停\n\n最近一次回报：%s（约 %d 分钟前）\n所在电脑：%s\n\n"
+                    "此时共享盘的新流水不会自动接入工作台。请检查那台常开内网电脑是否关机、"
+                    "或「银行流水取件机」计划任务是否停了。期间可在「数据接入」页手工上传流水包兜底。"
+                    % (last, mins, host))
+            conf = notifier.load_dingtalk_conf()
+            if conf:
+                conf = {**conf, "mobiles": [str(m) for m in mobiles], "userids": []}
+            res = notifier.send_dingtalk(text, conf)
+            db.set_setting(_BANKPULL_ALERTED, {"at": _now(), "ago_sec": ago,
+                                               "sent": bool(res.get("sent")), "detail": res}, "系统告警")
+        elif (not down) and alerted:
+            # 恢复了：清标记 + 发一条恢复通知（让收到过告警的人知道好了）
+            mobiles = db.get_setting(_BANKPULL_ALERT_MOB, None) or []
+            if mobiles:
+                conf = notifier.load_dingtalk_conf()
+                if conf:
+                    conf = {**conf, "mobiles": [str(m) for m in mobiles], "userids": []}
+                notifier.send_dingtalk("✓ 银行流水取件机已恢复\n\n最近回报：%s。共享盘自动接入恢复正常。"
+                                       % rec.get("at", "?"), conf)
+            db.set_setting(_BANKPULL_ALERTED, None, "系统告警")
+    except Exception:
+        pass   # 告警自检绝不能弄垮任何调用它的接口
+
+
+@app.get("/api/bank-pull/alert-recipients")
+def bank_pull_alert_get(request: Request):
+    """读停机告警收件人（前端配置用）。"""
+    u = _require_perm(request, "bank_upload")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    return {"ok": True, "mobiles": db.get_setting(_BANKPULL_ALERT_MOB, None) or [],
+            "dingtalk_configured": notifier.dingtalk_configured()}
+
+
+@app.post("/api/bank-pull/alert-recipients")
+def bank_pull_alert_set(body: dict, request: Request):
+    """存停机告警收件人（钉钉手机号列表，前端配）。空＝关闭告警。"""
+    u = _require_perm(request, "bank_upload")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    raw = body.get("mobiles")
+    if isinstance(raw, str):
+        import re as _re
+        raw = [x for x in _re.split(r"[,;，；、\s]+", raw) if x]
+    mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
+    bad = [m for m in mobiles if not _re_mobile_ok(m)]
+    if bad:
+        return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
+    db.set_setting(_BANKPULL_ALERT_MOB, mobiles, u["name"])
+    db.set_setting(_BANKPULL_ALERTED, None, u["name"])   # 改收件人＝重置告警状态，避免旧标记压着不发
+    db.audit(u["name"], "配置取件机告警收件人", _period_str(), "钉钉告警手机号 %d 个" % len(mobiles))
+    return {"ok": True, "mobiles": mobiles,
+            "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空收件人（停机告警关闭）"}
+
+
+def _re_mobile_ok(m):
+    import re as _re
+    return bool(_re.match(r"^\d{11}$", str(m)))
 
 
 @app.post("/api/kingdee/refresh")

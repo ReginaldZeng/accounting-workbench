@@ -441,6 +441,13 @@ def rptexport_pending(request: Request):
     取件机以为"服务器空了"，把共享盘上的报表全清光。指令式从根上没有这个失效模式。"""
     if not _pull_ok(request):
         return JSONResponse({"ok": False, "msg": "需要「报表导出」权限或正确的取件令牌"}, status_code=403)
+    # 顺手替【银行流水取件机】做停机自检：报表取件机每分钟来问一次，是最可靠的独立心跳源——
+    # 银行取件任务停了但机器还开着时，靠它每分钟触发一次检查（惰性 import 避免与 app 循环依赖）。
+    try:
+        import app as _app
+        _app._bankpull_alert_check()
+    except Exception:
+        pass
     w = db.get_setting(_WANT_KEY, None)
     return {"ok": True, "pending": bool(w), "at": (w or {}).get("at", ""), "by": (w or {}).get("by", ""),
             "delete": [x["rel"] for x in (db.get_setting(_DEL_KEY, None) or [])]}
