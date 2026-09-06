@@ -3402,7 +3402,8 @@ def bom_repoint(source, product_key):
     实证 2026-09-06：删掉 522031 的酱（指针版）后，240399 那版酱状态仍是「初审」但没指针 → 标准台账 0 行、待办也不显示（最新版已初审不算待办），成了幽灵。"""
     if bom_get_final(source, product_key):
         return None
-    rows = [x for x in bom_list_entries(source, product_key) if x.get("status") in ("初审", "已审核")]
+    rows = [x for x in bom_list_entries(source, product_key)
+            if x.get("status") in ("初审", "已审核") and not x.get("historical")]   # 历史版不对外，不能被自愈成指针（V2.464）
     if not rows:
         return None
     best = max(rows, key=lambda x: (x.get("calc_date") or "", x["id"]))

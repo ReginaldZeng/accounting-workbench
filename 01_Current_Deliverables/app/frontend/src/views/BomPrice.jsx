@@ -226,7 +226,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   return (
     <div className="bom-mask" onClick={e => { if (e.target.classList.contains('bom-mask')) onClose() }}>
       <div className="bom-modal" style={{ width: 'min(620px,100%)' }}>
-        <div className="bom-mhead"><b>审核定稿 · {entry.productName}</b><span className="bom-x" onClick={onClose}>✕</span></div>
+        <div className="bom-mhead"><b>审核归档 · {entry.productName}</b><span className="bom-x" onClick={onClose}>✕</span></div>
         <div className="bom-msub">编码 <b className="mono">{entry.cpCode}</b>　·　生产工厂 {entry.supplier || '—'}
           {entry.kindDoubt && <span style={{ color: 'var(--amber)' }}>　⚠ 按编码判「{entry.kindAuto}」但产品名不符，请据实指定</span>}</div>
         {missing.length > 0
@@ -291,7 +291,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           <button className="btn-sec" onClick={onClose}>取消</button>
           <button className="btn-pri" disabled={busy} onClick={save}
             style={(willFinalize && (cands.length === 0 || obs)) ? { background: 'var(--green)', borderColor: 'var(--green)' } : undefined}>
-            {busy ? '保存中…' : ((willFinalize && (cands.length === 0 || obs)) ? '✓ 保存定性并定稿' : '仅保存定性')}</button>
+            {busy ? '保存中…' : ((willFinalize && (cands.length === 0 || obs)) ? '✓ 保存定性并归档' : '仅保存定性')}</button>
         </div>
       </div>
       {cmpFirst && <CompareEntriesModal entry={entry} lk={erpLk} onAdopt={adoptErp} flash={flash} onClose={() => setCmpFirst(null)}
@@ -403,7 +403,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
   const [fch, setFch] = useState('all')         // all | ecom | common | tob | toc
   const [q, setQ] = useState('')
   const [showObs, setShowObs] = useState(false) // 换码承接：已失效（被已终审新版替代）的旧版默认收起
-  const rows = data.rows || []
+  const [showHist, setShowHist] = useState(false) // 历史版（答 C / 历史补录）：已归档不对外，默认收起
+  const histRows = data.hist || []
+  const rows = (data.rows || []).concat(showHist ? histRows : [])
   const versionsOf = (pk) => (data.all || []).filter(x => x.productKey === pk)
   const isDead = (r) => !!(r.obsoleteBy && r.obsoleteBy.live)
   const deadCount = rows.filter(isDead).length
@@ -475,6 +477,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
         <td className="mono" style={{ fontWeight: 600 }}>{r.cpCode}</td>
         <td style={{ fontWeight: 600 }}>{r.productName}
           {r.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + r.quoteReason}>禁报价</span>}
+          {r.historical && <span className="tag late" style={{ marginLeft: 6 }} title="历史版：已归档但不对外、不占定稿指针（补录或答 C）">历史版·不对外</span>}
           {r.obsoleteBy && (dead
             ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
             : <span className="tag late" style={{ marginLeft: 6 }} title={`${r.obsoleteBy.cpCode} 已初审、待终审；其终审通过后本版退出对外台账。在此之前 BP 仍用本版`}>待替代 · {r.obsoleteBy.cpCode} 待终审</span>)}
@@ -551,6 +554,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
             {deadCount > 0 && <button className={'btn-sec' + (showObs ? ' on' : '')} style={{ fontSize: 11.5 }} onClick={() => setShowObs(v => !v)}
               title="被已终审新版替代（同CP重核 / 不同CP同物料编码）的旧版：记录与历史都在，只是不再对外">
               {showObs ? '隐藏' : '显示'}已失效 {deadCount}</button>}
+            {histRows.length > 0 && <button className={'btn-sec' + (showHist ? ' on' : '')} style={{ fontSize: 11.5 }} onClick={() => setShowHist(v => !v)}
+              title="历史版：补录/答 C 归档的老版本，已审但不对外、不占定稿指针">
+              {showHist ? '隐藏' : '显示'}历史版 {histRows.length}</button>}
           </>}
           {!isStd && doneCount > 0 && <button className={'btn-sec' + (showDone ? ' on' : '')} style={{ fontSize: 11.5 }} onClick={() => setShowDone(v => !v)}
             title="产品已全部初审（成本会计任务完成）的钉钉单：默认不占待办；终审在「标准成本台账」由财务BP做">
@@ -961,7 +967,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
       flash('已定稿 · ' + (r.affectedPricing?.note || '')); await onChanged()
     } catch (e) { flash('定稿失败：' + e.message) }
   }
-  const unfinalize = async () => { try { await bomUnfinalize(entry.id); flash('已撤销定稿'); await onChanged() } catch (e) { flash(e.message) } }
+  const unfinalize = async () => { try { await bomUnfinalize(entry.id); flash('已撤销归档，退回复核'); await onChanged() } catch (e) { flash(e.message) } }
   const confirmStep = async (s, on) => {
     try { await bomConfirmStep(entry.id, s, on); flash(on ? '已确认' : '已撤销确认'); await onChanged() }
     catch (e) { flash('操作失败：' + e.message) }
@@ -999,35 +1005,43 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', position: 'relative' }}>
-          <button className="btn-sec" onClick={onBack}>返回台账</button>
-          {versions.length > 1 && <button className="btn-sec" onClick={onCompare}>⇄ 版本对比</button>}
-          {cfg?.canExport && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)}>导出 ▾</button>
+          {/* 动作条（业务方定序 2026-09-06，V2.463）：返回上一级 · 导出核算表 · 申请作废 · 修改价税费 · 审核归档 · 删除（主管理员）
+              颜色＝动作性质：灰边＝导航/只读（返回、导出）；琥珀边＝可逆申请（申请作废、撤销归档）；蓝边＝编辑（修改价税费、改定性）；
+              绿实心＝主流程正向动作（审核归档、保存）；琥珀实心＝审批他人申请（作废终审）；红实心＝不可逆（删除，仅主管理员） */}
+          <button className="btn-sec" onClick={onBack} title="回到来处（处理页或台账列表）">‹ 返回上一级</button>
+          {cfg?.canExport && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)} title="下载或预览核算表；同产品多版时可看版本对比">⤓ 导出核算表 ▾</button>
           {expMenu && <div className="bom-menu" onMouseLeave={() => setExpMenu(false)}>
             <a href={bomExportOriginalUrl(entry.id)}><b>原版核算表（源附件）</b><span>审批附件 xlsx 原样下载，供留档核对</span></a>
             <a href={bomExportOriginalUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览原版</b><span>不下载，在新标签页查看</span></a>
             <a href={bomExportPrettyUrl(entry.id)}><b>重排版核算表（美化）</b><span>台账口径重排版，含费用参数与勾稽说明</span></a>
             <a href={bomExportPrettyUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览重排版</b><span>不下载，在新标签页查看</span></a>
+            {versions.length > 1 && <a onClick={() => { setExpMenu(false); onCompare() }}><b>⇄ 版本对比</b><span>同产品 {versions.length} 个版本逐料涨跌</span></a>}
           </div>}</>}
-          {!isStd && !edit && cfg?.canAudit && <button className="btn-sec" onClick={startEdit}>✎ 复核（改税率/费用）</button>}
-          {edit && <><button className="btn-pri" disabled={saving} onClick={save}>保存并留痕</button>
-            <button className="btn-sec" onClick={cancelEdit}>取消</button></>}
-          {/* 审核定性＝定稿（业务方定：不做成两个动作）。四步未齐时按钮可点但弹窗内会拦并提示缺哪步 */}
-          {!isStd && !edit && cfg?.canAudit && !entry.isFinal && <button className="btn-pri" onClick={() => setAuditM(true)}
-            disabled={!entry.stepsOk}
-            title={entry.stepsOk ? '填物料类别+是否允许报价，保存即定稿' : '请先确认四步：①BOM清单 ②工艺流程 ③用量自洽 ④报价核算'}
-            style={{ background: entry.stepsOk ? 'var(--green)' : undefined, borderColor: entry.stepsOk ? 'var(--green)' : undefined }}>
-            ⚑ 审核定稿（定性+毕业进标准台账）</button>}
-          {!isStd && !edit && cfg?.canAudit && entry.isFinal && <button className="btn-sec" onClick={() => setAuditM(true)}>⚑ 改定性</button>}
-          {!edit && cfg?.canAudit && entry.isFinal && <button className="btn-sec" onClick={unfinalize}>撤销定稿</button>}
-          {/* 作废：申请（成本会计）/ 终审批准（财务BP）——作废=标记不删除，两步防一人闭环 */}
-          {/* 申请作废：V2.431 恢复（业务方要清残留单）——作废=标记不删、须终审批准；主管理员可自批（同终审口径） */}
+          {!cfg?.canExport && versions.length > 1 && <button className="btn-sec" onClick={onCompare}>⇄ 版本对比</button>}
+          {/* 申请作废（琥珀边）：作废＝标记不删、须财务BP终审批准；主管理员可自批 */}
           {!edit && entry.active && !entry.voidPending && cfg?.canAudit &&
-            <button className="btn-sec" onClick={() => setVoidM('request')} title="申请作废本版（留痕不删除，须财务BP终审批准；主管理员可自批）">⌦ 申请作废</button>}
+            <button className="btn-sec" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }} onClick={() => setVoidM('request')}
+              title="申请作废本版（留痕不删除，须财务BP终审批准；主管理员可自批）">⌦ 申请作废</button>}
           {!edit && entry.voidPending && cfg?.canFinalReview &&
-            <button className="btn-pri" style={{ background: 'var(--red)', borderColor: 'var(--red)' }}
-              onClick={() => setVoidM('review')}>⌦ 作废终审（有待批准）</button>}
-          {/* 主管理员密钥删除（V2.459）：真删本条记录 + 留档文件；作废仍是标记。密钥在服务器 conf.ini，未配置则通道关闭 */}
-          {!edit && isSuper && onDelete && <button className="btn-sec" style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+            <button className="btn-pri" style={{ background: 'var(--amber)', borderColor: 'var(--amber)' }}
+              onClick={() => setVoidM('review')} title="财务BP：批准或驳回成本会计的作废申请">⌦ 作废终审（有待批准）</button>}
+          {/* 修改价税费（蓝边）：复核＝改税率/费用/发票类型/明细，留痕；改了成本会自动打回重审 */}
+          {!isStd && !edit && cfg?.canAudit && <button className="btn-sec" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={startEdit}
+            title="改税率 / 费用参数 / 发票类型 / 明细，逐项留痕；改了成本会打回重新归档">✎ 修改价税费</button>}
+          {edit && <><button className="btn-pri" disabled={saving} onClick={save} style={{ background: 'var(--green)', borderColor: 'var(--green)' }}>✓ 保存并留痕</button>
+            <button className="btn-sec" onClick={cancelEdit}>取消</button></>}
+          {/* 审核归档（绿实心）＝定性+初审盖戳+毕业进标准台账，一个动作。四步未齐禁用并提示缺哪步 */}
+          {!isStd && !edit && cfg?.canAudit && !entry.isFinal && !entry.historical && <button className="btn-pri" onClick={() => setAuditM(true)}
+            disabled={!entry.stepsOk}
+            title={entry.stepsOk ? '填物料类别 + 是否允许报价，保存即初审归档、进标准成本台账' : '请先确认 ③用量自洽 ④报价核算 两步（①②只看不确认）'}
+            style={{ background: entry.stepsOk ? 'var(--green)' : undefined, borderColor: entry.stepsOk ? 'var(--green)' : undefined }}>
+            ⚑ 审核归档</button>}
+          {!isStd && !edit && cfg?.canAudit && (entry.isFinal || entry.historical) && <button className="btn-sec" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}
+            onClick={() => setAuditM(true)} title="改物料类别 / 报价结论（会重新归档、清终审戳）">⚑ 改定性</button>}
+          {!edit && cfg?.canAudit && (entry.isFinal || entry.historical) && <button className="btn-sec" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}
+            onClick={unfinalize} title="撤下初审戳与定稿指针，退回复核">↶ 撤销归档</button>}
+          {/* 删除（红实心，仅主管理员）：真删本条记录 + 留档文件，需 conf.ini 密钥，留全局审计 */}
+          {!edit && isSuper && onDelete && <button className="btn-pri" style={{ background: 'var(--red)', borderColor: 'var(--red)', marginLeft: 6 }}
             title="主管理员：永久删除本条记录（需密钥；留全局审计）" onClick={() => onDelete({ entryId: entry.id }, `记录 #${entry.id} · ${entry.cpCode} ${entry.productName}`)}>🗑 删除</button>}
         </div>
       </div>
@@ -2315,6 +2329,7 @@ function FinalReviewModal({ row, onClose, onDone, flash }) {
 // 哪些能入账、哪里不对、怎么修，统统到「处理页」去看去办——不在这个录入框里判。
 function IntakeModal({ cfg, onClose, onDone, flash }) {
   const [appno, setAppno] = useState('')
+  const [hist, setHist] = useState(false)     // 历史补录（V2.464）：不走常规审核，入账即归档为历史版（不对外）
   const [busy, setBusy] = useState('')
   const [res, setRes] = useState(null)
   useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
@@ -2323,7 +2338,7 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
     if (!appno.trim()) return flash('请填钉钉审批编号')
     setBusy('dt')
     try {
-      const r = await bomIntake(appno.trim())
+      const r = await bomIntake(appno.trim(), hist)
       if (!r.ok) { flash(r.msg || '立项失败'); setRes(r.commentPending ? r : null) }
       else setRes(r)
     } catch (e) { flash('立项失败：' + e.message) } finally { setBusy('') }
@@ -2334,7 +2349,7 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
     try {
       const up = await bomUpload([...files], appno.trim())
       if (!up.ok) return flash(up.msg || '上传失败')
-      const bk = await bomBook(up.stagingId, up.records.map(x => x.idx))   // 全量交给后端判，不在这勾选
+      const bk = await bomBook(up.stagingId, up.records.map(x => x.idx), hist)   // 全量交给后端判，不在这勾选
       setRes({ ok: true, approvalNo: appno.trim(), booked: bk.booked, rejected: bk.rejected,
                skipped: bk.skipped, warnings: up.warnings || [] })
     } catch (e) { flash('上传失败：' + e.message) } finally { setBusy('') }
@@ -2346,6 +2361,14 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
         <div className="bom-mhead"><b>立项（生成待办）</b><span className="bom-x" onClick={onClose}>✕</span></div>
         <div className="bom-msub">录入钉钉审批编号即可立项。系统会抓附件、解析、**能入账的自动入账，不能入的记为「待修」**——
           具体哪些能入、哪里不对、怎么修，都在<b>处理页</b>里看。</div>
+        {/* 历史补录（业务方定 2026-09-06「历史数据引入不走常规审核」）：勾上后本次入账的记录直接归档为历史版 */}
+        <label className="banner" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', margin: '8px 0 4px',
+          background: hist ? 'var(--amber-bg)' : 'var(--bg-sub)', color: hist ? 'var(--amber)' : 'var(--ink-2)', border: '1px solid ' + (hist ? 'var(--amber-line)' : 'var(--line)') }}>
+          <input type="checkbox" checked={hist} onChange={e => setHist(e.target.checked)} style={{ marginTop: 3 }} />
+          <span><b>历史补录</b>——不走常规审核：入账后直接归档为<b>历史版</b>（盖「历史补录」戳、四步视为已确认、物料类别取建议值），
+            <b>不对外、不占定稿指针、不进换码候选</b>，只留作历史与上游链路依据。勾稽不平的照旧拦下记待修。
+            <span className="muted">现在正在用的那一单不要勾，走正常审核。</span></span>
+        </label>
 
         <div className="bom-mstep"><span className="bom-mno">1</span><div style={{ flex: 1 }}>
           <b>钉钉审批编号</b>
@@ -2375,6 +2398,7 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
             <span className="tag ok">已入账 {(res.booked || []).length}</span>{' '}
             {(res.rejected || []).length > 0 && <span className="tag leak">待修 {res.rejected.length}</span>}{' '}
             {(res.skipped || []).length > 0 && <span className="tag unmap">跳过 {res.skipped.length}</span>}
+            {res.historical && <span className="tag late" style={{ marginLeft: 4 }}>历史补录 · 已归档为历史版，不对外</span>}
           </div>
           {(res.rejected || []).length > 0 && <div className="bom-chkfail">
             {res.rejected.map((r, i) => <div key={i}>· <b>{r.productName}</b>：{r.reason}</div>)}

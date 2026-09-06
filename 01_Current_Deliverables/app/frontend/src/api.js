@@ -296,7 +296,7 @@ export const getBomLedger = (mode = 'std') => j('/api/bom/ledger?mode=' + mode)
 export const getBomEntry = (id) => j(`/api/bom/entry/${id}`)
 export const bomFetchApproval = (approvalNo) => jp('/api/bom/fetch-approval', { approvalNo })
 export const bomUpload = (files, approvalNo) => { const fd = new FormData(); (Array.isArray(files) ? files : [files]).forEach(f => f && fd.append('file', f)); if (approvalNo) fd.append('approvalNo', approvalNo); return fetch('/api/bom/upload', { method: 'POST', body: fd }).then(r => r.json()) }
-export const bomBook = (stagingId, indexes) => jp('/api/bom/book', { stagingId, indexes })
+export const bomBook = (stagingId, indexes, historical = false) => jp('/api/bom/book', { stagingId, indexes, historical })
 export const bomReview = (entryId, fee, channel, materials) => jp('/api/bom/review', { entryId, fee, channel, materials })
 export const bomConfirmStep = (entryId, step, on = true) => jp('/api/bom/confirm-step', { entryId, step, on })
 export const bomApplyGoods = (entryId) => jp('/api/bom/apply-goods', { entryId })
@@ -309,7 +309,8 @@ export const bomLinkParallel = (entryId, otherId, on = true) => jp('/api/bom/lin
 // 主管理员密钥删除（真删）：target = {entryId} | {groupId, approvalNo} | {approvalNo}；dryRun 只回影响面。密钥在服务器 conf.ini [bom] delete_key
 export const bomDelete = (target, key, reason, dryRun = false) => jp('/api/bom/delete', { ...target, key, reason, dryRun })
 export const getBomApproval = (no) => j('/api/bom/approval?no=' + encodeURIComponent(no))
-export const bomIntake = (approvalNo) => jp('/api/bom/intake', { approvalNo })
+// historical（V2.464）：历史补录——入账后直接归档为历史版，不走四步/初审/终审，不对外、不动定稿指针
+export const bomIntake = (approvalNo, historical = false) => jp('/api/bom/intake', { approvalNo, historical })
 export const bomFinalReview = (entryId, approve, note) => jp('/api/bom/final-review', { entryId, approve, note })
 export const bomVoidRequest = (payload) => jp('/api/bom/void-request', payload)
 export const bomVoidReview = (payload) => jp('/api/bom/void-review', payload)

@@ -701,7 +701,7 @@ async def bom_ledger(request: Request):
     entries = db.bom_list_entries(src)
     # 指针自愈（V2.461）：已初审/已审核却没定稿指针的产品（指针版被删/替换后另一版还在）→ 指向最新一版，别让它在两个页面都消失
     healed = False
-    for pk in {e.get("product_key") for e in entries if e.get("status") in ("初审", "已审核") and e.get("product_key") not in finals}:
+    for pk in {e.get("product_key") for e in entries if e.get("status") in ("初审", "已审核") and not e.get("historical") and e.get("product_key") not in finals}:
         rid = db.bom_repoint(src, pk)
         if rid:
             db.bom_add_audit(rid, u["name"], "定稿指针自愈", "", "该产品无定稿指针（指针版已删/替换），指针改指本版")
@@ -731,7 +731,9 @@ async def bom_ledger(request: Request):
                 rows.append(cur)
     rows.sort(key=lambda x: (x["calcDate"], x["id"]), reverse=True)
     approvals = _approval_summ(views, db.bom_pending_list(src)) if mode != "std" else []
-    return {"ok": True, "source": src, "mode": mode, "rows": rows, "all": visible,
+    # 历史版（V2.462 答 C / V2.464 历史补录）：已归档但不对外、不占指针 → 标准台账默认不列，另给 hist 供「显示历史版」切换
+    hist = sorted([v for v in views if v.get("historical")], key=lambda x: (x["calcDate"], x["id"]), reverse=True) if mode == "std" else []
+    return {"ok": True, "source": src, "mode": mode, "rows": rows, "all": visible, "hist": hist,
             "finals": finals, "approvals": approvals,
             # 标准台账：已初审、待财务BP终审的条数（BP 要拿这数报价，得知道哪些还没终审、还没对外）
             "needAck": sum(1 for r in rows if r.get("needFinalReview")),
@@ -1411,9 +1413,11 @@ async def bom_upload(request: Request):
     return out
 
 
-def _book_staged(prev, sid, idxs, u):
+def _book_staged(prev, sid, idxs, u, historical=False):
     """入账核心（抽出来给「立项」与「入账」共用）。勾稽不平/上游不平的一律拒（红线）；
-    排版差异版（数字指纹重复）跳过；整组一条没入 → 记「待修」批次，留在待办里可见可修。"""
+    排版差异版（数字指纹重复）跳过；整组一条没入 → 记「待修」批次，留在待办里可见可修。
+    historical（V2.464，业务方定「历史数据引入不走常规审核」）：入账后直接归档为**历史版**——盖「历史补录」初审戳、四步标已确认、
+    物料类别取建议值、`historical=1`；**不动定稿指针、不对外、不进换码候选**，只留作历史与下游上游链路的依据。勾稽红线照拦。"""
     src = _src()
     appno = prev.get("approvalNo") or ""
     # 组锚：同一核算表文件(stagedFile)的产品共用 group_id（成品归组键作锚，替换后落回同组）
@@ -1482,6 +1486,14 @@ def _book_staged(prev, sid, idxs, u):
             "approval_no": appno, "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"),
             "status": "未复核", "created_by": u["name"],
         })
+        if historical:                       # 历史补录：直接归档为历史版（不对外、不动指针），见函数注释
+            from core import _now as _n
+            ts = _n()
+            db.bom_update_entry(eid, {"status": "初审", "finalized_by": "历史补录", "finalized_at": ts, "historical": 1,
+                                      "review_steps": {"qty": {"by": "历史补录", "at": ts}, "price": {"by": "历史补录", "at": ts}},
+                                      "mat_category": bq.suggest_category(rec.get("cpCode"), rec.get("productName"), rec.get("supplier")),
+                                      "classified_by": "历史补录", "classified_at": ts})
+            db.bom_add_audit(eid, u["name"], "历史补录", "", "不走常规审核：直接归档为历史版（不对外、不动定稿指针、物料类别取建议值）")
         # 源附件永久留档（供「原版核算表」导出）；商品版另存一份留档
         try:
             pdir = os.path.join(UPLOAD_DIR, src)
@@ -1542,7 +1554,7 @@ async def bom_book(request: Request):
     prev = _load_staging(sid)
     if not prev:
         return JSONResponse({"ok": False, "msg": "预检数据已过期，请重新取数/上传"}, status_code=400)
-    return _book_staged(prev, sid, idxs, u)
+    return _book_staged(prev, sid, idxs, u, historical=bool(body.get("historical")))
 
 
 @router.post("/api/bom/intake")
@@ -1573,11 +1585,12 @@ async def bom_intake(request: Request):
             msg += "另有 %d 个评论区补传附件当前钉钉权限取不到，请手工下载后上传。" % len(comment_pending)
         return JSONResponse({"ok": False, "msg": msg, "commentPending": comment_pending}, status_code=400)
     stg = _stage_files(files, appno, "dingtalk_form")
+    historical = bool(body.get("historical"))
     r = _book_staged(_load_staging(stg["stagingId"]), stg["stagingId"],
-                     set(x["idx"] for x in stg["records"]), u)
+                     set(x["idx"] for x in stg["records"]), u, historical=historical)
     db.audit(u["name"], "bom_intake", target=appno,
-             detail="立项：附件 %d、入账 %d、待修 %d" % (len(files), len(r["booked"]), len(r["rejected"])))
-    return {"ok": True, "approvalNo": appno, "title": res.get("title"),
+             detail="%s：附件 %d、入账 %d、待修 %d" % ("历史补录" if historical else "立项", len(files), len(r["booked"]), len(r["rejected"])))
+    return {"ok": True, "approvalNo": appno, "title": res.get("title"), "historical": historical,
             "booked": r["booked"], "rejected": r["rejected"], "skipped": r["skipped"],
             "commentPending": comment_pending, "warnings": stg.get("warnings") or []}
 
