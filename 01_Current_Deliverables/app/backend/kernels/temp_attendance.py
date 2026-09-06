@@ -795,7 +795,23 @@ def compute(summary, punch, params=None, contract=None, picks=None):
         rec, cand = match_punch(punch, person["name"], picks)
         _ambig = bool(cand)          # 归一后撞上多个人：逐日判「同名待指认」，不判「无打卡」
         if cand:
-            ambiguous.append({"姓名": person["name"], "候选": cand})
+            # 给成本会计定人用的三样：**人力上报了多少工时/几天**、每个候选**命中几个上工日**。
+            # 光有「打卡几天」没法判——得知道上报的班落在哪几天，才看得出哪个候选的打卡对得上。
+            _updays = {int(d) for d, h in (person.get("days") or {}).items() if h and float(h) > 0}
+            _uph = round(sum(float(h) for h in (person.get("days") or {}).values()
+                             if h and float(h) > 0), 2)
+            _recs = punch["by_key"].get(norm_name(person["name"])) or []
+            _seen, _cc = set(), []
+            for c in cand:                       # 按尾号去重：归一把同名多结算行的候选并到一起，会重复
+                _t = str(c.get("手机尾号") or "")
+                if _t and _t in _seen:
+                    continue
+                _seen.add(_t)
+                _cr = next((r for r in _recs if str(r.get("标识") or "").strip() == _t), None)
+                c["命中上工日"] = len(set(_cr.get("days") or {}) & _updays) if _cr else 0
+                _cc.append(c)
+            ambiguous.append({"姓名": person["name"], "上报工时": _uph, "上报天数": len(_updays),
+                              "上工日数": len(_updays), "候选": _cc})
         elif not rec:
             unmatched.append(person["name"])
         kind = shift_type(person)

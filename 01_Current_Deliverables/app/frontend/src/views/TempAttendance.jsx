@@ -2224,18 +2224,27 @@ function AmbigTable({ rows, n, onPick, busy }) {
       <button className="btn" style={{ padding: '2px 10px', fontSize: 12, marginLeft: 'auto' }}
         onClick={() => setOpen(!open)}>{open ? '收起' : '展开'}</button>
     </div>
-    {open && <div style={{ maxHeight: 340, overflow: 'auto' }}>
+    {open && <div>
       <table className="tbl" style={{ fontSize: 12, width: '100%' }}>
-        <thead><tr><th>姓名</th><th>候选钉钉部门</th><th>尾号</th><th>当月打卡</th><th>命中上工日</th><th></th></tr></thead>
+        <thead><tr>
+          <th>姓名</th><th>人力上报</th><th>候选钉钉部门</th><th>尾号</th>
+          <th>当月打卡</th><th>命中上报日</th><th></th>
+        </tr></thead>
         <tbody>
           {rows.map((x, i) => (x.候选 || []).map((c, j) => {
             const obj = typeof c === 'string' ? { 部门: c } : c
             return <tr key={`${i}-${j}`}>
               <td>{j === 0 ? <b>{x.姓名}</b> : ''}</td>
+              {/* 上报是这个人的，摆在第一行；后面几行留空免得重复刷屏 */}
+              <td>{j === 0 ? (x.上报工时 != null ? `${x.上报工时}h / ${x.上报天数}天` : '—') : ''}</td>
               <td title={obj.部门 || ''}>{shortDept(obj.部门) || '（打卡表没写部门）'}</td>
               <td><b>{obj.手机尾号 || '?'}</b></td>
               <td>{obj.打卡日数 != null ? `${obj.打卡日数} 天` : '—'}</td>
-              <td>{obj.命中上工日 != null && x.上工日数 != null ? `${obj.命中上工日} / ${x.上工日数}` : '—'}</td>
+              {/* 命中上报日＝这个候选的打卡落在人力上报的那几天里几天——越接近上报天数越像本人 */}
+              <td>{obj.命中上工日 != null && x.上工日数 != null
+                ? <b style={{ color: obj.命中上工日 >= (x.上工日数 || 0) && x.上工日数 ? '#166534' : undefined }}>
+                    {obj.命中上工日} / {x.上工日数}</b>
+                : '—'}</td>
               <td>{onPick && obj.手机尾号 && <button className="btn primary" disabled={busy}
                 style={{ padding: '2px 10px', fontSize: 12 }}
                 onClick={() => onPick(x.姓名, obj)}>就是TA →</button>}</td>
