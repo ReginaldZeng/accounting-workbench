@@ -2988,7 +2988,7 @@ def _bankpull_alert_check():
             host = rec.get("host", "?")
             last = rec.get("at", "?")
             mins = round(ago / 60)
-            text = ("⚠ 银行流水取件机可能已停\n\n最近一次回报：%s（约 %d 分钟前）\n所在电脑：%s\n\n"
+            text = ("⚠️【银行流水取件机】停机预警\n\n最近一次回报：%s（约 %d 分钟前）\n所在电脑：%s\n\n"
                     "此时共享盘的新流水不会自动接入工作台。请检查那台常开内网电脑是否关机、"
                     "或「银行流水取件机」计划任务是否停了。期间可在「数据接入」页手工上传流水包兜底。"
                     % (last, mins, host))
@@ -3005,7 +3005,7 @@ def _bankpull_alert_check():
                 conf = notifier.load_dingtalk_conf()
                 if conf:
                     conf = {**conf, "mobiles": [str(m) for m in mobiles], "userids": []}
-                notifier.send_dingtalk("✓ 银行流水取件机已恢复\n\n最近回报：%s。共享盘自动接入恢复正常。"
+                notifier.send_dingtalk("✅【银行流水取件机】已恢复\n\n最近回报：%s。共享盘自动接入恢复正常。"
                                        % rec.get("at", "?"), conf)
             db.set_setting(_BANKPULL_ALERTED, None, "系统告警")
     except Exception:
