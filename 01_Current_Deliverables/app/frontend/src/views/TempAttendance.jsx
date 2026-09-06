@@ -1157,23 +1157,33 @@ export default function TempAttendance() {
                     checked={dConfRows.every(r => rowSel[dKey(r)])}
                     onChange={e => setRowSel(e.target.checked
                       ? Object.fromEntries(dConfRows.map(r => [dKey(r), true])) : {})} />}</th>
-                <th>姓名</th><th>部门</th><th>归属</th><th>班型</th><th>日</th><th>上班</th>
+                <th>归属</th><th>部门</th><th>姓名</th>
+                <th title="钉钉取数才有；同名的两个人靠它分得清（人力导出的打卡表没这列）">手机尾号</th>
+                <th>班型</th><th>日</th><th>上班</th>
                 <th title="上下班之外的打卡（午休、宵夜等）。不参与在厂时长计算，摆出来是为了让这一行读得通——否则「上班19:51→下班次日08:32、次数4」中间那两张去哪了只能猜">无效卡</th>
                 <th>下班</th>
-                <th>次数</th><th>跨度</th><th>上报</th><th>重算</th><th>差异</th>
+                <th>次数</th><th>跨度</th>
+                <th title="白班扣 1 小时（午饭）/ 夜班扣 0.5 小时（夜宵）。没切出完整班次就没有扣减">规则扣减</th>
+                <th>上报</th>
+                <th title="重算 ＝ 跨度（下班−上班）按 0.5 小时【向下取整】，再扣规则扣减（白班1h / 夜班0.5h）。这是量偏离的尺子，不是重发工资——付款仍以人力上报为准。">
+                  重算 <span style={{ color: '#b45309', fontWeight: 800 }}>!</span></th>
+                <th>差异</th>
                 <th>单价</th><th>金额</th><th>判定</th><th></th>
               </tr></thead>
               <tbody>{page(rows, pgRow).map((r, i) => (
                 <tr key={i} style={{ background: BAND[r.档]?.bg }}>
                   <td>{dConf(r) && <input type="checkbox" checked={!!rowSel[dKey(r)]}
                     onChange={e => setRowSel(o => ({ ...o, [dKey(r)]: e.target.checked }))} />}</td>
-                  <td>{r.姓名}</td><td>{r.部门 || '—'}</td><td>{r.归属}</td><td>{r.班型}</td><td>{r.日}</td>
+                  <td>{r.归属}</td><td>{r.部门 || '—'}</td><td>{r.姓名}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{r.手机尾号 || '—'}</td>
+                  <td>{r.班型}</td><td>{r.日}</td>
                   <td>{r.上班打卡 || '—'}</td>
                   <td style={{ color: 'var(--ink-3)', fontSize: 12, whiteSpace: 'nowrap' }}
                       title={(r.无效卡 || []).length ? '上下班之外的打卡，不参与在厂时长' : ''}>
                     {(r.无效卡 || []).join(' ') || '—'}</td>
                   <td>{r.下班打卡 || '—'}</td>
                   <td>{r.打卡次数}</td><td>{r.跨度 == null ? '—' : h1(r.跨度)}</td>
+                  <td style={{ color: 'var(--ink-3)' }}>{r.规则扣减 == null ? '—' : h1(r.规则扣减)}</td>
                   <td>{h1(r.上报工时)}</td><td>{h1(r.重算工时)}</td>
                   <td>{(r.差异 > 0 ? '+' : '') + h1(r.差异)}</td>
                   {(() => {

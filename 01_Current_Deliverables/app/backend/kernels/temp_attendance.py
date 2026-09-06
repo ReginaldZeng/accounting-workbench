@@ -617,7 +617,7 @@ def compute_shifts(days, kind, params, only=None):
                               + [t + 1440 for t in (days.get(d + 1) or [])
                                  if (d + 1, t) in consumed])
                 out[d] = {"start": s0, "end": e0, "span": span, "n": len(_all),
-                          "mid": _all[1:-1],
+                          "mid": _all[1:-1], "break": brk,
                           "hours": max(round_step(span - brk, params), 0.0)}
         res = _Shifts(out)
         res.used_pts = frozenset(consumed)
@@ -650,7 +650,7 @@ def compute_shifts(days, kind, params, only=None):
                 own = [t for t in days[d] if t >= s]          # 起点日里属于这一班的（上班卡起）
                 allp = sorted(own + [t + 1440 for t in tail])
                 out[d] = {"start": s, "end": e, "span": span, "n": len(allp),
-                          "mid": allp[1:-1],                    # 上下班之外的（宵夜卡等）
+                          "mid": allp[1:-1], "break": params["night_break"],   # 上下班之外的（宵夜卡等）
                           "hours": max(round_step(span - params["night_break"], params), 0.0)}
                 pts |= {(d + 1, t) for t in tail}             # 次日那几张归这一班，不再算次日的
         res = _Shifts(out)
@@ -666,6 +666,7 @@ def compute_shifts(days, kind, params, only=None):
         if span <= 0:
             continue
         out[d] = {"start": ts[0], "end": ts[-1], "span": span, "n": len(ts), "mid": ts[1:-1],
+                  "break": params["day_break"],
                   "hours": max(round_step(span - params["day_break"], params), 0.0)}
     return _Shifts(out)
 
@@ -954,7 +955,11 @@ def compute(summary, punch, params=None, contract=None, picks=None):
                 agg["异常时"] += -diff
             rows.append({
                 "姓名": person["name"], "部门": person["dept"], "归属": person["agency"],
+                # 手机尾号：钉钉取数才有（人力导出没这列）；同名的两个人靠它分得清
+                "手机尾号": (rec.get("标识") or "") if rec else "",
                 "岗位": person["kind"] or "普工", "班型": {"day": "白班", "night": "夜班", "mixed": "白夜混合"}[kind],
+                # 规则扣减：白班扣 1h（午饭）/夜班扣 0.5h（夜宵）——重算＝跨度按0.5向下取整后再扣它。没切出班次就没扣减
+                "规则扣减": round(sh["break"], 2) if sh else None,
                 "日": d, "上班打卡": fmt_hm(sh["start"]) if sh else (fmt_hm(ts[0]) if ts else ""),
                 "下班打卡": fmt_hm(sh["end"]) if sh else (fmt_hm(ts[-1]) if len(ts) > 1 else ""),
                 # ⚠ 切不出班次时**别硬凑一个跨度**：这天的卡可能分属前后两个班
