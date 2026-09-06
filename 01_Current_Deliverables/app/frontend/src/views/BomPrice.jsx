@@ -1770,20 +1770,28 @@ function UpstreamSection({ entry, onOpen }) {
         <span className="muted" style={{ fontSize: 11 }}>下层「全成本含税」＝本品料行的「含税价」</span>
         <span style={{ flex: 1 }} />
         {block.length ? <span className="tag leak">上游未就绪 · 不能定稿</span> : <span className="tag ok">链路已通</span>}</div>
+      {/* 列序按业务方定（2026-09-06，V2.479）：编号 · 物料名称 · 上游含税价 · 本批含税价 · 差异 · 看子核算表；上游审核状态并入「差异」列 */}
       <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
-        <th className="th">本品料行</th><th className="th" style={{ textAlign: 'right' }}>本品用的含税价</th>
-        <th className="th" style={{ textAlign: 'right' }}>上游全成本含税</th><th className="th">上游状态</th><th className="th"></th>
+        <th className="th">编号</th><th className="th">物料名称</th>
+        <th className="th" style={{ textAlign: 'right' }}>上游含税价</th><th className="th" style={{ textAlign: 'right' }}>本批含税价</th>
+        <th className="th">差异</th><th className="th"></th>
       </tr></thead><tbody>
-        {ups.map((u, i) => (<tr key={i} className={(!(u.reviewed ?? u.isFinal) || !u.priceOk) ? 'bom-nbrow' : ''}>
-          <td style={{ fontWeight: 600 }}>{u.matName}{u.matchBy === 'CP码' && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="料行名字与台账产品名不一致，按型号栏的研发码对上的">按 CP {u.upCp} 配上台账「{u.upName}」</div>}</td>
-          <td className="num">{fmt(u.priceUsed)}</td>
-          <td className="num">{fmt(u.upFull)}{u.versions > 1 && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="台账里同名多版时的取法：同组 › 同钉钉单 › 定稿版 › 不晚于本单 › 最新版">取{u.pick}{u.upCalcDate ? ` · ${u.upCalcDate}` : ''} · 共 {u.versions} 版</div>}</td>
-          <td>{!u.priceOk ? <span className="tag leak">价格对不上（差 {fmt(Math.abs((u.priceUsed || 0) - (u.upFull || 0)), 4)}）</span>
-            : u.isFinal ? <span className="tag ok">已定稿</span>
-              : (u.reviewed ? <span className="tag ok">{u.historical ? '已审·历史版' : (u.backfill ? '已审核·补录' : u.status)}</span>
-                : <span className="tag werr">{u.status || '未复核'}·未审核</span>)}</td>
-          <td><a className="lk" onClick={() => onOpen(u.entryId)}>看子核算表 ›</a></td>
-        </tr>))}
+        {ups.map((u, i) => {
+          const diff = (u.priceUsed || 0) - (u.upFull || 0)
+          const st = u.isFinal ? <span className="tag ok">已定稿</span>
+            : (u.reviewed ? <span className="tag ok">{u.historical ? '已审·历史版' : (u.backfill ? '已审核·补录' : u.status)}</span>
+              : <span className="tag werr">{u.status || '未复核'}·未审核</span>)
+          return (<tr key={i} className={(!(u.reviewed ?? u.isFinal) || !u.priceOk) ? 'bom-nbrow' : ''}>
+            <td className="mono" title="复配料/半成品的研发编码（台账 CP）">{u.upCp || '—'}</td>
+            <td style={{ fontWeight: 600 }}>{u.matName}{u.matchBy === 'CP码' && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="料行名字与台账产品名不一致，按型号栏的研发码对上的">台账名「{u.upName}」（按 CP 配上）</div>}</td>
+            <td className="num">{fmt(u.upFull)}{u.versions > 1 && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="台账里同名多版时的取法：同组 › 同钉钉单 › 定稿版 › 不晚于本单 › 最新版">取{u.pick}{u.upCalcDate ? ` · ${u.upCalcDate}` : ''} · 共 {u.versions} 版</div>}</td>
+            <td className="num">{fmt(u.priceUsed)}</td>
+            <td>{!u.priceOk
+              ? <><span className="num" style={{ color: 'var(--red)', fontWeight: 600 }}>{diff > 0 ? '+' : ''}{fmt(diff, 4)}</span> <span className="tag leak">价格对不上</span> {st}</>
+              : <><span className="muted">0.00</span> {st}</>}</td>
+            <td><a className="lk" onClick={() => onOpen(u.entryId)}>看子核算表 ›</a></td>
+          </tr>)
+        })}
       </tbody></table></div>
       {block.length > 0 && <div className="bom-chkfail" style={{ margin: '0 14px 12px' }}>
         <b>⛔ 上游未就绪，本品不能定稿</b>：{block.join('；')}。<br />
