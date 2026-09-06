@@ -529,7 +529,15 @@ def resolve_dups(dup, month, worked_days=None, progress=None):
         scored.sort(key=lambda x: -x[0])
         best = scored[0]
         second = scored[1][0] if len(scored) > 1 else 0.0
-        ok = len(scored) == 1 or (best[0] >= 0.5 and best[0] >= 2 * second)
+        # 定人：① 只一个候选直接认；② 最高分≥0.5 且甩开第二名一倍；
+        # ③ 最高分近乎完美(≥0.85，即候选打卡日几乎正好＝上工日)且明显领先(≥0.1)——
+        #    专治「临时工撞名一个天天打卡的正式工」：正式工整月刷卡、把上工日也覆盖了 F1 不低，
+        #    但临时工的打卡**正好落在上工日**(F1≈1、精确率≈1)才是唯一真解；一倍闸门会把它误挡
+        #    （丁菊华 2026-08 实测 1.00 vs 0.86 被挡，全部上工日被判「报了工时没打卡」）。
+        #    势均力敌(两人都高、差不到 0.1)仍交人工，不猜。
+        ok = (len(scored) == 1
+              or (best[0] >= 0.5 and best[0] >= 2 * second)
+              or (best[0] >= 0.85 and best[0] - second >= 0.1))
 
         item = {"姓名": nm, "候选人数": len(people), "钉钉账号数": len(uids),
                 "上工日数": len(w), "已定": bool(ok),

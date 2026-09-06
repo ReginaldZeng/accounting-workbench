@@ -444,6 +444,45 @@ class TestAggregateTolerance(unittest.TestCase):
         self.assertEqual(r["stats"]["超弹性人数"], 1)
 
 
+class TestDupResolveTempVsRegular(unittest.TestCase):
+    """撞名定人：临时工撞名一个天天打卡的正式工时，临时工的打卡正好落在上工日(F1≈1)是唯一真解，
+    但正式工整月刷、也覆盖了上工日 F1 不低（丁菊华 2026-08：1.00 vs 0.86），一倍闸门会误挡→全被判「没打卡」。
+    近乎完美(≥0.85)且明显领先(≥0.1)应认；势均力敌仍交人工。"""
+
+    def test_temp_worker_wins_over_daily_punching_regular(self):
+        from kernels import dingtalk_attendance as dta
+        LIN, ZSH = "linshi_uid", "zhengshi_uid"
+        worked = set(range(1, 23))                                  # 报工 22 天
+        punch = {LIN: {d: [8 * 60, 18 * 60] for d in worked},       # 临时工：只在上工日打卡
+                 ZSH: {d: [8 * 60, 18 * 60] for d in range(1, 30)}} # 正式工：整月天天打卡
+        _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
+        dta.fetch_mobiles = lambda cands: {LIN: "13800000001", ZSH: "13800000002"}
+        dta.fetch_punches = lambda jobs, progress=None: punch
+        try:
+            hit, still, _got, _rec = dta.resolve_dups({"甲": [LIN, ZSH]}, "2026-08", worked_days={"甲": worked})
+        finally:
+            dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
+        self.assertIn("甲", hit)                                     # 认出来了，没被误判成没打卡
+        self.assertEqual(hit["甲"]["账号"], [LIN])                    # 认成临时工，不是天天打卡的正式工
+        self.assertEqual(still, {})
+
+    def test_two_equally_good_candidates_still_go_manual(self):
+        # 势均力敌（两人打卡都正好＝上工日）→ 拉不开，仍交人工，不猜
+        from kernels import dingtalk_attendance as dta
+        A, B = "uidA", "uidB"
+        worked = set(range(1, 23))
+        punch = {A: {d: [480, 1080] for d in worked}, B: {d: [480, 1080] for d in worked}}
+        _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
+        dta.fetch_mobiles = lambda cands: {A: "13800000001", B: "13800000002"}
+        dta.fetch_punches = lambda jobs, progress=None: punch
+        try:
+            hit, still, _g, _r = dta.resolve_dups({"甲": [A, B]}, "2026-08", worked_days={"甲": worked})
+        finally:
+            dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
+        self.assertNotIn("甲", hit)          # 两人都完美 → 拉不开 → 不认
+        self.assertIn("甲", still)
+
+
 class TestMixedShift(unittest.TestCase):
     def test_mixed_is_flagged(self):
         """同月既有白班又有夜班的人，切班规则未定，必须显式标出来而不是硬算。"""
