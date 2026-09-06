@@ -1373,8 +1373,16 @@ async def tempatt_review(request: Request):
     if not u:
         return JSONResponse({"ok": False, "msg": "无「临时工考勤」权限，请联系管理员"}, status_code=403)
     summary, punch, params, rates, month, names = await _read_two(request)
+    # 没重新上传的那张，用本期已留档的原表（上报表通常不变，不必每次重传；使用者 2026-09-06）
+    if month and (not summary or not punch):
+        _sb, _pb = _period_files(month)
+        _fn = (db.get_setting(_META_KEY + month) or {}).get("原表文件名") or {}
+        if not summary and _sb:
+            summary = _sb; names["summary"] = names.get("summary") or _fn.get("汇总表") or "留档上报表"
+        if not punch and _pb:
+            punch = _pb; names["punch"] = names.get("punch") or _fn.get("打卡表") or "留档打卡表"
     if not summary or not punch:
-        return {"ok": False, "msg": "请同时上传「人力上报汇总表」和「打卡时刻表」两个文件"}
+        return {"ok": False, "msg": "请上传「人力上报汇总表」和「打卡时刻表」（本期也没有可复用的留档原表）"}
     try:
         res = _run(summary, punch, params, rates, month)
     except Exception as e:
