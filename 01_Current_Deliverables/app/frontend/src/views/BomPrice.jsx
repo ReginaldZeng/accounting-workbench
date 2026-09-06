@@ -1753,7 +1753,7 @@ function UpstreamSection({ entry, onOpen }) {
         {ups.map((u, i) => (<tr key={i} className={(!u.isFinal || !u.priceOk) ? 'bom-nbrow' : ''}>
           <td style={{ fontWeight: 600 }}>{u.matName}</td>
           <td className="num">{fmt(u.priceUsed)}</td>
-          <td className="num">{fmt(u.upFull)}</td>
+          <td className="num">{fmt(u.upFull)}{u.versions > 1 && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="台账里同名多版时的取法：同组 › 同钉钉单 › 定稿版 › 不晚于本单 › 最新版">取{u.pick}{u.upCalcDate ? ` · ${u.upCalcDate}` : ''} · 共 {u.versions} 版</div>}</td>
           <td>{!u.priceOk ? <span className="tag leak">价格对不上（差 {fmt(Math.abs((u.priceUsed || 0) - (u.upFull || 0)), 4)}）</span>
             : u.isFinal ? <span className="tag ok">已定稿</span>
               : <span className="tag werr">{u.status || '未复核'}·未定稿</span>}</td>

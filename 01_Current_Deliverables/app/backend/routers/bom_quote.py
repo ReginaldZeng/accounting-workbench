@@ -91,27 +91,45 @@ def _upstream_status(e, finals=None, others=None):
       「复合宝A1」是外购原料、「复配料纸箱」是包材，都被误判成「链路不通」。
       名字带这些字的外购件很常见，光靠名字分不出「未入账的半成品」和「外购件」，所以宁可不报。
       同一核算表文件内的上下游由 bq.upstream_refs 按页名精确配（那条路无歧义），入账闸走那条。
-    返回 [{matName, priceUsed, found:True, entryId, upFull, priceOk, status, isFinal}]。"""
+    返回 [{matName, priceUsed, found:True, entryId, upFull, priceOk, status, isFinal, pick}]。
+
+    **同名多版怎么挑**（V2.460，业务方 2026-09-06 实证 240399）：台账里酱有 12-03 / 12-31 / 01-22 三版，12 月的半成品用的是同单那版 39.39，
+    老规则一律取「核算日期最新」→ 拿 1 月的 64.99 去卡 12 月的单，假报「价格对不上」、补录历史单永远定不了稿。
+    现在按远近挑：① 同组（同一核算表文件）② 同钉钉单 ③ 该产品的定稿版 ④ 核算日期 ≤ 本单的最近一版 ⑤ 最新版。pick 标明挑的是哪级。"""
     src = e.get("source")
     finals = finals if finals is not None else db.bom_finals(src)
     by_name = {}
-    for x in (others if others is not None else db.bom_list_entries(src)):
+    for x in (others if others is not None else db.bom_list_entries(src)):     # 已按 核算日期↓ 排
         if x["id"] == e["id"]:
             continue
         pn = (x.get("product_name") or "").strip()
         if pn:
-            by_name.setdefault(pn, x)
+            by_name.setdefault(pn, []).append(x)
+    my_gid, my_ap, my_date = e.get("group_id") or "", e.get("approval_no") or "", e.get("calc_date") or ""
+
+    def pick(cands):
+        for lab, cond in (("同组", lambda x: my_gid and x.get("group_id") == my_gid),
+                          ("同单", lambda x: my_ap and x.get("approval_no") == my_ap),
+                          ("定稿版", lambda x: finals.get(x.get("product_key")) == x["id"]),
+                          ("不晚于本单", lambda x: my_date and (x.get("calc_date") or "") <= my_date)):
+            hit = next((x for x in cands if cond(x)), None)
+            if hit:
+                return hit, lab
+        return cands[0], "最新版"
+
     out = []
     for m in (e.get("materials") or []):
         nm = (m.get("matName") or "").strip()
         if not nm or m.get("seg") == "包材":       # 包材不可能是半成品
             continue
-        up = by_name.get(nm)
-        if not up:                                 # 台账里没有同名产品 → 就是外购料，不当上游
+        cands = by_name.get(nm)
+        if not cands:                              # 台账里没有同名产品 → 就是外购料，不当上游
             continue
+        up, lab = pick(cands)
         comp = bq.compose(_rec_from_entry(up), _fee_of(up))
         out.append({"matName": nm, "priceUsed": m.get("priceIncl"), "found": True, "entryId": up["id"],
-                    "upFull": comp["full"], "status": up.get("status"),
+                    "upFull": comp["full"], "status": up.get("status"), "pick": lab, "upCalcDate": up.get("calc_date") or "",
+                    "versions": len(cands),
                     "isFinal": finals.get(up.get("product_key")) == up["id"],
                     "priceOk": (m.get("priceIncl") is not None
                                 and abs((comp["full"] or 0) - float(m.get("priceIncl"))) < 0.01)})
