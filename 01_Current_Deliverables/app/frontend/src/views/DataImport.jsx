@@ -230,7 +230,10 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
             <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--line)' }}>
               <span style={{ fontSize: 12, color: 'var(--ink-2)', cursor: 'pointer' }} onClick={() => setAlertOpen(o => !o)}>
                 🔔 停机钉钉告警：{(d.bank_pull_alert_mobiles || []).length > 0
-                  ? <b style={{ color: 'var(--green)' }}>已开（{(d.bank_pull_alert_mobiles || []).length} 人）</b>
+                  ? <b style={{ color: 'var(--green)' }}>已开 → {(d.bank_pull_alert_mobiles || []).map(m => {
+                      const s = String(m)
+                      return s.length === 11 ? s.slice(0, 3) + '****' + s.slice(7) : s   // 中间打码：136****3676
+                    }).join('、')}</b>
                   : <b style={{ color: 'var(--amber)' }}>未设</b>}
                 <span style={{ color: 'var(--ink-3)', marginLeft: 6 }}>{alertOpen ? '收起 ▲' : '设置 ▼'}</span>
               </span>
