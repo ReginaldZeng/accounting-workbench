@@ -388,10 +388,12 @@ export default function TempAttendance() {
   useEffect(() => { tempattDingStatus(month).then(setDing).catch(() => setDing(null)) }, [month])
 
   const pullDing = async () => {
-    if (!summary) { setErr('先选「人力上报汇总表」——要照着它上面的人去钉钉取'); return }
+    // 上报表本次选了就用选的；没选但本期有留档（已上传戳）也行，后端拿留档那份的人名去取
+    if (!summary && !storedSum) { setErr('先选「人力上报汇总表」——要照着它上面的人去钉钉取（本期也没有留档可用）'); return }
     setErr(''); setDJob({ 状态: '进行中', 进度: 0, 说明: '正在发起…' })
     const fd = new FormData()
-    fd.append('summary', summary); fd.append('month', month || '')
+    if (summary) fd.append('summary', summary)   // 没选就不发，后端用本期留档的上报表
+    fd.append('month', month || '')
     fd.append('scope', dFull ? 'full' : 'worked')
     const r = await tempattDingPull(fd)
     if (!r.ok) { setErr(r.msg || '取数失败'); setDJob(null); return }

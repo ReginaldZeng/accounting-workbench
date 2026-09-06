@@ -1292,12 +1292,17 @@ async def tempatt_ding_pull(request: Request):
     if dda is None:
         return {"ok": False, "msg": "后端没装钉钉取数模块"}
     form = await request.form()
-    uf = form.get("summary")
-    if uf is None or not hasattr(uf, "read"):
-        return {"ok": False, "msg": "请先上传「人力上报汇总表」——要照着它上面的人去钉钉取"}
     month = str(form.get("month") or "")
+    uf = form.get("summary")
+    if uf is not None and hasattr(uf, "read"):
+        _sm_bytes = await uf.read()
+    else:
+        # 没重新上传就用本期留档的上报表（已上传过、盖了「已上传」戳，不必再传）
+        _sm_bytes, _ = _period_files(month) if month else (None, None)
+    if not _sm_bytes:
+        return {"ok": False, "msg": "请先上传「人力上报汇总表」（本期也没有可复用的留档原表）——要照着它上面的人去钉钉取"}
     try:
-        sm = ta.parse_summary(await uf.read())
+        sm = ta.parse_summary(_sm_bytes)
     except Exception as e:
         return {"ok": False, "msg": f"汇总表解析失败：{e}"}
     # ⚠ 取数要花五六分钟，出发前必须先拦住「汇总表和期间对不上」这一种——
