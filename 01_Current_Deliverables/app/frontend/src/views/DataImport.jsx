@@ -174,25 +174,47 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
 
         {/* 取件机自动接入（V2.486）：出纳把流水放共享盘，取件机每小时扫→推给服务器→自动解析定格。
             服务器进不了内网，此按钮只是"留个话"，取件机下轮来问时看到就立即扫（延迟＝取件机轮询间隔）。 */}
-        {kd && d && d.pull_enabled && <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-sub)', border: '1px solid var(--line)', fontSize: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 600 }}>共享盘取件机</span>
-            {d.bank_pull
-              ? <span style={{ color: d.bank_pull.alive ? 'var(--green)' : 'var(--amber)' }}>
-                  {d.bank_pull.alive ? '● 在跑' : '○ 可能已停'}
-                  <span style={{ color: 'var(--ink-3)', marginLeft: 6 }}>
-                    最近扫描 {d.bank_pull.at || '—'}{d.bank_pull.host ? ` · ${d.bank_pull.host}` : ''}
-                    {typeof d.bank_pull.pushed === 'number' ? ` · 上轮推 ${d.bank_pull.pushed} 个` : ''}</span>
-                </span>
-              : <span style={{ color: 'var(--ink-3)' }}>尚无回报（取件机未部署或未跑过）</span>}
-            <button className="btn" style={{ marginLeft: 'auto', height: 28, fontSize: 12 }}
-              onClick={doScan} disabled={scanBusy || !canUpload}
-              title={!canUpload ? '需「上传资金流水」权限' : ''}>{scanBusy ? '通知中…' : '立即扫描共享盘'}</button>
+        {kd && d && d.pull_enabled && (() => {
+          const bp = d.bank_pull, alive = bp && bp.alive
+          // 三态：在跑=绿(呼吸灯)｜停/未部署=红色告警(取件机停了数据就不流，得有人去查那台内网电脑)
+          const down = !alive
+          const agoTxt = bp && bp.ago_sec != null ? (bp.ago_sec < 90 ? '刚刚' : bp.ago_sec < 3600 ? Math.round(bp.ago_sec / 60) + ' 分钟前' : Math.round(bp.ago_sec / 3600) + ' 小时前') : ''
+          return <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 10,
+            background: alive ? 'var(--green-bg)' : 'var(--red-bg, #fbe9e9)',
+            border: '1.5px solid ' + (alive ? 'var(--green-line)' : 'var(--red-line, #e6b8b8)') }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              {/* 灯：在跑=绿灯呼吸；停/未部署=红灯呼吸告警（不是静默灰圈，停了就得让人看见去处理） */}
+              <span className="nav-pulse" style={{ flex: '0 0 auto', width: 11, height: 11, borderRadius: '50%',
+                background: alive ? 'var(--green)' : 'var(--red)' }} />
+              <span style={{ fontSize: 13.5, fontWeight: 700 }}>共享盘取件机 · 自动接入</span>
+              <span style={{ fontSize: 12, padding: '2px 9px', borderRadius: 20, whiteSpace: 'nowrap', fontWeight: 600,
+                color: alive ? 'var(--green)' : 'var(--red)', background: 'var(--bg)',
+                border: '1px solid ' + (alive ? 'var(--green-line)' : 'var(--red-line, #e6b8b8)') }}>
+                {alive ? '● 在跑' : (bp ? '⚠ 可能已停' : '⚠ 未部署')}</span>
+              <button className="btn btn-pri" style={{ marginLeft: 'auto', height: 34, fontSize: 13, fontWeight: 600, padding: '0 16px' }}
+                onClick={doScan} disabled={scanBusy || !canUpload}
+                title={!canUpload ? '需「上传资金流水」权限' : ''}>{scanBusy ? '通知中…' : '↻ 立即扫描共享盘'}</button>
+            </div>
+            <div style={{ marginTop: 7, fontSize: 12, color: 'var(--ink-2)', lineHeight: 1.7 }}>
+              {bp
+                ? <>最近扫描 <b>{bp.at || '—'}</b>{bp.host ? ` · ${bp.host}` : ''}{typeof bp.pushed === 'number' ? ` · 上轮推送 ${bp.pushed} 个文件` : ''}
+                    {agoTxt && <span style={{ color: 'var(--ink-3)' }}>（{agoTxt}）</span>}</>
+                : '取件机尚未部署。'}
+            </div>
+            {down
+              ? <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--red)', fontWeight: 600, lineHeight: 1.7 }}>
+                  ⚠ 取件机{bp ? '超过约 1 小时没有回报，可能那台内网电脑关机了、或定时任务停了' : '还没部署'}——
+                  <b>此时共享盘的新流水不会自动接入，请联系管理员检查取件机</b>（那台常开内网电脑）。
+                  期间可照旧用上方①手工上传流水包兜底。
+                </div>
+              : <div style={{ marginTop: 4, fontSize: 12, color: 'var(--ink-3)' }}>
+                  💡 <b>发现数据有误、让出纳更新共享盘后，点右上「立即扫描共享盘」即可马上重新接入</b>，不必等每小时那轮（服务器进不了内网，此按钮是留个话，取件机下一轮来问时立即扫）。
+                </div>}
+            {(bp && (bp.waiting || []).length > 0) &&
+              <div style={{ marginTop: 6, fontSize: 12, color: 'var(--ink-3)' }}>等待中：{(bp.waiting || []).join('；')}</div>}
+            {scanMsg && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>{scanMsg}</div>}
           </div>
-          {(d.bank_pull && (d.bank_pull.waiting || []).length > 0) &&
-            <div style={{ marginTop: 4, color: 'var(--ink-3)' }}>等待：{(d.bank_pull.waiting || []).join('；')}</div>}
-          {scanMsg && <div style={{ marginTop: 4, color: 'var(--ink-2)' }}>{scanMsg}</div>}
-        </div>}
+        })()}
 
         {d && kd && <div style={{ marginTop: 12, fontSize: 12.5 }}>
           {joined.map((m, i) => <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', flexWrap: 'wrap' }}>

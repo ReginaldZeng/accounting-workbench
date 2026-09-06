@@ -2794,11 +2794,14 @@ def _bankpull_view():
     if not rec:
         return None
     out = dict(rec)
-    try:
-        t = datetime.datetime.strptime(rec.get("at", ""), "%Y-%m-%d %H:%M:%S")
-        ago = max(0, int((datetime.datetime.now() - t).total_seconds()))
-    except Exception:
-        ago = None
+    ago = None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):   # _now() 是分钟精度，回报时间戳无秒；两种都试
+        try:
+            t = datetime.datetime.strptime(rec.get("at", ""), fmt)
+            ago = max(0, int((datetime.datetime.now() - t).total_seconds()))
+            break
+        except Exception:
+            continue
     out["ago_sec"] = ago
     out["alive"] = (ago is not None and ago <= _BANKPULL_ALIVE_SEC)
     return out
