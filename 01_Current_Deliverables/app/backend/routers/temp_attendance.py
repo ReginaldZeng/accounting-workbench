@@ -1844,7 +1844,10 @@ def _xlsx(res, month_label="", punch_bytes=None):
         ws3.cell(r, 9, x["打卡次数"])
         ws3.cell(r, 10, f"=IF(OR(G{r}=\"—\",H{r}=\"—\"),0,(H{r}-G{r})*24)").number_format = "0.00"
         ws3.cell(r, 11, x["上报工时"]).number_format = "0.0"
-        ws3.cell(r, 12, f'=IF(I{r}<2,0,MAX(FLOOR(J{r},{C_STEP})-IF(E{r}="夜班",{C_NIGHT},{C_DAY}),0))').number_format = "0.0"
+        # 规则扣减「跨过饭点才扣」（与内核 _meal_break 一致）：夜班要下班过次日00:00(H≥1)才扣夜宵；
+        # 白班要在厂盖住中午(上班≤13:00 且 下班≥12:00)才扣午饭；没跨过＝没歇饭、不扣（曾奥 19:58–23:30 就不扣）。
+        _brk = f'IF(E{r}="夜班",IF(H{r}>=1,{C_NIGHT},0),IF(AND(G{r}<=13/24,H{r}>=12/24),{C_DAY},0))'
+        ws3.cell(r, 12, f'=IF(I{r}<2,0,MAX(FLOOR(J{r},{C_STEP})-{_brk},0))').number_format = "0.0"
         ws3.cell(r, 13, f"=L{r}-K{r}").number_format = "0.0;[Red]-0.0"
         # T（隐藏）：这天若是「判过班日」（上报>0、有打卡、非白夜混合）就记净多记贡献(上报−重算)，否则 0。
         # 判定公式按人 SUMIF 它 → 得整期净多记，据此判超弹性（与内核 compute 的净多记口径同构）。

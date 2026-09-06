@@ -37,6 +37,10 @@ DEFAULT_PARAMS = {
     "round_mode": "floor",    # floor=向下取整（实证口径）｜round=四舍五入
     "day_break": 1.0,         # 白班扣减（午饭）
     "night_break": 0.5,       # 夜班扣减（夜宵）
+    # 饭点窗口（分钟）：班次在厂区间盖住它才扣休息，没盖到＝没歇饭、不扣（2026-09-06 业务定案）。
+    # 夜宵放在 +1440 空间（夜班次日部分）：次日 00:00–01:00 ＝ 1440–1500。改这两对可调饭点。
+    "lunch_from": 12 * 60, "lunch_to": 13 * 60,        # 午饭窗口（白班）
+    "supper_from": 24 * 60, "supper_to": 25 * 60,      # 夜宵窗口（夜班，次日00:00–01:00）
     "tolerance": 0.5,         # 多记弹性（小时/天）：≤ 此值视为正常波动，> 此值判异常
     "night_start_from": 16 * 60,      # 夜班上班窗口起点（当日 16:00 之后的首卡＝上班）
     "night_end_by": 11 * 60 + 30,     # 夜班下班窗口终点（次日 11:30 之前的末卡＝下班）
@@ -567,6 +571,17 @@ class _Shifts(dict):
     used_pts = frozenset()
 
 
+def _meal_break(is_night, start, end, params):
+    """跨过饭点才扣休息：班次在厂区间 [start,end] 盖住午饭/夜宵窗口才扣（白班1h/夜班0.5h）；
+    没盖到＝这班没歇饭、不扣（曾奥 19:58–23:30 没到夜宵点，不该扣 0.5h）。
+    start/end 用分钟，夜班次日部分＝+1440，夜宵窗口也放在 +1440 空间（次日00:00–01:00）。"""
+    if is_night:
+        wa, wb, brk = params["supper_from"], params["supper_to"], params["night_break"]
+    else:
+        wa, wb, brk = params["lunch_from"], params["lunch_to"], params["day_break"]
+    return brk if (start <= wb and end >= wa) else 0.0
+
+
 def compute_shifts(days, kind, params, only=None):
     """打卡 {日:[分钟]} → {归班日: {"start","end","span","hours"}}。
     白班：当日首卡→当日末卡，扣 day_break。
@@ -593,7 +608,8 @@ def compute_shifts(days, kind, params, only=None):
             ts = [t for t in days[d] if (d, t) not in consumed]
             if not ts:
                 continue
-            if ts[0] >= params["night_start_from"]:          # 首卡在夜班窗口 → 这天是夜班
+            _is_night = ts[0] >= params["night_start_from"]
+            if _is_night:                                    # 首卡在夜班窗口 → 这天是夜班
                 s0 = ts[0]
                 nxt = days.get(d + 1) or []
                 tail = [t for t in nxt if t <= params["night_end_by"]]
@@ -606,12 +622,12 @@ def compute_shifts(days, kind, params, only=None):
                     if not later:
                         continue
                     e0 = later[-1]
-                brk = params["night_break"]
             else:                                            # 否则按白班切
                 if len(ts) < 2:
                     continue
-                s0, e0, brk = ts[0], ts[-1], params["day_break"]
+                s0, e0 = ts[0], ts[-1]
             span = (e0 - s0) / 60.0
+            brk = _meal_break(_is_night, s0, e0, params)     # 跨过饭点才扣休息
             if span > 0:
                 _all = sorted([t for t in ts if s0 <= t <= e0]
                               + [t + 1440 for t in (days.get(d + 1) or [])
@@ -649,9 +665,10 @@ def compute_shifts(days, kind, params, only=None):
             if span > 0:
                 own = [t for t in days[d] if t >= s]          # 起点日里属于这一班的（上班卡起）
                 allp = sorted(own + [t + 1440 for t in tail])
+                _brk = _meal_break(True, s, e, params)        # 跨过夜宵时段才扣 0.5h（曾奥 19:58–23:30 没到，不扣）
                 out[d] = {"start": s, "end": e, "span": span, "n": len(allp),
-                          "mid": allp[1:-1], "break": params["night_break"],   # 上下班之外的（宵夜卡等）
-                          "hours": max(round_step(span - params["night_break"], params), 0.0)}
+                          "mid": allp[1:-1], "break": _brk,   # 上下班之外的（宵夜卡等）
+                          "hours": max(round_step(span - _brk, params), 0.0)}
                 pts |= {(d + 1, t) for t in tail}             # 次日那几张归这一班，不再算次日的
         res = _Shifts(out)
         res.consumed = frozenset(used)
@@ -665,9 +682,10 @@ def compute_shifts(days, kind, params, only=None):
         span = (ts[-1] - ts[0]) / 60.0
         if span <= 0:
             continue
+        _brk = _meal_break(False, ts[0], ts[-1], params)     # 白班盖住午饭时段才扣 1h
         out[d] = {"start": ts[0], "end": ts[-1], "span": span, "n": len(ts), "mid": ts[1:-1],
-                  "break": params["day_break"],
-                  "hours": max(round_step(span - params["day_break"], params), 0.0)}
+                  "break": _brk,
+                  "hours": max(round_step(span - _brk, params), 0.0)}
     return _Shifts(out)
 
 

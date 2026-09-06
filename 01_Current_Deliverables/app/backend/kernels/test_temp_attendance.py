@@ -653,6 +653,29 @@ class TestNameTrailingDot(unittest.TestCase):
         self.assertEqual(r["查无"], [])
 
 
+class TestMealBreak(unittest.TestCase):
+    """规则扣减（午饭1h/夜宵0.5h）只在班次真跨过饭点才扣——短班/残卡没到饭点不扣
+    （使用者 2026-09-06：曾奥 19:58–23:30 没到夜宵，不该扣 0.5h）。"""
+    P = ta.DEFAULT_PARAMS
+
+    def test_short_night_no_supper_no_deduct(self):
+        sh = ta.compute_shifts({26: [19 * 60 + 58, 23 * 60 + 5, 23 * 60 + 30]}, "night", self.P, only={26})
+        self.assertEqual(sh[26]["break"], 0.0)              # 没到次日00:00夜宵点 → 不扣
+        self.assertAlmostEqual(sh[26]["hours"], 3.5, places=1)   # floor(3.53)=3.5
+
+    def test_full_night_spans_supper_deducts(self):
+        sh = ta.compute_shifts({1: [20 * 60], 2: [8 * 60]}, "night", self.P, only={1})
+        self.assertEqual(sh[1]["break"], 0.5)              # 20:00→次日08:00 跨过夜宵 → 扣0.5
+
+    def test_full_day_spans_lunch_deducts(self):
+        sh = ta.compute_shifts({1: [7 * 60, 17 * 60]}, "day", self.P, only={1})
+        self.assertEqual(sh[1]["break"], 1.0)              # 07:00→17:00 跨过午饭 → 扣1
+
+    def test_short_day_no_lunch_no_deduct(self):
+        sh = ta.compute_shifts({1: [8 * 60, 10 * 60]}, "day", self.P, only={1})
+        self.assertEqual(sh[1]["break"], 0.0)              # 08:00→10:00 没到午饭 → 不扣
+
+
 class TestMixedShift(unittest.TestCase):
     def test_mixed_is_flagged(self):
         """同月既有白班又有夜班的人，切班规则未定，必须显式标出来而不是硬算。"""
