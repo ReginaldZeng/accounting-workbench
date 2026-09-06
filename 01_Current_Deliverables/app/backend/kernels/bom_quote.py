@@ -66,9 +66,22 @@ def _clean_erp(raw):
     return s
 
 
+def _true_dims(ws):
+    """只读模式下 openpyxl **信任** xlsx 里的 `<dimension>` 标记；WPS 等工具导出的文件常把每页都写成 `<dimension ref="A1"/>`，
+    于是整页读成空白。实证 2026-09-06 钉钉单 202602111703000522031：商务版核算表三页（复配料/成本核算表/新原料清单）全是 A1，
+    复配料 SZY004024 与成品全量页被判「既没找到成本核算样表页、也不是 BOM清单」整份跳过，只入了商品版——业务方问「复配料怎么进不去」。
+    对只读页一律按实际单元格重算尺寸（`reset_dimensions`），普通模式的页没这方法、原样。"""
+    if hasattr(ws, "reset_dimensions"):
+        try:
+            ws.reset_dimensions()
+        except Exception:
+            pass
+    return ws
+
+
 def parse_sheet(ws, src_file):
     """解析一个 worksheet；不是成本核算页返回 None。字段口径见文件头与交接文档 §4。"""
-    grid = [[c.value for c in row] for row in ws.iter_rows()]
+    grid = [[c.value for c in row] for row in _true_dims(ws).iter_rows()]
     R = len(grid)
     C = max((len(r) for r in grid), default=0)
 
@@ -929,7 +942,7 @@ _BOM_QTY_TOL_REL = 0.005       # 用量相对容差 0.5%
 
 def _parse_bom_sheet(ws):
     """解析 BOM清单 的一个 sheet（成品页「BOM清单」或半成品页「复合调味料」）→ {sheet, productName, materials} 或 None。"""
-    grid = [[c.value for c in row] for row in ws.iter_rows()]
+    grid = [[c.value for c in row] for row in _true_dims(ws).iter_rows()]
     R = len(grid)
     C = max((len(r) for r in grid), default=0)
 
