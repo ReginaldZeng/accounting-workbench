@@ -186,9 +186,11 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   const missing = CONFIRM_STEPS.filter(([k]) => !entry.steps?.[k]).map(([, l]) => l)
   // 换码承接（业务方定 2026-09-05）：同CP再核算 / 不同CP同物料编码 → 定稿前必须答「原来那个是否失效」
   const cands = entry.obsoleteCandidates || []
-  // 两个答案（业务方定 2026-09-05）：'replace'=A 原版失效（本版替代）/ 'parallel'=B 并行但关联（都对外，同一产品不同版本/包装）。null 未答→只存定性不定稿
+  // 三个答案：'replace'=A 原版失效（本版替代）/ 'parallel'=B 并行但关联（都对外）/ 'historical'=C 补录历史版（只审不替代、不动指针、不对外）。null 未答→只存定性
   const [obs, setObs] = useState(null)
   const willFinalize = missing.length === 0
+  // 本版核算日期早于已有审核版 → 多半是补录历史单，推荐 C
+  const olderThanExisting = cands.some(c => c.calcDate && entry.calcDate && entry.calcDate < c.calcDate)
   // 无物料编码 → 到金蝶物料档案按 CP 反查（业务方 2026-09-05 定：检测到就提示确认）。只提示不拦：未中试的本来没编码。
   const [erpLk, setErpLk] = useState(null)
   const [erpBusy, setErpBusy] = useState(false)
@@ -204,14 +206,16 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
     if (!cat) return flash('请选择物料类别')
     if (q === null) return flash('请选择是否建议对外报价')
     if (!q && !reason.trim()) return flash('不建议对外报价时必须写明原因')
-    if (willFinalize && cands.length > 0 && obs === null) return flash('请先回答：原来的版本是失效，还是并行但关联？')
+    if (willFinalize && cands.length > 0 && obs === null) return flash('请先回答：原版失效 / 并行但关联 / 补录历史版？')
     setBusy(true)
     try {
-      const r = await bomClassify(entry.id, cat, q, reason.trim(), obs === 'replace', obs === 'parallel')
+      const r = await bomClassify(entry.id, cat, q, reason.trim(), obs === 'replace', obs === 'parallel', obs === 'historical')
       if (!r.ok) flash(r.msg || '保存失败')
       else {
         flash(r.finalized
-          ? `已定稿：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`
+          ? (r.historical
+            ? `已按历史版补审：${cat}——不替代当前版、不对外，同单的下游可以定稿了`
+            : `已定稿：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
           : (r.needConfirm || []).length
             ? `已存定性，未定稿：原版本 ${r.needConfirm.map(c => c.cpCode).join('、')} 保留为当前版，请先核对再定稿`
             : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
@@ -236,13 +240,14 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           </div>}
         {/* .banner 默认是横向 flex，这里内容多行 → display:block 分三段：说明 / 候选清单 / 问句+两个按钮 */}
         {willFinalize && cands.length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10, lineHeight: 1.6 }}>
-          <div><b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>。请判断它和本版的关系：<b>A 新旧版</b>——原版失效、退出对外，引用它的 BP 定价收到「成本已更新」（终审通过那一刻切换）；<b>B 并行版本</b>——同一产品的不同版本/包装（如火腿片各版、印刷袋 vs 空白袋），都对外、互不替代，串成一组。</div>
+          <div><b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>。请判断它和本版的关系：<b>A 新旧版</b>——原版失效、退出对外，引用它的 BP 定价收到「成本已更新」（终审通过那一刻切换）；<b>B 并行版本</b>——同一产品的不同版本/包装（如火腿片各版、印刷袋 vs 空白袋），都对外、互不替代，串成一组；<b>C 补录历史版</b>——本版比现有版本更早，只审不替代、不动当前对外版，让同单的半成品/成品能定稿。
+            {olderThanExisting && <span style={{ color: 'var(--red)', fontWeight: 600 }}>　本版核算日期 {entry.calcDate} 早于已有版本——多半是补录历史单，建议答 C；答 A 会让新版失效、老成本对外。</span>}</div>
           <div style={{ margin: '8px 0', padding: '6px 10px', background: 'rgba(255,255,255,.55)', borderRadius: 8 }}>{cands.map(c => (
             <div key={c.entryId} style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '2px 12px', alignItems: 'baseline', color: 'var(--ink)' }}>
               <b className="mono">{c.cpCode}</b><span>{c.productName}</span>
               {c.erpCode && <span className="mono muted">物料编码 {c.erpCode}</span>}
               <span className="muted">{c.why}</span>
-              <span className="muted">{c.status} {c.auditAt || ''}</span>
+              <span className="muted">核算 {c.calcDate || '—'} · {c.status} {c.auditAt || ''}</span>
               <span>全成本 <b>¥{fmt(c.fullIncl)}</b>/kg</span>
               <a className="lk" onClick={() => setCmpFirst(c.entryId)} title="两张核算表逐料对比用量与价格，再决定是新旧版还是两个产品">对比 ›</a>
             </div>))}</div>
@@ -251,6 +256,8 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
             <div className="bom-catpick">
               <button className={obs === 'replace' ? 'on no' : ''} onClick={() => setObs('replace')} title="本版替代原版：原版退出对外台账，BP 收到成本更新提示">A 是，原版失效</button>
               <button className={obs === 'parallel' ? 'on ok' : ''} onClick={() => setObs('parallel')} title="两条是同一产品的并行版本（不同 CP / 不同包装），都对外、互不替代；台账标「并行」并串成一组">B 否，并行但关联</button>
+              <button className={obs === 'historical' ? 'on' : ''} onClick={() => setObs('historical')} style={olderThanExisting && !obs ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
+                title="本版是更早的历史版本：只盖初审戳、不替代现有版本、不动定稿指针、不对外，让同单的半成品/成品能定稿">C 补录历史版（只审不替代）</button>
             </div>
             <span className="muted" style={{ fontSize: 11 }}>拿不准先点「对比 ›」看两张核算表差在哪；不答则只存定性、不定稿。</span>
           </div>
@@ -986,7 +993,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
         <div>
           <div className="h-title">成本核算表 · {entry.productName}
             <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
-            {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}</div>
+            {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
+            {entry.historical && <span className="tag late" title="补录的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}</div>
           <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
@@ -1750,13 +1758,14 @@ function UpstreamSection({ entry, onOpen }) {
         <th className="th">本品料行</th><th className="th" style={{ textAlign: 'right' }}>本品用的含税价</th>
         <th className="th" style={{ textAlign: 'right' }}>上游全成本含税</th><th className="th">上游状态</th><th className="th"></th>
       </tr></thead><tbody>
-        {ups.map((u, i) => (<tr key={i} className={(!u.isFinal || !u.priceOk) ? 'bom-nbrow' : ''}>
+        {ups.map((u, i) => (<tr key={i} className={(!(u.reviewed ?? u.isFinal) || !u.priceOk) ? 'bom-nbrow' : ''}>
           <td style={{ fontWeight: 600 }}>{u.matName}</td>
           <td className="num">{fmt(u.priceUsed)}</td>
           <td className="num">{fmt(u.upFull)}{u.versions > 1 && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="台账里同名多版时的取法：同组 › 同钉钉单 › 定稿版 › 不晚于本单 › 最新版">取{u.pick}{u.upCalcDate ? ` · ${u.upCalcDate}` : ''} · 共 {u.versions} 版</div>}</td>
           <td>{!u.priceOk ? <span className="tag leak">价格对不上（差 {fmt(Math.abs((u.priceUsed || 0) - (u.upFull || 0)), 4)}）</span>
             : u.isFinal ? <span className="tag ok">已定稿</span>
-              : <span className="tag werr">{u.status || '未复核'}·未定稿</span>}</td>
+              : (u.reviewed ? <span className="tag ok">{u.historical ? '已审·历史版' : u.status}</span>
+                : <span className="tag werr">{u.status || '未复核'}·未审核</span>)}</td>
           <td><a className="lk" onClick={() => onOpen(u.entryId)}>看子核算表 ›</a></td>
         </tr>))}
       </tbody></table></div>

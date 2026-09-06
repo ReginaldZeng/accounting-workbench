@@ -130,6 +130,8 @@ def _upstream_status(e, finals=None, others=None):
         out.append({"matName": nm, "priceUsed": m.get("priceIncl"), "found": True, "entryId": up["id"],
                     "upFull": comp["full"], "status": up.get("status"), "pick": lab, "upCalcDate": up.get("calc_date") or "",
                     "versions": len(cands),
+                    # reviewed＝已初审/已审核（含补录的历史版）——定稿闸看它，不再要求必须是定稿指针那版（V2.462）
+                    "reviewed": up.get("status") in ("初审", "已审核"), "historical": bool(up.get("historical")),
                     "isFinal": finals.get(up.get("product_key")) == up["id"],
                     "priceOk": (m.get("priceIncl") is not None
                                 and abs((comp["full"] or 0) - float(m.get("priceIncl"))) < 0.01)})
@@ -140,8 +142,8 @@ def _upstream_block(ups):
     """定稿硬闸的理由（只在**能确定**时拦）：上游在台账里但未定稿 / 价格与上游全成本对不上。"""
     bad = []
     for u in ups:
-        if not u.get("isFinal"):
-            bad.append("「%s」尚未定稿（当前 %s）" % (u["matName"], u.get("status") or "未复核"))
+        if not u.get("reviewed", u.get("isFinal")):     # V2.462：上游那版审过（初审/已审核，含补录历史版）即可，不必是对外指针版
+            bad.append("「%s」尚未审核（当前 %s）" % (u["matName"], u.get("status") or "未复核"))
         elif not u.get("priceOk"):
             bad.append("「%s」本品用价 %s ≠ 其全成本含税 %s" % (u["matName"], u.get("priceUsed"), round(u.get("upFull") or 0, 4)))
     return bad
@@ -210,7 +212,7 @@ def _obs_brief(x, why=""):
     return {"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "productKey": x.get("product_key"),
             "productName": (x.get("product_name") or "").strip(), "erpCode": (x.get("erp_code") or "").strip(),
             "status": x.get("status") or "", "auditAt": _audit_at(x)[:10], "fullIncl": comp["full"],
-            "approvalNo": x.get("approval_no") or "", "why": why}
+            "approvalNo": x.get("approval_no") or "", "calcDate": x.get("calc_date") or "", "why": why}
 
 
 def _obsolete_candidates(e, others=None):
@@ -223,6 +225,8 @@ def _obsolete_candidates(e, others=None):
     for x in (others if others is not None else db.bom_list_entries(e.get("source"))):
         if x["id"] == e["id"] or x.get("obsolete_by") or x.get("status") not in ("初审", "已审核"):
             continue
+        if x.get("historical"):
+            continue                                   # 补录的历史版：不对外、不参与替代
         if vg and (x.get("variant_group") or "").strip() == vg:
             continue                                   # 已标「并行关联」的同组成员：并存，不再问替代
         if cp and (x.get("cp_code") or "").strip() == cp:
@@ -310,6 +314,7 @@ def _entry_view(e, finals):
                         "at": e.get("obsolete_at") or "", "note": e.get("obsolete_note") or ""} if succ else None),
         "replaces": [_obs_brief(x) for x in others if x.get("obsolete_by") == e["id"]],
         "obsoleteCandidates": ([] if ob else _obsolete_candidates(e, others)),
+        "historical": bool(e.get("historical")),       # 补录历史版：已审但不对外、不动指针（V2.462）
         "netWeightKg": nw[0], "netWeightSrc": nw[1],
         "bomCheck": bom_check, "hasBomList": bool(bom_mats),
         # ①BOM清单 整表原样（研发出品）：类型/编码/物料/型号/规格/单位/供应商/用量（业务方 2026-09-04 定列序）
@@ -2192,26 +2197,35 @@ async def bom_classify(request: Request):
     # 换码承接闸（业务方定 2026-09-05）：同 CP / 同物料编码已有审核版 → **必须先答「原版是否失效」**（confirmObsolete=true）才定稿；
     # 没答 → 只存定性，把候选回给前端弹确认。答「否」= 不定稿，先核对。
     # 两个答案（业务方定 2026-09-05）：A confirmObsolete=原版失效（替代）；B parallelLink=并行但关联（都对外，串成一组）。都没答→只存定性。
+    # 三个答案（业务方定 2026-09-05/06）：A confirmObsolete=原版失效（替代）；B parallelLink=并行但关联（都对外）；
+    # C historical=补录历史版（只审不替代、不动定稿指针、不对外，让同单的半成品/成品能定稿）。都没答→只存定性。
     cands = _obsolete_candidates(e2) if not miss else []
     parallel = bool(body.get("parallelLink"))
-    need_confirm = bool(cands) and not bool(body.get("confirmObsolete")) and not parallel
+    historical = bool(body.get("historical"))
+    need_confirm = bool(cands) and not bool(body.get("confirmObsolete")) and not parallel and not historical
     finalized, affected, linked = False, None, ""
     if not miss and not need_confirm:
         prev_final = db.bom_get_final(_src(), e2["product_key"])
-        db.bom_update_entry(e2["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
-                                       "obsolete_by": None, "obsolete_at": None, "obsolete_note": None})   # 本版重新成为当前版
-        db.bom_set_final(_src(), e2["product_key"], e2["id"], u["name"])
-        db.audit(u["name"], "bom_finalize", target=str(e2["id"]), detail="随审核定性定稿 · " + (e2.get("product_name") or ""))
-        if cands:
-            if parallel:
-                linked = _link_parallel(e2, cands, u["name"])
-            else:
-                _mark_obsolete(e2, cands, u["name"])
-        affected = _affected_pricing(e2)
+        upd = {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
+               "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else None}
+        db.bom_update_entry(e2["id"], upd)
+        if historical:
+            # 历史版：指针留给现在的当前版；本产品若根本没指针（当前版被删了）再由 repoint 自愈，这里不抢
+            db.bom_add_audit(e2["id"], u["name"], "补录历史版", "", "只审不替代：不动定稿指针、不对外（当前版 %s）" % "、".join(c["cpCode"] + " " + (c["calcDate"] or "") for c in cands))
+            db.audit(u["name"], "bom_finalize", target=str(e2["id"]), detail="补录历史版（不对外） · " + (e2.get("product_name") or ""))
+        else:
+            db.bom_set_final(_src(), e2["product_key"], e2["id"], u["name"])       # 本版成为当前版
+            db.audit(u["name"], "bom_finalize", target=str(e2["id"]), detail="随审核定性定稿 · " + (e2.get("product_name") or ""))
+            if cands:
+                if parallel:
+                    linked = _link_parallel(e2, cands, u["name"])
+                else:
+                    _mark_obsolete(e2, cands, u["name"])
+        affected = None if historical else _affected_pricing(e2)
         finalized = True
     finals = db.bom_finals(_src())
-    return {"ok": True, "finalized": finalized, "missingSteps": miss,
-             "needConfirm": cands if need_confirm else [], "obsoleted": (cands if (finalized and not parallel) else []),
+    return {"ok": True, "finalized": finalized, "missingSteps": miss, "historical": bool(finalized and historical),
+             "needConfirm": cands if need_confirm else [], "obsoleted": (cands if (finalized and not parallel and not historical) else []),
              "linked": (cands if (finalized and parallel) else []), "variantGroup": linked,
              "affectedPricing": affected, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
 
@@ -2268,24 +2282,29 @@ async def bom_finalize(request: Request):
     if ub:
         return JSONResponse({"ok": False, "msg": "上游半成品/复配料未就绪，不能先定稿本品：%s" % "；".join(ub)}, status_code=400)
     # （V2.445 撤净重闸：成本会计不知道最小销售单元，净重由 BP 定价侧维护；核算侧只带规格解析参考值。）
-    cands = _obsolete_candidates(e)              # 换码承接闸（V2.440）：同 CP / 同物料编码已有审核版 → 先答「原版是否失效」或「并行但关联」
+    cands = _obsolete_candidates(e)              # 换码承接闸（V2.440）：同 CP / 同物料编码已有审核版 → 先答 A 原版失效 / B 并行 / C 补录历史版
     parallel = bool(body.get("parallelLink"))
-    if cands and not bool(body.get("confirmObsolete")) and not parallel:
+    historical = bool(body.get("historical"))
+    if cands and not bool(body.get("confirmObsolete")) and not parallel and not historical:
         return {"ok": False, "needConfirm": cands,
-                "msg": "台账里已有 %d 个同CP/同物料编码的审核版本（%s）。请答：A 原版失效（本版替代）/ B 并行但关联（都对外）。"
+                "msg": "台账里已有 %d 个同CP/同物料编码的审核版本（%s）。请答：A 原版失效（本版替代）/ B 并行但关联（都对外）/ C 补录历史版（只审不替代）。"
                        % (len(cands), "、".join("%s %s" % (c["cpCode"], c["auditAt"]) for c in cands))}
     from core import _now
     prev_final = db.bom_get_final(_src(), e["product_key"])
     db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
-                                  "obsolete_by": None, "obsolete_at": None, "obsolete_note": None})
-    db.bom_set_final(_src(), e["product_key"], e["id"], u["name"])
-    db.audit(u["name"], "bom_finalize", target=str(e["id"]), detail=e.get("product_name") or "")
+                                  "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else None})
     linked = ""
-    if cands:
-        if parallel:
-            linked = _link_parallel(e, cands, u["name"])
-        else:
-            _mark_obsolete(e, cands, u["name"])
+    if historical:
+        db.bom_add_audit(e["id"], u["name"], "补录历史版", "", "只审不替代：不动定稿指针、不对外")
+        db.audit(u["name"], "bom_finalize", target=str(e["id"]), detail="补录历史版（不对外） · " + (e.get("product_name") or ""))
+    else:
+        db.bom_set_final(_src(), e["product_key"], e["id"], u["name"])
+        db.audit(u["name"], "bom_finalize", target=str(e["id"]), detail=e.get("product_name") or "")
+        if cands:
+            if parallel:
+                linked = _link_parallel(e, cands, u["name"])
+            else:
+                _mark_obsolete(e, cands, u["name"])
     # 定稿变更通知（BP 消费提示）——留痕，前端据此弹「成本已更新，N 个定价方案受影响」。不静默变价。
     affected = _affected_pricing(e)
     finals = db.bom_finals(_src())

@@ -498,6 +498,9 @@ bom_quote_entry = Table(
     # 并行关联（业务方定 2026-09-05，V2.449）：同一产品的多个并行版本（火腿片各版本 CP 不同、印刷袋/空白袋）——**都对外、不互相替代**，
     # 只用一个组键把它们串起来（同组＝并行变体）；换码承接问「原版是否失效」时答 B「并行但关联」即落此列。
     Column("variant_group", String(40), index=True),
+    # 补录历史版（业务方场景 2026-09-06，V2.462）：定稿一个比现有已审版**更早**的版本时答 C——只审不替代、不动定稿指针、不对外，
+    # 让同单的半成品/成品能定稿；不参与换码承接候选。1=历史版。
+    Column("historical", Integer),
     Column("approval_no", String(40)), Column("src_file", String(200)), Column("sheet", String(80)),
     Column("status", String(12)),                    # 未复核/已复核/已定稿
     Column("created_by", String(50)), Column("created_at", String(20)),
@@ -3145,7 +3148,7 @@ def _ensure_bom_columns():
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s TEXT" % col))
         for col, ddl in (("active", "INTEGER DEFAULT 1"), ("quotable", "INTEGER"), ("net_weight_kg", "FLOAT"),
-                         ("obsolete_by", "INTEGER")):
+                         ("obsolete_by", "INTEGER"), ("historical", "INTEGER")):
             if col not in cols:
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s %s" % (col, ddl)))
