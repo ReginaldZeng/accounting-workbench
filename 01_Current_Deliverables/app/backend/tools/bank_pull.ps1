@@ -30,7 +30,10 @@ function Read-Ini {
         Write-Log "[X] 缺配置文件：$INI（把 bank_pull.ini.example 复制改名为 bank_pull.ini）"; exit 2
     }
     $cfg = @{ year = ''; settle_minutes = 10; timeout = 60 }
-    foreach ($ln in Get-Content -LiteralPath $INI -Encoding UTF8) {
+    foreach ($ln0 in Get-Content -LiteralPath $INI -Encoding UTF8) {
+        # 剔除所有控制字符（含 \0）：ini 若被存成 UTF-16/"Unicode"，值里会夹空字节，
+        # 塞进 HTTP 请求头会报「指定的值含有无效的控制字符」——这里一律清掉，容忍任意编码。
+        $ln = [regex]::Replace([string]$ln0, '[\x00-\x1F\x7F]', '')
         $t = $ln.Trim()
         if (-not $t -or $t.StartsWith(';') -or $t.StartsWith('#') -or $t.StartsWith('[')) { continue }
         $i = $t.IndexOf('=')

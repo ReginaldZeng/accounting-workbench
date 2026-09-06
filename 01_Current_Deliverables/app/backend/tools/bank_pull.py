@@ -67,7 +67,10 @@ def read_ini():
         log("[X] 缺配置文件：%s（把 bank_pull.ini.example 复制改名为 bank_pull.ini）" % INI)
         sys.exit(2)
     c = configparser.ConfigParser()
-    c.read(INI, encoding="utf-8")
+    # 剔除控制字符（含 \0）：ini 若被存成 UTF-16/"Unicode"，值里夹空字节，塞进请求头会报错。宽松读，容忍任意编码。
+    raw = open(INI, "rb").read().decode("utf-8", errors="replace")
+    raw = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", raw)
+    c.read_string(raw)
     s = c["pull"] if c.has_section("pull") else {}
     cfg = {
         "server": (s.get("server", "") or "").strip().rstrip("/"),
