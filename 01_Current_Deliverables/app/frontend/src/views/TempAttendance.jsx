@@ -101,6 +101,7 @@ export default function TempAttendance() {
   const [imTab, setImTab] = useState('upload')     // 第①步页签：上传核对 / 历史复核结果
   const [replaceSum, setReplaceSum] = useState(false)   // 上报表：已上传戳上点了「替换」→ 露出选文件框
   const [replacePun, setReplacePun] = useState(false)   // 打卡表：同上
+  const [punchSource, setPunchSource] = useState('')    // 本次打卡表来源：手工上传 / 钉钉接口
   const [delAsk, setDelAsk] = useState('')         // 正在二次确认删除的月份
   const [pgPer, setPgPer] = useState({ page: 1, size: 50 })   // 与 Pager 的每页选项对齐
   const [ledger, setLedger] = useState(null)   // 认定清单（长期认定折在结算风险卡里展开）
@@ -164,7 +165,7 @@ export default function TempAttendance() {
   // 认定/导出却落到新选的月份去（review 实测的坑）。月份与结果从此同进同出。
   const pickMonth = (mm) => {
     if (mm === month) return
-    setReplaceSum(false); setReplacePun(false)       // 换期了，替换态归零，重新按新期的已上传戳显示
+    setReplaceSum(false); setReplacePun(false); setPunchSource('')   // 换期了，替换态/来源归零，按新期的已上传戳显示
     // 选中期间后默认跳回第①步「数据接入」（使用者 2026-09-06）——从那看已上传/替换，再决定走哪步
     if (periods.some(p => p.月份 === mm)) { openPeriod(mm, 'import'); return }
     setMonth(mm); setRes(null); setArchive(null); setStep('import')
@@ -361,7 +362,7 @@ export default function TempAttendance() {
     const fd = new FormData()
     // 只发本次真选了的文件；没选的那张后端用本期留档原表（上报表通常不变，不必每次重传）
     if (summary) fd.append('summary', summary)
-    if (punch) fd.append('punch', punch)
+    if (punch) { fd.append('punch', punch); fd.append('punch_source', punchSource || '手工上传') }
     fd.append('params', JSON.stringify(params || {}))
     // ⚠ 不再发页面单价表。合同价改成「按行带生效期」的登记表之后，
     // 它才是唯一来源；再发页面这张会盖过合同价（merge 里 override 优先级最高），
@@ -404,7 +405,7 @@ export default function TempAttendance() {
         const blob = await fetch(tempattDingFileUrl(r.任务)).then(x => x.blob())
         const f = new File([blob], `${j.月份}钉钉打卡记录.xlsx`,
           { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-        setPunch(f); setRes(null)
+        setPunch(f); setPunchSource('钉钉接口'); setReplacePun(true); setRes(null)
         return
       }
       setTimeout(tick, 2500)
@@ -815,7 +816,8 @@ export default function TempAttendance() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
                 {(storedSum && !replaceSum && !summary)
                   ? <UploadedStamp label="① 人力上报汇总表" name={(curPeriod.原表文件名 || {}).汇总表}
-                      time={curPeriod.跑批时间} onReplace={() => setReplaceSum(true)} />
+                      info={(curPeriod.原表信息 || {}).汇总表} time={curPeriod.跑批时间} who={curPeriod.跑批人}
+                      onReplace={() => setReplaceSum(true)} />
                   : <div>
                       <Pick label="① 人力上报汇总表" hint="《YYYY年M月（临时工）考勤汇总表》。全量表或按派遣方拆分页都认；右侧金额列是复核结论的主列，表头的计价规则栏只作参考。"
                         file={summary} onPick={f => takeFile('汇总表', f, setSummary)} />
@@ -825,10 +827,11 @@ export default function TempAttendance() {
                 <div>
                   {(storedPun && !replacePun && !punch)
                     ? <UploadedStamp label="② 打卡时刻表" name={(curPeriod.原表文件名 || {}).打卡表}
-                        time={curPeriod.跑批时间} onReplace={() => setReplacePun(true)} />
+                        info={(curPeriod.原表信息 || {}).打卡表} time={curPeriod.跑批时间} who={curPeriod.跑批人}
+                        onReplace={() => setReplacePun(true)} />
                     : <>
                         <Pick label="② 打卡时刻表" hint="考勤系统导出的《打卡时间》。一格多次打卡、含「次日07:52」的跨零点记录都认。"
-                          file={punch} onPick={f => takeFile('打卡表', f, setPunch)} />
+                          file={punch} onPick={f => { takeFile('打卡表', f, setPunch); setPunchSource('手工上传') }} />
                         {storedPun && <button className="btn link" style={{ fontSize: 12, marginTop: 4 }}
                           onClick={() => { setPunch(null); setReplacePun(false) }}>取消替换，用回已上传的</button>}
                       </>}
@@ -2421,17 +2424,27 @@ function DingPull({ ding, job, onPull, hasSummary, full, onFull }) {
   </div>
 }
 
-// 本期已有留档原表时，不必每次重传——盖个「已上传」戳，要换再点「替换」（使用者 2026-09-06）。
-function UploadedStamp({ label, name, time, onReplace }) {
+// 本期已有留档原表时，不必每次重传——盖个「已上传」戳，注明谁·何时·来源，要换再点「替换」（使用者 2026-09-06）。
+function UploadedStamp({ label, name, info, time, who, onReplace }) {
+  const 来源 = info?.来源
+  const 上传人 = info?.上传人 || who        // 老留档没按表记时，退回跑批人（＝当时上传并核对的人）
+  const 时间 = info?.时间 || time
+  const srcColor = 来源 === '钉钉接口' ? '#6b21a8' : '#1d4ed8'
   return <div>
     <div style={{ fontWeight: 600, marginBottom: 4 }}>{label}</div>
     <div style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 8, lineHeight: 1.7, minHeight: 34 }}>
       本期已上传过、存在留档里，不用再传。要换成新表就点「替换」。
     </div>
     <div style={{ padding: 12, border: '1px solid #bbf7d0', background: '#f0fdf4', borderRadius: 8 }}>
-      <div style={{ color: '#166534', fontWeight: 600 }}>✓ 已上传（本期留档）</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ color: '#166534', fontWeight: 600 }}>✓ 已上传（本期留档）</span>
+        {来源 && <span style={{ fontSize: 11, color: '#fff', background: srcColor, borderRadius: 4, padding: '1px 6px' }}>
+          {来源}</span>}
+      </div>
       <div style={{ fontSize: 12, color: 'var(--ink-2)', margin: '4px 0', wordBreak: 'break-all' }}>{name || '（留档原表）'}</div>
-      {time && <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>{time} 留档</div>}
+      <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>
+        {上传人 ? `由 ${上传人}` : ''}{时间 ? ` 于 ${时间}` : ''} 上传{来源 === '钉钉接口' ? '（从钉钉接口直取）' : ''}
+      </div>
       <button className="btn" style={{ marginTop: 8, padding: '3px 12px', fontSize: 12 }} onClick={onReplace}>替换</button>
     </div>
   </div>

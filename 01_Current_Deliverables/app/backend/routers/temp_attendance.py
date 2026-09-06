@@ -247,8 +247,10 @@ def _purge_old_uploads(keep=None):
     return dropped
 
 
-def _save_period(month, summary_bytes, punch_bytes, names, res, user):
-    """存一期：原表落盘（留窗口）＋ 结论进库（长期）。存不下也不能让核对本身失败。"""
+def _save_period(month, summary_bytes, punch_bytes, names, res, user, fresh=None, punch_source=""):
+    """存一期：原表落盘（留窗口）＋ 结论进库（长期）。存不下也不能让核对本身失败。
+    fresh={summary,punch}：这次哪几张是新给的（新上传/新取数），据此更新「谁·何时·来源」，
+    没重新给的那张沿用上一次的上传信息（用回留档原表时，别把它的上传人/时间改成这次的）。"""
     if not _MONTH_RE.match(month or ""):
         return {"已留档": False, "原因": "月份不是 YYYY-MM，未留档"}
     try:
@@ -259,10 +261,22 @@ def _save_period(month, summary_bytes, punch_bytes, names, res, user):
                 f.write(data)
         st = res["stats"]
         tot = (res.get("settle") or {}).get("合计") or {}
+        _now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _who = user.get("name", "")
+        fresh = fresh or {"summary": True, "punch": True}
+        # 按表记「谁·何时·来源」：只更新这次新给的那张，没给的沿用上一次的
+        _prev_info = (db.get_setting(_META_KEY + month) or {}).get("原表信息") or {}
+        _info = dict(_prev_info)
+        if fresh.get("summary"):
+            _info["汇总表"] = {"上传人": _who, "时间": _now, "来源": "手工上传"}   # 上报表只有手工上传一条路
+        if fresh.get("punch"):
+            _info["打卡表"] = {"上传人": _who, "时间": _now,
+                              "来源": ("钉钉接口" if punch_source == "钉钉接口" else "手工上传")}
         meta = {
             "月份": month,
-            "跑批时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "跑批人": user.get("name", ""),
+            "跑批时间": _now,
+            "跑批人": _who,
+            "原表信息": _info,
             "人数": st.get("人数"), "比对人日": st.get("比对人日"),
             "上报总工时": st.get("上报总工时"), "重算总工时": st.get("重算总工时"),
             "应付合计": tot.get("表上合计") if tot.get("表上合计") is not None else tot.get("应付合计"),
@@ -1165,6 +1179,7 @@ async def _read_two(request: Request):
             names[k] = getattr(uf, "filename", "") or ""
         else:
             out[k] = None
+    names["punch_source"] = str(form.get("punch_source") or "")   # 打卡表来源：手工上传 / 钉钉接口
     params, rates = {}, None
     for key in ("params", "rates"):
         raw = form.get(key)
@@ -1373,6 +1388,8 @@ async def tempatt_review(request: Request):
     if not u:
         return JSONResponse({"ok": False, "msg": "无「临时工考勤」权限，请联系管理员"}, status_code=403)
     summary, punch, params, rates, month, names = await _read_two(request)
+    fresh = {"summary": summary is not None, "punch": punch is not None}   # 这次哪张是新给的（fallback 前判）
+    punch_source = names.get("punch_source") or ""
     # 没重新上传的那张，用本期已留档的原表（上报表通常不变，不必每次重传；使用者 2026-09-06）
     if month and (not summary or not punch):
         _sb, _pb = _period_files(month)
@@ -1394,7 +1411,8 @@ async def tempatt_review(request: Request):
         return {"ok": False,
                 "msg": f"右上角选的是 {month}，但上传的表识别为 {found}。请把期间切到 {found}（或清掉再传），"
                        f"以免按 {month} 的合同价算、又把 {month} 的留档覆盖掉。"}
-    res["留档"] = _save_period(res.get("month") or month, summary, punch, names, res, u)
+    res["留档"] = _save_period(res.get("month") or month, summary, punch, names, res, u,
+                              fresh=fresh, punch_source=punch_source)
     # 认定信息**不进留档快照**——它独立存、独立撤，重跑之后照样生效
     _apply_acks(res, res.get("month") or month)
     _attach_cost(res, res.get("month") or month)      # 用工成本汇总：页面第⑨步直接复制
@@ -1554,7 +1572,9 @@ async def tempatt_rerun(request: Request):
     except Exception as e:
         return {"ok": False, "msg": f"解析失败：{e}"}
     meta = db.get_setting(_META_KEY + month) or {}
-    res["留档"] = _save_period(month, summary, punch, meta.get("原表文件名") or {}, res, u)
+    # 重跑用的是留档原表，没有新上传 → 上传信息（谁·何时·来源）沿用上一次，别改成这次重跑的
+    res["留档"] = _save_period(month, summary, punch, meta.get("原表文件名") or {}, res, u,
+                              fresh={"summary": False, "punch": False})
     _apply_acks(res, month)
     _attach_cost(res, month)
     try:
