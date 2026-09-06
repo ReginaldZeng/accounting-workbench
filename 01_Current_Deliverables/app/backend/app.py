@@ -46,6 +46,7 @@ from core import (  # noqa: F401  部分名供 routers/ 与本文件共用
     _WR_CACHE, _cache_clear, _cache_get, _cache_key, _closed_block, _closed_info, _current_user,
     _is_closed, _kd_fetch_store, _kd_get, _kd_sync_info, _kd_synced_at, _now, _period_bank,
     _period_data_status, _period_str, _require_perm, _user_public, save_cfg, sid_name, VERSION_INFO,
+    _compute_version_info,
     _PULL_PATHS, pull_token_ok, can_enter_dev, dev_users_info,
 )
 
@@ -586,8 +587,11 @@ def health():
 def get_config():
     # 带上封存态 + 本期数据状态：前端各页据此显示徽标/胶囊，不必额外请求
     # 版本：并行开发后一台机器同时跑多条线，界面左下角自报「版本·分支·提交」（V2.176）
+    # 版本**每次现读** version_stamp.json：纯前端部署不重启后端，读缓存的 VERSION_INFO 会一直显示旧版号
+    # （V2.483 部署后徽章还挂 482 就是这么来的）。现读文件开销极小，配置本就一次一拉。
     return {**CFG, "period_str": _period_str(), "conf": kc.conf_path(),
-            "封存": _closed_info(), "数据状态": _period_data_status(), "版本": VERSION_INFO}
+            "封存": _closed_info(), "数据状态": _period_data_status(),
+            "版本": _compute_version_info()}
 
 
 @app.get("/api/period-statuses")
