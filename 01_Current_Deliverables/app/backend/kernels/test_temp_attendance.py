@@ -88,14 +88,19 @@ class TestNameMatch(unittest.TestCase):
         self.assertEqual(rec["组"], "组B")          # 命中原名那一行，不被归一带偏
 
     def test_ambiguous_returns_candidates_not_a_guess(self):
-        """归一后撞上两个人时必须返回候选交人工，不能随便挑一个——猜错就是算错工资。"""
+        """归一后撞上两个人时必须返回候选交人工，不能随便挑一个——猜错就是算错工资。
+        候选要带上**钉钉部门 + 手机尾号**，成本会计照部门就能定谁是临时工。"""
         pk = ta.parse_punch(_punch_book([
             ("张博", "组A", "临时普工-锦绣人力", ["08:00\n17:30"] + [""] * 6),
-            ("张博G（离职）", "组B", "临时普工-锦绣人力", ["08:00\n17:30"] + [""] * 6),
+            ("张博G（离职）", "销售中心", "销售中心", ["08:00\n17:30"] + [""] * 6),
         ]))
         rec, cand = ta.match_punch(pk, "张博X")
         self.assertIsNone(rec)
-        self.assertEqual(sorted(cand), ["张博", "张博G（离职）"])
+        self.assertEqual(sorted(c["原名"] for c in cand), ["张博", "张博G（离职）"])
+        # 每个候选都带部门，且部门就是打卡表里写的那个（决定性线索）
+        depts = {c["原名"]: c["部门"] for c in cand}
+        self.assertEqual(depts["张博"], "临时普工-锦绣人力")
+        self.assertEqual(depts["张博G（离职）"], "销售中心")
 
 
 class TestDayColumns(unittest.TestCase):
@@ -445,29 +450,55 @@ class TestAggregateTolerance(unittest.TestCase):
 
 
 class TestDupResolveTempVsRegular(unittest.TestCase):
-    """撞名定人：临时工撞名一个天天打卡的正式工时，临时工的打卡正好落在上工日(F1≈1)是唯一真解，
-    但正式工整月刷、也覆盖了上工日 F1 不低（丁菊华 2026-08：1.00 vs 0.86），一倍闸门会误挡→全被判「没打卡」。
-    近乎完美(≥0.85)且明显领先(≥0.1)应认；势均力敌仍交人工。"""
+    """撞名定人：钉钉有俩同名（临时工 + 天天打卡的正式工，如丁菊华 2026-08）时，**工具一律不猜**，
+    把每个候选（含钉钉部门）退回 still 交成本会计——她一看部门（「临时普工-…人力」vs「销售中心」）
+    就定得出临时工。原先按打卡日 F1 自动定人的规则（含 V2.458）已作废（2026-09 业务定案）。
+    唯一的例外：合并手机号后只剩一个人（同一人的多个账号）→ 无需选，直接认。"""
 
-    def test_temp_worker_wins_over_daily_punching_regular(self):
+    def test_two_different_people_defer_to_cost_accountant_with_dept(self):
         from kernels import dingtalk_attendance as dta
         LIN, ZSH = "linshi_uid", "zhengshi_uid"
         worked = set(range(1, 23))                                  # 报工 22 天
-        punch = {LIN: {d: [8 * 60, 18 * 60] for d in worked},       # 临时工：只在上工日打卡
+        punch = {LIN: {d: [8 * 60, 18 * 60] for d in worked},       # 临时工：只在上工日打卡（F1≈1）
                  ZSH: {d: [8 * 60, 18 * 60] for d in range(1, 30)}} # 正式工：整月天天打卡
+        roster = {LIN: {"部门": ["临时普工-锦绣人力"]}, ZSH: {"部门": ["销售中心"]}}
         _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
-        dta.fetch_mobiles = lambda cands: {LIN: "13800000001", ZSH: "13800000002"}
+        dta.fetch_mobiles = lambda cands: {LIN: "13800009276", ZSH: "13800002969"}
         dta.fetch_punches = lambda jobs, progress=None: punch
         try:
-            hit, still, _got, _rec = dta.resolve_dups({"甲": [LIN, ZSH]}, "2026-08", worked_days={"甲": worked})
+            hit, still, _got, _rec = dta.resolve_dups(
+                {"甲": [LIN, ZSH]}, "2026-08", worked_days={"甲": worked}, roster=roster)
         finally:
             dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
-        self.assertIn("甲", hit)                                     # 认出来了，没被误判成没打卡
-        self.assertEqual(hit["甲"]["账号"], [LIN])                    # 认成临时工，不是天天打卡的正式工
+        self.assertNotIn("甲", hit)             # 工具不猜：不自动定人
+        self.assertIn("甲", still)
+        # 两个候选都退回、都带钉钉部门（决定性线索）+ 各自打卡，交成本会计判
+        depts = {c["部门"] for c in still["甲"]["候选"]}
+        self.assertEqual(depts, {"临时普工-锦绣人力", "销售中心"})
+        tails = {c["手机尾号"] for c in still["甲"]["候选"]}
+        self.assertEqual(tails, {"9276", "2969"})
+        self.assertTrue(all("days" in c for c in still["甲"]["候选"]))   # 打卡带出来，上游好写成行
+
+    def test_same_person_multiple_accounts_still_auto_merged(self):
+        # 唯一不必人工的情形：手机号相同＝同一人的多个钉钉账号（离职再入职），合并、直接认
+        from kernels import dingtalk_attendance as dta
+        A, B = "acct_old", "acct_new"
+        worked = set(range(1, 23))
+        punch = {A: {d: [480, 1080] for d in range(1, 12)},
+                 B: {d: [480, 1080] for d in range(12, 23)}}
+        _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
+        dta.fetch_mobiles = lambda cands: {A: "13800000001", B: "13800000001"}  # 同号＝同一人
+        dta.fetch_punches = lambda jobs, progress=None: punch
+        try:
+            hit, still, _g, _r = dta.resolve_dups({"甲": [A, B]}, "2026-08", worked_days={"甲": worked})
+        finally:
+            dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
+        self.assertIn("甲", hit)             # 只剩一个人 → 无需在两个人里挑 → 直接认
         self.assertEqual(still, {})
+        self.assertEqual(set(hit["甲"]["账号"]), {A, B})   # 两账号合并，两段打卡都留住
 
     def test_two_equally_good_candidates_still_go_manual(self):
-        # 势均力敌（两人打卡都正好＝上工日）→ 拉不开，仍交人工，不猜
+        # 势均力敌（两人打卡都正好＝上工日）当然也交人工——现在**所有**≥2 个不同的人都交人工
         from kernels import dingtalk_attendance as dta
         A, B = "uidA", "uidB"
         worked = set(range(1, 23))
@@ -479,8 +510,33 @@ class TestDupResolveTempVsRegular(unittest.TestCase):
             hit, still, _g, _r = dta.resolve_dups({"甲": [A, B]}, "2026-08", worked_days={"甲": worked})
         finally:
             dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
-        self.assertNotIn("甲", hit)          # 两人都完美 → 拉不开 → 不认
+        self.assertNotIn("甲", hit)
         self.assertIn("甲", still)
+
+
+class TestAmbiguousDayVerdict(unittest.TestCase):
+    """撞名待指认的人：打卡表里同名多行、匹配不到唯一行 → 逐日判「同名待指认」，
+    绝不能判成「记了工时但无打卡」把工具没定人的锅甩给员工（丁菊华 2026-08 之冤）。"""
+
+    def test_ambiguous_person_is_not_flagged_no_punch(self):
+        sm = ta.parse_summary(_summary_book([("丁菊华", "小料", "锦绣", "", [11, 11, 0, 0, 0, 0, 0], 22, 19)]))
+        pk = ta.parse_punch(_punch_book([
+            ("丁菊华", "组", "临时普工-锦绣人力", [""] * 7),          # 临时工那行（这份样本恰无卡）
+            ("丁菊华", "销售中心", "销售中心", ["08:00\n18:00"] * 2 + [""] * 5),  # 天天打卡的正式工
+        ]))
+        r = ta.compute(sm, pk)
+        rep_days = [x for x in r["rows"] if x["姓名"] == "丁菊华" and x["上报工时"] > 0]
+        self.assertEqual(len(rep_days), 2)
+        self.assertTrue(all(x["档"] == "ambig" for x in rep_days))          # 不是 hard
+        self.assertTrue(all("同名待指认" in x["判定"] for x in rep_days))
+        p = r["people"][0]
+        self.assertEqual(p["待查日次"], 0)                                  # 没被冤成待查
+        self.assertEqual(p["同名待指认日次"], 2)
+        # 候选摆出来带部门，交成本会计判
+        amb = r["stats"]["待人工指认"]
+        self.assertTrue(any(a["姓名"] == "丁菊华" for a in amb))
+        cand = next(a for a in amb if a["姓名"] == "丁菊华")["候选"]
+        self.assertEqual({c["部门"] for c in cand}, {"临时普工-锦绣人力", "销售中心"})
 
 
 class TestMixedShift(unittest.TestCase):

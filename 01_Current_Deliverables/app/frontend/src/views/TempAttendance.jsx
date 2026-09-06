@@ -47,6 +47,9 @@ const BAND = {
   // 有打卡、当天没算临时工工时。打卡表是全厂的，这些天多半是这人在别的名目下上班——
   // 中性档，不标红（6 月全量实测：1,169 条，占人日 41%，标红会把真问题全淹了）
   unbilled: { label: '◇ 有打卡·未计工时', color: 'var(--ink-3)', bg: 'transparent' },
+  // 归一后撞上多个人、工具不猜（钉钉有俩同名）。中性档，不标红——不能把「工具没定人」当成员工没打卡。
+  // 候选的钉钉部门列在打卡表/结算风险页，成本会计照部门定谁是临时工。
+  ambig: { label: '◇ 同名待指认（成本会计判断）', color: '#6b21a8', bg: '#faf5ff' },
 }
 // 结算风险卡（同名 / 归属不符 + 认定按钮）**只在第④步结算风险（risk）**。
 // 需求方 2026-08-23：「这个不应该在这里……这个四档就是一个总览，
@@ -971,7 +974,9 @@ export default function TempAttendance() {
           {(st.白夜混合人数 > 0 || st.未匹配人数 > 0 || st.待指认人数 > 0 || (st.打卡表重名 || []).length > 0) &&
             <Note tone="warn" title="下面这些工具不猜，请人工确认：" items={[
               st.白夜混合人数 > 0 && `${st.白夜混合人数} 人同月既有白班又有夜班，已按切班窗口逐日切开、正常判档（不再整档交人工）：${(st.白夜混合名单 || []).join('、')}`,
-              st.待指认人数 > 0 && `${st.待指认人数} 人姓名归一后撞上多个打卡记录，未参与比对：${(st.待人工指认 || []).map(x => `${x.姓名}→${x.候选.join('/')}`).join('；')}`,
+              // 候选已带钉钉部门：成本会计照部门（「临时普工-…人力」vs「销售中心」）就能定谁是临时工。
+              // 候选是对象 {原名,部门,手机尾号,打卡日数}，直接 join 会印 [object Object]。
+              st.待指认人数 > 0 && `${st.待指认人数} 人姓名归一后撞上多个人，工具不猜、交成本会计按钉钉部门定：${(st.待人工指认 || []).map(x => `${x.姓名}【${(x.候选 || []).map(c => typeof c === 'string' ? c : `${c.部门 || '无部门'}·尾号${c.手机尾号 || '?'}·打卡${c.打卡日数}天`).join(' ／ ')}】`).join('；')}`,
               st.未匹配人数 > 0 && `${st.未匹配人数} 人在打卡表里找不到：${(st.未匹配打卡 || []).join('、')}`,
               // 打卡表重名经 _apply_acks 统一成 {姓名, 已认定?} 对象——直接 join 会印出 [object Object]（V2.346 实测）
               (st.打卡表重名 || []).length > 0 && `打卡表里有同名多行：${st.打卡表重名.map(x => (x && x.姓名) || x).join('、')}`,
@@ -2186,48 +2191,41 @@ function CostNote({ c, month }) {
 function DupReview({ rec, merged }) {
   const [open, setOpen] = useState(false)
   if (!(rec || []).length) return null
-  const bad = rec.filter(x => !x.已定)
-  const 弱 = rec.filter(x => x.已定 && (x.候选.find(c => c.选中)?.得分 ?? 1) < 0.8)
+  // 已定＝合并手机号后只剩一个人（同一人多账号，无需选）；其余＝不同的人撞名，工具不猜，交成本会计按部门定
+  const 待定 = rec.filter(x => !x.已定)
   return <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed #bae6fd' }}>
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-      <b>同名 {rec.length} 组，工具已替你定人</b>
-      {!!merged && <span>（其中 {merged} 组手机号相同＝同一个人在钉钉有两个账号，打卡已合并）</span>}
+      <b>同名 {rec.length} 组</b>
+      {!!merged && <span>（{merged} 组是同一个人在钉钉的多个账号，已自动合并、无需处理）</span>}
       <button className="btn" style={{ padding: '2px 10px', fontSize: 12 }}
-        onClick={() => setOpen(!open)}>{open ? '收起' : '展开复核'}</button>
+        onClick={() => setOpen(!open)}>{open ? '收起' : '展开定人'}</button>
     </div>
     <div style={{ marginTop: 4 }}>
-      {bad.length
-        ? <span className="warn">⚠ 其中 {bad.length} 组定不了，这些人会被判成「没打卡」，请人工确认。</span>
-        : <span>全部定出来了。</span>}
-      {!!弱.length && <span className="warn">　⚠ {弱.length} 组吻合度不高（&lt;0.8），建议重点看。</span>}
+      {待定.length
+        ? <span className="warn">⚠ {待定.length} 组是不同的人撞名，工具不猜——请按下表<b>钉钉部门</b>定谁是临时工
+          （「临时普工-…人力」才是；「销售/研发/品牌…中心」是正式工）。这些人本期判「同名待指认」，定人后再谈工时。</span>
+        : <span>全部是同一人的多账号，已合并，无需人工。</span>}
       <span style={{ color: 'var(--ink-3)' }}>　同一份底稿也在打卡表的第二页里，可打印存档。</span>
     </div>
     {open && <div style={{ marginTop: 8, maxHeight: 300, overflow: 'auto' }}>
       <table className="tbl" style={{ fontSize: 12 }}>
         <thead><tr>
-          <th>姓名</th><th>选中的人</th><th>当月打卡</th><th>命中上工日</th>
-          <th>吻合度</th><th>没选的候选</th>
+          <th>姓名</th><th>结论/候选</th><th>钉钉部门</th><th>手机尾号</th>
+          <th>当月打卡</th><th>命中上工日</th>
         </tr></thead>
         <tbody>
-          {rec.map((x, i) => {
-            const hit = x.候选.find(c => c.选中)
-            const oth = x.候选.filter(c => !c.选中)
-            const weak = x.已定 && (hit?.得分 ?? 1) < 0.8
-            return <tr key={i} style={!x.已定 ? { background: '#fef2f2' }
-              : weak ? { background: '#fffbeb' } : undefined}>
-              <td><b>{x.姓名}</b></td>
+          {rec.map((x, i) => (x.候选 || []).map((c, j) => (
+            <tr key={`${i}-${j}`} style={!x.已定 ? { background: '#faf5ff' } : undefined}>
+              <td>{j === 0 ? <b>{x.姓名}</b> : ''}</td>
               <td>{x.已定
-                ? <>手机尾号 <b>{hit?.手机尾号 || '（无）'}</b>
-                  {hit && hit.账号.length > 1 && <span>　·　{hit.账号.length} 个账号已合并</span>}</>
-                : <span className="warn">⚠ 定不了，需人工</span>}</td>
-              <td>{hit ? `${hit.打卡日数} 天` : '—'}</td>
-              <td>{hit ? `${hit.命中上工日} / ${x.上工日数}` : `— / ${x.上工日数}`}</td>
-              <td>{hit ? hit.得分 : '—'}</td>
-              <td style={{ color: 'var(--ink-3)' }}>
-                {oth.map(c => `尾号${c.手机尾号 || '?'}（打卡${c.打卡日数}天,命中${c.命中上工日}）`).join('；') || '—'}
-              </td>
+                ? (j === 0 ? <>同一人 · {(c.账号 || []).length} 个账号已合并</> : '')
+                : <span className="warn">候选{j + 1}</span>}</td>
+              <td>{c.部门 || <span style={{ color: 'var(--ink-3)' }}>（打卡表没写部门）</span>}</td>
+              <td><b>{c.手机尾号 || '（无）'}</b></td>
+              <td>{c.打卡日数} 天</td>
+              <td>{c.命中上工日} / {x.上工日数}</td>
             </tr>
-          })}
+          )))}
         </tbody>
       </table>
     </div>}
@@ -2313,8 +2311,13 @@ function DingPull({ ding, job, onPull, hasSummary, full, onFull }) {
         <span style={{ color: 'var(--ink-3)' }}>　建议先抽几个人跟钉钉 App 上的记录对一眼再往下走。</span>
       </div>
       <DupReview rec={r.重名记录} merged={r.合并账号组数} />
+      {!!(r.同名待指认数 || (r.同名待指认 || []).length) && <div style={{ marginTop: 4, color: '#6b21a8' }}>
+        ◇ {r.同名待指认数 || r.同名待指认.length} 人同名撞了不同的人，工具没定人：每个候选已<b>各写一行进打卡表（带钉钉部门）</b>，
+        本期判「同名待指认」交成本会计按部门定——<b>不会</b>被冤成「没打卡」。名单：{(r.同名待指认 || []).slice(0, 10).join('、')}
+        {(r.同名待指认 || []).length > 10 && ' 等'}。
+      </div>}
       {!!(r.未取到 || []).length && <div className="warn" style={{ marginTop: 4 }}>
-        ⚠ 有 {r.未取到.length} 人没取到（重名分不清或钉钉查无此人）：{r.未取到.slice(0, 8).join('、')}
+        ⚠ 有 {r.未取到.length} 人钉钉查无此人、没取到：{r.未取到.slice(0, 8).join('、')}
         {r.未取到.length > 8 && ' 等'}。<b>这些人会被判成「没打卡」，请改用人力导出的打卡表，别照这份下结论。</b>
       </div>}
     </div>}

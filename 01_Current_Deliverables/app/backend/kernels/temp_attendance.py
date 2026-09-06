@@ -208,6 +208,9 @@ J_UNDER = "△ 少记"
 J_OVER_IN = "○ 多记"
 J_OVER_OUT = "⚠ 多记"
 J_NO_PUNCH = "⚠ 记了工时但无打卡"
+# 归一后撞上多个**不同的人**（钉钉有俩同名），工具不猜，把每个候选（含钉钉部门）都摆出来交成本会计定。
+# 关键：**不能**当成「记了工时但无打卡」——那会把「工具没定人」的锅甩给员工（丁菊华 2026-08 就是这么冤的）。
+J_AMBIG = "◇ 同名待指认（成本会计按钉钉部门判断）"
 J_NO_HOUR = "⚠ 有打卡但未记工时"
 J_THIN = "△ 仅1次打卡且未记工时,疑似无效"
 # 白夜混合：**shift 口径下已按切班窗口逐日切开、正常判档**（V2.369，规则见 compute_shifts）。
@@ -365,7 +368,11 @@ def match_punch(punch, name):
         return cand[0], None
     if not cand:
         return None, None
-    return None, [c["raw"] for c in cand]
+    # 歧义：把每个候选的**钉钉部门 + 手机尾号 + 打卡天数**一并带出——
+    # 成本会计一看部门（「临时普工-天幕人力」vs「销售中心」）就分得出谁是临时工，不用工具猜。
+    return None, [{"原名": c["raw"], "部门": c.get("部门") or "",
+                   "手机尾号": c.get("标识") or "", "打卡日数": len(c.get("days") or {})}
+                  for c in cand]
 
 
 # ==================== 解析：人力上报汇总表 ====================
@@ -777,6 +784,7 @@ def compute(summary, punch, params=None, contract=None):
                 _hours_that_day[(same_person_key(_p["name"]), int(_d))] = True
     for person in summary["people"]:
         rec, cand = match_punch(punch, person["name"])
+        _ambig = bool(cand)          # 归一后撞上多个人：逐日判「同名待指认」，不判「无打卡」
         if cand:
             ambiguous.append({"姓名": person["name"], "候选": cand})
         elif not rec:
@@ -803,6 +811,7 @@ def compute(summary, punch, params=None, contract=None):
                                 "原因": pay["合同缺档"]})
         agg = {"少记日": 0, "少记时": 0.0, "弹性内日": 0, "异常日": 0, "异常时": 0.0,
                "一致日": 0, "硬伤日": 0, "混合日": 0, "未计日": 0, "薄卡日": 0,
+               "待指认日": 0,          # 同名待指认（工具没定人）——中性，不算待查/异常
                "多出日": 0, "多出时": 0.0, "上报": 0.0, "重算": 0.0,
                # 净多记＝「判过的班日」上 Σ(上报−重算)，>0 即公司整期多付；已消化日＝逐日超弹性但整期没超、被降级的天
                "净多记": 0.0, "已消化日": 0}
@@ -857,7 +866,8 @@ def compute(summary, punch, params=None, contract=None):
                 # 切班窗口逐日切过白/夜了，所以下面照常判。
                 judge, cls = J_MIXED, "mixed"
             elif not ts and rep > 0:
-                judge, cls = J_NO_PUNCH, "hard"
+                # 撞名待指认的人本就没匹配到唯一打卡行 → 别当「无打卡」冤枉员工，判「同名待指认」交人
+                judge, cls = (J_AMBIG, "ambig") if _ambig else (J_NO_PUNCH, "hard")
             elif rep <= 0 and len(ts) <= 1:
                 judge, cls = J_THIN, "thin"
             elif rep <= 0:
@@ -886,7 +896,7 @@ def compute(summary, punch, params=None, contract=None):
                 agg["净多记"] += (rep - cal)
             agg[{"under": "少记日", "over_in": "弹性内日", "over_out": "异常日",
                  "ok": "一致日", "mixed": "混合日", "unbilled": "未计日",
-                 "thin": "薄卡日"}.get(cls, "硬伤日")] += 1
+                 "thin": "薄卡日", "ambig": "待指认日"}.get(cls, "硬伤日")] += 1
             if cls == "ok" and diff > 1e-9:      # 参考量：人在厂里、但没算进上报的时间
                 agg["多出日"] += 1
                 agg["多出时"] += diff
@@ -947,6 +957,7 @@ def compute(summary, punch, params=None, contract=None):
             "异常多记小时": round(_net, 2) if _over else 0.0,      # 超弹性时＝整期净多记（公司整期多付的量）
             "异常多记金额": round(_net * rate, 2) if _over else 0.0,
             "一致日次": agg["一致日"], "待查日次": agg["硬伤日"], "白夜混合日次": agg["混合日"],
+            "同名待指认日次": agg["待指认日"],
             "未计工时日次": agg["未计日"] + agg["薄卡日"],
             "打卡多于上报日次": agg["多出日"], "打卡多于上报小时": round(agg["多出时"], 2),
             "员工单价": w, "管理费单价": m, "含管理费单价": rate, "单价来源": src,
@@ -1013,6 +1024,8 @@ def _stats(rows, people, summary, punch, p, unmatched, ambiguous, no_contract=No
         "整期已消化多记日次": sum(1 for r in rows if r["档"] == "over_absorbed"),
         # 待查只留**真该查的**：报了工时、却一次卡都没有。「没记工时」的那些归下面「未计工时」
         "待查日次": sum(1 for r in rows if r["档"] == "hard"),
+        # 同名待指认：报了工时、但归一后撞上多个人、工具没定人 → 中性，交成本会计按钉钉部门定，**不算待查**
+        "同名待指认日次": sum(1 for r in rows if r["档"] == "ambig"),
         "白夜混合日次": sum(1 for r in rows if r["档"] == "mixed"),
         # 有打卡没算工时：单独一档，**不计入待查**——打卡表是全厂的，这些天多半是这人在别的名目下上班
         "未计工时日次": sum(1 for r in rows if r["档"] in ("unbilled", "thin")),

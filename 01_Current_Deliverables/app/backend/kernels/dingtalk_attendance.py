@@ -478,7 +478,7 @@ def _score(worked, punched):
     return 2 * cov * pre / (cov + pre)
 
 
-def resolve_dups(dup, month, worked_days=None, progress=None):
+def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
     """重名的人怎么办：先用**手机号**分清是几个人，再用**上工日**定是哪一个。
 
     为什么必须处理而不是跳过：跳过等于这个人在打卡表里凭空消失，
@@ -488,12 +488,14 @@ def resolve_dups(dup, month, worked_days=None, progress=None):
     两步：
       ① 手机号相同的候选＝**同一个人的多个钉钉账号**（离职再入职会新建 userid）。
          合并，不是二选一——只选一个会丢掉另一个账号那几天的打卡。2026-06 有 8 组是这种。
-      ② 剩下手机号不同的，才是真的不同的人。按「打卡日 vs 汇总表上工日」算 F1，
-         要求 ≥0.5 且甩开第二名一倍才认；拿不准宁可空着交人工——
-         猜错就是把甲的工时记到乙头上。
+      ② 剩下手机号不同的，才是真的不同的人 → **工具不猜**，全部退回（still）交成本会计。
+         每个候选带上**钉钉部门**（「临时普工-天幕人力」vs「销售中心」，一眼分得出临时工）、
+         手机尾号、打卡天数；打卡也一并带出（days），由上游把每个候选写成打卡表里的一行，
+         核对侧自然认成「同名待指认」而不是「报了工时没打卡」。
+         （2026-09 业务定案：不自动定人。原先按 F1 猜的规则作废，猜错就是把甲的工时记到乙头上。）
 
-    **无论自动定成什么，都要原样报给成本会计复核**（返回值里的「记录」），
-    页面和生成的打卡表里都会列出来：选中谁、手机尾号、几天打卡、判据是什么。
+    返回：hit（只含「合并账号后唯一」的人）、still（≥2 个不同的人，交成本会计）、got、rec。
+    rec/still 里都列清楚：候选各是谁、部门、手机尾号、几天打卡——页面和打卡表都照原样摆出来。
     """
     say = progress or (lambda *a, **k: None)
     worked_days = worked_days or {}
@@ -528,23 +530,27 @@ def resolve_dups(dup, month, worked_days=None, progress=None):
             scored.append((_score(w, set(days)), grp, days))
         scored.sort(key=lambda x: -x[0])
         best = scored[0]
-        second = scored[1][0] if len(scored) > 1 else 0.0
-        # 定人：① 只一个候选直接认；② 最高分≥0.5 且甩开第二名一倍；
-        # ③ 最高分近乎完美(≥0.85，即候选打卡日几乎正好＝上工日)且明显领先(≥0.1)——
-        #    专治「临时工撞名一个天天打卡的正式工」：正式工整月刷卡、把上工日也覆盖了 F1 不低，
-        #    但临时工的打卡**正好落在上工日**(F1≈1、精确率≈1)才是唯一真解；一倍闸门会把它误挡
-        #    （丁菊华 2026-08 实测 1.00 vs 0.86 被挡，全部上工日被判「报了工时没打卡」）。
-        #    势均力敌(两人都高、差不到 0.1)仍交人工，不猜。
-        ok = (len(scored) == 1
-              or (best[0] >= 0.5 and best[0] >= 2 * second)
-              or (best[0] >= 0.85 and best[0] - second >= 0.1))
+        # 定人只认一种情形：**合并手机号后只剩一个人**（同一人的多个钉钉账号，不涉及在两个人里挑）。
+        # 只要是 ≥2 个**不同的人**，工具一律不猜——把每个候选（含钉钉部门）摆出来，交成本会计按部门判。
+        # （2026-09 业务定案：「不去自己认，把钉钉部门列出来让成本会计判断」。原先按打卡日 F1 猜的
+        #   两条规则——甩开一倍、以及 V2.458 的近乎完美领先——就此作废，猜错等于把甲的工时记到乙头上。）
+        ok = (len(scored) == 1)
+
+        def _dept(grp):
+            depts = []
+            for u in grp:
+                for dd in ((roster or {}).get(u) or {}).get("部门") or []:
+                    if dd and dd not in depts:
+                        depts.append(dd)
+            return "、".join(depts)
 
         item = {"姓名": nm, "候选人数": len(people), "钉钉账号数": len(uids),
                 "上工日数": len(w), "已定": bool(ok),
                 "合并账号": sum(1 for g in people if len(g) > 1),
-                "候选": [{"账号": g, "手机尾号": tail(mob.get(g[0])),
+                "候选": [{"账号": g, "手机尾号": tail(mob.get(g[0])), "部门": _dept(g),
                           "打卡日数": len(d), "命中上工日": len(w & set(d)),
-                          "得分": round(sc, 2), "选中": bool(ok and g is best[1])}
+                          "得分": round(sc, 2), "选中": bool(ok and g is best[1]),
+                          "days": d}
                          for sc, g, d in scored]}
         rec.append(item)
         if ok:
@@ -729,10 +735,11 @@ def build_punch_xlsx(month, rows, dup_rec=None):
     # 而它跟着文件走，下载下来就能核、能存档——不能让「工具替人做了选择」这件事没有痕迹。
     if dup_rec:
         w2 = wb.create_sheet("重名定人·待成本会计复核")
-        w2.cell(1, 1, f"{month} 重名定人底稿——同名的人，工具选了谁、凭什么选的。请逐行核对。")
-        w2.cell(2, 1, "手机号相同＝同一个人在钉钉有两个账号（离职再入职），已合并打卡；"
-                      "手机号不同＝真的是不同的人，按「打卡日和汇总表上工日对不对得上」定的。")
-        head = ("姓名", "结论", "候选", "手机尾号", "钉钉账号", "当月打卡天数",
+        w2.cell(1, 1, f"{month} 同名待指认底稿——钉钉有俩同名，工具不猜。请按「钉钉部门」定谁是临时工。")
+        w2.cell(2, 1, "手机号相同＝同一个人在钉钉有两个账号（离职再入职），已合并打卡、不必选；"
+                      "手机号不同＝真的是不同的人，看**钉钉部门**判——「临时普工-…人力」才是临时工，"
+                      "「销售/研发/品牌…中心」是正式工。")
+        head = ("姓名", "结论", "候选", "钉钉部门", "手机尾号", "钉钉账号", "当月打卡天数",
                 "命中上工日", "上工日数", "吻合度", "是否选中")
         for c, v in enumerate(head, start=1):
             w2.cell(4, c, v)
@@ -740,20 +747,21 @@ def build_punch_xlsx(month, rows, dup_rec=None):
         for it in dup_rec:
             for i, cd in enumerate(it["候选"]):
                 w2.cell(r, 1, it["姓名"] if i == 0 else "")
-                w2.cell(r, 2, ("已定人" if it["已定"] else "⚠ 定不了，需人工") if i == 0 else "")
+                w2.cell(r, 2, ("同一人多账号已合并" if it["已定"] else "⚠ 同名，需成本会计定人") if i == 0 else "")
                 w2.cell(r, 3, f"候选{i + 1}" + ("（同一人的%d个账号已合并）" % len(cd["账号"])
                                                 if len(cd["账号"]) > 1 else ""))
-                w2.cell(r, 4, cd["手机尾号"] or "（无）")
-                w2.cell(r, 5, "、".join(cd["账号"]))
-                w2.cell(r, 6, cd["打卡日数"])
-                w2.cell(r, 7, cd["命中上工日"])
-                w2.cell(r, 8, it["上工日数"] if i == 0 else "")
-                w2.cell(r, 9, cd["得分"])
-                w2.cell(r, 10, "✔ 选中" if cd["选中"] else "")
+                w2.cell(r, 4, cd.get("部门") or "（打卡表没写部门）")
+                w2.cell(r, 5, cd["手机尾号"] or "（无）")
+                w2.cell(r, 6, "、".join(cd["账号"]))
+                w2.cell(r, 7, cd["打卡日数"])
+                w2.cell(r, 8, cd["命中上工日"])
+                w2.cell(r, 9, it["上工日数"] if i == 0 else "")
+                w2.cell(r, 10, cd["得分"])
+                w2.cell(r, 11, "✔ 选中" if cd["选中"] else "")
                 r += 1
         w2.freeze_panes = "A5"
-        for col, wd in (("A", 12), ("B", 16), ("C", 24), ("D", 10), ("E", 44),
-                        ("F", 12), ("G", 12), ("H", 10), ("I", 9), ("J", 9)):
+        for col, wd in (("A", 12), ("B", 20), ("C", 24), ("D", 40), ("E", 10), ("F", 44),
+                        ("G", 12), ("H", 12), ("I", 10), ("J", 9), ("K", 9)):
             w2.column_dimensions[col].width = wd
     buf = BytesIO()
     wb.save(buf)
@@ -789,7 +797,7 @@ def pull_month(month, names, progress=None, roster=None, worked_days=None,
     mt = match_names(names, roster)
     say(f"对上 {len(mt['唯一'])} 人｜撞名 {len(mt['撞名'])}｜查无 {len(mt['查无'])}", 38)
 
-    fixed, still, cached, rec = resolve_dups(mt["撞名"], month, worked_days, say)
+    fixed, still, cached, rec = resolve_dups(mt["撞名"], month, worked_days, say, roster=roster)
 
     uids = sorted(set(mt["唯一"].values()))
     if scope == "worked":
@@ -838,16 +846,25 @@ def pull_month(month, names, progress=None, roster=None, worked_days=None,
         rows.append({"姓名": nm, "部门": "、".join(r.get("部门") or []),
                      "考勤组": _tag + "·重名已定人", "手机尾号": _tail(v["账号"][0]),
                      "days": v["days"]})
+    # 同名待指认（工具不猜）：把**每个候选各写一行**（同名、各带自己的钉钉部门+尾号+打卡）。
+    # 核对侧一看「同名多行」→ 判「同名待指认」，成本会计照部门定人；绝不能整个人丢掉害他被判「没打卡」。
+    for nm, it in sorted(still.items()):
+        for cd in it.get("候选") or []:
+            rows.append({"姓名": nm, "部门": cd.get("部门") or "",
+                         "考勤组": _tag + "·同名待指认",
+                         "手机尾号": cd.get("手机尾号") or "",
+                         "days": cd.get("days") or {}})
     rows.sort(key=lambda x: x["姓名"])
     xlsx = build_punch_xlsx(month, rows, dup_rec=rec)
     say("完成", 100)
-    # 「未取到」必须原样报出去：这些人不在打卡表里，下游会把他们判成「没打卡」。
-    # 不讲清楚，使用者会把工具的盲区当成员工的问题。
-    miss = sorted(set(still) | set(mt["查无"]))
+    # 「未取到」＝真的没进打卡表的人（查无此人）；下游会判「没打卡」，必须原样报出去。
+    # 撞名待指认的人**已经进表了**（每个候选一行），不算未取到——他们在报告里是「同名待指认」，交成本会计。
+    miss = sorted(set(mt["查无"]))
     return {"xlsx": xlsx, "人数": len(rows), "取数范围": scope,
             "对上": len(mt["唯一"]) + len(fixed), "撞名自动定人": len(fixed),
+            "同名待指认": sorted(still), "同名待指认数": len(still),
             "重名记录": rec, "合并账号组数": sum(1 for x in rec if x["合并账号"]),
-            "未取到": miss, "未取到明细": still, "查无此人": mt["查无"],
+            "未取到": miss, "未取到明细": {}, "查无此人": mt["查无"],
             "有打卡人数": sum(1 for r in rows if r["days"]),
             "打卡日次": sum(len(r["days"]) for r in rows),
             "调用次数": len(jobs) + len(cached) * last}
