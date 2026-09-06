@@ -328,6 +328,8 @@ export const bomSetMatType = (entryId, mat, subType) => jp('/api/bom/set-mat-typ
 export const bomSetErpCode = (entryId, erpCode, confirmObsolete = false) => jp('/api/bom/set-erp-code', { entryId, erpCode, confirmObsolete })
 // 按 CP 码到金蝶物料档案「研发编码」字段反查物料编码候选（只查不写，成本会计确认后再 bomSetErpCode）
 export const getBomErpLookup = (entryId) => j('/api/bom/erp-lookup?entryId=' + entryId)
+// 金蝶 ERP BOM 用量 vs 核算表添加量（核对弹窗 ③）；code 可选，默认用记录的物料编码
+export const getBomKdBom = (entryId, code) => j(`/api/bom/kd-bom?entryId=${entryId}${code ? `&code=${encodeURIComponent(code)}` : ''}`)
 export const bomSetNetWeight = (entryId, netWeightKg) => jp('/api/bom/set-net-weight', { entryId, netWeightKg })
 export const getBomUsageSpreads = (entryId) => j(`/api/bom/usage-spreads?entryId=${entryId}`)
 export const getBomInvoiceRules = () => j('/api/bom/invoice-rules')

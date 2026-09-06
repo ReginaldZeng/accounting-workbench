@@ -8,7 +8,7 @@ import {
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
-  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel,
+  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom,
   getBomInvoiceRules, setBomInvoiceRules,
 } from '../api.js'
 
@@ -1178,6 +1178,14 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLi
     getBomEntry(sel).then(r => setOther(r.entry)).catch(e => flash('打不开对方核算表：' + e.message))
   }, [sel])
   const adopt = async (code) => { setBusy(true); try { await onAdopt(code) } finally { setBusy(false) } }
+  // ③ 金蝶 ERP BOM 用量对比（业务方提 2026-09-06）：有物料编码就自动拉；没有就用金蝶候选里第一个正式码试比
+  const [kd, setKd] = useState(null)
+  const kdCode = entry.erpCode || ((lk && (lk.candidates || []).find(c => !c.erpCode.toUpperCase().startsWith('T')) || (lk && lk.candidates && lk.candidates[0]) || {}).erpCode) || ''
+  useEffect(() => {
+    setKd(null)
+    if (!kdCode) return
+    getBomKdBom(entry.id, entry.erpCode ? undefined : kdCode).then(setKd).catch(e => setKd({ ok: false, offline: true, msg: e.message }))
+  }, [entry.id, kdCode])
   // 对齐口径同后端 compare_bom：真实编码优先（「XX系列」占位不算），退名字
   const keyOf = (m) => { const c = clean(m.matCode); return (c && !c.includes('系列') && c !== '0') ? 'c:' + c : 'n:' + clean(m.matName) }
   const rows = useMemo(() => {
@@ -1218,7 +1226,42 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLi
             <div style={{ marginTop: 6 }}><ErpCandidates lk={lk} onAdopt={adopt} busy={busy} onCompare={(id) => setSel(id)} /></div>
           </div>
           <div style={{ marginTop: 12 }}>
-            <b style={{ fontSize: 12 }}>② 台账里同物料编码 / 同 CP 的其它核算表——逐料对比</b>
+            <b style={{ fontSize: 12 }}>② 金蝶 ERP BOM 用量 vs 核算表添加量{kdCode ? <span className="mono muted" style={{ fontWeight: 400 }}>　物料 {kdCode}{!entry.erpCode ? '（按金蝶候选试比，未采用）' : ''}</span> : ''}</b>
+            {!kdCode && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>没有物料编码，也没有金蝶候选——无法定位金蝶 BOM。</div>}
+            {kdCode && !kd && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>读取金蝶 BOM…</div>}
+            {kd && kd.offline && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>金蝶未连接：{kd.msg}</div>}
+            {kd && !kd.offline && kd.ok && !kd.hasBom && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{kd.msg}</div>}
+            {kd && kd.ok && kd.hasBom && <>
+              <div className="muted" style={{ fontSize: 11.5, margin: '4px 0' }}>
+                金蝶 BOM <b className="mono">{kd.bom.bomNo}</b>{kd.bom.forbidden ? <span className="tag werr" style={{ marginLeft: 4 }}>已禁用</span> : ''} · 母件单位 {kd.bom.unit || '—'} · 成品率 {kd.bom.yieldRate ?? '—'}%
+                {(kd.bom.versions || []).length > 1 ? ` · 共 ${kd.bom.versions.length} 版（取启用最新）` : ''} · 子项 {kd.itemCount} 项，
+                <b style={{ color: kd.diffCount ? 'var(--amber)' : 'var(--green)' }}>{kd.diffCount ? `${kd.diffCount} 项有差异` : '全部一致'}</b>
+                {kd.note ? <span style={{ color: 'var(--amber)' }}>　⚠ {kd.note}</span> : ''}
+                　·　容差 0.0005 kg/kg；金蝶 BOM 里的半成品子项对应核算表里「作原料进上层」的行。
+              </div>
+              <div className="tbl-wrap">
+                <table className="bom-ledger" style={{ fontSize: 12 }}>
+                  <thead><tr>
+                    <th className="th">段</th><th className="th">物料（核算表）</th><th className="th">编码</th><th className="th">金蝶子项</th>
+                    <th className="th" style={{ textAlign: 'right' }}>核算表添加量</th><th className="th" style={{ textAlign: 'right' }}>研发BOM用量</th>
+                    <th className="th" style={{ textAlign: 'right' }}>金蝶BOM用量</th><th className="th" style={{ textAlign: 'right' }}>Δ(核算−金蝶)</th><th className="th">判定</th>
+                  </tr></thead>
+                  <tbody>{kd.rows.map((r, i) => (
+                    <tr key={i} className={r.st === '一致' ? '' : 'bom-nbrow'}>
+                      <td className="sub">{r.seg || '—'}</td><td>{r.name || <span className="muted">—</span>}</td><td className="mono sub">{r.code || '—'}</td>
+                      <td className="sub">{r.kdCode ? <><span className="mono">{r.kdCode}</span> {r.kdName !== r.name ? r.kdName : ''}</> : '—'}</td>
+                      <td className="num">{r.ours != null ? Number(r.ours).toFixed(4) : '—'}</td>
+                      <td className="num sub">{r.rd != null ? Number(r.rd).toFixed(4) : '—'}</td>
+                      <td className="num">{r.kd != null ? Number(r.kd).toFixed(4) : '—'}{r.kdUnit && r.kdUnit !== '千克' ? <span className="muted"> {r.kdUnit}</span> : ''}</td>
+                      <td className="num sub" style={{ color: r.delta > 0.0005 ? 'var(--red)' : (r.delta < -0.0005 ? 'var(--green)' : undefined) }}>{r.delta == null ? '' : (r.delta > 0 ? '▲' : r.delta < 0 ? '▼' : '') + Math.abs(r.delta).toFixed(4)}</td>
+                      <td><span className={'tag ' + (r.st === '一致' ? 'ok' : (r.st.startsWith('仅') ? 'werr' : 'late'))}>{r.st}</span></td>
+                    </tr>))}</tbody>
+                </table>
+              </div>
+            </>}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <b style={{ fontSize: 12 }}>③ 台账里同物料编码 / 同 CP 的其它核算表——逐料对比</b>
             {list.length === 0 && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>台账里没有别的记录挂同一物料编码或同一 CP，无需对比。</div>}
             {list.length > 1 && <div className="bom-catpick" style={{ margin: '6px 0' }}>{list.map(o => (
               <button key={o.entryId} className={sel === o.entryId ? 'on' : ''} onClick={() => setSel(o.entryId)}>{o.cpCode} {o.productName}{o.status ? ` · ${o.status}` : ''}</button>))}</div>}

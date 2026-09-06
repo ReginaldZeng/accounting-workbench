@@ -740,6 +740,64 @@ def fetch_materials_by_rd_code(cp, s=None, conf=None):
     return out
 
 
+# ---- 金蝶 ERP BOM（ENG_BOM）按母件物料编码取子项用量（BOM报价审核 · 核对弹窗 ③，2026-09-06）----
+# 本账套实测（241000663 菌菇辣丝丝半成品）：BOM 编码形如 `241000663_V1.1`；母件单位 千克；子项 用量＝FNUMERATOR/FDENOMINATOR（kg/kg），
+# FDOSAGETYPE '2'＝变动用量（随母件数量比例）、'1'＝固定用量；FSCRAPRATE 损耗率；FYIELDRATE 表头成品率；
+# 同一 BOM 按使用组织(101/107)出重复行 → 只取一个组织；多版本（V1.0 禁用 B / V1.1 启用 A）取**启用且已审核**里版本号最大的。
+# 子项里会有半成品（如 200000177 卤味复合调味酱）——与核算表「作原料进上层」的口径一致，可直接逐料比。
+_BOM_HEAD = [("FNumber", "bomNo"), ("FMATERIALID.FNumber", "code"), ("FMATERIALID.FName", "name"), ("FUNITID.FName", "unit"),
+             ("FUSEORGID.FNumber", "org"), ("FDocumentStatus", "doc"), ("FForbidStatus", "forbid"), ("FYIELDRATE", "yieldRate")]
+_BOM_ITEMS = [("FNumber", "bomNo"), ("FUSEORGID.FNumber", "org"), ("FMATERIALIDCHILD.FNumber", "code"), ("FMATERIALIDCHILD.FName", "name"),
+              ("FCHILDUNITID.FName", "unit"), ("FNUMERATOR", "num"), ("FDENOMINATOR", "den"), ("FSCRAPRATE", "scrap"),
+              ("FDOSAGETYPE", "dosageType"), ("FMATERIALTYPE", "matType")]
+
+
+def _ver_key(bom_no):
+    m = re.search(r"_V(\d+)\.(\d+)$", str(bom_no or ""))
+    return (int(m.group(1)), int(m.group(2))) if m else (-1, -1)
+
+
+def fetch_bom(code, s=None, conf=None):
+    """按母件物料编码取金蝶 ERP 当前 BOM（只读）。→ dict 或 None（没登 BOM）：
+    {bomNo, code, name, unit, yieldRate, forbidden, doc, org, versions:[{bomNo, forbidden, doc}], items:[{code,name,unit,qty,num,den,scrap,dosageType,matType}]}
+    qty＝num/den（母件单位 1 单位所需子项数量，本账套母件/子项多为 千克 → kg/kg，可与核算表添加量直接比）。"""
+    if s is None or conf is None:
+        s, conf = login()
+    code = str(code or "").strip().replace("'", "''")
+    if not code:
+        return None
+    heads = _query(s, conf, "ENG_BOM", _BOM_HEAD, "FMATERIALID.FNumber = '%s'" % code, "FNumber")
+    if not heads:
+        return None
+    by_no = {}
+    for h in heads:
+        o = by_no.setdefault(h["bomNo"], {**h, "orgs": []})
+        if h.get("org") and h["org"] not in o["orgs"]:
+            o["orgs"].append(h["org"])
+    versions = sorted(by_no.values(), key=lambda h: _ver_key(h["bomNo"]))
+    live = [h for h in versions if str(h.get("forbid") or "") == "A" and str(h.get("doc") or "") == "C"]
+    cur = (live or versions)[-1]
+    org = (cur.get("orgs") or [None])[0]
+    filt = "FNumber = '%s'" % str(cur["bomNo"]).replace("'", "''")
+    if org:
+        filt += " and FUSEORGID.FNumber = '%s'" % org
+    rows = _query(s, conf, "ENG_BOM", _BOM_ITEMS, filt, "")
+    items = []
+    for r in rows:
+        try:
+            num = float(r.get("num") or 0)
+            den = float(r.get("den") or 1) or 1.0
+        except (TypeError, ValueError):
+            num, den = 0.0, 1.0
+        items.append({"code": str(r.get("code") or "").strip(), "name": str(r.get("name") or "").strip(),
+                      "unit": str(r.get("unit") or "").strip(), "qty": round(num / den, 6), "num": num, "den": den,
+                      "scrap": r.get("scrap"), "dosageType": str(r.get("dosageType") or ""), "matType": str(r.get("matType") or "")})
+    return {"bomNo": cur["bomNo"], "code": str(cur.get("code") or ""), "name": str(cur.get("name") or ""), "unit": str(cur.get("unit") or ""),
+            "yieldRate": cur.get("yieldRate"), "forbidden": str(cur.get("forbid") or "") == "B", "doc": str(cur.get("doc") or ""),
+            "org": org, "versions": [{"bomNo": v["bomNo"], "forbidden": str(v.get("forbid") or "") == "B", "doc": str(v.get("doc") or "")} for v in versions],
+            "items": items}
+
+
 # 二期付款对账：按回填单号直查的 7 类单据（前 4 类同上，新增 3 类 2026-07-14 实单探查确认）。
 # 字段Key 大小写各单据不同（库存基本数量：FBaseunitQty/FBaseUnitQty/FBASEUNITQTY），逐单据写死+缺列降级。
 _RETURN_FORMS = [

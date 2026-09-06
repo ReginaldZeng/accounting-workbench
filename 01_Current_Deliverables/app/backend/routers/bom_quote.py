@@ -1042,6 +1042,115 @@ async def bom_erp_lookup(request: Request):
     return {"ok": True, "cp": cp, "current": cur, "candidates": cands, "sameCode": same_code}
 
 
+# ---- 金蝶 ERP BOM 用量 vs 核算表添加量（业务方提 2026-09-06：「是不是应该将金蝶录入的 BOM 用量和我们这里的作对比」）----
+_KD_BOM_CACHE = {}
+
+
+def _kd_bom(code):
+    import kingdee_client as kc
+    key = str(code or "").strip()
+    hit = _KD_BOM_CACHE.get(key)
+    if hit and time.time() - hit[0] < _ERP_LOOKUP_TTL:
+        return hit[1]
+    res = kc.fetch_bom(key)
+    _KD_BOM_CACHE[key] = (time.time(), res)
+    return res
+
+
+def _real_code_of(m):
+    c = (m.get("matCode") or "").strip()
+    return c if (c and "系列" not in c and c != "0") else ""
+
+
+def _align_kd_bom(e, bom):
+    """核算表物料行 vs 金蝶 BOM 子项逐料对齐：真实编码优先、退名字、每条只配一次。
+    → rows[{seg,name,code,kdCode,kdName,ours,rd,kd,kdUnit,delta,st}]，st ∈ 一致/用量不符/仅核算表/仅金蝶/单位不同。
+    可比前提：母件单位 千克 且子项单位 千克 → kg/kg 与核算表添加量同口径；否则标「单位不同」不判。容差 0.0005（四位小数）。"""
+    mats = e.get("materials") or []
+    rd = {}
+    for b in (e.get("bom_list") or []):                     # 研发 BOM 清单用量，有就并一列
+        k = _real_code_of(b) or ("n:" + (b.get("matName") or "").strip())
+        rd[k] = b.get("qty")
+    # 金蝶 BOM 同一子项可能分多行（实测 241000663 V1.1：大豆油 0.2139 + 0.0181 两行）→ 按编码（无码按名）**求和**再比，同 compare_bom 口径
+    agg = {}
+    for it in (bom.get("items") or []):
+        k = it["code"] or ("n:" + it["name"])
+        o = agg.get(k)
+        if o:
+            o["qty"] = round(o["qty"] + it["qty"], 6)
+            o["lines"] += 1
+        else:
+            agg[k] = {**it, "lines": 1}
+    items = list(agg.values())
+    by_code = {it["code"]: it for it in items if it["code"]}
+    by_name = {}
+    for it in items:
+        by_name.setdefault(it["name"], it)
+    used, rows = set(), []
+    parent_kg = (bom.get("unit") or "") == "千克"
+    for m in mats:
+        code = _real_code_of(m)
+        nm = (m.get("matName") or "").strip()
+        it = by_code.get(code) if code else None
+        if (not it or id(it) in used):
+            it = by_name.get(nm)
+        if it and id(it) in used:
+            it = None
+        if it:
+            used.add(id(it))
+        ours = m.get("qtyPerKg")
+        rdq = rd.get(code) if code else None
+        if rdq is None:
+            rdq = rd.get("n:" + nm)
+        if not it:
+            rows.append({"seg": m.get("seg"), "name": nm, "code": code or (m.get("matCode") or ""), "kdCode": "", "kdName": "",
+                         "ours": ours, "rd": rdq, "kd": None, "kdUnit": "", "delta": None, "st": "仅核算表"})
+            continue
+        comparable = parent_kg and it["unit"] == "千克"
+        if not comparable:
+            st, delta = "单位不同", None
+        else:
+            delta = (ours or 0) - it["qty"]
+            st = "一致" if abs(delta) <= 0.0005 else "用量不符"
+        rows.append({"seg": m.get("seg"), "name": nm, "code": code or (m.get("matCode") or ""), "kdCode": it["code"], "kdName": it["name"],
+                     "ours": ours, "rd": rdq, "kd": it["qty"], "kdUnit": it["unit"], "delta": delta, "st": st})
+    for it in items:
+        if id(it) not in used:
+            rows.append({"seg": "", "name": it["name"], "code": "", "kdCode": it["code"], "kdName": it["name"],
+                         "ours": None, "rd": None, "kd": it["qty"], "kdUnit": it["unit"], "delta": None, "st": "仅金蝶"})
+    rank = {"仅核算表": 0, "仅金蝶": 0, "用量不符": 1, "单位不同": 2, "一致": 9}
+    rows.sort(key=lambda r: (rank[r["st"]], r["seg"] == "包材"))
+    return rows
+
+
+@router.get("/api/bom/kd-bom")
+async def bom_kd_bom(request: Request):
+    """核对弹窗 ③：按本记录的物料编码取金蝶 ERP 当前 BOM，与核算表添加量（及研发 BOM 清单用量）逐料对比。
+    只读金蝶；金蝶连不上 → offline；没物料编码 → 提示先采用编码；金蝶没登 BOM → hasBom=false。CAP_AUDIT。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限"}, status_code=403)
+    e = db.bom_get_entry(request.query_params.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    code = (request.query_params.get("code") or e.get("erp_code") or "").strip()
+    if not code:
+        return {"ok": True, "hasBom": False, "code": "", "msg": "本记录尚无物料编码——先在上面「采用」金蝶物料编码，再比金蝶 BOM"}
+    try:
+        bom = _kd_bom(code)
+    except Exception as ex:
+        return {"ok": True, "offline": True, "code": code, "msg": "金蝶未连接或字段待联调：%s" % str(ex)[:160]}
+    if not bom:
+        return {"ok": True, "hasBom": False, "code": code, "msg": "金蝶里物料 %s 没有登 BOM（未建 BOM 或未审核），无法对比" % code}
+    rows = _align_kd_bom(e, bom)
+    n_diff = sum(1 for r in rows if r["st"] != "一致")
+    return {"ok": True, "hasBom": True, "code": code,
+            "bom": {k: bom[k] for k in ("bomNo", "name", "unit", "yieldRate", "forbidden", "doc", "org", "versions")},
+            "itemCount": len(bom["items"]), "rows": rows, "diffCount": n_diff,
+            "comparable": (bom.get("unit") or "") == "千克",
+            "note": ("金蝶 BOM 母件单位 %s，子项用量口径与核算表 kg/kg 可能不同，仅供参考" % bom.get("unit")) if (bom.get("unit") or "") != "千克" else ""}
+
+
 @router.get("/api/bom/material-usage")
 async def bom_material_usage(request: Request):
     """BOM反查：本数据源下，其他记录用同一物料编码时研发填的含税价（看研发跨产品定价是否一致）。
