@@ -7,6 +7,7 @@ const S = (d, sw = 1.75) => <svg viewBox="0 0 24 24" fill="none" stroke="current
 const IC = {
   bank: S(<><path d="M3 10l9-6 9 6" /><path d="M4 10v9M20 10v9M8 10v9M16 10v9M12 10v9M3 21h18" /></>),
   back: S(<path d="M15 18l-6-6 6-6" />),
+  home: S(<><path d="M3 11l9-8 9 8" /><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10" /></>),
   chevDown: S(<path d="M6 9l6 6 6-6" />),
   collapse: S(<path d="M11 17l-5-5 5-5M18 17l-5-5 5-5" />),
   expand: S(<path d="M13 17l5-5-5-5M6 17l5-5-5-5" />),
@@ -254,6 +255,15 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
         </div>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', overflowX: 'visible', padding: '2px 0' }}>
+        {/* 首页（V2.488）：钉在图标轨最上 */}
+        <div style={{ position: 'relative' }}
+          onMouseEnter={() => setHovered('__home__')} onMouseLeave={() => setHovered(h => h === '__home__' ? null : h)}>
+          <div onClick={() => onSelect('home')} className="railbtn" title="首页" style={{ width: 44, height: 44, margin: '2px auto', borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: view === 'home' ? 'var(--accent)' : 'var(--ink-2)', background: view === 'home' ? 'var(--accent-soft)' : undefined }}>
+            <span style={{ width: 20, height: 20, display: 'inline-flex' }}>{IC.home}</span>
+          </div>
+          {hovered === '__home__' && <div style={{ position: 'absolute', left: '100%', top: 0, marginLeft: 12, zIndex: 60, background: 'var(--bg)', border: '1px solid var(--line)', borderRadius: 10, boxShadow: '0 16px 44px rgba(28,32,58,.18)', padding: '7px 12px', fontSize: 13, fontWeight: 700, color: 'var(--ink)', whiteSpace: 'nowrap' }}>首页</div>}
+        </div>
+        <div style={{ width: 34, height: 1, background: 'var(--line)', margin: '5px auto' }} />
         {flat.map(({ it, groupStart }) => Rail(it, groupStart))}
       </div>
       {/* 基础数据/基础设置：钉在底部（滚动区之外），参照 BP 工作台 */}
@@ -286,6 +296,10 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
     </div>
 
     <div style={{ flex: 1, overflowY: 'auto', padding: '0 12px 6px' }}>
+      {/* 首页（V2.488）：轻量落地页，恒在最上、恒可点 */}
+      <div className="navrow" onClick={() => onSelect('home')} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, borderRadius: 10, color: view === 'home' ? 'var(--accent)' : 'var(--ink)', background: view === 'home' ? 'var(--accent-soft)' : undefined, fontWeight: view === 'home' ? 600 : 400, fontSize: 13.5, cursor: 'pointer', padding: '0 6px' }}>
+        <span style={{ width: 18, height: 18, display: 'inline-flex' }}>{IC.home}</span> 首页
+      </div>
       {onHome && <div className="navrow" onClick={onHome} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, borderRadius: 10, color: 'var(--ink-2)', fontSize: 13.5, cursor: 'pointer', padding: '0 6px' }}>
         <span style={{ width: 18, height: 18, display: 'inline-flex' }}>{IC.back}</span> 返回门户
       </div>}

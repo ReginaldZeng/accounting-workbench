@@ -17,7 +17,7 @@ import secrets
 import datetime
 
 from sqlalchemy import (create_engine, MetaData, Table, Column, String, Text, Integer, Float,
-                        LargeBinary, UniqueConstraint, select, insert, update, delete)
+                        LargeBinary, UniqueConstraint, select, insert, update, delete, func)
 from sqlalchemy.dialects.mysql import LONGTEXT   # v 字段大月留档可达数百KB，MySQL 的 Text 仅 64KB
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -1218,6 +1218,35 @@ def recent_audit(limit=200):
     with _engine.connect() as c:
         rows = c.execute(select(audit_log).order_by(audit_log.c.id.desc()).limit(limit)).mappings().all()
     return [dict(r) for r in rows]
+
+
+def query_audit(operator=None, action=None, days=None, limit=500):
+    """审计留痕查询（供「日志中心 › 业务操作留痕」用）。按时间倒序，可按操作人 / 动作 / 天数过滤。
+    ts 是 'YYYY-MM-DD HH:MM' 字符串、字典序即时间序，故天数过滤用字符串下限即可（无需转日期）。"""
+    q = select(audit_log)
+    if operator:
+        q = q.where(audit_log.c.operator == operator)
+    if action:
+        q = q.where(audit_log.c.action == action)
+    if days:
+        cut = (datetime.datetime.now() - datetime.timedelta(days=int(days))).strftime("%Y-%m-%d %H:%M")
+        q = q.where(audit_log.c.ts >= cut)
+    q = q.order_by(audit_log.c.id.desc()).limit(min(int(limit), 5000))
+    with _engine.connect() as c:
+        rows = c.execute(q).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def audit_meta(days=90):
+    """留痕筛选器元信息：窗口内出现过的操作人、动作清单（去重）+ 总条数。给前端渲染下拉筛选。"""
+    cut = (datetime.datetime.now() - datetime.timedelta(days=int(days))).strftime("%Y-%m-%d %H:%M")
+    with _engine.connect() as c:
+        ops = [r[0] for r in c.execute(select(audit_log.c.operator).where(audit_log.c.ts >= cut)
+                                       .distinct().order_by(audit_log.c.operator)).all() if r[0]]
+        acts = [r[0] for r in c.execute(select(audit_log.c.action).where(audit_log.c.ts >= cut)
+                                        .distinct().order_by(audit_log.c.action)).all() if r[0]]
+        total = c.execute(select(func.count()).select_from(audit_log).where(audit_log.c.ts >= cut)).scalar()
+    return {"operators": ops, "actions": acts, "total": int(total or 0), "days": days}
 
 
 def backend_info():

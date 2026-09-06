@@ -6,8 +6,12 @@ __pycache__/
 dist/
 
 # ── 本地运行数据（每台机器不同，且含敏感信息）──────
-# SQLite 本地库（含 users 表密码哈希）
+# SQLite 本地库（含 users 表密码哈希）；运维日志库 ops_log.db（V2.485）同此。
 *.db
+# SQLite WAL/SHM 边车文件（开 WAL 后每个库都会生成，属运行时产物，不入库）
+*.db-wal
+*.db-shm
+*.db-journal
 # 上传的银行流水等运行时文件
 bank_uploads/
 ec_uploads/

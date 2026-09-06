@@ -30,12 +30,13 @@ import ReportDashboard from './views/ReportDashboard.jsx'
 import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
+import Home from './views/Home.jsx'
 import { getConfig, setConfig, getMe, apiLogout, getNavModules } from './api.js'
 
 export default function App() {
   const [user, setUser] = useState(undefined)   // undefined=检查登录中 / null=未登录 / {..}=已登录
   const [zone, setZone] = useState('portal')     // portal=门户 / accounting=核算工作台 / bp / legal
-  const [view, setView] = useState('reconcile')
+  const [view, setView] = useState('home')   // V2.488 进核算工作台先落首页（轻量、不取数），而非直接落对账程序
   const [cfg, setCfg] = useState({ source: 'sample', year: 2026, period: 6 })
   const [mods, setMods] = useState(null)          // 导航模块上线开关（null=未加载，按全开渲染）
   const [navDef, setNavDef] = useState(null)      // 模块清单+分组（内置+自建），驱动侧栏渲染
@@ -65,7 +66,7 @@ export default function App() {
   useEffect(() => {
     if (!mods || !navDef) return
     const cur = { import: 'reconcile', fund: 'reconcile', result: 'reconcile' }[view] || view
-    if (canView(cur)) return
+    if (cur === 'home' || canView(cur)) return   // 首页恒可进（不设准入点），别被"无权限"逻辑重定向走
     const first = (navDef.modules || []).find(m => !m.group_only && canView(m.key))
     setView(first ? first.key : '__noperm__')
   }, [mods, navDef])
@@ -79,7 +80,7 @@ export default function App() {
     onLogout={async () => { try { await apiLogout() } catch (e) {} setUser(null); setZone('portal') }} />
 
   // 登录后先落门户；选组进入某工作台
-  if (zone === 'portal') return <Portal user={user} onEnter={setZone} />
+  if (zone === 'portal') return <Portal user={user} onEnter={z => { setZone(z); if (z === 'accounting') setView('home') }} />
 
   const changePeriod = async (year, period) => { const c = await setConfig({ year, period }); setCfg(prev => ({ ...prev, ...c })) }
   const refreshCfg = () => getConfig().then(setCfg).catch(() => {})   // 封存/解封后刷新全局封存态（侧栏徽标）
@@ -87,8 +88,8 @@ export default function App() {
   const modOn = k => !mods || mods[k]?.['可进入'] !== false
   const modSt = k => mods?.[k]?.status || ''
   const canSettings = user?.role === 'admin' || !!user?.perms?.enter_settings   // 系统设置：默认仅主管理员，可由主管理员授权
-  const logout = async () => { try { await apiLogout() } catch (e) {} setUser(null); setZone('portal'); setView('reconcile') }
-  const backToPortal = () => { setZone('portal'); setView('reconcile') }
+  const logout = async () => { try { await apiLogout() } catch (e) {} setUser(null); setZone('portal'); setView('home') }
+  const backToPortal = () => { setZone('portal'); setView('home') }
 
   // 目前仅核算组工作台已建成；BP/法务进入先给建设中占位
   if (zone !== 'accounting') {
@@ -126,6 +127,8 @@ export default function App() {
             hint="该模块已上线，但你的账号没有它的准入权限。请联系主管理员在「账号管理」里开通。"
             body="这不是功能没做，是权限还没开——找主管理员即可。" />
         })()}
+        {/* 首页（V2.488）：轻量落地页，进核算工作台先落这里。恒可进、不取业务数据；卡片点开才进对应模块 */}
+        {view === 'home' && <Home user={user} cfg={cfg} navDef={navDef} mods={mods} onNav={setView} />}
         {view === 'import' && canView('reconcile') && <DataImport cfg={cfg} onChange={setCfg} onPeriod={changePeriod} onNav={setView} user={user} />}
         {view === 'fund' && canView('reconcile') && <FundDashboard cfg={cfg} onPeriod={changePeriod} onNav={setView} user={user} />}
         {view === 'fundboard' && canView('fundboard') && <FundBoard cfg={cfg} onPeriod={changePeriod} onNav={setView} />}

@@ -130,6 +130,19 @@ const jpSoft = async (url, body) => {
 // 导航模块上线管理（V2.63）——全员生效的上线开关，只管导航不挡接口
 export const getNavModules = () => j('/api/nav-modules')
 export const saveNavModules = (state, posts, templates) => jpSoft('/api/nav-modules/save', { state, posts, templates })
+// 日志中心（V2.488-489）：运维请求日志 + 业务操作留痕。全部仅主管理员（enter_settings）可读。
+export const getOpsLive = () => j('/api/ops/live')
+export const getOpsStats = (days = 7, slowLimit = 15) => j(`/api/ops/stats?days=${days}&slowLimit=${slowLimit}`)
+export const getOpsLogs = ({ days = 7, limit = 300, user = '', board = '', onlyErrors = false } = {}) =>
+  j(`/api/ops/logs?days=${days}&limit=${limit}` + (user ? `&user=${encodeURIComponent(user)}` : '')
+    + (board ? `&board=${encodeURIComponent(board)}` : '') + (onlyErrors ? '&onlyErrors=1' : ''))
+export const getOpsUserSessions = (user, days = 1, gapMin = 30) =>
+  j(`/api/ops/user-sessions?user=${encodeURIComponent(user)}&days=${days}&gapMin=${gapMin}`)
+export const opsLogsCsvUrl = (days = 7) => `/api/ops/logs.csv?days=${days}`
+export const getAudit = ({ days = 30, limit = 500, operator = '', action = '' } = {}) =>
+  j(`/api/ops/audit?days=${days}&limit=${limit}` + (operator ? `&operator=${encodeURIComponent(operator)}` : '')
+    + (action ? `&action=${encodeURIComponent(action)}` : ''))
+export const auditCsvUrl = (days = 30) => `/api/ops/audit.csv?days=${days}`
 // 只存岗位模板（权限中枢「岗位模板设置」抽屉用）。后端 V2.144 起 state 缺席不再被重置
 export const saveNavTemplates = (templates) => jpSoft('/api/nav-modules/save', { templates })
 // 只存岗位名单（权限中枢就近新增岗位用；传全量名单）。posts 段后端本就有 isinstance guard

@@ -38,6 +38,7 @@ import kingdee_client as kc
 import db
 import mailer
 import notifier
+import ops   # V2.489 运维观测埋点（请求日志/并发/慢接口/在线用户）——自包含，见 ops.py
 
 # ── 共享内核（V2.172 从本文件拆出；见 core.py 头部说明）──
 from core import (  # noqa: F401  部分名供 routers/ 与本文件共用
@@ -179,6 +180,10 @@ async def _auth_gate(request, call_next):
     p = request.url.path
     if p.startswith("/api/") and p not in _OPEN_API:
         u = _current_user(request)
+        # V2.489 运维埋点归因：把登录名塞进 scope（ops 中间件在请求结束时读回，见 ops.py 身份口径）。
+        # 只对已登录的非白名单 /api 塞——未登录/白名单/静态资源保持匿名，与埋点"谁在用"口径一致。
+        if u:
+            request.state.ops_user = u["name"]
         # 例外（V2.443）：BP 后端同机调 BOM 消费口 /api/bomcost/*——内部令牌对得上且来源回环才放过登录门，
         # 之后由路由自己再验一遍（只准已审核版；V2.451 起核算侧全量导出不再放行，BP 只拿脱敏版）。
         bp_internal = p.startswith(bom_quote.INTERNAL_PATH_PREFIXES) and bom_quote.internal_token_ok(request)
@@ -190,6 +195,20 @@ async def _auth_gate(request, call_next):
             return JSONResponse({"ok": False, "code": "must_change_pwd",
                                  "msg": "首次登录（或密码被重置后）需先设置新密码"}, status_code=403)
     return await call_next(request)
+
+
+# V2.489 运维观测埋点（请求日志/并发/慢接口/在线用户）。
+# **最后注册＝栈最外层**：它包住 _auth_gate，因此在请求结束时才读得到 auth_gate 塞进 scope 的登录名，
+# 也能把登录门的 401 一并计到（谁被挡在门外也是要看的现场）。埋点自包含、异常安全，
+# 出问题用 WB_OPS_ENABLED=0 一键关掉（中间件直接透传，零开销）。
+app.add_middleware(ops.OpsMiddleware)
+# 独立库 ops_log.db + 后台批量 writer 线程（请求线程不碰磁盘）。模块导入即起，与 core 的建表/播种同一路数。
+try:
+    ops.init_db()
+    ops.start_writer()
+    print(f"[启动] 运维埋点={'开' if ops.OPS_ENABLED else '关'} 日志库={ops.OPS_DB_PATH} 保留{ops.OPS_RETAIN_DAYS}天")
+except Exception as _e:
+    print(f"[启动] 运维埋点初始化失败（不影响业务，降级为只在内存）：{_e}")
 
 
 @app.post("/api/login")
@@ -2879,7 +2898,7 @@ def orgs_delete(body: dict, request: Request):
 # 一条工具线一个模块，改某条线只动 routers/<线>.py，app.py 不再是并行开发的冲突源。
 # 必须在下面的 SPA 兜底路由之前注册：兜底吃掉所有非 /api 路径，注册晚了会被它抢走。
 from routers import (logistics_accrual, archive, fxrate, logistics_recon, cost_ledger,
-                     rptexport, report_dashboard, ec, llm_hub, temp_attendance, bom_quote)
+                     rptexport, report_dashboard, ec, llm_hub, temp_attendance, bom_quote, syslog)
 
 app.include_router(logistics_accrual.router)
 app.include_router(archive.router)
@@ -2892,6 +2911,7 @@ app.include_router(ec.router)
 app.include_router(llm_hub.router)   # V2.301 门户模型配置 P0.5 聚合看板
 app.include_router(temp_attendance.router)
 app.include_router(bom_quote.router)   # V-draft BOM报价审核
+app.include_router(syslog.router)      # V2.489 日志中心（运维请求日志 + 业务操作留痕）·仅主管理员
 
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,

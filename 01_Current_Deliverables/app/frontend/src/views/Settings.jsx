@@ -7,6 +7,7 @@
 // 「引擎正常」可挂岗位标签——这是【标签】不是权限门，挡人用账号管理里的权限点。
 import React, { useState, useEffect } from 'react'
 import { setConfig, testKingdee, getNavModules, saveNavModules, addNavModule, delNavModule, moveNavModule, saveNavSections } from '../api.js'
+import SysLog from './SysLog.jsx'   // V2.489 日志中心（运维请求日志 + 业务操作留痕），作为系统设置内的一个标签页
 
 // 状态色：灰=还没开放，琥珀=可进但未定稿，绿=正式可用
 const ST_STYLE = {
@@ -319,6 +320,7 @@ function NavModules({ onModsChanged }) {
 }
 
 export default function Settings({ cfg, onChange, onModsChanged }) {
+  const [tab, setTab] = useState('settings')   // settings=常规设置 / syslog=日志中心（V2.489）
   const [src, setSrc] = useState(cfg.source || 'sample')
   const [year, setYear] = useState(cfg.year || 2026), [period, setPeriod] = useState(cfg.period || 6)
   const [test, setTest] = useState(null), [busy, setBusy] = useState(false), [saved, setSaved] = useState(false)
@@ -326,11 +328,27 @@ export default function Settings({ cfg, onChange, onModsChanged }) {
   const doTest = async () => { setBusy(true); try { setTest(await testKingdee()) } catch (e) { setTest({ ok: false, msg: String(e) }) } finally { setBusy(false) } }
   const inp = { width: 90, height: 32, borderRadius: 8, border: '1px solid var(--line-strong)', background: 'var(--bg)', color: 'var(--ink)', padding: '0 10px', fontSize: 13 }
 
+  // 顶部两标签：常规设置 / 日志中心（都在 enter_settings 闸内，仅主管理员）
+  const tabBtn = (k, label) => (
+    <button type="button" onClick={() => setTab(k)} style={{
+      fontFamily: 'inherit', border: 0, background: 'none', cursor: 'pointer', fontSize: 13.5, fontWeight: 600,
+      color: tab === k ? 'var(--accent)' : 'var(--ink-2)', padding: '9px 16px', marginBottom: -1,
+      borderBottom: '2px solid ' + (tab === k ? 'var(--accent)' : 'transparent'),
+    }}>{label}</button>
+  )
+
   return (<div>
     <div className="head"><div><div className="h-title">系统设置</div>
-      <div className="h-sub">导航模块上线管理 · 数据源 · 会计期间 · 金蝶连接 · 仅主管理员可进入</div></div></div>
-    {/* 模块表要横向铺满整页（状态+岗位一行放得下）；下面几张小卡片仍限宽，免得输入框拉得老长 */}
+      <div className="h-sub">{tab === 'syslog'
+        ? '日志中心 · 运维请求日志 + 业务操作留痕 · 仅主管理员可看'
+        : '导航模块上线管理 · 数据源 · 会计期间 · 金蝶连接 · 仅主管理员可进入'}</div></div></div>
     <div className="body">
+      <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--line)', marginBottom: 16 }}>
+        {tabBtn('settings', '常规设置')}
+        {tabBtn('syslog', '日志中心')}
+      </div>
+      {tab === 'syslog' && <SysLog />}
+      {tab === 'settings' && <>
       <NavModules onModsChanged={onModsChanged} />
       <div style={{ maxWidth: 660 }}>
         <div className="cat">
@@ -356,6 +374,7 @@ export default function Settings({ cfg, onChange, onModsChanged }) {
           {saved && <span style={{ fontSize: 12.5, color: 'var(--green)' }}>✓ 已保存，切换数据源后各页会自动刷新</span>}
         </div>
       </div>
+      </>}
     </div>
   </div>)
 }
