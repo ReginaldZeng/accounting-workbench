@@ -850,6 +850,12 @@ def pull_month(month, names, progress=None, roster=None, worked_days=None,
                        for n, ds in (worked_days or {}).items() if n in n2u
                        for d in ds for dd2 in (int(d) - 1, int(d), int(d) + 1)
                        if 1 <= dd2 <= last})
+        # 月末（last 日）报了工的人：+1 天落到次月，被上面的 1<=dd2<=last 夹掉了。
+        # 夜班下班卡就在次月 1 日凌晨——单独补取，打上 BND_NEXT 落到「次月初」列，否则月末夜班缺下班卡。
+        _dnext = date(y, mo, last) + timedelta(days=1)
+        jobs = list(jobs) + sorted({(n2u[n], _dnext, BND_NEXT)
+                                    for n, ds in (worked_days or {}).items()
+                                    if n in n2u and any(int(d) == last for d in ds)})
         say(f"只取报了工时的日子：{len(uids)} 人 / {len(jobs)} 人日"
             f"（整月要 {len(uids) * last} 次，省下 {max(0, len(uids) * last - len(jobs))} 次）", 42)
     else:

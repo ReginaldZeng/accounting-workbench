@@ -611,6 +611,29 @@ class TestAmbiguousDayVerdict(unittest.TestCase):
         self.assertEqual({c["部门"] for c in cand}, {"临时普工-锦绣人力", "销售中心"})
 
 
+class TestMonthEndNightShift(unittest.TestCase):
+    """月末（last 日）夜班的下班卡落在次月 1 日（打卡表「次月初」列 → rec.bnd）。
+    切班要把它接到 last+1，否则那班缺下班卡、被误判「撑不起上报」（使用者 2026-09-06：31 号那些不一致）。"""
+
+    def test_days_with_bnd_maps_next_month_to_last_plus_1(self):
+        rec = {"days": {31: [20 * 60]}, "bnd": {ta._BND_NEXT: [8 * 60]}}
+        days = ta._days_with_bnd(rec, 31)
+        self.assertIn(32, days)                       # 次月初并到了 31+1
+        self.assertEqual(days[32], [8 * 60])
+        self.assertNotIn(32, rec["days"])             # 原 days 不动，边界不进逐日输出
+
+    def test_month_end_night_clockout_connected(self):
+        # 31 号 20:00 上班，下班卡在次月 1 日 08:00 → 在厂≈12h，撑得住上报，不判「撑不起」
+        rec = {"days": {31: [20 * 60]}, "bnd": {ta._BND_NEXT: [8 * 60]}}
+        days = ta._days_with_bnd(rec, 31)
+        sh = ta.compute_shifts(days, "night", ta.DEFAULT_PARAMS, only={31})
+        self.assertIn(31, sh)
+        self.assertGreater(sh[31]["hours"], 11)       # 接上下班卡才有 ~11.5h；接不上会是 0/残缺
+        # 反证：不并边界卡（只有 20:00 上班卡）→ 切不出完整夜班
+        sh0 = ta.compute_shifts({31: [20 * 60]}, "night", ta.DEFAULT_PARAMS, only={31})
+        self.assertTrue(31 not in sh0 or sh0[31]["hours"] < 1)
+
+
 class TestMixedShift(unittest.TestCase):
     def test_mixed_is_flagged(self):
         """同月既有白班又有夜班的人，切班规则未定，必须显式标出来而不是硬算。"""

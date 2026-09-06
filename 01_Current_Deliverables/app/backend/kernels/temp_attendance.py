@@ -21,6 +21,7 @@ import datetime
 import io
 import math
 import re
+from calendar import monthrange
 
 try:
     from openpyxl import load_workbook
@@ -747,6 +748,19 @@ def dev_rate(person, shift, contract):
 
 
 # ==================== 主流程 ====================
+def _days_with_bnd(rec, last):
+    """切班用的 days：把「次月初」边界卡并到 last+1，好让**月末（last 日）夜班的下班卡**接得上——
+    夜班切班靠 days.get(d+1) 找次日下班卡，而次月初卡只在 rec["bnd"] 里、不在 rec["days"]，
+    月末那班就永远缺下班卡、被误判「撑不起上报」（使用者 2026-09-06：31 号那些不一致就是没接上 9/1 的下班卡）。
+    **只给 compute_shifts 用，不进逐日输出**（否则会冒出多余的一天）。上月末卡对本月自己的班没用，不并。"""
+    b = (rec or {}).get("bnd") or {}
+    if not b.get(_BND_NEXT):
+        return (rec or {}).get("days") or {}
+    d = dict(rec.get("days") or {})
+    d[int(last) + 1] = b[_BND_NEXT]
+    return d
+
+
 def compute(summary, punch, params=None, contract=None, picks=None):
     """逐日比对 + 四档判定 + 逐人汇总 + 全表统计。summary/punch 为上面两个 parse_* 的返回值。
 
@@ -775,6 +789,12 @@ def compute(summary, punch, params=None, contract=None, picks=None):
     # ⚠ 这一步必须在「每行只切自己报工的日子」之后才安全：早先每行都拿整月打卡去切，
     #   夜班那行会把 3 日 17:30 当成上班卡、吃掉 4 日早上的 07:25，
     #   合并归属后白班那行就少了上班卡（重算 9.0 → 5.0，撑不起 4 → 164）。踩过一次，别再颠倒顺序。
+    # 本月最后一天：月末夜班的下班卡落在次月 1 日（rec["bnd"] 的次月初列），切班要把它接到 last+1
+    _per = punch.get("period") or summary.get("period") or ""
+    try:
+        _y, _mo = (int(x) for x in _per.split("-")[:2]); _last = monthrange(_y, _mo)[1]
+    except Exception:
+        _last = 31
     _used_by_row, _rows_of = {}, {}
     for _p in summary["people"]:
         _rows_of.setdefault(same_person_key(_p["name"]), []).append(id(_p))
@@ -782,7 +802,7 @@ def compute(summary, punch, params=None, contract=None, picks=None):
         if not _rec:
             continue
         _own = {int(d) for d, h in (_p.get("days") or {}).items() if h and float(h) > 0}
-        _sh = compute_shifts(_rec["days"], shift_type(_p), p, only=_own)
+        _sh = compute_shifts(_days_with_bnd(_rec, _last), shift_type(_p), p, only=_own)
         _used_by_row[id(_p)] = set(getattr(_sh, "used_pts", ()))
 
     _shown_empty = set()          # 已经摆过一条「这天没上报工时」的 (姓名, 日)，别重复
@@ -819,7 +839,8 @@ def compute(summary, punch, params=None, contract=None, picks=None):
         # 这一行只为**自己报了工时的日子**切班。没人报工时的日子照样会摆一条中性行
         # （有打卡·未计工时 / 仅1次卡），只是不再由某一行硬切出一个班次来。
         _own_days = {int(d) for d, h in (person.get("days") or {}).items() if h and float(h) > 0}
-        shifts = compute_shifts(pdays, kind, p, only=_own_days)
+        # 切班用「并了次月初边界卡」的 days（接月末夜班的下班卡）；逐日输出仍用 pdays（只在月内，别多冒一天）
+        shifts = compute_shifts(_days_with_bnd(rec, _last) if rec else {}, kind, p, only=_own_days)
         # 偏离计价单价按这个人本月的班型取；白夜混合按白班取并在页面单列提示。
         # （逐日的白/夜已经切得出来了，但这个人整月的「代表单价」仍取白班；
         #   应付另按结算表上的白班/夜班工时分开乘各自单价算，不受这里影响）
