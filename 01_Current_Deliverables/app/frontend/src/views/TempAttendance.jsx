@@ -353,10 +353,11 @@ export default function TempAttendance() {
     } catch (e) { setSaveMsg(String(e)) } finally { setBusy(false) }
   }
 
-  // 本期留档里已有的原表（可重跑＝原表还在留存期）——用来在①页盖「已上传」戳、并让核对复用它
+  // 本期留档里已有的原表——只看「可重跑」（＝原表 xlsx 还在盘上），不依赖文件名字段
+  // （文件名可能被早期重跑清空过，但文件本身在；戳该按文件在不在盘上判，别被空文件名坑了）。
   const curPeriod = periods.find(p => p.月份 === month)
-  const storedSum = !!(curPeriod && curPeriod.可重跑 && (curPeriod.原表文件名 || {}).汇总表)
-  const storedPun = !!(curPeriod && curPeriod.可重跑 && (curPeriod.原表文件名 || {}).打卡表)
+  const storedSum = !!(curPeriod && curPeriod.可重跑)
+  const storedPun = !!(curPeriod && curPeriod.可重跑)
 
   const form = () => {
     const fd = new FormData()

@@ -265,13 +265,23 @@ def _save_period(month, summary_bytes, punch_bytes, names, res, user, fresh=None
         _who = user.get("name", "")
         fresh = fresh or {"summary": True, "punch": True}
         # 按表记「谁·何时·来源」：只更新这次新给的那张，没给的沿用上一次的
-        _prev_info = (db.get_setting(_META_KEY + month) or {}).get("原表信息") or {}
+        _prev_meta = db.get_setting(_META_KEY + month) or {}
+        _prev_info = _prev_meta.get("原表信息") or {}
         _info = dict(_prev_info)
         if fresh.get("summary"):
             _info["汇总表"] = {"上传人": _who, "时间": _now, "来源": "手工上传"}   # 上报表只有手工上传一条路
         if fresh.get("punch"):
             _info["打卡表"] = {"上传人": _who, "时间": _now,
                               "来源": ("钉钉接口" if punch_source == "钉钉接口" else "手工上传")}
+        # 原表文件名：只更新这次新给的那张，没给的**沿用上一次**——
+        # ⚠ 别用 names.get("summary")：重跑传进来的 names 是 {汇总表,打卡表}（键不是 summary/punch），
+        #   直接取会得到空串、把文件名清掉，「已上传」戳就此消失（V2.478 修）。
+        _prev_fn = _prev_meta.get("原表文件名") or {}
+        _fn = dict(_prev_fn)
+        if fresh.get("summary"):
+            _fn["汇总表"] = names.get("summary", "") or _prev_fn.get("汇总表", "")
+        if fresh.get("punch"):
+            _fn["打卡表"] = names.get("punch", "") or _prev_fn.get("打卡表", "")
         meta = {
             "月份": month,
             "跑批时间": _now,
@@ -287,8 +297,8 @@ def _save_period(month, summary_bytes, punch_bytes, names, res, user, fresh=None
             "同名跨派遣方数": st.get("同名跨派遣方数"),
             "归属与打卡不符": len(st.get("归属与打卡不符") or []),
             "原表在库": True,
-            "原表文件名": {"汇总表": names.get("summary", ""), "打卡表": names.get("punch", "")},
-            "跑批次数": int((db.get_setting(_META_KEY + month) or {}).get("跑批次数") or 0) + 1,
+            "原表文件名": _fn,
+            "跑批次数": int(_prev_meta.get("跑批次数") or 0) + 1,
         }
         db.set_setting(_RESULT_KEY + month, _pack(res), user.get("name", ""))
         db.set_setting(_META_KEY + month, meta, user.get("name", ""))
