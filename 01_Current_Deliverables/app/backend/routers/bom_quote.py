@@ -315,7 +315,7 @@ def _entry_view(e, finals):
         "replaces": [_obs_brief(x) for x in others if x.get("obsolete_by") == e["id"]],
         "obsoleteCandidates": ([] if ob else _obsolete_candidates(e, others)),
         "historical": e.get("historical") == 1,        # 答 C 的历史版：已审但不对外、不动指针（V2.462）
-        "backfill": e.get("historical") == 2,          # 补录（V2.466）：正式对外数据，只是没经二道审核
+        "backfill": e.get("historical") == 2,          # 补录（V2.466/V2.472）：正式对外数据，初审通过即定稿，没经BP二道审核
         "netWeightKg": nw[0], "netWeightSrc": nw[1],
         "bomCheck": bom_check, "hasBomList": bool(bom_mats),
         # ①BOM清单 整表原样（研发出品）：类型/编码/物料/型号/规格/单位/供应商/用量（业务方 2026-09-04 定列序）
@@ -1417,9 +1417,9 @@ async def bom_upload(request: Request):
 def _book_staged(prev, sid, idxs, u, historical=False):
     """入账核心（抽出来给「立项」与「入账」共用）。勾稽不平/上游不平的一律拒（红线）；
     排版差异版（数字指纹重复）跳过；整组一条没入 → 记「待修」批次，留在待办里可见可修。
-    historical（V2.464 建、V2.466 改口径，业务方定「补录要对外的，就是没有二道审核了而已」）：入账后直接成为**正式已审核数据**——
-    初审戳「历史补录」+ 终审戳「历史补录·无二审」、四步标已确认、物料类别取建议值、建议报价、`historical=2`；
-    **对外、占定稿指针**（同产品多版按核算日期最新指，历史单乱序录也对）；换码候选照常参与。勾稽红线照拦。
+    historical（V2.464 建、V2.466/V2.472 两次改口径，业务方定 2026-09-06「历史补录也是要审核的，只是这时候盖补录戳」）：
+    入账只打 `historical=2` 标记，**照常进待办走复核四步 + 成本会计初审**；初审通过那一刻由 _backfill_seal 直接置「已审核」，
+    终审戳＝「历史补录」（记谁初审的），**不进财务BP终审待办**；对外、占定稿指针（bom_set_final）；换码候选照常参与。勾稽红线照拦。
     （`historical=1` 是审核弹窗答 C 的「不对外历史版」，另一回事。）"""
     src = _src()
     appno = prev.get("approvalNo") or ""
@@ -1489,16 +1489,9 @@ def _book_staged(prev, sid, idxs, u, historical=False):
             "approval_no": appno, "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"),
             "status": "未复核", "created_by": u["name"],
         })
-        if historical:                       # 补录：直接成为正式已审核数据（对外、占指针），只是没经二道审核，见函数注释
-            from core import _now as _n
-            ts = _n()
-            db.bom_update_entry(eid, {"status": "已审核", "finalized_by": "历史补录", "finalized_at": ts,
-                                      "ack": {"by": "历史补录", "at": ts, "note": "补录·无二道审核", "backfill": True}, "historical": 2,
-                                      "review_steps": {"qty": {"by": "历史补录", "at": ts}, "price": {"by": "历史补录", "at": ts}},
-                                      "mat_category": bq.suggest_category(rec.get("cpCode"), rec.get("productName"), rec.get("supplier")),
-                                      "quotable": 1, "classified_by": "历史补录", "classified_at": ts})
-            db.bom_point_latest(src, it["productKey"])     # 同产品多版 → 指针指核算日期最新一版（乱序录也对）
-            db.bom_add_audit(eid, u["name"], "历史补录", "", "不走常规审核：直接已审核·对外（初审/终审戳均为「历史补录」，物料类别取建议值，建议报价）")
+        if historical:                       # 补录：只打标记，照常走复核+初审；初审通过即定稿（_backfill_seal），见函数注释
+            db.bom_update_entry(eid, {"historical": 2})
+            db.bom_add_audit(eid, u["name"], "历史补录", "", "补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿，不经财务BP终审")
         # 源附件永久留档（供「原版核算表」导出）；商品版另存一份留档
         try:
             pdir = os.path.join(UPLOAD_DIR, src)
@@ -2237,8 +2230,9 @@ async def bom_classify(request: Request):
     finalized, affected, linked = False, None, ""
     if not miss and not need_confirm:
         prev_final = db.bom_get_final(_src(), e2["product_key"])
+        backfill = e2.get("historical") == 2 and not historical      # 补录单（答 C 除外）：初审通过即定稿，见 _backfill_seal
         upd = {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
-               "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else None}
+               "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else (2 if backfill else None)}
         db.bom_update_entry(e2["id"], upd)
         if historical:
             # 历史版：指针留给现在的当前版；本产品若根本没指针（当前版被删了）再由 repoint 自愈，这里不抢
@@ -2247,6 +2241,8 @@ async def bom_classify(request: Request):
         else:
             db.bom_set_final(_src(), e2["product_key"], e2["id"], u["name"])       # 本版成为当前版
             db.audit(u["name"], "bom_finalize", target=str(e2["id"]), detail="随审核定性定稿 · " + (e2.get("product_name") or ""))
+            if backfill:
+                _backfill_seal(e2["id"], u)
             if cands:
                 if parallel:
                     linked = _link_parallel(e2, cands, u["name"])
@@ -2256,9 +2252,22 @@ async def bom_classify(request: Request):
         finalized = True
     finals = db.bom_finals(_src())
     return {"ok": True, "finalized": finalized, "missingSteps": miss, "historical": bool(finalized and historical),
+             "backfillSealed": bool(finalized and not historical and e2.get("historical") == 2),
              "needConfirm": cands if need_confirm else [], "obsoleted": (cands if (finalized and not parallel and not historical) else []),
              "linked": (cands if (finalized and parallel) else []), "variantGroup": linked,
              "affectedPricing": affected, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
+
+
+def _backfill_seal(eid, u):
+    """补录（historical=2）初审即定稿（V2.472，业务方定「历史补录也是要审核的，只是这时候盖补录戳」）：
+    成本会计初审通过那一刻直接置「已审核」，终审戳＝「历史补录」（reviewer 记谁初审的），不进财务BP终审待办；
+    对外、占指针（调用方已 bom_set_final）。答 C（historical=1）的不走这里。"""
+    from core import _now
+    ts = _now()
+    db.bom_update_entry(eid, {"status": "已审核",
+                              "ack": {"by": "历史补录", "at": ts, "note": "补录·初审即定稿，无二道审核", "backfill": True, "reviewer": u["name"]}})
+    db.bom_add_audit(eid, u["name"], "补录定稿", "初审", "已审核（补录戳：初审通过即定稿，不经财务BP终审）")
+    db.audit(u["name"], "bom_backfill_seal", target=str(eid), detail="补录·初审即定稿")
 
 
 @router.post("/api/bom/confirm-step")
@@ -2322,8 +2331,9 @@ async def bom_finalize(request: Request):
                        % (len(cands), "、".join("%s %s" % (c["cpCode"], c["auditAt"]) for c in cands))}
     from core import _now
     prev_final = db.bom_get_final(_src(), e["product_key"])
+    backfill = e.get("historical") == 2 and not historical      # 补录单（答 C 除外）：初审通过即定稿，见 _backfill_seal
     db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
-                                  "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else None})
+                                  "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else (2 if backfill else None)})
     linked = ""
     if historical:
         db.bom_add_audit(e["id"], u["name"], "补录历史版", "", "只审不替代：不动定稿指针、不对外")
@@ -2331,6 +2341,8 @@ async def bom_finalize(request: Request):
     else:
         db.bom_set_final(_src(), e["product_key"], e["id"], u["name"])
         db.audit(u["name"], "bom_finalize", target=str(e["id"]), detail=e.get("product_name") or "")
+        if backfill:
+            _backfill_seal(e["id"], u)
         if cands:
             if parallel:
                 linked = _link_parallel(e, cands, u["name"])
@@ -2339,7 +2351,7 @@ async def bom_finalize(request: Request):
     # 定稿变更通知（BP 消费提示）——留痕，前端据此弹「成本已更新，N 个定价方案受影响」。不静默变价。
     affected = _affected_pricing(e)
     finals = db.bom_finals(_src())
-    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals),
+    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals), "backfillSealed": backfill,
             "replacedFinal": bool(prev_final and prev_final.get("entry_id") != e["id"]),
             "obsoleted": ([] if parallel else cands), "linked": (cands if parallel else []), "variantGroup": linked,
             "affectedPricing": affected}

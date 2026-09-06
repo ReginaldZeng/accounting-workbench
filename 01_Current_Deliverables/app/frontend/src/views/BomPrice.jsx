@@ -215,7 +215,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
         flash(r.finalized
           ? (r.historical
             ? `已按历史版补审：${cat}——不替代当前版、不对外，同单的下游可以定稿了`
-            : `已定稿：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
+            : `${r.backfillSealed ? '补录单初审通过·已盖「补录」戳定稿（不经财务BP终审）' : '已定稿'}：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
           : (r.needConfirm || []).length
             ? `已存定性，未定稿：原版本 ${r.needConfirm.map(c => c.cpCode).join('、')} 保留为当前版，请先核对再定稿`
             : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
@@ -478,7 +478,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
         <td style={{ fontWeight: 600 }}>{r.productName}
           {r.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + r.quoteReason}>禁报价</span>}
           {r.historical && <span className="tag late" style={{ marginLeft: 6 }} title="历史版：审核时答 C 归档的老版本，已审但不对外、不占定稿指针">历史版·不对外</span>}
-          {r.backfill && <span className="bom-gvtag" style={{ marginLeft: 6 }} title="历史补录：正式对外数据，初审/终审戳均为「历史补录」，未经财务BP二道审核">补录·无二审</span>}
+          {r.backfill && <span className="bom-gvtag" style={{ marginLeft: 6 }} title={r.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿'}>{r.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}
           {r.obsoleteBy && (dead
             ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
             : <span className="tag late" style={{ marginLeft: 6 }} title={`${r.obsoleteBy.cpCode} 已初审、待终审；其终审通过后本版退出对外台账。在此之前 BP 仍用本版`}>待替代 · {r.obsoleteBy.cpCode} 待终审</span>)}
@@ -1002,7 +1002,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
             {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
             {entry.historical && <span className="tag late" title="审核时答 C 归档的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}
-            {entry.backfill && <span className="bom-gvtag" title="历史补录：正式对外数据，初审/终审戳均为「历史补录」，未经财务BP二道审核">补录·无二审</span>}</div>
+            {entry.backfill && <span className="bom-gvtag" title={entry.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿，不经财务BP终审'}>{entry.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}</div>
           <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
@@ -2331,7 +2331,7 @@ function FinalReviewModal({ row, onClose, onDone, flash }) {
 // 哪些能入账、哪里不对、怎么修，统统到「处理页」去看去办——不在这个录入框里判。
 function IntakeModal({ cfg, onClose, onDone, flash }) {
   const [appno, setAppno] = useState('')
-  const [hist, setHist] = useState(false)     // 历史补录（V2.464）：不走常规审核，入账即归档为历史版（不对外）
+  const [hist, setHist] = useState(false)     // 历史补录（V2.472 口径）：照常复核+初审，初审通过即盖「补录」戳定稿，不经BP终审
   const [busy, setBusy] = useState('')
   const [res, setRes] = useState(null)
   useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
@@ -2363,13 +2363,13 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
         <div className="bom-mhead"><b>立项（生成待办）</b><span className="bom-x" onClick={onClose}>✕</span></div>
         <div className="bom-msub">录入钉钉审批编号即可立项。系统会抓附件、解析、**能入账的自动入账，不能入的记为「待修」**——
           具体哪些能入、哪里不对、怎么修，都在<b>处理页</b>里看。</div>
-        {/* 历史补录（业务方定 2026-09-06「历史数据引入不走常规审核」）：勾上后本次入账的记录直接归档为历史版 */}
+        {/* 历史补录（业务方定 2026-09-06「历史补录也是要审核的，只是这时候盖补录戳」）：照常复核+初审，初审通过即定稿，不经BP终审 */}
         <label className="banner" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', margin: '8px 0 4px',
           background: hist ? 'var(--amber-bg)' : 'var(--bg-sub)', color: hist ? 'var(--amber)' : 'var(--ink-2)', border: '1px solid ' + (hist ? 'var(--amber-line)' : 'var(--line)') }}>
           <input type="checkbox" checked={hist} onChange={e => setHist(e.target.checked)} style={{ marginTop: 3 }} />
-          <span><b>历史补录</b>——不走常规审核：入账后直接<b>已审核·对外</b>（初审、终审戳均为「历史补录」，四步视为已确认，物料类别取建议值，建议报价），
-            台账上标「补录·无二审」；同产品多版时定稿指针指核算日期最新的一版。勾稽不平的照旧拦下记待修。
-            <span className="muted">现在正在用、需要财务BP把关的单不要勾，走正常审核。</span></span>
+          <span><b>历史补录</b>——照常进待办：复核四步、成本会计审核定性都要做；<b>初审通过那一刻直接定稿·对外</b>，终审戳盖「历史补录」，
+            不再进财务BP终审。台账上先标「补录·待初审」、定稿后标「补录·无二审」。勾稽不平的照旧拦下记待修。
+            <span className="muted">需要财务BP把关的单不要勾，走正常两道审核。</span></span>
         </label>
 
         <div className="bom-mstep"><span className="bom-mno">1</span><div style={{ flex: 1 }}>
@@ -2400,7 +2400,7 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
             <span className="tag ok">已入账 {(res.booked || []).length}</span>{' '}
             {(res.rejected || []).length > 0 && <span className="tag leak">待修 {res.rejected.length}</span>}{' '}
             {(res.skipped || []).length > 0 && <span className="tag unmap">跳过 {res.skipped.length}</span>}
-            {res.historical && <span className="tag ok" style={{ marginLeft: 4 }}>历史补录 · 已审核对外（无二道审核）</span>}
+            {res.historical && <span className="tag ok" style={{ marginLeft: 4 }}>历史补录 · 已进待办，初审通过即定稿（不经BP终审）</span>}
           </div>
           {(res.rejected || []).length > 0 && <div className="bom-chkfail">
             {res.rejected.map((r, i) => <div key={i}>· <b>{r.productName}</b>：{r.reason}</div>)}
