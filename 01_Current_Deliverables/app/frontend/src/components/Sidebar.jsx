@@ -8,6 +8,7 @@ const IC = {
   bank: S(<><path d="M3 10l9-6 9 6" /><path d="M4 10v9M20 10v9M8 10v9M16 10v9M12 10v9M3 21h18" /></>),
   back: S(<path d="M15 18l-6-6 6-6" />),
   home: S(<><path d="M3 11l9-8 9 8" /><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10" /></>),
+  accept: S(<><path d="M4 5h10M4 10h10M4 15h6" /><path d="M14 16l2 2 4-4" /></>),
   chevDown: S(<path d="M6 9l6 6 6-6" />),
   collapse: S(<path d="M11 17l-5-5 5-5M18 17l-5-5 5-5" />),
   expand: S(<path d="M13 17l5-5-5-5M6 17l5-5-5-5" />),
@@ -36,7 +37,7 @@ const ICON_BY_KEY = {
   bomprice: IC.cost, prodbrief: IC.month, revledger: IC.ledger, custrecon: IC.reconcile, ecompromo: IC.ecom,
   // 临工线（V2.318）：tempatt 是纯分组父项，两个三级各给一个图标
   tempatt: IC.user, tempattrev: IC.reconcile, tempattboard: IC.fund,
-  basicdata: IC.basicdata, settings: IC.settings,
+  basicdata: IC.basicdata, settings: IC.settings, acceptance: IC.accept,
 }
 const RECON_VIEWS = ['import', 'reconcile', 'fund', 'result']
 const VIEWS_BY_KEY = { reconcile: RECON_VIEWS }
@@ -44,8 +45,9 @@ const VIEWS_BY_KEY = { reconcile: RECON_VIEWS }
 const AMBER = 'var(--amber)', AMBER_BG = 'var(--amber-bg)'
 const TEAL = 'var(--teal)', TEAL_BG = 'var(--teal-bg)'       // 「人工并行」标签色
 const VIOLET = 'var(--purple)', VIOLET_BG = 'var(--purple-bg)'   // 「测试验证」标签色（V2.174 起可进入，须有标记）
-const pillC = bg => (bg.teal ? TEAL : bg.violet ? VIOLET : AMBER)
-const pillBG = bg => (bg.teal ? TEAL_BG : bg.violet ? VIOLET_BG : AMBER_BG)
+const RED = 'var(--red)', RED_BG = 'var(--red-bg)'                 // 验收台账提醒红点（V2.492）
+const pillC = bg => (bg.red ? RED : bg.teal ? TEAL : bg.violet ? VIOLET : AMBER)
+const pillBG = bg => (bg.red ? RED_BG : bg.teal ? TEAL_BG : bg.violet ? VIOLET_BG : AMBER_BG)
 // V2.175：4字状态在窄行会把模块名挤成省略号——侧栏行内用缩写（悬停见全名；飞出菜单/设置页仍全名）
 const PILL_SHORT = { '人工并行': '并行', '测试验证': '测试', '开发中·仅你可见': '在建' }
 
@@ -62,7 +64,7 @@ function applyTheme(mode) {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
 }
 
-export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver }) {
+export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver, nudge }) {
   const kd = source === 'kingdee'
   // 主题档位；auto 档要监听系统切换（白天↔夜间自动跟）
   const [theme, setTheme] = React.useState(() => localStorage.getItem('fw_theme') || 'auto')
@@ -116,6 +118,10 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   const bottomMods = allMods.filter(m => bottomKeys.has(m.sec) && canSee(m) && stat(m.key) !== '隐藏')
   const itemsOf = s => allMods.filter(m => m.sec === s.key && !subOf[m.key] && canSee(m) && stat(m.key) !== '隐藏')
   const badgeOf = it => {
+    if (it.key === 'acceptance') {                       // 验收台账红点：待验收 + 待评分之和（V2.492）
+      const n = (nudge?.toVerify || 0) + (nudge?.toRate || 0)
+      return n > 0 ? { t: n > 99 ? '99+' : String(n), pill: true, red: true } : null
+    }
     if (it.key === 'periodclose' && closed) return { t: '已封存', pill: true }
     if (!on(it.key)) return { t: stat(it.key) || '未开放', pill: false }   // 未开放：灰字
     const s = stat(it.key)

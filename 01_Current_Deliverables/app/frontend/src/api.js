@@ -143,6 +143,12 @@ export const getAudit = ({ days = 30, limit = 500, operator = '', action = '' } 
   j(`/api/ops/audit?days=${days}&limit=${limit}` + (operator ? `&operator=${encodeURIComponent(operator)}` : '')
     + (action ? `&action=${encodeURIComponent(action)}` : ''))
 export const auditCsvUrl = (days = 30) => `/api/ops/audit.csv?days=${days}`
+// 验收台账（V2.492）：进度+验收+一线满意度+近7天调用。打分全员，验收结论/账号明细仅管理员。
+export const getAcceptance = () => j('/api/acceptance')
+export const getAcceptanceNudge = () => j('/api/acceptance/nudge')
+export const rateTool = (module, score, comment = '') => jp('/api/acceptance/rate', { module, score, comment })
+export const setVerdict = (module, verdict, note = '') => jp('/api/acceptance/verdict', { module, verdict, note })
+export const getUsageDetail = (module) => j('/api/acceptance/usage-detail?module=' + encodeURIComponent(module))
 // 只存岗位模板（权限中枢「岗位模板设置」抽屉用）。后端 V2.144 起 state 缺席不再被重置
 export const saveNavTemplates = (templates) => jpSoft('/api/nav-modules/save', { templates })
 // 只存岗位名单（权限中枢就近新增岗位用；传全量名单）。posts 段后端本就有 isinstance guard

@@ -51,7 +51,7 @@ function greeting() {
 }
 
 const CSS = `
-.hm{padding:26px clamp(18px,3vw,40px) 48px;max-width:1320px;margin:0 auto}
+.hm{padding:20px 20px 44px}
 .hm-hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px 24px;
   padding:22px 26px;border-radius:16px;border:1px solid var(--line);
   background:linear-gradient(120deg,var(--accent-soft) 0%,var(--bg-sub) 60%,var(--bg-sub) 100%)}
@@ -67,6 +67,11 @@ const CSS = `
 .hm-chip.warn{color:var(--amber);border-color:var(--amber-line);background:var(--amber-bg)}
 .hm-chip.warn .dot{background:var(--amber)}
 .hm-glance{display:flex;flex-wrap:wrap;gap:18px;margin:20px 2px 4px;font-size:12px;color:var(--ink-2)}
+.hm-nudge{display:flex;align-items:center;gap:10px;margin-top:14px;padding:11px 15px;border-radius:12px;cursor:pointer;
+  background:var(--accent-soft);border:1px solid var(--accent-soft);font-size:13px;color:var(--ink);transition:filter .15s}
+.hm-nudge:hover{filter:brightness(.98)}
+.hm-nudge b{color:var(--accent);font-weight:700}
+.hm-nudge .go{margin-left:auto;color:var(--accent);font-weight:600;white-space:nowrap}
 .hm-glance b{color:var(--ink);font-weight:700}
 .hm-sec{margin-top:22px}
 .hm-sec-h{display:flex;align-items:center;gap:9px;margin:0 0 11px;font-size:13.5px;font-weight:800;letter-spacing:.02em;color:var(--ink)}
@@ -104,7 +109,7 @@ const IcLock = () => (
     strokeLinecap="round"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
 )
 
-export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
+export default function Home({ user, cfg = {}, navDef, mods, onNav, nudge }) {
   const modules = navDef?.modules || []
   const sections = navDef?.sections || []
   const hasCap = c => user?.role === 'admin' || !!user?.perms?.[c]
@@ -181,6 +186,16 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
           <span className={'hm-chip ' + (kd ? 'ok' : '')}><span className="dot" />数据源 · {kd ? '金蝶' : '样例'}</span>
         </div>
       </div>
+
+      {nudge && ((nudge.toVerify > 0) || (nudge.toRate > 0)) && (
+        <div className="hm-nudge" onClick={() => onNav && onNav('acceptance')} title="去验收台账">
+          <span>
+            {nudge.toVerify > 0 && <>待你验收 <b>{nudge.toVerify}</b> 个　</>}
+            {nudge.toRate > 0 && <>你还有 <b>{nudge.toRate}</b> 个常用工具没打分</>}
+          </span>
+          <span className="go">去验收台账 →</span>
+        </div>
+      )}
 
       <div className="hm-glance">
         <span>可进入 <b>{nCan}</b> 个板块</span>

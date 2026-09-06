@@ -48,6 +48,27 @@ audit_log = Table(
     Column("target", String(160)),
     Column("detail", Text),
 )
+# 验收台账（V2.492）：一个需求(模块)一条验收结论；满意度评分一人一模块一条。
+# create_all 会在导入时自动建这两张表（新表；不改既有表——遵 create_all 只建不改的既有惯例）。
+tool_acceptance = Table(
+    "tool_acceptance", _md,
+    Column("module_key", String(60), primary_key=True),   # nav 模块 key（权限/审计/状态都锚在它上）
+    Column("verdict", String(16)),                        # 待验收 / 通过 / 打回
+    Column("reviewer", String(50)),                       # 验收人
+    Column("ts", String(20)),
+    Column("note", Text),                                 # 意见/待办
+    Column("version", String(20)),                        # 验收时的版本号
+)
+tool_rating = Table(
+    "tool_rating", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("module_key", String(60)),
+    Column("user", String(50)),
+    Column("score", Integer),                             # 1..5（一线满意度）
+    Column("comment", Text),
+    Column("ts", String(20)),
+    UniqueConstraint("module_key", "user", name="uq_rating_mod_user"),   # 一人一模块只留最新一条
+)
 users = Table(
     "users", _md,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -1247,6 +1268,63 @@ def audit_meta(days=90):
                                         .distinct().order_by(audit_log.c.action)).all() if r[0]]
         total = c.execute(select(func.count()).select_from(audit_log).where(audit_log.c.ts >= cut)).scalar()
     return {"operators": ops, "actions": acts, "total": int(total or 0), "days": days}
+
+
+# ----------------------------- 验收台账（V2.492） -----------------------------
+def get_acceptance():
+    """全部验收结论：{module_key: {verdict, reviewer, ts, note, version}}。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(tool_acceptance)).mappings().all()
+    return {r["module_key"]: dict(r) for r in rows}
+
+
+def set_acceptance(module_key, verdict, reviewer, note="", version=""):
+    """管理员对某模块下验收结论（通过/打回/待验收）。upsert 一条。"""
+    vals = dict(verdict=str(verdict)[:16], reviewer=str(reviewer or "")[:50],
+                ts=_now(), note=str(note or ""), version=str(version or "")[:20])
+    with _engine.begin() as c:
+        if c.execute(select(tool_acceptance.c.module_key).where(tool_acceptance.c.module_key == module_key)).first():
+            c.execute(update(tool_acceptance).where(tool_acceptance.c.module_key == module_key).values(**vals))
+        else:
+            c.execute(insert(tool_acceptance).values(module_key=str(module_key)[:60], **vals))
+
+
+def rate_tool(module_key, user, score, comment=""):
+    """一线用户给某模块打满意度（1..5）。一人一模块只留最新一条（upsert）。"""
+    score = max(1, min(5, int(score)))
+    with _engine.begin() as c:
+        ex = c.execute(select(tool_rating.c.id).where(
+            (tool_rating.c.module_key == module_key) & (tool_rating.c.user == user))).first()
+        if ex:
+            c.execute(update(tool_rating).where(tool_rating.c.id == ex[0])
+                      .values(score=score, comment=str(comment or ""), ts=_now()))
+        else:
+            c.execute(insert(tool_rating).values(module_key=str(module_key)[:60], user=str(user or "")[:50],
+                                                 score=score, comment=str(comment or ""), ts=_now()))
+
+
+def rating_summary():
+    """{module_key: {avg, count}}——满意度均分与人数，验收台账主视图用。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(tool_rating.c.module_key, func.avg(tool_rating.c.score), func.count())
+                         .group_by(tool_rating.c.module_key)).all()
+    return {mk: {"avg": round(float(avg or 0), 1), "count": int(cnt or 0)} for mk, avg, cnt in rows}
+
+
+def my_ratings(user):
+    """当前用户对各模块的打分：{module_key: score}。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(tool_rating.c.module_key, tool_rating.c.score)
+                         .where(tool_rating.c.user == user)).all()
+    return {mk: sc for mk, sc in rows}
+
+
+def rating_detail(module_key):
+    """某模块的逐人打分（含评论），高分在前——展开明细用。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(tool_rating).where(tool_rating.c.module_key == module_key)
+                         .order_by(tool_rating.c.score.desc(), tool_rating.c.ts.desc())).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def backend_info():

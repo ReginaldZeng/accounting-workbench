@@ -715,3 +715,40 @@ def recent_logs(limit=300, user=None, board=None, only_errors=False, days=7):
         ]
     finally:
         conn.close()
+
+
+# ── V2.492 验收台账用：按板块的近期调用量 + 每板块逐账号明细 ──────────────────────
+def board_usage(days=7, detail=True):
+    """{board: {count, accounts, byUser:[{user,count,lastTs}]}}——验收台账「近期调用」列与展开明细。
+    只统计具名用户的写/读请求；未透传身份归「(未透传身份)」。detail=False 时省掉 byUser（省内存）。"""
+    since = time.time() - days * 86400
+    conn = _connect()
+    try:
+        conn.executescript(_DDL)
+        agg = {}
+        for board, user, ts in conn.execute(
+            "SELECT board, user, ts FROM req_log WHERE ts>=?", (since,)
+        ):
+            b = agg.get(board)
+            if b is None:
+                b = {"count": 0, "_users": {}}
+                agg[board] = b
+            b["count"] += 1
+            key = user or LABEL_ANON
+            u = b["_users"].get(key)
+            if u is None:
+                b["_users"][key] = {"user": key, "count": 1, "lastTs": ts}
+            else:
+                u["count"] += 1
+                if ts > u["lastTs"]:
+                    u["lastTs"] = ts
+        out = {}
+        for board, b in agg.items():
+            users = sorted(b["_users"].values(), key=lambda x: -x["count"])
+            row = {"count": b["count"], "accounts": len(users)}
+            if detail:
+                row["byUser"] = users
+            out[board] = row
+        return out
+    finally:
+        conn.close()

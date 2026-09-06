@@ -834,6 +834,8 @@ NAV_MODULES = [
     # ── 其它模块 ──
     {"key": "archive", "label": "凭证归档", "sec": "misc", "order": 10, "default": "待验收"},
     # ── 通用（钉底部）──
+    # 验收台账（V2.492）：全员可见可打分（无 cap）；验收结论/账号明细的编辑与查看在接口内按管理员判。恒常可用。
+    {"key": "acceptance", "label": "验收台账", "sec": "common", "order": 5, "default": "已上线", "always": True},
     # 基础数据/基础设置=平台基础设施（配主体档案、数据源、金蝶连接），恒常可用，不参与上线开关（always）
     {"key": "basicdata", "label": "基础数据", "sec": "common", "order": 10, "default": "已上线", "always": True},
     {"key": "settings", "label": "系统设置", "sec": "common", "order": 20, "default": "已上线", "always": True, "cap": "enter_settings"},
@@ -1281,6 +1283,148 @@ def nav_modules(request: Request):
             "开发者名单": info["names"], "开发者名单说明": info["note"],
             "我是谁": (u or {}).get("name", ""),
             "可编辑": _nav_can_edit(u)}
+
+
+# ═══════════════ 验收台账（V2.492）═══════════════
+# 一页看四件事：需求做到哪步（进度＝实时 nav 状态）/ 验收结论（管理员拍板）/ 一线满意度（全员打分均值）/
+# 近7天调用量（复用日志中心 ops 埋点，按板块归）。验收与打分动作都进 audit_log → 「日志中心 › 操作留痕」可复查。
+# 落点：「通用」板块新增菜单「验收台账」，全员可见可打分；验收结论/意见与账号明细仅主管理员/子管理员。
+_ACC_LIVE = {"已上线", "待验收", "引擎正常", "人工并行", "测试验证"}   # 算"已交付、可被验收/打分"的状态
+# module_key → 日志中心板块名（近7天调用量按板块归；共用板块的兄弟模块会显同一板块合计；无独立后端接口的前端页→None）
+_ACC_MODULE_BOARD = {
+    "reconcile": "银行对账", "fxrate": "汇率录入", "wealth": "理财对账", "fundboard": "资金看板",
+    "ledger": "账户台账", "periodclose": "月结·期间", "rptdash": "报表仪表盘", "rptexport": "报表导出",
+    "logibase": "物流计提", "logiupload": "物流计提", "logistics": "物流计提",
+    "logisticspay": "物流对账", "logisticscost": "物流对账",
+    "clexport": "存货台账", "cldash": "存货台账", "clwh": "存货台账",
+    "bomdraft": "BOM报价审核", "bomstd": "BOM报价审核", "bomconfig": "BOM报价审核",
+    "tempattrev": "临时工考勤", "tempattboard": "临时工考勤",
+    "ecomsettle": "电商对账", "ecombase": "电商对账",
+    "archive": "凭证归档", "basicdata": "基础数据", "settings": "系统设置",
+}
+
+
+def _acc_can_access(u, m):
+    """能不能给这个工具打分＝能不能进它（有准入点则须授权）。"""
+    cap = m.get("cap")
+    return (not cap) or db.user_can(u, cap)
+
+
+def _acceptance_rows(u):
+    """拼台账行：nav 模块 × 状态 × 验收 × 满意度 × 近7天调用。group_only 分组父项不算一个"需求"，跳过。"""
+    is_admin = db.can_admin_accounts(u)
+    state = _nav_state(can_enter_dev(u))
+    verdicts = db.get_acceptance()
+    sat = db.rating_summary()
+    mine = db.my_ratings(u["name"])
+    usage = ops.board_usage(days=7, detail=False)
+    rows = []
+    for m in _all_modules():
+        if m.get("group_only"):
+            continue
+        k = m["key"]
+        status = state.get(k, {}).get("status", "")
+        board = _ACC_MODULE_BOARD.get(k)
+        us = usage.get(board) if board else None
+        v = verdicts.get(k) or {}
+        s = sat.get(k) or {}
+        rows.append({
+            "key": k, "label": m["label"], "sec": m.get("sec"),
+            "status": status, "live": status in _ACC_LIVE, "canAccess": _acc_can_access(u, m),
+            "verdict": v.get("verdict", ""), "note": v.get("note", ""),
+            "reviewer": v.get("reviewer", ""), "verdictTs": v.get("ts", ""),
+            "avg": s.get("avg", 0), "count": s.get("count", 0), "myScore": mine.get(k, 0),
+            "board": board,
+            "usageCount": (us["count"] if us else None), "usageAccounts": (us["accounts"] if us else None),
+        })
+    return rows, is_admin
+
+
+def _acc_nudge(rows, is_admin):
+    to_rate = sum(1 for r in rows if r["live"] and r["canAccess"] and not r["myScore"])
+    to_verify = sum(1 for r in rows if r["live"] and r["verdict"] != "通过") if is_admin else 0
+    return {"toRate": to_rate, "toVerify": to_verify}
+
+
+@app.get("/api/acceptance")
+def api_acceptance(request: Request):
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    rows, is_admin = _acceptance_rows(u)
+    return {"ok": True, "rows": rows, "isAdmin": is_admin, "me": u["name"],
+            "nudge": _acc_nudge(rows, is_admin)}
+
+
+@app.get("/api/acceptance/nudge")
+def api_acceptance_nudge(request: Request):
+    """站内提醒用的轻量计数（首页横幅/侧栏红点）：我还没打分的、待你验收的。"""
+    u = _current_user(request)
+    if not u:
+        return {"toRate": 0, "toVerify": 0}
+    rows, is_admin = _acceptance_rows(u)
+    return _acc_nudge(rows, is_admin)
+
+
+@app.post("/api/acceptance/rate")
+def api_acceptance_rate(body: dict, request: Request):
+    """一线用户给某工具打满意度（1-5）。只能给自己有权限的工具打分。进操作留痕。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    k = str(body.get("module", ""))
+    try:
+        score = int(body.get("score", 0))
+    except Exception:
+        score = 0
+    comment = str(body.get("comment", "") or "")[:300]
+    m = next((x for x in _all_modules() if x["key"] == k and not x.get("group_only")), None)
+    if not m:
+        return JSONResponse({"ok": False, "msg": "模块不存在"}, status_code=400)
+    if not _acc_can_access(u, m):
+        return JSONResponse({"ok": False, "msg": "你没有这个工具的权限，不能给它打分"}, status_code=403)
+    if not (1 <= score <= 5):
+        return JSONResponse({"ok": False, "msg": "评分需 1-5"}, status_code=400)
+    db.rate_tool(k, u["name"], score, comment)
+    db.audit(u["name"], "工具评分", m["label"], f"{score}星" + (f"·{comment[:80]}" if comment else ""))
+    return {"ok": True}
+
+
+@app.post("/api/acceptance/verdict")
+def api_acceptance_verdict(body: dict, request: Request):
+    """管理员对某需求下验收结论（待验收/通过/打回）+ 意见。进操作留痕。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    if not db.can_admin_accounts(u):
+        return JSONResponse({"ok": False, "msg": "仅主管理员/子管理员可下验收结论"}, status_code=403)
+    k = str(body.get("module", ""))
+    verdict = str(body.get("verdict", ""))
+    note = str(body.get("note", "") or "")[:500]
+    if verdict not in ("待验收", "通过", "打回"):
+        return JSONResponse({"ok": False, "msg": "验收结论须为 待验收/通过/打回"}, status_code=400)
+    m = next((x for x in _all_modules() if x["key"] == k), None)
+    if not m:
+        return JSONResponse({"ok": False, "msg": "模块不存在"}, status_code=400)
+    db.set_acceptance(k, verdict, u["name"], note, (VERSION_INFO or {}).get("ver", ""))
+    db.audit(u["name"], "验收-" + verdict, m["label"], note[:200])
+    return {"ok": True}
+
+
+@app.get("/api/acceptance/usage-detail")
+def api_acceptance_usage_detail(request: Request, module: str = ""):
+    """某需求近7天的账号/时间/次数明细（展开用）。仅管理员——普通账号只看聚合次数。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    if not db.can_admin_accounts(u):
+        return JSONResponse({"ok": False, "msg": "账号/时间明细仅管理员可见"}, status_code=403)
+    board = _ACC_MODULE_BOARD.get(module)
+    if not board:
+        return {"board": None, "byUser": [], "count": 0, "accounts": 0}
+    bu = ops.board_usage(days=7, detail=True).get(board) or {}
+    return {"board": board, "count": bu.get("count", 0), "accounts": bu.get("accounts", 0),
+            "byUser": bu.get("byUser", [])}
 
 
 @app.post("/api/nav-modules/save")
