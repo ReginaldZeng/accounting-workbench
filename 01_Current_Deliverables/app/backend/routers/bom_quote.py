@@ -456,8 +456,18 @@ def _stage_files(files, approval_no, source_type):
                   "origin": origin, "srcLabel": label, "productKey": bq.product_key(rec)}
             (goods if origin == "costacct" else parsed).append(it)
     # 商品版配对到同产品商务版底稿；配不上（仅商品版）→ 降级入 parsed 并标缺列
+    # V2.457：**先按 CP 码配**（CP＝身份，V2.425），再退身份键(名|CP)。实证 240399：商务版 CP04107901 页头被写成「…-J-半成品」、
+    # 商品版写「…-半成品」，按 名|CP 配不上 → 商品版被当成第 4 个产品单独入账（缺三列、来源方成本会计商品版）。
     for g in goods:
-        base = next((p for p in parsed if p["productKey"] == g["productKey"] and "goods" not in p), None)
+        gcp = bq.norm(g["rec"].get("cpCode"))
+        base = None
+        if gcp:
+            base = next((p for p in parsed if "goods" not in p and bq.norm(p["rec"].get("cpCode")) == gcp), None)
+            if base and base["productKey"] != g["productKey"]:
+                warnings.append("%s 商务版页头产品名「%s」与商品版「%s」不一致，已按 CP 码配对；请研发/采购统一产品名称"
+                                % (gcp, (base["rec"].get("productName") or "").strip(), (g["rec"].get("productName") or "").strip()))
+        if not base:
+            base = next((p for p in parsed if p["productKey"] == g["productKey"] and "goods" not in p), None)
         if base:
             base["goods"] = g
         else:
