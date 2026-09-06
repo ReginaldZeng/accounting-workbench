@@ -3403,11 +3403,23 @@ def bom_repoint(source, product_key):
     if bom_get_final(source, product_key):
         return None
     rows = [x for x in bom_list_entries(source, product_key)
-            if x.get("status") in ("初审", "已审核") and not x.get("historical")]   # 历史版不对外，不能被自愈成指针（V2.464）
+            if x.get("status") in ("初审", "已审核") and x.get("historical") != 1]   # historical=1（答 C 的历史版）不对外，不能被自愈成指针；=2（补录）是正式数据
     if not rows:
         return None
     best = max(rows, key=lambda x: (x.get("calc_date") or "", x["id"]))
     bom_set_final(source, product_key, best["id"], "system:repoint")
+    return best["id"]
+
+
+def bom_point_latest(source, product_key):
+    """补录（V2.466）：同产品若已有多版正式数据，指针指向**核算日期最新**的一版（不看入账先后——历史单可能乱序录）。
+    候选＝active、初审/已审核、非「答 C 历史版」(historical!=1)。返回指针 id。"""
+    rows = [x for x in bom_list_entries(source, product_key)
+            if x.get("status") in ("初审", "已审核") and x.get("historical") != 1]
+    if not rows:
+        return None
+    best = max(rows, key=lambda x: (x.get("calc_date") or "", x["id"]))
+    bom_set_final(source, product_key, best["id"], "system:point_latest")
     return best["id"]
 
 

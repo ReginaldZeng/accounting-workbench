@@ -131,7 +131,7 @@ def _upstream_status(e, finals=None, others=None):
                     "upFull": comp["full"], "status": up.get("status"), "pick": lab, "upCalcDate": up.get("calc_date") or "",
                     "versions": len(cands),
                     # reviewed＝已初审/已审核（含补录的历史版）——定稿闸看它，不再要求必须是定稿指针那版（V2.462）
-                    "reviewed": up.get("status") in ("初审", "已审核"), "historical": bool(up.get("historical")),
+                    "reviewed": up.get("status") in ("初审", "已审核"), "historical": up.get("historical") == 1, "backfill": up.get("historical") == 2,
                     "isFinal": finals.get(up.get("product_key")) == up["id"],
                     "priceOk": (m.get("priceIncl") is not None
                                 and abs((comp["full"] or 0) - float(m.get("priceIncl"))) < 0.01)})
@@ -225,8 +225,8 @@ def _obsolete_candidates(e, others=None):
     for x in (others if others is not None else db.bom_list_entries(e.get("source"))):
         if x["id"] == e["id"] or x.get("obsolete_by") or x.get("status") not in ("初审", "已审核"):
             continue
-        if x.get("historical"):
-            continue                                   # 补录的历史版：不对外、不参与替代
+        if x.get("historical") == 1:
+            continue                                   # 答 C 的历史版：不对外、不参与替代（=2 的补录是正式数据，照常参与）
         if vg and (x.get("variant_group") or "").strip() == vg:
             continue                                   # 已标「并行关联」的同组成员：并存，不再问替代
         if cp and (x.get("cp_code") or "").strip() == cp:
@@ -314,7 +314,8 @@ def _entry_view(e, finals):
                         "at": e.get("obsolete_at") or "", "note": e.get("obsolete_note") or ""} if succ else None),
         "replaces": [_obs_brief(x) for x in others if x.get("obsolete_by") == e["id"]],
         "obsoleteCandidates": ([] if ob else _obsolete_candidates(e, others)),
-        "historical": bool(e.get("historical")),       # 补录历史版：已审但不对外、不动指针（V2.462）
+        "historical": e.get("historical") == 1,        # 答 C 的历史版：已审但不对外、不动指针（V2.462）
+        "backfill": e.get("historical") == 2,          # 补录（V2.466）：正式对外数据，只是没经二道审核
         "netWeightKg": nw[0], "netWeightSrc": nw[1],
         "bomCheck": bom_check, "hasBomList": bool(bom_mats),
         # ①BOM清单 整表原样（研发出品）：类型/编码/物料/型号/规格/单位/供应商/用量（业务方 2026-09-04 定列序）
@@ -701,7 +702,7 @@ async def bom_ledger(request: Request):
     entries = db.bom_list_entries(src)
     # 指针自愈（V2.461）：已初审/已审核却没定稿指针的产品（指针版被删/替换后另一版还在）→ 指向最新一版，别让它在两个页面都消失
     healed = False
-    for pk in {e.get("product_key") for e in entries if e.get("status") in ("初审", "已审核") and not e.get("historical") and e.get("product_key") not in finals}:
+    for pk in {e.get("product_key") for e in entries if e.get("status") in ("初审", "已审核") and e.get("historical") != 1 and e.get("product_key") not in finals}:
         rid = db.bom_repoint(src, pk)
         if rid:
             db.bom_add_audit(rid, u["name"], "定稿指针自愈", "", "该产品无定稿指针（指针版已删/替换），指针改指本版")
@@ -732,7 +733,7 @@ async def bom_ledger(request: Request):
     rows.sort(key=lambda x: (x["calcDate"], x["id"]), reverse=True)
     approvals = _approval_summ(views, db.bom_pending_list(src)) if mode != "std" else []
     # 历史版（V2.462 答 C / V2.464 历史补录）：已归档但不对外、不占指针 → 标准台账默认不列，另给 hist 供「显示历史版」切换
-    hist = sorted([v for v in views if v.get("historical")], key=lambda x: (x["calcDate"], x["id"]), reverse=True) if mode == "std" else []
+    hist = sorted([v for v in views if v.get("historical") == 1], key=lambda x: (x["calcDate"], x["id"]), reverse=True) if mode == "std" else []
     return {"ok": True, "source": src, "mode": mode, "rows": rows, "all": visible, "hist": hist,
             "finals": finals, "approvals": approvals,
             # 标准台账：已初审、待财务BP终审的条数（BP 要拿这数报价，得知道哪些还没终审、还没对外）
@@ -1416,8 +1417,10 @@ async def bom_upload(request: Request):
 def _book_staged(prev, sid, idxs, u, historical=False):
     """入账核心（抽出来给「立项」与「入账」共用）。勾稽不平/上游不平的一律拒（红线）；
     排版差异版（数字指纹重复）跳过；整组一条没入 → 记「待修」批次，留在待办里可见可修。
-    historical（V2.464，业务方定「历史数据引入不走常规审核」）：入账后直接归档为**历史版**——盖「历史补录」初审戳、四步标已确认、
-    物料类别取建议值、`historical=1`；**不动定稿指针、不对外、不进换码候选**，只留作历史与下游上游链路的依据。勾稽红线照拦。"""
+    historical（V2.464 建、V2.466 改口径，业务方定「补录要对外的，就是没有二道审核了而已」）：入账后直接成为**正式已审核数据**——
+    初审戳「历史补录」+ 终审戳「历史补录·无二审」、四步标已确认、物料类别取建议值、建议报价、`historical=2`；
+    **对外、占定稿指针**（同产品多版按核算日期最新指，历史单乱序录也对）；换码候选照常参与。勾稽红线照拦。
+    （`historical=1` 是审核弹窗答 C 的「不对外历史版」，另一回事。）"""
     src = _src()
     appno = prev.get("approvalNo") or ""
     # 组锚：同一核算表文件(stagedFile)的产品共用 group_id（成品归组键作锚，替换后落回同组）
@@ -1486,14 +1489,16 @@ def _book_staged(prev, sid, idxs, u, historical=False):
             "approval_no": appno, "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"),
             "status": "未复核", "created_by": u["name"],
         })
-        if historical:                       # 历史补录：直接归档为历史版（不对外、不动指针），见函数注释
+        if historical:                       # 补录：直接成为正式已审核数据（对外、占指针），只是没经二道审核，见函数注释
             from core import _now as _n
             ts = _n()
-            db.bom_update_entry(eid, {"status": "初审", "finalized_by": "历史补录", "finalized_at": ts, "historical": 1,
+            db.bom_update_entry(eid, {"status": "已审核", "finalized_by": "历史补录", "finalized_at": ts,
+                                      "ack": {"by": "历史补录", "at": ts, "note": "补录·无二道审核", "backfill": True}, "historical": 2,
                                       "review_steps": {"qty": {"by": "历史补录", "at": ts}, "price": {"by": "历史补录", "at": ts}},
                                       "mat_category": bq.suggest_category(rec.get("cpCode"), rec.get("productName"), rec.get("supplier")),
-                                      "classified_by": "历史补录", "classified_at": ts})
-            db.bom_add_audit(eid, u["name"], "历史补录", "", "不走常规审核：直接归档为历史版（不对外、不动定稿指针、物料类别取建议值）")
+                                      "quotable": 1, "classified_by": "历史补录", "classified_at": ts})
+            db.bom_point_latest(src, it["productKey"])     # 同产品多版 → 指针指核算日期最新一版（乱序录也对）
+            db.bom_add_audit(eid, u["name"], "历史补录", "", "不走常规审核：直接已审核·对外（初审/终审戳均为「历史补录」，物料类别取建议值，建议报价）")
         # 源附件永久留档（供「原版核算表」导出）；商品版另存一份留档
         try:
             pdir = os.path.join(UPLOAD_DIR, src)
@@ -3018,6 +3023,8 @@ async def bomcost_final(request: Request):
             "calcDate": e.get("calc_date") or "", "approvalNo": e.get("approval_no") or "",
             "status": "final",
             "finalizedBy": ack.get("by") or "", "finalizedAt": fin_at,
+            "noSecondReview": e.get("historical") == 2,    # 补录（V2.466）：正式对外，但没经财务BP二道审核——BP 想标注就看这个
+
             "firstReviewedBy": e.get("finalized_by") or "", "firstReviewedAt": e.get("finalized_at") or "",
             "quotable": (None if e.get("quotable") is None else bool(e.get("quotable"))),
             "quoteReason": e.get("quote_reason") or "",

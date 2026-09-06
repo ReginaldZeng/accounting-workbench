@@ -477,7 +477,8 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
         <td className="mono" style={{ fontWeight: 600 }}>{r.cpCode}</td>
         <td style={{ fontWeight: 600 }}>{r.productName}
           {r.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + r.quoteReason}>禁报价</span>}
-          {r.historical && <span className="tag late" style={{ marginLeft: 6 }} title="历史版：已归档但不对外、不占定稿指针（补录或答 C）">历史版·不对外</span>}
+          {r.historical && <span className="tag late" style={{ marginLeft: 6 }} title="历史版：审核时答 C 归档的老版本，已审但不对外、不占定稿指针">历史版·不对外</span>}
+          {r.backfill && <span className="bom-gvtag" style={{ marginLeft: 6 }} title="历史补录：正式对外数据，初审/终审戳均为「历史补录」，未经财务BP二道审核">补录·无二审</span>}
           {r.obsoleteBy && (dead
             ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
             : <span className="tag late" style={{ marginLeft: 6 }} title={`${r.obsoleteBy.cpCode} 已初审、待终审；其终审通过后本版退出对外台账。在此之前 BP 仍用本版`}>待替代 · {r.obsoleteBy.cpCode} 待终审</span>)}
@@ -1000,7 +1001,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           <div className="h-title">成本核算表 · {entry.productName}
             <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
             {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
-            {entry.historical && <span className="tag late" title="补录的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}</div>
+            {entry.historical && <span className="tag late" title="审核时答 C 归档的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}
+            {entry.backfill && <span className="bom-gvtag" title="历史补录：正式对外数据，初审/终审戳均为「历史补录」，未经财务BP二道审核">补录·无二审</span>}</div>
           <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
@@ -1778,7 +1780,7 @@ function UpstreamSection({ entry, onOpen }) {
           <td className="num">{fmt(u.upFull)}{u.versions > 1 && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="台账里同名多版时的取法：同组 › 同钉钉单 › 定稿版 › 不晚于本单 › 最新版">取{u.pick}{u.upCalcDate ? ` · ${u.upCalcDate}` : ''} · 共 {u.versions} 版</div>}</td>
           <td>{!u.priceOk ? <span className="tag leak">价格对不上（差 {fmt(Math.abs((u.priceUsed || 0) - (u.upFull || 0)), 4)}）</span>
             : u.isFinal ? <span className="tag ok">已定稿</span>
-              : (u.reviewed ? <span className="tag ok">{u.historical ? '已审·历史版' : u.status}</span>
+              : (u.reviewed ? <span className="tag ok">{u.historical ? '已审·历史版' : (u.backfill ? '已审核·补录' : u.status)}</span>
                 : <span className="tag werr">{u.status || '未复核'}·未审核</span>)}</td>
           <td><a className="lk" onClick={() => onOpen(u.entryId)}>看子核算表 ›</a></td>
         </tr>))}
@@ -2365,9 +2367,9 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
         <label className="banner" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', margin: '8px 0 4px',
           background: hist ? 'var(--amber-bg)' : 'var(--bg-sub)', color: hist ? 'var(--amber)' : 'var(--ink-2)', border: '1px solid ' + (hist ? 'var(--amber-line)' : 'var(--line)') }}>
           <input type="checkbox" checked={hist} onChange={e => setHist(e.target.checked)} style={{ marginTop: 3 }} />
-          <span><b>历史补录</b>——不走常规审核：入账后直接归档为<b>历史版</b>（盖「历史补录」戳、四步视为已确认、物料类别取建议值），
-            <b>不对外、不占定稿指针、不进换码候选</b>，只留作历史与上游链路依据。勾稽不平的照旧拦下记待修。
-            <span className="muted">现在正在用的那一单不要勾，走正常审核。</span></span>
+          <span><b>历史补录</b>——不走常规审核：入账后直接<b>已审核·对外</b>（初审、终审戳均为「历史补录」，四步视为已确认，物料类别取建议值，建议报价），
+            台账上标「补录·无二审」；同产品多版时定稿指针指核算日期最新的一版。勾稽不平的照旧拦下记待修。
+            <span className="muted">现在正在用、需要财务BP把关的单不要勾，走正常审核。</span></span>
         </label>
 
         <div className="bom-mstep"><span className="bom-mno">1</span><div style={{ flex: 1 }}>
@@ -2398,7 +2400,7 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
             <span className="tag ok">已入账 {(res.booked || []).length}</span>{' '}
             {(res.rejected || []).length > 0 && <span className="tag leak">待修 {res.rejected.length}</span>}{' '}
             {(res.skipped || []).length > 0 && <span className="tag unmap">跳过 {res.skipped.length}</span>}
-            {res.historical && <span className="tag late" style={{ marginLeft: 4 }}>历史补录 · 已归档为历史版，不对外</span>}
+            {res.historical && <span className="tag ok" style={{ marginLeft: 4 }}>历史补录 · 已审核对外（无二道审核）</span>}
           </div>
           {(res.rejected || []).length > 0 && <div className="bom-chkfail">
             {res.rejected.map((r, i) => <div key={i}>· <b>{r.productName}</b>：{r.reason}</div>)}
