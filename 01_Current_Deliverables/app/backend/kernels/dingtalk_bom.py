@@ -164,7 +164,11 @@ def collect_attachments(inst):
 
 
 def download_url(tok_v2, tok_old, iid, file_id):
-    """先新版 workflow 接口（现有应用已具备权限），失败回退老版 TOP。返回 (url, via)。"""
+    """先新版 workflow 接口（现有应用已具备权限），失败回退老版 TOP。返回 (url, via)；失败 → (None, 原因)。
+    ⚠ 实证 2026-09-06（202607011742000186641）：**发起人钉钉账号已不存在**（离职/注销，v2/user/get 60121）时，
+      两个接口都回「用户不存在 / 找不到该用户」——钉钉按发起人身份放附件，人没了附件就 API 拿不到，
+      与应用权限无关；只能从 OA 后台下载后手工上传。原因要带回去让页面讲清楚，别只说「拿不到下载链接」。"""
+    reasons = []
     try:
         j = requests.post(VAPI + "/v1.0/workflow/processInstances/spaces/files/urls/download",
                           headers={"x-acs-dingtalk-access-token": tok_v2},
@@ -173,15 +177,19 @@ def download_url(tok_v2, tok_old, iid, file_id):
         for k in ("fileUrl", "downloadUri", "resourceUrl", "url"):
             if isinstance(res, dict) and res.get(k):
                 return res[k], "v1.0"
-    except Exception:
-        pass
+        if isinstance(j, dict) and (j.get("code") or j.get("message")):
+            reasons.append("%s %s" % (j.get("code") or "", j.get("message") or ""))
+    except Exception as e:
+        reasons.append(str(e)[:80])
     r = _oapi(tok_old, "topapi/processinstance/file/url/get",
               {"request": {"process_instance_id": iid, "file_id": str(file_id)}})
     if r.get("errcode") == 0 and isinstance(r.get("result"), dict):
         for k in ("download_uri", "downloadUri", "url"):
             if r["result"].get(k):
                 return r["result"][k], "top"
-    return None, None
+    if r.get("errmsg"):
+        reasons.append("%s %s" % (r.get("errcode", ""), r.get("errmsg")))
+    return None, "；".join(x.strip() for x in reasons if x.strip()) or None
 
 
 def _day_window(business_id, start=None, end=None):
@@ -227,9 +235,15 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
                     except Exception as e:
                         a["error"] = "下载失败：%s" % _scrub(e, ak, sk)
                 else:
-                    a["error"] = "拿不到下载链接"
+                    a["error"] = "拿不到下载链接" + ("（%s）" % via if via else "")
+        # 发起人账号已不存在（离职/注销）→ 钉钉对该单所有附件都回「用户不存在」。上层据此给人话提示。
+        originator_gone = False
+        errs = [a.get("error") or "" for a in atts]
+        if atts and all(("用户不存在" in e or "找不到该用户" in e or "userNotExist" in e) for e in errs):
+            originator_gone = True
         return {"ok": True, "instanceId": iid, "title": inst.get("title"),
                 "businessId": str(business_id), "status": inst.get("status"),
+                "originatorGone": originator_gone, "originatorUserId": inst.get("originator_userid"),
                 "attachments": atts, "instance": inst}
     except Exception as e:
         return {"ok": False, "msg": "钉钉取数失败：%s" % _scrub(e, ak, sk)}   # 抹掉可能带的 appkey/appsecret（审查 H7）

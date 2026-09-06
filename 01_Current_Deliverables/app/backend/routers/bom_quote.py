@@ -1585,7 +1585,16 @@ async def bom_intake(request: Request):
         elif a.get("source") == "dingtalk_comment":
             comment_pending.append({"fileName": a.get("fileName"), "reason": a.get("error") or "评论区文件当前权限取不到"})
     if not files:
+        if res.get("originatorGone"):
+            names = [a.get("fileName") for a in res.get("attachments", []) if a.get("fileName")]
+            msg = ("这单的发起人钉钉账号已不存在（离职/注销），钉钉按发起人身份放附件，人没了接口就拿不到——不是权限问题、加权限也无解。"
+                   "请管理员在 OA 后台打开该单下载 %d 个附件，用下方「上传成本核算表」手工立项（单号照填）。" % len(names))
+            return JSONResponse({"ok": False, "msg": msg, "originatorGone": True, "attachmentNames": names,
+                                 "commentPending": comment_pending}, status_code=400)
         msg = "该审批未取到可解析的 xlsx 表单附件。"
+        errs = sorted({(a.get("error") or "") for a in res.get("attachments", []) if a.get("error")})
+        if errs:
+            msg += "钉钉回的原因：%s。" % "；".join(errs)[:200]
         if comment_pending:
             msg += "另有 %d 个评论区补传附件当前钉钉权限取不到，请手工下载后上传。" % len(comment_pending)
         return JSONResponse({"ok": False, "msg": msg, "commentPending": comment_pending}, status_code=400)
