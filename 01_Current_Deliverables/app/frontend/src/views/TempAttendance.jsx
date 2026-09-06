@@ -971,12 +971,12 @@ export default function TempAttendance() {
             title={`${st.偏离未计价人数} 人结算表上没有单价、合同价也没登记，偏离金额按 0 计（工时差异仍照算）：`}
             items={(st.偏离未计价 || []).map(x => `${x.姓名}（${x.归属 || '无归属'}·${x.岗位}）——${x.原因}`)} />}
 
-          {(st.白夜混合人数 > 0 || st.未匹配人数 > 0 || st.待指认人数 > 0 || (st.打卡表重名 || []).length > 0) &&
+          {/* 同名待指认单独摆一张清爽的表（下方 AmbigTable），别塞进这条 Note 挤成一长段没人看。 */}
+          {st.待指认人数 > 0 && <AmbigTable rows={st.待人工指认 || []} n={st.待指认人数} />}
+
+          {(st.白夜混合人数 > 0 || st.未匹配人数 > 0 || (st.打卡表重名 || []).length > 0) &&
             <Note tone="warn" title="下面这些工具不猜，请人工确认：" items={[
               st.白夜混合人数 > 0 && `${st.白夜混合人数} 人同月既有白班又有夜班，已按切班窗口逐日切开、正常判档（不再整档交人工）：${(st.白夜混合名单 || []).join('、')}`,
-              // 候选已带钉钉部门：成本会计照部门（「临时普工-…人力」vs「销售中心」）就能定谁是临时工。
-              // 候选是对象 {原名,部门,手机尾号,打卡日数}，直接 join 会印 [object Object]。
-              st.待指认人数 > 0 && `${st.待指认人数} 人姓名归一后撞上多个人，工具不猜、交成本会计按钉钉部门定：${(st.待人工指认 || []).map(x => `${x.姓名}【${(x.候选 || []).map(c => typeof c === 'string' ? c : `${c.部门 || '无部门'}·尾号${c.手机尾号 || '?'}·打卡${c.打卡日数}天`).join(' ／ ')}】`).join('；')}`,
               st.未匹配人数 > 0 && `${st.未匹配人数} 人在打卡表里找不到：${(st.未匹配打卡 || []).join('、')}`,
               // 打卡表重名经 _apply_acks 统一成 {姓名, 已认定?} 对象——直接 join 会印出 [object Object]（V2.346 实测）
               (st.打卡表重名 || []).length > 0 && `打卡表里有同名多行：${st.打卡表重名.map(x => (x && x.姓名) || x).join('、')}`,
@@ -2188,6 +2188,37 @@ function CostNote({ c, month }) {
   </div>
 }
 
+// 同名待指认：都在打卡、部门也定不了的真两可，摆成一张可折叠的表让成本会计按部门定——
+// 别再像早先那样塞进一条 Note 挤成一长段（使用者 2026-09-06：「那一长段谁去理你」）。
+function AmbigTable({ rows, n }) {
+  const [open, setOpen] = useState(false)
+  return <div style={{ marginTop: 8, border: '1px solid #e9d5ff', borderRadius: 8, overflow: 'hidden' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+      padding: '6px 10px', background: '#faf5ff', color: '#6b21a8' }}>
+      <b>◇ 同名待指认 {n} 人</b>
+      <span style={{ fontSize: 12 }}>都在打卡、部门也分不清的真两可——请按<b>钉钉部门</b>定谁是临时工
+        （「临时普工-…人力」才是；「销售/研发…中心」是正式工）。本期这些人判「同名待指认」，定人后再谈工时。</span>
+      <button className="btn" style={{ padding: '2px 10px', fontSize: 12, marginLeft: 'auto' }}
+        onClick={() => setOpen(!open)}>{open ? '收起' : '展开逐个看'}</button>
+    </div>
+    {open && <div style={{ maxHeight: 300, overflow: 'auto' }}>
+      <table className="tbl" style={{ fontSize: 12, width: '100%' }}>
+        <thead><tr><th>姓名</th><th>候选钉钉部门</th><th>尾号</th><th>当月打卡</th></tr></thead>
+        <tbody>
+          {rows.map((x, i) => (x.候选 || []).map((c, j) => (
+            <tr key={`${i}-${j}`}>
+              <td>{j === 0 ? <b>{x.姓名}</b> : ''}</td>
+              <td>{typeof c === 'string' ? c : (c.部门 || '（打卡表没写部门）')}</td>
+              <td>{typeof c === 'string' ? '' : (c.手机尾号 || '?')}</td>
+              <td>{typeof c === 'string' ? '' : `${c.打卡日数} 天`}</td>
+            </tr>
+          )))}
+        </tbody>
+      </table>
+    </div>}
+  </div>
+}
+
 function DupReview({ rec, merged }) {
   const [open, setOpen] = useState(false)
   if (!(rec || []).length) return null
@@ -2202,9 +2233,9 @@ function DupReview({ rec, merged }) {
     </div>
     <div style={{ marginTop: 4 }}>
       {待定.length
-        ? <span className="warn">⚠ {待定.length} 组是不同的人撞名，工具不猜——请按下表<b>钉钉部门</b>定谁是临时工
+        ? <span className="warn">⚠ {待定.length} 组是不同的人撞名、且都在打卡，工具不猜——请按下表<b>钉钉部门</b>定谁是临时工
           （「临时普工-…人力」才是；「销售/研发/品牌…中心」是正式工）。这些人本期判「同名待指认」，定人后再谈工时。</span>
-        : <span>全部是同一人的多账号，已合并，无需人工。</span>}
+        : <span>其余都一眼能定（同一人多账号／对方当月 0 打卡），已自动定人，无需人工。</span>}
       <span style={{ color: 'var(--ink-3)' }}>　同一份底稿也在打卡表的第二页里，可打印存档。</span>
     </div>
     {open && <div style={{ marginTop: 8, maxHeight: 300, overflow: 'auto' }}>
@@ -2218,7 +2249,7 @@ function DupReview({ rec, merged }) {
             <tr key={`${i}-${j}`} style={!x.已定 ? { background: '#faf5ff' } : undefined}>
               <td>{j === 0 ? <b>{x.姓名}</b> : ''}</td>
               <td>{x.已定
-                ? (j === 0 ? <>同一人 · {(c.账号 || []).length} 个账号已合并</> : '')
+                ? (j === 0 ? <span style={{ color: '#166534' }}>已定：{x.定人理由 || '同一人多账号'}</span> : '')
                 : <span className="warn">候选{j + 1}</span>}</td>
               <td>{c.部门 || <span style={{ color: 'var(--ink-3)' }}>（打卡表没写部门）</span>}</td>
               <td><b>{c.手机尾号 || '（无）'}</b></td>

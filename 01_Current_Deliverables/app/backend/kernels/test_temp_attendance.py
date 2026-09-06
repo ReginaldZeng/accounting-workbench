@@ -497,8 +497,28 @@ class TestDupResolveTempVsRegular(unittest.TestCase):
         self.assertEqual(still, {})
         self.assertEqual(set(hit["甲"]["账号"]), {A, B})   # 两账号合并，两段打卡都留住
 
+    def test_only_one_candidate_punched_auto_picks_it(self):
+        # 送分题：同名俩人，一个当月 0 打卡（没来上班）→ 认有打卡那个，不塞给成本会计
+        from kernels import dingtalk_attendance as dta
+        WORK, ZERO = "worked_uid", "nopunch_uid"
+        worked = set(range(1, 23))
+        punch = {WORK: {d: [480, 1080] for d in worked}, ZERO: {}}   # ZERO 当月一天没打卡
+        roster = {WORK: {"部门": ["临时普工-锦绣人力"]}, ZERO: {"部门": ["临时普工-华顺人力"]}}
+        _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
+        dta.fetch_mobiles = lambda cands: {WORK: "13800000001", ZERO: "13800000002"}
+        dta.fetch_punches = lambda jobs, progress=None: punch
+        try:
+            hit, still, _g, rec = dta.resolve_dups(
+                {"甲": [WORK, ZERO]}, "2026-08", worked_days={"甲": worked}, roster=roster)
+        finally:
+            dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
+        self.assertIn("甲", hit)                     # 一眼能定，不交人工
+        self.assertEqual(hit["甲"]["账号"], [WORK])   # 认有打卡那个
+        self.assertEqual(still, {})
+        self.assertIn("0 打卡", rec[0]["定人理由"])
+
     def test_two_equally_good_candidates_still_go_manual(self):
-        # 势均力敌（两人打卡都正好＝上工日）当然也交人工——现在**所有**≥2 个不同的人都交人工
+        # 两个候选都在打卡 → 真两可，交人工（部门摆出来让成本会计定）
         from kernels import dingtalk_attendance as dta
         A, B = "uidA", "uidB"
         worked = set(range(1, 23))

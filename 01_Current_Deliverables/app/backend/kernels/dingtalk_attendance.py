@@ -488,11 +488,12 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
     两步：
       ① 手机号相同的候选＝**同一个人的多个钉钉账号**（离职再入职会新建 userid）。
          合并，不是二选一——只选一个会丢掉另一个账号那几天的打卡。2026-06 有 8 组是这种。
-      ② 剩下手机号不同的，才是真的不同的人 → **工具不猜**，全部退回（still）交成本会计。
-         每个候选带上**钉钉部门**（「临时普工-天幕人力」vs「销售中心」，一眼分得出临时工）、
-         手机尾号、打卡天数；打卡也一并带出（days），由上游把每个候选写成打卡表里的一行，
-         核对侧自然认成「同名待指认」而不是「报了工时没打卡」。
-         （2026-09 业务定案：不自动定人。原先按 F1 猜的规则作废，猜错就是把甲的工时记到乙头上。）
+      ② 剩下手机号不同的，才是真的不同的人。**不靠打卡日 F1 猜**，只认「一眼能定」的：
+         · 本月**只有一个候选在打卡** → 认它（另一个当月 0 打卡＝没来上班，这是事实不是判断）；
+         · 否则（≥2 个候选**都在打卡**）→ 真两可，全退回（still）交成本会计，每个候选带**钉钉部门**
+           （「临时普工-天幕人力」vs「销售中心」，一眼分得出临时工）、手机尾号、打卡天数；
+           打卡也一并带出（days），由上游把每个候选写成打卡表里的一行，核对侧认成「同名待指认」。
+         （2026-09 业务定案：不按 F1 自动定人；但「一个候选当月 0 打卡」的送分题不塞给成本会计。）
 
     返回：hit（只含「合并账号后唯一」的人）、still（≥2 个不同的人，交成本会计）、got、rec。
     rec/still 里都列清楚：候选各是谁、部门、手机尾号、几天打卡——页面和打卡表都照原样摆出来。
@@ -530,11 +531,19 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
             scored.append((_score(w, set(days)), grp, days))
         scored.sort(key=lambda x: -x[0])
         best = scored[0]
-        # 定人只认一种情形：**合并手机号后只剩一个人**（同一人的多个钉钉账号，不涉及在两个人里挑）。
-        # 只要是 ≥2 个**不同的人**，工具一律不猜——把每个候选（含钉钉部门）摆出来，交成本会计按部门判。
-        # （2026-09 业务定案：「不去自己认，把钉钉部门列出来让成本会计判断」。原先按打卡日 F1 猜的
-        #   两条规则——甩开一倍、以及 V2.458 的近乎完美领先——就此作废，猜错等于把甲的工时记到乙头上。）
-        ok = (len(scored) == 1)
+        # 定人只认「一眼能定、有据可查」的两类，**不靠打卡日 F1 猜**（原先甩开一倍、V2.458 近乎完美领先都作废）：
+        #   ① 合并手机号后只剩一个人（同一人的多个钉钉账号，根本不涉及在两个人里挑）；
+        #   ② 本月**只有一个候选在打卡**——另一个当月 0 打卡＝本月没来上班，不可能是报了工时的人。
+        # 都不满足（≥2 个候选**都在打卡**）才是真两可 → 交成本会计，把每个候选的钉钉部门摆出来让人按部门定。
+        # （2026-09 业务定案：不去自己认；但「一个候选当月 0 打卡」这种送分题不该塞给成本会计——那不是判断，是事实。）
+        punched = [s for s in scored if len(s[2]) > 0]      # s=(得分, 账号组, 打卡)；本月有打卡的候选
+        if len(scored) == 1:
+            chosen, why = best, "只一个候选"
+        elif len(punched) == 1:
+            chosen, why = punched[0], "本月只有这个候选在打卡（其余候选当月 0 打卡）"
+        else:
+            chosen, why = None, ""
+        ok = chosen is not None
 
         def _dept(grp):
             depts = []
@@ -545,16 +554,16 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
             return "、".join(depts)
 
         item = {"姓名": nm, "候选人数": len(people), "钉钉账号数": len(uids),
-                "上工日数": len(w), "已定": bool(ok),
+                "上工日数": len(w), "已定": bool(ok), "定人理由": why,
                 "合并账号": sum(1 for g in people if len(g) > 1),
                 "候选": [{"账号": g, "手机尾号": tail(mob.get(g[0])), "部门": _dept(g),
                           "打卡日数": len(d), "命中上工日": len(w & set(d)),
-                          "得分": round(sc, 2), "选中": bool(ok and g is best[1]),
+                          "得分": round(sc, 2), "选中": bool(ok and chosen and g is chosen[1]),
                           "days": d}
                          for sc, g, d in scored]}
         rec.append(item)
         if ok:
-            hit[nm] = {"账号": best[1], "days": best[2]}
+            hit[nm] = {"账号": chosen[1], "days": chosen[2]}
         else:
             still[nm] = item
     say(f"重名自动定人 {len(hit)}／仍需人工 {len(still)}", 40)
