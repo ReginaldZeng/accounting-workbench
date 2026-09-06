@@ -444,8 +444,9 @@ _TAIL = re.compile(r"[（(].*?[)）]|[A-Za-z0-9]+")
 
 
 def _norm(s):
-    """与内核 temp_attendance.norm_name 同规则，避免两处口径不一致。"""
-    return _TAIL.sub("", str(s or "")).strip()
+    """与内核 temp_attendance.norm_name 同规则，避免两处口径不一致。
+    含去掉首尾句点/空格（「李菊英.」这类录入毛刺，否则对不上钉钉的「李菊英」）；不动中点「·」。"""
+    return _TAIL.sub("", str(s or "")).strip(" 　\t\r\n．。.")
 
 
 # ==================== 取打卡 ====================

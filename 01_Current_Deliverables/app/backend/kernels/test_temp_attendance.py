@@ -634,6 +634,25 @@ class TestMonthEndNightShift(unittest.TestCase):
         self.assertTrue(31 not in sh0 or sh0[31]["hours"] < 1)
 
 
+class TestNameTrailingDot(unittest.TestCase):
+    """上报表把名字多打了个句点（「李菊英.」），归一要去掉首尾句点/空格才对得上钉钉的「李菊英」；
+    但名字里的中点「·」（阿依古丽·买买提）是名字本身，不能动。"""
+
+    def test_norm_strips_trailing_dot(self):
+        self.assertEqual(ta.norm_name("李菊英."), "李菊英")
+        self.assertEqual(ta.norm_name("李菊英．"), "李菊英")     # 全角句点
+        self.assertEqual(ta.norm_name("李菊英。"), "李菊英")     # 中文句号
+        self.assertEqual(ta.norm_name(" 李菊英 "), "李菊英")
+        self.assertEqual(ta.norm_name("阿依古丽·买买提"), "阿依古丽·买买提")   # 中点不动
+
+    def test_match_names_resolves_trailing_dot(self):
+        from kernels import dingtalk_attendance as dta
+        roster = {"u1": {"姓名": "李菊英", "部门": []}}
+        r = dta.match_names(["李菊英."], roster)
+        self.assertEqual(r["唯一"], {"李菊英.": "u1"})       # 带点也对上唯一那个人
+        self.assertEqual(r["查无"], [])
+
+
 class TestMixedShift(unittest.TestCase):
     def test_mixed_is_flagged(self):
         """同月既有白班又有夜班的人，切班规则未定，必须显式标出来而不是硬算。"""
