@@ -13,6 +13,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 import urllib.parse
@@ -82,6 +83,12 @@ def _rec_from_entry(e):
             "materials": e.get("materials") or [], "checks": e.get("checks") or []}
 
 
+def _ncp(v):
+    """研发码比对口径（同 kingdee_client.normalize_rd_code）：去空白、全角括号→半角、大写；空/占位（如「复配料」「—」）→ ""。"""
+    s = re.sub(r"\s+", "", str(v or "")).replace("（", "(").replace("）", ")").upper()
+    return s if re.match(r"^[A-Z]{2,4}\d{3,}", s) else ""
+
+
 def _upstream_status(e, finals=None, others=None):
     """已入账记录的**上游链路**：料行里引用的半成品/复配料，在台账里是什么状态。
     口径 quirk#5：下层「全成本含税」＝上层料行的「含税价」，对不上就是链路串了。
@@ -95,16 +102,23 @@ def _upstream_status(e, finals=None, others=None):
 
     **同名多版怎么挑**（V2.460，业务方 2026-09-06 实证 240399）：台账里酱有 12-03 / 12-31 / 01-22 三版，12 月的半成品用的是同单那版 39.39，
     老规则一律取「核算日期最新」→ 拿 1 月的 64.99 去卡 12 月的单，假报「价格对不上」、补录历史单永远定不了稿。
-    现在按远近挑：① 同组（同一核算表文件）② 同钉钉单 ③ 该产品的定稿版 ④ 核算日期 ≤ 本单的最近一版 ⑤ 最新版。pick 标明挑的是哪级。"""
+    现在按远近挑：① 同组（同一核算表文件）② 同钉钉单 ③ 该产品的定稿版 ④ 核算日期 ≤ 本单的最近一版 ⑤ 最新版。pick 标明挑的是哪级。
+
+    **同名配不上时按 CP 码兜底**（V2.477，业务方 2026-09-06 实证 CP27115303）：料行写「钵钵鸡复合调味酱」、台账入的是「钵钵鸡风味复合调味料」，
+    名字差一个字就被当成外购料漏掉，三个复配料只列两个。料行型号/编码栏里带研发码（SZY227003）时，与台账 cp_code 对上也算同一产品；
+    matchBy 标「名称 / CP码」，upName 带回台账名供页面提示"名字不一致"。"""
     src = e.get("source")
     finals = finals if finals is not None else db.bom_finals(src)
-    by_name = {}
+    by_name, by_cp = {}, {}
     for x in (others if others is not None else db.bom_list_entries(src)):     # 已按 核算日期↓ 排
         if x["id"] == e["id"]:
             continue
         pn = (x.get("product_name") or "").strip()
         if pn:
             by_name.setdefault(pn, []).append(x)
+        cp = _ncp(x.get("cp_code"))
+        if cp:
+            by_cp.setdefault(cp, []).append(x)
     my_gid, my_ap, my_date = e.get("group_id") or "", e.get("approval_no") or "", e.get("calc_date") or ""
 
     def pick(cands):
@@ -122,12 +136,18 @@ def _upstream_status(e, finals=None, others=None):
         nm = (m.get("matName") or "").strip()
         if not nm or m.get("seg") == "包材":       # 包材不可能是半成品
             continue
-        cands = by_name.get(nm)
-        if not cands:                              # 台账里没有同名产品 → 就是外购料，不当上游
+        cands, match_by = by_name.get(nm), "名称"
+        if not cands:                              # 同名配不上 → 料行型号/编码栏带的研发码与台账 cp_code 对（V2.477）
+            for c in (_ncp(m.get("model")), _ncp(m.get("matCode"))):
+                if c and c in by_cp:
+                    cands, match_by = by_cp[c], "CP码"
+                    break
+        if not cands:                              # 台账里既无同名也无同码 → 就是外购料，不当上游
             continue
         up, lab = pick(cands)
         comp = bq.compose(_rec_from_entry(up), _fee_of(up))
         out.append({"matName": nm, "priceUsed": m.get("priceIncl"), "found": True, "entryId": up["id"],
+                    "matchBy": match_by, "upName": (up.get("product_name") or "").strip(), "upCp": up.get("cp_code") or "",
                     "upFull": comp["full"], "status": up.get("status"), "pick": lab, "upCalcDate": up.get("calc_date") or "",
                     "versions": len(cands),
                     # reviewed＝已初审/已审核（含补录的历史版）——定稿闸看它，不再要求必须是定稿指针那版（V2.462）

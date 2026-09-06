@@ -477,20 +477,31 @@ def all_checks_ok(rec):
     return len(ck) >= 6 and all(c.get("ok") for c in ck)
 
 
+def _ncp(v):
+    """研发码比对口径：去空白、全角括号→半角、大写；不像研发码的（「复配料」「—」「103010294」）→ ""。"""
+    s = re.sub(r"\s+", "", str(v or "")).replace("（", "(").replace("）", ")").upper()
+    return s if re.match(r"^[A-Z]{2,4}\d{3,}", s) else ""
+
+
 def upstream_refs(rec, recs):
     """本产品的物料行里，哪些是**引用了同一核算表工作簿里另一张表**（半成品/复配料作原料进上层）。
     按「物料名 == 上游产品名」精确配（同一工作簿里研发就是这么写的：成品料行「蘑力辣丝丝半成品」= 半成品页产品名）。
     口径 quirk#5：**下层「全成本含税」＝上层料行里的「含税价」**——两者对不上也要报。
     返回 [{matName, qtyPerKg, priceUsed, upCpCode, upProductName, upFull, priceOk, upChecksOk}]。"""
     me = product_key(rec)
-    by_name = {}
+    by_name, by_cp = {}, {}
     for r in recs or []:
         pn = norm(r.get("productName"))
         if pn and product_key(r) != me:
             by_name.setdefault(pn, r)
+            cp = _ncp(r.get("cpCode"))
+            if cp:
+                by_cp.setdefault(cp, r)
     out = []
     for m in (rec.get("materials") or []):
         up = by_name.get(norm(m.get("matName")))
+        if not up:      # 同名配不上 → 料行型号/编码栏带的研发码与页的 CP 对（V2.477：「…调味酱」vs「…调味料」差一字）
+            up = next((by_cp[c] for c in (_ncp(m.get("model")), _ncp(m.get("matCode"))) if c and c in by_cp), None)
         if not up:
             continue
         up_full = (up.get("summary") or {}).get("全成本含税")

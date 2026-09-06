@@ -1775,7 +1775,7 @@ function UpstreamSection({ entry, onOpen }) {
         <th className="th" style={{ textAlign: 'right' }}>上游全成本含税</th><th className="th">上游状态</th><th className="th"></th>
       </tr></thead><tbody>
         {ups.map((u, i) => (<tr key={i} className={(!(u.reviewed ?? u.isFinal) || !u.priceOk) ? 'bom-nbrow' : ''}>
-          <td style={{ fontWeight: 600 }}>{u.matName}</td>
+          <td style={{ fontWeight: 600 }}>{u.matName}{u.matchBy === 'CP码' && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="料行名字与台账产品名不一致，按型号栏的研发码对上的">按 CP {u.upCp} 配上台账「{u.upName}」</div>}</td>
           <td className="num">{fmt(u.priceUsed)}</td>
           <td className="num">{fmt(u.upFull)}{u.versions > 1 && <div className="muted" style={{ fontSize: 10.5, fontWeight: 400 }} title="台账里同名多版时的取法：同组 › 同钉钉单 › 定稿版 › 不晚于本单 › 最新版">取{u.pick}{u.upCalcDate ? ` · ${u.upCalcDate}` : ''} · 共 {u.versions} 版</div>}</td>
           <td>{!u.priceOk ? <span className="tag leak">价格对不上（差 {fmt(Math.abs((u.priceUsed || 0) - (u.upFull || 0)), 4)}）</span>
@@ -1788,7 +1788,7 @@ function UpstreamSection({ entry, onOpen }) {
       {block.length > 0 && <div className="bom-chkfail" style={{ margin: '0 14px 12px' }}>
         <b>⛔ 上游未就绪，本品不能定稿</b>：{block.join('；')}。<br />
         半成品的成本没确认，成品的成本就是建在未确认的数上——先把上游复核定稿，再回来定本品。</div>}
-      <div className="foot" style={{ padding: '0 14px 10px' }}>只列**台账里真有同名子核算表**的料行；外购原料/包材不在此列（名字带「复合/复配料」的外购件不算上游）。</div>
+      <div className="foot" style={{ padding: '0 14px 10px' }}>只列**台账里真有同名（或型号栏研发码同 CP）子核算表**的料行；外购原料/包材不在此列（名字带「复合/复配料」的外购件不算上游）。</div>
     </div>
   )
 }
