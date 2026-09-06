@@ -64,7 +64,7 @@ function applyTheme(mode) {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
 }
 
-export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver, nudge }) {
+export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver }) {
   const kd = source === 'kingdee'
   // 主题档位；auto 档要监听系统切换（白天↔夜间自动跟）
   const [theme, setTheme] = React.useState(() => localStorage.getItem('fw_theme') || 'auto')
@@ -118,10 +118,6 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   const bottomMods = allMods.filter(m => bottomKeys.has(m.sec) && canSee(m) && stat(m.key) !== '隐藏')
   const itemsOf = s => allMods.filter(m => m.sec === s.key && !subOf[m.key] && canSee(m) && stat(m.key) !== '隐藏')
   const badgeOf = it => {
-    if (it.key === 'acceptance') {                       // 验收台账红点：待验收 + 待评分之和（V2.492）
-      const n = (nudge?.toVerify || 0) + (nudge?.toRate || 0)
-      return n > 0 ? { t: n > 99 ? '99+' : String(n), pill: true, red: true } : null
-    }
     if (it.key === 'periodclose' && closed) return { t: '已封存', pill: true }
     if (!on(it.key)) return { t: stat(it.key) || '未开放', pill: false }   // 未开放：灰字
     const s = stat(it.key)

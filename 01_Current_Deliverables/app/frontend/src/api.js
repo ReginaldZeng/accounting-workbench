@@ -145,12 +145,13 @@ export const getAudit = ({ days = 30, limit = 500, operator = '', action = '' } 
   j(`/api/ops/audit?days=${days}&limit=${limit}` + (operator ? `&operator=${encodeURIComponent(operator)}` : '')
     + (action ? `&action=${encodeURIComponent(action)}` : ''))
 export const auditCsvUrl = (days = 30) => `/api/ops/audit.csv?days=${days}`
-// 验收台账（V2.492）：进度+验收+一线满意度+近7天调用。打分全员，验收结论/账号明细仅管理员。
-export const getAcceptance = () => j('/api/acceptance')
-export const getAcceptanceNudge = () => j('/api/acceptance/nudge')
-export const rateTool = (module, score, comment = '') => jp('/api/acceptance/rate', { module, score, comment })
-export const setVerdict = (module, verdict, note = '') => jp('/api/acceptance/verdict', { module, verdict, note })
-export const getUsageDetail = (module) => j('/api/acceptance/usage-detail?module=' + encodeURIComponent(module))
+// 门户跨台验收台账（V2.499）：发起验收(指人)+登录弹窗+收口。清单跨台(核算/BP/法务)。
+export const getPortalAcceptance = () => j('/api/portal/acceptance')
+export const getVerifyPopup = () => j('/api/portal/acceptance/popup')
+export const assignVerify = (b) => jp('/api/portal/acceptance/assign', b)      // {toolId, assignee, note}
+export const actVerify = (b) => jp('/api/portal/acceptance/act', b)            // {toolId, verdict:'pass'|'reject', improve}
+export const escalateVerify = (b) => jp('/api/portal/acceptance/escalate', b)  // {toolId, action:'close'|'hide'|'reopen'}
+export const ratePortalTool = (toolId, score, comment = '') => jp('/api/portal/acceptance/rate', { toolId, score, comment })
 // 只存岗位模板（权限中枢「岗位模板设置」抽屉用）。后端 V2.144 起 state 缺席不再被重置
 export const saveNavTemplates = (templates) => jpSoft('/api/nav-modules/save', { templates })
 // 只存岗位名单（权限中枢就近新增岗位用；传全量名单）。posts 段后端本就有 isinstance guard

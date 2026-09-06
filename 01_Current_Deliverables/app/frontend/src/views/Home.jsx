@@ -109,7 +109,7 @@ const IcLock = () => (
     strokeLinecap="round"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
 )
 
-export default function Home({ user, cfg = {}, navDef, mods, onNav, nudge }) {
+export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
   const modules = navDef?.modules || []
   const sections = navDef?.sections || []
   const hasCap = c => user?.role === 'admin' || !!user?.perms?.[c]
@@ -186,16 +186,6 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav, nudge }) {
           <span className={'hm-chip ' + (kd ? 'ok' : '')}><span className="dot" />数据源 · {kd ? '金蝶' : '样例'}</span>
         </div>
       </div>
-
-      {nudge && ((nudge.toVerify > 0) || (nudge.toRate > 0)) && (
-        <div className="hm-nudge" onClick={() => onNav && onNav('acceptance')} title="去验收台账">
-          <span>
-            {nudge.toVerify > 0 && <>待你验收 <b>{nudge.toVerify}</b> 个　</>}
-            {nudge.toRate > 0 && <>你还有 <b>{nudge.toRate}</b> 个常用工具没打分</>}
-          </span>
-          <span className="go">去验收台账 →</span>
-        </div>
-      )}
 
       <div className="hm-glance">
         <span>可进入 <b>{nCan}</b> 个板块</span>

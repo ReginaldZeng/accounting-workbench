@@ -31,8 +31,7 @@ import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
 import Home from './views/Home.jsx'
-import Acceptance from './views/Acceptance.jsx'
-import { getConfig, setConfig, getMe, apiLogout, getNavModules, getAcceptanceNudge } from './api.js'
+import { getConfig, setConfig, getMe, apiLogout, getNavModules } from './api.js'
 
 export default function App() {
   const [user, setUser] = useState(undefined)   // undefined=检查登录中 / null=未登录 / {..}=已登录
@@ -41,7 +40,6 @@ export default function App() {
   const [cfg, setCfg] = useState({ source: 'sample', year: 2026, period: 6 })
   const [mods, setMods] = useState(null)          // 导航模块上线开关（null=未加载，按全开渲染）
   const [navDef, setNavDef] = useState(null)      // 模块清单+分组（内置+自建），驱动侧栏渲染
-  const [nudge, setNudge] = useState(null)        // 验收台账站内提醒计数（首页横幅/侧栏红点）：{toRate,toVerify}
   // 某个模块这个人能不能进＝【上线状态开着】且【有准入点】。准入点 cap 由后端算好放在模块上，
   // 前端别自己拼 "enter:"+key——拼错就是静默放行。
   const modOf = k => (navDef?.modules || []).find(m => m.key === k)
@@ -62,8 +60,6 @@ export default function App() {
   }, [user])
   useEffect(() => { if (user) getConfig().then(setCfg).catch(() => {}) }, [user])
   useEffect(() => { if (user) getNavModules().then(r => { setMods(r.state); setNavDef({ modules: r.modules, sections: r.sections, posts: r.posts }) }).catch(() => {}) }, [user])
-  // 验收台账提醒（V2.492）：登录后拉一次；进/离开验收台账时再刷新，让横幅/红点跟着最新
-  useEffect(() => { if (user) getAcceptanceNudge().then(setNudge).catch(() => {}) }, [user, view === 'acceptance'])
   // 落地页：既要模块开着，**也要这个人进得去**（V2.52 准入点）。
   // 不看准入点的话，一个没有任何菜单权限的账号会直接落在「对账程序」上——侧栏空空如也，正文却把整页
   // 渲染给他看（实测抓到）。没有一个能进的 → 落到「无权限」占位，别白屏也别越权。
@@ -111,7 +107,7 @@ export default function App() {
 
   return (
     <div className="shell">
-      <Sidebar view={view} onSelect={setView} source={cfg.source} user={user} onLogout={logout} onHome={backToPortal} nudge={nudge}
+      <Sidebar view={view} onSelect={setView} source={cfg.source} user={user} onLogout={logout} onHome={backToPortal}
         closed={!!cfg['封存']?.['已封存']} mods={mods} navDef={navDef} ver={cfg['版本']} />
       <main className="main">
         {/* 模块未开放时，正停在该页的人不该继续看到旧内容（四部曲三个子视图都算「银行对账」这个模块） */}
@@ -132,9 +128,7 @@ export default function App() {
             body="这不是功能没做，是权限还没开——找主管理员即可。" />
         })()}
         {/* 首页（V2.488）：轻量落地页，进核算工作台先落这里。恒可进、不取业务数据；卡片点开才进对应模块 */}
-        {view === 'home' && <Home user={user} cfg={cfg} navDef={navDef} mods={mods} onNav={setView} nudge={nudge} />}
-        {/* 验收台账（V2.492）：全员可见（无 cap）；验收/明细的编辑与查看在接口内按管理员判 */}
-        {view === 'acceptance' && <Acceptance user={user} navDef={navDef} />}
+        {view === 'home' && <Home user={user} cfg={cfg} navDef={navDef} mods={mods} onNav={setView} />}
         {view === 'import' && canView('reconcile') && <DataImport cfg={cfg} onChange={setCfg} onPeriod={changePeriod} onNav={setView} user={user} />}
         {view === 'fund' && canView('reconcile') && <FundDashboard cfg={cfg} onPeriod={changePeriod} onNav={setView} user={user} />}
         {view === 'fundboard' && canView('fundboard') && <FundBoard cfg={cfg} onPeriod={changePeriod} onNav={setView} />}
@@ -200,7 +194,7 @@ const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodc
   'clexport', 'cldash', 'clwh', 'bomdraft', 'bomstd', 'bomconfig',
   'ecomsettle', 'ecombase',
   'tempattrev', 'tempattboard',
-  'archive', 'basicdata', 'settings', 'acceptance'])
+  'archive', 'basicdata', 'settings'])
 // body 默认是「二期开发」——但权限类占位不能这么说，那会让人以为是功能没做，跑去催开发而不是找管理员开权限
 function Placeholder({ title, hint, body = '敬请期待 —— 二期开发。' }) {
   return <div><div className="head"><div><div className="h-title">{title}</div>

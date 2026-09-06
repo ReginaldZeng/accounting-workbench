@@ -834,8 +834,6 @@ NAV_MODULES = [
     # ── 其它模块 ──
     {"key": "archive", "label": "凭证归档", "sec": "misc", "order": 10, "default": "待验收"},
     # ── 通用（钉底部）──
-    # 验收台账（V2.492）：全员可见可打分（无 cap）；验收结论/账号明细的编辑与查看在接口内按管理员判。恒常可用。
-    {"key": "acceptance", "label": "验收台账", "sec": "common", "order": 5, "default": "已上线", "always": True},
     # 基础数据/基础设置=平台基础设施（配主体档案、数据源、金蝶连接），恒常可用，不参与上线开关（always）
     {"key": "basicdata", "label": "基础数据", "sec": "common", "order": 10, "default": "已上线", "always": True},
     {"key": "settings", "label": "系统设置", "sec": "common", "order": 20, "default": "已上线", "always": True, "cap": "enter_settings"},
@@ -1425,6 +1423,175 @@ def api_acceptance_usage_detail(request: Request, module: str = ""):
     bu = ops.board_usage(days=7, detail=True).get(board) or {}
     return {"board": board, "count": bu.get("count", 0), "accounts": bu.get("accounts", 0),
             "byUser": bu.get("byUser", [])}
+
+
+# ═══════════════ 门户跨台验收台账（V2.499）═══════════════
+# 你「发起验收」＝给某工具指派待验收任务给某账号 → 该账号登录弹窗（系统语气）通过/打回 + 注明「需要完善的点」
+# → 不理下次再弹 → 你能收口（关闭/打回开发中/隐藏）。清单跨台来自 portal_tools（核算/BP/法务）。
+# 满意度打星复用 tool_rating（工具身份＝str(门户工具id)）。近7天调用：核算卡走 ops 埋点，BP/法务暂显「—」（待接 BP）。
+_PORTAL_ST_LABEL = {"ok": "已上线", "par": "人工并行", "beta": "开发中", "soon": "敬请期待"}
+_LANE_LABEL = {"accounting": "财务核算组", "bp": "财务分析组·BP", "legal": "法务部"}
+
+
+def _portal_tool_usage(t, ubb):
+    """门户工具近7天调用量：核算卡按 mods→ops 板块归；非核算或无映射 → (None,None) 显「—」。"""
+    if t.get("lane") != "accounting":
+        return None, None
+    boards = set()
+    for k in (t.get("mods") or []):
+        b = _ACC_MODULE_BOARD.get(k)
+        if b:
+            boards.add(b)
+    if not boards:
+        return None, None
+    cnt = sum(ubb.get(b, {}).get("count", 0) for b in boards)
+    acc = max((ubb.get(b, {}).get("accounts", 0) for b in boards), default=0)
+    return cnt, acc
+
+
+def _portal_acceptance_rows(u):
+    tools = _portal_autolink(db.list_portal_tools())
+    tasks = db.verify_all()
+    sat = db.rating_summary()
+    mine = db.my_ratings(u["name"])
+    ubb = ops.board_usage(days=7, detail=False)
+    rows = []
+    for t in tools:
+        tid = t["id"]
+        key = str(tid)
+        task = tasks.get(tid)
+        s = sat.get(key) or {}
+        uc, ua = _portal_tool_usage(t, ubb)
+        rows.append({
+            "id": tid, "lane": t.get("lane"), "name": t.get("name"),
+            "status": t.get("status"), "statusLabel": _PORTAL_ST_LABEL.get(t.get("status"), t.get("status")),
+            "descr": t.get("desc") or "",
+            "task": ({"assignee": task.get("assignee", ""), "status": task.get("status", ""),
+                      "note": task.get("note", ""), "improve": task.get("improve", ""),
+                      "createdBy": task.get("created_by", ""), "createdTs": task.get("created_ts", ""),
+                      "doneBy": task.get("done_by", ""), "doneTs": task.get("done_ts", "")} if task else None),
+            "avg": s.get("avg", 0), "count": s.get("count", 0), "myScore": mine.get(key, 0),
+            "usageCount": uc, "usageAccounts": ua,
+        })
+    return rows
+
+
+@app.get("/api/portal/acceptance")
+def api_portal_acceptance(request: Request):
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    is_admin = db.can_admin_accounts(u)
+    rows = _portal_acceptance_rows(u)
+    my_pending = sum(1 for r in rows if r["task"] and r["task"]["assignee"] == u["name"] and r["task"]["status"] == "pending")
+    accounts = [x["name"] for x in db.list_users()] if is_admin else []
+    return {"ok": True, "rows": rows, "isAdmin": is_admin, "me": u["name"],
+            "laneLabel": _LANE_LABEL, "accounts": accounts, "nudge": {"myPending": my_pending}}
+
+
+@app.get("/api/portal/acceptance/popup")
+def api_portal_acceptance_popup(request: Request):
+    """登录弹窗：我名下待验收的任务（含工具名/发起说明）。系统语气，不摆发起人。"""
+    u = _current_user(request)
+    if not u:
+        return {"tasks": []}
+    pend = db.verify_pending_for(u["name"])
+    if not pend:
+        return {"tasks": []}
+    names = {t["id"]: t.get("name", "") for t in db.list_portal_tools()}
+    return {"tasks": [{"toolId": p["tool_id"], "toolName": names.get(p["tool_id"], "该功能"),
+                       "note": p.get("note", "")} for p in pend]}
+
+
+@app.post("/api/portal/acceptance/assign")
+def api_portal_acceptance_assign(body: dict, request: Request):
+    """发起验收：指派某工具给某账号验收。仅管理员。"""
+    u = _current_user(request)
+    if not db.can_admin_accounts(u):
+        return JSONResponse({"ok": False, "msg": "仅主管理员/子管理员可发起验收"}, status_code=403)
+    tid = body.get("toolId")
+    assignee = str(body.get("assignee", "") or "").strip()
+    note = str(body.get("note", "") or "")[:500]
+    if not tid or not assignee:
+        return JSONResponse({"ok": False, "msg": "请选择工具与验收人"}, status_code=400)
+    tool = next((t for t in db.list_portal_tools() if t["id"] == int(tid)), None)
+    if not tool:
+        return JSONResponse({"ok": False, "msg": "工具不存在"}, status_code=400)
+    if not next((x for x in db.list_users() if x["name"] == assignee), None):
+        return JSONResponse({"ok": False, "msg": "验收人账号不存在"}, status_code=400)
+    db.verify_assign(int(tid), assignee, note, u["name"])
+    db.audit(u["name"], "发起验收", tool.get("name", ""), "指派给 " + assignee + ("｜" + note[:120] if note else ""))
+    return {"ok": True}
+
+
+@app.post("/api/portal/acceptance/act")
+def api_portal_acceptance_act(body: dict, request: Request):
+    """验收人提交：通过(pass)/打回(reject) + 注明需要完善的点。只有被指派人或管理员能提交。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    tid = body.get("toolId")
+    verdict = str(body.get("verdict", ""))
+    improve = str(body.get("improve", "") or "")[:800]
+    if verdict not in ("pass", "reject"):
+        return JSONResponse({"ok": False, "msg": "结论须为 通过/打回"}, status_code=400)
+    task = db.verify_all().get(int(tid)) if tid else None
+    if not task or task.get("status") != "pending":
+        return JSONResponse({"ok": False, "msg": "该验收任务不存在或已处理"}, status_code=400)
+    if task.get("assignee") != u["name"] and not db.can_admin_accounts(u):
+        return JSONResponse({"ok": False, "msg": "这条验收不是指派给你的"}, status_code=403)
+    tool = next((t for t in db.list_portal_tools() if t["id"] == int(tid)), None)
+    db.verify_act(int(tid), verdict, improve, u["name"])
+    db.audit(u["name"], "验收通过" if verdict == "pass" else "暂不验收",
+             (tool or {}).get("name", ""), ("完善点：" + improve[:160]) if improve else "")
+    return {"ok": True}
+
+
+@app.post("/api/portal/acceptance/escalate")
+def api_portal_acceptance_escalate(body: dict, request: Request):
+    """收口（仅管理员）：close 关闭 / hide 隐藏 / reopen 打回开发中（并把门户工具状态设回 开发中）。"""
+    u = _current_user(request)
+    if not db.can_admin_accounts(u):
+        return JSONResponse({"ok": False, "msg": "仅主管理员/子管理员可收口"}, status_code=403)
+    tid = body.get("toolId")
+    action = str(body.get("action", ""))
+    tool = next((t for t in db.list_portal_tools() if t["id"] == int(tid)), None) if tid else None
+    if not tool:
+        return JSONResponse({"ok": False, "msg": "工具不存在"}, status_code=400)
+    if action == "close":
+        db.verify_set_status(int(tid), "closed", u["name"]); label = "关闭验收"
+    elif action == "hide":
+        db.verify_set_status(int(tid), "hidden", u["name"]); label = "隐藏验收"
+    elif action == "reopen":
+        db.verify_set_status(int(tid), "closed", u["name"])
+        d = dict(tool); d["status"] = "beta"; db.save_portal_tool(d)   # 门户工具状态设回 开发中（自动联动卡以其模块进度为准）
+        label = "打回开发中"
+    else:
+        return JSONResponse({"ok": False, "msg": "未知动作"}, status_code=400)
+    db.audit(u["name"], label, tool.get("name", ""), "")
+    return {"ok": True}
+
+
+@app.post("/api/portal/acceptance/rate")
+def api_portal_acceptance_rate(body: dict, request: Request):
+    """一线满意度打星（全员，1-5）。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    tid = body.get("toolId")
+    try:
+        score = int(body.get("score", 0))
+    except Exception:
+        score = 0
+    comment = str(body.get("comment", "") or "")[:300]
+    tool = next((t for t in db.list_portal_tools() if t["id"] == int(tid)), None) if tid else None
+    if not tool:
+        return JSONResponse({"ok": False, "msg": "工具不存在"}, status_code=400)
+    if not (1 <= score <= 5):
+        return JSONResponse({"ok": False, "msg": "评分需 1-5"}, status_code=400)
+    db.rate_tool(str(int(tid)), u["name"], score, comment)
+    db.audit(u["name"], "工具评分", tool.get("name", ""), f"{score}星" + (f"·{comment[:60]}" if comment else ""))
+    return {"ok": True}
 
 
 @app.post("/api/nav-modules/save")

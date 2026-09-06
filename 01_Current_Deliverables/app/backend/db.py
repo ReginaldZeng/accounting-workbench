@@ -69,6 +69,23 @@ tool_rating = Table(
     Column("ts", String(20)),
     UniqueConstraint("module_key", "user", name="uq_rating_mod_user"),   # 一人一模块只留最新一条
 )
+# 验收任务（V2.499 门户跨台版）：你「发起验收」＝给某工具指派一个待验收任务给某账号；
+# 该账号登录弹窗，通过/打回并注明「需要完善的点」；一工具一条当前任务（重发起＝覆盖）。
+# tool_id ＝ portal_tools.id（跨台工具身份，核算/BP/法务通用）；module_key 复用给满意度存工具身份。
+verify_task = Table(
+    "verify_task", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("tool_id", Integer),            # portal_tools.id
+    Column("assignee", String(50)),        # 指派给谁验收
+    Column("note", Text),                  # 发起说明（系统弹窗里给验收人看的"要看的点"）
+    Column("status", String(12)),          # pending 待验收 / pass 通过 / reject 打回 / closed 关闭 / hidden 隐藏
+    Column("improve", Text),               # 验收人注明的"需要完善的点"
+    Column("created_by", String(50)),      # 发起人（记留痕、不摆在弹窗上催人）
+    Column("created_ts", String(20)),
+    Column("done_by", String(50)),         # 谁验的
+    Column("done_ts", String(20)),
+    UniqueConstraint("tool_id", name="uq_verify_tool"),
+)
 users = Table(
     "users", _md,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -1324,6 +1341,49 @@ def rating_detail(module_key):
     with _engine.connect() as c:
         rows = c.execute(select(tool_rating).where(tool_rating.c.module_key == module_key)
                          .order_by(tool_rating.c.score.desc(), tool_rating.c.ts.desc())).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------- 验收任务（V2.499 门户跨台版）----------------------
+def verify_all():
+    """全部当前验收任务：{tool_id: {...}}（一工具一条）。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(verify_task)).mappings().all()
+    return {r["tool_id"]: dict(r) for r in rows}
+
+
+def verify_assign(tool_id, assignee, note, by):
+    """发起验收：给某工具指派一个待验收任务给某账号（重发起＝覆盖当前任务，回到 pending）。"""
+    vals = dict(assignee=str(assignee or "")[:50], note=str(note or ""), status="pending",
+                improve="", created_by=str(by or "")[:50], created_ts=_now(), done_by="", done_ts="")
+    with _engine.begin() as c:
+        if c.execute(select(verify_task.c.id).where(verify_task.c.tool_id == int(tool_id))).first():
+            c.execute(update(verify_task).where(verify_task.c.tool_id == int(tool_id)).values(**vals))
+        else:
+            c.execute(insert(verify_task).values(tool_id=int(tool_id), **vals))
+
+
+def verify_act(tool_id, status, improve, by):
+    """验收人提交结论：status=pass/reject，注明需要完善的点。"""
+    with _engine.begin() as c:
+        c.execute(update(verify_task).where(verify_task.c.tool_id == int(tool_id))
+                  .values(status=str(status)[:12], improve=str(improve or ""),
+                          done_by=str(by or "")[:50], done_ts=_now()))
+
+
+def verify_set_status(tool_id, status, by):
+    """收口：关闭 closed / 隐藏 hidden（打回开发中在 app 里另设门户工具状态）。"""
+    with _engine.begin() as c:
+        c.execute(update(verify_task).where(verify_task.c.tool_id == int(tool_id))
+                  .values(status=str(status)[:12], done_by=str(by or "")[:50], done_ts=_now()))
+
+
+def verify_pending_for(user):
+    """某账号名下待验收（pending）的任务——登录弹窗用。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(verify_task).where(
+            (verify_task.c.assignee == user) & (verify_task.c.status == "pending"))
+            .order_by(verify_task.c.created_ts.asc())).mappings().all()
     return [dict(r) for r in rows]
 
 
