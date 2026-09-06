@@ -1243,7 +1243,7 @@ def tempatt_ding_status(request: Request, month: str = ""):
     return out
 
 
-def _ding_worker(jid, month, names, worked, force=False, scope="worked"):
+def _ding_worker(jid, month, names, worked, force=False, scope="worked", agencies=None):
     def say(msg, pct=0):
         with _DING_LOCK:
             j = _DING_JOBS.get(jid)
@@ -1251,7 +1251,7 @@ def _ding_worker(jid, month, names, worked, force=False, scope="worked"):
                 j["说明"], j["进度"] = msg, pct
     try:
         r = dda.pull_month(month, names, progress=say, worked_days=worked,
-                           force_roster=force, scope=scope)
+                           force_roster=force, scope=scope, agencies=agencies)
         with _DING_LOCK:
             j = _DING_JOBS.get(jid) or {}
             j.update(状态="完成", 进度=100, xlsx=r.pop("xlsx"), 结果=r, 完成于=time.time())
@@ -1292,11 +1292,14 @@ async def tempatt_ding_pull(request: Request):
     if not good:
         return {"ok": False, "msg": why}
 
-    names, worked = set(), {}
+    names, worked, agencies = set(), {}, {}
     for x in sm["people"]:
         names.add(x["name"])
         worked.setdefault(x["name"], set()).update(
             d for d, v in (x.get("days") or {}).items() if v)
+        # 上报归属：撞名定人「部门=归属则放行」要用它（上报锦绣 ↔ 钉钉唯一一个锦绣人力在打卡）
+        if x.get("agency"):
+            agencies[x["name"]] = x["agency"]
     _ding_gc()
     jid = f"{month}-{int(time.time() * 1000)}"
     with _DING_LOCK:
@@ -1305,7 +1308,8 @@ async def tempatt_ding_pull(request: Request):
     threading.Thread(target=_ding_worker,
                      args=(jid, month, sorted(names), worked,
                            str(form.get("refresh") or "") in ("1", "true"),
-                           "full" if str(form.get("scope") or "") == "full" else "worked"),
+                           "full" if str(form.get("scope") or "") == "full" else "worked",
+                           agencies),
                      daemon=True).start()
     db.audit(u["name"], "临时工考勤-钉钉取数", f"{month} {len(names)}人", "发起")
     return {"ok": True, "任务": jid, "月份": month, "人数": len(names),

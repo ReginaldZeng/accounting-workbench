@@ -478,7 +478,15 @@ def _score(worked, punched):
     return 2 * cov * pre / (cov + pre)
 
 
-def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
+def _agency_leaf(dept):
+    """从钉钉部门全称里取派遣方：末段去掉「人力」。「…-临时普工-锦绣人力」→「锦绣」。"""
+    leaf = str(dept or "").split("-")[-1].strip()
+    if leaf.endswith("人力") and len(leaf) > 2:
+        leaf = leaf[:-2].strip()
+    return leaf
+
+
+def resolve_dups(dup, month, worked_days=None, progress=None, roster=None, agencies=None):
     """重名的人怎么办：先用**手机号**分清是几个人，再用**上工日**定是哪一个。
 
     为什么必须处理而不是跳过：跳过等于这个人在打卡表里凭空消失，
@@ -488,12 +496,14 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
     两步：
       ① 手机号相同的候选＝**同一个人的多个钉钉账号**（离职再入职会新建 userid）。
          合并，不是二选一——只选一个会丢掉另一个账号那几天的打卡。2026-06 有 8 组是这种。
-      ② 剩下手机号不同的，才是真的不同的人。**不靠打卡日 F1 猜**，只认「一眼能定」的：
+      ② 剩下手机号不同的，才是真的不同的人。**不靠打卡日 F1 猜**，只认「一眼能定、有据可查」的：
          · 本月**只有一个候选在打卡** → 认它（另一个当月 0 打卡＝没来上班，这是事实不是判断）；
-         · 否则（≥2 个候选**都在打卡**）→ 真两可，全退回（still）交成本会计，每个候选带**钉钉部门**
-           （「临时普工-天幕人力」vs「销售中心」，一眼分得出临时工）、手机尾号、打卡天数；
-           打卡也一并带出（days），由上游把每个候选写成打卡表里的一行，核对侧认成「同名待指认」。
-         （2026-09 业务定案：不按 F1 自动定人；但「一个候选当月 0 打卡」的送分题不塞给成本会计。）
+         · 有打卡的候选里**恰好一个钉钉部门派遣方 = 上报归属** → 认它（两系统标签自洽，
+           上报「锦绣」↔ 钉钉唯一一个「锦绣人力」在打卡，需传 agencies={姓名:归属}）；
+         · 否则（≥2 个候选**都在打卡**、部门也定不了）→ 真两可，全退回（still）交成本会计，
+           每个候选带**钉钉部门**、手机尾号、打卡天数；打卡也一并带出（days），
+           由上游把每个候选写成打卡表里的一行，核对侧认成「同名待指认」。
+         （2026-09 业务定案：不按 F1 自动定人；但 0 打卡送分题、部门与归属自洽的都不塞给成本会计。）
 
     返回：hit（只含「合并账号后唯一」的人）、still（≥2 个不同的人，交成本会计）、got、rec。
     rec/still 里都列清楚：候选各是谁、部门、手机尾号、几天打卡——页面和打卡表都照原样摆出来。
@@ -531,19 +541,6 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
             scored.append((_score(w, set(days)), grp, days))
         scored.sort(key=lambda x: -x[0])
         best = scored[0]
-        # 定人只认「一眼能定、有据可查」的两类，**不靠打卡日 F1 猜**（原先甩开一倍、V2.458 近乎完美领先都作废）：
-        #   ① 合并手机号后只剩一个人（同一人的多个钉钉账号，根本不涉及在两个人里挑）；
-        #   ② 本月**只有一个候选在打卡**——另一个当月 0 打卡＝本月没来上班，不可能是报了工时的人。
-        # 都不满足（≥2 个候选**都在打卡**）才是真两可 → 交成本会计，把每个候选的钉钉部门摆出来让人按部门定。
-        # （2026-09 业务定案：不去自己认；但「一个候选当月 0 打卡」这种送分题不该塞给成本会计——那不是判断，是事实。）
-        punched = [s for s in scored if len(s[2]) > 0]      # s=(得分, 账号组, 打卡)；本月有打卡的候选
-        if len(scored) == 1:
-            chosen, why = best, "只一个候选"
-        elif len(punched) == 1:
-            chosen, why = punched[0], "本月只有这个候选在打卡（其余候选当月 0 打卡）"
-        else:
-            chosen, why = None, ""
-        ok = chosen is not None
 
         def _dept(grp):
             depts = []
@@ -552,6 +549,28 @@ def resolve_dups(dup, month, worked_days=None, progress=None, roster=None):
                     if dd and dd not in depts:
                         depts.append(dd)
             return "、".join(depts)
+
+        def _cand_agencies(grp):        # 该候选钉钉部门里的派遣方集合（「锦绣人力」→「锦绣」）
+            return {_agency_leaf(d) for d in _dept(grp).split("、") if _agency_leaf(d)}
+
+        # 定人只认「一眼能定、有据可查」的三类，**不靠打卡日 F1 猜**（原先甩开一倍、V2.458 近乎完美领先都作废）：
+        #   ① 合并手机号后只剩一个人（同一人的多个钉钉账号，根本不涉及在两个人里挑）；
+        #   ② 本月**只有一个候选在打卡**——另一个当月 0 打卡＝本月没来上班，不可能是报了工时的人；
+        #   ③ 有打卡的候选里，**恰好一个钉钉部门派遣方 = 上报归属**——两系统标签自洽，如上报「锦绣」、
+        #      钉钉也只有「锦绣人力」这一个在打卡（使用者 2026-09-06：「上报在锦绣、钉钉锦绣唯一一个打卡也该放行」）。
+        # 三条都不满足（≥2 个候选都在打卡、部门也定不了）才是真两可 → 交成本会计，按钉钉部门定。
+        punched = [s for s in scored if len(s[2]) > 0]      # s=(得分, 账号组, 打卡)；本月有打卡的候选
+        ag_rep = str((agencies or {}).get(nm) or "").strip()
+        ag_match = [s for s in punched if ag_rep and ag_rep in _cand_agencies(s[1])]
+        if len(scored) == 1:
+            chosen, why = best, "只一个候选"
+        elif len(punched) == 1:
+            chosen, why = punched[0], "本月只有这个候选在打卡（其余候选当月 0 打卡）"
+        elif len(ag_match) == 1:
+            chosen, why = ag_match[0], f"钉钉部门派遣方与上报归属一致（{ag_rep}）"
+        else:
+            chosen, why = None, ""
+        ok = chosen is not None
 
         item = {"姓名": nm, "候选人数": len(people), "钉钉账号数": len(uids),
                 "上工日数": len(w), "已定": bool(ok), "定人理由": why,
@@ -779,7 +798,7 @@ def build_punch_xlsx(month, rows, dup_rec=None):
 
 # ==================== 一条龙 ====================
 def pull_month(month, names, progress=None, roster=None, worked_days=None,
-               force_roster=False, scope="worked"):
+               force_roster=False, scope="worked", agencies=None):
     """给定期次与汇总表上的姓名清单 → 打卡表 xlsx + 对名结果。
 
     只取汇总表上有的人：全厂 1300+ 人全取要 4 万次调用，而复核只关心工资表上这些人。
@@ -806,7 +825,8 @@ def pull_month(month, names, progress=None, roster=None, worked_days=None,
     mt = match_names(names, roster)
     say(f"对上 {len(mt['唯一'])} 人｜撞名 {len(mt['撞名'])}｜查无 {len(mt['查无'])}", 38)
 
-    fixed, still, cached, rec = resolve_dups(mt["撞名"], month, worked_days, say, roster=roster)
+    fixed, still, cached, rec = resolve_dups(mt["撞名"], month, worked_days, say,
+                                             roster=roster, agencies=agencies)
 
     uids = sorted(set(mt["唯一"].values()))
     if scope == "worked":

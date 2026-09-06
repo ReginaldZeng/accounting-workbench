@@ -517,8 +517,49 @@ class TestDupResolveTempVsRegular(unittest.TestCase):
         self.assertEqual(still, {})
         self.assertIn("0 打卡", rec[0]["定人理由"])
 
+    def test_dept_matches_agency_auto_picks_it(self):
+        # 上报归属=锦绣；俩候选都在打卡，但只有一个钉钉部门是锦绣人力 → 放行认它（两系统标签自洽）
+        from kernels import dingtalk_attendance as dta
+        JX, HS = "jinxiu_uid", "huashun_uid"
+        worked = set(range(1, 23))
+        punch = {JX: {d: [480, 1080] for d in worked},          # 都在打卡
+                 HS: {d: [480, 1080] for d in range(1, 30)}}
+        roster = {JX: {"部门": ["…-临时普工-锦绣人力"]}, HS: {"部门": ["…-临时普工-华顺人力"]}}
+        _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
+        dta.fetch_mobiles = lambda cands: {JX: "13800000001", HS: "13800000002"}
+        dta.fetch_punches = lambda jobs, progress=None: punch
+        try:
+            hit, still, _g, rec = dta.resolve_dups(
+                {"甲": [JX, HS]}, "2026-08", worked_days={"甲": worked},
+                roster=roster, agencies={"甲": "锦绣"})
+        finally:
+            dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
+        self.assertIn("甲", hit)
+        self.assertEqual(hit["甲"]["账号"], [JX])         # 认钉钉锦绣人力那个
+        self.assertEqual(still, {})
+        self.assertIn("锦绣", rec[0]["定人理由"])
+
+    def test_dept_ambiguous_within_same_agency_still_manual(self):
+        # 俩候选都在打卡、且都是锦绣人力 → 部门也定不了 → 真两可，交人工
+        from kernels import dingtalk_attendance as dta
+        A, B = "uidA", "uidB"
+        worked = set(range(1, 23))
+        punch = {A: {d: [480, 1080] for d in worked}, B: {d: [480, 1080] for d in worked}}
+        roster = {A: {"部门": ["…-临时普工-锦绣人力"]}, B: {"部门": ["…-临时普工-锦绣人力"]}}
+        _fm, _fp = dta.fetch_mobiles, dta.fetch_punches
+        dta.fetch_mobiles = lambda cands: {A: "13800000001", B: "13800000002"}
+        dta.fetch_punches = lambda jobs, progress=None: punch
+        try:
+            hit, still, _g, _r = dta.resolve_dups(
+                {"甲": [A, B]}, "2026-08", worked_days={"甲": worked},
+                roster=roster, agencies={"甲": "锦绣"})
+        finally:
+            dta.fetch_mobiles, dta.fetch_punches = _fm, _fp
+        self.assertNotIn("甲", hit)          # 两个都锦绣 → 归属定不了 → 交人工
+        self.assertIn("甲", still)
+
     def test_two_equally_good_candidates_still_go_manual(self):
-        # 两个候选都在打卡 → 真两可，交人工（部门摆出来让成本会计定）
+        # 两个候选都在打卡、部门也定不了 → 真两可，交人工（部门摆出来让成本会计定）
         from kernels import dingtalk_attendance as dta
         A, B = "uidA", "uidB"
         worked = set(range(1, 23))

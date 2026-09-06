@@ -681,6 +681,10 @@ export default function TempAttendance() {
             </div>
           </div>}
 
+        {/* 同名待指认在这一页（④结算风险）处理：所有「定人」都在结算风险页，不在取数/总览页。 */}
+        {has && RISK_CARD_STEPS.includes(step) && st?.待指认人数 > 0 &&
+          <AmbigTable rows={st.待人工指认 || []} n={st.待指认人数} />}
+
         {/* 认定弹层：理由必填——将来翻这份底稿的人要知道当时为什么认为它不是问题 */}
         {ackAsk && ACK_STEPS.includes(step) && <div className="ta-ackmask"
           onClick={e => { if (e.target === e.currentTarget && !busy) { setAckAsk(null); setAckWhy('') } }}>
@@ -971,8 +975,10 @@ export default function TempAttendance() {
             title={`${st.偏离未计价人数} 人结算表上没有单价、合同价也没登记，偏离金额按 0 计（工时差异仍照算）：`}
             items={(st.偏离未计价 || []).map(x => `${x.姓名}（${x.归属 || '无归属'}·${x.岗位}）——${x.原因}`)} />}
 
-          {/* 同名待指认单独摆一张清爽的表（下方 AmbigTable），别塞进这条 Note 挤成一长段没人看。 */}
-          {st.待指认人数 > 0 && <AmbigTable rows={st.待人工指认 || []} n={st.待指认人数} />}
+          {/* 同名待指认的「定人」挪到第④步结算风险页处理（所有认定都在那儿）；总览只留一句指路，不在这处理。 */}
+          {st.待指认人数 > 0 && <div className="warn" style={{ marginTop: 8, fontSize: 12.5, lineHeight: 1.9 }}>
+            ◇ <b>{st.待指认人数} 人</b>同名待指认（都在打卡、部门也分不清的真两可）——到<b>第④步「结算风险」</b>页按钉钉部门定人。
+          </div>}
 
           {(st.白夜混合人数 > 0 || st.未匹配人数 > 0 || (st.打卡表重名 || []).length > 0) &&
             <Note tone="warn" title="下面这些工具不猜，请人工确认：" items={[
@@ -2233,8 +2239,8 @@ function DupReview({ rec, merged }) {
     </div>
     <div style={{ marginTop: 4 }}>
       {待定.length
-        ? <span className="warn">⚠ {待定.length} 组是不同的人撞名、且都在打卡，工具不猜——请按下表<b>钉钉部门</b>定谁是临时工
-          （「临时普工-…人力」才是；「销售/研发/品牌…中心」是正式工）。这些人本期判「同名待指认」，定人后再谈工时。</span>
+        ? <span className="warn">⚠ {待定.length} 组是不同的人撞名、且都在打卡，工具不猜——<b>到第④步「结算风险」页按钉钉部门定人</b>，不在这页处理。
+          这里只是取数底稿，展开可先核一眼。</span>
         : <span>其余都一眼能定（同一人多账号／对方当月 0 打卡），已自动定人，无需人工。</span>}
       <span style={{ color: 'var(--ink-3)' }}>　同一份底稿也在打卡表的第二页里，可打印存档。</span>
     </div>
