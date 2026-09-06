@@ -467,10 +467,14 @@ export default function TempAttendance() {
   const has = !!st
   // 「仅不一致」＝**真要查的那两档**：打卡撑不起上报、报了工时却没打卡。
   // ◇未计工时 / ◇白夜混合 是中性档，不该混进来（否则 6 月一点就是 1,271 行）
-  const rows = (res?.rows || []).filter(r => (filter === 'all' ? true
-    : filter === 'issue' ? ['over_out', 'hard'].includes(r.档) : r.档 === filter)
-    && (!df.dept || r.部门 === df.dept) && (!df.agency || r.归属 === df.agency)
-    && (!df.name || String(r.姓名 || '').includes(df.name.trim())))
+  // 先按「派遣方/部门/姓名」筛一遍（df）——KPI 卡片和表格都在这个子集上算，卡片跟着筛选联动
+  const _dfMatch = r => (!df.dept || r.部门 === df.dept) && (!df.agency || r.归属 === df.agency)
+    && (!df.name || String(r.姓名 || '').includes(df.name.trim()))
+  const dfRows = (res?.rows || []).filter(_dfMatch)
+  // 「只看异常」＝撑不起上报 + 报了工时无打卡 + 同名待指认（都是要处理的），比原来的「仅不一致」多带待指认
+  const _isBad = c => ['over_out', 'hard', 'ambig'].includes(c)
+  const rows = dfRows.filter(r => filter === 'all' ? true
+    : filter === 'issue' ? _isBad(r.档) : r.档 === filter)
   const pickFilter = k => { setFilter(k); setPgRow(v => ({ ...v, page: 1 })) }
   // 逐日明细里可认定的行（撑不起/待查/仅1次卡），键＝姓名|日；批量选中集按此算
   const dConf = r => ['over_out', 'hard', 'thin'].includes(r.档)
@@ -486,13 +490,17 @@ export default function TempAttendance() {
     if (ok) { setRowSel({}); setRowWhy('') }
   }
   // 每档各有多少条，直接印在筛选钮上——不然得逐个点开才知道哪档有货、哪档是空的
+  // KPI 卡片计数：在「派遣方/部门/姓名」筛过的子集上算，跟着筛选联动（选了锦绣，卡片就都是锦绣的数）
   const bandCount = React.useMemo(() => {
     const c = {}
-    for (const r of (res?.rows || [])) c[r.档] = (c[r.档] || 0) + 1
-    c.all = (res?.rows || []).length
-    c.issue = (c.over_out || 0) + (c.hard || 0)
+    const src = (res?.rows || []).filter(r =>
+      (!df.dept || r.部门 === df.dept) && (!df.agency || r.归属 === df.agency)
+      && (!df.name || String(r.姓名 || '').includes(df.name.trim())))
+    for (const r of src) c[r.档] = (c[r.档] || 0) + 1
+    c.all = src.length
+    c.issue = (c.over_out || 0) + (c.hard || 0) + (c.ambig || 0)   // 只看异常＝撑不起+无打卡+待指认
     return c
-  }, [res])
+  }, [res, df.dept, df.agency, df.name])
   // 第⑥步逐日那张表的「金额」＝ 差异 × 单价。单价是**这个人结算表上实际套用的价**（公司就是按它付的），
   // 所以这个人的单价要是跟合同价对不上，这一列的钱也跟着错。把「谁的单价不符」传下去，逐日行才标得出来。
   const 单价不符者 = new Set((res?.people || [])
@@ -1034,7 +1042,7 @@ export default function TempAttendance() {
 
           <div style={{ display: 'flex', gap: 10 }}>
             <button className="btn" onClick={() => setStep('people')}>看逐人核对 →</button>
-            <button className="btn" onClick={() => { pickFilter('issue'); setStep('daily') }}>只看不一致的日次 →</button>
+            <button className="btn" onClick={() => { pickFilter('issue'); setStep('daily') }}>只看异常的日次 →</button>
           </div>
         </>}
 
@@ -1114,8 +1122,8 @@ export default function TempAttendance() {
           <PeopleFilter people={res.rows || []} pf={df}
                         on={v => { setDf(v); setPgRow(x => ({ ...x, page: 1 })) }}
                         shown={rows.length} total={(res.rows || []).length} unit="人日"
-                        extra={[['all', '全部'], ['issue', '仅不一致'], ['over_out', '⚠撑不起上报'],
-                                ['hard', '⚠报了工时无打卡'], ['unbilled', '◇未计工时'],
+                        extra={[['all', '全部'], ['issue', '⚠只看异常'], ['over_out', '⚠撑不起上报'],
+                                ['hard', '⚠报了工时无打卡'], ['ambig', '◇同名待指认'], ['unbilled', '◇未计工时'],
                                 ['thin', '△仅1次卡'], ['mixed', '◇白夜混合'], ['ok', '✓撑得住']]
                           .filter(([k]) => k === 'all' || k === 'issue' || (bandCount[k] || 0) > 0)
                           .map(([k, l]) =>
@@ -2075,16 +2083,16 @@ function PeopleFilter({ people, pf, on, shown, total, sum, showBad, unit = '人'
   return (
     <div className="card ta-filter">
       <div className="row">
-        <label>部门
-          <select value={pf.dept} onChange={e => on1('dept', e.target.value)}>
-            <option value="">全部</option>
-            {uniq('部门').map(v => <option key={v} value={v}>{v}</option>)}
-          </select>
-        </label>
         <label>归属（派遣方）
           <select value={pf.agency} onChange={e => on1('agency', e.target.value)}>
             <option value="">全部</option>
             {uniq('归属').map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+        </label>
+        <label>部门
+          <select value={pf.dept} onChange={e => on1('dept', e.target.value)}>
+            <option value="">全部</option>
+            {uniq('部门').map(v => <option key={v} value={v}>{v}</option>)}
           </select>
         </label>
         <label>姓名
