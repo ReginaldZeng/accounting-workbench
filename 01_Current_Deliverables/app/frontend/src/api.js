@@ -305,6 +305,8 @@ export const bomApplyGoods = (entryId) => jp('/api/bom/apply-goods', { entryId }
 export const bomClassify = (entryId, category, quotable, reason, confirmObsolete = false, parallelLink = false) =>
   jp('/api/bom/classify', { entryId, category, quotable, reason, confirmObsolete, parallelLink })
 export const bomLinkParallel = (entryId, otherId, on = true) => jp('/api/bom/link-parallel', { entryId, otherId, on })
+// 主管理员密钥删除（真删）：target = {entryId} | {groupId, approvalNo} | {approvalNo}；dryRun 只回影响面。密钥在服务器 conf.ini [bom] delete_key
+export const bomDelete = (target, key, reason, dryRun = false) => jp('/api/bom/delete', { ...target, key, reason, dryRun })
 export const getBomApproval = (no) => j('/api/bom/approval?no=' + encodeURIComponent(no))
 export const bomIntake = (approvalNo) => jp('/api/bom/intake', { approvalNo })
 export const bomFinalReview = (entryId, approve, note) => jp('/api/bom/final-review', { entryId, approve, note })

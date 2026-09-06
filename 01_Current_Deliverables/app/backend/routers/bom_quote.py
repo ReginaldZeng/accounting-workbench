@@ -2268,6 +2268,113 @@ async def bom_finalize(request: Request):
             "affectedPricing": affected}
 
 
+# ============ 主管理员密钥删除（业务方定 2026-09-06：「主管理员要配一个删除的入口，密钥确认」「待办也是」）============
+# 作废＝标记不删（既有，给成本会计/财务BP）；这里是**真删**，只给主管理员，且每次要带密钥：
+#   密钥＝服务器 conf.ini `[bom] delete_key`（凭据不进代码不进文档；**未配置＝通道整个关闭**，不是默认放行，同取件令牌口径）。
+# 范围三选一：entryId 单条 / groupId+approvalNo 整组（含被替换旧版）/ approvalNo 整单（全部组 + 待修批次）。
+# dryRun=true 只回影响面。记录自身的留痕随记录一起删，故**全局 audit 必记** bom_delete（谁、删了什么、理由）。
+def _delete_key():
+    try:
+        import configparser
+        import kingdee_client as _kc
+        c = configparser.ConfigParser()
+        c.read(_kc.conf_path(), encoding="utf-8")
+        k = (c.get("bom", "delete_key", fallback="") or "").strip()
+        return k if k.isascii() else ""
+    except Exception:
+        return ""
+
+
+def _delete_targets(src, body):
+    """→ (entries, pendings, label)。entries 含 active=0 的被替换/作废版（整组/整单时一并删干净）。"""
+    eid = body.get("entryId")
+    gid = str(body.get("groupId") or "").strip()
+    appno = str(body.get("approvalNo") or "").strip()
+    if eid:
+        e = db.bom_get_entry(eid)
+        return ([e] if e and e.get("source") == src else []), [], "记录 #%s" % eid
+    if gid:
+        ents = db.bom_group_entries(src, gid, include_superseded=True)
+        pend = [p for p in db.bom_pending_list(src, appno or None) if p.get("group_id") == gid]
+        return ents, pend, "组 %s" % gid[:8]
+    if appno:
+        ents = [x for x in db.bom_list_entries(src, include_superseded=True) if (x.get("approval_no") or "") == appno]
+        return ents, db.bom_pending_list(src, appno), "钉钉单 %s" % appno
+    return [], [], ""
+
+
+def _delete_impact(src, ents, pend):
+    ids = {e["id"] for e in ents}
+    names = {(e.get("product_name") or "").strip() for e in ents} - {""}
+    others = [x for x in db.bom_list_entries(src) if x["id"] not in ids]
+    dependents = [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "productName": (x.get("product_name") or "").strip(),
+                   "uses": sorted({(m.get("matName") or "").strip() for m in (x.get("materials") or []) if (m.get("matName") or "").strip() in names})}
+                  for x in others if any((m.get("matName") or "").strip() in names for m in (x.get("materials") or []))]
+    restored = [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip()} for x in others if x.get("obsolete_by") in ids]
+    vgs = {(e.get("variant_group") or "").strip() for e in ents} - {""}
+    variants = [{"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip()} for x in others if (x.get("variant_group") or "").strip() in vgs]
+    pdir = os.path.join(UPLOAD_DIR, src)
+    files = 0
+    if os.path.isdir(pdir):
+        files = sum(1 for fn in os.listdir(pdir) if any(fn.startswith("%d__" % i) for i in ids))
+    finals = db.bom_finals(src)
+    return {"entries": [{"entryId": e["id"], "cpCode": (e.get("cp_code") or "").strip(), "productName": (e.get("product_name") or "").strip(),
+                         "status": e.get("status") or "", "active": e.get("active") in (1, None), "isFinal": finals.get(e.get("product_key")) == e["id"],
+                         "public": e.get("status") == "已审核" and e.get("active") in (1, None), "approvalNo": e.get("approval_no") or ""} for e in ents],
+            "pendings": [{"approvalNo": p.get("approval_no"), "groupId": (p.get("group_id") or "")[:8], "products": [r.get("productName") for r in (p.get("reasons") or [])]} for p in pend],
+            "dependents": dependents, "restored": restored, "variants": variants, "files": files,
+            "publicCount": sum(1 for e in ents if e.get("status") == "已审核" and e.get("active") in (1, None))}
+
+
+@router.post("/api/bom/delete")
+async def bom_delete(request: Request):
+    """主管理员密钥删除（真删）。body: {entryId | groupId+approvalNo | approvalNo, key, reason, dryRun}。"""
+    u = _current_user(request)
+    if not u or not db.is_super(u):
+        return JSONResponse({"ok": False, "msg": "只有主管理员能删除；成本会计请走「申请作废」"}, status_code=403)
+    body = await request.json()
+    src = _src()
+    ents, pend, label = _delete_targets(src, body)
+    if not ents and not pend:
+        return JSONResponse({"ok": False, "msg": "没有可删的对象（记录/组/单号不存在）"}, status_code=404)
+    impact = _delete_impact(src, ents, pend)
+    if body.get("dryRun"):
+        return {"ok": True, "dryRun": True, "label": label, "impact": impact, "keyConfigured": bool(_delete_key())}
+    want = _delete_key()
+    if not want:
+        return JSONResponse({"ok": False, "msg": "服务器未配置删除密钥（conf.ini [bom] delete_key），删除通道关闭"}, status_code=403)
+    import hmac
+    if not hmac.compare_digest(str(body.get("key") or ""), want):
+        db.audit(u["name"], "bom_delete_denied", target=label, detail="密钥错误")
+        return JSONResponse({"ok": False, "msg": "密钥不对"}, status_code=403)
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        return JSONResponse({"ok": False, "msg": "请写删除理由（留全局审计）"}, status_code=400)
+    pdir = os.path.join(UPLOAD_DIR, src)
+    removed_files = 0
+    for e in ents:
+        db.bom_clear_obsolete_by(e["id"])                          # 它替代过的旧版恢复
+        db.bom_clear_final_if(src, e.get("product_key"), e["id"])
+        if os.path.isdir(pdir):
+            for fn in os.listdir(pdir):
+                if fn.startswith("%d__" % e["id"]):
+                    try:
+                        os.remove(os.path.join(pdir, fn)); removed_files += 1
+                    except OSError:
+                        pass
+        db.bom_delete_entry(e["id"])
+    for vg in {(e.get("variant_group") or "").strip() for e in ents} - {""}:   # 并行组只剩一条 → 清
+        rest = db.bom_variant_members(src, vg)
+        if len(rest) == 1:
+            db.bom_set_variant_group([rest[0]["id"]], None)
+    for p in pend:
+        db.bom_pending_clear(src, p.get("approval_no") or "", p.get("group_id") or "")
+    detail = "%s · 记录 %d 条[%s] · 待修 %d · 文件 %d · 对外版 %d · 理由：%s" % (
+        label, len(ents), ",".join("%s#%d" % ((e.get("cp_code") or "").strip(), e["id"]) for e in ents)[:300], len(pend), removed_files, impact["publicCount"], reason[:200])
+    db.audit(u["name"], "bom_delete", target=label, detail=detail)
+    return {"ok": True, "msg": "已删除：%s（记录 %d 条、待修 %d、留档文件 %d）" % (label, len(ents), len(pend), removed_files), "deleted": len(ents), "pendings": len(pend)}
+
+
 @router.post("/api/bom/link-parallel")
 async def bom_link_parallel(request: Request):
     """把两条记录标为**并行关联**（同一产品的不同版本/包装，都对外、互不替代）或解除。CAP_AUDIT。

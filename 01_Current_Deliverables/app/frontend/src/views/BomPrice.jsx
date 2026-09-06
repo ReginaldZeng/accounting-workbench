@@ -8,7 +8,7 @@ import {
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
-  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom,
+  bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
   getBomInvoiceRules, setBomInvoiceRules,
 } from '../api.js'
 
@@ -311,6 +311,9 @@ function BomLedgerView({ user, mode = 'std' }) {
   const [manual, setManual] = useState(false)
   const [curAppr, setCurAppr] = useState('')    // 当前处理的钉钉单号
   const [finalRow, setFinalRow] = useState(null)   // 财务BP终审弹窗目标
+  // 主管理员密钥删除（V2.459）：{target:{entryId|groupId+approvalNo|approvalNo}, label, after} —— 待办/处理页/详情三处入口共用一个弹窗
+  const [delM, setDelM] = useState(null)
+  const isSuper = user?.role === 'admin'
 
   const load = useCallback(async () => {
     setLoading(true); setErr('')
@@ -365,12 +368,17 @@ function BomLedgerView({ user, mode = 'std' }) {
     <div className="bomv">
       {view === 'list' && <Ledger data={data} cfg={cfg} mode={mode} onOpen={openDetail} onManual={() => setManual(true)}
         onApproval={openApproval} onRefresh={load} flash={flash}
-        onFinalReview={data?.canFinalReview ? setFinalRow : null} />}
+        onFinalReview={data?.canFinalReview ? setFinalRow : null}
+        isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: load })} />}
       {view === 'approval' && <ApprovalView no={curAppr} cfg={cfg} onBack={() => { setCurAppr(''); backToList() }}
-        onOpen={openDetail} flash={flash} />}
+        onOpen={openDetail} flash={flash}
+        isSuper={isSuper} onDelete={(target, label, after) => setDelM({ target, label, after })} />}
       {view === 'detail' && entry && <Detail entry={entry} all={data.all} cfg={cfg} mode={mode} onBack={backFromDetail}
         onOpen={openDetail} onCompare={openCompare} onChanged={async () => { const r = await getBomEntry(curId); setEntry(r.entry); load() }}
-        flash={flash} />}
+        flash={flash}
+        isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: backFromDetail })} />}
+      {delM && <DeleteModal target={delM.target} label={delM.label} flash={flash} onClose={() => setDelM(null)}
+        onDone={async () => { const f = delM.after; setDelM(null); if (f) await f() }} />}
       {view === 'compare' && entry && <Compare entry={entry} all={data.all} onBack={() => setView('detail')} flash={flash} />}
       {manual && <IntakeModal cfg={cfg} onClose={() => setManual(false)} flash={flash}
         onDone={(no) => { setManual(false); load(); openApproval(no) }} />}
@@ -382,7 +390,7 @@ function BomLedgerView({ user, mode = 'std' }) {
 }
 
 // ============ 台账列表 ============
-function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, onRefresh, flash }) {
+function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, onRefresh, flash, isSuper, onDelete }) {
   const isStd = mode === 'std'
   const [ftype, setFtype] = useState('all')     // all | fin | semi
   const [fch, setFch] = useState('all')         // all | ecom | common | tob | toc
@@ -570,7 +578,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
                       : (a.blocked > 0 ? <span className="tag werr">待修 {a.blocked}</span> : <span className="tag ok">全部已初审 · 已完成</span>)}
                       {a.finalized > 0 && a.pending > 0 && <span className="tag ok" style={{ marginLeft: 4 }}>已初审 {a.finalized}</span>}
                       {a.blocked > 0 && a.pending > 0 && <span className="tag late" style={{ marginLeft: 4 }}>待修 {a.blocked}</span>}</td>
-                    <td><a className="lk" onClick={e => { e.stopPropagation(); onApproval(a.approvalNo) }}>进入处理 ›</a></td>
+                    <td style={{ whiteSpace: 'nowrap' }}><a className="lk" onClick={e => { e.stopPropagation(); onApproval(a.approvalNo) }}>进入处理 ›</a>
+                      {isSuper && onDelete && a.approvalNo && <a className="lk" style={{ marginLeft: 10, color: 'var(--red)' }} title="主管理员：整单永久删除（需密钥）"
+                        onClick={e => { e.stopPropagation(); onDelete({ approvalNo: a.approvalNo }, `钉钉单 ${a.approvalNo}（${a.productCount} 个产品，${a.groupCount} 组）`) }}>删除</a>}</td>
                   </tr>))}
               </tbody>
             </table>
@@ -643,7 +653,7 @@ function ChainStrip({ products }) {
 
 // ============ 处理页：一个钉钉单号 → 若干「组」（一个核算表文件=一组）============
 // 组内：当前版产品（成品/半成品/复配料）+ 各自 BOM 校验 + 可替换组内文件（重连钉钉/手动上传）+ 被替换旧版留痕。
-function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
+function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
   const [d, setD] = useState(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
@@ -701,6 +711,9 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn-sec" onClick={onBack}>返回待办</button>
           <button className="btn-sec" onClick={load}>⟳ 刷新</button>
+          {isSuper && onDelete && no && <button className="btn-sec" style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+            title="主管理员：删除本单全部组、记录、待修批次与留档文件（需密钥，留全局审计）"
+            onClick={() => onDelete({ approvalNo: no }, `钉钉单 ${no}（整单）`, onBack)}>🗑 删除整单</button>}
         </div>
       </div>
       <div className="body">
@@ -820,6 +833,9 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
                 {busy === g.groupId + ':dt' ? '重拉中…' : '⟳ 重连钉钉替换'}</button>
               <label className="bom-minifile pri">{busy === g.groupId + ':up' ? '上传中…' : '⬆ 上传替换核算表'}
                 <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => doUpload(g.groupId, e.target.files)} /></label>
+              {isSuper && onDelete && <button className="btn-sec" style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+                title="主管理员：删除本组全部记录（含被替换旧版）与留档文件（需密钥）"
+                onClick={() => onDelete({ groupId: g.groupId, approvalNo: no }, `组 ${g.groupId.slice(0, 8)} · ${(g.products || []).map(p => p.productName).join('、')}`, load)}>🗑 删除本组</button>}
             </div>}
 
             {/* 被替换留痕 */}
@@ -863,7 +879,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash }) {
 }
 
 // ============ 核算表详情 ============
-function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, flash }) {
+function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, flash, isSuper, onDelete }) {
   const isStd = mode === 'std'
   const [edit, setEdit] = useState(false)
   const [fee, setFee] = useState(entry.fee)
@@ -1002,6 +1018,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           {!edit && entry.voidPending && cfg?.canFinalReview &&
             <button className="btn-pri" style={{ background: 'var(--red)', borderColor: 'var(--red)' }}
               onClick={() => setVoidM('review')}>⌦ 作废终审（有待批准）</button>}
+          {/* 主管理员密钥删除（V2.459）：真删本条记录 + 留档文件；作废仍是标记。密钥在服务器 conf.ini，未配置则通道关闭 */}
+          {!edit && isSuper && onDelete && <button className="btn-sec" style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+            title="主管理员：永久删除本条记录（需密钥；留全局审计）" onClick={() => onDelete({ entryId: entry.id }, `记录 #${entry.id} · ${entry.cpCode} ${entry.productName}`)}>🗑 删除</button>}
         </div>
       </div>
       <div className="body">
@@ -2112,6 +2131,73 @@ function FullCompare({ A, B, matOf }) {
 // ============ 作废：申请 / 终审批准（业务方定 2026-09-04）============
 // 作废＝**标记**不是删除：记录留着、留痕，只是退出工作区与标准成本库。
 // 两步走防一人闭环：成本会计**申请**（理由必填）→ 财务经理**批准**才真作废；申请人不得自批。
+// ============ 主管理员密钥删除弹窗（V2.459）============
+// 先 dryRun 拿影响面（会删哪些记录/待修/文件、谁的上游会断、谁会恢复、并行组变化），再要理由 + 密钥才真删。
+function DeleteModal({ target, label, onClose, onDone, flash }) {
+  const [imp, setImp] = useState(null)
+  const [err, setErr] = useState('')
+  const [reason, setReason] = useState('')
+  const [key, setKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
+  useEffect(() => { bomDelete(target, '', '', true).then(r => { if (r.ok) setImp(r); else setErr(r.msg || '取影响面失败') }).catch(e => setErr(e.message)) }, [])
+  const go = async () => {
+    if (!reason.trim()) return flash('请写删除理由')
+    if (!key) return flash('请输入删除密钥')
+    if (!window.confirm(`永久删除：${label}\n\n记录 ${imp?.impact?.entries?.length || 0} 条、待修 ${imp?.impact?.pendings?.length || 0}、留档文件 ${imp?.impact?.files || 0}。\n此操作不可恢复，确定？`)) return
+    setBusy(true)
+    try {
+      const r = await bomDelete(target, key, reason.trim())
+      if (!r.ok) return flash(r.msg || '删除失败')
+      flash(r.msg); await onDone()
+    } catch (e) { flash('删除失败：' + e.message) } finally { setBusy(false) }
+  }
+  const I = imp?.impact
+  return (
+    <div className="bom-mask" onClick={e => { if (e.target.classList.contains('bom-mask')) onClose() }}>
+      <div className="bom-modal" style={{ width: 'min(760px,100%)' }}>
+        <div className="bom-mhead"><b style={{ color: 'var(--red)' }}>🗑 永久删除 · {label}</b><span className="bom-x" onClick={onClose}>✕</span></div>
+        <div className="bom-msub">主管理员专用。<b>作废是标记不删</b>，这里是真删：记录、留痕、定稿指针、留档文件一起清，只在全局审计留一条「谁删了什么、为什么」。</div>
+        {err && <div className="banner err" style={{ marginBottom: 10 }}>{err}</div>}
+        {!imp && !err && <div className="loading" style={{ padding: 16 }}>计算影响面…</div>}
+        {I && <>
+          {imp.keyConfigured === false && <div className="banner err" style={{ display: 'block', marginBottom: 10 }}>服务器未配置删除密钥（conf.ini <span className="k">[bom] delete_key</span>），删除通道关闭。配好后再来。</div>}
+          <div style={{ maxHeight: '46vh', overflowY: 'auto' }}>
+            <b style={{ fontSize: 12 }}>将删除记录 {I.entries.length} 条{I.publicCount ? <span style={{ color: 'var(--red)' }}>（含 {I.publicCount} 条已审核·对外版！BP 那边会少掉这些成本）</span> : ''}</b>
+            <div className="tbl-wrap" style={{ margin: '4px 0 8px' }}>
+              <table className="bom-ledger" style={{ fontSize: 12 }}>
+                <thead><tr><th className="th">#</th><th className="th">CP码</th><th className="th">产品</th><th className="th">状态</th><th className="th">钉钉单</th></tr></thead>
+                <tbody>{I.entries.map(e => (
+                  <tr key={e.entryId}><td className="mono sub">{e.entryId}</td><td className="mono">{e.cpCode}</td><td>{e.productName}</td>
+                    <td><span className={'tag ' + (e.public ? 'ok' : (e.active ? 'late' : 'unmap'))}>{e.status}{!e.active ? '·已退出' : ''}{e.isFinal ? '·定稿' : ''}</span></td>
+                    <td className="sub">{e.approvalNo}</td></tr>))}</tbody>
+              </table>
+            </div>
+            {I.pendings.length > 0 && <div style={{ fontSize: 12, marginBottom: 6 }}><b>待修批次 {I.pendings.length} 个</b>：{I.pendings.map((p, i) => <span key={i}>{i ? '；' : ''}{(p.products || []).join('、') || p.groupId}</span>)}</div>}
+            <div style={{ fontSize: 12, marginBottom: 6 }}><b>留档源文件</b> {I.files} 个一并删除（钉钉里的原件不受影响，可重新立项拉回）。</div>
+            {I.dependents.length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 6, fontSize: 12 }}>
+              ⚠ <b>{I.dependents.length} 条其它记录把它当上游</b>（半成品/复配料被引用）：{I.dependents.map(d => `${d.cpCode} ${d.productName}（用 ${d.uses.join('、')}）`).join('；')}。删掉后它们的上游链路会显示「台账里无此上游」，不影响其成本数字。</div>}
+            {I.restored.length > 0 && <div style={{ fontSize: 12, marginBottom: 6 }}>⇄ 被它替代而失效的旧版将<b>恢复为当前版</b>：{I.restored.map(x => x.cpCode).join('、')}</div>}
+            {I.variants.length > 0 && <div style={{ fontSize: 12, marginBottom: 6 }}>⇉ 并行组里的其它版本保留：{I.variants.map(x => x.cpCode).join('、')}（组内只剩一条时自动解除并行标记）</div>}
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <b style={{ fontSize: 12 }}>删除理由（必填，进全局审计）</b>
+            <textarea className="bom-ta" rows={2} value={reason} onChange={e => setReason(e.target.value)} placeholder="如：测试数据 / 重复立项 / 研发撤回该单" style={{ marginTop: 4 }} />
+          </div>
+          <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <b style={{ fontSize: 12, whiteSpace: 'nowrap' }}>删除密钥</b>
+            <input className="bom-feeinp" type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} placeholder="服务器 conf.ini 里配的密钥" style={{ width: 260 }} />
+          </div>
+        </>}
+        <div className="bom-mfoot">
+          <button className="btn-sec" onClick={onClose}>取消</button>
+          <button className="btn-pri" disabled={busy || !I || imp?.keyConfigured === false} style={{ background: 'var(--red)', borderColor: 'var(--red)' }} onClick={go}>{busy ? '删除中…' : '永久删除'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function VoidModal({ target, mode, onClose, onDone, flash }) {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
