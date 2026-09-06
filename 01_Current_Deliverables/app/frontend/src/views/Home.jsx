@@ -1,10 +1,16 @@
-// [Change Log] Date:2026-09-06 Author:Claude/Reginald Zeng Version:V2.488
+// [Change Log] Date:2026-09-06 Author:Claude/Reginald Zeng Version:V2.500
 // 核算工作台首页（轻量落地页，参照 BP 工作台 Home）。进核算工作台先落这里，别一进来就落在「对账程序」
 // 那种会取数的重页上。**本页刻意不发任何业务请求**：问候/期间来自已在内存的全局态（cfg），板块卡片来自
 // 侧栏同一份 navDef+mods（App 早已拉好），点开具体板块时才真正取数。
 // 卡片三态（与侧栏口径一致）：① 可用=正常可点；② 未上线=灰显+状态字（模块开关没开）；
 //   ③ 🔒无权限=灰显+锁（模块开着但这个账号没准入点）。全部展示、不过滤——让人知道有这么个板块可去申请。
+// V2.500（业务方：首页只留真的工具）：首页是「工具」落地页，不摆配置页。基础数据/基础资料/基础设置/系统设置
+//   这类维表·配置叶子从卡片里剔掉（侧栏仍可达）；一览计数同口径，不含配置页。
 import React from 'react'
+
+// 配置/维表叶子（非「工具」）：按 key 认（改名也挡得住）＋按标签兜底（将来新增的同类也挡得住）。
+const _CFG_KEYS = new Set(['basicdata', 'settings', 'logibase', 'clwh', 'bomconfig', 'ecombase'])
+const isConfigLeaf = m => _CFG_KEYS.has(m.key) || /^(基础(数据|资料|设置)|系统设置)$/.test(m.label || '')
 
 // 一句话板块说明（财务白话，只给主力叶子；缺省回退空）
 const HINT = {
@@ -117,9 +123,9 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
   const permOf = m => (!m.cap || hasCap(m.cap)) && (!m.act || hasCap(m.act))
   const onOf = k => !mods || mods[k]?.['可进入'] !== false
   const statusOf = k => mods?.[k]?.status || ''
-  // 叶子＝非纯分组的模块（含挂在分组父项下的三级）；按 section 归组
+  // 叶子＝非纯分组的模块（含挂在分组父项下的三级）；按 section 归组。配置/维表叶子不进首页。
   const leavesOf = secKey => modules
-    .filter(m => m.sec === secKey && !m.group_only)
+    .filter(m => m.sec === secKey && !m.group_only && !isConfigLeaf(m))
     .sort((a, b) => (a.order || 0) - (b.order || 0))
 
   const stateOf = m => {
@@ -128,9 +134,9 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
     return 'can'                           // 可用
   }
 
-  // 一览计数（全部叶子）
+  // 一览计数（全部工具叶子，不含配置页——与卡片同口径）
   let nCan = 0, nSoon = 0, nLock = 0
-  modules.filter(m => !m.group_only).forEach(m => {
+  modules.filter(m => !m.group_only && !isConfigLeaf(m)).forEach(m => {
     const s = stateOf(m)
     if (s === 'can') nCan++; else if (s === 'lock') nLock++; else nSoon++
   })

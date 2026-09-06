@@ -1455,6 +1455,18 @@ def _portal_acceptance_rows(u):
     sat = db.rating_summary()
     mine = db.my_ratings(u["name"])
     ubb = ops.board_usage(days=7, detail=False)
+    # 业务板块（二级分组）：核算卡按其 mods 映到工作台侧栏的板块（报表/总账/应付/成本/应收/其它）；非核算→None（按组平铺）
+    sec_label = {s["key"]: s["label"] for s in _all_sections()}
+    mod_sec = {m["key"]: m.get("sec") for m in _all_modules()}
+
+    def _board_of(t):
+        if t.get("lane") != "accounting":
+            return None
+        for k in (t.get("mods") or []):
+            sec = mod_sec.get(k)
+            if sec and sec != "common":          # 通用（基础数据/系统设置）不算业务板块
+                return sec_label.get(sec, sec)
+        return None
     rows = []
     for t in tools:
         tid = t["id"]
@@ -1464,6 +1476,7 @@ def _portal_acceptance_rows(u):
         uc, ua = _portal_tool_usage(t, ubb)
         rows.append({
             "id": tid, "lane": t.get("lane"), "name": t.get("name"),
+            "board": _board_of(t),
             "status": t.get("status"), "statusLabel": _PORTAL_ST_LABEL.get(t.get("status"), t.get("status")),
             "descr": t.get("desc") or "",
             "task": ({"assignee": task.get("assignee", ""), "status": task.get("status", ""),
@@ -1484,7 +1497,10 @@ def api_portal_acceptance(request: Request):
     is_admin = db.can_admin_accounts(u)
     rows = _portal_acceptance_rows(u)
     my_pending = sum(1 for r in rows if r["task"] and r["task"]["assignee"] == u["name"] and r["task"]["status"] == "pending")
-    accounts = [x["name"] for x in db.list_users()] if is_admin else []
+    # 谁都能被指派——但下拉别列停用号和测试号（噪音）
+    accounts = ([x["name"] for x in db.list_users()
+                 if x.get("active", 1) not in (0, False, "0") and "测试" not in (x.get("name") or "")]
+                if is_admin else [])
     return {"ok": True, "rows": rows, "isAdmin": is_admin, "me": u["name"],
             "laneLabel": _LANE_LABEL, "accounts": accounts, "nudge": {"myPending": my_pending}}
 
