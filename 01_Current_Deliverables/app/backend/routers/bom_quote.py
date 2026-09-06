@@ -694,6 +694,15 @@ async def bom_ledger(request: Request):
     src = _src()
     finals = db.bom_finals(src)
     entries = db.bom_list_entries(src)
+    # 指针自愈（V2.461）：已初审/已审核却没定稿指针的产品（指针版被删/替换后另一版还在）→ 指向最新一版，别让它在两个页面都消失
+    healed = False
+    for pk in {e.get("product_key") for e in entries if e.get("status") in ("初审", "已审核") and e.get("product_key") not in finals}:
+        rid = db.bom_repoint(src, pk)
+        if rid:
+            db.bom_add_audit(rid, u["name"], "定稿指针自愈", "", "该产品无定稿指针（指针版已删/替换），指针改指本版")
+            healed = True
+    if healed:
+        finals = db.bom_finals(src)
     views = [_entry_view(e, finals) for e in entries]
     by_key = {}
     for v in views:
@@ -2385,6 +2394,10 @@ async def bom_delete(request: Request):
         rest = db.bom_variant_members(src, vg)
         if len(rest) == 1:
             db.bom_set_variant_group([rest[0]["id"]], None)
+    for pk in {e.get("product_key") for e in ents} - {None, ""}:            # 删掉的是指针版而同产品还有已审版 → 指针自愈到最新一版
+        rid = db.bom_repoint(src, pk)
+        if rid:
+            db.bom_add_audit(rid, u["name"], "定稿指针自愈", "", "同产品指针版被删除，指针改指本版")
     for p in pend:
         db.bom_pending_clear(src, p.get("approval_no") or "", p.get("group_id") or "")
     detail = "%s · 记录 %d 条[%s] · 待修 %d · 文件 %d · 对外版 %d · 理由：%s" % (

@@ -3393,6 +3393,20 @@ def bom_clear_final(source, product_key):
             (bom_quote_final.c.source == source) & (bom_quote_final.c.product_key == product_key)))
 
 
+def bom_repoint(source, product_key):
+    """定稿指针**自愈**（V2.461）：该产品有 active 且 初审/已审核 的版本、却没有定稿指针（指针那版被删/被替换后另一版还在）
+    → 把指针指向其中核算日期最新的一版，让它重新出现在标准台账。有指针则不动。返回新指针 id 或 None。
+    实证 2026-09-06：删掉 522031 的酱（指针版）后，240399 那版酱状态仍是「初审」但没指针 → 标准台账 0 行、待办也不显示（最新版已初审不算待办），成了幽灵。"""
+    if bom_get_final(source, product_key):
+        return None
+    rows = [x for x in bom_list_entries(source, product_key) if x.get("status") in ("初审", "已审核")]
+    if not rows:
+        return None
+    best = max(rows, key=lambda x: (x.get("calc_date") or "", x["id"]))
+    bom_set_final(source, product_key, best["id"], "system:repoint")
+    return best["id"]
+
+
 def bom_clear_final_if(source, product_key, entry_id):
     """只有当定稿指针**确实指向 entry_id** 时才清（审查 M9：防竞态清掉『另一版』的指针）。
     退回/撤销定稿/审核态失效都该用它——同产品可并存多个活动版本，按 product_key 盲清会误伤当前定稿版。返回是否清了。"""
