@@ -1540,9 +1540,12 @@ async def bom_intake(request: Request):
             "commentPending": comment_pending, "warnings": stg.get("warnings") or []}
 
 
-def _do_replace_sheet(src, gid, data, fname, label, user, appno, via):
+def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=None):
     """用新核算表替换一个组：新文件里勾稽平的产品 → 顶替同组同产品旧版（旧版标 active=0 留痕、退出标准库）。
-    仍不平的产品不入、回报（供再修）；新增产品（旧组没有的、如原本不平未入的半成品）直接入组。返回结果字典。"""
+    仍不平的产品不入、回报（供再修）；新增产品（旧组没有的、如原本不平未入的半成品）直接入组。返回结果字典。
+    bom_lists：本次随单一并解析到的研发 BOM 清单（重连钉钉时把审批附件里的 BOM 文件也解析进来）——
+    ⚠ V2.456 前只用同组既有记录的 bom_list 兜底，**组内新增的产品**（如复配料）没有旧记录可继承 → 明明 BOM 文件里有它那页，
+    替换后仍显「无清单/补挂」（业务方 2026-09-06 实证 522031 卤味复合调味酱）。"""
     try:
         recs = bq.parse_workbook(data, fname)
     except Exception as e:
@@ -1550,8 +1553,8 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via):
     if not recs:
         return {"ok": False, "msg": "这份不是成本核算表（找不到核算样表页）。"}
     old_active = {x.get("product_key"): x for x in db.bom_group_entries(src, gid, include_superseded=False)}
-    # 组内的 BOM清单（新文件常只含核算表；用同组既有 bom_list + 本次一并解析的清单兜底）
-    bom_pool = []
+    # 组内的 BOM清单：本次随单解析到的研发 BOM 优先（最新），再用同组既有 bom_list 兜底
+    bom_pool = list(bom_lists or [])
     for x in db.bom_group_entries(src, gid):
         if x.get("bom_list"):
             bom_pool.append({"productName": x.get("product_name"), "cpCode": x.get("cp_code"),
@@ -1714,7 +1717,28 @@ async def bom_refetch_replace(request: Request):
                     and "商品版" not in (a.get("label") or "")), None)
     if not biz:
         return JSONResponse({"ok": False, "msg": "该审批未取到商务版核算表附件。"}, status_code=400)
-    out = _do_replace_sheet(_src(), gid, biz["bytes"], biz["fileName"], biz.get("label") or "", u["name"], appno, "重连钉钉")
+    # 同单其它 xlsx 附件里的研发 BOM 清单（成品页 + 复合调味酱页）一并解析，供组内新增产品（复配料/半成品）配清单（V2.456）
+    bom_lists = []
+    for a in res.get("attachments", []):
+        if a is biz or not a.get("bytes") or not str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")):
+            continue
+        try:
+            bl = bq.parse_bom_list(a["bytes"], a.get("fileName") or "")
+        except Exception:
+            bl = []
+        if not bl:
+            continue
+        try:
+            craft = bq.parse_craft(a["bytes"], a.get("fileName") or "")
+        except Exception:
+            craft = None
+        for b in bl:
+            b["craft"] = craft
+            b["srcFile"] = a.get("fileName") or ""
+        bom_lists.extend(bl)
+    out = _do_replace_sheet(_src(), gid, biz["bytes"], biz["fileName"], biz.get("label") or "", u["name"], appno, "重连钉钉", bom_lists=bom_lists)
+    if out.get("ok"):
+        out["bomSheets"] = [b.get("productName") for b in bom_lists]
     return JSONResponse(out, status_code=200 if out.get("ok") else 400)
 
 
