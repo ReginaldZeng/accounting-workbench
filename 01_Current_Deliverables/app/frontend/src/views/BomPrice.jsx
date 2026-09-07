@@ -414,7 +414,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
     if (isStd && !showObs && isDead(r)) return false
     if (ftype !== 'all' && (r.kind || '成品') !== ftype) return false
     if (fch !== 'all' && r.channel !== fch) return false
-    if (q.trim()) { const s = (r.cpCode + r.productName + r.customer).toLowerCase(); if (!s.includes(q.trim().toLowerCase())) return false }
+    if (q.trim()) { const s = [r.cpCode, r.productName, r.customer, r.erpCode, r.approval].filter(Boolean).join('').toLowerCase(); if (!s.includes(q.trim().toLowerCase())) return false }   // V2.502：物料编码、钉钉单号也能搜
     return true
   })
   const stats = useMemo(() => {
@@ -547,7 +547,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
         </div>
 
         <div className="card bom-filterbar">
-          <input className="bom-search" placeholder={isStd ? '搜索 CP码 / 产品名称 / 客户' : '搜索钉钉单号 / 产品名称 / CP码'}
+          <input className="bom-search" placeholder={isStd ? '搜索 CP码 / 物料编码 / 产品名称 / 客户' : '搜索钉钉单号 / 产品名称 / CP码 / 物料编码'}
             value={q} onChange={e => setQ(e.target.value)} />
           {isStd && <>
             <Seg value={ftype} onChange={setFtype} opts={[['all', '全部'], ['成品', '成品'], ['半成品', '半成品'], ['复配料', '复配料']]} />
