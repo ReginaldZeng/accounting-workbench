@@ -369,5 +369,12 @@ export const setBomInvoiceRules = (rules) => jp('/api/bom/invoice-rules', { rule
 export const bomExportPrettyUrl = (id) => `/api/bom/export/pretty?entry_id=${id}`
 export const bomExportOriginalUrl = (id) => `/api/bom/export/original?entry_id=${id}`
 export const bomExportPairUrl = (id) => `/api/bom/export/pair?entry_id=${id}`   // V2.504 财务版+脱敏版 zip
+// 历史标准成本直接导入（V2.512）：模板 → 上传成批次 → 成本会计批量确认即已审核
+export const bomStdImportTemplateUrl = '/api/bom/std-import/template'
+export const bomStdImportUpload = (file) => { const fd = new FormData(); fd.append('file', file); return fetch('/api/bom/std-import/upload', { method: 'POST', body: fd }).then(r => r.json()) }
+export const getBomStdImportBatches = () => j('/api/bom/std-import/batches')
+export const getBomStdImportBatch = (batchId) => j(`/api/bom/std-import/batch?batchId=${batchId}`)
+export const bomStdImportConfirm = (batchId, rows, answers) => jp('/api/bom/std-import/confirm', { batchId, rows, answers })
+export const bomStdImportDiscard = (batchId) => jp('/api/bom/std-import/discard', { batchId })
 export const getBomAutoIntakeStatus = () => j('/api/bom/auto-intake/status')
 export const bomAutoIntakeRun = (notify) => jp('/api/bom/auto-intake/run', { notify })

@@ -152,6 +152,14 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 
 ---
 
+### 2.10 历史数据：直接导入标准成本，不再一张张传采购核算表 ✅（业务方定 2026-09-07，V2.512）
+
+- **入口**：待办页「⇪ 导入标准成本（历史）」→ 下载模板（一行一个产品的五分项，含税 元/kg：原料 / 包材 / 加工费 / 装卸费 / 管理费 / 全成本，另有 CP码 / 物料编码 / 产品名称 / 客户 / 规格 / 渠道 / 核算日期 / 来源单号）→ 上传 → 落「导入待确认」批次 → **成本会计勾选批量确认即「已审核」**（终审戳「标准成本导入」，记确认人，不经财务BP终审）。
+- **红线**：五分项之和＝全成本（差 ≥0.01 不入）、CP 必填、文件内同名同 CP 重复不入；有问题的行留在批次里显示原因。
+- **换码承接照常**：同 CP / 同物料编码台账已有审核版 → 确认时必须答 A 原版失效 / B 并行 / C 历史版不对外（系统按核算日期先后建议）。
+- **没有物料明细**：台账/详情标「导入·无明细」；无采购核算表可导出、无逐料对比、无金蝶用量核对；占定稿指针、对外给 BP（接口行带 `imported:true`）、可当下游的上游。
+- 已用「历史补录」录进来的单不受影响；导入同产品会作为候选弹出让人选留哪个。
+
 ## 3. 权限点 ✅
 
 `enter:bomdraft`✅敏感 / `enter:bomstd` / `bom:view_sheet` / `dingtalk:fetch`✅ / `bom:audit`✅（复核+初审+申请作废+补物料编码+并行关联）/ `bom:final_review`✅（终审+作废批准）/ `bom:price_check`✅ / `bom:export`（含两版 zip）/ `bom:attach_bom`✅ / `bom:config`✅ / **`bom:view_full`✅**（V2.452：BP 侧原地看全量采购核算表）。
@@ -204,6 +212,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 | 未复核 / 已复核 | — | 待办与复核 | enter:bomdraft（敏感）| ❌ |
 | **初审**（=定稿）| 成本会计 | 标准台账（内部）+ 待办 | enter:bomstd | ❌ **未终审绝不外发** |
 | **已审核**（终审）| 财务BP | 标准台账 | enter:bomstd + bom:view_sheet | ✅ **只有此版对外** |
+| **已审核 · 导入**（§2.10）| 成本会计批量确认，终审戳「标准成本导入」| 标准台账（标「导入·无明细」）| 同上 | ✅ 对外，行带 `imported` |
 | **已审核 · 补录**（§2.5.3）| 成本会计初审即定稿，终审戳「历史补录」| 标准台账（标「补录·无二审」）| 同上 | ✅ 对外，行带 `noSecondReview` |
 | 已审核 · **已失效**（被已终审新版替代）| — | 标准台账（默认收起）| 同上 | ❌ 退出对外，替代者带 `supersedes` |
 | 已审核 · **待替代**（替代者仅初审）| — | 标准台账（琥珀标）| 同上 | ✅ 仍对外，直到替代者终审 |
@@ -226,7 +235,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 
 ## 10. 数据模型 ✅
 
-`bom_quote_entry` 在 v1.1 基础上新增：`mat_category/quotable/quote_reason/classified_by·at`、`ack`（终审戳 JSON，含 selfReview / backfill / reviewer）、`void_req`、`inactive_kind`、`stale_note`、`craft`、`net_weight_kg`、`obsolete_by/obsolete_at/obsolete_note`、**`variant_group`**（并行组）、**`historical`**（1＝答 C 不对外历史版；2＝补录）。`bom_quote_pending`；`bom_quote_audit`；`bom_quote_final`（定稿指针）。`app_settings`：`bom_config`、`bom_invoice_rules`、`bom_auto_intake_since/seen/last`。迁移由 `_ensure_bom_columns` 自动补列。
+`bom_quote_entry` 在 v1.1 基础上新增：`mat_category/quotable/quote_reason/classified_by·at`、`ack`（终审戳 JSON，含 selfReview / backfill / reviewer）、`void_req`、`inactive_kind`、`stale_note`、`craft`、`net_weight_kg`、`obsolete_by/obsolete_at/obsolete_note`、**`variant_group`**（并行组）、**`historical`**（1＝答 C 不对外历史版；2＝补录）、`source_type=std_import`（历史标准成本导入，无明细）。`bom_quote_pending`；`bom_quote_audit`；`bom_quote_final`（定稿指针）。`app_settings`：`bom_config`、`bom_invoice_rules`、`bom_auto_intake_since/seen/last`。迁移由 `_ensure_bom_columns` 自动补列。
 
 ---
 
@@ -279,7 +288,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 | v1.0 | 2026-09-03 | 首版：三级菜单 / 权限点 / 可见性 A 方案 / 复核两步 / 定性 |
 | v1.1 | 2026-09-04 | 立项、复核四步、两个戳、上游传导拦截、待修批次、作废两步、来源标注、编码分类降级、代码审查结论 |
 | v1.2 | 2026-09-05 | CP＝身份、单人模式、台账列重排+补物料编码、预览+重排版原版模板、BP 消费接口三件、换码承接、无编码不设闸+金蝶反查、BP 只读台账原则 |
-| **v1.3** | **2026-09-07** | **OA 衔接边界（吴总定案）+ 自动立项 + 两版导出**、历史补录终稿 + 补录承接、换码承接 A/B/C、上游链路 CP 兜底 + 列序、发起人离职备用通道、密钥删除、动作条、脱敏版/`bom:view_full`、台账搜索、§8/§10/§11/§12 同步 |
+| **v1.3** | **2026-09-07** | **OA 衔接边界（吴总定案）+ 自动立项 + 两版导出**、历史补录终稿 + 补录承接、换码承接 A/B/C、上游链路 CP 兜底 + 列序、发起人离职备用通道、密钥删除、动作条、脱敏版/`bom:view_full`、台账搜索、**历史标准成本直接导入（§2.10）**、术语统一「采购核算表」、§8/§10/§11/§12 同步 |
 
 ---
 

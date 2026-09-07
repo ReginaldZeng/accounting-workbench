@@ -2,10 +2,11 @@
 // 【BOM报价审核】前端：钉钉「BOM表报价」审批附件→解析→复核→定稿→BP消费。
 // 三视图（台账列表 / 采购核算表详情 / 版本对比）+ 手工入账弹窗。样机布局与交互照搬，皮肤换本项目令牌。
 // 含税五分项口径（元/kg），涨跌红▲绿▼（中国财务惯例），编辑态改费用参数保存留痕。
-import React, { useState, useEffect, useMemo, useCallback } from 'react'
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList,
+  bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
   bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
@@ -316,6 +317,7 @@ function BomLedgerView({ user, mode = 'std' }) {
   const [entry, setEntry] = useState(null)      // 详情完整数据
   const [toast, setToast] = useState('')
   const [manual, setManual] = useState(false)
+  const [stdImp, setStdImp] = useState(null)      // 导入标准成本弹窗（V2.512）：{} 新建 / {batchId} 处理已有批次
   const [curAppr, setCurAppr] = useState('')    // 当前处理的钉钉单号
   const [finalRow, setFinalRow] = useState(null)   // 财务BP终审弹窗目标
   // 主管理员密钥删除（V2.459）：{target:{entryId|groupId+approvalNo|approvalNo}, label, after} —— 待办/处理页/详情三处入口共用一个弹窗
@@ -373,7 +375,7 @@ function BomLedgerView({ user, mode = 'std' }) {
 
   return (
     <div className="bomv">
-      {view === 'list' && <Ledger data={data} cfg={cfg} mode={mode} onOpen={openDetail} onManual={() => setManual(true)}
+      {view === 'list' && <Ledger data={data} cfg={cfg} mode={mode} onOpen={openDetail} onManual={() => setManual(true)} onStdImport={(b) => setStdImp(b || {})}
         onApproval={openApproval} onRefresh={load} flash={flash}
         onFinalReview={data?.canFinalReview ? setFinalRow : null}
         isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: load })} />}
@@ -387,6 +389,7 @@ function BomLedgerView({ user, mode = 'std' }) {
       {delM && <DeleteModal target={delM.target} label={delM.label} flash={flash} onClose={() => setDelM(null)}
         onDone={async () => { const f = delM.after; setDelM(null); if (f) await f() }} />}
       {view === 'compare' && entry && <Compare entry={entry} all={data.all} onBack={() => setView('detail')} flash={flash} />}
+      {stdImp && <StdImportModal cfg={cfg} init={stdImp} onClose={() => setStdImp(null)} flash={flash} onDone={load} />}
       {manual && <IntakeModal cfg={cfg} onClose={() => setManual(false)} flash={flash}
         onDone={(no) => { setManual(false); load(); openApproval(no) }} />}
       {finalRow && <FinalReviewModal row={finalRow} onClose={() => setFinalRow(null)}
@@ -397,7 +400,10 @@ function BomLedgerView({ user, mode = 'std' }) {
 }
 
 // ============ 台账列表 ============
-function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, onRefresh, flash, isSuper, onDelete }) {
+function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, onFinalReview, onRefresh, flash, isSuper, onDelete }) {
+  // 历史标准成本导入待确认批次（V2.512）：待办页顶部一块，点「处理」进导入弹窗
+  const [impBatches, setImpBatches] = useState([])
+  useEffect(() => { if (mode !== 'std') getBomStdImportBatches().then(r => setImpBatches(r.ok ? (r.batches || []) : [])).catch(() => {}) }, [mode, data])
   const isStd = mode === 'std'
   const [ftype, setFtype] = useState('all')     // all | fin | semi
   const [fch, setFch] = useState('all')         // all | ecom | common | tob | toc
@@ -479,6 +485,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
           {r.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + r.quoteReason}>禁报价</span>}
           {r.historical && <span className="tag late" style={{ marginLeft: 6 }} title="历史版：审核时答 C 归档的老版本，已审但不对外、不占定稿指针">历史版·不对外</span>}
           {r.backfill && <span className="bom-gvtag" style={{ marginLeft: 6 }} title={r.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿'}>{r.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}
+          {r.imported && <span className="bom-gvtag" style={{ marginLeft: 6 }} title="历史标准成本直接导入：只有五分项、无物料明细；成本会计批量确认即已审核，未经财务BP终审；无采购核算表可导出">导入·无明细</span>}
           {r.obsoleteBy && (dead
             ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
             : <span className="tag late" style={{ marginLeft: 6 }} title={`${r.obsoleteBy.cpCode} 已初审、待终审；其终审通过后本版退出对外台账。在此之前 BP 仍用本版`}>待替代 · {r.obsoleteBy.cpCode} 待终审</span>)}
@@ -527,6 +534,8 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
           {!isStd && cfg?.canFetch && <>
             <button className="btn-pri" onClick={onManual}
               title="录钉钉单号 → 抓附件 → 生成待办（判断留到处理页）">＋ 立项（录钉钉单号）</button>
+            <button className="btn-sec" onClick={() => onStdImport && onStdImport({})}
+              title="历史数据不再一张张传采购核算表：按模板导入五分项标准成本 → 成本会计批量确认即已审核（无物料明细）">⇪ 导入标准成本（历史）</button>
           </>}
         </div>
       </div>
@@ -546,6 +555,20 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
                 suf={`/ ${stats.total} 产品`} /></>}
         </div>
 
+        {!isStd && impBatches.length > 0 && <div className="card" style={{ padding: '10px 14px', borderLeft: '3px solid var(--amber)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <b>⇪ 导入待确认 {impBatches.length} 批</b>
+            <span className="muted" style={{ fontSize: 12 }}>历史标准成本导入，成本会计勾选批量确认即已审核（不经财务BP终审）</span>
+          </div>
+          {impBatches.map(b => <div key={b.batchId} style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 6, fontSize: 12.5 }}>
+            <span style={{ fontWeight: 600 }}>{b.fileName}</span>
+            <span className="muted">{b.createdBy} · {b.createdAt}</span>
+            <span className="tag ok">可入 {b.okCount}</span>
+            {b.badCount > 0 && <span className="tag leak">有问题 {b.badCount}</span>}
+            {b.needAnswer > 0 && <span className="tag late">{b.needAnswer} 行要答 A/B/C</span>}
+            <a className="lk" onClick={() => onStdImport && onStdImport({ batchId: b.batchId })}>处理 ›</a>
+          </div>)}
+        </div>}
         <div className="card bom-filterbar">
           <input className="bom-search" placeholder={isStd ? '搜索 CP码 / 物料编码 / 产品名称 / 客户' : '搜索钉钉单号 / 产品名称 / CP码 / 物料编码'}
             value={q} onChange={e => setQ(e.target.value)} />
@@ -1002,7 +1025,10 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
             {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
             {entry.historical && <span className="tag late" title="审核时答 C 归档的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}
-            {entry.backfill && <span className="bom-gvtag" title={entry.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿，不经财务BP终审'}>{entry.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}</div>
+            {entry.backfill && <span className="bom-gvtag" title={entry.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿，不经财务BP终审'}>{entry.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}
+            {entry.imported && <span className="bom-gvtag" title="历史标准成本直接导入：只有五分项、无物料明细；批量确认即已审核，未经财务BP终审">导入·无明细</span>}</div>
+          {entry.imported && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', margin: '6px 0' }}>
+            这是历史标准成本直接导入的记录：只有五分项（原料/包材/加工费/装卸费/管理费 → 全成本），没有物料明细，所以下面的料表、逐料对比、金蝶用量核对、采购核算表导出都没有内容。数据由 {entry.ack?.reviewer || entry.finalizedBy || '成本会计'} 于 {entry.finalizedAt || ''} 批量确认。</div>}
           <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
@@ -1011,7 +1037,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               颜色＝动作性质：灰边＝导航/只读（返回、导出）；琥珀边＝可逆申请（申请作废、撤销归档）；蓝边＝编辑（修改价税费、改定性）；
               绿实心＝主流程正向动作（审核归档、保存）；琥珀实心＝审批他人申请（作废终审）；红实心＝不可逆（删除，仅主管理员） */}
           <button className="btn-sec" onClick={onBack} title="回到来处（处理页或台账列表）">‹ 返回上一级</button>
-          {cfg?.canExport && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)} title="下载或预览采购核算表；同产品多版时可看版本对比">⤓ 导出采购核算表 ▾</button>
+          {cfg?.canExport && !entry.imported && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)} title="下载或预览采购核算表；同产品多版时可看版本对比">⤓ 导出采购核算表 ▾</button>
           {expMenu && <div className="bom-menu" onMouseLeave={() => setExpMenu(false)}>
             <a href={bomExportOriginalUrl(entry.id)}><b>原版采购核算表（源附件）</b><span>审批附件 xlsx 原样下载，供留档核对</span></a>
             <a href={bomExportOriginalUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览原版</b><span>不下载，在新标签页查看</span></a>
@@ -1993,6 +2019,113 @@ function PriceModal({ mat, entry, cfg, onClose, flash }) {
   )
 }
 
+
+// ============ 历史标准成本直接导入（V2.512）============
+// 业务方定 2026-09-07：历史数据不再一张张传采购核算表，按模板导五分项标准成本；先落「导入待确认」批次，成本会计勾选批量确认即已审核。
+function StdImportModal({ cfg, init, onClose, flash, onDone }) {
+  const [batch, setBatch] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [sel, setSel] = useState({})
+  const [ans, setAns] = useState({})
+  const [result, setResult] = useState(null)
+  const fileRef = useRef(null)
+  const load = (b) => {
+    setBatch(b); const s = {}, a = {}
+    ;(b?.rows || []).forEach(r => { s[r.row] = !!r.ok; a[r.row] = r.suggest || '' })
+    setSel(s); setAns(a)
+  }
+  useEffect(() => {
+    if (init?.batchId) getBomStdImportBatch(init.batchId).then(r => { if (r.ok) load(r.batch); else flash(r.msg || '批次打不开') }).catch(e => flash('打开失败：' + e.message))
+  }, [init?.batchId])
+  const upload = async (f) => {
+    if (!f) return
+    setBusy(true); setResult(null)
+    try { const r = await bomStdImportUpload(f); if (!r.ok) flash(r.msg || '上传失败'); else { load(r.batch); flash(`已解析 ${r.brief.total} 行：可入 ${r.brief.okCount}${r.brief.badCount ? `，有问题 ${r.brief.badCount}` : ''}${r.brief.needAnswer ? `，${r.brief.needAnswer} 行要答 A/B/C` : ''}`) } }
+    catch (e) { flash('上传失败：' + e.message) } finally { setBusy(false) }
+  }
+  const okRows = (batch?.rows || []).filter(r => r.ok)
+  const chosen = okRows.filter(r => sel[r.row])
+  const confirm = async () => {
+    if (!chosen.length) return flash('先勾选要入台账的行')
+    const need = chosen.filter(r => (r.candidates || []).length && !['replace', 'parallel', 'historical'].includes(ans[r.row]))
+    if (need.length) return flash(`第 ${need.map(r => r.row).join('、')} 行台账已有同CP/同物料编码的审核版，请先答 A/B/C`)
+    setBusy(true)
+    try {
+      const a = {}; chosen.forEach(r => { if (ans[r.row]) a[r.row] = ans[r.row] })
+      const r = await bomStdImportConfirm(batch.batchId, chosen.map(x => x.row), a)
+      if (!r.ok) { flash(r.msg || '确认失败'); return }
+      setResult(r); flash(`已入台账 ${r.done.length} 条（已审核）${r.failed.length ? `，失败 ${r.failed.length}` : ''}`)
+      onDone && onDone()
+      if (r.batch) load(r.batch); else setBatch(null)
+    } catch (e) { flash('确认失败：' + e.message) } finally { setBusy(false) }
+  }
+  const discard = async () => {
+    if (!batch) return
+    if (!window.confirm(`作废这批未确认的 ${batch.rows.length} 行？（不影响已入台账的）`)) return
+    const r = await bomStdImportDiscard(batch.batchId); if (!r.ok) flash(r.msg || '作废失败'); else { flash('已作废'); setBatch(null); onDone && onDone() }
+  }
+  const fmt2 = (v) => (v == null || v === '' ? '—' : Number(v).toFixed(2))
+  const allOn = okRows.length > 0 && okRows.every(r => sel[r.row])
+  return (
+    <div className="bom-mask" onClick={e => { if (e.target.classList.contains('bom-mask')) onClose() }}>
+      <div className="bom-modal" style={{ width: 'min(1180px,100%)', maxHeight: '92vh', overflow: 'auto' }}>
+        <div className="bom-mhead"><b>⇪ 导入标准成本（历史数据）</b><span className="bom-x" onClick={onClose}>✕</span></div>
+        <div className="bom-msub">历史单不再一张张传采购核算表：按模板填<b>五分项（含税 元/kg）</b>一行一个产品 → 上传成「待确认」批次 → 成本会计勾选<b>批量确认即已审核</b>（终审戳「标准成本导入」，不经财务BP终审）。
+          导入行<b>没有物料明细</b>，台账标「导入·无明细」，无采购核算表可导出。勾稽红线：五分项之和必须等于全成本。</div>
+        {!batch && <div className="bom-mstep"><span className="bom-mno">1</span><div style={{ flex: 1 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <a className="btn-sec" href={bomStdImportTemplateUrl} title="含示例行与说明页">⤓ 下载模板</a>
+            <input ref={fileRef} type="file" accept=".xlsx" style={{ display: 'none' }} onChange={e => { upload(e.target.files?.[0]); e.target.value = '' }} />
+            <button className="btn-pri" disabled={busy || !cfg?.canFetch} onClick={() => fileRef.current?.click()} title={cfg?.canFetch ? '' : '需「抓取/录入」权限'}>{busy ? '解析中…' : '上传填好的模板'}</button>
+            <span className="muted" style={{ fontSize: 12 }}>必填：CP码、产品名称、原料、包材、加工费、装卸费、管理费、全成本；物料编码/客户/规格/渠道/核算日期/来源单号可选</span>
+          </div></div></div>}
+        {batch && <>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', margin: '8px 0', flexWrap: 'wrap', fontSize: 12.5 }}>
+            <b>{batch.fileName}</b><span className="muted">{batch.createdBy} · {batch.createdAt}</span>
+            <span className="tag ok">可入 {okRows.length}</span>
+            {batch.rows.length - okRows.length > 0 && <span className="tag leak">有问题 {batch.rows.length - okRows.length}（不入）</span>}
+            <span style={{ flex: 1 }} />
+            <label style={{ cursor: 'pointer' }}><input type="checkbox" checked={allOn} onChange={e => { const s = { ...sel }; okRows.forEach(r => { s[r.row] = e.target.checked }); setSel(s) }} /> 全选可入行</label>
+          </div>
+          <div className="tbl-wrap" style={{ maxHeight: '52vh', overflow: 'auto' }}><table style={{ fontSize: 12 }}><thead><tr>
+            <th className="th"></th><th className="th">行</th><th className="th">CP码</th><th className="th">物料编码</th><th className="th">产品名称</th><th className="th">客户</th><th className="th">渠道</th><th className="th">核算日期</th>
+            <th className="th" style={{ textAlign: 'right' }}>原料</th><th className="th" style={{ textAlign: 'right' }}>包材</th><th className="th" style={{ textAlign: 'right' }}>加工费</th><th className="th" style={{ textAlign: 'right' }}>装卸费</th><th className="th" style={{ textAlign: 'right' }}>管理费</th><th className="th" style={{ textAlign: 'right' }}>全成本</th>
+            <th className="th">校验</th><th className="th">台账已有同CP/同编码 → 答</th>
+          </tr></thead><tbody>
+            {batch.rows.map(r => (<tr key={r.row} className={r.ok ? '' : 'bom-nbrow'}>
+              <td>{r.ok && <input type="checkbox" checked={!!sel[r.row]} onChange={e => setSel({ ...sel, [r.row]: e.target.checked })} />}</td>
+              <td className="mono">{r.row}</td><td className="mono">{r.cpCode || '—'}</td><td className="mono">{r.erpCode || '—'}</td>
+              <td style={{ fontWeight: 600 }}>{r.productName}</td><td>{r.customer || '—'}</td><td>{({ ecom: '电商', common: '通品', tob: 'TOB', toc: 'TOC' })[r.channel] || '—'}</td><td className="mono">{r.calcDate || '导入日'}</td>
+              <td className="num">{fmt2(r.mat)}</td><td className="num">{fmt2(r.pack)}</td><td className="num">{fmt2(r.mfg)}</td><td className="num">{fmt2(r.load)}</td><td className="num">{fmt2(r.adm)}</td><td className="num" style={{ fontWeight: 600 }}>{fmt2(r.full)}</td>
+              <td>{r.ok ? <span className="tag ok">五分项=全成本</span> : <span className="tag leak" title={r.reason}>{r.reason}</span>}</td>
+              <td>{(r.candidates || []).length
+                ? <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  <span className="muted" style={{ fontSize: 11 }}>{r.candidates.map(c => `${c.cpCode} ${c.calcDate || c.auditAt} ¥${Number(c.fullIncl || 0).toFixed(2)}（${c.why}）`).join('；')}</span>
+                  <select value={ans[r.row] || ''} onChange={e => setAns({ ...ans, [r.row]: e.target.value })} style={{ fontSize: 11.5 }}>
+                    <option value="">请选择…</option>
+                    <option value="replace">A 原版失效，本行替代</option>
+                    <option value="parallel">B 并行但关联，都对外</option>
+                    <option value="historical">C 历史版，只入不对外</option>
+                  </select>
+                  {r.suggest && !ans[r.row] && <span className="muted" style={{ fontSize: 10.5 }}>建议 {r.suggest === 'historical' ? 'C（本行核算日期更早）' : 'A（本行更新）'}</span>}
+                </div>
+                : <span className="muted">—</span>}</td>
+            </tr>))}
+          </tbody></table></div>
+          {result && result.failed?.length > 0 && <div className="bom-chkfail" style={{ marginTop: 8 }}>{result.failed.map((f, i) => <div key={i}>· 第 {f.row} 行 {f.cpCode}：{f.msg}</div>)}</div>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button className="btn-pri" disabled={busy || !cfg?.canAudit || !chosen.length} onClick={confirm}
+              title={cfg?.canAudit ? '勾选行入台账，直接已审核（终审戳「标准成本导入」）' : '需「审核」权限（成本会计）；批次已保存，成本会计在待办页「导入待确认」里处理'}>
+              {busy ? '入账中…' : `确认入台账 ${chosen.length} 行（已审核）`}</button>
+            <button className="btn-sec" onClick={() => { setBatch(null); setResult(null) }}>重新上传</button>
+            <button className="btn-sec" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }} onClick={discard}>作废本批</button>
+            <span className="muted" style={{ fontSize: 12 }}>{cfg?.canAudit ? '' : '你没有审核权限：批次已保存，等成本会计确认。'}</span>
+          </div>
+        </>}
+      </div>
+    </div>
+  )
+}
 // ============ 版本对比 ============
 function Compare({ entry, all, onBack, flash }) {
   const versions = (all || []).filter(x => x.productKey === entry.productKey)

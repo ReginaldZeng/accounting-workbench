@@ -341,6 +341,7 @@ def _entry_view(e, finals):
         "obsoleteCandidates": ([] if ob else _obsolete_candidates(e, others)),
         "historical": e.get("historical") == 1,        # 答 C 的历史版：已审但不对外、不动指针（V2.462）
         "backfill": e.get("historical") == 2,          # 补录（V2.466/V2.472）：正式对外数据，初审通过即定稿，没经BP二道审核
+        "imported": e.get("source_type") == "std_import",   # 历史标准成本直接导入（V2.512）：只有五分项、无明细
         "netWeightKg": nw[0], "netWeightSrc": nw[1],
         "bomCheck": bom_check, "hasBomList": bool(bom_mats),
         # ①BOM清单 整表原样（研发出品）：类型/编码/物料/型号/规格/单位/供应商/用量（业务方 2026-09-04 定列序）
@@ -2913,6 +2914,9 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
     u, err = _export_auth(request, e)
     if err:
         return err
+    blk = _std_no_export(e)
+    if blk:
+        return blk
     # 下载=活公式版（改黄底参数全表联动，同原版）；预览=计算值版（openpyxl 写的公式无缓存值，网页只能走值）
     data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview,
                            rules=_invoice_rules())      # 成本不含税公式/M列下拉 按台账当前发票规则生成
@@ -2920,6 +2924,386 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
     if preview:
         return HTMLResponse(_xlsx_to_html(data, "重排版采购核算表 · %s %s" % (e.get("cp_code") or "", nm)))
     return _xlsx_response(data, "重排版采购核算表_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
+
+
+# ============ 历史标准成本直接导入（V2.512，业务方定 2026-09-07：「历史数据我直接上传标准成本吧，就不一个个上传采购核算表了」）============
+# 一行一个产品的五分项（含税 元/kg）→ 先落「导入待确认」批次 → 成本会计勾选批量确认 → 直接「已审核」（终审戳「标准成本导入」，不经财务BP终审）。
+# 没有物料明细：台账标「导入·无明细」，无采购核算表可导出、无逐料对比；但占定稿指针、对外给 BP（行带 imported）、参与换码承接、可当下游的上游。
+# 红线照收到这一层：五分项之和＝全成本（差 ≥0.01 不入）、CP 必填。同 CP/同物料编码在台账已有审核版 → 确认时答 A/B/C（默认按核算日期建议）。
+STDIMP_DIR = os.path.join(UPLOAD_DIR, "_stdimport")          # 批次 JSON，不走 _staging 的 TTL 清理
+_STD_COLS = [("cpCode", "CP码", True), ("erpCode", "物料编码", False), ("productName", "产品名称", True),
+             ("customer", "客户", False), ("packSpec", "规格", False), ("channel", "渠道", False), ("calcDate", "核算日期", False),
+             ("mat", "原料", True), ("pack", "包材", True), ("mfg", "加工费", True), ("load", "装卸费", True), ("adm", "管理费", True),
+             ("full", "全成本", True), ("note", "来源单号", False)]
+_STD_HEAD = {"cpCode": "CP码", "erpCode": "物料编码", "productName": "产品名称", "customer": "客户", "packSpec": "规格",
+             "channel": "渠道（电商/通品/TOB/TOC）", "calcDate": "核算日期（YYYY-MM-DD）", "mat": "原料（含税 元/kg）",
+             "pack": "包材（含税 元/kg）", "mfg": "加工费（含税 元/kg）", "load": "装卸费（含税 元/kg）", "adm": "管理费（含税 元/kg）",
+             "full": "全成本（含税 元/kg）", "note": "来源单号 / 备注"}
+_CH_IN = {"电商": "ecom", "ecom": "ecom", "通品": "common", "common": "common", "tob": "tob", "toc": "toc", "": ""}
+
+
+def _std_template_bytes():
+    import io as _io
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "标准成本导入"
+    ws.append([_STD_HEAD[k] for k, _, _ in _STD_COLS])
+    for c in ws[1]:
+        c.font = Font(bold=True)
+        c.fill = PatternFill("solid", fgColor="DCE6F1")
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+    ws.append(["CP04108204(SN3)", "300600105", "菌菇辣丝丝（油辣滋香风味）-90g规格", "吉茗", "500g/袋", "通品", "2026-05-07",
+               12.43, 0.95, 1.30, 0.02, 0.50, 15.20, "202604291512000089246（示例行，请删除）"])
+    for i, w in enumerate([18, 12, 34, 10, 12, 16, 18, 14, 14, 14, 14, 14, 16, 28]):
+        ws.column_dimensions[get_column_letter(i + 1)].width = w
+    ws.freeze_panes = "A2"
+    n = wb.create_sheet("说明")
+    for line in ["一行一个产品；示例行请删除或覆盖。",
+                 "必填：CP码、产品名称、原料、包材、加工费、装卸费、管理费、全成本（均为含税 元/kg）。",
+                 "勾稽红线：原料+包材+加工费+装卸费+管理费 必须等于 全成本（差 ≥0.01 的行不入）。",
+                 "渠道填 电商/通品/TOB/TOC；留空按名字推断（含「通品」→通品，其余 TOB；半成品/复配料留空）。",
+                 "物料编码可空（未中试的没有）。核算日期留空＝导入当天。",
+                 "来源单号填钉钉审批编号（18~24 位数字）时，台账钉钉单号列可点。",
+                 "导入后先进「导入待确认」批次；成本会计勾选批量确认即「已审核」（终审戳「标准成本导入」，不经财务BP终审）。",
+                 "同 CP / 同物料编码在台账已有审核版的行，确认时要答：A 原版失效 / B 并行但关联 / C 历史版不对外（系统按核算日期先后给建议）。",
+                 "导入行没有物料明细：台账标「导入·无明细」，无采购核算表可导出、无逐料对比、无金蝶用量核对。"]:
+        n.append([line])
+    n.column_dimensions["A"].width = 110
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _std_num(v):
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).replace("￥", "").replace("¥", "").replace(",", "").replace("，", "").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _std_date(v):
+    import datetime as _dt
+    if v is None or v == "":
+        return ""
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return v.strftime("%Y-%m-%d")
+    s = str(v).strip().replace("/", "-").replace(".", "-")
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        return "%s-%02d-%02d" % (m.group(1), int(m.group(2)), int(m.group(3)))
+    m = re.match(r"^(\d{4})(\d{2})(\d{2})$", s)
+    if m:
+        return "%s-%s-%s" % m.groups()
+    return None
+
+
+def _std_parse(data, src):
+    """模板 xlsx → 行清单（每行 ok/reason + 换码候选 + 建议答案）。→ (rows, err)"""
+    import io as _io
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(_io.BytesIO(data), data_only=True)
+    except Exception as e:
+        return None, "文件打不开（需 xlsx）：%s" % str(e)[:80]
+    ws = wb["标准成本导入"] if "标准成本导入" in wb.sheetnames else wb.worksheets[0]
+    rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    head_i, colmap = None, {}
+    for i, r in enumerate(rows[:10]):
+        cells = [str(c or "").strip() for c in r]
+        if any(c.upper().startswith("CP") for c in cells) and any(c.startswith("全成本") for c in cells):
+            head_i = i
+            for ci, c in enumerate(cells):
+                for k, lab, _ in _STD_COLS:
+                    hit = c.startswith(lab) or (k == "cpCode" and c.upper().startswith("CP")) or (k == "note" and ("备注" in c or "来源" in c))
+                    if hit and k not in colmap:
+                        colmap[k] = ci
+                        break
+            break
+    if head_i is None:
+        return None, "找不到表头（需含「CP码」与「全成本」两列，请用模板）"
+    missing = [lab for k, lab, req in _STD_COLS if req and k not in colmap]
+    if missing:
+        return None, "表头缺列：%s（请用模板）" % "、".join(missing)
+    others = db.bom_list_entries(src)
+    out, seen = [], {}
+    for ri, r in enumerate(rows[head_i + 1:], start=head_i + 2):
+        def get(k):
+            return r[colmap[k]] if k in colmap and colmap[k] < len(r) else None
+        if all(get(k) in (None, "") for k, _, _ in _STD_COLS):
+            continue
+        d = {"row": ri}
+        for k, _, _ in _STD_COLS:
+            d[k] = get(k)
+        d["cpCode"] = str(d["cpCode"] or "").strip()
+        d["productName"] = str(d["productName"] or "").strip()
+        erp = d["erpCode"]
+        d["erpCode"] = (str(int(erp)) if isinstance(erp, float) and erp.is_integer() else str(erp or "")).strip()
+        for k in ("customer", "packSpec", "note"):
+            d[k] = str(d[k] or "").strip()
+        if d["note"].endswith("（示例行，请删除）"):
+            continue
+        reasons = []
+        if not d["cpCode"]:
+            reasons.append("CP码为空")
+        if not d["productName"]:
+            reasons.append("产品名称为空")
+        nums = {}
+        for k in ("mat", "pack", "mfg", "load", "adm", "full"):
+            nv = _std_num(d[k])
+            if nv is None:
+                reasons.append("%s不是数字" % _STD_HEAD[k].split("（")[0])
+            elif nv < 0:
+                reasons.append("%s为负" % _STD_HEAD[k].split("（")[0])
+            nums[k] = nv
+        d.update(nums)
+        if all(nums[k] is not None for k in nums):
+            s5 = round(nums["mat"] + nums["pack"] + nums["mfg"] + nums["load"] + nums["adm"], 4)
+            if abs(s5 - nums["full"]) >= 0.01:
+                reasons.append("五分项之和 %.4f ≠ 全成本 %.4f（勾稽不平）" % (s5, nums["full"]))
+        ch_raw = str(d["channel"] or "").strip()
+        ch = _CH_IN.get(ch_raw, _CH_IN.get(ch_raw.lower()))
+        if ch is None:
+            reasons.append("渠道「%s」认不出（电商/通品/TOB/TOC）" % ch_raw)
+        d["channel"] = ch or ""
+        cd = _std_date(d["calcDate"])
+        if cd is None:
+            reasons.append("核算日期「%s」认不出" % d["calcDate"])
+        d["calcDate"] = cd or ""
+        pk = bq.product_key({"productName": d["productName"], "cpCode": d["cpCode"], "customer": d["customer"]})
+        d["productKey"] = pk
+        if pk in seen:
+            reasons.append("与第 %d 行同一产品（同名同CP）重复" % seen[pk])
+        else:
+            seen[pk] = ri
+        cands = _obsolete_candidates({"id": -1, "source": src, "cp_code": d["cpCode"], "erp_code": d["erpCode"], "variant_group": ""}, others) if d["cpCode"] else []
+        d["candidates"] = cands
+        if cands:
+            newest = max((c.get("calcDate") or c.get("auditAt") or "") for c in cands)
+            d["suggest"] = "historical" if (d["calcDate"] and newest and d["calcDate"] < newest) else "replace"
+        else:
+            d["suggest"] = ""
+        d["ok"] = not reasons
+        d["reason"] = "；".join(reasons)
+        out.append(d)
+    return out, None
+
+
+def _std_path(bid):
+    bid = re.sub(r"[^0-9a-f]", "", str(bid or ""))
+    return os.path.join(STDIMP_DIR, "%s.json" % bid) if bid else ""
+
+
+def _std_save(batch):
+    os.makedirs(STDIMP_DIR, exist_ok=True)
+    with open(_std_path(batch["batchId"]), "w", encoding="utf-8") as fh:
+        json.dump(batch, fh, ensure_ascii=False)
+
+
+def _std_load(bid):
+    p = _std_path(bid)
+    if not p or not os.path.isfile(p):
+        return None
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _std_brief(b):
+    rows = b.get("rows") or []
+    return {"batchId": b["batchId"], "fileName": b.get("fileName") or "", "createdBy": b.get("createdBy") or "", "createdAt": b.get("createdAt") or "",
+            "total": len(rows), "okCount": sum(1 for r in rows if r.get("ok")), "badCount": sum(1 for r in rows if not r.get("ok")),
+            "needAnswer": sum(1 for r in rows if r.get("ok") and r.get("candidates"))}
+
+
+def _std_list():
+    if not os.path.isdir(STDIMP_DIR):
+        return []
+    out = []
+    for fn in os.listdir(STDIMP_DIR):
+        if fn.endswith(".json"):
+            b = _std_load(fn[:-5])
+            if b and b.get("rows"):
+                out.append(_std_brief(b))
+    return sorted(out, key=lambda x: x["createdAt"], reverse=True)
+
+
+@router.get("/api/bom/std-import/template")
+async def bom_std_import_template(request: Request):
+    u = _require_perm(request, CAP_FETCH)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
+    return _xlsx_response(_std_template_bytes(), "标准成本导入模板.xlsx")
+
+
+@router.post("/api/bom/std-import/upload")
+async def bom_std_import_upload(request: Request):
+    """上传模板 → 解析校验 → 落「导入待确认」批次（不入台账）。"""
+    u = _require_perm(request, CAP_FETCH)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
+    form = await request.form()
+    uf = next((v for _k, v in form.multi_items() if hasattr(v, "read")), None)
+    if uf is None:
+        return JSONResponse({"ok": False, "msg": "请上传按模板填好的 xlsx"}, status_code=400)
+    data = await uf.read()
+    rows, err = _std_parse(data, _src())
+    if err:
+        return JSONResponse({"ok": False, "msg": err}, status_code=400)
+    if not rows:
+        return JSONResponse({"ok": False, "msg": "表里没有数据行（示例行不算）"}, status_code=400)
+    from core import _now
+    batch = {"batchId": uuid.uuid4().hex[:16], "fileName": getattr(uf, "filename", "") or "标准成本.xlsx",
+             "createdBy": u["name"], "createdAt": _now(), "rows": rows}
+    _std_save(batch)
+    db.audit(u["name"], "bom_std_import_upload", target=batch["batchId"],
+             detail="%s：%d 行，可入 %d、有问题 %d" % (batch["fileName"], len(rows), sum(1 for r in rows if r["ok"]), sum(1 for r in rows if not r["ok"])))
+    return {"ok": True, "batch": batch, "brief": _std_brief(batch)}
+
+
+@router.get("/api/bom/std-import/batches")
+async def bom_std_import_batches(request: Request):
+    u = _current_user(request)
+    if not u or not db.user_can(u, ENTER_DRAFT):
+        return JSONResponse({"ok": False, "msg": "无「待办与复核」权限"}, status_code=403)
+    return {"ok": True, "batches": _std_list()}
+
+
+@router.get("/api/bom/std-import/batch")
+async def bom_std_import_batch(request: Request):
+    u = _current_user(request)
+    if not u or not db.user_can(u, ENTER_DRAFT):
+        return JSONResponse({"ok": False, "msg": "无「待办与复核」权限"}, status_code=403)
+    b = _std_load(request.query_params.get("batchId"))
+    if not b:
+        return JSONResponse({"ok": False, "msg": "批次不存在或已处理完"}, status_code=404)
+    return {"ok": True, "batch": b}
+
+
+def _std_confirm_row(src, d, ans, u, batch):
+    """一行 → 一条「已审核」台账记录（无明细）。换码候选按 ans：replace 原版失效 / parallel 并行 / historical 历史版不对外。"""
+    from core import _now
+    ts = _now()
+    mat_excl = round(d["mat"] / bq.TAX_GROSS, 6)
+    pack_excl = round(d["pack"] / bq.TAX_GROSS, 6)
+    summary = {"全成本含税": d["full"], "成本合计含税": d["full"], "管理费加成含税": round(d["adm"], 4),
+               "制造费用小计不含税": round(d["mfg"] / bq.TAX_GROSS, 6), "工厂费用小计不含税": 0.0,
+               "装卸费不含税": round(d["load"] / bq.TAX_GROSS, 6), "运输费用不含税": 0.0,
+               "变动小计不含税": round(mat_excl + pack_excl, 6)}
+    checks = [{"check": "五分项之和=全成本", "a": round(d["mat"] + d["pack"] + d["mfg"] + d["load"] + d["adm"], 4), "b": d["full"], "ok": True}]
+    rec = {"productName": d["productName"], "cpCode": d["cpCode"], "customer": d["customer"], "calcDate": d["calcDate"],
+           "matSubtotal": mat_excl, "packSubtotal": pack_excl, "summary": summary, "materials": [], "checks": checks}
+    fee = {"mfg": round(d["mfg"], 4), "load": round(d["load"], 4), "adm": round(d["adm"], 4)}
+    comp = bq.compose(rec, fee)
+    appno = d["note"] if re.fullmatch(r"\d{18,24}", d.get("note") or "") else ""
+    eid = db.bom_insert_entry({
+        "source": src, "product_key": d["productKey"], "cp_code": d["cpCode"], "erp_code": d["erpCode"],
+        "product_name": d["productName"], "customer": d["customer"], "pack_spec": d["packSpec"], "supplier": "",
+        "calc_date": d["calcDate"] or ts[:10], "order_qty": None, "channel": d["channel"] or _default_channel(rec),
+        "semi": 1 if bq.is_semi(d["cpCode"], d["productName"]) else 0,
+        "mat_subtotal_excl": mat_excl, "pack_subtotal_excl": pack_excl, "fee_mfg": fee["mfg"], "fee_load": fee["load"], "fee_adm": fee["adm"],
+        "full_cost_incl": d["full"], "src_full": d["full"], "src_fee": comp["srcFee"], "summary": summary, "materials": [], "checks": checks,
+        "num_fp": _num_fp(rec, comp), "source_type": "std_import", "origin": "std_import", "src_label": "标准成本导入",
+        "group_id": "imp_" + batch["batchId"][:8], "active": 1, "approval_no": appno,
+        "src_file": batch.get("fileName") or "", "sheet": "标准成本导入 第%d行" % d["row"], "status": "未复核", "created_by": u["name"],
+    })
+    hist = ans == "historical"
+    db.bom_update_entry(eid, {"status": "已审核", "finalized_by": u["name"], "finalized_at": ts,
+                              "ack": {"by": "标准成本导入", "at": ts, "note": "导入·无明细·批量确认", "imported": True, "reviewer": u["name"]},
+                              "review_steps": {"qty": {"by": "标准成本导入", "at": ts}, "price": {"by": "标准成本导入", "at": ts}},
+                              "mat_category": bq.suggest_category(d["cpCode"], d["productName"], ""), "quotable": 1,
+                              "classified_by": u["name"], "classified_at": ts, "historical": 1 if hist else None})
+    e2 = db.bom_get_entry(eid)
+    cands = _obsolete_candidates(e2)          # 用入库后的真实记录重算（上传时的候选可能已变）
+    linked, obsoleted = "", []
+    if hist:
+        db.bom_add_audit(eid, u["name"], "导入历史版", "", "只入不替代：不动定稿指针、不对外" + ("（当前版 %s）" % "、".join(c["cpCode"] + " " + (c.get("calcDate") or "") for c in cands) if cands else ""))
+    else:
+        db.bom_set_final(src, d["productKey"], eid, u["name"])
+        if cands:
+            if ans == "parallel":
+                linked = _link_parallel(e2, cands, u["name"])
+            else:
+                _mark_obsolete(e2, cands, u["name"])
+                obsoleted = [c["cpCode"] for c in cands]
+    db.bom_add_audit(eid, u["name"], "标准成本导入", "",
+                     "历史标准成本直接导入（无物料明细）：原料 %.4f 包材 %.4f 加工 %.4f 装卸 %.4f 管理 %.4f 全成本 %.4f；批量确认即已审核，不经财务BP终审"
+                     % (d["mat"], d["pack"], d["mfg"], d["load"], d["adm"], d["full"]))
+    return {"id": eid, "row": d["row"], "cpCode": d["cpCode"], "productName": d["productName"], "answer": ans,
+            "obsoleted": obsoleted, "linked": linked, "historical": hist}
+
+
+@router.post("/api/bom/std-import/confirm")
+async def bom_std_import_confirm(request: Request):
+    """成本会计批量确认（需「审核」权限）：body {batchId, rows:[行号], answers:{行号: replace|parallel|historical}}。
+    有换码候选的行必须答；没答的整批不动、回报哪几行要答。确认过的行从批次里移除，批次空了即删。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限（仅成本会计）"}, status_code=403)
+    body = await request.json()
+    b = _std_load(body.get("batchId"))
+    if not b:
+        return JSONResponse({"ok": False, "msg": "批次不存在或已处理完"}, status_code=404)
+    want = {int(x) for x in (body.get("rows") or [])}
+    answers = {str(k): v for k, v in (body.get("answers") or {}).items()}
+    pick = [r for r in b["rows"] if r.get("ok") and r["row"] in want]
+    if not pick:
+        return JSONResponse({"ok": False, "msg": "没有可入的行（勾选的行都有问题或不存在）"}, status_code=400)
+    need = [r["row"] for r in pick if r.get("candidates") and answers.get(str(r["row"])) not in ("replace", "parallel", "historical")]
+    if need:
+        return JSONResponse({"ok": False, "msg": "第 %s 行台账已有同CP/同物料编码的审核版，请先答 A 原版失效 / B 并行 / C 历史版" % "、".join(map(str, need)),
+                             "needAnswer": need}, status_code=400)
+    src = _src()
+    done, failed = [], []
+    for r in pick:
+        try:
+            done.append(_std_confirm_row(src, r, answers.get(str(r["row"])) or "", u, b))
+        except Exception as e:
+            failed.append({"row": r["row"], "cpCode": r.get("cpCode"), "msg": str(e)[:200]})
+    done_rows = {x["row"] for x in done}
+    b["rows"] = [r for r in b["rows"] if r["row"] not in done_rows]
+    if b["rows"]:
+        _std_save(b)
+    else:
+        try:
+            os.remove(_std_path(b["batchId"]))
+        except OSError:
+            pass
+    db.audit(u["name"], "bom_std_import_confirm", target=b["batchId"],
+             detail="入台账 %d、失败 %d（%s）；历史版 %d、替代 %d、并行 %d" % (len(done), len(failed), b.get("fileName") or "",
+                     sum(1 for x in done if x["historical"]), sum(1 for x in done if x["obsoleted"]), sum(1 for x in done if x["linked"])))
+    return {"ok": True, "done": done, "failed": failed, "batch": b if b["rows"] else None}
+
+
+@router.post("/api/bom/std-import/discard")
+async def bom_std_import_discard(request: Request):
+    u = _require_perm(request, CAP_FETCH)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
+    body = await request.json()
+    b = _std_load(body.get("batchId"))
+    if not b:
+        return JSONResponse({"ok": False, "msg": "批次不存在或已处理完"}, status_code=404)
+    try:
+        os.remove(_std_path(b["batchId"]))
+    except OSError:
+        pass
+    db.audit(u["name"], "bom_std_import_discard", target=b["batchId"], detail="%s：作废 %d 行未确认的导入批次" % (b.get("fileName") or "", len(b.get("rows") or [])))
+    return {"ok": True}
+
+
+def _std_no_export(e):
+    if e.get("source_type") == "std_import":
+        return JSONResponse({"ok": False, "msg": "这是历史标准成本导入的记录，只有五分项、没有物料明细，没有采购核算表可导出"}, status_code=400)
+    return None
 
 
 @router.get("/api/bom/export/pair")
@@ -2932,6 +3316,9 @@ async def bom_export_pair(request: Request, entry_id: int):
     u, err = _export_auth(request, e)
     if err:
         return err
+    blk = _std_no_export(e)
+    if blk:
+        return blk
     import io as _io
     import zipfile
     rules = _invoice_rules()
@@ -2967,6 +3354,9 @@ async def bom_export_original(request: Request, entry_id: int, preview: int = 0)
     u, err = _export_auth(request, e)
     if err:
         return err
+    blk = _std_no_export(e)
+    if blk:
+        return blk
     pdir = os.path.join(UPLOAD_DIR, _src())
     match = None
     if os.path.isdir(pdir):
@@ -3180,6 +3570,9 @@ async def bomcost_export(request: Request, entryId: int, preview: int = 0):
     e, err, ctx = _bp_sheet_entry(request, entryId)
     if err:
         return err
+    blk = _std_no_export(e)
+    if blk:
+        return blk
     rec, hidden = _bp_rec(e, ctx, "export" if not preview else "preview")
     data = bq.build_pretty(rec, _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview, rules=_invoice_rules())
     nm = (e.get("product_name") or "").strip()
@@ -3285,6 +3678,7 @@ async def bomcost_final(request: Request):
             "status": "final",
             "finalizedBy": ack.get("by") or "", "finalizedAt": fin_at,
             "noSecondReview": e.get("historical") == 2,    # 补录（V2.466）：正式对外，但没经财务BP二道审核——BP 想标注就看这个
+            "imported": e.get("source_type") == "std_import",   # 历史标准成本直接导入（V2.512）：无物料明细，关联采购核算表只有五分项
 
             "firstReviewedBy": e.get("finalized_by") or "", "firstReviewedAt": e.get("finalized_at") or "",
             "quotable": (None if e.get("quotable") is None else bool(e.get("quotable"))),
