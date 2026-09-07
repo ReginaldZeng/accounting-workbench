@@ -1626,7 +1626,7 @@ async def bom_intake(request: Request):
             "commentPending": comment_pending, "warnings": stg.get("warnings") or []}
 
 
-def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=None):
+def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=None, historical=None):
     """用新核算表替换一个组：新文件里勾稽平的产品 → 顶替同组同产品旧版（旧版标 active=0 留痕、退出标准库）。
     仍不平的产品不入、回报（供再修）；新增产品（旧组没有的、如原本不平未入的半成品）直接入组。返回结果字典。
     bom_lists：本次随单一并解析到的研发 BOM 清单（重连钉钉时把审批附件里的 BOM 文件也解析进来）——
@@ -1639,6 +1639,9 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
     if not recs:
         return {"ok": False, "msg": "这份不是成本核算表（找不到核算样表页）。"}
     old_active = {x.get("product_key"): x for x in db.bom_group_entries(src, gid, include_superseded=False)}
+    # 补录承接（V2.501，业务方 2026-09-06「补录的时候也会更新评论区核算表上去」）：补录组替换/重拉核算表，新版**继承「补录」标记**，
+    # 照常复核+初审、初审即定稿，不因换了表就掉进财务BP终审。显式传 historical 可覆盖；不传则看组里有没有补录记录。
+    backfill = bool(historical) if historical is not None else any(x.get("historical") == 2 for x in db.bom_group_entries(src, gid))
     # 组内的 BOM清单：本次随单解析到的研发 BOM 优先（最新），再用同组既有 bom_list 兜底
     bom_pool = list(bom_lists or [])
     for x in db.bom_group_entries(src, gid):
@@ -1682,7 +1685,10 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             "origin": origin, "src_label": label or (old.get("src_label") if old else ""),
             "group_id": gid, "active": 1, "approval_no": appno,
             "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"), "status": "未复核", "created_by": user,
+            "historical": 2 if backfill else None,
         })
+        if backfill:
+            db.bom_add_audit(eid, user, "补录承接", "", "替换/重拉的新版继承「补录」标记：照常复核+初审，初审通过即定稿，不经财务BP终审")
         try:
             safe = "".join(ch if ch not in '\\/:*?"<>|' else "_" for ch in (fname or "replace.xlsx"))
             with open(os.path.join(pdir, "%d__%s" % (eid, safe)), "wb") as fh:
@@ -1758,7 +1764,7 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
     db.audit(user, "bom_replace_sheet", target="%s/%s" % (appno, gid),
              detail="替换 %d、新增 %d、仍不平 %d（%s）" % (len(replaced), len(added), len(still_bad), via))
     return {"ok": True, "replaced": replaced, "added": added, "stillBad": still_bad,
-            "staleDownstream": stale, "via": via}
+            "staleDownstream": stale, "via": via, "backfill": backfill}
 
 
 @router.post("/api/bom/replace-sheet")
@@ -1776,7 +1782,9 @@ async def bom_replace_sheet(request: Request):
     if uf is None:
         return JSONResponse({"ok": False, "msg": "请上传修正后的核算表 xlsx"}, status_code=400)
     data = await uf.read()
-    res = _do_replace_sheet(_src(), gid, data, getattr(uf, "filename", "replace.xlsx"), "", u["name"], appno, "手动上传")
+    hist = form.get("historical")
+    hist = None if hist in (None, "") else str(hist).lower() in ("1", "true", "yes", "on")
+    res = _do_replace_sheet(_src(), gid, data, getattr(uf, "filename", "replace.xlsx"), "", u["name"], appno, "手动上传", historical=hist)
     return JSONResponse(res, status_code=200 if res.get("ok") else 400)
 
 
@@ -1822,7 +1830,8 @@ async def bom_refetch_replace(request: Request):
             b["craft"] = craft
             b["srcFile"] = a.get("fileName") or ""
         bom_lists.extend(bl)
-    out = _do_replace_sheet(_src(), gid, biz["bytes"], biz["fileName"], biz.get("label") or "", u["name"], appno, "重连钉钉", bom_lists=bom_lists)
+    out = _do_replace_sheet(_src(), gid, biz["bytes"], biz["fileName"], biz.get("label") or "", u["name"], appno, "重连钉钉", bom_lists=bom_lists,
+                            historical=(None if body.get("historical") is None else bool(body.get("historical"))))
     if out.get("ok"):
         out["bomSheets"] = [b.get("productName") for b in bom_lists]
     return JSONResponse(out, status_code=200 if out.get("ok") else 400)

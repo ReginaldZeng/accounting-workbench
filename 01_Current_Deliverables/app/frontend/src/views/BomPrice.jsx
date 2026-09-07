@@ -685,7 +685,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
     if (!r || !r.ok) return flash((r && r.msg) || '替换失败')
     setRep({ ...r, how })
     const st = (r.staleDownstream || []).length
-    flash(`${how}：替换 ${r.replaced.length}、新增 ${r.added.length}` + (r.stillBad.length ? `，仍不平 ${r.stillBad.length}` : '') + (st ? `，下游 ${st} 个受影响已打回未复核` : ''))
+    flash(`${how}：替换 ${r.replaced.length}、新增 ${r.added.length}` + (r.stillBad.length ? `，仍不平 ${r.stillBad.length}` : '') + (st ? `，下游 ${st} 个受影响已打回未复核` : '') + (r.backfill ? '　· 补录组：新版承接「补录」标记，初审通过即定稿' : ''))
     await load()
   }
   const doRefetch = async (gid) => {
