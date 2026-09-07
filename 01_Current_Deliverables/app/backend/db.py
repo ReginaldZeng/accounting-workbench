@@ -772,6 +772,11 @@ CAP_META_STATIC = [
      "sensitive": True, "tier": "act", "mod": "bp:board:budgetCockpit"},
     {"key": "weekly:view", "label": "驾驶舱·查看/生成业绩周报（发送另需 weekly:send）", "ws": "bp", "group": "销售预算",
      "sensitive": True, "tier": "act", "mod": "bp:board:budgetCockpit"},
+    # V2.510 登记 BP V2.418.2 的业绩快报点 flash:view（范围×周/月/季 一页 A4：查看/打印/出图）。
+    #   同 weekly:view 定位：BP 侧非敏感（'*' 覆盖=管理员默认有）、核算侧标 sensitive＝默认不给、不 backfill、须逐人勾选；
+    #   不进 BP_SENSITIVE_CODES。受限数据域账号有此点也只看自己团队（BP routers/flash.py 收窄）。
+    {"key": "flash:view", "label": "驾驶舱·业绩快报（范围×周/月/季 一页 A4：查看/打印/出图）", "ws": "bp", "group": "销售预算",
+     "sensitive": True, "tier": "act", "mod": "bp:board:budgetCockpit"},
     # V2.323 加 parent：导出从属于「项目视图」（没有视图权的导出权无意义），层级化+级联同上。
     {"key": "perf:export", "label": "驾驶舱·项目视图导出 Excel（接口未上线，先控按钮）", "ws": "bp", "group": "销售预算",
      "sensitive": True, "tier": "act", "mod": "bp:board:budgetCockpit", "parent": "perf:projectView"},
