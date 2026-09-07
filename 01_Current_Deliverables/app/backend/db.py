@@ -777,6 +777,11 @@ CAP_META_STATIC = [
     #   不进 BP_SENSITIVE_CODES。受限数据域账号有此点也只看自己团队（BP routers/flash.py 收窄）。
     {"key": "flash:view", "label": "驾驶舱·业绩快报（范围×周/月/季 一页 A4：查看/打印/出图）", "ws": "bp", "group": "销售预算",
      "sensitive": True, "tier": "act", "mod": "bp:board:budgetCockpit"},
+    # V2.513 登记 BP V2.419 的快报推送点 flash:push（推到钉钉群/个人：手动、定时、群里 @机器人 按需）。
+    #   同 weekly:send：外发动作标 sensitive、parent=flash:view（没有查看权的推送权是死码，层级化+级联收回）；
+    #   BP 侧非敏感（'*' 覆盖）且另有口令 BP_WEEKLY_SEND_CODE 真闸 → **不进 BP_SENSITIVE_CODES**。
+    {"key": "flash:push", "label": "驾驶舱·业绩快报推送到钉钉（群/个人，另需口令）", "ws": "bp", "group": "销售预算",
+     "sensitive": True, "tier": "act", "mod": "bp:board:budgetCockpit", "parent": "flash:view"},
     # V2.323 加 parent：导出从属于「项目视图」（没有视图权的导出权无意义），层级化+级联同上。
     {"key": "perf:export", "label": "驾驶舱·项目视图导出 Excel（接口未上线，先控按钮）", "ws": "bp", "group": "销售预算",
      "sensitive": True, "tier": "act", "mod": "bp:board:budgetCockpit", "parent": "perf:projectView"},
