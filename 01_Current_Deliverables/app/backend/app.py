@@ -43,7 +43,7 @@ import ops   # V2.489 运维观测埋点（请求日志/并发/慢接口/在线�
 # ── 共享内核（V2.172 从本文件拆出；见 core.py 头部说明）──
 from core import (  # noqa: F401  部分名供 routers/ 与本文件共用
     AUTH_LEDGER_PATH, BASE, CFG, DIST, KdNotFetched, LEDGER_PATH, SAMPLE_YM, _BADJ_CACHE,
-    _CH_CACHE, _DS_CACHE, _FUND_CACHE, _OPEN_API, _RECON_CACHE, _SBAL_CACHE, _SYNC_AT,
+    _BSTMT_CACHE, _CH_CACHE, _DS_CACHE, _FUND_CACHE, _OPEN_API, _RECON_CACHE, _SBAL_CACHE, _SYNC_AT,
     _WR_CACHE, _cache_clear, _cache_get, _cache_key, _closed_block, _closed_info, _current_user,
     _is_closed, _kd_fetch_store, _kd_get, _kd_sync_info, _kd_synced_at, _now, _period_bank,
     _period_data_status, _period_str, _require_perm, _user_public, save_cfg, sid_name, VERSION_INFO,
@@ -2367,6 +2367,133 @@ def _balance_adjust():
     return {**base, "accounts": accounts, "对平户数": ping, "不平户数": len(accounts) - ping, "钩稽": tie}
 
 
+# ---------------- 银行余额调节表（全四类科目·单月竖版）----------------
+# 对标业务方手工《各银行余额》表的一个月区块：每账户列 银行流水余额(原币)+汇率+综合本位币 |
+# 金蝶系统余额(原币) | 差额(银行−金蝶) | 备注。科目分四类（库存现金/银行存款/交易性金融资产/
+# 其它货币资金）。与 _balance_adjust（只 1002·从逐笔稽核推智能未达）互补：本表是全科目的余额对照总表，
+# 差额走原始差(银行−金蝶原币)+手工备注；智能未达明细仍在「余额调节」页下钻。
+# 金蝶侧四类精确到原币：期初原币(gl_balance) + 本期序时账原币净(gl_subjects·rc.kd_delta_for)。
+# 银行侧：银行存款取归一化流水最新余额；其他科目暂待人工/后续接渠道·理财对账单（bank_bal=None→前端显"待人工"）。
+_STMT_CAT_ORDER = ["银行存款", "其它货币资金", "交易性金融资产", "库存现金"]
+
+
+def _balance_statement():
+    base = {"source": CFG["source"], "period": _period_str(), "updated_at": _now()}
+    if CFG["source"] != "kingdee":
+        return {**base, "groups": [], "note": "样例数据（切到金蝶真数据后可出调节表）"}
+    try:
+        bank_rows, _kd1002, _mf, _src = _real_bank_kd()
+        bal_rows = _kd_get("gl_balance")
+        vou_rows = _kd_get("gl_subjects")
+    except KdNotFetched:
+        return {**base, "未取数": True, "groups": [], "note": "本期未取数：请到「数据接入」点【刷新金蝶数据】"}
+    except kc.KingdeeError as e:
+        return {**base, "error": str(e), "groups": []}
+
+    MONEY = ("1001", "1002", "1012", "1101")
+    # 金蝶原币期初：按(科目,维度)去重取具体币别行（外币户原币才准，同 _balance_adjust 口径）。按账号汇总。
+    kd_open, acct_code, acct_cur = {}, {}, {}
+    seen = set()
+    for r in bal_rows:
+        code = str(r.get("科目编码") or "")
+        if not code.startswith(MONEY):
+            continue
+        dim = str(r.get("核算维度.银行账号.编码") or r.get("核算维度.银行账号.名称") or "").strip()
+        if not dim:
+            continue
+        key = (code, dim)
+        if key in seen:
+            continue                         # GL_BALANCE 重复行去重
+        seen.add(key)
+        a = al.norm_acct(dim)
+        if not a:
+            continue
+        kd_open[a] = kd_open.get(a, 0.0) + rc.to_float(r.get("期初原币") or 0)
+        acct_code.setdefault(a, code)
+        cur = str(r.get("币别") or "").strip()
+        if cur:
+            acct_cur.setdefault(a, cur)
+    # 本期序时账原币净 + 该币种记账汇率（月内最后一笔覆盖=月末近似）
+    kd_move, cur_rate = {}, {}
+    for r in vou_rows:
+        code = str(r.get("科目编码") or "")
+        if not code.startswith(MONEY):
+            continue
+        a = al.norm_acct(r.get("FDetailID.FF100002.FNumber") or "")
+        if not a:
+            continue
+        kd_move[a] = kd_move.get(a, 0.0) + rc.kd_delta_for(r)
+        acct_code.setdefault(a, code)
+        c = str(r.get("FCURRENCYID.FName") or r.get("币别") or "").strip()
+        if c:
+            acct_cur.setdefault(a, c)
+            rate = rc.to_float(r.get("FEXCHANGERATE") or 0)
+            if rate > 0:
+                cur_rate[c] = rate
+    # 银行侧（银行存款·1002）：每户流水最新余额（交易日期最晚一笔）
+    bank_last = {}
+    for r in bank_rows:
+        a = al.norm_acct(r.get("账号") or "")
+        if not a or r.get("余额") is None:
+            continue
+        d = r.get("交易日期") or ""
+        if a not in bank_last or d >= bank_last[a][0]:
+            bank_last[a] = (d, rc.to_float(r.get("余额")))
+
+    def _rate_for(cur):
+        if cur in ("人民币", "CNY", "RMB", ""):
+            return 1.0
+        return cur_rate.get(cur)          # 外币取金蝶记账汇率；缺则 None（前端显 —）
+
+    notes = db.list_balance_notes(CFG["year"], CFG["period"])
+    buckets = {c: [] for c in _STMT_CAT_ORDER}
+    diff_total = 0
+    for a in set(kd_open) | set(kd_move) | set(bank_last):
+        code = acct_code.get(a, "")
+        cat = al.cat_from_code(code) or "其它货币资金"
+        if cat not in buckets:
+            buckets[cat] = []
+        sub, bank, acct_name, cur0 = _acct_info(a)
+        cur = cur0 or acct_cur.get(a, "") or "人民币"
+        kd_bal = round(kd_open.get(a, 0.0) + kd_move.get(a, 0.0), 2)     # 金蝶系统余额（原币）
+        bank_bal = bank_last[a][1] if a in bank_last else None            # 银行流水余额（原币），非1002暂 None
+        rate = _rate_for(cur)
+        base_ccy = round(bank_bal * rate, 2) if (bank_bal is not None and rate is not None) else None
+        diff = round(bank_bal - kd_bal, 2) if bank_bal is not None else None
+        has_diff = diff is not None and abs(diff) > 0.01
+        if has_diff:
+            diff_total += 1
+        nt = notes.get(a, {})
+        buckets[cat].append({
+            "账号": a, "科目": cat, "主体": sub, "开户行": bank,
+            "账户名称": acct_name or a, "币别": cur,
+            "银行流水余额": bank_bal, "汇率": rate, "综合本位币": base_ccy,
+            "金蝶系统余额": kd_bal, "差额": diff, "有差异": has_diff,
+            "银行侧缺": bank_bal is None,                                  # 非1002/无对账单：待人工
+            "全零": (bank_bal in (None, 0) and abs(kd_bal) < 0.01),
+            "备注": nt.get("note", ""), "备注人": nt.get("operator", ""), "备注时间": nt.get("ts", ""),
+        })
+    groups = []
+    for cat in _STMT_CAT_ORDER:
+        rows = buckets.get(cat) or []
+        rows.sort(key=lambda x: (-(abs(x["差额"]) if x["差额"] is not None else -1), x["账户名称"]))
+        nz = [x for x in rows if not x["全零"]]
+        groups.append({"科目": cat, "户数": len(rows), "非零户数": len(nz),
+                       "有差异户数": sum(1 for x in rows if x["有差异"]), "accounts": rows})
+    return {**base, "groups": [g for g in groups if g["户数"]],
+            "差异户数": diff_total, "汇率口径": "金蝶记账汇率（月内序时账）；人民币=1；外币无记账汇率则空"}
+
+
+@app.get("/api/balance-statement")
+def balance_statement():
+    return _cache_get(_BSTMT_CACHE, _balance_statement)
+
+
+@app.post("/api/balance-statement/sync")
+def balance_statement_sync():
+    return _closed_block() or _cache_get(_BSTMT_CACHE, _balance_statement, force=True)
+
+
 def _channel_adjust():
     """第三方渠道(支付宝等,1012)余额勾稽：渠道对账单期末余额+本期收支 vs 金蝶1012该维度账面(期初+序时账)。
     逐笔对不了(海量微交易 vs 汇总)，故核对总额：本期净是否一致 + 期末余额差(=期初跨期差)。"""
@@ -2615,7 +2742,7 @@ def balance_adjust_note(body: dict, request: Request):
     note = str(body.get("note", "") or "")
     db.set_balance_note(CFG["year"], CFG["period"], acct, note, u["name"])
     db.audit(u["name"], "余额调节-未达原因", acct, note[:80])
-    _BADJ_CACHE.clear()          # 缓存里带的是旧原因，清掉让下次读到最新
+    _BADJ_CACHE.clear(); _BSTMT_CACHE.clear()   # 两处共用同一备注存储，一起清让下次都读到最新
     return {"ok": True, "operator": u["name"], "ts": db._now()}
 
 
