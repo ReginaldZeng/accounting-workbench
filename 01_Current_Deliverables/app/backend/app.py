@@ -131,6 +131,7 @@ def _auth_ledger_records(period_str):
             "类别": cat,
             "科目大类": _CAT2SUBJ.get(cat, r.get("科目大类", "银行存款")),
             "币种": r.get("币种", "CNY"),
+            "开户日期": ov_acct.get("开户日期", ""),   # 手工维护的账户主数据（余额调节表引用）
             "稽核方案": scheme,
             "稽核方案_手工": bool(ov_acct.get("稽核方案")),
             "状态": status,
@@ -2040,6 +2041,12 @@ def account_ledger_override(body: dict, request: Request):
             cur.pop("失效", None)
     if body.get("稽核方案") in ("明细", "余额"):
         cur["稽核方案"] = body["稽核方案"]
+    if "开户日期" in body:                       # 账户主数据：开户日期（余额调节表自动引用）；空=清除
+        d = str(body.get("开户日期") or "").strip()
+        if d:
+            cur["开户日期"] = d
+        else:
+            cur.pop("开户日期", None)
     if cur:
         ov[acct] = cur
     else:
@@ -2375,7 +2382,7 @@ def _balance_adjust():
 # 金蝶侧四类精确到原币：期初原币(gl_balance) + 本期序时账原币净(gl_subjects·rc.kd_delta_for)。
 # 银行侧：银行存款取归一化流水最新余额；其他科目暂待人工/后续接渠道·理财对账单（bank_bal=None→前端显"待人工"）。
 _STMT_CAT_ORDER = ["银行存款", "其它货币资金", "交易性金融资产", "库存现金"]
-_STMT_OPENDATE = "bank_open_dates"           # 开户日期：{账号: 'YYYY-MM-DD'}，手填一次跨期记住（全局设置）
+# 开户日期改在【账户台账】维护（account-ledger override 的「开户日期」字段），调节表只读引用，不在此另存。
 
 
 def _stmt_manual_key():
@@ -2398,7 +2405,8 @@ def _balance_statement():
 
     MONEY = ("1001", "1002", "1012", "1101")
     # 金蝶原币期初：按(科目,维度)去重取具体币别行（外币户原币才准，同 _balance_adjust 口径）。按账号汇总。
-    kd_open, acct_code, acct_cur = {}, {}, {}
+    # kd_name：金蝶核算维度「银行账号.名称」——电商渠道等在出纳台账里账号为空，靠这个友好户名兜住显示名。
+    kd_open, acct_code, acct_cur, kd_name = {}, {}, {}, {}
     seen = set()
     for r in bal_rows:
         code = str(r.get("科目编码") or "")
@@ -2416,6 +2424,9 @@ def _balance_statement():
             continue
         kd_open[a] = kd_open.get(a, 0.0) + rc.to_float(r.get("期初原币") or 0)
         acct_code.setdefault(a, code)
+        nm = str(r.get("核算维度.银行账号.名称") or "").strip()
+        if nm:
+            kd_name.setdefault(a, nm)        # 金蝶友好户名（如"星期零抖音账户（抖音17724646962）"）
         cur = str(r.get("币别") or "").strip()
         if cur:
             acct_cur.setdefault(a, cur)
@@ -2465,7 +2476,8 @@ def _balance_statement():
         return cur_rate.get(cur)          # 外币取金蝶记账汇率；缺则 None（前端显 —）
 
     notes = db.list_balance_notes(CFG["year"], CFG["period"])
-    open_dates = db.get_setting(_STMT_OPENDATE, None) or {}              # 开户日期：手填一次、跨期记住（全局）
+    ov_all = _load_overrides()                                           # 开户日期在账户台账维护，这里只引用
+    open_dates = {a: (o or {}).get("开户日期", "") for a, o in ov_all.items()}
     manual_bal = db.get_setting(_stmt_manual_key(), None) or {}          # 银行侧手填余额：按期间存（每月可不同）
     buckets = {c: [] for c in _STMT_CAT_ORDER}
     diff_total = 0
@@ -2475,6 +2487,7 @@ def _balance_statement():
         if cat not in buckets:
             buckets[cat] = []
         sub, bank, acct_name, cur0 = _acct_info(a)
+        acct_name = acct_name or kd_name.get(a, "")                     # 台账无名→用金蝶友好户名（电商渠道账号空时靠这个）
         cur = cur0 or acct_cur.get(a, "") or "人民币"
         kd_bal = round(kd_open.get(a, 0.0) + kd_move.get(a, 0.0), 2)     # 金蝶系统余额（原币）
         # 银行侧取值优先级：流水(银行存款) → 渠道对账(电商) → 人工录入(手填) → 待人工
@@ -2556,27 +2569,6 @@ def balance_statement_manual(body: dict, request: Request):
     db.audit(u["name"], "余额调节表-手填银行侧余额", acct, str(val))
     _BSTMT_CACHE.clear()
     return {"ok": True, "acct": acct, "bal": val, "operator": u["name"]}
-
-
-@app.post("/api/balance-statement/open-date")
-def balance_statement_open_date(body: dict, request: Request):
-    """账户开户日期：手填一次、跨期记住（全局，不随期间变）。空=清除。"""
-    u = _require_perm(request, "claim")
-    if not u:
-        return JSONResponse({"ok": False, "msg": "无「认领/处理差异」权限，不能录入开户日期"}, status_code=403)
-    acct = str(body.get("acct", "") or "").strip()
-    if not acct:
-        return {"ok": False, "msg": "缺账号"}
-    date = str(body.get("date", "") or "").strip()
-    m = dict(db.get_setting(_STMT_OPENDATE, None) or {})
-    if date:
-        m[acct] = date
-    else:
-        m.pop(acct, None)
-    db.set_setting(_STMT_OPENDATE, m, u["name"])
-    db.audit(u["name"], "余额调节表-开户日期", acct, date)
-    _BSTMT_CACHE.clear()
-    return {"ok": True, "acct": acct, "date": date, "operator": u["name"]}
 
 
 def _build_statement_xlsx(stmt):

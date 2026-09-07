@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.511
+// 账户台账加「开户日期」列（内联 date 输入，改即存，走 override）——账户主数据在此维护，余额调节表自动引用。
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1
 // 账户台账：列重定义(主体/开户行·渠道/账号/稽核方案/状态/操作/来源) + 家底汇总带 + 手工标失效(金蝶不维护此步)
 import React, { useEffect, useState } from 'react'
@@ -34,6 +36,12 @@ export default function AccountLedger({ cfg, onPeriod }) {
     await setLedgerOverride({ 账号, 稽核方案 }); await load()
     setMsg(`已将 ${账号} 稽核方案改为「${稽核方案}」` + (稽核方案 === '余额' ? '：不走逐笔，只需 金蝶余额 = 银行余额' : '：走逐笔明细稽核'))
   }
+  const setOpenDate = async (账号, 开户日期) => {   // 开户日期是账户主数据，余额调节表自动引用这里维护的值
+    if (!账号) return
+    setErr('')
+    try { await setLedgerOverride({ 账号, 开户日期 }); await load(); setMsg(`已更新 ${账号} 开户日期${开户日期 ? '＝' + 开户日期 : '（已清除）'}`) }
+    catch (e) { setErr('保存开户日期失败（可能无「账户台账改动」权限）：' + (e.message || e)) }
+  }
   if (!recs) return <div className="loading">加载中…</div>
   const ents = ['all', ...[...new Set(recs.map(r => r['主体']))]]
   const rows = recs.filter(r => (ent === 'all' || r['主体'] === ent) && (cat === '全部' || r['科目大类'] === cat) && (!onlyNew || r['本月新增']) && (incl || r['状态'] === '生效'))
@@ -41,7 +49,7 @@ export default function AccountLedger({ cfg, onPeriod }) {
   return (<div>
     <div className="head">
       <div><div className="h-title">账户台账</div>
-        <div className="h-sub">银行对账的匹配地基，从金蝶自动同步。稽核方案可点击调整（明细=走逐笔稽核 / 余额=只需金蝶余额对上银行余额）；失效需手工维护（金蝶不维护此步）</div></div>
+        <div className="h-sub">银行对账的匹配地基，从金蝶自动同步。开户日期、稽核方案、失效为手工维护（金蝶不维护）：开户日期在此填一次，余额调节表自动引用；稽核方案 明细=走逐笔 / 余额=只需金蝶余额对上银行余额</div></div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
         <button className="btn btn-pri" onClick={sync} disabled={busy}>{busy ? '同步中…' : '从金蝶同步'}</button></div>
@@ -69,7 +77,7 @@ export default function AccountLedger({ cfg, onPeriod }) {
           <label className="ck"><input type="checkbox" checked={incl} onChange={e => setIncl(e.target.checked)} /> 含失效/已销户</label></div>
       </div>
       <div className="tbl-wrap"><table style={{ minWidth: 900 }}>
-        <thead><tr>{['主体', '开户行/渠道', '账号', '稽核方案', '状态', '操作', '来源'].map(h => <th className="th" key={h}>{h}</th>)}</tr></thead>
+        <thead><tr>{['主体', '开户行/渠道', '账号', '开户日期', '稽核方案', '状态', '操作', '来源'].map(h => <th className="th" key={h}>{h}</th>)}</tr></thead>
         <tbody>{rows.map((r, i) => {
           const st = r['状态'] || (r['_active'] ? '生效' : '已销户')
           const stCls = st === '生效' ? { background: 'var(--green-bg)', color: 'var(--green)', borderColor: 'var(--green-line)' }
@@ -81,6 +89,10 @@ export default function AccountLedger({ cfg, onPeriod }) {
             <td>{r['开户行'] || '—'}</td>
             <td><span className="acct">{r['账号'] || '—'}</span>{r['本月新增'] && <span className="newtag">*New</span>}</td>
             <td>{r['账号']
+              ? <input type="date" value={r['开户日期'] || ''} onChange={e => setOpenDate(r['账号'], e.target.value)} title="账户开户日期（余额调节表自动引用）"
+                  style={{ fontSize: 12, padding: '2px 4px', borderRadius: 5, border: '1px solid var(--line-strong,#cfcdc4)', background: 'transparent', color: 'var(--ink)' }} />
+              : <span className="muted">—</span>}</td>
+            <td>{r['账号']
               ? <span className={'tag ' + (scheme === '明细' ? 'kd' : 'unmap')} style={{ cursor: 'pointer' }} title="点击切换：明细(走逐笔稽核) / 余额(只需金蝶余额=银行余额)" onClick={() => setScheme(r['账号'], scheme === '明细' ? '余额' : '明细')}>{scheme} ⇄{r['稽核方案_手工'] ? <span style={{ color: 'var(--amber)' }}> *</span> : ''}</span>
               : <span className={'tag ' + (scheme === '明细' ? 'kd' : 'unmap')}>{scheme}</span>}</td>
             <td><span className="badge" style={stCls}>{st}</span></td>
@@ -91,7 +103,7 @@ export default function AccountLedger({ cfg, onPeriod }) {
                 : <span className="lk" style={{ color: 'var(--red)' }} onClick={() => toggleOff(r['账号'], true)}>标记失效</span>}</td>
             <td className="muted">{r['来源'] || '金蝶同步'}</td>
           </tr>
-        })}{rows.length === 0 && <tr><td colSpan="7" className="muted">无匹配账户。</td></tr>}</tbody>
+        })}{rows.length === 0 && <tr><td colSpan="8" className="muted">无匹配账户。</td></tr>}</tbody>
       </table></div>
     </div>
   </div>)

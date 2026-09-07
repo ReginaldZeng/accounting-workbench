@@ -1,3 +1,6 @@
+// [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.511
+// 余额调节表·全科目：开户日期改由「账户台账」维护、本表只读引用（不再在本表手填）；账户名优先用金蝶核算维度友好户名
+// （电商渠道在出纳台账账号为空时，不再显裸编码）。
 // [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.509
 // 余额调节表·全科目：①待人工的户支持手填银行侧余额(存住·差额自动算·数据来源=人工录入)；②开户日期手填一次跨期记住；
 // ③账户名显已销户标；④导出 Excel 单月扁表(科目/账户/币别/账户状态/开户日期/数据来源/余额/差额/备注)。
@@ -13,7 +16,7 @@
 // 有「认领/处理差异」权限的会计可填/改，显示填写人+时间，供领导核查(领导只读可见)。
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1 资金看板冷灰重构+缓存不清屏
 import React, { useEffect, useState } from 'react'
-import { getFund, syncFund, getBalanceAdjust, syncBalanceAdjust, getChannelAdjust, syncChannelAdjust, saveBalanceNote, getBalanceStatement, syncBalanceStatement, setStmtManualBalance, setStmtOpenDate, balanceStatementExportUrl, yuan } from '../api.js'
+import { getFund, syncFund, getBalanceAdjust, syncBalanceAdjust, getChannelAdjust, syncChannelAdjust, saveBalanceNote, getBalanceStatement, syncBalanceStatement, setStmtManualBalance, balanceStatementExportUrl, yuan } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import Steps from '../components/Steps.jsx'
 
@@ -82,14 +85,7 @@ function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt,
               {a['账户名称'] || a['主体'] || '—'}
               {a['账户状态'] === '已销户' ? <span style={{ marginLeft: 5, fontSize: 10, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 3px' }}>已销户</span> : null}
               <div className="sub">{[a['主体'], a['开户行']].filter(Boolean).join(' · ')}</div>
-              <div className="sub" style={{ marginTop: 1 }}>开户日：{isCell(a['账号'], 'date')
-                ? <span style={{ display: 'inline-flex', gap: 4 }}>
-                    <input type="date" autoFocus value={cv} onChange={e => setCv(e.target.value)} style={{ fontSize: 11, padding: '1px 3px', borderRadius: 4, border: '1px solid var(--line-strong,#cfcdc4)' }} />
-                    <span className="lk" style={{ fontSize: 11 }} onClick={doCell}>存</span><span className="lk" style={{ fontSize: 11 }} onClick={() => setCe(null)}>×</span>
-                  </span>
-                : (a['开户日期']
-                    ? <span>{a['开户日期']}{canNote ? <span className="lk" style={{ marginLeft: 4, fontSize: 10 }} onClick={() => startCell(a['账号'], 'date', a['开户日期'])}>改</span> : null}</span>
-                    : (canNote ? <span className="lk" style={{ fontSize: 11 }} onClick={() => startCell(a['账号'], 'date', '')}>+ 填</span> : '—'))}</div>
+              {a['开户日期'] ? <div className="sub" style={{ marginTop: 1 }}>开户日：{a['开户日期']}</div> : null}
             </td>
             <td style={{ padding: '6px 8px', textAlign: 'center', borderBottom: '1px solid var(--line)', color: foreign ? 'var(--blue)' : 'var(--ink-3)', fontWeight: foreign ? 600 : 400, whiteSpace: 'nowrap' }}>{cur || '—'}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', fontWeight: 600, background: 'var(--accent-soft,var(--accent-soft))' }}>
@@ -174,11 +170,12 @@ export default function FundDashboard({ cfg, onPeriod, onNav, user }) {
       setEditAcct(null)
     } catch (e) { alert(String(e.message || e)) } finally { setNoteBusy(false) }
   }
-  // 手填银行侧余额 / 开户日期（待人工的户用；后端存住、差额自动重算）→ 存完重取一次调节表最省心
+  // 手填银行侧余额（待人工的户用；后端存住、差额自动重算）→ 存完重取一次调节表最省心。
+  // 开户日期不在此填——它是账户主数据，在「账户台账」维护，调节表只读引用。
   const saveStmtCell = async (acct, kind, value) => {
     setNoteBusy(true)
     try {
-      const r = kind === 'bal' ? await setStmtManualBalance(acct, value) : await setStmtOpenDate(acct, value)
+      const r = await setStmtManualBalance(acct, value)
       if (!r.ok) { alert(r.msg || '保存失败'); return false }
       setBs(await getBalanceStatement())   // 差额/数据来源随手填变，重取保证一致
       return true

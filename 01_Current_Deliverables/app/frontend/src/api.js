@@ -59,8 +59,8 @@ export const syncBalanceAdjust = () => j('/api/balance-adjust/sync', {method:'PO
 export const getBalanceStatement = () => j('/api/balance-statement')
 export const syncBalanceStatement = () => j('/api/balance-statement/sync', {method:'POST'})
 export const setStmtManualBalance = (acct, bal) => jp('/api/balance-statement/manual-balance', { acct, bal })
-export const setStmtOpenDate = (acct, date) => jp('/api/balance-statement/open-date', { acct, date })
 export const balanceStatementExportUrl = () => '/api/balance-statement/export'
+// 开户日期改在账户台账维护（setLedgerOverride 带「开户日期」），调节表只读引用，故此处不再有 setStmtOpenDate
 export const saveBalanceNote = (b) => jp('/api/balance-adjust/note', b)
 export const getChannelAdjust = () => j('/api/channel-adjust')
 export const syncChannelAdjust = () => j('/api/channel-adjust/sync', {method:'POST'})
