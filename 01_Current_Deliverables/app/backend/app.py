@@ -2439,6 +2439,19 @@ def _balance_statement():
         d = r.get("交易日期") or ""
         if a not in bank_last or d >= bank_last[a][0]:
             bank_last[a] = (d, rc.to_float(r.get("余额")))
+    # 银行侧（其他货币资金·1012·电商渠道）：接第三方渠道对账的「渠道期末余额」——支付宝等本就已解析、
+    # 按金蝶维度匹配好，这里按账号引过来当银行侧（不重复解析，见 _channel_adjust）。
+    chan_bal = {}
+    try:
+        cd = _cache_get(_CH_CACHE, _channel_adjust)
+        for c in (cd.get("channels") or []):
+            dim = c.get("金蝶维度") or ""
+            if dim and not str(dim).startswith("(") and c.get("渠道期末余额") is not None:
+                ca = al.norm_acct(dim)
+                if ca:
+                    chan_bal[ca] = rc.to_float(c["渠道期末余额"])
+    except Exception:
+        pass                              # 渠道对账不可用不影响调节表主体，1012 银行侧退回"待人工"
 
     def _rate_for(cur):
         if cur in ("人民币", "CNY", "RMB", ""):
@@ -2456,7 +2469,12 @@ def _balance_statement():
         sub, bank, acct_name, cur0 = _acct_info(a)
         cur = cur0 or acct_cur.get(a, "") or "人民币"
         kd_bal = round(kd_open.get(a, 0.0) + kd_move.get(a, 0.0), 2)     # 金蝶系统余额（原币）
-        bank_bal = bank_last[a][1] if a in bank_last else None            # 银行流水余额（原币），非1002暂 None
+        if a in bank_last:
+            bank_bal, bank_src2 = bank_last[a][1], "流水"                 # 银行存款：流水最新余额
+        elif a in chan_bal:
+            bank_bal, bank_src2 = chan_bal[a], "渠道"                     # 其他货币资金·渠道：渠道对账期末余额
+        else:
+            bank_bal, bank_src2 = None, ""                               # 现金/结构性存款/理财等：暂待人工
         rate = _rate_for(cur)
         base_ccy = round(bank_bal * rate, 2) if (bank_bal is not None and rate is not None) else None
         diff = round(bank_bal - kd_bal, 2) if bank_bal is not None else None
@@ -2469,7 +2487,8 @@ def _balance_statement():
             "账户名称": acct_name or a, "币别": cur,
             "银行流水余额": bank_bal, "汇率": rate, "综合本位币": base_ccy,
             "金蝶系统余额": kd_bal, "差额": diff, "有差异": has_diff,
-            "银行侧缺": bank_bal is None,                                  # 非1002/无对账单：待人工
+            "银行侧来源": bank_src2,                                       # 流水/渠道/""（待人工）
+            "银行侧缺": bank_bal is None,                                  # 无对账单：待人工（现金/结构性存款/理财等）
             "全零": (bank_bal in (None, 0) and abs(kd_bal) < 0.01),
             "备注": nt.get("note", ""), "备注人": nt.get("operator", ""), "备注时间": nt.get("ts", ""),
         })

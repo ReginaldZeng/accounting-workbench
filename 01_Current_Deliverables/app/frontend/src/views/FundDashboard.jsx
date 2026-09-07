@@ -1,3 +1,6 @@
+// [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.506
+// 余额调节表·全科目 接电商渠道银行侧：其他货币资金(支付宝等)银行侧余额接第三方渠道对账「渠道期末余额」，
+// 银行流水余额格显小「渠道」来源标；差额自动算出。理财/结构性存款/现金仍待人工（后续接）。
 // [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.503
 // 第三步加「余额调节表·全科目」tab（对标业务方《各银行余额》表）：四类科目(库存现金/银行存款/交易性金融资产/
 // 其他货币资金)逐户 银行流水余额+汇率+综合本位币 | 金蝶系统余额(原币) | 差额 | 备注；默认折叠全零户；备注复用未达存储。
@@ -68,7 +71,7 @@ function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt,
           return <tr key={i}>
             <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--line)', minWidth: 170 }}>{a['账户名称'] || a['主体'] || '—'}<div className="sub">{[a['主体'], a['开户行']].filter(Boolean).join(' · ')}</div></td>
             <td style={{ padding: '6px 8px', textAlign: 'center', borderBottom: '1px solid var(--line)', color: foreign ? 'var(--blue)' : 'var(--ink-3)', fontWeight: foreign ? 600 : 400, whiteSpace: 'nowrap' }}>{cur || '—'}</td>
-            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', fontWeight: 600, background: 'var(--accent-soft,var(--accent-soft))' }}>{a['银行侧缺'] ? <span style={{ color: 'var(--amber)', fontWeight: 500, fontSize: 11.5 }}>待人工</span> : yuan(a['银行流水余额'])}</td>
+            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', fontWeight: 600, background: 'var(--accent-soft,var(--accent-soft))' }}>{a['银行侧缺'] ? <span style={{ color: 'var(--amber)', fontWeight: 500, fontSize: 11.5 }}>待人工</span> : <span>{yuan(a['银行流水余额'])}{a['银行侧来源'] === '渠道' ? <span style={{ color: 'var(--ink-3)', fontSize: 10, marginLeft: 4, fontWeight: 400 }} title="来自第三方渠道对账（支付宝等）的渠道期末余额">渠道</span> : null}</span>}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: 'var(--ink-3)' }}>{rate(a['汇率'])}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: foreign ? 'var(--blue)' : 'var(--ink-3)' }}>{a['综合本位币'] != null ? yuan(a['综合本位币']) : '—'}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)' }}>{yuan(a['金蝶系统余额'])}</td>
@@ -182,7 +185,7 @@ export default function FundDashboard({ cfg, onPeriod, onNav, user }) {
       {/* Tab①：全四类科目余额调节表（对标《各银行余额》：银行流水余额+汇率+综合本位币 | 金蝶系统余额 | 差额 | 备注）*/}
       {tab === 'statement' && <div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
-          <div className="foot" style={{ flex: 1, minWidth: 260 }}>对标《各银行余额》调节表 · <b>全四类科目</b> · 单月（{d.period}）。银行流水余额与金蝶系统余额均按<b>原币</b>；综合本位币＝原币×金蝶记账汇率（人民币=1）；差额＝银行−金蝶，非零请填备注说明。其他货币资金 / 交易性金融资产的银行侧对账单接入中，暂显「待人工」。
+          <div className="foot" style={{ flex: 1, minWidth: 260 }}>对标《各银行余额》调节表 · <b>全四类科目</b> · 单月（{d.period}）。银行流水余额与金蝶系统余额均按<b>原币</b>；综合本位币＝原币×金蝶记账汇率（人民币=1）；差额＝银行−金蝶，非零请填备注说明。银行存款取流水、电商渠道（支付宝等）取<b>渠道对账</b>期末余额；理财 / 结构性存款 / 现金的银行侧接入中，暂显「待人工」。
             {bs && bs.groups && bs.groups.length > 0 && (bs.差异户数 ? <span> · <b style={{ color: 'var(--amber)' }}>有差异 {bs.差异户数} 户</b></span> : <span> · <b style={{ color: 'var(--green)' }}>全部对平</b></span>)}
           </div>
           <button className="btn" onClick={refreshBs} disabled={bsBusy}>{bsBusy ? '刷新中…' : '刷新'}</button>
