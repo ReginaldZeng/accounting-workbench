@@ -192,6 +192,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   const willFinalize = missing.length === 0
   // 本版核算日期早于已有审核版 → 多半是补录历史单，推荐 C
   const olderThanExisting = cands.some(c => c.calcDate && entry.calcDate && entry.calcDate < c.calcDate)
+  const importedCand = cands.length > 0 && cands.every(c => c.imported)   // 候选全是导入的无明细行（V2.514）→ 本版是来补明细的，建议答 A
   // 无物料编码 → 到金蝶物料档案按 CP 反查（业务方 2026-09-05 定：检测到就提示确认）。只提示不拦：未中试的本来没编码。
   const [erpLk, setErpLk] = useState(null)
   const [erpBusy, setErpBusy] = useState(false)
@@ -242,10 +243,12 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
         {/* .banner 默认是横向 flex，这里内容多行 → display:block 分三段：说明 / 候选清单 / 问句+两个按钮 */}
         {willFinalize && cands.length > 0 && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10, lineHeight: 1.6 }}>
           <div><b>⚠ 台账里已有 {cands.length} 个同CP / 同物料编码的审核版本</b>。请判断它和本版的关系：<b>A 新旧版</b>——原版失效、退出对外，引用它的 BP 定价收到「成本已更新」（终审通过那一刻切换）；<b>B 并行版本</b>——同一产品的不同版本/包装（如火腿片各版、印刷袋 vs 空白袋），都对外、互不替代，串成一组；<b>C 补录历史版</b>——本版比现有版本更早，只审不替代、不动当前对外版，让同单的半成品/成品能定稿。
-            {olderThanExisting && <span style={{ color: 'var(--red)', fontWeight: 600 }}>　本版核算日期 {entry.calcDate} 早于已有版本——多半是补录历史单，建议答 C；答 A 会让新版失效、老成本对外。</span>}</div>
+            {olderThanExisting && !importedCand && <span style={{ color: 'var(--red)', fontWeight: 600 }}>　本版核算日期 {entry.calcDate} 早于已有版本——多半是补录历史单，建议答 C；答 A 会让新版失效、老成本对外。</span>}
+            {importedCand && <span style={{ color: 'var(--accent)', fontWeight: 600 }}>　台账里那版是导入的无明细记录，本版带明细——建议答 A，让导入行退出、本版顶上（历史留痕；若两边全成本不同，以本版为准对外）。</span>}</div>
           <div style={{ margin: '8px 0', padding: '6px 10px', background: 'rgba(255,255,255,.55)', borderRadius: 8 }}>{cands.map(c => (
             <div key={c.entryId} style={{ fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: '2px 12px', alignItems: 'baseline', color: 'var(--ink)' }}>
               <b className="mono">{c.cpCode}</b><span>{c.productName}</span>
+              {c.imported && <span className="bom-gvtag">导入·无明细</span>}
               {c.erpCode && <span className="mono muted">物料编码 {c.erpCode}</span>}
               <span className="muted">{c.why}</span>
               <span className="muted">核算 {c.calcDate || '—'} · {c.status} {c.auditAt || ''}</span>
@@ -255,9 +258,9 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <b style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>原来的版本是否失效？</b>
             <div className="bom-catpick">
-              <button className={obs === 'replace' ? 'on no' : ''} onClick={() => setObs('replace')} title="本版替代原版：原版退出对外台账，BP 收到成本更新提示">A 是，原版失效</button>
+              <button className={obs === 'replace' ? 'on no' : ''} onClick={() => setObs('replace')} style={importedCand && !obs ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined} title="本版替代原版：原版退出对外台账，BP 收到成本更新提示">A 是，原版失效</button>
               <button className={obs === 'parallel' ? 'on ok' : ''} onClick={() => setObs('parallel')} title="两条是同一产品的并行版本（不同 CP / 不同包装），都对外、互不替代；台账标「并行」并串成一组">B 否，并行但关联</button>
-              <button className={obs === 'historical' ? 'on' : ''} onClick={() => setObs('historical')} style={olderThanExisting && !obs ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
+              <button className={obs === 'historical' ? 'on' : ''} onClick={() => setObs('historical')} style={olderThanExisting && !importedCand && !obs ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
                 title="本版是更早的历史版本：只盖初审戳、不替代现有版本、不动定稿指针、不对外，让同单的半成品/成品能定稿">C 补录历史版（只审不替代）</button>
             </div>
             <span className="muted" style={{ fontSize: 11 }}>拿不准先点「对比 ›」看两张采购核算表差在哪；不答则只存定性、不定稿。</span>
@@ -383,6 +386,7 @@ function BomLedgerView({ user, mode = 'std' }) {
         onOpen={openDetail} flash={flash}
         isSuper={isSuper} onDelete={(target, label, after) => setDelM({ target, label, after })} />}
       {view === 'detail' && entry && <Detail entry={entry} all={data.all} cfg={cfg} mode={mode} onBack={backFromDetail}
+        onFill={(e) => setManual({ approvalNo: e.approval || '', historical: true })}
         onOpen={openDetail} onCompare={openCompare} onChanged={async () => { const r = await getBomEntry(curId); setEntry(r.entry); load() }}
         flash={flash}
         isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: backFromDetail })} />}
@@ -390,7 +394,7 @@ function BomLedgerView({ user, mode = 'std' }) {
         onDone={async () => { const f = delM.after; setDelM(null); if (f) await f() }} />}
       {view === 'compare' && entry && <Compare entry={entry} all={data.all} onBack={() => setView('detail')} flash={flash} />}
       {stdImp && <StdImportModal cfg={cfg} init={stdImp} onClose={() => setStdImp(null)} flash={flash} onDone={load} />}
-      {manual && <IntakeModal cfg={cfg} onClose={() => setManual(false)} flash={flash}
+      {manual && <IntakeModal cfg={cfg} init={typeof manual === 'object' ? manual : null} onClose={() => setManual(false)} flash={flash}
         onDone={(no) => { setManual(false); load(); openApproval(no) }} />}
       {finalRow && <FinalReviewModal row={finalRow} onClose={() => setFinalRow(null)}
         onDone={() => { setFinalRow(null); load() }} flash={flash} />}
@@ -916,7 +920,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
 }
 
 // ============ 采购核算表详情 ============
-function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, flash, isSuper, onDelete }) {
+function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, flash, isSuper, onDelete, onFill }) {
   const isStd = mode === 'std'
   const [edit, setEdit] = useState(false)
   const [fee, setFee] = useState(entry.fee)
@@ -1047,6 +1051,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {versions.length > 1 && <a onClick={() => { setExpMenu(false); onCompare() }}><b>⇄ 版本对比</b><span>同产品 {versions.length} 个版本逐料涨跌</span></a>}
           </div>}</>}
           {!cfg?.canExport && versions.length > 1 && <button className="btn-sec" onClick={onCompare}>⇄ 版本对比</button>}
+          {/* 补明细（V2.514，导入的无明细行）：一键进「历史补录」立项，预填来源单号；初审时台账候选是本行 → 建议答 A，本行退出、新记录带明细顶上 */}
+          {entry.imported && entry.active && cfg?.canFetch && <button className="btn-sec" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={() => onFill && onFill(entry)}
+            title="给这条导入记录补上物料明细：按钉钉单号立项（或上传采购核算表）走「历史补录」，初审时答 A 让本行退出、新记录带明细顶上，历史留痕">⇪ 补明细</button>}
           {/* 申请作废（琥珀边）：作废＝标记不删、须财务BP终审批准；主管理员可自批 */}
           {!edit && entry.active && !entry.voidPending && cfg?.canAudit &&
             <button className="btn-sec" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }} onClick={() => setVoidM('request')}
@@ -2471,9 +2478,9 @@ function FinalReviewModal({ row, onClose, onDone, flash }) {
 // ============ 立项弹窗（业务方定 2026-09-04）============
 // 这一步**只负责把单立起来**：录钉钉单号 → 抓附件 → 能入的入账、不能入的记「待修」→ 生成待办。
 // 哪些能入账、哪里不对、怎么修，统统到「处理页」去看去办——不在这个录入框里判。
-function IntakeModal({ cfg, onClose, onDone, flash }) {
-  const [appno, setAppno] = useState('')
-  const [hist, setHist] = useState(false)     // 历史补录（V2.472 口径）：照常复核+初审，初审通过即盖「补录」戳定稿，不经BP终审
+function IntakeModal({ cfg, onClose, onDone, flash, init }) {
+  const [appno, setAppno] = useState(init?.approvalNo || '')
+  const [hist, setHist] = useState(!!init?.historical)     // 历史补录（V2.472 口径）：照常复核+初审，初审通过即盖「补录」戳定稿，不经BP终审；init 可预填（V2.514 导入行「补明细」）
   const [busy, setBusy] = useState('')
   const [res, setRes] = useState(null)
   useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])

@@ -237,7 +237,8 @@ def _obs_brief(x, why=""):
     return {"entryId": x["id"], "cpCode": (x.get("cp_code") or "").strip(), "productKey": x.get("product_key"),
             "productName": (x.get("product_name") or "").strip(), "erpCode": (x.get("erp_code") or "").strip(),
             "status": x.get("status") or "", "auditAt": _audit_at(x)[:10], "fullIncl": comp["full"],
-            "approvalNo": x.get("approval_no") or "", "calcDate": x.get("calc_date") or "", "why": why}
+            "approvalNo": x.get("approval_no") or "", "calcDate": x.get("calc_date") or "", "why": why,
+            "imported": x.get("source_type") == "std_import"}   # V2.514：候选是导入的无明细行 → 前端建议答 A（补明细顶上）
 
 
 def _obsolete_candidates(e, others=None):
