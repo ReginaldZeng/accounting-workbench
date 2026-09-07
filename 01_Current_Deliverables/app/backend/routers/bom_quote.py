@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import shutil
 import time
 import urllib.parse
@@ -29,6 +30,10 @@ try:
     from kernels import dingtalk_bom as dtb
 except Exception:                       # 缺 requests / 没配钉钉都不该拖垮整条线
     dtb = None
+try:
+    import notifier                     # 自动立项提醒（V2.504）
+except Exception:
+    notifier = None
 
 from core import CFG, JSONResponse, _current_user, _require_perm, db
 
@@ -1588,9 +1593,15 @@ async def bom_intake(request: Request):
         return JSONResponse({"ok": False, "msg": "请填钉钉审批编号"}, status_code=400)
     if not (dtb and dtb.configured()):
         return JSONResponse({"ok": False, "msg": "未配置钉钉应用——请在服务器 conf.ini [dingtalk] 配 appkey/appsecret，或改用手工上传。"}, status_code=400)
+    out, code = _intake_core(appno, u, historical=bool(body.get("historical")))
+    return JSONResponse(out, status_code=code) if code != 200 else out
+
+
+def _intake_core(appno, u, historical=False, action="立项"):
+    """立项核心（V2.504 抽出：手填单号的接口 与 自动立项 共用）：抓附件 → 解析 → 能入的入、不能入的记待修。→ (result, http_code)"""
     res = dtb.fetch_approval(appno)
     if not res.get("ok"):
-        return JSONResponse({"ok": False, "msg": res.get("msg") or "取数失败"}, status_code=400)
+        return {"ok": False, "msg": res.get("msg") or "取数失败"}, 400
     files, comment_pending = [], []
     for a in res.get("attachments", []):
         if a.get("bytes") and str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")):
@@ -1606,24 +1617,183 @@ async def bom_intake(request: Request):
             else:
                 fix = "备用通道也没拿到（%s）。请在 OA 后台打开该单下载 %d 个附件，用下方「上传成本核算表」手工立项（单号照填）。" % (hint or "无在职审批人身份可借", len(names))
             msg = "这单的发起人钉钉账号已不存在（离职/注销），钉钉按发起人身份放附件，常规接口拿不到。" + fix
-            return JSONResponse({"ok": False, "msg": msg, "originatorGone": True, "attachmentNames": names,
-                                 "commentPending": comment_pending}, status_code=400)
+            return {"ok": False, "msg": msg, "originatorGone": True, "attachmentNames": names, "commentPending": comment_pending}, 400
         msg = "该审批未取到可解析的 xlsx 表单附件。"
         errs = sorted({(a.get("error") or "") for a in res.get("attachments", []) if a.get("error")})
         if errs:
             msg += "钉钉回的原因：%s。" % "；".join(errs)[:200]
         if comment_pending:
             msg += "另有 %d 个评论区补传附件当前钉钉权限取不到，请手工下载后上传。" % len(comment_pending)
-        return JSONResponse({"ok": False, "msg": msg, "commentPending": comment_pending}, status_code=400)
+        return {"ok": False, "msg": msg, "commentPending": comment_pending}, 400
     stg = _stage_files(files, appno, "dingtalk_form")
-    historical = bool(body.get("historical"))
     r = _book_staged(_load_staging(stg["stagingId"]), stg["stagingId"],
                      set(x["idx"] for x in stg["records"]), u, historical=historical)
     db.audit(u["name"], "bom_intake", target=appno,
-             detail="%s：附件 %d、入账 %d、待修 %d" % ("历史补录" if historical else "立项", len(files), len(r["booked"]), len(r["rejected"])))
+             detail="%s：附件 %d、入账 %d、待修 %d" % ("历史补录" if historical else action, len(files), len(r["booked"]), len(r["rejected"])))
     return {"ok": True, "approvalNo": appno, "title": res.get("title"), "historical": historical,
             "booked": r["booked"], "rejected": r["rejected"], "skipped": r["skipped"],
-            "commentPending": comment_pending, "warnings": stg.get("warnings") or []}
+            "commentPending": comment_pending, "warnings": stg.get("warnings") or []}, 200
+
+
+# ============ 自动立项（V2.504，业务方定 2026-09-07：OA 到成本核算节点 → 自动进工作台待办；复核在工作台做，OA 流程不动）============
+# 轮询而非事件订阅：不用改开发者后台、不用公网回调、不装 SDK；每 N 分钟列一次在途单，停在成本核算节点且台账没有的就立项，
+# 并给该节点的审批人发钉钉提醒。只看 auto_intake_since 之后发起的单（默认＝首次启用日），**不回灌历史**（红线）。
+# conf.ini [bom]：auto_intake=1 开；cost_node_ids=节点 activity_id（逗号分隔，实证 BOM表报价 模板成本核算节点 9631_492f，
+#   志鹏节点 23b2_ee20，默认两个都算「到了」——立项幂等，早到不坏事）；auto_intake_interval_min=5；auto_intake_since=YYYY-MM-DD；
+#   auto_intake_notify=1 发提醒。本地 SQLite 不自动触发（同汇率线生产保护），但 /api/bom/auto-intake/run 可手动跑一次。
+_AUTO_USER = {"name": "自动立项", "role": "system", "username": "auto"}
+_AUTO_LOCK = threading.Lock()
+
+
+def _auto_conf():
+    try:
+        import configparser
+        import kingdee_client as _kc
+        c = configparser.ConfigParser()
+        c.read(_kc.conf_path(), encoding="utf-8")
+        g = lambda k, d="": (c.get("bom", k, fallback=d) or d).strip()
+        nodes = [x.strip() for x in g("cost_node_ids", "9631_492f,23b2_ee20").replace("，", ",").split(",") if x.strip()]
+        try:
+            interval = max(2, int(g("auto_intake_interval_min", "5")))
+        except ValueError:
+            interval = 5
+        return {"enabled": g("auto_intake", "0") in ("1", "true", "yes", "on"), "nodes": nodes, "interval": interval,
+                "since": g("auto_intake_since", ""), "notify": g("auto_intake_notify", "1") in ("1", "true", "yes", "on"),
+                "portal": g("portal_url", "") or (c.get("config", "portal_url", fallback="") or "").strip()}
+    except Exception:
+        return {"enabled": False, "nodes": ["9631_492f", "23b2_ee20"], "interval": 5, "since": "", "notify": True, "portal": ""}
+
+
+def _auto_is_local():
+    try:
+        return str(db.DB_URL).startswith("sqlite")
+    except Exception:
+        return False
+
+
+def _auto_since(conf):
+    """起算日：conf 指定优先；否则首次启用那天（存 settings），不回灌历史。"""
+    if conf.get("since"):
+        return conf["since"]
+    s = db.get_setting("bom_auto_intake_since", "")
+    if not s:
+        s = time.strftime("%Y-%m-%d")
+        db.set_setting("bom_auto_intake_since", s, "自动立项")
+    return s
+
+
+def _auto_intake_once(force=False, notify=None, trigger="定时"):
+    """跑一轮：列停在成本核算节点的在途单 → 台账/待修/已处理都没有的 → 立项 → 提醒节点审批人。返回本轮摘要（也存 settings 供状态页）。"""
+    conf = _auto_conf()
+    if not force and not conf["enabled"]:
+        return {"ran": False, "msg": "未启用（conf.ini [bom] auto_intake=0）"}
+    if not (dtb and dtb.configured()):
+        return {"ran": False, "msg": "未配置钉钉"}
+    if not _AUTO_LOCK.acquire(blocking=False):
+        return {"ran": False, "msg": "上一轮还在跑"}
+    try:
+        from core import _now
+        src = _src()
+        since = _auto_since(conf)
+        do_notify = conf["notify"] if notify is None else bool(notify)
+        seen = db.get_setting("bom_auto_intake_seen", {}) or {}
+        found = dtb.list_running_at_nodes(conf["nodes"], since)
+        in_ledger = {(x.get("approval_no") or "") for x in db.bom_list_entries(src, include_superseded=True)}
+        pending = {p.get("approval_no") for p in db.bom_pending_list(src)}
+        summary = {"at": _now(), "trigger": trigger, "since": since, "nodes": conf["nodes"], "found": len(found),
+                   "intaken": [], "skipped": [], "failed": []}
+        for f in found:
+            appno = f["businessId"]
+            if not appno:
+                continue
+            if appno in in_ledger or appno in pending:
+                summary["skipped"].append({"appno": appno, "why": "台账已有" if appno in in_ledger else "待修中"})
+                continue
+            prev = seen.get(appno) or {}
+            if prev.get("ok") or (prev.get("at") and prev.get("retryAfter") and prev["retryAfter"] > _now()):
+                summary["skipped"].append({"appno": appno, "why": "已处理" if prev.get("ok") else "上次失败·待重试"})
+                continue
+            try:
+                out, code = _intake_core(appno, _AUTO_USER, action="自动立项")
+            except Exception as e:
+                out, code = {"ok": False, "msg": "自动立项异常：%s" % str(e)[:200]}, 500
+            ok = bool(out.get("ok"))
+            rec = {"at": _now(), "ok": ok, "msg": (out.get("msg") or "")[:300], "title": f["title"], "node": f["nodeId"], "taskUser": f["taskUserId"],
+                   "booked": len(out.get("booked") or []), "rejected": len(out.get("rejected") or [])}
+            if not ok:
+                import datetime as _dt
+                rec["retryAfter"] = (_dt.datetime.now() + _dt.timedelta(hours=6)).strftime("%Y-%m-%d %H:%M")
+            # 提醒节点审批人（成本会计）——不管入没入全，都让人知道这单到了、工作台里怎么处理
+            if do_notify and f.get("taskUserId"):
+                link = (conf["portal"].rstrip("/") + "/#/bom") if conf["portal"] else "核算工作台 › 成本模块 › BOM报价审核 › 待办与复核"
+                if ok:
+                    text = ("【核算工作台·BOM报价审核】OA 单「%s」（%s）已到成本核算节点，已自动立项进待办：入账 %d、待修 %d。\n请到工作台复核审核：%s"
+                            % (f["title"], appno, rec["booked"], rec["rejected"], link))
+                else:
+                    text = ("【核算工作台·BOM报价审核】OA 单「%s」（%s）已到成本核算节点，自动立项没成功：%s\n请到工作台手工立项/上传：%s"
+                            % (f["title"], appno, rec["msg"][:120], link))
+                try:
+                    nr = notifier.send_dingtalk_to([f["taskUserId"]], text) if notifier else {"sent": False, "msg": "无通知模块"}
+                except Exception as e:
+                    nr = {"sent": False, "msg": str(e)[:120]}
+                rec["notified"] = bool(nr.get("sent"))
+                rec["notifyMsg"] = nr.get("msg") or nr.get("via") or ""
+            seen[appno] = rec
+            (summary["intaken"] if ok else summary["failed"]).append({"appno": appno, "title": f["title"], **{k: rec[k] for k in ("booked", "rejected", "msg") if k in rec}, "notified": rec.get("notified")})
+            db.audit("自动立项", "bom_auto_intake", target=appno,
+                     detail="%s · 节点 %s · %s" % ("入账 %d/待修 %d" % (rec["booked"], rec["rejected"]) if ok else "失败：" + rec["msg"][:100], f["nodeId"], "已提醒" if rec.get("notified") else "未提醒"))
+        # seen 只留最近 400 条
+        if len(seen) > 400:
+            for k in sorted(seen, key=lambda k: seen[k].get("at") or "")[:len(seen) - 400]:
+                seen.pop(k, None)
+        db.set_setting("bom_auto_intake_seen", seen, "自动立项")
+        db.set_setting("bom_auto_intake_last", summary, "自动立项")
+        summary["ran"] = True
+        return summary
+    finally:
+        _AUTO_LOCK.release()
+
+
+def _auto_intake_scheduler():
+    while True:
+        conf = _auto_conf()
+        time.sleep(max(120, conf["interval"] * 60))
+        try:
+            if conf["enabled"] and not _auto_is_local():
+                _auto_intake_once(trigger="定时")
+        except Exception:
+            pass
+
+
+threading.Thread(target=_auto_intake_scheduler, daemon=True, name="bom-auto-intake").start()
+
+
+@router.get("/api/bom/auto-intake/status")
+async def bom_auto_intake_status(request: Request):
+    """自动立项状态（V2.504）：开关/节点/起算日/上一轮摘要。有「抓取/录入」权限即可看。"""
+    u = _require_perm(request, CAP_FETCH)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
+    conf = _auto_conf()
+    return {"ok": True, "enabled": conf["enabled"] and not _auto_is_local(), "setting": conf["enabled"], "local": _auto_is_local(),
+            "nodes": conf["nodes"], "intervalMin": conf["interval"], "since": _auto_since(conf) if conf["enabled"] else (conf["since"] or ""),
+            "notify": conf["notify"], "last": db.get_setting("bom_auto_intake_last", None),
+            "note": "OA「BOM表报价」到成本核算节点 → 自动立项进待办并钉钉提醒该节点审批人；复核审核在工作台做，志鹏照旧手工传 OA。不回灌起算日之前的单。"}
+
+
+@router.post("/api/bom/auto-intake/run")
+async def bom_auto_intake_run(request: Request):
+    """手动跑一轮自动立项（主管理员）。body.notify=false 可只立项不发提醒（联调用）。"""
+    u = _require_perm(request, CAP_FETCH)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅主管理员"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    res = _auto_intake_once(force=True, notify=body.get("notify"), trigger="手动·" + u["name"])
+    db.audit(u["name"], "bom_auto_intake_run", detail="found %s · intaken %s · failed %s" % (res.get("found"), len(res.get("intaken") or []), len(res.get("failed") or [])) if res.get("ran") else res.get("msg", ""))
+    return {"ok": True, **res}
 
 
 def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=None, historical=None):
@@ -2750,6 +2920,43 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
     if preview:
         return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s %s" % (e.get("cp_code") or "", nm)))
     return _xlsx_response(data, "重排版核算表_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
+
+
+@router.get("/api/bom/export/pair")
+async def bom_export_pair(request: Request, entry_id: int):
+    """**财务版 + 脱敏版一次下**（V2.504，业务方定 2026-09-07：复核在工作台做完，志鹏照旧把两份手工传回 OA 表单）。
+    zip 里两个 xlsx：财务版＝全量活公式重排版；脱敏版＝按基础设置遮 型号/规格/供应商（给商品经理）。权限同全量导出。"""
+    e = db.bom_get_entry(entry_id)
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    u, err = _export_auth(request, e)
+    if err:
+        return err
+    import io as _io
+    import zipfile
+    rules = _invoice_rules()
+    ap = e.get("approval_no") or ""
+    full = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=ap, formulas=True, rules=rules)
+    mrec, hidden = _masked_rec(e)
+    masked = bq.build_pretty(mrec, _fee_of(e), approval=ap, formulas=True, rules=rules)
+    cp, nm = (e.get("cp_code") or "").strip(), (e.get("product_name") or "").strip()
+    st = e.get("status") or ""
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("财务版_重排版核算表_%s_%s.xlsx" % (cp, nm), full)
+        z.writestr("脱敏版_重排版核算表_%s_%s.xlsx" % (cp, nm), masked)
+        z.writestr("说明.txt", ("财务版：全量活公式，财务看。\n脱敏版：已遮 %s，给商品经理。\n记录状态：%s；钉钉单号：%s；导出人：%s；导出时间：%s\n"
+                                % ("/".join(hidden) if hidden else "（基础设置未遮任何列）", st, ap, u.get("name") or "", _now_str())).encode("utf-8"))
+    db.audit(u["name"], "bom_export_pair", target=str(e["id"]), detail="%s %s · %s" % (cp, nm, st))
+    from urllib.parse import quote
+    fn = "核算表两版_%s_%s.zip" % (cp, nm)
+    return Response(content=buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": "attachment; filename*=UTF-8''%s" % quote(fn)})
+
+
+def _now_str():
+    from core import _now
+    return _now()
 
 
 @router.get("/api/bom/export/original")

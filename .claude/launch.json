@@ -2,6 +2,20 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "wt-bom-quote",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app:app",
+        "--app-dir",
+        "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\bom-quote-review-tool-062af7\\01_Current_Deliverables\\app\\backend",
+        "--port",
+        "8100"
+      ],
+      "port": 8100
+    },
+    {
       "name": "wt-is-this-wrong",
       "runtimeExecutable": "python",
       "runtimeArgs": [

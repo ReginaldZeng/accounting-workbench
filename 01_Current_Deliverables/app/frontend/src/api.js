@@ -365,3 +365,6 @@ export const getBomInvoiceRules = () => j('/api/bom/invoice-rules')
 export const setBomInvoiceRules = (rules) => jp('/api/bom/invoice-rules', { rules })
 export const bomExportPrettyUrl = (id) => `/api/bom/export/pretty?entry_id=${id}`
 export const bomExportOriginalUrl = (id) => `/api/bom/export/original?entry_id=${id}`
+export const bomExportPairUrl = (id) => `/api/bom/export/pair?entry_id=${id}`   // V2.504 财务版+脱敏版 zip
+export const getBomAutoIntakeStatus = () => j('/api/bom/auto-intake/status')
+export const bomAutoIntakeRun = (notify) => jp('/api/bom/auto-intake/run', { notify })

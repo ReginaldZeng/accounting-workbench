@@ -81,3 +81,10 @@ dev_users =
 ; 作废是标记不删；真删只给主管理员，且每次要输这个密钥。**留空/不配置 = 删除通道关闭**（不是默认放行）。
 ; 只能用纯 ASCII（走请求体也建议），只写在服务器，别提交、别外发。
 delete_key = 
+; ---- 自动立项（V2.504）：OA「BOM表报价」到成本核算节点 → 自动进工作台待办 + 钉钉提醒该节点审批人；只看 since 之后的单，不回灌历史
+auto_intake = 0
+cost_node_ids = 9631_492f,23b2_ee20   ; 成本核算节点 activity_id（李美霞 / 志鹏两节点，任一到达即算），逗号分隔
+auto_intake_interval_min = 5
+auto_intake_since =                  ; YYYY-MM-DD，留空＝首次启用当天
+auto_intake_notify = 1
+portal_url =                         ; 提醒里带的工作台地址，如 https://xxx.com（留空只写文字路径） 

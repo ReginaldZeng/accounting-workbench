@@ -148,6 +148,41 @@ def send_dingtalk_worknotice(text, conf=None):
         return {"sent": False, "msg": f"钉钉工作通知异常：{e}"}
 
 
+def send_dingtalk_to(userids, text, conf=None):
+    """发给**指定 userid**（V2.504 自动立项提醒节点审批人用）：先机器人单聊，失败回退工作通知。不抛错。"""
+    conf = conf or load_dingtalk_conf()
+    uids = [u for u in (userids or []) if u]
+    if not conf:
+        return {"sent": False, "msg": "未配置钉钉（conf.ini [dingtalk]），未发送"}
+    if not uids:
+        return {"sent": False, "msg": "无收件人"}
+    try:
+        import requests
+        tok = _dt_v2_token(conf)
+        body = {"robotCode": conf["appkey"], "userIds": uids, "msgKey": "sampleText",
+                "msgParam": json.dumps({"content": text}, ensure_ascii=False)}
+        r = requests.post("https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+                          headers={"x-acs-dingtalk-access-token": tok, "Content-Type": "application/json"},
+                          data=json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=20).json()
+        if r.get("processQueryKey"):
+            return {"sent": True, "via": "robot", "to": uids, "invalid": r.get("invalidStaffIdList") or []}
+        first = f"机器人发送失败：{r.get('message') or r}"
+    except Exception as e:
+        first = f"机器人发送异常：{e}"
+    try:
+        import requests
+        tok = _dt_token(conf)
+        body = {"agent_id": int(conf["agentid"]), "userid_list": ",".join(uids),
+                "msg": {"msgtype": "text", "text": {"content": text}}}
+        r = requests.post("https://oapi.dingtalk.com/topapi/message/corpconversation/asyncsend_v2",
+                          params={"access_token": tok}, json=body, timeout=20).json()
+        if r.get("errcode") == 0:
+            return {"sent": True, "via": "worknotice", "to": uids, "fallback_from": first}
+        return {"sent": False, "msg": f"{first}；工作通知失败：{r.get('errmsg')}"}
+    except Exception as e:
+        return {"sent": False, "msg": f"{first}；工作通知异常：{e}"}
+
+
 def send_dingtalk(text, conf=None):
     """发钉钉：先机器人单聊；失败再回退工作通知。返回最终结果（含 via 标明走了哪条）。"""
     conf = conf or load_dingtalk_conf()

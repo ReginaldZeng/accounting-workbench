@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
-  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomAttachBomList,
+  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
   bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
@@ -1017,6 +1017,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             <a href={bomExportOriginalUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览原版</b><span>不下载，在新标签页查看</span></a>
             <a href={bomExportPrettyUrl(entry.id)}><b>重排版核算表（美化）</b><span>台账口径重排版，含费用参数与勾稽说明</span></a>
             <a href={bomExportPrettyUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览重排版</b><span>不下载，在新标签页查看</span></a>
+            <a href={bomExportPairUrl(entry.id)}><b>财务版 + 脱敏版（一次下两份）</b><span>zip：财务版全量活公式 · 脱敏版遮型号/规格/供应商给商品经理；复核完传回 OA 表单用</span></a>
             {versions.length > 1 && <a onClick={() => { setExpMenu(false); onCompare() }}><b>⇄ 版本对比</b><span>同产品 {versions.length} 个版本逐料涨跌</span></a>}
           </div>}</>}
           {!cfg?.canExport && versions.length > 1 && <button className="btn-sec" onClick={onCompare}>⇄ 版本对比</button>}

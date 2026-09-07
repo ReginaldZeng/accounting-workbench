@@ -244,6 +244,37 @@ def storage_download(tok_v2, tok_old, iid, file_id, space_id, inst):
     return None, None, reason or "无可用的在职审批人身份"
 
 
+_TASK_OPEN = ("NEW", "RUNNING", "PAUSED")
+
+
+def list_running_at_nodes(node_ids, since, process_code=None, until=None):
+    """在途单里**当前停在指定节点**的（V2.504 自动立项用）：按模板列 since..until 窗口内的实例，逐个看 status=RUNNING
+    且 tasks 里有 activity_id∈node_ids 且 task_status 未结（NEW/RUNNING/PAUSED）。
+    返回 [{businessId, instanceId, title, nodeId, taskUserId, taskCreateTime, createTime}]；未配置/异常 → []（不抛）。
+    只读；窗口由调用方给（上线日起），不扫历史。"""
+    if not configured():
+        return []
+    try:
+        ak, sk = _conf()
+        tok = _token(ak, sk)
+        pc = find_process_code(tok, process_code)
+        st, et = _day_window("00000000", since, until or time.strftime("%Y-%m-%d"))
+        out = []
+        for iid in list_ids(tok, pc, st, et):
+            inst = get_inst(tok, iid)
+            if not inst or (inst.get("status") or "").upper() != "RUNNING":
+                continue
+            for t in inst.get("tasks") or []:
+                if t.get("activity_id") in node_ids and (t.get("task_status") or "").upper() in _TASK_OPEN:
+                    out.append({"businessId": str(inst.get("business_id") or ""), "instanceId": iid, "title": inst.get("title") or "",
+                                "nodeId": t.get("activity_id"), "taskUserId": t.get("userid") or "",
+                                "taskCreateTime": t.get("create_time") or "", "createTime": inst.get("create_time") or ""})
+                    break
+        return out
+    except Exception:
+        return []
+
+
 def _day_window(business_id, start=None, end=None):
     day = str(business_id)[:8]
     d0 = "%s-%s-%s" % (day[:4], day[4:6], day[6:8])
