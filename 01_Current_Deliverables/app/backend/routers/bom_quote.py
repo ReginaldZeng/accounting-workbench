@@ -1638,8 +1638,8 @@ def _intake_core(appno, u, historical=False, action="立项"):
 # ============ 自动立项（V2.504，业务方定 2026-09-07：OA 到成本核算节点 → 自动进工作台待办；复核在工作台做，OA 流程不动）============
 # 轮询而非事件订阅：不用改开发者后台、不用公网回调、不装 SDK；每 N 分钟列一次在途单，停在成本核算节点且台账没有的就立项，
 # 并给该节点的审批人发钉钉提醒。只看 auto_intake_since 之后发起的单（默认＝首次启用日），**不回灌历史**（红线）。
-# conf.ini [bom]：auto_intake=1 开；cost_node_ids=节点 activity_id（逗号分隔，实证 BOM表报价 模板成本核算节点 9631_492f，
-#   志鹏节点 23b2_ee20，默认两个都算「到了」——立项幂等，早到不坏事）；auto_intake_interval_min=5；auto_intake_since=YYYY-MM-DD；
+# conf.ini [bom]：auto_intake=1 开；cost_node_ids=节点 activity_id（逗号分隔；业务方定 2026-09-07：成本核算节点＝志鹏+冯辉或签的
+#   23b2_ee20，正常志鹏审；李美霞的 9631_492f 不是）；auto_intake_interval_min=5；auto_intake_since=YYYY-MM-DD；
 #   auto_intake_notify=1 发提醒。本地 SQLite 不自动触发（同汇率线生产保护），但 /api/bom/auto-intake/run 可手动跑一次。
 _AUTO_USER = {"name": "自动立项", "role": "system", "username": "auto"}
 _AUTO_LOCK = threading.Lock()
@@ -1652,7 +1652,7 @@ def _auto_conf():
         c = configparser.ConfigParser()
         c.read(_kc.conf_path(), encoding="utf-8")
         g = lambda k, d="": (c.get("bom", k, fallback=d) or d).strip()
-        nodes = [x.strip() for x in g("cost_node_ids", "9631_492f,23b2_ee20").replace("，", ",").split(",") if x.strip()]
+        nodes = [x.strip() for x in g("cost_node_ids", "23b2_ee20").replace("，", ",").split(",") if x.strip()]
         try:
             interval = max(2, int(g("auto_intake_interval_min", "5")))
         except ValueError:
@@ -1661,7 +1661,7 @@ def _auto_conf():
                 "since": g("auto_intake_since", ""), "notify": g("auto_intake_notify", "1") in ("1", "true", "yes", "on"),
                 "portal": g("portal_url", "") or (c.get("config", "portal_url", fallback="") or "").strip()}
     except Exception:
-        return {"enabled": False, "nodes": ["9631_492f", "23b2_ee20"], "interval": 5, "since": "", "notify": True, "portal": ""}
+        return {"enabled": False, "nodes": ["23b2_ee20"], "interval": 5, "since": "", "notify": True, "portal": ""}
 
 
 def _auto_is_local():
@@ -1724,7 +1724,7 @@ def _auto_intake_once(force=False, notify=None, trigger="定时"):
                 import datetime as _dt
                 rec["retryAfter"] = (_dt.datetime.now() + _dt.timedelta(hours=6)).strftime("%Y-%m-%d %H:%M")
             # 提醒节点审批人（成本会计）——不管入没入全，都让人知道这单到了、工作台里怎么处理
-            if do_notify and f.get("taskUserId"):
+            if do_notify and (f.get("taskUserIds") or f.get("taskUserId")):
                 link = (conf["portal"].rstrip("/") + "/#/bom") if conf["portal"] else "核算工作台 › 成本模块 › BOM报价审核 › 待办与复核"
                 if ok:
                     text = ("【核算工作台·BOM报价审核】OA 单「%s」（%s）已到成本核算节点，已自动立项进待办：入账 %d、待修 %d。\n请到工作台复核审核：%s"
@@ -1733,7 +1733,7 @@ def _auto_intake_once(force=False, notify=None, trigger="定时"):
                     text = ("【核算工作台·BOM报价审核】OA 单「%s」（%s）已到成本核算节点，自动立项没成功：%s\n请到工作台手工立项/上传：%s"
                             % (f["title"], appno, rec["msg"][:120], link))
                 try:
-                    nr = notifier.send_dingtalk_to([f["taskUserId"]], text) if notifier else {"sent": False, "msg": "无通知模块"}
+                    nr = notifier.send_dingtalk_to(f.get("taskUserIds") or [f["taskUserId"]], text) if notifier else {"sent": False, "msg": "无通知模块"}
                 except Exception as e:
                     nr = {"sent": False, "msg": str(e)[:120]}
                 rec["notified"] = bool(nr.get("sent"))

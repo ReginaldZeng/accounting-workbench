@@ -264,12 +264,13 @@ def list_running_at_nodes(node_ids, since, process_code=None, until=None):
             inst = get_inst(tok, iid)
             if not inst or (inst.get("status") or "").upper() != "RUNNING":
                 continue
-            for t in inst.get("tasks") or []:
-                if t.get("activity_id") in node_ids and (t.get("task_status") or "").upper() in _TASK_OPEN:
-                    out.append({"businessId": str(inst.get("business_id") or ""), "instanceId": iid, "title": inst.get("title") or "",
-                                "nodeId": t.get("activity_id"), "taskUserId": t.get("userid") or "",
-                                "taskCreateTime": t.get("create_time") or "", "createTime": inst.get("create_time") or ""})
-                    break
+            opens = [t for t in (inst.get("tasks") or []) if t.get("activity_id") in node_ids and (t.get("task_status") or "").upper() in _TASK_OPEN]
+            if opens:      # 或签节点有多个在办人（实证 23b2_ee20：志鹏 + 冯辉）→ 全部带回，提醒都发
+                t = opens[0]
+                out.append({"businessId": str(inst.get("business_id") or ""), "instanceId": iid, "title": inst.get("title") or "",
+                            "nodeId": t.get("activity_id"), "taskUserId": t.get("userid") or "",
+                            "taskUserIds": [x.get("userid") for x in opens if x.get("userid")],
+                            "taskCreateTime": t.get("create_time") or "", "createTime": inst.get("create_time") or ""})
         return out
     except Exception:
         return []
