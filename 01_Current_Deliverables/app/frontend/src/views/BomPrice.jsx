@@ -1,6 +1,6 @@
 // [Change Log] Date:2026-09-02 Author:Claude/c Version:V-draft(BOM报价审核)
 // 【BOM报价审核】前端：钉钉「BOM表报价」审批附件→解析→复核→定稿→BP消费。
-// 三视图（台账列表 / 核算表详情 / 版本对比）+ 手工入账弹窗。样机布局与交互照搬，皮肤换本项目令牌。
+// 三视图（台账列表 / 采购核算表详情 / 版本对比）+ 手工入账弹窗。样机布局与交互照搬，皮肤换本项目令牌。
 // 含税五分项口径（元/kg），涨跌红▲绿▼（中国财务惯例），编辑态改费用参数保存留痕。
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import {
@@ -13,7 +13,7 @@ import {
 } from '../api.js'
 
 const GROSS = 1.13
-// 发票类型 → 单位成本不含税（镜像后端 kernel，对应核算表 N 列公式）。price=含税价 tax=税率 rate=扣除率
+// 发票类型 → 单位成本不含税（镜像后端 kernel，对应采购核算表 N 列公式）。price=含税价 tax=税率 rate=扣除率
 function invoiceUnitExcl(price, tax, mode, rate) {
   const p = +price || 0, t = +tax || 0, r = +rate || 0
   if (mode === '全额') return p                                   // 普票：不抵扣全额
@@ -115,7 +115,7 @@ function PendingDetailModal({ groupId, product, onClose, flash }) {
           <th className="th" style={{ width: 34 }}>#</th><th className="th">物料编码</th><th className="th">物料名称</th>
           <th className="th" style={{ textAlign: 'right' }}>添加量</th><th className="th" style={{ textAlign: 'right' }}>含税价</th>
           <th className="th" style={{ textAlign: 'right' }}>税率</th><th className="th" style={{ textAlign: 'right' }}>成本不含税</th>
-          <th className="th">核算表「小计」算它了吗</th>
+          <th className="th">采购核算表「小计」算它了吗</th>
         </tr></thead><tbody>
           {rows.map((m, i) => {
             const missed = missSet.has(m.matName) || (cut >= 0 && i > cut)
@@ -130,7 +130,7 @@ function PendingDetailModal({ groupId, product, onClose, flash }) {
               <td>{missed ? <span className="tag leak">✗ 没算它</span> : <span className="muted" style={{ fontSize: 11 }}>✓ 算了</span>}</td>
             </tr>)
           })}
-          {cut >= 0 && cut < rows.length - 1 && <tr className="bom-subrow"><td colSpan={6}>核算表的「小计」公式实际只加到第 {cut + 1} 味为止 → 后面 {rows.length - cut - 1} 味白填了</td>
+          {cut >= 0 && cut < rows.length - 1 && <tr className="bom-subrow"><td colSpan={6}>采购核算表的「小计」公式实际只加到第 {cut + 1} 味为止 → 后面 {rows.length - cut - 1} 味白填了</td>
             <td className="num" style={{ fontWeight: 700 }}>{fmt(declared, 4)}</td><td /></tr>}
         </tbody></table></div>
       </div>)
@@ -144,16 +144,16 @@ function PendingDetailModal({ groupId, product, onClose, flash }) {
         {p && <>
           <div className="bom-msub">编码 <b className="mono">{p.cpCode || '—'}</b>　·　页 {p.sheet}　·　核算日期 {p.calcDate}　·　工厂 {p.supplier || '—'}
             <br />源文件：{d.srcFile}</div>
-          {/* 讲白：不是「研发有、核算表没有」（那是③用量自洽报的），是核算表**自己**的小计公式漏加了自己的料 */}
+          {/* 讲白：不是「研发有、采购核算表没有」（那是③用量自洽报的），是采购核算表**自己**的小计公式漏加了自己的料 */}
           <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 8, fontSize: 12 }}>
-            ⓘ <b>这些料在核算表里是有的</b>（下表能看到它们的添加量和价格），<b>只是核算表自己的「小计」公式没把它们加进去</b>——
+            ⓘ <b>这些料在采购核算表里是有的</b>（下表能看到它们的添加量和价格），<b>只是采购核算表自己的「小计」公式没把它们加进去</b>——
             就像 Excel 里 <span className="mono">=SUM(H7:H16)</span> 之后又往下加了几行料，公式没跟着往下拉。
             <br />⚠ 这个偏低的小计会<b>一路往下传</b>（变动成本→成本合计→含税→全成本），所以<b>该产品全成本是少算的</b>。
-            <span className="muted">（若是「研发BOM有、核算表没有」那种缺料，会在③用量自洽里报「核算表缺料」，不是这里。）</span>
+            <span className="muted">（若是「研发BOM有、采购核算表没有」那种缺料，会在③用量自洽里报「采购核算表缺料」，不是这里。）</span>
           </div>
           {(p.failedChecks || []).map((c, i) => (
             <div key={i} className="bom-chkfail" style={{ marginBottom: 8 }}>
-              <b>✗ {c.check}</b>：核算表写的小计 <b>{fmt(c.a, 4)}</b> ≠ 逐料相加 <b>{fmt(c.b, 4)}</b>（少算 {fmt(Math.abs(c.diff || 0), 4)} 元/kg 不含税，折含税约 {fmt(Math.abs((c.diff || 0) * GROSS), 4)}）
+              <b>✗ {c.check}</b>：采购核算表写的小计 <b>{fmt(c.a, 4)}</b> ≠ 逐料相加 <b>{fmt(c.b, 4)}</b>（少算 {fmt(Math.abs(c.diff || 0), 4)} 元/kg 不含税，折含税约 {fmt(Math.abs((c.diff || 0) * GROSS), 4)}）
               {(c.missing || []).length > 0 && <span>　— <b>没被加进小计的是：{c.missing.map(m => m.matName).join('、')}</b></span>}
             </div>))}
           <div style={{ maxHeight: '52vh', overflowY: 'auto', marginTop: 6 }}>
@@ -162,7 +162,7 @@ function PendingDetailModal({ groupId, product, onClose, flash }) {
           </div>
           <div className="bom-chkfail" style={{ background: 'var(--bg-sub)', color: 'var(--ink-2)', borderColor: 'var(--line)' }}>
             <b>怎么改</b>：把上面标红「未计入」的料并进源表「小计」公式的求和范围（多半是底部新增料时没往下拉），
-            让研发/工厂改好后重传 → 回处理页用「⟳重连钉钉替换 / ⬆上传替换核算表」补入本组。
+            让研发/工厂改好后重传 → 回处理页用「⟳重连钉钉替换 / ⬆上传替换采购核算表」补入本组。
           </div>
           <div className="bom-mfoot"><button className="btn-sec" onClick={onClose}>关闭</button></div>
         </>}
@@ -182,7 +182,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   const [busy, setBusy] = useState(false)
   const subRef = React.useRef(false)     // 里面套着「核对/对比」子弹窗时，Esc 只关子弹窗
   useEffect(() => { const h = (e) => { if (e.key === 'Escape' && !subRef.current) onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
-  const PRESET = ['包材不全', '物料暂定价', '配方未定版', '缺半成品核算表', '勾稽存疑']
+  const PRESET = ['包材不全', '物料暂定价', '配方未定版', '缺半成品采购核算表', '勾稽存疑']
   const missing = CONFIRM_STEPS.filter(([k]) => !entry.steps?.[k]).map(([, l]) => l)
   // 换码承接（业务方定 2026-09-05）：同CP再核算 / 不同CP同物料编码 → 定稿前必须答「原来那个是否失效」
   const cands = entry.obsoleteCandidates || []
@@ -249,7 +249,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
               <span className="muted">{c.why}</span>
               <span className="muted">核算 {c.calcDate || '—'} · {c.status} {c.auditAt || ''}</span>
               <span>全成本 <b>¥{fmt(c.fullIncl)}</b>/kg</span>
-              <a className="lk" onClick={() => setCmpFirst(c.entryId)} title="两张核算表逐料对比用量与价格，再决定是新旧版还是两个产品">对比 ›</a>
+              <a className="lk" onClick={() => setCmpFirst(c.entryId)} title="两张采购核算表逐料对比用量与价格，再决定是新旧版还是两个产品">对比 ›</a>
             </div>))}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <b style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>原来的版本是否失效？</b>
@@ -259,7 +259,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
               <button className={obs === 'historical' ? 'on' : ''} onClick={() => setObs('historical')} style={olderThanExisting && !obs ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
                 title="本版是更早的历史版本：只盖初审戳、不替代现有版本、不动定稿指针、不对外，让同单的半成品/成品能定稿">C 补录历史版（只审不替代）</button>
             </div>
-            <span className="muted" style={{ fontSize: 11 }}>拿不准先点「对比 ›」看两张核算表差在哪；不答则只存定性、不定稿。</span>
+            <span className="muted" style={{ fontSize: 11 }}>拿不准先点「对比 ›」看两张采购核算表差在哪；不答则只存定性、不定稿。</span>
           </div>
         </div>}
 
@@ -472,7 +472,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
     const dot = (v, src) => Math.abs((v || 0) - (src || 0)) > 1e-9
     const dead = isDead(r)
     return (
-      <tr key={r.id} className="row" onClick={() => onOpen(r.id)} title="查看成本核算表" style={dead ? { opacity: 0.55 } : undefined}>
+      <tr key={r.id} className="row" onClick={() => onOpen(r.id)} title="查看采购核算表" style={dead ? { opacity: 0.55 } : undefined}>
         <td className="mono sub">{r.erpCode || <span className="muted">—</span>}</td>
         <td className="mono" style={{ fontWeight: 600 }}>{r.cpCode}</td>
         <td style={{ fontWeight: 600 }}>{r.productName}
@@ -499,7 +499,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
           {r.ack?.selfReview && <span className="bom-gvtag" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }} title="主管理员自审：初审与终审为同一人（单人模式），未经第二人把关">自审</span>}
           {r.hasGoodsVersion && <span className="bom-gvtag" title="附有成本会计商品版（脱敏公开版），已留档">＋商品版</span>}</td>
         <td style={{ whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
-          <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>核算表 ›</a>
+          <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>采购核算表 ›</a>
           <a className="lk" style={{ marginRight: 10 }} title="补/改本产品的 ERP 物料编码" onClick={() => fillErp(r)}>补物料编码</a>
           {r.needFinalReview && onFinalReview &&
             <a className="lk" style={{ fontWeight: 700, color: 'var(--green)' }} onClick={() => onFinalReview(r)}>⚑ 终审 ›</a>}
@@ -541,7 +541,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
                 suf={`/ ${stats.total} 产品`} /></>
             : <><Stat lab="待办单号" v={openAppr.length} suf={doneCount ? `单 · 另 ${doneCount} 单已完成初审` : '单'} />
               <Stat lab="组" v={openAppr.reduce((s, a) => s + a.groupCount, 0)}
-                suf="一个核算表文件=一组" />
+                suf="一个采购核算表文件=一组" />
               <Stat lab="待复核" v={openAppr.reduce((s, a) => s + a.pending, 0)}
                 suf={`/ ${stats.total} 产品`} /></>}
         </div>
@@ -618,8 +618,8 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onApproval, onFinalReview, 
             </table>
           </div>}
         <div className="foot">{isStd
-          ? '原料/包材来自核算表逐料解析；加工费/装卸费/管理费为台账费用参数。TOB/TOC 定价默认直连台账定稿版，电商/通品需显式引用。'
-          : '待办按钉钉单号立项。一个单号里可有若干「组」——一个成本核算表文件（含成品+半成品+复配料）配上它的 BOM 清单＝一组。点进单号在处理页按组复核、可替换组内文件（重连钉钉/手动上传），被替换的旧版留痕不进标准库。'}</div>
+          ? '原料/包材来自采购核算表逐料解析；加工费/装卸费/管理费为台账费用参数。TOB/TOC 定价默认直连台账定稿版，电商/通品需显式引用。'
+          : '待办按钉钉单号立项。一个单号里可有若干「组」——一个采购核算表文件（含成品+半成品+复配料）配上它的 BOM 清单＝一组。点进单号在处理页按组复核、可替换组内文件（重连钉钉/手动上传），被替换的旧版留痕不进标准库。'}</div>
       </div>
     </>
   )
@@ -665,7 +665,7 @@ function ChainStrip({ products }) {
   )
 }
 
-// ============ 处理页：一个钉钉单号 → 若干「组」（一个核算表文件=一组）============
+// ============ 处理页：一个钉钉单号 → 若干「组」（一个采购核算表文件=一组）============
 // 组内：当前版产品（成品/半成品/复配料）+ 各自 BOM 校验 + 可替换组内文件（重连钉钉/手动上传）+ 被替换旧版留痕。
 function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
   const [d, setD] = useState(null)
@@ -720,7 +720,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
         <div>
           <div className="h-title">处理审批单　<span className="bom-apprno">{no || '（手工/无单号）'}</span>
             {liveGroups.length === 0 && <span className="tag unmap">无记录</span>}</div>
-          <div className="h-sub">一个成本核算表文件（含成品+半成品+复配料）＋ 它的 BOM 清单 ＝ <b>一组</b>；本单共 {liveGroups.length} 组 · {prodCount} 个产品{histCount ? ` · ${histCount} 条替换留痕` : ''}</div>
+          <div className="h-sub">一个采购核算表文件（含成品+半成品+复配料）＋ 它的 BOM 清单 ＝ <b>一组</b>；本单共 {liveGroups.length} 组 · {prodCount} 个产品{histCount ? ` · ${histCount} 条替换留痕` : ''}</div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn-sec" onClick={onBack}>返回待办</button>
@@ -756,11 +756,11 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
               <b>组 {gi + 1}：{g.coreName || '（未命名）'}</b>
               <span className="mono muted" style={{ fontSize: 11 }}>{g.coreCp}</span>
               {g.anyFinal && <span className="tag ok">含已定稿</span>}
-              {g.pendingCount > 0 && <span className="tag leak" title="同一核算表里勾稽不平、未入账的产品，需退回研发/工厂修源表">{g.pendingCount} 个待修未入账</span>}
+              {g.pendingCount > 0 && <span className="tag leak" title="同一采购核算表里勾稽不平、未入账的产品，需退回研发/工厂修源表">{g.pendingCount} 个待修未入账</span>}
               {g.allOk ? <span className="tag ok">四步已确认</span> : <span className="tag werr">待复核</span>}
               <span className="muted" style={{ fontSize: 11 }}>{g.bookedCount}/{g.products.length} 已入账</span>
               <span style={{ flex: 1 }} />
-              <span className="muted" style={{ fontSize: 11 }} title={g.coreFile}>核算表：{(g.coreFile || '—').slice(0, 34)}{(g.coreFile || '').length > 34 ? '…' : ''}</span>
+              <span className="muted" style={{ fontSize: 11 }} title={g.coreFile}>采购核算表：{(g.coreFile || '—').slice(0, 34)}{(g.coreFile || '').length > 34 ? '…' : ''}</span>
             </div>
 
             {/* 组内嵌套结构与审核顺序 */}
@@ -789,14 +789,14 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                         <td colSpan={4} className="muted" style={{ fontSize: 11 }}>
                           {(p.blockedBy || []).length > 0 && p.checksOk
                             ? <><b style={{ color: 'var(--red)' }}>自身全平，但上游「{p.blockedBy.join('、')}」不平 → 连带拦下</b>：本品用的是它的价，成本建在错数上</>
-                            : <>勾稽不平 → 不予入账（红线）{(p.blockedBy || []).length > 0 ? `；且上游「${p.blockedBy.join('、')}」也不平` : ''}；修好源表后用下方「替换核算表」补入</>}</td>
+                            : <>勾稽不平 → 不予入账（红线）{(p.blockedBy || []).length > 0 ? `；且上游「${p.blockedBy.join('、')}」也不平` : ''}；修好源表后用下方「替换采购核算表」补入</>}</td>
                         <td className="muted" style={{ fontSize: 11 }}>{p.matCount} 味料</td>
                         <td><a className="lk" onClick={e => { e.stopPropagation(); setPendP({ groupId: g.groupId, product: p }) }}>查明细 ›</a></td>
                       </tr>
                       <tr><td /><td colSpan={9} style={{ paddingTop: 0 }}>
                         <div className="bom-chkfail">
                           {(p.failedChecks || []).map((c, j) => <div key={j}>
-                            <b>✗ {c.check}</b>：核算表写的小计 <b>{fmt(c.a, 4)}</b> ≠ 逐料相加 <b>{fmt(c.b, 4)}</b>（少算 {fmt(Math.abs(c.diff || 0), 4)} 元/kg 不含税）
+                            <b>✗ {c.check}</b>：采购核算表写的小计 <b>{fmt(c.a, 4)}</b> ≠ 逐料相加 <b>{fmt(c.b, 4)}</b>（少算 {fmt(Math.abs(c.diff || 0), 4)} 元/kg 不含税）
                             {(c.missing || []).length > 0 && <span>　— <b>没被加进小计的是：{c.missing.map(m => m.matName).join('、')}</b>（料是有的，是小计公式没框到），
                               <a className="lk" onClick={() => setPendP({ groupId: g.groupId, product: p })}>点开逐料看 ›</a></span>}
                           </div>)}
@@ -825,7 +825,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                         className={p.steps?.[k] ? 'ok' : 'wait'}>{k === 'qty' ? '③' : '④'}</span>))}</td>
                     <td><span className={'tag ' + (STATUS[p.status]?.cls || 'unmap')}>{p.status}</span>
                       {p.quotable === false && <span className="bom-noquote" title={p.quoteReason}>禁报价</span>}
-                      {p.staleNote && <span className="tag late" style={{ marginLeft: 4 }} title="上游核算表被替换、成本可能变了——本品已打回未复核，请重新复核">⚠ {p.staleNote}</span>}</td>
+                      {p.staleNote && <span className="tag late" style={{ marginLeft: 4 }} title="上游采购核算表被替换、成本可能变了——本品已打回未复核，请重新复核">⚠ {p.staleNote}</span>}</td>
                     <td>{cfg?.canAttach
                       ? <label className="bom-minifile">{busy === 'bom' + p.id ? '解析中…' : (p.hasBomList ? '替换' : '补挂')}
                         <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => doBom(p.id, e.target.files)} /></label>
@@ -840,12 +840,12 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
 
             {/* 组内文件替换 */}
             {cfg?.canFetch && <div className="bom-grpact">
-              <span className="muted" style={{ fontSize: 11.5 }}>组内核算表有错（如小计漏加料）→ 让研发/工厂改好后在此替换；<b>旧版留痕、不进标准成本库</b></span>
+              <span className="muted" style={{ fontSize: 11.5 }}>组内采购核算表有错（如小计漏加料）→ 让研发/工厂改好后在此替换；<b>旧版留痕、不进标准成本库</b></span>
               <span style={{ flex: 1 }} />
               <button className="btn-sec" disabled={!!busy || !cfg?.dingtalkConfigured} onClick={() => doRefetch(g.groupId)}
-                title={cfg?.dingtalkConfigured ? '重连钉钉重拉商务版核算表替换' : '本机未配置钉钉，请用上传替换'}>
+                title={cfg?.dingtalkConfigured ? '重连钉钉重拉商务版采购核算表替换' : '本机未配置钉钉，请用上传替换'}>
                 {busy === g.groupId + ':dt' ? '重拉中…' : '⟳ 重连钉钉替换'}</button>
-              <label className="bom-minifile pri">{busy === g.groupId + ':up' ? '上传中…' : '⬆ 上传替换核算表'}
+              <label className="bom-minifile pri">{busy === g.groupId + ':up' ? '上传中…' : '⬆ 上传替换采购核算表'}
                 <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => doUpload(g.groupId, e.target.files)} /></label>
               {isSuper && onDelete && <button className="btn-sec" style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
                 title="主管理员：删除本组全部记录（含被替换旧版）与留档文件（需密钥）"
@@ -882,7 +882,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
           </details>
         )}
 
-        <div className="foot">组＝一个成本核算表文件（成品+半成品+复配料）＋ 匹配的 BOM 清单。替换核算表时：新文件里勾稽平的产品顶替同组同产品旧版（旧版标「已被替换」留痕、退出标准成本库与定稿指针）；仍不平的不入账并回报原因；原先因不平未入的产品（如半成品）修好后会作「组内新增」补入。<b>定性</b>＝物料类别（复配料/自产·委外 半成品·成品）+ 是否建议对外报价（不建议须写原因），定稿前必须完成。</div>
+        <div className="foot">组＝一个采购核算表文件（成品+半成品+复配料）＋ 匹配的 BOM 清单。替换采购核算表时：新文件里勾稽平的产品顶替同组同产品旧版（旧版标「已被替换」留痕、退出标准成本库与定稿指针）；仍不平的不入账并回报原因；原先因不平未入的产品（如半成品）修好后会作「组内新增」补入。<b>定性</b>＝物料类别（复配料/自产·委外 半成品·成品）+ 是否建议对外报价（不建议须写原因），定稿前必须完成。</div>
       </div>
       {auditP && <AuditModal entry={auditP} onClose={() => setAuditP(null)}
         onDone={async () => { setAuditP(null); await load() }} flash={flash} />}
@@ -892,7 +892,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
   )
 }
 
-// ============ 核算表详情 ============
+// ============ 采购核算表详情 ============
 function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, flash, isSuper, onDelete }) {
   const isStd = mode === 'std'
   const [edit, setEdit] = useState(false)
@@ -998,7 +998,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
     <>
       <div className="head">
         <div>
-          <div className="h-title">成本核算表 · {entry.productName}
+          <div className="h-title">采购核算表 · {entry.productName}
             <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
             {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
             {entry.historical && <span className="tag late" title="审核时答 C 归档的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}
@@ -1007,15 +1007,15 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', position: 'relative' }}>
-          {/* 动作条（业务方定序 2026-09-06，V2.463）：返回上一级 · 导出核算表 · 申请作废 · 修改价税费 · 审核归档 · 删除（主管理员）
+          {/* 动作条（业务方定序 2026-09-06，V2.463）：返回上一级 · 导出采购核算表 · 申请作废 · 修改价税费 · 审核归档 · 删除（主管理员）
               颜色＝动作性质：灰边＝导航/只读（返回、导出）；琥珀边＝可逆申请（申请作废、撤销归档）；蓝边＝编辑（修改价税费、改定性）；
               绿实心＝主流程正向动作（审核归档、保存）；琥珀实心＝审批他人申请（作废终审）；红实心＝不可逆（删除，仅主管理员） */}
           <button className="btn-sec" onClick={onBack} title="回到来处（处理页或台账列表）">‹ 返回上一级</button>
-          {cfg?.canExport && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)} title="下载或预览核算表；同产品多版时可看版本对比">⤓ 导出核算表 ▾</button>
+          {cfg?.canExport && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)} title="下载或预览采购核算表；同产品多版时可看版本对比">⤓ 导出采购核算表 ▾</button>
           {expMenu && <div className="bom-menu" onMouseLeave={() => setExpMenu(false)}>
-            <a href={bomExportOriginalUrl(entry.id)}><b>原版核算表（源附件）</b><span>审批附件 xlsx 原样下载，供留档核对</span></a>
+            <a href={bomExportOriginalUrl(entry.id)}><b>原版采购核算表（源附件）</b><span>审批附件 xlsx 原样下载，供留档核对</span></a>
             <a href={bomExportOriginalUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览原版</b><span>不下载，在新标签页查看</span></a>
-            <a href={bomExportPrettyUrl(entry.id)}><b>重排版核算表（美化）</b><span>台账口径重排版，含费用参数与勾稽说明</span></a>
+            <a href={bomExportPrettyUrl(entry.id)}><b>重排版采购核算表（美化）</b><span>台账口径重排版，含费用参数与勾稽说明</span></a>
             <a href={bomExportPrettyUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览重排版</b><span>不下载，在新标签页查看</span></a>
             <a href={bomExportPairUrl(entry.id)}><b>财务版 + 脱敏版（一次下两份）</b><span>zip：财务版全量活公式 · 脱敏版遮型号/规格/供应商给商品经理；复核完传回 OA 表单用</span></a>
             {versions.length > 1 && <a onClick={() => { setExpMenu(false); onCompare() }}><b>⇄ 版本对比</b><span>同产品 {versions.length} 个版本逐料涨跌</span></a>}
@@ -1051,7 +1051,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
       <div className="body">
         <div className="bom-crumbs"><a className="lk" onClick={onBack}>成本台账</a> / {entry.productName}</div>
         {entry.staleNote && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
-          ⚠ <b>{entry.staleNote}</b>：本品所依赖的上游核算表被替换过，成本可能已变——已把本品打回<b>未复核</b>，请重新走 ③用量自洽 / ④报价核算 确认。确认后此提醒自动消失。</div>}
+          ⚠ <b>{entry.staleNote}</b>：本品所依赖的上游采购核算表被替换过，成本可能已变——已把本品打回<b>未复核</b>，请重新走 ③用量自洽 / ④报价核算 确认。确认后此提醒自动消失。</div>}
         {/* 换码承接（V2.440）：本版被新版替代 / 本版替代了旧版 */}
         {entry.obsoleteBy && <div className="banner" style={entry.obsoleteBy.live
           ? { display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }
@@ -1114,7 +1114,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {/* ② 工艺流程：同样**只看不确认**；费用参数右栏已有，此处不重复 */}
             {step === 'craft' && <CraftSection entry={entry} />}
 
-            {/* ③ 用量自洽（核算表添加量 vs BOM清单用量 逐料比对）*/}
+            {/* ③ 用量自洽（采购核算表添加量 vs BOM清单用量 逐料比对）*/}
             {step === 'qty' && <>
               <BomCheckSection entry={entry} cfg={cfg} onChanged={onChanged} flash={flash} />
               {!isStd && cfg?.canAudit && <StepConfirm okState={entry.steps?.qty} info={entry.stepsInfo?.qty}
@@ -1137,7 +1137,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               {!isStd && !edit && cfg?.canAudit && <StepConfirm okState={entry.steps?.price} info={entry.stepsInfo?.price}
                 label="报价核算无误" onConfirm={(on) => confirmStep('price', on)} />}
             </>}
-            <div className="foot">①BOM清单、②工艺流程＝研发给的<b>参考材料，只看不确认</b>；要签字的是 ③用量自洽（核算表 vs BOM清单逐料）和 ④报价核算（逐料核价，可改税率，成本与全成本随之重算并留痕）。<b>③④确认后点右上「审核定稿」填物料类别+是否允许报价，保存即定稿</b>。</div>
+            <div className="foot">①BOM清单、②工艺流程＝研发给的<b>参考材料，只看不确认</b>；要签字的是 ③用量自洽（采购核算表 vs BOM清单逐料）和 ④报价核算（逐料核价，可改税率，成本与全成本随之重算并留痕）。<b>③④确认后点右上「审核定稿」填物料类别+是否允许报价，保存即定稿</b>。</div>
           </div>
 
           <div className="bom-rail">
@@ -1201,8 +1201,8 @@ async function adoptErpCode(entryId, code, flash) {
   if (!r || !r.ok) { flash && flash((r && r.msg) || '更新失败'); return null }
   return r
 }
-// 「核对」弹窗（业务方 2026-09-05 提）：上半＝金蝶物料档案反查候选；下半＝与台账里同物料编码 / 同 CP 的另一条核算表**逐料对比**
-// （核算表添加量 + 含税采购价 + 成本，都有 BOM 清单时再并 BOM 用量），五分项汇总也并排。判断"是同一个东西的新旧版，还是两个不同产品"就看这张表。
+// 「核对」弹窗（业务方 2026-09-05 提）：上半＝金蝶物料档案反查候选；下半＝与台账里同物料编码 / 同 CP 的另一条采购核算表**逐料对比**
+// （采购核算表添加量 + 含税采购价 + 成本，都有 BOM 清单时再并 BOM 用量），五分项汇总也并排。判断"是同一个东西的新旧版，还是两个不同产品"就看这张表。
 function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLink, onLinked }) {
   const list = useMemo(() => { const seen = new Set(); return (others || []).filter(o => o && o.entryId && !seen.has(o.entryId) && seen.add(o.entryId)) }, [others])
   const [sel, setSel] = useState(list[0]?.entryId || null)
@@ -1219,7 +1219,7 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLi
   useEffect(() => {
     if (!sel) return
     setOther(null)
-    getBomEntry(sel).then(r => setOther(r.entry)).catch(e => flash('打不开对方核算表：' + e.message))
+    getBomEntry(sel).then(r => setOther(r.entry)).catch(e => flash('打不开对方采购核算表：' + e.message))
   }, [sel])
   const adopt = async (code) => { setBusy(true); try { await onAdopt(code) } finally { setBusy(false) } }
   // ③ 金蝶 ERP BOM 用量对比（业务方提 2026-09-06）：有物料编码就自动拉；没有就用金蝶候选里第一个正式码试比
@@ -1270,7 +1270,7 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLi
             <div style={{ marginTop: 6 }}><ErpCandidates lk={lk} onAdopt={adopt} busy={busy} onCompare={(id) => setSel(id)} /></div>
           </div>
           <div style={{ marginTop: 12 }}>
-            <b style={{ fontSize: 12 }}>② 金蝶 ERP BOM 用量 vs 核算表添加量{kdCode ? <span className="mono muted" style={{ fontWeight: 400 }}>　物料 {kdCode}{!entry.erpCode ? '（按金蝶候选试比，未采用）' : ''}</span> : ''}</b>
+            <b style={{ fontSize: 12 }}>② 金蝶 ERP BOM 用量 vs 采购核算表添加量{kdCode ? <span className="mono muted" style={{ fontWeight: 400 }}>　物料 {kdCode}{!entry.erpCode ? '（按金蝶候选试比，未采用）' : ''}</span> : ''}</b>
             {!kdCode && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>没有物料编码，也没有金蝶候选——无法定位金蝶 BOM。</div>}
             {kdCode && !kd && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>读取金蝶 BOM…</div>}
             {kd && kd.offline && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>金蝶未连接：{kd.msg}</div>}
@@ -1281,13 +1281,13 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLi
                 {(kd.bom.versions || []).length > 1 ? ` · 共 ${kd.bom.versions.length} 版（取启用最新）` : ''} · 子项 {kd.itemCount} 项，
                 <b style={{ color: kd.diffCount ? 'var(--amber)' : 'var(--green)' }}>{kd.diffCount ? `${kd.diffCount} 项有差异` : '全部一致'}</b>
                 {kd.note ? <span style={{ color: 'var(--amber)' }}>　⚠ {kd.note}</span> : ''}
-                　·　容差 0.0005 kg/kg；金蝶 BOM 里的半成品子项对应核算表里「作原料进上层」的行。
+                　·　容差 0.0005 kg/kg；金蝶 BOM 里的半成品子项对应采购核算表里「作原料进上层」的行。
               </div>
               <div className="tbl-wrap">
                 <table className="bom-ledger" style={{ fontSize: 12 }}>
                   <thead><tr>
-                    <th className="th">段</th><th className="th">物料（核算表）</th><th className="th">编码</th><th className="th">金蝶子项</th>
-                    <th className="th" style={{ textAlign: 'right' }}>核算表添加量</th><th className="th" style={{ textAlign: 'right' }}>研发BOM用量</th>
+                    <th className="th">段</th><th className="th">物料（采购核算表）</th><th className="th">编码</th><th className="th">金蝶子项</th>
+                    <th className="th" style={{ textAlign: 'right' }}>采购核算表添加量</th><th className="th" style={{ textAlign: 'right' }}>研发BOM用量</th>
                     <th className="th" style={{ textAlign: 'right' }}>金蝶BOM用量</th><th className="th" style={{ textAlign: 'right' }}>Δ(核算−金蝶)</th><th className="th">判定</th>
                   </tr></thead>
                   <tbody>{kd.rows.map((r, i) => (
@@ -1305,12 +1305,12 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLi
             </>}
           </div>
           <div style={{ marginTop: 12 }}>
-            <b style={{ fontSize: 12 }}>③ 台账里同物料编码 / 同 CP 的其它核算表——逐料对比</b>
+            <b style={{ fontSize: 12 }}>③ 台账里同物料编码 / 同 CP 的其它采购核算表——逐料对比</b>
             {list.length === 0 && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>台账里没有别的记录挂同一物料编码或同一 CP，无需对比。</div>}
             {list.length > 1 && <div className="bom-catpick" style={{ margin: '6px 0' }}>{list.map(o => (
               <button key={o.entryId} className={sel === o.entryId ? 'on' : ''} onClick={() => setSel(o.entryId)}>{o.cpCode} {o.productName}{o.status ? ` · ${o.status}` : ''}</button>))}</div>}
             {list.length === 1 && <div className="muted" style={{ fontSize: 12, margin: '4px 0' }}>对方：<b>{list[0].cpCode} {list[0].productName}</b>{list[0].status ? ` · ${list[0].status}` : ''}{list[0].calcDate ? ` · ${list[0].calcDate}` : ''}</div>}
-            {sel && !other && <div className="loading" style={{ padding: 16 }}>读取对方核算表…</div>}
+            {sel && !other && <div className="loading" style={{ padding: 16 }}>读取对方采购核算表…</div>}
             {other && <>
               <div className="tbl-wrap" style={{ marginTop: 6 }}>
                 <table className="bom-ledger" style={{ fontSize: 12 }}>
@@ -1322,7 +1322,7 @@ function CompareEntriesModal({ entry, lk, others, onAdopt, onClose, flash, canLi
                   </tbody>
                 </table>
               </div>
-              <div className="muted" style={{ fontSize: 11.5, margin: '8px 0 4px' }}>逐料 {rows.length} 项，<b style={{ color: nDiff ? 'var(--amber)' : 'var(--green)' }}>{nDiff ? `${nDiff} 项有差异` : '全部一致'}</b>；差异排前。添加量＝核算表 kg/kg；{showBom ? 'BOM 用量＝研发清单；' : ''}含税价＝研发填的采购价。</div>
+              <div className="muted" style={{ fontSize: 11.5, margin: '8px 0 4px' }}>逐料 {rows.length} 项，<b style={{ color: nDiff ? 'var(--amber)' : 'var(--green)' }}>{nDiff ? `${nDiff} 项有差异` : '全部一致'}</b>；差异排前。添加量＝采购核算表 kg/kg；{showBom ? 'BOM 用量＝研发清单；' : ''}含税价＝研发填的采购价。</div>
               <div className="tbl-wrap">
                 <table className="bom-ledger" style={{ fontSize: 12 }}>
                   <thead><tr>
@@ -1374,7 +1374,7 @@ function ErpCandidates({ lk, onAdopt, busy, compact, onCompare }) {
           {c.erpCode.toUpperCase().startsWith('T') && <span className="tag late" style={{ marginLeft: 4 }}>T 开头</span>}
           {c.forbidden && <span className="tag werr" style={{ marginLeft: 4 }}>金蝶已禁用</span>}
           {(c.inLedger || []).map(x => <span key={x.entryId} className="tag late" style={{ marginLeft: 4, cursor: onCompare ? 'pointer' : undefined }}
-            title={`台账里 ${x.cpCode} ${x.productName}（${x.status}）已挂此编码——采用后按「后审核的替代先审核的」提示确认${onCompare ? '；点击看两张核算表逐料对比' : ''}`}
+            title={`台账里 ${x.cpCode} ${x.productName}（${x.status}）已挂此编码——采用后按「后审核的替代先审核的」提示确认${onCompare ? '；点击看两张采购核算表逐料对比' : ''}`}
             onClick={onCompare ? () => onCompare(x.entryId) : undefined}>已挂 {x.cpCode}{onCompare ? ' ›' : ''}</span>)}
         </span>
       </div>))}
@@ -1415,7 +1415,7 @@ function ErpCodeRow({ entry, canEdit, onChanged, flash }) {
       <b style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="mono">{entry.erpCode || '—'}</span>
         {canEdit && <button className="btn-sec" disabled={busy} onClick={manual} style={{ padding: '0 8px' }}>{entry.erpCode ? '改' : '手填'}</button>}
-        {canEdit && <button className="btn-sec" disabled={busy} style={{ padding: '0 8px' }} title="弹窗：金蝶物料档案按 CP 反查 + 与台账里同编码/同CP的核算表逐料对比用量与价格"
+        {canEdit && <button className="btn-sec" disabled={busy} style={{ padding: '0 8px' }} title="弹窗：金蝶物料档案按 CP 反查 + 与台账里同编码/同CP的采购核算表逐料对比用量与价格"
           onClick={() => openCmp()}>核对</button>}
       </b>
     </div>
@@ -1453,7 +1453,7 @@ function MatTypeCell({ m, subType, editable, onSetType }) {
               <input type="radio" checked={pick === t} onChange={() => setPick(t)} style={{ marginRight: 8 }} />{t}
               {t === subType && <span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>（当前）</span>}
               {t === '原辅料' && <span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>普通采购料·不下钻</span>}
-              {t !== '原辅料' && <span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>自产·尝试下钻子核算表</span>}</label>))}
+              {t !== '原辅料' && <span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>自产·尝试下钻子采购核算表</span>}</label>))}
         </div>
         {pick !== subType && <div className="banner err" style={{ margin: '8px 0' }}>二次确认：把「{m.matName}」从「{subType}」改为「<b>{pick}</b>」？只改分类、五分项成本不变。</div>}
         <div className="bom-mfoot">
@@ -1490,7 +1490,7 @@ function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullI
             // 物料子类：人工覆盖(m.subType)优先，否则按名字/编码建议——名带半成品/复配料/复合 或 SZF 码 → 复配料，否则原辅料。
             const autoNested = /半成品|复配料|复合/.test(m.matName || '') || (m.matCode || '').startsWith('SZF')
             const subType = isPack ? '包材' : (m.subType || (autoNested ? '复配料' : '原辅料'))
-            const nested = !isPack && subType !== '原辅料'      // 复配料/自产半成品 → 尝试下钻子核算表
+            const nested = !isPack && subType !== '原辅料'      // 复配料/自产半成品 → 尝试下钻子采购核算表
             const semiEntry = nested ? (all || []).find(x => (m.priceIncl > 0) && Math.abs((x.comp?.full || 0) - m.priceIncl) < 0.02) : null
             const qMark = p && Math.abs((m.qtyPerKg || 0) - (p.qtyPerKg || 0)) > 1e-9 ? ((m.qtyPerKg > p.qtyPerKg) ? 'up' : 'down') : null
             const pMark = p && Math.abs((m.priceIncl || 0) - (p.priceIncl || 0)) > 1e-9 ? ((m.priceIncl > p.priceIncl) ? 'up' : 'down') : null
@@ -1504,7 +1504,7 @@ function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullI
                 <td><MatTypeCell m={m} subType={subType} editable={!isPack && !!onSetType} onSetType={onSetType} /></td>
                 <td className="mono">{m.matCode || '—'}</td>
                 <td style={{ fontWeight: 600, ...NOWRAP }} title={m.matName}>{semiEntry
-                  ? <a className="lk" onClick={() => onDrill(semiEntry.id)}>{m.matName} ↗ 子核算表</a>
+                  ? <a className="lk" onClick={() => onDrill(semiEntry.id)}>{m.matName} ↗ 子采购核算表</a>
                   : <>{m.matName}{nested && <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>{subType}·台账无子表</span>}</>}</td>
                 <td className="muted" style={NOWRAP} title={m.model}>{m.model && m.model !== '0' ? m.model : '—'}</td>
                 <td className="muted">{m.unit || '—'}</td>
@@ -1668,7 +1668,7 @@ function BomConfig() {
 
         <div className="card bom-sect">
           <div className="bom-secthead"><span className="bom-no">票</span><b>发票类型 → 成本不含税 算法</b>
-            <span className="muted" style={{ fontSize: 11 }}>{inv?.hint || '对应成本核算表 N 列公式，可维护'}</span></div>
+            <span className="muted" style={{ fontSize: 11 }}>{inv?.hint || '对应采购核算表 N 列公式，可维护'}</span></div>
           <div style={{ padding: '6px 14px 14px' }}>
             {!inv?.canConfig && <div className="banner info" style={{ marginBottom: 10 }}>只读——需「基础设置」权限方可修改。</div>}
             <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 12 }}>
@@ -1754,7 +1754,7 @@ function BomListSection({ entry, cfg, onChanged, flash }) {
         <span style={{ flex: 1 }} />
         <label className="bom-minifile">{busy ? '解析中…' : '⬆ 上传替换 BOM清单'}
           <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => upload(e.target.files)} /></label></div>}
-      <div className="foot" style={{ padding: '0 14px 12px' }}>此步只看研发清单原样（不确认）；逐料用量与核算表的比对在③用量自洽。</div>
+      <div className="foot" style={{ padding: '0 14px 12px' }}>此步只看研发清单原样（不确认）；逐料用量与采购核算表的比对在③用量自洽。</div>
     </div>
   )
 }
@@ -1771,7 +1771,7 @@ function UpstreamSection({ entry, onOpen }) {
         <span className="muted" style={{ fontSize: 11 }}>下层「全成本含税」＝本品料行的「含税价」</span>
         <span style={{ flex: 1 }} />
         {block.length ? <span className="tag leak">上游未就绪 · 不能定稿</span> : <span className="tag ok">链路已通</span>}</div>
-      {/* 列序按业务方定（2026-09-06，V2.479）：编号 · 物料名称 · 上游含税价 · 本批含税价 · 差异 · 看子核算表；上游审核状态并入「差异」列 */}
+      {/* 列序按业务方定（2026-09-06，V2.479）：编号 · 物料名称 · 上游含税价 · 本批含税价 · 差异 · 看子采购核算表；上游审核状态并入「差异」列 */}
       <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
         <th className="th">编号</th><th className="th">物料名称</th>
         <th className="th" style={{ textAlign: 'right' }}>上游含税价</th><th className="th" style={{ textAlign: 'right' }}>本批含税价</th>
@@ -1790,14 +1790,14 @@ function UpstreamSection({ entry, onOpen }) {
             <td>{!u.priceOk
               ? <><span className="num" style={{ color: 'var(--red)', fontWeight: 600 }}>{diff > 0 ? '+' : ''}{fmt(diff, 4)}</span> <span className="tag leak">价格对不上</span> {st}</>
               : <><span className="muted">0.00</span> {st}</>}</td>
-            <td><a className="lk" onClick={() => onOpen(u.entryId)}>看子核算表 ›</a></td>
+            <td><a className="lk" onClick={() => onOpen(u.entryId)}>看子采购核算表 ›</a></td>
           </tr>)
         })}
       </tbody></table></div>
       {block.length > 0 && <div className="bom-chkfail" style={{ margin: '0 14px 12px' }}>
         <b>⛔ 上游未就绪，本品不能定稿</b>：{block.join('；')}。<br />
         半成品的成本没确认，成品的成本就是建在未确认的数上——先把上游复核定稿，再回来定本品。</div>}
-      <div className="foot" style={{ padding: '0 14px 10px' }}>只列**台账里真有同名（或型号栏研发码同 CP）子核算表**的料行；外购原料/包材不在此列（名字带「复合/复配料」的外购件不算上游）。</div>
+      <div className="foot" style={{ padding: '0 14px 10px' }}>只列**台账里真有同名（或型号栏研发码同 CP）子采购核算表**的料行；外购原料/包材不在此列（名字带「复合/复配料」的外购件不算上游）。</div>
     </div>
   )
 }
@@ -1837,7 +1837,7 @@ function CraftSection({ entry }) {
   )
 }
 
-// 研发两表自洽校验：成本核算表(添加量) vs 研发BOM清单(用量)。缺料/多料/用量不符=BOM结构或用量不一致。
+// 研发两表自洽校验：采购核算表(添加量) vs 研发BOM清单(用量)。缺料/多料/用量不符=BOM结构或用量不一致。
 function BomCheckSection({ entry, cfg, onChanged, flash }) {
   const [onlyDiff, setOnlyDiff] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -1854,7 +1854,7 @@ function BomCheckSection({ entry, cfg, onChanged, flash }) {
     return (
       <div className="card bom-sect">
         <div className="bom-secthead"><span className="bom-no">✓</span><b>用量自洽校验</b>
-          <span className="muted" style={{ fontSize: 11 }}>成本核算表 vs 研发 BOM清单：用量 / 缺料 / 多料</span></div>
+          <span className="muted" style={{ fontSize: 11 }}>采购核算表 vs 研发 BOM清单：用量 / 缺料 / 多料</span></div>
         <div style={{ padding: '14px' }}>
           <div className="banner err" style={{ marginBottom: cfg?.canAttach ? 10 : 0 }}>
             ⚠ 本单未附研发 BOM清单，且按产品编码 <b className="mono">{entry.cpCode || '（无编码）'}</b> 在台账历史里也没查到——<b>疑似漏传</b>，建议向研发核实补传。（改配方必换编码，同编码历史里能找到就会自动沿用。）</div>
@@ -1866,24 +1866,24 @@ function BomCheckSection({ entry, cfg, onChanged, flash }) {
   }
   const s = ck.summary
   const rows = onlyDiff ? ck.rows.filter(r => r.status !== '一致') : ck.rows
-  const STAT = { '一致': 'ok', '用量不符': 'werr', '核算表缺料': 'leak', '核算表多料': 'late' }
+  const STAT = { '一致': 'ok', '用量不符': 'werr', '采购核算表缺料': 'leak', '采购核算表多料': 'late' }
   return (
     <div className="card bom-sect">
       <div className="bom-secthead"><span className="bom-no">✓</span><b>用量自洽校验</b>
-        <span className="muted" style={{ fontSize: 11 }}>成本核算表 vs 研发 BOM清单：<b>只核对用量</b>（按编码对齐，不判类型）</span>
+        <span className="muted" style={{ fontSize: 11 }}>采购核算表 vs 研发 BOM清单：<b>只核对用量</b>（按编码对齐，不判类型）</span>
         <span style={{ flex: 1 }} />
         {inherited && <span className="tag late" style={{ marginRight: 6 }}>沿用历史清单</span>}
         {s.ok ? <span className="tag ok">用量全平 · {s.total} 料</span>
-          : <span className="tag werr">{[s.qtyMismatch && `用量不符 ${s.qtyMismatch}`, s.missing && `核算表缺料 ${s.missing}`, s.extra && `核算表多料 ${s.extra}`].filter(Boolean).join(' · ')}</span>}
+          : <span className="tag werr">{[s.qtyMismatch && `用量不符 ${s.qtyMismatch}`, s.missing && `采购核算表缺料 ${s.missing}`, s.extra && `采购核算表多料 ${s.extra}`].filter(Boolean).join(' · ')}</span>}
         <Seg value={onlyDiff ? 'diff' : 'all'} onChange={v => setOnlyDiff(v === 'diff')} opts={[['diff', '只看差异'], ['all', '全部']]} />
       </div>
       {inherited && <div style={{ padding: '12px 14px 0' }}><div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)' }}>
         ⓘ 本单未附 BOM清单，按产品编码 <b className="mono">{inherited.fromCp}</b> 沿用历史清单校验（第 {inherited.fromEntryId} 号 · {inherited.fromApproval ? '审批…' + String(inherited.fromApproval).slice(-4) + ' · ' : ''}{inherited.fromDate}）——改配方必换编码，同编码=配方未变。研发补传本单清单后可上传替换。</div></div>}
       {s.ok && onlyDiff
-        ? <div style={{ padding: 14 }}><div className="banner" style={{ background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)' }}>✓ 核算表与研发 BOM清单逐料用量一致（{s.total} 味料全平）——两份表用量对得上。</div></div>
+        ? <div style={{ padding: 14 }}><div className="banner" style={{ background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)' }}>✓ 采购核算表与研发 BOM清单逐料用量一致（{s.total} 味料全平）——两份表用量对得上。</div></div>
         : <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
           <th className="th">物料</th>
-          <th className="th" style={{ textAlign: 'right' }}>核算表 添加量</th>
+          <th className="th" style={{ textAlign: 'right' }}>采购核算表 添加量</th>
           <th className="th" style={{ textAlign: 'right' }}>BOM清单 用量</th>
           <th className="th" style={{ textAlign: 'right' }}>差</th><th className="th">状态</th>
         </tr></thead><tbody>
@@ -2038,7 +2038,7 @@ function Compare({ entry, all, onBack, flash }) {
         <div><div className="h-title">版本对比 · {entry.productName}</div>
           <div className="h-sub">同一产品不同入账版本的差异识别 · 数值差异 / 信息差异，逐行标注成本影响</div></div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn-sec" onClick={onBack}>返回核算表</button>
+          <button className="btn-sec" onClick={onBack}>返回采购核算表</button>
           <button className="btn-sec" onClick={() => flash('导出差异清单 xlsx')}>导出差异清单</button>
         </div>
       </div>
@@ -2397,7 +2397,7 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
 
         <div className="bom-mor">钉钉扫不到 / 无审批单据时</div>
         <div className="bom-mstep"><span className="bom-mno">2</span><div style={{ flex: 1 }}>
-          <b>上传成本核算表</b>
+          <b>上传采购核算表</b>
           <div className="muted" style={{ fontSize: 12, margin: '3px 0 7px' }}>走同一套解析与勾稽/上游校验；单号填在上面可溯源。</div>
           <label className="bom-drop">{busy === 'up' ? '解析中…' : '点击或拖拽上传　·　支持 .xlsx'}
             <input type="file" accept=".xlsx,.xls" multiple style={{ display: 'none' }} onChange={e => doUpload(e.target.files)} /></label>
@@ -2413,7 +2413,7 @@ function IntakeModal({ cfg, onClose, onDone, flash }) {
           </div>
           {(res.rejected || []).length > 0 && <div className="bom-chkfail">
             {res.rejected.map((r, i) => <div key={i}>· <b>{r.productName}</b>：{r.reason}</div>)}
-            <div style={{ marginTop: 4 }}>→ 这些<b>不进台账</b>（红线），但已记为「待修」留在待办里；进处理页可看逐料差异、替换修好的核算表。</div>
+            <div style={{ marginTop: 4 }}>→ 这些<b>不进台账</b>（红线），但已记为「待修」留在待办里；进处理页可看逐料差异、替换修好的采购核算表。</div>
           </div>}
           {(res.commentPending || []).length > 0 && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', fontSize: 11.5, marginTop: 6 }}>
             ⚠ 评论区补传了 {res.commentPending.length} 个附件，钉钉权限取不到——请手工下载后用上方上传补入：{res.commentPending.map(c => c.fileName).join('、')}</div>}

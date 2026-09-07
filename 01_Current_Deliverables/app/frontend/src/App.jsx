@@ -51,7 +51,7 @@ export default function App() {
     return !m.cap || user?.role === 'admin' || !!user?.perms?.[m.cap]
   }
   useEffect(() => { getMe().then(r => setUser(r.user)).catch(() => setUser(null)) }, [])
-  // 深链（V2.442）：`#/bomstd?entry=17` 这种带菜单 key 的 hash → 登录后直接落核算工作台该菜单（BP 只读台账「关联核算表 / 去终审」用）。
+  // 深链（V2.442）：`#/bomstd?entry=17` 这种带菜单 key 的 hash → 登录后直接落核算工作台该菜单（BP 只读台账「关联采购核算表 / 去终审」用）。
   // 只定位菜单；菜单内的 entry/compare/final 由该页面自己解析 hash。准入仍走 canView，无权限照常落占位页。
   useEffect(() => {
     if (!user) return

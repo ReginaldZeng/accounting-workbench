@@ -44,10 +44,10 @@ CAP_AUDIT = "bom:audit"                # 审核＝复核+定稿合一（仅成�
 CAP_PRICE = "bom:price_check"          # 查金蝶实采价
 CAP_EXPORT = "bom:export"              # 导出
 CAP_ATTACH = "bom:attach_bom"          # 补挂BOM清单
-CAP_VIEW_SHEET = "bom:view_sheet"      # 核算表查阅（下钻）
+CAP_VIEW_SHEET = "bom:view_sheet"      # 采购核算表查阅（下钻）
 CAP_CONFIG = "bom:config"              # 基础设置（公开版脱敏规则等）
 CAP_FINAL_REVIEW = "bom:final_review"  # 财务BP终审：①终审通过盖已审核戳（只有终审的才对外开放）②作废批准
-CAP_VIEW_FULL = "bom:view_full"        # 核算表全量查阅（BP 侧原地看全量；主管理员天然有）——V2.452
+CAP_VIEW_FULL = "bom:view_full"        # 采购核算表全量查阅（BP 侧原地看全量；主管理员天然有）——V2.452
 ENTER_DRAFT = "enter:bomdraft"         # 进「待办与复核」＝看未审核（敏感）
 ENTER_STD = "enter:bomstd"             # 进「标准成本台账」＝查已定稿公开
 
@@ -102,12 +102,12 @@ def _upstream_status(e, finals=None, others=None):
       早先按名字关键词猜（含「半成品/复配料/复合」就当上游）**误报严重**——实证：
       「复合宝A1」是外购原料、「复配料纸箱」是包材，都被误判成「链路不通」。
       名字带这些字的外购件很常见，光靠名字分不出「未入账的半成品」和「外购件」，所以宁可不报。
-      同一核算表文件内的上下游由 bq.upstream_refs 按页名精确配（那条路无歧义），入账闸走那条。
+      同一采购核算表文件内的上下游由 bq.upstream_refs 按页名精确配（那条路无歧义），入账闸走那条。
     返回 [{matName, priceUsed, found:True, entryId, upFull, priceOk, status, isFinal, pick}]。
 
     **同名多版怎么挑**（V2.460，业务方 2026-09-06 实证 240399）：台账里酱有 12-03 / 12-31 / 01-22 三版，12 月的半成品用的是同单那版 39.39，
     老规则一律取「核算日期最新」→ 拿 1 月的 64.99 去卡 12 月的单，假报「价格对不上」、补录历史单永远定不了稿。
-    现在按远近挑：① 同组（同一核算表文件）② 同钉钉单 ③ 该产品的定稿版 ④ 核算日期 ≤ 本单的最近一版 ⑤ 最新版。pick 标明挑的是哪级。
+    现在按远近挑：① 同组（同一采购核算表文件）② 同钉钉单 ③ 该产品的定稿版 ④ 核算日期 ≤ 本单的最近一版 ⑤ 最新版。pick 标明挑的是哪级。
 
     **同名配不上时按 CP 码兜底**（V2.478，业务方 2026-09-06 实证 CP27115303）：料行写「钵钵鸡复合调味酱」、台账入的是「钵钵鸡风味复合调味料」，
     名字差一个字就被当成外购料漏掉，三个复配料只列两个。料行型号/编码栏里带研发码（SZY227003）时，与台账 cp_code 对上也算同一产品；
@@ -222,7 +222,7 @@ def _net_weight(e):
 
 
 # ---- 换码承接（业务方定 2026-09-05，V2.440）----
-# 规则：① CP 码正常不重复；同 CP 再来一张核算表＝同一产品重核，成本会计初审时**要跳出来问「原来那个是否失效」**。
+# 规则：① CP 码正常不重复；同 CP 再来一张采购核算表＝同一产品重核，成本会计初审时**要跳出来问「原来那个是否失效」**。
 #      ② 不同 CP 但**同 ERP 物料编码**（研发改配方换 CP、卖的还是同一 SKU）：后审核的替代先审核的；
 #         BP 眼里物料编码才是身份 → 凡引用旧 CP 的定价都要重新提示 BP（对外口带 supersedes）。
 # 落法：初审（定性即定稿 / finalize）与补物料编码两处检测冲突 → 前端确认 → 旧版 obsolete_by=新版（留痕双向）。
@@ -423,14 +423,14 @@ def _default_channel(rec):
 
 
 def _group_id(src, approval, anchor_pk):
-    """组锚点：一个核算表文件（成品+半成品+复配料）＝一组。用 hash(源+审批号+成品归组键) 定，
-    替换核算表后同一成品落回同组。审批号缺失（手工无单号）时用 anchor_pk 本身兜底。"""
+    """组锚点：一个采购核算表文件（成品+半成品+复配料）＝一组。用 hash(源+审批号+成品归组键) 定，
+    替换采购核算表后同一成品落回同组。审批号缺失（手工无单号）时用 anchor_pk 本身兜底。"""
     key = "%s|%s|%s" % (src, approval or "manual", anchor_pk or "")
     return "g" + hashlib.md5(key.encode("utf-8")).hexdigest()[:16]
 
 
 def _workbook_anchor(records):
-    """一个核算表工作簿里的「成品」归组键作组锚——非成品(半成品/复配料)不作锚；全是半成品时用第一条兜底。
+    """一个采购核算表工作簿里的「成品」归组键作组锚——非成品(半成品/复配料)不作锚；全是半成品时用第一条兜底。
     records=同一 stagedFile 的预检项列表（含 rec/productKey/semi）。"""
     fin = next((it for it in records if not it.get("semi")), None)
     return (fin or (records[0] if records else {})).get("productKey")
@@ -482,7 +482,7 @@ def _stage_files(files, approval_no, source_type):
             warnings.append("%s 解析失败：%s" % (fname, e))
             continue
         if not recs:
-            # 不是成本核算表 → 试作研发 BOM清单（供核算表 vs BOM清单 自洽校验；来源方=研发BOM）
+            # 不是采购核算表 → 试作研发 BOM清单（供采购核算表 vs BOM清单 自洽校验；来源方=研发BOM）
             try:
                 bl = bq.parse_bom_list(data, fname)
             except Exception:
@@ -522,7 +522,7 @@ def _stage_files(files, approval_no, source_type):
         else:
             g["goodsOnly"] = True
             parsed.append(g)
-    # 同一核算表工作簿内的产品互为上下游（复配料→半成品→成品），先按文件聚 recs 供链路检查
+    # 同一采购核算表工作簿内的产品互为上下游（复配料→半成品→成品），先按文件聚 recs 供链路检查
     wb_recs = {}
     for it in parsed:
         wb_recs.setdefault(it.get("stagedFile"), []).append(it["rec"])
@@ -603,9 +603,9 @@ async def bom_config(request: Request):
             "dingtalkConfigured": bool(dtb and dtb.configured())}
 
 
-# ---------------- 基础设置：脱敏版核算表遮哪几列（V2.451 起真正生效）----------------
-# 业务方定 2026-09-06：**BP 侧的人在 BP 工作台看核算表，看的是脱敏版**（核算工作台的全量核算表只给成本会计/财务BP/主管理员）；
-# 下载的核算表也分版本。脱敏口径＝成本会计手工「商品版」的删法：型号(model)/规格(spec)/供应商品牌(brand) 三列，
+# ---------------- 基础设置：脱敏版采购核算表遮哪几列（V2.451 起真正生效）----------------
+# 业务方定 2026-09-06：**BP 侧的人在 BP 工作台看采购核算表，看的是脱敏版**（核算工作台的全量采购核算表只给成本会计/财务BP/主管理员）；
+# 下载的采购核算表也分版本。脱敏口径＝成本会计手工「商品版」的删法：型号(model)/规格(spec)/供应商品牌(brand) 三列，
 # 报价说明默认不遮。这四个开关只管**给 BP 的脱敏版**（/api/bomcost/sheet、/api/bomcost/export）；核算侧内部永远全量。
 _CFG_DEFAULT = {"hideModel": True, "hideSpec": True, "hideSupplier": True, "hidePriceNote": False}
 _MASK_LABELS = (("hideModel", "型号"), ("hideSpec", "规格"), ("hideSupplier", "供应商"), ("hidePriceNote", "报价说明"))
@@ -643,7 +643,7 @@ async def bom_get_settings(request: Request):
     if not u:
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     return {"ok": True, "config": _bom_settings(), "canConfig": bool(db.user_can(u, CAP_CONFIG)),
-            "hint": "只管给 BP 工作台的脱敏版核算表（网页与下载）遮哪几列；核算侧内部核算表永远全量。默认＝商品版口径：遮 型号/规格/供应商，报价说明不遮。"}
+            "hint": "只管给 BP 工作台的脱敏版采购核算表（网页与下载）遮哪几列；核算侧内部采购核算表永远全量。默认＝商品版口径：遮 型号/规格/供应商，报价说明不遮。"}
 
 
 @router.post("/api/bom/settings")
@@ -680,7 +680,7 @@ async def bom_get_invoice_rules(request: Request):
         return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
     return {"ok": True, "rules": _invoice_rules(), "modes": list(bq.INVOICE_MODES),
             "canConfig": bool(db.user_can(u, CAP_CONFIG)),
-            "hint": "对应成本核算表 N 列公式：专票=价/(1+税率)；普票=全额；自产自销农产品=价×(1−扣除率)；农产品专票=有税率则价税分离后计算抵扣。扣除率(农产品)默认9%，可改。"}
+            "hint": "对应采购核算表 N 列公式：专票=价/(1+税率)；普票=全额；自产自销农产品=价×(1−扣除率)；农产品专票=有税率则价税分离后计算抵扣。扣除率(农产品)默认9%，可改。"}
 
 
 @router.post("/api/bom/invoice-rules")
@@ -805,10 +805,10 @@ async def bom_entry(request: Request, entry_id: int):
     e = db.bom_get_entry(entry_id)
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
-    # 可见性（确认书 §8）：已定稿→需核算表查阅或进标准台账；未定稿草稿→需 enter:bomdraft（未审核只权限人看）
+    # 可见性（确认书 §8）：已定稿→需采购核算表查阅或进标准台账；未定稿草稿→需 enter:bomdraft（未审核只权限人看）
     if e.get("status") in ("初审", "已审核", "已定稿"):
         if not (db.user_can(u, CAP_VIEW_SHEET) or db.user_can(u, ENTER_STD)):
-            return JSONResponse({"ok": False, "msg": "无「核算表查阅」权限"}, status_code=403)
+            return JSONResponse({"ok": False, "msg": "无「采购核算表查阅」权限"}, status_code=403)
     elif not db.user_can(u, ENTER_DRAFT):
         return JSONResponse({"ok": False, "msg": "该记录未审核，仅有「待办与复核」权限者可查看"}, status_code=403)
     finals = db.bom_finals(_src())
@@ -831,7 +831,7 @@ async def bom_entry(request: Request, entry_id: int):
 
 
 def _src_path(src, entry_id):
-    """某记录的源核算表留档路径（跳过商品版留档）。找不到 → None。"""
+    """某记录的源采购核算表留档路径（跳过商品版留档）。找不到 → None。"""
     pdir = os.path.join(UPLOAD_DIR, src)
     if not os.path.isdir(pdir):
         return None
@@ -842,7 +842,7 @@ def _src_path(src, entry_id):
 
 
 def _group_file(src, entries, group_id=None, approval_no=None):
-    """该组的核算表源文件：先找已入账记录的留档，没有就找「待修」批次的暂存（整组被拦时用）。"""
+    """该组的采购核算表源文件：先找已入账记录的留档，没有就找「待修」批次的暂存（整组被拦时用）。"""
     for e in entries or []:
         p = _src_path(src, e["id"])
         if p:
@@ -855,7 +855,7 @@ def _group_file(src, entries, group_id=None, approval_no=None):
 
 
 def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, approval_no=None):
-    """组内**全量产品名册**：重解析该组核算表留档，把「勾稽不平·未入账」的产品也列出来。
+    """组内**全量产品名册**：重解析该组采购核算表留档，把「勾稽不平·未入账」的产品也列出来。
     否则成本会计只看到入账成功的那一个（如只有成品），看不出复配料/半成品差在哪、没法找上游改（业务方 2026-09-03 提）。
     返回 [已入账的 entry view … , {notBooked:True, 诊断…} …]；文件找不到/解析失败 → 只回已入账的。"""
     path = _group_file(src, entries, group_id, approval_no)
@@ -865,7 +865,7 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
         recs = bq.parse_workbook(open(path, "rb").read(), os.path.basename(path))
     except Exception:
         return booked_views
-    # 排除本组已入账的；也排除**本审批下别的组**已入账的——同一核算表文件被拆到多组时（如样例种子按产品分组），
+    # 排除本组已入账的；也排除**本审批下别的组**已入账的——同一采购核算表文件被拆到多组时（如样例种子按产品分组），
     # 否则会把别组入账成功的产品误报成「未入账」。
     booked_pk = {v["productKey"] for v in booked_views} | set(exclude_pks or ())
     extra = []
@@ -936,7 +936,7 @@ def _with_bomcheck(e, finals):
 
 @router.get("/api/bom/approval")
 async def bom_approval(request: Request):
-    """处理页（业务方定 A 方案）：一个钉钉单号 → 若干「组」（一个核算表文件=一组）。
+    """处理页（业务方定 A 方案）：一个钉钉单号 → 若干「组」（一个采购核算表文件=一组）。
     每组：当前版产品（成品/半成品/复配料，含勾稽/用量校验/来源方/商品版）+ 被替换旧版留痕（审核历史）。"""
     u = _current_user(request)
     if not u:
@@ -964,7 +964,7 @@ async def bom_approval(request: Request):
             continue
         anchor = next((x for x in active if not x.get("semi")), (active or es or [{}])[0])
         pv = [_with_bomcheck(x, finals) for x in sorted(active, key=lambda a: (0 if not a.get("semi") else 1, a["id"]))]
-        # 组内全量名册：把同一核算表里「不平未入账」的产品也列出来（会计要看到差异在哪、好找上游改）
+        # 组内全量名册：把同一采购核算表里「不平未入账」的产品也列出来（会计要看到差异在哪、好找上游改）
         pv = _group_roster(src, active + superseded, pv, exclude_pks=all_booked_pk,
                            group_id=gid, approval_no=no)
         hist = [{"id": x["id"], "productName": (x.get("product_name") or "").strip(), "cpCode": x.get("cp_code"),
@@ -1003,7 +1003,7 @@ async def bom_approval(request: Request):
 @router.get("/api/bom/pending")
 async def bom_pending_detail(request: Request):
     """下钻看「勾稽不平·未入账」的产品**到底哪儿不对**（业务方 2026-09-03 提）：
-    重解析该组核算表留档，回该产品的逐料明细 + 6 项勾稽 + 不平诊断，
+    重解析该组采购核算表留档，回该产品的逐料明细 + 6 项勾稽 + 不平诊断，
     并标出**没被计进申报小计的那几味料**（missingNames），前端把这些行标红。"""
     u = _current_user(request)
     if not u:
@@ -1017,7 +1017,7 @@ async def bom_pending_detail(request: Request):
     ents = db.bom_group_entries(src, gid)
     path = _group_file(src, ents, gid, appno)     # 已入账留档 → 没有就用待修批次的暂存
     if not path:
-        return JSONResponse({"ok": False, "msg": "该组的核算表源文件未留档，无法下钻。"}, status_code=404)
+        return JSONResponse({"ok": False, "msg": "该组的采购核算表源文件未留档，无法下钻。"}, status_code=404)
     try:
         recs = bq.parse_workbook(open(path, "rb").read(), os.path.basename(path))
     except Exception as ex:
@@ -1107,12 +1107,12 @@ async def bom_erp_lookup(request: Request):
     for c in cands:
         c["inLedger"] = [brief(x) for x in others if (x.get("erp_code") or "").strip() == c["erpCode"]]
     cur = (e.get("erp_code") or "").strip() if e else ""
-    # 台账里与本记录**同物料编码**的其它有效记录——「核对」弹窗拿它们做两张核算表的用量/价格对比（V2.444）
+    # 台账里与本记录**同物料编码**的其它有效记录——「核对」弹窗拿它们做两张采购核算表的用量/价格对比（V2.444）
     same_code = [brief(x) for x in others if cur and (x.get("erp_code") or "").strip() == cur]
     return {"ok": True, "cp": cp, "current": cur, "candidates": cands, "sameCode": same_code}
 
 
-# ---- 金蝶 ERP BOM 用量 vs 核算表添加量（业务方提 2026-09-06：「是不是应该将金蝶录入的 BOM 用量和我们这里的作对比」）----
+# ---- 金蝶 ERP BOM 用量 vs 采购核算表添加量（业务方提 2026-09-06：「是不是应该将金蝶录入的 BOM 用量和我们这里的作对比」）----
 _KD_BOM_CACHE = {}
 
 
@@ -1133,9 +1133,9 @@ def _real_code_of(m):
 
 
 def _align_kd_bom(e, bom):
-    """核算表物料行 vs 金蝶 BOM 子项逐料对齐：真实编码优先、退名字、每条只配一次。
-    → rows[{seg,name,code,kdCode,kdName,ours,rd,kd,kdUnit,delta,st}]，st ∈ 一致/用量不符/仅核算表/仅金蝶/单位不同。
-    可比前提：母件单位 千克 且子项单位 千克 → kg/kg 与核算表添加量同口径；否则标「单位不同」不判。容差 0.0005（四位小数）。"""
+    """采购核算表物料行 vs 金蝶 BOM 子项逐料对齐：真实编码优先、退名字、每条只配一次。
+    → rows[{seg,name,code,kdCode,kdName,ours,rd,kd,kdUnit,delta,st}]，st ∈ 一致/用量不符/仅采购核算表/仅金蝶/单位不同。
+    可比前提：母件单位 千克 且子项单位 千克 → kg/kg 与采购核算表添加量同口径；否则标「单位不同」不判。容差 0.0005（四位小数）。"""
     mats = e.get("materials") or []
     rd = {}
     for b in (e.get("bom_list") or []):                     # 研发 BOM 清单用量，有就并一列
@@ -1174,7 +1174,7 @@ def _align_kd_bom(e, bom):
             rdq = rd.get("n:" + nm)
         if not it:
             rows.append({"seg": m.get("seg"), "name": nm, "code": code or (m.get("matCode") or ""), "kdCode": "", "kdName": "",
-                         "ours": ours, "rd": rdq, "kd": None, "kdUnit": "", "delta": None, "st": "仅核算表"})
+                         "ours": ours, "rd": rdq, "kd": None, "kdUnit": "", "delta": None, "st": "仅采购核算表"})
             continue
         comparable = parent_kg and it["unit"] == "千克"
         if not comparable:
@@ -1188,14 +1188,14 @@ def _align_kd_bom(e, bom):
         if id(it) not in used:
             rows.append({"seg": "", "name": it["name"], "code": "", "kdCode": it["code"], "kdName": it["name"],
                          "ours": None, "rd": None, "kd": it["qty"], "kdUnit": it["unit"], "delta": None, "st": "仅金蝶"})
-    rank = {"仅核算表": 0, "仅金蝶": 0, "用量不符": 1, "单位不同": 2, "一致": 9}
+    rank = {"仅采购核算表": 0, "仅金蝶": 0, "用量不符": 1, "单位不同": 2, "一致": 9}
     rows.sort(key=lambda r: (rank[r["st"]], r["seg"] == "包材"))
     return rows
 
 
 @router.get("/api/bom/kd-bom")
 async def bom_kd_bom(request: Request):
-    """核对弹窗 ③：按本记录的物料编码取金蝶 ERP 当前 BOM，与核算表添加量（及研发 BOM 清单用量）逐料对比。
+    """核对弹窗 ③：按本记录的物料编码取金蝶 ERP 当前 BOM，与采购核算表添加量（及研发 BOM 清单用量）逐料对比。
     只读金蝶；金蝶连不上 → offline；没物料编码 → 提示先采用编码；金蝶没登 BOM → hasBom=false。CAP_AUDIT。"""
     u = _require_perm(request, CAP_AUDIT)
     if not u:
@@ -1218,7 +1218,7 @@ async def bom_kd_bom(request: Request):
             "bom": {k: bom[k] for k in ("bomNo", "name", "unit", "yieldRate", "forbidden", "doc", "org", "versions")},
             "itemCount": len(bom["items"]), "rows": rows, "diffCount": n_diff,
             "comparable": (bom.get("unit") or "") == "千克",
-            "note": ("金蝶 BOM 母件单位 %s，子项用量口径与核算表 kg/kg 可能不同，仅供参考" % bom.get("unit")) if (bom.get("unit") or "") != "千克" else ""}
+            "note": ("金蝶 BOM 母件单位 %s，子项用量口径与采购核算表 kg/kg 可能不同，仅供参考" % bom.get("unit")) if (bom.get("unit") or "") != "千克" else ""}
 
 
 @router.get("/api/bom/material-usage")
@@ -1249,7 +1249,7 @@ async def bom_material_usage(request: Request):
 
 
 # 原料内部子类（业务方 2026-09-04）：④报价可把误判的复配料改回原辅料等；**只在原料内部改**（原辅料/复配料/自产半成品），
-# 不动原料/包材归属（那按采购核算表为准），故五分项小计不变——只影响是否下钻子核算表/上游链，不重算成本、不失效审核。
+# 不动原料/包材归属（那按采购核算表为准），故五分项小计不变——只影响是否下钻子采购核算表/上游链，不重算成本、不失效审核。
 MAT_SUBTYPES = ("原辅料", "复配料", "自产半成品")
 
 
@@ -1448,7 +1448,7 @@ def _book_staged(prev, sid, idxs, u, historical=False):
     （`historical=1` 是审核弹窗答 C 的「不对外历史版」，另一回事。）"""
     src = _src()
     appno = prev.get("approvalNo") or ""
-    # 组锚：同一核算表文件(stagedFile)的产品共用 group_id（成品归组键作锚，替换后落回同组）
+    # 组锚：同一采购核算表文件(stagedFile)的产品共用 group_id（成品归组键作锚，替换后落回同组）
     by_wb = {}
     for it in prev["records"]:
         by_wb.setdefault(it.get("stagedFile"), []).append(it)
@@ -1517,7 +1517,7 @@ def _book_staged(prev, sid, idxs, u, historical=False):
         if historical:                       # 补录：只打标记，照常走复核+初审；初审通过即定稿（_backfill_seal），见函数注释
             db.bom_update_entry(eid, {"historical": 2})
             db.bom_add_audit(eid, u["name"], "历史补录", "", "补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿，不经财务BP终审")
-        # 源附件永久留档（供「原版核算表」导出）；商品版另存一份留档
+        # 源附件永久留档（供「原版采购核算表」导出）；商品版另存一份留档
         try:
             pdir = os.path.join(UPLOAD_DIR, src)
             os.makedirs(pdir, exist_ok=True)
@@ -1613,9 +1613,9 @@ def _intake_core(appno, u, historical=False, action="立项"):
             names = [a.get("fileName") for a in res.get("attachments", []) if a.get("fileName")]
             hint = res.get("storageHint") or ""
             if "Storage.DownloadInfo.Read" in hint:
-                fix = "两条路：①让钉钉管理员给本应用开通权限「Storage.DownloadInfo.Read」（钉钉开发者后台 › 应用 › 权限管理），开通后重新立项即可自动以在职审批人身份代下载；②或在 OA 后台打开该单下载 %d 个附件，用下方「上传成本核算表」手工立项（单号照填）。" % len(names)
+                fix = "两条路：①让钉钉管理员给本应用开通权限「Storage.DownloadInfo.Read」（钉钉开发者后台 › 应用 › 权限管理），开通后重新立项即可自动以在职审批人身份代下载；②或在 OA 后台打开该单下载 %d 个附件，用下方「上传采购核算表」手工立项（单号照填）。" % len(names)
             else:
-                fix = "备用通道也没拿到（%s）。请在 OA 后台打开该单下载 %d 个附件，用下方「上传成本核算表」手工立项（单号照填）。" % (hint or "无在职审批人身份可借", len(names))
+                fix = "备用通道也没拿到（%s）。请在 OA 后台打开该单下载 %d 个附件，用下方「上传采购核算表」手工立项（单号照填）。" % (hint or "无在职审批人身份可借", len(names))
             msg = "这单的发起人钉钉账号已不存在（离职/注销），钉钉按发起人身份放附件，常规接口拿不到。" + fix
             return {"ok": False, "msg": msg, "originatorGone": True, "attachmentNames": names, "commentPending": comment_pending}, 400
         msg = "该审批未取到可解析的 xlsx 表单附件。"
@@ -1797,7 +1797,7 @@ async def bom_auto_intake_run(request: Request):
 
 
 def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=None, historical=None):
-    """用新核算表替换一个组：新文件里勾稽平的产品 → 顶替同组同产品旧版（旧版标 active=0 留痕、退出标准库）。
+    """用新采购核算表替换一个组：新文件里勾稽平的产品 → 顶替同组同产品旧版（旧版标 active=0 留痕、退出标准库）。
     仍不平的产品不入、回报（供再修）；新增产品（旧组没有的、如原本不平未入的半成品）直接入组。返回结果字典。
     bom_lists：本次随单一并解析到的研发 BOM 清单（重连钉钉时把审批附件里的 BOM 文件也解析进来）——
     ⚠ V2.456 前只用同组既有记录的 bom_list 兜底，**组内新增的产品**（如复配料）没有旧记录可继承 → 明明 BOM 文件里有它那页，
@@ -1807,9 +1807,9 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
     except Exception as e:
         return {"ok": False, "msg": "替换文件解析失败：%s" % e}
     if not recs:
-        return {"ok": False, "msg": "这份不是成本核算表（找不到核算样表页）。"}
+        return {"ok": False, "msg": "这份不是采购核算表（找不到核算样表页）。"}
     old_active = {x.get("product_key"): x for x in db.bom_group_entries(src, gid, include_superseded=False)}
-    # 补录承接（V2.501，业务方 2026-09-06「补录的时候也会更新评论区核算表上去」）：补录组替换/重拉核算表，新版**继承「补录」标记**，
+    # 补录承接（V2.501，业务方 2026-09-06「补录的时候也会更新评论区采购核算表上去」）：补录组替换/重拉采购核算表，新版**继承「补录」标记**，
     # 照常复核+初审、初审即定稿，不因换了表就掉进财务BP终审。显式传 historical 可覆盖；不传则看组里有没有补录记录。
     backfill = bool(historical) if historical is not None else any(x.get("historical") == 2 for x in db.bom_group_entries(src, gid))
     # 组内的 BOM清单：本次随单解析到的研发 BOM 优先（最新），再用同组既有 bom_list 兜底
@@ -1867,7 +1867,7 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             pass
         if old:
             db.bom_supersede_entry(old["id"], "被替换（%s）→ 第 %d 号，操作人 %s" % (via, eid, user))
-            db.bom_add_audit(eid, user, "替换核算表·" + (rec.get("productName") or ""),
+            db.bom_add_audit(eid, user, "替换采购核算表·" + (rec.get("productName") or ""),
                              "旧 #%d(%s)" % (old["id"], old.get("src_file") or ""), "新 #%d(%s)" % (eid, fname))
             replaced.append({"id": eid, "old": old["id"], "productName": (rec.get("productName") or "").strip()})
         else:
@@ -1939,7 +1939,7 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
 
 @router.post("/api/bom/replace-sheet")
 async def bom_replace_sheet(request: Request):
-    """手动上传修正后的核算表替换一个组（组内文件出错时）。旧版留痕、不进标准库。"""
+    """手动上传修正后的采购核算表替换一个组（组内文件出错时）。旧版留痕、不进标准库。"""
     u = _require_perm(request, CAP_FETCH)
     if not u:
         return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
@@ -1950,7 +1950,7 @@ async def bom_replace_sheet(request: Request):
         return JSONResponse({"ok": False, "msg": "缺组标识"}, status_code=400)
     uf = next((v for _k, v in form.multi_items() if hasattr(v, "read")), None)
     if uf is None:
-        return JSONResponse({"ok": False, "msg": "请上传修正后的核算表 xlsx"}, status_code=400)
+        return JSONResponse({"ok": False, "msg": "请上传修正后的采购核算表 xlsx"}, status_code=400)
     data = await uf.read()
     hist = form.get("historical")
     hist = None if hist in (None, "") else str(hist).lower() in ("1", "true", "yes", "on")
@@ -1960,7 +1960,7 @@ async def bom_replace_sheet(request: Request):
 
 @router.post("/api/bom/refetch-replace")
 async def bom_refetch_replace(request: Request):
-    """重连钉钉重拉商务版核算表，替换一个组（当研发/工厂在钉钉里改好了重新提交时）。"""
+    """重连钉钉重拉商务版采购核算表，替换一个组（当研发/工厂在钉钉里改好了重新提交时）。"""
     u = _require_perm(request, CAP_FETCH)
     if not u:
         return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
@@ -1980,7 +1980,7 @@ async def bom_refetch_replace(request: Request):
                     and str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls"))
                     and "商品版" not in (a.get("label") or "")), None)
     if not biz:
-        return JSONResponse({"ok": False, "msg": "该审批未取到商务版核算表附件。"}, status_code=400)
+        return JSONResponse({"ok": False, "msg": "该审批未取到商务版采购核算表附件。"}, status_code=400)
     # 同单其它 xlsx 附件里的研发 BOM 清单（成品页 + 复合调味酱页）一并解析，供组内新增产品（复配料/半成品）配清单（V2.456）
     bom_lists = []
     for a in res.get("attachments", []):
@@ -2009,7 +2009,7 @@ async def bom_refetch_replace(request: Request):
 
 @router.post("/api/bom/attach-bomlist")
 async def bom_attach_bomlist(request: Request):
-    """给已入账记录补挂研发 BOM清单（核算表先入账、BOM清单后到时用）。解析后按产品名对齐本记录。"""
+    """给已入账记录补挂研发 BOM清单（采购核算表先入账、BOM清单后到时用）。解析后按产品名对齐本记录。"""
     u = _require_perm(request, CAP_ATTACH)
     if not u:
         return JSONResponse({"ok": False, "msg": "无「补挂BOM清单」权限"}, status_code=403)
@@ -2825,7 +2825,7 @@ def _xlsx_to_html(data, title=""):
 
     out = ['<!doctype html><html lang="zh"><head><meta charset="utf-8">',
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
-           '<title>', esc(title or "核算表预览"), '</title><style>',
+           '<title>', esc(title or "采购核算表预览"), '</title><style>',
            'body{font:12px/1.35 "Microsoft YaHei",微软雅黑,-apple-system,"Segoe UI",sans-serif;margin:14px 18px;color:#1a1a1a;background:#fff}',
            'table{border-collapse:collapse;border-spacing:0;font-size:12px}',
            'td{border:0;padding:1px 6px;white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;font-variant-numeric:tabular-nums}',
@@ -2893,13 +2893,13 @@ def _xlsx_to_html(data, title=""):
 
 def _export_auth(request, e):
     """核算侧**全量**导出/预览：门户用户须有「导出」权限。
-    ⚠ V2.451 起 BP 后台（内部令牌）**不再放行这里**——业务方定「下载的核算表要分版本」：BP 只拿脱敏版，走 /api/bomcost/export。
+    ⚠ V2.451 起 BP 后台（内部令牌）**不再放行这里**——业务方定「下载的采购核算表要分版本」：BP 只拿脱敏版，走 /api/bomcost/export。
     → (who, err_response)"""
     who = _internal_or_user(request)
     if not who:
         return None, JSONResponse({"ok": False, "msg": "未授权：需登录并有「导出」权限"}, status_code=401)
     if who.get("internal"):
-        return None, JSONResponse({"ok": False, "msg": "BP 侧请走 /api/bomcost/export（脱敏版）；全量核算表只给核算工作台内部账号"}, status_code=403)
+        return None, JSONResponse({"ok": False, "msg": "BP 侧请走 /api/bomcost/export（脱敏版）；全量采购核算表只给核算工作台内部账号"}, status_code=403)
     if not db.user_can(who, CAP_EXPORT):
         return None, JSONResponse({"ok": False, "msg": "无「导出」权限"}, status_code=403)
     return who, None
@@ -2918,8 +2918,8 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
                            rules=_invoice_rules())      # 成本不含税公式/M列下拉 按台账当前发票规则生成
     nm = (e.get("product_name") or "").strip()
     if preview:
-        return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s %s" % (e.get("cp_code") or "", nm)))
-    return _xlsx_response(data, "重排版核算表_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
+        return HTMLResponse(_xlsx_to_html(data, "重排版采购核算表 · %s %s" % (e.get("cp_code") or "", nm)))
+    return _xlsx_response(data, "重排版采购核算表_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
 
 
 @router.get("/api/bom/export/pair")
@@ -2943,13 +2943,13 @@ async def bom_export_pair(request: Request, entry_id: int):
     st = e.get("status") or ""
     buf = _io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("财务版_重排版核算表_%s_%s.xlsx" % (cp, nm), full)
-        z.writestr("脱敏版_重排版核算表_%s_%s.xlsx" % (cp, nm), masked)
+        z.writestr("财务版_重排版采购核算表_%s_%s.xlsx" % (cp, nm), full)
+        z.writestr("脱敏版_重排版采购核算表_%s_%s.xlsx" % (cp, nm), masked)
         z.writestr("说明.txt", ("财务版：全量活公式，财务看。\n脱敏版：已遮 %s，给商品经理。\n记录状态：%s；钉钉单号：%s；导出人：%s；导出时间：%s\n"
                                 % ("/".join(hidden) if hidden else "（基础设置未遮任何列）", st, ap, u.get("name") or "", _now_str())).encode("utf-8"))
     db.audit(u["name"], "bom_export_pair", target=str(e["id"]), detail="%s %s · %s" % (cp, nm, st))
     from urllib.parse import quote
-    fn = "核算表两版_%s_%s.zip" % (cp, nm)
+    fn = "采购核算表两版_%s_%s.zip" % (cp, nm)
     return Response(content=buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": "attachment; filename*=UTF-8''%s" % quote(fn)})
 
@@ -2975,11 +2975,11 @@ async def bom_export_original(request: Request, entry_id: int, preview: int = 0)
                 match = os.path.join(pdir, fn)
                 break
     if not match:
-        return JSONResponse({"ok": False, "msg": "源附件未留档（样例种子或旧记录可能无原文件）。可导出重排版核算表替代。"}, status_code=404)
+        return JSONResponse({"ok": False, "msg": "源附件未留档（样例种子或旧记录可能无原文件）。可导出重排版采购核算表替代。"}, status_code=404)
     data = open(match, "rb").read()
     fn = os.path.basename(match).split("__", 1)[-1]
     if preview:
-        return HTMLResponse(_xlsx_to_html(data, "原版核算表 · " + fn))
+        return HTMLResponse(_xlsx_to_html(data, "原版采购核算表 · " + fn))
     return _xlsx_response(data, fn)
 
 
@@ -3046,7 +3046,7 @@ def internal_token_ok(request):
     return bool(tok and want and tok == want and host in ("127.0.0.1", "::1", "localhost"))
 
 
-# 登录门放行前缀（仅当 internal_token_ok）：只有 BP 消费口 /api/bomcost/*（含脱敏版核算表 sheet/export）。
+# 登录门放行前缀（仅当 internal_token_ok）：只有 BP 消费口 /api/bomcost/*（含脱敏版采购核算表 sheet/export）。
 # V2.451 起核算侧全量导出 /api/bom/export/* 不再对内部令牌开放（BP 只拿脱敏版）。
 INTERNAL_PATH_PREFIXES = ("/api/bomcost/",)
 
@@ -3063,13 +3063,13 @@ _CH_BY_LABEL = {v: k for k, v in CH_LABELS.items()}     # 电商/通品/TOB/TOC 
 
 def _bp_links(e):
     """BP 只读台账用的链接（V2.442 建，V2.451 改口径）——路径相对核算门户根。
-    业务方定 2026-09-06：**BP 侧的人在 BP 工作台看核算表、看脱敏版**；只有主管理员（Owner/总监）才跳核算工作台看全量。
+    业务方定 2026-09-06：**BP 侧的人在 BP 工作台看采购核算表、看脱敏版**；只有主管理员（Owner/总监）才跳核算工作台看全量。
     - sheetUrl / previewUrl / downloadUrl：默认**脱敏版**（BP 后台带内部令牌回环拉，再渲染/回给用户），只有已审核版；
       加 `&full=1` + 请求头 `X-On-Behalf-Of=<姓名>` → 该人是主管理员或有 bom:view_full 时给**全量**（V2.452），否则照旧脱敏。
     - adminDetailUrl / adminCompareUrl：核算工作台深链，**只给主管理员**放，普通 BP 用户不显示。
     - 源附件原件不给 BP（含供应商信息、无法脱敏）。"""
     i = int(e["id"])
-    return {"sheetUrl": "/api/bomcost/sheet?entryId=%d" % i,                  # 脱敏版核算表 JSON（BP 自己渲染）
+    return {"sheetUrl": "/api/bomcost/sheet?entryId=%d" % i,                  # 脱敏版采购核算表 JSON（BP 自己渲染）
             "previewUrl": "/api/bomcost/export?entryId=%d&preview=1" % i,     # 脱敏版重排版网页预览
             "downloadUrl": "/api/bomcost/export?entryId=%d" % i,              # 脱敏版重排版 xlsx（活公式，文件名带「脱敏版」）
             "adminDetailUrl": "/#/bomstd?entry=%d" % i,                        # 仅主管理员：核算侧全量详情
@@ -3096,7 +3096,7 @@ def _pending_final_rows(src):
 
 
 def _bp_actor(request, who):
-    """这次拉核算表的**人**是谁、能不能看全量（V2.452）。
+    """这次拉采购核算表的**人**是谁、能不能看全量（V2.452）。
     - 门户登录：就是登录人；
     - 内部令牌（BP 后台代拉）：请求头 `X-On-Behalf-Of`（URL 编码的姓名，同 X-BP-User 写法）报上替谁拉，核算侧到账号管理查这个人。
     全量＝主管理员，或有 `bom:view_full`。查不到人 / 没报人 → 只能脱敏。→ (name, full_ok, via)"""
@@ -3113,7 +3113,7 @@ def _bp_actor(request, who):
 
 
 def _bp_sheet_entry(request, eid):
-    """BP 核算表两个口共用的取件：鉴权（内部令牌/门户登录）→ 记录存在 → **只准已审核版** → 判本次能否全量。
+    """BP 采购核算表两个口共用的取件：鉴权（内部令牌/门户登录）→ 记录存在 → **只准已审核版** → 判本次能否全量。
     → (e, err, ctx)；ctx={actor, fullAllowed, full(本次实际给全量), via}。`full=1` 只在 fullAllowed 时生效，否则照旧脱敏。"""
     who = _internal_or_user(request)
     if not who:
@@ -3142,7 +3142,7 @@ def _bp_rec(e, ctx, what):
 
 @router.get("/api/bomcost/sheet")
 async def bomcost_sheet(request: Request):
-    """**脱敏版核算表**（V2.451，业务方定「BP 侧的人在 BP 侧看核算表」）：BP 工作台自己渲染用。
+    """**脱敏版采购核算表**（V2.451，业务方定「BP 侧的人在 BP 侧看采购核算表」）：BP 工作台自己渲染用。
     物料行按基础设置遮 型号/规格/供应商/报价说明（`hiddenColumns` 告诉 BP 遮了哪几列）；数值、勾稽、五分项全给。只准已审核版。"""
     e, err, ctx = _bp_sheet_entry(request, request.query_params.get("entryId"))
     if err:
@@ -3175,7 +3175,7 @@ async def bomcost_sheet(request: Request):
 
 @router.get("/api/bomcost/export")
 async def bomcost_export(request: Request, entryId: int, preview: int = 0):
-    """**脱敏版重排版核算表**下载 / 网页预览（V2.451，业务方定「下载的核算表要分版本」）。
+    """**脱敏版重排版采购核算表**下载 / 网页预览（V2.451，业务方定「下载的采购核算表要分版本」）。
     同一 build_pretty，只是物料行按基础设置置空 型号/规格/供应商/报价说明；文件名与页面标题带「脱敏版」。只准已审核版。"""
     e, err, ctx = _bp_sheet_entry(request, entryId)
     if err:
@@ -3188,8 +3188,8 @@ async def bomcost_export(request: Request, entryId: int, preview: int = 0):
     else:
         tag, fn_tag = "脱敏版" + ("（已遮 %s）" % "/".join(hidden) if hidden else ""), "脱敏版"
     if preview:
-        return HTMLResponse(_xlsx_to_html(data, "重排版核算表 · %s · %s %s" % (tag, e.get("cp_code") or "", nm)))
-    return _xlsx_response(data, "重排版核算表_%s_%s_%s.xlsx" % (fn_tag, e.get("cp_code") or "", nm))
+        return HTMLResponse(_xlsx_to_html(data, "重排版采购核算表 · %s · %s %s" % (tag, e.get("cp_code") or "", nm)))
+    return _xlsx_response(data, "重排版采购核算表_%s_%s_%s.xlsx" % (fn_tag, e.get("cp_code") or "", nm))
 
 
 @router.get("/api/bomcost/pending-final")
@@ -3306,8 +3306,8 @@ async def bomcost_final(request: Request):
 #   0 数据上 git 的红线由此双保险：不 commit 任何解析结果，也不 commit 任何附件。
 _SAMPLE_SRC = os.environ.get("BOM_SAMPLE_DIR",
                              r"D:\0 Claude 数据\03 财务核算工作台\_交接_成本台账_20260902\样例数据")
-# 审批编号按文件名 token 映射（交接文档 §7）。核算表用「8-20」式、BOM清单用「20260820」式，两种都登记，
-# 好让核算表与其配套 BOM清单 归到同一审批（同版本配对，不跨版本串台）。
+# 审批编号按文件名 token 映射（交接文档 §7）。采购核算表用「8-20」式、BOM清单用「20260820」式，两种都登记，
+# 好让采购核算表与其配套 BOM清单 归到同一审批（同版本配对，不跨版本串台）。
 _SAMPLE_APPROVALS = [("8-20", "202608201745000128676"), ("20260820", "202608201745000128676"),
                      ("8-28", "202608261641000144524"), ("20260826", "202608261641000144524"),
                      ("6-02", "202606011017000005185"), ("0529", "202606011017000005185"),
@@ -3366,7 +3366,7 @@ def seed_bom_sample():
                 if fp_hash not in best or rich > best[fp_hash]["rich"]:
                     best[fp_hash] = {"rec": rec, "comp": comp, "approval": approval,
                                      "fname": fname, "path": fp, "rich": rich}
-        # 组锚：与入账一致，**同一核算表文件的产品共用 group_id**（成品归组键作锚），
+        # 组锚：与入账一致，**同一采购核算表文件的产品共用 group_id**（成品归组键作锚），
         # 否则同文件被拆成多组，处理页重解析时会把别组的产品误报成「未入账」。
         wb_recs = {}
         for b in best.values():
