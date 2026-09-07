@@ -2375,6 +2375,12 @@ def _balance_adjust():
 # 金蝶侧四类精确到原币：期初原币(gl_balance) + 本期序时账原币净(gl_subjects·rc.kd_delta_for)。
 # 银行侧：银行存款取归一化流水最新余额；其他科目暂待人工/后续接渠道·理财对账单（bank_bal=None→前端显"待人工"）。
 _STMT_CAT_ORDER = ["银行存款", "其它货币资金", "交易性金融资产", "库存现金"]
+_STMT_OPENDATE = "bank_open_dates"           # 开户日期：{账号: 'YYYY-MM-DD'}，手填一次跨期记住（全局设置）
+
+
+def _stmt_manual_key():
+    """银行侧手填余额的存储键（按期间——每月余额不同）。"""
+    return "bank_manual_bal:%d-%02d" % (CFG["year"], CFG["period"])
 
 
 def _balance_statement():
@@ -2459,9 +2465,11 @@ def _balance_statement():
         return cur_rate.get(cur)          # 外币取金蝶记账汇率；缺则 None（前端显 —）
 
     notes = db.list_balance_notes(CFG["year"], CFG["period"])
+    open_dates = db.get_setting(_STMT_OPENDATE, None) or {}              # 开户日期：手填一次、跨期记住（全局）
+    manual_bal = db.get_setting(_stmt_manual_key(), None) or {}          # 银行侧手填余额：按期间存（每月可不同）
     buckets = {c: [] for c in _STMT_CAT_ORDER}
     diff_total = 0
-    for a in set(kd_open) | set(kd_move) | set(bank_last):
+    for a in set(kd_open) | set(kd_move) | set(bank_last) | set(chan_bal) | set(manual_bal):
         code = acct_code.get(a, "")
         cat = al.cat_from_code(code) or "其它货币资金"
         if cat not in buckets:
@@ -2469,12 +2477,16 @@ def _balance_statement():
         sub, bank, acct_name, cur0 = _acct_info(a)
         cur = cur0 or acct_cur.get(a, "") or "人民币"
         kd_bal = round(kd_open.get(a, 0.0) + kd_move.get(a, 0.0), 2)     # 金蝶系统余额（原币）
+        # 银行侧取值优先级：流水(银行存款) → 渠道对账(电商) → 人工录入(手填) → 待人工
         if a in bank_last:
-            bank_bal, bank_src2 = bank_last[a][1], "流水"                 # 银行存款：流水最新余额
+            bank_bal, bank_src2, src_kind = bank_last[a][1], "流水", "工具解析"
         elif a in chan_bal:
-            bank_bal, bank_src2 = chan_bal[a], "渠道"                     # 其他货币资金·渠道：渠道对账期末余额
+            bank_bal, bank_src2, src_kind = chan_bal[a], "渠道", "工具解析"
+        elif a in manual_bal and manual_bal[a] is not None:
+            bank_bal, bank_src2, src_kind = rc.to_float(manual_bal[a]), "手填", "人工录入"
         else:
-            bank_bal, bank_src2 = None, ""                               # 现金/结构性存款/理财等：暂待人工
+            bank_bal, bank_src2, src_kind = None, "", ""                 # 现金/结构性存款/理财等未填：待人工
+        acct_state = "已销户" if ("销户" in str(acct_name) or "销户" in str(a)) else "正常"
         rate = _rate_for(cur)
         base_ccy = round(bank_bal * rate, 2) if (bank_bal is not None and rate is not None) else None
         diff = round(bank_bal - kd_bal, 2) if bank_bal is not None else None
@@ -2487,8 +2499,11 @@ def _balance_statement():
             "账户名称": acct_name or a, "币别": cur,
             "银行流水余额": bank_bal, "汇率": rate, "综合本位币": base_ccy,
             "金蝶系统余额": kd_bal, "差额": diff, "有差异": has_diff,
-            "银行侧来源": bank_src2,                                       # 流水/渠道/""（待人工）
-            "银行侧缺": bank_bal is None,                                  # 无对账单：待人工（现金/结构性存款/理财等）
+            "银行侧来源": bank_src2,                                       # 流水/渠道/手填/""（待人工）
+            "数据来源": src_kind,                                          # 工具解析 / 人工录入 / ""（待人工）
+            "账户状态": acct_state,                                        # 正常 / 已销户
+            "开户日期": open_dates.get(a, ""),                            # 手填一次、跨期记住
+            "银行侧缺": bank_bal is None,                                  # 无对账单又未手填：待人工
             "全零": (bank_bal in (None, 0) and abs(kd_bal) < 0.01),
             "备注": nt.get("note", ""), "备注人": nt.get("operator", ""), "备注时间": nt.get("ts", ""),
         })
@@ -2511,6 +2526,107 @@ def balance_statement():
 @app.post("/api/balance-statement/sync")
 def balance_statement_sync():
     return _closed_block() or _cache_get(_BSTMT_CACHE, _balance_statement, force=True)
+
+
+@app.post("/api/balance-statement/manual-balance")
+def balance_statement_manual(body: dict, request: Request):
+    """待人工的户手填银行侧余额（按期间存，每月可不同）。填了→数据来源=人工录入、差额自动算。清空=退回待人工。"""
+    u = _require_perm(request, "claim")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「认领/处理差异」权限，不能录入银行侧余额"}, status_code=403)
+    blocked = _closed_block()
+    if blocked:
+        return blocked
+    acct = str(body.get("acct", "") or "").strip()
+    if not acct:
+        return {"ok": False, "msg": "缺账号"}
+    raw = body.get("bal")
+    key = _stmt_manual_key()
+    m = dict(db.get_setting(key, None) or {})
+    if raw is None or str(raw).strip() == "":
+        m.pop(acct, None)                       # 清空=退回"待人工"
+        val = None
+    else:
+        try:
+            val = round(float(str(raw).replace(",", "").strip()), 2)
+        except ValueError:
+            return {"ok": False, "msg": "金额格式不对，请填数字"}
+        m[acct] = val
+    db.set_setting(key, m, u["name"])
+    db.audit(u["name"], "余额调节表-手填银行侧余额", acct, str(val))
+    _BSTMT_CACHE.clear()
+    return {"ok": True, "acct": acct, "bal": val, "operator": u["name"]}
+
+
+@app.post("/api/balance-statement/open-date")
+def balance_statement_open_date(body: dict, request: Request):
+    """账户开户日期：手填一次、跨期记住（全局，不随期间变）。空=清除。"""
+    u = _require_perm(request, "claim")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「认领/处理差异」权限，不能录入开户日期"}, status_code=403)
+    acct = str(body.get("acct", "") or "").strip()
+    if not acct:
+        return {"ok": False, "msg": "缺账号"}
+    date = str(body.get("date", "") or "").strip()
+    m = dict(db.get_setting(_STMT_OPENDATE, None) or {})
+    if date:
+        m[acct] = date
+    else:
+        m.pop(acct, None)
+    db.set_setting(_STMT_OPENDATE, m, u["name"])
+    db.audit(u["name"], "余额调节表-开户日期", acct, date)
+    _BSTMT_CACHE.clear()
+    return {"ok": True, "acct": acct, "date": date, "operator": u["name"]}
+
+
+def _build_statement_xlsx(stmt):
+    """银行余额调节表·单月扁表 xlsx（一张表，逐户一行，全科目）→ bytes。"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "银行余额调节表"
+    cols = ["科目", "主体", "账户名称", "账号", "开户行", "币别", "账户状态", "开户日期",
+            "银行流水余额", "汇率", "综合本位币", "金蝶系统余额", "差额", "数据来源", "备注"]
+    ws.append(["银行余额调节表 · %s" % _period_str()])
+    ws["A1"].font = Font(bold=True, size=13)
+    ws.append([])
+    hdr_row = 3
+    ws.append(cols)
+    for c in range(1, len(cols) + 1):
+        cell = ws.cell(row=hdr_row, column=c)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="4B5563")
+        cell.alignment = Alignment(vertical="center")
+    ws.freeze_panes = "A4"
+    for g in (stmt.get("groups") or []):
+        for a in (g.get("accounts") or []):
+            ws.append([
+                a.get("科目"), a.get("主体"), a.get("账户名称"), a.get("账号"), a.get("开户行"),
+                a.get("币别"), a.get("账户状态"), a.get("开户日期"),
+                (a.get("银行流水余额") if not a.get("银行侧缺") else "待人工"),
+                a.get("汇率"), a.get("综合本位币"), a.get("金蝶系统余额"),
+                (a.get("差额") if a.get("差额") is not None else ""),
+                a.get("数据来源"), a.get("备注"),
+            ])
+    for i, w in enumerate([16, 22, 26, 22, 14, 8, 10, 12, 16, 10, 16, 16, 14, 12, 30], 1):
+        ws.column_dimensions[ws.cell(row=hdr_row, column=i).column_letter].width = w
+    bio = BytesIO(); wb.save(bio); return bio.getvalue()
+
+
+@app.get("/api/balance-statement/export")
+def balance_statement_export(request: Request):
+    """导出银行余额调节表·单月扁表 xlsx。"""
+    stmt = _cache_get(_BSTMT_CACHE, _balance_statement)
+    data = _build_statement_xlsx(stmt)
+    u = _current_user(request)
+    if u:
+        db.audit(u["name"], "导出银行余额调节表", _period_str())
+    fname = "银行余额调节表_%s.xlsx" % _period_str()
+    disp = "attachment; filename=balance_statement.xlsx; filename*=UTF-8''" + urllib.parse.quote(fname)
+    return Response(content=data,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": disp})
 
 
 def _channel_adjust():

@@ -1,3 +1,6 @@
+// [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.509
+// 余额调节表·全科目：①待人工的户支持手填银行侧余额(存住·差额自动算·数据来源=人工录入)；②开户日期手填一次跨期记住；
+// ③账户名显已销户标；④导出 Excel 单月扁表(科目/账户/币别/账户状态/开户日期/数据来源/余额/差额/备注)。
 // [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.506
 // 余额调节表·全科目 接电商渠道银行侧：其他货币资金(支付宝等)银行侧余额接第三方渠道对账「渠道期末余额」，
 // 银行流水余额格显小「渠道」来源标；差额自动算出。理财/结构性存款/现金仍待人工（后续接）。
@@ -10,7 +13,7 @@
 // 有「认领/处理差异」权限的会计可填/改，显示填写人+时间，供领导核查(领导只读可见)。
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1 资金看板冷灰重构+缓存不清屏
 import React, { useEffect, useState } from 'react'
-import { getFund, syncFund, getBalanceAdjust, syncBalanceAdjust, getChannelAdjust, syncChannelAdjust, saveBalanceNote, getBalanceStatement, syncBalanceStatement, yuan } from '../api.js'
+import { getFund, syncFund, getBalanceAdjust, syncBalanceAdjust, getChannelAdjust, syncChannelAdjust, saveBalanceNote, getBalanceStatement, syncBalanceStatement, setStmtManualBalance, setStmtOpenDate, balanceStatementExportUrl, yuan } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import Steps from '../components/Steps.jsx'
 
@@ -43,12 +46,18 @@ function TieRow({ n, title, sub, ok, star, children }) {
 }
 
 // 全科目余额调节表·一个科目分组（对标业务方《各银行余额》表；默认折叠全零户）
-function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt, saveNoteStmt, noteBusy, setEditAcct }) {
+function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt, saveNoteStmt, noteBusy, setEditAcct, saveStmtCell }) {
   const [showZero, setShowZero] = useState(false)
+  const [ce, setCe] = useState(null)   // {acct, field:'bal'|'date'} 正在编辑的单元格
+  const [cv, setCv] = useState('')
   const nz = g.accounts.filter(a => !a['全零'])
   const rows = showZero ? g.accounts : nz
   const zeroN = g.accounts.length - nz.length
   const rate = r => (r == null ? '—' : Number(r).toLocaleString('en-US', { minimumFractionDigits: r === 1 ? 0 : 4, maximumFractionDigits: 4 }))
+  const startCell = (acct, field, cur) => { setCe({ acct, field }); setCv(cur == null ? '' : String(cur)) }
+  const doCell = async () => { const ok = await saveStmtCell(ce.acct, ce.field, cv); if (ok) setCe(null) }
+  const isCell = (acct, field) => ce && ce.acct === acct && ce.field === field
+  const srcTag = { 渠道: '渠道', 手填: '手填' }
   return <div className="cat" style={{ marginTop: 4 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
       <div style={{ fontSize: 13, fontWeight: 600 }}>{g.科目}
@@ -69,9 +78,34 @@ function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt,
           const diff = a['差额']
           const hasDiff = diff != null && Math.abs(diff) > 0.01
           return <tr key={i}>
-            <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--line)', minWidth: 170 }}>{a['账户名称'] || a['主体'] || '—'}<div className="sub">{[a['主体'], a['开户行']].filter(Boolean).join(' · ')}</div></td>
+            <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--line)', minWidth: 190 }}>
+              {a['账户名称'] || a['主体'] || '—'}
+              {a['账户状态'] === '已销户' ? <span style={{ marginLeft: 5, fontSize: 10, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 3px' }}>已销户</span> : null}
+              <div className="sub">{[a['主体'], a['开户行']].filter(Boolean).join(' · ')}</div>
+              <div className="sub" style={{ marginTop: 1 }}>开户日：{isCell(a['账号'], 'date')
+                ? <span style={{ display: 'inline-flex', gap: 4 }}>
+                    <input type="date" autoFocus value={cv} onChange={e => setCv(e.target.value)} style={{ fontSize: 11, padding: '1px 3px', borderRadius: 4, border: '1px solid var(--line-strong,#cfcdc4)' }} />
+                    <span className="lk" style={{ fontSize: 11 }} onClick={doCell}>存</span><span className="lk" style={{ fontSize: 11 }} onClick={() => setCe(null)}>×</span>
+                  </span>
+                : (a['开户日期']
+                    ? <span>{a['开户日期']}{canNote ? <span className="lk" style={{ marginLeft: 4, fontSize: 10 }} onClick={() => startCell(a['账号'], 'date', a['开户日期'])}>改</span> : null}</span>
+                    : (canNote ? <span className="lk" style={{ fontSize: 11 }} onClick={() => startCell(a['账号'], 'date', '')}>+ 填</span> : '—'))}</div>
+            </td>
             <td style={{ padding: '6px 8px', textAlign: 'center', borderBottom: '1px solid var(--line)', color: foreign ? 'var(--blue)' : 'var(--ink-3)', fontWeight: foreign ? 600 : 400, whiteSpace: 'nowrap' }}>{cur || '—'}</td>
-            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', fontWeight: 600, background: 'var(--accent-soft,var(--accent-soft))' }}>{a['银行侧缺'] ? <span style={{ color: 'var(--amber)', fontWeight: 500, fontSize: 11.5 }}>待人工</span> : <span>{yuan(a['银行流水余额'])}{a['银行侧来源'] === '渠道' ? <span style={{ color: 'var(--ink-3)', fontSize: 10, marginLeft: 4, fontWeight: 400 }} title="来自第三方渠道对账（支付宝等）的渠道期末余额">渠道</span> : null}</span>}</td>
+            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', fontWeight: 600, background: 'var(--accent-soft,var(--accent-soft))' }}>
+              {isCell(a['账号'], 'bal')
+                ? <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                    <input autoFocus type="text" inputMode="decimal" value={cv} onChange={e => setCv(e.target.value)} placeholder="银行侧余额"
+                      style={{ width: 90, fontSize: 12, padding: '2px 4px', borderRadius: 4, border: '1px solid var(--line-strong,#cfcdc4)', textAlign: 'right' }} />
+                    <span className="lk" style={{ fontSize: 11 }} onClick={doCell}>存</span><span className="lk" style={{ fontSize: 11 }} onClick={() => setCe(null)}>×</span>
+                  </span>
+                : (a['银行侧缺']
+                    ? (canNote ? <span className="lk" style={{ fontSize: 12 }} onClick={() => startCell(a['账号'], 'bal', '')}>+ 填余额</span> : <span style={{ color: 'var(--amber)', fontWeight: 500, fontSize: 11.5 }}>待人工</span>)
+                    : <span>{yuan(a['银行流水余额'])}
+                        {a['银行侧来源'] === '渠道' ? <span style={{ color: 'var(--ink-3)', fontSize: 10, marginLeft: 4, fontWeight: 400 }} title="来自第三方渠道对账（支付宝等）">渠道</span> : null}
+                        {a['银行侧来源'] === '手填' ? <span style={{ color: 'var(--violet)', fontSize: 10, marginLeft: 4, fontWeight: 400 }}>手填{canNote ? <span className="lk" style={{ marginLeft: 2 }} onClick={() => startCell(a['账号'], 'bal', a['银行流水余额'])}>改</span> : null}</span> : null}
+                      </span>)}
+            </td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: 'var(--ink-3)' }}>{rate(a['汇率'])}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: foreign ? 'var(--blue)' : 'var(--ink-3)' }}>{a['综合本位币'] != null ? yuan(a['综合本位币']) : '—'}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)' }}>{yuan(a['金蝶系统余额'])}</td>
@@ -140,6 +174,16 @@ export default function FundDashboard({ cfg, onPeriod, onNav, user }) {
       setEditAcct(null)
     } catch (e) { alert(String(e.message || e)) } finally { setNoteBusy(false) }
   }
+  // 手填银行侧余额 / 开户日期（待人工的户用；后端存住、差额自动重算）→ 存完重取一次调节表最省心
+  const saveStmtCell = async (acct, kind, value) => {
+    setNoteBusy(true)
+    try {
+      const r = kind === 'bal' ? await setStmtManualBalance(acct, value) : await setStmtOpenDate(acct, value)
+      if (!r.ok) { alert(r.msg || '保存失败'); return false }
+      setBs(await getBalanceStatement())   // 差额/数据来源随手填变，重取保证一致
+      return true
+    } catch (e) { alert(String(e.message || e)); return false } finally { setNoteBusy(false) }
+  }
   const refreshCa = async () => { setCaBusy(true); try { setCa(await syncChannelAdjust()) } finally { setCaBusy(false) } }
   const sync = async () => {
     setBusy(true); setStamp('接入中…')
@@ -188,14 +232,18 @@ export default function FundDashboard({ cfg, onPeriod, onNav, user }) {
           <div className="foot" style={{ flex: 1, minWidth: 260 }}>对标《各银行余额》调节表 · <b>全四类科目</b> · 单月（{d.period}）。银行流水余额与金蝶系统余额均按<b>原币</b>；综合本位币＝原币×金蝶记账汇率（人民币=1）；差额＝银行−金蝶，非零请填备注说明。银行存款取流水、电商渠道（支付宝等）取<b>渠道对账</b>期末余额；理财 / 结构性存款 / 现金的银行侧接入中，暂显「待人工」。
             {bs && bs.groups && bs.groups.length > 0 && (bs.差异户数 ? <span> · <b style={{ color: 'var(--amber)' }}>有差异 {bs.差异户数} 户</b></span> : <span> · <b style={{ color: 'var(--green)' }}>全部对平</b></span>)}
           </div>
-          <button className="btn" onClick={refreshBs} disabled={bsBusy}>{bsBusy ? '刷新中…' : '刷新'}</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {bs && bs.groups && bs.groups.length > 0 && <a className="btn" href={balanceStatementExportUrl()} style={{ textDecoration: 'none' }}>导出 Excel</a>}
+            <button className="btn" onClick={refreshBs} disabled={bsBusy}>{bsBusy ? '刷新中…' : '刷新'}</button>
+          </div>
         </div>
         {bs && bs['未取数'] && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', borderColor: 'var(--amber-line)' }}>本期未取数：请先到「数据接入」点「从金蝶更新」。</div>}
         {bs && bs.error && <div className="banner err">金蝶取数失败：{bs.error}</div>}
         {bs && bs.groups && bs.groups.length > 0
           ? bs.groups.map(g => <StmtGroup key={g.科目} g={g} canNote={canNote}
               editAcct={editAcct} editText={editText} setEditText={setEditText}
-              startEditStmt={startEditStmt} saveNoteStmt={saveNoteStmt} noteBusy={noteBusy} setEditAcct={setEditAcct} />)
+              startEditStmt={startEditStmt} saveNoteStmt={saveNoteStmt} noteBusy={noteBusy} setEditAcct={setEditAcct}
+              saveStmtCell={saveStmtCell} />)
           : (bs && !bs['未取数'] && !bs.error ? <div className="foot">（本期无科目余额数据）</div> : null)}
       </div>}
 
