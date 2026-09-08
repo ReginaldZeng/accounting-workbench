@@ -4,7 +4,7 @@
 // 门户管理（门户内页签，仅管理员）：维护各工作台的工具卡片——所属工作台/名称/状态/概述/通用技能/AI技能。
 // 数据存 portal_tools 表，门户卡片实时读取；改这里 = 门户即时更新，无需改代码/发版。深色 pa- 作用域。
 import React, { useEffect, useState } from 'react'
-import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools } from '../api.js'
+import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients } from '../api.js'
 
 const LANES = [{ key: 'accounting', label: '财务核算组' }, { key: 'bp', label: '财务分析组 · BP' }, { key: 'legal', label: '法务部' }]
 const LANE_LABEL = { accounting: '财务核算组', bp: '财务分析组 · BP', legal: '法务部' }
@@ -54,6 +54,21 @@ select.pa-inp option{background:#221A3A;color:var(--ink)}
 .pa-prev{margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:10px;background:rgba(0,0,0,.18)}
 .pa-tg{font-size:10.5px;color:var(--ink2);background:rgba(255,255,255,.05);border:1px solid var(--line2);border-radius:6px;padding:2px 8px;margin:0 4px 4px 0;display:inline-block}
 .pa-tg.ai{color:#9BF5E6;border-color:rgba(63,224,200,.4)}
+.pa-seg{display:inline-flex;gap:2px;background:rgba(255,255,255,.05);border:1px solid var(--line2);border-radius:9px;padding:3px;margin-bottom:16px}
+.pa-segbtn{border:none;background:transparent;color:var(--ink2);font:inherit;font-size:12.5px;font-weight:600;padding:6px 15px;border-radius:7px;cursor:pointer}
+.pa-segbtn.on{background:var(--brand);color:#fff}
+@keyframes pa-pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--pmc)}50%{opacity:.4;box-shadow:0 0 0 5px transparent}}
+.pa-dot{flex:0 0 auto;width:11px;height:11px;border-radius:50%}
+.pa-dot.g{background:var(--green);--pmc:rgba(52,211,153,.55);animation:pa-pulse 2s ease-in-out infinite}
+.pa-dot.r{background:var(--red);--pmc:rgba(248,113,113,.55);animation:pa-pulse 2s ease-in-out infinite}
+.pa-dot.x{background:var(--ink3)}
+.pa-mcard{background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.005));border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+.pa-mrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pa-pill{font-size:11.5px;padding:2px 10px;border-radius:20px;font-weight:600;border:1px solid var(--line2);white-space:nowrap}
+.pa-meta{display:flex;flex-wrap:wrap;gap:4px 20px;margin-top:9px;font-size:12px;color:var(--ink2)}
+.pa-rcpt{margin-top:10px;padding:9px 11px;border-radius:9px;background:rgba(0,0,0,.18);border:1px solid var(--line)}
+.pa-rcpt input{width:100%;max-width:340px;border-radius:7px;border:1px solid var(--line2);background:rgba(255,255,255,.05);color:var(--ink);padding:6px 10px;font:inherit;font-size:12.5px;outline:none}
+.pa-rcpt input:focus{border-color:var(--brand)}
 `
 
 const blank = () => ({ id: null, lane: 'accounting', name: '', status: 'beta', icon: '▤', desc: '', genStr: '', aiStr: '', mods: [], statusSrc: 'manual', autoDetail: [] })
@@ -62,6 +77,7 @@ export default function PortalAdmin({ onChange }) {
   const [tools, setTools] = useState([])
   const [sel, setSel] = useState(null)      // 编辑中的 {..} 或 null
   const [msg, setMsg] = useState(null)
+  const [view, setView] = useState('tools')  // 门户管理两块：'tools' 工具卡片 / 'machines' 取件机监控
   const load = () => getPortalTools().then(r => setTools(r.tools || [])).catch(() => {})
   useEffect(() => { load() }, [])
   const flash = (ok, t) => { setMsg({ ok, t }); setTimeout(() => setMsg(null), 2400) }
@@ -93,9 +109,16 @@ export default function PortalAdmin({ onChange }) {
     <div className="pa-root">
       <style>{CSS}</style>
       <div className="pa-h1">门户管理</div>
-      <div className="pa-sub">维护各工作台首页的工具卡片，保存后门户即时更新 · 仅管理员
+      <div className="pa-sub">维护各工作台首页的工具卡片、看取件机运行 · 仅管理员
         {msg && <span style={{ color: msg.ok ? 'var(--green)' : 'var(--red)', marginLeft: 8 }}>{msg.t}</span>}</div>
 
+      <div className="pa-seg">
+        <button className={'pa-segbtn' + (view === 'tools' ? ' on' : '')} onClick={() => setView('tools')}>工具卡片</button>
+        <button className={'pa-segbtn' + (view === 'machines' ? ' on' : '')} onClick={() => setView('machines')}>取件机监控</button>
+      </div>
+
+      {view === 'machines' && <MachineMonitor />}
+      {view === 'tools' && (
       <div className="pa-cols">
         <div className="pa-left">
           <div className="pa-card">
@@ -173,6 +196,91 @@ export default function PortalAdmin({ onChange }) {
           )}
         </div>
       </div>
+      )}
+    </div>
+  )
+}
+
+
+// 取件机运行监控（V2.532）：门户管理内的只读监控 + 收件人配置（仅管理员进得来这页）。
+function MachineMonitor() {
+  const [d, setD] = useState(null)
+  const [msg, setMsg] = useState(null)
+  const [alertEdit, setAlertEdit] = useState({})    // {machineId: 停机告警手机号串}
+  const [resultEdit, setResultEdit] = useState({})  // {machineId: 结果通知手机号串}
+  const load = () => getMachines().then(r => { setD(r); setAlertEdit({}); setResultEdit({}) }).catch(() => {})
+  useEffect(() => { load() }, [])
+  const flash = (ok, t) => { setMsg({ ok, t }); setTimeout(() => setMsg(null), 2600) }
+  const saveAlert = async (id) => {
+    const r = await setMachineAlertRecipients(id, alertEdit[id] ?? '').catch(e => ({ ok: false, msg: String(e) }))
+    flash(r.ok, r.msg); if (r.ok) load()
+  }
+  const saveResult = async (id) => {
+    const r = await setMachineResultRecipients(id, resultEdit[id] ?? '').catch(e => ({ ok: false, msg: String(e) }))
+    flash(r.ok, r.msg); if (r.ok) load()
+  }
+  if (!d) return <div className="pa-empty">加载中…</div>
+  const ago = s => s == null ? '' : s < 90 ? '刚刚' : s < 3600 ? Math.round(s / 60) + ' 分钟前' : Math.round(s / 3600) + ' 小时前'
+  const RESULT = {
+    rpt: { label: '📊 报表送达通知 · 推送给谁', note: '报表同步到共享盘后，自动钉钉通知这些人可取用。' },
+    bank: { label: '💧 流水接入通知 · 推送给谁', note: '出纳上传、取件机接入流水后，自动钉钉通知这些人「可以去对账了」。' },
+    bom: { label: '📄 落公盘送达通知 · 推送给谁', note: '核算表落公盘后自动钉钉通知这些人（CP码+产品，财务版/脱敏版合一条）。' },
+  }
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: 'var(--ink3)', margin: '0 0 12px' }}>
+        共 {d.machines.length} 台取件机 · <span style={{ color: 'var(--green)' }}>绿=在跑</span>、<span style={{ color: 'var(--red)' }}>红=可能已停</span>、灰=未接/休息。改动即时生效、无需重启。</div>
+      {d.dingtalk_configured === false &&
+        <div className="pa-mcard" style={{ borderColor: 'var(--amber)', color: 'var(--amber)', fontSize: 12.5 }}>
+          ⚠ 服务器还没配钉钉应用（conf.ini [dingtalk]），配了收件人也发不出去——需先配钉钉。</div>}
+      {msg && <div style={{ fontSize: 12.5, margin: '0 0 10px', fontWeight: 600, color: msg.ok ? 'var(--green)' : 'var(--red)' }}>{msg.t}</div>}
+      {d.machines.map(m => {
+        const state = !m.deployed ? 'x' : (m.alive ? 'g' : (m.always_on ? 'r' : 'x'))
+        const label = !m.deployed ? '未接监控' : (m.alive ? '在跑' : (m.always_on ? '可能已停' : '未在取件'))
+        const col = state === 'g' ? 'var(--green)' : state === 'r' ? 'var(--red)' : 'var(--ink3)'
+        const last = m.last || {}
+        return (
+          <div className="pa-mcard" key={m.id}>
+            <div className="pa-mrow">
+              <span className={'pa-dot ' + state} />
+              <b style={{ fontSize: 14 }}>{m.name}</b>
+              <span className="pa-pill" style={{ color: 'var(--ink3)' }}>{m.dir === 'up' ? '上行 · 共享盘→云端' : '下行 · 云端→本地'}</span>
+              <span className="pa-pill" style={{ marginLeft: 'auto', color: col, borderColor: col }}>● {label}</span>
+            </div>
+            <div className="pa-meta">
+              <span>用途 {m.purpose}</span><span>频率 {m.freq}</span>
+              <span>最近报平安 {m.at || '—'}{m.ago_sec != null ? '（' + ago(m.ago_sec) + '）' : ''}</span>
+              {m.host && <span>所在电脑 {m.host}</span>}
+            </div>
+            <div className="pa-meta" style={{ color: 'var(--ink3)', marginTop: 4 }}>
+              {'并入笔数' in last && <span>上轮并入 {last['并入笔数']} 笔{last.need_dup_confirm ? ' · 待确认' : ''}</span>}
+              {Array.isArray(last.copied) && <span>上轮取 {last.copied.length} 个{last.skipped ? ' · 跳过 ' + last.skipped : ''}</span>}
+              {Array.isArray(last.bomCopied) && last.bomCopied.length > 0 && <span>上轮送公盘 {last.bomCopied.length} 份</span>}
+              {Array.isArray(last.errors) && last.errors.length > 0 && <span style={{ color: 'var(--red)' }}>错误 {last.errors.length}</span>}
+            </div>
+            <div className="pa-rcpt">
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 5 }}>🔔 停机告警 · 推送给谁 <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（运行 · 给运维/管理员）</span></div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <input value={alertEdit[m.id] ?? (m.alert_mobiles || []).join(', ')}
+                  onChange={e => setAlertEdit({ ...alertEdit, [m.id]: e.target.value })}
+                  placeholder="钉钉手机号，逗号隔开；留空＝关闭" />
+                <button className="pa-btn pri" onClick={() => saveAlert(m.id)}>保存</button>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>停了超阈值自动用风控 AI 机器人钉钉提醒这些人。</div>
+            </div>
+            <div className="pa-rcpt" style={{ borderColor: 'rgba(124,92,255,.35)' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 5 }}>{(RESULT[m.id] || {}).label} <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（结果 · 给干活的人）</span></div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <input value={resultEdit[m.id] ?? (m.result_mobiles || []).join(', ')}
+                  onChange={e => setResultEdit({ ...resultEdit, [m.id]: e.target.value })}
+                  placeholder="钉钉手机号，逗号隔开；留空＝不推" />
+                <button className="pa-btn pri" onClick={() => saveResult(m.id)}>保存</button>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>{(RESULT[m.id] || {}).note}</div>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

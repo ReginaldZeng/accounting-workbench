@@ -2151,7 +2151,7 @@ def _reconcile():
 
 def _data_sources():
     """数据接入页：银行导入 manifest + 每家银行 金蝶↔银行 覆盖对照（不跑逐笔）。"""
-    _bankpull_alert_check()   # 有人打开数据接入页＝一次自检机会（页面加载时也能发现取件机停了）
+    _pull_alert_check_all()   # 有人打开数据接入页＝一次自检机会（V2.531：三台取件机一并自检，不只银行）
     base = {"source": CFG["source"], "period": _period_str(),
             "bank_import_dir": CFG.get("bank_import_dir", ""), "updated_at": _now(),
             "bank_pull": _bankpull_view(), "pull_enabled": bool(pull_token()),
@@ -3309,6 +3309,15 @@ _BANKPULL_ALERT_MOB = "bank_pull_alert_mobiles"  # 停机钉钉告警收件人�
 # 取 130 分钟：漏跑约 2 轮才算停，既不误报、真停了也能在两小时内发现。页面红灯与钉钉告警共用此阈值。
 _BANKPULL_ALIVE_SEC = 130 * 60
 
+# BOM 采购核算表落公盘「送达通知」（V2.530，业务方定 2026-09-08）：报表取件机把 outbox 镜像到公盘(bom_dest)时，
+# 本轮新落的文件回报到 sync-report 的 bomCopied → 服务器发钉钉给【送达收件人】（与停机告警是两拨人，前端配）。
+_BOM_DELIVER_MOB = "bom_deliver_mobiles"   # BOM 落公盘·结果通知收件人（手机号列表；空＝不发）
+_BOM_DELIVER_MARK = "bom_deliver_mark"     # 送达去重：上批已通知的签名，防回执重试重发
+_RPT_DELIVER_MOB = "rpt_deliver_mobiles"   # 报表送达共享盘·结果通知收件人
+_RPT_DELIVER_MARK = "rpt_deliver_mark"
+_BANK_DELIVER_MOB = "bank_deliver_mobiles" # 流水接入·结果通知收件人（出纳上传→接入→通知可对账）
+_BANK_DELIVER_MARK = "bank_deliver_mark"
+
 
 def _bankpull_dir(tag):
     """某期取件机推送的暂存目录（与手工上传的 extracted 平级、不互相覆盖）。"""
@@ -3320,7 +3329,7 @@ def bank_pull_pending(request: Request):
     """取件机每轮先问：有没有人点过「立即扫描」。响应极小、可勤问。"""
     if not pull_token_ok(request):
         return JSONResponse({"ok": False, "msg": "取件令牌无效"}, status_code=403)
-    _bankpull_alert_check()   # 顺手自检停机告警（取件机来问＝它还活着，主要靠别处入口发现它"没来问"）
+    _pull_alert_check_all()   # 顺手自检三台取件机停机告警（银行来问＝它还活着，报表/BOM 靠别处入口发现"没来问"）
     w = db.get_setting(_BANKPULL_WANT, None)
     return {"ok": True, "pending": bool(w), "at": (w or {}).get("at", ""), "by": (w or {}).get("by", "")}
 
@@ -3386,6 +3395,7 @@ def bank_pull_commit(body: dict, request: Request):
     db.set_setting(_BANKPULL_SYNC, {"at": _now(), "host": body.get("host", "?"), "period": period,
                                     "并入笔数": res["并入笔数"], "need_dup_confirm": res["need_dup_confirm"],
                                     "staged": False}, "取件机")
+    _bank_result_notify(period, res)   # 结果通知：新流水接入→通知"可对账"（没配收件人/无新增则内部不发，绝不抛错）
     return {"ok": True, **res}
 
 
@@ -3487,6 +3497,219 @@ def _bankpull_alert_check():
         pass   # 告警自检绝不能弄垮任何调用它的接口
 
 
+# ───────── 取件机监控注册表 + 停机告警通用化（V2.531）─────────
+# 三台取件机统一描述，供门户「取件机监控」页读状态、供停机自检逐台判。今天全挂财务核算组；
+# 以后别的工作台加台＝加一条（lane 区分）。**银行那台的告警沿用需求方定稿的原逻辑（_bankpull_alert_check）不动**，
+# 这里只把「报表机 / BOM 小取件机」补上告警能力；三台的"在不在跑"都由 _pull_status 统一算。
+_RPTPULL_SYNC = "rpt_export_sync"     # 报表取件机回报（owner：routers/rptexport.py _SYNC_KEY）
+_BOMPULL_SYNC = "bom_pull_sync"       # BOM 小取件机回报（V2.531 新增，owner：routers/bom_quote.py 回执口）
+
+
+def _pull_registry():
+    return [
+        {"id": "rpt", "name": "财务报表取件机", "lane": "accounting", "dir": "down", "freq": "每分钟一轮",
+         "purpose": "把导出的报表搬回共享盘（兼送 BOM 核算表到公盘）", "alert": "generic", "always_on": True,
+         "sync_key": _RPTPULL_SYNC, "alive_sec": 240,
+         "alerted_key": "rpt_export_alerted", "mob_key": "rpt_export_alert_mobiles", "result_mob_key": _RPT_DELIVER_MOB,
+         "down_hint": "此时新导出的报表不会自动同步到共享盘，BOM 核算表也不会送到公盘。请检查那台常开内网电脑是否关机、或计划任务停了。",
+         "recover_hint": "报表同步已恢复正常。"},
+        {"id": "bank", "name": "银行流水取件机", "lane": "accounting", "dir": "up", "freq": "每小时一轮",
+         "purpose": "把出纳放共享盘的流水推上云端", "alert": "legacy", "always_on": True,
+         "sync_key": _BANKPULL_SYNC, "alive_sec": _BANKPULL_ALIVE_SEC,
+         "alerted_key": _BANKPULL_ALERTED, "mob_key": _BANKPULL_ALERT_MOB, "result_mob_key": _BANK_DELIVER_MOB,
+         "down_hint": "此时共享盘的新流水不会自动接入工作台。请检查那台常开内网电脑是否关机、或计划任务停了；期间可在「数据接入」页手工上传流水包兜底。",
+         "recover_hint": "共享盘自动接入已恢复正常。"},
+        {"id": "bom", "name": "BOM报价取件机", "lane": "accounting", "dir": "down", "freq": "每 2 分钟一轮",
+         "purpose": "把初审通过的 BOM 核算表取到成本会计电脑、并同步到公盘", "alert": "generic", "always_on": True,
+         "sync_key": _BOMPULL_SYNC, "alive_sec": 12 * 60,
+         "alerted_key": "bom_pull_alerted", "mob_key": "bom_pull_alert_mobiles", "result_mob_key": _BOM_DELIVER_MOB,
+         "down_hint": "此时初审通过的 BOM 核算表不会自动取件、也不会送到公盘。请检查那台常开内网电脑是否关机、或计划任务停了。",
+         "recover_hint": "BOM 核算表自动取件已恢复正常。"},
+    ]
+
+
+def _pull_status(m):
+    """某台取件机的存活：最近回报 at / 距今 ago_sec / 是否在跑 alive（差值必须服务端算，前端拿本机钟会跳变）。"""
+    rec = db.get_setting(m["sync_key"], None) or {}
+    ago = None
+    if rec:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):   # _now() 分钟精度无秒，两种都试
+            try:
+                ago = max(0, int((datetime.datetime.now() - datetime.datetime.strptime(rec.get("at", ""), fmt)).total_seconds()))
+                break
+            except Exception:
+                continue
+    return {"deployed": bool(rec), "alive": (ago is not None and ago <= m["alive_sec"]),
+            "ago_sec": ago, "at": rec.get("at", ""), "rec": rec}
+
+
+def _one_pull_alert(m):
+    """单台停机告警（报表机 / BOM 小取件机；银行走 _bankpull_alert_check）：转停发一次、恢复发一次；
+    没配收件人则不发也不置标记。绝不抛错（被高频入口调用）。"""
+    try:
+        st = _pull_status(m)
+        if not st["deployed"] or st["ago_sec"] is None:
+            return   # 从没回报过（未部署）——不当停机骚扰
+        down = st["ago_sec"] > m["alive_sec"]
+        alerted = db.get_setting(m["alerted_key"], None)
+        if down and not alerted:
+            mobiles = db.get_setting(m["mob_key"], None) or []
+            if not mobiles:
+                return   # 没配收件人：不发也不置标记（配好后仍能对当前这次停机首告警）
+            text = ("⚠️【%s】停机预警\n\n最近一次回报：%s（约 %d 分钟前）\n所在电脑：%s\n\n%s"
+                    % (m["name"], st["at"] or "?", round(st["ago_sec"] / 60),
+                       st["rec"].get("host", "?"), m["down_hint"]))
+            conf = notifier.load_dingtalk_conf()
+            if conf:
+                conf = {**conf, "mobiles": [str(x) for x in mobiles], "userids": []}
+            res = notifier.send_dingtalk(text, conf)
+            db.set_setting(m["alerted_key"], {"at": _now(), "ago_sec": st["ago_sec"],
+                                              "sent": bool(res.get("sent")), "detail": res}, "系统告警")
+        elif (not down) and alerted:
+            mobiles = db.get_setting(m["mob_key"], None) or []
+            if mobiles:
+                conf = notifier.load_dingtalk_conf()
+                if conf:
+                    conf = {**conf, "mobiles": [str(x) for x in mobiles], "userids": []}
+                notifier.send_dingtalk("✅【%s】已恢复\n\n最近回报：%s。%s"
+                                       % (m["name"], st["at"] or "?", m["recover_hint"]), conf)
+            db.set_setting(m["alerted_key"], None, "系统告警")
+    except Exception:
+        pass   # 告警自检绝不能弄垮调用它的接口
+
+
+def _pull_alert_check_all():
+    """三台取件机停机自检（被报表机每分钟 pending、银行 pending、数据接入页加载等高频入口调用）。
+    银行沿用原 _bankpull_alert_check（需求方定稿不动），报表机 / BOM 走通用逻辑。"""
+    _bankpull_alert_check()
+    for m in _pull_registry():
+        # 只对【常开】机器发停机告警：BOM 小取件机在个人电脑上，非工作时间关机属正常，不该告警/染红
+        if m.get("alert") == "generic" and m.get("always_on"):
+            _one_pull_alert(m)
+
+
+@app.get("/api/portal/machines")
+def portal_machines(request: Request):
+    """门户「取件机监控」数据（仅管理员）：三台取件机实时状态 + 上轮成绩 + 告警/送达收件人。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    keep = ("copied", "skipped", "errors", "newest", "newest_at", "bomCopied",
+            "并入笔数", "need_dup_confirm", "period", "dest")
+    out = []
+    for m in _pull_registry():
+        st = _pull_status(m)
+        rec = st["rec"]
+        out.append({"id": m["id"], "name": m["name"], "lane": m["lane"], "dir": m["dir"],
+                    "freq": m["freq"], "purpose": m["purpose"], "always_on": bool(m.get("always_on")),
+                    "deployed": st["deployed"], "alive": st["alive"], "ago_sec": st["ago_sec"],
+                    "at": st["at"], "host": rec.get("host", ""),
+                    "alert_mobiles": db.get_setting(m["mob_key"], None) or [],
+                    "result_mobiles": db.get_setting(m["result_mob_key"], None) or [],
+                    "last": {k: rec.get(k) for k in keep if k in rec}})
+    return {"ok": True, "asOf": _now(), "machines": out,
+            "dingtalk_configured": notifier.dingtalk_configured()}
+
+
+@app.get("/api/portal/machines/summary")
+def portal_machines_summary(request: Request):
+    """首页总呼吸灯用的极简汇总（任何登录用户可见）：几台在跑/停/未部署；state 只被【常开】机器染红。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    total = alive = down = unknown = idle = crit = 0
+    for m in _pull_registry():
+        total += 1
+        st = _pull_status(m)
+        if not st["deployed"]:
+            unknown += 1
+            crit += 1 if m.get("always_on") else 0
+        elif st["alive"]:
+            alive += 1
+        elif m.get("always_on"):
+            down += 1          # 常开机停了＝真问题：算 down、染红总灯
+            crit += 1
+        else:
+            idle += 1          # 个人电脑(BOM小取件机)非工作时间关机属正常：算"休息"，不算 down、不染红
+    return {"ok": True, "total": total, "alive": alive, "down": down, "idle": idle,
+            "unknown": unknown, "state": ("down" if crit else "ok")}
+
+
+@app.post("/api/portal/machines/alert-recipients")
+def portal_machines_alert_set(body: dict, request: Request):
+    """设某台取件机的【停机告警】收件人（门户管理·仅管理员）。写该机注册表里的 mob_key；
+    银行那台写的正是 bank_pull_alert_mobiles，与「数据接入」页那处配置同一个键、互通。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    mid = str(body.get("id") or "")
+    m = next((x for x in _pull_registry() if x["id"] == mid), None)
+    if not m:
+        return {"ok": False, "msg": "未知取件机：%s" % mid}
+    raw = body.get("mobiles")
+    if isinstance(raw, str):
+        raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
+    mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
+    bad = [x for x in mobiles if not _re_mobile_ok(x)]
+    if bad:
+        return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
+    db.set_setting(m["mob_key"], mobiles, u["name"])
+    db.set_setting(m["alerted_key"], None, u["name"])   # 改收件人＝重置告警去重标记（同银行那处逻辑）
+    db.audit(u["name"], "配置取件机停机告警收件人", m["name"], "钉钉收件人 %d 个" % len(mobiles))
+    return {"ok": True, "id": mid, "mobiles": mobiles,
+            "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空（该机停机告警关闭）"}
+
+
+@app.post("/api/portal/machines/result-recipients")
+def portal_machines_result_set(body: dict, request: Request):
+    """设某台取件机的【结果通知】收件人（门户管理·仅管理员）。写该机注册表里的 result_mob_key。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    mid = str(body.get("id") or "")
+    m = next((x for x in _pull_registry() if x["id"] == mid), None)
+    if not m or not m.get("result_mob_key"):
+        return {"ok": False, "msg": "未知取件机：%s" % mid}
+    raw = body.get("mobiles")
+    if isinstance(raw, str):
+        raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
+    mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
+    bad = [x for x in mobiles if not _re_mobile_ok(x)]
+    if bad:
+        return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
+    db.set_setting(m["result_mob_key"], mobiles, u["name"])
+    db.audit(u["name"], "配置取件机结果通知收件人", m["name"], "钉钉收件人 %d 个" % len(mobiles))
+    return {"ok": True, "id": mid, "mobiles": mobiles,
+            "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空（该机结果通知关闭）"}
+
+
+def _mask_mobile(m):
+    s = str(m or "")
+    return (s[:3] + "****" + s[-4:]) if len(s) == 11 else s
+
+
+@app.get("/api/bom/deliver-status")
+def bom_deliver_status(request: Request):
+    """BOM 报价审核工具里的【只读】送达状态：落公盘+通知通道通不通、会发给谁(打码)、上次送达、触发规则。
+    给用 BOM 工具的人看；改在门户管理（仅管理员）。有 BOM 报价审核相关权限即可读。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    can = u.get("role") == "admin" or any(db.user_can(u, c) for c in
+          ("bom:audit", "bom:final_review", "enter:bomdraft", "enter:bomstd", "bom:view_sheet"))
+    if not can:
+        return JSONResponse({"ok": False, "msg": "无 BOM 报价审核相关权限"}, status_code=403)
+    # 落公盘+通知这条通道，实际由【报表取件机】负责（它把 outbox 镜像到公盘并触发通知）——所以灯看它的存活
+    rpt = next(x for x in _pull_registry() if x["id"] == "rpt")
+    st = _pull_status(rpt)
+    mobiles = db.get_setting(_BOM_DELIVER_MOB, None) or []
+    mark = db.get_setting(_BOM_DELIVER_MARK, None) or {}
+    return {"ok": True, "alive": st["alive"], "ago_sec": st["ago_sec"], "at": st["at"], "deployed": st["deployed"],
+            "mobiles_masked": [_mask_mobile(x) for x in mobiles], "count": len(mobiles),
+            "dingtalk_configured": notifier.dingtalk_configured(),
+            "last": ({"at": mark.get("at", ""), "n": mark.get("n", 0), "sent": mark.get("sent")} if mark else None)}
+
+
 @app.get("/api/bank-pull/alert-recipients")
 def bank_pull_alert_get(request: Request):
     """读停机告警收件人（前端配置用）。"""
@@ -3521,6 +3744,134 @@ def bank_pull_alert_set(body: dict, request: Request):
 def _re_mobile_ok(m):
     import re as _re
     return bool(_re.match(r"^\d{11}$", str(m)))
+
+
+# ============ BOM 采购核算表落公盘「送达通知」（V2.530）============
+# 触发点在 rptexport.sync-report（报表取件机镜像 outbox→公盘时把 bomCopied 一并回报），惰性调 _bom_delivery_notify。
+_BOM_VER_RE = re.compile(r"^（(?:财务版|脱敏版)）\s*")     # 文件名前缀（财务版/脱敏版）
+_BOM_TAIL_RE = re.compile(r"\s*\d{6,8}\.xlsx$", re.I)      # 结尾 审核日期.xlsx
+
+
+def _bom_label(rel):
+    """outbox 文件名 → 「CP码 产品名」：去（财务版/脱敏版）前缀、去审核日期与扩展名（业务方定：只留 CP 码+产品）。"""
+    name = str(rel or "").replace("\\", "/").split("/")[-1]
+    return _BOM_TAIL_RE.sub("", _BOM_VER_RE.sub("", name)).strip()
+
+
+def _send_result_ding(mob_key, mark_key, sig, text):
+    """通用【结果通知】发送：读收件人→没配不发；同批 sig 去重防重发；发钉钉、记标记。绝不抛错。"""
+    try:
+        mobiles = db.get_setting(mob_key, None) or []
+        if not mobiles:
+            return
+        if (db.get_setting(mark_key, None) or {}).get("sig") == sig:
+            return   # 这一批刚发过（回执重试）——不重发
+        conf = notifier.load_dingtalk_conf()
+        if conf:
+            conf = {**conf, "mobiles": [str(m) for m in mobiles], "userids": []}
+        res = notifier.send_dingtalk(text, conf)
+        db.set_setting(mark_key, {"sig": sig, "at": _now(), "sent": bool(res.get("sent"))}, "结果通知")
+    except Exception:
+        pass   # 结果通知失败绝不能弄垮触发它的接口
+
+
+def _bom_delivery_notify(copied, host=""):
+    """BOM 核算表落公盘 → 结果通知。CP码+产品去重合一行、超 6 项截断、同批去重；没配收件人不发。"""
+    try:
+        if isinstance(copied, str):
+            copied = [copied]
+        copied = [str(x) for x in (copied or []) if str(x).strip()]
+        if not copied:
+            return
+        labels, seen = [], set()
+        for rel in copied:                       # 财务版+脱敏版去掉版本字样后同名 → 按 CP 码+产品去重合一行
+            lab = _bom_label(rel)
+            if lab and lab not in seen:
+                seen.add(lab)
+                labels.append(lab)
+        if not labels:
+            return
+        import hashlib
+        sig = hashlib.md5(("\n".join(labels)).encode("utf-8")).hexdigest()
+        shown = labels[:6]
+        body = "\n".join("· " + x for x in shown) + (("\n…等共 %d 项" % len(labels)) if len(labels) > 6 else "")
+        text = ("📄【BOM报价取件机】新核算表已到公盘\n\n"
+                "本轮新增 %d 项采购核算表（初审通过），请查收：\n%s\n\n"
+                "同步时间：%s\n"
+                "落盘位置：公盘「BOM报价审核」目录（按 年\\月 分文件夹存放）\n"
+                "来源：由工作台「BOM报价审核」初审通过后自动落盘同步\n\n"
+                "请到公盘对应 年\\月 目录查收；如需核对定价与审核详情，可在工作台「BOM报价审核」台账打开对应记录。"
+                % (len(labels), body, _now()))
+        _send_result_ding(_BOM_DELIVER_MOB, _BOM_DELIVER_MARK, sig, text)
+    except Exception:
+        pass
+
+
+def _rpt_result_notify(copied):
+    """报表落共享盘 → 结果通知：本轮新同步到共享盘的报表 → 通知【报表结果收件人】可取用。"""
+    try:
+        if isinstance(copied, str):
+            copied = [copied]
+        files = [str(x).replace("\\", "/").split("/")[-1] for x in (copied or []) if str(x).strip()]
+        if not files:
+            return
+        import hashlib
+        sig = hashlib.md5(("\n".join(sorted(files))).encode("utf-8")).hexdigest()
+        shown = files[:6]
+        body = "\n".join("· " + x for x in shown) + (("\n…等共 %d 份" % len(files)) if len(files) > 6 else "")
+        text = ("📊【财务报表取件机】报表已同步到共享盘\n\n"
+                "本轮新增 %d 份报表已同步到共享盘，可取用：\n%s\n\n"
+                "同步时间：%s\n位置：共享盘报表目录（按期存放）。"
+                % (len(files), body, _now()))
+        _send_result_ding(_RPT_DELIVER_MOB, _RPT_DELIVER_MARK, sig, text)
+    except Exception:
+        pass
+
+
+def _bank_result_notify(period, res):
+    """出纳流水被取件机接入 → 结果通知：通知【银行结果收件人】"可以去对账了"。"""
+    try:
+        n = int((res or {}).get("并入笔数") or 0)
+        if n <= 0:
+            return
+        dup = bool((res or {}).get("need_dup_confirm"))
+        sig = "%s|%s|%d" % (str(period), _now(), n)
+        text = ("💧【银行流水取件机】新流水已接入\n\n"
+                "出纳上传的流水已自动接入工作台：期间 %s，本轮并入 %d 笔%s。\n\n"
+                "可到「银行对账」开始对流水了。"
+                % (str(period), n, ("（其中有重复待人工确认）" if dup else "")))
+        _send_result_ding(_BANK_DELIVER_MOB, _BANK_DELIVER_MARK, sig, text)
+    except Exception:
+        pass
+
+
+@app.get("/api/bom/deliver-recipients")
+def bom_deliver_get(request: Request):
+    """读 BOM 落公盘送达通知收件人（门户管理·仅管理员）。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    return {"ok": True, "mobiles": db.get_setting(_BOM_DELIVER_MOB, None) or [],
+            "dingtalk_configured": notifier.dingtalk_configured()}
+
+
+@app.post("/api/bom/deliver-recipients")
+def bom_deliver_set(body: dict, request: Request):
+    """存 BOM 落公盘送达通知收件人（钉钉手机号列表；空＝关闭送达通知）。门户管理·仅管理员。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    raw = body.get("mobiles")
+    if isinstance(raw, str):
+        raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
+    mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
+    bad = [m for m in mobiles if not _re_mobile_ok(m)]
+    if bad:
+        return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
+    db.set_setting(_BOM_DELIVER_MOB, mobiles, u["name"])
+    db.audit(u["name"], "配置BOM送达通知收件人", _period_str(), "钉钉收件人 %d 个" % len(mobiles))
+    return {"ok": True, "mobiles": mobiles,
+            "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空收件人（送达通知关闭）"}
 
 
 @app.post("/api/kingdee/refresh")

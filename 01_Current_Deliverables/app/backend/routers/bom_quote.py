@@ -3078,6 +3078,27 @@ async def bom_outbox_status(request: Request):
             "note": "初审通过即落服务器 outbox（年/月/（财务版|脱敏版）CP 名称 审核日期.xlsx），取件机 bom_dest 同步到公盘；终审不覆盖"}
 
 
+@router.post("/api/bom/outbox/report")
+async def bom_outbox_report(request: Request):
+    """BOM 小取件机每轮回报（成本会计电脑那台，走 BOM 取件码）——供门户「取件机监控」显示它在不在跑。
+    内网往外发、不需登录（中间件对 /api/bom/outbox/* + BOM 取件码放行）；只存 bom_pull_sync，不碰业务数据。"""
+    if not bom_pull_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "需要 BOM 取件令牌"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    cp = body.get("copied")
+    cp = [cp] if isinstance(cp, str) else (cp or [])          # PowerShell 单元素数组会退化成标量，防一下
+    er = body.get("errors")
+    er = [er] if isinstance(er, str) else (er or [])
+    rec = {"at": _now(), "host": str(body.get("host") or "")[:60], "dest": str(body.get("dest") or "")[:300],
+           "copied": [str(x)[:200] for x in cp][:50], "skipped": int(body.get("skipped") or 0),
+           "errors": [str(x)[:200] for x in er][:20]}
+    db.set_setting("bom_pull_sync", rec, "取件机")
+    return {"ok": True}
+
+
 @router.post("/api/bom/outbox/redo")
 async def bom_outbox_redo(request: Request):
     """手动重落一条（初审过的记录；落盘失败后重推，或改了参数想重出）。需「审核」权限。"""

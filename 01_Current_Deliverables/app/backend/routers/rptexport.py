@@ -445,7 +445,7 @@ def rptexport_pending(request: Request):
     # 银行取件任务停了但机器还开着时，靠它每分钟触发一次检查（惰性 import 避免与 app 循环依赖）。
     try:
         import app as _app
-        _app._bankpull_alert_check()
+        _app._pull_alert_check_all()   # V2.531：一次自检三台取件机（银行/报表/BOM），不只银行
     except Exception:
         pass
     w = db.get_setting(_WANT_KEY, None)
@@ -550,6 +550,8 @@ def rptexport_sync_report(body: dict, request: Request):
            "newest": str(body.get("newest") or "")[:200],
            "newest_at": str(body.get("newest_at") or "")[:30],
            "total": int(body.get("total") or 0),
+           # BOM 落公盘（V2.530）：报表取件机顺带把 outbox 镜像到公盘，本轮新落的核算表文件名（供送达通知 + 页面展示）
+           "bomCopied": [str(x)[:200] for x in (body.get("bomCopied") or [])][:50],
            # 按期分桶：{"2026年07月": {n, copied, skipped, newest, newest_at}}。
            # 页面是按期间看的，站在某一期那一屏就该只显示那一期的数（业务方定）。
            #
@@ -566,6 +568,17 @@ def rptexport_sync_report(body: dict, request: Request):
                       for k, v in (body.get("months") or {}).items()
                       if isinstance(v, dict)}}
     db.set_setting(_SYNC_KEY, rec, "取件机")
+    # BOM 落公盘送达通知（V2.530）：本轮新镜像到公盘的核算表 → 发钉钉给送达收件人
+    # （惰性 import app 避循环依赖；没配收件人 / 同一批重发都会被 _bom_delivery_notify 内部挡掉，绝不抛错）。
+    if body.get("bomCopied") or body.get("copied"):
+        try:
+            import app as _app
+            if body.get("bomCopied"):
+                _app._bom_delivery_notify(body.get("bomCopied"), rec.get("host", ""))
+            if body.get("copied"):
+                _app._rpt_result_notify(body.get("copied"))   # 报表落共享盘·结果通知
+        except Exception:
+            pass
     # 删除指令：**执行成功的才从队列里划掉**。没删成的留着下一轮重试——
     # 那台电脑当时可能没连上共享盘，不该把这条指令悄悄吞了。
     if rec["deleted"]:

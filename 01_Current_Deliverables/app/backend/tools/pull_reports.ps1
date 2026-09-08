@@ -284,7 +284,7 @@ try {
     Invoke-Api $cfg '/api/rptexport/sync-report' $null @{
         host = $env:COMPUTERNAME; dest = $cfg.dest_dir
         copied = $copied; skipped = $skipped; deleted = $deleted; retry = $retry; errors = $errors
-        newest = $newest; newest_at = $newestAt; total = $total; months = $months } | Out-Null
+        newest = $newest; newest_at = $newestAt; total = $total; months = $months; bomCopied = $bomCopied } | Out-Null
 } catch {
     Write-Log ('[!] 回执没发出去（不影响文件已落盘）：' + $_.Exception.Message)
 }

@@ -10,8 +10,36 @@ import {
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
   bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
-  getBomInvoiceRules, setBomInvoiceRules,
+  getBomInvoiceRules, setBomInvoiceRules, getBomDeliverStatus,
 } from '../api.js'
+
+// BOM 报价审核工具里的【只读】送达状态面板（V2.534）：通道通不通 + 会发给谁 + 触发规则；改在门户管理（联系管理员）。
+function BomDeliverPanel() {
+  const [s, setS] = useState(null)
+  useEffect(() => { getBomDeliverStatus().then(setS).catch(() => {}) }, [])
+  if (!s || !s.ok) return null
+  const alive = s.alive
+  const ago = s.ago_sec == null ? '' : s.ago_sec < 90 ? '刚刚' : s.ago_sec < 3600 ? Math.round(s.ago_sec / 60) + ' 分钟前' : Math.round(s.ago_sec / 3600) + ' 小时前'
+  const col = alive ? 'var(--green)' : 'var(--ink-3)'
+  return (
+    <div className="card" style={{ borderLeft: '3px solid ' + col, padding: '11px 14px', fontSize: 12.5, lineHeight: 1.9, marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+        <span className={alive ? 'nav-pulse' : ''} style={{ width: 9, height: 9, borderRadius: '50%', background: col, display: 'inline-block', flex: '0 0 auto' }} />
+        <b style={{ fontSize: 13 }}>核算表自动送达</b>
+        <span style={{ color: col, fontWeight: 600 }}>{alive ? '● 通道运行中' : '⚠ 通道可能中断'}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--ink-3)' }}>只读 · 改请联系管理员</span>
+      </div>
+      <div style={{ color: 'var(--ink-2)', marginTop: 6 }}>
+        <div><b>会发给谁：</b>{s.count ? s.mobiles_masked.join('、') : <span style={{ color: 'var(--ink-3)' }}>未配置（暂不推送）</span>}</div>
+        <div><b>什么情况发：</b>成本会计「初审通过」→ 核算表自动落公盘 → 立即钉钉推送给上面的人</div>
+        <div><b>怎么发：</b>同一产品「财务版+脱敏版」只通知一次；一轮多份合并成一条{s.last && s.last.at ? `（上次 ${s.last.at} 推 ${s.last.n} 项）` : ''}</div>
+        {s.dingtalk_configured === false && <div style={{ color: 'var(--red)' }}>⚠ 服务器未配钉钉，暂发不出——需管理员先配。</div>}
+        {!alive && <div style={{ color: 'var(--ink-3)' }}>通道由常开的报表取件机负责；它最近报平安 {s.at || '—'}{ago ? '（' + ago + '）' : ''}。</div>}
+      </div>
+      <div style={{ marginTop: 4, fontSize: 11.5, color: 'var(--ink-3)' }}>⚙ 增减推送人请联系管理员（门户管理 · 取件机监控）</div>
+    </div>
+  )
+}
 
 const GROSS = 1.13
 // 发票类型 → 单位成本不含税（镜像后端 kernel，对应采购核算表 N 列公式）。price=含税价 tax=税率 rate=扣除率
@@ -551,6 +579,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
         </div>
       </div>
       <div className="body">
+        <BomDeliverPanel />
         <div className="card bom-stats">
           <Stat lab="台账产品" v={stats.total} suf={`个 · 含半成品 ${stats.semi}`} />
           <Stat lab="最近核算" v={stats.last} small suf="" />

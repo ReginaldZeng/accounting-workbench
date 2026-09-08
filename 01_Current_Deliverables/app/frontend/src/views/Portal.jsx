@@ -13,7 +13,7 @@
 // 工具卡片仍由「门户管理」维护、经 /api/portal/tools 读取；「常用」标签当前＝进入对应工作台
 //   （BP/核算暂不支持按 URL 落到指定模块，点亮模块级直达记在 V2.325 台账遗留）。
 import React, { useState, useEffect, useRef } from 'react'
-import { apiLogout, getPortalTools, getLlmHubStatus } from '../api.js'
+import { apiLogout, getPortalTools, getLlmHubStatus, getMachinesSummary } from '../api.js'
 import UserAdmin from './UserAdmin.jsx'
 import PortalAdmin from './PortalAdmin.jsx'
 import ModelConfig from './ModelConfig.jsx'
@@ -111,6 +111,17 @@ const CSS = `
 .pt-airdy.wait .t b{color:#FBE8B0}
 .pt-airdy.ro{cursor:default}
 .pt-airdy.ro:hover{filter:none}
+.pt-mchip{display:flex;align-items:center;gap:12px;flex:none;padding:11px 16px;border-radius:13px;cursor:pointer;transition:filter var(--tr);
+  background:linear-gradient(180deg,rgba(52,211,153,.10),rgba(52,211,153,.03));border:1px solid rgba(52,211,153,.32);box-shadow:0 0 26px rgba(52,211,153,.10)}
+.pt-mchip:hover{filter:brightness(1.12)}
+.pt-mchip.ro{cursor:default}.pt-mchip.ro:hover{filter:none}
+.pt-mchip .d{width:9px;height:9px;border-radius:50%;background:#34D399;box-shadow:0 0 10px #34D399,0 0 4px #34D399;animation:pt-mpulse 2s ease-in-out infinite}
+.pt-mchip .t b{font-size:13px;font-weight:800;display:block;color:#BDF5DE}
+.pt-mchip .t span{font-size:10.5px;color:var(--ink3);letter-spacing:.5px}
+.pt-mchip.down{background:linear-gradient(180deg,rgba(248,113,113,.10),rgba(248,113,113,.03));border-color:rgba(248,113,113,.36);box-shadow:0 0 26px rgba(248,113,113,.10)}
+.pt-mchip.down .d{background:#F87171;box-shadow:0 0 10px #F87171,0 0 4px #F87171}
+.pt-mchip.down .t b{color:#FBC9C9}
+@keyframes pt-mpulse{0%,100%{opacity:1}50%{opacity:.4}}
 /* ── 区块标题 ── */
 .pt-sec{display:flex;align-items:baseline;gap:12px;margin:6px 0 12px}
 .pt-sec h2{font-size:15px;font-weight:800;letter-spacing:.5px;display:flex;align-items:center;gap:8px;margin:0}
@@ -248,6 +259,9 @@ export default function Portal({ user, onEnter }) {
   const [aiStat, setAiStat] = useState(null)
   useEffect(() => { getLlmHubStatus().then(setAiStat).catch(() => {}) }, [])
   const aiReady = !!aiStat?.aiReady
+  // 取件机总呼吸灯（V2.533）：全平台取件机健康一眼看——登录即可看，点进全页仅管理员
+  const [machineStat, setMachineStat] = useState(null)
+  useEffect(() => { getMachinesSummary().then(setMachineStat).catch(() => {}) }, [])
 
   // 工具目录：搜索（顶栏输入框，Ctrl+K 唤起）+ 组别/状态筛选（V2.325）
   const [q, setQ] = useState('')
@@ -332,6 +346,7 @@ export default function Portal({ user, onEnter }) {
               <h1>你好，{user?.name} — <em>让每一笔业务，都经得起审计</em></h1>
               <p>有权限的工作台一键进入；下方工具目录可搜索、可筛选。其他组的工具可浏览，进入需相应权限。</p>
             </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
             <div className={'pt-airdy' + (aiReady ? '' : ' wait') + (canModel ? '' : ' ro')}
               onClick={canModel ? () => setTab('model') : undefined}
               title={canModel ? '前往模型配置' : undefined}>
@@ -343,6 +358,19 @@ export default function Portal({ user, onEnter }) {
                   : (canModel ? '点此前往「模型配置」接入大模型' : '未接入 · 请联系主管理员配置')}</span>
               </div>
               {canModel && <div className="v">配置 ›</div>}
+            </div>
+            {machineStat && (
+              <div className={'pt-mchip' + (machineStat.state === 'down' ? ' down' : '') + (isAdmin ? '' : ' ro')}
+                onClick={isAdmin ? () => setTab('cms') : undefined}
+                title={isAdmin ? '前往门户管理 · 取件机监控' : undefined}>
+                <div className="d"></div>
+                <div className="t">
+                  <b>{machineStat.state === 'down' ? '取件机 · 有异常' : '取件机运行正常'}</b>
+                  <span>{machineStat.alive}/{machineStat.total} 在跑{machineStat.down ? ` · ${machineStat.down} 可能已停` : ''}{machineStat.unknown ? ` · ${machineStat.unknown} 未接` : ''}</span>
+                </div>
+                {isAdmin && <div style={{ marginLeft: 4, paddingLeft: 13, borderLeft: '1px solid rgba(255,255,255,.12)', fontSize: 11, color: 'var(--ink3)' }}>查看 ›</div>}
+              </div>
+            )}
             </div>
           </div>
 
