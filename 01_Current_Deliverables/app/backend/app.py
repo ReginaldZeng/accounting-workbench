@@ -2424,9 +2424,10 @@ def _balance_statement():
             continue
         kd_open[a] = kd_open.get(a, 0.0) + rc.to_float(r.get("期初原币") or 0)
         acct_code.setdefault(a, code)
-        nm = str(r.get("核算维度.银行账号.名称") or "").strip()
-        if nm:
-            kd_name.setdefault(a, nm)        # 金蝶友好户名（如"星期零抖音账户（抖音17724646962）"）
+        # 金蝶友好户名＝核算维度【编码】（如"天猫1058952426@starfieldsz.com"/"宁波行通知存款户731101…"）；
+        # 维度【名称】是公司名（各户都一样），不能当户名用。电商/理财在出纳台账账号为空、匹配不上，靠这个兜住。
+        if dim:
+            kd_name.setdefault(a, dim)
         cur = str(r.get("币别") or "").strip()
         if cur:
             acct_cur.setdefault(a, cur)
