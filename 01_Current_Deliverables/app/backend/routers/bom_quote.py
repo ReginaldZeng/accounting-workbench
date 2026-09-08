@@ -2987,8 +2987,28 @@ def _drop_outbox_safe(eid, who, stage="初审"):
     return res
 
 
+def bom_pull_token():
+    """BOM 专用取件码：conf.ini [bom] pull_token。只能取 outbox 里的采购核算表，取不了报表、登录不了工作台。
+    与报表取件码同规矩：未配置＝通道关；必须纯 ASCII（走请求头）。"""
+    try:
+        import configparser
+        import kingdee_client as _kc
+        c = configparser.ConfigParser()
+        c.read(_kc.conf_path(), encoding="utf-8")
+        tok = (c.get("bom", "pull_token", fallback="") or "").strip()
+        return tok if (tok and tok.isascii()) else ""
+    except Exception:
+        return ""
+
+
+def bom_pull_token_ok(request):
+    tok = bom_pull_token()
+    return bool(tok) and request.headers.get("X-Pull-Token", "") == tok
+
+
 def _outbox_pull_ok(request):
-    return pull_token_ok(request) or bool(_require_perm(request, ENTER_STD))
+    """BOM 专用码 / 报表取件码（公盘那台机器） / 登录且有标准台账权限 三者任一。"""
+    return bom_pull_token_ok(request) or pull_token_ok(request) or bool(_require_perm(request, ENTER_STD))
 
 
 def _outbox_safe_path(rel):

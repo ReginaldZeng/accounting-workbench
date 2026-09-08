@@ -89,4 +89,7 @@ auto_intake_since =                  ; YYYY-MM-DD，留空＝首次启用当天
 auto_intake_notify = 1
 portal_url =                         ; 提醒里带的工作台地址，如 https://xxx.com（留空只写文字路径）
 ; ---- 初审通过即落盘（V2.524）：服务器 outbox 目录，留空＝bom_uploads/_outbox；取件机 bom_dest 同步到公盘
-outbox_dir = 
+outbox_dir =
+; BOM 专用取件码（V2.525）：成本会计电脑上的 bom_pull 小取件机揣它来取 outbox 里的采购核算表，取不了报表、登录不了工作台。
+; 纯 ASCII、24 位以上随机串：python -c "import secrets;print(secrets.token_urlsafe(24))"。留空＝专用通道关（报表取件码仍可取）
+pull_token = 

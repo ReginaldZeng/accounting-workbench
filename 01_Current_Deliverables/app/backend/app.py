@@ -188,7 +188,9 @@ async def _auth_gate(request, call_next):
         # 例外（V2.443）：BP 后端同机调 BOM 消费口 /api/bomcost/*——内部令牌对得上且来源回环才放过登录门，
         # 之后由路由自己再验一遍（只准已审核版；V2.451 起核算侧全量导出不再放行，BP 只拿脱敏版）。
         bp_internal = p.startswith(bom_quote.INTERNAL_PATH_PREFIXES) and bom_quote.internal_token_ok(request)
-        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal:
+        # BOM 专用取件码（V2.525）：只放 /api/bom/outbox/*——成本会计电脑上的小取件机揣它取采购核算表，取不了报表
+        bom_pull = p.startswith("/api/bom/outbox/") and bom_quote.bom_pull_token_ok(request)
+        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal and not bom_pull:
             return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
         # 初始密码闸（V2.330）：账号被新建/重置密码后 must_change_pwd=1——改密之前除 /api/change-pwd
         # 外一律 403（含 /api/bp-authz，BP 也进不去）。前端据 code 弹强制改密页；服务端拦，直连 API 也绕不过。
