@@ -2071,6 +2071,8 @@ async def bom_review(request: Request):
     e = db.bom_get_entry(body.get("entryId"))
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    if e.get("status") in ("初审", "已审核"):        # V2.528：戳在不能直接改，先撤销归档（前端按钮也灰）
+        return JSONResponse({"ok": False, "msg": "已归档（%s戳在），不能直接改价税费：先「撤销归档」，改完再重新审核归档" % e["status"]}, status_code=400)
     old_fee = _fee_of(e)
     new_fee = body.get("fee") or {}
     fields, changed = {}, 0
@@ -2157,6 +2159,8 @@ async def bom_apply_goods(request: Request):
     e = db.bom_get_entry(body.get("entryId"))
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    if e.get("status") in ("初审", "已审核"):        # V2.528：同上
+        return JSONResponse({"ok": False, "msg": "已归档（%s戳在），不能直接采纳商品版：先「撤销归档」" % e["status"]}, status_code=400)
     gv = e.get("goods_version") or {}
     if not gv:
         return JSONResponse({"ok": False, "msg": "本记录没有成本会计商品版可采纳。"}, status_code=400)

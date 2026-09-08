@@ -945,6 +945,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
   const [step, setStep] = useState('price')        // 四步页签：bom/craft/qty/price（默认落在④报价核算）
   useEffect(() => { setFee(entry.fee); setEdit(false); setMatDraft(null) }, [entry.id])
   const startEdit = () => { setStep('price'); setMatDraft((entry.materials || []).map(m => ({ ...m }))); setEdit(true) }
+  const archived = ['初审', '已审核'].includes(entry.status)   // 初审/终审戳在 → 改价税费、改定性、采纳商品版都要先撤销归档（V2.528）
   const cancelEdit = () => { setFee(entry.fee); setMatDraft(null); setEdit(false) }
   // 改税率 → 按发票类型算法现算该料成本不含税（保存时后端权威重算，口径一致）
   const setTax = (mat, v) => {
@@ -1093,8 +1094,10 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             <button className="btn-pri" style={{ background: 'var(--amber)', borderColor: 'var(--amber)' }}
               onClick={() => setVoidM('review')} title="财务BP：批准或驳回成本会计的作废申请">⌦ 作废终审（有待批准）</button>}
           {/* 修改价税费（蓝边）：复核＝改税率/费用/发票类型/明细，留痕；改了成本会自动打回重审 */}
-          {!isStd && !edit && cfg?.canAudit && <button className="btn-sec" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={startEdit}
-            title="改税率 / 费用参数 / 发票类型 / 明细，逐项留痕；改了成本会打回重新归档">✎ 修改价税费</button>}
+          {/* V2.528（业务方定 2026-09-08）：初审/终审戳在的记录不能直接改——按钮灰掉，提示先「撤销归档」；后端同样拒绝 */}
+          {!isStd && !edit && cfg?.canAudit && <button className="btn-sec" disabled={archived}
+            style={archived ? undefined : { color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={archived ? undefined : startEdit}
+            title={archived ? '已归档（初审/终审戳在），不能直接改价税费：先点「撤销归档」，改完再重新审核归档' : '改税率 / 费用参数 / 发票类型 / 明细，逐项留痕；改了成本会打回重新归档'}>✎ 修改价税费</button>}
           {edit && <><button className="btn-pri" disabled={saving} onClick={save} style={{ background: 'var(--green)', borderColor: 'var(--green)' }}>✓ 保存并留痕</button>
             <button className="btn-sec" onClick={cancelEdit}>取消</button></>}
           {/* 审核归档（绿实心）＝定性+初审盖戳+毕业进标准台账，一个动作。四步未齐禁用并提示缺哪步 */}
@@ -1103,8 +1106,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             title={entry.stepsOk ? '填物料类别 + 是否允许报价，保存即初审归档、进标准成本台账' : '请先确认 ③用量自洽 ④报价核算 两步（①②只看不确认）'}
             style={{ background: entry.stepsOk ? 'var(--green)' : undefined, borderColor: entry.stepsOk ? 'var(--green)' : undefined }}>
             ⚑ 审核归档</button>}
-          {!isStd && !edit && cfg?.canAudit && (entry.isFinal || entry.historical) && <button className="btn-sec" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }}
-            onClick={() => setAuditM(true)} title="改物料类别 / 报价结论（会重新归档、清终审戳）">⚑ 改定性</button>}
+          {!isStd && !edit && cfg?.canAudit && (entry.isFinal || entry.historical) && <button className="btn-sec" disabled={archived}
+            style={archived ? undefined : { color: 'var(--accent)', borderColor: 'var(--accent)' }}
+            onClick={archived ? undefined : () => setAuditM(true)} title={archived ? '已归档（初审/终审戳在），不能直接改定性：先点「撤销归档」' : '改物料类别 / 报价结论（会重新归档、清终审戳）'}>⚑ 改定性</button>}
           {!edit && cfg?.canAudit && (entry.isFinal || entry.historical) && <button className="btn-sec" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}
             onClick={unfinalize} title="撤下初审戳与定稿指针，退回复核">↶ 撤销归档</button>}
           {/* 删除（红实心，仅主管理员）：真删本条记录 + 留档文件，需 conf.ini 密钥，留全局审计 */}
