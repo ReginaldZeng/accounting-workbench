@@ -2274,13 +2274,13 @@ def _balance_adjust():
     # 金蝶账面·本位币：期初本位币+本期序时账本位币净，还原实时本位币账面。口径=账簿本位币
     # （境内簿=人民币，境外簿 Sinkio/Starfield=美元；与逐笔稽核 V2.32「本位币金额」列一致）。人民币户 == book(原币)。
     book_base = {a: round(open_bal_base.get(a, 0.0) + kd_move_base.get(a, 0.0), 2) for a in set(open_bal_base) | set(kd_move_base)}
-    # 银行对账单期末余额：每户取交易日期最晚一笔的余额
+    # 银行对账单期末余额：每户取【完整交易时间】最晚一笔的余额（同日多笔靠时分秒定真末笔，不取错行）
     bank_last = {}
     for r in bank_rows:
         a = al.norm_acct(r.get("账号") or "")
         if not a or r.get("余额") is None:
             continue
-        d = r.get("交易日期") or ""
+        d = r.get("时间") or r.get("交易日期") or ""
         if a not in bank_last or d >= bank_last[a][0]:
             bank_last[a] = (d, r.get("余额"))
     # 未达账项：来自逐笔稽核
@@ -2459,7 +2459,7 @@ def _balance_statement():
         bank_net[a] = bank_net.get(a, 0.0) + rin - rout
         if r.get("余额") is None:
             continue
-        d = r.get("交易日期") or ""
+        d = r.get("时间") or r.get("交易日期") or ""      # 用完整时间戳挑真正最后一笔（同日多笔才不取错行）
         if a not in bank_last or d >= bank_last[a][0]:
             bank_last[a] = (d, rc.to_float(r.get("余额")))
     # 银行侧（其他货币资金·1012·电商渠道）：接第三方渠道对账的「渠道期末余额」——支付宝等本就已解析、

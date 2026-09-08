@@ -85,8 +85,20 @@ def _date_iso(v) -> str:
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else s
 
 
+def _ts_full(v) -> str:
+    """完整交易时间戳（字典序可排序），供「同日多笔挑真正最后一笔」定期末余额用；无时分则退回日期。
+    财资流水交易时间带时分秒（如 2026-08-07 16:43:31）——只留日期会让同日几十笔分不出先后、月末余额取错行。"""
+    if isinstance(v, datetime.datetime):
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    s = _s(v)
+    m = re.match(r"^(20\d\d)[-/.]?(\d\d)[-/.]?(\d\d)[ T]?(\d\d:\d\d(?::\d\d)?)?", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" + (" " + m.group(4) if m.group(4) else "")
+    return _date_iso(v)
+
+
 def _row(acct, holder, d, memo, cp, inflow, outflow, src, bank, bal=None):
-    return {"账号": _s(acct), "户名": _s(holder), "交易日期": _date_iso(d),
+    return {"账号": _s(acct), "户名": _s(holder), "交易日期": _date_iso(d), "时间": _ts_full(d),
             "摘要": _s(memo), "对方户名": _s(cp),
             "收入": round(inflow, 2), "支出": round(outflow, 2),
             "余额": (_num(bal) if bal not in (None, "") else None),   # 账户余额(取末笔=期末，供余额调节)
