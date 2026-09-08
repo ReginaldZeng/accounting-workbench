@@ -87,4 +87,6 @@ cost_node_ids = 23b2_ee20             ; 成本核算节点 activity_id（志鹏+
 auto_intake_interval_min = 5
 auto_intake_since =                  ; YYYY-MM-DD，留空＝首次启用当天
 auto_intake_notify = 1
-portal_url =                         ; 提醒里带的工作台地址，如 https://xxx.com（留空只写文字路径） 
+portal_url =                         ; 提醒里带的工作台地址，如 https://xxx.com（留空只写文字路径）
+; ---- 初审通过即落盘（V2.524）：服务器 outbox 目录，留空＝bom_uploads/_outbox；取件机 bom_dest 同步到公盘
+outbox_dir = 

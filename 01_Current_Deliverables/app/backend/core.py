@@ -273,7 +273,9 @@ _PULL_PATHS = {"/api/rptexport/files", "/api/rptexport/download",
                "/api/rptexport/sync-report", "/api/rptexport/pending",
                # 银行流水【上行】通道（取件机反向推送共享盘散件→服务器，同一个 pull_token）
                "/api/bank-pull/pending", "/api/bank-pull/push",
-               "/api/bank-pull/commit", "/api/bank-pull/report"}
+               "/api/bank-pull/commit", "/api/bank-pull/report",
+               # BOM 采购核算表【下行】落公盘（V2.524）：初审通过即落服务器 outbox，取件机同一令牌取走
+               "/api/bom/outbox/files", "/api/bom/outbox/download"}
 
 
 def pull_token():

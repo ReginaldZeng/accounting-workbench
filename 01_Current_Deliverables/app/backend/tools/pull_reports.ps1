@@ -187,6 +187,42 @@ foreach ($rel in $todel) {
     } catch { $errors += ('删除失败 {0}: {1}' -f $rel, $_.Exception.Message) }
 }
 
+# ── BOM 采购核算表 落公盘（V2.524）：ini 有 bom_dest 才跑；服务器 outbox（年/月/（财务版|脱敏版）CP 名称 审核日期.xlsx）原样镜像 ──
+# 与报表同一套「大小+服务器 mtime」判变；不删公盘上的东西（BOM 只增不删，删由人）。
+$bomCopied = @(); $bomSkipped = 0; $bomErrors = @()
+if ($cfg.bom_dest) {
+    if (-not (Test-Path -LiteralPath $cfg.bom_dest)) {
+        Write-Log ('[X] BOM 目标目录不存在：{0} —— 共享盘没连上？' -f $cfg.bom_dest)
+    } else {
+        $bl = $null
+        try { $bl = Invoke-ApiJson $cfg '/api/bom/outbox/files' } catch { Write-Log ('[X] BOM 清单取不到：' + $_.Exception.Message) }
+        if ($bl -and $bl.ok) {
+            foreach ($f in $bl.files) {
+                $rel = $f.rel
+                $dst = Join-Path $cfg.bom_dest ($rel -replace '/', '\')
+                $stamp = '{0}|{1}' -f $f.size, $f.mtime
+                $key = 'bom:' + $rel
+                if ((Test-Path -LiteralPath $dst) -and $state[$key] -and ($state[$key] -eq $stamp)) { $bomSkipped++; continue }
+                try {
+                    $blob = Invoke-Api $cfg '/api/bom/outbox/download' ('name=' + [uri]::EscapeDataString($rel))
+                    if ($blob.Length -ne $f.size) { continue }        # 服务器正在重写这个文件，下轮再取
+                    $sub = Split-Path -Parent $dst
+                    if ($sub -and -not (Test-Path -LiteralPath $sub)) { New-Item -ItemType Directory -Path $sub -Force | Out-Null }
+                    $tmp = Join-Path $sub ('.' + [guid]::NewGuid().ToString('N') + '.part')
+                    [IO.File]::WriteAllBytes($tmp, $blob)
+                    Move-Item -LiteralPath $tmp -Destination $dst -Force
+                    $state[$key] = $stamp
+                    $bomCopied += $rel
+                } catch {
+                    $bomErrors += ('{0}: {1}' -f $rel, $_.Exception.Message)
+                }
+            }
+            Write-Log ('BOM 采购核算表：下载 {0} 个、跳过 {1} 个、失败 {2} 个 → {3}' -f $bomCopied.Count, $bomSkipped, $bomErrors.Count, $cfg.bom_dest)
+            foreach ($n in $bomCopied) { Write-Log ('   [OK] ' + $n) }
+            foreach ($x in $bomErrors) { Write-Log ('   [X]  ' + $x) }
+        }
+    }
+}
 try { $state | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $StateFile -Encoding utf8 } catch {}
 
 if ($copied.Count -or $errors.Count -or $deleted.Count -or $retry.Count -or $forced) {

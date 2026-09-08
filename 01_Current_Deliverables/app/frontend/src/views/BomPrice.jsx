@@ -6,7 +6,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList,
-  bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard,
+  bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
   bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
@@ -220,7 +220,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
         flash(r.finalized
           ? (r.historical
             ? `已按历史版补审：${cat}——不替代当前版、不对外，同单的下游可以定稿了`
-            : `${r.backfillSealed ? '补录单初审通过·已盖「补录」戳定稿（不经财务BP终审）' : '已定稿'}：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
+            : `${r.backfillSealed ? '补录单初审通过·已盖「补录」戳定稿（不经财务BP终审）' : '已定稿'}${r.outbox ? (r.outbox.ok ? '　· 已落盘公盘（财务版+脱敏版）' : `　· ⚠ 落盘公盘失败：${r.outbox.msg || ''}`) : ''}：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
           : (r.needConfirm || []).length
             ? `已存定性，未定稿：原版本 ${r.needConfirm.map(c => c.cpCode).join('、')} 保留为当前版，请先核对再定稿`
             : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
@@ -1052,6 +1052,16 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {(entry.recalc.cascade || []).length > 0 && <span>；{entry.recalc.cascade.map((c, i) => <span key={i}>{i ? '，' : ''}料行「{c.matName}」含税价随上游「{c.upName}」重算 {fmt(c.from)} → {fmt(c.to)}</span>)}</span>}
             。全成本 <b>{fmt(entry.recalc.srcFull)} → {fmt(entry.recalc.full)}</b>（{entry.recalc.diff > 0 ? '+' : ''}{fmt(entry.recalc.diff)}，{(entry.recalc.pct * 100).toFixed(1)}%）。
             台账、财务版/脱敏版导出、对外都用重算值；OA 里采购原表仍是旧数，志鹏传回的财务版才是对的。<b>复核③「确认用量自洽」即认可本次重算。</b></div>}
+          {(() => {
+            const ob = (entry.audits || []).find(a => (a.field || '').startsWith('落盘公盘'))   // audits 最近在前
+            if (!ob) return null
+            const failed = ob.field === '落盘公盘失败'
+            const txt = ob.new ?? ob.newValue ?? ob.new_value ?? ob.to ?? ''
+            return <div className="h-sub" style={{ color: failed ? 'var(--red)' : 'var(--green)' }}>
+              {failed ? '⚠ 落盘公盘失败：' : '✓ 已落盘公盘：'}{txt}{ob.ts || ob.at ? `　${ob.ts || ob.at}` : ''}
+              {cfg?.canAudit && <a className="lk" style={{ marginLeft: 8 }} onClick={async () => { const r = await bomOutboxRedo(entry.id); flash(r.ok ? `已重落：${(r.files || []).join('、')}` : (r.msg || '重落失败')); await onChanged() }}>重落公盘 ›</a>}
+            </div>
+          })()}
           <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>

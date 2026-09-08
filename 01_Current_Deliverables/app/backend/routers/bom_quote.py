@@ -35,7 +35,7 @@ try:
 except Exception:
     notifier = None
 
-from core import CFG, JSONResponse, _current_user, _require_perm, db
+from core import pull_token_ok, CFG, JSONResponse, _current_user, _require_perm, db
 
 router = APIRouter()
 
@@ -2438,7 +2438,7 @@ async def bom_classify(request: Request):
     parallel = bool(body.get("parallelLink"))
     historical = bool(body.get("historical"))
     need_confirm = bool(cands) and not bool(body.get("confirmObsolete")) and not parallel and not historical
-    finalized, affected, linked = False, None, ""
+    finalized, affected, linked, outbox = False, None, "", None
     if not miss and not need_confirm:
         prev_final = db.bom_get_final(_src(), e2["product_key"])
         backfill = e2.get("historical") == 2 and not historical      # 补录单（答 C 除外）：初审通过即定稿，见 _backfill_seal
@@ -2459,11 +2459,12 @@ async def bom_classify(request: Request):
                     linked = _link_parallel(e2, cands, u["name"])
                 else:
                     _mark_obsolete(e2, cands, u["name"])
+            outbox = _drop_outbox_safe(e2["id"], u["name"], "补录定稿" if backfill else "初审")   # V2.524：初审就落，终审不覆盖
         affected = None if historical else _affected_pricing(e2)
         finalized = True
     finals = db.bom_finals(_src())
     return {"ok": True, "finalized": finalized, "missingSteps": miss, "historical": bool(finalized and historical),
-             "backfillSealed": bool(finalized and not historical and e2.get("historical") == 2),
+             "backfillSealed": bool(finalized and not historical and e2.get("historical") == 2), "outbox": outbox,
              "needConfirm": cands if need_confirm else [], "obsoleted": (cands if (finalized and not parallel and not historical) else []),
              "linked": (cands if (finalized and parallel) else []), "variantGroup": linked,
              "affectedPricing": affected, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
@@ -2555,7 +2556,7 @@ async def bom_finalize(request: Request):
     backfill = e.get("historical") == 2 and not historical      # 补录单（答 C 除外）：初审通过即定稿，见 _backfill_seal
     db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
                                   "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else (2 if backfill else None)})
-    linked = ""
+    linked, outbox = "", None
     if historical:
         db.bom_add_audit(e["id"], u["name"], "补录历史版", "", "只审不替代：不动定稿指针、不对外")
         db.audit(u["name"], "bom_finalize", target=str(e["id"]), detail="补录历史版（不对外） · " + (e.get("product_name") or ""))
@@ -2569,10 +2570,11 @@ async def bom_finalize(request: Request):
                 linked = _link_parallel(e, cands, u["name"])
             else:
                 _mark_obsolete(e, cands, u["name"])
+        outbox = _drop_outbox_safe(e["id"], u["name"], "补录定稿" if backfill else "初审")   # V2.524：初审就落，终审不覆盖
     # 定稿变更通知（BP 消费提示）——留痕，前端据此弹「成本已更新，N 个定价方案受影响」。不静默变价。
     affected = _affected_pricing(e)
     finals = db.bom_finals(_src())
-    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals), "backfillSealed": backfill,
+    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals), "backfillSealed": backfill, "outbox": (None if historical else outbox),
             "replacedFinal": bool(prev_final and prev_final.get("entry_id") != e["id"]),
             "obsoleted": ([] if parallel else cands), "linked": (cands if parallel else []), "variantGroup": linked,
             "affectedPricing": affected}
@@ -2911,6 +2913,162 @@ def _xlsx_to_html(data, title=""):
         out.append('</table>')
     out.append('</body></html>')
     return "".join(out)
+
+
+# ============ 初审通过即落盘公盘（V2.524，业务方定 2026-09-08：「初审就落，终审不覆盖」）============
+# 落到服务器 outbox：<outbox>/<YYYY年>/<MM月>/（财务版）CP 名称 审核日期.xlsx + （脱敏版）…；两版都带上游链路多页。
+# 公盘在办公室内网，云服务器够不着 → 复用报表取件机（内网常开电脑主动出来取，同一把 pull_token）：
+# 取件机 ini 加 bom_dest 指向公盘目录，脚本按 rel（年/月/文件名）原样建目录落文件。
+# 审核日期＝成本会计初审那天；同产品同日再审覆盖同名；终审不再落。失败不卡审核：留痕「落盘公盘失败」+ 可重推。
+_OUTBOX_Y = re.compile(r"^\d{4}年$")
+_OUTBOX_M = re.compile(r"^\d{2}月$")
+_OUTBOX_NAME = re.compile(r"^（(财务版|脱敏版)）[^\\/:*?\"<>|\r\n]+\.xlsx$")
+
+
+def _outbox_dir():
+    try:
+        import configparser
+        import kingdee_client as _kc
+        c = configparser.ConfigParser()
+        c.read(_kc.conf_path(), encoding="utf-8")
+        d = (c.get("bom", "outbox_dir", fallback="") or "").strip()
+        if d:
+            return d
+    except Exception:
+        pass
+    return os.path.join(UPLOAD_DIR, "_outbox")
+
+
+def _outbox_safe_name(s):
+    return re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(s or "")).strip()
+
+
+def _drop_outbox(e, who, stage="初审"):
+    """一条已初审记录 → 两份 xlsx 落 outbox。→ {ok, files, ups}"""
+    if e.get("source_type") == "std_import":
+        return {"ok": False, "msg": "历史标准成本导入记录无物料明细，没有采购核算表可落"}
+    from core import _now
+    date = (e.get("finalized_at") or "")[:10] or _now()[:10]
+    y, m = date[:4], date[5:7]
+    sub = os.path.join(_outbox_dir(), "%s年" % y, "%s月" % m)
+    os.makedirs(sub, exist_ok=True)
+    cp = _outbox_safe_name(e.get("cp_code") or "")
+    nm = _outbox_safe_name((e.get("product_name") or "").strip())
+    d8 = date.replace("-", "")
+    files, ups = [], []
+    for tag, masked in (("财务版", False), ("脱敏版", True)):
+        data, ups, _ = _build_chain_xlsx(e, masked=masked, formulas=True, chain=True)
+        fn = "（%s）%s %s %s.xlsx" % (tag, cp, nm, d8)
+        p = os.path.join(sub, fn)
+        tmp = p + ".part"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, p)                     # 先写临时再改名：取件机不会取到写了一半的文件
+        files.append("%s年/%s月/%s" % (y, m, fn))
+    db.bom_add_audit(e["id"], who, "落盘公盘", "", "%s通过即落：%s（含上游 %d 页）" % (stage, "、".join(files), len(ups)))
+    return {"ok": True, "files": files, "ups": len(ups)}
+
+
+def _drop_outbox_safe(eid, who, stage="初审"):
+    """落盘失败不卡审核：留痕「落盘公盘失败」并记进 settings，页面可重推。"""
+    from core import _now
+    try:
+        e = db.bom_get_entry(eid)
+        res = _drop_outbox(e, who, stage) if e else {"ok": False, "msg": "记录不存在"}
+    except Exception as ex:
+        res = {"ok": False, "msg": str(ex)[:200]}
+    fails = db.get_setting("bom_outbox_fail", {}) or {}
+    if res.get("ok"):
+        fails.pop(str(eid), None)
+    else:
+        db.bom_add_audit(eid, who, "落盘公盘失败", "", res.get("msg") or "")
+        fails[str(eid)] = {"at": _now(), "msg": res.get("msg") or "", "by": who}
+    db.set_setting("bom_outbox_fail", fails, who)
+    return res
+
+
+def _outbox_pull_ok(request):
+    return pull_token_ok(request) or bool(_require_perm(request, ENTER_STD))
+
+
+def _outbox_safe_path(rel):
+    """外部传来的 rel 收敛成 outbox 下的真实文件：只认「YYYY年/MM月/（财务版|脱敏版）….xlsx」；越界一律 None。"""
+    parts = [x for x in str(rel or "").replace("\\", "/").split("/") if x not in ("", ".")]
+    if len(parts) != 3:
+        return None
+    y, m, name = (os.path.basename(x) for x in parts)
+    if not (_OUTBOX_Y.match(y) and _OUTBOX_M.match(m) and _OUTBOX_NAME.match(name)):
+        return None
+    base = os.path.realpath(_outbox_dir())
+    p = os.path.realpath(os.path.join(base, y, m, name))
+    if os.path.commonpath([p, base]) != base:
+        return None
+    return p if os.path.isfile(p) else None
+
+
+@router.get("/api/bom/outbox/files")
+async def bom_outbox_files(request: Request):
+    """取件机清单：outbox 里全部文件（rel＝年/月/文件名，size+mtime 供取件机判"变没变"）。令牌或登录+标准台账权限。"""
+    if not _outbox_pull_ok(request):
+        return JSONResponse({"ok": False, "msg": "需要取件令牌或「标准成本台账」权限"}, status_code=403)
+    base = _outbox_dir()
+    out = []
+    if os.path.isdir(base):
+        import datetime as _dt
+        for y in sorted(os.listdir(base)):
+            if not _OUTBOX_Y.match(y) or not os.path.isdir(os.path.join(base, y)):
+                continue
+            for m in sorted(os.listdir(os.path.join(base, y))):
+                dp = os.path.join(base, y, m)
+                if not _OUTBOX_M.match(m) or not os.path.isdir(dp):
+                    continue
+                for n in sorted(os.listdir(dp)):
+                    if not _OUTBOX_NAME.match(n):
+                        continue
+                    st = os.stat(os.path.join(dp, n))
+                    out.append({"rel": "%s/%s/%s" % (y, m, n), "name": n, "size": st.st_size,
+                                "mtime": _dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")})
+    return {"ok": True, "dir": base, "files": out}
+
+
+@router.get("/api/bom/outbox/download")
+async def bom_outbox_download(request: Request, name: str = ""):
+    if not _outbox_pull_ok(request):
+        return JSONResponse({"ok": False, "msg": "需要取件令牌或「标准成本台账」权限"}, status_code=403)
+    p = _outbox_safe_path(name)
+    if not p:
+        return JSONResponse({"ok": False, "msg": "文件不存在或路径不合法"}, status_code=404)
+    from fastapi.responses import FileResponse
+    return FileResponse(p, filename=os.path.basename(p),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@router.get("/api/bom/outbox/status")
+async def bom_outbox_status(request: Request):
+    u = _require_perm(request, ENTER_STD)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「标准成本台账」权限"}, status_code=403)
+    base = _outbox_dir()
+    n = sum(len([x for x in fs if _OUTBOX_NAME.match(x)]) for _, _, fs in os.walk(base)) if os.path.isdir(base) else 0
+    return {"ok": True, "dir": base, "count": n, "fails": db.get_setting("bom_outbox_fail", {}) or {},
+            "note": "初审通过即落服务器 outbox（年/月/（财务版|脱敏版）CP 名称 审核日期.xlsx），取件机 bom_dest 同步到公盘；终审不覆盖"}
+
+
+@router.post("/api/bom/outbox/redo")
+async def bom_outbox_redo(request: Request):
+    """手动重落一条（初审过的记录；落盘失败后重推，或改了参数想重出）。需「审核」权限。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    if e.get("status") not in ("初审", "已审核"):
+        return JSONResponse({"ok": False, "msg": "尚未初审，不落盘"}, status_code=400)
+    res = _drop_outbox_safe(e["id"], u["name"], "手动重落")
+    db.audit(u["name"], "bom_outbox_redo", target=str(e["id"]), detail=("落：%s" % "、".join(res.get("files") or [])) if res.get("ok") else ("失败：" + (res.get("msg") or "")))
+    return {"ok": bool(res.get("ok")), **res}
 
 
 def _chain_entries(e):
