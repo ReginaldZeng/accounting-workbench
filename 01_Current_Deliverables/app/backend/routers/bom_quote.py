@@ -3714,13 +3714,14 @@ def _bp_links(e):
     """BP 只读台账用的链接（V2.442 建，V2.451 改口径）——路径相对核算门户根。
     业务方定 2026-09-06：**BP 侧的人在 BP 工作台看采购核算表、看脱敏版**；只有主管理员（Owner/总监）才跳核算工作台看全量。
     - sheetUrl / previewUrl / downloadUrl：默认**脱敏版**（BP 后台带内部令牌回环拉，再渲染/回给用户），只有已审核版；
-      加 `&full=1` + 请求头 `X-On-Behalf-Of=<姓名>` → 该人是主管理员或有 bom:view_full 时给**全量**（V2.452），否则照旧脱敏。
+      链接**默认带 `&full=1`（V2.532）**——服务端仍按「看的人」判：iframe/下载带门户登录态回核算，`_bp_actor` 认出是主管理员或有 bom:view_full 就给**全量**，
+      普通 BP 用户 full_ok=False 照旧脱敏。（内部令牌代拉另有 `X-On-Behalf-Of=<姓名>` 报替谁看，V2.452。）
     - adminDetailUrl / adminCompareUrl：核算工作台深链，**只给主管理员**放，普通 BP 用户不显示。
     - 源附件原件不给 BP（含供应商信息、无法脱敏）。"""
     i = int(e["id"])
-    return {"sheetUrl": "/api/bomcost/sheet?entryId=%d" % i,                  # 脱敏版采购核算表 JSON（BP 自己渲染）
-            "previewUrl": "/api/bomcost/export?entryId=%d&preview=1" % i,     # 脱敏版重排版网页预览
-            "downloadUrl": "/api/bomcost/export?entryId=%d" % i,              # 脱敏版重排版 xlsx（活公式，文件名带「脱敏版」）
+    return {"sheetUrl": "/api/bomcost/sheet?entryId=%d&full=1" % i,           # 采购核算表 JSON（BP 自己渲染）——full=1 服务端按看的人判：主管理员/view_full 得全量，余脱敏
+            "previewUrl": "/api/bomcost/export?entryId=%d&preview=1&full=1" % i,  # 重排版网页预览（同上）
+            "downloadUrl": "/api/bomcost/export?entryId=%d&full=1" % i,        # 重排版 xlsx（活公式，主管理员全量则文件名「全量版」，余「脱敏版」）
             "adminDetailUrl": "/#/bomstd?entry=%d" % i,                        # 仅主管理员：核算侧全量详情
             "adminCompareUrl": "/#/bomstd?entry=%d&compare=1" % i}             # 仅主管理员：核算侧版本对比
 
