@@ -536,6 +536,7 @@ bom_quote_entry = Table(
     # 并行关联（业务方定 2026-09-05，V2.449）：同一产品的多个并行版本（火腿片各版本 CP 不同、印刷袋/空白袋）——**都对外、不互相替代**，
     # 只用一个组键把它们串起来（同组＝并行变体）；换码承接问「原版是否失效」时答 B「并行但关联」即落此列。
     Column("variant_group", String(40), index=True),
+    Column("recalc", Text),                          # 小计按明细重算留痕 JSON（V2.516）
     # 补录历史版（业务方场景 2026-09-06，V2.462）：定稿一个比现有已审版**更早**的版本时答 C——只审不替代、不动定稿指针、不对外，
     # 让同单的半成品/成品能定稿；不参与换码承接候选。1=历史版。
     Column("historical", Integer),
@@ -3309,7 +3310,7 @@ def audit_exists(action, target):
 # ==================== BOM报价审核（V-draft）CRUD ====================
 # 表在文件上方（bom_quote_entry/audit/final）。JSON 字段(summary/materials/checks/src_fee)在此层统一序列化，
 # 路由拿到的永远是 dict/list，不必各自 json.loads。定稿指针独立表，不随 entry 更新被冲掉。
-_BOM_JSON_COLS = ("summary", "materials", "checks", "src_fee", "bom_list", "craft", "review_steps", "goods_version", "void_req", "ack")
+_BOM_JSON_COLS = ("summary", "materials", "checks", "src_fee", "bom_list", "craft", "review_steps", "goods_version", "void_req", "ack", "recalc")
 
 
 def _ensure_bom_columns():
@@ -3320,7 +3321,7 @@ def _ensure_bom_columns():
         for col in ("bom_list", "review_steps", "origin", "src_label", "goods_version",
                     "group_id", "superseded_at", "supersede_reason",
                     "mat_category", "quote_reason", "classified_by", "classified_at", "craft",
-                    "inactive_kind", "void_req", "ack", "stale_note", "obsolete_at", "obsolete_note", "variant_group"):
+                    "inactive_kind", "void_req", "ack", "stale_note", "obsolete_at", "obsolete_note", "variant_group", "recalc"):
             if col not in cols:
                 with _engine.begin() as c:
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s TEXT" % col))

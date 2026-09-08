@@ -490,6 +490,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
           {r.historical && <span className="tag late" style={{ marginLeft: 6 }} title="历史版：审核时答 C 归档的老版本，已审但不对外、不占定稿指针">历史版·不对外</span>}
           {r.backfill && <span className="bom-gvtag" style={{ marginLeft: 6 }} title={r.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿'}>{r.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}
           {r.imported && <span className="bom-gvtag" style={{ marginLeft: 6 }} title="历史标准成本直接导入：只有五分项、无物料明细；成本会计批量确认即已审核，未经财务BP终审；无采购核算表可导出">导入·无明细</span>}
+          {r.recalc?.applied && <span className="tag late" style={{ marginLeft: 6 }} title={`源表小计公式漏行，已按明细重算：全成本 ${fmt(r.recalc.srcFull)} → ${fmt(r.recalc.full)}（${r.recalc.diff > 0 ? '+' : ''}${fmt(r.recalc.diff)}）`}>小计重算</span>}
           {r.obsoleteBy && (dead
             ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
             : <span className="tag late" style={{ marginLeft: 6 }} title={`${r.obsoleteBy.cpCode} 已初审、待终审；其终审通过后本版退出对外台账。在此之前 BP 仍用本版`}>待替代 · {r.obsoleteBy.cpCode} 待终审</span>)}
@@ -767,6 +768,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
           <div style={{ padding: '10px 14px' }}>
             {rep.stillBad.map((b, i) => <div key={i} className="bom-chkfail">
               <b>{b.productName}（{b.cpCode || '无编码'}）</b>
+              {b.recalcBlocked && <div style={{ color: 'var(--red)' }}>不能按明细重算：{b.recalcBlocked}</div>}
               {(b.failedChecks || []).map((c, j) => <div key={j}>✗ {c.check}：申报 {fmt(c.a, 4)} ≠ 逐料Σ {fmt(c.b, 4)}（差 {c.diff > 0 ? '+' : ''}{fmt(c.diff, 4)}）
                 {(c.missing || []).length > 0 && <span>　— 疑源表小计漏加：<b>{c.missing.map(m => m.matName).join('、')}</b></span>}</div>)}
             </div>)}
@@ -816,7 +818,9 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                         <td colSpan={4} className="muted" style={{ fontSize: 11 }}>
                           {(p.blockedBy || []).length > 0 && p.checksOk
                             ? <><b style={{ color: 'var(--red)' }}>自身全平，但上游「{p.blockedBy.join('、')}」不平 → 连带拦下</b>：本品用的是它的价，成本建在错数上</>
-                            : <>勾稽不平 → 不予入账（红线）{(p.blockedBy || []).length > 0 ? `；且上游「${p.blockedBy.join('、')}」也不平` : ''}；修好源表后用下方「替换采购核算表」补入</>}</td>
+                            : p.recalcBlocked
+                              ? <><b style={{ color: 'var(--red)' }}>勾稽不平，且不能按明细重算</b>：{p.recalcBlocked}；修好源表后用下方「替换采购核算表」补入</>
+                              : <>勾稽不平 → 不予入账（红线）{(p.blockedBy || []).length > 0 ? `；且上游「${p.blockedBy.join('、')}」也不平` : ''}；修好源表后用下方「替换采购核算表」补入</>}</td>
                         <td className="muted" style={{ fontSize: 11 }}>{p.matCount} 味料</td>
                         <td><a className="lk" onClick={e => { e.stopPropagation(); setPendP({ groupId: g.groupId, product: p }) }}>查明细 ›</a></td>
                       </tr>
@@ -841,7 +845,8 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                     <td className="mono sub">{p.cpCode}</td>
                     <td style={{ fontWeight: 600 }}><Lv d={p.depth} /><a className="lk" onClick={() => onOpen(p.id)}>{p.productName}</a></td>
                     <td className="num" style={{ fontWeight: 700, color: 'var(--teal)' }}>{fmt(p.comp.full)}</td>
-                    <td>{ck ? <span className="tag ok">全平</span> : <span className="tag leak">不平</span>}</td>
+                    <td>{ck ? (p.recalc ? <span className="tag ok" title={`小计按明细重算：源表全成本 ${fmt(p.recalc.srcFull)} → ${fmt(p.recalc.full)}（${p.recalc.diff > 0 ? '+' : ''}${fmt(p.recalc.diff)}）${(p.recalc.missing || []).length ? '；疑似漏加 ' + p.recalc.missing.join('、') : ''}；③确认即认可`}>全平·已重算</span> : <span className="tag ok">全平</span>) : <span className="tag leak">不平</span>}
+                      {p.recalc && <div className="muted" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>{fmt(p.recalc.srcFull)}→{fmt(p.recalc.full)}</div>}</td>
                     <td>{!bc ? <span className="muted" style={{ fontSize: 11 }}>无清单</span>
                       : bc.ok ? <span className="tag ok">自洽</span>
                         : <span className="tag werr">{[bc.qtyMismatch && '用量' + bc.qtyMismatch, bc.missing && '缺' + bc.missing, bc.extra && '多' + bc.extra].filter(Boolean).join('/')}</span>}
@@ -1033,6 +1038,13 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {entry.imported && <span className="bom-gvtag" title="历史标准成本直接导入：只有五分项、无物料明细；批量确认即已审核，未经财务BP终审">导入·无明细</span>}</div>
           {entry.imported && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', margin: '6px 0' }}>
             这是历史标准成本直接导入的记录：只有五分项（原料/包材/加工费/装卸费/管理费 → 全成本），没有物料明细，所以下面的料表、逐料对比、金蝶用量核对、采购核算表导出都没有内容。数据由 {entry.ack?.reviewer || entry.finalizedBy || '成本会计'} 于 {entry.finalizedAt || ''} 批量确认。</div>}
+          {entry.recalc?.applied && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', margin: '6px 0', lineHeight: 1.6 }}>
+            <b>✎ 小计已按明细重算</b>（源表小计公式漏行，明细是对的）：
+            {(entry.recalc.items || []).map((x, i) => <span key={i}>{i ? '；' : ''}{x.check} 源表 {fmt(x.src, 4)} → 重算 {fmt(x.recalc, 4)}</span>)}
+            {(entry.recalc.missing || []).length > 0 && <span>；<b>疑似没被加进小计的料：{entry.recalc.missing.join('、')}</b></span>}
+            {(entry.recalc.cascade || []).length > 0 && <span>；{entry.recalc.cascade.map((c, i) => <span key={i}>{i ? '，' : ''}料行「{c.matName}」含税价随上游「{c.upName}」重算 {fmt(c.from)} → {fmt(c.to)}</span>)}</span>}
+            。全成本 <b>{fmt(entry.recalc.srcFull)} → {fmt(entry.recalc.full)}</b>（{entry.recalc.diff > 0 ? '+' : ''}{fmt(entry.recalc.diff)}，{(entry.recalc.pct * 100).toFixed(1)}%）。
+            台账、财务版/脱敏版导出、对外都用重算值；OA 里采购原表仍是旧数，志鹏传回的财务版才是对的。<b>复核③「确认用量自洽」即认可本次重算。</b></div>}
           <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
             {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
@@ -1149,6 +1161,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
 
             {/* ③ 用量自洽（采购核算表添加量 vs BOM清单用量 逐料比对）*/}
             {step === 'qty' && <>
+              {entry.recalc?.applied && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 8 }}>
+                ✎ 本表小计已按明细重算（全成本 {fmt(entry.recalc.srcFull)} → {fmt(entry.recalc.full)}{(entry.recalc.missing || []).length ? `，疑似漏加 ${entry.recalc.missing.join('、')}` : ''}）。
+                请核一遍料表：漏加的料确实该算进去，就点下方「确认用量自洽」，即认可重算；若那几味料不该在表里，退回研发/采购改表后「替换采购核算表」。</div>}
               <BomCheckSection entry={entry} cfg={cfg} onChanged={onChanged} flash={flash} />
               {!isStd && cfg?.canAudit && <StepConfirm okState={entry.steps?.qty} info={entry.stepsInfo?.qty}
                 label="用量自洽无误" onConfirm={(on) => confirmStep('qty', on)} />}
@@ -1196,7 +1211,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               </div>
               <div className="bom-rdiv" />
               <div className="bom-check">
-                <div className="bom-rline"><span>源表全成本</span><b>¥ {fmt(entry.comp.srcFull)}</b></div>
+                <div className="bom-rline"><span>{entry.recalc?.applied ? '源表全成本（已重算）' : '源表全成本'}</span><b>¥ {fmt(entry.comp.srcFull)}</b></div>
+                {entry.recalc?.applied && <div className="bom-rline"><span>采购原表写的</span><b style={{ color: 'var(--amber)' }}>¥ {fmt(entry.recalc.srcFull)} <span style={{ fontWeight: 400, fontSize: 11 }}>（{entry.recalc.diff > 0 ? '+' : ''}{fmt(entry.recalc.diff)} 已重算）</span></b></div>}
                 <div className="bom-rline"><span>差异</span>{Math.abs(diff) < EPS
                   ? <b className="ok" style={{ color: 'var(--green)' }}>0.00 · 一致</b>
                   : <b style={{ color: 'var(--amber)' }}>{diff > 0 ? '+' : ''}{fmt(diff)} · 参数已调整</b>}</div>

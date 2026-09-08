@@ -343,6 +343,7 @@ def _entry_view(e, finals):
         "historical": e.get("historical") == 1,        # 答 C 的历史版：已审但不对外、不动指针（V2.462）
         "backfill": e.get("historical") == 2,          # 补录（V2.466/V2.472）：正式对外数据，初审通过即定稿，没经BP二道审核
         "imported": e.get("source_type") == "std_import",   # 历史标准成本直接导入（V2.512）：只有五分项、无明细
+        "recalc": e.get("recalc") or None,                   # 小计按明细重算（V2.516）：{items, missing, srcFull, full, diff, pct, cascade}
         "netWeightKg": nw[0], "netWeightSrc": nw[1],
         "bomCheck": bom_check, "hasBomList": bool(bom_mats),
         # ①BOM清单 整表原样（研发出品）：类型/编码/物料/型号/规格/单位/供应商/用量（业务方 2026-09-04 定列序）
@@ -501,6 +502,7 @@ def _stage_files(files, approval_no, source_type):
             else:
                 warnings.append("%s 里既没找到成本核算样表页、也不是 BOM清单。" % fname)
             continue
+        recs = bq.recalc_workbook(recs)      # 小计漏行按明细重算 + 链路随上游重算（V2.516 乙案）；重算不了的带 recalcBlocked
         origin = bq.origin_from_label(label, fsrc, is_bom_list=False)
         for rec in recs:
             it = {"stagedFile": safe, "rec": rec, "comp": bq.compose(rec),
@@ -561,6 +563,7 @@ def _stage_files(files, approval_no, source_type):
         out.append({"idx": it["idx"], "cpCode": r.get("cpCode"), "productName": (r.get("productName") or "").strip(),
                     "erpCode": r.get("erpCode"), "customer": r.get("customer") or "", "calcDate": r.get("calcDate"),
                     "packSpec": r.get("packSpec"), "matCount": len(r.get("materials", [])),
+                    "recalc": r.get("recalc"), "recalcBlocked": r.get("recalcBlocked"),
                     "full": it["comp"]["full"], "srcFull": it["comp"]["srcFull"], "diff": it["comp"]["diff"],
                     "checksOk": it["checksOk"], "checks": r.get("checks"),
                     "failedChecks": bq.failed_checks(r) if not it["checksOk"] else [], "semi": it["semi"],
@@ -864,7 +867,7 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
     if not path:
         return booked_views
     try:
-        recs = bq.parse_workbook(open(path, "rb").read(), os.path.basename(path))
+        recs = bq.recalc_workbook(bq.parse_workbook(open(path, "rb").read(), os.path.basename(path)))
     except Exception:
         return booked_views
     # 排除本组已入账的；也排除**本审批下别的组**已入账的——同一采购核算表文件被拆到多组时（如样例种子按产品分组），
@@ -885,7 +888,8 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
                       "kind": bq.classify(rec.get("cpCode"), rec.get("productName")),
                       "kindAuto": bq.classify(rec.get("cpCode"), rec.get("productName")),
                       "matCategory": "", "comp": comp, "checksOk": bq.all_checks_ok(rec),
-                      "failedChecks": bq.failed_checks(rec), "matCount": len(rec.get("materials") or [])})
+                      "failedChecks": bq.failed_checks(rec), "matCount": len(rec.get("materials") or []),
+                      "recalcBlocked": rec.get("recalcBlocked")})
     out = list(booked_views) + extra
     # **按依赖深度自下而上排**（业务方定 2026-09-04）：审核顺序＝先复配料、再半成品、最后成品。
     # 深度由「谁引用谁」算：没有上游的是 0 层（最底），引用了 n 层的是 n+1 层。同时带出 uses/usedBy 供画结构。
@@ -1462,7 +1466,8 @@ def _book_staged(prev, sid, idxs, u, historical=False):
         rec, comp = it["rec"], it["comp"]
         if not it.get("checksOk"):
             rejected.append({"productName": (rec.get("productName") or "").strip(),
-                             "cpCode": rec.get("cpCode"), "reason": "勾稽不平，不予入账"})
+                             "cpCode": rec.get("cpCode"),
+                             "reason": ("勾稽不平且不能按明细重算：" + rec["recalcBlocked"]) if rec.get("recalcBlocked") else "勾稽不平，不予入账"})
             continue
         # 上游链路闸（红线延伸）：自身勾稽平，但用到的半成品/复配料自身不平 → 本品成本建在错数上，连带拒收。
         if it.get("blockedBy"):
@@ -1510,12 +1515,14 @@ def _book_staged(prev, sid, idxs, u, historical=False):
             "pack_subtotal_excl": rec.get("packSubtotal"), "fee_mfg": fee["mfg"], "fee_load": fee["load"],
             "fee_adm": fee["adm"], "full_cost_incl": comp["full"], "src_full": comp["srcFull"],
             "src_fee": comp["srcFee"], "summary": rec.get("summary"), "materials": rec.get("materials"),
-            "checks": rec.get("checks"), "num_fp": it["numFp"], "source_type": prev.get("sourceType") or "manual_upload",
+            "checks": rec.get("checks"), "recalc": rec.get("recalc"), "num_fp": it["numFp"], "source_type": prev.get("sourceType") or "manual_upload",
             "origin": it.get("origin") or "", "src_label": it.get("srcLabel") or "", "goods_version": goods_ver,
             "group_id": gid_of.get(it.get("stagedFile")), "active": 1,
             "approval_no": appno, "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"),
             "status": "未复核", "created_by": u["name"],
         })
+        if rec.get("recalc"):
+            _audit_recalc(eid, u["name"], rec["recalc"])
         if historical:                       # 补录：只打标记，照常走复核+初审；初审通过即定稿（_backfill_seal），见函数注释
             db.bom_update_entry(eid, {"historical": 2})
             db.bom_add_audit(eid, u["name"], "历史补录", "", "补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿，不经财务BP终审")
@@ -1810,6 +1817,7 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
         return {"ok": False, "msg": "替换文件解析失败：%s" % e}
     if not recs:
         return {"ok": False, "msg": "这份不是采购核算表（找不到核算样表页）。"}
+    recs = bq.recalc_workbook(recs)          # V2.516：小计漏行按明细重算 + 链路随上游重算
     old_active = {x.get("product_key"): x for x in db.bom_group_entries(src, gid, include_superseded=False)}
     # 补录承接（V2.501，业务方 2026-09-06「补录的时候也会更新评论区采购核算表上去」）：补录组替换/重拉采购核算表，新版**继承「补录」标记**，
     # 照常复核+初审、初审即定稿，不因换了表就掉进财务BP终审。显式传 historical 可覆盖；不传则看组里有没有补录记录。
@@ -1829,7 +1837,7 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
         pk = bq.product_key(rec)
         if not bq.all_checks_ok(rec):
             still_bad.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"),
-                              "failedChecks": bq.failed_checks(rec)})
+                              "failedChecks": bq.failed_checks(rec), "recalcBlocked": rec.get("recalcBlocked")})
             continue
         # 上游链路闸（同 book）：上游半成品/复配料自身不平 → 本品连带不入，别让替换口绕过红线
         blocked = bq.upstream_bad_chain(rec, recs)   # 传导式（审查 H2）
@@ -1853,7 +1861,7 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             "pack_subtotal_excl": rec.get("packSubtotal"), "fee_mfg": fee["mfg"], "fee_load": fee["load"],
             "fee_adm": fee["adm"], "full_cost_incl": comp["full"], "src_full": comp["srcFull"],
             "src_fee": comp["srcFee"], "summary": rec.get("summary"), "materials": rec.get("materials"),
-            "checks": rec.get("checks"), "num_fp": _num_fp(rec, comp), "source_type": "dingtalk_form",
+            "checks": rec.get("checks"), "recalc": rec.get("recalc"), "num_fp": _num_fp(rec, comp), "source_type": "dingtalk_form",
             "origin": origin, "src_label": label or (old.get("src_label") if old else ""),
             "group_id": gid, "active": 1, "approval_no": appno,
             "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"), "status": "未复核", "created_by": user,
@@ -1861,6 +1869,8 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
         })
         if backfill:
             db.bom_add_audit(eid, user, "补录承接", "", "替换/重拉的新版继承「补录」标记：照常复核+初审，初审通过即定稿，不经财务BP终审")
+        if rec.get("recalc"):
+            _audit_recalc(eid, user, rec["recalc"])
         try:
             safe = "".join(ch if ch not in '\\/:*?"<>|' else "_" for ch in (fname or "replace.xlsx"))
             with open(os.path.join(pdir, "%d__%s" % (eid, safe)), "wb") as fh:
@@ -2457,6 +2467,16 @@ async def bom_classify(request: Request):
              "needConfirm": cands if need_confirm else [], "obsoleted": (cands if (finalized and not parallel and not historical) else []),
              "linked": (cands if (finalized and parallel) else []), "variantGroup": linked,
              "affectedPricing": affected, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
+
+
+def _audit_recalc(eid, who, rc):
+    """入账时把「小计按明细重算」写进记录留痕（V2.516）。"""
+    parts = ["%s：源表 %s → 重算 %s" % (x.get("check"), x.get("src"), x.get("recalc")) for x in (rc.get("items") or [])]
+    if rc.get("missing"):
+        parts.append("疑似漏加：" + "、".join(rc["missing"]))
+    for c in rc.get("cascade") or []:
+        parts.append("料行「%s」含税价随上游「%s」重算 %s → %s" % (c.get("matName"), c.get("upName"), c.get("from"), c.get("to")))
+    db.bom_add_audit(eid, who, "小计按明细重算", "全成本 %s" % rc.get("srcFull"), "全成本 %s（%+.4f，%.1f%%）；%s" % (rc.get("full"), rc.get("diff") or 0, (rc.get("pct") or 0) * 100, "；".join(parts)))
 
 
 def _backfill_seal(eid, u):
@@ -3333,8 +3353,11 @@ async def bom_export_pair(request: Request, entry_id: int):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("财务版_重排版采购核算表_%s_%s.xlsx" % (cp, nm), full)
         z.writestr("脱敏版_重排版采购核算表_%s_%s.xlsx" % (cp, nm), masked)
-        z.writestr("说明.txt", ("财务版：全量活公式，财务看。\n脱敏版：已遮 %s，给商品经理。\n记录状态：%s；钉钉单号：%s；导出人：%s；导出时间：%s\n"
-                                % ("/".join(hidden) if hidden else "（基础设置未遮任何列）", st, ap, u.get("name") or "", _now_str())).encode("utf-8"))
+        rc = e.get("recalc") or {}
+        rc_line = ("小计已按明细重算：源表全成本 %.4f → %.4f（%+.4f）；%s\n" % (rc.get("srcFull") or 0, rc.get("full") or 0, rc.get("diff") or 0,
+                   "疑似漏加 " + "、".join(rc.get("missing") or []) if rc.get("missing") else "见记录变更留痕")) if rc.get("applied") else ""
+        z.writestr("说明.txt", ("财务版：全量活公式，财务看。\n脱敏版：已遮 %s，给商品经理。\n%s记录状态：%s；钉钉单号：%s；导出人：%s；导出时间：%s\n"
+                                % ("/".join(hidden) if hidden else "（基础设置未遮任何列）", rc_line, st, ap, u.get("name") or "", _now_str())).encode("utf-8"))
     db.audit(u["name"], "bom_export_pair", target=str(e["id"]), detail="%s %s · %s" % (cp, nm, st))
     from urllib.parse import quote
     fn = "采购核算表两版_%s_%s.zip" % (cp, nm)

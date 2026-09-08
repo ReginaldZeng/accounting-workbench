@@ -218,6 +218,21 @@ def parse_sheet(ws, src_file):
     summary["制造费用小计不含税"] = next_subtotal(r_mfg, r_fac)
     summary["工厂费用小计不含税"] = next_subtotal(r_fac, r_trans)
 
+    checks = build_checks(sub_mat, sub_pack, summary, mats, packs)
+
+    return {
+        "srcFile": os.path.basename(src_file), "sheet": ws.title.strip(),
+        "supplier": norm(head.get("供应商名称")), "productName": norm(head.get("产品名称")),
+        "erpCode": _clean_erp(head.get("物料编码")), "cpCode": norm(head.get("产品编号")),
+        "packSpec": norm(head.get("包装规格")), "calcDate": _clean_date(head.get("核算日期"), src_file),
+        "orderQty": head.get("订单量kg"), "customer": norm(head.get("客户", "")),
+        "matSubtotal": sub_mat, "packSubtotal": sub_pack, "summary": summary,
+        "materials": mats + packs, "checks": checks,
+    }
+
+
+def build_checks(sub_mat, sub_pack, summary, mats, packs):
+    """六项勾稽（抽出供解析与重算共用，V2.516）。"""
     checks = []
 
     def chk(name, a, b, tol=0.01):
@@ -234,16 +249,133 @@ def parse_sheet(ws, src_file):
         (summary["成本合计不含税"] or 0) + (summary["增值税合计"] or 0))
     chk("全成本=含税+管理费", summary["全成本含税"],
         (summary["成本合计含税"] or 0) + (summary["管理费加成含税"] or 0))
+    return checks
 
-    return {
-        "srcFile": os.path.basename(src_file), "sheet": ws.title.strip(),
-        "supplier": norm(head.get("供应商名称")), "productName": norm(head.get("产品名称")),
-        "erpCode": _clean_erp(head.get("物料编码")), "cpCode": norm(head.get("产品编号")),
-        "packSpec": norm(head.get("包装规格")), "calcDate": _clean_date(head.get("核算日期"), src_file),
-        "orderQty": head.get("订单量kg"), "customer": norm(head.get("客户", "")),
-        "matSubtotal": sub_mat, "packSubtotal": sub_pack, "summary": summary,
-        "materials": mats + packs, "checks": checks,
-    }
+
+# ---------------- 小计按明细重算（乙案，业务方定 2026-09-08，V2.516）----------------
+# 源表最常见的错是「小计」公式求和范围没框到底部新增的料（明细是对的，小计少加）。以前六项勾稽任一不平就不入账；
+# 现在：**明细齐全 + 重算幅度 ≤ RECALC_MAX_PCT** 的，按明细重算小计→变动→成本合计→增值税(×13%)→含税(×1.13)→全成本(+管理费)，
+# 入账并打 recalc 标记（源表值/重算值/差异/疑似漏加的料），成本会计在复核③确认即认可；**明细缺数 / 幅度超阈值 仍不入**（疑似表填错）。
+# 同一工作簿内上游（复配料/半成品）重算后，下游料行里引用它的「含税价」随之换成重算后的全成本、下游再重算（链路不断）。
+# 财务版/脱敏版重排版导出用的就是重算值（本来就是活公式按明细算）。台账数与 OA 原表不一致，一致的是志鹏传回 OA 的财务版。
+RECALC_MAX_PCT = 0.05
+
+
+def recalc_from_details(rec, cascade=None, orig=None):
+    """按明细重算一条记录的汇总。→ (new_rec, None) 或 (None, 不能重算的原因)。
+    orig＝上游价替换前的原记录（链路重算时传），「疑似漏加的料」按它侦测。
+    **幅度阈值只拦"解释不了"的差**：小计差恰好等于底部几味料之和（公式范围没框到）、或差异全由上游重算传导而来，
+    都是机械性错误，不管幅度多大都重算；只有对不上任何解释的差才按 RECALC_MAX_PCT 拦（疑似表填错）。"""
+    import copy as _copy
+    mats = [m for m in (rec.get("materials") or []) if m.get("seg") == "原料"]
+    packs = [m for m in (rec.get("materials") or []) if m.get("seg") == "包材"]
+    for m in mats + packs:
+        if m.get("costExcl") is None:
+            return None, "「%s」没有成本不含税值，算不出小计" % (m.get("matName") or "?")
+    s = dict(rec.get("summary") or {})
+    src_full = s.get("全成本含税")
+    if not src_full:
+        return None, "源表没有「10、全成本」，无法校验重算幅度"
+    sub_mat = round(sum(m["costExcl"] or 0 for m in mats), 6)
+    sub_pack = round(sum(m["costExcl"] or 0 for m in packs), 6)
+    var = round(sub_mat + sub_pack, 6)
+    fee = sum((s.get(k) or 0) for k in ("制造费用小计不含税", "工厂费用小计不含税", "运输费用不含税", "装卸费不含税"))
+    cost_excl = round(var + fee, 6)
+    vat = round(cost_excl * 0.13, 6)                 # 原版模板：7、增值税 = 不含税 × 13%
+    incl = round(cost_excl * 1.13, 6)                # 8、含税 = 不含税 × 1.13
+    adm = s.get("管理费加成含税") or 0               # 9、管理费 = 固定加成（参数），照抄源表
+    full = round(incl + adm, 6)                      # 10、全成本 = 8 + 9
+    pct = abs(full - src_full) / abs(src_full)
+    base = orig or rec
+    orig_failed = failed_checks(base)
+    sub_failed = [f for f in orig_failed if "小计=Σ明细" in (f.get("check") or "")]
+    explained = all(f.get("missing") for f in sub_failed)      # 原记录自身的小计差全能对上"底部几味料之和"（或自身本来就平，只是随上游重算）
+    if not explained and pct > RECALC_MAX_PCT:
+        return None, ("按明细重算后全成本 %.4f 与源表 %.4f 差 %.1f%%，超过 %d%% 阈值，且小计差对不上任何几味料之和——多半不是漏行而是表填错，退回改表"
+                      % (full, src_full, pct * 100, RECALC_MAX_PCT * 100))
+    items = []
+    for c in rec.get("checks") or []:
+        if not c.get("ok"):
+            items.append({"check": c.get("check"), "src": c.get("a"), "recalc": c.get("b"),
+                          "diff": round((c.get("b") or 0) - (c.get("a") or 0), 4) if (c.get("a") is not None and c.get("b") is not None) else None})
+    missing = [m.get("matName") for f in orig_failed for m in (f.get("missing") or [])]
+    new = _copy.deepcopy(rec)
+    ns = new["summary"] = dict(s)
+    ns.update({"变动小计不含税": var, "成本合计不含税": cost_excl, "增值税合计": vat, "成本合计含税": incl, "全成本含税": full})
+    new["matSubtotal"], new["packSubtotal"] = sub_mat, sub_pack
+    new["checks"] = build_checks(sub_mat, sub_pack, ns, mats, packs)
+    new["recalc"] = {"applied": True, "items": items, "missing": missing, "srcFull": src_full, "full": full,
+                     "diff": round(full - src_full, 4), "pct": round(pct, 4), "cascade": list(cascade or []), "explained": explained}
+    new.pop("recalcBlocked", None)
+    return new, None
+
+
+def recalc_workbook(recs):
+    """同一工作簿内按依赖自下而上：不平的按明细重算；上游重算过的，下游料行「含税价」换成上游重算后全成本、再重算下游。
+    重算不了的记 rec['recalcBlocked']=原因（照旧不入账）。返回新列表（同序）。"""
+    import copy as _copy
+    recs = list(recs or [])
+    by_name = {norm(r.get("productName")): i for i, r in enumerate(recs) if norm(r.get("productName"))}
+    by_cp = {_ncp(r.get("cpCode")): i for i, r in enumerate(recs) if _ncp(r.get("cpCode"))}
+
+    def up_of(m, self_i):
+        if m.get("seg") == "包材":
+            return None
+        i = by_name.get(norm(m.get("matName")))
+        if i is None:
+            for c in (_ncp(m.get("model")), _ncp(m.get("matCode"))):
+                if c and c in by_cp:
+                    i = by_cp[c]
+                    break
+        return None if (i is None or i == self_i) else i
+
+    depth = {}
+
+    def d(i, seen=()):
+        if i in depth:
+            return depth[i]
+        if i in seen:
+            return 0
+        ups = [j for j in (up_of(m, i) for m in (recs[i].get("materials") or [])) if j is not None]
+        depth[i] = 0 if not ups else 1 + max(d(j, seen + (i,)) for j in ups)
+        return depth[i]
+
+    for i in sorted(range(len(recs)), key=lambda i: d(i)):
+        r = recs[i]
+        cascade, cur = [], None
+        for m in (r.get("materials") or []):
+            j = up_of(m, i)
+            if j is None or not (recs[j].get("recalc") or {}).get("applied"):
+                continue
+            new_price = round((recs[j].get("summary") or {}).get("全成本含税") or 0, 4)
+            old_price = m.get("priceIncl")
+            if not new_price or old_price is None or abs(new_price - old_price) < 0.005:
+                continue
+            if cur is None:
+                cur = _copy.deepcopy(r)
+            mm = cur["materials"][r["materials"].index(m)]
+            tax = mm.get("taxRate") if mm.get("taxRate") is not None else 0.13
+            mm["priceIncl"] = new_price
+            mm["costExcl"] = round((mm.get("qtyPerKg") or 0) * new_price / (1 + tax), 6)
+            cascade.append({"matName": mm.get("matName"), "upName": (recs[j].get("productName") or "").strip(),
+                            "from": old_price, "to": new_price})
+        if cur is not None:
+            mats = [m for m in cur["materials"] if m.get("seg") == "原料"]
+            packs = [m for m in cur["materials"] if m.get("seg") == "包材"]
+            cur["checks"] = build_checks(cur.get("matSubtotal"), cur.get("packSubtotal"), cur.get("summary") or {}, mats, packs)
+            new, err = recalc_from_details(cur, cascade, orig=r)
+            if new:
+                recs[i] = new
+            else:
+                r["recalcBlocked"] = "上游重算后本品需随之重算，但 " + err
+            continue
+        if not all_checks_ok(r):
+            new, err = recalc_from_details(r)
+            if new:
+                recs[i] = new
+            else:
+                r["recalcBlocked"] = err
+    return recs
 
 
 def parse_workbook(data, src_filename):

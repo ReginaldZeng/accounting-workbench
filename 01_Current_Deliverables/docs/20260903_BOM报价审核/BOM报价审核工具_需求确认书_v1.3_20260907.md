@@ -186,6 +186,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 - **归组键 = 产品名｜CP 码** ✅；老记录不回溯（作废重立）。
 - **发票规则**（基础设置）：成本不含税按发票类型算，规则可配；重排版导出公式与之一比一（§9）。
 - **WPS 存的 xlsx**（`<dimension ref="A1"/>`）V2.455 起按真实范围读，不再当空表。
+- **小计公式漏行按明细重算入账**（乙案，业务方定 2026-09-08，V2.516）：源表「小计」求和范围没框到底部新增的料（申报小计恰＝前 N 味之和）或差异全由上游重算传导而来的，按明细重算小计→变动→成本合计→增值税(×13%)→含税(×1.13)→全成本(+管理费)入账，记录打「小计重算」标记（源表值/重算值/差异/疑似漏加的料/链路传导），入账留痕；**复核③「确认用量自洽」即认可**。同一工作簿内上游重算后下游料行含税价随之更新再重算。**仍不入**：明细缺成本不含税值，或小计差对不上任何几味料之和且幅度 > 5%（疑似表填错）。后果：台账/两版导出/对外与 OA 采购原表不一致，一致的是传回 OA 的财务版。实证 251965：重算结果与财务手工复核版分毫不差。
 
 ### 5.1 / 5.1.1 物料类别人工定性 + 是否允许报价 ✅
 - **建议值默认「自产」**（V2.448）；委外由成本会计手点。
@@ -235,7 +236,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 
 ## 10. 数据模型 ✅
 
-`bom_quote_entry` 在 v1.1 基础上新增：`mat_category/quotable/quote_reason/classified_by·at`、`ack`（终审戳 JSON，含 selfReview / backfill / reviewer）、`void_req`、`inactive_kind`、`stale_note`、`craft`、`net_weight_kg`、`obsolete_by/obsolete_at/obsolete_note`、**`variant_group`**（并行组）、**`historical`**（1＝答 C 不对外历史版；2＝补录）、`source_type=std_import`（历史标准成本导入，无明细）。`bom_quote_pending`；`bom_quote_audit`；`bom_quote_final`（定稿指针）。`app_settings`：`bom_config`、`bom_invoice_rules`、`bom_auto_intake_since/seen/last`。迁移由 `_ensure_bom_columns` 自动补列。
+`bom_quote_entry` 在 v1.1 基础上新增：`mat_category/quotable/quote_reason/classified_by·at`、`ack`（终审戳 JSON，含 selfReview / backfill / reviewer）、`void_req`、`inactive_kind`、`stale_note`、`craft`、`net_weight_kg`、`obsolete_by/obsolete_at/obsolete_note`、**`variant_group`**（并行组）、**`historical`**（1＝答 C 不对外历史版；2＝补录）、`source_type=std_import`（历史标准成本导入，无明细）、**`recalc`**（小计按明细重算留痕 JSON，V2.516）。`bom_quote_pending`；`bom_quote_audit`；`bom_quote_final`（定稿指针）。`app_settings`：`bom_config`、`bom_invoice_rules`、`bom_auto_intake_since/seen/last`。迁移由 `_ensure_bom_columns` 自动补列。
 
 ---
 
@@ -263,7 +264,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 
 ## 12. 红线与提醒
 
-- **凭据不落文档不落代码**（conf.ini / .env）；**0 数据上 GitHub**；**别做批量扫描/回灌**（自动立项只看启用日后的在途单）；**勾稽不平不准静默入账**；**加字段/改口径 grep 全部读取点**。
+- **凭据不落文档不落代码**（conf.ini / .env）；**0 数据上 GitHub**；**别做批量扫描/回灌**（自动立项只看启用日后的在途单）；**勾稽不平不准静默入账**——V2.516 起口径为：能解释的小计漏行按明细重算、**标记并由成本会计③确认**后入；解释不了的差仍不入（§5）；**加字段/改口径 grep 全部读取点**。
 - **不强推 git**（服务器 `--ff-only`）——出错补提交；拼接源码保留原文件换行符。
 - **金蝶物料档案只读**：反查只出候选，**绝不写回金蝶、绝不自动写台账**。
 - **钉钉只读 + 提醒**：不替人点同意、不改 OA 表单、不留评论。已开通的应用权限：审批读取、附件下载、`Storage.DownloadInfo.Read`（代下载）、机器人单聊/工作通知；**未开也不需要**：`Storage.UploadInfo.Read`。
@@ -288,7 +289,7 @@ Description: 「BOM报价审核工具」需求确认书 v1.3（**签署版**）�
 | v1.0 | 2026-09-03 | 首版：三级菜单 / 权限点 / 可见性 A 方案 / 复核两步 / 定性 |
 | v1.1 | 2026-09-04 | 立项、复核四步、两个戳、上游传导拦截、待修批次、作废两步、来源标注、编码分类降级、代码审查结论 |
 | v1.2 | 2026-09-05 | CP＝身份、单人模式、台账列重排+补物料编码、预览+重排版原版模板、BP 消费接口三件、换码承接、无编码不设闸+金蝶反查、BP 只读台账原则 |
-| **v1.3** | **2026-09-07** | **OA 衔接边界（吴总定案）+ 自动立项 + 两版导出**、历史补录终稿 + 补录承接、换码承接 A/B/C、上游链路 CP 兜底 + 列序、发起人离职备用通道、密钥删除、动作条、脱敏版/`bom:view_full`、台账搜索、**历史标准成本直接导入（§2.10）**、术语统一「采购核算表」、§8/§10/§11/§12 同步 |
+| **v1.3** | **2026-09-07 / 09-08** | **OA 衔接边界（吴总定案）+ 自动立项 + 两版导出**、历史补录终稿 + 补录承接、换码承接 A/B/C、上游链路 CP 兜底 + 列序、发起人离职备用通道、密钥删除、动作条、脱敏版/`bom:view_full`、台账搜索、**历史标准成本直接导入（§2.10）**、术语统一「采购核算表」、**小计漏行按明细重算入账（§5，乙案）**、§8/§10/§11/§12 同步 |
 
 ---
 
