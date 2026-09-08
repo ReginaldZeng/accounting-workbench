@@ -707,7 +707,7 @@ def richness(rec):
 
 
 # ---------------- 重排版核算表导出（移植 tools/build_pretty_sheet.py，参数可覆盖为复核后值）----------------
-def build_pretty(rec, fee=None, approval="", formulas=True, rules=None):
+def build_pretty(rec, fee=None, approval="", formulas=True, rules=None, wb=None):
     """一条记录 → 重排版核算表 xlsx 字节，对齐星期九「成本核算表（财务版本）」原版。
     formulas=True（下载）：派生数字全写 **Excel 活公式**，参数一改全表联动；formulas=False（网页预览）：同布局写计算值。
     配色（业务方定 2026-09-05）：A6A6A6＝标题+公式格；D9D9D9＝填写格；**按汇总链路着色**——汇入「变动成本合计=N14+N19」的
@@ -831,9 +831,15 @@ def build_pretty(rec, fee=None, approval="", formulas=True, rules=None):
     NC = len(WIDTHS)
     DATA_H, HEAD_H = 18, 30
 
-    wb = Workbook()
-    wb.remove(wb.active)
-    ws = wb.create_sheet(name[:28])
+    own_wb = wb is None                      # V2.523：传入 wb 则在同一本里追加一页（成品带上游链路多页导出），返回 wb 而非字节
+    if own_wb:
+        wb = Workbook()
+        wb.remove(wb.active)
+    title, k = name[:28], 2
+    while title in wb.sheetnames:
+        title = "%s(%d)" % (name[:25], k)
+        k += 1
+    ws = wb.create_sheet(title)
     for i, w in enumerate(WIDTHS, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.sheet_view.showGridLines = False
@@ -1070,6 +1076,8 @@ def build_pretty(rec, fee=None, approval="", formulas=True, rules=None):
         ws.cell(r, 2, tnote).font = ff(8.5, False, "8A94A0"); ws.cell(r, 2).alignment = LFT
         r += 1
 
+    if not own_wb:
+        return wb
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

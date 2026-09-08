@@ -2913,6 +2913,56 @@ def _xlsx_to_html(data, title=""):
     return "".join(out)
 
 
+def _chain_entries(e):
+    """本品的上游链路记录，递归、自下而上（复配料 → 半成品），按 _upstream_status 挑的版本；导入的无明细行跳过（V2.523）。"""
+    src = e.get("source")
+    finals = db.bom_finals(src)
+    others = db.bom_list_entries(src)
+    by_id = {x["id"]: x for x in others}
+    order, seen = [], {e["id"]}
+
+    def walk(x):
+        for u in _upstream_status(x, finals, others):
+            up = by_id.get(u["entryId"]) or db.bom_get_entry(u["entryId"])
+            if not up or up["id"] in seen or up.get("source_type") == "std_import":
+                continue
+            seen.add(up["id"])
+            walk(up)
+            order.append(up)
+    walk(e)
+    return order
+
+
+def _build_chain_xlsx(e, masked=False, formulas=True, chain=True):
+    """本品 + 上游链路 → 一本工作簿多页（页序同原表：复配料 → 半成品 → 成品；打开停在本品页）。→ (bytes, 上游记录列表, 各页遮了什么)"""
+    from openpyxl import Workbook
+    ups = _chain_entries(e) if chain else []
+    rules = _invoice_rules()
+    wb = Workbook()
+    wb.remove(wb.active)
+    hidden = []
+    for x in ups + [e]:
+        if masked:
+            rec, hid = _masked_rec(x)
+            hidden = hid or hidden
+        else:
+            rec = _rec_from_entry(x)
+        bq.build_pretty(rec, _fee_of(x), approval=x.get("approval_no") or "", formulas=formulas, rules=rules, wb=wb)
+    wb.active = len(wb.sheetnames) - 1
+    import io as _io
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), ups, hidden
+
+
+def _chain_suffix(ups):
+    return "（含上游%d页）" % len(ups) if ups else ""
+
+
+def _want_chain(request):
+    return (request.query_params.get("chain") or "1").strip().lower() not in ("0", "false", "no")
+
+
 def _export_auth(request, e):
     """核算侧**全量**导出/预览：门户用户须有「导出」权限。
     ⚠ V2.451 起 BP 后台（内部令牌）**不再放行这里**——业务方定「下载的采购核算表要分版本」：BP 只拿脱敏版，走 /api/bomcost/export。
@@ -2939,12 +2989,12 @@ async def bom_export_pretty(request: Request, entry_id: int, preview: int = 0):
     if blk:
         return blk
     # 下载=活公式版（改黄底参数全表联动，同原版）；预览=计算值版（openpyxl 写的公式无缓存值，网页只能走值）
-    data = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview,
-                           rules=_invoice_rules())      # 成本不含税公式/M列下拉 按台账当前发票规则生成
+    # V2.523：成品/半成品带上游链路多页（复配料 → 半成品 → 本品），chain=0 只出本品页
+    data, ups, _ = _build_chain_xlsx(e, masked=False, formulas=not preview, chain=_want_chain(request))
     nm = (e.get("product_name") or "").strip()
     if preview:
-        return HTMLResponse(_xlsx_to_html(data, "重排版采购核算表 · %s %s" % (e.get("cp_code") or "", nm)))
-    return _xlsx_response(data, "重排版采购核算表_%s_%s.xlsx" % (e.get("cp_code") or "", nm))
+        return HTMLResponse(_xlsx_to_html(data, "重排版采购核算表 · %s %s%s" % (e.get("cp_code") or "", nm, _chain_suffix(ups))))
+    return _xlsx_response(data, "重排版采购核算表_%s_%s%s.xlsx" % (e.get("cp_code") or "", nm, _chain_suffix(ups)))
 
 
 # ============ 历史标准成本直接导入（V2.512，业务方定 2026-09-07：「历史数据我直接上传标准成本吧，就不一个个上传采购核算表了」）============
@@ -3342,12 +3392,12 @@ async def bom_export_pair(request: Request, entry_id: int):
         return blk
     import io as _io
     import zipfile
-    rules = _invoice_rules()
     ap = e.get("approval_no") or ""
-    full = bq.build_pretty(_rec_from_entry(e), _fee_of(e), approval=ap, formulas=True, rules=rules)
-    mrec, hidden = _masked_rec(e)
-    masked = bq.build_pretty(mrec, _fee_of(e), approval=ap, formulas=True, rules=rules)
+    chain = _want_chain(request)
+    full, ups, _ = _build_chain_xlsx(e, masked=False, formulas=True, chain=chain)       # V2.523：两版都带上游链路多页
+    masked, _, hidden = _build_chain_xlsx(e, masked=True, formulas=True, chain=chain)
     cp, nm = (e.get("cp_code") or "").strip(), (e.get("product_name") or "").strip()
+    nm = nm + _chain_suffix(ups)
     st = e.get("status") or ""
     buf = _io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -3356,8 +3406,9 @@ async def bom_export_pair(request: Request, entry_id: int):
         rc = e.get("recalc") or {}
         rc_line = ("小计已按明细重算：源表全成本 %.4f → %.4f（%+.4f）；%s\n" % (rc.get("srcFull") or 0, rc.get("full") or 0, rc.get("diff") or 0,
                    "疑似漏加 " + "、".join(rc.get("missing") or []) if rc.get("missing") else "见记录变更留痕")) if rc.get("applied") else ""
-        z.writestr("说明.txt", ("财务版：全量活公式，财务看。\n脱敏版：已遮 %s，给商品经理。\n%s记录状态：%s；钉钉单号：%s；导出人：%s；导出时间：%s\n"
-                                % ("/".join(hidden) if hidden else "（基础设置未遮任何列）", rc_line, st, ap, u.get("name") or "", _now_str())).encode("utf-8"))
+        chain_line = ("上游链路同簿：%s（页序 复配料 → 半成品 → 本品，打开停在本品页）\n" % "、".join("%s %s" % (x.get("cp_code") or "", (x.get("product_name") or "").strip()) for x in ups)) if ups else ""
+        z.writestr("说明.txt", ("财务版：全量活公式，财务看。\n脱敏版：已遮 %s，给商品经理。\n%s%s记录状态：%s；钉钉单号：%s；导出人：%s；导出时间：%s\n"
+                                % ("/".join(hidden) if hidden else "（基础设置未遮任何列）", chain_line, rc_line, st, ap, u.get("name") or "", _now_str())).encode("utf-8"))
     db.audit(u["name"], "bom_export_pair", target=str(e["id"]), detail="%s %s · %s" % (cp, nm, st))
     from urllib.parse import quote
     fn = "采购核算表两版_%s_%s.zip" % (cp, nm)
@@ -3597,9 +3648,9 @@ async def bomcost_export(request: Request, entryId: int, preview: int = 0):
     blk = _std_no_export(e)
     if blk:
         return blk
-    rec, hidden = _bp_rec(e, ctx, "export" if not preview else "preview")
-    data = bq.build_pretty(rec, _fee_of(e), approval=e.get("approval_no") or "", formulas=not preview, rules=_invoice_rules())
-    nm = (e.get("product_name") or "").strip()
+    rec, hidden = _bp_rec(e, ctx, "export" if not preview else "preview")     # 全量则留审计；遮列清单
+    data, ups, _ = _build_chain_xlsx(e, masked=not ctx["full"], formulas=not preview, chain=_want_chain(request))   # V2.523：带上游链路多页
+    nm = (e.get("product_name") or "").strip() + _chain_suffix(ups)
     if ctx["full"]:
         tag, fn_tag = "全量版", "全量版"
     else:
