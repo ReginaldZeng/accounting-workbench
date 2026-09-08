@@ -2448,11 +2448,16 @@ def _balance_statement():
             rate = rc.to_float(r.get("FEXCHANGERATE") or 0)
             if rate > 0:
                 cur_rate[c] = rate
-    # 银行侧（银行存款·1002）：每户流水最新余额（交易日期最晚一笔）
-    bank_last = {}
+    # 银行侧（银行存款·1002）：每户流水最新余额（交易日期最晚一笔）+ 本期净（收−支，倒推银行期初用）
+    bank_last, bank_net = {}, {}
     for r in bank_rows:
         a = al.norm_acct(r.get("账号") or "")
-        if not a or r.get("余额") is None:
+        if not a:
+            continue
+        rin = rc.to_float(r.get("收入") or r.get("借方") or r.get("借方金额") or 0)
+        rout = rc.to_float(r.get("支出") or r.get("贷方") or r.get("贷方金额") or 0)
+        bank_net[a] = bank_net.get(a, 0.0) + rin - rout
+        if r.get("余额") is None:
             continue
         d = r.get("交易日期") or ""
         if a not in bank_last or d >= bank_last[a][0]:
@@ -2522,6 +2527,19 @@ def _balance_statement():
             unmatched = None                                             # 非银行存款/无逐笔：没有未达调节
             net_diff = diff                                              # 调节后差额＝毛差
         has_diff = net_diff is not None and abs(net_diff) > 0.01         # 有差异按"调节后"判
+        # 期初差：银行期初(末余额−本期净) − 金蝶期初(kd_open)。调节后差额≈期初差 → 差是上期结转来的、
+        # 逐笔稽核(只看本月)天然抓不到，要去查上期；否则是本月真有对不上。
+        open_gap = None
+        diff_from = ""
+        if has_diff and a in bank_last and a in kd_open:
+            bank_open = round(bank_last[a][1] - bank_net.get(a, 0.0), 2)
+            open_gap = round(bank_open - kd_open.get(a, 0.0), 2)
+            if abs(open_gap - net_diff) <= 1.0:                          # 残差基本全来自期初
+                diff_from = "期初"                                       # 上期结转差，查上期
+            elif abs(open_gap) <= 1.0:
+                diff_from = "本期"                                       # 期初对得上，是本月的问题
+            else:
+                diff_from = "期初+本期"                                  # 两头都有
         if has_diff:
             diff_total += 1
         nt = notes.get(a, {})
@@ -2531,6 +2549,7 @@ def _balance_statement():
             "银行流水余额": bank_bal, "汇率": rate, "综合本位币": base_ccy,
             "金蝶系统余额": kd_bal, "差额": diff,                          # 差额=毛差（银行−金蝶，未调节）
             "未达调节": unmatched, "调节后差额": net_diff, "有差异": has_diff,
+            "期初差": open_gap, "差异归属": diff_from,                      # 期初/本期/期初+本期——差从哪来
             "银行侧来源": bank_src2,                                       # 流水/渠道/手填/""（待人工）
             "数据来源": src_kind,                                          # 工具解析 / 人工录入 / ""（待人工）
             "账户状态": acct_state,                                        # 正常 / 已销户
@@ -2598,7 +2617,7 @@ def _build_statement_xlsx(stmt):
     ws = wb.active
     ws.title = "银行余额调节表"
     cols = ["科目", "主体", "账户名称", "账号", "开户行", "币别", "账户状态", "开户日期",
-            "银行流水余额", "汇率", "综合本位币", "金蝶系统余额", "毛差", "未达调节", "调节后差额", "数据来源", "备注"]
+            "银行流水余额", "汇率", "综合本位币", "金蝶系统余额", "毛差", "未达调节", "调节后差额", "差异归属", "数据来源", "备注"]
     ws.append(["银行余额调节表 · %s" % _period_str()])
     ws["A1"].font = Font(bold=True, size=13)
     ws.append([])
@@ -2620,9 +2639,9 @@ def _build_statement_xlsx(stmt):
                 (a.get("差额") if a.get("差额") is not None else ""),
                 (a.get("未达调节") if a.get("未达调节") is not None else ""),
                 (a.get("调节后差额") if a.get("调节后差额") is not None else ""),
-                a.get("数据来源"), a.get("备注"),
+                a.get("差异归属"), a.get("数据来源"), a.get("备注"),
             ])
-    for i, w in enumerate([16, 22, 26, 22, 14, 8, 10, 12, 16, 10, 16, 16, 14, 14, 14, 12, 30], 1):
+    for i, w in enumerate([16, 22, 26, 22, 14, 8, 10, 12, 16, 10, 16, 16, 14, 14, 14, 12, 12, 30], 1):
         ws.column_dimensions[ws.cell(row=hdr_row, column=i).column_letter].width = w
     bio = BytesIO(); wb.save(bio); return bio.getvalue()
 

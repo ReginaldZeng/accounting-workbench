@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-09-08 Author:Claude/c Version:V2.518
+// 余额调节表：调节后差额≠0时标「差异归属」——期初差(上期结转·逐笔只看本月抓不到·查上期)/本月差异/期初+本月。
 // [Change Log] Date:2026-09-08 Author:Claude/c Version:V2.517
 // 余额调节表·全科目 差额改「调节后」：银行存款引智能表「更正后账面」→列出「未达调节」额+「调节后差额」，
 // 能被未达账项(如内部往来未做账)解释的调平到0、真差异才亮红；渠道/理财/现金无逐笔则调节后=毛差。
@@ -111,7 +113,12 @@ function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt,
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: foreign ? 'var(--blue)' : 'var(--ink-3)' }}>{a['综合本位币'] != null ? yuan(a['综合本位币']) : '—'}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)' }}>{yuan(a['金蝶系统余额'])}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: (unmatched != null && Math.abs(unmatched) > 0.01) ? 'var(--violet)' : 'var(--ink-3)', whiteSpace: 'nowrap' }} title={a['差额'] != null ? '毛差(银行−金蝶未调节)=' + yuan(a['差额']) : undefined}>{unmatched == null ? '—' : (Math.abs(unmatched) > 0.01 ? yuan(unmatched) : '0')}</td>
-            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', background: 'var(--accent-soft,var(--accent-soft))', color: a['银行侧缺'] ? 'var(--ink-3)' : (hasDiff ? 'var(--red)' : 'var(--green)'), fontWeight: hasDiff ? 700 : 500, whiteSpace: 'nowrap' }}>{a['银行侧缺'] ? '—' : (hasDiff ? yuan(netDiff) : '0 ✓')}</td>
+            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', background: 'var(--accent-soft,var(--accent-soft))', color: a['银行侧缺'] ? 'var(--ink-3)' : (hasDiff ? 'var(--red)' : 'var(--green)'), fontWeight: hasDiff ? 700 : 500, whiteSpace: 'nowrap' }}>
+              {a['银行侧缺'] ? '—' : (hasDiff ? yuan(netDiff) : '0 ✓')}
+              {hasDiff && a['差异归属'] ? <div style={{ fontWeight: 400, fontSize: 10.5, color: a['差异归属'] === '期初' ? 'var(--amber)' : 'var(--ink-3)' }} title={a['差异归属'] === '期初' ? '这笔差来自期初(上期结转)，逐笔稽核只看本月抓不到，请查上期' : (a['差异归属'] === '本期' ? '期初对得上，是本月的差异' : '期初和本月都有差')}>
+                  {a['差异归属'] === '期初' ? '期初差·查上期' : (a['差异归属'] === '本期' ? '本月差异' : '期初+本月')}
+                </div> : null}
+            </td>
             <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--line)', minWidth: 200 }}>
               {editing
                 ? <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
