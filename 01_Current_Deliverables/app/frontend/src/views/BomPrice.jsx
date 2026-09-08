@@ -497,6 +497,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
           {(r.replaces || []).length > 0 && <span className="bom-gvtag" title={'本版替代了：' + r.replaces.map(c => `${c.cpCode}（${c.why || ''} 审核 ${c.auditAt || '—'}）`).join('；')}>替代 {r.replaces.map(c => c.cpCode).join('、')}</span>}
           {(r.variants || []).length > 0 && <span className="bom-gvtag" style={{ color: 'var(--green)', borderColor: 'var(--green)' }} title={'并行版本（同一产品不同版本/包装，都对外）：' + r.variants.map(v => `${v.cpCode} ${v.productName}${v.packSpec ? ' · ' + v.packSpec : ''}`).join('；')}>⇉ 并行 {r.variants.map(v => v.cpCode).join('、')}</span>}
           {nver > 1 && <a className="lk" style={{ marginLeft: 6, fontSize: 11, fontWeight: 400 }} onClick={e => { e.stopPropagation(); onOpen(r.id) }}>{nver} 版</a>}</td>
+        <td style={{ whiteSpace: 'nowrap' }}>{r.matCategory
+          ? <span className={'bom-cat' + (r.outsourced ? ' out' : '')} title={r.outsourced ? '委外（代工厂生产）' : '自产'}>{r.matCategory}</span>
+          : <span className="bom-catsug" title="编码建议值，未定性">建议·{r.kindAuto}</span>}</td>
         <td className="sub" style={{ whiteSpace: 'nowrap' }}>{r.packSpec || '—'}</td>
         <td className="num">{fmt(r.comp.mat)}</td>
         <td className="num">{fmt(r.comp.pack)}</td>
@@ -631,6 +634,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
             <table className="bom-ledger">
               <thead><tr>
                 <th className="th">物料编码</th><th className="th">CP码</th><th className="th">产品名称</th>
+                <th className="th" title="审核定性时填的物料类别（复配料 / 自产半成品 / 自产成品 / 委外半成品 / 委外成品）；未定性显编码建议值">物料分类</th>
                 <th className="th">规格</th>
                 <th className="th" style={{ textAlign: 'right' }}>原料</th><th className="th" style={{ textAlign: 'right' }}>包材</th>
                 <th className="th" style={{ textAlign: 'right' }}>加工费</th><th className="th" style={{ textAlign: 'right' }}>装卸费</th>
