@@ -72,12 +72,15 @@ function Kind({ k }) {
 }
 // 物料类别（审核定性，业务方 2026-09-03）：编码规律不固定 → 编码只给建议值，最终由成本会计在审核弹窗指定。
 const MAT_CATS = ['复配料', '自产半成品', '自产成品', '委外半成品', '委外成品']
+// 物料分类五色（V2.522）：复配料青 · 自产半成品蓝 · 自产成品绿 · 委外半成品紫 · 委外成品琥珀
+const CAT_CLS = { '复配料': 'c-fp', '自产半成品': 'c-zb', '自产成品': 'c-zc', '委外半成品': 'c-wb', '委外成品': 'c-wc' }
+const catCls = (cat) => 'bom-cat ' + (CAT_CLS[cat] || (cat && cat.startsWith('委外') ? 'out' : ''))
 // 类别展示：已定性→显示类别（委外标灰底）；未定性→显示「建议·X」+待定性；名字与编码打架→⚠
 function CatCell({ p }) {
   const doubt = p.kindDoubt ? <span className="bom-kdoubt"
     title={`疑似分类不符：按编码判「${p.kindAuto}」，但产品名像「${p.productName && p.productName.includes('半成品') ? '半成品' : '复配料'}」——请在审核弹窗定性`}>⚠</span> : null
   if (!p.matCategory) return <><span className="bom-catsug" title={'编码建议值，未定性。定稿前须在「审核」弹窗指定'}>建议·{p.kindAuto}</span>{doubt}</>
-  return <><span className={'bom-cat' + (p.outsourced ? ' out' : '')} title={p.outsourced ? '委外（代工厂生产）' : '自产'}>{p.matCategory}</span>
+  return <><span className={catCls(p.matCategory)} title={p.outsourced ? '委外（代工厂生产）' : '自产'}>{p.matCategory}</span>
     {p.quotable === false && <span className="bom-noquote" title={'不建议对外报价：' + p.quoteReason}>禁报价</span>}</>
 }
 
@@ -483,6 +486,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
     const dead = isDead(r)
     return (
       <tr key={r.id} className="row" onClick={() => onOpen(r.id)} title="查看采购核算表" style={dead ? { opacity: 0.55 } : undefined}>
+        <td style={{ whiteSpace: 'nowrap' }}>{r.matCategory
+          ? <span className={catCls(r.matCategory)} title={r.outsourced ? '委外（代工厂生产）' : '自产'}>{r.matCategory}</span>
+          : <span className="bom-catsug" title="编码建议值，未定性">建议·{r.kindAuto}</span>}</td>
         <td className="mono sub">{r.erpCode || <span className="muted">—</span>}</td>
         <td className="mono" style={{ fontWeight: 600 }}>{r.cpCode}</td>
         <td style={{ fontWeight: 600 }}>{r.productName}
@@ -497,9 +503,6 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
           {(r.replaces || []).length > 0 && <span className="bom-gvtag" title={'本版替代了：' + r.replaces.map(c => `${c.cpCode}（${c.why || ''} 审核 ${c.auditAt || '—'}）`).join('；')}>替代 {r.replaces.map(c => c.cpCode).join('、')}</span>}
           {(r.variants || []).length > 0 && <span className="bom-gvtag" style={{ color: 'var(--green)', borderColor: 'var(--green)' }} title={'并行版本（同一产品不同版本/包装，都对外）：' + r.variants.map(v => `${v.cpCode} ${v.productName}${v.packSpec ? ' · ' + v.packSpec : ''}`).join('；')}>⇉ 并行 {r.variants.map(v => v.cpCode).join('、')}</span>}
           {nver > 1 && <a className="lk" style={{ marginLeft: 6, fontSize: 11, fontWeight: 400 }} onClick={e => { e.stopPropagation(); onOpen(r.id) }}>{nver} 版</a>}</td>
-        <td style={{ whiteSpace: 'nowrap' }}>{r.matCategory
-          ? <span className={'bom-cat' + (r.outsourced ? ' out' : '')} title={r.outsourced ? '委外（代工厂生产）' : '自产'}>{r.matCategory}</span>
-          : <span className="bom-catsug" title="编码建议值，未定性">建议·{r.kindAuto}</span>}</td>
         <td className="sub" style={{ whiteSpace: 'nowrap' }}>{r.packSpec || '—'}</td>
         <td className="num">{fmt(r.comp.mat)}</td>
         <td className="num">{fmt(r.comp.pack)}</td>
@@ -633,8 +636,8 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
           : <div className="tbl-wrap">
             <table className="bom-ledger">
               <thead><tr>
-                <th className="th">物料编码</th><th className="th">CP码</th><th className="th">产品名称</th>
                 <th className="th" title="审核定性时填的物料类别（复配料 / 自产半成品 / 自产成品 / 委外半成品 / 委外成品）；未定性显编码建议值">物料分类</th>
+                <th className="th">物料编码</th><th className="th">CP码</th><th className="th">产品名称</th>
                 <th className="th">规格</th>
                 <th className="th" style={{ textAlign: 'right' }}>原料</th><th className="th" style={{ textAlign: 'right' }}>包材</th>
                 <th className="th" style={{ textAlign: 'right' }}>加工费</th><th className="th" style={{ textAlign: 'right' }}>装卸费</th>

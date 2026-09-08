@@ -816,6 +816,12 @@ html[data-theme=dark] .ta-board{
 .bomv .bom-cat{display:inline-block; font-size:11px; font-weight:600; padding:1px 7px; border-radius:6px;
   color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent); white-space:nowrap;}
 .bomv .bom-cat.out{color:var(--purple); background:var(--purple-bg); border-color:var(--purple-line);}
+/* 物料分类五色（V2.522，业务方定「做下颜色分类」）：复配料青 · 自产半成品蓝 · 自产成品绿 · 委外半成品紫 · 委外成品琥珀 */
+.bomv .bom-cat.c-fp{color:var(--teal); background:var(--teal-bg); border-color:var(--teal);}
+.bomv .bom-cat.c-zb{color:var(--blue); background:var(--blue-bg); border-color:var(--blue-line);}
+.bomv .bom-cat.c-zc{color:var(--green); background:var(--green-bg); border-color:var(--green-line);}
+.bomv .bom-cat.c-wb{color:var(--purple); background:var(--purple-bg); border-color:var(--purple-line);}
+.bomv .bom-cat.c-wc{color:var(--amber); background:var(--amber-bg); border-color:var(--amber-line);}
 .bomv .bom-catsug{display:inline-block; font-size:10.5px; padding:1px 6px; border-radius:6px;
   color:var(--ink-3); background:var(--bg-sub); border:1px dashed var(--line); white-space:nowrap;}
 .bomv .bom-noquote{display:inline-block; font-size:10px; font-weight:700; margin-left:4px; padding:0 5px;
