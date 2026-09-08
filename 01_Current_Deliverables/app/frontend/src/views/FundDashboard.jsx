@@ -1,3 +1,6 @@
+// [Change Log] Date:2026-09-08 Author:Claude/c Version:V2.517
+// 余额调节表·全科目 差额改「调节后」：银行存款引智能表「更正后账面」→列出「未达调节」额+「调节后差额」，
+// 能被未达账项(如内部往来未做账)解释的调平到0、真差异才亮红；渠道/理财/现金无逐笔则调节后=毛差。
 // [Change Log] Date:2026-09-07 Author:Claude/c Version:V2.511
 // 余额调节表·全科目：开户日期改由「账户台账」维护、本表只读引用（不再在本表手填）；账户名优先用金蝶核算维度友好户名
 // （电商渠道在出纳台账账号为空时，不再显裸编码）。
@@ -72,14 +75,16 @@ function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt,
     </div>
     <div style={{ overflowX: 'auto' }}>
       <table style={{ width: '100%', minWidth: 1000, fontSize: 12.5, borderCollapse: 'collapse' }}>
-        <thead><tr>{['主体 / 账户名称', '币别', '银行流水余额', '汇率', '综合本位币', '金蝶系统余额', '差额', '备注'].map((h, i) =>
-          <th key={h} style={{ textAlign: i === 0 || i === 7 ? 'left' : (i === 1 ? 'center' : 'right'), padding: '6px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap', background: i === 2 ? 'var(--accent-soft,var(--accent-soft))' : undefined }}>{h}</th>)}</tr></thead>
+        <thead><tr>{['主体 / 账户名称', '币别', '银行流水余额', '汇率', '综合本位币', '金蝶系统余额', '未达调节', '调节后差额', '备注'].map((h, i) =>
+          <th key={h} title={h === '未达调节' ? '银行存款：逐笔稽核推出的未达账项净额（金蝶应补记−待更正），如内部往来未做账。渠道/理财/现金无此项' : (h === '调节后差额' ? '＝银行−（金蝶+未达调节）。能被未达解释的调平到0；仍≠0的才是真要查的差异' : undefined)}
+            style={{ textAlign: i === 0 || i === 8 ? 'left' : (i === 1 ? 'center' : 'right'), padding: '6px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap', background: i === 2 ? 'var(--accent-soft,var(--accent-soft))' : (i === 7 ? 'var(--accent-soft,var(--accent-soft))' : undefined), cursor: (h === '未达调节' || h === '调节后差额') ? 'help' : 'default' }}>{h}{(h === '未达调节' || h === '调节后差额') ? <span style={{ color: 'var(--ink-3)', marginLeft: 2, fontSize: 11 }}>ⓘ</span> : null}</th>)}</tr></thead>
         <tbody>{rows.map((a, i) => {
           const cur = a['币别'] || ''
           const foreign = cur && cur !== '人民币'
           const editing = editAcct === a['账号']
-          const diff = a['差额']
-          const hasDiff = diff != null && Math.abs(diff) > 0.01
+          const unmatched = a['未达调节']
+          const netDiff = a['调节后差额']
+          const hasDiff = netDiff != null && Math.abs(netDiff) > 0.01
           return <tr key={i}>
             <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--line)', minWidth: 190 }}>
               {a['账户名称'] || a['主体'] || '—'}
@@ -105,7 +110,8 @@ function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt,
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: 'var(--ink-3)' }}>{rate(a['汇率'])}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: foreign ? 'var(--blue)' : 'var(--ink-3)' }}>{a['综合本位币'] != null ? yuan(a['综合本位币']) : '—'}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)' }}>{yuan(a['金蝶系统余额'])}</td>
-            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: a['银行侧缺'] ? 'var(--ink-3)' : (hasDiff ? 'var(--red)' : 'var(--green)'), fontWeight: hasDiff ? 600 : 400, whiteSpace: 'nowrap' }}>{a['银行侧缺'] ? '—' : (hasDiff ? yuan(diff) : '0 ✓')}</td>
+            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: (unmatched != null && Math.abs(unmatched) > 0.01) ? 'var(--violet)' : 'var(--ink-3)', whiteSpace: 'nowrap' }} title={a['差额'] != null ? '毛差(银行−金蝶未调节)=' + yuan(a['差额']) : undefined}>{unmatched == null ? '—' : (Math.abs(unmatched) > 0.01 ? yuan(unmatched) : '0')}</td>
+            <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', background: 'var(--accent-soft,var(--accent-soft))', color: a['银行侧缺'] ? 'var(--ink-3)' : (hasDiff ? 'var(--red)' : 'var(--green)'), fontWeight: hasDiff ? 700 : 500, whiteSpace: 'nowrap' }}>{a['银行侧缺'] ? '—' : (hasDiff ? yuan(netDiff) : '0 ✓')}</td>
             <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--line)', minWidth: 200 }}>
               {editing
                 ? <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
@@ -226,7 +232,7 @@ export default function FundDashboard({ cfg, onPeriod, onNav, user }) {
       {/* Tab①：全四类科目余额调节表（对标《各银行余额》：银行流水余额+汇率+综合本位币 | 金蝶系统余额 | 差额 | 备注）*/}
       {tab === 'statement' && <div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
-          <div className="foot" style={{ flex: 1, minWidth: 260 }}>对标《各银行余额》调节表 · <b>全四类科目</b> · 单月（{d.period}）。银行流水余额与金蝶系统余额均按<b>原币</b>；综合本位币＝原币×金蝶记账汇率（人民币=1）；差额＝银行−金蝶，非零请填备注说明。银行存款取流水、电商渠道（支付宝等）取<b>渠道对账</b>期末余额；理财 / 结构性存款 / 现金的银行侧接入中，暂显「待人工」。
+          <div className="foot" style={{ flex: 1, minWidth: 260 }}>对标《各银行余额》调节表 · <b>全四类科目</b> · 单月（{d.period}）。均按<b>原币</b>；综合本位币＝原币×记账汇率。<b>差额已按未达账项调节</b>：能被未达解释的（如内部往来未做账）<b style={{ color: 'var(--green)' }}>调节后差额=0</b>、旁列未达调节额；仍<b style={{ color: 'var(--red)' }}>≠0 的才是真要查的差异</b>。未达调节仅银行存款有（走逐笔稽核）；渠道/理财/现金的调节后差额=毛差。银行存款取流水、电商渠道取渠道对账余额；理财/结构性存款/现金银行侧暂「待人工」。
             {bs && bs.groups && bs.groups.length > 0 && (bs.差异户数 ? <span> · <b style={{ color: 'var(--amber)' }}>有差异 {bs.差异户数} 户</b></span> : <span> · <b style={{ color: 'var(--green)' }}>全部对平</b></span>)}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>

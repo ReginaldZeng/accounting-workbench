@@ -2480,6 +2480,14 @@ def _balance_statement():
     ov_all = _load_overrides()                                           # 开户日期在账户台账维护，这里只引用
     open_dates = {a: (o or {}).get("开户日期", "") for a, o in ov_all.items()}
     manual_bal = db.get_setting(_stmt_manual_key(), None) or {}          # 银行侧手填余额：按期间存（每月可不同）
+    # 未达调节：银行存款走逐笔稽核推的未达账项（复用智能表 _balance_adjust），把"更正后账面"引过来，
+    # 差额改成"调节后残差"——能被未达解释的调平到 0、真对不上的才亮出来（内部往来未做账等一眼可见）。
+    badj_map = {}
+    try:
+        for x in (_cache_get(_BADJ_CACHE, _balance_adjust).get("accounts") or []):
+            badj_map[x["账号"]] = x
+    except Exception:
+        pass
     buckets = {c: [] for c in _STMT_CAT_ORDER}
     diff_total = 0
     for a in set(kd_open) | set(kd_move) | set(bank_last) | set(chan_bal) | set(manual_bal):
@@ -2503,8 +2511,17 @@ def _balance_statement():
         acct_state = "已销户" if ("销户" in str(acct_name) or "销户" in str(a)) else "正常"
         rate = _rate_for(cur)
         base_ccy = round(bank_bal * rate, 2) if (bank_bal is not None and rate is not None) else None
-        diff = round(bank_bal - kd_bal, 2) if bank_bal is not None else None
-        has_diff = diff is not None and abs(diff) > 0.01
+        diff = round(bank_bal - kd_bal, 2) if bank_bal is not None else None   # 毛差＝银行−金蝶（未调节）
+        # 未达调节：银行存款从智能表引「更正后账面」。未达调节＝更正后−金蝶；调节后差额＝银行−更正后（应≈0）。
+        b = badj_map.get(a)
+        fixed = b.get("更正后账面") if b else None
+        if fixed is not None:
+            unmatched = round(fixed - kd_bal, 2)                          # 金蝶应补记/待更正的净额
+            net_diff = round(bank_bal - fixed, 2) if bank_bal is not None else None
+        else:
+            unmatched = None                                             # 非银行存款/无逐笔：没有未达调节
+            net_diff = diff                                              # 调节后差额＝毛差
+        has_diff = net_diff is not None and abs(net_diff) > 0.01         # 有差异按"调节后"判
         if has_diff:
             diff_total += 1
         nt = notes.get(a, {})
@@ -2512,7 +2529,8 @@ def _balance_statement():
             "账号": a, "科目": cat, "主体": sub, "开户行": bank,
             "账户名称": acct_name or a, "币别": cur,
             "银行流水余额": bank_bal, "汇率": rate, "综合本位币": base_ccy,
-            "金蝶系统余额": kd_bal, "差额": diff, "有差异": has_diff,
+            "金蝶系统余额": kd_bal, "差额": diff,                          # 差额=毛差（银行−金蝶，未调节）
+            "未达调节": unmatched, "调节后差额": net_diff, "有差异": has_diff,
             "银行侧来源": bank_src2,                                       # 流水/渠道/手填/""（待人工）
             "数据来源": src_kind,                                          # 工具解析 / 人工录入 / ""（待人工）
             "账户状态": acct_state,                                        # 正常 / 已销户
@@ -2524,7 +2542,7 @@ def _balance_statement():
     groups = []
     for cat in _STMT_CAT_ORDER:
         rows = buckets.get(cat) or []
-        rows.sort(key=lambda x: (-(abs(x["差额"]) if x["差额"] is not None else -1), x["账户名称"]))
+        rows.sort(key=lambda x: (-(abs(x["调节后差额"]) if x["调节后差额"] is not None else -1), x["账户名称"]))
         nz = [x for x in rows if not x["全零"]]
         groups.append({"科目": cat, "户数": len(rows), "非零户数": len(nz),
                        "有差异户数": sum(1 for x in rows if x["有差异"]), "accounts": rows})
@@ -2580,7 +2598,7 @@ def _build_statement_xlsx(stmt):
     ws = wb.active
     ws.title = "银行余额调节表"
     cols = ["科目", "主体", "账户名称", "账号", "开户行", "币别", "账户状态", "开户日期",
-            "银行流水余额", "汇率", "综合本位币", "金蝶系统余额", "差额", "数据来源", "备注"]
+            "银行流水余额", "汇率", "综合本位币", "金蝶系统余额", "毛差", "未达调节", "调节后差额", "数据来源", "备注"]
     ws.append(["银行余额调节表 · %s" % _period_str()])
     ws["A1"].font = Font(bold=True, size=13)
     ws.append([])
@@ -2600,9 +2618,11 @@ def _build_statement_xlsx(stmt):
                 (a.get("银行流水余额") if not a.get("银行侧缺") else "待人工"),
                 a.get("汇率"), a.get("综合本位币"), a.get("金蝶系统余额"),
                 (a.get("差额") if a.get("差额") is not None else ""),
+                (a.get("未达调节") if a.get("未达调节") is not None else ""),
+                (a.get("调节后差额") if a.get("调节后差额") is not None else ""),
                 a.get("数据来源"), a.get("备注"),
             ])
-    for i, w in enumerate([16, 22, 26, 22, 14, 8, 10, 12, 16, 10, 16, 16, 14, 12, 30], 1):
+    for i, w in enumerate([16, 22, 26, 22, 14, 8, 10, 12, 16, 10, 16, 16, 14, 14, 14, 12, 30], 1):
         ws.column_dimensions[ws.cell(row=hdr_row, column=i).column_letter].width = w
     bio = BytesIO(); wb.save(bio); return bio.getvalue()
 
