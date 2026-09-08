@@ -612,8 +612,8 @@ async def bom_config(request: Request):
 # 业务方定 2026-09-06：**BP 侧的人在 BP 工作台看采购核算表，看的是脱敏版**（核算工作台的全量采购核算表只给成本会计/财务BP/主管理员）；
 # 下载的采购核算表也分版本。脱敏口径＝成本会计手工「商品版」的删法：型号(model)/规格(spec)/供应商品牌(brand) 三列，
 # 报价说明默认不遮。这四个开关只管**给 BP 的脱敏版**（/api/bomcost/sheet、/api/bomcost/export）；核算侧内部永远全量。
-_CFG_DEFAULT = {"hideModel": True, "hideSpec": True, "hideSupplier": True, "hidePriceNote": False}
-_MASK_LABELS = (("hideModel", "型号"), ("hideSpec", "规格"), ("hideSupplier", "供应商"), ("hidePriceNote", "报价说明"))
+_CFG_DEFAULT = {"hideModel": True, "hideSpec": True, "hideSupplier": True, "hidePriceNote": False, "hideMatCode": False}
+_MASK_LABELS = (("hideMatCode", "物料编码"), ("hideModel", "型号"), ("hideSpec", "规格"), ("hideSupplier", "供应商"), ("hidePriceNote", "报价说明"))
 
 
 def _bom_settings():
@@ -637,6 +637,8 @@ def _masked_rec(e, cfg=None):
             m["brand"] = ""
         if cfg.get("hidePriceNote"):
             m["priceNote"] = ""
+        if cfg.get("hideMatCode"):
+            m["matCode"] = ""          # V2.529：物料编码也算敏感（商品经理不必看金蝶编码）
         mats.append(m)
     rec["materials"] = mats
     return rec, [lab for k, lab in _MASK_LABELS if cfg.get(k)]
