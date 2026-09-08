@@ -1,3 +1,6 @@
+// [Change Log] Date:2026-09-08 Author:Claude/c Version:V2.519
+// 修 V2.518 差异归属误判：金蝶期初=上期末(已对准)是锚点，用「期初+本期收支=应达末」比实际末余额——
+// 对不上=「流水不平·核对本月流水」(流水没导全/末余额串账)；否则「本月差异」。不再误导查上期(期初本就对准)。
 // [Change Log] Date:2026-09-08 Author:Claude/c Version:V2.518
 // 余额调节表：调节后差额≠0时标「差异归属」——期初差(上期结转·逐笔只看本月抓不到·查上期)/本月差异/期初+本月。
 // [Change Log] Date:2026-09-08 Author:Claude/c Version:V2.517
@@ -115,8 +118,8 @@ function StmtGroup({ g, canNote, editAcct, editText, setEditText, startEditStmt,
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', color: (unmatched != null && Math.abs(unmatched) > 0.01) ? 'var(--violet)' : 'var(--ink-3)', whiteSpace: 'nowrap' }} title={a['差额'] != null ? '毛差(银行−金蝶未调节)=' + yuan(a['差额']) : undefined}>{unmatched == null ? '—' : (Math.abs(unmatched) > 0.01 ? yuan(unmatched) : '0')}</td>
             <td style={{ padding: '6px 8px', textAlign: 'right', borderBottom: '1px solid var(--line)', background: 'var(--accent-soft,var(--accent-soft))', color: a['银行侧缺'] ? 'var(--ink-3)' : (hasDiff ? 'var(--red)' : 'var(--green)'), fontWeight: hasDiff ? 700 : 500, whiteSpace: 'nowrap' }}>
               {a['银行侧缺'] ? '—' : (hasDiff ? yuan(netDiff) : '0 ✓')}
-              {hasDiff && a['差异归属'] ? <div style={{ fontWeight: 400, fontSize: 10.5, color: a['差异归属'] === '期初' ? 'var(--amber)' : 'var(--ink-3)' }} title={a['差异归属'] === '期初' ? '这笔差来自期初(上期结转)，逐笔稽核只看本月抓不到，请查上期' : (a['差异归属'] === '本期' ? '期初对得上，是本月的差异' : '期初和本月都有差')}>
-                  {a['差异归属'] === '期初' ? '期初差·查上期' : (a['差异归属'] === '本期' ? '本月差异' : '期初+本月')}
+              {hasDiff && a['差异归属'] ? <div style={{ fontWeight: 400, fontSize: 10.5, color: a['差异归属'] === '流水不平' ? 'var(--amber)' : 'var(--ink-3)' }} title={a['差异归属'] === '流水不平' ? '金蝶期初(=上期末,已对准)+本期收支 与实际末余额对不上→本月银行流水可能没导全/末余额行串账，请核对本月流水' : '流水与金蝶期初+收支自洽，是本月未匹配的账'}>
+                  {a['差异归属'] === '流水不平' ? '流水不平·核对流水' : '本月差异'}
                 </div> : null}
             </td>
             <td style={{ padding: '6px 8px', borderBottom: '1px solid var(--line)', minWidth: 200 }}>

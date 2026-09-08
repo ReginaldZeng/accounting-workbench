@@ -2527,19 +2527,15 @@ def _balance_statement():
             unmatched = None                                             # 非银行存款/无逐笔：没有未达调节
             net_diff = diff                                              # 调节后差额＝毛差
         has_diff = net_diff is not None and abs(net_diff) > 0.01         # 有差异按"调节后"判
-        # 期初差：银行期初(末余额−本期净) − 金蝶期初(kd_open)。调节后差额≈期初差 → 差是上期结转来的、
-        # 逐笔稽核(只看本月)天然抓不到，要去查上期；否则是本月真有对不上。
-        open_gap = None
+        # 差异归属：金蝶期初＝上期末（月结对账后已对准，权威锚点）。用它 + 本期收支净 算「应达末余额」，
+        # 与实际银行末余额比——对不上＝本月流水与收支不自洽（多半是流水没导全/末余额行串账），指向核对本月流水，
+        # 而不是查上期（期初已对准）。流水自洽但仍有残差＝本月真有未匹配的账。
+        tie_gap = None
         diff_from = ""
         if has_diff and a in bank_last and a in kd_open:
-            bank_open = round(bank_last[a][1] - bank_net.get(a, 0.0), 2)
-            open_gap = round(bank_open - kd_open.get(a, 0.0), 2)
-            if abs(open_gap - net_diff) <= 1.0:                          # 残差基本全来自期初
-                diff_from = "期初"                                       # 上期结转差，查上期
-            elif abs(open_gap) <= 1.0:
-                diff_from = "本期"                                       # 期初对得上，是本月的问题
-            else:
-                diff_from = "期初+本期"                                  # 两头都有
+            should_end = round(kd_open.get(a, 0.0) + bank_net.get(a, 0.0), 2)   # 金蝶期初 + 本期收支 应达末余额
+            tie_gap = round(bank_last[a][1] - should_end, 2)                     # 实际末余额 − 应达 ＝ 流水不平额
+            diff_from = "流水不平" if abs(tie_gap) > 1.0 else "本期"
         if has_diff:
             diff_total += 1
         nt = notes.get(a, {})
@@ -2549,7 +2545,7 @@ def _balance_statement():
             "银行流水余额": bank_bal, "汇率": rate, "综合本位币": base_ccy,
             "金蝶系统余额": kd_bal, "差额": diff,                          # 差额=毛差（银行−金蝶，未调节）
             "未达调节": unmatched, "调节后差额": net_diff, "有差异": has_diff,
-            "期初差": open_gap, "差异归属": diff_from,                      # 期初/本期/期初+本期——差从哪来
+            "流水不平额": tie_gap, "差异归属": diff_from,                    # 流水不平/本期——差往哪查
             "银行侧来源": bank_src2,                                       # 流水/渠道/手填/""（待人工）
             "数据来源": src_kind,                                          # 工具解析 / 人工录入 / ""（待人工）
             "账户状态": acct_state,                                        # 正常 / 已销户
