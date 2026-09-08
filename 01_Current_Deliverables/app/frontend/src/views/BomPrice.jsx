@@ -1053,13 +1053,15 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             。全成本 <b>{fmt(entry.recalc.srcFull)} → {fmt(entry.recalc.full)}</b>（{entry.recalc.diff > 0 ? '+' : ''}{fmt(entry.recalc.diff)}，{(entry.recalc.pct * 100).toFixed(1)}%）。
             台账、财务版/脱敏版导出、对外都用重算值；OA 里采购原表仍是旧数，志鹏传回的财务版才是对的。<b>复核③「确认用量自洽」即认可本次重算。</b></div>}
           {(() => {
+            // 落盘公盘状态（V2.524/527）：初审过的记录都显示——落过显文件名；落盘功能上线前初审的老记录显「未落盘」并给「重落公盘」入口
+            if (!['初审', '已审核'].includes(entry.status) || entry.imported || entry.historical) return null
             const ob = (entry.audits || []).find(a => (a.field || '').startsWith('落盘公盘'))   // audits 最近在前
-            if (!ob) return null
-            const failed = ob.field === '落盘公盘失败'
-            const txt = ob.new ?? ob.newValue ?? ob.new_value ?? ob.to ?? ''
+            const failed = ob && ob.field === '落盘公盘失败'
+            const txt = ob ? (ob.new ?? ob.newValue ?? ob.new_value ?? ob.to ?? '') : ''
+            const redo = cfg?.canAudit && <a className="lk" style={{ marginLeft: 8 }} onClick={async () => { const r = await bomOutboxRedo(entry.id); flash(r.ok ? `已落盘：${(r.files || []).join('、')}` : (r.msg || '落盘失败')); await onChanged() }}>{ob ? '重落公盘 ›' : '现在落盘 ›'}</a>
+            if (!ob) return <div className="h-sub" style={{ color: 'var(--amber)' }}>○ 未落盘公盘（初审早于落盘功能上线，或落盘未开启）{redo}</div>
             return <div className="h-sub" style={{ color: failed ? 'var(--red)' : 'var(--green)' }}>
-              {failed ? '⚠ 落盘公盘失败：' : '✓ 已落盘公盘：'}{txt}{ob.ts || ob.at ? `　${ob.ts || ob.at}` : ''}
-              {cfg?.canAudit && <a className="lk" style={{ marginLeft: 8 }} onClick={async () => { const r = await bomOutboxRedo(entry.id); flash(r.ok ? `已重落：${(r.files || []).join('、')}` : (r.msg || '重落失败')); await onChanged() }}>重落公盘 ›</a>}
+              {failed ? '⚠ 落盘公盘失败：' : '✓ 已落盘公盘：'}{txt}{ob.ts || ob.at ? `　${ob.ts || ob.at}` : ''}{redo}
             </div>
           })()}
           <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
