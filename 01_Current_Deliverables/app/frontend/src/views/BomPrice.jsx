@@ -1723,8 +1723,11 @@ function BomConfig() {
     <div className="bomv">
       <div className="head"><div>
         <div className="h-title">BOM报价审核 · 基础设置</div>
-        <div className="h-sub">公开版（标准成本台账 / 给 BP 消费）的脱敏规则等全局配置</div></div>
-        <Seg value={tab} onChange={setTab} opts={[['mask', '脱敏设置'], ['invoice', '发票设置'], ['fetcher', '取件机状态']]} /></div>
+        <div className="h-sub">公开版（标准成本台账 / 给 BP 消费）的脱敏规则等全局配置</div></div></div>
+      <div className="bom-tabs">
+        {[['mask', '脱敏设置'], ['invoice', '发票设置'], ['fetcher', '取件机状态']].map(([k, l]) => (
+          <div key={k} className={'bom-tab' + (tab === k ? ' on' : '')} onClick={() => setTab(k)}>{l}</div>))}
+      </div>
       <div className="body">
         {tab === 'mask' && <div className="card bom-sect">
           <div className="bom-secthead"><span className="bom-no">遮</span><b>公开版脱敏（隐藏敏感列）</b>
