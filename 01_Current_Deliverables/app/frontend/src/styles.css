@@ -669,6 +669,10 @@ html[data-theme=dark] .ta-board{
 
 /* ============ BOM报价审核（V-draft）—— 皮肤用本项目令牌，布局/交互照样机 ============ */
 .bomv{position:relative;}
+.bomv .bom-tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding:0 20px;}
+.bomv .bom-tab{padding:11px 15px;font-size:13px;font-weight:600;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;}
+.bomv .bom-tab.on{color:var(--accent);border-bottom-color:var(--accent);}
+.bomv .bom-tab:hover{color:var(--ink-2);}
 .bom-toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%); background:var(--ink); color:#fff;
   padding:10px 18px; border-radius:10px; font-size:13px; z-index:200; box-shadow:0 6px 22px rgba(0,0,0,.25);}
 /* 统计条 */

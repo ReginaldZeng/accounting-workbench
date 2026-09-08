@@ -377,6 +377,7 @@ export const getBomStdImportBatch = (batchId) => j(`/api/bom/std-import/batch?ba
 export const bomStdImportConfirm = (batchId, rows, answers) => jp('/api/bom/std-import/confirm', { batchId, rows, answers })
 export const bomStdImportDiscard = (batchId) => jp('/api/bom/std-import/discard', { batchId })
 export const bomOutboxRedo = (entryId) => jp('/api/bom/outbox/redo', { entryId })     // V2.524 手动重落公盘
+export const getBomOutboxStatus = () => j('/api/bom/outbox/status')                    // V2.529 取件机/落盘状态
 export const getBomAutoIntakeStatus = () => j('/api/bom/auto-intake/status')
 export const bomAutoIntakeRun = (notify) => jp('/api/bom/auto-intake/run', { notify })
 

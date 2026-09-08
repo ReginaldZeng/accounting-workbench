@@ -7,6 +7,7 @@ import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
   bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList,
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
+  getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
   getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
   bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
@@ -1703,8 +1704,10 @@ function GoodsSection({ entry, isStd, canAudit, onApply }) {
 
 // ============ 基础设置（第三页）：公开版脱敏规则 ============
 function BomConfig() {
+  const [tab, setTab] = useState('mask')             // 三页：脱敏设置 / 发票设置 / 取件机状态（V2.529）
   const [cfg, setCfg] = useState(null)
   const [inv, setInv] = useState(null)               // 发票规则 {rules, modes, canConfig, hint}
+  const [outbox, setOutbox] = useState(null)         // 落盘/取件机状态
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savingInv, setSavingInv] = useState(false)
@@ -1714,9 +1717,11 @@ function BomConfig() {
     (async () => {
       try { setCfg(await getBomSettings()) } catch (e) { flash('加载失败：' + e.message) }
       try { setInv(await getBomInvoiceRules()) } catch (e) { /* 发票规则失败不挡脱敏页 */ }
+      try { setOutbox(await getBomOutboxStatus()) } catch (e) { /* 取件机状态失败不挡别的页 */ }
       setLoading(false)
     })()
   }, [])
+  const reloadOutbox = async () => { try { setOutbox(await getBomOutboxStatus()) } catch (e) { flash('刷新失败：' + e.message) } }
   if (loading) return <div className="body"><div className="loading">加载中…</div></div>
   const c = cfg?.config || {}, canConfig = cfg?.canConfig
   const invModes = inv?.modes || ['价税分离', '全额', '买价扣除', '农产品专票']
@@ -1735,6 +1740,7 @@ function BomConfig() {
   }
   const MODE_FORMULA = { '价税分离': '成本 = 价 ÷ (1+税率) × 添加量', '全额': '成本 = 价 × 添加量', '买价扣除': '成本 = 价 × (1−扣除率) × 添加量', '农产品专票': '有税率则 (价 − 价÷(1+税率)×扣除率)×量，否则 价÷(1+税率)×量' }
   const items = [
+    ['hideMatCode', '物料编码', '公开版隐藏金蝶物料编码（给商品经理看时不必带内部编码）'],
     ['hideSupplier', '供应商 / 品牌', '公开版隐藏「谁供的」（成本会计商品版默认删这列）'],
     ['hideModel', '型号', '公开版隐藏物料型号（商品版默认删）'],
     ['hideSpec', '规格', '公开版隐藏物料规格（商品版默认删）'],
@@ -1747,8 +1753,12 @@ function BomConfig() {
       <div className="head"><div>
         <div className="h-title">BOM报价审核 · 基础设置</div>
         <div className="h-sub">公开版（标准成本台账 / 给 BP 消费）的脱敏规则等全局配置</div></div></div>
+      <div className="bom-tabs">
+        {[['mask', '脱敏设置'], ['invoice', '发票设置'], ['fetcher', '取件机状态']].map(([k, l]) => (
+          <div key={k} className={'bom-tab' + (tab === k ? ' on' : '')} onClick={() => setTab(k)}>{l}</div>))}
+      </div>
       <div className="body">
-        <div className="card bom-sect">
+        {tab === 'mask' && <div className="card bom-sect">
           <div className="bom-secthead"><span className="bom-no">遮</span><b>公开版脱敏（隐藏敏感列）</b>
             <span className="muted" style={{ fontSize: 11 }}>{cfg?.hint}</span></div>
           <div style={{ padding: '6px 14px 14px' }}>
@@ -1765,9 +1775,9 @@ function BomConfig() {
             {canConfig && <div style={{ marginTop: 14, textAlign: 'right' }}>
               <button className="btn-pri" disabled={saving} onClick={save}>{saving ? '保存中…' : '保存设置'}</button></div>}
           </div>
-        </div>
+        </div>}
 
-        <div className="card bom-sect">
+        {tab === 'invoice' && <div className="card bom-sect">
           <div className="bom-secthead"><span className="bom-no">票</span><b>发票类型 → 成本不含税 算法</b>
             <span className="muted" style={{ fontSize: 11 }}>{inv?.hint || '对应采购核算表 N 列公式，可维护'}</span></div>
           <div style={{ padding: '6px 14px 14px' }}>
@@ -1796,7 +1806,25 @@ function BomConfig() {
               <span style={{ flex: 1 }} />
               <button className="btn-pri" disabled={savingInv} onClick={saveInv}>{savingInv ? '保存中…' : '保存发票规则'}</button></div>}
           </div>
-        </div>
+        </div>}
+
+        {tab === 'fetcher' && <div className="card bom-sect">
+          <div className="bom-secthead"><span className="bom-no">盘</span><b>取件机状态（初审通过即落盘公盘）</b>
+            <span className="muted" style={{ fontSize: 11 }}>{outbox?.note || '成本会计初审通过 → 服务器出财务版/脱敏版 → 取件机同步到公盘'}</span>
+            <span style={{ flex: 1 }} /><a className="lk" onClick={reloadOutbox}>↻ 刷新</a></div>
+          <div style={{ padding: '6px 14px 14px' }}>
+            {!outbox ? <div className="muted">取件机状态取不到（可能无权限或接口异常）。</div> : <>
+              <div className="bom-rline"><span>服务器落盘目录</span><b className="mono" style={{ fontSize: 12 }}>{outbox.dir || '—'}</b></div>
+              <div className="bom-rline"><span>待取文件数（服务器 outbox 现存）</span><b>{outbox.count ?? 0} 个</b></div>
+              <div className="banner info" style={{ marginTop: 10 }}>
+                取件机装在办公室常开电脑上（报表取件机同一台），每分钟把这些文件同步到公盘的「3.1 成本核算表\年\月」。落盘目录里有文件、公盘里对应有，就是通的。
+                单条记录的落盘/重落，在该记录详情页顶部操作。</div>
+              {Object.keys(outbox.fails || {}).length > 0 && <div className="bom-chkfail" style={{ marginTop: 10 }}>
+                <b>⚠ 有 {Object.keys(outbox.fails).length} 条落盘失败</b>：
+                {Object.entries(outbox.fails).map(([id, f]) => <div key={id}>· 记录 #{id}：{f.msg}（{f.at}，{f.by}）——到该记录详情页点「重落公盘」重试</div>)}</div>}
+            </>}
+          </div>
+        </div>}
       </div>
       {toast && <div className="bom-toast">{toast}</div>}
     </div>
