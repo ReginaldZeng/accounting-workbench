@@ -368,7 +368,9 @@ def _entry_view(e, finals):
                                 "productName": (x.get("product_name") or "").strip(), "status": x.get("status") or "",
                                 "fullIncl": bq.compose(_rec_from_entry(x), _fee_of(x))["full"]}
                                for x in others if x["id"] != e["id"] and x.get("source_type") != "std_import"
-                               and (x.get("product_key") or "") not in ("", e.get("product_key"))],
+                               and (x.get("product_key") or "") not in ("", e.get("product_key"))
+                               and ((e.get("group_id") and x.get("group_id") == e.get("group_id"))
+                                    or (not e.get("group_id") and e.get("approval_no") and x.get("approval_no") == e.get("approval_no")))],
         "id": e["id"], "productKey": e["product_key"], "cpCode": e["cp_code"], "erpCode": e["erp_code"],
         "productName": (e.get("product_name") or "").strip(), "customer": e.get("customer") or "",
         "packSpec": e.get("pack_spec") or "", "supplier": e.get("supplier") or "",

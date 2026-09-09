@@ -1589,6 +1589,55 @@ function MatTypeCell({ m, subType, editable, onSetType }) {
   </>)
 }
 
+// 指认上游选择器（V2.543）：点开菜单指认这行复配料/半成品对应台账里的哪个子表产品——候选只列同组产品，选后按其现全成本重算本品成本
+function UpItem({ active, onClick, children }) {
+  return <div onMouseDown={onClick} className="bom-upitem"
+    style={{ padding: '4px 8px', borderRadius: 4, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      background: active ? 'var(--accent-weak, #eef4ff)' : 'transparent', color: active ? 'var(--accent)' : 'inherit' }}>
+    {active ? '✓ ' : ''}{children}
+  </div>
+}
+function UpstreamPicker({ matName, cur, cands, onPick }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [open])
+  const curCand = cands.find(c => c.productKey === cur)
+  const linked = cur && cur !== '__none__'
+  const label = cur === '__none__' ? '外购·非上游'
+    : curCand ? '↗ ' + curCand.cpCode + ' ' + curCand.productName
+    : '⚠ 指认上游'
+  const pick = v => { setOpen(false); onPick(matName, v) }
+  return (
+    <div ref={ref} className="bom-uppick" style={{ marginTop: 3, position: 'relative', display: 'inline-block' }}>
+      <a className="lk" onClick={() => setOpen(o => !o)}
+        style={{ fontSize: 10.5, color: linked ? 'var(--accent)' : (cur === '__none__' ? 'var(--ink-3)' : 'var(--stop, #a83529)') }}
+        title="这行复配料/半成品自动没连上台账里的子采购核算表——点开从同组产品里指认它对应哪个，连上后按其现全成本重算本品成本">
+        {label} ▾
+      </a>
+      {open && (
+        <div style={{ position: 'absolute', zIndex: 30, top: '100%', left: 0, minWidth: 220, maxWidth: 320,
+          background: 'var(--card, #fff)', border: '1px solid var(--line, #ddd)', borderRadius: 6,
+          boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, fontSize: 11.5 }}>
+          <UpItem active={!cur} onClick={() => pick('')}>自动匹配（按名/CP）</UpItem>
+          <UpItem active={cur === '__none__'} onClick={() => pick('__none__')}>外购·非上游（不重算）</UpItem>
+          <div style={{ borderTop: '1px solid var(--line,#eee)', margin: '3px 0' }} />
+          {cands.length === 0
+            ? <div className="muted" style={{ padding: '4px 8px', fontSize: 10.5 }}>同组没有可指认的子表产品</div>
+            : cands.map(c => (
+              <UpItem key={c.productKey} active={cur === c.productKey} onClick={() => pick(c.productKey)}>
+                {c.cpCode} {c.productName}<span className="muted" style={{ marginLeft: 6 }}>¥{Number(c.fullIncl || 0).toFixed(2)}</span>
+              </UpItem>
+            ))}
+        </div>
+      )}
+    </div>
+  )
+}
 function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullIncl, onDrill, all, delta, onPrice, edit, onTax, spreads, onSetType, manualUpstream, upCands, onSetUpstream, invoiceRules, onInvoice }) {
   return (
     <div className="card bom-sect">
@@ -1630,19 +1679,11 @@ function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullI
                 <td style={{ fontWeight: 600, ...NOWRAP }} title={m.matName}>{semiEntry
                   ? <a className="lk" onClick={() => onDrill(semiEntry.id)}>{m.matName} ↗ 子采购核算表</a>
                   : <>{m.matName}{nested && <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>{subType}·台账无子表</span>}</>}
-                  {/* 手动指认上游（V2.540）：复配料/半成品行，撞名/带后缀自动连不上时，成本会计指认它对应台账里哪个产品 */}
-                  {onSetUpstream && nested && (() => {
-                    const cur = (manualUpstream || {})[m.matName] || ''
-                    return <div style={{ marginTop: 3 }}>
-                      <select value={cur} onChange={e => onSetUpstream(m.matName, e.target.value)}
-                        style={{ fontSize: 10.5, maxWidth: 200, color: cur && cur !== '__none__' ? 'var(--accent)' : 'var(--ink-3)' }}
-                        title="指认这行料对应台账里的哪个半成品/复配料——连上后按其现全成本重算本品成本；撞名/带后缀自动连不上时用它">
-                        <option value="">自动匹配（按名/CP）</option>
-                        <option value="__none__">外购·非上游</option>
-                        {(upCands || []).map(c => <option key={c.productKey} value={c.productKey}>指认→ {c.cpCode} {c.productName}（¥{Number(c.fullIncl || 0).toFixed(2)}）</option>)}
-                      </select>
-                    </div>
-                  })()}</td>
+                  {/* 手动指认上游（V2.543）：复配料/半成品行自动没连上台账子表时才提示指认；已自动连上(semiEntry)且无人工指认就不打扰。候选只列同组产品 */}
+                  {onSetUpstream && nested && !(semiEntry && !(manualUpstream || {})[m.matName]) && (
+                    <UpstreamPicker matName={m.matName} cur={(manualUpstream || {})[m.matName] || ''}
+                      cands={upCands || []} onPick={onSetUpstream} />
+                  )}</td>
                 <td className="muted" style={NOWRAP} title={m.model}>{m.model && m.model !== '0' ? m.model : '—'}</td>
                 <td className="muted">{m.unit || '—'}</td>
                 <td className="num">{(m.qtyPerKg ?? 0).toFixed(4)}{qMark && <Tri d={qMark} title={`添加量较上一版（${prev?.calcDate}）：${(p.qtyPerKg ?? 0).toFixed(4)} → ${(m.qtyPerKg ?? 0).toFixed(4)}`} />}</td>
