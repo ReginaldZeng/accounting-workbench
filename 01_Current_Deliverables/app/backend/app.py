@@ -3684,7 +3684,8 @@ def portal_machines(request: Request):
                                  "mobiles": db.get_setting(r["key"], None) or []} for r in m.get("results", [])],
                     "last": {k: rec.get(k) for k in keep if k in rec}})
     return {"ok": True, "asOf": _now(), "machines": out,
-            "dingtalk_configured": notifier.dingtalk_configured()}
+            "dingtalk_configured": notifier.dingtalk_configured(),
+            "names": db.get_setting(_RECIP_NAMES, {}) or {}}   # 手机号→名字，前端把号码显示成名字
 
 
 @app.get("/api/portal/machines/summary")
@@ -3711,6 +3712,31 @@ def portal_machines_summary(request: Request):
             "unknown": unknown, "state": ("down" if crit else "ok")}
 
 
+_RECIP_NAMES = "recipient_names"   # 全局「手机号→名字」表（选人时记；仅供门户监控页把号码显示成名字，发送一律按手机号）
+
+
+def _parse_recips(body):
+    """解析收件人请求体：优先 entries=[{m,n}]（通讯录选人带名字），否则 mobiles（手机号串/列表·手填兜底）。
+    返回 (手机号列表, {手机号:名字})。存储仍只存手机号——名字单独进 _RECIP_NAMES，发送/其它读取一律不变。"""
+    ents = body.get("entries")
+    if isinstance(ents, list):
+        pairs = [(str(e.get("m") or "").strip(), str(e.get("n") or "").strip())
+                 for e in ents if isinstance(e, dict) and str(e.get("m") or "").strip()]
+        return [m for (m, _) in pairs], {m: n for (m, n) in pairs if n}
+    raw = body.get("mobiles")
+    if isinstance(raw, str):
+        raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
+    return [str(x).strip() for x in (raw or []) if str(x).strip()], {}
+
+
+def _save_recip_names(names_upd, operator):
+    """把「手机号→名字」并进全局表（只增/覆盖，不删——号码可能别处还在用）。"""
+    if names_upd:
+        nm = dict(db.get_setting(_RECIP_NAMES, {}) or {})
+        nm.update(names_upd)
+        db.set_setting(_RECIP_NAMES, nm, operator)
+
+
 @app.post("/api/portal/machines/alert-recipients")
 def portal_machines_alert_set(body: dict, request: Request):
     """设某台取件机的【停机告警】收件人（门户管理·仅管理员）。写该机注册表里的 mob_key；
@@ -3722,14 +3748,12 @@ def portal_machines_alert_set(body: dict, request: Request):
     m = next((x for x in _pull_registry() if x["id"] == mid), None)
     if not m:
         return {"ok": False, "msg": "未知取件机：%s" % mid}
-    raw = body.get("mobiles")
-    if isinstance(raw, str):
-        raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
-    mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
+    mobiles, names_upd = _parse_recips(body)
     bad = [x for x in mobiles if not _re_mobile_ok(x)]
     if bad:
         return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
     db.set_setting(m["mob_key"], mobiles, u["name"])
+    _save_recip_names(names_upd, u["name"])
     db.set_setting(m["alerted_key"], None, u["name"])   # 改收件人＝重置告警去重标记（同银行那处逻辑）
     db.audit(u["name"], "配置取件机停机告警收件人", m["name"], "钉钉收件人 %d 个" % len(mobiles))
     return {"ok": True, "id": mid, "mobiles": mobiles,
@@ -3747,14 +3771,12 @@ def portal_machines_result_set(body: dict, request: Request):
     m = next((x for x in _pull_registry() if x["id"] == mid), None)
     if not m or key not in {r["key"] for r in m.get("results", [])}:
         return {"ok": False, "msg": "未知取件机或结果通知：%s / %s" % (mid, key)}
-    raw = body.get("mobiles")
-    if isinstance(raw, str):
-        raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
-    mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
+    mobiles, names_upd = _parse_recips(body)
     bad = [x for x in mobiles if not _re_mobile_ok(x)]
     if bad:
         return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
     db.set_setting(key, mobiles, u["name"])
+    _save_recip_names(names_upd, u["name"])
     db.audit(u["name"], "配置取件机结果通知收件人", m["name"], "%s 钉钉 %d 个" % (key, len(mobiles)))
     return {"ok": True, "id": mid, "key": key, "mobiles": mobiles,
             "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空（该条结果通知关闭）"}
@@ -3797,6 +3819,34 @@ def portal_machines_test_notify(body: dict, request: Request):
     if res.get("sent"):
         return {"ok": True, "msg": "已发出测试钉钉给 %d 人，去钉钉确认是否收到。" % len(mobiles)}
     return {"ok": False, "msg": "发送未成功：" + (res.get("msg") or "钉钉返回失败")}
+
+
+@app.get("/api/dingtalk/depts")
+def dingtalk_depts(request: Request, id: int = 1):
+    """通讯录选人·列某部门的下级部门（门户管理·仅管理员）。id 缺省=根部门。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    return notifier.dt_depts(dept_id=id)
+
+
+@app.get("/api/dingtalk/dept-members")
+def dingtalk_dept_members(request: Request, id: int = 1):
+    """通讯录选人·列某部门直属成员（门户管理·仅管理员）。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    return notifier.dt_members(dept_id=id)
+
+
+@app.post("/api/dingtalk/pick-mobiles")
+def dingtalk_pick_mobiles(body: dict, request: Request):
+    """通讯录选人·取选中成员的手机号（门户管理·仅管理员）——把勾选的人填进收件人框。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    uids = body.get("userids") or []
+    return notifier.dt_mobiles(userids=[str(x) for x in uids])
 
 
 def _mask_mobile(m):

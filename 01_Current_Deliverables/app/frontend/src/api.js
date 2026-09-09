@@ -386,9 +386,14 @@ export const bomAutoIntakeRun = (notify) => jp('/api/bom/auto-intake/run', { not
 // ── 取件机运行监控（V2.532）：门户监控页 + 首页总灯 + BOM 只读送达面板 ──
 export const getMachines = () => j('/api/portal/machines')                                 // 门户监控页（仅管理员）
 export const getMachinesSummary = () => j('/api/portal/machines/summary')                  // 首页总呼吸灯（登录即可）
-export const setMachineAlertRecipients = (id, mobiles) => jp('/api/portal/machines/alert-recipients', { id, mobiles })
-export const setMachineResultRecipients = (id, key, mobiles) => jp('/api/portal/machines/result-recipients', { id, key, mobiles })
+// entries = [{m:手机号, n:名字}]；名字仅供显示，后端只存手机号（发送/校验不变）
+export const setMachineAlertRecipients = (id, entries) => jp('/api/portal/machines/alert-recipients', { id, entries })
+export const setMachineResultRecipients = (id, key, entries) => jp('/api/portal/machines/result-recipients', { id, key, entries })
 export const testMachineNotify = (id, kind, key) => jp('/api/portal/machines/test-notify', { id, kind, key })   // 发一条测试钉钉
+// 通讯录选人（V2.539）：拉部门/成员、取选中手机号
+export const getDingtalkDepts = (id = 1) => j('/api/dingtalk/depts?id=' + id)
+export const getDingtalkDeptMembers = (id = 1) => j('/api/dingtalk/dept-members?id=' + id)
+export const dingtalkPickMobiles = (userids) => jp('/api/dingtalk/pick-mobiles', { userids })
 export const getBomDeliverRecipients = () => j('/api/bom/deliver-recipients')              // BOM 落公盘送达收件人（读，仅管理员）
 export const saveBomDeliverRecipients = (mobiles) => jp('/api/bom/deliver-recipients', { mobiles })
 export const getBomDeliverStatus = () => j('/api/bom/deliver-status')                      // BOM 工具只读面板：通道/发给谁/上次送达

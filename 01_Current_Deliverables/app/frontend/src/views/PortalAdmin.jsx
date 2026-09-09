@@ -4,7 +4,7 @@
 // 门户管理（门户内页签，仅管理员）：维护各工作台的工具卡片——所属工作台/名称/状态/概述/通用技能/AI技能。
 // 数据存 portal_tools 表，门户卡片实时读取；改这里 = 门户即时更新，无需改代码/发版。深色 pa- 作用域。
 import React, { useEffect, useState } from 'react'
-import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify } from '../api.js'
+import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify, getDingtalkDepts, getDingtalkDeptMembers, dingtalkPickMobiles } from '../api.js'
 
 const LANES = [{ key: 'accounting', label: '财务核算组' }, { key: 'bp', label: '财务分析组 · BP' }, { key: 'legal', label: '法务部' }]
 const LANE_LABEL = { accounting: '财务核算组', bp: '财务分析组 · BP', legal: '法务部' }
@@ -69,6 +69,13 @@ select.pa-inp option{background:#221A3A;color:var(--ink)}
 .pa-rcpt{margin-top:10px;padding:9px 11px;border-radius:9px;background:rgba(0,0,0,.18);border:1px solid var(--line)}
 .pa-rcpt input{width:100%;max-width:340px;border-radius:7px;border:1px solid var(--line2);background:rgba(255,255,255,.05);color:var(--ink);padding:6px 10px;font:inherit;font-size:12.5px;outline:none}
 .pa-rcpt input:focus{border-color:var(--brand)}
+.pa-rcpt input.mini{width:172px;max-width:172px}
+.pa-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:24px;margin-bottom:7px}
+.pa-chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:3px 4px 3px 10px;border-radius:14px;background:rgba(124,92,255,.15);border:1px solid rgba(124,92,255,.42);color:var(--ink)}
+.pa-chip.num{background:rgba(255,255,255,.05);border-color:var(--line2);color:var(--ink2)}
+.pa-chip-x{cursor:pointer;color:var(--ink3);font-weight:700;line-height:1;padding:1px 5px;border-radius:9px}
+.pa-chip-x:hover{background:rgba(255,90,90,.25);color:#fff}
+.pa-chip-empty{font-size:12px;color:var(--ink3)}
 `
 
 const blank = () => ({ id: null, lane: 'accounting', name: '', status: 'beta', icon: '▤', desc: '', genStr: '', aiStr: '', mods: [], statusSrc: 'manual', autoDetail: [] })
@@ -203,20 +210,68 @@ export default function PortalAdmin({ onChange }) {
 
 
 // 取件机运行监控（V2.532）：门户管理内的只读监控 + 收件人配置（仅管理员进得来这页）。
+// 手打手机号输入 + 加（本地缓冲，回车或点「加」把号码交给父层，不常驻输入框）
+function TypedAdd({ onAdd }) {
+  const [v, setV] = useState('')
+  const go = () => { const t = v.trim(); if (t) { onAdd(t); setV('') } }
+  return (
+    <>
+      <input className="mini" value={v} placeholder="加手机号（外部人）"
+        onChange={e => setV(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); go() } }} />
+      <button className="pa-btn" onClick={go}>加</button>
+    </>
+  )
+}
+
 function MachineMonitor() {
   const [d, setD] = useState(null)
   const [msg, setMsg] = useState(null)
-  const [alertEdit, setAlertEdit] = useState({})    // {machineId: 停机告警手机号串}
-  const [resultEdit, setResultEdit] = useState({})  // {"machineId|通知键": 结果通知手机号串}
+  const [alertEdit, setAlertEdit] = useState({})    // {machineId: [{m,n}]}  未编辑=用后端已存
+  const [resultEdit, setResultEdit] = useState({})  // {"machineId|通知键": [{m,n}]}
+  const [picker, setPicker] = useState(null)         // 通讯录选人弹窗目标 {kind,id,key} | null
   const load = () => getMachines().then(r => { setD(r); setAlertEdit({}); setResultEdit({}) }).catch(() => {})
   useEffect(() => { load() }, [])
   const flash = (ok, t) => { setMsg({ ok, t }); setTimeout(() => setMsg(null), 2600) }
+  // 当前行收件人 [{m手机号, n名字}]：编辑中优先，否则由已存手机号 + names 表还原（选过的人有名字，手打的没有）
+  const entriesOf = (isAlert, id, key) => {
+    const editKey = isAlert ? id : (id + '|' + key)
+    const store = isAlert ? alertEdit : resultEdit
+    if (store[editKey]) return store[editKey]
+    const mac = (d.machines || []).find(x => x.id === id) || {}
+    const mobs = isAlert ? (mac.alert_mobiles || [])
+      : ((mac.results || []).find(rr => rr.key === key)?.mobiles || [])
+    const nm = d.names || {}
+    return mobs.map(mo => ({ m: mo, n: nm[mo] || '' }))
+  }
+  const setEntries = (isAlert, id, key, next) => {
+    const editKey = isAlert ? id : (id + '|' + key)
+    ;(isAlert ? setAlertEdit : setResultEdit)(prev => ({ ...prev, [editKey]: next }))
+  }
+  const removeChip = (isAlert, id, key, mo) =>
+    setEntries(isAlert, id, key, entriesOf(isAlert, id, key).filter(e => e.m !== mo))
+  const addTyped = (isAlert, id, key, mo) => {   // 手打外部人：只有号码、没名字
+    if (!/^\d{11}$/.test(mo)) { flash(false, '手机号要 11 位数字：' + mo); return }
+    const cur = entriesOf(isAlert, id, key)
+    if (cur.some(e => e.m === mo)) { flash(true, '这个号已经在里面了'); return }
+    setEntries(isAlert, id, key, [...cur, { m: mo, n: '' }])
+  }
+  const addPicked = (target, ents, noMobile) => {   // 通讯录选人回填：带名字，按号去重覆盖
+    const isAlert = target.kind === 'alert'
+    const map = new Map(entriesOf(isAlert, target.id, target.key).map(e => [e.m, e]))
+    ents.forEach(e => map.set(e.m, e))
+    setEntries(isAlert, target.id, target.key, Array.from(map.values()))
+    setPicker(null)
+    let t = '已加入 ' + ents.length + ' 人，记得点「保存」'
+    if (noMobile && noMobile.length) t += '（' + noMobile.join('、') + ' 没手机号，跳过了）'
+    flash(true, t)
+  }
   const saveAlert = async (id) => {
-    const r = await setMachineAlertRecipients(id, alertEdit[id] ?? '').catch(e => ({ ok: false, msg: String(e) }))
+    const r = await setMachineAlertRecipients(id, entriesOf(true, id)).catch(e => ({ ok: false, msg: String(e) }))
     flash(r.ok, r.msg); if (r.ok) load()
   }
   const saveResult = async (id, key) => {
-    const r = await setMachineResultRecipients(id, key, resultEdit[id + '|' + key] ?? '').catch(e => ({ ok: false, msg: String(e) }))
+    const r = await setMachineResultRecipients(id, key, entriesOf(false, id, key)).catch(e => ({ ok: false, msg: String(e) }))
     flash(r.ok, r.msg); if (r.ok) load()
   }
   const testNotify = async (id, kind, key) => {
@@ -234,11 +289,35 @@ function MachineMonitor() {
         <div className="pa-mcard" style={{ borderColor: 'var(--amber)', color: 'var(--amber)', fontSize: 12.5 }}>
           ⚠ 服务器还没配钉钉应用（conf.ini [dingtalk]），配了收件人也发不出去——需先配钉钉。</div>}
       {msg && <div style={{ fontSize: 12.5, margin: '0 0 10px', fontWeight: 600, color: msg.ok ? 'var(--green)' : 'var(--red)' }}>{msg.t}</div>}
+      {picker && <ContactPicker onClose={() => setPicker(null)} onConfirm={(ents, nm) => addPicked(picker, ents, nm)} />}
       {d.machines.map(m => {
         const state = !m.deployed ? 'x' : (m.alive ? 'g' : (m.always_on ? 'r' : 'x'))
         const label = !m.deployed ? '未接监控' : (m.alive ? '在跑' : (m.always_on ? '可能已停' : '未在取件'))
         const col = state === 'g' ? 'var(--green)' : state === 'r' ? 'var(--red)' : 'var(--ink3)'
         const last = m.last || {}
+        // 一行收件人：名字/号码标签（× 删）＋ 手打加号码 ＋ 通讯录选 ＋ 保存 ＋ 发测试
+        const rcptRow = (isAlert, key, emptyHint) => {
+          const ents = entriesOf(isAlert, m.id, key)
+          return (
+            <>
+              <div className="pa-chips">
+                {ents.length === 0 && <span className="pa-chip-empty">{emptyHint}</span>}
+                {ents.map(e => (
+                  <span key={e.m} className={'pa-chip' + (e.n ? '' : ' num')} title={e.n ? e.n + ' · ' + e.m : e.m}>
+                    {e.n || e.m}
+                    <span className="pa-chip-x" onClick={() => removeChip(isAlert, m.id, key, e.m)}>×</span>
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <TypedAdd onAdd={mo => addTyped(isAlert, m.id, key, mo)} />
+                <button className="pa-btn" onClick={() => setPicker(isAlert ? { kind: 'alert', id: m.id } : { kind: 'result', id: m.id, key })} title="从钉钉通讯录勾人">通讯录选</button>
+                <button className="pa-btn pri" onClick={() => isAlert ? saveAlert(m.id) : saveResult(m.id, key)}>保存</button>
+                <button className="pa-btn" onClick={() => testNotify(m.id, isAlert ? 'alert' : 'result', key)} title="给当前收件人发一条【测试】钉钉">发测试</button>
+              </div>
+            </>
+          )
+        }
         return (
           <div className="pa-mcard" key={m.id}>
             <div className="pa-mrow">
@@ -259,32 +338,83 @@ function MachineMonitor() {
               {Array.isArray(last.errors) && last.errors.length > 0 && <span style={{ color: 'var(--red)' }}>错误 {last.errors.length}</span>}
             </div>
             <div className="pa-rcpt">
-              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 5 }}>🔔 停机告警 · 推送给谁 <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（运行 · 给运维/管理员）</span></div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <input value={alertEdit[m.id] ?? (m.alert_mobiles || []).join(', ')}
-                  onChange={e => setAlertEdit({ ...alertEdit, [m.id]: e.target.value })}
-                  placeholder="钉钉手机号，逗号隔开；留空＝关闭" />
-                <button className="pa-btn pri" onClick={() => saveAlert(m.id)}>保存</button>
-                <button className="pa-btn" onClick={() => testNotify(m.id, 'alert')} title="给当前收件人发一条【测试】钉钉">发测试</button>
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>停了超阈值自动用风控 AI 机器人钉钉提醒这些人。「发测试」＝立刻给当前收件人发条测试，验链路。</div>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 7 }}>🔔 停机告警 · 推送给谁 <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（运行 · 给运维/管理员）</span></div>
+              {rcptRow(true, null, '空 = 关闭停机告警')}
+              <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 6 }}>停了超阈值自动用风控 AI 机器人钉钉提醒这些人。选的人显名字、手打的显号码。「发测试」＝立刻给当前收件人发条测试，验链路。</div>
             </div>
             {(m.results || []).map(r => (
               <div className="pa-rcpt" key={r.key} style={{ borderColor: 'rgba(124,92,255,.35)' }}>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 5 }}>{r.label} <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（结果 · 给干活的人）</span></div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <input value={resultEdit[m.id + '|' + r.key] ?? (r.mobiles || []).join(', ')}
-                    onChange={e => setResultEdit({ ...resultEdit, [m.id + '|' + r.key]: e.target.value })}
-                    placeholder="钉钉手机号，逗号隔开；留空＝不推" />
-                  <button className="pa-btn pri" onClick={() => saveResult(m.id, r.key)}>保存</button>
-                  <button className="pa-btn" onClick={() => testNotify(m.id, 'result', r.key)} title="给当前收件人发一条【测试】钉钉">发测试</button>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>{r.note}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 7 }}>{r.label} <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（结果 · 给干活的人）</span></div>
+                {rcptRow(false, r.key, '空 = 不推送')}
+                <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 6 }}>{r.note}</div>
               </div>
             ))}
           </div>
         )
       })}
+    </div>
+  )
+}
+
+
+// 通讯录选人弹窗（V2.539）：按部门树钻取、勾选成员 → 取其手机号回填到收件人框。只门户管理(admin)进得来。
+function ContactPicker({ onConfirm, onClose }) {
+  const [stack, setStack] = useState([{ id: 1, name: '通讯录' }])   // 部门路径栈（面包屑）
+  const [depts, setDepts] = useState([])
+  const [members, setMembers] = useState([])
+  const [sel, setSel] = useState({})          // {userid: name}
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const load = async (id) => {
+    setBusy(true); setErr('')
+    const d = await getDingtalkDepts(id).catch(e => ({ ok: false, msg: String(e) }))
+    const mm = await getDingtalkDeptMembers(id).catch(e => ({ ok: false, msg: String(e) }))
+    setBusy(false)
+    if (!d.ok && !mm.ok) { setErr(d.msg || mm.msg || '拉通讯录失败'); setDepts([]); setMembers([]); return }
+    setDepts(d.ok ? (d.depts || []) : [])
+    setMembers(mm.ok ? (mm.members || []) : [])
+  }
+  useEffect(() => { load(1) }, [])
+  const enter = (dp) => { setStack(s => [...s, dp]); load(dp.id) }
+  const jump = (i) => { const ns = stack.slice(0, i + 1); setStack(ns); load(ns[ns.length - 1].id) }
+  const toggle = (mem) => setSel(s => { const n = { ...s }; if (n[mem.userid]) delete n[mem.userid]; else n[mem.userid] = mem.name; return n })
+  const confirm = async () => {
+    const uids = Object.keys(sel)
+    if (!uids.length) { onClose(); return }
+    setBusy(true)
+    const r = await dingtalkPickMobiles(uids).catch(e => ({ ok: false, msg: String(e) }))
+    setBusy(false)
+    if (!r.ok) { setErr(r.msg || '取手机号失败'); return }
+    onConfirm((r.people || []).filter(p => p.mobile).map(p => ({ m: p.mobile, n: p.name })),
+      (r.people || []).filter(p => !p.mobile).map(p => p.name))
+  }
+  const n = Object.keys(sel).length
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div className="pa-card" style={{ width: 520, maxWidth: '92vw', maxHeight: '82vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+        <div className="pa-ct">从钉钉通讯录选人<span className="pa-lk" onClick={onClose}>✕ 关闭</span></div>
+        <div style={{ fontSize: 12, color: 'var(--ink2)', marginBottom: 6 }}>
+          {stack.map((s, i) => <span key={i}>{i > 0 && ' / '}<span className="pa-lk" onClick={() => jump(i)}>{s.name}</span></span>)}
+        </div>
+        {err && <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 6, lineHeight: 1.6 }}>{err}</div>}
+        <div style={{ overflowY: 'auto', flex: 1, minHeight: 180, border: '1px solid var(--line)', borderRadius: 8, padding: 4 }}>
+          {busy && <div style={{ color: 'var(--ink3)', fontSize: 12, padding: 8 }}>加载中…</div>}
+          {!busy && depts.map(dp => (
+            <div key={'d' + dp.id} className="pa-item" onClick={() => enter(dp)} style={{ cursor: 'pointer' }}>
+              <span>📁 {dp.name}</span><span className="pa-lk" style={{ marginLeft: 'auto' }}>进入 ›</span></div>
+          ))}
+          {!busy && members.map(mem => (
+            <label key={mem.userid} className="pa-item" style={{ cursor: 'pointer' }}>
+              <input type="checkbox" checked={!!sel[mem.userid]} onChange={() => toggle(mem)} style={{ marginRight: 8 }} />
+              <span>👤 {mem.name}</span></label>
+          ))}
+          {!busy && !err && !depts.length && !members.length && <div style={{ color: 'var(--ink3)', fontSize: 12, padding: 8 }}>这个部门下没有子部门 / 成员</div>}
+        </div>
+        <div className="pa-bar" style={{ marginTop: 10, justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 12, color: 'var(--ink2)' }}>已选 {n} 人{n > 0 ? '：' + Object.values(sel).slice(0, 4).join('、') + (n > 4 ? '…' : '') : ''}</span>
+          <span style={{ display: 'flex', gap: 8 }}><button className="pa-btn" onClick={onClose}>取消</button><button className="pa-btn pri" onClick={confirm} disabled={busy}>填入所选</button></span>
+        </div>
+      </div>
     </div>
   )
 }

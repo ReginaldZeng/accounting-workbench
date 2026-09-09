@@ -225,3 +225,66 @@ def notify(subject, text, html=None, dt_conf=None, smtp_conf=None, channels=None
     if not out:
         out["none"] = {"sent": False, "msg": "未配置/未启用任何通知渠道（钉钉/邮件），仅记录"}
     return out
+
+
+# ── 通讯录选人（V2.539）：复用老版 token；用于门户「取件机监控」从钉钉通讯录勾人填手机号 ──
+def dt_depts(conf=None, dept_id=1):
+    """列某部门的下级部门（钉钉 department/listsub）。失败/未配置 → {'ok':False,'msg':...}，不抛错。"""
+    conf = conf or load_dingtalk_conf()
+    if not conf:
+        return {"ok": False, "msg": "服务器未配钉钉（conf.ini [dingtalk]）"}
+    try:
+        import requests
+        tok = _dt_token(conf)
+        r = requests.post("https://oapi.dingtalk.com/topapi/v2/department/listsub",
+                          params={"access_token": tok}, json={"dept_id": int(dept_id)}, timeout=20).json()
+        if r.get("errcode") != 0:
+            return {"ok": False, "msg": (r.get("errmsg") or "拉部门失败") + "（应用可能未开通「通讯录部门读取」）"}
+        return {"ok": True, "depts": [{"id": d.get("dept_id"), "name": d.get("name")} for d in (r.get("result") or [])]}
+    except Exception as e:
+        return {"ok": False, "msg": "拉部门异常：%s" % e}
+
+
+def dt_members(conf=None, dept_id=1):
+    """列某部门直属成员（钉钉 user/listsimple，仅 userid+name，翻页取全）。失败 → {'ok':False}，不抛错。"""
+    conf = conf or load_dingtalk_conf()
+    if not conf:
+        return {"ok": False, "msg": "服务器未配钉钉（conf.ini [dingtalk]）"}
+    try:
+        import requests
+        tok = _dt_token(conf)
+        out, cursor = [], 0
+        for _ in range(20):    # 最多 20 页 × 100，防跑飞
+            r = requests.post("https://oapi.dingtalk.com/topapi/v2/user/listsimple",
+                              params={"access_token": tok},
+                              json={"dept_id": int(dept_id), "cursor": cursor, "size": 100}, timeout=20).json()
+            if r.get("errcode") != 0:
+                return {"ok": False, "msg": (r.get("errmsg") or "拉成员失败") + "（应用可能未开通「通讯录成员读取」）"}
+            res = r.get("result") or {}
+            out += [{"userid": u.get("userid"), "name": u.get("name")} for u in (res.get("list") or [])]
+            if not res.get("has_more"):
+                break
+            cursor = res.get("next_cursor") or 0
+        return {"ok": True, "members": out}
+    except Exception as e:
+        return {"ok": False, "msg": "拉成员异常：%s" % e}
+
+
+def dt_mobiles(conf=None, userids=None):
+    """取选中成员的手机号（钉钉 user/get 逐个；最多 50）。返回 {'ok':True,'people':[{userid,name,mobile}]}。"""
+    conf = conf or load_dingtalk_conf()
+    if not conf:
+        return {"ok": False, "msg": "服务器未配钉钉（conf.ini [dingtalk]）"}
+    try:
+        import requests
+        tok = _dt_token(conf)
+        people = []
+        for uid in (userids or [])[:50]:
+            r = requests.post("https://oapi.dingtalk.com/topapi/v2/user/get",
+                              params={"access_token": tok}, json={"userid": str(uid)}, timeout=20).json()
+            if r.get("errcode") == 0:
+                d = r.get("result") or {}
+                people.append({"userid": str(uid), "name": d.get("name") or "", "mobile": d.get("mobile") or ""})
+        return {"ok": True, "people": people}
+    except Exception as e:
+        return {"ok": False, "msg": "取手机号异常：%s" % e}
