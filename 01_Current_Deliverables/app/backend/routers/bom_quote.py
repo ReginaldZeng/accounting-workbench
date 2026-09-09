@@ -124,6 +124,11 @@ def _upstream_status(e, finals=None, others=None):
         cp = _ncp(x.get("cp_code"))
         if cp:
             by_cp.setdefault(cp, []).append(x)
+    by_pk = {}
+    for x in (others if others is not None else db.bom_list_entries(src)):
+        if x["id"] != e["id"] and x.get("product_key"):
+            by_pk.setdefault(x.get("product_key"), []).append(x)
+    manual = e.get("manual_upstream") or {}                # 手动指认（V2.540）：{料行名: 上游产品键 或 "__none__"（明确非上游）}
     my_gid, my_ap, my_date = e.get("group_id") or "", e.get("approval_no") or "", e.get("calc_date") or ""
 
     def pick(cands):
@@ -141,13 +146,17 @@ def _upstream_status(e, finals=None, others=None):
         nm = (m.get("matName") or "").strip()
         if not nm or m.get("seg") == "包材":       # 包材不可能是半成品
             continue
-        cands, match_by = by_name.get(nm), "名称"
-        if not cands:                              # 同名配不上 → 料行型号/编码栏带的研发码与台账 cp_code 对（V2.478）
+        mk = manual.get(nm)
+        mk = (mk.get("pk") if isinstance(mk, dict) else mk)
+        if mk == "__none__":                       # 成本会计明确指认「这行不是上游、就是外购」→ 不连
+            continue
+        cands, match_by = (by_pk.get(mk), "手动指认") if mk else (by_name.get(nm), "名称")
+        if not cands and not mk:                   # 同名配不上 → 料行型号/编码栏带的研发码与台账 cp_code 对（V2.478）
             for c in (_ncp(m.get("model")), _ncp(m.get("matCode"))):
                 if c and c in by_cp:
                     cands, match_by = by_cp[c], "CP码"
                     break
-        if not cands:                              # 台账里既无同名也无同码 → 就是外购料，不当上游
+        if not cands:                              # 手动指认的产品已删 / 台账里既无同名也无同码 → 不连（外购料）
             continue
         up, lab = pick(cands)
         comp = bq.compose(_rec_from_entry(up), _fee_of(up))
@@ -354,6 +363,12 @@ def _entry_view(e, finals):
                     for b in (bom_mats or [])],
         "craft": e.get("craft") or None,          # BOM 文件里的工艺流程页（复核②）
         "upstream": ups, "upstreamBlock": _upstream_block(ups),   # 上游链路（半成品/复配料）状态与定稿硬闸理由
+        "manualUpstream": {k: (v.get("pk") if isinstance(v, dict) else v) for k, v in (e.get("manual_upstream") or {}).items()},
+        "upstreamCandidates": [{"productKey": x.get("product_key"), "cpCode": (x.get("cp_code") or "").strip(),
+                                "productName": (x.get("product_name") or "").strip(), "status": x.get("status") or "",
+                                "fullIncl": bq.compose(_rec_from_entry(x), _fee_of(x))["full"]}
+                               for x in others if x["id"] != e["id"] and x.get("source_type") != "std_import"
+                               and (x.get("product_key") or "") not in ("", e.get("product_key"))],
         "id": e["id"], "productKey": e["product_key"], "cpCode": e["cp_code"], "erpCode": e["erp_code"],
         "productName": (e.get("product_name") or "").strip(), "customer": e.get("customer") or "",
         "packSpec": e.get("pack_spec") or "", "supplier": e.get("supplier") or "",
@@ -1300,6 +1315,86 @@ async def bom_set_mat_type(request: Request):
     db.bom_update_entry(e["id"], {"materials": mats})
     db.bom_add_audit(e["id"], u["name"], "物料子类·" + name, old, sub)
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+
+
+def _relink_recompute(e, mat_name, new_price_incl):
+    """把某料行的含税价改成 new_price_incl（手动指认上游后＝上游现全成本），重算 costExcl→小计→全成本→勾稽。
+    返回要 db.update 的字段 dict；找不到该料行→{}。价税分离口径（专票）同 recalc_workbook 的链路重算。"""
+    mats = [dict(m) for m in (e.get("materials") or [])]
+    hit = False
+    for m in mats:
+        if (m.get("matName") or "").strip() == mat_name and m.get("seg") != "包材":
+            tax = m.get("taxRate") if m.get("taxRate") is not None else 0.13
+            m["priceIncl"] = round(new_price_incl, 4)
+            m["costExcl"] = round((m.get("qtyPerKg") or 0) * new_price_incl / (1 + (tax or 0)), 6)
+            hit = True
+    if not hit:
+        return {}
+    orig = [m for m in mats if m.get("seg") == "原料"]
+    packs = [m for m in mats if m.get("seg") == "包材"]
+    sub_mat = round(sum(m.get("costExcl") or 0 for m in orig), 6)
+    sub_pack = round(sum(m.get("costExcl") or 0 for m in packs), 6)
+    s = dict(e.get("summary") or {})
+    var = round(sub_mat + sub_pack, 6)
+    fee_excl = sum((s.get(k) or 0) for k in ("制造费用小计不含税", "工厂费用小计不含税", "运输费用不含税", "装卸费不含税"))
+    cost_excl = round(var + fee_excl, 6)
+    s.update({"变动小计不含税": var, "成本合计不含税": cost_excl, "增值税合计": round(cost_excl * 0.13, 6),
+              "成本合计含税": round(cost_excl * 1.13, 6), "全成本含税": round(cost_excl * 1.13 + (s.get("管理费加成含税") or 0), 6)})
+    checks = bq.build_checks(sub_mat, sub_pack, s, orig, packs)
+    rec = _rec_from_entry(e)
+    rec.update({"materials": mats, "matSubtotal": sub_mat, "packSubtotal": sub_pack, "summary": s})
+    comp = bq.compose(rec, _fee_of(e))
+    return {"materials": mats, "mat_subtotal_excl": sub_mat, "pack_subtotal_excl": sub_pack,
+            "summary": s, "checks": checks, "full_cost_incl": comp["full"], "src_full": comp["full"]}
+
+
+@router.post("/api/bom/set-upstream")
+async def bom_set_upstream(request: Request):
+    """手动指认某料行的上游（V2.540，业务方定 2026-09-09）：撞名/带后缀致自动连不上时，成本会计在料行上指认
+    「它就是台账里的某半成品/复配料」→ 记 manual_upstream，并按上游现全成本重算本品成本；已审核则失效重审。
+    body: {entryId, matName, targetProductKey}；targetProductKey="__none__" 指认「非上游/外购」；="__clear__" 撤销指认恢复原价。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限（仅成本会计）"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    mat_name = str(body.get("matName") or "").strip()
+    tgt = str(body.get("targetProductKey") or "").strip()
+    row = next((m for m in (e.get("materials") or []) if (m.get("matName") or "").strip() == mat_name and m.get("seg") != "包材"), None)
+    if not row:
+        return JSONResponse({"ok": False, "msg": "本品没有名为「%s」的原料/复配料行" % mat_name}, status_code=400)
+    manual = dict(e.get("manual_upstream") or {})
+    prev = manual.get(mat_name)
+    prev_orig = prev.get("orig") if isinstance(prev, dict) else None
+    fields, note = {}, ""
+    if tgt in ("__clear__", ""):
+        if prev_orig is not None:
+            fields = _relink_recompute(e, mat_name, prev_orig)
+        manual.pop(mat_name, None)
+        note = "撤销「%s」的上游指认" % mat_name
+    elif tgt == "__none__":
+        if prev_orig is not None:
+            fields = _relink_recompute(e, mat_name, prev_orig)
+        manual[mat_name] = "__none__"
+        note = "指认「%s」为外购、非上游" % mat_name
+    else:
+        target = next((x for x in db.bom_list_entries(_src()) if x.get("product_key") == tgt and x["id"] != e["id"]), None)
+        if not target:
+            return JSONResponse({"ok": False, "msg": "指认的上游产品不存在或已失效"}, status_code=400)
+        up_full = bq.compose(_rec_from_entry(target), _fee_of(target))["full"]
+        orig = prev_orig if prev_orig is not None else row.get("priceIncl")
+        fields = _relink_recompute(e, mat_name, up_full or 0)
+        manual[mat_name] = {"pk": tgt, "orig": orig}
+        note = "指认「%s」的上游＝%s（%s），按其现全成本 %.4f 重算本品成本" % (mat_name, (target.get("cp_code") or "").strip(), (target.get("product_name") or "").strip(), up_full or 0)
+    fields["manual_upstream"] = manual
+    reset = _invalidate_review(e, fields) if fields.get("materials") is not None else None
+    db.bom_update_entry(e["id"], fields)
+    db.bom_add_audit(e["id"], u["name"], "手动指认上游", "", note + ("；" + reset if reset else ""))
+    db.audit(u["name"], "bom_set_upstream", target=str(e["id"]), detail=note)
+    finals = db.bom_finals(_src())
+    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals), "resetNote": reset}
 
 
 @router.post("/api/bom/set-erp-code")

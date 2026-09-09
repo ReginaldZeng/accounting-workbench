@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
-  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList,
+  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList, bomSetUpstream,
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
@@ -1004,6 +1004,12 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
     return () => { alive = false }
   }, [entry.id, isStd])
   // ④报价·改物料子类（原辅料/复配料/自产半成品，二次确认；只改原料内部、不动成本）
+  const setUpstreamMat = async (matName, targetProductKey) => {   // V2.540 手动指认上游
+    try { const r = await bomSetUpstream(entry.id, matName, targetProductKey)
+      if (!r.ok) return flash(r.msg || '指认失败')
+      flash('已更新上游连线' + (r.resetNote ? '（' + r.resetNote + '）' : '')); setEntry(r.entry); load()
+    } catch (e) { flash('指认失败：' + e.message) }
+  }
   const setMatType = async (mat, subType) => {
     try { const r = await bomSetMatType(entry.id, mat, subType); if (!r.ok) return flash(r.msg || '改类型失败'); flash(`已把「${mat.matName}」改为「${subType}」`); await onChanged() }
     catch (e) { flash('改类型失败：' + e.message) }
@@ -1237,6 +1243,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
                 seg="原料" prev={prev} prevMat={prevMat} subtotal={matSub} fullIncl={full} onDrill={onOpen} all={all}
                 delta={segDelta(mats)} onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
                 spreads={spreads} onSetType={!isStd && cfg?.canAudit && !edit ? setMatType : null}
+                manualUpstream={entry.manualUpstream} upCands={entry.upstreamCandidates}
+                onSetUpstream={!isStd && cfg?.canAudit && !edit ? setUpstreamMat : null}
                 invoiceRules={cfg?.invoiceRules} onInvoice={edit ? setInvoice : null} />
               <MatSection no={2} title="包材明细" hint="「核价」查金蝶实采" rows={packs} seg="包材" prev={prev} prevMat={prevMat}
                 subtotal={packSub} fullIncl={full} onDrill={onOpen} all={all} delta={segDelta(packs)} onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
@@ -1573,7 +1581,7 @@ function MatTypeCell({ m, subType, editable, onSetType }) {
   </>)
 }
 
-function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullIncl, onDrill, all, delta, onPrice, edit, onTax, spreads, onSetType, invoiceRules, onInvoice }) {
+function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullIncl, onDrill, all, delta, onPrice, edit, onTax, spreads, onSetType, manualUpstream, upCands, onSetUpstream, invoiceRules, onInvoice }) {
   return (
     <div className="card bom-sect">
       <div className="bom-secthead"><span className="bom-no">{no}</span><b>{title}</b>
@@ -1613,7 +1621,20 @@ function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullI
                 <td className="mono">{m.matCode || '—'}</td>
                 <td style={{ fontWeight: 600, ...NOWRAP }} title={m.matName}>{semiEntry
                   ? <a className="lk" onClick={() => onDrill(semiEntry.id)}>{m.matName} ↗ 子采购核算表</a>
-                  : <>{m.matName}{nested && <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>{subType}·台账无子表</span>}</>}</td>
+                  : <>{m.matName}{nested && <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>{subType}·台账无子表</span>}</>}
+                  {/* 手动指认上游（V2.540）：复配料/半成品行，撞名/带后缀自动连不上时，成本会计指认它对应台账里哪个产品 */}
+                  {onSetUpstream && nested && (() => {
+                    const cur = (manualUpstream || {})[m.matName] || ''
+                    return <div style={{ marginTop: 3 }}>
+                      <select value={cur} onChange={e => onSetUpstream(m.matName, e.target.value)}
+                        style={{ fontSize: 10.5, maxWidth: 200, color: cur && cur !== '__none__' ? 'var(--accent)' : 'var(--ink-3)' }}
+                        title="指认这行料对应台账里的哪个半成品/复配料——连上后按其现全成本重算本品成本；撞名/带后缀自动连不上时用它">
+                        <option value="">自动匹配（按名/CP）</option>
+                        <option value="__none__">外购·非上游</option>
+                        {(upCands || []).map(c => <option key={c.productKey} value={c.productKey}>指认→ {c.cpCode} {c.productName}（¥{Number(c.fullIncl || 0).toFixed(2)}）</option>)}
+                      </select>
+                    </div>
+                  })()}</td>
                 <td className="muted" style={NOWRAP} title={m.model}>{m.model && m.model !== '0' ? m.model : '—'}</td>
                 <td className="muted">{m.unit || '—'}</td>
                 <td className="num">{(m.qtyPerKg ?? 0).toFixed(4)}{qMark && <Tri d={qMark} title={`添加量较上一版（${prev?.calcDate}）：${(p.qtyPerKg ?? 0).toFixed(4)} → ${(m.qtyPerKg ?? 0).toFixed(4)}`} />}</td>
