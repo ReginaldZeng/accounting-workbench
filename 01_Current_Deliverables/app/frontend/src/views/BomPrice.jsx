@@ -63,6 +63,7 @@ const SRC_LABEL = { dingtalk_form: '钉钉·表单附件', dingtalk_comment: '�
 const ORIGIN_STY = {
   research: { txt: '研发BOM', cls: 'bom-org-research' },
   procurement: { txt: '采购商务版', cls: 'bom-org-proc' },
+  finance: { txt: '财务复核版', cls: 'bom-org-fin' },
   costacct: { txt: '成本会计商品版', cls: 'bom-org-cost' },
   manual: { txt: '手工上传', cls: 'bom-org-manual' },
   comment: { txt: '评论区上传', cls: 'bom-org-manual' },
@@ -1197,7 +1198,14 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
                 ['客户', entry.customer || '—'],
                 ['订单量', entry.orderQty ? fmt(entry.orderQty, 0) + ' kg' : '—'],
                 ['生产工厂', entry.supplier || '—'], ['物料类别', <CatCell p={entry} />],
-                ['数据来源', entry.origin ? <Origin o={entry.origin} /> : '—'],
+                ['数据来源', entry.origin
+                  ? (() => { const full = entry.comp?.full || 0, raw = entry.rawVersion?.full || 0
+                    return <span><Origin o={entry.origin} />{entry.rawVersion && <div className="bom-srcline" title="本单财务复核发现问题、改了商务输出的数，台账以财务复核版为准；商务输出留作采购原始参考（原件下载里仍有）">
+                      采购原始 {fmt(raw)} → 财务复核 {fmt(full)}
+                      {Math.abs(full - raw) > 1e-4
+                        ? <span style={{ color: 'var(--stop, #a83529)' }}>（成本会计已改 {(full - raw) > 0 ? '+' : ''}{fmt(full - raw)}）</span>
+                        : '（数值未变，仅版本口径）'}</div>}</span> })()
+                  : '—'],
                 ['初审 / 终审', <span style={{ fontSize: 12, lineHeight: 1.5 }}>
                   初审 {entry.finalizedBy ? entry.finalizedBy + ' · ' : ''}{entry.finalizedAt || '—'}<br />
                   终审 {entry.ack?.by ? entry.ack.by + ' · ' : ''}{entry.ack?.at || '—'}</span>],

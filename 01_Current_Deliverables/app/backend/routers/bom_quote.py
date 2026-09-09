@@ -410,6 +410,7 @@ def _entry_view(e, finals):
         "srcLabel": e.get("src_label") or "",
         "hasGoodsVersion": bool(e.get("goods_version")),
         "goodsVersion": _goods_view(e.get("goods_version")),
+        "rawVersion": e.get("raw_version") or None,     # 财务复核顶替商务输出时的采购原始参考（V2.547）
         "srcFile": e.get("src_file") or "", "sheet": e.get("sheet") or "",
         "status": e.get("status") or "未复核", "isFinal": is_final,
         "staleNote": e.get("stale_note") or "",     # 上游被替换→打回未复核时的提醒
@@ -481,9 +482,10 @@ def _purge_staging():
 
 def _stage_files(files, approval_no, source_type):
     """files=[(filename, bytes, label)]（label＝钉钉控件标注，手工上传传 ""）。解析→暂存→返回预检结果。
-    来源方按标注判定：商务输出/商务复核→采购商务版(procurement，全量·复核底稿)、商品版本→成本会计商品版(costacct)。
-    **商品版不单独入账**：它删了型号/规格/供应商三列，只作同产品商务版底稿的「留档+价/税 diff」；
-    同产品有商务版又有商品版时，商品版挂到商务版记录上；仅商品版无商务版时降级作底稿并标缺列。"""
+    来源方按标注判定：商务输出/商务复核→采购商务版(procurement)、财务复核→财务复核版(finance，成本会计复核后的全量财务版)、商品版本→成本会计商品版(costacct)。
+    **财务复核顶替商务输出**(V2.547)：同产品既有商务输出又有财务复核 → 以财务复核入账(台账=财务版)，商务输出降为「采购原始」参考差异、不单独入账。
+    **商品版不单独入账**：它删了型号/规格/供应商三列，是财务版(或商务版)的脱敏形态，只作同产品底稿的「留档+价/税 diff」；
+    同产品有底稿又有商品版时，商品版挂到底稿记录上；仅商品版无底稿时降级作底稿并标缺列。"""
     _purge_staging()
     sid = uuid.uuid4().hex[:16]
     sdir = os.path.join(STAGING_DIR, sid)
@@ -525,7 +527,23 @@ def _stage_files(files, approval_no, source_type):
             it = {"stagedFile": safe, "rec": rec, "comp": bq.compose(rec),
                   "origin": origin, "srcLabel": label, "productKey": bq.product_key(rec)}
             (goods if origin == "costacct" else parsed).append(it)
-    # 商品版配对到同产品商务版底稿；配不上（仅商品版）→ 降级入 parsed 并标缺列
+    # 财务复核版（成本会计复核后的全量财务版）顶替商务输出作底稿（V2.547）：同产品若既有 商务输出 又有 财务复核，
+    # 说明财务复核出问题改了数 → **入账以财务复核为准**（台账=财务版），商务输出降为「采购原始」差异参考挂在旁边、不单独入账。
+    # 财务复核==商品版是同一个财务版（商品版只是脱敏形态），故商品版随后配到财务复核底稿、diff 应为空。
+    for f in [p for p in parsed if p.get("origin") == "finance"]:
+        fcp = bq.norm(f["rec"].get("cpCode"))
+        raw = next((p for p in parsed if p is not f and p.get("origin") == "procurement"
+                    and ((bq.norm(p["rec"].get("cpCode")) == fcp) if fcp else (p["productKey"] == f["productKey"]))), None)
+        if raw:
+            rc = raw["comp"]
+            f["rawProcurement"] = {"srcLabel": raw.get("srcLabel") or "成本核算表（商务输出）",
+                                   "full": rc.get("full"), "mat": rc.get("mat"), "pack": rc.get("pack"),
+                                   "mfg": rc.get("mfg"), "load": rc.get("load"), "adm": rc.get("adm")}
+            if abs((rc.get("full") or 0) - (f["comp"].get("full") or 0)) > 1e-4:
+                warnings.append("%s 财务复核改了商务输出：全成本含税 %.4f → %.4f，已以财务复核版入账（商务输出留作采购原始参考）"
+                                % (f["rec"].get("cpCode") or "", rc.get("full") or 0, f["comp"].get("full") or 0))
+            parsed.remove(raw)      # 商务输出不再单独入账
+    # 商品版配对到同产品底稿（有财务复核先配财务复核，否则配商务输出）；配不上（仅商品版）→ 降级入 parsed 并标缺列
     # V2.457：**先按 CP 码配**（CP＝身份，V2.425），再退身份键(名|CP)。实证 240399：商务版 CP04107901 页头被写成「…-J-半成品」、
     # 商品版写「…-半成品」，按 名|CP 配不上 → 商品版被当成第 4 个产品单独入账（缺三列、来源方成本会计商品版）。
     for g in goods:
@@ -1680,6 +1698,7 @@ def _book_staged(prev, sid, idxs, u, historical=False):
             "src_fee": comp["srcFee"], "summary": rec.get("summary"), "materials": rec.get("materials"),
             "checks": rec.get("checks"), "recalc": rec.get("recalc"), "num_fp": it["numFp"], "source_type": prev.get("sourceType") or "manual_upload",
             "origin": it.get("origin") or "", "src_label": it.get("srcLabel") or "", "goods_version": goods_ver,
+            "raw_version": it.get("rawProcurement"),      # 财务复核顶替商务输出时，采购原始底稿留作参考（V2.547）
             "group_id": gid_of.get(it.get("stagedFile")), "active": 1,
             "approval_no": appno, "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"),
             "status": "未复核", "created_by": u["name"],

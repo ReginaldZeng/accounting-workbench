@@ -1325,8 +1325,8 @@ def match_bom_list(rec, bom_lists):
 #   成本会计商品版(costacct)：成本会计在「商品版本」槽输出的脱敏公开版（删了型号/规格/供应商三列，可能调过价/税）；
 #   手工上传(manual)/评论区上传(comment)：渠道兜底。
 # 判定优先级：控件标注含「商品版」→costacct、含「商务」→procurement；否则按解析类型（BOM清单→research、核算表→procurement）。
-ORIGIN_LABELS = {"research": "研发BOM", "procurement": "采购商务版", "costacct": "成本会计商品版",
-                 "manual": "手工上传", "comment": "评论区上传"}
+ORIGIN_LABELS = {"research": "研发BOM", "procurement": "采购商务版", "finance": "财务复核版",
+                 "costacct": "成本会计商品版", "manual": "手工上传", "comment": "评论区上传"}
 
 
 def origin_from_label(label, source_type="", is_bom_list=False):
@@ -1334,6 +1334,10 @@ def origin_from_label(label, source_type="", is_bom_list=False):
     lb = str(label or "")
     if "商品版" in lb:
         return "costacct"
+    # 「成本核算表（财务复核）」＝成本会计复核后的**全量财务版**（可能改了商务输出的数）；与商品版是同一个财务版，
+    # 商品版只是它的脱敏对外形态。同产品有商务输出又有财务复核 → 财务复核顶替商务输出作底稿（见 _stage_files）。
+    if "财务" in lb:
+        return "finance"
     if "商务" in lb:
         return "procurement"
     if source_type == "dingtalk_comment":
