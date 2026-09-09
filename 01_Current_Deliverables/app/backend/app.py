@@ -3548,21 +3548,15 @@ def _bankpull_alert_check():
                     "此时共享盘的新流水不会自动接入工作台。请检查那台常开内网电脑是否关机、"
                     "或「银行流水取件机」计划任务是否停了。期间可在「数据接入」页手工上传流水包兜底。"
                     % (last, mins, host))
-            conf = notifier.load_dingtalk_conf()
-            if conf:
-                conf = {**conf, "mobiles": [str(m) for m in mobiles], "userids": []}
-            res = notifier.send_dingtalk(text, conf)
+            res = notifier.send_dingtalk(text, _recip_conf(mobiles))
             db.set_setting(_BANKPULL_ALERTED, {"at": _now(), "ago_sec": ago,
                                                "sent": bool(res.get("sent")), "detail": res}, "系统告警")
         elif (not down) and alerted:
             # 恢复了：清标记 + 发一条恢复通知（让收到过告警的人知道好了）
             mobiles = db.get_setting(_BANKPULL_ALERT_MOB, None) or []
             if mobiles:
-                conf = notifier.load_dingtalk_conf()
-                if conf:
-                    conf = {**conf, "mobiles": [str(m) for m in mobiles], "userids": []}
                 notifier.send_dingtalk("✅【银行流水取件机】已恢复\n\n最近回报：%s。共享盘自动接入恢复正常。"
-                                       % rec.get("at", "?"), conf)
+                                       % rec.get("at", "?"), _recip_conf(mobiles))
             db.set_setting(_BANKPULL_ALERTED, None, "系统告警")
     except Exception:
         pass   # 告警自检绝不能弄垮任何调用它的接口
@@ -3634,20 +3628,14 @@ def _one_pull_alert(m):
             text = ("⚠️【%s】停机预警\n\n最近一次回报：%s（约 %d 分钟前）\n所在电脑：%s\n\n%s"
                     % (m["name"], st["at"] or "?", round(st["ago_sec"] / 60),
                        st["rec"].get("host", "?"), m["down_hint"]))
-            conf = notifier.load_dingtalk_conf()
-            if conf:
-                conf = {**conf, "mobiles": [str(x) for x in mobiles], "userids": []}
-            res = notifier.send_dingtalk(text, conf)
+            res = notifier.send_dingtalk(text, _recip_conf(mobiles))
             db.set_setting(m["alerted_key"], {"at": _now(), "ago_sec": st["ago_sec"],
                                               "sent": bool(res.get("sent")), "detail": res}, "系统告警")
         elif (not down) and alerted:
             mobiles = db.get_setting(m["mob_key"], None) or []
             if mobiles:
-                conf = notifier.load_dingtalk_conf()
-                if conf:
-                    conf = {**conf, "mobiles": [str(x) for x in mobiles], "userids": []}
                 notifier.send_dingtalk("✅【%s】已恢复\n\n最近回报：%s。%s"
-                                       % (m["name"], st["at"] or "?", m["recover_hint"]), conf)
+                                       % (m["name"], st["at"] or "?", m["recover_hint"]), _recip_conf(mobiles))
             db.set_setting(m["alerted_key"], None, "系统告警")
     except Exception:
         pass   # 告警自检绝不能弄垮调用它的接口
@@ -3749,7 +3737,7 @@ def portal_machines_alert_set(body: dict, request: Request):
     if not m:
         return {"ok": False, "msg": "未知取件机：%s" % mid}
     mobiles, names_upd = _parse_recips(body)
-    bad = [x for x in mobiles if not _re_mobile_ok(x)]
+    bad = [x for x in mobiles if not x.startswith("u:") and not _re_mobile_ok(x)]   # u:userid=通讯录选的人，跳过手机号校验
     if bad:
         return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
     db.set_setting(m["mob_key"], mobiles, u["name"])
@@ -3772,7 +3760,7 @@ def portal_machines_result_set(body: dict, request: Request):
     if not m or key not in {r["key"] for r in m.get("results", [])}:
         return {"ok": False, "msg": "未知取件机或结果通知：%s / %s" % (mid, key)}
     mobiles, names_upd = _parse_recips(body)
-    bad = [x for x in mobiles if not _re_mobile_ok(x)]
+    bad = [x for x in mobiles if not x.startswith("u:") and not _re_mobile_ok(x)]   # u:userid=通讯录选的人，跳过手机号校验
     if bad:
         return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
     db.set_setting(key, mobiles, u["name"])
@@ -3864,6 +3852,30 @@ def _mask_mobile(m):
     return (s[:3] + "****" + s[-4:]) if len(s) == 11 else s
 
 
+def _recip_conf(tokens):
+    """把收件人令牌拆成钉钉 conf：`u:<userid>`（搜通讯录选中的人）→ userids，**直接发 userid、不需读手机号权限**；
+    其余（11 位手机号，手打的外部人）→ mobiles，发时 getbymobile 转 userid（老路子）。没配钉钉→None。"""
+    conf = notifier.load_dingtalk_conf()
+    if not conf:
+        return None
+    uids, mobs = [], []
+    for t in (tokens or []):
+        s = str(t)
+        if s.startswith("u:"):
+            uids.append(s[2:])
+        else:
+            mobs.append(s)
+    return {**conf, "mobiles": mobs, "userids": uids}
+
+
+def _recip_display(token, names=None):
+    """收件人令牌 → 展示文字：`u:<userid>` 显名字（查不到兜底「钉钉联系人」）；手机号打码。"""
+    s = str(token or "")
+    if s.startswith("u:"):
+        return (names or {}).get(s) or "钉钉联系人"
+    return _mask_mobile(s)
+
+
 @app.get("/api/bom/deliver-status")
 def bom_deliver_status(request: Request):
     """BOM 报价审核工具里的【只读】送达状态：落公盘+通知通道通不通、会发给谁(打码)、上次送达、触发规则。
@@ -3880,8 +3892,9 @@ def bom_deliver_status(request: Request):
     st = _pull_status(rpt)
     mobiles = db.get_setting(_BOM_DELIVER_MOB, None) or []
     mark = db.get_setting(_BOM_DELIVER_MARK, None) or {}
+    _rnames = db.get_setting(_RECIP_NAMES, {}) or {}
     return {"ok": True, "alive": st["alive"], "ago_sec": st["ago_sec"], "at": st["at"], "deployed": st["deployed"],
-            "mobiles_masked": [_mask_mobile(x) for x in mobiles], "count": len(mobiles),
+            "mobiles_masked": [_recip_display(x, _rnames) for x in mobiles], "count": len(mobiles),
             "dingtalk_configured": notifier.dingtalk_configured(),
             "last": ({"at": mark.get("at", ""), "n": mark.get("n", 0), "sent": mark.get("sent")} if mark else None)}
 
@@ -3907,7 +3920,7 @@ def bank_pull_alert_set(body: dict, request: Request):
         import re as _re
         raw = [x for x in _re.split(r"[,;，；、\s]+", raw) if x]
     mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
-    bad = [m for m in mobiles if not _re_mobile_ok(m)]
+    bad = [m for m in mobiles if not m.startswith("u:") and not _re_mobile_ok(m)]   # u:userid=通讯录选的人
     if bad:
         return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
     db.set_setting(_BANKPULL_ALERT_MOB, mobiles, u["name"])
@@ -3942,10 +3955,7 @@ def _send_result_ding(mob_key, mark_key, sig, text):
             return
         if (db.get_setting(mark_key, None) or {}).get("sig") == sig:
             return   # 这一批刚发过（回执重试）——不重发
-        conf = notifier.load_dingtalk_conf()
-        if conf:
-            conf = {**conf, "mobiles": [str(m) for m in mobiles], "userids": []}
-        res = notifier.send_dingtalk(text, conf)
+        res = notifier.send_dingtalk(text, _recip_conf(mobiles))
         db.set_setting(mark_key, {"sig": sig, "at": _now(), "sent": bool(res.get("sent"))}, "结果通知")
     except Exception:
         pass   # 结果通知失败绝不能弄垮触发它的接口
@@ -4041,7 +4051,7 @@ def bom_deliver_set(body: dict, request: Request):
     if isinstance(raw, str):
         raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
     mobiles = [str(x).strip() for x in (raw or []) if str(x).strip()]
-    bad = [m for m in mobiles if not _re_mobile_ok(m)]
+    bad = [m for m in mobiles if not m.startswith("u:") and not _re_mobile_ok(m)]   # u:userid=通讯录选的人
     if bad:
         return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
     db.set_setting(_BOM_DELIVER_MOB, mobiles, u["name"])

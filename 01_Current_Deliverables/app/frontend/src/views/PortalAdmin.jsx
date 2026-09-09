@@ -4,7 +4,7 @@
 // 门户管理（门户内页签，仅管理员）：维护各工作台的工具卡片——所属工作台/名称/状态/概述/通用技能/AI技能。
 // 数据存 portal_tools 表，门户卡片实时读取；改这里 = 门户即时更新，无需改代码/发版。深色 pa- 作用域。
 import React, { useEffect, useState } from 'react'
-import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify, getDingtalkRoster, dingtalkPickMobiles } from '../api.js'
+import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify, getDingtalkRoster } from '../api.js'
 
 const LANES = [{ key: 'accounting', label: '财务核算组' }, { key: 'bp', label: '财务分析组 · BP' }, { key: 'legal', label: '法务部' }]
 const LANE_LABEL = { accounting: '财务核算组', bp: '财务分析组 · BP', legal: '法务部' }
@@ -303,15 +303,12 @@ function MachineMonitor() {
     if (cur.some(e => e.m === mo)) { flash(true, '这个号已经在里面了'); return }
     setEntries(isAlert, id, key, [...cur, { m: mo, n: '' }])
   }
-  const addPerson = async (isAlert, id, key, person) => {   // 搜名字选中一个人：取其手机号→加成名字标签
-    const r = await dingtalkPickMobiles([person.userid]).catch(e => ({ ok: false, msg: String(e) }))
-    if (!r.ok) { flash(false, r.msg || '取手机号失败'); return }
-    const p0 = (r.people || [])[0]
-    if (!p0 || !p0.mobile) { flash(false, (person.name || '该人') + ' 没有手机号，加不了'); return }
+  const addPerson = (isAlert, id, key, person) => {   // 搜名字选中一个人：直接存其 userid（发钉钉走 userid，不需读手机号权限）
+    const tok = 'u:' + person.userid
     const cur = entriesOf(isAlert, id, key)
-    if (cur.some(e => e.m === p0.mobile)) { flash(true, (p0.name || person.name) + ' 已经在里面了'); return }
-    setEntries(isAlert, id, key, [...cur, { m: p0.mobile, n: p0.name || person.name }])
-    flash(true, '已加入 ' + (p0.name || person.name) + '，记得点「保存」')
+    if (cur.some(e => e.m === tok)) { flash(true, (person.name || '此人') + ' 已经在里面了'); return }
+    setEntries(isAlert, id, key, [...cur, { m: tok, n: person.name || '' }])
+    flash(true, '已加入 ' + (person.name || '此人') + '，记得点「保存」')
   }
   const saveAlert = async (id) => {
     const r = await setMachineAlertRecipients(id, entriesOf(true, id)).catch(e => ({ ok: false, msg: String(e) }))
@@ -348,12 +345,16 @@ function MachineMonitor() {
             <>
               <div className="pa-chips">
                 {ents.length === 0 && <span className="pa-chip-empty">{emptyHint}</span>}
-                {ents.map(e => (
-                  <span key={e.m} className={'pa-chip' + (e.n ? '' : ' num')} title={e.n ? e.n + ' · ' + e.m : e.m}>
-                    {e.n || e.m}
-                    <span className="pa-chip-x" onClick={() => removeChip(isAlert, m.id, key, e.m)}>×</span>
-                  </span>
-                ))}
+                {ents.map(e => {
+                  const isUid = e.m.startsWith('u:')          // 通讯录选的人：存 u:userid、显名字
+                  const show = e.n || (isUid ? '钉钉联系人' : e.m)
+                  return (
+                    <span key={e.m} className={'pa-chip' + (isUid || e.n ? '' : ' num')} title={isUid ? show : (e.n ? e.n + ' · ' + e.m : e.m)}>
+                      {show}
+                      <span className="pa-chip-x" onClick={() => removeChip(isAlert, m.id, key, e.m)}>×</span>
+                    </span>
+                  )
+                })}
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <PersonSearchAdd roster={roster} rosterErr={rosterErr} onFocusLoad={ensureRoster}
