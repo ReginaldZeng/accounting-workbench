@@ -22,22 +22,21 @@ function BomDeliverPanel() {
   const alive = s.alive
   const ago = s.ago_sec == null ? '' : s.ago_sec < 90 ? '刚刚' : s.ago_sec < 3600 ? Math.round(s.ago_sec / 60) + ' 分钟前' : Math.round(s.ago_sec / 3600) + ' 小时前'
   const col = alive ? 'var(--green)' : 'var(--ink-3)'
+  // 压成一行（业务方定 2026-09-09：原大块占位太多）：状态灯 + 谁收 + 上次；触发规则/改法收进悬停提示
+  const tip = ['核算表自动送达（只读，改请联系管理员 · 门户管理 · 取件机监控）',
+    '什么情况发：成本会计「初审通过」→ 核算表自动落公盘 → 立即钉钉推送给收件人',
+    '怎么发：同一产品「财务版+脱敏版」只通知一次；一轮多份合并成一条',
+    '通道由常开的报表取件机负责' + (alive ? '' : '；它最近报平安 ' + (s.at || '—') + (ago ? '（' + ago + '）' : ''))].join(String.fromCharCode(10))
   return (
-    <div className="card" style={{ borderLeft: '3px solid ' + col, padding: '11px 14px', fontSize: 12.5, lineHeight: 1.9, marginBottom: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
-        <span className={alive ? 'nav-pulse' : ''} style={{ width: 9, height: 9, borderRadius: '50%', background: col, display: 'inline-block', flex: '0 0 auto' }} />
-        <b style={{ fontSize: 13 }}>核算表自动送达</b>
-        <span style={{ color: col, fontWeight: 600 }}>{alive ? '● 通道运行中' : '⚠ 通道可能中断'}</span>
-        <span style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--ink-3)' }}>只读 · 改请联系管理员</span>
-      </div>
-      <div style={{ color: 'var(--ink-2)', marginTop: 6 }}>
-        <div><b>会发给谁：</b>{s.count ? s.mobiles_masked.join('、') : <span style={{ color: 'var(--ink-3)' }}>未配置（暂不推送）</span>}</div>
-        <div><b>什么情况发：</b>成本会计「初审通过」→ 核算表自动落公盘 → 立即钉钉推送给上面的人</div>
-        <div><b>怎么发：</b>同一产品「财务版+脱敏版」只通知一次；一轮多份合并成一条{s.last && s.last.at ? `（上次 ${s.last.at} 推 ${s.last.n} 项）` : ''}</div>
-        {s.dingtalk_configured === false && <div style={{ color: 'var(--red)' }}>⚠ 服务器未配钉钉，暂发不出——需管理员先配。</div>}
-        {!alive && <div style={{ color: 'var(--ink-3)' }}>通道由常开的报表取件机负责；它最近报平安 {s.at || '—'}{ago ? '（' + ago + '）' : ''}。</div>}
-      </div>
-      <div style={{ marginTop: 4, fontSize: 11.5, color: 'var(--ink-3)' }}>⚙ 增减推送人请联系管理员（门户管理 · 取件机监控）</div>
+    <div className="card" title={tip} style={{ borderLeft: '3px solid ' + col, padding: '8px 14px', fontSize: 12.5, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <span className={alive ? 'nav-pulse' : ''} style={{ width: 9, height: 9, borderRadius: '50%', background: col, display: 'inline-block', flex: '0 0 auto' }} />
+      <b style={{ fontSize: 13 }}>核算表自动送达</b>
+      <span style={{ color: col, fontWeight: 600 }}>{alive ? '通道运行中' : '⚠ 通道可能中断'}</span>
+      <span style={{ color: 'var(--ink-3)' }}>·</span>
+      <span style={{ color: 'var(--ink-2)' }}>发给 {s.count ? <b>{s.mobiles_masked.join('、')}</b> : <span style={{ color: 'var(--ink-3)' }}>未配置（暂不推送）</span>}</span>
+      {s.last && s.last.at && <><span style={{ color: 'var(--ink-3)' }}>·</span><span style={{ color: 'var(--ink-3)' }}>上次 {s.last.at} 推 {s.last.n} 项</span></>}
+      {s.dingtalk_configured === false && <span style={{ color: 'var(--red)' }}>· ⚠ 服务器未配钉钉，暂发不出</span>}
+      <span style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--ink-3)', cursor: 'help' }}>ⓘ 规则/改法</span>
     </div>
   )
 }
