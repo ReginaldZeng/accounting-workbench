@@ -895,8 +895,12 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
     out = list(booked_views) + extra
     # **按依赖深度自下而上排**（业务方定 2026-09-04）：审核顺序＝先复配料、再半成品、最后成品。
     # 深度由「谁引用谁」算：没有上游的是 0 层（最底），引用了 n 层的是 n+1 层。同时带出 uses/usedBy 供画结构。
-    by_name = {bq.norm(r.get("productName")): r for r in recs}
-    pk_of = {bq.norm(r.get("productName")): bq.product_key(r) for r in recs}
+    # ⚠ 撞名保护（V2.537，业务方定 2026-09-09「甲」）：同一组里两个产品名完全相同（研发把成品也叫「…半成品」、
+    # 或都少打右括号致同名）→ 靠名字连上下游会连错。**撞名的名字一律不进连线映射**（不自动连，交给人），并给产品打 nameClash 警告。
+    from collections import Counter as _Counter
+    _name_ct = _Counter(bq.norm(r.get("productName")) for r in recs if bq.norm(r.get("productName")))
+    by_name = {bq.norm(r.get("productName")): r for r in recs if _name_ct[bq.norm(r.get("productName"))] == 1}
+    pk_of = {bq.norm(r.get("productName")): bq.product_key(r) for r in recs if _name_ct[bq.norm(r.get("productName"))] == 1}
     uses = {}
     for r in recs:
         uses[bq.product_key(r)] = [bq.norm(u["upProductName"]) for u in bq.upstream_refs(r, recs)]
@@ -923,6 +927,13 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
             x["catSuggest"] = bq.group_category(x.get("productName"), x.get("uses"),
                                                 x.get("usedBy"), x.get("supplier") or "")
             x["kindDoubt"] = False        # 结构定的建议，不再是编码打架的存疑
+    # 撞名标记：同名（norm 后）不同 CP 的产品，各自带上「撞了谁」的 CP 码 → 前端红字警告、连线不可信，请研发区分
+    _name_cps = {}
+    for x in out:
+        _name_cps.setdefault(bq.norm(x.get("productName")), set()).add((x.get("cpCode") or "").strip())
+    for x in out:
+        _mine = (x.get("cpCode") or "").strip()
+        x["nameClash"] = sorted(c for c in _name_cps.get(bq.norm(x.get("productName")), set()) if c and c != _mine)
     out.sort(key=lambda x: (x.get("depth", 0), 1 if x.get("notBooked") else 0, x.get("productName") or ""))
     return out
 

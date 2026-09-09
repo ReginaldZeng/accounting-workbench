@@ -698,6 +698,13 @@ function Seg({ value, onChange, opts }) {
     <button key={k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>{l}</button>))}</div>
 }
 
+// 撞名警告（V2.537，业务方定 2026-09-09「甲」）：同一组里两个产品名完全相同 → 靠名字连不出正确上下游，红字提示、不自动连，请研发/成本会计把名字区分开。
+function ClashBadge({ cps }) {
+  if (!cps || !cps.length) return null
+  return <span className="tag leak" style={{ marginLeft: 6 }}
+    title={`本组里有另一个产品名字和它完全相同（${cps.join('、')}）——工具靠产品名连上下游，撞名就连不对，已不自动连。请把名字区分开（如成品别叫「…半成品」、补全括号），或改产品名后重连。`}>⚠ 撞名 {cps.join('/')}</span>
+}
+
 // 组内嵌套结构 / 审核顺序（业务方定 2026-09-04）：**自下而上** 复配料 → 半成品 → 成品。
 // 深度由「谁把谁当原料用」算出来；上游没定稿，下游就定不了稿，所以顺序不是建议、是硬约束。
 // 行内层级：第 0 层（最底：复配料）不缩进，每深一层缩进并显示 └→（它把上一层当原料用）
@@ -848,7 +855,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                         title="点开看逐料明细：到底哪几味料没被算进小计">
                         <td><span className="bom-catsug">建议·{p.kindAuto}</span></td>
                         <td className="mono sub">{p.cpCode || '—'}</td>
-                        <td style={{ fontWeight: 600 }}><Lv d={p.depth} />{p.productName}<span className="tag leak" style={{ marginLeft: 4 }}>未入账</span></td>
+                        <td style={{ fontWeight: 600 }}><Lv d={p.depth} />{p.productName}<span className="tag leak" style={{ marginLeft: 4 }}>未入账</span><ClashBadge cps={p.nameClash} /></td>
                         <td className="num muted">{fmt(p.comp?.full)}</td>
                         <td>{p.checksOk ? <span className="tag ok">全平</span> : <span className="tag leak">不平</span>}</td>
                         <td colSpan={4} className="muted" style={{ fontSize: 11 }}>
@@ -879,7 +886,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                   return (<tr key={p.id}>
                     <td><CatCell p={p} /></td>
                     <td className="mono sub">{p.cpCode}</td>
-                    <td style={{ fontWeight: 600 }}><Lv d={p.depth} /><a className="lk" onClick={() => onOpen(p.id)}>{p.productName}</a></td>
+                    <td style={{ fontWeight: 600 }}><Lv d={p.depth} /><a className="lk" onClick={() => onOpen(p.id)}>{p.productName}</a><ClashBadge cps={p.nameClash} /></td>
                     <td className="num" style={{ fontWeight: 700, color: 'var(--teal)' }}>{fmt(p.comp.full)}</td>
                     <td>{ck ? (p.recalc ? <span className="tag ok" title={`小计按明细重算：源表全成本 ${fmt(p.recalc.srcFull)} → ${fmt(p.recalc.full)}（${p.recalc.diff > 0 ? '+' : ''}${fmt(p.recalc.diff)}）${(p.recalc.missing || []).length ? '；疑似漏加 ' + p.recalc.missing.join('、') : ''}；③确认即认可`}>全平·已重算</span> : <span className="tag ok">全平</span>) : <span className="tag leak">不平</span>}
                       {p.recalc && <div className="muted" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>{fmt(p.recalc.srcFull)}→{fmt(p.recalc.full)}</div>}</td>
