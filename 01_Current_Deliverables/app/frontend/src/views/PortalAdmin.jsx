@@ -207,7 +207,7 @@ function MachineMonitor() {
   const [d, setD] = useState(null)
   const [msg, setMsg] = useState(null)
   const [alertEdit, setAlertEdit] = useState({})    // {machineId: 停机告警手机号串}
-  const [resultEdit, setResultEdit] = useState({})  // {machineId: 结果通知手机号串}
+  const [resultEdit, setResultEdit] = useState({})  // {"machineId|通知键": 结果通知手机号串}
   const load = () => getMachines().then(r => { setD(r); setAlertEdit({}); setResultEdit({}) }).catch(() => {})
   useEffect(() => { load() }, [])
   const flash = (ok, t) => { setMsg({ ok, t }); setTimeout(() => setMsg(null), 2600) }
@@ -215,17 +215,12 @@ function MachineMonitor() {
     const r = await setMachineAlertRecipients(id, alertEdit[id] ?? '').catch(e => ({ ok: false, msg: String(e) }))
     flash(r.ok, r.msg); if (r.ok) load()
   }
-  const saveResult = async (id) => {
-    const r = await setMachineResultRecipients(id, resultEdit[id] ?? '').catch(e => ({ ok: false, msg: String(e) }))
+  const saveResult = async (id, key) => {
+    const r = await setMachineResultRecipients(id, key, resultEdit[id + '|' + key] ?? '').catch(e => ({ ok: false, msg: String(e) }))
     flash(r.ok, r.msg); if (r.ok) load()
   }
   if (!d) return <div className="pa-empty">加载中…</div>
   const ago = s => s == null ? '' : s < 90 ? '刚刚' : s < 3600 ? Math.round(s / 60) + ' 分钟前' : Math.round(s / 3600) + ' 小时前'
-  const RESULT = {
-    rpt: { label: '📊 报表送达通知 · 推送给谁', note: '报表同步到共享盘后，自动钉钉通知这些人可取用。' },
-    bank: { label: '💧 流水接入通知 · 推送给谁', note: '出纳上传、取件机接入流水后，自动钉钉通知这些人「可以去对账了」。' },
-    bom: { label: '📄 落公盘送达通知 · 推送给谁', note: '核算表落公盘后自动钉钉通知这些人（CP码+产品，财务版/脱敏版合一条）。' },
-  }
   return (
     <div>
       <div style={{ fontSize: 12.5, color: 'var(--ink3)', margin: '0 0 12px' }}>
@@ -268,16 +263,18 @@ function MachineMonitor() {
               </div>
               <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>停了超阈值自动用风控 AI 机器人钉钉提醒这些人。</div>
             </div>
-            <div className="pa-rcpt" style={{ borderColor: 'rgba(124,92,255,.35)' }}>
-              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 5 }}>{(RESULT[m.id] || {}).label} <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（结果 · 给干活的人）</span></div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <input value={resultEdit[m.id] ?? (m.result_mobiles || []).join(', ')}
-                  onChange={e => setResultEdit({ ...resultEdit, [m.id]: e.target.value })}
-                  placeholder="钉钉手机号，逗号隔开；留空＝不推" />
-                <button className="pa-btn pri" onClick={() => saveResult(m.id)}>保存</button>
+            {(m.results || []).map(r => (
+              <div className="pa-rcpt" key={r.key} style={{ borderColor: 'rgba(124,92,255,.35)' }}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 5 }}>{r.label} <span style={{ color: 'var(--ink3)', fontWeight: 400 }}>（结果 · 给干活的人）</span></div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input value={resultEdit[m.id + '|' + r.key] ?? (r.mobiles || []).join(', ')}
+                    onChange={e => setResultEdit({ ...resultEdit, [m.id + '|' + r.key]: e.target.value })}
+                    placeholder="钉钉手机号，逗号隔开；留空＝不推" />
+                  <button className="pa-btn pri" onClick={() => saveResult(m.id, r.key)}>保存</button>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>{r.note}</div>
               </div>
-              <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>{(RESULT[m.id] || {}).note}</div>
-            </div>
+            ))}
           </div>
         )
       })}

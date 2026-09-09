@@ -46,17 +46,10 @@ function Read-Ini {
     return $cfg
 }
 
-function Invoke-Api($cfg, [string]$path, [string]$query, $body) {
+function Invoke-Api($cfg, [string]$path, [string]$query) {
     $url = $cfg.server + $path
     if ($query) { $url += '?' + $query }
-    $p = @{ Uri = $url; Headers = @{ 'X-Pull-Token' = $cfg.pull_token }
-            UseBasicParsing = $true; TimeoutSec = [int]$cfg.timeout }
-    if ($null -ne $body) {                          # 传了 body 就转 POST（回报本轮结果用），JSON 自己按 UTF-8 编码
-        $p.Method = 'POST'
-        $p.ContentType = 'application/json;charset=utf-8'
-        $p.Body = [Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 5 -Compress))
-    }
-    $r = Invoke-WebRequest @p
+    $r = Invoke-WebRequest -Uri $url -Headers @{ 'X-Pull-Token' = $cfg.pull_token } -UseBasicParsing -TimeoutSec $cfg.timeout
     return $r.RawContentStream.ToArray()
 }
 function Invoke-ApiJson($cfg, [string]$path) {
@@ -114,12 +107,4 @@ if ($copied.Count -or $errors.Count -or $retry.Count) {
     foreach ($n in $retry) { Write-Log ('   [等] ' + $n) }
     foreach ($e in $errors) { Write-Log ('   [X]  ' + $e) }
 }
-
-# 回报本轮结果（内网往外发，不需登录）——供门户「取件机监控」显示这台在不在跑；回报失败不影响文件已落盘。
-try {
-    Invoke-Api $cfg '/api/bom/outbox/report' $null @{
-        host = $env:COMPUTERNAME; dest = $cfg.dest_dir
-        copied = $copied; skipped = $skipped; errors = $errors } | Out-Null
-} catch { Write-Log ('[!] 回执没发出去（不影响文件已落盘）：' + $_.Exception.Message) }
-
 if ($errors.Count) { exit 1 } else { exit 0 }

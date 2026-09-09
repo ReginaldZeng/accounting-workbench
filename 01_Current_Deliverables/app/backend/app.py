@@ -3502,7 +3502,6 @@ def _bankpull_alert_check():
 # 以后别的工作台加台＝加一条（lane 区分）。**银行那台的告警沿用需求方定稿的原逻辑（_bankpull_alert_check）不动**，
 # 这里只把「报表机 / BOM 小取件机」补上告警能力；三台的"在不在跑"都由 _pull_status 统一算。
 _RPTPULL_SYNC = "rpt_export_sync"     # 报表取件机回报（owner：routers/rptexport.py _SYNC_KEY）
-_BOMPULL_SYNC = "bom_pull_sync"       # BOM 小取件机回报（V2.531 新增，owner：routers/bom_quote.py 回执口）
 
 
 def _pull_registry():
@@ -3510,21 +3509,26 @@ def _pull_registry():
         {"id": "rpt", "name": "财务报表取件机", "lane": "accounting", "dir": "down", "freq": "每分钟一轮",
          "purpose": "把导出的报表搬回共享盘（兼送 BOM 核算表到公盘）", "alert": "generic", "always_on": True,
          "sync_key": _RPTPULL_SYNC, "alive_sec": 240,
-         "alerted_key": "rpt_export_alerted", "mob_key": "rpt_export_alert_mobiles", "result_mob_key": _RPT_DELIVER_MOB,
+         "alerted_key": "rpt_export_alerted", "mob_key": "rpt_export_alert_mobiles",
+         # 这台常开机干两件产出：报表落共享盘 + BOM 核算表落公盘——各一条结果通知、各配各的人
+         "results": [
+             {"key": _RPT_DELIVER_MOB, "label": "📊 报表送达通知 · 推送给谁",
+              "note": "报表同步到共享盘后，自动钉钉通知这些人可取用。"},
+             {"key": _BOM_DELIVER_MOB, "label": "📄 BOM 落公盘送达通知 · 推送给谁",
+              "note": "BOM 核算表落公盘后自动钉钉通知这些人（CP 码 + 产品，财务版 / 脱敏版合一条）。"},
+         ],
          "down_hint": "此时新导出的报表不会自动同步到共享盘，BOM 核算表也不会送到公盘。请检查那台常开内网电脑是否关机、或计划任务停了。",
          "recover_hint": "报表同步已恢复正常。"},
         {"id": "bank", "name": "银行流水取件机", "lane": "accounting", "dir": "up", "freq": "每小时一轮",
          "purpose": "把出纳放共享盘的流水推上云端", "alert": "legacy", "always_on": True,
          "sync_key": _BANKPULL_SYNC, "alive_sec": _BANKPULL_ALIVE_SEC,
-         "alerted_key": _BANKPULL_ALERTED, "mob_key": _BANKPULL_ALERT_MOB, "result_mob_key": _BANK_DELIVER_MOB,
+         "alerted_key": _BANKPULL_ALERTED, "mob_key": _BANKPULL_ALERT_MOB,
+         "results": [
+             {"key": _BANK_DELIVER_MOB, "label": "💧 流水接入通知 · 推送给谁",
+              "note": "出纳上传、取件机接入流水后，自动钉钉通知这些人「可以去对账了」。"},
+         ],
          "down_hint": "此时共享盘的新流水不会自动接入工作台。请检查那台常开内网电脑是否关机、或计划任务停了；期间可在「数据接入」页手工上传流水包兜底。",
          "recover_hint": "共享盘自动接入已恢复正常。"},
-        {"id": "bom", "name": "BOM报价取件机", "lane": "accounting", "dir": "down", "freq": "每 2 分钟一轮",
-         "purpose": "把初审通过的 BOM 核算表取到成本会计电脑、并同步到公盘", "alert": "generic", "always_on": True,
-         "sync_key": _BOMPULL_SYNC, "alive_sec": 12 * 60,
-         "alerted_key": "bom_pull_alerted", "mob_key": "bom_pull_alert_mobiles", "result_mob_key": _BOM_DELIVER_MOB,
-         "down_hint": "此时初审通过的 BOM 核算表不会自动取件、也不会送到公盘。请检查那台常开内网电脑是否关机、或计划任务停了。",
-         "recover_hint": "BOM 核算表自动取件已恢复正常。"},
     ]
 
 
@@ -3605,7 +3609,8 @@ def portal_machines(request: Request):
                     "deployed": st["deployed"], "alive": st["alive"], "ago_sec": st["ago_sec"],
                     "at": st["at"], "host": rec.get("host", ""),
                     "alert_mobiles": db.get_setting(m["mob_key"], None) or [],
-                    "result_mobiles": db.get_setting(m["result_mob_key"], None) or [],
+                    "results": [{"key": r["key"], "label": r["label"], "note": r["note"],
+                                 "mobiles": db.get_setting(r["key"], None) or []} for r in m.get("results", [])],
                     "last": {k: rec.get(k) for k in keep if k in rec}})
     return {"ok": True, "asOf": _now(), "machines": out,
             "dingtalk_configured": notifier.dingtalk_configured()}
@@ -3662,14 +3667,15 @@ def portal_machines_alert_set(body: dict, request: Request):
 
 @app.post("/api/portal/machines/result-recipients")
 def portal_machines_result_set(body: dict, request: Request):
-    """设某台取件机的【结果通知】收件人（门户管理·仅管理员）。写该机注册表里的 result_mob_key。"""
+    """设某台取件机某条【结果通知】的收件人（门户管理·仅管理员）。key 必须是该机注册表里 results 的某个键。"""
     u = _current_user(request)
     if not u or u.get("role") != "admin":
         return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
     mid = str(body.get("id") or "")
+    key = str(body.get("key") or "")
     m = next((x for x in _pull_registry() if x["id"] == mid), None)
-    if not m or not m.get("result_mob_key"):
-        return {"ok": False, "msg": "未知取件机：%s" % mid}
+    if not m or key not in {r["key"] for r in m.get("results", [])}:
+        return {"ok": False, "msg": "未知取件机或结果通知：%s / %s" % (mid, key)}
     raw = body.get("mobiles")
     if isinstance(raw, str):
         raw = [x for x in re.split(r"[,;，；、\s]+", raw) if x]
@@ -3677,10 +3683,10 @@ def portal_machines_result_set(body: dict, request: Request):
     bad = [x for x in mobiles if not _re_mobile_ok(x)]
     if bad:
         return {"ok": False, "msg": "手机号格式不对：" + "、".join(bad) + "（11 位数字）"}
-    db.set_setting(m["result_mob_key"], mobiles, u["name"])
-    db.audit(u["name"], "配置取件机结果通知收件人", m["name"], "钉钉收件人 %d 个" % len(mobiles))
-    return {"ok": True, "id": mid, "mobiles": mobiles,
-            "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空（该机结果通知关闭）"}
+    db.set_setting(key, mobiles, u["name"])
+    db.audit(u["name"], "配置取件机结果通知收件人", m["name"], "%s 钉钉 %d 个" % (key, len(mobiles)))
+    return {"ok": True, "id": mid, "key": key, "mobiles": mobiles,
+            "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空（该条结果通知关闭）"}
 
 
 def _mask_mobile(m):
