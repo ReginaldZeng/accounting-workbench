@@ -2607,40 +2607,106 @@ def balance_statement_manual(body: dict, request: Request):
     return {"ok": True, "acct": acct, "bal": val, "operator": u["name"]}
 
 
+def _stmt_analysis(a):
+    """一户的「解析」文字：对平 / 已由未达账项调平 / 本月差异·待核 / 流水不平·核对本月流水 / 备注。"""
+    if a.get("银行侧缺"):
+        return "银行侧待人工填"
+    net = a.get("调节后差额")
+    um = a.get("未达调节")
+    parts = []
+    if net is None or abs(net) <= 0.01:
+        if um is not None and abs(um) > 0.01:
+            parts.append("已由未达账项调平（未达调节 {:,.2f}）".format(um))
+        else:
+            parts.append("对平")
+    else:
+        fr = a.get("差异归属")
+        parts.append("流水不平·核对本月流水" if fr == "流水不平" else ("本月差异·待核" if fr == "本期" else "差异·待核"))
+    note = (a.get("备注") or "").strip()
+    if note:
+        parts.append("备注：" + note)
+    return "；".join(parts)
+
+
 def _build_statement_xlsx(stmt):
-    """银行余额调节表·单月扁表 xlsx（一张表，逐户一行，全科目）→ bytes。"""
+    """银行存款余额调节表·单月扁表 xlsx（逐户一行，全科目）→ bytes。
+    列：主体/科目/账户名称/账号/币别/银行期末余额/汇率/综合本位币/金蝶期末余额(原币)/数据来源/差异/解析。
+    差异＝调节后差额（能被未达账项/内部往来解释的显示 0，真差异才亮红）；按主体→科目→账户名排，斑马分组、深色表头、千分位。"""
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    NAVY, GREYLN, ZEBRA, REDF, GREENF, MUTED = "1E2761", "D8DEEC", "F4F6FC", "C0392B", "1E8E5A", "6B7280"
+    thin = Side(style="thin", color=GREYLN)
+    bd = Border(left=thin, right=thin, top=thin, bottom=thin)
+    cen = Alignment(vertical="center")
+    cenh = Alignment(vertical="center", horizontal="center")
+    rgt = Alignment(vertical="center", horizontal="right")
     wb = Workbook()
     ws = wb.active
     ws.title = "银行余额调节表"
-    cols = ["科目", "主体", "账户名称", "账号", "开户行", "币别", "账户状态", "开户日期",
-            "银行流水余额", "汇率", "综合本位币", "金蝶系统余额", "毛差", "未达调节", "调节后差额", "差异归属", "数据来源", "备注"]
-    ws.append(["银行余额调节表 · %s" % _period_str()])
-    ws["A1"].font = Font(bold=True, size=13)
-    ws.append([])
-    hdr_row = 3
+    cols = ["主体", "科目", "账户名称", "账号", "币别", "银行期末余额", "汇率",
+            "综合本位币", "金蝶期末余额（原币）", "数据来源", "差异", "解析"]
+    NC = len(cols)
+    ws.append(["银行存款余额调节表　·　%s" % _period_str()])
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NC)
+    ws["A1"].font = Font(bold=True, size=14, color=NAVY)
+    ws["A1"].alignment = cen
+    ws.row_dimensions[1].height = 26
+    ws.append(["单位：账户原币　｜　综合本位币＝原币×金蝶记账汇率（人民币=1）　｜　差异＝银行−金蝶（已按未达账项调节），解析见末列"])
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=NC)
+    ws["A2"].font = Font(size=9, color=MUTED)
+    ws["A2"].alignment = cen
+    HR = 3
     ws.append(cols)
-    for c in range(1, len(cols) + 1):
-        cell = ws.cell(row=hdr_row, column=c)
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="4B5563")
-        cell.alignment = Alignment(vertical="center")
+    for c in range(1, NC + 1):
+        cell = ws.cell(row=HR, column=c)
+        cell.font = Font(bold=True, color="FFFFFF", size=10.5)
+        cell.fill = PatternFill("solid", fgColor=NAVY)
+        cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+        cell.border = bd
+    ws.row_dimensions[HR].height = 30
     ws.freeze_panes = "A4"
-    for g in (stmt.get("groups") or []):
-        for a in (g.get("accounts") or []):
-            ws.append([
-                a.get("科目"), a.get("主体"), a.get("账户名称"), a.get("账号"), a.get("开户行"),
-                a.get("币别"), a.get("账户状态"), a.get("开户日期"),
-                (a.get("银行流水余额") if not a.get("银行侧缺") else "待人工"),
-                a.get("汇率"), a.get("综合本位币"), a.get("金蝶系统余额"),
-                (a.get("差额") if a.get("差额") is not None else ""),
-                (a.get("未达调节") if a.get("未达调节") is not None else ""),
-                (a.get("调节后差额") if a.get("调节后差额") is not None else ""),
-                a.get("差异归属"), a.get("数据来源"), a.get("备注"),
-            ])
-    for i, w in enumerate([16, 22, 26, 22, 14, 8, 10, 12, 16, 10, 16, 16, 14, 14, 14, 12, 12, 30], 1):
-        ws.column_dimensions[ws.cell(row=hdr_row, column=i).column_letter].width = w
+    # 拍平、按 主体→科目→账户名 排；跳过全零户（0/0/0 的销户，出报表噪声）
+    cat_ix = {c: i for i, c in enumerate(_STMT_CAT_ORDER)}
+    flat = [a for g in (stmt.get("groups") or []) for a in (g.get("accounts") or []) if not a.get("全零")]
+    flat.sort(key=lambda a: (str(a.get("主体") or ""), cat_ix.get(a.get("科目"), 9), str(a.get("账户名称") or "")))
+    money, ratef = "#,##0.00", "0.####"
+    r, prev_sub, zeb = HR, None, False
+    for a in flat:
+        r += 1
+        sub = str(a.get("主体") or "")
+        if sub != prev_sub:
+            zeb = not zeb
+            prev_sub = sub
+        net = a.get("调节后差额")
+        has = net is not None and abs(net) > 0.01
+        ws.append([
+            a.get("主体"), a.get("科目"), a.get("账户名称"), a.get("账号"), a.get("币别"),
+            ("待人工" if a.get("银行侧缺") else a.get("银行流水余额")),
+            a.get("汇率"), a.get("综合本位币"), a.get("金蝶系统余额"), a.get("数据来源"),
+            ("" if a.get("银行侧缺") else (net if net is not None else "")),
+            _stmt_analysis(a),
+        ])
+        for c in range(1, NC + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.border = bd
+            cell.font = Font(size=10)
+            if zeb:
+                cell.fill = PatternFill("solid", fgColor=ZEBRA)
+            cell.alignment = rgt if c in (6, 7, 8, 9, 11) else (cenh if c in (5, 10) else (
+                Alignment(vertical="center", wrap_text=True) if c == 12 else cen))
+        for c in (6, 8, 9):
+            cv = ws.cell(row=r, column=c)
+            if isinstance(cv.value, (int, float)):
+                cv.number_format = money
+        rt = ws.cell(row=r, column=7)
+        if isinstance(rt.value, (int, float)):
+            rt.number_format = ratef
+        dc = ws.cell(row=r, column=11)
+        if isinstance(dc.value, (int, float)):
+            dc.number_format = money
+            dc.font = Font(size=10, bold=has, color=(REDF if has else GREENF))
+    for i, w in enumerate([22, 15, 30, 22, 8, 16, 9, 16, 19, 12, 15, 42], 1):
+        ws.column_dimensions[ws.cell(row=HR, column=i).column_letter].width = w
     bio = BytesIO(); wb.save(bio); return bio.getvalue()
 
 
