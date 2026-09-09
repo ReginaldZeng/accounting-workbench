@@ -4,7 +4,7 @@
 // 门户管理（门户内页签，仅管理员）：维护各工作台的工具卡片——所属工作台/名称/状态/概述/通用技能/AI技能。
 // 数据存 portal_tools 表，门户卡片实时读取；改这里 = 门户即时更新，无需改代码/发版。深色 pa- 作用域。
 import React, { useEffect, useState } from 'react'
-import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients } from '../api.js'
+import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify } from '../api.js'
 
 const LANES = [{ key: 'accounting', label: '财务核算组' }, { key: 'bp', label: '财务分析组 · BP' }, { key: 'legal', label: '法务部' }]
 const LANE_LABEL = { accounting: '财务核算组', bp: '财务分析组 · BP', legal: '法务部' }
@@ -219,6 +219,11 @@ function MachineMonitor() {
     const r = await setMachineResultRecipients(id, key, resultEdit[id + '|' + key] ?? '').catch(e => ({ ok: false, msg: String(e) }))
     flash(r.ok, r.msg); if (r.ok) load()
   }
+  const testNotify = async (id, kind, key) => {
+    flash(true, '测试发送中…')
+    const r = await testMachineNotify(id, kind, key).catch(e => ({ ok: false, msg: String(e) }))
+    flash(r.ok, r.msg)
+  }
   if (!d) return <div className="pa-empty">加载中…</div>
   const ago = s => s == null ? '' : s < 90 ? '刚刚' : s < 3600 ? Math.round(s / 60) + ' 分钟前' : Math.round(s / 3600) + ' 小时前'
   return (
@@ -260,8 +265,9 @@ function MachineMonitor() {
                   onChange={e => setAlertEdit({ ...alertEdit, [m.id]: e.target.value })}
                   placeholder="钉钉手机号，逗号隔开；留空＝关闭" />
                 <button className="pa-btn pri" onClick={() => saveAlert(m.id)}>保存</button>
+                <button className="pa-btn" onClick={() => testNotify(m.id, 'alert')} title="给当前收件人发一条【测试】钉钉">发测试</button>
               </div>
-              <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>停了超阈值自动用风控 AI 机器人钉钉提醒这些人。</div>
+              <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>停了超阈值自动用风控 AI 机器人钉钉提醒这些人。「发测试」＝立刻给当前收件人发条测试，验链路。</div>
             </div>
             {(m.results || []).map(r => (
               <div className="pa-rcpt" key={r.key} style={{ borderColor: 'rgba(124,92,255,.35)' }}>
@@ -271,6 +277,7 @@ function MachineMonitor() {
                     onChange={e => setResultEdit({ ...resultEdit, [m.id + '|' + r.key]: e.target.value })}
                     placeholder="钉钉手机号，逗号隔开；留空＝不推" />
                   <button className="pa-btn pri" onClick={() => saveResult(m.id, r.key)}>保存</button>
+                  <button className="pa-btn" onClick={() => testNotify(m.id, 'result', r.key)} title="给当前收件人发一条【测试】钉钉">发测试</button>
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--ink3)', marginTop: 5 }}>{r.note}</div>
               </div>

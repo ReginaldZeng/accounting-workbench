@@ -3689,6 +3689,45 @@ def portal_machines_result_set(body: dict, request: Request):
             "msg": ("已保存 %d 个收件人" % len(mobiles)) if mobiles else "已清空（该条结果通知关闭）"}
 
 
+@app.post("/api/portal/machines/test-notify")
+def portal_machines_test_notify(body: dict, request: Request):
+    """给某条通知的【当前收件人】发一条【测试】钉钉（门户管理·仅管理员）——不必等真事件即可验证链路通不通。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    mid = str(body.get("id") or "")
+    kind = str(body.get("kind") or "")
+    m = next((x for x in _pull_registry() if x["id"] == mid), None)
+    if not m:
+        return {"ok": False, "msg": "未知取件机：%s" % mid}
+    if kind == "alert":
+        mob_key, what = m["mob_key"], "停机告警"
+    elif kind == "result":
+        key = str(body.get("key") or "")
+        r = next((x for x in m.get("results", []) if x["key"] == key), None)
+        if not r:
+            return {"ok": False, "msg": "未知结果通知：%s" % key}
+        mob_key, what = key, r["label"].replace(" · 推送给谁", "").strip()
+    else:
+        return {"ok": False, "msg": "kind 只能是 alert 或 result"}
+    mobiles = db.get_setting(mob_key, None) or []
+    if not mobiles:
+        return {"ok": False, "msg": "这条还没填收件人——先填手机号、点「保存」，再发测试。"}
+    if not notifier.dingtalk_configured():
+        return {"ok": False, "msg": "服务器还没配钉钉应用（conf.ini [dingtalk]），发不出——需先配钉钉。"}
+    text = ("🧪【测试】%s · %s\n\n这是一条测试消息：你能收到，就说明这条通知的钉钉链路是通的。\n"
+            "真事件发生时才会自动发正式通知，本条请忽略。\n（由 %s 在门户管理发起测试）"
+            % (m["name"], what, u["name"]))
+    conf = notifier.load_dingtalk_conf()
+    if conf:
+        conf = {**conf, "mobiles": [str(x) for x in mobiles], "userids": []}
+    res = notifier.send_dingtalk(text, conf)
+    db.audit(u["name"], "取件机通知·发测试", m["name"], "%s → %d 人 · sent=%s" % (mob_key, len(mobiles), res.get("sent")))
+    if res.get("sent"):
+        return {"ok": True, "msg": "已发出测试钉钉给 %d 人，去钉钉确认是否收到。" % len(mobiles)}
+    return {"ok": False, "msg": "发送未成功：" + (res.get("msg") or "钉钉返回失败")}
+
+
 def _mask_mobile(m):
     s = str(m or "")
     return (s[:3] + "****" + s[-4:]) if len(s) == 11 else s
