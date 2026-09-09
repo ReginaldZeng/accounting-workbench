@@ -4,7 +4,7 @@
 // 门户管理（门户内页签，仅管理员）：维护各工作台的工具卡片——所属工作台/名称/状态/概述/通用技能/AI技能。
 // 数据存 portal_tools 表，门户卡片实时读取；改这里 = 门户即时更新，无需改代码/发版。深色 pa- 作用域。
 import React, { useEffect, useState } from 'react'
-import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify, getDingtalkDepts, getDingtalkDeptMembers, dingtalkPickMobiles } from '../api.js'
+import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify, getDingtalkRoster, dingtalkPickMobiles } from '../api.js'
 
 const LANES = [{ key: 'accounting', label: '财务核算组' }, { key: 'bp', label: '财务分析组 · BP' }, { key: 'legal', label: '法务部' }]
 const LANE_LABEL = { accounting: '财务核算组', bp: '财务分析组 · BP', legal: '法务部' }
@@ -76,6 +76,12 @@ select.pa-inp option{background:#221A3A;color:var(--ink)}
 .pa-chip-x{cursor:pointer;color:var(--ink3);font-weight:700;line-height:1;padding:1px 5px;border-radius:9px}
 .pa-chip-x:hover{background:rgba(255,90,90,.25);color:#fff}
 .pa-chip-empty{font-size:12px;color:var(--ink3)}
+.pa-rcpt input.srch{width:250px;max-width:250px}
+.pa-srwrap{position:relative;display:inline-block}
+.pa-sr{position:absolute;z-index:30;top:36px;left:0;width:300px;max-height:238px;overflow-y:auto;background:#1b1430;border:1px solid var(--line2);border-radius:9px;padding:4px;box-shadow:0 14px 34px rgba(0,0,0,.5)}
+.pa-sr-item{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:7px;cursor:pointer;font-size:12.5px;color:var(--ink)}
+.pa-sr-item:hover{background:rgba(124,92,255,.2)}
+.pa-sr-msg{padding:8px 9px;color:var(--ink3);font-size:12px;line-height:1.6}
 `
 
 const blank = () => ({ id: null, lane: 'accounting', name: '', status: 'beta', icon: '▤', desc: '', genStr: '', aiStr: '', mods: [], statusSrc: 'manual', autoDetail: [] })
@@ -210,17 +216,47 @@ export default function PortalAdmin({ onChange }) {
 
 
 // 取件机运行监控（V2.532）：门户管理内的只读监控 + 收件人配置（仅管理员进得来这页）。
-// 手打手机号输入 + 加（本地缓冲，回车或点「加」把号码交给父层，不常驻输入框）
-function TypedAdd({ onAdd }) {
-  const [v, setV] = useState('')
-  const go = () => { const t = v.trim(); if (t) { onAdd(t); setV('') } }
+// 收件人加人（V2.543 直接搜人，取代旧「通讯录选」弹窗）：输名字→下拉搜通讯录（姓名｜岗位｜部门）点一下加；
+// 输 11 位号码→回车/点「加外部号码」当外部人。花名册由父层拉一次共享，首次聚焦时懒加载。
+function PersonSearchAdd({ roster, rosterErr, onFocusLoad, onPick, onAddNumber }) {
+  const [q, setQ] = useState('')
+  const [focused, setFocused] = useState(false)
+  const kw = q.trim()
+  const isNum = /^\d+$/.test(kw)
+  const hits = (!isNum && kw && Array.isArray(roster))
+    ? roster.filter(p => (p.name || '').includes(kw) || (p.title || '').includes(kw) || (p.dept || '').includes(kw)).slice(0, 8)
+    : []
+  const pick = (p) => { onPick(p); setQ('') }
+  const addNum = () => { if (/^\d{11}$/.test(kw)) { onAddNumber(kw); setQ('') } }
+  const open = focused && !!kw
   return (
-    <>
-      <input className="mini" value={v} placeholder="加手机号（外部人）"
-        onChange={e => setV(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); go() } }} />
-      <button className="pa-btn" onClick={go}>加</button>
-    </>
+    <div className="pa-srwrap">
+      <input className="srch" value={q} placeholder="输名字搜人加，或填 11 位手机号"
+        onFocus={() => { setFocused(true); onFocusLoad() }}
+        onBlur={() => setTimeout(() => setFocused(false), 150)}
+        onChange={e => setQ(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter' && isNum) { e.preventDefault(); addNum() } }} />
+      {open && (
+        <div className="pa-sr">
+          {isNum
+            ? (kw.length === 11
+              ? <div className="pa-sr-item" onMouseDown={e => { e.preventDefault(); addNum() }}>➕ 加外部号码 {kw}</div>
+              : <div className="pa-sr-msg">手机号 11 位，还差 {11 - kw.length} 位…</div>)
+            : (roster === null
+              ? <div className="pa-sr-msg">加载通讯录中…</div>
+              : rosterErr
+                ? <div className="pa-sr-msg" style={{ color: 'var(--red)' }}>{rosterErr}</div>
+                : hits.length === 0
+                  ? <div className="pa-sr-msg">没搜到「{kw}」</div>
+                  : hits.map(p => (
+                    <div key={p.userid} className="pa-sr-item" onMouseDown={e => { e.preventDefault(); pick(p) }}>
+                      <span>👤 {p.name}</span>
+                      {(p.title || p.dept) && <span style={{ color: 'var(--ink3)', marginLeft: 'auto', fontSize: 11.5 }}>{[p.title, p.dept].filter(Boolean).join(' · ')}</span>}
+                    </div>
+                  )))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -229,7 +265,18 @@ function MachineMonitor() {
   const [msg, setMsg] = useState(null)
   const [alertEdit, setAlertEdit] = useState({})    // {machineId: [{m,n}]}  未编辑=用后端已存
   const [resultEdit, setResultEdit] = useState({})  // {"machineId|通知键": [{m,n}]}
-  const [picker, setPicker] = useState(null)         // 通讯录选人弹窗目标 {kind,id,key} | null
+  const [roster, setRoster] = useState(null)   // 全公司花名册 [{userid,name,title,dept}]；null=没拉过
+  const [rosterErr, setRosterErr] = useState('')
+  const [rosterBusy, setRosterBusy] = useState(false)
+  const ensureRoster = () => {   // 首次聚焦搜人框时懒加载一次（钉钉走一遍部门树，别每次都拉）
+    if (roster !== null || rosterBusy) return
+    setRosterBusy(true)
+    getDingtalkRoster().then(r => {
+      setRosterBusy(false)
+      if (r.ok) setRoster(r.people || [])
+      else { setRoster([]); setRosterErr(r.msg || '拉通讯录失败') }
+    }).catch(e => { setRosterBusy(false); setRoster([]); setRosterErr(String(e)) })
+  }
   const load = () => getMachines().then(r => { setD(r); setAlertEdit({}); setResultEdit({}) }).catch(() => {})
   useEffect(() => { load() }, [])
   const flash = (ok, t) => { setMsg({ ok, t }); setTimeout(() => setMsg(null), 2600) }
@@ -256,15 +303,15 @@ function MachineMonitor() {
     if (cur.some(e => e.m === mo)) { flash(true, '这个号已经在里面了'); return }
     setEntries(isAlert, id, key, [...cur, { m: mo, n: '' }])
   }
-  const addPicked = (target, ents, noMobile) => {   // 通讯录选人回填：带名字，按号去重覆盖
-    const isAlert = target.kind === 'alert'
-    const map = new Map(entriesOf(isAlert, target.id, target.key).map(e => [e.m, e]))
-    ents.forEach(e => map.set(e.m, e))
-    setEntries(isAlert, target.id, target.key, Array.from(map.values()))
-    setPicker(null)
-    let t = '已加入 ' + ents.length + ' 人，记得点「保存」'
-    if (noMobile && noMobile.length) t += '（' + noMobile.join('、') + ' 没手机号，跳过了）'
-    flash(true, t)
+  const addPerson = async (isAlert, id, key, person) => {   // 搜名字选中一个人：取其手机号→加成名字标签
+    const r = await dingtalkPickMobiles([person.userid]).catch(e => ({ ok: false, msg: String(e) }))
+    if (!r.ok) { flash(false, r.msg || '取手机号失败'); return }
+    const p0 = (r.people || [])[0]
+    if (!p0 || !p0.mobile) { flash(false, (person.name || '该人') + ' 没有手机号，加不了'); return }
+    const cur = entriesOf(isAlert, id, key)
+    if (cur.some(e => e.m === p0.mobile)) { flash(true, (p0.name || person.name) + ' 已经在里面了'); return }
+    setEntries(isAlert, id, key, [...cur, { m: p0.mobile, n: p0.name || person.name }])
+    flash(true, '已加入 ' + (p0.name || person.name) + '，记得点「保存」')
   }
   const saveAlert = async (id) => {
     const r = await setMachineAlertRecipients(id, entriesOf(true, id)).catch(e => ({ ok: false, msg: String(e) }))
@@ -289,13 +336,12 @@ function MachineMonitor() {
         <div className="pa-mcard" style={{ borderColor: 'var(--amber)', color: 'var(--amber)', fontSize: 12.5 }}>
           ⚠ 服务器还没配钉钉应用（conf.ini [dingtalk]），配了收件人也发不出去——需先配钉钉。</div>}
       {msg && <div style={{ fontSize: 12.5, margin: '0 0 10px', fontWeight: 600, color: msg.ok ? 'var(--green)' : 'var(--red)' }}>{msg.t}</div>}
-      {picker && <ContactPicker onClose={() => setPicker(null)} onConfirm={(ents, nm) => addPicked(picker, ents, nm)} />}
       {d.machines.map(m => {
         const state = !m.deployed ? 'x' : (m.alive ? 'g' : (m.always_on ? 'r' : 'x'))
         const label = !m.deployed ? '未接监控' : (m.alive ? '在跑' : (m.always_on ? '可能已停' : '未在取件'))
         const col = state === 'g' ? 'var(--green)' : state === 'r' ? 'var(--red)' : 'var(--ink3)'
         const last = m.last || {}
-        // 一行收件人：名字/号码标签（× 删）＋ 手打加号码 ＋ 通讯录选 ＋ 保存 ＋ 发测试
+        // 一行收件人：名字/号码标签（× 删）＋ 搜名字加人/手打号码 ＋ 保存 ＋ 发测试
         const rcptRow = (isAlert, key, emptyHint) => {
           const ents = entriesOf(isAlert, m.id, key)
           return (
@@ -310,8 +356,9 @@ function MachineMonitor() {
                 ))}
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <TypedAdd onAdd={mo => addTyped(isAlert, m.id, key, mo)} />
-                <button className="pa-btn" onClick={() => setPicker(isAlert ? { kind: 'alert', id: m.id } : { kind: 'result', id: m.id, key })} title="从钉钉通讯录勾人">通讯录选</button>
+                <PersonSearchAdd roster={roster} rosterErr={rosterErr} onFocusLoad={ensureRoster}
+                  onPick={p => addPerson(isAlert, m.id, key, p)}
+                  onAddNumber={mo => addTyped(isAlert, m.id, key, mo)} />
                 <button className="pa-btn pri" onClick={() => isAlert ? saveAlert(m.id) : saveResult(m.id, key)}>保存</button>
                 <button className="pa-btn" onClick={() => testNotify(m.id, isAlert ? 'alert' : 'result', key)} title="给当前收件人发一条【测试】钉钉">发测试</button>
               </div>
@@ -352,69 +399,6 @@ function MachineMonitor() {
           </div>
         )
       })}
-    </div>
-  )
-}
-
-
-// 通讯录选人弹窗（V2.539）：按部门树钻取、勾选成员 → 取其手机号回填到收件人框。只门户管理(admin)进得来。
-function ContactPicker({ onConfirm, onClose }) {
-  const [stack, setStack] = useState([{ id: 1, name: '通讯录' }])   // 部门路径栈（面包屑）
-  const [depts, setDepts] = useState([])
-  const [members, setMembers] = useState([])
-  const [sel, setSel] = useState({})          // {userid: name}
-  const [err, setErr] = useState('')
-  const [busy, setBusy] = useState(false)
-  const load = async (id) => {
-    setBusy(true); setErr('')
-    const d = await getDingtalkDepts(id).catch(e => ({ ok: false, msg: String(e) }))
-    const mm = await getDingtalkDeptMembers(id).catch(e => ({ ok: false, msg: String(e) }))
-    setBusy(false)
-    if (!d.ok && !mm.ok) { setErr(d.msg || mm.msg || '拉通讯录失败'); setDepts([]); setMembers([]); return }
-    setDepts(d.ok ? (d.depts || []) : [])
-    setMembers(mm.ok ? (mm.members || []) : [])
-  }
-  useEffect(() => { load(1) }, [])
-  const enter = (dp) => { setStack(s => [...s, dp]); load(dp.id) }
-  const jump = (i) => { const ns = stack.slice(0, i + 1); setStack(ns); load(ns[ns.length - 1].id) }
-  const toggle = (mem) => setSel(s => { const n = { ...s }; if (n[mem.userid]) delete n[mem.userid]; else n[mem.userid] = mem.name; return n })
-  const confirm = async () => {
-    const uids = Object.keys(sel)
-    if (!uids.length) { onClose(); return }
-    setBusy(true)
-    const r = await dingtalkPickMobiles(uids).catch(e => ({ ok: false, msg: String(e) }))
-    setBusy(false)
-    if (!r.ok) { setErr(r.msg || '取手机号失败'); return }
-    onConfirm((r.people || []).filter(p => p.mobile).map(p => ({ m: p.mobile, n: p.name })),
-      (r.people || []).filter(p => !p.mobile).map(p => p.name))
-  }
-  const n = Object.keys(sel).length
-  return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
-      <div className="pa-card" style={{ width: 520, maxWidth: '92vw', maxHeight: '82vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
-        <div className="pa-ct">从钉钉通讯录选人<span className="pa-lk" onClick={onClose}>✕ 关闭</span></div>
-        <div style={{ fontSize: 12, color: 'var(--ink2)', marginBottom: 6 }}>
-          {stack.map((s, i) => <span key={i}>{i > 0 && ' / '}<span className="pa-lk" onClick={() => jump(i)}>{s.name}</span></span>)}
-        </div>
-        {err && <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 6, lineHeight: 1.6 }}>{err}</div>}
-        <div style={{ overflowY: 'auto', flex: 1, minHeight: 180, border: '1px solid var(--line)', borderRadius: 8, padding: 4 }}>
-          {busy && <div style={{ color: 'var(--ink3)', fontSize: 12, padding: 8 }}>加载中…</div>}
-          {!busy && depts.map(dp => (
-            <div key={'d' + dp.id} className="pa-item" onClick={() => enter(dp)} style={{ cursor: 'pointer' }}>
-              <span>📁 {dp.name}</span><span className="pa-lk" style={{ marginLeft: 'auto' }}>进入 ›</span></div>
-          ))}
-          {!busy && members.map(mem => (
-            <label key={mem.userid} className="pa-item" style={{ cursor: 'pointer' }}>
-              <input type="checkbox" checked={!!sel[mem.userid]} onChange={() => toggle(mem)} style={{ marginRight: 8 }} />
-              <span>👤 {mem.name}</span></label>
-          ))}
-          {!busy && !err && !depts.length && !members.length && <div style={{ color: 'var(--ink3)', fontSize: 12, padding: 8 }}>这个部门下没有子部门 / 成员</div>}
-        </div>
-        <div className="pa-bar" style={{ marginTop: 10, justifyContent: 'space-between' }}>
-          <span style={{ fontSize: 12, color: 'var(--ink2)' }}>已选 {n} 人{n > 0 ? '：' + Object.values(sel).slice(0, 4).join('、') + (n > 4 ? '…' : '') : ''}</span>
-          <span style={{ display: 'flex', gap: 8 }}><button className="pa-btn" onClick={onClose}>取消</button><button className="pa-btn pri" onClick={confirm} disabled={busy}>填入所选</button></span>
-        </div>
-      </div>
     </div>
   )
 }

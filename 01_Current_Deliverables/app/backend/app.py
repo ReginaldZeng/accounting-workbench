@@ -3821,6 +3821,16 @@ def portal_machines_test_notify(body: dict, request: Request):
     return {"ok": False, "msg": "发送未成功：" + (res.get("msg") or "钉钉返回失败")}
 
 
+@app.get("/api/dingtalk/roster")
+def dingtalk_roster(request: Request):
+    """通讯录·全公司花名册（门户管理·仅管理员）——供「搜名字选人」：返回 [{userid,name,title,dept}]，
+    **不含手机号**（手机号在点「填入所选」时才按需 user/get 取）。前端搜名字在这份花名册里前端过滤。"""
+    u = _current_user(request)
+    if not u or u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
+    return notifier.dt_roster()
+
+
 @app.get("/api/dingtalk/depts")
 def dingtalk_depts(request: Request, id: int = 1):
     """通讯录选人·列某部门的下级部门（门户管理·仅管理员）。id 缺省=根部门。"""

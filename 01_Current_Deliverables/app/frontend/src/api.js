@@ -390,7 +390,8 @@ export const getMachinesSummary = () => j('/api/portal/machines/summary')       
 export const setMachineAlertRecipients = (id, entries) => jp('/api/portal/machines/alert-recipients', { id, entries })
 export const setMachineResultRecipients = (id, key, entries) => jp('/api/portal/machines/result-recipients', { id, key, entries })
 export const testMachineNotify = (id, kind, key) => jp('/api/portal/machines/test-notify', { id, kind, key })   // 发一条测试钉钉
-// 通讯录选人（V2.539）：拉部门/成员、取选中手机号
+// 通讯录选人：搜名字（V2.543，拉全公司花名册前端过滤，不含手机号）；旧的按部门树钻取接口保留
+export const getDingtalkRoster = () => j('/api/dingtalk/roster')          // [{userid,name,title,dept}]
 export const getDingtalkDepts = (id = 1) => j('/api/dingtalk/depts?id=' + id)
 export const getDingtalkDeptMembers = (id = 1) => j('/api/dingtalk/dept-members?id=' + id)
 export const dingtalkPickMobiles = (userids) => jp('/api/dingtalk/pick-mobiles', { userids })
