@@ -3130,9 +3130,14 @@ def _outbox_safe_name(s):
 
 
 def _drop_outbox(e, who, stage="初审"):
-    """一条已初审记录 → 两份 xlsx 落 outbox。→ {ok, files, ups}"""
+    """一条已初审记录 → 两份 xlsx 落 outbox。→ {ok, files, ups}
+    **只有成品主动落盘**（业务方定 2026-09-09，甲案）：半成品/复配料审核完就好，不单独落——它们已随成品文件的上游页带出，
+    单独再落会在公盘上重复。判定用 effective_kind（人工定性的物料类别优先，初审必已定性）。"""
     if e.get("source_type") == "std_import":
         return {"ok": False, "msg": "历史标准成本导入记录无物料明细，没有采购核算表可落"}
+    kind = bq.effective_kind(e.get("cp_code"), e.get("product_name"), e.get("mat_category"))
+    if kind != "成品":
+        return {"ok": False, "skip": True, "msg": "非成品（%s）不单独落盘——已随成品文件的上游页带出" % (kind or "半成品/复配料")}
     from core import _now
     date = (e.get("finalized_at") or "")[:10] or _now()[:10]
     y, m = date[:4], date[5:7]
@@ -3164,8 +3169,8 @@ def _drop_outbox_safe(eid, who, stage="初审"):
     except Exception as ex:
         res = {"ok": False, "msg": str(ex)[:200]}
     fails = db.get_setting("bom_outbox_fail", {}) or {}
-    if res.get("ok"):
-        fails.pop(str(eid), None)
+    if res.get("ok") or res.get("skip"):
+        fails.pop(str(eid), None)          # 成功、或按「只有成品落盘」规则跳过：都不算失败，不进失败清单
     else:
         db.bom_add_audit(eid, who, "落盘公盘失败", "", res.get("msg") or "")
         fails[str(eid)] = {"at": _now(), "msg": res.get("msg") or "", "by": who}

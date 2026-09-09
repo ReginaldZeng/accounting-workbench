@@ -249,7 +249,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
         flash(r.finalized
           ? (r.historical
             ? `已按历史版补审：${cat}——不替代当前版、不对外，同单的下游可以定稿了`
-            : `${r.backfillSealed ? '补录单初审通过·已盖「补录」戳定稿（不经财务BP终审）' : '已定稿'}${r.outbox ? (r.outbox.ok ? '　· 已落盘公盘（财务版+脱敏版）' : `　· ⚠ 落盘公盘失败：${r.outbox.msg || ''}`) : ''}：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
+            : `${r.backfillSealed ? '补录单初审通过·已盖「补录」戳定稿（不经财务BP终审）' : '已定稿'}${r.outbox ? (r.outbox.ok ? '　· 已落盘公盘（财务版+脱敏版）' : (r.outbox.skip ? '　· 半成品/复配料不单独落盘（随成品带出）' : `　· ⚠ 落盘公盘失败：${r.outbox.msg || ''}`)) : ''}：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
           : (r.needConfirm || []).length
             ? `已存定性，未定稿：原版本 ${r.needConfirm.map(c => c.cpCode).join('、')} 保留为当前版，请先核对再定稿`
             : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
@@ -1107,6 +1107,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           {(() => {
             // 落盘公盘状态（V2.524/527）：初审过的记录都显示——落过显文件名；落盘功能上线前初审的老记录显「未落盘」并给「重落公盘」入口
             if (!['初审', '已审核'].includes(entry.status) || entry.imported || entry.historical) return null
+            // 只有成品主动落盘（V2.548，甲案）：半成品/复配料随成品文件的上游页带出，不单独落
+            if (entry.kind && entry.kind !== '成品') return <div className="h-sub muted">○ {entry.kind}不单独落盘公盘——已随成品文件的上游页带出</div>
             const ob = (entry.audits || []).find(a => (a.field || '').startsWith('落盘公盘'))   // audits 最近在前
             const failed = ob && ob.field === '落盘公盘失败'
             const txt = ob ? (ob.new ?? ob.newValue ?? ob.new_value ?? ob.to ?? '') : ''
