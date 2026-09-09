@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
-  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList, bomSetUpstream,
+  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList, bomSetUpstream, bomSetName,
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
@@ -1081,6 +1081,14 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
       <div className="head">
         <div>
           <div className="h-title">采购核算表 · {entry.productName}
+            {!isStd && cfg?.canAudit && !edit && <a className="lk" style={{ fontSize: 12, fontWeight: 400, marginLeft: 6 }}
+              title="研发把成品也叫「…半成品」/漏括号致撞名时，成本会计在这里把产品名改对——连同该产品所有版本一起改、迁移定稿指针；只动标识不动成本"
+              onClick={async () => {
+                const nn = window.prompt('改产品名（连同该产品所有版本一起改；只动标识不动成本）：', entry.productName || '')
+                if (nn == null || nn.trim() === '' || nn.trim() === (entry.productName || '')) return
+                try { const r = await bomSetName(entry.id, nn.trim()); if (!r.ok) return flash(r.msg || '改名失败'); flash(`已改名${r.renamed > 1 ? `（连 ${r.renamed} 版）` : ''}`); setEntry(r.entry); load() }
+                catch (e) { flash('改名失败：' + e.message) }
+              }}>✎ 改产品名</a>}
             <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
             {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
             {entry.historical && <span className="tag late" title="审核时答 C 归档的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}

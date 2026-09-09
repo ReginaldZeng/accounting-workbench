@@ -1397,6 +1397,59 @@ async def bom_set_upstream(request: Request):
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals), "resetNote": reset}
 
 
+@router.post("/api/bom/set-name")
+async def bom_set_name(request: Request):
+    """改产品名（V2.541，业务方定 2026-09-09）：研发把成品也命名成「…半成品」/漏括号致撞名时，成本会计在工具里把名字改对。
+    → 重算产品身份键（产品名|CP），连同该产品所有版本一起改；迁移定稿指针；修别的产品对它的手动指认引用。只动标识不动成本，逐条留痕。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限（仅成本会计）"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    new_name = str(body.get("productName") or "").strip()
+    old_name = (e.get("product_name") or "").strip()
+    if not new_name:
+        return JSONResponse({"ok": False, "msg": "产品名不能为空"}, status_code=400)
+    if new_name == old_name:
+        return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+    src = _src()
+    old_key = e.get("product_key")
+    new_key = bq.product_key({"productName": new_name, "cpCode": e.get("cp_code"), "customer": e.get("customer")})
+    # 防撞键：改名后的身份键已被另一个产品（同 CP 同新名）占着 → 不能改（会塑成同一产品）
+    clash = [x for x in db.bom_list_entries(src, include_superseded=True)
+             if x.get("product_key") == new_key and x.get("product_key") != old_key]
+    if clash:
+        return JSONResponse({"ok": False, "msg": "改成「%s」后会和 %s 撞成同一产品（同 CP 同名），请换个名字区分" % (new_name, "、".join((x.get("cp_code") or "").strip() for x in clash))}, status_code=400)
+    # 连同该产品所有版本（同 old_key，含被替换旧版）一起改，保版本链不断
+    sibs = [x for x in db.bom_list_entries(src, include_superseded=True) if x.get("product_key") == old_key]
+    for x in sibs:
+        db.bom_update_entry(x["id"], {"product_name": new_name, "product_key": new_key})
+    # 迁定稿指针：old_key 指向哪版就搬到 new_key
+    fin_eid = db.bom_finals(src).get(old_key)
+    if fin_eid:
+        db.bom_clear_final(src, old_key)
+        db.bom_set_final(src, new_key, fin_eid, u["name"])
+    # 修别的产品对它的手动指认引用（manual_upstream 里指向 old_key 的 → new_key）
+    for x in db.bom_list_entries(src, include_superseded=True):
+        mu = x.get("manual_upstream") or {}
+        changed = False
+        for kk, vv in list(mu.items()):
+            pk = vv.get("pk") if isinstance(vv, dict) else vv
+            if pk == old_key:
+                if isinstance(vv, dict):
+                    vv["pk"] = new_key
+                else:
+                    mu[kk] = new_key
+                changed = True
+        if changed:
+            db.bom_update_entry(x["id"], {"manual_upstream": mu})
+    db.bom_add_audit(e["id"], u["name"], "改产品名", old_name or "（空）", new_name)
+    db.audit(u["name"], "bom_set_name", target=str(e["id"]), detail="%s → %s（连 %d 版）" % (old_name, new_name, len(sibs)))
+    return {"ok": True, "renamed": len(sibs), "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(src))}
+
+
 @router.post("/api/bom/set-erp-code")
 async def bom_set_erp_code(request: Request):
     """补/改产品的 ERP 物料编码（钉钉解析常缺此码，成本会计在台账行手工补录）。

@@ -379,6 +379,7 @@ export const bomStdImportDiscard = (batchId) => jp('/api/bom/std-import/discard'
 export const bomOutboxRedo = (entryId) => jp('/api/bom/outbox/redo', { entryId })     // V2.524 手动重落公盘
 export const getBomOutboxStatus = () => j('/api/bom/outbox/status')                    // V2.529 取件机/落盘状态
 export const bomSetUpstream = (entryId, matName, targetProductKey) => jp('/api/bom/set-upstream', { entryId, matName, targetProductKey })  // V2.540 手动指认上游
+export const bomSetName = (entryId, productName) => jp('/api/bom/set-name', { entryId, productName })  // V2.541 改产品名
 export const getBomAutoIntakeStatus = () => j('/api/bom/auto-intake/status')
 export const bomAutoIntakeRun = (notify) => jp('/api/bom/auto-intake/run', { notify })
 
