@@ -2408,7 +2408,7 @@ def _balance_statement():
     MONEY = ("1001", "1002", "1012", "1101")
     # 金蝶原币期初：按(科目,维度)去重取具体币别行（外币户原币才准，同 _balance_adjust 口径）。按账号汇总。
     # kd_name：金蝶核算维度「银行账号.名称」——电商渠道等在出纳台账里账号为空，靠这个友好户名兜住显示名。
-    kd_open, acct_code, acct_cur, kd_name = {}, {}, {}, {}
+    kd_open, acct_code, acct_cur, kd_name, kd_subject = {}, {}, {}, {}, {}
     seen = set()
     for r in bal_rows:
         code = str(r.get("科目编码") or "")
@@ -2427,9 +2427,13 @@ def _balance_statement():
         kd_open[a] = kd_open.get(a, 0.0) + rc.to_float(r.get("期初原币") or 0)
         acct_code.setdefault(a, code)
         # 金蝶友好户名＝核算维度【编码】（如"天猫1058952426@starfieldsz.com"/"宁波行通知存款户731101…"）；
-        # 维度【名称】是公司名（各户都一样），不能当户名用。电商/理财在出纳台账账号为空、匹配不上，靠这个兜住。
+        # 维度【名称】是公司名（各户都一样）——正好当【主体】兜底：电商/理财在出纳台账账号为空、_acct_info 匹配不上，
+        # 主体会空，用维度名称（公司名）兜住。
         if dim:
             kd_name.setdefault(a, dim)
+        nm = str(r.get("核算维度.银行账号.名称") or "").strip()
+        if nm:
+            kd_subject.setdefault(a, nm)
         cur = str(r.get("币别") or "").strip()
         if cur:
             acct_cur.setdefault(a, cur)
@@ -2504,6 +2508,7 @@ def _balance_statement():
             buckets[cat] = []
         sub, bank, acct_name, cur0 = _acct_info(a)
         acct_name = acct_name or kd_name.get(a, "")                     # 台账无名→用金蝶友好户名（电商渠道账号空时靠这个）
+        sub = sub or kd_subject.get(a, "")                             # 台账无主体→用金蝶维度名称（=公司名，即主体）
         cur = cur0 or acct_cur.get(a, "") or "人民币"
         kd_bal = round(kd_open.get(a, 0.0) + kd_move.get(a, 0.0), 2)     # 金蝶系统余额（原币）
         # 银行侧取值优先级：流水(银行存款) → 渠道对账(电商) → 人工录入(手填) → 待人工
