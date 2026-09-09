@@ -14,6 +14,7 @@ import threading
 import calendar
 import hashlib
 import re
+import base64
 import urllib.parse
 from io import BytesIO
 from fastapi import FastAPI, Request
@@ -2633,10 +2634,101 @@ def _stmt_analysis(a):
     return "；".join(parts)
 
 
-def _build_statement_xlsx(stmt):
-    """银行存款余额调节表·单月扁表 xlsx（逐户一行，全科目）→ bytes。
-    列：主体/科目/账户名称/账号/币别/银行期末余额/汇率/综合本位币/金蝶期末余额(原币)/数据来源/差异/解析。
-    差异＝调节后差额（能被未达账项/内部往来解释的显示 0，真差异才亮红）；按主体→科目→账户名排，斑马分组、深色表头、千分位。"""
+# ----------------------- 余额调节表·按账号存银行余额截图 -----------------------
+# 复用 period_inputs 存档（重启不丢、全员共享）：一账号一行 kind='stmt_shot:<账号>'。
+# 上传即压成缩略图(最长边≤1200px)存 b64，导出时按账号在「余额截图」列内嵌。独立 source 不与取数撞。
+_SHOT_SRC = "stmt"
+_SHOT_MAX_SIDE = 1200                    # 存档缩略图最长边(px)：够读、体积可控
+_SHOT_DISP_W, _SHOT_DISP_H = 340, 232    # 导出内嵌显示框(px)，保比缩放塞进去
+
+
+def _shot_kind(account):
+    return "stmt_shot:%s" % str(account or "").strip()
+
+
+def _thumb_encode(raw):
+    """上传的图片 → {b64, mime, w, h, bytes}；非图片 / 无 Pillow → None。"""
+    try:
+        from PIL import Image as _PILImage
+    except Exception:
+        return None
+    try:
+        im = _PILImage.open(BytesIO(raw)); im.load()
+    except Exception:
+        return None
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+    w, h = im.size
+    sc = min(1.0, float(_SHOT_MAX_SIDE) / max(w, h)) if max(w, h) else 1.0
+    if sc < 1.0:
+        im = im.resize((max(1, int(w * sc)), max(1, int(h * sc))), _PILImage.LANCZOS)
+    out = BytesIO(); im.save(out, format="PNG", optimize=True); b = out.getvalue(); mime = "image/png"
+    if len(b) > 500 * 1024:              # 照片类 PNG 偏大→退 JPEG（界面截图 PNG 通常够小，保文字清晰）
+        out = BytesIO(); im.convert("RGB").save(out, format="JPEG", quality=82); b = out.getvalue(); mime = "image/jpeg"
+    return {"b64": base64.b64encode(b).decode("ascii"), "mime": mime,
+            "w": im.size[0], "h": im.size[1], "bytes": len(b)}
+
+
+def _stmt_shot_put(account, raw, filename, operator=""):
+    enc = _thumb_encode(raw)
+    if not enc:
+        return None
+    payload = {"b64": enc["b64"], "mime": enc["mime"], "w": enc["w"], "h": enc["h"], "filename": filename}
+    meta = {"filename": filename, "mime": enc["mime"], "w": enc["w"], "h": enc["h"], "bytes": enc["bytes"]}
+    db.set_period_input(_SHOT_SRC, CFG["year"], CFG["period"], _shot_kind(account), payload, meta, operator)
+    return meta
+
+
+def _stmt_shot_get(account):
+    d = db.get_period_input(_SHOT_SRC, CFG["year"], CFG["period"], _shot_kind(account))
+    return d["payload"] if d else None
+
+
+def _stmt_shots_meta():
+    """本期所有已存截图 → {账号: meta}（只读摘要，不解图）。"""
+    out = {}
+    for r in db.list_period_inputs_by_prefix(_SHOT_SRC, CFG["year"], CFG["period"], "stmt_shot:"):
+        acct = r["kind"].split(":", 1)[1] if ":" in r["kind"] else ""
+        if not acct:
+            continue
+        m = dict(r.get("meta") or {}); m["updated_by"] = r.get("updated_by"); m["updated_at"] = r.get("updated_at")
+        out[str(acct).strip()] = m
+    return out
+
+
+def _all_statement_accounts():
+    """本期出现在余额调节表里的账号清单（走权威台账，免跑重活）→ [账号]。"""
+    recs = _auth_ledger_records(_period_str()) or []
+    return [str(r.get("账号")).strip() for r in recs if r.get("账号")]
+
+
+def _match_account_by_name(filename):
+    """从文件名里的数字段匹配到唯一账号（≥4位数字段是某账号子串，或账号尾6位现于文件名）；无唯一命中→''。"""
+    import re
+    stem = os.path.splitext(os.path.basename(str(filename or "")))[0]
+    fdig = re.sub(r"\D", "", stem)
+    runs = re.findall(r"\d{4,}", stem)
+    if not runs and len(fdig) < 4:
+        return ""
+    hits = set()
+    for a in _all_statement_accounts():
+        ad = re.sub(r"\D", "", a)
+        if not ad:
+            continue
+        ok = any((d in ad) or (ad in d) or ad.endswith(d) for d in runs)
+        if not ok and len(ad) >= 6 and ad[-6:] in fdig:
+            ok = True
+        if ok:
+            hits.add(a)
+    return next(iter(hits)) if len(hits) == 1 else ""
+
+
+def _build_statement_xlsx(stmt, shot_override=None):
+    """银行存款余额调节表 xlsx → bytes。
+    Sheet1「银行余额调节表」：逐户一行·全科目·12列（主体/科目/账户名称/账号/币别/银行期末余额/汇率/综合本位币/
+      金蝶期末余额(原币)/数据来源/差异/解析）；差异＝调节后差额（能被未达/内部往来解释的显 0，真差异亮红）。
+    Sheet2「各银行截图」：本期上传过截图时才建；按 Sheet1 同序把余额截图放大排列，每张标 主体·账户名·账号·期末余额。
+      全走浮动图（DrawingML），WPS / 新老 Excel 都正常显示，不像单元格内嵌图那样跨软件乱码。"""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     NAVY, GREYLN, ZEBRA, REDF, GREENF, MUTED = "1E2761", "D8DEEC", "F4F6FC", "C0392B", "1E8E5A", "6B7280"
@@ -2648,6 +2740,16 @@ def _build_statement_xlsx(stmt):
     wb = Workbook()
     ws = wb.active
     ws.title = "银行余额调节表"
+    # shot_override：{账号: payload}——不走库、直接喂图（预览/占位卡用）；None 时读本期已存截图
+    if shot_override is not None:
+        shots = {str(k).strip(): (v or {}) for k, v in shot_override.items()}
+    else:
+        shots = {str(k).strip(): v for k, v in (_stmt_shots_meta() or {}).items()}   # {账号: meta}
+    try:
+        from openpyxl.drawing.image import Image as _XLImage
+    except Exception:
+        _XLImage = None
+    GALLERY = bool(shots) and _XLImage is not None   # 本期有截图且组件在→另建「各银行截图」页
     cols = ["主体", "科目", "账户名称", "账号", "币别", "银行期末余额", "汇率",
             "综合本位币", "金蝶期末余额（原币）", "数据来源", "差异", "解析"]
     NC = len(cols)
@@ -2712,7 +2814,148 @@ def _build_statement_xlsx(stmt):
             dc.font = Font(size=10, bold=has, color=(REDF if has else GREENF))
     for i, w in enumerate([22, 15, 30, 22, 8, 16, 9, 16, 19, 12, 15, 42], 1):
         ws.column_dimensions[ws.cell(row=HR, column=i).column_letter].width = w
+    _build_statement_lastrow_sheet(wb, flat)     # Sheet2：各户末笔流水（真数据佐证期末余额）
+    if GALLERY:
+        _build_statement_shot_sheet(wb, flat, shots, _XLImage, shot_override)
     bio = BytesIO(); wb.save(bio); return bio.getvalue()
+
+
+def _build_statement_lastrow_sheet(wb, flat):
+    """加「各户末笔流水」页：每个银行存款户直接取其本期流水按时间排序的最后一行（真数据：日期/摘要/收支/余额），
+    末行「余额」即银行期末余额，与调节表 Sheet1 一致。无本期流水的户标注「本月无流水」。纯表格·真数据·跨 WPS/Excel 稳。"""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    NAVY, GREY, ZEB, MUT = "1E2761", "D8DEEC", "F4F6FC", "6B7280"
+    thin = Side(style="thin", color=GREY); bd = Border(thin, thin, thin, thin)
+    bank_rows, _mf, _bm = _period_bank()
+    bank_rows = bank_rows or []
+    if not bank_rows:
+        return                                   # 本期没上传流水，不加此页
+    bmrec = db.get_period_input(CFG["source"], CFG["year"], CFG["period"], "kd:bank_master")
+    bmmap = (bmrec or {}).get("payload", {}).get("map", {}) if bmrec else {}
+    def _norm(x): return re.sub(r"\D", "", str(x or ""))
+    def _num(v):
+        try:
+            return round(float(str(v).replace(",", "").strip()), 2)
+        except Exception:
+            return None
+    last = {}        # 末笔"有余额"的行（期末余额锚在这行；有的行余额留空，取最后一条带余额的）
+    last_any = {}    # 末笔任意行（兜底：万一整户都没余额列，也能显示末笔日期/摘要）
+    for row in bank_rows:
+        k = _norm(row.get("账号"))
+        if not k:
+            continue
+        key = str(row.get("时间") or row.get("交易日期") or "")
+        if k not in last_any or key >= last_any[k][0]:
+            last_any[k] = (key, row)
+        if _num(row.get("余额")) is not None and (k not in last or key >= last[k][0]):
+            last[k] = (key, row)
+    ws = wb.create_sheet("各户末笔流水")
+    cols = ["主体", "账户名称", "账号", "开户行", "末笔日期", "摘要", "收入", "支出", "期末余额"]
+    NC = len(cols)
+    ws.append(["银行流水·各户末笔（佐证期末余额）　·　%s" % _period_str()])
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NC)
+    ws["A1"].font = Font(bold=True, size=14, color=NAVY)
+    ws.append(["每户直接取其银行流水按时间排序的最后一行；末行「余额」即银行期末余额，与调节表一致。此为流水包原始数据，非人工截图。"])
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=NC)
+    ws["A2"].font = Font(size=9, color=MUT)
+    ws.append(cols)
+    for c in range(1, NC + 1):
+        cell = ws.cell(row=3, column=c)
+        cell.font = Font(bold=True, color="FFFFFF", size=10.5)
+        cell.fill = PatternFill("solid", fgColor=NAVY)
+        cell.alignment = Alignment(horizontal="center", vertical="center"); cell.border = bd
+    ws.row_dimensions[3].height = 26
+    ws.freeze_panes = "A4"
+    banks = [a for a in flat if a.get("科目") == "银行存款"]
+    r, prev, zeb = 3, None, False
+    for a in banks:
+        r += 1
+        acct = str(a.get("账号") or "").strip()
+        sub = a.get("主体") or ""
+        if sub != prev:
+            zeb = not zeb; prev = sub
+        nk = _norm(acct)
+        khang = (bmmap.get(acct) or {}).get("开户行", "")
+        stmt_bal = a.get("银行流水余额")          # Sheet1 权威期末余额（保证两页一致）
+        if nk in last_any:                        # 本期有流水 → 取末笔（余额锚在最后一条带余额的行）
+            row = (last.get(nk) or last_any.get(nk))[1]
+            endbal = stmt_bal if isinstance(stmt_bal, (int, float)) else _num(row.get("余额"))
+            vals = [sub, a.get("账户名称"), acct, khang, str(row.get("交易日期") or "")[:10],
+                    str(row.get("摘要") or "")[:24], _num(row.get("收入")), _num(row.get("支出")), endbal]
+        elif isinstance(stmt_bal, (int, float)):  # 无流水但有余额（手工录入/渠道结转）
+            vals = [sub, a.get("账户名称"), acct, khang, "", "无本月流水·余额来自手工录入/结转", None, None, stmt_bal]
+        else:                                     # 无流水、无余额 → 待补
+            vals = [sub, a.get("账户名称"), acct, khang, "",
+                    "本月无流水（余额未变·需上期结转或手工确认）", None, None, None]
+        ws.append(vals)
+        for c in range(1, NC + 1):
+            cell = ws.cell(row=r, column=c); cell.border = bd; cell.font = Font(size=10)
+            if zeb:
+                cell.fill = PatternFill("solid", fgColor=ZEB)
+            cell.alignment = Alignment(horizontal=("right" if c in (7, 8, 9) else ("center" if c in (3, 5) else "left")), vertical="center")
+            if c in (7, 8, 9) and isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+        ws.cell(row=r, column=9).font = Font(size=10, bold=True, color=NAVY)
+    for i, w in enumerate([24, 30, 20, 14, 12, 26, 14, 14, 16], 1):
+        ws.column_dimensions[ws.cell(row=3, column=i).column_letter].width = w
+
+
+def _build_statement_shot_sheet(wb, flat, shots, XLImage, shot_override=None):
+    """在工作簿里加「各银行截图」页：按 Sheet1 同序，把有截图的户逐个大图排列，每张上方标 主体·账户名·账号·期末余额。
+    浮动图排布，跨 WPS/Excel 稳。列宽/行高按图尺寸算，图与说明左对齐、之间留白。"""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    NAVY, MUTED, CARD = "1E2761", "6B7280", "EEF1F8"
+    BOX_W, BOX_H = 560, 760                # 大图显示框(px)：看得清余额，又不至于一张占一屏
+    PX2PT, PX2COLW = 0.75, 1.0 / 7.0       # 行高 px→pt；列宽 px→Excel字符宽近似
+    ws = wb.create_sheet("各银行截图")
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 3
+    ws.column_dimensions["B"].width = BOX_W * PX2COLW + 2
+    ws.append([]); ws.append(["　各银行余额截图　·　%s" % _period_str()])
+    ws["B2"].font = Font(bold=True, size=14, color=NAVY); ws["B2"].alignment = Alignment(vertical="center")
+    ws.row_dimensions[2].height = 26
+    ws.append(["　与《银行余额调节表》按同一顺序排列；截图为各账户期末余额查询页，供审核比对。"])
+    ws["B3"].font = Font(size=9, color=MUTED)
+    r = 4
+    for a in flat:
+        acct = str(a.get("账号") or "").strip()
+        if acct not in shots:
+            continue
+        if shot_override is not None:
+            p = shot_override.get(acct)
+        else:
+            try:
+                p = _stmt_shot_get(acct)
+            except Exception:
+                p = None
+        if not p or not p.get("b64"):
+            continue
+        bal = a.get("银行流水余额")            # 原币期末（与截图上余额同币种），不用综合本位币(那是折人民币)
+        cur = a.get("币别") or ""
+        tag = p.get("_cap_tag") or ("【待贴截图】 " if p.get("_placeholder") else "")
+        cap = "%s%s ｜ %s ｜ %s%s" % (tag,
+                                    a.get("主体") or "", a.get("账户名称") or "", acct,
+                                    ("　期末 %s %s" % (cur, format(bal, ",.2f")) if isinstance(bal, (int, float)) else ""))
+        r += 1
+        cell = ws.cell(row=r, column=2, value=cap)
+        cell.font = Font(bold=True, size=11, color=NAVY)
+        cell.fill = PatternFill("solid", fgColor=CARD)
+        cell.alignment = Alignment(vertical="center", indent=1)
+        ws.row_dimensions[r].height = 22
+        r += 1
+        try:
+            iw = int(p.get("w") or 0) or 1
+            ih = int(p.get("h") or 0) or 1
+            sc = min(BOX_W / iw, BOX_H / ih, 1.0)
+            dw, dh = max(1, int(iw * sc)), max(1, int(ih * sc))
+            img = XLImage(BytesIO(base64.b64decode(p["b64"])))
+            img.width, img.height = dw, dh
+            ws.add_image(img, "B%d" % r)
+            ws.row_dimensions[r].height = dh * PX2PT + 4
+        except Exception:
+            ws.cell(row=r, column=2, value="（截图读取失败：%s）" % acct)
+        r += 1                              # 留白行
+        ws.row_dimensions[r].height = 8
 
 
 @app.get("/api/balance-statement/export")
@@ -2728,6 +2971,71 @@ def balance_statement_export(request: Request):
     return Response(content=data,
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": disp})
+
+
+@app.get("/api/balance-statement/screenshots")
+def balance_statement_shots_list():
+    """本期已上传的银行余额截图清单 → {账号: 摘要}。前端据此在各账号行显示「已传/上传」态。"""
+    return {"ok": True, "period": _period_str(), "shots": _stmt_shots_meta()}
+
+
+@app.get("/api/balance-statement/screenshot")
+def balance_statement_shot_get(request: Request):
+    """取某账号的银行余额截图（返回图片本体，供前端预览/放大）。"""
+    account = (request.query_params.get("account") or "").strip()
+    p = _stmt_shot_get(account) if account else None
+    if not p or not p.get("b64"):
+        return JSONResponse({"ok": False, "msg": "该账号本期无截图"}, status_code=404)
+    try:
+        raw = base64.b64decode(p["b64"])
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "截图数据损坏"}, status_code=500)
+    return Response(content=raw, media_type=p.get("mime") or "image/png",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/balance-statement/screenshot")
+async def balance_statement_shot_put(request: Request):
+    """上传某账号的银行余额截图（原始图片字节走请求体；account/filename 走 query）。
+    未给 account 时按文件名里的数字段匹配现表账号；压成缩略图存本期，导出时按账号内嵌。"""
+    u = _require_perm(request, "claim")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「认领/处理差异」权限，不能上传余额截图"}, status_code=403)
+    blocked = _closed_block()
+    if blocked:
+        return blocked
+    q = request.query_params
+    account = (q.get("account") or "").strip()
+    filename = (q.get("filename") or "").strip()
+    raw = await request.body()
+    if not raw:
+        return {"ok": False, "msg": "空文件（请选择余额截图图片）"}
+    matched = True
+    if not account:
+        account = _match_account_by_name(filename)
+        matched = bool(account)
+        if not account:
+            return {"ok": False, "matched": False,
+                    "msg": "未能从文件名『%s』匹配到唯一账号，请在文件名里带上账号，或手动指定账号" % (filename or "?")}
+    meta = _stmt_shot_put(account, raw, filename or account, u["name"])
+    if not meta:
+        return {"ok": False, "msg": "无法识别为图片（或服务器缺 Pillow 图片组件，无法生成缩略图）"}
+    db.audit(u["name"], "余额调节表-上传余额截图", "%s / %s" % (_period_str(), account), meta.get("filename", ""))
+    return {"ok": True, "account": account, "matched": matched, "auto_matched": (not q.get("account")), "meta": meta}
+
+
+@app.delete("/api/balance-statement/screenshot")
+def balance_statement_shot_del(request: Request):
+    """删除某账号本期的银行余额截图。"""
+    u = _require_perm(request, "claim")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「认领/处理差异」权限，不能删除余额截图"}, status_code=403)
+    account = (request.query_params.get("account") or "").strip()
+    if not account:
+        return {"ok": False, "msg": "缺账号"}
+    db.delete_period_input(_SHOT_SRC, CFG["year"], CFG["period"], _shot_kind(account))
+    db.audit(u["name"], "余额调节表-删除余额截图", "%s / %s" % (_period_str(), account))
+    return {"ok": True, "account": account}
 
 
 def _channel_adjust():

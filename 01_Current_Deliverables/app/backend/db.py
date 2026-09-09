@@ -3246,6 +3246,24 @@ def list_period_inputs(source, kind):
     return [{"year": r[0], "period": r[1], "updated_by": r[2] or "", "updated_at": r[3] or ""} for r in rows]
 
 
+def list_period_inputs_by_prefix(source, year, period, prefix):
+    """本期该源、kind 以 prefix 开头的所有输入的摘要（不解 payload）→ [{kind, meta, updated_by, updated_at}]。
+    余额调节表「按账号存截图」用它一次性拿全本期截图清单(kind='stmt_shot:<账号>')，省去逐户查库。"""
+    with _engine.connect() as c:
+        rows = c.execute(select(period_inputs.c.kind, period_inputs.c.meta,
+                                period_inputs.c.updated_by, period_inputs.c.updated_at)
+                         .where(_period_where(period_inputs, source, year, period)
+                                & period_inputs.c.kind.like(prefix + "%"))).all()
+    out = []
+    for r in rows:
+        try:
+            meta = json.loads(r[1]) if r[1] else {}
+        except Exception:
+            meta = {}
+        out.append({"kind": r[0], "meta": meta, "updated_by": r[2] or "", "updated_at": r[3] or ""})
+    return out
+
+
 def period_input_meta(source, year, period, kind):
     """只取摘要（meta + 更新人/时点），不解大 payload——列状态用，省带宽。"""
     with _engine.connect() as c:
@@ -3267,6 +3285,13 @@ def clear_period_inputs(source, year, period, prefix=None):
         w = _period_where(period_inputs, source, year, period)
         if prefix:
             w = w & period_inputs.c.kind.like(prefix + "%")
+        return c.execute(delete(period_inputs).where(w)).rowcount
+
+
+def delete_period_input(source, year, period, kind):
+    """精确删本期某一 kind 的输入（按账号存的余额截图删单张用；LIKE 前缀会误伤同前缀账号，故走等值）。"""
+    with _engine.begin() as c:
+        w = _period_where(period_inputs, source, year, period) & (period_inputs.c.kind == kind)
         return c.execute(delete(period_inputs).where(w)).rowcount
 
 
