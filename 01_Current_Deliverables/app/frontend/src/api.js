@@ -378,14 +378,23 @@ export const bomStdImportConfirm = (batchId, rows, answers) => jp('/api/bom/std-
 export const bomStdImportDiscard = (batchId) => jp('/api/bom/std-import/discard', { batchId })
 export const bomOutboxRedo = (entryId) => jp('/api/bom/outbox/redo', { entryId })     // V2.524 手动重落公盘
 export const getBomOutboxStatus = () => j('/api/bom/outbox/status')                    // V2.529 取件机/落盘状态
+export const bomSetUpstream = (entryId, matName, targetProductKey) => jp('/api/bom/set-upstream', { entryId, matName, targetProductKey })  // V2.540 手动指认上游
+export const bomSetName = (entryId, productName) => jp('/api/bom/set-name', { entryId, productName })  // V2.541 改产品名
 export const getBomAutoIntakeStatus = () => j('/api/bom/auto-intake/status')
 export const bomAutoIntakeRun = (notify) => jp('/api/bom/auto-intake/run', { notify })
 
 // ── 取件机运行监控（V2.532）：门户监控页 + 首页总灯 + BOM 只读送达面板 ──
 export const getMachines = () => j('/api/portal/machines')                                 // 门户监控页（仅管理员）
 export const getMachinesSummary = () => j('/api/portal/machines/summary')                  // 首页总呼吸灯（登录即可）
-export const setMachineAlertRecipients = (id, mobiles) => jp('/api/portal/machines/alert-recipients', { id, mobiles })
-export const setMachineResultRecipients = (id, key, mobiles) => jp('/api/portal/machines/result-recipients', { id, key, mobiles })
+// entries = [{m:手机号, n:名字}]；名字仅供显示，后端只存手机号（发送/校验不变）
+export const setMachineAlertRecipients = (id, entries) => jp('/api/portal/machines/alert-recipients', { id, entries })
+export const setMachineResultRecipients = (id, key, entries) => jp('/api/portal/machines/result-recipients', { id, key, entries })
+export const testMachineNotify = (id, kind, key) => jp('/api/portal/machines/test-notify', { id, kind, key })   // 发一条测试钉钉
+// 通讯录选人：搜名字（V2.543，拉全公司花名册前端过滤，不含手机号）；旧的按部门树钻取接口保留
+export const getDingtalkRoster = () => j('/api/dingtalk/roster')          // [{userid,name,title,dept}]
+export const getDingtalkDepts = (id = 1) => j('/api/dingtalk/depts?id=' + id)
+export const getDingtalkDeptMembers = (id = 1) => j('/api/dingtalk/dept-members?id=' + id)
+export const dingtalkPickMobiles = (userids) => jp('/api/dingtalk/pick-mobiles', { userids })
 export const getBomDeliverRecipients = () => j('/api/bom/deliver-recipients')              // BOM 落公盘送达收件人（读，仅管理员）
 export const saveBomDeliverRecipients = (mobiles) => jp('/api/bom/deliver-recipients', { mobiles })
 export const getBomDeliverStatus = () => j('/api/bom/deliver-status')                      // BOM 工具只读面板：通道/发给谁/上次送达

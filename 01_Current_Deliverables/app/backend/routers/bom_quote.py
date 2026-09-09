@@ -124,6 +124,11 @@ def _upstream_status(e, finals=None, others=None):
         cp = _ncp(x.get("cp_code"))
         if cp:
             by_cp.setdefault(cp, []).append(x)
+    by_pk = {}
+    for x in (others if others is not None else db.bom_list_entries(src)):
+        if x["id"] != e["id"] and x.get("product_key"):
+            by_pk.setdefault(x.get("product_key"), []).append(x)
+    manual = e.get("manual_upstream") or {}                # 手动指认（V2.540）：{料行名: 上游产品键 或 "__none__"（明确非上游）}
     my_gid, my_ap, my_date = e.get("group_id") or "", e.get("approval_no") or "", e.get("calc_date") or ""
 
     def pick(cands):
@@ -141,13 +146,17 @@ def _upstream_status(e, finals=None, others=None):
         nm = (m.get("matName") or "").strip()
         if not nm or m.get("seg") == "包材":       # 包材不可能是半成品
             continue
-        cands, match_by = by_name.get(nm), "名称"
-        if not cands:                              # 同名配不上 → 料行型号/编码栏带的研发码与台账 cp_code 对（V2.478）
+        mk = manual.get(nm)
+        mk = (mk.get("pk") if isinstance(mk, dict) else mk)
+        if mk == "__none__":                       # 成本会计明确指认「这行不是上游、就是外购」→ 不连
+            continue
+        cands, match_by = (by_pk.get(mk), "手动指认") if mk else (by_name.get(nm), "名称")
+        if not cands and not mk:                   # 同名配不上 → 料行型号/编码栏带的研发码与台账 cp_code 对（V2.478）
             for c in (_ncp(m.get("model")), _ncp(m.get("matCode"))):
                 if c and c in by_cp:
                     cands, match_by = by_cp[c], "CP码"
                     break
-        if not cands:                              # 台账里既无同名也无同码 → 就是外购料，不当上游
+        if not cands:                              # 手动指认的产品已删 / 台账里既无同名也无同码 → 不连（外购料）
             continue
         up, lab = pick(cands)
         comp = bq.compose(_rec_from_entry(up), _fee_of(up))
@@ -354,6 +363,14 @@ def _entry_view(e, finals):
                     for b in (bom_mats or [])],
         "craft": e.get("craft") or None,          # BOM 文件里的工艺流程页（复核②）
         "upstream": ups, "upstreamBlock": _upstream_block(ups),   # 上游链路（半成品/复配料）状态与定稿硬闸理由
+        "manualUpstream": {k: (v.get("pk") if isinstance(v, dict) else v) for k, v in (e.get("manual_upstream") or {}).items()},
+        "upstreamCandidates": [{"productKey": x.get("product_key"), "cpCode": (x.get("cp_code") or "").strip(),
+                                "productName": (x.get("product_name") or "").strip(), "status": x.get("status") or "",
+                                "fullIncl": bq.compose(_rec_from_entry(x), _fee_of(x))["full"]}
+                               for x in others if x["id"] != e["id"] and x.get("source_type") != "std_import"
+                               and (x.get("product_key") or "") not in ("", e.get("product_key"))
+                               and ((e.get("group_id") and x.get("group_id") == e.get("group_id"))
+                                    or (not e.get("group_id") and e.get("approval_no") and x.get("approval_no") == e.get("approval_no")))],
         "id": e["id"], "productKey": e["product_key"], "cpCode": e["cp_code"], "erpCode": e["erp_code"],
         "productName": (e.get("product_name") or "").strip(), "customer": e.get("customer") or "",
         "packSpec": e.get("pack_spec") or "", "supplier": e.get("supplier") or "",
@@ -393,6 +410,7 @@ def _entry_view(e, finals):
         "srcLabel": e.get("src_label") or "",
         "hasGoodsVersion": bool(e.get("goods_version")),
         "goodsVersion": _goods_view(e.get("goods_version")),
+        "rawVersion": e.get("raw_version") or None,     # 财务复核顶替商务输出时的采购原始参考（V2.547）
         "srcFile": e.get("src_file") or "", "sheet": e.get("sheet") or "",
         "status": e.get("status") or "未复核", "isFinal": is_final,
         "staleNote": e.get("stale_note") or "",     # 上游被替换→打回未复核时的提醒
@@ -464,9 +482,10 @@ def _purge_staging():
 
 def _stage_files(files, approval_no, source_type):
     """files=[(filename, bytes, label)]（label＝钉钉控件标注，手工上传传 ""）。解析→暂存→返回预检结果。
-    来源方按标注判定：商务输出/商务复核→采购商务版(procurement，全量·复核底稿)、商品版本→成本会计商品版(costacct)。
-    **商品版不单独入账**：它删了型号/规格/供应商三列，只作同产品商务版底稿的「留档+价/税 diff」；
-    同产品有商务版又有商品版时，商品版挂到商务版记录上；仅商品版无商务版时降级作底稿并标缺列。"""
+    来源方按标注判定：商务输出/商务复核→采购商务版(procurement)、财务复核→财务复核版(finance，成本会计复核后的全量财务版)、商品版本→成本会计商品版(costacct)。
+    **财务复核顶替商务输出**(V2.547)：同产品既有商务输出又有财务复核 → 以财务复核入账(台账=财务版)，商务输出降为「采购原始」参考差异、不单独入账。
+    **商品版不单独入账**：它删了型号/规格/供应商三列，是财务版(或商务版)的脱敏形态，只作同产品底稿的「留档+价/税 diff」；
+    同产品有底稿又有商品版时，商品版挂到底稿记录上；仅商品版无底稿时降级作底稿并标缺列。"""
     _purge_staging()
     sid = uuid.uuid4().hex[:16]
     sdir = os.path.join(STAGING_DIR, sid)
@@ -508,7 +527,23 @@ def _stage_files(files, approval_no, source_type):
             it = {"stagedFile": safe, "rec": rec, "comp": bq.compose(rec),
                   "origin": origin, "srcLabel": label, "productKey": bq.product_key(rec)}
             (goods if origin == "costacct" else parsed).append(it)
-    # 商品版配对到同产品商务版底稿；配不上（仅商品版）→ 降级入 parsed 并标缺列
+    # 财务复核版（成本会计复核后的全量财务版）顶替商务输出作底稿（V2.547）：同产品若既有 商务输出 又有 财务复核，
+    # 说明财务复核出问题改了数 → **入账以财务复核为准**（台账=财务版），商务输出降为「采购原始」差异参考挂在旁边、不单独入账。
+    # 财务复核==商品版是同一个财务版（商品版只是脱敏形态），故商品版随后配到财务复核底稿、diff 应为空。
+    for f in [p for p in parsed if p.get("origin") == "finance"]:
+        fcp = bq.norm(f["rec"].get("cpCode"))
+        raw = next((p for p in parsed if p is not f and p.get("origin") == "procurement"
+                    and ((bq.norm(p["rec"].get("cpCode")) == fcp) if fcp else (p["productKey"] == f["productKey"]))), None)
+        if raw:
+            rc = raw["comp"]
+            f["rawProcurement"] = {"srcLabel": raw.get("srcLabel") or "成本核算表（商务输出）",
+                                   "full": rc.get("full"), "mat": rc.get("mat"), "pack": rc.get("pack"),
+                                   "mfg": rc.get("mfg"), "load": rc.get("load"), "adm": rc.get("adm")}
+            if abs((rc.get("full") or 0) - (f["comp"].get("full") or 0)) > 1e-4:
+                warnings.append("%s 财务复核改了商务输出：全成本含税 %.4f → %.4f，已以财务复核版入账（商务输出留作采购原始参考）"
+                                % (f["rec"].get("cpCode") or "", rc.get("full") or 0, f["comp"].get("full") or 0))
+            parsed.remove(raw)      # 商务输出不再单独入账
+    # 商品版配对到同产品底稿（有财务复核先配财务复核，否则配商务输出）；配不上（仅商品版）→ 降级入 parsed 并标缺列
     # V2.457：**先按 CP 码配**（CP＝身份，V2.425），再退身份键(名|CP)。实证 240399：商务版 CP04107901 页头被写成「…-J-半成品」、
     # 商品版写「…-半成品」，按 名|CP 配不上 → 商品版被当成第 4 个产品单独入账（缺三列、来源方成本会计商品版）。
     for g in goods:
@@ -895,8 +930,12 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
     out = list(booked_views) + extra
     # **按依赖深度自下而上排**（业务方定 2026-09-04）：审核顺序＝先复配料、再半成品、最后成品。
     # 深度由「谁引用谁」算：没有上游的是 0 层（最底），引用了 n 层的是 n+1 层。同时带出 uses/usedBy 供画结构。
-    by_name = {bq.norm(r.get("productName")): r for r in recs}
-    pk_of = {bq.norm(r.get("productName")): bq.product_key(r) for r in recs}
+    # ⚠ 撞名保护（V2.537，业务方定 2026-09-09「甲」）：同一组里两个产品名完全相同（研发把成品也叫「…半成品」、
+    # 或都少打右括号致同名）→ 靠名字连上下游会连错。**撞名的名字一律不进连线映射**（不自动连，交给人），并给产品打 nameClash 警告。
+    from collections import Counter as _Counter
+    _name_ct = _Counter(bq.norm(r.get("productName")) for r in recs if bq.norm(r.get("productName")))
+    by_name = {bq.norm(r.get("productName")): r for r in recs if _name_ct[bq.norm(r.get("productName"))] == 1}
+    pk_of = {bq.norm(r.get("productName")): bq.product_key(r) for r in recs if _name_ct[bq.norm(r.get("productName"))] == 1}
     uses = {}
     for r in recs:
         uses[bq.product_key(r)] = [bq.norm(u["upProductName"]) for u in bq.upstream_refs(r, recs)]
@@ -923,6 +962,13 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
             x["catSuggest"] = bq.group_category(x.get("productName"), x.get("uses"),
                                                 x.get("usedBy"), x.get("supplier") or "")
             x["kindDoubt"] = False        # 结构定的建议，不再是编码打架的存疑
+    # 撞名标记：同名（norm 后）不同 CP 的产品，各自带上「撞了谁」的 CP 码 → 前端红字警告、连线不可信，请研发区分
+    _name_cps = {}
+    for x in out:
+        _name_cps.setdefault(bq.norm(x.get("productName")), set()).add((x.get("cpCode") or "").strip())
+    for x in out:
+        _mine = (x.get("cpCode") or "").strip()
+        x["nameClash"] = sorted(c for c in _name_cps.get(bq.norm(x.get("productName")), set()) if c and c != _mine)
     out.sort(key=lambda x: (x.get("depth", 0), 1 if x.get("notBooked") else 0, x.get("productName") or ""))
     return out
 
@@ -1291,6 +1337,139 @@ async def bom_set_mat_type(request: Request):
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
 
 
+def _relink_recompute(e, mat_name, new_price_incl):
+    """把某料行的含税价改成 new_price_incl（手动指认上游后＝上游现全成本），重算 costExcl→小计→全成本→勾稽。
+    返回要 db.update 的字段 dict；找不到该料行→{}。价税分离口径（专票）同 recalc_workbook 的链路重算。"""
+    mats = [dict(m) for m in (e.get("materials") or [])]
+    hit = False
+    for m in mats:
+        if (m.get("matName") or "").strip() == mat_name and m.get("seg") != "包材":
+            tax = m.get("taxRate") if m.get("taxRate") is not None else 0.13
+            m["priceIncl"] = round(new_price_incl, 4)
+            m["costExcl"] = round((m.get("qtyPerKg") or 0) * new_price_incl / (1 + (tax or 0)), 6)
+            hit = True
+    if not hit:
+        return {}
+    orig = [m for m in mats if m.get("seg") == "原料"]
+    packs = [m for m in mats if m.get("seg") == "包材"]
+    sub_mat = round(sum(m.get("costExcl") or 0 for m in orig), 6)
+    sub_pack = round(sum(m.get("costExcl") or 0 for m in packs), 6)
+    s = dict(e.get("summary") or {})
+    var = round(sub_mat + sub_pack, 6)
+    fee_excl = sum((s.get(k) or 0) for k in ("制造费用小计不含税", "工厂费用小计不含税", "运输费用不含税", "装卸费不含税"))
+    cost_excl = round(var + fee_excl, 6)
+    s.update({"变动小计不含税": var, "成本合计不含税": cost_excl, "增值税合计": round(cost_excl * 0.13, 6),
+              "成本合计含税": round(cost_excl * 1.13, 6), "全成本含税": round(cost_excl * 1.13 + (s.get("管理费加成含税") or 0), 6)})
+    checks = bq.build_checks(sub_mat, sub_pack, s, orig, packs)
+    rec = _rec_from_entry(e)
+    rec.update({"materials": mats, "matSubtotal": sub_mat, "packSubtotal": sub_pack, "summary": s})
+    comp = bq.compose(rec, _fee_of(e))
+    return {"materials": mats, "mat_subtotal_excl": sub_mat, "pack_subtotal_excl": sub_pack,
+            "summary": s, "checks": checks, "full_cost_incl": comp["full"], "src_full": comp["full"]}
+
+
+@router.post("/api/bom/set-upstream")
+async def bom_set_upstream(request: Request):
+    """手动指认某料行的上游（V2.540，业务方定 2026-09-09）：撞名/带后缀致自动连不上时，成本会计在料行上指认
+    「它就是台账里的某半成品/复配料」→ 记 manual_upstream，并按上游现全成本重算本品成本；已审核则失效重审。
+    body: {entryId, matName, targetProductKey}；targetProductKey="__none__" 指认「非上游/外购」；="__clear__" 撤销指认恢复原价。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限（仅成本会计）"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    mat_name = str(body.get("matName") or "").strip()
+    tgt = str(body.get("targetProductKey") or "").strip()
+    row = next((m for m in (e.get("materials") or []) if (m.get("matName") or "").strip() == mat_name and m.get("seg") != "包材"), None)
+    if not row:
+        return JSONResponse({"ok": False, "msg": "本品没有名为「%s」的原料/复配料行" % mat_name}, status_code=400)
+    manual = dict(e.get("manual_upstream") or {})
+    prev = manual.get(mat_name)
+    prev_orig = prev.get("orig") if isinstance(prev, dict) else None
+    fields, note = {}, ""
+    if tgt in ("__clear__", ""):
+        if prev_orig is not None:
+            fields = _relink_recompute(e, mat_name, prev_orig)
+        manual.pop(mat_name, None)
+        note = "撤销「%s」的上游指认" % mat_name
+    elif tgt == "__none__":
+        if prev_orig is not None:
+            fields = _relink_recompute(e, mat_name, prev_orig)
+        manual[mat_name] = "__none__"
+        note = "指认「%s」为外购、非上游" % mat_name
+    else:
+        target = next((x for x in db.bom_list_entries(_src()) if x.get("product_key") == tgt and x["id"] != e["id"]), None)
+        if not target:
+            return JSONResponse({"ok": False, "msg": "指认的上游产品不存在或已失效"}, status_code=400)
+        up_full = bq.compose(_rec_from_entry(target), _fee_of(target))["full"]
+        orig = prev_orig if prev_orig is not None else row.get("priceIncl")
+        fields = _relink_recompute(e, mat_name, up_full or 0)
+        manual[mat_name] = {"pk": tgt, "orig": orig}
+        note = "指认「%s」的上游＝%s（%s），按其现全成本 %.4f 重算本品成本" % (mat_name, (target.get("cp_code") or "").strip(), (target.get("product_name") or "").strip(), up_full or 0)
+    fields["manual_upstream"] = manual
+    reset = _invalidate_review(e, fields) if fields.get("materials") is not None else None
+    db.bom_update_entry(e["id"], fields)
+    db.bom_add_audit(e["id"], u["name"], "手动指认上游", "", note + ("；" + reset if reset else ""))
+    db.audit(u["name"], "bom_set_upstream", target=str(e["id"]), detail=note)
+    finals = db.bom_finals(_src())
+    return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals), "resetNote": reset}
+
+
+@router.post("/api/bom/set-name")
+async def bom_set_name(request: Request):
+    """改产品名（V2.541，业务方定 2026-09-09）：研发把成品也命名成「…半成品」/漏括号致撞名时，成本会计在工具里把名字改对。
+    → 重算产品身份键（产品名|CP），连同该产品所有版本一起改；迁移定稿指针；修别的产品对它的手动指认引用。只动标识不动成本，逐条留痕。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限（仅成本会计）"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    new_name = str(body.get("productName") or "").strip()
+    old_name = (e.get("product_name") or "").strip()
+    if not new_name:
+        return JSONResponse({"ok": False, "msg": "产品名不能为空"}, status_code=400)
+    if new_name == old_name:
+        return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+    src = _src()
+    old_key = e.get("product_key")
+    new_key = bq.product_key({"productName": new_name, "cpCode": e.get("cp_code"), "customer": e.get("customer")})
+    # 防撞键：改名后的身份键已被另一个产品（同 CP 同新名）占着 → 不能改（会塑成同一产品）
+    clash = [x for x in db.bom_list_entries(src, include_superseded=True)
+             if x.get("product_key") == new_key and x.get("product_key") != old_key]
+    if clash:
+        return JSONResponse({"ok": False, "msg": "改成「%s」后会和 %s 撞成同一产品（同 CP 同名），请换个名字区分" % (new_name, "、".join((x.get("cp_code") or "").strip() for x in clash))}, status_code=400)
+    # 连同该产品所有版本（同 old_key，含被替换旧版）一起改，保版本链不断
+    sibs = [x for x in db.bom_list_entries(src, include_superseded=True) if x.get("product_key") == old_key]
+    for x in sibs:
+        db.bom_update_entry(x["id"], {"product_name": new_name, "product_key": new_key})
+    # 迁定稿指针：old_key 指向哪版就搬到 new_key
+    fin_eid = db.bom_finals(src).get(old_key)
+    if fin_eid:
+        db.bom_clear_final(src, old_key)
+        db.bom_set_final(src, new_key, fin_eid, u["name"])
+    # 修别的产品对它的手动指认引用（manual_upstream 里指向 old_key 的 → new_key）
+    for x in db.bom_list_entries(src, include_superseded=True):
+        mu = x.get("manual_upstream") or {}
+        changed = False
+        for kk, vv in list(mu.items()):
+            pk = vv.get("pk") if isinstance(vv, dict) else vv
+            if pk == old_key:
+                if isinstance(vv, dict):
+                    vv["pk"] = new_key
+                else:
+                    mu[kk] = new_key
+                changed = True
+        if changed:
+            db.bom_update_entry(x["id"], {"manual_upstream": mu})
+    db.bom_add_audit(e["id"], u["name"], "改产品名", old_name or "（空）", new_name)
+    db.audit(u["name"], "bom_set_name", target=str(e["id"]), detail="%s → %s（连 %d 版）" % (old_name, new_name, len(sibs)))
+    return {"ok": True, "renamed": len(sibs), "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(src))}
+
+
 @router.post("/api/bom/set-erp-code")
 async def bom_set_erp_code(request: Request):
     """补/改产品的 ERP 物料编码（钉钉解析常缺此码，成本会计在台账行手工补录）。
@@ -1519,6 +1698,7 @@ def _book_staged(prev, sid, idxs, u, historical=False):
             "src_fee": comp["srcFee"], "summary": rec.get("summary"), "materials": rec.get("materials"),
             "checks": rec.get("checks"), "recalc": rec.get("recalc"), "num_fp": it["numFp"], "source_type": prev.get("sourceType") or "manual_upload",
             "origin": it.get("origin") or "", "src_label": it.get("srcLabel") or "", "goods_version": goods_ver,
+            "raw_version": it.get("rawProcurement"),      # 财务复核顶替商务输出时，采购原始底稿留作参考（V2.547）
             "group_id": gid_of.get(it.get("stagedFile")), "active": 1,
             "approval_no": appno, "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"),
             "status": "未复核", "created_by": u["name"],
@@ -2950,9 +3130,14 @@ def _outbox_safe_name(s):
 
 
 def _drop_outbox(e, who, stage="初审"):
-    """一条已初审记录 → 两份 xlsx 落 outbox。→ {ok, files, ups}"""
+    """一条已初审记录 → 两份 xlsx 落 outbox。→ {ok, files, ups}
+    **只有成品主动落盘**（业务方定 2026-09-09，甲案）：半成品/复配料审核完就好，不单独落——它们已随成品文件的上游页带出，
+    单独再落会在公盘上重复。判定用 effective_kind（人工定性的物料类别优先，初审必已定性）。"""
     if e.get("source_type") == "std_import":
         return {"ok": False, "msg": "历史标准成本导入记录无物料明细，没有采购核算表可落"}
+    kind = bq.effective_kind(e.get("cp_code"), e.get("product_name"), e.get("mat_category"))
+    if kind != "成品":
+        return {"ok": False, "skip": True, "msg": "非成品（%s）不单独落盘——已随成品文件的上游页带出" % (kind or "半成品/复配料")}
     from core import _now
     date = (e.get("finalized_at") or "")[:10] or _now()[:10]
     y, m = date[:4], date[5:7]
@@ -2984,8 +3169,8 @@ def _drop_outbox_safe(eid, who, stage="初审"):
     except Exception as ex:
         res = {"ok": False, "msg": str(ex)[:200]}
     fails = db.get_setting("bom_outbox_fail", {}) or {}
-    if res.get("ok"):
-        fails.pop(str(eid), None)
+    if res.get("ok") or res.get("skip"):
+        fails.pop(str(eid), None)          # 成功、或按「只有成品落盘」规则跳过：都不算失败，不进失败清单
     else:
         db.bom_add_audit(eid, who, "落盘公盘失败", "", res.get("msg") or "")
         fails[str(eid)] = {"at": _now(), "msg": res.get("msg") or "", "by": who}

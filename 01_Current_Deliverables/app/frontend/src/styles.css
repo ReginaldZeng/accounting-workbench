@@ -792,6 +792,7 @@ html[data-theme=dark] .ta-board{
 .bomv .bom-org-research{color:var(--teal); background:var(--teal-bg); border-color:var(--teal);}
 .bomv .bom-org-proc{color:var(--accent); background:var(--accent-soft); border-color:var(--accent);}
 .bomv .bom-org-cost{color:var(--purple); background:var(--purple-bg); border-color:var(--purple-line);}
+.bomv .bom-org-fin{color:var(--green); background:var(--green-bg); border-color:var(--green-line);}
 .bomv .bom-org-manual{color:var(--ink-3); background:var(--bg-sub); border-color:var(--line);}
 .bomv .bom-srcline{font-size:10.5px; color:var(--ink-3); margin-top:2px;}
 .bomv .bom-gvtag{display:inline-block; font-size:10px; font-weight:600; color:var(--purple); background:var(--purple-bg);

@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
-  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList,
+  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList, bomSetUpstream, bomSetName,
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
@@ -63,6 +63,7 @@ const SRC_LABEL = { dingtalk_form: '钉钉·表单附件', dingtalk_comment: '�
 const ORIGIN_STY = {
   research: { txt: '研发BOM', cls: 'bom-org-research' },
   procurement: { txt: '采购商务版', cls: 'bom-org-proc' },
+  finance: { txt: '财务复核版', cls: 'bom-org-fin' },
   costacct: { txt: '成本会计商品版', cls: 'bom-org-cost' },
   manual: { txt: '手工上传', cls: 'bom-org-manual' },
   comment: { txt: '评论区上传', cls: 'bom-org-manual' },
@@ -248,7 +249,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
         flash(r.finalized
           ? (r.historical
             ? `已按历史版补审：${cat}——不替代当前版、不对外，同单的下游可以定稿了`
-            : `${r.backfillSealed ? '补录单初审通过·已盖「补录」戳定稿（不经财务BP终审）' : '已定稿'}${r.outbox ? (r.outbox.ok ? '　· 已落盘公盘（财务版+脱敏版）' : `　· ⚠ 落盘公盘失败：${r.outbox.msg || ''}`) : ''}：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
+            : `${r.backfillSealed ? '补录单初审通过·已盖「补录」戳定稿（不经财务BP终审）' : '已定稿'}${r.outbox ? (r.outbox.ok ? '　· 已落盘公盘（财务版+脱敏版）' : (r.outbox.skip ? '　· 半成品/复配料不单独落盘（随成品带出）' : `　· ⚠ 落盘公盘失败：${r.outbox.msg || ''}`)) : ''}：${cat} · ${q ? '建议报价' : '不建议报价'}${(r.obsoleted || []).length ? `　· 原版 ${r.obsoleted.map(c => c.cpCode).join('、')} 已失效` : ''}${(r.linked || []).length ? `　· 与 ${r.linked.map(c => c.cpCode).join('、')} 并行关联，都对外` : ''}　${r.affectedPricing?.note || ''}`)
           : (r.needConfirm || []).length
             ? `已存定性，未定稿：原版本 ${r.needConfirm.map(c => c.cpCode).join('、')} 保留为当前版，请先核对再定稿`
             : `已存定性，但还缺：${(r.missingSteps || []).join('、')}——补齐后自动可定稿`)
@@ -698,6 +699,13 @@ function Seg({ value, onChange, opts }) {
     <button key={k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>{l}</button>))}</div>
 }
 
+// 撞名警告（V2.537，业务方定 2026-09-09「甲」）：同一组里两个产品名完全相同 → 靠名字连不出正确上下游，红字提示、不自动连，请研发/成本会计把名字区分开。
+function ClashBadge({ cps }) {
+  if (!cps || !cps.length) return null
+  return <span className="tag leak" style={{ marginLeft: 6 }}
+    title={`本组里有另一个产品名字和它完全相同（${cps.join('、')}）——工具靠产品名连上下游，撞名就连不对，已不自动连。请把名字区分开（如成品别叫「…半成品」、补全括号），或改产品名后重连。`}>⚠ 撞名 {cps.join('/')}</span>
+}
+
 // 组内嵌套结构 / 审核顺序（业务方定 2026-09-04）：**自下而上** 复配料 → 半成品 → 成品。
 // 深度由「谁把谁当原料用」算出来；上游没定稿，下游就定不了稿，所以顺序不是建议、是硬约束。
 // 行内层级：第 0 层（最底：复配料）不缩进，每深一层缩进并显示 └→（它把上一层当原料用）
@@ -848,7 +856,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                         title="点开看逐料明细：到底哪几味料没被算进小计">
                         <td><span className="bom-catsug">建议·{p.kindAuto}</span></td>
                         <td className="mono sub">{p.cpCode || '—'}</td>
-                        <td style={{ fontWeight: 600 }}><Lv d={p.depth} />{p.productName}<span className="tag leak" style={{ marginLeft: 4 }}>未入账</span></td>
+                        <td style={{ fontWeight: 600 }}><Lv d={p.depth} />{p.productName}<span className="tag leak" style={{ marginLeft: 4 }}>未入账</span><ClashBadge cps={p.nameClash} /></td>
                         <td className="num muted">{fmt(p.comp?.full)}</td>
                         <td>{p.checksOk ? <span className="tag ok">全平</span> : <span className="tag leak">不平</span>}</td>
                         <td colSpan={4} className="muted" style={{ fontSize: 11 }}>
@@ -879,7 +887,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
                   return (<tr key={p.id}>
                     <td><CatCell p={p} /></td>
                     <td className="mono sub">{p.cpCode}</td>
-                    <td style={{ fontWeight: 600 }}><Lv d={p.depth} /><a className="lk" onClick={() => onOpen(p.id)}>{p.productName}</a></td>
+                    <td style={{ fontWeight: 600 }}><Lv d={p.depth} /><a className="lk" onClick={() => onOpen(p.id)}>{p.productName}</a><ClashBadge cps={p.nameClash} /></td>
                     <td className="num" style={{ fontWeight: 700, color: 'var(--teal)' }}>{fmt(p.comp.full)}</td>
                     <td>{ck ? (p.recalc ? <span className="tag ok" title={`小计按明细重算：源表全成本 ${fmt(p.recalc.srcFull)} → ${fmt(p.recalc.full)}（${p.recalc.diff > 0 ? '+' : ''}${fmt(p.recalc.diff)}）${(p.recalc.missing || []).length ? '；疑似漏加 ' + p.recalc.missing.join('、') : ''}；③确认即认可`}>全平·已重算</span> : <span className="tag ok">全平</span>) : <span className="tag leak">不平</span>}
                       {p.recalc && <div className="muted" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>{fmt(p.recalc.srcFull)}→{fmt(p.recalc.full)}</div>}</td>
@@ -997,6 +1005,12 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
     return () => { alive = false }
   }, [entry.id, isStd])
   // ④报价·改物料子类（原辅料/复配料/自产半成品，二次确认；只改原料内部、不动成本）
+  const setUpstreamMat = async (matName, targetProductKey) => {   // V2.540 手动指认上游
+    try { const r = await bomSetUpstream(entry.id, matName, targetProductKey)
+      if (!r.ok) return flash(r.msg || '指认失败')
+      flash('已更新上游连线' + (r.resetNote ? '（' + r.resetNote + '）' : '')); setEntry(r.entry); load()
+    } catch (e) { flash('指认失败：' + e.message) }
+  }
   const setMatType = async (mat, subType) => {
     try { const r = await bomSetMatType(entry.id, mat, subType); if (!r.ok) return flash(r.msg || '改类型失败'); flash(`已把「${mat.matName}」改为「${subType}」`); await onChanged() }
     catch (e) { flash('改类型失败：' + e.message) }
@@ -1068,6 +1082,14 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
       <div className="head">
         <div>
           <div className="h-title">采购核算表 · {entry.productName}
+            {!isStd && cfg?.canAudit && !edit && <a className="lk" style={{ fontSize: 12, fontWeight: 400, marginLeft: 6 }}
+              title="研发把成品也叫「…半成品」/漏括号致撞名时，成本会计在这里把产品名改对——连同该产品所有版本一起改、迁移定稿指针；只动标识不动成本"
+              onClick={async () => {
+                const nn = window.prompt('改产品名（连同该产品所有版本一起改；只动标识不动成本）：', entry.productName || '')
+                if (nn == null || nn.trim() === '' || nn.trim() === (entry.productName || '')) return
+                try { const r = await bomSetName(entry.id, nn.trim()); if (!r.ok) return flash(r.msg || '改名失败'); flash(`已改名${r.renamed > 1 ? `（连 ${r.renamed} 版）` : ''}`); setEntry(r.entry); load() }
+                catch (e) { flash('改名失败：' + e.message) }
+              }}>✎ 改产品名</a>}
             <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
             {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
             {entry.historical && <span className="tag late" title="审核时答 C 归档的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}
@@ -1085,6 +1107,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           {(() => {
             // 落盘公盘状态（V2.524/527）：初审过的记录都显示——落过显文件名；落盘功能上线前初审的老记录显「未落盘」并给「重落公盘」入口
             if (!['初审', '已审核'].includes(entry.status) || entry.imported || entry.historical) return null
+            // 只有成品主动落盘（V2.548，甲案）：半成品/复配料随成品文件的上游页带出，不单独落
+            if (entry.kind && entry.kind !== '成品') return <div className="h-sub muted">○ {entry.kind}不单独落盘公盘——已随成品文件的上游页带出</div>
             const ob = (entry.audits || []).find(a => (a.field || '').startsWith('落盘公盘'))   // audits 最近在前
             const failed = ob && ob.field === '落盘公盘失败'
             const txt = ob ? (ob.new ?? ob.newValue ?? ob.new_value ?? ob.to ?? '') : ''
@@ -1176,7 +1200,14 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
                 ['客户', entry.customer || '—'],
                 ['订单量', entry.orderQty ? fmt(entry.orderQty, 0) + ' kg' : '—'],
                 ['生产工厂', entry.supplier || '—'], ['物料类别', <CatCell p={entry} />],
-                ['数据来源', entry.origin ? <Origin o={entry.origin} /> : '—'],
+                ['数据来源', entry.origin
+                  ? (() => { const full = entry.comp?.full || 0, raw = entry.rawVersion?.full || 0
+                    return <span><Origin o={entry.origin} />{entry.rawVersion && <div className="bom-srcline" title="本单财务复核发现问题、改了商务输出的数，台账以财务复核版为准；商务输出留作采购原始参考（原件下载里仍有）">
+                      采购原始 {fmt(raw)} → 财务复核 {fmt(full)}
+                      {Math.abs(full - raw) > 1e-4
+                        ? <span style={{ color: 'var(--stop, #a83529)' }}>（成本会计已改 {(full - raw) > 0 ? '+' : ''}{fmt(full - raw)}）</span>
+                        : '（数值未变，仅版本口径）'}</div>}</span> })()
+                  : '—'],
                 ['初审 / 终审', <span style={{ fontSize: 12, lineHeight: 1.5 }}>
                   初审 {entry.finalizedBy ? entry.finalizedBy + ' · ' : ''}{entry.finalizedAt || '—'}<br />
                   终审 {entry.ack?.by ? entry.ack.by + ' · ' : ''}{entry.ack?.at || '—'}</span>],
@@ -1230,6 +1261,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
                 seg="原料" prev={prev} prevMat={prevMat} subtotal={matSub} fullIncl={full} onDrill={onOpen} all={all}
                 delta={segDelta(mats)} onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
                 spreads={spreads} onSetType={!isStd && cfg?.canAudit && !edit ? setMatType : null}
+                manualUpstream={entry.manualUpstream} upCands={entry.upstreamCandidates}
+                onSetUpstream={!isStd && cfg?.canAudit && !edit ? setUpstreamMat : null}
                 invoiceRules={cfg?.invoiceRules} onInvoice={edit ? setInvoice : null} />
               <MatSection no={2} title="包材明细" hint="「核价」查金蝶实采" rows={packs} seg="包材" prev={prev} prevMat={prevMat}
                 subtotal={packSub} fullIncl={full} onDrill={onOpen} all={all} delta={segDelta(packs)} onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
@@ -1566,7 +1599,56 @@ function MatTypeCell({ m, subType, editable, onSetType }) {
   </>)
 }
 
-function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullIncl, onDrill, all, delta, onPrice, edit, onTax, spreads, onSetType, invoiceRules, onInvoice }) {
+// 指认上游选择器（V2.543）：点开菜单指认这行复配料/半成品对应台账里的哪个子表产品——候选只列同组产品，选后按其现全成本重算本品成本
+function UpItem({ active, onClick, children }) {
+  return <div onMouseDown={onClick} className="bom-upitem"
+    style={{ padding: '4px 8px', borderRadius: 4, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      background: active ? 'var(--accent-weak, #eef4ff)' : 'transparent', color: active ? 'var(--accent)' : 'inherit' }}>
+    {active ? '✓ ' : ''}{children}
+  </div>
+}
+function UpstreamPicker({ matName, cur, cands, onPick }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [open])
+  const curCand = cands.find(c => c.productKey === cur)
+  const linked = cur && cur !== '__none__'
+  const label = cur === '__none__' ? '外购·非上游'
+    : curCand ? '↗ ' + curCand.cpCode + ' ' + curCand.productName
+    : '⚠ 指认上游'
+  const pick = v => { setOpen(false); onPick(matName, v) }
+  return (
+    <div ref={ref} className="bom-uppick" style={{ marginTop: 3, position: 'relative', display: 'inline-block' }}>
+      <a className="lk" onClick={() => setOpen(o => !o)}
+        style={{ fontSize: 10.5, color: linked ? 'var(--accent)' : (cur === '__none__' ? 'var(--ink-3)' : 'var(--stop, #a83529)') }}
+        title="这行复配料/半成品自动没连上台账里的子采购核算表——点开从同组产品里指认它对应哪个，连上后按其现全成本重算本品成本">
+        {label} ▾
+      </a>
+      {open && (
+        <div style={{ position: 'absolute', zIndex: 30, top: '100%', left: 0, minWidth: 220, maxWidth: 320,
+          background: 'var(--card, #fff)', border: '1px solid var(--line, #ddd)', borderRadius: 6,
+          boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4, fontSize: 11.5 }}>
+          <UpItem active={!cur} onClick={() => pick('')}>自动匹配（按名/CP）</UpItem>
+          <UpItem active={cur === '__none__'} onClick={() => pick('__none__')}>外购·非上游（不重算）</UpItem>
+          <div style={{ borderTop: '1px solid var(--line,#eee)', margin: '3px 0' }} />
+          {cands.length === 0
+            ? <div className="muted" style={{ padding: '4px 8px', fontSize: 10.5 }}>同组没有可指认的子表产品</div>
+            : cands.map(c => (
+              <UpItem key={c.productKey} active={cur === c.productKey} onClick={() => pick(c.productKey)}>
+                {c.cpCode} {c.productName}<span className="muted" style={{ marginLeft: 6 }}>¥{Number(c.fullIncl || 0).toFixed(2)}</span>
+              </UpItem>
+            ))}
+        </div>
+      )}
+    </div>
+  )
+}
+function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullIncl, onDrill, all, delta, onPrice, edit, onTax, spreads, onSetType, manualUpstream, upCands, onSetUpstream, invoiceRules, onInvoice }) {
   return (
     <div className="card bom-sect">
       <div className="bom-secthead"><span className="bom-no">{no}</span><b>{title}</b>
@@ -1606,7 +1688,12 @@ function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullI
                 <td className="mono">{m.matCode || '—'}</td>
                 <td style={{ fontWeight: 600, ...NOWRAP }} title={m.matName}>{semiEntry
                   ? <a className="lk" onClick={() => onDrill(semiEntry.id)}>{m.matName} ↗ 子采购核算表</a>
-                  : <>{m.matName}{nested && <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>{subType}·台账无子表</span>}</>}</td>
+                  : <>{m.matName}{nested && <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>{subType}·台账无子表</span>}</>}
+                  {/* 手动指认上游（V2.543）：复配料/半成品行自动没连上台账子表时才提示指认；已自动连上(semiEntry)且无人工指认就不打扰。候选只列同组产品 */}
+                  {onSetUpstream && nested && !(semiEntry && !(manualUpstream || {})[m.matName]) && (
+                    <UpstreamPicker matName={m.matName} cur={(manualUpstream || {})[m.matName] || ''}
+                      cands={upCands || []} onPick={onSetUpstream} />
+                  )}</td>
                 <td className="muted" style={NOWRAP} title={m.model}>{m.model && m.model !== '0' ? m.model : '—'}</td>
                 <td className="muted">{m.unit || '—'}</td>
                 <td className="num">{(m.qtyPerKg ?? 0).toFixed(4)}{qMark && <Tri d={qMark} title={`添加量较上一版（${prev?.calcDate}）：${(p.qtyPerKg ?? 0).toFixed(4)} → ${(m.qtyPerKg ?? 0).toFixed(4)}`} />}</td>

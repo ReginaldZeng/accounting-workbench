@@ -225,3 +225,139 @@ def notify(subject, text, html=None, dt_conf=None, smtp_conf=None, channels=None
     if not out:
         out["none"] = {"sent": False, "msg": "未配置/未启用任何通知渠道（钉钉/邮件），仅记录"}
     return out
+
+
+# ── 通讯录选人（V2.539）：复用老版 token；用于门户「取件机监控」从钉钉通讯录勾人填手机号 ──
+def dt_depts(conf=None, dept_id=1):
+    """列某部门的下级部门（钉钉 department/listsub）。失败/未配置 → {'ok':False,'msg':...}，不抛错。"""
+    conf = conf or load_dingtalk_conf()
+    if not conf:
+        return {"ok": False, "msg": "服务器未配钉钉（conf.ini [dingtalk]）"}
+    try:
+        import requests
+        tok = _dt_token(conf)
+        r = requests.post("https://oapi.dingtalk.com/topapi/v2/department/listsub",
+                          params={"access_token": tok}, json={"dept_id": int(dept_id)}, timeout=20).json()
+        if r.get("errcode") != 0:
+            return {"ok": False, "msg": (r.get("errmsg") or "拉部门失败") + "（应用可能未开通「通讯录部门读取」）"}
+        return {"ok": True, "depts": [{"id": d.get("dept_id"), "name": d.get("name")} for d in (r.get("result") or [])]}
+    except Exception as e:
+        return {"ok": False, "msg": "拉部门异常：%s" % e}
+
+
+def dt_members(conf=None, dept_id=1):
+    """列某部门直属成员（钉钉 user/listsimple，仅 userid+name，翻页取全）。失败 → {'ok':False}，不抛错。"""
+    conf = conf or load_dingtalk_conf()
+    if not conf:
+        return {"ok": False, "msg": "服务器未配钉钉（conf.ini [dingtalk]）"}
+    try:
+        import requests
+        tok = _dt_token(conf)
+        out, cursor = [], 0
+        for _ in range(20):    # 最多 20 页 × 100，防跑飞
+            r = requests.post("https://oapi.dingtalk.com/topapi/v2/user/listsimple",
+                              params={"access_token": tok},
+                              json={"dept_id": int(dept_id), "cursor": cursor, "size": 100}, timeout=20).json()
+            if r.get("errcode") != 0:
+                return {"ok": False, "msg": (r.get("errmsg") or "拉成员失败") + "（应用可能未开通「通讯录成员读取」）"}
+            res = r.get("result") or {}
+            out += [{"userid": u.get("userid"), "name": u.get("name")} for u in (res.get("list") or [])]
+            if not res.get("has_more"):
+                break
+            cursor = res.get("next_cursor") or 0
+        return {"ok": True, "members": out}
+    except Exception as e:
+        return {"ok": False, "msg": "拉成员异常：%s" % e}
+
+
+def dt_mobiles(conf=None, userids=None):
+    """取选中成员的手机号（钉钉 user/get 逐个；最多 50）。返回 {'ok':True,'people':[{userid,name,mobile}]}。"""
+    conf = conf or load_dingtalk_conf()
+    if not conf:
+        return {"ok": False, "msg": "服务器未配钉钉（conf.ini [dingtalk]）"}
+    try:
+        import requests
+        tok = _dt_token(conf)
+        people = []
+        for uid in (userids or [])[:50]:
+            r = requests.post("https://oapi.dingtalk.com/topapi/v2/user/get",
+                              params={"access_token": tok}, json={"userid": str(uid)}, timeout=20).json()
+            if r.get("errcode") == 0:
+                d = r.get("result") or {}
+                people.append({"userid": str(uid), "name": d.get("name") or "", "mobile": d.get("mobile") or ""})
+        return {"ok": True, "people": people}
+    except Exception as e:
+        return {"ok": False, "msg": "取手机号异常：%s" % e}
+
+
+def dt_roster(conf=None, max_users=5000, max_depts=800, workers=8):
+    """全公司通讯录花名册（供门户「搜名字选人」）：遍历所有部门（listsub）＋各部门成员（user/list 带岗位），
+    按 userid 去重，返回 [{userid,name,title,dept}]——**不含手机号**（手机号在「选定」时才按需 user/get 取）。
+    **并发拉**（部门树逐层并发、各部门成员并发）以免公司大时几十上百次串行请求太慢。失败/未配置 → {'ok':False,'msg':...}，不抛错。"""
+    conf = conf or load_dingtalk_conf()
+    if not conf:
+        return {"ok": False, "msg": "服务器未配钉钉（conf.ini [dingtalk]）"}
+    try:
+        import requests
+        from concurrent.futures import ThreadPoolExecutor
+        tok = _dt_token(conf)
+
+        def _listsub(did):   # 某部门的下级部门；返回 (did, json)
+            r = requests.post("https://oapi.dingtalk.com/topapi/v2/department/listsub",
+                              params={"access_token": tok}, json={"dept_id": int(did)}, timeout=15).json()
+            return did, r
+
+        def _users(did):     # 某部门成员（翻页取全）；返回 (did, [user...], err)
+            out, cursor = [], 0
+            for _ in range(30):
+                r = requests.post("https://oapi.dingtalk.com/topapi/v2/user/list",
+                                  params={"access_token": tok},
+                                  json={"dept_id": int(did), "cursor": cursor, "size": 100}, timeout=15).json()
+                if r.get("errcode") != 0:
+                    return did, out, (r.get("errmsg") or "拉成员失败")
+                res = r.get("result") or {}
+                out += (res.get("list") or [])
+                if not res.get("has_more"):
+                    break
+                cursor = res.get("next_cursor") or 0
+            return did, out, None
+
+        # 1) 逐层并发遍历部门树，建 部门id→名字
+        dept_name = {1: ""}
+        frontier, seen = [1], {1}
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            while frontier and len(seen) <= max_depts:
+                nxt = []
+                for did, r in ex.map(_listsub, frontier):
+                    if r.get("errcode") != 0:
+                        if did == 1:
+                            return {"ok": False, "msg": (r.get("errmsg") or "拉部门失败") + "（应用可能未开通「通讯录部门读取」）"}
+                        continue
+                    for d in (r.get("result") or []):
+                        cid = d.get("dept_id")
+                        if cid is None or cid in seen:
+                            continue
+                        dept_name[cid] = d.get("name") or ""
+                        seen.add(cid)
+                        nxt.append(cid)
+                frontier = nxt
+
+        # 2) 各部门成员并发 user/list（带 title 岗位），按 userid 去重
+        people, last_err = {}, ""
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for did, ulist, err in ex.map(_users, list(dept_name.keys())):
+                if err:
+                    last_err = err
+                    continue
+                for u in ulist:
+                    uid = u.get("userid")
+                    if not uid or uid in people:
+                        continue
+                    people[uid] = {"userid": uid, "name": u.get("name") or "",
+                                   "title": u.get("title") or "", "dept": dept_name.get(did) or ""}
+        if not people:
+            return {"ok": False, "msg": (last_err + "（应用可能未开通「通讯录成员信息读取」）") if last_err
+                    else "通讯录里没搜到人（组织无成员，或应用缺成员读取权限）"}
+        return {"ok": True, "people": list(people.values())}
+    except Exception as e:
+        return {"ok": False, "msg": "拉花名册异常：%s" % e}
