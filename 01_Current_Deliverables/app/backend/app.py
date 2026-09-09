@@ -2730,6 +2730,15 @@ def _build_statement_xlsx(stmt, shot_override=None):
     Sheet2「各银行截图」：本期上传过截图时才建；按 Sheet1 同序把余额截图放大排列，每张标 主体·账户名·账号·期末余额。
       全走浮动图（DrawingML），WPS / 新老 Excel 都正常显示，不像单元格内嵌图那样跨软件乱码。"""
     from openpyxl import Workbook
+    wb = Workbook()
+    _write_statement_sheets(wb, stmt, shot_override)
+    if "Sheet" in wb.sheetnames:                  # 删掉 openpyxl 自带的空默认页
+        del wb["Sheet"]
+    bio = BytesIO(); wb.save(bio); return bio.getvalue()
+
+
+def _write_statement_sheets(wb, stmt, shot_override=None):
+    """把《银行余额调节表》+「各户末笔流水」(+本期已上传的截图页) 写进给定工作簿；供单独导出与对账底稿复用。"""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     NAVY, GREYLN, ZEBRA, REDF, GREENF, MUTED = "1E2761", "D8DEEC", "F4F6FC", "C0392B", "1E8E5A", "6B7280"
     thin = Side(style="thin", color=GREYLN)
@@ -2737,9 +2746,7 @@ def _build_statement_xlsx(stmt, shot_override=None):
     cen = Alignment(vertical="center")
     cenh = Alignment(vertical="center", horizontal="center")
     rgt = Alignment(vertical="center", horizontal="right")
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "银行余额调节表"
+    ws = wb.create_sheet("银行余额调节表")
     # shot_override：{账号: payload}——不走库、直接喂图（预览/占位卡用）；None 时读本期已存截图
     if shot_override is not None:
         shots = {str(k).strip(): (v or {}) for k, v in shot_override.items()}
@@ -2817,7 +2824,6 @@ def _build_statement_xlsx(stmt, shot_override=None):
     _build_statement_lastrow_sheet(wb, flat)     # Sheet2：各户末笔流水（真数据佐证期末余额）
     if GALLERY:
         _build_statement_shot_sheet(wb, flat, shots, _XLImage, shot_override)
-    bio = BytesIO(); wb.save(bio); return bio.getvalue()
 
 
 def _build_statement_lastrow_sheet(wb, flat):
@@ -3168,8 +3174,9 @@ def reconcile_claim(body: dict, request: Request):
     return {"ok": True, "key": key, "claim": {"状态": st, "操作人": op, "时间": ts, "备注": note}}
 
 
-def _build_report_xlsx(recon, badj):
-    """对账底稿 xlsx（4 表：对账汇总 / 差异清单 / 余额调节表 / 全部逐笔明细）→ bytes。"""
+def _build_report_xlsx(recon, stmt):
+    """对账底稿 xlsx（对账汇总 / 差异清单 / 银行余额调节表 / 各户末笔流水 / 全部逐笔明细）→ bytes。
+    余额调节改用全科目《银行余额调节表》(_balance_statement)，与「余额调节」第3步、单独导出完全一致；不再用旧的1002未达窄表。"""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     hdr_font = Font(bold=True, color="FFFFFF")
@@ -3206,8 +3213,11 @@ def _build_report_xlsx(recon, badj):
     g = recon.get("guardrail") or {}
     ws0.append(["护栏 · 银行笔数", g.get("银行笔数"), "金蝶笔数", g.get("金蝶笔数"),
                 "两侧各归一类", "是" if (g.get("银行笔数核对一致") and g.get("金蝶笔数核对一致")) else "否"])
-    ws0.append(["余额调节 · 对平户数", badj.get("对平户数", 0), "不平户数", badj.get("不平户数", 0)])
-    autowidth(ws0, [22, 16, 14, 16, 12, 10])
+    sflat = [a for gp in (stmt.get("groups") or []) for a in (gp.get("accounts") or []) if not a.get("全零")]
+    n_use = len(sflat); n_diff = stmt.get("差异户数", 0)
+    n_wait = sum(1 for a in sflat if a.get("银行侧缺")); n_tie = n_use - n_diff - n_wait
+    ws0.append(["余额调节 · 在用账户", n_use, "已对平", n_tie, "待补银行侧", n_wait, "真实差异", n_diff])
+    autowidth(ws0, [22, 10, 10, 8, 12, 8, 10, 8])
 
     # ② 差异清单（非"已匹配"的逐笔，即需人工处理的）
     # 序号=在稽核结果里的全局位置(与逐笔稽核页「序号」一致，办公室对号沟通用)
@@ -3222,17 +3232,10 @@ def _build_report_xlsx(recon, badj):
             ws1.append([i] + [r.get(c) for c in dcols])
     autowidth(ws1, [7, 14, 11, 11, 20, 12, 18, 6, 14, 14, 18, 30, 12, 10, 12, 22, 20])
 
-    # ③ 余额调节表
-    # 以银行为锚点：银行对账单余额=真实，金蝶更正后应=银行。
-    bcols = ["主体", "账户名称", "开户行", "账号", "币别", "银行对账单余额", "金蝶账面余额", "金蝶账面本位币",
-             "金蝶待更正", "金蝶应补记", "更正后账面", "对银行差额", "状态", "未达原因", "原因填写人"]
-    ws2 = wb.create_sheet("余额调节表")
-    ws2.append(bcols); style_header(ws2, len(bcols))
-    for a in (badj.get("accounts") or []):
-        ws2.append([a.get(c) for c in bcols])
-    autowidth(ws2, [18, 22, 10, 20, 8, 16, 16, 16, 16, 16, 16, 14, 12, 40, 12])
+    # ③ 银行余额调节表 + ④ 各户末笔流水（全科目·与第3步和单独导出完全一致）
+    _write_statement_sheets(wb, stmt)
 
-    # ④ 全部逐笔明细
+    # ⑤ 全部逐笔明细
     ws3 = wb.create_sheet("全部逐笔明细")
     ws3.append(cols); style_header(ws3, len(cols))
     for i, r in enumerate(results, 1):
@@ -3246,8 +3249,8 @@ def _build_report_xlsx(recon, badj):
 def export_report(request: Request):
     """结果出具：导出对账底稿 xlsx（浏览器直接下载）。已封存期间导出的是封存那一刻的快照。"""
     recon = _recon_data()
-    badj = _badj_data()
-    data = _build_report_xlsx(recon, badj)
+    stmt = _cache_get(_BSTMT_CACHE, _balance_statement)   # 全科目《银行余额调节表》，与第3步/单独导出同源
+    data = _build_report_xlsx(recon, stmt)
     u = _current_user(request)
     if u:
         db.audit(u["name"], "导出对账底稿", _period_str())     # 月结看板据此判断「底稿已导出」
