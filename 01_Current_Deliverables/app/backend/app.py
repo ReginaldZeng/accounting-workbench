@@ -3799,24 +3799,31 @@ def portal_machines_test_notify(body: dict, request: Request):
     text = ("🧪【测试】%s · %s\n\n这是一条测试消息：你能收到，就说明这条通知的钉钉链路是通的。\n"
             "真事件发生时才会自动发正式通知，本条请忽略。\n（由 %s 在门户管理发起测试）"
             % (m["name"], what, u["name"]))
-    conf = notifier.load_dingtalk_conf()
-    if conf:
-        conf = {**conf, "mobiles": [str(x) for x in mobiles], "userids": []}
-    res = notifier.send_dingtalk(text, conf)
+    res = notifier.send_dingtalk(text, _recip_conf(mobiles))
     db.audit(u["name"], "取件机通知·发测试", m["name"], "%s → %d 人 · sent=%s" % (mob_key, len(mobiles), res.get("sent")))
     if res.get("sent"):
         return {"ok": True, "msg": "已发出测试钉钉给 %d 人，去钉钉确认是否收到。" % len(mobiles)}
     return {"ok": False, "msg": "发送未成功：" + (res.get("msg") or "钉钉返回失败")}
 
 
+_ROSTER_CACHE = {"ts": 0.0, "people": None}   # 花名册进程内缓存（单 worker）：拉一次缓存 30 分钟，之后秒开；新人入职过半小时自动刷新，或加 ?fresh=1 立即重拉
+
 @app.get("/api/dingtalk/roster")
-def dingtalk_roster(request: Request):
+def dingtalk_roster(request: Request, fresh: int = 0):
     """通讯录·全公司花名册（门户管理·仅管理员）——供「搜名字选人」：返回 [{userid,name,title,dept}]，
-    **不含手机号**（手机号在点「填入所选」时才按需 user/get 取）。前端搜名字在这份花名册里前端过滤。"""
+    **不含手机号**（手机号在点「填入所选」时才按需 user/get 取）。前端搜名字在这份花名册里前端过滤。
+    并发拉 + 30 分钟进程缓存：首次稍慢、之后秒开（?fresh=1 强制重拉）。"""
     u = _current_user(request)
     if not u or u.get("role") != "admin":
         return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
-    return notifier.dt_roster()
+    now = time.time()
+    if not fresh and _ROSTER_CACHE["people"] is not None and (now - _ROSTER_CACHE["ts"]) < 1800:
+        return {"ok": True, "people": _ROSTER_CACHE["people"], "cached": True}
+    r = notifier.dt_roster()
+    if r.get("ok"):
+        _ROSTER_CACHE["people"] = r.get("people") or []
+        _ROSTER_CACHE["ts"] = now
+    return r
 
 
 @app.get("/api/dingtalk/depts")
