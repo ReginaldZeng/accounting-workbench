@@ -3695,6 +3695,7 @@ _BANKPULL_ALIVE_SEC = 130 * 60
 # 本轮新落的文件回报到 sync-report 的 bomCopied → 服务器发钉钉给【送达收件人】（与停机告警是两拨人，前端配）。
 _BOM_DELIVER_MOB = "bom_deliver_mobiles"   # BOM 落公盘·结果通知收件人（手机号列表；空＝不发）
 _BOM_DELIVER_MARK = "bom_deliver_mark"     # 送达去重：上批已通知的签名，防回执重试重发
+_BOM_DELIVER_PENDING = "bom_deliver_pending"  # 钉钉失败待重试；随取件机每分钟心跳重发，成功才清
 _RPT_DELIVER_MOB = "rpt_deliver_mobiles"   # 报表送达共享盘·结果通知收件人
 _RPT_DELIVER_MARK = "rpt_deliver_mark"
 _BANK_DELIVER_MOB = "bank_deliver_mobiles" # 流水接入·结果通知收件人（出纳上传→接入→通知可对账）
@@ -4256,37 +4257,48 @@ def _re_mobile_ok(m):
 # ============ BOM 采购核算表落公盘「送达通知」（V2.530）============
 # 触发点在 rptexport.sync-report（报表取件机镜像 outbox→公盘时把 bomCopied 一并回报），惰性调 _bom_delivery_notify。
 _BOM_VER_RE = re.compile(r"^（(?:财务版|脱敏版)）\s*")     # 文件名前缀（财务版/脱敏版）
-_BOM_TAIL_RE = re.compile(r"\s*\d{6,8}\.xlsx$", re.I)      # 结尾 审核日期.xlsx
 
 
 def _bom_label(rel):
-    """outbox 文件名 → 「CP码 产品名」：去（财务版/脱敏版）前缀、去审核日期与扩展名（业务方定：只留 CP 码+产品）。"""
+    """outbox 文件名 → 通知展示名：只去版本前缀，其余文件名（含日期、分钟、扩展名）原样保留。"""
     name = str(rel or "").replace("\\", "/").split("/")[-1]
-    return _BOM_TAIL_RE.sub("", _BOM_VER_RE.sub("", name)).strip()
+    return _BOM_VER_RE.sub("", name).strip()
 
 
 def _send_result_ding(mob_key, mark_key, sig, text):
-    """通用【结果通知】发送：读收件人→没配不发；同批 sig 去重防重发；发钉钉、记标记。绝不抛错。"""
+    """通用【结果通知】发送：只有成功才参与去重；失败保留错误并允许后续重试。绝不抛错。"""
     try:
         mobiles = db.get_setting(mob_key, None) or []
         if not mobiles:
-            return
-        if (db.get_setting(mark_key, None) or {}).get("sig") == sig:
-            return   # 这一批刚发过（回执重试）——不重发
+            return {"sent": False, "reason": "no_recipients", "msg": "未配置收件人"}
+        prev = db.get_setting(mark_key, None) or {}
+        if prev.get("sig") == sig and prev.get("sent") is True:
+            return {"sent": True, "deduped": True}   # 这一批已成功发过（回执重试）——不重发
         res = notifier.send_dingtalk(text, _recip_conf(mobiles))
-        db.set_setting(mark_key, {"sig": sig, "at": _now(), "sent": bool(res.get("sent"))}, "结果通知")
-    except Exception:
-        pass   # 结果通知失败绝不能弄垮触发它的接口
+        mark = {"sig": sig, "at": _now(), "sent": bool(res.get("sent"))}
+        if not res.get("sent"):
+            mark["error"] = str(res.get("msg") or "钉钉返回失败")[:500]
+        db.set_setting(mark_key, mark, "结果通知")
+        return res
+    except Exception as ex:
+        return {"sent": False, "msg": str(ex)[:500]}   # 结果通知失败绝不能弄垮触发它的接口
 
 
 def _bom_delivery_notify(copied, host=""):
-    """BOM 核算表落公盘 → 结果通知。CP码+产品去重合一行、超 6 项截断、同批去重；没配收件人不发。"""
+    """BOM 核算表落公盘 → 结果通知。失败写待重试队列；取件机下一分钟心跳继续发，成功才清。"""
     try:
         if isinstance(copied, str):
             copied = [copied]
-        copied = [str(x) for x in (copied or []) if str(x).strip()]
+        pending = db.get_setting(_BOM_DELIVER_PENDING, None) or {}
+        if not isinstance(pending, dict):
+            pending = {}
+        prior = pending.get("copied") or []
+        if isinstance(prior, str):
+            prior = [prior]
+        # 合并上轮失败与本轮新增；按完整相对路径去重，保留先后顺序。
+        copied = list(dict.fromkeys(str(x) for x in list(prior or []) + list(copied or []) if str(x).strip()))
         if not copied:
-            return
+            return {"sent": False, "reason": "empty"}
         labels, seen = [], set()
         for rel in copied:                       # 财务版+脱敏版去掉版本字样后同名 → 按 CP 码+产品去重合一行
             lab = _bom_label(rel)
@@ -4294,9 +4306,10 @@ def _bom_delivery_notify(copied, host=""):
                 seen.add(lab)
                 labels.append(lab)
         if not labels:
-            return
+            return {"sent": False, "reason": "empty"}
         import hashlib
-        sig = hashlib.md5(("\n".join(labels)).encode("utf-8")).hexdigest()
+        # 去重用服务器完整相对文件名（含日期+分钟和版本前缀）；展示时才合并财务版/脱敏版。
+        sig = hashlib.md5(("\n".join(sorted(copied))).encode("utf-8")).hexdigest()
         shown = labels[:6]
         body = "\n".join("· " + x for x in shown) + (("\n…等共 %d 项" % len(labels)) if len(labels) > 6 else "")
         text = ("📄【BOM报价取件机】新核算表已到公盘\n\n"
@@ -4306,9 +4319,17 @@ def _bom_delivery_notify(copied, host=""):
                 "来源：由工作台「BOM报价审核」初审通过后自动落盘同步\n\n"
                 "请到公盘对应 年\\月 目录查收；如需核对定价与审核详情，可在工作台「BOM报价审核」台账打开对应记录。"
                 % (len(labels), body, _now()))
-        _send_result_ding(_BOM_DELIVER_MOB, _BOM_DELIVER_MARK, sig, text)
-    except Exception:
-        pass
+        res = _send_result_ding(_BOM_DELIVER_MOB, _BOM_DELIVER_MARK, sig, text)
+        if res.get("sent") or res.get("reason") == "no_recipients":
+            db.set_setting(_BOM_DELIVER_PENDING, None, "结果通知")
+        else:
+            db.set_setting(_BOM_DELIVER_PENDING,
+                           {"copied": copied, "host": host or pending.get("host", ""),
+                            "at": _now(), "error": str(res.get("msg") or "钉钉返回失败")[:500]},
+                           "结果通知")
+        return res
+    except Exception as ex:
+        return {"sent": False, "msg": str(ex)[:500]}
 
 
 def _rpt_result_notify(copied):

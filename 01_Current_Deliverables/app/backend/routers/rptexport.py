@@ -568,17 +568,15 @@ def rptexport_sync_report(body: dict, request: Request):
                       for k, v in (body.get("months") or {}).items()
                       if isinstance(v, dict)}}
     db.set_setting(_SYNC_KEY, rec, "取件机")
-    # BOM 落公盘送达通知（V2.530）：本轮新镜像到公盘的核算表 → 发钉钉给送达收件人
-    # （惰性 import app 避循环依赖；没配收件人 / 同一批重发都会被 _bom_delivery_notify 内部挡掉，绝不抛错）。
-    if body.get("bomCopied") or body.get("copied"):
-        try:
-            import app as _app
-            if body.get("bomCopied"):
-                _app._bom_delivery_notify(body.get("bomCopied"), rec.get("host", ""))
-            if body.get("copied"):
-                _app._rpt_result_notify(body.get("copied"))   # 报表落共享盘·结果通知
-        except Exception:
-            pass
+    # BOM 落公盘送达通知：每分钟心跳都调用一次——本轮没新文件时也会重试上次发送失败的待发项，成功才清。
+    # （惰性 import app 避循环依赖；没配收件人 / 已成功的同批重发由通知函数内部挡掉，绝不抛错）。
+    try:
+        import app as _app
+        _app._bom_delivery_notify(body.get("bomCopied") or [], rec.get("host", ""))
+        if body.get("copied"):
+            _app._rpt_result_notify(body.get("copied"))   # 报表落共享盘·结果通知
+    except Exception:
+        pass
     # 删除指令：**执行成功的才从队列里划掉**。没删成的留着下一轮重试——
     # 那台电脑当时可能没连上共享盘，不该把这条指令悄悄吞了。
     if rec["deleted"]:

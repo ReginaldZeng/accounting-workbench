@@ -3102,7 +3102,7 @@ def _xlsx_to_html(data, title=""):
 
 
 # ============ 初审通过即落盘公盘（V2.524，业务方定 2026-09-08：「初审就落，终审不覆盖」）============
-# 落到服务器 outbox：<outbox>/<YYYY年>/<MM月>/（财务版）CP 名称 审核日期.xlsx + （脱敏版）…；两版都带上游链路多页。
+# 落到服务器 outbox：<outbox>/<YYYY年>/<MM月>/（财务版）CP 名称 YYYYMMDD HH：mm.xlsx + （脱敏版）…；两版都带上游链路多页。
 # 公盘在办公室内网，云服务器够不着 → 复用报表取件机（内网常开电脑主动出来取，同一把 pull_token）：
 # 取件机 ini 加 bom_dest 指向公盘目录，脚本按 rel（年/月/文件名）原样建目录落文件。
 # 审核日期＝成本会计初审那天；同产品同日再审覆盖同名；终审不再落。失败不卡审核：留痕「落盘公盘失败」+ 可重推。
@@ -3139,17 +3139,21 @@ def _drop_outbox(e, who, stage="初审"):
     if kind != "成品":
         return {"ok": False, "skip": True, "msg": "非成品（%s）不单独落盘——已随成品文件的上游页带出" % (kind or "半成品/复配料")}
     from core import _now
-    date = (e.get("finalized_at") or "")[:10] or _now()[:10]
+    # 用实际落盘时刻命名：同一成品同一天重审/手动重落时保留各自版本，不再覆盖当天旧文件。
+    # Windows 文件名不能用半角冒号，故分钟使用全角「：」。
+    dropped_at = _now()
+    date = dropped_at[:10]
     y, m = date[:4], date[5:7]
     sub = os.path.join(_outbox_dir(), "%s年" % y, "%s月" % m)
     os.makedirs(sub, exist_ok=True)
     cp = _outbox_safe_name(e.get("cp_code") or "")
     nm = _outbox_safe_name((e.get("product_name") or "").strip())
     d8 = date.replace("-", "")
+    hm = dropped_at[11:16].replace(":", "：")
     files, ups = [], []
     for tag, masked in (("财务版", False), ("脱敏版", True)):
         data, ups, _ = _build_chain_xlsx(e, masked=masked, formulas=True, chain=True)
-        fn = "（%s）%s %s %s.xlsx" % (tag, cp, nm, d8)
+        fn = "（%s）%s %s %s %s.xlsx" % (tag, cp, nm, d8, hm)
         p = os.path.join(sub, fn)
         tmp = p + ".part"
         with open(tmp, "wb") as fh:
@@ -3262,7 +3266,7 @@ async def bom_outbox_status(request: Request):
     base = _outbox_dir()
     n = sum(len([x for x in fs if _OUTBOX_NAME.match(x)]) for _, _, fs in os.walk(base)) if os.path.isdir(base) else 0
     return {"ok": True, "dir": base, "count": n, "fails": db.get_setting("bom_outbox_fail", {}) or {},
-            "note": "初审通过即落服务器 outbox（年/月/（财务版|脱敏版）CP 名称 审核日期.xlsx），取件机 bom_dest 同步到公盘；终审不覆盖"}
+            "note": "初审通过即落服务器 outbox（年/月/（财务版|脱敏版）CP 名称 YYYYMMDD HH：mm.xlsx），取件机 bom_dest 同步到公盘；终审不覆盖"}
 
 
 @router.post("/api/bom/outbox/redo")
