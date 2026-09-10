@@ -106,5 +106,19 @@ class StoreTests(unittest.TestCase):
         with fake._engine.begin() as cx:cx.execute(sa.update(module.R).values(balance=15))
         self.assertIsNone(module.accounts(None)['accounts'][0]['balance'])
 
+    def test_statement_account_is_not_merchant_suffix(self):
+        from kernels import ec_flow_ledger as ledger
+        with fake._engine.begin() as cx:cx.execute(sa.update(module.A).where(module.A.c.id=='a1').values(suffix='4680'))
+        rows=ledger.parse(file(),'2088141335094680-export.xlsx',{})
+        for row in rows:row['account']='10000000000000000156'
+        result=module.store_parsed('a1',[('2088141335094680-export.xlsx','test-hash',rows)],'test')
+        self.assertEqual(result['added'],1)
+        self.assertEqual(module.accounts(None)['accounts'][0]['suffix'],'4680')
+
+    def test_wrong_merchant_still_rejected(self):
+        with fake._engine.begin() as cx:cx.execute(sa.update(module.A).where(module.A.c.id=='a1').values(suffix='9999'))
+        with self.assertRaises(Exception):module.import_files('a1',[('2088141335094680-export.xlsx',file())],'test')
+        self.assertEqual(module.search(None)['total'],0)
+
 
 if __name__=='__main__':unittest.main()

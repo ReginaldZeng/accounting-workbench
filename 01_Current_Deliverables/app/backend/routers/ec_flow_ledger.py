@@ -81,15 +81,19 @@ def store_parsed(account_id, parsed, operator):
     identities={r['account'] for _,_,rows in parsed for r in rows if r['account']}
     if len(identities)>1:raise HTTPException(400,'选中文件属于多个支付宝账户，请分别导入')
     actual=next(iter(identities),'');identity_hash=hashlib.sha256(actual.encode()).hexdigest() if actual else ''
+    pids={r.get('account_pid') or ledger.merchant_id(filename) for filename,_,rows in parsed for r in rows}
+    pids.discard('')
+    if len(pids)>1:raise HTTPException(400,'选中文件包含多个支付宝商户 ID，请分账户导入')
+    pid=next(iter(pids),'') or (actual if actual.startswith('2088') and len(actual)==16 else '')
     added=duplicate=conflicts=0
     with _import_lock, db._engine.begin() as cx:
         acc=account(cx,account_id)
-        if actual and acc.suffix and not actual.endswith(acc.suffix):raise HTTPException(400,'原文件账号与登记尾号不一致，已拦截')
+        if pid and acc.suffix and not pid.endswith(acc.suffix):raise HTTPException(400,'原文件商户 ID 与登记尾号不一致，已拦截')
         if identity_hash and acc.identity_hash and identity_hash!=acc.identity_hash:raise HTTPException(400,'原文件账号与该账户历史流水不一致')
         if identity_hash:
             owner=cx.execute(select(A.c.id).where(A.c.identity_hash==identity_hash,A.c.id!=account_id)).first()
             if owner:raise HTTPException(400,'这个支付宝账户已登记，请使用已有账户以免重复统计')
-            cx.execute(update(A).where(A.c.id==account_id).values(identity_hash=identity_hash,suffix=actual[-4:] if not acc.suffix else acc.suffix))
+            cx.execute(update(A).where(A.c.id==account_id).values(identity_hash=identity_hash,suffix=(pid[-4:] or acc.suffix) if not acc.suffix else acc.suffix))
         for filename,digest,rows in parsed:
             old=cx.execute(select(F).where(F.c.account_id==account_id,F.c.digest==digest)).first()
             if old:

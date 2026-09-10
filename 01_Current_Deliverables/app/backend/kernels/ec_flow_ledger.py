@@ -51,6 +51,12 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def merchant_id(filename):
+    # Export prefix is the 16-digit Alipay PID. '#账号' can instead be an 11-digit login alias.
+    match=re.match(r'^(2088\d{12})-', str(filename).replace('\\','/').rsplit('/',1)[-1])
+    return match.group(1) if match else ''
+
+
 def _cells_xml(data):
     if b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():
         raise ValueError('不支持包含外部实体的流水 XML')
@@ -164,7 +170,7 @@ def parse(data, filename, fee_map):
             if any(row[k] for k in ('serial','income','outgo')): raise ValueError('流水时间无法识别，未跳过该记录')
             continue
         row.update(ts=date, income=decimal(row['income']),outgo=decimal(row['outgo']),balance=decimal(row['balance'],True))
-        row.update(classify(row,fee_map),raw=raw,source={'file':filename,'sheet':sheet,'row':number},account=account)
+        row.update(classify(row,fee_map),raw=raw,source={'file':filename,'sheet':sheet,'row':number},account=account,account_pid=merchant_id(filename))
         # The source row number is not business identity, and may change across exports.
         semantic={k:v for k,v in raw.items() if k not in ('序号','行号')}
         row['fingerprint']=fingerprint(semantic)
