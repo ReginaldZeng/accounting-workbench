@@ -26,9 +26,8 @@ import BasicData from './views/BasicData.jsx'
 import Archive from './views/Archive.jsx'
 import FxRate from './views/FxRate.jsx'
 import RptExport from './views/RptExport.jsx'
-import EcomSettle from './views/EcomSettle.jsx'
+import EcomWorkbench from './views/EcomWorkbench.jsx'
 import EcomBasicData from './views/EcomBasicData.jsx'
-import EcomMonthClose from './views/EcomMonthClose.jsx'
 import ReportDashboard from './views/ReportDashboard.jsx'
 import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
@@ -170,8 +169,8 @@ export default function App() {
           ? <Settings cfg={cfg} onChange={setCfg} onModsChanged={refreshMods} />
           : <Placeholder title="系统设置" hint="仅主管理员可进入。如需授权，请主管理员在「账号管理」勾选「进入系统设置」权限点。" />)}
         {/* 开着但还没开发的模块 → 规划中占位页 */}
-        {view === 'ecommonth' && canView('ecommonth') && <EcomMonthClose user={user} onNav={setView} />}
-        {view === 'ecomsettle' && canView('ecomsettle') && <EcomSettle user={user} />}
+        {view === 'ecommonth' && canView('ecommonth') && <EcomWorkbench user={user} onNav={setView} />}
+        {view === 'ecomsettle' && canView('ecomsettle') && <EcomWorkbench user={user} onNav={setView} initialScreen="cash" />}
         {view === 'ecombase' && canView('ecombase') && <EcomBasicData user={user} />}
         {view === 'logisticspay' && canView('logisticspay') && <LogisticsRecon user={user} cfg={cfg} onPeriod={changePeriod} />}
         {view === 'logisticscost' && canView('logisticscost') && <LogisticsCost user={user} />}

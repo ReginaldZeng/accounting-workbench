@@ -98,7 +98,8 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   const verFull = ver ? `版本 ${ver.ver || '未知'}${ver.dirty ? '（有未提交改动）' : ''} · 分支 ${ver.branch || '—'} · 提交 ${ver.commit || '—'} · 端口 ${port}` : ''
   const on = k => !mods || mods[k]?.['可进入'] !== false
   const stat = k => mods?.[k]?.status || ''
-  const allMods = navDef?.modules || []
+  // Legacy settlement deep links still resolve, but the duplicated menu is consolidated.
+  const allMods = (navDef?.modules || []).filter(m => m.key !== 'ecomsettle')
   // 岗位标签：后端存的是 key（改名不丢绑定），显示要翻成中文名
   const postLabel = {}; (navDef?.posts || []).forEach(p => { postLabel[p.key] = p.label })
   const posts = k => (mods?.[k]?.posts || []).map(p => postLabel[p] || p)

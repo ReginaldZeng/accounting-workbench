@@ -19,7 +19,7 @@ import hashlib
 import secrets
 import datetime
 
-from sqlalchemy import (create_engine, MetaData, Table, Column, String, Text, Integer, Float,
+from sqlalchemy import (create_engine, MetaData, Table, Column, String, Text, Integer, Float, Numeric, Index,
                         LargeBinary, UniqueConstraint, select, insert, update, delete, func)
 from sqlalchemy.dialects.mysql import LONGTEXT   # v 字段大月留档可达数百KB，MySQL 的 Text 仅 64KB
 
@@ -458,6 +458,69 @@ ec_tmall_import_runs = Table(       # 月结工作台·天猫订单/商品/聚�
     Column("ts", String(20)),
     UniqueConstraint("period", "kind", "content_sha256", name="uq_ec_tmall_period_kind_hash"),
 )
+ec_flow_accounts = Table(
+    "ec_flow_accounts", _md,
+    Column("id", String(32), primary_key=True),
+    Column("kind", String(20), nullable=False),
+    Column("name", String(120), nullable=False),
+    Column("suffix", String(8)),
+    Column("identity_hash", String(64), unique=True),
+    Column("shops", Text),
+    Column("operator", String(50)), Column("ts", String(20)),
+)
+ec_flow_files = Table(
+    "ec_flow_files", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("account_id", String(32), nullable=False),
+    Column("digest", String(64), nullable=False),
+    Column("filename", String(180)), Column("aliases", Text), Column("row_count", Integer),
+    Column("operator", String(50)), Column("ts", String(20)),
+    UniqueConstraint("account_id", "digest", name="uq_ec_flow_file"),
+)
+ec_flow_rows = Table(
+    "ec_flow_rows", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("account_id", String(32), nullable=False),
+    Column("identity_key", String(64), nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("serial", String(128)), Column("txn", String(128)),
+    Column("mch_no", String(128)), Column("order_no", String(128)),
+    Column("occurred_at", String(32)), Column("period", String(7)),
+    Column("income", Numeric(22, 6)), Column("outgo", Numeric(22, 6)),
+    Column("balance", Numeric(22, 6)), Column("bucket", String(24)),
+    Column("code", String(40)), Column("channel", String(80)),
+    Column("abnormal", Integer), Column("search_text", Text),
+    Column("payload", Text().with_variant(LONGTEXT(), "mysql")),
+    UniqueConstraint("account_id", "identity_key", "fingerprint", name="uq_ec_flow_evidence"),
+    Index("ix_ec_flow_scope", "account_id", "period", "occurred_at"),
+    Index("ix_ec_flow_serial", "account_id", "serial"),
+    Index("ix_ec_flow_order", "order_no"),
+    Index("ix_ec_flow_flags", "account_id", "abnormal", "bucket"),
+)
+ec_flow_reviews = Table(
+    "ec_flow_reviews", _md,
+    Column("flow_id", Integer, primary_key=True),
+    Column("verdict", String(20), nullable=False),
+    Column("note", Text), Column("operator", String(50)), Column("ts", String(20)),
+)
+ec_flow_origins = Table(
+    "ec_flow_origins", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("flow_id", Integer, nullable=False), Column("file_id", Integer, nullable=False),
+    Column("sheet", String(128)), Column("row_number", Integer),
+    UniqueConstraint("flow_id", "file_id", "sheet", "row_number", name="uq_ec_flow_origin"),
+)
+
+ec_workbench_imports = Table(       # V2.556：店铺隔离、可追溯来源快照；不覆盖历史月结数据
+    "ec_workbench_imports", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("period", String(10), index=True), Column("shop", String(120), index=True),
+    Column("kind", String(20)), Column("digest", String(64)),
+    Column("filenames", Text), Column("payload", LargeBinary(2 ** 32 - 1)),
+    Column("operator", String(50)), Column("ts", String(20)),
+    UniqueConstraint("period", "shop", "kind", "digest", name="uq_ec_workbench_source"),
+)
+
 ec_tmall_order_details = Table(     # 天猫订单逐单核算视图：仅保留财务追溯必要字段
     "ec_tmall_order_details", _md,
     Column("id", Integer, primary_key=True, autoincrement=True),

@@ -835,7 +835,7 @@ NAV_MODULES = [
     # 电商对账月结一期（V2.553）：组内先展示逐单月结工作台，再承接既有收款核销和基础资料。
     # 准入复用 enter:ecomsettle，避免给存量应收会计新增权限点；不改变任何敏感动作点。
     {"key": "ecom", "label": "电商对账", "sec": "ar", "order": 40, "default": "待验收", "group_only": True},
-    {"key": "ecommonth", "label": "月结工作台", "sec": "ar", "order": 41, "parent": "ecom", "default": "待验收", "cap": "enter:ecomsettle"},
+    {"key": "ecommonth", "label": "电商工作台", "sec": "ar", "order": 41, "parent": "ecom", "default": "待验收", "cap": "enter:ecomsettle"},
     {"key": "ecomsettle", "label": "收款核销", "sec": "ar", "order": 42, "parent": "ecom", "default": "待验收"},
     {"key": "ecombase", "label": "基础资料", "sec": "ar", "order": 43, "parent": "ecom", "default": "待验收"},
     # ── 其它模块 ──
@@ -4506,6 +4506,10 @@ app.include_router(cost_ledger.router)
 app.include_router(rptexport.router)
 app.include_router(report_dashboard.router)
 app.include_router(ec.router)
+from routers import ec_workbench
+app.include_router(ec_workbench.router)
+from routers import ec_flow_ledger
+app.include_router(ec_flow_ledger.router)
 app.include_router(llm_hub.router)   # V2.301 门户模型配置 P0.5 聚合看板
 app.include_router(temp_attendance.router)
 app.include_router(bom_quote.router)   # V-draft BOM报价审核

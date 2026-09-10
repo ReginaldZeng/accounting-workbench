@@ -1438,6 +1438,10 @@ async def ec_notify_test(request: Request):
 async def ec_post_voucher(request: Request):
     """两张结算凭证（扣款项/收款核销）→ 金蝶草稿。提交/审核人在金蝶做；防重靠 ec_post_log
     （独立台账，不碰物流 post_log——立项分析红线三的回避路径）。"""
+    # V2.556: explicit user boundary; even a legacy client cannot write Kingdee.
+    if not _require_perm(request, "ec_post"):
+        return JSONResponse({"msg": "无权限"}, status_code=403)
+    return JSONResponse({"msg": "金蝶只读验收中，禁止创建、下推、提交或审核单据"}, status_code=403)
     u = _require_perm(request, "ec_post")
     if not u:
         return JSONResponse({"error": "需要「一键录入结算凭证」权限（敏感，须显式授予）"}, status_code=403)
