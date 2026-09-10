@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-09-10 | Author: Codex | Version: V2.553
+# Description: 新增天猫订单逐单核算表，仅保存订单号与财务核算必要字段。
+# [Change Log]
 # Date: 2026-07-04 | Author: Claude / c | Version: V2.0(阶段1)
 # Description: 数据层（多人服务器版基础）。SQLAlchemy，一套代码两种库：
 #              本地开发/测试 = SQLite（默认，零配置）；服务器 = MySQL（DB_URL 环境变量指过去）。
@@ -432,6 +435,48 @@ ec_settle_runs = Table(             # 跑批留痕：一次上传+核销=一条
     Column("filenames", Text),                     # 上传文件名（人眼核对数据来源）
     Column("operator", String(50)),
     Column("ts", String(20)),
+)
+ec_wdt_import_runs = Table(         # 月结工作台·旺店通销售出库：仅存无个人信息的月度汇总
+    "ec_wdt_import_runs", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("period", String(10), index=True),
+    Column("content_sha256", String(64)),           # 内容指纹，仅用于同期间幂等去重
+    Column("status", String(20)),                   # ready / warning / blocked
+    Column("summary", Text),                        # 白名单聚合；不含原文件名、订单号、店铺名或客户字段
+    Column("ts", String(20)),
+    UniqueConstraint("period", "content_sha256", name="uq_ec_wdt_period_hash"),
+)
+ec_tmall_import_runs = Table(       # 月结工作台·天猫订单/商品/聚合资金/支付宝汇总 + 不可逆订单键
+    "ec_tmall_import_runs", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("period", String(10), index=True),
+    Column("kind", String(12), index=True),              # order / item / fund / alipay
+    Column("content_sha256", String(64)),
+    Column("status", String(20)),                        # ready / warning / blocked
+    Column("summary", Text),                             # 白名单聚合；不含原文件名、订单号和客户字段
+    Column("match_index", LargeBinary(2 ** 32 - 1)),     # gzip(JSON)：SHA256订单键，仅供跨表勾稽
+    Column("ts", String(20)),
+    UniqueConstraint("period", "kind", "content_sha256", name="uq_ec_tmall_period_kind_hash"),
+)
+ec_tmall_order_details = Table(     # 天猫订单逐单核算视图：仅保留财务追溯必要字段
+    "ec_tmall_order_details", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", Integer, index=True),
+    Column("period", String(10), index=True),
+    Column("order_key", String(64), index=True),              # 不可逆技术键，用于跨资金表勾稽
+    Column("order_no", String(64), index=True),               # 平台原始订单号，用于财务逐单复核
+    Column("created_at", String(20)),
+    Column("paid_at", String(20)),
+    Column("shipped_at", String(20)),
+    Column("confirmed_at", String(20)),
+    Column("status", String(80), index=True),
+    Column("payment_method", String(40), index=True),
+    Column("merchant_sku", String(120)),
+    Column("quantity", Float),
+    Column("current_paid", Float),
+    Column("refund", Float),
+    Column("confirmed_payout", Float),
+    UniqueConstraint("run_id", "order_key", name="uq_ec_tmall_order_detail_run_key"),
 )
 ec_settle_orders = Table(           # 逐单核销结果（收款核销页主表数据）
     "ec_settle_orders", _md,

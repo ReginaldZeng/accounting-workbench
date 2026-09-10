@@ -1,3 +1,5 @@
+// [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
+// Description: 电商月结页进入时自动展开应收模块与电商对账父级，保留完整业务承接。
 // [Change Log] Date:2026-07-12 Author:Claude/c Version:V2.105  侧栏按设计稿「导航栏想法」重做
 // 展开态＝白色悬浮卡片（分组胶囊带强调色条 + 二级导引条 + 选中态强调条 + 徽章/岗位标）；
 // 收起态＝76px 图标轨（状态圆点 + 悬停飞出子菜单）。数据仍由后端 navDef 驱动（单一真相源）。
@@ -31,7 +33,8 @@ const IC = {
 const ICON_BY_KEY = {
   periodclose: IC.month, bankrecon: IC.bank, reconcile: IC.reconcile, fundboard: IC.fund, ledger: IC.ledger,
   wealth: IC.wealth, logisticsrecon: IC.logistics, logistics: IC.logistics, logisticspay: IC.reconcile, logisticscost: IC.sbal,
-  ecom: IC.ecom, costledger: IC.cost, clwh: IC.basicdata, archive: IC.archive,
+  ecom: IC.ecom, ecommonth: IC.month, ecomsettle: IC.reconcile, ecombase: IC.basicdata,
+  costledger: IC.cost, clwh: IC.basicdata, archive: IC.archive,
   // 报表板块（V2.240）：sbal/journal 两个 key 已退出菜单树，图标随之撤走
   fiacc: IC.sbal, rptdash: IC.fund, rptexport: IC.dl, srcbill: IC.archive, srcexport: IC.dl, fxrate: IC.wealth,
   bomprice: IC.cost, prodbrief: IC.month, revledger: IC.ledger, custrecon: IC.reconcile, ecompromo: IC.ecom,
@@ -64,7 +67,7 @@ function applyTheme(mode) {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
 }
 
-export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver }) {
+export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver, focusSection = '', focusParent = '' }) {
   const kd = source === 'kingdee'
   // 主题档位；auto 档要监听系统切换（白天↔夜间自动跟）
   const [theme, setTheme] = React.useState(() => localStorage.getItem('fw_theme') || 'auto')
@@ -142,6 +145,31 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   const toggleGroup = g => setOpen(o => { const n = { ...o, [g]: !(o[g] !== false) }; save('fw_nav_groups', n); return n })
   const toggleExp = k => setExpand(x => { const n = { ...x, [k]: !(x[k] !== false) }; save('fw_nav_expand', n); return n })
   const setColl = v => { setCollapsed(v); try { localStorage.setItem('fw_nav_collapsed', v ? '1' : '0') } catch (e) {}; if (v) setHovered(null) }
+
+  // 从逐单工作台进入时，把完整的「应收模块 › 电商对账 › 当前页」链路带到首屏。
+  useEffect(() => {
+    if (!focusSection || !sections.length) return
+    setOpen(old => {
+      const next = { ...old }
+      sections.forEach(sec => { next[sec.key] = sec.key === focusSection })
+      save('fw_nav_groups', next)
+      return next
+    })
+    if (focusParent) setExpand(old => {
+      const next = { ...old, [focusParent]: true }
+      save('fw_nav_expand', next)
+      return next
+    })
+  }, [focusSection, focusParent, navDef])
+
+  useEffect(() => {
+    if (!focusSection || !view) return
+    const timer = window.setTimeout(() => {
+      document.querySelector(`[data-nav-key="${view}"]`)?.scrollIntoView({ block: 'nearest' })
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [view, focusSection, focusParent, navDef, open[focusSection], expand[focusParent]])
+
   // 当前所在板块自动展开
   useEffect(() => {
     const s = sections.find(sec => itemsOf(sec).some(it => isActive(it.key) || childrenOf(it.key).some(c => isActive(c.key))))
@@ -172,7 +200,7 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
     const onClick = disabled ? undefined
       : () => { if (enterable) onSelect(it.key); else if (expandable) toggleExp(it.key) }
     return (<React.Fragment key={it.key}>
-      <div className={'navrow' + (disabled ? ' navrow-dis' : '')} style={base} onClick={onClick} title={disabled ? `该模块：${stat(it.key)}` : undefined}>
+      <div className={'navrow' + (disabled ? ' navrow-dis' : '')} data-nav-key={it.key} style={base} onClick={onClick} title={disabled ? `该模块：${stat(it.key)}` : undefined}>
         {active && <span style={{ position: 'absolute', left: level ? -13 : -4, top: 9, bottom: 9, width: 3, borderRadius: level ? '3px' : '0 3px 3px 0', background: 'var(--accent)' }} />}
         <span style={{ flex: '0 0 auto', width: level ? 17 : 18, height: level ? 17 : 18, display: 'inline-flex', color: 'inherit' }}>{iconOf(it.key)}</span>
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.label}</span>

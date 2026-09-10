@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-09-10 Author:Codex Version:V2.553 天猫月结汇总、分片导入与逐单查询接口。
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1  前端 API 封装（加 reconcile/sync + 4位金额格式）
 // cache:'no-store' —— 接口永不吃浏览器缓存，避免后端更新后前端拿到旧数据（字段对不上）
 // 非 2xx：尽量把后端 {ok:false,msg} 的业务原因抛出来（如「初审人是您本人，不能自己终审」），
@@ -261,6 +262,35 @@ export const ecSettleResult = (id, bucket, page, f) => j(`/api/ec/settle/result?
   + (f&&f.shop ? `&shop=${encodeURIComponent(f.shop)}` : '') + (f&&f.order ? `&order_no=${encodeURIComponent(f.order)}` : '')
   + (f&&f.ar ? `&ar_no=${encodeURIComponent(f.ar)}` : '') + (f&&f.serial ? `&serial_no=${encodeURIComponent(f.serial)}` : ''))
 export const ecSources = (period) => j(`/api/ec/settle/sources?period=${period}`)
+export const ecWdtMonthCloseLatest = (period) => j(`/api/ec/month-close/wdt/latest?period=${encodeURIComponent(period)}`)
+export const ecWdtMonthCloseUpload = (period, file) => {
+  const form = new FormData()
+  form.append('period', period)
+  form.append('file', file)
+  return j('/api/ec/month-close/wdt/upload', { method: 'POST', body: form })
+}
+export const ecTmallMonthCloseLatest = (period) => j(`/api/ec/month-close/tmall/latest?period=${encodeURIComponent(period)}`)
+export const ecTmallOrderDetails = (period, options = {}) => {
+  const params = new URLSearchParams({ period, page: String(options.page || 1), page_size: String(options.pageSize || 50) })
+  if (options.q) params.set('q', options.q)
+  if (options.paymentMethod) params.set('payment_method', options.paymentMethod)
+  if (options.destination) params.set('destination', options.destination)
+  if (options.status) params.set('status', options.status)
+  return j(`/api/ec/month-close/tmall/orders?${params}`)
+}
+export const ecTmallMonthCloseUpload = (period, kind, file) => {
+  const form = new FormData()
+  form.append('period', period)
+  form.append('kind', kind)
+  form.append('file', file)
+  return j('/api/ec/month-close/tmall/upload', { method: 'POST', body: form })
+}
+export const ecTmallAlipayUpload = (period, files) => {
+  const form = new FormData()
+  form.append('period', period)
+  Array.from(files || []).forEach(file => form.append('files', file))
+  return j('/api/ec/month-close/tmall/alipay/upload', { method: 'POST', body: form })
+}
 export const ecKdRefresh = (form) => j('/api/ec/settle/kd-refresh', {method:'POST', body: form})
 export const ecManualUpload = (form) => j('/api/ec/settle/manual-upload', {method:'POST', body: form})
 export const ecUploadFiles = (form) => j('/api/ec/settle/upload-files', {method:'POST', body: form})

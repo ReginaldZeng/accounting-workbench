@@ -1,3 +1,5 @@
+// [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
+// Description: 接入电商月结工作台路由，并在进入时展开「应收模块 › 电商对账」承接链路。
 import React, { useState, useEffect } from 'react'
 import Sidebar from './components/Sidebar.jsx'
 import DataImport from './views/DataImport.jsx'
@@ -26,6 +28,7 @@ import FxRate from './views/FxRate.jsx'
 import RptExport from './views/RptExport.jsx'
 import EcomSettle from './views/EcomSettle.jsx'
 import EcomBasicData from './views/EcomBasicData.jsx'
+import EcomMonthClose from './views/EcomMonthClose.jsx'
 import ReportDashboard from './views/ReportDashboard.jsx'
 import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
@@ -108,7 +111,9 @@ export default function App() {
   return (
     <div className="shell">
       <Sidebar view={view} onSelect={setView} source={cfg.source} user={user} onLogout={logout} onHome={backToPortal}
-        closed={!!cfg['封存']?.['已封存']} mods={mods} navDef={navDef} ver={cfg['版本']} />
+        closed={!!cfg['封存']?.['已封存']} mods={mods} navDef={navDef} ver={cfg['版本']}
+        focusSection={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ar' : ''}
+        focusParent={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ecom' : ''} />
       <main className="main">
         {/* 模块未开放时，正停在该页的人不该继续看到旧内容（四部曲三个子视图都算「银行对账」这个模块） */}
         {(() => {
@@ -165,6 +170,7 @@ export default function App() {
           ? <Settings cfg={cfg} onChange={setCfg} onModsChanged={refreshMods} />
           : <Placeholder title="系统设置" hint="仅主管理员可进入。如需授权，请主管理员在「账号管理」勾选「进入系统设置」权限点。" />)}
         {/* 开着但还没开发的模块 → 规划中占位页 */}
+        {view === 'ecommonth' && canView('ecommonth') && <EcomMonthClose user={user} onNav={setView} />}
         {view === 'ecomsettle' && canView('ecomsettle') && <EcomSettle user={user} />}
         {view === 'ecombase' && canView('ecombase') && <EcomBasicData user={user} />}
         {view === 'logisticspay' && canView('logisticspay') && <LogisticsRecon user={user} cfg={cfg} onPeriod={changePeriod} />}
@@ -192,7 +198,7 @@ const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodc
   'rptexport', 'rptdash',
   'logistics', 'logibase', 'logiupload', 'logisticspay', 'logisticscost',
   'clexport', 'cldash', 'clwh', 'bomdraft', 'bomstd', 'bomconfig',
-  'ecomsettle', 'ecombase',
+  'ecommonth', 'ecomsettle', 'ecombase',
   'tempattrev', 'tempattboard',
   'archive', 'basicdata', 'settings'])
 // body 默认是「二期开发」——但权限类占位不能这么说，那会让人以为是功能没做，跑去催开发而不是找管理员开权限

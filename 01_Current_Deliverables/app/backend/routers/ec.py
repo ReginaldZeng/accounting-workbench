@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-09-10 | Author: Codex | Version: V2.553
+# Description: 增加天猫多源导入、逐单资金去向查询及旺店通/金蝶核销结果回填。
+# [Change Log]
 # Date: 2026-08-11 | Author: Claude / c | Version: V2.250
 # Description: 【电商对账】路由（条目⑤一期：收款核销+基础资料）。
 #              本文件是「电商对账」线在后端的唯一落点；算法在 kernels/ec_settle.py，
@@ -11,12 +14,16 @@ import os
 import re
 import threading
 import datetime
+import hashlib
+import gzip
 
 from fastapi import APIRouter, Request, File, UploadFile, Form
 from sqlalchemy import select, insert, delete
 
 import kingdee_client as kc
 from kernels import ec_settle as es
+from kernels import ec_wdt_import as wdt
+from kernels import ec_tmall_import as tmall
 from core import JSONResponse, _require_perm, db
 
 router = APIRouter()
@@ -67,6 +74,452 @@ def _manual_path(period, kind, shop):
 
 _WDT_KINDS = ("销售出库", "销售退货", "退款不退货")     # ③旺店通数据（发货核对×2 + 收款核销×1）
 _PLAT_KINDS = ("平台订单", "平台退款", "平台保证金", "平台价保")   # ④平台数据（订单必、退款/保证金推荐、价保可选）
+
+# ==================== 月结工作台·旺店通销售出库 ====================
+def _wdt_run_payload(row, duplicate=False):
+    summary = json.loads(row.summary or "{}")
+    return {"ok": True, "available": True, "duplicate": duplicate,
+            "run_id": row.id, "period": row.period, "status": row.status,
+            "imported_at": row.ts, "summary": summary}
+
+
+@router.get("/api/ec/month-close/wdt/latest")
+def ec_month_close_wdt_latest(request: Request, period: str):
+    if not _require_perm(request, "enter:ecomsettle"):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not re.match(r"^\d{4}-\d{2}$", period or ""):
+        return JSONResponse({"ok": False, "msg": "结算期间格式应为 YYYY-MM"}, status_code=400)
+    with db._engine.begin() as cx:
+        row = cx.execute(select(db.ec_wdt_import_runs)
+                         .where(db.ec_wdt_import_runs.c.period == period)
+                         .order_by(db.ec_wdt_import_runs.c.id.desc()).limit(1)).first()
+    return _wdt_run_payload(row) if row else {"ok": True, "available": False, "period": period}
+
+
+@router.post("/api/ec/month-close/wdt/upload")
+async def ec_month_close_wdt_upload(request: Request, period: str = Form(...),
+                                    file: UploadFile = File(...)):
+    u = _require_perm(request, "ec_settle_upload")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "需要「上传结算流水/跑批」权限"}, status_code=403)
+    if not re.match(r"^\d{4}-\d{2}$", period or ""):
+        return JSONResponse({"ok": False, "msg": "结算期间格式应为 YYYY-MM"}, status_code=400)
+    data = await file.read(wdt.MAX_FILE_BYTES + 1)
+    if len(data) > wdt.MAX_FILE_BYTES:
+        return JSONResponse({"ok": False, "msg": "文件超过 25 MB"}, status_code=413)
+    digest = hashlib.sha256(data).hexdigest()
+    with db._engine.begin() as cx:
+        existing = cx.execute(select(db.ec_wdt_import_runs)
+                              .where(db.ec_wdt_import_runs.c.period == period)
+                              .where(db.ec_wdt_import_runs.c.content_sha256 == digest)).first()
+    if existing:
+        db.audit(u["name"], "ec_wdt_import_duplicate", target=period,
+                 detail="复用汇总批次 %s" % existing.id)
+        return _wdt_run_payload(existing, duplicate=True)
+    try:
+        summary = wdt.parse_wdt_sales_export(data, period)
+    except wdt.WdtImportError as exc:
+        db.audit(u["name"], "ec_wdt_import_rejected", target=period, detail="格式校验未通过")
+        return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
+    with db._engine.begin() as cx:
+        rid = cx.execute(insert(db.ec_wdt_import_runs).values(
+            period=period, content_sha256=digest, status=summary["source_status"],
+            summary=json.dumps(summary, ensure_ascii=False, separators=(",", ":")), ts=_now()
+        )).inserted_primary_key[0]
+        row = cx.execute(select(db.ec_wdt_import_runs)
+                         .where(db.ec_wdt_import_runs.c.id == rid)).first()
+    db.audit(u["name"], "ec_wdt_import", target=period,
+             detail="批次%s %s行 %s单 状态%s" % (
+                 rid, summary["in_period_rows"], summary["order_count"], summary["source_status"]))
+    return _wdt_run_payload(row)
+
+
+# ==================== 月结工作台·天猫平台数据 ====================
+_TMALL_KINDS = {"order": "订单报表", "item": "宝贝销售明细", "fund": "聚合结算账户", "alipay": "支付宝 2088 流水"}
+
+
+def _pack_tmall_index(value):
+    return gzip.compress(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _unpack_tmall_index(value):
+    if not value:
+        return {}
+    try:
+        return json.loads(gzip.decompress(value).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _tmall_source_payload(row):
+    if not row:
+        return {"available": False}
+    return {"available": True, "run_id": row.id, "kind": row.kind, "status": row.status,
+            "imported_at": row.ts, "summary": json.loads(row.summary or "{}")}
+
+
+def _tmall_latest_rows(period):
+    rows = {}
+    with db._engine.begin() as cx:
+        for kind in _TMALL_KINDS:
+            row = cx.execute(select(db.ec_tmall_import_runs)
+                             .where(db.ec_tmall_import_runs.c.period == period)
+                             .where(db.ec_tmall_import_runs.c.kind == kind)
+                             .order_by(db.ec_tmall_import_runs.c.id.desc()).limit(1)).first()
+            if row:
+                rows[kind] = row
+    return rows
+
+
+def _tmall_reconciliation(rows):
+    indexes = {kind: _unpack_tmall_index(row.match_index) for kind, row in rows.items()}
+    output = {}
+    if indexes.get("order") and indexes.get("item"):
+        order_keys = set(indexes["order"])
+        item_keys = set(indexes["item"])
+        output["order_item"] = {
+            "available": True,
+            "matched_main_orders": len(order_keys & item_keys),
+            "order_only": len(order_keys - item_keys),
+            "item_only": len(item_keys - order_keys),
+            "status": "ready" if order_keys == item_keys else "warning",
+        }
+    else:
+        output["order_item"] = {"available": False}
+
+    if indexes.get("order") and indexes.get("fund"):
+        order_index = indexes["order"]
+        fund_index = indexes["fund"]
+        shared = set(order_index) & set(fund_index)
+        by_method = {}
+        for key in shared:
+            method = order_index.get(key) or "未识别"
+            item = by_method.setdefault(method, {"orders": 0, "income": 0.0, "expense": 0.0,
+                                                  "trade_receipt_rows": 0})
+            item["orders"] += 1
+            item["income"] += float(fund_index[key].get("income") or 0)
+            item["expense"] += float(fund_index[key].get("expense") or 0)
+            item["trade_receipt_rows"] += int(fund_index[key].get("trade_receipt_rows") or 0)
+        for item in by_method.values():
+            item["income"] = round(item["income"], 2)
+            item["expense"] = round(item["expense"], 2)
+        output["order_fund"] = {
+            "available": True,
+            "matched_current_period_orders": len(shared),
+            "fund_orders_outside_current_order_export": len(set(fund_index) - set(order_index)),
+            "current_orders_without_same_period_aggregate_entry": len(set(order_index) - set(fund_index)),
+            "by_payment_method": by_method,
+            "status": "ready",
+        }
+    else:
+        output["order_fund"] = {"available": False}
+
+    if indexes.get("order") and indexes.get("alipay"):
+        order_index = indexes["order"]
+        alipay_index = indexes["alipay"]
+        receipt_orders = {key for key, value in alipay_index.items()
+                          if int(value.get("receipt_rows") or 0) > 0}
+        shared = set(order_index) & receipt_orders
+        output["order_alipay"] = {
+            "available": True,
+            "matched_current_period_orders": len(shared),
+            "alipay_orders_outside_current_order_export": len(receipt_orders - set(order_index)),
+            "current_orders_without_same_period_alipay_receipt": len(set(order_index) - receipt_orders),
+            "matched_receipt_income": round(sum(float(alipay_index[key].get("receipt_income") or 0) for key in shared), 2),
+            "matched_refund_expense": round(sum(float(alipay_index[key].get("refund_expense") or 0) for key in shared), 2),
+            "status": "ready",
+        }
+    else:
+        output["order_alipay"] = {"available": False}
+
+    if indexes.get("order") and (indexes.get("fund") or indexes.get("alipay")):
+        order_index = indexes["order"]
+        fund_index = indexes.get("fund") or {}
+        alipay_index = indexes.get("alipay") or {}
+        aggregate_receipts = {key for key, value in fund_index.items()
+                              if int(value.get("trade_receipt_rows") or 0) > 0}
+        alipay_receipts = {key for key, value in alipay_index.items()
+                           if int(value.get("receipt_rows") or 0) > 0}
+        both = set(order_index) & aggregate_receipts & alipay_receipts
+        by_method = {}
+        for key, method in order_index.items():
+            item = by_method.setdefault(method or "未识别", {
+                "orders": 0, "alipay_receipt_orders": 0, "aggregate_receipt_orders": 0,
+                "both_receipt_sources": 0, "unresolved_orders": 0,
+            })
+            item["orders"] += 1
+            in_alipay = key in alipay_receipts
+            in_aggregate = key in aggregate_receipts
+            if in_alipay:
+                item["alipay_receipt_orders"] += 1
+            if in_aggregate:
+                item["aggregate_receipt_orders"] += 1
+            if in_alipay and in_aggregate:
+                item["both_receipt_sources"] += 1
+            if not in_alipay and not in_aggregate:
+                item["unresolved_orders"] += 1
+        complete = bool(indexes.get("fund")) and bool(indexes.get("alipay"))
+        output["payment_destination"] = {
+            "available": True,
+            "evidence_sources_complete": complete,
+            "alipay_receipt_orders": len(set(order_index) & alipay_receipts),
+            "aggregate_receipt_orders": len(set(order_index) & aggregate_receipts),
+            "both_receipt_sources": len(both),
+            "unresolved_orders": len(set(order_index) - alipay_receipts - aggregate_receipts),
+            "by_payment_method": by_method,
+            "status": "blocked" if both else ("ready" if complete else "warning"),
+        }
+    else:
+        output["payment_destination"] = {"available": False}
+    return output
+
+
+def _tmall_payload(period, duplicate=False, imported_kind=""):
+    rows = _tmall_latest_rows(period)
+    return {"ok": True, "period": period, "duplicate": duplicate, "imported_kind": imported_kind,
+            "sources": {kind: _tmall_source_payload(rows.get(kind)) for kind in _TMALL_KINDS},
+            "reconciliation": _tmall_reconciliation(rows)}
+
+
+def _insert_tmall_order_details(cx, run_id, period, detail_rows):
+    if not detail_rows:
+        return
+    cx.execute(insert(db.ec_tmall_order_details), [
+        {**row, "run_id": run_id, "period": period} for row in detail_rows
+    ])
+
+
+def _tmall_order_detail_row(row, fund_index, alipay_index, settle_index):
+    key = row.order_key
+    fund = fund_index.get(key) or {}
+    alipay = alipay_index.get(key) or {}
+    in_aggregate = int(fund.get("trade_receipt_rows") or 0) > 0
+    in_alipay = int(alipay.get("receipt_rows") or 0) > 0
+    if in_alipay and in_aggregate:
+        destination = "冲突"
+    elif in_alipay:
+        destination = "支付宝2088"
+    elif in_aggregate:
+        destination = "聚合账户"
+    else:
+        destination = "待查"
+    alipay_at = alipay.get("receipt_at_min") or ""
+    aggregate_at = fund.get("receipt_at_min") or ""
+    receipt_at = ("2088 %s / 聚合 %s" % (alipay_at, aggregate_at)) if destination == "冲突" else (
+        alipay_at if in_alipay else aggregate_at
+    )
+    settled = settle_index.get(row.order_no)
+    bucket_labels = {
+        "ok": "已匹配", "ufirst": "U先汇总", "crossed": "串单复核",
+        "carry": "跨期调节", "real": "有差异",
+    }
+    return {
+        "order_no": row.order_no,
+        "created_at": row.created_at or "",
+        "paid_at": row.paid_at or "",
+        "shipped_at": row.shipped_at or "",
+        "confirmed_at": row.confirmed_at or "",
+        "status": row.status or "空",
+        "payment_method": row.payment_method or "未识别",
+        "merchant_sku": row.merchant_sku or "",
+        "quantity": float(row.quantity or 0),
+        "current_paid": round(float(row.current_paid or 0), 2),
+        "refund": round(float(row.refund or 0), 2),
+        "confirmed_payout": round(float(row.confirmed_payout or 0), 2),
+        "alipay_receipt": round(float(alipay.get("receipt_income") or 0), 2),
+        "aggregate_receipt": round(float(fund.get("receipt_income") or 0), 2),
+        "destination": destination,
+        "receipt_at": receipt_at,
+        "alipay_receipt_at": alipay_at,
+        "aggregate_receipt_at": aggregate_at,
+        "internal_sync_status": "已接入" if settled else "待同步",
+        "kingdee_ar_no": settled.ar_no if settled else "",
+        "kingdee_ar_amount": round(float(settled.ar_amt or 0), 2) if settled else None,
+        "wdt_refund_adjustment": round(float(settled.rk_amt or 0), 2) if settled else None,
+        "reconcile_diff": round(float(settled.diff or 0), 2) if settled else None,
+        "reconcile_status": bucket_labels.get(settled.bucket, settled.bucket or "待判断") if settled else "待同步",
+        "difference_reason": settled.note or "" if settled else "等待旺店通逐单出库与金蝶应收同步",
+    }
+
+
+@router.get("/api/ec/month-close/tmall/latest")
+def ec_month_close_tmall_latest(request: Request, period: str):
+    if not _require_perm(request, "enter:ecomsettle"):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not re.match(r"^\d{4}-\d{2}$", period or ""):
+        return JSONResponse({"ok": False, "msg": "结算期间格式应为 YYYY-MM"}, status_code=400)
+    return _tmall_payload(period)
+
+
+@router.get("/api/ec/month-close/tmall/orders")
+def ec_month_close_tmall_orders(request: Request, period: str, page: int = 1, page_size: int = 50,
+                                q: str = "", payment_method: str = "", destination: str = "",
+                                status: str = ""):
+    if not _require_perm(request, "enter:ecomsettle"):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not re.match(r"^\d{4}-\d{2}$", period or ""):
+        return JSONResponse({"ok": False, "msg": "结算期间格式应为 YYYY-MM"}, status_code=400)
+    page = max(1, page)
+    page_size = min(200, max(20, page_size))
+    rows = _tmall_latest_rows(period)
+    order_run = rows.get("order")
+    if not order_run:
+        return {"ok": True, "available": False, "period": period, "rows": [], "total": 0}
+    indexes = {kind: _unpack_tmall_index(row.match_index) for kind, row in rows.items()}
+    with db._engine.begin() as cx:
+        detail_rows = cx.execute(
+            select(db.ec_tmall_order_details)
+            .where(db.ec_tmall_order_details.c.run_id == order_run.id)
+            .order_by(db.ec_tmall_order_details.c.created_at.desc(), db.ec_tmall_order_details.c.id.desc())
+        ).fetchall()
+        settle_run = cx.execute(select(db.ec_settle_runs)
+                                .where(db.ec_settle_runs.c.period == period)
+                                .where(db.ec_settle_runs.c.status == "done")
+                                .order_by(db.ec_settle_runs.c.id.desc()).limit(1)).first()
+        settle_rows = cx.execute(select(db.ec_settle_orders)
+                                 .where(db.ec_settle_orders.c.run_id == settle_run.id)).fetchall() if settle_run else []
+    settle_index = {row.order_no: row for row in settle_rows}
+    enriched = [_tmall_order_detail_row(row, indexes.get("fund") or {}, indexes.get("alipay") or {}, settle_index)
+                for row in detail_rows]
+    destination_counts = {"支付宝2088": 0, "聚合账户": 0, "待查": 0, "冲突": 0}
+    for item in enriched:
+        destination_counts[item["destination"]] += 1
+    methods = sorted({item["payment_method"] for item in enriched})
+    statuses = sorted({item["status"] for item in enriched})
+    needle = (q or "").strip().casefold()
+    filtered = [item for item in enriched
+                if (not needle or needle in item["order_no"].casefold())
+                and (not payment_method or item["payment_method"] == payment_method)
+                and (not destination or item["destination"] == destination)
+                and (not status or item["status"] == status)]
+    total = len(filtered)
+    start = (page - 1) * page_size
+    return {
+        "ok": True,
+        "available": bool(detail_rows),
+        "period": period,
+        "run_id": order_run.id,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "all_order_count": len(enriched),
+        "page_count": (total + page_size - 1) // page_size,
+        "destination_counts": destination_counts,
+        "payment_methods": methods,
+        "statuses": statuses,
+        "internal_run_id": settle_run.id if settle_run else None,
+        "internal_matched_orders": len(settle_index),
+        "rows": filtered[start:start + page_size],
+    }
+
+
+@router.post("/api/ec/month-close/tmall/upload")
+async def ec_month_close_tmall_upload(request: Request, period: str = Form(...), kind: str = Form(...),
+                                      file: UploadFile = File(...)):
+    u = _require_perm(request, "ec_settle_upload")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "需要「上传结算流水/跑批」权限"}, status_code=403)
+    if not re.match(r"^\d{4}-\d{2}$", period or ""):
+        return JSONResponse({"ok": False, "msg": "结算期间格式应为 YYYY-MM"}, status_code=400)
+    if kind not in _TMALL_KINDS:
+        return JSONResponse({"ok": False, "msg": "不支持的天猫报表类型"}, status_code=400)
+    if kind == "alipay":
+        return JSONResponse({"ok": False, "msg": "支付宝流水请使用多文件分片导入"}, status_code=400)
+    data = await file.read(tmall.MAX_FILE_BYTES + 1)
+    if len(data) > tmall.MAX_FILE_BYTES:
+        return JSONResponse({"ok": False, "msg": "文件超过 25 MB"}, status_code=413)
+    digest = hashlib.sha256(data).hexdigest()
+    with db._engine.begin() as cx:
+        existing = cx.execute(select(db.ec_tmall_import_runs)
+                              .where(db.ec_tmall_import_runs.c.period == period)
+                              .where(db.ec_tmall_import_runs.c.kind == kind)
+                              .where(db.ec_tmall_import_runs.c.content_sha256 == digest)).first()
+    if existing:
+        if kind == "order":
+            with db._engine.begin() as cx:
+                has_detail = cx.execute(select(db.ec_tmall_order_details.c.id)
+                                        .where(db.ec_tmall_order_details.c.run_id == existing.id)
+                                        .limit(1)).first()
+            if not has_detail:
+                try:
+                    reparsed = tmall.parse_order_export(data, period)
+                    detail_rows = reparsed.pop("_detail_rows", [])
+                    with db._engine.begin() as cx:
+                        _insert_tmall_order_details(cx, existing.id, period, detail_rows)
+                except tmall.TmallImportError as exc:
+                    return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
+        db.audit(u["name"], "ec_tmall_import_duplicate", target=period,
+                 detail="%s复用汇总批次%s" % (_TMALL_KINDS[kind], existing.id))
+        return _tmall_payload(period, duplicate=True, imported_kind=kind)
+    try:
+        parsed = tmall.PARSERS[kind](data, period)
+        match_index = parsed.pop("_match_index", {})
+        detail_rows = parsed.pop("_detail_rows", [])
+    except tmall.TmallImportError as exc:
+        db.audit(u["name"], "ec_tmall_import_rejected", target=period,
+                 detail="%s格式校验未通过" % _TMALL_KINDS[kind])
+        return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
+    with db._engine.begin() as cx:
+        rid = cx.execute(insert(db.ec_tmall_import_runs).values(
+            period=period, kind=kind, content_sha256=digest, status=parsed["source_status"],
+            summary=json.dumps(parsed, ensure_ascii=False, separators=(",", ":")),
+            match_index=_pack_tmall_index(match_index), ts=_now()
+        )).inserted_primary_key[0]
+        if kind == "order":
+            _insert_tmall_order_details(cx, rid, period, detail_rows)
+    db.audit(u["name"], "ec_tmall_import", target=period,
+             detail="批次%s %s %s行 状态%s" % (rid, _TMALL_KINDS[kind], parsed["in_period_rows"], parsed["source_status"]))
+    return _tmall_payload(period, imported_kind=kind)
+
+
+@router.post("/api/ec/month-close/tmall/alipay/upload")
+async def ec_month_close_tmall_alipay_upload(request: Request, period: str = Form(...),
+                                             files: list[UploadFile] = File(...)):
+    u = _require_perm(request, "ec_settle_upload")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "需要「上传结算流水/跑批」权限"}, status_code=403)
+    if not re.match(r"^\d{4}-\d{2}$", period or ""):
+        return JSONResponse({"ok": False, "msg": "结算期间格式应为 YYYY-MM"}, status_code=400)
+    if not files or len(files) > tmall.MAX_ALIPAY_FILES:
+        return JSONResponse({"ok": False, "msg": "支付宝流水文件数应在 1–20 个之间"}, status_code=400)
+    payloads = []
+    total_bytes = 0
+    for upload in files:
+        data = await upload.read(tmall.MAX_ALIPAY_FILE_BYTES + 1)
+        if len(data) > tmall.MAX_ALIPAY_FILE_BYTES:
+            return JSONResponse({"ok": False, "msg": "单个支付宝流水文件超过 30 MB"}, status_code=413)
+        payloads.append(data)
+        total_bytes += len(data)
+    if total_bytes > tmall.MAX_ALIPAY_TOTAL_BYTES:
+        return JSONResponse({"ok": False, "msg": "支付宝流水文件总体积超过 200 MB"}, status_code=413)
+    digest = hashlib.sha256("".join(sorted(hashlib.sha256(data).hexdigest() for data in payloads)).encode("ascii")).hexdigest()
+    with db._engine.begin() as cx:
+        existing = cx.execute(select(db.ec_tmall_import_runs)
+                              .where(db.ec_tmall_import_runs.c.period == period)
+                              .where(db.ec_tmall_import_runs.c.kind == "alipay")
+                              .where(db.ec_tmall_import_runs.c.content_sha256 == digest)).first()
+    if existing:
+        db.audit(u["name"], "ec_tmall_import_duplicate", target=period,
+                 detail="支付宝 2088 流水复用汇总批次%s" % existing.id)
+        return _tmall_payload(period, duplicate=True, imported_kind="alipay")
+    try:
+        parsed = tmall.parse_alipay_exports(payloads, period)
+        match_index = parsed.pop("_match_index", {})
+    except tmall.TmallImportError as exc:
+        db.audit(u["name"], "ec_tmall_import_rejected", target=period,
+                 detail="支付宝 2088 流水格式校验未通过")
+        return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
+    with db._engine.begin() as cx:
+        rid = cx.execute(insert(db.ec_tmall_import_runs).values(
+            period=period, kind="alipay", content_sha256=digest, status=parsed["source_status"],
+            summary=json.dumps(parsed, ensure_ascii=False, separators=(",", ":")),
+            match_index=_pack_tmall_index(match_index), ts=_now()
+        )).inserted_primary_key[0]
+    db.audit(u["name"], "ec_tmall_import", target=period,
+             detail="批次%s 支付宝 2088 流水 %s个文件 %s条唯一流水 状态%s" % (
+                 rid, parsed["file_count"], parsed["unique_rows"], parsed["source_status"]))
+    return _tmall_payload(period, imported_kind="alipay")
+
 
 
 def _shop_files(period, shop):
