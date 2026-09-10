@@ -47,6 +47,11 @@ class FlowLedgerTests(unittest.TestCase):
     def test_entity_rejected(self):
         with self.assertRaises(ValueError):list(ledger._cells_xml(b'<!DOCTYPE x><x/>'))
 
+    def test_refund_transfer_and_subsidy_not_platform_fees(self):
+        for code,expected in [('0020002','refund'),('008002800014','transfer'),('0240004T','adjustment')]:
+            row=ledger.parse(self.workbook([['2026-08-01','其它',0,10,code+'|测试费目','s','o',14,'']]),'a.xlsx',{code:{'category':'费用','account':'test'}})[0]
+            self.assertEqual(row['bucket'],expected)
+
     def test_numeric_long_id_rejected(self):
         with self.assertRaises(ValueError):
             ledger.parse(self.workbook([['2026-08-01','收款',14,0,'0010001|交易收款',1234567890123456789,'o',14,'']]),'a.xlsx',{})

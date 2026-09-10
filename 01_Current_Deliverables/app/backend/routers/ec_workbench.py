@@ -117,7 +117,8 @@ def load_sources(period, shop):
                     ledger_id=record.id,aggregate_copy=kind=='alipay' and value.get('chan')=='聚合结算渠道')
                 if value['bucket']=='receipt':event['kind']='receipt'
                 elif value['bucket']=='refund':event['kind']='refund'
-                elif value['bucket'] in ('fee','ufirst_fee'):event['kind']='fee'
+                elif value['bucket']=='adjustment':event['kind']='adjustment'
+                elif value['bucket'] in ('fee','ufirst_fee') and event['kind'] not in ('receipt','refund','transfer','adjustment'):event['kind']='fee'
                 elif value['bucket'] in ('transfer','recharge'):event['kind']='transfer'
                 events.append(event)
             if not events and not conflicted:continue
@@ -254,6 +255,8 @@ def order_view(request:Request,period:str,shop:str,order_no:str):
 @router.post('/upload')
 async def upload(request:Request,period:str=Form(...),shop:str=Form(...),kind:str=Form(...),files:list[UploadFile]=File(...)):
     user=require(request,True);check_period(period);s=check_shop(shop)
+    if kind in ('alipay','fund'):
+        raise HTTPException(400,'资金流水请在账户流水页按账户导入；数据准备会自动引用，避免两套金额来源')
     if s['platform'] not in ('天猫','淘宝') and kind not in ('wdt',):
         raise HTTPException(400,'当前先验收天猫；其他平台不得用天猫字段模板强行导入')
     if not files or len(files)>20: raise HTTPException(400,'每次最多 20 个文件')

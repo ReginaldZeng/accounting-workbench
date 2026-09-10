@@ -26,7 +26,7 @@ ALIASES = {
     'goods': ('商品名称',), 'peer': ('对方名称',),
     'desc': ('业务描述',), 'remark': ('备注', '摘要'),
 }
-BUCKETS = {'receipt':'交易收款', 'refund':'交易退款', 'fee':'平台费用',
+BUCKETS = {'receipt':'交易收款', 'refund':'交易退款', 'fee':'平台费用', 'adjustment':'补贴 / 调整',
     'ufirst_fee':'U先专属费用', 'qr':'收钱码收款', 'transfer':'内部划转候选',
     'recharge':'充值 / 划转候选', 'other':'其他已知费目', 'unknown':'待识别流水'}
 
@@ -112,7 +112,11 @@ def classify(row, fee_map):
     code, label = es._code_of(row['desc']); flags=[]
     bucket='unknown'; reason='业务描述不含可识别费目码'
     if code == '0010001': bucket,reason='receipt','交易收款费目 0010001'
-    elif code == '0020001': bucket,reason='refund','交易退款费目 0020001'
+    elif code in ('0020001','0020002'): bucket,reason='refund','交易退款费目 '+code
+    elif code in ('008000200003','008002800014','008002800015'):
+        bucket,reason='transfer','保证金划转费目；单独核对，不作为平台费用'
+        flags.append('保证金划转性质待确认')
+    elif code == '0240004T':bucket,reason='adjustment','百亿补贴激励前返，补贴单列'
     elif code in es.UFIRST_FEE_CODES: bucket,reason='ufirst_fee','U先专属费目信号；不等于整笔订单都是U先'
     elif code in fee_map:
         category=fee_map[code].get('category','')

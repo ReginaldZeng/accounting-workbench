@@ -7,6 +7,7 @@ import sys
 import types
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 BACK=ROOT/'01_Current_Deliverables/app/backend'
@@ -42,6 +43,7 @@ def file(serial='s1',amount=1.81,extra='first'):
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
+        module._jobs.clear()
         with fake._engine.begin() as cx:
             for name in ('ec_flow_reviews','ec_flow_origins','ec_flow_rows','ec_flow_files','ec_flow_accounts'):cx.execute(sa.delete(namespace[name]))
             for aid in ('a1','a2'):cx.execute(sa.insert(module.A).values(id=aid,kind='alipay',name=aid,shops='["test"]'))
@@ -118,6 +120,25 @@ class StoreTests(unittest.TestCase):
     def test_wrong_merchant_still_rejected(self):
         with fake._engine.begin() as cx:cx.execute(sa.update(module.A).where(module.A.c.id=='a1').values(suffix='9999'))
         with self.assertRaises(Exception):module.import_files('a1',[('2088141335094680-export.xlsx',file())],'test')
+        self.assertEqual(module.search(None)['total'],0)
+
+    def test_background_import_tracks_completion(self):
+        class InlineThread:
+            def __init__(self,target,daemon):self.target=target
+            def start(self):self.target()
+        with patch.object(module.threading,'Thread',InlineThread):
+            job=module.start_import_job('a1',[('one.xlsx',file())],'test')
+        state=module.import_status(None,job['job_id'])
+        self.assertEqual(state['status'],'complete')
+        self.assertEqual(state['result']['added'],1)
+
+    def test_background_failure_is_reported_without_partial_batch(self):
+        class InlineThread:
+            def __init__(self,target,daemon):self.target=target
+            def start(self):self.target()
+        with patch.object(module.threading,'Thread',InlineThread):
+            job=module.start_import_job('a1',[('one.xlsx',file()),('bad.xlsx',b'bad')],'test')
+        self.assertEqual(module.import_status(None,job['job_id'])['status'],'failed')
         self.assertEqual(module.search(None)['total'],0)
 
 

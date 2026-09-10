@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { requestJson, query, post, money, count, useResource } from './ecomWorkbenchApi.js'
 import './ecomFlowLedger.css'
 
-const BUCKETS = { receipt:'交易收款',refund:'交易退款',fee:'平台费用',ufirst_fee:'U先专属费用',qr:'收钱码收款',transfer:'内部划转候选',recharge:'充值 / 划转候选',other:'其他已知费目',unknown:'待识别流水' }
+const BUCKETS = { receipt:'交易收款',refund:'交易退款',fee:'平台费用',adjustment:'补贴 / 调整',ufirst_fee:'U先专属费用',qr:'收钱码收款',transfer:'划转候选',recharge:'充值 / 划转候选',other:'其他已知费目',unknown:'待识别流水' }
 const EMPTY = { review_status:'',q:'',bucket:'',abnormal:false,direction:'',amount_min:'',amount_max:'',date_from:'',date_to:'' }
 
 export function AccountTable({ data, onSelect }) {
@@ -46,8 +46,20 @@ export default function EcomFlowLedger({ user, period: parentPeriod = '', initia
     const files = Array.from(e.target.files || []); e.target.value = ''
     if (!files.length) return
     act(async () => {
-      const form = new FormData(); form.append('account_id', accountId); files.forEach(file => form.append('files', file))
-      const r = await requestJson('/api/ec/flows/import', { method:'POST',body:form })
+      const form = new FormData(); form.append('account_id', accountId); form.append('background','true'); files.forEach(file => form.append('files', file))
+      let r = await requestJson('/api/ec/flows/import', { method:'POST',body:form })
+      if (r.job_id) {
+        const jobId=r.job_id
+        setNotice(`已接收 ${files.length} 个文件，服务器正在后台解析与入库，请勿重复提交。`)
+        try {
+          while (true) {
+            await new Promise(resolve => setTimeout(resolve,1500))
+            const job=await requestJson(`/api/ec/flows/import-status/${jobId}`)
+            if (job.status==='failed') throw new Error(job.error || '后台导入失败')
+            if (job.status==='complete') {r=job.result;break}
+          }
+        } catch (error) { throw new Error(`${error.message}。若连接中断，任务可能仍在后台运行；请先刷新流水查看结果。`) }
+      }
       setNotice(`导入完成：新增 ${count(r.added)} 笔，重复来源 ${count(r.duplicates)} 笔，内容冲突 ${count(r.conflicts)} 笔。原文件未修改。`)
     })
   }
@@ -62,7 +74,7 @@ export default function EcomFlowLedger({ user, period: parentPeriod = '', initia
     {(notice || accounts.error || result.error) && <div className="ef-notice" role="status">{notice || accounts.error || result.error}</div>}
     {create && <form className="ef-account-form" onSubmit={saveAccount}><label>账户类型<select value={accountKind} onChange={e => setAccountKind(e.target.value)}><option value="alipay">支付宝</option><option value="fund">聚合账户</option></select></label><label>账户名称<input required maxLength="120" value={name} onChange={e => setName(e.target.value)} placeholder="例如：星期零天猫支付宝" /></label><label>尾号<input maxLength="8" pattern="[0-9]{0,8}" value={suffix} onChange={e => setSuffix(e.target.value)} placeholder="可填末 4 位" /></label><fieldset><legend>关联店铺（可多选）</legend>{accounts.data?.shops?.map(s => <label className="ef-check" key={s.id}><input type="checkbox" checked={shopIds.includes(s.id)} onChange={e => setShopIds(ids => e.target.checked ? [...ids,s.id] : ids.filter(id => id!==s.id))} />{s.name}</label>)}</fieldset><button className="ef-primary" disabled={busy || !shopIds.length}>保存账户</button><button type="button" onClick={() => setCreate(false)}>取消</button></form>}
     <AccountTable data={accounts.data} onSelect={selectAccount} />
-    <div className="ef-tools"><label>账户<select value={accountId} onChange={e => selectAccount(e.target.value)}><option value="">全部账户</option>{accounts.data?.accounts?.map(a => <option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label><label>流水期间<input type="month" value={period} onChange={e => {setPeriod(e.target.value);setPage(1)}} /></label><button onClick={() => {setPeriod('');setPage(1)}}>跨月查找</button><span className="ef-spacer" /><input hidden type="file" ref={fileRef} accept=".xlsx,.xls,.zip" multiple onChange={upload} /><button className="ef-primary" disabled={!canEdit || !accountId || busy} onClick={() => fileRef.current?.click()}>{busy ? '正在处理…' : '合并导入流水'}</button><small>{accountId ? '一次可选多个分片' : '导入前请选择具体账户'}</small></div>
+    <div className="ef-tools"><label>账户<select aria-label="流水账户" value={accountId} onChange={e => selectAccount(e.target.value)}><option value="">全部账户</option>{accounts.data?.accounts?.map(a => <option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label><label>流水期间<input type="month" value={period} onChange={e => {setPeriod(e.target.value);setPage(1)}} /></label><button onClick={() => {setPeriod('');setPage(1)}}>跨月查找</button><span className="ef-spacer" /><input hidden type="file" ref={fileRef} accept=".xlsx,.xls,.zip" multiple onChange={upload} /><button className="ef-primary" disabled={!canEdit || !accountId || busy} onClick={() => fileRef.current?.click()}>{busy ? '正在处理…' : '合并导入流水'}</button><small>{accountId ? '一次可选多个分片' : '导入前请选择具体账户'}</small></div>
     <form className="ef-search" onSubmit={apply}><label className="ef-query">统一搜索<input value={filters.q} onChange={e => change('q',e.target.value)} placeholder="订单号、流水号、交易号、商户单号、商品、对方名称、摘要…" /></label><label>业务分桶<select value={filters.bucket} onChange={e => change('bucket',e.target.value)}><option value="">全部流水</option>{Object.entries(BUCKETS).map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label>人工定性<select value={filters.review_status} onChange={e => change('review_status',e.target.value)}><option value="">全部状态</option><option>待核对</option><option>正常</option><option>待追查</option></select></label><label>收支方向<select value={filters.direction} onChange={e => change('direction',e.target.value)}><option value="">全部</option><option value="income">收入</option><option value="outgo">支出</option></select></label><label>金额从<input inputMode="decimal" value={filters.amount_min} onChange={e => change('amount_min',e.target.value)} placeholder="不限" /></label><label>金额至<input inputMode="decimal" value={filters.amount_max} onChange={e => change('amount_max',e.target.value)} placeholder="不限" /></label><label>开始日期<input type="date" value={filters.date_from} onChange={e => change('date_from',e.target.value)} /></label><label>结束日期<input type="date" value={filters.date_to} onChange={e => change('date_to',e.target.value)} /></label><label className="ef-check"><input type="checkbox" checked={filters.abnormal} onChange={e => change('abnormal',e.target.checked)} />仅看异常 / 待核对</label><button className="ef-primary">搜索</button><button type="button" onClick={() => {setFilters({...EMPTY});setSearch({...EMPTY});setPage(1)}}>清空条件</button></form>
     <div className="ef-summary"><span>筛选结果 <strong>{count(data?.total)}</strong> 笔</span><span>收入 <strong>¥{money(data?.income)}</strong></span><span>支出 <strong>¥{money(data?.outgo)}</strong></span><span>异常 / 提醒 <strong>{count(data?.flagged)}</strong> 笔</span></div>
     <p className="ef-muted">{data?.notice || '流水分类不是订单核销分桶；候选与提醒不等于已确认错误。'} 金额不指定方向时按单笔收支净额的绝对值筛选。</p>

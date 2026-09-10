@@ -13,6 +13,8 @@ from kernels import ec_flow_ledger as ledger
 
 router=APIRouter(prefix='/api/ec/flows')
 _import_lock=threading.Lock()
+_jobs_lock=threading.Lock()
+_jobs={}
 A,F,R,O=db.ec_flow_accounts,db.ec_flow_files,db.ec_flow_rows,db.ec_flow_origins
 
 
@@ -134,20 +136,53 @@ def store_parsed(account_id, parsed, operator):
 
 
 @router.post('/import')
-async def upload(request:Request,account_id:str=Form(...),files:list[UploadFile]=File(...)):
+async def upload(request:Request,account_id:str=Form(...),files:list[UploadFile]=File(...),background:bool=Form(False)):
     user=require(request,True)
     if not files or len(files)>20:raise HTTPException(400,'一次可选择 1–20 个文件')
-    blobs=[]
+    blobs=[];total_bytes=0
     for f in files:
         data=await f.read(30*1024*1024+1)
         if len(data)>30*1024*1024:raise HTTPException(413,'单个文件超过 30 MB')
+        total_bytes+=len(data)
+        if total_bytes>200*1024*1024:raise HTTPException(413,'本次文件合计超过 200 MB')
         blobs.append((Path((f.filename or '').replace('\\','/')).name[:180],data))
+    if background:
+        return start_import_job(account_id,blobs,user['name'])
     try:
         from starlette.concurrency import run_in_threadpool
         result=await run_in_threadpool(import_files,account_id,blobs,user['name'])
     except (ValueError,KeyError) as exc:raise HTTPException(400,str(exc)[:180])
     db.audit(user['name'],'ec_flow_import',target=account_id,detail=json.dumps(result))
     return result
+
+
+def start_import_job(account_id,blobs,operator):
+    with db._engine.connect() as cx:account(cx,account_id)
+    with _jobs_lock:
+        if any(j['status']=='running' for j in _jobs.values()):
+            raise HTTPException(409,'已有流水导入在后台处理，请完成后再提交，避免重复排队')
+        if len(_jobs)>=50:_jobs.clear()
+        job_id=uuid.uuid4().hex
+        _jobs[job_id]={'id':job_id,'account_id':account_id,'status':'running','files':len(blobs),'started_at':ec._now()}
+    def run():
+        try:
+            result=import_files(account_id,blobs,operator)
+            db.audit(operator,'ec_flow_import',target=account_id,detail=json.dumps(result))
+            with _jobs_lock:_jobs[job_id].update(status='complete',result=result,finished_at=ec._now())
+        except Exception as error:
+            message=str(error.detail) if isinstance(error,HTTPException) else str(error) if isinstance(error,ValueError) else '导入失败：'+type(error).__name__
+            with _jobs_lock:_jobs[job_id].update(status='failed',error=message[:200],finished_at=ec._now())
+    threading.Thread(target=run,daemon=True).start()
+    return {'ok':True,'job_id':job_id,'status':'running'}
+
+
+@router.get('/import-status/{job_id}')
+def import_status(request:Request,job_id:str):
+    require(request)
+    with _jobs_lock:
+        if job_id not in _jobs:
+            raise HTTPException(404,'导入进度记录已失效（可能服务重启）；请先刷新流水核对结果，再用原文件重试，已入库文件会去重')
+        return dict(_jobs[job_id],ok=True)
 
 
 @router.get('')
