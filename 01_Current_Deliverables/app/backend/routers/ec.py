@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-10 | Author: Codex | Version: V2.553
-# Description: 增加天猫多源导入、逐单资金去向查询及旺店通/金蝶核销结果回填。
+# Date: 2026-09-10 | Author: Codex | Version: V2.555
+# Description: 旺店通逐单发货证据、U先分流及旧导入批次无损补齐。
+# Description: 金蝶应收缓存独立关联天猫订单；新增同步状态查询、完整单号回填及原子刷新。
 # [Change Log]
 # Date: 2026-08-11 | Author: Claude / c | Version: V2.250
 # Description: 【电商对账】路由（条目⑤一期：收款核销+基础资料）。
@@ -16,14 +17,17 @@ import threading
 import datetime
 import hashlib
 import gzip
+import tempfile
 
 from fastapi import APIRouter, Request, File, UploadFile, Form
-from sqlalchemy import select, insert, delete
+from sqlalchemy import select, insert, delete, update
 
 import kingdee_client as kc
 from kernels import ec_settle as es
 from kernels import ec_wdt_import as wdt
 from kernels import ec_tmall_import as tmall
+from kernels import ec_month_ar as month_ar
+from kernels import ec_month_fulfillment as fulfillment
 from core import JSONResponse, _require_perm, db
 
 router = APIRouter()
@@ -75,12 +79,41 @@ def _manual_path(period, kind, shop):
 _WDT_KINDS = ("销售出库", "销售退货", "退款不退货")     # ③旺店通数据（发货核对×2 + 收款核销×1）
 _PLAT_KINDS = ("平台订单", "平台退款", "平台保证金", "平台价保")   # ④平台数据（订单必、退款/保证金推荐、价保可选）
 
+
 # ==================== 月结工作台·旺店通销售出库 ====================
 def _wdt_run_payload(row, duplicate=False):
     summary = json.loads(row.summary or "{}")
+    snapshot = _wdt_snapshot(row.period, row.id)
     return {"ok": True, "available": True, "duplicate": duplicate,
             "run_id": row.id, "period": row.period, "status": row.status,
-            "imported_at": row.ts, "summary": summary}
+            "imported_at": row.ts, "summary": summary,
+            "linkage": {key: value for key, value in snapshot.items() if key != 'orders'}}
+
+
+def _wdt_snapshot_path(period, run_id):
+    return os.path.join(EC_UPLOAD_DIR, period, 'month-wdt-%s.json.gz' % int(run_id))
+
+
+def _wdt_snapshot(period, run_id):
+    try:
+        with gzip.open(_wdt_snapshot_path(period, run_id), 'rt', encoding='utf-8') as stream:
+            return json.load(stream)
+    except (OSError, ValueError):
+        return {'available': False, 'orders': {}, 'reason': '请重新导入旺店通以生成逐单关联'}
+
+
+def _save_wdt_snapshot(period, run_id, snapshot):
+    path = _wdt_snapshot_path(period, run_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as stream:
+            temp_path = stream.name
+            stream.write(_pack_tmall_index(snapshot))
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 @router.get("/api/ec/month-close/wdt/latest")
@@ -112,20 +145,25 @@ async def ec_month_close_wdt_upload(request: Request, period: str = Form(...),
         existing = cx.execute(select(db.ec_wdt_import_runs)
                               .where(db.ec_wdt_import_runs.c.period == period)
                               .where(db.ec_wdt_import_runs.c.content_sha256 == digest)).first()
-    if existing:
+    if existing and _wdt_snapshot(period, existing.id).get('available'):
         db.audit(u["name"], "ec_wdt_import_duplicate", target=period,
                  detail="复用汇总批次 %s" % existing.id)
         return _wdt_run_payload(existing, duplicate=True)
     try:
         summary = wdt.parse_wdt_sales_export(data, period)
+        snapshot = fulfillment.parse_shipments(data, period)
     except wdt.WdtImportError as exc:
         db.audit(u["name"], "ec_wdt_import_rejected", target=period, detail="格式校验未通过")
         return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
     with db._engine.begin() as cx:
-        rid = cx.execute(insert(db.ec_wdt_import_runs).values(
+        if existing:
+            rid = existing.id
+        else:
+            rid = cx.execute(insert(db.ec_wdt_import_runs).values(
             period=period, content_sha256=digest, status=summary["source_status"],
             summary=json.dumps(summary, ensure_ascii=False, separators=(",", ":")), ts=_now()
         )).inserted_primary_key[0]
+        _save_wdt_snapshot(period, rid, snapshot)
         row = cx.execute(select(db.ec_wdt_import_runs)
                          .where(db.ec_wdt_import_runs.c.id == rid)).first()
     db.audit(u["name"], "ec_wdt_import", target=period,
@@ -146,8 +184,19 @@ def _unpack_tmall_index(value):
     if not value:
         return {}
     try:
-        return json.loads(gzip.decompress(value).decode("utf-8"))
+        result = json.loads(gzip.decompress(value).decode("utf-8"))
+        return result['index'] if isinstance(result, dict) and result.get('__version') == 2 else result
     except Exception:
+        return {}
+
+
+def _tmall_business_index(row):
+    if not row:
+        return {}
+    try:
+        value = json.loads(gzip.decompress(row.match_index).decode('utf-8'))
+        return value.get('business', {}) if isinstance(value, dict) and value.get('__version') == 2 else {}
+    except (OSError, ValueError, TypeError):
         return {}
 
 
@@ -289,7 +338,7 @@ def _insert_tmall_order_details(cx, run_id, period, detail_rows):
     ])
 
 
-def _tmall_order_detail_row(row, fund_index, alipay_index, settle_index):
+def _tmall_order_detail_row(row, fund_index, alipay_index, settle_index, ar_index=None):
     key = row.order_key
     fund = fund_index.get(key) or {}
     alipay = alipay_index.get(key) or {}
@@ -309,6 +358,9 @@ def _tmall_order_detail_row(row, fund_index, alipay_index, settle_index):
         alipay_at if in_alipay else aggregate_at
     )
     settled = settle_index.get(row.order_no)
+    ar = (ar_index or {}).get(month_ar.order_key(row.order_no))
+    ar_no = ', '.join(ar['bill_nos']) if ar else (settled.ar_no if settled and ar_index is None else '')
+    ar_amount = ar['amount'] if ar else (round(float(settled.ar_amt or 0), 2) if settled and ar_index is None else None)
     bucket_labels = {
         "ok": "已匹配", "ufirst": "U先汇总", "crossed": "串单复核",
         "carry": "跨期调节", "real": "有差异",
@@ -332,9 +384,11 @@ def _tmall_order_detail_row(row, fund_index, alipay_index, settle_index):
         "receipt_at": receipt_at,
         "alipay_receipt_at": alipay_at,
         "aggregate_receipt_at": aggregate_at,
-        "internal_sync_status": "已接入" if settled else "待同步",
-        "kingdee_ar_no": settled.ar_no if settled else "",
-        "kingdee_ar_amount": round(float(settled.ar_amt or 0), 2) if settled else None,
+        "internal_sync_status": "应收已匹配" if ar else ("未匹配" if ar_index is not None else ("历史核销" if settled else "待同步")),
+        "kingdee_ar_no": ar_no,
+        "kingdee_ar_amount": ar_amount,
+        "kingdee_ar_documents": ar['documents'] if ar else [],
+        "kingdee_ar_source": "金蝶应收缓存" if ar else ("历史核销结果" if ar_no else ""),
         "wdt_refund_adjustment": round(float(settled.rk_amt or 0), 2) if settled else None,
         "reconcile_diff": round(float(settled.diff or 0), 2) if settled else None,
         "reconcile_status": bucket_labels.get(settled.bucket, settled.bucket or "待判断") if settled else "待同步",
@@ -354,7 +408,7 @@ def ec_month_close_tmall_latest(request: Request, period: str):
 @router.get("/api/ec/month-close/tmall/orders")
 def ec_month_close_tmall_orders(request: Request, period: str, page: int = 1, page_size: int = 50,
                                 q: str = "", payment_method: str = "", destination: str = "",
-                                status: str = ""):
+                                status: str = "", business_type: str = "", ar_check: str = ""):
     if not _require_perm(request, "enter:ecomsettle"):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     if not re.match(r"^\d{4}-\d{2}$", period or ""):
@@ -378,9 +432,16 @@ def ec_month_close_tmall_orders(request: Request, period: str, page: int = 1, pa
                                 .order_by(db.ec_settle_runs.c.id.desc()).limit(1)).first()
         settle_rows = cx.execute(select(db.ec_settle_orders)
                                  .where(db.ec_settle_orders.c.run_id == settle_run.id)).fetchall() if settle_run else []
+        wdt_run = cx.execute(select(db.ec_wdt_import_runs).where(db.ec_wdt_import_runs.c.period == period)
+                             .order_by(db.ec_wdt_import_runs.c.id.desc()).limit(1)).first()
     settle_index = {row.order_no: row for row in settle_rows}
-    enriched = [_tmall_order_detail_row(row, indexes.get("fund") or {}, indexes.get("alipay") or {}, settle_index)
-                for row in detail_rows]
+    ar_index, ar_state = _month_ar_cache(period)
+    wdt_snapshot = _wdt_snapshot(period, wdt_run.id) if wdt_run else {'available': False, 'orders': {}}
+    business_index = _tmall_business_index(rows.get('item'))
+    enriched = [fulfillment.enrich(
+        _tmall_order_detail_row(row, indexes.get('fund') or {}, indexes.get('alipay') or {}, settle_index, ar_index),
+        wdt_snapshot.get('orders', {}).get(row.order_key), business_index.get(row.order_key),
+        ar_index is not None, wdt_snapshot.get('available', False)) for row in detail_rows]
     destination_counts = {"支付宝2088": 0, "聚合账户": 0, "待查": 0, "冲突": 0}
     for item in enriched:
         destination_counts[item["destination"]] += 1
@@ -391,7 +452,9 @@ def ec_month_close_tmall_orders(request: Request, period: str, page: int = 1, pa
                 if (not needle or needle in item["order_no"].casefold())
                 and (not payment_method or item["payment_method"] == payment_method)
                 and (not destination or item["destination"] == destination)
-                and (not status or item["status"] == status)]
+                and (not status or item["status"] == status)
+                and (not business_type or item['business_type'] == business_type)
+                and (not ar_check or item['ar_check_status'] == ar_check)]
     total = len(filtered)
     start = (page - 1) * page_size
     return {
@@ -407,8 +470,12 @@ def ec_month_close_tmall_orders(request: Request, period: str, page: int = 1, pa
         "destination_counts": destination_counts,
         "payment_methods": methods,
         "statuses": statuses,
+        "ar_checks": sorted({item['ar_check_status'] for item in enriched}),
+        "business_counts": {kind: sum(item['business_type'] == kind for item in enriched) for kind in ('normal', 'ufirst', 'mixed', 'review', 'unknown')},
+        "wdt_linkage": {key: value for key, value in wdt_snapshot.items() if key != 'orders'},
         "internal_run_id": settle_run.id if settle_run else None,
         "internal_matched_orders": len(settle_index),
+        "kingdee": dict(ar_state, matched_orders=sum(bool(item['kingdee_ar_no']) for item in enriched)),
         "rows": filtered[start:start + page_size],
     }
 
@@ -435,6 +502,14 @@ async def ec_month_close_tmall_upload(request: Request, period: str = Form(...),
                               .where(db.ec_tmall_import_runs.c.kind == kind)
                               .where(db.ec_tmall_import_runs.c.content_sha256 == digest)).first()
     if existing:
+        if kind == 'item' and not _tmall_business_index(existing):
+            try:
+                reparsed = tmall.parse_item_export(data, period)
+                packed = _pack_tmall_index({'__version': 2, 'index': reparsed['_match_index'], 'business': reparsed['_business_index']})
+                with db._engine.begin() as cx:
+                    cx.execute(update(db.ec_tmall_import_runs).where(db.ec_tmall_import_runs.c.id == existing.id).values(match_index=packed))
+            except tmall.TmallImportError as exc:
+                return JSONResponse({'ok': False, 'msg': str(exc)}, status_code=400)
         if kind == "order":
             with db._engine.begin() as cx:
                 has_detail = cx.execute(select(db.ec_tmall_order_details.c.id)
@@ -454,6 +529,9 @@ async def ec_month_close_tmall_upload(request: Request, period: str = Form(...),
     try:
         parsed = tmall.PARSERS[kind](data, period)
         match_index = parsed.pop("_match_index", {})
+        business_index = parsed.pop('_business_index', None)
+        if business_index is not None:
+            match_index = {'__version': 2, 'index': match_index, 'business': business_index}
         detail_rows = parsed.pop("_detail_rows", [])
     except tmall.TmallImportError as exc:
         db.audit(u["name"], "ec_tmall_import_rejected", target=period,
@@ -521,7 +599,6 @@ async def ec_month_close_tmall_alipay_upload(request: Request, period: str = For
     return _tmall_payload(period, imported_kind="alipay")
 
 
-
 def _shop_files(period, shop):
     """该店本期已识别落盘的手工文件：{类型: 原始文件名}。类型名.xlsx 旁存 .name 记原始名。"""
     d = _shop_dir(period, shop)
@@ -547,6 +624,62 @@ def _kd_cache_meta(period):
 
 
 _KD_REFRESH = {}                                       # period -> {"running","error"}
+_KD_REFRESH_LOCK = threading.Lock()
+
+
+def _month_ar_cache(period):
+    meta = _kd_cache_meta(period)
+    state = {'available': False, 'meta': meta, 'refreshing': bool(_KD_REFRESH.get(period, {}).get('running')),
+             'error': _KD_REFRESH.get(period, {}).get('error', '')}
+    if not meta:
+        return None, state
+    try:
+        with open(_kd_cache_path(period), encoding='utf-8') as stream:
+            rows = json.load(stream)
+        index, skipped = month_ar.index_receivables(rows)
+        state.update(available=True, linked_orders=len(index), skipped_rows=skipped)
+        return index, state
+    except (OSError, ValueError, TypeError, ArithmeticError):
+        state['error'] = '金蝶应收缓存读取失败，请重新同步'
+        return None, state
+
+
+@router.get('/api/ec/month-close/kingdee/status')
+def ec_month_ar_status(request: Request, period: str):
+    if not _require_perm(request, 'enter:ecomsettle'):
+        return JSONResponse({'ok': False, 'msg': '无权限'}, status_code=403)
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', period or ''):
+        return JSONResponse({'ok': False, 'msg': '期间格式 YYYY-MM'}, status_code=400)
+    _, state = _month_ar_cache(period)
+    return dict(state, ok=True, period=period)
+
+
+def _sync_kd_receivables(period, operator):
+    """Read-only Kingdee fetch and atomic application-cache refresh."""
+    import calendar
+    y, m = int(period[:4]), int(period[5:7])
+    end = "%04d-%02d-%02d" % (y, m, calendar.monthrange(y, m)[1])
+    fy, fm = (y - 1, m + 6) if m <= 6 else (y, m - 6)
+    rows = kc.fetch_ec_receivables("%04d-%02d-01" % (fy, fm), end)
+    p = _kd_cache_path(period)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    # Validate before replacing; readers always see a complete old/new snapshot.
+    month_ar.index_receivables(rows)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=os.path.dirname(p),
+                                         prefix='.kingdee-', suffix='.tmp', delete=False) as f:
+            temp_path = f.name
+            json.dump(rows, f, ensure_ascii=False)
+        os.replace(temp_path, p)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+    meta = db.get_setting("ec_kd_cache_meta", {}) or {}
+    meta[period] = {"rows": len(rows), "ts": _now(), "operator": operator,
+                    "date_from": "%04d-%02d-01" % (fy, fm), "date_to": end}
+    db.set_setting("ec_kd_cache_meta", meta, operator=operator)
+    db.audit(operator, "ec_kd_refresh", target=period, detail="%d 行" % len(rows))
 
 
 @router.post("/api/ec/settle/kd-refresh")
@@ -555,32 +688,20 @@ def ec_kd_refresh(request: Request, period: str = Form(...)):
     u = _require_perm(request, "ec_settle_upload")
     if not u:
         return JSONResponse({"error": "需要「上传结算流水/跑批」权限"}, status_code=403)
-    if not re.match(r"^\d{4}-\d{2}$", period):
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period or ''):
         return JSONResponse({"error": "期间格式 YYYY-MM"}, status_code=400)
-    if _KD_REFRESH.get(period, {}).get("running"):
-        return JSONResponse({"error": "该期正在刷新中"}, status_code=409)
-    _KD_REFRESH[period] = {"running": True, "error": ""}
+    with _KD_REFRESH_LOCK:
+        if _KD_REFRESH.get(period, {}).get("running"):
+            return JSONResponse({"error": "该期正在刷新中", "msg": "该期正在刷新中"}, status_code=409)
+        _KD_REFRESH[period] = {"running": True, "error": ""}
 
     def job():
         try:
-            import calendar
-            y, m = int(period[:4]), int(period[5:7])
-            end = "%04d-%02d-%02d" % (y, m, calendar.monthrange(y, m)[1])
-            fy, fm = (y - 1, m + 6) if m <= 6 else (y, m - 6)
-            rows = kc.fetch_ec_receivables("%04d-%02d-01" % (fy, fm), end)
-            p = _kd_cache_path(period)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(rows, f, ensure_ascii=False)
-            meta = db.get_setting("ec_kd_cache_meta", {}) or {}
-            meta[period] = {"rows": len(rows), "ts": _now(), "operator": u["name"]}
-            db.set_setting("ec_kd_cache_meta", meta, operator=u["name"])
-            db.audit(u["name"], "ec_kd_refresh", target=period, detail="%d 行" % len(rows))
+            _sync_kd_receivables(period, u['name'])
         except Exception as e:
-            _KD_REFRESH[period]["error"] = str(e)[:200]
+            _KD_REFRESH[period]['error'] = '金蝶应收同步失败（%s），请检查金蝶连接后重试' % type(e).__name__
         finally:
-            _KD_REFRESH[period]["running"] = False
-
+            _KD_REFRESH[period]['running'] = False
     threading.Thread(target=job, daemon=True).start()
     return {"ok": True}
 

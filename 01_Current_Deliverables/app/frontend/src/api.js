@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-10 Author:Codex Version:V2.553 天猫月结汇总、分片导入与逐单查询接口。
+// [Change Log] Date:2026-09-10 Author:Codex Version:V2.555 业务分流及应收检查筛选接口。
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1  前端 API 封装（加 reconcile/sync + 4位金额格式）
 // cache:'no-store' —— 接口永不吃浏览器缓存，避免后端更新后前端拿到旧数据（字段对不上）
 // 非 2xx：尽量把后端 {ok:false,msg} 的业务原因抛出来（如「初审人是您本人，不能自己终审」），
@@ -276,6 +276,8 @@ export const ecTmallOrderDetails = (period, options = {}) => {
   if (options.paymentMethod) params.set('payment_method', options.paymentMethod)
   if (options.destination) params.set('destination', options.destination)
   if (options.status) params.set('status', options.status)
+  if (options.businessType) params.set('business_type', options.businessType)
+  if (options.arCheck) params.set('ar_check', options.arCheck)
   return j(`/api/ec/month-close/tmall/orders?${params}`)
 }
 export const ecTmallMonthCloseUpload = (period, kind, file) => {
@@ -292,6 +294,7 @@ export const ecTmallAlipayUpload = (period, files) => {
   return j('/api/ec/month-close/tmall/alipay/upload', { method: 'POST', body: form })
 }
 export const ecKdRefresh = (form) => j('/api/ec/settle/kd-refresh', {method:'POST', body: form})
+export const ecMonthArStatus = (period) => j(`/api/ec/month-close/kingdee/status?period=${encodeURIComponent(period)}`)
 export const ecManualUpload = (form) => j('/api/ec/settle/manual-upload', {method:'POST', body: form})
 export const ecUploadFiles = (form) => j('/api/ec/settle/upload-files', {method:'POST', body: form})
 export const ecRunAuto = (form) => j('/api/ec/settle/run-auto', {method:'POST', body: form})

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-10 | Author: Codex | Version: V2.553
+# Date: 2026-09-10 | Author: Codex | Version: V2.555
+# Description: 宝贝标题仅在导入内存分类，保留U先/混合业务技术键，不持久化标题。
 # Description: 解析天猫订单、宝贝、聚合资金和支付宝分片，生成汇总与逐单核算字段。
 """天猫平台导出导入：按业务白名单生成期间汇总与逐单核算字段，不接触个人信息。"""
 import datetime
@@ -158,7 +159,10 @@ def _open_sheet(data, fields):
     if missing:
         workbook.close()
         raise TmallImportError("缺少必需业务列：" + "、".join(missing))
-    return workbook, sheet, {key: headers.index(label) for key, label in fields.items()}
+    index = {key: headers.index(label) for key, label in fields.items()}
+    if '商品标题' in headers:
+        index['title'] = headers.index('商品标题')
+    return workbook, sheet, index
 
 
 def _selected(row, index):
@@ -320,6 +324,7 @@ def parse_item_export(data, period):
         suborders = set()
         in_period_suborders = set()
         match_index = set()
+        business_kinds = defaultdict(set)
         statuses = Counter()
         refund_statuses = Counter()
         skus, product_ids = set(), set()
@@ -356,6 +361,8 @@ def parse_item_export(data, period):
             if main_order:
                 main_orders[main_order] += 1
                 match_index.add(_order_key(main_order))
+                from kernels.ec_month_fulfillment import title_kind
+                business_kinds[_order_key(main_order)].add(title_kind(item.get('title')))
             if suborder:
                 in_period_suborders.add(suborder)
             created_min = min(created_min, created) if created_min else created
@@ -428,6 +435,10 @@ def parse_item_export(data, period):
             "blocking_codes": blocking_codes,
             "warning_codes": warning_codes,
             "_match_index": sorted(match_index),
+            "_business_index": {key: ('mixed' if 'ufirst' in kinds and 'normal' in kinds
+                                      else 'unknown' if 'unknown' in kinds
+                                      else 'review' if 'review' in kinds
+                                      else next(iter(kinds))) for key, kinds in business_kinds.items()},
         }
     finally:
         workbook.close()

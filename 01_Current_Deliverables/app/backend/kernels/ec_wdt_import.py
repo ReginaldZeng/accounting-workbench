@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
+# [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.555
+# Description: 排除导出末尾合计行，保留既有月度汇总契约。
 # Description: 旺店通销售出库只读导入，为天猫逐单核算补充企业内部履约来源。
 """旺店通销售出库导入：只生成月度业务汇总，不返回或持久化逐单/个人信息。"""
 import datetime
@@ -133,6 +134,9 @@ def parse_wdt_sales_export(data, period):
                 continue
             source_rows += 1
             order_no = _text(selected["order_no"])
+            if order_no in ('合计:', '合计：', '合计', '总计'):
+                source_rows -= 1
+                continue
             ship_date = _date_text(selected["ship_time"])
             if not ship_date:
                 missing_ship_time_rows += 1

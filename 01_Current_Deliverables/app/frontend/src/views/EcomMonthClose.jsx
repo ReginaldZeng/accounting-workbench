@@ -1,12 +1,14 @@
 // [Change Log]
 // Date: 2026-09-10
 // Author: Codex
-// Version: V2.553
-// Description: 天猫平台优先的真实数据工作台：逐单订单、宝贝销售、资金去向及旺店通/金蝶核销承接。
+// Version: V2.555
+// Description: 逐单出库展开、业务分流及应收检查筛选。
+// Description: 天猫订单直接关联金蝶应收；同步进度、完整单号和多单据展开。
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ecTmallAlipayUpload, ecTmallMonthCloseLatest, ecTmallMonthCloseUpload, ecTmallOrderDetails,
   ecWdtMonthCloseLatest, ecWdtMonthCloseUpload,
+  ecKdRefresh, ecMonthArStatus,
 } from '../api.js'
 import './ecomMonthClose.css'
 
@@ -152,7 +154,7 @@ export default function EcomMonthClose({ user, onNav }) {
       ? <Overview tmall={tmall} sources={sources} readyCount={readyCount}
           onOpen={() => setScreen('workbench')} onOpenOrders={() => setScreen('orders')} />
       : screen === 'orders'
-        ? <OrderDetailView period={period} />
+        ? <OrderDetailView key={period} period={period} canSync={canUpload} />
         : <Workbench tmall={tmall} wdt={wdt} sources={sources} readyCount={readyCount} refs={refs}
             canUpload={canUpload} uploading={uploading} upload={upload} />}
   </div>
@@ -282,9 +284,86 @@ function DestinationChip({ value }) {
   return <span className={`emc-destination ${tone}`}>{value}</span>
 }
 
-function OrderDetailView({ period }) {
+function KingdeeSync({ period, canSync, onSynced }) {
+  const [state, setState] = useState({ loading: true })
+  const [starting, setStarting] = useState(false)
+  const [cycle, setCycle] = useState(0)
+  const [requestError, setRequestError] = useState('')
+  const lastSync = useRef('')
+  useEffect(() => {
+    let active = true
+    let timer
+    const poll = async () => {
+      try {
+        const result = await ecMonthArStatus(period)
+        if (!active) return
+        setState(result)
+        const version = result.available ? `${result.meta?.ts}:${result.meta?.rows}` : ''
+        if (version && version !== lastSync.current) {
+          lastSync.current = version
+          onSynced()
+        }
+        if (result.refreshing) timer = window.setTimeout(poll, 3000)
+      } catch (error) {
+        if (active) setState(old => ({ ...old, loading: false, refreshing: false, error: error.message || '金蝶状态读取失败' }))
+      }
+    }
+    poll()
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [period, cycle, onSynced])
+
+  const sync = async () => {
+    setStarting(true)
+    setRequestError('')
+    try {
+      const form = new FormData()
+      form.append('period', period)
+      await ecKdRefresh(form)
+      setState(old => ({ ...old, refreshing: true, error: '' }))
+    } catch (error) {
+      setRequestError(error.message || '无法启动金蝶同步')
+    } finally {
+      setStarting(false)
+      setCycle(value => value + 1)
+    }
+  }
+  const busy = starting || state.refreshing
+  return <section className="emc-panel emc-kd-sync" aria-label="金蝶应收同步">
+    <div><strong>金蝶应收单</strong><p>{state.loading ? '正在读取同步状态…' : state.available
+      ? `最近同步 ${state.meta?.ts || '—'} · ${count(state.meta?.rows)} 行应收明细 · ${count(state.linked_orders)} 个可关联订单`
+      : '尚未同步金蝶应收，点击同步后按平台订单号自动回填。'}</p>
+      {state.meta?.date_from ? <small>取数期间：{state.meta.date_from} 至 {state.meta.date_to} · 深圳市星期零食品科技有限公司 / 永续媒介中心</small> : null}
+      <small>应收关联与收款核销分别展示；未匹配仅表示当前取数范围未找到对应单据。</small>
+      {busy ? <p role="status">金蝶取数中，完成后自动更新订单明细…</p> : null}
+      {requestError || state.error ? <p role="alert" className="emc-kd-error">{requestError || state.error}</p> : null}
+    </div>
+    <button className="emc-button secondary" onClick={sync} disabled={!canSync || busy || state.loading}
+      title={canSync ? '只读查询金蝶应收单' : '需要上传结算流水/跑批权限'}><Icon name="refresh" />{busy ? '同步中…' : '同步金蝶应收'}</button>
+  </section>
+}
+
+function ReceivableCell({ row }) {
+  const docs = row.kingdee_ar_documents || []
+  if (!docs.length) return <span title={row.kingdee_ar_source || ''}>{row.kingdee_ar_no || '—'}</span>
+  return <details className="emc-ar-docs"><summary>{docs.length === 1 ? docs[0].bill_no : `${docs.length} 张应收单`}</summary>
+    {docs.map(doc => <div key={doc.bill_no}><strong>{doc.bill_no}</strong><span>{doc.date} · {doc.has_red ? '含红字 · ' : ''}¥{detailMoney(doc.amount)}</span></div>)}
+  </details>
+}
+
+function ShipmentCell({ row }) {
+  const docs = row.wdt_documents || []
+  if (!docs.length) return <span>{row.wdt_status || '未导入'}</span>
+  return <details className="emc-ar-docs"><summary>{docs.length} 张出库单{row.wdt_cross_period ? ' · 跨月' : ''}</summary>
+    {docs.map(doc => <div key={doc.shipment_no}><strong>{doc.shipment_no}</strong><span>{(doc.dates || []).join(' / ')} · 数量 {doc.quantity ?? '—'}</span>
+      {(doc.items || []).map((item, index) => <span key={`${item.sku}-${index}`}>{item.sku} × {item.quantity ?? '—'}</span>)}</div>)}
+  </details>
+}
+
+function OrderDetailView({ period, canSync }) {
+  const [revision, setRevision] = useState(0)
+  const onSynced = useCallback(() => setRevision(value => value + 1), [])
   const [query, setQuery] = useState('')
-  const [filters, setFilters] = useState({ q: '', paymentMethod: '', destination: '', status: '' })
+  const [filters, setFilters] = useState({ q: '', paymentMethod: '', destination: '', status: '', businessType: '', arCheck: '' })
   const [page, setPage] = useState(1)
   const [data, setData] = useState({ rows: [], destination_counts: {}, payment_methods: [], statuses: [] })
   const [loading, setLoading] = useState(true)
@@ -302,7 +381,7 @@ function OrderDetailView({ period }) {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [period, page, filters])
+  }, [period, page, filters, revision])
 
   const changeFilter = (key, value) => {
     setPage(1)
@@ -314,6 +393,12 @@ function OrderDetailView({ period }) {
   }
   const destinationCounts = data.destination_counts || {}
   return <main className="emc-content emc-order-detail">
+    <KingdeeSync period={period} canSync={canSync} onSynced={onSynced} />
+    <section className="emc-panel emc-fulfillment-note" aria-label="业务分流说明">
+      <strong>正常销售核对出库与应收，U先试用装核对总账凭证</strong>
+      <p>正常销售 {count(data.business_counts?.normal)} 单 · U先 {count(data.business_counts?.ufirst)} 单 · 混合 {count(data.business_counts?.mixed)} 单 · 待分类/确认 {count((data.business_counts?.unknown || 0) + (data.business_counts?.review || 0))} 单</p>
+      <small>{data.wdt_linkage?.available ? `旺店通逐单关联已就绪；仅取星期零STARFIELD 天猫官旗店，${count(data.wdt_linkage.skipped_rows)} 行未能作为有效发货证据。` : '请在「来源与勾稽」导入旺店通销售出库明细。'} 旧宝贝批次需重新导入以识别 U先；混合订单不整单豁免。未提供金蝶推送日志。</small>
+    </section>
     <section className="emc-detail-summary" aria-label="逐单资金去向汇总">
       <article><span>全部订单</span><strong>{count(data.all_order_count)}</strong><small>订单报表逐单口径</small></article>
       <article className="alipay"><span>支付宝 2088</span><strong>{count(destinationCounts['支付宝2088'])}</strong><small>0010001 交易收款命中</small></article>
@@ -332,26 +417,32 @@ function OrderDetailView({ period }) {
         </form>
       </div>
       <div className="emc-detail-filters">
+        <label><span>业务类型</span><select aria-label="业务类型" value={filters.businessType} onChange={event => changeFilter('businessType', event.target.value)}><option value="">全部</option><option value="normal">正常销售</option><option value="ufirst">U先试用装</option><option value="mixed">混合订单</option><option value="review">试用待确认</option><option value="unknown">待分类</option></select></label>
+        <label><span>应收检查</span><select aria-label="应收检查" value={filters.arCheck} onChange={event => changeFilter('arCheck', event.target.value)}><option value="">全部</option>{(data.ar_checks || []).map(value => <option key={value}>{value}</option>)}</select></label>
         <label><span>支付方式</span><select value={filters.paymentMethod} onChange={event => changeFilter('paymentMethod', event.target.value)}><option value="">全部</option>{(data.payment_methods || []).map(value => <option key={value}>{value}</option>)}</select></label>
         <label><span>实际去向</span><select value={filters.destination} onChange={event => changeFilter('destination', event.target.value)}><option value="">全部</option><option>支付宝2088</option><option>聚合账户</option><option>待查</option><option>冲突</option></select></label>
         <label><span>订单状态</span><select value={filters.status} onChange={event => changeFilter('status', event.target.value)}><option value="">全部</option>{(data.statuses || []).map(value => <option key={value}>{value}</option>)}</select></label>
-        {(filters.q || filters.paymentMethod || filters.destination || filters.status) ? <button className="emc-clear" onClick={() => { setQuery(''); setPage(1); setFilters({ q: '', paymentMethod: '', destination: '', status: '' }) }}>清除筛选</button> : null}
+        {Object.values(filters).some(Boolean) ? <button className="emc-clear" onClick={() => { setQuery(''); setPage(1); setFilters({ q: '', paymentMethod: '', destination: '', status: '', businessType: '', arCheck: '' }) }}>清除筛选</button> : null}
       </div>
       {error ? <div className="emc-page-error" role="alert">{error}</div> : null}
       {!error && loading ? <div className="emc-empty">正在读取订单明细…</div> : null}
       {!error && !loading && !data.available ? <div className="emc-empty">当前订单批次尚未生成逐单数据，请重新导入订单报表。</div> : null}
       {!error && !loading && data.available ? <>
-        <div className="emc-table-wrap emc-order-scroll"><table className="emc-table emc-order-table"><thead><tr className="emc-column-groups"><th colSpan="6">平台侧数据</th><th colSpan="4">旺店通 / 金蝶内部数据</th><th colSpan="6">核对结果</th></tr><tr>
-          <th>订单编号</th><th>创建时间</th><th>订单状态</th><th>支付方式</th><th className="num">当前实付</th><th className="num">平台退款</th><th>内部同步</th><th>金蝶应收单号</th><th className="num">金蝶应收</th><th className="num">退款调节</th><th className="num">2088 实收</th><th className="num">聚合实收</th><th>实际去向</th><th>入账时间</th><th className="num">核对差额</th><th>核对状态 / 差异原因</th>
+        <div className="emc-table-wrap emc-order-scroll"><table className="emc-table emc-order-table"><thead><tr className="emc-column-groups"><th colSpan="7">平台侧数据</th><th colSpan="8">旺店通 / 金蝶内部数据</th><th colSpan="6">收款核销结果</th></tr><tr>
+          <th>订单编号</th><th>业务类型</th><th>创建时间</th><th>订单状态</th><th>支付方式</th><th className="num">当前实付</th><th className="num">平台退款</th><th>旺店通出库 / 发货时间</th><th className="num">发货数量</th><th className="num">旺店通应收（参考）</th><th>内部同步</th><th>金蝶应收单号</th><th className="num">金蝶应收</th><th>应收检查 / 总账凭证</th><th className="num">退款调节</th><th className="num">2088 实收</th><th className="num">聚合实收</th><th>实际去向</th><th>入账时间</th><th className="num">核对差额</th><th>核对状态 / 差异原因</th>
         </tr></thead><tbody>
           {(data.rows || []).map(row => <tr key={row.order_no}>
-            <td className="mono order-no">{row.order_no}</td><td>{dateTime(row.created_at)}</td><td><span className="emc-order-status">{row.status}</span></td><td>{row.payment_method}</td><td className="num">{detailMoney(row.current_paid)}</td><td className={`num ${row.refund ? 'negative' : ''}`}>{detailMoney(row.refund)}</td><td><span className={`emc-internal ${row.internal_sync_status === '已接入' ? 'ready' : ''}`}>{row.internal_sync_status}</span></td><td className="mono">{row.kingdee_ar_no || '—'}</td><td className="num">{row.kingdee_ar_amount == null ? '—' : detailMoney(row.kingdee_ar_amount)}</td><td className="num">{row.wdt_refund_adjustment == null ? '—' : detailMoney(row.wdt_refund_adjustment)}</td><td className="num">{detailMoney(row.alipay_receipt)}</td><td className="num">{detailMoney(row.aggregate_receipt)}</td><td><DestinationChip value={row.destination} /></td><td>{dateTime(row.receipt_at)}</td><td className={`num ${row.reconcile_diff ? 'negative' : ''}`}>{row.reconcile_diff == null ? '—' : detailMoney(row.reconcile_diff)}</td><td className="emc-reconcile-cell"><strong>{row.reconcile_status}</strong><small>{row.difference_reason}</small></td>
+            <td className="mono order-no">{row.order_no}</td><td><span className={`emc-business ${row.business_type}`}>{row.business_label || '待分类'}</span></td><td>{dateTime(row.created_at)}</td><td><span className="emc-order-status">{row.status}</span></td><td>{row.payment_method}</td><td className="num">{detailMoney(row.current_paid)}</td><td className={`num ${row.refund ? 'negative' : ''}`}>{detailMoney(row.refund)}</td>
+            <td><ShipmentCell row={row} /></td><td className="num">{row.wdt_quantity ?? '—'}</td><td className="num" title="按旺店通订单去重；合单无法明确分配时不展示整单应收">{row.wdt_receivable == null ? '—' : detailMoney(row.wdt_receivable)}</td>
+            <td><span className={`emc-internal ${row.internal_sync_status === '应收已匹配' ? 'ready' : ''}`}>{row.business_type === 'ufirst' && !row.kingdee_ar_no ? '不要求应收' : row.internal_sync_status}</span></td><td className="mono"><ReceivableCell row={row} /></td><td className="num">{row.kingdee_ar_amount == null ? '—' : detailMoney(row.kingdee_ar_amount)}</td>
+            <td className="emc-reconcile-cell"><strong>{row.ar_check_status}</strong><small>{row.gl_status}</small><small>{row.ar_check_reason}</small></td>
+            <td className="num">{row.wdt_refund_adjustment == null ? '—' : detailMoney(row.wdt_refund_adjustment)}</td><td className="num">{detailMoney(row.alipay_receipt)}</td><td className="num">{detailMoney(row.aggregate_receipt)}</td><td><DestinationChip value={row.destination} /></td><td>{dateTime(row.receipt_at)}</td><td className={`num ${row.reconcile_diff ? 'negative' : ''}`}>{row.reconcile_diff == null ? '—' : detailMoney(row.reconcile_diff)}</td><td className="emc-reconcile-cell"><strong>{row.reconcile_status}</strong><small>{row.difference_reason}</small></td>
           </tr>)}
         </tbody></table>{!data.rows?.length ? <div className="emc-empty">没有符合筛选条件的订单</div> : null}</div>
         <div className="emc-pagination"><span>第 {data.page || 1} / {data.page_count || 1} 页，每页 50 单</span><div><button disabled={page <= 1} onClick={() => setPage(value => Math.max(1, value - 1))}>上一页</button><button disabled={page >= (data.page_count || 1)} onClick={() => setPage(value => value + 1)}>下一页</button></div></div>
       </> : null}
     </section>
-    <div className="emc-privacy-note">平台与资金列已按本次真实报表填充。旺店通/金蝶列只在逐单核销跑批存在时回填，否则明确显示“待同步”。逐单视图不含收货人、电话、地址、留言、备注和支付流水号。</div>
+    <div className="emc-privacy-note">金蝶应收单号按平台订单号精确关联，可展开查看多张应收单；金额为匹配行的价税合计（含红字冲减），范围截至所选月末。核对差额和结论仍来自收款核销跑批。未匹配不等于漏记账。</div>
   </main>
 }
 
@@ -397,7 +488,7 @@ function Workbench({ tmall, wdt, sources, readyCount, refs, canUpload, uploading
           <CheckRow title="订单报表 ↔ 宝贝销售明细" state={orderItem.available ? orderItem.status : 'missing'} result={orderItem.available ? `${count(orderItem.matched_main_orders)} 个主订单精确匹配` : '等待两张平台表'} note={orderItem.available ? `单表独有 ${count((orderItem.order_only || 0) + (orderItem.item_only || 0))} 单` : '按不可逆订单技术键勾稽'} />
           <CheckRow title="订单支付方式 ↔ 聚合账户" state={orderFund.available ? 'ready' : 'missing'} result={orderFund.available ? `${count(orderFund.matched_current_period_orders)} 个本期订单确认进入聚合账户` : '等待订单与聚合资金表'} note={orderFund.available ? `${count(orderFund.fund_orders_outside_current_order_export)} 个聚合入账来自其他下单期间` : '按淘宝订单编号勾稽'} />
           <CheckRow title="平台订单 ↔ 支付宝 2088 交易收款" state={orderAlipay.available ? orderAlipay.status : 'missing'} result={orderAlipay.available ? `${count(orderAlipay.matched_current_period_orders)} 个本期订单确认进入支付宝 2088` : '等待订单与 2088 流水'} note={orderAlipay.available ? `本期命中交易收款 ${money(orderAlipay.matched_receipt_income)}` : '按不可逆订单键与费目码 0010001 勾稽'} />
-          <CheckRow title="平台订单 ↔ 旺店通发货" state={wdt.available ? 'warning' : 'missing'} result={wdt.available ? '旺店通已导入，等待接入订单级勾稽' : '尚未导入旺店通'} note="下一阶段按订单技术键比对" />
+          <CheckRow title="平台订单 ↔ 旺店通发货" state={wdt.linkage?.available ? 'ready' : 'missing'} result={wdt.linkage?.available ? '逐单关联已就绪，请进入订单明细查看' : '请导入旺店通以生成逐单关联'} note="子单原始单号精确关联；U先单独核对总账" />
         </div>
       </section>
 

@@ -1,7 +1,7 @@
 /* [Change Log]
 Date: 2026-09-09
 Author: Codex
-Version: V2.553
+Version: V2.555
 Description: 天猫月结总览、来源勾稽、逐单收入确认表与窄屏适配。
 */
 .emc-page{min-height:100vh;background:var(--bg-sub);color:var(--ink);position:relative}
@@ -102,3 +102,11 @@ Description: 天猫月结总览、来源勾稽、逐单收入确认表与窄屏�
 @media(max-width:720px){.emc-page-error{margin-left:12px;margin-right:12px}.emc-report-grid{grid-template-columns:1fr}.emc-report-card.wide{grid-column:auto}.emc-route-note{align-items:flex-start;flex-direction:column;gap:4px}.emc-upload-grid{grid-template-columns:1fr}.emc-upload-grid>article{border-right:0}.emc-upload-grid>article:nth-last-child(-n+2){border-bottom:1px solid var(--line)}.emc-upload-grid>article:last-child{border-bottom:0}.emc-next-card{align-items:flex-start;flex-direction:column}}
 @media(max-width:720px){.emc-detail-summary{grid-template-columns:repeat(2,1fr)}.emc-detail-filters{align-items:flex-start;flex-direction:column}.emc-route-note .emc-link{margin-left:0}.emc-pagination{align-items:flex-start;flex-direction:column}}
 @media(prefers-reduced-motion:reduce){.emc-page *{scroll-behavior:auto!important}}
+.emc-kd-sync{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px;margin-bottom:16px}.emc-kd-sync p{margin:6px 0;font-size:13px}.emc-kd-sync small{display:block;color:var(--ink-3);font-size:12px;line-height:1.7}.emc-kd-sync button{flex-shrink:0}.emc-kd-error{color:var(--red,#b42318)}.emc-ar-docs summary{cursor:pointer;color:var(--accent)}.emc-ar-docs>div{padding:7px 0;border-bottom:1px solid var(--line)}.emc-ar-docs span{display:block;font-size:11px;color:var(--ink-3)}@media(max-width:720px){.emc-kd-sync{flex-direction:column}.emc-kd-sync button{align-self:flex-start}}
+.emc-fulfillment-note { padding: 16px 18px; margin-bottom: 16px; }
+.emc-fulfillment-note p { margin: 8px 0; }
+.emc-fulfillment-note small { color: #65758b; line-height: 1.7; }
+.emc-business { display: inline-block; padding: 4px 7px; background: #edf2f9; border-radius: 4px; white-space: nowrap; }
+.emc-business.ufirst { background: #f2eafb; color: #7042a0; }
+.emc-business.mixed, .emc-business.review { background: #fff2d9; color: #805515; }
+.emc-order-table { min-width: 2700px; }
