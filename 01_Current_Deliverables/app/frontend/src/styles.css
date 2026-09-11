@@ -110,6 +110,27 @@ select,.btn,.btn-pri,.btn-primary,.btn-sec,.selctl{
 /* 头 + 主体 */
 .head{display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:16px 20px 14px; border-bottom:1px solid var(--line);}
 .h-title{font-size:16px; font-weight:600;}
+.bom-detail-title{display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px; line-height:1.25;}
+.bom-detail-title .bom-product-name{font-size:18px;}
+.bom-detail-title .bom-cp-code{font-size:11.5px; font-weight:500; margin-right:2px;}
+.bom-detail-title .bom-product-switch{width:210px; margin-left:4px;}
+.bom-detail-actions{display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap; position:relative;}
+.bom-action-menu{position:relative;}
+.bom-action-menu>summary{list-style:none; height:32px; padding:0 13px; display:flex; align-items:center; border:1px solid var(--line-strong); border-radius:8px; background:var(--bg); cursor:pointer; font-weight:500; white-space:nowrap;}
+.bom-action-menu>summary::-webkit-details-marker{display:none;}
+.bom-action-menu>summary::after{content:'▾'; margin-left:7px; font-size:10px; color:var(--ink-3);}
+.bom-action-menu>div{position:absolute; right:0; top:38px; z-index:80; min-width:172px; padding:5px; border:1px solid var(--line-strong); border-radius:8px; background:var(--bg); box-shadow:0 10px 26px rgba(0,0,0,.16);}
+.bom-detail-actions>.bom-action-menu:not(.bom-more-menu)>div{left:0; right:auto;}
+.bom-source-menu>summary{color:var(--accent); border-color:var(--accent); background:var(--accent-soft); font-weight:600; box-shadow:0 1px 2px rgba(75,83,196,.12);}
+.bom-source-menu>summary:hover{border-color:var(--accent-strong); box-shadow:0 2px 6px rgba(75,83,196,.18);}
+.bom-source-menu>div{min-width:190px;}
+.bom-source-menu button+button{border-top:1px solid var(--line); border-radius:0 0 6px 6px;}
+.bom-action-menu button{display:block; width:100%; padding:8px 10px; border:0; border-radius:6px; background:transparent; color:var(--ink); text-align:left; cursor:pointer;}
+.bom-action-menu button:hover{background:var(--bg-sub);}
+.bom-action-menu button:disabled{opacity:.45; cursor:not-allowed;}
+.bom-action-menu button.danger{color:var(--red);}
+.bom-more-menu>summary{width:36px; padding:0; justify-content:center; font-weight:700; letter-spacing:1px;}
+.bom-more-menu>summary::after{display:none;}
 .h-sub{font-size:12px; color:var(--ink-2); margin-top:3px;}
 .body{padding:16px 20px 22px; display:flex; flex-direction:column; gap:16px;}
 .flabel{font-size:11px; color:var(--ink-3); letter-spacing:.04em; flex:0 0 auto;}
@@ -771,8 +792,10 @@ html[data-theme=dark] .ta-board{
 .bomv .bom-steps2 .arw{color:var(--ink-3); font-weight:400;}
 .bomv .bom-warndot{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--amber); margin-left:5px; vertical-align:middle;}
 .bomv .bom-taxedit{display:inline-flex; align-items:center; gap:2px; justify-content:flex-end; color:var(--ink-3);}
-.bomv .bom-taxedit input{width:52px; height:26px; text-align:right; border:1px solid var(--accent); border-radius:6px; padding:0 6px;
+.bomv .bom-taxedit input{width:44px; height:26px; text-align:right; border:1px solid var(--accent); border-radius:6px; padding:0 5px;
   font-family:var(--font-mono); background:var(--bg); color:var(--ink);}
+.bomv .bom-editcell{overflow:hidden;}
+.bomv .bom-invoice-select{display:block; width:100%; min-width:0; height:26px; padding:0 4px; font-size:11px;}
 .bomv .bom-nowrap td, .bomv .bom-nowrap th{white-space:nowrap;}
 .bomv .bom-pager{display:flex; align-items:center; justify-content:center; gap:14px; padding:10px 0 2px; font-size:12px;}
 .bomv .bom-pager .btn-sec{height:28px; padding:0 12px;}

@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
-  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomExportOriginalUrl, bomExportPairUrl, bomAttachBomList, bomSetUpstream, bomSetName,
+  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomAttachBomList, bomSetUpstream, bomSetName,
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
@@ -82,9 +82,10 @@ const STATUS = {
 const clean = (s) => (s || '').trim()
 const modelSpec = (m) => [m.model, m.spec].filter(x => x && x !== '0').join(' / ')
 // 分类标签：成品(蓝)/半成品(紫)/复配料(紫红)。编码规律 SZ→复配料、CP2→半成品、CP0→成品（后端 classify）。
-// 原料/包材两表列宽统一（table-layout:fixed + 同一 colgroup）→ 两个框列对齐。11 列，和 ≈100%。
-// 类型/编码/物料名/型号/单位/添加量/含税采购价/税率/发票类型/成本不含税/成本含税/占比/说明/核价（业务方 2026-09-04 定列）
-const MAT_COLS = ['7%', '9%', '15%', '8%', '4%', '7%', '7%', '4%', '5%', '7%', '7%', '4%', '9%', '4%']
+// 原料/包材两表列宽统一（table-layout:fixed + 同一 colgroup）→ 两个框列对齐。
+// 类型/编码/物料名/型号/单位/添加量/含税采购价/税率/发票类型/成本含税/占比/说明/核价。
+const MAT_COLS = ['7%', '9%', '17%', '9%', '4%', '8%', '8%', '5%', '6%', '8%', '5%', '9%', '5%']
+const MAT_COLS_EDIT = ['7%', '9%', '15%', '8%', '4%', '7%', '7%', '7%', '10%', '8%', '4%', '8%', '6%']
 // 单行不转行 + 超出省略号（品牌/型号等长文本；全文进 title 悬浮看）
 const NOWRAP = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }
 // 复核四个页签（业务方定 2026-09-03）：①BOM清单 ②工艺流程 ③用量自洽 ④报价核算。
@@ -260,7 +261,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
   return (
     <div className="bom-mask" onClick={e => { if (e.target.classList.contains('bom-mask')) onClose() }}>
       <div className="bom-modal" style={{ width: 'min(620px,100%)' }}>
-        <div className="bom-mhead"><b>审核归档 · {entry.productName}</b><span className="bom-x" onClick={onClose}>✕</span></div>
+        <div className="bom-mhead"><b>审核通过 · {entry.productName}</b><span className="bom-x" onClick={onClose}>✕</span></div>
         <div className="bom-msub">编码 <b className="mono">{entry.cpCode}</b>　·　生产工厂 {entry.supplier || '—'}
           {entry.kindDoubt && <span style={{ color: 'var(--amber)' }}>　⚠ 按编码判「{entry.kindAuto}」但产品名不符，请据实指定</span>}</div>
         {missing.length > 0
@@ -327,7 +328,7 @@ function AuditModal({ entry: entry0, onClose, onDone, flash }) {
           <button className="btn-sec" onClick={onClose}>取消</button>
           <button className="btn-pri" disabled={busy} onClick={save}
             style={(willFinalize && (cands.length === 0 || obs)) ? { background: 'var(--green)', borderColor: 'var(--green)' } : undefined}>
-            {busy ? '保存中…' : ((willFinalize && (cands.length === 0 || obs)) ? '✓ 保存定性并归档' : '仅保存定性')}</button>
+            {busy ? '保存中…' : ((willFinalize && (cands.length === 0 || obs)) ? '审核通过' : '仅保存定性')}</button>
         </div>
       </div>
       {cmpFirst && <CompareEntriesModal entry={entry} lk={erpLk} onAdopt={adoptErp} flash={flash} onClose={() => setCmpFirst(null)}
@@ -974,7 +975,10 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
   const [edit, setEdit] = useState(false)
   const [fee, setFee] = useState(entry.fee)
   const [saving, setSaving] = useState(false)
-  const [expMenu, setExpMenu] = useState(false)
+  const [sourceBusy, setSourceBusy] = useState('')
+  const bomFileRef = useRef(null)
+  const sheetFileRef = useRef(null)
+  const auditRef = useRef(null)
   const [auditM, setAuditM] = useState(false)      // 审核定性弹窗（物料类别 + 是否允许报价）
   const [voidM, setVoidM] = useState('')           // 作废弹窗：'' | 'request'(成本会计申请) | 'review'(财务BP终审)
   const [priceMat, setPriceMat] = useState(null)   // 价格校验弹窗（内联在明细行触发）
@@ -983,6 +987,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
   useEffect(() => { setFee(entry.fee); setEdit(false); setMatDraft(null) }, [entry.id])
   const startEdit = () => { setStep('price'); setMatDraft((entry.materials || []).map(m => ({ ...m }))); setEdit(true) }
   const archived = ['初审', '已审核'].includes(entry.status)   // 初审/终审戳在 → 改价税费、改定性、采纳商品版都要先撤销归档（V2.528）
+  const peerProducts = (all || []).filter(p => p.id !== entry.id && p.active !== false && (entry.groupId ? p.groupId === entry.groupId : p.approval === entry.approval))
+  const approvalGroups = [...new Set((all || []).filter(p => p.approval === entry.approval).map(p => p.groupId).filter(Boolean))]
+  const groupNo = Math.max(1, approvalGroups.indexOf(entry.groupId) + 1)
   const cancelEdit = () => { setFee(entry.fee); setMatDraft(null); setEdit(false) }
   // 改税率 → 按发票类型算法现算该料成本不含税（保存时后端权威重算，口径一致）
   const setTax = (mat, v) => {
@@ -1051,7 +1058,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
       flash('已定稿 · ' + (r.affectedPricing?.note || '')); await onChanged()
     } catch (e) { flash('定稿失败：' + e.message) }
   }
-  const unfinalize = async () => { try { await bomUnfinalize(entry.id); flash('已撤销归档，退回复核'); await onChanged() } catch (e) { flash(e.message) } }
+  const unfinalize = async () => { try { await bomUnfinalize(entry.id); flash('已撤销审核，退回复核'); await onChanged() } catch (e) { flash(e.message) } }
   const confirmStep = async (s, on) => {
     try { await bomConfirmStep(entry.id, s, on); flash(on ? '已确认' : '已撤销确认'); await onChanged() }
     catch (e) { flash('操作失败：' + e.message) }
@@ -1061,37 +1068,50 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
       flash(`已采纳商品版 ${r.changed} 项价/税调整并留痕`); await onChanged() }
     catch (e) { flash('采纳失败：' + e.message) }
   }
+  const updateBom = async (files) => {
+    if (!files?.length) return
+    setSourceBusy('bom')
+    try { const r = await bomAttachBomList(entry.id, files[0]); if (!r.ok) return flash(r.msg || '更新失败'); flash('研发 BOM 表已更新'); await onChanged() }
+    catch (e) { flash('更新失败：' + e.message) } finally { setSourceBusy('') }
+  }
+  const updateSheet = async (files) => {
+    if (!files?.length || !entry.groupId) return
+    setSourceBusy('sheet')
+    try {
+      const r = await bomReplaceSheet(entry.groupId, entry.approval, files[0])
+      if (!r?.ok) return flash(r?.msg || '更新失败')
+      flash(`采购核算表已更新：替换 ${r.replaced?.length || 0}、新增 ${r.added?.length || 0}`)
+      const next = (r.replaced || []).find(x => x.old === entry.id)
+      if (next?.id) await onOpen(next.id); else await onChanged()
+    } catch (e) { flash('更新失败：' + e.message) } finally { setSourceBusy('') }
+  }
+  const renameProduct = async () => {
+    const name = window.prompt('修改物料名称', entry.productName)
+    if (name == null || !name.trim() || name.trim() === entry.productName) return
+    try {
+      const r = await bomSetName(entry.id, name.trim())
+      if (!r.ok) return flash(r.msg || '修改失败')
+      flash(`物料名称已修改${r.renamed > 1 ? `（连 ${r.renamed} 版）` : ''}`)
+      await onChanged()
+    }
+    catch (e) { flash('修改失败：' + e.message) }
+  }
 
   const mats = curMats.filter(m => m.seg === '原料')
   const packs = curMats.filter(m => m.seg === '包材')
-  // 上一版标识：识别到上一版就把它的 CP码 + 钉钉单号 + 核算日期一并显示，供追溯
-  const prevTag = prev
-    ? `上一版 ${prev.cpCode}${prev.approval ? ' · 钉钉' + prev.approval : ''} · ${prev.calcDate}`
-    : ''
-  const segDelta = (list) => {
-    if (!prev) return null
-    let up = 0, dn = 0, add = 0
-    list.forEach(m => { const p = prevMat(m.matName); if (!p) { add++; return }
-      const d = ((m.costExcl || 0) - (p.costExcl || 0)) * GROSS; if (d > EPS) up++; else if (d < -EPS) dn++ })
-    if (!up && !dn && !add) return <span className="muted" title={prevTag}>　·　较{prevTag}无变化</span>
-    return <span className="muted" title={prevTag}>　·　较{prevTag} {up > 0 && <b className="up">▲{up}</b>} {dn > 0 && <b className="down">▼{dn}</b>} {add > 0 && <b style={{ color: 'var(--teal)' }}>新增{add}</b>}</span>
-  }
-
   return (
     <>
       <div className="head">
         <div>
-          <div className="h-title">采购核算表 · {entry.productName}
-            {!isStd && cfg?.canAudit && !edit && <a className="lk" style={{ fontSize: 12, fontWeight: 400, marginLeft: 6 }}
-              title="研发把成品也叫「…半成品」/漏括号致撞名时，成本会计在这里把产品名改对——连同该产品所有版本一起改、迁移定稿指针；只动标识不动成本"
-              onClick={async () => {
-                const nn = window.prompt('改产品名（连同该产品所有版本一起改；只动标识不动成本）：', entry.productName || '')
-                if (nn == null || nn.trim() === '' || nn.trim() === (entry.productName || '')) return
-                try { const r = await bomSetName(entry.id, nn.trim()); if (!r.ok) return flash(r.msg || '改名失败'); flash(`已改名${r.renamed > 1 ? `（连 ${r.renamed} 版）` : ''}`); setEntry(r.entry); load() }
-                catch (e) { flash('改名失败：' + e.message) }
-              }}>✎ 改产品名</a>}
-            <Kind k={entry.kind} />{entry.kind !== '成品' && <span className="muted" style={{ fontSize: 11 }}> 作原料进入上层</span>}
-            {edit ? <span className="tag werr">编辑中</span> : <span className="tag unmap">只读</span>}
+          <div className="h-sub" style={{ marginBottom: 6 }}><a className="lk" onClick={onBack}>‹ 处理审批单</a>　{entry.approval || '—'} / 组{groupNo}</div>
+          <div className="h-title bom-detail-title"><span className="bom-product-name">{entry.productName}</span>
+            <span className="mono muted bom-cp-code">{entry.cpCode}</span>
+            <Kind k={entry.kind} />
+            {edit ? <span className="tag werr">编辑中</span> : <span className={archived ? 'tag ok' : 'tag late'}>{archived ? '审核通过' : '复核中'}</span>}
+            <select className="bom-product-switch" aria-label="切换产品" value={entry.id} onChange={e => onOpen(+e.target.value)} disabled={!peerProducts.length}>
+              <option value={entry.id}>{entry.cpCode}丨{entry.productName}</option>
+              {peerProducts.map(p => <option key={p.id} value={p.id}>{p.cpCode}丨{p.productName}</option>)}
+            </select>
             {entry.historical && <span className="tag late" title="审核时答 C 归档的历史版本：已初审但不替代当前版、不对外、不动定稿指针；只为让同单的下游能定稿">历史版·不对外</span>}
             {entry.backfill && <span className="bom-gvtag" title={entry.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿，不经财务BP终审'}>{entry.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}
             {entry.imported && <span className="bom-gvtag" title="历史标准成本直接导入：只有五分项、无物料明细；批量确认即已审核，未经财务BP终审">导入·无明细</span>}</div>
@@ -1118,55 +1138,29 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               {failed ? '⚠ 落盘公盘失败：' : '✓ 已落盘公盘：'}{txt}{ob.ts || ob.at ? `　${ob.ts || ob.at}` : ''}{redo}
             </div>
           })()}
-          <div className="h-sub">来源：钉钉审批 {entry.approval || '—'} · {entry.srcFile} [{entry.sheet}] · 程序解析
-            {versions.length > 1 ? `　·　共 ${versions.length} 个版本` : ''}</div>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', position: 'relative' }}>
-          {/* 动作条（业务方定序 2026-09-06，V2.463）：返回上一级 · 导出采购核算表 · 申请作废 · 修改价税费 · 审核归档 · 删除（主管理员）
-              颜色＝动作性质：灰边＝导航/只读（返回、导出）；琥珀边＝可逆申请（申请作废、撤销归档）；蓝边＝编辑（修改价税费、改定性）；
-              绿实心＝主流程正向动作（审核归档、保存）；琥珀实心＝审批他人申请（作废终审）；红实心＝不可逆（删除，仅主管理员） */}
-          <button className="btn-sec" onClick={onBack} title="回到来处（处理页或台账列表）">‹ 返回上一级</button>
-          {cfg?.canExport && !entry.imported && <><button className="btn-sec" onClick={() => setExpMenu(m => !m)} title="下载或预览采购核算表；同产品多版时可看版本对比">⤓ 导出采购核算表 ▾</button>
-          {expMenu && <div className="bom-menu" onMouseLeave={() => setExpMenu(false)}>
-            <a href={bomExportOriginalUrl(entry.id)}><b>原版采购核算表（源附件）</b><span>审批附件 xlsx 原样下载，供留档核对</span></a>
-            <a href={bomExportOriginalUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览原版</b><span>不下载，在新标签页查看</span></a>
-            <a href={bomExportPrettyUrl(entry.id)}><b>重排版采购核算表（美化）</b><span>台账口径重排版，含费用参数与勾稽说明；成品/半成品自动带上游复配料、半成品页（一本多页）</span></a>
-            <a href={bomExportPrettyUrl(entry.id) + '&preview=1'} target="_blank" rel="noreferrer"><b>　🔍 预览重排版</b><span>不下载，在新标签页查看</span></a>
-            <a href={bomExportPairUrl(entry.id)}><b>财务版 + 脱敏版（一次下两份）</b><span>zip：财务版全量活公式 · 脱敏版遮型号/规格/供应商给商品经理；两版都带上游链路页；复核完传回 OA 表单用</span></a>
-            {versions.length > 1 && <a onClick={() => { setExpMenu(false); onCompare() }}><b>⇄ 版本对比</b><span>同产品 {versions.length} 个版本逐料涨跌</span></a>}
-          </div>}</>}
-          {!cfg?.canExport && versions.length > 1 && <button className="btn-sec" onClick={onCompare}>⇄ 版本对比</button>}
-          {/* 补明细（V2.514，导入的无明细行）：一键进「历史补录」立项，预填来源单号；初审时台账候选是本行 → 建议答 A，本行退出、新记录带明细顶上 */}
-          {entry.imported && entry.active && cfg?.canFetch && <button className="btn-sec" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={() => onFill && onFill(entry)}
-            title="给这条导入记录补上物料明细：按钉钉单号立项（或上传采购核算表）走「历史补录」，初审时答 A 让本行退出、新记录带明细顶上，历史留痕">⇪ 补明细</button>}
-          {/* 申请作废（琥珀边）：作废＝标记不删、须财务BP终审批准；主管理员可自批 */}
-          {!edit && entry.active && !entry.voidPending && cfg?.canAudit &&
-            <button className="btn-sec" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }} onClick={() => setVoidM('request')}
-              title="申请作废本版（留痕不删除，须财务BP终审批准；主管理员可自批）">⌦ 申请作废</button>}
-          {!edit && entry.voidPending && cfg?.canFinalReview &&
-            <button className="btn-pri" style={{ background: 'var(--amber)', borderColor: 'var(--amber)' }}
-              onClick={() => setVoidM('review')} title="财务BP：批准或驳回成本会计的作废申请">⌦ 作废终审（有待批准）</button>}
-          {/* 修改价税费（蓝边）：复核＝改税率/费用/发票类型/明细，留痕；改了成本会自动打回重审 */}
-          {/* V2.528（业务方定 2026-09-08）：初审/终审戳在的记录不能直接改——按钮灰掉，提示先「撤销归档」；后端同样拒绝 */}
-          {!isStd && !edit && cfg?.canAudit && <button className="btn-sec" disabled={archived}
-            style={archived ? undefined : { color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={archived ? undefined : startEdit}
-            title={archived ? '已归档（初审/终审戳在），不能直接改价税费：先点「撤销归档」，改完再重新审核归档' : '改税率 / 费用参数 / 发票类型 / 明细，逐项留痕；改了成本会打回重新归档'}>✎ 修改价税费</button>}
-          {edit && <><button className="btn-pri" disabled={saving} onClick={save} style={{ background: 'var(--green)', borderColor: 'var(--green)' }}>✓ 保存并留痕</button>
-            <button className="btn-sec" onClick={cancelEdit}>取消</button></>}
-          {/* 审核归档（绿实心）＝定性+初审盖戳+毕业进标准台账，一个动作。四步未齐禁用并提示缺哪步 */}
-          {!isStd && !edit && cfg?.canAudit && !entry.isFinal && !entry.historical && <button className="btn-pri" onClick={() => setAuditM(true)}
-            disabled={!entry.stepsOk}
-            title={entry.stepsOk ? '填物料类别 + 是否允许报价，保存即初审归档、进标准成本台账' : '请先确认 ③用量自洽 ④报价核算 两步（①②只看不确认）'}
-            style={{ background: entry.stepsOk ? 'var(--green)' : undefined, borderColor: entry.stepsOk ? 'var(--green)' : undefined }}>
-            ⚑ 审核归档</button>}
-          {!isStd && !edit && cfg?.canAudit && (entry.isFinal || entry.historical) && <button className="btn-sec" disabled={archived}
-            style={archived ? undefined : { color: 'var(--accent)', borderColor: 'var(--accent)' }}
-            onClick={archived ? undefined : () => setAuditM(true)} title={archived ? '已归档（初审/终审戳在），不能直接改定性：先点「撤销归档」' : '改物料类别 / 报价结论（会重新归档、清终审戳）'}>⚑ 改定性</button>}
-          {!edit && cfg?.canAudit && (entry.isFinal || entry.historical) && <button className="btn-sec" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}
-            onClick={unfinalize} title="撤下初审戳与定稿指针，退回复核">↶ 撤销归档</button>}
-          {/* 删除（红实心，仅主管理员）：真删本条记录 + 留档文件，需 conf.ini 密钥，留全局审计 */}
-          {!edit && isSuper && onDelete && <button className="btn-pri" style={{ background: 'var(--red)', borderColor: 'var(--red)', marginLeft: 6 }}
-            title="主管理员：永久删除本条记录（需密钥；留全局审计）" onClick={() => onDelete({ entryId: entry.id }, `记录 #${entry.id} · ${entry.cpCode} ${entry.productName}`)}>🗑 删除</button>}
+        <div className="bom-detail-actions">
+          {!archived && !edit && cfg?.canAudit && !entry.imported && <>
+            <details className="bom-action-menu bom-source-menu"><summary>{sourceBusy ? '更新中…' : '更新源表'}</summary><div>
+              <button disabled={!!sourceBusy} onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); bomFileRef.current?.click() }}>更新研发 BOM 表</button>
+              <button disabled={!!sourceBusy || !entry.groupId} onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); sheetFileRef.current?.click() }}>更新采购核算表</button>
+            </div></details>
+            <input ref={bomFileRef} type="file" accept=".xlsx,.xls" hidden onChange={e => { updateBom(e.target.files); e.target.value = '' }} />
+            <input ref={sheetFileRef} type="file" accept=".xlsx,.xls" hidden onChange={e => { updateSheet(e.target.files); e.target.value = '' }} />
+          </>}
+          {!archived && !isStd && !edit && cfg?.canAudit && <button className="btn-sec" style={{ color: 'var(--accent)', borderColor: 'var(--accent)' }} onClick={startEdit}>修改价税费</button>}
+          {edit && <><button className="btn-pri" disabled={saving} onClick={save}>{saving ? '保存中…' : '保存并留痕'}</button><button className="btn-sec" onClick={cancelEdit}>取消</button></>}
+          {!archived && !isStd && !edit && cfg?.canAudit && !entry.isFinal && !entry.historical && <button className="btn-pri" onClick={() => setAuditM(true)} disabled={!entry.stepsOk}
+            title={entry.stepsOk ? '完成定性并审核通过' : '请先确认 ③用量自洽 ④报价核算'}>审核通过</button>}
+          {!archived && !edit && <details className="bom-action-menu bom-more-menu"><summary aria-label="更多操作">···</summary><div>
+            {cfg?.canAudit && <button onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); renameProduct() }}>修改物料名称</button>}
+            <button onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); auditRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>查看变更记录</button>
+            {entry.active && !entry.voidPending && cfg?.canAudit && <button onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); setVoidM('request') }}>申请作废</button>}
+            {isSuper && onDelete && <button className="danger" onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); onDelete({ entryId: entry.id }, `记录 #${entry.id} · ${entry.cpCode} ${entry.productName}`) }}>删除记录</button>}
+          </div></details>}
+          {archived && !edit && cfg?.canAudit && <button className="btn-sec" onClick={unfinalize}>撤销审核</button>}
+          {archived && !edit && cfg?.canExport && !entry.imported && <a className="btn-sec" href={bomExportPrettyUrl(entry.id)}>导出核算表</a>}
+          {entry.imported && entry.active && cfg?.canFetch && !edit && <button className="btn-sec" onClick={() => onFill && onFill(entry)}>补明细</button>}
         </div>
       </div>
       <div className="body">
@@ -1257,15 +1251,15 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
               {(entry.upstream || []).length > 0 && <UpstreamSection entry={entry} onOpen={onOpen} />}
               {entry.hasGoodsVersion && <GoodsSection entry={entry} isStd={isStd} canAudit={cfg?.canAudit}
                 onApply={applyGoods} />}
-              <MatSection no={1} title="原料明细" hint="成本不含税 = 添加量 × 含税价 ÷ (1+税率)　·　类型可点改（原料内部）　·　「核价」查金蝶实采" rows={mats}
+              <MatSection no={1} title="原料明细" rows={mats}
                 seg="原料" prev={prev} prevMat={prevMat} subtotal={matSub} fullIncl={full} onDrill={onOpen} all={all}
-                delta={segDelta(mats)} onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
+                onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
                 spreads={spreads} onSetType={!isStd && cfg?.canAudit && !edit ? setMatType : null}
                 manualUpstream={entry.manualUpstream} upCands={entry.upstreamCandidates}
                 onSetUpstream={!isStd && cfg?.canAudit && !edit ? setUpstreamMat : null}
                 invoiceRules={cfg?.invoiceRules} onInvoice={edit ? setInvoice : null} />
-              <MatSection no={2} title="包材明细" hint="「核价」查金蝶实采" rows={packs} seg="包材" prev={prev} prevMat={prevMat}
-                subtotal={packSub} fullIncl={full} onDrill={onOpen} all={all} delta={segDelta(packs)} onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
+              <MatSection no={2} title="包材明细" rows={packs} seg="包材" prev={prev} prevMat={prevMat}
+                subtotal={packSub} fullIncl={full} onDrill={onOpen} all={all} onPrice={cfg?.canPrice ? setPriceMat : null} edit={edit} onTax={setTax}
                 spreads={spreads} onSetType={null} invoiceRules={cfg?.invoiceRules} onInvoice={edit ? setInvoice : null} />
               {!isStd && !edit && cfg?.canAudit && <StepConfirm okState={entry.steps?.price} info={entry.stepsInfo?.price}
                 label="报价核算无误" onConfirm={(on) => confirmStep('price', on)} />}
@@ -1303,7 +1297,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
                   : <b style={{ color: 'var(--amber)' }}>{diff > 0 ? '+' : ''}{fmt(diff)} · 参数已调整</b>}</div>
               </div>
               <div className="bom-rdiv" />
-              <div className="bom-ah">变更记录</div>
+              <div className="bom-ah" ref={auditRef}>变更记录</div>
               {(entry.audits || []).length === 0 && <div className="muted" style={{ fontSize: 12 }}>无修改 · 与源表一致</div>}
               {(entry.audits || []).slice(0, 5).map(a => (
                 <div key={a.id} className="bom-audit"><div className="bom-audit-h">{a.user} · {a.ts}</div>
@@ -1648,22 +1642,20 @@ function UpstreamPicker({ matName, cur, cands, onPick }) {
     </div>
   )
 }
-function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullIncl, onDrill, all, delta, onPrice, edit, onTax, spreads, onSetType, manualUpstream, upCands, onSetUpstream, invoiceRules, onInvoice }) {
+function MatSection({ no, title, rows, seg, prev, prevMat, subtotal, fullIncl, onDrill, all, onPrice, edit, onTax, spreads, onSetType, manualUpstream, upCands, onSetUpstream, invoiceRules, onInvoice }) {
   return (
     <div className="card bom-sect">
-      <div className="bom-secthead"><span className="bom-no">{no}</span><b>{title}</b>
-        {hint && <span className="muted" style={{ fontSize: 11 }}>{hint}</span>}<span style={{ flex: 1 }} />
-        <span className="muted" style={{ fontSize: 12 }}><b>{rows.length}</b> 条明细{delta}</span></div>
+      <div className="bom-secthead"><span className="bom-no">{no}</span><b>{title}</b></div>
       <div className="tbl-wrap" style={{ border: 'none', overflowX: 'auto' }}>
-        <table style={{ tableLayout: 'fixed', minWidth: 940 }}>
-          <colgroup>{MAT_COLS.map((w, i) => <col key={i} style={{ width: w }} />)}</colgroup>
+        <table style={{ tableLayout: 'fixed', minWidth: edit ? 1040 : 940 }}>
+          <colgroup>{(edit ? MAT_COLS_EDIT : MAT_COLS).map((w, i) => <col key={i} style={{ width: w }} />)}</colgroup>
           <thead><tr>
           <th className="th">类型</th><th className="th">{seg === '包材' ? '包材编码' : '物料编码'}</th><th className="th">物料名称</th>
           <th className="th">型号</th><th className="th">单位</th>
           <th className="th" style={{ textAlign: 'right' }}>{seg === '包材' ? '用量' : '添加量 kg/kg'}</th>
           <th className="th" style={{ textAlign: 'right' }}>含税采购价</th><th className="th" style={{ textAlign: 'right' }}>税率</th>
           <th className="th">发票类型</th>
-          <th className="th" style={{ textAlign: 'right' }}>成本不含税</th><th className="th" style={{ textAlign: 'right' }}>成本含税</th>
+          <th className="th" style={{ textAlign: 'right' }}>成本含税</th>
           <th className="th" style={{ textAlign: 'right' }}>占比</th><th className="th">说明</th>
           <th className="th">核价</th>
         </tr></thead><tbody>
@@ -1698,32 +1690,29 @@ function MatSection({ no, title, hint, rows, seg, prev, prevMat, subtotal, fullI
                 <td className="muted">{m.unit || '—'}</td>
                 <td className="num">{(m.qtyPerKg ?? 0).toFixed(4)}{qMark && <Tri d={qMark} title={`添加量较上一版（${prev?.calcDate}）：${(p.qtyPerKg ?? 0).toFixed(4)} → ${(m.qtyPerKg ?? 0).toFixed(4)}`} />}</td>
                 <td className="num">{fmt(m.priceIncl)}{pMark && <Tri d={pMark} title={`含税价较上一版（${prev?.calcDate}）：${fmt(p.priceIncl)} → ${fmt(m.priceIncl)}`} />}</td>
-                <td className="num">{edit && onTax
+                <td className={'num' + (edit ? ' bom-editcell' : '')}>{edit && onTax
                   ? <span className="bom-taxedit"><input type="number" step="1" min="0" value={m.taxRate != null ? +(m.taxRate * 100).toFixed(2) : ''} onChange={e => onTax(m, e.target.value)} />%</span>
                   : <span className="muted">{m.taxRate != null ? (m.taxRate * 100).toFixed(0) + '%' : '—'}</span>}</td>
-                <td>{edit && onInvoice
-                  ? <select value={m.invoiceType || ''} onChange={e => onInvoice(m, e.target.value)} title="改发票类型→按其算法重算成本不含税（基础数据可维护）"
-                      style={{ fontSize: 11, maxWidth: '100%', padding: '1px 2px' }}>
+                <td className={edit ? 'bom-editcell' : ''}>{edit && onInvoice
+                  ? <select className="bom-invoice-select" value={m.invoiceType || ''} onChange={e => onInvoice(m, e.target.value)} title="改发票类型→按其算法重算成本不含税（基础数据可维护）">
                       {m.invoiceType && !(invoiceRules || []).some(r => r.type === m.invoiceType) && <option value={m.invoiceType}>{m.invoiceType}</option>}
                       {(invoiceRules || []).map(r => <option key={r.type} value={r.type}>{r.type}</option>)}
                     </select>
                   : <span className="muted" style={{ fontSize: 12 }}>{m.invoiceType || '—'}</span>}</td>
-                <td className="num" style={{ fontWeight: 600 }}>{fmt(m.costExcl, 4)}
-                  {p && Math.abs(dCost) > EPS && <span className={'bom-cbadge ' + (dCost > 0 ? 'up' : 'down')} title={`成本含税较上一版（${prev?.calcDate}）${dCost > 0 ? '+' : ''}${fmt(dCost, 4)} 元/kg`}>{dCost > 0 ? '▲' : '▼'}{fmt(Math.abs(dCost))}</span>}
-                  {!p && prev && <span className="bom-cbadge new" title="较上一版新增物料">新增</span>}</td>
-                <td className="num" style={{ fontWeight: 600 }}>{fmt((m.costExcl || 0) * GROSS, 4)}</td>
+                <td className="num" style={{ fontWeight: 600 }}>{fmt((m.costExcl || 0) * GROSS)}
+                  {!edit && p && Math.abs(dCost) > EPS && <span className={'bom-cbadge ' + (dCost > 0 ? 'up' : 'down')} title={`成本含税较上一版（${prev?.calcDate}）${dCost > 0 ? '+' : ''}${fmt(dCost, 4)} 元/kg`}>{dCost > 0 ? '▲' : '▼'}{fmt(Math.abs(dCost))}</span>}
+                  {!edit && !p && prev && <span className="bom-cbadge new" title="较上一版新增物料">新增</span>}</td>
                 <td className="num muted">{fullIncl ? pct(((m.costExcl || 0) * GROSS) / fullIncl) : '—'}</td>
                 <td style={NOWRAP} title={note ? specBrand + '　' + note : specBrand}>{specBrand ? <span>{specBrand}{note && <span className="bom-noteic"> ⓘ</span>}</span>
                   : (note ? <span className="bom-noteic">ⓘ</span> : '—')}</td>
                 <td>{(m.matCode || '').trim() && onPrice
-                  ? <a className="lk" onClick={() => onPrice(m)} title={bigSpread ? `⚠ 同编码在别的产品里研发定价差异较大：${fmt(sp.min)}~${fmt(sp.max)}（跨 ${sp.count} 处，差 ${(sp.spread * 100).toFixed(0)}%）——点开 BOM反查看` : '查金蝶实采价 / BOM反查同编码'}>核价 ↗{bigSpread && <span style={{ color: 'var(--stop, #a83529)', marginLeft: 3 }} title="研发跨产品同料定价差异大">●</span>}</a>
+                  ? <a className="lk" style={{ whiteSpace: 'nowrap' }} onClick={() => onPrice(m)} title={bigSpread ? `⚠ 同编码在别的产品里研发定价差异较大：${fmt(sp.min)}~${fmt(sp.max)}（跨 ${sp.count} 处，差 ${(sp.spread * 100).toFixed(0)}%）——点开 BOM反查看` : '查金蝶实采价 / BOM反查同编码'}>核价 ↗{bigSpread && <span style={{ color: 'var(--stop, #a83529)', marginLeft: 3 }} title="研发跨产品同料定价差异大">●</span>}</a>
                   : <span className="muted" style={{ fontSize: 11 }}>—</span>}</td>
               </tr>
             )
           })}
           <tr className="bom-subrow"><td colSpan={9}>{seg}小计</td>
-            <td className="num" style={{ fontWeight: 700 }} title="不含税">{fmt(subtotal, 4)}</td>
-            <td className="num" style={{ fontWeight: 700 }} title="含税">{fmt((subtotal || 0) * GROSS, 4)}</td>
+            <td className="num" style={{ fontWeight: 700 }} title="含税">{fmt((subtotal || 0) * GROSS)}</td>
             <td className="num muted">{fullIncl ? pct(((subtotal || 0) * GROSS) / fullIncl) : ''}</td>
             <td colSpan={2}></td></tr>
         </tbody></table>
