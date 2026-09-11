@@ -220,9 +220,13 @@ def sources_view(request:Request,period:str,shop:str):
 
 
 @router.get('/orders')
-def orders_view(request:Request,period:str,shop:str,q:str='',business:str='',flag:str='',page:int=1,size:int=30):
+def orders_view(request:Request,period:str,shop:str,q:str='',business:str='',channel:str='',flag:str='',page:int=1,size:int=30):
     require(request); check_period(period); check_shop(shop)
     data=get_data(period,shop); rows=selected_rows(data['rows'],business)
+    if channel=='alipay': rows=[r for r in rows if '支付宝' in r['destination']]
+    elif channel=='fund': rows=[r for r in rows if '聚合账户' in r['destination']]
+    elif channel=='pending': rows=[r for r in rows if r['destination']=='待结算 / 待补流水']
+    elif channel=='multiple': rows=[r for r in rows if '、' in r['destination']]
     if q:
         q=q.strip().casefold()
         rows=[r for r in rows if q in r['order_no'].casefold() or any(q in str(x.get('sku','')).casefold() or q in str(x.get('name','')).casefold() for x in r['items'])]
