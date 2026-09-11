@@ -8,14 +8,12 @@ const EMPTY = { review_status:'',q:'',bucket:'',abnormal:false,direction:'',amou
 function OrderEvidence({ row, onOpen }) {
   const s=row.supplement
   const original=row.order_no && row.order_no!=='0' ? row.order_no : ''
-  return <><button className="ef-link ef-id" onClick={onOpen}>{original || s?.order_candidate || '未提供订单号'}</button>
-    {!original && s?.order_candidate && <small className="ef-warning">候选订单号 · 来自{s.order_sources.join('、')} · 待核对<small>原始业务基础订单号为空</small></small>}
-    {s?.status==='conflict' && <small className="ef-warning">订单线索冲突，不自动关联</small>}
-    <small>{row.mch_no && `商户单号 ${row.mch_no}`}</small></>
+  return <><button className="ef-link ef-id" onClick={onOpen}>{original || s?.order_candidate || '—'}</button>
+    {!original && s?.order_candidate && <span className="ef-inferred" title="补充识别的候选订单号；点击查看来源，尚未确认关联">候选</span>}</>
 }
 
 function BusinessEvidence({ row }) {
-  return <>{row.desc || '业务描述为空'}{row.supplement?.business_label && <small className="ef-warning">补充识别：{row.supplement.business_label}（来自备注；性质待确认）</small>}<small>{row.btype} · {row.chan || '未提供渠道'}</small></>
+  return <><span>{row.desc || row.supplement?.business_label || '—'}</span>{!row.desc && row.supplement?.business_label && <span className="ef-inferred" title="备注补充识别；原始业务描述为空，费用性质待确认">补充</span>}<small>{row.btype || '—'}</small></>
 }
 
 function SupplementalDetail({ row }) {
@@ -33,12 +31,17 @@ export function AccountTable({ data, onSelect }) {
   </tbody></table></div>
 }
 
-export default function EcomFlowLedger({ user, period: parentPeriod = '', initialQuery = '', initialAccountId = '', onChanged = () => {} }) {
+function datesForPeriod(period) {
+  if (!/^\d{4}-\d{2}$/.test(period)) return {date_from:'',date_to:''}
+  const [year,month]=period.split('-').map(Number)
+  return {date_from:`${period}-01`,date_to:`${period}-${new Date(year,month,0).getDate()}`}
+}
+
+export default function EcomFlowLedger({ user, period: parentPeriod = '', initialQuery = '', initialAccountId = '', onChanged = () => {}, managementOnly = false, refreshToken = 0 }) {
   const [revision, setRevision] = useState(0)
-  const accounts = useResource('/api/ec/flows/accounts', revision)
+  const accounts = useResource('/api/ec/flows/accounts', `${revision}:${refreshToken}`)
   const [accountId, setAccountId] = useState(initialAccountId)
-  const [period, setPeriod] = useState(parentPeriod)
-  const [filters, setFilters] = useState({ ...EMPTY, q: initialQuery })
+  const [filters, setFilters] = useState({ ...EMPTY, ...datesForPeriod(parentPeriod), q: initialQuery })
   const [search, setSearch] = useState(filters)
   const [page, setPage] = useState(1)
   const [selected, setSelected] = useState(null)
@@ -51,10 +54,11 @@ export default function EcomFlowLedger({ user, period: parentPeriod = '', initia
   const [shopIds, setShopIds] = useState([])
   const fileRef = useRef(null)
   const canEdit = user?.role === 'admin' || user?.perms?.ec_settle_upload
-  useEffect(() => { setPeriod(parentPeriod); setPage(1) }, [parentPeriod])
+  useEffect(() => { setFilters(f=>({...f,...datesForPeriod(parentPeriod)})); setPage(1) }, [parentPeriod])
   useEffect(() => { setAccountId(initialAccountId); setPage(1) }, [initialAccountId])
   useEffect(() => { setFilters(f => ({ ...f, q: initialQuery })); setSearch(f => ({ ...f, q: initialQuery })); setPage(1) }, [initialQuery])
-  const result = useResource(`/api/ec/flows?${query({ account_id:accountId,period,...search,abnormal:search.abnormal ? 'true' : '',page,size:50 })}`, revision)
+  useEffect(() => {const timer=setTimeout(()=>{setSearch({...filters});setPage(1)},250);return()=>clearTimeout(timer)},[filters])
+  const result = useResource(managementOnly ? null : `/api/ec/flows?${query({ account_id:accountId,...search,abnormal:search.abnormal ? 'true' : '',page,size:50 })}`, `${revision}:${refreshToken}`)
   const data = result.data
   const change = (key, value) => setFilters(f => ({ ...f, [key]:value }))
   const apply = e => { e?.preventDefault(); setSearch({ ...filters }); setPage(1) }
@@ -91,20 +95,31 @@ export default function EcomFlowLedger({ user, period: parentPeriod = '', initia
     })
   }
   return <section className="ef-ledger" aria-label="账户流水查询">
-    <div className="ef-heading"><div><h2>账户流水</h2><p>合并文件 · 全字段查找 · 流水分桶与异常检查</p></div><div className="ef-actions"><button disabled={!canEdit || busy} onClick={() => setCreate(v => !v)}>登记账户</button><button disabled={busy} onClick={() => setRevision(v => v+1)}>刷新</button></div></div>
+    {managementOnly && <div className="ef-heading"><div><h2>账户登记与流水导入</h2><p>按账户合并文件；查询请前往「账户流水」</p></div><div className="ef-actions"><button disabled={!canEdit || busy} onClick={() => setCreate(v => !v)}>登记账户</button><button disabled={busy} onClick={() => setRevision(v => v+1)}>刷新</button></div></div>}
     {(notice || accounts.error || result.error) && <div className="ef-notice" role="status">{notice || accounts.error || result.error}</div>}
     {create && <form className="ef-account-form" onSubmit={saveAccount}><label>账户类型<select value={accountKind} onChange={e => setAccountKind(e.target.value)}><option value="alipay">支付宝</option><option value="fund">聚合账户</option></select></label><label>账户名称<input required maxLength="120" value={name} onChange={e => setName(e.target.value)} placeholder="例如：星期零天猫支付宝" /></label><label>尾号<input maxLength="8" pattern="[0-9]{0,8}" value={suffix} onChange={e => setSuffix(e.target.value)} placeholder="可填末 4 位" /></label><fieldset><legend>关联店铺（可多选）</legend>{accounts.data?.shops?.map(s => <label className="ef-check" key={s.id}><input type="checkbox" checked={shopIds.includes(s.id)} onChange={e => setShopIds(ids => e.target.checked ? [...ids,s.id] : ids.filter(id => id!==s.id))} />{s.name}</label>)}</fieldset><button className="ef-primary" disabled={busy || !shopIds.length}>保存账户</button><button type="button" onClick={() => setCreate(false)}>取消</button></form>}
-    <AccountTable data={accounts.data} onSelect={selectAccount} />
-    <div className="ef-tools"><label>账户<select aria-label="流水账户" value={accountId} onChange={e => selectAccount(e.target.value)}><option value="">全部账户</option>{accounts.data?.accounts?.map(a => <option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label><label>流水期间<input type="month" value={period} onChange={e => {setPeriod(e.target.value);setPage(1)}} /></label><button onClick={() => {setPeriod('');setPage(1)}}>跨月查找</button><span className="ef-spacer" /><input hidden type="file" ref={fileRef} accept=".xlsx,.xls,.zip" multiple onChange={upload} /><button className="ef-primary" disabled={!canEdit || !accountId || busy} onClick={() => fileRef.current?.click()}>{busy ? '正在处理…' : '合并导入流水'}</button><small>{accountId ? '一次可选多个分片' : '导入前请选择具体账户'}</small></div>
-    <form className="ef-search" onSubmit={apply}><label className="ef-query">统一搜索<input value={filters.q} onChange={e => change('q',e.target.value)} placeholder="订单号、流水号、交易号、商户单号、商品、对方名称、摘要…" /></label><label>业务分桶<select value={filters.bucket} onChange={e => change('bucket',e.target.value)}><option value="">全部流水</option>{Object.entries(BUCKETS).map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label>人工定性<select value={filters.review_status} onChange={e => change('review_status',e.target.value)}><option value="">全部状态</option><option>待核对</option><option>正常</option><option>待追查</option></select></label><label>收支方向<select value={filters.direction} onChange={e => change('direction',e.target.value)}><option value="">全部</option><option value="income">收入</option><option value="outgo">支出</option></select></label><label>金额从<input inputMode="decimal" value={filters.amount_min} onChange={e => change('amount_min',e.target.value)} placeholder="不限" /></label><label>金额至<input inputMode="decimal" value={filters.amount_max} onChange={e => change('amount_max',e.target.value)} placeholder="不限" /></label><label>开始日期<input type="date" value={filters.date_from} onChange={e => change('date_from',e.target.value)} /></label><label>结束日期<input type="date" value={filters.date_to} onChange={e => change('date_to',e.target.value)} /></label><label className="ef-check"><input type="checkbox" checked={filters.abnormal} onChange={e => change('abnormal',e.target.checked)} />仅看异常 / 待核对</label><button className="ef-primary">搜索</button><button type="button" onClick={() => {setFilters({...EMPTY});setSearch({...EMPTY});setPage(1)}}>清空条件</button></form>
+    {managementOnly && <><AccountTable data={accounts.data} />
+    <div className="ef-tools"><label>导入账户<select aria-label="导入账户" value={accountId} onChange={e => selectAccount(e.target.value)}><option value="">请选择账户</option>{accounts.data?.accounts?.map(a => <option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label><span className="ef-spacer" /><input hidden type="file" ref={fileRef} accept=".xlsx,.xls,.zip" multiple onChange={upload} /><button className="ef-primary" disabled={!canEdit || !accountId || busy} onClick={() => fileRef.current?.click()}>{busy ? '正在处理…' : '合并导入流水'}</button><small>{accountId ? '一次可选多个分片，按原始入账日期归属期间' : '导入前请选择具体账户'}</small></div></>}
+    {!managementOnly && <><form className="ef-search ef-search-compact" onSubmit={apply} aria-label="流水筛选">
+      <label className="ef-account-filter">账户<select aria-label="流水账户" value={accountId} onChange={e=>selectAccount(e.target.value)}><option value="">全部账户</option>{accounts.data?.accounts?.map(a=><option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label>
+      <label>业务分桶<select aria-label="业务分桶" value={filters.bucket} onChange={e=>change('bucket',e.target.value)}><option value="">全部流水（{data ? count(Object.values(data.buckets||{}).reduce((a,b)=>a+b,0)) : '—'}）</option>{Object.entries(BUCKETS).map(([key,label])=><option key={key} value={key}>{label}（{data ? count(data.buckets?.[key]||0) : '—'}）</option>)}</select></label>
+      <label>初审判定<select aria-label="初审判定" value={filters.review_status} onChange={e=>change('review_status',e.target.value)}><option value="">全部状态</option><option>待核对</option><option>正常</option><option>待追查</option></select></label>
+      <label>开始日期<input aria-label="开始日期" type="date" value={filters.date_from} onChange={e=>change('date_from',e.target.value)}/></label>
+      <label>截止日期<input aria-label="截止日期" type="date" value={filters.date_to} onChange={e=>change('date_to',e.target.value)}/></label>
+      <div className="ef-amount-filter" role="group" aria-label="金额搜索"><span className="ef-amount-title">金额搜索</span><div className="ef-amount-inputs"><select aria-label="金额方向" value={filters.direction} onChange={e=>change('direction',e.target.value)}><option value="">净额</option><option value="income">收入</option><option value="outgo">支出</option></select><input aria-label="金额下限" inputMode="decimal" value={filters.amount_min} onChange={e=>change('amount_min',e.target.value)} placeholder="最低"/><span>—</span><input aria-label="金额上限" inputMode="decimal" value={filters.amount_max} onChange={e=>change('amount_max',e.target.value)} placeholder="最高"/></div></div>
+      <label className="ef-query">模糊搜索<input aria-label="模糊搜索" value={filters.q} onChange={e=>change('q',e.target.value)} placeholder="订单号 / 流水号 / 商户单号 / 备注…"/></label>
+      <label className="ef-check"><input type="checkbox" checked={filters.abnormal} onChange={e=>change('abnormal',e.target.checked)}/>仅看异常</label>
+      <div className="ef-search-actions"><button className="ef-primary">搜索</button><button type="button" onClick={()=>{setAccountId('');setFilters({...EMPTY});setSearch({...EMPTY});setPage(1)}}>清空</button></div>
+    </form>
     <div className="ef-summary"><span>筛选结果 <strong>{count(data?.total)}</strong> 笔</span><span>收入 <strong>¥{money(data?.income)}</strong></span><span>支出 <strong>¥{money(data?.outgo)}</strong></span><span>异常 / 提醒 <strong>{count(data?.flagged)}</strong> 笔</span></div>
     <p className="ef-muted">{data?.notice || '流水分类不是订单核销分桶；候选与提醒不等于已确认错误。'} 金额不指定方向时按单笔收支净额的绝对值筛选。</p>
-    <div className="ef-table-wrap"><table className="ef-table ef-flow-table"><thead><tr><th>入账时间 / 账户</th><th>业务基础订单号</th><th>支付宝流水号 / 交易号</th><th>业务描述 / 账务类型</th><th className="num">收入</th><th className="num">支出</th><th className="num">余额</th><th>流水分桶 / 提醒</th><th /></tr></thead><tbody>
-      {data?.rows?.map(r => <tr key={r.id}><td>{r.ts}<small>{r.account_name}</small></td><td><OrderEvidence row={r} onOpen={() => setSelected(r.id)} /></td><td className="ef-id">{r.serial || '无流水号'}<small>{r.txn || '无交易号'}</small></td><td className="ef-desc"><BusinessEvidence row={r} /></td><td className="num">{money(r.income)}</td><td className="num">{money(r.outgo)}</td><td className="num">{money(r.balance)}</td><td><span className={r.flags?.length ? 'ef-tag warn' : 'ef-tag'}>{BUCKETS[r.bucket] || r.bucket}</span><small className="ef-warning">{r.flags?.join('；')}</small><small>人工定性：{r.review?.verdict || '待核对'}</small></td><td><button className="ef-link" onClick={() => setSelected(r.id)}>原始字段</button></td></tr>)}
+    <div className="ef-table-wrap"><table className="ef-table ef-flow-table"><thead><tr><th>账户 / 入账时间</th><th>流水号</th><th>业务订单号</th><th>业务描述 / 账务类型</th><th className="num">收入</th><th className="num">支出</th><th className="num">余额</th><th>分桶</th><th>提醒</th></tr></thead><tbody>
+      {data?.rows?.map(r => <tr key={r.id}><td>{r.account_name}<small>{r.ts}</small></td><td className="ef-id"><button className="ef-link ef-id" title="查看全部原始字段" onClick={()=>setSelected(r.id)}>{r.serial || '查看明细'}</button></td><td><OrderEvidence row={r} onOpen={() => setSelected(r.id)} /></td><td className="ef-desc"><BusinessEvidence row={r} /></td><td className="num">{money(r.income)}</td><td className="num">{money(r.outgo)}</td><td className="num">{money(r.balance)}</td><td><span className="ef-tag">{BUCKETS[r.bucket] || r.bucket}</span></td><td><small className="ef-warning">{[...(r.flags||[]),...(r.supplement?.status==='conflict'?['订单线索冲突']:[])].join('；') || '—'}</small><small>初审：{r.review?.verdict || '待核对'}</small></td></tr>)}
       {(result.loading || !data?.rows?.length) && <tr><td colSpan="9" className="ef-empty">{result.loading ? '正在检索流水…' : result.error ? '读取失败，请重试' : '没有符合条件的流水；可调整筛选或先导入文件。'}</td></tr>}
     </tbody></table></div>
     <div className="ef-pagination"><span>每页 50 笔 · 仅加载当前页</span><button disabled={page<=1 || result.loading} onClick={() => setPage(p => p-1)}>上一页</button><span>{page} / {data?.pages || 1}</span><button disabled={page>=(data?.pages || 1) || result.loading} onClick={() => setPage(p => p+1)}>下一页</button></div>
     {selected && <FlowDetail id={selected} canEdit={canEdit} onSaved={() => setRevision(v => v+1)} onClose={() => setSelected(null)} />}
+    </>}
   </section>
 }
 

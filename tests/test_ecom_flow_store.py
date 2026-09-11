@@ -81,6 +81,18 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(Exception):module.import_files('a1',[('one.xlsx',file()),('bad.xlsx',b'bad')],'test')
         self.assertEqual(module.search(None)['total'],0)
 
+    def test_bucket_counts_exclude_selected_bucket_but_keep_other_filters(self):
+        module.import_files('a1',[('one.xlsx',file(serial='fee')),('two.xlsx',file(serial='other',amount=3.95))],'test')
+        module.import_files('a2',[('three.xlsx',file(serial='separate'))],'test')
+        with fake._engine.begin() as cx:
+            cx.execute(sa.update(module.R).where(module.R.c.serial=='other').values(bucket='unknown'))
+        result=module.search(None,account_id='a1',bucket='fee',date_from='2026-08-01',date_to='2026-08-31')
+        self.assertEqual(result['total'],1)
+        self.assertEqual(result['buckets'],{'fee':1,'unknown':1})
+        result=module.search(None,account_id='a1',bucket='unknown',direction='outgo',amount_min='3',amount_max='4')
+        self.assertEqual(result['buckets'],{'unknown':1})
+        self.assertEqual(module.search(None,account_id='a1',date_from='2026-09-01')['buckets'],{})
+
     def test_historical_row_supplement_is_read_only_and_searchable(self):
         module.import_files('a1',[('one.xlsx',file())],'test')
         with fake._engine.begin() as cx:

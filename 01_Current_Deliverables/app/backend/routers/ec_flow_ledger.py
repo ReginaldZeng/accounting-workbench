@@ -197,7 +197,6 @@ def search(request:Request,account_id:str='',period:str='',q:str='',bucket:str='
     if q:
         q=q.strip()[:200]
         where.append(or_(R.c.serial==q,R.c.txn==q,R.c.order_no==q,R.c.mch_no==q,R.c.search_text.contains(q,autoescape=True)))
-    if bucket:where.append(R.c.bucket==bucket)
     if abnormal:where.append(R.c.abnormal==1)
     if review_status=='待核对':where.append(R.c.id.not_in(select(db.ec_flow_reviews.c.flow_id).where(db.ec_flow_reviews.c.verdict.in_(['正常','待追查']))))
     elif review_status in ('正常','待追查'):where.append(R.c.id.in_(select(db.ec_flow_reviews.c.flow_id).where(db.ec_flow_reviews.c.verdict==review_status)))
@@ -208,11 +207,13 @@ def search(request:Request,account_id:str='',period:str='',q:str='',bucket:str='
         if amount_min:where.append(amount_col>=ledger.decimal(amount_min))
         if amount_max:where.append(amount_col<=ledger.decimal(amount_max))
     except ValueError:raise HTTPException(400,'金额筛选格式错误')
+    bucket_where=list(where)
+    if bucket:where.append(R.c.bucket==bucket)
     page=max(1,page);size=max(10,min(100,size))
     with db._engine.connect() as cx:
         stats=cx.execute(select(func.count(),func.sum(R.c.income),func.sum(R.c.outgo),func.sum(R.c.abnormal)).where(*where)).first()
         records=cx.execute(select(R.c.id,R.c.account_id,R.c.payload,A.c.name).join(A,A.c.id==R.c.account_id).where(*where).order_by(R.c.occurred_at.desc(),R.c.id.desc()).offset((page-1)*size).limit(size)).fetchall()
-        buckets=cx.execute(select(R.c.bucket,func.count()).where(*[w for w in where]).group_by(R.c.bucket)).fetchall()
+        buckets=cx.execute(select(R.c.bucket,func.count()).where(*bucket_where).group_by(R.c.bucket)).fetchall()
     rows=[]
     with db._engine.connect() as cx:
         reviews={r.flow_id:dict(r._mapping) for r in cx.execute(select(db.ec_flow_reviews).where(db.ec_flow_reviews.c.flow_id.in_([v.id for v in records])))} if records else {}
