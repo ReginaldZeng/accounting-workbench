@@ -217,7 +217,7 @@ def search(request:Request,account_id:str='',period:str='',q:str='',bucket:str='
     with db._engine.connect() as cx:
         reviews={r.flow_id:dict(r._mapping) for r in cx.execute(select(db.ec_flow_reviews).where(db.ec_flow_reviews.c.flow_id.in_([v.id for v in records])))} if records else {}
     for r in records:
-        payload=json.loads(r.payload);payload.pop('raw',None)
+        payload=ledger.supplement(json.loads(r.payload));payload.pop('raw',None)
         rows.append(dict(payload,id=r.id,account_id=r.account_id,account_name=r.name,review=reviews.get(r.id)))
     return {'ok':True,'rows':rows,'total':stats[0],'income':float(stats[1] or 0),'outgo':float(stats[2] or 0),
         'flagged':stats[3] or 0,'page':page,'pages':max(1,(stats[0]+size-1)//size),'buckets':dict(buckets),
@@ -236,7 +236,7 @@ def detail(request:Request,row_id:int):
             db.ec_excl_notes.c.shop.in_(json.loads(acc.shops or '[]')))).fetchall() if row.serial else []
         review=cx.execute(select(db.ec_flow_reviews).where(db.ec_flow_reviews.c.flow_id==row_id)).first()
     db.audit(user['name'],'ec_flow_detail',target=str(row_id),detail='查看流水原始字段；未写金蝶')
-    return {'ok':True,'row':json.loads(row.payload),'sources':[dict(r._mapping,aliases=json.loads(r.aliases or '[]')) for r in sources],
+    return {'ok':True,'row':ledger.supplement(json.loads(row.payload)),'sources':[dict(r._mapping,aliases=json.loads(r.aliases or '[]')) for r in sources],
         'review':dict(review._mapping) if review else None,
         'historical_reviews':[dict(r._mapping) for r in historical],
         'history_note':'旧记录按店铺、期间和流水号关联，未含账户维度；请核实后使用，不自动沿用旧定性。'}

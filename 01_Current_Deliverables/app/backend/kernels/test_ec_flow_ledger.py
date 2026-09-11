@@ -6,6 +6,32 @@ from kernels import ec_flow_ledger as ledger
 
 
 class FlowLedgerTests(unittest.TestCase):
+    def test_supplement_preserves_originals_and_amounts(self):
+        row={'order_no':'','desc':'','remark':'猫猫币抵扣项目平台垫付资金（331639328010038983）扣款',
+             'mch_no':'T200P331639328010038983','bucket':'unknown','outgo':Decimal('3.95'),'raw':{'业务描述':''}}
+        result=ledger.supplement(row)
+        self.assertEqual({k:result[k] for k in row},row)
+        self.assertNotIn('supplement',row)
+        self.assertEqual(result['supplement']['order_candidate'],'331639328010038983')
+        self.assertEqual(result['supplement']['order_sources'],['备注','商户订单号'])
+        self.assertEqual(result['supplement']['status'],'candidate')
+
+    def test_supplement_conflicts_and_structured_priority(self):
+        row={'order_no':'331639328010038983','desc':'known','mch_no':'T200P331639328010038984'}
+        result=ledger.supplement(row)
+        self.assertEqual(result['order_no'],row['order_no'])
+        self.assertEqual(result['supplement']['status'],'conflict')
+        self.assertEqual(result['supplement']['order_candidate'],'')
+        self.assertEqual(result['supplement']['business_label'],'')
+        row['mch_no']='T200P'+row['order_no']
+        self.assertEqual(ledger.supplement(row)['supplement']['status'],'corroborates')
+
+    def test_supplement_no_arbitrary_numbers_or_multiple_matches(self):
+        result=ledger.supplement({'remark':'付款账号(331639328010038983)扣款','mch_no':'X331639328010038983'})
+        self.assertEqual(result['supplement']['status'],'none')
+        remark='猫猫币抵扣项目平台垫付资金(331639328010038983)扣款；猫猫币抵扣项目平台垫付资金(331639328010038984)扣款'
+        self.assertEqual(ledger.supplement({'remark':remark})['supplement']['status'],'conflict')
+
     def workbook(self, rows, headers=None):
         book=openpyxl.Workbook();sheet=book.active
         sheet.append(headers or ['入账时间','账务类型','收入（+元）','支出（-元）','业务描述','支付宝流水号','业务基础订单号','余额（元）','新增业务字段'])

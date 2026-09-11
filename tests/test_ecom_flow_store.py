@@ -81,6 +81,26 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(Exception):module.import_files('a1',[('one.xlsx',file()),('bad.xlsx',b'bad')],'test')
         self.assertEqual(module.search(None)['total'],0)
 
+    def test_historical_row_supplement_is_read_only_and_searchable(self):
+        module.import_files('a1',[('one.xlsx',file())],'test')
+        with fake._engine.begin() as cx:
+            record=cx.execute(sa.select(module.R)).first()
+            payload=json.loads(record.payload)
+            payload.update(order_no='',desc='',mch_no='T200P331639328010038983',
+                remark='猫猫币抵扣项目平台垫付资金(331639328010038983)扣款')
+            payload['raw'].update({'业务描述':'','业务基础订单号':'','备注':payload['remark']})
+            raw_payload=json.dumps(payload,ensure_ascii=False)
+            cx.execute(sa.update(module.R).values(order_no='',payload=raw_payload,search_text=payload['remark']))
+        result=module.search(None,q='331639328010038983')
+        self.assertEqual(result['total'],1)
+        self.assertEqual(result['rows'][0]['supplement']['status'],'candidate')
+        detail=module.detail(None,record.id)['row']
+        self.assertEqual(detail['raw']['业务描述'],'')
+        self.assertEqual(detail['order_no'],'')
+        self.assertEqual(detail['outgo'],payload['outgo'])
+        with fake._engine.connect() as cx:
+            self.assertEqual(cx.execute(sa.select(module.R.c.payload)).scalar_one(),raw_payload)
+
     def test_identical_file_keeps_alias_without_double_count(self):
         blob=file()
         module.import_files('a1',[('original.xlsx',blob)],'test')

@@ -52,9 +52,31 @@ def fingerprint(value):
 
 
 def merchant_id(filename):
-    # Export prefix is the 16-digit Alipay PID. '#账号' can instead be an 11-digit login alias.
+    # Export prefix is the 16-digit Alipay PID; '#账号' may be a different statement account identifier.
     match=re.match(r'^(2088\d{12})-', str(filename).replace('\\','/').rsplit('/',1)[-1])
     return match.group(1) if match else ''
+
+
+def supplement(row):
+    """Read-time evidence only, including historical imports. Never change raw fields or accounting."""
+    remark=string(row.get('remark')); merchant=string(row.get('mch_no'))
+    evidence=[]
+    # Only explicit order-bearing templates; arbitrary long IDs may be transactions or accounts.
+    for match in re.finditer(r'猫猫币抵扣项目平台垫付资金\s*[（(]\s*([0-9]{15,24})\s*[）)]\s*扣款',remark):
+        evidence.append({'order_no':match.group(1),'source':'备注','text':match.group(0)})
+    hit=re.fullmatch(r'T200P([0-9]{15,24})',merchant)
+    if hit:evidence.append({'order_no':hit.group(1),'source':'商户订单号','text':merchant})
+    candidates=sorted({e['order_no'] for e in evidence})
+    original=string(row.get('order_no'))
+    original=original if original!='0' else ''
+    conflict=len(set(candidates+([original] if original else [])))>1
+    label='猫猫币抵扣项目平台垫付资金扣款' if any(e['source']=='备注' for e in evidence) and not string(row.get('desc')) else ''
+    derived={'business_label':label,'business_source':'备注' if label else '',
+        'order_candidate':candidates[0] if len(candidates)==1 and not conflict else '',
+        'order_sources':list(dict.fromkeys(e['source'] for e in evidence)),
+        'status':'conflict' if conflict else 'corroborates' if original and candidates else 'candidate' if candidates else 'none',
+        'evidence':evidence,'notice':'补充识别仅供查找，未确认订单归属及费用性质，不参与自动核销。'}
+    return dict(row,supplement=derived)
 
 
 def _cells_xml(data):

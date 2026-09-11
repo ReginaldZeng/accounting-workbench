@@ -5,6 +5,27 @@ import './ecomFlowLedger.css'
 const BUCKETS = { receipt:'交易收款',refund:'交易退款',fee:'平台费用',adjustment:'补贴 / 调整',ufirst_fee:'U先专属费用',qr:'收钱码收款',transfer:'划转候选',recharge:'充值 / 划转候选',other:'其他已知费目',unknown:'待识别流水' }
 const EMPTY = { review_status:'',q:'',bucket:'',abnormal:false,direction:'',amount_min:'',amount_max:'',date_from:'',date_to:'' }
 
+function OrderEvidence({ row, onOpen }) {
+  const s=row.supplement
+  const original=row.order_no && row.order_no!=='0' ? row.order_no : ''
+  return <><button className="ef-link ef-id" onClick={onOpen}>{original || s?.order_candidate || '未提供订单号'}</button>
+    {!original && s?.order_candidate && <small className="ef-warning">候选订单号 · 来自{s.order_sources.join('、')} · 待核对<small>原始业务基础订单号为空</small></small>}
+    {s?.status==='conflict' && <small className="ef-warning">订单线索冲突，不自动关联</small>}
+    <small>{row.mch_no && `商户单号 ${row.mch_no}`}</small></>
+}
+
+function BusinessEvidence({ row }) {
+  return <>{row.desc || '业务描述为空'}{row.supplement?.business_label && <small className="ef-warning">补充识别：{row.supplement.business_label}（来自备注；性质待确认）</small>}<small>{row.btype} · {row.chan || '未提供渠道'}</small></>
+}
+
+function SupplementalDetail({ row }) {
+  const s=row?.supplement
+  if (!s?.evidence?.length) return null
+  return <section className="ef-notice"><h3>补充识别依据（非原始字段）</h3>{s.business_label && <p>{s.business_label} · 来自{s.business_source} · 性质待确认</p>}
+    <p>{s.status==='conflict' ? '订单线索冲突，不自动关联' : s.status==='corroborates' ? '补充线索与原始订单号一致' : `候选订单号：${s.order_candidate}（待核对）`}</p>
+    {s.evidence.map((e,i)=><p key={i}>{e.source}：{e.text}</p>)}<p>{s.notice}</p></section>
+}
+
 export function AccountTable({ data, onSelect }) {
   return <div className="ef-table-wrap"><table className="ef-table"><thead><tr><th>账户名称</th><th>类型 / 尾号</th><th>关联店铺</th><th className="num">流水笔数</th><th className="num">账面余额</th><th>余额截至 / 数据状态</th><th /></tr></thead><tbody>
     {(data?.accounts || []).map(a => <tr key={a.id}><td><strong>{a.name}</strong></td><td>{a.kind === 'alipay' ? '支付宝' : '聚合账户'}{a.suffix && ` · ${a.suffix}`}</td><td>{a.shops.map(id => data.shops?.find(s => s.id === id)?.name || id).join('、')}</td><td className="num">{count(a.rows)}</td><td className="num">{money(a.balance)}</td><td>{a.as_of || '未提供余额'}<small>{a.balance_basis}</small></td><td>{onSelect && <button type="button" className="ef-link" onClick={() => onSelect(a.id)}>查看流水</button>}</td></tr>)}
@@ -79,7 +100,7 @@ export default function EcomFlowLedger({ user, period: parentPeriod = '', initia
     <div className="ef-summary"><span>筛选结果 <strong>{count(data?.total)}</strong> 笔</span><span>收入 <strong>¥{money(data?.income)}</strong></span><span>支出 <strong>¥{money(data?.outgo)}</strong></span><span>异常 / 提醒 <strong>{count(data?.flagged)}</strong> 笔</span></div>
     <p className="ef-muted">{data?.notice || '流水分类不是订单核销分桶；候选与提醒不等于已确认错误。'} 金额不指定方向时按单笔收支净额的绝对值筛选。</p>
     <div className="ef-table-wrap"><table className="ef-table ef-flow-table"><thead><tr><th>入账时间 / 账户</th><th>业务基础订单号</th><th>支付宝流水号 / 交易号</th><th>业务描述 / 账务类型</th><th className="num">收入</th><th className="num">支出</th><th className="num">余额</th><th>流水分桶 / 提醒</th><th /></tr></thead><tbody>
-      {data?.rows?.map(r => <tr key={r.id}><td>{r.ts}<small>{r.account_name}</small></td><td><button className="ef-link ef-id" onClick={() => setSelected(r.id)}>{r.order_no || '未提供订单号'}</button><small>{r.mch_no && `商户单号 ${r.mch_no}`}</small></td><td className="ef-id">{r.serial || '无流水号'}<small>{r.txn || '无交易号'}</small></td><td className="ef-desc">{r.desc || '业务描述为空'}<small>{r.btype} · {r.chan || '未提供渠道'}</small></td><td className="num">{money(r.income)}</td><td className="num">{money(r.outgo)}</td><td className="num">{money(r.balance)}</td><td><span className={r.flags?.length ? 'ef-tag warn' : 'ef-tag'}>{BUCKETS[r.bucket] || r.bucket}</span><small className="ef-warning">{r.flags?.join('；')}</small><small>人工定性：{r.review?.verdict || '待核对'}</small></td><td><button className="ef-link" onClick={() => setSelected(r.id)}>原始字段</button></td></tr>)}
+      {data?.rows?.map(r => <tr key={r.id}><td>{r.ts}<small>{r.account_name}</small></td><td><OrderEvidence row={r} onOpen={() => setSelected(r.id)} /></td><td className="ef-id">{r.serial || '无流水号'}<small>{r.txn || '无交易号'}</small></td><td className="ef-desc"><BusinessEvidence row={r} /></td><td className="num">{money(r.income)}</td><td className="num">{money(r.outgo)}</td><td className="num">{money(r.balance)}</td><td><span className={r.flags?.length ? 'ef-tag warn' : 'ef-tag'}>{BUCKETS[r.bucket] || r.bucket}</span><small className="ef-warning">{r.flags?.join('；')}</small><small>人工定性：{r.review?.verdict || '待核对'}</small></td><td><button className="ef-link" onClick={() => setSelected(r.id)}>原始字段</button></td></tr>)}
       {(result.loading || !data?.rows?.length) && <tr><td colSpan="9" className="ef-empty">{result.loading ? '正在检索流水…' : result.error ? '读取失败，请重试' : '没有符合条件的流水；可调整筛选或先导入文件。'}</td></tr>}
     </tbody></table></div>
     <div className="ef-pagination"><span>每页 50 笔 · 仅加载当前页</span><button disabled={page<=1 || result.loading} onClick={() => setPage(p => p-1)}>上一页</button><span>{page} / {data?.pages || 1}</span><button disabled={page>=(data?.pages || 1) || result.loading} onClick={() => setPage(p => p+1)}>下一页</button></div>
@@ -112,5 +133,5 @@ function FlowDetail({ id, onClose, canEdit, onSaved }) {
 function FlowReview({data,id,canEdit,onSaved}) {
   const [verdict,setVerdict]=useState(data?.review?.verdict||'待核对'),[note,setNote]=useState(data?.review?.note||''),[busy,setBusy]=useState(false),[message,setMessage]=useState('')
   const save=async event=>{event.preventDefault();setBusy(true);try{await requestJson('/api/ec/flows/review',post({ids:[id],verdict,note}));setMessage('已登记在工作台，未写金蝶。');onSaved()}catch(error){setMessage(error.message)}finally{setBusy(false)}}
-  return <section><h3>人工定性与活动依据</h3>{data?.review&&<p>{data.review.verdict} · {data.review.operator} · {data.review.ts}</p>}<form onSubmit={save} className="ef-account-form"><select aria-label="流水人工定性" value={verdict} onChange={e=>setVerdict(e.target.value)} disabled={!canEdit}><option>待核对</option><option>正常</option><option>待追查</option></select><input aria-label="活动或资金去向依据" value={note} onChange={e=>setNote(e.target.value)} maxLength="1000" required placeholder="活动名称、推广依据或资金去向说明" disabled={!canEdit}/><button disabled={!canEdit||busy||!note.trim()}>{busy?'保存中…':'保存定性'}</button></form>{message&&<p role="status">{message}</p>}{data?.historical_reviews?.length>0&&<><p>{data.history_note}</p>{data.historical_reviews.map((r,i)=><p key={i}>历史登记：{r.verdict} · {r.note} · {r.operator} · {r.ts}</p>)}</>}</section>
+  return <section><SupplementalDetail row={data?.row} /><h3>人工定性与活动依据</h3>{data?.review&&<p>{data.review.verdict} · {data.review.operator} · {data.review.ts}</p>}<form onSubmit={save} className="ef-account-form"><select aria-label="流水人工定性" value={verdict} onChange={e=>setVerdict(e.target.value)} disabled={!canEdit}><option>待核对</option><option>正常</option><option>待追查</option></select><input aria-label="活动或资金去向依据" value={note} onChange={e=>setNote(e.target.value)} maxLength="1000" required placeholder="活动名称、推广依据或资金去向说明" disabled={!canEdit}/><button disabled={!canEdit||busy||!note.trim()}>{busy?'保存中…':'保存定性'}</button></form>{message&&<p role="status">{message}</p>}{data?.historical_reviews?.length>0&&<><p>{data.history_note}</p>{data.historical_reviews.map((r,i)=><p key={i}>历史登记：{r.verdict} · {r.note} · {r.operator} · {r.ts}</p>)}</>}</section>
 }
