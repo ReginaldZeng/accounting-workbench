@@ -7,7 +7,7 @@ from pathlib import Path
 from decimal import Decimal
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from sqlalchemy import select, insert, update, delete, func, or_, and_
-from core import db
+from core import db, _require_perm
 from routers.ec_workbench import require, shops, check_shop, check_period, ec
 from kernels import ec_flow_ledger as ledger
 
@@ -16,6 +16,10 @@ _import_lock=threading.Lock()
 _jobs_lock=threading.Lock()
 _jobs={}
 A,F,R,O=db.ec_flow_accounts,db.ec_flow_files,db.ec_flow_rows,db.ec_flow_origins
+
+
+def configured_rules():
+    return ledger.normalize_rules(db.get_setting('ec_flow_class_rules',ledger.DEFAULT_CLASS_RULES) or [])
 
 
 def account(cx, account_id):
@@ -67,12 +71,13 @@ def import_files(account_id, files, operator):
         for r in cx.execute(select(db.ec_fee_map)):
             record=dict(r._mapping);code=record['code']
             seed.setdefault(code,{}).update(record)
-    parsed=[]; total_size=0;total_rows=0
+    rules=configured_rules();parsed=[]; total_size=0;total_rows=0
     for filename,blob in files:
         total_size+=len(blob)
         if total_size>200*1024*1024:raise HTTPException(413,'本次文件合计超过 200 MB')
         digest=hashlib.sha256(blob).hexdigest()
-        rows=(ledger.parse if acc.kind=='alipay' else ledger.parse_fund)(blob,filename,seed);total_rows+=len(rows)
+        rows=(ledger.parse if acc.kind=='alipay' else ledger.parse_fund)(blob,filename,seed)
+        rows=[ledger.apply_configured_rules(row,rules,acc.kind) for row in rows];total_rows+=len(rows)
         if total_rows>500000:raise HTTPException(413,'本次最多合并 500,000 行')
         parsed.append((filename,digest,rows))
     return store_parsed(account_id, parsed, operator)
@@ -257,3 +262,60 @@ async def review_save(request:Request):
         cx.execute(insert(db.ec_flow_reviews),[dict(flow_id=i,verdict=verdict,note=note,operator=user['name'],ts=ec._now()) for i in ids])
     db.audit(user['name'],'ec_flow_review',target=','.join(map(str,ids)),detail=verdict+'；'+note)
     return {'ok':True,'count':len(ids)}
+
+
+def _rule(rule_id):
+    rule=next((r for r in configured_rules() if r['id']==rule_id),None)
+    if not rule:raise HTTPException(404,'流水分类规则不存在，请刷新基础资料')
+    if not rule['enabled']:raise HTTPException(400,'该规则已停用')
+    return rule
+
+
+def _rule_matches(cx,rule):
+    reviewed=select(db.ec_flow_reviews.c.flow_id)
+    candidates=cx.execute(select(R.c.id,R.c.payload,R.c.income,R.c.outgo,A.c.name,A.c.kind)
+        .join(A,A.c.id==R.c.account_id).where(R.c.bucket=='unknown').order_by(R.c.occurred_at.desc(),R.c.id.desc())).fetchall()
+    matched=[];skipped=conflicts=0;rules=configured_rules()
+    review_ids=set(cx.execute(reviewed).scalars())
+    for row in candidates:
+        payload=json.loads(row.payload)
+        if not ledger.rule_matches(payload,rule,row.kind):continue
+        if row.id in review_ids:skipped+=1;continue
+        if len([candidate for candidate in rules if ledger.rule_matches(payload,candidate,row.kind)])>1:
+            conflicts+=1;continue
+        matched.append((row,payload))
+    return matched,skipped,conflicts
+
+
+@router.post('/rules/preview')
+async def rule_preview(request:Request):
+    require(request);body=await request.json();rule=_rule(str(body.get('id') or ''))
+    with db._engine.connect() as cx:matched,skipped,conflicts=_rule_matches(cx,rule)
+    return {'ok':True,'rule':rule,'matched':len(matched),'skipped_reviewed':skipped,'skipped_conflicts':conflicts,
+        'income':float(sum((r.income or 0 for r,_ in matched),Decimal('0'))),
+        'outgo':float(sum((r.outgo or 0 for r,_ in matched),Decimal('0'))),
+        'samples':[{'id':r.id,'account_name':r.name,'ts':p.get('ts'),'serial':p.get('serial'),
+            'order_no':p.get('order_no') or p.get('mch_no'),'text':p.get(rule['field']),'income':float(r.income or 0),'outgo':float(r.outgo or 0)}
+            for r,p in matched[:10]]}
+
+
+@router.post('/rules/apply')
+async def rule_apply(request:Request):
+    user=_require_perm(request,'ec_base_edit')
+    if not user:raise HTTPException(403,'需要「维护基础资料」权限')
+    body=await request.json();rule=_rule(str(body.get('id') or ''))
+    if body.get('confirmed') is not True:raise HTTPException(400,'请先预览并确认命中结果')
+    expected=body.get('expected_count')
+    if not isinstance(expected,int) or expected<0:raise HTTPException(400,'预览笔数无效，请重新预览')
+    with db._engine.begin() as cx:
+        matched,skipped,conflicts=_rule_matches(cx,rule)
+        if len(matched)!=expected:raise HTTPException(409,'待处理流水已变化，请重新预览后确认')
+        for row,payload in matched:
+            updated=ledger.apply_rule(payload,rule)
+            cx.execute(update(R).where(R.c.id==row.id).values(bucket=updated['bucket'],
+                abnormal=int(bool(updated.get('flags'))),payload=json.dumps(updated,ensure_ascii=False)))
+    db.audit(user['name'],'ec_flow_rule_apply',target=rule['id'],
+        detail='批量归类 %d 笔；跳过人工定性 %d 笔；规则冲突 %d 笔；未写金蝶' % (len(matched),skipped,conflicts))
+    from routers import ec_workbench
+    with ec_workbench._lock:ec_workbench._cache.clear()
+    return {'ok':True,'applied':len(matched),'skipped_reviewed':skipped,'skipped_conflicts':conflicts,'bucket':rule['bucket'],'label':rule['label']}

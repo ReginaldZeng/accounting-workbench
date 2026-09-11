@@ -29,6 +29,14 @@ ALIASES = {
 BUCKETS = {'receipt':'交易收款', 'refund':'交易退款', 'fee':'平台费用', 'adjustment':'补贴 / 调整',
     'ufirst_fee':'U先专属费用', 'qr':'收钱码收款', 'transfer':'内部划转候选',
     'recharge':'充值 / 划转候选', 'other':'其他已知费目', 'unknown':'待识别流水'}
+RULE_FIELDS = {'remark':'备注 / 摘要', 'desc':'业务描述', 'btype':'账务类型', 'goods':'商品名称'}
+RULE_DIRECTIONS = {'outgo':'支出', 'income':'收入', '':'不限'}
+DEFAULT_CLASS_RULES = [{
+    'id':'cat_coin_fee', 'name':'猫猫币平台垫付扣款', 'enabled':True,
+    'account_kind':'alipay', 'field':'remark',
+    'keywords':['猫猫币抵扣项目平台垫付资金', '扣款'],
+    'direction':'outgo', 'bucket':'fee', 'label':'猫猫币抵扣费用',
+}]
 
 
 def string(value):
@@ -55,6 +63,57 @@ def merchant_id(filename):
     # Export prefix is the 16-digit Alipay PID; '#账号' may be a different statement account identifier.
     match=re.match(r'^(2088\d{12})-', str(filename).replace('\\','/').rsplit('/',1)[-1])
     return match.group(1) if match else ''
+
+
+def normalize_rules(rows):
+    if not isinstance(rows, list) or len(rows)>50: raise ValueError('流水分类规则最多 50 条')
+    result=[];seen=set()
+    for source in rows:
+        if not isinstance(source, dict): raise ValueError('流水分类规则格式错误')
+        rid=string(source.get('id'))[:40]
+        name=string(source.get('name'))[:80]
+        field=string(source.get('field'))
+        direction=string(source.get('direction'))
+        account_kind=string(source.get('account_kind'))
+        bucket=string(source.get('bucket'))
+        keywords=source.get('keywords', [])
+        if isinstance(keywords, str): keywords=[v.strip() for v in keywords.split('|')]
+        keywords=[string(v)[:120] for v in keywords if string(v)] if isinstance(keywords,list) else []
+        if not rid or rid in seen or not re.fullmatch(r'[A-Za-z0-9_-]+',rid): raise ValueError('流水分类规则编号须唯一且仅含字母、数字、横线或下划线')
+        if not name or field not in RULE_FIELDS or direction not in RULE_DIRECTIONS or account_kind not in ('','alipay','fund'):
+            raise ValueError('流水分类规则名称、账户、字段或方向不完整')
+        if bucket not in BUCKETS or bucket=='unknown' or not keywords or len(keywords)>6:
+            raise ValueError('流水分类规则须填写 1–6 个关键词并选择明确分桶')
+        seen.add(rid);result.append({'id':rid,'name':name,'enabled':bool(source.get('enabled',True)),
+            'account_kind':account_kind,'field':field,'keywords':keywords,'direction':direction,
+            'bucket':bucket,'label':string(source.get('label'))[:80] or BUCKETS[bucket]})
+    return result
+
+
+def rule_matches(row, rule, account_kind=''):
+    if not rule.get('enabled') or row.get('bucket')!='unknown': return False
+    if rule.get('account_kind') and rule['account_kind']!=account_kind: return False
+    if rule.get('direction')=='outgo' and not decimal(row.get('outgo')): return False
+    if rule.get('direction')=='income' and not decimal(row.get('income')): return False
+    text=string(row.get(rule['field'])).casefold()
+    return all(word.casefold() in text for word in rule['keywords'])
+
+
+def apply_rule(row, rule):
+    result=dict(row);result['bucket']=rule['bucket'];result['reason']='流水分类规则：'+rule['name']
+    result['rule_id']=rule['id'];result['rule_label']=rule['label']
+    result['flags']=[f for f in result.get('flags',[]) if f!='流水待识别']
+    return result
+
+
+def apply_configured_rules(row, rules, account_kind=''):
+    matches=[rule for rule in rules if rule_matches(row,rule,account_kind)]
+    if len(matches)==1:return apply_rule(row,matches[0])
+    if len(matches)>1:
+        result=dict(row);result['flags']=list(result.get('flags',[]))
+        if '分类规则冲突' not in result['flags']:result['flags'].append('分类规则冲突')
+        return result
+    return row
 
 
 def supplement(row):

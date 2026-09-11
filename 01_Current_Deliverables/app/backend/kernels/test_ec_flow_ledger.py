@@ -89,5 +89,19 @@ class FlowLedgerTests(unittest.TestCase):
         self.assertEqual(row['raw']['附加字段'],'保留')
         self.assertIsNone(row['balance'])
 
+    def test_classification_rule_matches_unknown_without_touching_raw(self):
+        source={'bucket':'unknown','remark':'猫猫币抵扣项目平台垫付资金(331639328010038983)扣款',
+                'income':Decimal('0'),'outgo':Decimal('3.95'),'flags':['流水待识别'],'raw':{'业务描述':''}}
+        rule=ledger.normalize_rules(ledger.DEFAULT_CLASS_RULES)[0]
+        result=ledger.apply_configured_rules(source,[rule],'alipay')
+        self.assertEqual(result['bucket'],'fee');self.assertEqual(result['rule_label'],'猫猫币抵扣费用')
+        self.assertNotIn('流水待识别',result['flags']);self.assertEqual(result['raw'],source['raw'])
+
+    def test_classification_rule_does_not_override_known_or_conflicting_rows(self):
+        rules=ledger.normalize_rules(ledger.DEFAULT_CLASS_RULES+[dict(ledger.DEFAULT_CLASS_RULES[0],id='second')])
+        source={'bucket':'unknown','remark':'猫猫币抵扣项目平台垫付资金(1)扣款','income':0,'outgo':1,'flags':['流水待识别']}
+        self.assertIn('分类规则冲突',ledger.apply_configured_rules(source,rules,'alipay')['flags'])
+        self.assertEqual(ledger.apply_configured_rules(dict(source,bucket='refund'),rules[:1],'alipay')['bucket'],'refund')
+
 
 if __name__=='__main__':unittest.main()

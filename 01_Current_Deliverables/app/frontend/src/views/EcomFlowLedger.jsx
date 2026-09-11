@@ -13,7 +13,7 @@ function OrderEvidence({ row, onOpen }) {
 }
 
 function BusinessEvidence({ row }) {
-  return <><span>{row.desc || row.supplement?.business_label || '—'}</span>{!row.desc && row.supplement?.business_label && <span className="ef-inferred" title="备注补充识别；原始业务描述为空，费用性质待确认">补充</span>}<small>{row.btype || '—'}</small></>
+  return <><span>{row.desc || row.rule_label || row.supplement?.business_label || '—'}</span>{!row.desc && row.rule_label && <span className="ef-inferred" title="按基础资料中的流水分类规则识别">规则</span>}{!row.desc && !row.rule_label && row.supplement?.business_label && <span className="ef-inferred" title="备注补充识别；原始业务描述为空，费用性质待确认">补充</span>}<small>{row.btype || '—'}</small></>
 }
 
 function SupplementalDetail({ row }) {

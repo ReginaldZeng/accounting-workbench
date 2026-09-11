@@ -25,10 +25,13 @@ names={'ec_flow_accounts','ec_flow_files','ec_flow_rows','ec_flow_origins','ec_f
 for node in tree.body:
     if isinstance(node,ast.Assign) and isinstance(node.targets[0],ast.Name) and node.targets[0].id in names:
         exec(compile(ast.Module(body=[node],type_ignores=[]),'actual-schema','exec'),namespace)
-fake=types.SimpleNamespace(**{name:namespace[name] for name in names},audit=lambda *a,**k:None)
+settings={}
+fake=types.SimpleNamespace(**{name:namespace[name] for name in names},audit=lambda *a,**k:None,
+    get_setting=lambda key,default=None:settings.get(key,default),
+    set_setting=lambda key,value,operator='':settings.__setitem__(key,value))
 fake._engine=sa.create_engine('sqlite://')
 namespace['_md'].create_all(fake._engine)
-sys.modules['core']=types.SimpleNamespace(db=fake)
+sys.modules['core']=types.SimpleNamespace(db=fake,_require_perm=lambda *a,**k:{'name':'test'})
 sys.modules['routers.ec_workbench']=types.SimpleNamespace(_lock=threading.RLock(),_cache={},require=lambda *a,**k:{'name':'test'},shops=lambda:[],check_shop=lambda x:{},check_period=lambda x:None,ec=types.SimpleNamespace(es=es,_now=lambda:'2026-09-11 00:00:00'))
 from routers import ec_flow_ledger as module
 
@@ -43,7 +46,7 @@ def file(serial='s1',amount=1.81,extra='first'):
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
-        module._jobs.clear()
+        module._jobs.clear();settings.clear()
         with fake._engine.begin() as cx:
             for name in ('ec_flow_reviews','ec_flow_origins','ec_flow_rows','ec_flow_files','ec_flow_accounts'):cx.execute(sa.delete(namespace[name]))
             for aid in ('a1','a2'):cx.execute(sa.insert(module.A).values(id=aid,kind='alipay',name=aid,shops='["test"]'))
@@ -172,6 +175,25 @@ class StoreTests(unittest.TestCase):
             job=module.start_import_job('a1',[('one.xlsx',file()),('bad.xlsx',b'bad')],'test')
         self.assertEqual(module.import_status(None,job['job_id'])['status'],'failed')
         self.assertEqual(module.search(None)['total'],0)
+
+    def test_preview_and_apply_rule_skip_manual_review(self):
+        module.import_files('a1',[('one.xlsx',file(serial='cat')),('two.xlsx',file(serial='reviewed',extra='second'))],'test')
+        with fake._engine.begin() as cx:
+            records=list(cx.execute(sa.select(module.R)))
+            for record in records:
+                payload=json.loads(record.payload);payload.update(bucket='unknown',remark='猫猫币抵扣项目平台垫付资金(331639328010038983)扣款',flags=['流水待识别'])
+                cx.execute(sa.update(module.R).where(module.R.c.id==record.id).values(bucket='unknown',abnormal=1,payload=json.dumps(payload,ensure_ascii=False)))
+            cx.execute(sa.insert(namespace['ec_flow_reviews']).values(flow_id=records[1].id,verdict='正常',note='已核对',operator='test',ts='2026-09-11'))
+        class PreviewRequest:
+            async def json(self):return {'id':'cat_coin_fee'}
+        preview=asyncio.run(module.rule_preview(PreviewRequest()))
+        self.assertEqual(preview['matched'],1);self.assertEqual(preview['skipped_reviewed'],1)
+        class ApplyRequest:
+            async def json(self):return {'id':'cat_coin_fee','expected_count':1,'confirmed':True}
+        result=asyncio.run(module.rule_apply(ApplyRequest()))
+        self.assertEqual(result['applied'],1)
+        self.assertEqual(module.search(None,bucket='fee')['rows'][0]['rule_label'],'猫猫币抵扣费用')
+        self.assertEqual(module.search(None,bucket='unknown')['total'],1)
 
 
 if __name__=='__main__':unittest.main()

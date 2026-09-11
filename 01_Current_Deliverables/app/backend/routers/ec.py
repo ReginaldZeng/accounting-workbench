@@ -865,8 +865,10 @@ def ec_basicdata(request: Request):
     if not _require_perm(request, "enter:ecombase") and not _require_perm(request, "enter:ecomsettle"):
         return JSONResponse({"error": "无权限"}, status_code=403)
     seeded = _seed_if_empty()
+    from kernels import ec_flow_ledger as flow_ledger
     return {"shop_map": _rows(db.ec_shop_map), "fee_map": _rows(db.ec_fee_map),
             "rules": db.get_setting("ec_settle_rules", es.DEFAULT_RULES),
+            "flow_rules": db.get_setting("ec_flow_class_rules", flow_ledger.DEFAULT_CLASS_RULES),
             "voucher_cfg": db.get_setting("ec_voucher_cfg", {}) or {}, "seeded": seeded}
 
 
@@ -893,6 +895,11 @@ async def ec_basicdata_save(request: Request):
     if not u:
         return JSONResponse({"error": "需要「维护基础资料」权限"}, status_code=403)
     body = await request.json()
+    fr = None
+    if body.get("flow_rules") is not None:
+        from kernels import ec_flow_ledger as flow_ledger
+        try: fr=flow_ledger.normalize_rules(body["flow_rules"])
+        except ValueError as error:return JSONResponse({"detail":str(error)},status_code=400)
     with db._engine.begin() as cx:
         for name, table, cols in (("shop_map", db.ec_shop_map, ("kd_name", "wdt_name", "mgmt_name", "platform", "alipay_acct")),
                                   ("fee_map", db.ec_fee_map, ("code", "label", "account", "kd_code"))):
@@ -918,6 +925,8 @@ async def ec_basicdata_save(request: Request):
         vc = {k: str(v or "").strip()[:40] for k, v in dict(body["voucher_cfg"]).items()
               if k in ("book_code", "voucher_group", "currency", "rate_type", "cash_acct", "ar_acct")}
         db.set_setting("ec_voucher_cfg", vc, operator=u["name"])
+    if fr is not None:
+        db.set_setting("ec_flow_class_rules", fr, operator=u["name"])
     db.audit(u["name"], "ec_basicdata_save", detail="电商对账基础资料整表保存")
     return {"ok": True}
 
