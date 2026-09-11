@@ -1,5 +1,5 @@
 ﻿# [Change Log]
-# Date: 2026-08-07 | Author: Claude / c | Version: V2.241
+# Date: 2026-09-11 | Author: Codex | Version: V2.561
 # ⚠ 本文件必须存为 **UTF-8 with BOM**：Windows PowerShell 5.1 没有 BOM 就按 ANSI(GBK) 读，
 #   中文注释和字符串会整片乱码，引号配对随之崩掉，报出一堆莫名其妙的语法错（实际踩过）。
 #   编辑后另存时务必确认编码，别存成"UTF-8 无 BOM"。
@@ -287,5 +287,10 @@ try {
         newest = $newest; newest_at = $newestAt; total = $total; months = $months; bomCopied = $bomCopied } | Out-Null
 } catch {
     Write-Log ('[!] 回执没发出去（不影响文件已落盘）：' + $_.Exception.Message)
+}
+# 可选扩展：沿用本任务和同一取件码扫描旺店通共享盘。未配置两个 ecommerce_* 目录时静默跳过。
+$EcommercePickup = Join-Path $HERE 'pickup_ecommerce.ps1'
+if (Test-Path -LiteralPath $EcommercePickup) {
+    try { & $EcommercePickup } catch { Write-Log ('[!] 旺店通取件扩展异常（不影响财务报表取件）：' + $_.Exception.Message) }
 }
 if ($errors.Count) { exit 1 } else { exit 0 }
