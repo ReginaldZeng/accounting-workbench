@@ -3,9 +3,20 @@ import { ecKdRefresh } from '../api.js'
 import EcomFlowLedger, { AccountTable } from './EcomFlowLedger.jsx'
 import { requestJson, wb, query, post, money, count, percent, useResource } from './ecomWorkbenchApi.js'
 import './ecomWorkbench.css'
+import overviewIcon from '../assets/ecom-nav/chart-bar.svg'
+import prepareIcon from '../assets/ecom-nav/notes.svg'
+import incomeIcon from '../assets/ecom-nav/clipboard-check.svg'
+import cashIcon from '../assets/ecom-nav/coin-yuan.svg'
+import flowsIcon from '../assets/ecom-nav/receipt.svg'
 
 // Shops are resolved from source-backed base data, never a hardcoded display name.
-const NAV=[['overview','总览'],['prepare','数据准备'],['income','收入确认'],['cash','收款核销'],['flows','账户流水']]
+const NAV=[
+  ['overview','总览','经营与账户概览',overviewIcon],
+  ['prepare','数据准备','按店铺准备资料',prepareIcon],
+  ['income','收入确认','发货与应收核对',incomeIcon],
+  ['cash','收款核销','支付宝与聚合账户',cashIcon],
+  ['flows','账户流水','全字段合并查找',flowsIcon],
+]
 const BUSINESS={ '':'全部订单',normal:'正常销售',ufirst:'U先试用装',mixed:'混合订单',review:'待确认分类',unknown:'待分类' }
 export const Notice=({children}) => children ? <div className="ew-notice" role="status">{children}</div> : null
 const Panel=({title,children,extra}) => <section className="ew-panel"><header><h2>{title}</h2>{extra}</header>{children}</section>
@@ -22,8 +33,8 @@ export default function EcomWorkbench({user,onNav,initialScreen='overview'}) {
   const drill=(id,filter='',next='income')=>{setShop(id);setFlag(filter);setScreen(next)}
   const openLedger=(filter={})=>{setFlowFilter(filter);setDrawer(null);setScreen('flows')}
   return <div className="ew-workbench">
-    <header className="ew-header"><div><div className="ew-breadcrumb">应收模块 / 电商对账</div><h1>电商对账工作台</h1><p>平台事实 → 发货确认 → 应收核对 → 账户收款</p></div><div className="ew-header-tools"><span className="ew-readonly">金蝶只读</span>{screen!=='flows' && <label>结算期间<input aria-label="结算期间" type="month" value={period} onChange={changePeriod}/></label>}<button onClick={()=>setRevision(v=>v+1)}>刷新数据</button></div></header>
-    <nav className="ew-nav" aria-label="电商工作流">{NAV.map(([key,label])=><button key={key} className={screen===key?'active':''} onClick={()=>{setScreen(key);setFlag('')}}>{label}</button>)}<button className="ew-basic" onClick={()=>onNav?.('ecombase')}>基础资料</button></nav>
+    <header className="ew-header"><div><h1>电商对账工作台</h1><p>平台事实 → 发货确认 → 应收核对 → 账户收款</p></div><div className="ew-header-tools"><span className="ew-readonly">金蝶只读</span>{screen!=='flows' && <label>结算期间<input aria-label="结算期间" type="month" value={period} onChange={changePeriod}/></label>}<button onClick={()=>setRevision(v=>v+1)}>刷新数据</button><button className="ew-link ew-basic" onClick={()=>onNav?.('ecombase')}>基础资料</button></div></header>
+    <nav className="ew-nav ew-stage-nav" aria-label="电商工作流">{NAV.map(([key,label,description,icon])=><button key={key} aria-label={label} aria-current={screen===key?'page':undefined} className={screen===key?'active':''} onClick={()=>{setScreen(key);setFlag('')}}><span className="ew-stage-symbol" aria-hidden="true"><span className="ew-stage-icon" style={{maskImage:`url(${JSON.stringify(icon)})`,WebkitMaskImage:`url(${JSON.stringify(icon)})`}}/></span><span className="ew-stage-copy"><strong>{label}</strong><small>{description}</small></span></button>)}</nav>
     {screen!=='flows' && <div className="ew-filter"><span>业务范围</span>{Object.entries(BUSINESS).slice(0,4).map(([key,label])=><button key={key} className={business===key?'active':''} onClick={()=>setBusiness(key)}>{label}</button>)}<span className="ew-muted">覆盖 {overview?.coverage?.available ?? '—'} / {overview?.coverage?.total ?? '—'} 家店铺 · 缺数据不计作零</span></div>}
     <Notice>{message||result.error}</Notice>
     {screen==='flows' ? <EcomFlowLedger refreshToken={revision} onChanged={()=>setRevision(v=>v+1)} user={user} period={flowFilter.q?'':period} initialQuery={flowFilter.q||''} initialAccountId={flowFilter.account_id||''}/> : screen==='overview' ? <Overview data={overview} loading={result.loading} revision={revision} drill={drill} openCash={id=>openLedger({account_id:typeof id==='string'?id:''})}/> : <div className="ew-layout"><aside className="ew-shops"><h2>店铺数据准备</h2>{overview?.shops?.map(s=><button key={s.id} className={shop===s.id?'active':''} onClick={()=>{setShop(s.id);setFlag('');setDrawer(null)}}><span><i className={s.readiness}/>{s.name}</span><small>齐套 {s.ready}/{s.required} · 文件 {s.files}</small></button>)}</aside><main className="ew-main">
