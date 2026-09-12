@@ -869,6 +869,7 @@ def ec_basicdata(request: Request):
     return {"shop_map": _rows(db.ec_shop_map), "fee_map": _rows(db.ec_fee_map),
             "rules": db.get_setting("ec_settle_rules", es.DEFAULT_RULES),
             "recognition_rules": db.get_setting("ec_income_recognition_rules", {}) or {},
+            "preparation_rules": db.get_setting("ec_preparation_rules", {}) or {},
             "flow_rules": db.get_setting("ec_flow_class_rules", flow_ledger.DEFAULT_CLASS_RULES),
             "voucher_cfg": db.get_setting("ec_voucher_cfg", {}) or {}, "seeded": seeded}
 
@@ -897,6 +898,10 @@ async def ec_basicdata_save(request: Request):
         return JSONResponse({"error": "需要「维护基础资料」权限"}, status_code=403)
     body = await request.json()
     fr = None
+    if body.get('preparation_rules') is not None:
+        from kernels.ec_preparation import validate
+        try: validate(body['preparation_rules'])
+        except ValueError as error:return JSONResponse({'detail':str(error)},status_code=400)
     if body.get("flow_rules") is not None:
         from kernels import ec_flow_ledger as flow_ledger
         try: fr=flow_ledger.normalize_rules(body["flow_rules"])
@@ -933,6 +938,8 @@ async def ec_basicdata_save(request: Request):
         db.set_setting("ec_voucher_cfg", vc, operator=u["name"])
     if fr is not None:
         db.set_setting("ec_flow_class_rules", fr, operator=u["name"])
+    if body.get('preparation_rules') is not None:
+        db.set_setting('ec_preparation_rules',body['preparation_rules'],operator=u['name'])
     db.audit(u["name"], "ec_basicdata_save", detail="电商对账基础资料整表保存")
     return {"ok": True}
 

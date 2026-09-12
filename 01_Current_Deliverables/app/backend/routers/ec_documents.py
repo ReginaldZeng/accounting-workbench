@@ -4,6 +4,7 @@ import threading
 import uuid
 import logging
 import hashlib
+import gzip
 from pathlib import Path
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from sqlalchemy import select,func
@@ -16,6 +17,46 @@ _jobs={};_lock=threading.Lock()
 
 def reconcile(affected=None):
     return docs.reconcile(db._engine,db.ec_flow_rows,db.ec_flow_accounts,affected)
+
+
+def backfill_snapshots():
+    """Idempotent bridge, retaining the existing imports and all original ledger rows."""
+    table=db.ec_workbench_imports
+    affected=set();added=0
+    with db._engine.connect() as cx:
+        latest=select(func.max(table.c.id)).group_by(table.c.shop,table.c.period,table.c.kind)
+        records=list(cx.execute(select(table).where(table.c.id.in_(latest),table.c.kind.in_(['order','item','refund','wdt']))))
+        known=set(cx.execute(select(docs.ec_document_files.c.digest)).scalars())
+    for r in records:
+        source_id=f'ec_workbench_imports:{r.id}'
+        if docs.digest(['snapshot-v1',r.shop,source_id]) in known:continue
+        payload=json.loads(gzip.decompress(r.payload))
+        batch=docs.snapshot_batch(r.shop,r.period,r.kind,payload.get('rows',[]),source_id,json.loads(r.filenames or '[]'))
+        if batch:
+            result=docs.store_documents(db._engine,r.shop,[batch],'历史资料自动承接')
+            affected.update(result['affected']);added+=result['added']
+    # The earliest platform importer saved original order IDs in a separate table.
+    from kernels.ec_preparation import TARGET
+    migrated_periods={r.period for r in records if r.shop==TARGET and r.kind=='order'}
+    legacy=db.ec_tmall_import_runs
+    with db._engine.connect() as cx:
+        latest=select(func.max(legacy.c.id)).where(legacy.c.kind=='order').group_by(legacy.c.period)
+        old_runs=list(cx.execute(select(legacy).where(legacy.c.id.in_(latest))))
+    for r in old_runs:
+        source_id=f'ec_tmall_import_runs:{r.id}'
+        if r.period in migrated_periods or docs.digest(['snapshot-v1',TARGET,source_id]) in known:continue
+        with db._engine.connect() as cx:
+            rows=[dict(v._mapping) for v in cx.execute(select(db.ec_tmall_order_details).where(db.ec_tmall_order_details.c.run_id==r.id))]
+        batch=docs.snapshot_batch(TARGET,r.period,'order',rows,source_id,[])
+        if batch:
+            result=docs.store_documents(db._engine,TARGET,[batch],'历史资料自动承接')
+            affected.update(result['affected']);added+=result['added']
+    return {'added':added,'reconcile':reconcile(affected) if affected else {'updated':0}}
+
+
+@router.on_event('startup')
+def bridge_saved_evidence():
+    start_job(backfill_snapshots,'历史资料自动承接')
 
 def import_blobs(shop,blobs,operator):
     aliases=db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}
@@ -73,7 +114,10 @@ async def upload(request:Request,shop:str=Form(...),files:list[UploadFile]=File(
 @router.post('/reconcile')
 def rebuild(request:Request):
     user=require(request,True)
-    return start_job(lambda:reconcile(),user['name'])
+    def run():
+        backfill_snapshots()
+        return reconcile()
+    return start_job(run,user['name'])
 
 @router.get('')
 def status(request:Request,shop:str=''):

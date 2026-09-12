@@ -55,6 +55,18 @@ class DocumentsTests(unittest.TestCase):
             head=cx.execute(select(d.ec_document_heads)).one()
             self.assertEqual(json.loads(head.payload)['确认收货打款金额'],'10')
             self.assertEqual(cx.execute(select(func.count()).select_from(d.ec_document_versions)).scalar(),2)
+
+    def test_snapshot_backfill_is_idempotent_and_original_document_wins(self):
+        self.addflow();before=self.originals()
+        b=d.snapshot_batch('shop','2026-07','order',[{'order_no':'1234567890123456789','confirmed_payout':'9'}],'snapshot:1',['old.xlsx'])
+        self.assertEqual(d.store_documents(self.engine,'shop',[b],'test')['added'],1)
+        self.assertEqual(d.store_documents(self.engine,'shop',[b],'test')['added'],0)
+        d.reconcile(self.engine,self.flows,self.accounts)
+        self.assertEqual(self.results()[0].status,'amount_pending')
+        d.store_documents(self.engine,'shop',[self.order()],'test')
+        d.reconcile(self.engine,self.flows,self.accounts)
+        self.assertEqual(self.results()[0].status,'amount_equal')
+        self.assertEqual(self.originals(),before)
     def test_child_order_and_shop_isolation(self):
         no='1234567890123456789';child='2234567890123456789'
         p=d.parse_documents(self.book(['主订单编号','子订单编号','订单创建时间'],[[no,child,'2026-07-31']]),'nonsense.xlsx','shop')

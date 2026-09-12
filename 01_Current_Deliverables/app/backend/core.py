@@ -404,6 +404,14 @@ def _compute_version_info():
             info.update({k: d.get(k, info[k]) for k in ("ver", "branch", "commit")})
         except Exception:
             pass
+    # The shipped release is authoritative when an older deploy script leaves a stale label.
+    # Keep the deployed commit/branch from the stamp; never invent a commit identifier.
+    try:
+        with open(os.path.join(BASE,'release.json'),encoding='utf-8') as stream:
+            release=json.load(stream).get('ver','')
+        if _ver_key(release)>_ver_key(info['ver']):info['ver']=release
+    except (OSError,ValueError,AttributeError):
+        pass
     return info
 
 

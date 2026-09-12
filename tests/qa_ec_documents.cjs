@@ -28,12 +28,15 @@ const flow={id:1,account_id:account.id,account_name:account.name,ts:'2026-08-02 
  await page.goto('http://127.0.0.1:8783/#/ecommonth');
  await page.getByRole('heading',{name:'电商对账工作台',exact:true}).waitFor();
  await page.getByRole('button',{name:'数据准备',exact:true}).click();
+ await page.getByRole('button',{name:'0 个 · 查看',exact:true}).click();
+ await page.getByText('补充跨期资料与查看历史来源',{exact:true}).click();
  await page.getByRole('heading',{name:'跨期单据资料库',exact:true}).waitFor();
  await page.getByText('已保存 1 个来源文件',{exact:false}).click();
  await page.getByRole('button',{name:'重新核对流水',exact:true}).click();
  await page.getByText('更新 536 笔流水核对结果',{exact:false}).waitFor();
  await page.getByRole('heading',{name:'跨期单据资料库',exact:true}).scrollIntoViewIfNeeded();
  await page.screenshot({path:OUT+'/documents-registry-desktop.png'});
+ await page.keyboard.press('Escape');
  await page.getByRole('button',{name:'账户流水',exact:true}).click();
  await page.getByLabel('核对结果',{exact:true}).selectOption('missing_document');
  await page.waitForResponse(r=>r.url().includes('match_status=missing_document'));

@@ -54,6 +54,27 @@ def digest(v):return hashlib.sha256(pack(v).encode()).hexdigest()
 def chunks(rows,size=400):
     for i in range(0,len(rows),size):yield rows[i:i+size]
 
+
+def snapshot_batch(shop, period, kind, rows, source_id, filenames):
+    """Index saved, normalized evidence without inventing Excel headers or row numbers."""
+    if kind not in ('order','item','refund','wdt'):return None
+    result=[]
+    for i,r in enumerate(rows,1):
+        order=text(r.get('order_no'))
+        no=text(r.get('suborder_no') if kind=='item' else r.get('refund_no') if kind=='refund' else r.get('shipment_no') if kind=='wdt' else order)
+        if not order or not no:continue  # A hashed legacy key cannot be reconstructed safely.
+        raw={'快照来源':source_id,'订单编号':order}
+        if kind=='order' and r.get('confirmed_payout') not in (None,''):
+            raw['确认收货打款金额']=str(r['confirmed_payout'])
+        if kind=='wdt':no+=':'+digest([order,r.get('sku'),r.get('spec')])[:20]
+        snapshot_kind=kind+'_snapshot'
+        result.append(dict(document_key=digest([shop,snapshot_kind,no]),shop=shop,kind=snapshot_kind,
+            document_no=no,order_no=order,period=period,fingerprint=digest({k:v for k,v in raw.items() if k!='快照来源'}),
+            payload=pack(raw),sheet='已保存核算快照（非原文件行号）',row_number=i,conflict=0))
+    if not result:return None
+    return {'filename':('核算快照 · '+('、'.join(filenames) or source_id))[:180],
+            'digest':digest(['snapshot-v1',shop,source_id]),'docs':result,'skipped':len(rows)-len(result)}
+
 def parse_documents(blob,filename,shop,shop_aliases=()):
     tm._preflight_xlsx(blob)
     wb=openpyxl.load_workbook(io.BytesIO(blob),read_only=True,data_only=True)
@@ -142,7 +163,7 @@ def reconcile(engine,flow_table,account_table,affected=None):
         by_order=defaultdict(list);by_child=defaultdict(set)
         for r in heads:
             by_order[r.order_no].append(r)
-            if r.kind=='item':by_child[r.document_no].add((r.shop,r.order_no))
+            if r.kind in ('item','item_snapshot'):by_child[r.document_no].add((r.shop,r.order_no))
         known=set(by_order)|set(by_child)
         previous={r.flow_id:(r.raw_order_no,r.order_no) for r in cx.execute(select(ec_flow_matches.c.flow_id,ec_flow_matches.c.raw_order_no,ec_flow_matches.c.order_no))}
         # All imported cash dates contribute to an order's lifetime receipts, while UI period totals stay on the original flow table.
@@ -154,6 +175,9 @@ def reconcile(engine,flow_table,account_table,affected=None):
             aliases={p for sh,p in by_child.get(no,set()) if sh in acc['shops']}
             candidate_orders={no}|aliases if no else set()
             docs=[d for o in candidate_orders for d in by_order.get(o,[]) if d.shop in acc['shops']]
+            # Original documents supersede their abbreviated legacy snapshot, never vice versa.
+            originals={(d.shop,d.kind,d.document_no) for d in docs if not d.kind.endswith('_snapshot')}
+            docs=[d for d in docs if not d.kind.endswith('_snapshot') or (d.shop,d.kind.removesuffix('_snapshot'),d.document_no) not in originals]
             shops={d.shop for d in docs}
             parent=next(iter(aliases)) if len(aliases)==1 else no
             status='conflict' if link['status']=='conflict' or len(shops)>1 or len(aliases)>1 or any(d.conflict for d in docs) or any('同一流水号内容冲突' in flag for flag in v.get('flags',[])) else 'linked' if docs else 'missing_document' if no else 'unresolved'
@@ -173,7 +197,7 @@ def reconcile(engine,flow_table,account_table,affected=None):
         for rid,aid,link,raw_no,no,shop,status,docs,is_receipt,copy in linked:
             if affected is not None and rid in previous and not ({raw_no,no,*previous[rid]}&affected):continue
             message=STATUSES[status];extra={}
-            main=[d for d in docs if d.kind=='order']
+            main=sorted((d for d in docs if d.kind in ('order','order_snapshot')),key=lambda d:d.kind!='order')
             if status=='linked' and is_receipt and main and not copy:
                 raw=json.loads(main[0].payload);expected=raw.get('确认收货打款金额')
                 if expected not in ('',None):

@@ -47,6 +47,27 @@ class ApiTests(unittest.TestCase):
         if cls.previous_env is None:os.environ.pop('DB_URL',None)
         else:os.environ['DB_URL']=cls.previous_env
         cls.tmp.cleanup()
+    def test_preparation_uses_saved_sources_not_order_rebuild(self):
+        import importlib.util,routers
+        from kernels import ec_preparation
+        fake=types.SimpleNamespace(fulfillment=types.SimpleNamespace(TARGET_SHOP=ec_preparation.TARGET),
+            es=ec_settle,_now=lambda:'2026-09-12 12:00:00',_KD_REFRESH={},_kd_cache_meta=lambda p:None)
+        spec=importlib.util.spec_from_file_location('preparation_router_test',ROOT/'01_Current_Deliverables/app/backend/routers/ec_workbench.py')
+        module=importlib.util.module_from_spec(spec)
+        with patch.object(routers,'ec',fake,create=True):spec.loader.exec_module(module)
+        self.db.set_setting('ec_preparation_rules',{'shop':['order','alipay']})
+        module.save_source('2026-08','shop','order','test-prep',['test.xlsx'],{'rows':[{'order_no':'123'}],'status':'ready'},'test')
+        with patch.object(module,'get_data',side_effect=AssertionError('must not rebuild orders')):
+            cards=module.preparation_cards('2026-08','shop')
+        self.assertEqual(ec_preparation.progress(cards)['ready'],2)
+        with self.db._engine.begin() as cx:
+            cx.execute(insert(self.db.ec_flow_accounts).values(id='missing-account',kind='alipay',name='second',shops='["shop"]'))
+        cards=module.preparation_cards('2026-08','shop')
+        self.assertEqual(ec_preparation.progress(cards)['ready'],1)
+        self.assertEqual(cards[1]['rows'],1)
+        self.assertIn('1 个关联账户',cards[1]['warnings'][0])
+        self.assertEqual(module.preparation_cards('2026-08','unconfigured'),[])
+
     def test_router_import_filter_detail_and_permissions(self):
         from kernels.test_ec_documents import DocumentsTests
         headers={'x-test-role':'admin'}

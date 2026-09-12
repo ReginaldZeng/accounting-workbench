@@ -169,14 +169,14 @@ def parse_source(kind, payloads, period, shop):
             seen.add(rid)
             state = text(choose(r, '退款状态', '售后状态'))
             typ = text(choose(r, '售后类型', '退款类型', '服务类型'))
-            refund_amount = choose(r, '退款成功金额', '退款金额', '退款金额（元）')
+            refund_amount = choose(r, '退款成功金额', '退款总额', '退款金额', '退款金额（元）')
             if state in ('退款成功', '退款完成', '已退款') and refund_amount is None:
                 raise ValueError('退款成功记录缺少金额，不能按零处理')
             out['rows'].append({'order_no': no, 'refund_no': rid,
                 'type': 'return_refund' if typ in ('退货退款', '退款退货') else 'refund_only' if typ in ('仅退款', '退款不退货') else 'unknown',
                 'status': state, 'success': state in ('退款成功', '退款完成', '已退款'),
                 'amount': amount(refund_amount),
-                'date': tm._date_text(choose(r, '退款成功时间', '退款完成时间', '完成时间'))})
+                'date': tm._date_text(choose(r, '退款成功时间', '退款完结时间', '退款完成时间', '完成时间'))})
         if not out['rows']:
             raise ValueError('没有可识别售后明细，需订单号、退款编号、类型、状态及金额')
     elif kind == 'alipay':

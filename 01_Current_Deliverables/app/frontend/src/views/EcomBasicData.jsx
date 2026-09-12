@@ -5,6 +5,9 @@
 import React, { useEffect, useState } from 'react'
 import { getEcBasicdata, saveEcBasicdata } from '../api.js'
 import { requestJson, post, money, count } from './ecomWorkbenchApi.js'
+import EcomFlowLedger from './EcomFlowLedger.jsx'
+
+const MATERIALS={order:'平台订单',item:'商品与子订单',wdt:'旺店通销售出库',alipay:'支付宝流水',fund:'聚合账户流水',refund:'退款售后明细',kingdee:'金蝶应收单'}
 
 const FLOW_BUCKETS = { fee:'平台费用',adjustment:'补贴 / 调整',ufirst_fee:'U先专属费用',qr:'收钱码收款',transfer:'内部划转候选',recharge:'充值 / 划转候选',other:'其他已知费目' }
 
@@ -39,6 +42,7 @@ export default function EcomBasicData({ user }) {
   const [feeMap, setFeeMap] = useState([])
   const [rules, setRules] = useState({})
   const [recognitionRules, setRecognitionRules] = useState({})
+  const [preparationRules, setPreparationRules] = useState({})
   const [flowRules, setFlowRules] = useState([])
   const [vcfg, setVcfg] = useState({})
   const [preview, setPreview] = useState(null)
@@ -49,13 +53,14 @@ export default function EcomBasicData({ user }) {
   const load = () => getEcBasicdata().then(r => {
     setShopMap(r.shop_map || []); setFeeMap(r.fee_map || []); setRules(r.rules || {}); setRecognitionRules(r.recognition_rules || {}); setFlowRules(r.flow_rules || [])
     setVcfg(r.voucher_cfg || {}); setDirty(false)
+    setPreparationRules(r.preparation_rules || {})
   }).catch(e => setMsg(String(e.message || e)))
   useEffect(() => { load() }, [])
 
   const save = async () => {
     try {
       setMsg('保存中…')
-      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, rules, recognition_rules: recognitionRules, flow_rules: flowRules, voucher_cfg: vcfg })
+      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, rules, recognition_rules: recognitionRules, preparation_rules:preparationRules, flow_rules: flowRules, voucher_cfg: vcfg })
       setMsg('已保存'); load()
     } catch (e) { setMsg('保存失败：' + String(e.message || e)) }
   }
@@ -113,6 +118,8 @@ export default function EcomBasicData({ user }) {
     </div>
 
     <div className="eb-tabs">
+      <div className={'eb-tab'+(tab==='preparation'?' on':'')} onClick={()=>setTab('preparation')}>所需资料</div>
+      <div className={'eb-tab'+(tab==='accounts'?' on':'')} onClick={()=>setTab('accounts')}>资金账户</div>
       <div className={'eb-tab' + (tab === 'shop' ? ' on' : '')} onClick={() => setTab('shop')}>店铺对照</div>
       <div className={'eb-tab' + (tab === 'recognition' ? ' on' : '')} onClick={() => setTab('recognition')}>收入确认口径</div>
       <div className={'eb-tab' + (tab === 'fee' ? ' on' : '')} onClick={() => setTab('fee')}>费目科目映射</div>
@@ -146,6 +153,8 @@ export default function EcomBasicData({ user }) {
         </div>
       </div>}
 
+      {tab === 'accounts' && <EcomFlowLedger user={user} managementOnly registrationOnly/>}
+      {tab === 'preparation' && <div className="eb-card"><p className="eb-hint">按店铺勾选本期结账必需的资料。未勾选任何资料表示尚未配置，不计作齐套；齐套表示资料已准备，不代表金额已核对。</p><div className="eb-tblwrap"><table><thead><tr><th>店铺</th>{Object.values(MATERIALS).map(label=><th key={label}>{label}</th>)}</tr></thead><tbody>{shopMap.map(s=>{const id=s.wdt_name,selected=preparationRules[id]??(id==='星期零STARFIELD 天猫官旗店'?Object.keys(MATERIALS):[]);return <tr key={id}><td>{s.mgmt_name||id}</td>{Object.entries(MATERIALS).map(([kind,label])=><td key={kind}><input type="checkbox" aria-label={`${id} ${label}`} checked={selected.includes(kind)} disabled={!canEdit} onChange={e=>{setPreparationRules({...preparationRules,[id]:e.target.checked?[...selected,kind]:selected.filter(k=>k!==kind)});setDirty(true)}}/></td>)}</tr>})}</tbody></table></div></div>}
       {tab === 'recognition' && <div className="eb-card">
         <div style={{ marginBottom: 10 }}><span className="eb-hint">按基础资料中的店铺设置收入确认口径。工作台据此判断是否应形成应收，不向金蝶写入任何单据。</span></div>
         <div className="eb-tblwrap"><table><thead><tr><th>店铺</th><th>平台</th><th>收入确认口径</th><th>工作台判断</th></tr></thead><tbody>{shopMap.map((r,i)=>{const key=r.wdt_name,value=recognitionRules[key]||'shipment';return <tr key={key||i}><td className="eb-shop-cell"><strong>{r.mgmt_name||r.wdt_name}</strong>{r.mgmt_name&&r.mgmt_name!==r.wdt_name&&<small>{r.wdt_name}</small>}</td><td>{r.platform||'未设置'}</td><td><select className="eb-rule-select" value={value} disabled={!canEdit} onChange={e=>{setRecognitionRules({...recognitionRules,[key]:e.target.value});setDirty(true)}}><option value="shipment">发货确认收入</option><option value="confirmed">确认收货后确认收入</option></select></td><td>{value==='shipment'?'旺店通已发货 → 应形成应收':'平台确认收货 → 应形成应收'}</td></tr>})}{!shopMap.length&&<tr><td colSpan="4">请先维护店铺对照。</td></tr>}</tbody></table></div>

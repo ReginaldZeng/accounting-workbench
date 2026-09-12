@@ -15,6 +15,11 @@
 .ew-order-filters{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding:18px 0 14px}.ew-order-filters label{display:flex;flex-direction:column;gap:6px;min-width:145px;color:var(--ink-3,#8993a4);font-size:11px}.ew-order-filters label:first-child{min-width:240px}.ew-order-filters .ew-order-search{flex:1;min-width:220px}.ew-order-filters>button{margin-bottom:0}.ew-order-filters>.ew-muted{margin-left:auto;align-self:center}@media(max-width:800px){.ew-order-filters label,.ew-order-filters label:first-child,.ew-order-filters .ew-order-search{flex:1 1 calc(50% - 10px);min-width:150px}.ew-order-filters>.ew-muted{flex-basis:100%;margin-left:0}}
 
 /* Data preparation: stable shop rail + compact monthly checklist. */
+.ew-shops i.ready{background:#32a783;animation:ew-ready-pulse 2.4s ease-in-out infinite}
+@keyframes ew-ready-pulse{0%,100%{box-shadow:0 0 0 0 #32a78340}50%{box-shadow:0 0 0 5px #32a78310}}
+@media(prefers-reduced-motion:reduce){.ew-shops i.ready{animation:none}}
+.ew-source-table td:nth-child(2) small{max-width:190px;white-space:normal;line-height:1.5}
+.ew-source-table td select{max-width:220px;margin-top:7px}
 .ew-layout{grid-template-columns:242px minmax(0,1fr);gap:18px}
 .ew-shops{padding:0;overflow:hidden;border-radius:9px}
 .ew-shops h2{display:flex;justify-content:space-between;align-items:center;margin:0;padding:14px 15px;font-size:13px;font-weight:650;color:var(--ink,#17233a);border-bottom:1px solid var(--line,#e4e8f0)}

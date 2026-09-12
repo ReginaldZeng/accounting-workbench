@@ -23,7 +23,7 @@ function DocumentMatch({row}) {
   const m=row?.document_match,a=m?.evidence?.amount_check
   return <section className={`ef-notice ef-match-panel ${m?.status==='conflict'?'ef-match-conflict':''}`}><h3>跨期单据核对 · {MATCHES[m?.status || 'pending_index']}</h3><p>{m?.message || '尚未保存核对结果，请在数据准备中导入历史资料或重新核对。'}</p>
     {a?.expected!==undefined&&<><p>平台确认打款：{money(a.expected)} · 累计交易收款：{money(a.received)} · 差额：{money(a.difference)}</p><p>{a.basis}</p></>}
-    {m?.evidence?.documents?.map((d,i)=><p key={i}>{({order:'主订单',item:'子订单',refund:'退款',wdt:'出库'}[d.kind]||d.kind)} · {d.document_no} · {d.period} · {d.filename || `来源文件 #${d.file_id}`} / {d.sheet} 第{d.row}行{d.conflict?' · 存在版本冲突':''}</p>)}
+    {m?.evidence?.documents?.map((d,i)=><p key={i}>{({order:'主订单',item:'子订单',refund:'退款',wdt:'出库',order_snapshot:'主订单快照',item_snapshot:'子订单快照',wdt_snapshot:'出库快照',refund_snapshot:'退款快照'}[d.kind]||d.kind)} · {d.document_no} · {d.period} · {d.filename || `来源文件 #${d.file_id}`} / {d.sheet} 第{d.row}行{d.conflict?' · 存在版本冲突':''}</p>)}
     <p>单据关联不等于已结算；这里不表示提现至公司银行，也不执行金蝶写入。</p></section>
 }
 
@@ -48,7 +48,7 @@ function datesForPeriod(period) {
   return {date_from:`${period}-01`,date_to:`${period}-${new Date(year,month,0).getDate()}`}
 }
 
-export default function EcomFlowLedger({ user, period: parentPeriod = '', initialQuery = '', initialAccountId = '', onChanged = () => {}, managementOnly = false, refreshToken = 0 }) {
+export default function EcomFlowLedger({ user, period: parentPeriod = '', initialQuery = '', initialAccountId = '', onChanged = () => {}, managementOnly = false, registrationOnly = false, refreshToken = 0 }) {
   const [revision, setRevision] = useState(0)
   const accounts = useResource('/api/ec/flows/accounts', `${revision}:${refreshToken}`)
   const [accountId, setAccountId] = useState(initialAccountId)
@@ -106,11 +106,11 @@ export default function EcomFlowLedger({ user, period: parentPeriod = '', initia
     })
   }
   return <section className="ef-ledger" aria-label="账户流水查询">
-    {managementOnly && <div className="ef-heading"><div><h2>账户登记与流水导入</h2><p>按账户合并文件；查询请前往「账户流水」</p></div><div className="ef-actions"><button disabled={!canEdit || busy} onClick={() => setCreate(v => !v)}>登记账户</button><button disabled={busy} onClick={() => setRevision(v => v+1)}>刷新</button></div></div>}
+    {managementOnly && <div className="ef-heading"><div><h2>{registrationOnly?'资金账户':'账户登记与流水导入'}</h2><p>账户与店铺关联在这里维护；资料导入请前往「数据准备」。</p></div><div className="ef-actions"><button disabled={!canEdit || busy} onClick={() => setCreate(v => !v)}>登记账户</button><button disabled={busy} onClick={() => setRevision(v => v+1)}>刷新</button></div></div>}
     {(notice || accounts.error || result.error) && <div className="ef-notice" role="status">{notice || accounts.error || result.error}</div>}
     {create && <form className="ef-account-form" onSubmit={saveAccount}><label>账户类型<select value={accountKind} onChange={e => setAccountKind(e.target.value)}><option value="alipay">支付宝</option><option value="fund">聚合账户</option></select></label><label>账户名称<input required maxLength="120" value={name} onChange={e => setName(e.target.value)} placeholder="例如：星期零天猫支付宝" /></label><label>尾号<input maxLength="8" pattern="[0-9]{0,8}" value={suffix} onChange={e => setSuffix(e.target.value)} placeholder="可填末 4 位" /></label><fieldset><legend>关联店铺（可多选）</legend>{accounts.data?.shops?.map(s => <label className="ef-check" key={s.id}><input type="checkbox" checked={shopIds.includes(s.id)} onChange={e => setShopIds(ids => e.target.checked ? [...ids,s.id] : ids.filter(id => id!==s.id))} />{s.name}</label>)}</fieldset><button className="ef-primary" disabled={busy || !shopIds.length}>保存账户</button><button type="button" onClick={() => setCreate(false)}>取消</button></form>}
     {managementOnly && <><AccountTable data={accounts.data} />
-    <div className="ef-tools"><label>导入账户<select aria-label="导入账户" value={accountId} onChange={e => selectAccount(e.target.value)}><option value="">请选择账户</option>{accounts.data?.accounts?.map(a => <option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label><span className="ef-spacer" /><input hidden type="file" ref={fileRef} accept=".xlsx,.xls,.zip" multiple onChange={upload} /><button className="ef-primary" disabled={!canEdit || !accountId || busy} onClick={() => fileRef.current?.click()}>{busy ? '正在处理…' : '合并导入流水'}</button><small>{accountId ? '一次可选多个分片，按原始入账日期归属期间' : '导入前请选择具体账户'}</small></div></>}
+    {!registrationOnly&&<div className="ef-tools"><label>导入账户<select aria-label="导入账户" value={accountId} onChange={e => selectAccount(e.target.value)}><option value="">请选择账户</option>{accounts.data?.accounts?.map(a => <option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label><span className="ef-spacer" /><input hidden type="file" ref={fileRef} accept=".xlsx,.xls,.zip" multiple onChange={upload} /><button className="ef-primary" disabled={!canEdit || !accountId || busy} onClick={() => fileRef.current?.click()}>{busy ? '正在处理…' : '合并导入流水'}</button><small>{accountId ? '一次可选多个分片，按原始入账日期归属期间' : '导入前请选择具体账户'}</small></div>}</>}
     {!managementOnly && <><form className="ef-search ef-search-compact" onSubmit={apply} aria-label="流水筛选">
       <label className="ef-account-filter">账户<select aria-label="流水账户" value={accountId} onChange={e=>selectAccount(e.target.value)}><option value="">全部账户</option>{accounts.data?.accounts?.map(a=><option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label>
       <label>业务分桶<select aria-label="业务分桶" value={filters.bucket} onChange={e=>change('bucket',e.target.value)}><option value="">全部流水（{data ? count(Object.values(data.buckets||{}).reduce((a,b)=>a+b,0)) : '—'}）</option>{Object.entries(BUCKETS).map(([key,label])=><option key={key} value={key}>{label}（{data ? count(data.buckets?.[key]||0) : '—'}）</option>)}</select></label>

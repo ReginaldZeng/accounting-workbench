@@ -605,7 +605,8 @@ def _bank_accounts():
 @app.get("/api/health")
 def health():
     return {"ok": True, "period": _period_str(), "source": CFG["source"],
-            "conf": kc.conf_path() or "(未找到 conf.ini)", "db": db.backend_info()}
+            "conf": kc.conf_path() or "(未找到 conf.ini)", "db": db.backend_info(),
+            "version": _compute_version_info()}
 
 
 @app.get("/api/config")

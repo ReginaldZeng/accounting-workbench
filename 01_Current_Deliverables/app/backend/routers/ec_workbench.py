@@ -9,12 +9,14 @@ import threading
 import time
 from pathlib import Path
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
-from sqlalchemy import select, insert
+from sqlalchemy import select, insert, func
 from sqlalchemy.exc import IntegrityError
 from core import db, _require_perm
 from routers import ec
 from kernels import ec_workbench as model
 from kernels import ec_flow_ledger as ledger
+from kernels import ec_preparation as preparation
+from kernels import ec_documents as documents
 
 router = APIRouter(prefix='/api/ec/workbench')
 TABLE = db.ec_workbench_imports
@@ -181,23 +183,86 @@ def selected_rows(rows,business):
     return [r for r in rows if not business or r['business_type']==business]
 
 
-def source_cards(data):
-    out=[]
-    for kind,label in model.KINDS.items():
-        s=data['sources'].get(kind)
-        p=data['provenance'].get(kind,{})
-        out.append({'kind':kind,'label':label,'available':bool(s),'state':s.get('status','warning') if s else 'missing',
-            'rows':len(s.get('rows',[])) if s else None,'warnings':s.get('warnings',[]) if s else [],
-            'files':p.get('filenames',[]),'file_count':s.get('summary',{}).get('file_count',1) if s else 0,
-            'imported_at':p.get('imported_at'),'legacy':p.get('legacy',False),'version':p.get('id')})
-    return out
+def preparation_cards(period, shop):
+    """Read saved source metadata; never build orders or decode account statements here."""
+    kinds = preparation.requirements(db.get_setting('ec_preparation_rules', {}) or {}, shop)
+    cards = {k:dict(kind=k,label=preparation.KINDS[k],available=False,state='missing',rows=None,
+                    files=[],file_count=0,warnings=[],imported_at=None,accounts=[]) for k in kinds}
+    with db._engine.connect() as cx:
+        latest = select(func.max(TABLE.c.id)).where(TABLE.c.period==period,TABLE.c.shop==shop).group_by(TABLE.c.kind)
+        for r in cx.execute(select(TABLE).where(TABLE.c.id.in_(latest))):
+            if r.kind not in cards or r.kind in ('alipay','fund'):continue
+            try:
+                value=json.loads(gzip.decompress(r.payload)); names=json.loads(r.filenames or '[]')
+                if not isinstance(value,dict) or not isinstance(names,list):raise ValueError('来源格式错误')
+            except (OSError,ValueError,TypeError):
+                cards[r.kind].update(state='warning',warnings=['已保存快照不可读，原始记录保留；请补充资料'])
+                continue
+            valid=isinstance(value.get('rows'),list) and bool(value['rows']) and value.get('status') in ('ready','warning')
+            cards[r.kind].update(available=valid,state='ready' if valid else 'warning',rows=len(value.get('rows',[])),
+                files=names,file_count=len(names),imported_at=r.ts,warnings=value.get('warnings',[]))
+        # Original imports remain valid evidence, even before the new document index exists.
+        if shop==TARGET:
+            for kind, r in ec._tmall_latest_rows(period).items():
+                if kind not in cards or cards[kind]['available'] or kind in ('alipay','fund'):continue
+                summary=json.loads(r.summary or '{}')
+                cards[kind].update(available=True,state='ready' if r.status=='ready' else 'warning',
+                    rows=summary.get('rows'),legacy=True,file_count=1,imported_at=r.ts,
+                    warnings=['原核算快照已保留'])
+            if 'wdt' in cards and not cards['wdt']['available']:
+                old=cx.execute(select(db.ec_wdt_import_runs).where(db.ec_wdt_import_runs.c.period==period).order_by(db.ec_wdt_import_runs.c.id.desc()).limit(1)).first()
+                if old:cards['wdt'].update(available=True,state='warning',legacy=True,file_count=1,imported_at=old.ts,warnings=['原出库汇总已保留，逐单依据待核对'])
+        # Historical documents and monthly imports are two provenance sources of the same material row.
+        heads=documents.ec_document_heads; files=documents.ec_document_files
+        for kind in kinds:
+            if kind in ('alipay','fund','kingdee'):continue
+            scope=(heads.c.shop==shop,heads.c.period==period,heads.c.kind==kind)
+            n=cx.execute(select(func.count()).select_from(heads).where(*scope)).scalar_one()
+            if not n:continue
+            origins=list(cx.execute(select(files).where(files.c.id.in_(select(heads.c.file_id).where(*scope)))))
+            conflicts=cx.execute(select(func.count()).select_from(heads).where(*scope,heads.c.conflict==1)).scalar_one()
+            c=cards[kind]
+            c.update(available=True,state='warning' if conflicts else 'ready',rows=max(n,c['rows'] or 0),
+                files=list(dict.fromkeys(c['files']+[f.filename for f in origins])),
+                imported_at=max([c['imported_at'] or '']+[f.ts for f in origins]))
+            c['file_count']=len(c['files'])
+            if conflicts:c['warnings'].append(f'{conflicts} 条单据存在版本冲突')
+        accounts=[a for a in cx.execute(select(db.ec_flow_accounts)) if shop in json.loads(a.shops or '[]')]
+        for kind in ('alipay','fund'):
+            if kind not in cards:continue
+            selected=[a for a in accounts if a.kind==kind]; ids=[a.id for a in selected]
+            c=cards[kind]; c['accounts']=[{'id':a.id,'name':a.name} for a in selected]
+            if not ids:
+                c['warnings']=['请在基础资料登记并关联账户'];continue
+            rows=db.ec_flow_rows; origins=db.ec_flow_origins; source_files=db.ec_flow_files
+            totals=dict(cx.execute(select(rows.c.account_id,func.count()).where(rows.c.account_id.in_(ids),rows.c.period==period).group_by(rows.c.account_id)).all())
+            imported=list(cx.execute(select(source_files).where(source_files.c.id.in_(select(origins.c.file_id).join(rows,rows.c.id==origins.c.flow_id).where(rows.c.account_id.in_(ids),rows.c.period==period)))))
+            c.update(available=bool(totals),state='ready' if len(totals)==len(ids) else 'warning' if totals else 'missing',
+                rows=sum(totals.values()),files=[f.filename for f in imported],file_count=len(imported),
+                imported_at=max((f.ts for f in imported),default=None))
+            if len(totals)<len(ids):c['warnings']=[f'{len(ids)-len(totals)} 个关联账户缺少本期流水']
+    if 'kingdee' in cards:
+        meta=ec._kd_cache_meta(period)
+        if meta:
+            try:
+                cached=json.loads(Path(ec._kd_cache_path(period)).read_text(encoding='utf-8'))
+                if not isinstance(cached,list) or any(not isinstance(r,dict) for r in cached):raise ValueError('缓存格式错误')
+                selected=check_shop(shop)
+                matched=[r for r in cached if any(str(r.get(f) or '')==selected['kd_name'] for f in ('客户','客户名称'))]
+                scoped=not cached or any('客户' in r or '客户名称' in r for r in cached)
+                cards['kingdee'].update(available=True,state='ready' if scoped else 'warning',rows=len(matched) if scoped else None,imported_at=meta.get('ts'),
+                    warnings=['已读取本店应收缓存，匹配结果见收入确认'] if scoped else ['缓存缺少客户字段，店铺归属待核对'])
+            except (OSError,ValueError):
+                cards['kingdee']['warnings']=['金蝶缓存不可用，请重新只读同步']
+    return list(cards.values())
 
 
 @router.get('/shops')
-def shops_view(request:Request):
+def shops_view(request:Request,period:str=''):
     """Lightweight shop selector sourced only from controlled basic data."""
     require(request)
-    return {'ok':True,'shops':shops()}
+    if period:check_period(period)
+    return {'ok':True,'shops':[dict(s,**preparation.progress(preparation_cards(period,s['id']))) if period else s for s in shops()]}
 
 
 @router.get('/overview')
@@ -206,13 +271,12 @@ def overview(request:Request,period:str,business:str=''):
     result=[]; all_rows=[]; accounts={}; any_cash=False
     for shop in shops():
         data=get_data(period,shop['id']); rows=selected_rows(data['rows'],business)
-        cards=source_cards(data); ready=sum(c['available'] and c['state']=='ready' for c in cards)
-        present=sum(c['available'] for c in cards)
+        cards=preparation_cards(period,shop['id']); ready=sum(c['available'] and c['state']=='ready' for c in cards)
         any_cash |= data['cash_available']
         all_rows.extend(rows)
         result.append(dict(shop,available='order' in data['sources'],metrics=model.metrics(rows,data['cash_available']) if 'order' in data['sources'] else None,
             ready=ready,required=len(cards),files=sum(c['file_count'] for c in cards),
-            readiness='missing' if not present else 'ready' if ready==len(cards) else 'warning'))
+            readiness='ready' if cards and ready==len(cards) else 'linked'))
         if shop['platform'] in ('天猫','淘宝'):
             for kind,label in (('alipay','支付宝'),('fund','聚合账户')):
                 key=kind+':'+(shop['account_key'] if kind=='alipay' else shop['id'])
@@ -228,9 +292,10 @@ def overview(request:Request,period:str,business:str=''):
 @router.get('/sources')
 def sources_view(request:Request,period:str,shop:str):
     require(request); check_period(period); selected=check_shop(shop)
-    data=get_data(period,shop)
-    return {'ok':True,'shop':selected,'sources':source_cards(data),'kingdee':data['kingdee'],
-        'rule':data['rule'],'collector_configured':bool(os.environ.get('EC_INBOX_ROOT')),
+    cards=preparation_cards(period,shop)
+    return {'ok':True,'shop':selected,'sources':cards,'progress':preparation.progress(cards),
+        'kingdee':{'refreshing':bool(ec._KD_REFRESH.get(period,{}).get('running'))},
+        'collector_configured':bool(os.environ.get('EC_INBOX_ROOT')),
         'voucher_sync':_sync.get((period,shop),{}),'kingdee_read_only':True}
 
 
@@ -287,11 +352,21 @@ async def upload(request:Request,period:str=Form(...),shop:str=Form(...),kind:st
     try:
         from starlette.concurrency import run_in_threadpool
         parsed=await run_in_threadpool(model.parse_source,kind,blobs,period,shop)
+        aliases=(db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}).get(shop,[])
+        batches=[]
+        for f,blob in zip(files,blobs):
+            batch=await run_in_threadpool(documents.parse_documents,blob,Path((f.filename or '').replace('\\','/')).name[:180],shop,aliases)
+            if {r['kind'] for r in batch['docs']}!={kind}:
+                raise ValueError('文件实际列结构与所选资料行不一致，请在对应资料行导入；识别不使用文件名')
+            batches.append(batch)
     except (ValueError,TypeError,KeyError) as exc:
         raise HTTPException(400,str(exc)[:200])
     digest=hashlib.sha256(''.join(sorted(hashlib.sha256(b).hexdigest() for b in blobs)).encode()).hexdigest()
     filenames=[Path(f.filename.replace('\\','/')).name[:180] for f in files]
     result=save_source(period,shop,kind,digest,filenames,parsed,user['name'])
+    indexed=await run_in_threadpool(documents.store_documents,db._engine,shop,batches,user['name'])
+    if indexed['affected']:
+        await run_in_threadpool(documents.reconcile,db._engine,db.ec_flow_rows,db.ec_flow_accounts,indexed['affected'])
     db.audit(user['name'],'ec_workbench_import',target=period,detail=f"{kind} 快照 {result['id']}")
     return dict(result,ok=True,rows=len(parsed['rows']),warnings=parsed['warnings'])
 
