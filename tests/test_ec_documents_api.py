@@ -1,5 +1,6 @@
 """Real router/SQL contracts in a disposable database, with authentication and Kingdee isolated."""
 import os,sys,tempfile,types,threading,unittest,json,io,time
+from unittest.mock import patch
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'01_Current_Deliverables/app/backend'))
@@ -72,5 +73,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(v['document_match']['evidence']['documents'][0]['period'],'2026-07')
         self.assertEqual(v['raw'],{'业务描述':'交易收款'})
         self.assertEqual(self.client.get('/api/ec/documents?shop=shop',headers=headers).json()['coverage'][0]['period'],'2026-07')
+        with patch.object(docs,'parse_documents',side_effect=AssertionError('duplicate file must not be parsed')):
+            result=self.router.import_blobs('shop',[('renamed.xlsx',blob)],'test')
+            self.assertEqual(result['added'],0)
+            self.assertEqual(result['duplicates'],1)
+            self.assertEqual(result['reconcile']['updated'],0)
 
 if __name__=='__main__':unittest.main()

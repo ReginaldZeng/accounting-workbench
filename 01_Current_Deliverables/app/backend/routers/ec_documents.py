@@ -3,6 +3,7 @@ import json
 import threading
 import uuid
 import logging
+import hashlib
 from pathlib import Path
 from fastapi import APIRouter, Request, Form, File, UploadFile, HTTPException
 from sqlalchemy import select,func
@@ -18,9 +19,19 @@ def reconcile(affected=None):
 
 def import_blobs(shop,blobs,operator):
     aliases=db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}
-    parsed=[docs.parse_documents(blob,name,shop,aliases.get(shop,[])) for name,blob in blobs]
+    with db._engine.connect() as cx:
+        known={r.digest:r.row_count for r in cx.execute(select(docs.ec_document_files.c.digest,docs.ec_document_files.c.row_count).where(docs.ec_document_files.c.shop==shop))}
+    parsed=[];duplicate_rows=0
+    for name,blob in blobs:
+        fingerprint=hashlib.sha256(blob).hexdigest()
+        if fingerprint in known:
+            duplicate_rows+=known[fingerprint];continue
+        result=docs.parse_documents(blob,name,shop,aliases.get(shop,[]))
+        parsed.append(result);known[fingerprint]=len(result['docs'])
     result=docs.store_documents(db._engine,shop,parsed,operator)
-    result['reconcile']=reconcile(result.pop('affected'))
+    result['duplicates']+=duplicate_rows
+    affected=result.pop('affected')
+    result['reconcile']=reconcile(affected) if affected else {'updated':0,'statuses':{}}
     db.audit(operator,'ec_documents_import',target=shop,detail=json.dumps(result,ensure_ascii=False))
     return result
 
@@ -47,7 +58,7 @@ def job(request:Request,jid:str):
         if jid not in _jobs:raise HTTPException(404,'任务记录已失效，请刷新资料列表；可重新核对，无需重复上传')
         return dict(ok=True,**_jobs[jid])
 
-@router.post('/import')
+@router.post('/import',summary='按内容指纹去重后解析历史资料')
 async def upload(request:Request,shop:str=Form(...),files:list[UploadFile]=File(...)):
     user=require(request,True);selected=check_shop(shop)
     if selected['platform'] not in ('天猫','淘宝'):raise HTTPException(400,'本轮先接入天猫/淘宝资料')
