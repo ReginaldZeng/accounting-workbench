@@ -13,6 +13,32 @@ def sources(kind='normal',ship_date='2026-08-02'):
                           {'order_key':'k1','kind':'fee','channel':'alipay','income':0,'expense':1.81}]}}
 
 class ModelTests(unittest.TestCase):
+    def test_fee_categories_returns_and_kingdee_amount_not_reverse_calculated(self):
+        data=sources();flow=data['alipay']['rows'];flow[1]['code']='routine'
+        flow.extend([dict(flow[1],code='commission',expense=1),dict(flow[1],income=.5,expense=0),dict(flow[1],code='new',expense=.2)])
+        ar={'o1':{'amount':20,'documents':[{'bill_no':'AR1','amount':20}]}}
+        row=model.build_orders(data,ar,fee_categories={'routine':'routine','commission':'commission'})[0]
+        self.assertEqual((row['routine_fee'],row['commission_fee'],row['unclassified_fee']),(1.31,1,.2))
+        self.assertEqual(row['ar_amount'],20)
+        self.assertEqual(row['ar_diff'],4.19)
+        self.assertIn('费用分类待设置',row['issues'])
+        self.assertEqual(row['settlement_state'],'settled')
+        data['alipay']['rows']=[]
+        row=model.build_orders(data,ar)[0]
+        self.assertEqual(row['settlement_state'],'unknown')
+        self.assertEqual(row['ar_amount'],20)
+    def test_settlement_is_independent_of_ufirst_and_refunds_need_cash_evidence(self):
+        data=sources('ufirst');row=model.build_orders(data,{})[0]
+        self.assertEqual(row['settlement_state'],'settled')
+        self.assertEqual(row['destination'],'支付宝')
+        data['order']['rows'][0]['refund']=2
+        self.assertEqual(model.build_orders(data,{})[0]['settlement_state'],'review')
+        data['order']['rows'][0]['refund']=0;data['alipay']['rows'][0]['income']=5
+        self.assertEqual(model.build_orders(data,{})[0]['settlement_state'],'partial')
+    def test_fee_without_code_uses_saved_flow_rule_classification(self):
+        data=sources();data['alipay']['rows'][1]['rule_id']='trial_fee'
+        row=model.build_orders(data,{},fee_categories={'rule:trial_fee':'routine'})[0]
+        self.assertEqual((row['routine_fee'],row['commission_fee'],row['unclassified_fee']),(1.81,0,0))
     def test_linked_fee_keeps_actual_wallet_and_business_label(self):
         no='3316393238010038983'
         row={'order_no':'','remark':'先用后付技术服务费('+no+')扣款',

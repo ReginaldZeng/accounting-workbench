@@ -40,6 +40,7 @@ export default function EcomBasicData({ user }) {
   const [tab, setTab] = useState('shop')       // shop / fee / voucher / rules
   const [shopMap, setShopMap] = useState([])
   const [feeMap, setFeeMap] = useState([])
+  const [feeCategories,setFeeCategories]=useState({})
   const [rules, setRules] = useState({})
   const [recognitionRules, setRecognitionRules] = useState({})
   const [preparationRules, setPreparationRules] = useState({})
@@ -53,14 +54,14 @@ export default function EcomBasicData({ user }) {
   const load = () => getEcBasicdata().then(r => {
     setShopMap(r.shop_map || []); setFeeMap(r.fee_map || []); setRules(r.rules || {}); setRecognitionRules(r.recognition_rules || {}); setFlowRules(r.flow_rules || [])
     setVcfg(r.voucher_cfg || {}); setDirty(false)
-    setPreparationRules(r.preparation_rules || {})
+    setPreparationRules(r.preparation_rules || {}); setFeeCategories(r.fee_categories || {})
   }).catch(e => setMsg(String(e.message || e)))
   useEffect(() => { load() }, [])
 
   const save = async () => {
     try {
       setMsg('保存中…')
-      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, rules, recognition_rules: recognitionRules, preparation_rules:preparationRules, flow_rules: flowRules, voucher_cfg: vcfg })
+      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, fee_categories:feeCategories, rules, recognition_rules: recognitionRules, preparation_rules:preparationRules, flow_rules: flowRules, voucher_cfg: vcfg })
       setMsg('已保存'); load()
     } catch (e) { setMsg('保存失败：' + String(e.message || e)) }
   }
@@ -162,15 +163,16 @@ export default function EcomBasicData({ user }) {
 
       {tab === 'fee' && <div className="eb-card">
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
-          <span className="eb-hint">{feeMap.length} 条（种子=两月凭证区实证）。跑批遇到<b>新费目码 → 科目「待定」红标</b>，不套默认科目（确认书⑤ D9）。</span>
+          <span className="eb-hint">费用分类仅影响订单费用展示，不改变流水收支性质或金蝶科目；保存后后台更新订单结果。{feeMap.length} 条（种子=两月凭证区实证）。跑批遇到<b>新费目码 → 科目「待定」红标</b>，不套默认科目（确认书⑤ D9）。</span>
           {canEdit && addBtn(addFee)}
         </div>
         <div className="eb-tblwrap">
           <table>
-            <thead><tr><th>费目码</th><th>费目名</th><th>记账科目</th><th>金蝶科目编码（一键录入用）</th>{canEdit && <th style={{ width: 36 }}></th>}</tr></thead>
+            <thead><tr><th>费目码</th><th>费目名</th><th>订单费用分类</th><th>记账科目</th><th>金蝶科目编码（一键录入用）</th>{canEdit && <th style={{ width: 36 }}></th>}</tr></thead>
             <tbody>{feeMap.map((r, i) => <tr key={i}>
               <td className="eb-mono" style={{ color: 'var(--ink-2)' }}>{r.code}</td>
               <td style={{ ...editCell, whiteSpace: 'normal' }} onClick={() => editRow(feeMap, setFeeMap, i, 'label', '费目名')}>{r.label}</td>
+              <td><select aria-label={`订单费用分类 ${r.code}`} disabled={!canEdit} value={feeCategories[r.code]||'unclassified'} onChange={e=>{setFeeCategories({...feeCategories,[r.code]:e.target.value});setDirty(true)}}><option value="unclassified">待分类 / 非费用</option><option value="routine">常规费用</option><option value="commission">佣金</option></select></td>
               <td style={{ ...editCell, color: !r.account || r.account === '待定' ? 'var(--red,#c0392b)' : undefined, fontWeight: !r.account || r.account === '待定' ? 700 : 400 }}
                 onClick={() => editRow(feeMap, setFeeMap, i, 'account', '记账科目')}>{r.account || '待定'}</td>
               <td className="eb-mono" style={editCell} onClick={() => editRow(feeMap, setFeeMap, i, 'kd_code', '金蝶科目编码（如 6601 或 6601.01；以春艳实际记账口径为准）')}>
@@ -227,7 +229,7 @@ export default function EcomBasicData({ user }) {
           <span className="eb-hint">规则只处理“待识别流水”；已人工定性的自动跳过。先保存规则，再预览笔数和金额，最后确认批量应用。</span>
           {canEdit && addBtn(addFlowRule)}
         </div>
-        <div className="eb-tblwrap"><table><thead><tr><th>启用</th><th>规则名称</th><th>账户</th><th>匹配字段</th><th>关键词（用 | 分隔，须全部命中）</th><th>方向</th><th>归入分桶</th><th>费用名称</th><th>操作</th></tr></thead>
+        <div className="eb-tblwrap"><table><thead><tr><th>启用</th><th>规则名称</th><th>账户</th><th>匹配字段</th><th>关键词（用 | 分隔，须全部命中）</th><th>方向</th><th>归入分桶</th><th>费用名称</th><th>无费目码时的费用分类</th><th>操作</th></tr></thead>
           <tbody>{flowRules.map((r,i)=><tr key={r.id}>
             <td><input type="checkbox" checked={!!r.enabled} disabled={!canEdit} onChange={e=>updateFlowRule(i,{enabled:e.target.checked})}/></td>
             <td><input aria-label={`规则名称 ${i+1}`} className="eb-rule-input" value={r.name||''} disabled={!canEdit} onChange={e=>updateFlowRule(i,{name:e.target.value})}/></td>
@@ -237,6 +239,7 @@ export default function EcomBasicData({ user }) {
             <td><select aria-label={`收支方向 ${i+1}`} className="eb-rule-select" value={r.direction||''} disabled={!canEdit} onChange={e=>updateFlowRule(i,{direction:e.target.value})}><option value="outgo">支出</option><option value="income">收入</option><option value="">不限</option></select></td>
             <td><select aria-label={`目标分桶 ${i+1}`} className="eb-rule-select" value={r.bucket||'fee'} disabled={!canEdit} onChange={e=>updateFlowRule(i,{bucket:e.target.value})}>{Object.entries(FLOW_BUCKETS).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></td>
             <td><input aria-label={`分类名称 ${i+1}`} className="eb-rule-input" value={r.label||''} disabled={!canEdit} onChange={e=>updateFlowRule(i,{label:e.target.value})}/></td>
+            <td><select aria-label={`规则费用分类 ${i+1}`} disabled={!canEdit} value={feeCategories[`rule:${r.id}`]||'unclassified'} onChange={e=>{setFeeCategories({...feeCategories,[`rule:${r.id}`]:e.target.value});setDirty(true)}}><option value="unclassified">待分类</option><option value="routine">常规费用</option><option value="commission">佣金</option></select></td>
             <td><div className="eb-rule-actions"><button className="btn-sec" disabled={dirty||working||!r.enabled} onClick={()=>previewRule(r.id)}>预览</button>{canEdit&&<button className="btn-sec" disabled={working} onClick={()=>{setFlowRules(flowRules.filter((_,j)=>j!==i));setPreview(null);setDirty(true)}}>删除</button>}</div></td>
           </tr>)}</tbody></table></div>
         {dirty&&<p className="eb-hint">规则有未保存改动；保存后才能按服务器当前流水预览。</p>}

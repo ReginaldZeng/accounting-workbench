@@ -867,6 +867,7 @@ def ec_basicdata(request: Request):
     seeded = _seed_if_empty()
     from kernels import ec_flow_ledger as flow_ledger
     return {"shop_map": _rows(db.ec_shop_map), "fee_map": _rows(db.ec_fee_map),
+            "fee_categories": db.get_setting("ec_fee_display_categories", {}) or {},
             "rules": db.get_setting("ec_settle_rules", es.DEFAULT_RULES),
             "recognition_rules": db.get_setting("ec_income_recognition_rules", {}) or {},
             "preparation_rules": db.get_setting("ec_preparation_rules", {}) or {},
@@ -898,6 +899,9 @@ async def ec_basicdata_save(request: Request):
         return JSONResponse({"error": "需要「维护基础资料」权限"}, status_code=403)
     body = await request.json()
     fr = None
+    categories=body.get("fee_categories")
+    if categories is not None and (not isinstance(categories,dict) or len(categories)>1000 or any(not isinstance(k,str) or len(k)>64 or v not in ("routine","commission","unclassified") for k,v in categories.items())):
+        return JSONResponse({"detail":"费用分类配置无效"},status_code=400)
     if body.get('preparation_rules') is not None:
         from kernels.ec_preparation import validate
         try: validate(body['preparation_rules'])
@@ -923,6 +927,8 @@ async def ec_basicdata_save(request: Request):
             cx.execute(delete(table))                 # 整表覆盖（受控小表，几十行）
             for r in clean:
                 cx.execute(insert(table).values(**r, updated_by=u["name"], updated_at=_now()))
+    if categories is not None:
+        db.set_setting("ec_fee_display_categories",categories,operator=u["name"])
     if body.get("rules") is not None:
         ru = {k: float(v) if k != "qr_goods" else str(v)
               for k, v in dict(body["rules"]).items() if k in es.DEFAULT_RULES}

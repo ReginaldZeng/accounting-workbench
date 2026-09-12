@@ -225,7 +225,7 @@ def parse_source(kind, payloads, period, shop):
     return out
 
 
-def build_orders(sources, ar_index=None, recognition='shipment'):
+def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=None):
     orders = sources.get('order', {}).get('rows', [])
     items, shipments, refunds, events = (defaultdict(list) for _ in range(4))
     for r in sources.get('item', {}).get('rows', []): items[r['order_no']].append(r)
@@ -296,7 +296,30 @@ def build_orders(sources, ar_index=None, recognition='shipment'):
             refund_only = return_refund = 0
             unknown_refund = refund
         if unknown_refund > 0: issues.append('退款类型待分类')
+        # Classification is explicit in basic data; unknown codes never silently become routine fees.
+        fee_parts={name:[] for name in ('routine','commission','unclassified')}
+        for e in fee_events:
+            category=(fee_categories or {}).get(e.get('code') or 'rule:'+e.get('rule_id',''),'unclassified')
+            if category not in fee_parts:category='unclassified'
+            e['fee_category']=category
+            fee_parts[category].append(e['expense']-e['income'])
+        if fee_parts['unclassified']:issues.append('费用分类待设置')
+        receipt=total(e['income']-e['expense'] for e in actual if e['kind']=='receipt')
+        refunded=total(e['expense']-e['income'] for e in actual if e['kind']=='refund')
+        # No receipt evidence cannot prove non-settlement; do not equate wallet entry with bank withdrawal.
+        settlement='unknown'
+        if receipt>0:
+            settlement='settled' if paid_success and paid>0 and receipt==paid and refunded==refund and not any(e['kind'] in ('unclassified','adjustment') for e in actual) else 'partial' if paid>receipt and refund==0 else 'review'
+        shipment_state='shipped' if shipped or r.get('shipped_at') else 'unshipped' if pending_ship else 'unknown'
+        refund_state='none' if refund==0 else 'unknown'
+        if refund>0 and unknown_refund==0:
+            extent='full' if paid>0 and refund>=paid else 'partial'
+            refund_state=extent+('_return' if return_refund and not refund_only else '_only' if refund_only and not return_refund else '_mixed')
         r.update(paid=paid, paid_success=paid_success, refund=refund, gsv=amount(paid-refund),
+            routine_fee=total(fee_parts['routine']) if cash_present else None,
+            commission_fee=total(fee_parts['commission']) if cash_present else None,
+            unclassified_fee=total(fee_parts['unclassified']) if cash_present else None,
+            shipment_state=shipment_state,refund_state=refund_state,settlement_state=settlement,
             business_type=typ, business_label=LABELS.get(typ, typ), items=line_items, shipments=ship,
             refunds=refunds[no], events=events[key], fees=fee, fee_events=fee_events, net_receipt=net,
             destination='、'.join({'alipay':'支付宝','fund':'聚合账户'}[d] for d in destinations) or '待结算 / 待补流水',

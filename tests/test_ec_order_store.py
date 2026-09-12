@@ -21,6 +21,20 @@ def data(count=65):
 
 
 class OrderStoreTests(unittest.TestCase):
+    def test_date_and_status_filters_use_saved_rows_and_clamp_jump(self):
+        dataset=data(3)
+        for r,stamp,status in zip(dataset['rows'],['2026-08-01 23:59:59','2026-08-02 00:00:00','2026-08-02 23:59:59'],['unknown','partial','settled']):
+            r.update(created_at=stamp,settlement_state=status)
+        self.build(dataset=dataset)
+        with patch.object(model,'build_orders',side_effect=AssertionError('must not rebuild')):
+            result=store.page(self.engine,'2026-08','shop',start_date='2026-08-02',end_date='2026-08-02',page=999)
+            self.assertEqual((result['total'],result['page']),(2,1))
+            self.assertEqual(store.page(self.engine,'2026-08','shop',settlement='settled')['total'],1)
+            self.assertEqual(store.page(self.engine,'2026-08','shop',shipment='shipped')['total'],3)
+            self.assertEqual(store.page(self.engine,'2026-08','shop',refund_state='none')['total'],3)
+            self.assertEqual(store.page(self.engine,'2026-08','shop',start_date='2026-08-03')['total'],0)
+        for start,end in [('2026-08-03','2026-08-02'),('invalid',''),('','2026-02-30')]:
+            with self.assertRaises(ValueError):store.page(self.engine,'2026-08','shop',start_date=start,end_date=end)
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(prefix='order-results-test-')
         self.url='sqlite:///'+(Path(self.tmp.name)/'test.sqlite').as_posix()

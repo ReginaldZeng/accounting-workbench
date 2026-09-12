@@ -125,6 +125,7 @@ def load_sources(period, shop):
                     continue
                 event=model.event(value,kind)
                 event['order_link']=value['order_link']
+                event['rule_id']=value.get('rule_id','')
                 event.update(order_key=key,account_id=record.account_id,account_name=next(a['name'] for a in accounts if a['id']==record.account_id),
                     ledger_id=record.id,aggregate_copy=kind=='alipay' and value.get('chan')=='聚合结算渠道')
                 if value['bucket']=='receipt':event['kind']='receipt'
@@ -162,15 +163,15 @@ def compute_data(period, shop):
     rules = db.get_setting('ec_workbench_rules',{}) or {}
     recognition_rules = db.get_setting('ec_income_recognition_rules',{}) or {}
     rule = rules.get(period,{}).get(shop) or {'recognition':recognition_rules.get(shop,'shipment')}
-    rows = model.build_orders(sources,ar,rule.get('recognition','shipment'))
+    rows = model.build_orders(sources,ar,rule.get('recognition','shipment'),db.get_setting('ec_fee_display_categories',{}) or {})
     conflicted=set(sources.get('alipay',{}).get('conflicted_keys',[])+sources.get('fund',{}).get('conflicted_keys',[]))
     for row in rows:
         if row['order_key'] in conflicted:
-            row.update(fees=None,net_receipt=None,manual=True)
+            row.update(fees=None,routine_fee=None,commission_fee=None,unclassified_fee=None,settlement_state='review',net_receipt=None,manual=True)
             row['issues'].append('流水内容或订单关联冲突：费用与净收待核对')
     cash_available = any(sources.get(k,{}).get('rows') for k in ('alipay','fund'))
     if not cash_available:
-        for r in rows: r['fees']=None
+        for r in rows: r.update(fees=None,routine_fee=None,commission_fee=None,unclassified_fee=None,settlement_state='unknown')
     data = {'sources':sources,'provenance':provenance,'rows':rows,'kingdee':ar_state,'rule':rule,'cash_available':cash_available}
     return data
 
@@ -199,6 +200,7 @@ def result_inputs():
     return dict(imports=imports,legacy=legacy,wdt=wdt,accounts=accounts,cash=cash,files=files,scopes=scopes,
         shops={s['id']:s for s in shops()},rules=db.get_setting('ec_workbench_rules',{}) or {},
         recognition=db.get_setting('ec_income_recognition_rules',{}) or {},
+        fee_categories=db.get_setting('ec_fee_display_categories',{}) or {},
         account_revisions={a['id']:db.get_setting('ec_order_account_revision:'+a['id'],None) for a in accounts},
         kd_meta=db.get_setting('ec_kd_cache_meta',{}) or {})
 
@@ -210,7 +212,7 @@ def input_version(period,shop,inputs=None):
     try:
         stat=Path(ec._kd_cache_path(period)).stat();kd_file=(stat.st_mtime_ns,stat.st_size)
     except OSError:kd_file=None
-    manifest={'model':'order-results-v1','shop':inputs['shops'].get(shop),
+    manifest={'model':'order-results-v2','fee_categories':inputs.get('fee_categories',{}),'shop':inputs['shops'].get(shop),
         'imports':[r for r in inputs['imports'] if r['period']==period and r['shop']==shop],
         'legacy':[r for r in inputs['legacy'] if r[0]==period] if shop==TARGET else [],
         'wdt':[r for r in inputs['wdt'] if r[0]==period] if shop==TARGET else [],
@@ -402,10 +404,12 @@ def sources_view(request:Request,period:str,shop:str):
 
 
 @router.get('/orders')
-def orders_view(request:Request,period:str,shop:str,q:str='',business:str='',channel:str='',flag:str='',page:int=1,size:int=30,version:str=''):
+def orders_view(request:Request,period:str,shop:str,q:str='',business:str='',channel:str='',flag:str='',page:int=1,size:int=30,version:str='',start_date:str='',end_date:str='',shipment:str='',refund_state:str='',settlement:str=''):
     require(request); check_period(period); check_shop(shop)
     if len(q)>200 or len(version)>32:raise HTTPException(400,'查询条件过长')
-    try:return order_store.page(db._engine,period,shop,q,business,channel,flag,page,size,version)
+    if shipment not in ('','shipped','unshipped','unknown') or refund_state not in ('','none','unknown','full_only','partial_only','full_return','partial_return','full_mixed','partial_mixed') or settlement not in ('','unknown','settled','partial','review'):
+        raise HTTPException(400,'不支持的订单状态筛选')
+    try:return order_store.page(db._engine,period,shop,q,business,channel,flag,page,size,version,start_date,end_date,shipment,refund_state,settlement)
     except ValueError as exc:raise HTTPException(409,str(exc))
 
 

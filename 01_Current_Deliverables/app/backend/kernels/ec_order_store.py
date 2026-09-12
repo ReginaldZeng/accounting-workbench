@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from sqlalchemy import Table, Column, MetaData, String, Integer, Text, LargeBinary, Index, select, insert, update, func, or_
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.exc import IntegrityError
@@ -131,7 +131,13 @@ def public_status(current,build):
         'stale':bool(build and current and (current['requested_version']!=build['input_version'] or current['active_build']!=build['id']))}
 
 
-def page(engine,period,shop,q='',business='',channel='',flag='',page=1,size=30,version=''):
+def page(engine,period,shop,q='',business='',channel='',flag='',page=1,size=30,version='',start_date='',end_date='',shipment='',refund_state='',settlement=''):
+    try:
+        start=date.fromisoformat(start_date) if start_date else None
+        end=date.fromisoformat(end_date) if end_date else None
+        if start and end and start>end:raise ValueError()
+        end_exclusive=(end+timedelta(days=1)).isoformat() if end else None
+    except (ValueError,OverflowError):raise ValueError('订单创建日期范围无效')
     current=state(engine,period,shop)
     with engine.connect() as cx:
         build=load_build(cx,current,version)
@@ -143,6 +149,14 @@ def page(engine,period,shop,q='',business='',channel='',flag='',page=1,size=30,v
         if business:conditions.append(ROWS.c.business==business)
         if channel:conditions.append(ROWS.c.channel.in_([channel,'multiple']) if channel in ('alipay','fund') else ROWS.c.channel==channel)
         if flag in FLAGS:conditions.append(ROWS.c['f_'+flag]==1)
+        if start:conditions.append(ROWS.c.created_at>=start.isoformat())
+        if end_exclusive:
+            conditions.extend([ROWS.c.created_at!='',ROWS.c.created_at<end_exclusive])
+        for field,value in [('shipment_state',shipment),('refund_state',refund_state),('settlement_state',settlement)]:
+            if value:
+                column=func.json_extract(ROWS.c.listing,'$.'+field)
+                if engine.dialect.name=='mysql':column=func.json_unquote(column)
+                conditions.append(column==value)
         if q.strip():conditions.append(ROWS.c.search_text.contains(q.strip().casefold(),autoescape=True))
         total=cx.execute(select(func.count()).select_from(ROWS).where(*conditions)).scalar_one()
         size=min(100,max(10,size));pages=max(1,(total+size-1)//size);page=min(pages,max(1,page))
