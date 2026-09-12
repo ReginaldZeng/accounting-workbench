@@ -29,6 +29,7 @@ const EbStyle = () => <style>{`
 .eb-rule-input,.eb-rule-select{width:100%;min-width:90px;box-sizing:border-box;border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--bg);color:var(--ink);font:inherit}
 .eb-rule-actions{display:flex;gap:7px}.eb-preview{margin-top:14px;padding:14px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub)}
 .eb-preview-summary{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:12px}.eb-preview-summary strong{font-size:16px}
+.eb-shop-cell strong,.eb-shop-cell small{display:block}.eb-shop-cell small{margin-top:3px;color:var(--ink-3);font-size:10.5px;font-weight:400}
 `}</style>
 
 export default function EcomBasicData({ user }) {
@@ -37,6 +38,7 @@ export default function EcomBasicData({ user }) {
   const [shopMap, setShopMap] = useState([])
   const [feeMap, setFeeMap] = useState([])
   const [rules, setRules] = useState({})
+  const [recognitionRules, setRecognitionRules] = useState({})
   const [flowRules, setFlowRules] = useState([])
   const [vcfg, setVcfg] = useState({})
   const [preview, setPreview] = useState(null)
@@ -45,7 +47,7 @@ export default function EcomBasicData({ user }) {
   const [msg, setMsg] = useState('')
 
   const load = () => getEcBasicdata().then(r => {
-    setShopMap(r.shop_map || []); setFeeMap(r.fee_map || []); setRules(r.rules || {}); setFlowRules(r.flow_rules || [])
+    setShopMap(r.shop_map || []); setFeeMap(r.fee_map || []); setRules(r.rules || {}); setRecognitionRules(r.recognition_rules || {}); setFlowRules(r.flow_rules || [])
     setVcfg(r.voucher_cfg || {}); setDirty(false)
   }).catch(e => setMsg(String(e.message || e)))
   useEffect(() => { load() }, [])
@@ -53,7 +55,7 @@ export default function EcomBasicData({ user }) {
   const save = async () => {
     try {
       setMsg('保存中…')
-      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, rules, flow_rules: flowRules, voucher_cfg: vcfg })
+      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, rules, recognition_rules: recognitionRules, flow_rules: flowRules, voucher_cfg: vcfg })
       setMsg('已保存'); load()
     } catch (e) { setMsg('保存失败：' + String(e.message || e)) }
   }
@@ -112,6 +114,7 @@ export default function EcomBasicData({ user }) {
 
     <div className="eb-tabs">
       <div className={'eb-tab' + (tab === 'shop' ? ' on' : '')} onClick={() => setTab('shop')}>店铺对照</div>
+      <div className={'eb-tab' + (tab === 'recognition' ? ' on' : '')} onClick={() => setTab('recognition')}>收入确认口径</div>
       <div className={'eb-tab' + (tab === 'fee' ? ' on' : '')} onClick={() => setTab('fee')}>费目科目映射</div>
       <div className={'eb-tab' + (tab === 'voucher' ? ' on' : '')} onClick={() => setTab('voucher')}>凭证配置</div>
       <div className={'eb-tab' + (tab === 'rules' ? ' on' : '')} onClick={() => setTab('rules')}>识别与剔除规则</div>
@@ -141,6 +144,11 @@ export default function EcomBasicData({ user }) {
             </tr>)}</tbody>
           </table>
         </div>
+      </div>}
+
+      {tab === 'recognition' && <div className="eb-card">
+        <div style={{ marginBottom: 10 }}><span className="eb-hint">按基础资料中的店铺设置收入确认口径。工作台据此判断是否应形成应收，不向金蝶写入任何单据。</span></div>
+        <div className="eb-tblwrap"><table><thead><tr><th>店铺</th><th>平台</th><th>收入确认口径</th><th>工作台判断</th></tr></thead><tbody>{shopMap.map((r,i)=>{const key=r.wdt_name,value=recognitionRules[key]||'shipment';return <tr key={key||i}><td className="eb-shop-cell"><strong>{r.mgmt_name||r.wdt_name}</strong>{r.mgmt_name&&r.mgmt_name!==r.wdt_name&&<small>{r.wdt_name}</small>}</td><td>{r.platform||'未设置'}</td><td><select className="eb-rule-select" value={value} disabled={!canEdit} onChange={e=>{setRecognitionRules({...recognitionRules,[key]:e.target.value});setDirty(true)}}><option value="shipment">发货确认收入</option><option value="confirmed">确认收货后确认收入</option></select></td><td>{value==='shipment'?'旺店通已发货 → 应形成应收':'平台确认收货 → 应形成应收'}</td></tr>})}{!shopMap.length&&<tr><td colSpan="4">请先维护店铺对照。</td></tr>}</tbody></table></div>
       </div>}
 
       {tab === 'fee' && <div className="eb-card">

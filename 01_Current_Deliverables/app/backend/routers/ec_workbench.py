@@ -152,7 +152,8 @@ def get_data(period, shop):
         except (OSError, ValueError):
             ar = None
     rules = db.get_setting('ec_workbench_rules',{}) or {}
-    rule = rules.get(period,{}).get(shop,{'recognition':'shipment'})
+    recognition_rules = db.get_setting('ec_income_recognition_rules',{}) or {}
+    rule = rules.get(period,{}).get(shop) or {'recognition':recognition_rules.get(shop,'shipment')}
     rows = model.build_orders(sources,ar,rule.get('recognition','shipment'))
     conflicted=set(sources.get('alipay',{}).get('conflicted_keys',[])+sources.get('fund',{}).get('conflicted_keys',[]))
     for row in rows:
@@ -183,6 +184,13 @@ def source_cards(data):
             'files':p.get('filenames',[]),'file_count':s.get('summary',{}).get('file_count',1) if s else 0,
             'imported_at':p.get('imported_at'),'legacy':p.get('legacy',False),'version':p.get('id')})
     return out
+
+
+@router.get('/shops')
+def shops_view(request:Request):
+    """Lightweight shop selector sourced only from controlled basic data."""
+    require(request)
+    return {'ok':True,'shops':shops()}
 
 
 @router.get('/overview')

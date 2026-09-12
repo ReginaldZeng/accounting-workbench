@@ -868,6 +868,7 @@ def ec_basicdata(request: Request):
     from kernels import ec_flow_ledger as flow_ledger
     return {"shop_map": _rows(db.ec_shop_map), "fee_map": _rows(db.ec_fee_map),
             "rules": db.get_setting("ec_settle_rules", es.DEFAULT_RULES),
+            "recognition_rules": db.get_setting("ec_income_recognition_rules", {}) or {},
             "flow_rules": db.get_setting("ec_flow_class_rules", flow_ledger.DEFAULT_CLASS_RULES),
             "voucher_cfg": db.get_setting("ec_voucher_cfg", {}) or {}, "seeded": seeded}
 
@@ -921,6 +922,11 @@ async def ec_basicdata_save(request: Request):
         ru = {k: float(v) if k != "qr_goods" else str(v)
               for k, v in dict(body["rules"]).items() if k in es.DEFAULT_RULES}
         db.set_setting("ec_settle_rules", ru, operator=u["name"])
+    if body.get("recognition_rules") is not None:
+        allowed_shops = {str(r.get("wdt_name") or "").strip() for r in body.get("shop_map", [])}
+        recognition_rules = {str(k).strip(): str(v).strip() for k, v in dict(body["recognition_rules"]).items()
+                             if str(k).strip() in allowed_shops and str(v).strip() in ("shipment", "confirmed")}
+        db.set_setting("ec_income_recognition_rules", recognition_rules, operator=u["name"])
     if body.get("voucher_cfg") is not None:          # 凭证配置（账簿/凭证字/币别/两侧科目编码，V2.257）
         vc = {k: str(v or "").strip()[:40] for k, v in dict(body["voucher_cfg"]).items()
               if k in ("book_code", "voucher_group", "currency", "rate_type", "cash_acct", "ar_acct")}
