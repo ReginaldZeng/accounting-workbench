@@ -2,7 +2,7 @@
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict');
 const shop='测试天猫店',version='a'.repeat(32),requests=[],errors=[];
-const row=n=>({order_no:String(1000000000000000000n+BigInt(n)),business_type:'normal',business_label:'正常销售',status:'已发货',order_amount:100,paid:90,refund:0,fees:1,net_receipt:89,destination:'支付宝',ar_documents:[],issues:[],items:[],events:[]});
+const row=n=>({order_no:String(1000000000000000000n+BigInt(n)),business_type:'normal',business_label:'正常销售',status:'已发货',shipment_state:'shipped',created_at:n===3?'':'2026-08-02 12:00:00',order_amount:100,paid:90,refund:n===2?10:0,refund_state:n===2?'unknown':'none',fees:1,net_receipt:89,destination:'支付宝',ar_documents:[],issues:n===2?['退款类型待分类']:[],items:[],events:[]});
 (async()=>{
  const browser=await chromium.launch({headless:true,channel:'msedge'}),page=await browser.newPage({viewport:{width:1600,height:1000}});
  let delay=false,stale=false,phase='ready';
@@ -27,6 +27,12 @@ const row=n=>({order_no:String(1000000000000000000n+BigInt(n)),business_type:'no
  await page.goto(process.env.QA_URL||'http://127.0.0.1:8783/#/ecommonth');
  await page.getByRole('button',{name:'收入确认',exact:true}).click();
  await page.getByRole('button',{name:row(0).order_no,exact:true}).waitFor();
+ assert.equal(await page.locator('.ew-result-status').count(),0);
+ assert.equal(await page.locator('.ew-order-table tbody tr').first().locator('td').nth(2).locator('small').innerText(),'2026-08-02');
+ assert.equal(await page.locator('.ew-order-table tbody tr').nth(3).locator('td').nth(2).locator('small').innerText(),'日期未提供');
+ assert(!(await page.locator('.ew-order-table tbody tr').nth(2).locator('td').nth(1).innerText()).includes('退款类型待确认'));
+ assert.equal(await page.locator('.ew-order-table tbody tr').nth(2).locator('td').last().innerText(),'退款类型待分类');
+ assert((await page.locator('.ew-pagination').innerText()).includes('共 65 笔'));
  delay=true;await page.getByRole('button',{name:'下一页',exact:true}).click();
  await page.getByText('正在读取第 2 页…',{exact:true}).waitFor();
  assert.equal(await page.locator('.ew-order-table tbody tr').count(),30);
@@ -55,7 +61,7 @@ const row=n=>({order_no:String(1000000000000000000n+BigInt(n)),business_type:'no
  assert.equal(await page.getByRole('button',{name:row(2).order_no,exact:true}).count(),1);
  assert.equal(await page.getByRole('button',{name:'查看新版',exact:true}).count(),0);
  await page.getByRole('button',{name:'重试生成',exact:true}).click();
- await page.getByText('已保存 65 笔',{exact:false}).waitFor();
+ await page.locator('.ew-result-status').waitFor({state:'hidden'});
  if(process.env.QA_OUT)await page.screenshot({path:process.env.QA_OUT+'/orders-paging-desktop.png'});
  for(const width of [720,390]){await page.setViewportSize({width,height:1000});assert(!(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1)),`body overflow at ${width}`);if(process.env.QA_OUT)await page.screenshot({path:process.env.QA_OUT+`/orders-paging-${width}.png`});}
  assert.deepEqual(errors,[]);await browser.close();console.log(JSON.stringify({ok:true,retained_rows_while_loading:true,pinned_paging_and_drawer:true,filter_single_request:true,desktop_mobile:true,console_errors:errors.length}));
