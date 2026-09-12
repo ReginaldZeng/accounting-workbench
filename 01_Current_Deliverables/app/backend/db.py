@@ -821,6 +821,7 @@ CAP_META_STATIC = [
     {"key": "bp:board:budgetCockpit", "label": "驾驶舱看板", "ws": "bp", "group": "销售预算", "tier": "nav"},
     {"key": "bp:board:budgetPrep", "label": "销售预算编制", "ws": "bp", "group": "销售预算", "tier": "nav"},
     {"key": "bp:board:budgetRolling", "label": "滚动预算", "ws": "bp", "group": "销售预算", "plan": True, "tier": "nav"},
+    {"key": "bp:board:ecommerceOps", "label": "电商经营", "ws": "bp", "group": "电商经营", "tier": "nav"},   # V2.459 BP 电商经营拆独立板块，须能单独授予
     # V2.296 补登记（BP V2.183 就加了，核算这边一直没登记 → 除主管理员外没人能被授予，静默锁人）。
     # 「智能分析中心」在 BP 是**一级导航组**（与经营管理报表同级），不是挂在报表下的二级，故自成一个 group。
     # ⚠ 此码只管入口可见性；问数能问到哪些数由 BP 的 llm_query.ask 按 dashboard/budgetCockpit 另判——有入口 ≠ 什么都能问。
