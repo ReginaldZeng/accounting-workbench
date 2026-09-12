@@ -4510,6 +4510,8 @@ from routers import ec_workbench
 app.include_router(ec_workbench.router)
 from routers import ec_flow_ledger
 app.include_router(ec_flow_ledger.router)
+from routers import ec_documents
+app.include_router(ec_documents.router)
 app.include_router(llm_hub.router)   # V2.301 门户模型配置 P0.5 聚合看板
 app.include_router(temp_attendance.router)
 app.include_router(bom_quote.router)   # V-draft BOM报价审核

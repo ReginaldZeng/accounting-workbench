@@ -3,25 +3,36 @@ import { requestJson, query, post, money, count, useResource } from './ecomWorkb
 import './ecomFlowLedger.css'
 
 const BUCKETS = { receipt:'交易收款',refund:'交易退款',fee:'平台费用',adjustment:'补贴 / 调整',ufirst_fee:'U先专属费用',qr:'收钱码收款',transfer:'划转候选',recharge:'充值 / 划转候选',other:'其他已知费目',unknown:'待识别流水' }
-const EMPTY = { review_status:'',q:'',bucket:'',abnormal:false,direction:'',amount_min:'',amount_max:'',date_from:'',date_to:'' }
+const MATCHES={amount_equal:'金额一致',linked:'已关联，金额待核对',amount_pending:'金额待核对',missing_document:'有订单号但缺单据',unresolved:'无法确定订单号',conflict:'关联或单据版本冲突',not_order_based:'无需逐单关联',pending_index:'待建立关联'}
+const EMPTY = { review_status:'',match_status:'',q:'',bucket:'',abnormal:false,direction:'',amount_min:'',amount_max:'',date_from:'',date_to:'' }
 
 function OrderEvidence({ row, onOpen }) {
   const s=row.supplement
   const original=row.order_no && row.order_no!=='0' ? row.order_no : ''
-  return <><button className="ef-link ef-id" onClick={onOpen}>{original || s?.order_candidate || '—'}</button>
-    {!original && s?.order_candidate && <span className="ef-inferred" title="补充识别的候选订单号；点击查看来源，尚未确认关联">候选</span>}</>
+  const linked=row.document_match?.order_no || row.order_link?.order_no
+  return <><button className="ef-link ef-id" onClick={onOpen}>{linked || original || s?.order_candidate || '—'}</button>
+    {!linked && !original && s?.order_candidate && <span className="ef-inferred" title="补充识别的候选订单号；点击查看来源，尚未确认关联">候选</span>}
+    <small title={row.document_match?.message}>{MATCHES[row.document_match?.status || 'pending_index']}</small></>
 }
 
 function BusinessEvidence({ row }) {
   return <><span>{row.desc || row.rule_label || row.supplement?.business_label || '—'}</span>{!row.desc && row.rule_label && <span className="ef-inferred" title="按基础资料中的流水分类规则识别">规则</span>}{!row.desc && !row.rule_label && row.supplement?.business_label && <span className="ef-inferred" title="备注补充识别；原始业务描述为空，费用性质待确认">补充</span>}<small>{row.btype || '—'}</small></>
 }
 
+function DocumentMatch({row}) {
+  const m=row?.document_match,a=m?.evidence?.amount_check
+  return <section className={`ef-notice ef-match-panel ${m?.status==='conflict'?'ef-match-conflict':''}`}><h3>跨期单据核对 · {MATCHES[m?.status || 'pending_index']}</h3><p>{m?.message || '尚未保存核对结果，请在数据准备中导入历史资料或重新核对。'}</p>
+    {a?.expected!==undefined&&<><p>平台确认打款：{money(a.expected)} · 累计交易收款：{money(a.received)} · 差额：{money(a.difference)}</p><p>{a.basis}</p></>}
+    {m?.evidence?.documents?.map((d,i)=><p key={i}>{({order:'主订单',item:'子订单',refund:'退款',wdt:'出库'}[d.kind]||d.kind)} · {d.document_no} · {d.period} · {d.filename || `来源文件 #${d.file_id}`} / {d.sheet} 第{d.row}行{d.conflict?' · 存在版本冲突':''}</p>)}
+    <p>单据关联不等于已结算；这里不表示提现至公司银行，也不执行金蝶写入。</p></section>
+}
+
 function SupplementalDetail({ row }) {
   const s=row?.supplement
-  if (!s?.evidence?.length) return null
-  return <section className="ef-notice"><h3>补充识别依据（非原始字段）</h3>{s.business_label && <p>{s.business_label} · 来自{s.business_source} · 性质待确认</p>}
-    <p>{s.status==='conflict' ? '订单线索冲突，不自动关联' : s.status==='corroborates' ? '补充线索与原始订单号一致' : `候选订单号：${s.order_candidate}（待核对）`}</p>
-    {s.evidence.map((e,i)=><p key={i}>{e.source}：{e.text}</p>)}<p>{s.notice}</p></section>
+  if (!s?.evidence?.length) return <DocumentMatch row={row}/>
+  return <><DocumentMatch row={row}/><section className="ef-notice"><h3>补充识别依据（非原始字段）</h3>{s.business_label && <p>{s.business_label} · 来自{s.business_source} · 性质待确认</p>}
+    <p>{s.status==='conflict' ? '订单线索冲突，不自动关联' : row.order_link?.order_no ? `已关联订单：${row.order_link.order_no}` : s.status==='corroborates' ? '补充线索与原始订单号一致' : `候选订单号：${s.order_candidate}（待核对）`}</p>
+    {s.evidence.map((e,i)=><p key={i}>{e.source}：{e.text}</p>)}<p>{s.notice}</p></section></>
 }
 
 export function AccountTable({ data, onSelect }) {
@@ -104,6 +115,7 @@ export default function EcomFlowLedger({ user, period: parentPeriod = '', initia
       <label className="ef-account-filter">账户<select aria-label="流水账户" value={accountId} onChange={e=>selectAccount(e.target.value)}><option value="">全部账户</option>{accounts.data?.accounts?.map(a=><option key={a.id} value={a.id}>{a.name}{a.suffix ? ` · ${a.suffix}` : ''}</option>)}</select></label>
       <label>业务分桶<select aria-label="业务分桶" value={filters.bucket} onChange={e=>change('bucket',e.target.value)}><option value="">全部流水（{data ? count(Object.values(data.buckets||{}).reduce((a,b)=>a+b,0)) : '—'}）</option>{Object.entries(BUCKETS).map(([key,label])=><option key={key} value={key}>{label}（{data ? count(data.buckets?.[key]||0) : '—'}）</option>)}</select></label>
       <label>初审判定<select aria-label="初审判定" value={filters.review_status} onChange={e=>change('review_status',e.target.value)}><option value="">全部状态</option><option>待核对</option><option>正常</option><option>待追查</option></select></label>
+      <label>核对结果<select aria-label="核对结果" value={filters.match_status} onChange={e=>change('match_status',e.target.value)}><option value="">全部结果</option>{Object.entries(MATCHES).map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>
       <label>开始日期<input aria-label="开始日期" type="date" value={filters.date_from} onChange={e=>change('date_from',e.target.value)}/></label>
       <label>截止日期<input aria-label="截止日期" type="date" value={filters.date_to} onChange={e=>change('date_to',e.target.value)}/></label>
       <div className="ef-amount-filter" role="group" aria-label="金额搜索"><span className="ef-amount-title">金额搜索</span><div className="ef-amount-inputs"><select aria-label="金额方向" value={filters.direction} onChange={e=>change('direction',e.target.value)}><option value="">净额</option><option value="income">收入</option><option value="outgo">支出</option></select><input aria-label="金额下限" inputMode="decimal" value={filters.amount_min} onChange={e=>change('amount_min',e.target.value)} placeholder="最低"/><span>—</span><input aria-label="金额上限" inputMode="decimal" value={filters.amount_max} onChange={e=>change('amount_max',e.target.value)} placeholder="最高"/></div></div>

@@ -137,6 +137,8 @@ def store_parsed(account_id, parsed, operator):
                 cx.execute(insert(O).values(flow_id=rid,file_id=fid,sheet=origin['sheet'],row_number=origin['row']))
     from routers import ec_workbench
     with ec_workbench._lock: ec_workbench._cache.clear()
+    from routers.ec_documents import reconcile
+    reconcile()
     return {'ok':True,'added':added,'duplicates':duplicate,'conflicts':conflicts,'source_rows':total_rows}
 
 
@@ -191,9 +193,13 @@ def import_status(request:Request,job_id:str):
 
 
 @router.get('')
-def search(request:Request,account_id:str='',period:str='',q:str='',bucket:str='',abnormal:bool=False,review_status:str='',
+def search(request:Request,account_id:str='',period:str='',q:str='',bucket:str='',abnormal:bool=False,review_status:str='',match_status:str='',
            date_from:str='',date_to:str='',direction:str='',amount_min:str='',amount_max:str='',page:int=1,size:int=50):
     require(request);where=[]
+    M=db.ec_flow_matches
+    if match_status:
+        if match_status=='pending_index':where.append(R.c.id.not_in(select(M.c.flow_id)))
+        else:where.append(R.c.id.in_(select(M.c.flow_id).where(M.c.status==match_status)))
     if account_id:where.append(R.c.account_id==account_id)
     if period:
         check_period(period);where.append(R.c.period==period)
@@ -201,7 +207,7 @@ def search(request:Request,account_id:str='',period:str='',q:str='',bucket:str='
     if date_to:where.append(R.c.occurred_at<date_to[:10]+' 24:00:00')
     if q:
         q=q.strip()[:200]
-        where.append(or_(R.c.serial==q,R.c.txn==q,R.c.order_no==q,R.c.mch_no==q,R.c.search_text.contains(q,autoescape=True)))
+        where.append(or_(R.c.serial==q,R.c.txn==q,R.c.order_no==q,R.c.mch_no==q,R.c.search_text.contains(q,autoescape=True),R.c.id.in_(select(M.c.flow_id).where(M.c.order_no==q))))
     if abnormal:where.append(R.c.abnormal==1)
     if review_status=='待核对':where.append(R.c.id.not_in(select(db.ec_flow_reviews.c.flow_id).where(db.ec_flow_reviews.c.verdict.in_(['正常','待追查']))))
     elif review_status in ('正常','待追查'):where.append(R.c.id.in_(select(db.ec_flow_reviews.c.flow_id).where(db.ec_flow_reviews.c.verdict==review_status)))
@@ -221,10 +227,13 @@ def search(request:Request,account_id:str='',period:str='',q:str='',bucket:str='
         buckets=cx.execute(select(R.c.bucket,func.count()).where(*bucket_where).group_by(R.c.bucket)).fetchall()
     rows=[]
     with db._engine.connect() as cx:
+        matches={m.flow_id:dict(m._mapping) for m in cx.execute(select(M).where(M.c.flow_id.in_([v.id for v in records])))} if records else {}
         reviews={r.flow_id:dict(r._mapping) for r in cx.execute(select(db.ec_flow_reviews).where(db.ec_flow_reviews.c.flow_id.in_([v.id for v in records])))} if records else {}
     for r in records:
-        payload=ledger.supplement(json.loads(r.payload));payload.pop('raw',None)
-        rows.append(dict(payload,id=r.id,account_id=r.account_id,account_name=r.name,review=reviews.get(r.id)))
+        payload=ledger.resolve_order(json.loads(r.payload));payload.pop('raw',None)
+        match=matches.get(r.id)
+        if match:match.pop('payload',None)
+        rows.append(dict(payload,id=r.id,account_id=r.account_id,account_name=r.name,review=reviews.get(r.id),document_match=match))
     return {'ok':True,'rows':rows,'total':stats[0],'income':float(stats[1] or 0),'outgo':float(stats[2] or 0),
         'flagged':stats[3] or 0,'page':page,'pages':max(1,(stats[0]+size-1)//size),'buckets':dict(buckets),
         'notice':'同流水号冲突版本保留在搜索结果中；搜索合计不是已确认账户余额或可入账金额。'}
@@ -238,11 +247,18 @@ def detail(request:Request,row_id:int):
         if not row:raise HTTPException(404,'流水不存在')
         sources=cx.execute(select(O.c.sheet,O.c.row_number,F.c.filename,F.c.aliases,F.c.ts).join(F,F.c.id==O.c.file_id).where(O.c.flow_id==row_id)).fetchall()
         acc=account(cx,row.account_id)
+        match=cx.execute(select(db.ec_flow_matches).where(db.ec_flow_matches.c.flow_id==row_id)).first()
+        match=dict(match._mapping) if match else None
+        if match:
+            match['evidence']=json.loads(match.pop('payload'))
+            file_ids={d['file_id'] for d in match['evidence']['documents']}
+            names={f.id:f.filename for f in cx.execute(select(db.ec_document_files).where(db.ec_document_files.c.id.in_(file_ids)))} if file_ids else {}
+            for d in match['evidence']['documents']:d['filename']=names.get(d['file_id'],'')
         historical=cx.execute(select(db.ec_excl_notes).where(db.ec_excl_notes.c.period==row.period,db.ec_excl_notes.c.serial==row.serial,
             db.ec_excl_notes.c.shop.in_(json.loads(acc.shops or '[]')))).fetchall() if row.serial else []
         review=cx.execute(select(db.ec_flow_reviews).where(db.ec_flow_reviews.c.flow_id==row_id)).first()
     db.audit(user['name'],'ec_flow_detail',target=str(row_id),detail='查看流水原始字段；未写金蝶')
-    return {'ok':True,'row':ledger.supplement(json.loads(row.payload)),'sources':[dict(r._mapping,aliases=json.loads(r.aliases or '[]')) for r in sources],
+    return {'ok':True,'row':dict(ledger.resolve_order(json.loads(row.payload)),document_match=match),'sources':[dict(r._mapping,aliases=json.loads(r.aliases or '[]')) for r in sources],
         'review':dict(review._mapping) if review else None,
         'historical_reviews':[dict(r._mapping) for r in historical],
         'history_note':'旧记录按店铺、期间和流水号关联，未含账户维度；请核实后使用，不自动沿用旧定性。'}

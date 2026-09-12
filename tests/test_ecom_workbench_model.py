@@ -13,6 +13,18 @@ def sources(kind='normal',ship_date='2026-08-02'):
                           {'order_key':'k1','kind':'fee','channel':'alipay','income':0,'expense':1.81}]}}
 
 class ModelTests(unittest.TestCase):
+    def test_linked_fee_keeps_actual_wallet_and_business_label(self):
+        no='3316393238010038983'
+        row={'order_no':'','remark':'先用后付技术服务费('+no+')扣款',
+             'mch_no':'T200P'+no,'serial':'fee-1','income':0,'outgo':'0.19','desc':'','btype':'分账'}
+        for channel in ('alipay','fund'):
+            result=model.event(row,channel)
+            self.assertEqual(result['channel'],channel)
+            self.assertEqual(result['label'],'先用后付技术服务费扣款')
+            self.assertEqual(result['kind'],'fee')
+            self.assertEqual(result['expense'],0.19)
+        self.assertEqual(row['order_no'],'')
+
     def test_gsv_is_before_fees(self):
         row=model.build_orders(sources(),{})[0]
         self.assertEqual((row['paid'],row['fees'],row['net_receipt'],row['gsv']),(15.81,1.81,14,15.81))

@@ -32,6 +32,23 @@ class FlowLedgerTests(unittest.TestCase):
         remark='猫猫币抵扣项目平台垫付资金(331639328010038983)扣款；猫猫币抵扣项目平台垫付资金(331639328010038984)扣款'
         self.assertEqual(ledger.supplement({'remark':remark})['supplement']['status'],'conflict')
 
+    def test_order_link_templates_conflicts_and_raw_preservation(self):
+        no='3316393238010038983'
+        for label in ('先用后付技术服务费','猫猫币抵扣项目平台垫付资金','猫猫币抵扣项目推广服务费'):
+            row={'order_no':'','remark':label+'('+no+')扣款','mch_no':'T200P'+no,'raw':{'业务基础订单号':''}}
+            linked=ledger.resolve_order(row)
+            self.assertEqual(linked['order_link']['order_no'],no)
+            self.assertEqual(linked['order_link']['status'],'corroborated')
+            self.assertEqual(linked['raw'],row['raw'])
+            self.assertEqual(linked['order_no'],'')
+            self.assertEqual(ledger.resolve_order(dict(row,mch_no=''))['order_link']['status'],'candidate')
+            self.assertEqual(ledger.resolve_order(dict(row,mch_no=''),{no})['order_link']['status'],'matched')
+            conflict=ledger.resolve_order(dict(row,mch_no='T200P3316393238010038984'))
+            self.assertEqual(conflict['order_link']['order_no'],'')
+            self.assertIn('订单关联字段冲突',conflict['flags'])
+        self.assertEqual(ledger.resolve_order({'raw':{'业务订单号':no}})['order_link']['order_no'],no)
+        self.assertEqual(ledger.resolve_order({'raw':{'业务订单号':'M['+no+']'}})['order_link']['order_no'],'')
+
     def workbook(self, rows, headers=None):
         book=openpyxl.Workbook();sheet=book.active
         sheet.append(headers or ['入账时间','账务类型','收入（+元）','支出（-元）','业务描述','支付宝流水号','业务基础订单号','余额（元）','新增业务字段'])

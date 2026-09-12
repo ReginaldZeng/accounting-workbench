@@ -682,6 +682,10 @@ bom_quote_final = Table(                             # 定稿指针：每(源,�
     Column("finalized_by", String(50)), Column("finalized_at", String(20)),
     UniqueConstraint("source", "product_key", name="uq_bom_final_src_pk"),
 )
+from kernels.ec_documents import (TABLES as _ec_document_tables, ec_document_files,
+    ec_document_versions, ec_document_heads, ec_flow_matches)
+for _table in _ec_document_tables:
+    _table.to_metadata(_md)
 _md.create_all(_engine)
 
 # 细粒度权限能力清单 —— 代码持有的**静态**注册表：加一条动作权限只改这里，账号页按 ws/group 自动渲染。

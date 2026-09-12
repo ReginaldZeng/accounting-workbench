@@ -121,21 +121,54 @@ def supplement(row):
     remark=string(row.get('remark')); merchant=string(row.get('mch_no'))
     evidence=[]
     # Only explicit order-bearing templates; arbitrary long IDs may be transactions or accounts.
-    for match in re.finditer(r'猫猫币抵扣项目平台垫付资金\s*[（(]\s*([0-9]{15,24})\s*[）)]\s*扣款',remark):
-        evidence.append({'order_no':match.group(1),'source':'备注','text':match.group(0)})
+    pattern=r'(猫猫币抵扣项目平台垫付资金|猫猫币抵扣项目推广服务费|先用后付技术服务费)\s*[（(]\s*([0-9]{15,24})\s*[）)]\s*扣款'
+    labels=[]
+    for match in re.finditer(pattern,remark):
+        evidence.append({'order_no':match.group(2),'source':'备注','text':match.group(0)})
+        labels.append(match.group(1)+'扣款')
     hit=re.fullmatch(r'T200P([0-9]{15,24})',merchant)
     if hit:evidence.append({'order_no':hit.group(1),'source':'商户订单号','text':merchant})
+    secondary=string(row.get('business_order_no') or (row.get('raw') or {}).get('业务订单号'))
+    if re.fullmatch(r'[0-9]{15,24}',secondary):
+        evidence.append({'order_no':secondary,'source':'业务订单号','text':secondary})
     candidates=sorted({e['order_no'] for e in evidence})
     original=string(row.get('order_no'))
     original=original if original!='0' else ''
     conflict=len(set(candidates+([original] if original else [])))>1
-    label='猫猫币抵扣项目平台垫付资金扣款' if any(e['source']=='备注' for e in evidence) and not string(row.get('desc')) else ''
+    label=labels[0] if len(set(labels))==1 and not string(row.get('desc')) else ''
     derived={'business_label':label,'business_source':'备注' if label else '',
         'order_candidate':candidates[0] if len(candidates)==1 and not conflict else '',
         'order_sources':list(dict.fromkeys(e['source'] for e in evidence)),
         'status':'conflict' if conflict else 'corroborates' if original and candidates else 'candidate' if candidates else 'none',
         'evidence':evidence,'notice':'补充识别仅供查找，未确认订单归属及费用性质，不参与自动核销。'}
     return dict(row,supplement=derived)
+
+
+def resolve_order(row, known_orders=None):
+    """Resolve a link, never rewrite the source order number or imply settlement approval."""
+    result=supplement(row)
+    evidence=result['supplement']
+    original=string(row.get('order_no'))
+    original='' if original=='0' else original
+    candidate=evidence['order_candidate']
+    if evidence['status']=='conflict':
+        resolved,status='','conflict'
+    elif original:
+        resolved,status=original,'source'
+    elif candidate and ('业务订单号' in evidence['order_sources'] or len(evidence['order_sources'])>=2):
+        resolved,status=candidate,'corroborated'
+    elif candidate and known_orders is not None and candidate in known_orders:
+        resolved,status=candidate,'matched'
+    else:
+        resolved,status='', 'candidate' if candidate else 'missing'
+    result['order_link']={'order_no':resolved,'status':status,'sources':
+        (['业务基础订单号'] if original else [])+evidence['order_sources'],
+        'rule_version':1}
+    if resolved:
+        result['supplement']['notice']='已按订单关联规则建立关联；原始字段保留。关联不代表金额核对完成或已结算。'
+    if status=='conflict':
+        result['flags']=list(dict.fromkeys([*row.get('flags',[]),'订单关联字段冲突']))
+    return result
 
 
 def _cells_xml(data):

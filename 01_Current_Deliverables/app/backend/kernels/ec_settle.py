@@ -53,7 +53,8 @@ def _code_of(desc):
 _FLOW_COLS = {"入账时间": "ts", "支付宝交易号": "txn", "支付宝流水号": "serial",
               "商户订单号": "mch_no", "账务类型": "btype", "收入（+元）": "income",
               "支出（-元）": "outgo", "支付渠道": "chan", "商品名称": "goods",
-              "对方名称": "peer", "业务基础订单号": "order_no", "业务描述": "desc"}
+              "对方名称": "peer", "业务基础订单号": "order_no", "业务描述": "desc",
+              "备注": "remark", "业务订单号": "business_order_no"}
 
 
 def _pick_sheet(wb, must_heads):

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { ecKdRefresh } from '../api.js'
 import EcomFlowLedger, { AccountTable } from './EcomFlowLedger.jsx'
+import EcomHistoricalDocuments from './EcomHistoricalDocuments.jsx'
 import { requestJson, wb, query, post, money, count, percent, useResource } from './ecomWorkbenchApi.js'
 import './ecomWorkbench.css'
 import overviewIcon from '../assets/ecom-nav/chart-bar.svg'
@@ -59,7 +60,11 @@ function Overview({data,loading,revision,drill,openCash}) {
   </div>
 }
 
-function Preparation({period,shop,shopInfo,revision,canEdit,refresh,notify}) {
+function Preparation(props) {
+  return <><PreparationSources {...props}/><EcomHistoricalDocuments key={props.shop} shop={props.shop} canEdit={props.canEdit} onChanged={props.refresh}/></>
+}
+
+function PreparationSources({period,shop,shopInfo,revision,canEdit,refresh,notify}) {
   const result=useResource(`/api/ec/workbench/sources?${query({period,shop})}`,revision),data=result.data
   const [busy,setBusy]=useState(false),[inbox,setInbox]=useState(null),[fileSource,setFileSource]=useState(null),input=useRef(null),uploadKind=useRef('order')
   useEffect(()=>{if (!data?.voucher_sync?.running && !data?.kingdee?.refreshing) return;const timer=setInterval(refresh,5000);return()=>clearInterval(timer)},[data?.voucher_sync?.running,data?.kingdee?.refreshing])

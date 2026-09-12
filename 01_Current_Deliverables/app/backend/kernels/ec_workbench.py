@@ -6,6 +6,7 @@ from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from openpyxl import load_workbook
 from kernels import ec_tmall_import as tm, ec_settle as es, ec_month_fulfillment as fulfil
+from kernels import ec_flow_ledger as ledger
 
 KINDS = {'order': '平台订单', 'item': '商品与子订单', 'wdt': '旺店通销售出库',
          'alipay': '支付宝流水', 'fund': '聚合账户流水', 'refund': '退款售后明细'}
@@ -80,8 +81,9 @@ def fee_kind(code, label, income, expense):
 
 
 def event(row, channel):
+    row = ledger.resolve_order(row)
     code, label = es._code_of(row.get('desc'))
-    label = FEE_LABELS.get(code, label or text(row.get('btype')))
+    label = FEE_LABELS.get(code, label or row['supplement']['business_label'] or text(row.get('btype')))
     # Do not persist arbitrary descriptions, payment serials or customer identifiers.
     label = re.sub(r'\d{8,}', '[编号省略]', text(label, 120))
     income, expense = amount(row.get('income')), amount(row.get('outgo'))
@@ -188,7 +190,13 @@ def parse_source(kind, payloads, period, shop):
                 if ev['key'] in seen or ev['date'][:7] != period:
                     continue
                 seen.add(ev['key'])
-                no = text(r.get('order_no'), 64)
+                linked = ledger.resolve_order(r)
+                no = linked['order_link']['order_no']
+                ev['order_link'] = linked['order_link']
+                if linked['order_link']['status']=='conflict':
+                    out.setdefault('conflicted_keys',[]).extend(tm._order_key(n) for n in
+                        [r.get('order_no','')]+[e['order_no'] for e in linked['supplement']['evidence']] if n)
+                    continue
                 ev['order_key'] = tm._order_key(no) if no else ''
                 # Aggregation-channel rows are evidence copies, not an additional wallet receipt.
                 ev['aggregate_copy'] = text(r.get('chan')) == '聚合结算渠道'

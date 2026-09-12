@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from core import db, _require_perm
 from routers import ec
 from kernels import ec_workbench as model
+from kernels import ec_flow_ledger as ledger
 
 router = APIRouter(prefix='/api/ec/workbench')
 TABLE = db.ec_workbench_imports
@@ -107,12 +108,18 @@ def load_sources(period, shop):
             statement_rows=cx.execute(select(db.ec_flow_rows).where(db.ec_flow_rows.c.account_id.in_(ids),db.ec_flow_rows.c.period==period))
             events=[];conflicted=set()
             for record in statement_rows:
-                value=json.loads(record.payload)
-                key=model.tm._order_key(value['order_no']) if value.get('order_no') else ''
+                value=ledger.resolve_order(json.loads(record.payload))
+                linked=value['order_link']['order_no']
+                key=model.tm._order_key(linked) if linked else ''
+                if value['order_link']['status']=='conflict':
+                    conflicted.update(model.tm._order_key(no) for no in
+                        [value.get('order_no','')]+[e['order_no'] for e in value['supplement']['evidence']] if no)
+                    continue
                 if any('同一流水号内容冲突' in flag for flag in value.get('flags',[])):
                     if key:conflicted.add(key)
                     continue
                 event=model.event(value,kind)
+                event['order_link']=value['order_link']
                 event.update(order_key=key,account_id=record.account_id,account_name=next(a['name'] for a in accounts if a['id']==record.account_id),
                     ledger_id=record.id,aggregate_copy=kind=='alipay' and value.get('chan')=='聚合结算渠道')
                 if value['bucket']=='receipt':event['kind']='receipt'
@@ -159,7 +166,7 @@ def get_data(period, shop):
     for row in rows:
         if row['order_key'] in conflicted:
             row.update(fees=None,net_receipt=None,manual=True)
-            row['issues'].append('流水号内容冲突：费用与净收待核对')
+            row['issues'].append('流水内容或订单关联冲突：费用与净收待核对')
     cash_available = any(sources.get(k,{}).get('rows') for k in ('alipay','fund'))
     if not cash_available:
         for r in rows: r['fees']=None
