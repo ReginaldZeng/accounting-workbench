@@ -15,6 +15,7 @@
 .ew-order-filters{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding:18px 0 14px}.ew-order-filters label{display:flex;flex-direction:column;gap:6px;min-width:145px;color:var(--ink-3,#8993a4);font-size:11px}.ew-order-filters label:first-child{min-width:240px}.ew-order-filters .ew-order-search{flex:1;min-width:220px}.ew-order-filters>button{margin-bottom:0}.ew-order-filters>.ew-muted{margin-left:auto;align-self:center}@media(max-width:800px){.ew-order-filters label,.ew-order-filters label:first-child,.ew-order-filters .ew-order-search{flex:1 1 calc(50% - 10px);min-width:150px}.ew-order-filters>.ew-muted{flex-basis:100%;margin-left:0}}
 
 /* Data preparation: stable shop rail + compact monthly checklist. */
+.ew-result-status{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;font-size:11px;color:var(--ink-2,#637089)}
 .ew-shops i.ready{background:#32a783;animation:ew-ready-pulse 2.4s ease-in-out infinite}
 @keyframes ew-ready-pulse{0%,100%{box-shadow:0 0 0 0 #32a78340}50%{box-shadow:0 0 0 5px #32a78310}}
 @media(prefers-reduced-motion:reduce){.ew-shops i.ready{animation:none}}

@@ -29,6 +29,7 @@ class ApiTests(unittest.TestCase):
         sys.modules['core']=core
         wb=types.ModuleType('routers.ec_workbench');wb.require=require;wb.check_shop=check_shop;wb.shops=lambda:[{'id':'shop','name':'shop'}];wb.check_period=lambda period:None
         wb.ec=types.SimpleNamespace(_now=lambda:'2026-09-12 12:00:00',es=ec_settle);wb._lock=threading.RLock();wb._cache={}
+        wb.mark_order_inputs_changed=lambda ids:None
         sys.modules['routers.ec_workbench']=wb
         from routers import ec_documents,ec_flow_ledger
         cls.router=ec_documents
@@ -57,7 +58,7 @@ class ApiTests(unittest.TestCase):
         with patch.object(routers,'ec',fake,create=True):spec.loader.exec_module(module)
         self.db.set_setting('ec_preparation_rules',{'shop':['order','alipay']})
         module.save_source('2026-08','shop','order','test-prep',['test.xlsx'],{'rows':[{'order_no':'123'}],'status':'ready'},'test')
-        with patch.object(module,'get_data',side_effect=AssertionError('must not rebuild orders')):
+        with patch.object(module,'compute_data',side_effect=AssertionError('must not rebuild orders')):
             cards=module.preparation_cards('2026-08','shop')
         self.assertEqual(ec_preparation.progress(cards)['ready'],2)
         with self.db._engine.begin() as cx:
@@ -67,6 +68,51 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(cards[1]['rows'],1)
         self.assertIn('1 个关联账户',cards[1]['warnings'][0])
         self.assertEqual(module.preparation_cards('2026-08','unconfigured'),[])
+
+    def test_saved_order_http_reads_and_worker_version_contract(self):
+        import importlib.util,routers
+        from kernels import ec_order_store as store,ec_workbench as model
+        from tests.test_ec_order_store import data
+        fake=types.SimpleNamespace(fulfillment=types.SimpleNamespace(TARGET_SHOP='shop'),es=ec_settle,
+            _kd_cache_path=lambda p:str(Path(self.tmp.name)/'absent.json'))
+        spec=importlib.util.spec_from_file_location('order_router_test',ROOT/'01_Current_Deliverables/app/backend/routers/ec_workbench.py')
+        module=importlib.util.module_from_spec(spec)
+        with patch.object(routers,'ec',fake,create=True):spec.loader.exec_module(module)
+        app=FastAPI();app.include_router(module.router);client=TestClient(app)
+        selected={'id':'shop','name':'shop','platform':'天猫','kd_name':'shop'}
+        with patch.object(module,'shops',return_value=[selected]),patch.object(module,'preparation_cards',return_value=[]):
+            version=module.input_version('2026-08','shop')
+            store.observe(self.db._engine,'2026-08','shop',version)
+            with patch.object(module,'compute_data',return_value=data()) as compute:
+                module.build_result('2026-08','shop');module.build_result('2026-08','shop')
+                self.assertEqual(compute.call_count,1)
+            headers={'x-test-role':'reader'}
+            with patch.object(module,'compute_data',side_effect=AssertionError('HTTP must not build')),patch.object(model,'metrics',side_effect=AssertionError('HTTP must not aggregate all orders')):
+                for path in ('orders?page=2&','order?order_no=1000000000000000002&','overview?','preview?','results/status?'):
+                    response=client.get('/api/ec/workbench/'+path+'period=2026-08&shop=shop',headers=headers)
+                    self.assertEqual(response.status_code,200,response.text)
+                page=client.get('/api/ec/workbench/orders?period=2026-08&shop=shop&page=2',headers=headers).json()
+                self.assertEqual((page['total'],page['page'],len(page['rows'])),(65,2,30))
+                self.assertEqual(client.get('/api/ec/workbench/orders?period=2026-08&shop=shop').status_code,403)
+                self.assertEqual(client.post('/api/ec/workbench/results/refresh',json={'period':'2026-08','shop':'shop'},headers=headers).status_code,403)
+            self.db.set_setting('ec_income_recognition_rules',{'shop':'confirmed'})
+            changed=module.input_version('2026-08','shop');self.assertNotEqual(version,changed)
+            store.observe(self.db._engine,'2026-08','shop',changed)
+            with patch.object(module,'compute_data',side_effect=ValueError('private payload must not leak')):
+                module.build_result('2026-08','shop')
+            status=store.page(self.db._engine,'2026-08','shop')['result']
+            self.assertEqual(status['status'],'error');self.assertEqual(status['build_id'],page['result']['build_id'])
+            self.assertNotIn('private',status['error'])
+            original=module.input_version('2026-08','shop')
+            module.mark_order_inputs_changed(['a'])
+            self.assertNotEqual(original,module.input_version('2026-08','shop'))
+            with patch.object(module,'compute_data',return_value=data(7)) as compute,TestClient(app):
+                for _ in range(100):
+                    if store.state(self.db._engine,'2026-08','shop')['status']=='ready':break
+                    time.sleep(.02)
+                self.assertEqual(store.page(self.db._engine,'2026-08','shop')['total'],7)
+                self.assertEqual(compute.call_count,1)
+        client.close()
 
     def test_router_import_filter_detail_and_permissions(self):
         from kernels.test_ec_documents import DocumentsTests

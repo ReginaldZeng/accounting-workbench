@@ -686,6 +686,9 @@ from kernels.ec_documents import (TABLES as _ec_document_tables, ec_document_fil
     ec_document_versions, ec_document_heads, ec_flow_matches)
 for _table in _ec_document_tables:
     _table.to_metadata(_md)
+from kernels.ec_order_store import TABLES as _ec_order_tables
+for _table in _ec_order_tables:
+    _table.to_metadata(_md)
 _md.create_all(_engine)
 
 # 细粒度权限能力清单 —— 代码持有的**静态**注册表：加一条动作权限只改这里，账号页按 ws/group 自动渲染。

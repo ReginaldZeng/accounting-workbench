@@ -6,7 +6,6 @@ import json
 import os
 import re
 import threading
-import time
 from pathlib import Path
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from sqlalchemy import select, insert, func
@@ -17,13 +16,16 @@ from kernels import ec_workbench as model
 from kernels import ec_flow_ledger as ledger
 from kernels import ec_preparation as preparation
 from kernels import ec_documents as documents
+from kernels import ec_order_store as order_store
 
 router = APIRouter(prefix='/api/ec/workbench')
 TABLE = db.ec_workbench_imports
-_cache = {}
 _lock = threading.RLock()
 _sync = {}
 TARGET = ec.fulfillment.TARGET_SHOP
+_result_wake=threading.Event()
+_result_stop=threading.Event()
+_result_thread=None
 
 
 def require(request, write=False):
@@ -64,13 +66,14 @@ def save_source(period, shop, kind, digest, filenames, payload, operator):
             rid = cx.execute(select(TABLE.c.id).where(TABLE.c.period==period, TABLE.c.shop==shop,
                 TABLE.c.kind==kind, TABLE.c.digest==digest)).scalar_one()
         return {'id':rid,'duplicate':True}
-    with _lock: _cache.clear()
+    _result_wake.set()
     return {'id':rid,'duplicate':False}
 
 
 def load_sources(period, shop):
     with db._engine.connect() as cx:
-        records = cx.execute(select(TABLE).where(TABLE.c.period==period, TABLE.c.shop==shop).order_by(TABLE.c.id.desc())).fetchall()
+        latest=select(func.max(TABLE.c.id)).where(TABLE.c.period==period,TABLE.c.shop==shop).group_by(TABLE.c.kind)
+        records = cx.execute(select(TABLE).where(TABLE.c.id.in_(latest))).fetchall()
     sources, provenance = {}, {}
     for r in records:
         if r.kind in sources: continue
@@ -140,12 +143,8 @@ def load_sources(period, shop):
     return sources, provenance
 
 
-def get_data(period, shop):
-    # Bound memory; input and cache metadata changes invalidate within 20 seconds at most.
-    cache_key = (period,shop)
-    with _lock:
-        hit = _cache.get(cache_key)
-        if hit and time.monotonic()-hit[0]<20: return hit[1]
+def compute_data(period, shop):
+    """Background builder only. HTTP reads use ec_order_store, never this function."""
     sources, provenance = load_sources(period,shop)
     for source in sources.values(): source.setdefault('period',period)
     ar, ar_state = ec._month_ar_cache(period)
@@ -173,14 +172,124 @@ def get_data(period, shop):
     if not cash_available:
         for r in rows: r['fees']=None
     data = {'sources':sources,'provenance':provenance,'rows':rows,'kingdee':ar_state,'rule':rule,'cash_available':cash_available}
-    with _lock:
-        if len(_cache)>=12: _cache.clear()
-        _cache[cache_key]=(time.monotonic(),data)
     return data
 
 
-def selected_rows(rows,business):
-    return [r for r in rows if not business or r['business_type']==business]
+def mark_order_inputs_changed(account_ids):
+    import uuid
+    # Separate keys avoid losing another account's revision during concurrent imports.
+    for aid in set(account_ids):
+        db.set_setting('ec_order_account_revision:'+aid,uuid.uuid4().hex,operator='工作台结果更新')
+    _result_wake.set()
+
+
+def result_inputs():
+    """Small metadata manifest; no XLSX parsing, statement payloads or Kingdee requests."""
+    with db._engine.connect() as cx:
+        latest=select(func.max(TABLE.c.id)).where(TABLE.c.kind!='kingdee_docs').group_by(TABLE.c.period,TABLE.c.shop,TABLE.c.kind)
+        imports=[dict(r._mapping) for r in cx.execute(select(TABLE.c.id,TABLE.c.period,TABLE.c.shop,TABLE.c.kind,TABLE.c.digest).where(TABLE.c.id.in_(latest)))]
+        legacy=[tuple(r) for r in cx.execute(select(db.ec_tmall_import_runs.c.period,db.ec_tmall_import_runs.c.kind,func.max(db.ec_tmall_import_runs.c.id)).group_by(db.ec_tmall_import_runs.c.period,db.ec_tmall_import_runs.c.kind))]
+        wdt=[tuple(r) for r in cx.execute(select(db.ec_wdt_import_runs.c.period,func.max(db.ec_wdt_import_runs.c.id)).group_by(db.ec_wdt_import_runs.c.period))]
+        accounts=[dict(r._mapping) for r in cx.execute(select(db.ec_flow_accounts))]
+        cash=[tuple(r) for r in cx.execute(select(db.ec_flow_rows.c.account_id,db.ec_flow_rows.c.period,func.count(),func.max(db.ec_flow_rows.c.id)).group_by(db.ec_flow_rows.c.account_id,db.ec_flow_rows.c.period))]
+        files=[tuple(r) for r in cx.execute(select(db.ec_flow_files.c.account_id,func.max(db.ec_flow_files.c.id)).group_by(db.ec_flow_files.c.account_id))]
+        scopes={(r.period,r.shop) for r in cx.execute(select(order_store.STATES.c.period,order_store.STATES.c.shop))}
+    scopes.update((r['period'],r['shop']) for r in imports)
+    scopes.update((p,TARGET) for p,_,_ in legacy)
+    return dict(imports=imports,legacy=legacy,wdt=wdt,accounts=accounts,cash=cash,files=files,scopes=scopes,
+        shops={s['id']:s for s in shops()},rules=db.get_setting('ec_workbench_rules',{}) or {},
+        recognition=db.get_setting('ec_income_recognition_rules',{}) or {},
+        account_revisions={a['id']:db.get_setting('ec_order_account_revision:'+a['id'],None) for a in accounts},
+        kd_meta=db.get_setting('ec_kd_cache_meta',{}) or {})
+
+
+def input_version(period,shop,inputs=None):
+    inputs=inputs or result_inputs()
+    accounts=[a for a in inputs['accounts'] if shop in json.loads(a.get('shops') or '[]')]
+    ids={a['id'] for a in accounts}
+    try:
+        stat=Path(ec._kd_cache_path(period)).stat();kd_file=(stat.st_mtime_ns,stat.st_size)
+    except OSError:kd_file=None
+    manifest={'model':'order-results-v1','shop':inputs['shops'].get(shop),
+        'imports':[r for r in inputs['imports'] if r['period']==period and r['shop']==shop],
+        'legacy':[r for r in inputs['legacy'] if r[0]==period] if shop==TARGET else [],
+        'wdt':[r for r in inputs['wdt'] if r[0]==period] if shop==TARGET else [],
+        'accounts':accounts,'cash':[r for r in inputs['cash'] if r[0] in ids and r[1]==period],
+        'files':[r for r in inputs['files'] if r[0] in ids],
+        'account_revisions':{a:inputs['account_revisions'].get(a) for a in sorted(ids)},
+        'rule':inputs['rules'].get(period,{}).get(shop),'recognition':inputs['recognition'].get(shop,'shipment'),
+        'kd_meta':inputs['kd_meta'].get(period),'kd_file':kd_file}
+    # Stable ordering prevents database row order from looking like a source change.
+    for k in ('imports','legacy','wdt','accounts','cash','files'):manifest[k]=sorted(manifest[k],key=order_store.pack)
+    return order_store.fingerprint(manifest)
+
+
+def build_result(period,shop):
+    job=order_store.claim(db._engine,period,shop)
+    if not job:return
+    stop=threading.Event()
+    def renew():
+        while not stop.wait(30):
+            try:
+                if not order_store.heartbeat(db._engine,job):return
+            except Exception:return  # CAS publication still prevents a superseded worker from publishing.
+    thread=threading.Thread(target=renew,daemon=True);thread.start()
+    try:
+        data=compute_data(period,shop)
+        current=input_version(period,shop)
+        if current!=job['requested_version']:
+            order_store.observe(db._engine,period,shop,current)
+            raise order_store.Superseded()
+        order_store.publish(db._engine,job,data)
+    except order_store.Superseded:
+        order_store.fail(db._engine,job,superseded=True)
+    except Exception as exc:
+        order_store.fail(db._engine,job,'结果生成失败：'+type(exc).__name__+'；旧版本保留，可重试')
+    finally:stop.set();thread.join(timeout=1)
+
+
+@router.on_event('startup')
+def start_result_worker():
+    global _result_thread
+    if _result_thread and _result_thread.is_alive():return
+    _result_stop.clear()
+    def run():
+        # ponytail: one build at a time per worker; DB leases prevent duplicate work across server processes.
+        while not _result_stop.is_set():
+            try:
+                inputs=result_inputs()
+                for period,shop in sorted(inputs['scopes'],reverse=True):
+                    if _result_stop.is_set():break
+                    if shop not in inputs['shops']:continue
+                    version=input_version(period,shop,inputs)
+                    order_store.observe(db._engine,period,shop,version)
+                    build_result(period,shop)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error('Order result worker: %s',type(exc).__name__)
+            _result_wake.wait(15);_result_wake.clear()
+    _result_thread=threading.Thread(target=run,daemon=True);_result_thread.start()
+
+
+@router.on_event('shutdown')
+def stop_result_worker():
+    _result_stop.set();_result_wake.set()
+
+
+@router.post('/results/refresh')
+async def refresh_result(request:Request):
+    require(request,True);body=await request.json();period=body.get('period');shop=body.get('shop')
+    check_period(period);check_shop(shop)
+    order_store.observe(db._engine,period,shop,input_version(period,shop),force=True)
+    _result_wake.set()
+    return {'ok':True,'status':'pending'}
+
+
+@router.get('/results/status')
+def result_status(request:Request,period:str,shop:str):
+    require(request);check_period(period);check_shop(shop)
+    _,evidence,status=order_store.summary(db._engine,period,shop)
+    return dict(ok=True,result=status,source_rows=evidence.get('source_rows',{}),provenance=evidence.get('provenance',{}))
 
 
 def preparation_cards(period, shop):
@@ -268,24 +377,17 @@ def shops_view(request:Request,period:str=''):
 @router.get('/overview')
 def overview(request:Request,period:str,business:str=''):
     require(request); check_period(period)
-    result=[]; all_rows=[]; accounts={}; any_cash=False
+    result=[]; summaries=[]
     for shop in shops():
-        data=get_data(period,shop['id']); rows=selected_rows(data['rows'],business)
+        metrics,evidence,status=order_store.summary(db._engine,period,shop['id'],business)
         cards=preparation_cards(period,shop['id']); ready=sum(c['available'] and c['state']=='ready' for c in cards)
-        any_cash |= data['cash_available']
-        all_rows.extend(rows)
-        result.append(dict(shop,available='order' in data['sources'],metrics=model.metrics(rows,data['cash_available']) if 'order' in data['sources'] else None,
+        available=bool(evidence.get('has_order'))
+        if available and metrics is not None:summaries.append(metrics)
+        result.append(dict(shop,available=available,metrics=metrics if available else None,result=status,
             ready=ready,required=len(cards),files=sum(c['file_count'] for c in cards),
             readiness='ready' if cards and ready==len(cards) else 'linked'))
-        if shop['platform'] in ('天猫','淘宝'):
-            for kind,label in (('alipay','支付宝'),('fund','聚合账户')):
-                key=kind+':'+(shop['account_key'] if kind=='alipay' else shop['id'])
-                entry=accounts.setdefault(key,{'id':key,'label':label,'shops':[],'balance':None})
-                entry['shops'].append(shop['name'])
-                bal=data['sources'].get(kind,{}).get('balance')
-                if bal and (not entry['balance'] or bal['as_of']>entry['balance']['as_of']): entry['balance']=bal
-    return {'ok':True,'period':period,'shops':result,'totals':model.metrics(all_rows,any_cash),
-        'coverage':{'available':sum(s['available'] for s in result),'total':len(result)},'accounts':list(accounts.values()),
+    return {'ok':True,'period':period,'shops':result,'totals':order_store.combine_metrics(summaries),
+        'coverage':{'available':sum(s['available'] for s in result),'total':len(result)},
         'kingdee_read_only':True,'basis':'订单按创建月归属；GMV为该批订单支付成功金额，GSV扣除对应订单已成功退款。资金仅覆盖已导入流水期间。'}
 
 
@@ -300,37 +402,19 @@ def sources_view(request:Request,period:str,shop:str):
 
 
 @router.get('/orders')
-def orders_view(request:Request,period:str,shop:str,q:str='',business:str='',channel:str='',flag:str='',page:int=1,size:int=30):
+def orders_view(request:Request,period:str,shop:str,q:str='',business:str='',channel:str='',flag:str='',page:int=1,size:int=30,version:str=''):
     require(request); check_period(period); check_shop(shop)
-    data=get_data(period,shop); rows=selected_rows(data['rows'],business)
-    if channel=='alipay': rows=[r for r in rows if '支付宝' in r['destination']]
-    elif channel=='fund': rows=[r for r in rows if '聚合账户' in r['destination']]
-    elif channel=='pending': rows=[r for r in rows if r['destination']=='待结算 / 待补流水']
-    elif channel=='multiple': rows=[r for r in rows if '、' in r['destination']]
-    if q:
-        q=q.strip().casefold()
-        rows=[r for r in rows if q in r['order_no'].casefold() or any(q in str(x.get('sku','')).casefold() or q in str(x.get('name','')).casefold() for x in r['items'])]
-    if flag=='manual': rows=[r for r in rows if r['manual']]
-    elif flag=='unshipped': rows=[r for r in rows if r['unshipped']]
-    elif flag in ('refund_only','return_refund','unknown_refund','refund'): rows=[r for r in rows if r[flag]>0]
-    elif flag=='fees': rows=[r for r in rows if r['fees'] not in (None,0)]
-    elif flag=='ar_missing': rows=[r for r in rows if r['should_ar'] and not r['ar_documents']]
-    rows=sorted(rows,key=lambda r:r.get('created_at',''),reverse=True)
-    page=max(1,page);size=min(100,max(10,size));count=len(rows)
-    visible=[{k:v for k,v in r.items() if k not in ('events','fee_events','items','shipments','refunds','order_key','id','run_id')} for r in rows[(page-1)*size:page*size]]
-    return {'ok':True,'rows':visible,'total':count,'page':page,'pages':max(1,(count+size-1)//size),'metrics':model.metrics(rows,data['cash_available'])}
+    if len(q)>200 or len(version)>32:raise HTTPException(400,'查询条件过长')
+    try:return order_store.page(db._engine,period,shop,q,business,channel,flag,page,size,version)
+    except ValueError as exc:raise HTTPException(409,str(exc))
 
 
 @router.get('/order')
-def order_view(request:Request,period:str,shop:str,order_no:str):
+def order_view(request:Request,period:str,shop:str,order_no:str,version:str=''):
     require(request);check_period(period);check_shop(shop)
-    data=get_data(period,shop)
-    row=next((r for r in data['rows'] if r['order_no']==order_no),None)
+    row,status,evidence=order_store.detail(db._engine,period,shop,order_no,version)
     if not row: raise HTTPException(404,'本期本店未找到订单')
-    # Summary vouchers are period/shop references, NOT exact per-order links.
-    docs=data['sources'].get('kingdee_docs',{})
-    return {'ok':True,'order':row,'provenance':data['provenance'],
-        'vouchers':docs.get('vouchers',[]) if row['business_type'] in ('ufirst','mixed') else [],
+    return {'ok':True,'order':row,'result':status,'provenance':evidence.get('provenance',{}),
         'voucher_relation':'本店本期汇总参考，尚未建立逐单凭证关联',
         'receipt_relation':'未获取单据来源链，不能仅凭摘要确认收款单与订单关系',
         'kingdee_read_only':True}
@@ -380,7 +464,7 @@ async def rules_save(request:Request):
     rules=db.get_setting('ec_workbench_rules',{}) or {}
     rules.setdefault(period,{})[shop]={'recognition':recognition,'operator':user['name'],'updated_at':ec._now()}
     db.set_setting('ec_workbench_rules',rules,operator=user['name'])
-    with _lock:_cache.clear()
+    _result_wake.set()
     return {'ok':True}
 
 
@@ -427,9 +511,11 @@ async def voucher_refresh(request:Request):
 @router.get('/preview')
 def preview(request:Request,period:str,shop:str):
     require(request);check_period(period);check_shop(shop)
-    data=get_data(period,shop);uf=[r for r in data['rows'] if r['business_type']=='ufirst']
-    refs=data['sources'].get('kingdee_docs',{}).get('vouchers',[])
-    return {'ok':True,'read_only':True,'existing_vouchers':refs,'ufirst':model.metrics(uf,data['cash_available']),
+    metrics,_,status=order_store.summary(db._engine,period,shop,'ufirst')
+    with db._engine.connect() as cx:
+        packed=cx.execute(select(TABLE.c.payload).where(TABLE.c.period==period,TABLE.c.shop==shop,TABLE.c.kind=='kingdee_docs').order_by(TABLE.c.id.desc()).limit(1)).scalar()
+    refs=json.loads(gzip.decompress(packed)).get('vouchers',[]) if packed else []
+    return {'ok':True,'read_only':True,'existing_vouchers':refs,'ufirst':metrics,'result':status,
         'notice':'已有凭证优先对照；U先收入与普通结算可共用一张凭证。此页仅预览，不创建金蝶单据。',
         'draft':{'status':'待确认模板与来源链','blocked':True,
             'checks':['确认账户与辅助核算','确认含税金额与税额','核对历史已入账，防止重复','确认收款单来源关系后才可下推']}}

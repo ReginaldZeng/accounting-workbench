@@ -136,7 +136,8 @@ def store_parsed(account_id, parsed, operator):
                     variants[row['fingerprint']]=(rid,payload);added+=1
                 cx.execute(insert(O).values(flow_id=rid,file_id=fid,sheet=origin['sheet'],row_number=origin['row']))
     from routers import ec_workbench
-    with ec_workbench._lock: ec_workbench._cache.clear()
+    if added or conflicts:
+        ec_workbench.mark_order_inputs_changed([account_id])
     from routers.ec_documents import reconcile
     reconcile()
     return {'ok':True,'added':added,'duplicates':duplicate,'conflicts':conflicts,'source_rows':total_rows}
@@ -333,5 +334,5 @@ async def rule_apply(request:Request):
     db.audit(user['name'],'ec_flow_rule_apply',target=rule['id'],
         detail='批量归类 %d 笔；跳过人工定性 %d 笔；规则冲突 %d 笔；未写金蝶' % (len(matched),skipped,conflicts))
     from routers import ec_workbench
-    with ec_workbench._lock:ec_workbench._cache.clear()
+    ec_workbench.mark_order_inputs_changed({row.account_id for row,_ in matched})
     return {'ok':True,'applied':len(matched),'skipped_reviewed':skipped,'skipped_conflicts':conflicts,'bucket':rule['bucket'],'label':rule['label']}

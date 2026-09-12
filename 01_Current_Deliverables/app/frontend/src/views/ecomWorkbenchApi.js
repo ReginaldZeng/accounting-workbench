@@ -11,16 +11,17 @@ export const post = body => ({ method: 'POST', headers: { 'Content-Type': 'appli
 export const money = value => value == null || value === '' ? '—' : Number(value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 export const count = value => value == null ? '—' : Number(value).toLocaleString('zh-CN')
 export const percent = value => value == null ? '—' : `${(Number(value)*100).toFixed(2)}%`
-export function useResource(url, revision = 0) {
-  const [state, setState] = useState({ data: null, loading: true, error: '' })
+export function useResource(url, revision = 0, retainKey = '') {
+  const [state, setState] = useState({ data: null, loading: true, error: '', url:null, revision:null, retainKey:'' })
   useEffect(() => {
-    if (!url) { setState({ data: null, loading: false, error: '' }); return }
+    if (!url) { setState({ data: null, loading: false, error: '',url,revision,retainKey }); return }
     const controller = new AbortController()
-    setState({ data: null, loading: true, error: '' })
+    setState(previous=>({ data:retainKey&&previous.retainKey===retainKey?previous.data:null,loading:true,error:'',url,revision,retainKey }))
     requestJson(url, { signal: controller.signal }).then(data => {
-      if (!controller.signal.aborted) setState({ data, loading: false, error: '' })
-    }).catch(error => { if (!controller.signal.aborted) setState({ data: null, loading: false, error: error.message }) })
+      if (!controller.signal.aborted) setState({ data, loading: false, error: '',url,revision,retainKey })
+    }).catch(error => { if (!controller.signal.aborted) setState(previous=>({data:retainKey&&previous.retainKey===retainKey?previous.data:null, loading:false,error:error.message,url,revision,retainKey})) })
     return () => controller.abort()
-  }, [url, revision])
-  return state
+  }, [url, revision, retainKey])
+  const current=state.url===url&&state.revision===revision
+  return current?state:{data:retainKey&&state.retainKey===retainKey?state.data:null,loading:!!url,error:''}
 }
