@@ -6,8 +6,8 @@ import EcomHistoricalDocuments from './EcomHistoricalDocuments.jsx'
 export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,refresh,notify,onBasic}) {
   const result=useResource(`/api/ec/workbench/sources?${query({period,shop})}`,revision)
   const [busy,setBusy]=useState(false),[inbox,setInbox]=useState(null),[source,setSource]=useState(null)
-  const [accounts,setAccounts]=useState({})
-  const input=useRef(null),target=useRef(null)
+  const [accounts,setAccounts]=useState({}),[autoResults,setAutoResults]=useState(null)
+  const input=useRef(null),target=useRef(null),autoInput=useRef(null)
   const data=result.data, rows=data?.sources||[]
   useEffect(()=>{
     if (!data?.kingdee?.refreshing) return
@@ -18,6 +18,17 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
     try {await fn();refresh()} catch(e) {notify(e.message)} finally {setBusy(false)}
   }
   function choose(row) {target.current=row;input.current?.click()}
+  function uploadAuto(e) {
+    const files=Array.from(e.target.files||[]);e.target.value=''
+    if(!files.length) return
+    setAutoResults(null)
+    act(async()=>{
+      const body=new FormData();files.forEach(f=>body.append('files',f))
+      body.append('period',period);body.append('shop',shop)
+      const r=await wb('upload-auto',{method:'POST',body})
+      setAutoResults(r.results||[])
+    })
+  }
   function upload(e) {
     const files=Array.from(e.target.files||[]);e.target.value=''
     if (!files.length) return
@@ -46,8 +57,9 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
     })
   }
   return <section className="ew-panel ew-preparation">
-    <header><div><h2>月结资料清单</h2><p>{shopInfo?.name||shop} · {period}</p></div><button disabled={busy} onClick={()=>act(async()=>setInbox(await wb(`inbox?${query({period,shop})}`)))}>查看公盘</button></header>
+    <header><div><h2>月结资料清单</h2><p>{shopInfo?.name||shop} · {period}</p></div><div style={{display:'flex',gap:8}}>{canEdit&&<button disabled={busy} onClick={()=>autoInput.current?.click()} title="一次选多个文件，按表头自动识别订单/子订单/退款/旺店通，逐个入库">批量上传 · 自动识别</button>}<button disabled={busy} onClick={()=>act(async()=>setInbox(await wb(`inbox?${query({period,shop})}`)))}>查看公盘</button></div></header>
     <input ref={input} type="file" hidden multiple accept=".xlsx,.xls,.zip" onChange={upload}/>
+    <input ref={autoInput} type="file" hidden multiple accept=".xlsx,.xls,.zip" onChange={uploadAuto}/>
     {result.error&&<p className="ew-notice" role="alert">读取失败：{result.error}。齐套状态暂不可用。<button onClick={refresh}>重试</button></p>}
     <div className="ew-scroll ew-source-table"><table><thead><tr><th>资料类型</th><th>准备状态</th><th>有效行数</th><th>来源文件</th><th>最近更新</th><th>操作</th></tr></thead><tbody>
       {!result.loading&&!result.error&&rows.map(row=>{
@@ -66,6 +78,7 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
       {!result.loading&&!result.error&&!rows.length&&<tr><td colSpan="6" className="ew-empty">本店尚未配置所需资料，不能判定齐套。<button onClick={onBasic}>前往基础资料设置</button></td></tr>}
     </tbody></table></div>
     {inbox&&<p className="ew-notice">{inbox.message}{inbox.files?.map(f=><span key={f.name}>{f.name}<br/></span>)}</p>}
+    {autoResults&&<div className="ew-notice"><b>批量识别结果</b>（识别只看列结构、不看文件名；只读原文件）{autoResults.map((x,i)=><span key={i} style={{display:'block',marginTop:3}}>{x.name}：{x.ok?<>识别为「{x.label}」 · {count(x.rows)} 行{x.duplicate?'（内容重复，已跳过）':''}{x.warnings?.length?` · ${x.warnings.join('、')}`:''}</>:<span style={{color:'var(--red,#c0392b)'}}>未入库 · {x.error||x.kind||'无法识别'}</span>}</span>)}</div>}
     {source&&<SourceDrawer source={source} shop={shop} canEdit={canEdit} onChanged={refresh} onClose={()=>setSource(null)}/>}
   </section>
 }

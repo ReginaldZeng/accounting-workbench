@@ -466,6 +466,47 @@ async def upload(request:Request,period:str=Form(...),shop:str=Form(...),kind:st
     return dict(result,ok=True,rows=len(parsed['rows']),warnings=parsed['warnings'])
 
 
+@router.post('/upload-auto')
+async def upload_auto(request:Request,period:str=Form(...),shop:str=Form(...),files:list[UploadFile]=File(...)):
+    """批量上传·按表头自动识别资料类型（order/item/wdt/refund）逐个入库；资金流水仍走账户导入。
+    识别只用列结构、不用文件名；单文件指纹与 /upload 一致，跨两条通道去重。为公盘「一键取件」共用同一引擎。"""
+    user=require(request,True);check_period(period);s=check_shop(shop)
+    if not files or len(files)>20: raise HTTPException(400,'每次最多 20 个文件')
+    from starlette.concurrency import run_in_threadpool
+    aliases=(db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}).get(shop,[])
+    labels={'order':'平台订单','item':'商品与子订单','wdt':'旺店通销售出库','refund':'退款售后明细'}
+    results=[];affected=set()
+    for f in files:
+        name=Path((f.filename or '').replace('\\','/')).name[:180]
+        blob=await f.read(model.tm.MAX_ALIPAY_FILE_BYTES+1)
+        if len(blob)>model.tm.MAX_ALIPAY_FILE_BYTES:
+            results.append({'name':name,'ok':False,'error':'单个文件超过 30 MB'});continue
+        try:
+            batch=await run_in_threadpool(documents.parse_documents,blob,name,shop,aliases)
+            kinds={r['kind'] for r in batch['docs']}
+            if len(kinds)!=1:
+                results.append({'name':name,'ok':False,'error':'表头无法唯一识别资料类型'});continue
+            kind=kinds.pop()
+            if kind in ('alipay','fund'):
+                results.append({'name':name,'ok':False,'kind':kind,'error':'资金流水请在账户流水页按账户导入'});continue
+            if s['platform'] not in ('天猫','淘宝') and kind!='wdt':
+                results.append({'name':name,'ok':False,'kind':kind,'error':'该平台仅接受旺店通出库'});continue
+            parsed=await run_in_threadpool(model.parse_source,kind,[blob],period,shop)
+            digest=hashlib.sha256(hashlib.sha256(blob).hexdigest().encode()).hexdigest()
+            saved=save_source(period,shop,kind,digest,[name],parsed,user['name'])
+            indexed=await run_in_threadpool(documents.store_documents,db._engine,shop,[batch],user['name'])
+            affected|=set(indexed['affected'])
+            results.append({'name':name,'ok':True,'kind':kind,'label':labels.get(kind,kind),
+                'rows':len(parsed['rows']),'duplicate':saved['duplicate'],'warnings':parsed['warnings']})
+        except (ValueError,TypeError,KeyError) as exc:
+            results.append({'name':name,'ok':False,'error':str(exc)[:120]})
+    if affected:
+        await run_in_threadpool(documents.reconcile,db._engine,db.ec_flow_rows,db.ec_flow_accounts,affected)
+    ok_n=sum(1 for r in results if r.get('ok') and not r.get('duplicate'))
+    db.audit(user['name'],'ec_workbench_import_auto',target=period,detail=f"自动识别入库 {ok_n}/{len(results)}")
+    return {'ok':True,'results':results}
+
+
 @router.post('/rules')
 async def rules_save(request:Request):
     user=require(request,True);body=await request.json();period=body.get('period');shop=body.get('shop')

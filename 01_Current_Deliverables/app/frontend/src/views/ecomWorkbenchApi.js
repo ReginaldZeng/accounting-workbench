@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react'
 export async function requestJson(url, options = {}) {
   const response = await fetch(url, { cache: 'no-store', ...options })
   const body = await response.json().catch(() => ({}))
-  if (!response.ok || body.ok === false) throw new Error(body.detail || body.msg || `请求失败（${response.status}）`)
+  if (!response.ok || body.ok === false) {
+    const detail = body.detail ?? body.msg
+    throw new Error(typeof detail === 'string' ? detail : detail != null ? JSON.stringify(detail) : `请求失败（${response.status}）`)
+  }
   return body
 }
 export const query = values => new URLSearchParams(Object.entries(values).filter(([,v]) => v !== '' && v != null)).toString()
