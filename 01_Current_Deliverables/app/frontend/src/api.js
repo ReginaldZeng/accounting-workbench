@@ -7,7 +7,7 @@ const j = async (url, opt) => {
   const r = await fetch(url, { cache: 'no-store', ...opt })
   if (!r.ok) {
     let m = ''
-    try { const b = await r.json(); m = (b && (b.msg || b.detail)) || '' } catch { /* 无 JSON 体 */ }
+    try { const b = await r.json(); const _d = b && (b.msg || b.detail); m = typeof _d === 'string' ? _d : _d ? JSON.stringify(_d) : '' } catch { /* 无 JSON 体 */ }
     throw new Error(m || (url + ' ' + r.status))
   }
   return r.json()
@@ -293,7 +293,7 @@ export const ecTmallAlipayUpload = (period, files) => {
   Array.from(files || []).forEach(file => form.append('files', file))
   return j('/api/ec/month-close/tmall/alipay/upload', { method: 'POST', body: form })
 }
-export const ecKdRefresh = (form) => j('/api/ec/settle/kd-refresh', {method:'POST', body: form})
+export const ecKdRefresh = (p) => j('/api/ec/settle/kd-refresh', {method:'POST', body: p instanceof FormData ? p : (()=>{const fd=new FormData();fd.append('period',p);return fd})()})
 export const ecMonthArStatus = (period) => j(`/api/ec/month-close/kingdee/status?period=${encodeURIComponent(period)}`)
 export const ecManualUpload = (form) => j('/api/ec/settle/manual-upload', {method:'POST', body: form})
 export const ecUploadFiles = (form) => j('/api/ec/settle/upload-files', {method:'POST', body: form})
