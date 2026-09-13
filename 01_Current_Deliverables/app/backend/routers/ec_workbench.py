@@ -413,6 +413,13 @@ def orders_view(request:Request,period:str,shop:str,q:str='',business:str='',cha
     except ValueError as exc:raise HTTPException(409,str(exc))
 
 
+@router.get('/summary')
+def summary_view(request:Request,period:str,shop:str,business:str=''):
+    require(request);check_period(period);check_shop(shop)
+    metrics,_,status=order_store.summary(db._engine,period,shop,business)
+    return {'ok':True,'metrics':metrics,'result':status}
+
+
 @router.get('/order')
 def order_view(request:Request,period:str,shop:str,order_no:str,version:str=''):
     require(request);check_period(period);check_shop(shop)

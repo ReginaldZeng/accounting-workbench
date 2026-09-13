@@ -344,6 +344,14 @@ def metrics(rows, cash_available=True):
         'manual':sum(r['manual'] for r in rows), 'ar_matched':sum(bool(r['ar_documents']) for r in rows),
         'receipts':total(r['receipt_amount'] for r in rows), 'net_receipts':total(r['net_receipt'] for r in rows),
         'ufirst':sum(r['business_type']=='ufirst' for r in rows)}
+    # 收入确认收口卡：应确认收入=已发货订单的出库应收（发货即确认）；出库应收↔金蝶应收对平/差异/待同步计数
+    confirmable = [r for r in rows if r['shipment_state']=='shipped' and r['ar_expected'] is not None]
+    result.update(
+        confirm_total=total(r['ar_expected'] for r in confirmable), confirm_count=len(confirmable),
+        ar_ok=sum(r['ar_diff']==0 for r in rows),
+        ar_diff_count=sum(r['ar_diff'] not in (None,0) for r in rows),
+        ar_diff_amount=total(abs(r['ar_diff']) for r in rows if r['ar_diff'] not in (None,0)),
+        ar_pending=sum(r['shipment_state']=='shipped' and r['should_ar'] and r['ar_amount'] is None for r in rows))
     for kind in ('refund_only', 'return_refund', 'unknown_refund'):
         result[kind+'_rate'] = result[kind]/result['gmv'] if result['gmv'] else None
         result[kind+'_count'] = sum(r[kind]>0 for r in paid)

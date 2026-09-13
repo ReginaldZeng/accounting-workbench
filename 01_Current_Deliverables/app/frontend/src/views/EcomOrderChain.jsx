@@ -18,6 +18,43 @@ function CashEvidence({events,onOpenLedger}) {
   return <><div className="ew-scroll"><table><thead><tr><th>业务／说明</th><th>账户／流水标识</th><th>时间</th><th>收入</th><th>支出</th></tr></thead><tbody>{events.map((e,i)=><tr key={i}><td>{eventName(e)}{e.kind==='fee'&&<small>{({routine:'常规费用',commission:'佣金',unclassified:'费用待分类'})[e.fee_category]||'费用待分类'}</small>}<small>{e.label} {e.code}</small>{e.aggregate_copy&&<small>映射记录，不重复计入订单净收</small>}</td><td>{e.account_name||'未提供账户名称'}<small>{e.serial||e.ledger_id||'流水标识待查看原始字段'}</small></td><td>{e.date||'未提供'}</td><td>{money(e.income)}</td><td>{money(e.expense)}</td></tr>)}</tbody></table></div><button onClick={onOpenLedger}>在账户流水页查这笔订单</button></>
 }
 
+// 三结论：收入确认 / 应收核对 / 收款核对。先给结论，证据链在下方支撑。
+function Verdicts({r}) {
+  const closed=String(r.status||'').includes('关闭')
+  let v1
+  if(!r.paid_success&&closed) v1={c:'na',v:'已关闭 · 未成交',s:'买家未付款，无需确认收入'}
+  else if(r.business_type==='ufirst') v1={c:'ok',v:'U先 · 汇总确认',s:'不逐单核对'}
+  else if(r.shipment_state==='shipped'&&r.ar_expected!=null) v1={c:'ok',v:'可确认',s:`已发货 · ¥ ${money(r.ar_expected)}`}
+  else if(r.shipment_state==='unshipped') v1={c:'info',v:'暂不确认',s:'已付款未发货 · 预收'}
+  else if(r.refund>0&&r.paid>0&&r.refund>=r.paid) v1={c:'na',v:'退款冲平',s:'整单退款，不确认'}
+  else if(r.shipment_state==='shipped') v1={c:'warn',v:'待出库应收',s:'已发货，出库应收未匹配或跨期'}
+  else v1={c:'na',v:'待确认',s:'尚未达确认时点'}
+  let v2
+  if(!r.should_ar) v2={c:'na',v:'不适用',s:'本单无需金蝶应收'}
+  else if(r.ar_amount==null) v2={c:'warn',v:'待同步',s:'暂未匹配金蝶应收'}
+  else if(r.ar_diff&&r.ar_diff!==0) v2={c:'crit',v:`差额 ¥ ${money(r.ar_diff)}`,s:'金蝶应收 ≠ 出库应收'}
+  else v2={c:'ok',v:'对平',s:`金蝶应收 ¥ ${money(r.ar_amount)}`}
+  let v3
+  if(!r.paid_success) v3={c:'na',v:'无收款',s:'未成交'}
+  else if(r.net_receipt==null) v3={c:'warn',v:'待补流水',s:'未关联账户收支'}
+  else if(r.settlement_state==='settled') v3={c:'ok',v:'到账对平',s:`账户净收 ¥ ${money(r.net_receipt)}`}
+  else v3={c:'warn',v:'待核对',s:`净收 ¥ ${money(r.net_receipt)}`}
+  return <div className="ec-verdicts">{[['收入确认',v1],['应收核对',v2],['收款核对',v3]].map(([lab,v])=>
+    <div key={lab} className={`ec-vtile ec-v-${v.c}`}><small>{lab}</small><strong>{v.v}</strong><span>{v.s}</span></div>)}</div>
+}
+function Threeway({r}) {
+  const node=(lab,val,mute)=><div className="ec-tw-node"><small>{lab}</small><b className={mute?'ec-tw-mute':''}>{val}</b></div>
+  const d1=r.ar_diff===0?['ec-ok','差 0 ✓']:r.ar_diff!=null?['ec-diff',`差 ${money(r.ar_diff)}`]:['ec-warn','待同步']
+  return <div className="ec-threeway"><div className="ec-tw-title">三方金额对账 · 出库应收 → 金蝶应收 → 账户净收</div>
+    <div className="ec-tw-flow">
+      {node('应确认(出库应收)',r.ar_expected==null?'待出库':`¥ ${money(r.ar_expected)}`,r.ar_expected==null)}
+      <div className="ec-tw-arrow">▶<em className={d1[0]}>{d1[1]}</em></div>
+      {node('金蝶应收',r.ar_amount==null?'待同步':`¥ ${money(r.ar_amount)}`,r.ar_amount==null)}
+      <div className="ec-tw-arrow">▶<em className="ec-warn">{r.fees!=null?`平台费 ¥ ${money(r.fees)}`:'—'}</em></div>
+      {node('账户净收',r.net_receipt==null?'待补':`¥ ${money(r.net_receipt)}`,r.net_receipt==null)}
+    </div></div>
+}
+
 export default function EcomOrderChain({period,shop,orderNo,version,initialTab,onClose,onOpenLedger}) {
   const result=useResource(`/api/ec/workbench/order?${query({period,shop,order_no:orderNo,version})}`),r=result.data?.order
   const ref=useRef(null)
@@ -42,6 +79,8 @@ export default function EcomOrderChain({period,shop,orderNo,version,initialTab,o
     <header><div><span className="ew-muted">订单全链路 · 金蝶只读</span><h2 id="order-drawer-title">{orderNo}</h2><small>{shop} · {period}</small></div><button onClick={onClose}>关闭</button></header>
     {result.error?<p role="alert">读取失败：{result.error}。请关闭后重试。</p>:!r?<p role="status">正在读取已保存订单证据…</p>:<>
       <div className="ew-drawer-metrics">{[['订单金额',r.order_amount],['消费者实付',r.paid],['退款金额',r.refund],['平台费用',r.fees],['账户净收',r.net_receipt]].map(([label,value])=><div key={label}><small>{label}</small><strong>¥ {money(value)}</strong></div>)}</div>
+      <Verdicts r={r}/>
+      <Threeway r={r}/>
       <div className="ec-chain-badges"><span>{r.business_label}丨{r.status||'订单状态待补'}</span><span>{r.destination||'资金去向待核对'}</span></div>
       <p className="ec-chain-note">按业务环节排列，不代表实际时间先后。金额仅覆盖已有证据；账户净收不等于银行到账或拟生成收款单金额。</p>
       <div className="ew-scroll ec-chain-scroll"><table className="ec-chain-table"><thead><tr><th>业务环节</th><th>日期／时间</th><th>关联单据／账户</th><th>金额／数量</th><th>核对状态</th></tr></thead><tbody>

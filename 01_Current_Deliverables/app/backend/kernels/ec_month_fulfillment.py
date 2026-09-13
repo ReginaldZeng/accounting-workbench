@@ -15,7 +15,8 @@ def title_kind(title):
     text = str(title or '').strip()
     if not text:
         return 'unknown'
-    if re.search(r'[【\[]\s*(?:天猫\s*)?U\s*先\s*[】\]]', text, re.I):
+    # 前置括号标以「U先」开头即确定 U先：【U先】【U先试吃】【U先试用】【天猫U先…】等（后缀不限）
+    if re.search(r'[【\[]\s*(?:天猫\s*)?U\s*先[^】\]]*[】\]]', text, re.I):
         return 'ufirst'
     if re.search(r'U\s*先|试用', text, re.I):
         return 'review'

@@ -78,3 +78,30 @@
 .ew-source-table td:last-child button{min-width:82px}
 @media(max-width:1100px){.ew-layout{grid-template-columns:205px minmax(0,1fr)}.ew-prep-actions{justify-content:flex-start}.ew-preparation>header{align-items:flex-start;flex-direction:column}}
 @media(max-width:800px){.ew-layout{grid-template-columns:minmax(0,1fr)}.ew-shops{display:flex;overflow-x:auto}.ew-shops h2{display:none}.ew-shops button{min-width:190px}.ew-prep-alert p{display:block;margin:3px 0 0}.ew-source-table td{padding:11px 13px}}
+
+/* 收入确认：收口卡 + 分带表 + 出库应收主列（V-draft 收入确认重排） */
+.ew-closeout{display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr;border:1px solid var(--line,#e4e8f0);border-radius:9px;overflow:hidden;margin:0 0 14px;background:var(--bg,#fff)}
+.ew-co{padding:13px 16px;border-left:1px solid var(--line,#e4e8f0);display:flex;flex-direction:column;gap:3px;min-width:0}
+.ew-co:first-child{border-left:0}
+.ew-co-primary{background:var(--accent-soft,#efeeff)}
+.ew-co-lab{font-size:11px;color:var(--ink-3,#8993a4);font-weight:500;display:flex;align-items:center;gap:6px}
+.ew-co-lab em{font-style:normal;font-size:10px;font-weight:600;padding:1px 6px;border-radius:8px;background:rgba(50,167,131,.14);color:#2f9d78}
+.ew-co-primary .ew-co-lab{color:var(--accent,#4b53c4)}
+.ew-co>strong{font-size:22px;font-weight:650;color:var(--ink,#17233a);line-height:1.1;font-variant-numeric:tabular-nums}
+.ew-co-primary>strong{color:var(--accent,#4b53c4)}
+.ew-co>small{font-size:11px;color:var(--ink-3,#8993a4)}
+.ew-order-table-confirm{width:100%}
+.ew-order-table-confirm .ew-band-row th{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3,#8993a4);font-weight:600;padding:8px 14px 6px;border-bottom:1px solid var(--line,#e4e8f0);text-align:left}
+.ew-order-table-confirm .ew-band-key,.ew-order-table-confirm .ew-hero-th{background:var(--accent-soft,#efeeff);color:var(--accent,#4b53c4)}
+.ew-order-table-confirm td.ew-hero-td{background:var(--accent-soft,#efeeff)}
+.ew-hero-num{font-size:15px;font-weight:700;color:var(--ink,#17233a);font-variant-numeric:tabular-nums}
+.ew-muted-num{color:var(--ink-3,#8993a4);font-weight:500}
+.ew-matched{display:block;color:#2f9d78;font-size:11px;font-weight:600}
+.ew-ordercell .ew-order-id{font-weight:600}
+.ew-ordercell small{display:block;margin-top:3px;color:var(--ink-3,#8993a4);font-size:11px}
+.ew-pill-ok{background:rgba(50,167,131,.12);color:#2f9d78}
+.ew-pill-wait{background:rgba(168,106,0,.12);color:#a86a00}
+@media(max-width:760px){.ew-closeout{grid-template-columns:1fr 1fr}.ew-co:nth-child(3),.ew-closeout .ew-co:nth-child(4){border-top:1px solid var(--line,#e4e8f0)}}
+/* 阶段导航待办角标：把导航条变成收口流水线 */
+.ew-stage-badge{margin-left:auto;align-self:center;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:9px;background:rgba(192,68,68,.12);color:#c04444;flex:none;line-height:1.5}
+.ew-stage-nav button.active .ew-stage-badge{background:rgba(192,68,68,.16)}

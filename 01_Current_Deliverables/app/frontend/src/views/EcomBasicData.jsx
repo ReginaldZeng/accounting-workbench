@@ -41,6 +41,8 @@ export default function EcomBasicData({ user }) {
   const [shopMap, setShopMap] = useState([])
   const [feeMap, setFeeMap] = useState([])
   const [feeCategories,setFeeCategories]=useState({})
+  const [feeSel,setFeeSel]=useState(()=>new Set())
+  const [feeQ,setFeeQ]=useState('')
   const [rules, setRules] = useState({})
   const [recognitionRules, setRecognitionRules] = useState({})
   const [preparationRules, setPreparationRules] = useState({})
@@ -163,13 +165,22 @@ export default function EcomBasicData({ user }) {
 
       {tab === 'fee' && <div className="eb-card">
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
-          <span className="eb-hint">费用分类仅影响订单费用展示，不改变流水收支性质或金蝶科目；保存后后台更新订单结果。{feeMap.length} 条（种子=两月凭证区实证）。跑批遇到<b>新费目码 → 科目「待定」红标</b>，不套默认科目（确认书⑤ D9）。</span>
+          <span className="eb-hint">这一页按<b>费目码</b>查表：平台带费目码的费用（如 0030003 类目软件服务费）在此定常规/佣金与金蝶科目；<b>没有费目码</b>、要按摘要文字认的（先用后付、猫猫币等）请去「流水分类规则」。<br/>费用分类仅影响订单费用展示，不改变流水收支性质或金蝶科目；保存后后台更新订单结果。{feeMap.length} 条（种子=两月凭证区实证）。跑批遇到<b>新费目码 → 科目「待定」红标</b>，不套默认科目（确认书⑤ D9）。</span>
+          <input value={feeQ} onChange={e=>setFeeQ(e.target.value)} placeholder="搜索费目码 / 费目名" style={{ border:'1px solid var(--line)', borderRadius:8, padding:'6px 10px', fontSize:12.5, minWidth:180 }}/>
           {canEdit && addBtn(addFee)}
+          {canEdit && feeSel.size>0 && <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, color:'var(--ink-2)', background:'var(--accent-soft,#efeeff)', padding:'6px 10px', borderRadius:8, flexWrap:'wrap' }}>
+            已选 <b style={{ color:'var(--accent,#4b53c4)' }}>{feeSel.size}</b> 项 → 批量设为
+            {[['routine','常规费用'],['commission','佣金'],['unclassified','待分类 / 非费用']].map(([cat,label])=>
+              <button key={cat} type="button" style={{ cursor:'pointer', border:'1px solid var(--accent,#4b53c4)', background:'#fff', color:'var(--accent,#4b53c4)', borderRadius:6, padding:'3px 9px', fontSize:12 }}
+                onClick={()=>{ const next={...feeCategories}; feeSel.forEach(c=>next[c]=cat); setFeeCategories(next); setDirty(true); setFeeSel(new Set()) }}>{label}</button>)}
+            <button type="button" style={{ cursor:'pointer', border:'none', background:'none', color:'var(--ink-3)', fontSize:12 }} onClick={()=>setFeeSel(new Set())}>清除</button>
+          </div>}
         </div>
         <div className="eb-tblwrap">
           <table>
-            <thead><tr><th>费目码</th><th>费目名</th><th>订单费用分类</th><th>记账科目</th><th>金蝶科目编码（一键录入用）</th>{canEdit && <th style={{ width: 36 }}></th>}</tr></thead>
-            <tbody>{feeMap.map((r, i) => <tr key={i}>
+            <thead><tr>{canEdit && <th style={{ width: 28 }}><input type="checkbox" aria-label="全选费目" checked={feeMap.length>0&&feeMap.every(r=>feeSel.has(r.code))} onChange={e=>setFeeSel(e.target.checked?new Set(feeMap.filter(r=>!feeQ||String(r.code||'').includes(feeQ)||String(r.label||'').includes(feeQ)).map(r=>r.code)):new Set())}/></th>}<th>费目码</th><th>费目名</th><th>订单费用分类</th><th>记账科目</th><th>金蝶科目编码（一键录入用）</th>{canEdit && <th style={{ width: 36 }}></th>}</tr></thead>
+            <tbody>{feeMap.map((r, i) => (feeQ&&!(String(r.code||'').includes(feeQ)||String(r.label||'').includes(feeQ)))?null:<tr key={i}>
+              {canEdit && <td><input type="checkbox" aria-label={`选择 ${r.code}`} checked={feeSel.has(r.code)} onChange={e=>{const on=e.target.checked;setFeeSel(prev=>{const n=new Set(prev);on?n.add(r.code):n.delete(r.code);return n})}}/></td>}
               <td className="eb-mono" style={{ color: 'var(--ink-2)' }}>{r.code}</td>
               <td style={{ ...editCell, whiteSpace: 'normal' }} onClick={() => editRow(feeMap, setFeeMap, i, 'label', '费目名')}>{r.label}</td>
               <td><select aria-label={`订单费用分类 ${r.code}`} disabled={!canEdit} value={feeCategories[r.code]||'unclassified'} onChange={e=>{setFeeCategories({...feeCategories,[r.code]:e.target.value});setDirty(true)}}><option value="unclassified">待分类 / 非费用</option><option value="routine">常规费用</option><option value="commission">佣金</option></select></td>
@@ -226,7 +237,7 @@ export default function EcomBasicData({ user }) {
 
       {tab === 'flowrules' && <div className="eb-card">
         <div style={{ display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap' }}>
-          <span className="eb-hint">规则只处理“待识别流水”；已人工定性的自动跳过。先保存规则，再预览笔数和金额，最后确认批量应用。</span>
+          <span className="eb-hint">这一页按<b>关键词</b>认<b>没有费目码</b>的收支：支付宝/聚合备注能匹配到的（如先用后付技术服务费、猫猫币扣款）归成费用/退款/划转；有费目码的走「费目科目映射」。<br/>规则只处理“待识别流水”；已人工定性的自动跳过。先保存规则，再预览笔数和金额，最后确认批量应用。</span>
           {canEdit && addBtn(addFlowRule)}
         </div>
         <div className="eb-tblwrap"><table><thead><tr><th>启用</th><th>规则名称</th><th>账户</th><th>匹配字段</th><th>关键词（用 | 分隔，须全部命中）</th><th>方向</th><th>归入分桶</th><th>费用名称</th><th>无费目码时的费用分类</th><th>操作</th></tr></thead>

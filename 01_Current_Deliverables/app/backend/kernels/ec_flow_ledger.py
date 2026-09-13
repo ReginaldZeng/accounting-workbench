@@ -36,6 +36,11 @@ DEFAULT_CLASS_RULES = [{
     'account_kind':'alipay', 'field':'remark',
     'keywords':['猫猫币抵扣项目平台垫付资金', '扣款'],
     'direction':'outgo', 'bucket':'fee', 'label':'猫猫币抵扣费用',
+}, {
+    'id':'cat_xyhf_fee', 'name':'先用后付技术服务费扣款', 'enabled':True,
+    'account_kind':'alipay', 'field':'remark',
+    'keywords':['先用后付技术服务费', '扣款'],
+    'direction':'outgo', 'bucket':'fee', 'label':'先用后付技术服务费',
 }]
 
 

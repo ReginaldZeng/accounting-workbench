@@ -12,8 +12,8 @@ import flowsIcon from '../assets/ecom-nav/receipt.svg'
 
 // Shops are resolved from source-backed base data, never a hardcoded display name.
 const NAV=[
-  ['overview','总览','经营与账户概览',overviewIcon],
   ['prepare','数据准备','按店铺准备资料',prepareIcon],
+  ['overview','总览','经营与账户概览',overviewIcon],
   ['income','收入确认','发货与应收核对',incomeIcon],
   ['cash','收款核销','支付宝与聚合账户',cashIcon],
   ['flows','账户流水','全字段合并查找',flowsIcon],
@@ -27,6 +27,7 @@ export default function EcomWorkbench({user,onNav,initialScreen='overview'}) {
   const [screen,setScreen]=useState(initialScreen),[period,setPeriod]=useState('2026-08'),[shop,setShop]=useState(''),[business,setBusiness]=useState(''),[flag,setFlag]=useState(''),[revision,setRevision]=useState(0),[drawer,setDrawer]=useState(null),[message,setMessage]=useState(''),[flowFilter,setFlowFilter]=useState({})
   const result=useResource(screen==='overview'?`/api/ec/workbench/overview?${query({period,business})}`:null,revision)
   const shopResult=useResource(`/api/ec/workbench/shops?${query({period:screen==='prepare'?period:''})}`,revision)
+  const stageSummary=useResource(shop?`/api/ec/workbench/summary?${query({period,shop})}`:null,revision)
   const overview=result.data
   const overviewPending=overview?.shops?.some(s=>['pending','building'].includes(s.result?.status))
   useEffect(()=>{if(screen!=='overview'||!overviewPending)return;const timer=setInterval(()=>setRevision(v=>v+1),5000);return()=>clearInterval(timer)},[screen,overviewPending])
@@ -43,7 +44,11 @@ export default function EcomWorkbench({user,onNav,initialScreen='overview'}) {
   const openLedger=(filter={})=>{setFlowFilter(filter);setDrawer(null);setScreen('flows')}
   return <div className="ew-workbench">
     <header className="ew-header"><div><h1>电商对账工作台</h1><p>平台事实 → 发货确认 → 应收核对 → 账户收款</p></div><div className="ew-header-tools"><span className="ew-readonly">金蝶只读</span>{screen!=='flows' && <label>结算期间<input aria-label="结算期间" type="month" value={period} onChange={changePeriod}/></label>}<button onClick={()=>setRevision(v=>v+1)}>刷新数据</button><button className="ew-link ew-basic" onClick={()=>onNav?.('ecombase')}>基础资料</button></div></header>
-    <nav className="ew-nav ew-stage-nav" aria-label="电商工作流">{NAV.map(([key,label,description,icon])=><button key={key} aria-label={label} aria-current={screen===key?'page':undefined} className={screen===key?'active':''} onClick={()=>{setScreen(key);setFlag('')}}><span className="ew-stage-symbol" aria-hidden="true"><span className="ew-stage-icon" style={{maskImage:`url(${JSON.stringify(icon)})`,WebkitMaskImage:`url(${JSON.stringify(icon)})`}}/></span><span className="ew-stage-copy"><strong>{label}</strong><small>{description}</small></span></button>)}</nav>
+    <nav className="ew-nav ew-stage-nav" aria-label="电商工作流">{NAV.map(([key,label,description,icon])=>{
+      const sm=stageSummary.data?.metrics,cur=shops.find(s=>s.id===shop)
+      const badge=key==='income'?(sm?(sm.ar_diff_count||0)+(sm.ar_pending||0):0):key==='prepare'?Math.max(0,(cur?.required||0)-(cur?.ready||0)):0
+      return <button key={key} aria-label={label} aria-current={screen===key?'page':undefined} className={screen===key?'active':''} onClick={()=>{setScreen(key);setFlag('')}}><span className="ew-stage-symbol" aria-hidden="true"><span className="ew-stage-icon" style={{maskImage:`url(${JSON.stringify(icon)})`,WebkitMaskImage:`url(${JSON.stringify(icon)})`}}/></span><span className="ew-stage-copy"><strong>{label}</strong><small>{description}</small></span>{badge>0&&<span className="ew-stage-badge" title={key==='income'?'应收差异 + 待同步金蝶':'缺资料类数'}>{count(badge)}</span>}</button>
+    })}</nav>
     {screen==='overview' && <div className="ew-filter"><span>业务范围</span>{Object.entries(BUSINESS).slice(0,4).map(([key,label])=><button key={key} className={business===key?'active':''} onClick={()=>setBusiness(key)}>{label}</button>)}<span className="ew-muted">覆盖 {overview?.coverage?.available ?? '—'} / {overview?.coverage?.total ?? '—'} 家店铺 · 缺数据不计作零</span></div>}
     <Notice>{message||(screen==='overview'?result.error:shopResult.error)}</Notice>
     {screen==='flows' ? <EcomFlowLedger refreshToken={revision} onChanged={()=>setRevision(v=>v+1)} user={user} period={flowFilter.q?'':period} initialQuery={flowFilter.q||''} initialAccountId={flowFilter.account_id||''}/> : screen==='overview' ? <Overview data={overview} loading={result.loading} revision={revision} drill={drill} openCash={id=>openLedger({account_id:typeof id==='string'?id:''})}/> : screen==='prepare' ? <div className="ew-layout"><aside className="ew-shops"><h2>店铺 <small>{shops.length} 家</small></h2>{shops.map(s=>{const readiness=shopResult.loading?'linked':s.readiness||'linked',meta=shopResult.loading?'正在读取准备进度…':s.required?`齐套 ${s.ready}/${s.required} · 文件 ${s.files}`:'待配置所需资料';return <button key={s.id} className={shop===s.id?'active':''} onClick={()=>{setShop(s.id);setFlag('');setDrawer(null)}}><span><i className={readiness}/>{s.name}</span><small>{meta}</small></button>})}</aside><main className="ew-main">{shop&&<Preparation key={shop+period} period={period} shop={shop} shopInfo={shops.find(s=>s.id===shop)} revision={revision} canEdit={canEdit} refresh={()=>setRevision(v=>v+1)} notify={setMessage} onBasic={()=>onNav?.('ecombase')}/>}</main></div> : shop&&<OrderWorkspace key={period+screen} user={user} period={period} shop={shop} shops={shops} setShop={setShop} mode={screen} business={business} setBusiness={setBusiness} flag={flag} setFlag={setFlag} revision={revision} openOrder={(no,tab='flow',version='')=>setDrawer({no,tab,version})}/>}
@@ -68,6 +73,33 @@ const SETTLEMENT={settled:'已结算',partial:'部分结算',review:'结算待�
 function FeeCell({row,onOpen}) {
   return <>{[['常规',row.routine_fee],['佣金',row.commission_fee]].map(([label,value])=><button type="button" className="ew-fee-line" key={label} onClick={onOpen} aria-label={`查看${label}费用 ${row.order_no}`}><span>{label}</span><strong>{value==null?'—':`¥${money(value)}`}</strong><small>{value==null||!row.paid?'—':`${(value/row.paid*100).toFixed(2)}%`}</small></button>)}{row.unclassified_fee!==0&&row.unclassified_fee!=null&&<small className="ew-issue">待分类 ¥{money(row.unclassified_fee)}</small>}</>
 }
+// 收入确认收口卡：让人先看到“还差多少能收口”。指标取自 order_store.summary（含 confirm_total/ar_ok/ar_diff/ar_pending）
+function Closeout({m}) {
+  if(!m) return null
+  return <div className="ew-closeout">
+    <div className="ew-co ew-co-primary"><span className="ew-co-lab">本期应确认收入<em>已发货</em></span><strong>¥ {money(m.confirm_total)}</strong><small>{count(m.confirm_count)} 单已达确认时点（发货＝出库应收）</small></div>
+    <div className="ew-co"><span className="ew-co-lab">金蝶应收对平</span><strong>{count(m.ar_ok)} 单</strong><small>差异 {count(m.ar_diff_count)} 单 · ¥ {money(m.ar_diff_amount)}</small></div>
+    <div className="ew-co"><span className="ew-co-lab">应收待同步金蝶</span><strong>{count(m.ar_pending)} 单</strong><small>已发货、暂未匹配金蝶应收</small></div>
+    <div className="ew-co"><span className="ew-co-lab">待人工介入</span><strong>{count(m.manual)} 单</strong><small>费用分类 / 退款类型 / 应收差异等</small></div>
+  </div>
+}
+// 应确认收入＝出库应收（发货即确认）；未发货或未匹配出库则暂不确认
+function ConfirmCell({r}) {
+  const closed=String(r.status||'').includes('关闭')
+  if(!r.paid_success&&closed) return <span className="ew-hero-num ew-muted-num">未成交</span>
+  if(r.shipment_state!=='shipped'||r.ar_expected==null)
+    return <span className="ew-hero-num ew-muted-num">{r.shipment_state==='unshipped'?'暂不确认':closed?'已关闭':'待出库应收'}</span>
+  return <><strong className="ew-hero-num">{money(r.ar_expected)}</strong>{r.order_amount>r.paid?<small>含补贴 ¥{money(r.order_amount-r.paid)}</small>:null}</>
+}
+function ArConfirmCell({r}) {
+  if(r.ar_amount==null) return <span className="ew-muted-num">{r.shipment_state==='shipped'?'待同步':'—'}</span>
+  if(r.ar_diff!=null&&r.ar_diff!==0) return <><strong>{money(r.ar_amount)}</strong><small className="ew-difference">差 {r.ar_diff>0?'+':''}{money(r.ar_diff)}</small></>
+  return <><strong>{money(r.ar_amount)}</strong><small className="ew-matched">对平</small></>
+}
+function NetCell({r}) {
+  if(r.net_receipt==null) return <><small className="ew-muted-num">待补流水</small><div><span className="ew-order-pill ew-pill-wait">{SETTLEMENT[r.settlement_state]||SETTLEMENT.unknown}</span></div></>
+  return <><strong>{money(r.net_receipt)}</strong><div><span className={`ew-order-pill ${r.settlement_state==='settled'?'ew-pill-ok':'ew-pill-wait'}`}>{SETTLEMENT[r.settlement_state]||SETTLEMENT.unknown}</span> <small>{r.destination}</small></div></>
+}
 function OrderWorkspace({user,period,shop,shops,setShop,mode,business,setBusiness,flag,setFlag,revision,openOrder:openOrderAtVersion}) {
   const [q,setQ]=useState(''),[search,setSearch]=useState(''),[channel,setChannel]=useState(''),[cashTab,setCashTab]=useState('orders')
   const [dates,setDates]=useState({start_date:'',end_date:''}),[dateQuery,setDateQuery]=useState({start_date:'',end_date:''}),[shipment,setShipment]=useState(''),[refundState,setRefundState]=useState(''),[settlement,setSettlement]=useState(''),[jump,setJump]=useState('')
@@ -75,6 +107,7 @@ function OrderWorkspace({user,period,shop,shops,setShop,mode,business,setBusines
   const key=JSON.stringify([period,shop,business,channel,flag,search,revision,reload,dateQuery,shipment,refundState,settlement])
   const page=navigation.key===key?navigation.page:1,version=navigation.key===key?navigation.version:''
   const result=useResource(cashTab==='orders'?`/api/ec/workbench/orders?${query({period,shop,business,channel,flag,q:search,page,version,...dateQuery,shipment,refund_state:refundState,settlement})}`:null,`${revision}:${reload}:${tick}`,key),data=result.data
+  const summary=useResource(mode==='income'?`/api/ec/workbench/summary?${query({period,shop,business})}`:null,`${revision}:${reload}:${tick}`)
   const setPage=value=>setNavigation({key,page:typeof value==='function'?value(data?.page||page):value,version:data?.result?.build_id||''})
   const openOrder=(no,tab='flow')=>openOrderAtVersion(no,tab,data?.result?.build_id||'')
   const state=data?.result
@@ -83,7 +116,7 @@ function OrderWorkspace({user,period,shop,shops,setShop,mode,business,setBusines
   const retry=async()=>{try{setActionError('');await wb('results/refresh',post({period,shop}));setReload(v=>v+1)}catch(e){setActionError(e.message)}}
   const canEdit=user?.role==='admin'||user?.perms?.ec_settle_upload
   const filter=(label,value,setter,options)=><label><span>{label}</span><select aria-label={label} value={value} onChange={e=>setter(e.target.value)}><option value="">全部</option>{Object.entries(options).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label>
-  return <><form className="ew-order-filters ew-order-filters-expanded" onSubmit={e=>{e.preventDefault();setSearch(q);setDateQuery({...dates});setPage(1);setJump('')}}>
+  return <>{mode==='income'&&<Closeout m={summary.data?.metrics}/>}<form className="ew-order-filters ew-order-filters-expanded" onSubmit={e=>{e.preventDefault();setSearch(q);setDateQuery({...dates});setPage(1);setJump('')}}>
     <label><span>店铺</span><select aria-label="店铺" value={shop} onChange={e=>setShop(e.target.value)}>{shops.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
     {filter('业务类型',business,setBusiness,Object.fromEntries(Object.entries(BUSINESS).filter(([k])=>k)))}
     {filter('发货状态',shipment,setShipment,SHIPMENT)}{filter('退款状态',refundState,setRefundState,REFUND_STATE)}{filter('结算状态',settlement,setSettlement,SETTLEMENT)}
@@ -96,13 +129,17 @@ function OrderWorkspace({user,period,shop,shops,setShop,mode,business,setBusines
     </form>{mode==='cash'&&<div className="ew-subnav">{[['orders','订单收款'],['preview','凭证预览'],['history','历史核销记录']].map(([key,label])=><button key={key} className={cashTab===key?'active':''} onClick={()=>setCashTab(key)}>{label}</button>)}</div>}
     {cashTab==='flows'?<EcomFlowLedger user={user} period={period}/>:cashTab==='preview'?<VoucherPreview user={user} period={period} shop={shop} revision={revision}/>:cashTab==='history'?<History period={period} shop={shop}/>:<><Notice>{result.error||actionError}</Notice>
     {state&&(pending||state.stale||['error','missing'].includes(state.status))&&<div className="ew-result-status" role="status">{pending?(state.build_id?'后台更新中，当前仍显示上一完整版本。':'正在后台首次生成核算结果，可离开页面，完成后自动展示。'):state.status==='error'?state.error:state.status==='missing'?'尚无已保存核算结果，请先准备资料。':'已有新版核算结果；本次翻页继续使用原版本，避免混页。'}{state.stale&&state.status==='ready'&&<button onClick={()=>setReload(v=>v+1)}>查看新版</button>}{['error','missing'].includes(state.status)&&<button disabled={!canEdit} onClick={retry}>{state.status==='error'?'重试生成':'生成核算结果'}</button>}</div>}
-    <div className="ew-scroll ew-panel" aria-busy={result.loading}><table className="ew-order-table ew-order-table-expanded"><thead><tr><th>店铺简称</th><th>业务类型 / 订单状态</th><th>订单号</th><th className="ew-num">订单金额</th><th className="ew-num">实付金额</th><th className="ew-num">退款金额</th><th>费用金额 / 费率</th><th className="ew-num">金蝶应收金额</th><th title="按已关联账户流水核对货款与退款，不代表平台费用已完整或银行到账">结算状态</th><th>核对提示</th></tr></thead><tbody>{data?.rows?.map(r=><tr key={r.order_no}>
-      <td title={shops.find(s=>s.id===shop)?.name||shop}>{shops.find(s=>s.id===shop)?.name||shop}</td>
-      <td><span className="ew-order-pill">{r.business_label}丨{SHIPMENT[r.shipment_state]||'发货待确认'}</span><small>{r.refund>0?(!['none','unknown'].includes(r.refund_state)?REFUND_STATE[r.refund_state]:null):r.status!==SHIPMENT[r.shipment_state]?r.status:null}</small></td>
-      <td><button className="ew-link ew-order-id" onClick={()=>openOrder(r.order_no)}>{r.order_no}</button><small title={r.created_at||'未提供订单创建日期'}>{r.created_at?.slice(0,10)||'日期未提供'}</small></td><td className="ew-num">{money(r.order_amount)}</td><td className="ew-num ew-paid">{money(r.paid)}</td><td className={`ew-num ${r.refund===0?'ew-zero':''}`}>{money(r.refund)}</td>
+    <div className="ew-scroll ew-panel" aria-busy={result.loading}><table className="ew-order-table ew-order-table-confirm"><thead>
+      <tr className="ew-band-row"><th colSpan="2">身份</th><th colSpan="4" className="ew-band-key">该确认多少 · 会计口径</th><th>应收核对</th><th>平台费用</th><th>钱到没到</th><th>结论 / 待办</th></tr>
+      <tr><th>订单 / 发货</th><th>业务 · 状态</th><th className="ew-num">订单额</th><th className="ew-num">实付</th><th className="ew-num">退款</th><th className="ew-num ew-hero-th">应确认收入</th><th className="ew-num">金蝶应收</th><th>常规 / 佣金 · 费率</th><th className="ew-num" title="按已关联账户流水核对，不代表银行到账">账户净收</th><th>核对提示</th></tr>
+      </thead><tbody>{data?.rows?.map(r=><tr key={r.order_no}>
+      <td className="ew-ordercell"><button className="ew-link ew-order-id" onClick={()=>openOrder(r.order_no)}>{r.order_no}</button><small title={r.created_at||''}>{r.shipped_at?`发货 ${String(r.shipped_at).slice(5,10)}`:(SHIPMENT[r.shipment_state]||'发货待确认')} · 创建 {r.created_at?.slice(5,10)||'—'}</small></td>
+      <td><span className="ew-order-pill">{r.business_label}丨{SHIPMENT[r.shipment_state]||'发货待确认'}</span><small>{r.status||(r.refund>0&&!['none','unknown'].includes(r.refund_state)?REFUND_STATE[r.refund_state]:'')}</small></td>
+      <td className="ew-num">{money(r.order_amount)}</td><td className="ew-num ew-paid">{money(r.paid)}</td><td className={`ew-num ${r.refund===0?'ew-zero':''}`}>{money(r.refund)}</td>
+      <td className="ew-num ew-hero-td">{r.business_type==='ufirst'?<span className="ew-muted-num">不适用</span>:<ConfirmCell r={r}/>}</td>
+      <td className="ew-num">{r.business_type==='ufirst'?<span className="ew-muted-num">不适用</span>:<ArConfirmCell r={r}/>}</td>
       <td><FeeCell row={r} onOpen={()=>openOrder(r.order_no,'cash')}/></td>
-      <td className="ew-num">{r.business_type==='ufirst'?'不适用':r.ar_amount==null?'未匹配':money(r.ar_amount)}{r.business_type!=='ufirst'&&r.ar_diff!=null&&r.ar_diff!==0?<small className="ew-difference">差额 {r.ar_diff>0?'+':''}{money(r.ar_diff)}</small>:r.business_type!=='ufirst'&&r.ar_amount!=null&&r.ar_diff==null?<small>比较依据待补</small>:null}</td>
-      <td><span className="ew-order-pill">{SETTLEMENT[r.settlement_state]||SETTLEMENT.unknown}</span><small>{r.destination==='待结算 / 待补流水'?'渠道待确认':r.destination}</small></td>
+      <td className="ew-num"><NetCell r={r}/></td>
       <td>{r.issues?.length?<><span className="ew-issue">{r.issues[0]}</span>{r.issues.length>1&&<details><summary>另 {r.issues.length-1} 项</summary>{r.issues.slice(1).map((issue,i)=><small key={i}>{issue}</small>)}</details>}</>:'—'}</td>
     </tr>)}{!data?.rows?.length&&<tr><td colSpan="10" className="ew-empty">{result.loading?'正在读取订单…':pending?'核算结果正在后台生成…':result.error?'读取失败，请重试':state?.status==='error'?'核算结果生成失败，原始资料保留':state?.status==='missing'?'尚无已保存结果':'当前筛选下没有订单'}</td></tr>}</tbody></table></div>
     <div className="ew-pagination"><span>{result.loading&&data?.rows?.length?`正在读取第 ${page} 页…`:`共 ${count(data?.total)} 笔 · 每页 30 笔`}</span><button disabled={page<=1||result.loading} onClick={()=>setPage(p=>p-1)}>上一页</button>{data?.page??page} / {data?.pages??'—'}<button disabled={!data?.pages||(data?.page??page)>=data.pages||result.loading} onClick={()=>setPage(p=>p+1)}>下一页</button>

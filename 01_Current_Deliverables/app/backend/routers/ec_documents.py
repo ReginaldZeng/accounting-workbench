@@ -56,7 +56,10 @@ def backfill_snapshots():
 
 @router.on_event('startup')
 def bridge_saved_evidence():
-    start_job(backfill_snapshots,'历史资料自动承接')
+    try:
+        start_job(backfill_snapshots,'历史资料自动承接')
+    except HTTPException:
+        pass  # 本地临时: 启动钩子在某些 uvicorn 生命周期下会二次触发, 已在运行则跳过, 不应拖崩启动
 
 def import_blobs(shop,blobs,operator):
     aliases=db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}
