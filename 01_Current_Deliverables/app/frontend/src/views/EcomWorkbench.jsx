@@ -39,6 +39,8 @@ export default function EcomWorkbench({user,onNav,initialScreen='overview'}) {
   const canEdit=user?.role==='admin'||user?.perms?.ec_settle_upload
   useEffect(() => {if (shops.length&&(!shop||!shops.some(s=>s.id===shop))) setShop(shops.find(s=>s.platform==='天猫'&&s.available)?.id||shops.find(s=>s.platform==='天猫')?.id||shops[0].id)},[shops,shop])
   useEffect(() => {setScreen(initialScreen)},[initialScreen])
+  useEffect(() => {setMessage('')},[screen])                       // 切页签清掉上一页的临时提示，别跟着人跑到别的页
+  useEffect(() => {if(!message)return;const t=setTimeout(()=>setMessage(''),5000);return()=>clearTimeout(t)},[message])  // 临时提示 5 秒自动消失
   const changePeriod=e=>{setPeriod(e.target.value);setDrawer(null);setFlag('')}
   const drill=(id,filter='',next='income')=>{setShop(id);setFlag(filter);setScreen(next)}
   const openLedger=(filter={})=>{setFlowFilter(filter);setDrawer(null);setScreen('flows')}
