@@ -176,7 +176,7 @@ function Invoke-EcommerceReconPickup {
         Write-EcommerceLog ('[X] 电商对账目录不可访问：' + $cfg.ecommerce_recon_dir)
         return
     }
-    $rootFull = (Resolve-Path -LiteralPath $cfg.ecommerce_recon_dir).Path
+    $rootFull = (Resolve-Path -LiteralPath $cfg.ecommerce_recon_dir).ProviderPath.TrimEnd('\')
     $stateFile = Join-Path $EcomHere 'pickup_ecommerce_recon_state.json'
     $state = @{}
     if (Test-Path -LiteralPath $stateFile) {
