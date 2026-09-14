@@ -163,7 +163,7 @@ def compute_data(period, shop):
     rules = db.get_setting('ec_workbench_rules',{}) or {}
     recognition_rules = db.get_setting('ec_income_recognition_rules',{}) or {}
     rule = rules.get(period,{}).get(shop) or {'recognition':recognition_rules.get(shop,'shipment')}
-    rows = model.build_orders(sources,ar,rule.get('recognition','shipment'),db.get_setting('ec_fee_display_categories',{}) or {})
+    rows = model.build_orders(sources,ar,rule.get('recognition','shipment'),db.get_setting('ec_fee_display_categories',{}) or {},db.get_setting('ec_trial_title_keywords',None) or None)
     conflicted=set(sources.get('alipay',{}).get('conflicted_keys',[])+sources.get('fund',{}).get('conflicted_keys',[]))
     for row in rows:
         if row['order_key'] in conflicted:
@@ -201,6 +201,7 @@ def result_inputs():
         shops={s['id']:s for s in shops()},rules=db.get_setting('ec_workbench_rules',{}) or {},
         recognition=db.get_setting('ec_income_recognition_rules',{}) or {},
         fee_categories=db.get_setting('ec_fee_display_categories',{}) or {},
+        trial_keywords=db.get_setting('ec_trial_title_keywords',None) or None,
         account_revisions={a['id']:db.get_setting('ec_order_account_revision:'+a['id'],None) for a in accounts},
         kd_meta=db.get_setting('ec_kd_cache_meta',{}) or {})
 
@@ -212,7 +213,7 @@ def input_version(period,shop,inputs=None):
     try:
         stat=Path(ec._kd_cache_path(period)).stat();kd_file=(stat.st_mtime_ns,stat.st_size)
     except OSError:kd_file=None
-    manifest={'model':'order-results-v2','fee_categories':inputs.get('fee_categories',{}),'shop':inputs['shops'].get(shop),
+    manifest={'model':'order-results-v2','fee_categories':inputs.get('fee_categories',{}),'trial_keywords':inputs.get('trial_keywords'),'shop':inputs['shops'].get(shop),
         'imports':[r for r in inputs['imports'] if r['period']==period and r['shop']==shop],
         'legacy':[r for r in inputs['legacy'] if r[0]==period] if shop==TARGET else [],
         'wdt':[r for r in inputs['wdt'] if r[0]==period] if shop==TARGET else [],

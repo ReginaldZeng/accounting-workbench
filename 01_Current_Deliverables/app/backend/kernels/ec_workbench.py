@@ -225,7 +225,7 @@ def parse_source(kind, payloads, period, shop):
     return out
 
 
-def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=None):
+def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=None, trial_keywords=None):
     orders = sources.get('order', {}).get('rows', [])
     items, shipments, refunds, events = (defaultdict(list) for _ in range(4))
     for r in sources.get('item', {}).get('rows', []): items[r['order_no']].append(r)
@@ -246,8 +246,11 @@ def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=
         eligible = lambda date: bool(date) and (not period or str(date)[:7] <= period)
         line_items = items[no]
         typ = business.get(key, 'unknown')
-        # 试用/U先按【商品标题】豁免金蝶应收（title_kind 认标题里的 U先/试用；不看实付金额，故先用后付=正常销售不受影响）：
-        # 与 ufirst 同一待遇——不要求金蝶应收、不落待人工、金蝶应收列显“不适用”。
+        # 用【商品标题】+ 可维护识别词现算试用/U先分类（改词后重建即生效，不必重导宝贝明细）；无标题行时回落已存分类。
+        if line_items:
+            kinds = {fulfil.title_kind(x.get('name'), trial_keywords) for x in line_items}
+            typ = 'mixed' if {'normal', 'ufirst'} <= kinds else 'review' if len(kinds) > 1 else next(iter(kinds))
+        # 试用/U先与 ufirst 同待遇——不要求金蝶应收、不落待人工、金蝶应收列显“不适用”（认标题不看金额，先用后付=normal 不受影响）。
         ar_exempt = typ in ('ufirst', 'review')
         paid = amount(r.get('current_paid'))
         # Item report preserves gross transaction paid amount; master export can be current-state.

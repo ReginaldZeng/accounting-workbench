@@ -11,15 +11,23 @@ from kernels.ec_tmall_import import _order_key
 TARGET_SHOP = '星期零STARFIELD 天猫官旗店'
 
 
-def title_kind(title):
+DEFAULT_TRIAL_KEYWORDS = ['U先', '试用']   # 试用/U先识别词的默认值；可在基础资料·识别与剔除规则里维护（存 ec_trial_title_keywords）
+
+
+def title_kind(title, keywords=None):
+    """按【商品标题】判业务类型（不看金额，故先用后付=正常销售不受影响）。
+    keywords=试用识别词（默认 U先/试用，可在基础资料维护）——标题命中任一词→review（试用装，豁免金蝶应收）。"""
     text = str(title or '').strip()
     if not text:
         return 'unknown'
     # 前置括号标以「U先」开头即确定 U先：【U先】【U先试吃】【U先试用】【天猫U先…】等（后缀不限）
     if re.search(r'[【\[]\s*(?:天猫\s*)?U\s*先[^】\]]*[】\]]', text, re.I):
         return 'ufirst'
-    if re.search(r'U\s*先|试用', text, re.I):
-        return 'review'
+    flat = re.sub(r'\s+', '', text).lower()          # 去空白后子串匹配，兼容「U 先」等写法
+    for kw in (keywords or DEFAULT_TRIAL_KEYWORDS):
+        k = re.sub(r'\s+', '', str(kw)).lower()
+        if k and k in flat:
+            return 'review'
     return 'normal'
 
 

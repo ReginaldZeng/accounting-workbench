@@ -908,7 +908,7 @@ def ec_basicdata(request: Request):
             "recognition_rules": db.get_setting("ec_income_recognition_rules", {}) or {},
             "preparation_rules": db.get_setting("ec_preparation_rules", {}) or {},
             "flow_rules": db.get_setting("ec_flow_class_rules", flow_ledger.DEFAULT_CLASS_RULES),
-            "voucher_cfg": db.get_setting("ec_voucher_cfg", {}) or {}, "shop_aliases": db.get_setting("ec_document_shop_aliases", {}) or {}, "seeded": seeded}
+            "voucher_cfg": db.get_setting("ec_voucher_cfg", {}) or {}, "shop_aliases": db.get_setting("ec_document_shop_aliases", {}) or {}, "trial_keywords": db.get_setting("ec_trial_title_keywords", None) or ["U先", "试用"], "seeded": seeded}
 
 
 def _seed_if_empty():
@@ -979,6 +979,9 @@ async def ec_basicdata_save(request: Request):
         aliases = {str(k).strip(): [str(x).strip()[:120] for x in (v or []) if str(x).strip()][:20]
                    for k, v in dict(body["shop_aliases"]).items() if str(k).strip() in allowed}
         db.set_setting("ec_document_shop_aliases", {k: v for k, v in aliases.items() if v}, operator=u["name"])
+    if body.get("trial_keywords") is not None:
+        kws = [str(x).strip()[:40] for x in list(body["trial_keywords"])[:50] if str(x).strip()]
+        db.set_setting("ec_trial_title_keywords", kws, operator=u["name"])
     if body.get("voucher_cfg") is not None:          # 凭证配置（账簿/凭证字/币别/两侧科目编码，V2.257）
         vc = {k: str(v or "").strip()[:40] for k, v in dict(body["voucher_cfg"]).items()
               if k in ("book_code", "voucher_group", "currency", "rate_type", "cash_acct", "ar_acct")}

@@ -53,18 +53,19 @@ export default function EcomBasicData({ user }) {
   const [dirty, setDirty] = useState(false)
   const [msg, setMsg] = useState('')
   const [shopAliases, setShopAliases] = useState({})
+  const [trialKw, setTrialKw] = useState([])
 
   const load = () => getEcBasicdata().then(r => {
     setShopMap(r.shop_map || []); setFeeMap(r.fee_map || []); setRules(r.rules || {}); setRecognitionRules(r.recognition_rules || {}); setFlowRules(r.flow_rules || [])
     setVcfg(r.voucher_cfg || {}); setDirty(false)
-    setPreparationRules(r.preparation_rules || {}); setFeeCategories(r.fee_categories || {}); setShopAliases(r.shop_aliases || {})
+    setPreparationRules(r.preparation_rules || {}); setFeeCategories(r.fee_categories || {}); setShopAliases(r.shop_aliases || {}); setTrialKw(r.trial_keywords || [])
   }).catch(e => setMsg(String(e.message || e)))
   useEffect(() => { load() }, [])
 
   const save = async () => {
     try {
       setMsg('保存中…')
-      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, fee_categories:feeCategories, rules, recognition_rules: recognitionRules, preparation_rules:preparationRules, flow_rules: flowRules, voucher_cfg: vcfg, shop_aliases: shopAliases })
+      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, fee_categories:feeCategories, rules, recognition_rules: recognitionRules, preparation_rules:preparationRules, flow_rules: flowRules, voucher_cfg: vcfg, shop_aliases: shopAliases, trial_keywords: trialKw })
       setMsg('已保存'); load()
     } catch (e) { setMsg('保存失败：' + String(e.message || e)) }
   }
@@ -222,6 +223,11 @@ export default function EcomBasicData({ user }) {
       {tab === 'rules' && <div className="eb-card" style={{ maxWidth: 700 }}>
         <div style={{ marginBottom: 10 }}>
           <span className="eb-hint">U先主识别=专属费目码（0170155T 等，内置）；下面是兜底阈值。剔除项每期在「收款核销 › 核销总览」单列留痕。</span></div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 6 }}><span className="eb-hint"><b>试用 / U先 识别词</b>：按<b>商品标题</b>认——标题含任一词 → 归「试用装」，豁免金蝶应收、不落待人工。<b>只看标题不看金额</b>，故先用后付（正常销售）不受影响。改词保存后后台自动重算，不必重导。默认「U先」「试用」。</span></div>
+          <div>{(trialKw.length ? trialKw : ['U先', '试用']).map((w, i) => <span key={w + i} style={{ display: 'inline-block', padding: '3px 8px', margin: '0 6px 6px 0', border: '1px solid var(--line,#ddd)', borderRadius: 4 }}>{w}{canEdit && <button title="删除" style={{ marginLeft: 6, border: 0, background: 'none', cursor: 'pointer', color: 'var(--ink-3)' }} onClick={() => { const base = trialKw.length ? trialKw : ['U先', '试用']; setTrialKw(base.filter((_, j) => j !== i)); setDirty(true) }}>×</button>}</span>)}
+            {canEdit && <button className="btn-sec" onClick={() => { const v = window.prompt('新增识别词（多个用 、或逗号分隔）：商品标题含此词即归试用装、豁免金蝶应收', ''); if (!v) return; const add = v.split(/[、,，]+/).map(x => x.trim()).filter(Boolean); const base = trialKw.length ? trialKw : ['U先', '试用']; setTrialKw([...new Set([...base, ...add])]); setDirty(true) }}>＋ 加词</button>}</div>
+        </div>
         <div className="eb-tblwrap">
           <table>
             <tbody>
