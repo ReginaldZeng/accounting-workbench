@@ -29,6 +29,14 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
       setAutoResults(r.results||[])
     })
   }
+  function pickInbox() {
+    setAutoResults(null)
+    act(async()=>{
+      const body=new FormData();body.append('period',period);body.append('shop',shop)
+      const r=await wb('inbox-import',{method:'POST',body})
+      setAutoResults(r.results||[]);setInbox(null)
+    })
+  }
   function upload(e) {
     const files=Array.from(e.target.files||[]);e.target.value=''
     if (!files.length) return
@@ -77,7 +85,7 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
       {result.loading&&<tr><td colSpan="6" className="ew-empty">正在读取已保存资料…</td></tr>}
       {!result.loading&&!result.error&&!rows.length&&<tr><td colSpan="6" className="ew-empty">本店尚未配置所需资料，不能判定齐套。<button onClick={onBasic}>前往基础资料设置</button></td></tr>}
     </tbody></table></div>
-    {inbox&&<p className="ew-notice">{inbox.message}{inbox.files?.map(f=><span key={f.name}>{f.name}<br/></span>)}</p>}
+    {inbox&&<div className="ew-notice">{inbox.message}{inbox.files?.map(f=><span key={f.name}>{f.name}<br/></span>)}{canEdit&&inbox.configured&&inbox.files?.length>0&&<div style={{marginTop:8}}><button disabled={busy} onClick={pickInbox} title="读公盘该期间/店铺的文件，按表头自动识别订单/子订单/退款/旺店通入库；只读原文件不改不删">一键取件 · 自动识别入库（{inbox.files.length} 个）</button></div>}</div>}
     {autoResults&&<div className="ew-notice"><b>批量识别结果</b>（识别只看列结构、不看文件名；只读原文件）{autoResults.map((x,i)=><span key={i} style={{display:'block',marginTop:3}}>{x.name}：{x.ok?<>识别为「{x.label}」 · {count(x.rows)} 行{x.duplicate?'（内容重复，已跳过）':''}{x.warnings?.length?` · ${x.warnings.join('、')}`:''}</>:<span style={{color:'var(--red,#c0392b)'}}>未入库 · {x.error||x.kind||'无法识别'}</span>}</span>)}</div>}
     {source&&<SourceDrawer source={source} shop={shop} canEdit={canEdit} onChanged={refresh} onClose={()=>setSource(null)}/>}
   </section>

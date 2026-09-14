@@ -466,6 +466,31 @@ async def upload(request:Request,period:str=Form(...),shop:str=Form(...),kind:st
     return dict(result,ok=True,rows=len(parsed['rows']),warnings=parsed['warnings'])
 
 
+_AUTO_LABELS={'order':'平台订单','item':'商品与子订单','wdt':'旺店通销售出库','refund':'退款售后明细'}
+def _auto_ingest_one(period, shop, s, name, blob, aliases, operator):
+    """单文件按列自动识别 → 入库；批量上传与公盘取件共用。返回 (结果dict, 受影响单据集)。识别只看列结构、不看文件名。"""
+    if len(blob)>model.tm.MAX_ALIPAY_FILE_BYTES:
+        return {'name':name,'ok':False,'error':'单个文件超过 30 MB'}, set()
+    try:
+        batch=documents.parse_documents(blob,name,shop,aliases)
+        kinds={r['kind'] for r in batch['docs']}
+        if len(kinds)!=1:
+            return {'name':name,'ok':False,'error':'表头无法唯一识别资料类型'}, set()
+        kind=kinds.pop()
+        if kind in ('alipay','fund'):
+            return {'name':name,'ok':False,'kind':kind,'error':'资金流水请在账户流水页按账户导入'}, set()
+        if s['platform'] not in ('天猫','淘宝') and kind!='wdt':
+            return {'name':name,'ok':False,'kind':kind,'error':'该平台仅接受旺店通出库'}, set()
+        parsed=model.parse_source(kind,[blob],period,shop)
+        digest=hashlib.sha256(hashlib.sha256(blob).hexdigest().encode()).hexdigest()
+        saved=save_source(period,shop,kind,digest,[name],parsed,operator)
+        indexed=documents.store_documents(db._engine,shop,[batch],operator)
+        return {'name':name,'ok':True,'kind':kind,'label':_AUTO_LABELS.get(kind,kind),
+            'rows':len(parsed['rows']),'duplicate':saved['duplicate'],'warnings':parsed['warnings']}, set(indexed['affected'])
+    except (ValueError,TypeError,KeyError) as exc:
+        return {'name':name,'ok':False,'error':str(exc)[:120]}, set()
+
+
 @router.post('/upload-auto')
 async def upload_auto(request:Request,period:str=Form(...),shop:str=Form(...),files:list[UploadFile]=File(...)):
     """批量上传·按表头自动识别资料类型（order/item/wdt/refund）逐个入库；资金流水仍走账户导入。
@@ -474,36 +499,44 @@ async def upload_auto(request:Request,period:str=Form(...),shop:str=Form(...),fi
     if not files or len(files)>20: raise HTTPException(400,'每次最多 20 个文件')
     from starlette.concurrency import run_in_threadpool
     aliases=(db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}).get(shop,[])
-    labels={'order':'平台订单','item':'商品与子订单','wdt':'旺店通销售出库','refund':'退款售后明细'}
     results=[];affected=set()
     for f in files:
         name=Path((f.filename or '').replace('\\','/')).name[:180]
         blob=await f.read(model.tm.MAX_ALIPAY_FILE_BYTES+1)
-        if len(blob)>model.tm.MAX_ALIPAY_FILE_BYTES:
-            results.append({'name':name,'ok':False,'error':'单个文件超过 30 MB'});continue
-        try:
-            batch=await run_in_threadpool(documents.parse_documents,blob,name,shop,aliases)
-            kinds={r['kind'] for r in batch['docs']}
-            if len(kinds)!=1:
-                results.append({'name':name,'ok':False,'error':'表头无法唯一识别资料类型'});continue
-            kind=kinds.pop()
-            if kind in ('alipay','fund'):
-                results.append({'name':name,'ok':False,'kind':kind,'error':'资金流水请在账户流水页按账户导入'});continue
-            if s['platform'] not in ('天猫','淘宝') and kind!='wdt':
-                results.append({'name':name,'ok':False,'kind':kind,'error':'该平台仅接受旺店通出库'});continue
-            parsed=await run_in_threadpool(model.parse_source,kind,[blob],period,shop)
-            digest=hashlib.sha256(hashlib.sha256(blob).hexdigest().encode()).hexdigest()
-            saved=save_source(period,shop,kind,digest,[name],parsed,user['name'])
-            indexed=await run_in_threadpool(documents.store_documents,db._engine,shop,[batch],user['name'])
-            affected|=set(indexed['affected'])
-            results.append({'name':name,'ok':True,'kind':kind,'label':labels.get(kind,kind),
-                'rows':len(parsed['rows']),'duplicate':saved['duplicate'],'warnings':parsed['warnings']})
-        except (ValueError,TypeError,KeyError) as exc:
-            results.append({'name':name,'ok':False,'error':str(exc)[:120]})
+        res,aff=await run_in_threadpool(_auto_ingest_one,period,shop,s,name,blob,aliases,user['name'])
+        results.append(res);affected|=aff
     if affected:
         await run_in_threadpool(documents.reconcile,db._engine,db.ec_flow_rows,db.ec_flow_accounts,affected)
     ok_n=sum(1 for r in results if r.get('ok') and not r.get('duplicate'))
     db.audit(user['name'],'ec_workbench_import_auto',target=period,detail=f"自动识别入库 {ok_n}/{len(results)}")
+    return {'ok':True,'results':results}
+
+
+@router.post('/inbox-import')
+async def inbox_import(request:Request,period:str=Form(...),shop:str=Form(...)):
+    """公盘一键取件（L1）：读服务器 EC_INBOX_ROOT/期间/店铺/ 下的文件，逐个自动识别入库；
+    只读原文件、不改不删；复用批量上传同一引擎；单文件指纹去重，重复自动跳过。资金流水/金蝶不在此通道。"""
+    user=require(request,True);check_period(period);s=check_shop(shop)
+    configured=os.environ.get('EC_INBOX_ROOT')
+    if not configured: raise HTTPException(400,'服务器未挂载公盘（未配置 EC_INBOX_ROOT）；请先按店铺、数据类别上传，或配置取件目录')
+    root=Path(configured).resolve();folder=(root/period/shop).resolve()
+    if not folder.is_relative_to(root): raise HTTPException(400,'目录超出配置范围')
+    if not folder.is_dir(): return {'ok':True,'results':[],'message':'公盘该期间/店铺目录暂无文件'}
+    from starlette.concurrency import run_in_threadpool
+    aliases=(db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}).get(shop,[])
+    paths=[p for p in sorted(folder.rglob('*')) if p.resolve().is_relative_to(root) and p.is_file() and p.suffix.lower() in ('.xlsx','.xls','.zip')][:50]
+    if not paths: return {'ok':True,'results':[],'message':'公盘该期间/店铺目录暂无可识别文件（订单/子订单/退款/旺店通）'}
+    results=[];affected=set()
+    for p in paths:
+        name=p.name[:180]
+        try: blob=p.read_bytes()
+        except OSError: results.append({'name':name,'ok':False,'error':'读取失败'});continue
+        res,aff=await run_in_threadpool(_auto_ingest_one,period,shop,s,name,blob,aliases,user['name'])
+        results.append(res);affected|=aff
+    if affected:
+        await run_in_threadpool(documents.reconcile,db._engine,db.ec_flow_rows,db.ec_flow_accounts,affected)
+    ok_n=sum(1 for r in results if r.get('ok') and not r.get('duplicate'))
+    db.audit(user['name'],'ec_workbench_inbox_import',target=period,detail=f"公盘取件 {ok_n}/{len(results)}")
     return {'ok':True,'results':results}
 
 
