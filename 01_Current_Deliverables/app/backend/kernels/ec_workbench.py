@@ -11,7 +11,7 @@ from kernels import ec_flow_ledger as ledger
 KINDS = {'order': '平台订单', 'item': '商品与子订单', 'wdt': '旺店通销售出库',
          'alipay': '支付宝流水', 'fund': '聚合账户流水', 'refund': '退款售后明细'}
 REQUIRED = tuple(KINDS)
-LABELS = {'normal': '正常销售', 'ufirst': 'U先试用装', 'mixed': '混合订单', 'review': '待确认分类', 'unknown': '待分类'}
+LABELS = {'normal': '正常销售', 'ufirst': 'U先试用装', 'mixed': '混合订单', 'review': '试用装', 'unknown': '待分类'}
 FEE_LABELS = {c: label for c, label, _ in es.FEE_MAP_SEED}
 
 
@@ -246,6 +246,9 @@ def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=
         eligible = lambda date: bool(date) and (not period or str(date)[:7] <= period)
         line_items = items[no]
         typ = business.get(key, 'unknown')
+        # 试用/U先按【商品标题】豁免金蝶应收（title_kind 认标题里的 U先/试用；不看实付金额，故先用后付=正常销售不受影响）：
+        # 与 ufirst 同一待遇——不要求金蝶应收、不落待人工、金蝶应收列显“不适用”。
+        ar_exempt = typ in ('ufirst', 'review')
         paid = amount(r.get('current_paid'))
         # Item report preserves gross transaction paid amount; master export can be current-state.
         if line_items and all('paid' in x for x in line_items): paid = total(x['paid'] for x in line_items)
@@ -264,8 +267,8 @@ def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=
         issues = []
         if any(x.get('refund',0)>0 and x.get('refund_status') not in ('退款成功','退款完成','已退款') for x in line_items):
             issues.append('退款状态与累计退款金额不一致：核对售后及跨期流水')
-        if typ in ('unknown', 'review', 'mixed'): issues.append('业务分类待确认' if typ != 'mixed' else '混合订单待拆分')
-        pending_ship = typ != 'ufirst' and paid_success and refund < paid and not r.get('shipped_at') and not shipped and r.get('status') not in ('交易关闭', '交易成功')
+        if typ in ('unknown', 'mixed'): issues.append('业务分类待确认' if typ != 'mixed' else '混合订单待拆分')
+        pending_ship = not ar_exempt and paid_success and refund < paid and not r.get('shipped_at') and not shipped and r.get('status') not in ('交易关闭', '交易成功')
         if pending_ship and r.get('status') not in ('买家已付款', '等待卖家发货'):
             pending_ship = False
         should_ar = bool(shipped or eligible(r.get('shipped_at'))) if recognition == 'shipment' else eligible(r.get('confirmed_at'))
@@ -320,7 +323,7 @@ def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=
             commission_fee=total(fee_parts['commission']) if cash_present else None,
             unclassified_fee=total(fee_parts['unclassified']) if cash_present else None,
             shipment_state=shipment_state,refund_state=refund_state,settlement_state=settlement,
-            business_type=typ, business_label=LABELS.get(typ, typ), items=line_items, shipments=ship,
+            business_type=typ, business_label=LABELS.get(typ, typ), ar_exempt=ar_exempt, items=line_items, shipments=ship,
             refunds=refunds[no], events=events[key], fees=fee, fee_events=fee_events, net_receipt=net,
             destination='、'.join({'alipay':'支付宝','fund':'聚合账户'}[d] for d in destinations) or '待结算 / 待补流水',
             refund_only=refund_only, return_refund=return_refund, unknown_refund=unknown_refund,
