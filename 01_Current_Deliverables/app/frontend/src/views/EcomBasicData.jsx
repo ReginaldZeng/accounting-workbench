@@ -52,18 +52,19 @@ export default function EcomBasicData({ user }) {
   const [working, setWorking] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [msg, setMsg] = useState('')
+  const [shopAliases, setShopAliases] = useState({})
 
   const load = () => getEcBasicdata().then(r => {
     setShopMap(r.shop_map || []); setFeeMap(r.fee_map || []); setRules(r.rules || {}); setRecognitionRules(r.recognition_rules || {}); setFlowRules(r.flow_rules || [])
     setVcfg(r.voucher_cfg || {}); setDirty(false)
-    setPreparationRules(r.preparation_rules || {}); setFeeCategories(r.fee_categories || {})
+    setPreparationRules(r.preparation_rules || {}); setFeeCategories(r.fee_categories || {}); setShopAliases(r.shop_aliases || {})
   }).catch(e => setMsg(String(e.message || e)))
   useEffect(() => { load() }, [])
 
   const save = async () => {
     try {
       setMsg('保存中…')
-      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, fee_categories:feeCategories, rules, recognition_rules: recognitionRules, preparation_rules:preparationRules, flow_rules: flowRules, voucher_cfg: vcfg })
+      await saveEcBasicdata({ shop_map: shopMap, fee_map: feeMap, fee_categories:feeCategories, rules, recognition_rules: recognitionRules, preparation_rules:preparationRules, flow_rules: flowRules, voucher_cfg: vcfg, shop_aliases: shopAliases })
       setMsg('已保存'); load()
     } catch (e) { setMsg('保存失败：' + String(e.message || e)) }
   }
@@ -139,7 +140,7 @@ export default function EcomBasicData({ user }) {
         </div>
         <div className="eb-tblwrap">
           <table>
-            <thead><tr><th>管理名称（显示用简称）</th><th>金蝶客户名</th><th>旺店通店铺名</th><th>平台</th><th>支付宝账号（自动认流水包文件）</th>{canEdit && <th style={{ width: 36 }}></th>}</tr></thead>
+            <thead><tr><th>管理名称（显示用简称）</th><th>金蝶客户名</th><th>旺店通店铺名</th><th>平台</th><th>别名 / 公盘文件夹名</th><th>支付宝账号（自动认流水包文件）</th>{canEdit && <th style={{ width: 36 }}></th>}</tr></thead>
             <tbody>{shopMap.map((r, i) => <tr key={i}>
               {/* V2.277 管理名称：只做显示层（收款核销各处以此称呼店铺）；数据键仍是旺店通店铺名，改名不动历史 */}
               <td style={editCell} onClick={() => editRow(shopMap, setShopMap, i, 'mgmt_name', '管理名称（显示用简称，留空=用旺店通店铺名）')}>
@@ -148,6 +149,8 @@ export default function EcomBasicData({ user }) {
               <td style={editCell} onClick={() => editRow(shopMap, setShopMap, i, 'wdt_name', '旺店通店铺名')}>
                 {r.wdt_name}{r.kd_name !== r.wdt_name && <span className="eb-pill">两侧名称不同</span>}</td>
               <td style={{ ...editCell, color: 'var(--ink-2)' }} onClick={() => editRow(shopMap, setShopMap, i, 'platform', '平台')}>{r.platform}</td>
+              <td style={{ ...editCell, whiteSpace: 'normal', maxWidth: 260 }} onClick={() => { if (!canEdit) return; const key = r.wdt_name; const v = window.prompt('别名（多个用 、或逗号分隔）：系统ID/旺店通名/金蝶名之外的其它写法——显示名、公盘文件夹名、宝贝明细里的店铺名，都填进来。取件按此认对店、放错文件夹也能纠。', (shopAliases[key] || []).join('、')); if (v === null) return; const list = v.split(/[、,，]+/).map(x => x.trim()).filter(Boolean); setShopAliases({ ...shopAliases, [key]: list }); setDirty(true) }}>
+                {(shopAliases[r.wdt_name] || []).length ? (shopAliases[r.wdt_name] || []).join('、') : <span style={{ color: 'var(--amber,#a35a00)' }}>未填（建议填公盘文件夹名 / 显示名）</span>}</td>
               <td className="eb-mono" style={editCell} onClick={() => editRow(shopMap, setShopMap, i, 'alipay_acct', '支付宝账号（2088 开头，银行对账流水包文件名里的账号）')}>
                 {r.alipay_acct || <span style={{ color: 'var(--ink-3)' }}>未配（收款核销认不到该店流水）</span>}</td>
               {canEdit && <td><span style={{ cursor: 'pointer', color: 'var(--red,#c0392b)', fontSize: 12 }} onClick={() => delRow(shopMap, setShopMap, i)}>删</span></td>}
