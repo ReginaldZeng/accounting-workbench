@@ -664,16 +664,27 @@ def _kd_ar_from(period):
     return "%04d-%02d-01" % (fy, fm)
 
 
+def _kd_ar_to(period):
+    """金蝶应收取数终点：当期期末往后 forward 个月的月末；forward 可配 ec_kd_forward_months，默认1=含次月，
+    覆盖跨期发货/金蝶入账滞后（月底发货、应收单据日期常落到次月初）。设 0 则只到当期期末。"""
+    import calendar
+    y, m = int(period[:4]), int(period[5:7])
+    try: forward = max(0, int(db.get_setting("ec_kd_forward_months", 1)))
+    except (TypeError, ValueError): forward = 1
+    tm = m + forward; ty = y + (tm - 1) // 12; tm = (tm - 1) % 12 + 1
+    return "%04d-%02d-%02d" % (ty, tm, calendar.monthrange(ty, tm)[1])
+
+
 def _sync_kd_receivables(period, operator, full=False):
     """Read-only Kingdee fetch and atomic application-cache refresh."""
     import calendar
     y, m = int(period[:4]), int(period[5:7])
-    end = "%04d-%02d-%02d" % (y, m, calendar.monthrange(y, m)[1])
+    end = _kd_ar_to(period)
     ar_from = _kd_ar_from(period)
     p = _kd_cache_path(period)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     prev = _kd_cache_meta(period)
-    incremental = (not full) and bool(prev) and prev.get("date_from") == ar_from
+    incremental = (not full) and bool(prev) and prev.get("date_from") == ar_from and prev.get("date_to") == end
     changed_n = None
     if incremental:
         since = str(prev["ts"])[:10] + " 00:00:00"     # 日期级、宁可多拉不漏
@@ -1046,7 +1057,7 @@ def _run_core(rid, shop, period, flow_rows, refund_bytes, operator, ar_from=""):
         # 期间闸：应收只认结算期末以前（确认书⑤ 5.2）。起点默认往前 6 个月覆盖跨月发货。
         y, m = int(period[:4]), int(period[5:7])
         import calendar
-        end = "%04d-%02d-%02d" % (y, m, calendar.monthrange(y, m)[1])
+        end = _kd_ar_to(period)
         if not ar_from:
             ar_from = _kd_ar_from(period)
         ar_rows = kc.fetch_ec_receivables(ar_from, end)
@@ -1167,7 +1178,7 @@ def ec_order_detail(request: Request, run_id: int, order_no: str):
         return JSONResponse({"error": "订单不在该次跑批里"}, status_code=404)
     import calendar
     y, m = int(run.period[:4]), int(run.period[5:7])
-    end = "%04d-%02d-%02d" % (y, m, calendar.monthrange(y, m)[1])
+    end = _kd_ar_to(run.period)
     s, conf = kc.login()
     F = [("FBillNo", "bill"), ("FDate", "date"), ("FMATERIALID.FNumber", "mat"),
          ("FMATERIALID.FName", "mat_name"), ("FPriceQty", "qty"), ("FALLAMOUNTFOR_D", "amt"),
