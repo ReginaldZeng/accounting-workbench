@@ -466,6 +466,50 @@ async def upload(request:Request,period:str=Form(...),shop:str=Form(...),kind:st
     return dict(result,ok=True,rows=len(parsed['rows']),warnings=parsed['warnings'])
 
 
+def _norm_shop(x):
+    """归一店铺/文件夹名：去空白与常见标点、去尾部『数据/店铺』、小写；供公盘文件夹名与别名精确比对。"""
+    x=re.sub(r'[\s\-_、,，.。·／/\\（）()【】\[\]「」]+','',str(x or '')).lower()
+    return re.sub(r'(数据|店铺)+$','',x)
+
+
+def _shop_tokens(s,aliases):
+    """一家店的所有可认名（系统ID/管理名/金蝶名/别名）归一集合；长度≥2 才算，避免误配。"""
+    raw=[s.get('id'),s.get('name'),s.get('kd_name'),*(aliases or [])]
+    return {t for t in (_norm_shop(v) for v in raw) if len(t)>=2}
+
+
+def _period_of(name):
+    """把文件夹名解析成期间 YYYY-MM：认 2026年8月 / 2026-08 / 2026.8 / 202608 等；认不出返回 None。"""
+    x=str(name or '').strip()
+    m=re.search(r'(20\d{2})\s*[-./年_]\s*(\d{1,2})\s*月?',x) or re.fullmatch(r'(20\d{2})(0[1-9]|1[0-2])',x)
+    if not m:return None
+    y,mm=int(m.group(1)),int(m.group(2))
+    return f'{y:04d}-{mm:02d}' if 1<=mm<=12 else None
+
+
+def _inbox_files(root,period,s,aliases):
+    """在 EC_INBOX_ROOT 下按原生布局(年/年月/店铺-数据)找本期本店文件。
+    店按别名精确认(免文件夹名写错)、期间按 年月 文件夹容错解析；兼容旧的 期间/店铺ID 扁平布局。只读，返回 root 内文件路径列表。"""
+    root=root.resolve();hits=[];seen=set()
+    flat=(root/period/s['id']).resolve()
+    if flat.is_relative_to(root) and flat.is_dir():
+        for p in flat.rglob('*'):
+            rp=p.resolve()
+            if rp not in seen and rp.is_relative_to(root) and p.is_file():hits.append(p);seen.add(rp)
+    tokens=_shop_tokens(s,aliases)
+    for d in root.rglob('*'):
+        try:
+            if not d.is_dir():continue
+        except OSError:continue
+        rd=d.resolve()
+        if not rd.is_relative_to(root) or _norm_shop(d.name) not in tokens:continue
+        if not any(_period_of(seg)==period for seg in rd.relative_to(root).parts):continue
+        for p in rd.rglob('*'):
+            rp=p.resolve()
+            if rp not in seen and rp.is_relative_to(root) and p.is_file():hits.append(p);seen.add(rp)
+    return sorted(hits)
+
+
 _AUTO_LABELS={'order':'平台订单','item':'商品与子订单','wdt':'旺店通销售出库','refund':'退款售后明细'}
 def _auto_ingest_one(period, shop, s, name, blob, aliases, operator):
     """单文件按列自动识别 → 入库；批量上传与公盘取件共用。返回 (结果dict, 受影响单据集)。识别只看列结构、不看文件名。"""
@@ -519,13 +563,11 @@ async def inbox_import(request:Request,period:str=Form(...),shop:str=Form(...)):
     user=require(request,True);check_period(period);s=check_shop(shop)
     configured=os.environ.get('EC_INBOX_ROOT')
     if not configured: raise HTTPException(400,'服务器未挂载公盘（未配置 EC_INBOX_ROOT）；请先按店铺、数据类别上传，或配置取件目录')
-    root=Path(configured).resolve();folder=(root/period/shop).resolve()
-    if not folder.is_relative_to(root): raise HTTPException(400,'目录超出配置范围')
-    if not folder.is_dir(): return {'ok':True,'results':[],'message':'公盘该期间/店铺目录暂无文件'}
+    root=Path(configured)
     from starlette.concurrency import run_in_threadpool
     aliases=(db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}).get(shop,[])
-    paths=[p for p in sorted(folder.rglob('*')) if p.resolve().is_relative_to(root) and p.is_file() and p.suffix.lower() in ('.xlsx','.xls','.zip')][:50]
-    if not paths: return {'ok':True,'results':[],'message':'公盘该期间/店铺目录暂无可识别文件（订单/子订单/退款/旺店通）'}
+    paths=[p for p in _inbox_files(root,period,s,aliases) if p.suffix.lower() in ('.xlsx','.xls','.zip')][:50]
+    if not paths: return {'ok':True,'results':[],'message':'公盘未找到本期本店可识别文件；请在基础资料·店铺对照填该店的「公盘文件夹名/别名」，取件按别名认原生 年/年月/店铺-数据 文件夹'}
     results=[];affected=set()
     for p in paths:
         name=p.name[:180]
@@ -616,16 +658,11 @@ def history(request:Request,period:str,shop:str):
 
 @router.get('/inbox')
 def inbox(request:Request,period:str,shop:str):
-    require(request);check_period(period);check_shop(shop)
+    require(request);check_period(period);s=check_shop(shop)
     configured=os.environ.get('EC_INBOX_ROOT')
     if not configured:return {'ok':True,'configured':False,'files':[],'message':'服务器未挂载公盘。当前可按店铺、数据类别上传文件；公盘取件须配置服务器可访问目录。'}
-    root=Path(configured).resolve();folder=(root/period/shop).resolve()
-    if not folder.is_relative_to(root):raise HTTPException(400,'目录超出配置范围')
-    result=[]
-    if folder.is_dir():
-        for path in folder.rglob('*'):
-            if len(result)>=200:break
-            resolved=path.resolve()
-            if resolved.is_relative_to(root) and resolved.is_file() and resolved.suffix.lower() in ('.xlsx','.xls','.csv','.zip'):
-                result.append({'name':str(resolved.relative_to(folder)),'bytes':resolved.stat().st_size})
-    return {'ok':True,'configured':True,'files':result,'message':'按期间/店铺读取配置目录，原文件不修改。'}
+    root=Path(configured);rroot=root.resolve()
+    aliases=(db.get_setting('ec_document_shop_aliases',{'星期零STARFIELD 天猫官旗店':['STARFIELD星期零旗舰店']}) or {}).get(shop,[])
+    files=[p for p in _inbox_files(root,period,s,aliases) if p.suffix.lower() in ('.xlsx','.xls','.csv','.zip')][:200]
+    result=[{'name':str(p.resolve().relative_to(rroot)),'bytes':p.stat().st_size} for p in files]
+    return {'ok':True,'configured':True,'files':result,'message':'按店铺别名认公盘原生文件夹（年/年月/店铺-数据），只读本期文件、不修改原件。'}
