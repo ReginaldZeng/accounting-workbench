@@ -399,7 +399,7 @@ def sources_view(request:Request,period:str,shop:str):
     cards=preparation_cards(period,shop)
     return {'ok':True,'shop':selected,'sources':cards,'progress':preparation.progress(cards),
         'kingdee':{'refreshing':bool(ec._KD_REFRESH.get(period,{}).get('running'))},
-        'collector_configured':bool(os.environ.get('EC_INBOX_ROOT')),
+        'collector_configured':bool(os.environ.get('EC_INBOX_ROOT')),'pickup':_pickup_status(period,shop),
         'voucher_sync':_sync.get((period,shop),{}),'kingdee_read_only':True}
 
 
@@ -662,6 +662,21 @@ async def pickup_report(request:Request):
     except Exception:
         pass
     return {'ok':True}
+
+
+def _pickup_status(period,shop):
+    """取件机状态（数据准备页状态带用）：全局是否在跑 + 本店本期由取件机接入了几份、最近何时。"""
+    rec=db.get_setting(_PICKUP_SYNC,None) or {}
+    ago=None
+    for fmt in ('%Y-%m-%d %H:%M:%S','%Y-%m-%d %H:%M'):
+        try:ago=max(0,int((datetime.datetime.now()-datetime.datetime.strptime(rec.get('at',''),fmt)).total_seconds()));break
+        except Exception:continue
+    with db._engine.connect() as cx:
+        r=cx.execute(select(func.max(TABLE.c.ts),func.count()).where(TABLE.c.period==period,TABLE.c.shop==shop,TABLE.c.operator=='取件机')).first()
+    return {'deployed':bool(rec),'alive':(ago is not None and ago<=240),'ago_sec':ago,
+        'scan_at':rec.get('at',''),'host':rec.get('host',''),
+        'last_at':(r[0] if r else None),'files':(r[1] if r and r[1] else 0),
+        'last':{k:rec.get(k) for k in ('scanned','ingested','duplicate','unresolved','shops') if k in rec}}
 
 
 @router.post('/pickup/request-scan')

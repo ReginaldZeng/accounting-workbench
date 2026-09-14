@@ -5,10 +5,10 @@ import EcomHistoricalDocuments from './EcomHistoricalDocuments.jsx'
 
 export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,refresh,notify,onBasic}) {
   const result=useResource(`/api/ec/workbench/sources?${query({period,shop})}`,revision)
-  const [busy,setBusy]=useState(false),[inbox,setInbox]=useState(null),[source,setSource]=useState(null)
+  const [busy,setBusy]=useState(false),[showPickup,setShowPickup]=useState(false),[source,setSource]=useState(null)
   const [accounts,setAccounts]=useState({}),[autoResults,setAutoResults]=useState(null)
   const input=useRef(null),target=useRef(null),autoInput=useRef(null)
-  const data=result.data, rows=data?.sources||[]
+  const data=result.data, rows=data?.sources||[], pickup=data?.pickup
   useEffect(()=>{
     if (!data?.kingdee?.refreshing) return
     const timer=setInterval(refresh,5000);return()=>clearInterval(timer)
@@ -27,14 +27,6 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
       body.append('period',period);body.append('shop',shop)
       const r=await wb('upload-auto',{method:'POST',body})
       setAutoResults(r.results||[])
-    })
-  }
-  function pickInbox() {
-    setAutoResults(null)
-    act(async()=>{
-      const body=new FormData();body.append('period',period);body.append('shop',shop)
-      const r=await wb('inbox-import',{method:'POST',body})
-      setAutoResults(r.results||[]);setInbox(null)
     })
   }
   function upload(e) {
@@ -65,9 +57,16 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
     })
   }
   return <section className="ew-panel ew-preparation">
-    <header><div><h2>月结资料清单</h2><p>{shopInfo?.name||shop} · {period}</p></div><div style={{display:'flex',gap:8}}>{canEdit&&<button disabled={busy} onClick={()=>autoInput.current?.click()} title="一次选多个文件，按表头自动识别订单/子订单/退款/旺店通，逐个入库">批量上传 · 自动识别</button>}<button disabled={busy} onClick={()=>act(async()=>setInbox(await wb(`inbox?${query({period,shop})}`)))}>查看公盘</button></div></header>
+    <header><div><h2>月结资料清单</h2><p>{shopInfo?.name||shop} · {period}</p></div><div style={{display:'flex',gap:8}}>{canEdit&&<button disabled={busy} onClick={()=>autoInput.current?.click()} title="一次选多个文件，按表头自动识别订单/子订单/退款/旺店通，逐个入库">批量上传 · 自动识别</button>}<button disabled={busy} onClick={()=>setShowPickup(v=>!v)} title="公盘取件机的运行状态与本店本期自动接入记录">取件记录</button></div></header>
     <input ref={input} type="file" hidden multiple accept=".xlsx,.xls,.zip" onChange={upload}/>
     <input ref={autoInput} type="file" hidden multiple accept=".xlsx,.xls,.zip" onChange={uploadAuto}/>
+    {pickup&&<div className="ew-notice" style={{display:'flex',alignItems:'center',gap:6}}>{
+      pickup.deployed&&pickup.alive
+        ? <><span style={{color:'var(--green,#32a783)'}}>●</span><span>电商资料自动接入中 · 取件机最近扫描 {pickup.scan_at||'—'}{pickup.last_at?`　·　本店本期最近接入 ${pickup.last_at}（${pickup.files} 份）`:'　·　本店本期暂无自动接入'}</span></>
+        : pickup.deployed
+          ? <><span style={{color:'var(--amber,#a35a00)'}}>●</span><span>取件机最近 {pickup.scan_at||'—'} 后未再报平安（可能关机或任务停）· 期间可用「批量上传」兜底</span></>
+          : <><span style={{color:'var(--ink-3,#8a8f99)'}}>○</span><span>公盘取件机未部署 · 可用「批量上传 · 自动识别」手工准备</span></>
+    }</div>}
     {result.error&&<p className="ew-notice" role="alert">读取失败：{result.error}。齐套状态暂不可用。<button onClick={refresh}>重试</button></p>}
     <div className="ew-scroll ew-source-table"><table><thead><tr><th>资料类型</th><th>准备状态</th><th>有效行数</th><th>来源文件</th><th>最近更新</th><th>操作</th></tr></thead><tbody>
       {!result.loading&&!result.error&&rows.map(row=>{
@@ -85,7 +84,12 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
       {result.loading&&<tr><td colSpan="6" className="ew-empty">正在读取已保存资料…</td></tr>}
       {!result.loading&&!result.error&&!rows.length&&<tr><td colSpan="6" className="ew-empty">本店尚未配置所需资料，不能判定齐套。<button onClick={onBasic}>前往基础资料设置</button></td></tr>}
     </tbody></table></div>
-    {inbox&&<div className="ew-notice">{inbox.message}{inbox.files?.map(f=><span key={f.name}>{f.name}<br/></span>)}{canEdit&&inbox.configured&&inbox.files?.length>0&&<div style={{marginTop:8}}><button disabled={busy} onClick={pickInbox} title="读公盘该期间/店铺的文件，按表头自动识别订单/子订单/退款/旺店通入库；只读原文件不改不删">一键取件 · 自动识别入库（{inbox.files.length} 个）</button></div>}</div>}
+    {showPickup&&<div className="ew-notice"><b>公盘取件机 · 取件记录</b>{pickup?.deployed?<>
+      <div style={{marginTop:4}}>状态：{pickup.alive?'在跑':'已静默'} · 最近扫描 {pickup.scan_at||'—'}{pickup.host?` · ${pickup.host}`:''}</div>
+      <div style={{marginTop:4}}>上轮全盘扫描：接入 {pickup.last?.ingested??'—'} 份 · 去重 {pickup.last?.duplicate??'—'} · 跳过/认不出 {pickup.last?.unresolved??'—'}{pickup.last?.shops?.length?` · 涉及 ${pickup.last.shops.join('、')}`:''}</div>
+      <div style={{marginTop:4}}>本店本期已由取件机接入 {pickup.files||0} 份{pickup.last_at?`，最近 ${pickup.last_at}`:''}。</div>
+      <div style={{marginTop:4,color:'var(--ink-2)'}}>把文件放到公盘「年 / 年月 / 店铺-数据」文件夹即自动接入，无需手工。资金流水（支付宝/聚合）与金蝶不走此通道。若某店文件「认不出店铺」，去基础资料·店铺对照给该店补「公盘文件夹名」。</div>
+    </>:<div style={{marginTop:4}}>未部署：服务器还没收到取件机回报。当前可用「批量上传 · 自动识别」或按行「补充资料」手工准备。</div>}</div>}
     {autoResults&&<div className="ew-notice"><b>批量识别结果</b>（识别只看列结构、不看文件名；只读原文件）{autoResults.map((x,i)=><span key={i} style={{display:'block',marginTop:3}}>{x.name}：{x.ok?<>识别为「{x.label}」 · {count(x.rows)} 行{x.duplicate?'（内容重复，已跳过）':''}{x.warnings?.length?` · ${x.warnings.join('、')}`:''}</>:<span style={{color:'var(--red,#c0392b)'}}>未入库 · {x.error||x.kind||'无法识别'}</span>}</span>)}</div>}
     {source&&<SourceDrawer source={source} shop={shop} canEdit={canEdit} onChanged={refresh} onClose={()=>setSource(null)}/>}
   </section>
