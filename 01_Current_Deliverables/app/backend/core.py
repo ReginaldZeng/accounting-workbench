@@ -275,7 +275,10 @@ _PULL_PATHS = {"/api/rptexport/files", "/api/rptexport/download",
                "/api/bank-pull/pending", "/api/bank-pull/push",
                "/api/bank-pull/commit", "/api/bank-pull/report",
                # BOM 采购核算表【下行】落公盘（V2.524）：初审通过即落服务器 outbox，取件机同一令牌取走
-               "/api/bom/outbox/files", "/api/bom/outbox/download"}
+               "/api/bom/outbox/files", "/api/bom/outbox/download",
+               # 电商对账【上行】通道（取件机把公盘电商文件推上来，同一个 pull_token；request-scan 走登录不在此列）
+               "/api/ec/workbench/pickup/pending", "/api/ec/workbench/pickup/push",
+               "/api/ec/workbench/pickup/report"}
 
 
 def pull_token():

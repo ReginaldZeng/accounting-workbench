@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from sqlalchemy import select, insert, func
 from sqlalchemy.exc import IntegrityError
-from core import db, _require_perm
+from core import db, _require_perm, pull_token_ok
 from routers import ec
 from kernels import ec_workbench as model
 from kernels import ec_flow_ledger as ledger
@@ -580,6 +580,96 @@ async def inbox_import(request:Request,period:str=Form(...),shop:str=Form(...)):
     ok_n=sum(1 for r in results if r.get('ok') and not r.get('duplicate'))
     db.audit(user['name'],'ec_workbench_inbox_import',target=period,detail=f"公盘取件 {ok_n}/{len(results)}")
     return {'ok':True,'results':results}
+
+
+# ==================== 公盘电商对账取件机（上行 · HTTP 推送，与报表/银行同款令牌）====================
+# 报表取件机那台常开内网电脑，每分钟顺带扫公盘「电商对账」目录，把新文件按【原始相对路径】推上来。
+# 服务器按 V2.575 同一套解析：期间按 年月 文件夹容错、店铺按别名精确认——取件机零店铺配置、只管搬。
+_PICKUP_SYNC='ec_pickup_sync'      # 取件机最近一次回报（心跳；门户监控页 sync_key 读它）
+_PICKUP_WANT='ec_pickup_want'      # 页面点「立即扫描」标记（取件机下轮消费）
+
+
+def _all_shop_tokens():
+    """{归一名: 店铺dict} 全店索引：系统ID/管理名/金蝶名/各店别名 → 店，供取件机按路径认店。"""
+    aliases_all=db.get_setting('ec_document_shop_aliases',{}) or {}
+    idx={}
+    for s in shops():
+        for t in _shop_tokens(s,aliases_all.get(s['id'],[])):
+            idx.setdefault(t,s)   # 先到先得；shops() 顺序内建店在前，别名冲突不覆盖
+    return idx
+
+
+def _resolve_pickup(relpath):
+    """把取件机传来的相对路径解析成 (period, 店铺dict)。认不出对应项返回 None。"""
+    parts=[p for p in re.split(r'[\\/]+',str(relpath or '')) if p]
+    period=next((q for q in (_period_of(seg) for seg in parts) if q),None)
+    idx=_all_shop_tokens()
+    shop=next((idx[t] for seg in parts for t in (_norm_shop(seg),) if t in idx),None)
+    return period,shop
+
+
+@router.get('/pickup/pending')
+def pickup_pending(request:Request):
+    """取件机每轮先问：有没有人点过「立即扫描」。响应极小、可勤问。令牌鉴权（同报表/银行）。"""
+    if not pull_token_ok(request):raise HTTPException(403,'取件令牌无效')
+    w=db.get_setting(_PICKUP_WANT,None)
+    return {'ok':True,'pending':bool(w),'at':(w or {}).get('at',''),'by':(w or {}).get('by','')}
+
+
+@router.post('/pickup/push')
+async def pickup_push(request:Request):
+    """取件机推一个电商对账文件：原始相对路径走请求头 X-Ec-Relpath，文件字节走请求体。
+    服务器据路径认期间(年月文件夹)+认店(别名)，认得出才按列自动识别入库；内容指纹去重，重复推=无操作。
+    资金流水/金蝶不走此通道（各自另有来源）。"""
+    if not pull_token_ok(request):raise HTTPException(403,'取件令牌无效')
+    from urllib.parse import unquote
+    relpath=unquote(request.headers.get('x-ec-relpath','')).strip()
+    if not relpath:return {'ok':False,'msg':'缺文件路径(X-Ec-Relpath)'}
+    name=Path(relpath.replace('\\','/')).name[:180]
+    if Path(name).suffix.lower() not in ('.xlsx','.xls','.zip'):
+        return {'ok':True,'skipped':True,'name':name,'msg':'非订单/子订单/退款/旺店通文件，跳过'}
+    period,s=_resolve_pickup(relpath)
+    if not period:return {'ok':False,'name':name,'msg':'路径里认不出期间（需含 年月 文件夹，如 2026年8月），未入库'}
+    if not s:return {'ok':False,'name':name,'period':period,'msg':'路径里认不出店铺；请在基础资料·店铺对照给该店填「公盘文件夹名/别名」'}
+    data=await request.body()
+    if not data:return {'ok':False,'name':name,'msg':'空文件'}
+    if len(data)>model.tm.MAX_ALIPAY_FILE_BYTES:return {'ok':False,'name':name,'msg':'文件超过 30 MB'}
+    aliases=(db.get_setting('ec_document_shop_aliases',{}) or {}).get(s['id'],[])
+    from starlette.concurrency import run_in_threadpool
+    res,aff=await run_in_threadpool(_auto_ingest_one,period,s['id'],s,name,data,aliases,'取件机')
+    if aff:await run_in_threadpool(documents.reconcile,db._engine,db.ec_flow_rows,db.ec_flow_accounts,aff)
+    return dict(res,period=period,shop=s['id'],shop_name=s['name'])
+
+
+@router.post('/pickup/report')
+async def pickup_report(request:Request):
+    """取件机回报本轮扫描结果（内网往外发，不需入口）。写心跳供监控页显示「在跑·最近扫描时间」，
+    并消费「立即扫描」标记。本轮有新资料入库→按需钉钉提醒可核对（没配收件人/无新增则不发，绝不抛错）。"""
+    if not pull_token_ok(request):raise HTTPException(403,'取件令牌无效')
+    body=await request.json() if request.headers.get('content-type','').startswith('application/json') else {}
+    rec=dict(body or {});rec['at']=ec._now()
+    db.set_setting(_PICKUP_SYNC,rec,'取件机')
+    db.set_setting(_PICKUP_WANT,None,'取件机')
+    try:
+        if int(rec.get('ingested') or 0)>0:
+            mobiles=db.get_setting('ec_pickup_deliver_mobiles',None) or []
+            if mobiles:
+                from app import _recip_conf
+                import notifier
+                tail=('（'+'、'.join(rec.get('shops') or [])+'）') if rec.get('shops') else ''
+                notifier.send_dingtalk('🛒【电商资料取件机】新资料已接入 %d 份%s\n\n可到电商工作台·数据准备核对。'
+                    %(int(rec['ingested']),tail),_recip_conf(mobiles))
+    except Exception:
+        pass
+    return {'ok':True}
+
+
+@router.post('/pickup/request-scan')
+def pickup_request_scan(request:Request):
+    """页面点「立即扫描公盘电商对账」＝留个话，取件机下轮来问 pending 时看到就马上扫（走登录·需上传权限）。"""
+    u=require(request,True)
+    db.set_setting(_PICKUP_WANT,{'at':ec._now(),'by':u['name']},u['name'])
+    return {'ok':True,'msg':'已通知取件机，下一轮来取时会立即扫公盘电商对账目录（间隔取决于取件机轮询）。'}
 
 
 @router.post('/rules')

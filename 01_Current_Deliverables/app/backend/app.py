@@ -3910,6 +3910,16 @@ def _pull_registry():
          ],
          "down_hint": "此时共享盘的新流水不会自动接入工作台。请检查那台常开内网电脑是否关机、或计划任务停了；期间可在「数据接入」页手工上传流水包兜底。",
          "recover_hint": "共享盘自动接入已恢复正常。"},
+        {"id": "ecrecon", "name": "电商资料取件机", "lane": "accounting", "dir": "up", "freq": "每分钟一轮（随报表取件机）",
+         "purpose": "把公盘「电商对账」里各店订单/子订单/退款/旺店通推上工作台", "alert": "generic", "always_on": True,
+         "sync_key": "ec_pickup_sync", "alive_sec": 240,
+         "alerted_key": "ec_pickup_alerted", "mob_key": "ec_pickup_alert_mobiles",
+         "results": [
+             {"key": "ec_pickup_deliver_mobiles", "label": "🛒 电商资料接入通知 · 推送给谁",
+              "note": "公盘电商对账文件被自动识别入库后，钉钉通知这些人可到数据准备核对。"},
+         ],
+         "down_hint": "此时公盘「电商对账」的新文件不会自动接入工作台。请检查报表取件机那台常开电脑是否关机或计划任务停了；期间可在电商工作台·数据准备页手工上传兜底。",
+         "recover_hint": "公盘电商对账自动接入已恢复正常。"},
     ]
 
 

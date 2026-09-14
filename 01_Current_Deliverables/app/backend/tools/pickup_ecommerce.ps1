@@ -1,6 +1,9 @@
 ﻿# [Change Log]
 # Date: 2026-09-11 | Author: Codex | Version: V2.561
 # Description: 复用报表取件机的计划任务和取件码，把旺店通共享盘 XLSX 主动推给 BP 工作台。
+# Date: 2026-09-14 | Author: Claude | Version: V2.576
+# Description: 增 ecommerce_recon_dir：扫公盘「4.1 电商对账」原生树，按原始相对路径推给核算工作台
+#   /api/ec/workbench/pickup/*（同一 pull_token）；期间/店铺由服务器按 年月 文件夹 + 别名解析，取件机零店铺配置。
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
@@ -32,7 +35,7 @@ function Read-EcommerceConfig {
         if ($i -lt 1) { continue }
         $cfg[$text.Substring(0, $i).Trim()] = $text.Substring($i + 1).Trim()
     }
-    if (-not $cfg.ecommerce_inventory_dir -and -not $cfg.ecommerce_shipments_dir) { return $null }
+    if (-not $cfg.ecommerce_inventory_dir -and -not $cfg.ecommerce_shipments_dir -and -not $cfg.ecommerce_recon_dir) { return $null }
     $cfg.server = ($cfg.server -as [string]).TrimEnd('/')
     if (-not $cfg.server -or -not $cfg.pull_token) {
         throw 'pull_reports.ini 缺少 server 或 pull_token'
@@ -154,4 +157,81 @@ function Invoke-EcommercePickup {
     try { $state | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $EcomStateFile -Encoding utf8 } catch {}
 }
 
+# ── 公盘「电商对账」上行（V2.576）：扫 4.1 电商对账 原生树，按原始相对路径推给核算工作台 ──
+# 取件机保持"傻"：只搬文件、连原始路径一起送；期间(年月文件夹)与店铺(别名)全由服务器解析。
+# 推送目标是核算工作台 $cfg.server（与银行/报表同一把 pull_token），不是 BP。未配 ecommerce_recon_dir 静默跳过。
+function Push-EcommerceReconFile($cfg, [string]$RootFull, $File) {
+    $rel = $File.FullName.Substring($RootFull.Length).TrimStart('\', '/')
+    $bytes = [IO.File]::ReadAllBytes($File.FullName)
+    $h = @{ 'X-Pull-Token' = $cfg.pull_token; 'X-Ec-Relpath' = [uri]::EscapeDataString($rel) }
+    $r = Invoke-WebRequest -Uri ($cfg.server + '/api/ec/workbench/pickup/push') -Method POST -Headers $h `
+        -ContentType 'application/octet-stream' -Body $bytes -UseBasicParsing -TimeoutSec ([int]$cfg.timeout)
+    return [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray()) | ConvertFrom-Json
+}
+
+function Invoke-EcommerceReconPickup {
+    $cfg = Read-EcommerceConfig
+    if (-not $cfg -or -not $cfg.ecommerce_recon_dir) { return }
+    if (-not (Test-Path -LiteralPath $cfg.ecommerce_recon_dir)) {
+        Write-EcommerceLog ('[X] 电商对账目录不可访问：' + $cfg.ecommerce_recon_dir)
+        return
+    }
+    $rootFull = (Resolve-Path -LiteralPath $cfg.ecommerce_recon_dir).Path
+    $stateFile = Join-Path $EcomHere 'pickup_ecommerce_recon_state.json'
+    $state = @{}
+    if (Test-Path -LiteralPath $stateFile) {
+        try {
+            (Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties |
+                ForEach-Object { $state[$_.Name] = $_.Value }
+        } catch {}
+    }
+    $scanned = 0; $pushed = 0; $ingested = 0; $dup = 0; $unresolved = 0
+    $shops = New-Object System.Collections.Generic.HashSet[string]
+    $errs = @()
+    $files = Get-ChildItem -LiteralPath $cfg.ecommerce_recon_dir -Recurse -File -EA SilentlyContinue |
+        Where-Object { @('.xlsx', '.xls', '.zip') -contains $_.Extension.ToLowerInvariant() }
+    foreach ($f in $files) {
+        $scanned++
+        # 刚写入 30 秒内先不碰；下一分钟再取，避免读到"另存为"尚未写完的半份文件。
+        if (((Get-Date).ToUniversalTime() - $f.LastWriteTimeUtc).TotalSeconds -lt 30) { continue }
+        $rel = $f.FullName.Substring($rootFull.Length).TrimStart('\', '/')
+        $sig = '{0}|{1}' -f $f.Length, $f.LastWriteTimeUtc.Ticks
+        if ($state[$rel] -eq $sig) { continue }
+        try {
+            $res = Push-EcommerceReconFile $cfg $rootFull $f
+            $pushed++
+            if ($res.ok) {
+                $state[$rel] = $sig
+                if ($res.duplicate) {
+                    $dup++
+                } else {
+                    $ingested++
+                    if ($res.shop_name) { [void]$shops.Add([string]$res.shop_name) }
+                }
+                Write-EcommerceLog ('[OK] {0} → {1} / {2}（{3} 行{4}）' -f $rel, $res.shop_name, $res.period, $res.rows, $(if ($res.duplicate) { '·已存在' } else { '' }))
+            } else {
+                $unresolved++
+                Write-EcommerceLog ('[!] 未入库 {0}：{1}' -f $rel, $res.msg)
+            }
+        } catch {
+            $errs += ($rel + '：' + $_.Exception.Message)
+            Write-EcommerceLog ('[X] 推送失败 {0}：{1}' -f $rel, $_.Exception.Message)
+        }
+    }
+    try { $state | ConvertTo-Json -Depth 3 | Out-File -LiteralPath $stateFile -Encoding utf8 } catch {}
+    # 回执：写心跳（门户监控页显示"在跑·最近扫描"）+ 本轮成绩；发不出去不影响文件已推。
+    try {
+        $body = @{ host = $env:COMPUTERNAME; root = $cfg.ecommerce_recon_dir; scanned = $scanned;
+            pushed = $pushed; ingested = $ingested; duplicate = $dup; unresolved = $unresolved;
+            shops = @($shops); errors = $errs }
+        Invoke-WebRequest -Uri ($cfg.server + '/api/ec/workbench/pickup/report') -Method POST `
+            -Headers @{ 'X-Pull-Token' = $cfg.pull_token } -ContentType 'application/json;charset=utf-8' `
+            -Body ([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 4 -Compress))) `
+            -UseBasicParsing -TimeoutSec ([int]$cfg.timeout) | Out-Null
+    } catch {
+        Write-EcommerceLog ('[!] 电商对账回执没发出去（不影响文件已推）：' + $_.Exception.Message)
+    }
+}
+
 try { Invoke-EcommercePickup } catch { Write-EcommerceLog ('[X] 旺店通取件异常：' + $_.Exception.Message) }
+try { Invoke-EcommerceReconPickup } catch { Write-EcommerceLog ('[X] 电商对账取件异常：' + $_.Exception.Message) }
