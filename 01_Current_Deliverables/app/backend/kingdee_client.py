@@ -1999,7 +1999,7 @@ EC_AR_FIELDS = [
 
 
 def fetch_ec_receivables(date_from, date_to, org="深圳市星期零食品科技有限公司",
-                         dept="永续媒介中心", s=None, conf=None):
+                         dept="永续媒介中心", s=None, conf=None, modified_since=None):
     """电商应收单整段拉取（只读）。date_to = 结算期末（期间闸：下期红字属下期，实证 AR00301771）。"""
     if s is None or conf is None:
         s, conf = login()
@@ -2007,6 +2007,8 @@ def fetch_ec_receivables(date_from, date_to, org="深圳市星期零食品科技
     dept = str(dept).replace("'", "")
     filt = (f"FDATE>='{date_from}' and FDATE<='{date_to}'"
             f" and FSETTLEORGID.FName='{org}' and FSALEDEPTID.FName='{dept}'")
+    if modified_since:
+        filt += f" and FModifyDate>='{modified_since}'"
     return _query(s, conf, "AR_receivable", EC_AR_FIELDS, filt)
 
 

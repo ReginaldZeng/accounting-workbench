@@ -654,15 +654,38 @@ def ec_month_ar_status(request: Request, period: str):
     return dict(state, ok=True, period=period)
 
 
-def _sync_kd_receivables(period, operator):
+def _kd_ar_from(period):
+    """金蝶应收回溯起点：当期期末往前(回溯月数-1)个月的月初；回溯月数可配 ec_kd_lookback_months，默认3=当月+前2月。"""
+    y, m = int(period[:4]), int(period[5:7])
+    lookback = max(1, int(db.get_setting("ec_kd_lookback_months", 3) or 3))
+    fy, fm = y, m - (lookback - 1)
+    while fm <= 0:
+        fy -= 1; fm += 12
+    return "%04d-%02d-01" % (fy, fm)
+
+
+def _sync_kd_receivables(period, operator, full=False):
     """Read-only Kingdee fetch and atomic application-cache refresh."""
     import calendar
     y, m = int(period[:4]), int(period[5:7])
     end = "%04d-%02d-%02d" % (y, m, calendar.monthrange(y, m)[1])
-    fy, fm = (y - 1, m + 6) if m <= 6 else (y, m - 6)
-    rows = kc.fetch_ec_receivables("%04d-%02d-01" % (fy, fm), end)
+    ar_from = _kd_ar_from(period)
     p = _kd_cache_path(period)
     os.makedirs(os.path.dirname(p), exist_ok=True)
+    prev = _kd_cache_meta(period)
+    incremental = (not full) and bool(prev) and prev.get("date_from") == ar_from
+    changed_n = None
+    if incremental:
+        since = str(prev["ts"])[:10] + " 00:00:00"     # 日期级、宁可多拉不漏
+        changed = kc.fetch_ec_receivables(ar_from, end, modified_since=since)
+        month_ar.index_receivables(changed)
+        with open(p, encoding="utf-8") as _f:
+            rows = json.load(_f)
+        dirty = {str(r.get("单据编号") or "").strip() for r in changed}
+        rows = [r for r in rows if str(r.get("单据编号") or "").strip() not in dirty] + changed
+        changed_n = len(changed)
+    else:
+        rows = kc.fetch_ec_receivables(ar_from, end)
     # Validate before replacing; readers always see a complete old/new snapshot.
     month_ar.index_receivables(rows)
     temp_path = None
@@ -677,13 +700,15 @@ def _sync_kd_receivables(period, operator):
             os.remove(temp_path)
     meta = db.get_setting("ec_kd_cache_meta", {}) or {}
     meta[period] = {"rows": len(rows), "ts": _now(), "operator": operator,
-                    "date_from": "%04d-%02d-01" % (fy, fm), "date_to": end}
+                    "date_from": ar_from, "date_to": end,
+                    "mode": ("增量" if incremental else "全量"), "changed": changed_n}
     db.set_setting("ec_kd_cache_meta", meta, operator=operator)
-    db.audit(operator, "ec_kd_refresh", target=period, detail="%d 行" % len(rows))
+    db.audit(operator, "ec_kd_refresh", target=period,
+             detail=("增量 %s 变动 / 共 %d 行" % (changed_n, len(rows))) if incremental else ("全量 %d 行" % len(rows)))
 
 
 @router.post("/api/ec/settle/kd-refresh")
-def ec_kd_refresh(request: Request, period: str = Form(...)):
+def ec_kd_refresh(request: Request, period: str = Form(...), full: bool = Form(False)):
     """手动刷新金蝶应收（只读）→ 缓存落盘。后台线程跑（16k+ 行约 1 分钟），sources 轮询可见。"""
     u = _require_perm(request, "ec_settle_upload")
     if not u:
@@ -697,7 +722,7 @@ def ec_kd_refresh(request: Request, period: str = Form(...)):
 
     def job():
         try:
-            _sync_kd_receivables(period, u['name'])
+            _sync_kd_receivables(period, u['name'], full=full)
         except Exception as e:
             _KD_REFRESH[period]['error'] = '金蝶应收同步失败（%s），请检查金蝶连接后重试' % type(e).__name__
         finally:
@@ -1018,8 +1043,7 @@ def _run_core(rid, shop, period, flow_rows, refund_bytes, operator, ar_from=""):
         import calendar
         end = "%04d-%02d-%02d" % (y, m, calendar.monthrange(y, m)[1])
         if not ar_from:
-            fy, fm = (y - 1, m + 6) if m <= 6 else (y, m - 6)
-            ar_from = "%04d-%02d-01" % (fy, fm)
+            ar_from = _kd_ar_from(period)
         ar_rows = kc.fetch_ec_receivables(ar_from, end)
         ar_src = "实时拉取"
     st["step"] = "应收 %d 行已到，逐单核销中…" % len(ar_rows)
