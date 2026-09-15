@@ -88,6 +88,10 @@ auto_intake_interval_min = 5
 auto_intake_since =                  ; YYYY-MM-DD，留空＝首次启用当天
 auto_intake_notify = 1
 portal_url =                         ; 提醒里带的工作台地址，如 https://xxx.com（留空只写文字路径）
+; ---- OA 终审同步（V2.584）：你在 OA 财务经理节点点同意/退回 → 工作台自动终审通过/退回（工具只读 OA，不替人点）。
+;      退回备注里写 CP 码只退那几个产品；OA 单退回后再次到成本核算节点 → 草稿组自动重拉替换、已初审组只提醒
+oa_final_sync = 1
+final_node_ids = 908e_bfa0           ; 财务经理/BP 终审节点 activity_id，逗号分隔可多个
 ; ---- 初审通过即落盘（V2.524）：服务器 outbox 目录，留空＝bom_uploads/_outbox；取件机 bom_dest 同步到公盘
 outbox_dir =
 ; BOM 专用取件码（V2.525）：成本会计电脑上的 bom_pull 小取件机揣它来取 outbox 里的采购核算表，取不了报表、登录不了工作台。

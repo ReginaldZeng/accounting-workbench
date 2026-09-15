@@ -656,7 +656,9 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
                       ? <span className="tag werr">待复核 {a.pending}</span>
                       : (a.blocked > 0 ? <span className="tag werr">待修 {a.blocked}</span> : <span className="tag ok">全部已初审 · 已完成</span>)}
                       {a.finalized > 0 && a.pending > 0 && <span className="tag ok" style={{ marginLeft: 4 }}>已初审 {a.finalized}</span>}
-                      {a.blocked > 0 && a.pending > 0 && <span className="tag late" style={{ marginLeft: 4 }}>待修 {a.blocked}</span>}</td>
+                      {a.blocked > 0 && a.pending > 0 && <span className="tag late" style={{ marginLeft: 4 }}>待修 {a.blocked}</span>}
+                      {a.returned > 0 && <span className="tag late" style={{ marginLeft: 4 }} title="财务BP终审退回（工作台或 OA），原因见处理页 / 产品详情顶部">⟲ 终审退回 {a.returned}</span>}
+                      {a.oaReturned && <span className="tag late" style={{ marginLeft: 4 }} title={`OA 单退回后再次到成本核算节点（${a.oaReturned.at}）：已自动重拉替换 ${(a.oaReturned.replaced || []).length} 组，${(a.oaReturned.held || []).length} 组已初审未动（附件可能已变，请在处理页「重连钉钉替换」）`}>⟲ OA 退回重到</span>}</td>
                     <td style={{ whiteSpace: 'nowrap' }}><a className="lk" onClick={e => { e.stopPropagation(); onApproval(a.approvalNo) }}>进入处理 ›</a>
                       {isSuper && onDelete && a.approvalNo && <a className="lk" style={{ marginLeft: 10, color: 'var(--red)' }} title="主管理员：整单永久删除（需密钥）"
                         onClick={e => { e.stopPropagation(); onDelete({ approvalNo: a.approvalNo }, `钉钉单 ${a.approvalNo}（${a.productCount} 个产品，${a.groupCount} 组）`) }}>删除</a>}</td>
@@ -831,6 +833,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
               <span className="mono muted" style={{ fontSize: 11 }}>{g.coreCp}</span>
               {g.anyFinal && <span className="tag ok">含已定稿</span>}
               {g.pendingCount > 0 && <span className="tag leak" title="同一采购核算表里勾稽不平、未入账的产品，需退回研发/工厂修源表">{g.pendingCount} 个待修未入账</span>}
+              {g.returnCount > 0 && <span className="tag late" title="财务BP终审退回，原因见产品详情顶部横幅">⟲ 终审退回 {g.returnCount}</span>}
               {g.allOk ? <span className="tag ok">四步已确认</span> : <span className="tag werr">待复核</span>}
               <span className="muted" style={{ fontSize: 11 }}>{g.bookedCount}/{g.products.length} 已入账</span>
               <span style={{ flex: 1 }} />
@@ -1167,6 +1170,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
         <div className="bom-crumbs"><a className="lk" onClick={onBack}>成本台账</a> / {entry.productName}</div>
         {entry.staleNote && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
           ⚠ <b>{entry.staleNote}</b>：本品所依赖的上游采购核算表被替换过，成本可能已变——已把本品打回<b>未复核</b>，请重新走 ③用量自洽 / ④报价核算 确认。确认后此提醒自动消失。</div>}
+        {entry.finalReturn && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10, lineHeight: 1.6 }}>
+          ⟲ <b>终审退回</b>（{entry.finalReturn.by} · {entry.finalReturn.at}{entry.finalReturn.via === 'OA' ? ' · 在 OA 退回' : ''}）：<b>{entry.finalReturn.note}</b>
+          —— 按原因改好后重新走 ③用量自洽 / ④报价核算，再点「审核通过」；重新初审后此提醒自动消失。</div>}
         {/* 换码承接（V2.440）：本版被新版替代 / 本版替代了旧版 */}
         {entry.obsoleteBy && <div className="banner" style={entry.obsoleteBy.live
           ? { display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }

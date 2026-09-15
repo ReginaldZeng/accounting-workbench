@@ -343,3 +343,46 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
                 "attachments": atts, "instance": inst}
     except Exception as e:
         return {"ok": False, "msg": "钉钉取数失败：%s" % _scrub(e, ak, sk)}   # 抹掉可能带的 appkey/appsecret（审查 H7）
+
+
+def _find_inst(tok, business_id, process_code=None):
+    """按审批编号定位实例（当日窗口 + business_id 精确匹配）。→ (iid, inst) / (None, None)"""
+    st, et = _day_window(business_id)
+    pc = find_process_code(tok, process_code)
+    for iid in list_ids(tok, pc, st, et):
+        inst = get_inst(tok, iid)
+        if inst and str(inst.get("business_id") or "") == str(business_id):
+            return iid, inst
+    return None, None
+
+
+def final_node_state(business_id, node_ids, process_code=None):
+    """V2.584 OA 终审同步：某单在指定节点（财务经理/BP 节点）**最近一次已完成**的任务结果。只读、不抛。
+    → {ok, instanceId, instStatus, instResult, taskId, result(AGREE/REFUSE/REDIRECTED/NONE), userid, finishTime, remark, openAtNode}
+    remark＝该审批人在本单最后一条 EXECUTE_TASK_*/REDIRECT_* 操作记录的备注（拒绝/退回时写的原因）。"""
+    if not configured():
+        return {"ok": False, "msg": "未配置钉钉"}
+    try:
+        ak, sk = _conf()
+        tok = _token(ak, sk)
+        iid, inst = _find_inst(tok, business_id, process_code)
+        if not inst:
+            return {"ok": False, "msg": "未找到实例"}
+        tasks = inst.get("tasks") or []
+        done = [t for t in tasks if t.get("activity_id") in node_ids and (t.get("task_status") or "").upper() == "COMPLETED"]
+        done.sort(key=lambda t: str(t.get("finish_time") or ""))
+        t = done[-1] if done else None
+        remark = ""
+        if t:
+            uid = t.get("userid") or ""
+            recs = [r for r in (inst.get("operation_records") or []) if (r.get("userid") or "") == uid
+                    and str(r.get("operation_type") or "").upper().startswith(("EXECUTE_TASK", "REDIRECT"))]
+            recs.sort(key=lambda r: str(r.get("date") or ""))
+            if recs:
+                remark = str(recs[-1].get("remark") or "")
+        return {"ok": True, "instanceId": iid, "instStatus": (inst.get("status") or "").upper(), "instResult": (inst.get("result") or "").lower(),
+                "taskId": str((t.get("taskid") or t.get("task_id") or "") if t else ""), "result": ((t.get("task_result") or "").upper() if t else ""),
+                "userid": ((t.get("userid") or "") if t else ""), "finishTime": (str(t.get("finish_time") or "") if t else ""), "remark": remark,
+                "openAtNode": any(x.get("activity_id") in node_ids and (x.get("task_status") or "").upper() in _TASK_OPEN for x in tasks)}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)[:200]}

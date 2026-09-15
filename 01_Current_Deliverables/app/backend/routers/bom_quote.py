@@ -414,6 +414,7 @@ def _entry_view(e, finals):
         "srcFile": e.get("src_file") or "", "sheet": e.get("sheet") or "",
         "status": e.get("status") or "未复核", "isFinal": is_final,
         "staleNote": e.get("stale_note") or "",     # 上游被替换→打回未复核时的提醒
+        "finalReturn": e.get("final_return") or None,   # 终审退回 {by,at,note,via}（V2.584）；重新初审即清空
         "createdBy": e.get("created_by") or "", "createdAt": e.get("created_at") or "",
         "reviewedBy": e.get("reviewed_by") or "", "reviewedAt": e.get("reviewed_at") or "",
         "finalizedBy": e.get("finalized_by") or "", "finalizedAt": e.get("finalized_at") or "",
@@ -814,6 +815,7 @@ def _approval_summ(views, pendings=None):
     by_ap = {}
     for v in views:
         by_ap.setdefault(v.get("approval") or "", []).append(v)
+    oa_ret = db.get_setting("bom_oa_returned", {}) or {}     # OA 退回重到（V2.584）
     out = []
     for ap, vs in by_ap.items():
         groups = set(v.get("groupId") or v["id"] for v in vs)
@@ -822,6 +824,7 @@ def _approval_summ(views, pendings=None):
                     "date": dates[-1] if dates else "",
                     "pending": sum(1 for v in vs if v["status"] not in ("初审", "已审核")),
                     "finalized": sum(1 for v in vs if v["status"] in ("初审", "已审核")), "blocked": 0,
+                    "returned": sum(1 for v in vs if v.get("finalReturn")), "oaReturned": oa_ret.get(ap),
                     "products": [{"cpCode": v["cpCode"], "productName": v["productName"], "kind": v["kind"]} for v in vs]})
     ix = {o["approvalNo"]: o for o in out}
     for p in (pendings or []):
@@ -830,7 +833,7 @@ def _approval_summ(views, pendings=None):
         o = ix.get(ap)
         if not o:
             o = {"approvalNo": ap, "groupCount": 0, "productCount": 0, "date": p.get("created_at", "")[:10],
-                 "pending": 0, "finalized": 0, "blocked": 0, "products": []}
+                 "pending": 0, "finalized": 0, "blocked": 0, "returned": 0, "oaReturned": oa_ret.get(ap), "products": []}
             out.append(o); ix[ap] = o
         o["groupCount"] += 1
         o["blocked"] += len(rs)
@@ -1044,6 +1047,7 @@ async def bom_approval(request: Request):
                                 and all(v["stepsOk"] or v["isFinal"] for v in booked),
                        "anyFinal": any(v["isFinal"] for v in booked),
                        "voidPendingCount": sum(1 for v in booked if v.get("voidPending")),
+                       "returnCount": sum(1 for v in booked if v.get("finalReturn")),
                        "pendVoid": (pd or {}).get("void_req")})
     groups.sort(key=lambda g: g["date"] or "", reverse=True)
     def can(c):
@@ -1850,9 +1854,12 @@ def _auto_conf():
             interval = 5
         return {"enabled": g("auto_intake", "0") in ("1", "true", "yes", "on"), "nodes": nodes, "interval": interval,
                 "since": g("auto_intake_since", ""), "notify": g("auto_intake_notify", "1") in ("1", "true", "yes", "on"),
+                "oa_final_sync": g("oa_final_sync", "1") in ("1", "true", "yes", "on"),
+                "final_nodes": [x.strip() for x in g("final_node_ids", "908e_bfa0").replace("，", ",").split(",") if x.strip()],
                 "portal": g("portal_url", "") or (c.get("config", "portal_url", fallback="") or "").strip()}
     except Exception:
-        return {"enabled": False, "nodes": ["23b2_ee20"], "interval": 5, "since": "", "notify": True, "portal": ""}
+        return {"enabled": False, "nodes": ["23b2_ee20"], "interval": 5, "since": "", "notify": True, "portal": "",
+                "oa_final_sync": False, "final_nodes": ["908e_bfa0"]}
 
 
 def _auto_is_local():
@@ -1898,6 +1905,16 @@ def _auto_intake_once(force=False, notify=None, trigger="定时"):
             if not appno:
                 continue
             if appno in in_ledger or appno in pending:
+                # V2.584 退回重到：同一张单再次停到成本核算节点＝节点上是**新任务**（taskCreateTime 变新）→ 不是「台账已有」而是「退回重到」
+                prev = seen.get(appno) or {}
+                ta = str(f.get("taskCreateTime") or "")
+                if ta and prev.get("taskAt") and ta > str(prev["taskAt"]):
+                    rr = _oa_rearrival(appno, f, ta, do_notify, conf)
+                    prev["taskAt"] = ta; prev["rearrivalAt"] = _now(); seen[appno] = prev
+                    summary.setdefault("rearrived", []).append({"appno": appno, **rr})
+                    continue
+                if ta and not prev.get("taskAt"):
+                    prev["taskAt"] = ta; seen[appno] = prev          # 首次只记下当前任务时间、不动作（上线首轮别误判老单）
                 summary["skipped"].append({"appno": appno, "why": "台账已有" if appno in in_ledger else "待修中"})
                 continue
             prev = seen.get(appno) or {}
@@ -1909,7 +1926,7 @@ def _auto_intake_once(force=False, notify=None, trigger="定时"):
             except Exception as e:
                 out, code = {"ok": False, "msg": "自动立项异常：%s" % str(e)[:200]}, 500
             ok = bool(out.get("ok"))
-            rec = {"at": _now(), "ok": ok, "msg": (out.get("msg") or "")[:300], "title": f["title"], "node": f["nodeId"], "taskUser": f["taskUserId"],
+            rec = {"at": _now(), "ok": ok, "msg": (out.get("msg") or "")[:300], "title": f["title"], "node": f["nodeId"], "taskUser": f["taskUserId"], "taskAt": str(f.get("taskCreateTime") or ""),
                    "booked": len(out.get("booked") or []), "rejected": len(out.get("rejected") or [])}
             if not ok:
                 import datetime as _dt
@@ -1944,6 +1961,219 @@ def _auto_intake_once(force=False, notify=None, trigger="定时"):
     finally:
         _AUTO_LOCK.release()
 
+# ============ V2.584 OA 终审同步 + 终审退回提醒 + 退回重到 ============
+# 边界（吴总 2026-09-07：钉钉流程不动、不替人点）：工具**只读** OA——你在 OA 财务经理节点点了同意/退回，工作台跟着做终审；
+# 反过来永远不做（不替人在 OA 点）。轮询与自动立项同一线程；conf.ini [bom] oa_final_sync=1（默认开，需钉钉已配）、final_node_ids=908e_bfa0。
+_DT_NAMES = {"at": 0.0, "by_uid": {}, "by_name": {}}
+
+
+def _dt_names():
+    """钉钉花名册 userid↔姓名（30 分钟缓存，失败给空）。"""
+    if time.time() - _DT_NAMES["at"] < 1800 and _DT_NAMES["by_uid"]:
+        return _DT_NAMES
+    try:
+        rs = notifier.dt_roster() if notifier else None
+        users = rs.get("users") if isinstance(rs, dict) else rs
+        by_uid, by_name = {}, {}
+        for x in (users or []):
+            uid, nm = str(x.get("userid") or ""), str(x.get("name") or "").strip()
+            if uid and nm:
+                by_uid[uid] = nm
+                by_name.setdefault(nm, []).append(uid)
+        _DT_NAMES.update({"at": time.time(), "by_uid": by_uid, "by_name": by_name})
+    except Exception:
+        pass
+    return _DT_NAMES
+
+
+def _dt_name(uid):
+    return _dt_names()["by_uid"].get(str(uid or ""), "")
+
+
+def _dt_uid_by_name(name):
+    ids = _dt_names()["by_name"].get(str(name or "").strip(), [])
+    return ids[0] if len(ids) == 1 else ""
+
+
+def _cp_in_text(text):
+    """备注里写到的 CP/研发码集合（归一化），供 OA 退回只退指定产品。"""
+    return {bq._ncp(m) for m in re.findall(r"[A-Za-z]{2,4}\d{3,}(?:[-（(][^\s，,；;、）)]*[）)]?)?", str(text or ""))} - {""}
+
+
+def _notify_final_return(e, actor, note, via="工作台"):
+    """终审退回 → 钉钉通知**初审人**（按姓名查钉钉花名册；查不到退到门户配的「BOM 落公盘送达」收件人）。不抛错。"""
+    try:
+        conf = _auto_conf()
+        link = (conf["portal"].rstrip("/") + "/#/bom") if conf.get("portal") else "核算工作台 › 成本模块 › BOM报价审核 › 待办与复核"
+        text = ("【核算工作台·BOM报价审核】OA 单 %s · 产品 %s %s · 终审退回（%s%s · %s）：%s\n请到工作台待办处理，改完重新走③④并「审核通过」：%s"
+                % (e.get("approval_no") or "—", (e.get("cp_code") or "").strip(), (e.get("product_name") or "").strip(), actor,
+                   "·OA" if via == "OA" else "", time.strftime("%m-%d %H:%M"), (note or "").strip()[:200], link))
+        uid = _dt_uid_by_name(e.get("finalized_by") or "")
+        if uid and notifier:
+            nr = notifier.send_dingtalk_to([uid], text)
+            if nr.get("sent"):
+                db.bom_add_audit(e["id"], "系统", "退回提醒", "", "钉钉已发初审人 %s" % (e.get("finalized_by") or ""))
+                return nr
+        mobiles = db.get_setting("bom_deliver_mobiles", None) or []
+        if mobiles and notifier:
+            import app as _app
+            nr = notifier.send_dingtalk(text, _app._recip_conf(mobiles))
+            db.bom_add_audit(e["id"], "系统", "退回提醒", "", "钉钉已发送达收件人（初审人钉钉未匹配）" if nr.get("sent") else "钉钉发送失败：" + str(nr.get("msg") or "")[:80])
+            return nr
+        db.bom_add_audit(e["id"], "系统", "退回提醒", "", "未发钉钉：初审人钉钉未匹配且未配收件人")
+    except Exception as ex:
+        try:
+            db.bom_add_audit(e["id"], "系统", "退回提醒", "", "钉钉发送异常：" + str(ex)[:80])
+        except Exception:
+            pass
+    return {"sent": False}
+
+
+def _oa_final_sync_once(force=False, trigger="定时"):
+    """跑一轮：台账里**已初审、待终审**的单 → 看 OA 财务经理节点最近一次已完成任务 → AGREE＝自动终审通过（只对初审时间不晚于 OA 同意时间的产品）；
+    REFUSE/REDIRECTED（或实例已被拒绝终止）＝自动退回（备注里写了 CP 码只退那几个，没写整单已初审的都退）。同一任务只处理一次。"""
+    conf = _auto_conf()
+    if not force and not conf.get("oa_final_sync"):
+        return {"ran": False, "msg": "未启用（conf.ini [bom] oa_final_sync=0）"}
+    if not (dtb and dtb.configured()):
+        return {"ran": False, "msg": "未配置钉钉"}
+    from core import _now
+    src = _src()
+    nodes = conf.get("final_nodes") or ["908e_bfa0"]
+    seen = db.get_setting("bom_oa_final_seen", {}) or {}
+    waiting = {}
+    allents = db.bom_list_entries(src)
+    for e in allents:
+        if e.get("status") == "初审" and (e.get("approval_no") or "") and e.get("historical") != 2 and e.get("active") in (1, None):
+            waiting.setdefault(e["approval_no"], []).append(e)
+    summary = {"at": _now(), "trigger": trigger, "nodes": nodes, "waiting": len(waiting), "approved": [], "returned": [], "errors": []}
+    for appno, ents in waiting.items():
+        st = dtb.final_node_state(appno, nodes)
+        if not st.get("ok"):
+            summary["errors"].append({"appno": appno, "msg": st.get("msg")})
+            continue
+        res, key = (st.get("result") or ""), (st.get("taskId") or "")
+        if res not in ("AGREE", "REFUSE", "REDIRECTED"):
+            if st.get("instStatus") == "TERMINATED" and st.get("instResult") == "refuse":
+                res, key = "REFUSE", "inst:" + str(st.get("instanceId") or "")
+            else:
+                continue
+        if seen.get(appno) == key:
+            continue
+        actor_name = _dt_name(st.get("userid")) or (st.get("userid") or "OA审批人")
+        actor = db.get_user(actor_name) or {"name": actor_name, "role": "normal", "username": actor_name}
+        oa = {"taskId": key, "at": st.get("finishTime") or "", "userid": st.get("userid") or "", "instanceId": st.get("instanceId") or ""}
+        rec = {"appno": appno, "by": actor_name, "oaAt": oa["at"], "products": []}
+        if res == "AGREE":
+            late = []
+            for e in ents:
+                if (e.get("finalized_at") or "")[:16] <= (oa["at"] or "")[:16]:
+                    ok, msg = _final_review_apply(e, actor, True, "随 OA 同意", via="OA", oa=oa)
+                    rec["products"].append({"cp": e.get("cp_code"), "name": e.get("product_name"), "ok": ok, "msg": msg})
+                    if not ok:
+                        late.append(e)
+                else:
+                    late.append(e); rec["products"].append({"cp": e.get("cp_code"), "name": e.get("product_name"), "ok": False, "msg": "初审晚于 OA 同意时间，请在工作台终审"})
+            drafts = [x for x in allents if (x.get("approval_no") or "") == appno and x.get("status") not in ("初审", "已审核") and x.get("active") in (1, None)]
+            rec["late"] = len(late); rec["drafts"] = len(drafts)
+            summary["approved"].append(rec)
+            if (late or drafts) and notifier and st.get("userid"):
+                try:
+                    notifier.send_dingtalk_to([st["userid"]], "【核算工作台·BOM报价审核】OA 单 %s 你已同意，工作台已自动终审 %d 个产品；另有 %d 个初审晚于你同意时间、%d 个尚未初审——这些请到工作台「标准成本台账」终审。"
+                                              % (appno, sum(1 for p in rec["products"] if p["ok"]), len(late), len(drafts)))
+                except Exception:
+                    pass
+        else:
+            cps = _cp_in_text(st.get("remark"))
+            targets = [e for e in ents if bq._ncp(e.get("cp_code")) in cps] if cps else []
+            targets = targets or ents
+            note = (st.get("remark") or "").strip() or "OA 退回（未写原因）"
+            for e in targets:
+                ok, msg = _final_review_apply(e, actor, False, note, via="OA", oa=oa)
+                rec["products"].append({"cp": e.get("cp_code"), "name": e.get("product_name"), "ok": ok, "msg": msg})
+            rec["note"] = note; rec["byCp"] = bool(cps and len(targets) < len(ents))
+            summary["returned"].append(rec)
+        seen[appno] = key
+        db.audit("OA终审同步", "bom_oa_final_sync", target=appno, detail="%s · %s · %d 个产品" % (res, actor_name, len(rec["products"])))
+    if len(seen) > 500:
+        for kk in list(seen)[:len(seen) - 500]:
+            seen.pop(kk, None)
+    db.set_setting("bom_oa_final_seen", seen, "OA终审同步")
+    db.set_setting("bom_oa_final_last", summary, "OA终审同步")
+    summary["ran"] = True
+    return summary
+
+
+def _oa_rearrival(appno, f, task_at, do_notify, conf):
+    """OA 单退回后再次到成本核算节点（丙案）：草稿组自动重拉替换（数字没变 _do_replace_sheet 自会跳过），
+    含已初审/已审核的组不动、只标「附件可能已变」；记 bom_oa_returned 供待办显示；钉钉提醒节点在办人。"""
+    from core import _now
+    src = _src()
+    info = {"at": _now(), "taskAt": task_at, "replaced": [], "held": [], "errors": []}
+    groups = {}
+    for e in db.bom_list_entries(src):
+        if (e.get("approval_no") or "") == appno and e.get("active") in (1, None) and e.get("group_id"):
+            groups.setdefault(e["group_id"], []).append(e)
+    # 单子退回来了 → 已初审的产品先按「终审退回」打回（原因＝财务经理节点最后一条备注；没有就标退回重到），志鹏一看待办就知道哪个产品；
+    # 但这些组**不自动重拉**（丙案：已初审的只提醒，由成本会计点「重连钉钉替换」）。
+    st = dtb.final_node_state(appno, conf.get("final_nodes") or ["908e_bfa0"]) if dtb else {}
+    note = ((st or {}).get("remark") or "").strip() or "OA 退回重到（未写原因）"
+    actor_name = _dt_name((st or {}).get("userid")) or ((st or {}).get("userid") or "OA审批人")
+    actor = db.get_user(actor_name) or {"name": actor_name, "role": "normal", "username": actor_name}
+    oa = {"taskId": (st or {}).get("taskId") or "", "at": (st or {}).get("finishTime") or "", "userid": (st or {}).get("userid") or "", "rearrival": task_at}
+    info["returned"] = []
+    for gid, es in groups.items():
+        if any(x.get("status") in ("初审", "已审核") for x in es):
+            info["held"].append(gid)
+            for x in es:
+                if x.get("status") == "初审":
+                    ok, _m = _final_review_apply(x, actor, False, note, via="OA", oa=oa)
+                    if ok:
+                        info["returned"].append((x.get("cp_code") or "").strip())
+            continue
+        try:
+            out = _refetch_replace_core(gid, appno, _AUTO_USER["name"], via="退回重到·自动重拉")
+        except Exception as ex:
+            out = {"ok": False, "msg": str(ex)[:120]}
+        (info["replaced"] if out.get("ok") else info["errors"]).append(gid if out.get("ok") else "%s：%s" % (gid, out.get("msg")))
+    ret = db.get_setting("bom_oa_returned", {}) or {}
+    ret[appno] = info
+    if len(ret) > 200:
+        for kk in sorted(ret, key=lambda k: ret[k].get("at") or "")[:len(ret) - 200]:
+            ret.pop(kk, None)
+    db.set_setting("bom_oa_returned", ret, "自动立项")
+    db.audit("自动立项", "bom_oa_rearrival", target=appno, detail="退回重到：重拉替换 %d 组、已初审未动 %d 组、失败 %d" % (len(info["replaced"]), len(info["held"]), len(info["errors"])))
+    if do_notify and notifier and (f.get("taskUserIds") or f.get("taskUserId")):
+        link = (conf["portal"].rstrip("/") + "/#/bom") if conf.get("portal") else "核算工作台 › BOM报价审核 › 待办与复核"
+        text = ("【核算工作台·BOM报价审核】OA 单「%s」（%s）退回后再次到成本核算节点。工作台已自动重拉：替换 %d 组（草稿）；%d 组已初审未动（附件可能已变，请到处理页「重连钉钉替换」）。终审退回的原因见待办/产品详情顶部。%s"
+                % (f.get("title") or "", appno, len(info["replaced"]), len(info["held"]), link))
+        try:
+            notifier.send_dingtalk_to(f.get("taskUserIds") or [f["taskUserId"]], text)
+        except Exception:
+            pass
+    return info
+
+
+@router.get("/api/bom/oa-final-sync/status")
+async def bom_oa_final_status(request: Request):
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
+    conf = _auto_conf()
+    return {"ok": True, "enabled": bool(conf.get("oa_final_sync")) and bool(dtb and dtb.configured()) and not _auto_is_local(),
+            "nodes": conf.get("final_nodes"), "last": db.get_setting("bom_oa_final_last", None),
+            "note": "你在 OA 财务经理节点点同意/退回 → 工作台自动终审通过/退回（只读 OA，不替人点）；退回备注写 CP 码只退那几个产品。"}
+
+
+@router.post("/api/bom/oa-final-sync/run")
+async def bom_oa_final_run(request: Request):
+    """手动跑一轮 OA 终审同步（主管理员，联调用）。"""
+    u = _current_user(request)
+    if not u or not db.is_super(u):
+        return JSONResponse({"ok": False, "msg": "仅主管理员"}, status_code=403)
+    return {"ok": True, **_oa_final_sync_once(force=True, trigger="手动·" + u["name"])}
+
+
 
 def _auto_intake_scheduler():
     while True:
@@ -1952,6 +2182,8 @@ def _auto_intake_scheduler():
         try:
             if conf["enabled"] and not _auto_is_local():
                 _auto_intake_once(trigger="定时")
+            if not _auto_is_local():
+                _oa_final_sync_once(trigger="定时")       # V2.584：OA 财务经理节点同意/退回 → 工作台自动终审
         except Exception:
             pass
 
@@ -2152,33 +2384,22 @@ async def bom_replace_sheet(request: Request):
     return JSONResponse(res, status_code=200 if res.get("ok") else 400)
 
 
-@router.post("/api/bom/refetch-replace")
-async def bom_refetch_replace(request: Request):
-    """重连钉钉重拉商务版采购核算表，替换一个组（当研发/工厂在钉钉里改好了重新提交时）。"""
-    u = _require_perm(request, CAP_FETCH)
-    if not u:
-        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
-    body = await request.json()
-    gid = str(body.get("groupId") or "").strip()
-    appno = str(body.get("approvalNo") or "").strip()
-    if not (gid and appno):
-        return JSONResponse({"ok": False, "msg": "缺组标识或审批编号"}, status_code=400)
-    if not (dtb and dtb.configured()):
-        return JSONResponse({"ok": False, "msg": "未配置钉钉应用，改用手动上传替换。"}, status_code=400)
+def _refetch_replace_core(gid, appno, user_name, historical=None, via="重连钉钉"):
+    """重连钉钉重拉采购核算表替换一个组（V2.584 抽出供 OA 退回重到复用）。附件挑选：**财务复核 › 商务输出 › 其它非商品版 xlsx**
+    （V2.547 口径：有财务复核以财务复核为准）。→ 与 _do_replace_sheet 同形 out。"""
     res = dtb.fetch_approval(appno)
     if not res.get("ok"):
-        return JSONResponse({"ok": False, "msg": res.get("msg") or "取数失败"}, status_code=400)
-    biz = next((a for a in res.get("attachments", []) if a.get("bytes") and "商务" in (a.get("label") or "")), None)
+        return {"ok": False, "msg": res.get("msg") or "取数失败"}
+    atts = [a for a in res.get("attachments", []) if a.get("bytes")]
+    biz = next((a for a in atts if "财务" in (a.get("label") or "")), None) \
+        or next((a for a in atts if "商务" in (a.get("label") or "")), None) \
+        or next((a for a in atts if str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")) and "商品版" not in (a.get("label") or "")), None)
     if not biz:
-        biz = next((a for a in res.get("attachments", []) if a.get("bytes")
-                    and str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls"))
-                    and "商品版" not in (a.get("label") or "")), None)
-    if not biz:
-        return JSONResponse({"ok": False, "msg": "该审批未取到商务版采购核算表附件。"}, status_code=400)
-    # 同单其它 xlsx 附件里的研发 BOM 清单（成品页 + 复合调味酱页）一并解析，供组内新增产品（复配料/半成品）配清单（V2.456）
+        return {"ok": False, "msg": "该审批未取到采购核算表附件（财务复核/商务输出）。"}
+    # 同单其它 xlsx 附件里的研发 BOM 清单一并解析，供组内新增产品配清单（V2.456）
     bom_lists = []
-    for a in res.get("attachments", []):
-        if a is biz or not a.get("bytes") or not str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")):
+    for a in atts:
+        if a is biz or not str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")) or "核算表" in (a.get("label") or ""):
             continue
         try:
             bl = bq.parse_bom_list(a["bytes"], a.get("fileName") or "")
@@ -2194,10 +2415,27 @@ async def bom_refetch_replace(request: Request):
             b["craft"] = craft
             b["srcFile"] = a.get("fileName") or ""
         bom_lists.extend(bl)
-    out = _do_replace_sheet(_src(), gid, biz["bytes"], biz["fileName"], biz.get("label") or "", u["name"], appno, "重连钉钉", bom_lists=bom_lists,
-                            historical=(None if body.get("historical") is None else bool(body.get("historical"))))
+    out = _do_replace_sheet(_src(), gid, biz["bytes"], biz["fileName"], biz.get("label") or "", user_name, appno, via, bom_lists=bom_lists, historical=historical)
     if out.get("ok"):
         out["bomSheets"] = [b.get("productName") for b in bom_lists]
+        out["srcLabel"] = biz.get("label") or ""
+    return out
+
+
+@router.post("/api/bom/refetch-replace")
+async def bom_refetch_replace(request: Request):
+    """重连钉钉重拉商务版采购核算表，替换一个组（当研发/工厂在钉钉里改好了重新提交时）。"""
+    u = _require_perm(request, CAP_FETCH)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
+    body = await request.json()
+    gid = str(body.get("groupId") or "").strip()
+    appno = str(body.get("approvalNo") or "").strip()
+    if not (gid and appno):
+        return JSONResponse({"ok": False, "msg": "缺组标识或审批编号"}, status_code=400)
+    if not (dtb and dtb.configured()):
+        return JSONResponse({"ok": False, "msg": "未配置钉钉应用，改用手动上传替换。"}, status_code=400)
+    out = _refetch_replace_core(gid, appno, u["name"], historical=(None if body.get("historical") is None else bool(body.get("historical"))))
     return JSONResponse(out, status_code=200 if out.get("ok") else 400)
 
 
@@ -2386,6 +2624,40 @@ async def bom_apply_goods(request: Request):
     return {"ok": True, "changed": changed, "reviewReset": reset, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
 
 
+def _final_review_apply(e, u, approve, note, via="工作台", oa=None):
+    """终审的动作核心（V2.584 抽出，工作台按钮与 OA 同步共用）：通过＝盖已审核戳对外；退回＝打回已复核、撤指针、
+    记 final_return 留痕并**钉钉通知初审人**（产品 + 原因）。返回 (ok, msg)。via＝工作台 / OA。"""
+    from core import _now
+    note = str(note or "").strip()
+    self_review = approve and (e.get("finalized_by") or "") == u["name"]
+    if self_review and not db.is_super(u):
+        return False, "本版初审人是您本人，不能自己终审——终审须由另一人（财务BP）把关，方可对外开放。（仅主管理员可自审）"
+    who = u["name"] + ("·OA" if via == "OA" else "")
+    if approve:
+        ack = {"by": u["name"], "at": _now(), "note": note[:200]}
+        if self_review:
+            ack["selfReview"] = True          # 自审留痕：这版没经第二人，谁看台账都认得出
+        if via == "OA":
+            ack["via"] = "OA同意"; ack["oa"] = oa or {}
+        db.bom_update_entry(e["id"], {"status": "已审核", "ack": ack, "final_return": None})
+        did = "已审核·对外开放" + ("·自审(主管理员单人)" if self_review else "") + ("·随 OA 同意" if via == "OA" else "") + ("（%s）" % note if note else "")
+        db.bom_add_audit(e["id"], who, "终审（财务BP）" + ("·自审" if self_review else ""), "初审", did)
+        msg = "已终审通过，盖「已审核」戳，对外开放给 BP 报价" + ("（主管理员自审）" if self_review else "")
+    else:
+        db.bom_clear_final_if(_src(), e["product_key"], e["id"])   # 退回 → 撤下定稿指针(按id校验，审查M9)，不再供 BP 消费
+        fr = {"by": u["name"], "at": _now(), "note": note[:300], "via": via}
+        if oa:
+            fr["oa"] = oa
+        db.bom_update_entry(e["id"], {"status": "已复核", "ack": None, "finalized_by": "", "finalized_at": "", "final_return": fr})
+        db.bom_add_audit(e["id"], who, "终审（财务BP）", "初审", "退回成本会计：" + note[:180])
+        for rid in db.bom_clear_obsolete_by(e["id"]):                # 它替代过的旧版恢复为当前版（换码承接 V2.440）
+            db.bom_add_audit(rid, who, "恢复为当前版", "失效", "替代它的 #%d 被终审退回" % e["id"])
+        msg = "已退回成本会计（该版撤出标准台账）"
+        _notify_final_return(e, u["name"], note, via)
+    db.audit(who, "bom_final_review", target=str(e["id"]), detail=msg)
+    return True, msg
+
+
 @router.post("/api/bom/final-review")
 async def bom_final_review(request: Request):
     """**财务BP终审**（业务方定 2026-09-04）——全流程就两个戳，别拆碎：
@@ -2410,25 +2682,9 @@ async def bom_final_review(request: Request):
     # 退回不受此限（谁都能打回）；只有「盖已审核戳·对外」这一步要求两个人。
     # 例外（业务方定 2026-09-04）：**主管理员**可自审自终——小团队常一人身兼初审+终审，
     #   与其逼着造个假的第二账号(反而污染审计)，不如允许主管理员自审、但戳与留痕明记「自审·单人」。
-    self_review = approve and (e.get("finalized_by") or "") == u["name"]
-    if self_review and not db.is_super(u):
-        return JSONResponse({"ok": False, "msg": "本版初审人是您本人，不能自己终审——终审须由另一人（财务BP）把关，方可对外开放。（仅主管理员可自审）"}, status_code=400)
-    if approve:
-        ack = {"by": u["name"], "at": _now(), "note": note[:200]}
-        if self_review:
-            ack["selfReview"] = True          # 自审留痕：这版没经第二人，谁看台账都认得出
-        db.bom_update_entry(e["id"], {"status": "已审核", "ack": ack})
-        did = "已审核·对外开放" + ("·自审(主管理员单人)" if self_review else "") + ("（%s）" % note if note else "")
-        db.bom_add_audit(e["id"], u["name"], "终审（财务BP）" + ("·自审" if self_review else ""), "初审", did)
-        msg = "已终审通过，盖「已审核」戳，对外开放给 BP 报价" + ("（主管理员自审）" if self_review else "")
-    else:
-        db.bom_clear_final_if(_src(), e["product_key"], e["id"])   # 退回 → 撤下定稿指针(按id校验，审查M9)，不再供 BP 消费
-        db.bom_update_entry(e["id"], {"status": "已复核", "ack": None, "finalized_by": "", "finalized_at": ""})
-        db.bom_add_audit(e["id"], u["name"], "终审（财务BP）", "初审", "退回成本会计：" + note[:180])
-        for rid in db.bom_clear_obsolete_by(e["id"]):                # 它替代过的旧版恢复为当前版（换码承接 V2.440）
-            db.bom_add_audit(rid, u["name"], "恢复为当前版", "失效", "替代它的 #%d 被终审退回" % e["id"])
-        msg = "已退回成本会计（该版撤出标准台账）"
-    db.audit(u["name"], "bom_final_review", target=str(e["id"]), detail=msg)
+    ok, msg = _final_review_apply(e, u, approve, note, via="工作台")
+    if not ok:
+        return JSONResponse({"ok": False, "msg": msg}, status_code=400)
     finals = db.bom_finals(_src())
     return {"ok": True, "msg": msg, "approved": bool(approve),
             "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
@@ -2628,7 +2884,7 @@ async def bom_classify(request: Request):
     if not miss and not need_confirm:
         prev_final = db.bom_get_final(_src(), e2["product_key"])
         backfill = e2.get("historical") == 2 and not historical      # 补录单（答 C 除外）：初审通过即定稿，见 _backfill_seal
-        upd = {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
+        upd = {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None, "final_return": None,
                "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else (2 if backfill else None)}
         db.bom_update_entry(e2["id"], upd)
         if historical:
@@ -2740,7 +2996,7 @@ async def bom_finalize(request: Request):
     from core import _now
     prev_final = db.bom_get_final(_src(), e["product_key"])
     backfill = e.get("historical") == 2 and not historical      # 补录单（答 C 除外）：初审通过即定稿，见 _backfill_seal
-    db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None,
+    db.bom_update_entry(e["id"], {"status": "初审", "finalized_by": u["name"], "finalized_at": _now(), "ack": None, "final_return": None,
                                   "obsolete_by": None, "obsolete_at": None, "obsolete_note": None, "historical": 1 if historical else (2 if backfill else None)})
     linked, outbox = "", None
     if historical:
