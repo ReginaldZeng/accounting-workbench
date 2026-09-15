@@ -356,10 +356,52 @@ def _find_inst(tok, business_id, process_code=None):
     return None, None
 
 
+def final_state_from_inst(inst, node_ids, iid=""):
+    """纯函数（可离线测）：从实例 dict 判「财务经理/BP 节点」最近一次动作。
+    两种信号取**较晚者**：①该节点已完成任务 task_result AGREE/REFUSE；②**回退**＝REDIRECT_* 操作记录之后、在**非该节点**（更早的节点，如成本核算）
+    出现了新任务（27725 实证 2026-09-04：REDIRECT_PROCESS → 财务经理任务 CANCELED、成本核算节点新任务；同节点转交不算回退）。
+    → {ok, instanceId, instStatus, instResult, taskId, result(AGREE/REFUSE/REDIRECTED/""), userid, finishTime, remark, openAtNode}"""
+    tasks = inst.get("tasks") or []
+    ops = inst.get("operation_records") or []
+    node_ids = set(node_ids or [])
+    done = [t for t in tasks if t.get("activity_id") in node_ids and (t.get("task_status") or "").upper() == "COMPLETED"
+            and (t.get("task_result") or "").upper() in ("AGREE", "REFUSE")]
+    done.sort(key=lambda t: str(t.get("finish_time") or ""))
+    t = done[-1] if done else None
+    best = None
+    if t:
+        uid = t.get("userid") or ""
+        recs = [r for r in ops if (r.get("userid") or "") == uid and str(r.get("operation_type") or "").upper().startswith("EXECUTE_TASK")
+                and str(r.get("date") or "")[:16] <= str(t.get("finish_time") or "")[:16]]
+        recs.sort(key=lambda r: str(r.get("date") or ""))
+        best = {"taskId": str(t.get("taskid") or t.get("task_id") or ""), "result": (t.get("task_result") or "").upper(), "userid": uid,
+                "finishTime": str(t.get("finish_time") or ""), "remark": str(recs[-1].get("remark") or "") if recs else "", "at": str(t.get("finish_time") or "")}
+    # 回退：流程正停在本节点时有人做了 REDIRECT_*（不看是谁——27725 实证回退人不是节点任务的持有人），之后在别的（更早）节点出现新任务
+    for r in sorted(ops, key=lambda r: str(r.get("date") or "")):
+        if not str(r.get("operation_type") or "").upper().startswith("REDIRECT"):
+            continue
+        d = str(r.get("date") or "")[:16]
+        at_node = any(x.get("activity_id") in node_ids and str(x.get("create_time") or "")[:16] <= d
+                      and ((x.get("task_status") or "").upper() != "COMPLETED" or str(x.get("finish_time") or "")[:16] >= d) for x in tasks)
+        if not at_node:
+            continue                     # 回退发生时流程不在本节点（更早节点的人退的）→ 不算本节点的动作
+        back = [x for x in tasks if x.get("activity_id") not in node_ids and str(x.get("create_time") or "")[:16] >= d]
+        if not back:
+            continue                     # 只在本节点内转交/加签 → 不是回退
+        cand = {"taskId": "redirect:%s:%s" % (d, r.get("userid") or ""), "result": "REDIRECTED", "userid": r.get("userid") or "",
+                "finishTime": str(r.get("date") or ""), "remark": str(r.get("remark") or ""), "at": d}
+        if best is None or cand["at"] >= best["at"][:16]:
+            best = cand
+    out = {"ok": True, "instanceId": iid, "instStatus": (inst.get("status") or "").upper(), "instResult": (inst.get("result") or "").lower(),
+           "taskId": "", "result": "", "userid": "", "finishTime": "", "remark": "",
+           "openAtNode": any(x.get("activity_id") in node_ids and (x.get("task_status") or "").upper() in _TASK_OPEN for x in tasks)}
+    if best:
+        out.update({k: best[k] for k in ("taskId", "result", "userid", "finishTime", "remark")})
+    return out
+
+
 def final_node_state(business_id, node_ids, process_code=None):
-    """V2.584 OA 终审同步：某单在指定节点（财务经理/BP 节点）**最近一次已完成**的任务结果。只读、不抛。
-    → {ok, instanceId, instStatus, instResult, taskId, result(AGREE/REFUSE/REDIRECTED/NONE), userid, finishTime, remark, openAtNode}
-    remark＝该审批人在本单最后一条 EXECUTE_TASK_*/REDIRECT_* 操作记录的备注（拒绝/退回时写的原因）。"""
+    """V2.584/586 OA 终审同步：某单在指定节点最近一次动作（同意/拒绝/回退）。只读、不抛。见 final_state_from_inst。"""
     if not configured():
         return {"ok": False, "msg": "未配置钉钉"}
     try:
@@ -368,21 +410,6 @@ def final_node_state(business_id, node_ids, process_code=None):
         iid, inst = _find_inst(tok, business_id, process_code)
         if not inst:
             return {"ok": False, "msg": "未找到实例"}
-        tasks = inst.get("tasks") or []
-        done = [t for t in tasks if t.get("activity_id") in node_ids and (t.get("task_status") or "").upper() == "COMPLETED"]
-        done.sort(key=lambda t: str(t.get("finish_time") or ""))
-        t = done[-1] if done else None
-        remark = ""
-        if t:
-            uid = t.get("userid") or ""
-            recs = [r for r in (inst.get("operation_records") or []) if (r.get("userid") or "") == uid
-                    and str(r.get("operation_type") or "").upper().startswith(("EXECUTE_TASK", "REDIRECT"))]
-            recs.sort(key=lambda r: str(r.get("date") or ""))
-            if recs:
-                remark = str(recs[-1].get("remark") or "")
-        return {"ok": True, "instanceId": iid, "instStatus": (inst.get("status") or "").upper(), "instResult": (inst.get("result") or "").lower(),
-                "taskId": str((t.get("taskid") or t.get("task_id") or "") if t else ""), "result": ((t.get("task_result") or "").upper() if t else ""),
-                "userid": ((t.get("userid") or "") if t else ""), "finishTime": (str(t.get("finish_time") or "") if t else ""), "remark": remark,
-                "openAtNode": any(x.get("activity_id") in node_ids and (x.get("task_status") or "").upper() in _TASK_OPEN for x in tasks)}
+        return final_state_from_inst(inst, node_ids, iid)
     except Exception as e:
         return {"ok": False, "msg": str(e)[:200]}
