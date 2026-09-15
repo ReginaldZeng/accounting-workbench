@@ -415,6 +415,8 @@ def _entry_view(e, finals):
         "status": e.get("status") or "未复核", "isFinal": is_final,
         "staleNote": e.get("stale_note") or "",     # 上游被替换→打回未复核时的提醒
         "finalReturn": e.get("final_return") or None,   # 终审退回 {by,at,note,via}（V2.584）；重新初审即清空
+        "unfinalReq": e.get("unfinal_req") or None,     # 撤回终审申请（V2.585）{state,by,at,reason,decidedBy,decidedAt,note,mode}
+        "unfinalPending": ((e.get("unfinal_req") or {}).get("state") == "pending"),
         "createdBy": e.get("created_by") or "", "createdAt": e.get("created_at") or "",
         "reviewedBy": e.get("reviewed_by") or "", "reviewedAt": e.get("reviewed_at") or "",
         "finalizedBy": e.get("finalized_by") or "", "finalizedAt": e.get("finalized_at") or "",
@@ -806,6 +808,7 @@ async def bom_ledger(request: Request):
             "finals": finals, "approvals": approvals,
             # 标准台账：已初审、待财务BP终审的条数（BP 要拿这数报价，得知道哪些还没终审、还没对外）
             "needAck": sum(1 for r in rows if r.get("needFinalReview")),
+            "needUnfinal": sum(1 for v in visible if v.get("unfinalPending")),     # 待财务BP批的撤回终审申请（V2.585）
             "canFinalReview": bool(db.user_can(u, CAP_FINAL_REVIEW))}
 
 
@@ -2259,9 +2262,13 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             still_bad.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"),
                               "blockedBy": blocked, "failedChecks": []})
             continue
+        old = old_active.get(pk)
+        if old and _bp_stamped(old) and not db.is_super(db.get_user(user) or {}):     # V2.585：已终审对外的版本不能被直接替换掉
+            still_bad.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"), "failedChecks": [],
+                              "blockedFinal": True, "msg": "旧版已终审对外（财务BP戳），不能直接替换——请先「申请撤回终审」经财务BP批准"})
+            continue
         comp = bq.compose(rec)
         fee = comp["srcFee"]
-        old = old_active.get(pk)
         eid = db.bom_insert_entry({
             "source": src, "product_key": pk, "cp_code": rec.get("cpCode"),
             "bom_list": (bq.match_bom_entry(rec, bom_pool) or {}).get("materials"),
@@ -3165,6 +3172,127 @@ async def bom_link_parallel(request: Request):
     return {"ok": True, "msg": msg, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
 
 
+def _bp_stamped(e):
+    """已终审对外且戳是财务BP盖的（补录/导入自封的不算）——撤它、替换它都要 BP 点头（V2.585）。"""
+    ack = e.get("ack") or {}
+    return e.get("status") == "已审核" and e.get("historical") != 2 and e.get("source_type") != "std_import" \
+        and (ack.get("by") or "") not in ("历史补录", "标准成本导入")
+
+
+def _unfinalize_apply(e, who, why="撤销审核"):
+    """撤销定稿的动作核心：清指针、退回复核、恢复它替代过的旧版、留痕。"""
+    db.bom_clear_final_if(_src(), e["product_key"], e["id"])   # 按id校验清指针(审查M9)
+    db.bom_update_entry(e["id"], {"status": "已复核" if e.get("reviewed_by") else "未复核", "ack": None,
+                                  "finalized_by": "", "finalized_at": ""})
+    for rid in db.bom_clear_obsolete_by(e["id"]):               # 它替代过的旧版恢复（换码承接 V2.440）
+        db.bom_add_audit(rid, who, "恢复为当前版", "失效", "替代它的 #%d 撤销定稿" % e["id"])
+    db.bom_add_audit(e["id"], who, why, e.get("status") or "", "退回复核")
+    db.audit(who, "bom_unfinalize", target=str(e["id"]), detail=why)
+
+
+def _notify_person(name, text, eid=None, tag="提醒"):
+    """按姓名给一个人发钉钉（花名册匹配 userid；查不到/不唯一退到门户「BOM 落公盘送达」收件人）。不抛。"""
+    try:
+        uid = _dt_uid_by_name(name)
+        if uid and notifier:
+            nr = notifier.send_dingtalk_to([uid], text)
+            if nr.get("sent"):
+                if eid:
+                    db.bom_add_audit(eid, "系统", tag, "", "钉钉已发 %s" % name)
+                return nr
+        mobiles = db.get_setting("bom_deliver_mobiles", None) or []
+        if mobiles and notifier:
+            import app as _app
+            nr = notifier.send_dingtalk(text, _app._recip_conf(mobiles))
+            if eid:
+                db.bom_add_audit(eid, "系统", tag, "", ("钉钉已发送达收件人（%s 钉钉未匹配）" % name) if nr.get("sent") else "钉钉发送失败")
+            return nr
+        if eid:
+            db.bom_add_audit(eid, "系统", tag, "", "未发钉钉：%s 钉钉未匹配且未配收件人" % name)
+    except Exception as ex:
+        try:
+            if eid:
+                db.bom_add_audit(eid, "系统", tag, "", "钉钉发送异常：" + str(ex)[:80])
+        except Exception:
+            pass
+    return {"sent": False}
+
+
+def _portal_link():
+    conf = _auto_conf()
+    return (conf["portal"].rstrip("/") + "/#/bom") if conf.get("portal") else "核算工作台 › 成本模块 › BOM报价审核"
+
+
+@router.post("/api/bom/unfinal-request")
+async def bom_unfinal_request(request: Request):
+    """成本会计**申请撤回终审**（V2.585，业务方定：撤已对外的版本要财务BP点头；批准＝撤出）。申请期间本版照常对外。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    if not _bp_stamped(e):
+        return JSONResponse({"ok": False, "msg": "只有已终审对外（财务BP戳）的版本需要申请撤回；初审版直接「撤销审核」即可。"}, status_code=400)
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        return JSONResponse({"ok": False, "msg": "请写明撤回理由（要改什么、为什么），财务BP据此批准。"}, status_code=400)
+    if (e.get("unfinal_req") or {}).get("state") == "pending":
+        return JSONResponse({"ok": False, "msg": "已有待批的撤回申请，等财务BP处理。"}, status_code=400)
+    from core import _now
+    req = {"state": "pending", "by": u["name"], "at": _now(), "reason": reason[:300]}
+    db.bom_update_entry(e["id"], {"unfinal_req": req})
+    db.bom_add_audit(e["id"], u["name"], "申请撤回终审", "", reason[:180])
+    db.audit(u["name"], "bom_unfinal_request", target=str(e["id"]), detail=reason[:120])
+    bp = ((e.get("ack") or {}).get("by") or "").strip()
+    text = ("【核算工作台·BOM报价审核】%s %s（OA 单 %s）：%s 申请撤回终审，理由：%s\n批准＝撤出对外、退回复核；驳回＝继续对外。→ %s"
+            % ((e.get("cp_code") or "").strip(), (e.get("product_name") or "").strip(), e.get("approval_no") or "—", u["name"], reason[:200], _portal_link()))
+    nr = _notify_person(bp, text, e["id"], "撤回申请提醒") if bp else _notify_person("", text, e["id"], "撤回申请提醒")
+    return {"ok": True, "msg": "已提交撤回终审申请，等财务BP批准；申请期间本版照常对外", "notified": bool(nr.get("sent")),
+            "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+
+
+@router.post("/api/bom/unfinal-review")
+async def bom_unfinal_review(request: Request):
+    """财务BP处理撤回终审申请：批准＝**撤出**（立即退出对外、退回复核，默认）；驳回＝理由必填、本版继续对外。申请人不得自批（主管理员例外）。"""
+    u = _require_perm(request, CAP_FINAL_REVIEW)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「终审」权限（该权限给财务BP/经理）"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    req = dict(e.get("unfinal_req") or {})
+    if req.get("state") != "pending":
+        return JSONResponse({"ok": False, "msg": "没有待批的撤回申请。"}, status_code=400)
+    approve = bool(body.get("approve", True))
+    note = str(body.get("note") or "").strip()
+    if not approve and not note:
+        return JSONResponse({"ok": False, "msg": "驳回请写明理由（成本会计要知道为什么不让撤）。"}, status_code=400)
+    if req.get("by") == u["name"] and not db.is_super(u):
+        return JSONResponse({"ok": False, "msg": "申请人不得自批撤回申请（仅主管理员可自批）。"}, status_code=400)
+    from core import _now
+    if approve:
+        _unfinalize_apply(e, u["name"], "批准撤回终审（撤出对外）" + ("·自批" if req.get("by") == u["name"] else ""))
+        req.update({"state": "approved", "decidedBy": u["name"], "decidedAt": _now(), "note": note[:200], "mode": "撤出"})
+        msg = "已批准撤回：本版撤出对外、退回复核，成本会计可修改后重新初审"
+        did = "批准撤回终审（撤出对外）" + ("（%s）" % note if note else "")
+    else:
+        req.update({"state": "rejected", "decidedBy": u["name"], "decidedAt": _now(), "note": note[:200]})
+        msg = "已驳回撤回申请，本版继续对外"
+        did = "驳回撤回申请：" + note[:160]
+    db.bom_update_entry(e["id"], {"unfinal_req": req})
+    db.bom_add_audit(e["id"], u["name"], "撤回终审申请·" + ("批准" if approve else "驳回"), req.get("reason") or "", did)
+    db.audit(u["name"], "bom_unfinal_review", target=str(e["id"]), detail=did)
+    text = ("【核算工作台·BOM报价审核】你申请撤回终审的 %s %s（OA 单 %s）已由 %s %s%s。%s → %s"
+            % ((e.get("cp_code") or "").strip(), (e.get("product_name") or "").strip(), e.get("approval_no") or "—", u["name"],
+               "批准" if approve else "驳回", ("：" + note) if note else "",
+               "本版已撤出对外、退回复核，请修改后重新初审。" if approve else "本版继续对外。", _portal_link()))
+    _notify_person(req.get("by") or "", text, e["id"], "撤回结果提醒")
+    return {"ok": True, "msg": msg, "approved": approve, "entry": _entry_view(db.bom_get_entry(e["id"]), db.bom_finals(_src()))}
+
+
 @router.post("/api/bom/unfinalize")
 async def bom_unfinalize(request: Request):
     u = _require_perm(request, CAP_AUDIT)
@@ -3174,13 +3302,10 @@ async def bom_unfinalize(request: Request):
     e = db.bom_get_entry(body.get("entryId"))
     if not e or e.get("source") != _src():
         return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
-    db.bom_clear_final_if(_src(), e["product_key"], e["id"])   # 按id校验清指针(审查M9)
-    db.bom_update_entry(e["id"], {"status": "已复核" if e.get("reviewed_by") else "未复核", "ack": None,
-                                  "finalized_by": "", "finalized_at": ""})
-    restored = db.bom_clear_obsolete_by(e["id"])               # 它替代过的旧版恢复（换码承接 V2.440）
-    for rid in restored:
-        db.bom_add_audit(rid, u["name"], "恢复为当前版", "失效", "替代它的 #%d 撤销定稿" % e["id"])
-    db.audit(u["name"], "bom_unfinalize", target=str(e["id"]))
+    # V2.585（业务方定 2026-09-15）：已终审、对外中的版本（财务BP的戳）成本会计**不能直接撤**——走「申请撤回终审 → BP 批准」；主管理员例外可直接撤
+    if _bp_stamped(e) and not db.is_super(u):
+        return JSONResponse({"ok": False, "msg": "本版已终审、对外中（财务BP戳）：成本会计不能直接撤——请点「申请撤回终审」写明理由，财务BP批准后自动撤出对外、退回复核。"}, status_code=400)
+    _unfinalize_apply(e, u["name"], "主管理员直接撤回终审（撤出对外）" if _bp_stamped(e) else "撤销审核")
     finals = db.bom_finals(_src())
     return {"ok": True, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
 

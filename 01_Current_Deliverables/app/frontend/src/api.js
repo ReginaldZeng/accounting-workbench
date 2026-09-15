@@ -386,6 +386,8 @@ export const getBomSettings = () => j('/api/bom/settings')
 export const setBomSettings = (cfg) => jp('/api/bom/settings', cfg)
 export const bomFinalize = (entryId, confirmObsolete = false, parallelLink = false, historical = false) => jp('/api/bom/finalize', { entryId, confirmObsolete, parallelLink, historical })
 export const bomUnfinalize = (entryId) => jp('/api/bom/unfinalize', { entryId })
+export const bomUnfinalRequest = (entryId, reason) => jp('/api/bom/unfinal-request', { entryId, reason })     // V2.585 申请撤回终审
+export const bomUnfinalReview = (entryId, approve, note) => jp('/api/bom/unfinal-review', { entryId, approve, note })
 export const bomAttachBomList = (entryId, file) => { const fd = new FormData(); fd.append('entryId', entryId); fd.append('file', file); return fetch('/api/bom/attach-bomlist', { method: 'POST', body: fd }).then(r => r.json()) }
 export const getBomKdPurchase = (code, months = 12) => j(`/api/bom/kd-purchase?code=${encodeURIComponent(code)}&months=${months}`)
 export const getBomMaterialUsage = (code, exclude) => j(`/api/bom/material-usage?code=${encodeURIComponent(code)}${exclude ? `&exclude=${exclude}` : ''}`)

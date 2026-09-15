@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   getBomConfig, getBomLedger, getBomEntry, bomFetchApproval, bomUpload, bomBook,
-  bomReview, bomFinalize, bomUnfinalize, bomExportPrettyUrl, bomAttachBomList, bomSetUpstream, bomSetName,
+  bomReview, bomFinalize, bomUnfinalize, bomUnfinalRequest, bomUnfinalReview, bomExportPrettyUrl, bomAttachBomList, bomSetUpstream, bomSetName,
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
@@ -526,6 +526,7 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
           {r.historical && <span className="tag late" style={{ marginLeft: 6 }} title="历史版：审核时答 C 归档的老版本，已审但不对外、不占定稿指针">历史版·不对外</span>}
           {r.backfill && <span className="bom-gvtag" style={{ marginLeft: 6 }} title={r.status === '已审核' ? '历史补录：成本会计初审通过即定稿，终审戳为「历史补录」，未经财务BP二道审核' : '历史补录单：照常复核、成本会计初审；初审通过即盖「补录」戳定稿'}>{r.status === '已审核' ? '补录·无二审' : '补录·待初审'}</span>}
           {r.imported && <span className="bom-gvtag" style={{ marginLeft: 6 }} title="历史标准成本直接导入：只有五分项、无物料明细；成本会计批量确认即已审核，未经财务BP终审；无采购核算表可导出">导入·无明细</span>}
+          {r.unfinalPending && <span className="tag late" style={{ marginLeft: 6 }} title={`${r.unfinalReq?.by} 申请撤回终审：${r.unfinalReq?.reason}——待财务BP批准，期间照常对外`}>待批撤回</span>}
           {r.recalc?.applied && <span className="tag late" style={{ marginLeft: 6 }} title={`源表小计公式漏行，已按明细重算：全成本 ${fmt(r.recalc.srcFull)} → ${fmt(r.recalc.full)}（${r.recalc.diff > 0 ? '+' : ''}${fmt(r.recalc.diff)}）`}>小计重算</span>}
           {r.obsoleteBy && (dead
             ? <span className="tag unmap" style={{ marginLeft: 6 }} title={`已被 ${r.obsoleteBy.cpCode} ${r.obsoleteBy.productName} 替代（${r.obsoleteBy.at}）——已退出对外台账，BP 不再拿到本版`}>已失效 · 被 {r.obsoleteBy.cpCode} 替代</span>
@@ -1062,6 +1063,18 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
     } catch (e) { flash('定稿失败：' + e.message) }
   }
   const unfinalize = async () => { try { await bomUnfinalize(entry.id); flash('已撤销审核，退回复核'); await onChanged() } catch (e) { flash(e.message) } }
+  // V2.585 撤回终审两步：已终审对外的版本，成本会计只能「申请」，财务BP批准＝撤出对外（默认）/ 驳回
+  const unfinalRequest = async () => {
+    const reason = window.prompt('申请撤回终审：写明要改什么、为什么（财务BP据此批准；批准即撤出对外、退回复核）')
+    if (!reason || !reason.trim()) return
+    try { const r = await bomUnfinalRequest(entry.id, reason.trim()); if (!r.ok) return flash(r.msg || '申请失败'); flash(r.msg || '已提交撤回申请'); await onChanged() } catch (e) { flash(e.message) }
+  }
+  const unfinalReview = async (approve) => {
+    const note = approve ? window.prompt('批准撤回（本版立即撤出对外、退回复核）——备注可空', '') : window.prompt('驳回理由（必填）')
+    if (note === null) return
+    if (!approve && !note.trim()) return flash('驳回请写明理由')
+    try { const r = await bomUnfinalReview(entry.id, approve, note.trim()); if (!r.ok) return flash(r.msg || '操作失败'); flash(r.msg); await onChanged() } catch (e) { flash(e.message) }
+  }
   const confirmStep = async (s, on) => {
     try { await bomConfirmStep(entry.id, s, on); flash(on ? '已确认' : '已撤销确认'); await onChanged() }
     catch (e) { flash('操作失败：' + e.message) }
@@ -1161,7 +1174,10 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {entry.active && !entry.voidPending && cfg?.canAudit && <button onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); setVoidM('request') }}>申请作废</button>}
             {isSuper && onDelete && <button className="danger" onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); onDelete({ entryId: entry.id }, `记录 #${entry.id} · ${entry.cpCode} ${entry.productName}`) }}>删除记录</button>}
           </div></details>}
-          {archived && !edit && cfg?.canAudit && <button className="btn-sec" onClick={unfinalize}>撤销审核</button>}
+          {archived && !edit && cfg?.canAudit && (entry.status === '已审核' && !entry.backfill && !entry.imported && !isSuper
+            ? <button className="btn-sec" disabled={entry.unfinalPending} onClick={unfinalRequest}
+                title={entry.unfinalPending ? '已申请，待财务BP批准' : '本版已终审对外：撤回要财务BP批准，批准即撤出对外、退回复核'}>{entry.unfinalPending ? '撤回申请待批' : '申请撤回终审'}</button>
+            : <button className="btn-sec" onClick={unfinalize} title={entry.status === '已审核' ? '主管理员直接撤回终审（撤出对外、退回复核）' : '撤销初审，退回复核'}>撤销审核</button>)}
           {archived && !edit && cfg?.canExport && !entry.imported && <a className="btn-sec" href={bomExportPrettyUrl(entry.id)}>导出核算表</a>}
           {entry.imported && entry.active && cfg?.canFetch && !edit && <button className="btn-sec" onClick={() => onFill && onFill(entry)}>补明细</button>}
         </div>
@@ -1187,6 +1203,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
           ⇄ <b>本版替代了 {entry.replaces.length} 个旧版</b>：{entry.replaces.map((c, i) => (
             <span key={c.entryId}>{i > 0 ? '；' : ''}<a className="lk" onClick={() => onOpen(c.entryId)}>{c.cpCode}</a>（{c.why || '—'} · 审核 {c.auditAt || '—'} · 全成本 ¥{fmt(c.fullIncl)}/kg）</span>))}
           。{entry.finalPassed ? '本版已终审，旧版已退出对外台账；引用旧版的 BP 定价方案会收到「成本已更新」提示。' : '本版终审通过后旧版才退出对外台账；BP 那边随之收到「成本已更新」提示。'}</div>}
+        {entry.unfinalPending && <div className="banner" style={{ display: 'block', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10, lineHeight: 1.6 }}>
+          ⟲ <b>待批撤回终审</b>：{entry.unfinalReq?.by} 于 {entry.unfinalReq?.at} 申请，理由「{entry.unfinalReq?.reason}」——申请期间本版<b>照常对外</b>；财务BP批准即撤出对外、退回复核。
+          {cfg?.canFinalReview && <span style={{ marginLeft: 10 }}><button className="btn-pri" style={{ marginRight: 6 }} onClick={() => unfinalReview(true)}>批准撤出</button><button className="btn-sec" onClick={() => unfinalReview(false)}>驳回</button></span>}</div>}
         {entry.voidPending && <div className="banner" style={{ background: 'var(--red-bg)', color: 'var(--red)', border: '1px solid var(--red)', marginBottom: 10 }}>
           ⌦ <b>有待终审的作废申请</b>：{entry.voidReq?.by} 于 {entry.voidReq?.at} 申请作废，理由「{entry.voidReq?.reason}」——
           申请期间本版<b>照常有效</b>，须财务BP终审批准才真作废。{cfg?.canFinalReview
