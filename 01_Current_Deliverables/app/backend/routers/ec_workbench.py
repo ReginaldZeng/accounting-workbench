@@ -56,6 +56,8 @@ def check_shop(shop):
 
 
 def save_source(period, shop, kind, digest, filenames, payload, operator):
+    if kind=='price_protection':
+        for row in payload.get('rows',[]):row['source_filename']=filenames[0] if filenames else ''
     packed = gzip.compress(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode())
     try:
         with db._engine.begin() as cx:
@@ -298,8 +300,11 @@ def result_status(request:Request,period:str,shop:str):
 def preparation_cards(period, shop):
     """Read saved source metadata; never build orders or decode account statements here."""
     kinds = preparation.requirements(db.get_setting('ec_preparation_rules', {}) or {}, shop)
+    price_optional='price_protection' not in kinds
+    if price_optional and next((s['platform'] for s in shops() if s['id']==shop),'')=='天猫':kinds.append('price_protection')
     cards = {k:dict(kind=k,label=preparation.KINDS[k],available=False,state='missing',rows=None,
                     files=[],file_count=0,warnings=[],imported_at=None,accounts=[]) for k in kinds}
+    if 'price_protection' in cards:cards['price_protection']['optional']=price_optional
     with db._engine.connect() as cx:
         latest = select(func.max(TABLE.c.id)).where(TABLE.c.period==period,TABLE.c.shop==shop).group_by(TABLE.c.kind)
         for r in cx.execute(select(TABLE).where(TABLE.c.id.in_(latest))):
@@ -435,6 +440,7 @@ def order_view(request:Request,period:str,shop:str,order_no:str,version:str=''):
 @router.post('/upload')
 async def upload(request:Request,period:str=Form(...),shop:str=Form(...),kind:str=Form(...),files:list[UploadFile]=File(...)):
     user=require(request,True);check_period(period);s=check_shop(shop)
+    if kind=='price_protection' and s['platform']!='天猫':raise HTTPException(400,'价保赔付模板仅适配天猫店铺')
     if kind in ('alipay','fund'):
         raise HTTPException(400,'资金流水请在账户流水页按账户导入；数据准备会自动引用，避免两套金额来源')
     if s['platform'] not in ('天猫','淘宝') and kind not in ('wdt',):
@@ -511,7 +517,7 @@ def _inbox_files(root,period,s,aliases):
     return sorted(hits)
 
 
-_AUTO_LABELS={'order':'平台订单','item':'商品与子订单','wdt':'旺店通销售出库','refund':'退款售后明细'}
+_AUTO_LABELS={'order':'平台订单','item':'商品与子订单','wdt':'旺店通销售出库','refund':'退款售后明细','price_protection':'天猫价保赔付'}
 def _auto_ingest_one(period, shop, s, name, blob, aliases, operator):
     """单文件按列自动识别 → 入库；批量上传与公盘取件共用。返回 (结果dict, 受影响单据集)。识别只看列结构、不看文件名。"""
     if len(blob)>model.tm.MAX_ALIPAY_FILE_BYTES:
@@ -522,6 +528,8 @@ def _auto_ingest_one(period, shop, s, name, blob, aliases, operator):
         if len(kinds)!=1:
             return {'name':name,'ok':False,'error':'表头无法唯一识别资料类型'}, set()
         kind=kinds.pop()
+        if kind=='price_protection' and s['platform']!='天猫':
+            return {'name':name,'ok':False,'kind':kind,'error':'价保赔付模板仅适配天猫店铺'}, set()
         if kind in ('alipay','fund'):
             return {'name':name,'ok':False,'kind':kind,'error':'资金流水请在账户流水页按账户导入'}, set()
         if s['platform'] not in ('天猫','淘宝') and kind!='wdt':

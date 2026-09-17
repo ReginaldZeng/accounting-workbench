@@ -137,7 +137,7 @@ function OrderWorkspace({user,period,shop,shops,setShop,mode,business,setBusines
       </thead><tbody>{data?.rows?.map(r=><tr key={r.order_no}>
       <td className="ew-ordercell"><button className="ew-link ew-order-id" onClick={()=>openOrder(r.order_no)}>{r.order_no}</button><small title={r.created_at||''}>{r.shipped_at?`发货 ${String(r.shipped_at).slice(5,10)}`:(SHIPMENT[r.shipment_state]||'发货待确认')} · 创建 {r.created_at?.slice(5,10)||'—'}</small></td>
       <td><span className="ew-order-pill">{r.business_label}丨{SHIPMENT[r.shipment_state]||'发货待确认'}</span><small>{r.status||(r.refund>0&&!['none','unknown'].includes(r.refund_state)?REFUND_STATE[r.refund_state]:'')}</small></td>
-      <td className="ew-num">{money(r.order_amount)}</td><td className="ew-num ew-paid">{money(r.paid)}</td><td className={`ew-num ${r.refund===0?'ew-zero':''}`}>{money(r.refund)}</td>
+      <td className="ew-num">{money(r.order_amount)}</td><td className="ew-num ew-paid">{money(r.paid)}</td><td className={`ew-num ${r.refund===0?'ew-zero':''}`}>{money(r.refund)}{r.price_protection_count>0&&<small><button className="ew-link" onClick={()=>openOrder(r.order_no,'price')}>价保赔付已关联</button></small>}</td>
       <td className="ew-num ew-hero-td">{r.ar_exempt?<span className="ew-muted-num">不适用</span>:<ConfirmCell r={r}/>}</td>
       <td className="ew-num">{r.ar_exempt?<span className="ew-muted-num">不适用</span>:<ArConfirmCell r={r}/>}</td>
       <td><FeeCell row={r} onOpen={()=>openOrder(r.order_no,'cash')}/></td>

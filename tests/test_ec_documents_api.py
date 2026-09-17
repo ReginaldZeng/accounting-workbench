@@ -26,6 +26,7 @@ class ApiTests(unittest.TestCase):
             if shop!='shop':raise HTTPException(400,'未知店铺')
             return {'id':shop,'platform':'天猫'}
         core=types.ModuleType('core');core.db=db;core._require_perm=lambda request,permission:require(request,permission=='ec_settle_upload')
+        core.pull_token_ok=lambda request:False
         sys.modules['core']=core
         wb=types.ModuleType('routers.ec_workbench');wb.require=require;wb.check_shop=check_shop;wb.shops=lambda:[{'id':'shop','name':'shop'}];wb.check_period=lambda period:None
         wb.ec=types.SimpleNamespace(_now=lambda:'2026-09-12 12:00:00',es=ec_settle);wb._lock=threading.RLock();wb._cache={}
@@ -68,6 +69,27 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(cards[1]['rows'],1)
         self.assertIn('1 个关联账户',cards[1]['warnings'][0])
         self.assertEqual(module.preparation_cards('2026-08','unconfigured'),[])
+
+    def test_price_protection_auto_ingest_and_platform_guard(self):
+        import importlib.util,routers,gzip,json
+        from tests.test_ec_price_protection import blob
+        fake=types.SimpleNamespace(fulfillment=types.SimpleNamespace(TARGET_SHOP='target'),es=ec_settle,
+            _now=lambda:'2026-09-17 12:00:00')
+        spec=importlib.util.spec_from_file_location('price_router_test',ROOT/'01_Current_Deliverables/app/backend/routers/ec_workbench.py')
+        module=importlib.util.module_from_spec(spec)
+        with patch.object(routers,'ec',fake,create=True):spec.loader.exec_module(module)
+        payload=blob()
+        rejected,_=module._auto_ingest_one('2026-08','shop',{'platform':'淘宝'},'random.xlsx',payload,[],'test')
+        self.assertFalse(rejected['ok'])
+        imported,_=module._auto_ingest_one('2026-08','shop',{'platform':'天猫'},'random.xlsx',payload,[],'test')
+        self.assertTrue(imported['ok']);self.assertEqual(imported['rows'],1)
+        repeated,_=module._auto_ingest_one('2026-08','shop',{'platform':'天猫'},'renamed.xlsx',payload,[],'test')
+        self.assertTrue(repeated['duplicate'])
+        with self.db._engine.connect() as cx:
+            records=cx.execute(select(self.db.ec_workbench_imports).where(self.db.ec_workbench_imports.c.kind=='price_protection')).all()
+        self.assertEqual(len(records),1)
+        saved=json.loads(gzip.decompress(records[0].payload))
+        self.assertEqual(saved['rows'][0]['source_filename'],'random.xlsx')
 
     def test_saved_order_http_reads_and_worker_version_contract(self):
         import importlib.util,routers

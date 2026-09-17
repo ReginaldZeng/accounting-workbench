@@ -72,7 +72,7 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
       {!result.loading&&!result.error&&rows.map(row=>{
         const cash=['alipay','fund'].includes(row.kind), kd=row.kind==='kingdee'
         const account=accounts[row.kind]||(row.accounts?.length===1?row.accounts[0].id:'')
-        const status=!row.available?'待准备':row.state==='ready'?'已准备':'待核对'
+        const status=!row.available?(row.optional?'按需补充':'待准备'):row.state==='ready'?'已准备':'待核对'
         return <tr key={row.kind}><td><strong>{row.label}</strong>{cash&&row.accounts?.length>1&&<select aria-label={`${row.label}账户`} value={account} onChange={e=>setAccounts({...accounts,[row.kind]:e.target.value})}><option value="">选择账户</option>{row.accounts.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select>}{cash&&row.accounts?.length===1&&<small>{row.accounts[0].name}</small>}</td>
           <td><span className={`ew-status ${row.state}`}>{status}</span>{row.warnings?.length>0&&<small title={row.warnings.join('；')}>{row.warnings[0]}</small>}</td>
           <td className="ew-source-number">{row.available?count(row.rows):'—'}</td>

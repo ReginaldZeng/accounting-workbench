@@ -2,11 +2,12 @@
 KINDS = {'order':'平台订单', 'item':'商品与子订单', 'wdt':'旺店通销售出库',
          'alipay':'支付宝流水', 'fund':'聚合账户流水', 'refund':'退款售后明细', 'kingdee':'金蝶应收单'}
 TARGET = '星期零STARFIELD 天猫官旗店'
+KINDS['price_protection']='天猫价保赔付（补充）'
 
 
 def requirements(settings, shop):
     # Only the already-agreed pilot has defaults; other shops must choose their materials.
-    value = settings.get(shop, list(KINDS) if shop == TARGET else [])
+    value = settings.get(shop, [k for k in KINDS if k!='price_protection'] if shop == TARGET else [])
     return [kind for kind in KINDS if kind in value] if isinstance(value, list) else []
 
 
@@ -22,8 +23,10 @@ def validate(settings):
 
 
 def progress(cards):
+    all_cards=cards
+    cards=[c for c in cards if not c.get('optional')]
     ready = sum(bool(c.get('available')) and c.get('state') == 'ready' for c in cards)
     required = len(cards)
-    return {'ready':ready, 'required':required, 'files':sum(c.get('file_count', 0) for c in cards),
+    return {'ready':ready, 'required':required, 'files':sum(c.get('file_count', 0) for c in all_cards),
             'readiness':'ready' if required and ready == required else 'linked',
             'configured':bool(required)}

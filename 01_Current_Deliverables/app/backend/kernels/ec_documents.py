@@ -5,7 +5,7 @@ import json
 import threading
 from datetime import datetime
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import openpyxl
 from sqlalchemy import MetaData, Table, Column, String, Text, Integer, Index, UniqueConstraint, select, insert, update, delete
 from sqlalchemy.dialects.mysql import LONGTEXT
@@ -41,9 +41,10 @@ LOCK=threading.RLock()
 STATUSES={'amount_equal':'金额一致','linked':'已关联，金额待核对','amount_pending':'金额待核对',
     'missing_document':'有订单号但缺单据','unresolved':'无法确定订单号','conflict':'关联或单据版本冲突',
     'not_order_based':'无需逐单关联','pending_index':'待建立关联'}
-RULES=[('item',{'主订单编号','子订单编号'}),('refund',{'退款编号','退款总额'}),
+RULES=[('price_protection',{'主订单ID','子订单ID','价差金额','逆向退款金额（含退还天猫积分类服务费）','申请时间','状态'}),('item',{'主订单编号','子订单编号'}),('refund',{'退款编号','退款总额'}),
        ('wdt',{'出库单编号','原始单号'}),('order',{'订单编号','买家实付金额','订单创建时间'})]
 FIELDS={
+ 'price_protection':{'主订单ID','子订单ID','价差金额','逆向退款金额（含退还天猫积分类服务费）','申请时间','状态'},
  'order':{'订单编号','订单创建时间','订单付款时间','发货时间','确认收货时间','订单状态','买家实付金额','退款金额','确认收货打款金额','总金额','支付详情','店铺名称'},
  'item':{'主订单编号','子订单编号','订单创建时间','订单付款时间','确认收货时间','订单状态','买家实付金额','退款金额','商品价格','购买数量','商家编码','商品ID'},
  'refund':{'订单编号','退款编号','支付宝交易号','订单付款时间','退款申请时间','退款完结时间','退款状态','退款总额','售后类型','货物状态','退给买家金额','退给平台金额'},
@@ -78,7 +79,7 @@ def snapshot_batch(shop, period, kind, rows, source_id, filenames):
 def parse_documents(blob,filename,shop,shop_aliases=()):
     tm._preflight_xlsx(blob)
     wb=openpyxl.load_workbook(io.BytesIO(blob),read_only=True,data_only=True)
-    docs=[];skipped=0;seen=set()
+    docs=[];skipped=0;seen=set();price_keys=set()
     try:
         for ws in wb:
             ws.reset_dimensions();it=ws.iter_rows(values_only=True);kind=None
@@ -87,13 +88,39 @@ def parse_documents(blob,filename,shop,shop_aliases=()):
                 kind=next((k for k,required in RULES if required<=set(heads)),None)
                 if kind:break
                 if number>=20:break
-            if not kind:raise ValueError('无法按列识别资料类型：'+ws.title+'；支持平台订单、子订单、退款及旺店通出库')
+            if not kind:raise ValueError('无法按列识别资料类型：'+ws.title+'；支持平台订单、子订单、退款、天猫价保及旺店通出库')
             if len([h for h in heads if h])!=len(set(h for h in heads if h)):raise ValueError('表头重名，无法可靠识别')
             ix={h:i for i,h in enumerate(heads) if h in FIELDS[kind]}
             for line,row in enumerate(it,number+1):
                 if line>250001:raise ValueError('单表超过250,000行')
                 if not any(v is not None for v in row):continue
                 raw={h:text(row[i]) if i<len(row) else '' for h,i in ix.items()}
+                if kind=='price_protection':
+                    # The second header row describes product fields, not a financial record.
+                    if line==number+1 and not raw.get('主订单ID') and not raw.get('子订单ID') and '商品标题' in row:
+                        continue
+                    for h in ('主订单ID','子订单ID'):
+                        if isinstance(row[ix[h]],(int,float)) or not raw[h]:
+                            raise ValueError('价保订单ID必须为非空文本，避免长编号精度丢失')
+                    stamp=tm._date_text(raw['申请时间'])
+                    if not stamp or not raw['状态']:raise ValueError('价保申请时间或状态缺失')
+                    for h in ('价差金额','逆向退款金额（含退还天猫积分类服务费）'):
+                        value=raw[h]
+                        if h.startswith('逆向') and (not value or ('系统升级' in value and '不会展示逆向退款金额' in value)):
+                            continue  # Missing is not zero, including pre-upgrade exports.
+                        if not value:raise ValueError('价差金额缺失')
+                        try:money=Decimal(value.replace('¥','').replace('￥','').replace(',',''))
+                        except InvalidOperation:raise ValueError('价保金额格式错误') from None
+                        if not money.is_finite() or money<0:raise ValueError('价保金额必须为非负有限数值')
+                    no=raw['子订单ID']+':'+stamp
+                    key=digest([shop,kind,no]);fp=digest(raw)
+                    if (key,fp) in seen:continue
+                    if key in price_keys:raise ValueError('同一价保申请存在冲突记录，请核对后导入')
+                    price_keys.add(key)
+                    seen.add((key,fp))
+                    docs.append(dict(document_key=key,shop=shop,kind=kind,document_no=no,order_no=raw['主订单ID'],
+                        period=stamp[:7],fingerprint=fp,payload=pack(raw),sheet=ws.title,row_number=line,conflict=0))
+                    continue
                 if kind=='wdt' and raw.get('店铺')!=shop:skipped+=1;continue
                 if raw.get('店铺名称') and raw['店铺名称'] not in {shop,*shop_aliases}:
                     raise ValueError('文件店铺名称与所选店铺不一致，请先核实基础资料中的店铺别名')

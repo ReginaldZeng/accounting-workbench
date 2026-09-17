@@ -11,6 +11,7 @@ from kernels import ec_flow_ledger as ledger
 KINDS = {'order': '平台订单', 'item': '商品与子订单', 'wdt': '旺店通销售出库',
          'alipay': '支付宝流水', 'fund': '聚合账户流水', 'refund': '退款售后明细'}
 REQUIRED = tuple(KINDS)
+KINDS['price_protection'] = '天猫价保赔付（补充）'
 LABELS = {'normal': '正常销售', 'ufirst': 'U先试用装', 'mixed': '混合订单', 'review': '试用装', 'unknown': '待分类'}
 FEE_LABELS = {c: label for c, label, _ in es.FEE_MAP_SEED}
 
@@ -102,6 +103,20 @@ def parse_source(kind, payloads, period, shop):
     out = {'version': 1, 'kind': kind, 'period': period, 'shop': shop, 'rows': [], 'index': {},
            'business': {}, 'events': {}, 'status': 'ready', 'warnings': [], 'balance': None}
     data = payloads[0]
+    if kind == 'price_protection':
+        import json
+        from kernels import ec_documents
+        batch = ec_documents.parse_documents(data, '', shop)
+        if any(d['kind'] != kind for d in batch['docs']):raise ValueError('不是天猫价保列结构')
+        for d in batch['docs']:
+            raw=json.loads(d['payload']); reverse=raw['逆向退款金额（含退还天猫积分类服务费）']
+            missing=not reverse or ('系统升级' in reverse and '不会展示逆向退款金额' in reverse)
+            out['rows'].append(dict(order_no=d['order_no'],suborder_no=raw['子订单ID'],
+                application_key=d['document_key'],date=tm._date_text(raw['申请时间']),status=raw['状态'],
+                price_difference=amount(raw['价差金额']),reverse_refund=None if missing else amount(reverse),
+                reverse_note=reverse if missing else '',sheet=d['sheet'],row_number=d['row_number']))
+        if any(r['reverse_refund'] is None for r in out['rows']):out['warnings'].append('部分逆向退款金额未提供，保留未知，不计作零')
+        return out
     if kind in ('order', 'item', 'fund'):
         parsed = tm.PARSERS[kind](data, period)
         if parsed.get('blocking_codes'):
@@ -228,6 +243,8 @@ def parse_source(kind, payloads, period, shop):
 def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=None, trial_keywords=None):
     orders = sources.get('order', {}).get('rows', [])
     items, shipments, refunds, events = (defaultdict(list) for _ in range(4))
+    price_records=defaultdict(list)
+    for p in sources.get('price_protection',{}).get('rows',[]):price_records[p['order_no']].append(p)
     for r in sources.get('item', {}).get('rows', []): items[r['order_no']].append(r)
     internal_owners = defaultdict(set)
     for r in sources.get('wdt', {}).get('rows', []):
@@ -322,6 +339,7 @@ def build_orders(sources, ar_index=None, recognition='shipment', fee_categories=
             extent='full' if paid>0 and refund>=paid else 'partial'
             refund_state=extent+('_return' if return_refund and not refund_only else '_only' if refund_only and not return_refund else '_mixed')
         r.update(paid=paid, paid_success=paid_success, refund=refund, gsv=amount(paid-refund),
+            price_protections=price_records[no],price_protection_count=len(price_records[no]),
             routine_fee=total(fee_parts['routine']) if cash_present else None,
             commission_fee=total(fee_parts['commission']) if cash_present else None,
             unclassified_fee=total(fee_parts['unclassified']) if cash_present else None,

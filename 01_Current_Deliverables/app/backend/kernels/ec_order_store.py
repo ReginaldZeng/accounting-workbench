@@ -32,7 +32,7 @@ ROWS=Table('ec_order_result_rows',md,
     Index('ix_ec_order_channel','build_id','channel','created_at'))
 TABLES=tuple(md.tables.values())
 BUSINESSES=('', 'normal','ufirst','mixed','review','unknown')
-HIDDEN={'events','fee_events','items','shipments','refunds','order_key','id','run_id'}
+HIDDEN={'events','fee_events','items','shipments','refunds','price_protections','order_key','id','run_id'}
 
 
 def pack(value):return json.dumps(value,ensure_ascii=False,separators=(',',':'),sort_keys=True)
