@@ -3649,7 +3649,11 @@ def _fisbal_vouchers(y, p, code, org_name=""):
     key = (CFG["source"], int(y), int(p), str(code), org_name or "")
     if key in _FISBAL_VCH:
         return _FISBAL_VCH[key]
-    rows = kc.fetch_gl_voucher_subjects(int(y), int(p), (str(code),))
+    try:
+        dims = kc.valid_dim_fields(int(y), int(p))     # 本账套有效的核算维度槽（缓存），供应商精确匹配用
+    except Exception:
+        dims = []
+    rows = kc.fetch_gl_voucher_subjects(int(y), int(p), (str(code),), extra_fields=dims)
     if org_name:
         rows = [r for r in rows if _book_match(r.get("账簿"), org_name)]
     _FISBAL_VCH[key] = rows

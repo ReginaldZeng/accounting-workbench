@@ -386,18 +386,39 @@ GL_VOUCHER_SUBJ_FIELDS = GL_VOUCHER_FIELDS + [
     ("FACCOUNTBOOKID.FName", "账簿")]   # V2.238：本期新开维度只在序时账里，建记录要认主体
 
 
-def fetch_gl_voucher_subjects(year, period, prefixes=("1001", "1002", "1012", "1101"), s=None, conf=None):
+def fetch_gl_voucher_subjects(year, period, prefixes=("1001", "1002", "1012", "1101"),
+                              s=None, conf=None, extra_fields=None):
     s, conf = login(s, conf) if s is None else (s, conf or load_conf())
     pref = " or ".join(f"FAccountID.FNumber like '{p}%'" for p in prefixes)
     flt = f"({pref}) and FYear={year} and FPeriod={period}"
-    return _query(s, conf, "GL_VOUCHER", GL_VOUCHER_SUBJ_FIELDS, flt, "FDATE")
+    fields = GL_VOUCHER_SUBJ_FIELDS + list(extra_fields or [])
+    return _query(s, conf, "GL_VOUCHER", fields, flt, "FDATE")
 
 
-# 序时账核算维度槽候选：找供应商到底在哪个槽（FF100002 对暂估进项税/其他应付款是空的）。
-GL_DIM_CANDS = ["FDetailID.FASSTACTID.FNumber", "FDetailID.FASSTACTID.FName",
+# 序时账核算维度槽候选：找供应商/费用项目等到底在哪个槽（FF100002 对暂估进项税/其他应付款是空的）。
+GL_DIM_CANDS = ["FDetailID.FASSTACTID.FNumber",
                 "FDetailID.FF100001.FNumber", "FDetailID.FF100003.FNumber",
                 "FDetailID.FF100004.FNumber", "FDetailID.FF100005.FNumber",
-                "FDetailID.FF100006.FNumber", "FDetailID.FF100007.FNumber"]
+                "FDetailID.FF100006.FNumber", "FDetailID.FF100007.FNumber",
+                "FDetailID.FF100008.FNumber"]
+_VALID_DIM_FIELDS = None    # 缓存：本账套序时账里有效（查得动）的核算维度槽 [(fieldkey, alias), ...]
+
+
+def valid_dim_fields(year, period, code="2221.01.07", s=None, conf=None):
+    """探一次：哪些核算维度槽在本账套查得动（无效字段金蝶会报错）。结果全局缓存（槽是账套级、不随期变）。
+    返回 [(fieldkey, 别名 dimN), ...]，供 fetch_gl_voucher_subjects 一并带出、供应商精确匹配用。"""
+    global _VALID_DIM_FIELDS
+    if _VALID_DIM_FIELDS is not None:
+        return _VALID_DIM_FIELDS
+    s, conf = login(s, conf) if s is None else (s, conf or load_conf())
+    flt = "FAccountID.FNumber like '%s%%' and FYear=%d and FPeriod=%d" % (code, int(year), int(period))
+    valid = []
+    for i, c in enumerate(GL_DIM_CANDS):
+        _, err = _query_raw(s, conf, "GL_VOUCHER", "FACCOUNTBOOKID.FName," + c, flt, 0)
+        if err is None:
+            valid.append((c, "dim%d" % i))
+    _VALID_DIM_FIELDS = valid
+    return valid
 
 
 def probe_voucher_dims(year, period, code, s=None, conf=None):

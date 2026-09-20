@@ -346,10 +346,23 @@ def supplier_core(name):
     return s
 
 
+def _dim_match(dim, codes):
+    """余额表维度编码 dim 是否命中序时账某行的结构化核算维度值集合 codes。
+    dim 可能是单值(物流运输服务016)或复合(物流运输服务016/供应商009)；要求 dim 的每一段都在 codes 里。"""
+    dim = str(dim or "").strip()
+    if not dim:
+        return False
+    cs = set(str(c).strip() for c in codes if str(c).strip())
+    if not cs:
+        return False
+    segs = set(x for x in re.split(r"[/;,、\s]+", dim) if x) or {dim}
+    return segs <= cs
+
+
 def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
     """下钻反查：从序时账逐笔挑出某 (科目, 维度) 的凭证行 → 规整。样例 dict 与金蝶 fetch_gl_voucher_subjects 都吃。
-    维度归属：序时账有结构化维度编码(FF100002)就按编码；金蝶部分科目该字段为空(如2221.01.07 暂估进项税)，
-    则退化为【供应商核心名在摘要里匹配】(dim_name 传维度名/供应商名)。返回 {lines,借合计,贷合计,笔数}。"""
+    维度归属（V2.597 根治）：序时账把有效核算维度槽(dim0/dim1…)一并带出，按【结构化维度精确匹配】(dim 各段都在该行维度值里)；
+    退化顺序：结构化维度→(旧)FF100002 编码→供应商核心名在摘要里(dim_name)。返回 {lines,借合计,贷合计,笔数}。"""
     code, dim = str(code or ""), str(dim or "")
     core = supplier_core(dim_name)
 
@@ -365,13 +378,16 @@ def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
         if rc != code:
             continue
         rd = str(gv(r, "维度编码", "FDetailID.FF100002.FNumber") or "").strip()
+        flex = [str(v).strip() for k, v in r.items()
+                if isinstance(k, str) and k.startswith("dim") and str(v).strip()]
+        codes = ([rd] if rd else []) + flex     # 该行所有结构化核算维度值（旧FF100002 + 新探到的槽）
         memo = str(gv(r, "摘要", "FEXPLANATION") or "")
         if not dim and not core:        # 全科目模式：该科目本期全部凭证（对账找差用，dim/dim_name 都不传）
             pass
-        elif rd:                        # 有结构化维度 → 按维度编码严格匹配（样例、及维度非空的科目）
-            if rd != dim:
+        elif codes:                     # 有结构化核算维度 → 精确匹配（根治：dim 各段都在该行维度值里）
+            if not _dim_match(dim, codes):
                 continue
-        elif core:                      # 无结构化维度 → 按供应商核心名在摘要里匹配（2221.01.07/2241.02 等）
+        elif core:                      # 无任何结构化维度 → 供应商核心名在摘要里兜底
             if core not in memo:
                 continue
         else:
