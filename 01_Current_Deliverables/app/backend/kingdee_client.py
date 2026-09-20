@@ -426,24 +426,24 @@ def valid_dim_fields(year, period, code="2221.01.07", s=None, conf=None):
 
 
 def probe_voucher_dims(year, period, code, s=None, conf=None):
-    """诊断：逐个试序时账的核算维度槽（各自单独查、互不影响），返回每个槽的非空样例值。
-    用来定位供应商到底在哪个槽（如某槽样例值是「物流运输服务016」即它）。"""
+    """诊断（安全网）：按 FLEX_DIMS 各核算维度域取该科目本期序时账，列出每个域的非空样例值，看供应商/费用项目落在哪个域。"""
     s, conf = login(s, conf) if s is None else (s, conf or load_conf())
     flt = "FAccountID.FNumber like '%s%%' and FYear=%d and FPeriod=%d" % (code, int(year), int(period))
     out = {}
-    for c in GL_DIM_CANDS:
-        rows, err = _query_raw(s, conf, "GL_VOUCHER", "FEXPLANATION,FDEBIT,FCREDIT," + c, flt, 0)
+    for f, label, numfld, _ in FLEX_DIMS:
+        key = "FDetailID.%s.%s" % (f, numfld)
+        rows, err = _query_raw(s, conf, "GL_VOUCHER", "FEXPLANATION," + key, flt, 0)
         if err:
-            out[c] = "✗ 该字段查不了：" + str(err)[:70]
-        else:
-            vals = []
-            for r in (rows or []):
-                v = _cell(r[3]) if len(r) > 3 else ""
-                if v and v not in vals:
-                    vals.append(v)
-                if len(vals) >= 8:
-                    break
-            out[c] = {"取到行数": len(rows or []), "非空样例值": vals}
+            out["%s(%s)" % (label, f)] = "✗ " + str(err)[:60]
+            continue
+        vals = []
+        for r in (rows or []):
+            v = _cell(r[1]) if len(r) > 1 else ""
+            if v and v not in vals:
+                vals.append(v)
+            if len(vals) >= 8:
+                break
+        out["%s(%s)" % (label, f)] = {"非空样例值": vals} if vals else {"(空)": len(rows or [])}
     return out
 
 
@@ -1824,6 +1824,12 @@ def _flex_keys(prefix="FDetailID"):
     for f, _, numfld, namefld in FLEX_DIMS:
         ks += ["%s.%s.%s" % (prefix, f, numfld), "%s.%s.%s" % (prefix, f, namefld)]
     return ks
+
+
+def flex_num_fields(prefix="FDetailID"):
+    """19 个核算维度域的【编码】字段（供应商=FFLEX4 等），别名 dim0.. —— 下钻逐笔按核算维度精确匹配用。"""
+    return [("%s.%s.%s" % (prefix, f, numfld), "dim%d" % i)
+            for i, (f, _, numfld, _) in enumerate(FLEX_DIMS)]
 
 
 def fetch_account_dim_order(s=None, conf=None):

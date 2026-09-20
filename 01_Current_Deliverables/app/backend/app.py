@@ -3649,11 +3649,10 @@ def _fisbal_vouchers(y, p, code, org_name=""):
     key = (CFG["source"], int(y), int(p), str(code), org_name or "")
     if key in _FISBAL_VCH:
         return _FISBAL_VCH[key]
-    try:
-        dims = kc.valid_dim_fields(int(y), int(p))     # 本账套有效的核算维度槽（缓存），供应商精确匹配用
+    try:                               # 带上 19 个核算维度域的编码列（供应商=FFLEX4 等），供逐笔按维度精确匹配
+        rows = kc.fetch_gl_voucher_subjects(int(y), int(p), (str(code),), extra_fields=kc.flex_num_fields())
     except Exception:
-        dims = []
-    rows = kc.fetch_gl_voucher_subjects(int(y), int(p), (str(code),), extra_fields=dims)
+        rows = kc.fetch_gl_voucher_subjects(int(y), int(p), (str(code),))   # 退化：无维度列则走摘要兜底
     if org_name:
         rows = [r for r in rows if _book_match(r.get("账簿"), org_name)]
     _FISBAL_VCH[key] = rows
