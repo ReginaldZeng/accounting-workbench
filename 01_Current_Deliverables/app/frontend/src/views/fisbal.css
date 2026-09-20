@@ -1,0 +1,73 @@
+/* 科目余额解析（物流）· 明细账弹窗视觉打磨 —— 复用全站设计令牌，风格与主壳一致 */
+
+/* ── 弹窗外壳 ── */
+.fsb-ov{ position:fixed; inset:0; z-index:200; background:rgba(20,24,40,.5); backdrop-filter:blur(2px);
+  display:flex; align-items:flex-start; justify-content:center; padding:28px 16px; overflow:auto; }
+.fsb-modal{ background:var(--bg); border:1px solid var(--line); border-radius:16px; width:min(1060px,96vw);
+  max-height:calc(100vh - 56px); display:flex; flex-direction:column; overflow:hidden;
+  box-shadow:0 30px 80px rgba(20,24,40,.4); }
+.fsb-mhead{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px;
+  padding:15px 22px 13px; border-bottom:1px solid var(--line); background:var(--bg-sub); flex:0 0 auto; }
+.fsb-mtitle{ font-size:15.5px; font-weight:700; letter-spacing:.01em; line-height:1.35; }
+.fsb-mtitle .code{ color:var(--accent); font-family:var(--font-mono); font-size:13.5px; margin-right:6px; }
+.fsb-msub{ font-size:11.5px; color:var(--ink-3); margin-top:3px; }
+.fsb-x{ cursor:pointer; font-size:19px; color:var(--ink-3); line-height:1; padding:3px 8px; border-radius:8px; flex:0 0 auto; }
+.fsb-x:hover{ background:var(--line); color:var(--ink); }
+.fsb-mbody{ padding:16px 22px 22px; overflow:auto; }
+
+/* ── 期末余额 hero ── */
+.fsb-hero{ display:flex; align-items:baseline; gap:8px 16px; flex-wrap:wrap;
+  padding:13px 16px; border:1px solid var(--line); border-left:3px solid var(--accent);
+  border-radius:11px; background:var(--bg-sub); }
+.fsb-hero.neg{ border-left-color:var(--red); }
+.fsb-hero .lbl{ font-size:11.5px; color:var(--ink-3); font-weight:600; }
+.fsb-hero .big{ font-size:24px; font-weight:800; font-family:var(--font-mono); font-variant-numeric:tabular-nums; letter-spacing:-.01em; }
+.fsb-hero .big.neg{ color:var(--red); }
+.fsb-hero .eq{ font-size:12px; color:var(--ink-2); }
+.fsb-hero .eq b{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; color:var(--ink); font-weight:600; }
+.fsb-hero .hint{ flex-basis:100%; font-size:11.5px; color:var(--ink-2); margin-top:2px; }
+.fsb-hero .hint .g{ color:var(--green); font-weight:600; }
+
+/* ── 明细账 / 构成 通用表 ── */
+.fsb-tbl{ width:100%; border-collapse:collapse; font-size:12px; background:var(--bg); }
+.fsb-tbl th{ text-align:left; font-weight:600; font-size:10.5px; letter-spacing:.04em; color:var(--ink-3);
+  padding:7px 9px; border-bottom:1px solid var(--line-strong); white-space:nowrap; }
+.fsb-tbl th.r{ text-align:right; }
+.fsb-tbl td{ padding:6px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
+.fsb-tbl td.n{ text-align:right; font-family:var(--font-mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.fsb-tbl td.neg{ color:var(--red); }
+.fsb-tbl tbody tr:hover td{ background:var(--bg-sub); }
+.fsb-tbl tr.open td{ background:var(--green-bg); }
+.fsb-tbl tr.open:hover td{ background:var(--green-bg); }
+.fsb-tbl tr.opening td{ background:var(--bg-rail); color:var(--ink-2); }
+.fsb-tbl tr.opening:hover td{ background:var(--bg-rail); }
+.fsb-tbl tr.struck td{ color:var(--ink-3); text-decoration:line-through; background:var(--bg-rail); }
+.fsb-tbl tr.struck:hover td{ background:var(--bg-rail); }
+.fsb-tbl tr.sum td{ font-weight:700; border-top:1.5px solid var(--line-strong); border-bottom:none; background:var(--bg-sub); }
+.fsb-tbl .ck-td{ width:34px; text-align:center; }
+.fsb-tag{ display:inline-block; margin-left:6px; font-size:9.5px; font-weight:700; color:var(--green);
+  background:var(--bg); border:1px solid var(--green-line); padding:1px 6px; border-radius:5px; vertical-align:middle; }
+.fsb-scroll{ overflow-x:auto; border:1px solid var(--line); border-radius:10px; margin-top:8px; }
+
+/* ── 勾选核对条 ── */
+.fsb-vtools{ display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.fsb-vtools .tip{ font-size:11.5px; color:var(--ink-3); }
+.fsb-verify{ padding:8px 11px; border-radius:8px; background:var(--amber-bg); border:1px solid var(--amber-line);
+  font-size:12px; color:var(--ink-2); }
+.fsb-verify.ok{ background:var(--green-bg); border-color:var(--green-line); }
+.fsb-verify b.n{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
+
+/* ── 期末构成清单卡 ── */
+.fsb-comp{ border:1px solid var(--green-line); background:var(--green-bg); border-radius:12px; padding:13px 15px; margin-bottom:14px; }
+.fsb-comp .ttl{ font-size:13.5px; font-weight:700; color:var(--ink); display:flex; align-items:center; gap:8px; }
+.fsb-comp .pin{ font-size:14px; }
+.fsb-comp .desc{ font-size:11.5px; color:var(--ink-2); margin:5px 0 9px; line-height:1.55; }
+.fsb-comp .desc .warn{ color:var(--amber); font-weight:600; }
+.fsb-comp .fsb-scroll{ border-color:var(--green-line); margin-top:0; }
+
+/* ── 追溯区 ── */
+.fsb-trace{ border-left:2px solid var(--accent-soft); padding-left:14px; margin-top:4px; }
+.fsb-trace .thd{ font-size:12.5px; font-weight:600; margin-bottom:8px; }
+.fsb-trace .per{ margin-bottom:14px; }
+.fsb-trace .per .plabel{ font-size:12px; margin-bottom:4px; color:var(--ink-2); }
+.fsb-trace .per .plabel b{ color:var(--ink); font-family:var(--font-mono); font-variant-numeric:tabular-nums; }

@@ -4,6 +4,7 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { getFiSubjectOrgs, getFiSubjectBalance, syncFiSubjectBalance, getFiSubjectCheck, uploadFiSubjectReport, getFiSubjectDetail, getFiSubjectTrace } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
+import './fisbal.css'
 
 let _cache = null
 const fmt = n => n == null ? '—' : Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -77,7 +78,6 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     const { gid, opening, showOpening, offset = 0 } = opts
     const chk = gid ? (checks[gid] || new Set()) : null
     const ls = showLines || det.lines
-    const cell = { padding: '5px 8px', borderBottom: '1px solid var(--line)' }
     const ending = det['余额末']
     let checkedNet = 0, checkedCnt = 0
     if (chk) {
@@ -87,61 +87,58 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     checkedNet = r2(checkedNet)
     const uncheckedNet = r2((ending || 0) - checkedNet)
     const balanced = checkedCnt > 0 && Math.abs(checkedNet) < 0.005
-    const chkTd = key => <td style={{ ...cell, textAlign: 'center', width: 32 }}>
-      <input type="checkbox" checked={chk.has(key)} onChange={() => toggleCheck(gid, key)} style={{ cursor: 'pointer' }} /></td>
-    const strike = key => (chk && chk.has(key)) ? { color: 'var(--ink-3)', textDecoration: 'line-through' } : undefined
+    const chkTd = key => <td className="ck-td"><input type="checkbox" checked={chk.has(key)} onChange={() => toggleCheck(gid, key)} style={{ cursor: 'pointer' }} /></td>
     const table = (
-      <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+      <table className="fsb-tbl">
         <thead><tr>
-          {chk && <th style={{ width: 32, padding: '5px 8px', borderBottom: '1px solid var(--line)', color: 'var(--ink-3)', fontWeight: 500 }}>核对</th>}
+          {chk && <th className="ck-td">核对</th>}
           {['日期', '凭证', '摘要', '借方', '贷方', '余额', '制单人'].map((h, hi) =>
-            <th key={h} style={{ textAlign: (hi >= 3 && hi <= 5) ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}
+            <th key={h} className={(hi >= 3 && hi <= 5) ? 'r' : ''}>{h}</th>)}
         </tr></thead>
         <tbody>
-          {chk && showOpening && opening != null && <tr style={{ background: 'var(--bg-sub)' }}>
+          {chk && showOpening && opening != null && <tr className={chk.has('op') ? 'struck' : 'opening'}>
             {chkTd('op')}
-            <td style={cell}></td>
-            <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: 600, ...strike('op') }}>期初</td>
-            <td style={{ ...cell, ...strike('op') }}>上期结转（期初余额）</td>
-            <td style={cell}></td><td style={cell}></td>
-            <td style={{ ...cell, textAlign: 'right', fontWeight: 600, color: (opening || 0) < 0 ? 'var(--red)' : undefined, ...strike('op') }}>{fmt(opening)}</td>
-            <td style={cell}></td>
+            <td></td>
+            <td style={{ whiteSpace: 'nowrap', fontWeight: 600 }}>期初</td>
+            <td>上期结转（期初余额）</td>
+            <td></td><td></td>
+            <td className={'n' + ((opening || 0) < 0 ? ' neg' : '')} style={{ fontWeight: 600 }}>{fmt(opening)}</td>
+            <td></td>
           </tr>}
           {ls.map((ln, li) => {
-            const gi = offset + li, g = chk && chk.has(gi), s = strike(gi)
-            const bg = g ? 'var(--bg-sub)' : (ln['开项'] ? 'var(--green-bg)' : undefined)
-            return <tr key={li} style={bg ? { background: bg } : undefined} title={ln['开项'] ? '未核销的开项（构成期末余额）' : undefined}>
+            const gi = offset + li, g = chk && chk.has(gi)
+            return <tr key={li} className={g ? 'struck' : (ln['开项'] ? 'open' : '')} title={ln['开项'] ? '未核销的开项（构成期末余额）' : undefined}>
               {chk && chkTd(gi)}
-              <td style={{ ...cell, whiteSpace: 'nowrap', ...s }}>{ln['日期']}</td>
-              <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: (ln['开项'] && !g) ? 700 : 400, ...s }}>{ln['凭证']}{ln['开项'] && !g ? <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, color: 'var(--green)', background: 'var(--green-bg)', padding: '1px 6px', borderRadius: 5 }}>未核销</span> : ''}</td>
-              <td style={{ ...cell, ...s }}>{ln['摘要']}</td>
-              <td style={{ ...cell, textAlign: 'right', color: ln['借'] < 0 ? 'var(--red)' : undefined, ...s }}>{ln['借'] ? fmt(ln['借']) : ''}</td>
-              <td style={{ ...cell, textAlign: 'right', color: ln['贷'] < 0 ? 'var(--red)' : undefined, ...s }}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
-              <td style={{ ...cell, textAlign: 'right', fontWeight: 600, color: ln['余额'] < 0 ? 'var(--red)' : undefined, ...s }}>{fmt(ln['余额'])}</td>
-              <td style={{ ...cell, whiteSpace: 'nowrap', ...s }}>{ln['制单人']}</td>
+              <td style={{ whiteSpace: 'nowrap' }}>{ln['日期']}</td>
+              <td style={{ whiteSpace: 'nowrap', fontWeight: (ln['开项'] && !g) ? 700 : 400 }}>{ln['凭证']}{ln['开项'] && !g ? <span className="fsb-tag">未核销</span> : ''}</td>
+              <td>{ln['摘要']}</td>
+              <td className={'n' + (ln['借'] < 0 ? ' neg' : '')}>{ln['借'] ? fmt(ln['借']) : ''}</td>
+              <td className={'n' + (ln['贷'] < 0 ? ' neg' : '')}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
+              <td className={'n' + (ln['余额'] < 0 ? ' neg' : '')} style={{ fontWeight: 600 }}>{fmt(ln['余额'])}</td>
+              <td style={{ whiteSpace: 'nowrap' }}>{ln['制单人']}</td>
             </tr>
           })}
-          <tr>{chk && <td></td>}<td colSpan={3} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>本期发生合计 / 期末余额</td>
-            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['借合计'])}</td>
-            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['贷合计'])}</td>
-            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700 }}>{fmt(det['余额末'])}</td><td></td></tr>
-          {chk && checkedCnt > 0 && <tr><td colSpan={8} style={{ padding: '7px 8px', background: balanced ? 'var(--green-bg)' : 'var(--amber-bg, #fdf1dd)', fontSize: 12 }}>
-            <b>勾选核对</b>：已勾选 {checkedCnt} 笔，净额 <b style={{ color: balanced ? 'var(--green)' : 'var(--amber)' }}>{fmt(checkedNet)}</b>（成对核销时应为 0）　·　未勾选剩余 <b>{fmt(uncheckedNet)}</b> {balanced
-              ? <span style={{ color: 'var(--green)', fontWeight: 600 }}>✓ 正好＝期末 {fmt(ending)}，核对无误</span>
-              : <span style={{ color: 'var(--ink-3)' }}>（把成对的勾到净额为 0，剩余就＝期末 {fmt(ending)}）</span>}
-          </td></tr>}
+          <tr className="sum">{chk && <td></td>}<td colSpan={3} className="r">本期发生合计 / 期末余额</td>
+            <td className="n">{fmt(det['借合计'])}</td>
+            <td className="n">{fmt(det['贷合计'])}</td>
+            <td className={'n' + ((det['余额末'] || 0) < 0 ? ' neg' : '')}>{fmt(det['余额末'])}</td><td></td></tr>
         </tbody>
       </table>
     )
     if (!chk) return table
     return <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-        <span className="foot" style={{ fontSize: 11.5 }}>☑ 勾掉能互相对冲的几笔（灰掉划掉），剩下没勾的应正好＝期末——工作台上核对，不用按计算器。</span>
+      <div className="fsb-vtools">
+        <span className="tip">☑ 勾掉能互相对冲的几笔（灰掉划掉），剩下没勾的应正好＝期末——工作台上核对，不用按计算器。</span>
         <span style={{ flex: 1 }} />
         <button className="btn" style={{ padding: '2px 9px', fontSize: 11.5 }} onClick={() => autoCheckCleared(gid, det, opening)}>一键勾掉已核销</button>
         {checkedCnt > 0 && <button className="btn" style={{ padding: '2px 9px', fontSize: 11.5 }} onClick={() => setChecks(p => ({ ...p, [gid]: new Set() }))}>清除勾选</button>}
       </div>
-      {table}
+      <div className="fsb-scroll">{table}</div>
+      {checkedCnt > 0 && <div className={'fsb-verify' + (balanced ? ' ok' : '')} style={{ marginTop: 8 }}>
+        <b>勾选核对</b>：已勾选 {checkedCnt} 笔，净额 <b className="n" style={{ color: balanced ? 'var(--green)' : 'var(--amber)' }}>{fmt(checkedNet)}</b>（成对核销时应为 0）　·　未勾选剩余 <b className="n">{fmt(uncheckedNet)}</b> {balanced
+          ? <span style={{ color: 'var(--green)', fontWeight: 600 }}>✓ 正好＝期末 {fmt(ending)}，核对无误</span>
+          : <span style={{ color: 'var(--ink-3)' }}>（把成对的勾到净额为 0，剩余就＝期末 {fmt(ending)}）</span>}
+      </div>}
     </div>
   }
   const loadFor = async (o) => {
@@ -284,8 +281,8 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
               <td className="num" style={{ fontWeight: 600 }}>{fmt(g['期末'])}</td>
             </tr>
             {g.rows.map((r, i) => (
-              <tr key={g.code + i} onClick={() => openModal(r['科目编码'], r['维度编码'] || '', r['科目编码'] + ' ' + r['科目名称'], r['账户'])}
-                style={{ cursor: 'pointer' }} title="点开看这笔余额的明细账（滚动余额 + 未核销开项 + 追溯期初）">
+              <tr key={g.code + i} className="row" onClick={() => openModal(r['科目编码'], r['维度编码'] || '', r['科目编码'] + ' ' + r['科目名称'], r['账户'])}
+                title="点开看这笔余额的明细账（滚动余额 + 未核销开项 + 追溯期初）">
                 <td style={{ paddingLeft: 26 }} className="acct"><span style={{ color: 'var(--accent)', marginRight: 4 }}>▸</span>{r['账户']}</td>
                 <td></td>
                 <td className="num">{fmt(r['期初'])}</td>
@@ -309,32 +306,34 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     </div>
 
     {/* 明细账弹窗：滚动余额 + 未核销开项 + 分页 + 追溯期初 */}
-    {modal && <div onClick={closeModal} style={{ position: 'fixed', inset: 0, background: 'rgba(20,24,40,.45)', zIndex: 200, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '32px 16px', overflow: 'auto' }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg)', borderRadius: 14, width: 'min(1040px,96vw)', boxShadow: '0 24px 70px rgba(20,24,40,.35)', padding: '16px 20px 20px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
-          <div><div style={{ fontSize: 15, fontWeight: 700 }}>{modal.科目名} · {modal.维度名}</div>
-            <div className="foot">明细账 · {d.org_name || ''} · {d.period}</div></div>
-          <span onClick={closeModal} title="关闭" style={{ cursor: 'pointer', fontSize: 22, color: 'var(--ink-3)', lineHeight: 1 }}>×</span>
+    {modal && <div className="fsb-ov" onClick={closeModal}>
+      <div className="fsb-modal" onClick={e => e.stopPropagation()}>
+        <div className="fsb-mhead">
+          <div><div className="fsb-mtitle"><span className="code">{modal.code}</span>{modal.科目名.replace(modal.code, '').trim()} · {modal.维度名}</div>
+            <div className="fsb-msub">明细账 · {d.org_name || ''} · {d.period}</div></div>
+          <span className="fsb-x" onClick={closeModal} title="关闭">×</span>
         </div>
+        <div className="fsb-mbody">
         {mdBusy && <div className="loading">加载明细账…</div>}
         {!mdBusy && md && <>
-          <div className="banner" style={{ marginTop: 0, background: 'var(--bg-sub)', borderColor: 'var(--line)', color: 'var(--ink)' }}>
-            本期({d.period}) 期末余额 <b style={{ color: md['期末'] < 0 ? 'var(--red)' : undefined }}>{fmt(md['期末'])}</b> ＝ 期初 {fmt(md['期初'])} ＋ 本期借 {fmt(md['本期借方'])} － 本期贷 {fmt(md['本期贷方'])}
-            {md.detail && (md.detail.lines || []).some(l => l['开项']) && <span> · <span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>那几笔{Math.abs(md.detail['期初开项'] || 0) > 0.005 ? '＝期末里的本期新计提部分' : '的和＝期末（这笔余额的构成）'}</span>}
+          <div className={'fsb-hero' + ((md['期末'] || 0) < 0 ? ' neg' : '')}>
+            <span className="lbl">本期({d.period}) 期末余额</span>
+            <span className={'big' + ((md['期末'] || 0) < 0 ? ' neg' : '')}>{fmt(md['期末'])}</span>
+            <span className="eq">＝ 期初 <b>{fmt(md['期初'])}</b> ＋ 本期借 <b>{fmt(md['本期借方'])}</b> － 本期贷 <b>{fmt(md['本期贷方'])}</b></span>
+            {md.detail && (md.detail.lines || []).some(l => l['开项']) && <span className="hint"><span className="g">标绿「未核销」</span>那几笔{Math.abs(md.detail['期初开项'] || 0) > 0.005 ? '＝期末里的本期新计提部分' : '的和＝期末（这笔余额的构成）'}。</span>}
           </div>
-          {md.note && <div className="foot" style={{ margin: '6px 0' }}>{md.note}</div>}
+          {md.note && <div className="foot" style={{ margin: '8px 0 0' }}>{md.note}</div>}
           {(() => {
             const ls = (md.detail && md.detail.lines) || []
             const pages = Math.max(1, Math.ceil(ls.length / PAGE))
             const pg = Math.min(mpage, pages - 1)
-            return <>
-              <div style={{ overflowX: 'auto', marginTop: 8 }}>{ledgerTable(md.detail, ls.slice(pg * PAGE, (pg + 1) * PAGE), { gid: 'cur', opening: md['期初'], showOpening: pg === 0, offset: pg * PAGE })}</div>
+            return <div style={{ marginTop: 10 }}>{ledgerTable(md.detail, ls.slice(pg * PAGE, (pg + 1) * PAGE), { gid: 'cur', opening: md['期初'], showOpening: pg === 0, offset: pg * PAGE })}
               {pages > 1 && <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center', marginTop: 8, fontSize: 12.5 }}>
                 <button className="btn" disabled={pg <= 0} onClick={() => setMpage(pg - 1)}>上一页</button>
                 <span className="foot">第 {pg + 1} / {pages} 页 · 共 {ls.length} 笔</span>
                 <button className="btn" disabled={pg >= pages - 1} onClick={() => setMpage(pg + 1)}>下一页</button>
               </div>}
-            </>
+            </div>
           })()}
           {md._debug && <div style={{ marginTop: 8, padding: 8, background: 'var(--bg-sub)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>🔧 诊断（本期有发生却没匹配到凭证，截图发开发）：{'\n'}{JSON.stringify(md._debug, null, 2)}</div>}
           {d.source === 'kingdee' && md.detail && (Math.abs((md['本期借方'] || 0) - (md.detail['借合计'] || 0)) > 0.005 || Math.abs((md['本期贷方'] || 0) - (md.detail['贷合计'] || 0)) > 0.005) &&
@@ -344,49 +343,48 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
               ? <span>⚠ 期末里有 <b style={{ color: 'var(--amber)' }}>{fmt(md.detail['期初开项'])}</b> 来自<b>往期未核销的计提</b>（期初结转还挂着）—— 这部分才需要往前追。</span>
               : <span>✓ 期初 {fmt(md['期初'])} 已在本期<b style={{ color: 'var(--green)' }}>全部核销</b> —— 期末完全由本期新计提构成，不用追溯往期。</span>}
           </div>}
-          {md.detail && Math.abs(md.detail['期初开项'] || 0) > 0.005 && <div style={{ marginTop: 8 }}>
-            {!trace && <button className="btn" onClick={() => doTrace(modal.code, modal.dim)} disabled={traceBusy}>{traceBusy ? '追溯中…' : '↑ 追溯这 ' + fmt(md.detail['期初开项']) + ' 往期来源（逐期往前翻）'}</button>}
-            {trace && <div style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12, marginTop: 2 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>期初 {fmt(md['期初'])} 的来源 —— 逐期往前翻（期初 ＝ 上期期末）</div>
-              {trace.note && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}
+          {md.detail && Math.abs(md.detail['期初开项'] || 0) > 0.005 && <div style={{ marginTop: 10 }}>
+            {!trace && <button className="btn primary" onClick={() => doTrace(modal.code, modal.dim)} disabled={traceBusy}>{traceBusy ? '追溯中…' : '↑ 追溯这 ' + fmt(md.detail['期初开项']) + ' 往期来源（逐期往前翻）'}</button>}
+            {trace && <div className="fsb-trace">
               {(() => {
                 const periodsChrono = [...(trace.chain || [])].reverse().map(c => ({ ym: c.ym, lines: (c.detail && c.detail.lines) || [] }))
                   .concat([{ ym: d.period, lines: (md.detail && md.detail.lines) || [] }])
                 const startOpening = (trace.chain && trace.chain.length) ? trace.chain[trace.chain.length - 1]['期初'] : md['期初']
                 const comp = endComposition(periodsChrono, startOpening, md['期末'])
                 if (!comp.items.length) return null
-                const cell = { padding: '5px 8px', borderBottom: '1px solid var(--line)' }
-                return <div style={{ marginBottom: 14, background: 'var(--green-bg)', border: '1px solid var(--green-line)', borderRadius: 8, padding: '10px 12px' }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 2 }}>📌 期末 {fmt(md['期末'])} 的构成 —— 就是下面这 {comp.items.length} 笔还没核销的计提</div>
-                  <div className="foot" style={{ marginBottom: 8 }}>把追溯到的每一期逐笔串成一条时间线、跑一遍先进先出核销，剩下没被冲掉的就是它们（“仍挂”＝这笔到今天还没被核销的余额，全部加起来正好＝期末）。{!trace.reached_zero && ' ⚠ 更早的没追到底，最上面一行是更早结转的汇总。'}</div>
-                  <div style={{ overflowX: 'auto' }}>
-                    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', background: 'var(--bg)' }}>
+                return <div className="fsb-comp">
+                  <div className="ttl"><span className="pin">📌</span>期末 {fmt(md['期末'])} 的构成 —— 就是下面这 {comp.items.length} 笔还没核销的计提</div>
+                  <div className="desc">把追溯到的每一期逐笔串成一条时间线、跑一遍先进先出核销，剩下没被冲掉的就是它们（“仍挂”＝这笔到今天还没被核销的余额，全部加起来正好＝期末）。{!trace.reached_zero && <span className="warn"> ⚠ 更早的没追到底，最上面一行是更早结转的汇总。</span>}</div>
+                  <div className="fsb-scroll">
+                    <table className="fsb-tbl">
                       <thead><tr>{['月份', '凭证', '摘要', '原计提额', '仍挂（构成期末）'].map((h, hi) =>
-                        <th key={h} style={{ textAlign: hi >= 3 ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
+                        <th key={h} className={hi >= 3 ? 'r' : ''}>{h}</th>)}</tr></thead>
                       <tbody>
                         {comp.items.map((it, ii) => <tr key={ii}>
-                          <td style={{ ...cell, whiteSpace: 'nowrap' }}>{it.kind === '期初' ? (it.ym + ' 前') : it.ym}</td>
-                          <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: 600 }}>{it.kind === '期初' ? '更早结转' : it['凭证']}</td>
-                          <td style={cell}>{it.kind === '期初' ? `${it.ym} 之前挂着、至今未核销的更早计提（未再逐笔展开）` : it['摘要']}</td>
-                          <td style={{ ...cell, textAlign: 'right' }}>{it.kind === '期初' ? '—' : fmt(it['原额'])}</td>
-                          <td style={{ ...cell, textAlign: 'right', fontWeight: 700, color: it['仍挂'] < 0 ? 'var(--red)' : undefined }}>{fmt(it['仍挂'])}</td>
+                          <td style={{ whiteSpace: 'nowrap' }}>{it.kind === '期初' ? (it.ym + ' 前') : it.ym}</td>
+                          <td style={{ whiteSpace: 'nowrap', fontWeight: 600 }}>{it.kind === '期初' ? '更早结转' : it['凭证']}</td>
+                          <td>{it.kind === '期初' ? `${it.ym} 之前挂着、至今未核销的更早计提（未再逐笔展开）` : it['摘要']}</td>
+                          <td className="n">{it.kind === '期初' ? '—' : fmt(it['原额'])}</td>
+                          <td className={'n' + (it['仍挂'] < 0 ? ' neg' : '')} style={{ fontWeight: 700 }}>{fmt(it['仍挂'])}</td>
                         </tr>)}
-                        <tr><td colSpan={4} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700 }}>合计（＝期末余额）</td>
-                          <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700, color: comp['合计'] < 0 ? 'var(--red)' : undefined }}>{fmt(comp['合计'])}</td></tr>
+                        <tr className="sum"><td colSpan={4} className="r">合计（＝期末余额）</td>
+                          <td className={'n' + ((comp['合计'] || 0) < 0 ? ' neg' : '')}>{fmt(comp['合计'])}</td></tr>
                       </tbody>
                     </table>
                   </div>
                 </div>
               })()}
-              <div style={{ fontSize: 12.5, fontWeight: 600, margin: '2px 0 6px' }}>逐期明细（核对上面每一笔的来龙去脉）</div>
-              {(trace.chain || []).map((c, ci) => <div key={ci} style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 12.5, marginBottom: 4 }}><span style={{ fontWeight: 600 }}>{c.ym}</span> · 期末 {fmt(c['期末'])} ＝ 期初 {fmt(c['期初'])} ＋ 本期借 {fmt(c['本期借方'])} － 本期贷 {fmt(c['本期贷方'])}</div>
-                <div style={{ overflowX: 'auto' }}>{ledgerTable(c.detail, undefined, { gid: 'tr:' + c.ym, opening: c['期初'], showOpening: true, offset: 0 })}</div>
+              <div className="thd">逐期明细（核对上面每一笔的来龙去脉）· 期初 {fmt(md['期初'])} 逐期往前翻</div>
+              {(trace.note) && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}
+              {(trace.chain || []).map((c, ci) => <div key={ci} className="per">
+                <div className="plabel"><b>{c.ym}</b> · 期末 <b>{fmt(c['期末'])}</b> ＝ 期初 <b>{fmt(c['期初'])}</b> ＋ 本期借 <b>{fmt(c['本期借方'])}</b> － 本期贷 <b>{fmt(c['本期贷方'])}</b></div>
+                {ledgerTable(c.detail, undefined, { gid: 'tr:' + c.ym, opening: c['期初'], showOpening: true, offset: 0 })}
               </div>)}
               {trace.reached_zero && <div className="foot" style={{ color: 'var(--green)' }}>✓ 已追溯到期初为 0 —— 建账起点，到此为止。</div>}
             </div>}
           </div>}
         </>}
+        </div>
       </div>
     </div>}
   </div>)
