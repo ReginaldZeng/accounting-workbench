@@ -3577,7 +3577,11 @@ def fi_subject_balance(org: str = ""):
 
 @app.post("/api/fi-subject-balance/sync")
 def fi_subject_balance_sync(org: str = ""):
-    return _closed_block() or _fi_sbal_get(org, force=True)
+    blocked = _closed_block()
+    if blocked:
+        return blocked
+    _FISBAL_VCH.clear()                       # 强刷同时清序时账缓存
+    return _fi_sbal_get(org, force=True)
 
 
 def _fisbal_upload_path():
@@ -3626,13 +3630,20 @@ async def fi_subject_balance_upload(request: Request, org: str = ""):
     return _fisbal_check(org)
 
 
-def _fisbal_vouchers(y, p, org_name=""):
-    """取某期物流科目序时账逐笔（样例种子 / 金蝶按主体账簿名过滤）。"""
+_FISBAL_VCH: dict = {}   # 物流序时账缓存：(源,年,期,科目,账簿) -> rows。按被点科目单独查+缓存，避免每次下钻整段费用科目全拉（真机慢的根因）
+
+
+def _fisbal_vouchers(y, p, code, org_name=""):
+    """取某期【被下钻科目】序时账逐笔——只查该科目(prefix=code)，不再整段费用科目全拉；样例=种子。按科目缓存。"""
     if CFG["source"] != "kingdee":
         return S.sample_logi_vouchers()
-    rows = kc.fetch_gl_voucher_subjects(int(y), int(p), sb.LOGI_PREFIXES)
+    key = (CFG["source"], int(y), int(p), str(code), org_name or "")
+    if key in _FISBAL_VCH:
+        return _FISBAL_VCH[key]
+    rows = kc.fetch_gl_voucher_subjects(int(y), int(p), (str(code),))
     if org_name:
         rows = [r for r in rows if str(r.get("账簿") or "") == org_name]
+    _FISBAL_VCH[key] = rows
     return rows
 
 
@@ -3647,7 +3658,7 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = ""):
             "期初": (row or {}).get("期初"), "本期借方": (row or {}).get("本期借方"),
             "本期贷方": (row or {}).get("本期贷方"), "期末": (row or {}).get("期末")}
     try:
-        vrows = _fisbal_vouchers(CFG["year"], CFG["period"],
+        vrows = _fisbal_vouchers(CFG["year"], CFG["period"], code,
                                  sys_.get("org_name") if CFG["source"] == "kingdee" else "")
     except Exception as e:                                       # 金蝶未取数/接口异常 → 只给勾稽拆解，不给逐笔
         return {**base, "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
@@ -3694,7 +3705,7 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
             prows = sb.normalize_logi_rows(
                 kc.fetch_subject_balance_full(yy, pp, org_code, cur=cur))
             pr = next((r for r in prows if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
-            det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, org_name), code, dim)
+            det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, code, org_name), code, dim)
             beg = (pr or {}).get("期初")
             chain.append({"ym": "%04d-%02d" % (yy, pp), "期初": beg, "本期借方": (pr or {}).get("本期借方"),
                           "本期贷方": (pr or {}).get("本期贷方"), "期末": (pr or {}).get("期末"), "detail": det})

@@ -20,9 +20,10 @@ ITEMS = ("期初", "本期借方", "本期贷方", "期末")
 #   · 暂估进项税 = 精确明细科目 2221.01.07（挂供应商）  · 其他应付款—供应商往来 = 2241.02（挂供应商）
 #   · 费用 = 6601/6604/6401/5101，但物流部分靠【费用项目维度】区分（出库运费/入库运费/货物仓储费/搬运费/研发外购）
 # ⚠ 不能用 2221/2241 整段前缀——那会把整棵应交税费/其他应付款树都捞进来（真机 554 行即此坑，V2.590 修）。
-LOGI_EXACT = ("2221.01.07", "2241.02")               # 精确明细科目（供应商维度），任意维度都收
+LOGI_EXACT = ("2221.01.07", "2241.02")               # 精确明细科目
 LOGI_FEE_PREFIXES = ("5101", "6401", "6601", "6604")  # 费用科目：物流部分靠费用项目维度区分
-LOGI_FEE_ITEMS = ("运费", "仓储", "搬运", "研发外购")   # 物流费用项目关键字（在维度名里匹配）
+LOGI_FEE_ITEMS = ("运费", "仓储", "搬运", "研发外购")   # 物流费用项目关键字（费用科目维度里匹配）
+LOGI_CAT_KEYWORDS = ("物流", "运输", "运费", "仓储", "搬运")   # 2241.02 费用归属为物流类的关键字
 # 上传解析（按科目汇总、拿不到维度）用的前缀集：精确到 2221.01.07/2241.02，费用段仍按科目前缀
 LOGI_PREFIXES = ("2221.01.07", "2241.02", "5101", "6401", "6601", "6604")
 LOGI_CAT = [
@@ -38,13 +39,21 @@ def cat_of_logi(code):
     return ""
 
 
+def _last_seg(dim_name):
+    return str(dim_name or "").rsplit("/", 1)[-1]     # 维度名最后一段＝费用归属/费用项目（避免匹配到供应商名）
+
+
 def is_logi(code, dim_name=""):
-    """某(科目,维度)是否物流相关：精确科目全收；费用科目须维度名命中物流费用项目关键字。"""
-    code, dn = str(code or ""), str(dim_name or "")
-    if code.startswith(LOGI_EXACT):
+    """某(科目,维度)是否物流相关：
+    2221.01.07 暂估进项税＝物流计提专用，全收；2241.02 其他应付款＝全供应商共用，只留费用归属为物流类；
+    6601/6604/6401/5101 费用＝只留费用项目为物流类。"""
+    code = str(code or "")
+    if code.startswith("2221.01.07"):
         return True
-    if code.startswith(LOGI_FEE_PREFIXES) and any(k in dn for k in LOGI_FEE_ITEMS):
-        return True
+    if code.startswith("2241.02"):
+        return any(k in _last_seg(dim_name) for k in LOGI_CAT_KEYWORDS)
+    if code.startswith(LOGI_FEE_PREFIXES):
+        return any(k in str(dim_name or "") for k in LOGI_FEE_ITEMS)
     return False
 
 

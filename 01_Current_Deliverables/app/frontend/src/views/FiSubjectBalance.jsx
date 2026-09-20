@@ -16,6 +16,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   const [openKey, setOpenKey] = useState(null), [detail, setDetail] = useState(null), [detailBusy, setDetailBusy] = useState(false)
   const [trace, setTrace] = useState(null), [traceBusy, setTraceBusy] = useState(false)
   const [orgs, setOrgs] = useState([]), [org, setOrg] = useState('')
+  const [q, setQ] = useState('')
   const fileRef = useRef(null)
   const drill = async (code, dimc) => {
     const key = code + '|' + dimc
@@ -80,9 +81,11 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   if (!d) return <div className="loading">加载中…</div>
 
   const rows = d.rows || []
-  const codes = [...new Set(rows.map(r => r['科目编码']))]
+  const ql = q.trim().toLowerCase()
+  const fRows = ql ? rows.filter(r => [r['科目编码'], r['科目名称'], r['账户'], r['科目大类']].join(' ').toLowerCase().includes(ql)) : rows
+  const codes = [...new Set(fRows.map(r => r['科目编码']))]
   const groups = codes.map(c => {
-    const rs = rows.filter(r => r['科目编码'] === c)
+    const rs = fRows.filter(r => r['科目编码'] === c)
     const sum = k => rs.reduce((s, r) => s + (r[k] || 0), 0)
     return { code: c, name: rs[0]['科目名称'], cat: rs[0]['科目大类'], rows: rs, 期初: sum('期初'), 借: sum('本期借方'), 贷: sum('本期贷方'), 期末: sum('期末') }
   })
@@ -162,7 +165,12 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
       </div>
 
       {/* 系统数主表：按科目分组，维度明细 + 科目小计 + 总计。维度行可点开下钻。 */}
-      <div className="foot" style={{ marginTop: 10 }}>👉 点开任意<b>维度行</b>，看这笔余额是怎么构成的：期末＝期初＋本期借－本期贷 的勾稽拆解 + 本期发生的逐笔凭证（日期/凭证号/摘要/借贷/制单人）。</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 模糊搜索：科目编码 / 名称、供应商、费用项目…"
+          style={{ flex: '1 1 300px', maxWidth: 440, height: 34, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 12px', fontSize: 13 }} />
+        {ql && <span className="foot">筛出 {fRows.length} 行 / 共 {rows.length} 行<span onClick={() => setQ('')} style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }}>清除</span></span>}
+      </div>
+      <div className="foot" style={{ marginTop: 8 }}>👉 点开任意<b>维度行</b>，看这笔余额是怎么构成的：期末＝期初＋本期借－本期贷 的勾稽拆解 + 本期发生的逐笔凭证（日期/凭证号/摘要/借贷/制单人）。</div>
       <div className="tbl-wrap"><table style={{ minWidth: 920 }}>
         <thead><tr>{['科目 / 维度', '大类', '期初余额', '本期借方', '本期贷方', '期末余额'].map((h, i) =>
           <th className="th" key={h} style={i >= 2 ? { textAlign: 'right' } : null}>{h}</th>)}</tr></thead>
@@ -223,7 +231,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('贷'))}</td>
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('期末'))}</td>
           </tr>}
-          {groups.length === 0 && <tr><td colSpan="6" className="muted">系统侧暂无物流科目数据。样例模式已内置演示数据；金蝶模式请用上方「上传」解析核对。</td></tr>}
+          {groups.length === 0 && <tr><td colSpan="6" className="muted">{ql ? `没有匹配「${q}」的科目/维度。` : '系统侧暂无物流科目数据。样例模式已内置演示数据；金蝶模式请用上方「上传」解析核对。'}</td></tr>}
         </tbody>
       </table></div>
       <div className="foot">口径说明：余额取【借 − 贷】有符号口径，费用类为正、其他应付款（负债）为负，勾稽恒等式 期末 = 期初 + 本期借方 − 本期贷方 恒成立。物流科目段 = 物流计提工具入账落到的科目（销售费用出库运费/仓储费、主营业务成本/制造费用入库运费、研发费用搬运费、其他应付款—供应商往来、暂估进项税）。</div>
