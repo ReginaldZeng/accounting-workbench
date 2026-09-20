@@ -35,7 +35,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   }
   // 明细账小表：滚动余额 + 未核销开项高亮（构成期末的那几笔标绿）。showLines 传分页切片；不传=全部（追溯各期用）。
   const ledgerTable = (det, showLines) => {
-    if (!(det && det.lines && det.lines.length > 0)) return <div className="foot">本期无逐笔凭证。</div>
+    if (!(det && det.lines && det.lines.length > 0)) return <div className="foot">本期无逐笔凭证 —— 本期该维度没有新增计提、也没有核销（本期借/贷为 0），期末余额全部是往期结转下来的。</div>
     const ls = showLines || det.lines
     const cell = { padding: '5px 8px', borderBottom: '1px solid var(--line)' }
     return (

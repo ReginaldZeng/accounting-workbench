@@ -3704,8 +3704,11 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = "", full
            else sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", ""),
                                         opening=(row or {}).get("期初", 0)))
     out = {**base, "detail": det, "full": bool(full)}
-    # 结构化维度还没命中(结构命中==0，当前靠摘要兜底) → 附诊断：逐个试核算维度槽，看供应商在哪个槽（据此根治）
-    if CFG["source"] == "kingdee" and not full and det.get("结构命中", 0) == 0:
+    # 诊断只在【本期确有发生额、却一笔都没匹配到(笔数=0)】时才附——这才是"本期有发生却没匹配到凭证"。
+    # 本期借=贷=0(本户本期没动、期末纯是往期结转)时笔数天然=0，不是异常，不弹诊断（否则自相矛盾吓人）。
+    # 笔数>0(哪怕靠摘要兜底命中)说明明细账已能呈现，也不弹诊断；真有漏归则由前端"逐笔合计对不上"横幅提示。
+    _bb, _bc = abs(base.get("本期借方") or 0), abs(base.get("本期贷方") or 0)
+    if CFG["source"] == "kingdee" and not full and (_bb > 0.005 or _bc > 0.005) and det.get("笔数", 0) == 0:
         try:
             out["_debug"] = {"结构化状态": "结构化维度未命中，当前逐笔按摘要兜底匹配；下面各槽探测供定位供应商在哪个槽",
                              "我匹配的科目": code, "我匹配的维度编码": dim, "维度名": (row or {}).get("账户", ""),
