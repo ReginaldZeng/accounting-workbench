@@ -3672,7 +3672,7 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = ""):
     except Exception as e:                                       # 金蝶未取数/接口异常 → 只给勾稽拆解，不给逐笔
         return {**base, "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
                 "note": "序时账取数失败：%s" % e}
-    det = sb.build_voucher_lines(vrows, code, dim)
+    det = sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", ""))
     out = {**base, "detail": det}
     if CFG["source"] == "kingdee" and det.get("笔数", 0) == 0:      # 有科目却没匹配到凭证 → 附诊断，供真机对字段
         try:
@@ -3713,6 +3713,9 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
     # 金蝶：按主体逐期往前翻——每期取该主体《科目余额表》该(科目,维度)行 + 该期序时账逐笔，直到期初为0/本年年初/封顶。
     sys_ = _fi_sbal_get(org)
     org_code, org_name = sys_.get("org") or org, sys_.get("org_name") or ""
+    _seed = next((r for r in sys_.get("rows", [])
+                  if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
+    dim_name = (_seed or {}).get("账户", "")          # 供应商名，用于序时账无结构化维度时按摘要匹配
     try:
         cur = next((o.get("cur") for o in _fisbal_orgs() if o["org"] == org_code), None)
     except Exception:
@@ -3725,7 +3728,7 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
             prows = sb.normalize_logi_rows(
                 kc.fetch_subject_balance_full(yy, pp, org_code, cur=cur))
             pr = next((r for r in prows if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
-            det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, code, org_name), code, dim)
+            det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, code, org_name), code, dim, dim_name)
             beg = (pr or {}).get("期初")
             entry = {"ym": "%04d-%02d" % (yy, pp), "期初": beg, "本期借方": (pr or {}).get("本期借方"),
                      "本期贷方": (pr or {}).get("本期贷方"), "期末": (pr or {}).get("期末"), "detail": det}

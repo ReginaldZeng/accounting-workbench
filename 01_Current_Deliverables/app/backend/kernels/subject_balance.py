@@ -332,11 +332,26 @@ def qc_rows(rows):
             "全部通过": n_ok == len(out) and len(out) > 0, "异常": bad}
 
 
-def build_voucher_lines(voucher_rows, code, dim):
-    """下钻反查：从序时账逐笔挑出某 (科目编码, 维度编码) 的凭证行 → 规整。
-    样例 dict 与金蝶 fetch_gl_voucher_subjects 两套字段名都吃。
-    返回 {lines:[{日期,凭证,摘要,借,贷,制单人}], 借合计, 贷合计, 笔数}。"""
+_SUP_SUFFIXES = ("供应链管理有限公司", "供应链有限责任公司", "供应链有限公司", "物流有限公司",
+                 "有限责任公司", "股份有限公司", "有限公司", "供应链", "集团")
+
+
+def supplier_core(name):
+    """供应商核心名：取 '/' 前一段（去掉费用归属后缀），再去掉公司后缀，用于在摘要里模糊匹配。
+    如 '上海顺丰冷运供应链有限公司/物流运输服务' → '上海顺丰冷运'；'顺丰速运有限公司' → '顺丰速运'。"""
+    s = str(name or "").split("/")[0].strip()
+    for suf in _SUP_SUFFIXES:
+        if s.endswith(suf) and len(s) > len(suf):
+            return s[:-len(suf)]
+    return s
+
+
+def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
+    """下钻反查：从序时账逐笔挑出某 (科目, 维度) 的凭证行 → 规整。样例 dict 与金蝶 fetch_gl_voucher_subjects 都吃。
+    维度归属：序时账有结构化维度编码(FF100002)就按编码；金蝶部分科目该字段为空(如2221.01.07 暂估进项税)，
+    则退化为【供应商核心名在摘要里匹配】(dim_name 传维度名/供应商名)。返回 {lines,借合计,贷合计,笔数}。"""
     code, dim = str(code or ""), str(dim or "")
+    core = supplier_core(dim_name)
 
     def gv(r, *keys):
         for k in keys:
@@ -347,8 +362,17 @@ def build_voucher_lines(voucher_rows, code, dim):
     lines, td, tc = [], 0.0, 0.0
     for r in voucher_rows:
         rc = str(gv(r, "科目编码") or "")
-        rd = str(gv(r, "维度编码", "FDetailID.FF100002.FNumber") or "")
-        if rc != code or rd != dim:
+        if rc != code:
+            continue
+        rd = str(gv(r, "维度编码", "FDetailID.FF100002.FNumber") or "").strip()
+        memo = str(gv(r, "摘要", "FEXPLANATION") or "")
+        if rd:                          # 有结构化维度 → 按维度编码严格匹配（样例、及维度非空的科目）
+            if rd != dim:
+                continue
+        elif core:                      # 无结构化维度 → 按供应商核心名在摘要里匹配（2221.01.07/2241.02 等）
+            if core not in memo:
+                continue
+        else:
             continue
         d, c = to_f(gv(r, "借", "FDEBIT")), to_f(gv(r, "贷", "FCREDIT"))
         grp = str(gv(r, "凭证字", "FVOUCHERGROUPID.FName") or "")
