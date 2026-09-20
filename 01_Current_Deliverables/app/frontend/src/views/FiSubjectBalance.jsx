@@ -233,7 +233,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
         {!mdBusy && md && <>
           <div className="banner" style={{ marginTop: 0, background: 'var(--bg-sub)', borderColor: 'var(--line)', color: 'var(--ink)' }}>
             本期({d.period}) 期末余额 <b style={{ color: md['期末'] < 0 ? 'var(--red)' : undefined }}>{fmt(md['期末'])}</b> ＝ 期初 {fmt(md['期初'])} ＋ 本期借 {fmt(md['本期借方'])} － 本期贷 {fmt(md['本期贷方'])}
-            {md.detail && (md.detail.lines || []).some(l => l['开项']) && <span> · <span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>那几笔的和＝期末（这笔余额的构成）</span>}
+            {md.detail && (md.detail.lines || []).some(l => l['开项']) && <span> · <span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>那几笔{Math.abs(md.detail['期初开项'] || 0) > 0.005 ? '＝期末里的本期新计提部分' : '的和＝期末（这笔余额的构成）'}</span>}
           </div>
           {md.note && <div className="foot" style={{ margin: '6px 0' }}>{md.note}</div>}
           {(() => {
@@ -252,8 +252,13 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
           {md._debug && <div style={{ marginTop: 8, padding: 8, background: 'var(--bg-sub)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>🔧 诊断（本期有发生却没匹配到凭证，截图发开发）：{'\n'}{JSON.stringify(md._debug, null, 2)}</div>}
           {d.source === 'kingdee' && md.detail && (Math.abs((md['本期借方'] || 0) - (md.detail['借合计'] || 0)) > 0.005 || Math.abs((md['本期贷方'] || 0) - (md.detail['贷合计'] || 0)) > 0.005) &&
             <div className="banner err" style={{ marginTop: 8 }}>逐笔合计与余额表本期发生对不上：借 差 {fmt((md['本期借方'] || 0) - (md.detail['借合计'] || 0))}、贷 差 {fmt((md['本期贷方'] || 0) - (md.detail['贷合计'] || 0))} —— 多半是某笔凭证摘要没写供应商名、没归进来。</div>}
-          {Math.abs(md['期初'] || 0) > 0.005 && <div style={{ marginTop: 12 }}>
-            {!trace && <button className="btn" onClick={() => doTrace(modal.code, modal.dim)} disabled={traceBusy}>{traceBusy ? '追溯中…' : '↑ 追溯期初 ' + fmt(md['期初']) + ' 的来源（逐期往前翻）'}</button>}
+          {md.detail && Math.abs(md['期初'] || 0) > 0.005 && <div className="foot" style={{ marginTop: 10 }}>
+            {Math.abs(md.detail['期初开项'] || 0) > 0.005
+              ? <span>⚠ 期末里有 <b style={{ color: 'var(--amber)' }}>{fmt(md.detail['期初开项'])}</b> 来自<b>往期未核销的计提</b>（期初结转还挂着）—— 这部分才需要往前追。</span>
+              : <span>✓ 期初 {fmt(md['期初'])} 已在本期<b style={{ color: 'var(--green)' }}>全部核销</b> —— 期末完全由本期新计提构成，不用追溯往期。</span>}
+          </div>}
+          {md.detail && Math.abs(md.detail['期初开项'] || 0) > 0.005 && <div style={{ marginTop: 8 }}>
+            {!trace && <button className="btn" onClick={() => doTrace(modal.code, modal.dim)} disabled={traceBusy}>{traceBusy ? '追溯中…' : '↑ 追溯这 ' + fmt(md.detail['期初开项']) + ' 往期来源（逐期往前翻）'}</button>}
             {trace && <div style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12, marginTop: 2 }}>
               <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>期初 {fmt(md['期初'])} 的来源 —— 逐期往前翻（期初 ＝ 上期期末）</div>
               {trace.note && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}

@@ -371,22 +371,26 @@ def _annotate_ledger(lines, opening):
         ln["开项"] = False
     ending = bal
     debit_bal = ending >= 0                 # 余额方向：借方余额→借=计提/贷=核销；贷方余额→反过来
+    sign = 1 if debit_bal else -1           # 把"余额方向的净变动"统一：正=计提(开新笔)、负=核销(冲减)
     queue = []                              # 计提队列 [{'ln':行或None(期初), 'remain':未核销额}]
-    if (opening > 0 and debit_bal) or (opening < 0 and not debit_bal):
-        queue.append({"ln": None, "remain": abs(opening)})
+    if sign * opening > 0.005:              # 期初若与余额同向，作为最早一笔"计提"入队
+        queue.append({"ln": None, "remain": round(abs(opening), 2)})
     for ln in lines:
-        accrue = (ln.get("借") or 0) if debit_bal else (ln.get("贷") or 0)
-        clear = (ln.get("贷") or 0) if debit_bal else (ln.get("借") or 0)
-        if accrue > 0.005:
-            queue.append({"ln": ln, "remain": round(accrue, 2)})
-        rem = clear
-        while rem > 0.005 and queue:
-            head = queue[0]
-            take = min(head["remain"], rem)
-            head["remain"] = round(head["remain"] - take, 2)
-            rem = round(rem - take, 2)
-            if head["remain"] <= 0.005:
-                queue.pop(0)
+        # 按余额方向取每笔净变动 delta；同向(>0)=计提、反向(<0)=核销 FIFO 冲减。
+        # 关键：红冲/负数分录会让 delta 反向，从而正确去冲减期初/前面的计提——
+        # 老写法按借/贷两列各管各的，负数借红冲进不了核销路径（诚煜期初开项会算错），此为根治。
+        delta = round(sign * ((ln.get("借") or 0) - (ln.get("贷") or 0)), 2)
+        if delta > 0.005:
+            queue.append({"ln": ln, "remain": delta})
+        elif delta < -0.005:
+            rem = -delta
+            while rem > 0.005 and queue:
+                head = queue[0]
+                take = min(head["remain"], rem)
+                head["remain"] = round(head["remain"] - take, 2)
+                rem = round(rem - take, 2)
+                if head["remain"] <= 0.005:
+                    queue.pop(0)
     open_begin = 0.0
     for q in queue:
         if q["ln"] is None:
