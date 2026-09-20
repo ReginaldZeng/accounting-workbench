@@ -78,13 +78,16 @@ export const refreshReportDashboard = () => j('/api/report/dashboard/refresh', {
 export const syncSubjectBalance = () => j('/api/subject-balance/sync', {method:'POST'})
 export const getSubjectCheck = () => j('/api/subject-balance/check')
 export const uploadSubjectReport = (file) => j('/api/subject-balance/upload', {method:'POST', body:file})
-// 科目余额解析（物流科目段，V2.588）：系统取数 + 上传解析 + 质检勾稽 + 逐科目核对
-export const getFiSubjectBalance = () => j('/api/fi-subject-balance')
-export const syncFiSubjectBalance = () => j('/api/fi-subject-balance/sync', {method:'POST'})
-export const getFiSubjectCheck = () => j('/api/fi-subject-balance/check')
-export const uploadFiSubjectReport = (file) => j('/api/fi-subject-balance/upload', {method:'POST', body:file})
-export const getFiSubjectDetail = (code, dim) => j('/api/fi-subject-balance/detail?code=' + encodeURIComponent(code) + '&dim=' + encodeURIComponent(dim))
-export const getFiSubjectTrace = (code, dim) => j('/api/fi-subject-balance/trace?code=' + encodeURIComponent(code) + '&dim=' + encodeURIComponent(dim))
+// 科目余额解析（物流科目段，V2.588；V2.589 接金蝶真数据·带主体 org）：系统取数 + 上传解析 + 质检勾稽 + 逐科目核对 + 下钻 + 追溯
+const _fiq = (org) => org ? ('?org=' + encodeURIComponent(org)) : ''
+const _fiq2 = (code, dim, org) => '?code=' + encodeURIComponent(code) + '&dim=' + encodeURIComponent(dim) + (org ? '&org=' + encodeURIComponent(org) : '')
+export const getFiSubjectOrgs = () => j('/api/fi-subject-balance/orgs')
+export const getFiSubjectBalance = (org) => j('/api/fi-subject-balance' + _fiq(org))
+export const syncFiSubjectBalance = (org) => j('/api/fi-subject-balance/sync' + _fiq(org), {method:'POST'})
+export const getFiSubjectCheck = (org) => j('/api/fi-subject-balance/check' + _fiq(org))
+export const uploadFiSubjectReport = (file, org) => j('/api/fi-subject-balance/upload' + _fiq(org), {method:'POST', body:file})
+export const getFiSubjectDetail = (code, dim, org) => j('/api/fi-subject-balance/detail' + _fiq2(code, dim, org))
+export const getFiSubjectTrace = (code, dim, org) => j('/api/fi-subject-balance/trace' + _fiq2(code, dim, org))
 export const getWealthRecon = () => j('/api/wealth-recon')
 export const syncWealthRecon = () => j('/api/wealth-recon/sync', {method:'POST'})
 export const refreshKingdee = () => j('/api/kingdee/refresh', {method:'POST'})

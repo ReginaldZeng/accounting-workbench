@@ -2,7 +2,7 @@
 // 科目余额表 · 解析与核对（物流科目段）：财务报表下的独立页——科目余额这笔数据的“生产/落地入口”。
 // 系统取数(金蝶报表口径，样例先种子物流分录) + 上传解析(泛化认列，全科目容错) + 质检勾稽(期末=期初+借-贷) + 逐科目核对。
 import React, { useEffect, useState, useRef } from 'react'
-import { getFiSubjectBalance, syncFiSubjectBalance, getFiSubjectCheck, uploadFiSubjectReport, getFiSubjectDetail, getFiSubjectTrace } from '../api.js'
+import { getFiSubjectOrgs, getFiSubjectBalance, syncFiSubjectBalance, getFiSubjectCheck, uploadFiSubjectReport, getFiSubjectDetail, getFiSubjectTrace } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 let _cache = null
@@ -15,16 +15,17 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   const [showAll, setShowAll] = useState(false)
   const [openKey, setOpenKey] = useState(null), [detail, setDetail] = useState(null), [detailBusy, setDetailBusy] = useState(false)
   const [trace, setTrace] = useState(null), [traceBusy, setTraceBusy] = useState(false)
+  const [orgs, setOrgs] = useState([]), [org, setOrg] = useState('')
   const fileRef = useRef(null)
   const drill = async (code, dimc) => {
     const key = code + '|' + dimc
     if (openKey === key) { setOpenKey(null); setDetail(null); setTrace(null); return }
     setOpenKey(key); setDetail(null); setTrace(null); setDetailBusy(true)
-    try { setDetail(await getFiSubjectDetail(code, dimc)) } catch (e) { setDetail({ ok: false, note: '取明细失败：' + e.message }) } finally { setDetailBusy(false) }
+    try { setDetail(await getFiSubjectDetail(code, dimc, org)) } catch (e) { setDetail({ ok: false, note: '取明细失败：' + e.message }) } finally { setDetailBusy(false) }
   }
   const doTrace = async (code, dimc) => {
     setTraceBusy(true)
-    try { setTrace(await getFiSubjectTrace(code, dimc)) } catch (e) { setTrace({ ok: false, note: '追溯失败：' + e.message }) } finally { setTraceBusy(false) }
+    try { setTrace(await getFiSubjectTrace(code, dimc, org)) } catch (e) { setTrace({ ok: false, note: '追溯失败：' + e.message }) } finally { setTraceBusy(false) }
   }
   // 逐笔凭证小表（本期下钻 / 追溯历史期共用）
   const voucherTable = (det) => (det && det.lines && det.lines.length > 0) ? (
@@ -46,19 +47,33 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
       </tbody>
     </table>
   ) : <div className="foot">本期无逐笔凭证。</div>
+  const loadFor = async (o) => {
+    setOpenKey(null); setDetail(null); setTrace(null)
+    try { const x = await getFiSubjectBalance(o); _cache = x; setD(x) } catch (e) {}
+    try { setChk(await getFiSubjectCheck(o)) } catch (e) {}
+  }
   useEffect(() => {
-    getFiSubjectBalance().then(x => { _cache = x; setD(x) }).catch(() => {})
-    getFiSubjectCheck().then(setChk).catch(() => {})
+    let live = true
+    getFiSubjectOrgs().then(r => {
+      if (!live) return
+      const list = (r && r.orgs) || []
+      setOrgs(list)
+      const o = list.length ? list[0].org : ''
+      setOrg(o)
+      loadFor(o)
+    }).catch(() => { setOrg(''); loadFor('') })
+    return () => { live = false }
   }, [cfg.source, cfg.year, cfg.period])
+  const onOrg = (o) => { setOrg(o); setD(null); loadFor(o) }
   const sync = async () => {
     setBusy(true)
-    try { const x = await syncFiSubjectBalance(); _cache = x; setD(x); const c = await getFiSubjectCheck(); setChk(c) } finally { setBusy(false) }
+    try { const x = await syncFiSubjectBalance(org); _cache = x; setD(x); setOpenKey(null); setDetail(null); setTrace(null); setChk(await getFiSubjectCheck(org)) } finally { setBusy(false) }
   }
   const upload = async (f) => {
     if (!f) return
     setUpBusy(true); setUpMsg('')
     try {
-      const r = await uploadFiSubjectReport(f)
+      const r = await uploadFiSubjectReport(f, org)
       if (r.ok) { setChk(r) } else { setUpMsg(r.msg || '解析失败') }
     } catch (e) { setUpMsg('上传失败：' + e.message) } finally { setUpBusy(false); if (fileRef.current) fileRef.current.value = '' }
   }
@@ -82,14 +97,18 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
       <div><div className="h-title">科目余额表 · 解析与核对（物流）</div>
         <div className="h-sub">物流相关科目段：销售费用 6601 / 研发费用 6604 / 主营业务成本 6401 / 制造费用 5101 · 其他应付款 2241 · 应交税费—进项税 2221 —— 系统取数 + 手工上传两条路都可核对</div></div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        {orgs.length > 0 && <select value={org} onChange={e => onOrg(e.target.value)} title="选择主体（账簿）"
+          style={{ height: 32, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 8px', maxWidth: 240, fontSize: 13 }}>
+          {orgs.map(o => <option key={o.org} value={o.org}>{o.org_name || o.org}</option>)}
+        </select>}
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
         <button className="btn primary" onClick={sync} disabled={busy}>{busy ? '取数中…' : '从金蝶刷新'}</button>
       </div>
     </div>
     <div className="body">
       {d.error && <div className="banner err">金蝶取数失败：{d.error}</div>}
-      {d['系统取数未接'] && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', borderColor: 'var(--amber-line)' }}>{d.note}</div>}
-      <div className="foot">数据来源：{d.source === 'kingdee' ? '金蝶《科目余额表》报表接口（物流科目段，借−贷有符号口径）' : (d.note || '样例数据')} · {d.period} · 更新于 {d.updated_at}</div>
+      {d.note && d.source === 'kingdee' && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', borderColor: 'var(--amber-line)' }}>{d.note}</div>}
+      <div className="foot">数据来源：{d.source === 'kingdee' ? '金蝶《科目余额表》报表接口（物流科目段，借−贷有符号口径）' : (d.note || '样例数据')} · 主体 {d.org_name || '—'} · {d.period} · 更新于 {d.updated_at}</div>
 
       {/* 质检勾稽：逐科目 期末 = 期初 + 本期借方 − 本期贷方 */}
       {qc && qc['行数'] > 0 && <div className={'banner' + (qc['全部通过'] ? '' : ' err')} style={qc['全部通过'] ? { marginTop: 8, background: 'var(--green-bg)', color: 'var(--green)', borderColor: 'var(--green-line)' } : { marginTop: 8 }}>

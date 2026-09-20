@@ -3511,36 +3511,81 @@ async def subject_balance_upload(request: Request):
     return _sbal_check()
 
 
-# ---------------- 科目余额解析（物流科目段）：系统取数 + 上传解析 + 质检勾稽 + 逐科目核对（V2.588）----------------
+# ---------------- 科目余额解析（物流科目段）：系统取数 + 上传解析 + 质检勾稽 + 逐科目核对 + 下钻反查凭证 + 期初追溯 ----------------
 # 财务报表下的独立页：科目余额表这笔数据的“生产/落地入口”。先切物流相关科目段（费用6601/6604/6401/5101 + 应付2241 + 进项税2221）。
 # 余额一律取【借−贷】有符号口径 → 勾稽恒等式 期末=期初+本期借−本期贷 恒成立，资产/费用为正、负债为负。
-def _fi_subject_balance():
+# 金蝶真数据（V2.589 接入）：主体清单复用报表导出同源 kc.fetch_fin_report_list（已按本位币去重）；
+#   某主体全科目余额表 kc.fetch_subject_balance_full 筛物流；下钻/追溯逐笔取序时账 kc.fetch_gl_voucher_subjects（按主体账簿名过滤）。
+_FISBAL_TRACE_MAX = 12   # 期初逐期追溯：最多往前翻的期数（到期初为0或本会计年度期初亦停），防越翻越久
+
+
+def _fisbal_orgs():
+    """物流科目页的主体清单。样例=单一占位；金蝶=复用报表清单（已按本位币去重）。"""
+    if CFG["source"] != "kingdee":
+        return [{"org": "SAMPLE", "org_name": "样例·深圳市星期零", "cur": "人民币"}]
+    return [{"org": o["org"], "org_name": o["org_name"], "cur": o.get("cur")}
+            for o in kc.fetch_fin_report_list(int(CFG["year"]), int(CFG["period"]))]
+
+
+@app.get("/api/fi-subject-balance/orgs")
+def fi_subject_balance_orgs():
+    try:
+        return {"ok": True, "orgs": _fisbal_orgs()}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)[:300], "orgs": []}
+
+
+def _fi_subject_balance(org=""):
     base = {"source": CFG["source"], "period": _period_str(), "updated_at": _now(), "scope": "物流相关科目"}
     if CFG["source"] != "kingdee":
         rows = sb.build_rows_logi_sample(S.sample_subject_balance_logi())
-        return {**base, "rows": rows, "qc": sb.qc_rows(rows), "note": "样例数据（种子物流计提分录）"}
-    # 金蝶实时全科目取数（物流）需按主体走《科目余额表》报表接口(kc.fetch_subject_balance_full)，
-    # 与四类资金科目那套“取数总闸一次定格”模型不同（后者只抓 1001/1002/1012/1101）。原型阶段先接上传核对。
-    return {**base, "rows": [], "qc": sb.qc_rows([]), "系统取数未接": True,
-            "note": "金蝶物流科目取数接线中：本期请用下方「上传金蝶导出的科目余额表」做解析与质检。"}
+        return {**base, "org": "SAMPLE", "org_name": "样例·深圳市星期零",
+                "rows": rows, "qc": sb.qc_rows(rows), "note": "样例数据（种子物流计提分录）"}
+    try:
+        lst = _fisbal_orgs()
+    except kc.KingdeeError as e:
+        return {**base, "org": org, "rows": [], "qc": sb.qc_rows([]), "error": str(e)}
+    if not lst:
+        return {**base, "org": org, "rows": [], "qc": sb.qc_rows([]),
+                "note": "本期金蝶无可取主体（该期财务报表未上报？）"}
+    pick = next((o for o in lst if o["org"] == org), lst[0])
+    try:
+        raw = kc.fetch_subject_balance_full(int(CFG["year"]), int(CFG["period"]), pick["org"], cur=pick.get("cur"))
+    except kc.KingdeeError as e:
+        return {**base, "org": pick["org"], "org_name": pick["org_name"],
+                "rows": [], "qc": sb.qc_rows([]), "error": str(e)}
+    rows = sb.normalize_full_rows(raw, sb.LOGI_PREFIXES, sb.cat_of_logi)
+    return {**base, "org": pick["org"], "org_name": pick["org_name"], "rows": rows, "qc": sb.qc_rows(rows)}
+
+
+def _fi_sbal_get(org="", force=False):
+    """按 (数据源, 年, 期, 主体) 缓存的系统取数（金蝶报表口径较重，缓存到 /sync 或换主体/期）。"""
+    key = (CFG["source"], CFG["year"], CFG["period"], org or "")
+    if not force and key in _FISBAL_CACHE:
+        d = dict(_FISBAL_CACHE[key]); d["cached"] = True
+        return d
+    d = _fi_subject_balance(org)
+    _FISBAL_CACHE[key] = d
+    out = dict(d); out["cached"] = False
+    return out
 
 
 @app.get("/api/fi-subject-balance")
-def fi_subject_balance():
-    return _cache_get(_FISBAL_CACHE, _fi_subject_balance)
+def fi_subject_balance(org: str = ""):
+    return _fi_sbal_get(org)
 
 
 @app.post("/api/fi-subject-balance/sync")
-def fi_subject_balance_sync():
-    return _closed_block() or _cache_get(_FISBAL_CACHE, _fi_subject_balance, force=True)
+def fi_subject_balance_sync(org: str = ""):
+    return _closed_block() or _fi_sbal_get(org, force=True)
 
 
 def _fisbal_upload_path():
     return os.path.join(UPLOAD_DIR, "科目余额表_物流_解析上传.xlsx")
 
 
-def _fisbal_check():
-    """解析已上传的科目余额表（物流科目段）→ 质检勾稽 + 与系统数逐科目核对。没上传过返回 parsed=None。"""
+def _fisbal_check(org=""):
+    """解析已上传的科目余额表（物流科目段）→ 质检勾稽 + 与所选主体系统数逐科目核对。没上传过返回 parsed=None。"""
     p = _fisbal_upload_path()
     if not os.path.exists(p):
         return {"ok": True, "parsed": None}
@@ -3551,21 +3596,22 @@ def _fisbal_check():
                 "账户": "（上传·按科目汇总）", "币别": "CNY", "期初": v["期初"],
                 "本期借方": v["本期借方"], "本期贷方": v["本期贷方"], "期末": v["期末"]}
                for c, v in sorted(uploaded.items())]
-    sys_ = _cache_get(_FISBAL_CACHE, _fi_subject_balance)
+    sys_ = _fi_sbal_get(org)
     cmp_ = sb.compare(sys_.get("rows", []), uploaded, cat_fn=sb.cat_of_logi)
     return {"ok": True, "parsed": {"rows": up_rows, "qc": sb.qc_rows(up_rows)}, "compare": cmp_,
-            "有系统数": bool(sys_.get("rows")), "period": _period_str(),
+            "有系统数": bool(sys_.get("rows")), "org": sys_.get("org"), "org_name": sys_.get("org_name"),
+            "period": _period_str(),
             "uploaded_at": datetime.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M")}
 
 
 @app.get("/api/fi-subject-balance/check")
-def fi_subject_balance_check():
-    return _fisbal_check()
+def fi_subject_balance_check(org: str = ""):
+    return _fisbal_check(org)
 
 
 @app.post("/api/fi-subject-balance/upload")
-async def fi_subject_balance_upload(request: Request):
-    """上传导出的《科目余额表》Excel → 泛化认列（全科目容错）→ 筛物流科目 → 质检勾稽 + 与系统数逐科目核对。"""
+async def fi_subject_balance_upload(request: Request, org: str = ""):
+    """上传导出的《科目余额表》Excel → 泛化认列（全科目容错）→ 筛物流科目 → 质检勾稽 + 与所选主体系统数逐科目核对。"""
     blocked = _closed_block()
     if blocked:
         return blocked
@@ -3577,31 +3623,36 @@ async def fi_subject_balance_upload(request: Request):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     with open(_fisbal_upload_path(), "wb") as f:
         f.write(data)
-    return _fisbal_check()
+    return _fisbal_check(org)
+
+
+def _fisbal_vouchers(y, p, org_name=""):
+    """取某期物流科目序时账逐笔（样例种子 / 金蝶按主体账簿名过滤）。"""
+    if CFG["source"] != "kingdee":
+        return S.sample_logi_vouchers()
+    rows = kc.fetch_gl_voucher_subjects(int(y), int(p), sb.LOGI_PREFIXES)
+    if org_name:
+        rows = [r for r in rows if str(r.get("账簿") or "") == org_name]
+    return rows
 
 
 @app.get("/api/fi-subject-balance/detail")
-def fi_subject_balance_detail(code: str = "", dim: str = ""):
+def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = ""):
     """下钻反查某 (科目, 维度) 期末余额的构成：勾稽拆解(期初/本期借/本期贷/期末) + 本期发生逐笔凭证(序时账)。"""
-    sys_ = _cache_get(_FISBAL_CACHE, _fi_subject_balance)
+    sys_ = _fi_sbal_get(org)
     row = next((r for r in sys_.get("rows", [])
                 if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
-    if CFG["source"] != "kingdee":
-        vrows = S.sample_logi_vouchers()
-    else:
-        try:
-            vrows = kc.fetch_gl_voucher_subjects(int(CFG["year"]), int(CFG["period"]), sb.LOGI_PREFIXES)
-        except Exception as e:                                   # 金蝶未取数/接口异常 → 只给勾稽拆解，不给逐笔
-            return {"ok": True, "code": code, "dim": dim, "科目名称": (row or {}).get("科目名称", ""),
-                    "维度名": (row or {}).get("账户", ""), "期初": (row or {}).get("期初"),
-                    "本期借方": (row or {}).get("本期借方"), "本期贷方": (row or {}).get("本期贷方"),
-                    "期末": (row or {}).get("期末"), "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
-                    "note": "序时账取数失败：%s" % e}
-    detail = sb.build_voucher_lines(vrows, code, dim)
-    return {"ok": True, "code": code, "dim": dim, "科目名称": (row or {}).get("科目名称", ""),
-            "维度名": (row or {}).get("账户", ""), "期初": (row or {}).get("期初"),
-            "本期借方": (row or {}).get("本期借方"), "本期贷方": (row or {}).get("本期贷方"),
-            "期末": (row or {}).get("期末"), "detail": detail}
+    base = {"ok": True, "code": code, "dim": dim, "org": sys_.get("org"), "org_name": sys_.get("org_name"),
+            "科目名称": (row or {}).get("科目名称", ""), "维度名": (row or {}).get("账户", ""),
+            "期初": (row or {}).get("期初"), "本期借方": (row or {}).get("本期借方"),
+            "本期贷方": (row or {}).get("本期贷方"), "期末": (row or {}).get("期末")}
+    try:
+        vrows = _fisbal_vouchers(CFG["year"], CFG["period"],
+                                 sys_.get("org_name") if CFG["source"] == "kingdee" else "")
+    except Exception as e:                                       # 金蝶未取数/接口异常 → 只给勾稽拆解，不给逐笔
+        return {**base, "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
+                "note": "序时账取数失败：%s" % e}
+    return {**base, "detail": sb.build_voucher_lines(vrows, code, dim)}
 
 
 def _period_minus(y, p, k):
@@ -3614,7 +3665,7 @@ def _period_minus(y, p, k):
 
 
 @app.get("/api/fi-subject-balance/trace")
-def fi_subject_balance_trace(code: str = "", dim: str = ""):
+def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
     """追溯期初来源：期初＝上期期末，逐期往前翻各期构成，直到某期期初为 0（建账起点）。返回历史链（由近到远）。"""
     y, p = int(CFG["year"]), int(CFG["period"])
     if CFG["source"] != "kingdee":
@@ -3627,9 +3678,37 @@ def fi_subject_balance_trace(code: str = "", dim: str = ""):
                           "本期贷方": rec.get("本期贷方"), "期末": rec.get("期末"), "detail": det})
         reached0 = bool(chain) and abs((chain[-1].get("期初") or 0)) < 0.005
         return {"ok": True, "code": code, "dim": dim, "chain": chain, "reached_zero": reached0,
-                "note": "" if chain else "样例未给该维度种子历史；真金蝶模式可逐期往前追溯。"}
-    return {"ok": True, "code": code, "dim": dim, "chain": [], "reached_zero": False,
-            "note": "金蝶逐期追溯接线中：按主体逐期取历史《科目余额表》+序时账即可（机制同本期下钻，样例已演示）。"}
+                "note": "" if chain else "样例未给该维度种子历史。"}
+    # 金蝶：按主体逐期往前翻——每期取该主体《科目余额表》该(科目,维度)行 + 该期序时账逐笔，直到期初为0/本年年初/封顶。
+    sys_ = _fi_sbal_get(org)
+    org_code, org_name = sys_.get("org") or org, sys_.get("org_name") or ""
+    try:
+        cur = next((o.get("cur") for o in _fisbal_orgs() if o["org"] == org_code), None)
+    except Exception:
+        cur = None
+    chain, reached0, note = [], False, ""
+    yy, pp = y, p
+    try:
+        for _n in range(_FISBAL_TRACE_MAX):
+            yy, pp = _period_minus(yy, pp, 1)
+            prows = sb.normalize_full_rows(
+                kc.fetch_subject_balance_full(yy, pp, org_code, cur=cur), sb.LOGI_PREFIXES, sb.cat_of_logi)
+            pr = next((r for r in prows if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
+            det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, org_name), code, dim)
+            beg = (pr or {}).get("期初")
+            chain.append({"ym": "%04d-%02d" % (yy, pp), "期初": beg, "本期借方": (pr or {}).get("本期借方"),
+                          "本期贷方": (pr or {}).get("本期贷方"), "期末": (pr or {}).get("期末"), "detail": det})
+            if beg is not None and abs(beg) < 0.005:
+                reached0 = True
+                break
+            if pp == 1:                                          # 到本会计年度期初，不跨年（可后续放开）
+                note = "已回溯到本会计年度期初（%d年1期）；如需跨年继续可放开上限。" % yy
+                break
+        else:
+            note = "已回溯 %d 期仍未到期初为 0（建账更早，可放开上限）。" % _FISBAL_TRACE_MAX
+    except Exception as e:
+        note = "金蝶历史取数失败：%s" % e
+    return {"ok": True, "code": code, "dim": dim, "chain": chain, "reached_zero": reached0, "note": note}
 
 
 # ---------------- 理财产品对账（1101/1012理财腿 + 6xxx收益，产品维度聚合；含 PDF OCR）----------------
