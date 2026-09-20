@@ -3633,6 +3633,15 @@ async def fi_subject_balance_upload(request: Request, org: str = ""):
 _FISBAL_VCH: dict = {}   # 物流序时账缓存：(源,年,期,科目,账簿) -> rows。按被点科目单独查+缓存，避免每次下钻整段费用科目全拉（真机慢的根因）
 
 
+def _book_match(book, org_name):
+    """账簿名 ↔ 核算组织名 放宽匹配：金蝶里 FAccountBook.FName 与 FOrgId.FName 常不完全相同，
+    严格相等会把凭证全过滤掉（真机"本期无逐笔凭证"疑因）。空 org_name＝不过滤；否则相等或互相包含即算命中。"""
+    b, o = str(book or "").strip(), str(org_name or "").strip()
+    if not o:
+        return True
+    return b == o or (bool(b) and (b in o or o in b))
+
+
 def _fisbal_vouchers(y, p, code, org_name=""):
     """取某期【被下钻科目】序时账逐笔——只查该科目(prefix=code)，不再整段费用科目全拉；样例=种子。按科目缓存。"""
     if CFG["source"] != "kingdee":
@@ -3642,7 +3651,7 @@ def _fisbal_vouchers(y, p, code, org_name=""):
         return _FISBAL_VCH[key]
     rows = kc.fetch_gl_voucher_subjects(int(y), int(p), (str(code),))
     if org_name:
-        rows = [r for r in rows if str(r.get("账簿") or "") == org_name]
+        rows = [r for r in rows if _book_match(r.get("账簿"), org_name)]
     _FISBAL_VCH[key] = rows
     return rows
 
@@ -3720,6 +3729,30 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
     except Exception as e:
         note = "金蝶历史取数失败：%s" % e
     return {"ok": True, "code": code, "dim": dim, "chain": chain, "reached_zero": reached0, "note": note}
+
+
+@app.get("/api/fi-subject-balance/_probe")
+def fi_subject_balance_probe(request: Request, code: str = "2221.01.07", org: str = ""):
+    """真机诊断：看某科目在【报表侧维度编码】与【序时账原始行】的字段是否对得上（用于修下钻取不到凭证）。仅上传权限可看。"""
+    if not _require_perm(request, "subject_upload"):
+        return JSONResponse({"ok": False, "msg": "需「上传科目余额表」权限"}, status_code=403)
+    if CFG["source"] != "kingdee":
+        return {"ok": True, "note": "样例模式无需诊断"}
+    y, p = int(CFG["year"]), int(CFG["period"])
+    sys_ = _fi_sbal_get(org)
+    org_name = sys_.get("org_name") or ""
+    rep = [{"科目编码": r.get("科目编码"), "维度编码": r.get("维度编码"), "账户/维度名": r.get("账户")}
+           for r in sys_.get("rows", []) if str(r.get("科目编码") or "").startswith(code)][:8]
+    res = {"ok": True, "code": code, "org_name(账簿过滤用)": org_name, "period": _period_str(),
+           "报表侧该科目维度样本(前8)": rep}
+    try:
+        raw = kc.fetch_gl_voucher_subjects(y, p, (code,))
+        res["序时账原始行数"] = len(raw)
+        res["序时账distinct账簿"] = sorted({str(r.get("账簿") or "") for r in raw})[:20]
+        res["序时账前5行原样"] = raw[:5]
+    except Exception as e:
+        res["序时账取数异常"] = str(e)[:400]
+    return res
 
 
 # ---------------- 理财产品对账（1101/1012理财腿 + 6xxx收益，产品维度聚合；含 PDF OCR）----------------
