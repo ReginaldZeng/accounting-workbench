@@ -123,7 +123,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     <div className="body">
       {d.error && <div className="banner err">金蝶取数失败：{d.error}</div>}
       {d.note && d.source === 'kingdee' && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', borderColor: 'var(--amber-line)' }}>{d.note}</div>}
-      <div className="foot">数据来源：{d.source === 'kingdee' ? '金蝶《科目余额表》报表接口（物流科目段，借−贷有符号口径）' : (d.note || '样例数据')} · 主体 {d.org_name || '—'} · {d.period} · 更新于 {d.updated_at}</div>
+      <div className="foot">数据来源：{d.source === 'kingdee' ? '金蝶《科目余额表》报表接口（物流科目段，借−贷有符号口径）' : (d.note || '样例数据')} · 主体 {d.org_name || '—'} · {d.period} · {d.cached_db ? `定格于 ${d['定格于'] || ''}（进页面直接读库，秒开；点右上「从金蝶刷新」才重取）` : `更新于 ${d.updated_at}`}</div>
 
       {/* 质检勾稽：逐科目 期末 = 期初 + 本期借方 − 本期贷方 */}
       {qc && qc['行数'] > 0 && <div className={'banner' + (qc['全部通过'] ? '' : ' err')} style={qc['全部通过'] ? { marginTop: 8, background: 'var(--green-bg)', color: 'var(--green)', borderColor: 'var(--green-line)' } : { marginTop: 8 }}>

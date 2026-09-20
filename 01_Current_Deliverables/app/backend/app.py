@@ -3543,7 +3543,7 @@ def fi_subject_balance_orgs():
         return {"ok": False, "msg": str(e)[:300], "orgs": []}
 
 
-def _fi_subject_balance(org=""):
+def _fi_subject_balance(org="", force=False):
     base = {"source": CFG["source"], "period": _period_str(), "updated_at": _now(), "scope": "物流相关科目"}
     if CFG["source"] != "kingdee":
         rows = sb.build_rows_logi_sample(S.sample_subject_balance_logi())
@@ -3557,12 +3557,27 @@ def _fi_subject_balance(org=""):
         return {**base, "org": org, "rows": [], "qc": sb.qc_rows([]),
                 "note": "本期金蝶无可取主体（该期财务报表未上报？）"}
     pick = next((o for o in lst if o["org"] == org), lst[0])
+    dbkey = "fisbal:" + str(pick["org"])
+    if not force:                          # 定格库优先（取数一次入库，进页面秒读、重启也在，不打金蝶）
+        try:
+            rec = db.get_period_input(CFG["source"], CFG["year"], CFG["period"], dbkey)
+        except Exception:
+            rec = None
+        if rec and rec.get("payload") and rec["payload"].get("rows") is not None:
+            d = rec["payload"]
+            return {**base, "org": pick["org"], "org_name": pick["org_name"], "rows": d["rows"],
+                    "qc": sb.qc_rows(d["rows"]), "cached_db": True, "定格于": rec.get("updated_at")}
     try:
         raw = kc.fetch_subject_balance_full(int(CFG["year"]), int(CFG["period"]), pick["org"], cur=pick.get("cur"))
     except kc.KingdeeError as e:
         return {**base, "org": pick["org"], "org_name": pick["org_name"],
                 "rows": [], "qc": sb.qc_rows([]), "error": str(e)}
     rows = sb.normalize_logi_rows(raw)
+    try:                                   # 入库定格：下次进页面直接读库
+        db.set_period_input(CFG["source"], CFG["year"], CFG["period"], dbkey,
+                            {"rows": rows, "org_name": pick["org_name"]}, {"行数": len(rows)}, "fisbal")
+    except Exception:
+        pass
     return {**base, "org": pick["org"], "org_name": pick["org_name"], "rows": rows, "qc": sb.qc_rows(rows)}
 
 
@@ -3572,7 +3587,7 @@ def _fi_sbal_get(org="", force=False):
     if not force and key in _FISBAL_CACHE:
         d = dict(_FISBAL_CACHE[key]); d["cached"] = True
         return d
-    d = _fi_subject_balance(org)
+    d = _fi_subject_balance(org, force)
     _FISBAL_CACHE[key] = d
     out = dict(d); out["cached"] = False
     return out
