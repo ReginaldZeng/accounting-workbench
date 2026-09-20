@@ -395,12 +395,16 @@ def fetch_gl_voucher_subjects(year, period, prefixes=("1001", "1002", "1012", "1
     return _query(s, conf, "GL_VOUCHER", fields, flt, "FDATE")
 
 
-# 序时账核算维度槽候选：找供应商/费用项目等到底在哪个槽（FF100002 对暂估进项税/其他应付款是空的）。
-GL_DIM_CANDS = ["FDetailID.FASSTACTID.FNumber",
-                "FDetailID.FF100001.FNumber", "FDetailID.FF100003.FNumber",
-                "FDetailID.FF100004.FNumber", "FDetailID.FF100005.FNumber",
+# 序时账核算维度槽候选：找供应商/费用项目到底在哪个槽。
+# 真机诊断(V2.597)：FF100002~FF100008 全空、FASSTACTID/FF100001 字段不存在 → 供应商在更靠后的槽，拉宽到 FF100016 继续找。
+GL_DIM_CANDS = ["FASSTACTID.FNumber", "FASSTACTID.FName",
+                "FDetailID.FF100003.FNumber", "FDetailID.FF100005.FNumber",
                 "FDetailID.FF100006.FNumber", "FDetailID.FF100007.FNumber",
-                "FDetailID.FF100008.FNumber"]
+                "FDetailID.FF100008.FNumber", "FDetailID.FF100009.FNumber",
+                "FDetailID.FF100010.FNumber", "FDetailID.FF100011.FNumber",
+                "FDetailID.FF100012.FNumber", "FDetailID.FF100013.FNumber",
+                "FDetailID.FF100014.FNumber", "FDetailID.FF100015.FNumber",
+                "FDetailID.FF100016.FNumber"]
 _VALID_DIM_FIELDS = None    # 缓存：本账套序时账里有效（查得动）的核算维度槽 [(fieldkey, alias), ...]
 
 

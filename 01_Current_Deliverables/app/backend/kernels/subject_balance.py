@@ -372,7 +372,7 @@ def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
                 return r[k]
         return ""
 
-    lines, td, tc = [], 0.0, 0.0
+    lines, td, tc, struct_hits = [], 0.0, 0.0, 0
     for r in voucher_rows:
         rc = str(gv(r, "科目编码") or "")
         if rc != code:
@@ -382,16 +382,14 @@ def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
                 if isinstance(k, str) and k.startswith("dim") and str(v).strip()]
         codes = ([rd] if rd else []) + flex     # 该行所有结构化核算维度值（旧FF100002 + 新探到的槽）
         memo = str(gv(r, "摘要", "FEXPLANATION") or "")
-        if not dim and not core:        # 全科目模式：该科目本期全部凭证（对账找差用，dim/dim_name 都不传）
+        struct_ok = bool(codes) and _dim_match(dim, codes)
+        memo_ok = bool(core) and (core in memo)
+        if not dim and not core:            # 全科目模式：该科目本期全部凭证（对账找差用）
             pass
-        elif codes:                     # 有结构化核算维度 → 精确匹配（根治：dim 各段都在该行维度值里）
-            if not _dim_match(dim, codes):
-                continue
-        elif core:                      # 无任何结构化维度 → 供应商核心名在摘要里兜底
-            if core not in memo:
-                continue
-        else:
+        elif not (struct_ok or memo_ok):    # 结构化 或 摘要 任一命中即收（结构化优先、摘要兜底：根治没中也不会一笔不出）
             continue
+        if struct_ok:
+            struct_hits += 1
         d, c = to_f(gv(r, "借", "FDEBIT")), to_f(gv(r, "贷", "FCREDIT"))
         grp = str(gv(r, "凭证字", "FVOUCHERGROUPID.FName") or "")
         no = gv(r, "凭证号", "FVOUCHERGROUPNO")
@@ -402,4 +400,5 @@ def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
                       "制单人": str(gv(r, "制单人", "FCREATORID.FName") or "")})
         td += d
         tc += c
-    return {"lines": lines, "借合计": round(td, 2), "贷合计": round(tc, 2), "笔数": len(lines)}
+    return {"lines": lines, "借合计": round(td, 2), "贷合计": round(tc, 2), "笔数": len(lines),
+            "结构命中": struct_hits}

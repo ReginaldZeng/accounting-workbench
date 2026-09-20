@@ -3680,12 +3680,11 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = "", full
     det = (sb.build_voucher_lines(vrows, code, "", "") if full
            else sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", "")))
     out = {**base, "detail": det, "full": bool(full)}
-    diff = (abs((base.get("本期借方") or 0) - (det.get("借合计") or 0)) > 0.005
-            or abs((base.get("本期贷方") or 0) - (det.get("贷合计") or 0)) > 0.005)
-    if CFG["source"] == "kingdee" and not full and (det.get("笔数", 0) == 0 or diff):
-        # 没匹配到凭证 / 有差额 → 附诊断：逐个试核算维度槽，看供应商到底在哪个槽（据此根治为精确匹配）
+    # 结构化维度还没命中(结构命中==0，当前靠摘要兜底) → 附诊断：逐个试核算维度槽，看供应商在哪个槽（据此根治）
+    if CFG["source"] == "kingdee" and not full and det.get("结构命中", 0) == 0:
         try:
-            out["_debug"] = {"我匹配的科目": code, "我匹配的维度编码": dim, "维度名": (row or {}).get("账户", ""),
+            out["_debug"] = {"结构化状态": "结构化维度未命中，当前逐笔按摘要兜底匹配；下面各槽探测供定位供应商在哪个槽",
+                             "我匹配的科目": code, "我匹配的维度编码": dim, "维度名": (row or {}).get("账户", ""),
                              "账簿过滤org_name": sys_.get("org_name"),
                              "试探核算维度槽(找供应商在哪个)": kc.probe_voucher_dims(
                                  int(CFG["year"]), int(CFG["period"]), code)}
