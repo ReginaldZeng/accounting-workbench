@@ -28,12 +28,12 @@ function endComposition(periodsChrono, startOpening, ending, supplierCore) {
     return s
   }
   const groups = new Map(); let seq = 0
-  periodsChrono.forEach(per => (per.lines || []).forEach(ln => {
+  periodsChrono.forEach((per, pi) => (per.lines || []).forEach(ln => {
     const delta = r2((ln['借'] || 0) - (ln['贷'] || 0))     // 原始有符号净变动（借−贷）
     if (Math.abs(delta) < 0.005) return
     const key = norm(ln['摘要']) || ('#' + seq)
     let g = groups.get(key)
-    if (!g) { g = { net: 0, accr: 0, seq, accrYm: null, accrVou: '', accrMemo: '' }; groups.set(key, g) }
+    if (!g) { g = { net: 0, accr: 0, order: pi * 100000 + seq, accrYm: null, accrVou: '', accrMemo: '' }; groups.set(key, g) }
     g.net = r2(g.net + delta)
     if (sign * delta > 0) {                        // 该腿是"计提"方向（把余额往期末方向推）→ 记为原计提代表
       g.accr = r2(g.accr + delta)
@@ -41,17 +41,24 @@ function endComposition(periodsChrono, startOpening, ending, supplierCore) {
     }
     seq++
   }))
-  let lump = (sign * startOpening > 0.005) ? startOpening : 0     // 期初 lump（更早结转，追溯未展开的更早的账）
-  const opens = []
+  // 计提 lots（含期初 lump 作最早一笔）＋ 剩余核销（归集内没配平的红冲/付款）
+  const lots = []
+  if (sign * startOpening > 0.005) lots.push({ kind: '期初', ym: (periodsChrono[0] || {}).ym || '', 原额: startOpening, 仍挂: startOpening, order: -1 })
+  let clearing = 0                                 // 剩余核销累计（与期末反向）
   for (const g of groups.values()) {
-    if (Math.abs(g.net) < 0.005) continue                        // 这笔账已抵平（计提=红冲/核销/付款）→ 不构成期末
-    if (sign * g.net < 0) { lump = r2(lump + g.net); continue }  // 净核销/红冲、但范围内没配到对应计提 → 它冲的是更早结转
-    opens.push({ kind: '计提', ym: g.accrYm || '', 凭证: g.accrVou || '', 摘要: g.accrMemo || '', 原额: g.accr || g.net, 仍挂: g.net, seq: g.seq })
+    if (Math.abs(g.net) < 0.005) continue                        // 这笔账已抵平 → 不构成期末
+    if (sign * g.net > 0) lots.push({ kind: '计提', ym: g.accrYm || '', 凭证: g.accrVou || '', 摘要: g.accrMemo || '', 原额: g.accr || g.net, 仍挂: g.net, order: g.order })
+    else clearing = r2(clearing + g.net)                          // 净核销、但范围内没配到对应计提 → 待 FIFO 冲抵开项
   }
-  opens.sort((a, b) => a.seq - b.seq)
-  const items = []
-  if (Math.abs(lump) > 0.005) items.push({ kind: '期初', ym: (periodsChrono[0] || {}).ym || '', 原额: lump, 仍挂: lump })
-  items.push(...opens)
+  // 剩余核销 FIFO 冲抵开项（最早优先）——不倒进更早结转，否则会凭空造出正的“未核销”
+  lots.sort((a, b) => a.order - b.order)
+  let clr = Math.abs(clearing)
+  for (const lot of lots) {
+    if (clr <= 0.005) break
+    const take = Math.min(Math.abs(lot['仍挂']), clr)
+    lot['仍挂'] = r2(sign * (Math.abs(lot['仍挂']) - take)); clr = r2(clr - take)
+  }
+  const items = lots.filter(lot => Math.abs(lot['仍挂']) > 0.005)
   return { items, 合计: r2(items.reduce((s, it) => s + it['仍挂'], 0)) }
 }
 
