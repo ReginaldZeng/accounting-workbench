@@ -11,29 +11,48 @@ const fmt = n => n == null ? '—' : Number(n).toLocaleString('en-US', { minimum
 const ITEMS = ['期初', '本期借方', '本期贷方', '期末']
 const PAGE = 15   // 明细账弹窗每页笔数
 
-// 期末构成清单（跨期贯通 FIFO）：把追溯各期 + 当期的逐笔串成一条时间线跑一次 FIFO，
-// 算出「到底是哪几笔（哪月·哪张凭证）还没核销的计提，拼出了这个期末余额」。
-// —— 精确镜像后端内核 subject_balance._annotate_ledger 的 delta（借−贷）方向配对法（红冲负数天然反向冲减）。
-function endComposition(periodsChrono, startOpening, ending) {
+// 期末构成清单（按"这笔账"归集抵消，而非按时间 FIFO）：
+// 把追溯各期 + 当期的每一条腿，按【业务摘要】归集——同一笔账的 计提 / 红冲 / 核销 / 付款
+// 摘要归一后落到同一个 key，互相加减；抵平（净额≈0）的就消失，剩下没抵平的才是构成期末的。
+// 之所以不用 FIFO：遇到"冲暂估+按票重估+付款"三合一凭证时，FIFO 会把凭证内的付款拿去冲最早的
+// 期初，反把凭证自己重估那笔当成还挂着（张冠李戴）。按业务归集则该单四条腿自相抵平、正确消失。
+// 摘要归一：去掉前缀动词与"5/498#"这类单号引用——从供应商名开始截取（同一供应商同月同业务=同一笔账）。
+function endComposition(periodsChrono, startOpening, ending, supplierCore) {
   const r2 = n => Math.round((Number(n) || 0) * 100) / 100
   ending = r2(ending); startOpening = r2(startOpening)
-  const sign = ending >= 0 ? 1 : -1               // 借方余额+1 / 贷方余额-1，把净变动统一成 正=计提、负=核销
-  const queue = []                                 // [{src, orig, remain}]
-  const firstYm = (periodsChrono[0] || {}).ym || ''
-  if (sign * startOpening > 0.005) queue.push({ src: { kind: '期初', ym: firstYm }, orig: Math.abs(startOpening), remain: Math.abs(startOpening) })
+  const sign = ending >= 0 ? 1 : -1               // 借方余额+1 / 贷方余额-1（期末方向）
+  const core = String(supplierCore || '').replace(/\s+/g, '').trim()
+  const norm = memo => {                          // 摘要归一 → 归集 key
+    let s = String(memo || '').replace(/\s+/g, '')
+    if (core && s.includes(core)) s = s.slice(s.indexOf(core))   // 从供应商名起（丢掉"红冲5/498#计提""黄一飞提起支付"等前缀）
+    return s
+  }
+  const groups = new Map(); let seq = 0
   periodsChrono.forEach(per => (per.lines || []).forEach(ln => {
-    const delta = r2(sign * ((ln['借'] || 0) - (ln['贷'] || 0)))
-    if (delta > 0.005) queue.push({ src: { kind: '计提', ym: per.ym, 日期: ln['日期'], 凭证: ln['凭证'], 摘要: ln['摘要'] }, orig: delta, remain: delta })
-    else if (delta < -0.005) {
-      let rem = -delta
-      while (rem > 0.005 && queue.length) {
-        const head = queue[0], take = Math.min(head.remain, rem)
-        head.remain = r2(head.remain - take); rem = r2(rem - take)
-        if (head.remain <= 0.005) queue.shift()
-      }
+    const delta = r2((ln['借'] || 0) - (ln['贷'] || 0))     // 原始有符号净变动（借−贷）
+    if (Math.abs(delta) < 0.005) return
+    const key = norm(ln['摘要']) || ('#' + seq)
+    let g = groups.get(key)
+    if (!g) { g = { net: 0, accr: 0, seq, accrYm: null, accrVou: '', accrMemo: '' }; groups.set(key, g) }
+    g.net = r2(g.net + delta)
+    if (sign * delta > 0) {                        // 该腿是"计提"方向（把余额往期末方向推）→ 记为原计提代表
+      g.accr = r2(g.accr + delta)
+      if (g.accrYm == null) { g.accrYm = per.ym; g.accrVou = ln['凭证']; g.accrMemo = ln['摘要'] }
     }
+    seq++
   }))
-  return { items: queue.map(q => ({ ...q.src, 原额: r2(sign * q.orig), 仍挂: r2(sign * q.remain) })), 合计: r2(sign * queue.reduce((s, q) => s + q.remain, 0)) }
+  let lump = (sign * startOpening > 0.005) ? startOpening : 0     // 期初 lump（更早结转，追溯未展开的更早的账）
+  const opens = []
+  for (const g of groups.values()) {
+    if (Math.abs(g.net) < 0.005) continue                        // 这笔账已抵平（计提=红冲/核销/付款）→ 不构成期末
+    if (sign * g.net < 0) { lump = r2(lump + g.net); continue }  // 净核销/红冲、但范围内没配到对应计提 → 它冲的是更早结转
+    opens.push({ kind: '计提', ym: g.accrYm || '', 凭证: g.accrVou || '', 摘要: g.accrMemo || '', 原额: g.accr || g.net, 仍挂: g.net, seq: g.seq })
+  }
+  opens.sort((a, b) => a.seq - b.seq)
+  const items = []
+  if (Math.abs(lump) > 0.005) items.push({ kind: '期初', ym: (periodsChrono[0] || {}).ym || '', 原额: lump, 仍挂: lump })
+  items.push(...opens)
+  return { items, 合计: r2(items.reduce((s, it) => s + it['仍挂'], 0)) }
 }
 
 export default function FiSubjectBalance({ cfg, onPeriod }) {
@@ -350,11 +369,12 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
                 const periodsChrono = [...(trace.chain || [])].reverse().map(c => ({ ym: c.ym, lines: (c.detail && c.detail.lines) || [] }))
                   .concat([{ ym: d.period, lines: (md.detail && md.detail.lines) || [] }])
                 const startOpening = (trace.chain && trace.chain.length) ? trace.chain[trace.chain.length - 1]['期初'] : md['期初']
-                const comp = endComposition(periodsChrono, startOpening, md['期末'])
+                const supplierCore = String(modal.维度名 || '').split('/')[0]
+                const comp = endComposition(periodsChrono, startOpening, md['期末'], supplierCore)
                 if (!comp.items.length) return null
                 return <div className="fsb-comp">
-                  <div className="ttl"><span className="pin">📌</span>期末 {fmt(md['期末'])} 的构成 —— 就是下面这 {comp.items.length} 笔还没核销的计提</div>
-                  <div className="desc">把追溯到的每一期逐笔串成一条时间线、跑一遍先进先出核销，剩下没被冲掉的就是它们（“仍挂”＝这笔到今天还没被核销的余额，全部加起来正好＝期末）。{!trace.reached_zero && <span className="warn"> ⚠ 更早的没追到底，最上面一行是更早结转的汇总。</span>}</div>
+                  <div className="ttl"><span className="pin">📌</span>期末 {fmt(md['期末'])} 的构成 —— 就是下面这 {comp.items.length} 笔还没核销的账</div>
+                  <div className="desc">按【这笔账】归集：同一笔账的 计提 / 红冲 / 核销 / 付款 相互抵消，抵平的就消失，剩下没抵平的才是构成期末的（“仍挂”＝这笔到今天还欠着没结的，加起来正好＝期末）。像"冲暂估+按票重估+付款"三合一凭证，那一单四条腿自相抵平、不再出现。{!trace.reached_zero && <span className="warn"> ⚠ 更早的没追到底，最上面一行是更早结转的汇总。</span>}</div>
                   <div className="fsb-scroll">
                     <table className="fsb-tbl">
                       <thead><tr>{['月份', '凭证', '摘要', '原计提额', '仍挂（构成期末）'].map((h, hi) =>
