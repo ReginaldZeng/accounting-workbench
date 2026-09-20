@@ -197,7 +197,7 @@ export default function App() {
 // 三个被摘掉的 key（sbal / costledger / ecom）都已不对应任何页面——留着的话，
 // 万一有人把它配成可进入，会去找一个不存在的视图而不是走占位页。
 const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodclose', 'fundboard',
-  'rptexport', 'rptdash',
+  'rptexport', 'rptdash', 'fisbal',
   'logistics', 'logibase', 'logiupload', 'logisticspay', 'logisticscost',
   'clexport', 'cldash', 'clwh', 'bomdraft', 'bomstd', 'bomconfig',
   'ecommonth', 'ecomsettle', 'ecombase',

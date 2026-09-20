@@ -3519,12 +3519,20 @@ async def subject_balance_upload(request: Request):
 _FISBAL_TRACE_MAX = 12   # 期初逐期追溯：最多往前翻的期数（到期初为0或本会计年度期初亦停），防越翻越久
 
 
+_FISBAL_ORGS_CACHE: dict = {}    # 主体清单缓存 (源,年,期)：避免 orgs 端点与系统取数各拉一次金蝶报表清单
+
+
 def _fisbal_orgs():
-    """物流科目页的主体清单。样例=单一占位；金蝶=复用报表清单（已按本位币去重）。"""
+    """物流科目页的主体清单。样例=单一占位；金蝶=复用报表清单（已按本位币去重）。按期缓存，减少金蝶往返。"""
     if CFG["source"] != "kingdee":
         return [{"org": "SAMPLE", "org_name": "样例·深圳市星期零", "cur": "人民币"}]
-    return [{"org": o["org"], "org_name": o["org_name"], "cur": o.get("cur")}
-            for o in kc.fetch_fin_report_list(int(CFG["year"]), int(CFG["period"]))]
+    key = (CFG["source"], CFG["year"], CFG["period"])
+    if key in _FISBAL_ORGS_CACHE:
+        return _FISBAL_ORGS_CACHE[key]
+    lst = [{"org": o["org"], "org_name": o["org_name"], "cur": o.get("cur")}
+           for o in kc.fetch_fin_report_list(int(CFG["year"]), int(CFG["period"]))]
+    _FISBAL_ORGS_CACHE[key] = lst
+    return lst
 
 
 @app.get("/api/fi-subject-balance/orgs")
@@ -3581,6 +3589,7 @@ def fi_subject_balance_sync(org: str = ""):
     if blocked:
         return blocked
     _FISBAL_VCH.clear()                       # 强刷同时清序时账缓存
+    _FISBAL_ORGS_CACHE.clear()               # 和主体清单缓存
     return _fi_sbal_get(org, force=True)
 
 

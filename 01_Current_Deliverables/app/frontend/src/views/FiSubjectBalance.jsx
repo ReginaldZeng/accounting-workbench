@@ -34,25 +34,32 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     try { setFullDet(await getFiSubjectDetail(code, dimc, org, true)) } catch (e) { setFullDet({ ok: false, note: '取全部凭证失败：' + e.message }) } finally { setFullBusy(false) }
   }
   // 逐笔凭证小表（本期下钻 / 追溯历史期共用）
-  const voucherTable = (det) => (det && det.lines && det.lines.length > 0) ? (
-    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-      <thead><tr>{['日期', '凭证', '摘要', '借方', '贷方', '制单人'].map((h, hi) =>
-        <th key={h} style={{ textAlign: (hi === 3 || hi === 4) ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
-      <tbody>
-        {det.lines.map((ln, li) => <tr key={li}>
-          <td style={{ padding: '5px 8px', borderBottom: '1px solid var(--line)', whiteSpace: 'nowrap' }}>{ln['日期']}</td>
-          <td style={{ padding: '5px 8px', borderBottom: '1px solid var(--line)', whiteSpace: 'nowrap' }}>{ln['凭证']}</td>
-          <td style={{ padding: '5px 8px', borderBottom: '1px solid var(--line)' }}>{ln['摘要']}</td>
-          <td style={{ padding: '5px 8px', borderBottom: '1px solid var(--line)', textAlign: 'right', color: ln['借'] < 0 ? 'var(--red)' : undefined }}>{ln['借'] ? fmt(ln['借']) : ''}</td>
-          <td style={{ padding: '5px 8px', borderBottom: '1px solid var(--line)', textAlign: 'right', color: ln['贷'] < 0 ? 'var(--red)' : undefined }}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
-          <td style={{ padding: '5px 8px', borderBottom: '1px solid var(--line)', whiteSpace: 'nowrap' }}>{ln['制单人']}</td>
-        </tr>)}
-        <tr><td colSpan={3} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>本期发生合计</td>
-          <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['借合计'])}</td>
-          <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['贷合计'])}</td><td></td></tr>
-      </tbody>
-    </table>
-  ) : <div className="foot">本期无逐笔凭证。</div>
+  const voucherTable = (det) => {
+    if (!(det && det.lines && det.lines.length > 0)) return <div className="foot">本期无逐笔凭证。</div>
+    // 主变动高亮：本期金额（借/贷取大）最大的那一笔＝这笔余额的主要来源，标出来省得人肉找
+    let maxIdx = -1, maxAbs = 0
+    det.lines.forEach((ln, i) => { const a = Math.max(Math.abs(ln['借'] || 0), Math.abs(ln['贷'] || 0)); if (a > maxAbs) { maxAbs = a; maxIdx = i } })
+    const cell = { padding: '5px 8px', borderBottom: '1px solid var(--line)' }
+    return (
+      <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+        <thead><tr>{['日期', '凭证', '摘要', '借方', '贷方', '制单人'].map((h, hi) =>
+          <th key={h} style={{ textAlign: (hi === 3 || hi === 4) ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
+        <tbody>
+          {det.lines.map((ln, li) => <tr key={li} style={li === maxIdx ? { background: 'var(--amber-bg)' } : undefined} title={li === maxIdx ? '本期主变动（这笔余额的主要来源）' : undefined}>
+            <td style={{ ...cell, whiteSpace: 'nowrap' }}>{ln['日期']}</td>
+            <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: li === maxIdx ? 700 : 400 }}>{li === maxIdx ? '★ ' : ''}{ln['凭证']}</td>
+            <td style={cell}>{ln['摘要']}</td>
+            <td style={{ ...cell, textAlign: 'right', color: ln['借'] < 0 ? 'var(--red)' : undefined, fontWeight: li === maxIdx ? 700 : 400 }}>{ln['借'] ? fmt(ln['借']) : ''}</td>
+            <td style={{ ...cell, textAlign: 'right', color: ln['贷'] < 0 ? 'var(--red)' : undefined, fontWeight: li === maxIdx ? 700 : 400 }}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
+            <td style={{ ...cell, whiteSpace: 'nowrap' }}>{ln['制单人']}</td>
+          </tr>)}
+          <tr><td colSpan={3} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>本期发生合计</td>
+            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['借合计'])}</td>
+            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['贷合计'])}</td><td></td></tr>
+        </tbody>
+      </table>
+    )
+  }
   const loadFor = async (o) => {
     setOpenKey(null); setDetail(null); setTrace(null)
     try { const x = await getFiSubjectBalance(o); _cache = x; setD(x) } catch (e) {}
