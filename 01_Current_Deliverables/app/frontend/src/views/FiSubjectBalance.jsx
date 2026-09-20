@@ -10,6 +10,31 @@ const fmt = n => n == null ? '—' : Number(n).toLocaleString('en-US', { minimum
 const ITEMS = ['期初', '本期借方', '本期贷方', '期末']
 const PAGE = 15   // 明细账弹窗每页笔数
 
+// 期末构成清单（跨期贯通 FIFO）：把追溯各期 + 当期的逐笔串成一条时间线跑一次 FIFO，
+// 算出「到底是哪几笔（哪月·哪张凭证）还没核销的计提，拼出了这个期末余额」。
+// —— 精确镜像后端内核 subject_balance._annotate_ledger 的 delta（借−贷）方向配对法（红冲负数天然反向冲减）。
+function endComposition(periodsChrono, startOpening, ending) {
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100
+  ending = r2(ending); startOpening = r2(startOpening)
+  const sign = ending >= 0 ? 1 : -1               // 借方余额+1 / 贷方余额-1，把净变动统一成 正=计提、负=核销
+  const queue = []                                 // [{src, orig, remain}]
+  const firstYm = (periodsChrono[0] || {}).ym || ''
+  if (sign * startOpening > 0.005) queue.push({ src: { kind: '期初', ym: firstYm }, orig: Math.abs(startOpening), remain: Math.abs(startOpening) })
+  periodsChrono.forEach(per => (per.lines || []).forEach(ln => {
+    const delta = r2(sign * ((ln['借'] || 0) - (ln['贷'] || 0)))
+    if (delta > 0.005) queue.push({ src: { kind: '计提', ym: per.ym, 日期: ln['日期'], 凭证: ln['凭证'], 摘要: ln['摘要'] }, orig: delta, remain: delta })
+    else if (delta < -0.005) {
+      let rem = -delta
+      while (rem > 0.005 && queue.length) {
+        const head = queue[0], take = Math.min(head.remain, rem)
+        head.remain = r2(head.remain - take); rem = r2(rem - take)
+        if (head.remain <= 0.005) queue.shift()
+      }
+    }
+  }))
+  return { items: queue.map(q => ({ ...q.src, 原额: r2(sign * q.orig), 仍挂: r2(sign * q.remain) })), 合计: r2(sign * queue.reduce((s, q) => s + q.remain, 0)) }
+}
+
 export default function FiSubjectBalance({ cfg, onPeriod }) {
   const [d, setD] = useState(_cache), [busy, setBusy] = useState(false)
   const [chk, setChk] = useState(null), [upBusy, setUpBusy] = useState(false), [upMsg, setUpMsg] = useState('')
@@ -324,6 +349,36 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
             {trace && <div style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12, marginTop: 2 }}>
               <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>期初 {fmt(md['期初'])} 的来源 —— 逐期往前翻（期初 ＝ 上期期末）</div>
               {trace.note && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}
+              {(() => {
+                const periodsChrono = [...(trace.chain || [])].reverse().map(c => ({ ym: c.ym, lines: (c.detail && c.detail.lines) || [] }))
+                  .concat([{ ym: d.period, lines: (md.detail && md.detail.lines) || [] }])
+                const startOpening = (trace.chain && trace.chain.length) ? trace.chain[trace.chain.length - 1]['期初'] : md['期初']
+                const comp = endComposition(periodsChrono, startOpening, md['期末'])
+                if (!comp.items.length) return null
+                const cell = { padding: '5px 8px', borderBottom: '1px solid var(--line)' }
+                return <div style={{ marginBottom: 14, background: 'var(--green-bg)', border: '1px solid var(--green-line)', borderRadius: 8, padding: '10px 12px' }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 2 }}>📌 期末 {fmt(md['期末'])} 的构成 —— 就是下面这 {comp.items.length} 笔还没核销的计提</div>
+                  <div className="foot" style={{ marginBottom: 8 }}>把追溯到的每一期逐笔串成一条时间线、跑一遍先进先出核销，剩下没被冲掉的就是它们（“仍挂”＝这笔到今天还没被核销的余额，全部加起来正好＝期末）。{!trace.reached_zero && ' ⚠ 更早的没追到底，最上面一行是更早结转的汇总。'}</div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', background: 'var(--bg)' }}>
+                      <thead><tr>{['月份', '凭证', '摘要', '原计提额', '仍挂（构成期末）'].map((h, hi) =>
+                        <th key={h} style={{ textAlign: hi >= 3 ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
+                      <tbody>
+                        {comp.items.map((it, ii) => <tr key={ii}>
+                          <td style={{ ...cell, whiteSpace: 'nowrap' }}>{it.kind === '期初' ? (it.ym + ' 前') : it.ym}</td>
+                          <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: 600 }}>{it.kind === '期初' ? '更早结转' : it['凭证']}</td>
+                          <td style={cell}>{it.kind === '期初' ? `${it.ym} 之前挂着、至今未核销的更早计提（未再逐笔展开）` : it['摘要']}</td>
+                          <td style={{ ...cell, textAlign: 'right' }}>{it.kind === '期初' ? '—' : fmt(it['原额'])}</td>
+                          <td style={{ ...cell, textAlign: 'right', fontWeight: 700, color: it['仍挂'] < 0 ? 'var(--red)' : undefined }}>{fmt(it['仍挂'])}</td>
+                        </tr>)}
+                        <tr><td colSpan={4} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700 }}>合计（＝期末余额）</td>
+                          <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700, color: comp['合计'] < 0 ? 'var(--red)' : undefined }}>{fmt(comp['合计'])}</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              })()}
+              <div style={{ fontSize: 12.5, fontWeight: 600, margin: '2px 0 6px' }}>逐期明细（核对上面每一笔的来龙去脉）</div>
               {(trace.chain || []).map((c, ci) => <div key={ci} style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 12.5, marginBottom: 4 }}><span style={{ fontWeight: 600 }}>{c.ym}</span> · 期末 {fmt(c['期末'])} ＝ 期初 {fmt(c['期初'])} ＋ 本期借 {fmt(c['本期借方'])} － 本期贷 {fmt(c['本期贷方'])}</div>
                 <div style={{ overflowX: 'auto' }}>{ledgerTable(c.detail, undefined, { gid: 'tr:' + c.ym, opening: c['期初'], showOpening: true, offset: 0 })}</div>
