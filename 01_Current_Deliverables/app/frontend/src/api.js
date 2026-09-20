@@ -86,7 +86,7 @@ export const getFiSubjectBalance = (org) => j('/api/fi-subject-balance' + _fiq(o
 export const syncFiSubjectBalance = (org) => j('/api/fi-subject-balance/sync' + _fiq(org), {method:'POST'})
 export const getFiSubjectCheck = (org) => j('/api/fi-subject-balance/check' + _fiq(org))
 export const uploadFiSubjectReport = (file, org) => j('/api/fi-subject-balance/upload' + _fiq(org), {method:'POST', body:file})
-export const getFiSubjectDetail = (code, dim, org) => j('/api/fi-subject-balance/detail' + _fiq2(code, dim, org))
+export const getFiSubjectDetail = (code, dim, org, full) => j('/api/fi-subject-balance/detail' + _fiq2(code, dim, org) + (full ? '&full=1' : ''))
 export const getFiSubjectTrace = (code, dim, org) => j('/api/fi-subject-balance/trace' + _fiq2(code, dim, org))
 export const getWealthRecon = () => j('/api/wealth-recon')
 export const syncWealthRecon = () => j('/api/wealth-recon/sync', {method:'POST'})

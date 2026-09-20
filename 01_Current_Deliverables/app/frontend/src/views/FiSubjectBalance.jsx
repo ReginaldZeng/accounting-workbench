@@ -15,18 +15,23 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   const [showAll, setShowAll] = useState(false)
   const [openKey, setOpenKey] = useState(null), [detail, setDetail] = useState(null), [detailBusy, setDetailBusy] = useState(false)
   const [trace, setTrace] = useState(null), [traceBusy, setTraceBusy] = useState(false)
+  const [fullDet, setFullDet] = useState(null), [fullBusy, setFullBusy] = useState(false)
   const [orgs, setOrgs] = useState([]), [org, setOrg] = useState('')
   const [q, setQ] = useState('')
   const fileRef = useRef(null)
   const drill = async (code, dimc) => {
     const key = code + '|' + dimc
-    if (openKey === key) { setOpenKey(null); setDetail(null); setTrace(null); return }
-    setOpenKey(key); setDetail(null); setTrace(null); setDetailBusy(true)
+    if (openKey === key) { setOpenKey(null); setDetail(null); setTrace(null); setFullDet(null); return }
+    setOpenKey(key); setDetail(null); setTrace(null); setFullDet(null); setDetailBusy(true)
     try { setDetail(await getFiSubjectDetail(code, dimc, org)) } catch (e) { setDetail({ ok: false, note: '取明细失败：' + e.message }) } finally { setDetailBusy(false) }
   }
   const doTrace = async (code, dimc) => {
     setTraceBusy(true)
     try { setTrace(await getFiSubjectTrace(code, dimc, org)) } catch (e) { setTrace({ ok: false, note: '追溯失败：' + e.message }) } finally { setTraceBusy(false) }
+  }
+  const loadFull = async (code, dimc) => {
+    setFullBusy(true)
+    try { setFullDet(await getFiSubjectDetail(code, dimc, org, true)) } catch (e) { setFullDet({ ok: false, note: '取全部凭证失败：' + e.message }) } finally { setFullBusy(false) }
   }
   // 逐笔凭证小表（本期下钻 / 追溯历史期共用）
   const voucherTable = (det) => (det && det.lines && det.lines.length > 0) ? (
@@ -205,6 +210,14 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
                     </div>
                     {detail.note && <div className="foot" style={{ marginBottom: 6 }}>{detail.note}</div>}
                     {voucherTable(detail.detail)}
+                    {d.source === 'kingdee' && detail.detail && (Math.abs((detail['本期借方'] || 0) - (detail.detail['借合计'] || 0)) > 0.005 || Math.abs((detail['本期贷方'] || 0) - (detail.detail['贷合计'] || 0)) > 0.005) && <div style={{ marginTop: 8 }}>
+                      <div className="banner err" style={{ marginTop: 0 }}>逐笔合计与余额表本期发生对不上：借 差 {fmt((detail['本期借方'] || 0) - (detail.detail['借合计'] || 0))}、贷 差 {fmt((detail['本期贷方'] || 0) - (detail.detail['贷合计'] || 0))} —— 多半是某笔凭证摘要没写供应商名、没归进来。</div>
+                      {!fullDet && <button className="btn" style={{ marginTop: 6 }} onClick={() => loadFull(detail.code, detail.dim)} disabled={fullBusy}>{fullBusy ? '取全部凭证中…' : '看本科目本期全部凭证 → 找是哪一笔'}</button>}
+                      {fullDet && fullDet.detail && <div style={{ marginTop: 6 }}>
+                        <div className="foot" style={{ marginBottom: 4 }}>本科目本期全部凭证（{fullDet.detail['笔数']} 笔，含各供应商）——在里面找摘要没写「{detail['维度名']}」但其实属于它的那笔（金额多半＝上面的差额）：</div>
+                        {voucherTable(fullDet.detail)}
+                      </div>}
+                    </div>}
                     {detail._debug && <div style={{ marginTop: 8, padding: 8, background: 'var(--bg)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>
                       🔧 诊断（本期有发生却没匹配到凭证，把这段截图发开发）：{'\n'}{JSON.stringify(detail._debug, null, 2)}
                     </div>}

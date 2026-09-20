@@ -3657,8 +3657,9 @@ def _fisbal_vouchers(y, p, code, org_name=""):
 
 
 @app.get("/api/fi-subject-balance/detail")
-def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = ""):
-    """下钻反查某 (科目, 维度) 期末余额的构成：勾稽拆解(期初/本期借/本期贷/期末) + 本期发生逐笔凭证(序时账)。"""
+def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = "", full: int = 0):
+    """下钻反查某 (科目, 维度) 期末余额的构成：勾稽拆解 + 本期发生逐笔凭证(序时账)。
+    full=1：不按供应商过滤，返回该科目本期全部凭证——供"逐笔合计跟余额表对不上时，找是哪一笔漏归了"。"""
     sys_ = _fi_sbal_get(org)
     row = next((r for r in sys_.get("rows", [])
                 if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
@@ -3672,9 +3673,10 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = ""):
     except Exception as e:                                       # 金蝶未取数/接口异常 → 只给勾稽拆解，不给逐笔
         return {**base, "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
                 "note": "序时账取数失败：%s" % e}
-    det = sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", ""))
-    out = {**base, "detail": det}
-    if CFG["source"] == "kingdee" and det.get("笔数", 0) == 0:      # 有科目却没匹配到凭证 → 附诊断，供真机对字段
+    det = (sb.build_voucher_lines(vrows, code, "", "") if full
+           else sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", "")))
+    out = {**base, "detail": det, "full": bool(full)}
+    if CFG["source"] == "kingdee" and not full and det.get("笔数", 0) == 0:  # 有科目却没匹配到凭证 → 附诊断，供真机对字段
         try:
             raw = kc.fetch_gl_voucher_subjects(int(CFG["year"]), int(CFG["period"]), (str(code),))
             out["_debug"] = {"我匹配的科目": code, "我匹配的维度编码": dim, "账簿过滤org_name": sys_.get("org_name"),

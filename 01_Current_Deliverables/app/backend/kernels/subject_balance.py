@@ -366,7 +366,9 @@ def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
             continue
         rd = str(gv(r, "维度编码", "FDetailID.FF100002.FNumber") or "").strip()
         memo = str(gv(r, "摘要", "FEXPLANATION") or "")
-        if rd:                          # 有结构化维度 → 按维度编码严格匹配（样例、及维度非空的科目）
+        if not dim and not core:        # 全科目模式：该科目本期全部凭证（对账找差用，dim/dim_name 都不传）
+            pass
+        elif rd:                        # 有结构化维度 → 按维度编码严格匹配（样例、及维度非空的科目）
             if rd != dim:
                 continue
         elif core:                      # 无结构化维度 → 按供应商核心名在摘要里匹配（2221.01.07/2241.02 等）
