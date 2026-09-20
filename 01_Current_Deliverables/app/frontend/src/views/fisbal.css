@@ -1,7 +1,8 @@
 /* 科目余额解析（物流）· 明细账弹窗视觉打磨 —— 复用全站设计令牌，风格与主壳一致 */
 
 /* ── 弹窗外壳 ── */
-.fsb-ov{ position:fixed; inset:0; z-index:200; background:rgba(20,24,40,.5); backdrop-filter:blur(2px);
+/* 遮罩：不用 backdrop-filter（磨砂在后台重绘时会在部分机器上闪烁），改用纯半透明遮罩 */
+.fsb-ov{ position:fixed; inset:0; z-index:200; background:rgba(20,24,40,.5);
   display:flex; align-items:flex-start; justify-content:center; padding:28px 16px; overflow:auto; }
 .fsb-modal{ background:var(--bg); border:1px solid var(--line); border-radius:16px; width:min(1060px,96vw);
   max-height:calc(100vh - 56px); display:flex; flex-direction:column; overflow:hidden;
