@@ -19,12 +19,23 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   const [fullDet, setFullDet] = useState(null), [fullBusy, setFullBusy] = useState(false)
   const [orgs, setOrgs] = useState([]), [org, setOrg] = useState('')
   const [q, setQ] = useState('')
+  const [checks, setChecks] = useState({})   // 勾选核对：{ gid: Set(行键) }；'op'=期初行，数字=det.lines 全局下标
   const fileRef = useRef(null)
   const openModal = async (code, dimc, kmName, dimName) => {
-    setModal({ code, dim: dimc, 科目名: kmName, 维度名: dimName }); setMd(null); setTrace(null); setFullDet(null); setMpage(0); setMdBusy(true)
+    setModal({ code, dim: dimc, 科目名: kmName, 维度名: dimName }); setMd(null); setTrace(null); setFullDet(null); setMpage(0); setChecks({}); setMdBusy(true)
     try { setMd(await getFiSubjectDetail(code, dimc, org)) } catch (e) { setMd({ ok: false, note: '取明细失败：' + e.message }) } finally { setMdBusy(false) }
   }
-  const closeModal = () => { setModal(null); setMd(null); setTrace(null); setFullDet(null) }
+  const closeModal = () => { setModal(null); setMd(null); setTrace(null); setFullDet(null); setChecks({}) }
+  // ── 勾选核对（工作台上验算核销，不用计算器）──
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100
+  const toggleCheck = (gid, key) => setChecks(p => {
+    const s = new Set(p[gid] || []); s.has(key) ? s.delete(key) : s.add(key); return { ...p, [gid]: s }
+  })
+  const autoCheckCleared = (gid, det, opening) => {   // 一键勾掉系统判定已核销的行（留下标绿「未核销」的＝期末）
+    const s = new Set(); (det.lines || []).forEach((ln, i) => { if (!ln['开项']) s.add(i) })
+    if (Math.abs(det['期初开项'] || 0) < 0.005 && Math.abs(opening || 0) > 0.005) s.add('op')
+    setChecks(p => ({ ...p, [gid]: s }))
+  }
   const doTrace = async (code, dimc) => {
     setTraceBusy(true)
     try { setTrace(await getFiSubjectTrace(code, dimc, org)) } catch (e) { setTrace({ ok: false, note: '追溯失败：' + e.message }) } finally { setTraceBusy(false) }
@@ -33,32 +44,79 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     setFullBusy(true)
     try { setFullDet(await getFiSubjectDetail(code, dimc, org, true)) } catch (e) { setFullDet({ ok: false, note: '取全部凭证失败：' + e.message }) } finally { setFullBusy(false) }
   }
-  // 明细账小表：滚动余额 + 未核销开项高亮（构成期末的那几笔标绿）。showLines 传分页切片；不传=全部（追溯各期用）。
-  const ledgerTable = (det, showLines) => {
+  // 明细账小表：期初行 + 滚动余额 + 未核销开项高亮 + 逐行勾选核对（工作台上验算核销，不用计算器）。
+  // opts.gid=勾选分组键；opts.opening=期初；opts.showOpening=是否放期初行(分页时仅首页)；opts.offset=本页首行在 det.lines 的下标。
+  const ledgerTable = (det, showLines, opts = {}) => {
     if (!(det && det.lines && det.lines.length > 0)) return <div className="foot">本期无逐笔凭证 —— 本期该维度没有新增计提、也没有核销（本期借/贷为 0），期末余额全部是往期结转下来的。</div>
+    const { gid, opening, showOpening, offset = 0 } = opts
+    const chk = gid ? (checks[gid] || new Set()) : null
     const ls = showLines || det.lines
     const cell = { padding: '5px 8px', borderBottom: '1px solid var(--line)' }
-    return (
+    const ending = det['余额末']
+    let checkedNet = 0, checkedCnt = 0
+    if (chk) {
+      if (chk.has('op')) { checkedNet += (opening || 0); checkedCnt++ }
+      det.lines.forEach((ln, i) => { if (chk.has(i)) { checkedNet += (ln['借'] || 0) - (ln['贷'] || 0); checkedCnt++ } })
+    }
+    checkedNet = r2(checkedNet)
+    const uncheckedNet = r2((ending || 0) - checkedNet)
+    const balanced = checkedCnt > 0 && Math.abs(checkedNet) < 0.005
+    const chkTd = key => <td style={{ ...cell, textAlign: 'center', width: 32 }}>
+      <input type="checkbox" checked={chk.has(key)} onChange={() => toggleCheck(gid, key)} style={{ cursor: 'pointer' }} /></td>
+    const strike = key => (chk && chk.has(key)) ? { color: 'var(--ink-3)', textDecoration: 'line-through' } : undefined
+    const table = (
       <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-        <thead><tr>{['日期', '凭证', '摘要', '借方', '贷方', '余额', '制单人'].map((h, hi) =>
-          <th key={h} style={{ textAlign: (hi >= 3 && hi <= 5) ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
+        <thead><tr>
+          {chk && <th style={{ width: 32, padding: '5px 8px', borderBottom: '1px solid var(--line)', color: 'var(--ink-3)', fontWeight: 500 }}>核对</th>}
+          {['日期', '凭证', '摘要', '借方', '贷方', '余额', '制单人'].map((h, hi) =>
+            <th key={h} style={{ textAlign: (hi >= 3 && hi <= 5) ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}
+        </tr></thead>
         <tbody>
-          {ls.map((ln, li) => <tr key={li} style={ln['开项'] ? { background: 'var(--green-bg)' } : undefined} title={ln['开项'] ? '未核销的开项（构成期末余额）' : undefined}>
-            <td style={{ ...cell, whiteSpace: 'nowrap' }}>{ln['日期']}</td>
-            <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: ln['开项'] ? 700 : 400 }}>{ln['凭证']}{ln['开项'] ? <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, color: 'var(--green)', background: 'var(--green-bg)', padding: '1px 6px', borderRadius: 5 }}>未核销</span> : ''}</td>
-            <td style={cell}>{ln['摘要']}</td>
-            <td style={{ ...cell, textAlign: 'right', color: ln['借'] < 0 ? 'var(--red)' : undefined }}>{ln['借'] ? fmt(ln['借']) : ''}</td>
-            <td style={{ ...cell, textAlign: 'right', color: ln['贷'] < 0 ? 'var(--red)' : undefined }}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
-            <td style={{ ...cell, textAlign: 'right', fontWeight: 600, color: ln['余额'] < 0 ? 'var(--red)' : undefined }}>{fmt(ln['余额'])}</td>
-            <td style={{ ...cell, whiteSpace: 'nowrap' }}>{ln['制单人']}</td>
-          </tr>)}
-          <tr><td colSpan={3} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>本期发生合计 / 期末余额</td>
+          {chk && showOpening && opening != null && <tr style={{ background: 'var(--bg-sub)' }}>
+            {chkTd('op')}
+            <td style={cell}></td>
+            <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: 600, ...strike('op') }}>期初</td>
+            <td style={{ ...cell, ...strike('op') }}>上期结转（期初余额）</td>
+            <td style={cell}></td><td style={cell}></td>
+            <td style={{ ...cell, textAlign: 'right', fontWeight: 600, color: (opening || 0) < 0 ? 'var(--red)' : undefined, ...strike('op') }}>{fmt(opening)}</td>
+            <td style={cell}></td>
+          </tr>}
+          {ls.map((ln, li) => {
+            const gi = offset + li, g = chk && chk.has(gi), s = strike(gi)
+            const bg = g ? 'var(--bg-sub)' : (ln['开项'] ? 'var(--green-bg)' : undefined)
+            return <tr key={li} style={bg ? { background: bg } : undefined} title={ln['开项'] ? '未核销的开项（构成期末余额）' : undefined}>
+              {chk && chkTd(gi)}
+              <td style={{ ...cell, whiteSpace: 'nowrap', ...s }}>{ln['日期']}</td>
+              <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: (ln['开项'] && !g) ? 700 : 400, ...s }}>{ln['凭证']}{ln['开项'] && !g ? <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, color: 'var(--green)', background: 'var(--green-bg)', padding: '1px 6px', borderRadius: 5 }}>未核销</span> : ''}</td>
+              <td style={{ ...cell, ...s }}>{ln['摘要']}</td>
+              <td style={{ ...cell, textAlign: 'right', color: ln['借'] < 0 ? 'var(--red)' : undefined, ...s }}>{ln['借'] ? fmt(ln['借']) : ''}</td>
+              <td style={{ ...cell, textAlign: 'right', color: ln['贷'] < 0 ? 'var(--red)' : undefined, ...s }}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
+              <td style={{ ...cell, textAlign: 'right', fontWeight: 600, color: ln['余额'] < 0 ? 'var(--red)' : undefined, ...s }}>{fmt(ln['余额'])}</td>
+              <td style={{ ...cell, whiteSpace: 'nowrap', ...s }}>{ln['制单人']}</td>
+            </tr>
+          })}
+          <tr>{chk && <td></td>}<td colSpan={3} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>本期发生合计 / 期末余额</td>
             <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['借合计'])}</td>
             <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['贷合计'])}</td>
             <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700 }}>{fmt(det['余额末'])}</td><td></td></tr>
+          {chk && checkedCnt > 0 && <tr><td colSpan={8} style={{ padding: '7px 8px', background: balanced ? 'var(--green-bg)' : 'var(--amber-bg, #fdf1dd)', fontSize: 12 }}>
+            <b>勾选核对</b>：已勾选 {checkedCnt} 笔，净额 <b style={{ color: balanced ? 'var(--green)' : 'var(--amber)' }}>{fmt(checkedNet)}</b>（成对核销时应为 0）　·　未勾选剩余 <b>{fmt(uncheckedNet)}</b> {balanced
+              ? <span style={{ color: 'var(--green)', fontWeight: 600 }}>✓ 正好＝期末 {fmt(ending)}，核对无误</span>
+              : <span style={{ color: 'var(--ink-3)' }}>（把成对的勾到净额为 0，剩余就＝期末 {fmt(ending)}）</span>}
+          </td></tr>}
         </tbody>
       </table>
     )
+    if (!chk) return table
+    return <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <span className="foot" style={{ fontSize: 11.5 }}>☑ 勾掉能互相对冲的几笔（灰掉划掉），剩下没勾的应正好＝期末——工作台上核对，不用按计算器。</span>
+        <span style={{ flex: 1 }} />
+        <button className="btn" style={{ padding: '2px 9px', fontSize: 11.5 }} onClick={() => autoCheckCleared(gid, det, opening)}>一键勾掉已核销</button>
+        {checkedCnt > 0 && <button className="btn" style={{ padding: '2px 9px', fontSize: 11.5 }} onClick={() => setChecks(p => ({ ...p, [gid]: new Set() }))}>清除勾选</button>}
+      </div>
+      {table}
+    </div>
   }
   const loadFor = async (o) => {
     setModal(null); setMd(null); setTrace(null)
@@ -241,7 +299,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
             const pages = Math.max(1, Math.ceil(ls.length / PAGE))
             const pg = Math.min(mpage, pages - 1)
             return <>
-              <div style={{ overflowX: 'auto', marginTop: 8 }}>{ledgerTable(md.detail, ls.slice(pg * PAGE, (pg + 1) * PAGE))}</div>
+              <div style={{ overflowX: 'auto', marginTop: 8 }}>{ledgerTable(md.detail, ls.slice(pg * PAGE, (pg + 1) * PAGE), { gid: 'cur', opening: md['期初'], showOpening: pg === 0, offset: pg * PAGE })}</div>
               {pages > 1 && <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center', marginTop: 8, fontSize: 12.5 }}>
                 <button className="btn" disabled={pg <= 0} onClick={() => setMpage(pg - 1)}>上一页</button>
                 <span className="foot">第 {pg + 1} / {pages} 页 · 共 {ls.length} 笔</span>
@@ -264,7 +322,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
               {trace.note && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}
               {(trace.chain || []).map((c, ci) => <div key={ci} style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 12.5, marginBottom: 4 }}><span style={{ fontWeight: 600 }}>{c.ym}</span> · 期末 {fmt(c['期末'])} ＝ 期初 {fmt(c['期初'])} ＋ 本期借 {fmt(c['本期借方'])} － 本期贷 {fmt(c['本期贷方'])}</div>
-                <div style={{ overflowX: 'auto' }}>{ledgerTable(c.detail)}</div>
+                <div style={{ overflowX: 'auto' }}>{ledgerTable(c.detail, undefined, { gid: 'tr:' + c.ym, opening: c['期初'], showOpening: true, offset: 0 })}</div>
               </div>)}
               {trace.reached_zero && <div className="foot" style={{ color: 'var(--green)' }}>✓ 已追溯到期初为 0 —— 建账起点，到此为止。</div>}
             </div>}
