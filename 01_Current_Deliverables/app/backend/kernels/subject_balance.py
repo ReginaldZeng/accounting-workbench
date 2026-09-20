@@ -359,10 +359,49 @@ def _dim_match(dim, codes):
     return segs <= cs
 
 
-def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
-    """下钻反查：从序时账逐笔挑出某 (科目, 维度) 的凭证行 → 规整。样例 dict 与金蝶 fetch_gl_voucher_subjects 都吃。
-    维度归属（V2.597 根治）：序时账把有效核算维度槽(dim0/dim1…)一并带出，按【结构化维度精确匹配】(dim 各段都在该行维度值里)；
-    退化顺序：结构化维度→(旧)FF100002 编码→供应商核心名在摘要里(dim_name)。返回 {lines,借合计,贷合计,笔数}。"""
+def _annotate_ledger(lines, opening):
+    """明细账逐笔加 running 余额（期初+累计借−累计贷，末行=期末）；再 FIFO 把核销和计提配对，
+    标出【未核销的开项】(它们的和=期末余额、就是这笔余额的构成)。lines 需已按日期/凭证号排好序。
+    返回 (期末余额, 期初仍未核销余额)；原地给每行加 '余额' / '开项'(bool) / '开项余额'。"""
+    opening = round(opening or 0, 2)
+    bal = opening
+    for ln in lines:
+        bal = round(bal + (ln.get("借") or 0) - (ln.get("贷") or 0), 2)
+        ln["余额"] = bal
+        ln["开项"] = False
+    ending = bal
+    debit_bal = ending >= 0                 # 余额方向：借方余额→借=计提/贷=核销；贷方余额→反过来
+    queue = []                              # 计提队列 [{'ln':行或None(期初), 'remain':未核销额}]
+    if (opening > 0 and debit_bal) or (opening < 0 and not debit_bal):
+        queue.append({"ln": None, "remain": abs(opening)})
+    for ln in lines:
+        accrue = (ln.get("借") or 0) if debit_bal else (ln.get("贷") or 0)
+        clear = (ln.get("贷") or 0) if debit_bal else (ln.get("借") or 0)
+        if accrue > 0.005:
+            queue.append({"ln": ln, "remain": round(accrue, 2)})
+        rem = clear
+        while rem > 0.005 and queue:
+            head = queue[0]
+            take = min(head["remain"], rem)
+            head["remain"] = round(head["remain"] - take, 2)
+            rem = round(rem - take, 2)
+            if head["remain"] <= 0.005:
+                queue.pop(0)
+    open_begin = 0.0
+    for q in queue:
+        if q["ln"] is None:
+            open_begin = q["remain"]
+        else:
+            q["ln"]["开项"] = True
+            q["ln"]["开项余额"] = q["remain"]
+    return ending, round(open_begin, 2)
+
+
+def build_voucher_lines(voucher_rows, code, dim, dim_name="", opening=0):
+    """下钻反查：从序时账逐笔挑出某 (科目, 维度) 的凭证行 → 明细账（含滚动余额 + 未核销开项标注）。
+    维度归属（V2.597 根治）：序时账把有效核算维度槽(dim0/dim1…)一并带出，按【结构化维度精确匹配】；
+    退化顺序：结构化维度→(旧)FF100002 编码→供应商核心名在摘要里(dim_name)。
+    opening=该(科目,维度)期初，用于算滚动余额与开项。返回 {lines,借合计,贷合计,笔数,结构命中,余额末,期初开项}。"""
     code, dim = str(code or ""), str(dim or "")
     core = supplier_core(dim_name)
 
@@ -393,12 +432,20 @@ def build_voucher_lines(voucher_rows, code, dim, dim_name=""):
         d, c = to_f(gv(r, "借", "FDEBIT")), to_f(gv(r, "贷", "FCREDIT"))
         grp = str(gv(r, "凭证字", "FVOUCHERGROUPID.FName") or "")
         no = gv(r, "凭证号", "FVOUCHERGROUPNO")
+        try:
+            nonum = int(no)
+        except (TypeError, ValueError):
+            nonum = 0
         lines.append({"日期": str(gv(r, "日期", "FDATE") or "")[:10],
                       "凭证": (str(grp) + "-" + str(no)) if (grp or no not in ("", None)) else "",
                       "摘要": str(gv(r, "摘要", "FEXPLANATION") or ""),
                       "借": round(d, 2), "贷": round(c, 2),
-                      "制单人": str(gv(r, "制单人", "FCREATORID.FName") or "")})
+                      "制单人": str(gv(r, "制单人", "FCREATORID.FName") or ""), "_no": nonum})
         td += d
         tc += c
+    lines.sort(key=lambda x: (x["日期"], x.get("_no", 0)))
+    for ln in lines:
+        ln.pop("_no", None)
+    ending, open_begin = _annotate_ledger(lines, opening)
     return {"lines": lines, "借合计": round(td, 2), "贷合计": round(tc, 2), "笔数": len(lines),
-            "结构命中": struct_hits}
+            "结构命中": struct_hits, "余额末": ending, "期初开项": open_begin}

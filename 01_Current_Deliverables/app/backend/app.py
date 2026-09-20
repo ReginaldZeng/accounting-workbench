@@ -3701,7 +3701,8 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = "", full
         return {**base, "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
                 "note": "序时账取数失败：%s" % e}
     det = (sb.build_voucher_lines(vrows, code, "", "") if full
-           else sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", "")))
+           else sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", ""),
+                                        opening=(row or {}).get("期初", 0)))
     out = {**base, "detail": det, "full": bool(full)}
     # 结构化维度还没命中(结构命中==0，当前靠摘要兜底) → 附诊断：逐个试核算维度槽，看供应商在哪个槽（据此根治）
     if CFG["source"] == "kingdee" and not full and det.get("结构命中", 0) == 0:
@@ -3734,7 +3735,7 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
         chain = []
         for k, rec in enumerate(hist):
             yy, pp = _period_minus(y, p, k + 1)
-            det = sb.build_voucher_lines(rec.get("vouchers", []), code, dim)
+            det = sb.build_voucher_lines(rec.get("vouchers", []), code, dim, opening=rec.get("期初", 0))
             chain.append({"ym": "%04d-%02d" % (yy, pp), "期初": rec.get("期初"), "本期借方": rec.get("本期借方"),
                           "本期贷方": rec.get("本期贷方"), "期末": rec.get("期末"), "detail": det})
         reached0 = bool(chain) and abs((chain[-1].get("期初") or 0)) < 0.005
@@ -3758,7 +3759,8 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
             prows = sb.normalize_logi_rows(
                 kc.fetch_subject_balance_full(yy, pp, org_code, cur=cur))
             pr = next((r for r in prows if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
-            det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, code, org_name), code, dim, dim_name)
+            det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, code, org_name), code, dim, dim_name,
+                                         opening=(pr or {}).get("期初", 0))
             beg = (pr or {}).get("期初")
             entry = {"ym": "%04d-%02d" % (yy, pp), "期初": beg, "本期借方": (pr or {}).get("本期借方"),
                      "本期贷方": (pr or {}).get("本期贷方"), "期末": (pr or {}).get("期末"), "detail": det}

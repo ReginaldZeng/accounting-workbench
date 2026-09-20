@@ -8,23 +8,23 @@ import PeriodPicker from '../components/PeriodPicker.jsx'
 let _cache = null
 const fmt = n => n == null ? '—' : Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const ITEMS = ['期初', '本期借方', '本期贷方', '期末']
+const PAGE = 15   // 明细账弹窗每页笔数
 
 export default function FiSubjectBalance({ cfg, onPeriod }) {
   const [d, setD] = useState(_cache), [busy, setBusy] = useState(false)
   const [chk, setChk] = useState(null), [upBusy, setUpBusy] = useState(false), [upMsg, setUpMsg] = useState('')
   const [showAll, setShowAll] = useState(false)
-  const [openKey, setOpenKey] = useState(null), [detail, setDetail] = useState(null), [detailBusy, setDetailBusy] = useState(false)
+  const [modal, setModal] = useState(null), [md, setMd] = useState(null), [mdBusy, setMdBusy] = useState(false), [mpage, setMpage] = useState(0)
   const [trace, setTrace] = useState(null), [traceBusy, setTraceBusy] = useState(false)
   const [fullDet, setFullDet] = useState(null), [fullBusy, setFullBusy] = useState(false)
   const [orgs, setOrgs] = useState([]), [org, setOrg] = useState('')
   const [q, setQ] = useState('')
   const fileRef = useRef(null)
-  const drill = async (code, dimc) => {
-    const key = code + '|' + dimc
-    if (openKey === key) { setOpenKey(null); setDetail(null); setTrace(null); setFullDet(null); return }
-    setOpenKey(key); setDetail(null); setTrace(null); setFullDet(null); setDetailBusy(true)
-    try { setDetail(await getFiSubjectDetail(code, dimc, org)) } catch (e) { setDetail({ ok: false, note: '取明细失败：' + e.message }) } finally { setDetailBusy(false) }
+  const openModal = async (code, dimc, kmName, dimName) => {
+    setModal({ code, dim: dimc, 科目名: kmName, 维度名: dimName }); setMd(null); setTrace(null); setFullDet(null); setMpage(0); setMdBusy(true)
+    try { setMd(await getFiSubjectDetail(code, dimc, org)) } catch (e) { setMd({ ok: false, note: '取明细失败：' + e.message }) } finally { setMdBusy(false) }
   }
+  const closeModal = () => { setModal(null); setMd(null); setTrace(null); setFullDet(null) }
   const doTrace = async (code, dimc) => {
     setTraceBusy(true)
     try { setTrace(await getFiSubjectTrace(code, dimc, org)) } catch (e) { setTrace({ ok: false, note: '追溯失败：' + e.message }) } finally { setTraceBusy(false) }
@@ -33,35 +33,35 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     setFullBusy(true)
     try { setFullDet(await getFiSubjectDetail(code, dimc, org, true)) } catch (e) { setFullDet({ ok: false, note: '取全部凭证失败：' + e.message }) } finally { setFullBusy(false) }
   }
-  // 逐笔凭证小表（本期下钻 / 追溯历史期共用）
-  const voucherTable = (det) => {
+  // 明细账小表：滚动余额 + 未核销开项高亮（构成期末的那几笔标绿）。showLines 传分页切片；不传=全部（追溯各期用）。
+  const ledgerTable = (det, showLines) => {
     if (!(det && det.lines && det.lines.length > 0)) return <div className="foot">本期无逐笔凭证。</div>
-    // 主变动高亮：本期金额（借/贷取大）最大的那一笔＝这笔余额的主要来源，标出来省得人肉找
-    let maxIdx = -1, maxAbs = 0
-    det.lines.forEach((ln, i) => { const a = Math.max(Math.abs(ln['借'] || 0), Math.abs(ln['贷'] || 0)); if (a > maxAbs) { maxAbs = a; maxIdx = i } })
+    const ls = showLines || det.lines
     const cell = { padding: '5px 8px', borderBottom: '1px solid var(--line)' }
     return (
       <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-        <thead><tr>{['日期', '凭证', '摘要', '借方', '贷方', '制单人'].map((h, hi) =>
-          <th key={h} style={{ textAlign: (hi === 3 || hi === 4) ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
+        <thead><tr>{['日期', '凭证', '摘要', '借方', '贷方', '余额', '制单人'].map((h, hi) =>
+          <th key={h} style={{ textAlign: (hi >= 3 && hi <= 5) ? 'right' : 'left', padding: '5px 8px', color: 'var(--ink-3)', borderBottom: '1px solid var(--line)', fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>)}</tr></thead>
         <tbody>
-          {det.lines.map((ln, li) => <tr key={li} style={li === maxIdx ? { background: 'var(--amber-bg)' } : undefined} title={li === maxIdx ? '本期主变动（这笔余额的主要来源）' : undefined}>
+          {ls.map((ln, li) => <tr key={li} style={ln['开项'] ? { background: 'var(--green-bg)' } : undefined} title={ln['开项'] ? '未核销的开项（构成期末余额）' : undefined}>
             <td style={{ ...cell, whiteSpace: 'nowrap' }}>{ln['日期']}</td>
-            <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: li === maxIdx ? 700 : 400 }}>{li === maxIdx ? '★ ' : ''}{ln['凭证']}</td>
+            <td style={{ ...cell, whiteSpace: 'nowrap', fontWeight: ln['开项'] ? 700 : 400 }}>{ln['凭证']}{ln['开项'] ? <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, color: 'var(--green)', background: 'var(--green-bg)', padding: '1px 6px', borderRadius: 5 }}>未核销</span> : ''}</td>
             <td style={cell}>{ln['摘要']}</td>
-            <td style={{ ...cell, textAlign: 'right', color: ln['借'] < 0 ? 'var(--red)' : undefined, fontWeight: li === maxIdx ? 700 : 400 }}>{ln['借'] ? fmt(ln['借']) : ''}</td>
-            <td style={{ ...cell, textAlign: 'right', color: ln['贷'] < 0 ? 'var(--red)' : undefined, fontWeight: li === maxIdx ? 700 : 400 }}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
+            <td style={{ ...cell, textAlign: 'right', color: ln['借'] < 0 ? 'var(--red)' : undefined }}>{ln['借'] ? fmt(ln['借']) : ''}</td>
+            <td style={{ ...cell, textAlign: 'right', color: ln['贷'] < 0 ? 'var(--red)' : undefined }}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
+            <td style={{ ...cell, textAlign: 'right', fontWeight: 600, color: ln['余额'] < 0 ? 'var(--red)' : undefined }}>{fmt(ln['余额'])}</td>
             <td style={{ ...cell, whiteSpace: 'nowrap' }}>{ln['制单人']}</td>
           </tr>)}
-          <tr><td colSpan={3} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>本期发生合计</td>
+          <tr><td colSpan={3} style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>本期发生合计 / 期末余额</td>
             <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['借合计'])}</td>
-            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['贷合计'])}</td><td></td></tr>
+            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{fmt(det['贷合计'])}</td>
+            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700 }}>{fmt(det['余额末'])}</td><td></td></tr>
         </tbody>
       </table>
     )
   }
   const loadFor = async (o) => {
-    setOpenKey(null); setDetail(null); setTrace(null)
+    setModal(null); setMd(null); setTrace(null)
     try { const x = await getFiSubjectBalance(o); _cache = x; setD(x) } catch (e) {}
     try { setChk(await getFiSubjectCheck(o)) } catch (e) {}
   }
@@ -80,7 +80,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   const onOrg = (o) => { setOrg(o); setD(null); loadFor(o) }
   const sync = async () => {
     setBusy(true)
-    try { const x = await syncFiSubjectBalance(org); _cache = x; setD(x); setOpenKey(null); setDetail(null); setTrace(null); setChk(await getFiSubjectCheck(org)) } finally { setBusy(false) }
+    try { const x = await syncFiSubjectBalance(org); _cache = x; setD(x); setModal(null); setMd(null); setTrace(null); setChk(await getFiSubjectCheck(org)) } finally { setBusy(false) }
   }
   const upload = async (f) => {
     if (!f) return
@@ -182,7 +182,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
           style={{ flex: '1 1 300px', maxWidth: 440, height: 34, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 12px', fontSize: 13 }} />
         {ql && <span className="foot">筛出 {fRows.length} 行 / 共 {rows.length} 行<span onClick={() => setQ('')} style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }}>清除</span></span>}
       </div>
-      <div className="foot" style={{ marginTop: 8 }}>👉 点开任意<b>维度行</b>，看这笔余额是怎么构成的：期末＝期初＋本期借－本期贷 的勾稽拆解 + 本期发生的逐笔凭证（日期/凭证号/摘要/借贷/制单人）。</div>
+      <div className="foot" style={{ marginTop: 8 }}>👉 点开任意<b>维度行</b>，弹出它的<b>明细账</b>（逐笔滚动余额、分页）：<span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>的那几笔，其和＝期末余额（这笔余额到底挂着哪几笔）；还能一路追溯期初。</div>
       <div className="tbl-wrap"><table style={{ minWidth: 920 }}>
         <thead><tr>{['科目 / 维度', '大类', '期初余额', '本期借方', '本期贷方', '期末余额'].map((h, i) =>
           <th className="th" key={h} style={i >= 2 ? { textAlign: 'right' } : null}>{h}</th>)}</tr></thead>
@@ -196,57 +196,17 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
               <td className="num" style={{ fontWeight: 600 }}>{fmt(g['贷'])}</td>
               <td className="num" style={{ fontWeight: 600 }}>{fmt(g['期末'])}</td>
             </tr>
-            {g.rows.map((r, i) => {
-              const k = r['科目编码'] + '|' + (r['维度编码'] || '')
-              const isOpen = openKey === k
-              return (<React.Fragment key={g.code + i}>
-                <tr onClick={() => drill(r['科目编码'], r['维度编码'] || '')} style={{ cursor: 'pointer', background: isOpen ? 'var(--accent-soft)' : undefined }} title="点开看这笔余额的构成（勾稽拆解 + 逐笔凭证）">
-                  <td style={{ paddingLeft: 26 }} className="acct"><span style={{ display: 'inline-block', width: 12, color: 'var(--ink-3)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>▸</span> {r['账户']}</td>
-                  <td></td>
-                  <td className="num">{fmt(r['期初'])}</td>
-                  <td className="num">{fmt(r['本期借方'])}</td>
-                  <td className="num">{fmt(r['本期贷方'])}</td>
-                  <td className="num" style={{ color: r['期末'] < 0 ? 'var(--red)' : undefined }}>{fmt(r['期末'])}</td>
-                </tr>
-                {isOpen && <tr><td colSpan={6} style={{ background: 'var(--bg-sub)', padding: '10px 14px 12px 26px' }}>
-                  {detailBusy && <div className="muted">加载明细中…</div>}
-                  {!detailBusy && detail && <>
-                    <div style={{ marginBottom: 8, fontSize: 12.5 }}>
-                      本期({d.period}) 期末余额 <b style={{ color: detail['期末'] < 0 ? 'var(--red)' : 'var(--ink)' }}>{fmt(detail['期末'])}</b> 的构成：
-                      <span style={{ marginLeft: 6 }}>期初 {fmt(detail['期初'])} ＋ 本期借 {fmt(detail['本期借方'])} － 本期贷 {fmt(detail['本期贷方'])} ＝ <b>{fmt(detail['期末'])}</b></span>
-                    </div>
-                    {detail.note && <div className="foot" style={{ marginBottom: 6 }}>{detail.note}</div>}
-                    {voucherTable(detail.detail)}
-                    {d.source === 'kingdee' && detail.detail && (Math.abs((detail['本期借方'] || 0) - (detail.detail['借合计'] || 0)) > 0.005 || Math.abs((detail['本期贷方'] || 0) - (detail.detail['贷合计'] || 0)) > 0.005) && <div style={{ marginTop: 8 }}>
-                      <div className="banner err" style={{ marginTop: 0 }}>逐笔合计与余额表本期发生对不上：借 差 {fmt((detail['本期借方'] || 0) - (detail.detail['借合计'] || 0))}、贷 差 {fmt((detail['本期贷方'] || 0) - (detail.detail['贷合计'] || 0))} —— 多半是某笔凭证摘要没写供应商名、没归进来。</div>
-                      {!fullDet && <button className="btn" style={{ marginTop: 6 }} onClick={() => loadFull(detail.code, detail.dim)} disabled={fullBusy}>{fullBusy ? '取全部凭证中…' : '看本科目本期全部凭证 → 找是哪一笔'}</button>}
-                      {fullDet && fullDet.detail && <div style={{ marginTop: 6 }}>
-                        <div className="foot" style={{ marginBottom: 4 }}>本科目本期全部凭证（{fullDet.detail['笔数']} 笔，含各供应商）——在里面找摘要没写「{detail['维度名']}」但其实属于它的那笔（金额多半＝上面的差额）：</div>
-                        {voucherTable(fullDet.detail)}
-                      </div>}
-                    </div>}
-                    {detail._debug && <div style={{ marginTop: 8, padding: 8, background: 'var(--bg)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>
-                      🔧 诊断（本期有发生却没匹配到凭证，把这段截图发开发）：{'\n'}{JSON.stringify(detail._debug, null, 2)}
-                    </div>}
-                    {Math.abs(detail['期初'] || 0) > 0.005 && <div style={{ marginTop: 10 }}>
-                      {!trace && <button className="btn" onClick={() => doTrace(detail.code, detail.dim)} disabled={traceBusy}>{traceBusy ? '追溯中…' : '↑ 追溯期初 ' + fmt(detail['期初']) + ' 的来源'}</button>}
-                      {trace && <div style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12, marginTop: 2 }}>
-                        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>期初 {fmt(detail['期初'])} 的来源 —— 逐期往前翻（期初 ＝ 上期期末）</div>
-                        {trace.note && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}
-                        {(trace.chain || []).map((c, ci) => <div key={ci} style={{ marginBottom: 12 }}>
-                          <div style={{ fontSize: 12.5, marginBottom: 4 }}>
-                            <span style={{ fontWeight: 600 }}>{c.ym}</span> · 期末 {fmt(c['期末'])} ＝ 期初 {fmt(c['期初'])} ＋ 本期借 {fmt(c['本期借方'])} － 本期贷 {fmt(c['本期贷方'])}
-                          </div>
-                          {voucherTable(c.detail)}
-                          {c._debug && <div style={{ marginTop: 6, padding: 8, background: 'var(--bg)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>🔧 诊断（{c.ym} 有发生却没匹配到凭证，把这段截图发开发）：{'\n'}{JSON.stringify(c._debug, null, 2)}</div>}
-                        </div>)}
-                        {trace.reached_zero && <div className="foot" style={{ color: 'var(--green)' }}>✓ 已追溯到期初为 0 —— 该维度此前无结转（建账起点），到此为止。</div>}
-                      </div>}
-                    </div>}
-                  </>}
-                </td></tr>}
-              </React.Fragment>)
-            })}
+            {g.rows.map((r, i) => (
+              <tr key={g.code + i} onClick={() => openModal(r['科目编码'], r['维度编码'] || '', r['科目编码'] + ' ' + r['科目名称'], r['账户'])}
+                style={{ cursor: 'pointer' }} title="点开看这笔余额的明细账（滚动余额 + 未核销开项 + 追溯期初）">
+                <td style={{ paddingLeft: 26 }} className="acct"><span style={{ color: 'var(--accent)', marginRight: 4 }}>▸</span>{r['账户']}</td>
+                <td></td>
+                <td className="num">{fmt(r['期初'])}</td>
+                <td className="num">{fmt(r['本期借方'])}</td>
+                <td className="num">{fmt(r['本期贷方'])}</td>
+                <td className="num" style={{ color: r['期末'] < 0 ? 'var(--red)' : undefined }}>{fmt(r['期末'])}</td>
+              </tr>
+            ))}
           </React.Fragment>))}
           {groups.length > 0 && <tr style={{ background: 'var(--bg)' }}>
             <td style={{ fontWeight: 700 }}>合计</td><td></td>
@@ -260,5 +220,52 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
       </table></div>
       <div className="foot">口径说明：余额取【借 − 贷】有符号口径，费用类为正、其他应付款（负债）为负，勾稽恒等式 期末 = 期初 + 本期借方 − 本期贷方 恒成立。物流科目段 = 物流计提工具入账落到的科目（销售费用出库运费/仓储费、主营业务成本/制造费用入库运费、研发费用搬运费、其他应付款—供应商往来、暂估进项税）。</div>
     </div>
+
+    {/* 明细账弹窗：滚动余额 + 未核销开项 + 分页 + 追溯期初 */}
+    {modal && <div onClick={closeModal} style={{ position: 'fixed', inset: 0, background: 'rgba(20,24,40,.45)', zIndex: 200, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '32px 16px', overflow: 'auto' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg)', borderRadius: 14, width: 'min(1040px,96vw)', boxShadow: '0 24px 70px rgba(20,24,40,.35)', padding: '16px 20px 20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
+          <div><div style={{ fontSize: 15, fontWeight: 700 }}>{modal.科目名} · {modal.维度名}</div>
+            <div className="foot">明细账 · {d.org_name || ''} · {d.period}</div></div>
+          <span onClick={closeModal} title="关闭" style={{ cursor: 'pointer', fontSize: 22, color: 'var(--ink-3)', lineHeight: 1 }}>×</span>
+        </div>
+        {mdBusy && <div className="loading">加载明细账…</div>}
+        {!mdBusy && md && <>
+          <div className="banner" style={{ marginTop: 0, background: 'var(--bg-sub)', borderColor: 'var(--line)', color: 'var(--ink)' }}>
+            本期({d.period}) 期末余额 <b style={{ color: md['期末'] < 0 ? 'var(--red)' : undefined }}>{fmt(md['期末'])}</b> ＝ 期初 {fmt(md['期初'])} ＋ 本期借 {fmt(md['本期借方'])} － 本期贷 {fmt(md['本期贷方'])}
+            {md.detail && (md.detail.lines || []).some(l => l['开项']) && <span> · <span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>那几笔的和＝期末（这笔余额的构成）</span>}
+          </div>
+          {md.note && <div className="foot" style={{ margin: '6px 0' }}>{md.note}</div>}
+          {(() => {
+            const ls = (md.detail && md.detail.lines) || []
+            const pages = Math.max(1, Math.ceil(ls.length / PAGE))
+            const pg = Math.min(mpage, pages - 1)
+            return <>
+              <div style={{ overflowX: 'auto', marginTop: 8 }}>{ledgerTable(md.detail, ls.slice(pg * PAGE, (pg + 1) * PAGE))}</div>
+              {pages > 1 && <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center', marginTop: 8, fontSize: 12.5 }}>
+                <button className="btn" disabled={pg <= 0} onClick={() => setMpage(pg - 1)}>上一页</button>
+                <span className="foot">第 {pg + 1} / {pages} 页 · 共 {ls.length} 笔</span>
+                <button className="btn" disabled={pg >= pages - 1} onClick={() => setMpage(pg + 1)}>下一页</button>
+              </div>}
+            </>
+          })()}
+          {md._debug && <div style={{ marginTop: 8, padding: 8, background: 'var(--bg-sub)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>🔧 诊断（本期有发生却没匹配到凭证，截图发开发）：{'\n'}{JSON.stringify(md._debug, null, 2)}</div>}
+          {d.source === 'kingdee' && md.detail && (Math.abs((md['本期借方'] || 0) - (md.detail['借合计'] || 0)) > 0.005 || Math.abs((md['本期贷方'] || 0) - (md.detail['贷合计'] || 0)) > 0.005) &&
+            <div className="banner err" style={{ marginTop: 8 }}>逐笔合计与余额表本期发生对不上：借 差 {fmt((md['本期借方'] || 0) - (md.detail['借合计'] || 0))}、贷 差 {fmt((md['本期贷方'] || 0) - (md.detail['贷合计'] || 0))} —— 多半是某笔凭证摘要没写供应商名、没归进来。</div>}
+          {Math.abs(md['期初'] || 0) > 0.005 && <div style={{ marginTop: 12 }}>
+            {!trace && <button className="btn" onClick={() => doTrace(modal.code, modal.dim)} disabled={traceBusy}>{traceBusy ? '追溯中…' : '↑ 追溯期初 ' + fmt(md['期初']) + ' 的来源（逐期往前翻）'}</button>}
+            {trace && <div style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12, marginTop: 2 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>期初 {fmt(md['期初'])} 的来源 —— 逐期往前翻（期初 ＝ 上期期末）</div>
+              {trace.note && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}
+              {(trace.chain || []).map((c, ci) => <div key={ci} style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12.5, marginBottom: 4 }}><span style={{ fontWeight: 600 }}>{c.ym}</span> · 期末 {fmt(c['期末'])} ＝ 期初 {fmt(c['期初'])} ＋ 本期借 {fmt(c['本期借方'])} － 本期贷 {fmt(c['本期贷方'])}</div>
+                <div style={{ overflowX: 'auto' }}>{ledgerTable(c.detail)}</div>
+              </div>)}
+              {trace.reached_zero && <div className="foot" style={{ color: 'var(--green)' }}>✓ 已追溯到期初为 0 —— 建账起点，到此为止。</div>}
+            </div>}
+          </div>}
+        </>}
+      </div>
+    </div>}
   </div>)
 }
