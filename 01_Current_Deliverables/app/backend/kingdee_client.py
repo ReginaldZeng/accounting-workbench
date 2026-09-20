@@ -393,6 +393,35 @@ def fetch_gl_voucher_subjects(year, period, prefixes=("1001", "1002", "1012", "1
     return _query(s, conf, "GL_VOUCHER", GL_VOUCHER_SUBJ_FIELDS, flt, "FDATE")
 
 
+# 序时账核算维度槽候选：找供应商到底在哪个槽（FF100002 对暂估进项税/其他应付款是空的）。
+GL_DIM_CANDS = ["FDetailID.FASSTACTID.FNumber", "FDetailID.FASSTACTID.FName",
+                "FDetailID.FF100001.FNumber", "FDetailID.FF100003.FNumber",
+                "FDetailID.FF100004.FNumber", "FDetailID.FF100005.FNumber",
+                "FDetailID.FF100006.FNumber", "FDetailID.FF100007.FNumber"]
+
+
+def probe_voucher_dims(year, period, code, s=None, conf=None):
+    """诊断：逐个试序时账的核算维度槽（各自单独查、互不影响），返回每个槽的非空样例值。
+    用来定位供应商到底在哪个槽（如某槽样例值是「物流运输服务016」即它）。"""
+    s, conf = login(s, conf) if s is None else (s, conf or load_conf())
+    flt = "FAccountID.FNumber like '%s%%' and FYear=%d and FPeriod=%d" % (code, int(year), int(period))
+    out = {}
+    for c in GL_DIM_CANDS:
+        rows, err = _query_raw(s, conf, "GL_VOUCHER", "FEXPLANATION,FDEBIT,FCREDIT," + c, flt, 0)
+        if err:
+            out[c] = "✗ 该字段查不了：" + str(err)[:70]
+        else:
+            vals = []
+            for r in (rows or []):
+                v = _cell(r[3]) if len(r) > 3 else ""
+                if v and v not in vals:
+                    vals.append(v)
+                if len(vals) >= 8:
+                    break
+            out[c] = {"取到行数": len(rows or []), "非空样例值": vals}
+    return out
+
+
 def fetch_voucher_count(year, period, book_code, s=None, conf=None):
     """凭证归档号段体检用：该账簿该期间「记」字凭证的最大号 = 当月凭证张数。
     取 GL_VOUCHER 的 FVOUCHERGROUPNO（凭证字内序号），按账簿+期间过滤，取最大值。只读。"""

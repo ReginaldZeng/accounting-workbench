@@ -3676,15 +3676,17 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = "", full
     det = (sb.build_voucher_lines(vrows, code, "", "") if full
            else sb.build_voucher_lines(vrows, code, dim, (row or {}).get("账户", "")))
     out = {**base, "detail": det, "full": bool(full)}
-    if CFG["source"] == "kingdee" and not full and det.get("笔数", 0) == 0:  # 有科目却没匹配到凭证 → 附诊断，供真机对字段
+    diff = (abs((base.get("本期借方") or 0) - (det.get("借合计") or 0)) > 0.005
+            or abs((base.get("本期贷方") or 0) - (det.get("贷合计") or 0)) > 0.005)
+    if CFG["source"] == "kingdee" and not full and (det.get("笔数", 0) == 0 or diff):
+        # 没匹配到凭证 / 有差额 → 附诊断：逐个试核算维度槽，看供应商到底在哪个槽（据此根治为精确匹配）
         try:
-            raw = kc.fetch_gl_voucher_subjects(int(CFG["year"]), int(CFG["period"]), (str(code),))
-            out["_debug"] = {"我匹配的科目": code, "我匹配的维度编码": dim, "账簿过滤org_name": sys_.get("org_name"),
-                             "序时账未过滤行数": len(raw), "过滤账簿后行数": len(vrows),
-                             "distinct账簿": sorted({str(r.get("账簿") or "") for r in raw})[:10],
-                             "样例行前3原样": raw[:3]}
+            out["_debug"] = {"我匹配的科目": code, "我匹配的维度编码": dim, "维度名": (row or {}).get("账户", ""),
+                             "账簿过滤org_name": sys_.get("org_name"),
+                             "试探核算维度槽(找供应商在哪个)": kc.probe_voucher_dims(
+                                 int(CFG["year"]), int(CFG["period"]), code)}
         except Exception as e:
-            out["_debug"] = {"取序时账异常": str(e)[:300]}
+            out["_debug"] = {"诊断异常": str(e)[:300]}
     return out
 
 
