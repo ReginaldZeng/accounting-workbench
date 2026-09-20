@@ -1,16 +1,12 @@
 // [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
 // Description: 接入电商月结工作台路由，并在进入时展开「应收模块 › 电商对账」承接链路。
 import React, { useState, useEffect } from 'react'
+import LogisticsWorkspace from './views/LogisticsWorkspace.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import DataImport from './views/DataImport.jsx'
 import FundDashboard from './views/FundDashboard.jsx'
 import AccountLedger from './views/AccountLedger.jsx'
 import WealthRecon from './views/WealthRecon.jsx'
-import LogisticsAccrual from './views/LogisticsAccrual.jsx'
-import LogisticsBasicData from './views/LogisticsBasicData.jsx'
-import LogisticsBillUpload from './views/LogisticsBillUpload.jsx'
-import LogisticsRecon from './views/LogisticsRecon.jsx'
-import LogisticsCost from './views/LogisticsCost.jsx'
 import PeriodClose from './views/PeriodClose.jsx'
 import FundBoard from './views/FundBoard.jsx'
 import CostLedger from './views/CostLedger.jsx'
@@ -150,9 +146,9 @@ export default function App() {
         {view === 'wealth' && canView('wealth') && <WealthRecon cfg={cfg} onPeriod={changePeriod} />}
         {view === 'fxrate' && canView('fxrate') && <FxRate user={user} />}
         {view === 'periodclose' && canView('periodclose') && <PeriodClose cfg={cfg} onPeriod={changePeriod} user={user} onChanged={refreshCfg} />}
-        {view === 'logistics' && canView('logistics') && <LogisticsAccrual user={user} />}
-        {view === 'logibase' && canView('logibase') && <LogisticsBasicData user={user} />}
-        {view === 'logiupload' && canView('logiupload') && <LogisticsBillUpload user={user} />}
+        {view === 'logistics' && canView('logistics') && <LogisticsWorkspace entry="receive" cfg={cfg} />}
+        {view === 'logibase' && canView('logibase') && <LogisticsWorkspace entry="master" cfg={cfg} />}
+        {view === 'logiupload' && canView('logiupload') && <LogisticsWorkspace entry="overview" cfg={cfg} />}
         {/* V2.52：原「月结核对」(clrecon) 这一层取消，页面内容上提——点「成本台账」直接进七步工作流页。
             V2.254：成本台账→**存货台账**，二级改回纯分组，八步工作流页下沉成三级「台账导出」(clexport)。
             页面代码一行没动，还是同一个 CostLedger.jsx；变的只是它挂在树上的位置。
@@ -175,8 +171,8 @@ export default function App() {
         {view === 'ecommonth' && canView('ecommonth') && <EcomWorkbench user={user} onNav={setView} />}
         {view === 'ecomsettle' && canView('ecomsettle') && <EcomWorkbench user={user} onNav={setView} initialScreen="cash" />}
         {view === 'ecombase' && canView('ecombase') && <EcomBasicData user={user} />}
-        {view === 'logisticspay' && canView('logisticspay') && <LogisticsRecon user={user} cfg={cfg} onPeriod={changePeriod} />}
-        {view === 'logisticscost' && canView('logisticscost') && <LogisticsCost user={user} />}
+        {view === 'logisticspay' && canView('logisticspay') && <LogisticsWorkspace entry="reconcile" cfg={cfg} />}
+        {view === 'logisticscost' && canView('logisticscost') && <LogisticsWorkspace entry="ledger" cfg={cfg} />}
         {/* 自建但还没接代码的模块（key 不在已编码集合里）：即便被设为可进入，也给规划中占位而非白屏 */}
         {!CODED_VIEWS.has({ import: 'reconcile', fund: 'reconcile', result: 'reconcile' }[view] || view) && canView(view) &&
           <Placeholder title={(navDef?.modules || []).find(m => m.key === view)?.label || view}
