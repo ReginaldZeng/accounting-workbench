@@ -15,10 +15,16 @@ MONEY_PREFIXES = ("1001", "1002", "1012", "1101")
 CAT = {"1001": "库存现金", "1002": "银行存款", "1012": "其它货币资金", "1101": "交易性金融资产"}
 ITEMS = ("期初", "本期借方", "本期贷方", "期末")
 
-# ── 物流相关科目段（V2.588）──
-# 物流计提工具入账落到的科目：费用侧 6601/6604/6401/5101、应付侧 2241.02、进项税 2221.01.07。
-# 前缀取到能唯一区分的位数即可（2241/2221 用四位，避免误收其它 22xx）。
-LOGI_PREFIXES = ("5101", "6401", "6601", "6604", "2241", "2221")
+# ── 物流相关科目（V2.588 建，V2.590 按真金蝶收窄口径）──
+# 物流计提工具（logistics_accrual.py）入账落到的科目就是"物流相关"的权威定义：
+#   · 暂估进项税 = 精确明细科目 2221.01.07（挂供应商）  · 其他应付款—供应商往来 = 2241.02（挂供应商）
+#   · 费用 = 6601/6604/6401/5101，但物流部分靠【费用项目维度】区分（出库运费/入库运费/货物仓储费/搬运费/研发外购）
+# ⚠ 不能用 2221/2241 整段前缀——那会把整棵应交税费/其他应付款树都捞进来（真机 554 行即此坑，V2.590 修）。
+LOGI_EXACT = ("2221.01.07", "2241.02")               # 精确明细科目（供应商维度），任意维度都收
+LOGI_FEE_PREFIXES = ("5101", "6401", "6601", "6604")  # 费用科目：物流部分靠费用项目维度区分
+LOGI_FEE_ITEMS = ("运费", "仓储", "搬运", "研发外购")   # 物流费用项目关键字（在维度名里匹配）
+# 上传解析（按科目汇总、拿不到维度）用的前缀集：精确到 2221.01.07/2241.02，费用段仍按科目前缀
+LOGI_PREFIXES = ("2221.01.07", "2241.02", "5101", "6401", "6601", "6604")
 LOGI_CAT = [
     ("5101", "制造费用"), ("6401", "主营业务成本"), ("6601", "销售费用"),
     ("6604", "研发费用"), ("2241", "其他应付款"), ("2221", "应交税费"),
@@ -30,6 +36,16 @@ def cat_of_logi(code):
         if str(code).startswith(p):
             return name
     return ""
+
+
+def is_logi(code, dim_name=""):
+    """某(科目,维度)是否物流相关：精确科目全收；费用科目须维度名命中物流费用项目关键字。"""
+    code, dn = str(code or ""), str(dim_name or "")
+    if code.startswith(LOGI_EXACT):
+        return True
+    if code.startswith(LOGI_FEE_PREFIXES) and any(k in dn for k in LOGI_FEE_ITEMS):
+        return True
+    return False
 
 
 def to_f(v):
@@ -243,6 +259,31 @@ def normalize_full_rows(rows12, prefixes=LOGI_PREFIXES, cat_fn=cat_of_logi):
         dim = str((r[3] if len(r) > 3 else "") or dimc or "").strip()
         out.append({"科目编码": code, "科目名称": name, "科目大类": cat_fn(code),
                     "维度编码": dimc, "账户": dim or "—", "币别": "CNY",
+                    "期初": round(g(4) - g(5), 2), "本期借方": round(g(6), 2),
+                    "本期贷方": round(g(7), 2), "期末": round(g(10) - g(11), 2)})
+    out.sort(key=lambda x: (x["科目编码"], x["账户"]))
+    return out
+
+
+def normalize_logi_rows(rows12, cat_fn=cat_of_logi):
+    """金蝶《科目余额表》12列 → 物流精确口径行 dict：
+    只留 2221.01.07/2241.02 的供应商明细 + 6601/6604/6401/5101 的物流费用项目明细；
+    丢弃各级科目汇总(空维度)行——避免整棵费用/税费树与父级汇总污染（真机 554 行即此坑）。"""
+    out = []
+    for r in rows12:
+        code = str((r[0] if len(r) > 0 else "") or "").strip()
+        name = str((r[1] if len(r) > 1 else "") or "").strip()
+        if not code or name == "合计":
+            continue
+        dimc = str((r[2] if len(r) > 2 else "") or "").strip()
+        dimn = str((r[3] if len(r) > 3 else "") or "").strip()
+        if not dimc:                       # 空维度=科目级汇总行，丢弃（前端按科目分组自算小计）
+            continue
+        if not is_logi(code, dimn):
+            continue
+        g = lambda i: to_f(r[i]) if i < len(r) else 0.0
+        out.append({"科目编码": code, "科目名称": name, "科目大类": cat_fn(code),
+                    "维度编码": dimc, "账户": dimn or dimc, "币别": "CNY",
                     "期初": round(g(4) - g(5), 2), "本期借方": round(g(6), 2),
                     "本期贷方": round(g(7), 2), "期末": round(g(10) - g(11), 2)})
     out.sort(key=lambda x: (x["科目编码"], x["账户"]))

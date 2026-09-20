@@ -95,7 +95,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   return (<div>
     <div className="head">
       <div><div className="h-title">科目余额表 · 解析与核对（物流）</div>
-        <div className="h-sub">物流相关科目段：销售费用 6601 / 研发费用 6604 / 主营业务成本 6401 / 制造费用 5101 · 其他应付款 2241 · 应交税费—进项税 2221 —— 系统取数 + 手工上传两条路都可核对</div></div>
+        <div className="h-sub">物流相关科目（按物流计提入账口径精确圈定）：暂估进项税 2221.01.07 · 其他应付款—供应商往来 2241.02（均挂供应商）· 物流费用 6601/6604/6401/5101（按费用项目：出库/入库运费·仓储费·搬运费）—— 系统取数 + 手工上传两条路都可核对</div></div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         {orgs.length > 0 && <select value={org} onChange={e => onOrg(e.target.value)} title="选择主体（账簿）"
           style={{ height: 32, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 8px', maxWidth: 240, fontSize: 13 }}>

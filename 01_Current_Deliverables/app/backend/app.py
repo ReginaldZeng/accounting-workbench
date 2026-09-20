@@ -3554,7 +3554,7 @@ def _fi_subject_balance(org=""):
     except kc.KingdeeError as e:
         return {**base, "org": pick["org"], "org_name": pick["org_name"],
                 "rows": [], "qc": sb.qc_rows([]), "error": str(e)}
-    rows = sb.normalize_full_rows(raw, sb.LOGI_PREFIXES, sb.cat_of_logi)
+    rows = sb.normalize_logi_rows(raw)
     return {**base, "org": pick["org"], "org_name": pick["org_name"], "rows": rows, "qc": sb.qc_rows(rows)}
 
 
@@ -3691,8 +3691,8 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
     try:
         for _n in range(_FISBAL_TRACE_MAX):
             yy, pp = _period_minus(yy, pp, 1)
-            prows = sb.normalize_full_rows(
-                kc.fetch_subject_balance_full(yy, pp, org_code, cur=cur), sb.LOGI_PREFIXES, sb.cat_of_logi)
+            prows = sb.normalize_logi_rows(
+                kc.fetch_subject_balance_full(yy, pp, org_code, cur=cur))
             pr = next((r for r in prows if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
             det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, org_name), code, dim)
             beg = (pr or {}).get("期初")
