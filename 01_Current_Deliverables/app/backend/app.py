@@ -3672,7 +3672,18 @@ def fi_subject_balance_detail(code: str = "", dim: str = "", org: str = ""):
     except Exception as e:                                       # 金蝶未取数/接口异常 → 只给勾稽拆解，不给逐笔
         return {**base, "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
                 "note": "序时账取数失败：%s" % e}
-    return {**base, "detail": sb.build_voucher_lines(vrows, code, dim)}
+    det = sb.build_voucher_lines(vrows, code, dim)
+    out = {**base, "detail": det}
+    if CFG["source"] == "kingdee" and det.get("笔数", 0) == 0:      # 有科目却没匹配到凭证 → 附诊断，供真机对字段
+        try:
+            raw = kc.fetch_gl_voucher_subjects(int(CFG["year"]), int(CFG["period"]), (str(code),))
+            out["_debug"] = {"我匹配的科目": code, "我匹配的维度编码": dim, "账簿过滤org_name": sys_.get("org_name"),
+                             "序时账未过滤行数": len(raw), "过滤账簿后行数": len(vrows),
+                             "distinct账簿": sorted({str(r.get("账簿") or "") for r in raw})[:10],
+                             "样例行前3原样": raw[:3]}
+        except Exception as e:
+            out["_debug"] = {"取序时账异常": str(e)[:300]}
+    return out
 
 
 def _period_minus(y, p, k):
@@ -3706,7 +3717,7 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
         cur = next((o.get("cur") for o in _fisbal_orgs() if o["org"] == org_code), None)
     except Exception:
         cur = None
-    chain, reached0, note = [], False, ""
+    chain, reached0, note, dbg_left = [], False, "", 2
     yy, pp = y, p
     try:
         for _n in range(_FISBAL_TRACE_MAX):
@@ -3716,8 +3727,19 @@ def fi_subject_balance_trace(code: str = "", dim: str = "", org: str = ""):
             pr = next((r for r in prows if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
             det = sb.build_voucher_lines(_fisbal_vouchers(yy, pp, code, org_name), code, dim)
             beg = (pr or {}).get("期初")
-            chain.append({"ym": "%04d-%02d" % (yy, pp), "期初": beg, "本期借方": (pr or {}).get("本期借方"),
-                          "本期贷方": (pr or {}).get("本期贷方"), "期末": (pr or {}).get("期末"), "detail": det})
+            entry = {"ym": "%04d-%02d" % (yy, pp), "期初": beg, "本期借方": (pr or {}).get("本期借方"),
+                     "本期贷方": (pr or {}).get("本期贷方"), "期末": (pr or {}).get("期末"), "detail": det}
+            moved = ((pr or {}).get("本期借方") or 0) or ((pr or {}).get("本期贷方") or 0)
+            if dbg_left > 0 and det.get("笔数", 0) == 0 and moved:      # 有发生却没匹配到凭证 → 附诊断样例
+                dbg_left -= 1
+                try:
+                    raw = kc.fetch_gl_voucher_subjects(yy, pp, (str(code),))
+                    entry["_debug"] = {"未过滤行数": len(raw), "账簿过滤org_name": org_name,
+                                       "distinct账簿": sorted({str(r.get("账簿") or "") for r in raw})[:10],
+                                       "样例行前3原样": raw[:3]}
+                except Exception as e:
+                    entry["_debug"] = {"取序时账异常": str(e)[:300]}
+            chain.append(entry)
             if beg is not None and abs(beg) < 0.005:
                 reached0 = True
                 break

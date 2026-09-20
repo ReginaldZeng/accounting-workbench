@@ -205,6 +205,9 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
                     </div>
                     {detail.note && <div className="foot" style={{ marginBottom: 6 }}>{detail.note}</div>}
                     {voucherTable(detail.detail)}
+                    {detail._debug && <div style={{ marginTop: 8, padding: 8, background: 'var(--bg)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>
+                      🔧 诊断（本期有发生却没匹配到凭证，把这段截图发开发）：{'\n'}{JSON.stringify(detail._debug, null, 2)}
+                    </div>}
                     {Math.abs(detail['期初'] || 0) > 0.005 && <div style={{ marginTop: 10 }}>
                       {!trace && <button className="btn" onClick={() => doTrace(detail.code, detail.dim)} disabled={traceBusy}>{traceBusy ? '追溯中…' : '↑ 追溯期初 ' + fmt(detail['期初']) + ' 的来源'}</button>}
                       {trace && <div style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12, marginTop: 2 }}>
@@ -215,6 +218,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
                             <span style={{ fontWeight: 600 }}>{c.ym}</span> · 期末 {fmt(c['期末'])} ＝ 期初 {fmt(c['期初'])} ＋ 本期借 {fmt(c['本期借方'])} － 本期贷 {fmt(c['本期贷方'])}
                           </div>
                           {voucherTable(c.detail)}
+                          {c._debug && <div style={{ marginTop: 6, padding: 8, background: 'var(--bg)', border: '1px dashed var(--amber-line)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'monospace', color: 'var(--ink-2)' }}>🔧 诊断（{c.ym} 有发生却没匹配到凭证，把这段截图发开发）：{'\n'}{JSON.stringify(c._debug, null, 2)}</div>}
                         </div>)}
                         {trace.reached_zero && <div className="foot" style={{ color: 'var(--green)' }}>✓ 已追溯到期初为 0 —— 该维度此前无结转（建账起点），到此为止。</div>}
                       </div>}
