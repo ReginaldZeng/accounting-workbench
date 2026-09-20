@@ -71,6 +71,20 @@
         "8071"
       ],
       "port": 8071
+    },
+    {
+      "name": "wt-parcel-monitoring",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app:app",
+        "--app-dir",
+        "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\parcel-machine-monitoring-7100c2\\01_Current_Deliverables\\app\\backend",
+        "--port",
+        "8110"
+      ],
+      "port": 8110
     }
   ]
 }

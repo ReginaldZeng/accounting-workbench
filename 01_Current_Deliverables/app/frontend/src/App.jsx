@@ -29,6 +29,7 @@ import RptExport from './views/RptExport.jsx'
 import EcomWorkbench from './views/EcomWorkbench.jsx'
 import EcomBasicData from './views/EcomBasicData.jsx'
 import ReportDashboard from './views/ReportDashboard.jsx'
+import FiSubjectBalance from './views/FiSubjectBalance.jsx'
 import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
@@ -144,6 +145,8 @@ export default function App() {
             页面代码没删、接口没删（治理红线：删文件/删既有 API 须先出影响分析）。
             报表仪表盘(rptdash) 建好后要接回来的话，把这行改成 view === 'rptdash' 即可。 */}
         {view === 'rptdash' && canView('rptdash') && <ReportDashboard />}
+        {/* V2.588 科目余额解析（物流）：财务报表下新独立页——科目余额表这笔数据的“生产/落地入口”。 */}
+        {view === 'fisbal' && canView('fisbal') && <FiSubjectBalance cfg={cfg} onPeriod={changePeriod} />}
         {view === 'wealth' && canView('wealth') && <WealthRecon cfg={cfg} onPeriod={changePeriod} />}
         {view === 'fxrate' && canView('fxrate') && <FxRate user={user} />}
         {view === 'periodclose' && canView('periodclose') && <PeriodClose cfg={cfg} onPeriod={changePeriod} user={user} onChanged={refreshCfg} />}

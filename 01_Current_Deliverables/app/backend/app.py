@@ -46,7 +46,7 @@ import ops   # V2.489 运维观测埋点（请求日志/并发/慢接口/在线�
 # ── 共享内核（V2.172 从本文件拆出；见 core.py 头部说明）──
 from core import (  # noqa: F401  部分名供 routers/ 与本文件共用
     AUTH_LEDGER_PATH, BASE, CFG, DIST, KdNotFetched, LEDGER_PATH, SAMPLE_YM, _BADJ_CACHE,
-    _BSTMT_CACHE, _CH_CACHE, _DS_CACHE, _FUND_CACHE, _OPEN_API, _RECON_CACHE, _SBAL_CACHE, _SYNC_AT,
+    _BSTMT_CACHE, _CH_CACHE, _DS_CACHE, _FISBAL_CACHE, _FUND_CACHE, _OPEN_API, _RECON_CACHE, _SBAL_CACHE, _SYNC_AT,
     _WR_CACHE, _cache_clear, _cache_get, _cache_key, _closed_block, _closed_info, _current_user,
     _is_closed, _kd_fetch_store, _kd_get, _kd_sync_info, _kd_synced_at, _now, _period_bank,
     _period_data_status, _period_str, _require_perm, _user_public, save_cfg, sid_name, VERSION_INFO,
@@ -758,6 +758,9 @@ NAV_MODULES = [
     {"key": "rptdash", "label": "报表仪表盘", "sec": "report", "order": 11, "parent": "fiacc", "default": "待验收"},
     # 报表导出/源单导出页内各两个页签：①一键导出 ②通知设置（业务方定放页面内，不做四级菜单）
     {"key": "rptexport", "label": "报表导出", "sec": "report", "order": 12, "parent": "fiacc", "default": "待验收"},
+    # V2.588 科目余额解析（物流科目段）：科目余额表这笔数据的“生产/落地入口”——系统取数(金蝶报表口径) + 上传解析(全科目容错) + 质检勾稽 + 逐科目核对。
+    # 先切物流相关科目段（费用6601/6604/6401/5101 + 应付2241 + 进项税2221）；后续再泛化到全科目。
+    {"key": "fisbal", "label": "科目余额解析", "sec": "report", "order": 13, "parent": "fiacc", "default": "待验收"},
     # srcbill 由「二级直接进入」改为纯分组（业务方定）：它的 enter:srcbill 准入点因此消失，
     # 准入闸落到三级 enter:srcexport 上——与 fiacc 一族的处理一致。
     {"key": "srcbill", "label": "源单列表", "sec": "report", "order": 20, "default": "已上线", "group_only": True},
@@ -3506,6 +3509,127 @@ async def subject_balance_upload(request: Request):
     with open(_sbal_upload_path(), "wb") as f:
         f.write(data)
     return _sbal_check()
+
+
+# ---------------- 科目余额解析（物流科目段）：系统取数 + 上传解析 + 质检勾稽 + 逐科目核对（V2.588）----------------
+# 财务报表下的独立页：科目余额表这笔数据的“生产/落地入口”。先切物流相关科目段（费用6601/6604/6401/5101 + 应付2241 + 进项税2221）。
+# 余额一律取【借−贷】有符号口径 → 勾稽恒等式 期末=期初+本期借−本期贷 恒成立，资产/费用为正、负债为负。
+def _fi_subject_balance():
+    base = {"source": CFG["source"], "period": _period_str(), "updated_at": _now(), "scope": "物流相关科目"}
+    if CFG["source"] != "kingdee":
+        rows = sb.build_rows_logi_sample(S.sample_subject_balance_logi())
+        return {**base, "rows": rows, "qc": sb.qc_rows(rows), "note": "样例数据（种子物流计提分录）"}
+    # 金蝶实时全科目取数（物流）需按主体走《科目余额表》报表接口(kc.fetch_subject_balance_full)，
+    # 与四类资金科目那套“取数总闸一次定格”模型不同（后者只抓 1001/1002/1012/1101）。原型阶段先接上传核对。
+    return {**base, "rows": [], "qc": sb.qc_rows([]), "系统取数未接": True,
+            "note": "金蝶物流科目取数接线中：本期请用下方「上传金蝶导出的科目余额表」做解析与质检。"}
+
+
+@app.get("/api/fi-subject-balance")
+def fi_subject_balance():
+    return _cache_get(_FISBAL_CACHE, _fi_subject_balance)
+
+
+@app.post("/api/fi-subject-balance/sync")
+def fi_subject_balance_sync():
+    return _closed_block() or _cache_get(_FISBAL_CACHE, _fi_subject_balance, force=True)
+
+
+def _fisbal_upload_path():
+    return os.path.join(UPLOAD_DIR, "科目余额表_物流_解析上传.xlsx")
+
+
+def _fisbal_check():
+    """解析已上传的科目余额表（物流科目段）→ 质检勾稽 + 与系统数逐科目核对。没上传过返回 parsed=None。"""
+    p = _fisbal_upload_path()
+    if not os.path.exists(p):
+        return {"ok": True, "parsed": None}
+    uploaded, err = sb.parse_report_xlsx(p, sb.LOGI_PREFIXES)
+    if err:
+        return {"ok": False, "msg": err}
+    up_rows = [{"科目编码": c, "科目名称": v.get("科目名称", ""), "科目大类": sb.cat_of_logi(c),
+                "账户": "（上传·按科目汇总）", "币别": "CNY", "期初": v["期初"],
+                "本期借方": v["本期借方"], "本期贷方": v["本期贷方"], "期末": v["期末"]}
+               for c, v in sorted(uploaded.items())]
+    sys_ = _cache_get(_FISBAL_CACHE, _fi_subject_balance)
+    cmp_ = sb.compare(sys_.get("rows", []), uploaded, cat_fn=sb.cat_of_logi)
+    return {"ok": True, "parsed": {"rows": up_rows, "qc": sb.qc_rows(up_rows)}, "compare": cmp_,
+            "有系统数": bool(sys_.get("rows")), "period": _period_str(),
+            "uploaded_at": datetime.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M")}
+
+
+@app.get("/api/fi-subject-balance/check")
+def fi_subject_balance_check():
+    return _fisbal_check()
+
+
+@app.post("/api/fi-subject-balance/upload")
+async def fi_subject_balance_upload(request: Request):
+    """上传导出的《科目余额表》Excel → 泛化认列（全科目容错）→ 筛物流科目 → 质检勾稽 + 与系统数逐科目核对。"""
+    blocked = _closed_block()
+    if blocked:
+        return blocked
+    if not _require_perm(request, "subject_upload"):
+        return JSONResponse({"ok": False, "msg": "无「上传科目余额表」权限，请联系管理员"}, status_code=403)
+    data = await request.body()
+    if not data:
+        return {"ok": False, "msg": "空文件（请选择金蝶导出的科目余额表 Excel）"}
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    with open(_fisbal_upload_path(), "wb") as f:
+        f.write(data)
+    return _fisbal_check()
+
+
+@app.get("/api/fi-subject-balance/detail")
+def fi_subject_balance_detail(code: str = "", dim: str = ""):
+    """下钻反查某 (科目, 维度) 期末余额的构成：勾稽拆解(期初/本期借/本期贷/期末) + 本期发生逐笔凭证(序时账)。"""
+    sys_ = _cache_get(_FISBAL_CACHE, _fi_subject_balance)
+    row = next((r for r in sys_.get("rows", [])
+                if r.get("科目编码") == code and str(r.get("维度编码") or "") == dim), None)
+    if CFG["source"] != "kingdee":
+        vrows = S.sample_logi_vouchers()
+    else:
+        try:
+            vrows = kc.fetch_gl_voucher_subjects(int(CFG["year"]), int(CFG["period"]), sb.LOGI_PREFIXES)
+        except Exception as e:                                   # 金蝶未取数/接口异常 → 只给勾稽拆解，不给逐笔
+            return {"ok": True, "code": code, "dim": dim, "科目名称": (row or {}).get("科目名称", ""),
+                    "维度名": (row or {}).get("账户", ""), "期初": (row or {}).get("期初"),
+                    "本期借方": (row or {}).get("本期借方"), "本期贷方": (row or {}).get("本期贷方"),
+                    "期末": (row or {}).get("期末"), "detail": {"lines": [], "借合计": 0, "贷合计": 0, "笔数": 0},
+                    "note": "序时账取数失败：%s" % e}
+    detail = sb.build_voucher_lines(vrows, code, dim)
+    return {"ok": True, "code": code, "dim": dim, "科目名称": (row or {}).get("科目名称", ""),
+            "维度名": (row or {}).get("账户", ""), "期初": (row or {}).get("期初"),
+            "本期借方": (row or {}).get("本期借方"), "本期贷方": (row or {}).get("本期贷方"),
+            "期末": (row or {}).get("期末"), "detail": detail}
+
+
+def _period_minus(y, p, k):
+    """(年,期) 往前 k 个月 → (年,期)。"""
+    m = p - k
+    while m <= 0:
+        m += 12
+        y -= 1
+    return y, m
+
+
+@app.get("/api/fi-subject-balance/trace")
+def fi_subject_balance_trace(code: str = "", dim: str = ""):
+    """追溯期初来源：期初＝上期期末，逐期往前翻各期构成，直到某期期初为 0（建账起点）。返回历史链（由近到远）。"""
+    y, p = int(CFG["year"]), int(CFG["period"])
+    if CFG["source"] != "kingdee":
+        hist = S.sample_logi_history().get((code, str(dim)), [])
+        chain = []
+        for k, rec in enumerate(hist):
+            yy, pp = _period_minus(y, p, k + 1)
+            det = sb.build_voucher_lines(rec.get("vouchers", []), code, dim)
+            chain.append({"ym": "%04d-%02d" % (yy, pp), "期初": rec.get("期初"), "本期借方": rec.get("本期借方"),
+                          "本期贷方": rec.get("本期贷方"), "期末": rec.get("期末"), "detail": det})
+        reached0 = bool(chain) and abs((chain[-1].get("期初") or 0)) < 0.005
+        return {"ok": True, "code": code, "dim": dim, "chain": chain, "reached_zero": reached0,
+                "note": "" if chain else "样例未给该维度种子历史；真金蝶模式可逐期往前追溯。"}
+    return {"ok": True, "code": code, "dim": dim, "chain": [], "reached_zero": False,
+            "note": "金蝶逐期追溯接线中：按主体逐期取历史《科目余额表》+序时账即可（机制同本期下钻，样例已演示）。"}
 
 
 # ---------------- 理财产品对账（1101/1012理财腿 + 6xxx收益，产品维度聚合；含 PDF OCR）----------------

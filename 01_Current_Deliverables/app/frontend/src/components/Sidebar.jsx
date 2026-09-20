@@ -36,7 +36,7 @@ const ICON_BY_KEY = {
   ecom: IC.ecom, ecommonth: IC.month, ecomsettle: IC.reconcile, ecombase: IC.basicdata,
   costledger: IC.cost, clwh: IC.basicdata, archive: IC.archive,
   // 报表板块（V2.240）：sbal/journal 两个 key 已退出菜单树，图标随之撤走
-  fiacc: IC.sbal, rptdash: IC.fund, rptexport: IC.dl, srcbill: IC.archive, srcexport: IC.dl, fxrate: IC.wealth,
+  fiacc: IC.sbal, rptdash: IC.fund, rptexport: IC.dl, fisbal: IC.sbal, srcbill: IC.archive, srcexport: IC.dl, fxrate: IC.wealth,
   bomprice: IC.cost, prodbrief: IC.month, revledger: IC.ledger, custrecon: IC.reconcile, ecompromo: IC.ecom,
   // 临工线（V2.318）：tempatt 是纯分组父项，两个三级各给一个图标
   tempatt: IC.user, tempattrev: IC.reconcile, tempattboard: IC.fund,

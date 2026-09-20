@@ -77,6 +77,7 @@ _BADJ_CACHE: dict = {}
 _BSTMT_CACHE: dict = {}   # 银行余额调节表（全四类科目·单月）派生缓存
 _CH_CACHE: dict = {}
 _SBAL_CACHE: dict = {}
+_FISBAL_CACHE: dict = {}   # 科目余额解析（物流科目段·金蝶报表口径）派生缓存
 _WR_CACHE: dict = {}    # 理财对账（含OCR，重，只 /sync 触发）
 
 
@@ -98,7 +99,7 @@ def _cache_get(cache, producer, force=False):
 
 def _cache_clear():
     _FUND_CACHE.clear(); _RECON_CACHE.clear(); _DS_CACHE.clear(); _BADJ_CACHE.clear(); _CH_CACHE.clear()
-    _SBAL_CACHE.clear(); _WR_CACHE.clear(); _BSTMT_CACHE.clear()
+    _SBAL_CACHE.clear(); _WR_CACHE.clear(); _BSTMT_CACHE.clear(); _FISBAL_CACHE.clear()
 
 
 # ---------------- 月结批次 / 期间封存 ----------------
