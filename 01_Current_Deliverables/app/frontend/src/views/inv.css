@@ -1,0 +1,206 @@
+/* [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票管家共用样式（invShared.jsx 引入）；审查修复：配对弹窗"只看状态"提示条
+   规矩：类名一律 inv- 前缀（所有 CSS 最后打进同一个全局文件）；颜色只用 styles.css 令牌，深色模式自动跟随；
+   遮罩不用 backdrop-filter（部分机器后台重绘闪烁，V2.611 教训）。各页自己的样式放 inv-desk.css / inv-audit.css 等。 */
+
+/* ── 通用小件 ── */
+.inv-muted{ color:var(--ink-3); font-size:12px; }
+.inv-num{ font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
+.inv-lk{ color:var(--accent); font-size:12px; text-decoration:none; cursor:pointer; white-space:nowrap; }
+.inv-lk:hover{ text-decoration:underline; }
+.inv-in{ height:30px; width:100%; border-radius:7px; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink);
+  font-size:12.5px; padding:0 8px; font-family:inherit; }
+.inv-in:focus{ outline:none; border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+@keyframes inv-spin{ to{ transform:rotate(360deg); } }
+.inv-spin{ display:inline-block; width:11px; height:11px; border-radius:50%; border:2px solid var(--line-strong); border-top-color:var(--accent);
+  animation:inv-spin .8s linear infinite; vertical-align:-1px; flex:0 0 auto; }
+@media (prefers-reduced-motion: reduce){ .inv-spin{ animation-duration:2.4s; } }
+
+/* ── 轻提示（深色可读：底用 --bg、字用 --ink，左边色条表状态） ── */
+@keyframes inv-toast-in{ from{ opacity:0; transform:translate(-50%, 8px); } to{ opacity:1; transform:translate(-50%, 0); } }
+.inv-toast{ position:fixed; left:50%; bottom:26px; transform:translateX(-50%); z-index:300; max-width:min(560px, 92vw);
+  background:var(--bg); color:var(--ink); border:1px solid var(--line-strong); border-left:4px solid var(--accent);
+  padding:10px 16px; border-radius:10px; font-size:13px; line-height:1.45; box-shadow:0 8px 26px rgba(0,0,0,.22);
+  animation:inv-toast-in .16s ease-out; }
+.inv-toast.ok{ border-left-color:var(--green); }
+.inv-toast.err{ border-left-color:var(--red); color:var(--red); background:var(--red-bg); border-color:var(--red-line); border-left-color:var(--red); }
+
+/* ── 弹窗 ── */
+.inv-ov{ position:fixed; inset:0; z-index:200; background:rgba(20,24,40,.5);
+  display:flex; align-items:flex-start; justify-content:center; padding:32px 16px; overflow:auto; }
+.inv-modal{ background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:14px; max-width:96vw;
+  max-height:calc(100vh - 64px); display:flex; flex-direction:column; overflow:hidden; box-shadow:0 26px 70px rgba(20,24,40,.38); }
+.inv-modal:focus{ outline:none; }
+.inv-mhead{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:13px 18px 12px;
+  border-bottom:1px solid var(--line); background:var(--bg-sub); flex:0 0 auto; }
+.inv-mtitle{ font-size:15px; font-weight:700; line-height:1.35; min-width:0; }
+.inv-x{ border:none; background:transparent; cursor:pointer; font-size:20px; color:var(--ink-3); line-height:1; padding:2px 8px; border-radius:8px; font-family:inherit; }
+.inv-x:hover{ background:var(--line); color:var(--ink); }
+.inv-mbody{ padding:16px 18px 18px; overflow:auto; flex:1 1 auto; }
+.inv-mfoot{ display:flex; justify-content:flex-end; align-items:center; gap:8px; flex-wrap:wrap; padding:11px 18px;
+  border-top:1px solid var(--line); background:var(--bg-sub); flex:0 0 auto; }
+
+/* ── 状态徽标 ── */
+.inv-badges{ display:inline-flex; flex-wrap:wrap; gap:4px; vertical-align:middle; }
+.inv-badge{ display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:600; line-height:1; padding:3px 7px;
+  border-radius:6px; white-space:nowrap; border:1px solid var(--line-strong); color:var(--ink-2); background:var(--bg-sub); cursor:default; }
+.inv-badge.ok{ color:var(--green); background:var(--green-bg); border-color:var(--green-line); }
+.inv-badge.err{ color:var(--red); background:var(--red-bg); border-color:var(--red-line); }
+.inv-badge.warn{ color:var(--amber); background:var(--amber-bg); border-color:var(--amber-line); }
+.inv-badge.info{ color:var(--blue); background:var(--blue-bg); border-color:var(--blue-line); }
+.inv-badge.mute{ color:var(--gray); background:var(--gray-bg); border-color:var(--line-strong); }
+.inv-badge .inv-spin{ width:9px; height:9px; border-width:1.5px; border-top-color:var(--blue); }
+.inv-dot{ position:absolute; top:5px; right:5px; width:9px; height:9px; border-radius:50%; background:var(--ink-3);
+  box-shadow:0 0 0 2px var(--bg); }
+.inv-dot.ok{ background:var(--green); }
+.inv-dot.err{ background:var(--red); }
+.inv-dot.warn{ background:var(--amber); }
+.inv-dot.info{ background:var(--blue); }
+.inv-dot.mute{ background:var(--ink-3); }
+
+/* ── 缩略图条 ── */
+.inv-thumbs{ display:flex; gap:8px; overflow-x:auto; padding:4px 2px 8px; scroll-snap-type:x proximity; }
+.inv-thumbs.empty{ color:var(--ink-3); font-size:12px; padding:18px 6px; }
+.inv-thumb{ flex:0 0 auto; width:92px; display:flex; flex-direction:column; gap:4px; padding:4px; border-radius:9px;
+  border:1px solid var(--line); background:var(--bg); cursor:pointer; scroll-snap-align:start; font-family:inherit; color:var(--ink); }
+.inv-thumb:hover{ border-color:var(--line-strong); background:var(--bg-sub); }
+.inv-thumb.on{ border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+.inv-thumb.void{ opacity:.55; }
+.inv-thumb-img{ position:relative; display:flex; align-items:center; justify-content:center; height:104px; border-radius:6px;
+  overflow:hidden; background:var(--bg-rail); }
+.inv-thumb-img img{ max-width:100%; max-height:100%; object-fit:contain; display:block; }
+.inv-thumb-ph{ font-size:11px; color:var(--ink-3); text-align:center; padding:0 6px; line-height:1.4; }
+.inv-thumb-busy{ position:absolute; left:5px; bottom:5px; display:inline-flex; padding:3px; border-radius:50%; background:var(--bg); }
+.inv-thumb-cap{ display:flex; justify-content:space-between; gap:4px; font-size:11px; color:var(--ink-2);
+  font-family:var(--font-mono); font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; }
+.inv-thumb-cap b{ color:var(--ink-3); font-weight:600; }
+
+/* ── 看图器 ── */
+.inv-vw{ display:flex; flex-direction:column; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--bg); min-height:160px; }
+.inv-vw-bar{ display:flex; align-items:center; gap:4px; flex-wrap:wrap; padding:5px 8px; border-bottom:1px solid var(--line); background:var(--bg-sub); flex:0 0 auto; }
+.inv-ib{ min-width:28px; height:26px; padding:0 6px; border-radius:6px; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink);
+  font-size:13px; line-height:1; cursor:pointer; font-family:inherit; display:inline-flex; align-items:center; justify-content:center; }
+.inv-ib.wide{ font-size:12px; padding:0 9px; }
+.inv-ib:hover{ background:var(--bg-sub); }
+.inv-ib[disabled]{ opacity:.45; cursor:not-allowed; }
+.inv-vw-pct{ font-size:11.5px; color:var(--ink-2); min-width:40px; text-align:center; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.inv-vw-sep{ width:1px; height:16px; background:var(--line-strong); margin:0 4px; }
+.inv-vw-grow{ flex:1 1 auto; }
+.inv-vw-stage{ position:relative; flex:1 1 auto; overflow:hidden; background:var(--bg-rail); touch-action:none; user-select:none; }
+.inv-vw-stage.grab{ cursor:grab; }
+.inv-vw-stage.grab:active{ cursor:grabbing; }
+.inv-vw-wrap{ position:absolute; transform-origin:50% 50%; will-change:transform; }
+.inv-vw-wrap img{ display:block; width:100%; height:100%; pointer-events:none; box-shadow:0 2px 10px rgba(0,0,0,.18); }
+/* 字段定位框：琥珀色描边 + 淡琥珀底（用 ::after 的透明度做底色，免写死半透明色值） */
+.inv-vw-box{ position:absolute; border:2px solid var(--amber); border-radius:3px; pointer-events:none; box-sizing:border-box; }
+.inv-vw-box::after{ content:''; position:absolute; inset:0; background:var(--amber); opacity:.18; }
+.inv-vw-ph{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:20px;
+  color:var(--ink-3); font-size:13px; line-height:1.6; pointer-events:none; }
+.inv-vw > .inv-vw-ph{ position:static; flex:1 1 auto; }
+.inv-vw-nav{ position:absolute; top:50%; transform:translateY(-50%); width:34px; height:54px; border-radius:8px; z-index:2;
+  border:1px solid var(--line-strong); background:var(--bg); color:var(--ink-2); font-size:24px; line-height:1; cursor:pointer;
+  opacity:.75; font-family:inherit; }
+.inv-vw-nav:hover{ opacity:1; color:var(--ink); }
+.inv-vw-nav.l{ left:8px; }
+.inv-vw-nav.r{ right:8px; }
+
+/* ── 字段面板 ── */
+.inv-fp{ display:flex; flex-direction:column; border:1px solid var(--line); border-radius:10px; background:var(--bg); overflow:hidden; }
+.inv-fp-empty{ padding:22px; color:var(--ink-3); font-size:12.5px; text-align:center; }
+.inv-fp-row{ display:grid; grid-template-columns:76px minmax(0,1fr) auto; align-items:center; gap:8px; padding:5px 10px;
+  border-bottom:1px solid var(--line); cursor:pointer; min-height:36px; border-left:3px solid transparent; }
+.inv-fp-row:last-of-type{ border-bottom:none; }
+.inv-fp-row:hover{ background:var(--bg-sub); }
+.inv-fp-row.pend{ background:var(--amber-bg); border-left-color:var(--amber); }
+.inv-fp-row.on{ border-left-color:var(--accent); background:var(--accent-soft); }
+.inv-fp-row.pend.on{ border-left-color:var(--amber); box-shadow:inset 0 0 0 1px var(--accent); }
+.inv-fp-row.dirty .inv-in{ border-color:var(--blue); }
+.inv-fp-k{ font-size:12px; color:var(--ink-2); white-space:nowrap; }
+.inv-fp-v{ font-size:13px; color:var(--ink); min-width:0; overflow:hidden; text-overflow:ellipsis; word-break:break-all; }
+.inv-fp-tags{ display:inline-flex; gap:4px; align-items:center; }
+.inv-src{ font-size:10.5px; line-height:1; padding:3px 6px; border-radius:5px; white-space:nowrap; color:var(--ink-3); background:var(--gray-bg); }
+.inv-src.qr,.inv-src.pdf,.inv-src.ofd,.inv-src.xml{ color:var(--green); background:var(--green-bg); }
+.inv-src.ocr{ color:var(--amber); background:var(--amber-bg); }
+.inv-src.manual{ color:var(--violet); background:var(--violet-bg); }
+.inv-src.taxpack,.inv-src.taxlist{ color:var(--blue); background:var(--blue-bg); }
+.inv-src.dirty{ color:var(--blue); background:var(--blue-bg); }
+.inv-fp-warn{ margin:0; padding:7px 10px; font-size:12px; color:var(--amber); background:var(--amber-bg); border-top:1px solid var(--amber-line); }
+.inv-fp-err{ margin:0; padding:7px 10px; font-size:12px; color:var(--red); background:var(--red-bg); border-top:1px solid var(--red-line); }
+.inv-fp-act{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-top:1px solid var(--line); background:var(--bg-sub); }
+.inv-fp-hint{ font-size:12px; color:var(--amber); font-weight:600; }
+
+/* ── 扫码框 ── */
+.inv-scan{ display:flex; align-items:center; gap:8px; height:40px; padding:0 10px; border-radius:10px;
+  border:1.5px solid var(--line-strong); background:var(--bg); transition:border-color .13s ease, box-shadow .13s ease; }
+.inv-scan.on{ border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.inv-scan.off{ opacity:.6; }
+.inv-scan-ico{ width:20px; height:20px; display:inline-flex; color:var(--ink-3); flex:0 0 auto; }
+.inv-scan.on .inv-scan-ico{ color:var(--accent); }
+.inv-scan-in{ flex:1 1 auto; min-width:0; height:100%; border:none; outline:none; background:transparent; color:var(--ink);
+  font-size:13.5px; font-family:var(--font-mono); }
+.inv-scan-in::placeholder{ color:var(--ink-3); font-family:var(--font-sans); }
+.inv-scan-st{ font-size:11.5px; color:var(--ink-3); white-space:nowrap; flex:0 0 auto; }
+.inv-scan.on .inv-scan-st{ color:var(--green); }
+.inv-scan-st.warn, .inv-scan.on .inv-scan-st.warn{ color:var(--red); font-weight:700; }
+
+/* ── 拖拽上传区 ── */
+.inv-drop{ display:flex; align-items:center; justify-content:center; text-align:center; gap:8px; min-height:72px; padding:14px;
+  border:1.5px dashed var(--line-strong); border-radius:10px; background:var(--bg-sub); color:var(--ink-2); font-size:12.5px;
+  cursor:pointer; transition:border-color .13s ease, background .13s ease; }
+.inv-drop:hover, .inv-drop:focus-visible{ border-color:var(--accent); outline:none; }
+.inv-drop.over{ border-color:var(--accent); background:var(--accent-soft); color:var(--accent); }
+.inv-drop.off{ opacity:.55; cursor:not-allowed; }
+.inv-drop-tx b{ color:var(--accent); font-weight:600; margin-left:2px; }
+
+/* ── 相机（高拍仪） ── */
+.inv-cam{ display:flex; flex-direction:column; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--bg); }
+.inv-cam.off .inv-cam-stage{ opacity:.6; }
+.inv-cam-bar{ display:flex; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--line); background:var(--bg-sub); flex-wrap:wrap; }
+.inv-cam-bar select{ height:28px; max-width:240px; font-size:12px; padding:0 8px; }
+.inv-cam-auto{ display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--ink-2); cursor:pointer; user-select:none; }
+.inv-cam-auto input{ margin:0; accent-color:var(--accent); }
+.inv-cam-res{ font-size:11px; color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.inv-cam-stage{ position:relative; background:var(--bg-rail); }
+.inv-cam-stage video{ width:100%; height:100%; object-fit:contain; display:block; }
+.inv-cam-msg{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:18px; text-align:center;
+  font-size:12.5px; color:var(--ink-2); line-height:1.6; background:var(--bg-sub); }
+.inv-cam-msg b{ color:var(--ink); }
+.inv-cam-msg.over{ position:absolute; inset:0; background:var(--bg-sub); }
+@keyframes inv-cam-flash{ 0%{ opacity:0; transform:translate(-50%,-50%) scale(.9); } 15%{ opacity:1; transform:translate(-50%,-50%) scale(1); } 100%{ opacity:0; } }
+.inv-cam-flash{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); padding:8px 20px; border-radius:10px;
+  font-size:16px; font-weight:700; color:var(--green); background:var(--green-bg); border:1px solid var(--green-line);
+  animation:inv-cam-flash .9s ease-out forwards; pointer-events:none; }
+.inv-cam-st{ position:absolute; left:8px; bottom:8px; font-size:11.5px; padding:3px 8px; border-radius:6px;
+  background:var(--bg); color:var(--ink-2); border:1px solid var(--line); }
+.inv-cam-foot{ display:flex; align-items:center; gap:10px; padding:8px; border-top:1px solid var(--line); }
+
+/* ── 手机配对 ── */
+.inv-pair{ display:flex; flex-direction:column; align-items:center; gap:10px; text-align:center; }
+/* 二维码必须白底留边才扫得出——这是唯一写死白色的地方，深色模式下也要白底 */
+.inv-pair-qr{ position:relative; padding:10px; border-radius:10px; background:#fff; border:1px solid var(--line); line-height:0; }
+.inv-pair-qr img{ width:220px; height:220px; image-rendering:pixelated; display:block; }
+.inv-pair-qr.dim img{ opacity:.15; }
+.inv-pair-exp{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:700;
+  color:var(--red); line-height:1.4; }
+.inv-pair-st{ display:inline-flex; align-items:center; gap:4px; font-size:13.5px; color:var(--ink-2); }
+.inv-pair-st.ok{ color:var(--green); }
+.inv-pair-st.ok b{ color:var(--green); }
+.inv-pair-how{ text-align:left; margin:4px 0 0; padding-left:20px; font-size:12px; color:var(--ink-2); line-height:1.75; }
+/* 已连着手机时「只看状态」：提醒换手机会踢掉原来那部 */
+.inv-pair-note{ font-size:12px; line-height:1.6; color:var(--amber); background:var(--amber-bg); border:1px solid var(--amber-line);
+  border-radius:8px; padding:6px 10px; text-align:left; }
+
+/* ── 选人 ── */
+.inv-pp{ position:relative; min-width:180px; }
+.inv-pp-box{ position:relative; }
+.inv-pp-box .inv-in{ padding-right:26px; }
+.inv-pp-x{ position:absolute; right:4px; top:50%; transform:translateY(-50%); border:none; background:transparent; color:var(--ink-3);
+  font-size:16px; line-height:1; cursor:pointer; padding:2px 5px; border-radius:5px; font-family:inherit; }
+.inv-pp-x:hover{ color:var(--ink); background:var(--line); }
+.inv-pp-dd{ position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:220; max-height:260px; overflow:auto; min-width:280px;
+  background:var(--bg); border:1px solid var(--line-strong); border-radius:9px; box-shadow:0 12px 30px rgba(0,0,0,.18); padding:4px; }
+.inv-pp-row{ padding:6px 8px; border-radius:6px; font-size:12.5px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--ink); }
+.inv-pp-row span{ color:var(--ink-3); }
+.inv-pp-row.on{ background:var(--accent-soft); }
+.inv-pp-row.on b{ color:var(--accent); }
+.inv-pp-empty{ padding:8px; font-size:12px; color:var(--ink-3); display:flex; align-items:center; }
+.inv-pp-err{ margin-top:4px; font-size:11.5px; color:var(--red); line-height:1.5; }

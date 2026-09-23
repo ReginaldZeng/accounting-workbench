@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 末尾追加「发票管家」接口块（invXxx 具名导出 + 手机端 X-Inv-Pair 令牌头）
 // [Change Log] Date:2026-09-10 Author:Codex Version:V2.555 业务分流及应收检查筛选接口。
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1  前端 API 封装（加 reconcile/sync + 4位金额格式）
 // cache:'no-store' —— 接口永不吃浏览器缓存，避免后端更新后前端拿到旧数据（字段对不上）
@@ -8,7 +9,9 @@ const j = async (url, opt) => {
   if (!r.ok) {
     let m = ''
     try { const b = await r.json(); const _d = b && (b.msg || b.detail); m = typeof _d === 'string' ? _d : _d ? JSON.stringify(_d) : '' } catch { /* 无 JSON 体 */ }
-    throw new Error(m || (url + ' ' + r.status))
+    const err = new Error(m || (url + ' ' + r.status))
+    err.status = r.status   // 附带状态码（发票管家手机页据此分辨"过期/不是本人"）；只加属性，不影响既有页面
+    throw err
   }
   return r.json()
 }
@@ -444,3 +447,110 @@ export const dingtalkPickMobiles = (userids) => jp('/api/dingtalk/pick-mobiles',
 export const getBomDeliverRecipients = () => j('/api/bom/deliver-recipients')              // BOM 落公盘送达收件人（读，仅管理员）
 export const saveBomDeliverRecipients = (mobiles) => jp('/api/bom/deliver-recipients', { mobiles })
 export const getBomDeliverStatus = () => j('/api/bom/deliver-status')                      // BOM 工具只读面板：通道/发给谁/上次送达
+
+// ── 发票管家（V-draft）──
+// 接口契约见 docs/20260923_发票管家/发票管家_技术方案 §5.2。读用 j、写用 jp（非 2xx 抛后端中文原因）；
+// 「提交票夹」「审核通过」被拦时后端回 400 {msg, blockers}——页面要把拦截清单列给人看，所以这两个用 jpSoft 不抛。
+// 上传一律 FormData（多文件字段 files、单文件导入字段 file），不手设 Content-Type（让浏览器带 boundary）。
+const invQs = (params) => {   // 空值不上 URL，免得后端把 "undefined"/"" 当筛选条件
+  const q = new URLSearchParams()
+  Object.entries(params || {}).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') q.append(k, String(v)) })
+  return q.toString()
+}
+const invWithQs = (base, params) => { const s = invQs(params); return s ? base + '?' + s : base }
+const invFd = (files, field = 'files', extra) => {
+  const fd = new FormData()
+  ;(Array.isArray(files) ? files : [files]).forEach(f => { if (f) fd.append(field, f, f.name || (field + '.jpg')) })   // 相机拍的 Blob 没有文件名，补一个
+  Object.entries(extra || {}).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') fd.append(k, String(v)) })
+  return fd
+}
+// 被拦时不抛、原样回 body（同 jpSoft），另外带上 httpStatus——审核通过遇到「审核期间进了新票」回 409，页面要据此重读票夹
+// （审查修复 2026-09-24：审核通过带 itemIds、手机配对换会话令牌，见下方各接口注释）
+const invJpSoft = async (url, body) => {
+  const r = await fetch(url, { cache: 'no-store', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+  let b = null
+  try { b = await r.json() } catch { /* 无 JSON 体 */ }
+  if (!b || typeof b !== 'object') b = { ok: false, msg: '服务端无响应(' + r.status + ')' }
+  return { ...b, httpStatus: r.status }
+}
+// 上传：非 2xx 抛 Error(body.msg)，并把整包 body 挂在 err.body 上（页面要逐个文件的 results 时可取）
+const invPost = async (url, fd, headers) => {
+  const r = await fetch(url, { method: 'POST', cache: 'no-store', body: fd, headers })
+  let b = null
+  try { b = await r.json() } catch { /* 无 JSON 体 */ }
+  if (!r.ok || !b) {
+    const d = b && (b.msg || b.detail)
+    const e = new Error(typeof d === 'string' && d ? d : ('上传失败（' + r.status + '）'))
+    e.body = b
+    e.status = r.status
+    throw e
+  }
+  return b
+}
+// 配置 / 设置
+export const invConfig = () => j('/api/inv/config')
+export const invSettings = () => j('/api/inv/settings')
+export const invSaveSettings = (settings) => jp('/api/inv/settings', { settings })
+export const invRoster = (fresh = false) => j('/api/inv/roster' + (fresh ? '?fresh=1' : ''))
+export const invAccounts = () => j('/api/inv/accounts')
+// 收票工作台
+export const invDesk = () => j('/api/inv/desk')
+export const invScan = (code) => jp('/api/inv/desk/scan', { code })
+export const invOpenFolder = (folderId) => jp('/api/inv/desk/open', { folderId })
+export const invCloseFolder = () => jp('/api/inv/desk/close')
+export const invUpload = (files, opts = {}) => invPost('/api/inv/desk/upload', invFd(files, 'files', { origin: opts.origin || 'upload', folderId: opts.folderId }))
+export const invManualFolder = (body) => jp('/api/inv/folder/manual', body)
+export const invRefreshFolder = (id) => jp(`/api/inv/folder/${id}/refresh`)
+export const invSubmitFolder = (id) => invJpSoft(`/api/inv/folder/${id}/submit`)       // 被拦时返回 {ok:false,msg,blockers:[{code,itemIds,msg}],httpStatus}
+export const invFolder = (id) => j(`/api/inv/folder/${id}`)
+export const invItemUpdate = (id, body) => jp(`/api/inv/item/${id}/update`, body)      // body={fields:{…}, confirm:[field]|'all'}
+export const invItemRemove = (id) => jp(`/api/inv/item/${id}/remove`)
+export const invItemSplit = (id, body) => jp(`/api/inv/item/${id}/split`, body)        // body={split, alloc}
+export const invItemRotate = (id, rotation) => jp(`/api/inv/item/${id}/rotate`, { rotation })
+export const invItemReprocess = (id) => jp(`/api/inv/item/${id}/reprocess`)
+export const invItemVoid = (id, note) => jp(`/api/inv/item/${id}/void`, { note })
+// 手机配对（电脑端）
+export const invPairCreate = () => jp('/api/inv/pair')
+export const invPairRevoke = () => jp('/api/inv/pair/revoke')
+// 发票审核
+export const invAuditQueue = (params) => j(invWithQs('/api/inv/audit/queue', params))
+// body={folderId, itemIds:[审核人看到的待审票 id], decisions:{id:{deductible}}, note}；后端只通过 itemIds 里的票。
+// 被拦时返回 {ok:false,msg,blockers?,httpStatus}；审核期间又进了新票 → httpStatus 409 + newItems:[id]（页面提示并重读票夹）
+export const invAuditApprove = (body) => invJpSoft('/api/inv/audit/approve', body)
+export const invAuditBatch = (folderIds) => jp('/api/inv/audit/batch', { folderIds })
+export const invAuditReturn = (body) => jp('/api/inv/audit/return', body)             // body={folderId, note}
+// 发票台账
+export const invLedger = (params) => j(invWithQs('/api/inv/ledger', params))
+export const invLedgerExportUrl = (params) => invWithQs('/api/inv/ledger/export', params)
+export const invTaxlistImport = (file) => invPost('/api/inv/taxlist/import', invFd(file, 'file'))
+export const invTaxlistReport = (batch) => j(invWithQs('/api/inv/taxlist/report', { batch }))
+export const invTaxpackImport = (files) => invPost('/api/inv/taxpack/import', invFd(files, 'files'))
+export const invDeductPrepare = (file) => invPost('/api/inv/deduct/prepare', invFd(file, 'file'))
+export const invDeductDownloadUrl = (token) => invWithQs('/api/inv/deduct/download', { token })
+export const invSellers = (params) => j(invWithQs('/api/inv/sellers', params))
+export const invSellerCheck = (body) => jp('/api/inv/sellers/check', body)
+export const invOpeningPreview = (file) => invPost('/api/inv/opening/preview', invFd(file, 'file'))
+export const invOpeningCommit = (body) => jp('/api/inv/opening/commit', body)         // body={token, source}
+export const invOpeningStats = () => j('/api/inv/opening/stats')
+// 发票后补池
+export const invLaterList = (params) => j(invWithQs('/api/inv/later', params))
+export const invLater = (id) => j(`/api/inv/later/${id}`)
+export const invLaterResolve = (code) => jp('/api/inv/later/resolve', { code })
+export const invLaterCreate = (body) => jp('/api/inv/later/create', body)
+export const invLaterDocs = (id, files) => invPost(`/api/inv/later/${id}/docs`, invFd(files, 'files'))
+export const invLaterReceive = (id, code) => jp(`/api/inv/later/${id}/receive`, { code })
+export const invLaterReceiveUpload = (id, files) => invPost(`/api/inv/later/${id}/receive-upload`, invFd(files, 'files'))
+export const invLaterMark = (id, body) => jp(`/api/inv/later/${id}/mark`, body)        // body={amount, note}
+export const invLaterRemind = (id) => jp(`/api/inv/later/${id}/remind`)
+export const invLaterUpdate = (id, body) => jp(`/api/inv/later/${id}/update`, body)
+export const invLaterClose = (id, note) => jp(`/api/inv/later/${id}/close`, { note })
+export const invLaterExportUrl = (params) => invWithQs('/api/inv/later/export', params)
+// 手机端（配对页，不走登录 cookie）：配对令牌放请求头 X-Inv-Pair，不进 URL（免得留在日志/历史里）
+const invMH = (token, extra) => ({ 'X-Inv-Pair': token || '', ...(extra || {}) })
+export const invMHello = (token) => j('/api/inv/m/hello', { headers: invMH(token) })
+// 配对：成功回 {ok,user,dtName,msg,session}——session 是新的会话令牌，之后所有手机端调用都换用它（二维码里的令牌当场作废）。
+// 失败抛 Error（带 err.status）：409＝这个配对码已经用过了；403＝要用手机钉钉扫 / 手机上的人和电脑上的不是同一个
+export const invMBind = (token, body) => j('/api/inv/m/bind', { method: 'POST', headers: invMH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
+export const invMState = (token) => j('/api/inv/m/state', { headers: invMH(token) })
+export const invMScan = (token, code) => j('/api/inv/m/scan', { method: 'POST', headers: invMH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ code }) })
+export const invMUpload = (token, files, purpose = 'invoice') => invPost('/api/inv/m/upload', invFd(files, 'files', { purpose }), invMH(token))

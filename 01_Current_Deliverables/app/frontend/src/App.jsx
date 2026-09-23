@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 挂接发票管家四页（invdesk/invlater/invaudit/invledger）+ CODED_VIEWS + 进入时展开「发票管家」板块
 // [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
 // Description: 接入电商月结工作台路由，并在进入时展开「应收模块 › 电商对账」承接链路。
 import React, { useState, useEffect } from 'react'
@@ -26,6 +27,10 @@ import EcomWorkbench from './views/EcomWorkbench.jsx'
 import EcomBasicData from './views/EcomBasicData.jsx'
 import ReportDashboard from './views/ReportDashboard.jsx'
 import FiSubjectBalance from './views/FiSubjectBalance.jsx'
+import InvDesk from './views/InvDesk.jsx'
+import InvLater from './views/InvLater.jsx'
+import InvAudit from './views/InvAudit.jsx'
+import InvLedger from './views/InvLedger.jsx'
 import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
@@ -108,7 +113,7 @@ export default function App() {
     <div className="shell">
       <Sidebar view={view} onSelect={setView} source={cfg.source} user={user} onLogout={logout} onHome={backToPortal}
         closed={!!cfg['封存']?.['已封存']} mods={mods} navDef={navDef} ver={cfg['版本']}
-        focusSection={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ar' : ''}
+        focusSection={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ar' : INV_VIEWS.includes(view) ? 'inv' : ''}
         focusParent={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ecom' : ''} />
       <main className="main">
         {/* 模块未开放时，正停在该页的人不该继续看到旧内容（四部曲三个子视图都算「银行对账」这个模块） */}
@@ -164,6 +169,11 @@ export default function App() {
         {view === 'tempattboard' && canView('tempattboard') && <TempAttBoard user={user} />}
         {view === 'archive' && canView('archive') && <Archive user={user} />}
         {view === 'basicdata' && canView('basicdata') && <BasicData user={user} />}
+        {/* 发票管家（V-draft）：收票工作台 / 发票后补池 / 发票审核 / 发票台账。票夹详情、看图等子画面都是页内状态，不另开菜单 key */}
+        {view === 'invdesk' && canView('invdesk') && <InvDesk user={user} />}
+        {view === 'invlater' && canView('invlater') && <InvLater user={user} />}
+        {view === 'invaudit' && canView('invaudit') && <InvAudit user={user} />}
+        {view === 'invledger' && canView('invledger') && <InvLedger user={user} />}
         {view === 'settings' && (canSettings
           ? <Settings cfg={cfg} onChange={setCfg} onModsChanged={refreshMods} />
           : <Placeholder title="系统设置" hint="仅主管理员可进入。如需授权，请主管理员在「账号管理」勾选「进入系统设置」权限点。" />)}
@@ -198,7 +208,10 @@ const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodc
   'clexport', 'cldash', 'clwh', 'bomdraft', 'bomstd', 'bomconfig',
   'ecommonth', 'ecomsettle', 'ecombase',
   'tempattrev', 'tempattboard',
+  'invdesk', 'invlater', 'invaudit', 'invledger',
   'archive', 'basicdata', 'settings'])
+// 发票管家四页：进入时侧栏展开「发票管家」板块（同电商页展开「应收模块」的做法）
+const INV_VIEWS = ['invdesk', 'invlater', 'invaudit', 'invledger']
 // body 默认是「二期开发」——但权限类占位不能这么说，那会让人以为是功能没做，跑去催开发而不是找管理员开权限
 function Placeholder({ title, hint, body = '敬请期待 —— 二期开发。' }) {
   return <div><div className="head"><div><div className="h-title">{title}</div>

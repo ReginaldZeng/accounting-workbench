@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| HINT 补发票管家四页一句话说明
 // [Change Log] Date:2026-09-06 Author:Claude/Reginald Zeng Version:V2.500
 // 核算工作台首页（轻量落地页，参照 BP 工作台 Home）。进核算工作台先落这里，别一进来就落在「对账程序」
 // 那种会取数的重页上。**本页刻意不发任何业务请求**：问候/期间来自已在内存的全局态（cfg），板块卡片来自
@@ -43,6 +44,10 @@ const HINT = {
   ecomsettle: '电商 · 收款核销',
   ecombase: '电商 · 基础资料',
   archive: '凭证归档 · 标签打印',
+  invdesk: '扫审批单 → 放票自动拍 → 当场查重 / 对金额 → 提交审核',
+  invlater: '付款时票没到的单 · 登记预计来票 · 到了点收到',
+  invaudit: '逐张核票 · 判定可否抵扣 · 通过进台账 / 退回补正',
+  invledger: '发票台账 · 税局清单验真 · 抵扣勾选 · 新销方核查',
   basicdata: '主体档案 / 数据源 / 金蝶连接',
   settings: '导航模块上线 · 数据源 · 期间 · 金蝶 · 日志中心',
 }

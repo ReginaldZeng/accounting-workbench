@@ -1,0 +1,151 @@
+/* [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票台账页专用样式（InvLedger.jsx 引入）；审查修复：作废后的税务提醒常驻条
+   规矩同 inv.css：类名一律 inv-lg- 前缀；颜色只用 styles.css 令牌（深色模式自动跟随）；不用 backdrop-filter。 */
+
+/* ── 页签 ── */
+.inv-lg-tabs{ display:flex; gap:2px; border-bottom:1px solid var(--line); overflow-x:auto; overflow-y:hidden; scrollbar-width:thin; }
+.inv-lg-tab{ height:36px; padding:0 16px; border:none; background:transparent; color:var(--ink-2); font-size:13px; cursor:pointer;
+  font-family:inherit; border-bottom:2px solid transparent; white-space:nowrap; flex:0 0 auto; }
+.inv-lg-tab:hover{ color:var(--ink); }
+.inv-lg-tab.on{ color:var(--accent); font-weight:700; border-bottom-color:var(--accent); }
+.inv-lg-tab:focus-visible{ outline:2px solid var(--accent-soft); outline-offset:-2px; }
+
+/* ── 通用块 ── */
+.inv-lg-stack{ display:flex; flex-direction:column; gap:14px; min-width:0; }
+.inv-lg-stack.sm{ gap:8px; }
+.inv-lg-sec{ display:flex; flex-direction:column; gap:10px; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); padding:14px 16px; }
+.inv-lg-sec-h{ font-size:14px; font-weight:700; color:var(--ink); }
+.inv-lg-box{ display:flex; flex-direction:column; gap:5px; border:1px solid var(--line); border-radius:9px; background:var(--bg-sub); padding:10px 12px; }
+.inv-lg-box-h{ font-size:12px; font-weight:700; color:var(--ink-2); }
+.inv-lg-note{ font-size:12.5px; line-height:1.7; color:var(--ink-2); background:var(--bg-rail); border:1px solid var(--line); border-radius:9px; padding:10px 13px; }
+.inv-lg-note b{ color:var(--ink); }
+.inv-lg-err{ font-size:12.5px; line-height:1.55; color:var(--red); background:var(--red-bg); border:1px solid var(--red-line); border-radius:8px; padding:7px 11px; }
+.inv-lg-warn{ font-size:12px; line-height:1.55; color:var(--amber); background:var(--amber-bg); border:1px solid var(--amber-line); border-radius:8px; padding:6px 10px; }
+/* 作废后要去税局做的动作（进项税额转出/撤销勾选）：常驻到人点「×」 */
+.inv-lg-voidnote{ display:flex; align-items:center; gap:10px; font-size:13px; font-weight:600; margin:8px 0; }
+.inv-lg-voidnote span{ flex:1 1 auto; }
+.inv-lg-ok{ font-size:12.5px; line-height:1.55; color:var(--green); background:var(--green-bg); border:1px solid var(--green-line); border-radius:8px; padding:7px 11px; font-weight:600; }
+.inv-lg-empty{ padding:34px 16px; text-align:center; color:var(--ink-3); font-size:12.5px; border:1px dashed var(--line-strong); border-radius:var(--radius); }
+.inv-lg-empty.sm{ padding:12px; border:none; text-align:left; }
+.inv-lg-grow{ flex:1 1 auto; }
+.inv-lg-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.inv-lg-ml{ margin-left:6px; }
+.inv-lg-sub{ display:block; font-size:11px; color:var(--ink-3); margin-top:2px; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--font-sans); }
+.inv-lg-nowrap{ white-space:nowrap; }
+.inv-lg-pad{ padding:8px 12px; }
+.inv-lg-ck{ display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-2); cursor:pointer; user-select:none; white-space:nowrap; }
+.inv-lg-ck input{ margin:0; accent-color:var(--accent); }
+.inv-lg-ck.big{ font-size:13px; color:var(--ink); font-weight:600; }
+.inv-lg-ck.hit{ color:var(--red); font-weight:700; }
+
+/* ── 筛选条（全局 .fbar 只管了 text/select，这里补日期/月份框） ── */
+.inv-lg-fbar{ gap:10px 14px; }
+.inv-lg-fbar input[type=date],.inv-lg-fbar input[type=month]{ height:30px; border-radius:7px; border:1px solid var(--line-strong); background:var(--bg);
+  color:var(--ink); font-size:12.5px; padding:0 6px; font-family:inherit; }
+.inv-lg-fbar input[type=date]:focus,.inv-lg-fbar input[type=month]:focus{ outline:none; border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+.fbar.inv-lg-fbar input[type=text]{ width:190px; }
+.fbar.inv-lg-fbar input[type=text].inv-lg-short{ width:140px; }
+
+/* ── 台账表 + 右侧详情 ── */
+.inv-lg-main{ display:grid; grid-template-columns:minmax(0,1fr); gap:14px; align-items:start; }
+.inv-lg-main.has-side{ grid-template-columns:minmax(0,1fr) 380px; }
+@media (max-width:1180px){ .inv-lg-main.has-side{ grid-template-columns:minmax(0,1fr); } }
+.inv-lg-list{ display:flex; flex-direction:column; gap:10px; min-width:0; }
+.inv-lg-tbl td{ padding:8px 10px; }
+.inv-lg-tbl thead th{ padding:9px 10px; }
+.inv-lg-tbl tr.row:focus-visible{ outline:2px solid var(--accent); outline-offset:-2px; }
+.inv-lg-tbl tr.on td, .inv-lg-tbl tr.on:hover td{ background:var(--accent-soft); }
+.inv-lg-tbl tr.on td:first-child{ box-shadow:inset 3px 0 0 var(--accent); }
+.inv-lg-tbl tr.void td{ color:var(--ink-3); }
+.inv-lg-tbl tr.void .num{ text-decoration:line-through; }
+.inv-lg-tbl td.mono{ white-space:nowrap; }
+.inv-lg-type{ min-width:96px; max-width:150px; }
+.inv-lg-seller{ min-width:120px; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-lg-sum td{ background:var(--bg-sub); font-weight:700; border-top:1px solid var(--line-strong); color:var(--ink); }
+.inv-lg-pager{ display:flex; align-items:center; justify-content:center; gap:12px; font-size:12.5px; color:var(--ink-2); }
+.inv-lg-busy{ display:inline-flex; align-items:center; gap:6px; }
+
+.inv-lg-side{ position:sticky; top:12px; max-height:calc(100vh - 24px); overflow:auto; display:flex; flex-direction:column; gap:10px;
+  border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); padding:12px; }
+/* 详情栏限高内滚：子块不许被 flex 压扁（字段面板自带 overflow:hidden，压扁就只剩两行） */
+.inv-lg-side > *{ flex:0 0 auto; }
+.inv-lg-side-h{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.inv-lg-side-t{ font-size:14px; font-weight:700; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-lg-thumb{ display:flex; align-items:center; justify-content:center; height:190px; padding:6px; border-radius:9px; border:1px solid var(--line);
+  background:var(--bg-rail); cursor:zoom-in; font-family:inherit; }
+.inv-lg-thumb:hover{ border-color:var(--accent); }
+.inv-lg-thumb img{ max-width:100%; max-height:100%; object-fit:contain; display:block; }
+.inv-lg-kv{ display:grid; grid-template-columns:64px minmax(0,1fr); gap:8px; font-size:12px; line-height:1.5; }
+.inv-lg-kv > span{ color:var(--ink-3); white-space:nowrap; }
+.inv-lg-kv > b{ color:var(--ink); font-weight:500; word-break:break-all; }
+.inv-lg-log{ font-size:11.5px; color:var(--ink-2); border-top:1px dashed var(--line); padding-top:4px; }
+.inv-lg-side-act{ display:flex; justify-content:flex-end; }
+
+/* 危险动作：实心红底配 --bg 字色（深色下红变浅，白字会看不清，--bg 两种模式都读得出） */
+.btn.primary.inv-lg-danger{ background:var(--red); border-color:var(--red); color:var(--bg); box-shadow:none; }
+.btn.primary.inv-lg-danger:hover{ background:var(--red); border-color:var(--red); opacity:.9; }
+.btn.inv-lg-danger-ghost{ color:var(--red); border-color:var(--red-line); }
+.btn.inv-lg-danger-ghost:hover{ background:var(--red-bg); }
+
+/* ── 弹窗表单 ── */
+.inv-lg-form{ display:flex; flex-direction:column; gap:12px; }
+.inv-lg-fld{ display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--ink-2); }
+.inv-lg-fld.inline{ flex-direction:row; align-items:center; gap:8px; white-space:nowrap; }
+.inv-lg-fld.inline .inv-in{ width:160px; }
+.inv-lg-fld select{ width:100%; justify-content:flex-start; }
+.inv-lg-ta{ width:100%; border-radius:7px; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); font-size:12.5px;
+  padding:7px 9px; font-family:inherit; resize:vertical; line-height:1.5; }
+.inv-lg-ta:focus{ outline:none; border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+.inv-lg-radio{ display:flex; gap:18px; padding-top:2px; }
+
+/* ── 税局对账：四色卡 ── */
+.inv-lg-stats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; }
+.inv-lg-stat{ display:flex; flex-direction:column; gap:4px; border:1px solid var(--line); border-left-width:4px; border-radius:var(--radius); padding:11px 13px; background:var(--bg); }
+.inv-lg-stat-l{ font-size:12px; font-weight:700; color:var(--ink-2); }
+.inv-lg-stat-v{ font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+.inv-lg-stat-v span{ font-size:12px; font-weight:500; color:var(--ink-3); }
+.inv-lg-stat-d{ font-size:11.5px; color:var(--ink-3); line-height:1.5; }
+.inv-lg-stat.green{ border-color:var(--green-line); border-left-color:var(--green); background:var(--green-bg); }
+.inv-lg-stat.green .inv-lg-stat-v{ color:var(--green); }
+.inv-lg-stat.red{ border-color:var(--red-line); border-left-color:var(--red); background:var(--red-bg); }
+.inv-lg-stat.red .inv-lg-stat-v{ color:var(--red); }
+.inv-lg-stat.yellow{ border-color:var(--amber-line); border-left-color:var(--amber); background:var(--amber-bg); }
+.inv-lg-stat.yellow .inv-lg-stat-v{ color:var(--amber); }
+.inv-lg-stat.gray{ border-color:var(--line-strong); border-left-color:var(--gray); background:var(--gray-bg); }
+.inv-lg-stat.gray .inv-lg-stat-v{ color:var(--gray); }
+
+.inv-lg-map{ display:flex; flex-wrap:wrap; gap:6px; }
+.inv-lg-map span{ font-size:11.5px; padding:3px 8px; border-radius:6px; background:var(--bg); border:1px solid var(--line); color:var(--ink-2); font-family:var(--font-mono); }
+.inv-lg-det{ border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); }
+.inv-lg-det > summary{ cursor:pointer; padding:10px 14px; font-size:13px; list-style:none; }
+.inv-lg-det > summary::-webkit-details-marker{ display:none; }
+.inv-lg-det > summary::before{ content:'▸'; margin-right:8px; color:var(--ink-3); }
+.inv-lg-det[open] > summary::before{ content:'▾'; }
+.inv-lg-det[open] > summary{ border-bottom:1px solid var(--line); }
+.inv-lg-det .inv-lg-mini{ border:none; border-radius:0 0 var(--radius) var(--radius); }
+.inv-lg-cnt{ font-size:11.5px; font-weight:700; color:var(--accent); background:var(--accent-soft); border-radius:10px; padding:1px 8px; margin-left:4px; }
+.inv-lg-mini{ max-height:420px; overflow:auto; }
+.inv-lg-mini td{ padding:7px 10px; }
+.inv-lg-mini thead th{ padding:8px 10px; }
+.inv-lg-mini tr.inv-lg-bad td{ background:var(--red-bg); }
+.inv-lg-hint{ font-size:12px; color:var(--violet); }
+.inv-lg-red{ color:var(--red); font-weight:600; }
+.inv-lg-li{ font-size:12px; color:var(--ink); }
+
+/* ── 步骤说明 ── */
+.inv-lg-steps{ margin:0; padding-left:22px; font-size:12.5px; color:var(--ink-2); line-height:1.85; }
+.inv-lg-steps b{ color:var(--ink); }
+
+/* ── 结果计数小胶囊 ── */
+.inv-lg-chips{ display:flex; flex-wrap:wrap; gap:8px; }
+.inv-lg-chip{ font-size:12px; padding:5px 11px; border-radius:7px; border:1px solid var(--line); background:var(--bg-sub); color:var(--ink-2); }
+.inv-lg-chip b{ margin-left:3px; color:var(--ink); font-variant-numeric:tabular-nums; }
+.inv-lg-chip.ok{ color:var(--green); border-color:var(--green-line); background:var(--green-bg); }
+.inv-lg-chip.ok b{ color:var(--green); }
+.inv-lg-chip.warn{ color:var(--amber); border-color:var(--amber-line); background:var(--amber-bg); }
+.inv-lg-chip.warn b{ color:var(--amber); }
+.inv-lg-chip.err{ color:var(--red); border-color:var(--red-line); background:var(--red-bg); }
+.inv-lg-chip.err b{ color:var(--red); }
+
+/* 未确认前的下载按钮：链接没有 disabled 属性，用类模拟 */
+.btn.inv-lg-off{ opacity:.5; cursor:not-allowed; box-shadow:none; }
+.btn.primary.inv-lg-off:hover{ background:var(--accent); border-color:var(--accent); }

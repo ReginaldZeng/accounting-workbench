@@ -1,0 +1,183 @@
+/* [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 收票工作台页面样式（InvDesk.jsx 引入）；审查修复：票夹头「只能看」标记与收起按钮并排
+   规矩同 inv.css：类名 inv-dk- 前缀（所有 CSS 最后进同一个全局文件）；颜色只用 styles.css 令牌，深色自动跟随；不用 backdrop-filter。 */
+
+.inv-dk-actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.inv-dk-grow{ flex:1 1 auto; }
+.inv-dk-ok{ color:var(--green); font-style:normal; }
+.inv-dk-err{ margin:0 12px 8px; font-size:12px; color:var(--red); }
+.inv-dk-err-in{ font-size:12px; color:var(--red); line-height:1.5; }
+.inv-dk-empty-s{ padding:18px 14px; color:var(--ink-3); font-size:12.5px; line-height:1.6; }
+
+/* ── 扫码条：整页最显眼的地方 ── */
+.inv-dk-scan{ display:flex; flex-direction:column; gap:8px; padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:var(--bg-sub); }
+.inv-dk-scan-main{ display:flex; align-items:center; gap:10px; }
+.inv-dk-scan-main .inv-scan{ flex:1 1 auto; height:52px; border-width:2px; }
+.inv-dk-scan-main .inv-scan-in{ font-size:16px; }
+.inv-dk-scan-busy{ font-size:12.5px; color:var(--ink-2); white-space:nowrap; display:inline-flex; align-items:center; }
+.inv-dk-scanres{ font-size:15px; font-weight:700; padding:9px 14px; border-radius:10px; border:1px solid var(--line-strong);
+  background:var(--bg); color:var(--ink); display:flex; flex-direction:column; gap:3px; }
+.inv-dk-scanres.ok{ color:var(--green); background:var(--green-bg); border-color:var(--green-line); }
+.inv-dk-scanres.warn{ color:var(--amber); background:var(--amber-bg); border-color:var(--amber-line); }
+.inv-dk-scanres.err{ color:var(--red); background:var(--red-bg); border-color:var(--red-line); font-size:17px; }
+.inv-dk-scanres-sub{ font-size:12.5px; font-weight:500; }
+.inv-dk-hints{ display:flex; flex-wrap:wrap; gap:6px 18px; font-size:12px; color:var(--ink-3); }
+.inv-dk-hints b{ color:var(--ink-2); font-weight:600; margin-right:6px; }
+
+/* ── 两栏 ── */
+.inv-dk-cols{ display:grid; grid-template-columns:360px minmax(0,1fr); gap:16px; align-items:start; }
+.inv-dk-left{ display:flex; flex-direction:column; gap:14px; min-width:0; position:sticky; top:12px; }
+.inv-dk-right{ min-width:0; }
+@media (max-width:1279px){ .inv-dk-cols{ grid-template-columns:300px minmax(0,1fr); } }
+@media (max-width:980px){ .inv-dk-cols{ grid-template-columns:minmax(0,1fr); } .inv-dk-left{ position:static; } }
+
+.inv-dk-card{ border:1px solid var(--line); border-radius:10px; background:var(--bg); overflow:hidden; }
+.inv-dk-card-h{ display:flex; align-items:baseline; gap:8px; padding:9px 12px; font-size:13px; font-weight:700; border-bottom:1px solid var(--line); background:var(--bg-sub); }
+
+/* 我的票夹 */
+.inv-dk-recent{ display:flex; flex-direction:column; max-height:360px; overflow:auto; }
+.inv-dk-rec{ display:flex; flex-direction:column; gap:4px; text-align:left; padding:8px 12px; border:none; border-bottom:1px solid var(--line);
+  background:var(--bg); color:var(--ink); cursor:pointer; font-family:inherit; border-left:3px solid transparent; }
+.inv-dk-rec:last-child{ border-bottom:none; }
+.inv-dk-rec:hover{ background:var(--bg-sub); }
+.inv-dk-rec.on{ background:var(--accent-soft); border-left-color:var(--accent); }
+.inv-dk-rec:disabled{ opacity:.6; cursor:wait; }
+.inv-dk-rec-t{ font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-dk-rec-m{ display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--ink-2); flex-wrap:wrap; }
+
+/* ── 票夹面板（整块可拖入文件） ── */
+.inv-drop.inv-dk-drop{ display:block; position:relative; padding:0; min-height:0; border:1px solid var(--line); border-radius:12px;
+  background:var(--bg); color:var(--ink); cursor:default; text-align:left; font-size:13px; }
+.inv-drop.inv-dk-drop:hover, .inv-drop.inv-dk-drop:focus-visible{ border-color:var(--line); }
+.inv-drop.inv-dk-drop.off{ opacity:1; cursor:default; }
+.inv-drop.inv-dk-drop.over{ border-color:var(--accent); background:var(--bg); color:var(--ink); box-shadow:0 0 0 3px var(--accent-soft); }
+.inv-dk-dropmask{ display:none; }
+.inv-dk-drop.over .inv-dk-dropmask{ display:flex; position:absolute; inset:0; align-items:center; justify-content:center; border-radius:12px;
+  background:var(--accent-soft); color:var(--accent); font-size:18px; font-weight:700; border:2px dashed var(--accent); pointer-events:none; opacity:.94; }
+.inv-dk-folder{ display:flex; flex-direction:column; }
+
+/* 头卡 */
+.inv-dk-fhead{ display:flex; flex-direction:column; gap:10px; padding:14px 16px; border-bottom:1px solid var(--line); }
+.inv-dk-fhead-top{ display:flex; align-items:center; gap:10px; }
+.inv-dk-ftitle{ display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; font-size:15px; }
+.inv-dk-ftitle b{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-dk-fhead-acts{ display:inline-flex; align-items:center; gap:6px; flex:0 0 auto; }
+.inv-dk-kv{ display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:8px 16px; }
+.inv-dk-kv > div{ display:flex; flex-direction:column; gap:2px; min-width:0; }
+.inv-dk-kv > div.wide{ grid-column:span 2; }
+.inv-dk-kv span{ font-size:11.5px; color:var(--ink-3); }
+.inv-dk-kv b{ font-size:13px; font-weight:600; color:var(--ink); overflow:hidden; text-overflow:ellipsis; word-break:break-all; }
+.inv-dk-kv em{ font-style:normal; font-weight:500; color:var(--ink-2); }
+.inv-dk-amt{ font-size:15px !important; }
+@media (max-width:1279px){ .inv-dk-kv{ grid-template-columns:repeat(2, minmax(0,1fr)); } }
+
+.inv-dk-attline{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12.5px; }
+.inv-dk-att{ display:inline-flex; align-items:center; color:var(--ink-2); }
+.inv-dk-att.busy{ color:var(--blue); }
+.inv-dk-att.ok{ color:var(--green); }
+.inv-dk-att.err{ color:var(--red); }
+.inv-dk-later{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13px; padding:8px 12px; border-radius:9px; border:1px solid var(--line-strong); }
+.inv-dk-later.info{ color:var(--blue); background:var(--blue-bg); border-color:var(--blue-line); }
+.inv-dk-later.warn{ color:var(--amber); background:var(--amber-bg); border-color:var(--amber-line); font-weight:600; }
+.inv-dk-returned{ display:flex; flex-direction:column; gap:4px; padding:10px 14px; border-radius:10px; border:1px solid var(--red-line);
+  border-left:4px solid var(--red); background:var(--red-bg); color:var(--red); }
+.inv-dk-returned b{ font-size:14px; }
+.inv-dk-returned-note{ font-size:15px; font-weight:600; color:var(--ink); white-space:pre-wrap; }
+.inv-dk-submitted{ font-size:13px; padding:9px 12px; border-radius:9px; background:var(--amber-bg); color:var(--amber); border:1px solid var(--amber-line); }
+.inv-dk-submitted.ok{ background:var(--green-bg); color:var(--green); border-color:var(--green-line); }
+.inv-dk-submitted .inv-lk{ margin-left:8px; }
+
+/* 票列表 */
+.inv-dk-items{ display:flex; flex-direction:column; gap:10px; padding:12px 16px; }
+.inv-dk-items-h{ display:flex; align-items:center; gap:10px; font-size:13px; }
+.inv-dk-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:10px; }
+.inv-dk-item{ display:flex; gap:10px; text-align:left; padding:8px; border-radius:10px; border:1px solid var(--line); background:var(--bg);
+  color:var(--ink); cursor:pointer; font-family:inherit; min-width:0; }
+.inv-dk-item:hover{ border-color:var(--line-strong); background:var(--bg-sub); }
+.inv-dk-item:focus-visible{ outline:none; border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+.inv-dk-item.dup{ border-color:var(--red-line); background:var(--red-bg); }
+.inv-dk-item.void{ opacity:.55; }
+.inv-dk-item-img{ position:relative; flex:0 0 84px; height:96px; border-radius:7px; overflow:hidden; background:var(--bg-rail);
+  display:flex; align-items:center; justify-content:center; }
+.inv-dk-item-img img{ max-width:100%; max-height:100%; object-fit:contain; display:block; }
+.inv-dk-item-b{ display:flex; flex-direction:column; gap:5px; min-width:0; flex:1 1 auto; }
+.inv-dk-item-l1, .inv-dk-item-l2, .inv-dk-item-l3{ display:flex; align-items:center; gap:8px; min-width:0; }
+.inv-dk-item-l2{ font-size:12px; color:var(--ink-2); flex-wrap:wrap; row-gap:2px; }
+.inv-dk-item-l2 > span{ white-space:nowrap; }
+.inv-dk-item-l3{ flex-wrap:wrap; font-size:11.5px; }
+.inv-dk-item-n{ font-size:11px; color:var(--ink-3); font-weight:600; }
+.inv-dk-item-type{ font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-dk-item-total{ font-size:14px; }
+.inv-dk-item-seller{ flex-basis:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.inv-dk-item-dup{ font-size:12px; color:var(--red); font-weight:600; line-height:1.4; }
+
+/* 进票回执 */
+.inv-dk-receipt{ border:1px solid var(--line-strong); border-radius:9px; background:var(--bg-sub); padding:6px 10px; display:flex; flex-direction:column; gap:3px; }
+.inv-dk-receipt.err{ border-color:var(--red-line); background:var(--red-bg); }
+.inv-dk-receipt-h{ display:flex; align-items:center; gap:8px; font-size:12.5px; }
+.inv-dk-receipt-row{ display:grid; grid-template-columns:minmax(0, 220px) minmax(0,1fr); gap:10px; font-size:12px; color:var(--ink-2); }
+.inv-dk-receipt-row.ok{ color:var(--green); }
+.inv-dk-receipt-row.warn{ color:var(--amber); }
+.inv-dk-receipt-row.err{ color:var(--red); font-weight:600; }
+.inv-dk-receipt-name{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink); }
+
+/* 底部合计与提交 */
+.inv-dk-foot{ display:flex; flex-direction:column; gap:10px; padding:12px 16px 14px; border-top:1px solid var(--line); background:var(--bg-sub);
+  border-radius:0 0 12px 12px; }
+.inv-dk-sum{ display:flex; align-items:flex-end; gap:22px; flex-wrap:wrap; }
+.inv-dk-sum > div{ display:flex; flex-direction:column; gap:2px; }
+.inv-dk-sum span{ font-size:11.5px; color:var(--ink-3); }
+.inv-dk-sum b{ font-size:17px; font-weight:700; }
+.inv-dk-sum .eq b{ color:var(--green); }
+.inv-dk-sum .off b{ color:var(--amber); }
+.inv-dk-sum .off{ padding:2px 10px; border-radius:8px; background:var(--amber-bg); border:1px solid var(--amber-line); }
+.inv-dk-counts{ display:flex; flex-wrap:wrap; gap:6px 16px; font-size:12.5px; color:var(--ink-2); }
+.inv-dk-counts b{ color:var(--ink); }
+.inv-dk-counts .err, .inv-dk-counts .err b{ color:var(--red); }
+.inv-dk-counts .warn, .inv-dk-counts .warn b{ color:var(--amber); }
+.inv-dk-counts .info, .inv-dk-counts .info b{ color:var(--blue); }
+.inv-dk-submit{ display:flex; align-items:flex-start; justify-content:flex-end; gap:14px; }
+.inv-dk-submit-msg{ flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:4px; }
+.inv-dk-blockers{ margin:0; padding:8px 12px 8px 28px; border-radius:9px; background:var(--red-bg); border:1px solid var(--red-line);
+  color:var(--red); font-size:12.5px; line-height:1.7; }
+.btn.primary.inv-dk-submit-btn{ height:40px; padding:0 28px; font-size:14px; }
+
+/* ── 单张票详情弹窗 ── */
+.inv-dk-detail{ display:grid; grid-template-columns:minmax(0, 1.35fr) minmax(340px, 1fr); gap:16px; align-items:start; }
+@media (max-width:1100px){ .inv-dk-detail{ grid-template-columns:minmax(0,1fr); } }
+.inv-dk-detail-l{ min-width:0; }
+.inv-dk-detail-r{ display:flex; flex-direction:column; gap:10px; min-width:0; }
+.inv-dk-alert{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:12.5px; padding:8px 10px; border-radius:8px; line-height:1.5; }
+.inv-dk-alert b{ margin-right:4px; }
+.inv-dk-alert.err{ color:var(--red); background:var(--red-bg); border:1px solid var(--red-line); }
+.inv-dk-alert.info{ color:var(--blue); background:var(--blue-bg); border:1px solid var(--blue-line); }
+.inv-dk-split{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 10px; border:1px solid var(--line); border-radius:9px; }
+.inv-dk-chk{ display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-2); cursor:pointer; }
+.inv-dk-chk input{ margin:0; accent-color:var(--accent); }
+.inv-in.inv-dk-alloc{ width:140px; }
+.inv-dk-split .inv-dk-err-in{ flex-basis:100%; }
+.inv-dk-lines{ font-size:12px; border:1px solid var(--line); border-radius:9px; padding:6px 10px; }
+.inv-dk-lines summary{ cursor:pointer; color:var(--ink-2); }
+.inv-dk-lines table{ width:100%; border-collapse:collapse; margin-top:6px; }
+.inv-dk-lines th, .inv-dk-lines td{ text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); font-weight:500; }
+.inv-dk-lines th{ color:var(--ink-3); font-size:11.5px; position:static; background:transparent; }
+.inv-dk-remark{ font-size:12.5px; color:var(--ink-2); white-space:pre-wrap; }
+.inv-dk-remark span{ color:var(--ink-3); margin-right:8px; }
+.btn.inv-dk-danger{ color:var(--red); border-color:var(--red-line); }
+.btn.inv-dk-danger:hover{ background:var(--red-bg); }
+.inv-dk-foot-err{ margin-right:auto; max-width:60%; }
+
+/* 手工票夹表单 */
+.inv-dk-form{ display:flex; flex-direction:column; gap:12px; }
+.inv-dk-form label{ display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--ink-2); }
+.inv-dk-sel{ width:100%; justify-content:flex-start; }
+
+/* 空状态 */
+.inv-dk-emptyfolder{ display:flex; flex-direction:column; align-items:center; gap:12px; text-align:center; padding:60px 24px;
+  border:1.5px dashed var(--line-strong); border-radius:12px; background:var(--bg-sub); }
+.inv-dk-emptyfolder-big{ font-size:20px; font-weight:700; color:var(--ink); }
+
+/* 重复票红屏：整页红框闪一下（配合提示音），不挡操作 */
+@keyframes inv-dk-alarm{ 0%{ opacity:0; } 12%{ opacity:1; } 70%{ opacity:1; } 100%{ opacity:0; } }
+.inv-dk-alarm{ position:fixed; inset:0; z-index:250; pointer-events:none; border:10px solid var(--red); background:transparent;
+  box-shadow:inset 0 0 140px var(--red); animation:inv-dk-alarm 1.4s ease-out forwards; opacity:0; }
+@media (prefers-reduced-motion: reduce){ .inv-dk-alarm{ animation-duration:2.2s; } }

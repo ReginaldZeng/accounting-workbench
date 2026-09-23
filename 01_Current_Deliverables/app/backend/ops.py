@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| _BOARD_MAP 加 /api/inv → 发票管家；
+#   收票台/手机配对页两个只读轮询（GET /api/inv/desk、GET /api/inv/m/state，精确路径）不进埋点
 """
 [Change Log]
 Date: 2026-09-06 / Author: Claude / Version: V2.489
@@ -83,6 +85,7 @@ _BOARD_MAP = {
     "/api/tempatt": "临时工考勤",
     "/api/ec": "电商对账",
     "/api/archive": "凭证归档",
+    "/api/inv": "发票管家",          # 含手机配对 /api/inv/m/*（V-draft 发票管家）
     "/api/period-statuses": "月结·期间",
     "/api/period": "月结·期间",
     "/api/orgs": "基础数据",
@@ -175,6 +178,16 @@ def board_of(path):
 
 def _excluded(path):
     return any(path == p or path.startswith(p) for p in EXCLUDE_PREFIXES)
+
+
+# 只读轮询接口（精确路径＋GET 才不记）：发票管家电脑端收票台 1.5 秒一轮询、手机配对页 2 秒一轮询，
+# 一配对就是一整天——记下来会把"最近请求"刷掉、把板块用量统计撑成噪声。同路径的写操作、别的方法照记。
+_EXCLUDE_GET_EXACT = ("/api/inv/desk", "/api/inv/m/state")
+
+
+def _skip(method, path):
+    """这个请求不进埋点 → True。"""
+    return _excluded(path) or (method == "GET" and path in _EXCLUDE_GET_EXACT)
 
 
 # ── SQLite：建表 / 连接 ──────────────────────────────────────────────────────────
@@ -327,7 +340,7 @@ class OpsMiddleware:
         if scope.get("type") != "http" or not OPS_ENABLED:
             return await self.app(scope, receive, send)
         path = scope.get("path", "") or ""
-        if _excluded(path):
+        if _skip(scope.get("method", ""), path):
             return await self.app(scope, receive, send)
 
         try:

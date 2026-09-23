@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
+# Description: 新增一级板块「发票管家」及四个二级（收票工作台/发票后补池/发票审核/发票台账，默认开发中）、岗位模板种子与一次性并入 DB 模板、
+#              登录门加手机配对例外（/api/inv/m/ + X-Inv-Pair 一次性令牌）、注册 routers/invoice 与 routers/invoice_books。
 # [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
 # Description: 应收模块新增电商月结工作台导航，准入沿用收款核销权限且不新增敏感动作点。
 # [Change Log]
@@ -193,7 +196,13 @@ async def _auth_gate(request, call_next):
         bp_internal = p.startswith(bom_quote.INTERNAL_PATH_PREFIXES) and bom_quote.internal_token_ok(request)
         # BOM 专用取件码（V2.525）：只放 /api/bom/outbox/*——成本会计电脑上的小取件机揣它取采购核算表，取不了报表
         bom_pull = p.startswith("/api/bom/outbox/") and bom_quote.bom_pull_token_ok(request)
-        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal and not bom_pull:
+        # 发票管家手机配对（V-draft）：手机没有登录会话，只揣电脑端生成的一次性配对令牌（请求头 X-Inv-Pair，库里只存 sha256，
+        # 10 分钟内绑定、绑定后 12 小时、电脑端可随时断开）。只放 /api/inv/m/*——路由里每次再核令牌、账号仍启用且仍有收票权限。
+        inv_pair = (not u) and p.startswith("/api/inv/m/") and invoice.pair_token_ok(request)
+        if inv_pair:
+            # 手机端没有会话：埋点记成"<电脑账号>·手机"，不再全堆在"(未透传身份)"里
+            request.state.ops_user = invoice.pair_ops_user(request) or None
+        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal and not bom_pull and not inv_pair:
             return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
         # 初始密码闸（V2.330）：账号被新建/重置密码后 must_change_pwd=1——改密之前除 /api/change-pwd
         # 外一律 403（含 /api/bp-authz，BP 也进不去）。前端据 code 弹强制改密页；服务端拦，直连 API 也绕不过。
@@ -556,8 +565,17 @@ def api_user_active(body: dict, request: Request):
     db.set_user_active(name, active)
     if not active:
         db.delete_user_sessions(name)      # 禁用即踢下线
+        _inv_revoke_pairs(name)            # 发票管家手机配对一并吊销
     db.audit(adm["name"], "启用账号" if active else "禁用账号", name)
     return {"ok": True}
+
+
+def _inv_revoke_pairs(name):
+    """账号被重置密码/禁用/删除 → 吊销它的发票管家手机配对（手机没有会话，踢会话踢不到它）。出错不影响账号操作本身。"""
+    try:
+        invoice.revoke_pairs_for(name)
+    except Exception as e:
+        print("[账号] 吊销发票管家手机配对失败（%s）：%s" % (name, e))
 
 
 @app.post("/api/users/reset-pwd")
@@ -570,6 +588,7 @@ def api_user_reset(body: dict, request: Request):
     if not pwd:
         return {"ok": False, "msg": "新密码不能为空"}
     db.reset_pwd(name, pwd)
+    _inv_revoke_pairs(name)                # 疑似被盗号才重置：已配对的手机不能接着用
     db.audit(adm["name"], "重置密码", name)
     return {"ok": True}
 
@@ -584,6 +603,7 @@ def api_user_delete(body: dict, request: Request):
         return {"ok": False, "msg": "不能删除自己"}
     db.delete_user(name)
     db.delete_user_sessions(name)
+    _inv_revoke_pairs(name)
     db.audit(adm["name"], "删除账号", name)
     return {"ok": True}
 
@@ -736,6 +756,7 @@ NAV_SECTIONS = [
     {"key": "ap", "label": "应付板块", "order": 30},
     {"key": "cost", "label": "成本模块", "order": 40},
     {"key": "ar", "label": "应收模块", "order": 50},
+    {"key": "inv", "label": "发票管家", "order": 55},     # V-draft 发票管家（确认书 v1.4 四：排在应收后面，设置页可调）
     {"key": "misc", "label": "其它模块", "order": 60},
     {"key": "common", "label": "通用", "order": 999, "bottom": True},
 ]
@@ -842,6 +863,13 @@ NAV_MODULES = [
     {"key": "ecommonth", "label": "电商工作台", "sec": "ar", "order": 41, "parent": "ecom", "default": "待验收", "cap": "enter:ecomsettle"},
     {"key": "ecomsettle", "label": "收款核销", "sec": "ar", "order": 42, "parent": "ecom", "default": "待验收"},
     {"key": "ecombase", "label": "基础资料", "sec": "ar", "order": 43, "parent": "ecom", "default": "待验收"},
+    # ── 发票管家（V-draft）──
+    # 四个二级都是点了直接进页面的叶子 → 各自自动生成 enter:<key> 准入点（存量账号一律不给）。
+    # 「开发中」只挡侧栏不挡接口，所以 routers/invoice.py 每个接口都自己再判准入点＋动作点。
+    {"key": "invdesk", "label": "收票工作台", "sec": "inv", "order": 10, "default": "开发中"},
+    {"key": "invlater", "label": "发票后补池", "sec": "inv", "order": 20, "default": "开发中"},
+    {"key": "invaudit", "label": "发票审核", "sec": "inv", "order": 30, "default": "开发中"},
+    {"key": "invledger", "label": "发票台账", "sec": "inv", "order": 40, "default": "开发中"},
     # ── 其它模块 ──
     {"key": "archive", "label": "凭证归档", "sec": "misc", "order": 10, "default": "待验收"},
     # ── 通用（钉底部）──
@@ -891,9 +919,12 @@ _TPL_KEY = "nav_post_templates"
 NAV_POST_TEMPLATES_DEFAULT = {
     # secs 带上 common＝把「基础数据」给他；「系统设置」同在 common，但它的 cap 是敏感点 enter_settings，
     # 会被 _template_caps 挡掉——模板永远给不出敏感点，地板不破（确认书第五节）。
-    "fin_mgr": {"secs": ["report", "gl", "ap", "cost", "ar", "misc", "common"],
+    # 发票管家（V-draft，确认书 v1.4 十一，Q10 待业务方确认）：财务经理整个板块、应付会计四个菜单全进＋三个非敏感动作、
+    # 税务会计审核与台账＋抵扣、实习生收票工作台。审核/作废/期初/设置是敏感点，模板给不出，管理员手工开。
+    "fin_mgr": {"secs": ["report", "gl", "ap", "cost", "ar", "misc", "common", "inv"],
                 "acts": ["bank_upload", "kingdee_refresh", "claim", "ledger_override", "subject_upload",
-                         "logistics_upload", "cost_ledger", "cost_ledger_wh", "archive_edit"]},
+                         "logistics_upload", "cost_ledger", "cost_ledger_wh", "archive_edit",
+                         "inv_intake", "inv_receive", "inv_deduct"]},
     # 总账会计 / 资金专员在【银行对账】内部的分工，照业务方**已有的岗位标注**来（V2.51 前就挂在模块上）：
     #   对账程序＋理财对账 = 总账岗    资金看板＋账户台账 = 资金岗
     # 汇率录入/月结看板是新增的、没标注过，暂归总账会计（确认书 Q2 待业务方确认）。
@@ -903,12 +934,13 @@ NAV_POST_TEMPLATES_DEFAULT = {
     # V2.240 报表板块改名后按语义平移：科目余额+序时账簿 → 报表仪表盘；源单列表(现纯分组) → 源单导出。
     # 「报表导出」暂不进这三个模板（一键导出是新动作，给谁待业务方定）；gl_acc/tax_acc 走 secs=["report"] 整给，自动含它。
     "cost_acc": {"secs": ["cost"], "mods": ["rptdash"], "acts": ["cost_ledger", "cost_ledger_wh"]},
-    "ap_acc": {"secs": ["ap"], "mods": ["rptdash", "srcexport"], "acts": ["logistics_upload"]},
+    "ap_acc": {"secs": ["ap", "inv"], "mods": ["rptdash", "srcexport"],
+               "acts": ["logistics_upload", "inv_intake", "inv_receive", "inv_deduct"]},
     "ar_acc": {"secs": ["ar"], "mods": ["rptdash", "srcexport"], "acts": []},
     # 税务会计**不是没有工具**：DB 里早有个自建占位 tax「进项税核对」（原挂"其它小工具"）。
     # 确认书 Q1 据此修正——问题不是"缺工具"，而是"这个工具该归哪个板块"，待业务方定。
-    "tax_acc": {"secs": ["report"], "mods": ["tax"], "acts": []},
-    "intern": {"mods": [], "acts": []},                                 # Q3 待确认：给哪些菜单的只读
+    "tax_acc": {"secs": ["report"], "mods": ["tax", "invaudit", "invledger"], "acts": ["inv_deduct"]},
+    "intern": {"mods": ["invdesk"], "acts": ["inv_intake"]},            # Q3 待确认：给哪些菜单的只读
 }
 
 
@@ -1214,6 +1246,45 @@ def _migrate_nav_posts_once():
 
 _migrate_nav_posts_once()
 
+# 发票管家（V-draft）要并进岗位模板的条目——与 NAV_POST_TEMPLATES_DEFAULT 里新加的完全一致
+_INV_TPL_ADD = {
+    "fin_mgr": {"secs": ["inv"], "acts": ["inv_intake", "inv_receive", "inv_deduct"]},
+    "ap_acc": {"secs": ["inv"], "acts": ["inv_intake", "inv_receive", "inv_deduct"]},
+    "tax_acc": {"mods": ["invaudit", "invledger"], "acts": ["inv_deduct"]},
+    "intern": {"mods": ["invdesk"], "acts": ["inv_intake"]},
+}
+_INV_TPL_FLAG = "nav_tpl_inv_merged"
+
+
+def _migrate_inv_templates_once():
+    """发票管家一次性并模板：岗位模板一旦在设置页保存过就存进 DB，代码种子里新加的条目不再生效（_post_templates 优先 DB）。
+    这里把 _INV_TPL_ADD 并进 DB 那份：只加不减、不碰其它条目；DB 里没有的岗位不硬塞（那是管理员自己删的）。
+    flag 防重跑——管理员之后在设置页删掉的发票管家条目，重启也不会被加回来。"""
+    if db.get_setting(_INV_TPL_FLAG, False):
+        return
+    raw = db.get_setting(_TPL_KEY, None)
+    added = []
+    if isinstance(raw, dict) and raw:
+        for post, add in _INV_TPL_ADD.items():
+            t = raw.get(post)
+            if not isinstance(t, dict):
+                continue
+            for k, vals in add.items():
+                cur = [x for x in (t.get(k) or []) if isinstance(x, str)]
+                new = [v for v in vals if v not in cur]
+                if new:
+                    t[k] = cur + new
+                    added.append("%s.%s+%s" % (post, k, "/".join(new)))
+        if added:
+            db.set_setting(_TPL_KEY, raw, "系统迁移")
+            _nav_cache_clear()
+    db.set_setting(_INV_TPL_FLAG, True, "系统迁移")
+    if added:
+        db.audit("系统迁移", "岗位模板并入发票管家", "核算工作台", "；".join(added)[:300])
+
+
+_migrate_inv_templates_once()
+
 
 def _nav_one(m, saved, post_keys, dev_ok=False):
     s = saved.get(m["key"])
@@ -1310,6 +1381,7 @@ _ACC_MODULE_BOARD = {
     "tempattrev": "临时工考勤", "tempattboard": "临时工考勤",
     "ecommonth": "电商对账", "ecomsettle": "电商对账", "ecombase": "电商对账",
     "archive": "凭证归档", "basicdata": "基础数据", "settings": "系统设置",
+    "invdesk": "发票管家", "invlater": "发票管家", "invaudit": "发票管家", "invledger": "发票管家",
 }
 
 
@@ -4834,6 +4906,12 @@ app.include_router(llm_hub.router)   # V2.301 门户模型配置 P0.5 聚合看�
 app.include_router(temp_attendance.router)
 app.include_router(bom_quote.router)   # V-draft BOM报价审核
 app.include_router(syslog.router)      # V2.489 日志中心（运维请求日志 + 业务操作留痕）·仅主管理员
+# 发票管家（V-draft）：模块导入即起一个后台线程（拉审批附件＋照片识别）；登录门的手机配对例外引用本模块的 pair_token_ok
+from routers import invoice
+app.include_router(invoice.router)
+# 发票管家·台账与后补池（V-draft）：复用 routers/invoice 的闸与助手；模块导入即起催票线程（SQLite 库不起）
+from routers import invoice_books
+app.include_router(invoice_books.router)
 
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,

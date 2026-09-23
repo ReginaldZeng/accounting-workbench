@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| BOARD_ORDER 在「应收模块」后插入「发票管家」
 // [Change Log] Date:2026-09-06 Author:Claude/Reginald Zeng Version:V2.500
 // 门户「验收台账」——你的跨台驾驶舱。V2.500 重画（业务方：好丑+要分类）：
 //   一级=工作台（核算/BP/法务），二级=业务板块（核算内按 报表/总账/应付/成本/应收/其它 折叠）；顶部概览条；
@@ -10,7 +11,7 @@ import { getPortalAcceptance, assignVerify, escalateVerify, ratePortalTool } fro
 const ST = { ok: { t: '已上线', c: 'var(--green,#34D399)' }, par: { t: '人工并行', c: 'var(--amber,#FBBF24)' },
   beta: { t: '开发中', c: '#6FA8FF' }, soon: { t: '敬请期待', c: 'var(--ink3,#8B84AD)' } }
 const LANE_ORDER = ['accounting', 'bp', 'legal']
-const BOARD_ORDER = ['报表板块', '总账板块', '应付板块', '成本模块', '应收模块', '其它模块']
+const BOARD_ORDER = ['报表板块', '总账板块', '应付板块', '成本模块', '应收模块', '发票管家', '其它模块']
 const boardRank = b => { const i = BOARD_ORDER.indexOf(b); return i < 0 ? 99 : i }
 
 const CSS = `

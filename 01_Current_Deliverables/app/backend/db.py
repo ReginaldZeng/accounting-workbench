@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
+# Description: 挂入 kernels/invoice_store 的 11 张 inv_ 新表（create_all 只建不改）；CAP_META_STATIC 加 7 个发票管家动作点（4 个敏感）。
 # [Change Log]
 # Date: 2026-09-10 | Author: Codex | Version: V2.553
 # Description: 新增天猫订单逐单核算表，仅保存订单号与财务核算必要字段。
@@ -691,6 +693,10 @@ for _table in _ec_document_tables:
 from kernels.ec_order_store import TABLES as _ec_order_tables
 for _table in _ec_order_tables:
     _table.to_metadata(_md)
+# 发票管家（V-draft）：11 张 inv_ 表归 kernels/invoice_store 自带 MetaData，这里只挂进来由 create_all 建（只建不改既有表）
+from kernels.invoice_store import TABLES as _inv_tables
+for _table in _inv_tables:
+    _table.to_metadata(_md)
 _md.create_all(_engine)
 
 # 细粒度权限能力清单 —— 代码持有的**静态**注册表：加一条动作权限只改这里，账号页按 ws/group 自动渲染。
@@ -812,6 +818,23 @@ CAP_META_STATIC = [
     # 写金蝶一律敏感（logistics_post/fxrate_post 先例；立项分析 §6.1）。只建草稿、提交审核人在金蝶做。
     {"key": "ec_post", "label": "电商对账·一键录入结算凭证（写金蝶·草稿）", "ws": "accounting",
      "group": "电商对账", "sensitive": True, "tier": "act", "mod": "ecomsettle"},
+    # 发票管家（V-draft，确认书 v1.4 十一）：3 个非敏感点会被 _backfill_missing_perms 补给全体核算组账号，
+    # 所以 routers/invoice.py 每个写接口都同时校验「页面准入点 AND 动作点」——没开页面的人有动作点也用不了。
+    # 审核是控制点、作废/期初/设置动的是全员共享的底子 → 一律敏感：默认谁都不给、不进岗位模板，管理员手工开。
+    {"key": "inv_intake", "label": "发票管家·收票（建票夹/拍照登记/提交）", "ws": "accounting",
+     "group": "发票管家", "tier": "act", "mod": "invdesk"},
+    {"key": "inv_receive", "label": "发票管家·后补池（代填后补单/点收到/确认电子票/催票）", "ws": "accounting",
+     "group": "发票管家", "tier": "act", "mod": "invlater"},
+    {"key": "inv_deduct", "label": "发票管家·税局对账/抵扣勾选/新销方核查", "ws": "accounting",
+     "group": "发票管家", "tier": "act", "mod": "invledger"},
+    {"key": "inv_audit", "label": "发票管家·审核（通过/退回/判定可否抵扣）", "ws": "accounting",
+     "group": "发票管家", "sensitive": True, "tier": "act", "mod": "invaudit"},
+    {"key": "inv_unbind", "label": "发票管家·作废/解绑改挂", "ws": "accounting",
+     "group": "发票管家", "sensitive": True, "tier": "act", "mod": "invledger"},
+    {"key": "inv_opening", "label": "发票管家·期初导入（票总管历史清单）", "ws": "accounting",
+     "group": "发票管家", "sensitive": True, "tier": "act", "mod": "invledger"},
+    {"key": "inv_config", "label": "发票管家·设置（财务人员与钉钉绑定/本公司抬头/审批模板/催票规则）", "ws": "accounting",
+     "group": "发票管家", "sensitive": True, "tier": "act", "mod": "invlater"},
     # 它就是「系统设置」这个菜单的准入点（菜单声明 cap=enter_settings 复用它），故 tier=nav 不是 act。
     # mod 指回 settings 菜单：账号页第②栏据此把它排到「通用」板块里去，而不是因为它在本常量里排得早就窜到最前面。
     {"key": "enter_settings", "label": "进入系统设置", "ws": "accounting", "group": "通用", "sensitive": True,

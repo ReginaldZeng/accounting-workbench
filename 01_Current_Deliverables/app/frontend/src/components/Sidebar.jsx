@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 加发票图标，挂 inv/invdesk/invlater/invaudit/invledger
 // [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
 // Description: 电商月结页进入时自动展开应收模块与电商对账父级，保留完整业务承接。
 // [Change Log] Date:2026-07-12 Author:Claude/c Version:V2.105  侧栏按设计稿「导航栏想法」重做
@@ -27,6 +28,7 @@ const IC = {
   soon: S(<><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>),
   archive: S(<><rect x="3" y="4" width="18" height="4" rx="1" /><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" /><path d="M10 12h4" /></>),
   dl: S(<><path d="M12 3v11" /><path d="M8 10l4 4 4-4" /><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" /></>),   // 导出
+  invoice: S(<><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z" /><path d="M9 8h6M9 12h6M9 16h3" /></>),   // 发票（锯齿底的票据）
   basicdata: S(<><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></>),
   settings: S(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8 2 2 0 1 1-2.8 2.8 1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 0 1-4 0 1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3 2 2 0 1 1-2.8-2.8 1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 0 1 0-4 1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8 2 2 0 1 1 2.8-2.8 1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 0 1 4 0 1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3 2 2 0 1 1 2.8 2.8 1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></>),
 }
@@ -40,6 +42,8 @@ const ICON_BY_KEY = {
   bomprice: IC.cost, prodbrief: IC.month, revledger: IC.ledger, custrecon: IC.reconcile, ecompromo: IC.ecom,
   // 临工线（V2.318）：tempatt 是纯分组父项，两个三级各给一个图标
   tempatt: IC.user, tempattrev: IC.reconcile, tempattboard: IC.fund,
+  // 发票管家（V-draft）：板块与收票用票据图标；后补池=待办时钟、审核=勾选、台账=账本
+  inv: IC.invoice, invdesk: IC.invoice, invlater: IC.soon, invaudit: IC.accept, invledger: IC.ledger,
   basicdata: IC.basicdata, settings: IC.settings, acceptance: IC.accept,
 }
 const RECON_VIEWS = ['import', 'reconcile', 'fund', 'result']
