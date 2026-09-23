@@ -2020,30 +2020,53 @@ def fetch_journal_full(year, period, book, s=None, conf=None):
     #     所以这是一次零风险的加固：把"碰巧对"变成"结构上必然对"。
     # 分录行号怎么取到的：ExecuteBillQuery 的「单据体Key_字段」写法（`FEntity_FEntrySeq`）。
     # 另有 `FEntity_FEntryId`＝分录内码（创建序），实测两者次序一致，取行号更贴近金蝶的显示口径。
+    #
+    # V2.613 翻页改「按分录内码接着取」（keyset），排序挪到本地：
+    #   原来是 StartRow 偏移翻页 + 服务端 ORDER BY 凭证号——金蝶每翻一页都要从头数过前面所有行，
+    #   越往后越慢。107 号 2026-08 有 42.3 万行，实测深页 2.7s→32s（20 万行处）→约 60s（40 万行处），
+    #   整本要一个半到两个小时。改成 `FEntity_FEntryId > 上一页末行` + 按内码排（主键，走索引），
+    #   每页恒定 1~2 秒，同一本 42.3 万行 126 秒取完、行数一致。
+    #   内码唯一且单调，翻页不会丢行/重行（比偏移翻页更稳）。
+    #   本地再按【凭证号 + 分录行号】排回序时簿口径；并列时以内码兜底，结果确定。
+    base = "FYear=%d and FPERIOD=%d and FAccountBookID.FNumber='%s'" % (int(year), int(period), book)
+    fields = ["FEntity_FEntryId", "FVOUCHERGROUPNO", "FEntity_FEntrySeq"] + fields
     q = {"FormId": "GL_VOUCHER", "FieldKeys": ",".join(fields),
-         "FilterString": "FYear=%d and FPERIOD=%d and FAccountBookID.FNumber='%s'" % (int(year), int(period), book),
-         "OrderString": "FVOUCHERGROUPNO,FEntity_FEntrySeq", "TopRowCount": 0, "StartRow": 0, "Limit": PAGE_SIZE}
+         "OrderString": "FEntity_FEntryId", "TopRowCount": 0, "StartRow": 0, "Limit": JOURNAL_PAGE}
     dim_order = fetch_account_dim_order(s, conf)[0]
-    rows, start = [], 0
+    keyed, last = [], 0
     n = len(fields)
     nf = 2 * len(FLEX_DIMS)
     while True:
-        q["StartRow"] = start
+        q["FilterString"] = base + " and FEntity_FEntryId>%d" % last
         d = _post(s, conf, QUERY_SVC, [json.dumps(q, ensure_ascii=False)]).json()
         if isinstance(d, dict) or (d and isinstance(d[0], list) and d[0] and isinstance(d[0][0], dict)):
             raise KingdeeError("序时账簿取数失败：%s" % json.dumps(d, ensure_ascii=False)[:300])
         for r in d:
             rr = _unwrap_row(r, n)
+            eid, vno, seq, rr = int(rr[0]), rr[1], rr[2], rr[3:]
             h = [_cell(x) for x in rr[:8]]
             t = rr[8 + nf:]
-            rows.append([h[0], _kd_date(h[1]), h[2], h[3], h[4], h[5], h[6], h[7],
-                         _flex_inline(rr[8:8 + nf], dim_order.get(h[6])),
-                         _rpt_num(t[0]) or None, _rpt_num(t[1]) or None,
-                         _cell(t[2]), _cell(t[3]), _cell(t[4])])
-        if len(d) < PAGE_SIZE:
+            keyed.append(((_sort_num(vno), _sort_num(seq), eid),
+                          [h[0], _kd_date(h[1]), h[2], h[3], h[4], h[5], h[6], h[7],
+                           _flex_inline(rr[8:8 + nf], dim_order.get(h[6])),
+                           _rpt_num(t[0]) or None, _rpt_num(t[1]) or None,
+                           _cell(t[2]), _cell(t[3]), _cell(t[4])]))
+            last = eid
+        if len(d) < JOURNAL_PAGE:
             break
-        start += PAGE_SIZE
-    return rows
+    keyed.sort(key=lambda x: x[0])
+    return [r for _, r in keyed]
+
+
+JOURNAL_PAGE = 5000
+
+
+def _sort_num(v):
+    """凭证号/分录行号的排序键：数字按数值比（金蝶里是整型列，"10" 要排在 "9" 后面）；取不出数字的排最后。"""
+    try:
+        return (0, int(float(_cell(v) or "x")))
+    except ValueError:
+        return (1, _cell(v))
 # ---------------- 电商对账·收款核销取数（V2.250，只读，纯新增不动既有函数） ----------------
 # 电商应收整段拉取：结算组织+销售部门是唯一电商筛选器（确认书① §4.1，2026-08-11 实证——
 # 不加部门会混入 B2B，312 万 vs 9.6 万差 32 倍）。整段拉取+本地索引替代逐单千次 in 查询

@@ -19,6 +19,7 @@ import os
 import re
 
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter as _gl
 
@@ -57,13 +58,23 @@ SUBJECT_HDR2 = ["科目编码", "科目名称", "核算维度编码", "核算维
                 "期初余额", None, "本期发生", None, "本年累计", None, "期末余额", None]
 
 
-def _put(ws, r, c, v, font, fmt=None, center=False):
-    cell = ws.cell(r, c, v)
+# V2.613 整本改【只写模式】(write_only)：逐行流式落盘，不在内存里攒几百万个单元格对象。
+#   起因：107 号 2026-08 序时账 42.3 万行×14 列，普通模式实测峰值内存 2.8G——
+#   服务器总共 3.6G，一个主体就能把整个后端挤进交换区甚至被系统杀掉。
+#   只写模式的约束：只能按行从上往下 append，不能回头改格子；列宽/冻结/筛选/合并/网格线
+#   要在写行之前设好。版式（字体/格式/边框/合并/列宽/冻结/筛选/网格线）与原来逐格一致，已对照验证。
+def _c(ws, v, font, fmt=None, center=False, border=None):
+    """造一个带样式的只写单元格。v 为 None 时返回 None＝这一格不落（与原来"空值不建格"一致）。"""
+    if v is None:
+        return None
+    cell = WriteOnlyCell(ws, v)
     cell.font = font
     if fmt:
         cell.number_format = fmt
     if center:
         cell.alignment = CENTER
+    if border:
+        cell.border = border
     return cell
 
 
@@ -76,74 +87,71 @@ def _write_fin_sheet(wb, name, grid):
     """三大报表：Spread 网格 {(行,列): 值} → 表页。行列 0 基转 1 基。"""
     ws = wb.create_sheet(name)
     ncol = len(WIDTHS[name])
-    maxr = 0
-    for (r, c), v in grid.items():
-        if c >= ncol:                                    # 幻影列：金蝶一路拖到 BJ，不搬过来
-            continue
-        isnum = isinstance(v, (int, float))
-        # 表头四行（标题/期间/编制单位/列名）加粗居中，与参考文件一致
-        hdr = r <= 3 and not isnum
-        _put(ws, r + 1, c + 1, v, F_RPT_B if hdr else F_RPT,
-             FMT2 if isnum else None, center=hdr)
-        maxr = max(maxr, r + 1)
-    # 表格线：从列名行（第 4 行）画到最后一行，**整片都画**——包括值为空的格。
-    # 金蝶原件就是这样（数据区 100% 覆盖）；只给有值的格画框会画出一张缺牙的表。
-    # 同时给空格子也设字体：openpyxl 新建的格默认 Calibri，不设的话往里一打字就冒出个西文字体。
-    for r in range(4, maxr + 1):
-        for c in range(1, ncol + 1):
-            cell = ws.cell(r, c)
-            cell.border = BOX
-            if cell.value is None:
-                cell.font = F_RPT
-    for m in MERGES.get(name, []):
-        ws.merge_cells(m)
     # 关掉网格线（业务方定，只关三大报表）：这三张自己带表格线，再叠一层灰网格，
     # 表外那片空白会被切成豆腐块，正式报表的样子就没了。
     # 科目余额/序时账簿**不关**——它们刻意不画边框，全靠网格线分行分列，关了就成一片糊字。
     ws.sheet_view.showGridLines = False
     _widths(ws, name)
+    for m in MERGES.get(name, []):
+        ws.merged_cells.add(m)
+    cells = {(r + 1, c + 1): v for (r, c), v in grid.items()
+             if c < ncol}                                # 幻影列：金蝶一路拖到 BJ，不搬过来
+    maxr = max((r for r, _ in cells), default=0)
+    for r in range(1, maxr + 1):
+        line = []
+        for c in range(1, ncol + 1):
+            v = cells.get((r, c))
+            isnum = isinstance(v, (int, float))
+            # 表头四行（标题/期间/编制单位/列名）加粗居中，与参考文件一致
+            hdr = r <= 4 and v is not None and not isnum
+            # 表格线：从列名行（第 4 行）画到最后一行，**整片都画**——包括值为空的格。
+            # 金蝶原件就是这样（数据区 100% 覆盖）；只给有值的格画框会画出一张缺牙的表。
+            # 同时给空格子也设字体：新建的格默认 Calibri，不设的话往里一打字就冒出个西文字体。
+            if r >= 4:
+                cell = WriteOnlyCell(ws, v)
+                cell.border = BOX
+                cell.font = F_RPT_B if hdr else F_RPT
+                if isnum:
+                    cell.number_format = FMT2
+                if hdr:
+                    cell.alignment = CENTER
+            else:
+                cell = _c(ws, v, F_RPT_B if hdr else F_RPT, FMT2 if isnum else None, center=hdr)
+            line.append(cell)
+        ws.append(line)
     return ws
 
 
 def _write_subject(wb, rows, book_name, year, period, cur):
     """科目余额：三行表头（币别/账簿/期间 → 分组名 → 借贷）+ 明细 + 合计行。版式照参考文件。"""
     ws = wb.create_sheet("科目余额")
-    _put(ws, 1, 1, "币别:%s" % cur, F_LGR)
-    _put(ws, 1, 2, "账簿:%s" % book_name, F_LGR)
-    _put(ws, 1, 3, "期间:%d.%d -- %d.%d" % (year, period, year, period), F_LGR)
-    for i, t in enumerate(SUBJECT_HDR2, start=1):
-        if t:
-            _put(ws, 2, i, t, F_LGR_B, center=True)
-    for i in range(5, 13):                                # 8 个金额列的第二行表头：借方/贷方
-        _put(ws, 3, i, "借方" if i % 2 else "贷方", F_LGR_B, center=True)
-    for i in range(1, 5):
-        ws.merge_cells(start_row=2, start_column=i, end_row=3, end_column=i)   # 前四列纵向合并
-    for i in range(5, 13, 2):
-        ws.merge_cells(start_row=2, start_column=i, end_row=2, end_column=i + 1)
-    for ri, row in enumerate(rows, start=4):
-        for ci, v in enumerate(row, start=1):
-            if v is None:
-                continue
-            _put(ws, ri, ci, v, F_LGR, FMT4 if ci >= 5 else None)
     ws.freeze_panes = "A4"
     _widths(ws, "科目余额")
+    for i in range(1, 5):
+        ws.merged_cells.add("%s2:%s3" % (_gl(i), _gl(i)))                      # 前四列纵向合并
+    for i in range(5, 13, 2):
+        ws.merged_cells.add("%s2:%s2" % (_gl(i), _gl(i + 1)))
+    ws.append([_c(ws, "币别:%s" % cur, F_LGR), _c(ws, "账簿:%s" % book_name, F_LGR),
+               _c(ws, "期间:%d.%d -- %d.%d" % (year, period, year, period), F_LGR)])
+    ws.append([_c(ws, t, F_LGR_B, center=True) for t in SUBJECT_HDR2])
+    # 8 个金额列的第二行表头：借方/贷方
+    ws.append([None] * 4 + [_c(ws, "借方" if i % 2 else "贷方", F_LGR_B, center=True) for i in range(5, 13)])
+    for row in rows:
+        ws.append([_c(ws, v, F_LGR, FMT4 if ci >= 5 else None) for ci, v in enumerate(row, start=1)])
     return ws
 
 
 def _write_journal(wb, rows):
     """序时账簿：一行表头 + 明细。两万多行——冻结表头并挂自动筛选，否则根本没法用。"""
     ws = wb.create_sheet("序时账簿")
-    for i, t in enumerate(kc.JOURNAL_COLS, start=1):
-        _put(ws, 1, i, t, F_LGR_B, center=True)
-    for ri, row in enumerate(rows, start=2):
-        for ci, v in enumerate(row, start=1):
-            if v is None or v == "":
-                continue
-            fmt = FMT4 if ci in (10, 11) else ("#,##0" if ci == 3 else None)
-            _put(ws, ri, ci, v, F_LGR, fmt)
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = "A1:%s%d" % (_gl(len(kc.JOURNAL_COLS)), max(ws.max_row, 1))
+    ws.auto_filter.ref = "A1:%s%d" % (_gl(len(kc.JOURNAL_COLS)), len(rows) + 1)
     _widths(ws, "序时账簿")
+    ws.append([_c(ws, t, F_LGR_B, center=True) for t in kc.JOURNAL_COLS])
+    for row in rows:
+        ws.append([_c(ws, None if v == "" else v, F_LGR,
+                      FMT4 if ci in (10, 11) else ("#,##0" if ci == 3 else None))
+                   for ci, v in enumerate(row, start=1)])
     return ws
 
 
@@ -167,8 +175,7 @@ def file_name(year, period, org, org_name):
 def build_workbook(year, period, rpt, sheets, subject_rows, journal_rows, cur):
     """组装一个主体的工作簿。表页顺序＝三大报表在前、两张账表在后（业务方口径：
     "三大报表，和科目余额表，序时账簿"），**不用金蝶那个 资产负债表→序时簿→科目余额→利润表→现金流量表 的怪序。**"""
-    wb = Workbook()
-    wb.remove(wb.active)
+    wb = Workbook(write_only=True)                        # 只写模式：没有默认空表页，不用再 remove
     for name in kc.FIN_RPT_SHEETS:                        # 资产负债表 / 利润表 / 现金流量表
         if name in sheets:
             _write_fin_sheet(wb, name, sheets[name])
