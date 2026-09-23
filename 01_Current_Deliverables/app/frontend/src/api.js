@@ -259,6 +259,7 @@ export const runRptExport = (b) => jpSoft('/api/rptexport/run', b)
 export const getRptExportProgress = () => j('/api/rptexport/progress')
 export const testRptExportNotify = () => jpSoft('/api/rptexport/notify-test', {})
 export const requestRptExportSync = () => jpSoft('/api/rptexport/request-sync', {})
+export const cancelRptExport = () => jpSoft('/api/rptexport/cancel', {})   // V2.614 取消正在跑的导出
 export const listRptExportFiles = (year, period) => j(`/api/rptexport/files?year=${year}&period=${period}`)
 export const getRptExportPeriodStatus = (year) => j(`/api/rptexport/period-status?year=${year}`)
 export const deleteRptExportFiles = (b) => jpSoft('/api/rptexport/delete', b)

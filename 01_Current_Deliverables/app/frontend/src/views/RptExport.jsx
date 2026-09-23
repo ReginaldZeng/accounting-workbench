@@ -4,7 +4,7 @@
 //   ②通知设置：落地路径（留空回落 conf.ini 兜底）——改路径须口令，同通知设置那把
 // 一次一个月（业务方定）；境外主体只出本位币（后端已按账簿本位币去重）。
 import React, { useEffect, useRef, useState } from 'react'
-import { getRptExportOrgs, getRptExportConfig, saveRptExportConfig, runRptExport, getRptExportProgress, testRptExportNotify, requestRptExportSync, listRptExportFiles, deleteRptExportFiles, getRptExportPeriodStatus } from '../api.js'
+import { getRptExportOrgs, getRptExportConfig, saveRptExportConfig, runRptExport, getRptExportProgress, testRptExportNotify, requestRptExportSync, cancelRptExport, listRptExportFiles, deleteRptExportFiles, getRptExportPeriodStatus } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 // 秒 → 人话。跑 8 个主体要一分多钟，纯秒数（"87.3 秒"）读起来要在脑子里换算一次
@@ -23,6 +23,9 @@ const fmtAgo = s => {
   if (s < 172800) return `${Math.round(s / 3600)} 小时`
   return `${Math.round(s / 86400)} 天`
 }
+
+// 行数 → 人话：42 万行写成「42.3 万行」，小主体照写原数
+const fmtRows = n => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : `${n || 0} `) + '行'
 
 function defaultYM() {          // 默认上一个已结束的月——月结出报表就是导上个月的
   const n = new Date()
@@ -125,6 +128,9 @@ export default function RptExport({ user }) {
   // 进度轮询：只在跑的时候轮，跑完自动停——别让页面一直空转打后端
   const poll = () => getRptExportProgress().then(p => {
     setProg(p)
+    // 打开页面时已经有导出在跑（别人点的，或自己刷新了页面）：接着轮，
+    // 不然进度只取一次就定格，看上去跟卡死一样
+    if (p.running && !timer.current) startPoll()
     if (!p.running && timer.current) {
       clearInterval(timer.current); timer.current = null
       // 导出一跑完就自动通知取件机来取（这就是把「立即同步」并进主按钮：
@@ -140,12 +146,31 @@ export default function RptExport({ user }) {
   useEffect(() => { poll(); return () => timer.current && clearInterval(timer.current) }, [])
   const startPoll = () => { if (!timer.current) timer.current = setInterval(poll, 1500) }
 
+  // 点下去到后端回话之间要有反馈，失败也要说出来——原来这里不 catch，
+  // 网络一断 promise 静默失败，人看到的就是"点了没反应"（V2.614）
+  const [starting, setStarting] = useState(false)
   const run = async () => {
-    setMsg('')
-    const r = await runRptExport({ year, period, orgs: [...sel] })
-    if (!r.ok) { setMsg(r.msg || '启动失败'); return }
-    startPoll(); poll()
+    setMsg(''); setStarting(true)
+    try {
+      const r = await runRptExport({ year, period, orgs: [...sel] })
+      if (!r.ok) { setMsg(r.msg || '启动失败'); return }
+      startPoll(); poll()
+    } catch (e) {
+      setMsg('启动失败：请求没发到服务器（' + (e?.message || e) + '）。检查网络后再点一次。')
+    } finally { setStarting(false) }
   }
+  const cancel = async () => {
+    const left = (prog?.total || 0) - (prog?.done || 0)
+    if (!window.confirm(`确定取消导出？\n\n已导好的 ${prog?.done || 0} 个主体文件保留；正在导的「${prog?.cur || ''}」`
+      + `${left > 1 ? `及后面 ${left - 1} 个` : ''}不会生成文件。`)) return
+    try {
+      const r = await cancelRptExport()
+      if (!r.ok) setMsg(r.msg || '取消失败')
+      poll()
+    } catch (e) { setMsg('取消失败：' + (e?.message || e)) }
+  }
+  // 当期服务器上已有几个文件（期间选择器那份按目录数的）。0＝还没导过，点「立即同步」也没东西可搬
+  const exportedN = pst.counts[String(period)] || 0
   const save = async () => {
     setSaving(true); setMsg('')
     try {
@@ -232,9 +257,11 @@ export default function RptExport({ user }) {
             <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
               {!can('rpt_export') && <span style={{ fontSize: 12.5, color: 'var(--ink-3)' }}>（你没有「报表导出·一键导出」权限）</span>}
               <button className="btn-pri" onClick={run}
-                disabled={running || loading || !sel.size || !can('rpt_export')}
-                style={{ height: 34, padding: '0 18px', fontSize: 13.5, borderRadius: 8 }}>
-                {running ? `导出中… ${prog?.done || 0}/${prog?.total || sel.size}`
+                disabled={running || starting || loading || !sel.size || !can('rpt_export')}
+                style={{ height: 34, padding: '0 18px', fontSize: 13.5, borderRadius: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                {(running || starting) && <span className="rx-spin" aria-hidden="true" />}
+                {starting ? '启动中…'
+                  : running ? `导出中… ${prog?.done || 0}/${prog?.total || sel.size}`
                   : (cfg?.pull_token_set ? `导出并同步共享盘（${sel.size} 个主体）` : `导出选中的 ${sel.size} 个主体`)}
               </button>
             </span>
@@ -266,6 +293,9 @@ export default function RptExport({ user }) {
             <span style={{ fontSize: 12.5, color: 'var(--ink-2)' }}>
               {prog.done}/{prog.total || '?'}{prog.cur ? ` · 正在 ${prog.cur}` : ''}
             </span>
+            {running && can('rpt_export') && <button className="btn" onClick={cancel} disabled={!!prog.cancel}
+              style={{ height: 26, padding: '0 10px', fontSize: 12 }}>
+              {prog.cancel ? '取消中…' : '取消导出'}</button>}
             {/* 耗时由**服务端**算好下发：前端拿本机时钟去减服务器时间戳，两边差几秒就会出负数或跳变 */}
             {prog.elapsed != null && <span style={{
               marginLeft: 'auto', fontSize: 12.5, fontVariantNumeric: 'tabular-nums',
@@ -277,8 +307,22 @@ export default function RptExport({ user }) {
           {(prog.started || prog.finished) && <div style={{ fontSize: 12, color: 'var(--ink-3)', marginBottom: 8 }}>
             开始 {prog.started}{prog.finished ? ` · 结束 ${prog.finished}` : ''}
           </div>}
-          <div style={{ height: 8, borderRadius: 4, background: 'var(--line)', overflow: 'hidden', marginBottom: 10 }}>
-            <div style={{ width: pct + '%', height: '100%', background: 'var(--accent)', transition: 'width .3s' }} />
+          {/* 当前主体在干什么、干到多少行（V2.614）。107 这种 42 万行的主体要跑几分钟，
+              光一个「正在 107」看不出是在动还是卡死——业务方就是因此等了一个多小时不敢动。 */}
+          {running && prog.stage && <div className="rx-stage">
+            <span className="nav-live-dot" aria-hidden="true" />
+            <span>{prog.stage}</span>
+            {prog.rows > 0 && <b>
+              {prog.rows_total ? `${fmtRows(prog.rows)} / ${fmtRows(prog.rows_total)}` : `已取 ${fmtRows(prog.rows)}`}
+            </b>}
+            {prog.cancel && <span style={{ color: 'var(--amber)' }}>· {prog.cancel} 已请求取消，这一步做完就停</span>}
+          </div>}
+          {/* 进度条：跑的时候带流动斜纹（表示"还在动"），跑完变实色。
+              写 Excel 阶段知道总行数，把当前主体的完成比例也并进去，条不会在一个主体上一停几分钟。 */}
+          <div className="rx-track">
+            <div className={'rx-fill' + (running ? ' run' : '')}
+              style={{ width: Math.min(100, running && prog.total
+                ? (prog.done + (prog.rows_total ? prog.rows / prog.rows_total : 0)) * 100 / prog.total : pct) + '%' }} />
           </div>
           {prog.msg && <div style={{ fontSize: 13, marginBottom: 8 }}>{prog.msg}</div>}
           {prog.files && prog.files.length > 0 && <div style={{ fontSize: 12.5, color: 'var(--ink-2)' }}>
@@ -306,7 +350,15 @@ export default function RptExport({ user }) {
           <div className="row" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: cfg.sync ? 10 : 0 }}>
             <b style={{ fontSize: 13.5 }}>共享盘</b>
             <span style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 'auto' }}
+              title="把服务器上已经导好的文件搬到共享盘。不会去金蝶取数——取数请点上面蓝色的导出按钮。"
               onClick={async () => {
+                // 这一期服务器上一个文件都没有：同步了也没东西可搬。直接说清楚，别回一句"已通知取件机"
+                // 让人以为在搬、干等（V2.614，业务方把这个当成了导出按钮，点完等了半天）。
+                if (!exportedN && !running) {
+                  setSyncMsg(`${year}年${period}期还没导出过，服务器上没有这一期的文件，同步了也没东西可搬。`
+                    + '请先点上面蓝色的「导出并同步共享盘」——导完会自动同步，不用再点这里。')
+                  return
+                }
                 const r = await requestRptExportSync()
                 // 回执写在这一行旁边，不发去页顶那个通栏——它是「立即同步」的结果，
                 // 摆在页面顶上等于让人点完之后还要抬头去找（业务方指出）。

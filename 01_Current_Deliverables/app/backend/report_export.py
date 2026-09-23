@@ -141,17 +141,20 @@ def _write_subject(wb, rows, book_name, year, period, cur):
     return ws
 
 
-def _write_journal(wb, rows):
-    """序时账簿：一行表头 + 明细。两万多行——冻结表头并挂自动筛选，否则根本没法用。"""
+def _write_journal(wb, rows, progress=None):
+    """序时账簿：一行表头 + 明细。两万多行——冻结表头并挂自动筛选，否则根本没法用。
+    progress(已写行数)：每 2 万行回调一次（42 万行要写三四分钟，页面上得看得到在动）。"""
     ws = wb.create_sheet("序时账簿")
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = "A1:%s%d" % (_gl(len(kc.JOURNAL_COLS)), len(rows) + 1)
     _widths(ws, "序时账簿")
     ws.append([_c(ws, t, F_LGR_B, center=True) for t in kc.JOURNAL_COLS])
-    for row in rows:
+    for i, row in enumerate(rows, start=1):
         ws.append([_c(ws, None if v == "" else v, F_LGR,
                       FMT4 if ci in (10, 11) else ("#,##0" if ci == 3 else None))
                    for ci, v in enumerate(row, start=1)])
+        if progress and i % 20000 == 0:
+            progress(i)
     return ws
 
 
@@ -172,7 +175,7 @@ def file_name(year, period, org, org_name):
     return "%d年%02d期_%s_%s_财务报表.xlsx" % (year, int(period), org, _BAD_FN.sub("_", org_name or ""))
 
 
-def build_workbook(year, period, rpt, sheets, subject_rows, journal_rows, cur):
+def build_workbook(year, period, rpt, sheets, subject_rows, journal_rows, cur, progress=None):
     """组装一个主体的工作簿。表页顺序＝三大报表在前、两张账表在后（业务方口径：
     "三大报表，和科目余额表，序时账簿"），**不用金蝶那个 资产负债表→序时簿→科目余额→利润表→现金流量表 的怪序。**"""
     wb = Workbook(write_only=True)                        # 只写模式：没有默认空表页，不用再 remove
@@ -180,17 +183,27 @@ def build_workbook(year, period, rpt, sheets, subject_rows, journal_rows, cur):
         if name in sheets:
             _write_fin_sheet(wb, name, sheets[name])
     _write_subject(wb, subject_rows, rpt["org_name"], year, period, cur)
-    _write_journal(wb, journal_rows)
+    _write_journal(wb, journal_rows, progress)
     return wb
 
 
-def export_one(year, period, rpt, out_dir, s=None, conf=None):
-    """取一个主体的五张表 → 落一个 xlsx。返回 (文件全路径, 各表行数)。"""
+def export_one(year, period, rpt, out_dir, s=None, conf=None, progress=None):
+    """取一个主体的五张表 → 落一个 xlsx。返回 (文件全路径, 各表行数)。
+    progress(阶段, 行数, 总行数)：逐阶段回报给页面（取三大报表→科目余额→序时账簿→写 Excel→存盘）；
+    回调里抛异常＝中止（报表导出的「取消」就是这么实现的）。"""
+    p = progress or (lambda *a: None)
+    p("取三大报表", 0, 0)
     sheets = kc.fetch_fin_report_sheets(rpt["rid"], s, conf)
     cur = rpt.get("cur") or "人民币"
+    p("取科目余额", 0, 0)
     subject = kc.fetch_subject_balance_full(year, period, rpt["org"], cur=cur, s=s, conf=conf)
-    journal = kc.fetch_journal_full(year, period, rpt["org"], s=s, conf=conf)
-    wb = build_workbook(year, period, rpt, sheets, subject, journal, cur)
+    p("取序时账簿", 0, 0)
+    journal = kc.fetch_journal_full(year, period, rpt["org"], s=s, conf=conf,
+                                    on_page=lambda n: p("取序时账簿", n, 0))
+    nj = len(journal)
+    p("写入 Excel", 0, nj)
+    wb = build_workbook(year, period, rpt, sheets, subject, journal, cur,
+                        progress=lambda n: p("写入 Excel", n, nj))
     mdir = os.path.join(out_dir, month_dir(year, period))
     os.makedirs(mdir, exist_ok=True)
     path = os.path.join(mdir, file_name(year, period, rpt["org"], rpt["org_name"]))
@@ -199,6 +212,7 @@ def export_one(year, period, rpt, out_dir, s=None, conf=None):
     # 正好被扫到就会取走半个 Excel。改名是原子操作，外界要么看到旧的、要么看到完整的新的，
     # 没有中间态。同名覆盖＝重导即更新，不留新旧两份让人猜哪个准。
     tmp = path + ".part"
+    p("存盘", nj, nj)
     wb.save(tmp)
     os.replace(tmp, path)
     return path, {"三大报表": len(sheets), "科目余额": len(subject), "序时账簿": len(journal)}

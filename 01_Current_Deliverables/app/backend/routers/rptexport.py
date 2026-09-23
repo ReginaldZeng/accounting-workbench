@@ -29,8 +29,16 @@ _CFG_KEY = "rpt_export_cfg"          # {out_dir}
 # 收件人存 DB、前端可改；SMTP 账号密码**只在 conf.ini**，不经前端、不进 DB。
 _SCENE = "报表导出"
 _JOB = {"running": False, "done": 0, "total": 0, "cur": "", "files": [],
-        "errors": [], "started": "", "finished": "", "msg": "", "t0": 0.0, "t1": 0.0}
+        "errors": [], "started": "", "finished": "", "msg": "", "t0": 0.0, "t1": 0.0,
+        # V2.614 当前主体的细进度：阶段（取序时账簿/写入 Excel…）+ 行数。
+        # 起因：107 号 42 万行时页面只显示「正在 107」，一个多小时看不出是在跑还是卡死。
+        "stage": "", "rows": 0, "rows_total": 0,
+        "cancel": "", "canceled": False}       # cancel＝谁点了取消（非空即请求中止）
 _LOCK = threading.Lock()
+
+
+class _Canceled(Exception):
+    """用户点了「取消」。在每页取数/每 2 万行写入的回调里抛出，干净地中止当前主体。"""
 
 
 def _passcode():
@@ -220,6 +228,14 @@ def _send_notify(year, period, out_dir, files, errors, started, finished, share=
         return {"sent": False, "msg": "通知发送异常：%s" % str(e)[:200]}
 
 
+def _progress(stage, rows, total):
+    """export_one 的进度回调：记下阶段与行数；有人点了取消就抛 _Canceled 中止。"""
+    with _LOCK:
+        if _JOB["cancel"]:
+            raise _Canceled()
+        _JOB.update({"stage": stage, "rows": int(rows or 0), "rows_total": int(total or 0)})
+
+
 def _run(year, period, orgs, out_dir, who):
     s = conf = None
     files = errors = None          # 非 None ＝ 跑完了、该发回执（中断/无报表都不发）
@@ -237,14 +253,19 @@ def _run(year, period, orgs, out_dir, who):
             return
         for r in rpts:
             with _LOCK:
+                if _JOB["cancel"]:
+                    raise _Canceled()
                 _JOB["cur"] = "%s %s" % (r["org"], r["org_name"])
+                _JOB.update({"stage": "", "rows": 0, "rows_total": 0})
             t1 = time.time()
             try:
-                path, n = rx.export_one(year, period, r, out_dir, s, conf)
+                path, n = rx.export_one(year, period, r, out_dir, s, conf, progress=_progress)
                 with _LOCK:
                     _JOB["files"].append({"org": r["org"], "name": os.path.basename(path),
                                           "rows": n, "cur": r.get("cur"),
                                           "sec": round(time.time() - t1, 1)})
+            except _Canceled:
+                raise
             except Exception as e:                       # 一个主体炸掉不连坐其余的
                 with _LOCK:
                     _JOB["errors"].append({"org": r["org"], "name": r["org_name"],
@@ -257,6 +278,14 @@ def _run(year, period, orgs, out_dir, who):
             started = _JOB["started"]
         db.audit(who, "报表导出", "%d年%d期" % (year, period),
                  "成功%d 失败%d → %s" % (len(files), len(errors), out_dir))
+    except _Canceled:
+        # 取消＝不发回执（与"中断"同口径）；已经落盘的主体文件保留，取件机照常搬
+        files = None
+        with _LOCK:
+            _JOB["canceled"] = True
+            _JOB["msg"] = "已取消（%s 点的）：完成 %d 个主体，已导好的文件保留；没导完的那个没有落盘。" % (
+                _JOB["cancel"], len(_JOB["files"]))
+        db.audit(who, "报表导出", "%d年%d期 取消" % (year, period), "由 %s 取消" % _JOB["cancel"])
     except Exception as e:
         files = None
         with _LOCK:
@@ -265,6 +294,7 @@ def _run(year, period, orgs, out_dir, who):
         with _LOCK:
             _JOB["running"] = False
             _JOB["cur"] = ""
+            _JOB.update({"stage": "", "rows": 0, "rows_total": 0})
             _JOB["t1"] = time.time()
             _JOB["finished"] = finished = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -718,7 +748,23 @@ def rptexport_run(body: dict, request: Request):
     orgs = [str(x) for x in (body.get("orgs") or [])]
     with _LOCK:
         _JOB.update({"running": True, "done": 0, "total": 0, "cur": "准备中", "files": [], "errors": [],
+                     "stage": "", "rows": 0, "rows_total": 0, "cancel": "", "canceled": False,
                      "started": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
                      "msg": "", "t0": time.time(), "t1": 0.0})
     threading.Thread(target=_run, args=(year, period, orgs, out_dir, u["name"]), daemon=True).start()
     return {"ok": True, "msg": "已开始导出，进度见下方。"}
+
+
+@router.post("/api/rptexport/cancel")
+def rptexport_cancel(request: Request):
+    """取消正在跑的导出（V2.614）。只是**留个标记**：导出线程在下一页取数 / 下 2 万行写入时看到就停，
+    通常 1~2 秒内生效（一次金蝶请求正在路上的话要等它回来，最多 2 分钟超时）。
+    已经导好的主体文件保留；正导到一半的那个不落盘（先写 .part 再改名，不会留半个文件）。"""
+    u = _require_perm(request, "rpt_export")
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「报表导出」权限"}, status_code=403)
+    with _LOCK:
+        if not _JOB["running"]:
+            return {"ok": False, "msg": "当前没有在跑的导出。"}
+        _JOB["cancel"] = u["name"]
+    return {"ok": True, "msg": "已请求取消，当前这一步做完就停（通常几秒内）。"}

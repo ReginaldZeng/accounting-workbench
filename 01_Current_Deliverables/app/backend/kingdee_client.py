@@ -2000,8 +2000,9 @@ def _kd_date(v):
     return "%s/%d/%d" % (d[0], int(d[1]), int(d[2])) if len(d) == 3 and d[0] else str(v or "")
 
 
-def fetch_journal_full(year, period, book, s=None, conf=None):
-    """整本序时账簿（全科目）→ JOURNAL_COLS 那 14 列。单主体单月实测约 2.4 万行，故按 PAGE_SIZE 翻页。"""
+def fetch_journal_full(year, period, book, s=None, conf=None, on_page=None):
+    """整本序时账簿（全科目）→ JOURNAL_COLS 那 14 列。单主体单月实测约 2.4 万行，故按 PAGE_SIZE 翻页。
+    on_page(已取行数)：每取完一页回调一次——报表导出拿它报「已取 xx 万行」、查取消（回调里抛异常即中止）。"""
     s, conf = login(s, conf) if s is None else (s, conf or load_conf())
     head = ["FAccountBookID.FName", "FDate", "FPERIOD", "FVOUCHERGROUPID.FName", "FVOUCHERGROUPNO",
             "FEXPLANATION", "FACCOUNTID.FNumber", "FACCOUNTID.FName"]
@@ -2052,6 +2053,8 @@ def fetch_journal_full(year, period, book, s=None, conf=None):
                            _rpt_num(t[0]) or None, _rpt_num(t[1]) or None,
                            _cell(t[2]), _cell(t[3]), _cell(t[4])]))
             last = eid
+        if on_page:
+            on_page(len(keyed))
         if len(d) < JOURNAL_PAGE:
             break
     keyed.sort(key=lambda x: x[0])

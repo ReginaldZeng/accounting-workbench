@@ -277,6 +277,22 @@ tr.exp td{background:var(--bg-sub); padding:0;}
 .nav-live-dot{flex:0 0 auto; width:8px; height:8px; border-radius:50%; background:var(--green); animation:nav-pulse 2s ease-in-out infinite;}
 .nav-pulse{animation:nav-pulse 2s ease-in-out infinite;}
 
+/* V2.614 报表导出·加载动效。原则：只表达"还在动"，不抢视线、不假装进度。
+   · 按钮里的小转圈：点下去立刻有反馈（原来点完要等后端回话，中间一片死寂）
+   · 进度条流动斜纹：跑的时候纹路一直往前走——哪怕某个主体要几分钟，也看得出没死；跑完收成实色
+   · 阶段行复用导航那颗呼吸绿灯（同一套"在跑"语言）
+   减少动态效果的系统设置下全部静止。 */
+@keyframes rx-spin{to{transform:rotate(360deg);}}
+.rx-spin{width:12px; height:12px; border-radius:50%; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; animation:rx-spin .8s linear infinite; flex:0 0 auto;}
+.rx-stage{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--ink-2); margin-bottom:8px; flex-wrap:wrap;}
+.rx-stage b{color:var(--ink); font-variant-numeric:tabular-nums;}
+.rx-track{height:8px; border-radius:4px; background:var(--line); overflow:hidden; margin-bottom:10px;}
+.rx-fill{height:100%; min-width:0; border-radius:4px; background:var(--accent); transition:width .6s ease;}
+@keyframes rx-stripes{from{background-position:0 0;}to{background-position:28px 0;}}
+.rx-fill.run{min-width:24px; background-color:var(--accent); background-size:28px 28px; animation:rx-stripes .9s linear infinite;
+  background-image:linear-gradient(45deg,rgba(255,255,255,.22) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.22) 50%,rgba(255,255,255,.22) 75%,transparent 75%,transparent);}
+@media (prefers-reduced-motion:reduce){.rx-spin,.rx-fill.run,.rx-stage .nav-live-dot{animation:none;}}
+
 /* ── 临时工考勤 ────────────────────────────────────────────────
    表单控件统一高度：全局只给了 select/.btn 高度与内边距（本文件上方那条规则），
    input 没有对应规则，两者混排就一高一矮。这里按页面作用域补齐，不动全局。 */
