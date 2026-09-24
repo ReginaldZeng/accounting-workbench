@@ -623,6 +623,27 @@ def _kd_cache_meta(period):
     return meta
 
 
+_KD_ROWS_CACHE = {}                                    # period -> ((mtime_ns, size), rows)：同一份缓存文件只解析一次（V2.617）
+_KD_ROWS_LOCK = threading.Lock()
+
+
+def _kd_cache_rows(period):
+    """读金蝶应收缓存行（共享列表，调用方只读、不就地改）。按文件 mtime/size 失效：同步落盘走 os.replace，换文件即换新。
+    总览逐店取本店应收时不再每店重读一遍上万行 JSON。"""
+    p = _kd_cache_path(period)
+    st = os.stat(p)
+    key = (st.st_mtime_ns, st.st_size)
+    with _KD_ROWS_LOCK:
+        hit = _KD_ROWS_CACHE.get(period)
+        if hit and hit[0] == key:
+            return hit[1]
+    with open(p, encoding='utf-8') as stream:
+        rows = json.load(stream)
+    with _KD_ROWS_LOCK:
+        _KD_ROWS_CACHE[period] = (key, rows)
+    return rows
+
+
 _KD_REFRESH = {}                                       # period -> {"running","error"}
 _KD_REFRESH_LOCK = threading.Lock()
 
@@ -634,8 +655,7 @@ def _month_ar_cache(period):
     if not meta:
         return None, state
     try:
-        with open(_kd_cache_path(period), encoding='utf-8') as stream:
-            rows = json.load(stream)
+        rows = _kd_cache_rows(period)
         index, skipped = month_ar.index_receivables(rows)
         state.update(available=True, linked_orders=len(index), skipped_rows=skipped)
         return index, state
@@ -1052,8 +1072,7 @@ def _run_core(rid, shop, period, flow_rows, refund_bytes, operator, ar_from=""):
     meta = _kd_cache_meta(period)
     if meta and not ar_from:
         st["step"] = "读取金蝶应收缓存（%s %s 刷新，%d 行）…" % (meta["operator"], meta["ts"], meta["rows"])
-        with open(_kd_cache_path(period), encoding="utf-8") as f:
-            ar_rows = json.load(f)
+        ar_rows = _kd_cache_rows(period)
         ar_src = "缓存·%s %s" % (meta["operator"], meta["ts"])
     else:
         st["step"] = "从金蝶整段拉取电商应收（只读）…"

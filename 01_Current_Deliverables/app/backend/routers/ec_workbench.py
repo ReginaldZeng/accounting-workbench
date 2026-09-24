@@ -8,7 +8,7 @@ import re
 import threading
 from pathlib import Path
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
-from sqlalchemy import select, insert, func
+from sqlalchemy import select, insert, update, func
 from sqlalchemy.exc import IntegrityError
 from core import db, _require_perm, pull_token_ok
 from routers import ec
@@ -55,14 +55,31 @@ def check_shop(shop):
     return selected
 
 
+def source_summary(value):
+    """快照小摘要（行数/是否可用/告警）。V2.617 总览提速：数据准备与总览只读摘要，不再把整份快照从库里搬出来解压。"""
+    if not isinstance(value,dict):raise ValueError('来源格式错误')
+    rows=value.get('rows')
+    valid=isinstance(rows,list) and bool(rows) and value.get('status') in ('ready','warning')
+    return {'rows':len(rows) if isinstance(rows,list) else 0,'valid':valid,'warnings':list(value.get('warnings',[]) or [])}
+
+
+def _backfill_summary(cx, rid):
+    """V2.617 之前存的快照没有摘要：解压一次算出来回写同一连接，下次就不用再解压。"""
+    packed=cx.execute(select(TABLE.c.payload).where(TABLE.c.id==rid)).scalar_one()
+    meta=source_summary(json.loads(gzip.decompress(packed)))
+    cx.execute(update(TABLE).where(TABLE.c.id==rid).values(summary=json.dumps(meta,ensure_ascii=False)))
+    return meta
+
+
 def save_source(period, shop, kind, digest, filenames, payload, operator):
     if kind=='price_protection':
         for row in payload.get('rows',[]):row['source_filename']=filenames[0] if filenames else ''
     packed = gzip.compress(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode())
+    summary = json.dumps(source_summary(payload), ensure_ascii=False)
     try:
         with db._engine.begin() as cx:
             rid = cx.execute(insert(TABLE).values(period=period, shop=shop, kind=kind, digest=digest,
-                filenames=json.dumps(filenames, ensure_ascii=False), payload=packed, operator=operator, ts=ec._now())).inserted_primary_key[0]
+                filenames=json.dumps(filenames, ensure_ascii=False), payload=packed, operator=operator, ts=ec._now(), summary=summary)).inserted_primary_key[0]
     except IntegrityError:
         with db._engine.connect() as cx:
             rid = cx.execute(select(TABLE.c.id).where(TABLE.c.period==period, TABLE.c.shop==shop,
@@ -155,7 +172,7 @@ def compute_data(period, shop):
     # Kingdee customer is part of the join, not only the platform order string.
     if ar is not None:
         try:
-            raw = json.loads(Path(ec._kd_cache_path(period)).read_text(encoding='utf-8'))
+            raw = ec._kd_cache_rows(period)                 # 共享缓存，只读；下面只做筛选不改行
             customer_fields = ('客户','客户名称')
             if raw and any(f in raw[0] for f in customer_fields):
                 raw = [r for r in raw if any(str(r.get(f) or '')==selected['kd_name'] for f in customer_fields)]
@@ -307,17 +324,22 @@ def preparation_cards(period, shop):
     if 'price_protection' in cards:cards['price_protection']['optional']=price_optional
     with db._engine.connect() as cx:
         latest = select(func.max(TABLE.c.id)).where(TABLE.c.period==period,TABLE.c.shop==shop).group_by(TABLE.c.kind)
-        for r in cx.execute(select(TABLE).where(TABLE.c.id.in_(latest))):
+        # V2.617：只取摘要列，不把几 MB 的快照搬出来解压；老记录没摘要的当场补算一次并回写（同一连接，避免 SQLite 锁）
+        backfilled=False
+        for r in cx.execute(select(TABLE.c.id,TABLE.c.kind,TABLE.c.filenames,TABLE.c.ts,TABLE.c.summary).where(TABLE.c.id.in_(latest))).fetchall():
             if r.kind not in cards or r.kind in ('alipay','fund'):continue
             try:
-                value=json.loads(gzip.decompress(r.payload)); names=json.loads(r.filenames or '[]')
-                if not isinstance(value,dict) or not isinstance(names,list):raise ValueError('来源格式错误')
+                names=json.loads(r.filenames or '[]')
+                if r.summary:meta=json.loads(r.summary)
+                else:meta=_backfill_summary(cx,r.id);backfilled=True
+                if not isinstance(meta,dict) or not isinstance(names,list):raise ValueError('来源格式错误')
             except (OSError,ValueError,TypeError):
                 cards[r.kind].update(state='warning',warnings=['已保存快照不可读，原始记录保留；请补充资料'])
                 continue
-            valid=isinstance(value.get('rows'),list) and bool(value['rows']) and value.get('status') in ('ready','warning')
-            cards[r.kind].update(available=valid,state='ready' if valid else 'warning',rows=len(value.get('rows',[])),
-                files=names,file_count=len(names),imported_at=r.ts,warnings=value.get('warnings',[]))
+            valid=bool(meta.get('valid'))
+            cards[r.kind].update(available=valid,state='ready' if valid else 'warning',rows=meta.get('rows',0),
+                files=names,file_count=len(names),imported_at=r.ts,warnings=list(meta.get('warnings',[]) or []))
+        if backfilled:cx.commit()
         # Original imports remain valid evidence, even before the new document index exists.
         if shop==TARGET:
             for kind, r in ec._tmall_latest_rows(period).items():
@@ -362,7 +384,7 @@ def preparation_cards(period, shop):
         meta=ec._kd_cache_meta(period)
         if meta:
             try:
-                cached=json.loads(Path(ec._kd_cache_path(period)).read_text(encoding='utf-8'))
+                cached=ec._kd_cache_rows(period)             # 共享缓存，只读；总览 7 家店不再各读一遍
                 if not isinstance(cached,list) or any(not isinstance(r,dict) for r in cached):raise ValueError('缓存格式错误')
                 selected=check_shop(shop)
                 matched=[r for r in cached if any(str(r.get(f) or '')==selected['kd_name'] for f in ('客户','客户名称'))]

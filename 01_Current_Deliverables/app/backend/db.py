@@ -520,6 +520,7 @@ ec_workbench_imports = Table(       # V2.556：店铺隔离、可追溯来源快
     Column("kind", String(20)), Column("digest", String(64)),
     Column("filenames", Text), Column("payload", LargeBinary(2 ** 32 - 1)),
     Column("operator", String(50)), Column("ts", String(20)),
+    Column("summary", Text),                   # V2.617：行数/状态/告警小摘要；总览与数据准备只读它，不解压 payload
     UniqueConstraint("period", "shop", "kind", "digest", name="uq_ec_workbench_source"),
 )
 
@@ -1830,6 +1831,21 @@ def _ensure_ec_shop_map_cols():
 
 
 _ensure_ec_shop_map_cols()
+
+
+def _ensure_ec_workbench_imports_cols():
+    """V2.617：ec_workbench_imports 补 summary 列（快照小摘要）；老记录留空，读到时由路由按需补算回写。"""
+    from sqlalchemy import text as _text
+    with _engine.begin() as c:
+        cols = [r[1] for r in c.execute(_text("PRAGMA table_info(ec_workbench_imports)")).fetchall()] \
+            if DB_URL.startswith("sqlite") else \
+            [r[0] for r in c.execute(_text(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='ec_workbench_imports'")).fetchall()]
+        if "summary" not in cols:
+            c.execute(_text("ALTER TABLE ec_workbench_imports ADD COLUMN summary TEXT"))
+
+
+_ensure_ec_workbench_imports_cols()
 
 
 def _ensure_supplier_docs_subject_col():
