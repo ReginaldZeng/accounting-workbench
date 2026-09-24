@@ -119,7 +119,7 @@ export function validate(d) {
   if (!intIn(d.remind.everyDays, e0, e1)) errors['remind.everyDays'] = `填 ${e0}～${e1} 的整数`
   if (!intIn(d.remind.hour, h0, h1)) errors['remind.hour'] = `填 ${h0}～${h1} 的整点`
   const u = d.portalUrl.trim()
-  if (u && !/^https?:\/\/[^\s/]+/i.test(u)) errors.portalUrl = '要以 https:// 开头的完整网址，例如 https://finance.example.com'
+  if (u && !/^https?:\/\/[^\s/]+/i.test(u)) errors.portalUrl = '要以 http:// 或 https:// 开头的完整网址，例如 http://111.229.72.116'
   return { errors, warns }
 }
 
@@ -260,10 +260,11 @@ function AdvancedSection({ v, set, err }) {
   return <details className="inv-set-adv" open={!!err || undefined}>
     <summary>⑥ 高级：站点地址</summary>
     <div className="inv-set-advin">
-      <div className="inv-set-ss">钉钉消息里的「点这里查看」链接用这个地址开头。一般不用改；换了域名才改。</div>
+      <div className="inv-set-ss">手机配对码、钉钉消息里的链接用这个地址开头。留空＝用电脑上正在用的地址（一般不用填）；
+        正式域名开通后（备案＋https）再填上，例如 https://finance.starfieldsz.com。</div>
       <div className="inv-set-line">
         <div className="inv-set-cell grow">
-          <input className="inv-in inv-num" value={v} readOnly={!edit} onChange={e => set(e.target.value)} placeholder="https://…" />
+          <input className="inv-in inv-num" value={v} readOnly={!edit} onChange={e => set(e.target.value)} placeholder="留空＝用电脑上正在用的地址" />
           <Msg err={err} />
         </div>
         {!edit && <button type="button" className="btn" onClick={() => setEdit(true)}>修改</button>}

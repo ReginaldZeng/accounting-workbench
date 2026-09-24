@@ -955,8 +955,9 @@ export function CameraPanel({ onCapture, auto = false, onAutoChange, disabled, h
   if (!secure) {
     return <div className="inv-cam" ref={root}>
       <div className="inv-cam-msg" style={{ height }}>
-        <b>相机需要用 https 打开本页（https://finance.starfieldsz.com）</b>
-        <span>浏览器只在安全地址下允许网页用摄像头。也可以先用「拖文件」或「手机当相机」收票。</span>
+        <b>电脑上的高拍仪要在 https 地址下才能用</b>
+        <span>浏览器只在安全地址下允许网页开摄像头；正式域名开通 https 前，请先用「手机当相机」或「拖文件」收票
+          （或请管理员在这台电脑的浏览器里把本站设为可信地址）。</span>
       </div>
     </div>
   }
@@ -1093,7 +1094,7 @@ export function PairModal({ onClose, pairState }) {
             <li>手机上出现「扫审批单」「拍发票」两个按钮，就连上了</li>
             <li>手机上的人要和电脑上登录的是同一个人（工作台账号需先在设置里绑好钉钉）</li>
           </ol>
-          <div className="inv-muted">{res.httpsHint || '手机拍照需要用 https 地址打开页面；配对码里的地址已经是 https。'}</div>
+          <div className="inv-muted">{res.httpsHint || '手机上点「拍发票」会直接调起手机相机，不用装任何东西。'}</div>
         </>}
       </div>
     </Modal>

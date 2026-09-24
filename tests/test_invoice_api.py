@@ -200,7 +200,7 @@ class InvoiceApiTests(unittest.TestCase):
         st = self.get("/api/inv/settings", "boss").json()["settings"]
         self.assertEqual(st["templates"], self.inv.DEFAULT_SETTINGS["templates"])
         self.assertEqual(st["remind"], {"enabled": True, "beforeDays": 3, "everyDays": 7, "hour": 10})
-        self.assertEqual(st["portalUrl"], "https://finance.starfieldsz.com")
+        self.assertEqual(st["portalUrl"], "")      # 默认不写死域名：用电脑上正在用的地址
         self.assertFalse(st["blockNoInvoice"])
         r = self.post("/api/inv/settings", "boss", {"settings": {"remind": {"beforeDays": 5, "hour": 30},
                                                                  "portalUrl": "https://example.test/"}})
@@ -409,8 +409,8 @@ class InvoiceApiTests(unittest.TestCase):
         f = self.manual("phoneguy", "手机票夹", "100")
         j, tok = self._pair("phoneguy")
         self.assertEqual(j["pair"]["expiresIn"], 600)
-        # 不是本机访问 → 给门户正式网址（手机相机要 https）
-        self.assertTrue(j["url"].startswith("https://finance.starfieldsz.com/#/invpair?t="), j["url"])
+        # 没填门户网址 → 用电脑上正在用的地址
+        self.assertTrue(j["url"].startswith("http://testserver/#/invpair?t="), j["url"])
         self.assertEqual(j["httpsHint"], "")
         png = self.get(j["qr"], "phoneguy")
         self.assertEqual(png.status_code, 200)
@@ -1326,6 +1326,26 @@ class InvoiceApiTests(unittest.TestCase):
         rows3 = [i for i in self.items(fo2["id"])["items"] if i["status"] != "removed"]
         self.assertEqual(len(rows3), 3)
         self.assertTrue(all(i["flags"].get("dup") for i in rows3), [i["flags"] for i in rows3])
+
+    def test_42_pair_link_follows_current_address(self):
+        """配对码地址：没填门户网址 → 电脑上正在用的地址；用 IP 访问一律给 http（证书只签了域名，https://IP 手机打不开）；
+        填了门户网址 → 用填的。钉钉消息里的链接跟着最近一次外部访问的地址走。"""
+        inv = self.inv
+        self.manual("phoneguy", "配对地址")
+        r = self.c.post("https://111.229.72.116/api/inv/pair", json={}, headers=self.H("phoneguy"))
+        self.assertTrue(r.json()["url"].startswith("http://111.229.72.116/#/invpair?t="), r.json()["url"])
+        self.assertEqual(inv.portal_link("/#/invdesk"), "http://111.229.72.116/#/invdesk")
+        r = self.c.post("http://10.0.0.8:8000/api/inv/pair", json={}, headers=self.H("phoneguy"))
+        self.assertTrue(r.json()["url"].startswith("http://10.0.0.8:8000/#/invpair?t="), r.json()["url"])
+        r = self.c.post("https://work.example.test/api/inv/pair", json={}, headers=self.H("phoneguy"))
+        self.assertTrue(r.json()["url"].startswith("https://work.example.test/#/invpair?t="), r.json()["url"])
+        st = inv.get_settings()
+        try:
+            inv.save_settings({"portalUrl": "https://finance.example.test"}, "boss")
+            r = self.c.post("http://111.229.72.116/api/inv/pair", json={}, headers=self.H("phoneguy"))
+            self.assertTrue(r.json()["url"].startswith("https://finance.example.test/#/invpair?t="), r.json()["url"])
+        finally:
+            inv.save_settings({"portalUrl": st["portalUrl"]}, "boss")
 
 if __name__ == "__main__":
     unittest.main()

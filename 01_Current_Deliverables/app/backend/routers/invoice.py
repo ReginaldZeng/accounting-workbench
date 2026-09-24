@@ -278,7 +278,9 @@ DEFAULT_SETTINGS = {
                   {"name": "费用报销", "amountFields": ["报销总额", "合计金额", "报销金额", "实际报销金额"], "allowLater": False}],
     "remind": {"enabled": True, "beforeDays": 3, "everyDays": 7, "hour": 10},
     "blockNoInvoice": False,
-    "portalUrl": "https://finance.starfieldsz.com",
+    # 空＝用电脑上正在用的地址（手机扫配对码、钉钉消息里的链接都跟着走）。正式域名 finance.starfieldsz.com
+    # 上线时还没备案、在腾讯云被拦（跳"网站未备案"页），不能写死；备案开通后在设置里填上即可
+    "portalUrl": "",
     "corpId": "",
 }
 
@@ -371,7 +373,7 @@ def normalize_settings(raw, base=None, strict=True):
     if "portalUrl" in raw:
         u = _s(raw.get("portalUrl"), 200).rstrip("/")
         if u and not re.match(r"^https?://[^\s/]+", u):
-            bad("门户网址要以 https:// 开头，例如 https://finance.example.com")
+            bad("门户网址要以 http:// 或 https:// 开头，例如 http://111.229.72.116；留空＝用电脑上正在用的地址")
         else:
             out["portalUrl"] = u
     if "corpId" in raw:
@@ -461,8 +463,9 @@ def notify_dt(userids, text):
 
 
 def portal_link(path):
-    """站内深链（钉钉消息里用）：设置里的门户网址 + path（如 '/#/invdesk?folder=3'）。"""
-    base = (get_settings().get("portalUrl") or "").rstrip("/")
+    """站内深链（钉钉消息里用）：设置里的门户网址 + path（如 '/#/invdesk?folder=3'）；
+    没填门户网址 → 用最近一次有人从外面打开工作台时的地址（_site 记下的）。"""
+    base = (get_settings().get("portalUrl") or _LAST_SITE[0] or "").rstrip("/")
     return (base + path) if base else path
 
 
@@ -2826,13 +2829,27 @@ def _hash_tok(tok):
     return hashlib.sha256(tok.encode("ascii")).hexdigest()
 
 
+_LAST_SITE = [""]
+
+
 def _site(request, st):
-    # 本机调试用请求自己的地址；线上一律给门户正式网址（手机相机要 https，反代后请求里的 scheme 也不可信）
-    host = (request.url.hostname or "").lower()
+    """配对码/消息链接用的站点地址：设置里填了门户网址就用它；没填 → 电脑上正在用的地址（手机和电脑走同一个入口）。
+    直接用 IP 访问时一律给 http：服务器证书只签了域名，https://IP 在手机上会报证书错误打不开。
+    手机页拍照走系统相机（文件选择），http 也能用；只有电脑上的高拍仪预览要 https。"""
     portal = (st.get("portalUrl") or "").rstrip("/")
-    if host in ("localhost", "127.0.0.1", "::1") or not portal:
-        return "%s://%s" % (request.url.scheme, request.url.netloc)
-    return portal
+    host = (request.url.hostname or "").lower()
+    if portal and host not in ("localhost", "127.0.0.1", "::1"):
+        return portal
+    scheme = request.url.scheme
+    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host):
+        scheme = "http"
+        netloc = host if request.url.port in (None, 80, 443) else "%s:%s" % (host, request.url.port)
+    else:
+        netloc = request.url.netloc
+    site = "%s://%s" % (scheme, netloc)
+    if host not in ("localhost", "127.0.0.1", "::1", "testserver"):
+        _LAST_SITE[0] = site
+    return site
 
 
 def _qr_png(text, scale=8, quiet=4):
@@ -2863,7 +2880,7 @@ async def pair_create(request: Request):
         for k in [k for k, v in _PAIR_URLS.items() if v[1] < now or v[2] == u["name"]]:
             _PAIR_URLS.pop(k, None)
         _PAIR_URLS[pid] = (url, now + PAIR_BIND_MIN * 60, u["name"])
-    hint = "" if url.startswith("https://") else "当前网址不是 https，手机相机可能打不开；请用正式域名（https）打开工作台再配对"
+    hint = ""        # 手机页拍照走系统相机，http 也能用，不再提示
     log(u, "发起手机配对", detail={"pairId": pid})
     audit(u, "发起手机配对", "配对#%d" % pid, "10 分钟内有效")
     return {"ok": True, "pair": {"id": pid, "expiresAt": deadline, "expiresIn": PAIR_BIND_MIN * 60}, "url": url,
