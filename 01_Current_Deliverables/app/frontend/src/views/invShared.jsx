@@ -308,6 +308,7 @@ export function viewerStartPage(item, page) {
  * 打开/换票时停在这张票所在的页（item.page，见 viewerStartPage）；那一页没有预览图时明说，不拿第 1 页顶替。
  * 字段定位：activeField 对应的 item.fieldSrc[field].box（0..1，相对"未旋转"的预览图）在当前页时画高亮框；
  *   框和图片在同一个变换层里，跟着一起转、一起缩。切到某字段时若它在别的页，会自动翻过去。
+ * 一张照片拍了几张票、识别时拆开了：item.region（0..1）是这张票在图上的那一块，画虚线框标出来。
  * 旋转只在前端用 CSS 转（不重新取图），同时回调 onRotate(新角度) 让页面落库（invItemRotate）。
  * 没有图片（只扫了二维码）时显示占位"只有二维码信息，暂无图片"。
  * @param {object} p
@@ -422,6 +423,7 @@ export function InvViewer({ item, page, onPage, activeField, onRotate, height = 
   if (!item) return <div className="inv-vw" style={{ height }}><div className="inv-vw-ph">请在左侧选一张票</div></div>
 
   const showBox = fsrc && Array.isArray(fsrc.box) && fsrc.box.length === 4 && (fsrc.page || 0) === pg
+  const reg = Array.isArray(item.region) && item.region.length === 4 && (Number(item.page) || 0) === pg ? item.region : null
   const nav = (
     <>
       {onPrev && <button type="button" className="inv-vw-nav l" onClick={onPrev} title="上一张">‹</button>}
@@ -483,6 +485,11 @@ export function InvViewer({ item, page, onPage, activeField, onRotate, height = 
             <img src={src} alt={file.name || '票面'} draggable={false}
               onLoad={e => setNat({ w: e.currentTarget.naturalWidth || 1, h: e.currentTarget.naturalHeight || 1 })}
               onError={() => setImgErr(true)} />
+            {reg && <span className="inv-vw-region" title="一张照片里拍了几张票：这张在虚线框里" style={{
+              left: `${reg[0] * 100}%`, top: `${reg[1] * 100}%`,
+              width: `${Math.max(reg[2] - reg[0], 0.01) * 100}%`, height: `${Math.max(reg[3] - reg[1], 0.01) * 100}%`,
+              borderWidth: Math.max(3 / scale, 1.5),
+            }} />}
             {showBox && <span className="inv-vw-box" style={{
               left: `${fsrc.box[0] * 100}%`, top: `${fsrc.box[1] * 100}%`,
               width: `${Math.max(fsrc.box[2] - fsrc.box[0], 0.004) * 100}%`, height: `${Math.max(fsrc.box[3] - fsrc.box[1], 0.004) * 100}%`,

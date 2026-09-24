@@ -6,6 +6,7 @@
 #   全部合成夹具（复用 kernels/test_invoice_parse 的合成数电票）；钉钉全部 mock，INV_DRY_SEND=1 绝不真发；
 #   INV_WORKER_OFF=1 不起后台线程，识别/拉附件直接调 worker_step()。
 #   运行：repo 根目录 PYTHONPATH=01_Current_Deliverables/app/backend python -m unittest tests.test_invoice_api -v
+import io
 import json
 import os
 import re
@@ -1269,6 +1270,62 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400, r.text)
         self.assertIn("一次最多传", r.json()["msg"])
 
+
+    def test_41_photo_of_several_old_tickets_is_split(self):
+        """一张照片拍了几张老式票（出租车、过路费，没有二维码）：识别后按票拆成几行，挂同一个文件；
+        各自带在图上的那一块（region），建议都不可抵扣；「重新识别」不再拆第二遍。号码都是编的。"""
+        from PIL import Image
+        inv, ip = self.inv, self.inv.ip
+        fo = self.manual("intern", "老式票拼拍")
+        buf = io.BytesIO()
+        Image.new("RGB", (900, 700), "white").save(buf, "JPEG")
+        r = self.upload("intern", "拼拍.jpg", buf.getvalue(), "image/jpeg", origin="upload", folder_id=fo["id"]).json()
+        first = r["results"][0]
+        self.assertEqual(first["action"], "other", first)
+
+        def mk(it, code, num, date, total, region):
+            d = ip.new_doc()
+            d.update(isInvoice=True, kind="invoice", invType=it, typeLabel={"taxi": "出租汽车发票"}.get(it, "过路（过桥）费发票"),
+                     code=code, number=num, date=date, total=total, region=region,
+                     pending=["code", "number", "date", "total"], warnings=["这张照片里拍了 3 张票，已按票自动拆开；请对着图逐张核对"])
+            d["fieldSrc"] = {"number": {"src": "ocr", "page": 0, "box": [region[0], region[1], region[0] + 0.1, region[1] + 0.05]}}
+            return d
+
+        def fake_ocr(data, qr_doc=None):
+            d = mk("taxi", "111000000001", "12345671", "2026-01-08", 100.4, [0, 0, 0.3, 1])
+            d["extraDocs"] = [mk("tollpaper", "111000000002", "87654311", None, 5.0, [0.3, 0, 0.7, 0.5]),
+                              mk("tollpaper", None, "87654312", "2026-01-08", 10.0, [0.3, 0.5, 0.7, 1])]
+            return d
+        with patch.object(ip, "extract_image_ocr", side_effect=fake_ocr):
+            self.assertGreaterEqual(inv.worker_step(), 1)
+        rows = [i for i in self.items(fo["id"])["items"] if i["status"] != "removed"]
+        self.assertEqual(sorted(i["number"] for i in rows), ["12345671", "87654311", "87654312"])
+        self.assertEqual(len({i["file"]["id"] for i in rows}), 1)              # 同一张照片
+        for i in rows:
+            self.assertEqual(i["kind"], "invoice")
+            self.assertEqual(i["deductSuggest"], "no")
+            self.assertTrue(i["region"] and len(i["region"]) == 4)
+            self.assertIn("number", i["pending"])
+            self.assertEqual(i["procStatus"], "done")
+            self.assertEqual(i["createdBy"], "intern")
+        self.assertEqual({i["invType"] for i in rows}, {"taxi", "tollpaper"})
+        # 重新识别第一张：不再拆出第二份
+        r = self.post("/api/inv/item/%d/reprocess" % first["itemId"], "intern")
+        self.assertEqual(r.status_code, 200, r.text)
+        with patch.object(ip, "extract_image_ocr", side_effect=fake_ocr):
+            inv.worker_step()
+        rows2 = [i for i in self.items(fo["id"])["items"] if i["status"] != "removed"]
+        self.assertEqual(len(rows2), 3)
+        # 拆出来的票照样查重：同一张照片传进别的票夹 → 三张都标重复
+        fo2 = self.manual("intern", "老式票拼拍-再传")
+        buf2 = io.BytesIO()
+        Image.new("RGB", (900, 700), (250, 250, 250)).save(buf2, "JPEG")
+        self.upload("intern", "拼拍2.jpg", buf2.getvalue(), "image/jpeg", origin="upload", folder_id=fo2["id"])
+        with patch.object(ip, "extract_image_ocr", side_effect=fake_ocr):
+            inv.worker_step()
+        rows3 = [i for i in self.items(fo2["id"])["items"] if i["status"] != "removed"]
+        self.assertEqual(len(rows3), 3)
+        self.assertTrue(all(i["flags"].get("dup") for i in rows3), [i["flags"] for i in rows3])
 
 if __name__ == "__main__":
     unittest.main()

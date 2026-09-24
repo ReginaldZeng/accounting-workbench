@@ -83,13 +83,15 @@ MONEY_FIELDS = ("amount", "tax", "total")
 TRUSTED_SRC = ("qr", "pdf", "ofd", "xml", "manual", "taxpack", "taxlist")   # 这些来源的字段不许被识别结果覆盖
 MACHINE_SRC = ("qr", "pdf", "ofd", "xml", "taxpack", "taxlist")   # 机器从二维码/电子原件/税局文件直接读到的（人手改了要亮给审核看）
 KEY_FIELDS = ("number", "code", "total", "amount", "tax")         # 改了会动查重或金额的字段：人手改二维码/原件读到的值按"错"级提示
-INV_TYPES = ("special", "normal", "travel", "toll", "train", "flight", "vehicle", "quota", "taxi", "general", "other")
+INV_TYPES = ("special", "normal", "travel", "toll", "train", "flight", "vehicle", "quota", "taxi", "tollpaper", "general",
+             "other")
 KINDS = ("invoice", "receipt", "other")
 PAPER_ORIGINS = ("camera", "phone", "scanner")     # 这几种进票＝纸质件就在手上
 USER_ORIGINS = ("upload", "camera", "phone", "scanner")   # 人手送进来的：审批单打印件可当"扫审批单"
 OPEN_STATUSES = ("collecting", "returned")          # 收票工作台/手机只能往这两种状态的票夹里放票
 # 重算时要保留的标记（其余 flags 每次按字段重算）：原始码串、识别提示、已审票后到文件不一致、同票文件不一致、人手改机读字段、改票种
-STICKY_FLAGS = ("_qrRaw", "_warnings", "postApprovalMismatch", "fileMismatch", "manualOverride", "kindChanged")
+STICKY_FLAGS = ("_qrRaw", "_warnings", "_region", "_splitDone", "postApprovalMismatch", "fileMismatch", "manualOverride",
+                "kindChanged")
 SYSTEM_USER = "系统"                                 # 后台线程拉下来的附件记在"系统"名下（不算打开票夹那个人登记的）
 PAIR_ACTIVE_S = 120                                 # 手机 120 秒内来过＝正在用（电脑端据此快轮询）
 _DUP_LOCK = threading.RLock()                       # 查重"查＋插"必须原子（两个人同时扫同一张票只能一个算正主）；可重入：合并路径里还要重算
@@ -723,7 +725,7 @@ def item_view(it, idx=None, mobile=False):
          "pending": it.get("pending_json") or [], "procStatus": it.get("proc_status") or "done",
          "procError": it.get("proc_error") or "", "paper": bool(it.get("paper")),
          "flags": {k: x for k, x in fl.items() if not str(k).startswith("_")},
-         "warnings": list(fl.get("_warnings") or []),
+         "warnings": list(fl.get("_warnings") or []), "region": fl.get("_region"),
          "deductSuggest": it.get("deduct_suggest") or "", "deductReason": it.get("deduct_reason") or "",
          "deductible": None if ded is None else bool(ded), "deductStatus": it.get("deduct_status") or "",
          "verify": it.get("verify") or "", "verifyAt": it.get("verify_at") or "", "verifyNote": it.get("verify_note") or "",
@@ -1212,6 +1214,8 @@ def _register_doc(folder, f, d, origin, user, later_id=None, paper=False, review
             flags["_qrRaw"] = d["qrRaw"]
         if d.get("warnings"):
             flags["_warnings"] = list(d["warnings"])
+        if d.get("region"):
+            flags["_region"] = d["region"]     # 一张照片拍了几张票：这张在图上的那一块
         sug, why = suggest_deduct(d, flags)
         rv = review or ("pending" if (later_id or folder.get("status") in ("submitted", "approved")) else "draft")
         pending_ocr = bool(d.get("needOcr") and f)
@@ -1930,10 +1934,39 @@ def _process_item(iid):
         if cur:
             S.item_update(e, iid, proc_status="done", proc_error="")   # 识别期间换了主文件/被移除：这次结果作废
         return
+    split_before = bool((cur.get("flags_json") or {}).get("_splitDone"))
     _merge_recognized(e, cur, doc)
     it2 = refresh_item(iid)
     log("系统", "识别完成", it2["folder_id"], iid, it2.get("later_id"),
         {"kind": it2.get("kind"), "number": it2.get("number") or "", "pending": it2.get("pending_json") or []})
+    if doc.get("extraDocs") and not split_before:
+        _register_split(cur, doc["extraDocs"])
+
+
+def _register_split(cur, docs):
+    """一张照片里拍了几张老式票（出租车、过路费…）：识别拆出的第 2 张起各登记一行，挂同一个文件；
+    来源、登记人、后补单、审核状态跟第一张走，查重照常（同票夹同号合并、别处有标重复）。"""
+    e = E()
+    folder = S.folder_get(e, cur.get("folder_id"))
+    f = S.file_get(e, cur["file_id"]) if cur.get("file_id") else None
+    if not folder or not f:
+        return
+    user = cur.get("created_by") or SYSTEM_USER
+    review = cur.get("review") if cur.get("review") == "pending" else None
+    made = []
+    for d in docs:
+        try:
+            r = _register_doc(folder, f, d, cur.get("origin") or "upload", user, later_id=cur.get("later_id"),
+                              paper=bool(cur.get("paper")), review=review, log_extra={"splitFrom": cur["id"]},
+                              name=f.get("name") or "")
+        except Exception as ex:
+            log(SYSTEM_USER, "拆票登记失败", cur["folder_id"], cur["id"], detail={"msg": str(ex)[:300]})
+            continue
+        if r.get("itemId") and r.get("action") in ("item", "dup"):
+            made.append(r["itemId"])
+            refresh_item(r["itemId"])
+    log(SYSTEM_USER, "一张照片拆成几张票", cur["folder_id"], cur["id"], cur.get("later_id"),
+        {"total": len(docs) + 1, "newItems": made})
 
 
 def _merge_recognized(e, cur, doc):
@@ -1982,6 +2015,10 @@ def _merge_recognized(e, cur, doc):
             ws.append(w)
     if ws:
         fl["_warnings"] = ws[:20]
+    if doc.get("region"):
+        fl["_region"] = doc["region"]
+    if doc.get("extraDocs"):
+        fl["_splitDone"] = True           # 拆出来的其它票只登记一次（点「重新识别」不再拆第二遍）
     upd.update(field_src_json=fs, pending_json=pend, flags_json=fl, proc_status="done", proc_error="")
     S.item_update(e, cur["id"], **upd)
 

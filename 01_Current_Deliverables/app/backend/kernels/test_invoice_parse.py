@@ -17,6 +17,7 @@ import struct
 import zipfile
 import random
 import unittest
+from unittest.mock import patch
 
 from kernels import invoice_parse as ip
 
@@ -1216,6 +1217,119 @@ SAMPLES = os.environ.get("INV_SAMPLES_DIR")
 def _read(p):
     with open(p, "rb") as fh:
         return fh.read()
+
+
+def _tk(text, x0, y0, x1, y1):
+    return {"text": text, "box": [x0, y0, x1, y1], "score": 0.9}
+
+
+# 合成的"一张照片拍了四张老式票"：左一张北京式出租车票（代码/号码不带标签）、中间上下两张过路费票
+# （第二张的代码被章盖住没认出）、右一张深圳式出租车票（值整体比标签高半行、另收附加费）。号码全是编的。
+OLD_PHOTO = [
+    _tk("北京市出租汽车专用发票", 60, 450, 330, 475),
+    _tk("111000000001", 40, 580, 300, 605), _tk("12345678", 40, 612, 220, 637),
+    _tk("日期", 90, 785, 140, 805), _tk("2026-01-08", 170, 780, 300, 800),
+    _tk("单价", 90, 850, 140, 870), _tk("3.45", 260, 842, 300, 862),
+    _tk("里程", 90, 882, 140, 902), _tk("31.6", 262, 876, 300, 896),
+    _tk("金额", 95, 985, 140, 1005), _tk("¥100.40", 220, 978, 335, 998),
+    _tk("燃油附加费", 95, 1015, 190, 1035), _tk("¥0.00", 225, 1010, 300, 1030),
+    _tk("北京市税务局过路（过桥）费专用发票", 460, 335, 900, 360), _tk("北京市某某公路发展集团有限公司", 488, 366, 850, 390),
+    _tk("入口站北京站", 507, 461, 680, 485), _tk("金额：", 512, 547, 568, 567), _tk("5", 600, 545, 615, 567),
+    _tk("发票代码：111000000002", 488, 658, 760, 680), _tk("发票号码：87654321", 490, 693, 700, 715),
+    _tk("北京市税务局", 489, 812, 640, 835), _tk("费专用发票", 780, 810, 900, 835),
+    _tk("入口站：", 458, 936, 530, 956), _tk("机场南线进京站：", 545, 930, 700, 950), _tk("金额：", 455, 996, 516, 1016), _tk("10", 570, 1000, 590, 1020),
+    _tk("2026-01-08", 535, 1040, 660, 1060), _tk("发票号码：87654322", 458, 1119, 700, 1140),
+    _tk("深圳市出租汽车专用发票", 995, 383, 1230, 410),
+    _tk("发票代码144000000003", 997, 489, 1230, 510), _tk("发票号码11223344", 994, 517, 1200, 540),
+    _tk("单位名称：深圳某某出租汽车有限公司", 995, 584, 1270, 600),
+    _tk("车号：", 1020, 702, 1075, 722), _tk("BAH0000", 1125, 687, 1200, 707),
+    _tk("日期：", 1024, 758, 1075, 778), _tk("2026年01月11日", 1072, 743, 1220, 763),
+    _tk("单价：", 1023, 834, 1075, 854), _tk("4.32元", 1150, 819, 1210, 839),
+    _tk("里程：", 1024, 862, 1075, 882), _tk("21.81KM", 1124, 847, 1210, 867),
+    _tk("等候：", 1024, 889, 1075, 909), _tk("00:04:06", 1112, 874, 1210, 894),
+    _tk("金额：", 1026, 914, 1075, 934), _tk("¥96.00元", 1127, 899, 1225, 919),
+    _tk("另收附加费：", 1029, 945, 1124, 965), _tk("¥8.50元", 1127, 930, 1225, 950),
+    _tk("另收电召费", 1030, 971, 1116, 991),
+]
+
+
+class TestOldTickets(unittest.TestCase):
+    def test_type_from_title_not_special(self):
+        t = ip._type_from_title
+        self.assertEqual(t("深圳市出租汽车专用发票"), "taxi")
+        self.assertEqual(t("BEIJINGTAXISPECIALINVOICE"), "taxi")
+        self.assertEqual(t("北京市税务局过路（过桥）费专用发票"), "tollpaper")
+        self.assertEqual(t("电子发票（增值税专用发票）"), "special")
+        self.assertEqual(t("广东增值税专用发票"), "special")
+        self.assertIsNone(t("专用发票"))                      # 没认全的"专用发票"不当专票
+        self.assertEqual(t("增值税电子普通发票（通行费）"), "toll")
+
+    def test_deduct_old_types(self):
+        for it in ("taxi", "tollpaper", "quota"):
+            d = ip.new_doc()
+            d.update(isInvoice=True, kind="invoice", invType=it, typeLabel="XX专用发票", tax=None)
+            self.assertEqual(ip.deduct_suggest(d)[0], "no", it)
+        d = ip.new_doc()
+        d.update(isInvoice=True, kind="invoice", invType="toll", tax=3.0)
+        self.assertEqual(ip.deduct_suggest(d)[0], "yes")      # 通行费电子发票照样可抵
+
+    def test_title_only_special_fields_from_tokens(self):
+        # 只有"XX出租汽车专用发票"标题的票，按版式解析也不能判成专票
+        toks = [_tk("深圳市出租汽车专用发票", 300, 20, 700, 50), _tk("发票代码：144000000003", 100, 120, 500, 140),
+                _tk("发票号码：11223344", 100, 150, 400, 170)]
+        d = ip.fields_from_tokens(toks, 1000, 1000, "ocr")
+        self.assertEqual(d["invType"], "taxi")
+        self.assertEqual(ip.deduct_suggest(d)[0], "no")
+
+    def test_split_four_tickets(self):
+        docs = ip.split_old_tickets(OLD_PHOTO, 1300, 1700)
+        got = [(d["invType"], d["code"], d["number"], d["date"], d["total"]) for d in docs]
+        self.assertEqual(got, [
+            ("taxi", "111000000001", "12345678", "2026-01-08", 100.4),
+            ("tollpaper", "111000000002", "87654321", None, 5.0),
+            ("tollpaper", None, "87654322", "2026-01-08", 10.0),        # 标题被盖掉一半也按出入口站认成过路费
+            ("taxi", "144000000003", "11223344", "2026-01-11", 104.5),  # 金额 96 + 另收附加费 8.5
+        ])
+        self.assertEqual(docs[3]["sellerName"], "深圳某某出租汽车有限公司")
+        self.assertTrue(any("另收费用" in w for w in docs[3]["warnings"]))
+        for d in docs:
+            self.assertTrue(d["isInvoice"])
+            self.assertEqual(ip.deduct_suggest(d)[0], "no")
+            self.assertIn("number", d["pending"])            # 识别来的一律待核
+            self.assertTrue(any("已按票自动拆开" in w for w in d["warnings"]))
+            x0, y0, x1, y1 = d["region"]
+            self.assertTrue(0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1)
+            # 每张票自己的号码框落在自己那块里
+            b = d["fieldSrc"]["number"]["box"]
+            self.assertTrue(x0 <= (b[0] + b[2]) / 2 <= x1 and y0 <= (b[1] + b[3]) / 2 <= y1)
+        # 四块互不重叠
+        for i in range(4):
+            for j in range(i + 1, 4):
+                a, c = docs[i]["region"], docs[j]["region"]
+                self.assertFalse(min(a[2], c[2]) - max(a[0], c[0]) > 1e-6 and min(a[3], c[3]) - max(a[1], c[1]) > 1e-6)
+
+    def test_single_or_none(self):
+        one = [t for t in OLD_PHOTO if t["box"][0] >= 990]
+        self.assertEqual(ip.split_old_tickets(one, 1300, 1700), [])          # 只有一张不拆
+        f = ip.fields_from_tokens(one, 1300, 1700, "ocr")
+        d = ip._supplement_old(f, one, 1300, 1700)
+        self.assertEqual((d["invType"], d["number"], d["total"]), ("taxi", "11223344", 104.5))
+        self.assertIsNone(d["buyerName"])                   # 版式硬套的购买方丢掉
+        # 增值税票不受影响：号码/代码同样能配成锚点，但票种是专票就原样返回
+        vat = [_tk("广东增值税专用发票", 300, 20, 700, 50), _tk("发票代码：144000000009", 700, 60, 950, 80),
+               _tk("发票号码：99887766", 700, 90, 950, 110)]
+        f = ip.fields_from_tokens(vat, 1000, 600, "ocr")
+        self.assertEqual(ip._supplement_old(dict(f), vat, 1000, 600)["invType"], "special")
+        # 没有锚点（没代码号码）的照片：不拆、不改
+        self.assertEqual(ip.split_old_tickets([_tk("某某超市小票", 10, 10, 200, 30)], 500, 500), [])
+
+    def test_extract_image_ocr_returns_extra_docs(self):
+        with patch.object(ip, "ocr_tokens", return_value=(OLD_PHOTO, 1300, 1700)),                 patch.object(ip, "_qr_layout", return_value=(0, [])):
+            d = ip.extract_image_ocr(b"x")
+        self.assertEqual(d["number"], "12345678")
+        self.assertEqual([x["number"] for x in d["extraDocs"]], ["87654321", "87654322", "11223344"])
+        self.assertTrue(d["region"] and all(x["region"] for x in d["extraDocs"]))
+        self.assertFalse(d["needOcr"])
 
 
 @unittest.skipUnless(SAMPLES and os.path.isdir(SAMPLES or "") and HAS_FITZ and HAS_CV2,

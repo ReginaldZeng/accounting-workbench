@@ -1180,14 +1180,19 @@ def _type_from_title(c):
         return "vehicle"
     if "通行费" in c:
         return "toll"
-    if "专用发票" in c:
-        return "special"
-    if "普通发票" in c:
-        return "normal"
+    # 老式票名字里也带"专用发票"（XX市出租汽车专用发票、过路（过桥）费专用发票），不是增值税专票，先认出来
+    if "出租" in c or "TAXI" in c.upper():
+        return "taxi"
+    if "过路" in c or "过桥" in c:
+        return "tollpaper"
     if "定额" in c:
         return "quota"
-    if "出租" in c:
-        return "taxi"
+    if "专用发票" in c:
+        # 专票标题一定带"增值税"（电子发票（增值税专用发票）/XX增值税专用发票）；只剩"专用发票"几个字的
+        # （OCR 没认全、或别的行业专用票）不当专票：交给上层按"票种没认全"处理，不会误判成可抵扣
+        return "special" if "增值税" in c else None
+    if "普通发票" in c:
+        return "normal"
     if "机打" in c:
         return "general"
     return None
@@ -1628,6 +1633,299 @@ def _parse_regions(tokens, W, H, src, page, qrs):
             if bx:
                 v["box"] = _nb([rx0 + bx[0] * rw, ry0 + bx[1] * rh, rx0 + bx[2] * rw, ry0 + bx[3] * rh], W, H)
         out.append((text, d))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 6b. 没有二维码的老式票（出租车票、过路过桥费票、定额票…）：一张照片拼了几张也能拆开
+#   每张老式票都印着"发票代码（12 位）＋发票号码（8 位）"——以它为锚点：锚点按左右分列、
+#   同列上下按下一张票的标题切开，每块单独取字段。字段一律"待核"。
+# ---------------------------------------------------------------------------
+OLD_TICKET_TYPES = ("taxi", "tollpaper", "quota", "general")
+_OLD_CODE = re.compile(r"^(?:发票代码[:：]?)?([01]\d{11})$")
+_OLD_CODE_LAB = re.compile(r"发票代码[:：]?(\d{10}|\d{12})(?!\d)")
+_OLD_NUM = re.compile(r"^(?:No\.?)?(\d{8})$", re.I)
+_OLD_NUM_LAB = re.compile(r"发票号码[:：]?(\d{8})(?!\d)")
+_OLD_TITLE = re.compile(r"出租|过路|过桥|通行费|定额|税务局|TAXI|INVOICE|专用发票|普通发票|统一发票|机打发票$", re.I)
+_OLD_TITLE_NOT = re.compile(r"发票代码|发票号码|发票联|专用章|手写无效|发票系|查询|监制")
+_KV_LABELS = (  # (字段, 标签正则)：出租车/过路费票面上"标签：值"成列排
+    ("paid", r"实收金额|^实收"),
+    ("extra", r"另收.{0,4}费"),
+    ("fare", r"^金额"),
+)  # 只认中文标签：出租车票每个中文标签下面还有一行英文（Fare/Date…），掺进来会把上下错位估歪
+
+
+def _old_anchor_toks(toks):
+    """[_T] → 锚点 [(code_T|None, code, num_T, num)]：发票代码+号码配对；只有带"发票号码"字样的号码可以单独成锚。"""
+    codes, nums = [], []
+    for t in toks:
+        c = t.c
+        m = _OLD_CODE_LAB.search(c) or _OLD_CODE.match(c)
+        if m and not _parse_date(m.group(1)):
+            codes.append((t, m.group(1)))
+        m = _OLD_NUM_LAB.search(c)
+        if m:
+            nums.append((t, m.group(1), True))
+            continue
+        m = _OLD_NUM.match(c)
+        if m and not _parse_date(m.group(1)):
+            nums.append((t, m.group(1), False))
+    out, used = [], set()
+    for ct, code in codes:
+        best = None
+        for i, (nt, num, lab) in enumerate(nums):
+            if i in used or nt is ct:
+                continue
+            below = 0 < nt.cy - ct.cy < 3.2 * ct.h and (min(ct.x1, nt.x1) - max(ct.x0, nt.x0) > -ct.h
+                                                          or abs(nt.x0 - ct.x0) < 2 * ct.h)
+            right = abs(nt.cy - ct.cy) < 0.6 * ct.h and 0 <= nt.x0 - ct.x1 < 6 * ct.h
+            if below or right:
+                dist = abs(nt.cy - ct.cy) + abs(nt.x0 - ct.x0) * 0.2
+                if best is None or dist < best[0]:
+                    best = (dist, i)
+        if best is not None:
+            used.add(best[1])
+            nt, num, _ = nums[best[1]]
+            out.append((ct, code, nt, num))
+    for i, (nt, num, lab) in enumerate(nums):
+        if i not in used and lab:
+            out.append((None, None, nt, num))
+    seen, uniq = set(), []
+    for a in out:
+        if a[3] not in seen:
+            seen.add(a[3])
+            uniq.append(a)
+    return uniq
+
+
+def _abox(a):
+    ct, _, nt, _ = a
+    return _union([t.box for t in (ct, nt) if t is not None])
+
+
+def _min_cover_cut(toks, lo, hi, axis):
+    """lo..hi 之间找文字最稀的一刀（axis=0 竖切看 x，1 横切看 y）；找不到空档就取中点。"""
+    if hi - lo < 4:
+        return (lo + hi) / 2.0
+    step = max(1.0, (hi - lo) / 80.0)
+    best, runs, x = None, [], lo
+    while x <= hi:
+        n = sum(1 for t in toks if (t.x0 if axis == 0 else t.y0) <= x <= (t.x1 if axis == 0 else t.y1))
+        if best is None or n < best:
+            best, runs = n, [[x, x]]
+        elif n == best:
+            if runs and x - runs[-1][1] <= step * 1.01:
+                runs[-1][1] = x
+            else:
+                runs.append([x, x])
+        x += step
+    r = max(runs, key=lambda r: r[1] - r[0])
+    return (r[0] + r[1]) / 2.0
+
+
+def old_ticket_regions(toks, W, H):
+    """一张照片里的老式票 → [(锚点, (x0,y0,x1,y1) 像素)]；锚点少于 2 个返回 []（不用拆）。"""
+    anchors = _old_anchor_toks(toks)
+    if len(anchors) < 2:
+        return []
+    cols = []                                   # 按锚点左右重叠分列
+    for a in sorted(anchors, key=lambda a: _abox(a)[0]):
+        b = _abox(a)
+        for c in cols:
+            if min(c["x1"], b[2]) - max(c["x0"], b[0]) > -0.2 * (b[3] - b[1]):
+                c["a"].append(a)
+                c["x0"], c["x1"] = min(c["x0"], b[0]), max(c["x1"], b[2])
+                break
+        else:
+            cols.append({"a": [a], "x0": b[0], "x1": b[2]})
+    cols.sort(key=lambda c: c["x0"])
+    xcuts = [0.0]
+    for c1, c2 in zip(cols, cols[1:]):
+        xcuts.append(_min_cover_cut(toks, c1["x1"], c2["x0"], 0) if c2["x0"] > c1["x1"] else (c1["x1"] + c2["x0"]) / 2.0)
+    xcuts.append(float(W))
+    out = []
+    for i, c in enumerate(cols):
+        x0, x1 = xcuts[i], xcuts[i + 1]
+        inside = [t for t in toks if x0 <= t.cx < x1]
+        seq = sorted(c["a"], key=lambda a: _abox(a)[1])
+        ycuts = [0.0]
+        for a, b in zip(seq, seq[1:]):
+            lo, hi = _abox(a)[3], _abox(b)[1]
+            titles = [t for t in inside if lo < t.cy < hi and _OLD_TITLE.search(t.c) and not _OLD_TITLE_NOT.search(t.c)]
+            if titles:
+                ycuts.append(min(t.y0 for t in titles) - 0.3 * min(t.h for t in titles))
+            else:
+                ycuts.append(_min_cover_cut(inside, lo, hi, 1))
+        ycuts.append(float(H))
+        for j, a in enumerate(seq):
+            out.append((a, (x0, ycuts[j], x1, ycuts[j + 1])))
+    return out
+
+
+def _kv_pairs(toks, label_pat):
+    """标签列 ↔ 值列对齐（热敏小票的值常整体比标签高/低半行）：先估整体上下错位，再按最近配。
+    → [(标签 _T, 值 _T)]，值只取标签右边的金额样 token。"""
+    labs = [t for t in toks if re.search(label_pat, t.c) and len(t.c) <= 12]
+    vals = [t for t in toks if re.fullmatch(r"¥?\d{1,6}(?:\.\d{1,2})?元?", t.c) and not re.search(label_pat, t.c)]
+    if not labs or not vals:
+        return []
+    hs = sorted(t.h for t in labs)
+    lh = hs[len(hs) // 2]
+    allabs = [t for t in toks if any(re.search(p, t.c) for _, p in _KV_LABELS) or re.search(
+        r"^(日期|时间|单价|里程|等候|状态|车号|证号|上车|下车|卡号|卡余额|车型)", t.c)]
+
+    # 估错位用所有"值样"的字（带数字、不是标签），不只金额：时间、里程、车号都在同一列
+    anyvals = [t for t in toks if re.search(r"\d", t.c) and t not in allabs]
+
+    def near(l, d):
+        cs = [v for v in anyvals if v.x0 > l.x1 - 0.5 * lh and v.x0 - l.x1 < 12 * lh]
+        return min((abs(v.cy - (l.cy + d)) for v in cs), default=None)
+    best = (None, 0.0)
+    d = -1.2 * lh
+    while d <= 1.2 * lh:
+        cost = 0.0
+        for l in allabs:
+            n = near(l, d)
+            cost += min(n, lh) if n is not None else 0
+        if best[0] is None or cost < best[0] - 1e-6:
+            best = (cost, d)
+        d += max(1.0, lh / 10.0)
+    off = best[1]
+    out = []
+    for l in labs:
+        cs = [v for v in vals if v.x0 > l.x1 - 0.5 * lh and v.x0 - l.x1 < 12 * lh and abs(v.cy - (l.cy + off)) < 0.8 * lh]
+        if cs:
+            out.append((l, min(cs, key=lambda v: abs(v.cy - (l.cy + off)))))
+    return out
+
+
+def old_ticket_fields(toks, W, H, src="ocr", page=0, anchor=None):
+    """老式票（一张的范围内的 tokens，坐标与 W/H 同系）→ Doc：票种、代码、号码、日期、金额、销方。
+    金额：有"实收金额"用实收；否则"金额"＋"另收×××费"（深圳出租车另收燃油附加费）。"""
+    d = new_doc(page)
+    fs = d["fieldSrc"]
+
+    def put(field, value, box):
+        if value in (None, ""):
+            return
+        d[field] = value
+        if box:
+            fs[field] = {"src": src, "page": page, "box": _nb(box, W, H)}
+        if field not in d["pending"]:
+            d["pending"].append(field)
+    text = "".join(t.c for t in toks)
+    it = _type_from_title(text)
+    if it not in OLD_TICKET_TYPES:
+        # 标题常被章盖住、认不全：按票面内容补认（出租车票有上下车/里程，过路费票有出入口站）
+        if re.search(r"上车|下车|里程|等候|车号", text):
+            it = "taxi"
+        elif re.search(r"入口|出口|收费站|公路发展|车型", text):
+            it = "tollpaper"
+        elif "定额" in text:
+            it = "quota"
+        elif "机打" in text:
+            it = "general"
+    titles = [t for t in toks if _OLD_TITLE.search(t.c) and not _OLD_TITLE_NOT.search(t.c)]
+    title = min(titles, key=lambda t: t.y0) if titles else None
+    label = {"taxi": "出租汽车发票", "tollpaper": "过路（过桥）费发票", "quota": "定额发票", "general": "通用机打发票"}.get(it)
+    if title is not None and it == "taxi" and "出租汽车" in title.c and "发票" in title.c:
+        label = _canon_title(title.c)
+    d["invType"] = it or "general"
+    d["typeLabel"] = label or "通用机打发票"
+    if title is not None:
+        fs["typeLabel"] = {"src": src, "page": page, "box": _nb(title.box, W, H)}
+    if anchor is None:
+        an = _old_anchor_toks(toks)
+        anchor = an[0] if an else None
+    if anchor is not None:
+        ct, code, nt, num = anchor
+        put("code", code, ct.box if ct is not None else None)
+        put("number", num, nt.box)
+    if not d["code"]:
+        for t in toks:
+            m = _OLD_CODE_LAB.search(t.c) or _OLD_CODE.match(t.c)
+            if m:
+                put("code", m.group(1), t.box)
+                break
+    for t in sorted(toks, key=lambda t: t.cy):
+        v = _parse_date(t.c)
+        if v:
+            put("date", v, t.box)
+            break
+    pairs = {k: _kv_pairs(toks, p) for k, p in _KV_LABELS}
+    paid = next(((v, _parse_money(v.c, need_dec=False)) for _, v in pairs["paid"]), None)
+    fare = next(((v, _parse_money(v.c, need_dec=False)) for _, v in pairs["fare"]), None)
+    extra = [(v, _parse_money(v.c, need_dec=False)) for _, v in pairs["extra"]]
+    extra = [(v, m) for v, m in extra if m and m > 0]
+    if paid and paid[1] and (fare is None or paid[1] >= fare[1] - 0.005):
+        put("total", _r2(paid[1]), paid[0].box)
+    elif fare and fare[1]:
+        tot = fare[1] + sum(m for _, m in extra)
+        put("total", _r2(tot), _union([fare[0].box] + [v.box for v, _ in extra]))
+        if extra:
+            d["warnings"].append("金额按票面金额 %.2f 加另收费用 %s 合计，请核对"
+                                 % (fare[1], "、".join("%.2f" % m for _, m in extra)))
+    for t in toks:
+        m = re.search(r"(?:单位名称[:：]?)?(.{4,40}(?:公司|集团))", t.c)
+        if m and "税务" not in t.c and "监制" not in t.c:
+            put("sellerName", m.group(1).lstrip(":："), t.box)
+            break
+    for t in toks:
+        m = _TAXID_ANY.search(t.c.upper())
+        if m and len(m.group(1)) == 18 and uscc_ok(m.group(1)):
+            put("sellerTaxId", m.group(1), t.box)
+            break
+    if d["number"] or d["code"]:
+        d["kind"], d["isInvoice"] = "invoice", True
+    return d
+
+
+def _supplement_old(f, tokens, W, H, page=0):
+    """单张老式票（没二维码）：票面认得出是出租车/过路费/定额/机打票 → 改用老式票取法（fields_from_tokens
+    按增值税票版式硬套的购销方、金额不可信）。按票面认成增值税票（专票/普票…）的原样返回。"""
+    toks = _toks_of(tokens)
+    if not _old_anchor_toks(toks):
+        return f
+    o = old_ticket_fields(toks, W, H, "ocr", page)
+    if not o["isInvoice"] or o["invType"] not in OLD_TICKET_TYPES:
+        return f
+    if f.get("invType") not in (None, "other", "normal", "general") + OLD_TICKET_TYPES:
+        return f
+    # 认定是老式票：按增值税票版式硬套出来的购销方、金额税额都不可信，以老式票取法为准；
+    # 老式取法没取到的号码/代码/日期才用版式解析的
+    for k in ("code", "number", "date"):
+        if o.get(k) in (None, "") and f.get(k) not in (None, ""):
+            o[k] = f[k]
+            if f["fieldSrc"].get(k):
+                o["fieldSrc"][k] = f["fieldSrc"][k]
+            if k not in o["pending"]:
+                o["pending"].append(k)
+    o["warnings"] += [w for w in f["warnings"] if w not in o["warnings"] and not w.startswith("票种没认全")]
+    return o
+
+
+def _toks_of(tokens):
+    out = []
+    for tk in tokens or []:
+        txt = _fix_num_text(_nfkc(tk.get("text", "")).strip())
+        if txt:
+            b = [float(v) for v in (tk.get("box") or [0, 0, 0, 0])[:4]]
+            out.append(_T(txt, min(b[0], b[2]), min(b[1], b[3]), max(b[0], b[2]), max(b[1], b[3])))
+    return out
+
+
+def split_old_tickets(tokens, W, H, page=0):
+    """整张照片的 OCR tokens → 拆出的老式票 [Doc]（每张带 region＝它那块在整图上的 0..1 框）；
+    不到两张返回 []。"""
+    toks = _toks_of(tokens)
+    regs = old_ticket_regions(toks, W, H)
+    out = []
+    for a, (x0, y0, x1, y1) in regs:
+        sub = [t for t in toks if x0 <= t.cx < x1 and y0 <= t.cy < y1]
+        d = old_ticket_fields(sub, W, H, "ocr", page, anchor=a)
+        d["region"] = _nb([x0, y0, x1, y1], W, H)
+        d["warnings"].append("这张照片里拍了 %d 张票，已按票自动拆开；请对着图逐张核对" % len(regs))
+        out.append(d)
     return out
 
 
@@ -2695,11 +2993,23 @@ def extract_image_ocr(data, qr_doc=None):
             if parse_invoice_qr(t)["number"] == mine:
                 f = fd
                 break
+    extra = []
+    no_qr = not multi and not (qr_doc and qr_doc.get("isInvoice"))
+    if f is None and no_qr:
+        # 没有发票二维码：可能是一张照片拍了几张老式票（出租车、过路费…），按票拆开
+        olds = split_old_tickets(toks, w, h, page)
+        if olds:
+            f, extra = olds[0], olds[1:]
     if f is None:
         f = fields_from_tokens(toks, w, h, "ocr", page=page)
+        if no_qr:
+            f = _supplement_old(f, toks, w, h, page)
     if rot:
-        for k, v in f["fieldSrc"].items():
-            v["box"] = _rot_box_back(v.get("box"), rot)
+        for x in [f] + extra:
+            for k, v in x["fieldSrc"].items():
+                v["box"] = _rot_box_back(v.get("box"), rot)
+            if x.get("region"):
+                x["region"] = _rot_box_back(x["region"], rot)
     if qr_doc and qr_doc.get("isInvoice"):
         d = dict(qr_doc)
         d["fieldSrc"] = dict(qr_doc.get("fieldSrc") or {})
@@ -2756,6 +3066,16 @@ def extract_image_ocr(data, qr_doc=None):
         if wmsg not in d["warnings"]:
             d["warnings"].append(wmsg)
     d["needOcr"] = False
+    if f.get("region"):
+        d["region"] = f["region"]
+    if extra:
+        for x in extra:
+            x["needOcr"] = False
+            x["page"] = page
+            for v in x["fieldSrc"].values():
+                v["page"] = page
+            _finish(x)
+        d["extraDocs"] = extra
     return _finish(d)
 
 
@@ -2778,6 +3098,13 @@ def deduct_suggest(doc):
     cats = [((l.get("category") or ""), (l.get("name") or "")) for l in lines]
     if doc.get("category") and not cats:
         cats = [(doc["category"], "")]
+    # 老式票先判：名字里也带"专用发票"，票面没有税额，一律只作报销凭证
+    if it == "taxi":
+        return "no", "出租车票（纸质）没有乘客身份信息，不能计算抵扣，只作报销凭证"
+    if it == "tollpaper":
+        return "no", "纸质过路（过桥）费发票不能抵扣（能抵的是通行费电子普通发票），只作报销凭证"
+    if it == "quota":
+        return "no", "定额发票，不能抵扣"
     if (tax is not None and abs(float(tax)) < 0.005) or (rate and all(r.strip() in ("免税", "不征税", "***", "0%") for r in rate.split(","))):
         return "no", "税额为 0（免税/不征税），没有进项税可抵"
     if it == "special":
@@ -2799,10 +3126,6 @@ def deduct_suggest(doc):
         return "yes", "旅客运输服务，可计算抵扣（限本单位员工出行）"
     if it == "toll" or "通行费" in label or any("通行费" in (c + n) for c, n in cats):
         return "yes", "通行费电子发票，可抵扣"
-    if it == "quota":
-        return "no", "定额发票，不能抵扣"
-    if it == "taxi":
-        return "no", "出租车发票，不能抵扣"
     return "no", "普通发票，不能抵扣"
 
 

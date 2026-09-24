@@ -27,7 +27,7 @@ const tabSet = v => { try { localStorage.setItem(TAB_KEY, v) } catch { /* 存不
 const INV_TYPE_LABEL = {
   special: '增值税专用发票', normal: '增值税普通发票', travel: '旅客运输服务', toll: '通行费发票',
   train: '铁路电子客票', flight: '航空电子客票行程单', vehicle: '机动车销售统一发票',
-  quota: '定额发票', taxi: '出租车票', general: '通用机打发票', other: '其他',
+  quota: '定额发票', taxi: '出租车票', tollpaper: '过路（过桥）费发票', general: '通用机打发票', other: '其他',
 }
 const KIND_LABEL = { receipt: '收据', other: '非发票附件' }
 const VERIFY_OPTS = [['', '全部'], ['green', '已验真'], ['red', '作废红冲'], ['yellow', '税局未见'], ['gray', '不适用'], ['unset', '未对账']]
@@ -47,7 +47,7 @@ const typeText = it => first(it?.typeLabel, INV_TYPE_LABEL[it?.invType], KIND_LA
 // 表格里用简称（全称太长会把右边几列挤出去），全称放悬停提示
 const TYPE_SHORT = {
   special: '专票', normal: '普票', travel: '旅客运输', toll: '通行费', train: '火车票', flight: '机票行程单',
-  vehicle: '机动车', quota: '定额', taxi: '出租车', general: '通用机打', other: '其他',
+  vehicle: '机动车', quota: '定额', taxi: '出租车', tollpaper: '过路费', general: '通用机打', other: '其他',
 }
 const typeShort = it => (it?.kind && it.kind !== 'invoice' ? KIND_LABEL[it.kind] : TYPE_SHORT[it?.invType]) || typeText(it)
 const fBiz = f => first(f?.businessId, f?.business_id)

@@ -1003,7 +1003,7 @@ MONEY_FMT = "#,##0.00"
 INV_TYPE_LABELS = {
     "special": "增值税专用发票", "normal": "增值税普通发票", "travel": "旅客运输服务", "toll": "通行费发票",
     "train": "铁路电子客票", "flight": "航空电子客票行程单", "vehicle": "机动车销售统一发票",
-    "quota": "定额发票", "taxi": "出租车票", "general": "通用机打发票", "other": "其他",
+    "quota": "定额发票", "taxi": "出租车票", "tollpaper": "过路（过桥）费发票", "general": "通用机打发票", "other": "其他",
 }
 KIND_LABELS = {"invoice": "发票", "receipt": "收据", "other": "非发票附件"}
 VERIFY_LABELS = {"green": "已验真", "red": "作废/红冲", "yellow": "税局清单里没有（待核）",
