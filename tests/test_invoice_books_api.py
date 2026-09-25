@@ -1089,6 +1089,12 @@ class InvoiceBooksApiTests(unittest.TestCase):
              "createTime": "2026-09-20 10:00", "amount": 800.0, "payeeName": "自助收款方有限公司", "hasAttachments": False}]})
         with patch.object(inv.idt, "list_user_payments", pays):
             r = self.ok(self.c.get("/api/inv/s/payments", headers=H))
+            self.ok(self.c.get("/api/inv/s/payments", headers=H))              # 3 分钟内同一范围走缓存
+            self.assertEqual(pays.call_count, 1)
+            self.ok(self.c.get("/api/inv/s/payments?days=120&fresh=1", headers=H))
+            self.assertEqual((pays.call_count, pays.call_args[1]["days"], pays.call_args[1]["limit"]), (2, 120, sf.PAY_LIMIT))
+            self.assertEqual(self.ok(self.c.get("/api/inv/s/payments?days=999", headers=H))["days"], 60)   # 只认 30/60/120
+        sf._PAY_CACHE.clear()
         self.assertEqual(pays.call_args[0][0], "dt-app")
         self.assertIn("费用报销", pays.call_args[0][1])                      # 费用报销也能登记后补（V2.621 起默认允许）
         self.assertEqual((r["rows"][0]["laterId"], r["rows"][0]["hasInvoice"]), (None, False))

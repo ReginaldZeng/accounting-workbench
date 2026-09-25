@@ -742,8 +742,9 @@ function selfApi(st) {
   }
 }
 const SELF_PAYS = () => [
-  { procInstId: 'PI-A', businessId: '202609250001', title: '申请人甲提交的付款申请（公对公）', createTime: '2026-09-20 10:00', amount: 800, payeeName: '合成供应商', laterId: null, hasInvoice: false },
-  { procInstId: 'PI-B', businessId: '202609250002', title: '申请人甲提交的费用报销', createTime: '2026-09-18 09:00', amount: 66.5, payeeName: '申请人甲', laterId: 12, hasInvoice: false },
+  { procInstId: 'PI-A', businessId: '202609250001', title: '申请人甲提交的付款申请（公对公）', template: '付款申请（公对公）', createTime: '2026-09-20 10:00', amount: 800, payeeName: '合成供应商', laterId: null, hasInvoice: false, approvalStatus: 'COMPLETED', approvalResult: 'agree' },
+  { procInstId: 'PI-B', businessId: '202609250002', title: '申请人甲提交的费用报销', template: '费用报销', createTime: '2026-09-18 09:00', amount: 66.5, payeeName: '申请人甲', laterId: 12, hasInvoice: false },
+  { procInstId: 'PI-C', businessId: '202609250003', title: '申请人甲提交的付款申请（公对公）', template: '付款申请（公对公）', createTime: '2026-09-10 09:00', amount: 12345.6, payeeName: '另一家合成物流有限公司', laterId: null, hasInvoice: false, approvalStatus: 'RUNNING' },
 ]
 
 test('自助登记：电脑浏览器写姓名收钉钉验证码登录 → 选自己的付款单 → 默认值带好 → 提交进「我的后补单」', async (browser, B) => {
@@ -759,9 +760,31 @@ test('自助登记：电脑浏览器写姓名收钉钉验证码登录 → 选自
   await page.getByText('验证码不对').waitFor({ timeout: 4000 })
   await page.getByPlaceholder('6 位数字').fill('123456')
   await page.getByRole('button', { name: '登录', exact: true }).click()
-  await page.getByText('申请人甲提交的付款申请（公对公）').waitFor({ timeout: 4000 })
+  await page.getByText('申请人甲提交的付款申请（公对公）').first().waitFor({ timeout: 4000 })
+  // 搜索＋分类：默认只看未登记；按模板分；搜收款方/金额
+  assert.equal(await page.locator('.inv-sf-pay').count(), 2, '默认只列未登记的')
+  assert.ok(await page.getByText('审批中').isVisible())
+  await page.getByRole('button', { name: '已登记（1）' }).click()
   assert.ok(await page.getByRole('button', { name: '已登记 #12 · 看进度' }).isVisible(), '登记过的单不能再登记')
-  await page.getByRole('button', { name: '登记后补', exact: true }).click()
+  await page.getByRole('button', { name: '全部', exact: true }).click()
+  await page.getByRole('button', { name: '费用报销（1）' }).click()
+  assert.equal(await page.locator('.inv-sf-pay').count(), 1)
+  await page.getByRole('button', { name: '全部（3）' }).click()
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('12,345')
+  assert.equal(await page.locator('.inv-sf-pay').count(), 1, '按金额搜（带不带逗号都行）')
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('合成供应商')
+  assert.equal(await page.locator('.inv-sf-pay').count(), 1)
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('没有这家')
+  await page.getByText('没有符合条件的单子').waitFor({ timeout: 2000 })
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('')
+  await page.getByRole('button', { name: /^未登记/ }).click()
+  const before = calls.filter(c => c.path === '/api/inv/s/payments').length
+  await page.locator('.inv-sf-days').selectOption('120')
+  await page.waitForFunction(n => true, before)
+  for (let i = 0; i < 30 && calls.filter(c => c.path === '/api/inv/s/payments').length === before; i++) await sleep(100)
+  assert.equal(calls.filter(c => c.path === '/api/inv/s/payments').pop().query.days, '120', '改时间范围重新取')
+  await page.getByText('合成供应商').first().waitFor({ timeout: 4000 })
+  await page.locator('.inv-sf-pay', { hasText: '合成供应商' }).getByRole('button', { name: '登记后补', exact: true }).click()
   assert.equal(await page.locator('input[type=date]').inputValue(), '2026-10-09', '预计到票默认 15 天后')
   assert.equal(await page.locator('.inv-sf-f input[inputmode=decimal]').inputValue(), '800', '预计金额默认付款金额')
   await page.getByRole('button', { name: '提交后补单' }).click()
@@ -801,7 +824,7 @@ test('自助登记：在钉钉里打开 → 先 dd.config 鉴权再免登，直�
   const st = { pays: SELF_PAYS(), laters: [] }
   const { page, ctx, calls } = await open(browser, B, selfApi(st), { hash: '#/invself', ua: DD_UA, init: FAKE_DD })
   await mount(page, 'InvSelf')
-  await page.getByText('申请人甲提交的付款申请（公对公）').waitFor({ timeout: 5000 })
+  await page.getByText('申请人甲提交的付款申请（公对公）').first().waitFor({ timeout: 5000 })
   const cfgArgs = await page.evaluate(() => window.__ddCfg)
   assert.equal(cfgArgs && cfgArgs.corpId, 'dingSELF')
   const i = calls.findIndex(c => c.path === '/api/inv/s/jsconfig'), k = calls.findIndex(c => c.path === '/api/inv/s/login/dd')

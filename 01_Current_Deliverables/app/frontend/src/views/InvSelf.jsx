@@ -103,11 +103,21 @@ function Login({ hello, onIn }) {
 
 // ───────────────────────── 登记 ─────────────────────────
 
+function apprTag(p) {
+  const st = String(p.approvalStatus || '').toUpperCase(), rs = String(p.approvalResult || '').toLowerCase()
+  if (st === 'RUNNING' || st === 'NEW') return ['审批中', 'run']
+  if (st === 'TERMINATED' || st === 'CANCELED') return ['已撤销', 'off']
+  if (st === 'COMPLETED' && rs === 'refuse') return ['已拒绝', 'off']
+  if (st === 'COMPLETED') return ['已通过', 'ok']
+  return null
+}
+
 function PayCard({ p, onPick, onMine }) {
   const done = !!p.laterId
+  const tag = apprTag(p)
   return <div className={'inv-sf-pay' + (done ? ' done' : '')}>
     <div className="inv-sf-pay-main">
-      <div className="inv-sf-pay-t">{p.title || '（无标题）'}</div>
+      <div className="inv-sf-pay-t">{p.title || '（无标题）'}{tag && <span className={'inv-sf-appr ' + tag[1]}>{tag[0]}</span>}</div>
       <div className="inv-sf-pay-m">
         <span>审批编号 {p.businessId || '—'}</span>
         <span>{(p.createTime || '').slice(0, 10)}</span>
@@ -122,6 +132,49 @@ function PayCard({ p, onPick, onMine }) {
       {!done && p.hasInvoice && <span className="inv-sf-tip">这张单已经收到过发票</span>}
     </div>
   </div>
+}
+
+const PAGE = 30
+const payText = p => [p.title, p.businessId, p.payeeName, p.template, p.amount !== null && p.amount !== undefined ? money(p.amount) : '',
+  p.amount, (p.createTime || '').slice(0, 10)].join(' ').toLowerCase()
+
+// 我发起的单子：搜索（标题/审批编号/收款方/金额/日期）＋按审批模板分类＋未登记/已登记＋时间范围；一次最多显示 30 张，可再显示
+function PayList({ pays, msg, truncated, pf, setPf, onReload, onPick, onMine }) {
+  const q = pf.q.trim().toLowerCase().replace(/,/g, '')
+  const all = pays || []
+  const tpls = Array.from(new Set(all.map(p => p.template).filter(Boolean)))
+  const byTpl = all.filter(p => !pf.tpl || p.template === pf.tpl)
+  const cnt = { todo: byTpl.filter(p => !p.laterId).length, done: byTpl.filter(p => p.laterId).length }
+  const rows = byTpl.filter(p => (pf.reg === 'all' || (pf.reg === 'done') === !!p.laterId) && (!q || payText(p).replace(/,/g, '').includes(q)))
+  const shown = rows.slice(0, pf.n)
+  const set = (k, v) => setPf(x => ({ ...x, [k]: v, n: PAGE }))
+  return <>
+    <div className="inv-sf-sec-h"><b>选一张你发起的单子</b>
+      <select className="inv-in inv-sf-days" value={pf.days} onChange={e => set('days', Number(e.target.value))} aria-label="时间范围">
+        <option value={30}>近 30 天</option><option value={60}>近 60 天</option><option value={120}>近 120 天</option>
+      </select>
+      <button type="button" className="inv-sf-link" onClick={() => onReload(true)}>刷新</button></div>
+    <div className="inv-sf-filter">
+      <input className="inv-in inv-sf-q" value={pf.q} onChange={e => set('q', e.target.value)} placeholder="搜标题、审批编号、收款方、金额" />
+      {tpls.length > 1 && <div className="inv-sf-chips">
+        <button type="button" className={!pf.tpl ? 'on' : ''} onClick={() => set('tpl', '')}>全部（{all.length}）</button>
+        {tpls.map(t => <button type="button" key={t} className={pf.tpl === t ? 'on' : ''} onClick={() => set('tpl', t)}>
+          {t}（{all.filter(p => p.template === t).length}）</button>)}
+      </div>}
+      <div className="inv-sf-chips">
+        <button type="button" className={pf.reg === 'todo' ? 'on' : ''} onClick={() => set('reg', 'todo')}>未登记（{cnt.todo}）</button>
+        <button type="button" className={pf.reg === 'done' ? 'on' : ''} onClick={() => set('reg', 'done')}>已登记（{cnt.done}）</button>
+        <button type="button" className={pf.reg === 'all' ? 'on' : ''} onClick={() => set('reg', 'all')}>全部</button>
+      </div>
+    </div>
+    {pays === null && <div className="inv-sf-wait"><span className="inv-spin" /> 正在从钉钉取你的审批单…</div>}
+    {msg && <div className="inv-sf-note">{msg}{truncated && pf.days > 30 ? '，可把时间范围改小再找' : ''}</div>}
+    {pays && !all.length && !msg && <div className="inv-sf-empty">近 {pf.days} 天没有你发起的、可以登记后补的单子。</div>}
+    {pays && all.length > 0 && !rows.length && <div className="inv-sf-empty">没有符合条件的单子{q ? `（搜「${pf.q.trim()}」）` : ''}。</div>}
+    {shown.map(p => <PayCard key={p.procInstId} p={p} onPick={onPick} onMine={onMine} />)}
+    {rows.length > shown.length && <button type="button" className="btn inv-sf-more" onClick={() => setPf(x => ({ ...x, n: x.n + PAGE }))}>
+      再显示 {Math.min(PAGE, rows.length - shown.length)} 张（还有 {rows.length - shown.length} 张）</button>}
+  </>
 }
 
 function Form({ token, pay, receivers, onBack, onDone }) {
@@ -267,6 +320,8 @@ export default function InvSelf() {
   const [tab, setTab] = useState('new')
   const [pays, setPays] = useState(null)
   const [paysMsg, setPaysMsg] = useState('')
+  const [paysCut, setPaysCut] = useState(false)
+  const [pf, setPf] = useState({ q: '', tpl: '', reg: 'todo', days: 60, n: PAGE })   // 选单子的筛选（去填表再回来不丢）
   const [recv, setRecv] = useState([])
   const [laters, setLaters] = useState([])
   const [pick, setPick] = useState(null)
@@ -308,10 +363,13 @@ export default function InvSelf() {
   }, [])
 
   const expired = useCallback(e => { if (e && e.status === 401) { saveTok(''); setTok(''); setMe(null); setPhase('login'); return true } return false }, [])
-  const loadPays = useCallback(async () => {
-    setPays(null); setPaysMsg('')
-    try { const r = await invSPayments(tok); setPays(r.rows || []); setPaysMsg(r.ok ? (r.msg || '') : (r.msg || '钉钉审批单没取到')) } catch (e) { if (!expired(e)) { setPays([]); setPaysMsg(errText(e)) } }
-  }, [tok, expired])
+  const loadPays = useCallback(async (fresh) => {
+    setPays(null); setPaysMsg(''); setPaysCut(false)
+    try {
+      const r = await invSPayments(tok, pf.days, fresh === true)
+      setPays(r.rows || []); setPaysCut(!!r.truncated); setPaysMsg(r.ok ? (r.msg || '') : (r.msg || '钉钉审批单没取到'))
+    } catch (e) { if (!expired(e)) { setPays([]); setPaysMsg(errText(e)) } }
+  }, [tok, expired, pf.days])
   const loadLaters = useCallback(async () => {
     try { const r = await invSLaters(tok); setLaters(r.rows || []) } catch (e) { expired(e) }
   }, [tok, expired])
@@ -322,7 +380,6 @@ export default function InvSelf() {
     invSReceivers(tok).then(r => setRecv(r.rows || [])).catch(expired)
   }, [phase, tok, loadPays, loadLaters, expired])
 
-  const tpl = (hello?.templates || []).join('、')
   return <div className="inv-sf">
     <header className="inv-sf-top">
       <div>
@@ -345,16 +402,12 @@ export default function InvSelf() {
       {flash && <div className="inv-sf-ok">{flash}</div>}
 
       {tab === 'new' && !pick && <section className="inv-sf-sec">
-        <div className="inv-sf-sec-h"><b>选一张你发起的单子</b><span>近 60 天{tpl ? `的「${tpl}」` : ''}</span>
-          <button type="button" className="inv-sf-link" onClick={loadPays}>刷新</button></div>
-        {pays === null && <div className="inv-sf-wait"><span className="inv-spin" /> 正在从钉钉取你的审批单…</div>}
-        {paysMsg && <div className="inv-sf-note">{paysMsg}</div>}
-        {pays && !pays.length && !paysMsg && <div className="inv-sf-empty">近 60 天没有你发起的、可以登记后补的单子。</div>}
-        {pays && pays.map(p => <PayCard key={p.procInstId} p={p} onPick={x => { setFlash(''); setPick(x) }} onMine={() => { setTab('mine'); loadLaters() }} />)}
+        <PayList pays={pays} msg={paysMsg} truncated={paysCut} pf={pf} setPf={setPf} onReload={loadPays}
+          onPick={x => { setFlash(''); setPick(x) }} onMine={() => { setTab('mine'); loadLaters() }} />
       </section>}
       {tab === 'new' && pick && <section className="inv-sf-sec">
         <Form token={tok} pay={pick} receivers={recv} onBack={() => setPick(null)}
-          onDone={m => { setFlash(m); setPick(null); setTab('mine'); loadLaters(); loadPays() }} />
+          onDone={m => { setFlash(m); setPick(null); setTab('mine'); loadLaters(); loadPays(true) }} />
       </section>}
       {tab === 'mine' && <section className="inv-sf-sec"><MyLaters token={tok} rows={laters} onReload={loadLaters} /></section>}
     </>}

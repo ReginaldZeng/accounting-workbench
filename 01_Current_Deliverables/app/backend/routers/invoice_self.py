@@ -40,6 +40,11 @@ SELF_PATH = "/#/invself"
 
 _IP_HITS = {}
 _IP_LOCK = threading.Lock()
+PAY_DAYS = (30, 60, 120)  # 选单子的时间范围（钉钉最多 120 天）
+PAY_LIMIT = 150           # 最多列这么多张（请款多的人）
+PAY_TTL = 180             # 同一人同一范围 3 分钟内不重复去钉钉取（「刷新」强取）
+_PAY_CACHE = {}
+_PAY_LOCK = threading.Lock()
 
 
 def _h(s):
@@ -271,16 +276,39 @@ async def s_logout(request: Request):
 
 # ───────────────────────── 登记 / 查看 ─────────────────────────
 
+def _my_payments(uid, names, days, fresh):
+    key = (uid, days, tuple(names))
+    now = time.time()
+    with _PAY_LOCK:
+        hit = _PAY_CACHE.get(key)
+        if hit and not fresh and now - hit[0] < PAY_TTL:
+            return hit[1]
+    r = idt.list_user_payments(uid, names, days=days, limit=PAY_LIMIT)
+    if r.get("ok"):
+        with _PAY_LOCK:
+            if len(_PAY_CACHE) > 500:
+                _PAY_CACHE.clear()
+            _PAY_CACHE[key] = (now, r)
+    return r
+
+
 @router.get("/api/inv/s/payments")
 async def s_payments(request: Request):
-    """我近 60 天发起的、允许登记后补的审批单；标上已登记的后补单、票夹里是否已有发票。"""
+    """我近 N 天（30/60/120，默认 60）发起的、允许登记后补的审批单；标上已登记的后补单、票夹里是否已有发票。
+    搜索、按模板/是否已登记分类在页面上做（一次取全，最多 150 张）。?fresh=1 不用缓存。"""
     me, bad = _need(request)
     if bad:
         return bad
+    try:
+        days = int(request.query_params.get("days") or 60)
+    except ValueError:
+        days = 60
+    days = days if days in PAY_DAYS else 60
+    fresh = request.query_params.get("fresh") == "1"
 
     def run():
         names = _later_templates()
-        r = idt.list_user_payments(me["dt_userid"], names, days=60, limit=40)
+        r = _my_payments(me["dt_userid"], names, days, fresh)
         e = E()
         rows = []
         for x in r.get("rows") or []:
@@ -289,7 +317,8 @@ async def s_payments(request: Request):
             has_inv = bool(f) and any(i.get("kind") == "invoice" and i.get("review") != "void" and i.get("status") != "removed"
                                       for i in S.folder_items(e, f["id"]))
             rows.append(dict(x, laterId=ex["id"] if ex else None, hasInvoice=has_inv))
-        return {"ok": bool(r.get("ok")), "rows": rows, "msg": r.get("msg") or "", "templates": names}
+        return {"ok": bool(r.get("ok")), "rows": rows, "msg": r.get("msg") or "", "templates": names, "days": days,
+                "truncated": bool(r.get("truncated"))}
     return await run_in_threadpool(run)
 
 

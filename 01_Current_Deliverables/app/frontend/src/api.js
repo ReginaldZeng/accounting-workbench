@@ -566,7 +566,7 @@ export const invSLoginDd = (code) => invSJ('/api/inv/s/login/dd', '', { code })
 export const invSLoginSend = (name, pick) => invSJ('/api/inv/s/login/send', '', { name, pick })   // 重名 → {need:'pick', choices}
 export const invSLoginVerify = (ticket, code) => invSJ('/api/inv/s/login/verify', '', { ticket, code })
 export const invSLogout = (token) => invSJ('/api/inv/s/logout', token, {})
-export const invSPayments = (token) => invSJ('/api/inv/s/payments', token)
+export const invSPayments = (token, days = 60, fresh = false) => invSJ('/api/inv/s/payments?days=' + days + (fresh ? '&fresh=1' : ''), token)
 export const invSReceivers = (token) => invSJ('/api/inv/s/receivers', token)
 export const invSLaterCreate = (token, body) => invSJ('/api/inv/s/later', token, body)
 export const invSLaters = (token) => invSJ('/api/inv/s/laters', token)
