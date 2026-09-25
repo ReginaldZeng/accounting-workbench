@@ -278,12 +278,11 @@ function Form({ token, pay, receivers, onBack, onDone }) {
 
 // ───────────────────────── 我的后补单 ─────────────────────────
 
-// 我的后补单分类：按状态（还没到票/部分到票/财务已收齐/已超期/已关闭）＋搜索
+// 我的后补单分类：从申请人角度看——「我还欠的票」＝登记了、还没交齐给财务的（还没到票＋部分到票）＝默认先看这个
 const LIVE = l => l.status === 'open' || l.status === 'partial'
 const MINE_CATS = [
+  ['owe', '我还欠的票', l => LIVE(l)],
   ['all', '全部', () => true],
-  ['open', '还没到票', l => l.status === 'open'],
-  ['partial', '部分到票', l => l.status === 'partial'],
   ['done', '财务已收齐', l => l.status === 'done'],
   ['late', '已超期', l => LIVE(l) && l.overdue],
   ['closed', '已关闭', l => l.status === 'closed'],
@@ -295,7 +294,7 @@ function MyLaters({ token, rows: all, onReload }) {
   const [busy, setBusy] = useState(0)
   const [note, setNote] = useState('')
   const [q, setQ] = useState('')
-  const [cat, setCat] = useState('all')
+  const [cat, setCat] = useState('owe')
   const up = async (l, fs) => {
     if (!fs.length) return
     setBusy(l.id); setNote('')
@@ -310,7 +309,7 @@ function MyLaters({ token, rows: all, onReload }) {
       <input className="inv-in inv-sf-q" value={q} onChange={e => setQ(e.target.value)} placeholder="搜审批编号、收款方、交给谁、金额、日期" />
       <div className="inv-sf-chips">{MINE_CATS.map(([k, label, f]) => {
         const n = all.filter(f).length
-        return (k === 'all' || n > 0 || cat === k) &&
+        return (k === 'all' || k === 'owe' || n > 0 || cat === k) &&
           <button type="button" key={k} className={cat === k ? 'on' : ''} onClick={() => setCat(k)}>{label}（{n}）</button>
       })}</div>
     </div>
@@ -330,8 +329,7 @@ function MyLaters({ token, rows: all, onReload }) {
           <td className="num">{live ? money(l.remaining) : '—'}</td>
           <td>{l.expectDate}{l.overdue && live && <b className="inv-sf-late">已超期</b>}</td>
           <td>{l.receiverName}</td>
-          <td className={'st-' + l.status}>{l.status === 'done' ? '财务已收齐' : (ST_LABEL[l.status] || l.status)}
-            {num(l.unregisteredAmount) > 0 && <div className="inv-sf-sub2">其中 {money(l.unregisteredAmount)} 号码待登记</div>}</td>
+          <td className={'st-' + l.status}>{l.status === 'done' ? '财务已收齐' : (ST_LABEL[l.status] || l.status)}</td>
           <td>{l.filedVia === 'self' ? '自己' : '财务代填'}<div className="inv-sf-sub2">{(l.createdAt || '').slice(0, 10)}</div></td>
           <td>{live && <label className={'inv-sf-upl' + (busy === l.id ? ' busy' : '')}>{busy === l.id ? '上传中…' : '补传资料'}
             <input type="file" multiple disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; up(l, fs) }} /></label>}</td>
