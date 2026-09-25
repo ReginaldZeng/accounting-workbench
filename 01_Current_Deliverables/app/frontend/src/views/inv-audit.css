@@ -21,7 +21,7 @@
 .inv-au{ display:grid; grid-template-columns:340px minmax(0, 1fr); gap:14px; align-items:start; }
 
 /* ── 左：队列 ── */
-.inv-au-q{ position:sticky; top:12px; display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 150px); min-height:320px;
+.inv-au-q{ position:sticky; top:12px; display:flex; flex-direction:column; gap:8px; height:calc(100vh - 122px); min-height:320px;
   border:1px solid var(--line); border-radius:10px; background:var(--bg); padding:10px; }
 .inv-au-tabs{ display:flex; gap:2px; padding:3px; border-radius:9px; background:var(--bg-rail); border:1px solid var(--line); }
 .inv-au-tab{ flex:1 1 0; height:30px; border:none; border-radius:7px; background:transparent; color:var(--ink-2); font-size:12.5px;
@@ -60,7 +60,7 @@
 .inv-au-bres-why{ color:var(--amber); }
 
 /* ── 右：票夹 ── */
-.inv-au-d{ min-width:0; display:flex; flex-direction:column; gap:12px; }
+.inv-au-d{ min-width:0; display:flex; flex-direction:column; gap:12px; min-height:calc(100vh - 122px); }
 .inv-au-st{ font-size:11px; font-weight:600; padding:3px 8px; border-radius:6px; border:1px solid var(--line-strong); color:var(--ink-2); background:var(--bg-sub); }
 .inv-au-st.submitted{ color:var(--blue); background:var(--blue-bg); border-color:var(--blue-line); }
 .inv-au-st.approved{ color:var(--green); background:var(--green-bg); border-color:var(--green-line); }
@@ -100,7 +100,7 @@
 }
 @media (max-width:900px){
   .inv-au{ grid-template-columns:1fr; }
-  .inv-au-q{ position:static; max-height:none; }
+  .inv-au-q{ position:static; height:auto; max-height:none; }
 }
 
 /* ───────── 2026-09-25 审核页改版（按用户定稿样机）：单据头＋金额核对 → 已收发票 → 发票后补单 → 底部固定提交；单张核对弹窗 ───────── */
@@ -184,7 +184,7 @@
 .inv-au-dlg-logs summary{ cursor:pointer; color:var(--ink-2); }
 .inv-au-dlg-logs ul{ margin:6px 0 0; padding-left:18px; }
 
-.inv-au-bar2{ position:sticky; bottom:0; z-index:5; display:flex; flex-direction:column; gap:8px; padding:10px 14px;
+.inv-au-bar2{ position:sticky; bottom:0; z-index:5; margin-top:auto; display:flex; flex-direction:column; gap:8px; padding:10px 14px;
   padding-bottom:calc(10px + env(safe-area-inset-bottom, 0px)); border:1px solid var(--line-strong); border-radius:var(--radius);
   background:var(--bg); box-shadow:0 -4px 16px rgba(0,0,0,.08); max-height:70vh; overflow:auto; }
 .inv-au-bar2-row{ display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; }
