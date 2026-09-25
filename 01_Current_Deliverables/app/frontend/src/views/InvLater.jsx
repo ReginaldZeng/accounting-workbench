@@ -1,4 +1,5 @@
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票后补池页：列表筛选（我接收的/全部＋状态＋搜索）、财务代填新建后补单、收到（扫码/上传/先标记）、催一下、详情、修改、关闭、导出欠票清单、「设置」页签
+// [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 页头加「业务自助登记入口」（网址＋二维码，申请人自己登记发票后补）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 新建后补单按后端 notified/notifyMsg 如实说接收人收没收到钉钉消息；
 //   「收到」弹窗加高拍仪拍照（需求 v1.4 七「扫码枪或放高拍仪」），拍的照片走 receive-upload。
 // 需求确认书 v1.4 七 + 技术方案 §5.2「发票后补池」。接口全走 api.js 的 invLater*；共用组件来自 invShared.jsx。
@@ -6,7 +7,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLaterList, invLater, invLaterResolve, invLaterCreate, invLaterDocs, invLaterReceive,
-  invLaterReceiveUpload, invLaterMark, invLaterRemind, invLaterUpdate, invLaterClose, invLaterExportUrl,
+  invLaterReceiveUpload, invLaterMark, invLaterRemind, invLaterUpdate, invLaterClose, invLaterExportUrl, invSLink,
 } from '../api.js'
 import { Modal, useToast, ScanInput, FileDrop, CameraPanel, ThumbStrip, InvViewer, StatusBadges, money, fmtTime } from './invShared.jsx'
 import InvSettings from './InvSettings.jsx'
@@ -770,6 +771,38 @@ function LaterPool({ cfg, cfgErr, can, me, flash, onGoSettings, creating, setCre
   </>
 }
 
+// ───────────────────────── 业务自助登记入口（V2.621） ─────────────────────────
+
+// 发票后补由申请人自己登记：给财务一个网址＋二维码，发到群里或贴出来；电脑浏览器、手机钉钉都能打开
+function SelfLinkModal({ onClose }) {
+  const [r, setR] = useState(null)
+  const [err, setErr] = useState('')
+  const [copied, setCopied] = useState(false)
+  useEffect(() => { invSLink().then(setR).catch(e => setErr(errText(e))) }, [])
+  const copy = () => {
+    const t = r?.url || ''
+    const ok = () => { setCopied(true); setTimeout(() => setCopied(false), 1600) }
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(ok).catch(() => {})
+  }
+  return <Modal title="业务同事自助登记发票后补" onClose={onClose} width={560}
+    footer={<button type="button" className="btn" onClick={onClose}>关闭</button>}>
+    {err && <div className="inv-lt-fe">没取到入口地址：{err}</div>}
+    {!r && !err && <div className="inv-muted"><span className="inv-spin" /> 正在生成…</div>}
+    {r && <div className="inv-lt-self">
+      <p>付款时发票还没拿到，由<b>申请人自己</b>在这里登记：选自己发起的付款单/报销单 → 填预计到票 → 提交。
+        财务审核这张单时，「发票审核」里会自动带出这张后补单。</p>
+      <div className="inv-lt-self-url"><input className="inv-in inv-num" readOnly value={r.url} onFocus={e => e.target.select()} />
+        <button type="button" className="btn" onClick={copy}>{copied ? '已复制' : '复制网址'}</button></div>
+      <img className="inv-lt-self-qr" src={r.qr + '?t=' + Date.now()} alt="自助登记二维码" width={200} height={200} />
+      <ul className="inv-muted">
+        <li>手机钉钉扫这个码：自动认出是谁，直接登记。</li>
+        <li>电脑浏览器打开网址：写钉钉姓名，钉钉会收到 6 位验证码，输入就能登录。</li>
+        <li>只能登记自己发起的单子；登记后系统用钉钉通知所选的财务接收人。</li>
+      </ul>
+    </div>}
+  </Modal>
+}
+
 // ───────────────────────── 页面 ─────────────────────────
 
 export default function InvLater({ user }) {
@@ -778,6 +811,7 @@ export default function InvLater({ user }) {
   const [tab, setTab] = useState('pool')
   const [setSeen, setSetSeen] = useState(false)   // 设置页签第一次打开后常驻（切走再回来不丢没保存的改动）
   const [creating, setCreating] = useState(false)
+  const [selfLink, setSelfLink] = useState(false)
   const [toast, flash] = useToast()
 
   const loadCfg = useCallback(() => {
@@ -801,6 +835,7 @@ export default function InvLater({ user }) {
           <button type="button" className={tab === 'settings' ? 'on' : ''} onClick={goSettings}>设置</button>
         </div>}
         {tab === 'pool' && <a className="btn" href={invLaterExportUrl({ status: 'open' })}>导出欠票清单</a>}
+        {tab === 'pool' && <button type="button" className="btn" onClick={() => setSelfLink(true)}>业务自助登记入口</button>}
         {tab === 'pool' && can.receive && <button type="button" className="btn-pri" onClick={() => setCreating(true)}>新建后补单</button>}
       </div>
     </div>
@@ -811,6 +846,7 @@ export default function InvLater({ user }) {
     {can.config && setSeen && <div style={tab === 'settings' ? undefined : { display: 'none' }}>
       <InvSettings user={user} embedded onSaved={loadCfg} />
     </div>}
+    {selfLink && <SelfLinkModal onClose={() => setSelfLink(false)} />}
     {toast}
   </div>
 }

@@ -1371,6 +1371,11 @@ class InvoiceApiTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(r.json()["signature"], "s")
         self.assertEqual(seen, [("http://testserver/", inv.get_settings().get("corpId") or "")])
+        # V2.621：刚扫配对码、还没绑定也给签名（钉钉里要先 dd.config 再 requestAuthCode 才认得出人）
+        j2, tok2 = self._pair("phoneguy")
+        with patch.object(inv.idt, "jsapi_config", side_effect=fake):
+            r = self.c.get("/api/inv/m/jsconfig", params={"url": "http://testserver/"}, headers=self.P(tok2))
+            self.assertEqual(r.status_code, 200, r.text)
 
 
     def test_44_audit_gap_marks_laters(self):

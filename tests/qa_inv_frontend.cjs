@@ -1,4 +1,5 @@
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 发票管家前端回归（浏览器夹具）
+// [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 加申请人自助登记（#/invself）5 条：验证码登录→登记、重名、钉钉免登、手机配对先鉴权再免登、后补池入口
 // 只用合成数据：接口全部在浏览器里拦截回假数据，不连后端、不发钉钉、不碰生产。
 // 用法（仓库根目录）：node tests/qa_inv_frontend.cjs            —— 测工作区里的前端源码
 //                    INV_FE_SRC=<另一份 frontend/src> node ...   —— 测别的版本（例如修复前的 HEAD，用来确认用例"修前红、修后绿"）
@@ -33,6 +34,7 @@ import InvLedger from '%SRC%/views/InvLedger.jsx'
 import InvLater from '%SRC%/views/InvLater.jsx'
 import InvSettings from '%SRC%/views/InvSettings.jsx'
 import InvPhone from '%SRC%/views/InvPhone.jsx'
+import InvSelf from '%SRC%/views/InvSelf.jsx'
 import '%SRC%/styles.css'
 
 function ViewerSwitch({ items }) {
@@ -61,7 +63,7 @@ function PairHarness(p) {
   const [open, setOpen] = useState(true)
   return open ? <S.PairModal {...p} onClose={() => setOpen(false)} /> : <div id="qa-closed">已关</div>
 }
-const VIEWS = { ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone }
+const VIEWS = { ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf }
 window.__mount = (name, props) => {
   const root = createRoot(document.getElementById('root'))
   root.render(React.createElement(VIEWS[name], props || {}))
@@ -701,6 +703,138 @@ test('扫审批单：钉钉鉴权没过 → 说清原因、给「拍审批单二
   assert.ok(await page.getByRole('button', { name: '拍审批单二维码' }).isVisible())
   assert.equal(await page.evaluate(() => window.__ddScans), 0)
   assert.equal(n(calls, c => c.path === '/api/inv/m/scan'), 0)
+  await ctx.close()
+})
+
+// ───────────────────────── 申请人自助登记发票后补（V2.621，#/invself） ─────────────────────────
+
+function selfApi(st) {
+  return async c => {
+    if (c.path === '/api/inv/s/hello') return { ok: true, corpId: st.corpId || '', dingtalk: true, me: st.me || null, templates: ['付款申请（公对公）', '费用报销'] }
+    if (c.path === '/api/inv/s/jsconfig') return { ok: true, agentId: '9', corpId: 'dingSELF', timeStamp: '1', nonceStr: 'n', signature: 's9' }
+    if (c.path === '/api/inv/s/login/dd') { st.me = { name: '申请人甲', dept: '公司-采购部', via: 'dingtalk' }; return { ok: true, token: 'SELF-TOK', me: st.me } }
+    if (c.path === '/api/inv/s/login/send') {
+      if (c.body.name === '重名人' && (c.body.pick === null || c.body.pick === undefined)) return { ok: true, need: 'pick', choices: [{ i: 0, dept: '公司-销售部', title: '' }, { i: 1, dept: '公司-生产部', title: '' }] }
+      st.sent = c.body
+      return { ok: true, ticket: 'TK1', to: c.body.name + '（采购部）', expiresIn: 300 }
+    }
+    if (c.path === '/api/inv/s/login/verify') {
+      if (c.body.code !== '123456') return { __status: 400, ok: false, msg: '验证码不对：请核对钉钉消息里的 6 位数字' }
+      st.me = { name: '申请人甲', dept: '公司-采购部', via: 'code' }
+      return { ok: true, token: 'SELF-TOK', me: st.me }
+    }
+    if (c.headers['x-inv-self'] !== 'SELF-TOK') return { __status: 401, ok: false, msg: '登录已过期或没登录' }
+    if (c.path === '/api/inv/s/payments') return { ok: true, msg: '', rows: st.pays }
+    if (c.path === '/api/inv/s/receivers') return { ok: true, rows: [{ account: 'cw1', name: '财务甲' }, { account: 'cw2', name: '财务乙' }] }
+    if (c.path === '/api/inv/s/laters') return { ok: true, rows: st.laters }
+    if (c.path === '/api/inv/s/later') {
+      st.created = c.body
+      const l = { id: 31, businessId: '202609250001', payee: { name: '合成供应商' }, expectAmount: c.body.expectAmount, receivedAmount: 0,
+        unregisteredAmount: 0, remaining: c.body.expectAmount, expectDate: c.body.expectDate, receiverName: '财务乙', status: 'open', filedVia: 'self' }
+      st.laters = [l]; st.pays = st.pays.map(p => p.procInstId === c.body.instId ? { ...p, laterId: 31 } : p)
+      return { ok: true, later: l, notified: true }
+    }
+    if (c.path === '/api/inv/s/logout') return { ok: true }
+    return { __status: 404, ok: false, msg: 'nope' }
+  }
+}
+const SELF_PAYS = () => [
+  { procInstId: 'PI-A', businessId: '202609250001', title: '申请人甲提交的付款申请（公对公）', createTime: '2026-09-20 10:00', amount: 800, payeeName: '合成供应商', laterId: null, hasInvoice: false },
+  { procInstId: 'PI-B', businessId: '202609250002', title: '申请人甲提交的费用报销', createTime: '2026-09-18 09:00', amount: 66.5, payeeName: '申请人甲', laterId: 12, hasInvoice: false },
+]
+
+test('自助登记：电脑浏览器写姓名收钉钉验证码登录 → 选自己的付款单 → 默认值带好 → 提交进「我的后补单」', async (browser, B) => {
+  const st = { pays: SELF_PAYS(), laters: [] }
+  const { page, ctx, calls, errors } = await open(browser, B, selfApi(st), { hash: '#/invself', clock: true })
+  await mount(page, 'InvSelf')
+  await page.getByPlaceholder('你在钉钉上的姓名').fill('申请人甲')
+  await page.getByRole('button', { name: '发验证码到钉钉' }).click()
+  await page.getByText('验证码已发到').waitFor({ timeout: 4000 })
+  assert.equal(st.sent.name, '申请人甲')
+  await page.getByPlaceholder('6 位数字').fill('000000')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByText('验证码不对').waitFor({ timeout: 4000 })
+  await page.getByPlaceholder('6 位数字').fill('123456')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByText('申请人甲提交的付款申请（公对公）').waitFor({ timeout: 4000 })
+  assert.ok(await page.getByRole('button', { name: '已登记 #12 · 看进度' }).isVisible(), '登记过的单不能再登记')
+  await page.getByRole('button', { name: '登记后补', exact: true }).click()
+  assert.equal(await page.locator('input[type=date]').inputValue(), '2026-10-09', '预计到票默认 15 天后')
+  assert.equal(await page.locator('.inv-sf-f input[inputmode=decimal]').inputValue(), '800', '预计金额默认付款金额')
+  await page.getByRole('button', { name: '提交后补单' }).click()
+  await page.getByText('请选发票交给哪位财务').waitFor({ timeout: 3000 })
+  assert.equal(st.created, undefined, '没选接收人不能提交')
+  await page.locator('.inv-sf-f select').selectOption('cw2')
+  await page.getByRole('button', { name: '普票' }).click()
+  await page.getByRole('button', { name: '提交后补单' }).click()
+  await page.locator('.inv-sf-ok', { hasText: '已登记后补单 #31' }).waitFor({ timeout: 4000 })
+  assert.deepEqual({ ...st.created, expectDate: undefined },
+    { instId: 'PI-A', invKind: 'normal', taxRate: '', expectDate: undefined, expectAmount: 800, receiver: 'cw2', note: '' })
+  assert.ok(await page.locator('.inv-sf-tbl').getByText('财务乙').isVisible(), '提交后跳到「我的后补单」')
+  const authed = calls.filter(c => ['/api/inv/s/payments', '/api/inv/s/later', '/api/inv/s/laters'].includes(c.path))
+  assert.ok(authed.length >= 3 && authed.every(c => c.headers['x-inv-self'] === 'SELF-TOK'), '会话令牌走请求头')
+  assert.ok(calls.every(c => !c.path.includes('SELF-TOK') && !Object.values(c.query).includes('SELF-TOK')), '令牌不进地址')
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('自助登记：钉钉里有重名 → 先选部门再发码', async (browser, B) => {
+  const st = { pays: [], laters: [] }
+  const { page, ctx } = await open(browser, B, selfApi(st), { hash: '#/invself' })
+  await mount(page, 'InvSelf')
+  await page.getByPlaceholder('你在钉钉上的姓名').fill('重名人')
+  await page.getByRole('button', { name: '发验证码到钉钉' }).click()
+  await page.getByRole('button', { name: '公司-生产部' }).click()
+  await page.getByText('验证码已发到').waitFor({ timeout: 4000 })
+  assert.equal(st.sent.pick, 1)
+  await ctx.close()
+})
+
+test('自助登记：在钉钉里打开 → 先 dd.config 鉴权再免登，直接进，不用验证码', async (browser, B) => {
+  const st = { pays: SELF_PAYS(), laters: [] }
+  const { page, ctx, calls } = await open(browser, B, selfApi(st), { hash: '#/invself', ua: DD_UA, init: FAKE_DD })
+  await mount(page, 'InvSelf')
+  await page.getByText('申请人甲提交的付款申请（公对公）').waitFor({ timeout: 5000 })
+  const cfgArgs = await page.evaluate(() => window.__ddCfg)
+  assert.equal(cfgArgs && cfgArgs.corpId, 'dingSELF')
+  const i = calls.findIndex(c => c.path === '/api/inv/s/jsconfig'), k = calls.findIndex(c => c.path === '/api/inv/s/login/dd')
+  assert.ok(i >= 0 && k > i, '先鉴权后免登')
+  assert.equal(calls[k].body.code, 'AUTH1')
+  assert.equal(await page.getByPlaceholder('你在钉钉上的姓名').count(), 0)
+  await ctx.close()
+})
+
+test('手机配对：钉钉里还没绑定时先 dd.config（拿到企业编号）再要免登码，绑定带上身份', async (browser, B) => {
+  const st = { bound: false }
+  const api = async c => {
+    if (c.path === '/api/inv/m/hello') return { ok: true, bound: st.bound, user: '测试收票员', corpId: '' }
+    if (c.path === '/api/inv/m/jsconfig') return { ok: true, agentId: '123', corpId: 'dingFAKE', timeStamp: '1', nonceStr: 'n', signature: 's' }
+    if (c.path === '/api/inv/m/bind') { st.bind = c.body; st.bound = true; return { ok: true, user: '测试收票员', dtName: '张三', session: 'SESS2', msg: '已配对' } }
+    if (c.path === '/api/inv/m/state') return { ok: true, user: '测试收票员', folder: null, items: [] }
+    return { __status: 404, ok: false, msg: 'nope' }
+  }
+  const { page, ctx, calls } = await open(browser, B, api, { hash: '#/invpair?t=QR7', ua: DD_UA, init: FAKE_DD })
+  await mount(page, 'InvPhone')
+  await page.waitForFunction(() => true)
+  for (let i = 0; i < 40 && !st.bind; i++) await sleep(100)
+  assert.equal(st.bind && st.bind.code, 'AUTH1', '要带上钉钉免登码：' + JSON.stringify(st.bind))
+  const jc = calls.findIndex(c => c.path === '/api/inv/m/jsconfig'), bd = calls.findIndex(c => c.path === '/api/inv/m/bind')
+  assert.ok(jc >= 0 && jc < bd, '先鉴权再绑定')
+  assert.equal(calls[jc].headers['x-inv-pair'], 'QR7', '鉴权用的是还没绑定的配对码')
+  await ctx.close()
+})
+
+test('后补池：「业务自助登记入口」给网址和二维码', async (browser, B) => {
+  const st = { rows: [] }
+  const base = laterApi(st)
+  const api = async c => (c.path === '/api/inv/s/link' ? { ok: true, url: 'http://10.0.0.8/#/invself', qr: '/api/inv/s/qr.png' } : base(c))
+  const { page, ctx } = await open(browser, B, api)
+  await mount(page, 'InvLater', { user: { name: '测试会计' } })
+  await page.getByRole('button', { name: '业务自助登记入口' }).click()
+  const inp = page.locator('.inv-lt-self-url input')
+  await inp.waitFor({ timeout: 4000 })
+  assert.equal(await inp.inputValue(), 'http://10.0.0.8/#/invself')
+  assert.ok((await page.locator('.inv-lt-self-qr').getAttribute('src')).startsWith('/api/inv/s/qr.png'))
   await ctx.close()
 })
 

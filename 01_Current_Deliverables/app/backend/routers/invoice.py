@@ -275,7 +275,7 @@ DEFAULT_SETTINGS = {
     "company": [{"name": "深圳市星期零食品科技有限公司", "taxId": "91440300MA5EHQAR7X"},
                 {"name": "孝感市星期九食品科技有限公司", "taxId": "91420900MA4F00NK81"}],
     "templates": [{"name": "付款申请（公对公）", "amountFields": ["实际付款总额", "付款总额"], "allowLater": True},
-                  {"name": "费用报销", "amountFields": ["报销总额", "合计金额", "报销金额", "实际报销金额"], "allowLater": False}],
+                  {"name": "费用报销", "amountFields": ["报销总额", "合计金额", "报销金额", "实际报销金额"], "allowLater": True}],
     "remind": {"enabled": True, "beforeDays": 3, "everyDays": 7, "hour": 10},
     "blockNoInvoice": False,
     # 空＝用电脑上正在用的地址（手机扫配对码、钉钉消息里的链接都跟着走）。正式域名 finance.starfieldsz.com
@@ -884,10 +884,10 @@ def folder_view(f, items=None, mobile=False, settings=None, with_form=False, lat
          "reviewNote": f.get("review_note") or "", "selfReview": bool(f.get("self_review")),
          "allowLater": bool(cfg and cfg.get("allowLater")),
          "later": later_brief(f, e, later), "stats": folder_stats(f, items)}
-    # 黄牌「无票、未登记后补」只给允许后补的付款类模板；附件还在拉时先不亮（票可能马上就到）
+    # 黄牌「无票、未登记后补」只给允许后补的付款类模板（报销不亮：纸票常后放、餐补本就没票）；附件还在拉时先不亮（票可能马上就到）
     bills = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"
              and i.get("kind") in ("invoice", "receipt")]
-    v["laterMissing"] = bool(v["allowLater"] and v["later"] is None and not bills
+    v["laterMissing"] = bool(v["allowLater"] and not is_reimb(f.get("template")) and v["later"] is None and not bills
                              and (f.get("attach_status") or "none") not in ("pending", "running"))
     if with_form and not mobile:
         v["form"] = f.get("form_json") or []
@@ -988,12 +988,20 @@ def _qr_raw_of(it):
     return s if ip.parse_invoice_qr(s) else None
 
 
+def is_reimb(tpl):
+    """报销类模板（费用报销等）：收款方是报销人自己、纸票常后放、餐补本就没票。
+    V2.621 起报销也能登记发票后补（allowLater），但下面这些付款单专属的判断仍不适用于报销。"""
+    return "报销" in (tpl or "")
+
+
 def _payee_for_check(folder, st):
-    # 只有公对公付款单才比"销方＝收款方"：费用报销的收款方是报销人自己，比了全是假红
+    # 只有付款单才比"销方＝收款方"：费用报销的收款方是报销人自己，比了全是假红（报销允许后补也一样不比）
     name = (folder or {}).get("payee_name")
     if not name:
         return None
     tpl = (folder or {}).get("template") or ""
+    if is_reimb(tpl):
+        return None
     cfg = template_cfg(tpl, st)
     return name if ("公对公" in tpl or (cfg and cfg.get("allowLater"))) else None
 
@@ -2521,11 +2529,12 @@ def submit_check(folder, items, settings=None):
         warnings.append({"code": "attachFailed", "msg": "有附件没拉下来：%s" % (folder.get("attach_msg") or "")})
     bills = [i for i in act if i.get("kind") in ("invoice", "receipt")]
     cfg = template_cfg(folder.get("template"), st)
-    if cfg and cfg.get("allowLater"):
+    if cfg and cfg.get("allowLater") and not is_reimb(folder.get("template")):
         if not bills and not later_brief(folder):
             m = "付款单没附发票，也没登记发票后补：请先到「发票后补池」登记"
             (blockers if st.get("blockNoInvoice") else warnings).append({"code": "noInvoice", "msg": m})
-    elif not act:
+    elif not act and not later_brief(folder):
+        # 报销单登记了发票后补（票还没到）可以先空着提交，审核时看后补单
         blockers.append({"code": "empty", "msg": "票夹是空的，先放票再提交"})
     failed = [i for i in act if i.get("proc_status") == "failed"]
     if failed:
@@ -3230,8 +3239,9 @@ async def m_bind(request: Request):
 @router.get("/api/inv/m/jsconfig")
 async def m_jsconfig(request: Request):
     """手机页调钉钉「扫一扫」前的 dd.config 参数（JSAPI 鉴权）。query：url＝手机页当前地址（不含 #）。
-    只给本站地址签名（请求的 Host 或设置里的站点地址），免得拿我们的应用给别人的网页签权限。"""
-    p, u, bad = _phone(request)
+    只给本站地址签名（请求的 Host 或设置里的站点地址），免得拿我们的应用给别人的网页签权限。
+    还没绑定（刚扫配对码）也给：钉钉里要先 dd.config 鉴权、再 requestAuthCode 才认得出是谁（V2.621 修手机认不出人）。"""
+    p, u, bad = _phone(request, need_bound=False)
     if bad:
         return bad
     url = _s(request.query_params.get("url"), 500)

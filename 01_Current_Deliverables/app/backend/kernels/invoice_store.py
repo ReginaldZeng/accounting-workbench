@@ -13,7 +13,7 @@ import re
 from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from sqlalchemy import (MetaData, Table, Column, String, Integer, Text, Numeric, Index, UniqueConstraint,
-                        select, insert, update, func, or_, and_, not_, case)
+                        select, insert, update, delete, func, or_, and_, not_, case)
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.exc import IntegrityError
 
@@ -236,6 +236,21 @@ SELLER = Table(
     Column("check_note", String(500)), Column("checked_by", String(50)),
     Column("updated_at", String(20)),
     UniqueConstraint("tax_id", name="uq_inv_seller_tax"),
+)
+
+# 业务同事自助登记发票后补：钉钉验证码（kind=code）与登录会话（kind=session）。只存 sha256，明文不落库
+SELF = Table(
+    "inv_self", md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("kind", String(10), nullable=False),              # code / session
+    Column("token_hash", String(64), nullable=False),        # code：验证单号（ticket）；session：会话令牌
+    Column("code_hash", String(64)),                         # code：6 位验证码的 sha256（加 ticket 做盐）
+    Column("dt_userid", String(64)), Column("dt_name", String(50)), Column("dept", String(200)),
+    Column("tries", Integer, default=0), Column("used", Integer, default=0), Column("via", String(12)),
+    Column("ip", String(64)), Column("created_at", String(20)), Column("expires_at", String(20)),
+    Column("last_seen", String(20)),
+    UniqueConstraint("token_hash", name="uq_inv_self_token"),
+    Index("ix_inv_self_uid", "dt_userid"),
 )
 
 TABLES = tuple(md.tables.values())
@@ -918,6 +933,44 @@ def later_open_for_folders(e, folders):
         hit = next((r for r in rows if f.get("inst_id") and r.get("inst_id") == f["inst_id"]), None)
         out[f["id"]] = hit or next((r for r in rows if r.get("folder_id") == f["id"]), None)
     return out
+
+
+def self_insert(e, **cols):
+    return _insert(e, SELF, cols)
+
+
+def self_by_hash(e, kind, token_hash):
+    if not token_hash:
+        return None
+    with e.connect() as cx:
+        return _row(cx.execute(select(SELF).where(SELF.c.kind == kind, SELF.c.token_hash == token_hash)).first())
+
+
+def self_update(e, id_, **cols):
+    return _update(e, SELF, id_, cols, touch=False)
+
+
+def self_recent_codes(e, dt_userid, since):
+    """此人 since（now_s 格式）以后发过的验证码条数与最近一条的时间 → (n, last_created_at)。"""
+    with e.connect() as cx:
+        rows = cx.execute(select(SELF.c.created_at).where(SELF.c.kind == "code", SELF.c.dt_userid == dt_userid,
+                                                          SELF.c.created_at >= since)
+                          .order_by(SELF.c.id.desc())).fetchall()
+    return len(rows), (rows[0][0] if rows else None)
+
+
+def self_purge(e, now):
+    """清掉过期的验证码和会话（每次发码时顺手清）。"""
+    with e.begin() as cx:
+        return cx.execute(delete(SELF).where(SELF.c.expires_at < now)).rowcount
+
+
+def laters_of_person(e, dt_userid, limit=50):
+    """某人（钉钉 userid）的发票后补单：他是付款单申请人，或是他自己登记的。新的在前。"""
+    if not dt_userid:
+        return []
+    return _all(e, select(LATER).where(or_(LATER.c.applicant_uid == dt_userid, LATER.c.filed_uid == dt_userid))
+                .order_by(LATER.c.id.desc()).limit(int(limit)))
 
 
 def laters_by_inst(e, inst_id):

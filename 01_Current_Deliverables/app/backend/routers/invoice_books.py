@@ -1726,8 +1726,10 @@ def _notify_outcome(sent):
     return False, "钉钉消息没发出去：%s" % (m or "原因不明")
 
 
-def _later_create_sync(u, body):
-    """登记发票后补（线程池里跑：可能要去钉钉取审批单、发指派通知）→ (响应 dict, None) 或 (None, 错误响应)。"""
+def _later_create_sync(u, body, via="proxy", self_uid=None):
+    """登记发票后补（线程池里跑：可能要去钉钉取审批单、发指派通知）→ (响应 dict, None) 或 (None, 错误响应)。
+    via=proxy 财务在后补池代填（u＝工作台账号）；via=self 申请人自己登记（u＝{"name": 钉钉姓名}，self_uid＝钉钉 userid，
+    只能登记自己发起的单子）。"""
     e = E()
     st = inv.get_settings()
     iid = inv._s(body.get("instId"), 80)
@@ -1764,6 +1766,8 @@ def _later_create_sync(u, body):
     cfg = inv.template_cfg(n.get("template"), st)
     if not (cfg and cfg.get("allowLater")):
         return None, err(_later_tpl_msg(n.get("template")), 400)
+    if self_uid and (n.get("applicantUid") or "") != self_uid:
+        return None, err("只能登记你自己发起的付款单/报销单：这张的申请人是 %s" % (n.get("applicant") or "别人"), 403)
     if exp_amt is None:
         try:
             exp_amt = S.money(n.get("amount")) if n.get("amount") is not None else None
@@ -1785,15 +1789,16 @@ def _later_create_sync(u, body):
             erp_no=n.get("erpNo") or "", inv_kind=kind, tax_rate=inv._s(body.get("taxRate"), 20), expect_date=exp_date,
             expect_amount=exp_amt, receiver=person["account"], receiver_uid=person.get("dtUserid") or "",
             receiver_name=person.get("dtName") or person["account"], filed_by=u["name"],
-            filed_uid=inv.dt_uid_of(u["name"], st), filed_via="proxy", note=inv._s(body.get("note"), 500))
+            filed_uid=self_uid or inv.dt_uid_of(u["name"], st), filed_via=via, note=inv._s(body.get("note"), 500))
     l = S.later_get(e, lid)
     sent = inv.notify_dt([person.get("dtUserid")], _assign_text(l))
     notified, nmsg = _notify_outcome(sent)
     det = {"businessId": l.get("business_id") or "", "payee": l.get("payee_name") or "", "expectDate": exp_date,
            "expectAmount": inv._money_str(exp_amt), "receiver": person["account"], "invKind": kind,
-           "notify": notified, "notifyMsg": sent.get("msg") or ""}
-    inv.log(u, "登记发票后补", fid, None, lid, det)
-    inv.audit(u, "登记发票后补", "后补单#%d %s" % (lid, l.get("payee_name") or ""), det)
+           "notify": notified, "notifyMsg": sent.get("msg") or "", "via": via}
+    act = "申请人自助登记发票后补" if via == "self" else "登记发票后补"
+    inv.log(u, act, fid, None, lid, det)
+    inv.audit(u, act, "后补单#%d %s" % (lid, l.get("payee_name") or ""), det)
     rn = l.get("receiver_name") or person["account"]
     return {"ok": True, "later": inv.later_view(l, []), "notify": sent, "notified": notified,
             "notifyMsg": ("已通过钉钉通知接收人 %s" % rn) if notified else ("接收人 %s 没收到通知：%s" % (rn, nmsg)),
@@ -1850,45 +1855,48 @@ async def later_docs(lid: int, request: Request):
     if not files and not results:
         return err("没收到文件", 400)
 
-    def run():
-        e = E()
-        out = []
-        for i, (name, data) in enumerate(files):
-            same = S.file_by_sha(e, l["folder_id"], hashlib.sha256(data).hexdigest())
-            if same:
-                out.append(inv._res(name, "same", "这份资料已经传过了"))
-                continue
-            try:
-                t = ip.sniff_type(name, data)
-            except Exception:
-                t = "other"
-            ext, mime = inv._ext_mime(t if t in ("pdf", "ofd", "xml") else "other", name)
-            # 资料只留存、不识别：合同、对账单里常有金额，当票识别会被误算成"已到票"
-            try:
-                f = inv.store_file(l["folder_id"], name, data, "later", u["name"], role="doc", mime=mime, ext=ext)
-            except inv.StoreRefused as ex:      # 磁盘快满：这份和后面的都不存
-                out.extend(inv._res(n, "error", str(ex)) for n, _d in files[i:])
-                break
-            except Exception as ex:
-                out.append(inv._res(name, "error", "「%s」没存上：%s" % (name, ex)))
-                continue
-            try:
-                iid = S.item_insert(e, folder_id=l["folder_id"], file_id=f["id"], kind="other", origin="later",
-                                    type_label=inv._clean_name(name)[:60], later_id=lid, review="approved",
-                                    review_by="系统", review_at=inv.now_s(), created_by=u["name"])
-                # 资料不是票、不用审：直接记"已通过"，免得它进审核队列、挡住整夹批量通过
-                S.file_update(e, f["id"], item_id=iid)
-            except Exception as ex:
-                inv._fail_orphan_file(f)       # 没挂上：文件标失败，重传同一份时不会被"已经传过了"挡住
-                out.append(inv._res(name, "error", "「%s」没存上：%s" % (name, ex)))
-                continue
-            inv.log(u, "上传后补资料", l["folder_id"], iid, lid, {"name": name, "size": len(data)})
-            out.append(inv._res(name, "doc", "已留存", itemId=iid))
-        return out, _later_docs(e, S.items_of_later(e, lid))
-    out, docs = await run_in_threadpool(run)
+    out, docs = await run_in_threadpool(store_later_docs, l, lid, files, u["name"])
     results.extend(out)
     inv.audit(u, "上传后补资料", "后补单#%d" % lid, "、".join(n for n, _ in files)[:400])
     return {"ok": True, "results": results, "docs": docs}
+
+
+def store_later_docs(l, lid, files, uname):
+    """后补资料只留存、不识别（线程池里跑）→ (逐个结果, 这张后补单现有资料列表)。财务上传、申请人自助上传共用。"""
+    e = E()
+    out = []
+    for i, (name, data) in enumerate(files):
+        same = S.file_by_sha(e, l["folder_id"], hashlib.sha256(data).hexdigest())
+        if same:
+            out.append(inv._res(name, "same", "这份资料已经传过了"))
+            continue
+        try:
+            t = ip.sniff_type(name, data)
+        except Exception:
+            t = "other"
+        ext, mime = inv._ext_mime(t if t in ("pdf", "ofd", "xml") else "other", name)
+        # 资料只留存、不识别：合同、对账单里常有金额，当票识别会被误算成"已到票"
+        try:
+            f = inv.store_file(l["folder_id"], name, data, "later", uname, role="doc", mime=mime, ext=ext)
+        except inv.StoreRefused as ex:      # 磁盘快满：这份和后面的都不存
+            out.extend(inv._res(n, "error", str(ex)) for n, _d in files[i:])
+            break
+        except Exception as ex:
+            out.append(inv._res(name, "error", "「%s」没存上：%s" % (name, ex)))
+            continue
+        try:
+            iid = S.item_insert(e, folder_id=l["folder_id"], file_id=f["id"], kind="other", origin="later",
+                                type_label=inv._clean_name(name)[:60], later_id=lid, review="approved",
+                                review_by="系统", review_at=inv.now_s(), created_by=uname)
+            # 资料不是票、不用审：直接记"已通过"，免得它进审核队列、挡住整夹批量通过
+            S.file_update(e, f["id"], item_id=iid)
+        except Exception as ex:
+            inv._fail_orphan_file(f)       # 没挂上：文件标失败，重传同一份时不会被"已经传过了"挡住
+            out.append(inv._res(name, "error", "「%s」没存上：%s" % (name, ex)))
+            continue
+        inv.log(uname, "上传后补资料", l["folder_id"], iid, lid, {"name": name, "size": len(data)})
+        out.append(inv._res(name, "doc", "已留存", itemId=iid))
+    return out, _later_docs(e, S.items_of_later(e, lid))
 
 
 def _after_receive(results, lid, user):

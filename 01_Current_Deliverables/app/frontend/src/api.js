@@ -556,3 +556,20 @@ export const invMState = (token) => j('/api/inv/m/state', { headers: invMH(token
 export const invMJsConfig = (token, url) => j('/api/inv/m/jsconfig?url=' + encodeURIComponent(url), { headers: invMH(token) })
 export const invMScan = (token, code) => j('/api/inv/m/scan', { method: 'POST', headers: invMH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ code }) })
 export const invMUpload = (token, files, purpose = 'invoice') => invPost('/api/inv/m/upload', invFd(files, 'files', { purpose }), invMH(token))
+// 申请人自助登记发票后补（V2.621，页面 #/invself，不走登录 cookie）：会话令牌放请求头 X-Inv-Self
+const invSH = (token, extra) => ({ 'X-Inv-Self': token || '', ...(extra || {}) })
+const invSJ = (url, token, body) => j(url, body === undefined ? { headers: invSH(token) }
+  : { method: 'POST', headers: invSH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
+export const invSHello = (token) => invSJ('/api/inv/s/hello', token)
+export const invSJsConfig = (url) => invSJ('/api/inv/s/jsconfig?url=' + encodeURIComponent(url), '')
+export const invSLoginDd = (code) => invSJ('/api/inv/s/login/dd', '', { code })
+export const invSLoginSend = (name, pick) => invSJ('/api/inv/s/login/send', '', { name, pick })   // 重名 → {need:'pick', choices}
+export const invSLoginVerify = (ticket, code) => invSJ('/api/inv/s/login/verify', '', { ticket, code })
+export const invSLogout = (token) => invSJ('/api/inv/s/logout', token, {})
+export const invSPayments = (token) => invSJ('/api/inv/s/payments', token)
+export const invSReceivers = (token) => invSJ('/api/inv/s/receivers', token)
+export const invSLaterCreate = (token, body) => invSJ('/api/inv/s/later', token, body)
+export const invSLaters = (token) => invSJ('/api/inv/s/laters', token)
+export const invSLaterDocs = (token, id, files) => invPost(`/api/inv/s/later/${id}/docs`, invFd(files, 'files'), invSH(token))
+// 后补池页「业务同事自助登记」入口：网址＋二维码（要后补池权限）
+export const invSLink = () => j('/api/inv/s/link')
