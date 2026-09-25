@@ -540,7 +540,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
                     "receiver": "recv2", "note": "先付款后开票"}
             for bad, word in ((dict(body, receiver="intern"), "接收人"), (dict(body, receiver="ghost"), "接收人"),
                               (dict(body, expectDate="下周"), "预计到票日期"), (dict(body, invKind="x"), "发票种类"),
-                              (dict(body, expectAmount="abc"), "金额"), (dict(body, instId=""), "付款单")):
+                              (dict(body, expectAmount="abc"), "金额"), (dict(body, instId=""), "付款单"),
+                              (dict(body, taxRate=""), "税率"), (dict(body, taxRate="七个点"), "税率"), (dict(body, taxRate="12%"), "税率")):
                 r = self.post("/api/inv/later/create", "recv", bad)
                 self.assertEqual(r.status_code, 400, bad)
                 self.assertIn(word, r.json()["msg"])
@@ -999,7 +1000,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
                 seen.append("thread")
             return {"sent": True, "msg": "已发送"}
         day = (date.today() + timedelta(days=5)).isoformat()
-        body = {"instId": "PI-LATER-21A", "invKind": "special", "expectDate": day, "expectAmount": 300, "receiver": "recv2"}
+        body = {"instId": "PI-LATER-21A", "invKind": "special", "taxRate": "13%", "expectDate": day, "expectAmount": 300, "receiver": "recv2"}
         with patch.object(self.inv, "notify_dt", fake_notify):
             j = self.ok(self.post("/api/inv/later/create", "recv", body))
             self.assertIs(j["notified"], True)
@@ -1092,7 +1093,10 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertIn("费用报销", pays.call_args[0][1])                      # 费用报销也能登记后补（V2.621 起默认允许）
         self.assertEqual((r["rows"][0]["laterId"], r["rows"][0]["hasInvoice"]), (None, False))
         day = (date.today() + timedelta(days=15)).isoformat()
-        body = {"instId": "PI-SELF-1", "invKind": "normal", "expectDate": day, "expectAmount": 800, "receiver": "recv"}
+        body = {"instId": "PI-SELF-1", "invKind": "normal", "taxRate": "3", "expectDate": day, "expectAmount": 800, "receiver": "recv"}
+        r = self.c.post("/api/inv/s/later", json=dict(body, taxRate=""), headers=H)
+        self.assertEqual(r.status_code, 400)                                  # 税率必填（V2.622）
+        self.assertIn("税率", r.json()["msg"])
         sent = MagicMock(return_value={"sent": True, "msg": "已发送"})
         norm = self._norm(instId="PI-SELF-1", applicantUid="dt-app", payeeName="自助收款方有限公司", amount=800.0)
         with patch.object(books, "_cached_norm", MagicMock(return_value=dict(norm, applicantUid="dt-other", applicant="别人"))):
@@ -1103,6 +1107,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
             j = self.ok(self.c.post("/api/inv/s/later", json=body, headers=H))
         lid = j["later"]["id"]
         self.assertEqual((j["later"]["filedBy"], j["later"]["filedVia"], j["later"]["receiver"]), ("申请人丙", "self", "recv"))
+        self.assertEqual(j["later"]["taxRate"], "3%")                         # 3 → 3%
         self.assertEqual(sent.call_args[0][0], ["dt-recv"])
         l = S.later_get(e, lid)
         self.assertEqual((l["filed_uid"], l["applicant_uid"]), ("dt-app", "dt-app"))

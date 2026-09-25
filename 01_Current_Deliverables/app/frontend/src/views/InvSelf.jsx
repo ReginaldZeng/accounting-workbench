@@ -16,7 +16,7 @@ import './inv-self.css'
 
 const TOKEN_KEY = 'inv_self_t'
 const KIND_LABEL = { special: '专票', normal: '普票', receipt: '收据' }
-const TAX_RATES = ['13%', '9%', '6%', '5%', '3%', '1%', '0%', '免税']
+const TAX_RATES = ['13%', '9%', '6%', '5%', '3%', '1%', '0%', '免税', '不征税']
 const ST_LABEL = { open: '待到票', partial: '部分到票', done: '已收齐', closed: '已关闭' }
 const errText = e => (e && e.message) || String(e || '')
 const loadTok = () => { try { return sessionStorage.getItem(TOKEN_KEY) || '' } catch { return '' } }
@@ -134,11 +134,13 @@ function Form({ token, pay, receivers, onBack, onDone }) {
   const [ack, setAck] = useState(false)
   const [err, setErr] = useState({})
   const [busy, setBusy] = useState(false)
-  const set = (k, v) => setF(p => ({ ...p, [k]: v }))
+  // 改哪项就清掉哪项的错误提示；换发票种类连带清税率的（收据不用填税率）
+  const set = (k, v) => { setF(p => ({ ...p, [k]: v })); setErr(p => ({ ...p, [k]: undefined, ...(k === 'invKind' ? { taxRate: undefined } : {}) })) }
 
   const submit = async () => {
     const e = {}
     const amt = Number(String(f.expectAmount).replace(/,/g, ''))
+    if (f.invKind !== 'receipt' && !f.taxRate) e.taxRate = '请选税率'
     if (!f.expectDate) e.expectDate = '请填预计什么时候能拿到发票'
     if (!Number.isFinite(amt) || amt <= 0) e.expectAmount = '请填预计到票金额（大于 0）'
     if (!f.receiver) e.receiver = '请选发票交给哪位财务'
@@ -148,7 +150,7 @@ function Form({ token, pay, receivers, onBack, onDone }) {
     setBusy(true)
     try {
       const r = await invSLaterCreate(token, {
-        instId: pay.procInstId, invKind: f.invKind, taxRate: f.taxRate.trim(), expectDate: f.expectDate,
+        instId: pay.procInstId, invKind: f.invKind, taxRate: f.invKind === 'receipt' ? '' : f.taxRate, expectDate: f.expectDate,
         expectAmount: amt, receiver: f.receiver, note: f.note.trim(),
       })
       let docMsg = ''
@@ -172,9 +174,14 @@ function Form({ token, pay, receivers, onBack, onDone }) {
         <div className="inv-sf-seg" role="group" aria-label="发票种类">{Object.entries(KIND_LABEL).map(([k, v]) =>
           <button type="button" key={k} className={f.invKind === k ? 'on' : ''} aria-pressed={f.invKind === k} onClick={() => set('invKind', k)}>{v}</button>)}</div>
       </div>
-      <label className="inv-sf-f"><span>税率（不知道可不填）</span>
-        <input className="inv-in" list="inv-sf-rates" value={f.taxRate} onChange={e => set('taxRate', e.target.value)} placeholder="如 13%" />
-        <datalist id="inv-sf-rates">{TAX_RATES.map(x => <option key={x} value={x} />)}</datalist>
+      <label className="inv-sf-f"><span>税率</span>
+        {f.invKind === 'receipt'
+          ? <input className="inv-in" disabled value="收据没有税率，不用填" />
+          : <select className="inv-in" value={f.taxRate} onChange={e => set('taxRate', e.target.value)}>
+            <option value="">请选择</option>
+            {TAX_RATES.map(x => <option key={x} value={x}>{x}</option>)}
+          </select>}
+        {err.taxRate ? <em>{err.taxRate}</em> : f.invKind !== 'receipt' && <i>不清楚就问供应商开几个点的票</i>}
       </label>
       <label className="inv-sf-f"><span>预计什么时候拿到发票</span>
         <input type="date" className="inv-in" value={f.expectDate} onChange={e => set('expectDate', e.target.value)} />

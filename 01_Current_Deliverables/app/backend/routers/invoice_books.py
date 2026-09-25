@@ -53,6 +53,22 @@ REVIEW_CN = {"approved": "已审核", "void": "已作废", "pending": "待审核
 LATER_ACTIVE = ("open", "partial")
 LATER_STATUSES = ("open", "partial", "done", "closed", "overdue")
 LATER_KIND_CN = {"special": "专票", "normal": "普票", "receipt": "收据"}
+LATER_TAX_RATES = ("13%", "9%", "6%", "5%", "3%", "1%", "0%", "免税", "不征税")
+
+
+def norm_tax_rate(v):
+    """后补单税率 → 标准写法（13 / 13% / 0.13 → 13%；免税、不征税原样）；认不出 → ""。"""
+    s = str(v or "").strip().replace("％", "%").replace(" ", "")
+    if s in LATER_TAX_RATES:
+        return s
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)%?", s)
+    if not m:
+        return ""
+    x = float(m.group(1))
+    if x < 1 and "%" not in s and x > 0:
+        x *= 100
+    r = ("%g" % round(x, 2)) + "%"
+    return r if r in LATER_TAX_RATES else ""
 LATER_STATUS_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐", "closed": "已关闭"}
 SELLER_RESULTS = ("未查", "无记录", "命中")
 MSG_HEAD = "【核算工作台·发票管家】"
@@ -1738,6 +1754,10 @@ def _later_create_sync(u, body, via="proxy", self_uid=None):
     kind = inv._s(body.get("invKind"), 12)
     if kind not in LATER_KIND_CN:
         return None, err("发票种类只能选：专票 / 普票 / 收据", 400)
+    # V2.622 用户定：税率必填（专票、普票）；收据没有税率不用填
+    rate = "" if kind == "receipt" else norm_tax_rate(body.get("taxRate"))
+    if kind != "receipt" and not rate:
+        return None, err("请选税率（%s）" % " / ".join(LATER_TAX_RATES), 400)
     try:
         exp_date = inv._norm_date(body.get("expectDate"))
     except ValueError:
@@ -1786,7 +1806,7 @@ def _later_create_sync(u, body, via="proxy", self_uid=None):
             applicant=n.get("applicant") or "", applicant_uid=n.get("applicantUid") or "", dept=n.get("dept") or "",
             company=n.get("company") or "", payee_name=n.get("payeeName") or "", payee_bank=n.get("payeeBank") or "",
             payee_account=n.get("payeeAccount") or "", pay_amount=n.get("amount"), reason=n.get("reason") or "",
-            erp_no=n.get("erpNo") or "", inv_kind=kind, tax_rate=inv._s(body.get("taxRate"), 20), expect_date=exp_date,
+            erp_no=n.get("erpNo") or "", inv_kind=kind, tax_rate=rate, expect_date=exp_date,
             expect_amount=exp_amt, receiver=person["account"], receiver_uid=person.get("dtUserid") or "",
             receiver_name=person.get("dtName") or person["account"], filed_by=u["name"],
             filed_uid=self_uid or inv.dt_uid_of(u["name"], st), filed_via=via, note=inv._s(body.get("note"), 500))

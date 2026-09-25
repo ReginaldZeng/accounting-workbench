@@ -25,7 +25,7 @@ const STATUS_META = {
 const STATUS_CHIPS = [['open', '待收'], ['partial', '部分到票'], ['overdue', '超期'], ['done', '已收齐'], ['closed', '已关闭'], ['all', '全部']]
 const PAGE_SIZE = 50
 const UPLOAD_ACCEPT = '.pdf,.ofd,.xml,.zip,image/*'
-const TAX_RATES = ['13%', '9%', '6%', '5%', '3%', '1%', '0%', '免税']
+const TAX_RATES = ['13%', '9%', '6%', '5%', '3%', '1%', '0%', '免税', '不征税']
 const isLive = l => l && (l.status === 'open' || l.status === 'partial')   // 还在等票的单子才能收/催/关
 
 const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
@@ -492,7 +492,8 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
   const [ack, setAck] = useState(false)
   const [err, setErr] = useState({})
   const [busy, setBusy] = useState(false)
-  const set = (k, v) => setF(p => ({ ...p, [k]: v }))
+  // 改哪项就清掉哪项的错误提示；换发票种类连带清税率的（收据不用填税率）
+  const set = (k, v) => { setF(p => ({ ...p, [k]: v })); setErr(p => ({ ...p, [k]: undefined, ...(k === 'invKind' ? { taxRate: undefined } : {}) })) }
 
   const resolve = async (code) => {
     if (resolving) return
@@ -515,6 +516,7 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
   const submit = async () => {
     const e = {}
     const amt = Number(String(f.expectAmount).replace(/,/g, ''))
+    if (f.invKind !== 'receipt' && !f.taxRate) e.taxRate = '请选税率'
     if (!f.expectDate) e.expectDate = '请填预计到票日期'
     if (!Number.isFinite(amt) || amt <= 0) e.expectAmount = '请填预计到票金额（大于 0）'
     if (!f.receiver) e.receiver = '请选财务接收人（他会收到钉钉消息）'
@@ -524,7 +526,7 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
     setBusy(true)
     try {
       const r = await invLaterCreate({
-        instId: pre.instId, invKind: f.invKind, taxRate: f.taxRate.trim(), expectDate: f.expectDate,
+        instId: pre.instId, invKind: f.invKind, taxRate: f.invKind === 'receipt' ? '' : f.taxRate, expectDate: f.expectDate,
         expectAmount: amt, receiver: f.receiver, note: f.note.trim(),
       })
       const nl = r?.later
@@ -558,9 +560,13 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
             {Object.entries(KIND_LABEL).map(([k, v]) => <button type="button" key={k} className={f.invKind === k ? 'on' : ''} onClick={() => set('invKind', k)}>{v}</button>)}
           </div>
         </Field>
-        <Field label="税率（选填）">
-          <input className="inv-in" list="inv-lt-rates" value={f.taxRate} onChange={e => set('taxRate', e.target.value)} placeholder="如 13%" />
-          <datalist id="inv-lt-rates">{TAX_RATES.map(x => <option key={x} value={x} />)}</datalist>
+        <Field label="税率" err={err.taxRate}>
+          {f.invKind === 'receipt'
+            ? <input className="inv-in" disabled value="收据没有税率" />
+            : <select className="inv-in" value={f.taxRate} onChange={e => set('taxRate', e.target.value)}>
+              <option value="">请选择</option>
+              {TAX_RATES.map(x => <option key={x} value={x}>{x}</option>)}
+            </select>}
         </Field>
         <Field label="预计到票日期" err={err.expectDate}>
           <input type="date" className="inv-in" value={f.expectDate} onChange={e => set('expectDate', e.target.value)} />
