@@ -486,6 +486,15 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertTrue(r.json()["identified"])
         self.assertEqual(self.get("/api/inv/desk", "intern").json()["pair"]["dtName"], "实习生甲")
         self.post("/api/inv/pair/revoke", "intern")
+        # V2.628 信任电脑登录身份：绑了钉钉的账号，手机免登认不出（扫链接二维码调不起免登）→ 照样配得上，标"未核对"
+        j2, tok2 = self._pair("intern")
+        none = {"ok": False, "userid": "", "name": "", "msg": "免登没返回"}
+        with patch.object(self.inv.idt, "userinfo_by_code", MagicMock(return_value=none)):
+            r2 = self.c.post("/api/inv/m/bind", json={"code": "authcode"}, headers=self.P(tok2))
+        self.assertEqual(r2.status_code, 200, r2.text)
+        self.assertFalse(r2.json()["identified"])
+        self.assertTrue(self.c.get("/api/inv/m/hello", headers=self.P(r2.json()["session"])).json()["bound"])
+        self.post("/api/inv/pair/revoke", "intern")
 
     @unittest.skipUnless(HAS_IMG, "缺 PyMuPDF/opencv/Pillow")
     def test_11_phone_upload_and_file_scope(self):
@@ -840,19 +849,33 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertFalse(inv.pair_token_ok(req2))
         self.post("/api/inv/pair/revoke", "phoneguy")
         with patch.object(inv.idt, "configured", MagicMock(return_value=True)):
+            # V2.628 信任电脑登录身份：绑了钉钉，但扫链接二维码免登调不起来（没 code）→ 照样配上，标"未核对"
             j, tok = self._pair("intern")
             r = self.c.post("/api/inv/m/bind", json={}, headers=self.P(tok))
-            self.assertEqual(r.status_code, 403)
-            self.assertIn("请用手机钉钉「扫一扫」", r.json()["msg"])
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertFalse(r.json()["identified"])
+            self.post("/api/inv/pair/revoke", "intern")
+            # 免登认不出（code 无效）→ 也照样配上
+            j, tok = self._pair("intern")
             with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value={"ok": False, "msg": "免登码过期"})):
                 r = self.c.post("/api/inv/m/bind", json={"code": "x"}, headers=self.P(tok))
-            self.assertEqual(r.status_code, 403)
-            self.assertIn("没认出", r.json()["msg"])
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertFalse(r.json()["identified"])
+            self.post("/api/inv/pair/revoke", "intern")
+            # 认出的是本人 → 配上并记名
+            j, tok = self._pair("intern")
             who = {"ok": True, "userid": "dt-intern", "name": "实习生甲", "msg": ""}
             with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value=who)):
                 r = self.c.post("/api/inv/m/bind", json={"code": "x"}, headers=self.P(tok))
             self.assertEqual(r.status_code, 200, r.text)
             self.assertTrue(r.json()["identified"])
+            # 认出的是"另一个人" → 仍然拦（防在别人电脑上用自己手机配）
+            self.post("/api/inv/pair/revoke", "intern")
+            j, tok = self._pair("intern")
+            with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value={"ok": True, "userid": "dt-else", "name": "别人"})):
+                r = self.c.post("/api/inv/m/bind", json={"code": "x"}, headers=self.P(tok))
+            self.assertEqual(r.status_code, 403)
+            self.assertIn("不是同一个", r.json()["msg"])
             # 账号没绑钉钉：放行但提示没认出身份
             j, tok = self._pair("phoneguy")
             r = self.c.post("/api/inv/m/bind", json={}, headers=self.P(tok))

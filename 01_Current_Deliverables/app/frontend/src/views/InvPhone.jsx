@@ -245,7 +245,7 @@ export default function InvPhone() {
         if (cid) {
           try { code = await getAuthCode(cid) } catch { code = '' }
         }
-        if (!code) note = '未识别钉钉身份：钉钉没给出你是谁，照样可以拍；登记人记为电脑上登录的人。'
+        if (!code) note = '没通过钉钉核对身份，按电脑上登录的人登记；扫审批单、拍发票照常用。'
       } else {
         note = '请用钉钉扫码打开：现在是普通浏览器，系统认不出你是谁。'
       }

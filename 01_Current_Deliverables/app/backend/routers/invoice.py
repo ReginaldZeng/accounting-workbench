@@ -3203,13 +3203,9 @@ async def m_bind(request: Request):
     if code:
         who = await run_in_threadpool(idt.userinfo_by_code, code)
     bound_uid = dt_uid_of(p["user"])
-    if bound_uid and idt.configured():
-        if not code:
-            return err("请用手机钉钉「扫一扫」扫配对码（要核对手机上的人和电脑上登录的是同一个）", 403)
-        if not who.get("ok"):
-            log(p["user"], "手机配对被拒", detail={"reason": "没认出钉钉身份", "msg": who.get("msg") or ""})
-            return err("没认出手机上的钉钉身份（%s）：请用手机钉钉「扫一扫」重新扫电脑上的配对码"
-                       % (who.get("msg") or "未知原因"), 403)
+    # V2.628 用户定「信任电脑登录身份」：扫链接二维码打开的页面不是注册微应用，钉钉免登多半调不起来（拿不到 code）。
+    # 认不出钉钉身份也放行——配对是从已登录的电脑发起的，登记人＝电脑上登录的人，页面标注"未通过钉钉核对"。
+    # 只有钉钉明确认出是"另一个人"才拦（防在别人电脑上用自己手机配对）。
     if who.get("ok") and bound_uid and who.get("userid") != bound_uid:
         log(p["user"], "手机配对被拒", detail={"dtName": who.get("name") or "", "reason": "钉钉身份与电脑账号不一致"})
         audit(p["user"], "手机配对被拒", "配对#%d" % p["id"], "手机钉钉：%s" % (who.get("name") or ""))
@@ -3228,7 +3224,7 @@ async def m_bind(request: Request):
     if who.get("ok"):
         msg = "已配对：%s（钉钉：%s）" % (p["user"], who.get("name") or who.get("userid"))
     else:
-        msg = "没认出手机上的钉钉身份（%s），先按电脑账号「%s」登记；建议用钉钉「扫一扫」打开" % (who.get("msg") or "未知原因", p["user"])
+        msg = "没通过钉钉核对身份，按电脑上登录的「%s」登记（扫码收票照常用）" % p["user"]
     det = {"dtName": who.get("name") or "", "dtIdentified": bool(who.get("ok")), "device": device}
     log(p["user"], "手机配对", detail=det)
     audit(p["user"], "手机配对", "配对#%d" % p["id"], det)
