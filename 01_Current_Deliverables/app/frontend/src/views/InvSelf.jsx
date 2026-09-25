@@ -127,7 +127,7 @@ function PayCard({ p, onPick, onMine }) {
     <div className="inv-sf-pay-amt inv-num">{p.amount !== null && p.amount !== undefined ? money(p.amount) : '—'}</div>
     <div className="inv-sf-pay-op">
       {done
-        ? <button type="button" className="btn" onClick={onMine}>已登记 #{p.laterId} · 看进度</button>
+        ? <button type="button" className="btn" onClick={onMine}>已登记 #{p.laterId} · {ST_LABEL[p.laterStatus] || '看进度'}</button>
         : <button type="button" className="btn-pri" onClick={() => onPick(p)}>登记后补</button>}
       {!done && p.hasInvoice && <span className="inv-sf-tip">这张单已经收到过发票</span>}
     </div>
@@ -162,11 +162,14 @@ function PayList({ pays, msg, truncated, pf, setPf, onReload, onPick, onMine }) 
           {t}（{all.filter(p => p.template === t).length}）</button>)}
       </div>}
       <div className="inv-sf-chips">
-        <button type="button" className={pf.reg === 'todo' ? 'on' : ''} onClick={() => set('reg', 'todo')}>未登记（{cnt.todo}）</button>
-        <button type="button" className={pf.reg === 'done' ? 'on' : ''} onClick={() => set('reg', 'done')}>已登记（{cnt.done}）</button>
+        <button type="button" className={pf.reg === 'todo' ? 'on' : ''} onClick={() => set('reg', 'todo')}
+          title="这张单还没登记过发票后补">未登记后补（{cnt.todo}）</button>
+        <button type="button" className={pf.reg === 'done' ? 'on' : ''} onClick={() => set('reg', 'done')}
+          title="已经登记过发票后补（票没到、部分到、已收齐都算），不用再登">已登记后补（{cnt.done}）</button>
         <button type="button" className={pf.reg === 'all' ? 'on' : ''} onClick={() => set('reg', 'all')}>全部</button>
       </div>
     </div>
+    <div className="inv-sf-hint">「未登记后补」＝这张单还没登记过发票后补；「已登记后补」＝已经登记过（票没到、部分到、已收齐都算），不用再登。</div>
     {pays === null && <div className="inv-sf-wait"><span className="inv-spin" /> 正在从钉钉取你的审批单…</div>}
     {msg && <div className="inv-sf-note">{msg}{truncated && pf.days > 30 ? '，可把时间范围改小再找' : ''}</div>}
     {pays && !all.length && !msg && <div className="inv-sf-empty">近 {pf.days} 天没有你发起的、可以登记后补的单子。</div>}

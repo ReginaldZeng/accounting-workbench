@@ -743,7 +743,7 @@ function selfApi(st) {
 }
 const SELF_PAYS = () => [
   { procInstId: 'PI-A', businessId: '202609250001', title: '申请人甲提交的付款申请（公对公）', template: '付款申请（公对公）', createTime: '2026-09-20 10:00', amount: 800, payeeName: '合成供应商', laterId: null, hasInvoice: false, approvalStatus: 'COMPLETED', approvalResult: 'agree' },
-  { procInstId: 'PI-B', businessId: '202609250002', title: '申请人甲提交的费用报销', template: '费用报销', createTime: '2026-09-18 09:00', amount: 66.5, payeeName: '申请人甲', laterId: 12, hasInvoice: false },
+  { procInstId: 'PI-B', businessId: '202609250002', title: '申请人甲提交的费用报销', template: '费用报销', createTime: '2026-09-18 09:00', amount: 66.5, payeeName: '申请人甲', laterId: 12, laterStatus: 'done', hasInvoice: false },
   { procInstId: 'PI-C', businessId: '202609250003', title: '申请人甲提交的付款申请（公对公）', template: '付款申请（公对公）', createTime: '2026-09-10 09:00', amount: 12345.6, payeeName: '另一家合成物流有限公司', laterId: null, hasInvoice: false, approvalStatus: 'RUNNING' },
 ]
 
@@ -764,8 +764,8 @@ test('自助登记：电脑浏览器写姓名收钉钉验证码登录 → 选自
   // 搜索＋分类：默认只看未登记；按模板分；搜收款方/金额
   assert.equal(await page.locator('.inv-sf-pay').count(), 2, '默认只列未登记的')
   assert.ok(await page.getByText('审批中').isVisible())
-  await page.getByRole('button', { name: '已登记（1）' }).click()
-  assert.ok(await page.getByRole('button', { name: '已登记 #12 · 看进度' }).isVisible(), '登记过的单不能再登记')
+  await page.getByRole('button', { name: '已登记后补（1）' }).click()
+  assert.ok(await page.getByRole('button', { name: '已登记 #12 · 已收齐' }).isVisible(), '登记过的单不能再登记')
   await page.getByRole('button', { name: '全部', exact: true }).click()
   await page.getByRole('button', { name: '费用报销（1）' }).click()
   assert.equal(await page.locator('.inv-sf-pay').count(), 1)
@@ -777,7 +777,7 @@ test('自助登记：电脑浏览器写姓名收钉钉验证码登录 → 选自
   await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('没有这家')
   await page.getByText('没有符合条件的单子').waitFor({ timeout: 2000 })
   await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('')
-  await page.getByRole('button', { name: /^未登记/ }).click()
+  await page.getByRole('button', { name: /^未登记后补/ }).click()
   const before = calls.filter(c => c.path === '/api/inv/s/payments').length
   await page.locator('.inv-sf-days').selectOption('120')
   await page.waitForFunction(n => true, before)

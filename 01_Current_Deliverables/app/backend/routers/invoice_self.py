@@ -312,11 +312,11 @@ async def s_payments(request: Request):
         e = E()
         rows = []
         for x in r.get("rows") or []:
-            ex = S.later_open_by_inst(e, x["procInstId"])
+            ex = S.later_latest_by_inst(e, x["procInstId"])
             f = S.folder_by_inst(e, x["procInstId"])
             has_inv = bool(f) and any(i.get("kind") == "invoice" and i.get("review") != "void" and i.get("status") != "removed"
                                       for i in S.folder_items(e, f["id"]))
-            rows.append(dict(x, laterId=ex["id"] if ex else None, hasInvoice=has_inv))
+            rows.append(dict(x, laterId=ex["id"] if ex else None, laterStatus=(ex or {}).get("status") or "", hasInvoice=has_inv))
         return {"ok": bool(r.get("ok")), "rows": rows, "msg": r.get("msg") or "", "templates": names, "days": days,
                 "truncated": bool(r.get("truncated"))}
     return await run_in_threadpool(run)

@@ -916,6 +916,16 @@ def later_open_by_inst(e, inst_id):
                                .order_by(LATER.c.id.desc())).first())
 
 
+def later_latest_by_inst(e, inst_id):
+    """这张审批单最新一条没关闭的后补单（待收/部分到票/已收齐都算）——自助登记页判断「登记过没有」用：
+    已收齐的也算登记过，免得收齐后又显示成「未登记」让人重登；关闭（作废）的不算。"""
+    if not inst_id:
+        return None
+    with e.connect() as cx:
+        return _row(cx.execute(select(LATER).where(LATER.c.inst_id == inst_id, LATER.c.status != "closed")
+                               .order_by(LATER.c.id.desc())).first())
+
+
 def later_open_for_folders(e, folders):
     """一批票夹各自"未收齐的后补单"（与逐个 later_open_by_inst → 按 folder_id 兜底同一口径）→ {folder_id: 行或 None}。
     一条查询取完（收票工作台轮询/审核队列列表用，免得每个票夹查一两次）。"""

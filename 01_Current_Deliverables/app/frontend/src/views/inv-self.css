@@ -60,6 +60,7 @@
   font:inherit; font-size:12.5px; cursor:pointer; }
 .inv-sf-chips button.on{ border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600; }
 .inv-sf-more{ align-self:center; }
+.inv-sf-hint{ font-size:12px; color:var(--ink-3); }
 
 /* 登记表 */
 .inv-sf-form{ display:flex; flex-direction:column; gap:12px; align-items:stretch; }

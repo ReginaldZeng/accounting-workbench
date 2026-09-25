@@ -1124,6 +1124,13 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertTrue(all(S.later_get(e, x["id"])["applicant_uid"] == "dt-app" for x in mine))
         with patch.object(inv.idt, "list_user_payments", pays):
             self.assertEqual(self.ok(self.c.get("/api/inv/s/payments", headers=H))["rows"][0]["laterId"], lid)
+            # 已收齐也算「已登记」（V2.624：收齐后不能又显示成未登记）；关闭的不算
+            S.later_update(e, lid, status="done")
+            row = self.ok(self.c.get("/api/inv/s/payments", headers=H))["rows"][0]
+            self.assertEqual((row["laterId"], row["laterStatus"]), (lid, "done"))
+            S.later_update(e, lid, status="closed")
+            self.assertIsNone(self.ok(self.c.get("/api/inv/s/payments", headers=H))["rows"][0]["laterId"])
+            S.later_update(e, lid, status="open")
         # 资料：自己的能传，别人的看不到
         r = self.c.post("/api/inv/s/later/%d/docs" % lid, files=[("files", ("承诺函.txt", "承诺".encode("utf-8"), "text/plain"))], headers=H)
         self.assertEqual(r.status_code, 200, r.text)
