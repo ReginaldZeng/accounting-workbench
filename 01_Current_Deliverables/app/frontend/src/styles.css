@@ -79,6 +79,7 @@ select,.btn,.btn-pri,.btn-primary,.btn-sec,.selctl{
 .btn[disabled],.btn-pri[disabled],.btn-sec[disabled]{opacity:.5; cursor:not-allowed; box-shadow:none; transform:none;}
 .btn[disabled]:hover,.btn-pri[disabled]:hover,.btn-sec[disabled]:hover{background:var(--accent); transform:none;}
 .btn[disabled]:hover,.btn-sec[disabled]:hover{background:var(--bg);}
+.btn.primary[disabled]:hover{background:var(--accent); border-color:var(--accent);}   /* 不可点的主按钮悬停别变白底（白字会看不见） */
 
 /* 外壳 + 侧栏 */
 /* 侧栏＝贴边面板（不做悬浮卡片，参照 BP 工作台）；宽度由组件内联控制（展开/图标轨）。 */

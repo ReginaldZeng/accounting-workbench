@@ -317,7 +317,11 @@ function ItemList({ items, canEdit, onOpen, onFiles, upBusy, receipt, onReceiptC
 // ───────────────────────── 底部：合计与提交 ─────────────────────────
 
 function FolderFoot({ folder, items, canEdit, onSubmit, submitting, submitRes, onPickItem }) {
+  const [gapAsk, setGapAsk] = useState(false)
+  useEffect(() => { setGapAsk(false) }, [folder.id])
   const s = folder.stats || {}
+  const g = folder.gap && Number.isFinite(num(folder.gap.gap)) ? folder.gap : null
+  const gapOff = !!g && Math.abs(num(g.gap)) > 0.005
   const sum = Number.isFinite(num(s.sumTotal)) ? num(s.sumTotal) : items.filter(i => i.kind !== 'other').reduce((a, i) => a + (Number(i.split ? i.alloc : i.total) || 0), 0)
   const amt = num(folder.amount)
   const diff = Number.isFinite(num(s.diff)) ? num(s.diff) : (Number.isFinite(amt) ? sum - amt : NaN)
@@ -326,12 +330,20 @@ function FolderFoot({ folder, items, canEdit, onSubmit, submitting, submitRes, o
   const blockers = submitRes && Array.isArray(submitRes.blockers) ? submitRes.blockers : []
   return (
     <div className="inv-dk-foot">
-      <div className="inv-dk-sum">
-        <div><span>票合计</span><b className="inv-num">{money(sum)}</b></div>
-        <div><span>单据金额</span><b className="inv-num">{money(folder.amount)}</b></div>
-        <div className={off ? 'off' : 'eq'}><span>差额</span><b className="inv-num">{Number.isFinite(diff) ? (off ? money(diff) : '一致') : '—'}</b></div>
-        {off && <span className="inv-muted">只提示，不拦提交</span>}
+      {g ? <div className="inv-dk-sum" title="差额＝付款金额 −（专票＋普票＋发票后补单还没到的）">
+        <div><span>付款金额</span><b className="inv-num">{money(g.pay)}</b></div>
+        <div><span>专票（{g.specialN} 张）</span><b className="inv-num">{money(g.special)}</b></div>
+        <div><span>普票（{g.normalN} 张）</span><b className="inv-num">{money(g.normal)}</b></div>
+        <div><span>发票后补单</span><b className="inv-num">{money(g.later)}</b></div>
+        <div className={gapOff ? 'off' : 'eq'}><span>差额</span><b className="inv-num">{gapOff ? money(g.gap) : '0.00'}</b></div>
+        {gapOff && <span className="inv-dk-gapmsg">{num(g.gap) > 0 ? '票比付款少' : '票比付款多'}，提交后审核会重点关注</span>}
       </div>
+        : <div className="inv-dk-sum">
+          <div><span>票合计</span><b className="inv-num">{money(sum)}</b></div>
+          <div><span>单据金额</span><b className="inv-num">{money(folder.amount)}</b></div>
+          <div className={off ? 'off' : 'eq'}><span>差额</span><b className="inv-num">{Number.isFinite(diff) ? (off ? money(diff) : '一致') : '—'}</b></div>
+          {off && <span className="inv-muted">只提示，不拦提交</span>}
+        </div>}
       <div className="inv-dk-counts">
         <span>发票 <b>{s.invoices ?? items.filter(i => i.kind !== 'other').length}</b></span>
         <span>其它附件 <b>{s.others ?? items.filter(i => i.kind === 'other').length}</b></span>
@@ -358,9 +370,15 @@ function FolderFoot({ folder, items, canEdit, onSubmit, submitting, submitRes, o
               })}
             </ul>}
           </div>
-          <button type="button" className="btn primary inv-dk-submit-btn" disabled={submitting} onClick={onSubmit}>
-            {submitting ? '提交中…' : folder.status === 'returned' ? '改好了，重新提交' : '提交'}
-          </button>
+          {gapAsk && gapOff
+            ? <div className="inv-dk-gapask" role="alertdialog" aria-label="有差额，确认提交">
+              <span>有差额 <b className="inv-num">{money(g.gap)}</b>（{num(g.gap) > 0 ? '票比付款少' : '票比付款多'}），提交后会计会重点审核。确定提交？</span>
+              <button type="button" className="btn" onClick={() => setGapAsk(false)}>再看看</button>
+              <button type="button" className="btn primary" disabled={submitting} onClick={() => { setGapAsk(false); onSubmit() }}>确定提交</button>
+            </div>
+            : <button type="button" className="btn primary inv-dk-submit-btn" disabled={submitting} onClick={() => (gapOff ? setGapAsk(true) : onSubmit())}>
+              {submitting ? '提交中…' : folder.status === 'returned' ? '改好了，重新提交' : '提交'}
+            </button>}
         </div>
       )}
     </div>

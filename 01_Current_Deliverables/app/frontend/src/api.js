@@ -518,6 +518,7 @@ export const invAuditQueue = (params) => j(invWithQs('/api/inv/audit/queue', par
 // 被拦时返回 {ok:false,msg,blockers?,httpStatus}；审核期间又进了新票 → httpStatus 409 + newItems:[id]（页面提示并重读票夹）
 export const invAuditApprove = (body) => invJpSoft('/api/inv/audit/approve', body)
 export const invAuditBatch = (folderIds) => jp('/api/inv/audit/batch', { folderIds })
+export const invAuditMark = (id, body) => jp(`/api/inv/audit/item/${id}/mark`, body)   // body={mark:'ok'|'doubt'|'clear', text?}
 export const invAuditReturn = (body) => jp('/api/inv/audit/return', body)             // body={folderId, note}
 // 发票台账
 export const invLedger = (params) => j(invWithQs('/api/inv/ledger', params))

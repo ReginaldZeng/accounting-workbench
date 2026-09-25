@@ -273,38 +273,75 @@ test('F14/C6 只有查看权限：能打开「我的票夹」里的单子看（�
   await ctx.close()
 })
 
+test('收票台：有差额（付款−专票−普票−后补≠0）提交前先确认，提交后审核会重点关注', async (browser, B) => {
+  const state = {
+    pair: null, recent: [],
+    folder: { id: 50, status: 'collecting', title: '差额单', amount: 100, stats: { invoices: 1 },
+      gap: { pay: 100, special: 90, specialN: 1, normal: 0, normalN: 0, later: 0, gap: 10 } },
+    items: [inv({ id: 501, review: 'draft', total: 90 })],
+    submit: { ok: true, msg: '已提交，等会计审核', folder: { id: 50, status: 'submitted', title: '差额单' }, items: [], warnings: [] },
+  }
+  const { page, ctx, calls } = await open(browser, B, deskApi(state))
+  await mount(page, 'InvDesk', { user: { name: '测试收票员' } })
+  await page.getByText('票比付款少，提交后审核会重点关注').waitFor()
+  await page.getByRole('button', { name: '提交', exact: true }).click()
+  await page.getByText('提交后会计会重点审核', { exact: false }).waitFor()
+  assert.equal(n(calls, c => c.path.endsWith('/submit')), 0, '先确认，不能直接提交')
+  await page.getByRole('button', { name: '确定提交' }).click()
+  await page.waitForFunction(() => true)
+  await sleep(300)
+  assert.equal(n(calls, c => c.path.endsWith('/submit')), 1)
+  await ctx.close()
+})
+
 function auditApi(st) {
   return (c) => {
     if (c.path === '/api/inv/config') return cfg()
     if (c.path === '/api/inv/audit/queue') return { ok: true, total: st.queue.length, rows: st.queue }
     if (c.path === `/api/inv/folder/${st.folder.id}`) { st.folderGets = (st.folderGets || 0) + 1; return { ok: true, folder: st.folder, items: st.items, logs: st.logs || [] } }
     if (/^\/api\/inv\/item\/\d+\/update$/.test(c.path)) return st.onUpdate(c)
+    const mk = c.path.match(/^\/api\/inv\/audit\/item\/(\d+)\/mark$/)
+    if (mk) {
+      const id = +mk[1], b = c.body || {}
+      st.items = st.items.map(it => it.id !== id ? it : {
+        ...it, pending: b.mark === 'ok' ? [] : it.pending,
+        auditOk: b.mark === 'ok' ? { by: '测试会计', at: '2026-09-25 10:00:00' } : null,
+        doubt: b.mark === 'doubt' ? { text: b.text, by: '测试会计', at: '2026-09-25 10:00:00' } : null,
+      })
+      return { ok: true, item: st.items.find(it => it.id === id) }
+    }
     if (c.path === '/api/inv/audit/approve') return st.onApprove(c)
+    if (c.path === '/api/inv/audit/return') return st.onReturn ? st.onReturn(c) : { ok: true, folder: { ...st.folder, status: 'returned', reviewNote: c.body.note } }
     return { ok: true }
   }
 }
+const GAP0 = (pay) => ({ pay, special: pay, specialN: 1, normal: 0, normalN: 0, later: 0, gap: 0 })
 
-test('F2/C2 改字段后建议变「不可抵扣」，没手动改判的票跟着变；通过时带 itemIds', async (browser, B) => {
+test('F2/C2 弹窗里改字段后建议变「不可抵扣」，没手动改判的票跟着变；提交时带 itemIds 和抵扣判定', async (browser, B) => {
   const st = {
-    folder: { id: 10, status: 'submitted', title: '报销单甲', amount: 100, anomalies: [] },
-    items: [inv({ id: 101 })], logs: [],
+    folder: { id: 10, status: 'submitted', title: '报销单甲', businessId: '20260101000000000010', amount: 100, gap: GAP0(100), laters: [] },
+    items: [inv({ id: 101, pending: ['category'] })], logs: [],
   }
   st.queue = [{ id: 10, title: '报销单甲', amount: 100, anomalies: [], clean: false, stats: { invoices: 1 } }]
   st.onUpdate = (c) => {
-    st.items = [inv({ id: 101, ...(c.body.fields || {}), deductSuggest: 'no', deductReason: '餐饮服务不能抵扣' })]
+    st.items = [inv({ id: 101, ...(c.body.fields || {}), pending: [], deductSuggest: 'no', deductReason: '餐饮服务不能抵扣' })]
     return { ok: true, item: st.items[0] }
   }
   st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
   const { page, ctx, calls } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  const cat = page.locator('.inv-au-side .inv-fp-row', { hasText: '项目类别' }).locator('input')
+  await page.locator('.inv-au-hd2-t .inv-au-bid', { hasText: '（20260101000000000010）' }).waitFor()   // 标题后面要带审批编号
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  const cat = page.locator('.inv-au-dlg-side .inv-fp-row', { hasText: '项目类别' }).locator('input')
   await cat.waitFor()
+  assert.equal(await page.locator('.inv-au-dlg-side').getByRole('button', { name: '核对无误' }).count(), 0, '弹窗里用右上角「提交」，不再有「核对无误」')
   await cat.fill('餐饮')
-  await page.locator('.inv-au-side .inv-fp-act').getByRole('button', { name: '保存' }).click()
+  await page.locator('.inv-au-dlg-side .inv-fp-act').getByRole('button', { name: '保存' }).click()
   await page.getByText('建议不可抵扣', { exact: false }).first().waitFor()
-  await sleep(300)
-  assert.equal(await page.getByText('（已改判）').count(), 0, '没人改判，不能显示「已改判」')
-  await page.getByRole('button', { name: '通过', exact: true }).click()
+  await page.locator('.inv-mhead').getByRole('button', { name: '提交', exact: true }).click()
+  await page.waitForFunction(() => !document.querySelector('.inv-au-dlg'))
+  assert.ok(calls.some(c => c.path === '/api/inv/audit/item/101/mark' && c.body.mark === 'ok'), '弹窗「提交」要记这张已核')
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
   await page.waitForFunction(() => document.body.innerText.includes('已通过'))
   const ap = calls.find(c => c.path === '/api/inv/audit/approve')
   assert.ok(ap, '没发出通过请求')
@@ -313,9 +350,9 @@ test('F2/C2 改字段后建议变「不可抵扣」，没手动改判的票跟�
   await ctx.close()
 })
 
-test('C2 审核期间进了新票：409 后提示并重读票夹、跳到新票', async (browser, B) => {
+test('C2 审核期间进了新票：409 后提示并重读票夹、打开新票', async (browser, B) => {
   const st = {
-    folder: { id: 11, status: 'submitted', title: '付款单乙', amount: 300, anomalies: [] },
+    folder: { id: 11, status: 'submitted', title: '付款单乙', amount: 300, gap: GAP0(300), laters: [] },
     items: [inv({ id: 111 })], logs: [],
   }
   st.queue = [{ id: 11, title: '付款单乙', amount: 300, anomalies: [], clean: false }]
@@ -325,13 +362,13 @@ test('C2 审核期间进了新票：409 后提示并重读票夹、跳到新票'
   }
   const { page, ctx } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.locator('.inv-au-side .inv-fp').waitFor()
+  await page.locator('.inv-au-tbl tbody tr').first().waitFor()
   const before = st.folderGets
-  await page.getByRole('button', { name: '通过', exact: true }).click()
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
+  await page.getByRole('button', { name: '不逐张看了，仍然提交' }).click()
   await page.getByText('审核期间这个票夹又进了新票', { exact: false }).first().waitFor()
-  await page.waitForFunction(() => document.querySelectorAll('.inv-thumb').length === 2, null, { timeout: 3000 })
   assert.ok(st.folderGets > before, '409 之后要重读票夹')
-  await page.locator('.inv-au-it-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
+  await page.locator('.inv-au-dlg-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
   await ctx.close()
 })
 
@@ -339,29 +376,108 @@ const DEEP_LOGS = [{ id: 2, ts: '2026-09-24 10:00:00', user: '李会计', action
   { id: 1, ts: '2026-09-24 09:00:00', user: '王收票', action: '提交审核', detail: {}, itemId: null }]
 const deepAudit = () => {
   const st = {
-    folder: { id: 77, status: 'submitted', title: '深链票夹', amount: 150, anomalies: [{ code: 'amountDiff', level: 'warn', label: '金额差 50.00' }] },
+    folder: { id: 77, status: 'submitted', title: '深链票夹', amount: 150, laters: [],
+      gap: { pay: 150, special: 100, specialN: 1, normal: 0, normalN: 0, later: 0, gap: 50 } },
     items: [inv({ id: 771 })], logs: DEEP_LOGS,
   }
   st.queue = []
   return st
 }
 
-test('F9 深链打开不在队列里的票夹：票夹级异常照样显示', async (browser, B) => {
+test('F9 深链打开不在队列里的票夹：单据头和金额核对（差额重点关注）照样显示', async (browser, B) => {
   const { page, ctx } = await open(browser, B, auditApi(deepAudit()), { hash: '#/invaudit?folder=77' })
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.locator('.inv-au-side .inv-fp').waitFor({ timeout: 4000 })
-  await page.getByText('金额差 50.00').waitFor({ timeout: 4000 })
-  assert.equal(await page.getByText('没有发现异常').count(), 0)
+  await page.getByText('深链票夹').first().waitFor({ timeout: 4000 })
+  await page.locator('.inv-au-focus', { hasText: '有差额 50.00' }).waitFor({ timeout: 4000 })
+  assert.ok(await page.locator('.inv-au-fig.diff', { hasText: '50.00' }).isVisible())
   await ctx.close()
 })
 
-test('C7 审核页留痕可只看当前这张票（按 log.itemId）', async (browser, B) => {
+test('C7 弹窗里的留痕只列这张票自己的（按 log.itemId）', async (browser, B) => {
   const { page, ctx } = await open(browser, B, auditApi(deepAudit()), { hash: '#/invaudit?folder=77' })
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.locator('.inv-au-logs summary').click()
-  await page.getByText('只看当前这张票', { exact: false }).click({ timeout: 4000 })
-  assert.equal(await page.locator('.inv-au-logs li').count(), 1)
-  assert.ok(await page.locator('.inv-au-logs li', { hasText: '改票面字段' }).isVisible())
+  await page.locator('.inv-au-tbl tbody tr').first().click({ timeout: 4000 })
+  await page.locator('.inv-au-dlg-logs summary').click()
+  assert.equal(await page.locator('.inv-au-dlg-logs li').count(), 1)
+  assert.ok(await page.locator('.inv-au-dlg-logs li', { hasText: '改票面字段' }).isVisible())
+  await ctx.close()
+})
+
+test('审核改版：弹窗 Enter 提交这张并跳到下一张没核的；扫描人显示在弹窗标题', async (browser, B) => {
+  const st = {
+    folder: { id: 12, status: 'submitted', title: '两张票', amount: 200, gap: GAP0(200), laters: [] },
+    items: [inv({ id: 121, createdBy: '李四', origin: 'camera', createdAt: '2026-09-25 09:01:00' }), inv({ id: 122 })], logs: [],
+  }
+  st.queue = [{ id: 12, title: '两张票', amount: 200, anomalies: [], clean: false }]
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  await page.locator('.inv-au-who', { hasText: '李四' }).waitFor()
+  assert.ok(await page.locator('.inv-au-who', { hasText: '高拍仪' }).isVisible())
+  await page.locator('.inv-au-dlg').click({ position: { x: 5, y: 5 } })
+  await page.keyboard.press('Enter')
+  await page.locator('.inv-au-dlg-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
+  assert.ok(calls.some(c => c.path === '/api/inv/audit/item/121/mark' && c.body.mark === 'ok'))
+  await ctx.close()
+})
+
+test('审核改版：记了疑问 → 底部「提交」变成退回，并带上疑问', async (browser, B) => {
+  const st = {
+    folder: { id: 13, status: 'submitted', title: '有疑问的单', amount: 100, gap: GAP0(100), laters: [] },
+    items: [inv({ id: 131 })], logs: [],
+  }
+  st.queue = [{ id: 13, title: '有疑问的单', amount: 100, anomalies: [], clean: false }]
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  await page.locator('.inv-mhead').getByRole('button', { name: '有疑问' }).click()
+  await page.locator('.inv-au-qbox').getByRole('button', { name: '抬头不对' }).click()
+  await page.getByRole('button', { name: '记下疑问' }).click()
+  await page.locator('.inv-au-qbox', { hasText: '疑问：抬头不对' }).waitFor()
+  await page.keyboard.press('Escape')
+  await page.locator('.inv-au-st-q').waitFor()
+  const btn = page.locator('.inv-au-bar2').getByRole('button', { name: '提交（退回 1 个疑问）' })
+  await btn.click()
+  await page.getByRole('button', { name: '确认退回' }).click()
+  await page.waitForFunction(() => document.body.innerText.includes('已退回'))
+  const ret = calls.find(c => c.path === '/api/inv/audit/return')
+  assert.ok(ret && ret.body.note.includes('抬头不对'), '退回原因要带上疑问：' + JSON.stringify(ret && ret.body))
+  assert.equal(n(calls, c => c.path === '/api/inv/audit/approve'), 0)
+  await ctx.close()
+})
+
+test('审核改版：有差额要写差额说明才能提交（点常用说明可快填），说明随 gapNote 发出；后补单列表照实列出', async (browser, B) => {
+  const st = {
+    folder: { id: 14, status: 'submitted', title: '有差额的单', amount: 160.8,
+      gap: { pay: 160.8, special: 100, specialN: 1, normal: 0, normalN: 0, later: 60, gap: 0.8 },
+      laters: [{ id: 12, filedBy: '张三', filedAt: '2026-09-10 10:00:00', expectAmount: 60, receivedAmount: 0, unregisteredAmount: 0,
+        left: 60, expectDate: '2026-10-10', receiverName: '王五', status: 'open', statusText: '待收', remindCount: 1 }] },
+    items: [inv({ id: 141, auditOk: { by: '测试会计', at: '2026-09-25 10:00:00' } })], logs: [],
+  }
+  st.queue = [{ id: 14, title: '有差额的单', amount: 160.8, anomalies: [], clean: false }]
+  st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-ltbl', { hasText: '#12' }).waitFor()
+  assert.ok(await page.locator('.inv-au-ltbl', { hasText: '王五' }).isVisible())
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
+  const ok = page.getByRole('button', { name: '确认差额并提交' })
+  await ok.waitFor()
+  assert.ok(await ok.isDisabled(), '没写差额说明不能提交')
+  await page.locator('.inv-au-ask').getByRole('button', { name: '付款抹零' }).click()
+  await ok.click()
+  await page.waitForFunction(() => document.body.innerText.includes('已通过'))
+  const ap = calls.find(c => c.path === '/api/inv/audit/approve')
+  assert.equal(ap.body.gapNote, '付款抹零')
+  await ctx.close()
+})
+
+test('审核改版：没有后补单时写「没有发票后补单」', async (browser, B) => {
+  const st = { folder: { id: 15, status: 'submitted', title: '无后补', amount: 100, gap: GAP0(100), laters: [] }, items: [inv({ id: 151 })], logs: [] }
+  st.queue = [{ id: 15, title: '无后补', amount: 100, anomalies: [], clean: false }]
+  const { page, ctx } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.getByText('没有发票后补单').waitFor()
   await ctx.close()
 })
 
