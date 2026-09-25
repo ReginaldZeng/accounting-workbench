@@ -278,18 +278,45 @@ function Form({ token, pay, receivers, onBack, onDone }) {
 
 // ───────────────────────── 我的后补单 ─────────────────────────
 
-function MyLaters({ token, rows, onReload }) {
+// 我的后补单分类：按状态（还没到票/部分到票/财务已收齐/已超期/已关闭）＋搜索
+const LIVE = l => l.status === 'open' || l.status === 'partial'
+const MINE_CATS = [
+  ['all', '全部', () => true],
+  ['open', '还没到票', l => l.status === 'open'],
+  ['partial', '部分到票', l => l.status === 'partial'],
+  ['done', '财务已收齐', l => l.status === 'done'],
+  ['late', '已超期', l => LIVE(l) && l.overdue],
+  ['closed', '已关闭', l => l.status === 'closed'],
+]
+const laterText = l => [l.id, '#' + l.id, l.businessId, l.payee?.name, l.receiverName, l.expectDate, (l.createdAt || '').slice(0, 10),
+  money(l.expectAmount), l.expectAmount, ST_LABEL[l.status], l.note].join(' ').toLowerCase().replace(/,/g, '')
+
+function MyLaters({ token, rows: all, onReload }) {
   const [busy, setBusy] = useState(0)
   const [note, setNote] = useState('')
+  const [q, setQ] = useState('')
+  const [cat, setCat] = useState('all')
   const up = async (l, fs) => {
     if (!fs.length) return
     setBusy(l.id); setNote('')
     try { await invSLaterDocs(token, l.id, fs); setNote(`后补单 #${l.id} 资料已上传`); onReload() } catch (e) { setNote('没传上去：' + errText(e)) } finally { setBusy(0) }
   }
-  if (!rows.length) return <div className="inv-sf-empty">还没有登记过发票后补单。</div>
+  if (!all.length) return <div className="inv-sf-empty">还没有登记过发票后补单。</div>
+  const kw = q.trim().toLowerCase().replace(/,/g, '')
+  const fn = (MINE_CATS.find(c => c[0] === cat) || MINE_CATS[0])[2]
+  const rows = all.filter(l => fn(l) && (!kw || laterText(l).includes(kw)))
   return <div className="inv-sf-mine">
+    <div className="inv-sf-filter">
+      <input className="inv-in inv-sf-q" value={q} onChange={e => setQ(e.target.value)} placeholder="搜审批编号、收款方、交给谁、金额、日期" />
+      <div className="inv-sf-chips">{MINE_CATS.map(([k, label, f]) => {
+        const n = all.filter(f).length
+        return (k === 'all' || n > 0 || cat === k) &&
+          <button type="button" key={k} className={cat === k ? 'on' : ''} onClick={() => setCat(k)}>{label}（{n}）</button>
+      })}</div>
+    </div>
     {note && <div className="inv-sf-note">{note}</div>}
-    <div className="inv-sf-tw"><table className="inv-sf-tbl">
+    {!rows.length && <div className="inv-sf-empty">没有符合条件的后补单{kw ? `（搜「${q.trim()}」）` : ''}。</div>}
+    {rows.length > 0 && <div className="inv-sf-tw"><table className="inv-sf-tbl">
       <thead><tr><th>#</th><th>审批编号</th><th>收款方</th><th className="num">预计到票</th><th className="num">已到</th><th className="num">还没到</th>
         <th>预计日期</th><th>交给</th><th>状态</th><th>登记</th><th /></tr></thead>
       <tbody>{rows.map(l => {
@@ -303,13 +330,14 @@ function MyLaters({ token, rows, onReload }) {
           <td className="num">{live ? money(l.remaining) : '—'}</td>
           <td>{l.expectDate}{l.overdue && live && <b className="inv-sf-late">已超期</b>}</td>
           <td>{l.receiverName}</td>
-          <td className={'st-' + l.status}>{ST_LABEL[l.status] || l.status}</td>
-          <td>{l.filedVia === 'self' ? '自己' : '财务代填'}</td>
+          <td className={'st-' + l.status}>{l.status === 'done' ? '财务已收齐' : (ST_LABEL[l.status] || l.status)}
+            {num(l.unregisteredAmount) > 0 && <div className="inv-sf-sub2">其中 {money(l.unregisteredAmount)} 号码待登记</div>}</td>
+          <td>{l.filedVia === 'self' ? '自己' : '财务代填'}<div className="inv-sf-sub2">{(l.createdAt || '').slice(0, 10)}</div></td>
           <td>{live && <label className={'inv-sf-upl' + (busy === l.id ? ' busy' : '')}>{busy === l.id ? '上传中…' : '补传资料'}
             <input type="file" multiple disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; up(l, fs) }} /></label>}</td>
         </tr>
       })}</tbody>
-    </table></div>
+    </table></div>}
   </div>
 }
 

@@ -357,7 +357,7 @@ async def s_laters(request: Request):
         return bad
 
     def run():
-        return {"ok": True, "rows": [books._lv(l) for l in S.laters_of_person(E(), me["dt_userid"], limit=50)]}
+        return {"ok": True, "rows": [books._lv(l) for l in S.laters_of_person(E(), me["dt_userid"], limit=300)]}
     return await run_in_threadpool(run)
 
 

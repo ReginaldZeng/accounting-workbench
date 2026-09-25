@@ -801,6 +801,13 @@ test('自助登记：电脑浏览器写姓名收钉钉验证码登录 → 选自
   assert.deepEqual({ ...st.created, expectDate: undefined },
     { instId: 'PI-A', invKind: 'normal', taxRate: '3%', expectDate: undefined, expectAmount: 800, receiver: 'cw2', note: '' })
   assert.ok(await page.locator('.inv-sf-tbl').getByText('财务乙').isVisible(), '提交后跳到「我的后补单」')
+  // 我的后补单：搜索＋按状态分类
+  await page.getByPlaceholder('搜审批编号、收款方、交给谁、金额、日期').fill('没有这家')
+  await page.getByText('没有符合条件的后补单').waitFor({ timeout: 2000 })
+  await page.getByPlaceholder('搜审批编号、收款方、交给谁、金额、日期').fill('合成供应')
+  assert.equal(await page.locator('.inv-sf-tbl tbody tr').count(), 1)
+  await page.getByRole('button', { name: '还没到票（1）' }).click()
+  assert.equal(await page.locator('.inv-sf-tbl tbody tr').count(), 1)
   const authed = calls.filter(c => ['/api/inv/s/payments', '/api/inv/s/later', '/api/inv/s/laters'].includes(c.path))
   assert.ok(authed.length >= 3 && authed.every(c => c.headers['x-inv-self'] === 'SELF-TOK'), '会话令牌走请求头')
   assert.ok(calls.every(c => !c.path.includes('SELF-TOK') && !Object.values(c.query).includes('SELF-TOK')), '令牌不进地址')
