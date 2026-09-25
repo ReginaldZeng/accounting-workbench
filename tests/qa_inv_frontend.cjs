@@ -333,6 +333,11 @@ test('F2/C2 弹窗里改字段后建议变「不可抵扣」，没手动改判�
   const { page, ctx, calls } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
   await page.locator('.inv-au-hd2-t .inv-au-bid', { hasText: '（20260101000000000010）' }).waitFor()   // 标题后面要带审批编号
+  // 发票号码显示全＋复制按钮（会计要复制去金蝶）
+  assert.match((await page.locator('.inv-au-fullno').first().innerText()).trim(), /^26442000000000000\d{3}$/, '发票号码显示全（20 位，不截断）')
+  await page.locator('.inv-au-tbl tbody tr').first().locator('.inv-au-copy').click()
+  await page.locator('.inv-au-copy.done', { hasText: '已复制' }).first().waitFor({ timeout: 2000 })
+  assert.equal(await page.locator('.inv-au-dlg-side').count(), 0, '点复制不打开核对弹窗')
   await page.locator('.inv-au-tbl tbody tr').first().click()
   const cat = page.locator('.inv-au-dlg-side .inv-fp-row', { hasText: '项目类别' }).locator('input')
   await cat.waitFor()

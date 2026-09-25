@@ -330,6 +330,25 @@ function dedOf(it, decisions) {
   return needsDecision(it) ? !!decisions[it.id] : !!it.deductible
 }
 
+// 发票号码：显示全＋一键复制（会计要复制去金蝶做账）。自带「已复制」反馈，点它不打开核对弹窗。
+function CopyNum({ text }) {
+  const [done, setDone] = useState(false)
+  const copy = (e) => {
+    e.stopPropagation()
+    const ok = () => { setDone(true); setTimeout(() => setDone(false), 1500) }
+    const fallback = () => {
+      try {
+        const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); ok()
+      } catch { /* 复制不了就让用户手动选 */ }
+    }
+    // navigator.clipboard 在部分内嵌浏览器/未聚焦时会 reject：退回 execCommand
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(ok, fallback)
+    else fallback()
+  }
+  return <button type="button" className={'inv-au-copy' + (done ? ' done' : '')} title="复制发票号码" onClick={copy}>{done ? '已复制' : '复制'}</button>
+}
+
 function InvoiceTable({ items, decisions, orderOf, onOpen }) {
   const bills = items.filter(isBill)
   const others = items.filter(it => it.kind === 'other' && it.status !== 'removed')
@@ -360,7 +379,9 @@ function InvoiceTable({ items, decisions, orderOf, onOpen }) {
               <td className="inv-num">{orderOf(it.id)}</td>
               <td className={it.invType === 'special' ? '' : 'inv-au-nsp'}>{typeShort(it)}</td>
               <td className="inv-au-seller" title={it.sellerName || ''}>{it.sellerName || '—'}</td>
-              <td className="inv-num" title={[it.number, it.date].filter(Boolean).join(' · ')}>{it.number ? '…' + String(it.number).slice(-8) : '—'}</td>
+              <td className="inv-au-numcell" title={it.date || ''}>{it.number
+                ? <span className="inv-au-nowrap2"><span className="inv-num inv-au-fullno" onClick={e => e.stopPropagation()}>{it.number}</span><CopyNum text={it.number} /></span>
+                : '—'}</td>
               <td className="num"><b>{money(shareOf(it))}</b>{it.split ? <span className="inv-muted" title={'票面 ' + money(it.total)}>（分摊）</span> : null}</td>
               <td className="num">{money(it.tax)}</td>
               <td className="inv-au-cat" title={it.category || ''}>{(it.category || '—').replace(/^.*\*/, '')}{it.taxRate ? ' ' + it.taxRate : ''}</td>
