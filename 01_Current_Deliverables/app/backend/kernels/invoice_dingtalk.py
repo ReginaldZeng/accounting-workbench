@@ -857,6 +857,60 @@ def userinfo_by_code(code):
         return {"ok": False, "userid": "", "name": "", "msg": "钉钉免登失败：%s" % _clean(e, conf)}
 
 
+_TICKET = {}                             # appkey → (jsapi_ticket, 过期时刻)
+
+
+def _jsapi_ticket(conf, force=False):
+    """H5 页面 JSAPI 鉴权用的 jsapi_ticket（有效 2 小时，提前 5 分钟换新；token 失效时换 token 重取一次）。"""
+    key = conf.get("appkey")
+    now = time.time()
+    with _LOCK:
+        hit = _TICKET.get(key)
+        if hit and not force and hit[1] > now + 300:
+            return hit[0]
+    r = {}
+    for attempt in (0, 1):
+        tok = _token(conf, "old", force=bool(attempt))
+        r = requests.get(OAPI + "get_jsapi_ticket", params={"access_token": tok}, timeout=20).json()
+        if attempt == 0 and r.get("errcode") in _TOKEN_BAD:
+            _drop_token(conf, "old")
+            continue
+        break
+    if r.get("errcode") != 0 or not r.get("ticket"):
+        raise RuntimeError("钉钉 get_jsapi_ticket 失败：%s" % _errtext(r))
+    t, ttl = r["ticket"], int(r.get("expires_in") or 7200)
+    with _LOCK:
+        _TICKET[key] = (t, now + ttl)
+    return t
+
+
+def jsapi_sign(ticket, nonce, timestamp, url):
+    """钉钉 JSAPI 签名：sha1("jsapi_ticket=…&noncestr=…&timestamp=…&url=…")，url 去掉 # 及后面、先解码。"""
+    import hashlib
+    u = unquote(str(url or "").split("#", 1)[0])
+    plain = "jsapi_ticket=%s&noncestr=%s&timestamp=%s&url=%s" % (ticket, nonce, timestamp, u)
+    return hashlib.sha1(plain.encode("utf-8")).hexdigest()
+
+
+def jsapi_config(url, corp_id):
+    """手机页调钉钉扫码等 JSAPI 前的 dd.config 参数 → {ok, agentId, corpId, timeStamp, nonceStr, signature, msg}。
+    未配置钉钉/取票失败回 ok False＋人话（手机页就退回拍照读码）。"""
+    conf = _load_conf() if requests else None
+    if not conf:
+        return {"ok": False, "msg": _NOT_CONF}
+    if not corp_id:
+        return {"ok": False, "msg": "还不知道公司的钉钉企业编号：先用拍照扫一次审批单，系统会自动记下"}
+    try:
+        import secrets
+        ticket = _jsapi_ticket(conf)
+        ts = str(int(time.time() * 1000))
+        nonce = secrets.token_hex(8)
+        return {"ok": True, "agentId": str(conf["agentid"]), "corpId": corp_id, "timeStamp": ts, "nonceStr": nonce,
+                "signature": jsapi_sign(ticket, nonce, ts, url), "msg": ""}
+    except Exception as e:
+        return {"ok": False, "msg": "钉钉扫码鉴权失败：%s" % _clean(e, conf)}
+
+
 def send_text(userids, text):
     """按 userid 发钉钉文字消息（notifier.send_dingtalk_to：机器人单聊，失败回退工作通知）→ {sent, msg}。
     未配置钉钉时直接回 sent False，一个请求都不发。"""
@@ -945,6 +999,7 @@ def _reset_caches():
     """单测用：清空 token / 模板 / 花名册缓存。"""
     with _LOCK:
         _TOKENS.clear()
+        _TICKET.clear()
         _PC_CACHE.clear()
         _BID_CACHE.clear()
         _ROSTER["ts"], _ROSTER["rows"] = 0.0, None

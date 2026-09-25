@@ -5,7 +5,7 @@
 // 令牌只从地址里读一次就收进 sessionStorage 并把地址改回 #/invpair——免得令牌留在浏览记录/截图里。
 // 配对（m/bind）成功时后端回一个新的会话令牌 session：从此所有调用都用它，二维码里的那个令牌当场失效。
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { invMHello, invMBind, invMState, invMScan, invMUpload } from '../api.js'
+import { invMHello, invMBind, invMState, invMScan, invMUpload, invMJsConfig } from '../api.js'
 import { money, usePoll, StatusBadges } from './invShared.jsx'
 import './inv-phone.css'
 
@@ -76,6 +76,26 @@ async function getAuthCode(corpId) {
   const ask = () => ddCall(dd.runtime.permission.requestAuthCode, { corpId }, x => (x && x.code) || '')
   const ready = typeof dd.ready === 'function' ? new Promise(r => dd.ready(r)) : Promise.resolve()
   return withTimeout(ready.then(ask), 4000, '钉钉免登超时')
+}
+// 钉钉「扫一扫」要先 dd.config 鉴权（后端按本页地址签名）；成功 → true，失败抛带原因的错误
+let _ddCfgP = null
+function ddSetup(token) {
+  if (_ddCfgP) return _ddCfgP
+  _ddCfgP = (async () => {
+    const dd = await withTimeout(loadDd(), 6000, '钉钉组件加载超时')
+    const cfg = (await invMJsConfig(token, String(location.href).split('#')[0])) || {}
+    if (!cfg.ok) throw new Error(cfg.msg || '钉钉扫码鉴权没通过')
+    if (typeof dd.config !== 'function') return true
+    await withTimeout(new Promise((res, rej) => {
+      if (typeof dd.error === 'function') dd.error(e => rej(new Error('钉钉鉴权没通过：' + ((e && (e.errorMessage || e.message)) || JSON.stringify(e || {})))))
+      dd.config({ agentId: cfg.agentId, corpId: cfg.corpId, timeStamp: cfg.timeStamp, nonceStr: cfg.nonceStr,
+        signature: cfg.signature, type: 0, jsApiList: ['biz.util.scan'] })
+      if (typeof dd.ready === 'function') dd.ready(() => res(true)); else res(true)
+    }), 6000, '钉钉鉴权超时')
+    return true
+  })()
+  _ddCfgP.catch(() => { _ddCfgP = null })   // 失败了下次点按钮再试
+  return _ddCfgP
 }
 function ddScan() {
   const dd = window.dd
@@ -297,6 +317,11 @@ export default function InvPhone() {
     return () => { live = false }
   }, [attempt])
 
+  // 连上后先在后台把钉钉扫码鉴权做了：第一次点「扫审批单」就能直接出扫码框
+  useEffect(() => {
+    if (phase === 'ready' && inDingTalk()) ddSetup(tokRef.current).catch(() => { /* 点按钮时再试、再说原因 */ })
+  }, [phase])
+
   const loadState = useCallback(async () => {
     const token = tokRef.current
     try {
@@ -351,13 +376,16 @@ export default function InvPhone() {
 
   const scanApproval = async () => {
     setScanFallback(false)
-    if (window.dd && window.dd.biz && window.dd.biz.util && window.dd.biz.util.scan) {
+    if (inDingTalk()) {
       let text = ''
-      try { text = await ddScan() } catch (e) {
+      try {
+        await ddSetup(tokRef.current)          // 先鉴权，钉钉才让网页调「扫一扫」
+        text = await ddScan()
+      } catch (e) {
         if (isCancel(e)) return
-        // 钉钉扫码没开权限等：改成拍一张、让系统从照片里读码
-        setScanFallback(true)
-        try { scanPhoto.current && scanPhoto.current.click() } catch { /* 浏览器不让自动弹相机，就让人点下面的按钮 */ }
+        // 鉴权没过/钉钉不给扫：说清原因，改成拍一张、让系统从照片里读码
+        const why = (e && (e.errorMessage || e.message)) || ''
+        setScanFallback(why || true)
         return
       }
       if (!text) return
@@ -397,7 +425,7 @@ export default function InvPhone() {
       {st && !folder && <div className="inv-ph-hint">拍发票前先扫审批单，票才知道放进哪张单</div>}
       {scanFallback && (
         <div className="inv-ph-fb">
-          钉钉扫码没开通，改成拍照读码：对准审批单上的二维码拍一张。
+          钉钉扫码暂时用不了{typeof scanFallback === 'string' ? `（${scanFallback}）` : ''}，改成拍照读码：对准审批单上的二维码拍一张。
           <button type="button" className="inv-ph-btn2" onClick={() => scanPhoto.current && scanPhoto.current.click()}>拍审批单二维码</button>
         </div>
       )}

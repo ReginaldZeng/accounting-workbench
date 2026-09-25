@@ -91,9 +91,10 @@ function parseBody(req) {
 }
 
 // 新开一个干净的页面（独立 context：localStorage/sessionStorage 互不串）
-async function open(browser, B, api, { hash = '', clock = false } = {}) {
-  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['camera'] })
+async function open(browser, B, api, { hash = '', clock = false, ua = '', init = null } = {}) {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['camera'], ...(ua ? { userAgent: ua } : {}) })
   const page = await ctx.newPage()
+  if (init) await page.addInitScript(init)
   const calls = [], errors = []
   page.on('pageerror', e => errors.push(e.message))
   page.on('dialog', d => d.accept())
@@ -531,6 +532,59 @@ test('C1 配对码已被用过（409）：停在「用过了」，不给没用�
   await mount(page, 'InvPhone')
   await page.locator('.inv-ph-stop-t', { hasText: '这个配对码已经用过了' }).waitFor({ timeout: 4000 })
   assert.equal(await page.getByRole('button', { name: '重新试一次' }).count(), 0)
+  await ctx.close()
+})
+
+// 钉钉里打开手机页：假的 dd（记下 dd.config 参数、扫一扫回一条审批链接）
+const DD_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 Mobile/21G93 AliApp(DingTalk/9.0.1)'
+const FAKE_DD = () => {
+  window.__ddCfg = null; window.__ddScans = 0
+  window.dd = {
+    config: c => { window.__ddCfg = c },
+    ready: cb => setTimeout(cb, 10),
+    error: () => {},
+    runtime: { permission: { requestAuthCode: o => o.onSuccess({ code: 'AUTH1' }) } },
+    biz: { util: { scan: o => { window.__ddScans++; setTimeout(() => o.onSuccess({ text: 'https://aflow.dingtalk.com/qr/FAKEQR' }), 10) } } },
+  }
+}
+const ddPhoneApi = (jsconfig) => async c => {
+  if (c.path === '/api/inv/m/hello') return { ok: true, bound: true, user: '测试收票员', dtName: '张三', corpId: 'dingFAKE' }
+  if (c.path === '/api/inv/m/state') return { ok: true, user: '测试收票员', folder: { id: 7, title: '合成付款单', stats: { invoices: 0 } }, items: [] }
+  if (c.path === '/api/inv/m/jsconfig') return jsconfig(c)
+  if (c.path === '/api/inv/m/scan') return { ok: true, action: 'folder', msg: '这是审批单：已打开票夹「合成付款单」', folder: { id: 7, title: '合成付款单' } }
+  return { __status: 404, ok: false, msg: 'nope' }
+}
+
+test('扫审批单：钉钉里先按本页地址鉴权，再调「扫一扫」实时扫码，扫到的码直接开票夹（不用拍照）', async (browser, B) => {
+  const { page, ctx, calls } = await open(browser, B, ddPhoneApi(() => ({ ok: true, agentId: '123', corpId: 'dingFAKE', timeStamp: '1700000000000', nonceStr: 'n1', signature: 'sig1' })),
+    { hash: '#/invpair?t=SESS9', ua: DD_UA, init: FAKE_DD })
+  await mount(page, 'InvPhone')
+  await page.getByText('合成付款单').first().waitFor({ timeout: 4000 })
+  await page.getByRole('button', { name: '扫审批单' }).click()
+  await page.getByText('已打开票夹').waitFor({ timeout: 4000 })
+  const cfgArgs = await page.evaluate(() => window.__ddCfg)
+  assert.ok(cfgArgs && cfgArgs.jsApiList.includes('biz.util.scan'), '要先 dd.config：' + JSON.stringify(cfgArgs))
+  assert.equal(cfgArgs.signature, 'sig1'); assert.equal(cfgArgs.agentId, '123'); assert.equal(cfgArgs.corpId, 'dingFAKE')
+  const jc = calls.find(c => c.path === '/api/inv/m/jsconfig')
+  assert.ok(jc && !jc.query.url.includes('#'), '签名地址不能带 #：' + (jc && jc.query.url))
+  const sc = calls.filter(c => c.path === '/api/inv/m/scan')
+  assert.equal(sc.length, 1)
+  assert.equal(sc[0].body.code, 'https://aflow.dingtalk.com/qr/FAKEQR')
+  assert.equal(n(calls, c => c.path === '/api/inv/m/upload'), 0, '实时扫码成功就不该走拍照上传')
+  assert.equal(await page.locator('.inv-ph-fb').count(), 0)
+  await ctx.close()
+})
+
+test('扫审批单：钉钉鉴权没过 → 说清原因、给「拍审批单二维码」按钮，不去调扫一扫', async (browser, B) => {
+  const { page, ctx, calls } = await open(browser, B, ddPhoneApi(() => ({ ok: false, msg: '还不知道公司的钉钉企业编号' })),
+    { hash: '#/invpair?t=SESS9', ua: DD_UA, init: FAKE_DD })
+  await mount(page, 'InvPhone')
+  await page.getByText('合成付款单').first().waitFor({ timeout: 4000 })
+  await page.getByRole('button', { name: '扫审批单' }).click()
+  await page.locator('.inv-ph-fb', { hasText: '还不知道公司的钉钉企业编号' }).waitFor({ timeout: 4000 })
+  assert.ok(await page.getByRole('button', { name: '拍审批单二维码' }).isVisible())
+  assert.equal(await page.evaluate(() => window.__ddScans), 0)
+  assert.equal(n(calls, c => c.path === '/api/inv/m/scan'), 0)
   await ctx.close()
 })
 

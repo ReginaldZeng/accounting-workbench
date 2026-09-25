@@ -613,5 +613,43 @@ class TestLiveReadOnly(unittest.TestCase):
             self.assertTrue(f["ok"], f["msg"])
 
 
+class TestJsapi(Base):
+    def test_sign(self):
+        import hashlib
+        want = hashlib.sha1(b"jsapi_ticket=T1&noncestr=n1&timestamp=1700&url=http://1.2.3.4/?a=b c").hexdigest()
+        self.assertEqual(d.jsapi_sign("T1", "n1", "1700", "http://1.2.3.4/?a=b%20c#/invpair?t=x"), want)   # 去 #、先解码
+
+    def test_config(self):
+        gets = []
+
+        def get(url, kw):
+            gets.append(url)
+            if url.endswith("gettoken"):
+                return FakeResp({"errcode": 0, "access_token": "TOKxyz", "expires_in": 7200})
+            if url.endswith("get_jsapi_ticket"):
+                return FakeResp({"errcode": 0, "ticket": "TICKET1", "expires_in": 7200})
+            raise AssertionError(url)
+        d.requests = FakeRequests(get_handler=get)
+        self.assertFalse(d.jsapi_config("http://1.2.3.4/", "")["ok"])            # 还不知道企业编号
+        r = d.jsapi_config("http://1.2.3.4/", "dingCORP")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["agentId"], r["corpId"]), ("1", "dingCORP"))
+        self.assertEqual(r["signature"], d.jsapi_sign("TICKET1", r["nonceStr"], r["timeStamp"], "http://1.2.3.4/"))
+        self.assertNotIn("TICKET1", str(r))                                      # 票据本身不外露
+        d.jsapi_config("http://1.2.3.4/", "dingCORP")
+        self.assertEqual(sum(1 for u in gets if u.endswith("get_jsapi_ticket")), 1)   # 2 小时内复用
+
+    def test_config_error_scrubbed(self):
+        def get(url, kw):
+            if url.endswith("gettoken"):
+                return FakeResp({"errcode": 0, "access_token": "TOKsecret", "expires_in": 7200})
+            return FakeResp({"errcode": 60011, "errmsg": "no permission"})
+        d.requests = FakeRequests(get_handler=get)
+        r = d.jsapi_config("http://1.2.3.4/", "dingCORP")
+        self.assertFalse(r["ok"])
+        self.assertIn("60011", r["msg"])
+        self.assertNotIn("TOKsecret", r["msg"])
+
+
 if __name__ == "__main__":
     unittest.main()

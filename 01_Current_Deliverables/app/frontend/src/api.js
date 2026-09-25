@@ -552,5 +552,6 @@ export const invMHello = (token) => j('/api/inv/m/hello', { headers: invMH(token
 // 失败抛 Error（带 err.status）：409＝这个配对码已经用过了；403＝要用手机钉钉扫 / 手机上的人和电脑上的不是同一个
 export const invMBind = (token, body) => j('/api/inv/m/bind', { method: 'POST', headers: invMH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
 export const invMState = (token) => j('/api/inv/m/state', { headers: invMH(token) })
+export const invMJsConfig = (token, url) => j('/api/inv/m/jsconfig?url=' + encodeURIComponent(url), { headers: invMH(token) })
 export const invMScan = (token, code) => j('/api/inv/m/scan', { method: 'POST', headers: invMH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ code }) })
 export const invMUpload = (token, files, purpose = 'invoice') => invPost('/api/inv/m/upload', invFd(files, 'files', { purpose }), invMH(token))

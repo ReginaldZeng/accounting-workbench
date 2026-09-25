@@ -1346,6 +1346,26 @@ class InvoiceApiTests(unittest.TestCase):
             self.assertTrue(r.json()["url"].startswith("https://finance.example.test/#/invpair?t="), r.json()["url"])
         finally:
             inv.save_settings({"portalUrl": st["portalUrl"]}, "boss")
+    def test_43_phone_jsapi_config(self):
+        """手机页钉钉扫码鉴权：要手机会话令牌；只给本站地址签名；参数原样转给手机。"""
+        inv = self.inv
+        self.manual("phoneguy", "扫码鉴权")
+        j, tok = self._pair("phoneguy")
+        sess = self.c.post("/api/inv/m/bind", json={"device": "测试手机"}, headers=self.P(tok)).json()["session"]
+        self.assertEqual(self.c.get("/api/inv/m/jsconfig?url=http://testserver/").status_code, 401)
+        seen = []
+
+        def fake(url, corp):
+            seen.append((url, corp))
+            return {"ok": True, "agentId": "1", "corpId": corp, "timeStamp": "1", "nonceStr": "n", "signature": "s"}
+        with patch.object(inv.idt, "jsapi_config", side_effect=fake):
+            r = self.c.get("/api/inv/m/jsconfig", params={"url": "http://evil.example/"}, headers=self.P(sess))
+            self.assertEqual(r.status_code, 400, r.text)
+            r = self.c.get("/api/inv/m/jsconfig", params={"url": "http://testserver/"}, headers=self.P(sess))
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["signature"], "s")
+        self.assertEqual(seen, [("http://testserver/", inv.get_settings().get("corpId") or "")])
+
 
 if __name__ == "__main__":
     unittest.main()

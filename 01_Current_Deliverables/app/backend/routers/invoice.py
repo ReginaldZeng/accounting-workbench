@@ -3088,6 +3088,30 @@ async def m_bind(request: Request):
             "expiresAt": exp, "identified": bool(who.get("ok"))}
 
 
+@router.get("/api/inv/m/jsconfig")
+async def m_jsconfig(request: Request):
+    """手机页调钉钉「扫一扫」前的 dd.config 参数（JSAPI 鉴权）。query：url＝手机页当前地址（不含 #）。
+    只给本站地址签名（请求的 Host 或设置里的站点地址），免得拿我们的应用给别人的网页签权限。"""
+    p, u, bad = _phone(request)
+    if bad:
+        return bad
+    url = _s(request.query_params.get("url"), 500)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        parts = None
+    ok_hosts = {(request.url.hostname or "").lower()}
+    portal = (get_settings().get("portalUrl") or "").strip()
+    if portal:
+        ok_hosts.add((urlsplit(portal).hostname or "").lower())
+    if not parts or parts.scheme not in ("http", "https") or (parts.hostname or "").lower() not in ok_hosts:
+        return err("只能给本站页面做钉钉鉴权", 400)
+    r = await run_in_threadpool(idt.jsapi_config, url, get_settings().get("corpId") or "")
+    if not r.get("ok"):
+        log(p["user"], "钉钉扫码鉴权失败", detail={"msg": r.get("msg") or "", "via": "手机"})
+    return r
+
+
 def _m_state_sync(p):
     e = E()
     fid = S.desk_get(e, p["user"])
