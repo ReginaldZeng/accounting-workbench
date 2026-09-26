@@ -72,6 +72,8 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   const [orgs, setOrgs] = useState([]), [org, setOrg] = useState('')
   const [q, setQ] = useState('')
   const [hideZero, setHideZero] = useState(true)   // 默认隐藏期末为 0 的维度（已结清、无余额可解析）
+  const [selCode, setSelCode] = useState('')       // 层级筛选：科目编码/科目名称（1:1，共用此值）
+  const [selDim, setSelDim] = useState('')         // 层级筛选：核算维度编码（随所选科目联动）
   const [checks, setChecks] = useState({})   // 勾选核对：{ gid: Set(行键) }；'op'=期初行，数字=det.lines 全局下标
   const fileRef = useRef(null)
   const openModal = async (code, dimc, kmName, dimName) => {
@@ -206,7 +208,19 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
 
   const rows = d.rows || []
   const ql = q.trim().toLowerCase()
-  const fRows = ql ? rows.filter(r => [r['科目编码'], r['科目名称'], r['维度编码'], r['账户'], r['科目大类']].join(' ').toLowerCase().includes(ql)) : rows
+  // 层级下拉选项：科目（编码↔名称 1:1）；核算维度编码随所选科目联动
+  const codeMap = new Map()
+  rows.forEach(r => { const c = r['科目编码']; if (c && !codeMap.has(c)) codeMap.set(c, r['科目名称'] || '') })
+  const codeOpts = [...codeMap.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+  const dimMap = new Map()
+  rows.forEach(r => { const dc = String(r['维度编码'] || ''); if (dc && (!selCode || r['科目编码'] === selCode) && !dimMap.has(dc)) dimMap.set(dc, r['账户'] || '') })
+  const dimOpts = [...dimMap.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  const pickCode = c => { setSelCode(c); if (c && selDim && !rows.some(r => r['科目编码'] === c && String(r['维度编码'] || '') === selDim)) setSelDim('') }
+  const fRows = rows.filter(r =>
+    (!selCode || r['科目编码'] === selCode) &&
+    (!selDim || String(r['维度编码'] || '') === selDim) &&
+    (!ql || [r['科目编码'], r['科目名称'], r['维度编码'], r['账户'], r['科目大类']].join(' ').toLowerCase().includes(ql)))
+  const hasFilter = !!(selCode || selDim || ql)
   const zeroCnt = fRows.filter(r => Math.abs(r['期末'] || 0) < 0.005).length   // 期末为 0（已结清）的维度数
   const vRows = hideZero ? fRows.filter(r => Math.abs(r['期末'] || 0) >= 0.005) : fRows   // 主表实际显示的维度行
   const codes = [...new Set(vRows.map(r => r['科目编码']))]
@@ -290,12 +304,28 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
         </>}
       </div>
 
-      {/* 系统数主表：按科目分组，维度明细 + 科目小计 + 总计。维度行可点开下钻。 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+      {/* 系统数主表：一行一维度平表（科目编码/科目名称/核算维度编码/核算维度名称四列身份）+ 层级下拉筛选 + 模糊搜索。行可点开下钻。 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+        <span className="foot" style={{ fontWeight: 600, color: 'var(--ink-2)' }}>层级筛选</span>
+        <select className="fsb-sel" value={selCode} onChange={e => pickCode(e.target.value)} title="按科目编码筛选">
+          <option value="">科目编码（全部）</option>
+          {codeOpts.map(([c]) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <select className="fsb-sel" value={selCode} onChange={e => pickCode(e.target.value)} title="按科目名称筛选（与科目编码联动）">
+          <option value="">科目名称（全部）</option>
+          {codeOpts.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
+        </select>
+        <select className="fsb-sel" value={selDim} onChange={e => setSelDim(e.target.value)} title="按核算维度编码筛选（随所选科目联动）">
+          <option value="">核算维度编码（{selCode ? '仅该科目下' : '全部'}）</option>
+          {dimOpts.map(([dc, dn]) => <option key={dc} value={dc}>{dc}{dn ? ' · ' + dn : ''}</option>)}
+        </select>
+        {(selCode || selDim) && <span onClick={() => { setSelCode(''); setSelDim('') }} style={{ color: 'var(--accent)', cursor: 'pointer', fontSize: 12.5 }}>清除下拉</span>}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 模糊搜索：科目编码 / 名称、供应商、费用项目…"
           style={{ flex: '1 1 300px', maxWidth: 440, height: 34, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 12px', fontSize: 13 }} />
         <label className="ck" title="期末为 0 ＝ 本期已全部结清、没有余额可解析；默认隐藏，让列表只留还挂着余额的维度"><input type="checkbox" checked={hideZero} onChange={e => setHideZero(e.target.checked)} /> 隐藏期末为 0 的{zeroCnt > 0 && <span className="foot" style={{ marginLeft: 4 }}>（{zeroCnt} 个）</span>}</label>
-        {ql && <span className="foot">筛出 {fRows.length} 行 / 共 {rows.length} 行<span onClick={() => setQ('')} style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }}>清除</span></span>}
+        {hasFilter && <span className="foot">筛出 {fRows.length} 行 / 共 {rows.length} 行<span onClick={() => { setQ(''); setSelCode(''); setSelDim('') }} style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }}>清除全部</span></span>}
       </div>
       <div className="foot" style={{ marginTop: 8 }}>👉 点开任意<b>维度行</b>，弹出它的<b>明细账</b>（逐笔滚动余额、分页）：<span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>的那几笔，其和＝期末余额（这笔余额到底挂着哪几笔）；还能一路追溯期初。</div>
       <div className="tbl-wrap"><table style={{ minWidth: 1080 }}>
@@ -323,7 +353,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('贷'))}</td>
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('期末'))}</td>
           </tr>}
-          {vRows.length === 0 && <tr><td colSpan="9" className="muted">{ql ? `没有匹配「${q}」的科目/维度。` : (hideZero && zeroCnt > 0 && fRows.length > 0) ? `本期这些维度期末都为 0（已全部结清）。取消勾选「隐藏期末为 0 的」可查看全部 ${zeroCnt} 个。` : '系统侧暂无物流科目数据。样例模式已内置演示数据；金蝶模式请用上方「上传」解析核对。'}</td></tr>}
+          {vRows.length === 0 && <tr><td colSpan="9" className="muted">{hasFilter ? `没有匹配当前筛选条件的科目/维度。` : (hideZero && zeroCnt > 0 && fRows.length > 0) ? `本期这些维度期末都为 0（已全部结清）。取消勾选「隐藏期末为 0 的」可查看全部 ${zeroCnt} 个。` : '系统侧暂无物流科目数据。样例模式已内置演示数据；金蝶模式请用上方「上传」解析核对。'}</td></tr>}
         </tbody>
       </table></div>
       <div className="foot">口径说明：余额取【借 − 贷】有符号口径，费用类为正、其他应付款（负债）为负，勾稽恒等式 期末 = 期初 + 本期借方 − 本期贷方 恒成立。物流科目段 = 物流计提工具入账落到的科目（销售费用出库运费/仓储费、主营业务成本/制造费用入库运费、研发费用搬运费、其他应付款—供应商往来、暂估进项税）。</div>
