@@ -308,7 +308,6 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
 
       {/* 系统数主表：一行一维度平表（科目编码/科目名称/核算维度编码/核算维度名称四列身份）+ 层级下拉筛选 + 模糊搜索。行可点开下钻。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-        <span className="foot" style={{ fontWeight: 600, color: 'var(--ink-2)' }}>层级筛选</span>
         <select className="fsb-sel" value={selCode} onChange={e => pickCode(e.target.value)} title="按科目编码筛选">
           <option value="">科目编码（全部）</option>
           {codeOpts.map(([c]) => <option key={c} value={c}>{c}</option>)}
@@ -321,13 +320,10 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
           <option value="">核算维度编码（{selCode ? '仅该科目下' : '全部'}）</option>
           {dimOpts.map(([dc, dn]) => <option key={dc} value={dc}>{dc}{dn ? ' · ' + dn : ''}</option>)}
         </select>
-        {(selCode || selDim) && <span onClick={() => { setSelCode(''); setSelDim('') }} style={{ color: 'var(--accent)', cursor: 'pointer', fontSize: 12.5 }}>清除下拉</span>}
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 模糊搜索：科目编码 / 名称、供应商、费用项目…"
-          style={{ flex: '1 1 300px', maxWidth: 440, height: 34, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 12px', fontSize: 13 }} />
+          style={{ flex: '1 1 200px', maxWidth: 360, height: 34, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 12px', fontSize: 13 }} />
         <label className="ck" title="期末为 0 ＝ 本期已全部结清、没有余额可解析；默认隐藏，让列表只留还挂着余额的维度"><input type="checkbox" checked={hideZero} onChange={e => setHideZero(e.target.checked)} /> 隐藏期末为 0 的{zeroCnt > 0 && <span className="foot" style={{ marginLeft: 4 }}>（{zeroCnt} 个）</span>}</label>
-        {hasFilter && <span className="foot">筛出 {fRows.length} 行 / 共 {rows.length} 行<span onClick={() => { setQ(''); setSelCode(''); setSelDim('') }} style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }}>清除全部</span></span>}
+        {hasFilter && <span className="foot" style={{ whiteSpace: 'nowrap' }}>筛出 {fRows.length} / {rows.length} 行<span onClick={() => { setQ(''); setSelCode(''); setSelDim('') }} style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }}>清除</span></span>}
       </div>
       <div className="foot" style={{ marginTop: 8 }}>👉 点开任意<b>维度行</b>，弹出它的<b>明细账</b>（逐笔滚动余额、分页）：<span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>的那几笔，其和＝期末余额（这笔余额到底挂着哪几笔）；还能一路追溯期初。</div>
       <div className="tbl-wrap"><table style={{ minWidth: 1080 }}>
