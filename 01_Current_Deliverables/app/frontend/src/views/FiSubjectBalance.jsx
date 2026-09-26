@@ -101,7 +101,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
   // opts.gid=勾选分组键；opts.opening=期初；opts.showOpening=是否放期初行(分页时仅首页)；opts.offset=本页首行在 det.lines 的下标。
   const ledgerTable = (det, showLines, opts = {}) => {
     if (!(det && det.lines && det.lines.length > 0)) return <div className="foot">本期无逐笔凭证 —— 本期该维度没有新增计提、也没有核销（本期借/贷为 0），期末余额全部是往期结转下来的。</div>
-    const { gid, opening, showOpening, offset = 0 } = opts
+    const { gid, opening, showOpening, offset = 0, code = '', subjName = '', dimName = '' } = opts
     const chk = gid ? (checks[gid] || new Set()) : null
     const ls = showLines || det.lines
     const ending = det['余额末']
@@ -118,8 +118,9 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
       <table className="fsb-tbl">
         <thead><tr>
           {chk && <th className="ck-td">核对</th>}
-          {['日期', '凭证', '摘要', '借方', '贷方', '余额', '制单人'].map((h, hi) =>
-            <th key={h} className={(hi >= 3 && hi <= 5) ? 'r' : ''}>{h}</th>)}
+          <th>日期</th><th>凭证</th><th>摘要</th>
+          <th>科目编码</th><th>科目名称</th><th>核算维度</th>
+          <th className="r">借方</th><th className="r">贷方</th><th className="r">余额</th><th>制单人</th>
         </tr></thead>
         <tbody>
           {chk && showOpening && opening != null && <tr className={chk.has('op') ? 'struck' : 'opening'}>
@@ -127,6 +128,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
             <td></td>
             <td style={{ whiteSpace: 'nowrap', fontWeight: 600 }}>期初</td>
             <td>上期结转（期初余额）</td>
+            <td className="subj-c">{code}</td><td className="subj-c">{subjName}</td><td className="subj-c">{dimName}</td>
             <td></td><td></td>
             <td className={'n' + ((opening || 0) < 0 ? ' neg' : '')} style={{ fontWeight: 600 }}>{fmt(opening)}</td>
             <td></td>
@@ -138,13 +140,16 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
               <td style={{ whiteSpace: 'nowrap' }}>{ln['日期']}</td>
               <td style={{ whiteSpace: 'nowrap', fontWeight: (ln['开项'] && !g) ? 700 : 400 }}>{ln['凭证']}{ln['开项'] && !g ? <span className="fsb-tag">未核销</span> : ''}</td>
               <td>{ln['摘要']}</td>
+              <td className="subj-c" style={{ whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)' }}>{code}</td>
+              <td className="subj-c">{subjName}</td>
+              <td className="subj-c">{dimName}</td>
               <td className={'n' + (ln['借'] < 0 ? ' neg' : '')}>{ln['借'] ? fmt(ln['借']) : ''}</td>
               <td className={'n' + (ln['贷'] < 0 ? ' neg' : '')}>{ln['贷'] ? fmt(ln['贷']) : ''}</td>
               <td className={'n' + (ln['余额'] < 0 ? ' neg' : '')} style={{ fontWeight: 600 }}>{fmt(ln['余额'])}</td>
               <td style={{ whiteSpace: 'nowrap' }}>{ln['制单人']}</td>
             </tr>
           })}
-          <tr className="sum">{chk && <td></td>}<td colSpan={3} className="r">本期发生合计 / 期末余额</td>
+          <tr className="sum">{chk && <td></td>}<td colSpan={6} className="r">本期发生合计 / 期末余额</td>
             <td className="n">{fmt(det['借合计'])}</td>
             <td className="n">{fmt(det['贷合计'])}</td>
             <td className={'n' + ((det['余额末'] || 0) < 0 ? ' neg' : '')}>{fmt(det['余额末'])}</td><td></td></tr>
@@ -353,7 +358,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
             const ls = (md.detail && md.detail.lines) || []
             const pages = Math.max(1, Math.ceil(ls.length / PAGE))
             const pg = Math.min(mpage, pages - 1)
-            return <div style={{ marginTop: 10 }}>{ledgerTable(md.detail, ls.slice(pg * PAGE, (pg + 1) * PAGE), { gid: 'cur', opening: md['期初'], showOpening: pg === 0, offset: pg * PAGE })}
+            return <div style={{ marginTop: 10 }}>{ledgerTable(md.detail, ls.slice(pg * PAGE, (pg + 1) * PAGE), { gid: 'cur', opening: md['期初'], showOpening: pg === 0, offset: pg * PAGE, code: modal.code, subjName: (modal.科目名 || '').replace(modal.code, '').trim(), dimName: modal.维度名 })}
               {pages > 1 && <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center', marginTop: 8, fontSize: 12.5 }}>
                 <button className="btn" disabled={pg <= 0} onClick={() => setMpage(pg - 1)}>上一页</button>
                 <span className="foot">第 {pg + 1} / {pages} 页 · 共 {ls.length} 笔</span>
@@ -405,7 +410,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
               {(trace.note) && <div className="foot" style={{ marginBottom: 6 }}>{trace.note}</div>}
               {(trace.chain || []).map((c, ci) => <div key={ci} className="per">
                 <div className="plabel"><b>{c.ym}</b> · 期末 <b>{fmt(c['期末'])}</b> ＝ 期初 <b>{fmt(c['期初'])}</b> ＋ 本期借 <b>{fmt(c['本期借方'])}</b> － 本期贷 <b>{fmt(c['本期贷方'])}</b></div>
-                {ledgerTable(c.detail, undefined, { gid: 'tr:' + c.ym, opening: c['期初'], showOpening: true, offset: 0 })}
+                {ledgerTable(c.detail, undefined, { gid: 'tr:' + c.ym, opening: c['期初'], showOpening: true, offset: 0, code: modal.code, subjName: (modal.科目名 || '').replace(modal.code, '').trim(), dimName: modal.维度名 })}
               </div>)}
               {trace.reached_zero && <div className="foot" style={{ color: 'var(--green)' }}>✓ 已追溯到期初为 0 —— 建账起点，到此为止。</div>}
             </div>}

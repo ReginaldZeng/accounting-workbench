@@ -36,6 +36,7 @@
 .fsb-tbl th.r{ text-align:right; }
 .fsb-tbl td{ padding:6px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
 .fsb-tbl td.n{ text-align:right; font-family:var(--font-mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.fsb-tbl td.subj-c{ color:var(--ink-3); font-size:11px; }   /* 科目编码/名称/核算维度：每行同值、弱化，做账/导出用 */
 .fsb-tbl td.neg{ color:var(--red); }
 .fsb-tbl tbody tr:hover td{ background:var(--bg-sub); }
 .fsb-tbl tr.open td{ background:var(--green-bg); }
