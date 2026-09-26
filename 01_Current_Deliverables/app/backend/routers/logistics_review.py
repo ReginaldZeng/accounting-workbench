@@ -80,11 +80,21 @@ def review_carriers(request: Request, period: str = ""):
             accr = {}
     sup = db.list_logi_suppliers() or []
     full2short = {s.get("full"): s.get("short") for s in sup if s.get("full")}
+
+    def match_short(name):
+        # 金蝶摘要提取的承运商名常截在「供应链/物流」，与档案全名「…有限公司」不全等 → 前缀/包含兜底
+        if name in full2short:
+            return full2short[name]
+        for sfull, sshort in full2short.items():
+            if sfull and (sfull.startswith(name) or name.startswith(sfull) or name in sfull or sfull in name):
+                return sshort
+        return None
+
     with db._engine.connect() as c:
         specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
     out = []
     for full, amt in accr.items():
-        short = full2short.get(full, full)
+        short = match_short(full) or full
         out.append({"short": short, "full": full, "accrued": round(amt or 0, 2), "has_spec": short in specs})
     # 有计提但没配取数说明的也列出来（灰示"未配"）；再补上已配却本月无计提的（如 pilot 迅鸽），排在后
     listed = {x["short"] for x in out}
