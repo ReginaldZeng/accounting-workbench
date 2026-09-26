@@ -1,4 +1,5 @@
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 发票管家前端回归（浏览器夹具）
+// [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 加申请人自助登记（#/invself）5 条：验证码登录→登记、重名、钉钉免登、手机配对先鉴权再免登、后补池入口
 // 只用合成数据：接口全部在浏览器里拦截回假数据，不连后端、不发钉钉、不碰生产。
 // 用法（仓库根目录）：node tests/qa_inv_frontend.cjs            —— 测工作区里的前端源码
 //                    INV_FE_SRC=<另一份 frontend/src> node ...   —— 测别的版本（例如修复前的 HEAD，用来确认用例"修前红、修后绿"）
@@ -33,6 +34,7 @@ import InvLedger from '%SRC%/views/InvLedger.jsx'
 import InvLater from '%SRC%/views/InvLater.jsx'
 import InvSettings from '%SRC%/views/InvSettings.jsx'
 import InvPhone from '%SRC%/views/InvPhone.jsx'
+import InvSelf from '%SRC%/views/InvSelf.jsx'
 import '%SRC%/styles.css'
 
 function ViewerSwitch({ items }) {
@@ -61,7 +63,7 @@ function PairHarness(p) {
   const [open, setOpen] = useState(true)
   return open ? <S.PairModal {...p} onClose={() => setOpen(false)} /> : <div id="qa-closed">已关</div>
 }
-const VIEWS = { ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone }
+const VIEWS = { ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf }
 window.__mount = (name, props) => {
   const root = createRoot(document.getElementById('root'))
   root.render(React.createElement(VIEWS[name], props || {}))
@@ -273,38 +275,80 @@ test('F14/C6 只有查看权限：能打开「我的票夹」里的单子看（�
   await ctx.close()
 })
 
+test('收票台：有差额（付款−专票−普票−后补≠0）提交前先确认，提交后审核会重点关注', async (browser, B) => {
+  const state = {
+    pair: null, recent: [],
+    folder: { id: 50, status: 'collecting', title: '差额单', amount: 100, stats: { invoices: 1 },
+      gap: { pay: 100, special: 90, specialN: 1, normal: 0, normalN: 0, later: 0, gap: 10 } },
+    items: [inv({ id: 501, review: 'draft', total: 90 })],
+    submit: { ok: true, msg: '已提交，等会计审核', folder: { id: 50, status: 'submitted', title: '差额单' }, items: [], warnings: [] },
+  }
+  const { page, ctx, calls } = await open(browser, B, deskApi(state))
+  await mount(page, 'InvDesk', { user: { name: '测试收票员' } })
+  await page.getByText('票比付款少，提交后审核会重点关注').waitFor()
+  await page.getByRole('button', { name: '提交', exact: true }).click()
+  await page.getByText('提交后会计会重点审核', { exact: false }).waitFor()
+  assert.equal(n(calls, c => c.path.endsWith('/submit')), 0, '先确认，不能直接提交')
+  await page.getByRole('button', { name: '确定提交' }).click()
+  await page.waitForFunction(() => true)
+  await sleep(300)
+  assert.equal(n(calls, c => c.path.endsWith('/submit')), 1)
+  await ctx.close()
+})
+
 function auditApi(st) {
   return (c) => {
     if (c.path === '/api/inv/config') return cfg()
     if (c.path === '/api/inv/audit/queue') return { ok: true, total: st.queue.length, rows: st.queue }
     if (c.path === `/api/inv/folder/${st.folder.id}`) { st.folderGets = (st.folderGets || 0) + 1; return { ok: true, folder: st.folder, items: st.items, logs: st.logs || [] } }
     if (/^\/api\/inv\/item\/\d+\/update$/.test(c.path)) return st.onUpdate(c)
+    const mk = c.path.match(/^\/api\/inv\/audit\/item\/(\d+)\/mark$/)
+    if (mk) {
+      const id = +mk[1], b = c.body || {}
+      st.items = st.items.map(it => it.id !== id ? it : {
+        ...it, pending: b.mark === 'ok' ? [] : it.pending,
+        auditOk: b.mark === 'ok' ? { by: '测试会计', at: '2026-09-25 10:00:00' } : null,
+        doubt: b.mark === 'doubt' ? { text: b.text, by: '测试会计', at: '2026-09-25 10:00:00' } : null,
+      })
+      return { ok: true, item: st.items.find(it => it.id === id) }
+    }
     if (c.path === '/api/inv/audit/approve') return st.onApprove(c)
+    if (c.path === '/api/inv/audit/return') return st.onReturn ? st.onReturn(c) : { ok: true, folder: { ...st.folder, status: 'returned', reviewNote: c.body.note } }
     return { ok: true }
   }
 }
+const GAP0 = (pay) => ({ pay, special: pay, specialN: 1, normal: 0, normalN: 0, later: 0, gap: 0 })
 
-test('F2/C2 改字段后建议变「不可抵扣」，没手动改判的票跟着变；通过时带 itemIds', async (browser, B) => {
+test('F2/C2 弹窗里改字段后建议变「不可抵扣」，没手动改判的票跟着变；提交时带 itemIds 和抵扣判定', async (browser, B) => {
   const st = {
-    folder: { id: 10, status: 'submitted', title: '报销单甲', amount: 100, anomalies: [] },
-    items: [inv({ id: 101 })], logs: [],
+    folder: { id: 10, status: 'submitted', title: '报销单甲', businessId: '20260101000000000010', amount: 100, gap: GAP0(100), laters: [] },
+    items: [inv({ id: 101, pending: ['category'] })], logs: [],
   }
   st.queue = [{ id: 10, title: '报销单甲', amount: 100, anomalies: [], clean: false, stats: { invoices: 1 } }]
   st.onUpdate = (c) => {
-    st.items = [inv({ id: 101, ...(c.body.fields || {}), deductSuggest: 'no', deductReason: '餐饮服务不能抵扣' })]
+    st.items = [inv({ id: 101, ...(c.body.fields || {}), pending: [], deductSuggest: 'no', deductReason: '餐饮服务不能抵扣' })]
     return { ok: true, item: st.items[0] }
   }
   st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
   const { page, ctx, calls } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  const cat = page.locator('.inv-au-side .inv-fp-row', { hasText: '项目类别' }).locator('input')
+  await page.locator('.inv-au-hd2-t .inv-au-bid', { hasText: '（20260101000000000010）' }).waitFor()   // 标题后面要带审批编号
+  // 发票号码显示全＋复制按钮（会计要复制去金蝶）
+  assert.match((await page.locator('.inv-au-fullno').first().innerText()).trim(), /^26442000000000000\d{3}$/, '发票号码显示全（20 位，不截断）')
+  await page.locator('.inv-au-tbl tbody tr').first().locator('.inv-au-copy').click()
+  await page.locator('.inv-au-copy.done', { hasText: '已复制' }).first().waitFor({ timeout: 2000 })
+  assert.equal(await page.locator('.inv-au-dlg-side').count(), 0, '点复制不打开核对弹窗')
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  const cat = page.locator('.inv-au-dlg-side .inv-fp-row', { hasText: '项目类别' }).locator('input')
   await cat.waitFor()
+  assert.equal(await page.locator('.inv-au-dlg-side').getByRole('button', { name: '核对无误' }).count(), 0, '弹窗里用右上角「提交」，不再有「核对无误」')
   await cat.fill('餐饮')
-  await page.locator('.inv-au-side .inv-fp-act').getByRole('button', { name: '保存' }).click()
+  await page.locator('.inv-au-dlg-side .inv-fp-act').getByRole('button', { name: '保存' }).click()
   await page.getByText('建议不可抵扣', { exact: false }).first().waitFor()
-  await sleep(300)
-  assert.equal(await page.getByText('（已改判）').count(), 0, '没人改判，不能显示「已改判」')
-  await page.getByRole('button', { name: '通过', exact: true }).click()
+  await page.locator('.inv-mhead').getByRole('button', { name: '提交', exact: true }).click()
+  await page.waitForFunction(() => !document.querySelector('.inv-au-dlg'))
+  assert.ok(calls.some(c => c.path === '/api/inv/audit/item/101/mark' && c.body.mark === 'ok'), '弹窗「提交」要记这张已核')
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
   await page.waitForFunction(() => document.body.innerText.includes('已通过'))
   const ap = calls.find(c => c.path === '/api/inv/audit/approve')
   assert.ok(ap, '没发出通过请求')
@@ -313,9 +357,9 @@ test('F2/C2 改字段后建议变「不可抵扣」，没手动改判的票跟�
   await ctx.close()
 })
 
-test('C2 审核期间进了新票：409 后提示并重读票夹、跳到新票', async (browser, B) => {
+test('C2 审核期间进了新票：409 后提示并重读票夹、打开新票', async (browser, B) => {
   const st = {
-    folder: { id: 11, status: 'submitted', title: '付款单乙', amount: 300, anomalies: [] },
+    folder: { id: 11, status: 'submitted', title: '付款单乙', amount: 300, gap: GAP0(300), laters: [] },
     items: [inv({ id: 111 })], logs: [],
   }
   st.queue = [{ id: 11, title: '付款单乙', amount: 300, anomalies: [], clean: false }]
@@ -325,13 +369,13 @@ test('C2 审核期间进了新票：409 后提示并重读票夹、跳到新票'
   }
   const { page, ctx } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.locator('.inv-au-side .inv-fp').waitFor()
+  await page.locator('.inv-au-tbl tbody tr').first().waitFor()
   const before = st.folderGets
-  await page.getByRole('button', { name: '通过', exact: true }).click()
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
+  await page.getByRole('button', { name: '不逐张看了，仍然提交' }).click()
   await page.getByText('审核期间这个票夹又进了新票', { exact: false }).first().waitFor()
-  await page.waitForFunction(() => document.querySelectorAll('.inv-thumb').length === 2, null, { timeout: 3000 })
   assert.ok(st.folderGets > before, '409 之后要重读票夹')
-  await page.locator('.inv-au-it-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
+  await page.locator('.inv-au-dlg-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
   await ctx.close()
 })
 
@@ -339,29 +383,108 @@ const DEEP_LOGS = [{ id: 2, ts: '2026-09-24 10:00:00', user: '李会计', action
   { id: 1, ts: '2026-09-24 09:00:00', user: '王收票', action: '提交审核', detail: {}, itemId: null }]
 const deepAudit = () => {
   const st = {
-    folder: { id: 77, status: 'submitted', title: '深链票夹', amount: 150, anomalies: [{ code: 'amountDiff', level: 'warn', label: '金额差 50.00' }] },
+    folder: { id: 77, status: 'submitted', title: '深链票夹', amount: 150, laters: [],
+      gap: { pay: 150, special: 100, specialN: 1, normal: 0, normalN: 0, later: 0, gap: 50 } },
     items: [inv({ id: 771 })], logs: DEEP_LOGS,
   }
   st.queue = []
   return st
 }
 
-test('F9 深链打开不在队列里的票夹：票夹级异常照样显示', async (browser, B) => {
+test('F9 深链打开不在队列里的票夹：单据头和金额核对（差额重点关注）照样显示', async (browser, B) => {
   const { page, ctx } = await open(browser, B, auditApi(deepAudit()), { hash: '#/invaudit?folder=77' })
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.locator('.inv-au-side .inv-fp').waitFor({ timeout: 4000 })
-  await page.getByText('金额差 50.00').waitFor({ timeout: 4000 })
-  assert.equal(await page.getByText('没有发现异常').count(), 0)
+  await page.getByText('深链票夹').first().waitFor({ timeout: 4000 })
+  await page.locator('.inv-au-focus', { hasText: '有差额 50.00' }).waitFor({ timeout: 4000 })
+  assert.ok(await page.locator('.inv-au-fig.diff', { hasText: '50.00' }).isVisible())
   await ctx.close()
 })
 
-test('C7 审核页留痕可只看当前这张票（按 log.itemId）', async (browser, B) => {
+test('C7 弹窗里的留痕只列这张票自己的（按 log.itemId）', async (browser, B) => {
   const { page, ctx } = await open(browser, B, auditApi(deepAudit()), { hash: '#/invaudit?folder=77' })
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.locator('.inv-au-logs summary').click()
-  await page.getByText('只看当前这张票', { exact: false }).click({ timeout: 4000 })
-  assert.equal(await page.locator('.inv-au-logs li').count(), 1)
-  assert.ok(await page.locator('.inv-au-logs li', { hasText: '改票面字段' }).isVisible())
+  await page.locator('.inv-au-tbl tbody tr').first().click({ timeout: 4000 })
+  await page.locator('.inv-au-dlg-logs summary').click()
+  assert.equal(await page.locator('.inv-au-dlg-logs li').count(), 1)
+  assert.ok(await page.locator('.inv-au-dlg-logs li', { hasText: '改票面字段' }).isVisible())
+  await ctx.close()
+})
+
+test('审核改版：弹窗 Enter 提交这张并跳到下一张没核的；扫描人显示在弹窗标题', async (browser, B) => {
+  const st = {
+    folder: { id: 12, status: 'submitted', title: '两张票', amount: 200, gap: GAP0(200), laters: [] },
+    items: [inv({ id: 121, createdBy: '李四', origin: 'camera', createdAt: '2026-09-25 09:01:00' }), inv({ id: 122 })], logs: [],
+  }
+  st.queue = [{ id: 12, title: '两张票', amount: 200, anomalies: [], clean: false }]
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  await page.locator('.inv-au-who', { hasText: '李四' }).waitFor()
+  assert.ok(await page.locator('.inv-au-who', { hasText: '高拍仪' }).isVisible())
+  await page.locator('.inv-au-dlg').click({ position: { x: 5, y: 5 } })
+  await page.keyboard.press('Enter')
+  await page.locator('.inv-au-dlg-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
+  assert.ok(calls.some(c => c.path === '/api/inv/audit/item/121/mark' && c.body.mark === 'ok'))
+  await ctx.close()
+})
+
+test('审核改版：记了疑问 → 底部「提交」变成退回，并带上疑问', async (browser, B) => {
+  const st = {
+    folder: { id: 13, status: 'submitted', title: '有疑问的单', amount: 100, gap: GAP0(100), laters: [] },
+    items: [inv({ id: 131 })], logs: [],
+  }
+  st.queue = [{ id: 13, title: '有疑问的单', amount: 100, anomalies: [], clean: false }]
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  await page.locator('.inv-mhead').getByRole('button', { name: '有疑问' }).click()
+  await page.locator('.inv-au-qbox').getByRole('button', { name: '抬头不对' }).click()
+  await page.getByRole('button', { name: '记下疑问' }).click()
+  await page.locator('.inv-au-qbox', { hasText: '疑问：抬头不对' }).waitFor()
+  await page.keyboard.press('Escape')
+  await page.locator('.inv-au-st-q').waitFor()
+  const btn = page.locator('.inv-au-bar2').getByRole('button', { name: '提交（退回 1 个疑问）' })
+  await btn.click()
+  await page.getByRole('button', { name: '确认退回' }).click()
+  await page.waitForFunction(() => document.body.innerText.includes('已退回'))
+  const ret = calls.find(c => c.path === '/api/inv/audit/return')
+  assert.ok(ret && ret.body.note.includes('抬头不对'), '退回原因要带上疑问：' + JSON.stringify(ret && ret.body))
+  assert.equal(n(calls, c => c.path === '/api/inv/audit/approve'), 0)
+  await ctx.close()
+})
+
+test('审核改版：有差额要写差额说明才能提交（点常用说明可快填），说明随 gapNote 发出；后补单列表照实列出', async (browser, B) => {
+  const st = {
+    folder: { id: 14, status: 'submitted', title: '有差额的单', amount: 160.8,
+      gap: { pay: 160.8, special: 100, specialN: 1, normal: 0, normalN: 0, later: 60, gap: 0.8 },
+      laters: [{ id: 12, filedBy: '张三', filedAt: '2026-09-10 10:00:00', expectAmount: 60, receivedAmount: 0, unregisteredAmount: 0,
+        left: 60, expectDate: '2026-10-10', receiverName: '王五', status: 'open', statusText: '待收', remindCount: 1 }] },
+    items: [inv({ id: 141, auditOk: { by: '测试会计', at: '2026-09-25 10:00:00' } })], logs: [],
+  }
+  st.queue = [{ id: 14, title: '有差额的单', amount: 160.8, anomalies: [], clean: false }]
+  st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-ltbl', { hasText: '#12' }).waitFor()
+  assert.ok(await page.locator('.inv-au-ltbl', { hasText: '王五' }).isVisible())
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
+  const ok = page.getByRole('button', { name: '确认差额并提交' })
+  await ok.waitFor()
+  assert.ok(await ok.isDisabled(), '没写差额说明不能提交')
+  await page.locator('.inv-au-ask').getByRole('button', { name: '付款抹零' }).click()
+  await ok.click()
+  await page.waitForFunction(() => document.body.innerText.includes('已通过'))
+  const ap = calls.find(c => c.path === '/api/inv/audit/approve')
+  assert.equal(ap.body.gapNote, '付款抹零')
+  await ctx.close()
+})
+
+test('审核改版：没有后补单时写「没有发票后补单」', async (browser, B) => {
+  const st = { folder: { id: 15, status: 'submitted', title: '无后补', amount: 100, gap: GAP0(100), laters: [] }, items: [inv({ id: 151 })], logs: [] }
+  st.queue = [{ id: 15, title: '无后补', amount: 100, anomalies: [], clean: false }]
+  const { page, ctx } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.getByText('没有发票后补单').waitFor()
   await ctx.close()
 })
 
@@ -476,6 +599,9 @@ test('F12/C5 新建后补单：接收人没收到钉钉消息要如实说，不�
   await page.getByText('供应商甲').first().waitFor()
   await page.locator('.inv-modal input[type="date"]').fill('2026-10-10')
   await page.getByRole('button', { name: '登记后补单' }).click()
+  await page.locator('.inv-lt-fe', { hasText: '请选税率' }).waitFor({ timeout: 3000 })
+  await page.locator('.inv-modal select').first().selectOption('13%')
+  await page.getByRole('button', { name: '登记后补单' }).click()
   await page.getByText('接收人没收到钉钉消息', { exact: false }).first().waitFor({ timeout: 3000 })
   assert.equal(await page.getByText('已通知接收人', { exact: false }).count(), 0)
   await ctx.close()
@@ -585,6 +711,173 @@ test('扫审批单：钉钉鉴权没过 → 说清原因、给「拍审批单二
   assert.ok(await page.getByRole('button', { name: '拍审批单二维码' }).isVisible())
   assert.equal(await page.evaluate(() => window.__ddScans), 0)
   assert.equal(n(calls, c => c.path === '/api/inv/m/scan'), 0)
+  await ctx.close()
+})
+
+// ───────────────────────── 申请人自助登记发票后补（V2.621，#/invself） ─────────────────────────
+
+function selfApi(st) {
+  return async c => {
+    if (c.path === '/api/inv/s/hello') return { ok: true, corpId: st.corpId || '', dingtalk: true, me: st.me || null, templates: ['付款申请（公对公）', '费用报销'] }
+    if (c.path === '/api/inv/s/jsconfig') return { ok: true, agentId: '9', corpId: 'dingSELF', timeStamp: '1', nonceStr: 'n', signature: 's9' }
+    if (c.path === '/api/inv/s/login/dd') { st.me = { name: '申请人甲', dept: '公司-采购部', via: 'dingtalk' }; return { ok: true, token: 'SELF-TOK', me: st.me } }
+    if (c.path === '/api/inv/s/login/send') {
+      if (c.body.name === '重名人' && (c.body.pick === null || c.body.pick === undefined)) return { ok: true, need: 'pick', choices: [{ i: 0, dept: '公司-销售部', title: '' }, { i: 1, dept: '公司-生产部', title: '' }] }
+      st.sent = c.body
+      return { ok: true, ticket: 'TK1', to: c.body.name + '（采购部）', expiresIn: 300 }
+    }
+    if (c.path === '/api/inv/s/login/verify') {
+      if (c.body.code !== '123456') return { __status: 400, ok: false, msg: '验证码不对：请核对钉钉消息里的 6 位数字' }
+      st.me = { name: '申请人甲', dept: '公司-采购部', via: 'code' }
+      return { ok: true, token: 'SELF-TOK', me: st.me }
+    }
+    if (c.headers['x-inv-self'] !== 'SELF-TOK') return { __status: 401, ok: false, msg: '登录已过期或没登录' }
+    if (c.path === '/api/inv/s/payments') return { ok: true, msg: '', rows: st.pays }
+    if (c.path === '/api/inv/s/receivers') return { ok: true, rows: [{ account: 'cw1', name: '财务甲' }, { account: 'cw2', name: '财务乙' }] }
+    if (c.path === '/api/inv/s/laters') return { ok: true, rows: st.laters }
+    if (c.path === '/api/inv/s/later') {
+      st.created = c.body
+      const l = { id: 31, businessId: '202609250001', payee: { name: '合成供应商' }, expectAmount: c.body.expectAmount, receivedAmount: 0,
+        unregisteredAmount: 0, remaining: c.body.expectAmount, expectDate: c.body.expectDate, receiverName: '财务乙', status: 'open', filedVia: 'self' }
+      st.laters = [l]; st.pays = st.pays.map(p => p.procInstId === c.body.instId ? { ...p, laterId: 31 } : p)
+      return { ok: true, later: l, notified: true }
+    }
+    if (c.path === '/api/inv/s/logout') return { ok: true }
+    return { __status: 404, ok: false, msg: 'nope' }
+  }
+}
+const SELF_PAYS = () => [
+  { procInstId: 'PI-A', businessId: '202609250001', title: '申请人甲提交的付款申请（公对公）', template: '付款申请（公对公）', createTime: '2026-09-20 10:00', amount: 800, payeeName: '合成供应商', laterId: null, hasInvoice: false, approvalStatus: 'COMPLETED', approvalResult: 'agree' },
+  { procInstId: 'PI-B', businessId: '202609250002', title: '申请人甲提交的费用报销', template: '费用报销', createTime: '2026-09-18 09:00', amount: 66.5, payeeName: '申请人甲', laterId: 12, laterStatus: 'done', hasInvoice: false },
+  { procInstId: 'PI-C', businessId: '202609250003', title: '申请人甲提交的付款申请（公对公）', template: '付款申请（公对公）', createTime: '2026-09-10 09:00', amount: 12345.6, payeeName: '另一家合成物流有限公司', laterId: null, hasInvoice: false, approvalStatus: 'RUNNING' },
+]
+
+test('自助登记：电脑浏览器写姓名收钉钉验证码登录 → 选自己的付款单 → 默认值带好 → 提交进「我的后补单」', async (browser, B) => {
+  const st = { pays: SELF_PAYS(), laters: [] }
+  const { page, ctx, calls, errors } = await open(browser, B, selfApi(st), { hash: '#/invself', clock: true })
+  await mount(page, 'InvSelf')
+  await page.getByPlaceholder('你在钉钉上的姓名').fill('申请人甲')
+  await page.getByRole('button', { name: '发验证码到钉钉' }).click()
+  await page.getByText('验证码已发到').waitFor({ timeout: 4000 })
+  assert.equal(st.sent.name, '申请人甲')
+  await page.getByPlaceholder('6 位数字').fill('000000')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByText('验证码不对').waitFor({ timeout: 4000 })
+  await page.getByPlaceholder('6 位数字').fill('123456')
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByText('申请人甲提交的付款申请（公对公）').first().waitFor({ timeout: 4000 })
+  // 搜索＋分类：默认只看未登记；按模板分；搜收款方/金额
+  assert.equal(await page.locator('.inv-sf-pay').count(), 2, '默认只列未登记的')
+  assert.ok(await page.getByText('审批中').isVisible())
+  await page.getByRole('button', { name: '已登记后补（1）' }).click()
+  assert.ok(await page.getByRole('button', { name: '已登记 #12 · 已收齐' }).isVisible(), '登记过的单不能再登记')
+  await page.getByRole('button', { name: '全部', exact: true }).click()
+  await page.getByRole('button', { name: '费用报销（1）' }).click()
+  assert.equal(await page.locator('.inv-sf-pay').count(), 1)
+  await page.getByRole('button', { name: '全部（3）' }).click()
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('12,345')
+  assert.equal(await page.locator('.inv-sf-pay').count(), 1, '按金额搜（带不带逗号都行）')
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('合成供应商')
+  assert.equal(await page.locator('.inv-sf-pay').count(), 1)
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('没有这家')
+  await page.getByText('没有符合条件的单子').waitFor({ timeout: 2000 })
+  await page.getByPlaceholder('搜标题、审批编号、收款方、金额').fill('')
+  await page.getByRole('button', { name: /^未登记后补/ }).click()
+  const before = calls.filter(c => c.path === '/api/inv/s/payments').length
+  await page.locator('.inv-sf-days').selectOption('120')
+  await page.waitForFunction(n => true, before)
+  for (let i = 0; i < 30 && calls.filter(c => c.path === '/api/inv/s/payments').length === before; i++) await sleep(100)
+  assert.equal(calls.filter(c => c.path === '/api/inv/s/payments').pop().query.days, '120', '改时间范围重新取')
+  await page.getByText('合成供应商').first().waitFor({ timeout: 4000 })
+  await page.locator('.inv-sf-pay', { hasText: '合成供应商' }).getByRole('button', { name: '登记后补', exact: true }).click()
+  assert.equal(await page.locator('input[type=date]').inputValue(), '2026-10-09', '预计到票默认 15 天后')
+  assert.equal(await page.locator('.inv-sf-f input[inputmode=decimal]').inputValue(), '800', '预计金额默认付款金额')
+  await page.getByRole('button', { name: '提交后补单' }).click()
+  await page.getByText('请选发票交给哪位财务').waitFor({ timeout: 3000 })
+  await page.getByText('请选税率').waitFor({ timeout: 3000 })
+  assert.equal(st.created, undefined, '没选接收人、没选税率不能提交')
+  await page.getByRole('button', { name: '收据' }).click()
+  assert.equal(await page.getByText('请选税率').count(), 0, '收据不用填税率')
+  await page.getByRole('button', { name: '普票' }).click()
+  await page.locator('.inv-sf-f select').first().selectOption('3%')
+  await page.locator('.inv-sf-f select').nth(1).selectOption('cw2')
+  await page.getByRole('button', { name: '提交后补单' }).click()
+  await page.locator('.inv-sf-ok', { hasText: '已登记后补单 #31' }).waitFor({ timeout: 4000 })
+  assert.deepEqual({ ...st.created, expectDate: undefined },
+    { instId: 'PI-A', invKind: 'normal', taxRate: '3%', expectDate: undefined, expectAmount: 800, receiver: 'cw2', note: '' })
+  assert.ok(await page.locator('.inv-sf-tbl').getByText('财务乙').isVisible(), '提交后跳到「我的后补单」')
+  // 我的后补单：搜索＋按状态分类
+  await page.getByPlaceholder('搜审批编号、收款方、交给谁、金额、日期').fill('没有这家')
+  await page.getByText('没有符合条件的后补单').waitFor({ timeout: 2000 })
+  await page.getByPlaceholder('搜审批编号、收款方、交给谁、金额、日期').fill('合成供应')
+  assert.equal(await page.locator('.inv-sf-tbl tbody tr').count(), 1)
+  await page.getByRole('button', { name: '我还欠的票（1）' }).click()
+  assert.equal(await page.locator('.inv-sf-tbl tbody tr').count(), 1)
+  assert.equal(await page.getByText('号码待登记').count(), 0, '财务内部的「号码待登记」不出现在申请人页')
+  const authed = calls.filter(c => ['/api/inv/s/payments', '/api/inv/s/later', '/api/inv/s/laters'].includes(c.path))
+  assert.ok(authed.length >= 3 && authed.every(c => c.headers['x-inv-self'] === 'SELF-TOK'), '会话令牌走请求头')
+  assert.ok(calls.every(c => !c.path.includes('SELF-TOK') && !Object.values(c.query).includes('SELF-TOK')), '令牌不进地址')
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('自助登记：钉钉里有重名 → 先选部门再发码', async (browser, B) => {
+  const st = { pays: [], laters: [] }
+  const { page, ctx } = await open(browser, B, selfApi(st), { hash: '#/invself' })
+  await mount(page, 'InvSelf')
+  await page.getByPlaceholder('你在钉钉上的姓名').fill('重名人')
+  await page.getByRole('button', { name: '发验证码到钉钉' }).click()
+  await page.getByRole('button', { name: '公司-生产部' }).click()
+  await page.getByText('验证码已发到').waitFor({ timeout: 4000 })
+  assert.equal(st.sent.pick, 1)
+  await ctx.close()
+})
+
+test('自助登记：在钉钉里打开 → 先 dd.config 鉴权再免登，直接进，不用验证码', async (browser, B) => {
+  const st = { pays: SELF_PAYS(), laters: [] }
+  const { page, ctx, calls } = await open(browser, B, selfApi(st), { hash: '#/invself', ua: DD_UA, init: FAKE_DD })
+  await mount(page, 'InvSelf')
+  await page.getByText('申请人甲提交的付款申请（公对公）').first().waitFor({ timeout: 5000 })
+  const cfgArgs = await page.evaluate(() => window.__ddCfg)
+  assert.equal(cfgArgs && cfgArgs.corpId, 'dingSELF')
+  const i = calls.findIndex(c => c.path === '/api/inv/s/jsconfig'), k = calls.findIndex(c => c.path === '/api/inv/s/login/dd')
+  assert.ok(i >= 0 && k > i, '先鉴权后免登')
+  assert.equal(calls[k].body.code, 'AUTH1')
+  assert.equal(await page.getByPlaceholder('你在钉钉上的姓名').count(), 0)
+  await ctx.close()
+})
+
+test('手机配对：钉钉里还没绑定时先 dd.config（拿到企业编号）再要免登码，绑定带上身份', async (browser, B) => {
+  const st = { bound: false }
+  const api = async c => {
+    if (c.path === '/api/inv/m/hello') return { ok: true, bound: st.bound, user: '测试收票员', corpId: '' }
+    if (c.path === '/api/inv/m/jsconfig') return { ok: true, agentId: '123', corpId: 'dingFAKE', timeStamp: '1', nonceStr: 'n', signature: 's' }
+    if (c.path === '/api/inv/m/bind') { st.bind = c.body; st.bound = true; return { ok: true, user: '测试收票员', dtName: '张三', session: 'SESS2', msg: '已配对' } }
+    if (c.path === '/api/inv/m/state') return { ok: true, user: '测试收票员', folder: null, items: [] }
+    return { __status: 404, ok: false, msg: 'nope' }
+  }
+  const { page, ctx, calls } = await open(browser, B, api, { hash: '#/invpair?t=QR7', ua: DD_UA, init: FAKE_DD })
+  await mount(page, 'InvPhone')
+  await page.waitForFunction(() => true)
+  for (let i = 0; i < 40 && !st.bind; i++) await sleep(100)
+  assert.equal(st.bind && st.bind.code, 'AUTH1', '要带上钉钉免登码：' + JSON.stringify(st.bind))
+  const jc = calls.findIndex(c => c.path === '/api/inv/m/jsconfig'), bd = calls.findIndex(c => c.path === '/api/inv/m/bind')
+  assert.ok(jc >= 0 && jc < bd, '先鉴权再绑定')
+  assert.equal(calls[jc].headers['x-inv-pair'], 'QR7', '鉴权用的是还没绑定的配对码')
+  await ctx.close()
+})
+
+test('后补池：「业务自助登记入口」给网址和二维码', async (browser, B) => {
+  const st = { rows: [] }
+  const base = laterApi(st)
+  const api = async c => (c.path === '/api/inv/s/link' ? { ok: true, url: 'http://10.0.0.8/#/invself', qr: '/api/inv/s/qr.png' } : base(c))
+  const { page, ctx } = await open(browser, B, api)
+  await mount(page, 'InvLater', { user: { name: '测试会计' } })
+  await page.getByRole('button', { name: '业务自助登记入口' }).click()
+  const inp = page.locator('.inv-lt-self-url input')
+  await inp.waitFor({ timeout: 4000 })
+  assert.equal(await inp.inputValue(), 'http://10.0.0.8/#/invself')
+  assert.ok((await page.locator('.inv-lt-self-qr').getAttribute('src')).startsWith('/api/inv/s/qr.png'))
   await ctx.close()
 })
 

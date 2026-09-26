@@ -486,6 +486,15 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertTrue(r.json()["identified"])
         self.assertEqual(self.get("/api/inv/desk", "intern").json()["pair"]["dtName"], "实习生甲")
         self.post("/api/inv/pair/revoke", "intern")
+        # V2.628 信任电脑登录身份：绑了钉钉的账号，手机免登认不出（扫链接二维码调不起免登）→ 照样配得上，标"未核对"
+        j2, tok2 = self._pair("intern")
+        none = {"ok": False, "userid": "", "name": "", "msg": "免登没返回"}
+        with patch.object(self.inv.idt, "userinfo_by_code", MagicMock(return_value=none)):
+            r2 = self.c.post("/api/inv/m/bind", json={"code": "authcode"}, headers=self.P(tok2))
+        self.assertEqual(r2.status_code, 200, r2.text)
+        self.assertFalse(r2.json()["identified"])
+        self.assertTrue(self.c.get("/api/inv/m/hello", headers=self.P(r2.json()["session"])).json()["bound"])
+        self.post("/api/inv/pair/revoke", "intern")
 
     @unittest.skipUnless(HAS_IMG, "缺 PyMuPDF/opencv/Pillow")
     def test_11_phone_upload_and_file_scope(self):
@@ -576,7 +585,13 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual(got["fieldSrc"]["number"]["src"], "qr")
         self.assertEqual(got["sellerName"], v["seller"])
         self.assertEqual(got["fieldSrc"]["sellerName"]["src"], "ocr")
-        self.assertTrue({"sellerName", "sellerTaxId", "amount", "tax"} <= set(got["pending"]))
+        # 系统自动核：销方税号校验位对、金额＋税额＝二维码合计 → 不再待核，写明依据；第一次见的销方名称仍要人看
+        # 销方名称：第一次见的要人看；库里已有人核过的同税号票（前面的用例核过这家）→ 系统已核
+        self.assertTrue("sellerName" in got["pending"] or "人核过" in got["fieldSrc"]["sellerName"].get("sys", ""),
+                        (got["pending"], got["fieldSrc"].get("sellerName")))
+        for k, why in (("sellerTaxId", "校验位"), ("amount", "二维码"), ("tax", "二维码")):
+            self.assertNotIn(k, got["pending"])
+            self.assertIn(why, got["fieldSrc"][k].get("sys", ""), got["fieldSrc"][k])
         self.assertEqual(got["deductSuggest"], "yes")
         # 核对：改一个、确认一个 → 都不再待核
         r = self.post("/api/inv/item/%d/update" % got["id"], "intern",
@@ -694,7 +709,7 @@ class InvoiceApiTests(unittest.TestCase):
         return [i["id"] for i in self.items(fid)["items"] if i["review"] == "pending"]
 
     def _approve(self, fid, user="acct", decisions=None):
-        body = {"folderId": fid, "itemIds": self._pending_ids(fid)}
+        body = {"folderId": fid, "itemIds": self._pending_ids(fid), "gapNote": "测试：差额已核（没差额时后端不看）"}
         if decisions is not None:
             body["decisions"] = decisions
         return self.post("/api/inv/audit/approve", user, body)
@@ -834,19 +849,33 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertFalse(inv.pair_token_ok(req2))
         self.post("/api/inv/pair/revoke", "phoneguy")
         with patch.object(inv.idt, "configured", MagicMock(return_value=True)):
+            # V2.628 信任电脑登录身份：绑了钉钉，但扫链接二维码免登调不起来（没 code）→ 照样配上，标"未核对"
             j, tok = self._pair("intern")
             r = self.c.post("/api/inv/m/bind", json={}, headers=self.P(tok))
-            self.assertEqual(r.status_code, 403)
-            self.assertIn("请用手机钉钉「扫一扫」", r.json()["msg"])
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertFalse(r.json()["identified"])
+            self.post("/api/inv/pair/revoke", "intern")
+            # 免登认不出（code 无效）→ 也照样配上
+            j, tok = self._pair("intern")
             with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value={"ok": False, "msg": "免登码过期"})):
                 r = self.c.post("/api/inv/m/bind", json={"code": "x"}, headers=self.P(tok))
-            self.assertEqual(r.status_code, 403)
-            self.assertIn("没认出", r.json()["msg"])
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertFalse(r.json()["identified"])
+            self.post("/api/inv/pair/revoke", "intern")
+            # 认出的是本人 → 配上并记名
+            j, tok = self._pair("intern")
             who = {"ok": True, "userid": "dt-intern", "name": "实习生甲", "msg": ""}
             with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value=who)):
                 r = self.c.post("/api/inv/m/bind", json={"code": "x"}, headers=self.P(tok))
             self.assertEqual(r.status_code, 200, r.text)
             self.assertTrue(r.json()["identified"])
+            # 认出的是"另一个人" → 仍然拦（防在别人电脑上用自己手机配）
+            self.post("/api/inv/pair/revoke", "intern")
+            j, tok = self._pair("intern")
+            with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value={"ok": True, "userid": "dt-else", "name": "别人"})):
+                r = self.c.post("/api/inv/m/bind", json={"code": "x"}, headers=self.P(tok))
+            self.assertEqual(r.status_code, 403)
+            self.assertIn("不是同一个", r.json()["msg"])
             # 账号没绑钉钉：放行但提示没认出身份
             j, tok = self._pair("phoneguy")
             r = self.c.post("/api/inv/m/bind", json={}, headers=self.P(tok))
@@ -988,7 +1017,7 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual(r.json()["newItems"], [new])
         self.assertEqual(self._item(new)["review"], "pending")
         self.assertEqual(self._item(it["id"])["review"], "pending")
-        r = self.post("/api/inv/audit/approve", "acct", {"folderId": fo["id"], "itemIds": [it["id"], new]})
+        r = self.post("/api/inv/audit/approve", "acct", {"folderId": fo["id"], "itemIds": [it["id"], new], "gapNote": "测试"})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["msg"], "已通过 2 张")
 
@@ -1365,7 +1394,81 @@ class InvoiceApiTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(r.json()["signature"], "s")
         self.assertEqual(seen, [("http://testserver/", inv.get_settings().get("corpId") or "")])
+        # V2.621：刚扫配对码、还没绑定也给签名（钉钉里要先 dd.config 再 requestAuthCode 才认得出人）
+        j2, tok2 = self._pair("phoneguy")
+        with patch.object(inv.idt, "jsapi_config", side_effect=fake):
+            r = self.c.get("/api/inv/m/jsconfig", params={"url": "http://testserver/"}, headers=self.P(tok2))
+            self.assertEqual(r.status_code, 200, r.text)
 
+
+    def test_44_audit_gap_marks_laters(self):
+        """审核改版：金额核对＝付款金额−（专票＋普票＋后补单还没到的）；有差额通过要写说明；单张票可记已核/疑问，
+        有疑问的票拦通过；票夹详情带后补单列表；重新提交清掉上一轮标记。号码都是编的。"""
+        tip, inv, S, e = self.tip, self.inv, self.inv.S, self.inv.E()
+        fo = self.manual("intern", "审核改版-差额", "1500")
+        v = dict(tip.FAKE, number="26440000000000004401")
+        r = self.upload("intern", "a.pdf", tip.build_pdf(tip._page_items_digital("split", v=v), qr=qr(v["number"], v["total"])),
+                        "application/pdf", folder_id=fo["id"]).json()["results"][0]
+        iid = r["itemId"]
+        total = self.items(fo["id"])["items"][0]["total"]
+        # 后补单：还没到 100.00（预计 150，已收未登记 50）
+        now = inv.now_s()
+        S._insert(e, S.LATER, dict(folder_id=fo["id"], pay_amount=1500, expect_amount=150, received_amount=0,
+                                  unregistered_amount=50, status="partial", filed_by="张三", receiver_name="王五",
+                                  expect_date="2026-10-10", remind_count=1, created_at=now, updated_at=now))
+        d = self.items(fo["id"])
+        g = d["folder"]["gap"]
+        self.assertEqual((g["pay"], g["special"], g["later"]), (1500.0, total, 100.0))
+        self.assertAlmostEqual(g["gap"], round(1500 - total - 100, 2))
+        self.assertEqual([(x["filedBy"], x["left"], x["statusText"]) for x in d["folder"]["laters"]], [("张三", 100.0, "部分到票")])
+        # 提交：有差额只提示不拦
+        r = self.post("/api/inv/folder/%d/submit" % fo["id"], "intern").json()
+        self.assertIn("gap", [w["code"] for w in r["warnings"]])
+        # 单张：记疑问 → 通过被拦；清掉 → 记已核（待核字段一并确认）
+        self.assertEqual(self.post("/api/inv/audit/item/%d/mark" % iid, "acct", {"mark": "doubt"}).status_code, 400)
+        r = self.post("/api/inv/audit/item/%d/mark" % iid, "acct", {"mark": "doubt", "text": "抬头不对"})
+        self.assertEqual(r.json()["item"]["doubt"]["text"], "抬头不对")
+        r = self.post("/api/inv/audit/approve", "acct", {"folderId": fo["id"], "itemIds": [iid], "gapNote": "x"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("疑问", r.json()["msg"])
+        r = self.post("/api/inv/audit/item/%d/mark" % iid, "acct", {"mark": "ok"}).json()["item"]
+        self.assertIsNone(r["doubt"])
+        self.assertEqual(r["auditOk"]["by"], "acct")
+        self.assertEqual(r["pending"], [])
+        # 有差额：不写说明不让过；写了过，说明进审核备注
+        r = self.post("/api/inv/audit/approve", "acct", {"folderId": fo["id"], "itemIds": [iid]})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["code"], "gapNote")
+        r = self.post("/api/inv/audit/approve", "acct", {"folderId": fo["id"], "itemIds": [iid], "gapNote": "餐补不需要票"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("餐补不需要票", S.folder_get(e, fo["id"])["review_note"])
+        # 没权限的人不能标记
+        self.assertEqual(self.post("/api/inv/audit/item/%d/mark" % iid, "intern", {"mark": "ok"}).status_code, 403)
+        # 队列异常用同一口径
+        f2 = S.folder_get(e, fo["id"])
+        an, clean = inv.folder_anomalies(f2, S.folder_items(e, fo["id"]), "done")
+        self.assertIn("amountDiff", [a["code"] for a in an])
+
+    def test_45_auto_checked_rules(self):
+        """系统自动核的几条规则：抬头/税号在公司清单、校验位、金额＋税额＝二维码合计、税率反算；项目类别永远要人看。"""
+        inv = self.inv
+        st = inv.get_settings()
+        comp = st["company"][0]
+        it = {"id": -1, "kind": "invoice", "buyer_name": comp["name"], "buyer_tax_id": comp["taxId"],
+              "seller_tax_id": self.tip.FAKE["seller_tid"], "seller_name": "从没见过的销方有限公司",
+              "amount": 100.0, "tax": 6.0, "total": 106.0, "tax_rate": "6%", "category": "信息技术服务",
+              "pending_json": ["buyerName", "buyerTaxId", "sellerName", "sellerTaxId", "amount", "tax", "taxRate", "category"],
+              "field_src_json": {"total": {"src": "qr"}}}
+        got = inv.auto_checked(inv.E(), it, st)
+        self.assertEqual(set(got), {"buyerName", "buyerTaxId", "sellerTaxId", "amount", "tax", "taxRate"})
+        # 价税合计也是识别来的（不可信）→ 金额税额不自动核；税率对不上 → 不核
+        it2 = dict(it, field_src_json={"total": {"src": "ocr"}}, tax_rate="13%")
+        got2 = inv.auto_checked(inv.E(), it2, st)
+        self.assertNotIn("amount", got2)
+        self.assertNotIn("taxRate", got2)
+        # 校验位错的税号不核
+        it3 = dict(it, seller_tax_id="91440300MA5DXXXXX1")
+        self.assertNotIn("sellerTaxId", inv.auto_checked(inv.E(), it3, st))
 
 if __name__ == "__main__":
     unittest.main()

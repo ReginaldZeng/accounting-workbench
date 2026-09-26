@@ -530,12 +530,17 @@ const _fmtVal = (k, v) => (_MONEY_FIELDS.has(k) ? money(v) : (v === null || v ==
  * @param {(which: 'all') => (void|Promise<any>)} [p.onConfirm]
  * @param {string} [p.activeField] 当前高亮的字段键
  * @param {(field: string) => void} [p.onFieldFocus]
+ * @param {boolean} [p.hideConfirm] 不显示「核对无误」（审核弹窗用右上角的「提交」代替）
+ * @param {(dirty: boolean) => void} [p.onDirtyChange] 有没有没保存的改动（审核弹窗据此拦「提交」）
+ * 系统自动核过的字段（fieldSrc[字段].sys＝依据）标「系统已核」，悬停/下方小字写依据。
  */
-export function FieldPanel({ item, editable = false, onSave, onConfirm, activeField, onFieldFocus }) {
+export function FieldPanel({ item, editable = false, onSave, onConfirm, activeField, onFieldFocus, hideConfirm = false, onDirtyChange }) {
   const [draft, setDraft] = useState({})
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   useEffect(() => { setDraft({}); setErr('') }, [item?.id])
+  const dirtyNow = Object.keys(draft).length > 0
+  useEffect(() => { onDirtyChange?.(dirtyNow) }, [dirtyNow])
   if (!item) return <div className="inv-fp"><div className="inv-fp-empty">请选一张票</div></div>
 
   const pending = new Set(Array.isArray(item.pending) ? item.pending : [])
@@ -601,7 +606,10 @@ export function FieldPanel({ item, editable = false, onSave, onConfirm, activeFi
             </span>
             <span className="inv-fp-tags">
               {isPend && <span className="inv-badge warn">待核</span>}
-              {k in draft ? <span className="inv-src dirty">已改</span> : s?.src ? <span className={'inv-src ' + s.src}>{SRC_LABEL[s.src] || s.src}</span> : null}
+              {k in draft ? <span className="inv-src dirty">已改</span>
+                : s?.sys && !isPend ? <span className="inv-src sys" title={'系统已核：' + s.sys}>系统已核</span>
+                  : s?.src ? <span className={'inv-src ' + s.src}>{SRC_LABEL[s.src] || s.src}</span> : null}
+              {s?.sys && !isPend && !(k in draft) ? <span className="inv-fp-why">{s.sys}</span> : null}
             </span>
           </div>
         )
@@ -613,8 +621,8 @@ export function FieldPanel({ item, editable = false, onSave, onConfirm, activeFi
           {pending.size > 0 && <span className="inv-fp-hint">还有 {pending.size} 项待核</span>}
           <span className="inv-vw-grow" />
           <button type="button" className="btn" disabled={!dirty || busy} onClick={save}>保存</button>
-          <button type="button" className="btn primary" disabled={busy || dirty || pending.size === 0} onClick={confirm}
-            title={dirty ? '先保存改动' : pending.size === 0 ? '没有待核字段' : '把识别来的字段都确认为已核对'}>核对无误</button>
+          {!hideConfirm && <button type="button" className="btn primary" disabled={busy || dirty || pending.size === 0} onClick={confirm}
+            title={dirty ? '先保存改动' : pending.size === 0 ? '没有待核字段' : '把识别来的字段都确认为已核对'}>核对无误</button>}
         </div>
       )}
     </div>

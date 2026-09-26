@@ -952,9 +952,10 @@ def roster(fresh=False):
 
 
 def list_user_payments(userid, template_names, days=60, limit=60):
-    """某人近 N 天在指定模板里发起的审批单（后补池「从我的审批单里选」用，下一版）→
-    {ok, rows:[{procInstId, businessId, title, createTime, amount, payeeName, hasAttachments}], msg}。
-    listids 按发起人过滤（userid_list），窗口钉钉限 120 天。"""
+    """某人近 N 天在指定模板里发起的审批单（申请人自助登记发票后补「选一张我发起的单子」用）→
+    {ok, rows:[{procInstId, businessId, title, template, createTime, amount, payeeName, hasAttachments,
+    approvalStatus, approvalResult}], msg, truncated}。
+    listids 按发起人过滤（userid_list），窗口钉钉限 120 天；单据详情 6 路并发取（请款多的人不至于等太久）。"""
     uid = str(userid or "").strip()
     if not uid:
         return {"ok": False, "rows": [], "msg": "缺钉钉用户身份"}
@@ -968,29 +969,39 @@ def list_user_payments(userid, template_names, days=60, limit=60):
         days = max(1, min(int(days or 60), 120))
         end = datetime.datetime.now(CN_TZ)
         st, et = _ms(end - datetime.timedelta(days=days)), _ms(end)
-        rows, notes, seen = [], [], set()
+        ids, notes, seen = [], [], set()
         for nm in names:
             pc, why = _process_code(conf, nm)
             if not pc:
                 notes.append(why)
                 continue
-            ids, err = _list_ids(conf, pc, st, et, userids=[uid], max_pages=10)
+            got, err = _list_ids(conf, pc, st, et, userids=[uid], max_pages=20)
             if err:
                 notes.append(err)
-            for iid in ids:
-                if iid in seen or len(rows) >= limit:
-                    continue
-                seen.add(iid)
-                r = _oapi(conf, "topapi/processinstance/get", {"process_instance_id": iid})
-                inst = (r.get("process_instance") or r.get("result")) if r.get("errcode") == 0 else None
-                if not isinstance(inst, dict):
-                    continue
-                n = normalize_instance(inst, iid, [{"name": x} for x in names])
-                rows.append({"procInstId": iid, "businessId": n["businessId"], "title": n["title"],
-                             "createTime": n["createTime"], "amount": n["amount"], "payeeName": n["payeeName"],
-                             "hasAttachments": n["hasAttachments"]})
+            for iid in got:
+                if iid not in seen:
+                    seen.add(iid)
+                    ids.append(iid)
+        truncated = len(ids) > limit
+        ids = ids[:limit]
+
+        def one(iid):
+            r = _oapi(conf, "topapi/processinstance/get", {"process_instance_id": iid})
+            inst = (r.get("process_instance") or r.get("result")) if r.get("errcode") == 0 else None
+            if not isinstance(inst, dict):
+                return None
+            n = normalize_instance(inst, iid, [{"name": x} for x in names])
+            return {"procInstId": iid, "businessId": n["businessId"], "title": n["title"], "template": n.get("template") or "",
+                    "createTime": n["createTime"], "amount": n["amount"], "payeeName": n["payeeName"],
+                    "hasAttachments": n["hasAttachments"], "approvalStatus": n.get("approvalStatus") or "",
+                    "approvalResult": n.get("approvalResult") or ""}
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            rows = [x for x in ex.map(one, ids) if x]
         rows.sort(key=lambda x: x["createTime"], reverse=True)
-        return {"ok": True, "rows": rows, "msg": "；".join(x for x in notes if x)}
+        if truncated:
+            notes.append("单子太多，只列了最近 %d 张" % limit)
+        return {"ok": True, "rows": rows, "msg": "；".join(x for x in notes if x), "truncated": truncated}
     except Exception as e:
         return {"ok": False, "rows": [], "msg": "列审批单失败：%s" % _clean(e, conf)}
 

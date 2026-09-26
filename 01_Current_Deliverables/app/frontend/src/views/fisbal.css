@@ -36,6 +36,13 @@
 .fsb-tbl th.r{ text-align:right; }
 .fsb-tbl td{ padding:6px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
 .fsb-tbl td.n{ text-align:right; font-family:var(--font-mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.fsb-tbl td.subj-c{ color:var(--ink-3); font-size:11px; }   /* 科目编码/名称/核算维度：每行同值、弱化，做账/导出用 */
+
+/* 主表层级筛选下拉 */
+.fsb-sel{ height:34px; border-radius:8px; border:1px solid var(--line-strong); background:var(--bg-sub); color:var(--ink);
+  padding:0 8px; font-size:12.5px; max-width:230px; font-family:inherit; cursor:pointer; }
+.fsb-sel:hover{ border-color:var(--accent); }
+.fsb-sel:focus{ outline:none; border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
 .fsb-tbl td.neg{ color:var(--red); }
 .fsb-tbl tbody tr:hover td{ background:var(--bg-sub); }
 .fsb-tbl tr.open td{ background:var(--green-bg); }

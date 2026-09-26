@@ -90,8 +90,8 @@ PAPER_ORIGINS = ("camera", "phone", "scanner")     # 这几种进票＝纸质件
 USER_ORIGINS = ("upload", "camera", "phone", "scanner")   # 人手送进来的：审批单打印件可当"扫审批单"
 OPEN_STATUSES = ("collecting", "returned")          # 收票工作台/手机只能往这两种状态的票夹里放票
 # 重算时要保留的标记（其余 flags 每次按字段重算）：原始码串、识别提示、已审票后到文件不一致、同票文件不一致、人手改机读字段、改票种
-STICKY_FLAGS = ("_qrRaw", "_warnings", "_region", "_splitDone", "postApprovalMismatch", "fileMismatch", "manualOverride",
-                "kindChanged")
+STICKY_FLAGS = ("_qrRaw", "_warnings", "_region", "_splitDone", "_audOk", "_doubt", "postApprovalMismatch", "fileMismatch",
+                "manualOverride", "kindChanged")
 SYSTEM_USER = "系统"                                 # 后台线程拉下来的附件记在"系统"名下（不算打开票夹那个人登记的）
 PAIR_ACTIVE_S = 120                                 # 手机 120 秒内来过＝正在用（电脑端据此快轮询）
 _DUP_LOCK = threading.RLock()                       # 查重"查＋插"必须原子（两个人同时扫同一张票只能一个算正主）；可重入：合并路径里还要重算
@@ -275,7 +275,7 @@ DEFAULT_SETTINGS = {
     "company": [{"name": "深圳市星期零食品科技有限公司", "taxId": "91440300MA5EHQAR7X"},
                 {"name": "孝感市星期九食品科技有限公司", "taxId": "91420900MA4F00NK81"}],
     "templates": [{"name": "付款申请（公对公）", "amountFields": ["实际付款总额", "付款总额"], "allowLater": True},
-                  {"name": "费用报销", "amountFields": ["报销总额", "合计金额", "报销金额", "实际报销金额"], "allowLater": False}],
+                  {"name": "费用报销", "amountFields": ["报销总额", "合计金额", "报销金额", "实际报销金额"], "allowLater": True}],
     "remind": {"enabled": True, "beforeDays": 3, "everyDays": 7, "hour": 10},
     "blockNoInvoice": False,
     # 空＝用电脑上正在用的地址（手机扫配对码、钉钉消息里的链接都跟着走）。正式域名 finance.starfieldsz.com
@@ -729,6 +729,7 @@ def item_view(it, idx=None, mobile=False):
          "procError": it.get("proc_error") or "", "paper": bool(it.get("paper")),
          "flags": {k: x for k, x in fl.items() if not str(k).startswith("_")},
          "warnings": list(fl.get("_warnings") or []), "region": fl.get("_region"),
+         "auditOk": fl.get("_audOk"), "doubt": fl.get("_doubt"),
          "deductSuggest": it.get("deduct_suggest") or "", "deductReason": it.get("deduct_reason") or "",
          "deductible": None if ded is None else bool(ded), "deductStatus": it.get("deduct_status") or "",
          "verify": it.get("verify") or "", "verifyAt": it.get("verify_at") or "", "verifyNote": it.get("verify_note") or "",
@@ -774,6 +775,65 @@ def folder_stats(folder, items):
             "sumTotal": s, "diff": (round(s - float(amt), 2) if amt is not None else None),
             "paperMissing": len([i for i in inv if i.get("origin") in ("attachment", "photo_field") and not i.get("paper")]),
             "pendingReview": len([i for i in act if i.get("review") == "pending"])}
+
+
+LATER_ST_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐", "closed": "已关闭"}
+
+
+def folder_laters(e, folder):
+    """这张单关联的发票后补单（申请人付款时登记的；按审批实例或票夹找），新的在前。"""
+    if not folder:
+        return []
+    rows = S.laters_by_inst(e, folder.get("inst_id")) if folder.get("inst_id") else []
+    ids = {r["id"] for r in rows}
+    rows += [r for r in S._all(e, select(S.LATER).where(S.LATER.c.folder_id == folder["id"])) if r["id"] not in ids]
+    return sorted(rows, key=lambda r: -r["id"])
+
+
+def later_left(l):
+    """后补单还没到的金额（与后补池同口径：预计补票（没填按付款金额）− 已登记到票 − 已收未登记）；已收齐/已关闭算 0。"""
+    if (l.get("status") or "open") not in ("open", "partial"):
+        return 0.0
+    base = l.get("expect_amount") if l.get("expect_amount") is not None else l.get("pay_amount")
+    if base is None:
+        return 0.0
+    return round(max(0.0, float(base) - float(l.get("received_amount") or 0) - float(l.get("unregistered_amount") or 0)), 2)
+
+
+def later_row_view(l):
+    """审核页「发票后补单」列表的一行。"""
+    exp = l.get("expect_amount") if l.get("expect_amount") is not None else l.get("pay_amount")
+    return {"id": l["id"], "filedBy": l.get("filed_by") or "", "filedAt": l.get("created_at") or "",
+            "expectAmount": _money_val(exp), "receivedAmount": _money_val(l.get("received_amount")) or 0.0,
+            "unregisteredAmount": _money_val(l.get("unregistered_amount")) or 0.0, "left": later_left(l),
+            "expectDate": l.get("expect_date") or "", "receiverName": l.get("receiver_name") or l.get("receiver") or "",
+            "status": l.get("status") or "open", "statusText": LATER_ST_CN.get(l.get("status") or "open", l.get("status") or ""),
+            "remindCount": int(l.get("remind_count") or 0), "lastRemindAt": l.get("last_remind_at") or ""}
+
+
+def folder_gap(folder, items, laters):
+    """金额核对：差额＝付款金额 −（专票 ＋ 普票 ＋ 发票后补单还没到的）。正数＝票比付款少，负数＝票比付款多。
+    专票＝增值税专用发票（含电子专票）；普票＝其余发票和收据。拆分票按本单分摊额。付款金额没有（手工票夹没填）→ gap=None。"""
+    act = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"
+           and i.get("kind") in ("invoice", "receipt")]
+    sp = [i for i in act if i.get("kind") == "invoice" and i.get("inv_type") == "special"]
+    nm = [i for i in act if not (i.get("kind") == "invoice" and i.get("inv_type") == "special")]
+    s_sp = round(sum(_share(i) for i in sp), 2)
+    s_nm = round(sum(_share(i) for i in nm), 2)
+    left = round(sum(later_left(l) for l in (laters or [])), 2)
+    pay = (folder or {}).get("amount")
+    gap = None if pay is None else round(float(pay) - s_sp - s_nm - left, 2)
+    return {"pay": _money_val(pay), "special": s_sp, "specialN": len(sp), "normal": s_nm, "normalN": len(nm),
+            "later": left, "gap": gap}
+
+
+def gap_msg(g):
+    v = g["gap"]
+    return "有差额 ¥%s（票比付款%s）" % (_money_str(abs(v)), "少" if v > 0 else "多")
+
+
+def gap_off(g):
+    return bool(g) and g.get("gap") is not None and abs(g["gap"]) > 0.005
 
 
 _UNSET = object()
@@ -824,10 +884,10 @@ def folder_view(f, items=None, mobile=False, settings=None, with_form=False, lat
          "reviewNote": f.get("review_note") or "", "selfReview": bool(f.get("self_review")),
          "allowLater": bool(cfg and cfg.get("allowLater")),
          "later": later_brief(f, e, later), "stats": folder_stats(f, items)}
-    # 黄牌「无票、未登记后补」只给允许后补的付款类模板；附件还在拉时先不亮（票可能马上就到）
+    # 黄牌「无票、未登记后补」只给允许后补的付款类模板（报销不亮：纸票常后放、餐补本就没票）；附件还在拉时先不亮（票可能马上就到）
     bills = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"
              and i.get("kind") in ("invoice", "receipt")]
-    v["laterMissing"] = bool(v["allowLater"] and v["later"] is None and not bills
+    v["laterMissing"] = bool(v["allowLater"] and not is_reimb(f.get("template")) and v["later"] is None and not bills
                              and (f.get("attach_status") or "none") not in ("pending", "running"))
     if with_form and not mobile:
         v["form"] = f.get("form_json") or []
@@ -928,12 +988,20 @@ def _qr_raw_of(it):
     return s if ip.parse_invoice_qr(s) else None
 
 
+def is_reimb(tpl):
+    """报销类模板（费用报销等）：收款方是报销人自己、纸票常后放、餐补本就没票。
+    V2.621 起报销也能登记发票后补（allowLater），但下面这些付款单专属的判断仍不适用于报销。"""
+    return "报销" in (tpl or "")
+
+
 def _payee_for_check(folder, st):
-    # 只有公对公付款单才比"销方＝收款方"：费用报销的收款方是报销人自己，比了全是假红
+    # 只有付款单才比"销方＝收款方"：费用报销的收款方是报销人自己，比了全是假红（报销允许后补也一样不比）
     name = (folder or {}).get("payee_name")
     if not name:
         return None
     tpl = (folder or {}).get("template") or ""
+    if is_reimb(tpl):
+        return None
     cfg = template_cfg(tpl, st)
     return name if ("公对公" in tpl or (cfg and cfg.get("allowLater"))) else None
 
@@ -1083,6 +1151,61 @@ def item_dup_key(code, number, issue_date, total):
     return ip.dup_key(code, number, issue_date, total) or ""
 
 
+def _seller_name_known(e, it):
+    """同税号的销方名称在别的票上已由人核过（或从电子原件读到），且和这张一致 → True。
+    只认人核过/原件来的：识别出来又被系统放过的不算，免得识别错一次就一路放行。"""
+    tid = (it.get("seller_tax_id") or "").strip()
+    nm = ip.normalize_name(it.get("seller_name") or "")
+    if not tid or not nm:
+        return False
+    with e.connect() as cx:
+        rows = [S._row(r) for r in cx.execute(select(S.ITEM).where(
+            S.ITEM.c.seller_tax_id == tid, S.ITEM.c.id != it["id"],
+            or_(S.ITEM.c.status.is_(None), S.ITEM.c.status != "removed")).order_by(S.ITEM.c.id.desc()).limit(50))]
+    for r in rows:
+        src = (r.get("field_src_json") or {}).get("sellerName") or {}
+        if src.get("src") in TRUSTED_SRC and "sellerName" not in (r.get("pending_json") or []) \
+                and ip.normalize_name(r.get("seller_name") or "") == nm:
+            return True
+    return False
+
+
+def auto_checked(e, it, st):
+    """识别来的「待核」字段里系统能自己核的 → {字段: 依据}：抬头/购方税号在公司清单里、销方税号校验位正确、
+    金额＋税额＝二维码（或原件）的价税合计、税额÷金额＝税率、销方名称与人核过的同税号票一致。项目类别不自动核（决定能否抵扣）。"""
+    pend = list(it.get("pending_json") or [])
+    if not pend or it.get("kind") != "invoice":
+        return {}
+    fs = it.get("field_src_json") or {}
+    out = {}
+    comps = st.get("company") or []
+    names = {ip.normalize_name(c.get("name") or "") for c in comps if c.get("name")}
+    tids = {(c.get("taxId") or "").upper() for c in comps if c.get("taxId")}
+    if "buyerName" in pend and it.get("buyer_name") and ip.normalize_name(it["buyer_name"]) in names:
+        out["buyerName"] = "与公司清单一致"
+    if "buyerTaxId" in pend and (it.get("buyer_tax_id") or "").upper() in tids:
+        out["buyerTaxId"] = "与公司清单一致"
+    stid = (it.get("seller_tax_id") or "").upper()
+    if "sellerTaxId" in pend and len(stid) == 18 and ip.uscc_ok(stid):
+        out["sellerTaxId"] = "信用代码校验位正确"
+    a, t, tt = it.get("amount"), it.get("tax"), it.get("total")
+    tsrc = (fs.get("total") or {}).get("src")
+    if a is not None and t is not None and tt is not None and "total" not in pend and tsrc in TRUSTED_SRC \
+            and abs(float(a) + float(t) - float(tt)) <= 0.011:
+        why = "金额＋税额＝%s价税合计" % ("二维码" if tsrc == "qr" else "票面")
+        for k in ("amount", "tax"):
+            if k in pend:
+                out[k] = why
+    rate = str(it.get("tax_rate") or "").strip()
+    m = re.fullmatch(r"(\d{1,2}(?:\.\d+)?)%", rate)
+    if "taxRate" in pend and m and a and t is not None and float(a) > 0 \
+            and abs(float(a) * float(m.group(1)) / 100 - float(t)) <= max(0.02, float(a) * 0.0005):
+        out["taxRate"] = "税额÷金额＝%s" % rate
+    if "sellerName" in pend and _seller_name_known(e, it):
+        out["sellerName"] = "与人核过的同税号票一致"
+    return out
+
+
 def refresh_item(item_id, settings=None, user=SYSTEM_USER):
     """按票当前字段重算：查重键、重复标记、校验 flags、可否抵扣建议、销方档案；挂着后补单的顺手重算后补单。返回最新行。
     号码刚拿到（查重键变了）而同票夹里已有同号的票 → 两张并成一张（和"同票夹再进同一张票＝合并"一致），返回并入的那张
@@ -1113,7 +1236,16 @@ def refresh_item(item_id, settings=None, user=SYSTEM_USER):
             flags["dup"] = dup
         flags.update(validate_flags(d, folder, st))
         sug, why = suggest_deduct(d, flags)
-        S.item_update(e, it["id"], dup_key=key, dup_at=dup_at, flags_json=flags, deduct_suggest=sug, deduct_reason=why)
+        upd = dict(dup_key=key, dup_at=dup_at, flags_json=flags, deduct_suggest=sug, deduct_reason=why)
+        auto = auto_checked(e, it, st) if live and it.get("review") not in ("approved", "void") else {}
+        if auto:
+            fs = _copy(it.get("field_src_json") or {})
+            for k, why_k in auto.items():
+                meta = dict(fs.get(k)) if isinstance(fs.get(k), dict) else {"src": "ocr", "page": int(it.get("page") or 0), "box": None}
+                meta["sys"] = why_k
+                fs[k] = meta
+            upd.update(field_src_json=fs, pending_json=[p for p in (it.get("pending_json") or []) if p not in auto])
+        S.item_update(e, it["id"], **upd)
         if changed:
             # 号码变了：老组少了一张要重判；新组里先到的票不受这张后来者影响（它们排在前面），重判只为稳妥
             for k in (old_key, key):
@@ -2160,7 +2292,10 @@ def _desk_state(user):
     folder = S.folder_get(e, fid) if fid else None
     items = S.folder_items(e, folder["id"]) if folder else []
     recent = S.folders_recent(e, user, limit=10)
-    return {"ok": True, "folder": folder_view(folder, items, settings=st) if folder else None, "items": item_views(items),
+    fv = folder_view(folder, items, settings=st) if folder else None
+    if fv is not None:
+        fv["gap"] = folder_gap(folder, items, folder_laters(e, folder))     # 底部金额核对（付款−专票−普票−后补）
+    return {"ok": True, "folder": fv, "items": item_views(items),
             "recent": folder_views(recent, settings=st), "pair": _pair_state(user)}
 
 
@@ -2394,16 +2529,22 @@ def submit_check(folder, items, settings=None):
         warnings.append({"code": "attachFailed", "msg": "有附件没拉下来：%s" % (folder.get("attach_msg") or "")})
     bills = [i for i in act if i.get("kind") in ("invoice", "receipt")]
     cfg = template_cfg(folder.get("template"), st)
-    if cfg and cfg.get("allowLater"):
+    if cfg and cfg.get("allowLater") and not is_reimb(folder.get("template")):
         if not bills and not later_brief(folder):
             m = "付款单没附发票，也没登记发票后补：请先到「发票后补池」登记"
             (blockers if st.get("blockNoInvoice") else warnings).append({"code": "noInvoice", "msg": m})
-    elif not act:
+    elif not act and not later_brief(folder):
+        # 报销单登记了发票后补（票还没到）可以先空着提交，审核时看后补单
         blockers.append({"code": "empty", "msg": "票夹是空的，先放票再提交"})
     failed = [i for i in act if i.get("proc_status") == "failed"]
     if failed:
         warnings.append({"code": "procFailed", "itemIds": [i["id"] for i in failed],
                          "msg": "%d 张票没识别出来，审核时要对着图补字段" % len(failed)})
+    if bills and folder.get("amount") is not None:
+        g = folder_gap(folder, act, folder_laters(E(), folder))
+        if gap_off(g):
+            warnings.append({"code": "gap", "gap": g,
+                             "msg": "%s：付款金额 −（专票＋普票＋发票后补单）不等于 0，审核时会重点关注" % gap_msg(g)})
     return blockers, warnings
 
 
@@ -2439,7 +2580,11 @@ def _submit_sync(u, fid):
         return None, err("票夹里没有要审核的票，先放票再提交", 400,
                          blockers=[{"code": "nothing", "msg": "没有要审核的票"}], warnings=warnings)
     for it in todo:
-        S.item_update(e, it["id"], review="pending")
+        fl = dict(it.get("flags_json") or {})
+        stale = [k for k in ("_audOk", "_doubt") if k in fl]
+        for k in stale:
+            fl.pop(k)          # 退回后改好再提交：上一轮的「已核/疑问」作废，审核人重新看
+        S.item_update(e, it["id"], review="pending", **({"flags_json": fl} if stale else {}))
     n = len(todo)
     S.folder_update(e, fid, status="submitted", submitted_by=u["name"], submitted_at=ts)
     log(u, "提交审核", fid, detail={"items": n, "warnings": [w["msg"] for w in warnings]})
@@ -2492,6 +2637,9 @@ async def folder_detail(fid: int, request: Request):
         fv = folder_view(f, items, with_form=True)
         # 审核页从链接直接打开票夹时也要看到异常清单（不依赖它是否在当前队列页里）
         fv["anomalies"], fv["clean"] = folder_anomalies(f, items, "pending")
+        laters = folder_laters(e, f)
+        fv["laters"] = [later_row_view(l) for l in laters]
+        fv["gap"] = folder_gap(f, items, laters)
         # 留痕：票夹级的＋这夹里每张票（含已移除的）自己的，按 itemId/laterId 可筛单张票的历史
         ids = [i["id"] for i in S.folder_items(e, fid, include_removed=True)]
         logs = S.logs_of(e, folder_id=fid, item_ids=ids, limit=300)
@@ -3055,13 +3203,9 @@ async def m_bind(request: Request):
     if code:
         who = await run_in_threadpool(idt.userinfo_by_code, code)
     bound_uid = dt_uid_of(p["user"])
-    if bound_uid and idt.configured():
-        if not code:
-            return err("请用手机钉钉「扫一扫」扫配对码（要核对手机上的人和电脑上登录的是同一个）", 403)
-        if not who.get("ok"):
-            log(p["user"], "手机配对被拒", detail={"reason": "没认出钉钉身份", "msg": who.get("msg") or ""})
-            return err("没认出手机上的钉钉身份（%s）：请用手机钉钉「扫一扫」重新扫电脑上的配对码"
-                       % (who.get("msg") or "未知原因"), 403)
+    # V2.628 用户定「信任电脑登录身份」：扫链接二维码打开的页面不是注册微应用，钉钉免登多半调不起来（拿不到 code）。
+    # 认不出钉钉身份也放行——配对是从已登录的电脑发起的，登记人＝电脑上登录的人，页面标注"未通过钉钉核对"。
+    # 只有钉钉明确认出是"另一个人"才拦（防在别人电脑上用自己手机配对）。
     if who.get("ok") and bound_uid and who.get("userid") != bound_uid:
         log(p["user"], "手机配对被拒", detail={"dtName": who.get("name") or "", "reason": "钉钉身份与电脑账号不一致"})
         audit(p["user"], "手机配对被拒", "配对#%d" % p["id"], "手机钉钉：%s" % (who.get("name") or ""))
@@ -3080,7 +3224,7 @@ async def m_bind(request: Request):
     if who.get("ok"):
         msg = "已配对：%s（钉钉：%s）" % (p["user"], who.get("name") or who.get("userid"))
     else:
-        msg = "没认出手机上的钉钉身份（%s），先按电脑账号「%s」登记；建议用钉钉「扫一扫」打开" % (who.get("msg") or "未知原因", p["user"])
+        msg = "没通过钉钉核对身份，按电脑上登录的「%s」登记（扫码收票照常用）" % p["user"]
     det = {"dtName": who.get("name") or "", "dtIdentified": bool(who.get("ok")), "device": device}
     log(p["user"], "手机配对", detail=det)
     audit(p["user"], "手机配对", "配对#%d" % p["id"], det)
@@ -3091,8 +3235,9 @@ async def m_bind(request: Request):
 @router.get("/api/inv/m/jsconfig")
 async def m_jsconfig(request: Request):
     """手机页调钉钉「扫一扫」前的 dd.config 参数（JSAPI 鉴权）。query：url＝手机页当前地址（不含 #）。
-    只给本站地址签名（请求的 Host 或设置里的站点地址），免得拿我们的应用给别人的网页签权限。"""
-    p, u, bad = _phone(request)
+    只给本站地址签名（请求的 Host 或设置里的站点地址），免得拿我们的应用给别人的网页签权限。
+    还没绑定（刚扫配对码）也给：钉钉里要先 dd.config 鉴权、再 requestAuthCode 才认得出是谁（V2.621 修手机认不出人）。"""
+    p, u, bad = _phone(request, need_bound=False)
     if bad:
         return bad
     url = _s(request.query_params.get("url"), 500)
@@ -3273,9 +3418,9 @@ def folder_anomalies(folder, items, tab="pending", later=_UNSET):
             lb = later_brief(folder, None, later)
             add("noInvoice", "这张单没有发票" + ("，已登记后补" if lb else "，也没登记后补"), "info" if lb else "warn")
         elif folder.get("amount") is not None:
-            st = folder_stats(folder, act)
-            if st["diff"] is not None and abs(st["diff"]) > 0.005:
-                add("amountDiff", "票合计比单据金额%s ¥%s" % ("多" if st["diff"] > 0 else "少", _money_str(abs(st["diff"]))), "warn")
+            g = folder_gap(folder, act, folder_laters(E(), folder))
+            if gap_off(g):
+                add("amountDiff", gap_msg(g), "warn")
     return out, not out
 
 
@@ -3293,7 +3438,7 @@ def _self_review_msg(u, folder, what="审核"):
     return "这个票夹里有你自己登记的票，不能自己审，请换一位会计%s" % what
 
 
-def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=None):
+def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=None, gap_note=""):
     """审核通过票夹里待审的票 → (ok, http状态, msg, extra)。逐张通过与批量通过共用。
     item_ids：审核人页面上看到的待审票 id（逐张通过时必给）——只通过这些；审核期间票夹里又进了新的待审票 →
     409 {newItems}，让他刷新后再审（没看过的票不能被一起通过）。批量通过不给（只过"干净"的票夹）。
@@ -3316,6 +3461,16 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
     self_rev = _self_review(u, folder, pend)
     if self_rev and not db.is_super(u):
         return False, 403, _self_review_msg(u, folder), {}
+    doubts = [i for i in pend if (i.get("flags_json") or {}).get("_doubt")]
+    if doubts:
+        m = "有 %d 张记了疑问：请提交退回，或先清掉疑问" % len(doubts)
+        return False, 400, m, {"blockers": [{"code": "doubt", "itemIds": [i["id"] for i in doubts], "msg": m}]}
+    g = folder_gap(folder, items, folder_laters(e, folder))
+    if gap_off(g):
+        # 付款金额 −（专票＋普票＋后补）≠ 0：逐张审要写差额说明（批量通过本来就只过没异常的票夹）
+        if not gap_note:
+            return False, 400, "%s：要写差额说明才能通过" % gap_msg(g), {"code": "gapNote", "gap": g}
+        note = ("差额说明（%s）：%s" % (_money_str(g["gap"]), gap_note)) + (("；" + note) if note else "")
     blockers = []
     dups = [i for i in pend if (i.get("flags_json") or {}).get("dup")]
     if dups:
@@ -3413,10 +3568,12 @@ async def audit_approve(request: Request):
         return err("请刷新页面后再审", 400)
 
     def run():
-        f = S.folder_get(E(), _int_or_none(body.get("folderId")))
+        e = E()
+        f = S.folder_get(e, _int_or_none(body.get("folderId")))
         if not f:
             return err("票夹不存在", 404)
-        ok, status, msg, extra = approve_folder(u, f, body.get("decisions"), body.get("note") or "", item_ids=ids)
+        ok, status, msg, extra = approve_folder(u, f, body.get("decisions"), _s(body.get("note"), 300), item_ids=ids,
+                                                gap_note=_s(body.get("gapNote"), 300))
         if not ok:
             return err(msg, status, **extra)
         f = S.folder_get(E(), f["id"])
@@ -3454,6 +3611,51 @@ async def audit_batch(request: Request):
     ids = body.get("folderIds") if isinstance(body.get("folderIds"), list) else []
     # 最多 200 个票夹、每个几次写库：整段放线程池，不让别的工具的请求干等
     return await run_in_threadpool(_audit_batch_sync, u, ids, _s(body.get("note"), 500))
+
+
+def _audit_mark_sync(u, iid, mark, text):
+    """审核弹窗里单张票：ok＝这张核对无误（待核字段一并确认、记已核）；doubt＝记疑问（整单提交时退回）；clear＝清掉标记。"""
+    e = E()
+    it = S.item_get(e, iid)
+    folder = S.folder_get(e, (it or {}).get("folder_id")) if it else None
+    g = item_guard(u, it, folder)
+    if g:
+        return None, g
+    if it.get("review") != "pending":
+        return None, err("这张票不在待审核状态", 400)
+    if mark == "ok" and it.get("pending_json"):
+        _, bad = _item_update_sync(u, iid, {"confirm": "all"})
+        if bad:
+            return None, bad
+        it = S.item_get(e, iid)
+    fl = dict(it.get("flags_json") or {})
+    fl.pop("_audOk", None)
+    fl.pop("_doubt", None)
+    if mark == "ok":
+        fl["_audOk"] = {"by": u["name"], "at": now_s()}
+    elif mark == "doubt":
+        fl["_doubt"] = {"text": text, "by": u["name"], "at": now_s()}
+    S.item_update(e, iid, flags_json=fl)
+    act = {"ok": "审核·本张核对无误", "doubt": "审核·记疑问", "clear": "审核·清掉标记"}[mark]
+    log(u, act, it["folder_id"], iid, it.get("later_id"), {"text": text} if text else {})
+    return {"ok": True, "item": item_view(S.item_get(e, iid))}, None
+
+
+@router.post("/api/inv/audit/item/{iid}/mark")
+async def audit_item_mark(iid: int, request: Request):
+    """body：{mark: ok|doubt|clear, text?}。疑问必须写内容。"""
+    u, bad = need(request, ENTER_AUDIT, CAP_AUDIT)
+    if bad:
+        return bad
+    body = await body_json(request)
+    mark = body.get("mark")
+    text = _s(body.get("text"), 200)
+    if mark not in ("ok", "doubt", "clear"):
+        return err("mark 只能是 ok / doubt / clear", 400)
+    if mark == "doubt" and not text:
+        return err("写一下疑问是什么，退回时提交人才知道改哪", 400)
+    out, bad = await run_in_threadpool(_audit_mark_sync, u, iid, mark, text)
+    return bad if bad else out
 
 
 def _audit_return_sync(u, fid, note):

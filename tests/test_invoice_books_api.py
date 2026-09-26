@@ -36,7 +36,7 @@ def _has(mod):
 
 HAS_XL = _has("openpyxl")
 ENTERS = ("enter:invdesk", "enter:invlater", "enter:invaudit", "enter:invledger")
-MODS = ("db", "core", "routers.invoice", "routers.invoice_books")
+MODS = ("db", "core", "routers.invoice", "routers.invoice_books", "routers.invoice_self")
 
 
 def qr(num, total, qtype="31", dt="20260901"):
@@ -101,7 +101,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         pkg = sys.modules.get("routers")
         cls.pkg_attrs = {}
         if pkg is not None:
-            for a in ("invoice", "invoice_books"):
+            for a in ("invoice", "invoice_books", "invoice_self"):
                 if hasattr(pkg, a):
                     cls.pkg_attrs[a] = getattr(pkg, a)
                     delattr(pkg, a)
@@ -121,6 +121,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
         sys.modules["core"] = core
         from routers import invoice as inv
         from routers import invoice_books as books
+        from routers import invoice_self as sf
+        cls.sf = sf
         from kernels import invoice_store as S
         from kernels import invoice_excel as ie
         from kernels import test_invoice_parse as tip
@@ -129,6 +131,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         app = FastAPI()
         app.include_router(inv.router)
         app.include_router(books.router)
+        app.include_router(sf.router)
         cls.c = TestClient(app)
 
         def mk(name, perms=None, role="normal"):
@@ -162,7 +165,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
                 sys.modules[k] = v
         pkg = sys.modules.get("routers")
         if pkg is not None:
-            for a in ("invoice", "invoice_books"):
+            for a in ("invoice", "invoice_books", "invoice_self"):
                 if a in cls.pkg_attrs:
                     setattr(pkg, a, cls.pkg_attrs[a])
                 elif hasattr(pkg, a):
@@ -537,7 +540,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
                     "receiver": "recv2", "note": "先付款后开票"}
             for bad, word in ((dict(body, receiver="intern"), "接收人"), (dict(body, receiver="ghost"), "接收人"),
                               (dict(body, expectDate="下周"), "预计到票日期"), (dict(body, invKind="x"), "发票种类"),
-                              (dict(body, expectAmount="abc"), "金额"), (dict(body, instId=""), "付款单")):
+                              (dict(body, expectAmount="abc"), "金额"), (dict(body, instId=""), "付款单"),
+                              (dict(body, taxRate=""), "税率"), (dict(body, taxRate="七个点"), "税率"), (dict(body, taxRate="12%"), "税率")):
                 r = self.post("/api/inv/later/create", "recv", bad)
                 self.assertEqual(r.status_code, 400, bad)
                 self.assertIn(word, r.json()["msg"])
@@ -625,8 +629,10 @@ class InvoiceBooksApiTests(unittest.TestCase):
             cl = self.ok(self.post("/api/inv/later/%d/close" % lid, "recv", {"note": "供应商不开票，已退款"}))
             self.assertEqual(cl["later"]["status"], "closed")
             self.assertEqual(self.post("/api/inv/later/%d/receive" % lid, "recv2", {"code": qr(num(9003), 5)}).status_code, 400)
-            # 费用报销不走后补
-            with patch.object(inv.idt, "normalize_instance", MagicMock(return_value=self._norm(instId="PI-LATER-2", template="费用报销"))):
+            # 设置里没勾「允许后补」的模板不走后补（V2.621 起费用报销默认允许，这里临时关掉它）
+            st0 = inv.get_settings()
+            st1 = dict(st0, templates=[dict(t, allowLater=(t["name"] != "费用报销")) for t in st0["templates"]])
+            with patch.object(inv.idt, "normalize_instance", MagicMock(return_value=self._norm(instId="PI-LATER-2", template="费用报销"))),                     patch.object(inv, "get_settings", MagicMock(return_value=st1)):
                 r = self.post("/api/inv/later/resolve", "recv", {"code": code})
             self.assertEqual(r.status_code, 400)
             self.assertIn("不走发票后补", r.json()["msg"])
@@ -994,7 +1000,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
                 seen.append("thread")
             return {"sent": True, "msg": "已发送"}
         day = (date.today() + timedelta(days=5)).isoformat()
-        body = {"instId": "PI-LATER-21A", "invKind": "special", "expectDate": day, "expectAmount": 300, "receiver": "recv2"}
+        body = {"instId": "PI-LATER-21A", "invKind": "special", "taxRate": "13%", "expectDate": day, "expectAmount": 300, "receiver": "recv2"}
         with patch.object(self.inv, "notify_dt", fake_notify):
             j = self.ok(self.post("/api/inv/later/create", "recv", body))
             self.assertIs(j["notified"], True)
@@ -1040,6 +1046,125 @@ class InvoiceBooksApiTests(unittest.TestCase):
             books._pack_file(self.e, {}, None, "合并.pdf", b"%PDF-1.4 x", "pdf", [{"page": 0}, {"page": 7}], "acct")
         self.assertEqual(seen["max_pages"], 8)
 
+    def test_23_applicant_self_registers_later(self):
+        """申请人自助登记发票后补（V2.621）：不走工作台登录，钉钉验证码认人（重名先选部门、60 秒不重发、错码计次、一码一用）；
+        只列/只能登记自己发起的单；登记后进同一个后补池（filedVia=self），财务审核时按审批单关联；只能给自己的后补单传资料。人名单号都是编的。"""
+        inv, books, sf, S, e = self.inv, self.books, self.sf, self.S, self.e
+        self.assertEqual(self.c.get("/api/inv/s/payments").status_code, 401)
+        self.assertIsNone(self.c.get("/api/inv/s/hello").json()["me"])
+        roster = {"ok": True, "msg": "", "rows": [
+            {"userid": "dt-app", "name": "申请人丙", "title": "采购", "dept": "公司-采购部"},
+            {"userid": "dt-dup1", "name": "重名人", "title": "", "dept": "公司-销售部"},
+            {"userid": "dt-dup2", "name": "重名人", "title": "", "dept": "公司-生产部"}]}
+        sf._IP_HITS.clear()
+        with patch.object(inv.idt, "roster", MagicMock(return_value=roster)), \
+                patch.object(inv.idt, "send_text", MagicMock(side_effect=AssertionError("不许真发"))):
+            r = self.c.post("/api/inv/s/login/send", json={"name": "查无此人"})
+            self.assertEqual(r.status_code, 404)
+            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "重名人"}))
+            self.assertEqual((r["need"], [c["dept"] for c in r["choices"]]), ("pick", ["公司-销售部", "公司-生产部"]))
+            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "重名人", "pick": 1}))
+            self.assertIn("生产部", r["to"])
+            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "申请人丙"}))
+            ticket, code = r["ticket"], r["devCode"]
+            self.assertEqual(len(code), 6)
+            self.assertEqual(self.c.post("/api/inv/s/login/send", json={"name": "申请人丙"}).status_code, 429)   # 60 秒内不重发
+        bad = "%06d" % ((int(code) + 1) % 1000000)
+        r = self.c.post("/api/inv/s/login/verify", json={"ticket": ticket, "code": bad})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("不对", r.json()["msg"])
+        j = self.ok(self.c.post("/api/inv/s/login/verify", json={"ticket": ticket, "code": code}))
+        tok = j["token"]
+        self.assertEqual((j["me"]["name"], j["me"]["dept"]), ("申请人丙", "公司-采购部"))
+        self.assertEqual(self.c.post("/api/inv/s/login/verify", json={"ticket": ticket, "code": code}).status_code, 400)  # 一码一用
+        row = S.self_by_hash(e, "session", sf._h(tok))
+        self.assertEqual(row["dt_userid"], "dt-app")
+        self.assertNotIn(tok, json.dumps(row, default=str))                  # 库里只存哈希
+        H = {"X-Inv-Self": tok}
+        self.assertEqual(self.c.get("/api/inv/s/hello", headers=H).json()["me"]["name"], "申请人丙")
+        self.assertEqual([x["name"] for x in self.ok(self.c.get("/api/inv/s/receivers", headers=H))["rows"]], ["接收人甲", "接收人乙"])
+        # 我的审批单：只按我的钉钉 userid 查、只查允许后补的模板
+        pays = MagicMock(return_value={"ok": True, "msg": "", "rows": [
+            {"procInstId": "PI-SELF-1", "businessId": "202609250900000009101", "title": "申请人丙提交的付款申请（公对公）",
+             "createTime": "2026-09-20 10:00", "amount": 800.0, "payeeName": "自助收款方有限公司", "hasAttachments": False}]})
+        with patch.object(inv.idt, "list_user_payments", pays):
+            r = self.ok(self.c.get("/api/inv/s/payments", headers=H))
+            self.ok(self.c.get("/api/inv/s/payments", headers=H))              # 3 分钟内同一范围走缓存
+            self.assertEqual(pays.call_count, 1)
+            self.ok(self.c.get("/api/inv/s/payments?days=120&fresh=1", headers=H))
+            self.assertEqual((pays.call_count, pays.call_args[1]["days"], pays.call_args[1]["limit"]), (2, 120, sf.PAY_LIMIT))
+            self.assertEqual(self.ok(self.c.get("/api/inv/s/payments?days=999", headers=H))["days"], 60)   # 只认 30/60/120
+        sf._PAY_CACHE.clear()
+        self.assertEqual(pays.call_args[0][0], "dt-app")
+        self.assertIn("费用报销", pays.call_args[0][1])                      # 费用报销也能登记后补（V2.621 起默认允许）
+        self.assertEqual((r["rows"][0]["laterId"], r["rows"][0]["hasInvoice"]), (None, False))
+        day = (date.today() + timedelta(days=15)).isoformat()
+        body = {"instId": "PI-SELF-1", "invKind": "normal", "taxRate": "3", "expectDate": day, "expectAmount": 800, "receiver": "recv"}
+        r = self.c.post("/api/inv/s/later", json=dict(body, taxRate=""), headers=H)
+        self.assertEqual(r.status_code, 400)                                  # 税率必填（V2.622）
+        self.assertIn("税率", r.json()["msg"])
+        sent = MagicMock(return_value={"sent": True, "msg": "已发送"})
+        norm = self._norm(instId="PI-SELF-1", applicantUid="dt-app", payeeName="自助收款方有限公司", amount=800.0)
+        with patch.object(books, "_cached_norm", MagicMock(return_value=dict(norm, applicantUid="dt-other", applicant="别人"))):
+            r = self.c.post("/api/inv/s/later", json=body, headers=H)
+            self.assertEqual(r.status_code, 403)                              # 别人发起的单不能登记
+            self.assertIn("别人", r.json()["msg"])
+        with patch.object(books, "_cached_norm", MagicMock(return_value=norm)), patch.object(inv, "notify_dt", sent):
+            j = self.ok(self.c.post("/api/inv/s/later", json=body, headers=H))
+        lid = j["later"]["id"]
+        self.assertEqual((j["later"]["filedBy"], j["later"]["filedVia"], j["later"]["receiver"]), ("申请人丙", "self", "recv"))
+        self.assertEqual(j["later"]["taxRate"], "3%")                         # 3 → 3%
+        self.assertEqual(sent.call_args[0][0], ["dt-recv"])
+        l = S.later_get(e, lid)
+        self.assertEqual((l["filed_uid"], l["applicant_uid"]), ("dt-app", "dt-app"))
+        fo = S.folder_by_inst(e, "PI-SELF-1")
+        self.assertEqual([x["id"] for x in inv.folder_laters(e, fo)], [lid])  # 财务审核这张单时关联得到
+        mine = self.ok(self.c.get("/api/inv/s/laters", headers=H))["rows"]
+        self.assertEqual(mine[0]["id"], lid)                                   # 新登记的在最上面
+        self.assertTrue(all(S.later_get(e, x["id"])["applicant_uid"] == "dt-app" for x in mine))
+        with patch.object(inv.idt, "list_user_payments", pays):
+            self.assertEqual(self.ok(self.c.get("/api/inv/s/payments", headers=H))["rows"][0]["laterId"], lid)
+            # 已收齐也算「已登记」（V2.624：收齐后不能又显示成未登记）；关闭的不算
+            S.later_update(e, lid, status="done")
+            row = self.ok(self.c.get("/api/inv/s/payments", headers=H))["rows"][0]
+            self.assertEqual((row["laterId"], row["laterStatus"]), (lid, "done"))
+            S.later_update(e, lid, status="closed")
+            self.assertIsNone(self.ok(self.c.get("/api/inv/s/payments", headers=H))["rows"][0]["laterId"])
+            S.later_update(e, lid, status="open")
+        # 资料：自己的能传，别人的看不到
+        r = self.c.post("/api/inv/s/later/%d/docs" % lid, files=[("files", ("承诺函.txt", "承诺".encode("utf-8"), "text/plain"))], headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        other = self.later_row(folder_id=fo["id"], inst_id="PI-SELF-X", applicant_uid="dt-someone")
+        r = self.c.post("/api/inv/s/later/%d/docs" % other, files=[("files", ("x.txt", b"x", "text/plain"))], headers=H)
+        self.assertEqual(r.status_code, 404)
+        # 入口网址：要后补池权限
+        self.assertTrue(self.ok(self.get("/api/inv/s/link", "recv"))["url"].endswith("/#/invself"))
+        self.assertEqual(self.get("/api/inv/s/link", "intern").status_code, 403)
+        # 退出后令牌作废
+        self.ok(self.c.post("/api/inv/s/logout", json={}, headers=H))
+        self.assertEqual(self.c.get("/api/inv/s/laters", headers=H).status_code, 401)
+
+    def test_24_self_login_code_limits(self):
+        """验证码：输错 5 次作废；过期作废；钉钉免登认得出就直接发会话。"""
+        inv, sf, S, e = self.inv, self.sf, self.S, self.e
+        roster = {"ok": True, "msg": "", "rows": [{"userid": "dt-lim", "name": "限次人", "title": "", "dept": "公司-行政部"}]}
+        sf._IP_HITS.clear()
+        with patch.object(inv.idt, "roster", MagicMock(return_value=roster)):
+            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "限次人"}))
+        bad = "%06d" % ((int(r["devCode"]) + 7) % 1000000)
+        for _ in range(sf.CODE_TRIES):
+            self.assertEqual(self.c.post("/api/inv/s/login/verify", json={"ticket": r["ticket"], "code": bad}).status_code, 400)
+        r2 = self.c.post("/api/inv/s/login/verify", json={"ticket": r["ticket"], "code": r["devCode"]})
+        self.assertEqual(r2.status_code, 400)                                 # 次数用完，对的码也不行了
+        row = S.self_by_hash(e, "code", sf._h(r["ticket"]))
+        S.self_update(e, row["id"], used=0, tries=0, expires_at="2000-01-01 00:00:00")
+        self.assertIn("过期", self.c.post("/api/inv/s/login/verify", json={"ticket": r["ticket"], "code": r["devCode"]}).json()["msg"])
+        with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value={"ok": True, "userid": "dt-lim", "name": "限次人"})), \
+                patch.object(inv.idt, "roster", MagicMock(return_value=roster)):
+            j = self.ok(self.c.post("/api/inv/s/login/dd", json={"code": "authcode"}))
+        self.assertEqual((j["me"]["via"], j["me"]["dept"]), ("dingtalk", "公司-行政部"))
+        with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value={"ok": False, "msg": "码无效"})):
+            self.assertEqual(self.c.post("/api/inv/s/login/dd", json={"code": "x"}).status_code, 403)
 
 if __name__ == "__main__":
     unittest.main()

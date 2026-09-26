@@ -6,6 +6,7 @@
 // 配对（m/bind）成功时后端回一个新的会话令牌 session：从此所有调用都用它，二维码里的那个令牌当场失效。
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { invMHello, invMBind, invMState, invMScan, invMUpload, invMJsConfig } from '../api.js'
+import { inDingTalk, getAuthCode, ddConfig, ddCall } from './ddBridge.js'
 import { money, usePoll, StatusBadges } from './invShared.jsx'
 import './inv-phone.css'
 
@@ -42,58 +43,11 @@ function looksExpired(e) {
 
 // ───────────────────────── 钉钉 JSAPI ─────────────────────────
 
-const DD_JS = 'https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.25/dingtalk.open.js'
-const inDingTalk = () => /DingTalk/i.test(navigator.userAgent || '')
-function withTimeout(p, ms, text) {
-  let t = null
-  return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(text || '超时')), ms) })]).finally(() => clearTimeout(t))
-}
-let _ddP = null
-function loadDd() {
-  if (window.dd) return Promise.resolve(window.dd)
-  if (_ddP) return _ddP
-  _ddP = new Promise((res, rej) => {
-    const s = document.createElement('script')
-    s.src = DD_JS
-    s.async = true
-    s.onload = () => (window.dd ? res(window.dd) : rej(new Error('钉钉组件没加载上')))
-    s.onerror = () => { _ddP = null; rej(new Error('钉钉组件没加载上')) }
-    document.head.appendChild(s)
-  })
-  return _ddP
-}
-// 钉钉 JSAPI 新旧版本有的走回调、有的回 Promise，两种都接
-function ddCall(fn, args, pick) {
-  return new Promise((res, rej) => {
-    try {
-      const r = fn({ ...args, onSuccess: x => res(pick(x)), onFail: e => rej(e) })
-      if (r && typeof r.then === 'function') r.then(x => res(pick(x)), rej)
-    } catch (e) { rej(e) }
-  })
-}
-async function getAuthCode(corpId) {
-  const dd = await withTimeout(loadDd(), 6000, '钉钉组件加载超时')
-  const ask = () => ddCall(dd.runtime.permission.requestAuthCode, { corpId }, x => (x && x.code) || '')
-  const ready = typeof dd.ready === 'function' ? new Promise(r => dd.ready(r)) : Promise.resolve()
-  return withTimeout(ready.then(ask), 4000, '钉钉免登超时')
-}
-// 钉钉「扫一扫」要先 dd.config 鉴权（后端按本页地址签名）；成功 → true，失败抛带原因的错误
+// 钉钉「扫一扫」要先 dd.config 鉴权（后端按本页地址签名）；成功 → 签名参数（含 corpId），失败抛带原因的错误
 let _ddCfgP = null
 function ddSetup(token) {
   if (_ddCfgP) return _ddCfgP
-  _ddCfgP = (async () => {
-    const dd = await withTimeout(loadDd(), 6000, '钉钉组件加载超时')
-    const cfg = (await invMJsConfig(token, String(location.href).split('#')[0])) || {}
-    if (!cfg.ok) throw new Error(cfg.msg || '钉钉扫码鉴权没通过')
-    if (typeof dd.config !== 'function') return true
-    await withTimeout(new Promise((res, rej) => {
-      if (typeof dd.error === 'function') dd.error(e => rej(new Error('钉钉鉴权没通过：' + ((e && (e.errorMessage || e.message)) || JSON.stringify(e || {})))))
-      dd.config({ agentId: cfg.agentId, corpId: cfg.corpId, timeStamp: cfg.timeStamp, nonceStr: cfg.nonceStr,
-        signature: cfg.signature, type: 0, jsApiList: ['biz.util.scan'] })
-      if (typeof dd.ready === 'function') dd.ready(() => res(true)); else res(true)
-    }), 6000, '钉钉鉴权超时')
-    return true
-  })()
+  _ddCfgP = ddConfig(url => invMJsConfig(token, url), ['biz.util.scan', 'runtime.permission.requestAuthCode'])
   _ddCfgP.catch(() => { _ddCfgP = null })   // 失败了下次点按钮再试
   return _ddCfgP
 }
@@ -285,10 +239,13 @@ export default function InvPhone() {
       let code = ''
       let note = ''
       if (inDingTalk()) {
-        if (hello.corpId) {
-          try { code = await getAuthCode(hello.corpId) } catch { code = '' }
+        // 先 dd.config 鉴权再要免登码：不鉴权时有的钉钉版本不给码（V2.621 修手机认不出人）
+        let cid = hello.corpId || ''
+        try { const c = await ddSetup(tk); if (!cid && c && c.corpId) cid = c.corpId } catch { /* 鉴权不过也照样试免登 */ }
+        if (cid) {
+          try { code = await getAuthCode(cid) } catch { code = '' }
         }
-        if (!code) note = '未识别钉钉身份：钉钉没给出你是谁，照样可以拍；登记人记为电脑上登录的人。'
+        if (!code) note = '没通过钉钉核对身份，按电脑上登录的人登记；扫审批单、拍发票照常用。'
       } else {
         note = '请用钉钉扫码打开：现在是普通浏览器，系统认不出你是谁。'
       }

@@ -518,6 +518,7 @@ export const invAuditQueue = (params) => j(invWithQs('/api/inv/audit/queue', par
 // 被拦时返回 {ok:false,msg,blockers?,httpStatus}；审核期间又进了新票 → httpStatus 409 + newItems:[id]（页面提示并重读票夹）
 export const invAuditApprove = (body) => invJpSoft('/api/inv/audit/approve', body)
 export const invAuditBatch = (folderIds) => jp('/api/inv/audit/batch', { folderIds })
+export const invAuditMark = (id, body) => jp(`/api/inv/audit/item/${id}/mark`, body)   // body={mark:'ok'|'doubt'|'clear', text?}
 export const invAuditReturn = (body) => jp('/api/inv/audit/return', body)             // body={folderId, note}
 // 发票台账
 export const invLedger = (params) => j(invWithQs('/api/inv/ledger', params))
@@ -555,8 +556,24 @@ export const invMState = (token) => j('/api/inv/m/state', { headers: invMH(token
 export const invMJsConfig = (token, url) => j('/api/inv/m/jsconfig?url=' + encodeURIComponent(url), { headers: invMH(token) })
 export const invMScan = (token, code) => j('/api/inv/m/scan', { method: 'POST', headers: invMH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ code }) })
 export const invMUpload = (token, files, purpose = 'invoice') => invPost('/api/inv/m/upload', invFd(files, 'files', { purpose }), invMH(token))
-
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.632 物流账单复核（核价×核量→归一态；pilot 迅鸽）
+// 申请人自助登记发票后补（V2.621，页面 #/invself，不走登录 cookie）：会话令牌放请求头 X-Inv-Self
+const invSH = (token, extra) => ({ 'X-Inv-Self': token || '', ...(extra || {}) })
+const invSJ = (url, token, body) => j(url, body === undefined ? { headers: invSH(token) }
+  : { method: 'POST', headers: invSH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
+export const invSHello = (token) => invSJ('/api/inv/s/hello', token)
+export const invSJsConfig = (url) => invSJ('/api/inv/s/jsconfig?url=' + encodeURIComponent(url), '')
+export const invSLoginDd = (code) => invSJ('/api/inv/s/login/dd', '', { code })
+export const invSLoginSend = (name, pick) => invSJ('/api/inv/s/login/send', '', { name, pick })   // 重名 → {need:'pick', choices}
+export const invSLoginVerify = (ticket, code) => invSJ('/api/inv/s/login/verify', '', { ticket, code })
+export const invSLogout = (token) => invSJ('/api/inv/s/logout', token, {})
+export const invSPayments = (token, days = 60, fresh = false) => invSJ('/api/inv/s/payments?days=' + days + (fresh ? '&fresh=1' : ''), token)
+export const invSReceivers = (token) => invSJ('/api/inv/s/receivers', token)
+export const invSLaterCreate = (token, body) => invSJ('/api/inv/s/later', token, body)
+export const invSLaters = (token) => invSJ('/api/inv/s/laters', token)
+export const invSLaterDocs = (token, id, files) => invPost(`/api/inv/s/later/${id}/docs`, invFd(files, 'files'), invSH(token))
+// 后补池页「业务同事自助登记」入口：网址＋二维码（要后补池权限）
+export const invSLink = () => j('/api/inv/s/link')
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.633 物流账单复核（核价×核量→归一态；pilot 迅鸽）
 export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '') =>
   j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${period}&group=${group}&page=${page}&q=${encodeURIComponent(q)}`)
 export const reviewSpec = (carrier) => j(`/api/logistics-review/spec?carrier=${encodeURIComponent(carrier)}`)
@@ -564,3 +581,4 @@ export const reviewPriceCard = (carrier) => j(`/api/logistics-review/price-card?
 export const reviewImportPriceCard = (carrier, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/price-card/import?carrier=${encodeURIComponent(carrier)}`, { method: 'POST', body: fd }) }
 export const reviewParseBill = (carrier, period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/parse?carrier=${encodeURIComponent(carrier)}&period=${period}`, { method: 'POST', body: fd }) }
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
+

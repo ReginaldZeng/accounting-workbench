@@ -202,7 +202,12 @@ async def _auth_gate(request, call_next):
         if inv_pair:
             # 手机端没有会话：埋点记成"<电脑账号>·手机"，不再全堆在"(未透传身份)"里
             request.state.ops_user = invoice.pair_ops_user(request) or None
-        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal and not bom_pull and not inv_pair:
+        # 发票管家·申请人自助登记发票后补（V2.621）：业务同事没有工作台账号——/api/inv/s/* 不走登录门，
+        # 路由自己认人（钉钉免登或钉钉验证码换来的会话令牌，请求头 X-Inv-Self，库里只存 sha256；只能登记自己发起的单子）。
+        inv_self = (not u) and p.startswith("/api/inv/s/")
+        if inv_self:
+            request.state.ops_user = invoice_self.self_ops_user(request) or None
+        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal and not bom_pull and not inv_pair and not inv_self:
             return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
         # 初始密码闸（V2.330）：账号被新建/重置密码后 must_change_pwd=1——改密之前除 /api/change-pwd
         # 外一律 403（含 /api/bp-authz，BP 也进不去）。前端据 code 弹强制改密页；服务端拦，直连 API 也绕不过。
@@ -4912,6 +4917,9 @@ app.include_router(invoice.router)
 # 发票管家·台账与后补池（V-draft）：复用 routers/invoice 的闸与助手；模块导入即起催票线程（SQLite 库不起）
 from routers import invoice_books
 app.include_router(invoice_books.router)
+# 发票管家·申请人自助登记发票后补（V2.621）：/api/inv/s/*，登录门对它放行（见 _auth_gate）
+from routers import invoice_self
+app.include_router(invoice_self.router)
 
 from routers import logistics_review   # V2.632 物流账单复核（核价×核量→归一态；pilot 迅鸽）
 app.include_router(logistics_review.router)

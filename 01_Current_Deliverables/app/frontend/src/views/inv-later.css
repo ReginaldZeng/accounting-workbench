@@ -184,3 +184,10 @@
 .inv-set-bar.dirty .inv-set-state{ color:var(--amber); font-weight:600; }
 .inv-set-bar .inv-lt-inline{ margin:0; }
 .inv-set-grow{ flex:1 1 auto; }
+
+/* V2.621 业务自助登记入口弹窗 */
+.inv-lt-self{ display:flex; flex-direction:column; gap:10px; align-items:stretch; font-size:13px; }
+.inv-lt-self p{ margin:0; line-height:1.6; }
+.inv-lt-self-url{ display:flex; gap:8px; }
+.inv-lt-self-qr{ align-self:center; border:1px solid var(--line); border-radius:8px; background:#fff; padding:6px; }
+.inv-lt-self ul{ margin:0; padding-left:18px; line-height:1.7; }
