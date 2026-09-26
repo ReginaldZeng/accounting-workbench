@@ -17,15 +17,21 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [d, setD] = useState(null)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
-  const [sups, setSups] = useState([])
+  const [sups, setSups] = useState(null)
   const [supq, setSupq] = useState('')
 
   const load = useCallback(() => {
     reviewResult(carrier, period, group, page, q).then(setD).catch(e => setMsg(e.message))
   }, [carrier, period, group, page, q])
   useEffect(() => { load() }, [load])
-  // 本月有计提的承运商（金蝶 2241 计提凭证）——随账期变
-  useEffect(() => { reviewCarriers(period).then(r => setSups(r.carriers || [])).catch(() => setSups([])) }, [period])
+  // 本月有计提的承运商（金蝶 2241 计提凭证）——随账期变。金蝶取数慢，防串更新：只认最新账期的响应，
+  // 否则快速切月时先发的旧月响应后到会覆盖新月（曾出现 9 期显示 8 期承运商）。
+  useEffect(() => {
+    let alive = true
+    setSups(null)
+    reviewCarriers(period).then(r => { if (alive) setSups(r.carriers || []) }).catch(() => { if (alive) setSups([]) })
+    return () => { alive = false }
+  }, [period])
 
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
   const onFile = (fn, ...args) => e => {
@@ -102,16 +108,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       </div>
 
       <div className="supbar">
-        <span className="supbar-lb">本月有计提的承运商{sups.length ? `（${sups.length}）` : ''}</span>
+        <span className="supbar-lb">本月有计提的承运商{sups && sups.length ? `（${sups.filter(s => s.accrued != null).length}）` : ''}</span>
         <input type="search" placeholder="搜承运商" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 120 }} />
         <div className="supchips">
-          {sups.filter(s => !supq || (s.short || '').includes(supq) || (s.full || '').includes(supq)).map(s =>
+          {sups === null && <span className="supempty">读金蝶计提凭证中…</span>}
+          {sups !== null && sups.filter(s => !supq || (s.short || '').includes(supq) || (s.full || '').includes(supq)).map(s =>
             <button key={s.short} className={'supchip' + (s.short === carrier ? ' on' : '') + (s.has_spec ? '' : ' nospec')}
               title={(s.full || s.short) + (s.has_spec ? '（已配取数说明，可复核）' : '（未配取数说明）')}
               onClick={() => { setCarrier(s.short); setGroup('ex'); setPage(1) }}>
               {s.short}{s.accrued != null && <em>{money(s.accrued)}</em>}{!s.has_spec && <i>未配</i>}
             </button>)}
-          {!sups.length && <span className="supempty">本月金蝶暂无物流计提（或未接金蝶）——可直接选 pilot 迅鸽试跑</span>}
+          {sups !== null && !sups.some(s => s.accrued != null) &&
+            <span className="supempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）——下方 pilot 迅鸽可试跑</span>}
         </div>
       </div>
 
