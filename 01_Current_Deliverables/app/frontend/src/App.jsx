@@ -182,7 +182,7 @@ export default function App() {
         {view === 'ecommonth' && canView('ecommonth') && <EcomWorkbench user={user} onNav={setView} />}
         {view === 'ecomsettle' && canView('ecomsettle') && <EcomWorkbench user={user} onNav={setView} initialScreen="cash" />}
         {view === 'ecombase' && canView('ecombase') && <EcomBasicData user={user} />}
-        {view === 'logisticspay' && canView('logisticspay') && <LogisticsReview cfg={cfg} />}
+        {view === 'logisticspay' && canView('logisticspay') && <LogisticsReview cfg={cfg} onPeriod={changePeriod} />}
         {view === 'logisticscost' && canView('logisticscost') && <LogisticsWorkspace entry="ledger" cfg={cfg} />}
         {/* 自建但还没接代码的模块（key 不在已编码集合里）：即便被设为可进入，也给规划中占位而非白屏 */}
         {!CODED_VIEWS.has({ import: 'reconcile', fund: 'reconcile', result: 'reconcile' }[view] || view) && canView(view) &&

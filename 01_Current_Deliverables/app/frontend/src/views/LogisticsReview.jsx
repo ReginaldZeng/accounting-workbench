@@ -2,13 +2,13 @@
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers } from '../api.js'
+import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const PS = { ok: ['通过', 'ok'], over: ['多收', 'bad'], under: ['账单少收', 'neu'], free: ['账单未收·我方有利', 'neu'], gap: ['价卡缺·待确认', 'warn'] }
-const CARRIERS = ['迅鸽', '跨越', '天鹰', '极鲜达', '易风达']
 
-export default function LogisticsReview({ cfg }) {
+export default function LogisticsReview({ cfg, onPeriod }) {
   const period = `${cfg.year}-${String(cfg.period).padStart(2, '0')}`
   const [carrier, setCarrier] = useState('迅鸽')
   const [group, setGroup] = useState('ex')
@@ -17,11 +17,15 @@ export default function LogisticsReview({ cfg }) {
   const [d, setD] = useState(null)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
+  const [sups, setSups] = useState([])
+  const [supq, setSupq] = useState('')
 
   const load = useCallback(() => {
     reviewResult(carrier, period, group, page, q).then(setD).catch(e => setMsg(e.message))
   }, [carrier, period, group, page, q])
   useEffect(() => { load() }, [load])
+  // 本月有计提的承运商（金蝶 2241 计提凭证）——随账期变
+  useEffect(() => { reviewCarriers(period).then(r => setSups(r.carriers || [])).catch(() => setSups([])) }, [period])
 
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
   const onFile = (fn, ...args) => e => {
@@ -49,6 +53,17 @@ export default function LogisticsReview({ cfg }) {
       .lrv .h-title{font-size:18px;font-weight:700}.lrv .h-sub{color:#5E6B78;font-size:12.5px;margin-top:2px}
       .lrv .chip{font-size:12.5px;padding:4px 11px;border-radius:999px;border:1px solid #DCE2E7;background:#fff;color:#5E6B78;cursor:pointer}
       .lrv .chip.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+      .lrv .supbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#fff;border:1px solid #DCE2E7;border-radius:12px;padding:9px 14px;margin-bottom:12px}
+      .lrv .supbar-lb{font-size:12.5px;color:#5E6B78;font-weight:600;white-space:nowrap}
+      .lrv .supchips{display:flex;gap:6px;flex-wrap:wrap;flex:1}
+      .lrv .supchip{font-size:12.5px;padding:4px 10px;border-radius:999px;border:1px solid #DCE2E7;background:#fff;color:#1B2733;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+      .lrv .supchip:hover{border-color:var(--accent)}
+      .lrv .supchip.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+      .lrv .supchip em{font-style:normal;font-family:ui-monospace,monospace;font-size:11px;opacity:.75}
+      .lrv .supchip i{font-style:normal;font-size:10.5px;color:var(--warn);background:#F7E9CF;border-radius:4px;padding:0 4px}
+      .lrv .supchip.on i{color:#fff;background:rgba(255,255,255,.25)}
+      .lrv .supchip.nospec{color:#8A96A2}
+      .lrv .supempty{font-size:12px;color:#8A96A2}
       .lrv .btn{font-size:12.5px;padding:6px 12px;border-radius:7px;border:1px solid #DCE2E7;background:#fff;cursor:pointer;display:inline-block}
       .lrv .btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
       .lrv .btn[disabled]{opacity:.5;cursor:default}
@@ -81,14 +96,27 @@ export default function LogisticsReview({ cfg }) {
 
       <div className="head">
         <div><div className="h-title">物流账单复核台</div>
-          <div className="h-sub">核价（合同价格卡）× 核量（金蝶出库数量）→ 归一态 · 异常优先 · pilot 迅鸽</div></div>
+          <div className="h-sub">核价（合同价格卡）× 核量（金蝶出库数量）→ 归一态 · 异常优先</div></div>
         <div style={{ flex: 1 }} />
-        <div style={{ display: 'flex', gap: 6 }}>{CARRIERS.map(x =>
-          <button key={x} className={'chip' + (x === carrier ? ' on' : '')} onClick={() => { setCarrier(x); setGroup('ex'); setPage(1) }}>{x}</button>)}</div>
+        <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
+      </div>
+
+      <div className="supbar">
+        <span className="supbar-lb">本月有计提的承运商{sups.length ? `（${sups.length}）` : ''}</span>
+        <input type="search" placeholder="搜承运商" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 120 }} />
+        <div className="supchips">
+          {sups.filter(s => !supq || (s.short || '').includes(supq) || (s.full || '').includes(supq)).map(s =>
+            <button key={s.short} className={'supchip' + (s.short === carrier ? ' on' : '') + (s.has_spec ? '' : ' nospec')}
+              title={(s.full || s.short) + (s.has_spec ? '（已配取数说明，可复核）' : '（未配取数说明）')}
+              onClick={() => { setCarrier(s.short); setGroup('ex'); setPage(1) }}>
+              {s.short}{s.accrued != null && <em>{money(s.accrued)}</em>}{!s.has_spec && <i>未配</i>}
+            </button>)}
+          {!sups.length && <span className="supempty">本月金蝶暂无物流计提（或未接金蝶）——可直接选 pilot 迅鸽试跑</span>}
+        </div>
       </div>
 
       <div className="toolbar" style={{ border: '1px solid #DCE2E7', borderRadius: 12, marginBottom: 12 }}>
-        <span style={{ fontSize: 12.5, color: '#5E6B78' }}>账期 <b>{period}</b> · {carrier}</span>
+        <span style={{ fontSize: 12.5, color: '#5E6B78' }}>当前 <b>{carrier}</b> · {period}</span>
         <div style={{ flex: 1 }} />
         <label className="btn">导入价格卡（合同价目表）<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
         <label className="btn">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>

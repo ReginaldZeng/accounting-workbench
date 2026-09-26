@@ -582,3 +582,4 @@ export const reviewImportPriceCard = (carrier, file) => { const fd = new FormDat
 export const reviewParseBill = (carrier, period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/parse?carrier=${encodeURIComponent(carrier)}&period=${period}`, { method: 'POST', body: fd }) }
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 
+export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)

@@ -18,6 +18,7 @@ from kernels import logistics_review_store as store
 from kernels import logistics_price as lp
 from kernels import logistics_review as lr
 from kernels import logistics_intake as intake
+from kernels import logistics_recon as lrc
 
 router = APIRouter()
 BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
@@ -63,6 +64,35 @@ def review_spec(request: Request, carrier: str = "迅鸽"):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     return {"ok": True, "carrier": carrier, "spec": _load_spec(carrier)}
+
+
+# ---------- 本月有计提的承运商（金蝶 2241 供应商往来·计提凭证汇总）----------
+@router.get("/api/logistics-review/carriers")
+def review_carriers(request: Request, period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    accr = {}
+    if period and "-" in period:
+        y, m = period.split("-")[:2]
+        try:
+            accr = lrc.accrued_by_carrier(kc.fetch_gl_voucher(int(y), int(m), prefix="2241"))
+        except Exception:
+            accr = {}
+    sup = db.list_logi_suppliers() or []
+    full2short = {s.get("full"): s.get("short") for s in sup if s.get("full")}
+    with db._engine.connect() as c:
+        specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
+    out = []
+    for full, amt in accr.items():
+        short = full2short.get(full, full)
+        out.append({"short": short, "full": full, "accrued": round(amt or 0, 2), "has_spec": short in specs})
+    # 有计提但没配取数说明的也列出来（灰示"未配"）；再补上已配却本月无计提的（如 pilot 迅鸽），排在后
+    listed = {x["short"] for x in out}
+    for sc in specs:
+        if sc not in listed:
+            out.append({"short": sc, "full": "", "accrued": None, "has_spec": True})
+    out.sort(key=lambda x: (-(x["accrued"] or -1), x["short"]))
+    return {"ok": True, "period": period, "carriers": out, "kd_ok": bool(accr)}
 
 
 # ---------- 价格卡：导入合同价目表 / 读 ----------
