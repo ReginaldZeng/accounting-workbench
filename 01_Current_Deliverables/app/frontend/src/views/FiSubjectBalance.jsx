@@ -237,8 +237,8 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
 
   return (<div>
     <div className="head">
-      <div><div className="h-title">科目余额表 · 解析与核对（物流）</div>
-        <div className="h-sub">物流相关科目（按物流计提入账口径精确圈定）：暂估进项税 2221.01.07 · 其他应付款—供应商往来 2241.02（均挂供应商）· 物流费用 6601/6604/6401/5101（按费用项目：出库/入库运费·仓储费·搬运费）—— 系统取数 + 手工上传两条路都可核对</div></div>
+      <div><div className="h-title">科目余额解析（物流）</div>
+        <div className="h-sub" title="暂估进项税 2221.01.07 · 其他应付款—供应商往来 2241.02（挂供应商）· 物流费用 6601/6604/6401/5101（按费用项目：出库/入库运费·仓储费·搬运费）">物流科目的期末余额，逐笔拆到底、和系统核一遍 —— 暂估进项税 · 供应商往来 · 物流费用</div></div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         {orgs.length > 0 && <select value={org} onChange={e => onOrg(e.target.value)} title="选择主体（账簿）"
           style={{ height: 32, borderRadius: 8, border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink)', padding: '0 8px', maxWidth: 240, fontSize: 13 }}>
@@ -251,26 +251,27 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
     <div className="body">
       {d.error && <div className="banner err">金蝶取数失败：{d.error}</div>}
       {d.note && d.source === 'kingdee' && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', borderColor: 'var(--amber-line)' }}>{d.note}</div>}
-      <div className="foot">数据来源：{d.source === 'kingdee' ? '金蝶《科目余额表》报表接口（物流科目段，借−贷有符号口径）' : (d.note || '样例数据')} · 主体 {d.org_name || '—'} · {d.period} · {d.cached_db ? `定格于 ${d['定格于'] || ''}（进页面直接读库，秒开；点右上「从金蝶刷新」才重取）` : `更新于 ${d.updated_at}`}</div>
+      {/* 一行可信度条：数据源 + 质检勾稽（参考银行稽核页，页头保持干净） */}
+      <div className="trust">
+        <span className="lead">数据源</span>
+        <span className="foot" style={{ color: 'var(--ink-2)' }} title={d.cached_db ? '进页面直接读库，秒开；点右上「从金蝶刷新」才重取' : ''}>{d.source === 'kingdee' ? '金蝶科目余额表' : '样例数据'} · {d.org_name || '—'} · {d.period} · {d.cached_db ? `定格 ${d['定格于'] || ''}` : `更新 ${d.updated_at || ''}`}</span>
+        <span style={{ flex: 1 }} />
+        {qc && qc['行数'] > 0 && (qc['全部通过']
+          ? <span className="chk pass" title="每一行都满足 期末 = 期初 + 本期借方 − 本期贷方">✓ 质检 {qc['行数']} 行全平</span>
+          : <span className="chk warn">⚠ {qc['行数'] - qc['通过数']} 行不平</span>)}
+      </div>
+      {qc && qc['行数'] > 0 && !qc['全部通过'] && <div className="banner err" style={{ marginTop: 8 }}>不平明细（期末 ≠ 期初 + 借 − 贷）：{qc['异常'].map(x => `${x['科目编码']} ${x['账户'] || ''} 差 ${fmt(x['差'])}`).join('；')}</div>}
 
-      {/* 质检勾稽：逐科目 期末 = 期初 + 本期借方 − 本期贷方 */}
-      {qc && qc['行数'] > 0 && <div className={'banner' + (qc['全部通过'] ? '' : ' err')} style={qc['全部通过'] ? { marginTop: 8, background: 'var(--green-bg)', color: 'var(--green)', borderColor: 'var(--green-line)' } : { marginTop: 8 }}>
-        {qc['全部通过']
-          ? `质检勾稽：${qc['行数']} 行全部平 ✓ —— 每一行都满足 期末 = 期初 + 本期借方 − 本期贷方`
-          : `质检勾稽：${qc['行数']} 行中 ${qc['行数'] - qc['通过数']} 行不平（期末 ≠ 期初 + 借 − 贷）：` + qc['异常'].map(x => `${x['科目编码']} ${x['账户'] || ''} 差 ${fmt(x['差'])}`).join('；')}
-      </div>}
-
-      {/* 上传解析 + 逐科目核对（系统数 vs 上传数，人工核对） */}
-      <div className="cat" style={{ marginTop: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>上传科目余额表 → 解析 + 和系统数对一遍（人工核对）</div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {cmp && <label className="ck"><input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} /> 显示全部科目</label>}
+      {/* 上传解析 + 逐科目核对（系统数 vs 上传数，人工核对）——折叠为可选项，页头保持干净 */}
+      <details className="explain" style={{ marginTop: 8 }} open={!!cmp}>
+        <summary>上传《科目余额表》· 和系统数核对一遍（可选）</summary>
+        <div className="explain-in">
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
             <button className="btn" onClick={() => fileRef.current && fileRef.current.click()} disabled={upBusy}>{upBusy ? '解析中…' : '上传金蝶导出的科目余额表'}</button>
             <input ref={fileRef} type="file" accept=".xlsx" style={{ display: 'none' }} onChange={e => upload(e.target.files && e.target.files[0])} />
+            {cmp && <label className="ck"><input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} /> 显示全部科目</label>}
+            <span className="foot">导出 Excel 传上来，工具自动认列物流科目，逐科目对期初/借/贷/期末是不是同一个数（借/贷两行表头或单列「期初原币」都认）。</span>
           </div>
-        </div>
-        <div className="foot" style={{ margin: '6px 0 0' }}>从任意系统（金蝶等）导出《科目余额表》Excel 传上来：工具自动认列、只挑出物流相关科目，逐科目对期初 / 本期借方 / 本期贷方 / 期末——是不是同一个数，一眼可见。表头是「期初余额 借/贷」两行、或单列「期初原币」都能认。</div>
         {upMsg && <div className="banner err" style={{ marginTop: 8 }}>{upMsg}</div>}
 
         {parsed && parsed.qc && parsed.qc['行数'] > 0 && <div className={'banner' + (parsed.qc['全部通过'] ? '' : ' err')} style={parsed.qc['全部通过'] ? { marginTop: 8, background: 'var(--green-bg)', color: 'var(--green)', borderColor: 'var(--green-line)' } : { marginTop: 8 }}>
@@ -302,7 +303,8 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
           </div>}
           {cmp && cmpRows.length === 0 && !showAll && chk['有系统数'] && <div className="foot" style={{ marginTop: 6 }}>没有出入的科目。勾选「显示全部科目」可查看每一项对照。</div>}
         </>}
-      </div>
+        </div>
+      </details>
 
       {/* 系统数主表：一行一维度平表（科目编码/科目名称/核算维度编码/核算维度名称四列身份）+ 层级下拉筛选 + 模糊搜索。行可点开下钻。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
