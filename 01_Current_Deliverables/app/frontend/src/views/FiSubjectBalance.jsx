@@ -206,7 +206,7 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
 
   const rows = d.rows || []
   const ql = q.trim().toLowerCase()
-  const fRows = ql ? rows.filter(r => [r['科目编码'], r['科目名称'], r['账户'], r['科目大类']].join(' ').toLowerCase().includes(ql)) : rows
+  const fRows = ql ? rows.filter(r => [r['科目编码'], r['科目名称'], r['维度编码'], r['账户'], r['科目大类']].join(' ').toLowerCase().includes(ql)) : rows
   const zeroCnt = fRows.filter(r => Math.abs(r['期末'] || 0) < 0.005).length   // 期末为 0（已结清）的维度数
   const vRows = hideZero ? fRows.filter(r => Math.abs(r['期末'] || 0) >= 0.005) : fRows   // 主表实际显示的维度行
   const codes = [...new Set(vRows.map(r => r['科目编码']))]
@@ -298,39 +298,32 @@ export default function FiSubjectBalance({ cfg, onPeriod }) {
         {ql && <span className="foot">筛出 {fRows.length} 行 / 共 {rows.length} 行<span onClick={() => setQ('')} style={{ color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }}>清除</span></span>}
       </div>
       <div className="foot" style={{ marginTop: 8 }}>👉 点开任意<b>维度行</b>，弹出它的<b>明细账</b>（逐笔滚动余额、分页）：<span style={{ color: 'var(--green)', fontWeight: 600 }}>标绿「未核销」</span>的那几笔，其和＝期末余额（这笔余额到底挂着哪几笔）；还能一路追溯期初。</div>
-      <div className="tbl-wrap"><table style={{ minWidth: 920 }}>
-        <thead><tr>{['科目 / 维度', '大类', '期初余额', '本期借方', '本期贷方', '期末余额'].map((h, i) =>
-          <th className="th" key={h} style={i >= 2 ? { textAlign: 'right' } : null}>{h}</th>)}</tr></thead>
+      <div className="tbl-wrap"><table style={{ minWidth: 1080 }}>
+        <thead><tr>{['科目编码', '科目名称', '核算维度编码', '核算维度名称', '大类', '期初余额', '本期借方', '本期贷方', '期末余额'].map((h, i) =>
+          <th className="th" key={h} style={i >= 5 ? { textAlign: 'right' } : null}>{h}</th>)}</tr></thead>
         <tbody>
-          {groups.map(g => (<React.Fragment key={g.code}>
-            <tr style={{ background: 'var(--bg)' }}>
-              <td style={{ fontWeight: 600 }}>{g.code} {g.name}<span className="muted" style={{ marginLeft: 8, fontSize: 11 }}>{g.rows.length} 个维度</span></td>
-              <td className="muted" style={{ fontSize: 12 }}>{g.cat}</td>
-              <td className="num" style={{ fontWeight: 600 }}>{fmt(g['期初'])}</td>
-              <td className="num" style={{ fontWeight: 600 }}>{fmt(g['借'])}</td>
-              <td className="num" style={{ fontWeight: 600 }}>{fmt(g['贷'])}</td>
-              <td className="num" style={{ fontWeight: 600 }}>{fmt(g['期末'])}</td>
+          {[...vRows].sort((a, b) => String(a['科目编码'] || '').localeCompare(String(b['科目编码'] || '')) || String(a['账户'] || '').localeCompare(String(b['账户'] || ''))).map((r, i) => (
+            <tr key={i} className="row" onClick={() => openModal(r['科目编码'], r['维度编码'] || '', r['科目编码'] + ' ' + r['科目名称'], r['账户'])}
+              title="点开看这笔余额的明细账（滚动余额 + 未核销开项 + 追溯期初）">
+              <td className="acct" style={{ whiteSpace: 'nowrap' }}>{r['科目编码']}</td>
+              <td>{r['科目名称']}</td>
+              <td className="acct" style={{ whiteSpace: 'nowrap' }}>{r['维度编码']}</td>
+              <td>{r['账户']}</td>
+              <td className="muted" style={{ fontSize: 12 }}>{r['科目大类']}</td>
+              <td className="num">{fmt(r['期初'])}</td>
+              <td className="num">{fmt(r['本期借方'])}</td>
+              <td className="num">{fmt(r['本期贷方'])}</td>
+              <td className="num" style={{ color: r['期末'] < 0 ? 'var(--red)' : undefined }}>{fmt(r['期末'])}</td>
             </tr>
-            {g.rows.map((r, i) => (
-              <tr key={g.code + i} className="row" onClick={() => openModal(r['科目编码'], r['维度编码'] || '', r['科目编码'] + ' ' + r['科目名称'], r['账户'])}
-                title="点开看这笔余额的明细账（滚动余额 + 未核销开项 + 追溯期初）">
-                <td style={{ paddingLeft: 26 }} className="acct"><span style={{ color: 'var(--accent)', marginRight: 4 }}>▸</span>{r['账户']}</td>
-                <td></td>
-                <td className="num">{fmt(r['期初'])}</td>
-                <td className="num">{fmt(r['本期借方'])}</td>
-                <td className="num">{fmt(r['本期贷方'])}</td>
-                <td className="num" style={{ color: r['期末'] < 0 ? 'var(--red)' : undefined }}>{fmt(r['期末'])}</td>
-              </tr>
-            ))}
-          </React.Fragment>))}
-          {groups.length > 0 && <tr style={{ background: 'var(--bg)' }}>
-            <td style={{ fontWeight: 700 }}>合计</td><td></td>
+          ))}
+          {vRows.length > 0 && <tr style={{ background: 'var(--bg)' }}>
+            <td style={{ fontWeight: 700 }} colSpan={5}>合计（{vRows.length} 个维度）</td>
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('期初'))}</td>
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('借'))}</td>
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('贷'))}</td>
             <td className="num" style={{ fontWeight: 700 }}>{fmt(total('期末'))}</td>
           </tr>}
-          {groups.length === 0 && <tr><td colSpan="6" className="muted">{ql ? `没有匹配「${q}」的科目/维度。` : (hideZero && zeroCnt > 0 && fRows.length > 0) ? `本期这些维度期末都为 0（已全部结清）。取消勾选「隐藏期末为 0 的」可查看全部 ${zeroCnt} 个。` : '系统侧暂无物流科目数据。样例模式已内置演示数据；金蝶模式请用上方「上传」解析核对。'}</td></tr>}
+          {vRows.length === 0 && <tr><td colSpan="9" className="muted">{ql ? `没有匹配「${q}」的科目/维度。` : (hideZero && zeroCnt > 0 && fRows.length > 0) ? `本期这些维度期末都为 0（已全部结清）。取消勾选「隐藏期末为 0 的」可查看全部 ${zeroCnt} 个。` : '系统侧暂无物流科目数据。样例模式已内置演示数据；金蝶模式请用上方「上传」解析核对。'}</td></tr>}
         </tbody>
       </table></div>
       <div className="foot">口径说明：余额取【借 − 贷】有符号口径，费用类为正、其他应付款（负债）为负，勾稽恒等式 期末 = 期初 + 本期借方 − 本期贷方 恒成立。物流科目段 = 物流计提工具入账落到的科目（销售费用出库运费/仓储费、主营业务成本/制造费用入库运费、研发费用搬运费、其他应付款—供应商往来、暂估进项税）。</div>
