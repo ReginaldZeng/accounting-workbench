@@ -2,7 +2,7 @@
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers, reviewOverview } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -19,6 +19,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [msg, setMsg] = useState('')
   const [sups, setSups] = useState(null)
   const [supq, setSupq] = useState('')
+  const [mode, setMode] = useState('overview')   // overview 第一页总览 / detail 单承运商核价核量
+  const [ov, setOv] = useState(null)
+
+  // 第一页总览：承运商 × 主体 计提/付款/差异（金蝶 2241）——随账期变，防串更新
+  useEffect(() => {
+    if (mode !== 'overview') return
+    let alive = true; setOv(null)
+    reviewOverview(period).then(r => { if (alive) setOv(r) }).catch(() => { if (alive) setOv({ rows: [], subjects: [] }) })
+    return () => { alive = false }
+  }, [period, mode])
+  const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setMode('detail') }
 
   const load = useCallback(() => {
     reviewResult(carrier, period, group, page, q).then(setD).catch(e => setMsg(e.message))
@@ -70,6 +81,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .supchip.on i{color:#fff;background:rgba(255,255,255,.25)}
       .lrv .supchip.nospec{color:#8A96A2}
       .lrv .supempty{font-size:12px;color:#8A96A2}
+      .lrv .ovhead{display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid #DCE2E7;font-size:13px;color:#1B2733;flex-wrap:wrap}
+      .lrv .ovsub{font-size:12px;color:#8A96A2}
+      .lrv .ovtable th.subjgrp{text-align:center;background:var(--soft);color:var(--accent-ink,#0F4A60);border-left:1px solid #DCE2E7}
+      .lrv .ovtable th,.lrv .ovtable td{border-right:1px solid #EEF1F0}
+      .lrv .ovtable td.ovcar{font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff}
+      .lrv .ovtable td.paid{color:#5E6B78}
+      .lrv .ovtable td.diffpos{color:var(--bad);font-weight:600}
+      .lrv .ovtable td.diffneg{color:var(--ok)}
+      .lrv .nospectag{font-style:normal;font-size:10px;color:var(--warn);background:#F7E9CF;border-radius:4px;padding:0 4px;margin-left:5px}
+      .lrv .ovempty{text-align:center;color:#8A96A2;padding:16px}
+      .lrv .ovfoot{padding:9px 15px;font-size:11.5px;color:#8A96A2;border-top:1px solid #DCE2E7;line-height:1.6}
       .lrv .btn{font-size:12.5px;padding:6px 12px;border-radius:7px;border:1px solid #DCE2E7;background:#fff;cursor:pointer;display:inline-block}
       .lrv .btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
       .lrv .btn[disabled]{opacity:.5;cursor:default}
@@ -101,12 +123,50 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       `}</style>
 
       <div className="head">
-        <div><div className="h-title">物流账单复核台</div>
-          <div className="h-sub">核价（合同价格卡）× 核量（金蝶出库数量）→ 归一态 · 异常优先</div></div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {mode === 'detail' && <button className="btn" onClick={() => setMode('overview')}>‹ 返回总览</button>}
+          <div><div className="h-title">物流账单复核台{mode === 'detail' ? ` · ${carrier}` : ''}</div>
+            <div className="h-sub">核价（合同价格卡）× 核量（金蝶出库数量）→ 归一态 · 异常优先</div></div>
+        </div>
         <div style={{ flex: 1 }} />
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
       </div>
 
+      {mode === 'overview' && (
+        <div className="card" style={{ marginTop: 12 }}>
+          <div className="ovhead">
+            <div><b>本月有计提的承运商</b>　计提 vs 付款（金蝶 2241 供应商往来，按主体拆）　<span className="ovsub">点「开始复核」进单承运商核价核量</span></div>
+            <div style={{ flex: 1 }} />
+            <input type="search" placeholder="搜承运商" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 130 }} />
+          </div>
+          <div className="tw"><table className="ovtable">
+            <thead>
+              <tr><th rowSpan="2">承运商</th>{(ov && ov.subjects || []).map(s => <th key={s} colSpan="3" className="subjgrp">{s}</th>)}<th rowSpan="2"></th></tr>
+              <tr>{(ov && ov.subjects || []).map(s => [<th key={s + 'a'} className="num">计提</th>, <th key={s + 'p'} className="num">付款</th>, <th key={s + 'd'} className="num">差异</th>])}</tr>
+            </thead>
+            <tbody>
+              {ov === null && <tr><td colSpan="11" className="ovempty">读金蝶计提凭证中…</td></tr>}
+              {ov && ov.rows && ov.rows.filter(r => !supq || (r.carrier || '').includes(supq) || (r.full || '').includes(supq)).map(r =>
+                <tr key={r.full}>
+                  <td className="ovcar" title={r.full}>{r.carrier}{!r.has_spec && <i className="nospectag">未配</i>}</td>
+                  {ov.subjects.map(s => {
+                    const c = (r.cells && r.cells[s]) || { accr: 0, paid: 0, diff: 0 }
+                    return [
+                      <td key={s + 'a'} className="num">{c.accr ? money(c.accr) : ''}</td>,
+                      <td key={s + 'p'} className="num paid">{c.paid ? money(c.paid) : ''}</td>,
+                      <td key={s + 'd'} className={'num ' + (c.diff > 0.01 ? 'diffpos' : c.diff < -0.01 ? 'diffneg' : '')}>{c.diff ? money(c.diff) : ''}</td>
+                    ]
+                  })}
+                  <td><button className="btn pri" disabled={!r.has_spec} title={r.has_spec ? '进核价核量' : '该承运商未配取数说明与价格卡'} onClick={() => enterReview(r.carrier)}>开始复核</button></td>
+                </tr>)}
+              {ov && ov.rows && !ov.rows.length && <tr><td colSpan="11" className="ovempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）</td></tr>}
+            </tbody>
+          </table></div>
+          <div className="ovfoot">计提＝2241 本期贷方（摘要含「计提…运费/仓储费/装卸/搬运/物流」）；付款＝2241 本期借方（摘要含该承运商）；差异＝计提−付款。只有已配取数说明的承运商可「开始复核」。</div>
+        </div>
+      )}
+
+      {mode === 'detail' && (<>
       <div className="supbar">
         <span className="supbar-lb">本月有计提的承运商{sups && sups.length ? `（${sups.filter(s => s.accrued != null).length}）` : ''}</span>
         <input type="search" placeholder="搜承运商" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 120 }} />
@@ -192,6 +252,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           </div>
         </div>
       </div>
+      </>)}
     </div>
   )
 }

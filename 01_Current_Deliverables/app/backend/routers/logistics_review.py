@@ -105,6 +105,79 @@ def review_carriers(request: Request, period: str = ""):
     return {"ok": True, "period": period, "carriers": out, "kd_ok": bool(accr)}
 
 
+# ---------- 第一页总览：承运商 × 主体 的 计提/付款/差异（金蝶 2241）----------
+_SUBJECTS = ["深圳星期零", "深圳星期九", "孝感星期九"]   # 固定三列（其余账簿归「其它」不单列）
+
+
+@router.get("/api/logistics-review/overview")
+def review_overview(request: Request, period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not period or "-" not in period:
+        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
+    y, m = period.split("-")[:2]
+    orgs = db.list_orgs() or []
+    book2short = {o.get("full_name"): o.get("short_name") for o in orgs if o.get("full_name")}
+    sup = db.list_logi_suppliers() or []
+    full2short = {s.get("full"): s.get("short") for s in sup if s.get("full")}
+
+    def sup_short(name):
+        if name in full2short:
+            return full2short[name]
+        for sfull, sshort in full2short.items():
+            if sfull and (sfull.startswith(name) or name.startswith(sfull) or name in sfull or sfull in name):
+                return sshort
+        return name
+
+    fields = list(kc.GL_VOUCHER_FIELDS) + [("FACCOUNTBOOKID.FName", "账簿")]
+    rows = []
+    try:
+        s, conf = kc.login()
+        rows = kc._query(s, conf, "GL_VOUCHER", fields,
+                         "FAccountID.FNumber like '2241%%' and FYear=%d and FPeriod=%d" % (int(y), int(m)))
+    except Exception:
+        rows = []
+    # 计提=贷方(摘要「计提…运费/仓储费/装卸/搬运/物流」)；付款=借方(摘要含某承运商名)
+    accr, paid = {}, {}
+    carriers = set()
+    for r in rows:
+        z = str(r.get("FEXPLANATION") or "")
+        book = book2short.get(str(r.get("账簿") or ""), None)
+        cr = r.get("FCREDIT") or 0
+        if cr and "计提" in z and any(k in z for k in lrc._ACCR_KW):
+            mo = lrc._ACCR_RE.search(z)
+            if mo:
+                cf = mo.group(1)
+                carriers.add(cf)
+                accr[(book, cf)] = accr.get((book, cf), 0.0) + float(cr)
+    for r in rows:
+        dr = r.get("FDEBIT") or 0
+        if not dr:
+            continue
+        z = str(r.get("FEXPLANATION") or "")
+        book = book2short.get(str(r.get("账簿") or ""), None)
+        for cf in carriers:
+            if cf in z:
+                paid[(book, cf)] = paid.get((book, cf), 0.0) + float(dr)
+                break
+    with db._engine.connect() as c:
+        specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
+    out = {}
+    for cf in carriers:
+        short = sup_short(cf)
+        cells = {}
+        tot_accr = 0.0
+        for subj in _SUBJECTS:
+            a = round(accr.get((subj, cf), 0.0), 2)
+            p = round(paid.get((subj, cf), 0.0), 2)
+            cells[subj] = {"accr": a, "paid": p, "diff": round(a - p, 2)}
+            tot_accr += a
+        out[cf] = {"carrier": short, "full": cf, "has_spec": short in specs, "cells": cells,
+                   "total_accr": round(tot_accr, 2)}
+    rowlist = sorted(out.values(), key=lambda x: -x["total_accr"])
+    return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": bool(rows)}
+
+
 # ---------- 价格卡：导入合同价目表 / 读 ----------
 @router.post("/api/logistics-review/price-card/import")
 async def price_card_import(request: Request, carrier: str = "迅鸽"):

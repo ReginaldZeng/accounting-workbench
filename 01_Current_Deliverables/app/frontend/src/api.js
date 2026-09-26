@@ -583,3 +583,4 @@ export const reviewParseBill = (carrier, period, file) => { const fd = new FormD
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 
 export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)
+export const reviewOverview = (period) => j(`/api/logistics-review/overview?period=${period}`)
