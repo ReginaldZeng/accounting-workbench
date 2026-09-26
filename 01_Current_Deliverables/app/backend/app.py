@@ -4913,6 +4913,9 @@ app.include_router(invoice.router)
 from routers import invoice_books
 app.include_router(invoice_books.router)
 
+from routers import logistics_review   # V2.632 物流账单复核（核价×核量→归一态；pilot 迅鸽）
+app.include_router(logistics_review.router)
+
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,
 # 使前端子路径/刷新不再 404 —— {"detail":"Not Found"} 即此前缺兜底所致)

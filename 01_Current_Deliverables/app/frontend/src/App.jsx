@@ -3,6 +3,7 @@
 // Description: 接入电商月结工作台路由，并在进入时展开「应收模块 › 电商对账」承接链路。
 import React, { useState, useEffect } from 'react'
 import LogisticsWorkspace from './views/LogisticsWorkspace.jsx'
+import LogisticsReview from './views/LogisticsReview.jsx'   // V2.632 物流账单复核台（核价×核量→归一态；本体页，取代内嵌样机）
 import Sidebar from './components/Sidebar.jsx'
 import DataImport from './views/DataImport.jsx'
 import FundDashboard from './views/FundDashboard.jsx'
@@ -181,7 +182,7 @@ export default function App() {
         {view === 'ecommonth' && canView('ecommonth') && <EcomWorkbench user={user} onNav={setView} />}
         {view === 'ecomsettle' && canView('ecomsettle') && <EcomWorkbench user={user} onNav={setView} initialScreen="cash" />}
         {view === 'ecombase' && canView('ecombase') && <EcomBasicData user={user} />}
-        {view === 'logisticspay' && canView('logisticspay') && <LogisticsWorkspace entry="reconcile" cfg={cfg} />}
+        {view === 'logisticspay' && canView('logisticspay') && <LogisticsReview cfg={cfg} />}
         {view === 'logisticscost' && canView('logisticscost') && <LogisticsWorkspace entry="ledger" cfg={cfg} />}
         {/* 自建但还没接代码的模块（key 不在已编码集合里）：即便被设为可进入，也给规划中占位而非白屏 */}
         {!CODED_VIEWS.has({ import: 'reconcile', fund: 'reconcile', result: 'reconcile' }[view] || view) && canView(view) &&

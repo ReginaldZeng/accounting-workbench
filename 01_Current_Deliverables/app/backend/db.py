@@ -698,6 +698,11 @@ for _table in _ec_order_tables:
 from kernels.invoice_store import TABLES as _inv_tables
 for _table in _inv_tables:
     _table.to_metadata(_md)
+# 物流账单复核（V2.632）：中间表 logistics_bill_lines + 价格卡 logistics_price_card + 取数说明 logistics_intake_spec
+# 3 张新表自带 MetaData，这里挂进来由 create_all 建（只建不改既有表）。
+from kernels.logistics_review_store import TABLES as _lr_tables
+for _table in _lr_tables:
+    _table.to_metadata(_md)
 _md.create_all(_engine)
 
 # 细粒度权限能力清单 —— 代码持有的**静态**注册表：加一条动作权限只改这里，账号页按 ws/group 自动渲染。
@@ -2379,6 +2384,10 @@ def seed_logistics_maps():
 
 seed_logistics_maps()
 _ensure_type_map_std()
+
+# 物流账单复核 pilot 种子（V2.632）：迅鸽取数说明（表空才插）。价格卡走「导入合同价目表」，不硬编码。
+from kernels.logistics_review_store import seed_pilot as _lr_seed_pilot
+_lr_seed_pilot(_engine)
 
 
 # ----------------------------- 主体档案（平台级基础数据） -----------------------------

@@ -555,3 +555,12 @@ export const invMState = (token) => j('/api/inv/m/state', { headers: invMH(token
 export const invMJsConfig = (token, url) => j('/api/inv/m/jsconfig?url=' + encodeURIComponent(url), { headers: invMH(token) })
 export const invMScan = (token, code) => j('/api/inv/m/scan', { method: 'POST', headers: invMH(token, { 'Content-Type': 'application/json' }), body: JSON.stringify({ code }) })
 export const invMUpload = (token, files, purpose = 'invoice') => invPost('/api/inv/m/upload', invFd(files, 'files', { purpose }), invMH(token))
+
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.632 物流账单复核（核价×核量→归一态；pilot 迅鸽）
+export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '') =>
+  j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${period}&group=${group}&page=${page}&q=${encodeURIComponent(q)}`)
+export const reviewSpec = (carrier) => j(`/api/logistics-review/spec?carrier=${encodeURIComponent(carrier)}`)
+export const reviewPriceCard = (carrier) => j(`/api/logistics-review/price-card?carrier=${encodeURIComponent(carrier)}`)
+export const reviewImportPriceCard = (carrier, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/price-card/import?carrier=${encodeURIComponent(carrier)}`, { method: 'POST', body: fd }) }
+export const reviewParseBill = (carrier, period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/parse?carrier=${encodeURIComponent(carrier)}&period=${period}`, { method: 'POST', body: fd }) }
+export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
