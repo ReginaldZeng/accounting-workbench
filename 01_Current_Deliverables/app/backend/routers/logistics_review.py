@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.669
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.670
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -571,6 +571,7 @@ def _fetch_doc_materials(s, conf, docs_by_form):
 
 
 _BOX_CARRIERS = {"丰源"}  # 按件数/箱核对：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
+_QTY_CARRIERS = {"迅鸽"}  # 快递按件数核：账单件数 vs 金蝶出库件数(剔包装)，不做箱规换算
 _PACK_KW = ("纸箱", "包装袋", "包材", "运输袋", "编织袋", "拉链", "气泡", "胶带", "气枕", "葫芦膜", "文件封", "缠绕膜", "打托", "托盘", "护角")  # 包材(不摊运费、不进kg基数)
 # 费用类型按单据前缀通用推导（所有承运商共用，不再每家写死）
 _FEE_BY_PREFIX = {"FBDR": "调拨运费", "FBDC": "调拨运费", "XSCKD": "销售出库运费", "XQLCK": "销售出库运费",
@@ -811,8 +812,9 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     filt = [r for r in rows if keep(r)]
     page = max(1, int(page))
     sl = filt[(page - 1) * size: page * size]
-    # 统一物料模板：按重量(顺丰/天鹰)与按件数/箱(丰源)承运商共用同一分支（每单：有账单重量→按重量核，否则按件数核）
-    by_box = (carrier in _BOX_CARRIERS) or (carrier in _WEIGHT_CARRIERS)
+    # 统一物料模板：按重量(顺丰/天鹰)/按件数箱(丰源)/快递件数(迅鸽)共用同一分支
+    _rev = "weight" if carrier in _WEIGHT_CARRIERS else ("qty" if carrier in _QTY_CARRIERS else "box")
+    by_box = (carrier in _BOX_CARRIERS) or (carrier in _WEIGHT_CARRIERS) or (carrier in _QTY_CARRIERS)
     if by_box:
         # 按件数(箱)：金蝶数量(袋)÷规格箱规=金蝶箱数；整车比箱、打托倒算托规；账单件数/运费按箱数摊到物料。整车议价单只登记不核件数。
         by_form = {}
@@ -841,7 +843,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 chg_wt = float(r.get("charge_wt")) if r.get("charge_wt") not in (None, "") else None
             except (TypeError, ValueError):
                 chg_wt = None
-            if chg_wt:
+            use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
+            if use_weight:
                 # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
                 per = []
                 for m in lines:
@@ -852,11 +855,28 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                         bw = 0.0
                     per.append(bw if ("千克" in u or "kg" in u.lower()) else 0.0)
                 kd_sum = round(sum(per), 2)
-                bill_amt, bill_unit, kd_unit, mode_cn = chg_wt, "千克", "千克", "按重量"
-                cnt_state = "ok" if (kd_sum and abs(chg_wt - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
-                conv = round(chg_wt / kd_sum, 3) if kd_sum else None   # 按重量：换算系数=账单重量÷金蝶重量(毛重比)
+                wbase = chg_wt if chg_wt else kd_sum
+                bill_amt, bill_unit, kd_unit, mode_cn = wbase, "千克", "千克", "按重量"
+                cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
+                conv = round(wbase / kd_sum, 3) if kd_sum else None   # 按重量：换算系数=账单重量÷金蝶重量(毛重比)
                 mkq = lambda m: (float(m.get("基本数量") or 0) if ("千克" in str(m.get("基本单位") or "")) else None)
                 mku = lambda m: m.get("基本单位")
+            elif _rev == "qty":
+                # 快递 → 按件数核：金蝶件数=货品数量件之和(剔包装)，比账单件数
+                per = []
+                for m in lines:
+                    if any(k in str(m.get("名称") or "") for k in _PACK_KW):
+                        per.append(0.0); continue
+                    try:
+                        per.append(float(m.get("数量件") or 0))
+                    except (TypeError, ValueError):
+                        per.append(0.0)
+                kd_sum = round(sum(per), 2)
+                bill_amt, bill_unit, kd_unit, mode_cn = billcnt, (r.get("unit") or "件"), "件", "按件数"
+                cnt_state = "miss" if not kd_sum else ("ok" if abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum) else "qtydiff")
+                conv = round(kd_sum / billcnt, 3) if billcnt else None
+                mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
+                mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
             else:
                 # 无账单重量 → 按件数/箱核：金蝶箱数=数量件÷规格箱规
                 per = []
