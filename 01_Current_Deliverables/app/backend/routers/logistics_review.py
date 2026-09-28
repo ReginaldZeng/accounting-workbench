@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.641
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.643
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -552,22 +552,32 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
                                        "reg_id": r.get("id") if mode != "sales" else None})
             n = len([p for p in (r.get("doc_no") or "").split("+") if p]) or 1
             g["运费"] += (r.get("amount") or 0) / n
-    # 取物料明细
+    # 全量口径：总运费/单据数在取金蝶物料前算好（销售出库单可达数千张，不能每次翻页全量拉金蝶）
+    all_total = round(sum(g["运费"] for g in docfee.values()), 2)
+    # 单据号搜索先按单号过滤（物料名/编码搜索仅在本页已取物料内二次过滤）
+    doc_items = sorted(docfee.items(), key=lambda kv: kv[0])
+    if q:
+        doc_items = [kv for kv in doc_items if q in (kv[0] or "")]
+    doc_total = len(doc_items)
+    page = max(1, int(page))
+    page_items = doc_items[(page - 1) * size: page * size]  # 只取本页这一批单据
+    # 只对本页单据取金蝶物料明细
     by_form = {}
-    for no in docfee:
+    for no, _g in page_items:
         if no == "（无单号）":
             continue
         pre = "".join(ch for ch in no if ch.isalpha())
         for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
             by_form.setdefault(form, set()).add(no)
     mats = {}
-    try:
-        s, conf = kc.login()
-        mats = _fetch_doc_materials(s, conf, by_form)
-    except Exception:
-        mats = {}
+    if by_form:
+        try:
+            s, conf = kc.login()
+            mats = _fetch_doc_materials(s, conf, by_form)
+        except Exception:
+            mats = {}
     rows = []
-    for no, g in docfee.items():
+    for no, g in page_items:
         fee = round(g["运费"], 2)
         biz = _bizline_of(g["annot"])
         lines = mats.get(no) or []
@@ -598,12 +608,12 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
                 "fee": fline, "unitfee": round(fline / bq, 4) if bq else None,
                 "ratio": round(fline / sales_amt, 4) if sales_amt else None,
                 "reg_id": g.get("reg_id")})
+    # 本页物料名/编码二次过滤（仅在已取物料内，跨页搜索请用单据号）
     if q:
-        rows = [r for r in rows if q in (r["doc_no"] or "") or q in (r["name"] or "") or q in (r["code"] or "")]
-    total = round(sum(r["fee"] for r in rows), 2)
-    page = max(1, int(page))
-    return {"ok": True, "period": period, "mode": mode, "count": len(rows), "total": total,
-            "doc_count": len(docfee), "rows": rows[(page - 1) * size: page * size], "page": page, "size": size}
+        rows = [r for r in rows if q in (r["doc_no"] or "") or q in (r.get("name") or "") or q in (r.get("code") or "")]
+    pages = max(1, (doc_total + size - 1) // size)
+    return {"ok": True, "period": period, "mode": mode, "count": len(rows), "total": all_total,
+            "doc_count": doc_total, "rows": rows, "page": page, "pages": pages, "size": size}
 
 
 # 单据运费·销售出库 tab（旧·按单据汇总，保留兼容）：

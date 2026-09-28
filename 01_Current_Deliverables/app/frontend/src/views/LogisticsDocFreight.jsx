@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.642
+// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.643
 // 单据运费：两 tab（销售出库 / 其他单据登记制）统一为同一套物料级字段。
 // 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
@@ -21,13 +21,17 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
   const [sel, setSel] = useState(() => new Set())
+  const [page, setPage] = useState(1)
+  const [q, setQ] = useState('')
+  const [qInput, setQInput] = useState('')
   const fileRef = useRef(null)
 
   const load = useCallback(() => {
     setData(null); setSel(new Set())
-    reviewDocFreight(period, tab).then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0 }))
-  }, [period, tab])
+    reviewDocFreight(period, tab, q, page).then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0, pages: 1 }))
+  }, [period, tab, q, page])
   useEffect(() => { load() }, [load])
+  useEffect(() => { setPage(1) }, [tab, period, q])
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
 
@@ -104,6 +108,9 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .ldf .selbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 15px;background:#EAF4EE;border-bottom:1px solid #C6E2D2;font-size:13px;color:#2E5544}
       .ldf .selbar b{font-family:ui-monospace,monospace;font-size:14px;color:#1E7A4C}
       .ldf .selbar .sb-n{font-weight:700}.ldf .selbar .sb-sep{color:#A8C5B6}
+      .ldf .qbox{font:inherit;font-size:13px;padding:4px 9px;border:1px solid #DCE2E7;border-radius:6px;width:150px}
+      .ldf .pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px 15px;border-top:1px solid #DCE2E7}
+      .ldf .pager .pg{font-size:12.5px;color:#5E6B78}
       .ldf .tw{overflow-x:auto}
       .ldf .msg{background:#FEF7E6;border:1px solid #F0DCA8;border-radius:8px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;color:#5C4A00}
       .ldf .del{color:var(--bad);cursor:pointer;font-size:12px}
@@ -162,8 +169,15 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       )}
 
       <div className="card">
-        <h3>{tab === 'sales' ? '销售出库单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
-          {data ? `　${data.doc_count} 张单据 / ${data.count} 行 · 运费合计 ${money(data.total)} 元` : ''}</h3>
+        <h3 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span>{tab === 'sales' ? '销售出库单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
+            {data ? `　${data.doc_count} 张单据 · 运费合计 ${money(data.total)} 元` : ''}</span>
+          <span style={{ flex: 1 }} />
+          <input className="qbox" value={qInput} placeholder="搜单据号…" onChange={e => setQInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') setQ(qInput.trim()) }} />
+          <button className="btn" onClick={() => setQ(qInput.trim())}>搜索</button>
+          {q && <button className="btn" onClick={() => { setQInput(''); setQ('') }}>清除</button>}
+        </h3>
         {sel.size > 0 && (
           <div className="selbar">
             <span className="sb-n">已勾选 {sel.size} 张单</span>
@@ -230,6 +244,13 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
             })}
           </tbody>
         </table></div>
+        {data && data.pages > 1 && (
+          <div className="pager">
+            <button className="btn" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>上一页</button>
+            <span className="pg">第 {page} / {data.pages} 页（共 {data.doc_count} 张单，每页 {data.size} 张）</span>
+            <button className="btn" disabled={page >= data.pages} onClick={() => setPage(p => Math.min(data.pages, p + 1))}>下一页</button>
+          </div>
+        )}
       </div>
     </div>
   )
