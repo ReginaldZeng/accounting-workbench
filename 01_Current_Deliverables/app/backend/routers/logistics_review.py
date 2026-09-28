@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.657
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.658
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -888,8 +888,9 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         ws.column_dimensions[chr(64 + i)].width = w
     # sheet2 复核明细
     ws2 = wb.create_sheet("复核明细")
+    from openpyxl.utils import get_column_letter
     if res.get("material"):
-        # 接上原账单：每单费用分项(sub_fees)+运输方式(carrier_sub)+账单计入金额+账单计费重量，doc级仅首个物料行填（避免重复累加）
+        # 接上原账单：每单费用分项(sub_fees)+运输方式(carrier_sub)+账单计入金额+账单计费重量，doc级仅首个物料行填
         with db._engine.connect() as c:
             braw = {r[0]: (r[1], r[2], r[3], r[4]) for r in c.execute(select(
                 BL.c.doc_no, BL.c.carrier_sub, BL.c.sub_fees, BL.c.amount, BL.c.charge_wt).where(
@@ -904,31 +905,66 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 except Exception:
                     pass
         feekeys.sort(key=lambda k: (0 if k == "运费" else 1, k))
-        cols = ["费用主体", "承运商", "费用类型", "业务线", "单据号", "客户/需求部门", "物料编码", "物料名称",
-                "基本单位重量", "基本单位", "运费", "单位运费", "账单数量", "账单单位", "换算系数", "销售额", "费比",
-                "运输方式(原账单)"] + ["%s(原账单)" % k for k in feekeys] + ["账单计入金额(原账单)", "账单计费重量(原账单)"]
-        ws2.append(cols)
+        # 分组：ERP/金蝶数据、账单原始数据、复核数据分开配色；★=重点关注列。(组名, 组色, 列头浅色, doc级仅首行填, [(列头, 取值键)])
+        groups = [
+            ("归属·计提", "5E6B78", "E7ECEF", False, [("费用主体", "subject"), ("承运商", "carrier"),
+                ("费用类型", "fee_item"), ("业务线", "bizline"), ("单据号", "doc_no")]),
+            ("ERP·金蝶数据", "2E7D57", "DCEFE4", False, [("客户/需求部门", "party"), ("物料编码", "code"),
+                ("物料名称", "name"), ("基本单位重量", "base_wt"), ("基本单位", "base_unit"), ("销售额", "sales")]),
+            ("账单·%s原账单" % carrier, "B06A12", "FBF0DA", True, [("运输方式", "_cs")] +
+                [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费重量", "_cw")]),
+            ("复核数据", "B23B2E", "F8DDD8", False, [("运费(分摊)", "fee"), ("单位运费", "unit_fee"),
+                ("账单数量(分摊)", "bill_qty"), ("账单单位", "bill_unit"), ("★换算系数", "conv"), ("★费比", "ratio")]),
+        ]
+        col = 1
+        for name, gc, hc, _dl, cols in groups:
+            span = len(cols)
+            ws2.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + span - 1)
+            gcell = ws2.cell(row=1, column=col, value=name)
+            gcell.font = HFONT; gcell.fill = PatternFill("solid", fgColor=gc)
+            gcell.alignment = Alignment(horizontal="center")
+            for j, (h, _k) in enumerate(cols):
+                hc2 = ws2.cell(row=2, column=col + j, value=h)
+                hc2.font = Font(bold=True, color="B23B2E" if h.startswith("★") else "1B2733")
+                hc2.fill = PatternFill("solid", fgColor=hc)
+            col += span
+        rownum = 3
         prev = None
         for r in res.get("detail", []):
-            row = [r.get("subject"), r.get("carrier"), r.get("fee_item"), r.get("bizline"), r.get("doc_no"),
-                   r.get("party"), r.get("code"), r.get("name"), r.get("base_wt"), r.get("base_unit"),
-                   r.get("fee"), r.get("unit_fee"), r.get("bill_qty"), r.get("bill_unit"), r.get("conv"),
-                   r.get("sales"), (round(r["ratio"], 4) if r.get("ratio") is not None else None)]
-            d0 = r.get("doc_no")
-            if d0 != prev:
-                cs, sf, amt, cw = braw.get(d0, (None, None, None, None))
-                sfd = {}
-                if sf:
-                    try:
-                        sfd = json.loads(sf)
-                    except Exception:
-                        sfd = {}
-                row += [cs] + [sfd.get(k) for k in feekeys] + [amt, cw]
-                prev = d0
-            else:
-                row += [None] * (1 + len(feekeys) + 2)
-            ws2.append(row)
-        widths = [12, 14, 12, 10, 15, 16, 12, 22, 11, 8, 10, 10, 10, 8, 9, 10, 8, 14] + [10] * len(feekeys) + [14, 14]
+            d0 = r.get("doc_no"); firstdoc = (d0 != prev)
+            cs, sf, amt, cw = braw.get(d0, (None, None, None, None))
+            sfd = {}
+            if sf:
+                try:
+                    sfd = json.loads(sf)
+                except Exception:
+                    sfd = {}
+            col = 1
+            for name, gc, hc, doclvl, cols in groups:
+                for (_h, k) in cols:
+                    if doclvl and not firstdoc:
+                        val = None
+                    elif k == "_cs":
+                        val = cs
+                    elif k == "_amt":
+                        val = amt
+                    elif k == "_cw":
+                        val = cw
+                    elif k.startswith("_fee:"):
+                        val = sfd.get(k[5:])
+                    elif k == "ratio":
+                        val = round(r["ratio"], 4) if r.get("ratio") is not None else None
+                    else:
+                        val = r.get(k)
+                    ws2.cell(row=rownum, column=col, value=val)
+                    col += 1
+            prev = d0
+            rownum += 1
+        ws2.freeze_panes = "F3"
+        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 11, 8, 10] + [14] + [10] * len(feekeys) + [13, 13] +
+                  [10, 10, 10, 8, 10, 8])
+        for i, w in enumerate(widths, 1):
+            ws2.column_dimensions[get_column_letter(i)].width = w
     else:
         cols = ["金蝶单号", "快递/子类", "省", "计费重量", "账单数量", "金蝶数量", "账单金额", "标准费",
                 "核价差", "核价", "核量", "归一态", "计价档"]
@@ -939,12 +975,11 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                         _PSTATE_CN.get(r.get("price_state"), r.get("price_state")),
                         _QSTATE_CN.get(r.get("qty_state"), r.get("qty_state")),
                         _VERDICT_CN.get(r.get("verdict"), r.get("verdict")), r.get("tier")])
-        widths = [15, 16, 8, 10, 10, 10, 11, 10, 9, 9, 8, 10, 14]
-    for c in ws2[1]:
-        c.font = HFONT; c.fill = HFILL
-    ws2.freeze_panes = "A2"
-    for i, w in enumerate(widths, 1):
-        ws2.column_dimensions[chr(64 + i)].width = w
+        for c in ws2[1]:
+            c.font = HFONT; c.fill = HFILL
+        ws2.freeze_panes = "A2"
+        for i, w in enumerate([15, 16, 8, 10, 10, 10, 11, 10, 9, 9, 8, 10, 14], 1):
+            ws2.column_dimensions[get_column_letter(i)].width = w
     bio = BytesIO(); wb.save(bio)
     fn = "%s_%s_复核结果.xlsx" % (carrier, period)
     return Response(content=bio.getvalue(),
