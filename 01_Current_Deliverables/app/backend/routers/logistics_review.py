@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.658
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.659
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -980,6 +980,34 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         ws2.freeze_panes = "A2"
         for i, w in enumerate([15, 16, 8, 10, 10, 10, 11, 10, 9, 9, 8, 10, 14], 1):
             ws2.column_dimensions[get_column_letter(i)].width = w
+    # sheet3+ 原账单（可追溯）：若已存原始账单，逐 sheet 原样附上，右侧接复核列（金蝶重量/换算系数/核量结论），按金蝶单号匹配
+    import os as _os
+    raw_fp = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "..", "raw_bills",
+                           "%s_%s.json" % (carrier, period))
+    if _os.path.exists(raw_fp):
+        try:
+            raw = json.load(open(raw_fp, encoding="utf-8"))
+        except Exception:
+            raw = None
+        if raw:
+            with db._engine.connect() as c:
+                rv = {r[0]: (r[1], r[2], r[3]) for r in c.execute(select(
+                    BL.c.doc_no, BL.c.kd_qty, BL.c.charge_wt, BL.c.qty_state).where(
+                    (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()}
+            for sh in raw.get("sheets", []):
+                title = ("原账单-" + sh.get("name", ""))[:31]
+                ws3 = wb.create_sheet(title)
+                ws3.append(list(sh.get("header", [])) + ["金蝶出库重量kg", "换算系数(账单/金蝶)", "核量结论"])
+                for c in ws3[1]:
+                    c.font = HFONT; c.fill = HFILL
+                ki = sh.get("kidx")
+                for row in sh.get("rows", []):
+                    no = str(row[ki]).strip() if (ki is not None and ki < len(row) and row[ki] not in (None, "")) else ""
+                    kq, cw, qs = rv.get(no, (None, None, None))
+                    conv = round(cw / kq, 3) if (cw and kq) else None
+                    concl = "" if not no else ("重量一致" if qs == "ok" else "顺丰多报" if (conv and conv > 1) else "顺丰少报" if (conv and conv < 1) else "待核")
+                    ws3.append(list(row) + [kq, conv, concl])
+                ws3.freeze_panes = "A2"
     bio = BytesIO(); wb.save(bio)
     fn = "%s_%s_复核结果.xlsx" % (carrier, period)
     return Response(content=bio.getvalue(),
