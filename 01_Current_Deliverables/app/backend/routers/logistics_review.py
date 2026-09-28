@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.640
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.641
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -10,7 +10,7 @@ import re
 import calendar
 from datetime import datetime
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from sqlalchemy import select, insert, delete, update, func
 
 from core import JSONResponse, _require_perm, db
@@ -321,10 +321,7 @@ async def review_register_add(request: Request):
         amount = round(float(amount), 2)
     except Exception:
         return JSONResponse({"ok": False, "msg": "金额须为数字"}, status_code=400)
-    note = "；".join(x for x in [
-        ("需求部门 " + b["dept"]) if b.get("dept") else "",
-        ("来源 " + b["source"]) if b.get("source") else "",
-        ("日期 " + b["date"]) if b.get("date") else "", (b.get("note") or "")] if x)
+    note = _reg_note(b.get("dept"), b.get("source"), b.get("date"), b.get("note"))
     with db._engine.begin() as c:
         c.execute(insert(BL).values(
             batch_id="register|%s|%s" % (carrier, period), period=period, carrier=carrier,
@@ -346,6 +343,119 @@ async def review_register_delete(request: Request):
     with db._engine.begin() as c:
         c.execute(delete(BL).where((BL.c.id == rid) & (BL.c.review_mode == "register")))
     return {"ok": True}
+
+
+_REG_TPL_COLS = ["日期", "费用主体", "费用类型", "业务线", "ERP单据号", "需求部门", "承运商", "运费", "备注"]
+
+
+def _reg_note(dept, source, date, extra=""):
+    return "；".join(x for x in [
+        ("需求部门 " + dept) if dept else "",
+        ("来源 " + source) if source else "",
+        ("日期 " + date) if date else "", (extra or "")] if x)
+
+
+def _cell_str(v):
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, float) and v == int(v):
+        return str(int(v))
+    return str(v).strip()
+
+
+@router.get("/api/logistics-review/register/template")
+def review_register_template(request: Request):
+    """下载「其他单据（登记制）」批量导入模板 xlsx。列＝用户现有表：日期/费用主体/费用类型/业务线/ERP单据号/需求部门/承运商/运费/备注。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from io import BytesIO
+    wb = Workbook(); ws = wb.active; ws.title = "单据运费登记"
+    ws.append(_REG_TPL_COLS)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="1F6E8C")
+    ws.append(["2026-08-29", "深圳星期零", "销售出库运费", "星期零电商", "FBDR075727", "电商部门", "货拉拉", 347.4, "示例行，可删"])
+    ws.append(["2026-08-06", "深圳星期零", "销售出库运费", "星期零电商", "FBDR074944", "电商部门", "货拉拉", 197.99, ""])
+    for i, wd in enumerate([12, 12, 14, 14, 16, 12, 10, 10, 18], start=1):
+        ws.column_dimensions[chr(64 + i)].width = wd
+    bio = BytesIO(); wb.save(bio)
+    return Response(content=bio.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename=logistics_register_template.xlsx"})
+
+
+@router.post("/api/logistics-review/register/import")
+async def review_register_import(request: Request, period: str = ""):
+    """批量导入其他单据运费（登记制）。解析用户模板：承运商+运费必填，账期按「日期」列取 YYYY-MM（缺则用当前账期）。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    data = await _read_upload(request)
+    if not data:
+        return JSONResponse({"ok": False, "msg": "未收到文件"}, status_code=400)
+    try:
+        import openpyxl
+        from io import BytesIO
+        wb = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
+        ws = wb.active
+        grid = [list(row) for row in ws.iter_rows(values_only=True)]
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "Excel 读取失败，请用下载的模板另存 .xlsx 再传"}, status_code=400)
+    # 找表头行（含「承运商」且含「运费」或「金额」）
+    hdr_i, hdr = -1, []
+    for i, row in enumerate(grid[:8]):
+        txt = [_cell_str(c) for c in row]
+        if any("承运商" in t for t in txt) and any(("运费" in t or "金额" in t) for t in txt):
+            hdr_i, hdr = i, txt; break
+    if hdr_i < 0:
+        return JSONResponse({"ok": False, "msg": "没找到表头行（需含「承运商」和「运费」列），请用下载模板"}, status_code=400)
+
+    def col(*keys):
+        for j, h in enumerate(hdr):
+            if any(k in h for k in keys):
+                return j
+        return -1
+    ci = {"date": col("日期"), "subject": col("费用主体", "主体"), "fee_item": col("费用类型", "类型"),
+          "bizline": col("业务线"), "doc_no": col("单据号", "单号", "ERP"), "dept": col("需求部门", "部门"),
+          "carrier": col("承运商"), "amount": col("运费", "金额"), "note": col("备注")}
+    if ci["carrier"] < 0 or ci["amount"] < 0:
+        return JSONResponse({"ok": False, "msg": "表头缺「承运商」或「运费」列"}, status_code=400)
+
+    def get(row, key):
+        j = ci[key]
+        return _cell_str(row[j]) if 0 <= j < len(row) else ""
+    added, skipped, errs = 0, 0, []
+    with db._engine.begin() as c:
+        for r in grid[hdr_i + 1:]:
+            if not any(_cell_str(x) for x in r):
+                continue
+            carrier = get(r, "carrier"); amt_s = get(r, "amount")
+            if not carrier or amt_s == "":
+                skipped += 1; continue
+            try:
+                amount = round(float(str(amt_s).replace(",", "").replace("￥", "").replace("¥", "")), 2)
+            except Exception:
+                skipped += 1; errs.append("金额非数字：%s" % amt_s); continue
+            date = get(r, "date")
+            per = period
+            m = re.match(r"(\d{4})[-/年.](\d{1,2})", date or "")
+            if m:
+                per = "%s-%s" % (m.group(1), m.group(2).zfill(2))
+            if not per:
+                skipped += 1; errs.append("缺账期且日期不可解析"); continue
+            doc_no = get(r, "doc_no")
+            c.execute(insert(BL).values(
+                batch_id="register|%s|%s" % (carrier, per), period=per, carrier=carrier,
+                grain="detail", review_mode="register", subject=get(r, "subject"),
+                doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
+                annot=get(r, "bizline"), fee_item=get(r, "fee_item") or "运费",
+                amount=amount, unit="", note=_reg_note(get(r, "dept"), "", date, get(r, "note")), created_at=_now()))
+            added += 1
+    db.audit(u["name"], "物流复核-导入单据运费", period or "多期", "新增 %d 行 / 跳过 %d 行" % (added, skipped))
+    return {"ok": True, "added": added, "skipped": skipped, "errs": errs[:5]}
 
 
 @router.get("/api/logistics-review/register-list")

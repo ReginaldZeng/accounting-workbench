@@ -2,8 +2,8 @@
 // 单据运费：两 tab（销售出库 / 其他单据登记制）统一为同一套物料级字段。
 // 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
-import React, { useEffect, useState, useCallback } from 'react'
-import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocFreight } from '../api.js'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
+import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocFreight, reviewRegisterImport, reviewRegisterTemplateUrl } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -20,6 +20,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const [f, setF] = useState(BLANK)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
+  const fileRef = useRef(null)
 
   const load = useCallback(() => {
     setData(null)
@@ -36,6 +37,15 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
   }
   const del = id => { reviewRegisterDelete(id).then(load).catch(e => flash(e.message)) }
+  const doImport = e => {
+    const file = e.target.files && e.target.files[0]
+    if (fileRef.current) fileRef.current.value = ''
+    if (!file) return
+    setBusy('imp')
+    reviewRegisterImport(period, file)
+      .then(r => { flash(`导入完成：新增 ${r.added} 笔${r.skipped ? ` · 跳过 ${r.skipped}` : ''}${r.errs && r.errs.length ? '（' + r.errs.join('；') + '）' : ''}`); load() })
+      .catch(e => flash('导入失败：' + e.message)).finally(() => setBusy(''))
+  }
   const check = () => {
     setBusy('kd')
     reviewRegisterKingdeeCheck(period).then(r => { flash(`单号真实 ${r.real} / 查无 ${r.miss}（金蝶只读）`); load() })
@@ -75,6 +85,10 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .ldf th{font-size:11px;color:#8A96A2;background:#F7F9F9}
       .ldf td.num,.ldf th.num{text-align:right;font-family:ui-monospace,monospace}
       .ldf tr.docstart td{border-top:2px solid #CBD5Dc}
+      .ldf td[rowspan]{vertical-align:middle;background:#FBFCFD}
+      .ldf tr.band td{background:#F6F9FA}.ldf tr.band td[rowspan]{background:#EEF4F6}
+      .ldf td.docno .dn{font-family:ui-monospace,monospace;font-size:12px;font-weight:600}
+      .ldf td.docno .dnsub{display:block;font-size:10.5px;color:#8A96A2;margin-top:2px}
       .ldf .tw{overflow-x:auto}
       .ldf .msg{background:#FEF7E6;border:1px solid #F0DCA8;border-radius:8px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;color:#5C4A00}
       .ldf .del{color:var(--bad);cursor:pointer;font-size:12px}
@@ -106,7 +120,14 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       {tab === 'other' && (
         <div className="card">
-          <h3>登记一笔单据运费（议价/报销：货拉拉、零星件、调拨）</h3>
+          <h3 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span>登记单据运费（议价/报销：货拉拉、零星件、调拨）</span>
+            <span style={{ flex: 1 }} />
+            <a className="btn" style={{ textDecoration: 'none' }} href={reviewRegisterTemplateUrl()}>下载导入模板</a>
+            <button className="btn pri" disabled={busy === 'imp'} onClick={() => fileRef.current && fileRef.current.click()}>
+              {busy === 'imp' ? '导入中…' : '批量导入 Excel'}</button>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={doImport} />
+          </h3>
           <div className="form">
             <label>承运商<input value={f.carrier} onChange={e => set('carrier', e.target.value)} /></label>
             <label>单据号（FBDR/CGRK…）<input value={f.doc_no} onChange={e => set('doc_no', e.target.value)} placeholder="多单用 +" /></label>
@@ -144,16 +165,32 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
             </td></tr>}
             {rows.map((r, i) => {
               const first = i === 0 || rows[i - 1].doc_no !== r.doc_no
+              // 该单据跨几行（物料行数）＋整单运费合计，用于合并单元格显示「这是同一张单」
+              let span = 1, docFee = r.fee || 0
+              if (first) { for (let k = i + 1; k < rows.length && rows[k].doc_no === r.doc_no; k++) { span++; docFee += rows[k].fee || 0 } }
+              // 交替底色按单据分组
+              let gi = 0; for (let k = 1; k <= i; k++) { if (rows[k].doc_no !== rows[k - 1].doc_no) gi++ }
+              const band = gi % 2 === 1 ? ' band' : ''
+              const multi = span > 1
               return (
-                <tr key={i} className={first ? 'docstart' : ''}>
-                  <td>{r.subject}</td><td>{r.fee_item}</td><td>{r.bizline || <span className="note">—</span>}</td>
-                  <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{first ? r.doc_no : ''}</td>
-                  <td>{r.party || <span className="note">—</span>}</td>
+                <tr key={i} className={(first ? 'docstart' : '') + band}>
+                  {first && <>
+                    <td rowSpan={span}>{r.subject}</td>
+                    <td rowSpan={span}>{r.fee_item}</td>
+                    <td rowSpan={span}>{r.bizline || <span className="note">—</span>}</td>
+                    <td rowSpan={span} className="docno">
+                      <span className="dn">{r.doc_no}</span>
+                      {multi && <span className="dnsub">共 {span} 个物料 · 整单 {money(docFee)}</span>}
+                    </td>
+                  </>}
+                  {tab === 'other'
+                    ? (first && <td rowSpan={span}>{r.party || <span className="note">—</span>}</td>)
+                    : <td>{r.party || <span className="note">—</span>}</td>}
                   <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="note">—</span>}</td>
                   <td>{r.name}</td>
                   <td className="num">{qtyfmt(r.baseqty)}</td><td>{r.baseunit || <span className="note">—</span>}</td>
                   <td className="num">{money(r.fee)}</td><td className="num">{upfmt(r.unitfee)}</td><td className="num">{pctfmt(r.ratio)}</td>
-                  {tab === 'other' && <td>{first && r.reg_id ? <span className="del" onClick={() => del(r.reg_id)}>删除</span> : ''}</td>}
+                  {tab === 'other' && (first && <td rowSpan={span}>{r.reg_id ? <span className="del" onClick={() => del(r.reg_id)}>删除</span> : ''}</td>)}
                 </tr>
               )
             })}
