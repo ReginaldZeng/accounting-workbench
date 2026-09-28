@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.662
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.665
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -226,9 +226,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               ? <div className="tw"><table className="mtbl">
                 <thead><tr>
                   <th>费用主体</th><th>承运商</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/需求部门</th>
-                  <th>物料编码</th><th>物料名称</th><th className="num">金蝶数量</th><th>单位</th><th className="num">金蝶核对量</th>
+                  <th>物料编码</th><th>物料名称</th><th className="num">基本单位数量</th><th>基本单位</th>
+                  <th className="num">金蝶数量</th><th>单位</th><th className="num">金蝶核对量</th>
                   <th className="num">账单量</th><th>计费方式</th><th className="num">换算系数</th>
-                  <th className="num">运费</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th>
+                  <th className="num">运费</th><th className="num">单位运费<small>(元/kg)</small></th><th className="num">销售额</th><th className="num">费比</th>
                 </tr></thead>
                 <tbody>{(() => {
                   const rows = d.detail || []
@@ -250,7 +251,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       </>}
                       <td>{r.party || <span className="dim">—</span>}</td>
                       <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="dim">—</span>}</td>
-                      <td>{r.name}</td>
+                      <td>{r.name}{r.is_pack && <span className="pill neu" style={{ marginLeft: 4, fontSize: 10 }}>包材</span>}</td>
+                      <td className="num">{r.base_kg == null ? '—' : r.base_kg}</td><td>{r.kg_unit || <span className="dim">—</span>}</td>
                       <td className="num">{r.base_qty == null ? '—' : r.base_qty}</td><td>{r.base_unit || <span className="dim">—</span>}</td>
                       <td className="num">{r.kd == null ? '—' : r.kd}</td>
                       {first && <td rowSpan={span} className="num">{r.bill_amt == null ? '—' : r.bill_amt}<small style={{ color: '#8A96A2', marginLeft: 2 }}>{r.bill_unit}</small></td>}

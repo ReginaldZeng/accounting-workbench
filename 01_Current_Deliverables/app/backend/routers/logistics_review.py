@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.664
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.665
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -571,6 +571,7 @@ def _fetch_doc_materials(s, conf, docs_by_form):
 
 
 _BOX_CARRIERS = {"丰源"}  # 按件数/箱核对：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
+_PACK_KW = ("纸箱", "包装袋", "包材", "运输袋", "编织袋", "拉链", "气泡", "胶带", "气枕", "葫芦膜", "文件封", "缠绕膜", "打托", "托盘", "护角")  # 包材(不摊运费、不进kg基数)
 
 
 def _box_reg(spec):
@@ -880,9 +881,28 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                              "base_qty": None, "base_unit": "", "kd": None, "fee": round(fee, 2),
                              "unit_fee": None, "sales": None, "ratio": None})
                 continue
+            # 运费分摊与单位运费一律按货品基本重量(kg)，剔除包材（包材不摊、单位运费留空）
+            kgs = []
+            for m in lines:
+                ispack = any(k in str(m.get("名称") or "") for k in _PACK_KW)
+                u = str(m.get("基本单位") or "")
+                try:
+                    kg = float(m.get("基本数量") or 0)
+                except (TypeError, ValueError):
+                    kg = 0.0
+                kgs.append(0.0 if ispack else (kg if ("千克" in u or "kg" in u.lower()) else 0.0))
+            kgbase = sum(kgs)
+            nnp = sum(1 for x in kgs if x)  # 非包材(有kg)物料数，用于kgbase=0时兜底均摊
             for i, m in enumerate(lines):
                 kd = round(per[i], 2)
-                share = (kd / kd_sum) if kd_sum else (1.0 / len(lines))
+                ispack = any(k in str(m.get("名称") or "") for k in _PACK_KW)
+                kg = kgs[i]
+                if kgbase:
+                    share = kg / kgbase
+                elif not ispack and nnp == 0:
+                    share = 1.0 / len(lines)   # 无kg基数(异常)时均摊
+                else:
+                    share = 0.0
                 fline = round(fee * share, 2)
                 try:
                     sales = float(m.get("销售额")) if m.get("销售额") not in (None, "") else None
@@ -892,9 +912,15 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                     bq = mkq(m)
                 except (TypeError, ValueError):
                     bq = None
+                try:
+                    base_kg = float(m.get("基本数量")) if m.get("基本数量") not in (None, "") else None
+                except (TypeError, ValueError):
+                    base_kg = None
                 view.append({**base, "party": m.get("往来") or "", "code": m.get("编码"), "name": m.get("名称"),
-                             "base_qty": bq, "base_unit": mku(m), "kd": kd or None, "spec": m.get("规格"),
-                             "fee": fline, "unit_fee": round(fline / kd, 2) if kd else None,
+                             "base_qty": bq, "base_unit": mku(m),
+                             "base_kg": base_kg, "kg_unit": m.get("基本单位"), "is_pack": ispack,
+                             "kd": kd or None, "spec": m.get("规格"),
+                             "fee": fline, "unit_fee": round(fline / kg, 2) if kg else None,
                              "sales": round(sales, 2) if sales is not None else None,
                              "ratio": round(fline / sales, 4) if sales else None})
         return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
