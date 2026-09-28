@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.666
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.667
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -572,6 +572,14 @@ def _fetch_doc_materials(s, conf, docs_by_form):
 
 _BOX_CARRIERS = {"丰源"}  # 按件数/箱核对：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
 _PACK_KW = ("纸箱", "包装袋", "包材", "运输袋", "编织袋", "拉链", "气泡", "胶带", "气枕", "葫芦膜", "文件封", "缠绕膜", "打托", "托盘", "护角")  # 包材(不摊运费、不进kg基数)
+# 费用类型按单据前缀通用推导（所有承运商共用，不再每家写死）
+_FEE_BY_PREFIX = {"FBDR": "调拨运费", "FBDC": "调拨运费", "XSCKD": "销售出库运费", "XQLCK": "销售出库运费",
+                  "CGRK": "采购入库运费", "QTCK": "其他出库运费", "RK": "销售退货运费", "CGTL": "采购退料运费"}
+
+
+def _fee_of(doc_no, fallback):
+    pre = "".join(ch for ch in (doc_no or "").split("+")[0] if ch.isalpha())
+    return _FEE_BY_PREFIX.get(pre, fallback or "运输费")
 
 
 def _box_reg(spec):
@@ -803,7 +811,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     filt = [r for r in rows if keep(r)]
     page = max(1, int(page))
     sl = filt[(page - 1) * size: page * size]
-    by_box = carrier in _BOX_CARRIERS
+    # 统一物料模板：按重量(顺丰/天鹰)与按件数/箱(丰源)承运商共用同一分支（每单：有账单重量→按重量核，否则按件数核）
+    by_box = (carrier in _BOX_CARRIERS) or (carrier in _WEIGHT_CARRIERS)
     if by_box:
         # 按件数(箱)：金蝶数量(袋)÷规格箱规=金蝶箱数；整车比箱、打托倒算托规；账单件数/运费按箱数摊到物料。整车议价单只登记不核件数。
         by_form = {}
@@ -873,7 +882,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
                 mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
             conv = round(kd_sum / bill_amt, 3) if bill_amt else None
-            base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": r.get("fee_item"),
+            base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": _fee_of(d0, r.get("fee_item")),
                     "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                     "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
                     "note": r.get("note") or ""}
