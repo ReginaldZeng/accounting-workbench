@@ -4,6 +4,7 @@
 import React, { useState, useEffect } from 'react'
 import LogisticsWorkspace from './views/LogisticsWorkspace.jsx'
 import LogisticsReview from './views/LogisticsReview.jsx'   // V2.632 物流账单复核台（核价×核量→归一态；本体页，取代内嵌样机）
+import LogisticsDocFreight from './views/LogisticsDocFreight.jsx'   // V2.637 单据运费·其他单据（登记制：货拉拉等议价/报销）
 import Sidebar from './components/Sidebar.jsx'
 import DataImport from './views/DataImport.jsx'
 import FundDashboard from './views/FundDashboard.jsx'
@@ -183,7 +184,7 @@ export default function App() {
         {view === 'ecomsettle' && canView('ecomsettle') && <EcomWorkbench user={user} onNav={setView} initialScreen="cash" />}
         {view === 'ecombase' && canView('ecombase') && <EcomBasicData user={user} />}
         {view === 'logisticspay' && canView('logisticspay') && <LogisticsReview cfg={cfg} onPeriod={changePeriod} />}
-        {view === 'logisticscost' && canView('logisticscost') && <LogisticsWorkspace entry="ledger" cfg={cfg} />}
+        {view === 'logisticscost' && canView('logisticscost') && <LogisticsDocFreight cfg={cfg} onPeriod={changePeriod} />}
         {/* 自建但还没接代码的模块（key 不在已编码集合里）：即便被设为可进入，也给规划中占位而非白屏 */}
         {!CODED_VIEWS.has({ import: 'reconcile', fund: 'reconcile', result: 'reconcile' }[view] || view) && canView(view) &&
           <Placeholder title={(navDef?.modules || []).find(m => m.key === view)?.label || view}

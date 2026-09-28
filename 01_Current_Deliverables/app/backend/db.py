@@ -2385,8 +2385,9 @@ def seed_logistics_maps():
 seed_logistics_maps()
 _ensure_type_map_std()
 
-# 物流账单复核 pilot 种子（V2.632）：迅鸽取数说明（表空才插）。价格卡走「导入合同价目表」，不硬编码。
-from kernels.logistics_review_store import seed_pilot as _lr_seed_pilot
+# 物流账单复核 pilot 种子（V2.632）：迅鸽取数说明 + 登记制承运商（表空才插）。价格卡走「导入合同价目表」，不硬编码。
+from kernels.logistics_review_store import seed_pilot as _lr_seed_pilot, migrate_cols as _lr_migrate
+_lr_migrate(_engine)     # 补 bill_lines.review_mode 列（create_all 只建不改）
 _lr_seed_pilot(_engine)
 
 

@@ -232,6 +232,7 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
             for r in res[grain]:
                 vals = {k: r.get(k) for k in _DETAIL_KEYS}
                 vals["batch_id"] = batch
+                vals["review_mode"] = "audit"
                 vals["created_at"] = _now()
                 c.execute(insert(BL).values(**vals))
     db.audit(u["name"], "物流复核-解析账单", "%s %s" % (carrier, period),
@@ -286,6 +287,120 @@ def review_kingdee_qty(request: Request, carrier: str = "迅鸽", period: str = 
     db.audit(u["name"], "物流复核-接金蝶核量", "%s %s" % (carrier, period),
              "只读取数；出库单 %d 单，回填 %d 行" % (len(qty), hit))
     return {"ok": True, "kd_docs": len(qty), "filled": hit}
+
+
+# ---------- 登记制（议价/报销：货拉拉等）：单据运费·其他单据 ----------
+_FORM_BY_PREFIX = {
+    "FBDR": ["STK_TransferIn", "STK_TransferOut"], "FBDC": ["STK_TransferOut", "STK_TransferIn"],
+    "CGRK": ["STK_InStock"], "XSCKD": ["SAL_OUTSTOCK"], "XQLCK": ["SAL_OUTSTOCK"],
+    "QTCK": ["STK_MisDelivery"], "RK": ["SAL_RETURNSTOCK"], "CGTL": ["PUR_MRB"],
+}
+
+
+@router.post("/api/logistics-review/register")
+async def review_register_add(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    try:
+        b = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "请求格式错误"}, status_code=400)
+    carrier, period, doc_no = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("doc_no") or "").strip()
+    amount = b.get("amount")
+    if not carrier or not period or amount in (None, ""):
+        return JSONResponse({"ok": False, "msg": "承运商、账期、金额必填"}, status_code=400)
+    try:
+        amount = round(float(amount), 2)
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "金额须为数字"}, status_code=400)
+    note = "；".join(x for x in [
+        ("需求部门 " + b["dept"]) if b.get("dept") else "",
+        ("来源 " + b["source"]) if b.get("source") else "",
+        ("日期 " + b["date"]) if b.get("date") else "", (b.get("note") or "")] if x)
+    with db._engine.begin() as c:
+        c.execute(insert(BL).values(
+            batch_id="register|%s|%s" % (carrier, period), period=period, carrier=carrier,
+            grain="detail", review_mode="register", subject=(b.get("subject") or "").strip(),
+            doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
+            annot=(b.get("annot") or "").strip(), fee_item=(b.get("fee_item") or "运费").strip(),
+            amount=amount, unit=(b.get("unit") or "").strip(), note=note, created_at=_now()))
+    db.audit(u["name"], "物流复核-登记单据运费", "%s %s" % (carrier, period), "%s %.2f元" % (doc_no or "无单号", amount))
+    return {"ok": True}
+
+
+@router.post("/api/logistics-review/register/delete")
+async def review_register_delete(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    rid = b.get("id")
+    with db._engine.begin() as c:
+        c.execute(delete(BL).where((BL.c.id == rid) & (BL.c.review_mode == "register")))
+    return {"ok": True}
+
+
+@router.get("/api/logistics-review/register-list")
+def review_register_list(request: Request, period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL).where(
+            (BL.c.review_mode == "register") & (BL.c.period == period)).order_by(BL.c.id.desc())).mappings().all()]
+    lr.review_details(rows, {"express": {}, "unit": {}}, {})
+    view = [{k: r.get(k) for k in ("id", "carrier", "subject", "doc_no", "annot", "fee_item",
+             "amount", "unit", "qty_state", "verdict", "note")} for r in rows]
+    total = round(sum((r.get("amount") or 0) for r in rows), 2)
+    real = sum(1 for r in rows if r.get("qty_state") == "ok")
+    miss = sum(1 for r in rows if r.get("qty_state") == "miss")
+    return {"ok": True, "period": period, "rows": view, "count": len(rows),
+            "total": total, "doc_real": real, "doc_miss": miss}
+
+
+@router.post("/api/logistics-review/register/kingdee-check")
+def review_register_kingdee_check(request: Request, period: str = ""):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL.c.id, BL.c.doc_no).where(
+            (BL.c.review_mode == "register") & (BL.c.period == period)).mappings().all())]
+    # 按前缀分组单号 → 查对应金蝶单据存在性（只读）
+    form_docs = {}
+    for r in rows:
+        for no in [p for p in (r["doc_no"] or "").split("+") if p]:
+            pre = "".join(ch for ch in no if ch.isalpha())
+            for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"]):
+                form_docs.setdefault(form, set()).add(no)
+    exists = set()
+    try:
+        s, conf = kc.login()
+        for form, docs in form_docs.items():
+            docs = list(docs)
+            for i in range(0, len(docs), 200):
+                chunk = docs[i:i + 200]
+                inlist = ",".join("'%s'" % d.replace("'", "") for d in chunk)
+                try:
+                    for rr in kc._query(s, conf, form, [("FBillNo", "单号")], "FBillNo in (%s)" % inlist):
+                        if rr.get("单号"):
+                            exists.add(str(rr["单号"]))
+                except Exception:
+                    pass
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "金蝶取数失败，稍后重试"}, status_code=502)
+    real = miss = 0
+    with db._engine.begin() as c:
+        for r in rows:
+            nos = [p for p in (r["doc_no"] or "").split("+") if p]
+            st = "ok" if (nos and all(n in exists for n in nos)) else "miss"
+            if st == "ok":
+                real += 1
+            else:
+                miss += 1
+            c.execute(update(BL).where(BL.c.id == r["id"]).values(qty_state=st))
+    db.audit(u["name"], "物流复核-登记轻核单号", period, "单号真实 %d / 查无 %d（只读）" % (real, miss))
+    return {"ok": True, "real": real, "miss": miss}
 
 
 # ---------- 复核结果（费用项汇总 + 逐单）----------

@@ -64,6 +64,11 @@ def verdict(price_state, qty_state):
 def review_details(rows, card, kd_qty_map):
     """给一批 detail 行做两轴复核，就地填 std_amount/price_diff/price_state/kd_qty/qty_diff/qty_state/verdict。返回同一 list。"""
     for r in rows:
+        if r.get("review_mode") == "register":
+            # 登记制（议价/报销：货拉拉等）：不核价核量，只看单号在金蝶真不真实（qty_state 由 kingdee-check 填）。
+            r["std_amount"], r["price_diff"], r["price_state"], r["tier"] = None, None, "na", "登记制·免核"
+            r["verdict"] = "doc_miss" if r.get("qty_state") == "miss" else "registered"
+            continue
         std, pdiff, pstate, tier = price_check(r, card)
         r["std_amount"], r["price_diff"], r["price_state"], r["tier"] = std, pdiff, pstate, tier
         kd = kd_qty_map.get((r.get("doc_no") or "").split("+")[0]) if kd_qty_map else None

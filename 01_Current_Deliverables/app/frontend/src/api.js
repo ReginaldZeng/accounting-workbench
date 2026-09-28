@@ -584,3 +584,7 @@ export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/k
 
 export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)
 export const reviewOverview = (period) => j(`/api/logistics-review/overview?period=${period}`)
+export const reviewRegisterList = (period) => j(`/api/logistics-review/register-list?period=${period}`)
+export const reviewRegisterAdd = (body) => jp('/api/logistics-review/register', body)
+export const reviewRegisterDelete = (id) => jp('/api/logistics-review/register/delete', { id })
+export const reviewRegisterKingdeeCheck = (period) => jp(`/api/logistics-review/register/kingdee-check?period=${period}`)

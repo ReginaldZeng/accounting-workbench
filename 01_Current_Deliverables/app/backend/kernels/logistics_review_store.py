@@ -20,6 +20,7 @@ bill_lines = Table(
     Column("period", String(7)),           # 'YYYY-MM'
     Column("carrier", String(60)),         # 承运商简称
     Column("grain", String(10)),           # 'detail' 对账粒度 / 'accrual' 计提粒度
+    Column("review_mode", String(10)),     # 复核模式：'audit' 核价核量（有账单/合同价）/ 'register' 登记免核（议价/报销：货拉拉等）
     Column("subject", String(30)),         # 费用主体简称
     Column("doc_no", String(80)),          # 金蝶单号（一行多单以 + 连接）
     Column("annot", String(60)),           # 费用标注（规范词表）
@@ -103,9 +104,15 @@ _XUNGE_SPEC = {
     ],
 }
 
+# 登记制承运商种子：议价/报销制（货拉拉、顺丰速运零星），不核价核量，只登记单据运费 + 轻核单号真实。
+_REGISTER_CARRIERS = [
+    {"carrier": "货拉拉", "review_mode": "register",
+     "note": "同城/整车议价、员工报销制；无合同价目表、不按件数重量计费。登记 单据号(FBDR/CGRK)+费用+主体+需求部门，轻核单号在金蝶存在。"},
+]
+
 
 def seed_pilot(engine):
-    """迅鸽取数说明 pilot 种子（表为空才插；价格卡走「导入合同价目表」不硬编码）。幂等，服务器重启安全。"""
+    """迅鸽取数说明 pilot 种子 + 登记制承运商种子（表为空才插；价格卡走「导入合同价目表」）。幂等。"""
     import json
     from datetime import datetime
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -114,3 +121,25 @@ def seed_pilot(engine):
             c.execute(insert(intake_spec).values(carrier="迅鸽",
                 spec_json=json.dumps(_XUNGE_SPEC, ensure_ascii=False),
                 updated_by="种子(迅鸽pilot)", updated_at=now))
+        have = {r[0] for r in c.execute(select(intake_spec.c.carrier)).all()}
+        for rc in _REGISTER_CARRIERS:
+            if rc["carrier"] not in have:
+                c.execute(insert(intake_spec).values(carrier=rc["carrier"],
+                    spec_json=json.dumps(rc, ensure_ascii=False),
+                    updated_by="种子(登记制)", updated_at=now))
+
+
+def migrate_cols(engine):
+    """给已建的 logistics_bill_lines 补 review_mode 列（create_all 只建不改）。MySQL/SQLite 兼容，缺列才补。"""
+    from sqlalchemy import text
+    drv = engine.url.drivername
+    with engine.begin() as c:
+        if "mysql" in drv:
+            has = c.execute(text("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                                 "WHERE TABLE_NAME='logistics_bill_lines' AND COLUMN_NAME='review_mode'")).scalar()
+            if not has:
+                c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN review_mode VARCHAR(10)"))
+        else:
+            cols = [r[1] for r in c.execute(text("PRAGMA table_info(logistics_bill_lines)")).fetchall()]
+            if "review_mode" not in cols:
+                c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN review_mode VARCHAR(10)"))
