@@ -1,48 +1,48 @@
-// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.638
-// 单据运费：两 tab —— 销售出库（销售出库单挂的运费，从已解析账单汇总）/ 其他单据（登记制：货拉拉等议价报销、调拨）。
-// 每张单据带金蝶基本数量（重量/件）。其他单据不核价核量，只登记＋轻核单号在金蝶真实。
+// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.639
+// 单据运费：两 tab（销售出库 / 其他单据登记制）统一为同一套物料级字段。
+// 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
+// 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewRegisterList, reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocSales } from '../api.js'
+import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocFreight } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
-const qtyfmt = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN'))
+const qtyfmt = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 3 }))
+const upfmt = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 4, maximumFractionDigits: 4 }))
+const pctfmt = n => (n == null ? '—' : (Number(n) * 100).toFixed(2) + '%')
 const SUBJECTS = ['深圳星期零', '深圳星期九', '孝感星期九']
 const BLANK = { carrier: '货拉拉', doc_no: '', amount: '', subject: '孝感星期九', annot: '成品调拨单-电商', dept: '物流部', source: '', date: '' }
 
 export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const period = `${cfg.year}-${String(cfg.period).padStart(2, '0')}`
   const [tab, setTab] = useState('sales')
-  const [reg, setReg] = useState(null)
-  const [sales, setSales] = useState(null)
+  const [data, setData] = useState(null)
   const [f, setF] = useState(BLANK)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
 
-  const loadReg = useCallback(() => { reviewRegisterList(period).then(setReg).catch(e => setMsg(e.message)) }, [period])
-  const loadSales = useCallback(() => { setSales(null); reviewDocSales(period).then(setSales).catch(() => setSales({ rows: [], count: 0, total: 0 })) }, [period])
-  useEffect(() => { loadReg() }, [loadReg])
-  useEffect(() => { if (tab === 'sales') loadSales() }, [tab, loadSales])
+  const load = useCallback(() => {
+    setData(null)
+    reviewDocFreight(period, tab).then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0 }))
+  }, [period, tab])
+  useEffect(() => { load() }, [load])
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
 
   const add = () => {
     if (!f.carrier || f.amount === '') { flash('承运商、金额必填'); return }
     setBusy('add')
-    reviewRegisterAdd({ ...f, period }).then(() => { setF({ ...BLANK, carrier: f.carrier, subject: f.subject }); loadReg() })
+    reviewRegisterAdd({ ...f, period }).then(() => { setF({ ...BLANK, carrier: f.carrier, subject: f.subject }); load() })
       .catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
   }
-  const del = id => { reviewRegisterDelete(id).then(loadReg).catch(e => flash(e.message)) }
+  const del = id => { reviewRegisterDelete(id).then(load).catch(e => flash(e.message)) }
   const check = () => {
     setBusy('kd')
-    reviewRegisterKingdeeCheck(period).then(r => { flash(`单号真实 ${r.real} / 查无 ${r.miss}（金蝶只读）`); loadReg() })
+    reviewRegisterKingdeeCheck(period).then(r => { flash(`单号真实 ${r.real} / 查无 ${r.miss}（金蝶只读）`); load() })
       .catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
   }
-  const statePill = r => {
-    if (r.qty_state === 'ok') return <span className="pill ok">已登记 · 单号真实</span>
-    if (r.qty_state === 'miss') return <span className="pill bad">单号查无 · 待核</span>
-    return <span className="pill neu">已登记 · 单号待核</span>
-  }
+
+  const rows = data && data.rows ? data.rows : []
 
   return (
     <div className="ldf">
@@ -56,7 +56,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .ldf .tab .t{font-weight:700;font-size:14px}.ldf .tab .s{font-size:11.5px;color:#8A96A2;margin-top:2px}
       .ldf .card{background:#fff;border:1px solid #DCE2E7;border-radius:12px;overflow:hidden;margin-bottom:12px}
       .ldf .card h3{margin:0;padding:11px 15px;font-size:13px;border-bottom:1px solid #DCE2E7;color:#5E6B78}
-      .ldf .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px}
+      .ldf .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}
       @media(max-width:760px){.ldf .stats{grid-template-columns:1fr 1fr}}
       .ldf .stat{background:#fff;border:1px solid #DCE2E7;border-radius:12px;padding:13px 16px}
       .ldf .stat .v{font-family:ui-monospace,monospace;font-size:22px;font-weight:600}
@@ -74,9 +74,8 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .ldf th,.ldf td{padding:8px 11px;text-align:left;border-bottom:1px solid #DCE2E7;white-space:nowrap}
       .ldf th{font-size:11px;color:#8A96A2;background:#F7F9F9}
       .ldf td.num,.ldf th.num{text-align:right;font-family:ui-monospace,monospace}
+      .ldf tr.docstart td{border-top:2px solid #CBD5Dc}
       .ldf .tw{overflow-x:auto}
-      .ldf .pill{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:999px}
-      .ldf .pill.ok{background:#DCEFE4;color:var(--ok)}.ldf .pill.bad{background:#F8DDD8;color:var(--bad)}.ldf .pill.neu{background:#E7ECEF;color:var(--neu)}
       .ldf .msg{background:#FEF7E6;border:1px solid #F0DCA8;border-radius:8px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;color:#5C4A00}
       .ldf .del{color:var(--bad);cursor:pointer;font-size:12px}
       .ldf .note{color:#8A96A2;font-size:11.5px}
@@ -85,7 +84,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       <div className="head">
         <div><div className="h-title">单据运费</div>
-          <div className="h-sub">一行一张金蝶单据挂的物流费用 · 销售出库走核价核量 / 其他单据走登记制</div></div>
+          <div className="h-sub">一行一个物料行 · 运费按基本数量摊到物料 · 销售出库走核价核量 / 其他单据走登记制</div></div>
         <div style={{ flex: 1 }} />
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
       </div>
@@ -99,32 +98,13 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       {msg && <div className="msg">{msg}</div>}
 
-      {tab === 'sales' && (
-        <div className="card">
-          <h3>销售出库单 · 物流费用（按单据汇总）{sales ? `　共 ${sales.count} 张单据 · 合计 ${money(sales.total)} 元` : ''}</h3>
-          <div className="tw"><table>
-            <thead><tr><th>金蝶单号</th><th>承运商</th><th>费用标注</th><th className="num">计费重量</th><th className="num">金蝶数量</th><th className="num">物流费用</th></tr></thead>
-            <tbody>
-              {sales === null && <tr><td colSpan="6" className="empty">加载中…</td></tr>}
-              {sales && sales.rows && sales.rows.map((r, i) =>
-                <tr key={i}><td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.doc_no}</td><td>{r.carrier}</td>
-                  <td>{r.annot}</td><td className="num">{r.charge_wt == null ? '—' : r.charge_wt}</td>
-                  <td className="num">{qtyfmt(r.kd_qty)}</td><td className="num">{money(r.amount)}</td></tr>)}
-              {sales && sales.rows && !sales.rows.length &&
-                <tr><td colSpan="6" className="empty">本月还没有销售出库单据运费。<br />销售出库的账单在「账单上传」传入、「付款对账·复核台」做核价核量后，在此按单据汇总。</td></tr>}
-            </tbody>
-          </table></div>
-        </div>
-      )}
+      <div className="stats">
+        <div className="stat accent"><div className="v">{data ? data.doc_count : '—'}</div><div className="l">单据张数</div></div>
+        <div className="stat accent"><div className="v">{data ? data.count : '—'}</div><div className="l">物料明细行</div></div>
+        <div className="stat ok"><div className="v">{data ? money(data.total) : '—'}</div><div className="l">运费合计（元·含税）</div></div>
+      </div>
 
-      {tab === 'other' && (<>
-        <div className="stats">
-          <div className="stat accent"><div className="v">{reg ? reg.count : '—'}</div><div className="l">登记笔数</div></div>
-          <div className="stat accent"><div className="v">{reg ? money(reg.total) : '—'}</div><div className="l">费用合计（元·含税）</div></div>
-          <div className="stat ok"><div className="v">{reg ? reg.doc_real : '—'}</div><div className="l">单号真实（金蝶查到）</div></div>
-          <div className="stat bad"><div className="v">{reg ? reg.doc_miss : '—'}</div><div className="l">单号查无（待核）</div></div>
-        </div>
-
+      {tab === 'other' && (
         <div className="card">
           <h3>登记一笔单据运费（议价/报销：货拉拉、零星件、调拨）</h3>
           <div className="form">
@@ -139,30 +119,47 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
           </div>
           <div style={{ padding: '0 15px 13px', display: 'flex', gap: 8, alignItems: 'center' }}>
             <button className="btn pri" disabled={busy === 'add'} onClick={add}>登记</button>
-            <button className="btn" disabled={busy === 'kd'} onClick={check}>{busy === 'kd' ? '金蝶查单号中…' : '接金蝶查单号真实性＋基本数量'}</button>
+            <button className="btn" disabled={busy === 'kd'} onClick={check}>{busy === 'kd' ? '金蝶查单号中…' : '接金蝶查单号真实性＋物料明细'}</button>
             <span className="note">议价/报销制无合同价目表、不按件重计费，故不核价核量；核的是单号真实＋需求部门＋审批。</span>
           </div>
         </div>
+      )}
 
-        <div className="card">
-          <h3>本月其他单据 · 物流费用</h3>
-          <div className="tw"><table>
-            <thead><tr><th>单据号</th><th>承运商</th><th>费用标注</th><th>费用主体</th><th className="num">金蝶基本数量</th><th className="num">金额</th><th>需求部门 / 来源</th><th>核对状态</th><th></th></tr></thead>
-            <tbody>
-              {reg && reg.rows && reg.rows.map(r =>
-                <tr key={r.id}>
-                  <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.doc_no || <span className="note">无单号</span>}</td>
-                  <td>{r.carrier}</td><td>{r.annot}<div className="note">{r.fee_item}</div></td><td>{r.subject}</td>
-                  <td className="num">{r.kd_kg == null ? <span className="note">未核</span> : qtyfmt(r.kd_kg)}</td>
-                  <td className="num">{money(r.amount)}</td><td className="note">{r.note}</td>
-                  <td>{statePill(r)}</td>
-                  <td><span className="del" onClick={() => del(r.id)}>删除</span></td>
-                </tr>)}
-              {reg && reg.rows && !reg.rows.length && <tr><td colSpan="9" className="empty">本月还没有登记的其他单据运费。上方登记一笔（如货拉拉报销的 FBDR 运费）。</td></tr>}
-            </tbody>
-          </table></div>
-        </div>
-      </>)}
+      <div className="card">
+        <h3>{tab === 'sales' ? '销售出库单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
+          {data ? `　${data.doc_count} 张单据 / ${data.count} 行 · 运费合计 ${money(data.total)} 元` : ''}</h3>
+        <div className="tw"><table>
+          <thead><tr>
+            <th>费用主体</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/需求部门</th>
+            <th>物料编码</th><th>物料名称</th><th className="num">基本单位数量</th><th>基本单位</th>
+            <th className="num">运费</th><th className="num">单位运费</th><th className="num">费比</th>
+            {tab === 'other' && <th></th>}
+          </tr></thead>
+          <tbody>
+            {data === null && <tr><td colSpan="13" className="empty">加载中…（接金蝶取物料明细，可能稍慢）</td></tr>}
+            {data && !rows.length && <tr><td colSpan="13" className="empty">
+              {tab === 'sales'
+                ? <>本月还没有销售出库单据运费。<br />销售出库的账单在「账单上传」传入、「付款对账·复核台」做核价核量后，在此按物料摊列。</>
+                : <>本月还没有登记的其他单据运费。上方登记一笔（如货拉拉报销的 FBDR 运费），接金蝶取物料明细后在此按物料摊列。</>}
+            </td></tr>}
+            {rows.map((r, i) => {
+              const first = i === 0 || rows[i - 1].doc_no !== r.doc_no
+              return (
+                <tr key={i} className={first ? 'docstart' : ''}>
+                  <td>{r.subject}</td><td>{r.fee_item}</td><td>{r.bizline || <span className="note">—</span>}</td>
+                  <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{first ? r.doc_no : ''}</td>
+                  <td>{r.party || <span className="note">—</span>}</td>
+                  <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="note">—</span>}</td>
+                  <td>{r.name}</td>
+                  <td className="num">{qtyfmt(r.baseqty)}</td><td>{r.baseunit || <span className="note">—</span>}</td>
+                  <td className="num">{money(r.fee)}</td><td className="num">{upfmt(r.unitfee)}</td><td className="num">{pctfmt(r.ratio)}</td>
+                  {tab === 'other' && <td>{first && r.reg_id ? <span className="del" onClick={() => del(r.reg_id)}>删除</span> : ''}</td>}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table></div>
+      </div>
     </div>
   )
 }

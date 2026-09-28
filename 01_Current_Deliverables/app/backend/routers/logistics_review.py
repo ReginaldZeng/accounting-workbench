@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.639
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -364,7 +364,138 @@ def review_register_list(request: Request, period: str = ""):
             "total": total, "doc_real": real, "doc_miss": miss}
 
 
-# 单据运费·销售出库 tab：销售出库单挂的运费（从已解析账单的 audit 明细，按单据汇总）
+# 各单据的物料明细字段（编码/名称/基本单位数量/基本单位/往来/销售额），大小写逐单据写死，缺列降级
+_DOC_MAT_FIELDS = {
+    "SAL_OUTSTOCK": [("FBillNo", "单号"), ("FMaterialID.FNumber", "编码"), ("FMaterialID.FName", "名称"),
+                     ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
+                     ("FCustomerID.FName", "往来"), ("FAllAmount", "销售额")],
+    "STK_TransferIn": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
+                       ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来")],
+    "STK_TransferOut": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
+                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来")],
+    "STK_InStock": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
+                    ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FSupplierId.FName", "往来")],
+    "STK_MisDelivery": [("FBillNo", "单号"), ("FMaterialID.FNumber", "编码"), ("FMaterialID.FName", "名称"),
+                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FDeptId.FName", "往来")],
+}
+
+
+def _fetch_doc_materials(s, conf, docs_by_form):
+    """按 单据前缀→form 分组，查金蝶物料明细。返回 {单号: [{编码,名称,基本数量,基本单位,往来,销售额}]}。只读，缺列降级。"""
+    out = {}
+    for form, docs in docs_by_form.items():
+        fields = _DOC_MAT_FIELDS.get(form)
+        if not fields:
+            continue
+        docs = list(docs)
+        for i in range(0, len(docs), 200):
+            inlist = ",".join("'%s'" % d.replace("'", "") for d in docs[i:i + 200])
+            cols = list(fields)
+            rr = []
+            while cols:
+                try:
+                    rr = kc._query(s, conf, form, cols, "FBillNo in (%s)" % inlist)
+                    break
+                except Exception:
+                    cols = cols[:-1]
+            for r in rr:
+                no = r.get("单号")
+                if not no:
+                    continue
+                out.setdefault(str(no), []).append({
+                    "编码": r.get("编码"), "名称": r.get("名称"),
+                    "基本数量": r.get("基本数量"), "基本单位": r.get("基本单位"),
+                    "往来": r.get("往来"), "销售额": r.get("销售额")})
+    return out
+
+
+def _bizline_of(annot):
+    """从费用标注取业务线段（植物肉/鲜食/零售/小料/豆蛋制品/电商/山姆零售/kikiherb/海外）。"""
+    for b in ("植物肉", "鲜食", "山姆", "零售", "小料", "豆蛋制品", "电商", "kikiherb", "海外"):
+        if b in (annot or ""):
+            return "山姆零售" if b == "山姆" else b
+    return ""
+
+
+@router.get("/api/logistics-review/doc-freight")
+def review_doc_freight(request: Request, period: str = "", mode: str = "other", q: str = "", page: int = 1, size: int = 80):
+    """物料级单据运费（两 tab 同一套列）：一行=单据的一个物料行，运费按基本数量摊，单位运费=摊得运费/基本数量，费比=运费/销售额。
+    mode='other' 登记制(其他单据) / 'sales' 销售出库(已解析 audit 明细)。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        if mode == "sales":
+            src = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.period == period) & (BL.c.grain == "detail") & (BL.c.review_mode == "audit") &
+                (BL.c.fee == "销售出库费用"))).mappings().all()]
+        else:
+            src = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.period == period) & (BL.c.review_mode == "register")).order_by(BL.c.id.desc())).mappings().all()]
+    # 按单据汇总运费（一单号多行=累加）
+    docfee = {}
+    for r in src:
+        for no in [p for p in (r.get("doc_no") or "").split("+") if p] or ["（无单号）"]:
+            g = docfee.setdefault(no, {"运费": 0.0, "subject": r.get("subject"), "annot": r.get("annot"),
+                                       "fee_item": r.get("fee_item"), "carrier": r.get("carrier"),
+                                       "dept": (r.get("note") or ""), "qty_state": r.get("qty_state"),
+                                       "reg_id": r.get("id") if mode != "sales" else None})
+            n = len([p for p in (r.get("doc_no") or "").split("+") if p]) or 1
+            g["运费"] += (r.get("amount") or 0) / n
+    # 取物料明细
+    by_form = {}
+    for no in docfee:
+        if no == "（无单号）":
+            continue
+        pre = "".join(ch for ch in no if ch.isalpha())
+        for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
+            by_form.setdefault(form, set()).add(no)
+    mats = {}
+    try:
+        s, conf = kc.login()
+        mats = _fetch_doc_materials(s, conf, by_form)
+    except Exception:
+        mats = {}
+    rows = []
+    for no, g in docfee.items():
+        fee = round(g["运费"], 2)
+        biz = _bizline_of(g["annot"])
+        lines = mats.get(no) or []
+        kgsum = sum(float(m["基本数量"] or 0) for m in lines if m.get("基本数量") not in (None, ""))
+        if not lines:
+            rows.append({"subject": g["subject"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
+                         "party": g["dept"] if mode == "other" else "", "code": "", "name": "（金蝶无此单据物料）",
+                         "baseqty": None, "baseunit": "", "fee": fee, "unitfee": None, "ratio": None,
+                         "reg_id": g.get("reg_id")})
+            continue
+        for m in lines:
+            bq = None
+            try:
+                bq = float(m["基本数量"]) if m.get("基本数量") not in (None, "") else None
+            except (TypeError, ValueError):
+                bq = None
+            share = (bq / kgsum) if (kgsum and bq) else (1.0 / len(lines))
+            fline = round(fee * share, 2)
+            sales_amt = None
+            try:
+                sales_amt = float(m["销售额"]) if m.get("销售额") not in (None, "") else None
+            except (TypeError, ValueError):
+                sales_amt = None
+            rows.append({
+                "subject": g["subject"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
+                "party": (m.get("往来") or "") if mode == "sales" else (g["dept"] or ""),
+                "code": m.get("编码"), "name": m.get("名称"), "baseqty": bq, "baseunit": m.get("基本单位"),
+                "fee": fline, "unitfee": round(fline / bq, 4) if bq else None,
+                "ratio": round(fline / sales_amt, 4) if sales_amt else None,
+                "reg_id": g.get("reg_id")})
+    if q:
+        rows = [r for r in rows if q in (r["doc_no"] or "") or q in (r["name"] or "") or q in (r["code"] or "")]
+    total = round(sum(r["fee"] for r in rows), 2)
+    page = max(1, int(page))
+    return {"ok": True, "period": period, "mode": mode, "count": len(rows), "total": total,
+            "doc_count": len(docfee), "rows": rows[(page - 1) * size: page * size], "page": page, "size": size}
+
+
+# 单据运费·销售出库 tab（旧·按单据汇总，保留兼容）：
 @router.get("/api/logistics-review/doc-sales")
 def review_doc_sales(request: Request, period: str = "", q: str = "", page: int = 1, size: int = 50):
     if not _perm(request):
