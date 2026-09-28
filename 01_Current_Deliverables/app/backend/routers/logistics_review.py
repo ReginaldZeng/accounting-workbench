@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.650
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.653
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -783,17 +783,70 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     filt = [r for r in rows if keep(r)]
     page = max(1, int(page))
     sl = filt[(page - 1) * size: page * size]
-    view = []
-    for r in sl:
-        v = {k: r.get(k) for k in ("doc_no", "carrier_sub", "prov", "charge_wt", "qty", "kd_qty",
+    if by_weight:
+        # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
+        by_form = {}
+        for r in sl:
+            d0 = (r.get("doc_no") or "").split("+")[0]
+            if not d0:
+                continue
+            pre = "".join(ch for ch in d0 if ch.isalpha())
+            for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
+                by_form.setdefault(form, set()).add(d0)
+        mats = {}
+        if by_form:
+            try:
+                s2, conf2 = kc.login()
+                mats = _fetch_doc_materials(s2, conf2, by_form)
+            except Exception:
+                mats = {}
+        view = []
+        for r in sl:
+            d0 = (r.get("doc_no") or "").split("+")[0]
+            lines = mats.get(d0) or []
+            chg = float(r.get("charge_wt") or 0)
+            fee = float(r.get("amount") or 0)
+            biz = _bizline_of(r.get("annot"))
+            kgs = []
+            for m in lines:
+                u = str(m.get("基本单位") or "")
+                try:
+                    bw = float(m.get("基本数量") or 0)
+                except (TypeError, ValueError):
+                    bw = 0.0
+                kgs.append(bw if ("千克" in u or "kg" in u.lower()) else 0.0)
+            kgsum = sum(kgs)
+            conv = round(chg / kgsum, 3) if kgsum else None
+            base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": r.get("fee_item"),
+                    "bizline": biz, "doc_no": d0, "bill_qty_doc": round(chg, 2), "conv": conv,
+                    "qty_state": r.get("qty_state")}
+            if not lines:
+                view.append({**base, "party": "", "code": "", "name": "（金蝶无此单据物料）",
+                             "base_wt": None, "base_unit": "", "fee": round(fee, 2), "unit_fee": None,
+                             "bill_qty": round(chg, 2), "bill_unit": "千克", "sales": None, "ratio": None})
+                continue
+            for i, m in enumerate(lines):
+                bw = kgs[i]
+                share = (bw / kgsum) if kgsum else (1.0 / len(lines))
+                fline = round(fee * share, 2)
+                bqty = round(chg * share, 2)
+                try:
+                    sales = float(m.get("销售额")) if m.get("销售额") not in (None, "") else None
+                except (TypeError, ValueError):
+                    sales = None
+                view.append({**base, "party": m.get("往来") or "", "code": m.get("编码"), "name": m.get("名称"),
+                             "base_wt": bw or None, "base_unit": m.get("基本单位"),
+                             "fee": fline, "unit_fee": round(fline / bw, 4) if bw else None,
+                             "bill_qty": bqty, "bill_unit": "千克",
+                             "sales": round(sales, 2) if sales is not None else None,
+                             "ratio": round(fline / sales, 4) if sales else None})
+        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
+                "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
+                "by_weight": True, "material": True, "detail_total": len(filt), "detail": view,
+                "page": page, "size": size}
+    view = [{k: r.get(k) for k in ("doc_no", "carrier_sub", "prov", "charge_wt", "qty", "kd_qty",
              "amount", "base_amount", "std_amount", "price_diff", "price_state", "qty_diff",
-             "qty_state", "tier", "verdict", "fee_item")}
-        # 毛重比＝计费重量÷标准重量(金蝶)，仅按重量核对且核量不一致时给（一致的不需要）
-        if by_weight and r.get("qty_state") not in ("ok", None) and r.get("charge_wt") and r.get("kd_qty"):
-            v["gross_ratio"] = round(float(r["charge_wt"]) / float(r["kd_qty"]), 3)
-        else:
-            v["gross_ratio"] = None
-        view.append(v)
+             "qty_state", "tier", "verdict", "fee_item")} for r in sl]
     return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
             "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
             "by_weight": by_weight, "detail_total": len(filt), "detail": view, "page": page, "size": size}

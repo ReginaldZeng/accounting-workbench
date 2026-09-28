@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.652
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.653
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -118,6 +118,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .qchip .qc{font-family:ui-monospace,monospace;font-size:15px}
       .lrv .qchip small{color:#8A96A2}
       .lrv .qchip.warn.on{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn) inset;background:#FCF6EC}
+      .lrv .mtbl td[rowspan]{vertical-align:middle;background:#FBFCFD}
+      .lrv .mtbl tr.band td{background:#F6F9FA}.lrv .mtbl tr.band td[rowspan]{background:#EEF4F6}
+      .lrv .mtbl tr.docstart td{border-top:2px solid #CBD5DC}
+      .lrv .dim{color:#8A96A2}
       .lrv table{border-collapse:collapse;width:100%;font-size:13px}
       .lrv th,.lrv td{padding:7px 11px;text-align:left;border-bottom:1px solid #DCE2E7;white-space:nowrap}
       .lrv th{font-size:11px;color:#8A96A2;background:#F7F9F9}
@@ -223,24 +227,57 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <div style={{ flex: 1 }} />
               <input type="search" placeholder="搜单号/省份" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
             </div>
-            <div className="tw"><table>
-              <thead><tr><th>金蝶单号</th><th>{d && d.by_weight ? '产品' : '快递'}</th><th>省</th><th className="num">计费kg</th>{d && d.by_weight ? <th className="num">标准重量</th> : <th className="num">账单数量</th>}{!(d && d.by_weight) && <th className="num">金蝶数量</th>}{d && d.by_weight && <th className="num">毛重比</th>}<th className="num">账单</th><th className="num">标准</th><th className="num">差</th><th>计价档</th><th>归一态</th></tr></thead>
+            {d && d.material
+              ? <div className="tw"><table className="mtbl">
+                <thead><tr>
+                  <th>费用主体</th><th>承运商</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/需求部门</th>
+                  <th>物料编码</th><th>物料名称</th><th className="num">基本单位重量</th><th>基本单位</th>
+                  <th className="num">运费</th><th className="num">单位运费</th><th className="num">账单数量</th><th>账单单位</th>
+                  <th className="num">换算系数</th><th className="num">销售额</th><th className="num">费比</th>
+                </tr></thead>
+                <tbody>{(() => {
+                  const rows = d.detail || []
+                  return rows.map((r, i) => {
+                    const first = i === 0 || rows[i - 1].doc_no !== r.doc_no
+                    let span = 1
+                    if (first) { for (let k = i + 1; k < rows.length && rows[k].doc_no === r.doc_no; k++) span++ }
+                    let gi = 0; for (let k = 1; k <= i; k++) { if (rows[k].doc_no !== rows[k - 1].doc_no) gi++ }
+                    const band = gi % 2 === 1 ? ' band' : ''
+                    const abn = r.qty_state === 'qtydiff' || r.qty_state === 'miss'
+                    return <tr key={i} className={(first ? 'docstart' : '') + band}>
+                      {first && <>
+                        <td rowSpan={span}>{r.subject}</td>
+                        <td rowSpan={span}>{r.carrier}</td>
+                        <td rowSpan={span}>{r.fee_item}</td>
+                        <td rowSpan={span}>{r.bizline || <span className="dim">—</span>}</td>
+                        <td rowSpan={span} style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.doc_no}</td>
+                      </>}
+                      <td>{r.party || <span className="dim">—</span>}</td>
+                      <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="dim">—</span>}</td>
+                      <td>{r.name}</td>
+                      <td className="num">{r.base_wt == null ? '—' : r.base_wt}</td><td>{r.base_unit || <span className="dim">—</span>}</td>
+                      <td className="num">{money(r.fee)}</td><td className="num">{r.unit_fee == null ? '—' : r.unit_fee}</td>
+                      <td className="num">{r.bill_qty == null ? '—' : r.bill_qty}</td><td>{r.bill_unit || <span className="dim">—</span>}</td>
+                      {first && <td rowSpan={span} className="num" style={{ color: abn ? 'var(--warn)' : '', fontWeight: 600 }}>{r.conv == null ? '—' : r.conv}</td>}
+                      <td className="num">{r.sales == null ? '—' : money(r.sales)}</td>
+                      <td className="num">{r.ratio == null ? '—' : (r.ratio * 100).toFixed(2) + '%'}</td>
+                    </tr>
+                  })
+                })()}</tbody>
+              </table></div>
+              : <div className="tw"><table>
+              <thead><tr><th>金蝶单号</th><th>快递</th><th>省</th><th className="num">计费kg</th><th className="num">账单数量</th><th className="num">金蝶数量</th><th className="num">账单</th><th className="num">标准</th><th className="num">差</th><th>计价档</th><th>归一态</th></tr></thead>
               <tbody>{(d && d.detail || []).map((r, i) => {
                 const [nm, cl] = PS[r.price_state] || ['—', 'neu']
                 const qmk = r.qty_state === 'miss' ? ' ✕' : r.qty_state === 'qtydiff' ? ' ▲' : ''
                 return <tr key={i}><td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.doc_no}</td><td>{r.carrier_sub}</td><td>{r.prov}</td>
-                  <td className="num">{r.charge_wt == null ? '—' : r.charge_wt}</td>
-                  {d && d.by_weight
-                    ? <td className="num" style={{ color: qmk ? 'var(--warn)' : '' }}>{r.kd_qty == null ? '—' : r.kd_qty}{qmk}</td>
-                    : <td className="num">{r.qty == null ? '—' : r.qty}</td>}
-                  {d && d.by_weight
-                    ? <td className="num" style={{ color: r.gross_ratio != null ? 'var(--warn)' : '' }}>{r.gross_ratio == null ? '—' : r.gross_ratio}</td>
-                    : <td className="num" style={{ color: qmk ? 'var(--warn)' : '' }}>{r.kd_qty == null ? '—' : r.kd_qty}{qmk}</td>}
+                  <td className="num">{r.charge_wt == null ? '—' : r.charge_wt}</td><td className="num">{r.qty == null ? '—' : r.qty}</td>
+                  <td className="num" style={{ color: qmk ? 'var(--warn)' : '' }}>{r.kd_qty == null ? '—' : r.kd_qty}{qmk}</td>
                   <td className="num">{money(r.amount)}</td><td className="num">{r.std_amount == null ? '—' : money(r.std_amount)}</td>
                   <td className="num">{r.price_diff == null ? '?' : money(r.price_diff)}</td><td style={{ color: '#5E6B78', fontSize: 12 }}>{r.tier}</td>
                   <td><span className={'pill ' + cl}>{nm}</span></td></tr>
               })}</tbody>
-            </table></div>
+            </table></div>}
             {d && d.detail_total > d.size && <div className="toolbar">
               <button className="btn" disabled={page <= 1} onClick={() => setPage(page - 1)}>‹ 上一页</button>
               <span style={{ fontSize: 12.5 }}>第 {page} / {Math.ceil(d.detail_total / d.size)} 页</span>
