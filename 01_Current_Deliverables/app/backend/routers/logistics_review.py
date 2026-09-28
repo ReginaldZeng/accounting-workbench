@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.653
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.655
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -850,3 +850,72 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
             "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
             "by_weight": by_weight, "detail_total": len(filt), "detail": view, "page": page, "size": size}
+
+
+_PSTATE_CN = {"ok": "通过", "over": "多收", "under": "账单少收", "free": "账单未收·我方有利",
+              "gap": "价卡缺·待确认", "na": "待补价卡"}
+_QSTATE_CN = {"ok": "一致", "qtydiff": "不符", "miss": "金蝶查无", "na": "—"}
+_VERDICT_CN = {"pass": "两轴通过", "price": "核价多收", "gap": "核价待补", "free": "账单未收",
+               "qty": "核量存疑", "registered": "已登记", "doc_miss": "单号查无"}
+
+
+@router.get("/api/logistics-review/export")
+def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
+    """导出该承运商本月复核结果 xlsx：费用项汇总 + 逐单/物料级复核明细（按重量承运商=物料级17列）。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    res = review_result(request, carrier=carrier, period=period, group="all", page=1, size=1000000, q="")
+    if isinstance(res, JSONResponse):
+        return res
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from io import BytesIO
+    from urllib.parse import quote
+    HFONT = Font(bold=True, color="FFFFFF"); HFILL = PatternFill("solid", fgColor="1F6E8C")
+    wb = Workbook()
+    # sheet1 费用项汇总
+    ws = wb.active; ws.title = "费用项汇总"
+    ws.append(["承运商", carrier, "账期", period, "账单合计", res.get("total_bill")])
+    ws.append([])
+    sumcols = ["费用项", "账单额", "标准额(核价)", "差", "核价·一致", "多收", "缺价", "核量·一致", "不符", "查无"]
+    ws.append(sumcols)
+    for c in ws[3]:
+        c.font = HFONT; c.fill = HFILL
+    for f in res.get("summary", []):
+        ws.append([f.get("fee_item"), f.get("bill"), f.get("std"), f.get("diff"),
+                   f.get("price_ok"), f.get("over"), f.get("gap"), f.get("qty_ok"), f.get("qtydiff"), f.get("miss")])
+    for i, w in enumerate([16, 12, 12, 10, 9, 7, 7, 9, 7, 7], 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+    # sheet2 复核明细
+    ws2 = wb.create_sheet("复核明细")
+    if res.get("material"):
+        cols = ["费用主体", "承运商", "费用类型", "业务线", "单据号", "客户/需求部门", "物料编码", "物料名称",
+                "基本单位重量", "基本单位", "运费", "单位运费", "账单数量", "账单单位", "换算系数", "销售额", "费比"]
+        ws2.append(cols)
+        for r in res.get("detail", []):
+            ws2.append([r.get("subject"), r.get("carrier"), r.get("fee_item"), r.get("bizline"), r.get("doc_no"),
+                        r.get("party"), r.get("code"), r.get("name"), r.get("base_wt"), r.get("base_unit"),
+                        r.get("fee"), r.get("unit_fee"), r.get("bill_qty"), r.get("bill_unit"), r.get("conv"),
+                        r.get("sales"), (round(r["ratio"], 4) if r.get("ratio") is not None else None)])
+        widths = [12, 14, 12, 10, 15, 16, 12, 22, 11, 8, 10, 10, 10, 8, 9, 10, 8]
+    else:
+        cols = ["金蝶单号", "快递/子类", "省", "计费重量", "账单数量", "金蝶数量", "账单金额", "标准费",
+                "核价差", "核价", "核量", "归一态", "计价档"]
+        ws2.append(cols)
+        for r in res.get("detail", []):
+            ws2.append([r.get("doc_no"), r.get("carrier_sub"), r.get("prov"), r.get("charge_wt"), r.get("qty"),
+                        r.get("kd_qty"), r.get("amount"), r.get("std_amount"), r.get("price_diff"),
+                        _PSTATE_CN.get(r.get("price_state"), r.get("price_state")),
+                        _QSTATE_CN.get(r.get("qty_state"), r.get("qty_state")),
+                        _VERDICT_CN.get(r.get("verdict"), r.get("verdict")), r.get("tier")])
+        widths = [15, 16, 8, 10, 10, 10, 11, 10, 9, 9, 8, 10, 14]
+    for c in ws2[1]:
+        c.font = HFONT; c.fill = HFILL
+    ws2.freeze_panes = "A2"
+    for i, w in enumerate(widths, 1):
+        ws2.column_dimensions[chr(64 + i)].width = w
+    bio = BytesIO(); wb.save(bio)
+    fn = "%s_%s_复核结果.xlsx" % (carrier, period)
+    return Response(content=bio.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename*=UTF-8''%s" % quote(fn)})

@@ -1,8 +1,8 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.654
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.655
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers, reviewOverview } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers, reviewOverview, reviewExportUrl } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -188,6 +188,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         <label className="btn">导入价格卡（合同价目表）<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
         <label className="btn">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
         <button className="btn" disabled={busy === 'kd'} onClick={kingdee}>{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
+        <a className="btn pri" style={{ textDecoration: 'none' }} href={reviewExportUrl(carrier, period)}>导出复核结果</a>
       </div>
       {msg && <div className="msg">{msg}</div>}
 
