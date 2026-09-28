@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.650
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.651
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -167,22 +167,6 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       )}
 
       {mode === 'detail' && (<>
-      <div className="supbar">
-        <span className="supbar-lb">本月有计提的承运商{sups && sups.length ? `（${sups.filter(s => s.accrued != null).length}）` : ''}</span>
-        <input type="search" placeholder="搜承运商" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 120 }} />
-        <div className="supchips">
-          {sups === null && <span className="supempty">读金蝶计提凭证中…</span>}
-          {sups !== null && sups.filter(s => !supq || (s.short || '').includes(supq) || (s.full || '').includes(supq)).map(s =>
-            <button key={s.short} className={'supchip' + (s.short === carrier ? ' on' : '') + (s.has_spec ? '' : ' nospec')}
-              title={(s.full || s.short) + (s.has_spec ? '（已配取数说明，可复核）' : '（未配取数说明）')}
-              onClick={() => { setCarrier(s.short); setGroup('ex'); setPage(1) }}>
-              {s.short}{s.accrued != null && <em>{money(s.accrued)}</em>}{!s.has_spec && <i>未配</i>}
-            </button>)}
-          {sups !== null && !sups.some(s => s.accrued != null) &&
-            <span className="supempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）——下方 pilot 迅鸽可试跑</span>}
-        </div>
-      </div>
-
       <div className="toolbar" style={{ border: '1px solid #DCE2E7', borderRadius: 12, marginBottom: 12 }}>
         <span style={{ fontSize: 12.5, color: '#5E6B78' }}>当前 <b>{carrier}</b> · {period}</span>
         <div style={{ flex: 1 }} />
