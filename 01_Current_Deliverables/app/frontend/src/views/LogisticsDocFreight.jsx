@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.639
+// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.642
 // 单据运费：两 tab（销售出库 / 其他单据登记制）统一为同一套物料级字段。
 // 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
@@ -20,10 +20,11 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const [f, setF] = useState(BLANK)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
+  const [sel, setSel] = useState(() => new Set())
   const fileRef = useRef(null)
 
   const load = useCallback(() => {
-    setData(null)
+    setData(null); setSel(new Set())
     reviewDocFreight(period, tab).then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0 }))
   }, [period, tab])
   useEffect(() => { load() }, [load])
@@ -53,6 +54,16 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   }
 
   const rows = data && data.rows ? data.rows : []
+  const docNos = [...new Set(rows.map(r => r.doc_no))]
+  const toggle = no => setSel(p => { const n = new Set(p); n.has(no) ? n.delete(no) : n.add(no); return n })
+  const toggleAll = () => setSel(p => p.size === docNos.length ? new Set() : new Set(docNos))
+  // 勾选汇总：整单运费合计、基本单位数量合计（同单位才可加总）、平均单位运费=运费/数量
+  const picked = rows.filter(r => sel.has(r.doc_no))
+  const selFee = picked.reduce((s, r) => s + (r.fee || 0), 0)
+  const selQty = picked.reduce((s, r) => s + (Number(r.baseqty) || 0), 0)
+  const selUnits = [...new Set(picked.map(r => r.baseunit).filter(Boolean))]
+  const selUnit = selUnits.length === 1 ? selUnits[0] : (selUnits.length ? '多种单位' : '')
+  const avgUnitFee = selQty ? selFee / selQty : null
 
   return (
     <div className="ldf">
@@ -89,6 +100,10 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .ldf tr.band td{background:#F6F9FA}.ldf tr.band td[rowspan]{background:#EEF4F6}
       .ldf td.docno .dn{font-family:ui-monospace,monospace;font-size:12px;font-weight:600}
       .ldf td.docno .dnsub{display:block;font-size:10.5px;color:#8A96A2;margin-top:2px}
+      .ldf tr.picked td{background:#EAF4EE !important}
+      .ldf .selbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 15px;background:#EAF4EE;border-bottom:1px solid #C6E2D2;font-size:13px;color:#2E5544}
+      .ldf .selbar b{font-family:ui-monospace,monospace;font-size:14px;color:#1E7A4C}
+      .ldf .selbar .sb-n{font-weight:700}.ldf .selbar .sb-sep{color:#A8C5B6}
       .ldf .tw{overflow-x:auto}
       .ldf .msg{background:#FEF7E6;border:1px solid #F0DCA8;border-radius:8px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;color:#5C4A00}
       .ldf .del{color:var(--bad);cursor:pointer;font-size:12px}
@@ -149,16 +164,33 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       <div className="card">
         <h3>{tab === 'sales' ? '销售出库单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
           {data ? `　${data.doc_count} 张单据 / ${data.count} 行 · 运费合计 ${money(data.total)} 元` : ''}</h3>
+        {sel.size > 0 && (
+          <div className="selbar">
+            <span className="sb-n">已勾选 {sel.size} 张单</span>
+            <span className="sb-sep">·</span>
+            <span>运费合计 <b>{money(selFee)}</b> 元</span>
+            <span className="sb-sep">·</span>
+            <span>基本单位数量 <b>{qtyfmt(selQty)}</b> {selUnit}</span>
+            <span className="sb-sep">·</span>
+            <span>平均单位运费 <b>{avgUnitFee == null ? '—' : upfmt(avgUnitFee)}</b> 元/{selUnit || '单位'}</span>
+            <span style={{ flex: 1 }} />
+            <button className="btn" onClick={() => setSel(new Set())}>清空勾选</button>
+          </div>
+        )}
         <div className="tw"><table>
           <thead><tr>
+            <th style={{ width: 30, textAlign: 'center' }}>
+              <input type="checkbox" checked={docNos.length > 0 && sel.size === docNos.length}
+                ref={el => { if (el) el.indeterminate = sel.size > 0 && sel.size < docNos.length }}
+                onChange={toggleAll} title="全选/全不选" /></th>
             <th>费用主体</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/需求部门</th>
             <th>物料编码</th><th>物料名称</th><th className="num">基本单位数量</th><th>基本单位</th>
             <th className="num">运费</th><th className="num">单位运费</th><th className="num">费比</th>
             {tab === 'other' && <th></th>}
           </tr></thead>
           <tbody>
-            {data === null && <tr><td colSpan="13" className="empty">加载中…（接金蝶取物料明细，可能稍慢）</td></tr>}
-            {data && !rows.length && <tr><td colSpan="13" className="empty">
+            {data === null && <tr><td colSpan="14" className="empty">加载中…（接金蝶取物料明细，可能稍慢）</td></tr>}
+            {data && !rows.length && <tr><td colSpan="14" className="empty">
               {tab === 'sales'
                 ? <>本月还没有销售出库单据运费。<br />销售出库的账单在「账单上传」传入、「付款对账·复核台」做核价核量后，在此按物料摊列。</>
                 : <>本月还没有登记的其他单据运费。上方登记一笔（如货拉拉报销的 FBDR 运费），接金蝶取物料明细后在此按物料摊列。</>}
@@ -173,7 +205,9 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
               const band = gi % 2 === 1 ? ' band' : ''
               const multi = span > 1
               return (
-                <tr key={i} className={(first ? 'docstart' : '') + band}>
+                <tr key={i} className={(first ? 'docstart' : '') + band + (sel.has(r.doc_no) ? ' picked' : '')}>
+                  {first && <td rowSpan={span} style={{ textAlign: 'center' }}>
+                    <input type="checkbox" checked={sel.has(r.doc_no)} onChange={() => toggle(r.doc_no)} /></td>}
                   {first && <>
                     <td rowSpan={span}>{r.subject}</td>
                     <td rowSpan={span}>{r.fee_item}</td>
