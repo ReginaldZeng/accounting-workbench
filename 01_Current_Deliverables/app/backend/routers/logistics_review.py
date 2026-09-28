@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.644
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.645
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -583,7 +583,7 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
         lines = mats.get(no) or []
         kgsum = sum(float(m["基本数量"] or 0) for m in lines if m.get("基本数量") not in (None, ""))
         if not lines:
-            rows.append({"subject": g["subject"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
+            rows.append({"subject": g["subject"], "carrier": g["carrier"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
                          "party": g["dept"] if mode == "other" else "", "code": "", "name": "（金蝶无此单据物料）",
                          "baseqty": None, "baseunit": "", "fee": fee, "unitfee": None, "sales": None, "ratio": None,
                          "reg_id": g.get("reg_id")})
@@ -602,7 +602,7 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
             except (TypeError, ValueError):
                 sales_amt = None
             rows.append({
-                "subject": g["subject"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
+                "subject": g["subject"], "carrier": g["carrier"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
                 "party": (m.get("往来") or "") if mode == "sales" else (g["dept"] or ""),
                 "code": m.get("编码"), "name": m.get("名称"), "baseqty": bq, "baseunit": m.get("基本单位"),
                 "fee": fline, "unitfee": round(fline / bq, 4) if bq else None,
