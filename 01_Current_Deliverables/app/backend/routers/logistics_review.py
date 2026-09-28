@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.660
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.662
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -819,56 +819,74 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         for r in sl:
             d0 = (r.get("doc_no") or "").split("+")[0]
             lines = mats.get(d0) or []
-            billcnt = float(r.get("qty") or 0)         # 账单件数
+            billcnt = float(r.get("qty") or 0)
             fee = float(r.get("amount") or 0)
-            nego = (r.get("carrier_sub") == "整车议价")
             biz = r.get("bizline") or _bizline_of(r.get("annot"))
-            # 每物料箱数=数量件÷箱规(袋/箱)；箱规解析不出时退化用基本数量
-            boxes = []
-            for m in lines:
-                br = _box_reg(m.get("规格"))
-                try:
-                    qcnt = float(m.get("数量件") or 0)
-                except (TypeError, ValueError):
-                    qcnt = 0.0
-                boxes.append((qcnt / br) if (br and qcnt) else 0.0)
-            boxsum = round(sum(boxes), 2)
-            # 计费方式：整车议价→议价(不核)；否则件数≈箱数→整车按箱，件数远小→打托(倒算托规)
-            if nego:
-                mode_cn, tuo = "整车议价", None
-                cnt_state = "na"
-            elif boxsum and abs(billcnt - boxsum) <= max(1.0, 0.02 * boxsum):
-                mode_cn, tuo, cnt_state = "整车按箱", None, ("ok" if abs(billcnt - boxsum) <= max(1.0, 0.02 * boxsum) else "qtydiff")
-            elif boxsum and billcnt and boxsum > billcnt:
-                tuo = round(boxsum / billcnt, 1)
-                mode_cn, cnt_state = "打托(托规%s)" % tuo, "na"
+            try:
+                chg_wt = float(r.get("charge_wt")) if r.get("charge_wt") not in (None, "") else None
+            except (TypeError, ValueError):
+                chg_wt = None
+            if chg_wt:
+                # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
+                per = []
+                for m in lines:
+                    u = str(m.get("基本单位") or "")
+                    try:
+                        bw = float(m.get("基本数量") or 0)
+                    except (TypeError, ValueError):
+                        bw = 0.0
+                    per.append(bw if ("千克" in u or "kg" in u.lower()) else 0.0)
+                kd_sum = round(sum(per), 2)
+                bill_amt, bill_unit, kd_unit, mode_cn = chg_wt, "千克", "千克", "按重量"
+                cnt_state = "ok" if (kd_sum and abs(chg_wt - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
+                mkq = lambda m: (float(m.get("基本数量") or 0) if ("千克" in str(m.get("基本单位") or "")) else None)
+                mku = lambda m: m.get("基本单位")
             else:
-                mode_cn, tuo, cnt_state = "待核", None, "qtydiff"
-            conv = round(boxsum / billcnt, 2) if billcnt else None  # 换算系数(账单件↔金蝶箱)
+                # 无账单重量 → 按件数/箱核：金蝶箱数=数量件÷规格箱规
+                per = []
+                for m in lines:
+                    br = _box_reg(m.get("规格"))
+                    try:
+                        qcnt = float(m.get("数量件") or 0)
+                    except (TypeError, ValueError):
+                        qcnt = 0.0
+                    per.append((qcnt / br) if (br and qcnt) else 0.0)
+                kd_sum = round(sum(per), 2)
+                bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
+                if kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
+                    mode_cn, cnt_state = "整车按箱", "ok"
+                elif kd_sum and billcnt and kd_sum > billcnt:
+                    mode_cn, cnt_state = "打托(托规%s)" % round(kd_sum / billcnt, 1), "na"
+                elif not kd_sum:
+                    mode_cn, cnt_state = "无箱规待核", "qtydiff"
+                else:
+                    mode_cn, cnt_state = "待核", "qtydiff"
+                mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
+                mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
+            conv = round(kd_sum / bill_amt, 3) if bill_amt else None
             base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": r.get("fee_item"),
-                    "bizline": biz, "doc_no": d0, "bill_cnt": billcnt, "box_sum": boxsum,
-                    "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state}
+                    "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
+                    "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state}
             if not lines:
                 view.append({**base, "party": r.get("note") or "", "code": "", "name": "（金蝶无此单据物料）",
-                             "base_qty": None, "base_unit": "", "box": None, "fee": round(fee, 2),
+                             "base_qty": None, "base_unit": "", "kd": None, "fee": round(fee, 2),
                              "unit_fee": None, "sales": None, "ratio": None})
                 continue
             for i, m in enumerate(lines):
-                bx = round(boxes[i], 2)
-                share = (bx / boxsum) if boxsum else (1.0 / len(lines))
+                kd = round(per[i], 2)
+                share = (kd / kd_sum) if kd_sum else (1.0 / len(lines))
                 fline = round(fee * share, 2)
                 try:
                     sales = float(m.get("销售额")) if m.get("销售额") not in (None, "") else None
                 except (TypeError, ValueError):
                     sales = None
                 try:
-                    qn = float(m.get("数量件") or 0)
+                    bq = mkq(m)
                 except (TypeError, ValueError):
-                    qn = 0.0
+                    bq = None
                 view.append({**base, "party": m.get("往来") or "", "code": m.get("编码"), "name": m.get("名称"),
-                             "base_qty": qn or None, "base_unit": m.get("计价单位") or m.get("基本单位"),
-                             "box": bx or None, "spec": m.get("规格"),
-                             "fee": fline, "unit_fee": round(fline / bx, 2) if bx else None,
+                             "base_qty": bq, "base_unit": mku(m), "kd": kd or None, "spec": m.get("规格"),
+                             "fee": fline, "unit_fee": round(fline / kd, 2) if kd else None,
                              "sales": round(sales, 2) if sales is not None else None,
                              "ratio": round(fline / sales, 4) if sales else None})
         return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,

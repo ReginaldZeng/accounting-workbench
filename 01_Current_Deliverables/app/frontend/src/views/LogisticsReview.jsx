@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.661
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.662
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -226,8 +226,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               ? <div className="tw"><table className="mtbl">
                 <thead><tr>
                   <th>费用主体</th><th>承运商</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/需求部门</th>
-                  <th>物料编码</th><th>物料名称</th><th className="num">金蝶数量</th><th>单位</th><th className="num">金蝶箱数</th>
-                  <th className="num">账单件数</th><th>计费方式</th><th className="num">换算系数</th>
+                  <th>物料编码</th><th>物料名称</th><th className="num">金蝶数量</th><th>单位</th><th className="num">金蝶核对量</th>
+                  <th className="num">账单量</th><th>计费方式</th><th className="num">换算系数</th>
                   <th className="num">运费</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th>
                 </tr></thead>
                 <tbody>{(() => {
@@ -238,8 +238,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     if (first) { for (let k = i + 1; k < rows.length && rows[k].doc_no === r.doc_no; k++) span++ }
                     let gi = 0; for (let k = 1; k <= i; k++) { if (rows[k].doc_no !== rows[k - 1].doc_no) gi++ }
                     const band = gi % 2 === 1 ? ' band' : ''
-                    const nego = r.mode_cn === '整车议价'
-                    const bad = r.mode_cn === '待核'
+                    const nego = r.mode_cn && (r.mode_cn.indexOf('议价') >= 0 || r.mode_cn.indexOf('打托') >= 0)
+                    const bad = r.mode_cn && r.mode_cn.indexOf('待核') >= 0
                     return <tr key={i} className={(first ? 'docstart' : '') + band}>
                       {first && <>
                         <td rowSpan={span}>{r.subject}</td>
@@ -252,8 +252,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="dim">—</span>}</td>
                       <td>{r.name}</td>
                       <td className="num">{r.base_qty == null ? '—' : r.base_qty}</td><td>{r.base_unit || <span className="dim">—</span>}</td>
-                      <td className="num">{r.box == null ? '—' : r.box}</td>
-                      {first && <td rowSpan={span} className="num">{r.bill_cnt == null ? '—' : r.bill_cnt}</td>}
+                      <td className="num">{r.kd == null ? '—' : r.kd}</td>
+                      {first && <td rowSpan={span} className="num">{r.bill_amt == null ? '—' : r.bill_amt}<small style={{ color: '#8A96A2', marginLeft: 2 }}>{r.bill_unit}</small></td>}
                       {first && <td rowSpan={span}><span className={'pill ' + (nego ? 'neu' : bad ? 'warn' : 'ok')}>{r.mode_cn}</span></td>}
                       {first && <td rowSpan={span} className="num">{r.conv == null ? '—' : r.conv}</td>}
                       <td className="num">{money(r.fee)}</td><td className="num">{r.unit_fee == null ? '—' : r.unit_fee}</td>
