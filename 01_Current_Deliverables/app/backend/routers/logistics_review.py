@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.668
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.669
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -1081,12 +1081,14 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         groups = [
             ("归属·计提", "5E6B78", "E7ECEF", False, [("费用主体", "subject"), ("承运商", "carrier"),
                 ("费用类型", "fee_item"), ("业务线", "bizline"), ("单据号", "doc_no")]),
-            ("ERP·金蝶数据", "2E7D57", "DCEFE4", False, [("客户/需求部门", "party"), ("物料编码", "code"),
-                ("物料名称", "name"), ("基本单位重量", "base_wt"), ("基本单位", "base_unit"), ("销售额", "sales")]),
+            ("ERP·金蝶数据", "2E7D57", "DCEFE4", False, [("客户/仓库", "party"), ("物料编码", "code"),
+                ("物料名称", "name"), ("基本单位数量", "base_kg"), ("基本单位", "kg_unit"),
+                ("金蝶数量", "base_qty"), ("数量单位", "base_unit"), ("金蝶核对量", "kd"), ("销售额", "sales")]),
             ("账单·%s原账单" % carrier, "B06A12", "FBF0DA", True, [("运输方式", "_cs")] +
-                [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费重量", "_cw")]),
-            ("复核数据", "B23B2E", "F8DDD8", False, [("运费(分摊)", "fee"), ("单位运费", "unit_fee"),
-                ("账单数量(分摊)", "bill_qty"), ("账单单位", "bill_unit"), ("★换算系数", "conv"), ("★费比", "ratio")]),
+                [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费量", "_cw")]),
+            ("复核数据", "B23B2E", "F8DDD8", False, [("账单量", "bill_amt"), ("账单单位", "bill_unit"),
+                ("★计费方式", "mode_cn"), ("★换算系数", "conv"), ("运费(分摊)", "fee"),
+                ("单位运费(元/kg)", "unit_fee"), ("★费比", "ratio"), ("备注", "note")]),
         ]
         col = 1
         for name, gc, hc, _dl, cols in groups:
@@ -1133,8 +1135,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             prev = d0
             rownum += 1
         ws2.freeze_panes = "F3"
-        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 11, 8, 10] + [14] + [10] * len(feekeys) + [13, 13] +
-                  [10, 10, 10, 8, 10, 8])
+        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 11, 8, 9, 8, 11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
+                  [10, 8, 14, 9, 10, 12, 8, 16])
         for i, w in enumerate(widths, 1):
             ws2.column_dimensions[get_column_letter(i)].width = w
     else:
