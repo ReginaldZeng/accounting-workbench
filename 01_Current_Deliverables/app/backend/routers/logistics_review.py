@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.645
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.646
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -242,19 +242,65 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
 
 
 # ---------- 接金蝶回填出库数量（核量）----------
+# 按重量核量的承运商（干线/冷运：核量比金蝶出库重量kg，不是件数）
+_WEIGHT_CARRIERS = {"顺丰冷运", "天鹰物流"}
+
+
+def _kd_weight_by_doc(s, conf, docs):
+    """按单号→金蝶单据取货物出库重量kg（千克计量物料的基本数量之和）。返回 {单号: kg}。只读。"""
+    by_form = {}
+    for no in docs:
+        d0 = (no or "").split("+")[0]
+        if not d0 or d0 == "无单据":
+            continue
+        pre = "".join(ch for ch in d0 if ch.isalpha())
+        for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
+            by_form.setdefault(form, set()).add(d0)
+    mats = _fetch_doc_materials(s, conf, by_form) if by_form else {}
+    out = {}
+    for no, ms in mats.items():
+        kg = 0.0
+        for m in ms:
+            u = str(m.get("基本单位") or "")
+            if "千克" in u or "kg" in u.lower():
+                try:
+                    kg += float(m.get("基本数量") or 0)
+                except (TypeError, ValueError):
+                    pass
+        out[no] = round(kg, 2)
+    return out
+
+
 @router.post("/api/logistics-review/kingdee-qty")
 def review_kingdee_qty(request: Request, carrier: str = "迅鸽", period: str = ""):
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not period or "-" not in period:
+        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
     # 取本批 detail 单号前缀（迅鸽=XQLCK），按月拉出库单聚合数量（货品，剔包装）
     with db._engine.connect() as c:
         docs = [r[0] for r in c.execute(select(BL.c.doc_no).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()]
+    # 按重量核量的承运商（顺丰冷运/天鹰）：逐单取金蝶出库重量kg 回填 kd_qty
+    if carrier in _WEIGHT_CARRIERS:
+        try:
+            s, conf = kc.login()
+            wmap = _kd_weight_by_doc(s, conf, docs)
+        except Exception:
+            return JSONResponse({"ok": False, "msg": "金蝶取数失败，稍后重试；不影响已存复核结果"}, status_code=502)
+        hit = 0
+        with db._engine.begin() as c:
+            for no, w in wmap.items():
+                res = c.execute(update(BL).where(
+                    (BL.c.carrier == carrier) & (BL.c.period == period) &
+                    (func.substr(BL.c.doc_no, 1, len(no)) == no)).values(kd_qty=w))
+                hit += res.rowcount or 0
+        db.audit(u["name"], "物流复核-接金蝶核量(重量)", "%s %s" % (carrier, period),
+                 "只读取数；单据 %d，回填 %d 行(kg)" % (len(wmap), hit))
+        return {"ok": True, "kd_docs": len(wmap), "filled": hit, "by": "weight"}
     prefixes = sorted({"".join(ch for ch in (d.split("+")[0]) if ch.isalpha()) for d in docs if d and d != "无单据"})
     prefixes = [p for p in prefixes if p]
-    if not period or "-" not in period:
-        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
     y, m = period.split("-")[:2]
     last = calendar.monthrange(int(y), int(m))[1]
     d0, d1 = "%s-%s-01" % (y, m), "%s-%s-%02d" % (y, m, last)
