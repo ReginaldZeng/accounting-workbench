@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.662
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.663
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -853,10 +853,13 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                     per.append((qcnt / br) if (br and qcnt) else 0.0)
                 kd_sum = round(sum(per), 2)
                 bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
+                ratio_tuo = (kd_sum / billcnt) if billcnt else 0
                 if kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
                     mode_cn, cnt_state = "整车按箱", "ok"
-                elif kd_sum and billcnt and kd_sum > billcnt:
-                    mode_cn, cnt_state = "打托(托规%s)" % round(kd_sum / billcnt, 1), "na"
+                elif kd_sum and billcnt and 3 <= ratio_tuo <= 60:
+                    mode_cn, cnt_state = "打托(托规%s)" % round(ratio_tuo, 1), "na"
+                elif kd_sum and billcnt and ratio_tuo > 60:
+                    mode_cn, cnt_state = "整车包车·免核", "na"   # 件数为名义值(如1)、无重量、箱数远超→议价包车不核
                 elif not kd_sum:
                     mode_cn, cnt_state = "无箱规待核", "qtydiff"
                 else:
