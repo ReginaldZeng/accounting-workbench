@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.665
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.666
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -875,7 +875,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             conv = round(kd_sum / bill_amt, 3) if bill_amt else None
             base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": r.get("fee_item"),
                     "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
-                    "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state}
+                    "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
+                    "note": r.get("note") or ""}
             if not lines:
                 view.append({**base, "party": r.get("note") or "", "code": "", "name": "（金蝶无此单据物料）",
                              "base_qty": None, "base_unit": "", "kd": None, "fee": round(fee, 2),
@@ -1001,6 +1002,23 @@ _PSTATE_CN = {"ok": "通过", "over": "多收", "under": "账单少收", "free":
 _QSTATE_CN = {"ok": "一致", "qtydiff": "不符", "miss": "金蝶查无", "na": "—"}
 _VERDICT_CN = {"pass": "两轴通过", "price": "核价多收", "gap": "核价待补", "free": "账单未收",
                "qty": "核量存疑", "registered": "已登记", "doc_miss": "单号查无"}
+
+
+@router.post("/api/logistics-review/doc-note")
+async def review_doc_note(request: Request):
+    """复核台逐单备注：更新该承运商/账期/单据的 note（人工备注）。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period, doc_no = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("doc_no") or "").strip()
+    note = (b.get("note") or "").strip()
+    if not carrier or not doc_no:
+        return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
+    with db._engine.begin() as c:
+        c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
+                  (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(note=note))
+    return {"ok": True}
 
 
 @router.get("/api/logistics-review/export")
