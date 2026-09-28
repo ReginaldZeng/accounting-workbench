@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.648
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.649
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -142,7 +142,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           <div className="tw"><table className="ovtable">
             <thead>
               <tr><th rowSpan="2">承运商</th>{(ov && ov.subjects || []).map(s => <th key={s} colSpan="3" className="subjgrp">{s}</th>)}<th rowSpan="2"></th></tr>
-              <tr>{(ov && ov.subjects || []).map(s => [<th key={s + 'a'} className="num">计提</th>, <th key={s + 'p'} className="num">付款</th>, <th key={s + 'd'} className="num">差异</th>])}</tr>
+              <tr>{(ov && ov.subjects || []).map(s => [<th key={s + 'a'} className="num">计提</th>, <th key={s + 'p'} className="num">付款(复核)</th>, <th key={s + 'd'} className="num">差异</th>])}</tr>
             </thead>
             <tbody>
               {ov === null && <tr><td colSpan="11" className="ovempty">读金蝶计提凭证中…</td></tr>}
@@ -157,12 +157,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       <td key={s + 'd'} className={'num ' + (c.diff > 0.01 ? 'diffpos' : c.diff < -0.01 ? 'diffneg' : '')}>{c.diff ? money(c.diff) : ''}</td>
                     ]
                   })}
-                  <td><button className="btn pri" disabled={!r.has_spec} title={r.has_spec ? '进核价核量' : '该承运商未配取数说明与价格卡'} onClick={() => enterReview(r.carrier)}>开始复核</button></td>
+                  <td><button className="btn pri" disabled={!r.has_spec} title={r.has_spec ? '进核价核量' : '该承运商未配取数说明与价格卡'} onClick={() => enterReview(r.short || r.carrier)}>开始复核</button></td>
                 </tr>)}
               {ov && ov.rows && !ov.rows.length && <tr><td colSpan="11" className="ovempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）</td></tr>}
             </tbody>
           </table></div>
-          <div className="ovfoot">计提＝2241 本期贷方（摘要含「计提…运费/仓储费/装卸/搬运/物流」）；付款＝2241 本期借方（摘要含该承运商）；差异＝计提−付款。只有已配取数说明的承运商可「开始复核」。</div>
+          <div className="ovfoot">承运商＝金蝶全称。计提＝2241 本期贷方（摘要含「计提…运费/仓储费/装卸/搬运/物流」）；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径，非金蝶跨月现金借方）；差异＝计提−复核应付（本月计提是否对得上本月账单）。只有已配取数说明的承运商可「开始复核」。</div>
         </div>
       )}
 

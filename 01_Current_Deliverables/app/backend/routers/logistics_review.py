@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.647
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.649
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -151,18 +151,12 @@ def review_overview(request: Request, period: str = ""):
                 cf = mo.group(1)
                 carriers.add(cf)
                 accr[(book, cf)] = accr.get((book, cf), 0.0) + float(cr)
-    for r in rows:
-        dr = r.get("FDEBIT") or 0
-        if not dr:
-            continue
-        z = str(r.get("FEXPLANATION") or "")
-        book = book2short.get(str(r.get("账簿") or ""), None)
-        for cf in carriers:
-            if cf in z:
-                paid[(book, cf)] = paid.get((book, cf), 0.0) + float(dr)
-                break
+    # 本月付款（按复核结果）：本月已复核账单应付合计，按承运商×主体（权责发生制·同期间比，非金蝶跨月现金借方）
     with db._engine.connect() as c:
         specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
+        billrows = c.execute(select(BL.c.subject, BL.c.carrier, func.sum(BL.c.amount)).where(
+            (BL.c.period == period) & (BL.c.grain == "detail")).group_by(BL.c.subject, BL.c.carrier)).all()
+    billmap = {(str(subj), str(car)): round(float(amt or 0), 2) for subj, car, amt in billrows}
     out = {}
     for cf in carriers:
         short = sup_short(cf)
@@ -170,10 +164,10 @@ def review_overview(request: Request, period: str = ""):
         tot_accr = 0.0
         for subj in _SUBJECTS:
             a = round(accr.get((subj, cf), 0.0), 2)
-            p = round(paid.get((subj, cf), 0.0), 2)
+            p = billmap.get((subj, short), 0.0)      # 本月复核应付（该承运商本月账单复核后金额）
             cells[subj] = {"accr": a, "paid": p, "diff": round(a - p, 2)}
             tot_accr += a
-        out[cf] = {"carrier": short, "full": cf, "has_spec": short in specs, "cells": cells,
+        out[cf] = {"carrier": cf, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
                    "total_accr": round(tot_accr, 2)}
     rowlist = sorted(out.values(), key=lambda x: -x["total_accr"])
     return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": bool(rows)}
