@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.653
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.654
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -110,6 +110,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .qrow .cc{font-family:ui-monospace,monospace;font-weight:600;font-size:15px}
       .lrv .qbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
       .lrv .qbar-lb{font-size:12.5px;color:#5E6B78;margin-right:2px}
+      .lrv .qbar-sum{font-size:12.5px;color:#5E6B78}.lrv .qbar-sum b{font-family:ui-monospace,monospace;font-size:16px;color:var(--accent)}
       .lrv .qchip{display:inline-flex;align-items:center;gap:7px;border:1px solid #DCE2E7;background:#fff;border-radius:10px;padding:7px 12px;cursor:pointer;font:inherit;font-size:13px}
       .lrv .qchip:hover{background:#F7F9F9}
       .lrv .qchip.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset;background:#F5FAFC}
@@ -190,16 +191,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       </div>
       {msg && <div className="msg">{msg}</div>}
 
-      <div className="verdict">
-        <div className="lead">价格卡 {d ? d.price_card_rows : '—'} 行 · 明细 {d ? d.detail_total : '—'} 行（当前筛选）。复核=核价×核量两轴，归一态见下。</div>
-        <div className="stat accent"><div className="v">{d ? money(d.total_bill) : '—'}</div><div className="l">账单合计（元）</div></div>
-        <div className="stat ok"><div className="v">{(c.pass || 0)}</div><div className="l">两轴均通过（笔）</div></div>
-        <div className="stat warn"><div className="v">{(c.miss || 0) + (c.qtydiff || 0)}</div><div className="l">核量待处理（笔）</div></div>
-        <div className="stat warn"><div className="v">{(c.gap || 0) + (c.free || 0)}</div><div className="l">核价待处理（笔）</div></div>
-      </div>
-
       <div className="qbar">
-        <span className="qbar-lb">待处理（点一个筛下方明细）</span>
+        <span className="qbar-sum"><b>{d ? money(d.total_bill) : '—'}</b> 元 账单合计</span>
+        <span className="qbar-lb">· 待处理（点一个筛下方明细）</span>
         {QUEUE.map(g =>
           <button key={g.f} className={'qchip ' + g.sw + (g.f === group ? ' on' : '')} title={g.dd} onClick={() => { setGroup(g.f); setPage(1) }}>
             <span className={'sw ' + g.sw} /><span className="qn">{g.n}</span><b className="qc">{g.c}</b><small>{g.u}</small>
