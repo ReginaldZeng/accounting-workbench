@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.649
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.650
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -779,12 +779,21 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             return r["verdict"] == "pass"
         return True
 
+    by_weight = carrier in _WEIGHT_CARRIERS
     filt = [r for r in rows if keep(r)]
     page = max(1, int(page))
     sl = filt[(page - 1) * size: page * size]
-    view = [{k: r.get(k) for k in ("doc_no", "carrier_sub", "prov", "charge_wt", "qty", "kd_qty",
+    view = []
+    for r in sl:
+        v = {k: r.get(k) for k in ("doc_no", "carrier_sub", "prov", "charge_wt", "qty", "kd_qty",
              "amount", "base_amount", "std_amount", "price_diff", "price_state", "qty_diff",
-             "qty_state", "tier", "verdict", "fee_item")} for r in sl]
+             "qty_state", "tier", "verdict", "fee_item")}
+        # 毛重比＝计费重量÷标准重量(金蝶)，仅按重量核对且核量不一致时给（一致的不需要）
+        if by_weight and r.get("qty_state") not in ("ok", None) and r.get("charge_wt") and r.get("kd_qty"):
+            v["gross_ratio"] = round(float(r["charge_wt"]) / float(r["kd_qty"]), 3)
+        else:
+            v["gross_ratio"] = None
+        view.append(v)
     return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
             "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
-            "detail_total": len(filt), "detail": view, "page": page, "size": size}
+            "by_weight": by_weight, "detail_total": len(filt), "detail": view, "page": page, "size": size}

@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.649
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.650
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -232,13 +232,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <input type="search" placeholder="搜单号/省份" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
             </div>
             <div className="tw"><table>
-              <thead><tr><th>金蝶单号</th><th>快递</th><th>省</th><th className="num">计费kg</th><th className="num">账单数量</th><th className="num">金蝶数量</th><th className="num">账单</th><th className="num">标准</th><th className="num">差</th><th>计价档</th><th>归一态</th></tr></thead>
+              <thead><tr><th>金蝶单号</th><th>{d && d.by_weight ? '产品' : '快递'}</th><th>省</th><th className="num">计费kg</th>{d && d.by_weight ? <th className="num">标准重量</th> : <th className="num">账单数量</th>}{!(d && d.by_weight) && <th className="num">金蝶数量</th>}{d && d.by_weight && <th className="num">毛重比</th>}<th className="num">账单</th><th className="num">标准</th><th className="num">差</th><th>计价档</th><th>归一态</th></tr></thead>
               <tbody>{(d && d.detail || []).map((r, i) => {
                 const [nm, cl] = PS[r.price_state] || ['—', 'neu']
                 const qmk = r.qty_state === 'miss' ? ' ✕' : r.qty_state === 'qtydiff' ? ' ▲' : ''
                 return <tr key={i}><td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.doc_no}</td><td>{r.carrier_sub}</td><td>{r.prov}</td>
-                  <td className="num">{r.charge_wt == null ? '—' : r.charge_wt}</td><td className="num">{r.qty == null ? '—' : r.qty}</td>
-                  <td className="num" style={{ color: qmk ? 'var(--warn)' : '' }}>{r.kd_qty == null ? '—' : r.kd_qty}{qmk}</td>
+                  <td className="num">{r.charge_wt == null ? '—' : r.charge_wt}</td>
+                  {d && d.by_weight
+                    ? <td className="num" style={{ color: qmk ? 'var(--warn)' : '' }}>{r.kd_qty == null ? '—' : r.kd_qty}{qmk}</td>
+                    : <td className="num">{r.qty == null ? '—' : r.qty}</td>}
+                  {d && d.by_weight
+                    ? <td className="num" style={{ color: r.gross_ratio != null ? 'var(--warn)' : '' }}>{r.gross_ratio == null ? '—' : r.gross_ratio}</td>
+                    : <td className="num" style={{ color: qmk ? 'var(--warn)' : '' }}>{r.kd_qty == null ? '—' : r.kd_qty}{qmk}</td>}
                   <td className="num">{money(r.amount)}</td><td className="num">{r.std_amount == null ? '—' : money(r.std_amount)}</td>
                   <td className="num">{r.price_diff == null ? '?' : money(r.price_diff)}</td><td style={{ color: '#5E6B78', fontSize: 12 }}>{r.tier}</td>
                   <td><span className={'pill ' + cl}>{nm}</span></td></tr>
