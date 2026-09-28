@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.659
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.660
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -519,13 +519,17 @@ def review_register_list(request: Request, period: str = ""):
 _DOC_MAT_FIELDS = {
     "SAL_OUTSTOCK": [("FBillNo", "单号"), ("FMaterialID.FNumber", "编码"), ("FMaterialID.FName", "名称"),
                      ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
-                     ("FCustomerID.FName", "往来"), ("FAllAmount", "销售额")],
+                     ("FCustomerID.FName", "往来"), ("FAllAmount", "销售额"),
+                     ("FMaterialID.FSpecification", "规格"), ("FRealQty", "数量件"), ("FUnitID.FName", "计价单位")],
     "STK_TransferIn": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
-                       ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来")],
+                       ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来"),
+                       ("FMaterialId.FSpecification", "规格"), ("FQty", "数量件"), ("FUnitId.FName", "计价单位")],
     "STK_TransferOut": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
-                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来")],
+                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来"),
+                        ("FMaterialId.FSpecification", "规格"), ("FQty", "数量件"), ("FUnitId.FName", "计价单位")],
     "STK_InStock": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
-                    ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FSupplierId.FName", "往来")],
+                    ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FSupplierId.FName", "往来"),
+                    ("FMaterialId.FSpecification", "规格"), ("FRealQty", "数量件"), ("FUnitId.FName", "计价单位")],
     "STK_MisDelivery": [("FBillNo", "单号"), ("FMaterialID.FNumber", "编码"), ("FMaterialID.FName", "名称"),
                         ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FDeptId.FName", "往来")],
 }
@@ -556,8 +560,18 @@ def _fetch_doc_materials(s, conf, docs_by_form):
                 out.setdefault(str(no), []).append({
                     "编码": r.get("编码"), "名称": r.get("名称"),
                     "基本数量": r.get("基本数量"), "基本单位": r.get("基本单位"),
-                    "往来": r.get("往来"), "销售额": r.get("销售额")})
+                    "往来": r.get("往来"), "销售额": r.get("销售额"),
+                    "规格": r.get("规格"), "数量件": r.get("数量件"), "计价单位": r.get("计价单位")})
     return out
+
+
+_BOX_CARRIERS = {"丰源"}  # 按件数/箱核对：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
+
+
+def _box_reg(spec):
+    """从规格型号解析箱规（N袋/箱）。返回 int 或 None。"""
+    m = re.search(r"(\d+)\s*袋/箱", str(spec or ""))
+    return int(m.group(1)) if m else None
 
 
 def _bizline_of(annot):
@@ -783,6 +797,84 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     filt = [r for r in rows if keep(r)]
     page = max(1, int(page))
     sl = filt[(page - 1) * size: page * size]
+    by_box = carrier in _BOX_CARRIERS
+    if by_box:
+        # 按件数(箱)：金蝶数量(袋)÷规格箱规=金蝶箱数；整车比箱、打托倒算托规；账单件数/运费按箱数摊到物料。整车议价单只登记不核件数。
+        by_form = {}
+        for r in sl:
+            d0 = (r.get("doc_no") or "").split("+")[0]
+            if not d0:
+                continue
+            pre = "".join(ch for ch in d0 if ch.isalpha())
+            for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
+                by_form.setdefault(form, set()).add(d0)
+        mats = {}
+        if by_form:
+            try:
+                s2, conf2 = kc.login()
+                mats = _fetch_doc_materials(s2, conf2, by_form)
+            except Exception:
+                mats = {}
+        view = []
+        for r in sl:
+            d0 = (r.get("doc_no") or "").split("+")[0]
+            lines = mats.get(d0) or []
+            billcnt = float(r.get("qty") or 0)         # 账单件数
+            fee = float(r.get("amount") or 0)
+            nego = (r.get("carrier_sub") == "整车议价")
+            biz = r.get("bizline") or _bizline_of(r.get("annot"))
+            # 每物料箱数=数量件÷箱规(袋/箱)；箱规解析不出时退化用基本数量
+            boxes = []
+            for m in lines:
+                br = _box_reg(m.get("规格"))
+                try:
+                    qcnt = float(m.get("数量件") or 0)
+                except (TypeError, ValueError):
+                    qcnt = 0.0
+                boxes.append((qcnt / br) if (br and qcnt) else 0.0)
+            boxsum = round(sum(boxes), 2)
+            # 计费方式：整车议价→议价(不核)；否则件数≈箱数→整车按箱，件数远小→打托(倒算托规)
+            if nego:
+                mode_cn, tuo = "整车议价", None
+                cnt_state = "na"
+            elif boxsum and abs(billcnt - boxsum) <= max(1.0, 0.02 * boxsum):
+                mode_cn, tuo, cnt_state = "整车按箱", None, ("ok" if abs(billcnt - boxsum) <= max(1.0, 0.02 * boxsum) else "qtydiff")
+            elif boxsum and billcnt and boxsum > billcnt:
+                tuo = round(boxsum / billcnt, 1)
+                mode_cn, cnt_state = "打托(托规%s)" % tuo, "na"
+            else:
+                mode_cn, tuo, cnt_state = "待核", None, "qtydiff"
+            conv = round(boxsum / billcnt, 2) if billcnt else None  # 换算系数(账单件↔金蝶箱)
+            base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": r.get("fee_item"),
+                    "bizline": biz, "doc_no": d0, "bill_cnt": billcnt, "box_sum": boxsum,
+                    "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state}
+            if not lines:
+                view.append({**base, "party": r.get("note") or "", "code": "", "name": "（金蝶无此单据物料）",
+                             "base_qty": None, "base_unit": "", "box": None, "fee": round(fee, 2),
+                             "unit_fee": None, "sales": None, "ratio": None})
+                continue
+            for i, m in enumerate(lines):
+                bx = round(boxes[i], 2)
+                share = (bx / boxsum) if boxsum else (1.0 / len(lines))
+                fline = round(fee * share, 2)
+                try:
+                    sales = float(m.get("销售额")) if m.get("销售额") not in (None, "") else None
+                except (TypeError, ValueError):
+                    sales = None
+                try:
+                    qn = float(m.get("数量件") or 0)
+                except (TypeError, ValueError):
+                    qn = 0.0
+                view.append({**base, "party": m.get("往来") or "", "code": m.get("编码"), "name": m.get("名称"),
+                             "base_qty": qn or None, "base_unit": m.get("计价单位") or m.get("基本单位"),
+                             "box": bx or None, "spec": m.get("规格"),
+                             "fee": fline, "unit_fee": round(fline / bx, 2) if bx else None,
+                             "sales": round(sales, 2) if sales is not None else None,
+                             "ratio": round(fline / sales, 4) if sales else None})
+        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
+                "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
+                "by_box": True, "material": True, "detail_total": len(filt), "detail": view,
+                "page": page, "size": size}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
