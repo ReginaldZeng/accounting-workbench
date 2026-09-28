@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.663
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.664
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -522,10 +522,12 @@ _DOC_MAT_FIELDS = {
                      ("FCustomerID.FName", "往来"), ("FAllAmount", "销售额"),
                      ("FMaterialID.FSpecification", "规格"), ("FRealQty", "数量件"), ("FUnitID.FName", "计价单位")],
     "STK_TransferIn": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
-                       ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来"),
+                       ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
+                       ("FSrcStockId.FName", "源仓"), ("FDestStockId.FName", "目的仓"),
                        ("FMaterialId.FSpecification", "规格"), ("FQty", "数量件"), ("FUnitId.FName", "计价单位")],
     "STK_TransferOut": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
-                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FStockOrgId.FName", "往来"),
+                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
+                        ("FSrcStockId.FName", "源仓"), ("FDestStockId.FName", "目的仓"),
                         ("FMaterialId.FSpecification", "规格"), ("FQty", "数量件"), ("FUnitId.FName", "计价单位")],
     "STK_InStock": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
                     ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FSupplierId.FName", "往来"),
@@ -557,10 +559,13 @@ def _fetch_doc_materials(s, conf, docs_by_form):
                 no = r.get("单号")
                 if not no:
                     continue
+                lai = r.get("往来")
+                if r.get("源仓") or r.get("目的仓"):   # 调拨单：往来＝源仓(调出)→目的仓(调入)
+                    lai = "%s→%s" % (r.get("源仓") or "?", r.get("目的仓") or "?")
                 out.setdefault(str(no), []).append({
                     "编码": r.get("编码"), "名称": r.get("名称"),
                     "基本数量": r.get("基本数量"), "基本单位": r.get("基本单位"),
-                    "往来": r.get("往来"), "销售额": r.get("销售额"),
+                    "往来": lai, "销售额": r.get("销售额"),
                     "规格": r.get("规格"), "数量件": r.get("数量件"), "计价单位": r.get("计价单位")})
     return out
 
