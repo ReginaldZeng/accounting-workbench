@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.651
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.652
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -108,6 +108,16 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .qrow .sw{width:9px;height:9px;border-radius:3px}.lrv .sw.ok{background:var(--ok)}.lrv .sw.warn{background:var(--warn)}.lrv .sw.neu{background:var(--neu)}
       .lrv .qrow .t{flex:1}.lrv .qrow .t .n{font-weight:600;font-size:13px}.lrv .qrow .t .dd{font-size:11.5px;color:#5E6B78}
       .lrv .qrow .cc{font-family:ui-monospace,monospace;font-weight:600;font-size:15px}
+      .lrv .qbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+      .lrv .qbar-lb{font-size:12.5px;color:#5E6B78;margin-right:2px}
+      .lrv .qchip{display:inline-flex;align-items:center;gap:7px;border:1px solid #DCE2E7;background:#fff;border-radius:10px;padding:7px 12px;cursor:pointer;font:inherit;font-size:13px}
+      .lrv .qchip:hover{background:#F7F9F9}
+      .lrv .qchip.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset;background:#F5FAFC}
+      .lrv .qchip .sw{width:9px;height:9px;border-radius:3px}
+      .lrv .qchip .qn{color:#1B2733}
+      .lrv .qchip .qc{font-family:ui-monospace,monospace;font-size:15px}
+      .lrv .qchip small{color:#8A96A2}
+      .lrv .qchip.warn.on{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn) inset;background:#FCF6EC}
       .lrv table{border-collapse:collapse;width:100%;font-size:13px}
       .lrv th,.lrv td{padding:7px 11px;text-align:left;border-bottom:1px solid #DCE2E7;white-space:nowrap}
       .lrv th{font-size:11px;color:#8A96A2;background:#F7F9F9}
@@ -184,17 +194,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         <div className="stat warn"><div className="v">{(c.gap || 0) + (c.free || 0)}</div><div className="l">核价待处理（笔）</div></div>
       </div>
 
-      <div className="cols">
-        <div className="card">
-          <h3>待处理（点开筛下方明细）</h3>
-          {QUEUE.map(g =>
-            <button key={g.f} className={'qrow' + (g.f === group ? ' on' : '')} onClick={() => { setGroup(g.f); setPage(1) }}>
-              <span className={'sw ' + g.sw} /><div className="t"><div className="n">{g.n}</div><div className="dd">{g.dd}</div></div>
-              <div className="cc">{g.c}<small style={{ fontWeight: 400, color: '#8A96A2', marginLeft: 2 }}>{g.u}</small></div>
-            </button>)}
-        </div>
+      <div className="qbar">
+        <span className="qbar-lb">待处理（点一个筛下方明细）</span>
+        {QUEUE.map(g =>
+          <button key={g.f} className={'qchip ' + g.sw + (g.f === group ? ' on' : '')} title={g.dd} onClick={() => { setGroup(g.f); setPage(1) }}>
+            <span className={'sw ' + g.sw} /><span className="qn">{g.n}</span><b className="qc">{g.c}</b><small>{g.u}</small>
+          </button>)}
+      </div>
 
-        <div>
+      <div>
           <div className="card">
             <h3>费用项汇总 · 核价 × 核量</h3>
             <div className="tw"><table>
@@ -240,7 +248,6 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             </div>}
           </div>
         </div>
-      </div>
       </>)}
     </div>
   )
