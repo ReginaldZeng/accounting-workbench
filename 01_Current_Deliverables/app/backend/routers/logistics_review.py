@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.655
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.656
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -889,15 +889,46 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     # sheet2 复核明细
     ws2 = wb.create_sheet("复核明细")
     if res.get("material"):
+        # 接上原账单：每单费用分项(sub_fees)+运输方式(carrier_sub)+账单计入金额+账单计费重量，doc级仅首个物料行填（避免重复累加）
+        with db._engine.connect() as c:
+            braw = {r[0]: (r[1], r[2], r[3], r[4]) for r in c.execute(select(
+                BL.c.doc_no, BL.c.carrier_sub, BL.c.sub_fees, BL.c.amount, BL.c.charge_wt).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()}
+        feekeys = []
+        for _no, (cs, sf, amt, cw) in braw.items():
+            if sf:
+                try:
+                    for k in json.loads(sf):
+                        if k not in feekeys:
+                            feekeys.append(k)
+                except Exception:
+                    pass
+        feekeys.sort(key=lambda k: (0 if k == "运费" else 1, k))
         cols = ["费用主体", "承运商", "费用类型", "业务线", "单据号", "客户/需求部门", "物料编码", "物料名称",
-                "基本单位重量", "基本单位", "运费", "单位运费", "账单数量", "账单单位", "换算系数", "销售额", "费比"]
+                "基本单位重量", "基本单位", "运费", "单位运费", "账单数量", "账单单位", "换算系数", "销售额", "费比",
+                "运输方式(原账单)"] + ["%s(原账单)" % k for k in feekeys] + ["账单计入金额(原账单)", "账单计费重量(原账单)"]
         ws2.append(cols)
+        prev = None
         for r in res.get("detail", []):
-            ws2.append([r.get("subject"), r.get("carrier"), r.get("fee_item"), r.get("bizline"), r.get("doc_no"),
-                        r.get("party"), r.get("code"), r.get("name"), r.get("base_wt"), r.get("base_unit"),
-                        r.get("fee"), r.get("unit_fee"), r.get("bill_qty"), r.get("bill_unit"), r.get("conv"),
-                        r.get("sales"), (round(r["ratio"], 4) if r.get("ratio") is not None else None)])
-        widths = [12, 14, 12, 10, 15, 16, 12, 22, 11, 8, 10, 10, 10, 8, 9, 10, 8]
+            row = [r.get("subject"), r.get("carrier"), r.get("fee_item"), r.get("bizline"), r.get("doc_no"),
+                   r.get("party"), r.get("code"), r.get("name"), r.get("base_wt"), r.get("base_unit"),
+                   r.get("fee"), r.get("unit_fee"), r.get("bill_qty"), r.get("bill_unit"), r.get("conv"),
+                   r.get("sales"), (round(r["ratio"], 4) if r.get("ratio") is not None else None)]
+            d0 = r.get("doc_no")
+            if d0 != prev:
+                cs, sf, amt, cw = braw.get(d0, (None, None, None, None))
+                sfd = {}
+                if sf:
+                    try:
+                        sfd = json.loads(sf)
+                    except Exception:
+                        sfd = {}
+                row += [cs] + [sfd.get(k) for k in feekeys] + [amt, cw]
+                prev = d0
+            else:
+                row += [None] * (1 + len(feekeys) + 2)
+            ws2.append(row)
+        widths = [12, 14, 12, 10, 15, 16, 12, 22, 11, 8, 10, 10, 10, 8, 9, 10, 8, 14] + [10] * len(feekeys) + [14, 14]
     else:
         cols = ["金蝶单号", "快递/子类", "省", "计费重量", "账单数量", "金蝶数量", "账单金额", "标准费",
                 "核价差", "核价", "核量", "归一态", "计价档"]
