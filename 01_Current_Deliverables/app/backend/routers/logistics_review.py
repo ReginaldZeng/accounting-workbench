@@ -295,6 +295,12 @@ _FORM_BY_PREFIX = {
     "CGRK": ["STK_InStock"], "XSCKD": ["SAL_OUTSTOCK"], "XQLCK": ["SAL_OUTSTOCK"],
     "QTCK": ["STK_MisDelivery"], "RK": ["SAL_RETURNSTOCK"], "CGTL": ["PUR_MRB"],
 }
+# 各单据的「基本单位数量」字段 Key 大小写不同（逐单据写死，缺列降级）
+_QTYFIELD_BY_FORM = {
+    "STK_TransferIn": "FBaseQty", "STK_TransferOut": "FBaseQty", "STK_InStock": "FBaseUnitQty",
+    "SAL_OUTSTOCK": "FBaseUnitQty", "STK_MisDelivery": "FBaseQty", "SAL_RETURNSTOCK": "FBaseunitQty",
+    "PUR_MRB": "FBASEUNITQTY",
+}
 
 
 @router.post("/api/logistics-review/register")
@@ -350,12 +356,41 @@ def review_register_list(request: Request, period: str = ""):
             (BL.c.review_mode == "register") & (BL.c.period == period)).order_by(BL.c.id.desc())).mappings().all()]
     lr.review_details(rows, {"express": {}, "unit": {}}, {})
     view = [{k: r.get(k) for k in ("id", "carrier", "subject", "doc_no", "annot", "fee_item",
-             "amount", "unit", "qty_state", "verdict", "note")} for r in rows]
+             "amount", "unit", "kd_kg", "qty_state", "verdict", "note")} for r in rows]
     total = round(sum((r.get("amount") or 0) for r in rows), 2)
     real = sum(1 for r in rows if r.get("qty_state") == "ok")
     miss = sum(1 for r in rows if r.get("qty_state") == "miss")
     return {"ok": True, "period": period, "rows": view, "count": len(rows),
             "total": total, "doc_real": real, "doc_miss": miss}
+
+
+# 单据运费·销售出库 tab：销售出库单挂的运费（从已解析账单的 audit 明细，按单据汇总）
+@router.get("/api/logistics-review/doc-sales")
+def review_doc_sales(request: Request, period: str = "", q: str = "", page: int = 1, size: int = 50):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL).where(
+            (BL.c.period == period) & (BL.c.grain == "detail") & (BL.c.review_mode == "audit") &
+            (BL.c.fee == "销售出库费用")).mappings().all())]
+    # 按单据汇总
+    docs = {}
+    for r in rows:
+        key = r.get("doc_no") or "无单号"
+        g = docs.setdefault(key, {"doc_no": key, "carrier": r.get("carrier"), "subject": r.get("subject"),
+                                  "annot": r.get("annot"), "amount": 0.0, "charge_wt": r.get("charge_wt"),
+                                  "kd_qty": r.get("kd_qty"), "n": 0})
+        g["amount"] += r.get("amount") or 0
+        g["n"] += 1
+    out = sorted(docs.values(), key=lambda x: -x["amount"])
+    for g in out:
+        g["amount"] = round(g["amount"], 2)
+    if q:
+        out = [g for g in out if q in (g["doc_no"] or "") or q in (g["carrier"] or "")]
+    page = max(1, int(page))
+    total_amt = round(sum(g["amount"] for g in out), 2)
+    return {"ok": True, "period": period, "count": len(out), "total": total_amt,
+            "rows": out[(page - 1) * size: page * size], "page": page, "size": size, "detail_total": len(out)}
 
 
 @router.post("/api/logistics-review/register/kingdee-check")
@@ -374,19 +409,31 @@ def review_register_kingdee_check(request: Request, period: str = ""):
             for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"]):
                 form_docs.setdefault(form, set()).add(no)
     exists = set()
+    kg = {}   # 单号 → 金蝶基本单位数量之和（kg/吨/件，看物料基本单位）
     try:
         s, conf = kc.login()
         for form, docs in form_docs.items():
+            qf = _QTYFIELD_BY_FORM.get(form, "FBaseQty")
             docs = list(docs)
             for i in range(0, len(docs), 200):
                 chunk = docs[i:i + 200]
                 inlist = ",".join("'%s'" % d.replace("'", "") for d in chunk)
                 try:
-                    for rr in kc._query(s, conf, form, [("FBillNo", "单号")], "FBillNo in (%s)" % inlist):
-                        if rr.get("单号"):
-                            exists.add(str(rr["单号"]))
+                    rr_list = kc._query(s, conf, form, [("FBillNo", "单号"), (qf, "基本数量")], "FBillNo in (%s)" % inlist)
                 except Exception:
-                    pass
+                    try:
+                        rr_list = kc._query(s, conf, form, [("FBillNo", "单号")], "FBillNo in (%s)" % inlist)
+                    except Exception:
+                        rr_list = []
+                for rr in rr_list:
+                    no = rr.get("单号")
+                    if not no:
+                        continue
+                    exists.add(str(no))
+                    try:
+                        kg[str(no)] = kg.get(str(no), 0.0) + float(rr.get("基本数量") or 0)
+                    except (TypeError, ValueError):
+                        pass
     except Exception:
         return JSONResponse({"ok": False, "msg": "金蝶取数失败，稍后重试"}, status_code=502)
     real = miss = 0
@@ -394,11 +441,12 @@ def review_register_kingdee_check(request: Request, period: str = ""):
         for r in rows:
             nos = [p for p in (r["doc_no"] or "").split("+") if p]
             st = "ok" if (nos and all(n in exists for n in nos)) else "miss"
+            kd = round(sum(kg.get(n, 0.0) for n in nos), 2) if nos else None
             if st == "ok":
                 real += 1
             else:
                 miss += 1
-            c.execute(update(BL).where(BL.c.id == r["id"]).values(qty_state=st))
+            c.execute(update(BL).where(BL.c.id == r["id"]).values(qty_state=st, kd_kg=kd))
     db.audit(u["name"], "物流复核-登记轻核单号", period, "单号真实 %d / 查无 %d（只读）" % (real, miss))
     return {"ok": True, "real": real, "miss": miss}
 

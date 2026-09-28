@@ -588,3 +588,4 @@ export const reviewRegisterList = (period) => j(`/api/logistics-review/register-
 export const reviewRegisterAdd = (body) => jp('/api/logistics-review/register', body)
 export const reviewRegisterDelete = (id) => jp('/api/logistics-review/register/delete', { id })
 export const reviewRegisterKingdeeCheck = (period) => jp(`/api/logistics-review/register/kingdee-check?period=${period}`)
+export const reviewDocSales = (period, q = '', page = 1) => j(`/api/logistics-review/doc-sales?period=${period}&q=${encodeURIComponent(q)}&page=${page}`)
