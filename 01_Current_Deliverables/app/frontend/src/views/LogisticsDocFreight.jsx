@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.643
+// [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.644
 // 单据运费：两 tab（销售出库 / 其他单据登记制）统一为同一套物料级字段。
 // 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
@@ -199,12 +199,12 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
                 onChange={toggleAll} title="全选/全不选" /></th>
             <th>费用主体</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/需求部门</th>
             <th>物料编码</th><th>物料名称</th><th className="num">基本单位数量</th><th>基本单位</th>
-            <th className="num">运费</th><th className="num">单位运费</th><th className="num">费比</th>
+            <th className="num">运费</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th>
             {tab === 'other' && <th></th>}
           </tr></thead>
           <tbody>
-            {data === null && <tr><td colSpan="14" className="empty">加载中…（接金蝶取物料明细，可能稍慢）</td></tr>}
-            {data && !rows.length && <tr><td colSpan="14" className="empty">
+            {data === null && <tr><td colSpan="15" className="empty">加载中…（接金蝶取物料明细，可能稍慢）</td></tr>}
+            {data && !rows.length && <tr><td colSpan="15" className="empty">
               {tab === 'sales'
                 ? <>本月还没有销售出库单据运费。<br />销售出库的账单在「账单上传」传入、「付款对账·复核台」做核价核量后，在此按物料摊列。</>
                 : <>本月还没有登记的其他单据运费。上方登记一笔（如货拉拉报销的 FBDR 运费），接金蝶取物料明细后在此按物料摊列。</>}
@@ -237,7 +237,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
                   <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="note">—</span>}</td>
                   <td>{r.name}</td>
                   <td className="num">{qtyfmt(r.baseqty)}</td><td>{r.baseunit || <span className="note">—</span>}</td>
-                  <td className="num">{money(r.fee)}</td><td className="num">{upfmt(r.unitfee)}</td><td className="num">{pctfmt(r.ratio)}</td>
+                  <td className="num">{money(r.fee)}</td><td className="num">{upfmt(r.unitfee)}</td><td className="num">{money(r.sales)}</td><td className="num">{pctfmt(r.ratio)}</td>
                   {tab === 'other' && (first && <td rowSpan={span}>{r.reg_id ? <span className="del" onClick={() => del(r.reg_id)}>删除</span> : ''}</td>)}
                 </tr>
               )

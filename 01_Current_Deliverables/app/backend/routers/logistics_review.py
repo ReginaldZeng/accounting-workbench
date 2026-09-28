@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.643
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.644
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -585,7 +585,7 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
         if not lines:
             rows.append({"subject": g["subject"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
                          "party": g["dept"] if mode == "other" else "", "code": "", "name": "（金蝶无此单据物料）",
-                         "baseqty": None, "baseunit": "", "fee": fee, "unitfee": None, "ratio": None,
+                         "baseqty": None, "baseunit": "", "fee": fee, "unitfee": None, "sales": None, "ratio": None,
                          "reg_id": g.get("reg_id")})
             continue
         for m in lines:
@@ -606,6 +606,7 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
                 "party": (m.get("往来") or "") if mode == "sales" else (g["dept"] or ""),
                 "code": m.get("编码"), "name": m.get("名称"), "baseqty": bq, "baseunit": m.get("基本单位"),
                 "fee": fline, "unitfee": round(fline / bq, 4) if bq else None,
+                "sales": round(sales_amt, 2) if sales_amt is not None else None,
                 "ratio": round(fline / sales_amt, 4) if sales_amt else None,
                 "reg_id": g.get("reg_id")})
     # 本页物料名/编码二次过滤（仅在已取物料内，跨页搜索请用单据号）
