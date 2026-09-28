@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.656
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.657
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -806,7 +806,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             lines = mats.get(d0) or []
             chg = float(r.get("charge_wt") or 0)
             fee = float(r.get("amount") or 0)
-            biz = _bizline_of(r.get("annot"))
+            biz = r.get("bizline") or _bizline_of(r.get("annot"))   # 优先用中间表已存业务线
             kgs = []
             for m in lines:
                 u = str(m.get("基本单位") or "")
