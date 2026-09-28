@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.646
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.647
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -671,7 +671,7 @@ def review_doc_sales(request: Request, period: str = "", q: str = "", page: int 
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
             (BL.c.period == period) & (BL.c.grain == "detail") & (BL.c.review_mode == "audit") &
-            (BL.c.fee == "销售出库费用")).mappings().all())]
+            (BL.c.fee == "销售出库费用"))).mappings().all()]
     # 按单据汇总
     docs = {}
     for r in rows:
@@ -699,7 +699,7 @@ def review_register_kingdee_check(request: Request, period: str = ""):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL.c.id, BL.c.doc_no).where(
-            (BL.c.review_mode == "register") & (BL.c.period == period)).mappings().all())]
+            (BL.c.review_mode == "register") & (BL.c.period == period))).mappings().all()]
     # 按前缀分组单号 → 查对应金蝶单据存在性（只读）
     form_docs = {}
     for r in rows:
@@ -759,9 +759,9 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     card, ncard = _load_card(carrier)
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
-            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail")).mappings().all())]
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
         accr = [dict(r) for r in c.execute(select(BL).where(
-            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "accrual")).mappings().all())]
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "accrual"))).mappings().all()]
     kdmap = {(r.get("doc_no") or "").split("+")[0]: r["kd_qty"] for r in rows if r.get("kd_qty") is not None}
     lr.review_details(rows, card, kdmap)
     summary = lr.summarize(rows)
