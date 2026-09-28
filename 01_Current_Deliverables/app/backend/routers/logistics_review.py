@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.667
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.668
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -854,6 +854,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 kd_sum = round(sum(per), 2)
                 bill_amt, bill_unit, kd_unit, mode_cn = chg_wt, "千克", "千克", "按重量"
                 cnt_state = "ok" if (kd_sum and abs(chg_wt - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
+                conv = round(chg_wt / kd_sum, 3) if kd_sum else None   # 按重量：换算系数=账单重量÷金蝶重量(毛重比)
                 mkq = lambda m: (float(m.get("基本数量") or 0) if ("千克" in str(m.get("基本单位") or "")) else None)
                 mku = lambda m: m.get("基本单位")
             else:
@@ -879,9 +880,9 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                     mode_cn, cnt_state = "无箱规待核", "qtydiff"
                 else:
                     mode_cn, cnt_state = "待核", "qtydiff"
+                conv = round(kd_sum / billcnt, 3) if billcnt else None   # 按件数：换算系数=金蝶箱数÷账单件(整车按箱≈1、打托=托规)
                 mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
                 mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
-            conv = round(kd_sum / bill_amt, 3) if bill_amt else None
             base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": _fee_of(d0, r.get("fee_item")),
                     "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                     "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
