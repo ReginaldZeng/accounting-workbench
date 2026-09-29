@@ -604,9 +604,29 @@ def _is_outbound_fee(fee):
     return "出库" in str(fee or "")
 
 
+_ORG_MAP = {"ts": 0.0, "m": {}}
+
+
+def _short_subject(s):
+    """主体归一：账单里写全称(深圳市星期零食品科技有限公司)的，按组织档案 full_name→short_name 转成简称(深圳星期零)，
+    与计提侧(账簿全称→简称)同口径，否则同一家会被拆成"全称行只有账单、简称行只有计提"两行对不上。档案5分钟缓存。"""
+    import time as _t
+    s = str(s or "").strip()
+    if not s:
+        return s
+    if _t.time() - _ORG_MAP["ts"] > 300:
+        m = {}
+        for o in (db.list_orgs() or []):
+            f, sh = str(o.get("full_name") or "").strip(), str(o.get("short_name") or "").strip()
+            if f and sh:
+                m[f] = sh
+        _ORG_MAP["m"], _ORG_MAP["ts"] = m, _t.time()
+    return _ORG_MAP["m"].get(s, s)
+
+
 def _eff_subject(r):
-    """账单主体：人工覆盖(subj_ovr) 优先，否则原 subject。"""
-    return (str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
+    """账单主体：人工覆盖(subj_ovr) 优先，否则原 subject；再全称→简称归一。"""
+    return _short_subject(str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
 
 
 _CANON_FEES = {"入库运费", "出库运费", "调拨运费", "退货运费", "仓储费"}
