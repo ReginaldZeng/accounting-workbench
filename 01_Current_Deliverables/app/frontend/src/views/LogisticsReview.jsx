@@ -1,8 +1,8 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.673
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.676
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers, reviewOverview, reviewExportUrl, reviewDocNote } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers, reviewOverview, reviewExportUrl, reviewDocNote, reviewAccrual } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -21,6 +21,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [supq, setSupq] = useState('')
   const [mode, setMode] = useState('overview')   // overview 第一页总览 / detail 单承运商核价核量
   const [ov, setOv] = useState(null)
+  const [accr, setAccr] = useState(null)   // 计提对账（异步加载，不拖慢主表）
 
   // 第一页总览：承运商 × 主体 计提/付款/差异（金蝶 2241）——随账期变，防串更新
   useEffect(() => {
@@ -35,6 +36,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewResult(carrier, period, group, page, q).then(setD).catch(e => setMsg(e.message))
   }, [carrier, period, group, page, q])
   useEffect(() => { load() }, [load])
+  // 计提对账：单独异步拉（金蝶查询慢，带缓存），随承运商/账期变；不阻塞主表
+  useEffect(() => {
+    if (mode !== 'detail' || !carrier) return
+    let alive = true; setAccr(null)
+    reviewAccrual(carrier, period).then(r => { if (alive) setAccr(r) }).catch(() => { if (alive) setAccr({ accr_lines: [], accr_total: 0 }) })
+    return () => { alive = false }
+  }, [carrier, period, mode])
   // 本月有计提的承运商（金蝶 2241 计提凭证）——随账期变。金蝶取数慢，防串更新：只认最新账期的响应，
   // 否则快速切月时先发的旧月响应后到会覆盖新月（曾出现 9 期显示 8 期承运商）。
   useEffect(() => {
@@ -220,22 +228,22 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             </table></div>
           </div>
 
-          {d && d.accr_lines && d.accr_lines.length > 0 && (() => {
-            const gap = (d.accr_total || 0) - (d.total_bill || 0)
+          {accr && accr.accr_lines && accr.accr_lines.length > 0 && (() => {
+            const gap = (accr.accr_total || 0) - ((d && d.total_bill) || 0)
             return <div className="card">
               <h3>计提对账 · 金蝶 2241 计提(按业务线) vs 账单</h3>
               <div className="tw"><table>
                 <thead><tr><th>主体</th><th>计提业务线 / 费用类型</th><th className="num">计提额</th></tr></thead>
                 <tbody>
-                  {d.accr_lines.map((a, i) => <tr key={i}><td>{a.subject}</td><td>{a.label}</td><td className="num">{money(a.amt)}</td></tr>)}
+                  {accr.accr_lines.map((a, i) => <tr key={i}><td>{a.subject}</td><td>{a.label}</td><td className="num">{money(a.amt)}</td></tr>)}
                   <tr style={{ fontWeight: 700, borderTop: '2px solid #CBD5DC' }}>
-                    <td>计提合计</td><td className="num" style={{ color: 'var(--accent)' }}>{money(d.accr_total)}</td>
-                    <td className="num">账单合计 {money(d.total_bill)}</td></tr>
+                    <td>计提合计</td><td className="num" style={{ color: 'var(--accent)' }}>{money(accr.accr_total)}</td>
+                    <td className="num">账单合计 {money(d && d.total_bill)}</td></tr>
                   <tr style={{ fontWeight: 700 }}><td colSpan="2">差异（计提 − 账单）</td>
                     <td className="num" style={{ color: Math.abs(gap) < 0.01 ? 'var(--ok)' : 'var(--bad)' }}>{Math.abs(gap) < 0.01 ? '0 · 对平' : money(gap)}</td></tr>
                 </tbody>
               </table></div>
-              <div className="ovfoot">计提＝金蝶 2241 本期贷方（摘要含「计提…承运商」）按摘要拆业务线/费用类型；账单＝本承运商本月复核账单合计。总额对平即计提无缺漏；业务线维度与账单单据类型口径不同，先看总额与出/入库对得上。</div>
+              <div className="ovfoot">计提＝金蝶 2241 本期计提，业务线从核算维度「产品分类」读（山姆/kikiherb 由产品项目补充）；含税＝费用+暂估进项税。总额对平即计提无缺漏。</div>
             </div>
           })()}
 

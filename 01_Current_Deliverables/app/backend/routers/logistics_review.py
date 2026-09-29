@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.675
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.676
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -822,9 +822,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     card, ncard = _load_card(carrier)
-    _sup = db.list_logi_suppliers() or []
-    _cfull = next((x.get("full") for x in _sup if x.get("short") == carrier), None)
-    accr_lines, accr_total = _accr_lines(carrier, period, _cfull)
+    accr_lines, accr_total = [], 0.0   # 计提对账走单独异步接口 /accrual，不拖慢主表
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
@@ -1077,6 +1075,26 @@ _PSTATE_CN = {"ok": "通过", "over": "多收", "under": "账单少收", "free":
 _QSTATE_CN = {"ok": "一致", "qtydiff": "不符", "miss": "金蝶查无", "na": "—"}
 _VERDICT_CN = {"pass": "两轴通过", "price": "核价多收", "gap": "核价待补", "free": "账单未收",
                "qty": "核量存疑", "registered": "已登记", "doc_miss": "单号查无"}
+
+
+_ACCR_CACHE = {}   # (carrier,period) -> (lines, total, ts)
+
+
+@router.get("/api/logistics-review/accrual")
+def review_accrual(request: Request, carrier: str = "", period: str = ""):
+    """计提对账（金蝶2241计提·业务线从核算维度产品分类读）。单独异步接口，带30分钟缓存，不拖慢复核主表。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    import time as _t
+    k = (carrier, period)
+    c = _ACCR_CACHE.get(k)
+    if c and _t.time() - c[2] < 1800:
+        return {"ok": True, "accr_lines": c[0], "accr_total": c[1], "cached": True}
+    sup = db.list_logi_suppliers() or []
+    cfull = next((x.get("full") for x in sup if x.get("short") == carrier), None)
+    lines, total = _accr_lines(carrier, period, cfull)
+    _ACCR_CACHE[k] = (lines, total, _t.time())
+    return {"ok": True, "accr_lines": lines, "accr_total": total}
 
 
 @router.post("/api/logistics-review/doc-note")
