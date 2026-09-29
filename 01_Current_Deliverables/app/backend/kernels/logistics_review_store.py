@@ -45,6 +45,8 @@ bill_lines = Table(
     Column("src_sheet", String(60)),       # 来源工作表
     Column("src_row", Integer),            # 原表行号
     Column("note", Text),
+    Column("subj_ovr", String(30)),        # 复核台人工改归类：主体覆盖(非空时生效，不动原 subject)
+    Column("fee_ovr", String(40)),         # 复核台人工改归类：费用类型覆盖(非空时生效，不动原 fee_item/单号推断)
     Column("created_at", String(20)),
 )
 
@@ -130,16 +132,16 @@ def seed_pilot(engine):
 
 
 def migrate_cols(engine):
-    """给已建的 logistics_bill_lines 补 review_mode 列（create_all 只建不改）。MySQL/SQLite 兼容，缺列才补。"""
+    """给已建的 logistics_bill_lines 补新列（create_all 只建不改）。MySQL/SQLite 兼容，缺列才补。"""
     from sqlalchemy import text
     drv = engine.url.drivername
+    need = [("review_mode", "VARCHAR(10)"), ("subj_ovr", "VARCHAR(30)"), ("fee_ovr", "VARCHAR(40)")]
     with engine.begin() as c:
         if "mysql" in drv:
-            has = c.execute(text("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
-                                 "WHERE TABLE_NAME='logistics_bill_lines' AND COLUMN_NAME='review_mode'")).scalar()
-            if not has:
-                c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN review_mode VARCHAR(10)"))
+            have = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                                                 "WHERE TABLE_NAME='logistics_bill_lines'")).fetchall()}
         else:
-            cols = [r[1] for r in c.execute(text("PRAGMA table_info(logistics_bill_lines)")).fetchall()]
-            if "review_mode" not in cols:
-                c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN review_mode VARCHAR(10)"))
+            have = {r[1] for r in c.execute(text("PRAGMA table_info(logistics_bill_lines)")).fetchall()}
+        for col, typ in need:
+            if col not in have:
+                c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN %s %s" % (col, typ)))

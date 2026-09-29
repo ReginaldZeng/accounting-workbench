@@ -229,7 +229,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       </div>
 
       <div>
-          {accr && accr.groups && accr.groups.length > 0 && (() => {
+          {accr && accr.carrier === carrier && accr.groups && accr.groups.length > 0 && (() => {
             const totA = accr.accr_total || 0, totB = accr.bill_total || 0, totD = totA - totB
             return <div className="card">
               <h3>复核结论 · 金蝶2241计提(含税) vs 账单 · 按主体×费用类型</h3>

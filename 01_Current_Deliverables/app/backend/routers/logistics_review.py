@@ -602,6 +602,17 @@ def _is_outbound_fee(fee):
     return "出库" in str(fee or "")
 
 
+def _eff_subject(r):
+    """账单主体：人工覆盖(subj_ovr) 优先，否则原 subject。"""
+    return (str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
+
+
+def _eff_fee(r):
+    """账单费用类型(已归一)：人工覆盖(fee_ovr) 优先；否则按单号前缀推断(_fee_of，能把冷运运费/销售出库等归到出库)，
+    再归一到 入库/出库/调拨。不直接用账单原名 fee_item(顺丰=冷运运费 对不上计提出库)。"""
+    return _fee_norm(r.get("fee_ovr") or _fee_of(r.get("doc_no"), r.get("fee_item")))
+
+
 def _box_reg(spec):
     """从规格型号解析箱规（N袋/箱）。返回 int 或 None。"""
     m = re.search(r"(\d+)\s*袋/箱", str(spec or ""))
@@ -861,11 +872,11 @@ def _build_recon(request, carrier, period):
     # 账单金额(含税)：直接汇总账单明细，便宜、无需金蝶
     with db._engine.connect() as c:
         brows = [dict(r) for r in c.execute(select(
-            BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.amount).where(
+            BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
     bill_by = {}
     for r in brows:
-        k = (str(r.get("subject") or "").strip(), _fee_norm(r.get("fee_item") or _fee_of(r.get("doc_no"), "")))
+        k = (_eff_subject(r), _eff_fee(r))
         bill_by[k] = bill_by.get(k, 0.0) + float(r.get("amount") or 0)
     # 销售额(费比)：需金蝶物料，仅单据不多(≤400)时取，避免迅鸽这类几千单拖垮
     sales_by = {}
@@ -899,7 +910,7 @@ def _build_recon(request, carrier, period):
                        "lines": ag["lines"] or [{"bizline": "（无计提）", "vno": "", "amt": None}],
                        "accr_amt": accr_amt, "bill_amt": bamt, "sales": sales, "ratio": ratio,
                        "diff": round(accr_amt - bamt, 2)})
-    return {"ok": True, "groups": groups, "accr_total": round(atot, 2),
+    return {"ok": True, "carrier": carrier, "period": period, "groups": groups, "accr_total": round(atot, 2),
             "bill_total": round(sum(g["bill_amt"] for g in groups), 2),
             "tax": round(tax, 2), "gross_factor": round(gf, 4), "sales_ready": sales_ready}
 
@@ -1034,7 +1045,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 conv = round(kd_sum / billcnt, 3) if billcnt else None   # 按件数：换算系数=金蝶箱数÷账单件(整车按箱≈1、打托=托规)
                 mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
                 mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
-            base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": (r.get("fee_item") or _fee_of(d0, "运输费")),
+            base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
                     "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                     "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
                     "note": r.get("note") or ""}
@@ -1215,9 +1226,9 @@ async def review_doc_classify(request: Request):
         return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
     vals = {}
     if b.get("subject") is not None:
-        vals["subject"] = (b.get("subject") or "").strip()
+        vals["subj_ovr"] = (b.get("subject") or "").strip() or None   # 存覆盖列，不动原 subject；空=清覆盖
     if b.get("fee_item") is not None:
-        vals["fee_item"] = (b.get("fee_item") or "").strip()
+        vals["fee_ovr"] = (b.get("fee_item") or "").strip() or None
     if not vals:
         return {"ok": True}
     with db._engine.begin() as c:
