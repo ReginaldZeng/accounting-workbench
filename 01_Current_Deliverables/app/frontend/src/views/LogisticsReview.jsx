@@ -1,7 +1,7 @@
-// [Change Log] Date:2026-09-29 Author:Claude Fable 5.1 Version:V2.690
+// [Change Log] Date:2026-09-29 Author:Claude Fable 5.1 Version:V2.691
 // 物流账单复核台（三步流）：总表(承运商×主体，计提出发)
-//   → ① 逐笔计提复核：每笔计提一行(主体/费用类型/产品线/产品类型/部门/凭证号/含税计提/税率)，账单按 主体×费用类型×产品线 配到笔，
-//        配不到退回按组；差异写"差异解释"；页顶挂该供应商的复核要点
+//   → ① 逐笔计提复核：顶部结论格；复核要点一行(点编辑展开)；表按「主体·费用类型」分组，组头即小计；
+//        每笔=产品线(产品类型·部门小字)/凭证号/含税计提(税率标签)/账单/差异/差异解释，有差异未解释的行淡红底
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
@@ -9,12 +9,23 @@ import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty,
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
-const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(1) + '%')
-const dcls = d => (d == null ? '' : Math.abs(d) < 0.01 ? 'diffok' : 'diffbad')
-const dtxt = d => (d == null ? '—' : Math.abs(d) < 0.01 ? '0 · 平' : money(d))
+const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
+const isZero = d => d != null && Math.abs(d) < 0.01
+const dcls = d => (d == null ? '' : isZero(d) ? 'diffok' : 'diffbad')
+const dtxt = d => (d == null ? '—' : isZero(d) ? '0 · 平' : (d > 0 ? '+' : '') + money(d))
 const PS = { ok: ['通过', 'ok'], over: ['多收', 'bad'], under: ['账单少收', 'neu'], free: ['账单未收·我方有利', 'neu'], gap: ['价卡缺·待确认', 'warn'], na: ['待补价卡', 'neu'] }
 const STEPS = [['lines', '①', '逐笔计提复核'], ['docs', '②', '逐单核价核量'], ['sign', '③', '确认与登记']]
 const EMPTY_L = { rows: [], accr_total: 0, bill_total: 0, diff_total: 0, adj: [], points: '', signed: null, n_unexplained: 0 }
+
+// 后端 rows 是「若干笔 + 一行 gtotal」循环；这里切成组，组头用 gtotal 的小计数
+function toGroups(rows) {
+  const out = []; let cur = []
+  for (const r of rows || []) {
+    if (r.kind === 'gtotal') { out.push({ head: r, lines: cur }); cur = [] } else cur.push(r)
+  }
+  if (cur.length) out.push({ head: null, lines: cur })
+  return out
+}
 
 export default function LogisticsReview({ cfg, onPeriod }) {
   const period = `${cfg.year}-${String(cfg.period).padStart(2, '0')}`
@@ -32,7 +43,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [ov, setOv] = useState(null)
   const [L, setL] = useState(null)               // 逐笔计提复核结果（异步，金蝶慢）
   const [pts, setPts] = useState('')             // 供应商复核要点（编辑中）
-  const [ptsSaved, setPtsSaved] = useState('')   // 已保存值，判断是否有改动
+  const [ptsSaved, setPtsSaved] = useState('')   // 已保存值
+  const [ptsEdit, setPtsEdit] = useState(false)  // 要点是否展开编辑
 
   // 总表：承运商 × 主体 计提/付款/差异 + 复核状态——随账期变，防串更新
   useEffect(() => {
@@ -41,7 +53,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewOverview(period).then(r => { if (alive) setOv(r) }).catch(() => { if (alive) setOv({ rows: [], subjects: [] }) })
     return () => { alive = false }
   }, [period, mode])
-  const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setMode('detail') }
+  const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setPtsEdit(false); setMode('detail') }
 
   const load = useCallback(() => {
     reviewResult(carrier, period, group, page, q).then(setD).catch(e => setMsg(e.message))
@@ -80,13 +92,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .then(() => { load(); refetchL(); flash('已改归类，逐笔复核重算') })
       .catch(e => flash('归类保存失败：' + e.message))
   }
-  // 逐笔差异解释：存后本地回填，不整表重拉
+  // 逐笔差异解释：存后本地回填（含未解释计数），不整表重拉
   const saveLineNote = (key, note) => {
     reviewLineNote(carrier, period, key, note)
-      .then(() => setL(l => (l ? { ...l, rows: l.rows.map(r => (r.key === key ? { ...r, note } : r)) } : l)))
+      .then(() => setL(l => {
+        if (!l) return l
+        const rows = l.rows.map(r => (r.key === key ? { ...r, note } : r))
+        const n = rows.filter(r => r.kind !== 'gtotal' && r.diff != null && !isZero(r.diff) && !(r.note || '').trim()).length
+        return { ...l, rows, n_unexplained: n }
+      }))
       .catch(e => flash('差异解释保存失败：' + e.message))
   }
-  const savePts = () => { reviewCarrierPointsSet(carrier, pts).then(() => { setPtsSaved(pts); flash('复核要点已保存') }).catch(e => flash('保存失败：' + e.message)) }
+  const savePts = () => { reviewCarrierPointsSet(carrier, pts).then(() => { setPtsSaved(pts); setPtsEdit(false); flash('复核要点已保存') }).catch(e => flash('保存失败：' + e.message)) }
   const doSign = () => {
     if (!window.confirm(`确认 ${carrier} ${period} 复核通过并登记？登记后当月的归类与备注将锁定（可撤销）。`)) return
     setBusy('sign'); reviewSign(carrier, period).then(() => { flash('已登记复核'); refetchL() }).catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
@@ -110,6 +127,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   ]
   const stepIdx = STEPS.findIndex(s => s[0] === step)
   const goStep = k => setStep(k)
+  const groups = toGroups(lrows)
 
   return (
     <div className="lrv">
@@ -130,6 +148,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .ovfoot{padding:9px 15px;font-size:11.5px;color:#8A96A2;border-top:1px solid #DCE2E7;line-height:1.6}
       .lrv .btn{font-size:12.5px;padding:6px 12px;border-radius:7px;border:1px solid #DCE2E7;background:#fff;cursor:pointer;display:inline-block;text-decoration:none;color:#1B2733}
       .lrv .btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+      .lrv .btn.sm{font-size:12px;padding:4px 10px}
       .lrv .btn[disabled]{opacity:.5;cursor:default}
       .lrv .stepper{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
       .lrv .stepbtn{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;border:1px solid #DCE2E7;background:#fff;cursor:pointer;font:inherit;font-size:13px;color:#5E6B78}
@@ -137,13 +156,25 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .stepbtn.on{border-color:var(--accent);background:#F5FAFC;color:#1B2733;font-weight:600;box-shadow:0 0 0 1px var(--accent) inset}
       .lrv .stepbtn.done{color:var(--ok)}
       .lrv .lock{background:#FDF3E2;border:1px solid #F0D9A8;border-radius:10px;padding:8px 14px;font-size:12.5px;color:#6B4E00;margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+      .lrv .sumstrip{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+      .lrv .tile{background:#fff;border:1px solid #DCE2E7;border-radius:12px;padding:11px 16px}
+      .lrv .tile .v{font-family:ui-monospace,monospace;font-size:21px;font-weight:600;color:#1B2733}
+      .lrv .tile .l{font-size:11px;color:#8A96A2;margin-top:2px}
+      .lrv .tile.accent .v{color:var(--accent)}.lrv .tile.ok .v{color:var(--ok)}.lrv .tile.bad .v{color:var(--bad)}.lrv .tile.warn .v{color:var(--warn)}
       .lrv .verdict{background:#fff;border:1px solid #DCE2E7;border-radius:12px;padding:14px 18px;display:grid;grid-template-columns:1.5fr repeat(4,1fr);gap:6px 20px;align-items:end;margin-bottom:12px}
       .lrv .verdict .lead{grid-column:1/-1;color:#5E6B78;font-size:12.5px}
       .lrv .stat .v{font-family:ui-monospace,monospace;font-size:21px;font-weight:600}
       .lrv .stat .l{font-size:11px;color:#8A96A2}
       .lrv .stat.ok .v{color:var(--ok)}.lrv .stat.accent .v{color:var(--accent)}.lrv .stat.warn .v{color:var(--warn)}
       .lrv .card{background:#fff;border:1px solid #DCE2E7;border-radius:12px;overflow:hidden;margin-bottom:12px}
-      .lrv .card h3{margin:0;padding:11px 15px;font-size:13px;border-bottom:1px solid #DCE2E7;color:#5E6B78}
+      .lrv .card h3{margin:0;padding:11px 15px;font-size:13px;border-bottom:1px solid #DCE2E7;color:#5E6B78;display:flex;align-items:center;gap:8px}
+      .lrv .card h3 .sp{flex:1}
+      .lrv .ptsbar{display:flex;gap:12px;align-items:flex-start;padding:10px 15px;font-size:13px}
+      .lrv .ptsbar .pin{color:var(--accent);flex:none}
+      .lrv .ptsbar .ptxt{flex:1;white-space:pre-wrap;line-height:1.6;color:#1B2733}
+      .lrv .ptsbar .ptxt.empty{color:#8A96A2;cursor:pointer}
+      .lrv textarea.pts{font:inherit;font-size:13px;width:100%;box-sizing:border-box;border:1px solid #DCE2E7;border-radius:8px;padding:8px 10px;resize:vertical;min-height:64px}
+      .lrv textarea.pts:focus{border-color:var(--accent);outline:none}
       .lrv .qbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
       .lrv .qbar-lb{font-size:12.5px;color:#5E6B78;margin-right:2px}
       .lrv .qbar-sum{font-size:12.5px;color:#5E6B78}.lrv .qbar-sum b{font-family:ui-monospace,monospace;font-size:16px;color:var(--accent)}
@@ -156,22 +187,30 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .mtbl td[rowspan]{vertical-align:middle;background:#FBFCFD}
       .lrv .mtbl tr.band td{background:#F6F9FA}.lrv .mtbl tr.band td[rowspan]{background:#EEF4F6}
       .lrv .mtbl tr.docstart td{border-top:2px solid #CBD5DC}
-      .lrv .ltbl tr.gtotal td{font-weight:600;background:#EDF2F5;color:#1B2733}
+      .lrv .ltbl tr.ghead td{background:#EEF4F6;font-weight:600;color:#1B2733;border-top:2px solid #CBD5DC;padding:8px 10px}
+      .lrv .ltbl tr.ghead td.gname::before{content:"";display:inline-block;width:4px;height:13px;background:var(--accent);border-radius:2px;margin-right:8px;vertical-align:-1px}
+      .lrv .ltbl tr.ghead td.gsub{font-weight:500;color:#5E6B78;font-size:12px}
+      .lrv .ltbl tr.rowbad td{background:#FFF7F5}.lrv .ltbl tr.rowbad td[rowspan]{background:#FFF1EE}
       .lrv .ltbl tr.total td{font-weight:700;border-top:2px solid #CBD5DC;background:#E1EEF3}
+      .lrv .ltbl td.pl{line-height:1.25}
+      .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
+      .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
+      .lrv .tag.ok{color:var(--ok);background:#DCEFE4}
       .lrv .diffok{color:var(--ok);font-weight:600}.lrv .diffbad{color:var(--bad);font-weight:600}
       .lrv .mono{font-family:ui-monospace,monospace;font-size:12px}
       .lrv .dim{color:#8A96A2}
       .lrv .mtbl th,.lrv .mtbl td{padding:6px 8px}
       .lrv .mtbl small{font-size:10px}
       .lrv .noteinp{font:inherit;font-size:12px;border:1px solid #DCE2E7;border-radius:5px;padding:3px 6px;width:100px}
-      .lrv .noteinp.wide{width:230px}
+      .lrv .noteinp.wide{width:250px}
       .lrv .noteinp:focus{border-color:var(--accent);outline:none}
       .lrv .noteinp[disabled],.lrv .clsinp[disabled]{background:#F3F5F6;color:#8A96A2;cursor:not-allowed}
       .lrv .clsinp{font:inherit;font-size:12px;border:1px dashed #C6D0D6;border-radius:5px;padding:2px 5px;width:86px;background:#FbFdFe}
       .lrv .clsinp:hover{border-color:var(--accent)}
       .lrv .clsinp:focus{border-color:var(--accent);border-style:solid;outline:none}
-      .lrv textarea.pts{font:inherit;font-size:13px;width:100%;box-sizing:border-box;border:1px solid #DCE2E7;border-radius:8px;padding:8px 10px;resize:vertical;min-height:58px}
-      .lrv textarea.pts:focus{border-color:var(--accent);outline:none}
+      .lrv details.spec{padding:8px 15px;font-size:11.5px;color:#8A96A2;border-top:1px solid #DCE2E7;line-height:1.7}
+      .lrv details.spec summary{cursor:pointer;color:var(--accent);user-select:none}
+      .lrv .adjnote{padding:8px 15px;font-size:12px;color:#6B4E00;background:#FDF3E2;border-top:1px solid #F0D9A8}
       .lrv table{border-collapse:collapse;width:100%;font-size:13px}
       .lrv th,.lrv td{padding:7px 11px;text-align:left;border-bottom:1px solid #DCE2E7;white-space:nowrap}
       .lrv th{font-size:11px;color:#8A96A2;background:#F7F9F9}
@@ -184,7 +223,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .navbar{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin:4px 0 14px}
       .lrv input[type=search]{font:inherit;font-size:13px;padding:5px 10px;border:1px solid #DCE2E7;border-radius:7px}
       .lrv .msg{background:#FEF7E6;border:1px solid #F0DCA8;border-radius:8px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;color:#5C4A00;word-break:break-all}
-      @media(max-width:900px){.lrv .verdict{grid-template-columns:1fr 1fr}}
+      @media(max-width:900px){.lrv .verdict{grid-template-columns:1fr 1fr}.lrv .sumstrip{grid-template-columns:1fr 1fr}}
       `}</style>
 
       <div className="head">
@@ -248,74 +287,93 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         {STEPS.map(([k, no, name], i) =>
           <button key={k} className={'stepbtn' + (k === step ? ' on' : '') + (i < stepIdx ? ' done' : '')} onClick={() => goStep(k)}>
             <b>{no}</b><span>{name}</span>
-            {k === 'lines' && L && <small className="dim">{dtxt(L.diff_total)}</small>}
+            {k === 'lines' && L && !L.err && <small className={dcls(L.diff_total)}>{dtxt(L.diff_total)}</small>}
             {k === 'sign' && locked && <small className="pill ok">已登记</small>}
           </button>)}
       </div>
 
       {step === 'lines' && (<>
+        {L && !L.err && (
+          <div className="sumstrip">
+            <div className="tile accent"><div className="v">{money(L.accr_total)}</div><div className="l">计提合计（含税）</div></div>
+            <div className="tile"><div className="v">{money(L.bill_total)}</div><div className="l">账单合计{L.bill_src === 'accrual' ? '（费用项汇总）' : '（逐单汇总）'}</div></div>
+            <div className={'tile ' + (isZero(L.diff_total) ? 'ok' : 'bad')}><div className="v">{dtxt(L.diff_total)}</div><div className="l">差异（计提 − 账单）</div></div>
+            <div className={'tile ' + (L.n_unexplained ? 'warn' : 'ok')}><div className="v">{L.n_unexplained || 0}</div><div className="l">有差异、还没写解释（笔）</div></div>
+          </div>)}
+
         <div className="card">
-          <h3>本供应商复核要点 <span className="dim">（一家一段，比如按重量核还是按件数核、哪些费用不能逐单）</span></h3>
-          <div style={{ padding: '10px 15px' }}>
-            <textarea className="pts" value={pts} onChange={e => setPts(e.target.value)} placeholder={`${carrier} 的复核要点…`} />
-            <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
-              <span className="dim" style={{ fontSize: 12 }}>{pts !== ptsSaved ? '有未保存的改动' : ''}</span>
-              <div style={{ flex: 1 }} />
-              <button className="btn pri" disabled={pts === ptsSaved} onClick={savePts}>保存要点</button>
-            </div>
-          </div>
+          <h3>复核要点 <span className="dim">· {carrier} 这家怎么核（按重量还是件数、哪些费用不逐单）</span><span className="sp" />
+            {!ptsEdit && <button className="btn sm" onClick={() => setPtsEdit(true)}>编辑</button>}</h3>
+          {!ptsEdit
+            ? <div className="ptsbar"><span className="pin">📌</span>
+              <div className={'ptxt' + (ptsSaved ? '' : ' empty')} onClick={() => { if (!ptsSaved) setPtsEdit(true) }}>{ptsSaved || '还没写，点此填写'}</div></div>
+            : <div style={{ padding: '10px 15px' }}>
+              <textarea className="pts" autoFocus value={pts} onChange={e => setPts(e.target.value)} placeholder={`${carrier} 的复核要点…`} />
+              <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>
+                <button className="btn sm" onClick={() => { setPts(ptsSaved); setPtsEdit(false) }}>取消</button>
+                <button className="btn sm pri" disabled={pts === ptsSaved} onClick={savePts}>保存</button>
+              </div>
+            </div>}
         </div>
 
         <div className="card">
-          <h3>逐笔计提复核 · 金蝶计提每笔一行 vs 账单 <span className="dim">· 差异＝计提含税−账单；有差异请在右侧写差异解释</span></h3>
+          <h3>逐笔计提复核 <span className="dim">· 按「主体 · 费用类型」分组，组头即小计；有差异的行请写差异解释</span></h3>
           {L === null && <div className="ovempty">读金蝶计提分录中…</div>}
           {L && L.err && <div className="msg" style={{ margin: 12 }}>逐笔取数失败：{L.err}</div>}
           {L && !L.err && (
             <div className="tw"><table className="mtbl ltbl">
               <thead><tr>
-                <th>主体</th><th>费用类型</th><th>产品线</th><th>产品类型</th><th>部门</th><th>凭证号</th>
-                <th className="num">计提金额<small>含税</small></th><th className="num">税率</th>
-                <th className="num">账单金额</th><th className="num">差异</th><th>备注 · 差异解释</th>
+                <th>产品线 <small className="dim">/ 产品类型 · 部门</small></th><th>凭证号</th>
+                <th className="num">计提金额<small>含税</small></th><th className="num">账单金额</th><th className="num">差异</th><th>差异解释</th>
               </tr></thead>
               <tbody>
-                {lrows.map(r => {
-                  if (r.kind === 'gtotal') return (
-                    <tr key={r.key} className="gtotal">
-                      <td colSpan="6">{r.subject} · {r.fee_type} 小计</td>
-                      <td className="num">{money(r.amt)}</td><td className="num">—</td>
-                      <td className="num">{money(r.bill)}</td><td className={'num ' + dcls(r.diff)}>{dtxt(r.diff)}</td><td></td>
-                    </tr>)
-                  const anchor = r.bill != null
-                  const needNote = r.diff != null && Math.abs(r.diff) >= 0.01
-                  return (
-                    <tr key={r.key} className={r.gfirst ? 'docstart' : ''}>
-                      <td>{r.subject}</td><td>{r.fee_type}</td>
-                      <td>{r.kind === 'bill_only' ? <span className="dim">{r.biz}</span> : r.biz}{r.bill_biz && <small className="dim">（账单:{r.bill_biz}）</small>}</td>
-                      <td>{r.proj || <span className="dim">—</span>}</td>
-                      <td>{r.dept || <span className="dim">—</span>}</td>
-                      <td className="mono">{r.vno || <span className="dim">—</span>}</td>
-                      <td className="num">{r.amt == null ? <span className="dim">无计提</span> : money(r.amt)}</td>
-                      <td className="num">{pct(r.tax_rate)}</td>
-                      {anchor && <td rowSpan={r.bill_span || 1} className="num">{money(r.bill)}<small className="dim"> {r.level === 'biz' ? '逐笔' : '按组'}</small></td>}
-                      {anchor && <td rowSpan={r.bill_span || 1} className={'num ' + dcls(r.diff)}>{dtxt(r.diff)}</td>}
-                      <td><input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
-                        placeholder={needNote ? '为什么差…' : ''} onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} /></td>
-                    </tr>)
+                {groups.map((g, gi) => {
+                  const h = g.head
+                  const lines = g.lines
+                  return [
+                    h && <tr key={'h' + gi} className="ghead">
+                      <td className="gname" colSpan="2">{h.subject} · {h.fee_type}<span className="tag">{lines.filter(x => x.kind === 'accr').length} 笔</span></td>
+                      <td className="num">{money(h.amt)}</td><td className="num">{money(h.bill)}</td>
+                      <td className={'num ' + dcls(h.diff)}>{dtxt(h.diff)}</td><td className="gsub"></td>
+                    </tr>,
+                    ...lines.map(r => {
+                      const anchor = r.bill != null
+                      const bad = anchor && r.diff != null && !isZero(r.diff)
+                      const unexpl = bad && !(r.note || '').trim()
+                      const subline = [r.proj, r.dept].filter(Boolean).join(' · ')
+                      return (
+                        <tr key={r.key} className={unexpl ? 'rowbad' : ''}>
+                          <td className="pl">
+                            {r.kind === 'bill_only'
+                              ? <><span className="dim">{r.biz}</span><span className="sub">账单有、计提无</span></>
+                              : <>{r.biz}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}{subline && <span className="sub">{subline}</span>}</>}
+                          </td>
+                          <td className="mono">{r.vno || <span className="dim">—</span>}</td>
+                          <td className="num">{r.amt == null ? <span className="dim">—</span> : <>{money(r.amt)}{r.tax_rate != null && <span className="tag">{pct(r.tax_rate)}</span>}</>}</td>
+                          {anchor && <td rowSpan={r.bill_span || 1} className="num">{money(r.bill)}<span className="tag">{r.level === 'biz' ? '按产品线' : '按组'}</span></td>}
+                          {anchor && <td rowSpan={r.bill_span || 1} className={'num ' + dcls(r.diff)}>{dtxt(r.diff)}</td>}
+                          <td>{bad || (r.note || '').trim()
+                            ? <input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
+                              placeholder="为什么差…" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} />
+                            : (anchor ? <span className="tag ok">平</span> : null)}</td>
+                        </tr>)
+                    })
+                  ]
                 })}
                 <tr className="total">
-                  <td colSpan="6">合计</td>
-                  <td className="num">{money(L.accr_total)}</td><td></td>
-                  <td className="num">{money(L.bill_total)}</td><td className={'num ' + dcls(L.diff_total)}>{dtxt(L.diff_total)}</td>
+                  <td colSpan="2">合计</td>
+                  <td className="num">{money(L.accr_total)}</td><td className="num">{money(L.bill_total)}</td>
+                  <td className={'num ' + dcls(L.diff_total)}>{dtxt(L.diff_total)}</td>
                   <td>{L.n_unexplained ? <span className="pill warn">{L.n_unexplained} 笔有差异未解释</span> : <span className="pill ok">差异均已解释</span>}</td>
                 </tr>
               </tbody>
             </table></div>)}
-          {L && !L.err && <div className="ovfoot">
-            计提＝金蝶费用借方(6*/5*)逐分录，产品线/产品类型/部门取凭证核算维度；税率按凭证（同凭证进项税÷费用），计提金额已含税与账单同口径。
-            账单先按 主体×费用类型×产品线 配到笔（标"逐笔"），产品线对不上的退回按 主体×费用类型 挂该组首笔（标"按组"，跨行合并）；账单有计提无的单独一行。
-            {L.bill_src === 'accrual' ? '账单取费用项汇总行（月结清单口径）。' : '账单取逐单明细汇总。'}
-            {L.adj && L.adj.length > 0 && <> 另有 {L.adj.length} 张只有税额调整科目的凭证未计入：{L.adj.map(a => `${a.vno} ${a.acct} ${money(a.amt)}`).join('、')}。</>}
-          </div>}
+          {L && !L.err && L.adj && L.adj.length > 0 && <div className="adjnote">另有 {L.adj.length} 张只有税额调整科目的凭证未计入：{L.adj.map(a => `${a.vno} ${a.acct} ${money(a.amt)}`).join('、')}</div>}
+          {L && !L.err && <details className="spec"><summary>口径说明</summary>
+            计提＝金蝶费用借方(6*/5*)逐分录，产品线/产品类型/部门取凭证核算维度；税率按凭证（同凭证进项税÷费用，税额按分录精确分摊），计提金额已含税与账单同口径。
+            账单先按 主体×费用类型×产品线 配到笔（标"按产品线"），产品线对不上的退回按 主体×费用类型 挂该组首笔（标"按组"，跨行合并）；账单有计提无的单独一行。
+            {L.bill_src === 'accrual' ? '账单取费用项汇总行（月结清单口径）。' : '账单取逐单明细汇总。'}仓储费等无单据的费用只在本页看差异、写解释，不进逐单。
+          </details>}
         </div>
         <div className="navbar"><button className="btn pri" onClick={() => goStep('docs')}>下一步：逐单核价核量 ›</button></div>
       </>)}
@@ -454,7 +512,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <div className="lead">逐笔：计提 vs 账单；逐单：核量结果。确认通过后登记，当月归类与备注锁定，总表显示已复核。</div>
               <div className="stat accent"><div className="v">{money(L.accr_total)}</div><div className="l">计提合计（含税）</div></div>
               <div className="stat"><div className="v">{money(L.bill_total)}</div><div className="l">账单合计</div></div>
-              <div className={'stat ' + (Math.abs(L.diff_total || 0) < 0.01 ? 'ok' : 'warn')}><div className="v">{dtxt(L.diff_total)}</div><div className="l">差异（计提−账单）</div></div>
+              <div className={'stat ' + (isZero(L.diff_total) ? 'ok' : 'warn')}><div className="v">{dtxt(L.diff_total)}</div><div className="l">差异（计提−账单）</div></div>
               <div className={'stat ' + (L.n_unexplained ? 'warn' : 'ok')}><div className="v">{L.n_unexplained || 0}</div><div className="l">有差异未写解释（笔）</div></div>
             </div>
             <div className="toolbar" style={{ borderTop: '1px solid #DCE2E7', borderBottom: 0 }}>
