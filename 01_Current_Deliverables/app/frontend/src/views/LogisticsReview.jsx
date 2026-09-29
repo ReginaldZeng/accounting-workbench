@@ -2,7 +2,7 @@
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers, reviewOverview, reviewExportUrl, reviewDocNote, reviewAccrual } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewCarriers, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewAccrual } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -63,8 +63,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   }
   const kingdee = () => { setBusy('kd'); reviewKingdeeQty(carrier, period).then(r => { flash(`金蝶出库单 ${r.kd_docs} 单，回填 ${r.filled} 行`); load() }).catch(e => flash('失败：' + e.message)).finally(() => setBusy('')) }
   const saveNote = (doc_no, note) => { reviewDocNote(carrier, period, doc_no, note).catch(e => flash('备注保存失败：' + e.message)) }
+  // 逐单手改归类(主体/费用类型)→存账单侧→复核结论按新归类重算(后端已作废缓存，前端强拉一次)
+  const refetchAccr = () => { setAccr(null); reviewAccrual(carrier, period).then(r => setAccr(r)).catch(() => setAccr({ groups: [], accr_total: 0, bill_total: 0 })) }
+  const saveClass = (doc_no, patch) => {
+    reviewDocClassify(carrier, period, doc_no, patch)
+      .then(() => { load(); refetchAccr(); flash('已改归类，复核结论重算') })
+      .catch(e => flash('归类保存失败：' + e.message))
+  }
 
   const c = (d && d.counts) || {}
+  const subjOpts = [...new Set((accr && accr.groups || []).map(g => g.subject).filter(Boolean))]
+  const feeOpts = [...new Set([...(accr && accr.groups || []).map(g => g.fee_type), '采购入库运费', '销售出库运费', '调拨运费', '入库运费', '出库运费', '退货运费'].filter(Boolean))]
   const QUEUE = [
     { f: 'miss', sw: 'warn', n: '核量 · 金蝶查无出库单', dd: '账单单号在金蝶未匹配（拆单后缀/未审核）', c: c.miss || 0, u: '笔' },
     { f: 'qtydiff', sw: 'warn', n: '核量 · 账单数量≠金蝶出库数量', dd: '账单件数与金蝶出库数量不符', c: c.qtydiff || 0, u: '笔' },
@@ -138,6 +147,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .mtbl small{font-size:10px}
       .lrv .noteinp{font:inherit;font-size:12px;border:1px solid #DCE2E7;border-radius:5px;padding:3px 6px;width:100px}
       .lrv .noteinp:focus{border-color:var(--accent);outline:none}
+      .lrv .clsinp{font:inherit;font-size:12px;border:1px dashed #C6D0D6;border-radius:5px;padding:2px 5px;width:86px;background:#FbFdFe}
+      .lrv .clsinp:hover{border-color:var(--accent)}
+      .lrv .clsinp:focus{border-color:var(--accent);border-style:solid;outline:none}
       .lrv table{border-collapse:collapse;width:100%;font-size:13px}
       .lrv th,.lrv td{padding:7px 11px;text-align:left;border-bottom:1px solid #DCE2E7;white-space:nowrap}
       .lrv th{font-size:11px;color:#8A96A2;background:#F7F9F9}
@@ -263,7 +275,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <input type="search" placeholder="搜单号/省份" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
             </div>
             {d && d.by_box
-              ? <div className="tw"><table className="mtbl">
+              ? <div className="tw">
+                <datalist id="lrv-subj">{subjOpts.map(s => <option key={s} value={s} />)}</datalist>
+                <datalist id="lrv-fee">{feeOpts.map(s => <option key={s} value={s} />)}</datalist>
+                <table className="mtbl">
                 <thead><tr>
                   <th>费用主体</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/仓库</th>
                   <th>物料编码</th><th>物料名称</th><th className="num">基本单位数量</th>
@@ -283,8 +298,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     const bad = r.mode_cn && r.mode_cn.indexOf('待核') >= 0
                     return <tr key={i} className={(first ? 'docstart' : '') + band}>
                       {first && <>
-                        <td rowSpan={span}>{r.subject}</td>
-                        <td rowSpan={span}>{r.fee_item}</td>
+                        <td rowSpan={span}><input className="clsinp" list="lrv-subj" defaultValue={r.subject || ''} key={'s' + r.doc_no + (r.subject || '')} title="可手改主体，复核结论按新归类重算" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.subject || '')) saveClass(r.doc_no, { subject: v }) }} /></td>
+                        <td rowSpan={span}><input className="clsinp" list="lrv-fee" defaultValue={r.fee_item || ''} key={'f' + r.doc_no + (r.fee_item || '')} title="可手改费用类型，复核结论按新归类重算" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.fee_item || '')) saveClass(r.doc_no, { fee_item: v }) }} /></td>
                         <td rowSpan={span}>{r.bizline || <span className="dim">—</span>}</td>
                         <td rowSpan={span} style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.doc_no}</td>
                       </>}

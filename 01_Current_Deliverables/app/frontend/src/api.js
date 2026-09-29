@@ -586,6 +586,7 @@ export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?peri
 export const reviewOverview = (period) => j(`/api/logistics-review/overview?period=${period}`)
 export const reviewExportUrl = (carrier, period) => `/api/logistics-review/export?carrier=${encodeURIComponent(carrier)}&period=${period}`
 export const reviewDocNote = (carrier, period, doc_no, note) => j('/api/logistics-review/doc-note', { method: 'POST', body: JSON.stringify({ carrier, period, doc_no, note }) })
+export const reviewDocClassify = (carrier, period, doc_no, patch) => j('/api/logistics-review/doc-classify', { method: 'POST', body: JSON.stringify({ carrier, period, doc_no, ...patch }) })
 export const reviewAccrual = (carrier, period) => j(`/api/logistics-review/accrual?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 export const reviewRegisterList = (period) => j(`/api/logistics-review/register-list?period=${period}`)
 export const reviewRegisterAdd = (body) => jp('/api/logistics-review/register', body)

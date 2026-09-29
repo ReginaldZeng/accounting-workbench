@@ -804,7 +804,7 @@ def _accr_lines(carrier, period, carrier_full=None):
         cf = "FYear=%d and FPeriod=%d and FDEBIT>0 and FEXPLANATION like '%%计提%%%s%%'" % (int(y), int(m), carrier)
         rows = kc._query(s, conf, "GL_VOUCHER",
                          [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"),
-                          ("FBillNo", "凭证号"),
+                          ("FVOUCHERGROUPID.FName", "凭证字"), ("FVOUCHERGROUPNO", "凭证序号"),
                           ("FDetailID.FF100010.FDataValue", "产品分类"), ("FDetailID.FF100006.FDataValue", "产品项目"),
                           ("FDetailID.FFLEX9.FName", "费用项目")],
                          cf + " and (FAccountID.FNumber like '6%%' or FAccountID.FNumber like '5%%')")
@@ -829,9 +829,10 @@ def _accr_lines(carrier, period, carrier_full=None):
             biz = "%s·%s" % (biz, proj) if cls else proj
         fee = str(r.get("费用项目") or "").strip() or "运费"
         agg[(subj, biz, fee)] = agg.get((subj, biz, fee), 0.0) + amt
-        vn = str(r.get("凭证号") or "").strip()
-        if vn:
-            vnos.setdefault((subj, biz, fee), set()).add(vn)
+        zi = str(r.get("凭证字") or "记").strip()
+        no = str(r.get("凭证序号") or "").strip()
+        if no:
+            vnos.setdefault((subj, biz, fee), set()).add("%s-%s" % (zi, no))
     out = [{"subject": k[0], "bizline": k[1], "fee": k[2], "fee_norm": _fee_norm(k[2]),
             "label": "%s · %s" % (k[1], k[2]), "amt": round(v, 2),
             "vno": "、".join(sorted(vnos.get(k, [])))}
@@ -864,7 +865,7 @@ def _build_recon(request, carrier, period):
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
     bill_by = {}
     for r in brows:
-        k = (str(r.get("subject") or "").strip(), _fee_norm(_fee_of(r.get("doc_no"), r.get("fee_item"))))
+        k = (str(r.get("subject") or "").strip(), _fee_norm(r.get("fee_item") or _fee_of(r.get("doc_no"), "")))
         bill_by[k] = bill_by.get(k, 0.0) + float(r.get("amount") or 0)
     # 销售额(费比)：需金蝶物料，仅单据不多(≤400)时取，避免迅鸽这类几千单拖垮
     sales_by = {}
@@ -1033,7 +1034,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 conv = round(kd_sum / billcnt, 3) if billcnt else None   # 按件数：换算系数=金蝶箱数÷账单件(整车按箱≈1、打托=托规)
                 mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
                 mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
-            base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": _fee_of(d0, r.get("fee_item")),
+            base = {"subject": r.get("subject"), "carrier": carrier, "fee_item": (r.get("fee_item") or _fee_of(d0, "运输费")),
                     "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                     "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
                     "note": r.get("note") or ""}
@@ -1196,6 +1197,33 @@ async def review_doc_note(request: Request):
     with db._engine.begin() as c:
         c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
                   (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(note=note))
+    return {"ok": True}
+
+
+@router.post("/api/logistics-review/doc-classify")
+async def review_doc_classify(request: Request):
+    """复核台逐单手动改归类：改该单据的账单侧【主体/费用类型】，复核结论按新归类重算(缓存作废)。
+    用于把账单错配的行拨到对的计提组(如账单调拨费对不上计提、主体串号)，让逐组差异对平。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier = (b.get("carrier") or "").strip()
+    period = (b.get("period") or "").strip()
+    doc_no = (b.get("doc_no") or "").strip()
+    if not carrier or not doc_no:
+        return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
+    vals = {}
+    if b.get("subject") is not None:
+        vals["subject"] = (b.get("subject") or "").strip()
+    if b.get("fee_item") is not None:
+        vals["fee_item"] = (b.get("fee_item") or "").strip()
+    if not vals:
+        return {"ok": True}
+    with db._engine.begin() as c:
+        c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
+                  (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(**vals))
+    _ACCR_CACHE.pop((carrier, period), None)   # 归类变了 → 复核结论缓存作废，重算
     return {"ok": True}
 
 
