@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.676
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.677
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -36,13 +36,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewResult(carrier, period, group, page, q).then(setD).catch(e => setMsg(e.message))
   }, [carrier, period, group, page, q])
   useEffect(() => { load() }, [load])
-  // 计提对账：单独异步拉（金蝶查询慢，带缓存），随承运商/账期变；不阻塞主表
+  // 计提对账：等主表 d 到了再拉（金蝶查询慢，避免与主表取数并发争用金蝶连接把主表拖住）；带缓存
   useEffect(() => {
-    if (mode !== 'detail' || !carrier) return
+    if (mode !== 'detail' || !carrier || !d) return
     let alive = true; setAccr(null)
-    reviewAccrual(carrier, period).then(r => { if (alive) setAccr(r) }).catch(() => { if (alive) setAccr({ accr_lines: [], accr_total: 0 }) })
-    return () => { alive = false }
-  }, [carrier, period, mode])
+    const t = setTimeout(() => {
+      reviewAccrual(carrier, period).then(r => { if (alive) setAccr(r) }).catch(() => { if (alive) setAccr({ accr_lines: [], accr_total: 0 }) })
+    }, 300)
+    return () => { alive = false; clearTimeout(t) }
+  }, [carrier, period, mode, d && d.carrier])
   // 本月有计提的承运商（金蝶 2241 计提凭证）——随账期变。金蝶取数慢，防串更新：只认最新账期的响应，
   // 否则快速切月时先发的旧月响应后到会覆盖新月（曾出现 9 期显示 8 期承运商）。
   useEffect(() => {
