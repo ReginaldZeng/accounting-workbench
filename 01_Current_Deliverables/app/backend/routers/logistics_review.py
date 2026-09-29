@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.671
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.673
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -775,11 +775,50 @@ def review_register_kingdee_check(request: Request, period: str = ""):
 
 # ---------- 复核结果（费用项汇总 + 逐单）----------
 @router.get("/api/logistics-review/result")
+def _accr_lines(carrier, period, carrier_full=None):
+    """取该承运商本月金蝶计提，业务线/费用项目从核算维度(产品分类FF100010、费用项目FFLEX9)读，不抠摘要。
+    计提含税＝费用借方(6*/5*不含税)＋暂估进项税(2221.01.07)。返回([{subject,bizline,fee,label,amt}], 含税合计)。"""
+    if not period or "-" not in period:
+        return [], 0.0
+    try:
+        y, m = period.split("-")[:2]
+        s, conf = kc.login()
+        cf = "FYear=%d and FPeriod=%d and FDEBIT>0 and FEXPLANATION like '%%计提%%%s%%'" % (int(y), int(m), carrier)
+        rows = kc._query(s, conf, "GL_VOUCHER",
+                         [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"),
+                          ("FDetailID.FF100010.FDataValue", "业务线"), ("FDetailID.FFLEX9.FName", "费用项目")],
+                         cf + " and (FAccountID.FNumber like '6%%' or FAccountID.FNumber like '5%%')")
+        tx = kc._query(s, conf, "GL_VOUCHER", [("FDEBIT", "借")],
+                       cf + " and FAccountID.FNumber like '2221.01.07%%'")
+    except Exception:
+        return [], 0.0
+    orgs = db.list_orgs() or []
+    b2s = {o.get("full_name"): o.get("short_name") for o in orgs if o.get("full_name")}
+    agg = {}
+    for r in rows:
+        amt = float(r.get("借") or 0)
+        if not amt:
+            continue
+        subj = b2s.get(str(r.get("账簿") or ""), str(r.get("账簿") or ""))
+        biz = str(r.get("业务线") or "").strip() or "（无业务线）"
+        fee = str(r.get("费用项目") or "").strip() or "运费"
+        agg[(subj, biz, fee)] = agg.get((subj, biz, fee), 0.0) + amt
+    out = [{"subject": k[0], "bizline": k[1], "fee": k[2], "label": "%s · %s" % (k[1], k[2]), "amt": round(v, 2)}
+           for k, v in sorted(agg.items())]
+    tax = round(sum(float(x.get("借") or 0) for x in tx), 2)
+    if tax:
+        out.append({"subject": "—", "bizline": "进项税", "fee": "暂估进项税", "label": "暂估进项税", "amt": tax})
+    return out, round(sum(x["amt"] for x in out), 2)
+
+
 def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                   group: str = "ex", page: int = 1, size: int = 50, q: str = ""):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     card, ncard = _load_card(carrier)
+    _sup = db.list_logi_suppliers() or []
+    _cfull = next((x.get("full") for x in _sup if x.get("short") == carrier), None)
+    accr_lines, accr_total = _accr_lines(carrier, period, _cfull)
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
@@ -955,7 +994,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                              "sales": round(sales, 2) if sales is not None else None,
                              "ratio": round(fline / sales, 4) if sales else None})
         return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
-                "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
+                "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
                 "by_box": True, "material": True, "detail_total": len(filt), "detail": view,
                 "page": page, "size": size}
     if by_weight:
@@ -1016,14 +1055,14 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                              "sales": round(sales, 2) if sales is not None else None,
                              "ratio": round(fline / sales, 4) if sales else None})
         return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
-                "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
+                "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
                 "by_weight": True, "material": True, "detail_total": len(filt), "detail": view,
                 "page": page, "size": size}
     view = [{k: r.get(k) for k in ("doc_no", "carrier_sub", "prov", "charge_wt", "qty", "kd_qty",
              "amount", "base_amount", "std_amount", "price_diff", "price_state", "qty_diff",
              "qty_state", "tier", "verdict", "fee_item")} for r in sl]
     return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
-            "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
+            "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
             "by_weight": by_weight, "detail_total": len(filt), "detail": view, "page": page, "size": size}
 
 

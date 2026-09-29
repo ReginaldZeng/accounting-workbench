@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.666
+// [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.673
 // 物流账单复核台：核价(合同价格卡) × 核量(金蝶数量) → 归一态。异常优先——不摆全量，只把不对的顶上来。
 // pilot=迅鸽：导入《附件二》价格卡 → 上传账单解析落中间表 → 接金蝶回填出库数量 → 逐单复核。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -219,6 +219,25 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                 </tr>)}</tbody>
             </table></div>
           </div>
+
+          {d && d.accr_lines && d.accr_lines.length > 0 && (() => {
+            const gap = (d.accr_total || 0) - (d.total_bill || 0)
+            return <div className="card">
+              <h3>计提对账 · 金蝶 2241 计提(按业务线) vs 账单</h3>
+              <div className="tw"><table>
+                <thead><tr><th>主体</th><th>计提业务线 / 费用类型</th><th className="num">计提额</th></tr></thead>
+                <tbody>
+                  {d.accr_lines.map((a, i) => <tr key={i}><td>{a.subject}</td><td>{a.label}</td><td className="num">{money(a.amt)}</td></tr>)}
+                  <tr style={{ fontWeight: 700, borderTop: '2px solid #CBD5DC' }}>
+                    <td>计提合计</td><td className="num" style={{ color: 'var(--accent)' }}>{money(d.accr_total)}</td>
+                    <td className="num">账单合计 {money(d.total_bill)}</td></tr>
+                  <tr style={{ fontWeight: 700 }}><td colSpan="2">差异（计提 − 账单）</td>
+                    <td className="num" style={{ color: Math.abs(gap) < 0.01 ? 'var(--ok)' : 'var(--bad)' }}>{Math.abs(gap) < 0.01 ? '0 · 对平' : money(gap)}</td></tr>
+                </tbody>
+              </table></div>
+              <div className="ovfoot">计提＝金蝶 2241 本期贷方（摘要含「计提…承运商」）按摘要拆业务线/费用类型；账单＝本承运商本月复核账单合计。总额对平即计提无缺漏；业务线维度与账单单据类型口径不同，先看总额与出/入库对得上。</div>
+            </div>
+          })()}
 
           <div className="card">
             <h3>逐单核价核量</h3>
