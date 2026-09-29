@@ -76,7 +76,42 @@ intake_spec = Table(
     Column("updated_at", String(20)),
 )
 
-TABLES = [bill_lines, price_card, intake_spec]
+# 复核登记：整月一家一次，登记后锁当月（改归类/备注要先撤销）。snap_json=登记时结论快照(计提/账单/差异合计)
+review_sign = Table(
+    "logistics_review_sign", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("carrier", String(60)),
+    Column("period", String(7)),
+    Column("status", String(12)),          # signed
+    Column("reviewer", String(50)),
+    Column("signed_at", String(20)),
+    Column("note", Text),
+    Column("snap_json", Text),
+)
+
+# 逐笔计提复核的备注＝差异解释。分录没有稳定ID，line_key=凭证号+科目+主体+费用项目+产品线+产品类型+部门
+review_line_note = Table(
+    "logistics_review_line_note", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("carrier", String(60)),
+    Column("period", String(7)),
+    Column("line_key", String(200)),
+    Column("note", Text),
+    Column("updated_by", String(50)),
+    Column("updated_at", String(20)),
+)
+
+# 供应商复核要点：一家一段（顺丰按重量、丰源按件数箱…），挂在逐笔复核页顶部
+review_carrier_pts = Table(
+    "logistics_review_carrier_pts", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("carrier", String(60), unique=True),
+    Column("points", Text),
+    Column("updated_by", String(50)),
+    Column("updated_at", String(20)),
+)
+
+TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {

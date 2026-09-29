@@ -23,6 +23,7 @@ from kernels import logistics_recon as lrc
 
 router = APIRouter()
 BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
+SG, LN, CP = store.review_sign, store.review_line_note, store.review_carrier_pts   # 复核登记 / 逐笔差异解释 / 供应商复核要点
 
 _DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "fee", "bizline",
                 "fee_item", "qty", "unit", "amount", "carrier_sub", "prov", "charge_wt",
@@ -156,6 +157,8 @@ def review_overview(request: Request, period: str = ""):
         specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
         billrows = c.execute(select(BL.c.subject, BL.c.carrier, func.sum(BL.c.amount)).where(
             (BL.c.period == period) & (BL.c.grain == "detail")).group_by(BL.c.subject, BL.c.carrier)).all()
+        signed = {r["carrier"]: {"reviewer": r["reviewer"], "signed_at": r["signed_at"]} for r in c.execute(
+            select(SG).where((SG.c.period == period) & (SG.c.status == "signed"))).mappings().all()}
     billmap = {(str(subj), str(car)): round(float(amt or 0), 2) for subj, car, amt in billrows}
     out = {}
     for cf in carriers:
@@ -168,7 +171,7 @@ def review_overview(request: Request, period: str = ""):
             cells[subj] = {"accr": a, "paid": p, "diff": round(a - p, 2)}
             tot_accr += a
         out[cf] = {"carrier": cf, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
-                   "total_accr": round(tot_accr, 2)}
+                   "total_accr": round(tot_accr, 2), "signed": signed.get(short)}
     rowlist = sorted(out.values(), key=lambda x: -x["total_accr"])
     return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": bool(rows)}
 
@@ -587,6 +590,8 @@ def _fee_norm(s):
     """把账单侧(采购入库运费/销售出库运费/调拨运费…)与计提侧(入库运费/出库运费…)费用名归一到同一类，
     才能主体×费用类型对上账。识别不了的原样返回。"""
     s = str(s or "").strip()
+    if "研发" in s:
+        return "研发外购"        # 计提费用项目"研发外购" ↔ 账单标注"研发费用TOB/TOC"
     if "仓储" in s:
         return "仓储费"
     if "入库" in s:
@@ -629,7 +634,7 @@ def _eff_subject(r):
     return _short_subject(str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
 
 
-_CANON_FEES = {"入库运费", "出库运费", "调拨运费", "退货运费", "仓储费"}
+_CANON_FEES = {"入库运费", "出库运费", "调拨运费", "退货运费", "仓储费", "研发外购"}
 
 
 def _eff_fee(r):
@@ -960,6 +965,155 @@ def _build_recon(request, carrier, period):
             "tax": round(tax, 2), "gross_factor": round(gf, 4), "sales_ready": sales_ready, "bill_src": bill_src}
 
 
+# ---------- 第二页·逐笔计提复核（V2.690 起的主线；上面的 _build_recon 按组汇总版保留作对照，验证稳定后删）----------
+_BIZ_ALIAS = {"其他零售": "零售", "零售其他": "零售", "山姆零售": "零售", "kikiherb": "Kiki Herb", "KikiHerb": "Kiki Herb", "KIKIHERB": "Kiki Herb"}
+
+
+def _bill_biz(r):
+    """账单侧产品线：bizline 列(账单登记/手改)优先，否则从费用标注 annot 的业务线段解析(销售单-小料→小料)，
+    研发费用TOB/TOC→TO B/TO C；同义归一(其他零售/山姆零售→零售)。取不到返回空串→该笔只能按组配。"""
+    a = str(r.get("annot") or "").strip()
+    b = str(r.get("bizline") or "").strip() or _bizline_of(a)
+    if not b:
+        u = a.upper().replace(" ", "")
+        if u.endswith("TOB"):
+            b = "TO B"
+        elif u.endswith("TOC"):
+            b = "TO C"
+    return _BIZ_ALIAS.get(b, b)
+
+
+def _accr_entries(carrier, period, carrier_full=None):
+    """逐笔计提：金蝶费用借方(6*/5*)每条分录一行——主体/费用项目/产品线(产品分类)/产品类型(产品项目)/部门/凭证号。
+    税率按凭证：同凭证 2221.01.07 借方 ÷ 该凭证费用借方合计；含税＝费用×(1+税率)。
+    分录没有稳定ID，行键=凭证号+科目+维度组合。只有 2221.01.06(税额调整)的凭证不计入，另列 adj 提示。"""
+    if not period or "-" not in period:
+        return {"entries": [], "adj": []}
+    try:
+        y, m = period.split("-")[:2]
+        s, conf = kc.login()
+        names = [carrier] + ([carrier_full] if (carrier_full and carrier_full != carrier) else [])
+        cond = " or ".join("FEXPLANATION like '%%计提%%%s%%'" % n for n in names)
+        cf = "FYear=%d and FPeriod=%d and FDEBIT>0 and (%s)" % (int(y), int(m), cond)
+        rows = kc._query(s, conf, "GL_VOUCHER",
+                         [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"),
+                          ("FVOUCHERGROUPID.FName", "凭证字"), ("FVOUCHERGROUPNO", "凭证序号"),
+                          ("FDetailID.FF100010.FDataValue", "产品分类"), ("FDetailID.FF100006.FDataValue", "产品项目"),
+                          ("FDetailID.FFLEX5.FName", "部门"), ("FDetailID.FFLEX9.FName", "费用项目")], cf)
+    except Exception:
+        return {"entries": [], "adj": []}
+    orgs = db.list_orgs() or []
+    b2s = {o.get("full_name"): o.get("short_name") for o in orgs if o.get("full_name")}
+    fee_by_v, tax_by_v, ents, adj = {}, {}, [], []
+    for r in rows:
+        amt = float(r.get("借") or 0)
+        if not amt:
+            continue
+        acct = str(r.get("科目") or "")
+        vno = "%s-%s" % (str(r.get("凭证字") or "记").strip(), str(r.get("凭证序号") or "").strip())
+        if acct.startswith("2221.01.07"):
+            tax_by_v[vno] = tax_by_v.get(vno, 0.0) + amt
+            continue
+        if not (acct.startswith("6") or acct.startswith("5")):
+            adj.append({"vno": vno, "acct": acct, "amt": round(amt, 2)})
+            continue
+        subj = b2s.get(str(r.get("账簿") or ""), str(r.get("账簿") or ""))
+        fee = str(r.get("费用项目") or "").strip() or "运费"
+        fee_by_v[vno] = fee_by_v.get(vno, 0.0) + amt
+        ents.append({"subject": subj, "fee": fee, "fee_norm": _fee_norm(fee),
+                     "biz": str(r.get("产品分类") or "").strip() or "（无业务线）",
+                     "proj": str(r.get("产品项目") or "").strip(), "dept": str(r.get("部门") or "").strip(),
+                     "vno": vno, "acct": acct, "amt_net": round(amt, 2)})
+    for e in ents:
+        f = fee_by_v.get(e["vno"], 0.0)
+        rate = round(tax_by_v.get(e["vno"], 0.0) / f, 4) if f else 0.0
+        e["tax_rate"] = rate
+        e["tax"] = round(e["amt_net"] * rate, 2)
+        e["amt"] = round(e["amt_net"] + e["tax"], 2)
+        e["key"] = "|".join([e["vno"], e["acct"], e["subject"], e["fee"], e["biz"], e["proj"], e["dept"]])
+    ents.sort(key=lambda e: (e["subject"], e["fee_norm"], e["biz"], e["proj"], e["vno"]))
+    return {"entries": ents, "adj": adj}
+
+
+def _build_lines(request, carrier, period):
+    """逐笔计提复核（第二页主表）：以计提分录为主线每笔一行；账单先按 主体×费用类型×产品线 配到笔(level=biz)，
+    配不到的退回按 主体×费用类型 挂该组首笔(level=group)；账单有计提无的单独成行；每组末尾一行小计。
+    账单侧优先费用项汇总行(accrual)，无则逐单(detail)。差异＝计提含税−账单。附：差异解释/供应商复核要点/登记状态。"""
+    got = _accr_entries(carrier, period, _carrier_full(carrier))
+    ents, adj = got["entries"], got["adj"]
+    with db._engine.connect() as c:
+        allrows = [dict(r) for r in c.execute(select(
+            BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
+        notes = {r[0]: (r[1] or "") for r in c.execute(select(LN.c.line_key, LN.c.note).where(
+            (LN.c.carrier == carrier) & (LN.c.period == period))).all()}
+        pts = c.execute(select(CP.c.points).where(CP.c.carrier == carrier)).scalar() or ""
+        sg = c.execute(select(SG).where((SG.c.carrier == carrier) & (SG.c.period == period) & (SG.c.status == "signed"))).mappings().first()
+    acc_rows = [r for r in allrows if r.get("grain") == "accrual" and (r.get("amount") or 0)]
+    brows = acc_rows if acc_rows else [r for r in allrows if r.get("grain") == "detail"]
+    bill_src = "accrual" if acc_rows else "detail"
+    bill3 = {}
+    for r in brows:
+        k = (_eff_subject(r), _eff_fee(r), _bill_biz(r))
+        bill3[k] = bill3.get(k, 0.0) + float(r.get("amount") or 0)
+    groups = {}
+    for e in ents:
+        groups.setdefault((e["subject"], e["fee_norm"]), []).append(e)
+    bill2 = {}
+    for (s, f, b), v in bill3.items():
+        bill2[(s, f)] = bill2.get((s, f), 0.0) + v
+    rows, atot, btot = [], 0.0, 0.0
+    for gk in sorted(set(list(groups.keys()) + list(bill2.keys()))):
+        s, f = gk
+        es = groups.get(gk, [])
+        gb = round(bill2.get(gk, 0.0), 2)
+        ga = round(sum(e["amt"] for e in es), 2)
+        subs = {}
+        for e in es:
+            subs.setdefault(e["biz"], []).append(e)
+        # 能按产品线配上的子组先排，配不上的排后面连成一段，组级账单才能跨行合并
+        ordered = sorted(subs.items(), key=lambda kv: 0 if (s, f, kv[0]) in bill3 else 1)
+        grows, matched, used = [], 0.0, set()
+        for biz, ses in ordered:
+            bb = bill3.get((s, f, biz))
+            if bb is not None:
+                used.add(biz); matched += bb
+            for i, e in enumerate(ses):
+                row = {**e, "fee_type": f, "kind": "accr", "level": "biz" if bb is not None else "",
+                       "bill": None, "bill_span": 0, "diff": None, "note": notes.get(e["key"], "")}
+                if bb is not None and i == 0:
+                    row["bill"] = round(bb, 2); row["bill_span"] = len(ses)
+                    row["diff"] = round(sum(x["amt"] for x in ses) - bb, 2)
+                grows.append(row)
+        rest = round(gb - matched, 2)
+        rest_biz = "、".join(b for (ss, ff, b) in bill3 if ss == s and ff == f and b and b not in used)
+        un = [x for x in grows if not x["level"]]
+        if un:
+            un[0]["bill"] = rest; un[0]["bill_span"] = len(un)
+            un[0]["diff"] = round(sum(x["amt"] for x in un) - rest, 2)
+            if rest_biz:
+                un[0]["bill_biz"] = rest_biz
+            for x in un:
+                x["level"] = "group"
+        elif abs(rest) >= 0.01:
+            key = "bill|%s|%s" % (s, f)
+            grows.append({"subject": s, "fee": "", "fee_norm": f, "fee_type": f, "biz": rest_biz or "（账单无产品线）",
+                          "proj": "", "dept": "", "vno": "", "acct": "", "amt_net": None, "tax_rate": None, "tax": None, "amt": None,
+                          "key": key, "kind": "bill_only", "level": "group", "bill": rest, "bill_span": 1,
+                          "diff": round(-rest, 2), "note": notes.get(key, "")})
+        if grows:
+            grows[0]["gfirst"] = True
+        rows.extend(grows)
+        rows.append({"kind": "gtotal", "subject": s, "fee_type": f, "amt": ga, "bill": gb, "diff": round(ga - gb, 2),
+                     "key": "gt|%s|%s" % (s, f)})
+        atot += ga; btot += gb
+    n_unexpl = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None
+                   and abs(r["diff"]) >= 0.01 and not (r.get("note") or "").strip())
+    return {"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
+            "accr_total": round(atot, 2), "bill_total": round(btot, 2), "diff_total": round(atot - btot, 2),
+            "adj": adj, "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl}
+
+
 @router.get("/api/logistics-review/result")
 def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                   group: str = "ex", page: int = 1, size: int = 50, q: str = ""):
@@ -1230,22 +1384,50 @@ _VERDICT_CN = {"pass": "两轴通过", "price": "核价多收", "gap": "核价�
                "qty": "核量存疑", "registered": "已登记", "doc_miss": "单号查无"}
 
 
-_ACCR_CACHE = {}   # (carrier,period) -> (lines, total, ts)
+_ACCR_CACHE = {}   # (carrier,period) / ("lines",carrier,period) -> (result, None, ts)
 
 
+def _bust(carrier, period):
+    """归类/备注/登记变了 → 该承运商该月的逐笔与结论缓存作废。"""
+    for k in ((carrier, period), ("lines", carrier, period)):
+        _ACCR_CACHE.pop(k, None)
+
+
+def _signed(carrier, period):
+    with db._engine.connect() as c:
+        return c.execute(select(SG).where((SG.c.carrier == carrier) & (SG.c.period == period) & (SG.c.status == "signed"))).mappings().first()
+
+
+def _locked(carrier, period):
+    """已登记复核的月份不许再改归类/备注：返回 409 响应，否则 None。"""
+    sg = _signed(carrier, period)
+    if sg:
+        return JSONResponse({"ok": False, "msg": "本月已登记复核（%s %s），撤销登记后才能修改" % (
+            sg.get("reviewer") or "", sg.get("signed_at") or "")}, status_code=409)
+    return None
+
+
+def _uname(u):
+    try:
+        return str((u or {}).get("name") or "")[:50]
+    except Exception:
+        return ""
+
+
+@router.get("/api/logistics-review/lines")
 @router.get("/api/logistics-review/accrual")
-def review_accrual(request: Request, carrier: str = "", period: str = ""):
-    """计提对账（金蝶2241计提·业务线从核算维度产品分类读）。单独异步接口，带30分钟缓存，不拖慢复核主表。"""
+def review_lines(request: Request, carrier: str = "", period: str = ""):
+    """第二页·逐笔计提复核（老地址 /accrual 也指到这里）。金蝶查询慢，30分钟缓存；改归类/备注/登记会作废缓存。"""
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     import time as _t
-    k = (carrier, period)
+    k = ("lines", carrier, period)
     c = _ACCR_CACHE.get(k)
     if c and _t.time() - c[2] < 1800:
         return {**c[0], "cached": True}
-    recon = _build_recon(request, carrier, period)
-    _ACCR_CACHE[k] = (recon, None, _t.time())
-    return recon
+    res = _build_lines(request, carrier, period)
+    _ACCR_CACHE[k] = (res, None, _t.time())
+    return res
 
 
 @router.post("/api/logistics-review/doc-note")
@@ -1259,6 +1441,9 @@ async def review_doc_note(request: Request):
     note = (b.get("note") or "").strip()
     if not carrier or not doc_no:
         return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
     with db._engine.begin() as c:
         c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
                   (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(note=note))
@@ -1285,10 +1470,96 @@ async def review_doc_classify(request: Request):
         vals["fee_ovr"] = (b.get("fee_item") or "").strip() or None
     if not vals:
         return {"ok": True}
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
     with db._engine.begin() as c:
         c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
                   (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(**vals))
-    _ACCR_CACHE.pop((carrier, period), None)   # 归类变了 → 复核结论缓存作废，重算
+    _bust(carrier, period)   # 归类变了 → 逐笔/结论缓存作废，重算
+    return {"ok": True}
+
+
+@router.post("/api/logistics-review/line-note")
+async def review_line_note(request: Request):
+    """第二页逐笔备注＝差异解释（有差异时写为什么差）。键=凭证号+维度组合。已登记月份不可改。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period = (b.get("carrier") or "").strip(), (b.get("period") or "").strip()
+    key, note = (b.get("line_key") or "").strip(), (b.get("note") or "").strip()
+    if not carrier or not period or not key:
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期/行键"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    with db._engine.begin() as c:
+        ex = c.execute(select(LN.c.id).where((LN.c.carrier == carrier) & (LN.c.period == period) & (LN.c.line_key == key))).scalar()
+        vals = dict(note=note, updated_by=_uname(u), updated_at=_now())
+        if ex:
+            c.execute(update(LN).where(LN.c.id == ex).values(**vals))
+        else:
+            c.execute(insert(LN).values(carrier=carrier, period=period, line_key=key, **vals))
+    _bust(carrier, period)
+    return {"ok": True}
+
+
+@router.post("/api/logistics-review/carrier-points")
+async def review_carrier_points(request: Request):
+    """供应商复核要点（一家一段，挂逐笔复核页顶部：顺丰按重量、丰源按件数箱…）。不分月，不受锁月限制。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, points = (b.get("carrier") or "").strip(), (b.get("points") or "").strip()
+    if not carrier:
+        return JSONResponse({"ok": False, "msg": "缺承运商"}, status_code=400)
+    with db._engine.begin() as c:
+        ex = c.execute(select(CP.c.id).where(CP.c.carrier == carrier)).scalar()
+        vals = dict(points=points, updated_by=_uname(u), updated_at=_now())
+        if ex:
+            c.execute(update(CP).where(CP.c.id == ex).values(**vals))
+        else:
+            c.execute(insert(CP).values(carrier=carrier, **vals))
+    for k in [k for k in _ACCR_CACHE if k[0] == "lines" and k[1] == carrier]:
+        _ACCR_CACHE.pop(k, None)
+    return {"ok": True}
+
+
+@router.post("/api/logistics-review/sign")
+async def review_sign_month(request: Request):
+    """确认通过→登记已复核：整月一家一次，存复核人/时间/结论快照；登记后当月归类与备注锁定，总表显示已复核。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period, note = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("note") or "").strip()
+    if not carrier or not period:
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期"}, status_code=400)
+    if _signed(carrier, period):
+        return JSONResponse({"ok": False, "msg": "本月已登记，无需重复"}, status_code=409)
+    L = _build_lines(request, carrier, period)
+    snap = {k: L.get(k) for k in ("accr_total", "bill_total", "diff_total", "n_unexplained", "bill_src")}
+    rec = dict(carrier=carrier, period=period, status="signed", reviewer=_uname(u), signed_at=_now(), note=note,
+               snap_json=json.dumps(snap, ensure_ascii=False))
+    with db._engine.begin() as c:
+        c.execute(insert(SG).values(**rec))
+    _bust(carrier, period)
+    return {"ok": True, "signed": rec}
+
+
+@router.post("/api/logistics-review/unsign")
+async def review_unsign_month(request: Request):
+    """撤销复核登记（要改归类/备注时先撤销）。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period = (b.get("carrier") or "").strip(), (b.get("period") or "").strip()
+    with db._engine.begin() as c:
+        c.execute(delete(SG).where((SG.c.carrier == carrier) & (SG.c.period == period)))
+    _bust(carrier, period)
     return {"ok": True}
 
 
@@ -1307,71 +1578,77 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     from urllib.parse import quote
     HFONT = Font(bold=True, color="FFFFFF"); HFILL = PatternFill("solid", fgColor="1F6E8C")
     wb = Workbook()
-    # sheet1 复核结论：金蝶2241计提(含税) vs 账单，按主体×费用类型；不上凭证号。做成可直接打印
-    recon = _build_recon(request, carrier, period)
-    ws = wb.active; ws.title = "复核结论"
-    acc_t = recon.get("accr_total") or 0
-    bill_t = recon.get("bill_total") or 0
+    # sheet1 复核表（可直接打印）：逐笔计提为主线 主体/费用类型/产品线/产品类型/部门/凭证号/计提含税/税率/账单/差异/差异解释
+    L = _build_lines(request, carrier, period)
+    ws = wb.active; ws.title = "复核表"
+    acc_t = L.get("accr_total") or 0
+    bill_t = L.get("bill_total") or 0
     dif_t = round(acc_t - bill_t, 2)
-    NCOL = 7
+    NCOL = 11
     thin = Side(style="thin", color="B8C4CC")
     BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
     center = Alignment(horizontal="center", vertical="center")
-    left = Alignment(horizontal="left", vertical="center")
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
     right = Alignment(horizontal="right", vertical="center")
     RED = Font(color="B23B2E", bold=True); GREEN = Font(color="2E7D57", bold=True)
-    # 标题行
-    ws.merge_cells("A1:G1")
-    t = ws.cell(1, 1, "物流账单复核结论  ·  %s  ·  %s" % (carrier, period))
+    sg = L.get("signed") or {}
+    ws.merge_cells("A1:K1")
+    t = ws.cell(1, 1, "物流账单复核表  ·  %s  ·  %s" % (carrier, period))
     t.font = Font(bold=True, size=15, color="1B2733"); t.alignment = center
     ws.row_dimensions[1].height = 26
-    # 汇总行
-    ws.merge_cells("A2:C2")
-    ws.cell(2, 1, "计提合计 %s   |   账单合计 %s   |   差异 %s%s" % (
-        f"{acc_t:,.2f}", f"{bill_t:,.2f}", f"{dif_t:,.2f}", "（对平）" if abs(dif_t) < 0.01 else "")).alignment = left
-    ws.cell(2, 1).font = Font(bold=True, color="1F6E8C")
-    ws.row_dimensions[2].height = 20
-    # 表头
-    ccols = ["主体", "费用类型", "业务线/产品维度", "计提金额", "账单金额", "费比", "差异"]
-    ws.append([None] * NCOL)   # row3 空
-    ws.append(ccols)           # row4 表头
-    HROW = 4
-    for c in ws[HROW]:
-        c.font = HFONT; c.fill = HFILL; c.alignment = center; c.border = BORDER
-    # 数据行
-    for g in recon.get("groups", []):
-        bizs = "、".join(dict.fromkeys(ln.get("bizline") for ln in (g.get("lines") or []) if ln.get("bizline")))
-        ws.append([g.get("subject"), g.get("fee_type"), bizs, g.get("accr_amt"), g.get("bill_amt"),
-                   (round(g.get("ratio") * 100, 2) if g.get("ratio") is not None else None), g.get("diff")])
-    ws.append(["合计", None, None, acc_t, bill_t, None, dif_t])
+    ws.merge_cells("A2:K2")
+    st = ("已复核  复核人 %s  %s" % (sg.get("reviewer") or "", sg.get("signed_at") or "")) if sg else "待复核"
+    ws.cell(2, 1, "复核状态：%s    |    计提合计 %s    |    账单合计 %s    |    差异 %s%s" % (
+        st, f"{acc_t:,.2f}", f"{bill_t:,.2f}", f"{dif_t:,.2f}", "（对平）" if abs(dif_t) < 0.01 else "")
+    ).alignment = Alignment(horizontal="left", vertical="center")
+    ws.cell(2, 1).font = Font(bold=True, color="1F6E8C"); ws.row_dimensions[2].height = 20
+    ws.merge_cells("A3:K3")
+    ws.cell(3, 1, "复核要点：%s" % (L.get("points") or "（未填写）")).alignment = left
+    ws.row_dimensions[3].height = 34
+    ws.append([None] * NCOL)
+    ws.append(["主体", "费用类型", "产品线", "产品类型", "部门", "凭证号", "计提金额(含税)", "税率", "账单金额", "差异", "备注·差异解释"])
+    HROW = 5
+    for hc0 in ws[HROW]:
+        hc0.font = HFONT; hc0.fill = HFILL; hc0.alignment = center; hc0.border = BORDER
+    gt_rows = []
+    for r in L.get("rows", []):
+        if r.get("kind") == "gtotal":
+            ws.append(["%s · %s 小计" % (r.get("subject"), r.get("fee_type")), None, None, None, None, None,
+                       r.get("amt"), None, r.get("bill"), r.get("diff"), None])
+            gt_rows.append(ws.max_row)
+            continue
+        biz = r.get("biz") or ""
+        if r.get("bill_biz"):
+            biz = "%s（账单:%s）" % (biz, r["bill_biz"])
+        ws.append([r.get("subject"), r.get("fee_type"), biz, r.get("proj") or None, r.get("dept") or None, r.get("vno") or None,
+                   r.get("amt"), r.get("tax_rate"), r.get("bill"), r.get("diff"), r.get("note") or None])
+    ws.append(["合计", None, None, None, None, None, acc_t, None, bill_t, dif_t, None])
     LAST = ws.max_row
-    # 统一样式：边框、数字格式、费比%、差异红绿、合计行加粗底纹
-    for r in range(HROW + 1, LAST + 1):
-        is_total = (r == LAST)
+    for rr in range(HROW + 1, LAST + 1):
+        is_total = (rr == LAST); is_gt = rr in gt_rows
         for cc in range(1, NCOL + 1):
-            cell = ws.cell(r, cc)
-            cell.border = BORDER
-            if cc in (4, 5, 7):
+            cell = ws.cell(rr, cc); cell.border = BORDER
+            if cc in (7, 9, 10):
                 cell.number_format = "#,##0.00"; cell.alignment = right
-            elif cc == 6:
-                cell.number_format = "0.00\"%\""; cell.alignment = right
+            elif cc == 8:
+                cell.number_format = "0.0%"; cell.alignment = right
             else:
                 cell.alignment = left
             if is_total:
+                cell.font = Font(bold=True); cell.fill = PatternFill("solid", fgColor="E1EEF3")
+            elif is_gt:
                 cell.font = Font(bold=True); cell.fill = PatternFill("solid", fgColor="EDF2F5")
-        dv = ws.cell(r, 7).value
+        dv = ws.cell(rr, 10).value
         if isinstance(dv, (int, float)):
-            ws.cell(r, 7).font = GREEN if abs(dv) < 0.01 else RED
-        if is_total:
-            ws.cell(r, 7).font = (GREEN if abs(dif_t) < 0.01 else RED)
-    for i, w in enumerate([16, 13, 22, 14, 14, 9, 13], 1):
+            ws.cell(rr, 10).font = GREEN if abs(dv) < 0.01 else RED
+    for i, w in enumerate([13, 11, 16, 11, 13, 10, 14, 7, 14, 13, 30], 1):
         ws.column_dimensions[chr(64 + i)].width = w
-    ws.freeze_panes = "A5"
-    # 打印设置：纵向、按宽度缩放到1页、居中、重复表头、窄边距
-    ws.page_setup.orientation = "portrait"
+    ws.freeze_panes = "A6"
+    # 打印设置：横向(11列)、按宽缩放到1页、居中、重复表头、窄边距
+    ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_title_rows = "1:4"
+    ws.print_title_rows = "1:5"
     ws.print_options.horizontalCentered = True
     ws.page_margins.left = ws.page_margins.right = 0.4
     ws.page_margins.top = ws.page_margins.bottom = 0.5
@@ -1505,7 +1782,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             raw = None
         if raw:
             with db._engine.connect() as c:
-                rv = {r[0]: (r[1], r[2], r[3]) for r in c.execute(select(
+                rv = {(r[0] or "").split("+")[0].strip(): (r[1], r[2], r[3]) for r in c.execute(select(
                     BL.c.doc_no, BL.c.kd_qty, BL.c.charge_wt, BL.c.qty_state).where(
                     (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()}
             docmode = {}   # 单据→计费方式(按重量/整车按箱/打托…)，取自复核结果
@@ -1530,7 +1807,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 rn = 1
                 for row in sh.get("rows", []):
                     rn += 1
-                    no = str(row[ki]).strip() if (ki is not None and ki < len(row) and row[ki] not in (None, "")) else ""
+                    # 一格多单号(换行/区间)按首单号匹配，与中间表 doc_no 用"+"连的首段一致
+                    no = re.split(r"[\n\-+]", str(row[ki]))[0].strip() if (ki is not None and ki < len(row) and row[ki] not in (None, "")) else ""
                     kq, cw, qs = rv.get(no, (None, None, None))
                     conv = round(cw / kq, 3) if (cw and kq) else None
                     diff = round((cw or 0) - (kq or 0), 2) if (no and (cw is not None or kq is not None)) else None
