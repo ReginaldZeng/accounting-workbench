@@ -607,10 +607,19 @@ def _eff_subject(r):
     return (str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
 
 
+_CANON_FEES = {"入库运费", "出库运费", "调拨运费", "退货运费"}
+
+
 def _eff_fee(r):
-    """账单费用类型(已归一)：人工覆盖(fee_ovr) 优先；否则按单号前缀推断(_fee_of，能把冷运运费/销售出库等归到出库)，
-    再归一到 入库/出库/调拨。不直接用账单原名 fee_item(顺丰=冷运运费 对不上计提出库)。"""
-    return _fee_norm(r.get("fee_ovr") or _fee_of(r.get("doc_no"), r.get("fee_item")))
+    """账单费用类型(已归一到 入库/出库/调拨/退货运费)，优先级：
+    ① 人工覆盖 fee_ovr；② 账单原费用名 fee_item 本就是规范类(采购入库/销售出库/调拨…)就直接用——
+       也让老机制里直接改到 fee_item 的归类生效；③ 否则(顺丰=冷运运费 这类非规范名)按单号前缀 _fee_of 归口。"""
+    if r.get("fee_ovr"):
+        return _fee_norm(r["fee_ovr"])
+    fn = _fee_norm(r.get("fee_item"))
+    if fn in _CANON_FEES:
+        return fn
+    return _fee_norm(_fee_of(r.get("doc_no"), r.get("fee_item")))
 
 
 def _box_reg(spec):
