@@ -263,7 +263,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   </tr>
                 </tbody>
               </table></div>
-              <div className="ovfoot">计提＝金蝶2241本期计提，业务线取核算维度「产品分类」(山姆/kikiherb由产品项目补充)；费用不含税已按毛率 {accr.gross_factor} 毛成含税(＋暂估进项税 {money(accr.tax)})，与账单同口径 → 合计对平、逐组差异才有意义。差异＝计提含税−账单。{accr.sales_ready === false ? '（单据较多，费比暂略）' : ''}</div>
+              <div className="ovfoot">计提＝金蝶2241本期计提，业务线取核算维度「产品分类」(山姆/kikiherb由产品项目补充)；费用不含税已按毛率 {accr.gross_factor} 毛成含税(＋暂估进项税 {money(accr.tax)})，与账单同口径 → 合计对平、逐组差异才有意义。差异＝计提含税−账单。{accr.bill_src === 'accrual' ? '账单取费用项汇总行（月结清单口径，逐单只作支撑）。' : ''}{accr.sales_ready === false ? '（单据较多，费比暂略）' : ''}</div>
             </div>
           })()}
 

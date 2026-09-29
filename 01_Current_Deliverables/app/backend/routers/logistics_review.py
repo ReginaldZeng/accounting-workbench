@@ -587,6 +587,8 @@ def _fee_norm(s):
     """把账单侧(采购入库运费/销售出库运费/调拨运费…)与计提侧(入库运费/出库运费…)费用名归一到同一类，
     才能主体×费用类型对上账。识别不了的原样返回。"""
     s = str(s or "").strip()
+    if "仓储" in s:
+        return "仓储费"
     if "入库" in s:
         return "入库运费"
     if "出库" in s:
@@ -607,18 +609,23 @@ def _eff_subject(r):
     return (str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
 
 
-_CANON_FEES = {"入库运费", "出库运费", "调拨运费", "退货运费"}
+_CANON_FEES = {"入库运费", "出库运费", "调拨运费", "退货运费", "仓储费"}
 
 
 def _eff_fee(r):
-    """账单费用类型(已归一到 入库/出库/调拨/退货运费)，优先级：
-    ① 人工覆盖 fee_ovr；② 账单原费用名 fee_item 本就是规范类(采购入库/销售出库/调拨…)就直接用——
-       也让老机制里直接改到 fee_item 的归类生效；③ 否则(顺丰=冷运运费 这类非规范名)按单号前缀 _fee_of 归口。"""
+    """账单费用类型(已归一到 入库/出库/调拨/退货运费/仓储费)，优先级：
+    ① 人工覆盖 fee_ovr；② 账单原费用名 fee_item 本就是规范类(采购入库/销售出库/调拨/仓储…)就直接用——
+       也让老机制里直接改到 fee_item 的归类生效；③ 费用标注 annot 带单据类型(销售出库单-电商/成品仓储-电商)，
+       汇总行(无单号)靠它归口——迅鸽 第三方快递费/B2C操作费/物料费 都标"销售出库单"→出库运费；
+    ④ 否则(顺丰=冷运运费 这类非规范名)按单号前缀 _fee_of 归口。"""
     if r.get("fee_ovr"):
         return _fee_norm(r["fee_ovr"])
     fn = _fee_norm(r.get("fee_item"))
     if fn in _CANON_FEES:
         return fn
+    fa = _fee_norm(r.get("annot"))
+    if fa in _CANON_FEES:
+        return fa
     return _fee_norm(_fee_of(r.get("doc_no"), r.get("fee_item")))
 
 
@@ -882,18 +889,23 @@ def _build_recon(request, carrier, period):
     feelines = [a for a in lines if a.get("subject") != "—"]
     feetot = sum(a["amt"] for a in feelines) or 0.0
     gf = (atot / feetot) if feetot else 1.0            # 含税毛率：费用行×gf=含税，Σ=计提含税合计
-    # 账单金额(含税)：直接汇总账单明细，便宜、无需金蝶
+    # 账单金额(含税)：便宜、无需金蝶。**优先取费用项汇总行(grain=accrual，迅鸽月结清单那种，主体干净费用项全)，
+    # 没有汇总行才按逐单明细(detail)汇总**——与顶栏 total_bill 同口径；逐单只是支撑，像迅鸽的操作费/物料费没有逐单。
     with db._engine.connect() as c:
-        brows = [dict(r) for r in c.execute(select(
-            BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
-            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+        allrows = [dict(r) for r in c.execute(select(
+            BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
+    acc_rows = [r for r in allrows if r.get("grain") == "accrual" and (r.get("amount") or 0)]
+    brows = acc_rows if acc_rows else [r for r in allrows if r.get("grain") == "detail"]
+    bill_src = "accrual" if acc_rows else "detail"
     bill_by = {}
     for r in brows:
         k = (_eff_subject(r), _eff_fee(r))
         bill_by[k] = bill_by.get(k, 0.0) + float(r.get("amount") or 0)
-    # 销售额(费比)：需金蝶物料，仅单据不多(≤400)时取，避免迅鸽这类几千单拖垮
+    # 销售额(费比)：需金蝶物料，仅逐单不多(≤400)时取，避免迅鸽这类几千单拖垮(按 detail 单数判，别被5条汇总行骗)
     sales_by = {}
-    sales_ready = len(brows) <= 400
+    n_detail = sum(1 for r in allrows if r.get("grain") == "detail")
+    sales_ready = n_detail <= 400
     if sales_ready:
         res = review_result(request, carrier=carrier, period=period, group="all", page=1, size=1000000, q="")
         if not isinstance(res, JSONResponse):
@@ -925,7 +937,7 @@ def _build_recon(request, carrier, period):
                        "diff": round(accr_amt - bamt, 2)})
     return {"ok": True, "carrier": carrier, "period": period, "groups": groups, "accr_total": round(atot, 2),
             "bill_total": round(sum(g["bill_amt"] for g in groups), 2),
-            "tax": round(tax, 2), "gross_factor": round(gf, 4), "sales_ready": sales_ready}
+            "tax": round(tax, 2), "gross_factor": round(gf, 4), "sales_ready": sales_ready, "bill_src": bill_src}
 
 
 @router.get("/api/logistics-review/result")
