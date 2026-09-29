@@ -1265,30 +1265,80 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     if isinstance(res, JSONResponse):
         return res
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.worksheet.properties import PageSetupProperties
     from io import BytesIO
     from urllib.parse import quote
     HFONT = Font(bold=True, color="FFFFFF"); HFILL = PatternFill("solid", fgColor="1F6E8C")
     wb = Workbook()
-    # sheet1 复核结论：金蝶2241计提(含税) vs 账单，按主体×费用类型；不上凭证号
+    # sheet1 复核结论：金蝶2241计提(含税) vs 账单，按主体×费用类型；不上凭证号。做成可直接打印
     recon = _build_recon(request, carrier, period)
     ws = wb.active; ws.title = "复核结论"
-    ws.append(["承运商", carrier, "账期", period, "计提合计", recon.get("accr_total"),
-               "账单合计", recon.get("bill_total"), "差异", round((recon.get("accr_total") or 0) - (recon.get("bill_total") or 0), 2)])
-    ws.append([])
+    acc_t = recon.get("accr_total") or 0
+    bill_t = recon.get("bill_total") or 0
+    dif_t = round(acc_t - bill_t, 2)
+    NCOL = 7
+    thin = Side(style="thin", color="B8C4CC")
+    BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+    right = Alignment(horizontal="right", vertical="center")
+    RED = Font(color="B23B2E", bold=True); GREEN = Font(color="2E7D57", bold=True)
+    # 标题行
+    ws.merge_cells("A1:G1")
+    t = ws.cell(1, 1, "物流账单复核结论  ·  %s  ·  %s" % (carrier, period))
+    t.font = Font(bold=True, size=15, color="1B2733"); t.alignment = center
+    ws.row_dimensions[1].height = 26
+    # 汇总行
+    ws.merge_cells("A2:C2")
+    ws.cell(2, 1, "计提合计 %s   |   账单合计 %s   |   差异 %s%s" % (
+        f"{acc_t:,.2f}", f"{bill_t:,.2f}", f"{dif_t:,.2f}", "（对平）" if abs(dif_t) < 0.01 else "")).alignment = left
+    ws.cell(2, 1).font = Font(bold=True, color="1F6E8C")
+    ws.row_dimensions[2].height = 20
+    # 表头
     ccols = ["主体", "费用类型", "业务线/产品维度", "计提金额", "账单金额", "费比", "差异"]
-    ws.append(ccols)
-    for c in ws[3]:
-        c.font = HFONT; c.fill = HFILL
+    ws.append([None] * NCOL)   # row3 空
+    ws.append(ccols)           # row4 表头
+    HROW = 4
+    for c in ws[HROW]:
+        c.font = HFONT; c.fill = HFILL; c.alignment = center; c.border = BORDER
+    # 数据行
     for g in recon.get("groups", []):
         bizs = "、".join(dict.fromkeys(ln.get("bizline") for ln in (g.get("lines") or []) if ln.get("bizline")))
         ws.append([g.get("subject"), g.get("fee_type"), bizs, g.get("accr_amt"), g.get("bill_amt"),
                    (round(g.get("ratio") * 100, 2) if g.get("ratio") is not None else None), g.get("diff")])
-    ws.append(["合计", "", "", recon.get("accr_total"), recon.get("bill_total"), None,
-               round((recon.get("accr_total") or 0) - (recon.get("bill_total") or 0), 2)])
-    ws[ws.max_row][0].font = Font(bold=True)
-    for i, w in enumerate([14, 12, 22, 13, 13, 9, 12], 1):
+    ws.append(["合计", None, None, acc_t, bill_t, None, dif_t])
+    LAST = ws.max_row
+    # 统一样式：边框、数字格式、费比%、差异红绿、合计行加粗底纹
+    for r in range(HROW + 1, LAST + 1):
+        is_total = (r == LAST)
+        for cc in range(1, NCOL + 1):
+            cell = ws.cell(r, cc)
+            cell.border = BORDER
+            if cc in (4, 5, 7):
+                cell.number_format = "#,##0.00"; cell.alignment = right
+            elif cc == 6:
+                cell.number_format = "0.00\"%\""; cell.alignment = right
+            else:
+                cell.alignment = left
+            if is_total:
+                cell.font = Font(bold=True); cell.fill = PatternFill("solid", fgColor="EDF2F5")
+        dv = ws.cell(r, 7).value
+        if isinstance(dv, (int, float)):
+            ws.cell(r, 7).font = GREEN if abs(dv) < 0.01 else RED
+        if is_total:
+            ws.cell(r, 7).font = (GREEN if abs(dif_t) < 0.01 else RED)
+    for i, w in enumerate([16, 13, 22, 14, 14, 9, 13], 1):
         ws.column_dimensions[chr(64 + i)].width = w
+    ws.freeze_panes = "A5"
+    # 打印设置：纵向、按宽度缩放到1页、居中、重复表头、窄边距
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.print_title_rows = "1:4"
+    ws.print_options.horizontalCentered = True
+    ws.page_margins.left = ws.page_margins.right = 0.4
+    ws.page_margins.top = ws.page_margins.bottom = 0.5
     # sheet2 复核明细
     ws2 = wb.create_sheet("复核明细")
     from openpyxl.utils import get_column_letter
