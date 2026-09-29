@@ -22,7 +22,7 @@ bill_lines = Table(
     Column("grain", String(10)),           # 'detail' 对账粒度 / 'accrual' 计提粒度
     Column("review_mode", String(10)),     # 复核模式：'audit' 核价核量（有账单/合同价）/ 'register' 登记免核（议价/报销：货拉拉等）
     Column("subject", String(30)),         # 费用主体简称
-    Column("doc_no", String(80)),          # 金蝶单号（一行多单以 + 连接）
+    Column("doc_no", String(300)),         # 金蝶单号（一行多单以 + 连接；物流部一格写7单/27单区间，80字不够，加宽到300）
     Column("annot", String(60)),           # 费用标注（规范词表）
     Column("fee", String(40)),             # 翻译后费用归属
     Column("bizline", String(40)),         # 业务线
@@ -145,3 +145,10 @@ def migrate_cols(engine):
         for col, typ in need:
             if col not in have:
                 c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN %s %s" % (col, typ)))
+        # doc_no 加宽到 300：物流部一格写多个金蝶单号(换行/区间)，按"+"连起来 80 字不够(7单=83字、27单区间=296字)。
+        # MySQL 用 MODIFY；SQLite 不校验 VARCHAR 长度，不用改。
+        if "mysql" in drv:
+            ln = c.execute(text("SELECT CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS "
+                                "WHERE TABLE_NAME='logistics_bill_lines' AND COLUMN_NAME='doc_no'")).scalar()
+            if ln is not None and int(ln) < 300:
+                c.execute(text("ALTER TABLE logistics_bill_lines MODIFY doc_no VARCHAR(300)"))
