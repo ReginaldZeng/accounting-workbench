@@ -1472,19 +1472,37 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 rv = {r[0]: (r[1], r[2], r[3]) for r in c.execute(select(
                     BL.c.doc_no, BL.c.kd_qty, BL.c.charge_wt, BL.c.qty_state).where(
                     (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()}
+            docmode = {}   # 单据→计费方式(按重量/整车按箱/打托…)，取自复核结果
+            for dd in res.get("detail", []):
+                dn = dd.get("doc_no")
+                if dn and dn not in docmode:
+                    docmode[dn] = dd.get("mode_cn")
+            addcols = ["计费类别", "ERP重量", "账单数量", "差异", "结论"]   # 单据运费复核数据，只接右侧、单独配色
+            AFILL = PatternFill("solid", fgColor="B06A12")      # 追加列表头：琥珀底
+            ALIGHT = PatternFill("solid", fgColor="FBF0DA")     # 追加列数据：淡琥珀底
+            acenter = Alignment(horizontal="center", vertical="center")
             for sh in raw.get("sheets", []):
                 title = ("原账单-" + sh.get("name", ""))[:31]
                 ws3 = wb.create_sheet(title)
-                ws3.append(list(sh.get("header", [])) + ["金蝶出库重量kg", "换算系数(账单/金蝶)", "核量结论"])
-                for c in ws3[1]:
-                    c.font = HFONT; c.fill = HFILL
+                hdr = list(sh.get("header", []))
+                base_n = len(hdr)
+                ws3.append(hdr + addcols)
+                for j in range(len(addcols)):   # 仅追加列表头配色，原始表头不动(保留原格式)
+                    cc = ws3.cell(1, base_n + 1 + j)
+                    cc.font = HFONT; cc.fill = AFILL; cc.alignment = acenter
                 ki = sh.get("kidx")
+                rn = 1
                 for row in sh.get("rows", []):
+                    rn += 1
                     no = str(row[ki]).strip() if (ki is not None and ki < len(row) and row[ki] not in (None, "")) else ""
                     kq, cw, qs = rv.get(no, (None, None, None))
                     conv = round(cw / kq, 3) if (cw and kq) else None
-                    concl = "" if not no else ("重量一致" if qs == "ok" else "顺丰多报" if (conv and conv > 1) else "顺丰少报" if (conv and conv < 1) else "待核")
-                    ws3.append(list(row) + [kq, conv, concl])
+                    diff = round((cw or 0) - (kq or 0), 2) if (no and (cw is not None or kq is not None)) else None
+                    concl = "" if not no else ("一致" if qs == "ok" else "%s多报" % carrier if (conv and conv > 1)
+                                               else "%s少报" % carrier if (conv and conv < 1) else "待核")
+                    ws3.append(list(row) + [docmode.get(no), kq, cw, diff, concl])
+                    for j in range(len(addcols)):   # 仅追加列数据配淡底，原始列不动
+                        ws3.cell(rn, base_n + 1 + j).fill = ALIGHT
                 ws3.freeze_panes = "A2"
     bio = BytesIO(); wb.save(bio)
     fn = "%s_%s_复核结果.xlsx" % (carrier, period)
