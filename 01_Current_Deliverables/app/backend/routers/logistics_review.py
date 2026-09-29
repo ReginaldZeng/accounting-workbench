@@ -583,6 +583,25 @@ def _fee_of(doc_no, fallback):
     return _FEE_BY_PREFIX.get(pre, fallback or "运输费")
 
 
+def _fee_norm(s):
+    """把账单侧(采购入库运费/销售出库运费/调拨运费…)与计提侧(入库运费/出库运费…)费用名归一到同一类，
+    才能主体×费用类型对上账。识别不了的原样返回。"""
+    s = str(s or "").strip()
+    if "入库" in s:
+        return "入库运费"
+    if "出库" in s:
+        return "出库运费"
+    if "调拨" in s or "调入" in s or "调出" in s:
+        return "调拨运费"
+    if "退货" in s or "退料" in s:
+        return "退货运费"
+    return s or "运费"
+
+
+def _is_outbound_fee(fee):
+    return "出库" in str(fee or "")
+
+
 def _box_reg(spec):
     """从规格型号解析箱规（N袋/箱）。返回 int 或 None。"""
     m = re.search(r"(\d+)\s*袋/箱", str(spec or ""))
@@ -785,6 +804,7 @@ def _accr_lines(carrier, period, carrier_full=None):
         cf = "FYear=%d and FPeriod=%d and FDEBIT>0 and FEXPLANATION like '%%计提%%%s%%'" % (int(y), int(m), carrier)
         rows = kc._query(s, conf, "GL_VOUCHER",
                          [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"),
+                          ("FBillNo", "凭证号"),
                           ("FDetailID.FF100010.FDataValue", "产品分类"), ("FDetailID.FF100006.FDataValue", "产品项目"),
                           ("FDetailID.FFLEX9.FName", "费用项目")],
                          cf + " and (FAccountID.FNumber like '6%%' or FAccountID.FNumber like '5%%')")
@@ -795,6 +815,7 @@ def _accr_lines(carrier, period, carrier_full=None):
     orgs = db.list_orgs() or []
     b2s = {o.get("full_name"): o.get("short_name") for o in orgs if o.get("full_name")}
     agg = {}
+    vnos = {}
     for r in rows:
         amt = float(r.get("借") or 0)
         if not amt:
@@ -808,12 +829,78 @@ def _accr_lines(carrier, period, carrier_full=None):
             biz = "%s·%s" % (biz, proj) if cls else proj
         fee = str(r.get("费用项目") or "").strip() or "运费"
         agg[(subj, biz, fee)] = agg.get((subj, biz, fee), 0.0) + amt
-    out = [{"subject": k[0], "bizline": k[1], "fee": k[2], "label": "%s · %s" % (k[1], k[2]), "amt": round(v, 2)}
+        vn = str(r.get("凭证号") or "").strip()
+        if vn:
+            vnos.setdefault((subj, biz, fee), set()).add(vn)
+    out = [{"subject": k[0], "bizline": k[1], "fee": k[2], "fee_norm": _fee_norm(k[2]),
+            "label": "%s · %s" % (k[1], k[2]), "amt": round(v, 2),
+            "vno": "、".join(sorted(vnos.get(k, [])))}
            for k, v in sorted(agg.items())]
     tax = round(sum(float(x.get("借") or 0) for x in tx), 2)
     if tax:
-        out.append({"subject": "—", "bizline": "进项税", "fee": "暂估进项税", "label": "暂估进项税", "amt": tax})
+        out.append({"subject": "—", "bizline": "进项税", "fee": "暂估进项税", "fee_norm": "暂估进项税",
+                    "label": "暂估进项税", "amt": tax, "vno": ""})
     return out, round(sum(x["amt"] for x in out), 2)
+
+
+def _carrier_full(carrier):
+    sup = db.list_logi_suppliers() or []
+    return next((x.get("full") for x in sup if x.get("short") == carrier), None)
+
+
+def _build_recon(request, carrier, period):
+    """复核结论：金蝶2241计提 vs 账单，按【主体×费用类型】归口对账，业务线是计提侧明细。
+    计提侧费用不含税(6*/5*)按毛率等比毛成含税(＋暂估进项税)，与账单(含税)同口径，故合计对平、逐组差异才有意义。
+    返回 {groups:[{subject,fee_type,lines:[{bizline,vno,amt}],accr_amt,bill_amt,sales,ratio,diff}], accr_total,bill_total,tax}。"""
+    lines, atot = _accr_lines(carrier, period, _carrier_full(carrier))
+    tax = next((a["amt"] for a in lines if a.get("subject") == "—"), 0.0)
+    feelines = [a for a in lines if a.get("subject") != "—"]
+    feetot = sum(a["amt"] for a in feelines) or 0.0
+    gf = (atot / feetot) if feetot else 1.0            # 含税毛率：费用行×gf=含税，Σ=计提含税合计
+    # 账单金额(含税)：直接汇总账单明细，便宜、无需金蝶
+    with db._engine.connect() as c:
+        brows = [dict(r) for r in c.execute(select(
+            BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.amount).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+    bill_by = {}
+    for r in brows:
+        k = (str(r.get("subject") or "").strip(), _fee_norm(_fee_of(r.get("doc_no"), r.get("fee_item"))))
+        bill_by[k] = bill_by.get(k, 0.0) + float(r.get("amount") or 0)
+    # 销售额(费比)：需金蝶物料，仅单据不多(≤400)时取，避免迅鸽这类几千单拖垮
+    sales_by = {}
+    sales_ready = len(brows) <= 400
+    if sales_ready:
+        res = review_result(request, carrier=carrier, period=period, group="all", page=1, size=1000000, q="")
+        if not isinstance(res, JSONResponse):
+            for d0 in res.get("detail", []):
+                if d0.get("sales") is None:
+                    continue
+                k = (str(d0.get("subject") or "").strip(), _fee_norm(d0.get("fee_item")))
+                sales_by[k] = sales_by.get(k, 0.0) + float(d0.get("sales") or 0)
+    # 计提按(主体,费用norm)归组，业务线明细(金额毛成含税)
+    accr_by = {}
+    for a in feelines:
+        k = (str(a["subject"]).strip(), a.get("fee_norm") or _fee_norm(a.get("fee")))
+        g = accr_by.setdefault(k, {"total": 0.0, "lines": []})
+        amt_tax = round((a["amt"] or 0) * gf, 2)
+        g["total"] += amt_tax
+        g["lines"].append({"bizline": a.get("bizline") or "（无业务线）", "vno": a.get("vno") or "", "amt": amt_tax})
+    keys = sorted(set(list(accr_by.keys()) + list(bill_by.keys())))
+    groups = []
+    for k in keys:
+        subj, fnorm = k
+        ag = accr_by.get(k, {"total": 0.0, "lines": []})
+        bamt = round(bill_by.get(k, 0.0), 2)
+        accr_amt = round(ag["total"], 2)
+        sales = round(sales_by[k], 2) if k in sales_by else None
+        ratio = round(bamt / sales, 4) if (sales and _is_outbound_fee(fnorm)) else None
+        groups.append({"subject": subj, "fee_type": fnorm,
+                       "lines": ag["lines"] or [{"bizline": "（无计提）", "vno": "", "amt": None}],
+                       "accr_amt": accr_amt, "bill_amt": bamt, "sales": sales, "ratio": ratio,
+                       "diff": round(accr_amt - bamt, 2)})
+    return {"ok": True, "groups": groups, "accr_total": round(atot, 2),
+            "bill_total": round(sum(g["bill_amt"] for g in groups), 2),
+            "tax": round(tax, 2), "gross_factor": round(gf, 4), "sales_ready": sales_ready}
 
 
 @router.get("/api/logistics-review/result")
@@ -1089,12 +1176,10 @@ def review_accrual(request: Request, carrier: str = "", period: str = ""):
     k = (carrier, period)
     c = _ACCR_CACHE.get(k)
     if c and _t.time() - c[2] < 1800:
-        return {"ok": True, "accr_lines": c[0], "accr_total": c[1], "cached": True}
-    sup = db.list_logi_suppliers() or []
-    cfull = next((x.get("full") for x in sup if x.get("short") == carrier), None)
-    lines, total = _accr_lines(carrier, period, cfull)
-    _ACCR_CACHE[k] = (lines, total, _t.time())
-    return {"ok": True, "accr_lines": lines, "accr_total": total}
+        return {**c[0], "cached": True}
+    recon = _build_recon(request, carrier, period)
+    _ACCR_CACHE[k] = (recon, None, _t.time())
+    return recon
 
 
 @router.post("/api/logistics-review/doc-note")
@@ -1128,18 +1213,24 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     from urllib.parse import quote
     HFONT = Font(bold=True, color="FFFFFF"); HFILL = PatternFill("solid", fgColor="1F6E8C")
     wb = Workbook()
-    # sheet1 费用项汇总
-    ws = wb.active; ws.title = "费用项汇总"
-    ws.append(["承运商", carrier, "账期", period, "账单合计", res.get("total_bill")])
+    # sheet1 复核结论：金蝶2241计提(含税) vs 账单，按主体×费用类型；不上凭证号
+    recon = _build_recon(request, carrier, period)
+    ws = wb.active; ws.title = "复核结论"
+    ws.append(["承运商", carrier, "账期", period, "计提合计", recon.get("accr_total"),
+               "账单合计", recon.get("bill_total"), "差异", round((recon.get("accr_total") or 0) - (recon.get("bill_total") or 0), 2)])
     ws.append([])
-    sumcols = ["费用项", "账单额", "标准额(核价)", "差", "核价·一致", "多收", "缺价", "核量·一致", "不符", "查无"]
-    ws.append(sumcols)
+    ccols = ["主体", "费用类型", "业务线/产品维度", "计提金额", "账单金额", "费比", "差异"]
+    ws.append(ccols)
     for c in ws[3]:
         c.font = HFONT; c.fill = HFILL
-    for f in res.get("summary", []):
-        ws.append([f.get("fee_item"), f.get("bill"), f.get("std"), f.get("diff"),
-                   f.get("price_ok"), f.get("over"), f.get("gap"), f.get("qty_ok"), f.get("qtydiff"), f.get("miss")])
-    for i, w in enumerate([16, 12, 12, 10, 9, 7, 7, 9, 7, 7], 1):
+    for g in recon.get("groups", []):
+        bizs = "、".join(dict.fromkeys(ln.get("bizline") for ln in (g.get("lines") or []) if ln.get("bizline")))
+        ws.append([g.get("subject"), g.get("fee_type"), bizs, g.get("accr_amt"), g.get("bill_amt"),
+                   (round(g.get("ratio") * 100, 2) if g.get("ratio") is not None else None), g.get("diff")])
+    ws.append(["合计", "", "", recon.get("accr_total"), recon.get("bill_total"), None,
+               round((recon.get("accr_total") or 0) - (recon.get("bill_total") or 0), 2)])
+    ws[ws.max_row][0].font = Font(bold=True)
+    for i, w in enumerate([14, 12, 22, 13, 13, 9, 12], 1):
         ws.column_dimensions[chr(64 + i)].width = w
     # sheet2 复核明细
     ws2 = wb.create_sheet("复核明细")

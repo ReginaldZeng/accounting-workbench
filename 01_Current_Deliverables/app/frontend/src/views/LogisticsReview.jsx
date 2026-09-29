@@ -41,7 +41,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     if (mode !== 'detail' || !carrier || !d) return
     let alive = true; setAccr(null)
     const t = setTimeout(() => {
-      reviewAccrual(carrier, period).then(r => { if (alive) setAccr(r) }).catch(() => { if (alive) setAccr({ accr_lines: [], accr_total: 0 }) })
+      reviewAccrual(carrier, period).then(r => { if (alive) setAccr(r) }).catch(() => { if (alive) setAccr({ groups: [], accr_total: 0, bill_total: 0 }) })
     }, 300)
     return () => { alive = false; clearTimeout(t) }
   }, [carrier, period, mode, d && d.carrier])
@@ -217,35 +217,41 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       </div>
 
       <div>
-          <div className="card">
-            <h3>费用项汇总 · 核价 × 核量</h3>
-            <div className="tw"><table>
-              <thead><tr><th>费用项</th><th className="num">账单额</th><th className="num">标准额</th><th className="num">差</th><th>核价</th><th>核量</th></tr></thead>
-              <tbody>{(d && d.summary || []).map((f, i) =>
-                <tr key={i}><td style={{ fontWeight: 600 }}>{f.fee_item}</td><td className="num">{money(f.bill)}</td>
-                  <td className="num">{f.std == null ? '—' : money(f.std)}</td><td className="num">{f.diff == null ? '?' : money(f.diff)}</td>
-                  <td><span className={'pill ' + (f.over ? 'bad' : f.gap ? 'warn' : 'ok')}>{f.price_ok}一致{f.over ? ` · ${f.over}多收` : ''}{f.gap ? ` · ${f.gap}缺价` : ''}</span></td>
-                  <td><span className={'pill ' + ((f.qtydiff || f.miss) ? 'warn' : 'neu')}>{f.qty_ok ? `一致${f.qty_ok}` : '—'}{f.qtydiff ? ` · ${f.qtydiff}不符` : ''}{f.miss ? ` · ${f.miss}查无` : ''}</span></td>
-                </tr>)}</tbody>
-            </table></div>
-          </div>
-
-          {accr && accr.accr_lines && accr.accr_lines.length > 0 && (() => {
-            const gap = (accr.accr_total || 0) - ((d && d.total_bill) || 0)
+          {accr && accr.groups && accr.groups.length > 0 && (() => {
+            const totA = accr.accr_total || 0, totB = accr.bill_total || 0, totD = totA - totB
             return <div className="card">
-              <h3>计提对账 · 金蝶 2241 计提(按业务线) vs 账单</h3>
-              <div className="tw"><table>
-                <thead><tr><th>主体</th><th>计提业务线 / 费用类型</th><th className="num">计提额</th></tr></thead>
+              <h3>复核结论 · 金蝶2241计提(含税) vs 账单 · 按主体×费用类型</h3>
+              <div className="tw"><table className="mtbl">
+                <thead><tr>
+                  <th>主体</th><th>费用类型</th><th>业务线/产品维度</th><th>凭证号</th>
+                  <th className="num">计提金额</th><th className="num">账单金额</th><th className="num">费比</th><th className="num">差异</th>
+                </tr></thead>
                 <tbody>
-                  {accr.accr_lines.map((a, i) => <tr key={i}><td>{a.subject}</td><td>{a.label}</td><td className="num">{money(a.amt)}</td></tr>)}
+                  {accr.groups.map((g, gi) => {
+                    const ls = (g.lines && g.lines.length) ? g.lines : [{ bizline: '（无计提）', vno: '', amt: null }]
+                    const band = gi % 2 === 1 ? ' band' : ''
+                    const bad = Math.abs(g.diff) >= 0.01
+                    return ls.map((ln, li) =>
+                      <tr key={gi + '-' + li} className={(li === 0 ? 'docstart' : '') + band}>
+                        {li === 0 && <td rowSpan={ls.length}>{g.subject}</td>}
+                        {li === 0 && <td rowSpan={ls.length}>{g.fee_type}</td>}
+                        <td>{ln.bizline}</td>
+                        <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{ln.vno || <span className="dim">—</span>}</td>
+                        <td className="num">{ln.amt == null ? '—' : money(ln.amt)}</td>
+                        {li === 0 && <td rowSpan={ls.length} className="num">{money(g.bill_amt)}</td>}
+                        {li === 0 && <td rowSpan={ls.length} className="num">{g.ratio == null ? '—' : (g.ratio * 100).toFixed(2) + '%'}</td>}
+                        {li === 0 && <td rowSpan={ls.length} className="num" style={{ color: bad ? 'var(--bad)' : 'var(--ok)', fontWeight: 600 }}>{bad ? money(g.diff) : '0 · 平'}</td>}
+                      </tr>)
+                  })}
                   <tr style={{ fontWeight: 700, borderTop: '2px solid #CBD5DC' }}>
-                    <td>计提合计</td><td className="num" style={{ color: 'var(--accent)' }}>{money(accr.accr_total)}</td>
-                    <td className="num">账单合计 {money(d && d.total_bill)}</td></tr>
-                  <tr style={{ fontWeight: 700 }}><td colSpan="2">差异（计提 − 账单）</td>
-                    <td className="num" style={{ color: Math.abs(gap) < 0.01 ? 'var(--ok)' : 'var(--bad)' }}>{Math.abs(gap) < 0.01 ? '0 · 对平' : money(gap)}</td></tr>
+                    <td colSpan="4">合计</td>
+                    <td className="num" style={{ color: 'var(--accent)' }}>{money(totA)}</td>
+                    <td className="num">{money(totB)}</td><td className="num">—</td>
+                    <td className="num" style={{ color: Math.abs(totD) < 0.01 ? 'var(--ok)' : 'var(--bad)' }}>{Math.abs(totD) < 0.01 ? '0 · 对平' : money(totD)}</td>
+                  </tr>
                 </tbody>
               </table></div>
-              <div className="ovfoot">计提＝金蝶 2241 本期计提，业务线从核算维度「产品分类」读（山姆/kikiherb 由产品项目补充）；含税＝费用+暂估进项税。总额对平即计提无缺漏。</div>
+              <div className="ovfoot">计提＝金蝶2241本期计提，业务线取核算维度「产品分类」(山姆/kikiherb由产品项目补充)；费用不含税已按毛率 {accr.gross_factor} 毛成含税(＋暂估进项税 {money(accr.tax)})，与账单同口径 → 合计对平、逐组差异才有意义。差异＝计提含税−账单。{accr.sales_ready === false ? '（单据较多，费比暂略）' : ''}</div>
             </div>
           })()}
 
