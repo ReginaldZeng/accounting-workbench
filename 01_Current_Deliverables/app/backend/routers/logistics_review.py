@@ -1153,7 +1153,7 @@ def _box_docs(rsub, carrier):
     by_form = {}
     for r in rsub:
         d0 = (r.get("doc_no") or "").split("+")[0]
-        if not d0:
+        if not d0 or d0 == "无单据":
             continue
         pre = "".join(ch for ch in d0 if ch.isalpha())
         for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
@@ -1168,6 +1168,8 @@ def _box_docs(rsub, carrier):
     docs = []
     for r in rsub:
         d0 = (r.get("doc_no") or "").split("+")[0]
+        if d0 == "无单据":          # 迅鸽退货/仓储/卸货行单号列写的字面量"无单据"，与空单号同样按无单据处理
+            d0 = ""
         lines = mats.get(d0) or []
         billcnt = float(r.get("qty") or 0)
         fee = float(r.get("amount") or 0)
