@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-09-29 Author:Claude Fable 5.1 Version:V2.691
+// [Change Log] Date:2026-09-29 Author:Claude Fable 5.1 Version:V2.692
 // 物流账单复核台（三步流）：总表(承运商×主体，计提出发)
 //   → ① 逐笔计提复核：顶部结论格；复核要点一行(点编辑展开)；表按「主体·费用类型」分组，组头即小计；
 //        每笔=产品线(产品类型·部门小字)/凭证号/含税计提(税率标签)/账单/差异/差异解释，有差异未解释的行淡红底
@@ -14,7 +14,7 @@ const isZero = d => d != null && Math.abs(d) < 0.01
 const dcls = d => (d == null ? '' : isZero(d) ? 'diffok' : 'diffbad')
 const dtxt = d => (d == null ? '—' : isZero(d) ? '0 · 平' : (d > 0 ? '+' : '') + money(d))
 const PS = { ok: ['通过', 'ok'], over: ['多收', 'bad'], under: ['账单少收', 'neu'], free: ['账单未收·我方有利', 'neu'], gap: ['价卡缺·待确认', 'warn'], na: ['待补价卡', 'neu'] }
-const STEPS = [['lines', '①', '逐笔计提复核'], ['docs', '②', '逐单核价核量'], ['sign', '③', '确认与登记']]
+const STEPS = [['lines', '逐笔计提复核'], ['docs', '逐单核价核量'], ['sign', '确认与登记']]
 const EMPTY_L = { rows: [], accr_total: 0, bill_total: 0, diff_total: 0, adj: [], points: '', signed: null, n_unexplained: 0 }
 
 // 后端 rows 是「若干笔 + 一行 gtotal」循环；这里切成组，组头用 gtotal 的小计数
@@ -150,11 +150,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
       .lrv .btn.sm{font-size:12px;padding:4px 10px}
       .lrv .btn[disabled]{opacity:.5;cursor:default}
-      .lrv .stepper{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
-      .lrv .stepbtn{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;border:1px solid #DCE2E7;background:#fff;cursor:pointer;font:inherit;font-size:13px;color:#5E6B78}
-      .lrv .stepbtn b{font-family:ui-monospace,monospace;font-size:13px}
-      .lrv .stepbtn.on{border-color:var(--accent);background:#F5FAFC;color:#1B2733;font-weight:600;box-shadow:0 0 0 1px var(--accent) inset}
-      .lrv .stepbtn.done{color:var(--ok)}
+      .lrv .steps{display:flex;align-items:stretch;background:#fff;border:1px solid #DCE2E7;border-radius:12px;overflow:hidden;margin-bottom:12px}
+      .lrv .stepbtn{flex:1;display:flex;align-items:center;gap:10px;padding:11px 16px;border:0;background:#fff;cursor:pointer;font:inherit;font-size:13px;color:#5E6B78;text-align:left;min-width:0}
+      .lrv .stepbtn+.stepbtn{border-left:1px solid #DCE2E7}
+      .lrv .stepbtn:hover{background:#F7F9F9}
+      .lrv .stepbtn .no{width:22px;height:22px;border-radius:50%;border:1px solid #C6D0D6;display:inline-flex;align-items:center;justify-content:center;font-family:ui-monospace,monospace;font-size:12px;flex:none;color:#5E6B78}
+      .lrv .stepbtn.on{background:#F5FAFC;color:#1B2733;font-weight:600;box-shadow:inset 0 -3px 0 var(--accent)}
+      .lrv .stepbtn.on .no{background:var(--accent);border-color:var(--accent);color:#fff}
+      .lrv .stepbtn.done .no{background:#DCEFE4;border-color:#DCEFE4;color:var(--ok)}
+      .lrv .stepbtn .st{margin-left:auto;font-size:12px;font-weight:500;white-space:nowrap}
       .lrv .lock{background:#FDF3E2;border:1px solid #F0D9A8;border-radius:10px;padding:8px 14px;font-size:12.5px;color:#6B4E00;margin-bottom:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
       .lrv .sumstrip{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
       .lrv .tile{background:#fff;border:1px solid #DCE2E7;border-radius:12px;padding:11px 16px}
@@ -233,6 +237,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <div className="h-sub">从计提出发：逐笔计提复核 → 逐单核价核量 → 确认通过·登记已复核</div></div>
         </div>
         <div style={{ flex: 1 }} />
+        {mode === 'detail' && <a className="btn pri" href={reviewExportUrl(carrier, period)}>导出复核表</a>}
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
       </div>
 
@@ -272,25 +277,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       )}
 
       {mode === 'detail' && (<>
-      <div className="toolbar" style={{ border: '1px solid #DCE2E7', borderRadius: 12, marginBottom: 12 }}>
-        <span style={{ fontSize: 12.5, color: '#5E6B78' }}>当前 <b>{carrier}</b> · {period}</span>
-        <div style={{ flex: 1 }} />
-        <label className="btn">导入价格卡（合同价目表）<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
-        <label className="btn">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
-        <button className="btn" disabled={busy === 'kd'} onClick={kingdee}>{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
-        <a className="btn pri" href={reviewExportUrl(carrier, period)}>导出复核表</a>
+      <div className="steps">
+        {STEPS.map(([k, name], i) =>
+          <button key={k} className={'stepbtn' + (k === step ? ' on' : '') + (i < stepIdx ? ' done' : '')} onClick={() => goStep(k)}>
+            <span className="no">{i < stepIdx ? '✓' : i + 1}</span><span>{name}</span>
+            {k === 'lines' && L && !L.err && <span className={'st ' + dcls(L.diff_total)}>{dtxt(L.diff_total)}</span>}
+            {k === 'docs' && d && <span className="st dim">{((c.miss || 0) + (c.qtydiff || 0)) ? `${(c.miss || 0) + (c.qtydiff || 0)} 笔待核` : '无异常'}</span>}
+            {k === 'sign' && <span className={'st ' + (locked ? 'diffok' : 'dim')}>{locked ? '已登记' : '待登记'}</span>}
+          </button>)}
       </div>
       {msg && <div className="msg">{msg}</div>}
       {locked && <div className="lock">🔒 本月已登记复核 · {L.signed.reviewer} · {L.signed.signed_at}　归类与备注已锁定，要修改请先在第③步撤销登记。</div>}
-
-      <div className="stepper">
-        {STEPS.map(([k, no, name], i) =>
-          <button key={k} className={'stepbtn' + (k === step ? ' on' : '') + (i < stepIdx ? ' done' : '')} onClick={() => goStep(k)}>
-            <b>{no}</b><span>{name}</span>
-            {k === 'lines' && L && !L.err && <small className={dcls(L.diff_total)}>{dtxt(L.diff_total)}</small>}
-            {k === 'sign' && locked && <small className="pill ok">已登记</small>}
-          </button>)}
-      </div>
 
       {step === 'lines' && (<>
         {L && !L.err && (
@@ -392,6 +389,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           <div className="toolbar">
             <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{d ? d.detail_total : 0}</b> 行</span>
             <div style={{ flex: 1 }} />
+            <label className="btn sm">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
+            <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee}>{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
+            <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
             <input type="search" placeholder="搜单号/客户/物料" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
           </div>
           {d && d.by_box
