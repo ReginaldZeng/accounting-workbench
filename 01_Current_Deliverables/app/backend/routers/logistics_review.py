@@ -774,7 +774,6 @@ def review_register_kingdee_check(request: Request, period: str = ""):
 
 
 # ---------- 复核结果（费用项汇总 + 逐单）----------
-@router.get("/api/logistics-review/result")
 def _accr_lines(carrier, period, carrier_full=None):
     """取该承运商本月金蝶计提，业务线/费用项目从核算维度(产品分类FF100010、费用项目FFLEX9)读，不抠摘要。
     计提含税＝费用借方(6*/5*不含税)＋暂估进项税(2221.01.07)。返回([{subject,bizline,fee,label,amt}], 含税合计)。"""
@@ -817,6 +816,7 @@ def _accr_lines(carrier, period, carrier_full=None):
     return out, round(sum(x["amt"] for x in out), 2)
 
 
+@router.get("/api/logistics-review/result")
 def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                   group: str = "ex", page: int = 1, size: int = 50, q: str = ""):
     if not _perm(request):
