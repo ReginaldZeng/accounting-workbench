@@ -821,7 +821,11 @@ def _accr_lines(carrier, period, carrier_full=None):
     try:
         y, m = period.split("-")[:2]
         s, conf = kc.login()
-        cf = "FYear=%d and FPeriod=%d and FDEBIT>0 and FEXPLANATION like '%%计提%%%s%%'" % (int(y), int(m), carrier)
+        # 计提摘要用的是承运商真名——简称(如"迅鸽")多是别名，金蝶摘要写全称("武汉顺鸽科技有限公司")，
+        # 故简称+全称一起 OR 匹配，别名对不上就靠全称兜底。
+        names = [carrier] + ([carrier_full] if (carrier_full and carrier_full != carrier) else [])
+        name_cond = " or ".join("FEXPLANATION like '%%计提%%%s%%'" % n for n in names)
+        cf = "FYear=%d and FPeriod=%d and FDEBIT>0 and (%s)" % (int(y), int(m), name_cond)
         rows = kc._query(s, conf, "GL_VOUCHER",
                          [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"),
                           ("FVOUCHERGROUPID.FName", "凭证字"), ("FVOUCHERGROUPNO", "凭证序号"),
