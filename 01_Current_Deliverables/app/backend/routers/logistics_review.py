@@ -1024,13 +1024,24 @@ def _accr_entries(carrier, period, carrier_full=None):
                      "biz": str(r.get("产品分类") or "").strip() or "（无业务线）",
                      "proj": str(r.get("产品项目") or "").strip(), "dept": str(r.get("部门") or "").strip(),
                      "vno": vno, "acct": acct, "amt_net": round(amt, 2)})
+    # 同一凭证的进项税按各费用分录金额精确分摊，舍入余数给最后一笔——保证每张凭证 Σ含税 = 费用+税 分毫不差
+    by_v = {}
     for e in ents:
-        f = fee_by_v.get(e["vno"], 0.0)
-        rate = round(tax_by_v.get(e["vno"], 0.0) / f, 4) if f else 0.0
-        e["tax_rate"] = rate
-        e["tax"] = round(e["amt_net"] * rate, 2)
-        e["amt"] = round(e["amt_net"] + e["tax"], 2)
-        e["key"] = "|".join([e["vno"], e["acct"], e["subject"], e["fee"], e["biz"], e["proj"], e["dept"]])
+        by_v.setdefault(e["vno"], []).append(e)
+    for vno, es in by_v.items():
+        f = fee_by_v.get(vno, 0.0)
+        t = round(tax_by_v.get(vno, 0.0), 2)
+        rate = round(t / f, 4) if f else 0.0
+        acc = 0.0
+        for i, e in enumerate(es):
+            e["tax_rate"] = rate
+            if i < len(es) - 1:
+                e["tax"] = round(e["amt_net"] * t / f, 2) if f else 0.0
+                acc += e["tax"]
+            else:
+                e["tax"] = round(t - acc, 2)
+            e["amt"] = round(e["amt_net"] + e["tax"], 2)
+            e["key"] = "|".join([e["vno"], e["acct"], e["subject"], e["fee"], e["biz"], e["proj"], e["dept"]])
     ents.sort(key=lambda e: (e["subject"], e["fee_norm"], e["biz"], e["proj"], e["vno"]))
     return {"entries": ents, "adj": adj}
 
