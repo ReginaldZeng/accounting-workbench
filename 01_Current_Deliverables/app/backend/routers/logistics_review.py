@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.674
+# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.675
 # Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
@@ -787,7 +787,7 @@ def _accr_lines(carrier, period, carrier_full=None):
         rows = kc._query(s, conf, "GL_VOUCHER",
                          [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"),
                           ("FDetailID.FF100010.FDataValue", "产品分类"), ("FDetailID.FF100006.FDataValue", "产品项目"),
-                          ("FDetailID.FF100007.FDataValue", "品牌项目"), ("FDetailID.FFLEX9.FName", "费用项目")],
+                          ("FDetailID.FFLEX9.FName", "费用项目")],
                          cf + " and (FAccountID.FNumber like '6%%' or FAccountID.FNumber like '5%%')")
         tx = kc._query(s, conf, "GL_VOUCHER", [("FDEBIT", "借")],
                        cf + " and FAccountID.FNumber like '2221.01.07%%'")
@@ -801,9 +801,12 @@ def _accr_lines(carrier, period, carrier_full=None):
         if not amt:
             continue
         subj = b2s.get(str(r.get("账簿") or ""), str(r.get("账簿") or ""))
-        # 业务线 = 产品分类 / 产品项目(TOC) / 品牌项目(TOB) 任一有值者
-        biz = (str(r.get("产品分类") or "").strip() or str(r.get("产品项目") or "").strip()
-               or str(r.get("品牌项目") or "").strip() or "（无业务线）")
+        # 业务线＝产品分类(主)；产品项目仅作补充(专标山姆/kikiherb)
+        cls = str(r.get("产品分类") or "").strip()
+        proj = str(r.get("产品项目") or "").strip()
+        biz = cls or proj or "（无业务线）"
+        if proj and proj not in biz and any(k in proj for k in ("山姆", "kiki", "KIKI", "Kiki")):
+            biz = "%s·%s" % (biz, proj) if cls else proj
         fee = str(r.get("费用项目") or "").strip() or "运费"
         agg[(subj, biz, fee)] = agg.get((subj, biz, fee), 0.0) + amt
     out = [{"subject": k[0], "bizline": k[1], "fee": k[2], "label": "%s · %s" % (k[1], k[2]), "amt": round(v, 2)}
