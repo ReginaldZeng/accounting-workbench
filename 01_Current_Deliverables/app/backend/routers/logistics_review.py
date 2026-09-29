@@ -942,11 +942,16 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     counts = lr.verdict_counts(rows)
     total_bill = round(sum((a.get("amount") or 0) for a in accr) or sum((r.get("amount") or 0) for r in rows), 2)
 
+    qs = (q or "").strip()
+    q_on = bool(qs)
+    q_small = len(rows) <= 300   # 小承运商搜索时全量取物料，支持按客户/物料名搜(大承运商仍按单号/省预筛省金蝶)
+
     def keep(r):
-        if q:
-            s = q.strip()
-            if s not in (r.get("doc_no") or "") and s not in (r.get("prov") or ""):
-                return False
+        if q_on:
+            # 搜索忽略分组(异常/通过都能搜到)；小承运商放行全部到 view 层全字段筛，大承运商按单号/省预筛
+            if q_small:
+                return True
+            return qs in (r.get("doc_no") or "") or qs in (r.get("prov") or "")
         if group == "all":
             return True
         if group == "ex":
@@ -962,7 +967,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     by_weight = carrier in _WEIGHT_CARRIERS
     filt = [r for r in rows if keep(r)]
     page = max(1, int(page))
-    sl = filt[(page - 1) * size: page * size]
+    sl = filt if q_on else filt[(page - 1) * size: page * size]   # 搜索不分页(结果集小)，全量取物料后按全字段筛
     # 统一物料模板：按重量(顺丰/天鹰)/按件数箱(丰源)/快递件数(迅鸽)共用同一分支
     _rev = "weight" if carrier in _WEIGHT_CARRIERS else ("qty" if carrier in _QTY_CARRIERS else "box")
     by_box = (carrier in _BOX_CARRIERS) or (carrier in _WEIGHT_CARRIERS) or (carrier in _QTY_CARRIERS)
@@ -1105,9 +1110,13 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                              "fee": fline, "unit_fee": round(fline / kg, 2) if kg else None,
                              "sales": round(sales, 2) if sales is not None else None,
                              "ratio": round(fline / sales, 4) if sales else None})
+        if q_on:   # 搜索：view 层按 单号/省/客户/物料编码·名称/主体/费用类型 全字段筛，跨分组、认客户名
+            view = [v for v in view if any(qs in str(v.get(f) or "")
+                    for f in ("doc_no", "party", "name", "code", "subject", "fee_item"))]
+        dtot = len({v.get("doc_no") for v in view}) if q_on else len(filt)
         return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
-                "by_box": True, "material": True, "detail_total": len(filt), "detail": view,
+                "by_box": True, "material": True, "detail_total": dtot, "detail": view,
                 "page": page, "size": size}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
@@ -1313,21 +1322,34 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 ("单位运费(元/kg)", "unit_fee"), ("★费比", "ratio"), ("备注", "note")]),
         ]
         col = 1
+        col_of_key = {}
         for name, gc, hc, _dl, cols in groups:
             span = len(cols)
             ws2.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + span - 1)
             gcell = ws2.cell(row=1, column=col, value=name)
             gcell.font = HFONT; gcell.fill = PatternFill("solid", fgColor=gc)
             gcell.alignment = Alignment(horizontal="center")
-            for j, (h, _k) in enumerate(cols):
+            for j, (h, k) in enumerate(cols):
+                col_of_key[k] = col + j
                 hc2 = ws2.cell(row=2, column=col + j, value=h)
                 hc2.font = Font(bold=True, color="B23B2E" if h.startswith("★") else "1B2733")
                 hc2.fill = PatternFill("solid", fgColor=hc)
             col += span
+        # 单据级列(跨该单所有物料行合并单元格)；物料级列(客户/物料/数量/运费分摊/单位运费/费比/销售额)不合并
+        _DOCLVL = {"subject", "carrier", "fee_item", "bizline", "doc_no", "_cs", "_amt", "_cw",
+                   "bill_amt", "bill_unit", "mode_cn", "conv", "note"}
+        def _is_doclvl(k):
+            return k in _DOCLVL or k.startswith("_fee:")
         rownum = 3
         prev = None
+        doc_start = None
+        ranges = []
         for r in res.get("detail", []):
             d0 = r.get("doc_no"); firstdoc = (d0 != prev)
+            if firstdoc:
+                if doc_start is not None:
+                    ranges.append((doc_start, rownum - 1))
+                doc_start = rownum
             cs, sf, amt, cw = braw.get(d0, (None, None, None, None))
             sfd = {}
             if sf:
@@ -1338,8 +1360,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             col = 1
             for name, gc, hc, doclvl, cols in groups:
                 for (_h, k) in cols:
-                    if doclvl and not firstdoc:
-                        val = None
+                    if _is_doclvl(k) and not firstdoc:
+                        val = None                       # 单据级列仅首行写值，其余留空待合并
                     elif k == "_cs":
                         val = cs
                     elif k == "_amt":
@@ -1356,6 +1378,16 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     col += 1
             prev = d0
             rownum += 1
+        if doc_start is not None:
+            ranges.append((doc_start, rownum - 1))
+        midv = Alignment(vertical="center")
+        for s, e in ranges:
+            if e <= s:
+                continue
+            for k, ci in col_of_key.items():
+                if _is_doclvl(k):
+                    ws2.merge_cells(start_row=s, start_column=ci, end_row=e, end_column=ci)
+                    ws2.cell(row=s, column=ci).alignment = midv
         ws2.freeze_panes = "F3"
         widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 11, 8, 9, 8, 11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
                   [10, 8, 14, 9, 10, 12, 8, 16])
