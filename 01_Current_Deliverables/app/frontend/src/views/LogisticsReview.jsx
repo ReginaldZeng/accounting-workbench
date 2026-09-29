@@ -213,6 +213,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .ltbl tr.ghead td.gsub{font-weight:500;color:#5E6B78;font-size:12px}
       .lrv .ltbl tr.rowbad td{background:#FFF7F5}.lrv .ltbl tr.rowbad td[rowspan]{background:#FFF1EE}
       .lrv .ltbl tr.total td{font-weight:700;border-top:2px solid #CBD5DC;background:#E1EEF3}
+      .lrv .ltbl tr.fsep td{border-top:1px dashed #CBD5DC}
       .lrv .ltbl td.pl{line-height:1.25}
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
       .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
@@ -354,7 +355,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </div>
 
         <div className="card">
-          <h3>逐笔计提复核 <span className="dim">· 按「主体 · 费用类型」分组，组头即小计；有差异的行请写差异解释</span></h3>
+          <h3>逐笔计提复核 <span className="dim">· 按主体分组，组头即小计；每笔下方小字是费用类型；有差异的行请写差异解释</span></h3>
           {L === null && <div className="ovempty">读金蝶计提分录中…</div>}
           {L && L.err && <div className="msg" style={{ margin: 12 }}>逐笔取数失败：{L.err}</div>}
           {L && !L.err && (
@@ -369,7 +370,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   const lines = g.lines
                   return [
                     h && <tr key={'h' + gi} className="ghead">
-                      <td className="gname" colSpan="2">{h.subject} · {h.fee_type}<span className="tag">{lines.filter(x => x.kind === 'accr').length} 笔</span></td>
+                      <td className="gname" colSpan="2">{h.subject}{h.fee_type ? ' · ' + h.fee_type : ''}<span className="tag">{lines.filter(x => x.kind === 'accr').length} 笔</span></td>
                       <td className="num">{money(h.amt)}</td><td className="num">{money(h.bill)}</td>
                       <td className={'num ' + dcls(h.diff)}>{dtxt(h.diff)}</td><td className="gsub"></td>
                     </tr>,
@@ -377,12 +378,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
                       const unexpl = bad && !(r.note || '').trim()
-                      const subline = [r.proj, r.dept].filter(Boolean).join(' · ')
+                      const subline = [r.fee_type, r.proj, r.dept].filter(Boolean).join(' · ')
                       return (
-                        <tr key={r.key} className={unexpl ? 'rowbad' : ''}>
+                        <tr key={r.key} className={(unexpl ? 'rowbad' : '') + (r.ffirst && !r.gfirst ? ' fsep' : '')}>
                           <td className="pl">
                             {r.kind === 'bill_only'
-                              ? <><span className="dim">{r.biz}</span><span className="sub">账单有、计提无</span></>
+                              ? <><span className="dim">{r.biz}</span><span className="sub">{r.fee_type} · 账单有、计提无</span></>
                               : <>{r.biz}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}{subline && <span className="sub">{subline}</span>}</>}
                           </td>
                           <td className="mono">{r.vno || <span className="dim">—</span>}</td>
@@ -405,6 +406,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                 </tr>
               </tbody>
             </table></div>)}
+          {L && !L.err && L.prior && L.prior.length > 0 && <div className="adjnote">上期计提的红冲 / 更正（本月做的账，属于上个月）不计入本月，净额 <b className="mono">{money(L.prior_total)}</b>：{L.prior.map(p => `${p.vno} ${p.subject} ${money(p.net)}`).join('；')}</div>}
           {L && !L.err && L.adj && L.adj.length > 0 && <div className="adjnote">另有 {L.adj.length} 张只有税额调整科目的凭证未计入：{L.adj.map(a => `${a.vno} ${a.acct} ${money(a.amt)}`).join('、')}</div>}
           {L && !L.err && <details className="spec"><summary>口径说明</summary>
             计提＝金蝶费用借方(6*/5*)逐分录，产品线/产品类型/部门取凭证核算维度；税率按凭证（同凭证进项税÷费用，税额按分录精确分摊），计提金额已含税与账单同口径。
