@@ -583,7 +583,7 @@ export const reviewParseBill = (carrier, period, file) => { const fd = new FormD
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 
 export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)
-export const reviewOverview = (period) => j(`/api/logistics-review/overview?period=${period}`)
+export const reviewOverview = (period, fresh = false) => j(`/api/logistics-review/overview?period=${period}${fresh ? '&fresh=1' : ''}`)
 export const reviewExportUrl = (carrier, period) => `/api/logistics-review/export?carrier=${encodeURIComponent(carrier)}&period=${period}`
 export const reviewDocNote = (carrier, period, doc_no, note) => j('/api/logistics-review/doc-note', { method: 'POST', body: JSON.stringify({ carrier, period, doc_no, note }) })
 export const reviewDocClassify = (carrier, period, doc_no, patch) => j('/api/logistics-review/doc-classify', { method: 'POST', body: JSON.stringify({ carrier, period, doc_no, ...patch }) })
