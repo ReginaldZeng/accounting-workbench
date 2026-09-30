@@ -102,38 +102,91 @@ def parse_detail_sheet(sp, ws, period, carrier):
     return out
 
 
+def _is_idx(v):
+    """月结清单明细行首格是序号(1、2、3…)。"""
+    f = _f(v)
+    return f is not None and float(f).is_integer() and 0 < f < 1000
+
+
 def parse_accrual_sheet(sp, ws, period, carrier):
-    """accrual 角色 sheet（月结清单，半结构）→ 按费用项一行。定位费用项标签行，取数值单元格：金额=末值、数量=最大值。"""
+    """accrual 角色 sheet（月结清单，半结构）→ 按费用项一行。
+    ① fee_map 名单内的费用：行内费用取本行金额；段头费用(物料费/第三方快递费等)取本段「合计」，段内明细不再另取。
+    ② 名单外、带序号的费用行(如 卸货、B2C续件、B2B基础操作费、冲红·7月纸箱差异)：spec 配了 default_annot 就按它逐行收进来，
+       金额为 0 的跳过——以前只认名单，名单外整行丢掉不提示(V2.715 修，迅鸽 8 月漏读 1,548+329.25)。没配 default_annot 保持旧行为。"""
     rows = list(ws.iter_rows(values_only=True))
     n = len(rows)
     fee_map = sp.get("fee_map", {})
+    dflt = sp.get("default_annot")
     subj = sp.get("subject", {}).get("fixed", "")
     out = []
+    in_total_sec = False      # 当前在名单内「段头费用」段里(段内明细不另取)
     for ri in range(n):
-        cells = [_s(c) for c in rows[ri]]
+        raw = rows[ri]
+        cells = [_s(c) for c in raw]
         label = next((c for c in cells if c in fee_map), None)
-        if not label:
+        if label:
+            k0 = next((k for k, c in enumerate(cells) if c), 0)
+            nums = [_f(c) for c in (raw[k0 + 1:] if _is_idx(raw[k0]) else raw) if _f(c) is not None]   # 序号不算数量
+            if len(nums) >= 2:
+                # 行内费用（名字与金额同一行）：金额=末值，数量=其余最大值
+                amt, qty = nums[-1], max(nums[:-1], default=None)
+            else:
+                # 段头费用（名字在段头，金额在本段「合计」行）：往下找到合计取数，遇到下一段费用名即止
+                in_total_sec = True
+                amt = qty = None
+                for j in range(ri + 1, min(ri + 40, n)):
+                    jc = [_s(c) for c in rows[j]]
+                    if any(c in fee_map for c in jc):
+                        break
+                    if jc and any("合计" in c for c in jc[:2]):
+                        jn = [_f(c) for c in rows[j] if _f(c) is not None]
+                        if jn:
+                            amt, qty = jn[-1], (max(jn[:-1], default=None) if len(jn) > 1 else None)
+                        break
+            out.append({"period": period, "carrier": carrier, "grain": "accrual", "subject": subj,
+                        "doc_no": "", "annot": fee_map[label], "fee_item": label,
+                        "qty": qty, "unit": "", "amount": amt, "src_sheet": ws.title, "src_row": ri + 1})
             continue
-        nums = [_f(c) for c in rows[ri] if _f(c) is not None]
-        if len(nums) >= 2:
-            # 行内费用（名字与金额同一行）：金额=末值，数量=其余最大值
-            amt, qty = nums[-1], max(nums[:-1], default=None)
-        else:
-            # 段头费用（名字在段头，金额在本段「合计」行）：往下找到合计取数，遇到下一段费用名即止
-            amt = qty = None
-            for j in range(ri + 1, min(ri + 40, n)):
-                jc = [_s(c) for c in rows[j]]
-                if any(c in fee_map for c in jc):
-                    break
-                if jc and any("合计" in c for c in jc[:2]):
-                    jn = [_f(c) for c in rows[j] if _f(c) is not None]
-                    if jn:
-                        amt, qty = jn[-1], (max(jn[:-1], default=None) if len(jn) > 1 else None)
-                    break
-        out.append({"period": period, "carrier": carrier, "grain": "accrual", "subject": subj,
-                    "doc_no": "", "annot": fee_map[label], "fee_item": label,
-                    "qty": qty, "unit": "", "amount": amt, "src_sheet": ws.title, "src_row": ri + 1})
+        # 表格常从 B 列起(A 列空)：按每行第一个非空格判断段头/序号
+        k0 = next((k for k, c in enumerate(cells) if c), None)
+        if k0 is None:
+            continue
+        if not _is_idx(raw[k0]) and any("金额" in c for c in cells):
+            in_total_sec = False      # 名单外的段头(服务费/冲红/仓储费…)：新段开始
+            continue
+        if dflt and not in_total_sec and _is_idx(raw[k0]):
+            name = next((c for c in cells[k0 + 1:] if c and _f(c) is None), "")
+            nums = [_f(c) for c in raw[k0 + 1:] if _f(c) is not None]
+            if not name or not nums or not nums[-1]:
+                continue
+            out.append({"period": period, "carrier": carrier, "grain": "accrual", "subject": subj,
+                        "doc_no": "", "annot": dflt, "fee_item": name,
+                        "qty": (max(nums[:-1]) if len(nums) > 1 else None), "unit": "", "amount": nums[-1],
+                        "src_sheet": ws.title, "src_row": ri + 1})
     return out
+
+
+def bill_owner(wb, spec):
+    """账单货主(一家承运商一个月可能有几份账单，如迅鸽 starfield / kikiherb 两个货主)：
+    取月结清单「结算时间」下一行的单格文字(星期零-starfield / 星期零kikiherb)，取不到用「客户名称」。"""
+    acc = [c["name"] for c in spec.get("sheets", []) if c.get("role") == "accrual"]
+    for ws in wb.worksheets:
+        if not any(match_sheet(nm, ws.title) for nm in acc):
+            continue
+        rows = [[_s(c) for c in r] for r in ws.iter_rows(min_row=1, max_row=15, values_only=True)]
+        cust = ""
+        for i, r in enumerate(rows):
+            vals = [c for c in r if c]
+            if vals and vals[0].startswith("客户名称") and len(vals) > 1:
+                cust = vals[1]
+            if vals and vals[0].startswith("结算时间"):
+                for r2 in rows[i + 1:i + 8]:          # 中间隔着到期时间/收款员/空行
+                    v2 = [c for c in r2 if c]
+                    if len(v2) == 1 and _f(v2[0]) is None:
+                        return v2[0]
+        if cust:
+            return cust
+    return ""
 
 
 def parse_bill(spec, data):
@@ -159,4 +212,12 @@ def parse_bill(spec, data):
             detail += parse_detail_sheet(sp, ws, period, carrier)
         elif sp["role"] == "accrual":
             accrual += parse_accrual_sheet(sp, ws, period, carrier)
-    return {"detail": detail, "accrual": accrual, "skipped": skipped, "carrier": carrier, "period": period}
+    owner = bill_owner(wb, spec)
+    # 货主→产品线(spec.owner_bizline，如 kikiherb→Kiki Herb)：同一套标注下的另一个货主，产品线跟货主走
+    biz = next((v for k, v in (spec.get("owner_bizline") or {}).items() if k.lower() in owner.lower()), "")
+    for r in detail + accrual:
+        r["bill_src"] = owner
+        if biz and not r.get("bizline"):
+            r["bizline"] = biz
+    return {"detail": detail, "accrual": accrual, "skipped": skipped, "carrier": carrier, "period": period,
+            "bill_src": owner}

@@ -212,7 +212,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const onFile = (fn, ...args) => e => {
     const f = e.target.files && e.target.files[0]; e.target.value = ''
     if (!f) return
-    setBusy(fn.name); fn(...args, f).then(r => { flash(JSON.stringify(r)); setGroup('ex'); setPage(1); load(); refetchL() })
+    // 账单解析回显说人话：这次是哪一份(货主)、读了多少行、本月现在有哪几份账单(一家一月可有几份，只替换同一份)
+    const say = r => (r && r.sources
+      ? `已解析「${r.bill_src || '账单'}」：明细 ${r.detail} 行、汇总 ${r.accrual} 行${r.skipped && r.skipped.length ? `（跳过 ${r.skipped.length} 张价目/明细表）` : ''}。` +
+        `本月现有账单 ${r.sources.length} 份：` + r.sources.map(x => `${x.src} ${money(x.amount)}`).join('；') + '。'
+      : JSON.stringify(r))
+    setBusy(fn.name); fn(...args, f).then(r => { flash(say(r)); setGroup('ex'); setPage(1); load(); refetchL() })
       .catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
   }
   const kingdee = () => { setBusy('kd'); reviewKingdeeQty(carrier, period).then(r => { flash(`金蝶出库单 ${r.kd_docs} 单，回填 ${r.filled} 行`); load() }).catch(e => flash('失败：' + e.message)).finally(() => setBusy('')) }

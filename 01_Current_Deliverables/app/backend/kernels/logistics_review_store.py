@@ -47,6 +47,7 @@ bill_lines = Table(
     Column("note", Text),
     Column("subj_ovr", String(30)),        # 复核台人工改归类：主体覆盖(非空时生效，不动原 subject)
     Column("fee_ovr", String(40)),         # 复核台人工改归类：费用类型覆盖(非空时生效，不动原 fee_item/单号推断)
+    Column("bill_src", String(120)),       # 账单份(货主)：一家一月可有几份账单(迅鸽 starfield/kikiherb)，上传只替换同一份
     Column("created_at", String(20)),
 )
 
@@ -151,14 +152,16 @@ TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, re
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {
     "carrier": "迅鸽",
+    "owner_bizline": {"kikiherb": "Kiki Herb"},     # 货主 kikiherb 的账单整份归 Kiki Herb 产品线
     "sheets": [
         {"name": "帐单-深圳星期零", "role": "accrual", "header_row": 14, "subject": {"fixed": "深圳星期零"},
          "amount_col": "金额", "qty_col": "服务数量(个)", "fee_item_col": "服务费", "summary_marker": "合计",
          "fee_map": {"第三方快递费": "销售出库单-电商", "B2C基础操作费": "销售出库单-电商",
-                     "退货服务费": "其它出库单-电商", "物料费": "销售出库单-电商"}},
+                     "退货服务费": "其它出库单-电商", "物料费": "销售出库单-电商"},
+         "default_annot": "销售出库单-电商"},
         {"name": "账单-孝感星期九", "role": "accrual", "header_row": 14, "subject": {"fixed": "孝感星期九"},
          "amount_col": "金额", "qty_col": "数量(㎡)", "fee_item_col": "仓储费", "summary_marker": "合计",
-         "fee_map": {"货品仓储费": "成品仓储-电商"}},
+         "fee_map": {"货品仓储费": "成品仓储-电商"}, "default_annot": "成品仓储-电商"},
         {"name": "*发货明细", "role": "detail", "header_row": 1, "subject": {"fixed": "深圳星期零"},
          "doc_col": ["金蝶单号", "金蝶单据编号"], "amount_cols": ["金额", "旺季加收", "燃油附加", "地区加收"],
          "qty_col": "数量", "qty_unit": "件", "wt_col": "快递重量", "prov_col": "省", "carrier_sub_col": "快递公司",
@@ -205,7 +208,7 @@ def migrate_cols(engine):
     """给已建的 logistics_bill_lines 补新列（create_all 只建不改）。MySQL/SQLite 兼容，缺列才补。"""
     from sqlalchemy import text
     drv = engine.url.drivername
-    need = [("review_mode", "VARCHAR(10)"), ("subj_ovr", "VARCHAR(30)"), ("fee_ovr", "VARCHAR(40)")]
+    need = [("review_mode", "VARCHAR(10)"), ("subj_ovr", "VARCHAR(30)"), ("fee_ovr", "VARCHAR(40)"), ("bill_src", "VARCHAR(120)")]
     with engine.begin() as c:
         if "mysql" in drv:
             have = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "

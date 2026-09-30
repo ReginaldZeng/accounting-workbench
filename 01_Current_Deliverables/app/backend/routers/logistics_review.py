@@ -251,11 +251,17 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
     except Exception:
         return JSONResponse({"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}, status_code=400)
     batch = "%s|%s|%s" % (carrier, period, datetime.now().strftime("%Y%m%d%H%M%S"))
+    src = (res.get("bill_src") or "").strip()
     with db._engine.begin() as c:
-        c.execute(delete(BL).where((BL.c.carrier == carrier) & (BL.c.period == period)))
+        # 一家一月可有几份账单(货主不同，如迅鸽 starfield/kikiherb)：只替换同一份；没标份的旧数据视同本份一并替换(V2.715)
+        scope = (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register"))
+        if src:
+            scope = scope & ((BL.c.bill_src == src) | (BL.c.bill_src.is_(None)) | (BL.c.bill_src == ""))
+        c.execute(delete(BL).where(scope))
         for grain in ("detail", "accrual"):
             for r in res[grain]:
                 vals = {k: r.get(k) for k in _DETAIL_KEYS}
+                vals["bill_src"] = src or None
                 vals["batch_id"] = batch
                 vals["review_mode"] = "audit"
                 vals["created_at"] = _now()
@@ -263,7 +269,16 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
     db.audit(u["name"], "物流复核-解析账单", "%s %s" % (carrier, period),
              "明细 %d 行 / 计提 %d 行 / 跳过 %d 表" % (len(res["detail"]), len(res["accrual"]), len(res["skipped"])))
     _bust(carrier, period)   # 账单重解析 → 逐笔/逐单视图缓存作废
-    return {"ok": True, "detail": len(res["detail"]), "accrual": len(res["accrual"]), "skipped": res["skipped"]}
+    with db._engine.connect() as c:   # 本月现有几份账单(按货主)：汇总行合计，没有汇总行用明细合计
+        srcs = {}
+        for r in c.execute(select(BL.c.bill_src, BL.c.grain, func.count(), func.sum(BL.c.amount)).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period)).group_by(BL.c.bill_src, BL.c.grain)).all():
+            d = srcs.setdefault(r[0] or "（未标货主）", {})
+            d[r[1]] = (int(r[2]), round(float(r[3] or 0), 2))
+    sources = [{"src": k, "amount": (v.get("accrual") or v.get("detail") or (0, 0))[1],
+                "n_detail": (v.get("detail") or (0, 0))[0], "n_accrual": (v.get("accrual") or (0, 0))[0]} for k, v in sorted(srcs.items())]
+    return {"ok": True, "bill_src": src, "detail": len(res["detail"]), "accrual": len(res["accrual"]),
+            "skipped": res["skipped"], "sources": sources}
 
 
 # ---------- 接金蝶回填出库数量（核量）----------
