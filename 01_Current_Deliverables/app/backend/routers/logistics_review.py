@@ -1489,6 +1489,17 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         return (not fsub or sub == fsub) and (not ffee or fee == ffee) and (bset is None or bb in bset)
 
     rows_all = rows            # 单据视图缓存按整家承运商建，按组筛在缓存之后
+    # 第②步三个下拉筛选(主体/费用类型/产品线)的选项：取整家本月全部单据，按单号去重计张数(口径同 fsub/ffee/fbiz 筛选)
+    _fc = {"subject": {}, "fee": {}, "biz": {}}
+    _fs = set()
+    for i_, r in enumerate(rows_all):
+        k_ = (r.get("doc_no") or "").split("+")[0] or ("#%d" % i_)
+        if k_ in _fs:
+            continue
+        _fs.add(k_)
+        for fk, fv in (("subject", _eff_subject(r)), ("fee", _eff_fee(r)), ("biz", _bill_biz(r))):
+            _fc[fk][fv or ""] = _fc[fk].get(fv or "", 0) + 1
+    facets = {k: sorted(v.items(), key=lambda kv: (-kv[1], kv[0])) for k, v in _fc.items()}
     if bucket_on:
         rows = [r for r in rows if inb(_eff_subject(r), _eff_fee(r), _bill_biz(r))]
         counts = lr.verdict_counts(rows)
@@ -1540,16 +1551,18 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             else:
                 pool = _box_docs(rows_all, carrier)
                 _ACCR_CACHE[ck] = (pool, None, _t.time())
-            if bucket_on:
-                pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
             for x in pool:                    # 缓存里的单据每次重挂确认态
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
+            ex_all = sum(1 for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff"))   # 步骤条用整家总数，不随筛选变
+            if bucket_on:
+                pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
             dc = {"miss": 0, "qtydiff": 0, "info": 0, "ok": 0, "done": 0}
             for x in pool:
                 k = "done" if x.get("confirmed") else x["state"]
                 dc[k] = dc.get(k, 0) + 1
             dc["all"] = len(pool)
         else:
+            ex_all = None
             pool = _box_docs(sl, carrier)
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
@@ -1589,7 +1602,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}

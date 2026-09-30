@@ -180,10 +180,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setPtsEdit(false); setOpen({}); setSel({}); setDfilt(null); setMode('detail') }
   // 第①步「可逐单」→ 第②步只看这一组单据
   const goDocs = od => {
-    setDfilt({ fsub: od.fsub, ffee: od.ffee, fbiz: od.fbiz, label: [od.fsub, od.ffee, od.blabel].filter(Boolean).join(' · ') })
+    setDfilt({ fsub: od.fsub, ffee: od.ffee, fbiz: od.fbiz, from: 'lines', label: [od.fsub, od.ffee, od.blabel].filter(Boolean).join(' · ') })
     setGroup('all'); setPage(1); setQ(''); setOpen({}); setStep('docs')
   }
   const clearDfilt = () => { setDfilt(null); setGroup('ex'); setPage(1); setOpen({}) }
+  // 第②步下拉筛选(主体/费用类型/产品线)：和「可逐单」点进来共用 dfilt，可与待核/已确认等分组叠加
+  const setFacet = (k, v) => {
+    const nx = { fsub: '', ffee: '', fbiz: '', ...(dfilt || {}), [k]: v }
+    setDfilt(!nx.fsub && !nx.ffee && !nx.fbiz ? null : { fsub: nx.fsub, ffee: nx.ffee, fbiz: nx.fbiz, from: '',
+      label: [nx.fsub, nx.ffee, nx.fbiz && nx.fbiz.split('|').map(b => (b === '-' ? '无产品线' : b)).join('、')].filter(Boolean).join(' · ') })
+    setPage(1); setOpen({})
+  }
 
   const load = useCallback(() => {
     reviewResult(carrier, period, group, page, q, dfilt).then(setD).catch(e => setMsg(e.message))
@@ -457,6 +464,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .selbar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;padding:9px 15px;
         background:#E8F2EC;border-top:1px solid #BFDCCB;border-bottom:1px solid #BFDCCB;font-size:13px;color:#1B2733}
       .lrv .selbar b{color:#1E6B43}.lrv .selbar .sp{flex:1}
+      .lrv .fsel{font:inherit;font-size:12.5px;border:1px solid #DCE2E7;border-radius:6px;padding:4px 6px;max-width:170px;background:#fff;color:#1B2733}
+      .lrv .fsel.on{border-color:var(--accent);background:#F0F7FA;font-weight:600}
       .lrv .xpanel{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:hidden}
       .lrv .xcls{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid #EEF1F3;font-size:12.5px}
       .lrv .xcls label{display:inline-flex;gap:6px;align-items:center;color:#5E6B78}
@@ -519,7 +528,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           <button key={k} className={'stepbtn' + (k === step ? ' on' : '') + (i < stepIdx ? ' done' : '')} onClick={() => goStep(k)}>
             <span className="no">{i < stepIdx ? '✓' : i + 1}</span><span>{name}</span>
             {k === 'lines' && L && !L.err && <span className={'st ' + dcls(L.diff_total)}>{dtxt(L.diff_total)}</span>}
-            {k === 'docs' && d && (() => { const n = dc ? dc.ex : (c.miss || 0) + (c.qtydiff || 0); return <span className={'st ' + (n ? 'diffbad' : 'diffok')}>{n ? `${n} 张待核` : '无异常'}</span> })()}
+            {k === 'docs' && d && (() => { const n = d.ex_all != null ? d.ex_all : dc ? dc.ex : (c.miss || 0) + (c.qtydiff || 0); return <span className={'st ' + (n ? 'diffbad' : 'diffok')}>{n ? `${n} 张待核` : '无异常'}</span> })()}
             {k === 'sign' && <span className={'st ' + (locked ? 'diffok' : 'dim')}>{locked ? '已登记' : '待登记'}</span>}
           </button>)}
       </div>
@@ -659,7 +668,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </div>}
         <div className="card">
           <h3>逐单核价核量 <span className="dim">· 一单一行，点行展开看物料、改归类；仓储费等无单据的费用在第①步看差异</span></h3>
-          {dfilt && <div className="dfilt">只看：<b>{dfilt.label}</b>（从逐笔计提复核点进来）
+          {dfilt && dfilt.from === 'lines' && <div className="dfilt">只看：<b>{dfilt.label}</b>（从逐笔计提复核点进来）
             <button className="btn sm" onClick={clearDfilt}>✕ 看全部单据</button>
             <button className="btn sm" onClick={() => setStep('lines')}>‹ 回逐笔计提复核</button></div>}
           {d && d.by_box && dc && <div className="dq">
@@ -672,6 +681,16 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           <div className="toolbar">
             <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{d ? d.detail_total : 0}</b> {d && d.by_box ? '张单据' : '行'}</span>
             {d && d.by_box && docs.length > 0 && <button className="btn sm" onClick={() => setAll(!allOpen)}>{allOpen ? '全部收起' : '全部展开'}</button>}
+            {d && d.by_box && d.facets && <>
+              {[['fsub', 'subject', '全部主体'], ['ffee', 'fee', '全部费用类型'], ['fbiz', 'biz', '全部产品线']].map(([k, fk, all]) => {
+                const cur = (dfilt && dfilt[k]) || ''
+                const opts = (d.facets[fk] || []).map(([v, n]) => [fk === 'biz' ? (v || '-') : v, (v || (fk === 'biz' ? '无产品线' : '（空）')) + '（' + n + '）'])
+                if (cur && !opts.some(o => o[0] === cur)) opts.unshift([cur, cur.split('|').map(b => (b === '-' ? '无产品线' : b)).join('、')])
+                return <select key={k} className={'fsel' + (cur ? ' on' : '')} value={cur} onChange={e => setFacet(k, e.target.value)}>
+                  <option value="">{all}</option>{opts.map(([v, lb]) => <option key={v} value={v}>{lb}</option>)}</select>
+              })}
+              {dfilt && <button className="btn sm" onClick={() => { setDfilt(null); setPage(1); setOpen({}) }}>清空筛选</button>}
+            </>}
             <div style={{ flex: 1 }} />
             <label className="btn sm">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
             <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee} title="重新从金蝶取出库单物料，刷新核量">{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
