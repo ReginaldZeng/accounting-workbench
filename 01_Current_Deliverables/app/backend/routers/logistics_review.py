@@ -1641,7 +1641,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         if d0_of(r) in conf:           # 已确认的单据不再算待核/异常/一致
             return False
         if group == "ex":
-            return r["price_state"] in ("gap", "free", "over") or r["qty_state"] in ("miss", "qtydiff")
+            return r["qty_state"] in ("miss", "qtydiff")     # 与逐单视图、分组计数同口径(核量)
         if group in ("miss", "qtydiff"):
             return r["qty_state"] == group
         if group == "info":
@@ -1651,7 +1651,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         if group in ("gap", "free", "over"):
             return r["price_state"] == group
         if group in ("pass", "ok"):
-            return r["verdict"] == "pass"
+            return r["qty_state"] == "ok"
         return True
 
     by_weight = carrier in _WEIGHT_CARRIERS
@@ -1691,7 +1691,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
             dc = {"miss": counts.get("miss", 0), "qtydiff": counts.get("qtydiff", 0),
                   "info": sum(1 for r in rows if r.get("qty_state") == "na"),
-                  "ok": counts.get("pass", 0), "all": len(rows), "done": 0}
+                  "ok": sum(1 for r in rows if r.get("qty_state") == "ok"), "all": len(rows), "done": 0}
             seen = set()
             for r in rows:                    # 大承运商按中间表行扣掉已确认的(行级近似，单号去重计已确认)
                 d0 = d0_of(r)
@@ -1700,8 +1700,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                         seen.add(d0); dc["done"] += 1
                     if r.get("qty_state") in ("miss", "qtydiff"):
                         dc[r["qty_state"]] = max(0, dc[r["qty_state"]] - 1)
-                    elif r.get("verdict") == "pass":
+                    elif r.get("qty_state") == "ok":
                         dc["ok"] = max(0, dc["ok"] - 1)
+                    elif r.get("qty_state") == "na":
+                        dc["info"] = max(0, dc["info"] - 1)
         dc["ex"] = dc["miss"] + dc["qtydiff"] + dc.get("price", 0)
 
         def dhit(x):
