@@ -375,7 +375,12 @@ function BomLedgerView({ user, mode = 'std' }) {
     try { const r = await getBomEntry(id); setEntry(r.entry); setCurId(id); setView('detail'); window.scrollTo(0, 0) }
     catch (e) { flash('打开失败：' + e.message) }
   }, [])
-  const openCompare = () => { setView('compare'); window.scrollTo(0, 0) }
+  const [cmpFromList, setCmpFromList] = useState(false)     // 版本对比从哪进的：台账（V2.696）→ 返回台账；详情/深链 → 返回详情
+  const openCompare = () => { setCmpFromList(false); setView('compare'); window.scrollTo(0, 0) }
+  const openCompareById = useCallback(async (id) => {
+    try { const r = await getBomEntry(id); setEntry(r.entry); setCurId(id); setCmpFromList(true); setView('compare'); window.scrollTo(0, 0) }
+    catch (e) { flash('打开失败：' + e.message) }
+  }, [])
   // 深链（V2.442，BP 只读台账 → 核算）：#/bomstd?entry=17[&compare=1] 直开详情/对比；?entry=17&final=1 直开终审弹窗（无终审权限则开详情）。
   // 只消费一次，消费后把 hash 收回到 #/bomstd，刷新不再重放。
   const deepRef = React.useRef(false)
@@ -411,7 +416,7 @@ function BomLedgerView({ user, mode = 'std' }) {
 
   return (
     <div className="bomv">
-      {view === 'list' && <Ledger data={data} cfg={cfg} mode={mode} onOpen={openDetail} onManual={() => setManual(true)} onStdImport={(b) => setStdImp(b || {})}
+      {view === 'list' && <Ledger data={data} cfg={cfg} mode={mode} onOpen={openDetail} onCompare={openCompareById} onManual={() => setManual(true)} onStdImport={(b) => setStdImp(b || {})}
         onApproval={openApproval} onRefresh={load} flash={flash}
         onFinalReview={data?.canFinalReview ? setFinalRow : null}
         isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: load })} />}
@@ -425,7 +430,7 @@ function BomLedgerView({ user, mode = 'std' }) {
         isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: backFromDetail })} />}
       {delM && <DeleteModal target={delM.target} label={delM.label} flash={flash} onClose={() => setDelM(null)}
         onDone={async () => { const f = delM.after; setDelM(null); if (f) await f() }} />}
-      {view === 'compare' && entry && <Compare entry={entry} all={data.all} onBack={() => setView('detail')} flash={flash} />}
+      {view === 'compare' && entry && <Compare entry={entry} all={data.all} onBack={() => (cmpFromList ? backToList() : setView('detail'))} flash={flash} />}
       {stdImp && <StdImportModal cfg={cfg} init={stdImp} onClose={() => setStdImp(null)} flash={flash} onDone={load} />}
       {manual && <IntakeModal cfg={cfg} init={typeof manual === 'object' ? manual : null} onClose={() => setManual(false)} flash={flash}
         onDone={(no) => { setManual(false); load(); openApproval(no) }} />}
@@ -437,7 +442,7 @@ function BomLedgerView({ user, mode = 'std' }) {
 }
 
 // ============ 台账列表 ============
-function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, onFinalReview, onRefresh, flash, isSuper, onDelete }) {
+function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onApproval, onFinalReview, onRefresh, flash, isSuper, onDelete }) {
   // 历史标准成本导入待确认批次（V2.512）：待办页顶部一块，点「处理」进导入弹窗
   const [impBatches, setImpBatches] = useState([])
   useEffect(() => { if (mode !== 'std') getBomStdImportBatches().then(r => setImpBatches(r.ok ? (r.batches || []) : [])).catch(() => {}) }, [mode, data])
@@ -550,6 +555,8 @@ function Ledger({ data, cfg, mode, onOpen, onManual, onStdImport, onApproval, on
         <td style={{ whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
           <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>采购核算表 ›</a>
           <a className="lk" style={{ marginRight: 10 }} title="补/改本产品的 ERP 物料编码" onClick={() => fillErp(r)}>补物料编码</a>
+          {r.versionCount > 1 && onCompare &&
+            <a className="lk" style={{ marginRight: 10 }} title={`本产品有 ${r.versionCount} 个审核版本：逐料对比用量/含税价/税率/费用差异，可导出差异清单`} onClick={() => onCompare(r.id)}>版本对比（{r.versionCount}）›</a>}
           {r.needFinalReview && onFinalReview &&
             <a className="lk" style={{ fontWeight: 700, color: 'var(--green)' }} onClick={() => onFinalReview(r)}>⚑ 终审 ›</a>}
         </td>
