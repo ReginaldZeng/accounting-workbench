@@ -135,7 +135,18 @@ review_line_fix = Table(
     Column("updated_at", String(20)),
 )
 
-TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix]
+# 逐单「已确认」：复核人核过没问题的单据打标(可批量)，打过的不再算待核；按 承运商+账期+单号(首个金蝶单号)。锁月后不可改。
+review_doc_ok = Table(
+    "logistics_review_doc_ok", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("carrier", String(60)),
+    Column("period", String(7)),
+    Column("doc_no", String(300)),
+    Column("confirmed_by", String(50)),
+    Column("confirmed_at", String(20)),
+)
+
+TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {

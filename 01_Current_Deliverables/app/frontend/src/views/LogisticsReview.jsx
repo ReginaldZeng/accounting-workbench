@@ -9,7 +9,7 @@
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -26,6 +26,7 @@ const DOC_Q = [
   { f: 'qtydiff', n: '数量不符', k: 'qtydiff', cls: 'warn', dd: '账单量与金蝶核对量超过容差(2%或1)' },
   { f: 'info', n: '打托·免核', k: 'info', cls: 'neu', dd: '打托倒算托规 / 整车包车议价 / 无单据调整，仅提示' },
   { f: 'ok', n: '一致', k: 'ok', cls: 'ok', dd: '账单量＝金蝶核对量' },
+  { f: 'done', n: '已确认', k: 'done', cls: 'ok', dd: '复核人核过没问题、已点「确认无误」的单据（不再算待核）' },
   { f: 'all', n: '全部', k: 'all', cls: '', dd: '' },
 ]
 const STATE_PILL = { miss: ['金蝶查无', 'bad'], qtydiff: ['数量不符', 'warn'], info: [null, 'neu'], ok: ['一致', 'ok'] }
@@ -154,6 +155,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [supq, setSupq] = useState('')
   const [ovBusy, setOvBusy] = useState(false)     // 总表「刷新」进行中
   const [open, setOpen] = useState({})            // 逐单：展开的单据号
+  const [sel, setSel] = useState({})              // 逐单：勾选的单据(可跨页) key → 统计用快照
   const [dfilt, setDfilt] = useState(null)        // 逐单：从第①步「可逐单」点进来的组 {fsub,ffee,fbiz,label}
   const [mode, setMode] = useState('overview')   // overview 总表 / detail 单承运商三步流
   const [step, setStep] = useState('lines')      // lines / docs / sign
@@ -175,7 +177,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     setOvBusy(true)
     reviewOverview(period, true).then(setOv).catch(e => flash('刷新失败：' + e.message)).finally(() => setOvBusy(false))
   }
-  const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setPtsEdit(false); setOpen({}); setDfilt(null); setMode('detail') }
+  const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setPtsEdit(false); setOpen({}); setSel({}); setDfilt(null); setMode('detail') }
   // 第①步「可逐单」→ 第②步只看这一组单据
   const goDocs = od => {
     setDfilt({ fsub: od.fsub, ffee: od.ffee, fbiz: od.fbiz, label: [od.fsub, od.ffee, od.blabel].filter(Boolean).join(' · ') })
@@ -251,6 +253,32 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const dc = (d && d.by_box && d.doc_counts) || null        // 逐单按真实核对结果的计数（物料模板承运商）
   const toggle = no => setOpen(o => ({ ...o, [no]: !o[no] }))
   const docs = (d && d.docs) || []
+  // 勾选：单号作键(无单据的调整行用 主体+费用+金额+序号 兜底)，快照存统计要用的量，翻页不丢
+  const dkey = (x, i) => x.doc_no || `nd|${x.subject}|${x.fee_item}|${x.doc_fee}|${page}|${i}`
+  const snap = x => ({ doc_no: x.doc_no || '', fee: x.doc_fee || 0, kg: x.doc_kg || 0, bill: x.bill_amt, unit: x.bill_unit || '', sales: x.sales, confirmed: !!x.confirmed })
+  const toggleSel = (x, i) => setSel(o => { const k = dkey(x, i); const n = { ...o }; if (n[k]) delete n[k]; else n[k] = snap(x); return n })
+  const pageAllOn = docs.length > 0 && docs.every((x, i) => sel[dkey(x, i)])
+  const pageSomeOn = docs.some((x, i) => sel[dkey(x, i)])
+  const togglePage = () => setSel(o => { const n = { ...o }; docs.forEach((x, i) => { const k = dkey(x, i); if (pageAllOn) delete n[k]; else n[k] = snap(x) }); return n })
+  const selList = Object.values(sel)
+  const selStat = (() => {
+    const fee = selList.reduce((a, x) => a + (x.fee || 0), 0)
+    const wk = selList.filter(x => x.kg > 0), kg = wk.reduce((a, x) => a + x.kg, 0), feeKg = wk.reduce((a, x) => a + (x.fee || 0), 0)
+    const units = [...new Set(selList.map(x => x.unit).filter(Boolean))]
+    const bill = units.length === 1 ? selList.reduce((a, x) => a + (Number(x.bill) || 0), 0) : null
+    const ws = selList.filter(x => x.sales > 0), sales = ws.reduce((a, x) => a + x.sales, 0), feeS = ws.reduce((a, x) => a + (x.fee || 0), 0)
+    return { n: selList.length, fee, kg, unitFee: kg > 0 ? feeKg / kg : null, nKg: wk.length, bill, unit: units[0] || '', multiUnit: units.length > 1,
+      sales, ratio: sales > 0 ? feeS / sales : null, nSales: ws.length,
+      toConfirm: selList.filter(x => x.doc_no && !x.confirmed).map(x => x.doc_no), toUndo: selList.filter(x => x.doc_no && x.confirmed).map(x => x.doc_no),
+      nNoDoc: selList.filter(x => !x.doc_no).length }
+  })()
+  useEffect(() => { setSel({}) }, [carrier, period])
+  const doConfirm = (nos, on) => {
+    if (!nos.length) return
+    setBusy('confirm')
+    reviewDocConfirm(carrier, period, nos, on).then(r => { flash(on ? `已确认 ${r.n} 张单据` : `已取消确认 ${r.n} 张`); setSel({}); load() })
+      .catch(e => flash('操作失败：' + e.message)).finally(() => setBusy(''))
+  }
   const allOpen = docs.length > 0 && docs.every(x => open[x.doc_no])
   const setAll = v => setOpen(v ? Object.fromEntries(docs.map(x => [x.doc_no, true])) : {})
   const lrows = (L && L.rows) || []
@@ -423,6 +451,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .dtbl td.party{max-width:220px;overflow:hidden;text-overflow:ellipsis}
       .lrv small.u{font-size:10px;color:#8A96A2;margin-left:2px}
       .lrv .dtbl tr.xrow td{background:#EEF5F8;padding:0 12px 12px 30px;white-space:normal}
+      .lrv .dtbl th.ck,.lrv .dtbl td.ck{width:28px;padding-left:10px;padding-right:0;text-align:center}
+      .lrv .dtbl tr.drow.rowok td{background:#F3FAF6}
+      .lrv .dtbl tr.drow.rowsel td{background:#EAF3FB}
+      .lrv .selbar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;padding:9px 15px;
+        background:#E8F2EC;border-top:1px solid #BFDCCB;border-bottom:1px solid #BFDCCB;font-size:13px;color:#1B2733}
+      .lrv .selbar b{color:#1E6B43}.lrv .selbar .sp{flex:1}
       .lrv .xpanel{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:hidden}
       .lrv .xcls{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid #EEF1F3;font-size:12.5px}
       .lrv .xcls label{display:inline-flex;gap:6px;align-items:center;color:#5E6B78}
@@ -644,6 +678,20 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
             <input type="search" placeholder="搜单号/客户/物料" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
           </div>
+          {selStat.n > 0 && <div className="selbar">
+            <span>已选 <b>{selStat.n}</b> 张</span>
+            <span>运费 <b className="mono">{money(selStat.fee)}</b></span>
+            {selStat.bill != null && <span>账单量 <b className="mono">{num(selStat.bill)}</b> {selStat.unit}</span>}
+            {selStat.multiUnit && <span className="dim">账单量单位不一，不合计</span>}
+            {selStat.kg > 0 && <span>金蝶重量 <b className="mono">{num(selStat.kg)}</b> 千克</span>}
+            {selStat.unitFee != null && <span title={selStat.nKg < selStat.n ? `按有金蝶重量的 ${selStat.nKg} 张算` : ''}>单位运费 <b className="mono">{selStat.unitFee.toFixed(2)}</b> 元/千克{selStat.nKg < selStat.n && <small className="dim">（{selStat.nKg} 张）</small>}</span>}
+            {selStat.ratio != null && <span title={`按有销售额的 ${selStat.nSales} 张算`}>销售额 <b className="mono">{money(selStat.sales)}</b> · 费比 <b className="mono">{(selStat.ratio * 100).toFixed(2)}%</b>{selStat.nSales < selStat.n && <small className="dim">（{selStat.nSales} 张）</small>}</span>}
+            <span className="sp" />
+            {selStat.toConfirm.length > 0 && <button className="btn sm pri" disabled={locked || busy === 'confirm'} onClick={() => doConfirm(selStat.toConfirm, true)}>✓ 确认无误（{selStat.toConfirm.length}）</button>}
+            {selStat.toUndo.length > 0 && <button className="btn sm" disabled={locked || busy === 'confirm'} onClick={() => doConfirm(selStat.toUndo, false)}>取消确认（{selStat.toUndo.length}）</button>}
+            <button className="btn sm" onClick={() => setSel({})}>清空选择</button>
+            {selStat.nNoDoc > 0 && <small className="dim" style={{ width: '100%' }}>其中 {selStat.nNoDoc} 张无单据的调整行只参与统计，不打确认。</small>}
+          </div>}
           {d === null && <div className="ovempty">读账单与金蝶出库单中…</div>}
           {d && d.by_box && (docs.length === 0
             ? <div className="ovempty">{group === 'ex' && !q
@@ -654,18 +702,23 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <datalist id="lrv-fee">{feeOpts.map(s => <option key={s} value={s} />)}</datalist>
               <table className="dtbl">
                 <thead><tr>
+                  <th className="ck"><input type="checkbox" title="全选本页" checked={pageAllOn}
+                    ref={el => { if (el) el.indeterminate = !pageAllOn && pageSomeOn }} onChange={togglePage} /></th>
                   <th></th><th>单据号</th><th>主体 · 费用类型</th><th>产品线</th><th>往来（客户/仓库）</th>
                   <th className="num">账单量 <small>/ 金蝶</small></th><th className="num">换算系数</th><th>核对结论</th>
                   <th className="num">运费</th><th className="num">单位运费<small>元/kg</small></th><th className="num">费比<small> / 销售额</small></th><th>备注</th>
                 </tr></thead>
                 <tbody>
-                  {docs.map(x => {
+                  {docs.map((x, i) => {
                     const isO = !!open[x.doc_no]
+                    const on = !!sel[dkey(x, i)]
+                    const cf = x.confirmed
                     const [pl, pc] = STATE_PILL[x.state] || [null, 'neu']
                     const qd = x.q_diff
                     const ps = x.parties || []
                     return [
-                      <tr key={x.doc_no + '|r'} className={'drow st-' + x.state + (isO ? ' open' : '')} onClick={() => toggle(x.doc_no)}>
+                      <tr key={x.doc_no + '|r'} className={'drow st-' + x.state + (isO ? ' open' : '') + (cf ? ' rowok' : '') + (on ? ' rowsel' : '')} onClick={() => toggle(x.doc_no)}>
+                        <td className="ck" onClick={e => e.stopPropagation()}><input type="checkbox" checked={on} onChange={() => toggleSel(x, i)} /></td>
                         <td className="caret">{isO ? '▾' : '▸'}</td>
                         <td><span className="mono">{x.doc_no || '—'}</span><span className="sub">{x.n_mat ? `${x.n_mat} 个物料` : (x.doc_no ? '金蝶无此单据' : '无单据')}</span></td>
                         <td>{x.subject}<span className="sub">{x.fee_item}</span></td>
@@ -674,14 +727,16 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td className="num">{num(x.bill_amt)}<small className="u">{x.bill_unit}</small>
                           <span className="sub">金蝶 {num(x.kd_sum)}{x.kd_unit}{qd != null && !isZero(qd) && <span className={x.state === 'qtydiff' ? 'diffbad' : ''}> · 差{qd > 0 ? '+' : ''}{num(qd)}</span>}</span></td>
                         <td className="num">{x.conv == null ? '—' : x.conv}</td>
-                        <td><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}</td>
+                        <td>{cf
+                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className="sub">{pl || x.mode_cn} · {cf.by}</span></>
+                          : <><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}</>}</td>
                         <td className="num">{money(x.doc_fee)}</td>
                         <td className="num">{x.unit_fee == null ? '—' : x.unit_fee}</td>
                         <td className="num">{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null && <span className="sub">{money(x.sales)}</span>}</td>
                         <td onClick={e => e.stopPropagation()}><input className="noteinp" disabled={locked} defaultValue={x.note || ''} key={x.doc_no + '|n|' + (x.note || '')} placeholder="备注…"
                           onBlur={e => { const v = e.target.value.trim(); if (v !== (x.note || '')) saveNote(x.doc_no, v) }} /></td>
                       </tr>,
-                      isO && <tr key={x.doc_no + '|x'} className="xrow"><td colSpan="12">
+                      isO && <tr key={x.doc_no + '|x'} className="xrow"><td colSpan="13">
                         <div className="xpanel">
                           {x.doc_no && <div className="xcls">
                             <span className="dim">归类</span>

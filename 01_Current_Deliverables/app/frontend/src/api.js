@@ -587,6 +587,7 @@ export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?peri
 export const reviewOverview = (period, fresh = false) => j(`/api/logistics-review/overview?period=${period}${fresh ? '&fresh=1' : ''}`)
 export const reviewExportUrl = (carrier, period) => `/api/logistics-review/export?carrier=${encodeURIComponent(carrier)}&period=${period}`
 export const reviewDocNote = (carrier, period, doc_no, note) => j('/api/logistics-review/doc-note', { method: 'POST', body: JSON.stringify({ carrier, period, doc_no, note }) })
+export const reviewDocConfirm = (carrier, period, doc_nos, on = true) => j('/api/logistics-review/doc-confirm', { method: 'POST', body: JSON.stringify({ carrier, period, doc_nos, on }) })
 export const reviewDocClassify = (carrier, period, doc_no, patch) => j('/api/logistics-review/doc-classify', { method: 'POST', body: JSON.stringify({ carrier, period, doc_no, ...patch }) })
 export const reviewAccrual = (carrier, period) => j(`/api/logistics-review/accrual?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 // 复核台三步流（V2.690）：逐笔计提复核 / 差异解释 / 供应商复核要点 / 整月登记与撤销

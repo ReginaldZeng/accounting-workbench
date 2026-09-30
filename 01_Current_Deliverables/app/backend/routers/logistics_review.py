@@ -25,6 +25,14 @@ router = APIRouter()
 BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
 SG, LN, CP = store.review_sign, store.review_line_note, store.review_carrier_pts   # 复核登记 / 逐笔差异解释 / 供应商复核要点
 FX = store.review_line_fix   # 计提更正(只登记应改为什么，打印交专人去金蝶改)
+DK = store.review_doc_ok     # 逐单已确认(复核人核过没问题的单据)
+
+
+def _doc_ok(carrier, period):
+    """本月已确认的单据 {单号: {by, at}}。"""
+    with db._engine.connect() as c:
+        return {r[0]: {"by": r[1] or "", "at": r[2] or ""} for r in c.execute(select(
+            DK.c.doc_no, DK.c.confirmed_by, DK.c.confirmed_at).where((DK.c.carrier == carrier) & (DK.c.period == period))).all()}
 
 _DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "fee", "bizline",
                 "fee_item", "qty", "unit", "amount", "carrier_sub", "prov", "charge_wt",
@@ -1485,6 +1493,11 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         rows = [r for r in rows if inb(_eff_subject(r), _eff_fee(r), _bill_biz(r))]
         counts = lr.verdict_counts(rows)
 
+    conf = _doc_ok(carrier, period)
+
+    def d0_of(r):
+        return (r.get("doc_no") or "").split("+")[0]
+
     def keep(r):
         if q_on:
             # 搜索忽略分组(异常/通过都能搜到)；小承运商放行全部到 view 层全字段筛，大承运商按单号/省预筛
@@ -1493,6 +1506,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             return qs in (r.get("doc_no") or "") or qs in (r.get("prov") or "")
         if group == "all":
             return True
+        if group == "done":
+            return d0_of(r) in conf
+        if d0_of(r) in conf:           # 已确认的单据不再算待核/异常/一致
+            return False
         if group == "ex":
             return r["price_state"] in ("gap", "free", "over") or r["qty_state"] in ("miss", "qtydiff")
         if group in ("miss", "qtydiff"):
@@ -1525,14 +1542,29 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 _ACCR_CACHE[ck] = (pool, None, _t.time())
             if bucket_on:
                 pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
-            dc ={"miss": 0, "qtydiff": 0, "info": 0, "ok": 0}
+            for x in pool:                    # 缓存里的单据每次重挂确认态
+                x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
+            dc = {"miss": 0, "qtydiff": 0, "info": 0, "ok": 0, "done": 0}
             for x in pool:
-                dc[x["state"]] = dc.get(x["state"], 0) + 1
+                k = "done" if x.get("confirmed") else x["state"]
+                dc[k] = dc.get(k, 0) + 1
             dc["all"] = len(pool)
         else:
             pool = _box_docs(sl, carrier)
+            for x in pool:
+                x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
             dc = {"miss": counts.get("miss", 0), "qtydiff": counts.get("qtydiff", 0), "info": 0,
-                  "ok": counts.get("pass", 0), "all": len(rows)}
+                  "ok": counts.get("pass", 0), "all": len(rows), "done": 0}
+            seen = set()
+            for r in rows:                    # 大承运商按中间表行扣掉已确认的(行级近似，单号去重计已确认)
+                d0 = d0_of(r)
+                if d0 and d0 in conf:
+                    if d0 not in seen:
+                        seen.add(d0); dc["done"] += 1
+                    if r.get("qty_state") in ("miss", "qtydiff"):
+                        dc[r["qty_state"]] = max(0, dc[r["qty_state"]] - 1)
+                    elif r.get("verdict") == "pass":
+                        dc["ok"] = max(0, dc["ok"] - 1)
         dc["ex"] = dc["miss"] + dc["qtydiff"]
 
         def dhit(x):
@@ -1543,9 +1575,11 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             return any(qs in str(m.get(f) or "") for m in x["materials"] for f in ("name", "code", "party"))
         if q_on:
             pool = [x for x in pool if dhit(x)]
+        elif full and group == "done":
+            pool = [x for x in pool if x.get("confirmed")]
         elif full and group != "all":
             want = {"ex": ("miss", "qtydiff"), "pass": ("ok",)}.get(group, (group,))
-            pool = [x for x in pool if x["state"] in want]
+            pool = [x for x in pool if not x.get("confirmed") and x["state"] in want]
         if full:
             dtot, docs = len(pool), pool[(page - 1) * size: page * size]
         else:
@@ -1727,6 +1761,34 @@ async def review_doc_classify(request: Request):
                   (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(**vals))
     _bust(carrier, period)   # 归类变了 → 逐笔/结论缓存作废，重算
     return {"ok": True}
+
+
+@router.post("/api/logistics-review/doc-confirm")
+async def review_doc_confirm(request: Request):
+    """逐单「已确认」：批量打标/取消(on=false)。只认有金蝶单号的单据；已登记复核的月份不可改。不动账单、不影响对账。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period = (b.get("carrier") or "").strip(), (b.get("period") or "").strip()
+    nos = list(dict.fromkeys(str(x).strip() for x in (b.get("doc_nos") or []) if str(x).strip()))
+    on = b.get("on", True) is not False
+    if not carrier or not period or not nos:
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期/单号"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    have = _doc_ok(carrier, period)
+    with db._engine.begin() as c:
+        if on:
+            todo = [n for n in nos if n not in have]
+            for n in todo:
+                c.execute(insert(DK).values(carrier=carrier, period=period, doc_no=n, confirmed_by=_uname(u), confirmed_at=_now()))
+        else:
+            todo = [n for n in nos if n in have]
+            if todo:
+                c.execute(delete(DK).where((DK.c.carrier == carrier) & (DK.c.period == period) & (DK.c.doc_no.in_(todo))))
+    return {"ok": True, "n": len(todo), "on": on}
 
 
 @router.post("/api/logistics-review/line-note")
@@ -2233,8 +2295,9 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费量", "_cw")]),
             ("复核数据", "B23B2E", "F8DDD8", False, [("账单量", "bill_amt"), ("账单单位", "bill_unit"),
                 ("★计费方式", "mode_cn"), ("★换算系数", "conv"), ("运费(分摊)", "fee"),
-                ("单位运费(元/kg)", "unit_fee"), ("★费比", "ratio"), ("备注", "note")]),
+                ("单位运费(元/kg)", "unit_fee"), ("★费比", "ratio"), ("备注", "note"), ("已确认", "_ok")]),
         ]
+        okmap = _doc_ok(carrier, period)   # 逐单已确认：确认人+时间
         col = 1
         col_of_key = {}
         for name, gc, hc, _dl, cols in groups:
@@ -2251,7 +2314,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             col += span
         # 单据级列(跨该单所有物料行合并单元格)；物料级列(客户/物料/数量/运费分摊/单位运费/费比/销售额)不合并
         _DOCLVL = {"subject", "carrier", "fee_item", "bizline", "doc_no", "_cs", "_amt", "_cw",
-                   "bill_amt", "bill_unit", "mode_cn", "conv", "note"}
+                   "bill_amt", "bill_unit", "mode_cn", "conv", "note", "_ok"}
         def _is_doclvl(k):
             return k in _DOCLVL or k.startswith("_fee:")
         rownum = 3
@@ -2282,6 +2345,9 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                         val = amt
                     elif k == "_cw":
                         val = cw
+                    elif k == "_ok":
+                        ok_ = okmap.get(d0) if d0 else None
+                        val = ("✓ %s %s" % (ok_["by"], ok_["at"])).strip() if ok_ else None
                     elif k.startswith("_fee:"):
                         val = sfd.get(k[5:])
                     elif k == "ratio":
