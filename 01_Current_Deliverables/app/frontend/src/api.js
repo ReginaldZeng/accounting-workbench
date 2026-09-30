@@ -574,8 +574,9 @@ export const invSLaterDocs = (token, id, files) => invPost(`/api/inv/s/later/${i
 // 后补池页「业务同事自助登记」入口：网址＋二维码（要后补池权限）
 export const invSLink = () => j('/api/inv/s/link')
 // [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.633 物流账单复核（核价×核量→归一态；pilot 迅鸽）
-export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '') =>
-  j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${period}&group=${group}&page=${page}&q=${encodeURIComponent(q)}`)
+export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '', filt = null) =>
+  j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${period}&group=${group}&page=${page}&q=${encodeURIComponent(q)}` +
+    (filt ? `&fsub=${encodeURIComponent(filt.fsub || '')}&ffee=${encodeURIComponent(filt.ffee || '')}&fbiz=${encodeURIComponent(filt.fbiz || '')}` : ''))
 export const reviewSpec = (carrier) => j(`/api/logistics-review/spec?carrier=${encodeURIComponent(carrier)}`)
 export const reviewPriceCard = (carrier) => j(`/api/logistics-review/price-card?carrier=${encodeURIComponent(carrier)}`)
 export const reviewImportPriceCard = (carrier, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/price-card/import?carrier=${encodeURIComponent(carrier)}`, { method: 'POST', body: fd }) }

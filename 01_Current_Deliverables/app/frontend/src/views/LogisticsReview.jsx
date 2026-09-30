@@ -52,6 +52,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [supq, setSupq] = useState('')
   const [ovBusy, setOvBusy] = useState(false)     // 总表「刷新」进行中
   const [open, setOpen] = useState({})            // 逐单：展开的单据号
+  const [dfilt, setDfilt] = useState(null)        // 逐单：从第①步「可逐单」点进来的组 {fsub,ffee,fbiz,label}
   const [mode, setMode] = useState('overview')   // overview 总表 / detail 单承运商三步流
   const [step, setStep] = useState('lines')      // lines / docs / sign
   const [ov, setOv] = useState(null)
@@ -72,11 +73,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     setOvBusy(true)
     reviewOverview(period, true).then(setOv).catch(e => flash('刷新失败：' + e.message)).finally(() => setOvBusy(false))
   }
-  const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setPtsEdit(false); setOpen({}); setMode('detail') }
+  const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setPtsEdit(false); setOpen({}); setDfilt(null); setMode('detail') }
+  // 第①步「可逐单」→ 第②步只看这一组单据
+  const goDocs = od => {
+    setDfilt({ fsub: od.fsub, ffee: od.ffee, fbiz: od.fbiz, label: [od.fsub, od.ffee, od.blabel].filter(Boolean).join(' · ') })
+    setGroup('all'); setPage(1); setQ(''); setOpen({}); setStep('docs')
+  }
+  const clearDfilt = () => { setDfilt(null); setGroup('ex'); setPage(1); setOpen({}) }
 
   const load = useCallback(() => {
-    reviewResult(carrier, period, group, page, q).then(setD).catch(e => setMsg(e.message))
-  }, [carrier, period, group, page, q])
+    reviewResult(carrier, period, group, page, q, dfilt).then(setD).catch(e => setMsg(e.message))
+  }, [carrier, period, group, page, q, dfilt])
   useEffect(() => { load() }, [load])
   // 逐笔：等主表 d 到了再拉（避免与逐单取数并发争用金蝶会话把主表拖住）；后端带缓存
   const applyL = r => { setL(r); setPts(r.points || ''); setPtsSaved(r.points || '') }
@@ -214,6 +221,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .ltbl tr.rowbad td{background:#FFF7F5}.lrv .ltbl tr.rowbad td[rowspan]{background:#FFF1EE}
       .lrv .ltbl tr.total td{font-weight:700;border-top:2px solid #CBD5DC;background:#E1EEF3}
       .lrv .ltbl tr.fsep td{border-top:1px dashed #CBD5DC}
+      .lrv .odbtn{font:inherit;font-size:12px;border-radius:999px;padding:2px 10px;cursor:pointer;border:1px solid transparent;white-space:nowrap}
+      .lrv .odbtn.ok{background:#DCEFE4;color:var(--ok)}.lrv .odbtn.ok:hover{border-color:var(--ok)}
+      .lrv .odbtn.part{background:#F7E9CF;color:var(--warn)}.lrv .odbtn.part:hover{border-color:var(--warn)}
+      .lrv .dfilt{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 15px;background:#F5FAFC;border-bottom:1px solid #DCE2E7;font-size:12.5px;color:#1B2733}
       .lrv .ltbl td.pl{line-height:1.25}
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
       .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
@@ -334,7 +345,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         {L && !L.err && (
           <div className="sumstrip">
             <div className="tile accent"><div className="v">{money(L.accr_total)}</div><div className="l">计提合计（含税）</div></div>
-            <div className="tile"><div className="v">{money(L.bill_total)}</div><div className="l">账单合计{L.bill_src === 'accrual' ? '（费用项汇总）' : '（逐单汇总）'}</div></div>
+            <div className="tile"><div className="v">{money(L.bill_total)}</div><div className="l">账单合计{L.bill_src === 'accrual' ? '（费用项汇总）' : '（逐单汇总）'}{L.od_total && <> · 可逐单 {Math.round(L.od_total.ratio * 100)}%</>}</div></div>
             <div className={'tile ' + (isZero(L.diff_total) ? 'ok' : 'bad')}><div className="v">{dtxt(L.diff_total)}</div><div className="l">差异（计提 − 账单）</div></div>
             <div className={'tile ' + (L.n_unexplained ? 'warn' : 'ok')}><div className="v">{L.n_unexplained || 0}</div><div className="l">有差异、还没写解释（笔）</div></div>
           </div>)}
@@ -362,7 +373,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <div className="tw"><table className="mtbl ltbl">
               <thead><tr>
                 <th>产品线 <small className="dim">/ 产品类型 · 部门</small></th><th>凭证号</th>
-                <th className="num">计提金额<small>含税</small></th><th className="num">账单金额</th><th className="num">差异</th><th>差异解释</th>
+                <th className="num">计提金额<small>含税</small></th><th className="num">账单金额</th><th className="num">差异</th>
+                <th title="账单金额里有多少是带金蝶单号的单据撑着的；点一下去第②步只看这一组单据">可逐单</th><th>差异解释</th>
               </tr></thead>
               <tbody>
                 {groups.map((g, gi) => {
@@ -372,7 +384,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     h && <tr key={'h' + gi} className="ghead">
                       <td className="gname" colSpan="2">{h.subject}{h.fee_type ? ' · ' + h.fee_type : ''}<span className="tag">{lines.filter(x => x.kind === 'accr').length} 笔</span></td>
                       <td className="num">{money(h.amt)}</td><td className="num">{money(h.bill)}</td>
-                      <td className={'num ' + dcls(h.diff)}>{dtxt(h.diff)}</td><td className="gsub"></td>
+                      <td className={'num ' + dcls(h.diff)}>{dtxt(h.diff)}</td><td></td><td className="gsub"></td>
                     </tr>,
                     ...lines.map(r => {
                       const anchor = r.bill != null
@@ -390,6 +402,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           <td className="num">{r.amt == null ? <span className="dim">—</span> : <>{money(r.amt)}{r.tax_rate != null && <span className="tag">{pct(r.tax_rate)}</span>}</>}</td>
                           {anchor && <td rowSpan={r.bill_span || 1} className="num">{money(r.bill)}<span className="tag">{r.level === 'biz' ? '按产品线' : '按组'}</span></td>}
                           {anchor && <td rowSpan={r.bill_span || 1} className={'num ' + dcls(r.diff)}>{dtxt(r.diff)}</td>}
+                          {anchor && <td rowSpan={r.bill_span || 1}>{(() => {
+                            const od = r.od
+                            if (!od) return null
+                            if (!od.n) return <span className="tag" title="这部分账单没有金蝶单号（仓储、调整、月结汇总等），只能看汇总差异">否 · 汇总核</span>
+                            const full = od.ratio >= 0.995
+                            return <button className={'odbtn ' + (full ? 'ok' : 'part')} onClick={() => goDocs(od)}
+                              title={`${od.n} 单带金蝶单号，覆盖账单 ${money(od.amt)}；点击去第②步只看这一组`}>
+                              {full ? `✓ ${od.n} 单` : `部分 ${Math.round(od.ratio * 100)}% · ${od.n} 单`} ›</button>
+                          })()}</td>}
                           <td>{bad || (r.note || '').trim()
                             ? <input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
                               placeholder="为什么差…" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} />
@@ -402,6 +423,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   <td colSpan="2">合计</td>
                   <td className="num">{money(L.accr_total)}</td><td className="num">{money(L.bill_total)}</td>
                   <td className={'num ' + dcls(L.diff_total)}>{dtxt(L.diff_total)}</td>
+                  <td>{L.od_total && <span className="dim" style={{ fontWeight: 500, fontSize: 12 }}>{Math.round(L.od_total.ratio * 100)}%</span>}</td>
                   <td>{L.n_unexplained ? <span className="pill warn">{L.n_unexplained} 笔有差异未解释</span> : <span className="pill ok">差异均已解释</span>}</td>
                 </tr>
               </tbody>
@@ -412,6 +434,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             计提＝金蝶费用借方(6*/5*)逐分录，产品线/产品类型/部门取凭证核算维度；税率按凭证（同凭证进项税÷费用，税额按分录精确分摊），计提金额已含税与账单同口径。
             账单先按 主体×费用类型×产品线 配到笔（标"按产品线"），产品线对不上的退回按 主体×费用类型 挂该组首笔（标"按组"，跨行合并）；账单有计提无的单独一行。
             {L.bill_src === 'accrual' ? '账单取费用项汇总行（月结清单口径）。' : '账单取逐单明细汇总。'}仓储费等无单据的费用只在本页看差异、写解释，不进逐单。
+            「可逐单」＝这笔账单金额里带金蝶单号的逐单明细占多少（✓ 全覆盖 / 部分 xx% / 否＝只能按汇总核），点一下去第②步只看这一组单据。
           </details>}
         </div>
         <div className="navbar"><button className="btn pri" onClick={() => goStep('docs')}>下一步：逐单核价核量 ›</button></div>
@@ -428,6 +451,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </div>}
         <div className="card">
           <h3>逐单核价核量 <span className="dim">· 一单一行，点行展开看物料、改归类；仓储费等无单据的费用在第①步看差异</span></h3>
+          {dfilt && <div className="dfilt">只看：<b>{dfilt.label}</b>（从逐笔计提复核点进来）
+            <button className="btn sm" onClick={clearDfilt}>✕ 看全部单据</button>
+            <button className="btn sm" onClick={() => setStep('lines')}>‹ 回逐笔计提复核</button></div>}
           {d && d.by_box && dc && <div className="dq">
             {DOC_Q.map(g =>
               <button key={g.f} className={'dqchip ' + g.cls + (g.f === group ? ' on' : '')} title={g.dd}

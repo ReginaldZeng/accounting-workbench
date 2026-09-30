@@ -1116,6 +1116,27 @@ def _build_lines(request, carrier, period):
     for r in brows:
         k = (_eff_subject(r), _eff_fee(r), _bill_biz(r))
         bill3[k] = bill3.get(k, 0.0) + float(r.get("amount") or 0)
+    # 可逐单：每个账单归口里，有多少金额是带金蝶单号的逐单明细撑着的(无单据/只有月结汇总行的只能按汇总核)
+    det3 = {}
+    for r in allrows:
+        if r.get("grain") != "detail":
+            continue
+        no = (r.get("doc_no") or "").strip()
+        if not no or no == "无单据":
+            continue
+        d = det3.setdefault((_eff_subject(r), _eff_fee(r), _bill_biz(r)), {"docs": set(), "amt": 0.0})
+        d["docs"].add(no)
+        d["amt"] += float(r.get("amount") or 0)
+
+    def _od(keys, bill):
+        # fbiz：产品线集合用 | 连，空产品线记 "-"，第②步按同一口径筛单据
+        n = len(set().union(*[det3[k]["docs"] for k in keys if k in det3]))
+        amt = round(sum(det3.get(k, {}).get("amt", 0.0) for k in keys), 2)
+        ratio = max(0.0, min(1.0, amt / bill)) if bill and bill > 0 else 0.0
+        bizs = sorted({k[2] for k in keys})
+        return {"n": n, "amt": amt, "ratio": round(ratio, 4), "fsub": keys[0][0] if keys else "",
+                "ffee": keys[0][1] if keys else "", "fbiz": "|".join(b or "-" for b in bizs),
+                "blabel": "、".join(b or "无产品线" for b in bizs)}
     groups = {}
     for e in ents:
         groups.setdefault((e["subject"], e["fee_norm"]), []).append(e)
@@ -1164,6 +1185,11 @@ def _build_lines(request, carrier, period):
                           "proj": "", "dept": "", "vno": "", "acct": "", "amt_net": None, "tax_rate": None, "tax": None, "amt": None,
                           "key": key, "kind": "bill_only", "level": "group", "bill": rest, "bill_span": 1,
                           "diff": round(-rest, 2), "note": notes.get(key, "")})
+        rkeys = [(s, f, b) for (ss, ff, b) in bill3 if ss == s and ff == f and b not in used]
+        for x in grows:
+            if x.get("bill") is None:
+                continue
+            x["od"] = _od([(s, f, x["biz"])] if x.get("level") == "biz" else rkeys, x["bill"])
         if grows:
             grows[0]["ffirst"] = True          # 主体组内每段费用类型的首行(前端画细分隔)
         srows.extend(grows)
@@ -1179,6 +1205,8 @@ def _build_lines(request, carrier, period):
     return {"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
             "accr_total": round(atot, 2), "bill_total": round(btot, 2), "diff_total": round(atot - btot, 2),
             "adj": adj, "prior": prior, "prior_total": round(sum(p["net"] for p in prior), 2),
+            "od_total": (lambda a: {"amt": a, "ratio": round(max(0.0, min(1.0, a / btot)), 4) if btot > 0 else 0.0})(
+                round(sum(det3[k]["amt"] for k in bill3 if k in det3), 2)),
             "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl}
 
 
@@ -1280,7 +1308,7 @@ def _box_docs(rsub, carrier):
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
                 "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                 "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
-                "note": r.get("note") or ""}
+                "note": r.get("note") or "", "bbiz": _bill_biz(r)}
         mrows = []
         kgbase = 0.0
         if not lines:
@@ -1353,7 +1381,9 @@ def _box_docs(rsub, carrier):
 
 @router.get("/api/logistics-review/result")
 def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
-                  group: str = "ex", page: int = 1, size: int = 50, q: str = ""):
+                  group: str = "ex", page: int = 1, size: int = 50, q: str = "",
+                  fsub: str = "", ffee: str = "", fbiz: str = ""):
+    # fsub/ffee/fbiz：从第①步「可逐单」点进来时只看这一组(主体/费用类型/产品线，口径同逐笔复核的账单归口)
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     card, ncard = _load_card(carrier)
@@ -1372,6 +1402,17 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     qs = (q or "").strip()
     q_on = bool(qs)
     q_small = len(rows) <= 300   # 小承运商搜索时全量取物料，支持按客户/物料名搜(大承运商仍按单号/省预筛省金蝶)
+
+    bucket_on = bool(fsub or ffee or fbiz)
+    bset = {("" if t == "-" else t) for t in fbiz.split("|")} if fbiz else None
+
+    def inb(sub, fee, bb):
+        return (not fsub or sub == fsub) and (not ffee or fee == ffee) and (bset is None or bb in bset)
+
+    rows_all = rows            # 单据视图缓存按整家承运商建，按组筛在缓存之后
+    if bucket_on:
+        rows = [r for r in rows if inb(_eff_subject(r), _eff_fee(r), _bill_biz(r))]
+        counts = lr.verdict_counts(rows)
 
     def keep(r):
         if q_on:
@@ -1402,16 +1443,18 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         import time as _t
         # 小承运商(≤300单)：全量出单据视图、缓存10分钟，按真实核对结果筛/计数/翻页，不用每次翻页都拉金蝶；
         # 大承运商(迅鸽几千单)：只按当前页取金蝶物料，计数沿用中间表核量态。
-        full = len(rows) <= 300
+        full = len(rows_all) <= 300
         if full:
             ck = ("view", carrier, period)
             cc = _ACCR_CACHE.get(ck)
             if cc and _t.time() - cc[2] < 600:
                 pool = cc[0]
             else:
-                pool = _box_docs(rows, carrier)
+                pool = _box_docs(rows_all, carrier)
                 _ACCR_CACHE[ck] = (pool, None, _t.time())
-            dc = {"miss": 0, "qtydiff": 0, "info": 0, "ok": 0}
+            if bucket_on:
+                pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
+            dc ={"miss": 0, "qtydiff": 0, "info": 0, "ok": 0}
             for x in pool:
                 dc[x["state"]] = dc.get(x["state"], 0) + 1
             dc["all"] = len(pool)
