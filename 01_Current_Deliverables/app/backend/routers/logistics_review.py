@@ -755,6 +755,22 @@ def _box_reg(spec):
     return int(m.group(1)) if m else None
 
 
+def _box_div(m):
+    """金蝶数量折成箱的除数：计价单位本来是箱→1；规格 N袋/箱→N；规格 20kg/箱、10L/件 且金蝶数量单位是千克/升→按每箱千克/升折(恒茂采购原料)。"""
+    u = str(m.get("计价单位") or m.get("基本单位") or "").strip()
+    if u == "箱":
+        return 1
+    br = _box_reg(m.get("规格"))
+    if br:
+        return br
+    mw = re.search(r"(\d+(?:\.\d+)?)\s*(kg|千克|公斤|l|升)\s*/\s*(?:箱|件)", str(m.get("规格") or ""), re.I)
+    if mw:
+        su = mw.group(2).lower()
+        if (su in ("kg", "千克", "公斤") and u in ("千克", "kg", "公斤")) or (su in ("l", "升") and u in ("升", "l", "L")):
+            return float(mw.group(1))
+    return None
+
+
 def _bizline_of(annot):
     """从费用标注取业务线段（植物肉/鲜食/零售/小料/豆蛋制品/电商/山姆零售/kikiherb/海外）。"""
     for b in ("植物肉", "鲜食", "山姆", "零售", "小料", "豆蛋制品", "电商", "kikiherb", "海外"):
@@ -1463,13 +1479,11 @@ def _box_docs(rsub, carrier):
             # 无账单重量 → 按件数/箱核：金蝶箱数=数量件÷规格箱规
             per = []
             for m in lines:
-                br = _box_reg(m.get("规格"))
+                br = _box_div(m)                  # 袋/箱、计价单位箱、20kg/箱·10L/件(按千克/升折)
                 try:
                     qcnt = float(m.get("数量件") or 0)
                 except (TypeError, ValueError):
                     qcnt = 0.0
-                if str(m.get("计价单位") or "").strip() == "箱":
-                    br = 1                        # 金蝶本来就按箱计(采购入库原料常见)，不用箱规折
                 per.append((qcnt / br) if (br and qcnt) else 0.0)
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
@@ -1604,13 +1618,15 @@ def _box_docs(rsub, carrier):
                     x["unit_fee"] = round(tot / x["doc_kg"], 2)
                 if x.get("sales"):
                     x["ratio"] = round(tot / x["sales"], 4)
-            qx = [x for x in xs if x.get("state") in ("ok", "qtydiff") and x.get("kd_sum")]
-            if len(qx) == len(xs) and not any(x.get("trip") and x["trip"].get("verdict") for x in xs if x.get("mode_cn", "").startswith("包天")):
+            # 一张单拆几行批次(恒茂入库)：单行比整单会被误判成打托/包车，先把几行账单量加起来再比金蝶
+            if all(x.get("kd_sum") for x in xs) and not any(str(x.get("mode_cn", "")).startswith("包天") or x.get("state") == "price" for x in xs)                     and len({x.get("bill_unit") for x in xs}) == 1 and all(x.get("bill_amt") for x in xs):
                 bsum = round(sum(float(x.get("bill_amt") or 0) for x in xs), 2)
                 kd = xs[0]["kd_sum"]
                 st = "ok" if abs(bsum - kd) <= max(1.0, 0.02 * kd) else "qtydiff"
                 for x in xs:
                     x["state"], x["q_diff"], x["doc_bill_all"] = st, round(bsum - kd, 2), bsum
+                    x["mode_cn"] = "本单 %d 行合计 %s%s" % (len(xs), _fmt_amt(bsum), x.get("bill_unit") or "")
+                    x["conv"] = round(kd / bsum, 3) if bsum else None
     return docs
 
 
