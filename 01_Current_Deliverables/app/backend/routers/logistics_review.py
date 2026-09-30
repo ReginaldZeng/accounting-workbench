@@ -1881,17 +1881,22 @@ def _fix_sheet(wb, carrier, period, fixes):
                     cl.font = GRAY
                 else:
                     cl.font = Font(bold=True, color="8A5A00"); cl.fill = PatternFill("solid", fgColor="FDF6E8")
-        ws.row_dimensions[rr].height = 30
+        # 行高按说明折行估(说明列宽30≈15个汉字一行)，打印不截字
+        nl = max(1, -(-len(str(fx.get("memo") or "")) // 15))
+        ws.row_dimensions[rr].height = max(30, 15 * nl + 8)
     rr = 4 + len(fixes) + 1
     ws.cell(rr, 7, "合计").font = Font(bold=True); ws.cell(rr, 7).alignment = R
     ws.cell(rr, 8, round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2))
     ws.cell(rr, 8).number_format = "#,##0.00"; ws.cell(rr, 8).font = Font(bold=True); ws.cell(rr, 8).alignment = R
+    ws.cell(rr, 7).border = BD; ws.cell(rr, 8).border = BD
+    ws.row_dimensions[rr].height = 20
     by = sorted({fx.get("by") for fx in fixes if fx.get("by")})
     ws.merge_cells(start_row=rr + 2, start_column=1, end_row=rr + 2, end_column=N)
     ws.cell(rr + 2, 1, "登记人：%s        更正人：______________        更正日期：______________        复核人：______________"
             % ("、".join(by) or "______________")).alignment = LFT
     ws.row_dimensions[rr + 2].height = 26
-    for j, w in enumerate([5, 11, 9, 8, 10, 12, 9, 12, 8, 10, 12, 9, 26, 13], 1):
+    ws.row_dimensions[4].height = 30
+    for j, w in enumerate([5, 11, 9, 14, 10, 12, 9, 13, 14, 10, 12, 9, 30, 14], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
