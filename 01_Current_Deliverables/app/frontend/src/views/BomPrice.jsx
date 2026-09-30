@@ -2371,8 +2371,85 @@ function VerPicker({ pool, value, onChange, exclude, rel, placeholder }) {
   )
 }
 
+// ============ 版本对比（V2.700 重做）============
+// 业务方反馈「这个页面不太清晰」。原「完整对比」表头按版本分组、数据却按字段新旧交错排，对不上；同名物料按名字配（两行「桃胶」互相配错，
+// 出现 70→78、-2.31 的假差异）；「只看差异/完整对比」两套表来回切；导出按钮不导出。重做为：
+//   ① 成本总览：五分项 + 全成本两版并排，变化额与主要原因，一句话结论；
+//   ② 逐料对比一张表：每行一种物料，每格「旧 → 新」（没变只写一个数），变化标签，信息变化（编码/型号/规格/品牌/名称）写在物料名下；
+//      配对＝真实物料编码 › 名称+型号 › 名称 › 型号+用量（换料），一对一不重复；
+//   ③「只看有变化」开关；④ 导出差异清单（CSV，Excel 直接打开）。
+const _realCode = c => { const s = String(c || '').trim(); return s && s.length >= 6 && !/系列/.test(s) ? s : '' }
+const _eqn = (x, y, eps = 1e-9) => Math.abs((x || 0) - (y || 0)) <= eps
+const _blank = v => (v == null || v === '0' || v === 0) ? '' : String(v).trim()
+const _norm = s => String(s || '').replace(/\s+/g, '').toLowerCase()
+
+function _cmpRow(seg, a, b) {
+  const cA = a ? (a.costExcl || 0) * GROSS : null
+  const cB = b ? (b.costExcl || 0) * GROSS : null
+  const d = (cB || 0) - (cA || 0)
+  const tags = [], info = []
+  if (!a) tags.push('新增')
+  else if (!b) tags.push('移除')
+  else {
+    if (_norm(a.matName) !== _norm(b.matName)) { tags.push('换料'); info.push({ lab: '名称', va: a.matName || '—', vb: b.matName || '—' }) }
+    if (!_eqn(a.priceIncl, b.priceIncl)) tags.push('调价')
+    if (!_eqn(a.qtyPerKg, b.qtyPerKg)) tags.push('调量')
+    if (!_eqn(a.taxRate, b.taxRate)) tags.push('税率')
+    if (!tags.length && !_eqn(cA, cB, 1e-6)) tags.push('成本变')
+    ;[['matCode', '编码'], ['model', '型号'], ['spec', '规格'], ['brand', '品牌']].forEach(([k, lab]) => {
+      const va = _blank(a[k]), vb = _blank(b[k])
+      if (va !== vb) info.push({ lab, va: va || '—', vb: vb || '—' })
+    })
+  }
+  return { seg, a, b, cA, cB, d, tags, info, changed: tags.length > 0 || info.length > 0 }
+}
+
+function pairVersionMats(A, B) {
+  const aMats = A.materials || [], bMats = B.materials || []
+  const segOf = m => m.seg || '原料'
+  const usedA = new Set(), match = new Map()
+  const passes = [
+    (a, b) => !!_realCode(a.matCode) && _realCode(a.matCode) === _realCode(b.matCode),
+    (a, b) => _norm(a.matName) === _norm(b.matName) && _norm(a.model) === _norm(b.model),
+    (a, b) => _norm(a.matName) === _norm(b.matName),
+    (a, b) => !!_norm(a.model) && _norm(a.model) === _norm(b.model) && _eqn(a.qtyPerKg, b.qtyPerKg),   // 换料：同型号同用量、名称编码变了
+  ]
+  passes.forEach(ok => bMats.forEach((b, bi) => {
+    if (match.has(bi)) return
+    const ai = aMats.findIndex((a, i) => !usedA.has(i) && segOf(a) === segOf(b) && ok(a, b))
+    if (ai >= 0) { match.set(bi, ai); usedA.add(ai) }
+  }))
+  const rows = []
+  ;['原料', '包材'].forEach(seg => {
+    bMats.forEach((b, bi) => { if (segOf(b) === seg) rows.push(_cmpRow(seg, match.has(bi) ? aMats[match.get(bi)] : null, b)) })
+    aMats.forEach((a, ai) => { if (segOf(a) === seg && !usedA.has(ai)) rows.push(_cmpRow(seg, a, null)) })
+  })
+  return rows
+}
+
+const _TAG_STY = {
+  新增: { color: 'var(--green)', background: 'var(--green-bg)', borderColor: 'var(--green-line)' },
+  移除: { color: 'var(--red)', background: 'var(--red-bg)', borderColor: 'var(--red)' },
+  调价: { color: 'var(--teal)', background: 'var(--teal-bg)', borderColor: 'var(--teal)' },
+  调量: { color: 'var(--accent)', background: 'var(--accent-soft)', borderColor: 'var(--accent)' },
+  税率: { color: 'var(--amber)', background: 'var(--amber-bg)', borderColor: 'var(--amber-line)' },
+  换料: { color: 'var(--purple)', background: 'var(--purple-bg)', borderColor: 'var(--purple-line)' },
+  成本变: { color: 'var(--ink-2)', background: 'var(--bg-sub)', borderColor: 'var(--line)' },
+}
+const _upC = d => (d > 0 ? 'var(--red)' : 'var(--green)')
+const _dTxt = (d, dec = 2) => (Math.abs(d) < Math.pow(10, -dec) / 2 ? '—' : (d > 0 ? '▲ +' : '▼ −') + fmt(Math.abs(d), dec))
+
+function CmpPair({ a, b, dec = 4, pctFmt }) {
+  const f = v => (v == null ? '—' : (pctFmt ? (v * 100).toFixed(0) + '%' : fmt(v, dec)))
+  if (a != null && b != null && _eqn(a, b, Math.pow(10, -dec) / 2)) return <td className="num">{f(b)}</td>
+  return <td className="num" style={{ whiteSpace: 'nowrap' }}>
+    <span style={{ color: 'var(--ink-3)', textDecoration: a != null && b != null ? 'line-through' : 'none' }}>{f(a)}</span>
+    <span style={{ color: 'var(--ink-3)', margin: '0 5px' }}>→</span>
+    <b style={{ color: b == null ? 'var(--ink-3)' : (a == null ? 'var(--ink)' : _upC((b || 0) - (a || 0))) }}>{f(b)}</b></td>
+}
+
 function Compare({ entry, all, onBack, backLabel, flash }) {
-  // V2.698 业务方定：台账左上角进入，左选「对比版本」、右选「当前版本」，都按 CP 码挑；不限同一产品（换码前后不同 CP 也能比）。
+  // V2.698：台账左上角进入，左「对比版本」右「当前版本」都按 CP 码挑；不限同一产品（换码前后不同 CP 也能比）。
   // 候选池＝台账可见的已初审/已审核版本（历史标准成本导入没有物料明细，不入池）。从详情/深链进来：当前版本＝本条，对比版本＝同产品上一版（没有就同物料编码最近一版）。
   const pool = (all || []).filter(x => !x.imported && (x.materials || []).length)
   const byNewest = (a, b) => (b.calcDate || '').localeCompare(a.calcDate || '') || (b.id - a.id)
@@ -2387,7 +2464,7 @@ function Compare({ entry, all, onBack, backLabel, flash }) {
   }
   const [bId, setBId] = useState(entry ? entry.id : null)
   const [aId, setAId] = useState(() => seedPrev(entry))
-  const [mode, setMode] = useState('diff')
+  const [onlyChanged, setOnlyChanged] = useState(true)
   const A = pool.find(v => v.id === aId) || null
   const B = pool.find(v => v.id === bId) || null
   const rel = (x) => {
@@ -2398,172 +2475,169 @@ function Compare({ entry, all, onBack, backLabel, flash }) {
     return null
   }
   const pickB = (id) => { setBId(id); if (!aId || aId === id) setAId(seedPrev(pool.find(v => v.id === id))) }
-  const matOf = (v, name) => (v.materials || []).find(m => clean(m.matName) === clean(name))
-
-  const num = [], info = []
   const ready = !!(A && B)
-  if (ready) {
-  const bMats = B.materials || [], aMats = A.materials || []
-  bMats.forEach(m => {
-    const a = matOf(A, m.matName)
-    if (!a) { num.push({ cat: '新增', catCls: 'ok', name: m.matName, field: '整行', va: null, vb: (m.costExcl || 0) * GROSS, d: (m.costExcl || 0) * GROSS }); return }
-    if (Math.abs((m.priceIncl || 0) - (a.priceIncl || 0)) > 1e-9)
-      num.push({ cat: '调价', catCls: 'teal', name: m.matName, field: '含税价', va: a.priceIncl, vb: m.priceIncl, d: ((m.costExcl || 0) - (a.costExcl || 0)) * GROSS })
-    else if (Math.abs((m.qtyPerKg || 0) - (a.qtyPerKg || 0)) > 1e-9)
-      num.push({ cat: '调量', catCls: 'kd', name: m.matName, field: '添加量', va: (a.qtyPerKg ?? 0).toFixed(4), vb: (m.qtyPerKg ?? 0).toFixed(4), d: ((m.costExcl || 0) - (a.costExcl || 0)) * GROSS })
-    else if (Math.abs((m.costExcl || 0) - (a.costExcl || 0)) > 1e-9)
-      num.push({ cat: '变更', catCls: 'kd', name: m.matName, field: '成本', va: fmt(a.costExcl, 4), vb: fmt(m.costExcl, 4), d: ((m.costExcl || 0) - (a.costExcl || 0)) * GROSS })
-    if (Math.abs((m.taxRate || 0) - (a.taxRate || 0)) > 1e-9)
-      num.push({ cat: '税率', catCls: 'late', name: m.matName, field: '税率', va: (a.taxRate * 100).toFixed(0) + '%', vb: (m.taxRate * 100).toFixed(0) + '%', d: 0 });
-    ['matCode:物料编码', 'model:型号', 'spec:规格', 'brand:品牌'].forEach(f => {
-      const [k, lab] = f.split(':'); const av = a[k] === '0' ? '' : (a[k] || ''); const bv = m[k] === '0' ? '' : (m[k] || '')
-      if (av !== bv) info.push({ name: m.matName, field: lab, va: av || '—', vb: bv || '—' })
-    })
-  })
-  aMats.forEach(m => { if (!matOf(B, m.matName)) num.push({ cat: '移除', catCls: 'werr', name: m.matName, field: '整行', va: (m.costExcl || 0) * GROSS, vb: null, d: -(m.costExcl || 0) * GROSS }) })
-  ;[['mfg', '加工费'], ['load', '装卸费'], ['adm', '管理费']].forEach(([k, lab]) => {
-    if (Math.abs((B.fee[k] || 0) - (A.fee[k] || 0)) > 1e-9)
-      num.push({ cat: '费用', catCls: 'late', name: lab, field: '含税', va: fmt(A.fee[k]), vb: fmt(B.fee[k]), d: (B.fee[k] || 0) - (A.fee[k] || 0) })
-  })
-  if (A.cpCode !== B.cpCode) info.push({ name: '表头', field: '产品编号', va: A.cpCode, vb: B.cpCode })
-  num.sort((x, y) => Math.abs(y.d) - Math.abs(x.d))
-  }
-  const dd = ready ? (B.comp.full || 0) - (A.comp.full || 0) : 0
+  const rows = useMemo(() => (A && B ? pairVersionMats(A, B) : []), [aId, bId, all])   // eslint-disable-line react-hooks/exhaustive-deps
   const crossCp = ready && A.productKey !== B.productKey
+  const verHead = (v, lab) => <span>{lab}<br /><b className="mono" style={{ color: 'var(--ink)' }}>{v.cpCode}</b>
+    <span className="muted" style={{ fontWeight: 400 }}> · {(v.calcDate || '').slice(0, 10)}</span></span>
 
+  // 成本总览：五分项 + 全成本；原料/包材的「主要原因」取该段对全成本影响最大的两行
+  const topOf = (seg) => rows.filter(r => r.seg === seg && Math.abs(r.d) >= 0.005).sort((x, y) => Math.abs(y.d) - Math.abs(x.d)).slice(0, 2)
+  const rowName = r => { const m = r.b || r.a; return (m.matName || '') + (_blank(m.model) ? `（${m.model}）` : '') }
+  const overview = !ready ? [] : [
+    { lab: '原料（含复配料）', key: 'mat', why: topOf('原料').map(r => `${rowName(r)} ${r.tags.join('/')} ${_dTxt(r.d)}`).join('；') },
+    { lab: '包材', key: 'pack', why: topOf('包材').map(r => `${rowName(r)} ${r.tags.join('/')} ${_dTxt(r.d)}`).join('；') },
+    { lab: '加工费', key: 'mfg' }, { lab: '装卸费', key: 'load' }, { lab: '管理费', key: 'adm' },
+  ].map(o => ({ ...o, va: A.comp[o.key] || 0, vb: B.comp[o.key] || 0, d: (B.comp[o.key] || 0) - (A.comp[o.key] || 0) }))
+  const fullA = ready ? A.comp.full || 0 : 0, fullB = ready ? B.comp.full || 0 : 0, dd = fullB - fullA
+  const drivers = !ready ? [] : [
+    ...overview.filter(o => o.key !== 'mat' && o.key !== 'pack' && Math.abs(o.d) >= 0.005).map(o => ({ txt: o.lab, d: o.d })),
+    ...rows.filter(r => Math.abs(r.d) >= 0.005).map(r => ({ txt: `${rowName(r)} ${r.tags.join('/')}`, d: r.d })),
+  ].sort((x, y) => Math.abs(y.d) - Math.abs(x.d)).slice(0, 3)
+  const nChanged = rows.filter(r => r.changed).length
+  const nHidden = onlyChanged ? rows.length - nChanged : 0
+
+  const exportCsv = () => {
+    if (!ready) return
+    const esc = v => { const s = v == null ? '' : String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s }
+    const n = (v, dec = 4) => (v == null ? '' : Number(v).toFixed(dec))
+    const L = []
+    L.push(['版本对比', `对比版 ${A.cpCode} ${A.productName} 核算${A.calcDate}`, `当前版 ${B.cpCode} ${B.productName} 核算${B.calcDate}`].map(esc).join(','))
+    L.push('')
+    L.push(['成本总览（含税 元/kg）', '对比版', '当前版', '变化', '主要原因'].join(','))
+    overview.forEach(o => L.push([o.lab, n(o.va), n(o.vb), n(o.d), o.why || ''].map(esc).join(',')))
+    L.push(['全成本', n(fullA), n(fullB), n(dd), ''].map(esc).join(','))
+    L.push('')
+    L.push(['分段', '变化', '物料名称', '物料编码', '型号', '添加量·对比版', '添加量·当前版', '含税价·对比版', '含税价·当前版',
+      '税率·对比版', '税率·当前版', '成本含税·对比版', '成本含税·当前版', '对全成本影响', '信息变化'].join(','))
+    rows.forEach(r => {
+      const m = r.b || r.a
+      L.push([r.seg, r.tags.join('/') || (r.info.length ? '信息变化' : '一致'), m.matName, m.matCode, m.model,
+        n(r.a?.qtyPerKg), n(r.b?.qtyPerKg), n(r.a?.priceIncl, 2), n(r.b?.priceIncl, 2),
+        r.a ? (r.a.taxRate * 100).toFixed(0) + '%' : '', r.b ? (r.b.taxRate * 100).toFixed(0) + '%' : '',
+        n(r.cA), n(r.cB), n(r.d), r.info.map(i => `${i.lab}:${i.va}→${i.vb}`).join('；')].map(esc).join(','))
+    })
+    const blob = new Blob(['﻿' + L.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const el = document.createElement('a'); el.href = url; el.download = `版本对比_${A.cpCode}_vs_${B.cpCode}.csv`
+    document.body.appendChild(el); el.click(); el.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000)
+    flash && flash('已导出差异清单（CSV，Excel 可直接打开）')
+  }
+
+  const th = (t, right) => <th className="th" style={right ? { textAlign: 'right' } : undefined}>{t}</th>
   return (
     <>
       <div className="head">
         <div><div className="h-title">版本对比{B ? ' · ' + B.productName : ''}</div>
-          <div className="h-sub">任选两个已审核版本（按 CP 码挑）· 同产品新旧版、换码前后不同 CP 都能比 · 数值差异 / 信息差异，逐行标注成本影响</div></div>
+          <div className="h-sub">任选两个已审核版本（按 CP 码挑）· 同产品新旧版、换码前后不同 CP 都能比 · 含税 元/kg</div></div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn-sec" onClick={onBack}>{backLabel || '返回采购核算表'}</button>
-          <button className="btn-sec" onClick={() => flash('导出差异清单 xlsx')}>导出差异清单</button>
+          <button className="btn-sec" disabled={!ready} onClick={exportCsv} title="导出成本总览 + 逐料对比（CSV，Excel 可直接打开）">导出差异清单</button>
         </div>
       </div>
       <div className="body">
         <div className="bom-crumbs"><a className="lk" onClick={onBack}>成本台账</a> / {B ? B.productName + ' / ' : ''}版本对比</div>
-        <div className="card bom-filterbar">
+        <div className="card bom-filterbar" style={{ flexWrap: 'wrap', gap: 10 }}>
           <span className="flabel">对比版本</span>
           <VerPicker pool={pool} value={aId} onChange={setAId} exclude={bId} rel={rel} placeholder={B ? '输 CP 码 / 产品名 / 物料编码（同产品的排最前）' : '先选右边的当前版本'} />
-          <b>vs</b>
+          <b style={{ color: 'var(--ink-3)' }}>→</b>
           <span className="flabel">当前版本</span>
           <VerPicker pool={pool} value={bId} onChange={pickB} exclude={aId} placeholder="输 CP 码 / 产品名 / 物料编码" />
           <span style={{ flex: 1 }} />
-          <Seg value={mode} onChange={setMode} opts={[['diff', '只看差异'], ['full', '完整对比']]} />
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', userSelect: 'none' }}>
+            <input type="checkbox" checked={onlyChanged} onChange={e => setOnlyChanged(e.target.checked)} />只看有变化</label>
         </div>
+
         {!ready ? <div className="card" style={{ padding: 28, textAlign: 'center', color: 'var(--ink-3)' }}>
           {B ? '再在左边选一个「对比版本」——同产品、同物料编码的会排在最前。' : '先在右边选「当前版本」（输 CP 码搜），再在左边选要对比的版本。'}</div> : <>
-        {crossCp && <div className="banner" style={{ display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }}>
-          ⇄ <b>跨 CP 对比</b>：对比版 <span className="mono">{A.cpCode}</span> {A.productName} → 当前版 <span className="mono">{B.cpCode}</span> {B.productName}
-          {rel(A) ? `（${rel(A)}）` : '（两条不是同一产品，也没有共用物料编码——确认选对了）'}。明细按物料名称对齐。</div>}
-        <div className="card bom-stats">
-          <Stat lab="全成本（含税）对比版 → 当前版" v={`${fmt(A.comp.full)} → ${fmt(B.comp.full)}`} small suf="" />
-          <div className="bom-stat"><div className="bom-stat-l">变化</div>
-            <div className="bom-stat-v" style={{ fontSize: 18, color: dd > 0 ? 'var(--red)' : 'var(--green)' }}>{dd > 0 ? '▲ +' : '▼ '}{fmt(Math.abs(dd))}</div>
-            <small>元/kg · {A.comp.full ? ((dd / A.comp.full) * 100).toFixed(1) : '0'}%</small></div>
-          <Stat lab="数值差异" v={num.length} suf="处" />
-          <Stat lab="信息差异" v={info.length} suf="处" />
-        </div>
+          {crossCp && <div className="banner" style={{ display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }}>
+            ⇄ <b>跨 CP 对比</b>：{A.cpCode} {A.productName} → {B.cpCode} {B.productName}
+            {rel(A) ? `（${rel(A)}）` : '——两条不是同一产品，也没有共用物料编码，确认选对了'}。</div>}
 
-        {mode === 'diff' ? <>
+          {/* ① 成本总览 */}
           <div className="card bom-sect">
-            <div className="bom-secthead"><span className="bom-no">1</span><b>数值差异</b>
-              <span className="muted" style={{ fontSize: 11 }}>单价 / 用量 / 税率 / 费用 / 新增移除</span>
-              <span style={{ flex: 1 }} /><span className="muted"><b>{num.length}</b> 处</span></div>
+            <div className="bom-secthead"><span className="bom-no">1</span><b>成本总览</b>
+              <span className="muted" style={{ fontSize: 11 }}>五分项 · 含税 元/kg</span></div>
+            <div style={{ padding: '4px 16px 12px', fontSize: 14, lineHeight: 1.8 }}>
+              全成本 <b>{fmt(fullA)}</b> → <b>{fmt(fullB)}</b>，
+              {Math.abs(dd) < 0.005 ? <b>基本不变</b> : <b style={{ color: _upC(dd) }}>{dd > 0 ? '上涨' : '下降'} {fmt(Math.abs(dd))} 元/kg（{fullA ? (dd > 0 ? '+' : '') + ((dd / fullA) * 100).toFixed(1) : '0'}%）</b>}
+              {drivers.length > 0 && <span className="muted">　主要来自：{drivers.map((x, i) => <span key={i}>{i ? '；' : ''}{x.txt} <b style={{ color: _upC(x.d) }}>{_dTxt(x.d)}</b></span>)}</span>}
+            </div>
             <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
-              <th className="th">类别</th><th className="th">物料 / 项目</th><th className="th">字段</th>
-              <th className="th" style={{ textAlign: 'right' }}>对比版 · {A.cpCode} · {(A.calcDate || '').slice(5)}</th>
-              <th className="th" style={{ textAlign: 'right' }}>当前版 · {B.cpCode} · {(B.calcDate || '').slice(5)}</th>
-              <th className="th" style={{ textAlign: 'right' }}>Δ成本（含税）元/kg</th>
+              {th('项目')}
+              <th className="th" style={{ textAlign: 'right' }}>{verHead(A, '对比版')}</th>
+              <th className="th" style={{ textAlign: 'right' }}>{verHead(B, '当前版')}</th>
+              {th('变化', true)}{th('主要原因')}
             </tr></thead><tbody>
-              {num.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 22 }}>无数值差异 —— 两版金额完全一致</td></tr>}
-              {num.map((r, i) => (<tr key={i}>
-                <td><span className={'tag ' + (r.catCls === 'teal' ? 'ok' : r.catCls)} style={r.catCls === 'teal' ? { color: 'var(--teal)', background: 'var(--teal-bg)', borderColor: 'var(--teal)' } : {}}>{r.cat}</span></td>
-                <td style={{ fontWeight: 600 }}>{r.name}</td><td className="muted">{r.field}</td>
-                <td className="num bom-old">{r.va == null ? '—' : (typeof r.va === 'number' ? fmt(r.va) : r.va)}</td>
-                <td className={'num ' + (r.d > 0 ? 'bom-up' : r.d < 0 ? 'bom-down' : '')}>{r.vb == null ? '—' : (r.d > 0 ? '▲ ' : r.d < 0 ? '▼ ' : '') + (typeof r.vb === 'number' ? fmt(r.vb) : r.vb)}</td>
-                <td className="num">{Math.abs(r.d) < 1e-6 ? <span className="muted">—</span> : <span className={r.d > 0 ? 'bom-up' : 'bom-down'}>{r.d > 0 ? '▲ +' : '▼ -'}{fmt(Math.abs(r.d), 4)}</span>}</td>
-              </tr>))}
+              {overview.map(o => (
+                <tr key={o.key}>
+                  <td style={{ fontWeight: 600 }}>{o.lab}</td>
+                  <td className="num" style={{ color: 'var(--ink-3)' }}>{fmt(o.va, 2)}</td>
+                  <td className="num">{fmt(o.vb, 2)}</td>
+                  <td className="num"><b style={{ color: Math.abs(o.d) < 0.005 ? 'var(--ink-3)' : _upC(o.d) }}>{_dTxt(o.d)}</b></td>
+                  <td className="muted" style={{ fontSize: 12 }}>{o.why || ''}</td>
+                </tr>))}
+              <tr className="bom-subrow">
+                <td>全成本（含税）</td>
+                <td className="num">{fmt(fullA, 2)}</td><td className="num">{fmt(fullB, 2)}</td>
+                <td className="num"><b style={{ color: Math.abs(dd) < 0.005 ? 'var(--ink-3)' : _upC(dd) }}>{_dTxt(dd)}</b></td>
+                <td className="muted" style={{ fontSize: 12 }}>{fullA ? `${dd > 0 ? '+' : ''}${((dd / fullA) * 100).toFixed(1)}%` : ''}</td>
+              </tr>
             </tbody></table></div>
           </div>
+
+          {/* ② 逐料对比 */}
           <div className="card bom-sect">
-            <div className="bom-secthead"><span className="bom-no">2</span><b>信息差异</b>
-              <span className="muted" style={{ fontSize: 11 }}>编码 / 型号 / 规格 / 品牌 的补全或变化（不影响金额）</span>
-              <span style={{ flex: 1 }} /><span className="muted"><b>{info.length}</b> 处</span></div>
+            <div className="bom-secthead"><span className="bom-no">2</span><b>逐料对比</b>
+              <span className="muted" style={{ fontSize: 11 }}>每格「对比版 → 当前版」，没变的只写一个数 · ▲红＝成本上升 ▼绿＝下降</span>
+              <span style={{ flex: 1 }} />
+              <span className="muted" style={{ fontSize: 12 }}><b>{nChanged}</b> 行有变化{nHidden > 0 && <>，已隐藏 {nHidden} 行未变化</>}</span></div>
             <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
-              <th className="th">物料</th><th className="th">字段</th><th className="th">对比版 · {A.cpCode}</th><th className="th">当前版 · {B.cpCode}</th>
+              {th('变化')}{th('物料')}{th('添加量 kg/kg', true)}{th('含税价', true)}{th('税率', true)}{th('成本（含税）', true)}{th('对全成本影响', true)}
             </tr></thead><tbody>
-              {info.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 22 }}>无信息差异</td></tr>}
-              {info.map((r, i) => <tr key={i}><td style={{ fontWeight: 600 }}>{r.name}</td><td className="muted">{r.field}</td>
-                <td className="bom-old">{r.va}</td><td>{r.vb}</td></tr>)}
+              {['原料', '包材'].map(seg => {
+                const segRows = rows.filter(r => r.seg === seg)
+                const shown = onlyChanged ? segRows.filter(r => r.changed) : segRows
+                const sA = segRows.reduce((s, r) => s + (r.cA || 0), 0), sB = segRows.reduce((s, r) => s + (r.cB || 0), 0)
+                const segChanged = segRows.filter(r => r.changed).length
+                return (
+                  <React.Fragment key={seg}>
+                    <tr><td colSpan={7} style={{ background: 'var(--bg-sub)', fontWeight: 700, fontSize: 12.5 }}>
+                      {seg}<span className="muted" style={{ fontWeight: 400, marginLeft: 8 }}>{segRows.length} 行 · {segChanged} 行有变化</span></td></tr>
+                    {shown.length === 0 && <tr><td colSpan={7} className="muted" style={{ textAlign: 'center', padding: 12, fontSize: 12 }}>{seg}没有变化</td></tr>}
+                    {shown.map((r, i) => {
+                      const m = r.b || r.a
+                      return (
+                        <tr key={seg + i} style={r.tags.includes('移除') ? { opacity: 0.85 } : undefined}>
+                          <td style={{ whiteSpace: 'nowrap' }}>{r.tags.length
+                            ? r.tags.map(t => <span key={t} className="tag" style={{ ..._TAG_STY[t], marginRight: 4 }}>{t}</span>)
+                            : (r.info.length ? <span className="tag" style={_TAG_STY['成本变']}>信息变化</span> : <span className="muted" style={{ fontSize: 12 }}>一致</span>)}</td>
+                          <td>
+                            <div style={{ fontWeight: 600, textDecoration: r.tags.includes('移除') ? 'line-through' : 'none' }}>{m.matName}</div>
+                            <div className="muted mono" style={{ fontSize: 11 }}>{[_blank(m.matCode), _blank(m.model)].filter(Boolean).join(' · ') || '—'}</div>
+                            {r.info.map((x, j) => (
+                              <div key={j} style={{ fontSize: 11, color: 'var(--amber)' }}>{x.lab}：<span style={{ textDecoration: 'line-through', color: 'var(--ink-3)' }}>{x.va}</span> → {x.vb}</div>))}
+                          </td>
+                          <CmpPair a={r.a?.qtyPerKg} b={r.b?.qtyPerKg} dec={4} />
+                          <CmpPair a={r.a?.priceIncl} b={r.b?.priceIncl} dec={2} />
+                          <CmpPair a={r.a?.taxRate} b={r.b?.taxRate} dec={2} pctFmt />
+                          <CmpPair a={r.cA} b={r.cB} dec={4} />
+                          <td className="num"><b style={{ color: Math.abs(r.d) < 5e-5 ? 'var(--ink-3)' : _upC(r.d) }}>{_dTxt(r.d, 4)}</b></td>
+                        </tr>)
+                    })}
+                    <tr className="bom-subrow">
+                      <td colSpan={5}>{seg}小计（含税）</td>
+                      <CmpPair a={sA} b={sB} dec={4} />
+                      <td className="num"><b style={{ color: Math.abs(sB - sA) < 5e-5 ? 'var(--ink-3)' : _upC(sB - sA) }}>{_dTxt(sB - sA, 4)}</b></td>
+                    </tr>
+                  </React.Fragment>)
+              })}
             </tbody></table></div>
           </div>
-        </> : <FullCompare A={A} B={B} matOf={matOf} />}
+          <div className="foot">配对规则：先按物料编码（「XX系列」这类占位码不算），再按名称+型号，再按名称，最后同型号同用量视为「换料」；一对一，不会两行配同一行。成本均为含税口径（不含税 × 1.13，与台账一致）；各行「对全成本影响」相加＝原料/包材小计变化。</div>
         </>}
-        <div className="foot">匹配规则：明细按物料名称对齐（编码缺失时仍可比）；Δ与成本列均为含税口径（不含税×1.13，与台账一致），逐行 Δ 相加＝全成本变化。红▲=涨 绿▼=跌 灰=旧值。</div>
       </div>
     </>
-  )
-}
-
-function FullCompare({ A, B, matOf }) {
-  const seg = (label) => {
-    const bRows = (B.materials || []).filter(m => m.seg === label)
-    const aOnly = (A.materials || []).filter(m => m.seg === label && !matOf(B, m.matName))
-    const rows = [...bRows.map(m => ({ m, a: matOf(A, m.matName), removed: false })), ...aOnly.map(m => ({ m, a: m, removed: true }))]
-    return { label, rows }
-  }
-  const cell = (cur, prev, pick, dec = 4) => {
-    const cv = pick(cur), pv = prev ? pick(prev) : null
-    const d = pv == null ? 0 : (cv || 0) - (pv || 0)
-    return { cv, pv, d, dec }
-  }
-  const Row = ({ m, a, removed }) => {
-    const nested = m.matName === '复合调味料'
-    const q = cell(m, a, x => x.qtyPerKg)
-    const p = cell(m, a, x => x.priceIncl, 2)
-    const c = { cv: (m.costExcl || 0) * GROSS, pv: a && !removed ? (a.costExcl || 0) * GROSS : (removed ? (m.costExcl || 0) * GROSS : null) }
-    c.d = removed ? -(m.costExcl || 0) * GROSS : (a ? ((m.costExcl || 0) - (a.costExcl || 0)) * GROSS : (m.costExcl || 0) * GROSS)
-    const oc = (v, dec = 4) => <td className="num bom-old">{v == null ? '—' : fmt(v, dec)}</td>
-    const nc = (v, d, dec = 4) => <td className={'num ' + (d > 0 ? 'bom-up' : d < 0 ? 'bom-down' : '')}>{v == null ? '—' : (d > 0 ? '▲ ' : d < 0 ? '▼ ' : '') + fmt(v, dec)}</td>
-    return <tr>
-      <td>{nested ? <span className="tag late">复配料</span> : (m.seg === '原料' ? <span className="tag ok">原辅料</span> : <span className="tag werr">包材</span>)}</td>
-      <td style={{ fontWeight: 600 }}>{m.matName} {removed && <span className="tag werr">移除</span>}{!a && !removed && <span className="tag ok">新增</span>}</td>
-      {oc(removed ? m.qtyPerKg : q.pv)}{nc(removed ? null : q.cv, q.d)}
-      {oc(removed ? m.priceIncl : p.pv, 2)}{nc(removed ? null : p.cv, p.d, 2)}
-      {oc(removed ? c.pv : (a ? (a.costExcl || 0) * GROSS : null))}{nc(removed ? null : c.cv, c.d)}
-      <td className="num">{Math.abs(c.d) < 1e-6 ? <span className="muted">—</span> : <span className={c.d > 0 ? 'bom-up' : 'bom-down'}>{c.d > 0 ? '▲ +' : '▼ -'}{fmt(Math.abs(c.d), 4)}</span>}</td>
-    </tr>
-  }
-  const subRow = (label, av, bv) => { const d = (bv || 0) - (av || 0); return (
-    <tr className="bom-subrow"><td colSpan={2}>{label}</td>
-      <td colSpan={2} className="num bom-old">{fmt(av)}</td>
-      <td colSpan={2} className={'num ' + (d > 0 ? 'bom-up' : d < 0 ? 'bom-down' : '')}>{d > 0 ? '▲ ' : d < 0 ? '▼ ' : ''}{fmt(bv)}</td>
-      <td className="num">{Math.abs(d) < 1e-6 ? <span className="muted">—</span> : <span className={d > 0 ? 'bom-up' : 'bom-down'}>{d > 0 ? '▲ +' : '▼ -'}{fmt(Math.abs(d), 4)}</span>}</td></tr>) }
-  return (
-    <div className="card bom-sect">
-      <div className="bom-secthead"><span className="bom-no">≡</span><b>完整对比</b>
-        <span className="muted" style={{ fontSize: 11 }}>全部明细并排 · 红▲=上涨 绿▼=下降 灰=旧值 · 含小计与费用链</span></div>
-      <div className="tbl-wrap" style={{ border: 'none' }}><table><thead>
-        <tr><th className="th" rowSpan={2}>类型</th><th className="th" rowSpan={2}>物料</th>
-          <th className="th" colSpan={3} style={{ textAlign: 'center', borderLeft: '1px solid var(--line)' }}>对比版 · {A.cpCode} · {A.calcDate.slice(5)}</th>
-          <th className="th" style={{ display: 'none' }} />
-          <th className="th" rowSpan={2} style={{ textAlign: 'right' }}>Δ成本（含税）</th></tr>
-        <tr><th className="th" style={{ textAlign: 'right', borderLeft: '1px solid var(--line)' }}>添加量</th><th className="th" style={{ textAlign: 'right' }}>含税价</th><th className="th" style={{ textAlign: 'right' }}>成本(含税)</th>
-          <th className="th" style={{ textAlign: 'right' }}>添加量</th><th className="th" style={{ textAlign: 'right' }}>含税价</th><th className="th" style={{ textAlign: 'right' }}>成本(含税)</th></tr>
-      </thead><tbody>
-        {['原料', '包材'].map(label => { const s = seg(label); return (
-          <React.Fragment key={label}>
-            {s.rows.map((r, i) => <Row key={label + i} {...r} />)}
-            {subRow(`${label}小计（含税）`, (A[label === '原料' ? 'matSubtotal' : 'packSubtotal'] || 0) * GROSS, (B[label === '原料' ? 'matSubtotal' : 'packSubtotal'] || 0) * GROSS)}
-          </React.Fragment>) })}
-        {subRow('加工费（含税）', A.fee.mfg, B.fee.mfg)}
-        {subRow('装卸费（含税）', A.fee.load, B.fee.load)}
-        {subRow('管理费（含税）', A.fee.adm, B.fee.adm)}
-        {subRow('全成本（含税）', A.comp.full, B.comp.full)}
-      </tbody></table></div>
-    </div>
   )
 }
 
