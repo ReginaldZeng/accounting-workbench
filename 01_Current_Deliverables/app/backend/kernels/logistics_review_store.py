@@ -165,7 +165,9 @@ _XUNGE_SPEC = {
         {"name": "*发货明细", "role": "detail", "header_row": 1, "subject": {"fixed": "深圳星期零"},
          "doc_col": ["金蝶单号", "金蝶单据编号"], "amount_cols": ["金额", "旺季加收", "燃油附加", "地区加收"],
          "qty_col": "数量", "qty_unit": "件", "wt_col": "快递重量", "prov_col": "省", "carrier_sub_col": "快递公司",
-         "fee_item": "快递费", "annot": "销售出库单-电商", "kd_qty_axis": "qty"},
+         "fee_item": "快递费", "annot": "销售出库单-电商", "kd_qty_axis": "qty",
+         # 每单物流费=快递费+操作费(含续件)+箱子(箱型×月结清单物料费单价)，V2.720
+         "fee_parts": {"快递费": ["金额", "旺季加收", "燃油附加", "地区加收"], "操作费": ["操作费"]}, "box_col": "箱型"},
         {"name": "搬运费", "role": "detail", "header_row": 2, "subject": {"column": "客户"},
          "doc_col": "金蝶单号", "amount_col": "合计费用", "qty_col": "合计体积", "qty_unit": "方",
          "fee_item": "卸货费", "annot": "出库装卸", "summary_marker": "合计"},

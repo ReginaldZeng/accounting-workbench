@@ -58,8 +58,54 @@ def _subject(spec_sub, row, hdr):
     return ""
 
 
-def parse_detail_sheet(sp, ws, period, carrier):
-    """detail 角色 sheet → 逐单据行。按 spec 的 doc_col/amount_cols/qty_col/wt_col/prov_col/carrier_sub_col 认列。"""
+def _box_price(v, prices):
+    """箱型 → 单价：'7号超硬' / '原箱+3号五层'(几种相加) / '快递袋25*35'；取不到返回 None。"""
+    tot, hit = 0.0, False
+    for part in re.split(r"[+＋]", _s(v)):
+        part = part.strip()
+        if not part:
+            continue
+        pr = prices.get(part)
+        if pr is None:
+            pr = next((x for k, x in prices.items() if k.startswith(part) or part.startswith(k)), None)
+        if pr is None:
+            return None
+        tot += pr
+        hit = True
+    return round(tot, 2) if hit else None
+
+
+def box_prices_from(wb, spec):
+    """从月结清单「物料费」段读箱子单价：{名称/备注简称: 单价}。备注列正好是发货明细「箱型」的叫法(7号超硬/1号五层)。"""
+    acc = [c["name"] for c in spec.get("sheets", []) if c.get("role") == "accrual"]
+    out = {}
+    for ws in wb.worksheets:
+        if not any(match_sheet(nm, ws.title) for nm in acc):
+            continue
+        in_mat = False
+        for raw in ws.iter_rows(values_only=True):
+            cells = [_s(c) for c in raw]
+            k0 = next((k for k, c in enumerate(cells) if c), None)
+            if k0 is None:
+                continue
+            if not _is_idx(raw[k0]) and any("金额" in c for c in cells):
+                in_mat = cells[k0] == "物料费"
+                continue
+            if not in_mat or not _is_idx(raw[k0]):
+                continue
+            txt = [c for c in cells[k0 + 1:] if c and _f(c) is None and c not in ("物料中心", "运营中心", "后勤中心")]
+            nums = [_f(c) for c in raw[k0 + 1:] if _f(c) is not None]
+            if not txt or len(nums) < 2:
+                continue
+            price = nums[1] if len(nums) >= 3 else (nums[1] if nums[0] else nums[-1])
+            for key in txt[:2]:        # 名称 + 备注简称
+                out.setdefault(key, price)
+    return out
+
+
+def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
+    """detail 角色 sheet → 逐单据行。按 spec 的 doc_col/amount_cols/qty_col/wt_col/prov_col/carrier_sub_col 认列。
+    spec.fee_parts={分项名: [列名…]} 时按分项求和记 sub_fees；spec.box_col 时按箱型查汇总页物料单价加「箱子」分项(迅鸽 V2.720)。"""
     rows = list(ws.iter_rows(values_only=True))
     hr = int(sp.get("header_row", 1)) - 1
     if hr >= len(rows):
@@ -73,6 +119,8 @@ def parse_detail_sheet(sp, ws, period, carrier):
     c_wt = find_col(hdr, sp["wt_col"]) if sp.get("wt_col") else None
     c_prov = find_col(hdr, sp["prov_col"]) if sp.get("prov_col") else None
     c_cs = find_col(hdr, sp["carrier_sub_col"]) if sp.get("carrier_sub_col") else None
+    parts = {nm: [c for c in (find_col(hdr, x) for x in cols) if c is not None] for nm, cols in (sp.get("fee_parts") or {}).items()}
+    c_box = find_col(hdr, sp["box_col"]) if sp.get("box_col") else None
     marker = sp.get("summary_marker")
     out = []
     for ri, r in enumerate(rows[hr + 1:], start=hr + 2):
@@ -84,6 +132,17 @@ def parse_detail_sheet(sp, ws, period, carrier):
         if c_doc is not None and not doc:
             continue
         base = sum((_f(r[c]) or 0) for c in c_amts) if c_amts else None
+        sub = {}
+        if parts:
+            for nm, cs in parts.items():
+                v = round(sum((_f(r[c]) or 0) for c in cs if c < len(r)), 2)
+                if v:
+                    sub[nm] = v
+            if c_box is not None and c_box < len(r) and _s(r[c_box]):
+                bp = _box_price(r[c_box], box_prices or {})
+                sub["箱子"] = bp if bp is not None else 0.0
+                sub["箱型"] = _s(r[c_box]) + ("" if bp is not None else "(单价未识别)")   # 文字，不参与求和
+            base = sum(v for v in sub.values() if isinstance(v, (int, float)))
         row = {
             "period": period, "carrier": carrier, "grain": "detail",
             "subject": _subject(sp.get("subject"), r, hdr),
@@ -98,6 +157,8 @@ def parse_detail_sheet(sp, ws, period, carrier):
             "charge_wt": _f(r[c_wt]) if c_wt is not None and c_wt < len(r) else None,
             "src_sheet": ws.title, "src_row": ri,
         }
+        if sub:
+            row["sub_fees"] = json.dumps(sub, ensure_ascii=False)
         out.append(row)
     return out
 
@@ -199,6 +260,7 @@ def parse_bill(spec, data):
     carrier = spec.get("carrier", "")
     period = spec.get("period", "")
     detail, accrual, skipped = [], [], []
+    boxp = box_prices_from(wb, spec) if any(c.get("box_col") for c in spec.get("sheets", [])) else {}
     for ws in wb.worksheets:
         sp = None
         for cand in spec.get("sheets", []):
@@ -209,7 +271,7 @@ def parse_bill(spec, data):
             skipped.append(ws.title)
             continue
         if sp["role"] == "detail":
-            detail += parse_detail_sheet(sp, ws, period, carrier)
+            detail += parse_detail_sheet(sp, ws, period, carrier, boxp)
         elif sp["role"] == "accrual":
             accrual += parse_accrual_sheet(sp, ws, period, carrier)
     owner = bill_owner(wb, spec)

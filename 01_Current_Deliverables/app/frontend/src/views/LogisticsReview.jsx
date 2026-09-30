@@ -475,6 +475,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .selbar b{color:#1E6B43}.lrv .selbar .sp{flex:1}
       .lrv .fsel{font:inherit;font-size:12.5px;border:1px solid #DCE2E7;border-radius:6px;padding:4px 6px;max-width:170px;background:#fff;color:#1B2733}
       .lrv .fsel.on{border-color:var(--accent);background:#F0F7FA;font-weight:600}
+      .lrv .xfee{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:8px 2px;font-size:12.5px}
       .lrv .xpanel{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:hidden}
       .lrv .xcls{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid #EEF1F3;font-size:12.5px}
       .lrv .xcls label{display:inline-flex;gap:6px;align-items:center;color:#5E6B78}
@@ -760,7 +761,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className="sub">{pl || x.mode_cn} · {cf.by}</span></>
                           : <><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}
                             {x.trip && <span className={'sub' + (x.trip.verdict === 'ok' ? '' : ' diffbad')} title={x.trip.msg}>{x.trip.msg}</span>}</>}</td>
-                        <td className="num">{money(x.doc_fee)}{x.trips > 1 && <span className="sub" title="同一单号账单上有几行(包天包趟一车一行)，单位运费/费比按本单合计算">共 {x.trips} 行 · 合计 {money(x.doc_fee_all)}</span>}</td>
+                        <td className="num">{money(x.doc_fee)}{x.trips > 1 && <span className="sub" title="同一单号账单上有几行(包天包趟一车一行)，单位运费/费比按本单合计算">共 {x.trips} 行 · 合计 {money(x.doc_fee_all)}</span>}
+                          {x.sub_fees && Object.keys(x.sub_fees).filter(k => typeof x.sub_fees[k] === 'number').length > 1 &&
+                            <span className="sub" title={'费用构成：' + Object.entries(x.sub_fees).map(([k, v]) => `${k} ${typeof v === 'number' ? money(v) : v}`).join('，')}>
+                              {Object.entries(x.sub_fees).filter(([, v]) => typeof v === 'number' && v).map(([k, v]) => `${k.replace('快递费', '快递').replace('操作费', '操作')} ${v}`).join(' + ')}</span>}</td>
                         <td className="num">{x.unit_fee == null ? '—' : x.unit_fee}</td>
                         <td className="num">{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null && <span className="sub">{money(x.sales)}</span>}</td>
                         <td onClick={e => e.stopPropagation()}><input className="noteinp" disabled={locked} defaultValue={x.note || ''} key={rk + '|n|' + (x.note || '')} placeholder="备注…"
@@ -776,6 +780,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                               onBlur={e => { const v = e.target.value.trim(); if (v !== (x.fee_item || '')) saveClass(x.doc_no, { fee_item: v }) }} /></label>
                             <span className="dim" style={{ fontSize: 11.5 }}>改完离开输入框即保存，逐笔复核按新归类重算</span>
                           </div>}
+                          {x.sub_fees && <div className="xfee"><span className="dim">费用构成</span>
+                            {Object.entries(x.sub_fees).map(([k, v]) => <span key={k} className="tag">{k} {typeof v === 'number' ? money(v) : v}</span>)}
+                            <b className="mono">= {money(x.doc_fee)}</b></div>}
                           {x.n_mat > 0 ? <table className="mini">
                             <thead><tr><th>物料编码</th><th>物料名称</th><th>往来</th><th className="num">基本单位数量</th><th className="num">金蝶数量</th>
                               <th className="num">核对量<small>{x.kd_unit}</small></th><th className="num">分摊运费</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th></tr></thead>

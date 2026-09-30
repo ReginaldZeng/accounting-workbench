@@ -1338,6 +1338,15 @@ def _attach_fixes(L, carrier, period):
     return L
 
 
+def _subfees(v):
+    """账单行费用分项 JSON → dict；坏数据/空返回 None。"""
+    try:
+        d = json.loads(v) if v else None
+        return d if isinstance(d, dict) and d else None
+    except Exception:
+        return None
+
+
 def _car_norm(s):
     """车型归一：'9.6米冷藏' / '9.6米冷藏车' / '9.6m' → '9.6米'(账单与报价写法不一)。"""
     m = re.search(r"(\d+(?:\.\d+)?)\s*(米|m|M)", str(s or ""))
@@ -1494,7 +1503,8 @@ def _box_docs(rsub, carrier):
                 "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                 "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
                 "note": r.get("note") or "", "bbiz": _bill_biz(r),
-                "lid": r.get("id")}    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
+                "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
+                "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
         kgbase = 0.0
         if not lines:
@@ -2419,10 +2429,11 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 try:
                     for k in json.loads(sf):
                         if k not in feekeys:
-                            feekeys.append(k)
+                            feekeys.append(k)     # 含「箱型」文字列(迅鸽)，照样作一列
                 except Exception:
                     pass
-        feekeys.sort(key=lambda k: (0 if k == "运费" else 1, k))
+        _ORD = {"运费": 0, "快递费": 0, "操作费": 1, "箱子": 2, "箱型": 3, "加班": 4}
+        feekeys.sort(key=lambda k: (_ORD.get(k, 9), k))
         # 分组：ERP/金蝶数据、账单原始数据、复核数据分开配色；★=重点关注列。(组名, 组色, 列头浅色, doc级仅首行填, [(列头, 取值键)])
         groups = [
             ("归属·计提", "5E6B78", "E7ECEF", False, [("费用主体", "subject"), ("承运商", "carrier"),
