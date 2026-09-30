@@ -2156,7 +2156,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         nt = r.get("note") or ""
         if r.get("fix"):
             nt = ("%s\n" % nt if nt else "") + "【待更正】改为 " + _fix_to_txt(r["fix"])
-        ws.append([_cn(r.get("book_code"), r.get("subject")), r.get("fee_type"), biz,
+        fee = _cn(r.get("fee_code"), r.get("fee")) if r.get("fee_code") else r.get("fee_type")   # 费用类型=金蝶费用项目(编码 名称)，账单有计提无的用复核归类
+        ws.append([_cn(r.get("book_code"), r.get("subject")), fee, biz,
                    _cn(r.get("proj_code"), r.get("proj")) or None, _cn(r.get("dept_code"), r.get("dept")) or None, r.get("vno") or None,
                    r.get("amt"), r.get("tax_rate"), r.get("bill"), r.get("diff"), nt or None])
         if r.get("fix"):
@@ -2189,7 +2190,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         ws.merge_cells(start_row=r0, start_column=1, end_row=r0, end_column=NCOL)
         c0 = ws.cell(r0, 1, "另有 %d 笔计提需要更正（登记更正不影响本表对账），明细见《计提更正单》，打印交专人在金蝶修改。" % len(fixes))
         c0.font = Font(bold=True, color="8A5A00"); c0.alignment = left
-    for i, w in enumerate([16, 11, 20, 17, 20, 10, 14, 7, 14, 13, 30], 1):     # 主体/产品线/产品类型/部门带编码后加宽
+    for i, w in enumerate([16, 26, 20, 17, 20, 10, 14, 7, 14, 13, 30], 1):     # 主体/产品线/产品类型/部门带编码后加宽
         ws.column_dimensions[chr(64 + i)].width = w
     ws.freeze_panes = "A6"
     # 打印设置：横向(11列)、按宽缩放到1页、居中、重复表头、窄边距

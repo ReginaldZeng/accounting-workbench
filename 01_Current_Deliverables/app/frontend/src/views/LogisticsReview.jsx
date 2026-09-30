@@ -520,7 +520,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {L && !L.err && (
             <div className="tw"><table className="mtbl ltbl">
               <thead><tr>
-                <th>产品线 <small className="dim">/ 费用项目 · 产品类型 · 部门（均带金蝶编码）</small></th><th>凭证号</th>
+                <th>费用项目 <small className="dim">/ 产品分类 · 产品项目 · 部门（均带金蝶编码）</small></th><th>凭证号</th>
                 <th className="num">计提金额<small>含税</small></th><th className="num">账单金额</th><th className="num">差异</th>
                 <th title="账单金额里有多少是带金蝶单号的单据撑着的；点一下去第②步只看这一组单据">可逐单</th><th>差异解释</th>
               </tr></thead>
@@ -538,8 +538,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
                       const unexpl = bad && !(r.note || '').trim()
-                      // 小字：费用项目 · 产品类型(产品项目) · 部门，都带金蝶编码(用户 2026-09-30)
-                      const subline = [r.fee_code ? <><Cd c={r.fee_code} />{r.fee}</> : r.fee_type,
+                      // 第一行=费用项目(FYXM编码+金蝶名称)；小字=产品分类 · 产品项目 · 部门，都带金蝶编码(用户 2026-09-30)
+                      const bizEl = (r.biz || '').startsWith('（') ? <span className="dim">无产品分类</span> : <><Cd c={r.biz_code} />{r.biz}</>
+                      const subline = [<>{bizEl}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}</>,
                         r.proj && <><Cd c={r.proj_code} />{r.proj}</>, r.dept && <><Cd c={r.dept_code} />{r.dept}</>]
                         .filter(Boolean).map((x, i) => <React.Fragment key={i}>{i > 0 && ' · '}{x}</React.Fragment>)
                       const accr = r.kind === 'accr'
@@ -552,8 +553,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <tr key={r.key} className={(unexpl ? 'rowbad' : '') + (r.ffirst && !r.gfirst ? ' fsep' : '') + (r.fix ? ' rowfix' : '')}>
                           <td className="pl">
                             {r.kind === 'bill_only'
-                              ? <><span className="dim"><Cd c={r.biz_code} />{r.biz}</span><span className="sub">{r.fee_type} · 账单有、计提无</span></>
-                              : <>{!(r.biz || '').startsWith('（') && <Cd c={r.biz_code} />}{r.biz}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}{subline.length > 0 && <span className="sub">{subline}</span>}</>}
+                              ? <><span className="dim">{r.fee_type}</span><span className="sub">{bizEl} · 账单有、计提无</span></>
+                              : <>{r.fee_code ? <><Cd c={r.fee_code} />{r.fee}</> : r.fee_type}<span className="sub">{subline}</span></>}
                           </td>
                           <td className="mono">{r.vno || <span className="dim">—</span>}</td>
                           <td className="num">{r.amt == null ? <span className="dim">—</span> : <>{money(r.amt)}{r.tax_rate != null && <span className="tag">{pct(r.tax_rate)}</span>}</>}</td>
