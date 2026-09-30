@@ -50,16 +50,18 @@ const nm = v => (v && v.includes(' ') ? v.slice(v.indexOf(' ') + 1) : v)        
 const cn = (code, name) => [code, name && name !== code ? name : ''].filter(Boolean).join(' ')
 const fixShort = f => FIX_F.map(([k]) => nm(f[k])).filter(Boolean).join(' · ') || (f.memo ? '见说明' : '')
 const fixTxt = f => FIX_F.map(([k, lb]) => f[k] && lb + ' ' + f[k]).filter(Boolean).join(' · ') + (f.memo ? '；' + f.memo : '')
+const nextPeriod = p => { const [y, m] = String(p || '').split('-').map(Number); return y && m ? (m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`) : p }
 let DIMOPT = null                                                                  // 金蝶主数据下拉，页面内只拉一次
 const loadDimOpt = () => (DIMOPT = DIMOPT || reviewDimOptions().catch(() => { DIMOPT = null; return null }))
 
 // 计提更正弹窗：只改点的那一笔(用户 2026-09-30：同一账单金额下常常只有一笔记错)；只登记，打印交专人去金蝶改
-function FixEditor({ at, rows, onSave, onCancel }) {
+function FixEditor({ at, rows, period, onSave, onCancel }) {
   const accr = rows.filter(r => r.kind === 'accr')
   const me = accr.find(r => r.key === at.key) || {}
   const init = me.fix || {}
   const [f, setF] = useState(Object.fromEntries(Object.keys(FIX_EMPTY).map(k => [k, init[k] || ''])))
   const [dim, setDim] = useState(null)
+  const [adj, setAdj] = useState(init.adj_period || nextPeriod(period))   // 调账月份：默认归属月份的下个月
   useEffect(() => { loadDimOpt().then(d => setDim(d || { ok: false })) }, [])
   useEffect(() => {
     const esc = e => { if (e.key === 'Escape') onCancel() }
@@ -73,7 +75,7 @@ function FixEditor({ at, rows, onSave, onCancel }) {
   const bad = FIX_F.filter(([k, , ok]) => f[k].trim() && dim && dim[ok] && dim[ok].length && !opts[ok].includes(f[k].trim())).map(([, lb]) => lb)
   const inHint = nm(f.to_fee.trim()) === '入库运费' && String(me.acct || '').startsWith('6601') && !f.to_acct.trim()
   const any = Object.values(f).some(v => v.trim())
-  const clean = Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.trim()]))
+  const clean = { ...Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.trim()])), adj_period: adj }
   const acctOpt = code => opts.acct.find(o => o.startsWith(code + ' ')) || code
   return (
     <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
@@ -82,6 +84,9 @@ function FixEditor({ at, rows, onSave, onCancel }) {
           <button className="fxx" onClick={onCancel} aria-label="关闭">✕</button></div>
         <div className="fxsub">只登记这一笔应改为什么，不改金蝶、不影响对账；导出复核表时进《计提更正单》，打印交专人按编码改。</div>
         <div className="fxamt">金额 <b className="mono">{money(me.amt_net)}</b> 不含税 · 含税 <span className="mono">{money(me.amt)}</span>{me.tax_rate != null && <> · 税率 {pct(me.tax_rate)}</>}</div>
+        <div className="fxper">费用归属月份 <b className="mono">{period}</b>
+          <label>调账月份 <input type="month" value={adj} onChange={e => setAdj(e.target.value || nextPeriod(period))} /></label>
+          <span className="dim">{adj === period ? '＝归属月份：直接改原凭证' : '晚于归属月份：在调账月份做调整凭证'}</span></div>
         <table className="fxtbl">
           <thead><tr><th>项目</th><th>金蝶原记账 <small>编码 名称</small></th><th>应改为 <small>（从下拉选，空白＝不变）</small></th></tr></thead>
           <tbody>
@@ -313,6 +318,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fxx{font:inherit;background:none;border:none;font-size:16px;color:#7A8791;cursor:pointer;padding:0 4px}
       .lrv .fxsub{font-size:12px;color:#6B7A86}
       .lrv .fxamt{font-size:13px;color:#1B2733}
+      .lrv .fxper{font-size:13px;color:#1B2733;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+      .lrv .fxper label{display:flex;gap:6px;align-items:center}
+      .lrv .fxper input{font:inherit;font-size:12.5px;border:1px solid #DCE2E7;border-radius:5px;padding:3px 6px}
+      .lrv .fxper .dim{font-size:12px}
       .lrv .fxtbl{width:100%;border-collapse:collapse;font-size:13px}
       .lrv .fxtbl th,.lrv .fxtbl td{border:1px solid #DCE2E7;padding:6px 8px;text-align:left;vertical-align:middle}
       .lrv .fxtbl th{background:#E7ECEF;font-weight:600;color:#1B2733}
@@ -542,7 +551,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                 </tr>
               </tbody>
             </table></div>)}
-          {fixAt && L && L.rows && <FixEditor key={fixAt.key} at={fixAt} rows={L.rows} onSave={saveFix} onCancel={() => setFixAt(null)} />}
+          {fixAt && L && L.rows && <FixEditor key={fixAt.key} at={fixAt} rows={L.rows} period={period} onSave={saveFix} onCancel={() => setFixAt(null)} />}
           {L && !L.err && L.fixes && L.fixes.length > 0 && <div className="adjnote fixnote">
             <b>计提维度待更正 {L.fixes.length} 笔</b>（金额不变、不影响对账；导出复核表时单独一页《计提更正单》，打印交专人在金蝶改）：
             {L.fixes.map(f => `${f.snap.vno || ''} ${money(f.snap.amt_net)} → ${fixShort(f)}${f.live ? '' : '（金蝶里原分录已变，可能已改好）'}`).join('；')}

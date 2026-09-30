@@ -1231,6 +1231,15 @@ _SNAP_KEYS = ("subject", "book_code", "vno", "acct", "acct_name", "fee", "fee_co
               "biz", "biz_code", "proj", "proj_code", "amt_net", "tax_rate", "amt")
 
 
+def _next_period(p):
+    """YYYY-MM 的下一个月；格式不对原样返回。"""
+    try:
+        y, m = int(p[:4]), int(p[5:7])
+        return "%04d-%02d" % (y + (m == 12), 1 if m == 12 else m + 1)
+    except Exception:
+        return p or ""
+
+
 def _attach_fixes(L, carrier, period):
     """把已登记的计提更正挂到逐笔行(row.fix)，另回 fixes(按登记快照，金蝶改好后原行不在了也照样列出)。"""
     with db._engine.connect() as c:
@@ -1243,7 +1252,7 @@ def _attach_fixes(L, carrier, period):
         except Exception:
             snap = {}
         item = {"key": f["line_key"], "snap": snap, "by": f.get("updated_by") or "", "at": f.get("updated_at") or "",
-                **{k: (f.get(k) or "") for k in _FIX_KEYS}}
+                "adj_period": f.get("adj_period") or _next_period(period), **{k: (f.get(k) or "") for k in _FIX_KEYS}}
         by_key[f["line_key"]] = item
         out.append(item)
     live = set()
@@ -1747,6 +1756,8 @@ async def review_line_fix(request: Request):
     if lk:
         return lk
     vals = {k: str(b.get(k) or "").strip() for k in _FIX_KEYS}
+    # 调账月份：不填默认归属月份的下个月(复核多在次月，原月份一般已结账)；只有它不算"有更正"
+    adj = str(b.get("adj_period") or "").strip()[:7] or _next_period(period)
     import time as _t
     ck = ("lines", carrier, period)
     cc = _ACCR_CACHE.get(ck)
@@ -1760,7 +1771,7 @@ async def review_line_fix(request: Request):
                     c.execute(delete(FX).where(FX.c.id == ex))
                 continue
             r = rows.get(key)
-            rec = dict(vals, updated_by=_uname(u), updated_at=_now())
+            rec = dict(vals, adj_period=adj, updated_by=_uname(u), updated_at=_now())
             if r:
                 rec["snap_json"] = json.dumps({k: r.get(k) for k in _SNAP_KEYS}, ensure_ascii=False)
             if ex:
@@ -1896,9 +1907,9 @@ def _dw(t):
 
 
 def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
-    """《计提更正单》（第二页，可直接打印交专人）：标题下一行右侧=月份/供应商名称/供应商编码；
-    每笔两行——上行金蝶原记账、下行应改为(不变的写"不变")，各维度都印「编码 名称」(用户 2026-09-30 定：以编码识别、同时带名称)；
-    序号/主体/凭证号/金额/说明/更正人合并两行；底部留更正人/复核人签字。"""
+    """《计提更正单》（第二页，可直接打印交专人）。抬头两行居中：①计提更正单 ②供应商编码/名称(取计提凭证上挂的供应商维度)。
+    表格每笔两行——上行金蝶原记账、下行应改为(不变的写"不变")，各维度都印「编码 名称」(用户 2026-09-30 定：以编码识别、同时带名称)；
+    序号/主体/凭证号/费用归属月份/调账月份/金额/说明/更正人合并两行；表下一行填写说明，再下签字栏。"""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.worksheet.properties import PageSetupProperties
     from openpyxl.utils import get_column_letter
@@ -1910,35 +1921,31 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     C = Alignment(horizontal="center", vertical="center", wrap_text=True)
     LFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
     R = Alignment(horizontal="right", vertical="center")
-    WID = [5, 15, 9, 13, 8, 14, 23, 18, 13, 13, 24, 12]
+    # 列：序号 主体 凭证号 费用归属月份 调账月份 金额 | 原/改 | 科目 费用项目 部门 产品分类 产品项目 | 说明 更正人
+    WID = [5, 15, 9, 9, 9, 13, 8, 14, 23, 18, 13, 13, 24, 12]
     N = len(WID)
+    SHARED = (1, 2, 3, 4, 5, 6, 13, 14)      # 两行合并
+    DIM0 = 8                                 # 五个维度从第8列起
     last = get_column_letter(N)
     ws.merge_cells("A1:%s1" % last)
     ws.cell(1, 1, "计提更正单").font = Font(bold=True, size=16, color="1B2733")
     ws.cell(1, 1).alignment = C
-    ws.row_dimensions[1].height = 28
-    # 第二行右侧：月份 / 供应商名称 / 供应商编码(取计提凭证上挂的供应商维度)
+    ws.row_dimensions[1].height = 30
     sups = suppliers or []
-    y, m = (period.split("-") + [""])[:2] if period else ("", "")
-    mon = "%s年%d月" % (y, int(m)) if y and m.isdigit() else period
     sname = "、".join(dict.fromkeys(x.get("name") for x in sups if x.get("name"))) or carrier_full or carrier
     scode = "、".join(x.get("code") for x in sups if x.get("code")) or "（未取到）"
     ws.merge_cells("A2:%s2" % last)
-    c2 = ws.cell(2, 1, "月份：%s　　　供应商名称：%s　　　供应商编码：%s" % (mon, sname, scode))
-    c2.alignment = Alignment(horizontal="right", vertical="center"); c2.font = Font(bold=True, color="1B2733")
-    ws.row_dimensions[2].height = 22
-    ws.merge_cells("A3:%s3" % last)
-    ws.cell(3, 1, "物流账单复核时发现以下计提分录维度记错（金额不变、不影响对账）。每笔两行：上行是金蝶原记账，下行是应改为，写「不变」的不用动；"
-                  "各项均为「编码 名称」，请按编码在金蝶修改，改完在右侧签字。")
-    ws.cell(3, 1).alignment = LFT; ws.cell(3, 1).font = Font(color="5E6B78", size=10)
-    ws.row_dimensions[3].height = 32
-    HR = 4
-    heads = ["序号", "主体", "凭证号", "金额(不含税)", "", "科目", "费用项目", "部门", "产品分类", "产品项目", "说明", "更正人/日期"]
+    c2 = ws.cell(2, 1, "供应商编码：%s　　　供应商名称：%s" % (scode, sname))
+    c2.alignment = C; c2.font = Font(bold=True, size=11, color="1B2733")
+    ws.row_dimensions[2].height = 24
+    HR = 3
+    heads = ["序号", "主体", "凭证号", "费用归属\n月份", "调账\n月份", "金额(不含税)", "", "科目", "费用项目", "部门", "产品分类", "产品项目",
+             "说明", "更正人/日期"]
     for j, h in enumerate(heads, 1):
         cl = ws.cell(HR, j, h)
         cl.font = Font(bold=True, color="FFFFFF"); cl.alignment = C; cl.border = BD
         cl.fill = PatternFill("solid", fgColor="5E6B78")
-    ws.row_dimensions[HR].height = 30
+    ws.row_dimensions[HR].height = 32
     GRAY = Font(color="9AA5AE")
     OLD_FILL = PatternFill("solid", fgColor="EEF2F4")
     NEW_FILL = PatternFill("solid", fgColor="FBF0DA")
@@ -1950,23 +1957,26 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
         s = fx.get("snap") or {}
         r1 = HR + 2 * i - 1
         r2 = r1 + 1
-        shared = {1: i, 2: _cn(s.get("book_code"), s.get("subject")), 3: s.get("vno"), 4: s.get("amt_net"),
-                  11: fx.get("memo") or None, 12: None}
+        adj = fx.get("adj_period") or _next_period(period)
+        shared = {1: i, 2: _cn(s.get("book_code"), s.get("subject")), 3: s.get("vno"), 4: period, 5: adj, 6: s.get("amt_net"),
+                  13: fx.get("memo") or None, 14: None}
         old = [_cn(s.get("acct"), s.get("acct_name")), _cn(s.get("fee_code"), s.get("fee")), _cn(s.get("dept_code"), s.get("dept")),
                _cn(s.get("biz_code"), "" if str(s.get("biz") or "").startswith("（") else s.get("biz")),   # （无业务线）=空
                _cn(s.get("proj_code"), s.get("proj"))]
         new = [fx.get("to_acct"), fx.get("to_fee"), fx.get("to_dept"), fx.get("to_biz"), fx.get("to_proj")]
-        for j, v in shared.items():
+        for j in SHARED:
             ws.merge_cells(start_row=r1, start_column=j, end_row=r2, end_column=j)
-            cl = ws.cell(r1, j, v)
-            cl.alignment = R if j == 4 else (C if j in (1, 3) else LFT)
-            if j == 4:
+            cl = ws.cell(r1, j, shared[j])
+            cl.alignment = R if j == 6 else (C if j in (1, 3, 4, 5) else LFT)
+            if j == 6:
                 cl.number_format = "#,##0.00"
-        a = ws.cell(r1, 5, "原记账"); a.fill = OLD_FILL; a.alignment = C; a.font = Font(color="5E6B78")
-        b = ws.cell(r2, 5, "应改为"); b.fill = NEW_FILL; b.alignment = C; b.font = Font(bold=True, color="8A5A00")
+            if j == 5 and adj != period:
+                cl.font = Font(bold=True, color="8A5A00")      # 跨月调账醒目
+        a = ws.cell(r1, 7, "原记账"); a.fill = OLD_FILL; a.alignment = C; a.font = Font(color="5E6B78")
+        b = ws.cell(r2, 7, "应改为"); b.fill = NEW_FILL; b.alignment = C; b.font = Font(bold=True, color="8A5A00")
         for k in range(5):
-            c1 = ws.cell(r1, 6 + k, old[k] or "空"); c1.alignment = LFT; c1.fill = OLD_FILL
-            c2 = ws.cell(r2, 6 + k, new[k] or "不变"); c2.alignment = LFT
+            c1 = ws.cell(r1, DIM0 + k, old[k] or "空"); c1.alignment = LFT; c1.fill = OLD_FILL
+            c2 = ws.cell(r2, DIM0 + k, new[k] or "不变"); c2.alignment = LFT
             if new[k]:
                 c2.font = Font(bold=True, color="8A5A00"); c2.fill = HOT_FILL
             else:
@@ -1975,29 +1985,34 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
             ws.cell(r1, j).border = BD
             ws.cell(r2, j).border = BDE
         # 行高按折行估：两行各自按最长的格；合并格(主体/说明)的行数摊到两行，打印不截字
-        l1 = max(nlines(old[k] or "空", 6 + k) for k in range(5))
-        l2 = max(nlines(new[k] or "不变", 6 + k) for k in range(5))
-        lm = max(nlines(shared[2], 2), nlines(shared[11] or "", 11))
+        l1 = max(nlines(old[k] or "空", DIM0 + k) for k in range(5))
+        l2 = max(nlines(new[k] or "不变", DIM0 + k) for k in range(5))
+        lm = max(nlines(shared[2], 2), nlines(shared[13] or "", 13))
         extra = max(0, lm - l1 - l2)
         ws.row_dimensions[r1].height = 15 * (l1 + extra / 2) + 7
         ws.row_dimensions[r2].height = 15 * (l2 + extra / 2) + 7
     rr = HR + 2 * len(fixes) + 1
-    ws.cell(rr, 3, "合计").font = Font(bold=True); ws.cell(rr, 3).alignment = R
-    ws.cell(rr, 4, round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2))
-    ws.cell(rr, 4).number_format = "#,##0.00"; ws.cell(rr, 4).font = Font(bold=True); ws.cell(rr, 4).alignment = R
-    ws.cell(rr, 3).border = BD; ws.cell(rr, 4).border = BD
+    ws.cell(rr, 5, "合计").font = Font(bold=True); ws.cell(rr, 5).alignment = R
+    ws.cell(rr, 6, round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2))
+    ws.cell(rr, 6).number_format = "#,##0.00"; ws.cell(rr, 6).font = Font(bold=True); ws.cell(rr, 6).alignment = R
+    ws.cell(rr, 5).border = BD; ws.cell(rr, 6).border = BD
     ws.row_dimensions[rr].height = 20
+    ws.merge_cells(start_row=rr + 1, start_column=1, end_row=rr + 1, end_column=N)
+    nt = ws.cell(rr + 1, 1, "填写说明：以上计提分录维度记错，金额不变、不影响对账。每笔上行是金蝶原记账，下行是应改为，写「不变」的不用动；各项均为「编码 名称」，请按编码修改。"
+                             "调账月份＝费用归属月份的，直接修改原凭证；晚于费用归属月份的，在调账月份做调整凭证。改完在右侧签字。")
+    nt.alignment = LFT; nt.font = Font(color="5E6B78", size=10)
+    ws.row_dimensions[rr + 1].height = 32
     by = sorted({fx.get("by") for fx in fixes if fx.get("by")})
-    ws.merge_cells(start_row=rr + 2, start_column=1, end_row=rr + 2, end_column=N)
-    ws.cell(rr + 2, 1, "登记人：%s        更正人：______________        更正日期：______________        复核人：______________"
+    ws.merge_cells(start_row=rr + 3, start_column=1, end_row=rr + 3, end_column=N)
+    ws.cell(rr + 3, 1, "登记人：%s        更正人：______________        更正日期：______________        复核人：______________"
             % ("、".join(by) or "______________")).alignment = LFT
-    ws.row_dimensions[rr + 2].height = 26
+    ws.row_dimensions[rr + 3].height = 26
     for j, w in enumerate(WID, 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_title_rows = "1:4"
+    ws.print_title_rows = "1:3"
     ws.print_options.horizontalCentered = True
     ws.page_margins.left = ws.page_margins.right = 0.4
     ws.page_margins.top = ws.page_margins.bottom = 0.5
