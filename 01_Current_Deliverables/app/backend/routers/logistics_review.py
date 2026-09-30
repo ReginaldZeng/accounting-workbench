@@ -763,11 +763,13 @@ def _box_div(m):
     br = _box_reg(m.get("规格"))
     if br:
         return br
-    mw = re.search(r"(\d+(?:\.\d+)?)\s*(kg|千克|公斤|l|升)\s*/\s*(?:箱|件)", str(m.get("规格") or ""), re.I)
+    sp = str(m.get("规格") or "")
+    # 每箱千克/升：20kg/箱、10L/件，或 1L*12/箱、1KG*10/箱(=单件×件数)
+    mw = re.search(r"(\d+(?:\.\d+)?)\s*(kg|千克|公斤|l|升)\s*(?:[*×xX]\s*(\d+)\s*(?:袋|盒|包|瓶|罐|桶|支|个|件)?)?\s*/\s*(?:箱|件)", sp, re.I)
     if mw:
         su = mw.group(2).lower()
         if (su in ("kg", "千克", "公斤") and u in ("千克", "kg", "公斤")) or (su in ("l", "升") and u in ("升", "l", "L")):
-            return float(mw.group(1))
+            return float(mw.group(1)) * (float(mw.group(3)) if mw.group(3) else 1.0)
     return None
 
 
