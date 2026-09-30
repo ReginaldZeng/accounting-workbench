@@ -167,8 +167,11 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
         z = str(r.get("FEXPLANATION") or "")
         book = book2short.get(str(r.get("账簿") or ""), None)
         cr = r.get("FCREDIT") or 0
-        if cr and "计提" in z and _accr_is_current(z, period) and any(k in z for k in lrc._ACCR_KW):
-            sname, scode = str(r.get("供应商") or "").strip(), str(r.get("供应商码") or "").strip()
+        sname, scode = str(r.get("供应商") or "").strip(), str(r.get("供应商码") or "").strip()
+        # 物流供应商(编码 物流运输服务…/在物流供应商档案里)的计提：摘要有「计提」即算，不再要求带费用关键词
+        # (记-562「计提武汉顺鸽…8月线上kikiherb-花草茶」没写仓储费，原来被漏)
+        is_logi = scode.startswith("物流运输服务") or (sname and sname in full2short)
+        if cr and "计提" in z and _accr_is_current(z, period) and (is_logi or any(k in z for k in lrc._ACCR_KW)):
             mo = lrc._ACCR_RE.search(z)
             if not sname and not mo:
                 continue
