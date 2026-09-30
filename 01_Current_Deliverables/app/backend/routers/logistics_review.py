@@ -387,7 +387,7 @@ def _fill_kd(carrier, period, kmap):
 # ---------- 登记制（议价/报销：货拉拉等）：单据运费·其他单据 ----------
 _FORM_BY_PREFIX = {
     "FBDR": ["STK_TransferIn", "STK_TransferOut"], "FBDC": ["STK_TransferOut", "STK_TransferIn"],
-    "CGRK": ["STK_InStock"], "XSCKD": ["SAL_OUTSTOCK"], "XQLCK": ["SAL_OUTSTOCK"],
+    "CGRK": ["STK_InStock"], "XSCKD": ["SAL_OUTSTOCK"], "XQLCK": ["SAL_OUTSTOCK", "STK_MisDelivery"],   # 迅鸽 XQLCK 也有其他出库单(2026-09 实证 268 张)
     "QTCK": ["STK_MisDelivery"], "RK": ["SAL_RETURNSTOCK"], "CGTL": ["PUR_MRB"],
 }
 # 各单据的「基本单位数量」字段 Key 大小写不同（逐单据写死，缺列降级）
@@ -597,7 +597,29 @@ _DOC_MAT_FIELDS = {
 
 
 def _fetch_doc_materials(s, conf, docs_by_form):
-    """按 单据前缀→form 分组，查金蝶物料明细。返回 {单号: [{编码,名称,基本数量,基本单位,往来,销售额}]}。只读，缺列降级。"""
+    """按 单据前缀→form 分组，查金蝶物料明细。返回 {单号: [{编码,名称,基本数量,基本单位,往来,销售额}]}。只读，缺列降级。
+    同一前缀可能对应几种单据(XQLCK 既有销售出库也有其他出库、FBDR 调入/调出)：首选单据查不到的，按 _FORM_BY_PREFIX 依次再试(V2.718)。"""
+    out = _fetch_doc_materials_once(s, conf, docs_by_form)
+    tried = {f: set(str(d) for d in ds) for f, ds in docs_by_form.items()}
+    left = {str(d) for ds in docs_by_form.values() for d in ds if str(d) not in out}
+    for _ in range(3):
+        nxt = {}
+        for d in left:
+            pre = "".join(ch for ch in d if ch.isalpha())
+            for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"]):
+                if d not in tried.get(form, set()):
+                    nxt.setdefault(form, set()).add(d)
+                    break
+        if not nxt:
+            break
+        for f, ds in nxt.items():
+            tried.setdefault(f, set()).update(ds)
+        out.update(_fetch_doc_materials_once(s, conf, nxt))
+        left = {d for d in left if d not in out}
+    return out
+
+
+def _fetch_doc_materials_once(s, conf, docs_by_form):
     out = {}
     for form, docs in docs_by_form.items():
         fields = _DOC_MAT_FIELDS.get(form)
