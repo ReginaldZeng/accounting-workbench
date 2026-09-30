@@ -27,19 +27,19 @@ bill_lines = Table(
     Column("fee", String(40)),             # 翻译后费用归属
     Column("bizline", String(40)),         # 业务线
     Column("fee_item", String(40)),        # 承运商费用项原名（快递费/操作费/仓储费…）
-    Column("qty", Float),                  # 账单数量
+    Column("qty", Float(53)),                  # 账单数量
     Column("unit", String(12)),            # 数量单位
-    Column("amount", Float),               # 含税金额（元）
+    Column("amount", Float(53)),               # 含税金额（元）
     Column("carrier_sub", String(40)),     # 快递公司/子类（快递核价用：圆通/中通…）
     Column("prov", String(20)),            # 目的省（快递核价用）
-    Column("charge_wt", Float),            # 计费重量（快递核价定档用）
+    Column("charge_wt", Float(53)),            # 计费重量（快递核价定档用）
     Column("sub_fees", Text),              # JSON：账单各费用列分项
-    Column("kd_qty", Float),               # 金蝶出库数量（核量填回）
-    Column("kd_kg", Float),                # 金蝶货物净重kg（辅助）
-    Column("std_amount", Float),           # 标准费（核价填回：价卡单价×数量/重量档）
-    Column("price_diff", Float),           # 核价差（账单−标准）
+    Column("kd_qty", Float(53)),               # 金蝶出库数量（核量填回）
+    Column("kd_kg", Float(53)),                # 金蝶货物净重kg（辅助）
+    Column("std_amount", Float(53)),           # 标准费（核价填回：价卡单价×数量/重量档）
+    Column("price_diff", Float(53)),           # 核价差（账单−标准）
     Column("price_state", String(12)),     # 核价态：ok/over/under/free/gap
-    Column("qty_diff", Float),             # 核量差（账单数量−金蝶数量）
+    Column("qty_diff", Float(53)),             # 核量差（账单数量−金蝶数量）
     Column("qty_state", String(12)),       # 核量态：ok/qtydiff/miss/na
     Column("verdict", String(12)),         # 归一态：pass/price/qty/gap/free
     Column("src_sheet", String(60)),       # 来源工作表
@@ -58,9 +58,9 @@ price_card = Table(
     Column("fee_item", String(60)),        # 费用项：快递费/操作费B2C/退货入库/仓储租金/货物装卸/包材·xxx
     Column("sub", String(40)),             # 子类：快递公司(圆通/中通…) 或 规格；空=不分
     Column("unit", String(16)),            # 计价单位：元/单、元/托/天、元/立方…
-    Column("price", Float),                # 单价（简单单价；快递阶梯为空，看 tier_json）
+    Column("price", Float(53)),                # 单价（简单单价；快递阶梯为空，看 tier_json）
     Column("tier_json", Text),             # 快递阶梯 JSON：{省:[<0.5,0.5-1,1-2,2-3,首重,续重]} / 顺丰{省:[1kg,2kg,3kg,续重]}
-    Column("first_kg", Float),             # 首重kg（快递：圆通3/中通韵达邮政1）
+    Column("first_kg", Float(53)),             # 首重kg（快递：圆通3/中通韵达邮政1）
     Column("effective_from", String(10)),  # 生效日期
     Column("source", String(80)),          # 合同/报价位置
     Column("status", String(12)),          # 确认状态：已签署/待确认
@@ -225,6 +225,16 @@ def migrate_cols(engine):
                                 "WHERE TABLE_NAME='logistics_bill_lines' AND COLUMN_NAME='doc_no'")).scalar()
             if ln is not None and int(ln) < 300:
                 c.execute(text("ALTER TABLE logistics_bill_lines MODIFY doc_no VARCHAR(300)"))
+        # 金额/数量列 FLOAT(单精度，只留约 6 位有效数字：16256.05 读回 16256) → DOUBLE(V2.716)。
+        # 已存的单精度值 13 万以下转双精度后按两位小数取整可还原到分。
+        if "mysql" in drv:
+            for tb, cols in (("logistics_bill_lines", ("qty", "amount", "charge_wt", "kd_qty", "kd_kg", "std_amount", "price_diff", "qty_diff")),
+                             ("logistics_price_card", ("price", "first_kg"))):
+                typ = {r[0]: r[1] for r in c.execute(text("SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                                                          "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=:t"), {"t": tb}).fetchall()}
+                for col in cols:
+                    if typ.get(col) == "float":
+                        c.execute(text("ALTER TABLE %s MODIFY %s DOUBLE" % (tb, col)))
         # 计提更正表(V2.697建)：补产品项目列；应改为改存「编码 名称」，MySQL 加宽到 120
         if "mysql" in drv:
             fx = {r[0]: r[1] for r in c.execute(text("SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS "
