@@ -1369,7 +1369,11 @@ def _box_docs(rsub, carrier):
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
             ratio_tuo = (kd_sum / billcnt) if billcnt else 0
-            if kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
+            # 调拨(分布式调出)按包天包趟计费：一张单可能跑几车、账单一车一行、不填数量 → 核不了量，免核(用户 2026-09-30)
+            is_trip = (not billcnt) and (d0.upper().startswith("FBDR") or "调拨" in str(r.get("annot") or ""))
+            if kd_sum and is_trip:
+                mode_cn, cnt_state = "包天包趟·免核量", "na"
+            elif kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
                 mode_cn, cnt_state = "整车按箱", "ok"
             elif kd_sum and billcnt and 3 <= ratio_tuo <= 60:
                 mode_cn, cnt_state = "打托(托规%s)" % round(ratio_tuo, 1), "na"
@@ -1456,6 +1460,20 @@ def _box_docs(rsub, carrier):
                      "parties": list(dict.fromkeys(m.get("party") for m in mrows if m.get("party"))),
                      "n_mat": len(lines), "q_diff": round(bill_amt - kd_sum, 2) if kd_sum else None,
                      "materials": mrows})
+    # 同一单号账单上有多行(包天包趟一车一行)：每行注明本单共几行、合计运费；单位运费/费比按本单合计运费算，不拿单行去除整单重量
+    grp = {}
+    for x in docs:
+        if x["doc_no"]:
+            grp.setdefault(x["doc_no"], []).append(x)
+    for xs in grp.values():
+        if len(xs) > 1:
+            tot = round(sum(x["doc_fee"] for x in xs), 2)
+            for x in xs:
+                x["trips"], x["doc_fee_all"] = len(xs), tot
+                if x.get("doc_kg"):
+                    x["unit_fee"] = round(tot / x["doc_kg"], 2)
+                if x.get("sales"):
+                    x["ratio"] = round(tot / x["sales"], 4)
     return docs
 
 
