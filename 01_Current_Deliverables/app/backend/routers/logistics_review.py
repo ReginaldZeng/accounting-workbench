@@ -1153,6 +1153,19 @@ def _build_lines(request, carrier, period):
     groups = {}
     for e in ents:
         groups.setdefault((e["subject"], e["fee_norm"]), []).append(e)
+    # 页面/复核表都带编码(用户 2026-09-30)：主体→账簿编码(本期凭证优先，主体档案兜底)；账单侧产品线→产品分类编码(本期凭证实证优先，BIZLINE_CODE 兜底)
+    s2book = {o.get("short_name"): o.get("book_code") for o in (db.list_orgs() or []) if o.get("short_name") and o.get("book_code")}
+    biz2code = {}
+    try:
+        from kernels.logistics_accrual import BIZLINE_CODE
+        biz2code.update({k.lower(): v for k, v in BIZLINE_CODE.items()})
+    except Exception:
+        pass
+    for e in ents:
+        if e.get("book_code"):
+            s2book[e["subject"]] = e["book_code"]
+        if e.get("biz_code") and e.get("biz"):
+            biz2code[e["biz"].lower()] = e["biz_code"]
     bill2 = {}
     for (s, f, b), v in bill3.items():
         bill2[(s, f)] = bill2.get((s, f), 0.0) + v
@@ -1196,7 +1209,8 @@ def _build_lines(request, carrier, period):
                 x["anc"] = un[0]["key"]
         elif abs(rest) >= 0.01:
             key = "bill|%s|%s" % (s, f)
-            grows.append({"subject": s, "fee": "", "fee_norm": f, "fee_type": f, "biz": rest_biz or "（账单无产品线）",
+            grows.append({"subject": s, "book_code": s2book.get(s, ""), "biz_code": biz2code.get((rest_biz or "").lower(), ""),
+                          "fee": "", "fee_norm": f, "fee_type": f, "biz": rest_biz or "（账单无产品线）",
                           "proj": "", "dept": "", "vno": "", "acct": "", "amt_net": None, "tax_rate": None, "tax": None, "amt": None,
                           "key": key, "kind": "bill_only", "level": "group", "bill": rest, "bill_span": 1,
                           "diff": round(-rest, 2), "note": notes.get(key, "")})
@@ -1212,7 +1226,7 @@ def _build_lines(request, carrier, period):
       if srows:
           srows[0]["gfirst"] = True
       rows.extend(srows)
-      rows.append({"kind": "gtotal", "subject": s, "fee_type": "", "amt": round(sa, 2), "bill": round(sb, 2),
+      rows.append({"kind": "gtotal", "subject": s, "book_code": s2book.get(s, ""), "fee_type": "", "amt": round(sa, 2), "bill": round(sb, 2),
                    "diff": round(sa - sb, 2), "key": "gt|%s" % s})
       atot += sa; btot += sb
     n_unexpl = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None
@@ -2129,17 +2143,21 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     gt_rows, fix_rows = [], []
     for r in L.get("rows", []):
         if r.get("kind") == "gtotal":
-            ws.append([("%s · %s 小计" % (r.get("subject"), r.get("fee_type"))) if r.get("fee_type") else ("%s 小计" % r.get("subject")), None, None, None, None, None,
+            sj = _cn(r.get("book_code"), r.get("subject"))
+            ws.append([("%s · %s 小计" % (sj, r.get("fee_type"))) if r.get("fee_type") else ("%s 小计" % sj), None, None, None, None, None,
                        r.get("amt"), None, r.get("bill"), r.get("diff"), None])
             gt_rows.append(ws.max_row)
             continue
         biz = r.get("biz") or ""
+        if not biz.startswith("（"):
+            biz = _cn(r.get("biz_code"), biz)          # 维度都带编码：CPFL013 Kiki Herb
         if r.get("bill_biz"):
             biz = "%s（账单:%s）" % (biz, r["bill_biz"])
         nt = r.get("note") or ""
         if r.get("fix"):
             nt = ("%s\n" % nt if nt else "") + "【待更正】改为 " + _fix_to_txt(r["fix"])
-        ws.append([r.get("subject"), r.get("fee_type"), biz, r.get("proj") or None, r.get("dept") or None, r.get("vno") or None,
+        ws.append([_cn(r.get("book_code"), r.get("subject")), r.get("fee_type"), biz,
+                   _cn(r.get("proj_code"), r.get("proj")) or None, _cn(r.get("dept_code"), r.get("dept")) or None, r.get("vno") or None,
                    r.get("amt"), r.get("tax_rate"), r.get("bill"), r.get("diff"), nt or None])
         if r.get("fix"):
             fix_rows.append(ws.max_row)
@@ -2171,7 +2189,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         ws.merge_cells(start_row=r0, start_column=1, end_row=r0, end_column=NCOL)
         c0 = ws.cell(r0, 1, "另有 %d 笔计提需要更正（登记更正不影响本表对账），明细见《计提更正单》，打印交专人在金蝶修改。" % len(fixes))
         c0.font = Font(bold=True, color="8A5A00"); c0.alignment = left
-    for i, w in enumerate([13, 11, 16, 11, 13, 10, 14, 7, 14, 13, 30], 1):
+    for i, w in enumerate([16, 11, 20, 17, 20, 10, 14, 7, 14, 13, 30], 1):     # 主体/产品线/产品类型/部门带编码后加宽
         ws.column_dimensions[chr(64 + i)].width = w
     ws.freeze_panes = "A6"
     # 打印设置：横向(11列)、按宽缩放到1页、居中、重复表头、窄边距

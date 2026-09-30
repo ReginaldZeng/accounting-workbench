@@ -54,6 +54,7 @@ const fixAmts = f => [f.to_amt_tax && '金额 ' + money(f.to_amt_tax), f.to_rate
 const fixShort = f => [...FIX_F.map(([k]) => nm(f[k])), ...fixAmts(f)].filter(Boolean).join(' · ') || (f.memo ? '见原因' : '')
 const fixTxt = f => [...FIX_F.map(([k, lb]) => f[k] && lb + ' ' + f[k]), ...fixAmts(f)].filter(Boolean).join(' · ') + (f.memo ? '；原因：' + f.memo : '')
 const r2 = x => Math.round(x * 100) / 100
+const Cd = ({ c }) => (c ? <span className="cd">{c}</span> : null)                // 金蝶编码小标签(主体/产品分类/产品项目/部门/费用项目)
 const nextPeriod = p => { const [y, m] = String(p || '').split('-').map(Number); return y && m ? (m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`) : p }
 let DIMOPT = null                                                                  // 金蝶主数据下拉，页面内只拉一次
 const loadDimOpt = () => (DIMOPT = DIMOPT || reviewDimOptions().catch(() => { DIMOPT = null; return null }))
@@ -360,6 +361,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fxtbl td:first-child{width:72px;color:#5E6B78;white-space:nowrap}
       .lrv .fxtbl td:first-child small{display:block;font-size:11px}
       .lrv .fxtbl tr.fxsep td{border-top:2px solid #CBD5DC}
+      .lrv .cd{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#6B7A86;background:#EEF2F4;border-radius:3px;padding:0 4px;margin-right:4px;font-weight:400;white-space:nowrap}
       .lrv .fxpct{display:flex;align-items:center;gap:4px;color:#5E6B78}.lrv .fxpct input{width:90px}
       .lrv .fxtbl td:nth-child(2){width:38%}
       .lrv .fxtbl input{font:inherit;width:100%;box-sizing:border-box;border:1px solid #DCE2E7;border-radius:5px;padding:4px 7px}
@@ -518,7 +520,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {L && !L.err && (
             <div className="tw"><table className="mtbl ltbl">
               <thead><tr>
-                <th>产品线 <small className="dim">/ 产品类型 · 部门</small></th><th>凭证号</th>
+                <th>产品线 <small className="dim">/ 费用项目 · 产品类型 · 部门（均带金蝶编码）</small></th><th>凭证号</th>
                 <th className="num">计提金额<small>含税</small></th><th className="num">账单金额</th><th className="num">差异</th>
                 <th title="账单金额里有多少是带金蝶单号的单据撑着的；点一下去第②步只看这一组单据">可逐单</th><th>差异解释</th>
               </tr></thead>
@@ -528,7 +530,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   const lines = g.lines
                   return [
                     h && <tr key={'h' + gi} className="ghead">
-                      <td className="gname" colSpan="2">{h.subject}{h.fee_type ? ' · ' + h.fee_type : ''}<span className="tag">{lines.filter(x => x.kind === 'accr').length} 笔</span></td>
+                      <td className="gname" colSpan="2"><Cd c={h.book_code} />{h.subject}{h.fee_type ? ' · ' + h.fee_type : ''}<span className="tag">{lines.filter(x => x.kind === 'accr').length} 笔</span></td>
                       <td className="num">{money(h.amt)}</td><td className="num">{money(h.bill)}</td>
                       <td className={'num ' + dcls(h.diff)}>{dtxt(h.diff)}</td><td></td><td className="gsub"></td>
                     </tr>,
@@ -536,7 +538,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
                       const unexpl = bad && !(r.note || '').trim()
-                      const subline = [r.fee_type, r.proj, r.dept].filter(Boolean).join(' · ')
+                      // 小字：费用项目 · 产品类型(产品项目) · 部门，都带金蝶编码(用户 2026-09-30)
+                      const subline = [r.fee_code ? <><Cd c={r.fee_code} />{r.fee}</> : r.fee_type,
+                        r.proj && <><Cd c={r.proj_code} />{r.proj}</>, r.dept && <><Cd c={r.dept_code} />{r.dept}</>]
+                        .filter(Boolean).map((x, i) => <React.Fragment key={i}>{i > 0 && ' · '}{x}</React.Fragment>)
                       const accr = r.kind === 'accr'
                       const fixCell = accr && (r.fix
                         ? <button className="fixtag" disabled={locked} onClick={() => setFixAt({ key: r.key })}
@@ -547,8 +552,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <tr key={r.key} className={(unexpl ? 'rowbad' : '') + (r.ffirst && !r.gfirst ? ' fsep' : '') + (r.fix ? ' rowfix' : '')}>
                           <td className="pl">
                             {r.kind === 'bill_only'
-                              ? <><span className="dim">{r.biz}</span><span className="sub">{r.fee_type} · 账单有、计提无</span></>
-                              : <>{r.biz}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}{subline && <span className="sub">{subline}</span>}</>}
+                              ? <><span className="dim"><Cd c={r.biz_code} />{r.biz}</span><span className="sub">{r.fee_type} · 账单有、计提无</span></>
+                              : <>{!(r.biz || '').startsWith('（') && <Cd c={r.biz_code} />}{r.biz}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}{subline.length > 0 && <span className="sub">{subline}</span>}</>}
                           </td>
                           <td className="mono">{r.vno || <span className="dim">—</span>}</td>
                           <td className="num">{r.amt == null ? <span className="dim">—</span> : <>{money(r.amt)}{r.tax_rate != null && <span className="tag">{pct(r.tax_rate)}</span>}</>}</td>
