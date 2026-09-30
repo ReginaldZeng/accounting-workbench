@@ -375,12 +375,9 @@ function BomLedgerView({ user, mode = 'std' }) {
     try { const r = await getBomEntry(id); setEntry(r.entry); setCurId(id); setView('detail'); window.scrollTo(0, 0) }
     catch (e) { flash('打开失败：' + e.message) }
   }, [])
-  const [cmpFromList, setCmpFromList] = useState(false)     // 版本对比从哪进的：台账（V2.696）→ 返回台账；详情/深链 → 返回详情
+  const [cmpFromList, setCmpFromList] = useState(false)     // 版本对比从哪进的：台账左上角（V2.698）→ 两边自选 CP、返回台账；详情/深链 → 预选本条、返回详情
   const openCompare = () => { setCmpFromList(false); setView('compare'); window.scrollTo(0, 0) }
-  const openCompareById = useCallback(async (id) => {
-    try { const r = await getBomEntry(id); setEntry(r.entry); setCurId(id); setCmpFromList(true); setView('compare'); window.scrollTo(0, 0) }
-    catch (e) { flash('打开失败：' + e.message) }
-  }, [])
+  const openComparePick = () => { setCmpFromList(true); setView('compare'); window.scrollTo(0, 0) }   // 台账左上角：两边自己挑 CP
   // 深链（V2.442，BP 只读台账 → 核算）：#/bomstd?entry=17[&compare=1] 直开详情/对比；?entry=17&final=1 直开终审弹窗（无终审权限则开详情）。
   // 只消费一次，消费后把 hash 收回到 #/bomstd，刷新不再重放。
   const deepRef = React.useRef(false)
@@ -416,7 +413,7 @@ function BomLedgerView({ user, mode = 'std' }) {
 
   return (
     <div className="bomv">
-      {view === 'list' && <Ledger data={data} cfg={cfg} mode={mode} onOpen={openDetail} onCompare={openCompareById} onManual={() => setManual(true)} onStdImport={(b) => setStdImp(b || {})}
+      {view === 'list' && <Ledger data={data} cfg={cfg} mode={mode} onOpen={openDetail} onCompare={openComparePick} onManual={() => setManual(true)} onStdImport={(b) => setStdImp(b || {})}
         onApproval={openApproval} onRefresh={load} flash={flash}
         onFinalReview={data?.canFinalReview ? setFinalRow : null}
         isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: load })} />}
@@ -430,7 +427,8 @@ function BomLedgerView({ user, mode = 'std' }) {
         isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: backFromDetail })} />}
       {delM && <DeleteModal target={delM.target} label={delM.label} flash={flash} onClose={() => setDelM(null)}
         onDone={async () => { const f = delM.after; setDelM(null); if (f) await f() }} />}
-      {view === 'compare' && entry && <Compare entry={entry} all={data.all} onBack={() => (cmpFromList ? backToList() : setView('detail'))} flash={flash} />}
+      {view === 'compare' && (cmpFromList || entry) && <Compare key={cmpFromList ? 'pick' : 'e' + (entry && entry.id)} entry={cmpFromList ? null : entry} all={data.all}
+        backLabel={cmpFromList ? '返回台账' : '返回采购核算表'} onBack={() => (cmpFromList ? backToList() : setView('detail'))} flash={flash} />}
       {stdImp && <StdImportModal cfg={cfg} init={stdImp} onClose={() => setStdImp(null)} flash={flash} onDone={load} />}
       {manual && <IntakeModal cfg={cfg} init={typeof manual === 'object' ? manual : null} onClose={() => setManual(false)} flash={flash}
         onDone={(no) => { setManual(false); load(); openApproval(no) }} />}
@@ -555,8 +553,6 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
         <td style={{ whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
           <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>采购核算表 ›</a>
           <a className="lk" style={{ marginRight: 10 }} title="补/改本产品的 ERP 物料编码" onClick={() => fillErp(r)}>补物料编码</a>
-          {r.versionCount > 1 && onCompare &&
-            <a className="lk" style={{ marginRight: 10 }} title={`本产品有 ${r.versionCount} 个审核版本：逐料对比用量/含税价/税率/费用差异，可导出差异清单`} onClick={() => onCompare(r.id)}>版本对比（{r.versionCount}）›</a>}
           {r.needFinalReview && onFinalReview &&
             <a className="lk" style={{ fontWeight: 700, color: 'var(--green)' }} onClick={() => onFinalReview(r)}>⚑ 终审 ›</a>}
         </td>
@@ -569,7 +565,9 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
       <div className="head">
         <div>
           <div className="h-title">{isStd ? '标准成本台账' : '待办与复核'}　{isStd
-            ? <span className="tag ok">已审核 · 公开</span> : <span className="tag werr">未审核工作台</span>}</div>
+            ? <span className="tag ok">已审核 · 公开</span> : <span className="tag werr">未审核工作台</span>}
+            {isStd && onCompare && <button className="btn-sec" style={{ marginLeft: 10, fontSize: 12, padding: '3px 12px', verticalAlign: 'middle' }}
+              title="任选两个已审核版本（按 CP 码挑）逐料对比：同产品新旧版、换码前后不同 CP 都可以" onClick={onCompare}>⇄ 版本对比</button>}</div>
           <div className="h-sub">{isStd
             ? '已定稿标准成本 · 含税五分项（元/kg）· 供 BP 定价消费（TOB/TOC 直连、电商/通品显式引用）'
             : '钉钉「BOM表报价」附件抓取/手工入账 → 复核（改税率费用）→ 定稿毕业进「标准成本台账」· 未审核仅本组可见'}</div>
@@ -2337,18 +2335,74 @@ function StdImportModal({ cfg, init, onClose, flash, onDone }) {
   )
 }
 // ============ 版本对比 ============
-function Compare({ entry, all, onBack, flash }) {
-  const versions = (all || []).filter(x => x.productKey === entry.productKey)
-    .slice().sort((a, b) => (a.calcDate || '').localeCompare(b.calcDate || '') || (a.id - b.id))
-  const [aId, setAId] = useState(versions[0]?.id)
-  const [bId, setBId] = useState(versions[versions.length - 1]?.id)
+// 版本选择器（V2.698）：输 CP 码 / 产品名 / 物料编码 / 单号搜台账里的已审核版本，点选；与「当前版本」同产品/同物料编码/同名的排最前并标注
+function VerPicker({ pool, value, onChange, exclude, rel, placeholder }) {
+  const [q, setQ] = useState('')
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [open])
+  const cur = pool.find(v => v.id === value)
+  const qq = q.trim().toLowerCase()
+  const rk = { '同产品': 0, '同物料编码': 1, '同名': 2 }
+  const list = pool.filter(v => v.id !== exclude && (!qq || [v.cpCode, v.productName, v.erpCode, v.approval].some(s => String(s || '').toLowerCase().includes(qq))))
+    .map(v => ({ v, r: rel ? rel(v) : null }))
+    .sort((a, b) => ((rk[a.r] ?? 9) - (rk[b.r] ?? 9)) || (b.v.calcDate || '').localeCompare(a.v.calcDate || '') || (b.v.id - a.v.id))
+    .slice(0, 40)
+  return (
+    <div ref={ref} style={{ position: 'relative', minWidth: 320 }}>
+      <input value={open ? q : (cur ? `${cur.cpCode} · ${cur.productName} · 核算 ${cur.calcDate || '—'}` : '')} placeholder={placeholder}
+        onFocus={() => { setOpen(true); setQ('') }} onChange={e => { setQ(e.target.value); setOpen(true) }} style={{ width: '100%' }} />
+      {open && <div style={{ position: 'absolute', zIndex: 40, top: '100%', left: 0, right: 0, marginTop: 2, maxHeight: 360, overflowY: 'auto',
+        background: 'var(--card, #fff)', border: '1px solid var(--line, #ddd)', borderRadius: 6, boxShadow: '0 4px 16px rgba(0,0,0,.14)', padding: 4 }}>
+        {list.length === 0 && <div className="muted" style={{ padding: '6px 8px', fontSize: 12 }}>没有匹配的已审核版本</div>}
+        {list.map(({ v, r }) => (
+          <div key={v.id} onMouseDown={() => { onChange(v.id); setOpen(false); setQ('') }}
+            style={{ padding: '5px 8px', borderRadius: 4, cursor: 'pointer', background: v.id === value ? 'var(--accent-soft)' : 'transparent' }}>
+            <div style={{ fontSize: 12.5 }}><b className="mono">{v.cpCode}</b> · {v.productName}{r && <span className="bom-gvtag" style={{ marginLeft: 6 }}>{r}</span>}</div>
+            <div className="muted" style={{ fontSize: 11 }}>核算 {v.calcDate || '—'} · {STATUS[v.status]?.txt || v.status} · ¥{fmt(v.comp?.full)}/kg{v.erpCode ? ' · 编码 ' + v.erpCode : ''} · 单号…{(v.approval || '').slice(-6)}</div>
+          </div>))}
+      </div>}
+    </div>
+  )
+}
+
+function Compare({ entry, all, onBack, backLabel, flash }) {
+  // V2.698 业务方定：台账左上角进入，左选「对比版本」、右选「当前版本」，都按 CP 码挑；不限同一产品（换码前后不同 CP 也能比）。
+  // 候选池＝台账可见的已初审/已审核版本（历史标准成本导入没有物料明细，不入池）。从详情/深链进来：当前版本＝本条，对比版本＝同产品上一版（没有就同物料编码最近一版）。
+  const pool = (all || []).filter(x => !x.imported && (x.materials || []).length)
+  const byNewest = (a, b) => (b.calcDate || '').localeCompare(a.calcDate || '') || (b.id - a.id)
+  const seedPrev = (e) => {
+    if (!e) return null
+    const older = x => (x.calcDate || '') < (e.calcDate || '') || ((x.calcDate || '') === (e.calcDate || '') && x.id < e.id)
+    const same = pool.filter(x => x.id !== e.id && x.productKey === e.productKey && older(x)).sort(byNewest)
+    if (same.length) return same[0].id
+    const code = (e.erpCode || '').trim()
+    const alt = code ? pool.filter(x => x.id !== e.id && (x.erpCode || '').trim() === code).sort(byNewest) : []
+    return alt.length ? alt[0].id : null
+  }
+  const [bId, setBId] = useState(entry ? entry.id : null)
+  const [aId, setAId] = useState(() => seedPrev(entry))
   const [mode, setMode] = useState('diff')
-  const A = versions.find(v => v.id === aId) || versions[0]
-  const B = versions.find(v => v.id === bId) || versions[versions.length - 1]
-  const verLabel = (v) => `${v.cpCode} · ${v.calcDate} · ¥${fmt(v.comp.full)} · 审批…${(v.approval || '').slice(-4)}`
+  const A = pool.find(v => v.id === aId) || null
+  const B = pool.find(v => v.id === bId) || null
+  const rel = (x) => {
+    if (!B || x.id === B.id) return null
+    if (x.productKey === B.productKey) return '同产品'
+    if ((B.erpCode || '').trim() && (x.erpCode || '').trim() === (B.erpCode || '').trim()) return '同物料编码'
+    if (clean(x.productName) === clean(B.productName)) return '同名'
+    return null
+  }
+  const pickB = (id) => { setBId(id); if (!aId || aId === id) setAId(seedPrev(pool.find(v => v.id === id))) }
   const matOf = (v, name) => (v.materials || []).find(m => clean(m.matName) === clean(name))
 
   const num = [], info = []
+  const ready = !!(A && B)
+  if (ready) {
   const bMats = B.materials || [], aMats = A.materials || []
   bMats.forEach(m => {
     const a = matOf(A, m.matName)
@@ -2373,29 +2427,36 @@ function Compare({ entry, all, onBack, flash }) {
   })
   if (A.cpCode !== B.cpCode) info.push({ name: '表头', field: '产品编号', va: A.cpCode, vb: B.cpCode })
   num.sort((x, y) => Math.abs(y.d) - Math.abs(x.d))
-  const dd = (B.comp.full || 0) - (A.comp.full || 0)
+  }
+  const dd = ready ? (B.comp.full || 0) - (A.comp.full || 0) : 0
+  const crossCp = ready && A.productKey !== B.productKey
 
   return (
     <>
       <div className="head">
-        <div><div className="h-title">版本对比 · {entry.productName}</div>
-          <div className="h-sub">同一产品不同入账版本的差异识别 · 数值差异 / 信息差异，逐行标注成本影响</div></div>
+        <div><div className="h-title">版本对比{B ? ' · ' + B.productName : ''}</div>
+          <div className="h-sub">任选两个已审核版本（按 CP 码挑）· 同产品新旧版、换码前后不同 CP 都能比 · 数值差异 / 信息差异，逐行标注成本影响</div></div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn-sec" onClick={onBack}>返回采购核算表</button>
+          <button className="btn-sec" onClick={onBack}>{backLabel || '返回采购核算表'}</button>
           <button className="btn-sec" onClick={() => flash('导出差异清单 xlsx')}>导出差异清单</button>
         </div>
       </div>
       <div className="body">
-        <div className="bom-crumbs"><a className="lk" onClick={onBack}>成本台账</a> / {entry.productName} / 版本对比</div>
+        <div className="bom-crumbs"><a className="lk" onClick={onBack}>成本台账</a> / {B ? B.productName + ' / ' : ''}版本对比</div>
         <div className="card bom-filterbar">
           <span className="flabel">对比版本</span>
-          <select value={aId} onChange={e => setAId(+e.target.value)} style={{ minWidth: 280 }}>{versions.map(v => <option key={v.id} value={v.id}>{verLabel(v)}</option>)}</select>
+          <VerPicker pool={pool} value={aId} onChange={setAId} exclude={bId} rel={rel} placeholder={B ? '输 CP 码 / 产品名 / 物料编码（同产品的排最前）' : '先选右边的当前版本'} />
           <b>vs</b>
           <span className="flabel">当前版本</span>
-          <select value={bId} onChange={e => setBId(+e.target.value)} style={{ minWidth: 280 }}>{versions.map(v => <option key={v.id} value={v.id}>{verLabel(v)}</option>)}</select>
+          <VerPicker pool={pool} value={bId} onChange={pickB} exclude={aId} placeholder="输 CP 码 / 产品名 / 物料编码" />
           <span style={{ flex: 1 }} />
           <Seg value={mode} onChange={setMode} opts={[['diff', '只看差异'], ['full', '完整对比']]} />
         </div>
+        {!ready ? <div className="card" style={{ padding: 28, textAlign: 'center', color: 'var(--ink-3)' }}>
+          {B ? '再在左边选一个「对比版本」——同产品、同物料编码的会排在最前。' : '先在右边选「当前版本」（输 CP 码搜），再在左边选要对比的版本。'}</div> : <>
+        {crossCp && <div className="banner" style={{ display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginBottom: 10 }}>
+          ⇄ <b>跨 CP 对比</b>：对比版 <span className="mono">{A.cpCode}</span> {A.productName} → 当前版 <span className="mono">{B.cpCode}</span> {B.productName}
+          {rel(A) ? `（${rel(A)}）` : '（两条不是同一产品，也没有共用物料编码——确认选对了）'}。明细按物料名称对齐。</div>}
         <div className="card bom-stats">
           <Stat lab="全成本（含税）对比版 → 当前版" v={`${fmt(A.comp.full)} → ${fmt(B.comp.full)}`} small suf="" />
           <div className="bom-stat"><div className="bom-stat-l">变化</div>
@@ -2412,8 +2473,8 @@ function Compare({ entry, all, onBack, flash }) {
               <span style={{ flex: 1 }} /><span className="muted"><b>{num.length}</b> 处</span></div>
             <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
               <th className="th">类别</th><th className="th">物料 / 项目</th><th className="th">字段</th>
-              <th className="th" style={{ textAlign: 'right' }}>对比版 · {A.calcDate.slice(5)}</th>
-              <th className="th" style={{ textAlign: 'right' }}>当前版 · {B.calcDate.slice(5)}</th>
+              <th className="th" style={{ textAlign: 'right' }}>对比版 · {A.cpCode} · {(A.calcDate || '').slice(5)}</th>
+              <th className="th" style={{ textAlign: 'right' }}>当前版 · {B.cpCode} · {(B.calcDate || '').slice(5)}</th>
               <th className="th" style={{ textAlign: 'right' }}>Δ成本（含税）元/kg</th>
             </tr></thead><tbody>
               {num.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 22 }}>无数值差异 —— 两版金额完全一致</td></tr>}
@@ -2431,7 +2492,7 @@ function Compare({ entry, all, onBack, flash }) {
               <span className="muted" style={{ fontSize: 11 }}>编码 / 型号 / 规格 / 品牌 的补全或变化（不影响金额）</span>
               <span style={{ flex: 1 }} /><span className="muted"><b>{info.length}</b> 处</span></div>
             <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
-              <th className="th">物料</th><th className="th">字段</th><th className="th">版本A</th><th className="th">版本B</th>
+              <th className="th">物料</th><th className="th">字段</th><th className="th">对比版 · {A.cpCode}</th><th className="th">当前版 · {B.cpCode}</th>
             </tr></thead><tbody>
               {info.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 22 }}>无信息差异</td></tr>}
               {info.map((r, i) => <tr key={i}><td style={{ fontWeight: 600 }}>{r.name}</td><td className="muted">{r.field}</td>
@@ -2439,6 +2500,7 @@ function Compare({ entry, all, onBack, flash }) {
             </tbody></table></div>
           </div>
         </> : <FullCompare A={A} B={B} matOf={matOf} />}
+        </>}
         <div className="foot">匹配规则：明细按物料名称对齐（编码缺失时仍可比）；Δ与成本列均为含税口径（不含税×1.13，与台账一致），逐行 Δ 相加＝全成本变化。红▲=涨 绿▼=跌 灰=旧值。</div>
       </div>
     </>
