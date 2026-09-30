@@ -651,7 +651,7 @@ def _fetch_doc_materials_once(s, conf, docs_by_form):
     return out
 
 
-_BOX_CARRIERS = {"丰源", "极鲜达"}  # 按件数/箱核对(有账单重量则按重量)：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
+_BOX_CARRIERS = {"丰源", "极鲜达", "恒茂"}  # 按件数/箱核对(有账单重量则按重量)：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
 _QTY_CARRIERS = {"迅鸽"}  # 快递按件数核：账单件数 vs 金蝶出库件数(剔包装)，不做箱规换算
 _PACK_KW = ("纸箱", "包装袋", "包材", "运输袋", "编织袋", "拉链", "气泡", "胶带", "气枕", "葫芦膜", "文件封", "缠绕膜", "打托", "托盘", "护角")  # 包材(不摊运费、不进kg基数)
 # 费用类型按单据前缀通用推导（所有承运商共用，不再每家写死）
@@ -751,7 +751,7 @@ def _eff_fee(r):
 
 def _box_reg(spec):
     """从规格型号解析箱规（N袋/箱）。返回 int 或 None。"""
-    m = re.search(r"(\d+)\s*袋/箱", str(spec or ""))
+    m = re.search(r"(\d+)\s*(?:袋|盒|包|瓶|罐|桶|支|个|件|盒装)\s*/\s*箱", str(spec or ""))   # 10袋/箱、12盒/箱…
     return int(m.group(1)) if m else None
 
 
@@ -1468,6 +1468,8 @@ def _box_docs(rsub, carrier):
                     qcnt = float(m.get("数量件") or 0)
                 except (TypeError, ValueError):
                     qcnt = 0.0
+                if str(m.get("计价单位") or "").strip() == "箱":
+                    br = 1                        # 金蝶本来就按箱计(采购入库原料常见)，不用箱规折
                 per.append((qcnt / br) if (br and qcnt) else 0.0)
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
@@ -1482,6 +1484,8 @@ def _box_docs(rsub, carrier):
                 mode_cn, cnt_state = trip["label"], "price"
             elif kd_sum and is_trip:
                 mode_cn, cnt_state = "包天包趟·免核量", "na"
+            elif str(r.get("unit") or "").strip() in lr._NOQTY_UNITS:
+                mode_cn, cnt_state = "按%s计费·免核量" % str(r.get("unit")).strip(), "na"   # 恒茂出库装卸按吨、冷藏按板
             if is_trip and tu:
                 bill_unit = tu                   # 账单量显示 1 天 / 2 趟
             elif kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
@@ -1575,7 +1579,18 @@ def _box_docs(rsub, carrier):
                      "n_mat": len(lines), "q_diff": round(bill_amt - kd_sum, 2) if (kd_sum and not is_trip) else None,
                      "trip": trip,
                      "materials": mrows})
-    # 同一单号账单上有多行(包天包趟一车一行)：每行注明本单共几行、合计运费；单位运费/费比按本单合计运费算，不拿单行去除整单重量
+    # 账单公式核价(恒茂冷藏费=天数×计费数量×单价、处置费=吨重×19.4)：差超 1 分标「核价不符」，一致的注明算法
+    for x in docs:
+        sf = x.get("sub_fees") or {}
+        if "标准" in sf:
+            tgt = next((k for k in sf if k not in ("标准", "公式", "核价差") and isinstance(sf[k], (int, float))), "金额")
+            if "核价差" in sf:
+                x["state"], x["mode_cn"] = "price", "核价不符"
+                x["trip"] = {"verdict": "diff", "msg": "%s %s ≠ %s %s" % (tgt, _fmt_amt(sf[tgt]), sf.get("公式") or "标准", _fmt_amt(sf["标准"]))}
+            else:
+                x["trip"] = {"verdict": "ok", "msg": "%s = %s ✓" % (sf.get("公式") or "按公式", _fmt_amt(sf["标准"]))}
+    # 同一单号账单上有多行(包天包趟一车一行 / 恒茂一张调拨单拆几个批次)：每行注明本单共几行、合计运费；单位运费/费比按本单合计运费算；
+    # 按件数/箱核的，拿本单几行账单量之和比金蝶(不再单行比整单)
     grp = {}
     for x in docs:
         if x["doc_no"]:
@@ -1589,6 +1604,13 @@ def _box_docs(rsub, carrier):
                     x["unit_fee"] = round(tot / x["doc_kg"], 2)
                 if x.get("sales"):
                     x["ratio"] = round(tot / x["sales"], 4)
+            qx = [x for x in xs if x.get("state") in ("ok", "qtydiff") and x.get("kd_sum")]
+            if len(qx) == len(xs) and not any(x.get("trip") and x["trip"].get("verdict") for x in xs if x.get("mode_cn", "").startswith("包天")):
+                bsum = round(sum(float(x.get("bill_amt") or 0) for x in xs), 2)
+                kd = xs[0]["kd_sum"]
+                st = "ok" if abs(bsum - kd) <= max(1.0, 0.02 * kd) else "qtydiff"
+                for x in xs:
+                    x["state"], x["q_diff"], x["doc_bill_all"] = st, round(bsum - kd, 2), bsum
     return docs
 
 
@@ -1614,7 +1636,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
 
     qs = (q or "").strip()
     q_on = bool(qs)
-    q_small = len(rows) <= 300   # 小承运商搜索时全量取物料，支持按客户/物料名搜(大承运商仍按单号/省预筛省金蝶)
+    n_docs = len({(r.get("doc_no") or "").split("+")[0] for r in rows})   # 大小按单据数算(取金蝶物料的量)，不按账单行数(恒茂 598 行只 43 张单)
+    q_small = n_docs <= 300   # 小承运商搜索时全量取物料，支持按客户/物料名搜(大承运商仍按单号/省预筛省金蝶)
 
     bucket_on = bool(fsub or ffee or fbiz)
     bset = {("" if t == "-" else t) for t in fbiz.split("|")} if fbiz else None
@@ -1675,7 +1698,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         import time as _t
         # 小承运商(≤300单)：全量出单据视图、缓存10分钟，按真实核对结果筛/计数/翻页，不用每次翻页都拉金蝶；
         # 大承运商(迅鸽几千单)：只按当前页取金蝶物料，计数沿用中间表核量态。
-        full = len(rows_all) <= 300
+        full = len({(r.get("doc_no") or "").split("+")[0] for r in rows_all}) <= 300
         if full:
             ck = ("view", carrier, period)
             cc = _ACCR_CACHE.get(ck)

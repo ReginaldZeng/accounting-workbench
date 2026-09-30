@@ -41,6 +41,15 @@ def find_col(hdr, name_or_list):
     return None
 
 
+def find_col_nth(hdr, spec_col):
+    """列名可写成 [名, 第几次出现]：表头同名列(如恒茂「类型」出现两三次)取指定那一个。"""
+    if isinstance(spec_col, list) and len(spec_col) == 2 and isinstance(spec_col[1], int):
+        name, n = spec_col
+        hits = [i for i, h in enumerate(hdr) if h == name]
+        return hits[n - 1] if len(hits) >= n else None
+    return find_col(hdr, spec_col)
+
+
 def split_nos(no):
     """一格多单号 A+B / A/B / A，B → [A,B]。"""
     parts = re.split(r"[+/,，、;；\s]+", no or "")
@@ -106,12 +115,24 @@ def box_prices_from(wb, spec):
 def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
     """detail 角色 sheet → 逐单据行。按 spec 的 doc_col/amount_cols/qty_col/wt_col/prov_col/carrier_sub_col 认列。
     spec.fee_parts={分项名: [列名…]} 时按分项求和记 sub_fees；spec.box_col 时按箱型查汇总页物料单价加「箱子」分项(迅鸽 V2.720)。"""
-    rows = list(ws.iter_rows(values_only=True))
+    # 逐行读、连续 300 行空就停(恒茂入库页带 104 万行空格式，整表 list 会拖死)
+    rows, blank = [], 0
+    for r in ws.iter_rows(values_only=True):
+        rows.append(r)
+        blank = 0 if any(x not in (None, "") for x in r) else blank + 1
+        if blank >= 300:
+            break
     hr = int(sp.get("header_row", 1)) - 1
     if hr >= len(rows):
         return []
     hdr = [_s(x) for x in rows[hr]]
     c_doc = find_col(hdr, sp["doc_col"]) if sp.get("doc_col") else None
+    c_annot = find_col_nth(hdr, sp["annot_col"]) if sp.get("annot_col") else None
+    c_rtype = find_col_nth(hdr, sp["row_type"]["col"]) if sp.get("row_type") else None
+    calc = sp.get("calc")
+    c_calc_t = find_col(hdr, calc["target"]) if calc else None
+    c_calc_f = [find_col(hdr, x) for x in calc.get("factors", [])] if calc else []
+    last_doc = ""
     c_amts = [find_col(hdr, n) for n in sp["amount_cols"]] if sp.get("amount_cols") else \
              ([find_col(hdr, sp["amount_col"])] if sp.get("amount_col") else [])
     c_amts = [c for c in c_amts if c is not None]
@@ -128,9 +149,17 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             continue
         if marker and _s(r[0]) and marker in _s(r[0]):
             continue
+        if c_rtype is not None and _s(r[c_rtype] if c_rtype < len(r) else "") not in sp["row_type"]["in"]:
+            continue                      # 只取指定类型的行(合计行、别的类型跳过)
         doc = _s(r[c_doc]) if c_doc is not None and c_doc < len(r) else _s(sp.get("doc", ""))
+        if c_doc is not None and not doc and sp.get("doc_ffill") and last_doc:
+            doc = last_doc                # 单号只写在首行、下面几行沿用(恒茂入库：一张调拨单拆几个批次)
         if c_doc is not None and not doc:
-            continue
+            doc = _s(sp.get("doc_default", ""))
+            if not doc:
+                continue
+        if c_doc is not None and _s(r[c_doc] if c_doc < len(r) else ""):
+            last_doc = doc
         base = sum((_f(r[c]) or 0) for c in c_amts) if c_amts else None
         sub = {}
         if parts:
@@ -147,7 +176,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             "period": period, "carrier": carrier, "grain": "detail",
             "subject": _subject(sp.get("subject"), r, hdr),
             "doc_no": "+".join(split_nos(doc)) if doc and doc != "无单据" else doc,
-            "annot": sp.get("annot", ""), "fee_item": sp.get("fee_item", ""),
+            "annot": _annot_of(sp, r, c_annot), "fee_item": sp.get("fee_item", ""),
             "qty": _f(r[c_qty]) if c_qty is not None and c_qty < len(r) else None,
             "unit": sp.get("qty_unit", ""),
             "amount": round(base, 2) if base is not None else None,
@@ -157,10 +186,35 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             "charge_wt": _f(r[c_wt]) if c_wt is not None and c_wt < len(r) else None,
             "src_sheet": ws.title, "src_row": ri,
         }
+        if calc and c_calc_t is not None and c_calc_t < len(r) and _f(r[c_calc_t]) is not None:
+            # 按账单公式核价：标准=各因子相乘×rate(四舍五入到分)，与账单金额差超 1 分记「核价差」
+            fs = [_f(r[c]) if c is not None and c < len(r) else None for c in c_calc_f]
+            if all(x is not None for x in fs):
+                std = 1.0
+                for x in fs:
+                    std *= x
+                std = round(std * float(calc.get("rate", 1)), 2)
+                tv = round(_f(r[c_calc_t]), 2)
+                sub2 = json.loads(row.get("sub_fees") or "{}") if row.get("sub_fees") else {}
+                sub2[calc["target"]] = tv
+                sub2["标准"] = std
+                sub2["公式"] = calc.get("label", "")
+                if abs(tv - std) > 0.01:
+                    sub2["核价差"] = round(tv - std, 2)
+                row["sub_fees"] = json.dumps(sub2, ensure_ascii=False)
         if sub:
-            row["sub_fees"] = json.dumps(sub, ensure_ascii=False)
+            row["sub_fees"] = json.dumps({**sub, **(json.loads(row["sub_fees"]) if row.get("sub_fees") else {})}, ensure_ascii=False)
         out.append(row)
     return out
+
+
+def _annot_of(sp, r, c_annot):
+    """标注：spec.annot_col 取该列(可配 annot_map 改写、annot_fmt 套模板如 仓储费-{})，否则用固定 annot。"""
+    if c_annot is None or c_annot >= len(r) or not _s(r[c_annot]):
+        return sp.get("annot", "")
+    v = _s(r[c_annot])
+    v = (sp.get("annot_map") or {}).get(v, v)
+    return sp.get("annot_fmt", "{}").format(v)
 
 
 def _is_idx(v):

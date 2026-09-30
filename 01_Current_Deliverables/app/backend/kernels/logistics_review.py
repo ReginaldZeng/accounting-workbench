@@ -37,7 +37,7 @@ def price_check(row, card):
     return None, None, "na", "无价卡/待人工"
 
 
-_NOQTY_UNITS = ("方", "板", "托", "天", "趟", "平", "㎡", "元/天", "元/趟")
+_NOQTY_UNITS = ("方", "板", "托", "天", "趟", "平", "㎡", "元/天", "元/趟", "吨")
 
 
 def qty_check(row, kd_qty):
