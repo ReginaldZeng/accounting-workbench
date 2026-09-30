@@ -1226,7 +1226,7 @@ def _build_lines(request, carrier, period):
             "suppliers": got.get("suppliers") or []}, carrier, period)
 
 
-_FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj", "to_amt", "memo")
+_FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj", "to_amt_tax", "to_rate", "to_amt", "memo")
 _SNAP_KEYS = ("subject", "book_code", "vno", "acct", "acct_name", "fee", "fee_code", "fee_type", "dept", "dept_code",
               "biz", "biz_code", "proj", "proj_code", "amt_net", "tax_rate", "amt")
 
@@ -1756,11 +1756,13 @@ async def review_line_fix(request: Request):
     if lk:
         return lk
     vals = {k: str(b.get(k) or "").strip() for k in _FIX_KEYS}
-    if vals["to_amt"]:          # 应改为金额：可带千分位，存两位小数
-        try:
-            vals["to_amt"] = "%.2f" % float(vals["to_amt"].replace(",", "").replace("，", ""))
-        except ValueError:
-            return JSONResponse({"ok": False, "msg": "应改为金额不是数字：%s" % vals["to_amt"]}, status_code=400)
+    for k, lb in (("to_amt", "不含税金额"), ("to_amt_tax", "金额(含税)"), ("to_rate", "税率")):
+        if vals[k]:             # 金额可带千分位，存两位小数；税率可写 9 / 9% / 0.09，存小数
+            try:
+                v = float(vals[k].replace(",", "").replace("，", "").replace("%", ""))
+            except ValueError:
+                return JSONResponse({"ok": False, "msg": "应改为%s不是数字：%s" % (lb, vals[k])}, status_code=400)
+            vals[k] = ("%.4f" % (v / 100 if v >= 1 else v)) if k == "to_rate" else "%.2f" % v
     # 调账月份：不填默认归属月份的下个月(复核多在次月，原月份一般已结账)；只有它不算"有更正"
     adj = str(b.get("adj_period") or "").strip()[:7] or _next_period(period)
     import time as _t
@@ -1777,6 +1779,10 @@ async def review_line_fix(request: Request):
                 continue
             r = rows.get(key)
             rec = dict(vals, adj_period=adj, updated_by=_uname(u), updated_at=_now())
+            if r:   # 金额/税率填的和原记账一样 → 存空(更正单印"不变")
+                for k, ok, tol in (("to_amt", "amt_net", 0.005), ("to_amt_tax", "amt", 0.005), ("to_rate", "tax_rate", 0.00005)):
+                    if rec.get(k) and r.get(ok) is not None and abs(float(rec[k]) - float(r[ok])) < tol:
+                        rec[k] = ""
             if r:
                 rec["snap_json"] = json.dumps({k: r.get(k) for k in _SNAP_KEYS}, ensure_ascii=False)
             if ex:
@@ -1892,13 +1898,15 @@ async def review_unsign_month(request: Request):
 
 
 def _fix_to_txt(fx):
-    """更正内容一句话：科目 · 费用项目 · 部门 · 产品分类 · 产品项目（空=不变，值为「编码 名称」）；说明。"""
+    """更正内容一句话：科目 · 费用项目 · 部门 · 产品分类 · 产品项目 · 金额 · 税率 · 不含税（空=不变，维度值为「编码 名称」）；原因。"""
     parts = [("科目 " + fx["to_acct"]) if fx.get("to_acct") else "", ("费用项目 " + fx["to_fee"]) if fx.get("to_fee") else "",
              ("部门 " + fx["to_dept"]) if fx.get("to_dept") else "", ("产品分类 " + fx["to_biz"]) if fx.get("to_biz") else "",
              ("产品项目 " + fx["to_proj"]) if fx.get("to_proj") else "",
-             ("金额 {:,.2f}".format(float(fx["to_amt"]))) if fx.get("to_amt") else ""]
-    s = " · ".join(p for p in parts if p) or "（见说明）"
-    return s + (("；" + fx["memo"]) if fx.get("memo") else "")
+             ("金额 {:,.2f}".format(float(fx["to_amt_tax"]))) if fx.get("to_amt_tax") else "",
+             ("税率 {:g}%".format(round(float(fx["to_rate"]) * 100, 2))) if fx.get("to_rate") else "",
+             ("不含税 {:,.2f}".format(float(fx["to_amt"]))) if fx.get("to_amt") else ""]
+    s = " · ".join(p for p in parts if p) or "（见原因）"
+    return s + (("；原因：" + fx["memo"]) if fx.get("memo") else "")
 
 
 def _cn(code, name):
@@ -1914,8 +1922,9 @@ def _dw(t):
 
 def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     """《计提更正单》（第二页，可直接打印交专人）。抬头两行居中：①计提更正单 ②供应商编码/名称(取计提凭证上挂的供应商维度)。
-    表格每笔两行——上行金蝶原记账、下行应改为(不变的写"不变")，各维度都印「编码 名称」(用户 2026-09-30 定：以编码识别、同时带名称)；
-    金额也分两行(不一定是原金额：部分调走/金额记错)；序号/主体/凭证号/费用归属月份/调账月份/说明/更正人合并两行；表下填写说明+签字栏。"""
+    每笔三行(用户 2026-09-30 定)：原记账 / 应改为(不变的写"不变") / 原因(横跨维度与金额列)；
+    维度都印「编码 名称」；金额拆 金额(含税)/税率/不含税金额 三列，放产品项目后面；
+    序号/主体/凭证号/费用归属月份/调账月份/更正人合并三行；表下合计(金额有改时分原记账/应改为两行)、填写说明、签字栏。"""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.worksheet.properties import PageSetupProperties
     from openpyxl.utils import get_column_letter
@@ -1923,15 +1932,15 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     thin = Side(style="thin", color="B8C4CC")
     thick = Side(style="medium", color="7A8791")
     BD = Border(left=thin, right=thin, top=thin, bottom=thin)
-    BDE = Border(left=thin, right=thin, top=thin, bottom=thick)     # 每笔第二行下边线加粗，分隔各笔
+    BDE = Border(left=thin, right=thin, top=thin, bottom=thick)     # 每笔最后一行下边线加粗，分隔各笔
     C = Alignment(horizontal="center", vertical="center", wrap_text=True)
     LFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
     R = Alignment(horizontal="right", vertical="center")
-    # 列：序号 主体 凭证号 费用归属月份 调账月份 金额 | 原/改 | 科目 费用项目 部门 产品分类 产品项目 | 说明 更正人
-    WID = [5, 15, 9, 9, 9, 13, 8, 14, 23, 18, 13, 13, 24, 12]
+    # 列：序号 主体 凭证号 费用归属月份 调账月份 | 行标 | 科目 费用项目 部门 产品分类 产品项目 | 金额 税率 不含税金额 | 更正人
+    WID = [5, 15, 9, 9, 9, 7, 16, 23, 18, 13, 13, 12, 7, 12, 12]
     N = len(WID)
-    SHARED = (1, 2, 3, 4, 5, 13, 14)         # 两行合并；金额(第6列)分两行
-    DIM0 = 8                                 # 五个维度从第8列起
+    SHARED = (1, 2, 3, 4, 5, 15)             # 三行合并
+    LBL, DIM0, AMT, RATE, NET = 6, 7, 12, 13, 14
     last = get_column_letter(N)
     ws.merge_cells("A1:%s1" % last)
     ws.cell(1, 1, "计提更正单").font = Font(bold=True, size=16, color="1B2733")
@@ -1945,79 +1954,108 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     c2.alignment = C; c2.font = Font(bold=True, size=11, color="1B2733")
     ws.row_dimensions[2].height = 24
     HR = 3
-    heads = ["序号", "主体", "凭证号", "费用归属\n月份", "调账\n月份", "金额(不含税)", "", "科目", "费用项目", "部门", "产品分类", "产品项目",
-             "说明", "更正人/日期"]
+    heads = ["序号", "主体", "凭证号", "费用归属\n月份", "调账\n月份", "", "科目", "费用项目", "部门", "产品分类", "产品项目",
+             "金额\n(含税)", "税率", "不含税\n金额", "更正人/日期"]
     for j, h in enumerate(heads, 1):
         cl = ws.cell(HR, j, h)
         cl.font = Font(bold=True, color="FFFFFF"); cl.alignment = C; cl.border = BD
         cl.fill = PatternFill("solid", fgColor="5E6B78")
     ws.row_dimensions[HR].height = 32
     GRAY = Font(color="9AA5AE")
+    HOT = Font(bold=True, color="8A5A00")
     OLD_FILL = PatternFill("solid", fgColor="EEF2F4")
     NEW_FILL = PatternFill("solid", fgColor="FBF0DA")
     HOT_FILL = PatternFill("solid", fgColor="FDF6E8")
+    WHY_FILL = PatternFill("solid", fgColor="FFFFFF")
 
-    def nlines(t, col):
-        return max(1, -(-_dw(t) // max(1, WID[col - 1] - 3)))     # 留余量：Excel 实际折行比估算早
+    def nlines(t, width):
+        return max(1, -(-_dw(t) // max(1, width - 3)))     # 留余量：Excel 实际折行比估算早
+
+    def fnum(v):
+        try:
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    def rate_fmt(r):
+        return "0%" if abs(r * 100 - round(r * 100)) < 0.005 else "0.00%"
+    t_old = [0.0, 0.0]      # 含税, 不含税
+    t_new = [0.0, 0.0]
     for i, fx in enumerate(fixes, 1):
         s = fx.get("snap") or {}
-        r1 = HR + 2 * i - 1
-        r2 = r1 + 1
+        r1 = HR + 3 * i - 2
+        r2, r3 = r1 + 1, r1 + 2
         adj = fx.get("adj_period") or _next_period(period)
-        shared = {1: i, 2: _cn(s.get("book_code"), s.get("subject")), 3: s.get("vno"), 4: period, 5: adj,
-                  13: fx.get("memo") or None, 14: None}
+        shared = {1: i, 2: _cn(s.get("book_code"), s.get("subject")), 3: s.get("vno"), 4: period, 5: adj, 15: None}
+        for j in SHARED:
+            ws.merge_cells(start_row=r1, start_column=j, end_row=r3, end_column=j)
+            cl = ws.cell(r1, j, shared[j])
+            cl.alignment = C if j in (1, 3, 4, 5) else LFT
+            if j == 5 and adj != period:
+                cl.font = HOT                    # 跨月调账醒目
+        for rr_, lb, fill, font in ((r1, "原记账", OLD_FILL, Font(color="5E6B78")), (r2, "应改为", NEW_FILL, HOT),
+                                    (r3, "原因", WHY_FILL, Font(bold=True, color="5E6B78"))):
+            cl = ws.cell(rr_, LBL, lb); cl.fill = fill; cl.alignment = C; cl.font = font
+        # 维度：原记账 / 应改为
         old = [_cn(s.get("acct"), s.get("acct_name")), _cn(s.get("fee_code"), s.get("fee")), _cn(s.get("dept_code"), s.get("dept")),
                _cn(s.get("biz_code"), "" if str(s.get("biz") or "").startswith("（") else s.get("biz")),   # （无业务线）=空
                _cn(s.get("proj_code"), s.get("proj"))]
         new = [fx.get("to_acct"), fx.get("to_fee"), fx.get("to_dept"), fx.get("to_biz"), fx.get("to_proj")]
-        for j in SHARED:
-            ws.merge_cells(start_row=r1, start_column=j, end_row=r2, end_column=j)
-            cl = ws.cell(r1, j, shared[j])
-            cl.alignment = C if j in (1, 3, 4, 5) else LFT
-            if j == 5 and adj != period:
-                cl.font = Font(bold=True, color="8A5A00")      # 跨月调账醒目
-        a = ws.cell(r1, 7, "原记账"); a.fill = OLD_FILL; a.alignment = C; a.font = Font(color="5E6B78")
-        b = ws.cell(r2, 7, "应改为"); b.fill = NEW_FILL; b.alignment = C; b.font = Font(bold=True, color="8A5A00")
-        m1 = ws.cell(r1, 6, s.get("amt_net")); m1.number_format = "#,##0.00"; m1.alignment = R; m1.fill = OLD_FILL
-        amt2 = float(fx["to_amt"]) if fx.get("to_amt") else None
-        m2 = ws.cell(r2, 6, amt2 if amt2 is not None else "不变"); m2.alignment = R
-        if amt2 is not None:
-            m2.number_format = "#,##0.00"; m2.font = Font(bold=True, color="8A5A00"); m2.fill = HOT_FILL
-        else:
-            m2.font = GRAY
         for k in range(5):
             c1 = ws.cell(r1, DIM0 + k, old[k] or "空"); c1.alignment = LFT; c1.fill = OLD_FILL
-            c2 = ws.cell(r2, DIM0 + k, new[k] or "不变"); c2.alignment = LFT
+            c2_ = ws.cell(r2, DIM0 + k, new[k] or "不变"); c2_.alignment = LFT
             if new[k]:
-                c2.font = Font(bold=True, color="8A5A00"); c2.fill = HOT_FILL
+                c2_.font = HOT; c2_.fill = HOT_FILL
             else:
-                c2.font = GRAY
-        for j in range(1, N + 1):            # 合并之后再上边框，合并格下沿也是粗线
+                c2_.font = GRAY
+        # 金额：含税 / 税率 / 不含税
+        o_t, o_r, o_n = fnum(s.get("amt")), fnum(s.get("tax_rate")), fnum(s.get("amt_net"))
+        n_t, n_r, n_n = fnum(fx.get("to_amt_tax")), fnum(fx.get("to_rate")), fnum(fx.get("to_amt"))
+        for col, ov, nv, kind in ((AMT, o_t, n_t, "m"), (RATE, o_r, n_r, "r"), (NET, o_n, n_n, "m")):
+            c1 = ws.cell(r1, col, ov); c1.alignment = R; c1.fill = OLD_FILL
+            if ov is not None:
+                c1.number_format = "#,##0.00" if kind == "m" else rate_fmt(ov)
+            c2_ = ws.cell(r2, col, nv if nv is not None else "不变"); c2_.alignment = R
+            if nv is not None:
+                c2_.number_format = "#,##0.00" if kind == "m" else rate_fmt(nv)
+                c2_.font = HOT; c2_.fill = HOT_FILL
+            else:
+                c2_.font = GRAY
+        t_old[0] += o_t or 0; t_old[1] += o_n or 0
+        t_new[0] += n_t if n_t is not None else (o_t or 0)
+        t_new[1] += n_n if n_n is not None else (o_n or 0)
+        # 原因：横跨维度与金额列
+        ws.merge_cells(start_row=r3, start_column=DIM0, end_row=r3, end_column=NET)
+        why = ws.cell(r3, DIM0, fx.get("memo") or "")
+        why.alignment = LFT
+        for j in range(1, N + 1):            # 合并之后再上边框，每笔最后一行下沿粗线
             ws.cell(r1, j).border = BD
-            ws.cell(r2, j).border = BDE
-        # 行高按折行估：两行各自按最长的格；合并格(主体/说明)的行数摊到两行，打印不截字
-        l1 = max(nlines(old[k] or "空", DIM0 + k) for k in range(5))
-        l2 = max(nlines(new[k] or "不变", DIM0 + k) for k in range(5))
-        lm = max(nlines(shared[2], 2), nlines(shared[13] or "", 13))
-        extra = max(0, lm - l1 - l2)
-        ws.row_dimensions[r1].height = 15 * (l1 + extra / 2) + 7
-        ws.row_dimensions[r2].height = 15 * (l2 + extra / 2) + 7
-    rr = HR + 2 * len(fixes) + 1
-    t_old = round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2)
-    t_new = round(sum(float(fx["to_amt"]) if fx.get("to_amt") else float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2)
-    tots = [("原记账合计", t_old)] + ([("应改为合计", t_new)] if abs(t_new - t_old) >= 0.005 else [])   # 金额有改才出第二行
+            ws.cell(r2, j).border = BD
+            ws.cell(r3, j).border = BDE
+        # 行高按折行估：原记账/应改为按最长的格；原因按合并宽度；主体(三行合并)不够时摊到三行
+        l1 = max(nlines(old[k] or "空", WID[DIM0 + k - 1]) for k in range(5))
+        l2 = max(nlines(new[k] or "不变", WID[DIM0 + k - 1]) for k in range(5))
+        l3 = nlines(fx.get("memo") or "", sum(WID[DIM0 - 1:NET]))
+        extra = max(0, nlines(shared[2], WID[1]) - l1 - l2 - l3)
+        for rr_, ln in ((r1, l1), (r2, l2), (r3, l3)):
+            ws.row_dimensions[rr_].height = 15 * (ln + extra / 3) + 7
+    rr = HR + 3 * len(fixes) + 1
+    t_old = [round(v, 2) for v in t_old]
+    t_new = [round(v, 2) for v in t_new]
+    changed = any(abs(a - b) >= 0.005 for a, b in zip(t_old, t_new))
+    tots = [("原记账合计" if changed else "合计", t_old)] + ([("应改为合计", t_new)] if changed else [])   # 金额有改才出第二行
     for k, (lb, v) in enumerate(tots):
-        ws.merge_cells(start_row=rr + k, start_column=4, end_row=rr + k, end_column=5)
-        ws.cell(rr + k, 4, lb if len(tots) > 1 else "合计").font = Font(bold=True); ws.cell(rr + k, 4).alignment = R
-        ws.cell(rr + k, 4).border = BD
-        ws.cell(rr + k, 6, v).number_format = "#,##0.00"
-        ws.cell(rr + k, 6).font = Font(bold=True, color="8A5A00" if k else "1B2733"); ws.cell(rr + k, 6).alignment = R
-        ws.cell(rr + k, 5).border = BD; ws.cell(rr + k, 6).border = BD
+        ws.merge_cells(start_row=rr + k, start_column=DIM0 + 3, end_row=rr + k, end_column=DIM0 + 4)
+        cl = ws.cell(rr + k, DIM0 + 3, lb); cl.font = Font(bold=True); cl.alignment = R; cl.border = BD
+        for col, val in ((AMT, v[0]), (NET, v[1])):
+            c_ = ws.cell(rr + k, col, val); c_.number_format = "#,##0.00"; c_.alignment = R; c_.border = BD
+            c_.font = Font(bold=True, color="8A5A00" if k else "1B2733")
+        ws.cell(rr + k, RATE).border = BD
         ws.row_dimensions[rr + k].height = 20
     rn = rr + len(tots)
     ws.merge_cells(start_row=rn, start_column=1, end_row=rn, end_column=N)
-    nt = ws.cell(rn, 1, "填写说明：以上计提分录需要更正（登记更正不影响复核台对账）。每笔上行是金蝶原记账，下行是应改为，写「不变」的不用动；各项均为「编码 名称」，请按编码修改；"
-                        "应改为金额与原金额不同的，差额按说明处理。调账月份＝费用归属月份的，直接修改原凭证；晚于费用归属月份的，在调账月份做调整凭证。改完在右侧签字。")
+    nt = ws.cell(rn, 1, "填写说明：以上计提分录需要更正（登记更正不影响复核台对账）。每笔三行：原记账、应改为、原因；应改为写「不变」的不用动；各项均为「编码 名称」，请按编码修改。"
+                        "金额/税率变动的，按应改为的含税金额、税率、不含税金额调整进项税与费用。调账月份＝费用归属月份的，直接修改原凭证；晚于费用归属月份的，在调账月份做调整凭证。改完在右侧签字。")
     nt.alignment = LFT; nt.font = Font(color="5E6B78", size=10)
     ws.row_dimensions[rn].height = 32
     by = sorted({fx.get("by") for fx in fixes if fx.get("by")})

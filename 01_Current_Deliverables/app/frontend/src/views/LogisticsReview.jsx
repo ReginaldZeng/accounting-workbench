@@ -44,13 +44,16 @@ function toGroups(rows) {
 
 // 计提更正：应改为(空=不变)的一句话。值存「编码 名称」(改账按编码找，用户 2026-09-30 定)
 const FIX_F = [['to_acct', '科目', 'acct'], ['to_fee', '费用项目', 'fee'], ['to_dept', '部门', 'dept'], ['to_biz', '产品分类', 'biz'], ['to_proj', '产品项目', 'proj']]
-const FIX_EMPTY = { to_acct: '', to_fee: '', to_dept: '', to_biz: '', to_proj: '', to_amt: '', memo: '' }
+const FIX_EMPTY = { to_acct: '', to_fee: '', to_dept: '', to_biz: '', to_proj: '', to_amt_tax: '', to_rate: '', to_amt: '', memo: '' }
 const amtNum = v => { const n = Number(String(v || '').replace(/[,，\s]/g, '')); return String(v || '').trim() && isFinite(n) ? n : null }
 const CLEAR = '（清空）'
 const nm = v => (v && v.includes(' ') ? v.slice(v.indexOf(' ') + 1) : v)          // 「编码 名称」只取名称(页面标签用)
 const cn = (code, name) => [code, name && name !== code ? name : ''].filter(Boolean).join(' ')
-const fixShort = f => [...FIX_F.map(([k]) => nm(f[k])), f.to_amt && '金额 ' + money(f.to_amt)].filter(Boolean).join(' · ') || (f.memo ? '见说明' : '')
-const fixTxt = f => [...FIX_F.map(([k, lb]) => f[k] && lb + ' ' + f[k]), f.to_amt && '金额 ' + money(f.to_amt)].filter(Boolean).join(' · ') + (f.memo ? '；' + f.memo : '')
+// 金额三项(后端存：含税/不含税两位小数，税率小数 0.09)
+const fixAmts = f => [f.to_amt_tax && '金额 ' + money(f.to_amt_tax), f.to_rate && '税率 ' + pct(Number(f.to_rate)), f.to_amt && '不含税 ' + money(f.to_amt)]
+const fixShort = f => [...FIX_F.map(([k]) => nm(f[k])), ...fixAmts(f)].filter(Boolean).join(' · ') || (f.memo ? '见原因' : '')
+const fixTxt = f => [...FIX_F.map(([k, lb]) => f[k] && lb + ' ' + f[k]), ...fixAmts(f)].filter(Boolean).join(' · ') + (f.memo ? '；原因：' + f.memo : '')
+const r2 = x => Math.round(x * 100) / 100
 const nextPeriod = p => { const [y, m] = String(p || '').split('-').map(Number); return y && m ? (m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`) : p }
 let DIMOPT = null                                                                  // 金蝶主数据下拉，页面内只拉一次
 const loadDimOpt = () => (DIMOPT = DIMOPT || reviewDimOptions().catch(() => { DIMOPT = null; return null }))
@@ -60,7 +63,9 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
   const accr = rows.filter(r => r.kind === 'accr')
   const me = accr.find(r => r.key === at.key) || {}
   const init = me.fix || {}
-  const [f, setF] = useState(Object.fromEntries(Object.keys(FIX_EMPTY).map(k => [k, init[k] || ''])))
+  const [f, setF] = useState(Object.fromEntries(Object.keys(FIX_EMPTY).map(k => [k,
+    k === 'to_rate' && init[k] ? String(r2(Number(init[k]) * 100)) : (init[k] || '')])))   // 税率页面按百分数填(9)
+  const [drv, setDrv] = useState(init.to_amt && !init.to_amt_tax ? 'N' : 'T')   // 金额联动以哪项为准：T 含税 / N 不含税
   const [dim, setDim] = useState(null)
   const [adj, setAdj] = useState(init.adj_period || nextPeriod(period))   // 调账月份：默认归属月份的下个月
   useEffect(() => { loadDimOpt().then(d => setDim(d || { ok: false })) }, [])
@@ -76,8 +81,20 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
   const bad = FIX_F.filter(([k, , ok]) => f[k].trim() && dim && dim[ok] && dim[ok].length && !opts[ok].includes(f[k].trim())).map(([, lb]) => lb)
   const inHint = nm(f.to_fee.trim()) === '入库运费' && String(me.acct || '').startsWith('6601') && !f.to_acct.trim()
   const any = Object.values(f).some(v => v.trim())
-  const amtBad = f.to_amt.trim() && amtNum(f.to_amt) == null
-  const amtDiff = amtNum(f.to_amt) != null ? Math.round((amtNum(f.to_amt) - (me.amt_net || 0)) * 100) / 100 : null
+  // 金额联动：含税 = 不含税 ×(1+税率)。改含税→算不含税；改不含税→算含税；改税率→按上次改的那项为准重算(默认保持含税，账单金额是事实)
+  const rateOf = v => (amtNum(v) != null ? amtNum(v) / 100 : (me.tax_rate || 0))
+  const onTax = v => { setDrv('T'); const t = amtNum(v); setF({ ...f, to_amt_tax: v, to_amt: t != null ? String(r2(t / (1 + rateOf(f.to_rate)))) : '' }) }
+  const onNet = v => { setDrv('N'); const n = amtNum(v); setF({ ...f, to_amt: v, to_amt_tax: n != null ? String(r2(n * (1 + rateOf(f.to_rate)))) : '' }) }
+  const onRate = v => {
+    const r = rateOf(v)
+    if (drv === 'N' && amtNum(f.to_amt) != null) return setF({ ...f, to_rate: v, to_amt_tax: String(r2(amtNum(f.to_amt) * (1 + r))) })
+    const t = amtNum(f.to_amt_tax) != null ? amtNum(f.to_amt_tax) : me.amt
+    if (!String(v).trim() && !f.to_amt_tax.trim()) return setF({ ...f, to_rate: v, to_amt: '' })
+    setF({ ...f, to_rate: v, to_amt_tax: String(t), to_amt: String(r2(t / (1 + r))) })
+  }
+  const amtBad = ['to_amt_tax', 'to_rate', 'to_amt'].some(k => f[k].trim() && amtNum(f[k]) == null)
+  const amtDiff = amtNum(f.to_amt_tax) != null ? r2(amtNum(f.to_amt_tax) - (me.amt || 0)) : null
+  const newNet = amtNum(f.to_amt), newRate = amtNum(f.to_rate)
   const clean = { ...Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.trim()])), adj_period: adj }
   const acctOpt = code => opts.acct.find(o => o.startsWith(code + ' ')) || code
   return (
@@ -96,14 +113,20 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
             {FIX_F.map(([k, lb, ok]) => <tr key={k}><td>{lb}</td><td className="mono">{orig[ok] || <span className="dim">空</span>}</td>
               <td><input list={'fx-' + ok} value={f[k]} placeholder={dim ? '不变' : '读金蝶主数据中…'} onChange={e => setF({ ...f, [k]: e.target.value })} />
                 <datalist id={'fx-' + ok}>{opts[ok].map(o => <option key={o} value={o} />)}</datalist></td></tr>)}
-            <tr><td>金额<small className="dim">不含税</small></td><td className="mono">{money(me.amt_net)}</td>
-              <td><input inputMode="decimal" value={f.to_amt} placeholder="不变（部分调走或金额记错时填）" onChange={e => setF({ ...f, to_amt: e.target.value })} /></td></tr>
-            <tr><td>说明</td><td colSpan="2"><input value={f.memo} placeholder="写给改账的人，例：这笔是孝感工厂小料入库的装卸费，应记入库运费" onChange={e => setF({ ...f, memo: e.target.value })} /></td></tr>
+            <tr className="fxsep"><td>金额<small className="dim">含税</small></td><td className="mono">{money(me.amt)}</td>
+              <td><input inputMode="decimal" value={f.to_amt_tax} placeholder="不变（部分调走或金额记错时填）" onChange={e => onTax(e.target.value)} /></td></tr>
+            <tr><td>税率</td><td className="mono">{me.tax_rate != null ? pct(me.tax_rate) : '—'}</td>
+              <td><span className="fxpct"><input inputMode="decimal" value={f.to_rate} placeholder="不变（如 9）" onChange={e => onRate(e.target.value)} />%</span></td></tr>
+            <tr><td>不含税金额</td><td className="mono">{money(me.amt_net)}</td>
+              <td><input inputMode="decimal" value={f.to_amt} placeholder="不变" onChange={e => onNet(e.target.value)} /></td></tr>
+            <tr className="fxsep"><td>原因</td><td colSpan="2"><input value={f.memo} placeholder="写给改账的人，例：这笔是孝感工厂小料入库的装卸费，应记入库运费" onChange={e => setF({ ...f, memo: e.target.value })} /></td></tr>
           </tbody>
         </table>
         {dim && dim.ok === false && <div className="fxhint">金蝶主数据没取到，下拉是空的；可以手填「编码 名称」。</div>}
-        {amtBad && <div className="fxhint">应改为金额不是数字，请只填数字（可带千分位逗号）。</div>}
-        {amtDiff != null && Math.abs(amtDiff) >= 0.005 && <div className="fxhint">应改为金额比原金额{amtDiff > 0 ? '多' : '少'} <b className="mono">{money(Math.abs(amtDiff))}</b>，差额怎么处理请写在说明里（例：其余仍按原维度 / 多提冲回）。</div>}
+        {amtBad && <div className="fxhint">金额、税率只能填数字（金额可带千分位逗号，税率填 9 表示 9%）。</div>}
+        {!amtBad && newRate != null && Math.abs(newRate / 100 - (me.tax_rate || 0)) >= 0.00005 && newNet != null &&
+          <div className="fxhint">税率改为 {r2(newRate)}%：含税 <b className="mono">{money(amtNum(f.to_amt_tax))}</b> ＝ 不含税 <b className="mono">{money(newNet)}</b> ＋ 进项税 <b className="mono">{money(r2(amtNum(f.to_amt_tax) - newNet))}</b>（原进项税 {money(me.tax)}）。</div>}
+        {amtDiff != null && Math.abs(amtDiff) >= 0.005 && <div className="fxhint">应改为含税金额比原来{amtDiff > 0 ? '多' : '少'} <b className="mono">{money(Math.abs(amtDiff))}</b>，差额怎么处理请写在原因里（例：其余仍按原维度 / 多提冲回）。</div>}
         {bad.length > 0 && <div className="fxhint">{bad.join('、')} 在金蝶主数据里找不到这个编码，改账的人可能对不上——请从下拉里选。</div>}
         {inHint && <div className="fxhint">入库运费一般不记 6601 销售费用。{String(me.subject || '').includes('孝感') && '孝感历来：工厂/小料入库记 5101 制造费用，代工厂/零售/鲜食入库记 6401 主营业务成本。'}科目要一起改就点：
           <button className="lnk" onClick={() => setF({ ...f, to_acct: acctOpt('5101') })}>5101 制造费用</button>　
@@ -336,6 +359,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fxtbl th small{font-weight:400;color:#8A96A2}
       .lrv .fxtbl td:first-child{width:72px;color:#5E6B78;white-space:nowrap}
       .lrv .fxtbl td:first-child small{display:block;font-size:11px}
+      .lrv .fxtbl tr.fxsep td{border-top:2px solid #CBD5DC}
+      .lrv .fxpct{display:flex;align-items:center;gap:4px;color:#5E6B78}.lrv .fxpct input{width:90px}
       .lrv .fxtbl td:nth-child(2){width:38%}
       .lrv .fxtbl input{font:inherit;width:100%;box-sizing:border-box;border:1px solid #DCE2E7;border-radius:5px;padding:4px 7px}
       .lrv .fxtbl input:focus{border-color:#D9A441;outline:none;background:#FFFCF5}

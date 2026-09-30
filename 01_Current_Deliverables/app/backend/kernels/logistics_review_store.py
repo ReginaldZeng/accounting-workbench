@@ -127,7 +127,9 @@ review_line_fix = Table(
     Column("to_biz", String(120)),        # 产品分类
     Column("to_proj", String(120)),       # 产品项目
     Column("adj_period", String(7)),      # 调账月份(YYYY-MM)：=归属月份改原凭证，晚于则在该月做调整凭证
-    Column("to_amt", String(30)),         # 应改为金额(不含税，空=不变；部分调走/金额记错时填)
+    Column("to_amt", String(30)),         # 应改为不含税金额(空=不变；部分调走/金额记错时填)
+    Column("to_amt_tax", String(30)),     # 应改为金额(含税)
+    Column("to_rate", String(12)),        # 应改为税率(小数，0.09)
     Column("memo", Text),
     Column("updated_by", String(50)),
     Column("updated_at", String(20)),
@@ -222,6 +224,10 @@ def migrate_cols(engine):
                 c.execute(text("ALTER TABLE logistics_review_line_fix ADD COLUMN adj_period VARCHAR(7)"))
             if "to_amt" not in fx:
                 c.execute(text("ALTER TABLE logistics_review_line_fix ADD COLUMN to_amt VARCHAR(30)"))
+            if "to_amt_tax" not in fx:
+                c.execute(text("ALTER TABLE logistics_review_line_fix ADD COLUMN to_amt_tax VARCHAR(30)"))
+            if "to_rate" not in fx:
+                c.execute(text("ALTER TABLE logistics_review_line_fix ADD COLUMN to_rate VARCHAR(12)"))
             if "mysql" in drv:
                 for col in ("to_acct", "to_fee", "to_dept", "to_biz"):
                     if fx.get(col) is not None and int(fx[col]) < 120:
