@@ -592,7 +592,8 @@ export const reviewAccrual = (carrier, period) => j(`/api/logistics-review/accru
 // 复核台三步流（V2.690）：逐笔计提复核 / 差异解释 / 供应商复核要点 / 整月登记与撤销
 export const reviewLines = (carrier, period) => j(`/api/logistics-review/lines?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 export const reviewLineNote = (carrier, period, line_key, note) => j('/api/logistics-review/line-note', { method: 'POST', body: JSON.stringify({ carrier, period, line_key, note }) })
-export const reviewLineFix = (carrier, period, line_keys, fix) => j('/api/logistics-review/line-fix', { method: 'POST', body: JSON.stringify({ carrier, period, line_keys, ...fix }) })
+export const reviewDimOptions = () => j('/api/logistics-review/dim-options')
+export const reviewLineFix =(carrier, period, line_keys, fix) => j('/api/logistics-review/line-fix', { method: 'POST', body: JSON.stringify({ carrier, period, line_keys, ...fix }) })
 export const reviewCarrierPointsSet =(carrier, points) => j('/api/logistics-review/carrier-points', { method: 'POST', body: JSON.stringify({ carrier, points }) })
 export const reviewSign = (carrier, period, note = '') => j('/api/logistics-review/sign', { method: 'POST', body: JSON.stringify({ carrier, period, note }) })
 export const reviewUnsign = (carrier, period) => j('/api/logistics-review/unsign', { method: 'POST', body: JSON.stringify({ carrier, period }) })

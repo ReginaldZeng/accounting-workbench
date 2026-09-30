@@ -1038,13 +1038,21 @@ def _accr_entries(carrier, period, carrier_full=None):
                          [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"), ("FAccountID.FName", "科目名"),
                           ("FVOUCHERGROUPID.FName", "凭证字"), ("FVOUCHERGROUPNO", "凭证序号"), ("FEXPLANATION", "摘要"),
                           ("FDetailID.FF100010.FDataValue", "产品分类"), ("FDetailID.FF100006.FDataValue", "产品项目"),
-                          ("FDetailID.FFLEX5.FName", "部门"), ("FDetailID.FFLEX9.FName", "费用项目")], cf)
+                          ("FDetailID.FFLEX5.FName", "部门"), ("FDetailID.FFLEX9.FName", "费用项目"),
+                          # 编码(计提更正单按编码找分录)：账簿/费用项目/部门/产品分类/产品项目/供应商(税额行上挂)
+                          ("FACCOUNTBOOKID.FNumber", "账簿码"), ("FDetailID.FFLEX9.FNumber", "费用项目码"),
+                          ("FDetailID.FFLEX5.FNumber", "部门码"), ("FDetailID.FF100010.FNumber", "产品分类码"),
+                          ("FDetailID.FF100006.FNumber", "产品项目码"),
+                          ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商")], cf)
     except Exception:
-        return {"entries": [], "adj": [], "prior": []}
+        return {"entries": [], "adj": [], "prior": [], "suppliers": []}
     orgs = db.list_orgs() or []
     b2s = {o.get("full_name"): o.get("short_name") for o in orgs if o.get("full_name")}
     fee_by_v, tax_by_v, ents, adj, prior = {}, {}, [], [], {}
+    sups = {}
     for r in rows:
+        if r.get("供应商码"):
+            sups[str(r["供应商码"]).strip()] = str(r.get("供应商") or "").strip()
         amt = float(r.get("借") or 0)
         if not amt:
             continue
@@ -1072,7 +1080,10 @@ def _accr_entries(carrier, period, carrier_full=None):
         ents.append({"subject": subj, "fee": fee, "fee_norm": _fee_norm(fee),
                      "biz": str(r.get("产品分类") or "").strip() or "（无业务线）",
                      "proj": str(r.get("产品项目") or "").strip(), "dept": str(r.get("部门") or "").strip(),
-                     "vno": vno, "acct": acct, "acct_name": str(r.get("科目名") or "").strip(), "amt_net": round(amt, 2)})
+                     "vno": vno, "acct": acct, "acct_name": str(r.get("科目名") or "").strip(), "amt_net": round(amt, 2),
+                     "book_code": str(r.get("账簿码") or "").strip(), "fee_code": str(r.get("费用项目码") or "").strip(),
+                     "dept_code": str(r.get("部门码") or "").strip(), "biz_code": str(r.get("产品分类码") or "").strip(),
+                     "proj_code": str(r.get("产品项目码") or "").strip()})
     # 同一凭证的进项税按各费用分录金额精确分摊，舍入余数给最后一笔——保证每张凭证 Σ含税 = 费用+税 分毫不差
     by_v = {}
     for e in ents:
@@ -1093,7 +1104,8 @@ def _accr_entries(carrier, period, carrier_full=None):
             e["key"] = "|".join([e["vno"], e["acct"], e["subject"], e["fee"], e["biz"], e["proj"], e["dept"]])
     ents.sort(key=lambda e: (e["subject"], e["fee_norm"], e["biz"], e["proj"], e["vno"]))
     plist = [{**p, "net": round(p["net"], 2)} for p in sorted(prior.values(), key=lambda p: (p["subject"], p["vno"]))]
-    return {"entries": ents, "adj": adj, "prior": plist}
+    return {"entries": ents, "adj": adj, "prior": plist,
+            "suppliers": [{"code": k, "name": v} for k, v in sorted(sups.items())]}
 
 
 def _build_lines(request, carrier, period):
@@ -1210,10 +1222,13 @@ def _build_lines(request, carrier, period):
             "adj": adj, "prior": prior, "prior_total": round(sum(p["net"] for p in prior), 2),
             "od_total": (lambda a: {"amt": a, "ratio": round(max(0.0, min(1.0, a / btot)), 4) if btot > 0 else 0.0})(
                 round(sum(det3[k]["amt"] for k in bill3 if k in det3), 2)),
-            "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl}, carrier, period)
+            "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl,
+            "suppliers": got.get("suppliers") or []}, carrier, period)
 
 
-_FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "memo")
+_FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj", "memo")
+_SNAP_KEYS = ("subject", "book_code", "vno", "acct", "acct_name", "fee", "fee_code", "fee_type", "dept", "dept_code",
+              "biz", "biz_code", "proj", "proj_code", "amt_net", "tax_rate", "amt")
 
 
 def _attach_fixes(L, carrier, period):
@@ -1747,8 +1762,7 @@ async def review_line_fix(request: Request):
             r = rows.get(key)
             rec = dict(vals, updated_by=_uname(u), updated_at=_now())
             if r:
-                rec["snap_json"] = json.dumps({k: r.get(k) for k in ("subject", "vno", "acct", "acct_name", "fee", "fee_type", "dept", "biz", "proj",
-                                                                      "amt_net", "tax_rate", "amt")}, ensure_ascii=False)
+                rec["snap_json"] = json.dumps({k: r.get(k) for k in _SNAP_KEYS}, ensure_ascii=False)
             if ex:
                 c.execute(update(FX).where(FX.c.id == ex).values(**rec))
             elif r:
@@ -1758,6 +1772,49 @@ async def review_line_fix(request: Request):
     if not cc:
         _ACCR_CACHE[ck] = (L, None, _t.time())
     return {"ok": True, "fixes": L["fixes"]}
+
+
+_DIMOPT_CACHE = {}
+
+
+@router.get("/api/logistics-review/dim-options")
+def review_dim_options(request: Request):
+    """计提更正「应改为」下拉：金蝶主数据 编码+名称(科目/费用项目/部门/产品分类/产品项目)。改账按编码找，缓存12小时。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    import time as _t
+    cc = _DIMOPT_CACHE.get("v")
+    if cc and _t.time() - cc[1] < 43200:
+        return cc[0]
+    out = {"ok": True, "acct": [], "fee": [], "dept": [], "biz": [], "proj": []}
+    try:
+        s, conf = kc.login()
+    except Exception as e:
+        return {**out, "ok": False, "msg": "金蝶登录失败：%s" % e}
+
+    def q(form, fields, flt):
+        try:
+            return kc._query(s, conf, form, fields, flt)
+        except Exception:
+            return []
+
+    def pairs(rows, keep=None):
+        seen = {}
+        for r in rows:
+            code, name = str(r.get("c") or "").strip(), str(r.get("n") or "").strip()
+            if code and code not in seen and (keep is None or keep(r)):
+                seen[code] = name
+        return [{"code": k, "name": v} for k, v in sorted(seen.items())]
+    CN = [("FNumber", "c"), ("FName", "n")]
+    out["acct"] = pairs(q("BD_Account", CN, "FNumber in ('5101','5301','6401','6402','6601','6602','6603','6711')"))
+    out["fee"] = pairs(q("BD_Expense", CN, "FNumber like 'FYXM%'"))
+    out["dept"] = pairs(q("BD_Department", CN, "FNumber like '%'"))
+    ad = q("BOS_ASSISTANTDATA_DETAIL", [("FNumber", "c"), ("FDataValue", "n"), ("FId.FNumber", "t")], "FId.FNumber in ('CPFL','CPXM')")
+    out["biz"] = pairs(ad, lambda r: r.get("t") == "CPFL")
+    out["proj"] = pairs(ad, lambda r: r.get("t") == "CPXM")
+    if all(out[k] for k in ("acct", "fee", "dept", "biz", "proj")):
+        _DIMOPT_CACHE["v"] = (out, _t.time())
+    return out
 
 
 @router.post("/api/logistics-review/carrier-points")
@@ -1819,16 +1876,29 @@ async def review_unsign_month(request: Request):
 
 
 def _fix_to_txt(fx):
-    """更正内容一句话：费用项目 · 科目 · 部门 · 产品线（空=不变）；说明。"""
-    parts = [("费用项目 " + fx["to_fee"]) if fx.get("to_fee") else "", ("科目 " + fx["to_acct"]) if fx.get("to_acct") else "",
-             ("部门 " + fx["to_dept"]) if fx.get("to_dept") else "", ("产品线 " + fx["to_biz"]) if fx.get("to_biz") else ""]
+    """更正内容一句话：科目 · 费用项目 · 部门 · 产品分类 · 产品项目（空=不变，值为「编码 名称」）；说明。"""
+    parts = [("科目 " + fx["to_acct"]) if fx.get("to_acct") else "", ("费用项目 " + fx["to_fee"]) if fx.get("to_fee") else "",
+             ("部门 " + fx["to_dept"]) if fx.get("to_dept") else "", ("产品分类 " + fx["to_biz"]) if fx.get("to_biz") else "",
+             ("产品项目 " + fx["to_proj"]) if fx.get("to_proj") else ""]
     s = " · ".join(p for p in parts if p) or "（见说明）"
     return s + (("；" + fx["memo"]) if fx.get("memo") else "")
 
 
-def _fix_sheet(wb, carrier, period, fixes):
-    """《计提更正单》（第二页，可直接打印交专人）：每笔两行——上行金蝶原记账、下行应改为(不变的写"不变")，
-    序号/主体/凭证号/金额/说明/更正人合并两行(用户 2026-09-30 定)；底部留更正人/复核人签字。"""
+def _cn(code, name):
+    """维度显示＝「编码 名称」(改账按编码找)；缺哪个写哪个，都缺返回空串。"""
+    code, name = str(code or "").strip(), str(name or "").strip()
+    return (code + " " + name).strip() if code != name else code
+
+
+def _dw(t):
+    """估打印宽度：汉字按2、其余按1(openpyxl 列宽单位≈1个英文字符)。"""
+    return sum(2 if ord(ch) > 0x2E80 else 1 for ch in str(t or ""))
+
+
+def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
+    """《计提更正单》（第二页，可直接打印交专人）：标题下一行右侧=月份/供应商名称/供应商编码；
+    每笔两行——上行金蝶原记账、下行应改为(不变的写"不变")，各维度都印「编码 名称」(用户 2026-09-30 定：以编码识别、同时带名称)；
+    序号/主体/凭证号/金额/说明/更正人合并两行；底部留更正人/复核人签字。"""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.worksheet.properties import PageSetupProperties
     from openpyxl.utils import get_column_letter
@@ -1840,36 +1910,52 @@ def _fix_sheet(wb, carrier, period, fixes):
     C = Alignment(horizontal="center", vertical="center", wrap_text=True)
     LFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
     R = Alignment(horizontal="right", vertical="center")
-    N = 11
+    WID = [5, 15, 9, 13, 8, 14, 23, 18, 13, 13, 24, 12]
+    N = len(WID)
     last = get_column_letter(N)
     ws.merge_cells("A1:%s1" % last)
-    ws.cell(1, 1, "计提更正单  ·  %s  ·  %s" % (carrier, period)).font = Font(bold=True, size=15, color="1B2733")
+    ws.cell(1, 1, "计提更正单").font = Font(bold=True, size=16, color="1B2733")
     ws.cell(1, 1).alignment = C
-    ws.row_dimensions[1].height = 26
+    ws.row_dimensions[1].height = 28
+    # 第二行右侧：月份 / 供应商名称 / 供应商编码(取计提凭证上挂的供应商维度)
+    sups = suppliers or []
+    y, m = (period.split("-") + [""])[:2] if period else ("", "")
+    mon = "%s年%d月" % (y, int(m)) if y and m.isdigit() else period
+    sname = "、".join(dict.fromkeys(x.get("name") for x in sups if x.get("name"))) or carrier_full or carrier
+    scode = "、".join(x.get("code") for x in sups if x.get("code")) or "（未取到）"
     ws.merge_cells("A2:%s2" % last)
-    ws.cell(2, 1, "物流账单复核时发现以下计提分录维度记错（金额不变、不影响对账）。每笔两行：上行是金蝶原记账，下行是应改为，写「不变」的不用动；改完在右侧签字。")
-    ws.cell(2, 1).alignment = LFT; ws.cell(2, 1).font = Font(color="5E6B78")
-    ws.row_dimensions[2].height = 30
-    HR = 3
-    heads = ["序号", "主体", "凭证号", "金额(不含税)", "", "科目", "费用项目", "部门", "产品线", "说明", "更正人/日期"]
+    c2 = ws.cell(2, 1, "月份：%s　　　供应商名称：%s　　　供应商编码：%s" % (mon, sname, scode))
+    c2.alignment = Alignment(horizontal="right", vertical="center"); c2.font = Font(bold=True, color="1B2733")
+    ws.row_dimensions[2].height = 22
+    ws.merge_cells("A3:%s3" % last)
+    ws.cell(3, 1, "物流账单复核时发现以下计提分录维度记错（金额不变、不影响对账）。每笔两行：上行是金蝶原记账，下行是应改为，写「不变」的不用动；"
+                  "各项均为「编码 名称」，请按编码在金蝶修改，改完在右侧签字。")
+    ws.cell(3, 1).alignment = LFT; ws.cell(3, 1).font = Font(color="5E6B78", size=10)
+    ws.row_dimensions[3].height = 32
+    HR = 4
+    heads = ["序号", "主体", "凭证号", "金额(不含税)", "", "科目", "费用项目", "部门", "产品分类", "产品项目", "说明", "更正人/日期"]
     for j, h in enumerate(heads, 1):
         cl = ws.cell(HR, j, h)
         cl.font = Font(bold=True, color="FFFFFF"); cl.alignment = C; cl.border = BD
         cl.fill = PatternFill("solid", fgColor="5E6B78")
-    ws.row_dimensions[HR].height = 26
+    ws.row_dimensions[HR].height = 30
     GRAY = Font(color="9AA5AE")
     OLD_FILL = PatternFill("solid", fgColor="EEF2F4")
     NEW_FILL = PatternFill("solid", fgColor="FBF0DA")
     HOT_FILL = PatternFill("solid", fgColor="FDF6E8")
-    MERGE_COLS = (1, 2, 3, 4, 10, 11)      # 两行共用：序号/主体/凭证号/金额/说明/更正人
+
+    def nlines(t, col):
+        return max(1, -(-_dw(t) // max(1, WID[col - 1] - 1)))
     for i, fx in enumerate(fixes, 1):
         s = fx.get("snap") or {}
         r1 = HR + 2 * i - 1
         r2 = r1 + 1
-        acct0 = " ".join(x for x in (s.get("acct"), s.get("acct_name")) if x)
-        shared = {1: i, 2: s.get("subject"), 3: s.get("vno"), 4: s.get("amt_net"), 10: fx.get("memo") or None, 11: None}
-        old = [acct0 or "空", s.get("fee") or "空", s.get("dept") or "空", s.get("biz") or "空"]
-        new = [fx.get("to_acct"), fx.get("to_fee"), fx.get("to_dept"), fx.get("to_biz")]
+        shared = {1: i, 2: _cn(s.get("book_code"), s.get("subject")), 3: s.get("vno"), 4: s.get("amt_net"),
+                  11: fx.get("memo") or None, 12: None}
+        old = [_cn(s.get("acct"), s.get("acct_name")), _cn(s.get("fee_code"), s.get("fee")), _cn(s.get("dept_code"), s.get("dept")),
+               _cn(s.get("biz_code"), "" if str(s.get("biz") or "").startswith("（") else s.get("biz")),   # （无业务线）=空
+               _cn(s.get("proj_code"), s.get("proj"))]
+        new = [fx.get("to_acct"), fx.get("to_fee"), fx.get("to_dept"), fx.get("to_biz"), fx.get("to_proj")]
         for j, v in shared.items():
             ws.merge_cells(start_row=r1, start_column=j, end_row=r2, end_column=j)
             cl = ws.cell(r1, j, v)
@@ -1878,8 +1964,8 @@ def _fix_sheet(wb, carrier, period, fixes):
                 cl.number_format = "#,##0.00"
         a = ws.cell(r1, 5, "原记账"); a.fill = OLD_FILL; a.alignment = C; a.font = Font(color="5E6B78")
         b = ws.cell(r2, 5, "应改为"); b.fill = NEW_FILL; b.alignment = C; b.font = Font(bold=True, color="8A5A00")
-        for k in range(4):
-            c1 = ws.cell(r1, 6 + k, old[k]); c1.alignment = LFT; c1.fill = OLD_FILL
+        for k in range(5):
+            c1 = ws.cell(r1, 6 + k, old[k] or "空"); c1.alignment = LFT; c1.fill = OLD_FILL
             c2 = ws.cell(r2, 6 + k, new[k] or "不变"); c2.alignment = LFT
             if new[k]:
                 c2.font = Font(bold=True, color="8A5A00"); c2.fill = HOT_FILL
@@ -1888,11 +1974,13 @@ def _fix_sheet(wb, carrier, period, fixes):
         for j in range(1, N + 1):            # 合并之后再上边框，合并格下沿也是粗线
             ws.cell(r1, j).border = BD
             ws.cell(r2, j).border = BDE
-        # 行高按说明折行估(说明列宽32≈16个汉字一行)，两行分摊，打印不截字
-        nl = max(1, -(-len(str(fx.get("memo") or "")) // 16))
-        h = max(22, (15 * nl + 10) / 2)
-        ws.row_dimensions[r1].height = h
-        ws.row_dimensions[r2].height = h
+        # 行高按折行估：两行各自按最长的格；合并格(主体/说明)的行数摊到两行，打印不截字
+        l1 = max(nlines(old[k] or "空", 6 + k) for k in range(5))
+        l2 = max(nlines(new[k] or "不变", 6 + k) for k in range(5))
+        lm = max(nlines(shared[2], 2), nlines(shared[11] or "", 11))
+        extra = max(0, lm - l1 - l2)
+        ws.row_dimensions[r1].height = 15 * (l1 + extra / 2) + 7
+        ws.row_dimensions[r2].height = 15 * (l2 + extra / 2) + 7
     rr = HR + 2 * len(fixes) + 1
     ws.cell(rr, 3, "合计").font = Font(bold=True); ws.cell(rr, 3).alignment = R
     ws.cell(rr, 4, round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2))
@@ -1904,12 +1992,12 @@ def _fix_sheet(wb, carrier, period, fixes):
     ws.cell(rr + 2, 1, "登记人：%s        更正人：______________        更正日期：______________        复核人：______________"
             % ("、".join(by) or "______________")).alignment = LFT
     ws.row_dimensions[rr + 2].height = 26
-    for j, w in enumerate([5, 12, 9, 13, 8, 16, 11, 13, 10, 32, 14], 1):
+    for j, w in enumerate(WID, 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_title_rows = "1:3"
+    ws.print_title_rows = "1:4"
     ws.print_options.horizontalCentered = True
     ws.page_margins.left = ws.page_margins.right = 0.4
     ws.page_margins.top = ws.page_margins.bottom = 0.5
@@ -2020,7 +2108,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     ws.page_margins.left = ws.page_margins.right = 0.4
     ws.page_margins.top = ws.page_margins.bottom = 0.5
     if fixes:
-        _fix_sheet(wb, carrier, period, fixes)
+        _fix_sheet(wb, carrier, period, fixes, L.get("suppliers") or [], _carrier_full(carrier))
     # sheet2 复核明细
     ws2 = wb.create_sheet("复核明细")
     from openpyxl.utils import get_column_letter

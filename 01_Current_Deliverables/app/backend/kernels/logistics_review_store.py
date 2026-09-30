@@ -113,7 +113,7 @@ review_carrier_pts = Table(
 
 # 计提更正：复核时发现金蝶计提记错维度(费用项目/科目/部门/产品线)，不在系统里改账，只登记"应改为什么"，
 # 导出《计提更正单》打印交专人去金蝶改。snap_json=登记时原分录快照(主体/凭证号/科目/费用项目/部门/产品线/金额)，
-# 金蝶改好后原行键会变，更正单仍按快照打印。
+# 金蝶改好后原行键会变，更正单仍按快照打印。to_* 存「编码 名称」(如 0030301 仓储物流部)，改账按编码找。
 review_line_fix = Table(
     "logistics_review_line_fix", _md,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -121,10 +121,11 @@ review_line_fix = Table(
     Column("period", String(7)),
     Column("line_key", String(200)),
     Column("snap_json", Text),
-    Column("to_acct", String(60)),
-    Column("to_fee", String(40)),
-    Column("to_dept", String(60)),
-    Column("to_biz", String(40)),
+    Column("to_acct", String(120)),
+    Column("to_fee", String(120)),
+    Column("to_dept", String(120)),
+    Column("to_biz", String(120)),        # 产品分类
+    Column("to_proj", String(120)),       # 产品项目
     Column("memo", Text),
     Column("updated_by", String(50)),
     Column("updated_at", String(20)),
@@ -206,3 +207,16 @@ def migrate_cols(engine):
                                 "WHERE TABLE_NAME='logistics_bill_lines' AND COLUMN_NAME='doc_no'")).scalar()
             if ln is not None and int(ln) < 300:
                 c.execute(text("ALTER TABLE logistics_bill_lines MODIFY doc_no VARCHAR(300)"))
+        # 计提更正表(V2.697建)：补产品项目列；应改为改存「编码 名称」，MySQL 加宽到 120
+        if "mysql" in drv:
+            fx = {r[0]: r[1] for r in c.execute(text("SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS "
+                                                     "WHERE TABLE_NAME='logistics_review_line_fix'")).fetchall()}
+        else:
+            fx = {r[1]: None for r in c.execute(text("PRAGMA table_info(logistics_review_line_fix)")).fetchall()}
+        if fx:
+            if "to_proj" not in fx:
+                c.execute(text("ALTER TABLE logistics_review_line_fix ADD COLUMN to_proj VARCHAR(120)"))
+            if "mysql" in drv:
+                for col in ("to_acct", "to_fee", "to_dept", "to_biz"):
+                    if fx.get(col) is not None and int(fx[col]) < 120:
+                        c.execute(text("ALTER TABLE logistics_review_line_fix MODIFY %s VARCHAR(120)" % col))

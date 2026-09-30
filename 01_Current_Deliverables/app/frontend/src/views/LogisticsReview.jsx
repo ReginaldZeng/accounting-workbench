@@ -9,7 +9,7 @@
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewLines, reviewLineNote, reviewLineFix, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -42,54 +42,62 @@ function toGroups(rows) {
   return out
 }
 
-// 计提更正：应改为(空=不变)的一句话
-const FIX_F = [['to_fee', '费用项目', 'fee'], ['to_acct', '科目', 'acct'], ['to_dept', '部门', 'dept'], ['to_biz', '产品线', 'biz']]
-const fixShort = f => [f.to_fee, f.to_acct, f.to_dept, f.to_biz].filter(Boolean).join(' · ') || (f.memo ? '见说明' : '')
-const fixTxt = f => [f.to_fee && '费用项目 ' + f.to_fee, f.to_acct && '科目 ' + f.to_acct, f.to_dept && '部门 ' + f.to_dept,
-  f.to_biz && '产品线 ' + f.to_biz].filter(Boolean).join(' · ') + (f.memo ? '；' + f.memo : '')
-const uniq = a => [...new Set(a.filter(Boolean))]
+// 计提更正：应改为(空=不变)的一句话。值存「编码 名称」(改账按编码找，用户 2026-09-30 定)
+const FIX_F = [['to_acct', '科目', 'acct'], ['to_fee', '费用项目', 'fee'], ['to_dept', '部门', 'dept'], ['to_biz', '产品分类', 'biz'], ['to_proj', '产品项目', 'proj']]
+const FIX_EMPTY = { to_acct: '', to_fee: '', to_dept: '', to_biz: '', to_proj: '', memo: '' }
+const CLEAR = '（清空）'
+const nm = v => (v && v.includes(' ') ? v.slice(v.indexOf(' ') + 1) : v)          // 「编码 名称」只取名称(页面标签用)
+const cn = (code, name) => [code, name && name !== code ? name : ''].filter(Boolean).join(' ')
+const fixShort = f => FIX_F.map(([k]) => nm(f[k])).filter(Boolean).join(' · ') || (f.memo ? '见说明' : '')
+const fixTxt = f => FIX_F.map(([k, lb]) => f[k] && lb + ' ' + f[k]).filter(Boolean).join(' · ') + (f.memo ? '；' + f.memo : '')
+let DIMOPT = null                                                                  // 金蝶主数据下拉，页面内只拉一次
+const loadDimOpt = () => (DIMOPT = DIMOPT || reviewDimOptions().catch(() => { DIMOPT = null; return null }))
 
 // 计提更正弹窗：只改点的那一笔(用户 2026-09-30：同一账单金额下常常只有一笔记错)；只登记，打印交专人去金蝶改
 function FixEditor({ at, rows, onSave, onCancel }) {
   const accr = rows.filter(r => r.kind === 'accr')
   const me = accr.find(r => r.key === at.key) || {}
   const init = me.fix || {}
-  const [f, setF] = useState({ to_fee: init.to_fee || '', to_acct: init.to_acct || '', to_dept: init.to_dept || '', to_biz: init.to_biz || '', memo: init.memo || '' })
+  const [f, setF] = useState(Object.fromEntries(Object.keys(FIX_EMPTY).map(k => [k, init[k] || ''])))
+  const [dim, setDim] = useState(null)
+  useEffect(() => { loadDimOpt().then(d => setDim(d || { ok: false })) }, [])
   useEffect(() => {
     const esc = e => { if (e.key === 'Escape') onCancel() }
     window.addEventListener('keydown', esc); return () => window.removeEventListener('keydown', esc)
   }, [onCancel])
-  const opts = {
-    fee: uniq(['入库运费', '出库运费', '退货运费', '货物仓储费', '装卸费', ...accr.map(r => r.fee)]),
-    acct: uniq(['5101 制造费用', '6401 主营业务成本', '6601 销售费用', '6602 管理费用', ...accr.map(r => r.acct && `${r.acct} ${r.acct_name || ''}`.trim())]),
-    dept: uniq([...accr.map(r => r.dept), '仓储物流部', '茶饮小料部', '永续物流中心', '永续供应中心']),
-    biz: uniq(['无（清空）', ...accr.map(r => r.biz).filter(b => b && !b.startsWith('（'))]),
-  }
-  const orig = { fee: me.fee, acct: [me.acct, me.acct_name].filter(Boolean).join(' '), dept: me.dept, biz: me.biz }
-  const inHint = f.to_fee.trim() === '入库运费' && String(me.acct || '').startsWith('6601') && !f.to_acct.trim()
+  // 下拉=金蝶主数据「编码 名称」；产品分类/产品项目多一个「（清空）」
+  const opts = Object.fromEntries(FIX_F.map(([, , ok]) => [ok,
+    [...(ok === 'biz' || ok === 'proj' ? [CLEAR] : []), ...((dim && dim[ok]) || []).map(o => cn(o.code, o.name))]]))
+  const orig = { acct: cn(me.acct, me.acct_name), fee: cn(me.fee_code, me.fee), dept: cn(me.dept_code, me.dept),
+    biz: cn(me.biz_code, (me.biz || '').startsWith('（') ? '' : me.biz), proj: cn(me.proj_code, me.proj) }
+  const bad = FIX_F.filter(([k, , ok]) => f[k].trim() && dim && dim[ok] && dim[ok].length && !opts[ok].includes(f[k].trim())).map(([, lb]) => lb)
+  const inHint = nm(f.to_fee.trim()) === '入库运费' && String(me.acct || '').startsWith('6601') && !f.to_acct.trim()
   const any = Object.values(f).some(v => v.trim())
   const clean = Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.trim()]))
+  const acctOpt = code => opts.acct.find(o => o.startsWith(code + ' ')) || code
   return (
     <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
       <div className="fxdlg" role="dialog" aria-label="计提更正">
-        <div className="fxhead"><b>计提更正</b><span className="mono">{me.subject} · {me.vno}</span><span className="sp" />
+        <div className="fxhead"><b>计提更正</b><span className="mono">{cn(me.book_code, me.subject)} · {me.vno}</span><span className="sp" />
           <button className="fxx" onClick={onCancel} aria-label="关闭">✕</button></div>
-        <div className="fxsub">只登记这一笔应改为什么，不改金蝶、不影响对账；导出复核表时进《计提更正单》，打印交专人改。</div>
+        <div className="fxsub">只登记这一笔应改为什么，不改金蝶、不影响对账；导出复核表时进《计提更正单》，打印交专人按编码改。</div>
         <div className="fxamt">金额 <b className="mono">{money(me.amt_net)}</b> 不含税 · 含税 <span className="mono">{money(me.amt)}</span>{me.tax_rate != null && <> · 税率 {pct(me.tax_rate)}</>}</div>
         <table className="fxtbl">
-          <thead><tr><th>项目</th><th>金蝶原记账</th><th>应改为 <small>（空白＝不变）</small></th></tr></thead>
+          <thead><tr><th>项目</th><th>金蝶原记账 <small>编码 名称</small></th><th>应改为 <small>（从下拉选，空白＝不变）</small></th></tr></thead>
           <tbody>
-            {FIX_F.map(([k, lb, ok]) => <tr key={k}><td>{lb}</td><td>{orig[ok] || <span className="dim">空</span>}</td>
-              <td><input list={'fx-' + ok} value={f[k]} placeholder="不变" onChange={e => setF({ ...f, [k]: e.target.value })} />
+            {FIX_F.map(([k, lb, ok]) => <tr key={k}><td>{lb}</td><td className="mono">{orig[ok] || <span className="dim">空</span>}</td>
+              <td><input list={'fx-' + ok} value={f[k]} placeholder={dim ? '不变' : '读金蝶主数据中…'} onChange={e => setF({ ...f, [k]: e.target.value })} />
                 <datalist id={'fx-' + ok}>{opts[ok].map(o => <option key={o} value={o} />)}</datalist></td></tr>)}
             <tr><td>说明</td><td colSpan="2"><input value={f.memo} placeholder="写给改账的人，例：这笔是孝感工厂小料入库的装卸费，应记入库运费" onChange={e => setF({ ...f, memo: e.target.value })} /></td></tr>
           </tbody>
         </table>
+        {dim && dim.ok === false && <div className="fxhint">金蝶主数据没取到，下拉是空的；可以手填「编码 名称」。</div>}
+        {bad.length > 0 && <div className="fxhint">{bad.join('、')} 在金蝶主数据里找不到这个编码，改账的人可能对不上——请从下拉里选。</div>}
         {inHint && <div className="fxhint">入库运费一般不记 6601 销售费用。{String(me.subject || '').includes('孝感') && '孝感历来：工厂/小料入库记 5101 制造费用，代工厂/零售/鲜食入库记 6401 主营业务成本。'}科目要一起改就点：
-          <button className="lnk" onClick={() => setF({ ...f, to_acct: '5101 制造费用' })}>5101 制造费用</button>
-          <button className="lnk" onClick={() => setF({ ...f, to_acct: '6401 主营业务成本' })}>6401 主营业务成本</button></div>}
+          <button className="lnk" onClick={() => setF({ ...f, to_acct: acctOpt('5101') })}>5101 制造费用</button>　
+          <button className="lnk" onClick={() => setF({ ...f, to_acct: acctOpt('6401') })}>6401 主营业务成本</button></div>}
         <div className="fxbtns">
-          {me.fix && <button className="btn sm" onClick={() => onSave([me.key], { to_fee: '', to_acct: '', to_dept: '', to_biz: '', memo: '' })}>撤掉这笔更正</button>}
+          {me.fix && <button className="btn sm" onClick={() => onSave([me.key], FIX_EMPTY)}>撤掉这笔更正</button>}
           <span className="sp" />
           <button className="btn sm" onClick={onCancel}>取消</button>
           <button className="btn sm pri" disabled={!any} onClick={() => onSave([me.key], clean)}>保存更正</button>
