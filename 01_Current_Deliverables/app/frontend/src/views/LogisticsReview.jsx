@@ -405,11 +405,14 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           {anchor && <td rowSpan={r.bill_span || 1}>{(() => {
                             const od = r.od
                             if (!od) return null
-                            if (!od.n) return <span className="tag" title="这部分账单没有金蝶单号（仓储、调整、月结汇总等），只能看汇总差异">否 · 汇总核</span>
+                            if (!od.n) return isZero(r.bill) ? <span className="dim">—</span>
+                              : <span className="tag" title="这部分账单没有金蝶单号（仓储、调整、月结汇总等），只能看汇总差异">否 · 汇总核</span>
                             const full = od.ratio >= 0.995
+                            const qonly = od.ratio < 0.005
                             return <button className={'odbtn ' + (full ? 'ok' : 'part')} onClick={() => goDocs(od)}
-                              title={`${od.n} 单带金蝶单号，覆盖账单 ${money(od.amt)}；点击去第②步只看这一组`}>
-                              {full ? `✓ ${od.n} 单` : `部分 ${Math.round(od.ratio * 100)}% · ${od.n} 单`} ›</button>
+                              title={qonly ? `${od.n} 单有金蝶单号但逐单没有金额（钱在汇总行），逐单只能核数量；点击去第②步只看这一组`
+                                : `${od.n} 单带金蝶单号，覆盖账单 ${money(od.amt)}；点击去第②步只看这一组`}>
+                              {full ? `✓ ${od.n} 单` : qonly ? `${od.n} 单 · 只核量` : `部分 ${Math.round(od.ratio * 100)}% · ${od.n} 单`} ›</button>
                           })()}</td>}
                           <td>{bad || (r.note || '').trim()
                             ? <input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
