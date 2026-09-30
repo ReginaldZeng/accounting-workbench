@@ -1489,14 +1489,9 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         return (not fsub or sub == fsub) and (not ffee or fee == ffee) and (bset is None or bb in bset)
 
     rows_all = rows            # 单据视图缓存按整家承运商建，按组筛在缓存之后
-    # 第②步三个下拉筛选(主体/费用类型/产品线)的选项：取整家本月全部单据，按单号去重计张数(口径同 fsub/ffee/fbiz 筛选)
+    # 第②步三个下拉筛选(主体/费用类型/产品线)的选项：取整家本月全部账单行计张数(一行=表里一张，与列表条数一致；口径同 fsub/ffee/fbiz 筛选)
     _fc = {"subject": {}, "fee": {}, "biz": {}}
-    _fs = set()
-    for i_, r in enumerate(rows_all):
-        k_ = (r.get("doc_no") or "").split("+")[0] or ("#%d" % i_)
-        if k_ in _fs:
-            continue
-        _fs.add(k_)
+    for r in rows_all:
         for fk, fv in (("subject", _eff_subject(r)), ("fee", _eff_fee(r)), ("biz", _bill_biz(r))):
             _fc[fk][fv or ""] = _fc[fk].get(fv or "", 0) + 1
     facets = {k: sorted(v.items(), key=lambda kv: (-kv[1], kv[0])) for k, v in _fc.items()}
