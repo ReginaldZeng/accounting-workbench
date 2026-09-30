@@ -1387,7 +1387,8 @@ def _box_docs(rsub, carrier):
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
                 "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                 "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
-                "note": r.get("note") or "", "bbiz": _bill_biz(r)}
+                "note": r.get("note") or "", "bbiz": _bill_biz(r),
+                "lid": r.get("id")}    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
         mrows = []
         kgbase = 0.0
         if not lines:
