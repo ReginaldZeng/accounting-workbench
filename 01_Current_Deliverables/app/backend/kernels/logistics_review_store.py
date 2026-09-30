@@ -168,10 +168,11 @@ _XUNGE_SPEC = {
          "fee_item": "快递费", "annot": "销售出库单-电商", "kd_qty_axis": "qty",
          # 每单物流费=快递费+操作费(含续件)+箱子(箱型×月结清单物料费单价)，V2.720
          "fee_parts": {"快递费": ["金额", "旺季加收", "燃油附加", "地区加收"], "操作费": ["操作费"]}, "box_col": "箱型"},
-        {"name": "搬运费", "role": "detail", "header_row": 2, "subject": {"column": "客户"},
+        # 搬运费＝月结清单孝感页「卸货」(计提记孝感仓储费)；退件表＝深圳页「退货服务费」——主体/标注跟汇总页走(V2.721)
+        {"name": "搬运费", "role": "detail", "header_row": 2, "subject": {"fixed": "孝感星期九"},
          "doc_col": "金蝶单号", "amount_col": "合计费用", "qty_col": "合计体积", "qty_unit": "方",
-         "fee_item": "卸货费", "annot": "出库装卸", "summary_marker": "合计"},
-        {"name": "退件表", "role": "detail", "header_row": 1, "subject": {"column": "公司"},
+         "fee_item": "卸货费", "annot": "成品仓储-电商", "summary_marker": "合计"},
+        {"name": "退件表", "role": "detail", "header_row": 1, "subject": {"fixed": "深圳星期零"},
          "doc_col": "金蝶单号", "qty_col": "入库数量", "qty_unit": "件",
          "fee_item": "退货", "annot": "其它出库单-电商", "kd_qty_axis": "qty",
          "per_row_fees": {"退货服务费": "退货服务费"}},     # 每张退货单挂退货服务费(单价取月结清单，V2.721)
