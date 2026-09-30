@@ -2044,14 +2044,18 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     t_new = [round(v, 2) for v in t_new]
     changed = any(abs(a - b) >= 0.005 for a, b in zip(t_old, t_new))
     tots = [("原记账合计" if changed else "合计", t_old)] + ([("应改为合计", t_new)] if changed else [])   # 金额有改才出第二行
+    TOT_FILL = [PatternFill("solid", fgColor="E7ECEF"), PatternFill("solid", fgColor="FBF0DA")]
     for k, (lb, v) in enumerate(tots):
-        ws.merge_cells(start_row=rr + k, start_column=DIM0 + 3, end_row=rr + k, end_column=DIM0 + 4)
-        cl = ws.cell(rr + k, DIM0 + 3, lb); cl.font = Font(bold=True); cl.alignment = R; cl.border = BD
+        # 合计行撑满整行(用户 2026-09-30)：标签合并到金额列前，金额两列，其余格也上边框和底色
+        ws.merge_cells(start_row=rr + k, start_column=1, end_row=rr + k, end_column=AMT - 1)
+        cl = ws.cell(rr + k, 1, lb); cl.font = Font(bold=True, color="8A5A00" if k else "1B2733"); cl.alignment = R
         for col, val in ((AMT, v[0]), (NET, v[1])):
-            c_ = ws.cell(rr + k, col, val); c_.number_format = "#,##0.00"; c_.alignment = R; c_.border = BD
+            c_ = ws.cell(rr + k, col, val); c_.number_format = "#,##0.00"; c_.alignment = R
             c_.font = Font(bold=True, color="8A5A00" if k else "1B2733")
-        ws.cell(rr + k, RATE).border = BD
-        ws.row_dimensions[rr + k].height = 20
+        for j in range(1, N + 1):
+            ws.cell(rr + k, j).border = BD
+            ws.cell(rr + k, j).fill = TOT_FILL[min(k, 1)]
+        ws.row_dimensions[rr + k].height = 22
     rn = rr + len(tots)
     ws.merge_cells(start_row=rn, start_column=1, end_row=rn, end_column=N)
     nt = ws.cell(rn, 1, "填写说明：以上计提分录需要更正（登记更正不影响复核台对账）。每笔三行：原记账、应改为、原因；应改为写「不变」的不用动；各项均为「编码 名称」，请按编码修改。"
