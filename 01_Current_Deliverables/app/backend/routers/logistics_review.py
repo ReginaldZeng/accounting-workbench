@@ -1289,6 +1289,45 @@ def _attach_fixes(L, carrier, period):
     return L
 
 
+def _car_norm(s):
+    """车型归一：'9.6米冷藏' / '9.6米冷藏车' / '9.6m' → '9.6米'(账单与报价写法不一)。"""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(米|m|M)", str(s or ""))
+    return (m.group(1) + "米") if m else str(s or "").strip()
+
+
+def _fmt_amt(v):
+    return ("{:,.0f}" if abs(v - round(v)) < 0.005 else "{:,.2f}").format(v)
+
+
+def _trip_check(r, tu, n, fee, pmap):
+    """包天包趟一行按报价核：运费 = 数量 × 单价(车型+天/趟)；加班费报价未列 → 待确认。
+    没车型/不是天趟/承运商没配价目 → None(只能免核量)。"""
+    car = str(r.get("carrier_sub") or "").strip()
+    if not car or tu not in ("天", "趟") or not pmap:
+        return None
+    try:
+        sf = json.loads(r.get("sub_fees") or "{}") or {}
+    except Exception:
+        sf = {}
+    run = float(sf["运费"]) if sf.get("运费") is not None else float(fee)
+    ot = float(sf.get("加班") or 0)
+    n = n or 1
+    carn = car.replace("冷藏车", "").replace("冷藏", "")
+    label = "包天包趟·%s×%g%s" % (carn, n, tu)
+    price = pmap.get((_car_norm(car), tu))
+    base = {"car": car, "unit": tu, "n": n, "price": price, "run": round(run, 2), "ot": round(ot, 2), "label": label}
+    if price is None:
+        return {**base, "std": None, "verdict": "diff", "msg": "报价里没有 %s 按%s的价" % (carn, tu)}
+    std = round(price * n, 2)
+    msgs = []
+    if abs(run - std) >= 0.01:
+        msgs.append("运费 %s ≠ 报价 %s×%g=%s" % (_fmt_amt(run), _fmt_amt(price), n, _fmt_amt(std)))
+    if ot:
+        msgs.append("加班 %s 报价未列价，需确认" % _fmt_amt(ot))
+    return {**base, "std": std, "verdict": "diff" if msgs else "ok",
+            "msg": "；".join(msgs) if msgs else "按报价 %s×%g=%s" % (_fmt_amt(price), n, _fmt_amt(std))}
+
+
 def _box_docs(rsub, carrier):
     """统一物料模板·单据视图：账单每张单据一条 doc（materials=金蝶物料明细，运费按货品kg摊、剔包材）。
     核量三口径：weight=账单重量vs金蝶kg / qty=账单件vs金蝶件(剔包装) / box=有账单重量按重量，否则账单件vs金蝶箱(规格箱规)。
@@ -1309,6 +1348,9 @@ def _box_docs(rsub, carrier):
             mats = _fetch_doc_materials(s2, conf2, by_form)
         except Exception:
             mats = {}
+    # 短驳(包天包趟)价目：承运商配置 spec_json.shuttle_prices=[{car,unit(天/趟),price}]，如极鲜达《仓储收费标准(星期零)》短驳运输
+    _sp = _load_spec(carrier) or {}
+    pmap = {(_car_norm(x.get("car")), x.get("unit")): float(x.get("price") or 0) for x in (_sp.get("shuttle_prices") or [])}
     docs = []
     for r in rsub:
         d0 = (r.get("doc_no") or "").split("+")[0]
@@ -1318,6 +1360,7 @@ def _box_docs(rsub, carrier):
         billcnt = float(r.get("qty") or 0)
         fee = float(r.get("amount") or 0)
         biz = r.get("bizline") or _bizline_of(r.get("annot"))
+        is_trip, trip = False, None
         try:
             chg_wt = float(r.get("charge_wt")) if r.get("charge_wt") not in (None, "") else None
         except (TypeError, ValueError):
@@ -1369,10 +1412,18 @@ def _box_docs(rsub, carrier):
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
             ratio_tuo = (kd_sum / billcnt) if billcnt else 0
-            # 调拨(分布式调出)按包天包趟计费：一张单可能跑几车、账单一车一行、不填数量 → 核不了量，免核(用户 2026-09-30)
-            is_trip = (not billcnt) and (d0.upper().startswith("FBDR") or "调拨" in str(r.get("annot") or ""))
-            if kd_sum and is_trip:
+            # 调拨(分布式调出)按包天包趟计费：一张单可能跑几车、账单一车一行 → 核不了量；有车型/天趟/价目时按报价核价(用户 2026-09-30)
+            tu = str(r.get("unit") or "").replace("元/", "").strip()
+            is_trip = tu in ("天", "趟") or ((not billcnt) and (d0.upper().startswith("FBDR") or "调拨" in str(r.get("annot") or "")))
+            trip = _trip_check(r, tu, billcnt, fee, pmap) if is_trip else None
+            if is_trip and trip and trip["verdict"] == "ok":
+                mode_cn, cnt_state = trip["label"], "ok"
+            elif is_trip and trip:
+                mode_cn, cnt_state = trip["label"], "price"
+            elif kd_sum and is_trip:
                 mode_cn, cnt_state = "包天包趟·免核量", "na"
+            if is_trip and tu:
+                bill_unit = tu                   # 账单量显示 1 天 / 2 趟
             elif kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
                 mode_cn, cnt_state = "整车按箱", "ok"
             elif kd_sum and billcnt and 3 <= ratio_tuo <= 60:
@@ -1448,6 +1499,8 @@ def _box_docs(rsub, carrier):
             state = "miss"
         elif cnt_state == "qtydiff":
             state = "qtydiff"
+        elif cnt_state == "price":
+            state = "price"            # 包天包趟核价不符/加班未列价
         elif cnt_state == "na":
             state = "info"
         else:
@@ -1458,7 +1511,8 @@ def _box_docs(rsub, carrier):
                      "unit_fee": round(fee / kgbase, 2) if kgbase else None, "sales": ssum,
                      "ratio": round(fee / ssum, 4) if ssum else None,
                      "parties": list(dict.fromkeys(m.get("party") for m in mrows if m.get("party"))),
-                     "n_mat": len(lines), "q_diff": round(bill_amt - kd_sum, 2) if kd_sum else None,
+                     "n_mat": len(lines), "q_diff": round(bill_amt - kd_sum, 2) if (kd_sum and not is_trip) else None,
+                     "trip": trip,
                      "materials": mrows})
     # 同一单号账单上有多行(包天包趟一车一行)：每行注明本单共几行、合计运费；单位运费/费比按本单合计运费算，不拿单行去除整单重量
     grp = {}
@@ -1567,10 +1621,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 _ACCR_CACHE[ck] = (pool, None, _t.time())
             for x in pool:                    # 缓存里的单据每次重挂确认态
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
-            ex_all = sum(1 for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff"))   # 步骤条用整家总数，不随筛选变
+            ex_all = sum(1 for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff", "price"))   # 步骤条用整家总数，不随筛选变
             if bucket_on:
                 pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
-            dc = {"miss": 0, "qtydiff": 0, "info": 0, "ok": 0, "done": 0}
+            dc = {"miss": 0, "qtydiff": 0, "price": 0, "info": 0, "ok": 0, "done": 0}
             for x in pool:
                 k = "done" if x.get("confirmed") else x["state"]
                 dc[k] = dc.get(k, 0) + 1
@@ -1592,7 +1646,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                         dc[r["qty_state"]] = max(0, dc[r["qty_state"]] - 1)
                     elif r.get("verdict") == "pass":
                         dc["ok"] = max(0, dc["ok"] - 1)
-        dc["ex"] = dc["miss"] + dc["qtydiff"]
+        dc["ex"] = dc["miss"] + dc["qtydiff"] + dc.get("price", 0)
 
         def dhit(x):
             if any(qs in str(x.get(f) or "") for f in ("doc_no", "subject", "fee_item", "bizline", "note", "mode_cn")):
@@ -1605,7 +1659,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         elif full and group == "done":
             pool = [x for x in pool if x.get("confirmed")]
         elif full and group != "all":
-            want = {"ex": ("miss", "qtydiff"), "pass": ("ok",)}.get(group, (group,))
+            want = {"ex": ("miss", "qtydiff", "price"), "pass": ("ok",)}.get(group, (group,))
             pool = [x for x in pool if not x.get("confirmed") and x["state"] in want]
         if full:
             dtot, docs = len(pool), pool[(page - 1) * size: page * size]

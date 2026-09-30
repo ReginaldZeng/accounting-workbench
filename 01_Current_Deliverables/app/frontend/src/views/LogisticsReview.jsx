@@ -21,15 +21,16 @@ const PS = { ok: ['通过', 'ok'], over: ['多收', 'bad'], under: ['账单少�
 const STEPS = [['lines', '逐笔计提复核'], ['docs', '逐单核价核量'], ['sign', '确认与登记']]
 // 逐单·单据核对结果（后端 doc.state）：筛选条与结论 pill 共用
 const DOC_Q = [
-  { f: 'ex', n: '待核', k: 'ex', cls: 'warn', dd: '金蝶查无 + 数量不符' },
+  { f: 'ex', n: '待核', k: 'ex', cls: 'warn', dd: '金蝶查无 + 数量不符 + 核价不符' },
   { f: 'miss', n: '金蝶查无', k: 'miss', cls: 'bad', dd: '账单单号在金蝶没找到出库单' },
   { f: 'qtydiff', n: '数量不符', k: 'qtydiff', cls: 'warn', dd: '账单量与金蝶核对量超过容差(2%或1)' },
+  { f: 'price', n: '核价不符', k: 'price', cls: 'bad', dd: '包天包趟按报价核：运费≠数量×单价，或有报价未列的加班费' },
   { f: 'info', n: '免核', k: 'info', cls: 'neu', dd: '打托倒算托规 / 整车包车议价 / 调拨包天包趟 / 无单据调整，不核数量，仅提示' },
   { f: 'ok', n: '一致', k: 'ok', cls: 'ok', dd: '账单量＝金蝶核对量' },
   { f: 'done', n: '已确认', k: 'done', cls: 'ok', dd: '复核人核过没问题、已点「确认无误」的单据（不再算待核）' },
   { f: 'all', n: '全部', k: 'all', cls: '', dd: '' },
 ]
-const STATE_PILL = { miss: ['金蝶查无', 'bad'], qtydiff: ['数量不符', 'warn'], info: [null, 'neu'], ok: ['一致', 'ok'] }
+const STATE_PILL = { miss: ['金蝶查无', 'bad'], qtydiff: ['数量不符', 'warn'], price: ['核价不符', 'bad'], info: [null, 'neu'], ok: ['一致', 'ok'] }
 const num = (v, dp = 2) => (v == null || v === '' ? '—' : Number(v).toLocaleString('zh-CN', { maximumFractionDigits: dp }))
 const EMPTY_L = { rows: [], accr_total: 0, bill_total: 0, diff_total: 0, adj: [], points: '', signed: null, n_unexplained: 0 }
 
@@ -752,7 +753,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td className="num">{x.conv == null ? '—' : x.conv}</td>
                         <td>{cf
                           ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className="sub">{pl || x.mode_cn} · {cf.by}</span></>
-                          : <><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}</>}</td>
+                          : <><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}
+                            {x.trip && <span className={'sub' + (x.trip.verdict === 'ok' ? '' : ' diffbad')} title={x.trip.msg}>{x.trip.msg}</span>}</>}</td>
                         <td className="num">{money(x.doc_fee)}{x.trips > 1 && <span className="sub" title="同一单号账单上有几行(包天包趟一车一行)，单位运费/费比按本单合计算">共 {x.trips} 行 · 合计 {money(x.doc_fee_all)}</span>}</td>
                         <td className="num">{x.unit_fee == null ? '—' : x.unit_fee}</td>
                         <td className="num">{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null && <span className="sub">{money(x.sales)}</span>}</td>
