@@ -502,7 +502,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <div style={{ flex: 1 }} />
             {ov && ov.fetched_at && <span className="ovsub" title="金蝶计提数据缓存30分钟；复核状态、账单应付每次现算">金蝶数据取于 {ov.fetched_at.slice(5)}</span>}
             <button className="btn sm" disabled={ovBusy} onClick={refreshOv} title="重新从金蝶读取计提">{ovBusy ? '刷新中…' : '刷新'}</button>
-            <input type="search" placeholder="搜承运商" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 130 }} />
+            <input type="search" placeholder="搜承运商/编码" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 130 }} />
           </div>
           <div className="tw"><table className="ovtable">
             <thead>
@@ -511,9 +511,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             </thead>
             <tbody>
               {ov === null && <tr><td colSpan="12" className="ovempty">读金蝶计提凭证中…</td></tr>}
-              {ov && ov.rows && ov.rows.filter(r => !supq || (r.carrier || '').includes(supq) || (r.full || '').includes(supq)).map(r =>
-                <tr key={r.full}>
-                  <td className="ovcar" title={r.full}>{r.carrier}{!r.has_spec && <i className="nospectag">未配</i>}</td>
+              {ov && ov.rows && ov.rows.filter(r => !supq || (r.carrier || '').includes(supq) || (r.full || '').includes(supq) || (r.code || '').includes(supq)).map(r =>
+                <tr key={r.code || r.full}>
+                  <td className="ovcar" title={[r.code, r.full].filter(Boolean).join(' ')}><Cd c={r.code} />{r.carrier}{!r.has_spec && <i className="nospectag">未配</i>}</td>
                   {ov.subjects.map(s => {
                     const cc = (r.cells && r.cells[s]) || { accr: 0, paid: 0, diff: 0 }
                     return [

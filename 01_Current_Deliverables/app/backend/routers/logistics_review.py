@@ -142,8 +142,10 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
                 return sshort
         return name
 
-    fields = list(kc.GL_VOUCHER_FIELDS) + [("FACCOUNTBOOKID.FName", "账簿")]
-    ck = ("ov", period)
+    # 供应商维度(FFLEX4)：名称用金蝶全称、带编码(原来从摘要截名，截在「供应链/物流」不全)，V2.725
+    fields = list(kc.GL_VOUCHER_FIELDS) + [("FACCOUNTBOOKID.FName", "账簿"),
+                                           ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商")]
+    ck = ("ov2", period)
     cc = _ACCR_CACHE.get(ck)
     if cc and not fresh and _t.time() - cc[2] < 1800:
         rows, fetched_at, cached = cc[0], cc[1], True
@@ -160,17 +162,20 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
             _ACCR_CACHE[ck] = (rows, fetched_at, _t.time())
     # 计提=贷方(摘要「计提…运费/仓储费/装卸/搬运/物流」)；付款=借方(摘要含某承运商名)
     accr, paid = {}, {}
-    carriers = set()
+    carriers = {}     # 键(供应商编码，没有则摘要名) → (金蝶全称, 编码)
     for r in rows:
         z = str(r.get("FEXPLANATION") or "")
         book = book2short.get(str(r.get("账簿") or ""), None)
         cr = r.get("FCREDIT") or 0
         if cr and "计提" in z and _accr_is_current(z, period) and any(k in z for k in lrc._ACCR_KW):
+            sname, scode = str(r.get("供应商") or "").strip(), str(r.get("供应商码") or "").strip()
             mo = lrc._ACCR_RE.search(z)
-            if mo:
-                cf = mo.group(1)
-                carriers.add(cf)
-                accr[(book, cf)] = accr.get((book, cf), 0.0) + float(cr)
+            if not sname and not mo:
+                continue
+            cf = sname or mo.group(1)
+            key = scode or cf
+            carriers[key] = (cf, scode)
+            accr[(book, key)] = accr.get((book, key), 0.0) + float(cr)
     # 本月付款（按复核结果）：本月已复核账单应付合计，按承运商×主体（权责发生制·同期间比，非金蝶跨月现金借方）
     with db._engine.connect() as c:
         specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
@@ -187,18 +192,22 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
         k = (_eff_subject(r), str(r["carrier"]))
         billmap[k] = round(billmap.get(k, 0.0) + float(r["amount"] or 0), 2)
     out = {}
-    for cf in carriers:
+    for key, (cf, scode) in carriers.items():
         short = sup_short(cf)
         cells = {}
         tot_accr = 0.0
         for subj in _SUBJECTS:
-            a = round(accr.get((subj, cf), 0.0), 2)
+            a = round(accr.get((subj, key), 0.0), 2)
             p = billmap.get((subj, short), 0.0)      # 本月复核应付（该承运商本月账单复核后金额）
             cells[subj] = {"accr": a, "paid": p, "diff": round(a - p, 2)}
             tot_accr += a
-        out[cf] = {"carrier": cf, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
-                   "total_accr": round(tot_accr, 2), "signed": signed.get(short)}
-    rowlist = sorted(out.values(), key=lambda x: -x["total_accr"])
+        out[key] = {"carrier": cf, "code": scode, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
+                    "total_accr": round(tot_accr, 2), "signed": signed.get(short)}
+
+    def _natkey(x):   # 按供应商编码自然排序(物流运输服务009 < 物流运输服务063)，没编码的排最后
+        c = x.get("code") or ""
+        return (0 if c else 1, [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", c)], x["carrier"])
+    rowlist = sorted(out.values(), key=_natkey)
     return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": bool(rows),
             "fetched_at": fetched_at, "cached": cached}
 
