@@ -266,6 +266,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const stepIdx = STEPS.findIndex(s => s[0] === step)
   const goStep = k => setStep(k)
   const groups = toGroups(lrows)
+  // 同一账单金额(合并格)下的几笔共用一个差异：锚点行键 → 差异，让每一行都能标「平」(用户 2026-09-30：平也按行看)
+  const ancDiff = {}
+  for (const x of lrows || []) if (x.bill != null) ancDiff[x.anc || x.key] = x.diff
 
   return (
     <div className="lrv">
@@ -538,6 +541,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
                       const unexpl = bad && !(r.note || '').trim()
+                      const gdiff = anchor ? r.diff : ancDiff[r.anc]          // 本行所在账单金额的差异
+                      const flat = gdiff != null && isZero(gdiff)
                       // 第一行=费用项目(FYXM编码+金蝶名称)；小字=产品分类 · 产品项目 · 部门，都带金蝶编码(用户 2026-09-30)
                       const bizEl = (r.biz || '').startsWith('（') ? <span className="dim">无产品分类</span> : <><Cd c={r.biz_code} />{r.biz}</>
                       const subline = [<>{bizEl}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}</>,
@@ -575,7 +580,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           <td><div className="notecell">{bad || (r.note || '').trim()
                             ? <input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
                               placeholder="为什么差…" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} />
-                            : (anchor ? <span className="tag ok">平</span> : null)}{fixCell}</div></td>
+                            : flat ? <span className="tag ok">平</span>
+                              : (!anchor && gdiff != null ? <span className="dim" style={{ fontSize: 12 }} title="这几笔共用一个账单金额，差异解释写在本组第一笔">差异见本组首笔</span> : null)}{fixCell}</div></td>
                         </tr>
                       ]
                     })
