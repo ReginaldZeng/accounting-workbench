@@ -330,51 +330,58 @@ def review_kingdee_qty(request: Request, carrier: str = "迅鸽", period: str = 
             wmap = _kd_weight_by_doc(s, conf, docs)
         except Exception:
             return JSONResponse({"ok": False, "msg": "金蝶取数失败，稍后重试；不影响已存复核结果"}, status_code=502)
-        hit = 0
-        with db._engine.begin() as c:
-            for no, w in wmap.items():
-                res = c.execute(update(BL).where(
-                    (BL.c.carrier == carrier) & (BL.c.period == period) &
-                    (func.substr(BL.c.doc_no, 1, len(no)) == no)).values(kd_qty=w))
-                hit += res.rowcount or 0
+        hit = _fill_kd(carrier, period, wmap)
         db.audit(u["name"], "物流复核-接金蝶核量(重量)", "%s %s" % (carrier, period),
                  "只读取数；单据 %d，回填 %d 行(kg)" % (len(wmap), hit))
         return {"ok": True, "kd_docs": len(wmap), "filled": hit, "by": "weight"}
-    prefixes = sorted({"".join(ch for ch in (d.split("+")[0]) if ch.isalpha()) for d in docs if d and d != "无单据"})
-    prefixes = [p for p in prefixes if p]
-    y, m = period.split("-")[:2]
-    last = calendar.monthrange(int(y), int(m))[1]
-    d0, d1 = "%s-%s-01" % (y, m), "%s-%s-%02d" % (y, m, last)
+    # 按件数核量(迅鸽等)：单号前缀→对应金蝶单据(XQLCK 销售出库 / RK 销售退货 / QTCK 其他出库 / FBDR 调拨…)，
+    # 按单号直接查、不限日期(跨月发货也取得到)，件数=货品数量件之和(剔包装)。V2.717：原来只查当月销售出库、按单号前缀回填(短号会套到长号上)。
     PACK = ("纸箱", "电商专供袋", "拉链", "气泡", "胶带", "气枕", "葫芦膜", "编织袋", "文件封")
-    fields = [("FBillNo", "单号"), ("FRealQty", "数量"), ("FMaterialID.FName", "物料")]
+    by_form = {}
+    for no in docs:
+        d0 = (no or "").split("+")[0].strip()
+        if not d0 or d0 == "无单据":
+            continue
+        pre = "".join(ch for ch in d0 if ch.isalpha())
+        by_form.setdefault(_FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[0], set()).add(d0)
     try:
         s, conf = kc.login()
-        qty = {}
-        for pre in prefixes:
-            filt = "FDate>='%s' and FDate<='%s' and FBillNo like '%s%%'" % (d0, d1, pre)
-            for r in kc._query(s, conf, "SAL_OUTSTOCK", fields, filt):
-                no = r["单号"]
-                if not no:
-                    continue
-                nm = r.get("物料") or ""
-                if any(p in nm for p in PACK):
-                    continue
-                try:
-                    qty[no] = qty.get(no, 0.0) + float(r["数量"] or 0)
-                except (TypeError, ValueError):
-                    pass
+        mats = _fetch_doc_materials(s, conf, by_form) if by_form else {}
     except Exception:
         return JSONResponse({"ok": False, "msg": "金蝶取数失败，稍后重试；不影响已存复核结果"}, status_code=502)
-    hit = 0
-    with db._engine.begin() as c:
-        for no, q in qty.items():
-            res = c.execute(update(BL).where(
-                (BL.c.carrier == carrier) & (BL.c.period == period) &
-                (func.substr(BL.c.doc_no, 1, len(no)) == no)).values(kd_qty=round(q, 2)))
-            hit += res.rowcount or 0
+    qty = {}
+    for no, ms in mats.items():
+        q = 0.0
+        for m in ms:
+            if any(p in str(m.get("名称") or "") for p in PACK):
+                continue
+            try:
+                q += float(m.get("数量件") if m.get("数量件") not in (None, "") else (m.get("基本数量") or 0))
+            except (TypeError, ValueError):
+                pass
+        qty[no] = round(q, 2)
+    hit = _fill_kd(carrier, period, qty)
     db.audit(u["name"], "物流复核-接金蝶核量", "%s %s" % (carrier, period),
-             "只读取数；出库单 %d 单，回填 %d 行" % (len(qty), hit))
-    return {"ok": True, "kd_docs": len(qty), "filled": hit}
+             "只读取数；金蝶单据 %d 张(%s)，回填 %d 行" % (len(qty), "/".join(sorted(by_form)), hit))
+    return {"ok": True, "kd_docs": len(qty), "filled": hit, "want_docs": sum(len(v) for v in by_form.values())}
+
+
+def _fill_kd(carrier, period, kmap):
+    """金蝶量回填中间表：先清空本月旧值，再按「首个单号完全相等」回填(不用前缀匹配)。返回回填行数。"""
+    with db._engine.begin() as c:
+        rows = c.execute(select(BL.c.id, BL.c.doc_no).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()
+        ids_by = {}
+        for rid, no in rows:
+            ids_by.setdefault((no or "").split("+")[0].strip(), []).append(rid)
+        c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail")).values(kd_qty=None))
+        hit = 0
+        for no, v in kmap.items():
+            ids = ids_by.get(no)
+            if ids:
+                c.execute(update(BL).where(BL.c.id.in_(ids)).values(kd_qty=v))
+                hit += len(ids)
+    return hit
 
 
 # ---------- 登记制（议价/报销：货拉拉等）：单据运费·其他单据 ----------
@@ -580,7 +587,12 @@ _DOC_MAT_FIELDS = {
                     ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FSupplierId.FName", "往来"),
                     ("FMaterialId.FSpecification", "规格"), ("FRealQty", "数量件"), ("FUnitId.FName", "计价单位")],
     "STK_MisDelivery": [("FBillNo", "单号"), ("FMaterialID.FNumber", "编码"), ("FMaterialID.FName", "名称"),
-                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FDeptId.FName", "往来")],
+                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FDeptId.FName", "往来"),
+                        ("FQty", "数量件")],
+    # 销售退货单(RK 开头，迅鸽退件表)：字段 2026-09-30 真机实测
+    "SAL_RETURNSTOCK": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
+                        ("FBaseunitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FRetcustId.FName", "往来"),
+                        ("FRealQty", "数量件"), ("FUnitID.FName", "计价单位")],
 }
 
 
@@ -1411,6 +1423,8 @@ def _box_docs(rsub, carrier):
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit, mode_cn = billcnt, (r.get("unit") or "件"), "件", "按件数"
             cnt_state = "miss" if not kd_sum else ("ok" if abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum) else "qtydiff")
+            if str(r.get("unit") or "").strip() in lr._NOQTY_UNITS:
+                mode_cn, cnt_state = "按%s计费·免核量" % str(r.get("unit")).strip(), "na"   # 搬运费按方、存储费按板：核不了件数
             conv = round(kd_sum / billcnt, 3) if billcnt else None
             mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
             mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
@@ -1608,6 +1622,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             return r["price_state"] in ("gap", "free", "over") or r["qty_state"] in ("miss", "qtydiff")
         if group in ("miss", "qtydiff"):
             return r["qty_state"] == group
+        if group == "info":
+            return r["qty_state"] == "na"      # 无单据/按方板计费·免核
+        if group == "price":
+            return False                       # 包天包趟核价只在逐单视图(小承运商)
         if group in ("gap", "free", "over"):
             return r["price_state"] == group
         if group in ("pass", "ok"):
@@ -1649,7 +1667,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             pool = _box_docs(sl, carrier)
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
-            dc = {"miss": counts.get("miss", 0), "qtydiff": counts.get("qtydiff", 0), "info": 0,
+            dc = {"miss": counts.get("miss", 0), "qtydiff": counts.get("qtydiff", 0),
+                  "info": sum(1 for r in rows if r.get("qty_state") == "na"),
                   "ok": counts.get("pass", 0), "all": len(rows), "done": 0}
             seen = set()
             for r in rows:                    # 大承运商按中间表行扣掉已确认的(行级近似，单号去重计已确认)

@@ -37,16 +37,22 @@ def price_check(row, card):
     return None, None, "na", "无价卡/待人工"
 
 
+_NOQTY_UNITS = ("方", "板", "托", "天", "趟", "平", "㎡", "元/天", "元/趟")
+
+
 def qty_check(row, kd_qty):
     """核量：账单数量 vs 金蝶出库数量（口径由取数说明按承运商定，此处按行已带的 qty/单位）。
     返回 (金蝶数量, 核量差, 核量态)。kd_qty=该单号金蝶数量 或 None(查无)。"""
     qty = row.get("qty")
+    no = (row.get("doc_no") or "").split("+")[0].strip()
+    if not no or no == "无单据" or str(row.get("unit") or "").strip() in _NOQTY_UNITS:
+        return kd_qty, None, "na"         # 无单据(存储费等)、按方/板/天/趟计费：核不了件数，免核
     if kd_qty is None:
         return None, None, "miss"
     if qty is None:
         return kd_qty, None, "na"
     diff = round(qty - kd_qty, 3)
-    return kd_qty, diff, ("ok" if abs(diff) <= 0.001 else "qtydiff")
+    return kd_qty, diff, ("ok" if abs(diff) <= max(1.0, 0.02 * abs(kd_qty)) else "qtydiff")   # 与逐单视图同口径：差≤1件或2%
 
 
 def verdict(price_state, qty_state):
