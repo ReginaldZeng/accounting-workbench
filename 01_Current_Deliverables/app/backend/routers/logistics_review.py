@@ -1827,81 +1827,89 @@ def _fix_to_txt(fx):
 
 
 def _fix_sheet(wb, carrier, period, fixes):
-    """《计提更正单》（第二页，可直接打印交专人）：原记账 vs 应改为，空白=不变；底部留更正人/复核人签字。"""
+    """《计提更正单》（第二页，可直接打印交专人）：每笔两行——上行金蝶原记账、下行应改为(不变的写"不变")，
+    序号/主体/凭证号/金额/说明/更正人合并两行(用户 2026-09-30 定)；底部留更正人/复核人签字。"""
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.worksheet.properties import PageSetupProperties
     from openpyxl.utils import get_column_letter
     ws = wb.create_sheet("计提更正单", 1)
     thin = Side(style="thin", color="B8C4CC")
+    thick = Side(style="medium", color="7A8791")
     BD = Border(left=thin, right=thin, top=thin, bottom=thin)
+    BDE = Border(left=thin, right=thin, top=thin, bottom=thick)     # 每笔第二行下边线加粗，分隔各笔
     C = Alignment(horizontal="center", vertical="center", wrap_text=True)
     LFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
     R = Alignment(horizontal="right", vertical="center")
-    N = 14
+    N = 11
     last = get_column_letter(N)
     ws.merge_cells("A1:%s1" % last)
     ws.cell(1, 1, "计提更正单  ·  %s  ·  %s" % (carrier, period)).font = Font(bold=True, size=15, color="1B2733")
     ws.cell(1, 1).alignment = C
     ws.row_dimensions[1].height = 26
     ws.merge_cells("A2:%s2" % last)
-    ws.cell(2, 1, "物流账单复核时发现以下计提分录维度记错（金额不变、不影响对账）。请在金蝶按「应改为」修改，空白＝该项不变；改完在右侧签字。")
+    ws.cell(2, 1, "物流账单复核时发现以下计提分录维度记错（金额不变、不影响对账）。每笔两行：上行是金蝶原记账，下行是应改为，写「不变」的不用动；改完在右侧签字。")
     ws.cell(2, 1).alignment = LFT; ws.cell(2, 1).font = Font(color="5E6B78")
     ws.row_dimensions[2].height = 30
-    # 两级表头：原记账(灰) / 应改为(橙)
-    groups = [("", 1, 3, "5E6B78"), ("金蝶原记账", 4, 8, "5E6B78"), ("应改为（空白＝不变）", 9, 13, "B06A12"), ("", 14, 14, "5E6B78")]
-    for name, a, b, colr in groups:
-        if b > a:
-            ws.merge_cells(start_row=3, start_column=a, end_row=3, end_column=b)
-        cl = ws.cell(3, a, name)
-        cl.font = Font(bold=True, color="FFFFFF"); cl.fill = PatternFill("solid", fgColor=colr); cl.alignment = C
-        for cc in range(a, b + 1):
-            ws.cell(3, cc).fill = PatternFill("solid", fgColor=colr); ws.cell(3, cc).border = BD
-    heads = ["序号", "主体", "凭证号", "科目", "费用项目", "部门", "产品线", "金额(不含税)",
-             "科目", "费用项目", "部门", "产品线", "说明", "更正人/日期"]
+    HR = 3
+    heads = ["序号", "主体", "凭证号", "金额(不含税)", "", "科目", "费用项目", "部门", "产品线", "说明", "更正人/日期"]
     for j, h in enumerate(heads, 1):
-        cl = ws.cell(4, j, h)
-        cl.font = Font(bold=True, color="1B2733"); cl.alignment = C; cl.border = BD
-        cl.fill = PatternFill("solid", fgColor="FBF0DA" if 9 <= j <= 13 else "E7ECEF")
+        cl = ws.cell(HR, j, h)
+        cl.font = Font(bold=True, color="FFFFFF"); cl.alignment = C; cl.border = BD
+        cl.fill = PatternFill("solid", fgColor="5E6B78")
+    ws.row_dimensions[HR].height = 26
     GRAY = Font(color="9AA5AE")
+    OLD_FILL = PatternFill("solid", fgColor="EEF2F4")
+    NEW_FILL = PatternFill("solid", fgColor="FBF0DA")
+    HOT_FILL = PatternFill("solid", fgColor="FDF6E8")
+    MERGE_COLS = (1, 2, 3, 4, 10, 11)      # 两行共用：序号/主体/凭证号/金额/说明/更正人
     for i, fx in enumerate(fixes, 1):
         s = fx.get("snap") or {}
+        r1 = HR + 2 * i - 1
+        r2 = r1 + 1
         acct0 = " ".join(x for x in (s.get("acct"), s.get("acct_name")) if x)
-        vals = [i, s.get("subject"), s.get("vno"), acct0, s.get("fee"), s.get("dept"), s.get("biz"), s.get("amt_net"),
-                fx.get("to_acct") or "不变", fx.get("to_fee") or "不变", fx.get("to_dept") or "不变", fx.get("to_biz") or "不变",
-                fx.get("memo") or None, None]
-        rr = 4 + i
-        for j, v in enumerate(vals, 1):
-            cl = ws.cell(rr, j, v)
-            cl.border = BD
-            cl.alignment = R if j == 8 else (C if j in (1, 3) else LFT)
-            if j == 8:
+        shared = {1: i, 2: s.get("subject"), 3: s.get("vno"), 4: s.get("amt_net"), 10: fx.get("memo") or None, 11: None}
+        old = [acct0 or "空", s.get("fee") or "空", s.get("dept") or "空", s.get("biz") or "空"]
+        new = [fx.get("to_acct"), fx.get("to_fee"), fx.get("to_dept"), fx.get("to_biz")]
+        for j, v in shared.items():
+            ws.merge_cells(start_row=r1, start_column=j, end_row=r2, end_column=j)
+            cl = ws.cell(r1, j, v)
+            cl.alignment = R if j == 4 else (C if j in (1, 3) else LFT)
+            if j == 4:
                 cl.number_format = "#,##0.00"
-            if 9 <= j <= 12:
-                if v == "不变":
-                    cl.font = GRAY
-                else:
-                    cl.font = Font(bold=True, color="8A5A00"); cl.fill = PatternFill("solid", fgColor="FDF6E8")
-        # 行高按说明折行估(说明列宽30≈15个汉字一行)，打印不截字
-        nl = max(1, -(-len(str(fx.get("memo") or "")) // 15))
-        ws.row_dimensions[rr].height = max(30, 15 * nl + 8)
-    rr = 4 + len(fixes) + 1
-    ws.cell(rr, 7, "合计").font = Font(bold=True); ws.cell(rr, 7).alignment = R
-    ws.cell(rr, 8, round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2))
-    ws.cell(rr, 8).number_format = "#,##0.00"; ws.cell(rr, 8).font = Font(bold=True); ws.cell(rr, 8).alignment = R
-    ws.cell(rr, 7).border = BD; ws.cell(rr, 8).border = BD
+        a = ws.cell(r1, 5, "原记账"); a.fill = OLD_FILL; a.alignment = C; a.font = Font(color="5E6B78")
+        b = ws.cell(r2, 5, "应改为"); b.fill = NEW_FILL; b.alignment = C; b.font = Font(bold=True, color="8A5A00")
+        for k in range(4):
+            c1 = ws.cell(r1, 6 + k, old[k]); c1.alignment = LFT; c1.fill = OLD_FILL
+            c2 = ws.cell(r2, 6 + k, new[k] or "不变"); c2.alignment = LFT
+            if new[k]:
+                c2.font = Font(bold=True, color="8A5A00"); c2.fill = HOT_FILL
+            else:
+                c2.font = GRAY
+        for j in range(1, N + 1):            # 合并之后再上边框，合并格下沿也是粗线
+            ws.cell(r1, j).border = BD
+            ws.cell(r2, j).border = BDE
+        # 行高按说明折行估(说明列宽32≈16个汉字一行)，两行分摊，打印不截字
+        nl = max(1, -(-len(str(fx.get("memo") or "")) // 16))
+        h = max(22, (15 * nl + 10) / 2)
+        ws.row_dimensions[r1].height = h
+        ws.row_dimensions[r2].height = h
+    rr = HR + 2 * len(fixes) + 1
+    ws.cell(rr, 3, "合计").font = Font(bold=True); ws.cell(rr, 3).alignment = R
+    ws.cell(rr, 4, round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2))
+    ws.cell(rr, 4).number_format = "#,##0.00"; ws.cell(rr, 4).font = Font(bold=True); ws.cell(rr, 4).alignment = R
+    ws.cell(rr, 3).border = BD; ws.cell(rr, 4).border = BD
     ws.row_dimensions[rr].height = 20
     by = sorted({fx.get("by") for fx in fixes if fx.get("by")})
     ws.merge_cells(start_row=rr + 2, start_column=1, end_row=rr + 2, end_column=N)
     ws.cell(rr + 2, 1, "登记人：%s        更正人：______________        更正日期：______________        复核人：______________"
             % ("、".join(by) or "______________")).alignment = LFT
     ws.row_dimensions[rr + 2].height = 26
-    ws.row_dimensions[4].height = 30
-    for j, w in enumerate([5, 11, 9, 14, 10, 12, 9, 13, 14, 10, 12, 9, 30, 14], 1):
+    for j, w in enumerate([5, 12, 9, 13, 8, 16, 11, 13, 10, 32, 14], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_title_rows = "1:4"
+    ws.print_title_rows = "1:3"
     ws.print_options.horizontalCentered = True
     ws.page_margins.left = ws.page_margins.right = 0.4
     ws.page_margins.top = ws.page_margins.bottom = 0.5
