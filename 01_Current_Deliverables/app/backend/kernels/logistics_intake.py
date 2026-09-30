@@ -261,6 +261,7 @@ def parse_bill(spec, data):
     period = spec.get("period", "")
     detail, accrual, skipped = [], [], []
     boxp = box_prices_from(wb, spec) if any(c.get("box_col") for c in spec.get("sheets", [])) else {}
+    per_row = []     # (sheet spec, 该表 detail 行)：per_row_fees 要等汇总页单价
     for ws in wb.worksheets:
         sp = None
         for cand in spec.get("sheets", []):
@@ -271,9 +272,32 @@ def parse_bill(spec, data):
             skipped.append(ws.title)
             continue
         if sp["role"] == "detail":
-            detail += parse_detail_sheet(sp, ws, period, carrier, boxp)
+            got = parse_detail_sheet(sp, ws, period, carrier, boxp)
+            detail += got
+            if sp.get("per_row_fees"):
+                per_row.append((sp, got))
         elif sp["role"] == "accrual":
             accrual += parse_accrual_sheet(sp, ws, period, carrier)
+    # 逐单固定费(spec.per_row_fees={分项名: 汇总页费用项})：单价=汇总页该项 金额÷数量，每行(一单)挂一份。
+    # 如迅鸽退件表每张退货单挂「退货服务费」2元(=222÷111)，V2.721
+    if per_row:
+        unit = {}
+        for a in accrual:
+            if a.get("qty") and a.get("amount"):
+                unit.setdefault(a["fee_item"], round(a["amount"] / a["qty"], 4))
+        for sp, rows in per_row:
+            for r in rows:
+                try:
+                    sub = json.loads(r.get("sub_fees") or "{}") or {}
+                except Exception:
+                    sub = {}
+                for nm, src in sp["per_row_fees"].items():
+                    p = unit.get(src)
+                    if p:
+                        sub[nm] = p
+                if sub:
+                    r["sub_fees"] = json.dumps(sub, ensure_ascii=False)
+                    r["amount"] = round(sum(v for v in sub.values() if isinstance(v, (int, float))), 2)
     owner = bill_owner(wb, spec)
     # 货主→产品线(spec.owner_bizline，如 kikiherb→Kiki Herb)：同一套标注下的另一个货主，产品线跟货主走
     biz = next((v for k, v in (spec.get("owner_bizline") or {}).items() if k.lower() in owner.lower()), "")

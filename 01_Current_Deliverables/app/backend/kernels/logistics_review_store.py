@@ -173,7 +173,8 @@ _XUNGE_SPEC = {
          "fee_item": "卸货费", "annot": "出库装卸", "summary_marker": "合计"},
         {"name": "退件表", "role": "detail", "header_row": 1, "subject": {"column": "公司"},
          "doc_col": "金蝶单号", "qty_col": "入库数量", "qty_unit": "件",
-         "fee_item": "退货", "annot": "其它出库单-电商", "kd_qty_axis": "qty"},
+         "fee_item": "退货", "annot": "其它出库单-电商", "kd_qty_axis": "qty",
+         "per_row_fees": {"退货服务费": "退货服务费"}},     # 每张退货单挂退货服务费(单价取月结清单，V2.721)
         {"name": "存储费", "role": "detail", "header_row": 2, "subject": {"fixed": "深圳星期零"},
          "amount_col": "仓储费", "qty_col": "结存板位数", "qty_unit": "板",
          "fee_item": "仓储费", "annot": "成品仓储-电商", "doc": "无单据"},
