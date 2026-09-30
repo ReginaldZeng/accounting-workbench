@@ -24,6 +24,7 @@ from kernels import logistics_recon as lrc
 router = APIRouter()
 BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
 SG, LN, CP = store.review_sign, store.review_line_note, store.review_carrier_pts   # 复核登记 / 逐笔差异解释 / 供应商复核要点
+FX = store.review_line_fix   # 计提更正(只登记应改为什么，打印交专人去金蝶改)
 
 _DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "fee", "bizline",
                 "fee_item", "qty", "unit", "amount", "carrier_sub", "prov", "charge_wt",
@@ -1034,7 +1035,7 @@ def _accr_entries(carrier, period, carrier_full=None):
         cond = " or ".join("FEXPLANATION like '%%计提%%%s%%'" % n for n in names)
         cf = "FYear=%d and FPeriod=%d and FDEBIT<>0 and (%s)" % (int(y), int(m), cond)   # <>0：红冲是负数借方，也要取到才能认出来
         rows = kc._query(s, conf, "GL_VOUCHER",
-                         [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"),
+                         [("FACCOUNTBOOKID.FName", "账簿"), ("FDEBIT", "借"), ("FAccountID.FNumber", "科目"), ("FAccountID.FName", "科目名"),
                           ("FVOUCHERGROUPID.FName", "凭证字"), ("FVOUCHERGROUPNO", "凭证序号"), ("FEXPLANATION", "摘要"),
                           ("FDetailID.FF100010.FDataValue", "产品分类"), ("FDetailID.FF100006.FDataValue", "产品项目"),
                           ("FDetailID.FFLEX5.FName", "部门"), ("FDetailID.FFLEX9.FName", "费用项目")], cf)
@@ -1071,7 +1072,7 @@ def _accr_entries(carrier, period, carrier_full=None):
         ents.append({"subject": subj, "fee": fee, "fee_norm": _fee_norm(fee),
                      "biz": str(r.get("产品分类") or "").strip() or "（无业务线）",
                      "proj": str(r.get("产品项目") or "").strip(), "dept": str(r.get("部门") or "").strip(),
-                     "vno": vno, "acct": acct, "amt_net": round(amt, 2)})
+                     "vno": vno, "acct": acct, "acct_name": str(r.get("科目名") or "").strip(), "amt_net": round(amt, 2)})
     # 同一凭证的进项税按各费用分录金额精确分摊，舍入余数给最后一笔——保证每张凭证 Σ含税 = 费用+税 分毫不差
     by_v = {}
     for e in ents:
@@ -1164,7 +1165,8 @@ def _build_lines(request, carrier, period):
                 used.add(biz); matched += bb
             for i, e in enumerate(ses):
                 row = {**e, "fee_type": f, "kind": "accr", "level": "biz" if bb is not None else "",
-                       "bill": None, "bill_span": 0, "diff": None, "note": notes.get(e["key"], "")}
+                       "bill": None, "bill_span": 0, "diff": None, "note": notes.get(e["key"], ""),
+                       "anc": ses[0]["key"] if bb is not None else ""}   # anc=同一账单金额下的锚点行键(一起标更正用)
                 if bb is not None and i == 0:
                     row["bill"] = round(bb, 2); row["bill_span"] = len(ses)
                     row["diff"] = round(sum(x["amt"] for x in ses) - bb, 2)
@@ -1179,6 +1181,7 @@ def _build_lines(request, carrier, period):
                 un[0]["bill_biz"] = rest_biz
             for x in un:
                 x["level"] = "group"
+                x["anc"] = un[0]["key"]
         elif abs(rest) >= 0.01:
             key = "bill|%s|%s" % (s, f)
             grows.append({"subject": s, "fee": "", "fee_norm": f, "fee_type": f, "biz": rest_biz or "（账单无产品线）",
@@ -1202,12 +1205,42 @@ def _build_lines(request, carrier, period):
       atot += sa; btot += sb
     n_unexpl = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None
                    and abs(r["diff"]) >= 0.01 and not (r.get("note") or "").strip())
-    return {"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
+    return _attach_fixes({"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
             "accr_total": round(atot, 2), "bill_total": round(btot, 2), "diff_total": round(atot - btot, 2),
             "adj": adj, "prior": prior, "prior_total": round(sum(p["net"] for p in prior), 2),
             "od_total": (lambda a: {"amt": a, "ratio": round(max(0.0, min(1.0, a / btot)), 4) if btot > 0 else 0.0})(
                 round(sum(det3[k]["amt"] for k in bill3 if k in det3), 2)),
-            "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl}
+            "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl}, carrier, period)
+
+
+_FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "memo")
+
+
+def _attach_fixes(L, carrier, period):
+    """把已登记的计提更正挂到逐笔行(row.fix)，另回 fixes(按登记快照，金蝶改好后原行不在了也照样列出)。"""
+    with db._engine.connect() as c:
+        fx = [dict(r) for r in c.execute(select(FX).where((FX.c.carrier == carrier) & (FX.c.period == period))
+                                         .order_by(FX.c.id)).mappings().all()]
+    by_key, out = {}, []
+    for f in fx:
+        try:
+            snap = json.loads(f.get("snap_json") or "{}")
+        except Exception:
+            snap = {}
+        item = {"key": f["line_key"], "snap": snap, "by": f.get("updated_by") or "", "at": f.get("updated_at") or "",
+                **{k: (f.get(k) or "") for k in _FIX_KEYS}}
+        by_key[f["line_key"]] = item
+        out.append(item)
+    live = set()
+    for r in L.get("rows", []):
+        if r.get("kind") == "accr":
+            r["fix"] = by_key.get(r["key"])
+            live.add(r["key"])
+    for it in out:
+        it["live"] = it["key"] in live
+    out.sort(key=lambda it: (it["snap"].get("subject", ""), it["snap"].get("vno", "")))
+    L["fixes"] = out
+    return L
 
 
 def _box_docs(rsub, carrier):
@@ -1683,6 +1716,50 @@ async def review_line_note(request: Request):
     return {"ok": True}
 
 
+@router.post("/api/logistics-review/line-fix")
+async def review_line_fix(request: Request):
+    """计提更正：对一笔或同一账单下几笔计提登记"应改为"(科目/费用项目/部门/产品线+说明)。不改金蝶、不影响对账，
+    只进导出的《计提更正单》打印交专人去改。五项全空=撤掉更正。已登记月份不可改。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period = (b.get("carrier") or "").strip(), (b.get("period") or "").strip()
+    keys = [str(k).strip() for k in (b.get("line_keys") or []) if str(k).strip()]
+    if not carrier or not period or not keys:
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期/行键"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    vals = {k: str(b.get(k) or "").strip() for k in _FIX_KEYS}
+    import time as _t
+    ck = ("lines", carrier, period)
+    cc = _ACCR_CACHE.get(ck)
+    L = cc[0] if cc else _build_lines(request, carrier, period)
+    rows = {r["key"]: r for r in L.get("rows", []) if r.get("kind") == "accr"}
+    with db._engine.begin() as c:
+        for key in keys:
+            ex = c.execute(select(FX.c.id).where((FX.c.carrier == carrier) & (FX.c.period == period) & (FX.c.line_key == key))).scalar()
+            if not any(vals.values()):
+                if ex:
+                    c.execute(delete(FX).where(FX.c.id == ex))
+                continue
+            r = rows.get(key)
+            rec = dict(vals, updated_by=_uname(u), updated_at=_now())
+            if r:
+                rec["snap_json"] = json.dumps({k: r.get(k) for k in ("subject", "vno", "acct", "acct_name", "fee", "fee_type", "dept", "biz", "proj",
+                                                                      "amt_net", "tax_rate", "amt")}, ensure_ascii=False)
+            if ex:
+                c.execute(update(FX).where(FX.c.id == ex).values(**rec))
+            elif r:
+                c.execute(insert(FX).values(carrier=carrier, period=period, line_key=key, **rec))
+    # 只重挂更正，不作废逐笔缓存(不用重读金蝶)
+    _attach_fixes(L, carrier, period)
+    if not cc:
+        _ACCR_CACHE[ck] = (L, None, _t.time())
+    return {"ok": True, "fixes": L["fixes"]}
+
+
 @router.post("/api/logistics-review/carrier-points")
 async def review_carrier_points(request: Request):
     """供应商复核要点（一家一段，挂逐笔复核页顶部：顺丰按重量、丰源按件数箱…）。不分月，不受锁月限制。"""
@@ -1741,6 +1818,91 @@ async def review_unsign_month(request: Request):
     return {"ok": True}
 
 
+def _fix_to_txt(fx):
+    """更正内容一句话：费用项目 · 科目 · 部门 · 产品线（空=不变）；说明。"""
+    parts = [("费用项目 " + fx["to_fee"]) if fx.get("to_fee") else "", ("科目 " + fx["to_acct"]) if fx.get("to_acct") else "",
+             ("部门 " + fx["to_dept"]) if fx.get("to_dept") else "", ("产品线 " + fx["to_biz"]) if fx.get("to_biz") else ""]
+    s = " · ".join(p for p in parts if p) or "（见说明）"
+    return s + (("；" + fx["memo"]) if fx.get("memo") else "")
+
+
+def _fix_sheet(wb, carrier, period, fixes):
+    """《计提更正单》（第二页，可直接打印交专人）：原记账 vs 应改为，空白=不变；底部留更正人/复核人签字。"""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.worksheet.properties import PageSetupProperties
+    from openpyxl.utils import get_column_letter
+    ws = wb.create_sheet("计提更正单", 1)
+    thin = Side(style="thin", color="B8C4CC")
+    BD = Border(left=thin, right=thin, top=thin, bottom=thin)
+    C = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    LFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    R = Alignment(horizontal="right", vertical="center")
+    N = 14
+    last = get_column_letter(N)
+    ws.merge_cells("A1:%s1" % last)
+    ws.cell(1, 1, "计提更正单  ·  %s  ·  %s" % (carrier, period)).font = Font(bold=True, size=15, color="1B2733")
+    ws.cell(1, 1).alignment = C
+    ws.row_dimensions[1].height = 26
+    ws.merge_cells("A2:%s2" % last)
+    ws.cell(2, 1, "物流账单复核时发现以下计提分录维度记错（金额不变、不影响对账）。请在金蝶按「应改为」修改，空白＝该项不变；改完在右侧签字。")
+    ws.cell(2, 1).alignment = LFT; ws.cell(2, 1).font = Font(color="5E6B78")
+    ws.row_dimensions[2].height = 30
+    # 两级表头：原记账(灰) / 应改为(橙)
+    groups = [("", 1, 3, "5E6B78"), ("金蝶原记账", 4, 8, "5E6B78"), ("应改为（空白＝不变）", 9, 13, "B06A12"), ("", 14, 14, "5E6B78")]
+    for name, a, b, colr in groups:
+        if b > a:
+            ws.merge_cells(start_row=3, start_column=a, end_row=3, end_column=b)
+        cl = ws.cell(3, a, name)
+        cl.font = Font(bold=True, color="FFFFFF"); cl.fill = PatternFill("solid", fgColor=colr); cl.alignment = C
+        for cc in range(a, b + 1):
+            ws.cell(3, cc).fill = PatternFill("solid", fgColor=colr); ws.cell(3, cc).border = BD
+    heads = ["序号", "主体", "凭证号", "科目", "费用项目", "部门", "产品线", "金额(不含税)",
+             "科目", "费用项目", "部门", "产品线", "说明", "更正人/日期"]
+    for j, h in enumerate(heads, 1):
+        cl = ws.cell(4, j, h)
+        cl.font = Font(bold=True, color="1B2733"); cl.alignment = C; cl.border = BD
+        cl.fill = PatternFill("solid", fgColor="FBF0DA" if 9 <= j <= 13 else "E7ECEF")
+    GRAY = Font(color="9AA5AE")
+    for i, fx in enumerate(fixes, 1):
+        s = fx.get("snap") or {}
+        acct0 = " ".join(x for x in (s.get("acct"), s.get("acct_name")) if x)
+        vals = [i, s.get("subject"), s.get("vno"), acct0, s.get("fee"), s.get("dept"), s.get("biz"), s.get("amt_net"),
+                fx.get("to_acct") or "不变", fx.get("to_fee") or "不变", fx.get("to_dept") or "不变", fx.get("to_biz") or "不变",
+                fx.get("memo") or None, None]
+        rr = 4 + i
+        for j, v in enumerate(vals, 1):
+            cl = ws.cell(rr, j, v)
+            cl.border = BD
+            cl.alignment = R if j == 8 else (C if j in (1, 3) else LFT)
+            if j == 8:
+                cl.number_format = "#,##0.00"
+            if 9 <= j <= 12:
+                if v == "不变":
+                    cl.font = GRAY
+                else:
+                    cl.font = Font(bold=True, color="8A5A00"); cl.fill = PatternFill("solid", fgColor="FDF6E8")
+        ws.row_dimensions[rr].height = 30
+    rr = 4 + len(fixes) + 1
+    ws.cell(rr, 7, "合计").font = Font(bold=True); ws.cell(rr, 7).alignment = R
+    ws.cell(rr, 8, round(sum(float((fx.get("snap") or {}).get("amt_net") or 0) for fx in fixes), 2))
+    ws.cell(rr, 8).number_format = "#,##0.00"; ws.cell(rr, 8).font = Font(bold=True); ws.cell(rr, 8).alignment = R
+    by = sorted({fx.get("by") for fx in fixes if fx.get("by")})
+    ws.merge_cells(start_row=rr + 2, start_column=1, end_row=rr + 2, end_column=N)
+    ws.cell(rr + 2, 1, "登记人：%s        更正人：______________        更正日期：______________        复核人：______________"
+            % ("、".join(by) or "______________")).alignment = LFT
+    ws.row_dimensions[rr + 2].height = 26
+    for j, w in enumerate([5, 11, 9, 8, 10, 12, 9, 12, 8, 10, 12, 9, 26, 13], 1):
+        ws.column_dimensions[get_column_letter(j)].width = w
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.print_title_rows = "1:4"
+    ws.print_options.horizontalCentered = True
+    ws.page_margins.left = ws.page_margins.right = 0.4
+    ws.page_margins.top = ws.page_margins.bottom = 0.5
+    return ws
+
+
 @router.get("/api/logistics-review/export")
 def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     """导出该承运商本月复核结果 xlsx：费用项汇总 + 逐单/物料级复核明细（按重量承运商=物料级17列）。"""
@@ -1788,7 +1950,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     HROW = 5
     for hc0 in ws[HROW]:
         hc0.font = HFONT; hc0.fill = HFILL; hc0.alignment = center; hc0.border = BORDER
-    gt_rows = []
+    gt_rows, fix_rows = [], []
     for r in L.get("rows", []):
         if r.get("kind") == "gtotal":
             ws.append([("%s · %s 小计" % (r.get("subject"), r.get("fee_type"))) if r.get("fee_type") else ("%s 小计" % r.get("subject")), None, None, None, None, None,
@@ -1798,8 +1960,13 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         biz = r.get("biz") or ""
         if r.get("bill_biz"):
             biz = "%s（账单:%s）" % (biz, r["bill_biz"])
+        nt = r.get("note") or ""
+        if r.get("fix"):
+            nt = ("%s\n" % nt if nt else "") + "【待更正】改为 " + _fix_to_txt(r["fix"])
         ws.append([r.get("subject"), r.get("fee_type"), biz, r.get("proj") or None, r.get("dept") or None, r.get("vno") or None,
-                   r.get("amt"), r.get("tax_rate"), r.get("bill"), r.get("diff"), r.get("note") or None])
+                   r.get("amt"), r.get("tax_rate"), r.get("bill"), r.get("diff"), nt or None])
+        if r.get("fix"):
+            fix_rows.append(ws.max_row)
     ws.append(["合计", None, None, None, None, None, acc_t, None, bill_t, dif_t, None])
     LAST = ws.max_row
     for rr in range(HROW + 1, LAST + 1):
@@ -1819,6 +1986,15 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         dv = ws.cell(rr, 10).value
         if isinstance(dv, (int, float)):
             ws.cell(rr, 10).font = GREEN if abs(dv) < 0.01 else RED
+        if rr in fix_rows:
+            ws.cell(rr, 11).fill = PatternFill("solid", fgColor="FBF0DA")
+            ws.cell(rr, 11).font = Font(color="8A5A00")
+    fixes = L.get("fixes") or []
+    if fixes:
+        r0 = LAST + 2
+        ws.merge_cells(start_row=r0, start_column=1, end_row=r0, end_column=NCOL)
+        c0 = ws.cell(r0, 1, "另有 %d 笔计提维度记错、待更正（金额不影响对账），明细见《计提更正单》，打印交专人在金蝶修改。" % len(fixes))
+        c0.font = Font(bold=True, color="8A5A00"); c0.alignment = left
     for i, w in enumerate([13, 11, 16, 11, 13, 10, 14, 7, 14, 13, 30], 1):
         ws.column_dimensions[chr(64 + i)].width = w
     ws.freeze_panes = "A6"
@@ -1830,6 +2006,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     ws.print_options.horizontalCentered = True
     ws.page_margins.left = ws.page_margins.right = 0.4
     ws.page_margins.top = ws.page_margins.bottom = 0.5
+    if fixes:
+        _fix_sheet(wb, carrier, period, fixes)
     # sheet2 复核明细
     ws2 = wb.create_sheet("复核明细")
     from openpyxl.utils import get_column_letter

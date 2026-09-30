@@ -111,7 +111,26 @@ review_carrier_pts = Table(
     Column("updated_at", String(20)),
 )
 
-TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts]
+# 计提更正：复核时发现金蝶计提记错维度(费用项目/科目/部门/产品线)，不在系统里改账，只登记"应改为什么"，
+# 导出《计提更正单》打印交专人去金蝶改。snap_json=登记时原分录快照(主体/凭证号/科目/费用项目/部门/产品线/金额)，
+# 金蝶改好后原行键会变，更正单仍按快照打印。
+review_line_fix = Table(
+    "logistics_review_line_fix", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("carrier", String(60)),
+    Column("period", String(7)),
+    Column("line_key", String(200)),
+    Column("snap_json", Text),
+    Column("to_acct", String(60)),
+    Column("to_fee", String(40)),
+    Column("to_dept", String(60)),
+    Column("to_biz", String(40)),
+    Column("memo", Text),
+    Column("updated_by", String(50)),
+    Column("updated_at", String(20)),
+)
+
+TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {

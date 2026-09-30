@@ -1,4 +1,6 @@
-// [Change Log] Date:2026-09-30 Author:Claude Opus 5.5 Version:V2.693
+// [Change Log] Date:2026-09-30 Author:Claude Opus 5.5 Version:V2.697
+// V2.697：逐笔计提每笔可「改维度」＝登记计提更正(应改为 费用项目/科目/部门/产品线+说明)，不改金蝶、不影响对账，
+//   导出复核表多一页《计提更正单》打印交专人改；同一账单金额下几笔可一起改。V2.695：加「可逐单」列。
 // V2.693：总表金蝶数据后端缓存30分(可刷新)、返回总表不再清空重拉；逐单核价核量改"一单一行、点开看物料"，
 //   筛选/计数按真实核对结果(金蝶查无/数量不符/打托·免核/一致)，改归类挪进展开区。
 // 物流账单复核台（三步流）：总表(承运商×主体，计提出发)
@@ -7,7 +9,7 @@
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewLines, reviewLineNote, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewLines, reviewLineNote, reviewLineFix, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -38,6 +40,57 @@ function toGroups(rows) {
   }
   if (cur.length) out.push({ head: null, lines: cur })
   return out
+}
+
+// 计提更正：应改为(空=不变)的一句话
+const FIX_F = [['to_fee', '费用项目', 'fee'], ['to_acct', '科目', 'acct'], ['to_dept', '部门', 'dept'], ['to_biz', '产品线', 'biz']]
+const fixShort = f => [f.to_fee, f.to_acct, f.to_dept, f.to_biz].filter(Boolean).join(' · ') || (f.memo ? '见说明' : '')
+const fixTxt = f => [f.to_fee && '费用项目 ' + f.to_fee, f.to_acct && '科目 ' + f.to_acct, f.to_dept && '部门 ' + f.to_dept,
+  f.to_biz && '产品线 ' + f.to_biz].filter(Boolean).join(' · ') + (f.memo ? '；' + f.memo : '')
+const uniq = a => [...new Set(a.filter(Boolean))]
+
+// 计提更正编辑框：点哪笔就改哪笔，同一账单金额下几笔可一起改；只登记，打印交专人去金蝶改
+function FixEditor({ at, rows, onSave, onCancel }) {
+  const accr = rows.filter(r => r.kind === 'accr')
+  const me = accr.find(r => r.key === at.key) || {}
+  const sibs = at.anc ? accr.filter(r => r.anc === at.anc) : [me]
+  const [together, setTogether] = useState(sibs.length > 1)
+  const init = me.fix || {}
+  const [f, setF] = useState({ to_fee: init.to_fee || '', to_acct: init.to_acct || '', to_dept: init.to_dept || '', to_biz: init.to_biz || '', memo: init.memo || '' })
+  const targets = together ? sibs : [me]
+  const opts = {
+    fee: uniq(['入库运费', '出库运费', '退货运费', '货物仓储费', '装卸费', ...accr.map(r => r.fee)]),
+    acct: uniq(['5101 制造费用', '6401 主营业务成本', '6601 销售费用', '6602 管理费用', ...accr.map(r => r.acct && `${r.acct} ${r.acct_name || ''}`.trim())]),
+    dept: uniq([...accr.map(r => r.dept), '仓储物流部', '茶饮小料部', '永续物流中心', '永续供应中心']),
+    biz: uniq(['无（清空）', ...accr.map(r => r.biz).filter(b => b && !b.startsWith('（'))]),
+  }
+  const orig = { fee: me.fee, acct: [me.acct, me.acct_name].filter(Boolean).join(' '), dept: me.dept, biz: me.biz }
+  const inHint = f.to_fee.trim() === '入库运费' && String(me.acct || '').startsWith('6601') && !f.to_acct.trim()
+  const any = Object.values(f).some(v => v.trim())
+  const clean = Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.trim()]))
+  return (
+    <div className="fixed">
+      <div className="fxhead"><b>计提更正</b><span className="dim">只登记应改为什么，不改金蝶、不影响对账；导出复核表时单独一页《计提更正单》，打印交专人改</span>
+        {sibs.length > 1 && <label className="fxall"><input type="checkbox" checked={together} onChange={e => setTogether(e.target.checked)} />同一账单金额下 {sibs.length} 笔一起改</label>}
+      </div>
+      <div className="fxwho">{targets.map(t => <span key={t.key} className="tag">{t.vno} · {money(t.amt_net)} 不含税 · 原：{[[t.acct, t.acct_name].filter(Boolean).join(' '), t.fee, t.dept, t.biz].filter(Boolean).join(' / ')}</span>)}</div>
+      <div className="fxgrid">
+        {FIX_F.map(([k, lb, ok]) => <label key={k}><span>{lb}<small>原：{orig[ok] || '空'}</small></span>
+          <input list={'fx-' + ok} value={f[k]} placeholder="不变" onChange={e => setF({ ...f, [k]: e.target.value })} />
+          <datalist id={'fx-' + ok}>{opts[ok].map(o => <option key={o} value={o} />)}</datalist></label>)}
+        <label className="wide"><span>说明（写给改账的人）</span>
+          <input value={f.memo} placeholder="例：孝感工厂发深圳仓的小料，按集团口径是入库运费" onChange={e => setF({ ...f, memo: e.target.value })} /></label>
+      </div>
+      {inHint && <div className="fxhint">入库运费一般不记 6601 销售费用。{String(me.subject || '').includes('孝感') && '孝感历来：工厂/小料入库记 5101 制造费用，代工厂/零售/鲜食入库记 6401 主营业务成本。'}科目要一起改就点：
+        <button className="lnk" onClick={() => setF({ ...f, to_acct: '5101 制造费用' })}>5101 制造费用</button>
+        <button className="lnk" onClick={() => setF({ ...f, to_acct: '6401 主营业务成本' })}>6401 主营业务成本</button></div>}
+      <div className="fxbtns">
+        {targets.some(t => t.fix) && <button className="btn sm" onClick={() => onSave(targets.map(t => t.key), { to_fee: '', to_acct: '', to_dept: '', to_biz: '', memo: '' })}>撤掉更正</button>}
+        <span className="sp" />
+        <button className="btn sm" onClick={onCancel}>取消</button>
+        <button className="btn sm pri" disabled={!any} onClick={() => onSave(targets.map(t => t.key), clean)}>保存更正（{targets.length} 笔）</button>
+      </div>
+    </div>)
 }
 
 export default function LogisticsReview({ cfg, onPeriod }) {
@@ -121,6 +174,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         return { ...l, rows, n_unexplained: n }
       }))
       .catch(e => flash('差异解释保存失败：' + e.message))
+  }
+  // 计提更正：只登记"应改为"，不改金蝶、不影响对账；导出《计提更正单》打印交专人改
+  const [fixAt, setFixAt] = useState(null)       // 正在编辑更正的行 {key, anc}
+  const saveFix = (keys, fix) => {
+    reviewLineFix(carrier, period, keys, fix)
+      .then(r => {
+        const by = {}; (r.fixes || []).forEach(f => { by[f.key] = f })
+        setL(l => l && ({ ...l, fixes: r.fixes || [], rows: l.rows.map(x => (x.kind === 'accr' ? { ...x, fix: by[x.key] || null } : x)) }))
+        setFixAt(null)
+        flash(Object.values(fix).some(v => v) ? `已登记计提更正 ${keys.length} 笔，导出复核表时单独一页《计提更正单》` : '已撤掉更正')
+      })
+      .catch(e => flash('更正保存失败：' + e.message))
   }
   const savePts = () => { reviewCarrierPointsSet(carrier, pts).then(() => { setPtsSaved(pts); setPtsEdit(false); flash('复核要点已保存') }).catch(e => flash('保存失败：' + e.message)) }
   const doSign = () => {
@@ -221,6 +286,28 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .ltbl tr.rowbad td{background:#FFF7F5}.lrv .ltbl tr.rowbad td[rowspan]{background:#FFF1EE}
       .lrv .ltbl tr.total td{font-weight:700;border-top:2px solid #CBD5DC;background:#E1EEF3}
       .lrv .ltbl tr.fsep td{border-top:1px dashed #CBD5DC}
+      .lrv .notecell{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+      .lrv .fixlnk{font:inherit;font-size:11.5px;color:#7A8791;background:none;border:1px dashed #CBD5DC;border-radius:4px;padding:1px 7px;cursor:pointer;opacity:.5}
+      .lrv tr:hover .fixlnk{opacity:1}.lrv .fixlnk:hover{color:#8A5A00;border-color:#D9A441}
+      .lrv .fixtag{font:inherit;font-size:12px;background:#FBF0DA;color:#8A5A00;border:1px solid #F0D9A8;border-radius:999px;padding:2px 10px;cursor:pointer;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
+      .lrv .fixtag[disabled]{cursor:default}
+      .lrv tr.rowfix td{background:#FFFBF2}
+      .lrv tr.fixrow td{background:#FFFDF7;padding:0}
+      .lrv .fixed{padding:12px 16px;border-left:3px solid #D9A441;display:flex;flex-direction:column;gap:9px}
+      .lrv .fxhead{font-size:13px;color:#1B2733;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+      .lrv .fxhead .dim{font-size:12px}
+      .lrv .fxall{font-size:12.5px;color:#6B4E00;display:flex;gap:4px;align-items:center;cursor:pointer}
+      .lrv .fxwho{display:flex;gap:6px;flex-wrap:wrap}
+      .lrv .fxgrid{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:8px 12px}
+      .lrv .fxgrid label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:#5E6B78}
+      .lrv .fxgrid label small{margin-left:6px;color:#9AA5AE}
+      .lrv .fxgrid label.wide{grid-column:1/-1}
+      .lrv .fxgrid input{font:inherit;font-size:12.5px;border:1px solid #DCE2E7;border-radius:5px;padding:4px 7px;min-width:0}
+      .lrv .fxgrid input:focus{border-color:var(--accent);outline:none}
+      .lrv .fxhint{font-size:12px;color:#6B4E00;background:#FDF3E2;border-radius:5px;padding:6px 10px}
+      .lrv .lnk{font:inherit;background:none;border:none;color:var(--accent);text-decoration:underline;cursor:pointer;padding:0}
+      .lrv .fxbtns{display:flex;gap:8px;align-items:center}.lrv .fxbtns .sp{flex:1}
+      @media (max-width:700px){.lrv .fxgrid{grid-template-columns:1fr 1fr}}
       .lrv .odbtn{font:inherit;font-size:12px;border-radius:999px;padding:2px 10px;cursor:pointer;border:1px solid transparent;white-space:nowrap}
       .lrv .odbtn.ok{background:#DCEFE4;color:var(--ok)}.lrv .odbtn.ok:hover{border-color:var(--ok)}
       .lrv .odbtn.part{background:#F7E9CF;color:var(--warn)}.lrv .odbtn.part:hover{border-color:var(--warn)}
@@ -386,13 +473,22 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       <td className="num">{money(h.amt)}</td><td className="num">{money(h.bill)}</td>
                       <td className={'num ' + dcls(h.diff)}>{dtxt(h.diff)}</td><td></td><td className="gsub"></td>
                     </tr>,
-                    ...lines.map(r => {
+                    ...lines.flatMap((r, i) => {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
                       const unexpl = bad && !(r.note || '').trim()
                       const subline = [r.fee_type, r.proj, r.dept].filter(Boolean).join(' · ')
-                      return (
-                        <tr key={r.key} className={(unexpl ? 'rowbad' : '') + (r.ffirst && !r.gfirst ? ' fsep' : '')}>
+                      // 更正编辑框插在同一账单金额(rowSpan)的最后一行之后，不打断合并单元格
+                      const spanEnd = !r.anc || i === lines.length - 1 || lines[i + 1].anc !== r.anc
+                      const showFix = fixAt && spanEnd && (fixAt.key === r.key || (r.anc && fixAt.anc === r.anc))
+                      const accr = r.kind === 'accr'
+                      const fixCell = accr && (r.fix
+                        ? <button className="fixtag" disabled={locked} onClick={() => setFixAt({ key: r.key, anc: r.anc })}
+                            title={'待更正：改为 ' + fixTxt(r.fix)}>待更正 → {fixShort(r.fix)}</button>
+                        : (!locked && <button className="fixlnk" onClick={() => setFixAt({ key: r.key, anc: r.anc })}
+                            title="这笔计提的科目/费用项目/部门/产品线记错了：登记应改为什么，打印交专人去金蝶改（不影响对账）">改维度</button>))
+                      return [
+                        <tr key={r.key} className={(unexpl ? 'rowbad' : '') + (r.ffirst && !r.gfirst ? ' fsep' : '') + (r.fix ? ' rowfix' : '')}>
                           <td className="pl">
                             {r.kind === 'bill_only'
                               ? <><span className="dim">{r.biz}</span><span className="sub">{r.fee_type} · 账单有、计提无</span></>
@@ -414,11 +510,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                                 : `${od.n} 单带金蝶单号，覆盖账单 ${money(od.amt)}；点击去第②步只看这一组`}>
                               {full ? `✓ ${od.n} 单` : qonly ? `${od.n} 单 · 只核量` : `部分 ${Math.round(od.ratio * 100)}% · ${od.n} 单`} ›</button>
                           })()}</td>}
-                          <td>{bad || (r.note || '').trim()
+                          <td><div className="notecell">{bad || (r.note || '').trim()
                             ? <input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
                               placeholder="为什么差…" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} />
-                            : (anchor ? <span className="tag ok">平</span> : null)}</td>
-                        </tr>)
+                            : (anchor ? <span className="tag ok">平</span> : null)}{fixCell}</div></td>
+                        </tr>,
+                        showFix && <tr key={r.key + '|fix'} className="fixrow"><td colSpan="7">
+                          <FixEditor key={fixAt.key} at={fixAt} rows={L.rows} onSave={saveFix} onCancel={() => setFixAt(null)} />
+                        </td></tr>
+                      ]
                     })
                   ]
                 })}
@@ -431,6 +531,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                 </tr>
               </tbody>
             </table></div>)}
+          {L && !L.err && L.fixes && L.fixes.length > 0 && <div className="adjnote fixnote">
+            <b>计提维度待更正 {L.fixes.length} 笔</b>（金额不变、不影响对账；导出复核表时单独一页《计提更正单》，打印交专人在金蝶改）：
+            {L.fixes.map(f => `${f.snap.vno || ''} ${money(f.snap.amt_net)} → ${fixShort(f)}${f.live ? '' : '（金蝶里原分录已变，可能已改好）'}`).join('；')}
+          </div>}
           {L && !L.err && L.prior && L.prior.length > 0 && <div className="adjnote">上期计提的红冲 / 更正（本月做的账，属于上个月）不计入本月，净额 <b className="mono">{money(L.prior_total)}</b>：{L.prior.map(p => `${p.vno} ${p.subject} ${money(p.net)}`).join('；')}</div>}
           {L && !L.err && L.adj && L.adj.length > 0 && <div className="adjnote">另有 {L.adj.length} 张只有税额调整科目的凭证未计入：{L.adj.map(a => `${a.vno} ${a.acct} ${money(a.amt)}`).join('、')}</div>}
           {L && !L.err && <details className="spec"><summary>口径说明</summary>
@@ -438,6 +542,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             账单先按 主体×费用类型×产品线 配到笔（标"按产品线"），产品线对不上的退回按 主体×费用类型 挂该组首笔（标"按组"，跨行合并）；账单有计提无的单独一行。
             {L.bill_src === 'accrual' ? '账单取费用项汇总行（月结清单口径）。' : '账单取逐单明细汇总。'}仓储费等无单据的费用只在本页看差异、写解释，不进逐单。
             「可逐单」＝这笔账单金额里带金蝶单号的逐单明细占多少（✓ 全覆盖 / 部分 xx% / 否＝只能按汇总核），点一下去第②步只看这一组单据。
+            「改维度」＝金蝶计提的科目/费用项目/部门/产品线记错时登记应改为什么（金额不变，不影响本页对账），导出复核表时单独一页《计提更正单》，打印交专人在金蝶改。
           </details>}
         </div>
         <div className="navbar"><button className="btn pri" onClick={() => goStep('docs')}>下一步：逐单核价核量 ›</button></div>
