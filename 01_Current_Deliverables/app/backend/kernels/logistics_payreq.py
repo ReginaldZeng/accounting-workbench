@@ -74,6 +74,19 @@ def classify_file(name, source):
     return "invoice"
 
 
+# 同一家快递供应商下的「办公室快递月结」(深圳/上海办公室按部门分摊，记费用不走物流计提)不属于物流账单复核(用户 2026-10-01 定排除)
+_EXCL_KW = (("办公室", "办公室快递月结"),)
+
+
+def auto_exclude(texts):
+    """事由/附件名 → 排除原因；不该排除返回 ''。"""
+    for t in texts:
+        for kw, why in _EXCL_KW:
+            if kw in str(t or ""):
+                return why
+    return ""
+
+
 def _ym(dt_str):
     try:
         d = datetime.strptime(str(dt_str)[:10], "%Y-%m-%d")

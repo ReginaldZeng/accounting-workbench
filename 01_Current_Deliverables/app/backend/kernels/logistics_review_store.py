@@ -190,6 +190,7 @@ payreq = Table(
     Column("bill_state", String(16)),              # imported / exists / nospec / parsefail / nofile
     Column("bill_msg", String(300)),
     Column("auto", Integer),                       # 1=上线后提交、自动建票夹+导账单
+    Column("excluded", String(60)),                # 不属于物流账单(V2.733)：NULL=没判过→按规则自动判；''=人工确认属于；非空=排除原因(办公室快递…)
     Column("updated_at", String(20)),
 )
 
@@ -301,6 +302,14 @@ def migrate_cols(engine):
                 for col in cols:
                     if typ.get(col) == "float":
                         c.execute(text("ALTER TABLE %s MODIFY %s DOUBLE" % (tb, col)))
+        # 钉钉请款单(V2.730建)：补「排除」列(V2.733)
+        if "mysql" in drv:
+            pq = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                                               "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='logistics_payreq'")).fetchall()}
+        else:
+            pq = {r[1] for r in c.execute(text("PRAGMA table_info(logistics_payreq)")).fetchall()}
+        if pq and "excluded" not in pq:
+            c.execute(text("ALTER TABLE logistics_payreq ADD COLUMN excluded VARCHAR(60)"))
         # 计提更正表(V2.697建)：补产品项目列；应改为改存「编码 名称」，MySQL 加宽到 120
         if "mysql" in drv:
             fx = {r[0]: r[1] for r in c.execute(text("SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS "

@@ -80,6 +80,10 @@ class T(unittest.TestCase):
         self.assertNotIn("C", m)                       # 一张付款单只配一张请款单
         self.assertNotIn("A", P.match_paybills(reqs, pbs, taken={2}))
 
+    def test_auto_exclude(self):
+        self.assertEqual(P.auto_exclude(["8月深圳顺丰月结账单费用：", "08月深圳办公室顺丰月结费用-分部门核对.xlsx"]), "办公室快递月结")
+        self.assertEqual(P.auto_exclude(["2026年8月，顺丰速运960元", "8月顺丰速运960.xlsx"]), "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -59,6 +59,12 @@ function PayReqDlg({ v, onClose, onChanged, flash }) {
     setBusy('as')
     reviewPayreqAssign(v.inst, p).then(() => { flash(p ? `已归到 ${p}` : '已清空归属月份'); onChanged() }).catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
   }
+  // 不属于物流账单（办公室快递月结等，V2.733）：排除后不进总表格子/待我审批/待认领；可恢复
+  const exclude = on => {
+    setBusy('ex')
+    reviewPayreqExclude(v.inst, on).then(() => { flash(on ? '已排除：不再算进物流复核' : '已恢复'); onChanged() })
+      .catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
+  }
   const [bl, bc] = BILL_LB[v.bill_state] || ['账单还没导', 'neu']
   return (
     <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
@@ -82,10 +88,15 @@ function PayReqDlg({ v, onClose, onChanged, flash }) {
         <div className="prrow"><b>归属月份</b><input type="month" value={p} onChange={e => setP(e.target.value)} />
           <button className="btn sm" disabled={busy !== '' || p === (v.period || '')} onClick={assign}>保存</button>
           <span className="dim">{v.period ? (PSRC[v.period_src] || '') : '没认出归哪个月：按账单月份选一下'}</span></div>
+        {v.excluded && <div className="prrow"><span className="pill neu">已排除</span><span className="dim">{v.excluded}（不进总表、不自动拉发票和账单）</span></div>}
         <div className="prrow">
-          {(!v.folder || !['imported', 'exists', 'nofile'].includes(v.bill_state)) &&
+          {!v.excluded && (!v.folder || !['imported', 'exists', 'nofile'].includes(v.bill_state)) &&
             <button className="btn pri" disabled={busy !== ''} onClick={() => pull(false)}>{busy === 'pull' ? '拉取中…' : '拉进来（发票进发票管家、账单进复核台）'}</button>}
           {v.bill_state === 'exists' && <button className="btn" disabled={busy !== ''} onClick={() => pull(true)}>用这份账单替换复核台现有账单</button>}
+          <span style={{ flex: 1 }} />
+          {v.excluded
+            ? <button className="btn" disabled={busy !== ''} onClick={() => exclude(false)}>恢复：算物流账单</button>
+            : <button className="btn" disabled={busy !== ''} onClick={() => exclude(true)} title="如办公室快递月结、非物流计提的请款：排除后不再显示在总表">不属于物流账单（排除）</button>}
         </div>
       </div>
     </div>
@@ -278,7 +289,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     setPr(cur => {
       if (!cur) return cur
       const pq = r.payreq || {}
-      const all = [...(pq.mine || []), ...(pq.unassigned || []), ...(r.rows || []).flatMap(x => Object.values(x.cells || {}).flatMap(c => c.reqs || []))]
+      const all = [...(pq.mine || []), ...(pq.unassigned || []), ...(pq.excluded || []), ...(r.rows || []).flatMap(x => Object.values(x.cells || {}).flatMap(c => c.reqs || []))]
       return all.find(x => x.inst === cur.inst) || null
     })
   }).catch(() => {})
@@ -640,6 +651,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {(ov.payreq.unassigned || []).length > 0 && <span className="prgrp">没认出月份 {ov.payreq.unassigned.slice(0, 8).map(v =>
               <button key={v.inst} className="dtchip dtrun" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}
               {ov.payreq.unassigned.length > 8 && <span className="dim">等 {ov.payreq.unassigned.length} 张</span>}</span>}
+            {(ov.payreq.excluded || []).length > 0 && <span className="prgrp"><span className="dim">本月已排除</span>{ov.payreq.excluded.map(v =>
+              <button key={v.inst} className="dtchip dtvoid" title={v.excluded} onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}</span>}
             <span style={{ flex: 1 }} />
             <span className="ovsub">{ov.payreq.last && ov.payreq.last.at ? `每 20 分钟自动扫；上次 ${ov.payreq.last.at.slice(5)}（${ov.payreq.last.trigger}）` : '还没扫过钉钉'}</span>
             <button className="btn sm" disabled={dtBusy} onClick={scanDt} title="扫钉钉「付款申请（公对公）」：收款方是物流供应商的落到下表各格">{dtBusy ? '扫钉钉中…' : '扫钉钉'}</button>

@@ -231,9 +231,17 @@ def _scan(trigger, days):
             else:
                 c.execute(insert(PR).values(inst_id=iid, auto=1 if ct[:10] >= since else 0, **row))
                 n_new += 1
-    # 认账期：没认过的(手工认领的不动)——金额正好＝某月计提优先，其次事由/附件名写的月份
+    # 不属于物流账单的(办公室快递月结等)：没判过的按规则判一次；人工改过的(''或原因)不再动
     with db._engine.connect() as c:
         allr = [dict(r) for r in c.execute(select(PR)).mappings().all()]
+    for r in allr:
+        if r.get("excluded") is None:
+            texts = [r.get("reason")] + [x.get("fileName") for x in json.loads(r.get("files_json") or "[]")]
+            why = lpq.auto_exclude(texts)
+            with db._engine.begin() as c:
+                c.execute(update(PR).where(PR.c.inst_id == r["inst_id"]).values(excluded=("自动：" + why) if why else ""))
+            r["excluded"] = ("自动：" + why) if why else ""
+    # 认账期：没认过的(手工认领的不动)——金额正好＝某月计提优先，其次事由/附件名写的月份
     pend = [r for r in allr if not r.get("period")]
     if pend:
         ps = sorted({p for r in pend for p in lpq.prev_periods(r.get("create_time"))})
@@ -268,7 +276,7 @@ def _scan(trigger, days):
     # 上线后提交的：自动建票夹拉发票 + 导账单
     n_auto = 0
     for r in allr:
-        if r.get("auto") and r.get("dt_status") != "TERMINATED" and r.get("dt_result") != "refuse":
+        if r.get("auto") and not r.get("excluded") and r.get("dt_status") != "TERMINATED" and r.get("dt_result") != "refuse":
             if not r.get("folder_id") or not r.get("bill_state"):
                 pull(r["inst_id"], "系统·钉钉")
                 n_auto += 1
@@ -389,7 +397,7 @@ def req_view(r, me):
             "ops": json.loads(r.get("ops_json") or "[]"), "cur": json.loads(r.get("cur_json") or "[]"),
             "files": [{"id": f.get("fileId"), "name": f.get("fileName"), "role": f.get("role"), "src": f.get("source")} for f in files],
             "folder": r.get("folder_id"), "bill_state": r.get("bill_state") or "", "bill_msg": r.get("bill_msg") or "",
-            "auto": bool(r.get("auto")), "paid": r.get("kd_paid") or ""}
+            "auto": bool(r.get("auto")), "paid": r.get("kd_paid") or "", "excluded": r.get("excluded") or ""}
 
 
 def overview_merge(period, rows, user):
@@ -397,6 +405,8 @@ def overview_merge(period, rows, user):
     me = _me_uid(user)
     with db._engine.connect() as c:
         reqs = [dict(r) for r in c.execute(select(PR)).mappings().all()]
+    excl = [req_view(r, me) for r in reqs if r.get("excluded") and r.get("period") == period]
+    reqs = [r for r in reqs if not r.get("excluded")]      # 不属于物流账单的不进总表格子/待我审批/待认领
     mine_all = [req_view(r, me) for r in reqs if r.get("dt_status") == "RUNNING"]
     mine_all = [v for v in mine_all if v["st"]["key"] == "mine"]
     cur = [req_view(r, me) for r in reqs if r.get("period") == period]
@@ -426,7 +436,7 @@ def overview_merge(period, rows, user):
             elif any(v["bill_state"] in ("nospec", "parsefail", "exists") for v in vs) and x.get("status") in ("nobill", "nospec", "noaccr"):
                 x["status"] = "billarrived"
     last = db.get_setting(_SET_LAST, None) or {}
-    return {"mine": mine_all, "unassigned": unassigned, "last": last, "since": db.get_setting(_SET_SINCE, None)}
+    return {"mine": mine_all, "unassigned": unassigned, "excluded": excl, "last": last, "since": db.get_setting(_SET_SINCE, None)}
 
 
 # ---------- 接口 ----------
@@ -468,6 +478,23 @@ async def payreq_assign(request: Request):
                                                                bill_state=None, bill_msg=None, updated_at=_now()))
     db.audit(u["name"], "物流复核-请款单认领月份", iid, p or "清空")
     return {"ok": True}
+
+
+@router.post("/api/logistics-review/payreq/exclude")
+async def payreq_exclude(request: Request):
+    """标「不属于物流账单」/ 恢复。exclude=false 存 ''＝人工确认属于，自动规则不再改它。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    iid = str(b.get("inst") or "")
+    val = ("%s：%s" % (u["name"], str(b.get("reason") or "不属于物流账单").strip()[:30])) if b.get("exclude") else ""
+    with db._engine.begin() as c:
+        n = c.execute(update(PR).where(PR.c.inst_id == iid).values(excluded=val, updated_at=_now())).rowcount
+    if not n:
+        return JSONResponse({"ok": False, "msg": "没有这张请款单"}, status_code=404)
+    db.audit(u["name"], "物流复核-请款单" + ("排除" if val else "恢复"), iid, val)
+    return {"ok": True, "excluded": val}
 
 
 @router.get("/api/logistics-review/payreq/file")

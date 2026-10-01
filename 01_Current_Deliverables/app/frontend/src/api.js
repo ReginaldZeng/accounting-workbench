@@ -592,6 +592,7 @@ export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?peri
 export const reviewPayreqScan = (days = 0) => j(`/api/logistics-review/payreq/scan${days ? '?days=' + days : ''}`, { method: 'POST' })
 export const reviewPayreqPull = (inst, force = false) => j('/api/logistics-review/payreq/pull', { method: 'POST', body: JSON.stringify({ inst, force }) })
 export const reviewPayreqAssign = (inst, period) => j('/api/logistics-review/payreq/assign', { method: 'POST', body: JSON.stringify({ inst, period }) })
+export const reviewPayreqExclude = (inst, exclude, reason = '') => j('/api/logistics-review/payreq/exclude', { method: 'POST', body: JSON.stringify({ inst, exclude, reason }) })
 export const reviewPayreqFileUrl = (inst, fid) => `/api/logistics-review/payreq/file?inst=${encodeURIComponent(inst)}&fid=${encodeURIComponent(fid)}`
 export const reviewOverview = (period, fresh = false) => j(`/api/logistics-review/overview?period=${period}${fresh ? '&fresh=1' : ''}`)
 export const reviewExportUrl = (carrier, period) => `/api/logistics-review/export?carrier=${encodeURIComponent(carrier)}&period=${period}`
