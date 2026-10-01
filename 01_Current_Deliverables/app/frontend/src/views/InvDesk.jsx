@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.738 | 「票夹里的票」只排发票/收据；非发票附件（账单、对账单、截图等）收进底下一行「其他附件 N 个」，点开才列，点名字仍能打开改票种
 // [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.737 | 左栏加「钉钉接入 · 待收票」：自动接入建的票夹记在系统名下、「我的票夹」看不到，单列一块（可搜，点开即打开）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 收票工作台：扫审批单开票夹 → 高拍仪/手机/拖文件进票 → 核对 → 提交（需求确认书五、技术方案 §5.2）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 轮询分快慢两档（手机连着但没在拍只 10 秒看一眼，配对码扫到一半关了弹窗也照样等到连上）；
@@ -342,8 +343,24 @@ function UploadReceipt({ res, onClose }) {
   )
 }
 
-function ItemList({ items, canEdit, onOpen, onFiles, upBusy, receipt, onReceiptClose }) {
+// 非发票附件（钉钉审批单上的账单、对账单、截图等）不跟发票排在一起：收进一行，点开才列（V2.738，Owner：不是发票的别放出来）
+function OtherAttachments({ items, onOpen }) {
+  if (!items.length) return null
+  return (
+    <details className="inv-dk-others">
+      <summary>其他附件 {items.length} 个<span className="inv-muted">　账单、对账单、截图等，不是发票，只留存；识别错了点开改票种</span></summary>
+      <div className="inv-dk-others-l">
+        {items.map(it => <button type="button" key={it.id} className="inv-lk" onClick={() => onOpen(it.id)}
+          title="打开看原件">{(it.file && it.file.name) || ('附件 #' + it.id)}</button>)}
+      </div>
+    </details>
+  )
+}
+
+function ItemList({ items: all, canEdit, onOpen, onFiles, upBusy, receipt, onReceiptClose }) {
   const pick = useRef(null)
+  const items = all.filter(it => it.kind !== 'other')
+  const others = all.filter(it => it.kind === 'other')
   return (
     <div className="inv-dk-items">
       <div className="inv-dk-items-h">
@@ -362,6 +379,7 @@ function ItemList({ items, canEdit, onOpen, onFiles, upBusy, receipt, onReceiptC
           {canEdit ? '还没有票。把发票放到高拍仪下、用扫码枪扫发票二维码，或把 PDF／OFD／XML／图片／压缩包拖到这里。' : '这个票夹里没有票。'}
         </div>
         : <div className="inv-dk-grid">{items.map((it, i) => <ItemCard key={it.id} item={it} idx={i} onOpen={onOpen} />)}</div>}
+      <OtherAttachments items={others} onOpen={onOpen} />
     </div>
   )
 }
@@ -821,7 +839,7 @@ export default function InvDesk({ user }) {
           </div>
         </div>
       </div>
-      {detailId !== null && <ItemModal items={items} id={detailId} canEdit={canEdit} onClose={() => setDetailId(null)}
+      {detailId !== null && <ItemModal items={[...items.filter(i => i.kind !== 'other'), ...items.filter(i => i.kind === 'other')]} id={detailId} canEdit={canEdit} onClose={() => setDetailId(null)}
         onPick={setDetailId} reload={loadDesk} flash={flash} />}
       {pairOpen && <PairModal pairState={pair} onClose={() => { setPairOpen(false); loadDesk() }} />}
       {manualOpen && <ManualModal companies={cfg && cfg.settings && cfg.settings.company} onClose={() => setManualOpen(false)} onDone={onManualDone} />}
