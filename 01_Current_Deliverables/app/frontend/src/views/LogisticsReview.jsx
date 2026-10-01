@@ -31,7 +31,7 @@ const DOC_Q = [
   { f: 'all', n: '全部', k: 'all', cls: '', dd: '' },
 ]
 // 总表复核状态：已登记 > 全部主体通过 > 复核中(标过主体/写过解释/确认过单据/登记过更正) > 账单已传 > 未传账单 > 未配
-const OV_ST = { signed: ['已登记', 'ok'], allok: ['主体全通过·待登记', 'ok'], doing: ['复核中', 'warn'], billed: ['账单已传', 'neu'], nobill: ['未传账单', 'neu'], nospec: ['未配', 'neu'] }
+const OV_ST = { signed: ['已登记', 'ok'], allfix: ['主体全通过·计提需更正', 'bad'], allok: ['主体全通过·待登记', 'ok'], doing: ['复核中', 'warn'], billed: ['账单已传', 'neu'], nobill: ['未传账单', 'neu'], nospec: ['未配', 'neu'] }
 const STATE_PILL = { miss: ['金蝶查无', 'bad'], qtydiff: ['数量不符', 'warn'], price: ['核价不符', 'bad'], info: [null, 'neu'], ok: ['一致', 'ok'] }
 const num = (v, dp = 2) => (v == null || v === '' ? '—' : Number(v).toLocaleString('zh-CN', { maximumFractionDigits: dp }))
 const EMPTY_L = { rows: [], accr_total: 0, bill_total: 0, diff_total: 0, adj: [], points: '', signed: null, n_unexplained: 0 }
@@ -490,7 +490,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .selbar b{color:#1E6B43}.lrv .selbar .sp{flex:1}
       .lrv .fsel{font:inherit;font-size:12.5px;border:1px solid #DCE2E7;border-radius:6px;padding:4px 6px;max-width:170px;background:#fff;color:#1B2733}
       .lrv .fsel.on{border-color:var(--accent);background:#F0F7FA;font-weight:600}
-      .lrv .ovtable td.mkok{background:#EAF6EF}.lrv .ovtable td.mkq{background:#FDF3E2}
+      .lrv .ovtable td.mkok{background:#EAF6EF}.lrv .ovtable td.mkq{background:#FDF3E2}.lrv .ovtable td.mkfix{background:#FBEAE7}
+      .lrv .mkdot.fix{color:#B23B2E}.lrv .smkfix{color:#B23B2E;font-weight:600}
       .lrv .ovtable tr.ovsigned td{background:#F1F8F4}
       .lrv .mkdot{display:inline-block;font-size:11px;font-weight:700;margin-right:4px}.lrv .mkdot.ok{color:var(--ok)}.lrv .mkdot.question{color:var(--warn)}
       .lrv .ovchips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px 15px;border-bottom:1px solid #E6EBEF}
@@ -546,18 +547,20 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   <td className="ovcar" title={[r.code, r.full].filter(Boolean).join(' ')}><Cd c={r.code} />{r.carrier}{!r.has_spec && <i className="nospectag">未配</i>}</td>
                   {ov.subjects.map(s => {
                     const cc = (r.cells && r.cells[s]) || { accr: 0, paid: 0, diff: 0 }
-                    const mk = cc.mark, mc = mk ? (mk.status === 'ok' ? ' mkok' : ' mkq') : ''
-                    const mt = mk ? (mk.status === 'ok' ? `${s} 已通过 · ${mk.by} ${mk.at}` : `${s} 有疑问：${mk.note || ''}（${mk.by}）`) : undefined
+                    const mk = cc.mark, fix = mk && mk.status === 'ok' && Math.abs(cc.diff || 0) >= 0.01
+                    const mc = mk ? (fix ? ' mkfix' : mk.status === 'ok' ? ' mkok' : ' mkq') : ''
+                    const mt = mk ? (fix ? `${s} 已通过，但计提与复核应付差 ${money(cc.diff)}，计提有误，需红冲更正（${mk.by}）`
+                      : mk.status === 'ok' ? `${s} 已通过 · ${mk.by} ${mk.at}` : `${s} 有疑问：${mk.note || ''}（${mk.by}）`) : undefined
                     return [
                       <td key={s + 'a'} className={'num' + mc} title={mt}>{cc.accr ? money(cc.accr) : ''}</td>,
                       <td key={s + 'p'} className={'num paid' + mc} title={mt}>{cc.paid ? money(cc.paid) : ''}</td>,
                       <td key={s + 'd'} className={'num ' + (cc.diff > 0.01 ? 'diffpos' : cc.diff < -0.01 ? 'diffneg' : '') + mc} title={mt}>
-                        {mk && <span className={'mkdot ' + mk.status}>{mk.status === 'ok' ? '✓' : '?'}</span>}{cc.diff ? money(cc.diff) : ''}</td>
+                        {mk && <span className={'mkdot ' + (fix ? 'fix' : mk.status)}>{fix ? '⚠ 需更正' : mk.status === 'ok' ? '✓' : '?'}</span>}{cc.diff ? money(cc.diff) : ''}</td>
                     ]
                   })}
                   <td>{(() => {
                     const pg = r.progress || {}
-                    const sub = [pg.subj_n && `${pg.subj_ok || 0}/${pg.subj_n} 主体通过`, pg.subj_q && `${pg.subj_q} 个有疑问`, pg.docs_ok && `确认 ${pg.docs_ok} 单`,
+                    const sub = [pg.subj_n && `${pg.subj_ok || 0}/${pg.subj_n} 主体通过`, pg.subj_fix && `${pg.subj_fix} 个主体计提需红冲更正`, pg.subj_q && `${pg.subj_q} 个有疑问`, pg.docs_ok && `确认 ${pg.docs_ok} 单`,
                       pg.notes && `解释 ${pg.notes} 笔`, pg.fixes && `更正 ${pg.fixes} 笔`].filter(Boolean).join(' · ')
                     const [lb, cl] = OV_ST[r.status] || ['待复核', 'neu']
                     return <>{r.signed ? <span className="pill ok" title={r.signed.signed_at}>已登记 · {r.signed.reviewer}</span> : <span className={'pill ' + cl}>{lb}</span>}
@@ -632,6 +635,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       <td className="gsub">{(() => {
                         const mk = h.mark
                         if (mk && mk.status === 'ok') return <span className="smk ok" title={`${mk.by} ${mk.at}`}>✓ 本主体通过 · {mk.by}
+                          {!isZero(h.diff) && <span className="smkfix" title="账单核过了，计提与账单还有差，说明计提记错，需红冲更正">⚠ 计提差 {dtxt(h.diff)}，需红冲更正</span>}
                           {!locked && <button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button>}</span>
                         if (mk && mk.status === 'question') return <span className="smk q" title={`${mk.by} ${mk.at}`}>? 有疑问：{mk.note || '（未写）'}
                           {!locked && <><button className="lnk" onClick={() => askSubj(h.subject, mk.note)}>改</button><button className="lnk" onClick={() => markSubj(h.subject, 'ok')}>改为通过</button><button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button></>}</span>

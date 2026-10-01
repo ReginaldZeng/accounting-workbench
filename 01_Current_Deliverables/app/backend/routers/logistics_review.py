@@ -233,10 +233,12 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
                 cells[sj]["mark"] = mk
         n_ok = sum(1 for sj in live if (smarks.get((short, sj)) or {}).get("status") == "ok")
         n_q = sum(1 for sj in live if (smarks.get((short, sj)) or {}).get("status") == "question")
+        # 通过了但计提≠复核应付：账单核过了，说明计提记错，要红冲更正(用户 2026-10-01)
+        n_fix = sum(1 for sj in live if (smarks.get((short, sj)) or {}).get("status") == "ok" and abs(cells[sj]["diff"]) >= 0.01)
         if n_ok or n_q:
-            pg = {**pg, "subj_ok": n_ok, "subj_q": n_q, "subj_n": len(live)}
+            pg = {**pg, "subj_ok": n_ok, "subj_q": n_q, "subj_n": len(live), "subj_fix": n_fix}
         # 状态：已登记 > 复核中(做过解释/确认/更正) > 账单已传 > 未传账单 > 未配取数说明
-        st = ("signed" if signed.get(short) else "allok" if (pg.get("subj_n") and pg.get("subj_ok") == pg.get("subj_n"))
+        st = ("signed" if signed.get(short) else ("allfix" if pg.get("subj_fix") else "allok") if (pg.get("subj_n") and pg.get("subj_ok") == pg.get("subj_n"))
               else "doing" if any(pg.values()) else "billed" if has_bill
               else "nobill" if short in specs else "nospec")
         out[key] = {"carrier": cf, "code": scode, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
