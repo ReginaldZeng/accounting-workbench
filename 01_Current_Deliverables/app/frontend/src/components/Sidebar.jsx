@@ -260,7 +260,8 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   }
 
   const meName = user?.name || ''
-  const mePost = user?.post || (user?.role === 'admin' ? '管理员' : '')
+  // 账号的岗位存的是岗位 key（改名不丢绑定），显示翻成中文名（同上面菜单岗位标的 postLabel）
+  const mePost = (user?.post && (postLabel[user.post] || user.post)) || (user?.role === 'admin' ? '管理员' : '')
 
   return (
     <div className="kd-sbslot" style={{ width: pinned ? 240 : 72 }}>

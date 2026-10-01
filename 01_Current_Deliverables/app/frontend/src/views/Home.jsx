@@ -85,6 +85,8 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
   const mine = live.filter(canSee)
   const allOpen = mine.length === live.length
   const showPeriod = mine.some(l => PERIOD_KEYS.includes(l.key))
+  // 岗位存的是岗位 key（改名不丢绑定），显示翻成中文名
+  const postName = (user?.post && ((navDef?.posts || []).find(p => p.key === user.post)?.label || user.post)) || (user?.role === 'admin' ? '管理员' : '')
 
   // 视图：记本机；没记过 → 没开全默认「我有权限的」，一个没开默认「显示全部」（免得空白页）
   const [view, setView] = useState(() => readLS(VIEW_KEY))
@@ -206,7 +208,7 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
         <div>
           <h2>{greeting()}{user?.name ? `，${user.name}` : ''}</h2>
           <div className="id">
-            {(user?.post || user?.role === 'admin') && <span>{user?.post || '管理员'}</span>}
+            {postName && <span>{postName}</span>}
             <span>财务核算工作台 · 进入页面后才取数</span>
           </div>
         </div>
