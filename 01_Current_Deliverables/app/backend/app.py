@@ -179,6 +179,10 @@ async def _api_no_store(request, call_next):
 # ---------------- 登录 / 账号（阶段2） ----------------
 
 
+# V2.728 BP 后端同机回环 + 内部令牌才能调的身份接口前缀（只读，见 api_internal_bp_users / api_internal_bp_identity）
+BP_INTERNAL_PREFIX = "/api/internal/bp-"
+
+
 @app.middleware("http")
 async def _auth_gate(request, call_next):
     """登录门：除白名单外的 /api/* 都要登录；未登录返回 401（前端据此弹登录页）。
@@ -193,7 +197,9 @@ async def _auth_gate(request, call_next):
             request.state.ops_user = u["name"]
         # 例外（V2.443）：BP 后端同机调 BOM 消费口 /api/bomcost/*——内部令牌对得上且来源回环才放过登录门，
         # 之后由路由自己再验一遍（只准已审核版；V2.451 起核算侧全量导出不再放行，BP 只拿脱敏版）。
-        bp_internal = p.startswith(bom_quote.INTERNAL_PATH_PREFIXES) and bom_quote.internal_token_ok(request)
+        # V2.728 同一通道再放 /api/internal/bp-*（BP「以他人视角查看」读某账号的 BP 身份，见 api_internal_bp_identity）
+        bp_internal = (p.startswith(bom_quote.INTERNAL_PATH_PREFIXES) or p.startswith(BP_INTERNAL_PREFIX)) \
+            and bom_quote.internal_token_ok(request)
         # BOM 专用取件码（V2.525）：只放 /api/bom/outbox/*——成本会计电脑上的小取件机揣它取采购核算表，取不了报表
         bom_pull = p.startswith("/api/bom/outbox/") and bom_quote.bom_pull_token_ok(request)
         # 发票管家手机配对（V-draft）：手机没有登录会话，只揣电脑端生成的一次性配对令牌（请求头 X-Inv-Pair，库里只存 sha256，
@@ -371,6 +377,53 @@ def api_bp_authz(request: Request):
     except Exception:
         pass                      # 岗位只是展示信息，取不到不能影响 BP 准入
     return resp
+
+
+# ── V2.728 BP「以他人视角查看」（BP 侧 V2.551）──────────────────────────────────────────────
+# 背景：强制改密（V2.330）后管理员没法再登别人账号看"他在 BP 里看到什么"。BP 无自己的登录，身份全靠
+#   /api/bp-authz 透传的 X-BP-*；BP 管理员（'*'）选一个人后，BP 后端用下面两个接口取**该账号会被透传的身份**
+#   （与 bp-authz 同一个 db.bp_perm_codes，口径零分叉），在 BP 内只读模拟。
+# 鉴权：仅 BP 后端同机回环 + X-Internal-Token（与 /api/bomcost/* 同一把 BOMCOST_INTERNAL_TOKEN）；不对浏览器开放。
+#   只读、不回密码/会话、不改任何数据。谁能发起模拟由 BP 侧判定（真实身份须 '*'），并在 BP 侧留审计。
+def _bp_identity_of(u):
+    codes = db.bp_perm_codes(u) if (db.is_super(u) or db.user_can(u, "enter_bp")) else []
+    try:
+        post = _post_label(str(u.get("post") or ""))
+    except Exception:
+        post = ""
+    return {"name": u["name"], "post": post, "grp": u.get("grp") or "", "perms": codes}
+
+
+@app.get("/api/internal/bp-users")
+def api_internal_bp_users(request: Request):
+    """可被 BP 模拟查看的账号：启用中、且有 BP 准入（透传码非空）。按账号 id 序。"""
+    if not bom_quote.internal_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "仅限内部调用"}, status_code=401)
+    out = []
+    for row in db.list_users():
+        if not row.get("active"):
+            continue
+        u = db.get_user(row["name"])
+        if not u:
+            continue
+        ident = _bp_identity_of(u)
+        if not ident["perms"]:
+            continue
+        ident["all"] = "*" in ident["perms"]
+        ident.pop("perms")                     # 列表只给人名/岗位，权限按需单查
+        out.append(ident)
+    return {"ok": True, "users": out}
+
+
+@app.get("/api/internal/bp-identity")
+def api_internal_bp_identity(request: Request, name: str = ""):
+    """某账号会被 /api/bp-authz 透传给 BP 的身份：{name, post, grp, perms[]}。停用/不存在 → 404；无准入 → perms=[]。"""
+    if not bom_quote.internal_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "仅限内部调用"}, status_code=401)
+    u = db.get_user((name or "").strip())
+    if not u or not u.get("active"):
+        return JSONResponse({"ok": False, "msg": "账号不存在或已停用"}, status_code=404)
+    return {"ok": True, **_bp_identity_of(u)}
 
 
 @app.get("/api/perms/caps")
