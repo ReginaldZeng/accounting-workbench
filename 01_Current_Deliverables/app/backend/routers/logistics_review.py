@@ -827,6 +827,58 @@ def _eff_fee(r):
     return _fee_norm(_fee_of(r.get("doc_no"), r.get("fee_item")))
 
 
+# —— 费用类型「物流部填」vs「系统判」(V2.735，用户 2026-10-01：他们填归他们填、系统做归系统做，两边对比才能复核对不对) ——
+# 比对在归一类上做(出库运费/入库运费/研发外购/仓储费/搬运费)：规范附表 F 的 销售出库费用、出库装卸费用 都归出库运费，
+# 成品/原料入库费用、成品/原料调拨费用、入库装卸费用 都归入库运费——科目层面(6601/6401/5101)由计提对账管，这里只核类别。
+def _fee_cmp(x):
+    x = str(x or "")
+    return "出库运费" if x == "退货运费" else x      # 附表 H：销售退货单按销售出库费用
+
+
+def _fill_fee(r):
+    """物流部填的费用类型 → 归一类；没填返回 ''。新账单读「费用类型」列(存 bill_lines.fee)；
+    老账单(8 月)从「类别」标注推：研发→研发外购、仓储→仓储费、销售单/样品单/福利领用/退货→出库运费、调拨/入库→入库运费。"""
+    v = str(r.get("fee") or "").strip()
+    if v:
+        return "搬运费" if "设备" in v else _fee_cmp(_fee_norm(v))
+    a = str(r.get("annot") or "")
+    if not a:
+        return ""
+    fa = _fee_norm(a)
+    if fa in _CANON_FEES:
+        return _fee_cmp(fa)
+    if any(k in a for k in ("销售单", "样品单", "福利", "退货", "销售出库")):
+        return "出库运费"
+    if any(k in a for k in ("调拨", "入库")):
+        return "入库运费"
+    return ""
+
+
+def _sys_fee(doc_no, parties):
+    """系统按金蝶单据判费用类型(规范附表 H)：销售出库/电商出库/销售退货→出库运费；采购入库/退料、分步式调拨→入库运费；
+    其他出库单看领料部门——研发中心领的→研发外购，其余(销售中心样品、福利领用…)→出库运费。没单号判不了返回 ''。"""
+    pre = "".join(ch for ch in (doc_no or "").split("+")[0] if ch.isalpha())
+    if pre in ("XSCKD", "XQLCK", "RK"):
+        return "出库运费"
+    if pre in ("CGRK", "CGTL", "FBDC", "FBDR"):
+        return "入库运费"
+    if pre == "QTCK":
+        return "研发外购" if any("研发" in str(p or "") for p in (parties or [])) else "出库运费"
+    return ""
+
+
+def _fee_check(r, doc_no, parties):
+    """→ (系统判, 物流部填, 结论 ok/diff/nofill/nosys/na)。仓储、搬运(设备调拨)这类不看单据的，系统不判(na)。"""
+    fs, ff = _sys_fee(doc_no, parties), _fill_fee(r)
+    if ff in ("仓储费", "搬运费"):
+        return fs, ff, "na"
+    if not fs:
+        return fs, ff, "nosys"
+    if not ff:
+        return fs, ff, "nofill"
+    return fs, ff, ("ok" if _fee_cmp(ff) == _fee_cmp(fs) else "diff")
+
+
 def _box_reg(spec):
     """从规格型号解析箱规（N袋/箱）。返回 int 或 None。"""
     m = re.search(r"(\d+)\s*(?:袋|盒|包|瓶|罐|桶|支|个|件|盒装)\s*/\s*箱", str(spec or ""))   # 10袋/箱、12盒/箱…
@@ -1668,7 +1720,9 @@ def _box_docs(rsub, carrier):
             state = "ok"
         svals = [m["sales"] for m in mrows if m.get("sales") is not None]
         ssum = round(sum(svals), 2) if svals else None
-        docs.append({**base, "state": state, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
+        _pts = list(dict.fromkeys(m.get("party") for m in mrows if m.get("party")))
+        f_sys, f_fill, f_chk = _fee_check(r, d0, _pts)
+        docs.append({**base, "state": state, "fee_sys": f_sys, "fee_fill": f_fill, "fee_chk": f_chk, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
                      "unit_fee": round(fee / kgbase, 2) if kgbase else None, "sales": ssum,
                      "ratio": round(fee / ssum, 4) if ssum else None,
                      "parties": list(dict.fromkeys(m.get("party") for m in mrows if m.get("party"))),
@@ -1847,6 +1901,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 k = "done" if x.get("confirmed") else x["state"]
                 dc[k] = dc.get(k, 0) + 1
             dc["all"] = len(pool)
+            dc["feediff"] = sum(1 for x in pool if x.get("fee_chk") == "diff")    # 费用类型 物流部填≠系统判(V2.735)
         else:
             ex_all = None
             pool = _box_docs(sl, carrier)
@@ -1879,6 +1934,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             pool = [x for x in pool if dhit(x)]
         elif full and group == "done":
             pool = [x for x in pool if x.get("confirmed")]
+        elif full and group == "feediff":
+            pool = [x for x in pool if x.get("fee_chk") == "diff"]
         elif full and group != "all":
             want = {"ex": ("miss", "qtydiff", "price"), "pass": ("ok",)}.get(group, (group,))
             pool = [x for x in pool if not x.get("confirmed") and x["state"] in want]

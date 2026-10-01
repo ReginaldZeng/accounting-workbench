@@ -128,6 +128,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
     hdr = [_s(x) for x in rows[hr]]
     c_doc = find_col(hdr, sp["doc_col"]) if sp.get("doc_col") else None
     c_annot = find_col_nth(hdr, sp["annot_col"]) if sp.get("annot_col") else None
+    c_fee = find_col(hdr, sp["fee_col"]) if sp.get("fee_col") else None     # 物流部填的费用类型(规范第4列，V2.735)
     c_rtype = find_col_nth(hdr, sp["row_type"]["col"]) if sp.get("row_type") else None
     calc = sp.get("calc")
     c_calc_t = find_col(hdr, calc["target"]) if calc else None
@@ -177,6 +178,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             "subject": _subject(sp.get("subject"), r, hdr),
             "doc_no": "+".join(split_nos(doc)) if doc and doc != "无单据" else doc,
             "annot": _annot_of(sp, r, c_annot), "fee_item": sp.get("fee_item", ""),
+            "fee": _s(r[c_fee]) if c_fee is not None and c_fee < len(r) else "",
             "qty": _f(r[c_qty]) if c_qty is not None and c_qty < len(r) else None,
             "unit": sp.get("qty_unit", ""),
             "amount": round(base, 2) if base is not None else None,

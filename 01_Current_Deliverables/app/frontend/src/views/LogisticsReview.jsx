@@ -27,6 +27,7 @@ const DOC_Q = [
   { f: 'price', n: '核价不符', k: 'price', cls: 'bad', dd: '包天包趟按报价核：运费≠数量×单价，或有报价未列的加班费' },
   { f: 'info', n: '免核', k: 'info', cls: 'neu', dd: '打托倒算托规 / 整车包车议价 / 调拨包天包趟 / 无单据调整，不核数量，仅提示' },
   { f: 'ok', n: '一致', k: 'ok', cls: 'ok', dd: '账单量＝金蝶核对量' },
+  { f: 'feediff', n: '费用类型不一致', k: 'feediff', cls: 'bad', dd: '物流部填的费用类型 ≠ 系统按金蝶单据判的（其他出库单看领料部门）' },
   { f: 'done', n: '已确认', k: 'done', cls: 'ok', dd: '复核人核过没问题、已点「确认无误」的单据（不再算待核）' },
   { f: 'all', n: '全部', k: 'all', cls: '', dd: '' },
 ]
@@ -502,6 +503,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fixtag{font:inherit;font-size:12px;background:#FBF0DA;color:#8A5A00;border:1px solid #F0D9A8;border-radius:999px;padding:2px 10px;cursor:pointer;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
       .lrv .fixtag[disabled]{cursor:default}
       .lrv tr.rowfix td{background:#FFFBF2}
+      .lrv .fchk{color:#8A5A00}.lrv .fchk.bad{color:var(--bad);font-weight:600}
       .lrv .dtchip{display:inline-block;margin-top:3px;font:inherit;font-size:11px;line-height:1.6;padding:0 8px;border-radius:999px;border:1px solid transparent;cursor:pointer;white-space:nowrap}
       .lrv .dtchip.dtmine{background:#FDE7C8;color:#9A5200;border-color:#F2C27A;font-weight:600}.lrv .dtchip.dtrun{background:#E3EEF8;color:#2F5E8A}
       .lrv .dtchip.dtok{background:#E6F4EC;color:#2E7A50}.lrv .dtchip.dtpaid{background:#2E8B57;color:#fff}.lrv .dtchip.dtvoid{background:#EEF0F2;color:#8A96A2;text-decoration:line-through}
@@ -933,7 +935,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td className="ck" onClick={e => e.stopPropagation()}><input type="checkbox" checked={on} onChange={() => toggleSel(x, i)} /></td>
                         <td className="caret">{isO ? '▾' : '▸'}</td>
                         <td><span className="mono">{x.doc_no || '—'}</span><span className="sub">{x.n_mat ? `${x.n_mat} 个物料` : (x.doc_no ? '金蝶无此单据' : '无单据')}</span></td>
-                        <td><Cd c={cdBook(x.subject)} />{x.subject}<span className="sub">{(() => { const f = cdFee(x.subject, x.fee_item); return f ? <><Cd c={f[0]} />{f[1]}</> : x.fee_item })()}</span></td>
+                        <td><Cd c={cdBook(x.subject)} />{x.subject}<span className="sub">{(() => { const f = cdFee(x.subject, x.fee_item); return f ? <><Cd c={f[0]} />{f[1]}</> : x.fee_item })()}</span>
+                          {x.fee_chk === 'diff' && <span className="sub fchk bad" title="物流部填的费用类型和系统按金蝶单据判的不一样，请双方核对">物流部填 {x.fee_fill} ≠ 系统判 {x.fee_sys}</span>}
+                          {x.fee_chk === 'nofill' && <span className="sub fchk" title="规范第4列「费用类型」每行必填">物流部未填 · 系统判 {x.fee_sys}</span>}</td>
                         <td>{x.bizline ? <><Cd c={cdBiz(x.bizline)} />{x.bizline}</> : <span className="dim">—</span>}</td>
                         <td className="party" title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</td>
                         <td className="num">{num(x.bill_amt)}<small className="u">{x.bill_unit}</small>
