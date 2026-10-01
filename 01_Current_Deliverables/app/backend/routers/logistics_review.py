@@ -361,7 +361,7 @@ def import_bill(carrier, period, data, operator, origin="手工上传"):
 
 # ---------- 接金蝶回填出库数量（核量）----------
 # 按重量核量的承运商（干线/冷运：核量比金蝶出库重量kg，不是件数）
-_WEIGHT_CARRIERS = {"顺丰冷运", "天鹰物流"}
+_WEIGHT_CARRIERS = {"顺丰冷运", "天鹰物流", "顺丰速运"}   # 顺丰速运(V2.732)：快递寄样按计费重量比金蝶出库重量
 
 
 def _kd_weight_by_doc(s, conf, docs):
