@@ -44,7 +44,7 @@ function DtChip({ reqs, onOpen }) {
   if (!reqs || !reqs.length) return null
   const v = reqs[0], more = reqs.length - 1
   return <button className={'dtchip ' + (DT_CLS[v.st.key] || '')} title={`钉钉请款 ${money(v.amount)} · ${v.applicant || ''} ${v.created || ''}（点开看节点/附件）`}
-    onClick={() => onOpen(v)}>{v.st.label}{v.st.date ? ' ' + v.st.date.slice(5, 10) : ''}{more > 0 ? ` +${more}` : ''}</button>
+    onClick={() => onOpen(v)}>{v.st.key === 'run' && v.cur && v.cur.length > 1 ? `待${v.cur[0].name}等审批` : v.st.label}{v.st.date ? ' ' + v.st.date.slice(5, 10) : ''}{more > 0 ? ` +${more}` : ''}</button>
 }
 
 function PayReqDlg({ v, onClose, onChanged, flash }) {
@@ -421,7 +421,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .ovtable th.subjgrp{text-align:center;background:var(--soft);color:#0F4A60;border-left:1px solid #DCE2E7}
       .lrv .ovtable th,.lrv .ovtable td{border-right:1px solid #EEF1F0}
       .lrv .ovtable td.ovcar{font-weight:600;white-space:nowrap;position:sticky;left:0;background:#fff}
+      .lrv .ovtable td.ovcar .ovcode{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#8A96A2;font-weight:400;margin-top:1px}
       .lrv .ovtable td.paid{color:#5E6B78}
+      .lrv .ovtable td.ovst{white-space:normal;min-width:150px;max-width:230px}
       .lrv .ovtable td.diffpos{color:var(--bad);font-weight:600}
       .lrv .ovtable td.diffneg{color:var(--ok)}
       .lrv .nospectag{font-style:normal;font-size:10px;color:var(--warn);background:#F7E9CF;border-radius:4px;padding:0 4px;margin-left:5px}
@@ -651,7 +653,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               {ov === null && <tr><td colSpan="12" className="ovempty">读金蝶计提凭证中…</td></tr>}
               {ov && ov.rows && ov.rows.filter(r => ovMatch(r) && (!supq || (r.carrier || '').includes(supq) || (r.full || '').includes(supq) || (r.code || '').includes(supq))).map(r =>
                 <tr key={r.code || r.full} className={r.status === 'signed' ? 'ovsigned' : ''}>
-                  <td className="ovcar" title={[r.code, r.full].filter(Boolean).join(' ')}><Cd c={r.code} />{r.carrier}{!r.has_spec && <i className="nospectag">未配</i>}</td>
+                  <td className="ovcar" title={[r.code, r.full].filter(Boolean).join(' ')}>{r.carrier}{!r.has_spec && <i className="nospectag">未配</i>}{r.code && <div className="ovcode">{r.code}</div>}</td>
                   {ov.subjects.map(s => {
                     const cc = (r.cells && r.cells[s]) || { accr: 0, paid: 0, diff: 0 }
                     const mk = cc.mark, fix = mk && mk.status === 'ok' && Math.abs(cc.diff || 0) >= 0.01
@@ -665,7 +667,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         {mk && <span className={'mkdot ' + (fix ? 'fix' : mk.status)}>{fix ? '⚠ 需更正' : mk.status === 'ok' ? '✓' : '?'}</span>}{cc.diff ? money(cc.diff) : ''}</td>
                     ]
                   })}
-                  <td>{(() => {
+                  <td className="ovst">{(() => {
                     const pg = r.progress || {}
                     const sub = [r.bill_from && `账单来自钉钉请款 ${(r.bill_from.date || '').slice(5)}`, r.dt && r.dt.n && `钉钉 ${r.dt.paid}/${r.dt.n} 已付款`,
                       pg.subj_n && `${pg.subj_ok || 0}/${pg.subj_n} 主体通过`, pg.subj_fix && `${pg.subj_fix} 个主体计提需红冲更正`, pg.subj_q && `${pg.subj_q} 个有疑问`, pg.docs_ok && `确认 ${pg.docs_ok} 单`,
