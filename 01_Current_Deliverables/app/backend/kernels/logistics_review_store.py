@@ -147,7 +147,20 @@ review_doc_ok = Table(
     Column("confirmed_at", String(20)),
 )
 
-TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok]
+# 按主体标复核结论：一家承运商常常某个主体先通过、别的主体还有疑问(用户 2026-10-01)。status=ok 通过 / question 有疑问(note 写疑问)
+review_subj = Table(
+    "logistics_review_subj", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("carrier", String(60)),
+    Column("period", String(7)),
+    Column("subject", String(30)),
+    Column("status", String(12)),
+    Column("note", Text),
+    Column("updated_by", String(50)),
+    Column("updated_at", String(20)),
+)
+
+TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok, review_subj]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {

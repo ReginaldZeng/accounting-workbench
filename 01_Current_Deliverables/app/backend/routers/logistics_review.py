@@ -26,6 +26,17 @@ BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
 SG, LN, CP = store.review_sign, store.review_line_note, store.review_carrier_pts   # 复核登记 / 逐笔差异解释 / 供应商复核要点
 FX = store.review_line_fix   # 计提更正(只登记应改为什么，打印交专人去金蝶改)
 DK = store.review_doc_ok     # 逐单已确认(复核人核过没问题的单据)
+SJ = store.review_subj       # 按主体复核结论(通过/有疑问)
+
+
+def _subj_marks(period, carrier=None):
+    """{(承运商, 主体): {status, note, by, at}}"""
+    q = select(SJ).where(SJ.c.period == period)
+    if carrier:
+        q = q.where(SJ.c.carrier == carrier)
+    with db._engine.connect() as c:
+        return {(r["carrier"], r["subject"]): {"status": r["status"], "note": r["note"] or "", "by": r["updated_by"] or "",
+                                              "at": r["updated_at"] or ""} for r in c.execute(q).mappings().all()}
 
 
 def _doc_ok(carrier, period):
@@ -186,6 +197,14 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
             (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
         signed = {r["carrier"]: {"reviewer": r["reviewer"], "signed_at": r["signed_at"]} for r in c.execute(
             select(SG).where((SG.c.period == period) & (SG.c.status == "signed"))).mappings().all()}
+        # 复核进度(总表看得出做到哪)：差异解释/确认单据/计提更正 各几笔
+        prog = {}
+        for tb, k in ((LN, "notes"), (DK, "docs_ok"), (FX, "fixes")):
+            q = select(tb.c.carrier, func.count()).where(tb.c.period == period)
+            if tb is LN:
+                q = q.where(func.length(func.coalesce(LN.c.note, "")) > 0)
+            for cr, n in c.execute(q.group_by(tb.c.carrier)).all():
+                prog.setdefault(cr, {})[k] = int(n)
     # 账单应付与逐笔复核同口径：有费用项汇总行(迅鸽)用汇总行，否则逐单；主体走覆盖列+全称→简称(极鲜达账单写全称)
     has_acc = {r["carrier"] for r in brs if r["grain"] == "accrual" and (r["amount"] or 0)}
     billmap = {}
@@ -194,6 +213,7 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
             continue
         k = (_eff_subject(r), str(r["carrier"]))
         billmap[k] = round(billmap.get(k, 0.0) + float(r["amount"] or 0), 2)
+    smarks = _subj_marks(period)
     out = {}
     for key, (cf, scode) in carriers.items():
         short = sup_short(cf)
@@ -204,8 +224,23 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
             p = billmap.get((subj, short), 0.0)      # 本月复核应付（该承运商本月账单复核后金额）
             cells[subj] = {"accr": a, "paid": p, "diff": round(a - p, 2)}
             tot_accr += a
+        pg = prog.get(short, {})
+        has_bill = any(k[1] == short for k in billmap)
+        live = [sj for sj in _SUBJECTS if cells[sj]["accr"] or cells[sj]["paid"]]
+        for sj in _SUBJECTS:
+            mk = smarks.get((short, sj))
+            if mk:
+                cells[sj]["mark"] = mk
+        n_ok = sum(1 for sj in live if (smarks.get((short, sj)) or {}).get("status") == "ok")
+        n_q = sum(1 for sj in live if (smarks.get((short, sj)) or {}).get("status") == "question")
+        if n_ok or n_q:
+            pg = {**pg, "subj_ok": n_ok, "subj_q": n_q, "subj_n": len(live)}
+        # 状态：已登记 > 复核中(做过解释/确认/更正) > 账单已传 > 未传账单 > 未配取数说明
+        st = ("signed" if signed.get(short) else "allok" if (pg.get("subj_n") and pg.get("subj_ok") == pg.get("subj_n"))
+              else "doing" if any(pg.values()) else "billed" if has_bill
+              else "nobill" if short in specs else "nospec")
         out[key] = {"carrier": cf, "code": scode, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
-                    "total_accr": round(tot_accr, 2), "signed": signed.get(short)}
+                    "total_accr": round(tot_accr, 2), "signed": signed.get(short), "status": st, "progress": pg}
 
     def _natkey(x):   # 按供应商编码自然排序(物流运输服务009 < 物流运输服务063)，没编码的排最后
         c = x.get("code") or ""
@@ -1257,6 +1292,7 @@ def _build_lines(request, carrier, period):
     for (s, f, b), v in bill3.items():
         bill2[(s, f)] = bill2.get((s, f), 0.0) + v
     rows, atot, btot = [], 0.0, 0.0
+    smk = _subj_marks(period, carrier)
     allkeys = set(list(groups.keys()) + list(bill2.keys()))
     for s in sorted({k[0] for k in allkeys}):
       srows, sa, sb = [], 0.0, 0.0
@@ -1314,6 +1350,7 @@ def _build_lines(request, carrier, period):
           srows[0]["gfirst"] = True
       rows.extend(srows)
       rows.append({"kind": "gtotal", "subject": s, "book_code": s2book.get(s, ""), "fee_type": "", "amt": round(sa, 2), "bill": round(sb, 2),
+                   "mark": smk.get((carrier, s)),
                    "diff": round(sa - sb, 2), "key": "gt|%s" % s})
       atot += sa; btot += sb
     n_unexpl = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None
@@ -1962,6 +1999,33 @@ async def review_doc_classify(request: Request):
         c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
                   (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(**vals))
     _bust(carrier, period)   # 归类变了 → 逐笔/结论缓存作废，重算
+    return {"ok": True}
+
+
+@router.post("/api/logistics-review/subject-mark")
+async def review_subject_mark(request: Request):
+    """按主体标复核结论：status=ok 通过 / question 有疑问(note 写疑问) / 空=撤销。已登记复核的月份不可改。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period, subj = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("subject") or "").strip()
+    st, note = (b.get("status") or "").strip(), (b.get("note") or "").strip()
+    if not carrier or not period or not subj or st not in ("", "ok", "question"):
+        return JSONResponse({"ok": False, "msg": "参数不对"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    with db._engine.begin() as c:
+        c.execute(delete(SJ).where((SJ.c.carrier == carrier) & (SJ.c.period == period) & (SJ.c.subject == subj)))
+        if st:
+            c.execute(insert(SJ).values(carrier=carrier, period=period, subject=subj, status=st, note=note,
+                                        updated_by=_uname(u), updated_at=_now()))
+    k = ("lines", carrier, period)
+    if k in _ACCR_CACHE:                     # 只改组头标记，不重读金蝶
+        for r in _ACCR_CACHE[k][0].get("rows", []):
+            if r.get("kind") == "gtotal" and r.get("subject") == subj:
+                r["mark"] = {"status": st, "note": note, "by": _uname(u), "at": _now()} if st else None
     return {"ok": True}
 
 
