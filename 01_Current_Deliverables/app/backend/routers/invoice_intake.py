@@ -192,6 +192,20 @@ async def intake_status(request: Request):
     return {"ok": True, **status()}
 
 
+def _auto_folders():
+    rows, total = S.folders_auto_open(inv.E(), SOURCE, limit=300)
+    return {"ok": True, "rows": inv.folder_views(rows), "total": total}
+
+
+@router.get("/api/inv/desk/auto")
+async def desk_auto_folders(request: Request):
+    """V2.737 收票工作台「钉钉接入·待收票」：自动接入建的、还在收票/被退回的票夹（记在系统名下，「我的票夹」里看不到）。"""
+    u, bad = inv.need(request, inv.ENTER_DESK)
+    if bad:
+        return bad
+    return await run_in_threadpool(_auto_folders)
+
+
 @router.post("/api/inv/intake/scan")
 async def intake_scan(request: Request):
     u, bad = inv.need(request, None, inv.CAP_CONFIG)

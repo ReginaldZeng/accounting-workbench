@@ -1533,6 +1533,11 @@ class InvoiceApiTests(unittest.TestCase):
             g = inv.open_approval_folder(user="系统", source="dingtalk", inst_id="PI-IN-REAL", inst={"x": 1})
         self.assertTrue(g["ok"], g)
         self.assertEqual((g["folder"]["source"], g["folder"]["attach_status"]), ("dingtalk", "done"))
+        # V2.737 收票工作台单列自动接入的票夹（记在系统名下，「我的票夹」看不到）
+        rows, total = self.S.folders_auto_open(inv.E())
+        self.assertEqual((total, [r["inst_id"] for r in rows]), (1, ["PI-IN-REAL"]))
+        self.assertEqual(ii._auto_folders()["rows"][0]["instId"], "PI-IN-REAL")
+        self.assertNotIn("PI-IN-REAL", [f["instId"] for f in self.get("/api/inv/desk", "intern").json()["recent"]])
         # 没设接入审批人 → 不扫
         self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": []}}})
         self.assertFalse(ii.scan_once("测试")["ok"])

@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.737 | 左栏加「钉钉接入 · 待收票」：自动接入建的票夹记在系统名下、「我的票夹」看不到，单列一块（可搜，点开即打开）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 收票工作台：扫审批单开票夹 → 高拍仪/手机/拖文件进票 → 核对 → 提交（需求确认书五、技术方案 §5.2）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 轮询分快慢两档（手机连着但没在拍只 10 秒看一眼，配对码扫到一半关了弹窗也照样等到连上）；
 //   提交被拦的「去看这张」按 itemIds 出链接；只有查看权限的人也能打开/收起票夹看（只读，标「只能看」）。
@@ -6,7 +7,7 @@
 //   手机连着但闲着、或配对码已生成还没扫上 → 10 秒；其余时候不轮询，每次操作后刷新一次。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invDesk, invScan, invOpenFolder, invCloseFolder, invUpload, invManualFolder, invRefreshFolder,
+  invConfig, invDesk, invDeskAuto, invScan, invOpenFolder, invCloseFolder, invUpload, invManualFolder, invRefreshFolder,
   invSubmitFolder, invItemUpdate, invItemRemove, invItemSplit, invItemRotate, invItemReprocess,
 } from '../api.js'
 import {
@@ -146,6 +147,57 @@ function RecentFolders({ rows, currentId, onOpen, busyId, err }) {
             )
           })}
         </div>}
+    </div>
+  )
+}
+
+// ───────────────────────── 左栏：钉钉接入 · 待收票 ─────────────────────────
+
+// 自动接入（审批流走到接入审批人节点）建的票夹记在「系统」名下，「我的票夹」里看不到：单列一块。
+// 打开一次后它也会进「我的票夹」。自己拉数：进页、换票夹、每分钟一次（不跟 1.5 秒的票夹轮询走）
+function AutoFolders({ currentId, onOpen, busyId }) {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+  const [q, setQ] = useState('')
+  const load = useCallback(() => {
+    invDeskAuto().then(r => { setData(r || {}); setErr('') }).catch(e => setErr(e.message || String(e)))
+  }, [])
+  useEffect(() => { load() }, [load, currentId])
+  useEffect(() => { const t = setInterval(load, 60000); return () => clearInterval(t) }, [load])
+  const rows = (data && data.rows) || []
+  const k = q.trim()
+  const shown = k ? rows.filter(f => [f.title, f.applicant, f.businessId, f.payee && f.payee.name, f.amount]
+    .some(v => v !== null && v !== undefined && String(v).includes(k))) : rows
+  if (data && !rows.length && !err) return null
+  return (
+    <div className="inv-dk-card">
+      <div className="inv-dk-card-h">钉钉接入 · 待收票<span className="inv-muted">{data ? `${data.total} 张单` : '…'}，审批走到接入审批人时自动建的</span></div>
+      {err && <div className="inv-dk-err">{err}</div>}
+      {rows.length > 8 && <div style={{ padding: '6px 12px' }}>
+        <input className="inv-in" value={q} onChange={e => setQ(e.target.value)} placeholder="搜申请人、金额、审批编号…" style={{ width: '100%' }} />
+      </div>}
+      {!data ? <div className="inv-dk-empty-s">正在读取…</div>
+        : !shown.length ? <div className="inv-dk-empty-s">没有搜到</div>
+        : <div className="inv-dk-recent">
+          {shown.map(f => {
+            const st = FOLDER_ST[f.status] || ['mute', f.status || '—']
+            const s = f.stats || {}
+            return (
+              <button type="button" key={f.id} className={'inv-dk-rec' + (f.id === currentId ? ' on' : '')}
+                disabled={busyId === f.id} onClick={() => onOpen(f.id)}>
+                <span className="inv-dk-rec-t">{f.title || f.businessId || ('票夹 #' + f.id)}</span>
+                <span className="inv-dk-rec-m">
+                  {f.status !== 'collecting' && <span className={'inv-badge ' + st[0]}>{st[1]}</span>}
+                  <span className="inv-num">{money(f.amount)}</span>
+                  <span>{s.invoices || 0} 张票</span>
+                  {s.paperMissing > 0 && <span className="inv-badge warn">纸质件差 {s.paperMissing}</span>}
+                  {f.attachStatus === 'failed' && <span className="inv-badge err">附件没拉全</span>}
+                </span>
+              </button>
+            )
+          })}
+        </div>}
+      {data && data.total > rows.length && <div className="inv-dk-empty-s">只列了最近 {rows.length} 张，其余请扫审批单打开</div>}
     </div>
   )
 }
@@ -746,6 +798,7 @@ export default function InvDesk({ user }) {
             {can.intake && <CameraPanel auto={auto} onAutoChange={onAuto} disabled={!canEdit} height={270}
               onCapture={blob => upload([blob], 'camera')} />}
             <RecentFolders rows={desk && desk.recent} currentId={fid} onOpen={openFolder} busyId={openBusy} err={openErr} />
+            <AutoFolders currentId={fid} onOpen={openFolder} busyId={openBusy} />
           </div>
           <div className="inv-dk-right">
             {!desk

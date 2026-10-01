@@ -515,6 +515,16 @@ def folders_recent(e, user, limit=10):
     return _all(e, stmt)
 
 
+def folders_auto_open(e, source="dingtalk", limit=300):
+    """系统自动接入（source）、还在收票/被退回的票夹，新建的在前 → (rows, 总数)。V2.737：自动建的票夹记在"系统"名下，
+    「我的票夹」看不到，收票工作台单列一块。"""
+    cond = and_(FOLDER.c.source == source, FOLDER.c.status.in_(("collecting", "returned")))
+    with e.connect() as cx:
+        total = cx.execute(select(func.count()).select_from(FOLDER).where(cond)).scalar() or 0
+    rows = _all(e, select(FOLDER).where(cond).order_by(FOLDER.c.id.desc()).limit(max(1, int(limit or 300))))
+    return rows, int(total)
+
+
 def folder_items(e, folder_id, include_removed=False):
     stmt = select(ITEM).where(ITEM.c.folder_id == folder_id)
     if not include_removed:

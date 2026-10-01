@@ -502,6 +502,7 @@ export const invIntake = () => j('/api/inv/intake')                // V2.736 钉
 export const invIntakeScan = () => jp('/api/inv/intake/scan', {})   // 立即扫一轮
 // 收票工作台
 export const invDesk = () => j('/api/inv/desk')
+export const invDeskAuto = () => j('/api/inv/desk/auto')   // V2.737 钉钉接入·待收票（系统自动建的票夹）
 export const invScan = (code) => jp('/api/inv/desk/scan', { code })
 export const invOpenFolder = (folderId) => jp('/api/inv/desk/open', { folderId })
 export const invCloseFolder = () => jp('/api/inv/desk/close')
