@@ -9,7 +9,7 @@
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -31,7 +31,66 @@ const DOC_Q = [
   { f: 'all', n: '全部', k: 'all', cls: '', dd: '' },
 ]
 // 总表复核状态：已登记 > 全部主体通过 > 复核中(标过主体/写过解释/确认过单据/登记过更正) > 账单已传 > 未传账单 > 未配
-const OV_ST = { signed: ['已登记', 'ok'], allfix: ['主体全通过·计提需更正', 'bad'], allok: ['主体全通过·待登记', 'ok'], doing: ['复核中', 'warn'], billed: ['账单已传', 'neu'], nobill: ['未传账单', 'neu'], nospec: ['未配', 'neu'] }
+const OV_ST = { signed: ['已登记', 'ok'], allfix: ['主体全通过·计提需更正', 'bad'], allok: ['主体全通过·待登记', 'ok'], doing: ['复核中', 'warn'], billed: ['账单已就绪', 'neu'],
+  billarrived: ['账单已到·待配置', 'warn'], noaccr: ['有请款·无计提', 'bad'], nobill: ['未传账单', 'neu'], nospec: ['未配', 'neu'] }
+// 钉钉请款单(V2.730)：进度标颜色 / 总表筛选 / 附件角色 / 账单导入状态 / 月份怎么认出来的
+const DT_CLS = { mine: 'dtmine', run: 'dtrun', agreed: 'dtok', paid: 'dtpaid', void: 'dtvoid' }
+const DT_F = [['dt:mine', '待我审批', 'warn', r => r.dt && r.dt.mine], ['dt:any', '已提交请款', 'neu', r => r.dt && r.dt.n], ['dt:paid', '已付款', 'ok', r => r.dt && r.dt.paid]]
+const ROLE_LB = [['bill', '账单'], ['stamp', '账单盖章件'], ['invoice', '发票'], ['review', '审核留档']]
+const BILL_LB = { imported: ['账单已就绪', 'ok'], exists: ['复核台已有账单·没覆盖', 'warn'], nospec: ['账单已到·待配置解析', 'warn'], parsefail: ['账单解析失败', 'bad'], nofile: ['请款单没附账单', 'neu'] }
+const PSRC = { amount: '请款金额正好＝该月计提，自动认出', text: '按事由/附件名里写的月份认出', manual: '手工认领' }
+
+function DtChip({ reqs, onOpen }) {
+  if (!reqs || !reqs.length) return null
+  const v = reqs[0], more = reqs.length - 1
+  return <button className={'dtchip ' + (DT_CLS[v.st.key] || '')} title={`钉钉请款 ${money(v.amount)} · ${v.applicant || ''} ${v.created || ''}（点开看节点/附件）`}
+    onClick={() => onOpen(v)}>{v.st.label}{v.st.date ? ' ' + v.st.date.slice(5, 10) : ''}{more > 0 ? ` +${more}` : ''}</button>
+}
+
+function PayReqDlg({ v, onClose, onChanged, flash }) {
+  const [p, setP] = useState(v.period || '')
+  const [busy, setBusy] = useState('')
+  const pull = force => {
+    if (force && !window.confirm('用钉钉请款单里这份账单替换复核台现有的账单？\n现有账单明细会被换掉。')) return
+    setBusy('pull')
+    reviewPayreqPull(v.inst, force).then(r => { flash(r.msg || '已拉进来'); onChanged() }).catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
+  }
+  const assign = () => {
+    setBusy('as')
+    reviewPayreqAssign(v.inst, p).then(() => { flash(p ? `已归到 ${p}` : '已清空归属月份'); onChanged() }).catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
+  }
+  const [bl, bc] = BILL_LB[v.bill_state] || ['账单还没导', 'neu']
+  return (
+    <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="fxdlg prdlg" role="dialog" aria-label="钉钉请款单">
+        <div className="fxhead"><b>钉钉请款单</b><span>{v.carrier} · {v.subject}</span><b className="mono">{money(v.amount)}</b><span className="sp" />
+          <button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxsub">审批编号 <span className="mono">{v.bid}</span> · {v.applicant} 提交于 {v.created}{v.finished ? ` · 流程结束 ${v.finished}` : ''}</div>
+        <div className="prrow"><span className={'dtchip ' + (DT_CLS[v.st.key] || '')}>{v.st.label}{v.st.date ? ' ' + v.st.date : ''}</span>
+          {v.cur && v.cur.length > 0 && <span className="dim">当前在办：{v.cur.map(x => x.name).join('、')}</span>}
+          {v.paid && <span className="dim">金蝶付款单 {v.paid.split('|')[0]}（进金蝶＝已付款）</span>}</div>
+        {v.reason && <div className="prreason">{v.reason}</div>}
+        {v.ops && v.ops.length > 0 && <table className="fxtbl prtbl"><thead><tr><th>节点</th><th>人</th><th>结果</th><th>时间</th><th>意见</th></tr></thead>
+          <tbody>{v.ops.map((o, i) => <tr key={i}><td>{o.type}</td><td>{o.name}</td><td>{o.result}</td><td className="mono">{o.date}</td><td>{o.remark}</td></tr>)}</tbody></table>}
+        <div className="prfiles">{ROLE_LB.map(([k, lb]) => {
+          const fs = (v.files || []).filter(f => f.role === k)
+          return fs.length ? <div key={k}><b>{lb}</b>{fs.map(f => <a key={f.id} href={reviewPayreqFileUrl(v.inst, f.id)}>{f.name}</a>)}</div> : null
+        })}</div>
+        <div className="prrow"><b>发票</b>{v.folder ? <a href={`#/invdesk?folder=${v.folder}`} target="_blank" rel="noopener">在发票管家打开票夹#{v.folder} ↗</a>
+          : <span className="dim">还没进发票管家{v.auto ? '（下一轮扫描会自动拉）' : '（上线前的老单，点下面「拉进来」）'}</span>}</div>
+        <div className="prrow"><b>账单</b><span className={'pill ' + bc}>{bl}</span><span className="dim">{v.bill_msg}</span></div>
+        <div className="prrow"><b>归属月份</b><input type="month" value={p} onChange={e => setP(e.target.value)} />
+          <button className="btn sm" disabled={busy !== '' || p === (v.period || '')} onClick={assign}>保存</button>
+          <span className="dim">{v.period ? (PSRC[v.period_src] || '') : '没认出归哪个月：按账单月份选一下'}</span></div>
+        <div className="prrow">
+          {(!v.folder || !['imported', 'exists', 'nofile'].includes(v.bill_state)) &&
+            <button className="btn pri" disabled={busy !== ''} onClick={() => pull(false)}>{busy === 'pull' ? '拉取中…' : '拉进来（发票进发票管家、账单进复核台）'}</button>}
+          {v.bill_state === 'exists' && <button className="btn" disabled={busy !== ''} onClick={() => pull(true)}>用这份账单替换复核台现有账单</button>}
+        </div>
+      </div>
+    </div>
+  )
+}
 const STATE_PILL = { miss: ['金蝶查无', 'bad'], qtydiff: ['数量不符', 'warn'], price: ['核价不符', 'bad'], info: [null, 'neu'], ok: ['一致', 'ok'] }
 const num = (v, dp = 2) => (v == null || v === '' ? '—' : Number(v).toLocaleString('zh-CN', { maximumFractionDigits: dp }))
 const EMPTY_L = { rows: [], accr_total: 0, bill_total: 0, diff_total: 0, adj: [], points: '', signed: null, n_unexplained: 0 }
@@ -157,6 +216,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [msg, setMsg] = useState('')
   const [supq, setSupq] = useState('')
   const [ovf, setOvf] = useState('')             // 总表按复核状态筛
+  const [pr, setPr] = useState(null)             // 打开的钉钉请款单
+  const [dtBusy, setDtBusy] = useState(false)
   const [ovBusy, setOvBusy] = useState(false)     // 总表「刷新」进行中
   const [open, setOpen] = useState({})            // 逐单：展开的单据号
   const [sel, setSel] = useState({})              // 逐单：勾选的单据(可跨页) key → 统计用快照
@@ -211,6 +272,26 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     return () => { alive = false; clearTimeout(t) }
   }, [carrier, period, mode, d && d.carrier])
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
+  // 钉钉请款单：重读总表(不重取金蝶，弹窗跟着换新数据) / 手动扫一轮
+  const reloadOv = () => reviewOverview(period).then(r => {
+    setOv(r)
+    setPr(cur => {
+      if (!cur) return cur
+      const pq = r.payreq || {}
+      const all = [...(pq.mine || []), ...(pq.unassigned || []), ...(r.rows || []).flatMap(x => Object.values(x.cells || {}).flatMap(c => c.reqs || []))]
+      return all.find(x => x.inst === cur.inst) || null
+    })
+  }).catch(() => {})
+  const scanDt = () => {
+    setDtBusy(true)
+    reviewPayreqScan().then(r => { flash(r.ok ? `扫完：新增 ${r.new} 张、更新 ${r.updated} 张、配上付款 ${r.paid} 张（${r.sec}s）` : (r.msg || '扫描失败')); reloadOv() })
+      .catch(e => flash('扫描失败：' + e.message)).finally(() => setDtBusy(false))
+  }
+  const ovMatch = r => {
+    if (!ovf) return true
+    const f = DT_F.find(x => x[0] === ovf)
+    return f ? !!f[3](r) : r.status === ovf
+  }
   const refetchL = () => { setL(null); reviewLines(carrier, period).then(applyL).catch(e => setL({ ...EMPTY_L, err: e.message })) }
   const onFile = (fn, ...args) => e => {
     const f = e.target.files && e.target.files[0]; e.target.value = ''
@@ -403,6 +484,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fixtag{font:inherit;font-size:12px;background:#FBF0DA;color:#8A5A00;border:1px solid #F0D9A8;border-radius:999px;padding:2px 10px;cursor:pointer;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
       .lrv .fixtag[disabled]{cursor:default}
       .lrv tr.rowfix td{background:#FFFBF2}
+      .lrv .dtchip{display:inline-block;margin-top:3px;font:inherit;font-size:11px;line-height:1.6;padding:0 8px;border-radius:999px;border:1px solid transparent;cursor:pointer;white-space:nowrap}
+      .lrv .dtchip.dtmine{background:#FDE7C8;color:#9A5200;border-color:#F2C27A;font-weight:600}.lrv .dtchip.dtrun{background:#E3EEF8;color:#2F5E8A}
+      .lrv .dtchip.dtok{background:#E6F4EC;color:#2E7A50}.lrv .dtchip.dtpaid{background:#2E8B57;color:#fff}.lrv .dtchip.dtvoid{background:#EEF0F2;color:#8A96A2;text-decoration:line-through}
+      .lrv .prbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:8px 15px;border-bottom:1px solid #E6EBEF;font-size:12.5px;color:#1B2733}
+      .lrv .prgrp{display:inline-flex;gap:5px;align-items:center;flex-wrap:wrap}.lrv .prgrp .dtchip{margin-top:0}
+      .lrv .fxdlg.prdlg{width:min(760px,100%)}
+      .lrv .prrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+      .lrv .prrow input{font:inherit;font-size:12.5px;border:1px solid #DCE2E7;border-radius:5px;padding:3px 6px}
+      .lrv .prreason{white-space:pre-wrap;background:#F6F8FA;border-radius:6px;padding:8px 10px;font-size:12.5px;color:#1B2733}
+      .lrv .prtbl td,.lrv .prtbl th{font-size:12px}
+      .lrv .prfiles{display:flex;flex-direction:column;gap:4px;font-size:12.5px}.lrv .prfiles div{display:flex;gap:10px;flex-wrap:wrap}.lrv .prfiles b{min-width:72px}
       .lrv .fxmask{position:fixed;inset:0;background:rgba(20,30,40,.38);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
       .lrv .fxdlg{background:#fff;border-radius:10px;width:min(620px,100%);max-height:90vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.22);
         padding:16px 18px;display:flex;flex-direction:column;gap:10px;border-top:4px solid #D9A441}
@@ -533,7 +625,22 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               const n = ov.rows.filter(r => r.status === k).length
               return n ? <button key={k} className={'dqchip ' + cl + (ovf === k ? ' on' : '')} onClick={() => setOvf(ovf === k ? '' : k)}>{lb}<b>{n}</b></button> : null
             })}
+            {DT_F.map(([k, lb, cl, fn]) => {
+              const n = ov.rows.filter(fn).length
+              return n ? <button key={k} className={'dqchip ' + cl + (ovf === k ? ' on' : '')} onClick={() => setOvf(ovf === k ? '' : k)}>{lb}<b>{n}</b></button> : null
+            })}
             <span className="ovsub" style={{ marginLeft: 8 }}>主体格浅绿＝该主体已通过，浅橙＝有疑问（鼠标停留看疑问）</span>
+          </div>}
+          {ov && ov.payreq && !ov.payreq.err && <div className="prbar">
+            <b>钉钉请款单</b>
+            {(ov.payreq.mine || []).length > 0 && <span className="prgrp">待我审批 {ov.payreq.mine.map(v =>
+              <button key={v.inst} className="dtchip dtmine" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}</span>}
+            {(ov.payreq.unassigned || []).length > 0 && <span className="prgrp">没认出月份 {ov.payreq.unassigned.slice(0, 8).map(v =>
+              <button key={v.inst} className="dtchip dtrun" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}
+              {ov.payreq.unassigned.length > 8 && <span className="dim">等 {ov.payreq.unassigned.length} 张</span>}</span>}
+            <span style={{ flex: 1 }} />
+            <span className="ovsub">{ov.payreq.last && ov.payreq.last.at ? `每 20 分钟自动扫；上次 ${ov.payreq.last.at.slice(5)}（${ov.payreq.last.trigger}）` : '还没扫过钉钉'}</span>
+            <button className="btn sm" disabled={dtBusy} onClick={scanDt} title="扫钉钉「付款申请（公对公）」：收款方是物流供应商的落到下表各格">{dtBusy ? '扫钉钉中…' : '扫钉钉'}</button>
           </div>}
           <div className="tw"><table className="ovtable">
             <thead>
@@ -542,7 +649,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             </thead>
             <tbody>
               {ov === null && <tr><td colSpan="12" className="ovempty">读金蝶计提凭证中…</td></tr>}
-              {ov && ov.rows && ov.rows.filter(r => (!ovf || r.status === ovf) && (!supq || (r.carrier || '').includes(supq) || (r.full || '').includes(supq) || (r.code || '').includes(supq))).map(r =>
+              {ov && ov.rows && ov.rows.filter(r => ovMatch(r) && (!supq || (r.carrier || '').includes(supq) || (r.full || '').includes(supq) || (r.code || '').includes(supq))).map(r =>
                 <tr key={r.code || r.full} className={r.status === 'signed' ? 'ovsigned' : ''}>
                   <td className="ovcar" title={[r.code, r.full].filter(Boolean).join(' ')}><Cd c={r.code} />{r.carrier}{!r.has_spec && <i className="nospectag">未配</i>}</td>
                   {ov.subjects.map(s => {
@@ -553,14 +660,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       : mk.status === 'ok' ? `${s} 已通过 · ${mk.by} ${mk.at}` : `${s} 有疑问：${mk.note || ''}（${mk.by}）`) : undefined
                     return [
                       <td key={s + 'a'} className={'num' + mc} title={mt}>{cc.accr ? money(cc.accr) : ''}</td>,
-                      <td key={s + 'p'} className={'num paid' + mc} title={mt}>{cc.paid ? money(cc.paid) : ''}</td>,
+                      <td key={s + 'p'} className={'num paid' + mc} title={mt}>{cc.paid ? money(cc.paid) : ''}{cc.reqs && <div><DtChip reqs={cc.reqs} onOpen={setPr} /></div>}</td>,
                       <td key={s + 'd'} className={'num ' + (cc.diff > 0.01 ? 'diffpos' : cc.diff < -0.01 ? 'diffneg' : '') + mc} title={mt}>
                         {mk && <span className={'mkdot ' + (fix ? 'fix' : mk.status)}>{fix ? '⚠ 需更正' : mk.status === 'ok' ? '✓' : '?'}</span>}{cc.diff ? money(cc.diff) : ''}</td>
                     ]
                   })}
                   <td>{(() => {
                     const pg = r.progress || {}
-                    const sub = [pg.subj_n && `${pg.subj_ok || 0}/${pg.subj_n} 主体通过`, pg.subj_fix && `${pg.subj_fix} 个主体计提需红冲更正`, pg.subj_q && `${pg.subj_q} 个有疑问`, pg.docs_ok && `确认 ${pg.docs_ok} 单`,
+                    const sub = [r.bill_from && `账单来自钉钉请款 ${(r.bill_from.date || '').slice(5)}`, r.dt && r.dt.n && `钉钉 ${r.dt.paid}/${r.dt.n} 已付款`,
+                      pg.subj_n && `${pg.subj_ok || 0}/${pg.subj_n} 主体通过`, pg.subj_fix && `${pg.subj_fix} 个主体计提需红冲更正`, pg.subj_q && `${pg.subj_q} 个有疑问`, pg.docs_ok && `确认 ${pg.docs_ok} 单`,
                       pg.notes && `解释 ${pg.notes} 笔`, pg.fixes && `更正 ${pg.fixes} 笔`].filter(Boolean).join(' · ')
                     const [lb, cl] = OV_ST[r.status] || ['待复核', 'neu']
                     return <>{r.signed ? <span className="pill ok" title={r.signed.signed_at}>已登记 · {r.signed.reviewer}</span> : <span className={'pill ' + cl}>{lb}</span>}
@@ -571,7 +679,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               {ov && ov.rows && !ov.rows.length && <tr><td colSpan="12" className="ovempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）</td></tr>}
             </tbody>
           </table></div>
-          <div className="ovfoot">承运商＝金蝶全称。计提＝2241 本期贷方；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径）；差异＝计提−复核应付。复核状态＝该承运商本月是否已「确认通过并登记」。只有已配取数说明的承运商可「开始复核」。</div>
+          {pr && <PayReqDlg key={pr.inst} v={pr} onClose={() => setPr(null)} onChanged={reloadOv} flash={flash} />}
+          <div className="ovfoot">付款(复核)下的小标＝钉钉请款单进度（待谁审批 / 已通过·待付款 / 已付款＝金蝶出现付款单），点开看节点和附件。承运商＝金蝶全称。计提＝2241 本期贷方；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径）；差异＝计提−复核应付。复核状态＝该承运商本月是否已「确认通过并登记」。只有已配取数说明的承运商可「开始复核」。</div>
         </div>
       )}
 

@@ -584,6 +584,10 @@ export const reviewParseBill = (carrier, period, file) => { const fd = new FormD
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 
 export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)
+export const reviewPayreqScan = (days = 0) => j(`/api/logistics-review/payreq/scan${days ? '?days=' + days : ''}`, { method: 'POST' })
+export const reviewPayreqPull = (inst, force = false) => j('/api/logistics-review/payreq/pull', { method: 'POST', body: JSON.stringify({ inst, force }) })
+export const reviewPayreqAssign = (inst, period) => j('/api/logistics-review/payreq/assign', { method: 'POST', body: JSON.stringify({ inst, period }) })
+export const reviewPayreqFileUrl = (inst, fid) => `/api/logistics-review/payreq/file?inst=${encodeURIComponent(inst)}&fid=${encodeURIComponent(fid)}`
 export const reviewOverview = (period, fresh = false) => j(`/api/logistics-review/overview?period=${period}${fresh ? '&fresh=1' : ''}`)
 export const reviewExportUrl = (carrier, period) => `/api/logistics-review/export?carrier=${encodeURIComponent(carrier)}&period=${period}`
 export const reviewDocNote = (carrier, period, doc_no, note) => j('/api/logistics-review/doc-note', { method: 'POST', body: JSON.stringify({ carrier, period, doc_no, note }) })

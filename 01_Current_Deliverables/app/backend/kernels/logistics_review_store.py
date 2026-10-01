@@ -9,7 +9,7 @@
 #   ③ logistics_intake_spec  取数说明——一家承运商一条 spec_json：哪些 sheet 算费用、每张表列名/汇总/单据/数量列/费用项翻译。
 #      通用解析器按它认列（按列名不按序号），加一家配一张，不改代码。
 # 复核链路：上传→通用解析(按 intake_spec)→bill_lines(detail+accrual)→核价(price_card)+核量(金蝶数量)→归一态→计提行(复用 logistics_bills)。
-from sqlalchemy import Table, Column, Integer, String, Float, Text, MetaData, insert, select
+from sqlalchemy import Table, Column, Integer, String, Float, Text, MetaData, LargeBinary, insert, select
 
 _md = MetaData()
 
@@ -160,7 +160,56 @@ review_subj = Table(
     Column("updated_at", String(20)),
 )
 
-TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok, review_subj]
+# 钉钉请款单(V2.730)：自动扫「付款申请（公对公）」全模板，收款方是物流供应商(金蝶 物流运输服务…)的留下，
+# 落到总表 承运商×主体×月份 一格；钉钉节点进度/金蝶付款单(=已付款)随扫随刷。一张审批一行，主键＝实例号。
+payreq = Table(
+    "logistics_payreq", _md,
+    Column("inst_id", String(64), primary_key=True),
+    Column("business_id", String(32)),
+    Column("title", String(200)),
+    Column("applicant", String(50)),
+    Column("subject_full", String(100)),           # 审批单「公司主体」原文
+    Column("subject", String(30)),                 # 简称(深圳星期零/深圳星期九/孝感星期九)
+    Column("payee", String(200)),
+    Column("payee_account", String(64)),
+    Column("amount", Float(53)),
+    Column("reason", Text),                        # 付款事由
+    Column("sup_code", String(40)),                # 金蝶供应商编码 物流运输服务027
+    Column("carrier", String(60)),                 # 复核台承运商简称(物流供应商档案；没建档=金蝶全称)
+    Column("period", String(7)),                   # 归属账期；空=待认领
+    Column("period_src", String(10)),              # amount(金额=当月计提) / text(事由/附件名写了月份) / manual
+    Column("dt_status", String(16)),               # RUNNING / COMPLETED / TERMINATED
+    Column("dt_result", String(16)),               # agree / refuse
+    Column("cur_json", Text),                      # 当前在办 [{userid,name}]
+    Column("ops_json", Text),                      # 节点记录 [{name,type,result,date,remark}]
+    Column("files_json", Text),                    # 附件 [{fileId,fileName,source,role,size}]
+    Column("create_time", String(20)),
+    Column("finish_time", String(20)),
+    Column("kd_paid", String(40)),                 # 金蝶付款单(日期|状态)；有＝已付款
+    Column("folder_id", Integer),                  # 发票管家票夹
+    Column("bill_state", String(16)),              # imported / exists / nospec / parsefail / nofile
+    Column("bill_msg", String(300)),
+    Column("auto", Integer),                       # 1=上线后提交、自动建票夹+导账单
+    Column("updated_at", String(20)),
+)
+
+# 请款单里的账单/复核簿原件(xlsx)：发票走发票管家，这里只存 xlsx 原件(留版本、可再解析)
+payreq_file = Table(
+    "logistics_payreq_file", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("inst_id", String(64)),
+    Column("file_id", String(64)),
+    Column("name", String(200)),
+    Column("source", String(20)),                  # dingtalk_form / dingtalk_comment
+    Column("role", String(12)),                    # bill / review
+    Column("sha256", String(64)),
+    Column("size", Integer),
+    Column("data", LargeBinary(2 ** 32 - 1)),
+    Column("created_at", String(20)),
+)
+
+TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok, review_subj,
+          payreq, payreq_file]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {

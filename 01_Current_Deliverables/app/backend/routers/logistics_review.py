@@ -131,49 +131,37 @@ def review_carriers(request: Request, period: str = ""):
 _SUBJECTS = ["深圳星期零", "深圳星期九", "孝感星期九"]   # 固定三列（其余账簿归「其它」不单列）
 
 
-@router.get("/api/logistics-review/overview")
-def review_overview(request: Request, period: str = "", fresh: int = 0):
-    """总表。金蝶 2241 凭证按账期缓存 30 分钟(fresh=1 强制重取)；账单应付与复核状态每次从本库现算(便宜、改了即时)。"""
-    if not _perm(request):
-        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
-    if not period or "-" not in period:
-        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
+def _ov_kd_rows(period, fresh=False):
+    """金蝶本期 2241 凭证行(总表与请款单认月份共用，按账期缓存 30 分钟) → (rows, fetched_at, cached)。"""
     import time as _t
     y, m = period.split("-")[:2]
-    orgs = db.list_orgs() or []
-    book2short = {o.get("full_name"): o.get("short_name") for o in orgs if o.get("full_name")}
-    sup = db.list_logi_suppliers() or []
-    full2short = {s.get("full"): s.get("short") for s in sup if s.get("full")}
-
-    def sup_short(name):
-        if name in full2short:
-            return full2short[name]
-        for sfull, sshort in full2short.items():
-            if sfull and (sfull.startswith(name) or name.startswith(sfull) or name in sfull or sfull in name):
-                return sshort
-        return name
-
     # 供应商维度(FFLEX4)：名称用金蝶全称、带编码(原来从摘要截名，截在「供应链/物流」不全)，V2.725
     fields = list(kc.GL_VOUCHER_FIELDS) + [("FACCOUNTBOOKID.FName", "账簿"),
                                            ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商")]
     ck = ("ov2", period)
     cc = _ACCR_CACHE.get(ck)
     if cc and not fresh and _t.time() - cc[2] < 1800:
-        rows, fetched_at, cached = cc[0], cc[1], True
-    else:
+        return cc[0], cc[1], True
+    rows = []
+    try:
+        s, conf = kc.login()
+        rows = kc._query(s, conf, "GL_VOUCHER", fields,
+                         "FAccountID.FNumber like '2241%%' and FYear=%d and FPeriod=%d" % (int(y), int(m)))
+    except Exception:
         rows = []
-        try:
-            s, conf = kc.login()
-            rows = kc._query(s, conf, "GL_VOUCHER", fields,
-                             "FAccountID.FNumber like '2241%%' and FYear=%d and FPeriod=%d" % (int(y), int(m)))
-        except Exception:
-            rows = []
-        fetched_at, cached = _now(), False
-        if rows:
-            _ACCR_CACHE[ck] = (rows, fetched_at, _t.time())
-    # 计提=贷方(摘要「计提…运费/仓储费/装卸/搬运/物流」)；付款=借方(摘要含某承运商名)
-    accr, paid = {}, {}
-    carriers = {}     # 键(供应商编码，没有则摘要名) → (金蝶全称, 编码)
+    fetched_at = _now()
+    if rows:
+        _ACCR_CACHE[ck] = (rows, fetched_at, _t.time())
+    return rows, fetched_at, False
+
+
+def _ov_accr(rows, period, full2short=None):
+    """2241 行 → 计提 {(主体简称, 供应商键): 含税} 与 承运商 {键: (金蝶全称, 编码)}。键=供应商编码，没有则摘要名。"""
+    if full2short is None:
+        full2short = {s.get("full"): s.get("short") for s in (db.list_logi_suppliers() or []) if s.get("full")}
+    book2short = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or []) if o.get("full_name")}
+    # 计提=贷方(摘要「计提…运费/仓储费/装卸/搬运/物流」)
+    accr, carriers = {}, {}
     for r in rows:
         z = str(r.get("FEXPLANATION") or "")
         book = book2short.get(str(r.get("账簿") or ""), None)
@@ -190,6 +178,30 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
             key = scode or cf
             carriers[key] = (cf, scode)
             accr[(book, key)] = accr.get((book, key), 0.0) + float(cr)
+    return accr, carriers
+
+
+@router.get("/api/logistics-review/overview")
+def review_overview(request: Request, period: str = "", fresh: int = 0):
+    """总表。金蝶 2241 凭证按账期缓存 30 分钟(fresh=1 强制重取)；账单应付与复核状态每次从本库现算(便宜、改了即时)。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not period or "-" not in period:
+        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
+    sup = db.list_logi_suppliers() or []
+    full2short = {s.get("full"): s.get("short") for s in sup if s.get("full")}
+
+    def sup_short(name):
+        if name in full2short:
+            return full2short[name]
+        for sfull, sshort in full2short.items():
+            if sfull and (sfull.startswith(name) or name.startswith(sfull) or name in sfull or sfull in name):
+                return sshort
+        return name
+
+    rows, fetched_at, cached = _ov_kd_rows(period, fresh)
+    accr, carriers = _ov_accr(rows, period, full2short)
     # 本月付款（按复核结果）：本月已复核账单应付合计，按承运商×主体（权责发生制·同期间比，非金蝶跨月现金借方）
     with db._engine.connect() as c:
         specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
@@ -247,9 +259,15 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
     def _natkey(x):   # 按供应商编码自然排序(物流运输服务009 < 物流运输服务063)，没编码的排最后
         c = x.get("code") or ""
         return (0 if c else 1, [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", c)], x["carrier"])
-    rowlist = sorted(out.values(), key=_natkey)
+    rowlist = list(out.values())
+    try:     # 钉钉请款单(V2.730)：每个主体格挂进度、没计提但有请款的补一行
+        from routers import logistics_payreq as LPQ
+        payreq = LPQ.overview_merge(period, rowlist, u)
+    except Exception as e:
+        payreq = {"err": str(e)[:200]}
+    rowlist = sorted(rowlist, key=_natkey)
     return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": bool(rows),
-            "fetched_at": fetched_at, "cached": cached}
+            "fetched_at": fetched_at, "cached": cached, "payreq": payreq}
 
 
 # ---------- 价格卡：导入合同价目表 / 读 ----------
@@ -291,14 +309,25 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
     spec = _load_spec(carrier)
     if not spec:
         return JSONResponse({"ok": False, "msg": "该承运商还没配取数说明"}, status_code=400)
-    spec["period"] = period
     data = await _read_upload(request)
     if not data:
         return JSONResponse({"ok": False, "msg": "未收到文件"}, status_code=400)
+    r = import_bill(carrier, period, data, u["name"])
+    if not r.get("ok"):
+        return JSONResponse(r, status_code=400)
+    return r
+
+
+def import_bill(carrier, period, data, operator, origin="手工上传"):
+    """解析一份账单落 bill_lines（上传页与钉钉请款单自动导入共用）→ {ok, bill_src, detail, accrual, skipped, sources} / {ok:False,msg}。"""
+    spec = _load_spec(carrier)
+    if not spec:
+        return {"ok": False, "msg": "该承运商还没配取数说明"}
+    spec["period"] = period
     try:
         res = intake.parse_bill(spec, data)
     except Exception:
-        return JSONResponse({"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}, status_code=400)
+        return {"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}
     batch = "%s|%s|%s" % (carrier, period, datetime.now().strftime("%Y%m%d%H%M%S"))
     src = (res.get("bill_src") or "").strip()
     with db._engine.begin() as c:
@@ -315,8 +344,8 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
                 vals["review_mode"] = "audit"
                 vals["created_at"] = _now()
                 c.execute(insert(BL).values(**vals))
-    db.audit(u["name"], "物流复核-解析账单", "%s %s" % (carrier, period),
-             "明细 %d 行 / 计提 %d 行 / 跳过 %d 表" % (len(res["detail"]), len(res["accrual"]), len(res["skipped"])))
+    db.audit(operator, "物流复核-解析账单", "%s %s" % (carrier, period),
+             "%s：明细 %d 行 / 计提 %d 行 / 跳过 %d 表" % (origin, len(res["detail"]), len(res["accrual"]), len(res["skipped"])))
     _bust(carrier, period)   # 账单重解析 → 逐笔/逐单视图缓存作废
     with db._engine.connect() as c:   # 本月现有几份账单(按货主)：汇总行合计，没有汇总行用明细合计
         srcs = {}
