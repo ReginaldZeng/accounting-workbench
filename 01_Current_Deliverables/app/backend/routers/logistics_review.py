@@ -1712,6 +1712,38 @@ def _box_docs(rsub, carrier):
     return docs
 
 
+def _code_maps(request, carrier, period):
+    """逐单页的主体/费用类型/产品线带金蝶编码，和第①步逐笔计提同一套(用户 2026-10-01「产品线应该和外面对齐」)：
+    取第①步的结果(30 分钟缓存，没有就现算一次)——主体→账簿编码、产品线→产品分类编码、(主体,费用类型)→费用项目编码+金蝶名称。"""
+    import time as _t
+    k = ("lines", carrier, period)
+    c = _ACCR_CACHE.get(k)
+    L = c[0] if (c and _t.time() - c[2] < 1800) else None
+    if L is None:
+        try:
+            L = _build_lines(request, carrier, period)
+            _ACCR_CACHE[k] = (L, None, _t.time())
+        except Exception:
+            L = {}
+    book = {o.get("short_name"): o.get("book_code") for o in (db.list_orgs() or []) if o.get("short_name") and o.get("book_code")}
+    biz = {}
+    try:
+        from kernels.logistics_accrual import BIZLINE_CODE
+        biz.update(BIZLINE_CODE)
+    except Exception:
+        pass
+    fee = {}
+    for r in (L or {}).get("rows") or []:
+        if r.get("book_code") and r.get("subject"):
+            book[r["subject"]] = r["book_code"]
+        if r.get("biz_code") and r.get("biz") and not str(r["biz"]).startswith("（"):
+            biz[r["biz"]] = r["biz_code"]
+        if r.get("kind") == "accr" and r.get("fee_code") and r.get("fee_type"):
+            fee.setdefault("%s|%s" % (r.get("subject"), r["fee_type"]), [r["fee_code"], r.get("fee") or r["fee_type"]])
+            fee.setdefault(r["fee_type"], [r["fee_code"], r.get("fee") or r["fee_type"]])
+    return {"book": book, "biz": biz, "fee": fee}
+
+
 @router.get("/api/logistics-review/result")
 def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                   group: str = "ex", page: int = 1, size: int = 50, q: str = "",
@@ -1855,7 +1887,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         else:
             dtot, docs = (len(pool) if q_on else len(filt)), pool
         view = [m for x in docs for m in x["materials"]]
-        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
+        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
@@ -1917,14 +1949,14 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                              "bill_qty": bqty, "bill_unit": "千克",
                              "sales": round(sales, 2) if sales is not None else None,
                              "ratio": round(fline / sales, 4) if sales else None})
-        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
+        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
                 "by_weight": True, "material": True, "detail_total": len(filt), "detail": view,
                 "page": page, "size": size}
     view = [{k: r.get(k) for k in ("doc_no", "carrier_sub", "prov", "charge_wt", "qty", "kd_qty",
              "amount", "base_amount", "std_amount", "price_diff", "price_state", "qty_diff",
              "qty_state", "tier", "verdict", "fee_item")} for r in sl]
-    return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard,
+    return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
             "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
             "by_weight": by_weight, "detail_total": len(filt), "detail": view, "page": page, "size": size}
 

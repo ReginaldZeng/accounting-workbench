@@ -374,6 +374,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const toggle = no => setOpen(o => ({ ...o, [no]: !o[no] }))
   const docs = (d && d.docs) || []
   // 勾选/展开按账单行认(lid)：同一张调拨单账单上常有几行(按车次收费)，按单号认会把几行并成一行、漏算运费。快照存统计要用的量，翻页不丢
+  // 逐单页主体/费用类型/产品线带金蝶编码，和第①步逐笔计提同一套(后端 codes，用户 2026-10-01「产品线应该和外面对齐」)
+  const cds = (d && d.codes) || {}
+  const cdBook = s => (cds.book || {})[s] || ''
+  const cdBiz = b => { const m = cds.biz || {}; return m[b] || m[(b || '').toLowerCase()] || '' }
+  const cdFee = (s, f) => { const m = cds.fee || {}; return m[s + '|' + f] || m[f] || null }
   const dkey = (x, i) => (x.lid != null ? 'l' + x.lid : x.doc_no ? `${x.doc_no}|${page}|${i}` : `nd|${x.subject}|${x.fee_item}|${x.doc_fee}|${page}|${i}`)
   const snap = x => ({ doc_no: x.doc_no || '', fee: x.doc_fee || 0, kg: x.doc_kg || 0, bill: x.bill_amt, unit: x.bill_unit || '', sales: x.sales, confirmed: !!x.confirmed })
   const toggleSel = (x, i) => setSel(o => { const k = dkey(x, i); const n = { ...o }; if (n[k]) delete n[k]; else n[k] = snap(x); return n })
@@ -928,8 +933,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td className="ck" onClick={e => e.stopPropagation()}><input type="checkbox" checked={on} onChange={() => toggleSel(x, i)} /></td>
                         <td className="caret">{isO ? '▾' : '▸'}</td>
                         <td><span className="mono">{x.doc_no || '—'}</span><span className="sub">{x.n_mat ? `${x.n_mat} 个物料` : (x.doc_no ? '金蝶无此单据' : '无单据')}</span></td>
-                        <td>{x.subject}<span className="sub">{x.fee_item}</span></td>
-                        <td>{x.bizline || <span className="dim">—</span>}</td>
+                        <td><Cd c={cdBook(x.subject)} />{x.subject}<span className="sub">{(() => { const f = cdFee(x.subject, x.fee_item); return f ? <><Cd c={f[0]} />{f[1]}</> : x.fee_item })()}</span></td>
+                        <td>{x.bizline ? <><Cd c={cdBiz(x.bizline)} />{x.bizline}</> : <span className="dim">—</span>}</td>
                         <td className="party" title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</td>
                         <td className="num">{num(x.bill_amt)}<small className="u">{x.bill_unit}</small>
                           <span className="sub">金蝶 {num(x.kd_sum)}{x.kd_unit}{qd != null && !isZero(qd) && <span className={x.state === 'qtydiff' ? 'diffbad' : ''}> · 差{qd > 0 ? '+' : ''}{num(qd)}</span>}</span></td>
