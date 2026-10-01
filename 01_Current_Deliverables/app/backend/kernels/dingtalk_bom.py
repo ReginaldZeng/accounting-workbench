@@ -168,12 +168,14 @@ def download_url(tok_v2, tok_old, iid, file_id):
     ⚠ 实证 2026-09-06（202607011742000186641）：**发起人钉钉账号已不存在**（离职/注销，v2/user/get 60121）时，
       两个接口都回「用户不存在 / 找不到该用户」——钉钉按发起人身份放附件，人没了这两个接口就拿不到。
       V2.469 起由 storage_download() 走钉盘代下载兜底（应用已开 Storage.DownloadInfo.Read，2026-09-06 实证 8 附件全通）。
-      原因要带回去让页面讲清楚，别只说「拿不到下载链接」。"""
+      原因要带回去让页面讲清楚，别只说「拿不到下载链接」。
+    ⚠ 实证 2026-10-01（202609111542000383471）：**审批人在评论里补的附件**不带 withCommentAttatchment 一律回 noPermission，
+      带上就通；表单附件带上同样能下（钉钉参数名本身拼错，照抄）。"""
     reasons = []
     try:
         j = requests.post(VAPI + "/v1.0/workflow/processInstances/spaces/files/urls/download",
                           headers={"x-acs-dingtalk-access-token": tok_v2},
-                          json={"processInstanceId": iid, "fileId": str(file_id)}, timeout=30).json()
+                          json={"processInstanceId": iid, "fileId": str(file_id), "withCommentAttatchment": True}, timeout=30).json()
         res = j.get("result") or j
         for k in ("fileUrl", "downloadUri", "resourceUrl", "url"):
             if isinstance(res, dict) and res.get(k):
