@@ -282,6 +282,9 @@ DEFAULT_SETTINGS = {
     # 上线时还没备案、在腾讯云被拦（跳"网站未备案"页），不能写死；备案开通后在设置里填上即可
     "portalUrl": "",
     "corpId": "",
+    # 钉钉自动接入（V2.736，Owner 2026-10-01 定）：上面这些模板的审批单，审批流走到 approvers 里某人节点的自动建票夹拉票。
+    # approvers 空＝不扫；since＝只看这天起提交的单（定为 9/1 往前补）。扫描在 routers/invoice_intake.py
+    "intake": {"approvers": [], "since": "2026-09-01"},
 }
 
 
@@ -378,6 +381,25 @@ def normalize_settings(raw, base=None, strict=True):
             out["portalUrl"] = u
     if "corpId" in raw:
         out["corpId"] = _s(raw.get("corpId"), 64)
+    if "intake" in raw:
+        r = raw.get("intake")
+        if not isinstance(r, dict):
+            bad("钉钉自动接入设置格式不对")
+        else:
+            cur = base.get("intake") or {}
+            aps, seen = [], set()
+            for p in r.get("approvers", cur.get("approvers")) or []:
+                uid = _s((p or {}).get("dtUserid"), 64) if isinstance(p, dict) else ""
+                if uid and uid not in seen:
+                    seen.add(uid)
+                    aps.append({"dtUserid": uid, "dtName": _s(p.get("dtName"), 50)})
+            since = _s(r.get("since", cur.get("since")), 10)
+            try:
+                datetime.strptime(since, "%Y-%m-%d")
+            except ValueError:
+                bad("自动接入的起始日要写成 2026-09-01 这样的日期")
+                since = cur.get("since") or DEFAULT_SETTINGS["intake"]["since"]
+            out["intake"] = {"approvers": aps, "since": since}
     return out
 
 
@@ -1770,8 +1792,9 @@ def ingest_qr(folder_id, code_text, user, origin="scanner", later_id=None, revie
 
 # ───────────────────────── 审批单 ─────────────────────────
 
-def resolve_approval(code=None, inst_id=None):
+def resolve_approval(code=None, inst_id=None, inst=None):
     """审批码（钉钉短链接/含 procInstId 的链接）或审批编号，或直接给实例号 → 取单并规范化。
+    给了实例号又给了已取到的单子 inst（自动接入批量扫时）就不再去钉钉取第二遍。
     → {ok, msg, norm(invoice_dingtalk.normalize_instance 结果), inst, procInstId}。
     钉钉没配置时 ok=False，msg 为内核原话（含「未配置钉钉（conf.ini [dingtalk]）」）。
     只接设置里配了的审批模板（别的审批单——调薪、人事等——不许拉进来建票夹、拉附件）。
@@ -1781,10 +1804,11 @@ def resolve_approval(code=None, inst_id=None):
     learn = ""
     if inst_id:
         iid = str(inst_id)
-        g = idt.get_instance(iid)
-        if not g.get("ok"):
-            return {"ok": False, "msg": g.get("msg") or "取审批单失败"}
-        inst = g["inst"]
+        if not isinstance(inst, dict):
+            g = idt.get_instance(iid)
+            if not g.get("ok"):
+                return {"ok": False, "msg": g.get("msg") or "取审批单失败"}
+            inst = g["inst"]
     else:
         c = ip.classify_code(code or "")
         if c["kind"] == "approval_link":
@@ -1836,10 +1860,10 @@ def _corp_from_server(link):
     return bool(host_ok and not self_carried)
 
 
-def open_approval_folder(code=None, user="", refresh=False, source="scan", inst_id=None):
+def open_approval_folder(code=None, user="", refresh=False, source="scan", inst_id=None, inst=None):
     """扫到的审批码/编号（或实例号）→ 建或刷新票夹；新建或 refresh=True 时排队拉附件并唤醒后台线程。
     → {ok, msg, folder(行), created}；失败 {ok:False, msg}。不改当前票夹（调用方自己 desk_set）。"""
-    r = resolve_approval(code, inst_id=inst_id)
+    r = resolve_approval(code, inst_id=inst_id, inst=inst)
     if not r.get("ok"):
         return r
     n = r["norm"]

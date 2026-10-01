@@ -1,11 +1,12 @@
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票管家设置：财务人员名单（钉钉绑定＋接收人）、本公司抬头、审批模板、催票规则、没附发票的付款单拦/提醒、站点地址；未保存提示＋逐项校验
+// [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.736 | 加「④ 钉钉自动接入」：接入审批人（审批流走到他节点的单子自动建票夹）＋起始日＋上次扫描情况＋立即扫一次；后面几节顺延编号
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 和后端校验对齐：名单里没绑工作台账号的人直接挡保存并在行内说清楚（后端本来就拒）；
 //   催票天数范围改成后端实际收的 0～30 / 1～60（原来前端放 60/90，后端悄悄压成 30/60）。
 // 需求确认书 v1.4 五/十一 + 技术方案 §3「设置」+ §5.2 GET/POST /api/inv/settings。
 // 既能当后补池的「设置」页签（embedded，不再画页头），也能被收票工作台放进 Modal 里用——宽度全跟容器走，不写死页面宽。
 // 保存时把后端给的其它键（corpId 等本页不编辑的）原样带回去，免得本页一保存把别处的配置抹掉。
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { invSettings, invSaveSettings, invAccounts } from '../api.js'
+import { invSettings, invSaveSettings, invAccounts, invIntake, invIntakeScan } from '../api.js'
 import { PersonPicker, useToast } from './invShared.jsx'
 import './inv-later.css'
 
@@ -21,6 +22,7 @@ const splitFields = s => str(s).split(/[,，、;；\n]+/).map(x => x.trim()).fil
 function toDraft(s) {
   const src = s && typeof s === 'object' ? s : {}
   const r = src.remind && typeof src.remind === 'object' ? src.remind : {}
+  const ik = src.intake && typeof src.intake === 'object' ? src.intake : {}
   return {
     people: (Array.isArray(src.people) ? src.people : []).map(p => ({
       ...p, _k: key(), dtName: str(p?.dtName), dtUserid: str(p?.dtUserid), account: str(p?.account), receiver: !!p?.receiver,
@@ -37,6 +39,10 @@ function toDraft(s) {
     },
     blockNoInvoice: !!src.blockNoInvoice,
     portalUrl: str(src.portalUrl),
+    intake: {
+      approvers: (Array.isArray(ik.approvers) ? ik.approvers : []).map(a => ({ dtUserid: str(a?.dtUserid), dtName: str(a?.dtName) })),
+      since: str(ik.since || '2026-09-01'),
+    },
   }
 }
 const stripK = ({ _k: _drop, ...rest }) => rest
@@ -55,6 +61,7 @@ function toPayload(d, raw) {
     },
     blockNoInvoice: !!d.blockNoInvoice,
     portalUrl: d.portalUrl.trim(),
+    intake: { approvers: d.intake.approvers, since: d.intake.since.trim() },
   }
 }
 // 比较有没有改动：不看 _k（每次载入都会重新编号）
@@ -119,6 +126,7 @@ export function validate(d) {
   if (!intIn(d.remind.everyDays, e0, e1)) errors['remind.everyDays'] = `填 ${e0}～${e1} 的整数`
   if (!intIn(d.remind.hour, h0, h1)) errors['remind.hour'] = `填 ${h0}～${h1} 的整点`
   const u = d.portalUrl.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.intake.since.trim())) errors['intake.since'] = '请选一个日期'
   if (u && !/^https?:\/\/[^\s/]+/i.test(u)) errors.portalUrl = '要以 http:// 或 https:// 开头的完整网址，例如 http://111.229.72.116'
   return { errors, warns }
 }
@@ -227,13 +235,72 @@ function TemplateSection({ rows, setRows, errors, warns }) {
   </Section>
 }
 
-// ───────────────────────── ④ 催票 ⑤ 拦截 ⑥ 高级 ─────────────────────────
+// ───────────────────────── ④ 钉钉自动接入 ─────────────────────────
+
+const INTAKE_DESC = '设置里③那些模板的审批单，审批流一走到下面这几位的节点，系统就自动建票夹、拉附件、识别发票，不用再扫审批码。'
+  + '还没走到的单子系统会一直跟着，走到了再接；撤回、被拒的不接。每 20 分钟扫一轮。'
+
+function IntakeSection({ v, set, dirty, errors }) {
+  const [st, setSt] = useState(null)
+  const [stErr, setStErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [addErr, setAddErr] = useState('')
+  const loadSt = useCallback(() => {
+    invIntake().then(r => { setSt(r); setStErr('') }).catch(e => setStErr(errText(e)))
+  }, [])
+  useEffect(() => { loadSt() }, [loadSt])
+  const add = (p) => {
+    if (!p) return
+    if (v.approvers.some(a => a.dtUserid === p.userid)) { setAddErr(`${p.name} 已经在里面了`); return }
+    setAddErr('')
+    set({ ...v, approvers: [...v.approvers, { dtUserid: p.userid, dtName: p.name }] })
+  }
+  const scan = async () => {
+    setBusy(true); setMsg(null)
+    try {
+      const r = await invIntakeScan()
+      setMsg({ ok: true, t: `扫完了：新建票夹 ${r.created} 个，还没走到的 ${r.waiting} 张` + (r.failed ? `，${r.failed} 张没取到/没建成` : '') })
+      loadSt()
+    } catch (e) { setMsg({ ok: false, t: errText(e) }) } finally { setBusy(false) }
+  }
+  const last = st && st.last
+  return <Section title="④ 钉钉自动接入" sub={INTAKE_DESC}
+    extra={<button type="button" className="btn" onClick={scan} disabled={busy || dirty || !v.approvers.length}
+      title={dirty ? '先保存设置再扫' : (!v.approvers.length ? '先加接入审批人' : '')}>{busy ? '正在扫…' : '立即扫一次'}</button>}>
+    <div className="inv-set-add">
+      <span className="inv-set-addl">接入审批人</span>
+      {v.approvers.map(a => <span key={a.dtUserid} className="inv-badge">{a.dtName || a.dtUserid}
+        <button type="button" className="inv-set-del" style={{ marginLeft: 6 }}
+          onClick={() => set({ ...v, approvers: v.approvers.filter(x => x.dtUserid !== a.dtUserid) })}>×</button></span>)}
+      <PersonPicker value={null} onChange={add} placeholder="打名字，从钉钉通讯录里搜" />
+    </div>
+    {addErr && <div className="inv-lt-fe">{addErr}</div>}
+    {!v.approvers.length && <div className="inv-set-warn">还没加人：自动接入不会运行，仍可在收票台手工扫审批码。</div>}
+    <div className="inv-set-add" style={{ marginTop: 10 }}>
+      <span className="inv-set-addl">从这天提交的单子起</span>
+      <input type="date" className="inv-in inv-num" style={{ width: 170 }} value={v.since} onChange={e => set({ ...v, since: e.target.value })} />
+      <Msg err={errors['intake.since']} />
+    </div>
+    <div className="inv-set-ss" style={{ marginTop: 10 }}>
+      {stErr ? <>扫描情况没读出来：{stErr}</>
+        : !st ? '正在读扫描情况…'
+        : !last ? '还没扫过。保存设置后约 20 分钟内自动扫第一轮，或点右上「立即扫一次」。'
+        : <>上次扫描 {last.at}（{last.trigger}）：看了 {last.listed} 张，新建票夹 {last.created} 个，还没走到接入审批人的 {st.waiting} 张
+          {last.failed ? `，${last.failed} 张没取到/没建成` : ''}{last.notes ? `；${last.notes}` : ''}
+          {st.running ? '；正在扫…' : ''}</>}
+    </div>
+    {msg && <div className={msg.ok ? 'inv-set-ss' : 'inv-lt-fe'}>{msg.t}</div>}
+  </Section>
+}
+
+// ───────────────────────── ⑤ 催票 ⑥ 拦截 ⑦ 高级 ─────────────────────────
 
 function RemindSection({ v, set, errors }) {
   const up = (k, x) => set({ ...v, [k]: x })
   const numIn = (k, w) => <input className="inv-in inv-num inv-set-n" style={{ width: w }} inputMode="numeric" value={v[k]}
     disabled={!v.enabled} onChange={e => up(k, e.target.value.replace(/[^\d]/g, ''))} />
-  return <Section title="④ 催票规则" sub="系统自动给后补单的申请人发钉钉提醒，抄送财务接收人。">
+  return <Section title="⑤ 催票规则" sub="系统自动给后补单的申请人发钉钉提醒，抄送财务接收人。">
     <label className="inv-set-ck big"><input type="checkbox" checked={!!v.enabled} onChange={e => up('enabled', e.target.checked)} />自动催票</label>
     <div className={'inv-set-rule' + (v.enabled ? '' : ' off')}>
       <div>预计到票日前 {numIn('beforeDays', 56)} 天提醒一次<Msg err={errors['remind.beforeDays']} /></div>
@@ -245,7 +312,7 @@ function RemindSection({ v, set, errors }) {
 }
 
 function BlockSection({ v, set }) {
-  return <Section title="⑤ 没附发票、又没登记后补的付款单" sub="收票台扫到这种付款单时怎么处理。">
+  return <Section title="⑥ 没附发票、又没登记后补的付款单" sub="收票台扫到这种付款单时怎么处理。">
     <div className="inv-set-radios">
       <label className={'inv-set-radio' + (!v ? ' on' : '')}><input type="radio" name="inv-set-block" checked={!v} onChange={() => set(false)} />
         <span><b>只提醒</b><em>亮黄牌提示，照样能提交审核</em></span></label>
@@ -258,7 +325,7 @@ function BlockSection({ v, set }) {
 function AdvancedSection({ v, set, err }) {
   const [edit, setEdit] = useState(false)
   return <details className="inv-set-adv" open={!!err || undefined}>
-    <summary>⑥ 高级：站点地址</summary>
+    <summary>⑦ 高级：站点地址</summary>
     <div className="inv-set-advin">
       <div className="inv-set-ss">手机配对码、钉钉消息里的链接用这个地址开头。留空＝用电脑上正在用的地址（一般不用填）；
         正式域名开通后（备案＋https）再填上，例如 https://finance.starfieldsz.com。</div>
@@ -346,7 +413,7 @@ export default function InvSettings({ user, embedded, onSaved, onDirtyChange }) 
   const head = !embedded && <div className="head">
     <div>
       <div className="h-title">发票管家设置</div>
-      <div className="h-sub">财务人员与钉钉绑定、本公司抬头、审批模板、催票规则。改完点最下面的「保存」才生效。</div>
+      <div className="h-sub">财务人员与钉钉绑定、本公司抬头、审批模板、钉钉自动接入、催票规则。改完点最下面的「保存」才生效。</div>
     </div>
     {dirty && <span className="inv-badge warn">有改动还没保存</span>}
   </div>
@@ -362,6 +429,7 @@ export default function InvSettings({ user, embedded, onSaved, onDirtyChange }) 
       <PeopleSection rows={d.people} setRows={put('people')} accounts={accounts} accErr={accErr} errors={shownErr} warns={warns} />
       <CompanySection rows={d.company} setRows={put('company')} errors={shownErr} warns={warns} />
       <TemplateSection rows={d.templates} setRows={put('templates')} errors={shownErr} warns={warns} />
+      <IntakeSection v={d.intake} set={put('intake')} dirty={dirty} errors={shownErr} />
       <RemindSection v={d.remind} set={put('remind')} errors={shownErr} />
       <BlockSection v={d.blockNoInvoice} set={put('blockNoInvoice')} />
       <AdvancedSection v={d.portalUrl} set={put('portalUrl')} err={shownErr.portalUrl} />

@@ -498,6 +498,8 @@ export const invSettings = () => j('/api/inv/settings')
 export const invSaveSettings = (settings) => jp('/api/inv/settings', { settings })
 export const invRoster = (fresh = false) => j('/api/inv/roster' + (fresh ? '?fresh=1' : ''))
 export const invAccounts = () => j('/api/inv/accounts')
+export const invIntake = () => j('/api/inv/intake')                // V2.736 钉钉自动接入：上次扫描情况
+export const invIntakeScan = () => jp('/api/inv/intake/scan', {})   // 立即扫一轮
 // 收票工作台
 export const invDesk = () => j('/api/inv/desk')
 export const invScan = (code) => jp('/api/inv/desk/scan', { code })

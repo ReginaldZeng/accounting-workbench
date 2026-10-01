@@ -1470,5 +1470,73 @@ class InvoiceApiTests(unittest.TestCase):
         it3 = dict(it, seller_tax_id="91440300MA5DXXXXX1")
         self.assertNotIn("sellerTaxId", inv.auto_checked(inv.E(), it3, st))
 
+    def test_46_dingtalk_intake_scan(self):
+        """V2.736 钉钉自动接入：只接审批流走到接入审批人节点的单子；没走到的记 waiting 下轮再看；撤回/审完没到的跳过。"""
+        inv = self.inv
+        sys.modules.pop("routers.invoice_intake", None)
+        from routers import invoice_intake as ii
+        self.assertTrue(ii.reached({"tasks": [{"userid": "boss-dt", "task_status": "NEW"}]}, ["boss-dt"]))
+        self.assertTrue(ii.reached({"tasks": [{"userid": "boss-dt", "task_status": "COMPLETED"}]}, ["boss-dt"]))
+        self.assertFalse(ii.reached({"tasks": [{"userid": "x", "task_status": "RUNNING"}]}, ["boss-dt"]))
+        self.assertFalse(ii.reached({"tasks": [{"userid": "boss-dt"}]}, []))
+        # 设置：接入审批人 + 起始日；坏日期拒存
+        r = self.post("/api/inv/settings", "boss", {"settings": {"intake": {"since": "9月1日"}}})
+        self.assertEqual(r.status_code, 400, r.text)
+        r = self.post("/api/inv/settings", "boss", {"settings": {"intake": {
+            "approvers": [{"dtUserid": "boss-dt", "dtName": "老板"}, {"dtUserid": "boss-dt"}], "since": "2026-09-01"}}})
+        self.assertEqual(r.json()["settings"]["intake"], {"approvers": [{"dtUserid": "boss-dt", "dtName": "老板"}],
+                                                          "since": "2026-09-01"})
+        from datetime import datetime as _dt, timedelta as _td
+        ct = (_dt.now() - _td(days=1)).strftime("%Y-%m-%d %H:%M:%S")     # 跳过记录只留几天：用近日的单子
+        insts = {
+            "PI-IN-HIT": {"status": "RUNNING", "result": "", "create_time": ct,
+                          "business_id": "202609201000000000001", "tasks": [{"userid": "boss-dt", "task_status": "RUNNING"}]},
+            "PI-IN-WAIT": {"status": "RUNNING", "result": "", "create_time": ct,
+                           "tasks": [{"userid": "mgr", "task_status": "RUNNING"}]},
+            "PI-IN-DONE": {"status": "COMPLETED", "result": "agree", "create_time": ct,
+                           "tasks": [{"userid": "mgr", "task_status": "COMPLETED"}]},
+            "PI-IN-VOID": {"status": "TERMINATED", "result": "", "create_time": ct,
+                           "tasks": [{"userid": "boss-dt", "task_status": "CANCELED"}]},
+        }
+        calls = []
+
+        def oapi(conf, path, body, timeout=20):
+            calls.append(body["process_instance_id"])
+            return {"errcode": 0, "process_instance": insts[body["process_instance_id"]]}
+        opened = MagicMock(side_effect=lambda **kw: {"ok": True, "folder": {"id": 1}, "created": True})
+        with patch.object(ii.idt, "_load_conf", MagicMock(return_value={"x": 1})), \
+                patch.object(ii.idt, "_process_code", MagicMock(return_value=("PROC-1", ""))), \
+                patch.object(ii.idt, "_list_ids", MagicMock(return_value=(list(insts), ""))) as li, \
+                patch.object(ii.idt, "_oapi", oapi), \
+                patch.object(ii.inv, "open_approval_folder", opened):
+            r = ii.scan_once("测试")
+            self.assertTrue(r["ok"], r)
+            self.assertTrue(r["full"])
+            self.assertEqual((r["created"], r["waiting"], r["skipped"]), (1, 1, 2))
+            kw = opened.call_args.kwargs
+            self.assertEqual((kw["inst_id"], kw["source"], kw["user"]), ("PI-IN-HIT", "dingtalk", "系统"))
+            self.assertIs(kw["inst"], insts["PI-IN-HIT"])          # 不再去钉钉取第二遍
+            # 第二轮：不是整段列；跳过的不再取；等着的那张走到了 → 建票夹
+            insts["PI-IN-WAIT"]["tasks"].append({"userid": "boss-dt", "task_status": "NEW"})
+            calls.clear()
+            r2 = ii.scan_once("测试")
+            self.assertFalse(r2["full"])
+            self.assertNotIn("PI-IN-DONE", calls)
+            self.assertNotIn("PI-IN-VOID", calls)
+            self.assertEqual((r2["created"], r2["waiting"]), (2, 0))   # HIT 没真建票夹（mock）所以也再开了一次
+            self.assertEqual(li.call_count, 2 * 2)                        # 两个模板 × 两轮
+        # 真建票夹：传进来的单子直接用，不再 get_instance
+        norm = {"instId": "PI-IN-REAL", "businessId": "202609201000000000009", "template": "付款申请（公对公）",
+                "title": "自动接入测试", "approvalStatus": "RUNNING", "attachments": [], "photos": [], "hasAttachments": False}
+        with patch.object(inv.idt, "get_instance", MagicMock(side_effect=AssertionError("不该再取"))), \
+                patch.object(inv.idt, "normalize_instance", MagicMock(return_value=norm)):
+            g = inv.open_approval_folder(user="系统", source="dingtalk", inst_id="PI-IN-REAL", inst={"x": 1})
+        self.assertTrue(g["ok"], g)
+        self.assertEqual((g["folder"]["source"], g["folder"]["attach_status"]), ("dingtalk", "done"))
+        # 没设接入审批人 → 不扫
+        self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": []}}})
+        self.assertFalse(ii.scan_once("测试")["ok"])
+        sys.modules.pop("routers.invoice_intake", None)
+
 if __name__ == "__main__":
     unittest.main()

@@ -4973,6 +4973,9 @@ app.include_router(invoice_books.router)
 # 发票管家·申请人自助登记发票后补（V2.621）：/api/inv/s/*，登录门对它放行（见 _auth_gate）
 from routers import invoice_self
 app.include_router(invoice_self.router)
+# 发票管家·钉钉自动接入（V2.736）：审批流走到接入审批人节点的单子自动建票夹；模块导入即起 20 分钟定时线程（SQLite 库不起）
+from routers import invoice_intake
+app.include_router(invoice_intake.router)
 
 from routers import logistics_review   # V2.632 物流账单复核（核价×核量→归一态；pilot 迅鸽）
 app.include_router(logistics_review.router)
