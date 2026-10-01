@@ -1,0 +1,103 @@
+/*
+[Change Log]
+Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.731
+Description: 首页按权限分层（移植财务BP工作台 V2.550/V2.552 home.css）。两个高亮按钮切「我有权限的 / 显示全部」，
+  卡片两色：绿＝已开通、灰紫+锁＝没权限可申请（未上线不成卡片）。颜色全走核算 CSS 变量，深色主题自动跟。
+*/
+.kd-home { padding: 18px 22px 44px; display: grid; gap: 16px; color: var(--ink); }
+
+/* 问候条（紧凑） */
+.kd-home .hero { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 24px; padding: 14px 20px;
+  border-radius: 12px; border: 1px solid var(--line); background: linear-gradient(120deg, var(--accent-soft) 0%, var(--bg-sub) 62%); }
+.kd-home .hero h2 { margin: 0; font-size: 22px; font-weight: 800; letter-spacing: .3px; color: var(--ink); }
+.kd-home .hero .id { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
+.kd-home .chip { cursor: default; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 20px; padding: 0 9px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink-2); white-space: nowrap; }
+.kd-home .chip.per { border-color: var(--accent-soft); background: var(--accent-soft); color: var(--accent); }
+.kd-home .chip.closed { border-color: var(--green-line); background: var(--green-bg); color: var(--green); }
+.kd-home .chip.open { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
+.kd-home .meter { min-width: 210px; }
+.kd-home .meter .t { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--ink-2); }
+.kd-home .meter .t b { color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
+.kd-home .meter .bar { margin-top: 6px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.kd-home .meter .bar i { display: block; height: 100%; background: var(--green); border-radius: 3px; }
+.kd-home .meter .row2 { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* 视图切换：两个高亮按钮 */
+.kd-home .viewbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.kd-home .vt { display: inline-flex; gap: 6px; padding: 4px; border-radius: 12px; background: var(--bg-rail); border: 1px solid var(--line); }
+.kd-home .vt button { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 16px; border: 0; border-radius: 9px; background: transparent;
+  color: var(--ink-2); font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+.kd-home .vt button .c { min-width: 22px; height: 20px; padding: 0 6px; border-radius: 999px; display: inline-grid; place-items: center; font-size: 11.5px;
+  background: var(--line); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.kd-home .vt button[aria-pressed="true"] { background: var(--bg); color: var(--ink); box-shadow: 0 1px 3px rgba(20, 30, 50, .14); }
+.kd-home .vt button.mine[aria-pressed="true"] { color: var(--green); }
+.kd-home .vt button.mine[aria-pressed="true"] .c { background: var(--green-bg); color: var(--green); }
+.kd-home .vt button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.kd-home .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--ink-2); }
+.kd-home .legend span { display: inline-flex; align-items: center; gap: 6px; }
+.kd-home .legend i { width: 12px; height: 12px; border-radius: 4px; }
+.kd-home .legend .l-ok { background: var(--green-bg); box-shadow: inset 3px 0 0 var(--green); }
+.kd-home .legend .l-lock { background: var(--violet-bg); box-shadow: inset 3px 0 0 var(--violet-line); }
+
+/* 分组 + 卡片（卡片统一两行等高、锁卡只留锁角标+小链接、组间 22px） */
+.kd-home .hgrp + .hgrp { margin-top: 22px; }
+.kd-home .grp-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 10px; }
+.kd-home .grp-h > b { font-size: 14px; font-weight: 700; color: var(--ink); }
+.kd-home .grp-h .cnt { font-size: 11.5px; line-height: 18px; padding: 0 7px; border-radius: 999px; background: var(--gray-bg); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.kd-home .grp-h .cnt.some { background: var(--green-bg); color: var(--green); }
+.kd-home .grp-h .soon-note { font-size: 12px; color: var(--ink-3); }
+.kd-home .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(264px, 1fr)); gap: 10px; }
+.kd-home .card { display: grid; grid-template-columns: 32px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 12px; row-gap: 3px;
+  align-items: center; text-align: left; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg); font: inherit; color: inherit; }
+.kd-home .card > .ci { grid-column: 1; grid-row: 1 / span 2; position: relative; width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; }
+.kd-home .card > .ci svg { width: 17px; height: 17px; }
+.kd-home .card > b { grid-column: 2; grid-row: 1; min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 13.5px; }
+.kd-home .card > b .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-home .card > .hint { grid-column: 2; grid-row: 2; min-width: 0; font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kd-home .card .recent, .kd-home .card .beta { flex: none; font-size: 10.5px; font-weight: 600; border-radius: 4px; padding: 0 5px; line-height: 16px; }
+.kd-home .card .recent { color: var(--green); background: var(--green-bg); }
+.kd-home .card .beta { color: var(--amber); background: var(--amber-bg); }
+
+.kd-home .card.ok { cursor: pointer; border-left: 3px solid var(--green); transition: border-color .15s, box-shadow .15s, transform .15s; }
+.kd-home .card.ok > .ci { background: var(--green-bg); color: var(--green); }
+.kd-home .card.ok > b { color: var(--ink); }
+.kd-home .card.ok:hover { border-color: var(--green-line); border-left-color: var(--green); box-shadow: 0 6px 18px -10px rgba(31, 122, 85, .45); transform: translateY(-1px); }
+.kd-home .card.ok:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+
+.kd-home .card.lock { background: var(--violet-bg); border-color: var(--violet-line); border-left: 3px solid var(--violet-line); }
+.kd-home .card.lock > .ci { background: var(--bg); color: var(--ink-3); }
+.kd-home .card.lock > .ci .lk { position: absolute; right: -4px; bottom: -4px; width: 15px; height: 15px; border-radius: 50%; background: var(--bg);
+  display: grid; place-items: center; color: var(--violet); box-shadow: 0 0 0 1px var(--violet-line); cursor: inherit; font-weight: 400; }
+.kd-home .card.lock > .ci .lk svg { width: 9px; height: 9px; }
+.kd-home .card.lock > b { color: var(--ink-2); font-weight: 600; }
+.kd-home .card.lock > .hint { color: var(--ink-3); }
+.kd-home .card .ask { flex: none; margin-left: auto; padding: 0 2px; border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 500; color: var(--violet); opacity: .7; }
+.kd-home .card .ask:hover { opacity: 1; text-decoration: underline; }
+.kd-home .card .ask:focus-visible { outline: 2px solid var(--violet); outline-offset: 1px; border-radius: 3px; }
+.kd-home .card.lock:hover .ask { opacity: 1; }
+.kd-home .card .asked { flex: none; margin-left: auto; font-size: 11.5px; font-weight: 500; color: var(--green); background: var(--green-bg); border-radius: 4px; padding: 0 6px; line-height: 18px; }
+
+.kd-home .empty { padding: 26px 22px; border: 1px dashed var(--line-strong); border-radius: 12px; background: var(--bg); display: grid; gap: 6px; }
+.kd-home .empty b { font-size: 15px; }
+.kd-home .empty span { font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+
+/* 申请开通弹框 / 提示 */
+.kd-home .mask { position: fixed; inset: 0; z-index: 1000; background: rgba(20, 28, 40, .38); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.kd-home .dlg { width: min(460px, 100%); background: var(--bg); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 16px 44px rgba(20, 28, 58, .22); }
+.kd-home .dlg-h { display: flex; align-items: center; padding: 14px 18px 0; font-size: 15px; }
+.kd-home .dlg-h .x { margin-left: auto; border: 0; background: none; font-size: 15px; color: var(--ink-3); cursor: pointer; }
+.kd-home .dlg-b { padding: 12px 18px; display: grid; gap: 10px; font-size: 13px; color: var(--ink-2); line-height: 1.7; }
+.kd-home .dlg-b b { color: var(--ink); }
+.kd-home .dlg-b textarea { width: 100%; font: inherit; font-size: 13px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--bg); color: var(--ink); resize: vertical; }
+.kd-home .dlg-b .cnt-r { margin-top: -6px; text-align: right; font-size: 11.5px; color: var(--ink-3); }
+.kd-home .dlg-b .fine { font-size: 12px; color: var(--ink-3); line-height: 1.6; }
+.kd-home .dlg-f { display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 16px; }
+.kd-home .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 1001; padding: 9px 16px; border-radius: 9px; font-size: 13px;
+  box-shadow: 0 8px 26px rgba(20, 28, 58, .2); max-width: min(560px, 90vw); }
+.kd-home .toast.ok { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-line); }
+.kd-home .toast.bad { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-line); }
+
+@media (prefers-reduced-motion: reduce) { .kd-home .card.ok { transition: none; } .kd-home .card.ok:hover { transform: none; } }

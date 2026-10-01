@@ -150,6 +150,11 @@ const jpSoft = async (url, body) => {
 }
 // 导航模块上线管理（V2.63）——全员生效的上线开关，只管导航不挡接口
 export const getNavModules = () => j('/api/nav-modules')
+// V2.731 首页「申请开通」→ 钉钉推送（/mine 只读本人申请记录，首页唯一允许的轻量请求）
+export const submitAccessRequest = (cap, label, pages, note) => jp('/api/access-request', { cap, label, pages, note })
+export const getMyAccessRequests = () => j('/api/access-request/mine')
+export const getAccessRequestConfig = () => j('/api/access-request/config')
+export const saveAccessRequestConfig = (entries) => j('/api/access-request/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries }) })
 export const saveNavModules = (state, posts, templates) => jpSoft('/api/nav-modules/save', { state, posts, templates })
 // 日志中心（V2.488-489）：运维请求日志 + 业务操作留痕。全部仅主管理员（enter_settings）可读。
 export const getOpsLive = () => j('/api/ops/live')

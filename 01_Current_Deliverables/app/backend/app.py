@@ -4978,6 +4978,8 @@ from routers import logistics_review   # V2.632 物流账单复核（核价×核
 app.include_router(logistics_review.router)
 from routers import logistics_payreq   # V2.730 物流复核·钉钉请款单接入（扫公对公请款单→总表进度/账单就绪/发票进发票管家）
 app.include_router(logistics_payreq.router)
+from routers import access_request   # V2.731 首页「申请开通」→ 钉钉推送接收人（移植 BP V2.553/555）
+app.include_router(access_request.router)
 
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,

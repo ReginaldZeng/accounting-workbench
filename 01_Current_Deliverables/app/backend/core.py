@@ -249,6 +249,7 @@ def _user_public(u):
     if u.get("role") != "admin" and ws:
         perms = {**perms, **{c: True for c in db.sub_admin_caps(u)}}
     return {"name": u["name"], "role": u["role"], "grp": u["grp"], "perms": perms,
+            "post": u.get("post") or "",                       # V2.731 岗位（侧栏账号区/首页问候显示，不影响权限）
             "is_super": db.is_super(u),                        # 主管理员
             "can_admin": db.can_admin_accounts(u),             # 能进账号管理(主管理员或子管理员)
             "managed_ws": ws,                                  # 可管的工作台 key 列表

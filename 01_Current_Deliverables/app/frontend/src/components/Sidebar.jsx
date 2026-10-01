@@ -1,10 +1,18 @@
+// [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.731
+// Description: 侧栏改「悬停展开」（移植财务BP工作台 V2.549，交接提示词 §1，口径已定）：常态 72px 图标轨，
+//   移入/Tab 进入浮出 240px 盖在页面上（不推挤），图钉固定后占 240（记本机 fw_nav_pinned，默认不固定）；
+//   动效在 src/sidebar.css。上下分区：顶部 logo(角标绿点＝金蝶)+标题+「数据源 · 金蝶 V2.xxx」(版本常驻)+图钉，
+//   底部 基础数据/系统设置/色调 + 账号（头像姓名末字·「姓名 · 岗位」·门户·退出）。
+//   无权限的菜单改为**上锁灰显**（原来是隐藏），让人知道有这个板块、可去首页申请；状态「隐藏」的仍隐藏。
+//   数据仍由后端 navDef 驱动（单一真相源），三种节点/徽标/岗位标口径不变。
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 加发票图标，挂 inv/invdesk/invlater/invaudit/invledger
 // [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
 // Description: 电商月结页进入时自动展开应收模块与电商对账父级，保留完整业务承接。
 // [Change Log] Date:2026-07-12 Author:Claude/c Version:V2.105  侧栏按设计稿「导航栏想法」重做
 // 展开态＝白色悬浮卡片（分组胶囊带强调色条 + 二级导引条 + 选中态强调条 + 徽章/岗位标）；
 // 收起态＝76px 图标轨（状态圆点 + 悬停飞出子菜单）。数据仍由后端 navDef 驱动（单一真相源）。
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
+import '../sidebar.css'
 
 const S = (d, sw = 1.75) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">{d}</svg>
 const IC = {
@@ -30,6 +38,11 @@ const IC = {
   dl: S(<><path d="M12 3v11" /><path d="M8 10l4 4 4-4" /><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" /></>),   // 导出
   invoice: S(<><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z" /><path d="M9 8h6M9 12h6M9 16h3" /></>),   // 发票（锯齿底的票据）
   basicdata: S(<><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></>),
+  pin: S(<><path d="M9 4h6l-1 6 3 3H7l3-3z" /><path d="M12 13v7" /></>),
+  pinOn: <svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M9 4h6l-1 6 3 3H7l3-3z" /><path d="M12 13v7" fill="none" strokeLinecap="round" /></svg>,
+  logout: S(<><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" /><path d="M10 17l-5-5 5-5M5 12h11" /></>),
+  portal: S(<><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>),
+  lock: S(<><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></>, 2.2),
   settings: S(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8 2 2 0 1 1-2.8 2.8 1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 0 1-4 0 1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3 2 2 0 1 1-2.8-2.8 1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 0 1 0-4 1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8 2 2 0 1 1 2.8-2.8 1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 0 1 4 0 1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3 2 2 0 1 1 2.8 2.8 1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></>),
 }
 const ICON_BY_KEY = {
@@ -46,6 +59,9 @@ const ICON_BY_KEY = {
   inv: IC.invoice, invdesk: IC.invoice, invlater: IC.soon, invaudit: IC.accept, invledger: IC.ledger,
   basicdata: IC.basicdata, settings: IC.settings, acceptance: IC.accept,
 }
+// 首页卡片与侧栏同一套图标（V2.731）
+export const navIcon = k => ICON_BY_KEY[k] || IC.soon
+export const LOCK_ICON = IC.lock
 const RECON_VIEWS = ['import', 'reconcile', 'fund', 'result']
 const VIEWS_BY_KEY = { reconcile: RECON_VIEWS }
 // 设计令牌（用应用 CSS 变量，深色自动适配）
@@ -74,10 +90,10 @@ function applyTheme(mode) {
 export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver, focusSection = '', focusParent = '' }) {
   const kd = source === 'kingdee'
   // 主题档位；auto 档要监听系统切换（白天↔夜间自动跟）
-  const [theme, setTheme] = React.useState(() => localStorage.getItem('fw_theme') || 'auto')
+  const [theme, setTheme] = React.useState(() => { try { return localStorage.getItem('fw_theme') || 'auto' } catch (e) { return 'auto' } })
   React.useEffect(() => {
     applyTheme(theme)
-    localStorage.setItem('fw_theme', theme)
+    try { localStorage.setItem('fw_theme', theme) } catch (e) {}
     if (theme !== 'auto') return
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const fn = () => applyTheme('auto')
@@ -89,17 +105,15 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
     const i = THEME_MODES.findIndex(m => m.key === theme)
     setTheme(THEME_MODES[(i + 1) % THEME_MODES.length].key)
   }
-  // 本实例身份行（V2.176，V2.187 收敛）：正常情况（主干+默认端口）只显版本号——
-  // 分支名/端口对业务方是噪音；只在「不寻常」时才亮出来（开发分支实例、非默认端口），
-  // 那正是需要分清「在看哪条线」的时候（实战教训：盯着 main 找别的分支的功能）。
-  // 完整明细（分支/提交/端口/有无未提交改动）始终在悬停提示里。
+  // 版本行（V2.176/V2.187）：正常只显版本号；开发分支实例、非默认端口才亮出分支/端口。完整明细在悬停提示。
+  // 交接口径：版本号**常驻可见**（Owner 靠它确认线上是哪一版）——放在标题下一行。
   const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80')
   const branchShort = ver && ver.branch ? ver.branch.replace(/^claude\//, '') : ''
-  const oddBranch = branchShort && branchShort !== 'main'         // 非主干才值得亮分支
-  const oddPort = !['8000', '80', '443'].includes(port)           // 非默认端口才值得亮端口
-  const verLine = ver ? [ver.ver || '', oddBranch ? branchShort : '', oddPort ? ':' + port : '']
-    .filter(Boolean).join(' · ') : ''
+  const oddBranch = branchShort && branchShort !== 'main'
+  const oddPort = !['8000', '80', '443'].includes(port)
+  const verLine = ver ? [ver.ver || '', oddBranch ? branchShort : '', oddPort ? ':' + port : ''].filter(Boolean).join(' · ') : ''
   const verFull = ver ? `版本 ${ver.ver || '未知'}${ver.dirty ? '（有未提交改动）' : ''} · 分支 ${ver.branch || '—'} · 提交 ${ver.commit || '—'} · 端口 ${port}` : ''
+
   const on = k => !mods || mods[k]?.['可进入'] !== false
   const stat = k => mods?.[k]?.status || ''
   // Legacy settlement deep links still resolve, but the duplicated menu is consolidated.
@@ -107,49 +121,60 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   // 岗位标签：后端存的是 key（改名不丢绑定），显示要翻成中文名
   const postLabel = {}; (navDef?.posts || []).forEach(p => { postLabel[p.key] = p.label })
   const posts = k => (mods?.[k]?.posts || []).map(p => postLabel[p] || p)
-  // 每个菜单的准入点 cap 由后端算好（_enter_cap）：无 cap＝纯分组父项(可见性看子项)；
-  // 有 cap 则主管理员或已授权者才见。**别在前端拼 "enter:"+key**——拼错就是静默放行。
-  // V2.142 组内第二道门 act：第三种节点的子项（如 成本台账›仓库类型）与父项共用一个准入闸，
-  // 进组后见不见还要看 act（动作点，如「维护仓库类型」）——两道都过才显示。
+  // 准入点 cap 由后端算好（_enter_cap）——别在前端拼 "enter:"+key。act＝组内第二道门（V2.142）。
   const hasCap = c => user?.role === 'admin' || !!user?.perms?.[c]
   const canEnter = m => (!m.cap || hasCap(m.cap)) && (!m.act || hasCap(m.act))
   const subOf = {}; allMods.forEach(m => { if (m.parent) subOf[m.key] = m.parent })
   const iconOf = k => ICON_BY_KEY[k] || IC.soon
   const viewsOf = k => VIEWS_BY_KEY[k] || [k]
   const isActive = k => viewsOf(k).includes(view)
-  const childrenOf = k => allMods.filter(m => subOf[m.key] === k && canEnter(m) && stat(m.key) !== '隐藏')
-  // 纯分组父项（group_only）本身没页面、没准入点：子项全看不见时它就该整个消失，不留空壳
-  const canSee = m => m.group_only ? childrenOf(m.key).length > 0 : canEnter(m)
+  // V2.731：无权限不再隐藏、改上锁灰显（交接口径「无权限页面：上锁灰显（不隐藏）」）；状态「隐藏」的仍不显示
+  const shown = m => stat(m.key) !== '隐藏'
+  const childrenOf = k => allMods.filter(m => subOf[m.key] === k && shown(m))
+  const canSee = m => m.group_only ? childrenOf(m.key).length > 0 : true
   const allSecs = navDef?.sections || []
   const sections = allSecs.filter(s => !s.bottom)
   const bottomKeys = new Set(allSecs.filter(s => s.bottom).map(s => s.key))
-  const bottomMods = allMods.filter(m => bottomKeys.has(m.sec) && canSee(m) && stat(m.key) !== '隐藏')
-  const itemsOf = s => allMods.filter(m => m.sec === s.key && !subOf[m.key] && canSee(m) && stat(m.key) !== '隐藏')
+  const bottomMods = allMods.filter(m => bottomKeys.has(m.sec) && canSee(m) && shown(m))
+  const itemsOf = s => allMods.filter(m => m.sec === s.key && !subOf[m.key] && canSee(m) && shown(m))
   const badgeOf = it => {
     if (it.key === 'periodclose' && closed) return { t: '已封存', pill: true }
     if (!on(it.key)) return { t: stat(it.key) || '未开放', pill: false }   // 未开放：灰字
     const s = stat(it.key)
     if (s === '待验收') return { t: '待验收', pill: true }
     if (s === '人工并行') return { t: '人工并行', pill: true, teal: true }
-    if (s === '测试验证') return { t: '测试验证', pill: true, violet: true }  // V2.174 起可进入，配紫标
-    // 「开发中」只有 conf.ini [nav] dev_users 名单里的人进得来（别人在上面那行就被判成不可进入、灰字）。
-    // 必须给个显眼标记：否则进得去的人看到的是个"跟正常模块一样"的入口，会忘了同事其实看不见它，
-    // 进而在会上拿它当已上线的东西讲。琥珀＝在建（V2.242）
+    if (s === '测试验证') return { t: '测试验证', pill: true, violet: true }
+    // 「开发中」只有 dev_users 名单里的人进得来——给显眼标记，免得拿它当已上线的东西讲（V2.242）
     if (s === '开发中') return { t: '开发中·仅你可见', pill: true }
-    if (s === '引擎正常') return { t: '引擎正常', live: true }             // 呼吸绿灯（V2.173）
+    if (s === '引擎正常') return { t: '引擎正常', live: true }
     return null
   }
 
-  const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem('fw_nav_collapsed') === '1' } catch (e) { return false } })
   const [open, setOpen] = useState(() => { try { return JSON.parse(localStorage.getItem('fw_nav_groups') || '{}') } catch (e) { return {} } })
   const [expand, setExpand] = useState(() => { try { return JSON.parse(localStorage.getItem('fw_nav_expand') || '{}') } catch (e) { return {} } })
-  const [hovered, setHovered] = useState(null)
   const isOpen = g => open[g] !== false
   const isExp = k => expand[k] !== false
   const save = (key, v) => { try { localStorage.setItem(key, JSON.stringify(v)) } catch (e) {} }
   const toggleGroup = g => setOpen(o => { const n = { ...o, [g]: !(o[g] !== false) }; save('fw_nav_groups', n); return n })
   const toggleExp = k => setExpand(x => { const n = { ...x, [k]: !(x[k] !== false) }; save('fw_nav_expand', n); return n })
-  const setColl = v => { setCollapsed(v); try { localStorage.setItem('fw_nav_collapsed', v ? '1' : '0') } catch (e) {}; if (v) setHovered(null) }
+
+  // —— 悬停展开（V2.731）：常态 72，移入/键盘进入浮出 240；图钉＝固定展开（记本机，默认不固定）——
+  const [pinned, setPinned] = useState(() => { try { return localStorage.getItem('fw_nav_pinned') === '1' } catch (e) { return false } })
+  const togglePin = () => setPinned(p => { try { localStorage.setItem('fw_nav_pinned', p ? '0' : '1') } catch (e) {} return !p })
+  const [hover, setHover] = useState(false)
+  const [kbFocus, setKbFocus] = useState(false)
+  const [touchOpen, setTouchOpen] = useState(false)
+  const expanded = pinned || hover || kbFocus || touchOpen
+  const panelRef = useRef(null)
+  const canHover = useMemo(() => typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(hover: hover)').matches, [])
+  // 触屏没有悬停：点板块/分组展开，点侧栏外收起
+  useEffect(() => {
+    if (!touchOpen) return undefined
+    const off = e => { if (panelRef.current && !panelRef.current.contains(e.target)) setTouchOpen(false) }
+    document.addEventListener('pointerdown', off)
+    return () => document.removeEventListener('pointerdown', off)
+  }, [touchOpen])
+  const go = k => { setTouchOpen(false); onSelect(k) }
 
   // 从逐单工作台进入时，把完整的「应收模块 › 电商对账 › 当前页」链路带到首屏。
   useEffect(() => {
@@ -181,208 +206,117 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
     if (s && !isOpen(s.key)) setOpen(o => ({ ...o, [s.key]: true }))
   }, [view, navDef])
 
-  // —— 展开态：一个导航行 ——
-  // 三种节点（V2.52）：
-  //   ① 叶子             → 整行点＝进页面
-  //   ② 纯分组父项 group_only → 整行点＝展开/收起（它没页面）
-  //   ③ 可进入且有子项（成本台账）→ 点文字/图标＝进页面，点右侧箭头＝展开（箭头要 stopPropagation）
-  const Row = (it, level, inFlyout) => {
-    const kids = childrenOf(it.key)
-    const disabled = !on(it.key)
-    const groupOnly = !!it.group_only
-    const expandable = kids.length > 0 && !inFlyout
-    const enterable = !groupOnly
-    const active = isActive(it.key) && enterable
+  const tailOf = (it, perm, disabled) => {
+    if (!perm) return <span className="tail fx"><span className="lock" title="没有权限，可在首页申请开通">{IC.lock}</span></span>
     const bg = badgeOf(it)
     const ps = disabled ? [] : posts(it.key)
-    const h = level ? 36 : 40
-    const base = {
-      position: 'relative', display: 'flex', alignItems: 'center', gap: 11, height: h, padding: '0 12px',
-      borderRadius: 10, fontSize: level ? 13 : 14, cursor: disabled ? 'default' : 'pointer', userSelect: 'none',
-      color: disabled ? 'var(--ink-3)' : (active ? 'var(--accent)' : 'var(--ink)'),
-      fontWeight: active ? 600 : 400, background: active ? 'var(--accent-soft)' : undefined,
+    if (!bg && !ps.length) return null
+    return <span className="tail fx">
+      {ps.map(p => <span key={p} className="pill" style={{ color: 'var(--accent)', background: 'var(--accent-soft)' }}>{p}</span>)}
+      {bg && (bg.live ? <span className="nav-live-dot" title="引擎正常" />
+        : bg.pill ? <span className="pill" title={bg.t} style={{ color: pillC(bg), background: pillBG(bg) }}>{PILL_SHORT[bg.t] || bg.t}</span>
+          : <span title={bg.t} style={{ fontSize: 10.5, color: 'var(--ink-3)' }}>{bg.t}</span>)}
+    </span>
+  }
+  // 收起态图标角上的状态点（展开态看右侧标签）
+  const dotOf = (it, perm) => {
+    if (!perm) return null
+    const bg = badgeOf(it)
+    if (!bg) return null
+    const c = bg.live ? 'var(--green)' : bg.pill ? pillC(bg) : 'var(--ink-3)'
+    return <span className={'bd' + (bg.live ? ' nav-pulse' : '')} style={{ background: c }} />
+  }
+
+  // —— 一行 ——（三种节点 V2.52：①叶子 点＝进页面 ②纯分组父项 点＝展开/收起 ③可进入且有子项 点文字＝进页面、点箭头＝展开）
+  const Row = (it, level) => {
+    const kids = level ? [] : childrenOf(it.key)
+    const perm = it.group_only ? true : canEnter(it)
+    const disabled = !on(it.key) || !perm
+    const groupOnly = !!it.group_only
+    const expandable = kids.length > 0
+    const active = isActive(it.key) && !groupOnly
+    const hasOn = !active && kids.some(c => isActive(c.key))
+    const tip = !perm ? `${it.label}（没有权限，可在首页申请开通）` : !on(it.key) ? `${it.label}（${stat(it.key) || '未开放'}）` : undefined
+    const click = () => {
+      if (groupOnly) {
+        if (!expanded && !canHover) { setTouchOpen(true); setExpand(x => ({ ...x, [it.key]: true })); return }
+        toggleExp(it.key); return
+      }
+      if (!disabled) go(it.key)
     }
-    const onClick = disabled ? undefined
-      : () => { if (enterable) onSelect(it.key); else if (expandable) toggleExp(it.key) }
     return (<React.Fragment key={it.key}>
-      <div className={'navrow' + (disabled ? ' navrow-dis' : '')} data-nav-key={it.key} style={base} onClick={onClick} title={disabled ? `该模块：${stat(it.key)}` : undefined}>
-        {active && <span style={{ position: 'absolute', left: level ? -13 : -4, top: 9, bottom: 9, width: 3, borderRadius: level ? '3px' : '0 3px 3px 0', background: 'var(--accent)' }} />}
-        <span style={{ flex: '0 0 auto', width: level ? 17 : 18, height: level ? 17 : 18, display: 'inline-flex', color: 'inherit' }}>{iconOf(it.key)}</span>
-        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.label}</span>
-        {ps.map(p => <span key={p} style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--accent)', background: 'var(--accent-soft)', padding: '2px 6px', borderRadius: 5, whiteSpace: 'nowrap' }}>{p}</span>)}
-        {bg && (bg.live
-          ? <span className="nav-live-dot" title="引擎正常" />
-          : bg.pill
-            ? <span title={bg.t} style={{ fontSize: 10.5, fontWeight: 600, color: pillC(bg), background: pillBG(bg), padding: '2px 6px', borderRadius: 5, whiteSpace: 'nowrap' }}>{PILL_SHORT[bg.t] || bg.t}</span>
-            : <span title={bg.t} style={{ fontSize: 10.5, color: 'var(--ink-3)', whiteSpace: 'nowrap' }}>{bg.t}</span>)}
-        {expandable && <span
-          onClick={enterable && !disabled ? (e => { e.stopPropagation(); toggleExp(it.key) }) : undefined}
-          title={enterable ? (isExp(it.key) ? '收起子菜单' : '展开子菜单') : undefined}
-          style={{
-            flex: '0 0 auto', width: 15, height: 15, color: 'var(--ink-3)', borderRadius: 4,
-            cursor: enterable && !disabled ? 'pointer' : 'inherit',
-            transform: isExp(it.key) ? 'none' : 'rotate(-90deg)', transition: 'transform .18s',
-          }}>{IC.chevDown}</span>}
-      </div>
-      {expandable && isExp(it.key) &&
-        <div style={{ margin: '3px 0 3px 24px', paddingLeft: 13, borderLeft: '1px solid var(--line)' }}>
-          {kids.map(c => Row(c, 1))}
-        </div>}
+      <button type="button" className={'row' + (level ? ' kid' : '') + (active ? ' on' : '') + (hasOn ? ' has-on' : '') + (disabled && !groupOnly ? ' dis' : '')}
+        data-nav-key={it.key} aria-current={active ? 'page' : undefined} aria-expanded={expandable ? isExp(it.key) : undefined}
+        title={tip} onClick={click}>
+        <span className="ic">{level ? <i className="dot" /> : iconOf(it.key)}{!level && dotOf(it, perm)}</span>
+        <span className="lb fx">{it.label}</span>
+        {tailOf(it, perm, disabled)}
+        {expandable && <span className={'caret fx' + (isExp(it.key) ? '' : ' shut')} title={isExp(it.key) ? '收起子菜单' : '展开子菜单'}
+          onClick={groupOnly ? undefined : e => { e.stopPropagation(); toggleExp(it.key) }}>{IC.chevDown}</span>}
+      </button>
+      {/* 子项收起态也占位（树线上的点）：鼠标停在哪一项，展开后还是那一项，不跳 */}
+      {expandable && isExp(it.key) && <div className="kids">{kids.map(c => Row(c, 1))}</div>}
     </React.Fragment>)
   }
 
-  // —— 图标轨：一个图标按钮（含飞出） ——
-  const Rail = (it, groupStart) => {
-    const kids = childrenOf(it.key)
-    const disabled = !on(it.key)
-    const active = (isActive(it.key) || kids.some(c => isActive(c.key)))
-    const bg = badgeOf(it)
-    const dot = bg ? (bg.live ? 'var(--green)' : bg.pill ? pillC(bg) : 'var(--ink-3)') : null
-    return (<div key={it.key} style={{ position: 'relative' }}
-      onMouseEnter={() => setHovered(it.key)} onMouseLeave={() => setHovered(h => h === it.key ? null : h)}>
-      {groupStart && <div style={{ width: 34, height: 1, background: 'var(--line)', margin: '7px auto' }} />}
-      <div style={{
-        width: 44, height: 44, margin: '2px auto', borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        cursor: disabled ? 'default' : 'pointer', color: disabled ? 'var(--ink-3)' : (active ? 'var(--accent)' : 'var(--ink-2)'),
-        background: active ? 'var(--accent-soft)' : undefined, position: 'relative',
-      }} className={'railbtn' + (disabled ? ' navrow-dis' : '')}
-        onClick={disabled || it.group_only ? undefined : () => onSelect(it.key)}>
-        <span style={{ width: 20, height: 20, display: 'inline-flex' }}>{iconOf(it.key)}</span>
-        {dot && <span className={bg.live ? 'nav-pulse' : undefined} style={{ position: 'absolute', top: 7, right: 7, width: 7, height: 7, borderRadius: '50%', background: dot, border: '1.6px solid var(--bg)' }} />}
-      </div>
-      {hovered === it.key && <div style={{
-        position: 'absolute', left: '100%', top: 0, marginLeft: 12, zIndex: 60, minWidth: 190,
-        background: 'var(--bg)', border: '1px solid var(--line)', borderRadius: 13, boxShadow: '0 16px 44px rgba(28,32,58,.18)', padding: 7,
-      }}>
-        {/* 飞出菜单的标题：可进入的父项（如成本台账）点标题就进页面，别让收起态成为进不去的死角 */}
-        <div className={!it.group_only && !disabled ? 'navrow' : undefined}
-          onClick={!it.group_only && !disabled ? () => onSelect(it.key) : undefined}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 8, padding: '5px 9px', borderRadius: 8,
-            fontSize: 13.5, fontWeight: 700, color: 'var(--ink)',
-            cursor: !it.group_only && !disabled ? 'pointer' : 'default',
-          }}>
-          {it.label}
-          {posts(it.key).map(p => <span key={p} style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent)', background: 'var(--accent-soft)', padding: '2px 7px', borderRadius: 6 }}>{p}</span>)}
-          {bg && (bg.live
-            ? <span className="nav-live-dot" style={{ marginLeft: 'auto' }} title="引擎正常" />
-            : <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 600, color: bg.pill ? pillC(bg) : 'var(--ink-3)', background: bg.pill ? pillBG(bg) : 'transparent', padding: bg.pill ? '2px 7px' : 0, borderRadius: 6 }}>{bg.t}</span>)}
-        </div>
-        {kids.length > 0 && <>
-          <div style={{ height: 1, background: 'var(--line)', margin: '4px 2px' }} />
-          {kids.map(c => Row(c, 1, true))}
-        </>}
-      </div>}
-    </div>)
-  }
+  const meName = user?.name || ''
+  const mePost = user?.post || (user?.role === 'admin' ? '管理员' : '')
 
-  // ============ 收起：图标轨 ============
-  if (collapsed) {
-    const flat = []
-    sections.forEach((s, si) => itemsOf(s).forEach((it, ii) => flat.push({ it, groupStart: si > 0 && ii === 0 })))
-    return (<aside className="aside" style={{ width: 72 }}>
-      <div style={{ padding: '14px 0 6px', textAlign: 'center' }}>
-        <div onClick={onHome} title={onHome ? '返回门户' : undefined} style={{ width: 42, height: 42, margin: '0 auto', borderRadius: 13, background: 'var(--accent)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 7px 18px rgba(75,83,196,.30)', cursor: onHome ? 'pointer' : 'default' }}>
-          <span style={{ width: 22, height: 22, display: 'inline-flex' }}>{IC.bank}</span>
-        </div>
-        <div onClick={() => setColl(false)} title="展开" style={{ width: 34, height: 30, margin: '6px auto 0', borderRadius: 8, color: 'var(--ink-3)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }} className="railbtn">
-          <span style={{ width: 18, height: 18, display: 'inline-flex' }}>{IC.expand}</span>
-        </div>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', overflowX: 'visible', padding: '2px 0' }}>
-        {/* 首页（V2.488）：钉在图标轨最上 */}
-        <div style={{ position: 'relative' }}
-          onMouseEnter={() => setHovered('__home__')} onMouseLeave={() => setHovered(h => h === '__home__' ? null : h)}>
-          <div onClick={() => onSelect('home')} className="railbtn" title="首页" style={{ width: 44, height: 44, margin: '2px auto', borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: view === 'home' ? 'var(--accent)' : 'var(--ink-2)', background: view === 'home' ? 'var(--accent-soft)' : undefined }}>
-            <span style={{ width: 20, height: 20, display: 'inline-flex' }}>{IC.home}</span>
+  return (
+    <div className="kd-sbslot" style={{ width: pinned ? 240 : 72 }}>
+      <aside ref={panelRef} className={'kd-sb' + (expanded ? ' open' : '') + (pinned ? ' pinned' : '')}
+        onMouseEnter={() => canHover && setHover(true)}
+        onMouseLeave={() => canHover && setHover(false)}
+        onFocus={e => { if (e.target.matches && e.target.matches(':focus-visible')) setKbFocus(true) }}
+        onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) setKbFocus(false) }}>
+
+        {/* 顶部：logo/标题回首页；logo 角上绿点＝数据源金蝶；标题下「数据源 · 金蝶 V2.xxx」常驻 */}
+        <div className="brand">
+          <button type="button" className={'logo' + (kd ? ' kd' : '')} title={'回到首页 · 数据源：' + (kd ? '金蝶' : '样例')} aria-label="回到首页" onClick={() => go('home')}>
+            <span>{IC.bank}</span>
+          </button>
+          <div className="title fx" onClick={() => go('home')} title={verFull}>
+            <b>财务核算工作台</b>
+            <small><i className={kd ? 'kd' : ''} />数据源 · {kd ? '金蝶' : '样例'}{verLine && <em>{verLine}</em>}</small>
           </div>
-          {hovered === '__home__' && <div style={{ position: 'absolute', left: '100%', top: 0, marginLeft: 12, zIndex: 60, background: 'var(--bg)', border: '1px solid var(--line)', borderRadius: 10, boxShadow: '0 16px 44px rgba(28,32,58,.18)', padding: '7px 12px', fontSize: 13, fontWeight: 700, color: 'var(--ink)', whiteSpace: 'nowrap' }}>首页</div>}
+          <button type="button" className="pin fx" aria-pressed={pinned} title={pinned ? '取消固定（悬停展开）' : '固定展开'}
+            aria-label={pinned ? '取消固定' : '固定展开'} onClick={togglePin}>{pinned ? IC.pinOn : IC.pin}</button>
         </div>
-        <div style={{ width: 34, height: 1, background: 'var(--line)', margin: '5px auto' }} />
-        {flat.map(({ it, groupStart }) => Rail(it, groupStart))}
-      </div>
-      {/* 基础数据/基础设置：钉在底部（滚动区之外），参照 BP 工作台 */}
-      <div style={{ padding: '2px 0 4px', overflow: 'visible' }}>
-        <div style={{ width: 34, height: 1, background: 'var(--line)', margin: '4px auto 6px' }} />
-        {bottomMods.map(m => Rail(m, false))}
-      </div>
-      <div style={{ borderTop: '1px solid var(--line)', padding: '10px 0', textAlign: 'center' }}>
-        <div onClick={onLogout} title={(user ? user.name : '') + ' · 退出'} style={{ width: 34, height: 34, margin: '0 auto', borderRadius: '50%', background: 'var(--bg-rail)', color: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
-          <span style={{ width: 17, height: 17, display: 'inline-flex' }}>{IC.user}</span>
+
+        <nav>
+          <button type="button" className={'row' + (view === 'home' ? ' on' : '')} aria-current={view === 'home' ? 'page' : undefined} onClick={() => go('home')}>
+            <span className="ic">{IC.home}</span><span className="lb fx">首页</span>
+          </button>
+          {sections.map(s => {
+            const items = itemsOf(s)
+            if (!items.length) return null
+            return (<div key={s.key}>
+              <button type="button" className="section" aria-expanded={isOpen(s.key)}
+                onClick={() => { if (!expanded && !canHover) { setTouchOpen(true); setOpen(o => ({ ...o, [s.key]: true })); return } toggleGroup(s.key) }}>
+                <span className="lb fx">{s.label}</span>
+                <span className={'caret fx' + (isOpen(s.key) ? '' : ' shut')}>{IC.chevDown}</span>
+              </button>
+              {isOpen(s.key) && items.map(it => Row(it, 0))}
+            </div>)
+          })}
+        </nav>
+
+        {/* 底部固定区：基础数据/系统设置 + 色调开关 */}
+        <div className="foot">
+          {bottomMods.map(m => Row(m, 0))}
+          <button type="button" className="row" onClick={cycleTheme} title={'色调：' + themeMode.label + '（点击切换 跟随系统→浅色→深色）'}>
+            <span className="ic" style={{ fontSize: 16 }}>{themeMode.icon}</span><span className="lb fx">色调 · {themeMode.label}</span>
+          </button>
         </div>
-        <span style={{ display: 'inline-block', marginTop: 6, width: 7, height: 7, borderRadius: '50%', background: kd ? 'var(--green)' : 'var(--ink-3)', boxShadow: kd ? '0 0 0 3px rgba(31,122,85,.14)' : 'none' }} title={'数据源 · ' + (kd ? '金蝶' : '样例')} />
-      </div>
-    </aside>)
-  }
 
-  // ============ 展开：卡片 ============
-  return (<aside className="aside" style={{ width: 264 }}>
-    <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '18px 14px 12px' }}>
-      <div onClick={onHome} title={onHome ? '返回门户' : undefined} style={{ width: 42, height: 42, borderRadius: 13, background: 'var(--accent)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 7px 18px rgba(75,83,196,.30)', flex: '0 0 auto', cursor: onHome ? 'pointer' : 'default' }}>
-        <span style={{ width: 22, height: 22, display: 'inline-flex' }}>{IC.bank}</span>
-      </div>
-      <div style={{ lineHeight: 1.25, flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--ink)', letterSpacing: '.01em' }}>财务核算工作台</div>
-        <div style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 2 }}>核算组 · 稽核提效</div>
-      </div>
-      <div onClick={() => setColl(true)} title="收起" className="railbtn" style={{ width: 30, height: 30, borderRadius: 9, color: 'var(--ink-3)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flex: '0 0 auto' }}>
-        <span style={{ width: 18, height: 18, display: 'inline-flex' }}>{IC.collapse}</span>
-      </div>
+        {/* 账号区：头像（姓名末字，收起态也认得出）+「姓名 · 岗位」（同字号同色，姓名永远完整、只省略岗位）+ 门户 / 退出 */}
+        {user && <div className="acct" title={meName + (mePost ? '｜' + mePost : '')}>
+          <span className="av"><span>{meName.slice(-1)}</span></span>
+          <span className="who fx"><span className="n">{meName}</span>{mePost && <span className="s">· {mePost}</span>}</span>
+          {onHome && <button type="button" className="exit fx" title="回到工作台门户" aria-label="回到门户" onClick={onHome}>{IC.portal}</button>}
+          <button type="button" className="exit fx" title="退出登录" onClick={onLogout}>{IC.logout}退出</button>
+        </div>}
+      </aside>
     </div>
-
-    <div style={{ flex: 1, overflowY: 'auto', padding: '0 12px 6px' }}>
-      {/* 首页（V2.488）：轻量落地页，恒在最上、恒可点 */}
-      <div className="navrow" onClick={() => onSelect('home')} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, borderRadius: 10, color: view === 'home' ? 'var(--accent)' : 'var(--ink)', background: view === 'home' ? 'var(--accent-soft)' : undefined, fontWeight: view === 'home' ? 600 : 400, fontSize: 13.5, cursor: 'pointer', padding: '0 6px' }}>
-        <span style={{ width: 18, height: 18, display: 'inline-flex' }}>{IC.home}</span> 首页
-      </div>
-      {onHome && <div className="navrow" onClick={onHome} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 38, borderRadius: 10, color: 'var(--ink-2)', fontSize: 13.5, cursor: 'pointer', padding: '0 6px' }}>
-        <span style={{ width: 18, height: 18, display: 'inline-flex' }}>{IC.back}</span> 返回门户
-      </div>}
-
-      {sections.map(s => {
-        const items = itemsOf(s)
-        if (!items.length) return null      // 该板块下一个都看不见 → 整个板块不显示（别留空标题）
-        return (<div key={s.key}>
-          <div className="grphdr" onClick={() => toggleGroup(s.key)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 40, padding: '0 13px', margin: '10px 0 4px', borderRadius: 10, cursor: 'pointer', background: 'var(--bg-rail)', border: '1px solid var(--line)' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 13, fontWeight: 700, letterSpacing: '.02em', color: 'var(--ink)' }}>
-              <span style={{ width: 3, height: 14, borderRadius: 2, background: 'var(--accent)', flex: '0 0 auto' }} />{s.label}
-            </span>
-            <span style={{ width: 16, height: 16, color: 'var(--ink-3)', transform: isOpen(s.key) ? 'none' : 'rotate(-90deg)', transition: 'transform .18s' }}>{IC.chevDown}</span>
-          </div>
-          {isOpen(s.key) && <div style={{ borderLeft: '2px solid var(--accent)', marginLeft: 5, paddingLeft: 9, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {items.map(it => Row(it, 0))}
-          </div>}
-        </div>)
-      })}
-    </div>
-
-    {/* 基础数据/基础设置：钉在底部（滚动区之外，紧贴页脚上方），参照 BP 工作台 */}
-    <div style={{ padding: '4px 12px 6px' }}>
-      <div style={{ height: 1, background: 'var(--line)', margin: '0 4px 6px' }} />
-      {bottomMods.map(m => Row(m, 0))}
-    </div>
-
-    <div style={{ borderTop: '1px solid var(--line)', padding: '14px 16px 16px' }}>
-      {user && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <span style={{ width: 17, height: 17, color: 'var(--accent)', display: 'inline-flex' }}>{IC.user}</span>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={user.name + (user.role === 'admin' ? ' · 管理员' : '')}>{user.name}{user.role === 'admin' ? ' · 管理员' : ''}</span>
-        <span onClick={onLogout} style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 600, color: 'var(--accent)', cursor: 'pointer' }}>退出</span>
-      </div>}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, border: '1px solid var(--line)', background: 'var(--bg-sub)', borderRadius: 999, padding: '5px 11px', fontSize: 12, color: 'var(--ink-2)' }}>
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: kd ? 'var(--green)' : 'var(--ink-3)', boxShadow: kd ? '0 0 0 3px rgba(31,122,85,.14)' : 'none' }} />
-          数据源 · {kd ? '金蝶' : '样例'}
-        </span>
-        {/* 双色调开关：点击轮换 跟随系统→浅色→深色（系统黑的同事可强制浅色） */}
-        <span onClick={cycleTheme} title={'色调：' + themeMode.label + '（点击切换）'}
-          style={{ width: 26, height: 26, borderRadius: '50%', border: '1px solid var(--line)', background: 'var(--bg-sub)', color: 'var(--ink-2)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: 13, flexShrink: 0, userSelect: 'none' }}>
-          {themeMode.icon}
-        </span>
-        {/* 版本号与数据源同行右侧（业务方指定位置），不再单占一行 */}
-        {verLine && <span title={verFull} style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'default' }}>
-          {verLine}
-        </span>}
-      </div>
-    </div>
-  </aside>)
+  )
 }

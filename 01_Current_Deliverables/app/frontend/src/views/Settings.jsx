@@ -7,6 +7,7 @@
 // 「引擎正常」可挂岗位标签——这是【标签】不是权限门，挡人用账号管理里的权限点。
 import React, { useState, useEffect } from 'react'
 import { setConfig, testKingdee, getNavModules, saveNavModules, addNavModule, delNavModule, moveNavModule, saveNavSections } from '../api.js'
+import AccessRequestPanel from './AccessRequestPanel.jsx'   // V2.731 首页「申请开通」钉钉接收人
 import SysLog from './SysLog.jsx'   // V2.489 日志中心（运维请求日志 + 业务操作留痕），作为系统设置内的一个标签页
 
 // 状态色：灰=还没开放，琥珀=可进但未定稿，绿=正式可用
@@ -350,6 +351,7 @@ export default function Settings({ cfg, onChange, onModsChanged }) {
       {tab === 'syslog' && <SysLog />}
       {tab === 'settings' && <>
       <NavModules onModsChanged={onModsChanged} />
+      <div style={{ margin: '16px 0' }}><AccessRequestPanel /></div>
       <div style={{ maxWidth: 660 }}>
         <div className="cat">
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>数据源</div>

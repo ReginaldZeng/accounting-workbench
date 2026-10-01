@@ -1,17 +1,26 @@
-// [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| HINT 补发票管家四页一句话说明
+// [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.731
+// Description: 首页按权限分层（移植财务BP工作台 V2.550/V2.552/V2.553，交接提示词 §2，口径已定）。
+//   访问的人多、权限普遍小：要能区分哪些能用，又让人知道哪些没权限、可以申请。
+//   · 问候区（紧凑）：问候 + 岗位；右侧「已开通页面 x / y」+ 进度条（分母只算已上线）；当前期间/封存只给开了期间类页面的人。
+//   · 两个高亮按钮「我有权限的 N / 显示全部 N」，选择记本机；没记过：没开全→前者，一个没开→后者（不给空白页），全开→不显示切换。
+//   · 卡片三色：绿＝已开通可点；灰紫+锁＝没权限（不用红/橙，没权限是正常状态不是报错）；未上线不成卡片，只在组标题旁一行小字。
+//   · 卡片统一两行等高（标题 + 一行说明，超长省略、悬停看全文）；锁卡只靠锁角标+颜色，「申请开通」是标题行右侧小链接。
+//   · 申请开通 → 小弹框（开通后能用哪些页面 + 用途选填）→ 钉钉推给接收人（routers/access_request.py）；24 小时内同权限只推一次。
+//   ⚠ 首页铁律：不打任何业务数据接口（只读身份与本地态）；唯一例外是轻量的「我的申请记录」，且只在有没开通的页面时才取。
 // [Change Log] Date:2026-09-06 Author:Claude/Reginald Zeng Version:V2.500
-// 核算工作台首页（轻量落地页，参照 BP 工作台 Home）。进核算工作台先落这里，别一进来就落在「对账程序」
-// 那种会取数的重页上。**本页刻意不发任何业务请求**：问候/期间来自已在内存的全局态（cfg），板块卡片来自
-// 侧栏同一份 navDef+mods（App 早已拉好），点开具体板块时才真正取数。
-// 卡片三态（与侧栏口径一致）：① 可用=正常可点；② 未上线=灰显+状态字（模块开关没开）；
-//   ③ 🔒无权限=灰显+锁（模块开着但这个账号没准入点）。全部展示、不过滤——让人知道有这么个板块可去申请。
-// V2.500（业务方：首页只留真的工具）：首页是「工具」落地页，不摆配置页。基础数据/基础资料/基础设置/系统设置
-//   这类维表·配置叶子从卡片里剔掉（侧栏仍可达）；一览计数同口径，不含配置页。
-import React from 'react'
+// V2.500（业务方：首页只留真的工具）：基础数据/基础资料/基础设置/系统设置这类维表·配置叶子不进首页（侧栏仍可达），计数同口径。
+import React, { useEffect, useState } from 'react'
+import { navIcon, LOCK_ICON } from '../components/Sidebar.jsx'
+import { submitAccessRequest, getMyAccessRequests } from '../api.js'
+import '../home.css'
 
 // 配置/维表叶子（非「工具」）：按 key 认（改名也挡得住）＋按标签兜底（将来新增的同类也挡得住）。
 const _CFG_KEYS = new Set(['basicdata', 'settings', 'logibase', 'clwh', 'bomconfig', 'ecombase'])
 const isConfigLeaf = m => _CFG_KEYS.has(m.key) || /^(基础(数据|资料|设置)|系统设置)$/.test(m.label || '')
+// 用全局「当前期间」的页面：开了这些的人才在问候区看期间/封存
+const PERIOD_KEYS = ['reconcile', 'ledger', 'fundboard', 'wealth', 'periodclose', 'fisbal', 'logistics', 'logisticspay']
+export const RECENT_KEY = 'fw-recent-pages'    // App 切页时写入（最近使用排前）
+const VIEW_KEY = 'fw-home-view'
 
 // 一句话板块说明（财务白话，只给主力叶子；缺省回退空）
 const HINT = {
@@ -23,33 +32,29 @@ const HINT = {
   periodclose: '月结看板 · 封存 / 解封本期',
   rptdash: '报表仪表盘 · 三视角下钻反查凭证',
   rptexport: '一键导出报表 · 内网取件通道',
+  fisbal: '科目余额解析 · 期末余额挂的是哪几笔',
   srcexport: '源单明细导出',
-  logibase: '物流共用维表 · 供应商 / 费用归属 / 税率',
   logiupload: '物流部：传账单 / 长表 → 质检 → 提交',
   logistics: '物流计提 · 复核 / 去向费率 / 录金蝶',
-  logisticspay: '账单核对',
-  logisticscost: '单据运费',
+  logisticspay: '物流账单核对 · 逐笔计提 / 逐单核价核量 / 钉钉请款进度',
+  logisticscost: '单据运费 · 货拉拉等议价/报销登记',
   clexport: '存货台账 · 八步工作流导出',
   cldash: '存货看板',
-  clwh: '基础资料 · 仓库类型 / 类别科目对照',
   bomdraft: 'BOM 报价 · 钉钉抓取 / 入账 / 复核 / 定稿',
   bomstd: '标准成本台账 · 已定稿公开可查',
-  bomconfig: 'BOM 基础设置',
   prodbrief: '生产简报复核',
   tempattrev: '临时工考勤 · 上报工时 vs 打卡逐日重算',
   tempattboard: '临时工看板 · 全年用工结构',
   revledger: '收入台账',
   custrecon: '客户对账',
   ecompromo: '电商推广',
+  ecommonth: '电商月结 · 收款核销',
   ecomsettle: '电商 · 收款核销',
-  ecombase: '电商 · 基础资料',
   archive: '凭证归档 · 标签打印',
   invdesk: '扫审批单 → 放票自动拍 → 当场查重 / 对金额 → 提交审核',
   invlater: '付款时票没到的单 · 登记预计来票 · 到了点收到',
   invaudit: '逐张核票 · 判定可否抵扣 · 通过进台账 / 退回补正',
   invledger: '发票台账 · 税局清单验真 · 抵扣勾选 · 新销方核查',
-  basicdata: '主体档案 / 数据源 / 金蝶连接',
-  settings: '导航模块上线 · 数据源 · 期间 · 金蝶 · 日志中心',
 }
 
 function greeting() {
@@ -60,158 +65,207 @@ function greeting() {
   if (h < 18) return '下午好'
   return '晚上好'
 }
-
-const CSS = `
-.hm{padding:20px 20px 44px}
-.hm-hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px 24px;
-  padding:22px 26px;border-radius:16px;border:1px solid var(--line);
-  background:linear-gradient(120deg,var(--accent-soft) 0%,var(--bg-sub) 60%,var(--bg-sub) 100%)}
-.hm-hi{font-size:26px;font-weight:800;letter-spacing:.4px;color:var(--ink);margin:0}
-.hm-hi em{font-style:normal;color:var(--accent)}
-.hm-sub{font-size:12.5px;color:var(--ink-2);margin:7px 0 0}
-.hm-chips{display:flex;flex-wrap:wrap;gap:8px}
-.hm-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:5px 12px;border-radius:999px;
-  border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-2);white-space:nowrap}
-.hm-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-3)}
-.hm-chip.ok{color:var(--green);border-color:var(--green-line);background:var(--green-bg)}
-.hm-chip.ok .dot{background:var(--green)}
-.hm-chip.warn{color:var(--amber);border-color:var(--amber-line);background:var(--amber-bg)}
-.hm-chip.warn .dot{background:var(--amber)}
-.hm-glance{display:flex;flex-wrap:wrap;gap:18px;margin:20px 2px 4px;font-size:12px;color:var(--ink-2)}
-.hm-nudge{display:flex;align-items:center;gap:10px;margin-top:14px;padding:11px 15px;border-radius:12px;cursor:pointer;
-  background:var(--accent-soft);border:1px solid var(--accent-soft);font-size:13px;color:var(--ink);transition:filter .15s}
-.hm-nudge:hover{filter:brightness(.98)}
-.hm-nudge b{color:var(--accent);font-weight:700}
-.hm-nudge .go{margin-left:auto;color:var(--accent);font-weight:600;white-space:nowrap}
-.hm-glance b{color:var(--ink);font-weight:700}
-.hm-sec{margin-top:22px}
-.hm-sec-h{display:flex;align-items:center;gap:9px;margin:0 0 11px;font-size:13.5px;font-weight:800;letter-spacing:.02em;color:var(--ink)}
-.hm-sec-h i{width:3px;height:15px;border-radius:2px;background:var(--accent);display:inline-block}
-.hm-sec-h span{font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.06em}
-.hm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:12px}
-.hm-card{position:relative;text-align:left;display:flex;flex-direction:column;gap:6px;min-height:78px;
-  padding:14px 15px;border-radius:12px;border:1px solid var(--line);background:var(--bg);
-  transition:transform .16s,border-color .16s,box-shadow .16s;font-family:inherit}
-.hm-card.can{cursor:pointer}
-.hm-card.can:hover{transform:translateY(-2px);border-color:var(--accent);box-shadow:0 10px 24px rgba(75,83,196,.12)}
-.hm-card.grey{opacity:.62;cursor:not-allowed}
-.hm-card-top{display:flex;align-items:center;gap:7px}
-.hm-name{font-size:14px;font-weight:700;color:var(--ink)}
-.hm-card.grey .hm-name{color:var(--ink-2)}
-.hm-tag{margin-left:auto;flex:none;font-size:10px;font-weight:700;padding:1.5px 8px;border-radius:999px;letter-spacing:.02em}
-.hm-tag.soon{color:var(--ink-3);background:var(--bg-rail);border:1px solid var(--line)}
-.hm-tag.lock{color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber-line)}
-.hm-tag.beta{color:var(--accent);background:var(--accent-soft);border:1px solid var(--accent-soft)}
-.hm-hint{font-size:11.5px;line-height:1.5;color:var(--ink-2)}
-.hm-card.grey .hm-hint{color:var(--ink-3)}
-.hm-go{position:absolute;right:12px;bottom:11px;opacity:0;transform:translateX(-4px);transition:opacity .16s,transform .16s;color:var(--accent)}
-.hm-card.can:hover .hm-go{opacity:1;transform:translateX(0)}
-.hm-legend{margin-top:26px;font-size:11px;color:var(--ink-3);display:flex;flex-wrap:wrap;gap:14px}
-.hm-legend span{display:inline-flex;align-items:center;gap:5px}
-.hm-legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
-`
-
-const IcGo = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
-    strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="18" y2="12" /><polyline points="12 6 18 12 12 18" /></svg>
-)
-const IcLock = () => (
-  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
-    strokeLinecap="round"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-)
+const readLS = k => { try { return localStorage.getItem(k) } catch (e) { return null } }
+const writeLS = (k, v) => { try { localStorage.setItem(k, v) } catch (e) { /* 存不了就只本次有效 */ } }
 
 export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
   const modules = navDef?.modules || []
-  const sections = navDef?.sections || []
+  const sections = (navDef?.sections || []).filter(s => !s.bottom).sort((a, b) => (a.order || 0) - (b.order || 0))
   const hasCap = c => user?.role === 'admin' || !!user?.perms?.[c]
   // 与侧栏完全同口径：可进入(准入点+动作点)、上线开关、状态字
-  const permOf = m => (!m.cap || hasCap(m.cap)) && (!m.act || hasCap(m.act))
-  const onOf = k => !mods || mods[k]?.['可进入'] !== false
+  const canSee = m => (!m.cap || hasCap(m.cap)) && (!m.act || hasCap(m.act))
+  const isOn = m => !mods || mods[m.key]?.['可进入'] !== false
   const statusOf = k => mods?.[k]?.status || ''
-  // 叶子＝非纯分组的模块（含挂在分组父项下的三级）；按 section 归组。配置/维表叶子不进首页。
   const leavesOf = secKey => modules
-    .filter(m => m.sec === secKey && !m.group_only && !isConfigLeaf(m))
+    .filter(m => m.sec === secKey && !m.group_only && !isConfigLeaf(m) && statusOf(m.key) !== '隐藏' && m.key !== 'ecomsettle')
     .sort((a, b) => (a.order || 0) - (b.order || 0))
+  const groups = sections.map(s => ({ key: s.key, label: s.label, kids: leavesOf(s.key) })).filter(g => g.kids.length)
+  const leaves = groups.flatMap(g => g.kids)
+  const live = leaves.filter(isOn)                         // 已上线（未上线另算，不进分母）
+  const mine = live.filter(canSee)
+  const allOpen = mine.length === live.length
+  const showPeriod = mine.some(l => PERIOD_KEYS.includes(l.key))
 
-  const stateOf = m => {
-    if (!onOf(m.key)) return 'soon'        // 未上线（开关没开 / 敬请期待）
-    if (!permOf(m)) return 'lock'          // 上线了但没准入权限
-    return 'can'                           // 可用
+  // 视图：记本机；没记过 → 没开全默认「我有权限的」，一个没开默认「显示全部」（免得空白页）
+  const [view, setView] = useState(() => readLS(VIEW_KEY))
+  const v = allOpen ? 'all' : (view === 'mine' || view === 'all' ? view : (mine.length ? 'mine' : 'all'))
+  const pickView = x => { setView(x); writeLS(VIEW_KEY, x) }
+
+  let recent = []
+  try { recent = JSON.parse(readLS(RECENT_KEY) || '[]') } catch (e) { recent = [] }
+  const recentSet = new Set(recent.slice(0, 3))
+
+  // 申请开通（V2.731）：只在有没开通的页面时才取「我的申请记录」（轻量、非业务数据）
+  const hasLocked = mine.length < live.length
+  const [requested, setRequested] = useState({})
+  const [askFor, setAskFor] = useState(null)      // {cap, unit, pages}
+  const [note, setNote] = useState('')
+  const [sending, setSending] = useState(false)
+  const [toast, setToast] = useState(null)        // {ok, text}
+  useEffect(() => { if (hasLocked) getMyAccessRequests().then(r => setRequested(r.requested || {})).catch(() => {}) }, [hasLocked])
+  const sibsOf = leaf => live.filter(x => x.key !== leaf.key && leaf.cap && x.cap === leaf.cap)
+  const openAsk = leaf => {
+    const sibs = sibsOf(leaf)
+    setNote('')
+    setAskFor({ cap: leaf.cap, unit: leaf.label, pages: [leaf, ...sibs].map(x => x.label) })
   }
+  const send = async () => {
+    if (!askFor) return
+    setSending(true)
+    try {
+      const r = await submitAccessRequest(askFor.cap, askFor.unit, askFor.pages, note)
+      setRequested(p => ({ ...p, [askFor.cap]: r.at }))
+      setToast({ ok: true, text: `已通过钉钉推送给管理员（${r.to} 人），开通后刷新页面即可使用` })
+      setAskFor(null)
+    } catch (e) {
+      setToast({ ok: false, text: e.message })
+    } finally {
+      setSending(false)
+    }
+  }
+  useEffect(() => { if (!toast) return undefined; const t = setTimeout(() => setToast(null), 6000); return () => clearTimeout(t) }, [toast])
 
-  // 一览计数（全部工具叶子，不含配置页——与卡片同口径）
-  let nCan = 0, nSoon = 0, nLock = 0
-  modules.filter(m => !m.group_only && !isConfigLeaf(m)).forEach(m => {
-    const s = stateOf(m)
-    if (s === 'can') nCan++; else if (s === 'lock') nLock++; else nSoon++
-  })
-
-  const period = cfg['期间'] || (cfg.year && cfg.period ? `${cfg.year}-${String(cfg.period).padStart(2, '0')}` : '')
-  const closed = !!cfg['封存']?.['已封存']
-  const kd = cfg.source === 'kingdee'
-
-  const card = (m) => {
-    const st = stateOf(m)
-    const can = st === 'can'
-    const status = statusOf(m.key)
+  const card = leaf => {
+    const hint = HINT[leaf.key] || ''
+    const st = statusOf(leaf.key)
+    if (canSee(leaf)) {
+      const beta = st && !['已上线', '引擎正常'].includes(st)
+      return (
+        <button key={leaf.key} type="button" className="card ok" title={[hint, beta ? st : ''].filter(Boolean).join(' · ') || leaf.label}
+          onClick={() => onNav && onNav(leaf.key)}>
+          <span className="ci">{navIcon(leaf.key)}</span>
+          <b><span className="nm">{leaf.label}</span>
+            {recentSet.has(leaf.key) && <span className="recent">最近使用</span>}
+            {beta && <span className="beta">{st === '开发中' ? '在建' : st}</span>}</b>
+          <span className="hint">{hint || ' '}</span>
+        </button>
+      )
+    }
+    const sibs = sibsOf(leaf)
+    const tip = [hint, '没权限', sibs.length ? `同一权限还含：${sibs.map(x => x.label).join('、')}` : ''].filter(Boolean).join(' · ')
+    const at = leaf.cap && requested[leaf.cap]
     return (
-      <button key={m.key} type="button" className={'hm-card ' + (can ? 'can' : 'grey')}
-        onClick={can ? () => onNav && onNav(m.key) : undefined}
-        title={can ? '进入 ' + m.label : (st === 'lock' ? '你的账号没有这个板块的权限，找主管理员开通' : '该板块' + (status || '未上线'))}>
-        <div className="hm-card-top">
-          <span className="hm-name">{m.label}</span>
-          {st === 'soon' && <span className="hm-tag soon">{status || '未上线'}</span>}
-          {st === 'lock' && <span className="hm-tag lock"><IcLock /> 无权限</span>}
-          {can && status && status !== '已上线' && status !== '引擎正常' && <span className="hm-tag beta">{status}</span>}
-        </div>
-        <div className="hm-hint">{HINT[m.key] || ' '}</div>
-        {can && <span className="hm-go"><IcGo /></span>}
-      </button>
+      <div key={leaf.key} className="card lock" title={tip}>
+        <span className="ci">{navIcon(leaf.key)}<span className="lk">{LOCK_ICON}</span></span>
+        <b><span className="nm">{leaf.label}</span>
+          {at ? <span className="asked" title="24 小时内已推送给管理员">已申请 · {String(at).slice(5, 16)}</span>
+            : leaf.cap && <button type="button" className="ask" onClick={() => openAsk(leaf)}>申请开通</button>}</b>
+        <span className="hint">{hint || ' '}</span>
+      </div>
     )
   }
 
-  const topSecs = sections.filter(s => !s.bottom).sort((a, b) => (a.order || 0) - (b.order || 0))
-  const botSecs = sections.filter(s => s.bottom).sort((a, b) => (a.order || 0) - (b.order || 0))
-  const renderSec = (s) => {
-    const leaves = leavesOf(s.key)
-    if (!leaves.length) return null
-    return (
-      <div className="hm-sec" key={s.key}>
-        <div className="hm-sec-h"><i></i>{s.label}<span>{leaves.length} 项</span></div>
-        <div className="hm-grid">{leaves.map(card)}</div>
+  // 组内：已上线的才成卡（有权限的排前）；未上线的只在组标题旁列名字
+  const shownGroups = groups
+    .map(g => {
+      const liveKids = g.kids.filter(isOn)
+      const items = liveKids.filter(k => v === 'all' || canSee(k)).sort((a, b) => canSee(b) - canSee(a))
+      return { ...g, items, liveN: liveKids.length, soon: g.kids.filter(k => !isOn(k)) }
+    })
+    .filter(g => g.items.length || (v === 'all' && g.soon.length))
+  const pct = live.length ? Math.round((mine.length / live.length) * 100) : 0
+  const period = cfg['期间'] || (cfg.year && cfg.period ? `${cfg.year}-${String(cfg.period).padStart(2, '0')}` : '')
+  const closed = !!cfg['封存']?.['已封存']
+
+  let body
+  if (v === 'mine' && !mine.length) {
+    body = (
+      <div className="empty">
+        <b>你的账号还没有开通任何页面</b>
+        <span>点「显示全部」看看工作台有哪些页面，在需要的页面上点「申请开通」。</span>
+      </div>
+    )
+  } else if (v === 'mine' && mine.length <= 6) {
+    // 开得少：平铺，最近使用的排前
+    const flat = shownGroups.flatMap(g => g.items).sort((a, b) => recentSet.has(b.key) - recentSet.has(a.key))
+    body = <div className="cards">{flat.map(card)}</div>
+  } else {
+    body = (
+      <div>
+        {shownGroups.map(g => {
+          const okN = g.items.filter(canSee).length
+          return (
+            <section key={g.key} className="hgrp">
+              <div className="grp-h">
+                <b>{g.label}</b>
+                {v === 'all' && !allOpen && g.liveN > 0 && <span className={'cnt' + (okN ? ' some' : '')}>{okN ? `已开通 ${okN} / ${g.liveN}` : '未开通'}</span>}
+                {v === 'all' && g.soon.length > 0 && <span className="soon-note">未上线：{g.soon.map(k => k.label).join('、')}</span>}
+              </div>
+              {g.items.length > 0 && <div className="cards">{g.items.map(card)}</div>}
+            </section>
+          )
+        })}
       </div>
     )
   }
 
   return (
-    <div className="hm">
-      <style>{CSS}</style>
-      <div className="hm-hero">
+    <div className="kd-home">
+      {/* 问候 + 我是谁 + 开通进度。不发业务请求：期间来自已在内存的全局态 cfg，身份由 App 传入 */}
+      <section className="hero">
         <div>
-          <h1 className="hm-hi">{greeting()}{user?.name ? '，' + user.name : ''} <em>👋</em></h1>
-          <p className="hm-sub">财务核算工作台 · 选一个板块进入；首页不加载业务数据，进板块后才取数。</p>
+          <h2>{greeting()}{user?.name ? `，${user.name}` : ''}</h2>
+          <div className="id">
+            {(user?.post || user?.role === 'admin') && <span>{user?.post || '管理员'}</span>}
+            <span>财务核算工作台 · 进入页面后才取数</span>
+          </div>
         </div>
-        <div className="hm-chips">
-          {period && <span className="hm-chip"><span className="dot" />当前期间 {period}</span>}
-          <span className={'hm-chip ' + (closed ? 'ok' : 'warn')}><span className="dot" />{closed ? '本期已封存' : '本期未封存'}</span>
-          <span className={'hm-chip ' + (kd ? 'ok' : '')}><span className="dot" />数据源 · {kd ? '金蝶' : '样例'}</span>
+        <div className="meter">
+          <div className="t"><span>已开通页面</span><b>{allOpen ? `全部 ${live.length} 个` : `${mine.length} / ${live.length}`}</b></div>
+          <div className="bar"><i style={{ width: `${pct}%` }} /></div>
+          {showPeriod && period && (
+            <div className="row2">
+              <span className="chip per">当前期间 {period}</span>
+              <span className={'chip ' + (closed ? 'closed' : 'open')}>{closed ? '本期已封存' : '本期未封存'}</span>
+            </div>
+          )}
         </div>
+      </section>
+
+      <div className="viewbar">
+        {allOpen ? (
+          <span className="chip per">全部 {live.length} 个页面已开通</span>
+        ) : (
+          <div className="vt" role="group" aria-label="显示范围">
+            <button type="button" className="mine" aria-pressed={v === 'mine'} onClick={() => pickView('mine')}>
+              我有权限的<span className="c">{mine.length}</span>
+            </button>
+            <button type="button" className="all" aria-pressed={v === 'all'} onClick={() => pickView('all')}>
+              显示全部<span className="c">{live.length}</span>
+            </button>
+          </div>
+        )}
+        {v === 'all' && !allOpen && (
+          <div className="legend">
+            <span><i className="l-ok" />已开通</span>
+            <span><i className="l-lock" />没权限 · 可申请</span>
+          </div>
+        )}
       </div>
 
-      <div className="hm-glance">
-        <span>可进入 <b>{nCan}</b> 个板块</span>
-        {nSoon > 0 && <span>未上线 <b>{nSoon}</b></span>}
-        {nLock > 0 && <span>待开通权限 <b>{nLock}</b></span>}
-      </div>
+      {body}
 
-      {topSecs.map(renderSec)}
-      {botSecs.map(renderSec)}
+      {toast && <div className={'toast ' + (toast.ok ? 'ok' : 'bad')} role="status">{toast.text}</div>}
 
-      <div className="hm-legend">
-        <span><i style={{ background: 'var(--accent)' }} />可用</span>
-        <span><i style={{ background: 'var(--ink-3)' }} />未上线</span>
-        <span><i style={{ background: 'var(--amber)' }} />无权限（可申请）</span>
-      </div>
+      {askFor && (
+        <div className="mask" onMouseDown={e => { if (e.target === e.currentTarget && !sending) setAskFor(null) }}>
+          <div className="dlg" role="dialog" aria-label={`申请开通「${askFor.unit}」`}>
+            <div className="dlg-h"><b>申请开通「{askFor.unit}」</b>
+              <button type="button" className="x" onClick={() => setAskFor(null)} aria-label="关闭">✕</button></div>
+            <div className="dlg-b">
+              <div>开通后可以使用：<b>{askFor.pages.join('、')}</b></div>
+              <textarea value={note} onChange={e => setNote(e.target.value.slice(0, 200))} rows={3}
+                placeholder="用途（选填）：比如「月结时要看本主体的银行对账」" />
+              <div className="cnt-r">{note.length} / 200</div>
+              <div className="fine">点「发送给管理员」后，钉钉会把你的姓名、岗位和申请内容推给管理员。管理员在门户「账号管理」开通后，刷新页面即可使用。</div>
+            </div>
+            <div className="dlg-f">
+              <button type="button" className="btn" onClick={() => setAskFor(null)} disabled={sending}>取消</button>
+              <button type="button" className="btn btn-pri" onClick={send} disabled={sending}>{sending ? '发送中…' : '发送给管理员'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

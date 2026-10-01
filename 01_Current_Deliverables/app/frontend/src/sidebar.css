@@ -1,0 +1,126 @@
+/*
+[Change Log]
+Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.731
+Description: 侧栏悬停展开（移植财务BP工作台 V2.549，交接提示词「侧边栏与首页」§1，口径已定）：
+  常态 72px 图标轨，鼠标移入/键盘 Tab 进入浮出 240px，盖在页面上不推挤；图钉固定后占 240、页面让出。
+  宽度 220ms 缓出 easeOutCubic；文字晚 80ms 淡入，收起时立即淡出（否则宽度收窄时文字被硬裁半个字）。
+  图标固定在每行左侧 52px 格子（72 − 左右各 10），展开只是往右长出文字，图标不位移。
+  颜色全走核算 CSS 变量，深色主题自动跟（BP 是固定浅色，这里不能照抄色值）。
+  动效写独立 CSS：transition-delay、收起不延迟这类内联样式做不了。
+*/
+.kd-sbslot { flex: 0 0 auto; position: relative; z-index: 40; }
+.kd-sb {
+  --sb-rail: 72px;
+  --sb-full: 240px;
+  --sb-dur: 220ms;
+  --sb-delay: 80ms;
+  --sb-ease: cubic-bezier(.33, 1, .68, 1);
+  position: sticky; top: 0; height: 100vh; width: var(--sb-rail);
+  display: flex; flex-direction: column;
+  background: var(--bg-sub); border-right: 1px solid var(--line);
+  overflow: hidden; white-space: nowrap;
+  transition: width var(--sb-dur) var(--sb-ease), box-shadow var(--sb-dur) var(--sb-ease);
+}
+.kd-sb.open { width: var(--sb-full); }
+/* 悬停展开是浮层（不推页面），带右侧阴影；固定后常驻、无阴影 */
+.kd-sb.open:not(.pinned) { box-shadow: 10px 0 28px -6px rgba(16, 24, 52, .18); }
+
+/* 文字：展开时延迟 80ms 淡入；收起时立即淡出 */
+.kd-sb .fx { opacity: 0; transform: translateX(-6px); transition: opacity 80ms ease-out, transform 80ms ease-out; }
+.kd-sb.open .fx {
+  opacity: 1; transform: none;
+  transition: opacity 160ms ease-out var(--sb-delay), transform 160ms var(--sb-ease) var(--sb-delay);
+}
+
+/* 行 */
+.kd-sb .row {
+  position: relative; display: flex; align-items: center; flex: none;
+  width: calc(100% - 20px); margin: 1px 10px; height: 38px; padding: 0;
+  border: 0; border-radius: 10px; background: transparent; text-align: left;
+  font: inherit; font-size: 13.5px; color: var(--ink); cursor: pointer; transition: background .12s;
+}
+.kd-sb .row:hover { background: var(--bg-rail); }
+.kd-sb .row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.kd-sb .row.dis { cursor: default; color: var(--ink-3); }
+.kd-sb .row.dis:hover { background: transparent; }
+.kd-sb .row.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.kd-sb .row.has-on { color: var(--accent); }
+.kd-sb .ic { position: relative; flex: none; width: 52px; height: 100%; display: grid; place-items: center; color: var(--ink-2); }
+.kd-sb .ic svg { width: 19px; height: 19px; }
+.kd-sb .row.on .ic, .kd-sb .row.has-on .ic { color: var(--accent); }
+.kd-sb .row.dis .ic { color: var(--ink-3); }
+.kd-sb .ic .bd { position: absolute; top: 7px; right: 13px; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--bg-sub); }
+.kd-sb.open .ic .bd { opacity: 0; transition: opacity 80ms; }
+.kd-sb .lb { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
+.kd-sb .tail { flex: none; margin-right: 8px; display: inline-flex; align-items: center; gap: 4px; }
+.kd-sb .pill { font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 5px; }
+.kd-sb .lock { width: 12px; height: 12px; color: var(--violet); display: inline-flex; }
+.kd-sb .caret { flex: none; width: 16px; height: 16px; margin-right: 10px; color: var(--ink-3); border-radius: 4px; transition: transform .18s; display: inline-flex; }
+.kd-sb .caret.shut { transform: rotate(-90deg); }
+
+/* 顶部：logo（回首页，角上绿点＝数据源）+ 标题 + 数据源·版本 + 图钉 */
+.kd-sb .brand { flex: none; display: flex; align-items: center; gap: 0; height: 64px; padding: 0 10px; }   /* 全局 .brand 带 gap:10，清掉 */
+.kd-sb .logo { flex: none; width: 52px; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; display: grid; place-items: center; }
+.kd-sb .logo span { position: relative; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent); color: #fff; box-shadow: 0 6px 16px rgba(75, 83, 196, .28); }
+.kd-sb .logo span svg { width: 20px; height: 20px; }
+.kd-sb .logo span::after { content: ""; position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--ink-3); box-shadow: 0 0 0 2px var(--bg-sub); }
+.kd-sb .logo.kd span::after { background: var(--green); }
+.kd-sb .logo:focus-visible span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.kd-sb .title { flex: 1; min-width: 0; cursor: pointer; }
+.kd-sb .title b { display: block; font-size: 14.5px; font-weight: 700; color: var(--ink); }
+.kd-sb .title small { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 11px; color: var(--ink-3); overflow: hidden; }
+.kd-sb .title small i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); }
+.kd-sb .title small i.kd { background: var(--green); }
+.kd-sb .title small em { font-style: normal; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.kd-sb .pin { flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--ink-3); cursor: pointer; display: grid; place-items: center; }
+.kd-sb .pin svg { width: 15px; height: 15px; }
+.kd-sb .pin:hover { background: var(--bg-rail); color: var(--ink); }
+.kd-sb .pin:focus-visible { outline: 2px solid var(--accent); }
+.kd-sb.pinned .pin { color: var(--accent); background: var(--accent-soft); }
+
+/* 板块标签：收起时换成一道短线，纵向位置不变（展开时条目不跳） */
+.kd-sb .section { position: relative; flex: none; display: flex; align-items: flex-end; width: calc(100% - 20px); height: 28px; margin: 4px 10px 0; padding: 0 0 5px 10px;
+  border: 0; background: transparent; font: inherit; font-size: 11.5px; font-weight: 700; letter-spacing: .08em; color: var(--ink-3); cursor: pointer; text-align: left; border-radius: 7px; }
+.kd-sb .section:hover { color: var(--ink-2); }
+.kd-sb .section:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.kd-sb .section::before { content: ""; position: absolute; left: 16px; bottom: 10px; width: 20px; height: 1px; background: var(--line-strong); transition: opacity 80ms; }
+.kd-sb.open .section::before { opacity: 0; }
+.kd-sb .section .lb { padding-right: 0; }
+.kd-sb .section .caret { margin-right: 4px; width: 14px; height: 14px; }
+
+.kd-sb nav { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2px 0 8px; scrollbar-width: thin; }
+.kd-sb:not(.open) nav { scrollbar-width: none; }   /* 图标轨上不露滚动条（仍可滚轮滚动） */
+.kd-sb:not(.open) nav::-webkit-scrollbar { display: none; }
+
+/* 子项：收起态也占同样高度（显示为树线上的点），展开时整列不跳 */
+.kd-sb .kids { position: relative; }
+.kd-sb .kids::before { content: ""; position: absolute; left: 36px; top: 2px; bottom: 8px; width: 1px; background: var(--line-strong); }
+.kd-sb .kid { height: 33px; font-size: 13px; color: var(--ink-2); }
+.kd-sb .kid .dot { position: relative; z-index: 1; width: 5px; height: 5px; border-radius: 50%; background: var(--line-strong); box-shadow: 0 0 0 3px var(--bg-sub); transition: all .15s; }
+.kd-sb .kid:hover .dot { background: var(--ink-3); }
+.kd-sb .kid.on { color: var(--accent); }
+.kd-sb .kid.on .dot { width: 7px; height: 7px; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* 底部：基础数据/系统设置/色调 + 账号（头像·姓名·岗位 + 门户/退出） */
+.kd-sb .foot { flex: none; border-top: 1px solid var(--line); padding: 6px 0; font-size: 13px; color: var(--ink); }   /* 全局 .foot 是 11px 灰字 */
+.kd-sb .acct { flex: none; display: flex; align-items: center; height: 52px; margin: 0 10px; padding-bottom: 4px; border-top: 1px solid var(--line);
+  font-family: var(--font-sans); font-size: 13px; color: var(--ink); }   /* 全局 .acct 是等宽数字字体，清掉 */
+.kd-sb .av { flex: none; width: 52px; display: grid; place-items: center; }
+.kd-sb .av span { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 700; }
+.kd-sb .who { flex: 1; min-width: 0; display: flex; gap: 4px; padding-right: 6px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.kd-sb .who .n { flex: none; }
+.kd-sb .who .s { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.kd-sb .exit {
+  flex: none; display: inline-flex; align-items: center; gap: 3px; height: 28px; padding: 0 7px; margin-left: 4px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+  font: inherit; font-size: 12px; font-weight: 600; color: var(--ink-2); cursor: pointer;
+}
+.kd-sb .exit svg { width: 13px; height: 13px; }
+.kd-sb .exit:hover { color: var(--accent); border-color: var(--accent); }
+.kd-sb .exit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.kd-sb .nav-live-dot { margin-right: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kd-sb, .kd-sb .fx, .kd-sb.open .fx, .kd-sb .caret { transition-duration: 1ms !important; transition-delay: 0ms !important; }
+}

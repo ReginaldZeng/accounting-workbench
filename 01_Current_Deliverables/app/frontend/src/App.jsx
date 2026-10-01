@@ -36,7 +36,7 @@ import InvLedger from './views/InvLedger.jsx'
 import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
-import Home from './views/Home.jsx'
+import Home, { RECENT_KEY } from './views/Home.jsx'
 import { getConfig, setConfig, getMe, apiLogout, getNavModules } from './api.js'
 
 export default function App() {
@@ -65,6 +65,15 @@ export default function App() {
     if (m) { setZone('accounting'); setView(m[1]) }
   }, [user])
   useEffect(() => { if (user) getConfig().then(setCfg).catch(() => {}) }, [user])
+  // V2.731 最近使用（首页「我有权限的」平铺时排前、打小标）：切到真页面就记一笔，只存本机
+  useEffect(() => {
+    if (!view || view === 'home' || view.startsWith('__')) return
+    const k = { import: 'reconcile', fund: 'reconcile', result: 'reconcile' }[view] || view
+    try {
+      const old = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]').filter(x => x !== k)
+      localStorage.setItem(RECENT_KEY, JSON.stringify([k, ...old].slice(0, 8)))
+    } catch (e) { /* 存不了就算了 */ }
+  }, [view])
   useEffect(() => { if (user) getNavModules().then(r => { setMods(r.state); setNavDef({ modules: r.modules, sections: r.sections, posts: r.posts }) }).catch(() => {}) }, [user])
   // 落地页：既要模块开着，**也要这个人进得去**（V2.52 准入点）。
   // 不看准入点的话，一个没有任何菜单权限的账号会直接落在「对账程序」上——侧栏空空如也，正文却把整页
