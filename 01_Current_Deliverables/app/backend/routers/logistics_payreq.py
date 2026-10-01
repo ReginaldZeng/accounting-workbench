@@ -143,7 +143,8 @@ def _paid_vouchers(since_date):
         if "提起支付" not in str(r.get("摘要") or ""):
             continue
         vno = "%s-%s" % (str(r.get("字") or "记").strip(), str(r.get("号") or "").strip())
-        out.append({"id": "gl:%s:%s:%s" % (r.get("账簿"), str(r.get("日期"))[:7], vno), "code": r.get("码"), "org": r.get("账簿"),
+        gid = hashlib.md5(("%s|%s|%s" % (r.get("账簿"), str(r.get("日期"))[:7], vno)).encode("utf-8")).hexdigest()[:10]
+        out.append({"id": "gl:" + gid, "code": r.get("码"), "org": r.get("账簿"),
                     "amount": r.get("借"), "date": str(r.get("日期") or "")[:10], "status": vno})
     return out
 
