@@ -127,6 +127,27 @@ def _paybills(since_date):
              "status": r.get("状态")} for r in rows]
 
 
+def _paid_vouchers(since_date):
+    """金蝶支付凭证(2241 借方、挂物流供应商、摘要「提起支付」) → 同 _paybills 结构。
+    付款单 9 月下旬才开始自动进金蝶，之前付过的只能从支付凭证认(实证 孝感 8月记-221 易风达 12,091)。"""
+    try:
+        s, conf = kc.login()
+        rows = kc._query(s, conf, "GL_VOUCHER",
+                         [("FACCOUNTBOOKID.FName", "账簿"), ("FDate", "日期"), ("FVOUCHERGROUPID.FName", "字"), ("FVOUCHERGROUPNO", "号"),
+                          ("FEXPLANATION", "摘要"), ("FDEBIT", "借"), ("FDetailID.FFLEX4.FNumber", "码")],
+                         "FAccountID.FNumber like '2241%%' and FDEBIT>0 and FDetailID.FFLEX4.FNumber like '物流运输服务%%' and FDate>='%s'" % since_date)
+    except Exception:
+        return None
+    out = []
+    for r in rows:
+        if "提起支付" not in str(r.get("摘要") or ""):
+            continue
+        vno = "%s-%s" % (str(r.get("字") or "记").strip(), str(r.get("号") or "").strip())
+        out.append({"id": "gl:%s:%s:%s" % (r.get("账簿"), str(r.get("日期"))[:7], vno), "code": r.get("码"), "org": r.get("账簿"),
+                    "amount": r.get("借"), "date": str(r.get("日期") or "")[:10], "status": vno})
+    return out
+
+
 def _fmt_ms(v):
     try:
         return datetime.fromtimestamp(int(v) / 1000, idt.CN_TZ).strftime("%Y-%m-%d %H:%M")
@@ -176,6 +197,8 @@ def _scan(trigger, days):
 
     with ThreadPoolExecutor(8) as ex:
         got = list(ex.map(get, todo))
+    # 并发 8 偶尔被钉钉限流回空(首扫 559 张空了 40 张，单张重取都正常)：空的逐张再取一次
+    got = [(i, inst) if inst else get(i) for i, inst in got]
     n_new = n_upd = n_fail = 0
     for iid, inst in got:
         if not inst:
@@ -230,6 +253,14 @@ def _scan(trigger, days):
             taken = {str(r["kd_paid"]).split("|")[-1] for r in allr if r.get("kd_paid")}
             hit = lpq.match_paybills(wait, pbs, taken)
             for iid, v in hit.items():
+                with db._engine.begin() as c:
+                    c.execute(update(PR).where(PR.c.inst_id == iid).values(kd_paid=v))
+                n_paid += 1
+                taken.add(v.split("|")[-1])
+            wait = [r for r in wait if r["inst_id"] not in hit]
+        if wait:      # 付款单配不上的，再看支付凭证
+            gls = _paid_vouchers(min(str(r.get("create_time") or "")[:10] for r in wait))
+            for iid, v in lpq.match_paybills(wait, gls or [], {str(r["kd_paid"]).split("|")[-1] for r in allr if r.get("kd_paid")}).items():
                 with db._engine.begin() as c:
                     c.execute(update(PR).where(PR.c.inst_id == iid).values(kd_paid=v))
                 n_paid += 1

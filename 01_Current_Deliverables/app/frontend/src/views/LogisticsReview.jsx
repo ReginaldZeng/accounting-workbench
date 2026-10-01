@@ -68,7 +68,7 @@ function PayReqDlg({ v, onClose, onChanged, flash }) {
         <div className="fxsub">审批编号 <span className="mono">{v.bid}</span> · {v.applicant} 提交于 {v.created}{v.finished ? ` · 流程结束 ${v.finished}` : ''}</div>
         <div className="prrow"><span className={'dtchip ' + (DT_CLS[v.st.key] || '')}>{v.st.label}{v.st.date ? ' ' + v.st.date : ''}</span>
           {v.cur && v.cur.length > 0 && <span className="dim">当前在办：{v.cur.map(x => x.name).join('、')}</span>}
-          {v.paid && <span className="dim">金蝶付款单 {v.paid.split('|')[0]}（进金蝶＝已付款）</span>}</div>
+          {v.paid && <span className="dim">{(v.paid.split('|')[1] || '').startsWith('记') ? `金蝶支付凭证 ${v.paid.split('|')[1]}` : '金蝶付款单'} {v.paid.split('|')[0]}（进金蝶＝已付款）</span>}</div>
         {v.reason && <div className="prreason">{v.reason}</div>}
         {v.ops && v.ops.length > 0 && <table className="fxtbl prtbl"><thead><tr><th>节点</th><th>人</th><th>结果</th><th>时间</th><th>意见</th></tr></thead>
           <tbody>{v.ops.map((o, i) => <tr key={i}><td>{o.type}</td><td>{o.name}</td><td>{o.result}</td><td className="mono">{o.date}</td><td>{o.remark}</td></tr>)}</tbody></table>}
