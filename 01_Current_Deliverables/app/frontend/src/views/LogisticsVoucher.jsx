@@ -18,10 +18,10 @@ const ST = {
 }
 const ORDER = ['ready', 'invdiff', 'noinv', 'unpaid', 'booked']
 // 批量做账只放「一致·只核销 / 含尾差」：红冲更正的写法还没在金蝶实测，先单张做（用户 2026-10-02）
-const BATCH_KINDS = ['hx', 'tail']
+const BATCH_KINDS = ['hx']
 // 做账类型(要读金蝶计提，列表出来后再逐张补)：计提与发票一致只核销 / 含尾差 / 要红冲更正 / 计提记错主体 / 金额不符 / 没有计提
 const KIND = {
-  hx: ['一致·只核销', 'ok'], tail: ['一致·核销含尾差', 'ok'], redo: ['需红冲更正', 'bad'],
+  hx: ['一致·只核销', 'ok'], tail: ['尾差·红冲更正', 'warn'], redo: ['需红冲更正', 'bad'],
   subj: ['计提记错主体', 'bad'], manual: ['金额不符·人工', 'warn'], noacc: ['没有计提', 'warn'], err: ['读取失败', 'neu'],
 }
 // 整单问题的建议动作
@@ -272,7 +272,7 @@ export default function LogisticsVoucher() {
         <div className="lv-batch">
           <span>已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((s, r) => s + (r.amount || 0), 0))}</b></>}</span>
           <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}>批量保存到金蝶</button>
-          <span className="dim">只能勾「可做账」且审核结果全部一致（只核销/含尾差）的；需红冲更正的先单张做</span>
+          <span className="dim">只能勾「可做账」且全部一致、只核销的；有红冲更正（含尾差）的先单张做</span>
           {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
             {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
         </div>
@@ -316,9 +316,9 @@ export default function LogisticsVoucher() {
                     <td className="kd"><span className={KIND[p.kind] ? (KIND[p.kind][1] === 'bad' ? 'bad' : 'warn') : ''}>{KIND[p.kind]?.[0]}</span><div className="dim kt">{p.text}</div></td>
                     <td className="kd">{ACT[p.kind]}</td></>
                   return <>
-                    <td>{stack(a => a.mode === 'hx' ? <span className="ok">一致{a.tail ? <span className="dim"> · 尾差 {money(a.tail)}</span> : ''}</span>
+                    <td>{stack(a => a.mode === 'hx' ? <span className="ok">一致</span> : a.mode === 'tail' ? <span className="warn">一致 · 尾差 {money(a.tail)}</span>
                       : a.mode === 'rate' ? <span className="bad" title={a.why}>税率不符</span> : a.mode === 'fix' ? <span className="bad" title={a.why}>有计提更正</span> : '—')}</td>
-                    <td>{stack(a => a.mode === 'hx' ? (a.tail ? '核销 + 尾差' : '核销') : a.mode ? <b className="bad">红冲 + 更正</b> : '—')}</td></>
+                    <td>{stack(a => a.mode === 'hx' ? '核销' : a.mode === 'tail' ? <b className="warn">红冲 + 更正（尾差）</b> : a.mode ? <b className="bad">红冲 + 更正</b> : '—')}</td></>
                 })()}
                 <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
                 <td className="nw">{pay}<div className="dim">纸质件 {r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr ? ' · 已放行' : ''}</div>

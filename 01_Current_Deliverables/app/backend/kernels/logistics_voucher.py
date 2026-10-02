@@ -163,7 +163,9 @@ def plan(vouchers, invoices, fixes=None):
         hx = [v for v in vs if per[v["vno"]]["mode"] == "hx"]
         tgt = max(hx or vs, key=lambda v: v["gross"])
         tails[tgt["vno"]] = d
-        msgs.append("%s 尾差 %.2f 记在 %s（照记-221 写法：费用红冲、暂估更正）" % (pct(r), d, tgt["vno"]))
+        if per[tgt["vno"]]["mode"] == "hx":       # 尾差也整笔红冲 + 更正：税额 +d、不含税 −d，含税不变
+            per[tgt["vno"]] = {"mode": "tail", "new_rate": per[tgt["vno"]]["new_rate"], "why": "发票税额与计提差 %.2f" % d}
+        msgs.append("%s 尾差 %.2f：记-%s 整笔红冲后更正（税额 %+.2f）" % (pct(r), d, tgt["vno"], d))
     return {"status": "ok", "msgs": msgs, "per": per, "tails": tails}
 
 
@@ -218,7 +220,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     sup = ctx["supplier"]
     py = ctx["pay_year"]
     out = []
-    redo = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") in ("rate", "fix")]
+    redo = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") in ("rate", "fix", "tail")]
     # 本张凭证号：写金蝶时付款单自动凭证的号已知(ctx.self_vno)，直接填；预览时用 □ 占位
     self_ref = "%d/%s#" % (ctx["pay_month"], ctx.get("self_vno") or "□")
     # 红冲：原分录全额取负
@@ -242,7 +244,11 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
                     gross = r2(gross - float(f["snap"].get("amt") or 0) + float(str(f["to_amt_tax"]).replace(",", "")))
                 except (TypeError, ValueError, KeyError):
                     pass
-        net, tax = split_gross(gross, p["new_rate"])
+        if p["mode"] == "tail":                  # 尾差：含税不变，税额按发票口径 +d
+            tax = r2(v["tax"] + pl["tails"].get(v["vno"], 0))
+            net = r2(gross - tax)
+        else:
+            net, tax = split_gross(gross, p["new_rate"])
         exps = [dict(l) for l in v["exp_lines"]]
         for f in fx:
             sn = f.get("snap") or {}
@@ -261,14 +267,6 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=("sup_code", "sup_name")))
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
         v["_new"] = {"gross": gross, "tax": tax}
-    # 尾差(照记-221)：费用红冲 d、暂估更正 d
-    for v in vouchers:
-        d = pl["tails"].get(v["vno"])
-        if not d:
-            continue
-        el = (v["exp_lines"] or [{}])[0]
-        out.append(_ln("更正", "红冲%s%s" % (ref_of(v, py), v["expl"]), el.get("acct"), el.get("acct_name"), dr=-d, src=el, keep=EXP_DIMS))
-        out.append(_ln("更正", "更正%s%s" % (ref_of(v, py), v["expl"]), "2221.01.07", "暂估进项税", dr=d, src=v["tax_line"], keep=SUP_DIMS))
     # 核销：每张票一行待认证 + 每张计提一行贷暂估(更正过的用新税额、引用本凭证号)
     refs = "、".join(self_ref if v in redo else ref_of(v, py) for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])))
     pre, items, mc = merged_desc(vouchers, sup)
@@ -276,7 +274,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     for i in invoices:
         out.append(_ln("核销", "%s%s" % (i["number"], hx_desc), "2221.01.06", "待认证进项税额", dr=float(i.get("tax") or 0)))
     for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])):
-        t = v["_new"]["tax"] if v in redo else r2(v["tax"] + pl["tails"].get(v["vno"], 0))
+        t = v["_new"]["tax"] if v in redo else v["tax"]
         if t:
             out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
     # 支付

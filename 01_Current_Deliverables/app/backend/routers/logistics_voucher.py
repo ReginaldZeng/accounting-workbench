@@ -223,10 +223,12 @@ def _kind(vouchers, notes, pl):
     if pl["status"] != "ok":
         return "manual", (pl["msgs"] or ["要人工处理"])[0]
     redo = [(k, p) for k, p in pl["per"].items() if p.get("mode") in ("rate", "fix")]
+    tails = [(k, p) for k, p in pl["per"].items() if p.get("mode") == "tail"]
     if redo:
         return "redo", "需红冲更正 %d 张：%s" % (len(redo), "；".join("记-%s %s" % (k, p.get("why") or "") for k, p in redo))
-    if pl["tails"]:
-        return "tail", "计提与发票一致，核销（含尾差 %s）" % "、".join("%.2f" % d for d in pl["tails"].values())
+    if tails:
+        return "tail", "计提与发票一致，尾差 %s：%s 整笔红冲后更正" % ("、".join("%.2f" % d for d in pl["tails"].values()),
+                                                     "、".join("记-%s" % k for k, _ in tails))
     return "hx", "计提与发票一致，只核销"
 
 

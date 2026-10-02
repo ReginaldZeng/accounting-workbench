@@ -86,8 +86,16 @@ class T(unittest.TestCase):
         pl = V.plan(vs, inv)
         self.assertEqual(pl["status"], "ok")
         self.assertEqual(pl["tails"], {"555": 0.01})
+        self.assertEqual(pl["per"]["555"]["mode"], "tail")
         ls = V.build(CTX, vs, inv, pl)
         self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+        red = [(l["acct"], l["dr"], l["cr"]) for l in ls if l["block"] == "红冲"]
+        fix = [(l["acct"], l["dr"], l["cr"]) for l in ls if l["block"] == "更正"]
+        self.assertEqual(red, [("6601", -11024.42, 0), ("2221.01.07", -661.47, 0), ("2241.02", 0, -11685.89)])
+        self.assertEqual(fix, [("6601", 11024.41, 0), ("2221.01.07", 661.48, 0), ("2241.02", 0, 11685.89)])
+        hx = [l for l in ls if l["block"] == "核销" and l["acct"] == "2221.01.07"]
+        self.assertEqual([l["cr"] for l in hx], [661.48])
+        self.assertIn("9/□#", hx[0]["expl"])
 
     def test_amount_mismatch_is_manual(self):
         pl = V.plan(vouchers(), INV[:3])
