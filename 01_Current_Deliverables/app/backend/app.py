@@ -4977,6 +4977,11 @@ app.include_router(invoice_self.router)
 from routers import invoice_intake
 app.include_router(invoice_intake.router)
 # 发票管家·月末纸质件查验（V2.740）：按审核通过月份列票、扫发票码记纸质件已到、导出未到清单
+
+# V2.746 发票凭证主动/定时同步
+from routers import invoice_vouchers
+app.include_router(invoice_vouchers.router)
+
 from routers import invoice_paper
 app.include_router(invoice_paper.router)
 

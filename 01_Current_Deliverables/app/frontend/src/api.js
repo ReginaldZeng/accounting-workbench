@@ -631,3 +631,5 @@ export const reviewRegisterImport = (period, file) => { const fd = new FormData(
 export const invSQrCreate = () => invSJ('/api/inv/s/login/qr', '', {})
 export const invSQrCheck = ticket => invSJ('/api/inv/s/login/qr/check', '', { ticket })
 export const invSQrApprove = (token, scan, confirm = false) => invSJ('/api/inv/s/login/qr/approve', token, { scan, confirm })
+
+export const invVouchersRefresh = (itemId) => jp('/api/inv/vouchers/refresh', itemId ? { itemId } : {})

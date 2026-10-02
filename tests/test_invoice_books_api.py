@@ -134,6 +134,9 @@ class InvoiceBooksApiTests(unittest.TestCase):
         app.include_router(sf.router)
         from routers import invoice_paper
         app.include_router(invoice_paper.router)
+        from routers import invoice_vouchers
+        cls.vouchers = invoice_vouchers
+        app.include_router(invoice_vouchers.router)
         cls.c = TestClient(app)
 
         def mk(name, perms=None, role="normal"):
@@ -280,6 +283,25 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(vals[1][cols.index("发票号码")], num(2003))
         self.assertEqual(vals[1][cols.index("审核状态")], "已审核")
         self.assertEqual(vals[-1][cols.index("价税合计")], 600)
+
+    def test_vouchers_exact_match_persistence_and_failure(self):
+        iid, _ = self.make_item(num(9746), 345, fields={"buyer_name": "测试公司"})
+        row = {"book": "测试公司会计账簿", "year": 2026, "month": 10, "group": "记", "number": 31, "summary": "转待认证 发票" + num(9746)}
+        self.assertEqual(self.vouchers.match_vouchers(self.item(iid), [{**row, "summary": num(9746) + "1"}]), [])
+        self.assertEqual(self.vouchers.match_vouchers(self.item(iid), [{**row, "book": "其他公司"}]), [])
+        url = "/api/inv/vouchers/refresh"
+        self.assertEqual(self.post(url, "viewer", {"itemId": iid}).status_code, 403)
+        with patch.object(self.vouchers, "fetch_rows", return_value=[row, row]):
+            first = self.ok(self.post(url, "acct", {"itemId": iid}))
+            self.assertEqual(first["changed"], 1)
+            self.assertEqual(len(first["item"]["bookkeeping"]["vouchers"]), 1)
+            before = first["item"]["bookkeeping"]
+            self.assertEqual(self.ok(self.post(url, "acct", {"itemId": iid}))["changed"], 0)
+        with patch.object(self.vouchers, "fetch_rows", side_effect=RuntimeError("query error")):
+            self.assertEqual(self.post(url, "acct", {"itemId": iid}).status_code, 502)
+            self.assertEqual(self.item(iid)["flags_json"]["_bookkeeping"], before)
+        with patch.object(self.vouchers, "fetch_rows", return_value=[{**row, "number": 32}]):
+            self.assertEqual(self.ok(self.post(url, "acct", {"itemId": iid}))["changed"], 1)
 
     def test_audit_records_paper_and_voucher_before_approval(self):
         iid, _ = self.make_item(num(9745), 321, approve=False)

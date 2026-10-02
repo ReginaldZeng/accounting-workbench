@@ -5,7 +5,7 @@
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invLedger, invLedgerExportUrl, invItemBookkeeping, invItemVoid, invFolder,
+  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
   invDeductPrepare, invDeductDownloadUrl,
   invSellers, invSellerCheck,
@@ -239,26 +239,19 @@ function VoidModal({ item, onClose, onDone }) {
 const bookText = bk => ({ booked: '已做账', unbooked: '未做账' }[bk?.status] || '未确认')
 export function Bookkeeping({ row, canEdit, onSaved }) {
   const bk = row.bookkeeping || {}
-  const [status, setStatus] = useState(bk.status || 'unknown')
-  const [vouchers, setVouchers] = useState(bk.vouchers || [])
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
-  const save = async () => {
+  const refresh = async () => {
     setBusy(true); setMsg('')
-    try { const r = await invItemBookkeeping(row.id, { status, vouchers: status === 'booked' ? vouchers : [] }); onSaved(r) }
+    try { const r = await invVouchersRefresh(row.id); if (!r.ok) throw new Error(r.msg); onSaved(r); setMsg(r.matched ? `已匹配凭证，更新 ${r.changed} 张票` : '暂未匹配到凭证') }
     catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
   }
-  return <section className="inv-lg-box"><div className="inv-lg-box-h">做账记录 · 财务确认</div>
-    {canEdit ? <>
-      <label>做账状态 <select value={status} disabled={busy} onChange={e => setStatus(e.target.value)}><option value="unknown">未确认</option><option value="unbooked">未做账</option><option value="booked">已做账</option></select></label>
-      {status === 'booked' && <>{vouchers.map((v, i) => <div key={i}>
-        {['book', 'period', 'number'].map((k, j) => <label key={k}>{['账簿', '会计期间', '凭证号'][j]}<input type={k === 'period' ? 'month' : 'text'} value={v[k]} maxLength={k === 'book' ? 100 : 60} disabled={busy} onChange={e => setVouchers(xs => xs.map((x, n) => n === i ? { ...x, [k]: e.target.value } : x))} /></label>)}
-        <button className="btn" disabled={busy} onClick={() => setVouchers(xs => xs.filter((_, n) => n !== i))}>移除凭证</button>
-      </div>)}<button className="btn" disabled={busy || vouchers.length >= 20} onClick={() => setVouchers(xs => [...xs, { book: '', period: '', number: '' }])}>添加凭证</button></>}
-      <button className="btn-pri" disabled={busy} onClick={save}>{busy ? '保存中…' : '保存做账记录'}</button>
-    </> : <><p>{bookText(bk)}</p>{(bk.vouchers || []).map((v, i) => <p key={i}>{v.book} · {v.period} · {v.number}</p>)}</>}
-    {bk.by && <p className="inv-muted">{bk.by} · {fmtTime(bk.at)}</p>}
-    <p className="inv-muted">人工核实后确认；尚未与金蝶自动匹配。</p><ErrLine msg={msg} />
+  return <section className="inv-lg-box"><div className="inv-lg-box-h">金蝶做账凭证</div>
+    <p>{bk.source === 'kingdee' ? (bk.status === 'booked' ? '已匹配到凭证' : '暂未匹配到凭证') : '待刷新核实'}</p>
+    {(bk.vouchers || []).map((v, i) => <p key={i}>{v.book} · {v.period} · {v.number}</p>)}
+    {canEdit && <button className="btn" disabled={busy} onClick={refresh}>{busy ? '查询金蝶中…' : '刷新凭证'}</button>}
+    {bk.at && <p className="inv-muted">记录更新：{fmtTime(bk.at)}</p>}
+    <p className="inv-muted">按摘要完整发票号、购方账簿匹配；每20分钟同步，变化才更新。</p><p role="status">{msg}</p>
   </section>
 }
 
@@ -391,6 +384,11 @@ function QueryTab({ can, flash }) {
 
   return (
     <>
+      {can.auditAct && <button className="btn" disabled={busy} onClick={async () => {
+        setBusy(true); setErr('')
+        try { const r = await invVouchersRefresh(); if (!r.ok) throw new Error(r.msg); flash(`匹配 ${r.matched} 张，更新 ${r.changed} 张`); await load(page) }
+        catch (e) { setErr(errText(e)) } finally { setBusy(false) }
+      }}>刷新金蝶凭证</button>}
       <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} />
       {voidNote && <div className="inv-lg-warn inv-lg-voidnote" role="alert">
         <span>{voidNote}</span>
