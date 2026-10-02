@@ -17,8 +17,10 @@ const ST = {
   booked: ['已做账', 'done', '发票都已被金蝶凭证引用（发票管家同步）'],
 }
 const ORDER = ['ready', 'invdiff', 'noinv', 'unpaid', 'booked']
-// 批量做账只放「一致·只核销 / 含尾差」：红冲更正的写法还没在金蝶实测，先单张做（用户 2026-10-02）
-const BATCH_KINDS = ['hx']
+// 批量做账：一致只核销 + 红冲更正(含尾差)。红冲更正写法已在金蝶实测(跨越 记-261 / 易风达 记-264)后放进来，
+// 但要提示：勾到红冲更正的，批量条和确认框都单独列出来（用户 2026-10-02「放进去，但是要提示」）
+const BATCH_KINDS = ['hx', 'tail', 'redo']
+const REDO_KINDS = ['tail', 'redo']
 // 做账类型(要读金蝶计提，列表出来后再逐张补)：计提与发票一致只核销 / 含尾差 / 要红冲更正 / 计提记错主体 / 金额不符 / 没有计提
 const KIND = {
   hx: ['一致·只核销', 'ok'], tail: ['尾差·红冲更正', 'warn'], redo: ['需红冲更正', 'bad'],
@@ -76,7 +78,8 @@ function Detail({ inst, onClose, onChanged }) {
     if (!window.confirm(`保存到金蝶：
 ① 系统提交并审核这张金蝶付款单（审核人显示「系统操作员」）
 ② 金蝶自动生成付款凭证后，往里补红冲/更正/核销分录、改支付摘要
-凭证本身不审核，留给你在金蝶核对后审核。
+③ 提交这张凭证（进审核人的待审列表）
+凭证不审核，留给你在金蝶核对后审核。
 
 确定？`)) return
     setPosting({ busy: true })
@@ -227,18 +230,27 @@ export default function LogisticsVoucher() {
   const canBatch = r => r.status === 'ready' && !r.posted && plans[r.inst] && BATCH_KINDS.includes(plans[r.inst].kind)
   const label = r => `${r.sup_full || r.carrier} · ${r.subject}`
   const picked = (rows || []).filter(r => sel[r.inst] && canBatch(r))
+  const isRedo = r => REDO_KINDS.includes((plans[r.inst] || {}).kind)
+  const pickedRedo = picked.filter(isRedo)
   const runBatch = async () => {
     const list = picked
     if (!list.length) return
     const tot = list.reduce((s, r) => s + (r.amount || 0), 0)
-    if (!window.confirm(`批量保存到金蝶：${list.length} 张，付款合计 ${money(tot)}\n\n每张：系统审核金蝶付款单 → 往金蝶自动生成的付款凭证里补核销分录、改支付摘要。\n凭证本身不审核，留给你在金蝶核对后审核。\n一张约半分钟，中途可以离开本页。确定？`)) return
+    const redo = list.filter(isRedo)
+    const warn = redo.length
+      ? `\n\n⚠ 其中 ${redo.length} 张要红冲更正（原计提整笔红冲，再按发票重新计提）：\n` +
+        redo.map(r => `  · ${label(r)}：${(plans[r.inst] || {}).text || ''}`).join('\n') +
+        `\n这几张写完后请在金蝶重点核对红冲、更正两段。`
+      : ''
+    if (!window.confirm(`批量保存到金蝶：${list.length} 张，付款合计 ${money(tot)}${warn}\n\n每张：系统审核金蝶付款单 → 往金蝶自动生成的付款凭证里补分录、改支付摘要 → 提交凭证。\n凭证不审核，留给你在金蝶核对后审核。\n一张约半分钟，中途可以离开本页。确定？`)) return
     const done = []
     for (let i = 0; i < list.length; i++) {
       const r = list[i]
       setRun({ i: i + 1, n: list.length, cur: label(r), done: [...done] })
       try {
         const x = await voucherPost(r.inst)
-        done.push({ inst: r.inst, label: label(r), ok: true, vno: x.vno, msg: `记-${x.vno}` })
+        done.push({ inst: r.inst, label: label(r), ok: true, vno: x.vno, redo: isRedo(r),
+          msg: `记-${x.vno}${isRedo(r) ? '（含红冲更正，请在金蝶重点核对）' : ''}${(x.steps || []).some(t => t.startsWith('凭证提交失败')) ? '；凭证没提交成功，请在金蝶手动提交' : ''}` })
       } catch (e) {
         done.push({ inst: r.inst, label: label(r), ok: false, msg: e.message })
       }
@@ -254,7 +266,7 @@ export default function LogisticsVoucher() {
     <div className="lv">
       <style>{CSS}</style>
       <div className="head"><div><div className="h-title">付款做账 · 物流请款单</div>
-        <div className="h-sub">付款后合成一张凭证：红冲 → 更正 → 核销（暂估转待认证）→ 支付。计提取金蝶、发票取发票管家、维度更正取复核台登记。「保存到金蝶」＝系统审核付款单，再往金蝶自动生成的付款凭证里补分录；凭证留给人在金蝶审核。</div></div></div>
+        <div className="h-sub">付款后合成一张凭证：红冲 → 更正 → 核销（暂估转待认证）→ 支付。计提取金蝶、发票取发票管家、维度更正取复核台登记。「保存到金蝶」＝系统审核付款单，再往金蝶自动生成的付款凭证里补分录并提交；凭证留给人在金蝶审核。</div></div></div>
       <div className="body">
         <div className="lv-bar">
           {ORDER.map(k => <button key={k} className={'lv-chip ' + ST[k][1] + (f === k ? ' on' : '')} title={ST[k][2]} onClick={() => setF(f === k ? '' : k)}>{ST[k][0]}<b>{cnt[k] || 0}</b></button>)}
@@ -272,10 +284,13 @@ export default function LogisticsVoucher() {
         <div className="lv-batch">
           <span>已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((s, r) => s + (r.amount || 0), 0))}</b></>}</span>
           <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}>批量保存到金蝶</button>
-          <span className="dim">只能勾「可做账」且全部一致、只核销的；有红冲更正（含尾差）的先单张做</span>
+          <span className="dim">能勾「可做账」且做账类型为 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的；计提记错主体、金额不符的要人工</span>
           {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
             {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
         </div>
+        {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
+          {pickedRedo.map(r => <span key={r.inst} className="lv-redo">{label(r)}<span className="dim">（{(plans[r.inst] || {}).text}）</span></span>)}
+          建议先点开预览看一眼；写完后在金蝶重点核对红冲、更正两段。</div>}
         {run && run.done.length > 0 && <ul className="lv-runlist">{run.done.map(x => <li key={x.inst} className={x.ok ? 'ok' : 'bad'}>{x.ok ? '✓' : '✗'} {x.label}：{x.msg}</li>)}</ul>}
         <div className="tbl-wrap"><table className="lv-t lv-list">
           <thead><tr><th className="ck"><input type="checkbox" title="勾选当前列表里能批量做账的"
@@ -300,7 +315,7 @@ export default function LogisticsVoucher() {
                 : (r.dt_status === 'RUNNING' ? <span className="dim">钉钉审批中</span> : <span className="dim">已通过 · 待付款</span>)
               return <tr key={r.inst}>
                 <td className="ck"><input type="checkbox" disabled={!canBatch(r)} checked={!!sel[r.inst] && canBatch(r)}
-                  title={canBatch(r) ? '勾选批量做账' : r.posted ? '已写金蝶' : r.status !== 'ready' ? '还不能做账' : '需红冲更正/人工的不进批量，单张做'}
+                  title={canBatch(r) ? (isRedo(r) ? '勾选批量做账（⚠ 这张要红冲更正）' : '勾选批量做账') : r.posted ? '已写金蝶' : r.status !== 'ready' ? '还不能做账' : '计提记错主体/金额不符的要人工，不进批量'}
                   onChange={e => setSel(o => ({ ...o, [r.inst]: e.target.checked }))} /></td>
                 <td className="nw">{r.subject}<div className="code2">{r.book}</div></td>
                 <td className="sup">{r.sup_full}<div className="code2">{r.code}</div></td>
@@ -370,6 +385,8 @@ const CSS = `
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
 .lv .lv-kind{font-size:13px;margin:6px 0}
 .lv .lv-batch{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);font-size:12.5px}
+.lv .lv-msg.warn{background:var(--amber-bg);border:1px solid var(--amber-line);color:var(--ink);padding:8px 12px;border-radius:8px;font-size:12.5px;line-height:1.9}
+.lv .lv-redo{display:inline-block;margin:0 10px 0 4px;font-weight:600}
 .lv .lv-run{color:var(--accent);font-weight:600}.lv .lv-runlist{margin:6px 0;padding:8px 12px 8px 26px;font-size:12.5px;background:var(--bg-sub);border-radius:8px}
 .lv .lv-runlist li.ok{color:var(--green)}.lv .lv-runlist li.bad{color:var(--red)}
 .lv .lv-list th.ck,.lv .lv-list td.ck{width:34px;text-align:center}

@@ -355,7 +355,7 @@ async def paper_override(request: Request):
 # 流程(顺丰速运 960 / 深圳星期零 记-260 实证)：付款单 暂存→Save(只传 FID，生成单号，字段不变)→Submit→Audit
 #   （用户授权：物流付款单由系统提交审核，是确认书 D11「审核留给人」的例外，只限物流付款单）→ 金蝶约 5 秒自动生成付款凭证(状态 A)
 #   → 读回这张凭证 → Save(IsDeleteEntry=False + NeedUpDateFields) 加红冲/更正/核销分录、支付两行改摘要。
-#   金蝶允许改自动凭证；新加的行排在支付行后面(行号不随顺序变)，用户同意「支付在前」。凭证本身不审核，留给人在金蝶审。
+#   金蝶允许改自动凭证；新加的行排在支付行后面(行号不随顺序变)，用户同意「支付在前」。补完分录提交凭证(V2.758)，凭证不审核，留给人在金蝶审。
 _AUDIT_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Audit.common.kdsvc"
 _POST_LOCK = {}
 _KD_BASE = {"FCURRENCYID": {"FNumber": "PRE001"}, "FEXCHANGERATETYPE": {"FNumber": "HLTX01_SYS"}, "FEXCHANGERATE": 1.0}
@@ -454,9 +454,12 @@ def _post(inst, user):
     e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["GL_VOUCHER", json.dumps(body, ensure_ascii=False)]).json())
     if e:
         return {"ok": False, "msg": "付款单已审核、凭证 记-%s 已生成，但补分录失败：%s（凭证还是金蝶原样，可人工补）" % (vno, e), "steps": steps, "vno": vno}
+    # 补完分录就提交凭证(用户 2026-10-02：公司凭证做完都提交，进审核人的待审列表；审核仍留给人)
+    sub_err = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["GL_VOUCHER", json.dumps({"Ids": str(vid)})]).json())
     m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
     rec = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book, "at": _now(), "by": user,
-           "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2}
+           "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2,
+           "submitted": not sub_err, "submit_err": sub_err, "status": m2.get("DocumentStatus")}
     posted = dict(db.get_setting(_POSTED_KEY, None) or {})
     posted[inst] = rec
     db.set_setting(_POSTED_KEY, posted, user)
@@ -464,12 +467,13 @@ def _post(inst, user):
         c.execute(text("update logistics_payreq set kd_paid=:v where inst_id=:i"), {"v": "%s|C|%s" % (str(pb["日期"])[:10], fid), "i": inst})
     db.audit(user, "物流付款做账-写入金蝶凭证", "记-%s" % vno, "%s 付款单 %s；补 %d 行；借 %s 贷 %s" % (book, pb["单号"], len(new), rec["dr"], rec["cr"]))
     steps.append("凭证 记-%s 补 %d 行、改支付摘要" % (vno, len(new)))
+    steps.append("凭证已提交，等人审核" if not sub_err else "凭证提交失败：%s（凭证已保存，可在金蝶手动提交）" % sub_err)
     return {"ok": True, "vno": vno, "bill_no": pb["单号"], "steps": steps, "dr": rec["dr"], "cr": rec["cr"]}
 
 
 @router.post("/api/logistics-voucher/post")
 async def post_to_kingdee(request: Request):
-    """保存到金蝶：审核付款单 → 金蝶自动出付款凭证 → 往里补红冲/更正/核销分录、改支付摘要。凭证不审核。"""
+    """保存到金蝶：审核付款单 → 金蝶自动出付款凭证 → 往里补红冲/更正/核销分录、改支付摘要 → 提交凭证。凭证不审核。"""
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
