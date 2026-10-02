@@ -279,6 +279,30 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(vals[1][cols.index("审核状态")], "已审核")
         self.assertEqual(vals[-1][cols.index("价税合计")], 600)
 
+    def test_bookkeeping_record_filter_export(self):
+        iid, _ = self.make_item(num(9744), 123)
+        url = f"/api/inv/item/{iid}/bookkeeping"
+        body = {"status": "booked", "vouchers": [{"book": "测试账簿", "period": "2026-09", "number": "记-123"}, {"book": "另一账簿", "period": "2026-10", "number": "记-456"}]}
+        self.assertEqual(self.post(url, "viewer", body).status_code, 403)
+        self.assertEqual(self.post(url, "acct", {"status": "booked"}).status_code, 400)
+        self.assertEqual(self.post(url, "acct", {"status": "booked", "vouchers": [{"book": "A", "period": "2026-13", "number": "1"}]}).status_code, 400)
+        self.S.item_update(self.e, iid, flags_json={"_warnings": ["keep"]})
+        r = self.ok(self.post(url, "acct", body))
+        self.assertEqual(len(r["item"]["bookkeeping"]["vouchers"]), 2)
+        self.assertEqual(r["item"]["warnings"], ["keep"])
+        q = "?q=" + num(9744)
+        self.assertEqual(self.ok(self.get("/api/inv/ledger" + q + "&booked=booked", "viewer"))["total"], 1)
+        self.assertEqual(self.ok(self.get("/api/inv/ledger" + q + "&booked=unknown", "viewer"))["total"], 0)
+        from openpyxl import load_workbook
+        ws = load_workbook(io.BytesIO(self.get("/api/inv/ledger/export" + q, "viewer").content)).active
+        headers = [c.value for c in ws[1]]
+        self.assertEqual(ws.cell(2, headers.index("做账状态") + 1).value, "已做账")
+        self.assertIn("记-456", ws.cell(2, headers.index("凭证信息") + 1).value)
+        self.ok(self.post(url, "acct", {"status": "unbooked"}))
+        self.assertEqual(self.ok(self.get("/api/inv/ledger" + q + "&booked=unbooked", "viewer"))["total"], 1)
+        self.S.item_update(self.e, iid, review="void")
+        self.assertEqual(self.post(url, "acct", body).status_code, 409)
+
     def test_03_void_frees_dedup(self):
         a, _ = self.make_item(num(3001), 88)
         self.ok(self.post("/api/inv/folder/manual", "intern", {"title": "第二张单", "company": self.OUR}))

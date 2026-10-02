@@ -48,7 +48,7 @@ REPORT_CAP = 2000                   # 对账报告每张清单最多存这么多
 LIST_COVER = ("special", "normal", "travel", "toll", "train", "flight", "vehicle")   # 税局「取得发票」清单能覆盖的票种
 # 台账审核状态筛选：approved（默认）/ withvoid（页面「含作废」＝已审核＋已作废）/ void / pending / draft / returned / all（仅内部用）
 LEDGER_REVIEWS = S.LEDGER_REVIEWS
-LEDGER_EXTRA_COLUMNS = ["审核状态", "本单分摊额"]   # 导出在票面列后加两列：含作废时看得出哪行作废；拆分票看得出本单算多少
+LEDGER_EXTRA_COLUMNS = ["审核状态", "本单分摊额", "做账状态", "凭证信息", "做账确认人", "做账确认时间"]   # 导出在票面列后加两列：含作废时看得出哪行作废；拆分票看得出本单算多少
 REVIEW_CN = {"approved": "已审核", "void": "已作废", "pending": "待审核", "draft": "收票中", "returned": "已退回"}
 LATER_ACTIVE = ("open", "partial")
 LATER_STATUSES = ("open", "partial", "done", "closed", "overdue")
@@ -254,7 +254,7 @@ def _tmp_meta(token, kind):
 def _ledger_filters(qp):
     """查询参数 → (store.ledger_query 的 filters, 错误原因)。日期统一成 YYYY-MM-DD。"""
     f = {}
-    for k in ("q", "invType", "verify", "deduct", "seller", "kind"):
+    for k in ("q", "invType", "verify", "deduct", "seller", "kind", "booked"):
         v = inv._s(qp.get(k), 100)
         if v:
             f[k] = v
@@ -265,6 +265,8 @@ def _ledger_filters(qp):
                 f[k] = inv._norm_date(raw)
             except ValueError:
                 return None, "日期格式不对（要 2026-09-01 这样）：%s" % raw
+    if f.get("booked") and f["booked"] not in ("booked", "unbooked", "unknown"):
+        return None, "做账状态不正确"
     rv = inv._s(qp.get("review"), 12) or "approved"
     f["review"] = rv if rv in LEDGER_REVIEWS else "approved"
     return f, None
@@ -279,6 +281,7 @@ def _ledger_row_values(r):
     else:
         typ = r.get("type_label") or ie.INV_TYPE_LABELS.get(r.get("inv_type") or "", r.get("inv_type") or "")
     split = bool(r.get("split")) and r.get("alloc") is not None
+    bk = (r.get("flags_json") or {}).get("_bookkeeping") or {}
     return [f.get("business_id"), f.get("template"), f.get("applicant"), f.get("dept"),
             f.get("payee_name") or f.get("title"), typ, r.get("code"), r.get("number"), r.get("issue_date"),
             r.get("seller_name"), r.get("seller_tax_id"), r.get("buyer_name"), r.get("buyer_tax_id"),
@@ -288,7 +291,10 @@ def _ledger_row_values(r):
             ie.DEDUCT_STATUS_LABELS.get(r.get("deduct_status") or "", r.get("deduct_status")),
             r.get("created_by"), r.get("created_at"), r.get("review_by"), r.get("review_at"),
             ie.ORIGIN_LABELS.get(r.get("origin") or "", r.get("origin")),
-            REVIEW_CN.get(r.get("review") or "", r.get("review") or ""), r.get("alloc") if split else None]
+            REVIEW_CN.get(r.get("review") or "", r.get("review") or ""), r.get("alloc") if split else None,
+            {"booked": "已做账", "unbooked": "未做账"}.get(bk.get("status"), "未确认"),
+            "；".join("%s · %s · %s" % (v["book"], v["period"], v["number"]) for v in bk.get("vouchers", [])),
+            bk.get("by"), bk.get("at")]
 
 
 def _ledger_export_bytes(filters):
@@ -339,6 +345,51 @@ def _ledger_page(filters, page, size):
     for v, r in zip(views, rows):
         v["folder"] = _folder_brief(r.get("folder"))
     return total, sums, views
+
+
+def _bookkeeping_body(body):
+    status = body.get("status")
+    vouchers = body.get("vouchers", [])
+    if status not in ("booked", "unbooked", "unknown") or not isinstance(vouchers, list) or len(vouchers) > 20:
+        raise ValueError("做账状态或凭证数量不正确（最多 20 张）")
+    clean = []
+    for v in vouchers:
+        if not isinstance(v, dict):
+            raise ValueError("凭证信息不正确")
+        row = {k: str(v.get(k) or "").strip() for k in ("book", "period", "number")}
+        if not row["book"] or len(row["book"]) > 100 or not row["number"] or len(row["number"]) > 60 or not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", row["period"]):
+            raise ValueError("请填写账簿、期间（YYYY-MM）和凭证号")
+        if row not in clean:
+            clean.append(row)
+    if status == "booked" and not clean:
+        raise ValueError("已做账必须填写至少一张凭证")
+    if status != "booked" and clean:
+        raise ValueError("未做账或未确认时不能保留凭证，请先清空")
+    return {"status": status, "vouchers": clean}
+
+
+@router.post("/api/inv/item/{item_id}/bookkeeping")
+async def item_bookkeeping(item_id: int, request: Request):
+    u, bad = need(request, ENTER_LEDGER, inv.CAP_AUDIT)
+    if bad:
+        return bad
+    try:
+        bk = _bookkeeping_body(await inv.body_json(request))
+    except ValueError as exc:
+        return err(str(exc), 400)
+    def run():
+        with E().begin() as cx:
+            row = S._row(cx.execute(select(S.ITEM).where(S.ITEM.c.id == item_id).with_for_update()).first())
+            if not row or row["status"] != "active" or row["review"] != "approved":
+                return err("只能更新有效且审核通过的票", 409)
+            flags = dict(row["flags_json"] or {})
+            previous = flags.get("_bookkeeping") or {}
+            bk.update(by=u["name"], at=inv.now_s(), source="manual")
+            flags["_bookkeeping"] = bk
+            cx.execute(update(S.ITEM).where(S.ITEM.c.id == item_id).values(flags_json=S._dumps(flags), updated_at=inv.now_s()))
+        inv.log(u, "确认发票做账记录", folder_id=row["folder_id"], item_id=item_id, detail={"before": previous, "after": bk})
+        return {"ok": True, "item": inv.item_view(S.item_get(E(), item_id))}
+    return await run_in_threadpool(run)
 
 
 @router.get("/api/inv/ledger")

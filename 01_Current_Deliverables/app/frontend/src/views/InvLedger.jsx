@@ -5,7 +5,7 @@
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invLedger, invLedgerExportUrl, invItemVoid, invFolder,
+  invConfig, invLedger, invLedgerExportUrl, invItemBookkeeping, invItemVoid, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
   invDeductPrepare, invDeductDownloadUrl,
   invSellers, invSellerCheck,
@@ -83,11 +83,11 @@ function NoPerm({ what }) {
 
 // ───────────────────────── 页签 1：台账查询 ─────────────────────────
 
-const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', withVoid: false }
+const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', booked: '', withVoid: false }
 // 台账只放审核通过的票；勾「含作废」＝已通过＋已作废（withvoid）。后端的 'all'（连草稿/待审都算）只给内部用，这页不发。
 export const toParams = f => ({
   from: f.from, to: f.to, q: f.q.trim(), invType: f.invType, verify: f.verify, deduct: f.deduct,
-  seller: f.seller.trim(), review: f.withVoid ? 'withvoid' : '',
+  seller: f.seller.trim(), booked: f.booked, review: f.withVoid ? 'withvoid' : '',
 })
 // 作废提示里带着税务动作（进项税额转出 / 撤销勾选）时要留在页面上，不能 2 秒就消失
 export const voidNeedsTaxAction = msg => /转出|撤销/.test(String(msg || ''))
@@ -137,6 +137,7 @@ function FilterBar({ f, setF, exportUrl, total }) {
           {DEDUCT_OPTS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
       </label>
+      <label>做账<select value={f.booked} onChange={e => set('booked', e.target.value)}><option value="">全部</option><option value="unknown">未确认</option><option value="unbooked">未做账</option><option value="booked">已做账</option></select></label>
       <label className="inv-lg-ck"><input type="checkbox" checked={f.withVoid} onChange={e => set('withVoid', e.target.checked)} />含作废</label>
       {dirty && <button type="button" className="btn" onClick={() => setF(EMPTY_FILTER)}>清空条件</button>}
       <span className="inv-lg-grow" />
@@ -152,7 +153,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
         <thead><tr>
           <th>开票日期</th><th>票种</th><th>发票号码</th><th>销方</th>
           <th className="num">金额</th><th className="num">税额</th><th className="num">价税合计</th>
-          <th>验真</th><th>抵扣</th><th>审批单</th><th>登记 / 审核</th>
+          <th>验真</th><th>抵扣</th><th>审批单</th><th>登记 / 审核</th><th>做账 / 凭证</th>
         </tr></thead>
         <tbody>
           {rows.map(r => {
@@ -173,6 +174,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
                 <td className="inv-lg-nowrap">{fBiz(f) ? <span className="mono">{fBiz(f)}</span> : <span>{f.title || '—'}</span>}
                   {f.applicant ? <span className="inv-lg-sub">{f.applicant}</span> : null}</td>
                 <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}</span></td>
+                <td>{bookText(r.bookkeeping)}{(r.bookkeeping?.vouchers || []).map((v, i) => <span key={i} className="inv-lg-sub">{v.book} · {v.period} · {v.number}</span>)}</td>
               </tr>
             )
           })}
@@ -183,7 +185,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
             <td className="num">{money(sum?.amount)}</td>
             <td className="num">{money(sum?.tax)}</td>
             <td className="num">{money(sum?.total)}</td>
-            <td colSpan={4} />
+            <td colSpan={5} />
           </tr></tfoot>
         )}
       </table>
@@ -234,7 +236,33 @@ function VoidModal({ item, onClose, onDone }) {
   )
 }
 
-function DetailPanel({ row, can, onClose, onVoided }) {
+const bookText = bk => ({ booked: '已做账', unbooked: '未做账' }[bk?.status] || '未确认')
+function Bookkeeping({ row, canEdit, onSaved }) {
+  const bk = row.bookkeeping || {}
+  const [status, setStatus] = useState(bk.status || 'unknown')
+  const [vouchers, setVouchers] = useState(bk.vouchers || [])
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const save = async () => {
+    setBusy(true); setMsg('')
+    try { const r = await invItemBookkeeping(row.id, { status, vouchers: status === 'booked' ? vouchers : [] }); onSaved(r) }
+    catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
+  }
+  return <section className="inv-lg-box"><div className="inv-lg-box-h">做账记录 · 财务确认</div>
+    {canEdit ? <>
+      <label>做账状态 <select value={status} disabled={busy} onChange={e => setStatus(e.target.value)}><option value="unknown">未确认</option><option value="unbooked">未做账</option><option value="booked">已做账</option></select></label>
+      {status === 'booked' && <>{vouchers.map((v, i) => <div key={i}>
+        {['book', 'period', 'number'].map((k, j) => <label key={k}>{['账簿', '会计期间', '凭证号'][j]}<input type={k === 'period' ? 'month' : 'text'} value={v[k]} maxLength={k === 'book' ? 100 : 60} disabled={busy} onChange={e => setVouchers(xs => xs.map((x, n) => n === i ? { ...x, [k]: e.target.value } : x))} /></label>)}
+        <button className="btn" disabled={busy} onClick={() => setVouchers(xs => xs.filter((_, n) => n !== i))}>移除凭证</button>
+      </div>)}<button className="btn" disabled={busy || vouchers.length >= 20} onClick={() => setVouchers(xs => [...xs, { book: '', period: '', number: '' }])}>添加凭证</button></>}
+      <button className="btn-pri" disabled={busy} onClick={save}>{busy ? '保存中…' : '保存做账记录'}</button>
+    </> : <><p>{bookText(bk)}</p>{(bk.vouchers || []).map((v, i) => <p key={i}>{v.book} · {v.period} · {v.number}</p>)}</>}
+    {bk.by && <p className="inv-muted">{bk.by} · {fmtTime(bk.at)}</p>}
+    <p className="inv-muted">人工核实后确认；尚未与金蝶自动匹配。</p><ErrLine msg={msg} />
+  </section>
+}
+
+function DetailPanel({ row, can, onClose, onVoided, onBooked }) {
   const [view, setView] = useState(false)
   const [field, setField] = useState('')
   const [voiding, setVoiding] = useState(false)
@@ -270,6 +298,7 @@ function DetailPanel({ row, can, onClose, onVoided }) {
       <button type="button" className="inv-lg-thumb" onClick={() => setView(true)} title="点开放大看">
         {file?.thumb ? <img src={file.thumb} alt="票面缩略图" /> : <span className="inv-muted">只有二维码信息，暂无图片</span>}
       </button>
+      <Bookkeeping key={row.id} row={row} canEdit={can.auditAct && row.review === 'approved'} onSaved={onBooked} />
       <FieldPanel item={row} activeField={field} onFieldFocus={k => { setField(k); if (file) setView(true) }} />
 
       <div className="inv-lg-box">
@@ -378,7 +407,7 @@ function QueryTab({ can, flash }) {
           {data && <Pager page={page} total={data.total} onPage={goPage} busy={busy} />}
           {busy && data && <div className="inv-muted inv-lg-busy"><span className="inv-spin" /> 正在刷新…</div>}
         </div>
-        {sel && <DetailPanel row={sel} can={can} onClose={() => setSel(null)} onVoided={onVoided} />}
+        {sel && <DetailPanel row={sel} can={can} onClose={() => setSel(null)} onVoided={onVoided} onBooked={r => { setSel(s => ({ ...s, ...r.item })); load(page) }} />}
       </div>
     </>
   )

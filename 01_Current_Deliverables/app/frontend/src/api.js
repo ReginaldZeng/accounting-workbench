@@ -521,6 +521,7 @@ export const invItemRemove = (id) => jp(`/api/inv/item/${id}/remove`)
 export const invItemSplit = (id, body) => jp(`/api/inv/item/${id}/split`, body)        // body={split, alloc}
 export const invItemRotate = (id, rotation) => jp(`/api/inv/item/${id}/rotate`, { rotation })
 export const invItemReprocess = (id) => jp(`/api/inv/item/${id}/reprocess`)
+export const invItemBookkeeping = (id, body) => jp(`/api/inv/item/${id}/bookkeeping`, body)
 export const invItemVoid = (id, note) => jp(`/api/inv/item/${id}/void`, { note })
 // 手机配对（电脑端）
 export const invPairCreate = () => jp('/api/inv/pair')

@@ -750,6 +750,7 @@ def item_view(it, idx=None, mobile=False):
          "pending": it.get("pending_json") or [], "procStatus": it.get("proc_status") or "done",
          "procError": it.get("proc_error") or "", "paper": bool(it.get("paper")),
          "flags": {k: x for k, x in fl.items() if not str(k).startswith("_")},
+         "bookkeeping": fl.get("_bookkeeping") or {},
          "warnings": list(fl.get("_warnings") or []), "region": fl.get("_region"),
          "auditOk": fl.get("_audOk"), "doubt": fl.get("_doubt"),
          "deductSuggest": it.get("deduct_suggest") or "", "deductReason": it.get("deduct_reason") or "",

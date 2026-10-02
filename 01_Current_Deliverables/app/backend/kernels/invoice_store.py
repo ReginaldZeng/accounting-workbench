@@ -1071,7 +1071,7 @@ def ledger_iter(e, filters, cap=100000, chunk=500):
     导出时边读边写 Excel，不用先把几万行连同 JSON 全装进内存（单进程只有 ~2G 可用）。"""
     conds, _review = _ledger_conds(filters)
     src = ITEM.outerjoin(FOLDER, FOLDER.c.id == ITEM.c.folder_id)
-    cols = [c for c in ITEM.c if c.name not in JSON_DEFAULTS] + \
+    cols = [c for c in ITEM.c if c.name not in JSON_DEFAULTS or c.name == "flags_json"] + \
         [FOLDER.c[c].label("f__" + c) for c in _LEDGER_FOLDER_COLS]
     stmt = (select(*cols).select_from(src).where(*conds)
             .order_by(ITEM.c.issue_date.desc(), ITEM.c.id.desc()).limit(max(1, int(cap or 1))))
@@ -1123,6 +1123,10 @@ def _ledger_conds(filters):
         conds.append(func.coalesce(ITEM.c.deduct_status, "").in_(("marked", "checked")))
     elif dd == "checked":
         conds.append(ITEM.c.deduct_status == "checked")
+    booked = g("booked")
+    book_status = func.coalesce(func.replace(func.json_extract(ITEM.c.flags_json, "$.\"_bookkeeping\".status"), '"', ''), "unknown")
+    if booked in ("booked", "unbooked", "unknown"):
+        conds.append(book_status == booked)
     s = g("seller")
     if s:
         conds.append(or_(_like(ITEM.c.seller_name, s), _like(ITEM.c.seller_tax_id, s)))
