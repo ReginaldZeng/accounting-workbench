@@ -22,6 +22,8 @@ const KIND = {
   hx: ['一致·只核销', 'ok'], tail: ['一致·核销含尾差', 'ok'], redo: ['需红冲更正', 'bad'],
   subj: ['计提记错主体', 'bad'], manual: ['金额不符·人工', 'warn'], noacc: ['没有计提', 'warn'], err: ['读取失败', 'neu'],
 }
+// 整单问题的建议动作
+const ACT = { subj: '原主体红冲、本主体补提后再做', manual: '人工核对差额（补提 / 查发票）', noacc: '先计提', err: '刷新重试' }
 const KIND_ORDER = ['hx', 'tail', 'redo', 'subj', 'manual', 'noacc']
 const BLOCK_CLS = { 红冲: 'b-red', 更正: 'b-fix', 核销: 'b-hx', 支付: 'b-pay' }
 const MODE = { hx: ['核销', 'ok'], rate: ['红冲+更正', 'bad'], fix: ['红冲+更正', 'bad'] }
@@ -242,10 +244,10 @@ export default function LogisticsVoucher() {
         {err && <div className="lv-msg bad">{err}</div>}
         <div className="tbl-wrap"><table className="lv-t lv-list">
           <thead><tr><th>主体</th><th>物流商</th><th>费用类型</th><th className="num">计提金额</th><th>税率</th><th>计提凭证</th>
-            <th>审核结果</th><th className="num">付款金额</th><th>付款单状态</th><th></th></tr></thead>
+            <th>审核结果</th><th>建议动作</th><th className="num">付款金额</th><th>付款单状态</th><th></th></tr></thead>
           <tbody>
-            {rows === null && <tr><td colSpan="10" className="lv-empty">读取中…</td></tr>}
-            {rows && !shown.length && <tr><td colSpan="10" className="lv-empty">没有</td></tr>}
+            {rows === null && <tr><td colSpan="11" className="lv-empty">读取中…</td></tr>}
+            {rows && !shown.length && <tr><td colSpan="11" className="lv-empty">没有</td></tr>}
             {shown.map(r => {
               const p = plans[r.inst]
               const acc = (p && p.acc) || []
@@ -262,18 +264,22 @@ export default function LogisticsVoucher() {
               return <tr key={r.inst}>
                 <td className="nw">{r.subject}<div className="code2">{r.book}</div></td>
                 <td className="sup">{r.sup_full}<div className="code2">{r.code}</div></td>
-                <td>{stack(a => a.fee || '—')}</td>
+                <td>{stack(a => <>{a.fee || '—'}{a.biz && <span className="dim"> · {a.biz}</span>}</>)}</td>
                 <td className="num">{stack(a => money(a.gross))}</td>
                 <td>{stack(a => a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate))}</td>
                 <td>{stack(a => <span className="mono">{a.month}/{a.vno}#</span>)}</td>
-                <td className="kd">
-                  {acc.length > 0 && <div className="ml">{acc.map(a => <div key={a.vno} title={a.why}>{a.mode === 'hx' ? <span className="ok">核销</span>
-                    : a.mode ? <span className="bad">红冲更正</span> : <span className="dim">—</span>}</div>)}</div>}
-                  {p && <div className="kres"><span className={'lv-pill ' + kcl} title={p.text}>{klb}</span>
-                    {['subj', 'manual', 'noacc', 'err'].includes(p.kind) && <div className="dim kt">{p.text}</div>}</div>}
-                  {!calc && <span className="dim">{!r.period ? '未认账单月' : '票夹没有发票'}</span>}
-                  {pending && <span className="dim">计算中…</span>}
-                </td>
+                {(() => {
+                  // 审核结果＝比对出来的事实，建议动作＝要做什么；逐张计提一行，和左边对齐。整单问题(主体错/金额不符…)各写一句。
+                  if (!calc) return <><td><span className="dim">{!r.period ? '未认账单月' : '票夹没有发票'}</span></td><td><span className="dim">{!r.period ? '到账单核对总表认领月份' : '收票台补票'}</span></td></>
+                  if (pending) return <><td><span className="dim">计算中…</span></td><td></td></>
+                  if (['subj', 'manual', 'noacc', 'err'].includes(p.kind)) return <>
+                    <td className="kd"><span className={KIND[p.kind] ? (KIND[p.kind][1] === 'bad' ? 'bad' : 'warn') : ''}>{KIND[p.kind]?.[0]}</span><div className="dim kt">{p.text}</div></td>
+                    <td className="kd">{ACT[p.kind]}</td></>
+                  return <>
+                    <td>{stack(a => a.mode === 'hx' ? <span className="ok">一致{a.tail ? <span className="dim"> · 尾差 {money(a.tail)}</span> : ''}</span>
+                      : a.mode === 'rate' ? <span className="bad" title={a.why}>税率不符</span> : a.mode === 'fix' ? <span className="bad" title={a.why}>有计提更正</span> : '—')}</td>
+                    <td>{stack(a => a.mode === 'hx' ? (a.tail ? '核销 + 尾差' : '核销') : a.mode ? <b className="bad">红冲 + 更正</b> : '—')}</td></>
+                })()}
                 <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
                 <td className="nw">{pay}<div className="dim">纸质件 {r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr ? ' · 已放行' : ''}</div>
                   <span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span>{r.posted && <div className="dim">已写金蝶 记-{r.posted.vno}</div>}</td>

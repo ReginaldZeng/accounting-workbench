@@ -301,6 +301,8 @@ def _preview_data(inst, self_vno=None):
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
+                          "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
+                          "tail": pl["tails"].get(v["vno"]),
                           **(pl["per"].get(v["vno"]) or {"mode": "", "new_rate": None, "why": ""})} for v in vouchers],
             "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"]},
             "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}, 200
@@ -320,7 +322,7 @@ async def plans(request: Request):
                 d, code = _preview_data(str(inst))
                 if code == 200:
                     out[inst] = {"kind": d.get("kind"), "text": d.get("kind_text"),
-                                 "acc": [{k: a.get(k) for k in ("vno", "month", "fee", "expl", "gross", "rate", "mode", "new_rate", "why")}
+                                 "acc": [{k: a.get(k) for k in ("vno", "month", "fee", "biz", "tail", "expl", "gross", "rate", "mode", "new_rate", "why")}
                                          for a in d.get("accruals") or []]}
                 else:
                     out[inst] = {"kind": "err", "text": d.get("msg"), "acc": []}
