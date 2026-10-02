@@ -53,7 +53,7 @@ function rateCheck(acc, inv) {
   const g = {}
   const put = (r, k, v) => { const key = Math.round(r * 10000); (g[key] = g[key] || { r, acc: 0, fixed: 0, inv: 0 })[k] += v }
   acc.forEach(a => { put(a.rate, 'acc', a.gross); put(a.mode === 'rate' || a.mode === 'fix' ? (a.new_rate ?? a.rate) : a.rate, 'fixed', a.gross) })
-  inv.forEach(i => { const r = rateOf(i.rate); if (r != null) put(r, 'inv', i.gross) })
+  inv.forEach(i => { const r = i.deduct === false ? 0 : rateOf(i.rate); if (r != null) put(r, 'inv', i.gross) })   // 普票不抵扣按 0%
   return Object.values(g).sort((a, b) => a.r - b.r).map(x => ({ ...x, acc: r2(x.acc), fixed: r2(x.fixed), inv: r2(x.inv) }))
 }
 
@@ -99,7 +99,7 @@ function adjustSheet(d) {
   }).join('')
   const S = (k, w) => r2(adj.reduce((s, a) => s + (a[w][k] || 0), 0))
   const tot = (lb, w, cls) => `<tr class="tot ${cls}"><td colspan="11" class="n">${lb}</td><td class="n">${money(S('gross', w))}</td><td></td><td class="n">${money(S('net', w))}</td><td class="n">${money(S('tax', w))}</td><td></td></tr>`
-  const invTxt = inv.map(i => `<span class="m">${esc(i.number)}</span>（${esc(i.rate)}，含税 ${money(i.gross)}，税额 ${money(i.tax)}）`).join('；')
+  const invTxt = inv.map(i => `<span class="m">${esc(i.number)}</span>（${esc(i.rate)}${i.deduct === false ? '·不抵扣' : ''}，含税 ${money(i.gross)}，税额 ${money(i.tax)}）`).join('；')
   return `<div class="sheet">
   <div class="t1">计提更正单</div>
   <div class="t2">供应商编码：${esc(q.code)}　　　供应商名称：${esc(q.payee)}</div>
@@ -242,7 +242,7 @@ function Detail({ inst, onClose, onChanged }) {
             <tbody>
               {d.invoices.map(i => <tr key={i.id}>
                 <td className="mono">{i.number}</td><td className="ell" title={i.type}>{i.type}</td>
-                <td className="num">{money(i.gross)}</td><td>{i.rate}</td><td className="num">{money(i.tax)}</td>
+                <td className="num">{money(i.gross)}</td><td>{i.rate}{i.deduct === false && <span className="warn"> · 不抵扣</span>}</td><td className="num">{money(i.tax)}</td>
                 <td>{i.paper ? <span className="ok">纸质件已到</span> : <span className="warn">纸质件未到</span>}
                   {i.booked && <span className="dim"> · 已做账 {(i.vouchers || []).join('、')}</span>}</td>
               </tr>)}

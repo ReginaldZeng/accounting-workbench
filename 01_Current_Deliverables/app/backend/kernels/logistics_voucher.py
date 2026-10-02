@@ -264,7 +264,8 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
             acc = r2(acc + amt)
             out.append(_ln("更正", e, l["acct"], l["acct_name"], dr=amt, src=l, keep=EXP_DIMS))
         tl = v["tax_line"] or v["ap_line"] or {}
-        out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=("sup_code", "sup_name")))
+        if tax:                                  # 更正到 0%(普票不抵扣)不出 0 金额的税行
+            out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=("sup_code", "sup_name")))
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
         v["_new"] = {"gross": gross, "tax": tax}
     # 核销：每张票一行待认证 + 每张计提一行贷暂估(更正过的用新税额、引用本凭证号)
@@ -272,6 +273,8 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     pre, items, mc = merged_desc(vouchers, sup)
     hx_desc = "核销%s%s%s" % (refs, pre, items)
     for i in invoices:
+        if i.get("deduct") is False:            # 普票等不能抵扣：不出待认证行(调用方已按 0 税率、0 税额参与核对)
+            continue
         out.append(_ln("核销", "%s%s" % (i["number"], hx_desc), "2221.01.06", "待认证进项税额", dr=float(i.get("tax") or 0)))
     for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])):
         t = v["_new"]["tax"] if v in redo else v["tax"]
@@ -280,6 +283,9 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     # 支付
     if ctx.get("paid"):
         pe = "%s提起支付%s%s%s" % (ctx.get("applicant") or "", sup, mc, items)
+        plain = [i["number"] for i in invoices if i.get("deduct") is False and i.get("number")]
+        if plain:                                # 普票号码写进支付摘要，发票管家按摘要里的号码认「已做账」
+            pe += "（普票%s）" % "、".join(plain)
         ap = (vouchers[0]["ap_line"] if vouchers else None) or {}
         out.append(_ln("支付", pe, "2241.02", "供应商往来", dr=ctx["pay_amount"], src=ap, keep=SUP_DIMS))
         out.append({"block": "支付", "expl": pe, "acct": "1002", "acct_name": "银行存款", "dr": 0.0, "cr": r2(ctx["pay_amount"]),

@@ -105,6 +105,29 @@ class T(unittest.TestCase):
         v = V.acc_voucher("424", [], 2025, 12)
         self.assertEqual(V.ref_of(v, 2026), "2025-12/424#")
 
+    def test_plain_invoice_not_deductible(self):
+        # 恒茂 8 月孝感：计提按 0% 全额进费用；发票是普票 1%(不能抵扣，调用方传 rate 0 / tax 0 / deduct False) → 只核销，不红冲更正
+        e = "计提孝感市恒茂食品有限责任公司8月线下仓储费"
+        v = V.acc_voucher("564", [{"acct": "6601", "acct_name": "销售费用", "dr": 78733.53, "cr": 0, "expl": e, **D6601_CC},
+                                  {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": 78733.53, "expl": e, **SC}], 2026, 8)
+        inv = [{"number": "26422000003323832436", "rate": 0, "gross": 78733.53, "tax": 0.0, "deduct": False}]
+        pl = V.plan([v], inv, {})
+        self.assertEqual(pl["status"], "ok")
+        self.assertEqual(pl["per"]["564"]["mode"], "hx")
+        ctx = dict(CTX, supplier="孝感市恒茂食品有限责任公司", pay_amount=78733.53)
+        ls = V.build(ctx, [v], inv, pl)
+        self.assertEqual([l["block"] for l in ls], ["支付", "支付"])
+        self.assertIn("普票26422000003323832436", ls[0]["expl"])
+        # 计提错分了税(1%)：要红冲后按 0% 更正
+        v2 = V.acc_voucher("564", [{"acct": "6601", "acct_name": "销售费用", "dr": 77953.99, "cr": 0, "expl": e, **D6601_CC},
+                                   {"acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 779.54, "cr": 0, "expl": e, **SC},
+                                   {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": 78733.53, "expl": e, **SC}], 2026, 8)
+        pl2 = V.plan([v2], inv, {})
+        self.assertEqual(pl2["per"]["564"]["mode"], "rate")
+        ls2 = V.build(ctx, [v2], inv, pl2)
+        self.assertFalse([l for l in ls2 if l["acct"] == "2221.01.06"])
+        self.assertFalse([l for l in ls2 if not l["dr"] and not l["cr"]])
+        self.assertEqual(V.balance(ls2)[0], V.balance(ls2)[1])
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,7 +65,9 @@ def _invoices(inst_id):
         except Exception:
             fl = {}
         bk = fl.get("_bookkeeping") or {}
+        # 能抵扣的只有专票、旅客运输票；普票/出租车票等不抵扣(用户 2026-10-02「普票不能抵扣，不做更正」)
         out.append({"id": x["id"], "number": x["number"] or "", "type": x["type_label"] or x["inv_type"] or "",
+                    "deduct": (x["inv_type"] or "") in ("special", "travel"),
                     "gross": float(x["total"] or 0), "net": float(x["amount"] or 0), "tax": float(x["tax"] or 0),
                     "rate": x["tax_rate"] or "", "paper": bool(x["paper"]), "review": x["review"] or "",
                     "booked": bk.get("status") == "booked", "vouchers": bk.get("vouchers") or [],
@@ -273,7 +275,13 @@ def _preview_data(inst, self_vno=None):
                 break
     fixes = _fixes(r["carrier"], r["period"], r["subject"])
     fixes = {k: v for k, v in fixes.items() if any(x["vno"] == k for x in vouchers)}
-    inv_in = [{"number": i["number"], "rate": i["rate"], "gross": i["gross"], "tax": i["tax"]} for i in invs]
+    # 不能抵扣的票按 0 税率、0 税额参与核对：计提本就全额进费用的直接核销；计提分了税的要红冲更正到 0%
+    inv_in = [{"number": i["number"], "rate": i["rate"], "gross": i["gross"], "tax": i["tax"]} if i["deduct"] else
+              {"number": i["number"], "rate": 0, "gross": i["gross"], "tax": 0.0, "deduct": False} for i in invs]
+    nd = [i for i in invs if not i["deduct"]]
+    if nd:
+        notes.append("%s 不能抵扣（%s），按含税全额进费用核对、不出待认证行，号码写进支付摘要" %
+                     ("、".join(i["number"] or "无号码" for i in nd), "、".join(dict.fromkeys(i["type"] for i in nd))))
     pl = LV.plan(vouchers, inv_in, fixes) if (vouchers and inv_in) else \
         {"status": "manual", "msgs": ["金蝶本期没找到这家的计提凭证" if not vouchers else "票夹里还没有发票"], "per": {}, "tails": {}}
     pi = _paid_info(r) or {}
