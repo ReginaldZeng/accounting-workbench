@@ -189,7 +189,7 @@ def _ln(block, expl, acct, acct_name, dr=0.0, cr=0.0, src=None, keep=()):
 
 
 EXP_DIMS = ("dept_code", "dept", "fee_code", "fee", "biz_code", "biz", "proj_code", "proj")
-SUP_DIMS = ("sup_code", "sup_name")
+SUP_DIMS = ("sup_code", "sup_name", "sup_grp")
 
 
 def _split_code(v):
@@ -219,7 +219,8 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     py = ctx["pay_year"]
     out = []
     redo = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") in ("rate", "fix")]
-    self_ref = "%d/□#" % ctx["pay_month"]           # 本张凭证号，保存后回填
+    # 本张凭证号：写金蝶时付款单自动凭证的号已知(ctx.self_vno)，直接填；预览时用 □ 占位
+    self_ref = "%d/%s#" % (ctx["pay_month"], ctx.get("self_vno") or "□")
     # 红冲：原分录全额取负
     for v in redo:
         e = "红冲%s%s" % (ref_of(v, py), v["expl"])
@@ -257,7 +258,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
             acc = r2(acc + amt)
             out.append(_ln("更正", e, l["acct"], l["acct_name"], dr=amt, src=l, keep=EXP_DIMS))
         tl = v["tax_line"] or v["ap_line"] or {}
-        out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=SUP_DIMS))
+        out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=("sup_code", "sup_name")))
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
         v["_new"] = {"gross": gross, "tax": tax}
     # 尾差(照记-221)：费用红冲 d、暂估更正 d
@@ -277,7 +278,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])):
         t = v["_new"]["tax"] if v in redo else r2(v["tax"] + pl["tails"].get(v["vno"], 0))
         if t:
-            out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=SUP_DIMS))
+            out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
     # 支付
     if ctx.get("paid"):
         pe = "%s提起支付%s%s%s" % (ctx.get("applicant") or "", sup, mc, items)

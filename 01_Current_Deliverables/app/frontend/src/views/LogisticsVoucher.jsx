@@ -4,7 +4,7 @@
 //   点开：计提 vs 发票逐张比（核销 / 红冲更正 + 原因）+ 整张凭证预览（带全部核算维度，借贷平衡）。
 //   第一版只预览、不写金蝶；纸质件没到可手动放行（用户 2026-10-02 定）。
 import React, { useEffect, useMemo, useState } from 'react'
-import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans } from '../api.js'
+import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost } from '../api.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
@@ -67,6 +67,18 @@ function Detail({ inst, onClose, onChanged }) {
     setBusy(true)
     voucherPaperOverride(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
+  const [posting, setPosting] = useState(null)   // 写金蝶结果 {ok, msg, steps}
+  const post = () => {
+    if (!window.confirm(`保存到金蝶：
+① 系统提交并审核这张金蝶付款单（审核人显示「系统操作员」）
+② 金蝶自动生成付款凭证后，往里补红冲/更正/核销分录、改支付摘要
+凭证本身不审核，留给你在金蝶核对后审核。
+
+确定？`)) return
+    setPosting({ busy: true })
+    voucherPost(inst).then(r => { setPosting({ ok: true, ...r }); load(); onChanged() })
+      .catch(e => setPosting({ ok: false, msg: e.message }))
+  }
   const lines = d?.voucher?.lines || []
   const rc = d ? rateCheck(d.accruals, d.invoices) : []
   const accSum = k => r2((d?.accruals || []).reduce((s, a) => s + (a[k] || 0), 0))
@@ -95,6 +107,9 @@ function Detail({ inst, onClose, onChanged }) {
               : d.req.status === 'paper' && <button className="btn sm" disabled={busy} onClick={() => ovr(true)}>纸质件没到，先做账</button>}
           </div>
 
+          {d.req.posted && <div className="lv-verdict ok"><span className="lv-pill ok">已写入金蝶</span>
+            付款单 {d.req.posted.bill_no} 已审核 · 凭证 <b>记-{d.req.posted.vno}</b>（{d.req.posted.book}）已补分录，借 {money(d.req.posted.dr)} = 贷 {money(d.req.posted.cr)} · {d.req.posted.by} {d.req.posted.at} · 凭证请在金蝶核对后审核</div>}
+          {posting && !posting.busy && <div className={'lv-msg ' + (posting.ok ? 'okb' : 'bad')}>{posting.ok ? `已写入：记-${posting.vno}（${(posting.steps || []).join(' → ')}）` : posting.msg}</div>}
           {d.kind && KIND[d.kind] && <div className={'lv-verdict ' + KIND[d.kind][1]}><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span>{d.kind_text}</div>}
           {d.plan.msgs.filter(m => m !== d.kind_text).length > 0 &&
             <ul className="lv-notes">{d.plan.msgs.filter(m => m !== d.kind_text).map((m, i) => <li key={i}>{m}</li>)}</ul>}
@@ -143,7 +158,11 @@ function Detail({ inst, onClose, onChanged }) {
             </tbody>
           </table>
 
-          <div className="lv-sec">④ 凭证预览 <span className="dim">{d.voucher.book} · {d.voucher.date} · 记-□（存金蝶后分配，核销摘要里的 □ 回填）· 只预览、不写金蝶</span></div>
+          <div className="lv-sec">④ 凭证预览 <span className="dim">{d.voucher.book} · {d.voucher.date} · 写入时并进金蝶付款单自动生成的那张凭证（支付两行在前），核销摘要里的 □ 填该凭证号</span>
+            <span style={{ flex: 1 }} />
+            {!d.req.posted && d.plan.status === 'ok' && (d.req.status === 'ready'
+              ? <button className="btn btn-pri" disabled={!!posting?.busy || !d.req.bill_id} title={d.req.bill_id ? '' : '没有金蝶付款单'} onClick={post}>{posting?.busy ? '写金蝶中…（约半分钟）' : '保存到金蝶'}</button>
+              : <span className="dim">（{ST[d.req.status]?.[0]}，还不能写金蝶）</span>)}</div>
           {d.plan.status !== 'ok'
             ? <div className="lv-msg bad">计提和发票对不上，这张先人工处理（原因见上），不出凭证。</div>
             : <table className="lv-t lv-v">
@@ -257,7 +276,7 @@ export default function LogisticsVoucher() {
                 </td>
                 <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
                 <td className="nw">{pay}<div className="dim">纸质件 {r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr ? ' · 已放行' : ''}</div>
-                  <span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span></td>
+                  <span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span>{r.posted && <div className="dim">已写金蝶 记-{r.posted.vno}</div>}</td>
                 <td><button className="btn btn-pri" disabled={!r.period} onClick={() => setOpen(r.inst)}>{r.status === 'booked' ? '查看' : '凭证预览'}</button></td>
               </tr>
             })}
@@ -288,7 +307,8 @@ const CSS = `
 .lv .lv-pill.ok{background:var(--green-bg);color:var(--green)}.lv .lv-pill.warn{background:var(--amber-bg);color:var(--amber)}
 .lv .lv-pill.bad{background:var(--red-bg);color:var(--red)}.lv .lv-pill.neu{background:var(--gray-bg);color:var(--ink-2)}.lv .lv-pill.done{background:var(--accent-soft);color:var(--accent)}
 .lv .lv-empty{color:var(--ink-3);text-align:center;padding:18px}
-.lv .lv-msg{padding:9px 12px;border-radius:8px;font-size:12.5px;margin:8px 0}.lv .lv-msg.bad{background:var(--red-bg);color:var(--red)}
+.lv .lv-msg{padding:9px 12px;border-radius:8px;font-size:12.5px;margin:8px 0}.lv .lv-msg.bad{background:var(--red-bg);color:var(--red)}.lv .lv-msg.okb{background:var(--green-bg);color:var(--green)}
+.lv .lv-sec{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .lv .lv-mask{position:fixed;inset:0;z-index:1000;background:rgba(20,28,40,.38);display:flex;align-items:flex-start;justify-content:center;padding:28px 16px;overflow:auto}
 .lv .lv-dlg{width:min(1100px,100%);background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 16px 44px rgba(20,28,58,.22);padding:16px 20px 22px}
 .lv .lv-dh{display:flex;align-items:flex-start;gap:12px}

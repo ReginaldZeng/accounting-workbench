@@ -23,6 +23,7 @@ router = APIRouter()
 PR = store.payreq
 FX = store.review_line_fix
 _OVR_KEY = "logi_voucher_paper_ok"          # {inst_id: {by, at}} 纸质件没到、手动放行做账
+_POSTED_KEY = "logi_voucher_posted"         # {inst_id: {bill_no, vid, vno, book, at, by}} 已写入金蝶
 _ACC_CACHE = {}
 
 
@@ -93,6 +94,7 @@ def vlist(request: Request, since: str = "2026-09-01"):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     ovr = db.get_setting(_OVR_KEY, None) or {}
+    posted = db.get_setting(_POSTED_KEY, None) or {}
     with db._engine.connect() as c:
         reqs = [dict(r) for r in c.execute(select(PR).where(PR.c.create_time >= since)).mappings().all()]
     out = []
@@ -118,7 +120,8 @@ def vlist(request: Request, since: str = "2026-09-01"):
                     "n_inv": len(invs), "inv_total": round(sum(i["gross"] for i in invs), 2),
                     "n_paper": sum(1 for i in invs if i["paper"]), "paper_ovr": ovr.get(r["inst_id"]),
                     "booked": sorted({str(v) for i in invs for v in (i["vouchers"] or [])})[:5],
-                    "status": _status(r, folder, invs, ovr)})
+                    "posted": posted.get(r["inst_id"]),
+                    "status": "booked" if r["inst_id"] in posted else _status(r, folder, invs, ovr)})
     out.sort(key=lambda x: (x["created"] or ""), reverse=True)
     return {"ok": True, "rows": out}
 
@@ -128,7 +131,8 @@ _F = [("FVOUCHERGROUPNO", "号"), ("FEXPLANATION", "摘要"), ("FAccountID.FNumb
       ("FDEBIT", "借"), ("FCREDIT", "贷"), ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商"),
       ("FDetailID.FFLEX5.FNumber", "部门码"), ("FDetailID.FFLEX5.FName", "部门"), ("FDetailID.FFLEX9.FNumber", "费用码"),
       ("FDetailID.FFLEX9.FName", "费用"), ("FDetailID.FF100010.FNumber", "分类码"), ("FDetailID.FF100010.FDataValue", "分类"),
-      ("FDetailID.FF100006.FNumber", "项目码"), ("FDetailID.FF100006.FDataValue", "项目")]
+      ("FDetailID.FF100006.FNumber", "项目码"), ("FDetailID.FF100006.FDataValue", "项目"),
+      ("FDetailID.FF100005.FNumber", "供应商分组")]
 
 
 def _s(v):
@@ -157,7 +161,7 @@ def _accruals(book, period, sup_code):
                 "acct": _s(r["科目"]), "acct_name": _s(r["科目名"]), "dr": float(r["借"] or 0), "cr": float(r["贷"] or 0),
                 "expl": _s(r["摘要"]), "sup_code": _s(r["供应商码"]), "sup_name": _s(r["供应商"]), "dept_code": _s(r["部门码"]),
                 "dept": _s(r["部门"]), "fee_code": _s(r["费用码"]), "fee": _s(r["费用"]), "biz_code": _s(r["分类码"]),
-                "biz": _s(r["分类"]), "proj_code": _s(r["项目码"]), "proj": _s(r["项目"])})
+                "biz": _s(r["分类"]), "proj_code": _s(r["项目码"]), "proj": _s(r["项目"]), "sup_grp": _s(r["供应商分组"])})
         for vno in vnos:
             ls = by.get(vno) or []
             sups = {l["sup_code"] for l in ls if l["acct"].startswith("2241") and l["sup_code"]}
@@ -227,7 +231,7 @@ def _kind(vouchers, notes, pl):
     return "hx", "计提与发票一致，只核销"
 
 
-def _preview_data(inst):
+def _preview_data(inst, self_vno=None):
     with db._engine.connect() as c:
         r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
     if not r:
@@ -276,7 +280,7 @@ def _preview_data(inst):
     pay_date = pay_date or pi.get("date") or datetime.now().strftime("%Y-%m-%d")
     ctx = {"supplier": r.get("payee") or "", "applicant": r.get("applicant") or "", "pay_year": int(pay_date[:4]),
            "pay_month": int(pay_date[5:7]), "pay_amount": float(r.get("amount") or 0), "bank": bank,
-           "paid": bool(pi) and not pi.get("voucher")}
+           "paid": bool(pi) and not pi.get("voucher"), "self_vno": self_vno}
     lines = LV.build(ctx, vouchers, inv_in, pl, fixes) if pl["status"] == "ok" else []
     dr, cr = LV.balance(lines)
     msgs = list(notes) + list(pl["msgs"])
@@ -286,13 +290,14 @@ def _preview_data(inst):
         msgs.append("还没付款（金蝶没有付款单）：先出红冲/更正/核销预览，付款后才加支付分录")
     if pi.get("bill_id") and not bank:
         msgs.append("金蝶付款单没取到我方银行账号，银行存款那行的账号待补")
-    st = _status(r, folder, invs, ovr)
+    st = "booked" if inst in (db.get_setting(_POSTED_KEY, None) or {}) else _status(r, folder, invs, ovr)
     kind, ktext = _kind(vouchers, notes, pl)
     return {"ok": True, "kind": kind, "kind_text": ktext, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
                                 "code": r.get("sup_code"), "subject": r.get("subject"), "subject_full": r.get("subject_full"),
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
-                                "paper_ovr": ovr.get(inst), "status": st},
+                                "paper_ovr": ovr.get(inst), "status": st, "posted": (db.get_setting(_POSTED_KEY, None) or {}).get(inst),
+                                "bill_id": pi.get("bill_id") or ""},
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
@@ -341,3 +346,141 @@ async def paper_override(request: Request):
     db.set_setting(_OVR_KEY, ovr, u["name"])
     db.audit(u["name"], "物流付款做账-纸质件" + ("手动放行" if b.get("on") else "撤销放行"), inst, str(b.get("note") or ""))
     return {"ok": True}
+
+
+# ---------- 写金蝶（V2.753，用户 2026-10-02 实测通过后定）----------
+# 流程(顺丰速运 960 / 深圳星期零 记-260 实证)：付款单 暂存→Save(只传 FID，生成单号，字段不变)→Submit→Audit
+#   （用户授权：物流付款单由系统提交审核，是确认书 D11「审核留给人」的例外，只限物流付款单）→ 金蝶约 5 秒自动生成付款凭证(状态 A)
+#   → 读回这张凭证 → Save(IsDeleteEntry=False + NeedUpDateFields) 加红冲/更正/核销分录、支付两行改摘要。
+#   金蝶允许改自动凭证；新加的行排在支付行后面(行号不随顺序变)，用户同意「支付在前」。凭证本身不审核，留给人在金蝶审。
+_AUDIT_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Audit.common.kdsvc"
+_POST_LOCK = {}
+_KD_BASE = {"FCURRENCYID": {"FNumber": "PRE001"}, "FEXCHANGERATETYPE": {"FNumber": "HLTX01_SYS"}, "FEXCHANGERATE": 1.0}
+ST_CN = {"ready": "可做账", "paper": "纸质件未到", "invdiff": "发票≠请款", "noinv": "票不齐", "unpaid": "未付款", "booked": "已做账"}
+
+
+def _kd_ok(res):
+    st = (res or {}).get("Result", {}).get("ResponseStatus") or {}
+    if st.get("IsSuccess"):
+        return ""
+    return "；".join(str(e.get("Message") or "") for e in (st.get("Errors") or [])) or json.dumps(st, ensure_ascii=False)[:200]
+
+
+def _kd_dims(l):
+    x, dd = l.get("dims") or {}, {}
+    for k, f in (("sup_code", "FDETAILID__FFLEX4"), ("dept_code", "FDETAILID__FFLEX5"), ("fee_code", "FDETAILID__FFLEX9"),
+                 ("biz_code", "FDETAILID__FF100010"), ("proj_code", "FDETAILID__FF100006"), ("sup_grp", "FDETAILID__FF100005")):
+        if x.get(k):
+            dd[f] = {"FNumber": x[k]}
+    return dd
+
+
+def _post(inst, user):
+    from datetime import datetime as _dt, timedelta
+    d, code = _preview_data(inst)
+    if code != 200:
+        return {"ok": False, "msg": d.get("msg")}
+    req = d["req"]
+    if req.get("posted"):
+        return {"ok": False, "msg": "这张已经写过金蝶：记-%s" % req["posted"].get("vno")}
+    if d["plan"]["status"] != "ok":
+        return {"ok": False, "msg": "计提和发票对不上，不能写金蝶"}
+    if req["status"] != "ready":
+        return {"ok": False, "msg": "还不能做账（%s）" % (ST_CN.get(req["status"]) or req["status"])}
+    if not str(req.get("bill_id") or "").isdigit():
+        return {"ok": False, "msg": "没有金蝶付款单（或付款已经记过支付凭证），这一版只支持从付款单出凭证"}
+    fid = int(req["bill_id"])
+    s, conf = kc.login()
+    F = [("FBillNo", "单号"), ("FDOCUMENTSTATUS", "状态"), ("FPAYTOTALAMOUNTFOR", "金额"), ("FCONTACTUNIT.FNumber", "码"), ("FDate", "日期")]
+    pb = (kc._query(s, conf, "AP_PAYBILL", F, "FID=%d" % fid) or [None])[0]
+    if not pb or pb["码"] != req["code"] or abs(float(pb["金额"] or 0) - float(req["amount"] or 0)) >= 0.01:
+        return {"ok": False, "msg": "金蝶付款单和请款单对不上（供应商或金额），没动"}
+    steps = []
+    if pb["状态"] == "C":
+        return {"ok": False, "msg": "付款单 %s 已经被人审核过，金蝶已出过凭证；这一版不去改别人生成的凭证，请人工处理" % pb["单号"]}
+    if pb["状态"] == "Z" or not str(pb["单号"] or "").strip():
+        e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["AP_PAYBILL", json.dumps({"IsDeleteEntry": False, "Model": {"FID": fid}})]).json())
+        if e:
+            return {"ok": False, "msg": "付款单保存失败：" + e}
+        steps.append("付款单保存")
+    pb = kc._query(s, conf, "AP_PAYBILL", F, "FID=%d" % fid)[0]
+    if pb["状态"] in ("A", "D"):
+        e = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["AP_PAYBILL", json.dumps({"Ids": str(fid)})]).json())
+        if e:
+            return {"ok": False, "msg": "付款单提交失败：" + e, "steps": steps}
+        steps.append("付款单提交")
+    t0 = _dt.now() - timedelta(seconds=30)
+    e = _kd_ok(kc._post(s, conf, _AUDIT_SVC, ["AP_PAYBILL", json.dumps({"Ids": str(fid)})]).json())
+    if e:
+        return {"ok": False, "msg": "付款单审核失败：" + e, "steps": steps}
+    steps.append("付款单审核 %s" % pb["单号"])
+    db.audit(user, "物流付款做账-系统审核付款单", pb["单号"], "%s %s %.2f" % (req["subject"], req["payee"], float(req["amount"] or 0)))
+    # 找金蝶自动生成的付款凭证：同账簿、同付款日、贷 1002 = 付款金额、审核之后生成、状态 A
+    book = req["subject_full"]
+    flt = ("FACCOUNTBOOKID.FName='" + book + "' and FDate='" + str(pb["日期"])[:10] + "' and FAccountID.FNumber like '1002%' and FCREDIT="
+           + ("%.2f" % float(pb["金额"])) + " and FCreateDate>='" + t0.strftime("%Y-%m-%d %H:%M:%S") + "'")
+    vid = None
+    for _ in range(12):
+        time.sleep(2.5)
+        rows = [r for r in kc._query(s, conf, "GL_VOUCHER", [("FVOUCHERID", "id"), ("FDOCUMENTSTATUS", "状态")], flt) if r["状态"] in ("A", "Z")]
+        if rows:
+            vid = rows[-1]["id"]
+            break
+    if not vid:
+        return {"ok": False, "msg": "付款单已审核，但 30 秒内没等到金蝶生成付款凭证，请到金蝶看一下", "steps": steps}
+    m = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
+    ents = [x for x in m.get("GL_VOUCHERENTRY") or [] if x.get("FACCOUNTID") and x.get("Id")]
+    vno = str(m.get("VOUCHERGROUPNO") or "")
+    if m.get("DocumentStatus") not in ("A", "Z") or len(ents) != 2:
+        return {"ok": False, "msg": "金蝶付款凭证 记-%s 状态/分录不是预期(状态 %s，%d 行)，没动" % (vno, m.get("DocumentStatus"), len(ents)), "steps": steps}
+    # 有了凭证号，核销摘要里引用本凭证的 □ 直接填上
+    d2, _ = _preview_data(inst, self_vno=vno)
+    lines = d2["voucher"]["lines"]
+    add = [l for l in lines if l["block"] in ("红冲", "更正", "核销")]
+    pay_expl = next(l["expl"] for l in lines if l["block"] == "支付")
+    new = []
+    for l in add:
+        x = dict(_KD_BASE, FEXPLANATION=l["expl"], FACCOUNTID={"FNumber": l["acct"]}, FDEBIT=l["dr"], FCREDIT=l["cr"])
+        dd = _kd_dims(l)
+        if dd:
+            x["FDetailID"] = dd
+        new.append(x)
+    body = {"IsDeleteEntry": False, "NeedUpDateFields": ["FEntity", "FEXPLANATION", "FACCOUNTID", "FDEBIT", "FCREDIT", "FDetailID",
+                                                         "FCURRENCYID", "FEXCHANGERATETYPE", "FEXCHANGERATE"],
+            "Model": {"FVOUCHERID": vid, "FEntity": new + [{"FEntryID": x["Id"], "FEXPLANATION": pay_expl} for x in ents]}}
+    e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["GL_VOUCHER", json.dumps(body, ensure_ascii=False)]).json())
+    if e:
+        return {"ok": False, "msg": "付款单已审核、凭证 记-%s 已生成，但补分录失败：%s（凭证还是金蝶原样，可人工补）" % (vno, e), "steps": steps, "vno": vno}
+    m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
+    rec = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book, "at": _now(), "by": user,
+           "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2}
+    posted = dict(db.get_setting(_POSTED_KEY, None) or {})
+    posted[inst] = rec
+    db.set_setting(_POSTED_KEY, posted, user)
+    with db._engine.begin() as c:
+        c.execute(text("update logistics_payreq set kd_paid=:v where inst_id=:i"), {"v": "%s|C|%s" % (str(pb["日期"])[:10], fid), "i": inst})
+    db.audit(user, "物流付款做账-写入金蝶凭证", "记-%s" % vno, "%s 付款单 %s；补 %d 行；借 %s 贷 %s" % (book, pb["单号"], len(new), rec["dr"], rec["cr"]))
+    steps.append("凭证 记-%s 补 %d 行、改支付摘要" % (vno, len(new)))
+    return {"ok": True, "vno": vno, "bill_no": pb["单号"], "steps": steps, "dr": rec["dr"], "cr": rec["cr"]}
+
+
+@router.post("/api/logistics-voucher/post")
+async def post_to_kingdee(request: Request):
+    """保存到金蝶：审核付款单 → 金蝶自动出付款凭证 → 往里补红冲/更正/核销分录、改支付摘要。凭证不审核。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    import threading
+    lk = _POST_LOCK.setdefault(inst, threading.Lock())
+    if not lk.acquire(blocking=False):
+        return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
+    try:
+        from starlette.concurrency import run_in_threadpool
+        r = await run_in_threadpool(_post, inst, u["name"])
+    except Exception as e:
+        r = {"ok": False, "msg": "写金蝶出错：%s" % str(e)[:200]}
+    finally:
+        lk.release()
+    return r if r.get("ok") else JSONResponse(r, status_code=400)
