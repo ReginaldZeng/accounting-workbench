@@ -5,6 +5,11 @@
 #   走到了 → 建票夹拉附件（复用 invoice.open_approval_folder，source=dingtalk，记在"系统"名下）；
 #   还在审批、没走到 → 记进 waiting，下一轮再取；撤回/拒绝/审完了也没走到 → 跳过。已有票夹的单子不再取。
 #   扫描状态存 app_settings: inv_intake_state（不新增表）。SQLite 库（本机/测试）不起定时线程，测试直接调 scan_once。
+# [Change Log] Date: 2026-10-02 | Author: Claude Opus 5.5 | Version: V2.739
+# Description: Owner 定：票据齐全的直接进审核（不用收票台点提交），纸质件月末一次性查验；流程里没传/没传齐的留收票台，
+#   财务补传后在收票台提交，审核才看得全。「齐全」＝提交检查（submit_check）既不拦也没有任何提示：附件拉全、票都识别完、
+#   没重复票、有发票且付款金额−专票−普票−后补未到＝0。每 2 分钟看一次（auto_submit_ready），提交人记「系统」。
+#   收票台「钉钉接入」列表每行带「为什么还留在这」（why）。
 import threading
 import time
 import traceback
@@ -58,6 +63,42 @@ def _load_state():
         if not isinstance(s.get(k), dict):
             s[k] = {}
     return s
+
+
+def ready_check(folder, items):
+    """自动接入的票夹票据齐全吗 → (齐全?, 不齐的原因)。齐全＝提交检查既不拦也没提示、有发票/收据、付款金额有值。"""
+    if folder.get("attach_status") in ("pending", "running", "none", None):
+        return False, "附件还在拉"
+    act = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"]
+    bills = [i for i in act if i.get("kind") in ("invoice", "receipt")]
+    blockers, warnings = inv.submit_check(folder, items)
+    if blockers:
+        return False, blockers[0]["msg"]
+    if not bills:
+        return False, "流程里没传发票，要财务补传"
+    if folder.get("amount") is None:
+        return False, "审批单上读不出付款金额，金额核对做不了"
+    if warnings:
+        return False, warnings[0]["msg"]
+    return True, ""
+
+
+def auto_submit_ready():
+    """自动接入、还在收票中的票夹：票据齐全的直接提交进审核（提交人「系统」）。→ 这轮提交了几个。
+    被审核退回的（returned）不动：退回后由财务在收票台处理。"""
+    e = inv.E()
+    with e.connect() as c:
+        rows = [S._row(r) for r in c.execute(select(S.FOLDER).where(
+            (S.FOLDER.c.source == SOURCE) & (S.FOLDER.c.status == "collecting") & (S.FOLDER.c.attach_status == "done")))]
+    n = 0
+    for f in rows:
+        ok, _ = ready_check(f, S.folder_items(e, f["id"]))
+        if not ok:
+            continue
+        out, bad = inv._submit_sync({"name": inv.SYSTEM_USER}, f["id"])
+        if out:
+            n += 1
+    return n
 
 
 def _folder_insts(ids):
@@ -170,6 +211,7 @@ def _scan(trigger):
             "failed": n_fail, "notes": "；".join(notes)[:400], "fails": fails[:10], "sec": round(time.time() - t0, 1)}
     state["last"] = last
     db.set_setting(STATE_KEY, state, inv.SYSTEM_USER)
+    last["autoSubmitted"] = auto_submit_ready()
     if n_new:
         inv.audit(inv.SYSTEM_USER, "钉钉自动接入", trigger, "新建票夹 %d 个；还没走到接入审批人的 %d 张" % (n_new, len(waiting)))
     return {"ok": True, **last}
@@ -193,8 +235,15 @@ async def intake_status(request: Request):
 
 
 def _auto_folders():
-    rows, total = S.folders_auto_open(inv.E(), SOURCE, limit=300)
-    return {"ok": True, "rows": inv.folder_views(rows), "total": total}
+    e = inv.E()
+    rows, total = S.folders_auto_open(e, SOURCE, limit=300)
+    views = inv.folder_views(rows)
+    for f, v in zip(rows, views):
+        if f.get("status") == "returned":
+            v["why"] = "审核退回：" + (f.get("review_note") or "看退回意见")
+        else:
+            v["why"] = ready_check(f, S.folder_items(e, f["id"]))[1]
+    return {"ok": True, "rows": views, "total": total}
 
 
 @router.get("/api/inv/desk/auto")
@@ -219,15 +268,23 @@ async def intake_scan(request: Request):
 
 # ───────────────────────── 定时线程 ─────────────────────────
 
+TICK_S = 120                     # 每 2 分钟看一次齐全的票夹（识别完就尽快进审核）；整轮扫钉钉仍 20 分钟一次
+
+
 def _loop():
     time.sleep(90)                     # 开机先让别的线程起来
+    n = 0
     while True:
         try:
-            if (inv.get_settings().get("intake") or {}).get("approvers"):
-                scan_once("定时")
+            if n % (EVERY_MIN * 60 // TICK_S) == 0:
+                if (inv.get_settings().get("intake") or {}).get("approvers"):
+                    scan_once("定时")
+            else:
+                auto_submit_ready()
         except Exception:
             _STATE["lastError"] = traceback.format_exc()[-2000:]
-        _WAKE.wait(EVERY_MIN * 60)
+        n += 1
+        _WAKE.wait(TICK_S)
         _WAKE.clear()
 
 

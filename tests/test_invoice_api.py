@@ -1538,6 +1538,20 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual((total, [r["inst_id"] for r in rows]), (1, ["PI-IN-REAL"]))
         self.assertEqual(ii._auto_folders()["rows"][0]["instId"], "PI-IN-REAL")
         self.assertNotIn("PI-IN-REAL", [f["instId"] for f in self.get("/api/inv/desk", "intern").json()["recent"]])
+        # V2.739 票据齐全的自动进审核；没传票的留收票台并说明原因
+        fo = self.S.folder_get(inv.E(), g["folder"]["id"])
+        self.assertEqual(ii.ready_check(fo, []), (False, "流程里没传发票，要财务补传"))
+        bill = [{"kind": "invoice", "status": "active", "review": "draft"}]
+        with patch.object(ii.inv, "submit_check", MagicMock(return_value=([], []))):
+            self.assertEqual(ii.ready_check(dict(fo, amount=10), bill), (True, ""))
+            self.assertEqual(ii.ready_check(dict(fo, amount=None), bill)[0], False)
+        with patch.object(ii.inv, "submit_check", MagicMock(return_value=([], [{"msg": "有差额 ¥1.00"}]))):
+            self.assertEqual(ii.ready_check(dict(fo, amount=10), bill), (False, "有差额 ¥1.00"))
+        self.assertEqual(ii._auto_folders()["rows"][0]["why"], "流程里没传发票，要财务补传")
+        sub = MagicMock(return_value=({"ok": True}, None))
+        with patch.object(ii, "ready_check", MagicMock(return_value=(True, ""))), patch.object(ii.inv, "_submit_sync", sub):
+            self.assertEqual(ii.auto_submit_ready(), 1)
+        self.assertEqual(sub.call_args.args, ({"name": "系统"}, fo["id"]))
         # 没设接入审批人 → 不扫
         self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": []}}})
         self.assertFalse(ii.scan_once("测试")["ok"])

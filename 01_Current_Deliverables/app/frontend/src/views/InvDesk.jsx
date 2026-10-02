@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-02 | Author: Claude Opus 5.5 | Version: V2.739 | 「钉钉接入」改名「钉钉接入 · 票不齐」：票据齐全的系统自动提交进审核，这里只剩要财务补传/处理的，每行写明原因
 // [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.738 | 「票夹里的票」只排发票/收据；非发票附件（账单、对账单、截图等）收进底下一行「其他附件 N 个」，点开才列，点名字仍能打开改票种
 // [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.737 | 左栏加「钉钉接入 · 待收票」：自动接入建的票夹记在系统名下、「我的票夹」看不到，单列一块（可搜，点开即打开）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 收票工作台：扫审批单开票夹 → 高拍仪/手机/拖文件进票 → 核对 → 提交（需求确认书五、技术方案 §5.2）
@@ -172,7 +173,7 @@ function AutoFolders({ currentId, onOpen, busyId }) {
   if (data && !rows.length && !err) return null
   return (
     <div className="inv-dk-card">
-      <div className="inv-dk-card-h">钉钉接入 · 待收票<span className="inv-muted">{data ? `${data.total} 张单` : '…'}，审批走到接入审批人时自动建的</span></div>
+      <div className="inv-dk-card-h">钉钉接入 · 票不齐<span className="inv-muted">{data ? `${data.total} 张单` : '…'}，票齐的已自动进审核，这里要补传或处理</span></div>
       {err && <div className="inv-dk-err">{err}</div>}
       {rows.length > 8 && <div style={{ padding: '6px 12px' }}>
         <input className="inv-in" value={q} onChange={e => setQ(e.target.value)} placeholder="搜申请人、金额、审批编号…" style={{ width: '100%' }} />
@@ -191,9 +192,8 @@ function AutoFolders({ currentId, onOpen, busyId }) {
                   {f.status !== 'collecting' && <span className={'inv-badge ' + st[0]}>{st[1]}</span>}
                   <span className="inv-num">{money(f.amount)}</span>
                   <span>{s.invoices || 0} 张票</span>
-                  {s.paperMissing > 0 && <span className="inv-badge warn">纸质件差 {s.paperMissing}</span>}
-                  {f.attachStatus === 'failed' && <span className="inv-badge err">附件没拉全</span>}
                 </span>
+                {f.why && <span className="inv-dk-rec-m" style={{ color: 'var(--amber)' }}>{f.why}</span>}
               </button>
             )
           })}
