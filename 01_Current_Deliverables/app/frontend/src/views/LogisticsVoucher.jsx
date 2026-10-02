@@ -9,14 +9,16 @@ import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, vouche
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
 const ST = {
-  ready: ['可做账', 'ok', '已付款、发票齐、纸质件已到（或已放行）'],
+  ready: ['可做账', 'ok', '已付款、发票齐（纸质件不卡做账，月末统一查验）'],
   paper: ['纸质件未到', 'warn', '纸质付款单/发票还没交到财务；可手动放行'],
   invdiff: ['发票≠请款', 'bad', '票夹里发票含税合计和请款金额对不上'],
   noinv: ['票不齐', 'warn', '票夹里还没有发票（流程里没传，要财务在收票台补）'],
   unpaid: ['未付款', 'neu', '金蝶还没有付款单'],
   booked: ['已做账', 'done', '发票都已被金蝶凭证引用（发票管家同步）'],
 }
-const ORDER = ['ready', 'paper', 'invdiff', 'noinv', 'unpaid', 'booked']
+const ORDER = ['ready', 'invdiff', 'noinv', 'unpaid', 'booked']
+// 批量做账只放「一致·只核销 / 含尾差」：红冲更正的写法还没在金蝶实测，先单张做（用户 2026-10-02）
+const BATCH_KINDS = ['hx', 'tail']
 // 做账类型(要读金蝶计提，列表出来后再逐张补)：计提与发票一致只核销 / 含尾差 / 要红冲更正 / 计提记错主体 / 金额不符 / 没有计提
 const KIND = {
   hx: ['一致·只核销', 'ok'], tail: ['一致·核销含尾差', 'ok'], redo: ['需红冲更正', 'bad'],
@@ -208,6 +210,8 @@ export default function LogisticsVoucher() {
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(null)
   const [plans, setPlans] = useState({})        // inst → {kind, text}
+  const [sel, setSel] = useState({})            // 批量做账勾选 inst → true
+  const [run, setRun] = useState(null)          // 批量进度 {i, n, cur, done:[{inst, label, ok, msg, vno}]}
   const [kf, setKf] = useState('')
   const load = () => voucherList().then(r => {
     const rs = r.rows || []
@@ -220,6 +224,29 @@ export default function LogisticsVoucher() {
   }).catch(e => { setErr(e.message); setRows([]) })
   useEffect(() => { load() }, [])
   const cnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { c[r.status] = (c[r.status] || 0) + 1 }); return c }, [rows])
+  const canBatch = r => r.status === 'ready' && !r.posted && plans[r.inst] && BATCH_KINDS.includes(plans[r.inst].kind)
+  const label = r => `${r.sup_full || r.carrier} · ${r.subject}`
+  const picked = (rows || []).filter(r => sel[r.inst] && canBatch(r))
+  const runBatch = async () => {
+    const list = picked
+    if (!list.length) return
+    const tot = list.reduce((s, r) => s + (r.amount || 0), 0)
+    if (!window.confirm(`批量保存到金蝶：${list.length} 张，付款合计 ${money(tot)}\n\n每张：系统审核金蝶付款单 → 往金蝶自动生成的付款凭证里补核销分录、改支付摘要。\n凭证本身不审核，留给你在金蝶核对后审核。\n一张约半分钟，中途可以离开本页。确定？`)) return
+    const done = []
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i]
+      setRun({ i: i + 1, n: list.length, cur: label(r), done: [...done] })
+      try {
+        const x = await voucherPost(r.inst)
+        done.push({ inst: r.inst, label: label(r), ok: true, vno: x.vno, msg: `记-${x.vno}` })
+      } catch (e) {
+        done.push({ inst: r.inst, label: label(r), ok: false, msg: e.message })
+      }
+    }
+    setRun({ i: list.length, n: list.length, cur: '', done, end: true })
+    setSel({})
+    load()
+  }
   const kcnt = useMemo(() => { const c = {}; Object.values(plans).forEach(p => { c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans])
   const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) &&
     (!q || [r.carrier, r.payee, r.sup_full, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
@@ -242,12 +269,22 @@ export default function LogisticsVoucher() {
           {kf && <button className="lnk" onClick={() => setKf('')}>不限</button>}
         </div>
         {err && <div className="lv-msg bad">{err}</div>}
+        <div className="lv-batch">
+          <span>已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((s, r) => s + (r.amount || 0), 0))}</b></>}</span>
+          <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}>批量保存到金蝶</button>
+          <span className="dim">只能勾「可做账」且审核结果全部一致（只核销/含尾差）的；需红冲更正的先单张做</span>
+          {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
+            {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
+        </div>
+        {run && run.done.length > 0 && <ul className="lv-runlist">{run.done.map(x => <li key={x.inst} className={x.ok ? 'ok' : 'bad'}>{x.ok ? '✓' : '✗'} {x.label}：{x.msg}</li>)}</ul>}
         <div className="tbl-wrap"><table className="lv-t lv-list">
-          <thead><tr><th>主体</th><th>物流商</th><th>费用类型</th><th className="num">计提金额</th><th>税率</th><th>计提凭证</th>
+          <thead><tr><th className="ck"><input type="checkbox" title="勾选当前列表里能批量做账的"
+            checked={shown.some(canBatch) && shown.filter(canBatch).every(r => sel[r.inst])}
+            onChange={e => { const on = e.target.checked; setSel(o => { const n = { ...o }; shown.filter(canBatch).forEach(r => { n[r.inst] = on }); return n }) }} /></th><th>主体</th><th>物流商</th><th>费用类型</th><th className="num">计提金额</th><th>税率</th><th>计提凭证</th>
             <th>审核结果</th><th>建议动作</th><th className="num">付款金额</th><th>付款单状态</th><th></th></tr></thead>
           <tbody>
-            {rows === null && <tr><td colSpan="11" className="lv-empty">读取中…</td></tr>}
-            {rows && !shown.length && <tr><td colSpan="11" className="lv-empty">没有</td></tr>}
+            {rows === null && <tr><td colSpan="12" className="lv-empty">读取中…</td></tr>}
+            {rows && !shown.length && <tr><td colSpan="12" className="lv-empty">没有</td></tr>}
             {shown.map(r => {
               const p = plans[r.inst]
               const acc = (p && p.acc) || []
@@ -262,6 +299,9 @@ export default function LogisticsVoucher() {
                 ? (r.paid_voucher ? <>已记支付凭证 <b>{r.paid_voucher}</b></> : <>付款单 · {r.pay_st || '已生成'}<div className="dim">{r.paid}</div></>)
                 : (r.dt_status === 'RUNNING' ? <span className="dim">钉钉审批中</span> : <span className="dim">已通过 · 待付款</span>)
               return <tr key={r.inst}>
+                <td className="ck"><input type="checkbox" disabled={!canBatch(r)} checked={!!sel[r.inst] && canBatch(r)}
+                  title={canBatch(r) ? '勾选批量做账' : r.posted ? '已写金蝶' : r.status !== 'ready' ? '还不能做账' : '需红冲更正/人工的不进批量，单张做'}
+                  onChange={e => setSel(o => ({ ...o, [r.inst]: e.target.checked }))} /></td>
                 <td className="nw">{r.subject}<div className="code2">{r.book}</div></td>
                 <td className="sup">{r.sup_full}<div className="code2">{r.code}</div></td>
                 <td>{stack(a => <>{a.fee || '—'}{a.biz && <span className="dim"> · {a.biz}</span>}</>)}</td>
@@ -329,6 +369,10 @@ const CSS = `
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
 .lv .lv-kind{font-size:13px;margin:6px 0}
+.lv .lv-batch{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);font-size:12.5px}
+.lv .lv-run{color:var(--accent);font-weight:600}.lv .lv-runlist{margin:6px 0;padding:8px 12px 8px 26px;font-size:12.5px;background:var(--bg-sub);border-radius:8px}
+.lv .lv-runlist li.ok{color:var(--green)}.lv .lv-runlist li.bad{color:var(--red)}
+.lv .lv-list th.ck,.lv .lv-list td.ck{width:34px;text-align:center}
 .lv .lv-list td{vertical-align:middle}.lv .lv-list .code2{font-family:var(--font-mono);font-size:11px;color:var(--ink-3);margin-top:2px}.lv .lv-list .ml>div{height:21px;line-height:21px;white-space:nowrap}
 .lv .lv-list td.nw{white-space:nowrap}.lv .lv-list td.sup{min-width:190px;max-width:240px}
 .lv .cd{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-2);background:var(--gray-bg);border-radius:3px;padding:0 4px;margin-right:5px;white-space:nowrap}.lv .bad{color:var(--red)}.lv .lv-list .kres{margin-top:4px}.lv .lv-list .lv-pill{margin-top:3px}.lv td.kd{max-width:280px}.lv td.kd .kt{white-space:normal;line-height:1.4;margin-top:3px}

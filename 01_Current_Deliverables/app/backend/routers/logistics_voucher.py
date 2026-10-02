@@ -84,8 +84,7 @@ def _status(r, folder, invs, ovr):
         return "noinv"
     if abs(tot - float(r.get("amount") or 0)) >= 0.005:
         return "invdiff"
-    if not all(i["paper"] for i in invs) and r["inst_id"] not in ovr:
-        return "paper"
+    # 纸质件不卡做账(用户 2026-10-02 改：月末统一查验，同发票管家 V2.739/740)，列表只提示到了几张
     return "ready"
 
 
