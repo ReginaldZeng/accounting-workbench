@@ -3178,7 +3178,7 @@ PORTAL_TOOL_DEFAULTS = [
     ("accounting", "存货成本台账", "par", "▥", "金蝶取数/上传双通道，按主体期间落库全员共享；勾稽透视、仓库维度、期间封存。",
      ["取数上传", "勾稽透视", "仓库维度"], [], 3, ["clexport", "cldash", "clwh"]),
     ("accounting", "物流费用计提与对账", "par", "▨", "物流计提表上传与税率维护、一键录入金蝶；物流账单对账核对。",
-     ["计提录入", "税率维护", "物流对账"], [], 4, ["logistics", "logibase", "logiupload", "logisticspay", "logisticscost"]),
+     ["计提录入", "税率维护", "物流对账"], [], 4, ["logistics", "logibase", "logiupload", "logisticspay", "logisticscost", "logisticsvoucher"]),
     ("accounting", "汇率录入", "ok", "◈", "每月自动取数写入金蝶汇率（含提交/撤销），挂起与出错自动邮件/钉钉告警。",
      ["自动取数", "写入金蝶", "异常告警"], [], 5, ["fxrate"]),
     ("accounting", "报表导出", "par", "▧", "金蝶报表一键导出落地共享盘，导出路径与通知可配置，已导出文件可管理。",

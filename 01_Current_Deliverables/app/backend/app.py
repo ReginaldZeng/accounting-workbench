@@ -867,6 +867,8 @@ NAV_MODULES = [
     # 数据/权限/审计历史全绑在 key 上，改 key 等于搬家，改 label 零迁移（确认书 D6/D7）
     {"key": "logisticspay", "label": "账单核对", "sec": "ap", "order": 13, "parent": "logisticsrecon", "default": "待验收"},
     {"key": "logisticscost", "label": "单据运费", "sec": "ap", "order": 14, "parent": "logisticsrecon", "default": "待验收"},
+    # V2.749 付款做账：物流请款单付款后合成一张凭证（红冲→更正→核销→支付），第一版只预览不写金蝶；开发中=仅 dev_users 可见
+    {"key": "logisticsvoucher", "label": "付款做账", "sec": "ap", "order": 15, "parent": "logisticsrecon", "default": "开发中"},
     # ── 成本模块 ──
     # V2.254（业务方定）：成本台账 → **存货台账**，并由「第三种节点」改回**纯分组 + 三个三级**：
     #   台账导出 clexport（原来挂在二级上的八步工作流页，一行代码没动）／存货看板 cldash（新）／
@@ -1433,7 +1435,7 @@ _ACC_MODULE_BOARD = {
     "reconcile": "银行对账", "fxrate": "汇率录入", "wealth": "理财对账", "fundboard": "资金看板",
     "ledger": "账户台账", "periodclose": "月结·期间", "rptdash": "报表仪表盘", "rptexport": "报表导出",
     "logibase": "物流计提", "logiupload": "物流计提", "logistics": "物流计提",
-    "logisticspay": "物流对账", "logisticscost": "物流对账",
+    "logisticspay": "物流对账", "logisticscost": "物流对账", "logisticsvoucher": "物流对账",
     "clexport": "存货台账", "cldash": "存货台账", "clwh": "存货台账",
     "bomdraft": "BOM报价审核", "bomstd": "BOM报价审核", "bomconfig": "BOM报价审核",
     "tempattrev": "临时工考勤", "tempattboard": "临时工考勤",
@@ -4991,6 +4993,8 @@ from routers import logistics_payreq   # V2.730 物流复核·钉钉请款单接
 app.include_router(logistics_payreq.router)
 from routers import access_request   # V2.731 首页「申请开通」→ 钉钉推送接收人（移植 BP V2.553/555）
 app.include_router(access_request.router)
+from routers import logistics_voucher   # V2.749 物流付款做账（红冲→更正→核销→支付 合成凭证预览）
+app.include_router(logistics_voucher.router)
 
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,

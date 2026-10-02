@@ -47,7 +47,7 @@ const IC = {
 }
 const ICON_BY_KEY = {
   periodclose: IC.month, bankrecon: IC.bank, reconcile: IC.reconcile, fundboard: IC.fund, ledger: IC.ledger,
-  wealth: IC.wealth, logisticsrecon: IC.logistics, logistics: IC.logistics, logisticspay: IC.reconcile, logisticscost: IC.sbal,
+  wealth: IC.wealth, logisticsrecon: IC.logistics, logistics: IC.logistics, logisticspay: IC.reconcile, logisticscost: IC.sbal, logisticsvoucher: IC.ledger,
   ecom: IC.ecom, ecommonth: IC.month, ecomsettle: IC.reconcile, ecombase: IC.basicdata,
   costledger: IC.cost, clwh: IC.basicdata, archive: IC.archive,
   // 报表板块（V2.240）：sbal/journal 两个 key 已退出菜单树，图标随之撤走

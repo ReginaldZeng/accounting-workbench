@@ -38,6 +38,7 @@ const HINT = {
   logistics: '物流计提 · 复核 / 去向费率 / 录金蝶',
   logisticspay: '物流账单核对 · 逐笔计提 / 逐单核价核量 / 钉钉请款进度',
   logisticscost: '单据运费 · 货拉拉等议价/报销登记',
+  logisticsvoucher: '付款做账 · 红冲 / 更正 / 暂估转待认证 / 支付 合成一张凭证',
   clexport: '存货台账 · 八步工作流导出',
   cldash: '存货看板',
   bomdraft: 'BOM 报价 · 钉钉抓取 / 入账 / 复核 / 定稿',
