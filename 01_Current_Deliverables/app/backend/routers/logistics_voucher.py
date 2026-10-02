@@ -293,6 +293,23 @@ def _preview_data(inst, self_vno=None):
         msgs.append("金蝶付款单没取到我方银行账号，银行存款那行的账号待补")
     st = "booked" if inst in (db.get_setting(_POSTED_KEY, None) or {}) else _status(r, folder, invs, ovr)
     kind, ktext = _kind(vouchers, notes, pl)
+    # 计提调整单(V2.759，用户 2026-10-02「审核的时候就出来，打印后贴在钉钉单据后面」)：每张红冲更正的计提，原计提 vs 更正后
+    adjust = []
+    for v in (vouchers if lines else []):
+        p = pl["per"].get(v["vno"]) or {}
+        if p.get("mode") not in ("rate", "fix", "tail"):
+            continue
+        e = "更正%s%s" % (LV.ref_of(v, ctx["pay_year"]), v["expl"])
+        nl = [l for l in lines if l["block"] == "更正" and l["expl"] == e]
+        exp_old = [{k: l.get(k) for k in ("acct", "acct_name", "dr") + LV.EXP_DIMS} for l in v["exp_lines"]]
+        exp_new = [dict(l["dims"], acct=l["acct"], acct_name=l["acct_name"], dr=l["dr"]) for l in nl if str(l["acct"])[:1] in ("5", "6")]
+        ng = sum(l["cr"] for l in nl if l["acct"] == "2241.02")
+        nt = sum(l["dr"] for l in nl if l["acct"] == "2221.01.07")
+        adjust.append({"ref": LV.ref_of(v, ctx["pay_year"]), "vno": v["vno"], "year": v["year"], "month": v["month"], "expl": v["expl"],
+                       "mode": p["mode"], "why": p.get("why") or "",
+                       "old": {"gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"], "exp": exp_old},
+                       "new": {"gross": LV.r2(ng), "tax": LV.r2(nt), "net": LV.r2(ng - nt),
+                               "rate": v["rate"] if p["mode"] == "tail" else p.get("new_rate"), "exp": exp_new}})
     return {"ok": True, "kind": kind, "kind_text": ktext, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
                                 "code": r.get("sup_code"), "subject": r.get("subject"), "subject_full": r.get("subject_full"),
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
@@ -306,6 +323,7 @@ def _preview_data(inst, self_vno=None):
                           "tail": pl["tails"].get(v["vno"]),
                           **(pl["per"].get(v["vno"]) or {"mode": "", "new_rate": None, "why": ""})} for v in vouchers],
             "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"]},
+            "adjust": adjust,
             "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}, 200
 
 @router.post("/api/logistics-voucher/plans")

@@ -61,6 +61,81 @@ function dimLine(d) {
   return dimText(d).join(' · ')
 }
 
+// 计提调整单（V2.759，用户 2026-10-02「审核的时候就出来，打印后贴在钉钉单据后面」）：每张请款单一页 A4，
+// 列出要红冲更正的计提：原计提 / 调整后 / 差额 + 原因，对应发票，会计处理，签字栏。数据来自预览接口的 adjust。
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const dimKey = l => [l.acct, l.fee_code, l.dept_code, l.biz_code, l.proj_code].join('|')
+const expText = l => esc([l.acct + ' ' + (l.acct_name || ''), ...dimText(l)].join(' · '))
+const MODE_CN = { rate: '改税率', fix: '改科目/维度/金额', tail: '尾差' }
+
+function adjustSheet(d) {
+  const q = d.req, p = q.posted, adj = d.adjust || []
+  const ym = String(d.voucher.date || '').slice(0, 7).split('-')
+  const vno = p ? `${ym[0]}年${+ym[1]}月 记-${esc(p.vno)}` : '（保存到金蝶后生成）'
+  const sum = (k, w) => r2(adj.reduce((s, a) => s + (a[w][k] || 0), 0))
+  const row = (lab, x, cls) => `<tr class="${cls || ''}"><td>${lab}</td><td class="n">${money(x.gross)}</td><td class="c">${x.rate == null ? '' : pct(x.rate)}</td><td class="n">${money(x.net)}</td><td class="n">${money(x.tax)}</td></tr>`
+  const diff = a => ({ gross: r2(a.new.gross - a.old.gross), net: r2(a.new.net - a.old.net), tax: r2(a.new.tax - a.old.tax) })
+  const sgn = x => (x > 0 ? '+' : '') + money(x)
+  const blocks = adj.map((a, i) => {
+    const df = diff(a)
+    const dimChg = a.old.exp.length !== a.new.exp.length || a.old.exp.some((l, j) => dimKey(l) !== dimKey(a.new.exp[j] || {}))
+    const exps = dimChg ? `<table class="t exp"><thead><tr><th style="width:38%">原费用分录</th><th class="n" style="width:12%">金额</th><th style="width:38%">调整后费用分录</th><th class="n">金额</th></tr></thead><tbody>${
+      Array.from({ length: Math.max(a.old.exp.length, a.new.exp.length) }, (_, j) => {
+        const o = a.old.exp[j], n = a.new.exp[j]
+        return `<tr><td>${o ? expText(o) : ''}</td><td class="n">${o ? money(o.dr) : ''}</td><td>${n ? expText(n) : ''}</td><td class="n">${n ? money(n.dr) : ''}</td></tr>`
+      }).join('')}</tbody></table>` : ''
+    return `<div class="blk"><div class="bh"><b>${i + 1}. 原计提凭证 ${esc(a.year)}年${esc(a.month)}月 记-${esc(a.vno)}</b>
+      <span class="tag">${esc(MODE_CN[a.mode] || a.mode)}</span></div>
+      <div class="ex">摘要：${esc(a.expl)}</div>
+      <div class="ex">调整原因：${esc(a.why || '—')}</div>
+      <table class="t"><thead><tr><th style="width:16%"></th><th class="n">含税金额</th><th class="c" style="width:12%">税率</th><th class="n">不含税金额</th><th class="n">税额</th></tr></thead><tbody>
+      ${row('原计提', a.old)}${row('调整后', a.new, 'b')}
+      <tr class="d"><td>差额</td><td class="n">${sgn(df.gross)}</td><td></td><td class="n">${sgn(df.net)}</td><td class="n">${sgn(df.tax)}</td></tr></tbody></table>${exps}</div>`
+  }).join('')
+  const inv = d.invoices || []
+  const invTb = `<table class="t"><thead><tr><th>发票号码</th><th>类型</th><th class="c">税率</th><th class="n">含税金额</th><th class="n">税额</th></tr></thead><tbody>${
+    inv.map(i => `<tr><td class="m">${esc(i.number)}</td><td>${esc(i.type)}</td><td class="c">${esc(i.rate)}</td><td class="n">${money(i.gross)}</td><td class="n">${money(i.tax)}</td></tr>`).join('')}
+    <tr class="b"><td colspan="3">合计 ${inv.length} 张</td><td class="n">${money(r2(inv.reduce((s, i) => s + (i.gross || 0), 0)))}</td><td class="n">${money(r2(inv.reduce((s, i) => s + (i.tax || 0), 0)))}</td></tr></tbody></table>`
+  const refs = adj.map(a => `记-${esc(a.vno)}`).join('、')
+  return `<div class="sheet">
+  <h1>计 提 调 整 单</h1><div class="sub">物流费用 · 付款时按发票红冲更正原计提</div>
+  <table class="hd"><tr><th>主体</th><td>${esc(q.subject_full || q.subject)}</td><th>调整凭证</th><td>${vno}</td></tr>
+  <tr><th>物流商</th><td>${esc(q.payee)}（${esc(q.code)}）</td><th>账单期间</th><td>${esc(q.period)}</td></tr>
+  <tr><th>钉钉审批</th><td>${esc(q.bid)} · 申请人 ${esc(q.applicant)}</td><th>付款金额</th><td>${money(q.amount)}${p ? ` · 付款单 ${esc(p.bill_no)}` : ''}</td></tr></table>
+  <h2>一、调整明细 <span>（${adj.length} 张计提，金额单位：元）</span></h2>${blocks}
+  ${adj.length > 1 ? `<table class="t"><tbody><tr class="b"><td style="width:16%">差额合计</td><td class="n">含税 ${sgn(r2(sum('gross', 'new') - sum('gross', 'old')))}</td><td class="n">不含税 ${sgn(r2(sum('net', 'new') - sum('net', 'old')))}</td><td class="n">税额 ${sgn(r2(sum('tax', 'new') - sum('tax', 'old')))}</td></tr></tbody></table>` : ''}
+  <h2>二、对应发票</h2>${invTb}
+  <h2>三、会计处理</h2><div class="ex">在付款凭证 ${vno} 中：① 红冲原计提 ${refs}（整笔）；② 按调整后金额重新计提（税额挂暂估进项税）；③ 凭上列发票核销，暂估进项税转待认证；④ 支付。</div>
+  <table class="sign"><tr><td>制单：${esc(p ? p.by : '')}</td><td>复核：</td><td>审核：</td><td>日期：${p ? esc(String(p.at || '').slice(0, 10)) : ''}</td></tr></table>
+  <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString('zh-CN', { hour12: false })}${p ? '' : ' · 未写金蝶，凭证号待定'}</div></div>`
+}
+
+const SHEET_CSS = `@page{size:A4;margin:12mm 13mm}*{box-sizing:border-box}body{font:12px/1.55 "Microsoft YaHei","PingFang SC",sans-serif;color:#111;margin:0}
+.sheet{page-break-after:always}.sheet:last-child{page-break-after:auto}
+h1{text-align:center;font-size:21px;letter-spacing:2px;margin:0 0 2px}.sub{text-align:center;color:#555;margin-bottom:10px}
+h2{font-size:13.5px;margin:12px 0 5px;border-left:3px solid #111;padding-left:6px}h2 span{font-weight:400;color:#555;font-size:11.5px}
+table{width:100%;border-collapse:collapse}.hd th,.hd td,.t th,.t td{border:1px solid #333;padding:4px 6px;vertical-align:middle}
+.hd th{width:11%;background:#f2f2f2;text-align:left;font-weight:600}.t th{background:#f2f2f2;font-weight:600;text-align:left}
+.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.t th.n{text-align:right}.c,.t th.c{text-align:center}.m{font-family:Consolas,monospace}
+tr.b td{font-weight:700}tr.d td{font-weight:700;background:#fafafa}
+.blk{margin:6px 0 8px;break-inside:avoid}.bh{display:flex;gap:8px;align-items:center}.tag{border:1px solid #333;border-radius:3px;padding:0 5px;font-size:11px}
+.ex{margin:2px 0 4px;color:#222}.exp{margin-top:4px;font-size:11px}
+.sign{margin-top:22px}.sign td{padding:6px 4px;width:25%}.ft{margin-top:10px;color:#777;font-size:10.5px;text-align:right}
+.wait{padding:40px;text-align:center;color:#555}@media screen{body{background:#eee}.sheet{background:#fff;width:210mm;margin:12px auto;padding:12mm 13mm;box-shadow:0 1px 4px #0002}}`
+
+// 先同步开窗(避免被拦截)，数据到了再写；ds 可以是数组或 Promise
+function printAdjust(ds, title) {
+  const w = window.open('', '_blank')
+  if (!w) { alert('浏览器拦截了弹窗，请允许本站弹出窗口后再点'); return }
+  w.document.write(`<!doctype html><meta charset="utf-8"><title>${esc(title || '计提调整单')}</title><style>${SHEET_CSS}</style><div class="wait">正在生成计提调整单…</div>`)
+  w.document.close()
+  Promise.resolve(ds).then(list => {
+    const ok = list.filter(d => d && (d.adjust || []).length)
+    w.document.body.innerHTML = ok.length ? ok.map(adjustSheet).join('') : '<div class="wait">没有需要调整的计提</div>'
+    if (ok.length) setTimeout(() => w.print(), 300)
+  }).catch(e => { w.document.body.innerHTML = `<div class="wait">生成失败：${esc(e.message)}</div>` })
+}
+
 function Detail({ inst, onClose, onChanged }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -116,8 +191,10 @@ function Detail({ inst, onClose, onChanged }) {
 
           {d.req.posted && <div className="lv-verdict ok"><span className="lv-pill ok">已写入金蝶</span>
             付款单 {d.req.posted.bill_no} 已审核 · 凭证 <b>记-{d.req.posted.vno}</b>（{d.req.posted.book}）已补分录，借 {money(d.req.posted.dr)} = 贷 {money(d.req.posted.cr)} · {d.req.posted.by} {d.req.posted.at} · 凭证请在金蝶核对后审核</div>}
-          {posting && !posting.busy && <div className={'lv-msg ' + (posting.ok ? 'okb' : 'bad')}>{posting.ok ? `已写入：记-${posting.vno}（${(posting.steps || []).join(' → ')}）` : posting.msg}</div>}
-          {d.kind && KIND[d.kind] && <div className={'lv-verdict ' + KIND[d.kind][1]}><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span>{d.kind_text}</div>}
+          {posting && !posting.busy && <div className={'lv-msg ' + (posting.ok ? 'okb' : 'bad')}>{posting.ok ? `已写入：记-${posting.vno}（${(posting.steps || []).join(' → ')}）` : posting.msg}
+            {posting.ok && (d.adjust || []).length > 0 && <> · <button className="lnk" onClick={() => printAdjust([d], `计提调整单 ${d.req.payee}`)}>打印计提调整单（贴钉钉单据后）</button></>}</div>}
+          {d.kind && KIND[d.kind] && <div className={'lv-verdict ' + KIND[d.kind][1]}><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span>{d.kind_text}
+            {(d.adjust || []).length > 0 && <><span style={{ flex: 1 }} /><button className="btn sm" title="打印后贴在钉钉付款单据后面" onClick={() => printAdjust([d], `计提调整单 ${d.req.payee}`)}>打印计提调整单</button></>}</div>}
           {d.plan.msgs.filter(m => m !== d.kind_text).length > 0 &&
             <ul className="lv-notes">{d.plan.msgs.filter(m => m !== d.kind_text).map((m, i) => <li key={i}>{m}</li>)}</ul>}
 
@@ -286,6 +363,7 @@ export default function LogisticsVoucher() {
           <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}>批量保存到金蝶</button>
           <span className="dim">能勾「可做账」且做账类型为 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的；计提记错主体、金额不符的要人工</span>
           {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
+            {run.end && run.done.some(x => x.ok && x.redo) && <button className="lnk" onClick={() => printAdjust(Promise.all(run.done.filter(x => x.ok && x.redo).map(x => voucherPreview(x.inst))), '本批计提调整单')}>打印本批计提调整单（{run.done.filter(x => x.ok && x.redo).length} 张）</button>}
             {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
         </div>
         {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
