@@ -203,8 +203,33 @@ def preview(request: Request, inst: str):
     ovr = db.get_setting(_OVR_KEY, None) or {}
     try:
         vouchers, notes = _accruals(r["subject_full"], r["period"], r["sup_code"])
+        vouchers, notes = list(vouchers), list(notes)      # 缓存里的列表别被下面改到
     except Exception as e:
         return JSONResponse({"ok": False, "msg": "读金蝶计提凭证失败：%s" % str(e)[:160]}, status_code=502)
+    # 同一家同月有几张请款单(或计提多记了一张)：计提比发票多时，挑出含税合计正好＝发票的那几张，其余不在这次请款里
+    inv_tot = round(sum(i["gross"] for i in invs), 2)
+    if vouchers and invs and sum(v["gross"] for v in vouchers) - inv_tot > 0.004:
+        pick = LV._subset(vouchers, inv_tot)
+        if pick:
+            rest = [v for v in vouchers if v not in pick]
+            notes.append("本期这家还有 %s 不在这次请款里（含税合计正好对上发票的是另外几张）" %
+                         "、".join("记-%s %.2f" % (v["vno"], v["gross"]) for v in rest))
+            vouchers = pick
+    # 本账簿没有/对不上：去另外两个主体的账上找，计提可能记错了主体(实证 丰源 深圳星期九 918.93 记在深圳星期零 记-390)
+    if invs and abs(sum(v["gross"] for v in vouchers) - inv_tot) > 0.004:
+        for o in db.list_orgs() or []:
+            ob = o.get("full_name")
+            if not ob or ob == r["subject_full"]:
+                continue
+            try:
+                ov, _ = _accruals(ob, r["period"], r["sup_code"])
+            except Exception:
+                continue
+            hit = LV._subset(ov, inv_tot) if ov else None
+            if hit:
+                notes.append("计提记在了「%s」的账上（%s），主体记错：要先在那边红冲、在本主体重新计提，再做这张" %
+                             (o.get("short_name") or ob, "、".join("记-%s %.2f" % (v["vno"], v["gross"]) for v in hit)))
+                break
     fixes = _fixes(r["carrier"], r["period"], r["subject"])
     fixes = {k: v for k, v in fixes.items() if any(x["vno"] == k for x in vouchers)}
     inv_in = [{"number": i["number"], "rate": i["rate"], "gross": i["gross"], "tax": i["tax"]} for i in invs]
