@@ -1557,5 +1557,38 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertFalse(ii.scan_once("测试")["ok"])
         sys.modules.pop("routers.invoice_intake", None)
 
+    def test_47_paper_month_check(self):
+        """V2.740 月末纸质件查验：按审核通过月份列票；扫发票码按号码找到就记纸质件已到（不用开票夹）；手工勾/撤；导出未到。"""
+        inv, S = self.inv, self.S
+        sys.modules.pop("routers.invoice_paper", None)
+        from routers import invoice_paper as ip_
+        e = inv.E()
+        fo = self.manual("intern", "月末查验", 300)
+        n1, n2, n3 = "26440000000000004701", "26440000000000004702", "26440000000000004703"
+        mk = lambda num, at, review="approved", kind="invoice": S.item_insert(
+            e, folder_id=fo["id"], kind=kind, origin="attachment", inv_type="special", number=num, total=100,
+            review=review, review_at=at, paper=0, status="active")
+        a = mk(n1, "2026-08-31 18:00:00")
+        mk(n2, "2026-09-02 09:00:00")
+        mk(n3, "2026-09-03 09:00:00", review="pending")
+        mk("26440000000000004704", "2026-09-04 09:00:00", kind="other")
+        r = ip_._list("2026-09")
+        self.assertEqual(([x["number"] for x in r["rows"]], r["missing"]), ([n2], 1))     # 只算 9 月审核通过的发票
+        u = {"name": "intern"}
+        s1 = ip_._scan(u, qr(n2, 100))
+        self.assertEqual((s1["action"], s1["month"]), ("confirm", "2026-09"), s1)
+        self.assertEqual(ip_._list("2026-09")["arrived"], 1)
+        self.assertEqual(ip_._scan(u, qr(n2, 100))["action"], "already")
+        s3 = ip_._scan(u, qr(n1, 100))
+        self.assertEqual((s3["action"], s3["month"]), ("confirm", "2026-08"))               # 别的月的也照记，告诉他是几月审的
+        self.assertEqual(ip_._scan(u, qr("26440000000000004799", 1))["action"], "notFound")
+        self.assertEqual(ip_._scan(u, "随便")["action"], "notInvoice")
+        ip_._mark(u, S.item_get(e, a), False, "手工勾")
+        self.assertFalse(S.item_get(e, a)["paper"])
+        data, n = ip_._export("2026-08", "missing")
+        self.assertEqual(n, 1)
+        self.assertTrue(data[:2] == b"PK")
+        sys.modules.pop("routers.invoice_paper", None)
+
 if __name__ == "__main__":
     unittest.main()

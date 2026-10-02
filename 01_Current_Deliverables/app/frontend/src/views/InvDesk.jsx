@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-02 | Author: Claude Opus 5.5 | Version: V2.740 | 页头加「月末纸质件查验」切换（InvPaper.jsx）：按审核通过月份扫码记纸质件到件、导出未到清单
 // [Change Log] Date: 2026-10-02 | Author: Claude Opus 5.5 | Version: V2.739 | 「钉钉接入」改名「钉钉接入 · 票不齐」：票据齐全的系统自动提交进审核，这里只剩要财务补传/处理的，每行写明原因
 // [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.738 | 「票夹里的票」只排发票/收据；非发票附件（账单、对账单、截图等）收进底下一行「其他附件 N 个」，点开才列，点名字仍能打开改票种
 // [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.737 | 左栏加「钉钉接入 · 待收票」：自动接入建的票夹记在系统名下、「我的票夹」看不到，单列一块（可搜，点开即打开）
@@ -17,6 +18,7 @@ import {
   ScanInput, FileDrop, CameraPanel, PairModal,
 } from './invShared.jsx'
 import InvSettings from './InvSettings.jsx'
+import InvPaper from './InvPaper.jsx'
 import './inv-desk.css'
 
 // ───────────────────────── 常量与小工具 ─────────────────────────
@@ -635,6 +637,7 @@ export default function InvDesk({ user }) {
   const [deskErr, setDeskErr] = useState('')
   const [pairOpen, setPairOpen] = useState(false)
   const [setOpen, setSetOpen] = useState(false)
+  const [paperMode, setPaperMode] = useState(false)   // V2.740 月末纸质件查验
   const [manualOpen, setManualOpen] = useState(false)
   const [detailId, setDetailId] = useState(null)
   const [scanBusy, setScanBusy] = useState(false)
@@ -785,8 +788,10 @@ export default function InvDesk({ user }) {
 
   const header = (
     <div className="head">
-      <div><div className="h-title">收票工作台</div><div className="h-sub">扫审批单 → 放发票 → 提交</div></div>
+      <div><div className="h-title">{paperMode ? '月末纸质件查验' : '收票工作台'}</div>
+        <div className="h-sub">{paperMode ? '按审核通过的月份，扫纸质发票二维码记到件，导出没到的去催' : '扫审批单 → 放发票 → 提交'}</div></div>
       <div className="inv-dk-actions">
+        <button type="button" className={paperMode ? 'btn-pri' : 'btn'} onClick={() => setPaperMode(v => !v)}>{paperMode ? '← 回到收票' : '月末纸质件查验'}</button>
         {pair && pair.bound && <span className={'inv-badge ' + (pair.active === false ? 'mute' : 'ok')}
           title={[pair.device, pair.active === false && pair.lastSeen ? '手机最近一次在线 ' + fmtTime(pair.lastSeen) : ''].filter(Boolean).join(' · ')}>
           手机已连上{pair.dtName ? '：' + pair.dtName : ''}{pair.active === false ? '（没在用）' : ''}</span>}
@@ -801,6 +806,8 @@ export default function InvDesk({ user }) {
   if (cfg && can.desk === false) {
     return <div>{header}<div className="body"><div className="banner err">你还没有「收票工作台」的权限，请找管理员在账号管理里开通。</div></div></div>
   }
+
+  if (paperMode) return <div className="inv-dk">{header}<div className="body"><InvPaper canEdit={!!can.intake} /></div></div>
 
   return (
     <div className="inv-dk">

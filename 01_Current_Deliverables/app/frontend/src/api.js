@@ -503,6 +503,11 @@ export const invIntakeScan = () => jp('/api/inv/intake/scan', {})   // 立即扫
 // 收票工作台
 export const invDesk = () => j('/api/inv/desk')
 export const invDeskAuto = () => j('/api/inv/desk/auto')   // V2.737 钉钉接入·待收票（系统自动建的票夹）
+// V2.740 月末纸质件查验（按审核通过月份）
+export const invPaperList = (month) => j('/api/inv/paper?month=' + encodeURIComponent(month))
+export const invPaperScan = (code) => jp('/api/inv/paper/scan', { code })
+export const invPaperMark = (itemId, paper) => jp('/api/inv/paper/mark', { itemId, paper })
+export const invPaperExportUrl = (month, only) => '/api/inv/paper/export?month=' + encodeURIComponent(month) + (only ? '&only=' + only : '')
 export const invScan = (code) => jp('/api/inv/desk/scan', { code })
 export const invOpenFolder = (folderId) => jp('/api/inv/desk/open', { folderId })
 export const invCloseFolder = () => jp('/api/inv/desk/close')

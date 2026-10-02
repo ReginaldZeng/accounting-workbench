@@ -188,3 +188,18 @@
 .inv-dk-others{ margin-top:10px; border:1px dashed var(--line); border-radius:8px; padding:6px 10px; font-size:12.5px; }
 .inv-dk-others summary{ cursor:pointer; font-weight:600; color:var(--ink-2); }
 .inv-dk-others-l{ display:flex; flex-wrap:wrap; gap:6px 14px; padding:8px 0 2px; }
+
+/* V2.740 月末纸质件查验 */
+.inv-pp{ display:flex; flex-direction:column; gap:12px; }
+.inv-pp-bar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.inv-pp-m{ display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; white-space:nowrap; }
+.inv-pp-sum{ font-size:13px; color:var(--ink-2); }
+.inv-pp-sum b.ok{ color:var(--green, #16a34a); } .inv-pp-sum b.warn{ color:var(--amber); }
+.inv-pp-tabs{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.inv-pp-tab{ border:1px solid var(--line); background:var(--bg); border-radius:999px; padding:4px 14px; font-size:12.5px; cursor:pointer; color:var(--ink-2); }
+.inv-pp-tab.on{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:600; }
+.inv-pp-tbl{ width:100%; border-collapse:collapse; font-size:12.5px; }
+.inv-pp-tbl th{ text-align:left; padding:7px 10px; background:var(--bg-sub); border-bottom:1px solid var(--line); font-weight:600; white-space:nowrap; }
+.inv-pp-tbl td{ padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+.inv-pp-tbl .num{ text-align:right; }
+.inv-pp-tbl .sub{ font-size:11.5px; color:var(--ink-2); }
