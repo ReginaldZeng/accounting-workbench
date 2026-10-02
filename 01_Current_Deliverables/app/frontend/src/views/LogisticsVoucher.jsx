@@ -4,7 +4,7 @@
 //   点开：计提 vs 发票逐张比（核销 / 红冲更正 + 原因）+ 整张凭证预览（带全部核算维度，借贷平衡）。
 //   第一版只预览、不写金蝶；纸质件没到可手动放行（用户 2026-10-02 定）。
 import React, { useEffect, useMemo, useState } from 'react'
-import { voucherList, voucherPreview, voucherPaperOverride } from '../api.js'
+import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans } from '../api.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
@@ -17,6 +17,12 @@ const ST = {
   booked: ['已做账', 'done', '发票都已被金蝶凭证引用（发票管家同步）'],
 }
 const ORDER = ['ready', 'paper', 'invdiff', 'noinv', 'unpaid', 'booked']
+// 做账类型(要读金蝶计提，列表出来后再逐张补)：计提与发票一致只核销 / 含尾差 / 要红冲更正 / 计提记错主体 / 金额不符 / 没有计提
+const KIND = {
+  hx: ['一致·只核销', 'ok'], tail: ['一致·核销含尾差', 'ok'], redo: ['需红冲更正', 'bad'],
+  subj: ['计提记错主体', 'bad'], manual: ['金额不符·人工', 'warn'], noacc: ['没有计提', 'warn'], err: ['读取失败', 'neu'],
+}
+const KIND_ORDER = ['hx', 'tail', 'redo', 'subj', 'manual', 'noacc']
 const BLOCK_CLS = { 红冲: 'b-red', 更正: 'b-fix', 核销: 'b-hx', 支付: 'b-pay' }
 const MODE = { hx: ['核销', 'ok'], rate: ['红冲+更正', 'bad'], fix: ['红冲+更正', 'bad'] }
 
@@ -66,6 +72,7 @@ function Detail({ inst, onClose, onChanged }) {
               ? <span className="lv-ovr">纸质件已手动放行（{d.req.paper_ovr.by} {d.req.paper_ovr.at}{d.req.paper_ovr.note ? '：' + d.req.paper_ovr.note : ''}）<button className="lnk" disabled={busy} onClick={() => ovr(false)}>撤销</button></span>
               : d.req.status === 'paper' && <button className="btn" disabled={busy} onClick={() => ovr(true)}>纸质件没到，先做账（手动放行）</button>}
           </div>
+          {d.kind && KIND[d.kind] && <div className="lv-kind"><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span> {d.kind_text}</div>}
           {d.plan.msgs.length > 0 && <ul className={'lv-msgs ' + (d.plan.status === 'ok' ? '' : 'bad')}>{d.plan.msgs.map((m, i) => <li key={i}>{m}</li>)}</ul>}
 
           <div className="lv-sec">① 计提 vs 发票</div>
@@ -126,10 +133,21 @@ export default function LogisticsVoucher() {
   const [f, setF] = useState('ready')
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(null)
-  const load = () => voucherList().then(r => { setRows(r.rows || []); setErr('') }).catch(e => { setErr(e.message); setRows([]) })
+  const [plans, setPlans] = useState({})        // inst → {kind, text}
+  const [kf, setKf] = useState('')
+  const load = () => voucherList().then(r => {
+    const rs = r.rows || []
+    setRows(rs); setErr('')
+    // 做账类型：有账单月、有发票的才算；分几批取，先出的先显示
+    const ids = rs.filter(x => x.period && x.n_inv && x.status !== 'booked').map(x => x.inst)
+    const batches = []
+    for (let i = 0; i < ids.length; i += 5) batches.push(ids.slice(i, i + 5))
+    batches.reduce((p, b) => p.then(() => voucherPlans(b).then(o => setPlans(old => ({ ...old, ...(o.plans || {}) }))).catch(() => {})), Promise.resolve())
+  }).catch(e => { setErr(e.message); setRows([]) })
   useEffect(() => { load() }, [])
   const cnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { c[r.status] = (c[r.status] || 0) + 1 }); return c }, [rows])
-  const shown = (rows || []).filter(r => (!f || r.status === f) &&
+  const kcnt = useMemo(() => { const c = {}; Object.values(plans).forEach(p => { c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans])
+  const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) &&
     (!q || [r.carrier, r.payee, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
   return (
     <div className="lv">
@@ -144,17 +162,29 @@ export default function LogisticsVoucher() {
           <input type="search" placeholder="搜承运商/主体/审批编号" value={q} onChange={e => setQ(e.target.value)} />
           <button className="btn" onClick={load}>刷新</button>
         </div>
+        <div className="lv-bar">
+          <span className="dim">做账类型</span>
+          {KIND_ORDER.map(k => <button key={k} className={'lv-chip ' + KIND[k][1] + (kf === k ? ' on' : '')} onClick={() => setKf(kf === k ? '' : k)}>{KIND[k][0]}<b>{kcnt[k] || 0}</b></button>)}
+          {kf && <button className="lnk" onClick={() => setKf('')}>不限</button>}
+        </div>
         {err && <div className="lv-msg bad">{err}</div>}
         <div className="tbl-wrap"><table className="lv-t">
-          <thead><tr><th>承运商</th><th>主体</th><th className="num">请款金额</th><th>账单月</th><th>付款</th><th className="num">发票</th><th>纸质件</th><th>状态</th><th></th></tr></thead>
+          <thead><tr><th>承运商</th><th>主体</th><th className="num">请款金额</th><th>账单月</th><th>付款</th><th className="num">发票</th><th>做账类型</th><th>纸质件</th><th>状态</th><th></th></tr></thead>
           <tbody>
-            {rows === null && <tr><td colSpan="9" className="lv-empty">读取中…</td></tr>}
-            {rows && !shown.length && <tr><td colSpan="9" className="lv-empty">没有</td></tr>}
+            {rows === null && <tr><td colSpan="10" className="lv-empty">读取中…</td></tr>}
+            {rows && !shown.length && <tr><td colSpan="10" className="lv-empty">没有</td></tr>}
             {shown.map(r => <tr key={r.inst}>
               <td><b>{r.carrier}</b><div className="dim">{r.code}</div></td>
               <td>{r.subject}</td><td className="num">{money(r.amount)}</td><td>{r.period || <span className="warn">未认月份</span>}</td>
               <td>{r.paid || <span className="dim">未付</span>}{r.paid_voucher && <div className="dim">已记 {r.paid_voucher}</div>}</td>
               <td className="num">{r.n_inv ? <>{r.n_inv} 张 · {money(r.inv_total)}</> : <span className="dim">—</span>}</td>
+              <td className="kd">{(() => {
+                const p = plans[r.inst]
+                if (!r.period || !r.n_inv || r.status === 'booked') return <span className="dim">—</span>
+                if (!p) return <span className="dim">计算中…</span>
+                const [lb, cl] = KIND[p.kind] || [p.kind, 'neu']
+                return <><span className={'lv-pill ' + cl} title={p.text}>{lb}</span>{['redo', 'subj', 'manual'].includes(p.kind) && <div className="dim kt" title={p.text}>{p.text}</div>}</>
+              })()}</td>
               <td>{r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr && <div className="dim">已放行</div>}</td>
               <td><span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span>{r.booked.length > 0 && <div className="dim">{r.booked.join('、')}</div>}</td>
               <td><button className="btn btn-pri" disabled={!r.period} onClick={() => setOpen(r.inst)}>{r.status === 'booked' ? '查看' : '凭证预览'}</button></td>
@@ -193,6 +223,7 @@ const CSS = `
 .lv .lv-x{border:0;background:none;font-size:16px;color:var(--ink-3);cursor:pointer}
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
+.lv .lv-kind{font-size:13px;margin:6px 0}.lv td.kd{max-width:280px}.lv td.kd .kt{white-space:normal;line-height:1.4;margin-top:3px}
 .lv .lv-msgs{margin:6px 0 4px;padding:8px 12px 8px 28px;background:var(--amber-bg);color:var(--amber);border-radius:8px;font-size:12.5px}
 .lv .lv-msgs.bad{background:var(--red-bg);color:var(--red)}
 .lv .lv-sec{font-weight:700;font-size:13.5px;margin:16px 0 8px}

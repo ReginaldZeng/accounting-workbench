@@ -192,20 +192,42 @@ def _fixes(carrier, period, subject):
 def preview(request: Request, inst: str):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    d, code = _preview_data(inst)
+    return d if code == 200 else JSONResponse(d, status_code=code)
+
+
+def _kind(vouchers, notes, pl):
+    """一句话做账类型(列表用)：hx 一致·只核销 / tail 核销含尾差 / redo 需红冲更正 / subj 计提记错主体 / manual 金额不符 / noacc 没有计提。"""
+    subj = next((n for n in notes if "主体记错" in n), "")
+    if subj:
+        return "subj", subj
+    if not vouchers:
+        return "noacc", "金蝶本期没找到这家的计提凭证"
+    if pl["status"] != "ok":
+        return "manual", (pl["msgs"] or ["要人工处理"])[0]
+    redo = [(k, p) for k, p in pl["per"].items() if p.get("mode") in ("rate", "fix")]
+    if redo:
+        return "redo", "需红冲更正 %d 张：%s" % (len(redo), "；".join("记-%s %s" % (k, p.get("why") or "") for k, p in redo))
+    if pl["tails"]:
+        return "tail", "计提与发票一致，核销（含尾差 %s）" % "、".join("%.2f" % d for d in pl["tails"].values())
+    return "hx", "计提与发票一致，只核销"
+
+
+def _preview_data(inst):
     with db._engine.connect() as c:
         r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
     if not r:
-        return JSONResponse({"ok": False, "msg": "没有这张请款单"}, status_code=404)
+        return {"ok": False, "msg": "没有这张请款单"}, 404
     r = dict(r)
     if not r.get("period"):
-        return JSONResponse({"ok": False, "msg": "这张请款单还没认出归哪个月（到账单核对总表认领）"}, status_code=400)
+        return {"ok": False, "msg": "这张请款单还没认出归哪个月（到账单核对总表认领）"}, 400
     folder, invs = _invoices(inst)
     ovr = db.get_setting(_OVR_KEY, None) or {}
     try:
         vouchers, notes = _accruals(r["subject_full"], r["period"], r["sup_code"])
         vouchers, notes = list(vouchers), list(notes)      # 缓存里的列表别被下面改到
     except Exception as e:
-        return JSONResponse({"ok": False, "msg": "读金蝶计提凭证失败：%s" % str(e)[:160]}, status_code=502)
+        return {"ok": False, "msg": "读金蝶计提凭证失败：%s" % str(e)[:160]}, 502
     # 同一家同月有几张请款单(或计提多记了一张)：计提比发票多时，挑出含税合计正好＝发票的那几张，其余不在这次请款里
     inv_tot = round(sum(i["gross"] for i in invs), 2)
     if vouchers and invs and sum(v["gross"] for v in vouchers) - inv_tot > 0.004:
@@ -251,7 +273,8 @@ def preview(request: Request, inst: str):
     if pi.get("bill_id") and not bank:
         msgs.append("金蝶付款单没取到我方银行账号，银行存款那行的账号待补")
     st = _status(r, folder, invs, ovr)
-    return {"ok": True, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
+    kind, ktext = _kind(vouchers, notes, pl)
+    return {"ok": True, "kind": kind, "kind_text": ktext, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
                                 "code": r.get("sup_code"), "subject": r.get("subject"), "subject_full": r.get("subject_full"),
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
@@ -260,7 +283,26 @@ def preview(request: Request, inst: str):
             "accruals": [{"vno": v["vno"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           **(pl["per"].get(v["vno"]) or {"mode": "", "new_rate": None, "why": ""})} for v in vouchers],
             "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"]},
-            "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}
+            "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}, 200
+
+@router.post("/api/logistics-voucher/plans")
+async def plans(request: Request):
+    """列表的「做账类型」列：逐张算(要读金蝶计提，按账簿×月×供应商缓存 10 分钟)，前端列表出来后再来取。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    from starlette.concurrency import run_in_threadpool
+
+    def run():
+        out = {}
+        for inst in (b.get("insts") or [])[:80]:
+            try:
+                d, code = _preview_data(str(inst))
+                out[inst] = {"kind": d.get("kind"), "text": d.get("kind_text")} if code == 200 else {"kind": "err", "text": d.get("msg")}
+            except Exception as e:
+                out[inst] = {"kind": "err", "text": str(e)[:120]}
+        return out
+    return {"ok": True, "plans": await run_in_threadpool(run)}
 
 
 @router.post("/api/logistics-voucher/paper-override")

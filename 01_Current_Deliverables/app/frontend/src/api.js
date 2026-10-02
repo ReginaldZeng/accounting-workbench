@@ -153,6 +153,7 @@ export const getNavModules = () => j('/api/nav-modules')
 // V2.749 物流·付款做账（红冲→更正→核销→支付 合成凭证预览）
 export const voucherList = (since = '2026-09-01') => j('/api/logistics-voucher/list?since=' + since)
 export const voucherPreview = inst => j('/api/logistics-voucher/preview?inst=' + encodeURIComponent(inst))
+export const voucherPlans = insts => j('/api/logistics-voucher/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ insts }) })
 export const voucherPaperOverride = (inst, on, note = '') => j('/api/logistics-voucher/paper-override', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, on, note }) })
 // V2.731 首页「申请开通」→ 钉钉推送（/mine 只读本人申请记录，首页唯一允许的轻量请求）
 export const submitAccessRequest = (cap, label, pages, note) => jp('/api/access-request', { cap, label, pages, note })
