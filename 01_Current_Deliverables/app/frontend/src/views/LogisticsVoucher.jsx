@@ -97,12 +97,15 @@ function adjustSheet(d) {
     inv.map(i => `<tr><td class="m">${esc(i.number)}</td><td>${esc(i.type)}</td><td class="c">${esc(i.rate)}</td><td class="n">${money(i.gross)}</td><td class="n">${money(i.tax)}</td></tr>`).join('')}
     <tr class="b"><td colspan="3">合计 ${inv.length} 张</td><td class="n">${money(r2(inv.reduce((s, i) => s + (i.gross || 0), 0)))}</td><td class="n">${money(r2(inv.reduce((s, i) => s + (i.tax || 0), 0)))}</td></tr></tbody></table>`
   const refs = adj.map(a => `记-${esc(a.vno)}`).join('、')
+  const acc = d.accruals || []
+  const accG = r2(acc.reduce((s, a) => s + (a.gross || 0), 0)), invG = r2(inv.reduce((s, i) => s + (i.gross || 0), 0))
   return `<div class="sheet">
   <h1>计 提 调 整 单</h1><div class="sub">物流费用 · 付款时按发票红冲更正原计提</div>
-  <table class="hd"><tr><th>主体</th><td>${esc(q.subject_full || q.subject)}</td><th>调整凭证</th><td>${vno}</td></tr>
+  <table class="hd"><colgroup><col style="width:11%"><col style="width:47%"><col style="width:11%"><col></colgroup><tr><th>主体</th><td>${esc(q.subject_full || q.subject)}</td><th>调整凭证</th><td>${vno}</td></tr>
   <tr><th>物流商</th><td>${esc(q.payee)}（${esc(q.code)}）</td><th>账单期间</th><td>${esc(q.period)}</td></tr>
   <tr><th>钉钉审批</th><td>${esc(q.bid)} · 申请人 ${esc(q.applicant)}</td><th>付款金额</th><td>${money(q.amount)}${p ? ` · 付款单 ${esc(p.bill_no)}` : ''}</td></tr></table>
-  <h2>一、调整明细 <span>（${adj.length} 张计提，金额单位：元）</span></h2>${blocks}
+  <h2>一、调整明细 <span>（金额单位：元）</span></h2>
+  <div class="ex">本次付款核销计提 ${acc.length} 张（${acc.map(a => `记-${esc(a.vno)}`).join('、')}），含税合计 ${money(accG)}，发票含税合计 ${money(invG)}；其中下列 ${adj.length} 张需红冲后更正：</div>${blocks}
   ${adj.length > 1 ? `<table class="t"><tbody><tr class="b"><td style="width:16%">差额合计</td><td class="n">含税 ${sgn(r2(sum('gross', 'new') - sum('gross', 'old')))}</td><td class="n">不含税 ${sgn(r2(sum('net', 'new') - sum('net', 'old')))}</td><td class="n">税额 ${sgn(r2(sum('tax', 'new') - sum('tax', 'old')))}</td></tr></tbody></table>` : ''}
   <h2>二、对应发票</h2>${invTb}
   <h2>三、会计处理</h2><div class="ex">在付款凭证 ${vno} 中：① 红冲原计提 ${refs}（整笔）；② 按调整后金额重新计提（税额挂暂估进项税）；③ 凭上列发票核销，暂估进项税转待认证；④ 支付。</div>
@@ -115,7 +118,7 @@ const SHEET_CSS = `@page{size:A4;margin:12mm 13mm}*{box-sizing:border-box}body{f
 h1{text-align:center;font-size:21px;letter-spacing:2px;margin:0 0 2px}.sub{text-align:center;color:#555;margin-bottom:10px}
 h2{font-size:13.5px;margin:12px 0 5px;border-left:3px solid #111;padding-left:6px}h2 span{font-weight:400;color:#555;font-size:11.5px}
 table{width:100%;border-collapse:collapse}.hd th,.hd td,.t th,.t td{border:1px solid #333;padding:4px 6px;vertical-align:middle}
-.hd th{width:11%;background:#f2f2f2;text-align:left;font-weight:600}.t th{background:#f2f2f2;font-weight:600;text-align:left}
+.hd{table-layout:fixed}.hd th{background:#f2f2f2;text-align:left;font-weight:600}.t th{background:#f2f2f2;font-weight:600;text-align:left}
 .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.t th.n{text-align:right}.c,.t th.c{text-align:center}.m{font-family:Consolas,monospace}
 tr.b td{font-weight:700}tr.d td{font-weight:700;background:#fafafa}
 .blk{margin:6px 0 8px;break-inside:avoid}.bh{display:flex;gap:8px;align-items:center}.tag{border:1px solid #333;border-radius:3px;padding:0 5px;font-size:11px}
