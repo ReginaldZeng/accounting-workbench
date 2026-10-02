@@ -132,6 +132,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
         app.include_router(inv.router)
         app.include_router(books.router)
         app.include_router(sf.router)
+        from routers import invoice_paper
+        app.include_router(invoice_paper.router)
         cls.c = TestClient(app)
 
         def mk(name, perms=None, role="normal"):
@@ -278,6 +280,15 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(vals[1][cols.index("发票号码")], num(2003))
         self.assertEqual(vals[1][cols.index("审核状态")], "已审核")
         self.assertEqual(vals[-1][cols.index("价税合计")], 600)
+
+    def test_audit_records_paper_and_voucher_before_approval(self):
+        iid, _ = self.make_item(num(9745), 321, approve=False)
+        self.assertEqual(self.post("/api/inv/paper/mark", "viewer", {"itemId": iid, "paper": True}).status_code, 403)
+        self.ok(self.post("/api/inv/paper/mark", "acct", {"itemId": iid, "paper": True}))
+        self.assertTrue(self.item(iid)["paper"])
+        self.ok(self.post(f"/api/inv/item/{iid}/bookkeeping", "acct", {"status": "booked", "vouchers": [{"book": "测试账簿", "period": "2026-10", "number": "记-1"}]}))
+        self.assertEqual(self.item(iid)["review"], "pending")
+        self.assertEqual(self.item(iid)["flags_json"]["_bookkeeping"]["status"], "booked")
 
     def test_bookkeeping_record_filter_export(self):
         iid, _ = self.make_item(num(9744), 123)

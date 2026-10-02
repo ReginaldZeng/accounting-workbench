@@ -145,7 +145,7 @@ async def paper_scan(request: Request):
 @router.post("/api/inv/paper/mark")
 async def paper_mark(request: Request):
     """没二维码的（收据、老式纸票）手工勾「纸质件已到」，勾错了可撤。"""
-    u, bad = inv.need(request, inv.ENTER_DESK, inv.CAP_INTAKE)
+    u, bad = inv.need_any(request, [(inv.ENTER_DESK, inv.CAP_INTAKE), (inv.ENTER_AUDIT, inv.CAP_AUDIT)])
     if bad:
         return bad
     b = await inv.body_json(request)

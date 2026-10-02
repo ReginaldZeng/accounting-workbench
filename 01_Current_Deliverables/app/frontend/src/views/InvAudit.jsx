@@ -1,3 +1,5 @@
+import { Bookkeeping } from './InvLedger.jsx'
+import { invPaperMark } from '../api.js'
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票审核：左队列（待审核/已退回/已通过＋搜索＋无异常批量通过）＋右票夹（抬头卡/缩略条/看图器点字段框位置/字段核对/逐张可否抵扣/异常/留痕/通过·退回）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 通过时带上看过的待审票 itemIds（审核期间进了新票→后端 409，提示后重读票夹）；
 //   改了票面字段后没手动改判的票，可否抵扣跟着新建议走；票夹级异常用票夹详情自带的（深链打开也有）；拦截项按 itemIds 出「第 N 张」；留痕可只看当前这张票。
@@ -468,8 +470,22 @@ function LinesTable({ lines }) {
 const DOUBT_QUICK = ['抬头不对', '金额和付款对不上', '不是这张单的票', '图片看不清', '项目不能报销']
 
 // 点一张票弹出来：左看图（旋转、缩放、拖动），右基础信息（系统已核的写依据）；右上 提交 / 有疑问 / 删除；下方本张明细
+function ReceiptRecord({ item, editable, onRecorded }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const mark = async () => {
+    setBusy(true); setError('')
+    try { const r = await invPaperMark(item.id, true); onRecorded({ item: { ...item, paper: r.paper } }) }
+    catch (e) { setError(e.message || '接收失败') } finally { setBusy(false) }
+  }
+  return <div className="inv-au-dedrow"><b>纸质票：{item.paper ? '已收到' : '未收到'}</b>
+    {!item.paper && editable && <button type="button" className="btn" disabled={busy} onClick={mark}>{busy ? '保存中…' : '已收到纸质票'}</button>}
+    {error && <span role="alert">{error}</span>}
+  </div>
+}
+
 function ItemDialog({ item, order, total, editable, decision, setDecision, logs, onClose, onPrev, onNext,
-  onMarkOk, onDoubt, onClearDoubt, onRemove, onSave, onRotate }) {
+  onMarkOk, onDoubt, onClearDoubt, onRemove, onSave, onRotate, onRecorded }) {
   const [mode, setMode] = useState('')       // '' | 'doubt' | 'del'
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -557,6 +573,8 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, logs,
             ? <div className="inv-au-note">这是附件（合同、清单、水单、行程单等），只留存不入台账，不用核字段。</div>
             : <>
               <div className="inv-muted inv-au-tip">点一行字段，左边图上框出它的位置。二维码读的、系统已核的不用再看，黄色「待核」的看一眼。</div>
+              <ReceiptRecord item={item} editable={editable} onRecorded={onRecorded} />
+              <Bookkeeping key={item.id} row={item} canEdit={editable} onSaved={onRecorded} />
               <FieldPanel item={item} editable={editable} activeField={activeField} onFieldFocus={setActiveField}
                 onSave={onSave} hideConfirm onDirtyChange={d => { dirty.current = d }} />
               {item.kind === 'invoice' && <div className="inv-au-dedrow">
@@ -993,7 +1011,7 @@ export default function InvAudit({ user }) {
         decision={decisions[dlgItem.id]} setDecision={v => setDecision(dlgItem.id, v)} logs={detail?.logs}
         onClose={() => setDlgId(null)}
         onPrev={dlgIdx > 0 ? () => step(-1) : undefined} onNext={dlgIdx < items.length - 1 ? () => step(1) : undefined}
-        onMarkOk={onMarkOk} onDoubt={onDoubt} onClearDoubt={onClearDoubt} onRemove={onRemove} onSave={onSave} onRotate={onRotate} />}
+        onMarkOk={onMarkOk} onDoubt={onDoubt} onClearDoubt={onClearDoubt} onRemove={onRemove} onSave={onSave} onRotate={onRotate} onRecorded={r => { setDetail(d => ({ ...d, items: d.items.map(it => it.id === r.item.id ? { ...it, ...r.item } : it) })) }} />}
       {toast}
     </div>
   )

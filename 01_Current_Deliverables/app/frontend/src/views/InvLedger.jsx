@@ -237,7 +237,7 @@ function VoidModal({ item, onClose, onDone }) {
 }
 
 const bookText = bk => ({ booked: '已做账', unbooked: '未做账' }[bk?.status] || '未确认')
-function Bookkeeping({ row, canEdit, onSaved }) {
+export function Bookkeeping({ row, canEdit, onSaved }) {
   const bk = row.bookkeeping || {}
   const [status, setStatus] = useState(bk.status || 'unknown')
   const [vouchers, setVouchers] = useState(bk.vouchers || [])

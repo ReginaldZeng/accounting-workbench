@@ -370,7 +370,7 @@ def _bookkeeping_body(body):
 
 @router.post("/api/inv/item/{item_id}/bookkeeping")
 async def item_bookkeeping(item_id: int, request: Request):
-    u, bad = need(request, ENTER_LEDGER, inv.CAP_AUDIT)
+    u, bad = inv.need_any(request, [(ENTER_LEDGER, inv.CAP_AUDIT), (inv.ENTER_AUDIT, inv.CAP_AUDIT)])
     if bad:
         return bad
     try:
@@ -380,8 +380,8 @@ async def item_bookkeeping(item_id: int, request: Request):
     def run():
         with E().begin() as cx:
             row = S._row(cx.execute(select(S.ITEM).where(S.ITEM.c.id == item_id).with_for_update()).first())
-            if not row or row["status"] != "active" or row["review"] != "approved":
-                return err("只能更新有效且审核通过的票", 409)
+            if not row or row["status"] != "active" or row["review"] not in ("pending", "approved"):
+                return err("只能更新有效的待审或已审核票", 409)
             flags = dict(row["flags_json"] or {})
             previous = flags.get("_bookkeeping") or {}
             bk.update(by=u["name"], at=inv.now_s(), source="manual")
