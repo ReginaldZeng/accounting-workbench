@@ -1094,6 +1094,17 @@ def _ledger_conds(filters):
         conds.append(ITEM.c.review.in_(("approved", "void")))
     elif review != "all":
         conds.append(ITEM.c.review == review)
+    subject = g("subject")
+    if subject:
+        conds.append(ITEM.c.buyer_name == subject)
+    month = g("month")
+    if month:
+        conds.append(ITEM.c.issue_date.like(month + "%"))
+    paper = g("paper")
+    if paper == "received":
+        conds.append(ITEM.c.paper == 1)
+    elif paper == "missing":
+        conds.append(func.coalesce(ITEM.c.paper, 0) == 0)
     q = g("q")
     if q:
         conds.append(or_(_like(ITEM.c.number, q), _like(ITEM.c.code, q), _like(ITEM.c.seller_name, q),

@@ -48,7 +48,7 @@ REPORT_CAP = 2000                   # 对账报告每张清单最多存这么多
 LIST_COVER = ("special", "normal", "travel", "toll", "train", "flight", "vehicle")   # 税局「取得发票」清单能覆盖的票种
 # 台账审核状态筛选：approved（默认）/ withvoid（页面「含作废」＝已审核＋已作废）/ void / pending / draft / returned / all（仅内部用）
 LEDGER_REVIEWS = S.LEDGER_REVIEWS
-LEDGER_EXTRA_COLUMNS = ["审核状态", "本单分摊额", "做账状态", "凭证信息", "做账确认人", "做账确认时间"]   # 导出在票面列后加两列：含作废时看得出哪行作废；拆分票看得出本单算多少
+LEDGER_EXTRA_COLUMNS = ["审核状态", "本单分摊额", "做账状态", "凭证信息", "做账确认人", "做账确认时间", "纸质票"]   # 导出在票面列后加两列：含作废时看得出哪行作废；拆分票看得出本单算多少
 REVIEW_CN = {"approved": "已审核", "void": "已作废", "pending": "待审核", "draft": "收票中", "returned": "已退回"}
 LATER_ACTIVE = ("open", "partial")
 LATER_STATUSES = ("open", "partial", "done", "closed", "overdue")
@@ -254,10 +254,14 @@ def _tmp_meta(token, kind):
 def _ledger_filters(qp):
     """查询参数 → (store.ledger_query 的 filters, 错误原因)。日期统一成 YYYY-MM-DD。"""
     f = {}
-    for k in ("q", "invType", "verify", "deduct", "seller", "kind", "booked"):
+    for k in ("q", "invType", "verify", "deduct", "seller", "kind", "booked", "subject", "month", "paper"):
         v = inv._s(qp.get(k), 100)
         if v:
             f[k] = v
+    if f.get("month") and not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", f["month"]):
+        return None, "月份格式不正确（YYYY-MM）"
+    if f.get("paper") and f["paper"] not in ("received", "missing"):
+        return None, "纸质票状态不正确"
     for k in ("from", "to"):
         raw = inv._s(qp.get(k), 20)
         if raw:
@@ -294,7 +298,7 @@ def _ledger_row_values(r):
             REVIEW_CN.get(r.get("review") or "", r.get("review") or ""), r.get("alloc") if split else None,
             {"booked": "已做账", "unbooked": "未做账"}.get(bk.get("status"), "未确认"),
             "；".join("%s · %s · %s" % (v["book"], v["period"], v["number"]) for v in bk.get("vouchers", [])),
-            bk.get("by"), bk.get("at")]
+            bk.get("by"), bk.get("at"), "已收到" if r.get("paper") else "未收到"]
 
 
 def _ledger_export_bytes(filters):
@@ -344,7 +348,9 @@ def _ledger_page(filters, page, size):
     views = inv.item_views(rows)
     for v, r in zip(views, rows):
         v["folder"] = _folder_brief(r.get("folder"))
-    return total, sums, views
+    with E().connect() as cx:
+        subjects = [x for x in cx.execute(select(S.ITEM.c.buyer_name).where(S._item_active(), S.ITEM.c.review.in_(("approved", "void")), S.ITEM.c.buyer_name.isnot(None), S.ITEM.c.buyer_name != "").distinct().order_by(S.ITEM.c.buyer_name)).scalars()]
+    return total, sums, views, subjects
 
 
 def _bookkeeping_body(body):
@@ -401,8 +407,8 @@ async def ledger_list(request: Request):
     if msg:
         return err(msg, 400)
     page, size = _page_args(request, 50, 500)
-    total, sums, views = await run_in_threadpool(_ledger_page, filters, page, size)
-    return {"ok": True, "total": total, "sum": sums, "rows": views, "page": page, "size": size}
+    total, sums, views, subjects = await run_in_threadpool(_ledger_page, filters, page, size)
+    return {"ok": True, "total": total, "sum": sums, "rows": views, "page": page, "size": size, "subjects": subjects}
 
 
 @router.get("/api/inv/ledger/export")

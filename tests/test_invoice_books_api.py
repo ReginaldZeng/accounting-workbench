@@ -284,6 +284,25 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(vals[1][cols.index("审核状态")], "已审核")
         self.assertEqual(vals[-1][cols.index("价税合计")], 600)
 
+    def test_ledger_subject_month_paper_and_export(self):
+        self.make_item(num(9748), 100, fields={"buyer_name": "主体甲", "paper": 0})
+        self.make_item(num(9749), 200, dt="20260801", fields={"buyer_name": "主体甲", "paper": 1})
+        self.make_item(num(9750), 300, fields={"buyer_name": "主体乙", "paper": 0})
+        q = "?subject=" + quote("主体甲") + "&month=2026-09&paper=missing"
+        r = self.ok(self.get("/api/inv/ledger" + q, "viewer"))
+        self.assertEqual(r["total"], 1)
+        self.assertEqual(r["sum"]["total"], 100)
+        self.assertIn("主体甲", r["subjects"])
+        self.assertIn("主体乙", r["subjects"])
+        self.assertEqual(r["rows"][0]["number"], num(9748))
+        self.assertEqual(self.get("/api/inv/ledger?month=2026-13", "viewer").status_code, 400)
+        self.assertEqual(self.get("/api/inv/ledger?paper=bad", "viewer").status_code, 400)
+        from openpyxl import load_workbook
+        ws = load_workbook(io.BytesIO(self.get("/api/inv/ledger/export" + q, "viewer").content)).active
+        headers = [c.value for c in ws[1]]
+        self.assertEqual(ws.cell(2, headers.index("纸质票") + 1).value, "未收到")
+        self.assertEqual(ws.max_row, 3)  # 表头 + 一张票 + 合计
+
     def test_vouchers_exact_match_persistence_and_failure(self):
         iid, _ = self.make_item(num(9746), 345, fields={"buyer_name": "测试公司"})
         row = {"book": "测试公司会计账簿", "year": 2026, "month": 10, "group": "记", "number": 31, "summary": "转待认证 发票" + num(9746)}

@@ -83,11 +83,11 @@ function NoPerm({ what }) {
 
 // ───────────────────────── 页签 1：台账查询 ─────────────────────────
 
-const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', booked: '', withVoid: false }
+const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', booked: '', subject: '', month: '', paper: '', withVoid: false }
 // 台账只放审核通过的票；勾「含作废」＝已通过＋已作废（withvoid）。后端的 'all'（连草稿/待审都算）只给内部用，这页不发。
 export const toParams = f => ({
   from: f.from, to: f.to, q: f.q.trim(), invType: f.invType, verify: f.verify, deduct: f.deduct,
-  seller: f.seller.trim(), booked: f.booked, review: f.withVoid ? 'withvoid' : '',
+  seller: f.seller.trim(), booked: f.booked, subject: f.subject, month: f.month, paper: f.paper, review: f.withVoid ? 'withvoid' : '',
 })
 // 作废提示里带着税务动作（进项税额转出 / 撤销勾选）时要留在页面上，不能 2 秒就消失
 export const voidNeedsTaxAction = msg => /转出|撤销/.test(String(msg || ''))
@@ -109,15 +109,17 @@ function logBrief(d) {
   return t ? String(t).slice(0, 80) : ''
 }
 
-function FilterBar({ f, setF, exportUrl, total }) {
+function FilterBar({ f, setF, exportUrl, total, subjects, refresh, refreshing }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
   const dirty = Object.keys(EMPTY_FILTER).some(k => f[k] !== EMPTY_FILTER[k])
   return (
     <div className="fbar inv-lg-fbar">
+      <label>主体<select value={f.subject} onChange={e => set('subject', e.target.value)}><option value="">全部主体</option>{(subjects || []).map(x => <option key={x} value={x}>{x}</option>)}</select></label>
+      <label>开票月份<input type="month" value={f.month} onChange={e => setF(p => ({ ...p, month: e.target.value, from: '', to: '' }))} /></label>
       <label>开票日期
-        <input type="date" value={f.from} onChange={e => set('from', e.target.value)} aria-label="开票日期从" />
+        <input type="date" value={f.from} onChange={e => setF(p => ({ ...p, from: e.target.value, month: '' }))} aria-label="开票日期从" />
         <span className="muted">至</span>
-        <input type="date" value={f.to} onChange={e => set('to', e.target.value)} aria-label="开票日期到" />
+        <input type="date" value={f.to} onChange={e => setF(p => ({ ...p, to: e.target.value, month: '' }))} aria-label="开票日期到" />
       </label>
       <label>搜索<input type="text" value={f.q} onChange={e => set('q', e.target.value)} placeholder="发票号码 / 审批单号 / 申请人" /></label>
       <label>销方<input type="text" value={f.seller} onChange={e => set('seller', e.target.value)} placeholder="名称或税号" className="inv-lg-short" /></label>
@@ -137,10 +139,12 @@ function FilterBar({ f, setF, exportUrl, total }) {
           {DEDUCT_OPTS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
       </label>
-      <label>做账<select value={f.booked} onChange={e => set('booked', e.target.value)}><option value="">全部</option><option value="unknown">未确认</option><option value="unbooked">未做账</option><option value="booked">已做账</option></select></label>
+      <label>做账<select value={f.booked} onChange={e => set('booked', e.target.value)}><option value="">全部</option><option value="unknown">未匹配 / 待刷新</option><option value="unbooked">未做账</option><option value="booked">已做账</option></select></label>
+      <label>纸质票<select value={f.paper} onChange={e => set('paper', e.target.value)}><option value="">全部</option><option value="received">已收到</option><option value="missing">未收到</option></select></label>
       <label className="inv-lg-ck"><input type="checkbox" checked={f.withVoid} onChange={e => set('withVoid', e.target.checked)} />含作废</label>
       {dirty && <button type="button" className="btn" onClick={() => setF(EMPTY_FILTER)}>清空条件</button>}
       <span className="inv-lg-grow" />
+      {refresh && <button className="btn" disabled={refreshing} onClick={refresh}>{refreshing ? '刷新中…' : '刷新全部金蝶凭证'}</button>}
       <a className="btn" href={exportUrl} title={total ? `按当前条件导出 ${total} 张` : '按当前条件导出'}>导出 Excel</a>
     </div>
   )
@@ -151,9 +155,9 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
     <div className="tbl-wrap">
       <table className="inv-lg-tbl">
         <thead><tr>
-          <th>开票日期</th><th>票种</th><th>发票号码</th><th>销方</th>
+          <th>开票日期</th><th>主体</th><th>票种</th><th>发票号码</th><th>销方</th>
           <th className="num">金额</th><th className="num">税额</th><th className="num">价税合计</th>
-          <th>验真</th><th>抵扣</th><th>审批单</th><th>登记 / 审核</th><th>做账 / 凭证</th>
+          <th>验真</th><th>抵扣</th><th>审批单</th><th>登记 / 审核</th><th>纸质票</th><th>做账 / 凭证</th>
         </tr></thead>
         <tbody>
           {rows.map(r => {
@@ -163,6 +167,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
               <tr key={r.id} className={'row' + (r.id === selId ? ' on' : '') + (isVoid ? ' void' : '')} tabIndex={0}
                 onClick={() => onPick(r)} onKeyDown={e => { if (e.key === 'Enter') onPick(r) }}>
                 <td className="mono">{r.date || '—'}</td>
+                <td title={r.buyerTaxId}>{r.buyerName || '未识别主体'}</td>
                 <td className="inv-lg-type" title={typeText(r)}>{typeShort(r)}{isVoid && <span className="inv-badge err inv-lg-ml">已作废</span>}</td>
                 <td className="mono">{r.number || '—'}{r.split ? <span className="inv-lg-sub">分摊 {money(r.alloc)}</span> : null}</td>
                 <td className="inv-lg-seller" title={r.sellerTaxId || undefined}>{r.sellerName || '—'}</td>
@@ -174,6 +179,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
                 <td className="inv-lg-nowrap">{fBiz(f) ? <span className="mono">{fBiz(f)}</span> : <span>{f.title || '—'}</span>}
                   {f.applicant ? <span className="inv-lg-sub">{f.applicant}</span> : null}</td>
                 <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}</span></td>
+                <td><span className={'inv-badge ' + (r.paper ? 'ok' : 'warn')}>{r.paper ? '已收到' : '未收到'}</span></td>
                 <td>{bookText(r.bookkeeping)}{(r.bookkeeping?.vouchers || []).map((v, i) => <span key={i} className="inv-lg-sub">{v.book} · {v.period} · {v.number}</span>)}</td>
               </tr>
             )
@@ -181,11 +187,11 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
         </tbody>
         {rows.length > 0 && (
           <tfoot><tr className="inv-lg-sum">
-            <td colSpan={4}>合计（当前条件共 {total} 张{withVoid ? '；作废的票只列出来，不计入合计' : '，不含作废'}）</td>
+            <td colSpan={5}>合计（当前条件共 {total} 张{withVoid ? '；作废的票只列出来，不计入合计' : '，不含作废'}）</td>
             <td className="num">{money(sum?.amount)}</td>
             <td className="num">{money(sum?.tax)}</td>
             <td className="num">{money(sum?.total)}</td>
-            <td colSpan={5} />
+            <td colSpan={6} />
           </tr></tfoot>
         )}
       </table>
@@ -236,7 +242,7 @@ function VoidModal({ item, onClose, onDone }) {
   )
 }
 
-const bookText = bk => ({ booked: '已做账', unbooked: '未做账' }[bk?.status] || '未确认')
+const bookText = bk => bk?.source === 'kingdee' ? (bk.status === 'booked' ? '已匹配凭证' : '暂未匹配') : ({ booked: '已做账', unbooked: '未做账' }[bk?.status] || '尚未刷新')
 export function Bookkeeping({ row, canEdit, onSaved }) {
   const bk = row.bookkeeping || {}
   const [busy, setBusy] = useState(false)
@@ -355,7 +361,7 @@ function QueryTab({ can, flash }) {
     try {
       const r = await invLedger({ ...JSON.parse(key), page: p, size: PAGE_SIZE })
       if (my !== seq.current) return
-      setData({ total: n0(r?.total), sum: r?.sum || {}, rows: asList(r?.rows) })
+      setData({ total: n0(r?.total), sum: r?.sum || {}, rows: asList(r?.rows), subjects: asList(r?.subjects) })
     } catch (e) {
       if (my === seq.current) setErr(errText(e))
     } finally {
@@ -384,12 +390,13 @@ function QueryTab({ can, flash }) {
 
   return (
     <>
-      {can.auditAct && <button className="btn" disabled={busy} onClick={async () => {
+      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects} refreshing={busy} refresh={can.auditAct ? async () => {
         setBusy(true); setErr('')
         try { const r = await invVouchersRefresh(); if (!r.ok) throw new Error(r.msg); flash(`匹配 ${r.matched} 张，更新 ${r.changed} 张`); await load(page) }
         catch (e) { setErr(errText(e)) } finally { setBusy(false) }
-      }}>刷新金蝶凭证</button>}
-      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} />
+      } : undefined} />
+      {data && <div className="inv-lg-overview"><span>当前条件 <b>{data.total}</b> 张</span><span>价税合计 <b>{money(data.sum.total)}</b></span><span>税额 <b>{money(data.sum.tax)}</b></span><span className="inv-muted">未匹配凭证不代表未做账；金额合计不含作废票。</span></div>}
+
       {voidNote && <div className="inv-lg-warn inv-lg-voidnote" role="alert">
         <span>{voidNote}</span>
         <button type="button" className="inv-x" onClick={() => setVoidNote('')} aria-label="知道了" title="知道了">×</button>
