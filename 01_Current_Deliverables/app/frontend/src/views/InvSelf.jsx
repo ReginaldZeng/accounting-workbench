@@ -13,6 +13,14 @@ import { inDingTalk, getAuthCode } from './ddBridge.js'
 import { money } from './invShared.jsx'
 import './inv.css'
 import './inv-self.css'
+import './inv-login.css'
+import stackIcon from '../assets/inv-login/stack.svg'
+import fileIcon from '../assets/inv-login/file.svg'
+import lightningIcon from '../assets/inv-login/lightning.svg'
+import shieldIcon from '../assets/inv-login/shield.svg'
+import checkIcon from '../assets/inv-login/check.svg'
+import infoIcon from '../assets/inv-login/info.svg'
+import qrIcon from '../assets/inv-login/qr.svg'
 
 const TOKEN_KEY = 'inv_self_t'
 const KIND_LABEL = { special: '专票', normal: '普票', receipt: '收据' }
@@ -28,6 +36,22 @@ function plusDays(n) {
 const num = v => (v === null || v === undefined || v === '' ? 0 : Number(v) || 0)
 
 // ───────────────────────── 登录 ─────────────────────────
+
+function LoginLayout({ children }) {
+  return <div className="inv-auth">
+    <header className="inv-auth-header"><div className="inv-auth-brand">
+      <img src={stackIcon} alt="" /><strong>核算工作台</strong><span className="inv-auth-bar" /><span>发票管家</span>
+    </div><span className="inv-auth-values">简单　 高效　 合规</span></header>
+    <main className="inv-auth-main"><section className="inv-auth-intro">
+      <h1>发票后补登记</h1><p className="inv-auth-subtitle">先登记，发票到了再交给财务。</p>
+      <ol className="inv-auth-steps">{['确认身份', '登记后补', '查看进度'].map((text, i) =>
+        <li key={text} className={i === 0 ? 'active' : ''}><span>{i + 1}</span><b>{text}</b></li>)}</ol>
+      <p className="inv-auth-description">通过钉钉快速确认你的身份信息，<br />先登记票据信息，等发票到了再交给财务审核处理。</p>
+      <div className="inv-auth-features">{[[fileIcon, '流程简单', '几步完成登记'], [lightningIcon, '高效协同', '财务及时知晓'], [shieldIcon, '信息安全', '仅用于身份验证']].map(([icon, title, text]) =>
+        <div key={title}><span className="inv-auth-icon"><img src={icon} alt="" /></span><div><strong>{title}</strong><small>{text}</small></div></div>)}</div>
+    </section><section className="inv-auth-panel">{children}</section></main>
+  </div>
+}
 
 function QrLogin({ onIn }) {
   const [qr, setQr] = useState(null)
@@ -142,47 +166,44 @@ function Login({ hello, onIn }) {
     } catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
   }
 
-  return <div className="inv-sf-login">
-    <h2>先确认你是谁</h2>
-    {!inDingTalk() && <div className="inv-sf-tabs">
-      <button type="button" className={method === 'phone' ? 'on' : ''} onClick={() => setMethod('phone')}>手机号登录</button>
-      <button type="button" className={method === 'qr' ? 'on' : ''} onClick={() => setMethod('qr')}>钉钉扫码登录</button>
+  return <div className="inv-auth-login">
+    <h2>{method === 'phone' && step === 'code' ? '查看钉钉验证码' : '使用钉钉身份登录'}</h2>
+    <p className="inv-auth-lead">{method === 'qr' ? '使用手机钉钉扫码，确认登录这台电脑。' : step === 'code' ? '请在钉钉工作通知中查看验证码。' : '输入手机号，先核对姓名。'}</p>
+    {!inDingTalk() && <div className="inv-sf-tabs inv-auth-tabs" role="tablist" aria-label="登录方式">
+      <button type="button" role="tab" aria-selected={method === 'phone'} className={method === 'phone' ? 'on' : ''} onClick={() => setMethod('phone')}>手机号登录</button>
+      <button type="button" role="tab" aria-selected={method === 'qr'} className={method === 'qr' ? 'on' : ''} onClick={() => setMethod('qr')}><img src={qrIcon} alt="" />钉钉扫码</button>
     </div>}
     {method === 'qr' ? <QrLogin onIn={onIn} /> : <>
-    {hello?.ddNote && <div className="inv-sf-note">{hello.ddNote}</div>}
-    <p className="inv-sf-lead">系统会通过<b>钉钉</b>给你发一条 6 位验证码，能收到就说明是你本人。在钉钉里打开这个网址可以直接登录，不用验证码。</p>
-    {step === 'mobile' && <div>
-      <label>钉钉绑定的手机号
-        <input className="inv-in inv-sf-big" type="tel" inputMode="numeric" autoComplete="tel-national"
+      {hello?.ddNote && <div className="inv-sf-note">{hello.ddNote}</div>}
+      {step === 'mobile' && <div>
+        <label className="inv-auth-label" htmlFor="inv-self-phone">钉钉绑定的手机号</label>
+        <input id="inv-self-phone" className="inv-in inv-auth-input" type="tel" inputMode="numeric" autoComplete="tel-national"
           autoFocus value={mobile} disabled={busy} maxLength={11} placeholder="请输入 11 位手机号"
           onChange={e => { setMobile(e.target.value.replace(/\D/g, '')); setPerson(null); setLooking(false); setMsg('') }} />
-      </label>
-      <div aria-live="polite">
-        {looking && <p>正在查询姓名…</p>}
-        {person && <p>对应姓名：<b>{person.name}</b>。请确认是本人，再发送验证码。</p>}
-      </div>
-      <button type="button" className="btn-pri inv-sf-bigbtn" onClick={send}
-        disabled={busy || looking || !person || wait > 0 || !hello?.dingtalk}>
-        {busy ? '发送中…' : wait > 0 ? `${wait} 秒后可重发` : '确认姓名，发送钉钉验证码'}
-      </button>
-      <p className="inv-sf-hint">输入手机号只查询姓名，点击按钮才发送验证码。姓名不对请修改手机号。</p>
-    </div>}
-    {step === 'code' && <form className="inv-sf-codebox" onSubmit={e => { e.preventDefault(); verify() }}>
-      <div>验证码已发到 <b>{to}</b> 的钉钉（工作通知），5 分钟内有效。</div>
-      {dev && <div className="inv-sf-note">测试环境没有真发钉钉，验证码是 <b className="inv-num">{dev}</b></div>}
-      <div className="inv-sf-row">
-        <input ref={codeRef} className="inv-in inv-sf-big inv-sf-code inv-num" inputMode="numeric" autoComplete="one-time-code"
-          maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ''))} placeholder="6 位数字" />
-        <button type="submit" className="btn-pri inv-sf-bigbtn" disabled={busy}>{busy ? '核对中…' : '登录'}</button>
-      </div>
-      <div className="inv-sf-row small">
-        <button type="button" className="inv-sf-link" disabled={wait > 0 || busy} onClick={() => send()}>{wait > 0 ? `${wait} 秒后可重发` : '没收到？重发'}</button>
-        <button type="button" className="inv-sf-link" disabled={busy} onClick={() => { setStep('mobile'); setPerson(null); setTicket(''); setCode(''); setMsg('') }}>← 改手机号</button>
-      </div>
-    </form>}
-    {!hello?.dingtalk && <div className="inv-sf-err">服务器还没接上钉钉，暂时没法登录，请联系财务。</div>}
-    {msg && <div className="inv-sf-err">{msg}</div>}
+        <div className={'inv-auth-name' + (person ? ' matched' : '')} aria-live="polite">
+          {looking ? '正在查询姓名…' : person ? <><img src={checkIcon} alt="" /><strong>对应姓名：{person.name}</strong>
+            <button type="button" className="inv-sf-link" onClick={() => { setMobile(''); setPerson(null); setLooking(false); setMsg(''); document.getElementById('inv-self-phone')?.focus() }}>姓名不对？请修改手机号。</button></> : '输入完整手机号后显示对应姓名'}
+        </div>
+        <button type="button" className="btn-pri inv-auth-primary" onClick={send}
+          disabled={busy || looking || !person || wait > 0 || !hello?.dingtalk}>
+          {busy ? '发送中…' : wait > 0 ? `${wait} 秒后可重发` : '确认姓名，发送钉钉验证码'}
+        </button>
+        <p className="inv-auth-helper">输入手机号不会发送消息，确认后才发送验证码。</p>
+      </div>}
+      {step === 'code' && <form className="inv-sf-codebox" onSubmit={e => { e.preventDefault(); verify() }}>
+        <div className="inv-auth-identity"><span>已发送至 <b>{to}</b> 的钉钉</span>
+          <button type="button" className="inv-sf-link" disabled={busy} onClick={() => { setStep('mobile'); setPerson(null); setTicket(''); setCode(''); setMsg('') }}>修改手机号</button></div>
+        {dev && <div className="inv-sf-note">测试环境验证码：<b>{dev}</b></div>}
+        <label className="inv-auth-label" htmlFor="inv-self-code">钉钉验证码</label>
+        <input id="inv-self-code" ref={codeRef} className="inv-in inv-auth-input" inputMode="numeric" autoComplete="one-time-code"
+          maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ''))} placeholder="输入 6 位验证码" />
+        <div className="inv-auth-codehelp"><span>5 分钟内有效</span><button type="button" className="inv-sf-link" disabled={wait > 0 || busy} onClick={send}>{wait > 0 ? `${wait} 秒后可重发` : '没收到？重发'}</button></div>
+        <button type="submit" className="btn-pri inv-auth-primary" disabled={busy || code.length !== 6}>{busy ? '核对中…' : '验证并登录'}</button>
+      </form>}
+      {!hello?.dingtalk && <div className="inv-sf-err">服务器还没接上钉钉，暂时没法登录，请联系财务。</div>}
+      {msg && <div className="inv-sf-err" role="alert">{msg}</div>}
     </>}
+    <p className="inv-auth-auto"><img src={infoIcon} alt="" />钉钉内打开可尝试自动登录。</p>
   </div>
 }
 
@@ -495,6 +516,12 @@ export default function InvSelf() {
     invSReceivers(tok).then(r => setRecv(r.rows || [])).catch(expired)
   }, [phase, tok, loadPays, loadLaters, expired])
 
+  if (phase !== 'ready') return <LoginLayout>
+    {phase === 'loading' && <div className="inv-sf-wait"><span className="inv-spin" /> 正在识别钉钉身份…</div>}
+    {phase === 'down' && <div className="inv-sf-err">页面没连上服务器：{down}</div>}
+    {phase === 'login' && <Login hello={hello} onIn={signIn} />}
+  </LoginLayout>
+
   return <div className="inv-sf">
     <header className="inv-sf-top">
       <div>
@@ -505,9 +532,6 @@ export default function InvSelf() {
         <button type="button" className="inv-sf-link" onClick={signOut}>退出</button></div>}
     </header>
 
-    {phase === 'loading' && <div className="inv-sf-wait"><span className="inv-spin" /> 正在打开…</div>}
-    {phase === 'down' && <div className="inv-sf-err">页面没连上服务器：{down}</div>}
-    {phase === 'login' && <Login hello={hello} onIn={signIn} />}
 
     {phase === 'ready' && scan && <QrApproval token={tok} me={me} scan={scan} />}
     {phase === 'ready' && !scan && <>
