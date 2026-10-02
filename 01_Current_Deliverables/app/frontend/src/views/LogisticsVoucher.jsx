@@ -56,7 +56,7 @@ function Detail({ inst, onClose, onChanged }) {
       <div className="lv-dlg" role="dialog" aria-label="付款做账">
         <div className="lv-dh">
           <b>付款做账</b>
-          {d && <span>{d.req.carrier} · {d.req.subject} · <b className="mono">{money(d.req.amount)}</b> · {d.req.period} 账单</span>}
+          {d && <span><span className="cd">{d.req.code}</span>{d.req.payee} · {d.req.subject} · <b className="mono">{money(d.req.amount)}</b> · {d.req.period} 账单</span>}
           <span style={{ flex: 1 }} />
           <button className="lv-x" onClick={onClose} aria-label="关闭">✕</button>
         </div>
@@ -148,7 +148,7 @@ export default function LogisticsVoucher() {
   const cnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { c[r.status] = (c[r.status] || 0) + 1 }); return c }, [rows])
   const kcnt = useMemo(() => { const c = {}; Object.values(plans).forEach(p => { c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans])
   const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) &&
-    (!q || [r.carrier, r.payee, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
+    (!q || [r.carrier, r.payee, r.sup_full, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
   return (
     <div className="lv">
       <style>{CSS}</style>
@@ -168,27 +168,46 @@ export default function LogisticsVoucher() {
           {kf && <button className="lnk" onClick={() => setKf('')}>不限</button>}
         </div>
         {err && <div className="lv-msg bad">{err}</div>}
-        <div className="tbl-wrap"><table className="lv-t">
-          <thead><tr><th>承运商</th><th>主体</th><th className="num">请款金额</th><th>账单月</th><th>付款</th><th className="num">发票</th><th>做账类型</th><th>纸质件</th><th>状态</th><th></th></tr></thead>
+        <div className="tbl-wrap"><table className="lv-t lv-list">
+          <thead><tr><th>主体</th><th>物流商</th><th>费用类型</th><th className="num">计提金额</th><th>税率</th><th>计提凭证</th>
+            <th>审核结果</th><th className="num">付款金额</th><th>付款单状态</th><th></th></tr></thead>
           <tbody>
             {rows === null && <tr><td colSpan="10" className="lv-empty">读取中…</td></tr>}
             {rows && !shown.length && <tr><td colSpan="10" className="lv-empty">没有</td></tr>}
-            {shown.map(r => <tr key={r.inst}>
-              <td><b>{r.carrier}</b><div className="dim">{r.code}</div></td>
-              <td>{r.subject}</td><td className="num">{money(r.amount)}</td><td>{r.period || <span className="warn">未认月份</span>}</td>
-              <td>{r.paid || <span className="dim">未付</span>}{r.paid_voucher && <div className="dim">已记 {r.paid_voucher}</div>}</td>
-              <td className="num">{r.n_inv ? <>{r.n_inv} 张 · {money(r.inv_total)}</> : <span className="dim">—</span>}</td>
-              <td className="kd">{(() => {
-                const p = plans[r.inst]
-                if (!r.period || !r.n_inv || r.status === 'booked') return <span className="dim">—</span>
-                if (!p) return <span className="dim">计算中…</span>
-                const [lb, cl] = KIND[p.kind] || [p.kind, 'neu']
-                return <><span className={'lv-pill ' + cl} title={p.text}>{lb}</span>{['redo', 'subj', 'manual'].includes(p.kind) && <div className="dim kt" title={p.text}>{p.text}</div>}</>
-              })()}</td>
-              <td>{r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr && <div className="dim">已放行</div>}</td>
-              <td><span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span>{r.booked.length > 0 && <div className="dim">{r.booked.join('、')}</div>}</td>
-              <td><button className="btn btn-pri" disabled={!r.period} onClick={() => setOpen(r.inst)}>{r.status === 'booked' ? '查看' : '凭证预览'}</button></td>
-            </tr>)}
+            {shown.map(r => {
+              const p = plans[r.inst]
+              const acc = (p && p.acc) || []
+              const calc = !!r.period && !!r.n_inv && r.status !== 'booked'
+              const pending = calc && !p
+              // 一张请款单对应几张计提：费用类型/金额/税率/凭证号/审核结果 逐张上下对齐
+              const stack = (fn, cls = '') => acc.length
+                ? <div className={'ml ' + cls}>{acc.map(a => <div key={a.vno} title={a.expl}>{fn(a)}</div>)}</div>
+                : <span className="dim">{pending ? '计算中…' : '—'}</span>
+              const [klb, kcl] = p ? (KIND[p.kind] || [p.kind, 'neu']) : ['', '']
+              const pay = r.paid
+                ? (r.paid_voucher ? <>已记支付凭证 <b>{r.paid_voucher}</b></> : <>付款单 · {r.pay_st || '已生成'}<div className="dim">{r.paid}</div></>)
+                : (r.dt_status === 'RUNNING' ? <span className="dim">钉钉审批中</span> : <span className="dim">已通过 · 待付款</span>)
+              return <tr key={r.inst}>
+                <td className="nw"><span className="cd">{r.book}</span>{r.subject}</td>
+                <td className="sup"><span className="cd">{r.code}</span>{r.sup_full}</td>
+                <td>{stack(a => a.fee || '—')}</td>
+                <td className="num">{stack(a => money(a.gross))}</td>
+                <td>{stack(a => a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate))}</td>
+                <td>{stack(a => <span className="mono">{a.month}/{a.vno}#</span>)}</td>
+                <td className="kd">
+                  {acc.length > 0 && <div className="ml">{acc.map(a => <div key={a.vno} title={a.why}>{a.mode === 'hx' ? <span className="ok">核销</span>
+                    : a.mode ? <span className="bad">红冲更正</span> : <span className="dim">—</span>}</div>)}</div>}
+                  {p && <div className="kres"><span className={'lv-pill ' + kcl} title={p.text}>{klb}</span>
+                    {['subj', 'manual', 'noacc', 'err'].includes(p.kind) && <div className="dim kt">{p.text}</div>}</div>}
+                  {!calc && <span className="dim">{!r.period ? '未认账单月' : !r.n_inv ? '票夹没有发票' : '已做账'}</span>}
+                  {pending && <span className="dim">计算中…</span>}
+                </td>
+                <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
+                <td className="nw">{pay}<div className="dim">纸质件 {r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr ? ' · 已放行' : ''}</div>
+                  <span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span></td>
+                <td><button className="btn btn-pri" disabled={!r.period} onClick={() => setOpen(r.inst)}>{r.status === 'booked' ? '查看' : '凭证预览'}</button></td>
+              </tr>
+            })}
           </tbody>
         </table></div>
       </div>
@@ -223,7 +242,10 @@ const CSS = `
 .lv .lv-x{border:0;background:none;font-size:16px;color:var(--ink-3);cursor:pointer}
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
-.lv .lv-kind{font-size:13px;margin:6px 0}.lv td.kd{max-width:280px}.lv td.kd .kt{white-space:normal;line-height:1.4;margin-top:3px}
+.lv .lv-kind{font-size:13px;margin:6px 0}
+.lv .lv-list td{vertical-align:top}.lv .lv-list .ml>div{height:21px;line-height:21px;white-space:nowrap}
+.lv .lv-list td.nw{white-space:nowrap}.lv .lv-list td.sup{min-width:190px;max-width:240px}
+.lv .cd{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-2);background:var(--gray-bg);border-radius:3px;padding:0 4px;margin-right:5px;white-space:nowrap}.lv .bad{color:var(--red)}.lv .lv-list .kres{margin-top:4px}.lv .lv-list .lv-pill{margin-top:3px}.lv td.kd{max-width:280px}.lv td.kd .kt{white-space:normal;line-height:1.4;margin-top:3px}
 .lv .lv-msgs{margin:6px 0 4px;padding:8px 12px 8px 28px;background:var(--amber-bg);color:var(--amber);border-radius:8px;font-size:12.5px}
 .lv .lv-msgs.bad{background:var(--red-bg);color:var(--red)}
 .lv .lv-sec{font-weight:700;font-size:13.5px;margin:16px 0 8px}

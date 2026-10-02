@@ -34,6 +34,10 @@ def _perm(request):
     return _require_perm(request, "logistics_upload")
 
 
+# 金蝶付款单单据状态：Z 暂存 / A 创建 / B 审核中 / C 已审核 / D 重新审核
+_PAY_ST = {"Z": "暂存", "A": "创建", "B": "审核中", "C": "已审核", "D": "重新审核"}
+
+
 def _paid_info(r):
     """kd_paid = '日期|状态|付款单FID'（付款单）或 '日期|记-N|gl:xxx'（已有支付凭证）。"""
     v = str(r.get("kd_paid") or "")
@@ -92,15 +96,25 @@ def vlist(request: Request, since: str = "2026-09-01"):
     with db._engine.connect() as c:
         reqs = [dict(r) for r in c.execute(select(PR).where(PR.c.create_time >= since)).mappings().all()]
     out = []
+    # 物流商写金蝶全称、主体写简称，都带编码(用户 2026-10-02)
+    try:
+        from routers.logistics_payreq import _kd_suppliers
+        c2n = _kd_suppliers().get("code2name") or {}
+    except Exception:
+        c2n = {}
+    s2book = {o.get("short_name"): o.get("book_code") for o in (db.list_orgs() or []) if o.get("short_name")}
     for r in reqs:
         if r.get("excluded") or r.get("dt_status") == "TERMINATED" or r.get("dt_result") == "refuse":
             continue
         folder, invs = _invoices(r["inst_id"])
         pi = _paid_info(r) or {}
         out.append({"inst": r["inst_id"], "bid": r.get("business_id"), "carrier": r.get("carrier"), "code": r.get("sup_code"),
+                    "sup_full": c2n.get(r.get("sup_code")) or r.get("payee") or r.get("carrier"), "book": s2book.get(r.get("subject")) or "",
                     "payee": r.get("payee"), "subject": r.get("subject"), "amount": r.get("amount"), "period": r.get("period") or "",
                     "applicant": r.get("applicant"), "created": r.get("create_time"), "paid": pi.get("date") or "",
                     "paid_voucher": pi.get("voucher") or "", "folder": folder["id"] if folder else None,
+                    "pay_st": _PAY_ST.get(str(r.get("kd_paid") or "").split("|")[1] if "|" in str(r.get("kd_paid") or "") else "", ""),
+                    "dt_status": r.get("dt_status"), "dt_result": r.get("dt_result"),
                     "n_inv": len(invs), "inv_total": round(sum(i["gross"] for i in invs), 2),
                     "n_paper": sum(1 for i in invs if i["paper"]), "paper_ovr": ovr.get(r["inst_id"]),
                     "booked": sorted({str(v) for i in invs for v in (i["vouchers"] or [])})[:5],
@@ -280,7 +294,8 @@ def _preview_data(inst):
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
                                 "paper_ovr": ovr.get(inst), "status": st},
             "invoices": invs,
-            "accruals": [{"vno": v["vno"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
+            "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
+                          "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
                           **(pl["per"].get(v["vno"]) or {"mode": "", "new_rate": None, "why": ""})} for v in vouchers],
             "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"]},
             "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}, 200
@@ -298,7 +313,12 @@ async def plans(request: Request):
         for inst in (b.get("insts") or [])[:80]:
             try:
                 d, code = _preview_data(str(inst))
-                out[inst] = {"kind": d.get("kind"), "text": d.get("kind_text")} if code == 200 else {"kind": "err", "text": d.get("msg")}
+                if code == 200:
+                    out[inst] = {"kind": d.get("kind"), "text": d.get("kind_text"),
+                                 "acc": [{k: a.get(k) for k in ("vno", "month", "fee", "expl", "gross", "rate", "mode", "new_rate", "why")}
+                                         for a in d.get("accruals") or []]}
+                else:
+                    out[inst] = {"kind": "err", "text": d.get("msg"), "acc": []}
             except Exception as e:
                 out[inst] = {"kind": "err", "text": str(e)[:120]}
         return out
