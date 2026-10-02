@@ -211,7 +211,7 @@ export default function LogisticsVoucher() {
     const rs = r.rows || []
     setRows(rs); setErr('')
     // 做账类型：有账单月、有发票的才算；分几批取，先出的先显示
-    const ids = rs.filter(x => x.period && x.n_inv && x.status !== 'booked').map(x => x.inst)
+    const ids = rs.filter(x => x.period && x.n_inv).map(x => x.inst)
     const batches = []
     for (let i = 0; i < ids.length; i += 5) batches.push(ids.slice(i, i + 5))
     batches.reduce((p, b) => p.then(() => voucherPlans(b).then(o => setPlans(old => ({ ...old, ...(o.plans || {}) }))).catch(() => {})), Promise.resolve())
@@ -225,7 +225,7 @@ export default function LogisticsVoucher() {
     <div className="lv">
       <style>{CSS}</style>
       <div className="head"><div><div className="h-title">付款做账 · 物流请款单</div>
-        <div className="h-sub">付款后合成一张凭证：红冲 → 更正 → 核销（暂估转待认证）→ 支付。计提取金蝶、发票取发票管家、维度更正取复核台登记。第一版只预览，不写金蝶。</div></div></div>
+        <div className="h-sub">付款后合成一张凭证：红冲 → 更正 → 核销（暂估转待认证）→ 支付。计提取金蝶、发票取发票管家、维度更正取复核台登记。「保存到金蝶」＝系统审核付款单，再往金蝶自动生成的付款凭证里补分录；凭证留给人在金蝶审核。</div></div></div>
       <div className="body">
         <div className="lv-bar">
           {ORDER.map(k => <button key={k} className={'lv-chip ' + ST[k][1] + (f === k ? ' on' : '')} title={ST[k][2]} onClick={() => setF(f === k ? '' : k)}>{ST[k][0]}<b>{cnt[k] || 0}</b></button>)}
@@ -249,7 +249,7 @@ export default function LogisticsVoucher() {
             {shown.map(r => {
               const p = plans[r.inst]
               const acc = (p && p.acc) || []
-              const calc = !!r.period && !!r.n_inv && r.status !== 'booked'
+              const calc = !!r.period && !!r.n_inv
               const pending = calc && !p
               // 一张请款单对应几张计提：费用类型/金额/税率/凭证号/审核结果 逐张上下对齐
               const stack = (fn, cls = '') => acc.length
@@ -260,8 +260,8 @@ export default function LogisticsVoucher() {
                 ? (r.paid_voucher ? <>已记支付凭证 <b>{r.paid_voucher}</b></> : <>付款单 · {r.pay_st || '已生成'}<div className="dim">{r.paid}</div></>)
                 : (r.dt_status === 'RUNNING' ? <span className="dim">钉钉审批中</span> : <span className="dim">已通过 · 待付款</span>)
               return <tr key={r.inst}>
-                <td className="nw"><span className="cd">{r.book}</span>{r.subject}</td>
-                <td className="sup"><span className="cd">{r.code}</span>{r.sup_full}</td>
+                <td className="nw">{r.subject}<div className="code2">{r.book}</div></td>
+                <td className="sup">{r.sup_full}<div className="code2">{r.code}</div></td>
                 <td>{stack(a => a.fee || '—')}</td>
                 <td className="num">{stack(a => money(a.gross))}</td>
                 <td>{stack(a => a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate))}</td>
@@ -271,7 +271,7 @@ export default function LogisticsVoucher() {
                     : a.mode ? <span className="bad">红冲更正</span> : <span className="dim">—</span>}</div>)}</div>}
                   {p && <div className="kres"><span className={'lv-pill ' + kcl} title={p.text}>{klb}</span>
                     {['subj', 'manual', 'noacc', 'err'].includes(p.kind) && <div className="dim kt">{p.text}</div>}</div>}
-                  {!calc && <span className="dim">{!r.period ? '未认账单月' : !r.n_inv ? '票夹没有发票' : '已做账'}</span>}
+                  {!calc && <span className="dim">{!r.period ? '未认账单月' : '票夹没有发票'}</span>}
                   {pending && <span className="dim">计算中…</span>}
                 </td>
                 <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
@@ -323,7 +323,7 @@ const CSS = `
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
 .lv .lv-kind{font-size:13px;margin:6px 0}
-.lv .lv-list td{vertical-align:top}.lv .lv-list .ml>div{height:21px;line-height:21px;white-space:nowrap}
+.lv .lv-list td{vertical-align:middle}.lv .lv-list .code2{font-family:var(--font-mono);font-size:11px;color:var(--ink-3);margin-top:2px}.lv .lv-list .ml>div{height:21px;line-height:21px;white-space:nowrap}
 .lv .lv-list td.nw{white-space:nowrap}.lv .lv-list td.sup{min-width:190px;max-width:240px}
 .lv .cd{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-2);background:var(--gray-bg);border-radius:3px;padding:0 4px;margin-right:5px;white-space:nowrap}.lv .bad{color:var(--red)}.lv .lv-list .kres{margin-top:4px}.lv .lv-list .lv-pill{margin-top:3px}.lv td.kd{max-width:280px}.lv td.kd .kt{white-space:normal;line-height:1.4;margin-top:3px}
 .lv .lv-msgs{margin:6px 0 4px;padding:8px 12px 8px 28px;background:var(--amber-bg);color:var(--amber);border-radius:8px;font-size:12.5px}
