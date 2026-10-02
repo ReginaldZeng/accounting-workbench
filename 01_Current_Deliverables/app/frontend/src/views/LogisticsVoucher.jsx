@@ -68,63 +68,66 @@ const dimKey = l => [l.acct, l.fee_code, l.dept_code, l.biz_code, l.proj_code].j
 const expText = l => esc([l.acct + ' ' + (l.acct_name || ''), ...dimText(l)].join(' · '))
 const MODE_CN = { rate: '改税率', fix: '改科目/维度/金额', tail: '尾差' }
 
+// 横向 A4（用户 2026-10-02「可以做成横向的」）：每张计提一行，原计提 / 调整后 / 差额 并排；下方左发票、右会计处理
 function adjustSheet(d) {
   const q = d.req, p = q.posted, adj = d.adjust || []
   const ym = String(d.voucher.date || '').slice(0, 7).split('-')
   const vno = p ? `${ym[0]}年${+ym[1]}月 记-${esc(p.vno)}` : '（保存到金蝶后生成）'
-  const sum = (k, w) => r2(adj.reduce((s, a) => s + (a[w][k] || 0), 0))
-  const row = (lab, x, cls) => `<tr class="${cls || ''}"><td>${lab}</td><td class="n">${money(x.gross)}</td><td class="c">${x.rate == null ? '' : pct(x.rate)}</td><td class="n">${money(x.net)}</td><td class="n">${money(x.tax)}</td></tr>`
-  const diff = a => ({ gross: r2(a.new.gross - a.old.gross), net: r2(a.new.net - a.old.net), tax: r2(a.new.tax - a.old.tax) })
   const sgn = x => (x > 0 ? '+' : '') + money(x)
-  const blocks = adj.map((a, i) => {
-    const df = diff(a)
+  const inv = d.invoices || [], acc = d.accruals || []
+  const accG = r2(acc.reduce((s, a) => s + (a.gross || 0), 0)), invG = r2(inv.reduce((s, i) => s + (i.gross || 0), 0))
+  const S = (k, w) => r2(adj.reduce((s, a) => s + (a[w][k] || 0), 0))
+  const rows = adj.map((a, i) => {
+    const dn = r2(a.new.net - a.old.net), dt = r2(a.new.tax - a.old.tax)
     const dimChg = a.old.exp.length !== a.new.exp.length || a.old.exp.some((l, j) => dimKey(l) !== dimKey(a.new.exp[j] || {}))
-    const exps = dimChg ? `<table class="t exp"><thead><tr><th style="width:38%">原费用分录</th><th class="n" style="width:12%">金额</th><th style="width:38%">调整后费用分录</th><th class="n">金额</th></tr></thead><tbody>${
+    const exps = dimChg ? `<tr class="sub"><td></td><td colspan="13"><b>费用分录调整：</b>${
       Array.from({ length: Math.max(a.old.exp.length, a.new.exp.length) }, (_, j) => {
         const o = a.old.exp[j], n = a.new.exp[j]
-        return `<tr><td>${o ? expText(o) : ''}</td><td class="n">${o ? money(o.dr) : ''}</td><td>${n ? expText(n) : ''}</td><td class="n">${n ? money(n.dr) : ''}</td></tr>`
-      }).join('')}</tbody></table>` : ''
-    return `<div class="blk"><div class="bh"><b>${i + 1}. 原计提凭证 ${esc(a.year)}年${esc(a.month)}月 记-${esc(a.vno)}</b>
-      <span class="tag">${esc(MODE_CN[a.mode] || a.mode)}</span></div>
-      <div class="ex">摘要：${esc(a.expl)}</div>
-      <div class="ex">调整原因：${esc(a.why || '—')}</div>
-      <table class="t"><thead><tr><th style="width:16%"></th><th class="n">含税金额</th><th class="c" style="width:12%">税率</th><th class="n">不含税金额</th><th class="n">税额</th></tr></thead><tbody>
-      ${row('原计提', a.old)}${row('调整后', a.new, 'b')}
-      <tr class="d"><td>差额</td><td class="n">${sgn(df.gross)}</td><td></td><td class="n">${sgn(df.net)}</td><td class="n">${sgn(df.tax)}</td></tr></tbody></table>${exps}</div>`
+        return `<div>${o ? expText(o) + ' ' + money(o.dr) : '（无）'} → ${n ? expText(n) + ' ' + money(n.dr) : '（无）'}</div>`
+      }).join('')}</td></tr>` : ''
+    return `<tr><td class="c">${i + 1}</td><td class="nw">${esc(a.year)}年${esc(a.month)}月<br>记-${esc(a.vno)}</td>
+      <td class="ex2">${esc(a.expl)}</td><td>${esc(MODE_CN[a.mode] || a.mode)}<div class="why">${esc(a.why || '')}</div></td>
+      <td class="n">${money(a.old.gross)}</td><td class="c">${pct(a.old.rate)}</td><td class="n">${money(a.old.net)}</td><td class="n">${money(a.old.tax)}</td>
+      <td class="n b">${money(a.new.gross)}</td><td class="c b">${pct(a.new.rate)}</td><td class="n b">${money(a.new.net)}</td><td class="n b">${money(a.new.tax)}</td>
+      <td class="n d">${sgn(dn)}</td><td class="n d">${sgn(dt)}</td></tr>${exps}`
   }).join('')
-  const inv = d.invoices || []
+  const tot = adj.length > 1 ? `<tr class="tt"><td colspan="4">合计</td><td class="n">${money(S('gross', 'old'))}</td><td></td><td class="n">${money(S('net', 'old'))}</td><td class="n">${money(S('tax', 'old'))}</td>
+    <td class="n">${money(S('gross', 'new'))}</td><td></td><td class="n">${money(S('net', 'new'))}</td><td class="n">${money(S('tax', 'new'))}</td>
+    <td class="n">${sgn(r2(S('net', 'new') - S('net', 'old')))}</td><td class="n">${sgn(r2(S('tax', 'new') - S('tax', 'old')))}</td></tr>` : ''
   const invTb = `<table class="t"><thead><tr><th>发票号码</th><th>类型</th><th class="c">税率</th><th class="n">含税金额</th><th class="n">税额</th></tr></thead><tbody>${
     inv.map(i => `<tr><td class="m">${esc(i.number)}</td><td>${esc(i.type)}</td><td class="c">${esc(i.rate)}</td><td class="n">${money(i.gross)}</td><td class="n">${money(i.tax)}</td></tr>`).join('')}
-    <tr class="b"><td colspan="3">合计 ${inv.length} 张</td><td class="n">${money(r2(inv.reduce((s, i) => s + (i.gross || 0), 0)))}</td><td class="n">${money(r2(inv.reduce((s, i) => s + (i.tax || 0), 0)))}</td></tr></tbody></table>`
+    <tr class="tt"><td colspan="3">合计 ${inv.length} 张</td><td class="n">${money(invG)}</td><td class="n">${money(r2(inv.reduce((s, i) => s + (i.tax || 0), 0)))}</td></tr></tbody></table>`
   const refs = adj.map(a => `记-${esc(a.vno)}`).join('、')
-  const acc = d.accruals || []
-  const accG = r2(acc.reduce((s, a) => s + (a.gross || 0), 0)), invG = r2(inv.reduce((s, i) => s + (i.gross || 0), 0))
   return `<div class="sheet">
-  <h1>计 提 调 整 单</h1><div class="sub">物流费用 · 付款时按发票红冲更正原计提</div>
-  <table class="hd"><colgroup><col style="width:11%"><col style="width:47%"><col style="width:11%"><col></colgroup><tr><th>主体</th><td>${esc(q.subject_full || q.subject)}</td><th>调整凭证</th><td>${vno}</td></tr>
-  <tr><th>物流商</th><td>${esc(q.payee)}（${esc(q.code)}）</td><th>账单期间</th><td>${esc(q.period)}</td></tr>
-  <tr><th>钉钉审批</th><td>${esc(q.bid)} · 申请人 ${esc(q.applicant)}</td><th>付款金额</th><td>${money(q.amount)}${p ? ` · 付款单 ${esc(p.bill_no)}` : ''}</td></tr></table>
-  <h2>一、调整明细 <span>（金额单位：元）</span></h2>
-  <div class="ex">本次付款核销计提 ${acc.length} 张（${acc.map(a => `记-${esc(a.vno)}`).join('、')}），含税合计 ${money(accG)}，发票含税合计 ${money(invG)}；其中下列 ${adj.length} 张需红冲后更正：</div>${blocks}
-  ${adj.length > 1 ? `<table class="t"><tbody><tr class="b"><td style="width:16%">差额合计</td><td class="n">含税 ${sgn(r2(sum('gross', 'new') - sum('gross', 'old')))}</td><td class="n">不含税 ${sgn(r2(sum('net', 'new') - sum('net', 'old')))}</td><td class="n">税额 ${sgn(r2(sum('tax', 'new') - sum('tax', 'old')))}</td></tr></tbody></table>` : ''}
-  <h2>二、对应发票</h2>${invTb}
-  <h2>三、会计处理</h2><div class="ex">在付款凭证 ${vno} 中：① 红冲原计提 ${refs}（整笔）；② 按调整后金额重新计提（税额挂暂估进项税）；③ 凭上列发票核销，暂估进项税转待认证；④ 支付。</div>
+  <div class="top"><div></div><div><h1>计 提 调 整 单</h1><div class="sub">物流费用 · 付款时按发票红冲更正原计提</div></div>
+    <div class="vno">调整凭证：<b>${vno}</b></div></div>
+  <table class="hd"><colgroup><col style="width:7%"><col style="width:30%"><col style="width:7%"><col style="width:26%"><col style="width:7%"><col></colgroup>
+  <tr><th>主体</th><td>${esc(q.subject_full || q.subject)}</td><th>物流商</th><td>${esc(q.payee)}（${esc(q.code)}）</td><th>账单期间</th><td>${esc(q.period)}</td></tr>
+  <tr><th>钉钉审批</th><td>${esc(q.bid)} · 申请人 ${esc(q.applicant)}</td><th>付款金额</th><td>${money(q.amount)}${p ? ` · 付款单 ${esc(p.bill_no)}` : ''}</td><th>核销计提</th><td>${acc.length} 张 · 含税 ${money(accG)}（发票 ${money(invG)}）</td></tr></table>
+  <h2>一、调整明细 <span>本次核销 ${acc.length} 张计提（${acc.map(a => `记-${esc(a.vno)}`).join('、')}），其中下列 ${adj.length} 张整笔红冲后更正；金额单位：元</span></h2>
+  <table class="t adj"><colgroup><col style="width:3%"><col style="width:7%"><col><col style="width:10%"><col style="width:7.5%"><col style="width:4.5%"><col style="width:7.5%"><col style="width:6.5%"><col style="width:7.5%"><col style="width:4.5%"><col style="width:7.5%"><col style="width:6.5%"><col style="width:6.5%"><col style="width:6%"></colgroup>
+  <thead><tr><th rowspan="2" class="c">#</th><th rowspan="2">原计提凭证</th><th rowspan="2">摘要</th><th rowspan="2">调整原因</th><th colspan="4" class="c g">原计提</th><th colspan="4" class="c g">调整后</th><th colspan="2" class="c g">差额</th></tr>
+  <tr><th class="n">含税</th><th class="c">税率</th><th class="n">不含税</th><th class="n">税额</th><th class="n">含税</th><th class="c">税率</th><th class="n">不含税</th><th class="n">税额</th><th class="n">不含税</th><th class="n">税额</th></tr></thead>
+  <tbody>${rows}${tot}</tbody></table>
+  <div class="two"><div><h2>二、对应发票</h2>${invTb}</div>
+    <div><h2>三、会计处理</h2><div class="ex">在付款凭证 ${vno} 中：<br>① 红冲原计提 ${refs}（整笔）；<br>② 按调整后金额重新计提（税额挂暂估进项税）；<br>③ 凭左列发票核销，暂估进项税转待认证；<br>④ 支付。</div></div></div>
   <table class="sign"><tr><td>制单：${esc(p ? p.by : '')}</td><td>复核：</td><td>审核：</td><td>日期：${p ? esc(String(p.at || '').slice(0, 10)) : ''}</td></tr></table>
   <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString('zh-CN', { hour12: false })}${p ? '' : ' · 未写金蝶，凭证号待定'}</div></div>`
 }
 
-const SHEET_CSS = `@page{size:A4;margin:12mm 13mm}*{box-sizing:border-box}body{font:12px/1.55 "Microsoft YaHei","PingFang SC",sans-serif;color:#111;margin:0}
+const SHEET_CSS = `@page{size:A4 landscape;margin:10mm 12mm}*{box-sizing:border-box}body{font:11.5px/1.5 "Microsoft YaHei","PingFang SC",sans-serif;color:#111;margin:0}
 .sheet{page-break-after:always}.sheet:last-child{page-break-after:auto}
-h1{text-align:center;font-size:21px;letter-spacing:2px;margin:0 0 2px}.sub{text-align:center;color:#555;margin-bottom:10px}
-h2{font-size:13.5px;margin:12px 0 5px;border-left:3px solid #111;padding-left:6px}h2 span{font-weight:400;color:#555;font-size:11.5px}
-table{width:100%;border-collapse:collapse}.hd th,.hd td,.t th,.t td{border:1px solid #333;padding:4px 6px;vertical-align:middle}
-.hd{table-layout:fixed}.hd th{background:#f2f2f2;text-align:left;font-weight:600}.t th{background:#f2f2f2;font-weight:600;text-align:left}
-.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.t th.n{text-align:right}.c,.t th.c{text-align:center}.m{font-family:Consolas,monospace}
-tr.b td{font-weight:700}tr.d td{font-weight:700;background:#fafafa}
-.blk{margin:6px 0 8px;break-inside:avoid}.bh{display:flex;gap:8px;align-items:center}.tag{border:1px solid #333;border-radius:3px;padding:0 5px;font-size:11px}
-.ex{margin:2px 0 4px;color:#222}.exp{margin-top:4px;font-size:11px}
-.sign{margin-top:22px}.sign td{padding:6px 4px;width:25%}.ft{margin-top:10px;color:#777;font-size:10.5px;text-align:right}
-.wait{padding:40px;text-align:center;color:#555}@media screen{body{background:#eee}.sheet{background:#fff;width:210mm;margin:12px auto;padding:12mm 13mm;box-shadow:0 1px 4px #0002}}`
+.top{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;margin-bottom:8px}.vno{text-align:right;font-size:12.5px}
+h1{text-align:center;font-size:20px;letter-spacing:2px;margin:0}.sub{text-align:center;color:#555}
+h2{font-size:13px;margin:10px 0 5px;border-left:3px solid #111;padding-left:6px}h2 span{font-weight:400;color:#444;font-size:11px;margin-left:6px}
+table{width:100%;border-collapse:collapse}.hd,.adj{table-layout:fixed}.hd th,.hd td,.t th,.t td{border:1px solid #333;padding:3px 5px;vertical-align:middle}
+.hd th{background:#f2f2f2;text-align:left;font-weight:600}.t th{background:#f2f2f2;font-weight:600;text-align:left}.t th.g{background:#e6e6e6}
+.n,.t th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.c,.t th.c{text-align:center}.m{font-family:Consolas,monospace}.nw{white-space:nowrap}
+td.b{font-weight:700}td.d{font-weight:700;background:#fafafa}tr.tt td{font-weight:700}.ex2{font-size:11px}.why{color:#444;font-size:10.5px}
+tr.sub td{font-size:10.5px;background:#fcfcfc}.adj tr{break-inside:avoid}
+.two{display:grid;grid-template-columns:62% 1fr;gap:14px}.ex{margin:2px 0 4px;line-height:1.8}
+.sign{margin-top:18px}.sign td{padding:6px 4px;width:25%}.ft{margin-top:6px;color:#777;font-size:10px;text-align:right}
+.wait{padding:40px;text-align:center;color:#555}@media screen{body{background:#eee}.sheet{background:#fff;width:297mm;min-height:210mm;margin:12px auto;padding:10mm 12mm;box-shadow:0 1px 4px #0002}}`
 
 // 先同步开窗(避免被拦截)，数据到了再写；ds 可以是数组或 Promise
 function printAdjust(ds, title) {
