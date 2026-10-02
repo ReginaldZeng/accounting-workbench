@@ -37,6 +37,24 @@ function dimText(d) {
     d.bank !== undefined ? '银行账号 ' + (d.bank || '（待补）') : ''].filter(Boolean)
 }
 
+// 预览弹窗（V2.752 重排，用户「有点乱了，重新设计下」）：从上往下读——头部 → 一句结论 → 按税率核对 → 计提凭证 → 发票 → 凭证预览。
+// 两张表上下排满宽(不再并排挤爆)；计提表不放长摘要(放悬停)；凭证里同一块后面相同摘要写「同上」，核销待认证行只写「发票号 + 同上」。
+const rateOf = s => { const m = String(s ?? '').match(/[\d.]+/); if (!m) return null; const f = parseFloat(m[0]); return f > 1 ? f / 100 : f }
+const r2 = x => Math.round((x + 1e-9) * 100) / 100
+
+function rateCheck(acc, inv) {
+  // 每个税率：计提(原) / 更正后 / 发票，更正后 = 发票 才算对上
+  const g = {}
+  const put = (r, k, v) => { const key = Math.round(r * 10000); (g[key] = g[key] || { r, acc: 0, fixed: 0, inv: 0 })[k] += v }
+  acc.forEach(a => { put(a.rate, 'acc', a.gross); put(a.mode === 'rate' || a.mode === 'fix' ? (a.new_rate ?? a.rate) : a.rate, 'fixed', a.gross) })
+  inv.forEach(i => { const r = rateOf(i.rate); if (r != null) put(r, 'inv', i.gross) })
+  return Object.values(g).sort((a, b) => a.r - b.r).map(x => ({ ...x, acc: r2(x.acc), fixed: r2(x.fixed), inv: r2(x.inv) }))
+}
+
+function dimLine(d) {
+  return dimText(d).join(' · ')
+}
+
 function Detail({ inst, onClose, onChanged }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -45,19 +63,22 @@ function Detail({ inst, onClose, onChanged }) {
   useEffect(load, [inst])
   const ovr = on => {
     let note = ''
-    if (on) { note = window.prompt('纸质件还没到，确定先做账？写一句原因（会留痕）', '') ; if (note === null) return }
+    if (on) { note = window.prompt('纸质件还没到，确定先做账？写一句原因（会留痕）', ''); if (note === null) return }
     setBusy(true)
     voucherPaperOverride(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
   const lines = d?.voucher?.lines || []
-  let lastBlock = ''
+  const rc = d ? rateCheck(d.accruals, d.invoices) : []
+  const accSum = k => r2((d?.accruals || []).reduce((s, a) => s + (a[k] || 0), 0))
+  const invSum = k => r2((d?.invoices || []).reduce((s, i) => s + (i[k] || 0), 0))
   return (
     <div className="lv-mask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
       <div className="lv-dlg" role="dialog" aria-label="付款做账">
         <div className="lv-dh">
-          <b>付款做账</b>
-          {d && <span><span className="cd">{d.req.code}</span>{d.req.payee} · {d.req.subject} · <b className="mono">{money(d.req.amount)}</b> · {d.req.period} 账单</span>}
-          <span style={{ flex: 1 }} />
+          <div className="lv-title">
+            {d ? <><span className="cd">{d.req.code}</span><b>{d.req.payee}</b><span className="sep">·</span>{d.req.subject}
+              <span className="sep">·</span><b className="mono">{money(d.req.amount)}</b><span className="sep">·</span>{d.req.period} 账单</> : <b>付款做账</b>}
+          </div>
           <button className="lv-x" onClick={onClose} aria-label="关闭">✕</button>
         </div>
         {err && <div className="lv-msg bad">{err}</div>}
@@ -65,59 +86,91 @@ function Detail({ inst, onClose, onChanged }) {
         {d && <>
           <div className="lv-meta">
             <span>审批 <span className="mono">{d.req.bid}</span> · {d.req.applicant}</span>
-            <span>{d.req.paid ? `付款 ${d.req.paid}${d.req.bank ? ' · ' + d.req.bank : ''}` : '未付款'}</span>
+            <span>{d.req.paid ? <>付款 {d.req.paid}{d.req.bank && <> · {d.req.bank}</>}</> : '未付款'}</span>
             {d.req.folder && <a href={`#/invaudit?folder=${d.req.folder}`} target="_blank" rel="noopener">发票管家票夹 #{d.req.folder} ↗</a>}
+            <span style={{ flex: 1 }} />
             <span className={'lv-pill ' + (ST[d.req.status] || [])[1]}>{(ST[d.req.status] || [d.req.status])[0]}</span>
             {d.req.paper_ovr
-              ? <span className="lv-ovr">纸质件已手动放行（{d.req.paper_ovr.by} {d.req.paper_ovr.at}{d.req.paper_ovr.note ? '：' + d.req.paper_ovr.note : ''}）<button className="lnk" disabled={busy} onClick={() => ovr(false)}>撤销</button></span>
-              : d.req.status === 'paper' && <button className="btn" disabled={busy} onClick={() => ovr(true)}>纸质件没到，先做账（手动放行）</button>}
+              ? <span className="lv-ovr">已手动放行（{d.req.paper_ovr.by} {d.req.paper_ovr.at}{d.req.paper_ovr.note ? '：' + d.req.paper_ovr.note : ''}）<button className="lnk" disabled={busy} onClick={() => ovr(false)}>撤销</button></span>
+              : d.req.status === 'paper' && <button className="btn sm" disabled={busy} onClick={() => ovr(true)}>纸质件没到，先做账</button>}
           </div>
-          {d.kind && KIND[d.kind] && <div className="lv-kind"><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span> {d.kind_text}</div>}
-          {d.plan.msgs.length > 0 && <ul className={'lv-msgs ' + (d.plan.status === 'ok' ? '' : 'bad')}>{d.plan.msgs.map((m, i) => <li key={i}>{m}</li>)}</ul>}
 
-          <div className="lv-sec">① 计提 vs 发票</div>
-          <div className="lv-two">
-            <table className="lv-t">
-              <thead><tr><th>计提凭证</th><th>摘要</th><th className="num">含税</th><th>税率</th><th className="num">暂估税</th><th>结论</th></tr></thead>
-              <tbody>{d.accruals.map(a => <tr key={a.vno}>
-                <td className="mono">记-{a.vno}</td><td className="ell" title={a.expl}>{a.expl}</td>
-                <td className="num">{money(a.gross)}</td><td>{pct(a.rate)}{a.mode === 'rate' && <> → <b>{pct(a.new_rate)}</b></>}</td>
+          {d.kind && KIND[d.kind] && <div className={'lv-verdict ' + KIND[d.kind][1]}><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span>{d.kind_text}</div>}
+          {d.plan.msgs.filter(m => m !== d.kind_text).length > 0 &&
+            <ul className="lv-notes">{d.plan.msgs.filter(m => m !== d.kind_text).map((m, i) => <li key={i}>{m}</li>)}</ul>}
+
+          <div className="lv-sec">① 按税率核对 <span className="dim">计提按税率合计，红冲更正后要等于同税率的发票</span></div>
+          <table className="lv-t lv-rc">
+            <thead><tr><th>税率</th><th className="num">计提</th><th className="num">更正后</th><th className="num">发票</th><th></th></tr></thead>
+            <tbody>{rc.map(x => {
+              const ok = Math.abs(x.fixed - x.inv) < 0.005
+              return <tr key={x.r}><td><b>{pct(x.r)}</b></td><td className="num">{money(x.acc)}</td>
+                <td className="num">{Math.abs(x.acc - x.fixed) < 0.005 ? <span className="dim">同左</span> : <b>{money(x.fixed)}</b>}</td>
+                <td className="num">{money(x.inv)}</td><td>{ok ? <span className="ok">✓ 对上</span> : <span className="bad">差 {money(r2(x.inv - x.fixed))}</span>}</td></tr>
+            })}</tbody>
+          </table>
+
+          <div className="lv-sec">② 计提凭证 <span className="dim">{d.accruals.length} 张 · 金蝶 {d.req.period}</span></div>
+          <table className="lv-t lv-fix">
+            <colgroup><col style={{ width: 110 }} /><col /><col style={{ width: 130 }} /><col style={{ width: 120 }} /><col style={{ width: 110 }} /><col style={{ width: '30%' }} /></colgroup>
+            <thead><tr><th>凭证</th><th>费用项目</th><th className="num">含税</th><th>税率</th><th className="num">暂估税</th><th>处理</th></tr></thead>
+            <tbody>
+              {d.accruals.map(a => <tr key={a.vno} title={a.expl}>
+                <td className="mono">{a.month}/{a.vno}#</td><td>{a.fee || '—'}</td>
+                <td className="num">{money(a.gross)}</td>
+                <td className="nw">{a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate)}</td>
                 <td className="num">{money(a.tax)}</td>
-                <td>{a.mode ? <span className={'lv-pill ' + MODE[a.mode][1]} title={a.why}>{MODE[a.mode][0]}</span> : '—'}{a.why && <div className="dim">{a.why}</div>}</td>
+                <td>{a.mode === 'hx' ? <span className="ok">核销</span> : a.mode ? <><span className="bad">红冲 + 更正</span><span className="dim"> · {a.why}</span></> : <span className="dim">—</span>}</td>
               </tr>)}
               {!d.accruals.length && <tr><td colSpan="6" className="lv-empty">金蝶本期没找到这家的计提凭证</td></tr>}
-              <tr className="tot"><td colSpan="2">合计</td><td className="num">{money(d.accruals.reduce((s, a) => s + a.gross, 0))}</td><td></td>
-                <td className="num">{money(d.accruals.reduce((s, a) => s + a.tax, 0))}</td><td></td></tr></tbody>
-            </table>
-            <table className="lv-t">
-              <thead><tr><th>发票号</th><th>类型</th><th className="num">含税</th><th>税率</th><th className="num">税额</th><th>纸质件</th></tr></thead>
-              <tbody>{d.invoices.map(i => <tr key={i.id}>
-                <td className="mono">{i.number}{i.booked && <div className="dim">已做账 {(i.vouchers || []).join('、')}</div>}</td>
-                <td className="ell" title={i.type}>{i.type}</td><td className="num">{money(i.gross)}</td><td>{i.rate}</td>
-                <td className="num">{money(i.tax)}</td><td>{i.paper ? <span className="ok">已到</span> : <span className="warn">未到</span>}</td>
+              <tr className="tot"><td colSpan="2">合计</td><td className="num">{money(accSum('gross'))}</td><td></td><td className="num">{money(accSum('tax'))}</td><td></td></tr>
+            </tbody>
+          </table>
+
+          <div className="lv-sec">③ 发票 <span className="dim">{d.invoices.length} 张 · 发票管家</span></div>
+          <table className="lv-t lv-fix">
+            <colgroup><col style={{ width: 200 }} /><col /><col style={{ width: 130 }} /><col style={{ width: 120 }} /><col style={{ width: 110 }} /><col style={{ width: '30%' }} /></colgroup>
+            <thead><tr><th>发票号</th><th>类型</th><th className="num">含税</th><th>税率</th><th className="num">税额</th><th>纸质件 / 做账</th></tr></thead>
+            <tbody>
+              {d.invoices.map(i => <tr key={i.id}>
+                <td className="mono">{i.number}</td><td className="ell" title={i.type}>{i.type}</td>
+                <td className="num">{money(i.gross)}</td><td>{i.rate}</td><td className="num">{money(i.tax)}</td>
+                <td>{i.paper ? <span className="ok">纸质件已到</span> : <span className="warn">纸质件未到</span>}
+                  {i.booked && <span className="dim"> · 已做账 {(i.vouchers || []).join('、')}</span>}</td>
               </tr>)}
               {!d.invoices.length && <tr><td colSpan="6" className="lv-empty">票夹里还没有发票</td></tr>}
-              <tr className="tot"><td colSpan="2">合计</td><td className="num">{money(d.invoices.reduce((s, i) => s + i.gross, 0))}</td><td></td>
-                <td className="num">{money(d.invoices.reduce((s, i) => s + i.tax, 0))}</td><td></td></tr></tbody>
-            </table>
-          </div>
+              <tr className="tot"><td colSpan="2">合计</td><td className="num">{money(invSum('gross'))}</td><td></td><td className="num">{money(invSum('tax'))}</td><td></td></tr>
+            </tbody>
+          </table>
 
-          <div className="lv-sec">② 凭证预览 <span className="dim">{d.voucher.book} · 日期 {d.voucher.date} · 记-□（保存到金蝶后分配；核销摘要里的「□」回填本张凭证号）· 第一版只预览、不写金蝶</span></div>
+          <div className="lv-sec">④ 凭证预览 <span className="dim">{d.voucher.book} · {d.voucher.date} · 记-□（存金蝶后分配，核销摘要里的 □ 回填）· 只预览、不写金蝶</span></div>
           {d.plan.status !== 'ok'
             ? <div className="lv-msg bad">计提和发票对不上，这张先人工处理（原因见上），不出凭证。</div>
             : <table className="lv-t lv-v">
+              <colgroup><col style={{ width: 34 }} /><col /><col style={{ width: 170 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: '32%' }} /></colgroup>
               <thead><tr><th>#</th><th>摘要</th><th>科目</th><th className="num">借方</th><th className="num">贷方</th><th>核算维度</th></tr></thead>
-              <tbody>{lines.map((l, i) => {
-                const head = l.block !== lastBlock
-                lastBlock = l.block
-                return <React.Fragment key={i}>
-                  {head && <tr className={'blk ' + BLOCK_CLS[l.block]}><td colSpan="6">{{ 红冲: '一、红冲', 更正: '二、更正', 核销: '三、核销（暂估转待认证）', 支付: '四、支付' }[l.block]}</td></tr>}
-                  <tr><td className="dim">{i + 1}</td><td className="expl">{l.expl}</td><td className="nw">{l.acct} {l.acct_name}</td>
+              <tbody>{(() => {
+                const out = []
+                let blk = '', base = ''
+                lines.forEach((l, i) => {
+                  if (l.block !== blk) {
+                    blk = l.block; base = ''
+                    out.push(<tr key={'h' + i} className={'blk ' + BLOCK_CLS[l.block]}><td colSpan="6">{{ 红冲: '一、红冲', 更正: '二、更正', 核销: '三、核销（暂估转待认证）', 支付: '四、支付' }[l.block]}</td></tr>)
+                  }
+                  // 同一块里摘要相同写「同上」；核销待认证行＝发票号 + 共同摘要
+                  const m = l.expl.match(/^(\d{8,20})(核销.*)$/)
+                  let txt
+                  if (m && base === m[2]) txt = <><span className="mono">{m[1]}</span> <span className="dim">+ 同上</span></>
+                  else if (!m && base === l.expl) txt = <span className="dim">同上</span>
+                  else { txt = l.expl; base = m ? m[2] : l.expl }
+                  out.push(<tr key={i}><td className="dim">{i + 1}</td><td className="expl" title={l.expl}>{txt}</td>
+                    <td className="nw">{l.acct} {l.acct_name}</td>
                     <td className="num">{l.dr ? money(l.dr) : ''}</td><td className="num">{l.cr ? money(l.cr) : ''}</td>
-                    <td className="dims">{dimText(l.dims).map((t, k) => <div key={k}>{t}</div>)}</td></tr>
-                </React.Fragment>
-              })}
-                <tr className="tot"><td colSpan="3">合计 {Math.abs(d.voucher.dr - d.voucher.cr) < 0.005 ? '· 借贷平衡 ✓' : '· ⚠ 借贷不平'}</td>
+                    <td className="dims">{dimLine(l.dims)}</td></tr>)
+                })
+                return out
+              })()}
+                <tr className="tot"><td colSpan="3">合计　{Math.abs(d.voucher.dr - d.voucher.cr) < 0.005 ? <span className="ok">借贷平衡 ✓</span> : <span className="bad">借贷不平</span>}</td>
                   <td className="num">{money(d.voucher.dr)}</td><td className="num">{money(d.voucher.cr)}</td><td></td></tr>
               </tbody>
             </table>}
@@ -237,8 +290,15 @@ const CSS = `
 .lv .lv-empty{color:var(--ink-3);text-align:center;padding:18px}
 .lv .lv-msg{padding:9px 12px;border-radius:8px;font-size:12.5px;margin:8px 0}.lv .lv-msg.bad{background:var(--red-bg);color:var(--red)}
 .lv .lv-mask{position:fixed;inset:0;z-index:1000;background:rgba(20,28,40,.38);display:flex;align-items:flex-start;justify-content:center;padding:28px 16px;overflow:auto}
-.lv .lv-dlg{width:min(1180px,100%);background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 16px 44px rgba(20,28,58,.22);padding:16px 20px 22px}
-.lv .lv-dh{display:flex;align-items:center;gap:12px;font-size:15px}
+.lv .lv-dlg{width:min(1100px,100%);background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 16px 44px rgba(20,28,58,.22);padding:16px 20px 22px}
+.lv .lv-dh{display:flex;align-items:flex-start;gap:12px}
+.lv .lv-title{flex:1;min-width:0;font-size:15.5px;line-height:1.5}.lv .lv-title .sep{color:var(--ink-3);margin:0 6px}
+.lv .lv-verdict{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:9px;font-size:13.5px;margin:4px 0 2px;background:var(--bg-sub);border:1px solid var(--line)}
+.lv .lv-verdict.bad{background:var(--red-bg);border-color:var(--red-line)}.lv .lv-verdict.ok{background:var(--green-bg);border-color:var(--green-line)}.lv .lv-verdict.warn{background:var(--amber-bg);border-color:var(--amber-line)}
+.lv .lv-notes{margin:6px 0 0;padding:0 0 0 20px;font-size:12.5px;color:var(--ink-2)}
+.lv .lv-rc{width:auto;min-width:520px}
+.lv .lv-fix,.lv .lv-v{table-layout:fixed}.lv .lv-fix td,.lv .lv-v td{overflow-wrap:anywhere}
+.lv .btn.sm{padding:3px 10px;font-size:12px}
 .lv .lv-x{border:0;background:none;font-size:16px;color:var(--ink-3);cursor:pointer}
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
@@ -251,7 +311,7 @@ const CSS = `
 .lv .lv-sec{font-weight:700;font-size:13.5px;margin:16px 0 8px}
 .lv .lv-two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media (max-width:1100px){.lv .lv-two{grid-template-columns:1fr}}
-.lv .lv-v td.expl{max-width:360px}.lv .lv-v td.nw{white-space:nowrap}.lv .lv-v td.dims{font-size:11.5px;color:var(--ink-2);min-width:220px}
+.lv .lv-v td.expl{line-height:1.45}.lv td.nw{white-space:nowrap}.lv .lv-v td.dims{font-size:11.5px;color:var(--ink-2);line-height:1.45}
 .lv .lv-v tr.blk td{font-weight:700;font-size:12px;padding:6px 10px}
 .lv .lv-v tr.b-red td{background:var(--red-bg);color:var(--red)}.lv .lv-v tr.b-fix td{background:var(--amber-bg);color:var(--amber)}
 .lv .lv-v tr.b-hx td{background:var(--accent-soft);color:var(--accent)}.lv .lv-v tr.b-pay td{background:var(--green-bg);color:var(--green)}
