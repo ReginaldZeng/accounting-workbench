@@ -109,3 +109,6 @@
   .inv-sf-pay-op{ grid-column:1 / -1; align-items:stretch; }
   .inv-sf-pay-op .btn, .inv-sf-pay-op .btn-pri{ height:38px; }
 }
+
+.inv-sf-qr{display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;}
+.inv-sf-qr p{margin:0;color:var(--ink-2);}

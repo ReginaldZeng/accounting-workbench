@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
+from sqlalchemy import update
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
@@ -134,7 +135,7 @@ def _later_templates():
 async def s_hello(request: Request):
     st = inv.get_settings()
     me = self_from_request(request)
-    return {"ok": True, "corpId": st.get("corpId") or "", "dingtalk": idt.configured(),
+    return {"ok": True, "corpId": st.get("corpId") or "", "dingtalk": idt.configured(), "clientId": (idt._load_conf() or {}).get("appkey") or "",
             "me": {"name": me.get("dt_name") or "", "dept": me.get("dept") or "", "via": me.get("via") or ""} if me else None,
             "templates": _later_templates()}
 
@@ -273,6 +274,69 @@ async def s_login_verify(request: Request):
         return {"ok": True, "token": tok, "me": {"name": r.get("dt_name") or "", "dept": r.get("dept") or "", "via": "code"}}, None
     out, bad = await run_in_threadpool(run)
     return bad if bad else out
+
+
+@router.post("/api/inv/s/login/qr")
+async def s_login_qr(request: Request):
+    if not _ip_ok("qr:" + _ip(request)):
+        return err("二维码生成太频繁，请稍后再试", 429)
+    poll, scan = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    number = "%06d" % secrets.randbelow(1000000)
+    expires = _at(minutes=5)
+    S.self_insert(E(), kind="qr", token_hash=_h(poll), via=number, ip=_ip(request),
+                  created_at=inv.now_s(), expires_at=expires, used=0)
+    S.self_insert(E(), kind="qrscan", token_hash=_h(scan), code_hash=_h(poll), via=number,
+                  created_at=inv.now_s(), expires_at=expires, used=0)
+    url = self_url(request) + "?scan=" + scan
+    png = await run_in_threadpool(inv._qr_png, url)
+    if not png:
+        return err("服务器无法生成二维码，请使用手机号登录", 503)
+    import base64
+    return {"ok": True, "ticket": poll, "number": number, "expiresIn": 300,
+            "image": "data:image/png;base64," + base64.b64encode(png).decode()}
+
+
+def _qr_row(kind, token):
+    row = S.self_by_hash(E(), kind, _h(token)) if token else None
+    return row if row and not row.get("used") and row.get("expires_at", "") >= inv.now_s() else None
+
+
+@router.post("/api/inv/s/login/qr/check")
+async def s_qr_check(request: Request):
+    body = await inv.body_json(request)
+    row = _qr_row("qr", inv._s(body.get("ticket"), 100))
+    if not row or row.get("ip") != _ip(request):
+        return err("二维码已失效，请刷新二维码", 410)
+    if not row.get("dt_userid"):
+        return {"ok": True, "pending": True}
+    with E().begin() as cx:
+        claimed = cx.execute(update(S.SELF).where(S.SELF.c.id == row["id"], S.SELF.c.used == 0).values(used=1)).rowcount
+    if not claimed:
+        return err("二维码已使用，请重新登录", 410)
+    tok = _new_session(row["dt_userid"], row["dt_name"], row.get("dept"), "qr", _ip(request))
+    return {"ok": True, "token": tok, "me": {"name": row["dt_name"], "dept": row.get("dept") or "", "via": "qr"}}
+
+
+@router.post("/api/inv/s/login/qr/approve")
+async def s_qr_approve(request: Request):
+    me, bad = _need(request)
+    if bad:
+        return bad
+    body = await inv.body_json(request)
+    row = _qr_row("qrscan", inv._s(body.get("scan"), 100))
+    if not row:
+        return err("二维码已失效或已确认，请在电脑刷新", 410)
+    if not body.get("confirm"):
+        return {"ok": True, "number": row["via"]}
+    with E().begin() as cx:
+        claimed = cx.execute(update(S.SELF).where(S.SELF.c.id == row["id"], S.SELF.c.used == 0,
+                            S.SELF.c.expires_at >= inv.now_s()).values(used=1)).rowcount
+        if not claimed:
+            return err("二维码已使用", 410)
+        cx.execute(update(S.SELF).where(S.SELF.c.kind == "qr", S.SELF.c.token_hash == row["code_hash"],
+                   S.SELF.c.used == 0, S.SELF.c.expires_at >= inv.now_s()).values(
+                   dt_userid=me["dt_userid"], dt_name=me["dt_name"], dept=me.get("dept") or ""))
+    return {"ok": True}
 
 
 @router.post("/api/inv/s/logout")

@@ -1157,6 +1157,34 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.ok(self.c.post("/api/inv/s/logout", json={}, headers=H))
         self.assertEqual(self.c.get("/api/inv/s/laters", headers=H).status_code, 401)
 
+    def test_qr_login_requires_approval_and_is_single_use(self):
+        sf = self.sf
+        sf._IP_HITS.clear()
+        qr = self.ok(self.c.post("/api/inv/s/login/qr", json={}))
+        row = self.S.self_by_hash(self.e, "qr", sf._h(qr["ticket"]))
+        self.assertTrue(self.ok(self.c.post("/api/inv/s/login/qr/check", json={"ticket": qr["ticket"]}))["pending"])
+        self.assertEqual(self.c.post("/api/inv/s/login/qr/check", json={"ticket": qr["ticket"]}, headers={"x-real-ip": "other"}).status_code, 410)
+        # 单独创建合成扫描令牌，绑定真实接口生成的电脑挑战。
+        scan = "synthetic-scan-secret"
+        self.S.self_insert(self.e, kind="qrscan", token_hash=sf._h(scan), code_hash=sf._h(qr["ticket"]),
+                           via=qr["number"], used=0, created_at=self.inv.now_s(), expires_at=sf._at(minutes=5))
+        self.assertEqual(self.c.post("/api/inv/s/login/qr/approve", json={"scan": scan, "confirm": True}).status_code, 401)
+        token = sf._new_session("dt-qr-user", "扫码员工", "采购", "dingtalk", "mobile")
+        H = {"X-Inv-Self": token}
+        preview = self.ok(self.c.post("/api/inv/s/login/qr/approve", json={"scan": scan}, headers=H))
+        self.assertEqual(preview["number"], qr["number"])
+        self.assertTrue(self.ok(self.c.post("/api/inv/s/login/qr/check", json={"ticket": qr["ticket"]}))["pending"])
+        self.ok(self.c.post("/api/inv/s/login/qr/approve", json={"scan": scan, "confirm": True, "userid": "attacker"}, headers=H))
+        self.assertEqual(self.c.post("/api/inv/s/login/qr/approve", json={"scan": scan, "confirm": True}, headers=H).status_code, 410)
+        login = self.ok(self.c.post("/api/inv/s/login/qr/check", json={"ticket": qr["ticket"]}))
+        self.assertEqual(login["me"]["name"], "扫码员工")
+        self.assertEqual(self.S.self_by_hash(self.e, "session", sf._h(login["token"]))["dt_userid"], "dt-qr-user")
+        self.assertEqual(self.c.post("/api/inv/s/login/qr/check", json={"ticket": qr["ticket"]}).status_code, 410)
+        qr2 = self.ok(self.c.post("/api/inv/s/login/qr", json={}))
+        row2 = self.S.self_by_hash(self.e, "qr", sf._h(qr2["ticket"]))
+        self.S.self_update(self.e, row2["id"], expires_at="2000-01-01 00:00:00")
+        self.assertEqual(self.c.post("/api/inv/s/login/qr/check", json={"ticket": qr2["ticket"]}).status_code, 410)
+
     def test_24_self_login_code_limits(self):
         """验证码：输错 5 次作废；过期作废；钉钉免登认得出就直接发会话。"""
         inv, sf, S, e = self.inv, self.sf, self.S, self.e

@@ -6,10 +6,10 @@
 // 会话令牌只放 sessionStorage + 请求头 X-Inv-Self（不进地址栏）。
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  invSHello, invSJsConfig, invSLoginDd, invSLoginLookup, invSLoginSend, invSLoginVerify, invSLogout,
+  invSQrCreate, invSQrCheck, invSQrApprove, invSHello, invSLoginDd, invSLoginLookup, invSLoginSend, invSLoginVerify, invSLogout,
   invSPayments, invSReceivers, invSLaterCreate, invSLaters, invSLaterDocs,
 } from '../api.js'
-import { inDingTalk, getAuthCode, ddConfig } from './ddBridge.js'
+import { inDingTalk, getAuthCode } from './ddBridge.js'
 import { money } from './invShared.jsx'
 import './inv.css'
 import './inv-self.css'
@@ -18,7 +18,7 @@ const TOKEN_KEY = 'inv_self_t'
 const KIND_LABEL = { special: '专票', normal: '普票', receipt: '收据' }
 const TAX_RATES = ['13%', '9%', '6%', '5%', '3%', '1%', '0%', '免税', '不征税']
 const ST_LABEL = { open: '待到票', partial: '部分到票', done: '已收齐', closed: '已关闭' }
-const errText = e => (e && e.message) || String(e || '')
+const errText = e => e?.message || e?.errorMessage || JSON.stringify(e || '未知错误')
 const loadTok = () => { try { return sessionStorage.getItem(TOKEN_KEY) || '' } catch { return '' } }
 const saveTok = t => { try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY) } catch { /* 存不了就只在本页用 */ } }
 function plusDays(n) {
@@ -29,7 +29,67 @@ const num = v => (v === null || v === undefined || v === '' ? 0 : Number(v) || 0
 
 // ───────────────────────── 登录 ─────────────────────────
 
+function QrLogin({ onIn }) {
+  const [qr, setQr] = useState(null)
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+  const create = async () => {
+    setBusy(true); setQr(null); setMsg('')
+    try { setQr(await invSQrCreate()) } catch (e) { setMsg(errText(e)) }
+    finally { setBusy(false) }
+  }
+  useEffect(() => { create() }, [])
+  useEffect(() => {
+    if (!qr) return
+    let live = true, timer
+    const check = async () => {
+      try {
+        const r = await invSQrCheck(qr.ticket)
+        if (!live) return
+        if (r.token) { onIn(r.token, r.me); return }
+        timer = setTimeout(check, 2000)
+      } catch (e) { if (live) { setMsg(errText(e)); setQr(null) } }
+    }
+    timer = setTimeout(check, 2000)
+    return () => { live = false; clearTimeout(timer) }
+  }, [qr, onIn])
+  return <div className="inv-sf-qr">
+    <p>使用手机钉钉扫一扫，在手机上确认登录这台电脑。</p>
+    {qr && <><img src={qr.image} alt="钉钉扫码登录二维码" width="220" height="220" />
+      <p>电脑确认码：<b>{qr.number}</b></p><p>二维码 5 分钟有效，请核对手机显示的确认码。</p></>}
+    {msg && <div className="inv-sf-err">{msg}</div>}
+    <button type="button" className="btn" disabled={busy} onClick={create}>{busy ? '生成中…' : '刷新二维码'}</button>
+  </div>
+}
+
+function QrApproval({ token, me, scan }) {
+  const [number, setNumber] = useState('')
+  const [msg, setMsg] = useState('')
+  const [done, setDone] = useState(false)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    let live = true
+    invSQrApprove(token, scan).then(r => { if (live) setNumber(r.number) }).catch(e => { if (live) setMsg(errText(e)) })
+    return () => { live = false }
+  }, [token, scan])
+  const approve = async () => {
+    setBusy(true)
+    try { await invSQrApprove(token, scan, true); setDone(true) }
+    catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
+  }
+  return <section className="inv-sf-login"><h2>{done ? '已确认电脑登录' : '确认登录电脑'}</h2>
+    {done ? <p>可以回到电脑继续登记。</p> : <>
+      <p>将以 <b>{me.name}</b> 的身份登录扫描二维码的电脑。</p>
+      <p>请核对电脑确认码：<b>{number || '正在读取…'}</b></p>
+      <p>仅确认你本人正在使用的电脑。确认后电脑可以查看你的审批单和后补记录。</p>
+      <button className="btn-pri" disabled={!number || busy || !!msg} onClick={approve}>{busy ? '确认中…' : '确认是我的电脑，登录'}</button>
+      <button className="btn" onClick={() => { window.location.hash = '#/invself'; window.location.reload() }}>取消</button>
+    </>}{msg && <div className="inv-sf-err">{msg}</div>}
+  </section>
+}
+
 function Login({ hello, onIn }) {
+  const [method, setMethod] = useState('phone')
   const [step, setStep] = useState('mobile')
   const [mobile, setMobile] = useState('')
   const [person, setPerson] = useState(null)
@@ -84,6 +144,11 @@ function Login({ hello, onIn }) {
 
   return <div className="inv-sf-login">
     <h2>先确认你是谁</h2>
+    {!inDingTalk() && <div className="inv-sf-tabs">
+      <button type="button" className={method === 'phone' ? 'on' : ''} onClick={() => setMethod('phone')}>手机号登录</button>
+      <button type="button" className={method === 'qr' ? 'on' : ''} onClick={() => setMethod('qr')}>钉钉扫码登录</button>
+    </div>}
+    {method === 'qr' ? <QrLogin onIn={onIn} /> : <>
     {hello?.ddNote && <div className="inv-sf-note">{hello.ddNote}</div>}
     <p className="inv-sf-lead">系统会通过<b>钉钉</b>给你发一条 6 位验证码，能收到就说明是你本人。在钉钉里打开这个网址可以直接登录，不用验证码。</p>
     {step === 'mobile' && <div>
@@ -117,6 +182,7 @@ function Login({ hello, onIn }) {
     </form>}
     {!hello?.dingtalk && <div className="inv-sf-err">服务器还没接上钉钉，暂时没法登录，请联系财务。</div>}
     {msg && <div className="inv-sf-err">{msg}</div>}
+    </>}
   </div>
 }
 
@@ -361,6 +427,7 @@ function MyLaters({ token, rows: all, onReload }) {
 // ───────────────────────── 页面 ─────────────────────────
 
 export default function InvSelf() {
+  const scan = new URLSearchParams((window.location.hash.split('?')[1] || '')).get('scan') || ''
   const [tok, setTok] = useState(loadTok)
   const [hello, setHello] = useState(null)
   const [me, setMe] = useState(null)
@@ -394,9 +461,9 @@ export default function InvSelf() {
       if (tok) saveTok('')
       if (inDingTalk() && h.dingtalk) {
         let cid = h.corpId || ''
-        try { const c = await ddConfig(invSJsConfig, ['runtime.permission.requestAuthCode']); if (!cid && c && c.corpId) cid = c.corpId } catch { /* 不鉴权也照样试免登 */ }
         try {
-          const code = cid ? await getAuthCode(cid) : ''
+          const code = cid ? await getAuthCode(cid, h.clientId) : ''
+          if (!code) throw new Error('钉钉未返回免登授权码')
           if (code) {
             const r = await invSLoginDd(code)
             if (live) signIn(r.token, r.me)
@@ -423,7 +490,7 @@ export default function InvSelf() {
   }, [tok, expired])
 
   useEffect(() => {
-    if (phase !== 'ready' || !tok) return
+    if (phase !== 'ready' || !tok || scan) return
     loadPays(); loadLaters()
     invSReceivers(tok).then(r => setRecv(r.rows || [])).catch(expired)
   }, [phase, tok, loadPays, loadLaters, expired])
@@ -442,7 +509,8 @@ export default function InvSelf() {
     {phase === 'down' && <div className="inv-sf-err">页面没连上服务器：{down}</div>}
     {phase === 'login' && <Login hello={hello} onIn={signIn} />}
 
-    {phase === 'ready' && <>
+    {phase === 'ready' && scan && <QrApproval token={tok} me={me} scan={scan} />}
+    {phase === 'ready' && !scan && <>
       <nav className="inv-sf-tabs">
         <button type="button" className={tab === 'new' ? 'on' : ''} onClick={() => setTab('new')}>登记后补单</button>
         <button type="button" className={tab === 'mine' ? 'on' : ''} onClick={() => { setTab('mine'); loadLaters() }}>我的后补单{laters.length ? `（${laters.length}）` : ''}</button>

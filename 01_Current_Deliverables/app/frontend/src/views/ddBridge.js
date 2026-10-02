@@ -24,16 +24,27 @@ export function loadDd() {
 export function ddCall(fn, args, pick) {
   return new Promise((res, rej) => {
     try {
-      const r = fn({ ...args, onSuccess: x => res(pick(x)), onFail: e => rej(e) })
+      const success = x => res(pick(x))
+      const fail = e => rej(new Error(e?.errorMessage || e?.message || JSON.stringify(e || {})))
+      const r = fn({ ...args, onSuccess: success, onFail: fail, success, fail })
       if (r && typeof r.then === 'function') r.then(x => res(pick(x)), rej)
     } catch (e) { rej(e) }
   })
 }
-export async function getAuthCode(corpId) {
+export async function getAuthCode(corpId, clientId) {
   const dd = await withTimeout(loadDd(), 6000, '钉钉组件加载超时')
-  const ask = () => ddCall(dd.runtime.permission.requestAuthCode, { corpId }, x => (x && x.code) || '')
-  const ready = typeof dd.ready === 'function' ? new Promise(r => dd.ready(r)) : Promise.resolve()
-  return withTimeout(ready.then(ask), 4000, '钉钉免登超时')
+  if (!corpId) throw new Error('缺少企业编号，请联系财务')
+  // 免登接口不需要 dd.config；不要让签名失败阻塞身份识别。
+  if (clientId && typeof dd.requestAuthCode === 'function') {
+    try { return await withTimeout(ddCall(dd.requestAuthCode.bind(dd), { corpId, clientId }, x => x?.code || ''), 6000, '钉钉免登超时') }
+    catch { /* 老容器继续用旧版接口 */ }
+  }
+  if (typeof dd.ready === 'function') {
+    try { await withTimeout(new Promise(resolve => dd.ready(resolve)), 2500, '钉钉组件尚未就绪') } catch { /* 仍尝试旧版桥接，错误由接口返回 */ }
+  }
+  const permission = dd.runtime?.permission
+  if (!permission?.requestAuthCode) throw new Error('当前钉钉容器不支持免登，请从手机钉钉内打开')
+  return withTimeout(ddCall(permission.requestAuthCode.bind(permission), { corpId }, x => x?.code || ''), 6000, '钉钉免登超时')
 }
 // dd.config 鉴权：getCfg(页面地址不含#) → 后端签名 {ok, agentId, corpId, timeStamp, nonceStr, signature, msg}；
 // 成功回签名参数（含 corpId），失败抛带原因的错误
