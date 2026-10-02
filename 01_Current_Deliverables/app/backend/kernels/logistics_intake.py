@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
+# V2.761：读老格式 .xls(xlrd)；列名 * 结尾按前缀认；wt_scale 账单重量换千克(链盟接入)
 # Description: 【物流账单复核】通用解析器——按「取数说明」(intake_spec) 认列，不写死序号（同一家导出月间列会漂移，写死必错）。
 #   一张 sheet 按 spec 的角色解析：detail=对账逐单(带单号)、accrual=计提口径(月结按费用项)、ignore=价目表跳过。
 #   出中间表行(dict)。表名按前缀/正则匹配月度变动（如「*发货明细」）。落库/核价核量在 router 串起来。
@@ -32,11 +33,12 @@ def match_sheet(spec_name, real_name):
 
 
 def find_col(hdr, name_or_list):
-    """按列名（或别名列表）在表头找列号，取首个命中。认名不认序号。"""
+    """按列名（或别名列表）在表头找列号，取首个命中。认名不认序号。
+    名字以 * 结尾按前缀认(链盟「蜜雪卸货费/0.45元/箱(含6%税,单独开票)」这类长表头，V2.761)。"""
     names = name_or_list if isinstance(name_or_list, list) else [name_or_list]
     for n in names:
         for i, h in enumerate(hdr):
-            if h == n:
+            if h == n or (isinstance(n, str) and n.endswith("*") and len(n) > 1 and h.startswith(n[:-1])):
                 return i
     return None
 
@@ -148,8 +150,8 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
     for ri, r in enumerate(rows[hr + 1:], start=hr + 2):
         if not any(x is not None for x in r):
             continue
-        if marker and _s(r[0]) and marker in _s(r[0]):
-            continue
+        if marker and any(marker in _s(x) for x in r[:int(sp.get("summary_cols", 1))]):
+            continue                      # 合计/汇总行：默认只看首格；summary_cols=2 连第二格也看(链盟「汇总」在 B 列)
         if c_rtype is not None and _s(r[c_rtype] if c_rtype < len(r) else "") not in sp["row_type"]["in"]:
             continue                      # 只取指定类型的行(合计行、别的类型跳过)
         doc = _s(r[c_doc]) if c_doc is not None and c_doc < len(r) else _s(sp.get("doc", ""))
@@ -185,7 +187,9 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             "base_amount": round(_f(r[c_amts[0]]) or 0, 2) if c_amts else None,
             "carrier_sub": _s(r[c_cs]) if c_cs is not None and c_cs < len(r) else "",
             "prov": _s(r[c_prov]) if c_prov is not None and c_prov < len(r) else "",
-            "charge_wt": _f(r[c_wt]) if c_wt is not None and c_wt < len(r) else None,
+            # wt_scale：账单重量单位换千克(链盟「重量/吨」配 1000)，核量统一比金蝶 kg
+            "charge_wt": (round(_f(r[c_wt]) * float(sp.get("wt_scale", 1)), 3) if _f(r[c_wt]) is not None else None)
+                         if c_wt is not None and c_wt < len(r) else None,
             "src_sheet": ws.title, "src_row": ri,
         }
         if calc and c_calc_t is not None and c_calc_t < len(r) and _f(r[c_calc_t]) is not None:
@@ -306,13 +310,40 @@ def bill_owner(wb, spec):
     return ""
 
 
-def parse_bill(spec, data):
-    """按取数说明解析整本账单 xlsx → {'detail':[...], 'accrual':[...], 'skipped':[表名], 'period':...}。
-    data=bytes 或路径。period 从 spec 传入或调用方补。"""
+class _XlsSheet:
+    """老格式 .xls(xlrd) 套成 openpyxl 只读表的样子：title + iter_rows(values_only)。"""
+    def __init__(self, sh):
+        self.title = sh.name
+        self._sh = sh
+
+    def iter_rows(self, min_row=1, max_row=None, values_only=True):
+        n = self._sh.nrows if max_row is None else min(max_row, self._sh.nrows)
+        for i in range(max(0, min_row - 1), n):
+            yield tuple(None if v == "" else v for v in self._sh.row_values(i))
+
+
+class _XlsBook:
+    def __init__(self, data):
+        import xlrd
+        bk = xlrd.open_workbook(file_contents=data) if isinstance(data, (bytes, bytearray)) else xlrd.open_workbook(data)
+        self.worksheets = [_XlsSheet(sh) for sh in bk.sheets()]
+
+
+def open_book(data):
+    """xlsx 走 openpyxl；老格式 .xls(OLE 文件头 D0CF11E0，如链盟)走 xlrd(V2.761)。"""
     import openpyxl
     from io import BytesIO
+    head = bytes(data[:4]) if isinstance(data, (bytes, bytearray)) else open(data, "rb").read(4)
+    if head == bytes.fromhex("d0cf11e0"):
+        return _XlsBook(data)
     src = BytesIO(data) if isinstance(data, (bytes, bytearray)) else data
-    wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
+    return openpyxl.load_workbook(src, read_only=True, data_only=True)
+
+
+def parse_bill(spec, data):
+    """按取数说明解析整本账单 xlsx/xls → {'detail':[...], 'accrual':[...], 'skipped':[表名], 'period':...}。
+    data=bytes 或路径。period 从 spec 传入或调用方补。"""
+    wb = open_book(data)
     carrier = spec.get("carrier", "")
     period = spec.get("period", "")
     detail, accrual, skipped = [], [], []
