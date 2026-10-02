@@ -43,8 +43,9 @@ def fetch_rows(numbers):
     fields = [("FAccountBookID.FName", "book"), ("FYear", "year"), ("FPeriod", "month"),
               ("FVOUCHERGROUPID.FName", "group"), ("FVOUCHERGROUPNO", "number"), ("FEXPLANATION", "summary")]
     rows = []
-    for start in range(0, len(numbers), 30):
-        filt = " or ".join("FEXPLANATION like '%%%s%%'" % n for n in numbers[start:start + 30])
+    # ponytail: 单号查询避免金蝶多条件摘要扫描超时；发票量大时改接有索引的关联字段。
+    for number in numbers:
+        filt = "FEXPLANATION like '%%%s%%'" % number
         rows.extend(kc._query(s, conf, "GL_VOUCHER", fields, "(" + filt + ")", "FAccountBookID,FYear,FPeriod,FVOUCHERGROUPNO,FEntity_FEntrySeq"))
     return rows
 
