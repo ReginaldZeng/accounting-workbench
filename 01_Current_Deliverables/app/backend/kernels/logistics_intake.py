@@ -2,6 +2,7 @@
 # [Change Log]
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
 # V2.761：读老格式 .xls(xlrd)；列名 * 结尾按前缀认；wt_scale 账单重量换千克(链盟接入)
+# V2.762：doc_re 单号格式过滤(跨越/中通账单底下带透视小计，单号列会读到「总计」)；dedupe_col 跨 sheet 按运单号去重
 # Description: 【物流账单复核】通用解析器——按「取数说明」(intake_spec) 认列，不写死序号（同一家导出月间列会漂移，写死必错）。
 #   一张 sheet 按 spec 的角色解析：detail=对账逐单(带单号)、accrual=计提口径(月结按费用项)、ignore=价目表跳过。
 #   出中间表行(dict)。表名按前缀/正则匹配月度变动（如「*发货明细」）。落库/核价核量在 router 串起来。
@@ -145,6 +146,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
     c_cs = find_col(hdr, sp["carrier_sub_col"]) if sp.get("carrier_sub_col") else None
     parts = {nm: [c for c in (find_col(hdr, x) for x in cols) if c is not None] for nm, cols in (sp.get("fee_parts") or {}).items()}
     c_box = find_col(hdr, sp["box_col"]) if sp.get("box_col") else None
+    c_dk = find_col(hdr, sp["dedupe_col"]) if sp.get("dedupe_col") else None   # 跨 sheet 去重键(运单号)
     marker = sp.get("summary_marker")
     out = []
     for ri, r in enumerate(rows[hr + 1:], start=hr + 2):
@@ -155,6 +157,8 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
         if c_rtype is not None and _s(r[c_rtype] if c_rtype < len(r) else "") not in sp["row_type"]["in"]:
             continue                      # 只取指定类型的行(合计行、别的类型跳过)
         doc = _s(r[c_doc]) if c_doc is not None and c_doc < len(r) else _s(sp.get("doc", ""))
+        if doc and sp.get("doc_re") and doc != _s(sp.get("doc_default", "")) and not re.match(sp["doc_re"], doc):
+            continue                      # 单号列里不像单号的(账单底下的透视小计「总计」「孝感市…公司」)不收(V2.762)
         if c_doc is not None and not doc and sp.get("doc_ffill") and last_doc:
             doc = last_doc                # 单号只写在首行、下面几行沿用(恒茂入库：一张调拨单拆几个批次)
         if c_doc is not None and not doc:
@@ -192,6 +196,8 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
                          if c_wt is not None and c_wt < len(r) else None,
             "src_sheet": ws.title, "src_row": ri,
         }
+        if c_dk is not None and c_dk < len(r) and _s(r[c_dk]):
+            row["_dk"] = _s(r[c_dk])
         if calc and c_calc_t is not None and c_calc_t < len(r) and _f(r[c_calc_t]) is not None:
             # 按账单公式核价：标准=各因子相乘×rate(四舍五入到分)，与账单金额差超 1 分记「核价差」
             fs = [_f(r[c]) if c is not None and c < len(r) else None for c in c_calc_f]
@@ -408,6 +414,16 @@ def parse_bill(spec, data):
                 if sub:
                     r["sub_fees"] = json.dumps(sub, ensure_ascii=False)
                     r["amount"] = round(sum(v for v in sub.values() if isinstance(v, (int, float))), 2)
+    # 跨 sheet 去重(spec 表配 dedupe_col)：跨越「深圳星期零」页是全量、「孝感星期九」页又抄了孝感那单，按运单号只留第一次(V2.762)
+    seen, kept = set(), []
+    for r in detail:
+        k = r.pop("_dk", None)
+        if k and k in seen:
+            continue
+        if k:
+            seen.add(k)
+        kept.append(r)
+    detail = kept
     owner = bill_owner(wb, spec)
     # 货主→产品线(spec.owner_bizline，如 kikiherb→Kiki Herb)：同一套标注下的另一个货主，产品线跟货主走
     biz = next((v for k, v in (spec.get("owner_bizline") or {}).items() if k.lower() in owner.lower()), "")
