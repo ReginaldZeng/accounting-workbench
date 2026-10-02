@@ -211,6 +211,29 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
         if sub:
             row["sub_fees"] = json.dumps({**sub, **(json.loads(row["sub_fees"]) if row.get("sub_fees") else {})}, ensure_ascii=False)
         out.append(row)
+    return _merge_doc(out) if sp.get("merge_doc") else out
+
+
+def _merge_doc(rows):
+    """同一单号的几行并成一行(金额/数量/重量/分项相加，留首行出处)。链盟一张出库单分两车送同一仓，
+    第二车只写卸货费、单号空(配 doc_ffill 沿用上一行)，并起来才能和金蝶整单重量比(V2.761)。无单据行不并。"""
+    out, idx = [], {}
+    for r in rows:
+        k = r.get("doc_no")
+        if not k or k == "无单据" or k not in idx:
+            if k and k != "无单据":
+                idx[k] = len(out)
+            out.append(dict(r))
+            continue
+        m = out[idx[k]]
+        for f in ("amount", "base_amount", "qty", "charge_wt"):
+            if r.get(f) is not None:
+                m[f] = round((m.get(f) or 0) + r[f], 3 if f == "charge_wt" else 2)
+        if r.get("sub_fees"):
+            a, b = json.loads(m.get("sub_fees") or "{}"), json.loads(r["sub_fees"])
+            for kk, v in b.items():
+                a[kk] = round(a.get(kk, 0) + v, 2) if isinstance(v, (int, float)) and isinstance(a.get(kk, 0), (int, float)) else a.get(kk, v)
+            m["sub_fees"] = json.dumps(a, ensure_ascii=False)
     return out
 
 
