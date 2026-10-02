@@ -1,12 +1,12 @@
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621（发票管家·申请人自助登记发票后补）
 // 业务同事自己登记发票后补：main.jsx 按 #/invself 分流到这里，不走工作台登录（业务同事没有工作台账号）。
-// 认人：在钉钉里打开 → 自动免登；电脑浏览器 → 写钉钉上的姓名 → 钉钉收 6 位验证码 → 输入即登录。
+// 认人：在钉钉里打开 → 自动免登；电脑浏览器 → 输入手机号、确认姓名 → 钉钉收 6 位验证码 → 输入即登录。
 // 登录后：「登记后补单」从我近 60 天发起的付款单/报销单里选一张 → 填预计到票 → 提交（进财务的发票后补池，
 // 财务审核这张单时在「发票审核」里自动关联出来）；「我的后补单」看到票进度、补传资料。
 // 会话令牌只放 sessionStorage + 请求头 X-Inv-Self（不进地址栏）。
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  invSHello, invSJsConfig, invSLoginDd, invSLoginSend, invSLoginVerify, invSLogout,
+  invSHello, invSJsConfig, invSLoginDd, invSLoginLookup, invSLoginSend, invSLoginVerify, invSLogout,
   invSPayments, invSReceivers, invSLaterCreate, invSLaters, invSLaterDocs,
 } from '../api.js'
 import { inDingTalk, getAuthCode, ddConfig } from './ddBridge.js'
@@ -30,10 +30,10 @@ const num = v => (v === null || v === undefined || v === '' ? 0 : Number(v) || 0
 // ───────────────────────── 登录 ─────────────────────────
 
 function Login({ hello, onIn }) {
-  const [step, setStep] = useState('name')        // name / pick / code
-  const [name, setName] = useState('')
-  const [choices, setChoices] = useState([])
-  const [pick, setPick] = useState(null)
+  const [step, setStep] = useState('mobile')
+  const [mobile, setMobile] = useState('')
+  const [person, setPerson] = useState(null)
+  const [looking, setLooking] = useState(false)
   const [ticket, setTicket] = useState('')
   const [to, setTo] = useState('')
   const [code, setCode] = useState('')
@@ -49,12 +49,25 @@ function Login({ hello, onIn }) {
     return () => clearTimeout(t)
   }, [wait])
 
-  const send = async (p) => {
-    if (!name.trim()) { setMsg('写一下你在钉钉上的姓名'); return }
+  useEffect(() => {
+    if (step !== 'mobile' || !/^1[3-9][0-9]{9}$/.test(mobile) || !hello?.dingtalk) return
+    let live = true
+    const timer = setTimeout(async () => {
+      setLooking(true)
+      try {
+        const r = await invSLoginLookup(mobile)
+        if (live) setPerson(r)
+      } catch (e) { if (live) setMsg(errText(e)) }
+      finally { if (live) setLooking(false) }
+    }, 400)
+    return () => { live = false; clearTimeout(timer) }
+  }, [mobile, step, hello?.dingtalk])
+
+  const send = async () => {
+    if (!person?.confirmation || busy || wait > 0) return
     setBusy(true); setMsg('')
     try {
-      const r = await invSLoginSend(name.trim(), p === undefined ? pick : p)
-      if (r.need === 'pick') { setChoices(r.choices || []); setStep('pick'); return }
+      const r = await invSLoginSend(person.confirmation)
       setTicket(r.ticket); setTo(r.to || ''); setDev(r.devCode || ''); setCode(''); setStep('code'); setWait(60)
       setTimeout(() => codeRef.current && codeRef.current.focus(), 50)
     } catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
@@ -73,15 +86,21 @@ function Login({ hello, onIn }) {
     <h2>先确认你是谁</h2>
     {hello?.ddNote && <div className="inv-sf-note">{hello.ddNote}</div>}
     <p className="inv-sf-lead">系统会通过<b>钉钉</b>给你发一条 6 位验证码，能收到就说明是你本人。在钉钉里打开这个网址可以直接登录，不用验证码。</p>
-    {step === 'name' && <form className="inv-sf-row" onSubmit={e => { e.preventDefault(); setPick(null); send(null) }}>
-      <input className="inv-in inv-sf-big" autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="你在钉钉上的姓名" maxLength={20} />
-      <button type="submit" className="btn-pri inv-sf-bigbtn" disabled={busy || !hello?.dingtalk}>{busy ? '发送中…' : '发验证码到钉钉'}</button>
-    </form>}
-    {step === 'pick' && <div className="inv-sf-pick">
-      <div>钉钉里有 {choices.length} 位「{name}」，请选你自己：</div>
-      {choices.map(c => <button type="button" key={c.i} className="btn" disabled={busy}
-        onClick={() => { setPick(c.i); send(c.i) }}>{c.dept || '（部门未知）'}{c.title ? ' · ' + c.title : ''}</button>)}
-      <button type="button" className="inv-sf-link" onClick={() => setStep('name')}>← 改名字</button>
+    {step === 'mobile' && <div>
+      <label>钉钉绑定的手机号
+        <input className="inv-in inv-sf-big" type="tel" inputMode="numeric" autoComplete="tel-national"
+          autoFocus value={mobile} disabled={busy} maxLength={11} placeholder="请输入 11 位手机号"
+          onChange={e => { setMobile(e.target.value.replace(/\D/g, '')); setPerson(null); setLooking(false); setMsg('') }} />
+      </label>
+      <div aria-live="polite">
+        {looking && <p>正在查询姓名…</p>}
+        {person && <p>对应姓名：<b>{person.name}</b>。请确认是本人，再发送验证码。</p>}
+      </div>
+      <button type="button" className="btn-pri inv-sf-bigbtn" onClick={send}
+        disabled={busy || looking || !person || wait > 0 || !hello?.dingtalk}>
+        {busy ? '发送中…' : wait > 0 ? `${wait} 秒后可重发` : '确认姓名，发送钉钉验证码'}
+      </button>
+      <p className="inv-sf-hint">输入手机号只查询姓名，点击按钮才发送验证码。姓名不对请修改手机号。</p>
     </div>}
     {step === 'code' && <form className="inv-sf-codebox" onSubmit={e => { e.preventDefault(); verify() }}>
       <div>验证码已发到 <b>{to}</b> 的钉钉（工作通知），5 分钟内有效。</div>
@@ -93,7 +112,7 @@ function Login({ hello, onIn }) {
       </div>
       <div className="inv-sf-row small">
         <button type="button" className="inv-sf-link" disabled={wait > 0 || busy} onClick={() => send()}>{wait > 0 ? `${wait} 秒后可重发` : '没收到？重发'}</button>
-        <button type="button" className="inv-sf-link" onClick={() => { setStep('name'); setMsg('') }}>← 改名字</button>
+        <button type="button" className="inv-sf-link" disabled={busy} onClick={() => { setStep('mobile'); setPerson(null); setTicket(''); setCode(''); setMsg('') }}>← 改手机号</button>
       </div>
     </form>}
     {!hello?.dingtalk && <div className="inv-sf-err">服务器还没接上钉钉，暂时没法登录，请联系财务。</div>}

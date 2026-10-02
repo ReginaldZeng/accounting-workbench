@@ -19,6 +19,24 @@ FAKE_CONF = {"appkey": "dingFAKEKEY123", "appsecret": "FAKESECRETabc987", "agent
              "mobiles": [], "userids": []}
 
 
+class MobileLookupTests(unittest.TestCase):
+    def test_mobile_resolves_visible_member_without_sending(self):
+        from unittest.mock import patch
+        person = {"userid": "u1", "name": "测试员工", "dept": "采购"}
+        with patch.object(d, "_load_conf", return_value=FAKE_CONF), \
+                patch.object(d, "_oapi", return_value={"errcode": 0, "result": {"userid": "u1"}}) as api, \
+                patch.object(d, "roster", return_value={"ok": True, "rows": [person]}) as roster, \
+                patch.object(d, "send_text", side_effect=AssertionError("不允许发送")):
+            self.assertEqual(d.userinfo_by_mobile("13800000001"), dict(person, ok=True))
+            api.assert_called_once_with(FAKE_CONF, "topapi/v2/user/getbymobile", {"mobile": "13800000001"})
+            roster.return_value = {"ok": True, "rows": []}
+            self.assertFalse(d.userinfo_by_mobile("13800000001")["ok"])
+            api.return_value = {"errcode": 400, "errmsg": "denied"}
+            self.assertFalse(d.userinfo_by_mobile("13800000001")["ok"])
+            api.side_effect = RuntimeError("secret")
+            self.assertNotIn("secret", d.userinfo_by_mobile("13800000001")["msg"])
+
+
 class FakeResp(object):
     def __init__(self, js=None, text="", status=200, headers=None, content=None):
         self._js = js

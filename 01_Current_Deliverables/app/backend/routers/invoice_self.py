@@ -2,12 +2,13 @@
 # Description: 业务同事（付款单/报销单的申请人）自己登记发票后补，不用工作台账号：
 #   /api/inv/s/*（不走工作台登录，app._auth_gate 放行，本文件每个接口自己认人）。
 #   认人两条路：① 在钉钉里打开 → 钉钉免登（dd.config 鉴权后 requestAuthCode）；
-#             ② 电脑浏览器 → 输入钉钉上的姓名 → 系统通过钉钉给本人发 6 位验证码 → 输入即登录（能收到＝本人）。
+#             ② 电脑浏览器 → 输入手机号 → 确认姓名 → 手动通过钉钉给本人发 6 位验证码 → 输入即登录（能收到＝本人）。
 #   登录后：列出「我发起的、允许后补的审批单」→ 选一张 → 填预计到票等 → 进发票后补池（与财务代填同一张单、同一个池子）；
 #   「我的后补单」看到票进度。只能登记自己发起的单子（后端按审批单申请人的钉钉 userid 核）。
 #   验证码/会话只存 sha256（inv_self 表）；发码限流：同一人 60 秒一次、一天 10 次；同一 IP 10 分钟 8 次。
 import hashlib
 import os
+import re
 import secrets
 import threading
 import time
@@ -176,34 +177,42 @@ async def s_login_dd(request: Request):
     return bad if bad else out
 
 
+@router.post("/api/inv/s/login/lookup")
+async def s_login_lookup(request: Request):
+    """只查姓名；确认令牌绑定服务端查到的人，不能由浏览器指定收件人。"""
+    body = await inv.body_json(request)
+    mobile = body.get("mobile")
+    if not isinstance(mobile, str) or not re.fullmatch(r"1[3-9][0-9]{9}", mobile.strip()):
+        return err("请输入 11 位钉钉绑定的手机号", 400)
+    ip = _ip(request)
+    if not _ip_ok("lookup:" + ip):
+        return err("查询太频繁，请 10 分钟后再试", 429)
+
+    def run():
+        p = idt.userinfo_by_mobile(mobile.strip())
+        if not p.get("ok"):
+            return err(p.get("msg") or "未找到对应员工", 400)
+        token = secrets.token_urlsafe(24)
+        S.self_insert(E(), kind="identity", token_hash=_h(token), dt_userid=p["userid"],
+                      dt_name=p["name"], dept=p.get("dept") or "", ip=ip,
+                      created_at=inv.now_s(), expires_at=_at(minutes=15))
+        return {"ok": True, "confirmation": token, "name": p["name"]}
+    return await run_in_threadpool(run)
+
+
 @router.post("/api/inv/s/login/send")
 async def s_login_send(request: Request):
-    """电脑浏览器：输入钉钉上的姓名 → 通过钉钉给本人发 6 位验证码。重名 → 先回候选（部门、岗位）让他选 pick。"""
+    """确认查到的姓名后，手动发送验证码。"""
     body = await inv.body_json(request)
-    name = inv._s(body.get("name"), 40).replace(" ", "")
-    if not name:
-        return err("写一下你在钉钉上的姓名", 400)
-    pick = body.get("pick")
+    confirmation = inv._s(body.get("confirmation"), 100)
     ip = _ip(request)
 
     def run():
-        r = idt.roster()
-        if not r.get("ok"):
-            return None, err("拉不到钉钉通讯录：%s" % (r.get("msg") or "原因不明"), 503)
-        hits = [p for p in (r.get("rows") or []) if (p.get("name") or "").replace(" ", "") == name and p.get("userid")]
-        if not hits:
-            return None, err("钉钉通讯录里没找到「%s」：请写钉钉上的全名" % name, 404)
-        if len(hits) > 1:
-            try:
-                idx = int(pick)
-            except (TypeError, ValueError):
-                idx = -1
-            if not (0 <= idx < len(hits)):
-                return {"ok": True, "need": "pick",
-                        "choices": [{"i": i, "dept": p.get("dept") or "", "title": p.get("title") or ""} for i, p in enumerate(hits)]}, None
-            p = hits[idx]
-        else:
-            p = hits[0]
+        identity = S.self_by_hash(E(), "identity", _h(confirmation)) if confirmation else None
+        if (not identity or identity.get("ip") != ip or identity.get("used")
+                or (identity.get("expires_at") or "") < inv.now_s()):
+            return None, err("请重新输入手机号并确认姓名", 400)
+        p = {"userid": identity["dt_userid"], "name": identity["dt_name"], "dept": identity.get("dept") or ""}
         if not _ip_ok(ip):
             return None, err("发得太频繁了：请 10 分钟后再试", 429)
         e = E()

@@ -1047,7 +1047,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(seen["max_pages"], 8)
 
     def test_23_applicant_self_registers_later(self):
-        """申请人自助登记发票后补（V2.621）：不走工作台登录，钉钉验证码认人（重名先选部门、60 秒不重发、错码计次、一码一用）；
+        """申请人自助登记发票后补（V2.621）：不走工作台登录，钉钉验证码认人（手机号查姓名不发码、确认后发码、60 秒不重发、错码计次、一码一用）；
         只列/只能登记自己发起的单；登记后进同一个后补池（filedVia=self），财务审核时按审批单关联；只能给自己的后补单传资料。人名单号都是编的。"""
         inv, books, sf, S, e = self.inv, self.books, self.sf, self.S, self.e
         self.assertEqual(self.c.get("/api/inv/s/payments").status_code, 401)
@@ -1057,18 +1057,31 @@ class InvoiceBooksApiTests(unittest.TestCase):
             {"userid": "dt-dup1", "name": "重名人", "title": "", "dept": "公司-销售部"},
             {"userid": "dt-dup2", "name": "重名人", "title": "", "dept": "公司-生产部"}]}
         sf._IP_HITS.clear()
-        with patch.object(inv.idt, "roster", MagicMock(return_value=roster)), \
-                patch.object(inv.idt, "send_text", MagicMock(side_effect=AssertionError("不许真发"))):
-            r = self.c.post("/api/inv/s/login/send", json={"name": "查无此人"})
-            self.assertEqual(r.status_code, 404)
-            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "重名人"}))
-            self.assertEqual((r["need"], [c["dept"] for c in r["choices"]]), ("pick", ["公司-销售部", "公司-生产部"]))
-            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "重名人", "pick": 1}))
-            self.assertIn("生产部", r["to"])
-            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "申请人丙"}))
+        person = dict(roster["rows"][0], ok=True)
+        with patch.object(inv.idt, "userinfo_by_mobile", MagicMock(return_value=person)) as lookup, \
+                patch.object(inv, "notify_dt", wraps=inv.notify_dt) as notify:
+            self.assertEqual(self.c.post("/api/inv/s/login/send", json={"name": "申请人丙"}).status_code, 400)
+            for mobile in ("", "123", "1380000000x", 13800000001):
+                self.assertEqual(self.c.post("/api/inv/s/login/lookup", json={"mobile": mobile}).status_code, 400)
+            lookup.assert_not_called()
+            who = self.ok(self.c.post("/api/inv/s/login/lookup", json={"mobile": "13800000001"}))
+            self.assertEqual(who["name"], "申请人丙")
+            self.assertNotIn("userid", who)
+            notify.assert_not_called()  # 查姓名绝不发验证码
+            confirm = {"confirmation": who["confirmation"]}
+            self.assertEqual(self.c.post("/api/inv/s/login/send", json=confirm, headers={"x-real-ip": "other"}).status_code, 400)
+            r = self.ok(self.c.post("/api/inv/s/login/send", json=dict(confirm, userid="dt-other", name="别人")))
+            self.assertEqual(notify.call_args[0][0], ["dt-app"])  # 收件人只认服务端确认令牌
             ticket, code = r["ticket"], r["devCode"]
             self.assertEqual(len(code), 6)
-            self.assertEqual(self.c.post("/api/inv/s/login/send", json={"name": "申请人丙"}).status_code, 429)   # 60 秒内不重发
+            self.assertEqual(self.c.post("/api/inv/s/login/send", json=confirm).status_code, 429)
+            row = S.self_by_hash(e, "identity", sf._h(who["confirmation"]))
+            S.self_update(e, row["id"], expires_at="2000-01-01 00:00:00")
+            self.assertEqual(self.c.post("/api/inv/s/login/send", json=confirm).status_code, 400)
+            with patch.object(inv.idt, "userinfo_by_mobile", return_value={"ok": False, "msg": "未找到对应员工"}):
+                self.assertEqual(self.c.post("/api/inv/s/login/lookup", json={"mobile": "13800000002"}).status_code, 400)
+            sf._IP_HITS["lookup:testclient"] = [__import__("time").time()] * sf.IP_MAX
+            self.assertEqual(self.c.post("/api/inv/s/login/lookup", json={"mobile": "13800000001"}).status_code, 429)
         bad = "%06d" % ((int(code) + 1) % 1000000)
         r = self.c.post("/api/inv/s/login/verify", json={"ticket": ticket, "code": bad})
         self.assertEqual(r.status_code, 400)
@@ -1149,8 +1162,9 @@ class InvoiceBooksApiTests(unittest.TestCase):
         inv, sf, S, e = self.inv, self.sf, self.S, self.e
         roster = {"ok": True, "msg": "", "rows": [{"userid": "dt-lim", "name": "限次人", "title": "", "dept": "公司-行政部"}]}
         sf._IP_HITS.clear()
-        with patch.object(inv.idt, "roster", MagicMock(return_value=roster)):
-            r = self.ok(self.c.post("/api/inv/s/login/send", json={"name": "限次人"}))
+        with patch.object(inv.idt, "userinfo_by_mobile", return_value=dict(roster["rows"][0], ok=True)):
+            who = self.ok(self.c.post("/api/inv/s/login/lookup", json={"mobile": "13800000003"}))
+            r = self.ok(self.c.post("/api/inv/s/login/send", json={"confirmation": who["confirmation"]}))
         bad = "%06d" % ((int(r["devCode"]) + 7) % 1000000)
         for _ in range(sf.CODE_TRIES):
             self.assertEqual(self.c.post("/api/inv/s/login/verify", json={"ticket": r["ticket"], "code": bad}).status_code, 400)

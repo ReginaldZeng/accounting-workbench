@@ -802,7 +802,7 @@ function SelfLinkModal({ onClose }) {
       <img className="inv-lt-self-qr" src={r.qr + '?t=' + Date.now()} alt="自助登记二维码" width={200} height={200} />
       <ul className="inv-muted">
         <li>手机钉钉扫这个码：自动认出是谁，直接登记。</li>
-        <li>电脑浏览器打开网址：写钉钉姓名，钉钉会收到 6 位验证码，输入就能登录。</li>
+        <li>电脑浏览器打开网址：输入钉钉绑定的手机号，确认显示的姓名后点击发送验证码，再输入钉钉收到的 6 位验证码登录。</li>
         <li>只能登记自己发起的单子；登记后系统用钉钉通知所选的财务接收人。</li>
       </ul>
     </div>}

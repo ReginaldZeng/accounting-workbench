@@ -576,7 +576,8 @@ const invSJ = (url, token, body) => j(url, body === undefined ? { headers: invSH
 export const invSHello = (token) => invSJ('/api/inv/s/hello', token)
 export const invSJsConfig = (url) => invSJ('/api/inv/s/jsconfig?url=' + encodeURIComponent(url), '')
 export const invSLoginDd = (code) => invSJ('/api/inv/s/login/dd', '', { code })
-export const invSLoginSend = (name, pick) => invSJ('/api/inv/s/login/send', '', { name, pick })   // 重名 → {need:'pick', choices}
+export const invSLoginLookup = (mobile) => invSJ('/api/inv/s/login/lookup', '', { mobile })
+export const invSLoginSend = (confirmation) => invSJ('/api/inv/s/login/send', '', { confirmation })
 export const invSLoginVerify = (ticket, code) => invSJ('/api/inv/s/login/verify', '', { ticket, code })
 export const invSLogout = (token) => invSJ('/api/inv/s/logout', token, {})
 export const invSPayments = (token, days = 60, fresh = false) => invSJ('/api/inv/s/payments?days=' + days + (fresh ? '&fresh=1' : ''), token)

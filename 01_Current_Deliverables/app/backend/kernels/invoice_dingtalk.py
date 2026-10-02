@@ -835,6 +835,27 @@ def download_photo(url):
 
 # ───────────────────────── 身份 / 通知 / 花名册 ─────────────────────────
 
+def userinfo_by_mobile(mobile):
+    """按手机号定位成员，再从应用可见通讯录取姓名；不发送消息。"""
+    conf = _load_conf() if requests else None
+    if not conf:
+        return {"ok": False, "msg": _NOT_CONF}
+    try:
+        r = _oapi(conf, "topapi/v2/user/getbymobile", {"mobile": mobile})
+        if r.get("errcode") != 0:
+            return {"ok": False, "msg": "手机号查询失败，请核对号码；若号码正确，请联系管理员检查钉钉手机号查询权限"}
+        uid = str((r.get("result") or {}).get("userid") or "")
+        people = roster()
+        if not people.get("ok"):
+            return {"ok": False, "msg": "暂时无法读取钉钉通讯录，请稍后再试"}
+        person = next((p for p in people.get("rows", []) if uid and p.get("userid") == uid), None)
+        if not person or not person.get("name"):
+            return {"ok": False, "msg": "未找到对应员工，请核对钉钉绑定的手机号"}
+        return dict(person, ok=True)
+    except Exception:
+        return {"ok": False, "msg": "钉钉手机号查询暂时不可用，请稍后再试"}
+
+
 def userinfo_by_code(code):
     """H5 免登 authCode → {ok, userid, name, msg}（topapi/v2/user/getuserinfo）。"""
     c = str(code or "").strip()
