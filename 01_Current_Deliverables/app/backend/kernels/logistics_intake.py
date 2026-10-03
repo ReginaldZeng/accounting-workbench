@@ -2,6 +2,7 @@
 # [Change Log]
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
 # V2.761：读老格式 .xls(xlrd)；列名 * 结尾按前缀认；wt_scale 账单重量换千克(链盟接入)
+# V2.765：src_from_sheets 份名取表名(多文件各算一份)；amount_dp 金额小数位(天鹰接入)
 # V2.764：表名 {m} 月份占位；row_re 行过滤；doc_blank 单号「无」当空；collapse 整表并一行(易风达接入)
 # V2.762：doc_re 单号格式过滤(跨越/中通账单底下带透视小计，单号列会读到「总计」)；dedupe_col 跨 sheet 按运单号去重
 # Description: 【物流账单复核】通用解析器——按「取数说明」(intake_spec) 认列，不写死序号（同一家导出月间列会漂移，写死必错）。
@@ -196,7 +197,8 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             "fee": _s(r[c_fee]) if c_fee is not None and c_fee < len(r) else "",
             "qty": _f(r[c_qty]) if c_qty is not None and c_qty < len(r) else None,
             "unit": sp.get("qty_unit", ""),
-            "amount": round(base, 2) if base is not None else None,
+            # amount_dp：金额留几位小数(默认 2)。天鹰逐行是 吨×18.5 的长小数、供应商只在合计处取整，逐行先取整合计会差几分
+            "amount": round(base, int(sp.get("amount_dp", 2))) if base is not None else None,
             "base_amount": round(_f(r[c_amts[0]]) or 0, 2) if c_amts else None,
             "carrier_sub": _s(r[c_cs]) if c_cs is not None and c_cs < len(r) else "",
             "prov": _s(r[c_prov]) if c_prov is not None and c_prov < len(r) else "",
@@ -220,7 +222,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
                 sub2[calc["target"]] = tv
                 sub2["标准"] = std
                 sub2["公式"] = calc.get("label", "")
-                if abs(tv - std) > 0.01:
+                if round(abs(tv - std), 2) > 0.01:      # 先取整再比，免得 0.01 被浮点噪声判成「超 1 分」
                     sub2["核价差"] = round(tv - std, 2)
                 row["sub_fees"] = json.dumps(sub2, ensure_ascii=False)
         if sub:
@@ -262,7 +264,7 @@ def _merge_doc(rows):
         m = out[idx[k]]
         for f in ("amount", "base_amount", "qty", "charge_wt"):
             if r.get(f) is not None:
-                m[f] = round((m.get(f) or 0) + r[f], 3 if f == "charge_wt" else 2)
+                m[f] = round((m.get(f) or 0) + r[f], 6)      # 只去浮点噪声；金额小数位由各行 amount_dp 定
         if r.get("sub_fees"):
             a, b = json.loads(m.get("sub_fees") or "{}"), json.loads(r["sub_fees"])
             for kk, v in b.items():
@@ -455,6 +457,10 @@ def parse_bill(spec, data):
         kept.append(r)
     detail = kept
     owner = bill_owner(wb, spec)
+    if spec.get("src_from_sheets") and not owner:
+        # 一家一月分几个文件、各管一类(天鹰：蜜雪装货/小料卸货/分步调拨…)：份名=取到数的表名(去掉「(2)」这类副本号)，各份互不覆盖(V2.765)
+        names = list(dict.fromkeys(re.sub(r"[\s\(（]+\d*[\)）]*\s*$", "", r.get("src_sheet") or "").strip() for r in detail + accrual))
+        owner = "+".join(n for n in names if n)
     # 货主→产品线(spec.owner_bizline，如 kikiherb→Kiki Herb)：同一套标注下的另一个货主，产品线跟货主走
     biz = next((v for k, v in (spec.get("owner_bizline") or {}).items() if k.lower() in owner.lower()), "")
     for r in detail + accrual:

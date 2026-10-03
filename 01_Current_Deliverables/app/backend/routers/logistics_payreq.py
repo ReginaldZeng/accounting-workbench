@@ -345,7 +345,7 @@ def pull(iid, operator, force_bill=False):
     elif not r.get("period"):
         vals["bill_state"], vals["bill_msg"] = None, "还没认出归哪个月，认领后再导"
     else:
-        vals.update(_import(r, bills[0], shas[bills[0]["fileId"]], operator, force_bill))
+        vals.update(_import(r, bills[0], shas[bills[0]["fileId"]], operator, force_bill, bills=bills))
     msgs.append("账单：" + (vals.get("bill_msg") or ""))
     vals["updated_at"] = _now()
     with db._engine.begin() as c:
@@ -353,10 +353,56 @@ def pull(iid, operator, force_bill=False):
     return {"ok": True, "msg": "；".join(m for m in msgs if m)}
 
 
-def _import(r, bill, sha, operator, force=False):
+def _import_multi(r, bills, operator, force=False):
+    """一张请款单带几个账单文件、每个文件一类(取数说明 multi_file，天鹰：蜜雪装货/小料卸货/分步调拨…)：
+    逐个文件导，各算一份(份名=表名，import_bill 只替换同名那份)。复核台已有同名那份的不覆盖(force 才换)。V2.765"""
+    from routers import logistics_review as LR
+    from kernels import logistics_intake as intake
+    carrier, period = r["carrier"], r["period"]
+    spec = LR._load_spec(carrier) or {}
+    spec["period"] = period
+    done, kept, empty, fail, nrow = [], [], [], [], 0
+    for b in bills:
+        with db._engine.connect() as c:
+            data = c.execute(select(PF.c.data).where((PF.c.inst_id == r["inst_id"]) & (PF.c.file_id == str(b["fileId"])))).scalar()
+        try:
+            pre = intake.parse_bill(spec, data)
+        except Exception:
+            fail.append(b.get("fileName"))
+            continue
+        src = (pre.get("bill_src") or "").strip()
+        if not pre["detail"] and not pre["accrual"]:
+            empty.append(b.get("fileName"))
+            continue
+        with db._engine.connect() as c:
+            has = c.execute(select(BL.c.id).where((BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.bill_src == src)).limit(1)).first()
+        if has and not force:
+            kept.append(src or b.get("fileName"))
+            continue
+        res = LR.import_bill(carrier, period, data, operator, origin="钉钉请款单 %s「%s」" % (r.get("business_id"), b.get("fileName")))
+        if not res.get("ok"):
+            fail.append(b.get("fileName"))
+            continue
+        done.append(src or b.get("fileName"))
+        nrow += res.get("detail", 0) + res.get("accrual", 0)
+    if fail:
+        return {"bill_state": "parsefail", "bill_msg": "账单已到但有 %d 个文件解析失败：%s" % (len(fail), "、".join(str(x) for x in fail))}
+    if not done and not kept:
+        return {"bill_state": "parsefail", "bill_msg": "账单文件里没认出费用明细表（%s）" % "、".join(str(x) for x in empty)}
+    msg = "账单已就绪：%d 份（%s）%s" % (len(done) + len(kept), "、".join(done + kept),
+                                    "，明细 %d 行" % nrow if nrow else "")
+    if kept:
+        msg += "；其中 %s 复核台已有，没覆盖（要以钉钉这份为准请点「用这份替换」）" % "、".join(kept)
+    return {"bill_state": "imported" if done or r.get("bill_state") == "imported" else "exists", "bill_msg": msg}
+
+
+def _import(r, bill, sha, operator, force=False, bills=None):
     carrier, period = r["carrier"], r["period"]
     if not _has_spec(carrier):
         return {"bill_state": "nospec", "bill_msg": "账单已到，%s 还没配取数说明，配好后点「导入账单」" % carrier}
+    from routers import logistics_review as _LR
+    if (_LR._load_spec(carrier) or {}).get("multi_file"):
+        return _import_multi(r, bills or [bill], operator, force)
     with db._engine.connect() as c:
         n = c.execute(select(BL.c.id).where((BL.c.carrier == carrier) & (BL.c.period == period)).limit(1)).first()
         # 同一份账单别的主体的请款单已导过(易风达：孝感 87,168 + 深圳 800 共一份账单)
