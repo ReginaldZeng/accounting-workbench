@@ -748,6 +748,8 @@ def _fee_norm(s):
     s = str(s or "").strip()
     if "研发" in s:
         return "研发外购"        # 计提费用项目"研发外购" ↔ 账单标注"研发费用TOB/TOC"
+    if "搬运" in s or "设备调拨" in s or "设备转移" in s:
+        return "搬运费"          # 设备/托盘调拨不是货物调拨：计提记 5101 搬运费(易风达 8 月记-565 托盘费用，V2.764)，要排在「调拨→入库运费」前面
     if "仓储" in s:
         return "仓储费"
     if "入库" in s:
@@ -805,7 +807,7 @@ def _eff_subject(r):
     return _short_subject(str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
 
 
-_CANON_FEES = {"入库运费", "出库运费", "退货运费", "仓储费", "研发外购"}
+_CANON_FEES = {"入库运费", "出库运费", "退货运费", "仓储费", "研发外购", "搬运费"}
 
 
 def _eff_fee(r):
