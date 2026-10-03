@@ -4,6 +4,7 @@
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
 // V2.773：第一个 tab 从「销售出库」改成「账单复核（已登记）」——某家某月在复核台登记已复核后，逐单运费自动进来(所有单据类型)；
 //   可按承运商/费用类型筛；还没登记复核的承运商在上方提示。分组/勾选按「承运商+单号」(同一张单可能有两家的费用)。
+// V2.786：去掉中间的「账单复核明细（已登记）」页签(用户定)——它的内容在另外两个页签里都看得到(还带待复核的)。只留 销售出库单 / 其他单据。
 // V2.784：「其他单据」页签不再只有手工登记的——账单里的其他出库单/采购入库单/调拨单等也进来(标 账单·已复核/待复核)，销售出库单、退货单不重复。
 // V2.774：最前面加「销售出库单」页签(LogisticsOutstockFreight)＝金蝶本月全部销售出库单 × 运费，剔除内部交易；原页签改名「账单复核明细（已登记）」。
 import React, { useEffect, useState, useCallback, useRef } from 'react'
@@ -20,7 +21,7 @@ const BLANK = { carrier: '货拉拉', doc_no: '', amount: '', subject: '孝感�
 
 export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const period = `${cfg.year}-${String(cfg.period).padStart(2, '0')}`
-  const [tab, setTab] = useState('out')         // out 销售出库单(全量) / sales 账单复核明细(已登记) / other 其他单据(登记制)
+  const [tab, setTab] = useState('out')         // out 销售出库单、退货单(金蝶全量 × 费用) / other 其他单据(账单里的非销售单据 + 手工登记)
   const [data, setData] = useState(null)
   const [f, setF] = useState(BLANK)
   const [busy, setBusy] = useState('')
@@ -29,18 +30,15 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const [page, setPage] = useState(1)
   const [q, setQ] = useState('')
   const [qInput, setQInput] = useState('')
-  const [fc, setFc] = useState('')        // 承运商筛选(账单复核 tab)
-  const [ff, setFf] = useState('')        // 费用类型筛选
   const fileRef = useRef(null)
 
   const load = useCallback(() => {
     if (tab === 'out') return                    // 销售出库单页签自己取数
     setData(null); setSel(new Set())
-    reviewDocFreight(period, tab, q, page, tab === 'sales' ? fc : '', tab === 'sales' ? ff : '').then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0, pages: 1 }))
-  }, [period, tab, q, page, fc, ff])
+    reviewDocFreight(period, tab, q, page).then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0, pages: 1 }))
+  }, [period, tab, q, page])
   useEffect(() => { load() }, [load])
-  useEffect(() => { setPage(1) }, [tab, period, q, fc, ff])
-  useEffect(() => { setFc(''); setFf('') }, [period])
+  useEffect(() => { setPage(1) }, [tab, period, q])
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
 
@@ -129,7 +127,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       <div className="head">
         <div><div className="h-title">单据运费</div>
-          <div className="h-sub">一行一个物料行 · 运费按基本数量摊到物料 · 账单在复核台登记已复核后自动进来 / 没有账单的走登记制</div></div>
+          <div className="h-sub">每张单据的物流费用 · 账单在复核台导入后自动带出（标已复核 / 待复核）· 没有账单的手工登记</div></div>
         <div style={{ flex: 1 }} />
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
       </div>
@@ -137,8 +135,6 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       <div className="tabs">
         <button className={'tab' + (tab === 'out' ? ' on' : '')} onClick={() => setTab('out')}>
           <div className="t">销售出库单</div><div className="s">本月全部销售出库单、退货单（剔除内部交易）· 每张单的运费</div></button>
-        <button className={'tab' + (tab === 'sales' ? ' on' : '')} onClick={() => setTab('sales')}>
-          <div className="t">账单复核明细（已登记）</div><div className="s">已登记复核的账单 · 所有单据类型 · 摊到物料</div></button>
         <button className={'tab' + (tab === 'other' ? ' on' : '')} onClick={() => setTab('other')}>
           <div className="t">其他单据</div><div className="s">其他出库 / 采购入库 / 调拨等 · 账单里的 ＋ 手工登记的</div></button>
       </div>
@@ -146,26 +142,6 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       {msg && <div className="msg">{msg}</div>}
 
       {tab === 'out' && <LogisticsOutstockFreight period={period} />}
-
-      {tab === 'sales' && data && data.facets && (
-        <div className="card" style={{ padding: '10px 14px', fontSize: 13 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ color: '#5E6B78' }}>已登记复核：</span>
-            {data.facets.carriers.length === 0 && <span style={{ color: '#8A96A2' }}>本月还没有承运商登记已复核</span>}
-            <button className={'btn' + (!fc ? ' pri' : '')} onClick={() => setFc('')}>全部</button>
-            {data.facets.carriers.map(x => <button key={x.carrier} className={'btn' + (fc === x.carrier ? ' pri' : '')} title={`${x.by} ${x.at} 登记已复核`}
-              onClick={() => setFc(fc === x.carrier ? '' : x.carrier)}>{x.carrier} <b style={{ fontWeight: 600 }}>{money(x.amount)}</b></button>)}
-            <span style={{ flex: 1 }} />
-            <select value={ff} onChange={e => setFf(e.target.value)} style={{ padding: '5px 8px', border: '1px solid #DCE2E7', borderRadius: 6 }}>
-              <option value="">全部费用类型</option>{data.facets.fees.map(([k, v]) => <option key={k} value={k}>{k}（{money(v)}）</option>)}</select>
-          </div>
-          {data.pending && data.pending.length > 0 && <div style={{ marginTop: 8, color: 'var(--warn)' }}>
-            还没登记复核、暂时没进来的：{data.pending.map(x => `${x.carrier} ${money(x.amount)}`).join('　·　')}
-            <span style={{ color: '#8A96A2' }}>　到「账单核对」第③步登记已复核后自动进来</span></div>}
-          {data.nodoc && data.nodoc.n > 0 && <div style={{ marginTop: 6, color: '#5E6B78' }}>
-            另有 {data.nodoc.n} 笔没有金蝶单号的费用 {money(data.nodoc.amount)}（仓储费、账单调整等），到不了单据，不在下表。</div>}
-        </div>
-      )}
 
       {tab !== 'out' && <div className="stats">
         <div className="stat accent"><div className="v">{data ? data.doc_count : '—'}</div><div className="l">单据张数</div></div>
@@ -214,7 +190,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       {tab !== 'out' && <div className="card">
         <h3 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span>{tab === 'sales' ? '已复核账单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
+          <span>其他单据 · 物料级运费明细
             {data ? `　${data.doc_count} 张单据 · 运费合计 ${money(data.total)} 元` : ''}</span>
           <span style={{ flex: 1 }} />
           <input className="qbox" value={qInput} placeholder="搜单据号…" onChange={e => setQInput(e.target.value)}
@@ -251,9 +227,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
           <tbody>
             {data === null && <tr><td colSpan="16" className="empty">加载中…（接金蝶取物料明细，可能稍慢）</td></tr>}
             {data && !rows.length && <tr><td colSpan="16" className="empty">
-              {tab === 'sales'
-                ? <>本月还没有登记已复核的账单。<br />各家账单在「账单核对·复核台」核完，第③步点「确认通过并登记已复核」后，逐单运费自动在此按物料摊列。</>
-                : <>本月还没有其他单据的运费。账单里的其他出库/采购入库/调拨单会随复核台导入自动出现；没有账单的在上方登记（如货拉拉报销的 FBDR 运费）。</>}
+              本月还没有其他单据的运费。账单里的其他出库/采购入库/调拨单会随复核台导入自动出现；没有账单的在上方登记（如货拉拉报销的 FBDR 运费）。
             </td></tr>}
             {rows.map((r, i) => {
               const first = i === 0 || rows[i - 1].dk !== r.dk
