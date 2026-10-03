@@ -6,6 +6,7 @@
 //   V2.770(用户「看不出是哪里导致的差异」)：发票对不到单张计提，能定位的是账单——每张计提旁边加「账单金额 / 账单−计提」两列，
 //   取第①步逐笔计提复核的结果(同主体×费用类型×产品线的账单金额；几张凭证共用一笔账单的并在一起比)；账单有、计提没有的单列一行。
 //   结论的长文字挪到每张请款单最后一行通栏显示，腾出列宽。
+//   V2.771：共用一笔账单的几张计提排到相邻行，账单两格用合并单元格(不再写「并在…一起比」，排不到一起时才退回文字)。
 import React from 'react'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -112,50 +113,65 @@ export default function LogisticsInvCompare({ data, lines }) {
             <div className="sub"><span className="dim" title={`审批编号 ${b.bid}`}>{b.applicant} · …{String(b.bid || '').slice(-6)}</span></div>
           </td>
           if (b.err || !gs.length) return <tbody key={b.inst}><tr>{head}<td colSpan="10" className={b.err ? 'bad' : 'z'} style={{ textAlign: 'center' }}>{b.err || '没有计提、也没有发票'}</td></tr></tbody>
-          let first = true
+          // 排行：税率组按税率升序；共用同一笔账单的几张计提要挨着，才能把账单两格合并(用户 2026-10-03「一起比的就用合并单元格」)。
+          // 同一笔账单跨两个税率组的(如 6% 一张 + 9% 一张)：前一组里排到最后、后一组里排到最前，正好相邻。
+          const grpOf = a => (a && bm && bm.byVno ? bm.byVno[String(a.vno)] : null)
+          const gIdx = new Map()           // 账单组 → 出现在哪些税率组(序号)
+          gs.forEach((g, gi) => g.accs.forEach(a => { const x = grpOf(a); if (x && x.has) gIdx.set(x, [...(gIdx.get(x) || []), gi]) }))
+          const rows = []
+          gs.forEach((g, gi) => {
+            const rank = a => { const x = grpOf(a); const ix = x && gIdx.get(x); if (!ix) return 1; return Math.min(...ix) < gi ? 0 : Math.max(...ix) > gi ? 2 : 1 }
+            const order = new Map()        // 同一账单组的排在一起：按组第一次出现的位置
+            g.accs.forEach((a, k) => { const x = grpOf(a) || a; if (!order.has(x)) order.set(x, k) })
+            const accs = g.accs.map((a, k) => ({ a, k })).sort((p, q) => rank(p.a) - rank(q.a) || order.get(grpOf(p.a) || p.a) - order.get(grpOf(q.a) || q.a) || p.k - q.k).map(x => x.a)
+            ;(accs.length ? accs : [null]).forEach((a, i) => rows.push({ a, g, gi, i, n: Math.max(1, accs.length), accs }))
+          })
+          // 账单格的合并段：相邻且同一账单组的行并成一段
           const shown = new Set()
+          rows.forEach((r, k) => {
+            const x = grpOf(r.a)
+            const prev = k > 0 ? rows[k - 1] : null
+            r.grp = x && x.has ? x : null
+            r.runStart = !(r.grp && prev && prev.grp === r.grp)
+          })
+          rows.forEach((r, k) => { if (r.runStart) { let n = 1; while (k + n < rows.length && !rows[k + n].runStart) n++; r.run = n } })
           return <tbody key={b.inst}>
-            {gs.map(g => {
-              const n = Math.max(1, g.accs.length)
-              const gAcc = r2(g.accs.reduce((t, a) => t + (a.gross || 0), 0)), gTax = r2(g.accs.reduce((t, a) => t + (a.tax || 0), 0))
-              const invCells = <>
+            {rows.map((r, k) => {
+              const { a, g, i, n } = r
+              const gAcc = r2(r.accs.reduce((t, x) => t + (x.gross || 0), 0)), gTax = r2(r.accs.reduce((t, x) => t + (x.tax || 0), 0))
+              const invCells = i === 0 && <>
                 <td rowSpan={n} className="num gl">{g.n_inv ? money(g.inv) : <span className="z">无票</span>}
                   {n > 1 && <div className="subt">{n} 张计提合计 {money(gAcc)}</div>}</td>
                 <td rowSpan={n} className="num">{noInv ? <span className="z">—</span> : <Diff v={g.inv - gAcc} />}</td>
                 <td rowSpan={n} className="num">{g.n_inv ? money(g.inv_tax) : <span className="z">—</span>}
                   {!noInv && !isZero(g.inv_tax - gTax) && <div className="subt d">比暂估 {g.inv_tax - gTax > 0 ? '+' : ''}{money(g.inv_tax - gTax)}</div>}</td>
               </>
-              const accRows = g.accs.length ? g.accs : [null]
-              return accRows.map((a, i) => {
-                const isFirst = first
-                first = false
-                // 账单对比：这张凭证所在的组(共用一笔账单的几张凭证)，组里第一张出现时写金额，其余写「并在…一起比」
-                const grp = a && bm && bm.byVno ? bm.byVno[String(a.vno)] : null
-                let billCells
-                if (!a) billCells = <><td className="gl hl"></td><td className="hl"></td></>
-                else if (!BM) billCells = <><td className="num gl hl z">…</td><td className="num hl z">…</td></>
-                else if (!grp || !grp.has) billCells = <><td className="num gl hl"><span className="z">账单没有这一类</span></td><td className="num hl"><Diff v={-(a.gross || 0)} /></td></>
-                else if (shown.has(grp)) billCells = <td colSpan="2" className="gl hl z" style={{ textAlign: 'right' }}>↑ 并在 {grp.first} 一起比</td>
+              let billCells = null
+              if (!a) billCells = <><td className="gl hl"></td><td className="hl"></td></>
+              else if (!BM) billCells = <><td className="num gl hl z">…</td><td className="num hl z">…</td></>
+              else if (!r.grp) billCells = <><td className="num gl hl"><span className="z">账单没有这一类</span></td><td className="num hl"><Diff v={-(a.gross || 0)} /></td></>
+              else if (r.runStart) {
+                const grp = r.grp
+                if (shown.has(grp)) billCells = <td colSpan="2" rowSpan={r.run} className="gl hl z" style={{ textAlign: 'right' }}>↑ 并在 {grp.first} 一起比</td>
                 else {
                   shown.add(grp); grp.first = `${a.month}/${a.vno}#`
-                  const others = [...grp.vnos].filter(v => v !== String(a.vno))
                   const gsum = r2((b.accruals || []).filter(x => grp.vnos.has(String(x.vno))).reduce((t, x) => t + (x.gross || 0), 0))
-                  billCells = <><td className="num gl hl">{money(grp.bill)}{others.length > 0 && <div className="subt">对 {[a.vno, ...others].map(v => `${a.month}/${v}#`).join('＋')} 合计 {money(gsum)}</div>}</td>
-                    <td className="num hl"><Diff v={grp.diff} /></td></>
+                  billCells = <><td rowSpan={r.run} className="num gl hl">{money(grp.bill)}{grp.vnos.size > 1 && <div className="subt">{grp.vnos.size} 张计提合计 {money(gsum)}</div>}</td>
+                    <td rowSpan={r.run} className="num hl"><Diff v={grp.diff} /></td></>
                 }
-                return <tr key={g.rate + '-' + i} className={i === 0 ? 'gfirst' : ''}>
-                  {isFirst && head}
-                  {a ? <>
-                    <td><b>{a.fee || '—'}</b>{a.biz && <span className="biz"> · {a.biz}</span>}</td>
-                    <td className="mono nw">{a.month}/{a.vno}#</td>
-                    <td className="nw">{a.moved ? <>{pctOf(a.rate)} <span className="d">→ <b>{pctOf(a.new_rate)}</b></span></> : <b>{pctOf(a.rate)}</b>}</td>
-                    <td className="num">{money(a.gross)}</td>
-                  </> : <td colSpan="4" className="d">这个税率（{pctOf(g.rate)}）只有发票、没有计提</td>}
-                  {billCells}
-                  <td className="num gl">{a ? money(a.tax) : ''}</td>
-                  {i === 0 && invCells}
-                </tr>
-              })
+              }
+              return <tr key={k} className={i === 0 ? 'gfirst' : ''}>
+                {k === 0 && head}
+                {a ? <>
+                  <td><b>{a.fee || '—'}</b>{a.biz && <span className="biz"> · {a.biz}</span>}</td>
+                  <td className="mono nw">{a.month}/{a.vno}#</td>
+                  <td className="nw">{a.moved ? <>{pctOf(a.rate)} <span className="d">→ <b>{pctOf(a.new_rate)}</b></span></> : <b>{pctOf(a.rate)}</b>}</td>
+                  <td className="num">{money(a.gross)}</td>
+                </> : <td colSpan="4" className="d">这个税率（{pctOf(g.rate)}）只有发票、没有计提</td>}
+                {billCells}
+                <td className="num gl">{a ? money(a.tax) : ''}</td>
+                {invCells}
+              </tr>
             })}
             {extra.map((x, k) => <tr key={'x' + k} className="gfirst">
               <td colSpan="4" className="d"><b>{x.fee || '—'}</b>{x.biz && <span> · {x.biz}</span>} <span className="dim">账单有这一类，金蝶没有对应的计提</span></td>
@@ -225,6 +241,7 @@ const CSS = `
 .ivc .ivc-t .subt{font-size:11px;color:#7A8791;font-weight:400;margin-top:2px}
 .ivc .ivc-t .biz{color:#5E6B78}
 .ivc .ivc-t th.hl{background:#E4EFF4;color:#1F5F78}.ivc .ivc-t td.hl{background:#F5FAFC}
+.ivc .ivc-t td[rowspan].hl{border-top:1px solid #DCE2E7;border-bottom:1px solid #DCE2E7}
 .ivc .ivc-t tr.whyrow td{background:#FFFBF2;font-size:12px;line-height:1.6;color:#33414D;border-top:1px dashed #E3D7BC}
 .ivc .ivc-t .subt.d{color:var(--bad,#B23B2E);font-weight:600}
 .ivc .ivc-t tfoot td{background:#F1F4F6;font-weight:700;border-top:1.5px solid #B9C3CB;padding:8px 10px}
