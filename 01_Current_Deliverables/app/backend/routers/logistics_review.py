@@ -1229,6 +1229,37 @@ def _outstock_freight(period):
     return out
 
 
+_ORPH_CACHE = {}    # (period, 单号集合指纹) -> (ts, {单号: (去向 kind, 月份, 往来)})
+
+
+def _orphan_where(period, nos):
+    """账单上写了销售出库单号、但本月销售出库单里没有的 → 去金蝶按单号查它到底在哪(V2.782，用户问「会不会留存，很可能出现在下个月的出库单上」)：
+    别的月份的销售出库单(kind=out，带月份；费用按单号挂，切到那个月会自动出现) / 其他出库单(kind=mis，如迅鸽 XQLCK 开头的媒介领用)
+    / 销售退货单(kind=ret) / 都查不到(kind=none，多半单号填错)。只读，缓存 15 分钟。"""
+    key = (period, hash(tuple(sorted(nos))))
+    hit = _ORPH_CACHE.get(key)
+    if hit and time.time() - hit[0] < _OS_TTL:
+        return hit[1]
+    found = {}
+    try:
+        s, conf = kc.login()
+        for form, kind, party in (("SAL_OUTSTOCK", "out", "FCustomerID.FName"), ("STK_MisDelivery", "mis", "FDeptId.FName"),
+                                  ("SAL_RETURNSTOCK", "ret", "FRetcustId.FName")):
+            left = [n for n in nos if n not in found]
+            for i in range(0, len(left), 200):
+                inl = ",".join("'%s'" % n.replace("'", "") for n in left[i:i + 200])
+                try:
+                    rr = kc._query(s, conf, form, [("FBillNo", "单号"), ("FDate", "日期"), (party, "往来")], "FBillNo in (%s)" % inl)
+                except Exception:
+                    rr = []
+                for r in rr:
+                    found.setdefault(str(r.get("单号")), (kind, str(r.get("日期") or "")[:7], r.get("往来") or ""))
+    except Exception:
+        return {}
+    _ORPH_CACHE[key] = (time.time(), found)
+    return found
+
+
 @router.get("/api/logistics-review/outstock-freight")
 async def review_outstock_freight(request: Request, period: str = "", internal: int = 0, q: str = "", org: str = "", btype: str = "",
                                   carrier: str = "", state: str = "", sort: str = "date", page: int = 1, size: int = 100, fresh: int = 0,
@@ -1278,14 +1309,32 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
     # 账单写了销售出库单号、但本月出库单里没有的(发货在别的月 / 单号填错 / 其实是其他出库单)
     orphan = {"n": 0, "amount": 0.0}
     with db._engine.connect() as c:
-        cur = c.execute(select(BL.c.doc_no, BL.c.amount).where((BL.c.period == period) & (BL.c.grain == "detail") &
-                                                                (BL.c.doc_no != "") & BL.c.doc_no.isnot(None))).all()
-    for doc, amt in cur:
+        cur = c.execute(select(BL.c.doc_no, BL.c.amount, BL.c.carrier).where((BL.c.period == period) & (BL.c.grain == "detail") &
+                                                                             (BL.c.doc_no != "") & BL.c.doc_no.isnot(None))).all()
+    oitems = {}
+    for doc, amt, car in cur:
         nos = [p for p in str(doc).split("+") if p]
         for no in nos:
             if "".join(ch for ch in no if ch.isalpha()) in ("XSCKD", "XQLCK") and no not in docs:
                 orphan["n"] += 1
                 orphan["amount"] += float(amt or 0) / len(nos)
+                it = oitems.setdefault(no, {"no": no, "carrier": car, "amount": 0.0})
+                it["amount"] += float(amt or 0) / len(nos)
+    # 这些单到底在哪：别的月份的出库单 / 其他出库单 / 退货单 / 金蝶查不到
+    where = await run_in_threadpool(_orphan_where, period, list(oitems)) if oitems else {}
+    KIND_CN = {"out": "%s 的销售出库单", "mis": "其他出库单（不是销售出库）", "ret": "销售退货单", "none": "金蝶里查不到这个单号"}
+    ogrp = {}
+    for no, it in oitems.items():
+        w = where.get(no)
+        kind, mon, party = (w[0], w[1], w[2]) if w else ("none", "", "")
+        it.update(kind=kind, month=mon, party=party, amount=round(it["amount"], 2),
+                  where=(KIND_CN["out"] % mon) if kind == "out" else KIND_CN[kind])
+        g = ogrp.setdefault((kind, mon if kind == "out" else ""), {"kind": kind, "month": mon if kind == "out" else "", "n": 0, "amount": 0.0, "label": it["where"]})
+        g["n"] += 1
+        g["amount"] += it["amount"]
+    order = {"out": 0, "ret": 1, "mis": 2, "none": 3}
+    orphan["groups"] = [dict(g, amount=round(g["amount"], 2)) for g in sorted(ogrp.values(), key=lambda g: (order[g["kind"]], g["month"]))]
+    orphan["items"] = sorted(oitems.values(), key=lambda x: (order[x["kind"]], x["month"], -x["amount"]))[:400]
     base = rows                       # 口径内全部(剔内部后)：统计卡片按筛选前后各给一份
     bcnt = {}
     for r in base:
@@ -1364,7 +1413,8 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         r["lines"] = [dict(ln, brand=bp_of(r["customer"], ln.get("code")).get("brand") or "",
                            series=bp_of(r["customer"], ln.get("code")).get("series") or "") for ln in docs[r["no"]]["lines"]]
     return {"ok": True, "period": period, "fetched_at": datetime.fromtimestamp(ts).strftime("%H:%M"), "internal": bool(internal),
-            "n_internal": n_internal, "all": stat(base), "cur": stat(rows), "facets": facets, "bp_err": bp_err, "orphan": {"n": orphan["n"], "amount": round(orphan["amount"], 2)},
+            "n_internal": n_internal, "all": stat(base), "cur": stat(rows), "facets": facets, "bp_err": bp_err,
+            "orphan": {"n": orphan["n"], "amount": round(orphan["amount"], 2), "groups": orphan.get("groups") or [], "items": orphan.get("items") or []},
             "rows": view, "page": page, "pages": pages, "size": size, "sort": col, "dir": "desc" if desc else "asc"}
 
 

@@ -11,6 +11,7 @@
 //   V2.780：V2.779 把最小宽定到 1900 结果用户屏上要左右滑——压到 1720(日期只显示月-日、列间距收窄、固定列各减几像素)，1900 宽的屏不用滑。
 //   V2.779：修收货地址列被挤没(加了费用列后固定宽度超了，地址列是「剩多少给多少」)：每列都给明确宽度，表格最小宽 1900。
 //   V2.781：销售退货单也进这张表(类型标「退货」，销售额/数量为负＝冲减；不算费比；「有/没有运费」只对出库单说)。
+//   V2.782：「另有 N 笔不在下表」的提示改成写明每一类的去向(别的月份的出库单/其他出库单/查不到)，可点开看明细。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
 import { reviewOutstockFreight } from '../api.js'
@@ -23,6 +24,26 @@ const STATES = [['', '全部'], ['has', '有运费'], ['none', '没有运费'], 
 const COLS = [['org', '销售组织'], ['date', '日期'], ['no', '出库单号'], ['brand', '品牌'], ['customer', '客户'], ['stock', '发货仓库'], ['addr', '收货地址'], ['btype', '类型'],
   ['kg', '数量', 1], ['amount', '销售额', 1], ['fee_tr', '运费', 1], ['fee_ld', '装卸费', 1], ['fee_ot', '其他', 1], ['fee', '合计', 1], ['ratio', '费比', 1], ['carrier', '承运商']]
 const zero = v => !v || Math.abs(v) < 0.005
+
+// 账单上写了销售出库单号、但本月出库单里没有的：写明每一类去了哪，可点开看明细。费用按单号留在库里，不会丢——
+// 出库在别的月份的，切到那个月会自动挂在那张出库单上(用户 2026-10-03 问「会不会留存」)。
+function Orphan({ o }) {
+  const [open, setOpen] = useState(false)
+  const gs = o.groups || []
+  return <div className="lof-note">
+    <div>本月账单里另有 <b>{o.n}</b> 笔费用 <b>{money(o.amount)}</b> 写的是销售出库单号，但不在本月的销售出库单里，所以没列在下表。费用按单号一直留着，不会丢：
+      {gs.length > 0 && <button className="lk" onClick={() => setOpen(!open)}>{open ? '收起明细' : '看明细'}</button>}</div>
+    {gs.length > 0 && <ul>{gs.map((g, i) => <li key={i}><b>{g.n}</b> 笔 {money(g.amount)}　是 <b>{g.label}</b>
+      {g.kind === 'out' && <span>——出库日期在 {g.month}，切到 {g.month} 期就能看到，已经挂在那张出库单上</span>}
+      {g.kind === 'mis' && <span>——领用类的出库，不算销售，不会出现在销售出库单上</span>}
+      {g.kind === 'ret' && <span>——在本表的退货单里</span>}
+      {g.kind === 'none' && <span className="warn">——多半是单号填错，要找物流部核对</span>}</li>)}</ul>}
+    {open && <div className="otw"><table className="in"><thead><tr><th>账单上的单号</th><th>承运商</th><th className="num">金额</th><th>去向</th><th>往来 / 领用部门</th></tr></thead>
+      <tbody>{(o.items || []).map(x => <tr key={x.no}><td className="mono">{x.no}</td><td>{x.carrier}</td><td className="num">{money(x.amount)}</td>
+        <td className={x.kind === 'none' ? 'warn' : ''}>{x.where}</td><td>{x.party || '—'}</td></tr>)}</tbody></table>
+      {o.items && o.items.length < o.n && <div className="dim" style={{ marginTop: 4 }}>只列前 {o.items.length} 笔</div>}</div>}
+  </div>
+}
 
 export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQInput, onFresh, busy }) {
   const filtered = !!(f.org || f.btype || f.carrier || f.state || f.q || f.brand || f.stock)
@@ -61,8 +82,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         <button className="btn" disabled={busy} onClick={onFresh} title="重新从金蝶取本月销售出库单（只读）">{busy ? '取数中…' : '刷新金蝶'}</button>
       </div>
       {d && d.bp_err && <div className="lof-note">{d.bp_err}</div>}
-      {d && d.orphan && d.orphan.n > 0 && <div className="lof-note">另有 {d.orphan.n} 笔运费 {money(d.orphan.amount)}：账单上写了销售出库单号，但本月的销售出库单里没有这张单
-        （发货在别的月份、单号填错，或它其实是其他出库单），不在下表。</div>}
+      {d && d.orphan && d.orphan.n > 0 && <Orphan o={d.orphan} />}
 
       <div className="lof-tw"><table>
         <colgroup><col style={{ width: 24 }} /><col style={{ width: 80 }} /><col style={{ width: 54 }} /><col style={{ width: 142 }} /><col style={{ width: '9%' }} /><col style={{ width: '13%' }} />
@@ -163,7 +183,11 @@ const CSS = `
 .lof-bar select,.lof-bar .q{padding:6px 8px;border:1px solid #DCE2E7;border-radius:6px;font-size:13px;background:#fff}
 .lof-bar .q{width:240px}.lof-bar select{max-width:190px}.lof-bar .ck{display:inline-flex;flex-direction:row;gap:4px;align-items:center;font-size:13px;white-space:nowrap}.lof-bar .ck input{margin:0;width:auto}
 .lof .btn{border:1px solid #DCE2E7;background:#fff;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer}.lof .btn:disabled{opacity:.5;cursor:default}
-.lof-note{background:#FFFBF2;border:1px solid #EADFC6;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;color:#6B5320}
+.lof-note{background:#FFFBF2;border:1px solid #EADFC6;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;color:#6B5320;line-height:1.7}
+.lof-note ul{margin:4px 0 0;padding-left:20px}.lof-note .lk{margin-left:8px;border:0;background:none;color:#1F6E8C;cursor:pointer;font-size:12.5px;text-decoration:underline;padding:0}
+.lof-note .otw{margin-top:8px;max-height:320px;overflow:auto;background:#fff;border:1px solid #EADFC6;border-radius:6px}
+.lof-note table.in{width:100%;border-collapse:collapse;color:#1B2733}.lof-note table.in th{background:#F7F1E3;text-align:left;padding:5px 9px;font-size:12px;position:sticky;top:0}
+.lof-note table.in td{padding:4px 9px;border-top:1px solid #F1EAD8}
 .lof-tw{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:auto}
 .lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1720px}
 .lof-tw th{background:#F1F4F6;color:#4A5763;font-weight:600;font-size:12px;text-align:left;padding:7px 6px;border-bottom:1px solid #DCE2E7;position:sticky;top:0}
