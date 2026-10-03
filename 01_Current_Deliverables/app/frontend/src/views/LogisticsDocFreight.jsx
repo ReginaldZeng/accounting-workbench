@@ -4,6 +4,7 @@
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
 // V2.773：第一个 tab 从「销售出库」改成「账单复核（已登记）」——某家某月在复核台登记已复核后，逐单运费自动进来(所有单据类型)；
 //   可按承运商/费用类型筛；还没登记复核的承运商在上方提示。分组/勾选按「承运商+单号」(同一张单可能有两家的费用)。
+// V2.784：「其他单据」页签不再只有手工登记的——账单里的其他出库单/采购入库单/调拨单等也进来(标 账单·已复核/待复核)，销售出库单、退货单不重复。
 // V2.774：最前面加「销售出库单」页签(LogisticsOutstockFreight)＝金蝶本月全部销售出库单 × 运费，剔除内部交易；原页签改名「账单复核明细（已登记）」。
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocFreight, reviewRegisterImport, reviewRegisterTemplateUrl } from '../api.js'
@@ -139,7 +140,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
         <button className={'tab' + (tab === 'sales' ? ' on' : '')} onClick={() => setTab('sales')}>
           <div className="t">账单复核明细（已登记）</div><div className="s">已登记复核的账单 · 所有单据类型 · 摊到物料</div></button>
         <button className={'tab' + (tab === 'other' ? ' on' : '')} onClick={() => setTab('other')}>
-          <div className="t">其他单据（登记制）</div><div className="s">议价/报销/调拨 · 只登记＋轻核单号真实</div></button>
+          <div className="t">其他单据</div><div className="s">其他出库 / 采购入库 / 调拨等 · 账单里的 ＋ 手工登记的</div></button>
       </div>
 
       {msg && <div className="msg">{msg}</div>}
@@ -171,6 +172,17 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
         <div className="stat accent"><div className="v">{data ? data.count : '—'}</div><div className="l">物料明细行</div></div>
         <div className="stat ok"><div className="v">{data ? money(data.total) : '—'}</div><div className="l">运费合计（元·含税）</div></div>
       </div>}
+
+      {tab === 'other' && data && data.other_stat && (
+        <div className="card" style={{ padding: '10px 14px', fontSize: 13, color: '#33414D' }}>
+          本页是销售出库单、退货单以外的单据（其他出库单、采购入库单、调拨单等）上的运费：
+          账单里的 <b>{data.other_stat.bill_ok.n + data.other_stat.bill_pending.n}</b> 张
+          （已复核 {data.other_stat.bill_ok.n} 张 {money(data.other_stat.bill_ok.amount)}
+          {data.other_stat.bill_pending.n > 0 && <span style={{ color: 'var(--warn)' }}> · 待复核 {data.other_stat.bill_pending.n} 张 {money(data.other_stat.bill_pending.amount)}</span>}）
+          ＋ 手工登记的 <b>{data.other_stat.reg.n}</b> 张 {money(data.other_stat.reg.amount)}。
+          <span style={{ color: '#8A96A2' }}>账单里的随复核台导入自动出现；没有账单的（货拉拉报销等）在下面登记。</span>
+        </div>
+      )}
 
       {tab === 'other' && (
         <div className="card">
@@ -231,7 +243,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
               <input type="checkbox" checked={docNos.length > 0 && sel.size === docNos.length}
                 ref={el => { if (el) el.indeterminate = sel.size > 0 && sel.size < docNos.length }}
                 onChange={toggleAll} title="全选/全不选" /></th>
-            <th>费用主体</th><th>承运商</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>客户/需求部门</th>
+            <th>费用主体</th><th>承运商</th><th>费用类型</th><th>业务线</th><th>单据号</th><th>{tab === 'other' ? '领用部门/供应商/调拨仓' : '客户/需求部门'}</th>
             <th>物料编码</th><th>物料名称</th><th className="num">基本单位数量</th><th>基本单位</th>
             <th className="num">运费</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th>
             {tab === 'other' && <th></th>}
@@ -241,7 +253,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
             {data && !rows.length && <tr><td colSpan="16" className="empty">
               {tab === 'sales'
                 ? <>本月还没有登记已复核的账单。<br />各家账单在「账单核对·复核台」核完，第③步点「确认通过并登记已复核」后，逐单运费自动在此按物料摊列。</>
-                : <>本月还没有登记的其他单据运费。上方登记一笔（如货拉拉报销的 FBDR 运费），接金蝶取物料明细后在此按物料摊列。</>}
+                : <>本月还没有其他单据的运费。账单里的其他出库/采购入库/调拨单会随复核台导入自动出现；没有账单的在上方登记（如货拉拉报销的 FBDR 运费）。</>}
             </td></tr>}
             {rows.map((r, i) => {
               const first = i === 0 || rows[i - 1].dk !== r.dk
@@ -263,10 +275,12 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
                     <td rowSpan={span}>{r.bizline || <span className="note">—</span>}</td>
                     <td rowSpan={span} className="docno">
                       <span className="dn">{r.doc_no}</span>
+                      {tab === 'other' && <span className="dnsub" style={{ color: r.src === '账单' ? (r.signed ? 'var(--ok)' : 'var(--warn)') : '#8A96A2' }}>
+                        {r.src === '账单' ? (r.signed ? '账单 · 已复核' : '账单 · 待复核') : '手工登记'}</span>}
                       {multi && <span className="dnsub">共 {span} 个物料 · 整单 {money(docFee)}</span>}
                     </td>
                   </>}
-                  {tab === 'other'
+                  {tab === 'other' && r.src !== '账单'
                     ? (first && <td rowSpan={span}>{r.party || <span className="note">—</span>}</td>)
                     : <td>{r.party || <span className="note">—</span>}</td>}
                   <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="note">—</span>}</td>

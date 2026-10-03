@@ -964,16 +964,56 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
         else:
             src = [dict(r) for r in c.execute(select(BL).where(
                 (BL.c.period == period) & (BL.c.review_mode == "register")).order_by(BL.c.id.desc())).mappings().all()]
+            for r in src:
+                r["_src"], r["_signed"] = "登记", True
+            # V2.784(用户「其它出库单不是应该出现在其它单据类那里吗」)：账单里的非销售出库单据也进这个页签——
+            #   其他出库单(QTCK、以及 XQLCK 开头其实是其他出库的)、采购入库(CGRK)、调拨(FBDR/FBDC)、退料等。销售出库单、退货单在第一个页签，不重复。
+            signed_o = {r[0] for r in c.execute(select(SG.c.carrier).where((SG.c.period == period) & (SG.c.status == "signed"))).all()}
+            aud = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.period == period) & (BL.c.grain == "detail") & (BL.c.review_mode == "audit") &
+                (BL.c.doc_no != "") & (BL.c.doc_no != "无单据") & BL.c.doc_no.isnot(None))).mappings().all()]
+            for r in aud:
+                r["_src"], r["_signed"] = "账单", r.get("carrier") in signed_o
+                r["_fee_type"] = _eff_fee(r)
+                r["subject"] = _eff_subject(r)
+                r["_biz"] = _bill_biz(r)
+            src = src + aud
+    # 其他单据页签：哪些单号算「销售出库/退货」(不进本页签)——本月出库单里有的；或单号像销售出库(XSCKD/XQLCK/RK)、金蝶里查到是别的月份的销售出库/退货
+    sales_nos, where_o = set(), {}
+    if mode != "sales":
+        try:
+            docs_m, _ts = _month_outstock(period)
+        except Exception:
+            docs_m = {}
+        cand = set()
+        for r in src:
+            if r.get("_src") != "账单":
+                continue
+            for no in [p for p in (r.get("doc_no") or "").split("+") if p]:
+                if no in docs_m:
+                    sales_nos.add(no)
+                elif "".join(ch for ch in no if ch.isalpha()) in ("XSCKD", "XQLCK", "RK"):
+                    cand.add(no)
+        where_o = _orphan_where(period, sorted(cand)) if cand else {}
+        for no in cand:
+            w = where_o.get(no)
+            if w and w[0] in ("out", "ret"):
+                sales_nos.add(no)
+            elif not w and not docs_m:
+                sales_nos.add(no)        # 金蝶取不到出库单时退回按单号前缀判，宁可少列也不把销售出库单混进来
     # 按单据汇总运费（一单号多行=累加）。账单复核页同一张单可能有两家的费用(链盟运费 + 天鹰装货费)，按「承运商+单号」分开
     docfee = {}
     for r in src:
         for no in [p for p in (r.get("doc_no") or "").split("+") if p] or ["（无单号）"]:
-            key = ((r.get("carrier") or "") + "|" + no) if mode == "sales" else no
-            g = docfee.setdefault(key, {"运费": 0.0, "no": no, "subject": r.get("subject"), "annot": r.get("annot"),
+            if mode != "sales" and r.get("_src") == "账单" and no in sales_nos:
+                continue                  # 销售出库/退货单在第一个页签
+            key = ((r.get("carrier") or "") + "|" + no) if (mode == "sales" or r.get("_src") == "账单") else no
+            g = docfee.setdefault(key, {"src": r.get("_src") or "", "signed": bool(r.get("_signed")),
+                                        "运费": 0.0, "no": no, "subject": r.get("subject"), "annot": r.get("annot"),
                                         "fee_item": r.get("fee_item"), "carrier": r.get("carrier"),
                                         "fee_type": r.get("_fee_type") or "", "biz": r.get("_biz"),
                                         "dept": (r.get("note") or ""), "qty_state": r.get("qty_state"),
-                                        "reg_id": r.get("id") if mode != "sales" else None})
+                                        "reg_id": r.get("id") if (mode != "sales" and r.get("_src") != "账单") else None})   # 只有手工登记的能删
             n = len([p for p in (r.get("doc_no") or "").split("+") if p]) or 1
             g["运费"] += (r.get("amount") or 0) / n
     # 全量口径：总运费/单据数在取金蝶物料前算好（销售出库单可达数千张，不能每次翻页全量拉金蝶）
@@ -1009,7 +1049,7 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
         lines = mats.get(no) or []
         kgsum = sum(float(m["基本数量"] or 0) for m in lines if m.get("基本数量") not in (None, ""))
         if not lines:
-            rows.append({"key": dkey, "fee_type": g.get("fee_type") or "",
+            rows.append({"key": dkey, "fee_type": g.get("fee_type") or "", "src": g.get("src") or "", "signed": g.get("signed"),
                          "subject": g["subject"], "carrier": g["carrier"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
                          "party": g["dept"] if mode == "other" else "", "code": "", "name": "（金蝶无此单据物料）",
                          "baseqty": None, "baseunit": "", "fee": fee, "unitfee": None, "sales": None, "ratio": None,
@@ -1029,9 +1069,9 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
             except (TypeError, ValueError):
                 sales_amt = None
             rows.append({
-                "key": dkey, "fee_type": g.get("fee_type") or "",
+                "key": dkey, "fee_type": g.get("fee_type") or "", "src": g.get("src") or "", "signed": g.get("signed"),
                 "subject": g["subject"], "carrier": g["carrier"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
-                "party": (m.get("往来") or "") if mode == "sales" else (g["dept"] or ""),
+                "party": (m.get("往来") or "") if (mode == "sales" or g.get("src") == "账单") else (g["dept"] or ""),
                 "code": m.get("编码"), "name": m.get("名称"), "baseqty": bq, "baseunit": m.get("基本单位"),
                 "fee": fline, "unitfee": round(fline / bq, 4) if bq else None,
                 "sales": round(sales_amt, 2) if sales_amt is not None else None,
@@ -1041,7 +1081,15 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
     if q:
         rows = [r for r in rows if q in (r["doc_no"] or "") or q in (r.get("name") or "") or q in (r.get("code") or "")]
     pages = max(1, (doc_total + size - 1) // size)
-    return {"ok": True, "period": period, "mode": mode, "count": len(rows), "total": all_total,
+    ostat = None
+    if mode != "sales":
+        def _s(pred):
+            gs = [g for g in docfee.values() if pred(g)]
+            return {"n": len(gs), "amount": round(sum(g["运费"] for g in gs), 2)}
+        ostat = {"bill_ok": _s(lambda g: g.get("src") == "账单" and g.get("signed")),
+                 "bill_pending": _s(lambda g: g.get("src") == "账单" and not g.get("signed")),
+                 "reg": _s(lambda g: g.get("src") != "账单")}
+    return {"ok": True, "period": period, "mode": mode, "count": len(rows), "total": all_total, "other_stat": ostat,
             "doc_count": doc_total, "rows": rows, "page": page, "pages": pages, "size": size,
             "facets": facets, "pending": pending, "nodoc": {"n": nodoc["n"], "amount": round(nodoc["amt"], 2)}}
 
