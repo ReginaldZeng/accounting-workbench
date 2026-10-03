@@ -2,6 +2,7 @@
 # [Change Log]
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
 # V2.761：读老格式 .xls(xlrd)；列名 * 结尾按前缀认；wt_scale 账单重量换千克(链盟接入)
+# V2.764：表名 {m} 月份占位；row_re 行过滤；doc_blank 单号「无」当空；collapse 整表并一行(易风达接入)
 # V2.762：doc_re 单号格式过滤(跨越/中通账单底下带透视小计，单号列会读到「总计」)；dedupe_col 跨 sheet 按运单号去重
 # Description: 【物流账单复核】通用解析器——按「取数说明」(intake_spec) 认列，不写死序号（同一家导出月间列会漂移，写死必错）。
 #   一张 sheet 按 spec 的角色解析：detail=对账逐单(带单号)、accrual=计提口径(月结按费用项)、ignore=价目表跳过。
@@ -147,6 +148,10 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
     parts = {nm: [c for c in (find_col(hdr, x) for x in cols) if c is not None] for nm, cols in (sp.get("fee_parts") or {}).items()}
     c_box = find_col(hdr, sp["box_col"]) if sp.get("box_col") else None
     c_dk = find_col(hdr, sp["dedupe_col"]) if sp.get("dedupe_col") else None   # 跨 sheet 去重键(运单号)
+    # row_re={"col": 列名, "re": 正则}：只收该列对得上的行(易风达运输页只收「序号」是数字的行，表底合计/开票信息/透视小计都不收，V2.764)
+    rre = sp.get("row_re")
+    c_rre = find_col(hdr, rre["col"]) if rre else None
+    blank_docs = set(sp.get("doc_blank") or [])        # 单号列写「无」这类字的当没单号(走 doc_default)
     marker = sp.get("summary_marker")
     out = []
     for ri, r in enumerate(rows[hr + 1:], start=hr + 2):
@@ -156,7 +161,11 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             continue                      # 合计/汇总行：默认只看首格；summary_cols=2 连第二格也看(链盟「汇总」在 B 列)
         if c_rtype is not None and _s(r[c_rtype] if c_rtype < len(r) else "") not in sp["row_type"]["in"]:
             continue                      # 只取指定类型的行(合计行、别的类型跳过)
+        if rre and (c_rre is None or c_rre >= len(r) or not re.match(rre["re"], _s(r[c_rre]))):
+            continue
         doc = _s(r[c_doc]) if c_doc is not None and c_doc < len(r) else _s(sp.get("doc", ""))
+        if doc in blank_docs:
+            doc = ""
         if doc and sp.get("doc_re") and doc != _s(sp.get("doc_default", "")) and not re.match(sp["doc_re"], doc):
             continue                      # 单号列里不像单号的(账单底下的透视小计「总计」「孝感市…公司」)不收(V2.762)
         if c_doc is not None and not doc and sp.get("doc_ffill") and last_doc:
@@ -217,7 +226,26 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
         if sub:
             row["sub_fees"] = json.dumps({**sub, **(json.loads(row["sub_fees"]) if row.get("sub_fees") else {})}, ensure_ascii=False)
         out.append(row)
+    if sp.get("collapse") and out:
+        out = [_collapse(out)]
     return _merge_doc(out) if sp.get("merge_doc") else out
+
+
+def _collapse(rows):
+    """整张表并成一行(金额/数量/分项相加)：易风达仓储费一天一行，计提只有一笔，逐日没有单据可核(V2.764)。"""
+    m = dict(rows[0])
+    for f in ("amount", "base_amount", "qty"):
+        vs = [r[f] for r in rows if r.get(f) is not None]
+        m[f] = round(sum(vs), 2) if vs else None
+    sub = {}
+    for r in rows:
+        for k, v in (json.loads(r["sub_fees"]) if r.get("sub_fees") else {}).items():
+            if isinstance(v, (int, float)):
+                sub[k] = round(sub.get(k, 0) + v, 2)
+    if sub:
+        m["sub_fees"] = json.dumps(sub, ensure_ascii=False)
+    m["charge_wt"] = None
+    return m
 
 
 def _merge_doc(rows):
@@ -378,10 +406,12 @@ def parse_bill(spec, data):
     detail, accrual, skipped = [], [], []
     boxp = box_prices_from(wb, spec) if any(c.get("box_col") for c in spec.get("sheets", [])) else {}
     per_row = []     # (sheet spec, 该表 detail 行)：per_row_fees 要等汇总页单价
+    # 表名里的 {m} 换成账期月份(易风达一本表留着历月的页：只认「{m}月运输」「{m}月仓储费」，V2.764)
+    mon = str(int(period[5:7])) if len(period) >= 7 and period[5:7].isdigit() else ""
     for ws in wb.worksheets:
         sp = None
         for cand in spec.get("sheets", []):
-            if match_sheet(cand["name"], ws.title):
+            if match_sheet(cand["name"].replace("{m}", mon) if mon else cand["name"], ws.title):
                 sp = cand
                 break
         if sp is None or sp.get("role") == "ignore":
