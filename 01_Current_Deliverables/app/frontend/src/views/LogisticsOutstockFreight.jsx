@@ -6,6 +6,8 @@
 //   V2.775：加 品牌(照 BP 工作台的客户物料映射表，按 客户名+物料编码 对) / 发货仓库 / 收货地址·联系人(金蝶出库单)，品牌、仓库可筛。
 //   V2.776：列顺序按用户定＝销售组织 / 日期 / 出库单号 / 品牌 / 客户 / 发货仓库 / 收货地址 …；「含内部交易」勾选框不再上下折行。
 //   V2.777：点表头排序(每一列都能排，再点一次反向；数字列先从大到小；空值永远排最后)，原来的排序下拉去掉。
+//   V2.778：费用拆三列＝运费 / 装卸费 / 其他(仓储·操作·包材)＋合计；「没有运费」按运费列判(只有装卸费的也算没运费)，筛选可单挑「只有装卸费」。
+//     合计标橙色＝其中有待复核的(原「其中待复核」一列并进来，鼠标放上去看金额)。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
 import { reviewOutstockFreight } from '../api.js'
@@ -13,10 +15,11 @@ import { reviewOutstockFreight } from '../api.js'
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pctfmt = n => (n == null ? '—' : (Number(n) * 100).toFixed(2) + '%')
 const qty = n => Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
-const STATES = [['', '全部'], ['has', '有运费'], ['none', '没有运费'], ['pending', '有待复核的运费'], ['ok', '运费都已复核']]
+const STATES = [['', '全部'], ['has', '有运费'], ['none', '没有运费'], ['ldonly', '只有装卸费、没有运费'], ['nofee', '什么费用都没有'], ['pending', '有待复核的费用'], ['ok', '费用都已复核']]
 // 表头：[排序键, 列名, 是否数字列]。点表头排序，再点一次反过来；数字列第一次点是从大到小
 const COLS = [['org', '销售组织'], ['date', '日期'], ['no', '出库单号'], ['brand', '品牌'], ['customer', '客户'], ['stock', '发货仓库'], ['addr', '收货地址'], ['btype', '类型'],
-  ['kg', '数量', 1], ['amount', '销售额', 1], ['fee', '运费', 1], ['fee_pending', '其中待复核', 1], ['ratio', '费比', 1], ['carrier', '承运商']]
+  ['kg', '数量', 1], ['amount', '销售额', 1], ['fee_tr', '运费', 1], ['fee_ld', '装卸费', 1], ['fee_ot', '其他', 1], ['fee', '合计', 1], ['ratio', '费比', 1], ['carrier', '承运商']]
+const zero = v => !v || Math.abs(v) < 0.005
 
 export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQInput, onFresh, busy }) {
   const filtered = !!(f.org || f.btype || f.carrier || f.state || f.q || f.brand || f.stock)
@@ -30,10 +33,11 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         <div className="st"><div className="v">{S ? S.n : '—'}</div><div className="l">销售出库单（张）{filtered && <span className="tag">当前筛选</span>}
           {d && <div className="s">{d.internal ? `含内部交易 ${d.n_internal} 张` : `已剔除内部交易 ${d.n_internal} 张`}</div>}</div></div>
         <div className="st"><div className="v">{S ? S.n_has : '—'}<small> / {S ? S.n_none : '—'}</small></div><div className="l">有运费 / 没有运费（张）
-          {S && S.n_none > 0 && <div className="s">没运费的销售额 {money(S.amount_none)}</div>}</div></div>
-        <div className="st ok"><div className="v">{S ? money(S.fee) : '—'}</div><div className="l">运费合计（含税）
+          {S && S.n_none > 0 && <div className="s">没运费的：只有装卸费 {S.n_ldonly} 张 · 什么费用都没有 {S.n_nofee} 张 · 销售额 {money(S.amount_none)}</div>}</div></div>
+        <div className="st ok"><div className="v">{S ? money(S.fee) : '—'}</div><div className="l">物流费用合计（含税）
+          {S && <div className="s">运费 {money(S.fee_tr)} · 装卸费 {money(S.fee_ld)}{S.fee_ot ? ` · 其他 ${money(S.fee_ot)}` : ''}</div>}
           {S && <div className="s">已复核 {money(S.fee_ok)}{S.fee_pending ? <span className="warn"> · 待复核 {money(S.fee_pending)}</span> : ''}</div>}</div></div>
-        <div className="st"><div className="v">{S ? pctfmt(S.ratio) : '—'}</div><div className="l">费比（运费 ÷ 销售额）
+        <div className="st"><div className="v">{S ? pctfmt(S.ratio) : '—'}</div><div className="l">费比（费用合计 ÷ 销售额）
           {S && <div className="s">销售额 {money(S.amount)}（价税合计）</div>}</div></div>
       </div>
 
@@ -59,7 +63,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
       <div className="lof-tw"><table>
         <colgroup><col style={{ width: 28 }} /><col style={{ width: 88 }} /><col style={{ width: 92 }} /><col style={{ width: 150 }} /><col style={{ width: '10%' }} /><col style={{ width: '14%' }} />
           <col style={{ width: 112 }} /><col /><col style={{ width: 62 }} />
-          <col style={{ width: 118 }} /><col style={{ width: 108 }} /><col style={{ width: 96 }} /><col style={{ width: 92 }} /><col style={{ width: 70 }} /><col style={{ width: '11%' }} /></colgroup>
+          <col style={{ width: 112 }} /><col style={{ width: 106 }} /><col style={{ width: 94 }} /><col style={{ width: 86 }} /><col style={{ width: 80 }} /><col style={{ width: 94 }} /><col style={{ width: 70 }} /><col style={{ width: '10%' }} /></colgroup>
         <thead><tr><th></th>{COLS.map(([k, name, num]) => {
           const on = f.sort === k
           const next = on ? (f.dir === 'desc' ? 'asc' : 'desc') : (num ? 'desc' : 'asc')
@@ -67,13 +71,13 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
             onClick={() => setF({ ...f, sort: k, dir: next, page: 1 })}>{name}<span className="ar">{on ? (f.dir === 'desc' ? '▼' : '▲') : '↕'}</span></th>
         })}</tr></thead>
         <tbody>
-          {d === null && <tr><td colSpan="15" className="empty">从金蝶取本月全部销售出库单…</td></tr>}
-          {d && d.rows.length === 0 && <tr><td colSpan="15" className="empty">没有符合条件的出库单</td></tr>}
+          {d === null && <tr><td colSpan="16" className="empty">从金蝶取本月全部销售出库单…</td></tr>}
+          {d && d.rows.length === 0 && <tr><td colSpan="16" className="empty">没有符合条件的出库单</td></tr>}
           {d && d.rows.map(r => {
             const isOpen = open.has(r.no)
             const base = r.lines.reduce((s, x) => s + (x.baseqty || 0), 0)
             return <React.Fragment key={r.no}>
-              <tr className={(r.fee ? '' : 'nofee') + (r.internal ? ' inner' : '')} onClick={() => toggle(r.no)}>
+              <tr className={(zero(r.fee_tr) ? 'nofee' : '') + (r.internal ? ' inner' : '')} onClick={() => toggle(r.no)}>
                 <td className="tg">{isOpen ? '▾' : '▸'}</td>
                 <td>{r.org}</td><td>{r.date}</td><td className="mono">{r.no}</td>
                 <td className="ell" title={[r.brand, r.bu].filter(Boolean).join(' · ')}>{r.brand || <span className="z">{r.internal ? '—' : '未映射'}</span>}</td>
@@ -83,16 +87,18 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
                 <td className="ell" title={r.btype}>{String(r.btype || '').replace('线上销售出库单', '').replace('销售出库单', '')}</td>
                 <td className="num ell" title={r.qty_txt}>{r.qty_txt || '—'}</td>
                 <td className="num">{money(r.amount)}</td>
-                <td className="num">{r.fee ? <b>{money(r.fee)}</b> : <span className="z">没有运费</span>}</td>
-                <td className="num">{r.fee_pending ? <span className="warn">{money(r.fee_pending)}</span> : <span className="z">—</span>}</td>
+                <td className="num">{zero(r.fee_tr) ? <span className="warn">没有运费</span> : money(r.fee_tr)}</td>
+                <td className="num">{zero(r.fee_ld) ? <span className="z">—</span> : money(r.fee_ld)}</td>
+                <td className="num">{zero(r.fee_ot) ? <span className="z">—</span> : money(r.fee_ot)}</td>
+                <td className="num" title={r.fee_pending ? `其中待复核 ${money(r.fee_pending)}` : '都已复核'}>{zero(r.fee) ? <span className="z">—</span> : <b className={r.fee_pending ? 'warn' : ''}>{money(r.fee)}</b>}</td>
                 <td className="num">{pctfmt(r.ratio)}</td>
                 <td className="ell" title={r.carriers.map(x => `${x.carrier} ${money(x.amount)}（${x.period}${x.signed ? '' : '·待复核'}）`).join('\n')}>
-                  {r.carriers.length ? r.carriers.map((x, i) => <span key={i} className={x.signed ? '' : 'warn'}>{i > 0 && '、'}{x.carrier}{r.carriers.length > 1 && <small> {money(x.amount)}</small>}</span>) : <span className="z">—</span>}</td>
+                  {r.carriers.length ? r.carriers.map((x, i) => <span key={i}>{i > 0 && '、'}{x.carrier}</span>) : <span className="z">—</span>}</td>
               </tr>
-              {isOpen && <tr className="sub"><td></td><td colSpan="14">
+              {isOpen && <tr className="sub"><td></td><td colSpan="15">
                 <div className="src" style={{ marginTop: 0, marginBottom: 6 }}>
                   {r.bu && <span>事业单元：{r.bu}　·　</span>}收货：{[r.linkman, r.addr].filter(Boolean).join(' ') || '—'}　·　单据类型：{r.btype}</div>
-                <table className="in"><thead><tr><th>物料编码</th><th>物料名称</th><th>品牌</th><th>产品系列</th><th>发货仓库</th><th className="num">基本单位数量</th><th>单位</th><th className="num">销售额</th><th className="num">摊得运费</th><th className="num">单位运费</th></tr></thead>
+                <table className="in"><thead><tr><th>物料编码</th><th>物料名称</th><th>品牌</th><th>产品系列</th><th>发货仓库</th><th className="num">基本单位数量</th><th>单位</th><th className="num">销售额</th><th className="num">摊得费用</th><th className="num">单位费用</th></tr></thead>
                   <tbody>{r.lines.map((x, i) => {
                     const share = base ? (x.baseqty || 0) / base : 1 / r.lines.length
                     const fl = r.fee * share
@@ -100,7 +106,8 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
                       <td className="num">{money(x.amount)}</td><td className="num">{r.fee ? money(fl) : '—'}</td>
                       <td className="num">{r.fee && x.baseqty ? (fl / x.baseqty).toFixed(4) : '—'}</td></tr>
                   })}</tbody></table>
-                {r.carriers.length > 0 && <div className="src">运费来源：{r.carriers.map((x, i) => <span key={i}>{i > 0 && '　·　'}{x.carrier} {money(x.amount)}（{x.period} 账单，{x.signed ? '已复核' : <span className="warn">待复核</span>}）</span>)}</div>}
+                {r.carriers.length > 0 && <div className="src">费用来源：{r.carriers.map((x, i) => <span key={i}>{i > 0 && '　·　'}<b style={{ fontWeight: 600 }}>{x.carrier}</b>
+                  {[['运费', x.tr], ['装卸费', x.ld], ['其他', x.ot]].filter(([, v]) => !zero(v)).map(([n, v]) => ` ${n} ${money(v)}`).join('，')}（{x.period} 账单，{x.signed ? '已复核' : <span className="warn">待复核</span>}）</span>)}</div>}
               </td></tr>}
             </React.Fragment>
           })}
@@ -154,7 +161,7 @@ const CSS = `
 .lof .btn{border:1px solid #DCE2E7;background:#fff;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer}.lof .btn:disabled{opacity:.5;cursor:default}
 .lof-note{background:#FFFBF2;border:1px solid #EADFC6;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;color:#6B5320}
 .lof-tw{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:auto}
-.lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1560px}
+.lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1680px}
 .lof-tw th{background:#F1F4F6;color:#4A5763;font-weight:600;font-size:12px;text-align:left;padding:7px 9px;border-bottom:1px solid #DCE2E7;position:sticky;top:0}
 .lof-tw td{padding:6px 9px;border-bottom:1px solid #EDF0F2;white-space:nowrap}
 .lof-tw th.sortable{cursor:pointer;user-select:none;white-space:nowrap}.lof-tw th.sortable:hover{background:#E4EBEF}

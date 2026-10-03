@@ -1149,25 +1149,65 @@ def _month_outstock(period, fresh=False):
     return docs, _OS_CACHE[period][0]
 
 
+# 费用分三类(V2.778，用户 2026-10-03「运费和装卸费要分开，不然不知道哪些是不含运费的」)：
+#   tr 运费＝运输本身及其附加(运费/快递费/提货费/送货费/保费/回单费/压车等其他费用)；
+#   ld 装卸费＝装货/卸货/装卸/搬运/上楼；ot 其他＝仓储、冷藏、处置、操作费、箱子(包材)、退货服务费。
+#   先看账单行的分项(sub_fees 的每个数字项)，分项加起来不够金额的差额、以及没有分项的行，按该行费用名(fee_item)归类。
+_LD_KW = ("装货", "卸货", "装卸", "搬运", "上楼")
+_OT_KW = ("仓储", "冷藏", "处置", "操作费", "箱子", "包材", "物料", "退货服务")
+_SUB_SKIP = ("标准", "核价差", "公式", "箱型")
+
+
+def _fee_bucket(name):
+    s = str(name or "")
+    if any(k in s for k in _LD_KW):
+        return "ld"
+    if any(k in s for k in _OT_KW):
+        return "ot"
+    return "tr"
+
+
+def _line_buckets(amount, fee_item, sub_fees):
+    """一行账单 → {tr, ld, ot}，三者之和＝该行金额。"""
+    out = {"tr": 0.0, "ld": 0.0, "ot": 0.0}
+    amt = float(amount or 0)
+    try:
+        sf = json.loads(sub_fees) if sub_fees else {}
+    except Exception:
+        sf = {}
+    used = 0.0
+    for k, v in (sf or {}).items():
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or k in _SUB_SKIP or k.startswith("含税金额"):
+            continue
+        out[_fee_bucket(k)] += float(v)
+        used += float(v)
+    if abs(amt - used) > 0.005:
+        out[_fee_bucket(fee_item)] += amt - used
+    return out
+
+
 def _outstock_freight(period):
-    """各家账单逐单运费按单号归集 → ({单号: {ok, pending, parts:[{carrier,period,amount,signed}]}}, 签署集)。
+    """各家账单逐单费用按单号归集 → {单号: {ok, pending, tr, ld, ot, parts:{(承运商, 账期, 已复核): {tr, ld, ot}}}}。
     已登记复核的承运商×账期 + 登记制 算「已复核」，其余算「待复核」。一格多单号的平摊。账单账期不限(跨月发货也挂得上)。"""
     with db._engine.connect() as c:
         signed = {(r[0], r[1]) for r in c.execute(select(SG.c.carrier, SG.c.period).where(SG.c.status == "signed")).all()}
-        bl = c.execute(select(BL.c.carrier, BL.c.period, BL.c.doc_no, BL.c.amount, BL.c.review_mode).where(
+        bl = c.execute(select(BL.c.carrier, BL.c.period, BL.c.doc_no, BL.c.amount, BL.c.review_mode, BL.c.fee_item, BL.c.sub_fees).where(
             (BL.c.grain == "detail") & (BL.c.doc_no != "") & (BL.c.doc_no != "无单据") & BL.c.doc_no.isnot(None))).all()
     out = {}
-    for car, per, doc, amt, mode in bl:
+    for car, per, doc, amt, mode, fee_item, sub in bl:
         nos = [p for p in str(doc).split("+") if p]
         if not nos:
             continue
         ok = mode == "register" or (car, per) in signed
-        share = float(amt or 0) / len(nos)
+        bk = _line_buckets(amt, fee_item, sub)
+        n = len(nos)
         for no in nos:
-            o = out.setdefault(no, {"ok": 0.0, "pending": 0.0, "parts": {}})
-            o["ok" if ok else "pending"] += share
-            p = o["parts"].setdefault((car, per, ok), 0.0)
-            o["parts"][(car, per, ok)] = p + share
+            o = out.setdefault(no, {"ok": 0.0, "pending": 0.0, "tr": 0.0, "ld": 0.0, "ot": 0.0, "parts": {}})
+            o["ok" if ok else "pending"] += float(amt or 0) / n
+            p = o["parts"].setdefault((car, per, ok), {"tr": 0.0, "ld": 0.0, "ot": 0.0})
+            for k in ("tr", "ld", "ot"):
+                o[k] += bk[k] / n
+                p[k] += bk[k] / n
     return out
 
 
@@ -1175,8 +1215,9 @@ def _outstock_freight(period):
 async def review_outstock_freight(request: Request, period: str = "", internal: int = 0, q: str = "", org: str = "", btype: str = "",
                                   carrier: str = "", state: str = "", sort: str = "date", page: int = 1, size: int = 100, fresh: int = 0,
                                   brand: str = "", stock: str = "", dir: str = ""):
-    """销售出库单全量 × 运费。internal=1 连内部交易一起列；state: has 有运费 / none 没有运费 / pending 有待复核运费 / ok 运费都已复核；
-    sort: date / fee(运费大→小) / ratio(费比大→小) / amount(销售额大→小)。"""
+    """销售出库单全量 × 物流费用。internal=1 连内部交易一起列。
+    state: has 有运费 / none 没有运费(含只有装卸费的) / ldonly 只有装卸费 / nofee 什么费用都没有 / pending 有待复核 / ok 都已复核。
+    费用分 运费 fee_tr / 装卸费 fee_ld / 其他 fee_ot，fee＝三者合计；费比＝合计÷销售额。sort 任一列 + dir。"""
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     if not period or len(period) != 7:
@@ -1200,7 +1241,7 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
             n_internal += 1
             if not internal:
                 continue
-        f = fr.get(no) or {"ok": 0.0, "pending": 0.0, "parts": {}}
+        f = fr.get(no) or {"ok": 0.0, "pending": 0.0, "tr": 0.0, "ld": 0.0, "ot": 0.0, "parts": {}}
         fee = round(f["ok"] + f["pending"], 2)
         bps = [bp_of(d["customer"], ln.get("code")) for ln in d["lines"]]       # 品牌照 BP 的客户物料映射：一张单几个物料可能几个品牌
         brands = list(dict.fromkeys(b.get("brand") for b in bps if b.get("brand")))
@@ -1211,8 +1252,10 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
                      "no": no, "date": d["date"], "org": d["org"], "stock_org": d["stock_org"], "customer": d["customer"],
                      "btype": d["btype"], "status": d["status"], "internal": is_in, "amount": d["amount"], "kg": d["kg"], "qty_txt": d["qty_txt"],
                      "n_lines": len(d["lines"]), "fee_ok": round(f["ok"], 2), "fee_pending": round(f["pending"], 2), "fee": fee,
+                     "fee_tr": round(f["tr"], 2), "fee_ld": round(f["ld"], 2), "fee_ot": round(f["ot"], 2),
                      "ratio": round(fee / d["amount"], 4) if d["amount"] and fee else None,
-                     "carriers": [{"carrier": k[0], "period": k[1], "signed": k[2], "amount": round(v, 2)} for k, v in sorted(f["parts"].items())]})
+                     "carriers": [{"carrier": k[0], "period": k[1], "signed": k[2], "amount": round(v["tr"] + v["ld"] + v["ot"], 2),
+                                   "tr": round(v["tr"], 2), "ld": round(v["ld"], 2), "ot": round(v["ot"], 2)} for k, v in sorted(f["parts"].items())]})
     # 账单写了销售出库单号、但本月出库单里没有的(发货在别的月 / 单号填错 / 其实是其他出库单)
     orphan = {"n": 0, "amount": 0.0}
     with db._engine.connect() as c:
@@ -1244,8 +1287,12 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
     if carrier:
         rows = [r for r in rows if any(x["carrier"] == carrier for x in r["carriers"])]
     if state == "has":
-        rows = [r for r in rows if r["fee"]]
+        rows = [r for r in rows if r["fee_tr"]]
     elif state == "none":
+        rows = [r for r in rows if not r["fee_tr"]]
+    elif state == "ldonly":
+        rows = [r for r in rows if not r["fee_tr"] and r["fee_ld"]]
+    elif state == "nofee":
         rows = [r for r in rows if not r["fee"]]
     elif state == "pending":
         rows = [r for r in rows if r["fee_pending"]]
@@ -1256,7 +1303,8 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         rows = [r for r in rows if ql in r["no"].lower() or ql in (r["customer"] or "").lower() or ql in (r["addr"] or "").lower()
                 or ql in (r["brand"] or "").lower() or ql in (r["linkman"] or "").lower()]
     # 排序(V2.777 点表头排)：sort=列，dir=asc/desc；不传 dir 时金额类默认从大到小、其余从小到大。空值(没有费比/没有品牌…)永远排最后。
-    NUM = {"amount": "amount", "fee": "fee", "fee_pending": "fee_pending", "ratio": "ratio", "kg": "kg"}
+    NUM = {"amount": "amount", "fee": "fee", "fee_pending": "fee_pending", "ratio": "ratio", "kg": "kg",
+           "fee_tr": "fee_tr", "fee_ld": "fee_ld", "fee_ot": "fee_ot"}
     TXT = {"date": "date", "no": "no", "org": "org", "brand": "brand", "customer": "customer", "stock": "stock", "addr": "addr",
            "btype": "btype", "carrier": None}
     col = sort if (sort in NUM or sort in TXT) else "date"
@@ -1276,8 +1324,11 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
 
     def stat(rs):
         fee, amt = sum(r["fee"] for r in rs), sum(r["amount"] for r in rs)
-        amt_has = sum(r["amount"] for r in rs if r["fee"])
-        return {"n": len(rs), "n_has": sum(1 for r in rs if r["fee"]), "n_none": sum(1 for r in rs if not r["fee"]),
+        amt_has = sum(r["amount"] for r in rs if r["fee_tr"])
+        return {"n": len(rs), "n_has": sum(1 for r in rs if r["fee_tr"]), "n_none": sum(1 for r in rs if not r["fee_tr"]),
+                "n_ldonly": sum(1 for r in rs if not r["fee_tr"] and r["fee_ld"]), "n_nofee": sum(1 for r in rs if not r["fee"]),
+                "fee_tr": round(sum(r["fee_tr"] for r in rs), 2), "fee_ld": round(sum(r["fee_ld"] for r in rs), 2),
+                "fee_ot": round(sum(r["fee_ot"] for r in rs), 2),
                 "fee_ok": round(sum(r["fee_ok"] for r in rs), 2), "fee_pending": round(sum(r["fee_pending"] for r in rs), 2),
                 "fee": round(fee, 2), "amount": round(amt, 2), "ratio": round(fee / amt, 4) if amt else None,
                 "amount_none": round(amt - amt_has, 2)}
