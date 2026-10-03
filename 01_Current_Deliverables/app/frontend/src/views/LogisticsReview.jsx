@@ -9,7 +9,7 @@
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -236,6 +236,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [dfilt, setDfilt] = useState(null)        // 逐单：从第①步「可逐单」点进来的组 {fsub,ffee,fbiz,label}
   const [mode, setMode] = useState('overview')   // overview 总表 / detail 单承运商三步流
   const [step, setStep] = useState('lines')      // lines / docs / sign
+  // 第③步·发票与暂估：这家这月的钉钉请款单 → 发票管家的发票 vs 金蝶计提暂估(进第③步才取，要读金蝶)
+  const [inv3, setInv3] = useState(null)
+  useEffect(() => {
+    if (step !== 'sign' || !carrier || !period) return
+    setInv3(null)
+    let off = false
+    reviewInvoices(carrier, period).then(r => { if (!off) setInv3(r) }).catch(e => { if (!off) setInv3({ err: e.message, blocks: [] }) })
+    return () => { off = true }
+  }, [step, carrier, period])
   const [ov, setOv] = useState(null)
   const [L, setL] = useState(null)               // 逐笔计提复核结果（异步，金蝶慢）
   const [pts, setPts] = useState('')             // 供应商复核要点（编辑中）
@@ -581,6 +590,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv td.num,.lrv th.num{text-align:right;font-family:ui-monospace,monospace}
       .lrv .tw{overflow-x:auto}
       .lrv .pill{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:999px}
+      .lrv .inv3 h3 small{margin-left:8px;font-size:12px}
+      .lrv .inv3b{border-top:1px solid #DCE2E7;padding:10px 14px 12px}
+      .lrv .inv3h{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;margin-bottom:6px}
+      .lrv .inv3h a{font-size:12px;color:var(--accent)}
+      .lrv .inv3t{font-size:12.5px;color:#33414D;margin:2px 0 8px}
+      .lrv .inv3g{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:12px;align-items:start}
+      @media(max-width:1300px){.lrv .inv3g{grid-template-columns:1fr}}
       .lrv .pill.ok{background:#DCEFE4;color:var(--ok)}.lrv .pill.warn{background:#F7E9CF;color:var(--warn)}
       .lrv .pill.bad{background:#F8DDD8;color:var(--bad)}.lrv .pill.neu{background:#E7ECEF;color:var(--neu)}
       .lrv .toolbar{display:flex;gap:8px;align-items:center;padding:9px 15px;border-bottom:1px solid #DCE2E7;flex-wrap:wrap}
@@ -1052,6 +1068,61 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <a className="btn" href={reviewExportUrl(carrier, period)}>导出复核表</a>
             </div>
           </>)}
+        </div>
+        <div className="card inv3">
+          <h3>发票与暂估 <small style={{ fontWeight: 400, color: '#5E6B78' }}>这家这月的钉钉请款单 → 发票管家里的发票，和金蝶计提的暂估进项税按税率并排比（口径同付款做账）</small></h3>
+          {inv3 === null && <div className="ovempty">读钉钉请款单、发票管家票夹、金蝶计提凭证…</div>}
+          {inv3 && inv3.err && <div className="ovempty" style={{ color: 'var(--bad)' }}>读取失败：{inv3.err}</div>}
+          {inv3 && !inv3.err && inv3.blocks.length === 0 && <div className="ovempty">这家这月还没有钉钉请款单（或都已撤回/排除），没有发票可比。</div>}
+          {inv3 && !inv3.err && inv3.blocks.length > 0 && <>
+            <div className="verdict" style={{ border: 0, borderRadius: 0, marginBottom: 0 }}>
+              <div className="stat"><div className="v">{money(inv3.req_total)}</div><div className="l">请款合计（{inv3.blocks.length} 张请款单）</div></div>
+              <div className={'stat ' + (isZero(inv3.inv_total - inv3.req_total) ? 'ok' : 'warn')}><div className="v">{money(inv3.inv_total)}</div><div className="l">发票含税合计（{inv3.n_inv} 张）</div></div>
+              <div className="stat"><div className="v">{money(inv3.acc_tax)}</div><div className="l">计提暂估进项税</div></div>
+              <div className={'stat ' + (isZero(inv3.inv_tax - inv3.acc_tax) ? 'ok' : 'warn')}><div className="v">{money(inv3.inv_tax)}</div><div className="l">发票可抵扣税额{isZero(inv3.inv_tax - inv3.acc_tax) ? '' : `（差 ${dtxt(inv3.inv_tax - inv3.acc_tax)}）`}</div></div>
+            </div>
+            {inv3.blocks.map(b => <div key={b.inst} className="inv3b">
+              <div className="inv3h">
+                <b>{b.subject}</b><span className="mono">{money(b.amount)}</span>
+                <span className="dim">审批 {b.bid} · {b.applicant}</span>
+                <span className={'pill ' + ({ paid: 'ok', agreed: 'ok', mine: 'warn', run: 'neu' }[b.st && b.st.key] || 'neu')}>{b.st ? b.st.label : ''}{b.st && b.st.date ? ' ' + String(b.st.date).slice(0, 10) : ''}</span>
+                {b.kind_cn && <span className={'pill ' + ({ hx: 'ok', tail: 'warn', redo: 'bad', subj: 'bad', manual: 'warn', noacc: 'warn' }[b.kind] || 'neu')} title={b.kind_text}>{b.kind_cn}</span>}
+                {b.posted && <span className="pill ok">已做账 记-{b.posted.vno}</span>}
+                <span style={{ flex: 1 }} />
+                {b.folder && <a href={`#/invaudit?folder=${b.folder}`} target="_blank" rel="noopener">发票管家票夹 #{b.folder} ↗</a>}
+                <a href="#/logisticsvoucher" target="_blank" rel="noopener">付款做账 ↗</a>
+              </div>
+              {b.err && <div className="ovempty" style={{ color: 'var(--bad)' }}>{b.err}</div>}
+              {!b.err && <>
+                {b.kind_text && <div className="inv3t">{b.kind_text}{(b.msgs || []).map((m, i) => <span key={i} className="dim">；{m}</span>)}</div>}
+                <div className="inv3g">
+                  <div className="tw"><table>
+                    <thead><tr><th>税率</th><th className="num">计提含税</th><th className="num">暂估进项税</th><th className="num">发票含税</th><th className="num">发票税额</th><th>结论</th></tr></thead>
+                    <tbody>
+                      {b.rates.map(x => {
+                        const okG = isZero(x.acc - x.inv), okT = isZero(x.acc_tax - x.inv_tax)
+                        return <tr key={x.rate}><td><b>{Math.round(x.rate * 10000) / 100}%</b></td><td className="num">{money(x.acc)}</td><td className="num">{money(x.acc_tax)}</td>
+                          <td className="num">{money(x.inv)}</td><td className="num">{money(x.inv_tax)}</td>
+                          <td>{okG && okT ? <span style={{ color: 'var(--ok)' }}>✓ 一致</span> : !okG ? <span style={{ color: 'var(--bad)' }}>含税差 {dtxt(x.inv - x.acc)}（计提税率和发票不同，或金额不符）</span> : <span style={{ color: 'var(--warn)' }}>税额差 {dtxt(x.inv_tax - x.acc_tax)}</span>}</td></tr>
+                      })}
+                      {b.rates.length === 0 && <tr><td colSpan="6" className="ovempty">没有计提、也没有发票</td></tr>}
+                      {b.rates.length > 0 && <tr style={{ fontWeight: 700, background: '#F4F7F9' }}><td>合计</td><td className="num">{money(b.acc_total)}</td><td className="num">{money(b.acc_tax)}</td><td className="num">{money(b.inv_total)}</td><td className="num">{money(b.inv_tax)}</td>
+                        <td>{isZero(b.inv_total - b.amount) ? <span style={{ color: 'var(--ok)' }}>发票＝请款</span> : <span style={{ color: 'var(--bad)' }}>发票比请款 {dtxt(b.inv_total - b.amount)}</span>}</td></tr>}
+                    </tbody>
+                  </table></div>
+                  <div className="tw"><table>
+                    <thead><tr><th>发票号码</th><th>类型</th><th>税率</th><th className="num">含税</th><th className="num">税额</th><th>纸质件 / 做账</th></tr></thead>
+                    <tbody>
+                      {b.invoices.map(i => <tr key={i.id}><td className="mono">{i.number}</td><td>{i.type}</td><td>{i.rate}{i.deduct === false && <span style={{ color: 'var(--warn)' }}> · 不抵扣</span>}</td>
+                        <td className="num">{money(i.gross)}</td><td className="num">{money(i.tax)}</td>
+                        <td>{i.paper ? <span style={{ color: 'var(--ok)' }}>纸质件已到</span> : <span style={{ color: 'var(--warn)' }}>纸质件未到</span>}{i.booked && <span className="dim"> · 已做账 {(i.vouchers || []).join('、')}</span>}</td></tr>)}
+                      {b.invoices.length === 0 && <tr><td colSpan="6" className="ovempty">票夹里还没有发票{b.folder ? '' : '（这张请款单还没进发票管家）'}</td></tr>}
+                    </tbody>
+                  </table></div>
+                </div>
+              </>}
+            </div>)}
+          </>}
         </div>
         <div className="navbar"><button className="btn" onClick={() => goStep('docs')}>‹ 上一步：逐单核价核量</button></div>
       </>)}

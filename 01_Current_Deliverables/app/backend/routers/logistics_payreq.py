@@ -567,6 +567,75 @@ async def payreq_file(request: Request, inst: str, fid: str):
                     headers={"Content-Disposition": "attachment; filename*=UTF-8''%s" % quote(name)})
 
 
+# ---------- 第③步·发票与暂估（V2.767）----------
+# 用户 2026-10-01 定「发票也接入第三步，将暂估的和实际的发票放上来」：这家这月的钉钉请款单 → 发票管家票夹里的发票，
+# 和金蝶计提凭证的暂估进项税按税率并排比。口径与付款做账同一套(logistics_voucher._preview_data)，这里只读、不出凭证。
+_KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "需红冲更正", "subj": "计提记错主体", "manual": "金额不符·人工", "noacc": "没有计提"}
+
+
+def _inv_block(r, me):
+    from routers import logistics_voucher as LVR
+    from kernels import logistics_voucher as LV
+    st = lpq.status_view({**r, "cur": json.loads(r.get("cur_json") or "[]")}, me)
+    out = {"inst": r["inst_id"], "bid": r.get("business_id"), "subject": r.get("subject"), "amount": r.get("amount"),
+           "applicant": r.get("applicant"), "st": st, "folder": r.get("folder_id"), "invoices": [], "rates": [], "msgs": []}
+    try:
+        d, code = LVR._preview_data(r["inst_id"])
+    except Exception as e:
+        out["err"] = "读取失败：%s" % str(e)[:120]
+        return out
+    if code != 200:
+        out["err"] = d.get("msg") or "读取失败"
+        return out
+    invs, accs = d.get("invoices") or [], d.get("accruals") or []
+    out.update(invoices=invs, folder=d["req"].get("folder") or out["folder"], kind=d.get("kind"), kind_cn=_KIND_CN.get(d.get("kind"), ""),
+               kind_text=d.get("kind_text"), msgs=[m for m in (d.get("plan") or {}).get("msgs") or [] if m != d.get("kind_text")],
+               paid=d["req"].get("paid"), posted=d["req"].get("posted"), pay_status=d["req"].get("status"),
+               accruals=[{k: a.get(k) for k in ("vno", "month", "fee", "biz", "gross", "tax", "rate", "mode", "new_rate", "why")} for a in accs])
+    # 按税率并排：计提(含税/暂估税) vs 发票(含税/税额)；不能抵扣的票算 0 税率
+    g = {}
+    for a in accs:
+        x = g.setdefault(round(float(a.get("rate") or 0), 4), {"acc": 0.0, "acc_tax": 0.0, "inv": 0.0, "inv_tax": 0.0, "n_inv": 0})
+        x["acc"] += float(a.get("gross") or 0)
+        x["acc_tax"] += float(a.get("tax") or 0)
+    for i in invs:
+        rt = 0.0 if i.get("deduct") is False else LV.rate_of(i.get("rate"))
+        if rt is None:
+            continue
+        x = g.setdefault(round(rt, 4), {"acc": 0.0, "acc_tax": 0.0, "inv": 0.0, "inv_tax": 0.0, "n_inv": 0})
+        x["inv"] += float(i.get("gross") or 0)
+        x["inv_tax"] += 0.0 if i.get("deduct") is False else float(i.get("tax") or 0)
+        x["n_inv"] += 1
+    out["rates"] = [{"rate": k, **{kk: (round(v, 2) if kk != "n_inv" else v) for kk, v in x.items()}} for k, x in sorted(g.items())]
+    out["acc_total"] = round(sum(float(a.get("gross") or 0) for a in accs), 2)
+    out["acc_tax"] = round(sum(float(a.get("tax") or 0) for a in accs), 2)
+    out["inv_total"] = round(sum(float(i.get("gross") or 0) for i in invs), 2)
+    out["inv_tax"] = round(sum(float(i.get("tax") or 0) for i in invs if i.get("deduct") is not False), 2)
+    return out
+
+
+@router.get("/api/logistics-review/invoices")
+async def review_invoices(request: Request, carrier: str = "", period: str = ""):
+    """第③步·发票与暂估：这家这月每张钉钉请款单(撤回/拒绝/已排除的不算) → 发票清单 + 按税率的计提暂估 vs 发票。只读。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        reqs = [dict(r) for r in c.execute(select(PR).where((PR.c.carrier == carrier) & (PR.c.period == period))).mappings().all()]
+    reqs = [r for r in reqs if not r.get("excluded") and str(r.get("dt_status") or "").upper() != "TERMINATED"
+            and str(r.get("dt_result") or "").lower() != "refuse"]
+    reqs.sort(key=lambda r: (r.get("subject") or "", r.get("create_time") or ""))
+    from starlette.concurrency import run_in_threadpool
+    me = _me_uid(u)
+    blocks = await run_in_threadpool(lambda: [_inv_block(r, me) for r in reqs])
+    return {"ok": True, "carrier": carrier, "period": period, "blocks": blocks,
+            "req_total": round(sum(float(b.get("amount") or 0) for b in blocks), 2),
+            "inv_total": round(sum(b.get("inv_total") or 0 for b in blocks), 2),
+            "inv_tax": round(sum(b.get("inv_tax") or 0 for b in blocks), 2),
+            "acc_tax": round(sum(b.get("acc_tax") or 0 for b in blocks), 2),
+            "n_inv": sum(len(b.get("invoices") or []) for b in blocks)}
+
+
 def _scheduler():
     while True:
         time.sleep(20 * 60)

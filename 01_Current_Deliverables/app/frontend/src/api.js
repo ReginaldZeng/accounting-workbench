@@ -622,6 +622,7 @@ export const reviewLines = (carrier, period) => j(`/api/logistics-review/lines?c
 export const reviewLineNote = (carrier, period, line_key, note) => j('/api/logistics-review/line-note', { method: 'POST', body: JSON.stringify({ carrier, period, line_key, note }) })
 export const reviewDimOptions = () => j('/api/logistics-review/dim-options')
 export const reviewLineFix =(carrier, period, line_keys, fix) => j('/api/logistics-review/line-fix', { method: 'POST', body: JSON.stringify({ carrier, period, line_keys, ...fix }) })
+export const reviewInvoices = (carrier, period) => j(`/api/logistics-review/invoices?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
 export const reviewCarrierPointsSet =(carrier, points) => j('/api/logistics-review/carrier-points', { method: 'POST', body: JSON.stringify({ carrier, points }) })
 export const reviewSign = (carrier, period, note = '') => j('/api/logistics-review/sign', { method: 'POST', body: JSON.stringify({ carrier, period, note }) })
