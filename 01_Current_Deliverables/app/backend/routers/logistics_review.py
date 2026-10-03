@@ -8,6 +8,7 @@
 import json
 import re
 import calendar
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
@@ -1043,6 +1044,178 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
     return {"ok": True, "period": period, "mode": mode, "count": len(rows), "total": all_total,
             "doc_count": doc_total, "rows": rows, "page": page, "pages": pages, "size": size,
             "facets": facets, "pending": pending, "nodoc": {"n": nodoc["n"], "amount": round(nodoc["amt"], 2)}}
+
+
+# ---------- 单据运费·销售出库单（全量）V2.774 ----------
+# 用户 2026-10-03：「销售出库这里需要列出来所有的出库单，支持筛选……我需要知道这个月每一笔出库单的运费是多少（除去内部交易的部分）」。
+# 以金蝶当月全部销售出库单为底(不是只列有运费的)，把各家账单逐单运费按单号挂上去；没挂到运费的也列出来。
+# 内部交易口径同 BP 工作台(kingdee.INTERNAL_CUSTOMERS)：客户＝集团内部主体(孝感卖给深圳两家的那一段)，默认剔除。
+#   实证(2026-08)：内部腿的「源单编号」＝对外那张出库单号；账单上填的全是对外单号，没有填内部腿的，剔除不丢运费。
+_OS_CACHE = {}      # period -> (ts, {单号: doc})
+_OS_TTL = 900
+_OS_FIELDS = [("FBillNo", "单号"), ("FDate", "日期"), ("FSaleOrgId.FName", "销售组织"), ("FCustomerID.FName", "客户"),
+              ("FMaterialID.FNumber", "编码"), ("FMaterialID.FName", "名称"), ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
+              ("FAllAmount", "价税合计"), ("FRealQty", "数量"), ("FUnitID.FName", "单位"),
+              ("FDocumentStatus", "状态"), ("FBillTypeID.FName", "单据类型"), ("FStockOrgId.FName", "发货组织"), ("FSrcBillNo", "源单")]
+_OS_INTERNAL_EXTRA = ("SINKIO LIMITED",)
+
+
+def _internal_customers():
+    return {o.get("full_name") for o in (db.list_orgs() or []) if o.get("full_name")} | set(_OS_INTERNAL_EXTRA)
+
+
+def _month_outstock(period, fresh=False):
+    """金蝶当月全部销售出库单 → {单号: {no,date,org,stock_org,customer,status,btype,src,amount,kg,qty_txt,lines:[…]}}。只读，缓存 15 分钟。"""
+    hit = _OS_CACHE.get(period)
+    if hit and not fresh and time.time() - hit[0] < _OS_TTL:
+        return hit[1], hit[0]
+    y, m = int(period[:4]), int(period[5:7])
+    nxt = "%04d-%02d-01" % ((y + 1, 1) if m == 12 else (y, m + 1))
+    s, conf = kc.login()
+    cols, rows = list(_OS_FIELDS), []
+    while len(cols) >= 9:               # 后面几列是锦上添花，哪列本账套没有就丢哪列；前 9 列缺了就报错
+        try:
+            rows = kc._query(s, conf, "SAL_OUTSTOCK", cols, "FDate>='%s-01' and FDate<'%s'" % (period, nxt))
+            break
+        except Exception:
+            if len(cols) == 9:
+                raise
+            cols = cols[:-1]
+    docs = {}
+    for r in rows:
+        no = str(r.get("单号") or "")
+        if not no:
+            continue
+        d = docs.setdefault(no, {"no": no, "date": str(r.get("日期") or "")[:10], "org": _short_subject(r.get("销售组织") or ""),
+                                 "stock_org": _short_subject(r.get("发货组织") or ""), "customer": r.get("客户") or "",
+                                 "status": r.get("状态") or "", "btype": r.get("单据类型") or "", "src": r.get("源单") or "",
+                                 "amount": 0.0, "kg": 0.0, "units": {}, "lines": []})
+        try:
+            bq = float(r.get("基本数量") or 0)
+        except (TypeError, ValueError):
+            bq = 0.0
+        try:
+            am = float(r.get("价税合计") or 0)
+        except (TypeError, ValueError):
+            am = 0.0
+        u = str(r.get("基本单位") or "")
+        d["amount"] += am
+        if "千克" in u or "kg" in u.lower():
+            d["kg"] += bq
+        d["units"][u] = d["units"].get(u, 0.0) + bq
+        d["lines"].append({"code": r.get("编码"), "name": r.get("名称"), "baseqty": bq, "baseunit": u, "amount": round(am, 2)})
+    for d in docs.values():
+        d["amount"] = round(d["amount"], 2)
+        d["kg"] = round(d["kg"], 3)
+        d["qty_txt"] = "、".join("%s %s" % (("%.3f" % v).rstrip("0").rstrip("."), k) for k, v in d.pop("units").items() if v)
+    _OS_CACHE[period] = (time.time(), docs)
+    return docs, _OS_CACHE[period][0]
+
+
+def _outstock_freight(period):
+    """各家账单逐单运费按单号归集 → ({单号: {ok, pending, parts:[{carrier,period,amount,signed}]}}, 签署集)。
+    已登记复核的承运商×账期 + 登记制 算「已复核」，其余算「待复核」。一格多单号的平摊。账单账期不限(跨月发货也挂得上)。"""
+    with db._engine.connect() as c:
+        signed = {(r[0], r[1]) for r in c.execute(select(SG.c.carrier, SG.c.period).where(SG.c.status == "signed")).all()}
+        bl = c.execute(select(BL.c.carrier, BL.c.period, BL.c.doc_no, BL.c.amount, BL.c.review_mode).where(
+            (BL.c.grain == "detail") & (BL.c.doc_no != "") & (BL.c.doc_no != "无单据") & BL.c.doc_no.isnot(None))).all()
+    out = {}
+    for car, per, doc, amt, mode in bl:
+        nos = [p for p in str(doc).split("+") if p]
+        if not nos:
+            continue
+        ok = mode == "register" or (car, per) in signed
+        share = float(amt or 0) / len(nos)
+        for no in nos:
+            o = out.setdefault(no, {"ok": 0.0, "pending": 0.0, "parts": {}})
+            o["ok" if ok else "pending"] += share
+            p = o["parts"].setdefault((car, per, ok), 0.0)
+            o["parts"][(car, per, ok)] = p + share
+    return out
+
+
+@router.get("/api/logistics-review/outstock-freight")
+async def review_outstock_freight(request: Request, period: str = "", internal: int = 0, q: str = "", org: str = "", btype: str = "",
+                                  carrier: str = "", state: str = "", sort: str = "date", page: int = 1, size: int = 100, fresh: int = 0):
+    """销售出库单全量 × 运费。internal=1 连内部交易一起列；state: has 有运费 / none 没有运费 / pending 有待复核运费 / ok 运费都已复核；
+    sort: date / fee(运费大→小) / ratio(费比大→小) / amount(销售额大→小)。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not period or len(period) != 7:
+        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
+    from starlette.concurrency import run_in_threadpool
+    try:
+        docs, ts = await run_in_threadpool(_month_outstock, period, bool(fresh))
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "金蝶取销售出库单失败：%s" % str(e)[:160]}, status_code=502)
+    fr = _outstock_freight(period)
+    inner = _internal_customers()
+    rows = []
+    n_internal = 0
+    for no, d in docs.items():
+        is_in = d["customer"] in inner
+        if is_in:
+            n_internal += 1
+            if not internal:
+                continue
+        f = fr.get(no) or {"ok": 0.0, "pending": 0.0, "parts": {}}
+        fee = round(f["ok"] + f["pending"], 2)
+        rows.append({"no": no, "date": d["date"], "org": d["org"], "stock_org": d["stock_org"], "customer": d["customer"],
+                     "btype": d["btype"], "status": d["status"], "internal": is_in, "amount": d["amount"], "kg": d["kg"], "qty_txt": d["qty_txt"],
+                     "n_lines": len(d["lines"]), "fee_ok": round(f["ok"], 2), "fee_pending": round(f["pending"], 2), "fee": fee,
+                     "ratio": round(fee / d["amount"], 4) if d["amount"] and fee else None,
+                     "carriers": [{"carrier": k[0], "period": k[1], "signed": k[2], "amount": round(v, 2)} for k, v in sorted(f["parts"].items())]})
+    # 账单写了销售出库单号、但本月出库单里没有的(发货在别的月 / 单号填错 / 其实是其他出库单)
+    orphan = {"n": 0, "amount": 0.0}
+    with db._engine.connect() as c:
+        cur = c.execute(select(BL.c.doc_no, BL.c.amount).where((BL.c.period == period) & (BL.c.grain == "detail") &
+                                                                (BL.c.doc_no != "") & BL.c.doc_no.isnot(None))).all()
+    for doc, amt in cur:
+        nos = [p for p in str(doc).split("+") if p]
+        for no in nos:
+            if "".join(ch for ch in no if ch.isalpha()) in ("XSCKD", "XQLCK") and no not in docs:
+                orphan["n"] += 1
+                orphan["amount"] += float(amt or 0) / len(nos)
+    base = rows                       # 口径内全部(剔内部后)：统计卡片按筛选前后各给一份
+    facets = {"orgs": sorted({r["org"] for r in base if r["org"]}), "btypes": sorted({r["btype"] for r in base if r["btype"]}),
+              "carriers": sorted({x["carrier"] for r in base for x in r["carriers"]})}
+    if org:
+        rows = [r for r in rows if r["org"] == org]
+    if btype:
+        rows = [r for r in rows if r["btype"] == btype]
+    if carrier:
+        rows = [r for r in rows if any(x["carrier"] == carrier for x in r["carriers"])]
+    if state == "has":
+        rows = [r for r in rows if r["fee"]]
+    elif state == "none":
+        rows = [r for r in rows if not r["fee"]]
+    elif state == "pending":
+        rows = [r for r in rows if r["fee_pending"]]
+    elif state == "ok":
+        rows = [r for r in rows if r["fee"] and not r["fee_pending"]]
+    if q:
+        ql = q.strip().lower()
+        rows = [r for r in rows if ql in r["no"].lower() or ql in (r["customer"] or "").lower()]
+    key = {"fee": lambda r: (-r["fee"], r["no"]), "ratio": lambda r: (-(r["ratio"] or 0), r["no"]),
+           "amount": lambda r: (-r["amount"], r["no"])}.get(sort, lambda r: (r["date"], r["no"]))
+    rows.sort(key=key)
+
+    def stat(rs):
+        fee, amt = sum(r["fee"] for r in rs), sum(r["amount"] for r in rs)
+        amt_has = sum(r["amount"] for r in rs if r["fee"])
+        return {"n": len(rs), "n_has": sum(1 for r in rs if r["fee"]), "n_none": sum(1 for r in rs if not r["fee"]),
+                "fee_ok": round(sum(r["fee_ok"] for r in rs), 2), "fee_pending": round(sum(r["fee_pending"] for r in rs), 2),
+                "fee": round(fee, 2), "amount": round(amt, 2), "ratio": round(fee / amt, 4) if amt else None,
+                "amount_none": round(amt - amt_has, 2)}
+    page = max(1, int(page))
+    size = max(20, min(500, int(size)))
+    pages = max(1, (len(rows) + size - 1) // size)
+    view = rows[(page - 1) * size: page * size]
+    for r in view:
+        r["lines"] = docs[r["no"]]["lines"]
+    return {"ok": True, "period": period, "fetched_at": datetime.fromtimestamp(ts).strftime("%H:%M"), "internal": bool(internal),
+            "n_internal": n_internal, "all": stat(base), "cur": stat(rows), "facets": facets, "orphan": {"n": orphan["n"], "amount": round(orphan["amount"], 2)},
+            "rows": view, "page": page, "pages": pages, "size": size}
 
 
 # 单据运费·销售出库 tab（旧·按单据汇总，保留兼容）：

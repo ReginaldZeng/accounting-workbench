@@ -4,9 +4,11 @@
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
 // V2.773：第一个 tab 从「销售出库」改成「账单复核（已登记）」——某家某月在复核台登记已复核后，逐单运费自动进来(所有单据类型)；
 //   可按承运商/费用类型筛；还没登记复核的承运商在上方提示。分组/勾选按「承运商+单号」(同一张单可能有两家的费用)。
+// V2.774：最前面加「销售出库单」页签(LogisticsOutstockFreight)＝金蝶本月全部销售出库单 × 运费，剔除内部交易；原页签改名「账单复核明细（已登记）」。
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocFreight, reviewRegisterImport, reviewRegisterTemplateUrl } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
+import LogisticsOutstockFreight from './LogisticsOutstockFreight.jsx'   // 销售出库单全量 × 运费(V2.774)
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const qtyfmt = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 3 }))
@@ -17,7 +19,7 @@ const BLANK = { carrier: '货拉拉', doc_no: '', amount: '', subject: '孝感�
 
 export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const period = `${cfg.year}-${String(cfg.period).padStart(2, '0')}`
-  const [tab, setTab] = useState('sales')
+  const [tab, setTab] = useState('out')         // out 销售出库单(全量) / sales 账单复核明细(已登记) / other 其他单据(登记制)
   const [data, setData] = useState(null)
   const [f, setF] = useState(BLANK)
   const [busy, setBusy] = useState('')
@@ -31,6 +33,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const fileRef = useRef(null)
 
   const load = useCallback(() => {
+    if (tab === 'out') return                    // 销售出库单页签自己取数
     setData(null); setSel(new Set())
     reviewDocFreight(period, tab, q, page, tab === 'sales' ? fc : '', tab === 'sales' ? ff : '').then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0, pages: 1 }))
   }, [period, tab, q, page, fc, ff])
@@ -131,13 +134,17 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       </div>
 
       <div className="tabs">
+        <button className={'tab' + (tab === 'out' ? ' on' : '')} onClick={() => setTab('out')}>
+          <div className="t">销售出库单</div><div className="s">本月全部销售出库单（剔除内部交易）· 每张单的运费</div></button>
         <button className={'tab' + (tab === 'sales' ? ' on' : '')} onClick={() => setTab('sales')}>
-          <div className="t">账单复核（已登记）</div><div className="s">各家账单在复核台「确认通过并登记已复核」后，逐单运费进到这里</div></button>
+          <div className="t">账单复核明细（已登记）</div><div className="s">已登记复核的账单 · 所有单据类型 · 摊到物料</div></button>
         <button className={'tab' + (tab === 'other' ? ' on' : '')} onClick={() => setTab('other')}>
           <div className="t">其他单据（登记制）</div><div className="s">议价/报销/调拨 · 只登记＋轻核单号真实</div></button>
       </div>
 
       {msg && <div className="msg">{msg}</div>}
+
+      {tab === 'out' && <LogisticsOutstockFreight period={period} />}
 
       {tab === 'sales' && data && data.facets && (
         <div className="card" style={{ padding: '10px 14px', fontSize: 13 }}>
@@ -159,11 +166,11 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
         </div>
       )}
 
-      <div className="stats">
+      {tab !== 'out' && <div className="stats">
         <div className="stat accent"><div className="v">{data ? data.doc_count : '—'}</div><div className="l">单据张数</div></div>
         <div className="stat accent"><div className="v">{data ? data.count : '—'}</div><div className="l">物料明细行</div></div>
         <div className="stat ok"><div className="v">{data ? money(data.total) : '—'}</div><div className="l">运费合计（元·含税）</div></div>
-      </div>
+      </div>}
 
       {tab === 'other' && (
         <div className="card">
@@ -193,7 +200,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
         </div>
       )}
 
-      <div className="card">
+      {tab !== 'out' && <div className="card">
         <h3 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span>{tab === 'sales' ? '已复核账单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
             {data ? `　${data.doc_count} 张单据 · 运费合计 ${money(data.total)} 元` : ''}</span>
@@ -279,7 +286,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
             <button className="btn" disabled={page >= data.pages} onClick={() => setPage(p => Math.min(data.pages, p + 1))}>下一页</button>
           </div>
         )}
-      </div>
+      </div>}
     </div>
   )
 }
