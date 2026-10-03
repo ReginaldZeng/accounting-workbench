@@ -1067,7 +1067,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           <h3 style={{ display: 'flex', alignItems: 'center' }}>发票与暂估 · {carrier} · {period}
             <small style={{ fontWeight: 400, color: '#5E6B78', marginLeft: 10, fontSize: 12 }}>钉钉请款单的发票（发票管家）对金蝶计提的暂估，口径同付款做账</small>
             <span style={{ flex: 1 }} /><a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
-          <LogisticsInvCompare data={inv3} />
+          <LogisticsInvCompare data={inv3} lines={L} />
         </div>
         <div className="navbar"><button className="btn" onClick={() => goStep('docs')}>‹ 上一步：逐单核价核量</button></div>
       </>)}
