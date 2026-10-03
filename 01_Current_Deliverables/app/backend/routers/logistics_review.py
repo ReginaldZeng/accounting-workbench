@@ -1174,7 +1174,7 @@ def _outstock_freight(period):
 @router.get("/api/logistics-review/outstock-freight")
 async def review_outstock_freight(request: Request, period: str = "", internal: int = 0, q: str = "", org: str = "", btype: str = "",
                                   carrier: str = "", state: str = "", sort: str = "date", page: int = 1, size: int = 100, fresh: int = 0,
-                                  brand: str = "", stock: str = ""):
+                                  brand: str = "", stock: str = "", dir: str = ""):
     """销售出库单全量 × 运费。internal=1 连内部交易一起列；state: has 有运费 / none 没有运费 / pending 有待复核运费 / ok 运费都已复核；
     sort: date / fee(运费大→小) / ratio(费比大→小) / amount(销售额大→小)。"""
     if not _perm(request):
@@ -1255,9 +1255,24 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         ql = q.strip().lower()
         rows = [r for r in rows if ql in r["no"].lower() or ql in (r["customer"] or "").lower() or ql in (r["addr"] or "").lower()
                 or ql in (r["brand"] or "").lower() or ql in (r["linkman"] or "").lower()]
-    key = {"fee": lambda r: (-r["fee"], r["no"]), "ratio": lambda r: (-(r["ratio"] or 0), r["no"]),
-           "amount": lambda r: (-r["amount"], r["no"])}.get(sort, lambda r: (r["date"], r["no"]))
-    rows.sort(key=key)
+    # 排序(V2.777 点表头排)：sort=列，dir=asc/desc；不传 dir 时金额类默认从大到小、其余从小到大。空值(没有费比/没有品牌…)永远排最后。
+    NUM = {"amount": "amount", "fee": "fee", "fee_pending": "fee_pending", "ratio": "ratio", "kg": "kg"}
+    TXT = {"date": "date", "no": "no", "org": "org", "brand": "brand", "customer": "customer", "stock": "stock", "addr": "addr",
+           "btype": "btype", "carrier": None}
+    col = sort if (sort in NUM or sort in TXT) else "date"
+    desc = (dir == "desc") if dir in ("asc", "desc") else (col in NUM)
+    if col in NUM:
+        val = lambda r: r.get(NUM[col])
+    elif col == "carrier":
+        val = lambda r: "、".join(x["carrier"] for x in r["carriers"])
+    else:
+        val = lambda r: r.get(TXT[col]) or ""
+    has = [r for r in rows if val(r) not in (None, "")]
+    non = [r for r in rows if val(r) in (None, "")]
+    has.sort(key=lambda r: r["no"])                       # 先按单号排稳，再按所选列排(稳定排序，同值的按单号)
+    has.sort(key=val, reverse=desc)
+    non.sort(key=lambda r: r["no"])
+    rows = has + non
 
     def stat(rs):
         fee, amt = sum(r["fee"] for r in rs), sum(r["amount"] for r in rs)
@@ -1275,7 +1290,7 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
                            series=bp_of(r["customer"], ln.get("code")).get("series") or "") for ln in docs[r["no"]]["lines"]]
     return {"ok": True, "period": period, "fetched_at": datetime.fromtimestamp(ts).strftime("%H:%M"), "internal": bool(internal),
             "n_internal": n_internal, "all": stat(base), "cur": stat(rows), "facets": facets, "bp_err": bp_err, "orphan": {"n": orphan["n"], "amount": round(orphan["amount"], 2)},
-            "rows": view, "page": page, "pages": pages, "size": size}
+            "rows": view, "page": page, "pages": pages, "size": size, "sort": col, "dir": "desc" if desc else "asc"}
 
 
 # 单据运费·销售出库 tab（旧·按单据汇总，保留兼容）：

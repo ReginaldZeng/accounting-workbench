@@ -5,6 +5,7 @@
 //   运费分两种：已复核(该承运商该月在复核台登记了已复核，或登记制) / 待复核(账单已导入、还没登记)。
 //   V2.775：加 品牌(照 BP 工作台的客户物料映射表，按 客户名+物料编码 对) / 发货仓库 / 收货地址·联系人(金蝶出库单)，品牌、仓库可筛。
 //   V2.776：列顺序按用户定＝销售组织 / 日期 / 出库单号 / 品牌 / 客户 / 发货仓库 / 收货地址 …；「含内部交易」勾选框不再上下折行。
+//   V2.777：点表头排序(每一列都能排，再点一次反向；数字列先从大到小；空值永远排最后)，原来的排序下拉去掉。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
 import { reviewOutstockFreight } from '../api.js'
@@ -13,7 +14,9 @@ const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { mini
 const pctfmt = n => (n == null ? '—' : (Number(n) * 100).toFixed(2) + '%')
 const qty = n => Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
 const STATES = [['', '全部'], ['has', '有运费'], ['none', '没有运费'], ['pending', '有待复核的运费'], ['ok', '运费都已复核']]
-const SORTS = [['date', '按日期'], ['fee', '运费从大到小'], ['ratio', '费比从大到小'], ['amount', '销售额从大到小']]
+// 表头：[排序键, 列名, 是否数字列]。点表头排序，再点一次反过来；数字列第一次点是从大到小
+const COLS = [['org', '销售组织'], ['date', '日期'], ['no', '出库单号'], ['brand', '品牌'], ['customer', '客户'], ['stock', '发货仓库'], ['addr', '收货地址'], ['btype', '类型'],
+  ['kg', '数量', 1], ['amount', '销售额', 1], ['fee', '运费', 1], ['fee_pending', '其中待复核', 1], ['ratio', '费比', 1], ['carrier', '承运商']]
 
 export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQInput, onFresh, busy }) {
   const filtered = !!(f.org || f.btype || f.carrier || f.state || f.q || f.brand || f.stock)
@@ -43,7 +46,6 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         {d && sel('stock', d.facets.stocks || [], '全部发货仓库')}
         {d && sel('carrier', d.facets.carriers, '全部承运商')}
         {sel('state', STATES.slice(1), '运费：全部')}
-        <select value={f.sort} onChange={e => setF({ ...f, sort: e.target.value, page: 1 })}>{SORTS.map(o => <option key={o[0]} value={o[0]}>{o[1]}</option>)}</select>
         <label className="ck"><input type="checkbox" checked={!!f.internal} onChange={e => setF({ ...f, internal: e.target.checked ? 1 : 0, page: 1 })} />含内部交易</label>
         {filtered && <button className="btn" onClick={() => { setQInput(''); setF({ ...f, org: '', btype: '', carrier: '', state: '', q: '', brand: '', stock: '', page: 1 }) }}>清空筛选</button>}
         <span style={{ flex: 1 }} />
@@ -58,8 +60,12 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         <colgroup><col style={{ width: 28 }} /><col style={{ width: 88 }} /><col style={{ width: 92 }} /><col style={{ width: 150 }} /><col style={{ width: '10%' }} /><col style={{ width: '14%' }} />
           <col style={{ width: 112 }} /><col /><col style={{ width: 62 }} />
           <col style={{ width: 118 }} /><col style={{ width: 108 }} /><col style={{ width: 96 }} /><col style={{ width: 92 }} /><col style={{ width: 70 }} /><col style={{ width: '11%' }} /></colgroup>
-        <thead><tr><th></th><th>销售组织</th><th>日期</th><th>出库单号</th><th>品牌</th><th>客户</th><th>发货仓库</th><th>收货地址</th><th>类型</th><th className="num">数量</th>
-          <th className="num">销售额</th><th className="num">运费</th><th className="num">其中待复核</th><th className="num">费比</th><th>承运商</th></tr></thead>
+        <thead><tr><th></th>{COLS.map(([k, name, num]) => {
+          const on = f.sort === k
+          const next = on ? (f.dir === 'desc' ? 'asc' : 'desc') : (num ? 'desc' : 'asc')
+          return <th key={k} className={'sortable' + (num ? ' num' : '') + (on ? ' on' : '')} title={`点击按「${name}」排序`}
+            onClick={() => setF({ ...f, sort: k, dir: next, page: 1 })}>{name}<span className="ar">{on ? (f.dir === 'desc' ? '▼' : '▲') : '↕'}</span></th>
+        })}</tr></thead>
         <tbody>
           {d === null && <tr><td colSpan="15" className="empty">从金蝶取本月全部销售出库单…</td></tr>}
           {d && d.rows.length === 0 && <tr><td colSpan="15" className="empty">没有符合条件的出库单</td></tr>}
@@ -111,7 +117,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
 
 export default function LogisticsOutstockFreight({ period }) {
   const [d, setD] = useState(null)
-  const [f, setF] = useState({ internal: 0, q: '', org: '', btype: '', carrier: '', state: '', brand: '', stock: '', sort: 'date', page: 1 })
+  const [f, setF] = useState({ internal: 0, q: '', org: '', btype: '', carrier: '', state: '', brand: '', stock: '', sort: 'date', dir: 'asc', page: 1 })
   const [qInput, setQInput] = useState('')
   const [open, setOpen] = useState(() => new Set())
   const [busy, setBusy] = useState(false)
@@ -151,6 +157,8 @@ const CSS = `
 .lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1560px}
 .lof-tw th{background:#F1F4F6;color:#4A5763;font-weight:600;font-size:12px;text-align:left;padding:7px 9px;border-bottom:1px solid #DCE2E7;position:sticky;top:0}
 .lof-tw td{padding:6px 9px;border-bottom:1px solid #EDF0F2;white-space:nowrap}
+.lof-tw th.sortable{cursor:pointer;user-select:none;white-space:nowrap}.lof-tw th.sortable:hover{background:#E4EBEF}
+.lof-tw th .ar{margin-left:3px;font-size:10px;color:#B8C2CA}.lof-tw th.on{color:#1F6E8C}.lof-tw th.on .ar{color:#1F6E8C}
 .lof-tw tbody>tr:not(.sub){cursor:pointer}.lof-tw tbody>tr:not(.sub):hover td{background:#F7FAFC}
 .lof-tw tr.nofee td{background:#FFFCF5}.lof-tw tr.inner td{color:#8A96A2}
 .lof .num{text-align:right;font-variant-numeric:tabular-nums}.lof th.num{text-align:right}
