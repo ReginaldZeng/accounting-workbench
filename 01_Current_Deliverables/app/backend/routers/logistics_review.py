@@ -1056,8 +1056,41 @@ _OS_TTL = 900
 _OS_FIELDS = [("FBillNo", "单号"), ("FDate", "日期"), ("FSaleOrgId.FName", "销售组织"), ("FCustomerID.FName", "客户"),
               ("FMaterialID.FNumber", "编码"), ("FMaterialID.FName", "名称"), ("FBaseUnitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
               ("FAllAmount", "价税合计"), ("FRealQty", "数量"), ("FUnitID.FName", "单位"),
-              ("FDocumentStatus", "状态"), ("FBillTypeID.FName", "单据类型"), ("FStockOrgId.FName", "发货组织"), ("FSrcBillNo", "源单")]
+              ("FDocumentStatus", "状态"), ("FBillTypeID.FName", "单据类型"), ("FStockOrgId.FName", "发货组织"), ("FSrcBillNo", "源单"),
+              # V2.775 用户要「发货仓库和收货地址」：仓库在分录上(一张单可能几个仓)，收货地址/联系人在单头
+              ("FStockID.FName", "仓库"), ("FReceiveAddress", "收货地址"), ("FLinkMan", "联系人")]
 _OS_INTERNAL_EXTRA = ("SINKIO LIMITED",)
+_BPMAP_CACHE = {}   # "m" -> (ts, combo, mat, err)
+
+
+def _bp_mapping(fresh=False):
+    """BP 工作台「客户物料映射表」→ ({(客户名, 物料码): 行}, {物料码: 首行}, 错误)。只读，缓存 15 分钟；BP 不可达返回空表+原因，不拖垮页面。
+    匹配规则照 BP(revenue_ledger.build_combo_lookup / build_material_lookup)：(客户名, 物料码) 精确优先，其次该物料第一条映射；
+    同一组合多行取首条。8 月实证：对外出库单 7,419 行物料全部组合命中。"""
+    hit = _BPMAP_CACHE.get("m")
+    if hit and not fresh and time.time() - hit[0] < _OS_TTL:
+        return hit[1], hit[2], hit[3]
+    import urllib.request
+    combo, mat, err = {}, {}, ""
+    try:
+        with urllib.request.urlopen(db.BP_API_BASE + "/api/master/mapping", timeout=8) as r:
+            rows = json.loads(r.read().decode("utf-8"))
+        for m in rows or []:
+            if str(m.get("status") or "") == "已停用":
+                continue
+            mc, cn = str(m.get("materialCode") or "").strip(), str(m.get("customerName") or "").strip()
+            if not mc:
+                continue
+            v = {"brand": m.get("brand") or "", "bu": m.get("businessUnit") or "", "division": m.get("division") or "",
+                 "series": m.get("productSeries") or "", "team": m.get("salesTeam") or ""}
+            if cn:
+                combo.setdefault((cn, mc), v)
+            mat.setdefault(mc, v)
+    except Exception as e:
+        err = "BP 工作台取不到客户物料映射表（%s），品牌暂时显示不了" % str(e)[:80]
+    if not err:
+        _BPMAP_CACHE["m"] = (time.time(), combo, mat, err)
+    return combo, mat, err
 
 
 def _internal_customers():
@@ -1089,7 +1122,11 @@ def _month_outstock(period, fresh=False):
         d = docs.setdefault(no, {"no": no, "date": str(r.get("日期") or "")[:10], "org": _short_subject(r.get("销售组织") or ""),
                                  "stock_org": _short_subject(r.get("发货组织") or ""), "customer": r.get("客户") or "",
                                  "status": r.get("状态") or "", "btype": r.get("单据类型") or "", "src": r.get("源单") or "",
-                                 "amount": 0.0, "kg": 0.0, "units": {}, "lines": []})
+                                 "addr": str(r.get("收货地址") or "").strip(), "linkman": str(r.get("联系人") or "").strip(),
+                                 "stocks": [], "amount": 0.0, "kg": 0.0, "units": {}, "lines": []})
+        wh = str(r.get("仓库") or "").strip()
+        if wh and wh not in d["stocks"]:
+            d["stocks"].append(wh)
         try:
             bq = float(r.get("基本数量") or 0)
         except (TypeError, ValueError):
@@ -1103,7 +1140,7 @@ def _month_outstock(period, fresh=False):
         if "千克" in u or "kg" in u.lower():
             d["kg"] += bq
         d["units"][u] = d["units"].get(u, 0.0) + bq
-        d["lines"].append({"code": r.get("编码"), "name": r.get("名称"), "baseqty": bq, "baseunit": u, "amount": round(am, 2)})
+        d["lines"].append({"code": r.get("编码"), "name": r.get("名称"), "baseqty": bq, "baseunit": u, "amount": round(am, 2), "stock": wh})
     for d in docs.values():
         d["amount"] = round(d["amount"], 2)
         d["kg"] = round(d["kg"], 3)
@@ -1136,7 +1173,8 @@ def _outstock_freight(period):
 
 @router.get("/api/logistics-review/outstock-freight")
 async def review_outstock_freight(request: Request, period: str = "", internal: int = 0, q: str = "", org: str = "", btype: str = "",
-                                  carrier: str = "", state: str = "", sort: str = "date", page: int = 1, size: int = 100, fresh: int = 0):
+                                  carrier: str = "", state: str = "", sort: str = "date", page: int = 1, size: int = 100, fresh: int = 0,
+                                  brand: str = "", stock: str = ""):
     """销售出库单全量 × 运费。internal=1 连内部交易一起列；state: has 有运费 / none 没有运费 / pending 有待复核运费 / ok 运费都已复核；
     sort: date / fee(运费大→小) / ratio(费比大→小) / amount(销售额大→小)。"""
     if not _perm(request):
@@ -1150,6 +1188,10 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         return JSONResponse({"ok": False, "msg": "金蝶取销售出库单失败：%s" % str(e)[:160]}, status_code=502)
     fr = _outstock_freight(period)
     inner = _internal_customers()
+    combo, matmap, bp_err = await run_in_threadpool(_bp_mapping, bool(fresh))
+
+    def bp_of(cust, code):
+        return combo.get((str(cust or "").strip(), str(code or "").strip())) or matmap.get(str(code or "").strip()) or {}
     rows = []
     n_internal = 0
     for no, d in docs.items():
@@ -1160,7 +1202,13 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
                 continue
         f = fr.get(no) or {"ok": 0.0, "pending": 0.0, "parts": {}}
         fee = round(f["ok"] + f["pending"], 2)
-        rows.append({"no": no, "date": d["date"], "org": d["org"], "stock_org": d["stock_org"], "customer": d["customer"],
+        bps = [bp_of(d["customer"], ln.get("code")) for ln in d["lines"]]       # 品牌照 BP 的客户物料映射：一张单几个物料可能几个品牌
+        brands = list(dict.fromkeys(b.get("brand") for b in bps if b.get("brand")))
+        rows.append({"brand": "、".join(brands), "brands": brands,
+                     "bu": "、".join(dict.fromkeys(b.get("bu") for b in bps if b.get("bu"))),
+                     "stock": "、".join(d.get("stocks") or []), "stocks": d.get("stocks") or [],
+                     "addr": d.get("addr") or "", "linkman": d.get("linkman") or "",
+                     "no": no, "date": d["date"], "org": d["org"], "stock_org": d["stock_org"], "customer": d["customer"],
                      "btype": d["btype"], "status": d["status"], "internal": is_in, "amount": d["amount"], "kg": d["kg"], "qty_txt": d["qty_txt"],
                      "n_lines": len(d["lines"]), "fee_ok": round(f["ok"], 2), "fee_pending": round(f["pending"], 2), "fee": fee,
                      "ratio": round(fee / d["amount"], 4) if d["amount"] and fee else None,
@@ -1177,8 +1225,18 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
                 orphan["n"] += 1
                 orphan["amount"] += float(amt or 0) / len(nos)
     base = rows                       # 口径内全部(剔内部后)：统计卡片按筛选前后各给一份
+    bcnt = {}
+    for r in base:
+        for b in r["brands"] or ["（未映射品牌）"]:
+            bcnt[b] = bcnt.get(b, 0) + 1
     facets = {"orgs": sorted({r["org"] for r in base if r["org"]}), "btypes": sorted({r["btype"] for r in base if r["btype"]}),
-              "carriers": sorted({x["carrier"] for r in base for x in r["carriers"]})}
+              "carriers": sorted({x["carrier"] for r in base for x in r["carriers"]}),
+              "brands": [[k, v] for k, v in sorted(bcnt.items(), key=lambda kv: (-kv[1], kv[0]))],
+              "stocks": sorted({s for r in base for s in r["stocks"]})}
+    if brand:
+        rows = [r for r in rows if (brand in r["brands"]) or (brand == "（未映射品牌）" and not r["brands"])]
+    if stock:
+        rows = [r for r in rows if stock in r["stocks"]]
     if org:
         rows = [r for r in rows if r["org"] == org]
     if btype:
@@ -1195,7 +1253,8 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         rows = [r for r in rows if r["fee"] and not r["fee_pending"]]
     if q:
         ql = q.strip().lower()
-        rows = [r for r in rows if ql in r["no"].lower() or ql in (r["customer"] or "").lower()]
+        rows = [r for r in rows if ql in r["no"].lower() or ql in (r["customer"] or "").lower() or ql in (r["addr"] or "").lower()
+                or ql in (r["brand"] or "").lower() or ql in (r["linkman"] or "").lower()]
     key = {"fee": lambda r: (-r["fee"], r["no"]), "ratio": lambda r: (-(r["ratio"] or 0), r["no"]),
            "amount": lambda r: (-r["amount"], r["no"])}.get(sort, lambda r: (r["date"], r["no"]))
     rows.sort(key=key)
@@ -1212,9 +1271,10 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
     pages = max(1, (len(rows) + size - 1) // size)
     view = rows[(page - 1) * size: page * size]
     for r in view:
-        r["lines"] = docs[r["no"]]["lines"]
+        r["lines"] = [dict(ln, brand=bp_of(r["customer"], ln.get("code")).get("brand") or "",
+                           series=bp_of(r["customer"], ln.get("code")).get("series") or "") for ln in docs[r["no"]]["lines"]]
     return {"ok": True, "period": period, "fetched_at": datetime.fromtimestamp(ts).strftime("%H:%M"), "internal": bool(internal),
-            "n_internal": n_internal, "all": stat(base), "cur": stat(rows), "facets": facets, "orphan": {"n": orphan["n"], "amount": round(orphan["amount"], 2)},
+            "n_internal": n_internal, "all": stat(base), "cur": stat(rows), "facets": facets, "bp_err": bp_err, "orphan": {"n": orphan["n"], "amount": round(orphan["amount"], 2)},
             "rows": view, "page": page, "pages": pages, "size": size}
 
 
