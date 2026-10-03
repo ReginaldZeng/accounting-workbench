@@ -8,6 +8,7 @@
 //   V2.777：点表头排序(每一列都能排，再点一次反向；数字列先从大到小；空值永远排最后)，原来的排序下拉去掉。
 //   V2.778：费用拆三列＝运费 / 装卸费 / 其他(仓储·操作·包材)＋合计；「没有运费」按运费列判(只有装卸费的也算没运费)，筛选可单挑「只有装卸费」。
 //     合计标橙色＝其中有待复核的(原「其中待复核」一列并进来，鼠标放上去看金额)。
+//   V2.779：修收货地址列被挤没(加了费用列后固定宽度超了，地址列是「剩多少给多少」)：每列都给明确宽度，表格最小宽 1900。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
 import { reviewOutstockFreight } from '../api.js'
@@ -61,9 +62,9 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         （发货在别的月份、单号填错，或它其实是其他出库单），不在下表。</div>}
 
       <div className="lof-tw"><table>
-        <colgroup><col style={{ width: 28 }} /><col style={{ width: 88 }} /><col style={{ width: 92 }} /><col style={{ width: 150 }} /><col style={{ width: '10%' }} /><col style={{ width: '14%' }} />
-          <col style={{ width: 112 }} /><col /><col style={{ width: 62 }} />
-          <col style={{ width: 112 }} /><col style={{ width: 106 }} /><col style={{ width: 94 }} /><col style={{ width: 86 }} /><col style={{ width: 80 }} /><col style={{ width: 94 }} /><col style={{ width: 70 }} /><col style={{ width: '10%' }} /></colgroup>
+        <colgroup><col style={{ width: 28 }} /><col style={{ width: 84 }} /><col style={{ width: 88 }} /><col style={{ width: 146 }} /><col style={{ width: '9%' }} /><col style={{ width: '13%' }} />
+          <col style={{ width: 104 }} /><col style={{ width: '13%' }} /><col style={{ width: 52 }} />
+          <col style={{ width: 100 }} /><col style={{ width: 100 }} /><col style={{ width: 88 }} /><col style={{ width: 80 }} /><col style={{ width: 70 }} /><col style={{ width: 92 }} /><col style={{ width: 68 }} /><col style={{ width: '7%' }} /></colgroup>
         <thead><tr><th></th>{COLS.map(([k, name, num]) => {
           const on = f.sort === k
           const next = on ? (f.dir === 'desc' ? 'asc' : 'desc') : (num ? 'desc' : 'asc')
@@ -71,8 +72,8 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
             onClick={() => setF({ ...f, sort: k, dir: next, page: 1 })}>{name}<span className="ar">{on ? (f.dir === 'desc' ? '▼' : '▲') : '↕'}</span></th>
         })}</tr></thead>
         <tbody>
-          {d === null && <tr><td colSpan="16" className="empty">从金蝶取本月全部销售出库单…</td></tr>}
-          {d && d.rows.length === 0 && <tr><td colSpan="16" className="empty">没有符合条件的出库单</td></tr>}
+          {d === null && <tr><td colSpan="17" className="empty">从金蝶取本月全部销售出库单…</td></tr>}
+          {d && d.rows.length === 0 && <tr><td colSpan="17" className="empty">没有符合条件的出库单</td></tr>}
           {d && d.rows.map(r => {
             const isOpen = open.has(r.no)
             const base = r.lines.reduce((s, x) => s + (x.baseqty || 0), 0)
@@ -95,7 +96,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
                 <td className="ell" title={r.carriers.map(x => `${x.carrier} ${money(x.amount)}（${x.period}${x.signed ? '' : '·待复核'}）`).join('\n')}>
                   {r.carriers.length ? r.carriers.map((x, i) => <span key={i}>{i > 0 && '、'}{x.carrier}</span>) : <span className="z">—</span>}</td>
               </tr>
-              {isOpen && <tr className="sub"><td></td><td colSpan="15">
+              {isOpen && <tr className="sub"><td></td><td colSpan="16">
                 <div className="src" style={{ marginTop: 0, marginBottom: 6 }}>
                   {r.bu && <span>事业单元：{r.bu}　·　</span>}收货：{[r.linkman, r.addr].filter(Boolean).join(' ') || '—'}　·　单据类型：{r.btype}</div>
                 <table className="in"><thead><tr><th>物料编码</th><th>物料名称</th><th>品牌</th><th>产品系列</th><th>发货仓库</th><th className="num">基本单位数量</th><th>单位</th><th className="num">销售额</th><th className="num">摊得费用</th><th className="num">单位费用</th></tr></thead>
@@ -161,7 +162,7 @@ const CSS = `
 .lof .btn{border:1px solid #DCE2E7;background:#fff;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer}.lof .btn:disabled{opacity:.5;cursor:default}
 .lof-note{background:#FFFBF2;border:1px solid #EADFC6;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;color:#6B5320}
 .lof-tw{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:auto}
-.lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1680px}
+.lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1900px}
 .lof-tw th{background:#F1F4F6;color:#4A5763;font-weight:600;font-size:12px;text-align:left;padding:7px 9px;border-bottom:1px solid #DCE2E7;position:sticky;top:0}
 .lof-tw td{padding:6px 9px;border-bottom:1px solid #EDF0F2;white-space:nowrap}
 .lof-tw th.sortable{cursor:pointer;user-select:none;white-space:nowrap}.lof-tw th.sortable:hover{background:#E4EBEF}
