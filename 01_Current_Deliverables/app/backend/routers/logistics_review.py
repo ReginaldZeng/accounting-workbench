@@ -1354,7 +1354,7 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
                 "fee_tr": round(sum(r["fee_tr"] for r in rs), 2), "fee_ld": round(sum(r["fee_ld"] for r in rs), 2),
                 "fee_ot": round(sum(r["fee_ot"] for r in rs), 2),
                 "fee_ok": round(sum(r["fee_ok"] for r in rs), 2), "fee_pending": round(sum(r["fee_pending"] for r in rs), 2),
-                "fee": round(fee, 2), "amount": round(amt, 2), "ratio": round(fee / amt, 4) if amt else None,
+                "fee": round(fee, 2), "amount": round(amt, 2), "ratio": round(fee / amt, 4) if amt > 0 else None,
                 "amount_none": round(amt - amt_has, 2)}
     page = max(1, int(page))
     size = max(20, min(500, int(size)))

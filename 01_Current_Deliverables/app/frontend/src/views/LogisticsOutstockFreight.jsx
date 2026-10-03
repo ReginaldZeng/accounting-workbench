@@ -108,7 +108,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
                     const fl = r.fee * share
                     return <tr key={i}><td className="mono">{x.code}</td><td>{x.name}</td><td>{x.brand || '—'}</td><td>{x.series || '—'}</td><td>{x.stock || '—'}</td><td className="num">{qty(x.baseqty)}</td><td>{x.baseunit}</td>
                       <td className="num">{money(x.amount)}</td><td className="num">{r.fee ? money(fl) : '—'}</td>
-                      <td className="num">{r.fee && x.baseqty ? (fl / x.baseqty).toFixed(4) : '—'}</td></tr>
+                      <td className="num">{r.fee && x.baseqty > 0 ? (fl / x.baseqty).toFixed(4) : '—'}</td></tr>
                   })}</tbody></table>
                 {r.carriers.length > 0 && <div className="src">费用来源：{r.carriers.map((x, i) => <span key={i}>{i > 0 && '　·　'}<b style={{ fontWeight: 600 }}>{x.carrier}</b>
                   {[['运费', x.tr], ['装卸费', x.ld], ['其他', x.ot]].filter(([, v]) => !zero(v)).map(([n, v]) => ` ${n} ${money(v)}`).join('，')}（{x.period} 账单，{x.signed ? '已复核' : <span className="warn">待复核</span>}）</span>)}</div>}
