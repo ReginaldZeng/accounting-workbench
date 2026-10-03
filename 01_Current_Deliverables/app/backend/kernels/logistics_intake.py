@@ -170,7 +170,11 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
         if doc and sp.get("doc_re") and doc != _s(sp.get("doc_default", "")) and not re.match(sp["doc_re"], doc):
             continue                      # 单号列里不像单号的(账单底下的透视小计「总计」「孝感市…公司」)不收(V2.762)
         if c_doc is not None and not doc and sp.get("doc_ffill") and last_doc:
-            doc = last_doc                # 单号只写在首行、下面几行沿用(恒茂入库：一张调拨单拆几个批次)
+            # 单号只写在首行、下面几行沿用(恒茂入库：一张调拨单拆几个批次)。
+            # doc_ffill_if_blank=[列名…]：这些列里有空的才算续行(天鹰：续行不写日期/序号；日期序号齐全却没单号的是漏填，不能并到上一单，V2.765)
+            cond = [find_col(hdr, x) for x in (sp.get("doc_ffill_if_blank") or [])]
+            if not cond or any(ci is not None and (ci >= len(r) or not _s(r[ci])) for ci in cond):
+                doc = last_doc
         if c_doc is not None and not doc:
             doc = _s(sp.get("doc_default", ""))
             if not doc:
