@@ -195,7 +195,7 @@ export default function LogisticsInvCompare({ data, lines }) {
       <table className="ivc-t">
         <colgroup><col style={{ width: '14%' }} /><col style={{ width: '18%' }} /><col /><col style={{ width: '9%' }} /><col style={{ width: '11%' }} /><col style={{ width: '10%' }} />
           <col style={{ width: '8%' }} /><col style={{ width: '10%' }} /></colgroup>
-        <thead><tr><th>请款单</th><th>发票号码</th><th>类型</th><th>税率</th><th className="num">含税</th><th className="num">税额</th><th>纸质件</th><th>做账凭证</th></tr></thead>
+        <thead><tr><th>请款单</th><th>发票号码</th><th>票种 <span style={{ fontWeight: 400 }}>· 特定业务</span></th><th>税率</th><th className="num">含税</th><th className="num">税额</th><th>纸质件</th><th>做账凭证</th></tr></thead>
         {blocks.map(b => {
           const invs = b.invoices || []
           const n = Math.max(1, invs.length)
@@ -206,7 +206,7 @@ export default function LogisticsInvCompare({ data, lines }) {
               ? <tr>{head}<td colSpan="7" className="z" style={{ textAlign: 'center' }}>{b.folder ? '票夹里还没有发票' : '请款单走到接入审批人节点后，发票会自动进发票管家'}</td></tr>
               : invs.map((i, k) => <tr key={i.id}>
                 {k === 0 && head}
-                <td className="mono">{i.number}</td><td className="ell" title={i.type}>{i.type}</td>
+                <td className="mono">{i.number}</td><td className="ell" title={i.type}>{i.type_short || i.type}{i.type_tag && <span className="dim"> · {i.type_tag}</span>}</td>
                 <td>{i.rate}{i.deduct === false && <span className="warn"> 不抵扣</span>}</td>
                 <td className="num">{money(i.gross)}</td><td className="num">{money(i.tax)}</td>
                 <td>{i.paper ? <span className="ok">已到</span> : <span className="warn">未到</span>}</td>

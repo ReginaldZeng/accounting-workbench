@@ -66,13 +66,28 @@ def _invoices(inst_id):
             fl = {}
         bk = fl.get("_bookkeeping") or {}
         # 能抵扣的只有专票、旅客运输票；普票/出租车票等不抵扣(用户 2026-10-02「普票不能抵扣，不做更正」)
-        out.append({"id": x["id"], "number": x["number"] or "", "type": x["type_label"] or x["inv_type"] or "",
+        typ, short, tag = _inv_type_text(x["inv_type"], x["type_label"])
+        out.append({"id": x["id"], "number": x["number"] or "", "type": typ, "type_short": short, "type_tag": tag,
                     "deduct": (x["inv_type"] or "") in ("special", "travel"),
                     "gross": float(x["total"] or 0), "net": float(x["amount"] or 0), "tax": float(x["tax"] or 0),
                     "rate": x["tax_rate"] or "", "paper": bool(x["paper"]), "review": x["review"] or "",
                     "booked": bk.get("status") == "booked", "vouchers": bk.get("vouchers") or [],
                     "seller": x["seller_name"] or "", "buyer": x["buyer_name"] or ""})
     return dict(f), out
+
+
+def _inv_type_text(inv_type, label):
+    """发票管家的 type_label 存的是票面左上角那行字：数电票带「特定业务」的(货物运输服务/建筑服务…)存的是特定业务名、不是票种，
+    直接当类型显示就成了「货物运输服务」「电子发票（增值税专用发票）」混着出现(用户 2026-10-03「发票类型怎么奇奇怪怪」)。
+    这里统一成：票种看 inv_type，特定业务单独给。→ (全称, 简称, 特定业务)"""
+    from kernels.invoice_excel import INV_TYPE_LABELS
+    from kernels.invoice_parse import _SPECIAL_LABELS
+    it, lab = str(inv_type or ""), str(label or "").strip()
+    base = INV_TYPE_LABELS.get(it, "")
+    short = {"special": "专票", "normal": "普票"}.get(it) or base or lab or it
+    tag = lab if (lab in _SPECIAL_LABELS and lab != base) else ""
+    full = (base or lab or it) + ("（%s）" % tag if tag else "")
+    return full, short, tag
 
 
 def _status(r, folder, invs, ovr):
