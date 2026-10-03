@@ -4,6 +4,7 @@
 //   内部交易口径同 BP 工作台：客户＝集团内部主体(孝感卖给深圳两家的那一段)，默认剔除，可勾选一起看。
 //   运费分两种：已复核(该承运商该月在复核台登记了已复核，或登记制) / 待复核(账单已导入、还没登记)。
 //   V2.775：加 品牌(照 BP 工作台的客户物料映射表，按 客户名+物料编码 对) / 发货仓库 / 收货地址·联系人(金蝶出库单)，品牌、仓库可筛。
+//   V2.776：列顺序按用户定＝销售组织 / 日期 / 出库单号 / 品牌 / 客户 / 发货仓库 / 收货地址 …；「含内部交易」勾选框不再上下折行。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
 import { reviewOutstockFreight } from '../api.js'
@@ -54,10 +55,10 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         （发货在别的月份、单号填错，或它其实是其他出库单），不在下表。</div>}
 
       <div className="lof-tw"><table>
-        <colgroup><col style={{ width: 28 }} /><col style={{ width: 92 }} /><col style={{ width: 150 }} /><col style={{ width: 88 }} /><col style={{ width: '14%' }} /><col style={{ width: '10%' }} />
+        <colgroup><col style={{ width: 28 }} /><col style={{ width: 88 }} /><col style={{ width: 92 }} /><col style={{ width: 150 }} /><col style={{ width: '10%' }} /><col style={{ width: '14%' }} />
           <col style={{ width: 112 }} /><col /><col style={{ width: 62 }} />
           <col style={{ width: 118 }} /><col style={{ width: 108 }} /><col style={{ width: 96 }} /><col style={{ width: 92 }} /><col style={{ width: 70 }} /><col style={{ width: '11%' }} /></colgroup>
-        <thead><tr><th></th><th>日期</th><th>出库单号</th><th>销售组织</th><th>客户</th><th>品牌</th><th>发货仓库</th><th>收货地址</th><th>类型</th><th className="num">数量</th>
+        <thead><tr><th></th><th>销售组织</th><th>日期</th><th>出库单号</th><th>品牌</th><th>客户</th><th>发货仓库</th><th>收货地址</th><th>类型</th><th className="num">数量</th>
           <th className="num">销售额</th><th className="num">运费</th><th className="num">其中待复核</th><th className="num">费比</th><th>承运商</th></tr></thead>
         <tbody>
           {d === null && <tr><td colSpan="15" className="empty">从金蝶取本月全部销售出库单…</td></tr>}
@@ -68,9 +69,9 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
             return <React.Fragment key={r.no}>
               <tr className={(r.fee ? '' : 'nofee') + (r.internal ? ' inner' : '')} onClick={() => toggle(r.no)}>
                 <td className="tg">{isOpen ? '▾' : '▸'}</td>
-                <td>{r.date}</td><td className="mono">{r.no}</td><td>{r.org}</td>
-                <td className="ell" title={r.customer}>{r.customer}{r.internal && <span className="pill neu">内部</span>}</td>
+                <td>{r.org}</td><td>{r.date}</td><td className="mono">{r.no}</td>
                 <td className="ell" title={[r.brand, r.bu].filter(Boolean).join(' · ')}>{r.brand || <span className="z">{r.internal ? '—' : '未映射'}</span>}</td>
+                <td className="ell" title={r.customer}>{r.customer}{r.internal && <span className="pill neu">内部</span>}</td>
                 <td className="ell" title={r.stock}>{r.stock || <span className="z">—</span>}</td>
                 <td className="ell" title={[r.linkman, r.addr].filter(Boolean).join(' · ')}>{r.addr || r.linkman ? <>{r.linkman && <b style={{ fontWeight: 600 }}>{r.linkman} </b>}{r.addr}</> : <span className="z">—</span>}</td>
                 <td className="ell" title={r.btype}>{String(r.btype || '').replace('线上销售出库单', '').replace('销售出库单', '')}</td>
@@ -143,7 +144,7 @@ const CSS = `
 .lof-stats .tag{margin-left:6px;background:#E1EEF3;color:#1F6E8C;border-radius:999px;padding:1px 7px;font-size:11px}
 .lof-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid #DCE2E7;border-radius:10px;padding:10px 12px;margin-bottom:10px}
 .lof-bar select,.lof-bar .q{padding:6px 8px;border:1px solid #DCE2E7;border-radius:6px;font-size:13px;background:#fff}
-.lof-bar .q{width:240px}.lof-bar select{max-width:190px}.lof-bar .ck{display:flex;gap:4px;align-items:center;font-size:13px;white-space:nowrap}
+.lof-bar .q{width:240px}.lof-bar select{max-width:190px}.lof-bar .ck{display:inline-flex;flex-direction:row;gap:4px;align-items:center;font-size:13px;white-space:nowrap}.lof-bar .ck input{margin:0;width:auto}
 .lof .btn{border:1px solid #DCE2E7;background:#fff;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer}.lof .btn:disabled{opacity:.5;cursor:default}
 .lof-note{background:#FFFBF2;border:1px solid #EADFC6;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;color:#6B5320}
 .lof-tw{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:auto}
