@@ -8,6 +8,7 @@
 //   V2.777：点表头排序(每一列都能排，再点一次反向；数字列先从大到小；空值永远排最后)，原来的排序下拉去掉。
 //   V2.778：费用拆三列＝运费 / 装卸费 / 其他(仓储·操作·包材)＋合计；「没有运费」按运费列判(只有装卸费的也算没运费)，筛选可单挑「只有装卸费」。
 //     合计标橙色＝其中有待复核的(原「其中待复核」一列并进来，鼠标放上去看金额)。
+//   V2.780：V2.779 把最小宽定到 1900 结果用户屏上要左右滑——压到 1720(日期只显示月-日、列间距收窄、固定列各减几像素)，1900 宽的屏不用滑。
 //   V2.779：修收货地址列被挤没(加了费用列后固定宽度超了，地址列是「剩多少给多少」)：每列都给明确宽度，表格最小宽 1900。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
@@ -62,9 +63,9 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         （发货在别的月份、单号填错，或它其实是其他出库单），不在下表。</div>}
 
       <div className="lof-tw"><table>
-        <colgroup><col style={{ width: 28 }} /><col style={{ width: 84 }} /><col style={{ width: 88 }} /><col style={{ width: 146 }} /><col style={{ width: '9%' }} /><col style={{ width: '13%' }} />
-          <col style={{ width: 104 }} /><col style={{ width: '13%' }} /><col style={{ width: 52 }} />
-          <col style={{ width: 100 }} /><col style={{ width: 100 }} /><col style={{ width: 88 }} /><col style={{ width: 80 }} /><col style={{ width: 70 }} /><col style={{ width: 92 }} /><col style={{ width: 68 }} /><col style={{ width: '7%' }} /></colgroup>
+        <colgroup><col style={{ width: 24 }} /><col style={{ width: 80 }} /><col style={{ width: 54 }} /><col style={{ width: 142 }} /><col style={{ width: '9%' }} /><col style={{ width: '13%' }} />
+          <col style={{ width: 96 }} /><col style={{ width: '13%' }} /><col style={{ width: 44 }} />
+          <col style={{ width: 92 }} /><col style={{ width: 96 }} /><col style={{ width: 84 }} /><col style={{ width: 76 }} /><col style={{ width: 62 }} /><col style={{ width: 88 }} /><col style={{ width: 62 }} /><col style={{ width: '7%' }} /></colgroup>
         <thead><tr><th></th>{COLS.map(([k, name, num]) => {
           const on = f.sort === k
           const next = on ? (f.dir === 'desc' ? 'asc' : 'desc') : (num ? 'desc' : 'asc')
@@ -80,7 +81,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
             return <React.Fragment key={r.no}>
               <tr className={(zero(r.fee_tr) ? 'nofee' : '') + (r.internal ? ' inner' : '')} onClick={() => toggle(r.no)}>
                 <td className="tg">{isOpen ? '▾' : '▸'}</td>
-                <td>{r.org}</td><td>{r.date}</td><td className="mono">{r.no}</td>
+                <td>{r.org}</td><td title={r.date}>{String(r.date || '').slice(5)}</td><td className="mono">{r.no}</td>
                 <td className="ell" title={[r.brand, r.bu].filter(Boolean).join(' · ')}>{r.brand || <span className="z">{r.internal ? '—' : '未映射'}</span>}</td>
                 <td className="ell" title={r.customer}>{r.customer}{r.internal && <span className="pill neu">内部</span>}</td>
                 <td className="ell" title={r.stock}>{r.stock || <span className="z">—</span>}</td>
@@ -162,9 +163,9 @@ const CSS = `
 .lof .btn{border:1px solid #DCE2E7;background:#fff;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer}.lof .btn:disabled{opacity:.5;cursor:default}
 .lof-note{background:#FFFBF2;border:1px solid #EADFC6;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px;color:#6B5320}
 .lof-tw{background:#fff;border:1px solid #DCE2E7;border-radius:10px;overflow:auto}
-.lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1900px}
-.lof-tw th{background:#F1F4F6;color:#4A5763;font-weight:600;font-size:12px;text-align:left;padding:7px 9px;border-bottom:1px solid #DCE2E7;position:sticky;top:0}
-.lof-tw td{padding:6px 9px;border-bottom:1px solid #EDF0F2;white-space:nowrap}
+.lof-tw table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:1720px}
+.lof-tw th{background:#F1F4F6;color:#4A5763;font-weight:600;font-size:12px;text-align:left;padding:7px 6px;border-bottom:1px solid #DCE2E7;position:sticky;top:0}
+.lof-tw td{padding:6px 6px;border-bottom:1px solid #EDF0F2;white-space:nowrap}
 .lof-tw th.sortable{cursor:pointer;user-select:none;white-space:nowrap}.lof-tw th.sortable:hover{background:#E4EBEF}
 .lof-tw th .ar{margin-left:3px;font-size:10px;color:#B8C2CA}.lof-tw th.on{color:#1F6E8C}.lof-tw th.on .ar{color:#1F6E8C}
 .lof-tw tbody>tr:not(.sub){cursor:pointer}.lof-tw tbody>tr:not(.sub):hover td{background:#F7FAFC}
