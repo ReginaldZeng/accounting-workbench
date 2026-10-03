@@ -2,6 +2,7 @@
 # [Change Log]
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
 # V2.761：读老格式 .xls(xlrd)；列名 * 结尾按前缀认；wt_scale 账单重量换千克(链盟接入)
+# V2.766：part_col 分项名取列值；wt_once_col 同一运单重量只算一次(顺丰冷运取数说明修复)
 # V2.765：src_from_sheets 份名取表名(多文件各算一份)；amount_dp 金额小数位(天鹰接入)
 # V2.764：表名 {m} 月份占位；row_re 行过滤；doc_blank 单号「无」当空；collapse 整表并一行(易风达接入)
 # V2.762：doc_re 单号格式过滤(跨越/中通账单底下带透视小计，单号列会读到「总计」)；dedupe_col 跨 sheet 按运单号去重
@@ -150,6 +151,11 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
     c_box = find_col(hdr, sp["box_col"]) if sp.get("box_col") else None
     c_dk = find_col(hdr, sp["dedupe_col"]) if sp.get("dedupe_col") else None   # 跨 sheet 去重键(运单号)
     # row_re={"col": 列名, "re": 正则}：只收该列对得上的行(易风达运输页只收「序号」是数字的行，表底合计/开票信息/透视小计都不收，V2.764)
+    # part_col：分项名取这一列的值(顺丰一个运单拆 运费/保费/签回单 几行，按「服务」列记分项)；
+    # wt_once_col：同一运单(该列值相同)的几行重量、件数只算一次，并单时才不会把计费重量加三遍(V2.766)
+    c_part = find_col(hdr, sp["part_col"]) if sp.get("part_col") else None
+    c_once = find_col(hdr, sp["wt_once_col"]) if sp.get("wt_once_col") else None
+    seen_once = set()
     rre = sp.get("row_re")
     c_rre = find_col(hdr, rre["col"]) if rre else None
     blank_docs = set(sp.get("doc_blank") or [])        # 单号列写「无」这类字的当没单号(走 doc_default)
@@ -213,6 +219,12 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
         }
         if c_dk is not None and c_dk < len(r) and _s(r[c_dk]):
             row["_dk"] = _s(r[c_dk])
+        if c_part is not None and c_part < len(r) and _s(r[c_part]) and base:
+            sub[_s(r[c_part])] = round(base, 2)
+        if c_once is not None and c_once < len(r) and _s(r[c_once]):
+            if _s(r[c_once]) in seen_once:
+                row["charge_wt"] = row["qty"] = None
+            seen_once.add(_s(r[c_once]))
         if calc and c_calc_t is not None and c_calc_t < len(r) and _f(r[c_calc_t]) is not None:
             # 按账单公式核价：标准=各因子相乘×rate(四舍五入到分)，与账单金额差超 1 分记「核价差」
             fs = [_f(r[c]) if c is not None and c < len(r) else None for c in c_calc_f]
