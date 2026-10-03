@@ -914,27 +914,65 @@ def _bizline_of(annot):
 
 
 @router.get("/api/logistics-review/doc-freight")
-def review_doc_freight(request: Request, period: str = "", mode: str = "other", q: str = "", page: int = 1, size: int = 80):
+def review_doc_freight(request: Request, period: str = "", mode: str = "other", q: str = "", page: int = 1, size: int = 80,
+                       carrier: str = "", ffee: str = ""):
     """物料级单据运费（两 tab 同一套列）：一行=单据的一个物料行，运费按基本数量摊，单位运费=摊得运费/基本数量，费比=运费/销售额。
-    mode='other' 登记制(其他单据) / 'sales' 销售出库(已解析 audit 明细)。"""
+    mode='other' 登记制(其他单据)；
+    mode='sales' 账单复核(已登记)——V2.773(用户 2026-10-03「核对确认后应该补充到逐单运费上」)：
+      某家某月在复核台「确认通过并登记已复核」后，它的逐单账单明细(带金蝶单号的)自动进来；撤销登记就退出。不复制数据，直接读中间表、按登记状态过滤
+      (登记后当月归类与备注锁定，读到的就是定稿)。原来只认账单行 fee='销售出库费用' 的，各家都进不来。
+      所有单据类型都进(销售出库/采购入库/调拨/其他出库)，费用类型＝复核台归口后的(出库运费/入库运费/研发外购…)。carrier/ffee 可筛。"""
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    facets, pending, nodoc = None, [], {"n": 0, "amt": 0.0}
     with db._engine.connect() as c:
         if mode == "sales":
-            src = [dict(r) for r in c.execute(select(BL).where(
-                (BL.c.period == period) & (BL.c.grain == "detail") & (BL.c.review_mode == "audit") &
-                (BL.c.fee == "销售出库费用"))).mappings().all()]
+            signed = {r[0]: (r[1], r[2]) for r in c.execute(select(SG.c.carrier, SG.c.reviewer, SG.c.signed_at).where(
+                (SG.c.period == period) & (SG.c.status == "signed"))).all()}
+            allsrc = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.period == period) & (BL.c.grain == "detail") & (BL.c.review_mode == "audit"))).mappings().all()]
+            pend = {}
+            for r in allsrc:
+                if r.get("carrier") not in signed:
+                    pend[r.get("carrier")] = pend.get(r.get("carrier"), 0.0) + float(r.get("amount") or 0)
+            pending = [{"carrier": k, "amount": round(v, 2)} for k, v in sorted(pend.items(), key=lambda kv: -kv[1])]
+            src = [r for r in allsrc if r.get("carrier") in signed]
+            for r in src:
+                r["_fee_type"] = _eff_fee(r)
+                r["subject"] = _eff_subject(r)
+                r["_biz"] = _bill_biz(r)
+            fc, ff = {}, {}
+            for r in src:
+                a = float(r.get("amount") or 0)
+                x = fc.setdefault(r.get("carrier"), {"carrier": r.get("carrier"), "amount": 0.0, "by": signed[r.get("carrier")][0], "at": signed[r.get("carrier")][1]})
+                x["amount"] = round(x["amount"] + a, 2)
+                ff[r["_fee_type"]] = round(ff.get(r["_fee_type"], 0.0) + a, 2)
+            facets = {"carriers": sorted(fc.values(), key=lambda x: -x["amount"]), "fees": sorted(ff.items(), key=lambda kv: -kv[1])}
+            if carrier:
+                src = [r for r in src if r.get("carrier") == carrier]
+            if ffee:
+                src = [r for r in src if r["_fee_type"] == ffee]
+            keep = []
+            for r in src:           # 没有单号的(仓储费、账单调整)到不了单据，另计
+                if not (r.get("doc_no") or "").strip() or r.get("doc_no") == "无单据":
+                    nodoc["n"] += 1
+                    nodoc["amt"] += float(r.get("amount") or 0)
+                else:
+                    keep.append(r)
+            src = keep
         else:
             src = [dict(r) for r in c.execute(select(BL).where(
                 (BL.c.period == period) & (BL.c.review_mode == "register")).order_by(BL.c.id.desc())).mappings().all()]
-    # 按单据汇总运费（一单号多行=累加）
+    # 按单据汇总运费（一单号多行=累加）。账单复核页同一张单可能有两家的费用(链盟运费 + 天鹰装货费)，按「承运商+单号」分开
     docfee = {}
     for r in src:
         for no in [p for p in (r.get("doc_no") or "").split("+") if p] or ["（无单号）"]:
-            g = docfee.setdefault(no, {"运费": 0.0, "subject": r.get("subject"), "annot": r.get("annot"),
-                                       "fee_item": r.get("fee_item"), "carrier": r.get("carrier"),
-                                       "dept": (r.get("note") or ""), "qty_state": r.get("qty_state"),
-                                       "reg_id": r.get("id") if mode != "sales" else None})
+            key = ((r.get("carrier") or "") + "|" + no) if mode == "sales" else no
+            g = docfee.setdefault(key, {"运费": 0.0, "no": no, "subject": r.get("subject"), "annot": r.get("annot"),
+                                        "fee_item": r.get("fee_item"), "carrier": r.get("carrier"),
+                                        "fee_type": r.get("_fee_type") or "", "biz": r.get("_biz"),
+                                        "dept": (r.get("note") or ""), "qty_state": r.get("qty_state"),
+                                        "reg_id": r.get("id") if mode != "sales" else None})
             n = len([p for p in (r.get("doc_no") or "").split("+") if p]) or 1
             g["运费"] += (r.get("amount") or 0) / n
     # 全量口径：总运费/单据数在取金蝶物料前算好（销售出库单可达数千张，不能每次翻页全量拉金蝶）
@@ -942,13 +980,14 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
     # 单据号搜索先按单号过滤（物料名/编码搜索仅在本页已取物料内二次过滤）
     doc_items = sorted(docfee.items(), key=lambda kv: kv[0])
     if q:
-        doc_items = [kv for kv in doc_items if q in (kv[0] or "")]
+        doc_items = [kv for kv in doc_items if q in (kv[1]["no"] or "")]
     doc_total = len(doc_items)
     page = max(1, int(page))
     page_items = doc_items[(page - 1) * size: page * size]  # 只取本页这一批单据
     # 只对本页单据取金蝶物料明细
     by_form = {}
-    for no, _g in page_items:
+    for _k, _g in page_items:
+        no = _g["no"]
         if no == "（无单号）":
             continue
         pre = "".join(ch for ch in no if ch.isalpha())
@@ -962,13 +1001,15 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
         except Exception:
             mats = {}
     rows = []
-    for no, g in page_items:
+    for dkey, g in page_items:
+        no = g["no"]
         fee = round(g["运费"], 2)
-        biz = _bizline_of(g["annot"])
+        biz = g.get("biz") or _bizline_of(g["annot"])
         lines = mats.get(no) or []
         kgsum = sum(float(m["基本数量"] or 0) for m in lines if m.get("基本数量") not in (None, ""))
         if not lines:
-            rows.append({"subject": g["subject"], "carrier": g["carrier"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
+            rows.append({"key": dkey, "fee_type": g.get("fee_type") or "",
+                         "subject": g["subject"], "carrier": g["carrier"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
                          "party": g["dept"] if mode == "other" else "", "code": "", "name": "（金蝶无此单据物料）",
                          "baseqty": None, "baseunit": "", "fee": fee, "unitfee": None, "sales": None, "ratio": None,
                          "reg_id": g.get("reg_id")})
@@ -987,6 +1028,7 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
             except (TypeError, ValueError):
                 sales_amt = None
             rows.append({
+                "key": dkey, "fee_type": g.get("fee_type") or "",
                 "subject": g["subject"], "carrier": g["carrier"], "fee_item": g["fee_item"], "bizline": biz, "doc_no": no,
                 "party": (m.get("往来") or "") if mode == "sales" else (g["dept"] or ""),
                 "code": m.get("编码"), "name": m.get("名称"), "baseqty": bq, "baseunit": m.get("基本单位"),
@@ -999,7 +1041,8 @@ def review_doc_freight(request: Request, period: str = "", mode: str = "other", 
         rows = [r for r in rows if q in (r["doc_no"] or "") or q in (r.get("name") or "") or q in (r.get("code") or "")]
     pages = max(1, (doc_total + size - 1) // size)
     return {"ok": True, "period": period, "mode": mode, "count": len(rows), "total": all_total,
-            "doc_count": doc_total, "rows": rows, "page": page, "pages": pages, "size": size}
+            "doc_count": doc_total, "rows": rows, "page": page, "pages": pages, "size": size,
+            "facets": facets, "pending": pending, "nodoc": {"n": nodoc["n"], "amount": round(nodoc["amt"], 2)}}
 
 
 # 单据运费·销售出库 tab（旧·按单据汇总，保留兼容）：

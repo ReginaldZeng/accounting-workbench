@@ -2,6 +2,8 @@
 // 单据运费：两 tab（销售出库 / 其他单据登记制）统一为同一套物料级字段。
 // 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
+// V2.773：第一个 tab 从「销售出库」改成「账单复核（已登记）」——某家某月在复核台登记已复核后，逐单运费自动进来(所有单据类型)；
+//   可按承运商/费用类型筛；还没登记复核的承运商在上方提示。分组/勾选按「承运商+单号」(同一张单可能有两家的费用)。
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocFreight, reviewRegisterImport, reviewRegisterTemplateUrl } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
@@ -24,14 +26,17 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const [page, setPage] = useState(1)
   const [q, setQ] = useState('')
   const [qInput, setQInput] = useState('')
+  const [fc, setFc] = useState('')        // 承运商筛选(账单复核 tab)
+  const [ff, setFf] = useState('')        // 费用类型筛选
   const fileRef = useRef(null)
 
   const load = useCallback(() => {
     setData(null); setSel(new Set())
-    reviewDocFreight(period, tab, q, page).then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0, pages: 1 }))
-  }, [period, tab, q, page])
+    reviewDocFreight(period, tab, q, page, tab === 'sales' ? fc : '', tab === 'sales' ? ff : '').then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0, pages: 1 }))
+  }, [period, tab, q, page, fc, ff])
   useEffect(() => { load() }, [load])
-  useEffect(() => { setPage(1) }, [tab, period, q])
+  useEffect(() => { setPage(1) }, [tab, period, q, fc, ff])
+  useEffect(() => { setFc(''); setFf('') }, [period])
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
 
@@ -57,12 +62,12 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
   }
 
-  const rows = data && data.rows ? data.rows : []
-  const docNos = [...new Set(rows.map(r => r.doc_no))]
+  const rows = (data && data.rows ? data.rows : []).map(r => ({ ...r, dk: r.key || r.doc_no }))   // dk=分组键(承运商+单号)
+  const docNos = [...new Set(rows.map(r => r.dk))]
   const toggle = no => setSel(p => { const n = new Set(p); n.has(no) ? n.delete(no) : n.add(no); return n })
   const toggleAll = () => setSel(p => p.size === docNos.length ? new Set() : new Set(docNos))
   // 勾选汇总：整单运费合计、基本单位数量合计（同单位才可加总）、平均单位运费=运费/数量
-  const picked = rows.filter(r => sel.has(r.doc_no))
+  const picked = rows.filter(r => sel.has(r.dk))
   const selFee = picked.reduce((s, r) => s + (r.fee || 0), 0)
   const selQty = picked.reduce((s, r) => s + (Number(r.baseqty) || 0), 0)
   const selUnits = [...new Set(picked.map(r => r.baseunit).filter(Boolean))]
@@ -120,19 +125,39 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       <div className="head">
         <div><div className="h-title">单据运费</div>
-          <div className="h-sub">一行一个物料行 · 运费按基本数量摊到物料 · 销售出库走核价核量 / 其他单据走登记制</div></div>
+          <div className="h-sub">一行一个物料行 · 运费按基本数量摊到物料 · 账单在复核台登记已复核后自动进来 / 没有账单的走登记制</div></div>
         <div style={{ flex: 1 }} />
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
       </div>
 
       <div className="tabs">
         <button className={'tab' + (tab === 'sales' ? ' on' : '')} onClick={() => setTab('sales')}>
-          <div className="t">销售出库</div><div className="s">销售出库单挂的运费 · 核价核量在「付款对账」</div></button>
+          <div className="t">账单复核（已登记）</div><div className="s">各家账单在复核台「确认通过并登记已复核」后，逐单运费进到这里</div></button>
         <button className={'tab' + (tab === 'other' ? ' on' : '')} onClick={() => setTab('other')}>
           <div className="t">其他单据（登记制）</div><div className="s">议价/报销/调拨 · 只登记＋轻核单号真实</div></button>
       </div>
 
       {msg && <div className="msg">{msg}</div>}
+
+      {tab === 'sales' && data && data.facets && (
+        <div className="card" style={{ padding: '10px 14px', fontSize: 13 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ color: '#5E6B78' }}>已登记复核：</span>
+            {data.facets.carriers.length === 0 && <span style={{ color: '#8A96A2' }}>本月还没有承运商登记已复核</span>}
+            <button className={'btn' + (!fc ? ' pri' : '')} onClick={() => setFc('')}>全部</button>
+            {data.facets.carriers.map(x => <button key={x.carrier} className={'btn' + (fc === x.carrier ? ' pri' : '')} title={`${x.by} ${x.at} 登记已复核`}
+              onClick={() => setFc(fc === x.carrier ? '' : x.carrier)}>{x.carrier} <b style={{ fontWeight: 600 }}>{money(x.amount)}</b></button>)}
+            <span style={{ flex: 1 }} />
+            <select value={ff} onChange={e => setFf(e.target.value)} style={{ padding: '5px 8px', border: '1px solid #DCE2E7', borderRadius: 6 }}>
+              <option value="">全部费用类型</option>{data.facets.fees.map(([k, v]) => <option key={k} value={k}>{k}（{money(v)}）</option>)}</select>
+          </div>
+          {data.pending && data.pending.length > 0 && <div style={{ marginTop: 8, color: 'var(--warn)' }}>
+            还没登记复核、暂时没进来的：{data.pending.map(x => `${x.carrier} ${money(x.amount)}`).join('　·　')}
+            <span style={{ color: '#8A96A2' }}>　到「账单核对」第③步登记已复核后自动进来</span></div>}
+          {data.nodoc && data.nodoc.n > 0 && <div style={{ marginTop: 6, color: '#5E6B78' }}>
+            另有 {data.nodoc.n} 笔没有金蝶单号的费用 {money(data.nodoc.amount)}（仓储费、账单调整等），到不了单据，不在下表。</div>}
+        </div>
+      )}
 
       <div className="stats">
         <div className="stat accent"><div className="v">{data ? data.doc_count : '—'}</div><div className="l">单据张数</div></div>
@@ -170,7 +195,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       <div className="card">
         <h3 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span>{tab === 'sales' ? '销售出库单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
+          <span>{tab === 'sales' ? '已复核账单 · 物料级运费明细' : '其他单据 · 物料级运费明细'}
             {data ? `　${data.doc_count} 张单据 · 运费合计 ${money(data.total)} 元` : ''}</span>
           <span style={{ flex: 1 }} />
           <input className="qbox" value={qInput} placeholder="搜单据号…" onChange={e => setQInput(e.target.value)}
@@ -208,26 +233,26 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
             {data === null && <tr><td colSpan="16" className="empty">加载中…（接金蝶取物料明细，可能稍慢）</td></tr>}
             {data && !rows.length && <tr><td colSpan="16" className="empty">
               {tab === 'sales'
-                ? <>本月还没有销售出库单据运费。<br />销售出库的账单在「账单上传」传入、「付款对账·复核台」做核价核量后，在此按物料摊列。</>
+                ? <>本月还没有登记已复核的账单。<br />各家账单在「账单核对·复核台」核完，第③步点「确认通过并登记已复核」后，逐单运费自动在此按物料摊列。</>
                 : <>本月还没有登记的其他单据运费。上方登记一笔（如货拉拉报销的 FBDR 运费），接金蝶取物料明细后在此按物料摊列。</>}
             </td></tr>}
             {rows.map((r, i) => {
-              const first = i === 0 || rows[i - 1].doc_no !== r.doc_no
+              const first = i === 0 || rows[i - 1].dk !== r.dk
               // 该单据跨几行（物料行数）＋整单运费合计，用于合并单元格显示「这是同一张单」
               let span = 1, docFee = r.fee || 0
-              if (first) { for (let k = i + 1; k < rows.length && rows[k].doc_no === r.doc_no; k++) { span++; docFee += rows[k].fee || 0 } }
+              if (first) { for (let k = i + 1; k < rows.length && rows[k].dk === r.dk; k++) { span++; docFee += rows[k].fee || 0 } }
               // 交替底色按单据分组
-              let gi = 0; for (let k = 1; k <= i; k++) { if (rows[k].doc_no !== rows[k - 1].doc_no) gi++ }
+              let gi = 0; for (let k = 1; k <= i; k++) { if (rows[k].dk !== rows[k - 1].dk) gi++ }
               const band = gi % 2 === 1 ? ' band' : ''
               const multi = span > 1
               return (
-                <tr key={i} className={(first ? 'docstart' : '') + band + (sel.has(r.doc_no) ? ' picked' : '')}>
+                <tr key={i} className={(first ? 'docstart' : '') + band + (sel.has(r.dk) ? ' picked' : '')}>
                   {first && <td rowSpan={span} style={{ textAlign: 'center' }}>
-                    <input type="checkbox" checked={sel.has(r.doc_no)} onChange={() => toggle(r.doc_no)} /></td>}
+                    <input type="checkbox" checked={sel.has(r.dk)} onChange={() => toggle(r.dk)} /></td>}
                   {first && <>
                     <td rowSpan={span}>{r.subject}</td>
                     <td rowSpan={span}>{r.carrier || <span className="note">—</span>}</td>
-                    <td rowSpan={span}>{r.fee_item}</td>
+                    <td rowSpan={span}>{r.fee_type || r.fee_item}{r.fee_type && r.fee_item && r.fee_item !== r.fee_type && <div style={{ fontSize: 11.5, color: '#8A96A2' }}>{r.fee_item}</div>}</td>
                     <td rowSpan={span}>{r.bizline || <span className="note">—</span>}</td>
                     <td rowSpan={span} className="docno">
                       <span className="dn">{r.doc_no}</span>

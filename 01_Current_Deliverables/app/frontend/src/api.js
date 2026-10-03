@@ -632,7 +632,7 @@ export const reviewRegisterAdd = (body) => jp('/api/logistics-review/register', 
 export const reviewRegisterDelete = (id) => jp('/api/logistics-review/register/delete', { id })
 export const reviewRegisterKingdeeCheck = (period) => jp(`/api/logistics-review/register/kingdee-check?period=${period}`)
 export const reviewDocSales = (period, q = '', page = 1) => j(`/api/logistics-review/doc-sales?period=${period}&q=${encodeURIComponent(q)}&page=${page}`)
-export const reviewDocFreight = (period, mode = 'other', q = '', page = 1) => j(`/api/logistics-review/doc-freight?period=${period}&mode=${mode}&q=${encodeURIComponent(q)}&page=${page}`)
+export const reviewDocFreight = (period, mode = 'other', q = '', page = 1, carrier = '', ffee = '') => j(`/api/logistics-review/doc-freight?period=${period}&mode=${mode}&q=${encodeURIComponent(q)}&page=${page}&carrier=${encodeURIComponent(carrier)}&ffee=${encodeURIComponent(ffee)}`)
 export const reviewRegisterTemplateUrl = () => '/api/logistics-review/register/template'
 export const reviewRegisterImport = (period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/register/import?period=${period}`, { method: 'POST', body: fd }) }
 
