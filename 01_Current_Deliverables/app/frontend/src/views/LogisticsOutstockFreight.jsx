@@ -12,6 +12,7 @@
 //   V2.779：修收货地址列被挤没(加了费用列后固定宽度超了，地址列是「剩多少给多少」)：每列都给明确宽度，表格最小宽 1900。
 //   V2.781：销售退货单也进这张表(类型标「退货」，销售额/数量为负＝冲减；不算费比；「有/没有运费」只对出库单说)。
 //   V2.782：「另有 N 笔不在下表」的提示改成写明每一类的去向(别的月份的出库单/其他出库单/查不到)，可点开看明细。
+//   V2.783：出库单数据落库(取一次存下来，进页面直接读，点「刷新金蝶」才重取)；右上角显示取数时间，超过一天标出来。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
 import { reviewOutstockFreight } from '../api.js'
@@ -78,8 +79,9 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         <label className="ck"><input type="checkbox" checked={!!f.internal} onChange={e => setF({ ...f, internal: e.target.checked ? 1 : 0, page: 1 })} />含内部交易</label>
         {filtered && <button className="btn" onClick={() => { setQInput(''); setF({ ...f, org: '', btype: '', carrier: '', state: '', q: '', brand: '', stock: '', page: 1 }) }}>清空筛选</button>}
         <span style={{ flex: 1 }} />
-        {d && <span className="dim">金蝶取数 {d.fetched_at}</span>}
-        <button className="btn" disabled={busy} onClick={onFresh} title="重新从金蝶取本月销售出库单（只读）">{busy ? '取数中…' : '刷新金蝶'}</button>
+        {d && <span className="dim" title="出库单数据取一次就存下来，进页面直接读；金蝶那边有新单或改单，点「刷新金蝶」重取">金蝶取数于 {d.fetched_at}
+          {d.stale_days >= 1 && <span className="warn">（{d.stale_days} 天前）</span>}</span>}
+        <button className="btn" disabled={busy} onClick={onFresh} title="重新从金蝶取本月销售出库单、退货单（只读，约 10 秒），取完存下来">{busy ? '取数中…' : '刷新金蝶'}</button>
       </div>
       {d && d.bp_err && <div className="lof-note">{d.bp_err}</div>}
       {d && d.orphan && d.orphan.n > 0 && <Orphan o={d.orphan} />}

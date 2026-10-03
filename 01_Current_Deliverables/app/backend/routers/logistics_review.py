@@ -1104,12 +1104,27 @@ def _internal_customers():
     return {o.get("full_name") for o in (db.list_orgs() or []) if o.get("full_name")} | set(_OS_INTERNAL_EXTRA)
 
 
-def _month_outstock(period, fresh=False):
-    """金蝶当月全部销售出库单 → {单号: {no,date,org,stock_org,customer,status,btype,src,amount,kg,qty_txt,lines:[…]}}。只读，缓存 15 分钟。"""
-    hit = _OS_CACHE.get(period)
-    if hit and not fresh and time.time() - hit[0] < _OS_TTL:
-        return hit[1], hit[0]
+_OS_KIND = "kd:sal_outstock"        # period_inputs 里的 kind：金蝶当月销售出库单+退货单(按单聚合好的)
+
+
+def _month_outstock(period, fresh=False, operator=""):
+    """金蝶当月全部销售出库单+退货单 → ({单号: {…}}, 取数时刻)。只读金蝶。
+    V2.783 落库(用户问「是每次进来重新取数金蝶吗」)：取一次就存进 period_inputs(平台通用的「取数一次、进页面直接读」那张表)，
+    重启不丢、全员共用；以后进页面直接读库，只有点「刷新金蝶」(fresh) 才重取。进程里另留一份免得每次请求都解压。
+    原来只放内存 15 分钟，过期或后端重启就得再等 5～10 秒。"""
     y, m = int(period[:4]), int(period[5:7])
+    hit = _OS_CACHE.get(period)
+    if hit and not fresh:
+        return hit[1], hit[0]
+    if not fresh:
+        try:
+            snap = db.get_period_input("kingdee", y, m, _OS_KIND)
+        except Exception:
+            snap = None
+        if snap and isinstance(snap.get("payload"), dict) and snap["payload"].get("docs"):
+            ts = float((snap.get("meta") or {}).get("ts") or 0) or time.time()
+            _OS_CACHE[period] = (ts, snap["payload"]["docs"])
+            return _OS_CACHE[period][1], ts
     nxt = "%04d-%02d-01" % ((y + 1, 1) if m == 12 else (y, m + 1))
     s, conf = kc.login()
     cols, rows = list(_OS_FIELDS), []
@@ -1164,6 +1179,13 @@ def _month_outstock(period, fresh=False):
         d["kg"] = round(d["kg"], 3)
         d["qty_txt"] = "、".join("%s %s" % (("%.3f" % v).rstrip("0").rstrip("."), k) for k, v in d.pop("units").items() if v)
     _OS_CACHE[period] = (time.time(), docs)
+    try:
+        db.set_period_input("kingdee", y, m, _OS_KIND, {"docs": docs},
+                            meta={"ts": _OS_CACHE[period][0], "n_docs": len(docs), "n_out": sum(1 for d in docs.values() if d.get("kind") != "ret"),
+                                  "n_ret": sum(1 for d in docs.values() if d.get("kind") == "ret"), "desc": "金蝶销售出库单+退货单(单据运费·销售出库单页)"},
+                            operator=operator or "系统")
+    except Exception:
+        pass                      # 存不进库不影响本次显示，下次进来再取
     return docs, _OS_CACHE[period][0]
 
 
@@ -1273,7 +1295,10 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
     from starlette.concurrency import run_in_threadpool
     try:
-        docs, ts = await run_in_threadpool(_month_outstock, period, bool(fresh))
+        _u = _perm(request) or {}
+        docs, ts = await run_in_threadpool(_month_outstock, period, bool(fresh), _uname(_u) if _u else "")
+        if fresh:
+            db.audit(_uname(_u) if _u else "", "单据运费-刷新金蝶", period, "重取销售出库单+退货单 %d 张（只读金蝶）" % len(docs))
     except Exception as e:
         return JSONResponse({"ok": False, "msg": "金蝶取销售出库单失败：%s" % str(e)[:160]}, status_code=502)
     fr = _outstock_freight(period)
@@ -1412,7 +1437,8 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
     for r in view:
         r["lines"] = [dict(ln, brand=bp_of(r["customer"], ln.get("code")).get("brand") or "",
                            series=bp_of(r["customer"], ln.get("code")).get("series") or "") for ln in docs[r["no"]]["lines"]]
-    return {"ok": True, "period": period, "fetched_at": datetime.fromtimestamp(ts).strftime("%H:%M"), "internal": bool(internal),
+    return {"ok": True, "period": period, "fetched_at": datetime.fromtimestamp(ts).strftime("%m-%d %H:%M"),
+            "stale_days": int((time.time() - ts) // 86400), "internal": bool(internal),
             "n_internal": n_internal, "all": stat(base), "cur": stat(rows), "facets": facets, "bp_err": bp_err,
             "orphan": {"n": orphan["n"], "amount": round(orphan["amount"], 2), "groups": orphan.get("groups") or [], "items": orphan.get("items") or []},
             "rows": view, "page": page, "pages": pages, "size": size, "sort": col, "dir": "desc" if desc else "asc"}
