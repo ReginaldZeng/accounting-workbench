@@ -135,7 +135,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
 
       <div className="tabs">
         <button className={'tab' + (tab === 'out' ? ' on' : '')} onClick={() => setTab('out')}>
-          <div className="t">销售出库单</div><div className="s">本月全部销售出库单（剔除内部交易）· 每张单的运费</div></button>
+          <div className="t">销售出库单</div><div className="s">本月全部销售出库单、退货单（剔除内部交易）· 每张单的运费</div></button>
         <button className={'tab' + (tab === 'sales' ? ' on' : '')} onClick={() => setTab('sales')}>
           <div className="t">账单复核明细（已登记）</div><div className="s">已登记复核的账单 · 所有单据类型 · 摊到物料</div></button>
         <button className={'tab' + (tab === 'other' ? ' on' : '')} onClick={() => setTab('other')}>

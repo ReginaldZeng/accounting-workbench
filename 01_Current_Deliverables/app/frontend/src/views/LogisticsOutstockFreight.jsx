@@ -10,6 +10,7 @@
 //     合计标橙色＝其中有待复核的(原「其中待复核」一列并进来，鼠标放上去看金额)。
 //   V2.780：V2.779 把最小宽定到 1900 结果用户屏上要左右滑——压到 1720(日期只显示月-日、列间距收窄、固定列各减几像素)，1900 宽的屏不用滑。
 //   V2.779：修收货地址列被挤没(加了费用列后固定宽度超了，地址列是「剩多少给多少」)：每列都给明确宽度，表格最小宽 1900。
+//   V2.781：销售退货单也进这张表(类型标「退货」，销售额/数量为负＝冲减；不算费比；「有/没有运费」只对出库单说)。
 //   OutstockView 是纯展示(好在本地用真数据渲染核版式)，默认导出的容器负责取数和筛选状态。
 import React, { useEffect, useState, useCallback } from 'react'
 import { reviewOutstockFreight } from '../api.js'
@@ -32,7 +33,8 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
     <div className="lof">
       <style>{CSS}</style>
       <div className="lof-stats">
-        <div className="st"><div className="v">{S ? S.n : '—'}</div><div className="l">销售出库单（张）{filtered && <span className="tag">当前筛选</span>}
+        <div className="st"><div className="v">{S ? S.n_out : '—'}{S && S.n_ret > 0 && <small style={{ color: '#8A96A2' }}> ＋退货 {S.n_ret}</small>}</div><div className="l">销售出库单（张）{filtered && <span className="tag">当前筛选</span>}
+          {S && S.n_ret > 0 && <div className="s">销售退货单 {S.n_ret} 张 · 冲减销售额 {money(S.amount_ret)}{S.fee_ret ? ` · 退货费用 ${money(S.fee_ret)}` : ''}</div>}
           {d && <div className="s">{d.internal ? `含内部交易 ${d.n_internal} 张` : `已剔除内部交易 ${d.n_internal} 张`}</div>}</div></div>
         <div className="st"><div className="v">{S ? S.n_has : '—'}<small> / {S ? S.n_none : '—'}</small></div><div className="l">有运费 / 没有运费（张）
           {S && S.n_none > 0 && <div className="s">没运费的：只有装卸费 {S.n_ldonly} 张 · 什么费用都没有 {S.n_nofee} 张 · 销售额 {money(S.amount_none)}</div>}</div></div>
@@ -40,7 +42,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
           {S && <div className="s">运费 {money(S.fee_tr)} · 装卸费 {money(S.fee_ld)}{S.fee_ot ? ` · 其他 ${money(S.fee_ot)}` : ''}</div>}
           {S && <div className="s">已复核 {money(S.fee_ok)}{S.fee_pending ? <span className="warn"> · 待复核 {money(S.fee_pending)}</span> : ''}</div>}</div></div>
         <div className="st"><div className="v">{S ? pctfmt(S.ratio) : '—'}</div><div className="l">费比（费用合计 ÷ 销售额）
-          {S && <div className="s">销售额 {money(S.amount)}（价税合计）</div>}</div></div>
+          {S && <div className="s">销售额 {money(S.amount)}（价税合计{S.n_ret > 0 ? '，已减退货' : ''}）</div>}</div></div>
       </div>
 
       <div className="lof-bar">
@@ -79,17 +81,17 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
             const isOpen = open.has(r.no)
             const base = r.lines.reduce((s, x) => s + (x.baseqty || 0), 0)
             return <React.Fragment key={r.no}>
-              <tr className={(zero(r.fee_tr) ? 'nofee' : '') + (r.internal ? ' inner' : '')} onClick={() => toggle(r.no)}>
+              <tr className={(r.kind === 'ret' ? 'ret' : zero(r.fee_tr) ? 'nofee' : '') + (r.internal ? ' inner' : '')} onClick={() => toggle(r.no)}>
                 <td className="tg">{isOpen ? '▾' : '▸'}</td>
                 <td>{r.org}</td><td title={r.date}>{String(r.date || '').slice(5)}</td><td className="mono">{r.no}</td>
                 <td className="ell" title={[r.brand, r.bu].filter(Boolean).join(' · ')}>{r.brand || <span className="z">{r.internal ? '—' : '未映射'}</span>}</td>
                 <td className="ell" title={r.customer}>{r.customer}{r.internal && <span className="pill neu">内部</span>}</td>
                 <td className="ell" title={r.stock}>{r.stock || <span className="z">—</span>}</td>
                 <td className="ell" title={[r.linkman, r.addr].filter(Boolean).join(' · ')}>{r.addr || r.linkman ? <>{r.linkman && <b style={{ fontWeight: 600 }}>{r.linkman} </b>}{r.addr}</> : <span className="z">—</span>}</td>
-                <td className="ell" title={r.btype}>{String(r.btype || '').replace('线上销售出库单', '').replace('销售出库单', '')}</td>
+                <td className="ell" title={r.btype}>{r.kind === 'ret' ? <span className="rt">退货</span> : String(r.btype || '').replace('线上销售出库单', '').replace('销售出库单', '')}</td>
                 <td className="num ell" title={r.qty_txt}>{r.qty_txt || '—'}</td>
                 <td className="num">{money(r.amount)}</td>
-                <td className="num">{zero(r.fee_tr) ? <span className="warn">没有运费</span> : money(r.fee_tr)}</td>
+                <td className="num">{zero(r.fee_tr) ? (r.kind === 'ret' ? <span className="z">—</span> : <span className="warn">没有运费</span>) : money(r.fee_tr)}</td>
                 <td className="num">{zero(r.fee_ld) ? <span className="z">—</span> : money(r.fee_ld)}</td>
                 <td className="num">{zero(r.fee_ot) ? <span className="z">—</span> : money(r.fee_ot)}</td>
                 <td className="num" title={r.fee_pending ? `其中待复核 ${money(r.fee_pending)}` : '都已复核'}>{zero(r.fee) ? <span className="z">—</span> : <b className={r.fee_pending ? 'warn' : ''}>{money(r.fee)}</b>}</td>
@@ -169,7 +171,7 @@ const CSS = `
 .lof-tw th.sortable{cursor:pointer;user-select:none;white-space:nowrap}.lof-tw th.sortable:hover{background:#E4EBEF}
 .lof-tw th .ar{margin-left:3px;font-size:10px;color:#B8C2CA}.lof-tw th.on{color:#1F6E8C}.lof-tw th.on .ar{color:#1F6E8C}
 .lof-tw tbody>tr:not(.sub){cursor:pointer}.lof-tw tbody>tr:not(.sub):hover td{background:#F7FAFC}
-.lof-tw tr.nofee td{background:#FFFCF5}.lof-tw tr.inner td{color:#8A96A2}
+.lof-tw tr.nofee td{background:#FFFCF5}.lof-tw tr.ret td{background:#FBF7FB}.lof .rt{color:#8E4A8A;font-weight:600}.lof-tw tr.inner td{color:#8A96A2}
 .lof .num{text-align:right;font-variant-numeric:tabular-nums}.lof th.num{text-align:right}
 .lof .ell{overflow:hidden;text-overflow:ellipsis}.lof .mono{font-family:Consolas,Menlo,monospace;font-size:12.5px}
 .lof .tg{color:#8A96A2;text-align:center;padding-right:0}

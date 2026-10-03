@@ -1059,6 +1059,13 @@ _OS_FIELDS = [("FBillNo", "单号"), ("FDate", "日期"), ("FSaleOrgId.FName", "
               ("FDocumentStatus", "状态"), ("FBillTypeID.FName", "单据类型"), ("FStockOrgId.FName", "发货组织"), ("FSrcBillNo", "源单"),
               # V2.775 用户要「发货仓库和收货地址」：仓库在分录上(一张单可能几个仓)，收货地址/联系人在单头
               ("FStockID.FName", "仓库"), ("FReceiveAddress", "收货地址"), ("FLinkMan", "联系人")]
+# 销售退货单(V2.781，用户「销售退货单是不是也可以加进来」)：字段名和出库单不一样(客户=FRetcustId、基本数量=FBaseunitQty、仓库=FStockId)，2026-10-03 真机实测。
+# 进同一张表，销售额、数量记负数(冲减)；RK 开头是对外退货，XSTHD 开头是孝感对深圳的内部镜像(客户=内部主体，照样剔除)。
+_RT_FIELDS = [("FBillNo", "单号"), ("FDate", "日期"), ("FSaleOrgId.FName", "销售组织"), ("FRetcustId.FName", "客户"),
+              ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"), ("FBaseunitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
+              ("FAllAmount", "价税合计"), ("FRealQty", "数量"), ("FUnitID.FName", "单位"),
+              ("FDocumentStatus", "状态"), ("FBillTypeID.FName", "单据类型"), ("FStockOrgId.FName", "发货组织"), ("FSrcBillNo", "源单"),
+              ("FStockId.FName", "仓库"), ("FReceiveAddress", "收货地址"), ("FLinkMan", "联系人")]
 _OS_INTERNAL_EXTRA = ("SINKIO LIMITED",)
 _BPMAP_CACHE = {}   # "m" -> (ts, combo, mat, err)
 
@@ -1114,12 +1121,23 @@ def _month_outstock(period, fresh=False):
             if len(cols) == 9:
                 raise
             cols = cols[:-1]
+    # 销售退货单：取不到不影响出库单(降级成没有退货)
+    rcols, rrows = list(_RT_FIELDS), []
+    while len(rcols) >= 9:
+        try:
+            rrows = kc._query(s, conf, "SAL_RETURNSTOCK", rcols, "FDate>='%s-01' and FDate<'%s'" % (period, nxt))
+            break
+        except Exception:
+            if len(rcols) == 9:
+                rrows = []
+                break
+            rcols = rcols[:-1]
     docs = {}
-    for r in rows:
+    for r, sign, kind in [(x, 1, "out") for x in rows] + [(x, -1, "ret") for x in rrows]:
         no = str(r.get("单号") or "")
         if not no:
             continue
-        d = docs.setdefault(no, {"no": no, "date": str(r.get("日期") or "")[:10], "org": _short_subject(r.get("销售组织") or ""),
+        d = docs.setdefault(no, {"kind": kind, "no": no, "date": str(r.get("日期") or "")[:10], "org": _short_subject(r.get("销售组织") or ""),
                                  "stock_org": _short_subject(r.get("发货组织") or ""), "customer": r.get("客户") or "",
                                  "status": r.get("状态") or "", "btype": r.get("单据类型") or "", "src": r.get("源单") or "",
                                  "addr": str(r.get("收货地址") or "").strip(), "linkman": str(r.get("联系人") or "").strip(),
@@ -1128,11 +1146,11 @@ def _month_outstock(period, fresh=False):
         if wh and wh not in d["stocks"]:
             d["stocks"].append(wh)
         try:
-            bq = float(r.get("基本数量") or 0)
+            bq = sign * float(r.get("基本数量") or 0)
         except (TypeError, ValueError):
             bq = 0.0
         try:
-            am = float(r.get("价税合计") or 0)
+            am = sign * float(r.get("价税合计") or 0)
         except (TypeError, ValueError):
             am = 0.0
         u = str(r.get("基本单位") or "")
@@ -1245,7 +1263,8 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         fee = round(f["ok"] + f["pending"], 2)
         bps = [bp_of(d["customer"], ln.get("code")) for ln in d["lines"]]       # 品牌照 BP 的客户物料映射：一张单几个物料可能几个品牌
         brands = list(dict.fromkeys(b.get("brand") for b in bps if b.get("brand")))
-        rows.append({"brand": "、".join(brands), "brands": brands,
+        is_ret = d.get("kind") == "ret"
+        rows.append({"kind": d.get("kind") or "out", "brand": "、".join(brands), "brands": brands,
                      "bu": "、".join(dict.fromkeys(b.get("bu") for b in bps if b.get("bu"))),
                      "stock": "、".join(d.get("stocks") or []), "stocks": d.get("stocks") or [],
                      "addr": d.get("addr") or "", "linkman": d.get("linkman") or "",
@@ -1253,7 +1272,7 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
                      "btype": d["btype"], "status": d["status"], "internal": is_in, "amount": d["amount"], "kg": d["kg"], "qty_txt": d["qty_txt"],
                      "n_lines": len(d["lines"]), "fee_ok": round(f["ok"], 2), "fee_pending": round(f["pending"], 2), "fee": fee,
                      "fee_tr": round(f["tr"], 2), "fee_ld": round(f["ld"], 2), "fee_ot": round(f["ot"], 2),
-                     "ratio": round(fee / d["amount"], 4) if d["amount"] and fee else None,
+                     "ratio": round(fee / d["amount"], 4) if d["amount"] and fee and not is_ret else None,      # 退货单不算费比
                      "carriers": [{"carrier": k[0], "period": k[1], "signed": k[2], "amount": round(v["tr"] + v["ld"] + v["ot"], 2),
                                    "tr": round(v["tr"], 2), "ld": round(v["ld"], 2), "ot": round(v["ot"], 2)} for k, v in sorted(f["parts"].items())]})
     # 账单写了销售出库单号、但本月出库单里没有的(发货在别的月 / 单号填错 / 其实是其他出库单)
@@ -1286,14 +1305,15 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
         rows = [r for r in rows if r["btype"] == btype]
     if carrier:
         rows = [r for r in rows if any(x["carrier"] == carrier for x in r["carriers"])]
+    # 有/没有运费只对出库单说(退货单本来就不该有运费)
     if state == "has":
-        rows = [r for r in rows if r["fee_tr"]]
+        rows = [r for r in rows if r["kind"] == "out" and r["fee_tr"]]
     elif state == "none":
-        rows = [r for r in rows if not r["fee_tr"]]
+        rows = [r for r in rows if r["kind"] == "out" and not r["fee_tr"]]
     elif state == "ldonly":
-        rows = [r for r in rows if not r["fee_tr"] and r["fee_ld"]]
+        rows = [r for r in rows if r["kind"] == "out" and not r["fee_tr"] and r["fee_ld"]]
     elif state == "nofee":
-        rows = [r for r in rows if not r["fee"]]
+        rows = [r for r in rows if r["kind"] == "out" and not r["fee"]]
     elif state == "pending":
         rows = [r for r in rows if r["fee_pending"]]
     elif state == "ok":
@@ -1324,9 +1344,13 @@ async def review_outstock_freight(request: Request, period: str = "", internal: 
 
     def stat(rs):
         fee, amt = sum(r["fee"] for r in rs), sum(r["amount"] for r in rs)
-        amt_has = sum(r["amount"] for r in rs if r["fee_tr"])
-        return {"n": len(rs), "n_has": sum(1 for r in rs if r["fee_tr"]), "n_none": sum(1 for r in rs if not r["fee_tr"]),
-                "n_ldonly": sum(1 for r in rs if not r["fee_tr"] and r["fee_ld"]), "n_nofee": sum(1 for r in rs if not r["fee"]),
+        outs = [r for r in rs if r["kind"] == "out"]
+        rets = [r for r in rs if r["kind"] == "ret"]
+        amt_has = sum(r["amount"] for r in outs if r["fee_tr"]) + sum(r["amount"] for r in rets)
+        return {"n": len(rs), "n_out": len(outs), "n_ret": len(rets), "amount_ret": round(sum(r["amount"] for r in rets), 2),
+                "fee_ret": round(sum(r["fee"] for r in rets), 2),
+                "n_has": sum(1 for r in outs if r["fee_tr"]), "n_none": sum(1 for r in outs if not r["fee_tr"]),
+                "n_ldonly": sum(1 for r in outs if not r["fee_tr"] and r["fee_ld"]), "n_nofee": sum(1 for r in outs if not r["fee"]),
                 "fee_tr": round(sum(r["fee_tr"] for r in rs), 2), "fee_ld": round(sum(r["fee_ld"] for r in rs), 2),
                 "fee_ot": round(sum(r["fee_ot"] for r in rs), 2),
                 "fee_ok": round(sum(r["fee_ok"] for r in rs), 2), "fee_pending": round(sum(r["fee_pending"] for r in rs), 2),
