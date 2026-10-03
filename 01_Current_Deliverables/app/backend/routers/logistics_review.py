@@ -1536,6 +1536,12 @@ def _trip_check(r, tu, n, fee, pmap):
             "msg": "；".join(msgs) if msgs else "按报价 %s×%g=%s" % (_fmt_amt(price), n, _fmt_amt(std))}
 
 
+def _wt_range(carrier):
+    """该承运商的毛重比允许范围 (下限, 上限)；没配返回 None=默认差 2% 以内。存供应商档案 logistics_suppliers.wt_lo/wt_hi。"""
+    sup = next((x for x in (db.list_logi_suppliers() or []) if x.get("short") == carrier), None) or {}
+    return (float(sup["wt_lo"]), float(sup["wt_hi"])) if sup.get("wt_lo") and sup.get("wt_hi") else None
+
+
 def _box_docs(rsub, carrier):
     """统一物料模板·单据视图：账单每张单据一条 doc（materials=金蝶物料明细，运费按货品kg摊、剔包材）。
     核量三口径：weight=账单重量vs金蝶kg / qty=账单件vs金蝶件(剔包装) / box=有账单重量按重量，否则账单件vs金蝶箱(规格箱规)。
@@ -1559,6 +1565,8 @@ def _box_docs(rsub, carrier):
     # 短驳(包天包趟)价目：承运商配置 spec_json.shuttle_prices=[{car,unit(天/趟),price}]，如极鲜达《仓储收费标准(星期零)》短驳运输
     _sp = _load_spec(carrier) or {}
     pmap = {(_car_norm(x.get("car")), x.get("unit")): float(x.get("price") or 0) for x in (_sp.get("shuttle_prices") or [])}
+    # 毛重比允许范围(基础设置·供应商列表，V2.763)：配了就按 账单重量÷金蝶净重 落在范围内算一致；没配走默认(差 2% 以内)
+    wt_rng = _wt_range(carrier)
     docs = []
     for r in rsub:
         d0 = (r.get("doc_no") or "").split("+")[0]
@@ -1587,7 +1595,10 @@ def _box_docs(rsub, carrier):
             kd_sum = round(sum(per), 2)
             wbase = chg_wt if chg_wt else kd_sum
             bill_amt, bill_unit, kd_unit, mode_cn = wbase, "千克", "千克", "按重量"
-            cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
+            if wt_rng and kd_sum:
+                cnt_state = "ok" if wt_rng[0] - 1e-9 <= wbase / kd_sum <= wt_rng[1] + 1e-9 else "qtydiff"
+            else:
+                cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
             conv = round(wbase / kd_sum, 3) if kd_sum else None   # 按重量：换算系数=账单重量÷金蝶重量(毛重比)
             mkq = lambda m: (float(m.get("基本数量") or 0) if ("千克" in str(m.get("基本单位") or "")) else None)
             mku = lambda m: m.get("基本单位")
@@ -1948,7 +1959,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier)}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
@@ -2299,6 +2310,29 @@ def review_dim_options(request: Request):
     if all(out[k] for k in ("acct", "fee", "dept", "biz", "proj")):
         _DIMOPT_CACHE["v"] = (out, _t.time())
     return out
+
+
+@router.post("/api/logistics-review/wt-range")
+async def review_wt_range(request: Request):
+    """毛重比允许范围(一家一档，不分月)：账单重量÷金蝶净重 落在 [lo, hi] 内算重量一致；两个都空=恢复默认(差 2% 以内)。
+    快递/快运计费重量含包装、抛重，一般配 1~2(用户 2026-10-03 定放进基础设置，V2.763)。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier = (b.get("carrier") or "").strip()
+    sup = next((x for x in (db.list_logi_suppliers() or []) if x.get("short") == carrier), None)
+    if not sup:
+        return JSONResponse({"ok": False, "msg": "供应商档案里没有「%s」，先建档再配毛重比" % carrier}, status_code=400)
+    try:
+        db.save_logi_supplier({"short": sup["short"], "full": sup.get("full"), "kd_code": sup.get("kd_code"), "channel": sup.get("channel"),
+                               "note": sup.get("note"), "wt_lo": b.get("lo"), "wt_hi": b.get("hi")}, _uname(u))
+    except ValueError as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+    db.audit(_uname(u), "物流复核-毛重比范围", carrier, "%s ~ %s" % (b.get("lo") or "默认", b.get("hi") or "默认"))
+    for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and carrier in k]:
+        _ACCR_CACHE.pop(k, None)          # 各月逐单视图缓存一并作废，按新范围重判
+    return {"ok": True, "wt_range": _wt_range(carrier)}
 
 
 @router.post("/api/logistics-review/carrier-points")

@@ -9,7 +9,7 @@
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback } from 'react'
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -317,6 +317,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
   }
   const kingdee = () => { setBusy('kd'); reviewKingdeeQty(carrier, period).then(r => { flash(`金蝶出库单 ${r.kd_docs} 单，回填 ${r.filled} 行`); load() }).catch(e => flash('失败：' + e.message)).finally(() => setBusy('')) }
+  // 毛重比允许范围(基础设置，一家一档)：账单重量÷金蝶净重 落在范围内算重量一致；留空=默认差 2% 以内
+  const editWt = () => {
+    const cur = d && d.wt_range
+    const lo = window.prompt(`「${carrier}」毛重比下限（账单重量 ÷ 金蝶净重）\n快递/快运含包装、抛重，一般填 1；整车留空（默认差 2% 以内算一致）`, cur ? cur[0] : '')
+    if (lo === null) return
+    const hi = lo.trim() === '' ? '' : window.prompt('毛重比上限（快递/快运一般填 2）', cur ? cur[1] : '2')
+    if (hi === null) return
+    reviewWtRange(carrier, lo.trim(), String(hi).trim()).then(() => { flash('毛重比范围已保存，按新范围重判'); load() }).catch(e => flash('保存失败：' + e.message))
+  }
   const saveNote = (doc_no, note) => { reviewDocNote(carrier, period, doc_no, note).catch(e => flash('备注保存失败：' + e.message)) }
   // 逐单手改归类(主体/费用类型)→存账单侧覆盖列→逐笔复核按新归类重算
   const saveClass = (doc_no, patch) => {
@@ -886,6 +895,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               {dfilt && <button className="btn sm" onClick={() => { setDfilt(null); setPage(1); setOpen({}) }}>清空筛选</button>}
             </>}
             <div style={{ flex: 1 }} />
+            {d && d.by_box && <button className="btn sm" onClick={editWt} title="按重量核量时，账单重量÷金蝶净重 落在这个范围内算一致。快递/快运含包装、抛重，一般 1～2；整车用默认（差 2% 以内）。一家一档，各月通用">
+              毛重比 {d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认±2%'} ⚙</button>}
             <label className="btn sm">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
             <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee} title="重新从金蝶取出库单物料，刷新核量">{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
             <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>

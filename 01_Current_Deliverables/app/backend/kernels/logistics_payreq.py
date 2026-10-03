@@ -76,10 +76,15 @@ def classify_file(name, source):
 
 # 同一家快递供应商下的「办公室快递月结」(深圳/上海办公室按部门分摊，记费用不走物流计提)不属于物流账单复核(用户 2026-10-01 定排除)
 _EXCL_KW = (("办公室", "办公室快递月结"),)
+# 按收款方排除：湖北顺丰速运=孝感各部门快递费(研发/生产/财务…)，付款时按部门直接入账、不走物流计提(用户 2026-10-03 定不进)
+_EXCL_PAYEE = (("湖北顺丰速运", "各部门快递费"),)
 
 
-def auto_exclude(texts):
-    """事由/附件名 → 排除原因；不该排除返回 ''。"""
+def auto_exclude(texts, payee=""):
+    """事由/附件名(+收款方) → 排除原因；不该排除返回 ''。"""
+    for kw, why in _EXCL_PAYEE:
+        if kw in str(payee or ""):
+            return why
     for t in texts:
         for kw, why in _EXCL_KW:
             if kw in str(t or ""):

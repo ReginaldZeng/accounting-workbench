@@ -237,7 +237,7 @@ def _scan(trigger, days):
     for r in allr:
         if r.get("excluded") is None:
             texts = [r.get("reason")] + [x.get("fileName") for x in json.loads(r.get("files_json") or "[]")]
-            why = lpq.auto_exclude(texts)
+            why = lpq.auto_exclude(texts, r.get("payee"))
             with db._engine.begin() as c:
                 c.execute(update(PR).where(PR.c.inst_id == r["inst_id"]).values(excluded=("自动：" + why) if why else ""))
             r["excluded"] = ("自动：" + why) if why else ""

@@ -62,6 +62,13 @@ export default function LogisticsBasicData({ user }) {
     const r = await saveLogiSupplier({ short: sp.short, full, kd_code: code, channel: chan, note: sp.note || '' })
     if (!r.ok) throw new Error(r.msg || '保存失败')
   })
+  // 毛重比允许范围：账单重量÷金蝶净重 落在范围内算一致(复核台逐单核量用)。两格都留空=默认(差 2% 以内，整车口径)
+  const editWt = (sp) => guard(async () => {
+    const lo = window.prompt(`「${sp.short}」毛重比下限（账单重量÷金蝶净重）\n快递/快运一般填 1；留空=恢复默认（差 2% 以内）`, sp.wt_lo ?? ''); if (lo === null) return
+    const hi = lo.trim() === '' ? '' : window.prompt('毛重比上限（快递/快运含包装、抛重，一般填 2）', sp.wt_hi ?? '2'); if (hi === null) return
+    const r = await saveLogiSupplier({ short: sp.short, full: sp.full, kd_code: sp.kd_code || '', channel: sp.channel, note: sp.note || '', wt_lo: lo.trim(), wt_hi: String(hi).trim() })
+    if (!r.ok) throw new Error(r.msg || '保存失败')
+  })
   const addSup = () => guard(async () => {
     const short = window.prompt('新物流商·简称（唯一查找键，账单文件名里认得出；同名两法人须拆不同简称）'); if (!short) return
     const full = window.prompt('全名（与金蝶档案一致）', short); if (full === null) return
@@ -78,9 +85,10 @@ export default function LogisticsBasicData({ user }) {
         <span style={{ fontSize: 12.5, color: '#77756e' }}>一行一物流商；右侧=该商各费用类型的<b>不含税</b>税率（默认档兜底，仓储 6% 等特例单列）。税率来源=报价单专票口径；账单解析、模板签发都吃这里。</span>
         {canUp && <button style={{ ...btn, marginLeft: 'auto' }} onClick={addSup}>＋ 新增物流商</button>}
       </div>
-      <div style={{ overflowX: 'auto' }}><table style={{ borderCollapse: 'collapse', fontSize: 12.5, minWidth: 860 }}>
+      <div style={{ overflowX: 'auto' }}><table style={{ borderCollapse: 'collapse', fontSize: 12.5, minWidth: 960 }}>
         <thead><tr>
           <th style={cth}>供应商名称（金蝶档案）</th><th style={cth}>金蝶代码</th><th style={cth}>简称</th><th style={cth}>渠道</th>
+          <th style={cth} title="复核台逐单核量：账单重量÷金蝶净重 落在这个范围内算一致。快递/快运含包装、抛重，一般 1～2；没配按默认（差 2% 以内）">毛重比范围</th>
           <th style={cth}>费用类型</th><th style={cth}>税率</th><th style={cth}>维护</th><th style={cth}></th>
         </tr></thead>
         <tbody>
@@ -95,6 +103,8 @@ export default function LogisticsBasicData({ user }) {
                 <td rowSpan={n} style={{ ...ctd, fontFamily: 'Consolas,monospace', color: sp.kd_code ? undefined : '#b9b7ae' }}>{sp.kd_code || '（录入时实查）'}</td>
                 <td rowSpan={n} style={{ ...ctd, fontWeight: 600 }}>{sp.short}</td>
                 <td rowSpan={n} style={{ ...ctd, color: sp.channel === '线上' ? '#2c6bcf' : undefined }}>{sp.channel}</td>
+                <td rowSpan={n} style={{ ...ctd, whiteSpace: 'nowrap' }}>{sp.wt_lo != null && sp.wt_hi != null ? <b>{sp.wt_lo} ～ {sp.wt_hi}</b> : <span style={{ color: '#b9b7ae' }}>默认 ±2%</span>}
+                  {canUp && <span onClick={() => editWt(sp)} style={{ marginLeft: 6, color: '#305496', cursor: 'pointer', fontSize: 11.5 }}>改</span>}</td>
               </>}
               <td style={ctd}>{r ? (r.fee_type || <span style={{ color: '#8a8880' }}>（默认·全部类型）</span>) : <span style={{ color: 'var(--red)' }}>未维护税率</span>}</td>
               <td style={{ ...ctd, textAlign: 'right', fontWeight: r && r.fee_type ? 600 : 400 }}>{r ? pct(r.rate) : '—'}</td>

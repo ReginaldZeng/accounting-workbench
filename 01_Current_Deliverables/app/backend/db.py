@@ -316,6 +316,10 @@ logi_suppliers = Table(             # 物流·供应商列表（V2.198 基础数
     Column("kd_code", String(60)),              # 金蝶供应商编码（可空，录入时以档案实查为准）
     Column("channel", String(10)),              # 渠道：线下/线上（进摘要）
     Column("note", String(200)),
+    # 毛重比允许范围(V2.763，基础设置里配)：账单重量÷金蝶净重 在 [wt_lo, wt_hi] 内算一致。
+    # 快递/快运计费重量含包装、抛重，一般 1~2；两个都空=默认(整车口径：差 2% 以内)
+    Column("wt_lo", Float),
+    Column("wt_hi", Float),
     Column("updated_by", String(50)),
     Column("updated_at", String(20)),
 )
@@ -1815,6 +1819,24 @@ def _ensure_bill_upload_status_cols():
 _ensure_bill_upload_status_cols()
 
 
+def _ensure_logi_supplier_wt_cols():
+    """V2.763 供应商列表加 毛重比 wt_lo/wt_hi；老库补列，并给快递/快运三家置初值 1~2(用户 2026-10-03 定放宽)。"""
+    from sqlalchemy import text as _text
+    with _engine.begin() as c:
+        cols = [r[1] for r in c.execute(_text("PRAGMA table_info(logistics_suppliers)")).fetchall()] \
+            if DB_URL.startswith("sqlite") else \
+            [r[0] for r in c.execute(_text(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='logistics_suppliers' AND TABLE_SCHEMA=DATABASE()")).fetchall()]
+        if not cols or "wt_lo" in cols:
+            return
+        c.execute(_text("ALTER TABLE logistics_suppliers ADD COLUMN wt_lo FLOAT"))
+        c.execute(_text("ALTER TABLE logistics_suppliers ADD COLUMN wt_hi FLOAT"))
+        c.execute(_text("UPDATE logistics_suppliers SET wt_lo=1, wt_hi=2 WHERE short IN ('跨越物流','中通快运','顺丰速运')"))
+
+
+_ensure_logi_supplier_wt_cols()
+
+
 def _ensure_ec_shop_map_cols():
     """V2.250 建的 ec_shop_map 无 alipay_acct 列时补上（create_all 不改既有表，同上款兜底）。"""
     from sqlalchemy import text as _text
@@ -2186,6 +2208,17 @@ def save_logi_supplier(row, operator):
     vals = dict(full=str(row.get("full", "") or "").strip(), kd_code=str(row.get("kd_code", "") or "").strip(),
                 channel=str(row.get("channel", "") or "线下").strip(), note=str(row.get("note", "") or "").strip(),
                 updated_by=str(operator or ""), updated_at=_now())
+    # 毛重比：传了才改(老入口只传身份几项，不能把已配的范围冲掉)；空=恢复默认
+    if "wt_lo" in row or "wt_hi" in row:
+        def _num(v):
+            v = str(v if v is not None else "").strip()
+            return float(v) if v else None
+        lo, hi = _num(row.get("wt_lo")), _num(row.get("wt_hi"))
+        if (lo is None) != (hi is None):
+            raise ValueError("毛重比下限和上限要么都填、要么都留空（留空=默认差 2% 以内）")
+        if lo is not None and not (0 < lo <= hi):
+            raise ValueError("毛重比要 0 < 下限 ≤ 上限")
+        vals.update(wt_lo=lo, wt_hi=hi)
     with _engine.begin() as c:
         r = c.execute(select(logi_suppliers.c.id).where(logi_suppliers.c.short == short)).first()
         if r:
