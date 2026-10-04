@@ -241,7 +241,9 @@ textarea.ac-input{height:auto; padding:8px 10px; width:100%; box-sizing:border-b
 .ac-cmp thead .pin-l{background:var(--bg-rail); z-index:3;}
 .ac-cmp td{padding:6px 10px;}
 .ac-cmp td.num{min-width:74px;}
-.ac-cmp td.num:nth-child(5),.ac-cmp td.num:nth-child(8),.ac-cmp td.num:nth-child(11){box-shadow:inset -1px 0 0 var(--line);}
+.ac-cmp td.num:nth-child(5),.ac-cmp td.num:nth-child(6),.ac-cmp td.num:nth-child(9),.ac-cmp td.num:nth-child(12){box-shadow:inset -1px 0 0 var(--line);}
+.ac-cmp thead th small{display:block; font-weight:400; font-size:10px; color:var(--ink-3); letter-spacing:0;}
+.ac-cmp thead tr.c th{height:34px;}
 .ac-cmp .strong{font-weight:700;}
 .ac-cmp .sub{font-size:11px; color:var(--ink-3); margin-top:1px;}
 .ac-cmp tr.ac-row{cursor:pointer;}

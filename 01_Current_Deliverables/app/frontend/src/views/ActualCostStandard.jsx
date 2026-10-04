@@ -4,11 +4,13 @@
 // 本期自制的半成品（如高浓豆浆）可以就地展开它自己的用料。数值全部来自后端，这里不另算口径；
 // 仅有的两处加工：半成品子项按「本产品对它的单耗」折算、以及由此得到的「其余（人工制费及计价差）」。
 // V2.792：单位不一致的料可以填换算系数、底稿里没有的料可以指成某颗料的替代料——都由人来定，系统不猜；设了才并，行上写明，随时可撤。
+// V2.793：加「生产 BOM」一层（工单用料清单折成每公斤标准单耗），用量差异拆成 配方（报价→BOM）和 生产（BOM→实际）两段，各找各的责任人。
 // 规矩（沿用交接）：多份底稿不替人挑最新；空值显示「—」不显示 0；采购价、底稿计价、出库计价分开标；来源与版本提示常显。
 import React, { useEffect, useState } from 'react'
 import { api, Note, Num, Seg, fmt, fmtDate, fmtFull, fmtPct, isNum } from './actualCostShared.jsx'
 
-const SECTION = { 原料: '原料', 包材: '包材', 实际新增: '底稿里没有、本期实际领用的', 实际用料: '本期实际用料' }
+const SECTION = { 原料: '原料', 包材: '包材', 实际新增: '底稿里没有、本期实际领用的', 实际用料: '本期实际用料', 仅生产BOM: '只在生产 BOM 里、底稿和本期领用都没有的' }
+const TAIL = ['实际新增', '仅生产BOM']
 const FEES = [['mfg', '加工费'], ['load', '装卸费'], ['adm', '管理费']]
 const QUIET = ['匹配', '实际用料']
 const statusTone = s => (/新增/.test(s) ? 'violet' : 'amber')
@@ -43,7 +45,7 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
   }, [choice, org, year, period, runId, target.code, target.cc, detail, rev])
 
   const view = data || breakdown || { rows: [] }, overlay = !!data
-  const sections = [...new Set(view.rows.map(r => r.section))].sort((a, b) => (a === '实际新增') - (b === '实际新增'))
+  const sections = [...new Set(view.rows.map(r => r.section))].sort((a, b) => TAIL.indexOf(a) - TAIL.indexOf(b))
   const draftNotes = data ? (data.issues || []).filter(s => s !== data.standard.provenance_note && /定稿/.test(s)) : []
   const method = data ? (data.issues || []).filter(s => s !== data.standard.provenance_note && !/定稿/.test(s)) : []
   const prices = code => (detail?.prices || []).filter(p => p.code === code)
@@ -51,7 +53,7 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
   const makerOf = code => (products || []).filter(p => p.code === code && p.code !== target.code && p.qty > 0).sort((a, b) => b.qty - a.qty)[0]
   const price = r => (incl ? r.actual_price_incl : r.actual_price), cost = r => (incl ? r.actual_cost_incl : r.actual_cost)
   const sPrice = r => (incl ? r.quote_price : r.standard_price), sCost = r => (incl ? r.standard_cost_incl : r.standard_cost)
-  const cols = overlay ? 12 : 6
+  const cols = overlay ? 15 : 8, gap = overlay ? 9 : 2    // gap＝实际四列之后、备注之前的列数（半成品子行用来占位）
 
   const loadSemi = async (code, maker, refresh) => {
     setSemi(s => ({ ...s, [code]: { ...(s[code] || {}), busy: true, error: '' } }))
@@ -124,14 +126,19 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
             <tr className="g">
               <th rowSpan={2} className="pin-l">子项物料 <span className="ac-hint">点一行看采购记录{overlay ? '和影响金额' : ''}</span></th>
               <th colSpan={4}>本期实际（金蝶）· 每公斤产品</th>
+              <th title="金蝶工单用料清单的标准用量，按本期完工量折成每公斤；只有用量，没有价格">生产 BOM</th>
               {overlay && <th colSpan={3}>底稿（报价）· 每公斤产品</th>}
-              {overlay && <th colSpan={3}>差异率（实际 ÷ 底稿 − 1）</th>}
+              <th colSpan={overlay ? 5 : 1}>差异率</th>
               <th rowSpan={2} className="note">差异原因 / 备注</th>
             </tr>
             <tr className="c">
               <th className="r">单耗</th><th className="r">{incl ? '含税单价' : '出库单价'}</th><th className="r">{incl ? '含税成本' : '单位成本'}</th><th className="r">占比</th>
+              <th className="r">标准单耗</th>
               {overlay && <><th className="r">单耗</th><th className="r">{incl ? '含税单价' : '计价单价'}</th><th className="r">{incl ? '含税成本' : '成本'}</th>
-                <th className="r">用量</th><th className="r">单价</th><th className="r">整体</th></>}
+                <th className="r" title="生产 BOM 单耗 ÷ 底稿单耗 − 1：配方或报价假设变了多少（找研发、BP）">配方<small>报价→BOM</small></th></>}
+              <th className="r" title="实际单耗 ÷ 生产 BOM 单耗 − 1：车间超耗还是节约（找生产）。含在产和跨期影响">生产<small>BOM→实际</small></th>
+              {overlay && <><th className="r" title="实际单耗 ÷ 底稿单耗 − 1，等于前两段连乘">用量合计</th>
+                <th className="r" title="实际出库单价 ÷ 底稿计价单价 − 1：采购价变了多少（找采购）">单价</th><th className="r" title="实际成本 ÷ 底稿成本 − 1">整体</th></>}
             </tr>
           </thead>
           <tbody>
@@ -157,8 +164,11 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
                       </td>
                       <td className="num"><Num v={r.actual_qty} d={4} /></td><td className="num"><Num v={price(r)} d={4} /></td>
                       <td className="num strong"><Num v={cost(r)} d={4} /></td><td className="num">{isNum(r.actual_share) ? fmtPct(r.actual_share, 1) : <span className="ac-nil">—</span>}</td>
+                      <td className="num" title={r.bom_note || (r.bom_orders ? `${r.bom_orders} 张工单的用料清单` : '')}><Num v={r.bom_qty} d={4} /></td>
                       {overlay && <><td className="num"><Num v={r.standard_qty} d={4} /></td><td className="num"><Num v={sPrice(r)} d={4} /></td><td className="num strong"><Num v={sCost(r)} d={4} /></td>
-                        <td className="num"><Rate v={r.qty_rate} /></td><td className="num"><Rate v={r.price_rate} /></td><td className="num strong"><Rate v={r.cost_rate} /></td></>}
+                        <td className="num"><Rate v={r.design_rate} /></td></>}
+                      <td className="num"><Rate v={r.bom_rate} /></td>
+                      {overlay && <><td className="num strong"><Rate v={r.qty_rate} /></td><td className="num"><Rate v={r.price_rate} /></td><td className="num strong"><Rate v={r.cost_rate} /></td></>}
                       <td className="note" onClick={e => e.stopPropagation()}>
                         <input className="ac-note-in" aria-label={`${r.code} 差异原因`} disabled={!canNote || saving === key} maxLength={500}
                           placeholder={canNote ? '写原因，回车或点别处保存' : ''} title={saved ? `${saved.by} · ${fmtDate(saved.at)}` : ''}
@@ -172,11 +182,11 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
                       <td className="num"><Num v={scale != null && isNum(k.actual_qty) ? k.actual_qty * scale : null} d={4} /></td>
                       <td className="num"><Num v={incl ? k.actual_price_incl : k.actual_price} d={4} /></td>
                       <td className="num"><Num v={kidCost(k)} d={4} /></td><td className="num"><span className="ac-nil">—</span></td>
-                      {overlay && <td colSpan={6} />}<td className="note muted">{r.name} 的用料</td>
+                      <td colSpan={gap} /><td className="note muted">{r.name} 的用料</td>
                     </tr>)}
                     {kids && <tr className="ac-child rest">
                       <td className="pin-l">其余：{r.name} 的人工、制造费用及计价差<div className="sub">本产品领用成本 − 上面各料折算成本</div></td>
-                      <td /><td /><td className="num"><Num v={rest} d={4} /></td><td />{overlay && <td colSpan={6} />}<td className="note muted">{scale == null ? '领用单位不是千克，无法折算' : `含 ${r.name} 的加工费`}</td>
+                      <td /><td /><td className="num"><Num v={rest} d={4} /></td><td /><td colSpan={gap} /><td className="note muted">{scale == null ? '领用单位不是千克，无法折算' : `含 ${r.name} 的加工费`}</td>
                     </tr>}
                     {shown && <tr className="ac-open"><td colSpan={cols}>
                       <div className="ac-drill">
@@ -231,6 +241,7 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
                           {overlay && <div className="ac-kv"><span>底稿含税采购价{isNum(r.tax_rate) ? `（税率 ${fmtPct(r.tax_rate, 0)}）` : ''}</span><b><Num v={r.quote_price} d={4} /></b></div>}
                           {overlay && <div className="ac-kv"><span>底稿计价单价（不含税）</span><b><Num v={r.standard_price} d={4} /></b></div>}
                           <div className="ac-kv"><span>实际出库单价（库存计价，不含税）</span><b><Num v={r.actual_price} d={4} /></b></div>
+                          <div className="ac-kv"><span>生产 BOM 标准单耗{r.bom_orders ? `（${r.bom_orders} 张工单）` : ''}</span><b>{isNum(r.bom_qty) ? `${fmt(r.bom_qty, 4)} ${r.unit}/kg` : <span className="ac-nil">{r.bom_note || '—'}</span>}</b></div>
                           <div className="ac-kv"><span>本期净领用</span><b>{isNum(r.net_qty) ? `${fmt(r.net_qty)} ${r.unit} · ${fmt(r.net_amount)} 元` : '—'}</b></div>
                           {overlay && <><div className="ac-kv"><span>用量影响（元/kg）</span><b><Num v={r.quantity_effect} d={4} signed tone /></b></div>
                             <div className="ac-kv"><span>计价影响（元/kg）</span><b><Num v={r.price_effect} d={4} signed tone /></b></div>
@@ -256,8 +267,9 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
           <tfoot><tr>
             <td className="pin-l">合计（直接材料 · 元/kg）</td><td /><td />
             <td className="num"><Num v={incl ? view.actual_material_incl : view.actual_material_input_per_kg} d={4} /></td><td className="num">{view.ready ? '100%' : ''}</td>
-            {overlay && <><td /><td /><td className="num"><Num v={incl ? view.standard_material_incl : view.standard_material_cost} d={4} /></td>
-              <td /><td /><td className="num" title="按不含税口径：本期材料投入 ÷ 底稿材料成本 − 1"><Rate v={view.material_cost_rate} /></td></>}
+            <td className="muted" title="生产 BOM 只有用量、没有价格，所以没有成本合计" />
+            {overlay ? <><td /><td /><td className="num"><Num v={incl ? view.standard_material_incl : view.standard_material_cost} d={4} /></td>
+              <td /><td /><td /><td /><td className="num" title="按不含税口径：本期材料投入 ÷ 底稿材料成本 − 1"><Rate v={view.material_cost_rate} /></td></> : <td />}
             <td className="note muted">{incl && view.actual_incl_unknown ? `有 ${view.actual_incl_unknown} 颗料没有税率依据，没计入含税合计` : ''}</td>
           </tr></tfoot>
         </table>
@@ -292,6 +304,7 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
         <div className="explain-in">
           <p>单耗 ＝ 本期净领用数量 ÷ 本期完工公斤；单位成本 ＝ 本期净领用金额 ÷ 本期完工公斤；出库单价 ＝ 单位成本 ÷ 单耗（库存出库计价，不是采购价）。含在产和跨期影响，不直接判定超耗。</p>
           <p>含税口径：底稿用含税采购价；实际成本按这颗料在底稿里的「含税采购价 ÷ 不含税计价」折成含税（专票约为 1＋税率，普票为 1），底稿里没有的料按本期应付单税率折，都没有就不折。差异率在含税、不含税下是一样的。</p>
+          <p>生产 BOM ＝ 金蝶各工单用料清单的标准用量，按「÷ 用料单产品数量 × 本期完工量」逐工单折算后汇总，再除以完工公斤；只有用量，没有价格。用量差异拆两段：配方（报价→BOM）＝ BOM 单耗 ÷ 底稿单耗 − 1，生产（BOM→实际）＝ 实际单耗 ÷ BOM 单耗 − 1，两段连乘等于用量合计。某张工单的用料清单是固定用量、带固定损耗、未审核或一单多版本时，这颗料的 BOM 不出数。主料和替代料在用料清单里各列足量，设了替代料后每张工单取较大的一行，不相加。</p>
           {method.map((s, i) => <p key={i}>{s}</p>)}
           {overlay && <p>用量影响 ＝（实际单耗 − 底稿单耗）× 底稿计价单价。计价影响 ＝ 实际单耗 ×（实际出库单价 − 底稿计价单价）。只有编码、单位唯一匹配且数量有效的行才计算差异。</p>}
           {overlay && <p className="ex-foot mono" style={{ overflowWrap: 'anywhere' }}>底稿指纹 {data.fingerprint}</p>}

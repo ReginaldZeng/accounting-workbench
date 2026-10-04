@@ -189,5 +189,61 @@ class TestMaterialMapping(unittest.TestCase):
         self.assertEqual(by[('BAG2', 'pcs', '实际新增')]['merged'], [])
 
 
+class TestBomLayer(unittest.TestCase):
+    """生产 BOM 一层（V2.793）：用量差异拆成 配方（报价→BOM）× 生产（BOM→实际）；替代料在 BOM 一侧逐工单取大不相加。"""
+    PRODUCT = dict(cc='小料车间', code='A001', qty=100.0, unit=2.0)
+    ENTRY = dict(erp_code='A001', status='已定稿', materials=[
+        dict(seg='原料', matCode='OIL', matName='大豆油', unit='kg', qtyPerKg=0.30, priceIncl=3.39, taxRate=0.13, costExcl=0.90),
+        dict(seg='包材', matCode='BAG1', matName='包装袋', unit='pcs', qtyPerKg=1.0, priceIncl=0.339, taxRate=0.13, costExcl=0.30)])
+
+    def detail(self, oil_standard=28.0):
+        return dict(
+            movements=[dict(code='OIL', unit='千克', name='大豆油', net_qty=27.0, net_amount=81.0, bill='L1'),
+                       dict(code='BAG1', unit='Pcs', name='包装袋', net_qty=70.0, net_amount=21.0, bill='L2'),
+                       dict(code='BAG2', unit='Pcs', name='包装袋', net_qty=33.0, net_amount=9.9, bill='L3')],
+            # 逐工单折好的标准量；工单 1 的用料清单里主料袋和替代料袋各列足量（二选一），工单 2 只列主料袋
+            materials=[dict(wo='MO1', code='OIL', unit='千克', name='大豆油', standard_qty=oil_standard, bom='A001_V1'),
+                       dict(wo='MO1', code='BAG1', unit='Pcs', name='包装袋', standard_qty=60.0, bom='A001_V1'),
+                       dict(wo='MO1', code='BAG2', unit='Pcs', name='包装袋', standard_qty=60.0, bom='A001_V1'),
+                       dict(wo='MO2', code='BAG1', unit='Pcs', name='包装袋', standard_qty=41.0, bom='A001_V1'),
+                       dict(wo='MO2', code='SALT', unit='千克', name='盐', standard_qty=None, bom='')],      # 用料清单里没有这颗料
+            prices=[], controls=dict(complete_material=111.9))
+
+    def by(self, out):
+        return {(r['code'], r['section']): r for r in out['rows']}
+
+    def test_usage_variance_splits_into_design_and_production(self):
+        import actual_cost_standard as standard
+        oil = self.by(standard.compare(self.ENTRY, self.PRODUCT, self.detail()))[('OIL', '原料')]
+        self.assertAlmostEqual(oil['bom_qty'], 0.28)
+        self.assertAlmostEqual(oil['design_rate'], 0.28 / 0.30 - 1)       # 报价→BOM
+        self.assertAlmostEqual(oil['bom_rate'], 0.27 / 0.28 - 1)          # BOM→实际
+        self.assertAlmostEqual((1 + oil['design_rate']) * (1 + oil['bom_rate']), 1 + oil['qty_rate'])   # 两段连乘＝用量合计
+
+    def test_substitute_takes_larger_line_per_order(self):
+        import actual_cost_standard as standard
+        plain = self.by(standard.compare(self.ENTRY, self.PRODUCT, self.detail()))
+        self.assertAlmostEqual(plain[('BAG1', '包材')]['bom_qty'], 1.01)
+        self.assertAlmostEqual(plain[('BAG2', '实际新增')]['bom_qty'], 0.60)
+        merged = self.by(standard.compare(self.ENTRY, self.PRODUCT, self.detail(), dict(units={}, aliases={'BAG2': {'to': 'BAG1'}})))
+        bag = merged[('BAG1', '包材')]
+        self.assertAlmostEqual(bag['bom_qty'], 1.01)                      # 不是 1.01＋0.60
+        self.assertAlmostEqual(bag['actual_qty'], 1.03)
+        self.assertAlmostEqual(bag['bom_rate'], 1.03 / 1.01 - 1)
+
+    def test_incomplete_bom_gives_no_number(self):
+        import actual_cost_standard as standard
+        detail = self.detail(oil_standard=None); detail['materials'][0]['bom'] = 'A001_V1'   # 有用料清单但不满足折算条件
+        oil = self.by(standard.compare(self.ENTRY, self.PRODUCT, detail))[('OIL', '原料')]
+        self.assertIsNone(oil['bom_qty']); self.assertIsNone(oil['bom_rate'])
+        self.assertEqual(oil['bom_note'], '工单用料清单不满足折算条件')
+
+    def test_breakdown_without_standard_has_bom_side(self):
+        import actual_cost_standard as standard
+        oil = self.by(standard.breakdown(self.PRODUCT, self.detail()))[('OIL', '实际用料')]
+        self.assertAlmostEqual(oil['bom_rate'], 0.27 / 0.28 - 1)
+        self.assertIsNone(oil['design_rate'])                             # 没选底稿就没有「报价→BOM」
+
+
 if __name__ == '__main__':
     unittest.main()
