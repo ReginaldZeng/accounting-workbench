@@ -5000,6 +5000,8 @@ from routers import logistics_review   # V2.632 物流账单复核（核价×核
 app.include_router(logistics_review.router)
 from routers import bp_logistics_feed   # V2.785 BP 工作台读物流账单（内部只读口 /api/internal/bp-logistics-lines，出库费用归属用）
 app.include_router(bp_logistics_feed.router)
+from routers import bp_actual_cost_feed   # V2.795 BP 工作台读产品全成本（内部只读口 /api/internal/bp-actual-cost，STEP6 现金流用）
+app.include_router(bp_actual_cost_feed.router)
 from routers import logistics_payreq   # V2.730 物流复核·钉钉请款单接入（扫公对公请款单→总表进度/账单就绪/发票进发票管家）
 app.include_router(logistics_payreq.router)
 from routers import access_request   # V2.731 首页「申请开通」→ 钉钉推送接收人（移植 BP V2.553/555）
