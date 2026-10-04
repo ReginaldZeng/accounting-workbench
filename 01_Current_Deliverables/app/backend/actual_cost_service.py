@@ -1,11 +1,12 @@
 # [Change Log] 2026-10-02 | Codex | V-draft | Period-bound full-cost generation and preserved snapshots
+# [Change Log] 2026-10-04 | Claude / c | V2.789 | 试算因缺配置失败时，把缺的费用项目/产品分组名单写进状态（missing），页面直接让人补。
 import hashlib
 import json
 import threading
 import re
 import base64
 from datetime import datetime, timezone
-from kernels.actual_cost import prepare, monthly_input_issues
+from kernels.actual_cost import prepare, monthly_input_issues, MissingConfig
 import kingdee_client as kingdee
 
 # ponytail: 单服务进程内串行生成；多worker部署时改为数据库按期间的任务锁。
@@ -70,7 +71,8 @@ def generate(year, period, org, rules, supplement, store, client=kingdee, operat
             return save_latest(dict(common,status='failed',run_id=previous.get('run_id'),
                                     issues=[str(exc) if isinstance(exc,ValueError) else
                                             '金蝶取数失败，请检查连接或源数据' if isinstance(exc,kingdee.KingdeeError) else
-                                            '源数据或规则字段缺失，请核对本期输入']))
+                                            '源数据或规则字段缺失，请核对本期输入'],
+                                    **({'missing':{'kind':exc.kind,'names':exc.names}} if isinstance(exc,MissingConfig) else {})))
         except Exception:
             save_latest(dict(common,status='failed',run_id=previous.get('run_id'),issues=['生成程序异常，请检查服务日志']))
             raise  # 程序错误不得伪装为取数问题；旧快照仍留存，但失去当前可发布状态。

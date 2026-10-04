@@ -1,10 +1,28 @@
 # [Change Log] 2026-10-02 | Codex | V-draft | Product actual-cost calculation
+# [Change Log] 2026-10-04 | Claude / c | V2.789 | 委外产品进全成本表（单列「委外」、新增成本项「委外加工费」，不参与厂内分摊）；
+#              没归类的费用项目、没配系数的产品分组一次报全（带名单），供页面直接补。
 import math
 import re
 from collections import defaultdict
 
 CENTRES = ("植物肉车间", "小料车间")
-COST_FIELDS = ("material", "packaging", "labor", "indirect", "water", "power", "gas", "depreciation", "rent", "other", "wip")
+COST_FIELDS = ("material", "packaging", "labor", "indirect", "water", "power", "gas", "depreciation", "rent", "other", "subcontract", "wip")
+# 委外（V2.789，用户定）：有成本的委外工单进全成本表，车间记「委外」；成本＝直接材料＋委外加工费。
+# 不在厂内生产，所以不分摊厂内水电/折旧/租金/共享领用，也不计入共享分摊产量。金额为零的委外工单照旧不列。
+OUTSOURCED = "委外"
+OUTSOURCED_ITEMS = {'直接材料':'material', '间接材料':'material', '委外加工费':'subcontract'}
+# 页面上允许自己归类的去向；水电/租金/氮气三类要和凭证口径逐项对上，只能改规则文件。
+EDITABLE_EXPENSE_TARGETS = ('other', 'indirect', 'gas', 'gold_depreciation')
+
+
+class MissingConfig(ValueError):
+    """缺配置：带上缺的名单（kind='expense' 费用项目 / 'group' 产品分组），页面据此让人直接补。"""
+    def __init__(self, kind, names, message):
+        super().__init__(message); self.kind, self.names = kind, list(names)
+
+
+def is_outsourced(wo, bill_type):
+    return str(wo or '').strip().upper().startswith('SUB') or '委外' in str(bill_type or '')
 
 
 def number(value):
@@ -25,7 +43,7 @@ def trial_workorders(sources):
     orders=[]
     for index,row in enumerate(sources['cost'],1):
         if not row[3] or (row[0]!='试产中心' and not any(t in str(row[4]) for t in ('中试','试产'))): continue
-        if str(row[3]).upper().startswith('SUB') or '委外' in str(row[4]): continue
+        if is_outsourced(row[3],row[4]): continue
         cc,code,name,wo,bill_type=[str(v or '').strip() for v in row[:5]]
         orders.append(dict(key='|'.join((cc,code,wo)),cc=cc,code=code,name=name,wo=wo,bill_type=bill_type,
                            source_row=index,qty=0 if row[8] in ('',None) else number(row[8]),
@@ -85,21 +103,27 @@ def prepare(sources, rules, supplement):
     material_fields = {'直接材料':'material', '间接材料':'material','直接人工':'labor'}
     grouped, items = defaultdict(lambda:defaultdict(float)), defaultdict(lambda:defaultdict(float))
     expenses, names = defaultdict(lambda:defaultdict(float)), {}
-    key = None; item = ''; outsourced = False
+    key = None; item = ''; outsourced = False; skipped = False; unmapped = []
     for row in sources['cost']:
         if not isinstance(row,list) or len(row) != 10: raise ValueError('成本报表结构变化')
         # 此报表零完工金额/数量返回空字符串；保留该已验证的来源语义。
         amount = 0 if row[9] in ('',None) else number(row[9])
         if row[3]:
             cc,code,name,wo,bt = [str(x or '').strip() for x in row[:5]]
-            key = (cc,code); item=''; outsourced=wo.upper().startswith('SUB') or '委外' in bt
-            if outsourced:
-                if row[9] not in ('',None) and number(row[9]) != 0: raise ValueError('出现非零委外成本，需明确全成本表范围')
-                continue
+            item=''; outsourced=is_outsourced(wo,bt)
+            skipped = outsourced and amount == 0     # 金额为零的委外工单不列（8 月即此情形，保持原结果）
+            if skipped: key = None; continue
+            if outsourced: cc = OUTSOURCED
+            key = (cc,code)
             if not cc or not code: raise ValueError('成本工单缺少成本中心或产品编码')
             names[key] = name; grouped[key]['qty'] += 0 if row[8] in ('',None) else number(row[8]); grouped[key]['gold_total'] += amount
+        elif skipped:
+            if amount != 0: raise ValueError('零成本委外工单下出现非零明细，需核对成本报表')
         elif outsourced:
-            if row[9] not in ('',None) and number(row[9]) != 0: raise ValueError('出现非零委外明细，需明确全成本表范围')
+            if row[5]:
+                item = str(row[5]); items[key][item] += amount
+                if item in OUTSOURCED_ITEMS: grouped[key][OUTSOURCED_ITEMS[item]] += amount
+                elif amount: raise ValueError(f'委外工单出现未配置成本项目：{item}')
         else:
             if key is None: raise ValueError('成本明细缺少父工单')
             if row[5]:
@@ -108,9 +132,12 @@ def prepare(sources, rules, supplement):
                 elif item != '制造费用': raise ValueError(f'未配置成本项目：{item}')
             elif row[6] and item == '制造费用':
                 name = str(row[6]); amt = amount; expenses[key][name] += amt
-                if name not in rules['expense_map']: raise ValueError(f'未配置费用项目：{name}')
+                if name not in rules['expense_map']:
+                    if name not in unmapped: unmapped.append(name)
+                    continue
                 grouped[key][rules['expense_map'][name]] += amt
                 if name == rules['oil_expense']: grouped[key]['oil'] += amt
+    if unmapped: raise MissingConfig('expense',unmapped,'未配置费用项目：'+'、'.join(unmapped))
     products = []
     for key,p in grouped.items():
         attrs = sources['materials'].get(key[1])
@@ -119,7 +146,7 @@ def prepare(sources, rules, supplement):
         reconcile(sum(expenses[key].values()),items[key]['制造费用'],f'{key}制造费用明细')
         products.append(dict(cc=key[0],code=key[1],name=names[key],spec=attrs['spec'],group=attrs['group'],
             **{k:p[k] for k in ('qty','gold_total','material','labor','indirect','gas','oil','other',
-                               'gold_utilities','gold_depreciation','gold_rent')},packaging=0))
+                               'gold_utilities','gold_depreciation','gold_rent','subcontract')},packaging=0))
     if not products: raise ValueError('本期无产品成本数据')
     qty = {cc:sum(p['qty'] for p in products if p['cc']==cc) for cc in CENTRES}
     shared, selected, excluded_outbound = 0, [], []
@@ -146,10 +173,12 @@ def prepare(sources, rules, supplement):
     else:
         weights = rules['shared_group_weights']
         centres=rules.get('shared_centre_weights')
-        if centres is not None and any(p['cc'] not in centres for p in products):
+        house=[p for p in products if p['cc']!=OUTSOURCED]   # 委外不在厂内生产，不进共享分摊产量
+        if centres is not None and any(p['cc'] not in centres for p in house):
             raise ValueError('新增成本中心缺少共享产量范围配置')
-        if any(p['group'] not in weights for p in products): raise ValueError('新增产品分组缺少共享分摊权重')
-        included=[p for p in products if centres is None or number(centres[p['cc']])==1]
+        missing_groups=sorted({p['group'] for p in house if p['group'] not in weights})
+        if missing_groups: raise MissingConfig('group',missing_groups,'新增产品分组缺少共享分摊权重：'+'、'.join(missing_groups))
+        included=[p for p in house if centres is None or number(centres[p['cc']])==1]
         numerator = sum(p['qty']*number(weights[p['group']]['tea']) for p in included)
         denominator = sum(p['qty']*number(weights[p['group']]['total']) for p in included)
         for order in trials:
@@ -229,7 +258,8 @@ def prepare(sources, rules, supplement):
     return dict(period=period,org=org,inputs=inputs,products=result,rule_version=rules['version'],
         ready=not issues,issues=issues,unallocated_wip=unallocated,wip_detail=wip_detail,trial_orders=trials,
         controls=dict(gold_total=gold_total,total=total,wip_allocated=wip_total,source_difference=source_difference,
-                      selected_outbound=len(selected),shared_amount=shared,shared_ratio=ratio,shared_quantity=shared_quantity))
+                      selected_outbound=len(selected),shared_amount=shared,shared_ratio=ratio,shared_quantity=shared_quantity,
+                      outsourced_total=sum(p['total'] for p in result if p['cc']==OUTSOURCED)))
 
 def calculate(inputs):
     """No original product results enter the calculation. Inputs must identify their period."""
@@ -246,14 +276,18 @@ def calculate(inputs):
             raise ValueError(f'重复产品键: {key}')
         keys.add(key)
         for field in ('qty','material','packaging','labor','indirect','gas','oil','other',
-                      'gold_utilities','gold_depreciation','gold_rent'):
+                      'gold_utilities','gold_depreciation','gold_rent','subcontract'):
             if not isinstance(p[field], (int,float)) or not math.isfinite(p[field]):
                 raise ValueError(f'{key}缺少有效数值: {field}')
         if p['cc'] not in CENTRES and any(p[k] for k in ('gold_utilities','gold_depreciation','gold_rent')):
             raise ValueError(f'{key}出现新费用归属，需要新增分摊规则')
         if p['qty'] < 0:
             raise ValueError(f'负完工数量需单独处理: {key}')
-        if p['qty'] == 0 and any(p[k] for k in ('material','packaging','labor','indirect','gas')):
+        if p['cc'] == OUTSOURCED and any(p[k] for k in ('labor','indirect','gas','oil','other')):
+            raise ValueError(f'{key}委外产品出现厂内人工或制造费用，需明确口径')
+        if p['cc'] != OUTSOURCED and p['subcontract']:
+            raise ValueError(f'{key}自制产品出现委外加工费，需明确口径')
+        if p['qty'] == 0 and any(p[k] for k in ('material','packaging','labor','indirect','gas','subcontract')):
             raise ValueError(f'{key}有直接费用但无完工数量，需核对成本报表')
         qty[p['cc']] += p['qty']
     transfer = inputs['shared_amount'] * rules['shared_tea_ratio']

@@ -1,4 +1,5 @@
 # [Change Log] 2026-10-02 | Codex | V-draft | Period snapshot workbook with cached formulas
+# [Change Log] 2026-10-04 | Claude / c | V2.789 | 加「委外加工费」列；委外产品（车间记「委外」）进公式归集链；主表列位改按字段名定位，不再写死列字母。
 import io
 import json
 from datetime import datetime, timezone
@@ -6,12 +7,16 @@ try:
     import xlsxwriter
 except ImportError:  # 服务器还没装这个库时，只让「导出」报明白话；不能因为它把整个后端的启动带崩
     xlsxwriter = None
-from kernels.actual_cost import COST_FIELDS, CENTRES, number, reconcile, trial_workorders
+from kernels.actual_cost import COST_FIELDS, CENTRES, OUTSOURCED, is_outsourced, number, reconcile, trial_workorders
 
 FIELDS = [('cc','车间'),('code','物料编码'),('name','物料名称'),('spec','规格'),('qty','完工数量 kg'),
           ('material','直接材料'),('packaging','包材'),('labor','直接人工'),('indirect','间接人工'),
           ('water','水费'),('power','电费'),('gas','燃气及氮气'),('depreciation','折旧摊销'),
-          ('rent','租金'),('other','其他制造费用'),('wip','在产调整'),('total','全成本合计'),('unit','单位成本 元/kg')]
+          ('rent','租金'),('other','其他制造费用'),('subcontract','委外加工费'),('wip','在产调整'),
+          ('total','全成本合计'),('unit','单位成本 元/kg')]
+IDX = {key:i for i,(key,_) in enumerate(FIELDS)}      # 主表字段 → 0 起列号
+LETTER = {key:chr(65+i) for key,i in IDX.items()}     # 主表字段 → 列字母（不超过 Z）
+TRIAL_COL = len(FIELDS)                               # 主表右侧三列试产信息的起始列（0 起）
 
 
 def build_workbook(snapshot, latest, formal=False):
@@ -55,16 +60,16 @@ def build_workbook(snapshot, latest, formal=False):
     main.set_column(2,2,48); main.set_column(3,3,30)
     for i,p in enumerate(products,5):
         r=i+1
-        reconcile(sum(p[k] for k in COST_FIELDS),p['total'],f'{p["code"]}导出合计')
-        main.write_formula(i,16,f'=SUM(F{r}:P{r})',money,p['total'])
+        reconcile(sum(p.get(k,0) for k in COST_FIELDS),p['total'],f'{p["code"]}导出合计')
+        main.write_formula(i,IDX['total'],f'=SUM({LETTER["material"]}{r}:{LETTER["wip"]}{r})',money,p['total'])
         value=p['total']/p['qty'] if p['qty'] else ''
         if p['qty']: reconcile(value,p['unit'],f'{p["code"]}导出单位成本')
-        main.write_formula(i,17,f'=IF(E{r}=0,"",Q{r}/E{r})',money,value)
+        main.write_formula(i,IDX['unit'],f'=IF(E{r}=0,"",{LETTER["total"]}{r}/E{r})',money,value)
     total_row=len(products)+6
     main.write(total_row,0,'筛选后合计',header)
-    for c,(key,_) in enumerate(FIELDS[4:17],4):
+    for c,(key,_) in enumerate(FIELDS[4:IDX['total']+1],4):
         col=xlsxwriter.utility.xl_col_to_name(c)
-        main.write_formula(total_row,c,f'=SUBTOTAL(109,{col}6:{col}{len(products)+5})',money,sum(p[key] for p in products))
+        main.write_formula(total_row,c,f'=SUBTOTAL(109,{col}6:{col}{len(products)+5})',money,sum(p.get(key,0) for p in products))
 
     controls = result['controls']
     audit = sheet('出表校验',['项目','值'],[
@@ -121,7 +126,8 @@ def _link_formulas(wb, sheet, snapshot, main, audit, cost, raw, money, header):
              ('小料领用部门',rules['tea_department']),('油费用项目',rules['oil_expense']),('在产处理方式',rules['wip_policy'])]
     for r,values in enumerate(scalars,5): params.write_row(r,0,values)
     groups=rules.get('shared_group_weights') or {p['group']:{'tea':0,'total':0} for p in products}
-    centres=rules.get('shared_centre_weights') or {p['cc']:1 for p in products}
+    centres=rules.get('shared_centre_weights') or {p['cc']:1 for p in products if p['cc']!=OUTSOURCED}
+    no_weight={'tea':0,'total':0}   # 委外不计入共享分摊产量：车间系数、分组系数一律按 0
     for r,(name,weight) in enumerate(groups.items(),5): params.write_row(r,3,[name,weight['tea'],weight['total']])
     for r,(name,weight) in enumerate(centres.items(),5):
         params.write_row(r,7,[name,weight,rules['solar_departments'].get(name,''),rules['dorm_departments'].get(name,'')])
@@ -165,37 +171,40 @@ def _link_formulas(wb, sheet, snapshot, main, audit, cost, raw, money, header):
     trial.autofilter(4,0,max(4,len(trials)+4),14)
     if trials:trial.data_validation(5,9,len(trials)+4,9,{'validate':'list','source':['待确认','计入','不计入'],'ignore_blank':False,'error_type':'stop','error_message':'请选择待确认、计入或不计入'})
     tr=lambda c:rng('试产工单确认',c,len(trials))
-    main.write_row(4,18,['试产工单数','其中试产完工 kg','试产共享确认'],header)
-    main.autofilter(4,0,count+4,20);main.set_column(18,20,22)
+    main.write_row(4,TRIAL_COL,['试产工单数','其中试产完工 kg','试产共享确认'],header)
+    main.autofilter(4,0,count+4,TRIAL_COL+2);main.set_column(TRIAL_COL,TRIAL_COL+2,22)
+    tn,tq=chr(65+TRIAL_COL),chr(65+TRIAL_COL+1)   # 试产工单数、试产完工 kg 两列的列字母
     for i,p in enumerate(products,6):
         related=[o for o in trials if o['cc']==p['cc'] and o['code']==p['code']]
         common=f'{tr("B")},A{i},{tr("C")},B{i}'
-        put(main,i,19,f'COUNTIFS({common})',len(related))
-        put(main,i,20,f'SUMIFS({tr("G")},{common})',sum(o['qty'] for o in related))
+        put(main,i,TRIAL_COL+1,f'COUNTIFS({common})',len(related))
+        put(main,i,TRIAL_COL+2,f'SUMIFS({tr("G")},{common})',sum(o['qty'] for o in related))
         pending=any(o['qty'] and decisions.get(o['key'],'pending')=='pending' for o in related)
         status='待确认' if pending else '已逐单选择' if any(o['qty'] for o in related) else '零产量' if related else '无试产'
-        put(main,i,21,f'IF(S{i}=0,"无试产",IF(T{i}=0,"零产量",IF(COUNTIFS({common},{tr("J")},"待确认",{tr("G")},">0")>0,"待确认","已逐单选择")))',status)
+        put(main,i,TRIAL_COL+3,f'IF({tn}{i}=0,"无试产",IF({tq}{i}=0,"零产量",IF(COUNTIFS({common},{tr("J")},"待确认",{tr("G")},">0")>0,"待确认","已逐单选择")))',status)
 
     # 金蝶字段原样保留；新增列只做公式归属，避免把三层金额重复加总。
-    cost.write(3,0,'A:K保留本次金蝶接口取数字段及原始顺序（不是手工导出文件版式）；L:S为公式辅助列。仅工单汇总计数量，各成本层级分开归集。')
-    cost.write_row(4,11,['公式车间','公式产品编码','公式成本项目','公式行层级','纳入自制','归集字段','完工金额数值','完工数量数值'],header)
+    cost.write(3,0,'A:K保留本次金蝶接口取数字段及原始顺序（不是手工导出文件版式）；L:S为公式辅助列。仅工单汇总计数量，各成本层级分开归集。委外工单车间记「委外」，金额为零的委外工单不纳入。')
+    cost.write_row(4,11,['公式车间','公式产品编码','公式成本项目','公式行层级','纳入全成本','归集字段','完工金额数值','完工数量数值'],header)
     cc=code=item='';included=0
+    sub_test=lambda r: f'OR(LEFT(UPPER(E{r}),3)="SUB",ISNUMBER(SEARCH("委外",F{r})))'
     for i,row in enumerate(sources['cost'],6):
         if row[3]:
-            cc,code=str(row[0] or '').strip(),str(row[1] or '').strip(); item=''
-            included=int(not (str(row[3]).upper().startswith('SUB') or '委外' in str(row[4])))
+            outsourced=is_outsourced(row[3],row[4])
+            cc,code=(OUTSOURCED if outsourced else str(row[0] or '').strip()),str(row[1] or '').strip(); item=''
+            included=int(not (outsourced and (0 if row[9] in ('',None) else number(row[9]))==0))
         elif row[5]: item=str(row[5])
         level='工单汇总' if row[3] else '成本项目' if row[5] else '制造费用明细' if row[6] and item=='制造费用' else '明细'
         field=('gold_total' if level=='工单汇总' else
-               {'直接材料':'material','间接材料':'material','直接人工':'labor','制造费用':'manufacturing_total'}.get(item,'') if level=='成本项目' else
+               {'直接材料':'material','间接材料':'material','直接人工':'labor','制造费用':'manufacturing_total','委外加工费':'subcontract'}.get(item,'') if level=='成本项目' else
                rules['expense_map'].get(str(row[6]),'') if level=='制造费用明细' else '')
         previous=lambda c: f'{c}{i-1}' if i>6 else '""'
-        formulas=[(f'IF(E{i}<>"",TRIM(B{i}),{previous("L")})',cc),
+        formulas=[(f'IF(E{i}<>"",IF({sub_test(i)},{quote(OUTSOURCED)},TRIM(B{i})),{previous("L")})',cc),
                   (f'IF(E{i}<>"",TRIM(C{i}),{previous("M")})',code),
                   (f'IF(E{i}<>"","",IF(G{i}<>"",G{i},{previous("N")}))',item),
                   (f'IF(E{i}<>"","工单汇总",IF(G{i}<>"","成本项目",IF(AND(H{i}<>"",N{i}="制造费用"),"制造费用明细","明细")))',level),
-                  (f'IF(E{i}<>"",IF(OR(LEFT(UPPER(E{i}),3)="SUB",ISNUMBER(SEARCH("委外",F{i}))),0,1),{previous("P") or 0})',included),
-                  (f'IF(O{i}="工单汇总","gold_total",IF(O{i}="成本项目",IF(OR(G{i}="直接材料",G{i}="间接材料"),"material",IF(G{i}="直接人工","labor",IF(G{i}="制造费用","manufacturing_total","未映射"))),IF(O{i}="制造费用明细",{lookup(f"H{i}","费用映射","A","B",len(rules["expense_map"]))},"")))',field),
+                  (f'IF(E{i}<>"",IF(AND({sub_test(i)},R{i}=0),0,1),{previous("P") or 0})',included),
+                  (f'IF(O{i}="工单汇总","gold_total",IF(O{i}="成本项目",IF(OR(G{i}="直接材料",G{i}="间接材料"),"material",IF(G{i}="直接人工","labor",IF(G{i}="制造费用","manufacturing_total",IF(G{i}="委外加工费","subcontract","未映射")))),IF(O{i}="制造费用明细",{lookup(f"H{i}","费用映射","A","B",len(rules["expense_map"]))},"")))',field),
                   (f'IF(K{i}="",0,VALUE(SUBSTITUTE(K{i},",","")))',0 if row[9] in ('',None) else number(row[9])),
                   (f'IF(J{i}="",0,VALUE(SUBSTITUTE(J{i},",","")))',0 if row[8] in ('',None) else number(row[8]))]
         for c,(formula,value) in enumerate(formulas,12):put(cost,i,c,formula,value)
@@ -241,7 +250,7 @@ def _link_formulas(wb, sheet, snapshot, main, audit, cost, raw, money, header):
         refs[kind]={k:rng(name,col(c),len(rows)) for c,k in enumerate(fields+headings)}
 
     agg_fields=['cc','code','name','spec','group','qty','gold_total','material','labor','indirect','gas','oil','other','gold_utilities','gold_depreciation','gold_rent','packaging']
-    agg=sheet('产品公式归集',['车间','物料编码','物料名称','规格','产品分组','完工数量 kg','金蝶完工成本','材料原值','直接人工','间接人工','燃气','油转材料','其他费用原值','金蝶水电费','金蝶折旧摊销','金蝶租金','包材（未单独拆分）','本车间产量','车间内分摊比例','共享车间系数','小料分组系数','总量分组系数','共享小料产量','共享分母产量','在产调整'],[[p.get(k) for k in agg_fields]+[None]*8 for p in products])
+    agg=sheet('产品公式归集',['车间','物料编码','物料名称','规格','产品分组','完工数量 kg','金蝶完工成本','材料原值','直接人工','间接人工','燃气','油转材料','其他费用原值','金蝶水电费','金蝶折旧摊销','金蝶租金','包材（未单独拆分）','本车间产量','车间内分摊比例','共享车间系数','小料分组系数','总量分组系数','共享小料产量','共享分母产量','在产调整','委外加工费'],[[p.get(k) for k in agg_fields]+[None]*9 for p in products])
     def ar(c):return rng('产品公式归集',c,count)
     def cr(c):return rng('金蝶成本原始层级',c,len(sources['cost']))
     lr=refs['ledger'];orr=refs['outbound']
@@ -257,14 +266,16 @@ def _link_formulas(wb, sheet, snapshot, main, audit, cost, raw, money, header):
         put(agg,i,17,'0',0)
         put(agg,i,18,f'SUMIF({ar("A")},A{i},{ar("F")})',qty)
         put(agg,i,19,f'IF(R{i}=0,0,F{i}/R{i})',share)
-        weight=groups[p['group']];cw=centres[p['cc']]
+        house=p['cc']!=OUTSOURCED
+        weight=groups[p['group']] if house else no_weight;cw=centres[p['cc']] if house else 0
         for c,key,left,right,n,v in [(20,f'A{i}','H','I',len(centres),cw),(21,f'E{i}','D','E',len(groups),weight['tea']),(22,f'E{i}','D','F',len(groups),weight['total'])]:
-            put(agg,i,c,lookup(key,'分摊参数',left,right,n),v)
+            put(agg,i,c,lookup(key,'分摊参数',left,right,n) if house else '0',v)
         adjustments=trial_adjustments.get((p['cc'],p['code']),[0,0])
         put(agg,i,23,f'F{i}*T{i}*U{i}+SUMIFS({tr("N")},{tr("B")},A{i},{tr("C")},B{i})',p['qty']*cw*weight['tea']+adjustments[0])
         put(agg,i,24,f'F{i}*T{i}*V{i}+SUMIFS({tr("O")},{tr("B")},A{i},{tr("C")},B{i})',p['qty']*cw*weight['total']+adjustments[1])
         wip=result['inputs']['wip'].get(p['cc']+'|'+p['code'],0) if p['qty'] else 0
         put(agg,i,25,f'IF(F{i}=0,0,SUMIFS({lr["在产调整金额"]},{lr["在产车间"]},A{i},{lr["在产产品编码"]},B{i}))',wip)
+        put(agg,i,26,f'SUMIFS({cr("R")},{common},{cr("Q")},"subcontract")',p.get('subcontract',0))
 
     # 费用池每一项均有来源公式，分配只引用本页的费用池和车间产量。
     pool=sheet('费用分摊依据',['车间/范围','费用项目','金额 元/数量 kg/比例','计算口径'],[])
@@ -282,7 +293,7 @@ def _link_formulas(wb, sheet, snapshot, main, audit, cost, raw, money, header):
         poolrow(key,'全厂',expense,f'SUMIF({lr["expense"]},{quote(expense)},{lr["费用借方金额"]})',ledger_sums.get(expense,0),'按金蝶凭证费用项目取入账金额')
     poolrow('shared','共享','非小料共享领用',f'SUM({orr["非小料共享金额"]})',result['inputs']['shared_amount'],'其他出库按类别、审核、作废、方向和领用部门筛选')
     for key,column in [('tea_qty','W'),('all_qty','X')]:
-        value=sum(p['qty']*centres[p['cc']]*groups[p['group']]['tea' if key=='tea_qty' else 'total'] for p in products)+sum(v[0 if key=='tea_qty' else 1] for v in trial_adjustments.values())
+        value=sum(p['qty']*centres[p['cc']]*groups[p['group']]['tea' if key=='tea_qty' else 'total'] for p in products if p['cc']!=OUTSOURCED)+sum(v[0 if key=='tea_qty' else 1] for v in trial_adjustments.values())
         poolrow(key,'共享','小料分子 kg' if key=='tea_qty' else '分摊分母 kg',f'SUM({ar(column)})',value,'金蝶完工数量×车间范围×产品分组系数')
     poolrow('ratio','共享','转入小料比例',f'IF(\'分摊参数\'!$B$7="completed_quantity",{pr["tea_qty"]}/{pr["all_qty"]},\'分摊参数\'!$B$8)',result['controls']['shared_ratio'],'自动产量比例或明确的本期补充比例')
     poolrow('transfer','共享','转入小料金额',f'{pr["shared"]}*{pr["ratio"]}',pv['shared']*pv['ratio'],'植物肉其他费用池扣减，小料其他费用池增加；全厂总额不变')
@@ -313,16 +324,17 @@ def _link_formulas(wb, sheet, snapshot, main, audit, cost, raw, money, header):
         a=lambda c:f"'产品公式归集'!{c}{i}"
         formula_by_key={'qty':a('F'),'material':f'{a("H")}+{a("L")}','packaging':a('Q'),'labor':a('I'),'indirect':a('J'),
                         'gas':f'{a("K")}+{pr["nitrogen"]}*{a("S")}' if p['cc']==CENTRES[0] else a('K'),
-                        'other':f'{pr[p["cc"]+"other"]}*{a("S")}' if p['cc'] in CENTRES else f'{a("M")}-{a("L")}', 'wip':a('Y')}
+                        'other':f'{pr[p["cc"]+"other"]}*{a("S")}' if p['cc'] in CENTRES else f'{a("M")}-{a("L")}', 'wip':a('Y'),
+                        'subcontract':a('Z')}
         for field in ('water','power','depreciation','rent'):
             formula_by_key[field]=f'{pr[p["cc"]+field]}*{a("S")}' if p['cc'] in CENTRES else '0'
-        for c,(key,_) in enumerate(FIELDS[4:16],5):put(main,i,c,formula_by_key[key],p[key])
-        main.write_comment(i-1,14,'公式路径：其他出库/成本原始层级 → 产品公式归集及费用分摊依据 → 本格。共享领用只作车间间转移，不能重复加一次成本。')
+        for c,(key,_) in enumerate(FIELDS[4:IDX['wip']+1],5):put(main,i,c,formula_by_key[key],p.get(key,0))
+        main.write_comment(i-1,IDX['other'],'公式路径：其他出库/成本原始层级 → 产品公式归集及费用分摊依据 → 本格。共享领用只作车间间转移，不能重复加一次成本。')
     put(audit,12,2,f'SUM({ar("G")})',result['controls']['gold_total'])
     put(audit,13,2,f'SUM({ar("Y")})',result['controls']['wip_allocated'])
     pool_total='+'.join(pr[cc+f] for cc in CENTRES for f in ('water','power','depreciation','rent'))
     put(audit,14,2,f'{pool_total}-SUM({ar("N")})-SUM({ar("O")})-SUM({ar("P")})',result['controls']['source_difference'])
-    put(audit,15,2,f'SUM({rng("产品全成本","Q",count)})',result['controls']['total'])
+    put(audit,15,2,f'SUM({rng("产品全成本",LETTER["total"],count)})',result['controls']['total'])
     audit.write(17,1,'原始数据为本次金蝶接口取数字段原值；计算由Excel公式关联。包材未单拆，不代表未发生。跨月、新增行/产品应从工作台重新生成。')
     # 公式改动不改变已确认快照；单独提示源数据失配和本地编辑影响。
     extra=[('水电凭证与成本原表差额',f'{pr["water"]}+{pr["power"]}-SUM({ar("N")})',pv['water']+pv['power']-sum(p['gold_utilities'] for p in products)),

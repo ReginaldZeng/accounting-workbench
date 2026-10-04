@@ -1,4 +1,6 @@
 # [Change Log] 2026-10-02 | Codex | V-draft | Full-cost period API; Kingdee reads only
+# [Change Log] 2026-10-04 | Claude / c | V2.789 | 建立本期配置可沿用任意一个有规则的月份（原先只能沿用更早的）；
+#              /state 返回有规则的月份清单与可归类去向；/inputs 可保存费用项目归类（水电/租金/氮气三类固定项不可改）。
 import copy
 import json
 import re
@@ -12,7 +14,7 @@ from fastapi.responses import Response
 from core import db, _require_perm
 import actual_cost_service as service
 from actual_cost_export import build_workbook
-from kernels.actual_cost import number, CENTRES, monthly_input_issues
+from kernels.actual_cost import number, CENTRES, monthly_input_issues, EDITABLE_EXPENSE_TARGETS
 from actual_cost_trace import product_rows, fetch_product_trace
 import actual_cost_standard as standard
 
@@ -192,13 +194,24 @@ def inputs(year, period, org):
     return data
 
 
+def rule_periods(org):
+    """有分摊规则可沿用的月份（新→旧）：工作台保存过的，加随代码带的规则种子。"""
+    found={f"{r['year']:04d}-{int(r['period']):02d}" for r in db.list_period_inputs('actual_cost:'+org,INPUT)}
+    for path in Path(__file__).resolve().parents[1].glob(f'actual_cost_{org}_20??_??.json'):
+        m=re.fullmatch(rf'actual_cost_{re.escape(org)}_(20\d{{2}})_(0[1-9]|1[0-2])\.json',path.name)
+        if m: found.add(f'{m[1]}-{m[2]}')
+    return sorted(found,reverse=True)
+
+
 @router.post('/initialize')
 def initialize(body:dict, request:Request, org:str, year:int=Query(ge=2000,le=2100), period:int=Query(ge=1,le=12)):
     user=authorized(request,org,'cost_ledger_wh')
     target=f'{year:04d}-{period:02d}'
     source=body.get('source_period')
-    if not isinstance(source,str) or not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',source) or source>=target:
-        raise HTTPException(400,'请选择早于本期的规则来源月份')
+    # V2.789：补做早月份时没有更早的规则可沿用，放开为「任意一个别的、有规则的月份」。沿用的只是规则结构，
+    # 本期金额、比例、试产确认和「已核对」状态一概不带过来（见下）。
+    if not isinstance(source,str) or not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',source) or source==target:
+        raise HTTPException(400,'请选择本期以外、已有规则的月份')
     with service._RUN_LOCK:
         if inputs(year,period,org) is not None: raise HTTPException(409,'本期已有配置，不能覆盖')
         y,p=map(int,source.split('-')); previous=inputs(y,p,org)
@@ -244,6 +257,7 @@ def state(request:Request, org:str, year:int=Query(ge=2000,le=2100), period:int=
         else: latest['issues']=list(dict.fromkeys(list(latest.get('issues',[]))+monthly_input_issues(data['rules'],data['supplement'])))
         result=(snapshot or {}).get('result')
         return dict(ok=True,org=org,period=f'{year:04d}-{period:02d}',latest=latest,inputs=data,
+            rule_periods=rule_periods(org),expense_targets=list(EDITABLE_EXPENSE_TARGETS),
             result=result,source_time=(snapshot or {}).get('sources',{}).get('fetched_at'),
             historical=bool(snapshot and latest['status'] not in ('ready','needs_confirmation')),
             trigger='manual',close_confirmation=(db.get_period_input(namespace,year,period,service.CLOSE) or {}).get('payload'))
@@ -308,6 +322,18 @@ def save_inputs(body:dict, request:Request, org:str, year:int=Query(ge=2000,le=2
                 if any(not isinstance(cc,str) or not 1<=len(cc)<=200 or number(v) not in (0,1) for cc,v in centres.items()):
                     raise ValueError('请明确各车间是否计入共享产量')
                 rules['shared_centre_weights']={cc:number(v) for cc,v in centres.items()}
+            if 'expense_map' in body:
+                mapping=body['expense_map'];current=rules['expense_map']
+                if not isinstance(mapping,dict) or not mapping or len(mapping)>500: raise ValueError('费用项目归类无效')
+                for name,target_field in mapping.items():
+                    if not isinstance(name,str) or not 1<=len(name.strip())<=100 or name!=name.strip(): raise ValueError('费用项目名称无效')
+                    if current.get(name)==target_field: continue
+                    # 水电、租金、氮气要和凭证口径逐项对上，改了会对不平，页面不开放；只允许归到可自行归类的去向
+                    if name in current and current[name] not in EDITABLE_EXPENSE_TARGETS: raise ValueError(f'「{name}」是固定归类，不能在页面修改')
+                    if target_field not in EDITABLE_EXPENSE_TARGETS: raise ValueError(f'「{name}」的归类去向无效')
+                fixed={k for k,v in current.items() if v not in EDITABLE_EXPENSE_TARGETS}
+                if fixed-set(mapping): raise ValueError('固定归类的费用项目不能删除')
+                rules['expense_map']=dict(mapping)
             if 'trial_shared_decisions' in body:
                 decisions=body['trial_shared_decisions']
                 if not isinstance(decisions,dict) or len(decisions)>10000: raise ValueError('试产工单确认列表无效')

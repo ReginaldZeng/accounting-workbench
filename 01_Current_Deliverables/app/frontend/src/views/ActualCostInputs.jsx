@@ -11,9 +11,14 @@ const POLICY = {
 }
 const POOLS = { water: '水费', power: '电费', depreciation: '折旧摊销', rent: '租金' }
 const DECISION = [['pending', '待确认'], ['include', '计入'], ['exclude', '不计入']]
+// 费用项目归到哪：前四个可以在页面上选；后三个要和凭证口径逐项对上，是固定的，页面只读
+const TARGET = {
+  other: '其他制造费用', indirect: '间接人工', gas: '燃气', gold_depreciation: '折旧摊销',
+  gold_utilities: '水电费（按凭证重分）', gold_rent: '租金（按凭证重分）', nitrogen: '氮气（按凭证分到植物肉车间）',
+}
 
-export default function ActualCostInputs({ data, form, setForm, dirty, busy, can, trials, counts, onSave, onReset }) {
-  const [show, setShow] = useState('all')
+export default function ActualCostInputs({ data, form, setForm, dirty, busy, can, trials, counts, missing, onSave, onReset }) {
+  const [show, setShow] = useState('all'), [newName, setNewName] = useState('')
   const { rules, supplement } = data.inputs
   const editable = can('cost_ledger_wh')
   const set = patch => setForm({ ...form, ...patch })
@@ -23,6 +28,15 @@ export default function ActualCostInputs({ data, form, setForm, dirty, busy, can
   const withOutput = trials.filter(o => o.qty > 0)
   const pending = withOutput.filter(o => decisionOf(o) === 'pending')
   const shown = trials.filter(o => show === 'all' || (show === 'output' ? o.qty > 0 : o.qty > 0 && decisionOf(o) === 'pending'))
+  // 费用项目归类：上次试算报「没归类」的排最前，选了去向才算补上
+  const targets = data.expense_targets || ['other', 'indirect']
+  const map = form.expense_map || {}
+  const lacking = missing?.kind === 'expense' ? missing.names.filter(n => !map[n]) : []
+  const lackingGroups = missing?.kind === 'group' ? missing.names : []
+  const setTarget = (name, target) => set({ expense_map: { ...map, [name]: target } })
+  const removeItem = name => { const next = { ...map }; delete next[name]; set({ expense_map: next }) }
+  const added = Object.keys(map).filter(n => !(n in (rules.expense_map || {})))
+  const addItem = () => { const n = newName.trim(); if (n && !map[n]) { setTarget(n, 'other'); setNewName('') } }
   const provenance = Object.entries(supplement.provenance || {}).filter(([key]) => key !== 'reference_pools' || form.basis === 'reference')
 
   return (
@@ -45,9 +59,41 @@ export default function ActualCostInputs({ data, form, setForm, dirty, busy, can
           </div>
         </section>
 
-        {/* ② 共享领用分摊依据 */}
+        {/* ② 费用项目归类 */}
         <section className="ac-sec">
-          <header><b>② 共享领用分摊依据</b><span className="muted">劳动用品等共享领用（金蝶其他出库）里，小料承担的比例</span></header>
+          <header><b>② 费用项目归类</b>
+            <span className="muted">金蝶成本计算单里「制造费用」下的每个费用项目归到哪一列 · 共 {Object.keys(map).length} 项
+              {lacking.length ? <b className="ac-amber"> · {lacking.length} 项还没归类</b> : ''}</span></header>
+          {!!lacking.length && <div className="ac-lack">
+            <div className="ac-label">本期出现了下面这些费用项目，规则里还没有，选好归到哪一列再保存、重新试算</div>
+            {lacking.map(n => <div className="ac-lack-row" key={n}><b>{n}</b>
+              <Seg label={`${n} 归到`} value="" onChange={v => setTarget(n, v)} options={targets.map(t => [t, TARGET[t] || t])} disabled={!!busy || !editable} /></div>)}
+          </div>}
+          <details className="explain" open={!!added.length}>
+            <summary>查看全部归类{added.length ? `（本次新加 ${added.length} 项，未保存）` : ''}</summary>
+            <div className="explain-in">
+              <div className="ac-map">
+                {Object.entries(map).sort((a, b) => (added.includes(b[0]) - added.includes(a[0])) || a[0].localeCompare(b[0], 'zh')).map(([n, t]) => (
+                  <div className={'ac-map-row' + (added.includes(n) ? ' new' : '')} key={n}><span title={n}>{n}</span>
+                    {targets.includes(t)
+                      ? <select aria-label={`${n} 归到`} value={t} onChange={e => setTarget(n, e.target.value)}>{targets.map(x => <option key={x} value={x}>{TARGET[x] || x}</option>)}</select>
+                      : <em title="要和凭证口径逐项对上，页面不开放修改">{TARGET[t] || t}</em>}
+                    {added.includes(n) && <button type="button" className="lk q" onClick={() => removeItem(n)}>撤销</button>}
+                  </div>))}
+              </div>
+              <div className="ac-toolbar-l" style={{ marginTop: 10 }}>
+                <input className="ac-input" placeholder="手工添加一个费用项目（名称须与金蝶一致）" style={{ width: 300 }} value={newName} onChange={e => setNewName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addItem() } }} />
+                <button type="button" className="btn-sec" disabled={!newName.trim() || !!map[newName.trim()]} onClick={addItem}>添加（先归到其他制造费用）</button>
+              </div>
+              <p className="ac-p muted" style={{ marginTop: 8 }}>水电费、租金、氮气三类是固定归类：它们的金额要按凭证重新分到车间，改了会和凭证对不平，所以页面不开放。</p>
+            </div>
+          </details>
+        </section>
+
+        {/* ③ 共享领用分摊依据 */}
+        <section className="ac-sec">
+          <header><b>③ 共享领用分摊依据</b><span className="muted">劳动用品等共享领用（金蝶其他出库）里，小料承担的比例</span></header>
           <div className="ac-fields">
             <div className="ac-field"><span>分摊依据</span>
               <Seg label="共享领用分摊依据" value={form.shared_basis} onChange={v => set({ shared_basis: v })} disabled={!!busy || !editable}
@@ -66,11 +112,11 @@ export default function ActualCostInputs({ data, form, setForm, dirty, busy, can
               ))}</div>
             </div>}
             <div>
-              <div className="ac-label">产品分组系数 <span className="muted">小料比例 ＝ Σ(完工千克×小料系数) ÷ Σ(完工千克×总量系数)；须满足 0 ≤ 小料 ≤ 总量 ≤ 1</span></div>
+              <div className="ac-label">产品分组系数 {!!lackingGroups.length && <b className="ac-amber">本期新出现分组「{lackingGroups.join('、')}」，请补上系数</b>}<span className="muted">小料比例 ＝ Σ(完工千克×小料系数) ÷ Σ(完工千克×总量系数)；须满足 0 ≤ 小料 ≤ 总量 ≤ 1</span></div>
               <div className="tbl-wrap ac-fit"><table className="ac-plain">
                 <thead><tr><th>产品分组</th><th>计入总产量系数</th><th>计入小料产量系数</th></tr></thead>
                 <tbody>
-                  {Object.entries(form.shared_group_weights || {}).map(([group, weights]) => <tr key={group}><td>{group}</td>
+                  {Object.entries(form.shared_group_weights || {}).map(([group, weights]) => <tr key={group} className={weights.total == null || weights.tea == null || weights.total === '' || weights.tea === '' ? 'ac-pending' : ''}><td>{group}</td>
                     {['total', 'tea'].map(k => <td key={k}><input className="ac-input sm" aria-label={`${group}${k === 'total' ? '总量' : '小料'}系数`} type="number" min="0" max="1" step="any" required value={weights[k] ?? ''}
                       onChange={e => set({ shared_group_weights: { ...form.shared_group_weights, [group]: { ...weights, [k]: e.target.value } } })} /></td>)}</tr>)}
                   {!Object.keys(form.shared_group_weights || {}).length && <tr><td colSpan={3} className="ac-empty">还没有产品分组。请先用「填写本期比例」试算一次取得分组，再回来配系数。</td></tr>}
@@ -86,9 +132,9 @@ export default function ActualCostInputs({ data, form, setForm, dirty, busy, can
           </table></div>}
         </section>
 
-        {/* ③ 试产工单 */}
+        {/* ④ 试产工单 */}
         {!!trials.length && <section className="ac-sec">
-          <header><b>③ 试产工单 · 是否计入共享分摊产量</b>
+          <header><b>④ 试产工单 · 是否计入共享分摊产量</b>
             <span className="muted">共 {trials.length} 张 · 有产量 {withOutput.length} 张{pending.length ? <b className="ac-amber"> · 待确认 {pending.length} 张</b> : ' · 已全部确认'}</span></header>
           <p className="ac-p">逐单确认后保存，再重新试算。有产量的工单没确认完，「按产量自动算」不能正式出表；零产量工单仍列示。工单成本已在全成本表里，不会重复加总。
             {!byQuantity && <b> 当前是「填写本期比例」，这里的选择暂不参与计算，切到「按产量自动算」后生效。</b>}</p>
@@ -117,9 +163,9 @@ export default function ActualCostInputs({ data, form, setForm, dirty, busy, can
           </table></div>
         </section>}
 
-        {/* ④ 说明与确认 */}
+        {/* ⑤ 说明与确认 */}
         <section className="ac-sec">
-          <header><b>{trials.length ? '④' : '③'} 依据说明与核对</b></header>
+          <header><b>{trials.length ? '⑤' : '④'} 依据说明与核对</b></header>
           {!!provenance.length && <ul className="ac-prov">{provenance.map(([key, text]) => <li key={key}>{text}</li>)}</ul>}
           <label className="ac-label" htmlFor="ac-note">本期依据说明 <span className="muted">5 至 1000 字，写清比例和范围的来历</span></label>
           <textarea id="ac-note" className="ac-input" required minLength={5} maxLength={1000} rows={3} value={form.note} onChange={e => set({ note: e.target.value })} />

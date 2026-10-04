@@ -14,7 +14,7 @@ const VIEWS = {
     hint: '实际用本期净领用，标准参考量取工单用料清单、按本期完工量折算。差异含在产和跨期因素，只供核查，不等于已判定的超耗或节约。点物料编码看它的采购记录。',
   },
   movements: { label: '领补退料原单', cols: ['kind', 'bill', 'date', 'wo', 'code', 'name', 'unit', 'net_qty', 'net_amount', 'status', 'entry_id'],
-    hint: '净领用 ＝ 生产领料 ＋ 生产补料 − 生产退料；金额是库存出库成本。' },
+    hint: '净领用 ＝ 领料 ＋ 补料 − 退料；金额是库存出库成本。自制产品取生产领补退料单，委外产品取委外领补退料单。' },
   prices: { label: '采购参考价', cols: ['code', 'name', 'date', 'supplier', 'unit', 'qty', 'price', 'tax_price', 'tax_rate', 'currency', 'bill', 'entry_id'],
     hint: '同组织、本期已审核应付单的价格，按原币和计价单位显示。这是采购价，不是库存出库计价，不能直接代替耗用单价；没有记录不等于价格为零。' },
   bom: { label: '工单配方', cols: ['wo', 'bill', 'bom', 'code', 'name', 'unit', 'standard_qty', 'product_qty', 'product_unit', 'picked', 'repicked', 'returned', 'consumed', 'wip', 'dosage_type', 'fixed_scrap', 'modified_at', 'entry_id'],
@@ -142,7 +142,7 @@ export default function ActualCostTrace({ org, year, period, runId, target, sibl
                   {cols.map(k => {
                     const v = r[k], text = TEXT_KEYS.test(k)
                     if (tab === 'materials' && k === 'code') return <td key={k}><button className="lk mono" onClick={() => go('prices', r.code)}>{r.code}</button></td>
-                    if (k === 'kind') return <td key={k}><span className={'ac-tag ' + (v === '生产退料' ? 'violet' : v === '生产补料' ? 'blue' : 'gray')}>{v}</span></td>
+                    if (k === 'kind') return <td key={k}><span className={'ac-tag ' + (String(v).endsWith('退料') ? 'violet' : String(v).endsWith('补料') ? 'blue' : 'gray')}>{v}</span></td>
                     const tone = view.tone?.includes(k) && isNum(v) ? (v > 0 ? ' ac-up' : v < 0 ? ' ac-down' : '') : ''
                     return <td key={k} className={(text ? (k === 'comparison_note' ? 'wrap' : /code|bill|wo|entry_id|source_row|bom/.test(k) ? 'mono' : '') : 'num') + tone}
                       title={isNum(v) && !text ? fmtFull(v) : undefined}>{cellText(v, k, !text)}</td>

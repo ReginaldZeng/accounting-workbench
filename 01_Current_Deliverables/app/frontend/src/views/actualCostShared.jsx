@@ -55,9 +55,10 @@ export function Num({ v, d = 2, signed, tone, className = '' }) {
   return <span className={cls || undefined} title={fmtFull(v)}>{signed ? fmtSigned(v, d) : fmt(v, d)}</span>
 }
 
-// ── 成本项目（与后端 COST_FIELDS 一一对应，合计＝这 11 项相加）───────────────────
+// ── 成本项目（与后端 COST_FIELDS 一一对应，合计＝这 12 项相加）───────────────────
 export const GROUPS = [
   { key: 'mat', label: '材料', color: 'var(--cat-1)' },
+  { key: 'sub', label: '委外', color: 'var(--cat-8)' },
   { key: 'lab', label: '人工', color: 'var(--cat-3)' },
   { key: 'moh', label: '制造费用', color: 'var(--cat-2)' },
   { key: 'adj', label: '调整', color: 'var(--cat-5)' },
@@ -65,6 +66,7 @@ export const GROUPS = [
 export const COMPONENTS = [
   { key: 'material', label: '直接材料', group: 'mat' },
   { key: 'packaging', label: '包材', group: 'mat' },
+  { key: 'subcontract', label: '委外加工费', group: 'sub' },   // V2.789：只有车间为「委外」的产品有值
   { key: 'labor', label: '直接人工', group: 'lab' },
   { key: 'indirect', label: '间接人工', group: 'lab' },
   { key: 'water', label: '水费', group: 'moh' },
@@ -78,7 +80,7 @@ export const COMPONENTS = [
 export const groupOf = key => GROUPS.find(g => g.key === key)
 export const groupSum = (p, key) => COMPONENTS.filter(c => c.group === key).reduce((s, c) => s + (isNum(p[c.key]) ? p[c.key] : 0), 0)
 
-// 构成条：材料 / 人工 / 制造费用 / 调整 四段。只画正数部分的占比（在产调整可能为负，负数不占条，悬停看实数）
+// 构成条：材料 / 委外 / 人工 / 制造费用 / 调整 五段。只画正数部分的占比（在产调整可能为负，负数不占条，悬停看实数）
 export function MixBar({ p, height = 8 }) {
   const parts = GROUPS.map(g => ({ ...g, v: groupSum(p, g.key) }))
   const base = parts.reduce((s, x) => s + Math.max(x.v, 0), 0)

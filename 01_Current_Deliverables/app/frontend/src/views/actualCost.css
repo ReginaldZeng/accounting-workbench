@@ -182,6 +182,15 @@ textarea.ac-input{height:auto; padding:8px 10px; width:100%; box-sizing:border-b
 .ac-checks{display:flex; gap:6px; flex-wrap:wrap;}
 .ac-check{display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border:1px solid var(--line-strong); border-radius:7px; font-size:12px; cursor:pointer; user-select:none;}
 .ac-check.on{border-color:var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600;}
+.ac-lack{border:1px solid var(--amber-line); background:var(--amber-bg); border-radius:8px; padding:10px 12px; display:flex; flex-direction:column; gap:7px;}
+.ac-lack-row{display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:12.5px;}
+.ac-lack-row > b{min-width:150px;}
+.ac-map{display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:5px 22px;}
+.ac-map-row{display:flex; align-items:center; gap:8px; font-size:12px; min-width:0; padding:2px 0;}
+.ac-map-row > span{flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.ac-map-row select{height:26px; font-size:12px; padding:0 6px;}
+.ac-map-row em{font-style:normal; color:var(--ink-3); font-size:11.5px; white-space:nowrap;}
+.ac-map-row.new > span{color:var(--amber); font-weight:600;}
 .ac-prov{margin:0; padding:8px 12px 8px 28px; font-size:12px; line-height:1.7; color:var(--ink-2); background:var(--bg-rail); border-radius:8px;}
 .ac-savebar{position:sticky; bottom:0; z-index:6; display:flex; align-items:center; justify-content:space-between; gap:10px 16px; flex-wrap:wrap; padding:10px 14px; border:1px solid var(--line-strong); border-radius:var(--radius); background:var(--bg); box-shadow:0 -6px 18px rgba(0,0,0,.06);}
 .ac-savebar-r{display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12px;}

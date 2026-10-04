@@ -221,7 +221,7 @@ export default function App() {
 const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodclose', 'fundboard',
   'rptexport', 'rptdash', 'fisbal',
   'logistics', 'logibase', 'logiupload', 'logisticspay', 'logisticscost', 'logisticsvoucher',
-  'clexport', 'cldash', 'clwh', 'bomdraft', 'bomstd', 'bomconfig',
+  'clexport', 'cldash', 'clwh', 'fullcost', 'bomdraft', 'bomstd', 'bomconfig',
   'ecommonth', 'ecomsettle', 'ecombase',
   'tempattrev', 'tempattboard',
   'invdesk', 'invlater', 'invaudit', 'invledger',

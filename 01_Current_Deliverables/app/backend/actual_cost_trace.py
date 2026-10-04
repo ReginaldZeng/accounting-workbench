@@ -1,11 +1,20 @@
 # [Change Log] 2026-10-03 | Codex | V-draft | Read-only product, order and material trace
+# [Change Log] 2026-10-04 | Claude / c | V2.789 | 委外产品（车间「委外」）下钻：取委外领料/补料/退料单与委外用料清单，口径同自制。
 import calendar
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
 
 import kingdee_client as kd
-from kernels.actual_cost import number
+from kernels.actual_cost import number, OUTSOURCED, is_outsourced
+
+# 逐料单据来源：自制走生产领料/补料/退料 + 生产用料清单；委外走对应的委外单据。字段名经真账套只读实测。
+FORMS = {
+    False: dict(moves=[('PRD_PickMtrl','生产领料','FBaseActualQty',1),('PRD_FeedMtrl','生产补料','FBaseActualQty',1),('PRD_ReturnMtrl','生产退料','FBaseQty',-1)],
+                wo='FMoBillNo', org='FPrdOrgId.FNumber', bom='PRD_PPBOM', bom_wo='FMOBillNO', bom_entry='FMOEntryID'),
+    True: dict(moves=[('SUB_PickMtrl','委外领料','FBaseActualQty',1),('SUB_FEEDMTRL','委外补料','FBaseActualQty',1),('SUB_RETURNMTRL','委外退料','FBaseQty',-1)],
+               wo='FSubReqBillNo', org='FSubOrgId.FNumber', bom='SUB_PPBOM', bom_wo='FSubReqBillNO', bom_entry='FSubReqEntryId'),
+}
 
 
 def product_rows(snapshot, cc, code):
@@ -14,7 +23,9 @@ def product_rows(snapshot, cc, code):
     rows=[];active=False;wo=item=''
     for i,r in enumerate(snapshot['sources']['cost'],1):
         if r[3]:
-            active=str(r[0]).strip()==cc and str(r[1]).strip()==code
+            out=is_outsourced(r[3],r[4])
+            # 委外工单在金蝶里没有成本中心，全成本表记「委外」；金额为零的委外工单不列（与内核一致）
+            active=str(r[1]).strip()==code and ((cc==OUTSOURCED and r[9] not in ('',None) and number(r[9])!=0) if out else str(r[0]).strip()==cc)
             wo=str(r[3]);item=''
         if not active:continue
         if r[5]:item=r[5]
@@ -37,23 +48,24 @@ def fetch_product_trace(snapshot,cc,code,client=kd):
     year,month=map(int,period.split('-'));end=f'{period}-{calendar.monthrange(year,month)[1]:02d}T23:59:59'
     dates=f"FDate>='{period}-01' and FDate<='{end}'"
     s,c=client.login();movements=[];notes=[]
-    for form,label,qty_key,sign in [('PRD_PickMtrl','生产领料','FBaseActualQty',1),('PRD_FeedMtrl','生产补料','FBaseActualQty',1),('PRD_ReturnMtrl','生产退料','FBaseQty',-1)]:
-        fields=[('FBillNo','bill'),('FEntity_FEntryID','entry_id'),('FDate','date'),('FMoBillNo','wo'),
+    outsourced=cc==OUTSOURCED;f=FORMS[outsourced]
+    for form,label,qty_key,sign in f['moves']:
+        fields=[('FBillNo','bill'),('FEntity_FEntryID','entry_id'),('FDate','date'),(f['wo'],'wo'),
                 ('FMaterialId.FNumber','code'),('FMaterialId.FName','name'),('FBaseUnitId.FName','unit'),
-                (qty_key,'qty'),('FAmount','amount'),('FDocumentStatus','status'),('FCancelStatus','cancel'),('FPrdOrgId.FNumber','org')]
-        rows=client._query(s,c,form,fields,f"FPrdOrgId.FNumber='{org}' and FMoBillNo in ({quoted}) and {dates}",'FBillNo,FEntity_FEntryID')
+                (qty_key,'qty'),('FAmount','amount'),('FDocumentStatus','status'),('FCancelStatus','cancel'),(f['org'],'org')]
+        rows=client._query(s,c,form,fields,f"{f['org']}='{org}' and {f['wo']} in ({quoted}) and {dates}",'FBillNo,FEntity_FEntryID')
         for row in rows:
             if str(row['org'])!=org or row['wo'] not in orders or str(row['date'])[:7]!=period: raise ValueError('领补退料返回范围不符')
             if row['status']!='C' or row['cancel']!='A':raise ValueError('本期存在未审核或作废领补退料，需核对后重取')
             movements.append(dict(row,form=form,kind=label,net_qty=sign*number(row['qty']),net_amount=sign*number(row['amount'])))
     if len({(r['form'],r['entry_id']) for r in movements})!=len(movements): raise ValueError('领补退料分录重复')
-    fields=[('FBillNo','bill'),('FEntity_FEntryID','entry_id'),('FMOBillNO','wo'),('FMOEntryID','mo_entry'),('FMaterialID.FNumber','product'),
+    fields=[('FBillNo','bill'),('FEntity_FEntryID','entry_id'),(f['bom_wo'],'wo'),(f['bom_entry'],'mo_entry'),('FMaterialID.FNumber','product'),
             ('FBOMID.FNumber','bom'),('FBaseQty','product_qty'),('FBaseUnitID.FName','product_unit'),
             ('FMaterialID2.FNumber','code'),('FMaterialID2.FName','name'),('FBaseUnitID1.FName','unit'),
             ('FBaseStdQty','standard_qty'),('FBaseNeedQty','need_qty'),('FBasePickedQty','picked'),('FBaseRepickedQty','repicked'),
             ('FBaseGoodReturnQty','returned'),('FBaseConsumeQty','consumed'),('FBaseWipQty','wip'),
-            ('FDosageType','dosage_type'),('FBaseFixScrapQTY','fixed_scrap'),('FDocumentStatus','status'),('FModifyDate','modified_at'),('FPrdOrgId.FNumber','org')]
-    bom=client._query(s,c,'PRD_PPBOM',fields,f"FPrdOrgId.FNumber='{org}' and FMOBillNO in ({quoted})",'FMOBillNO,FEntity_FEntryID')
+            ('FDosageType','dosage_type'),('FBaseFixScrapQTY','fixed_scrap'),('FDocumentStatus','status'),('FModifyDate','modified_at'),(f['org'],'org')]
+    bom=client._query(s,c,f['bom'],fields,f"{f['org']}='{org}' and {f['bom_wo']} in ({quoted})",f"{f['bom_wo']},FEntity_FEntryID")
     for r in bom:
         if str(r['org'])!=org or r['wo'] not in orders or str(r['product'])!=code: raise ValueError('工单用料清单返回范围不符')
     codes=sorted({r['code'] for r in movements+bom})
@@ -72,6 +84,9 @@ def fetch_product_trace(snapshot,cc,code,client=kd):
     detail=dict(org=org,period=period,cc=cc,code=code,fetched_at=datetime.now(timezone.utc).isoformat(),
                 movements=movements,bom=bom,prices=prices,notes=notes)
     detail.update(compare_materials(cost_rows,detail))
+    if outsourced:
+        detail['notes']=['委外产品：逐料取自委外领料、委外补料、委外退料单和委外用料清单；委外加工费见成本计算单，不在逐料里。',
+                         '委外产品不在厂内生产，不分摊厂内人工、水电、折旧、租金和共享领用。']+detail['notes']
     return detail
 
 

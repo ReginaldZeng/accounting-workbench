@@ -41,7 +41,9 @@ export default function ActualCost({ org, year, period, user }) {
       setData(r)
       if (r.inputs) {
         const { rules, supplement } = r.inputs
-        const groups = [...new Set((r.result?.products || []).map(p => p.group))].sort()
+        // 分组系数表要列出的分组：本期产品里出现的 + 上次试算报「没配系数」的（V2.789，让人直接补）
+        const lacking = r.latest?.missing?.kind === 'group' ? r.latest.missing.names : []
+        const groups = [...new Set([...(r.result?.products || []).map(p => p.group), ...lacking])].sort()
         const next = {
           ...rules,
           sharedPercent: supplement.shared_tea_ratio == null ? '' : pct(supplement.shared_tea_ratio),
@@ -61,7 +63,7 @@ export default function ActualCost({ org, year, period, user }) {
     try { await fn(); await load() } catch (e) { setError(e.message); if (reloadOnError) await load() } finally { setBusy('') }
   }
   const run = () => act('run', () => api.generate(org, year, period))
-  const initialize = () => act('init', () => api.initialize(org, year, period, sourcePeriod))
+  const initialize = source => act('init', () => api.initialize(org, year, period, source))
   const revokeClose = () => act('revoke', () => api.revokeClose(org, year, period))
   const confirmClose = () => { confirmDialog.current?.close(); return act('confirm', () => api.confirmClose(org, year, period, data.inputs.rules.version), true) }
   const save = e => {
@@ -75,6 +77,7 @@ export default function ActualCost({ org, year, period, user }) {
         rent_plant_ratio: Number(form.rentPercent) / 100,
         ...(form.shared_basis === 'completed_quantity' ? { shared_group_weights: form.shared_group_weights, ...(form.shared_centre_weights ? { shared_centre_weights: form.shared_centre_weights } : {}) } : {}),
         ...(form.basis === 'reference' ? { reference_pools: form.reference_pools } : {}),
+        expense_map: form.expense_map,
         trial_shared_decisions: form.trial_shared_decisions, note: form.note, confirmed: form.confirmed,
       })
     })
@@ -100,12 +103,16 @@ export default function ActualCost({ org, year, period, user }) {
   // 试产工单：出表卡口按「上次试算时的结论」（与后端一致）；流程条按「已保存的选择」，这样保存后会提示去重新试算而不是还停在第一步
   const pendingTrials = byQuantity ? trials.filter(o => o.qty > 0 && o.decision === 'pending').length : 0
   const pendingSaved = byQuantity ? trials.filter(o => o.qty > 0 && (data.inputs.supplement.trial_shared_decisions?.[o.key] || 'pending') === 'pending').length : 0
+  // 上次试算因缺配置失败：没归类的费用项目 / 没配系数的产品分组。已保存补上的不再算。
+  const missing = latest?.missing
+  const missingLeft = !missing || !rules ? [] : missing.names.filter(n => (missing.kind === 'expense' ? !rules.expense_map?.[n]
+    : !(rules.shared_group_weights?.[n] && rules.shared_group_weights[n].total != null && rules.shared_group_weights[n].tea != null)))
   const closed = !!data?.close_confirmation?.id
   const trialDone = !!latest?.run_id && ['needs_confirmation', 'ready', 'unverified'].includes(status)
-  const done = [!!rules?.confirmed && !dirty && !pendingSaved, trialDone, closed && status === 'ready', status === 'ready' && !!latest?.export_ready]
+  const done = [!!rules?.confirmed && !dirty && !pendingSaved && !missingLeft.length, trialDone, closed && status === 'ready', status === 'ready' && !!latest?.export_ready]
   const current = !data?.inputs ? 0 : done.findIndex(x => !x)
   const stepDesc = [
-    !data?.inputs ? '尚未建立本期配置' : dirty ? '有未保存的修改' : pendingSaved ? `${pendingSaved} 张试产工单待确认` : !rules.confirmed ? '待核对并保存' : `已核对${data.inputs.updated_by ? ' · ' + data.inputs.updated_by : ''}`,
+    !data?.inputs ? '尚未建立本期配置' : dirty ? '有未保存的修改' : missingLeft.length ? `${missingLeft.length} 个${missing.kind === 'expense' ? '费用项目待归类' : '产品分组待配系数'}` : pendingSaved ? `${pendingSaved} 张试产工单待确认` : !rules.confirmed ? '待核对并保存' : `已核对${data.inputs.updated_by ? ' · ' + data.inputs.updated_by : ''}`,
     status === 'needs_inputs' ? '依据已改，需重新试算' : status === 'failed' ? '上次生成失败' : data?.source_time ? `金蝶数据时点 ${fmtTime(data.source_time)}` : '尚未取数',
     closed ? `${data.close_confirmation.confirmed_by} · ${fmtTime(data.close_confirmation.confirmed_at)}` : '由你确认本期已结账',
     done[3] ? '可导出带公式的正式表' : '确认结账后自动生成',
@@ -121,7 +128,10 @@ export default function ActualCost({ org, year, period, user }) {
   const canConfirm = !!data?.inputs && !blockers.length && !busy
   const exportable = ['ready', 'needs_confirmation'].includes(status)
   const issues = latest?.issues || []
-  const issueTarget = text => (/试产|分摊|依据|规则|比例|配置|口径/.test(text) && data?.inputs ? 'inputs' : null)
+  const issueTarget = text => (/试产|分摊|依据|规则|比例|配置|口径|费用项目|产品分组/.test(text) && data?.inputs ? 'inputs' : null)
+  // 可沿用规则的月份（不含本期）；默认选最近的一个
+  const sources = (data?.rule_periods || []).filter(x => x !== `${year}-${String(period).padStart(2, '0')}`)
+  const sourceChoice = sources.includes(sourcePeriod) ? sourcePeriod : sources[0] || ''
 
   const centres = useMemo(() => { const m = new Map(); products.forEach(p => m.set(p.cc, (m.get(p.cc) || 0) + 1)); return [...m] }, [products])
   const rows = useMemo(() => {
@@ -188,10 +198,12 @@ export default function ActualCost({ org, year, period, user }) {
 
         {/* ── 本期还没有配置：沿用历史月份的规则结构 ── */}
         {data && !data.inputs && <div className="ac-card ac-init">
-          <div><b>建立 {periodText} 的配置</b><p>选一个同账簿的历史月份沿用分摊规则。本期的金额、共享比例和确认状态不会沿用，建立后需重新填写并核对。</p></div>
-          <label className="selctl"><span className="k">规则来源月份</span>
-            <input type="month" value={sourcePeriod} onChange={e => setSourcePeriod(e.target.value)} /></label>
-          <button className="btn-pri" disabled={!!busy || !sourcePeriod || !can('cost_ledger_wh')} onClick={initialize}>{busy === 'init' ? '正在建立…' : '沿用规则建立本期配置'}</button>
+          <div><b>建立 {periodText} 的配置</b><p>选一个已有规则的月份沿用它的分摊规则（可以是后面的月份）。本期的金额、共享比例、试产确认和「已核对」状态都不会带过来，建立后要重新填写并核对。</p></div>
+          {sources.length ? <span className="selctl"><span className="k">沿用哪个月的规则</span>
+            <select aria-label="规则来源月份" value={sourceChoice} onChange={e => setSourcePeriod(e.target.value)} style={{ border: 0, height: 28, padding: '0 4px', background: 'transparent' }}>
+              {sources.map(x => <option key={x} value={x}>{x.replace('-', ' 年 ')} 月</option>)}</select></span>
+            : <span className="ac-amber">这个账簿还没有任何月份的规则可沿用</span>}
+          <button className="btn-pri" disabled={!!busy || !sourceChoice || !can('cost_ledger_wh')} onClick={() => initialize(sourceChoice)}>{busy === 'init' ? '正在建立…' : '沿用规则建立本期配置'}</button>
         </div>}
 
         {/* ── 合计衔接：金蝶完工成本 ＋ 在产调整 ＝ 全成本合计（后端已校验此等式）── */}
@@ -204,6 +216,7 @@ export default function ActualCost({ org, year, period, user }) {
           <div className="ac-fig-side">
             <div className={'ac-fig sm ' + (Math.abs(counts.source_difference) > 0.01 ? 'bad' : 'ok')}><span>来源差异</span><b>{fmt(counts.source_difference)}{Math.abs(counts.source_difference) <= 0.01 && ' ✓'}</b></div>
             <div className="ac-fig sm"><span>无产出在产调整（单列）</span><b>{fmt(unallocatedSum)}</b></div>
+            {!!counts.outsourced_total && <div className="ac-fig sm" title="委外产品在表里车间记「委外」，成本＝直接材料＋委外加工费，不分摊厂内费用；已含在金蝶完工成本和全成本合计里"><span>其中委外产品</span><b>{fmt(counts.outsourced_total)}</b></div>}
             {counts.shared_quantity
               ? <div className="ac-fig sm" title={`小料产量 ${fmt(counts.shared_quantity.tea)} ÷ 纳入分摊产量 ${fmt(counts.shared_quantity.total)} kg，按本期金蝶完工量自动计算`}><span>共享领用小料比例</span><b>{fmtPct(counts.shared_ratio, 4)}</b></div>
               : isNum(counts.shared_ratio) && <div className="ac-fig sm"><span>共享领用小料比例（填写）</span><b>{fmtPct(counts.shared_ratio, 4)}</b></div>}
@@ -214,7 +227,7 @@ export default function ActualCost({ org, year, period, user }) {
         {(data?.inputs || result) && <div className="ac-tabbar">
           <Tabs label="全成本视图" value={tab} onChange={setTab} tabs={[
             ['table', '全成本表', products.length || null],
-            ...(data?.inputs ? [['inputs', '本期依据', dirty ? '未保存' : pendingSaved || (!rules.confirmed ? '待核对' : null), 'warn']] : []),
+            ...(data?.inputs ? [['inputs', '本期依据', dirty ? '未保存' : missingLeft.length + pendingSaved || (!rules.confirmed ? '待核对' : null), 'warn']] : []),
             ...(result ? [['wip', '在产调整', unallocated.length || null]] : []),
             ...(latest?.run_id ? [['sources', '金蝶原始数据']] : []),
           ]} />
@@ -285,7 +298,7 @@ export default function ActualCost({ org, year, period, user }) {
         </> : data?.inputs && <div className="ac-card ac-empty">本期还没有试算结果。核对「本期依据」后点右上角「取数并试算」。</div>)}
 
         {tab === 'inputs' && form && <ActualCostInputs data={data} form={form} setForm={setForm} dirty={dirty} busy={busy} can={can}
-          trials={trials} counts={counts} onSave={save} onReset={() => setForm(JSON.parse(savedForm.current))} />}
+          trials={trials} counts={counts} missing={missing} onSave={save} onReset={() => setForm(JSON.parse(savedForm.current))} />}
 
         {/* ── 在产调整 ── */}
         {tab === 'wip' && result && <div className="ac-two">
