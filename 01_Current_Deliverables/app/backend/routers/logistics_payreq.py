@@ -201,6 +201,7 @@ def _scan(trigger, days):
     # 并发 8 偶尔被钉钉限流回空(首扫 559 张空了 40 张，单张重取都正常)：空的逐张再取一次
     got = [(i, inst) if inst else get(i) for i, inst in got]
     n_new = n_upd = n_fail = 0
+    new_ids = []
     for iid, inst in got:
         if not inst:
             n_fail += 1
@@ -231,6 +232,8 @@ def _scan(trigger, days):
             else:
                 c.execute(insert(PR).values(inst_id=iid, auto=1 if ct[:10] >= since else 0, **row))
                 n_new += 1
+                if row["business_id"]:
+                    new_ids.append(row["business_id"])
     # 不属于物流账单的(办公室快递月结等)：没判过的按规则判一次；人工改过的(''或原因)不再动
     with db._engine.connect() as c:
         allr = [dict(r) for r in c.execute(select(PR)).mappings().all()]
@@ -284,7 +287,7 @@ def _scan(trigger, days):
            "updated": n_upd, "failed": n_fail, "paid": n_paid, "auto": n_auto, "err": lerr or "",
            "sec": round(time.time() - t0, 1)}
     db.set_setting(_SET_LAST, out, "系统")
-    return {"ok": True, **out}
+    return {"ok": True, **out, "newIds": new_ids[:8]}       # newIds＝这一轮新接的钉钉审批编号（数字员工办公室的干活记录用；设置里不存）
 
 
 # ---------- 拉进来：发票进发票管家 + 账单进复核台 ----------
@@ -640,10 +643,22 @@ def _scheduler():
     while True:
         time.sleep(20 * 60)
         try:
-            if not _is_local():
-                scan_once("定时")
-        except Exception:
-            pass
+            import worker_store      # 数字员工办公室·物流请款单接收员：每圈报到；真接了新单 / 出了错才记一笔（只写张数和钉钉单号）
+            if _is_local():
+                worker_store.beat("payreq", off="本机测试库不自动跑")
+                continue
+            r = scan_once("定时") or {}
+            worker_store.beat("payreq")
+            if r.get("new") or r.get("failed") or r.get("err"):
+                bad = r.get("failed") or r.get("err")
+                worker_store.record("payreq", n=r.get("new") or 0, ok=not bad, summary="已接入 %d 张请款单" % (r.get("new") or 0), refs=r.get("newIds"),
+                                    error=("%s 张没读成；%s" % (r.get("failed") or 0, r.get("err") or "")) if bad else "")
+        except Exception as e:
+            try:
+                import worker_store
+                worker_store.record("payreq", ok=False, summary="扫钉钉请款单出错", error=str(e))
+            except Exception:
+                pass
 
 
 threading.Thread(target=_scheduler, daemon=True, name="logi-payreq-scan").start()

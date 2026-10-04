@@ -2290,11 +2290,18 @@ def remind_tick(now=None, force=False):
 
 
 def _remind_loop():
+    import worker_store      # 数字员工办公室·催票员：每圈报到；当天真催了才记一笔（只写张数）
     while True:
         try:
-            remind_tick()
+            r = remind_tick() or {}
+            worker_store.beat("inv_remind", off="催票开关没开" if r.get("reason") == "disabled" else "")
+            if r.get("ran") and r.get("due"):
+                worker_store.record("inv_remind", n=r.get("sent") or 0, ok=not r.get("failed"),
+                                    summary="该催 %d 张，已发出 %d 张" % (r["due"], r.get("sent") or 0),
+                                    error=("%d 张没发出：%s" % (r["failed"], _REMIND.get("lastError") or "")) if r.get("failed") else "")
         except Exception:
             _REMIND["lastError"] = traceback.format_exc()[-2000:]    # 绝不让线程死掉：记下来，下一轮再试
+            worker_store.record("inv_remind", ok=False, summary="催票出错", error=_REMIND["lastError"][-600:])
         _REMIND_WAKE.wait(600)
         _REMIND_WAKE.clear()
 

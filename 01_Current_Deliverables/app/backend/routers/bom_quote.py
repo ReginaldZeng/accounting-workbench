@@ -2184,11 +2184,48 @@ def _auto_intake_scheduler():
         time.sleep(max(120, conf["interval"] * 60))
         try:
             if conf["enabled"] and not _auto_is_local():
-                _auto_intake_once(trigger="定时")
+                _office_bom("bom_intake", _auto_intake_once(trigger="定时"))
+            else:
+                _office_bom("bom_intake", {"ran": False, "msg": "本机测试库不自动跑" if _auto_is_local() else "未启用（conf.ini [bom] auto_intake=0）"})
             if not _auto_is_local():
-                _oa_final_sync_once(trigger="定时")       # V2.584：OA 财务经理节点同意/退回 → 工作台自动终审
-        except Exception:
-            pass
+                _office_bom("bom_final", _oa_final_sync_once(trigger="定时"))       # V2.584：OA 财务经理节点同意/退回 → 工作台自动终审
+            else:
+                _office_bom("bom_final", {"ran": False, "msg": "本机测试库不自动跑"})
+        except Exception as e:
+            try:
+                import worker_store
+                worker_store.record("bom_intake", ok=False, summary="定时扫描出错", error=str(e))
+            except Exception:
+                pass
+
+
+def _office_bom(desk, s):
+    """数字员工办公室·BOM 两个工位：每圈报到；真立了项 / 同步了终审 / 出了错才记一笔（只写单数，不写产品名）。"""
+    try:
+        _office_bom_inner(desk, s)
+    except Exception:
+        pass          # 记不上绝不拦定时任务本身
+
+
+def _office_bom_inner(desk, s):
+    import worker_store
+    s = s or {}
+    if not s.get("ran"):
+        msg = str(s.get("msg") or "")
+        worker_store.beat(desk, off="" if "还在跑" in msg else msg)
+        return
+    worker_store.beat(desk)
+    if desk == "bom_intake":
+        ok_n, bad = len(s.get("intaken") or []), s.get("failed") or []
+        if ok_n or bad:
+            worker_store.record(desk, n=ok_n, ok=not bad, summary="已自动立项 %d 单" % ok_n, refs=[x.get("appno") for x in s.get("intaken") or []],
+                                error=("%d 单没立成：%s" % (len(bad), "；".join(str(x.get("msg") or "")[:80] for x in bad[:5]))) if bad else "")
+    else:
+        a, r, bad = len(s.get("approved") or []), len(s.get("returned") or []), s.get("errors") or []
+        if a or r or bad:
+            worker_store.record(desk, n=a + r, ok=not bad, summary="已同步终审：通过 %d 单、退回 %d 单" % (a, r),
+                                refs=[x.get("appno") for x in (s.get("approved") or []) + (s.get("returned") or [])],
+                                error=("%d 单没同步成：%s" % (len(bad), str(bad[:3])[:300])) if bad else "")
 
 
 threading.Thread(target=_auto_intake_scheduler, daemon=True, name="bom-auto-intake").start()

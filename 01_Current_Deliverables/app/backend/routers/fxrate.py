@@ -16,6 +16,7 @@ import notifier
 import threading
 import time
 import todo_scenes
+import worker_store
 
 from core import (
     JSONResponse, _KD_STATUS_CN, _require_perm, datetime, db, os,
@@ -604,6 +605,7 @@ def _fxrate_autorun_enabled():
 def _fxrate_scheduler():
     """每日 FX_AUTORUN_HOUR:00 触发一次自动批。幂等：已建的跳过、缺数静默等待。单次异常不弄垮线程。
     是否真正跑批在【触发时】判定（_fxrate_autorun_enabled），故页面开关即时生效、无需重启。"""
+    _office_beat()          # 数字员工办公室：一启动先报到（一天才转一圈，不然上线当天值班表上一直是「没报到过」）
     while True:
         now = datetime.datetime.now()
         nxt = now.replace(hour=FX_AUTORUN_HOUR, minute=0, second=0, microsecond=0)
@@ -611,10 +613,29 @@ def _fxrate_scheduler():
             nxt += datetime.timedelta(days=1)
         time.sleep(max(30, (nxt - now).total_seconds()))
         try:
+            _office_beat()
             if _fxrate_autorun_enabled():
-                _fxrate_autorun_once()
-        except Exception:
-            pass
+                _office_report(_fxrate_autorun_once())
+        except Exception as e:
+            worker_store.record("fx", ok=False, summary="自动录入出错", error=str(e))
+
+
+def _office_beat():
+    """数字员工办公室·汇率录入员报到：开关没开 / 本机测试库 → 记成「没上岗」并写明原因。"""
+    worker_store.beat("fx", off="" if _fxrate_autorun_enabled() else ("本机测试库不自动跑" if _fxrate_is_local() else "自动录入开关没开"))
+
+
+def _office_report(reports):
+    """把一轮自动批的结果记进干活记录：真写了、被闸门拦了、出错了才记；等人行公布（waiting）、金蝶已齐（done）不记。只写条数。"""
+    for rep in reports or []:
+        st, label = rep.get("status"), "%s 年 %s 月" % (rep.get("year"), rep.get("month"))
+        n = sum(1 for r in rep.get("results") or [] if r.get("status") == "posted")
+        if st in ("written", "partial"):
+            worker_store.record("fx", n=n, ok=(st == "written"), summary="%s已写入 %d 条" % (label, n),
+                                error="" if st == "written" else str(rep.get("msg") or ""))
+        elif st in ("held", "error"):
+            worker_store.record("fx", ok=False, summary=label + ("被闸门拦下，没写" if st == "held" else "出错，没写"),
+                                error=str(rep.get("msg") or ""))
 
 
 @router.get("/api/fxrate/autorun-config")

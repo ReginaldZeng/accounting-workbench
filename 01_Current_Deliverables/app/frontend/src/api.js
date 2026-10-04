@@ -167,6 +167,12 @@ export const checkTodo = id => jp('/api/todo/check', id ? { id } : {})
 export const closeTodo = (id, vno) => jp('/api/todo/close', { id, vno })
 export const voidTodo = (id, reason) => jp('/api/todo/void', { id, reason })
 export const getTodoConfig = () => j('/api/todo/config')
+// V2.796 数字员工办公室：roster=值班表（登录）；screen=大屏用（不登录，请求头带大屏口令）；runs=某工位干活记录；token=主管理员管大屏链接
+export const getOfficeRoster = () => j('/api/office/roster')
+export const getOfficeScreen = token => j('/api/office/screen', { headers: { 'X-Office-Token': token } })
+export const getOfficeRuns = desk => j('/api/office/runs?desk=' + encodeURIComponent(desk))
+export const getOfficeToken = () => j('/api/office/screen-token')
+export const setOfficeToken = action => jp('/api/office/screen-token', { action })
 export const saveTodoConfig = assignees => j('/api/todo/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assignees }) })
 export const saveNavModules = (state, posts, templates) => jpSoft('/api/nav-modules/save', { state, posts, templates })
 // 日志中心（V2.488-489）：运维请求日志 + 业务操作留痕。全部仅主管理员（enter_settings）可读。

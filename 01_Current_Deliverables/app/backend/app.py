@@ -213,7 +213,11 @@ async def _auth_gate(request, call_next):
         inv_self = (not u) and p.startswith("/api/inv/s/")
         if inv_self:
             request.state.ops_user = invoice_self.self_ops_user(request) or None
-        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal and not bom_pull and not inv_pair and not inv_self:
+        # 数字员工办公室大屏（V2.796）：闲置电脑上常开的值班表没有登录会话，只揣主管理员生成的大屏口令（请求头 X-Office-Token）。
+        # 只放 /api/office/screen 这一个只读口——它只回件数和状态，没有任何业务明细；口令没生成过＝通道关着。
+        office_screen = (not u) and p == office.SCREEN_PATH and office.screen_token_ok(request)
+        if not u and not (p in _PULL_PATHS and pull_token_ok(request)) and not bp_internal and not bom_pull and not inv_pair and not inv_self \
+                and not office_screen:
             return JSONResponse({"ok": False, "msg": "未登录"}, status_code=401)
         # 初始密码闸（V2.330）：账号被新建/重置密码后 must_change_pwd=1——改密之前除 /api/change-pwd
         # 外一律 403（含 /api/bp-authz，BP 也进不去）。前端据 code 弹强制改密页；服务端拦，直连 API 也绕不过。
@@ -5010,6 +5014,33 @@ from routers import logistics_voucher   # V2.749 物流付款做账（红冲→�
 app.include_router(logistics_voucher.router)
 from routers import todo   # V2.790 首页待办区（待我处理 / 我发起的 / 最近办结 + 待办处理人设置 + 回读金蝶状态自动销账）
 app.include_router(todo.router)
+from routers import office   # V2.796 数字员工办公室（值班表 + 干活记录 + 大屏口令）
+app.include_router(office.router)
+
+
+def _office_machines():
+    """取件机也是工位：状态不在干活记录表里，在各自的回报记录里——这里翻成值班表的一行（只有状态，没有文件名）。"""
+    out = []
+    for m in _pull_registry():
+        st = _pull_status(m)
+        ago = st["ago_sec"]
+        if not st["deployed"]:
+            status, text = "off", "还没上岗：这台机器还没回报过"
+        elif st["alive"]:
+            status, text = "ok", "正常"
+        elif m.get("always_on"):
+            mins = int((ago or 0) // 60)
+            status, text = "down", "%s没动静" % ("%d 分钟" % max(1, mins) if mins < 60 else "%d 小时" % (mins // 60) if mins < 2880 else "%d 天" % (mins // 1440))
+        else:
+            status, text = "off", "休息中：个人电脑，关机属正常"
+        out.append({"key": "pull_" + m["id"], "name": m["name"], "what": m["purpose"], "cadence": m["freq"],
+                    "handoff": "送达收件人", "status": status, "statusText": text,
+                    "lastAt": str(st["at"] or "")[5:16], "lastText": "上次回报" if st["at"] else ""})
+    return out
+
+
+import worker_store
+worker_store.PROVIDERS.append(_office_machines)
 
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,

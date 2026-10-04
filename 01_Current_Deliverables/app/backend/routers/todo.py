@@ -165,6 +165,13 @@ def _loop():
         try:
             r = _checks(None, "定时")
             _STATE.update(lastRun=ts._now(), lastResult=r, lastError=r.get("kd_error") or "")
+            import worker_store      # 数字员工办公室·待办核对员：每圈报到；真销了账 / 没连上金蝶才记一笔（只写条数）
+            worker_store.beat("todo_check")
+            if r.get("kd_error"):
+                worker_store.record("todo_check", ok=False, summary="没连上金蝶，这一轮没核对成", error=r["kd_error"])
+            elif r.get("done") or r.get("withdrawn"):
+                worker_store.record("todo_check", n=r.get("done") or 0,
+                                    summary="已核对 %d 条，销账 %d 条" % (r.get("checked") or 0, r.get("done") or 0))
         except Exception as e:
             _STATE["lastError"] = str(e)[:300]      # 绝不让线程死掉：记下来，下一轮再试
         time.sleep(EVERY_MIN * 60)

@@ -1,0 +1,233 @@
+<!doctype html>
+<!--
+[Change Log]
+Date: 2026-10-04 | Author: Claude Opus 5.5 | Version: V2.796（数字员工办公室）
+Description: 画风样张 ②「等距写实 · 格子间」——只画一个六人卡位的近景，给业务方看这条路线能精细到什么程度（纯代码绘制，没有用任何图片素材）。
+  和现在线上那版的区别：对坐卡位 + 隔断（后排的人脸朝观众）；人物正常比例；写字楼常见的灰蓝 + 暖白；
+  财务办公室真有的东西——凭证柜、打印机、取件机、百叶窗、地毯块；状态用显示器顶上的小灯（绿 / 黄 / 红闪 / 灭）。
+  数据是编的，只看画面。不接接口。
+-->
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>画风样张 ② 等距写实格子间</title>
+<style>
+  html,body{margin:0;height:100%;background:#DDE2E6;font-family:"MiSans","PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{height:100%;display:grid;grid-template-rows:auto 1fr}
+  .bar{padding:10px 18px;font-size:13px;color:#4A5560;background:#EEF1F3;border-bottom:1px solid #D3D9DE}
+  .bar b{color:#1F2A33}
+  svg{width:100%;height:100%;display:block}
+  @keyframes pulse{50%{opacity:.3}}
+  .blink{animation:pulse 1.1s infinite}
+  .nod{animation:nod 3.4s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 95%}
+  @keyframes nod{0%,100%{transform:rotate(-2deg)}50%{transform:rotate(2.5deg) translateY(.6px)}}
+  .ty{animation:ty .4s ease-in-out infinite alternate}.ty.b{animation-direction:alternate-reverse}
+  @keyframes ty{to{transform:translateY(-1.8px)}}
+  .zz{animation:zz 3s ease-in infinite;opacity:0}
+  @keyframes zz{0%{opacity:0;transform:translate(0,5px)}25%{opacity:.85}100%{opacity:0;transform:translate(8px,-14px)}}
+  .bub{animation:bub 1.3s ease-in-out infinite}@keyframes bub{50%{transform:translateY(-3px)}}
+  .scr{animation:scr 2.8s steps(1) infinite}@keyframes scr{50%{opacity:.35}}
+  @media (prefers-reduced-motion:reduce){.blink,.nod,.ty,.bub,.scr{animation:none}.zz{animation:none;opacity:.7}}
+</style>
+<div class="wrap">
+  <div class="bar"><b>画风样张 ② 等距写实 · 格子间</b>　一个六人卡位的近景，纯代码画的，数据是编的。后排脸朝你，前排背朝你；显示器顶上的小灯是状态：绿＝正常，黄＝上一轮出错，红闪＝停了，灭＝没上岗。</div>
+  <svg id="s" viewBox="0 0 1200 700" preserveAspectRatio="xMidYMid meet"></svg>
+</div>
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg', S0 = document.getElementById('s')
+  const el = (t, a = {}) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); return e }
+  const C = 0.9, S = 0.5, iso = (x, y, z = 0) => [(x - y) * C, (x + y) * S - z]
+  const pts = a => a.map(p => iso(...p).join(',')).join(' ')
+  let P                                       // 当前画到哪个组
+  const poly = (p, fill, ex = {}) => { const e = el('polygon', { points: pts(p), fill, ...ex }); P.appendChild(e); return e }
+  const box = (x, y, z, w, d, h, c) => {      // c = [顶, 右(+x 面), 前(+y 面)]
+    poly([[x, y + d, z], [x + w, y + d, z], [x + w, y + d, z + h], [x, y + d, z + h]], c[2])
+    poly([[x + w, y, z], [x + w, y + d, z], [x + w, y + d, z + h], [x + w, y, z + h]], c[1])
+    poly([[x, y, z + h], [x + w, y, z + h], [x + w, y + d, z + h], [x, y + d, z + h]], c[0])
+  }
+  const at = (x, y, z, html) => { const p = iso(x, y, z), g = el('g', { transform: `translate(${p[0]},${p[1]})` }); g.innerHTML = html; P.appendChild(g); return g }
+  const shadow = (x, y, rx, ry, o = .16) => { const p = iso(x, y, 0); P.appendChild(el('ellipse', { cx: p[0], cy: p[1], rx, ry, fill: `rgba(40,55,70,${o})`, filter: 'url(#soft)' })) }
+
+  S0.innerHTML = `<defs>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="7"/></filter>
+    <filter id="glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="5"/></filter>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E9EDF0"/><stop offset="1" stop-color="#D5DBE0"/></linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#BFDDF2"/><stop offset="1" stop-color="#EAF4FB"/></linearGradient>
+    <linearGradient id="fab" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9DB0C2"/><stop offset="1" stop-color="#8598AB"/></linearGradient>
+  </defs><rect width="1200" height="700" fill="url(#bg)"/>`
+  const root = el('g'); S0.appendChild(root); P = root
+
+  // ───────── 房间：地毯块 / 墙 / 窗 ─────────
+  const WX = -150, WY = -110, XM = 500, YM = 236, WH = 170
+  for (let x = WX; x < XM; x += 60) for (let y = WY; y < YM; y += 60) {
+    const w = Math.min(60, XM - x), d = Math.min(60, YM - y)
+    poly([[x, y], [x + w, y], [x + w, y + d], [x, y + d]], ((x - WX) / 60 + (y - WY) / 60) % 2 ? '#C6CED5' : '#BFC8D0', { stroke: '#B4BDC6', 'stroke-width': .6 })
+  }
+  ;[[-40, 60], [120, 220], [280, 380]].forEach(([a, b]) =>          // 窗外照进来的光
+    poly([[a, WY], [b, WY], [b + 50, WY + 190], [a + 50, WY + 190]], 'rgba(255,255,255,.20)'))
+  poly([[WX, WY, 0], [WX, YM, 0], [WX, YM, WH], [WX, WY, WH]], '#ECEAE4')            // 左墙
+  poly([[WX, WY, 0], [XM, WY, 0], [XM, WY, WH], [WX, WY, WH]], '#F5F3EE')            // 后墙
+  poly([[WX, WY, 0], [WX, YM, 0], [WX, YM, 10], [WX, WY, 10]], '#CFCBC1')
+  poly([[WX, WY, 0], [XM, WY, 0], [XM, WY, 10], [WX, WY, 10]], '#D8D4CA')
+  const win = (x0, x1) => {
+    poly([[x0, WY, 62], [x1, WY, 62], [x1, WY, 142], [x0, WY, 142]], '#AEB7BF')
+    poly([[x0 + 4, WY, 66], [x1 - 4, WY, 66], [x1 - 4, WY, 138], [x0 + 4, WY, 138]], 'url(#sky)')
+    for (let z = 70; z < 136; z += 7) poly([[x0 + 4, WY, z], [x1 - 4, WY, z], [x1 - 4, WY, z + 2.4], [x0 + 4, WY, z + 2.4]], 'rgba(255,255,255,.78)')   // 百叶
+    poly([[x0 - 3, WY, 58], [x1 + 3, WY, 58], [x1 + 3, WY, 62], [x0 - 3, WY, 62]], '#DAD6CC')
+  }
+  win(-40, 60); win(120, 220); win(280, 380)
+  at(-128, WY, 128, `<g transform="matrix(${C},${S},0,1,0,0)"><rect x="0" y="0" width="92" height="30" rx="3" fill="#34495C"/><text x="46" y="20" font-size="14" font-weight="700" fill="#fff" text-anchor="middle" letter-spacing="3">财务部</text></g>`)
+  at(WX, 190, 138, `<g transform="matrix(${C},${-S},0,1,0,0)"><circle cx="18" cy="18" r="17" fill="#fff" stroke="#8E979F" stroke-width="2.5"/><path d="M18,18 L18,7 M18,18 L26,21" stroke="#34495C" stroke-width="2" stroke-linecap="round"/></g>`)   // 左墙挂钟
+
+  // ───────── 靠左墙一排凭证柜 ─────────
+  const CAB = ['#DDE1E5', '#B3BAC1', '#C7CDD3']
+  for (let i = 0; i < 3; i++) {
+    const y = -100 + i * 78
+    shadow(WX + 30, y + 46, 46, 24)
+    box(WX + 2, y, 0, 42, 72, 118, CAB)
+    for (let k = 0; k < 2; k++) {              // +x 面上：两扇门、把手、标签槽
+      const y0 = y + 3 + k * 35
+      poly([[WX + 44, y0, 6], [WX + 44, y0 + 31, 6], [WX + 44, y0 + 31, 112], [WX + 44, y0, 112]], '#BCC3CA', { stroke: '#A2AAB2', 'stroke-width': .8 })
+      poly([[WX + 44, y0 + (k ? 3 : 25), 62], [WX + 44, y0 + (k ? 6 : 28), 62], [WX + 44, y0 + (k ? 6 : 28), 72], [WX + 44, y0 + (k ? 3 : 25), 72]], '#7F8992')
+      poly([[WX + 44, y0 + 8, 90], [WX + 44, y0 + 23, 90], [WX + 44, y0 + 23, 100], [WX + 44, y0 + 8, 100]], '#F4F1EA', { stroke: '#A2AAB2', 'stroke-width': .6 })
+    }
+    box(WX + 8, y + 10, 118, 26, 18, 9, ['#F3EFE6', '#D6D0C2', '#E4DED1'])          // 柜顶的档案盒
+    box(WX + 8, y + 34, 118, 26, 22, 14, ['#6F8FAE', '#587792', '#6483A0'])
+  }
+
+  // ───────── 人物（正常比例）─────────
+  const SKIN = '#EBC8A4'
+  const LOOK = [
+    { hair: '#2E2A28', style: 'short', shirt: '#F5F7F9', shirtD: '#D5DBE1', glasses: true },
+    { hair: '#4A3728', style: 'long', shirt: '#7E9BB8', shirtD: '#64829F' },
+    { hair: '#2E2E2C', style: 'bun', shirt: '#E9E3D4', shirtD: '#CFC7B4' },
+    { hair: '#5A4030', style: 'short', shirt: '#55616E', shirtD: '#434E5A' },
+    { hair: '#3B3330', style: 'pony', shirt: '#8FA98A', shirtD: '#76916F' },
+  ]
+  const torso = L => `<path d="M-13,2 Q-15,-21 -7,-26 L7,-26 Q15,-21 13,2 Z" fill="${L.shirt}"/><path d="M-13,2 Q-14,-12 -11,-20 Q-9,-8 -9,2 Z" fill="${L.shirtD}" opacity=".55"/>`
+  const armTo = (x0, y0, x1, y1, L, cls = '') => { const mx = (x0 + x1) / 2 + (y1 - y0) * .12, my = (y0 + y1) / 2 + 4
+    return `<g class="${cls}"><path d="M${x0},${y0} Q${mx},${my} ${x1},${y1}" fill="none" stroke="${L.shirtD}" stroke-width="6.5" stroke-linecap="round"/><circle cx="${x1}" cy="${y1}" r="3.3" fill="${SKIN}"/></g>` }
+  // 后排：脸朝观众（朝左下看屏幕）。躯干和头先画，桌子画完以后再画前臂（手搭在桌上）
+  const faceHead = (L, extra = '') => `<g class="nod"><rect x="-3" y="-31" width="6" height="6" fill="#DDB592"/>
+    ${L.style === 'long' ? `<path d="M-10,-42 Q-13,-26 -9,-18 L-5,-22 Q-8,-32 -6,-42 Z M10,-42 Q13,-26 9,-18 L5,-22 Q8,-32 6,-42 Z" fill="${L.hair}"/>` : ''}
+    <ellipse cx="0" cy="-39" rx="8.6" ry="9.6" fill="${SKIN}"/>
+    <path d="M-9.2,-39 Q-10,-51 0,-51.5 Q10,-51 9.2,-39 Q7,-46 1,-46.5 Q-5,-46 -9.2,-39 Z" fill="${L.hair}"/>
+    ${L.style === 'bun' ? `<circle cx="0" cy="-53" r="5" fill="${L.hair}"/>` : ''}
+    <ellipse cx="-3.6" cy="-38.5" rx="1.15" ry="1.5" fill="#2B2B2B"/><ellipse cx="2.4" cy="-38.5" rx="1.15" ry="1.5" fill="#2B2B2B"/>
+    <path d="M-2.6,-33.6 Q-.6,-32.4 1.4,-33.6" fill="none" stroke="#B0705C" stroke-width="1" stroke-linecap="round"/>
+    ${L.glasses ? '<g fill="none" stroke="#34495C" stroke-width="1"><rect x="-6.6" y="-41" width="5.6" height="4.6" rx="1.6"/><rect x="-.4" y="-41" width="5.6" height="4.6" rx="1.6"/></g>' : ''}${extra}</g>`
+  const personFront = L => torso(L) + faceHead(L)
+  const armsFront = (L, pose) => pose === 'sip'
+    ? armTo(-10, -19, -29, 7, L) + `<g class="bub">${armTo(10, -19, 4, -27, L)}<rect x="1" y="-33" width="7" height="8" rx="1.5" fill="#fff" stroke="#C9CED3"/></g>`
+    : armTo(-10, -19, -31, 6, L, 'ty') + armTo(10, -19, -20, 11, L, 'ty b')
+  // 前排：背朝观众，脸朝右上方的屏幕
+  const backHead = L => `<g class="nod"><rect x="-3" y="-31" width="6" height="6" fill="#DDB592"/><ellipse cx="1.5" cy="-39" rx="8.4" ry="9.4" fill="${SKIN}"/><circle cx="9.6" cy="-38" r="2.2" fill="${SKIN}"/>
+    ${L.style === 'pony' ? `<ellipse cx="-6" cy="-29" rx="3.6" ry="9" fill="${L.hair}" transform="rotate(18 -6 -29)"/>` : ''}
+    <ellipse cx="0" cy="-39.5" rx="8.8" ry="9.8" fill="${L.hair}"/>${L.style === 'bun' ? `<circle cx="0" cy="-53" r="5" fill="${L.hair}"/>` : ''}</g>`
+  const personBack = (L, pose) => pose === 'down'
+    ? armTo(8, -18, 30, -20, L) + armTo(-9, -16, 22, -13, L) + `<g transform="translate(8,4) rotate(24)">${torso(L)}${backHead(L)}</g>` +
+      [[24, -50, 10, 0], [30, -59, 12, 1], [37, -69, 15, 2]].map(([x, y, f, i]) => `<text class="zz" style="animation-delay:${i}s" x="${x}" y="${y}" font-size="${f}" font-weight="700" fill="#6B7884">z</text>`).join('')
+    : pose === 'err'
+      ? armTo(-9, -18, 22, -18, L) + torso(L) + armTo(9, -20, 11, -46, L) + backHead(L) +
+        `<g class="bub"><rect x="14" y="-76" width="16" height="18" rx="5.5" fill="#E2A93B"/><path d="M19,-59 l3,4.5 l3,-4.5 z" fill="#E2A93B"/><text x="22" y="-62.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff">!</text></g>`
+      : torso(L) + armTo(9, -20, 33, -24, L, 'ty') + armTo(-9, -18, 23, -16, L, 'ty b') + backHead(L)
+  const chairBase = (x, y) => { const p = iso(x, y, 0)
+    P.appendChild(el('ellipse', { cx: p[0], cy: p[1] + 2, rx: 21, ry: 10, fill: 'none', stroke: '#59636E', 'stroke-width': 3 }))
+    box(x - 3, y - 3, 0, 6, 6, 14, ['#6E7884', '#525C67', '#5F6974']); box(x - 17, y - 15, 14, 34, 30, 7, ['#3D4651', '#2B333C', '#343D47']) }
+  const chairBack = (x, y, far) => at(x, y, 21, far
+    ? '<rect x="-13" y="-46" width="26" height="34" rx="9" fill="#343D47"/><rect x="-2.5" y="-14" width="5" height="10" fill="#525C67"/>'
+    : '<rect x="-12" y="-27" width="24" height="22" rx="8" fill="#3D4651"/><rect x="-2.5" y="-6" width="5" height="9" fill="#525C67"/>')
+
+  // ───────── 桌子 / 显示器 / 桌面物件 ─────────
+  const DW = 112, DD = 62, DZ = 30
+  const TOP = ['#F4F1EA', '#D2CCBE', '#E0DACD'], PED = ['#DFE3E7', '#B9C0C7', '#CBD1D7']
+  const desk = (x, y, pedRight) => {
+    shadow(x + DW / 2, y + DD / 2 + 10, 78, 36, .13)
+    const px = pedRight ? x + DW - 34 : x + 4
+    box(px, y + 6, 0, 30, DD - 12, DZ - 4, PED)
+    for (let k = 0; k < 3; k++) poly([[px + 3, y + DD - 6, 3 + k * 8], [px + 27, y + DD - 6, 3 + k * 8], [px + 27, y + DD - 6, 9 + k * 8], [px + 3, y + DD - 6, 9 + k * 8]], '#D5DAE0', { stroke: '#AEB6BE', 'stroke-width': .6 })
+    box(pedRight ? x + 4 : x + DW - 8, y + 6, 0, 4, DD - 12, DZ - 4, ['#C9CED3', '#AEB6BE', '#BCC3CA'])
+    box(x, y, DZ - 4, DW, DD, 4, TOP)
+  }
+  const LAMP = { ok: '#5BC06A', err: '#E2A93B', down: '#D8452E', off: '#8C949C' }
+  const lamp = (x, y, z, st) => { const p = iso(x, y, z)
+    if (st !== 'off') P.appendChild(el('ellipse', { cx: p[0], cy: p[1], rx: 15, ry: 11, fill: LAMP[st], opacity: .55, filter: 'url(#glow)', class: st === 'down' ? 'blink' : '' }))
+    P.appendChild(el('circle', { cx: p[0], cy: p[1], r: 4.2, fill: LAMP[st], stroke: '#fff', 'stroke-width': 1, class: st === 'down' ? 'blink' : '' })) }
+  // 显示器：back=true 只看到背面（后排的屏幕朝着人）；否则屏幕朝观众
+  const monitor = (x, y, st, back) => {
+    const w = 46, h = 30, z = DZ
+    box(x + w / 2 - 8, y - 1, z, 16, 8, 2, ['#3A424D', '#262C33', '#2F363E']); box(x + w / 2 - 3, y + 1, z, 6, 4, 9, ['#3A424D', '#262C33', '#2F363E'])
+    box(x, y, z + 9, w, 4, h, ['#3A424D', '#262C33', back ? '#333A43' : '#262C33'])
+    if (back) { const c = iso(x + w / 2, y + 4, z + 9 + h / 2); P.appendChild(el('circle', { cx: c[0], cy: c[1], r: 2.4, fill: '#59636E' })) }
+    else {
+      const on = st === 'ok' || st === 'err'
+      poly([[x + 2.5, y + 4, z + 11.5], [x + w - 2.5, y + 4, z + 11.5], [x + w - 2.5, y + 4, z + 6.5 + h], [x + 2.5, y + 4, z + 6.5 + h]], on ? '#EEF4F9' : st === 'down' ? '#2E2526' : '#20262C')
+      if (on) { poly([[x + 2.5, y + 4, z + h + 1], [x + w - 2.5, y + 4, z + h + 1], [x + w - 2.5, y + 4, z + 6.5 + h], [x + 2.5, y + 4, z + 6.5 + h]], '#34495C')
+        ;[[5, 22, '#9DB7CC'], [10, 30, '#C3D3E0'], [15, 18, '#C3D3E0'], [20, 26, '#9DB7CC']].forEach(([dz, len, c], i) =>
+          poly([[x + 6, y + 4, z + h - dz], [x + 6 + len, y + 4, z + h - dz], [x + 6 + len, y + 4, z + h - dz + 2], [x + 6, y + 4, z + h - dz + 2]], c, i === 2 ? { class: 'scr' } : {})) }
+    }
+    lamp(x + w / 2, y + 2, z + 9 + h + 4, st)
+  }
+  const keyb = (x, y) => { box(x, y, DZ, 36, 12, 1.6, ['#E7EAED', '#C3C9CF', '#D2D7DC']); box(x + 42, y + 2, DZ, 7, 10, 2, ['#E7EAED', '#C3C9CF', '#D2D7DC']) }
+  const papers = (x, y, n = 3) => { for (let i = 0; i < n; i++) box(x + (i % 2), y, DZ + i * 2.2, 22, 28, 2, ['#FFFFFF', '#DCD8CE', '#EFEBE2']); box(x + 6, y + 24, DZ + n * 2.2, 9, 4, 1.4, ['#34495C', '#22303C', '#2B3B4A']) }
+  const mug = (x, y, c = '#FFFFFF') => box(x, y, DZ, 7, 7, 8, [c, '#C9CED3', '#DDE1E5'])
+  const calc = (x, y) => { box(x, y, DZ, 13, 18, 1.8, ['#434E5A', '#2B333C', '#353F49']); box(x + 2, y + 2, DZ + 1.8, 9, 4, .6, ['#B9D7B0', '#8FB085', '#A3C599']) }
+  const pot = (x, y, s = 1) => at(x, y, DZ, `<g transform="scale(${s})"><path d="M-6,0 L6,0 L5,-9 L-5,-9 Z" fill="#E6E2D8"/><ellipse cx="0" cy="-9" rx="5" ry="1.8" fill="#C9C3B5"/><path d="M0,-9 Q-9,-16 -7,-24 Q-2,-18 0,-9 Q3,-20 9,-22 Q8,-14 0,-9 Q-1,-22 2,-28 Q5,-20 0,-9" fill="#6E9A5C"/></g>`)
+  const plate = (x, y, z, name, st, line) => { const w = Math.max(70, name.length * 12.4 + 20), c = LAMP[st]
+    at(x, y, z, `<rect x="0" y="-34" width="${w}" height="34" rx="6" fill="#FFFFFF" stroke="#C5CED6"/><text x="10" y="-19" font-size="12" font-weight="700" fill="#1F2A33">${name}</text><circle cx="13" cy="-8" r="3.6" fill="${c}"/><text x="21" y="-4" font-size="10.5" fill="#5A6672">${line}</text>`) }
+
+  // ───────── 一个六人卡位：后排三个脸朝观众，前排三个背朝观众，中间一道隔断 ─────────
+  const COLX = [0, DW + 2, (DW + 2) * 2], BY = 0, PY = BY + DD, FY = PY + 6
+  const back = [{ name: '汇率录入员', st: 'ok', line: '本月 8 条', L: LOOK[0], pose: 'type' }, { name: '待办核对员', st: 'ok', line: '本月 31 条', L: LOOK[1], pose: 'sip' }, { name: '合同预审员', st: 'off', line: '没上岗', L: null }]
+  const front = [{ name: '发票接收员', st: 'ok', line: '本月 186 张单', L: LOOK[2], pose: 'type' }, { name: '物流请款单接收员', st: 'err', line: '上一轮出错', L: LOOK[3], pose: 'err' }, { name: '发票凭证同步员', st: 'down', line: '停了 · 9 小时', L: LOOK[4], pose: 'down' }]
+  const top = el('g')                          // 工位牌单独一层，最后盖上去
+  // 后排：椅背最远 → 人 → 桌子 → 屏幕背面 → 前臂
+  back.forEach((d, i) => { const cx = COLX[i] + DW / 2, sy = BY - 24
+    shadow(cx, sy, 30, 15, .14); chairBack(cx, sy - 13, true); chairBase(cx, sy)
+    if (d.L) at(cx, sy + 2, 21, personFront(d.L)) })
+  back.forEach((d, i) => { const x = COLX[i]
+    desk(x, BY, i % 2 === 0); keyb(x + 36, BY + 8)
+    monitor(x + 32, BY + 46, d.st, true)
+    if (i === 0) { calc(x + 88, BY + 14); papers(x + 8, BY + 22, 4) }
+    if (i === 1) { pot(x + 96, BY + 44, 1.1); papers(x + 10, BY + 26, 2) }
+    if (i === 2) mug(x + 92, BY + 20, '#DDE1E5')
+    if (d.L) at(x + DW / 2, BY - 22, 21, armsFront(d.L, d.pose)) })
+  // 隔断：布面 + 上沿磨砂条 + 金属收边
+  box(COLX[0] - 3, PY, 0, (DW + 2) * 3 + 4, 6, 50, ['#E4E8EC', '#7F92A5', 'url(#fab)'])
+  box(COLX[0] - 3, PY, 50, (DW + 2) * 3 + 4, 6, 12, ['#F2F5F7', '#B4C1CD', '#C6D2DC'])
+  ;[1, 2].forEach(i => box(COLX[i] - 3, FY, 0, 4, DD + 2, 44, ['#E4E8EC', '#7F92A5', '#8FA1B3']))      // 前排工位之间的矮隔板
+  // 前排：桌子 → 屏幕正面 → 人 → 椅背最近
+  front.forEach((d, i) => { const x = COLX[i]
+    desk(x, FY, i % 2 === 1); monitor(x + 30, FY + 8, d.st, false); keyb(x + 34, FY + 40)
+    if (i === 0) { mug(x + 92, FY + 30); papers(x + 6, FY + 22, 3) }
+    if (i === 1) { calc(x + 10, FY + 34); papers(x + 84, FY + 20, 5) }
+    if (i === 2) pot(x + 14, FY + 22, .9) })
+  front.forEach((d, i) => { const cx = COLX[i] + DW / 2, sy = FY + DD + 24
+    shadow(cx, sy, 30, 15, .14); chairBase(cx, sy)
+    if (d.L) at(cx, sy - 2, 21, personBack(d.L, d.pose))
+    chairBack(cx, sy + 13, false) })
+  // 工位牌（放在最上层）
+  const P0 = P; P = top
+  back.forEach((d, i) => plate(COLX[i] - 4, BY - 46, 78, d.name, d.st, d.line))
+  front.forEach((d, i) => plate(COLX[i] + DW / 2 + 26, FY + DD + 50, 8, d.name, d.st, d.line))
+  P = P0
+
+  // ───────── 右边：打印机、取件机、绿植 ─────────
+  const plantBig = (x, y) => { shadow(x, y, 26, 12); at(x, y, 0, '<path d="M-13,0 L13,0 L10,-24 L-10,-24 Z" fill="#E6E2D8"/><ellipse cx="0" cy="-24" rx="10" ry="3.6" fill="#C9C3B5"/><path d="M0,-24 Q-22,-40 -18,-66 Q-6,-50 0,-24 Q8,-52 26,-58 Q22,-38 0,-24 Q-4,-60 6,-84 Q14,-56 0,-24 Q-30,-30 -32,-46 Q-14,-44 0,-24" fill="#5E8C55"/><path d="M0,-24 Q8,-52 26,-58 Q22,-38 0,-24" fill="#6FA064"/>') }
+  shadow(430, -64, 60, 30); box(396, -96, 0, 70, 54, 46, ['#E9ECEF', '#BFC6CD', '#D0D6DB'])
+  box(402, -90, 46, 58, 44, 26, ['#F2F4F6', '#C9CED3', '#DDE1E5']); box(408, -84, 72, 46, 30, 5, ['#434E5A', '#2B333C', '#353F49'])
+  poly([[414, -46, 52], [448, -46, 52], [448, -46, 58], [414, -46, 58]], '#FFFFFF')
+  shadow(444, 86, 54, 26); box(404, 56, 0, 84, 50, 30, ['#F4F1EA', '#D2CCBE', '#E0DACD'])
+  box(410, 62, 30, 20, 38, 38, ['#3D4651', '#262C33', '#2F363E']); lamp(420, 100, 60, 'ok')
+  monitor(440, 70, 'ok', false)
+  plantBig(-96, 206); plantBig(456, 190)
+  P.appendChild(top)                           // 工位牌盖在所有东西上面
+  P = top; plate(486, 104, 34, '财务报表取件机', 'ok', '正常'); P = root
+
+  // 整体居中缩放
+  const bb = root.getBBox(), pad = 30, s = Math.min((1200 - pad * 2) / bb.width, (700 - pad * 2) / bb.height)
+  root.setAttribute('transform', `translate(${(1200 - bb.width * s) / 2 - bb.x * s},${(700 - bb.height * s) / 2 - bb.y * s}) scale(${s})`)
+})()
+</script>
+</html>

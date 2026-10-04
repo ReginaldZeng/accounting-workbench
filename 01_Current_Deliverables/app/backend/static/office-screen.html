@@ -1,0 +1,566 @@
+<!doctype html>
+<!--
+[Change Log]
+Date: 2026-10-04 | Author: Claude Opus 5.5 | Version: V2.796（数字员工办公室）
+Description: 数字员工办公室 · 大屏（插画版）。画面换成业务方用生图工具出的素材：B 半写实插画风办公室底图（品牌布局 v4：
+  茶水间在左上房间旁、经理办公室在右上角、中央 3 排 × 4 列工位、前台挂完整品牌 LOGO、没有顶部横幅）+ 九个人的坐姿 / 走动图集。
+  图只管画；所有会变的东西由代码叠上去：
+  · 谁坐哪：按工位 key 固定座位和人物（不对应任何真人）。没上岗＝空椅子。
+  · 状态：显示器背面一盏小灯（绿 正常 / 黄 上一轮出错 / 红闪 停了 / 灰 没上岗）+ 人物动作（打字 / 歇着喝水 / 挠头 / 趴着睡）。
+  · 真干活才打字：上次干活在 10 分钟内的在打字，其余的歇着；闲着的偶尔起身去茶水间喝水、去沙发坐会儿（同时最多两个人离开座位）。
+  · 派工：两次刷新之间某工位多了一笔干成的活 → 画面中间弹一张「新任务」派工单（谁、接了什么），单子一张张飞到各自工位，
+    那位说「收到，开工」敲一阵键盘，干完说一句交给谁；要交给人的再走去右下角交接台放下、回来。
+    只是定时巡了一圈、没有新活的 → 不弹窗，显示器上闪一圈、敲几下键盘（不然每隔几分钟弹一次「没事」，弹窗就没人看了）。
+    大屏每分钟才取一次数，所以这是「刚刚发生的事」的回放，最多晚一分钟。
+  · 取件间三台电脑各一盏灯；交接台的文件筐里摞着「等人接手」的件数。
+  · 遮挡：人按脚下位置排前后；显示器单独抠了一层前景（office-art/fg.webp），盖在坐着的人前面。
+  版式：左边大画面，下面一排数字，最底下一条「实时动态」滚动条（把最近干完的活连同单号轮着滚）；
+       右边一栏（时间、要人看一眼、刚干完的活、值班表）。没有顶部横幅。
+  · 刚干完的活：一笔一张卡——谁、干完了什么（件数）、哪几张单（钉钉单号，最多列两个）；最新一笔加重，新来的闪一下。
+  · 值班表：默认收起成一行（几个在岗 / 停了 / 没上岗），点标题或按 R 展开，记在这台电脑的浏览器里。
+    画面上每个工位的状态已经看得见，收起来把地方让给「刚干完的活」。
+  全屏只有件数、状态和单号，不显示供应商、客户、金额。不显示工时。
+  数据：地址栏 # 后面带大屏口令（#k=…）→ 每分钟读 /api/office/screen；不带口令 / 直接双击打开 → 内置样例数据。
+  底图加载失败 → 自动退回矢量版 office-screen-vector.html。素材由 backend/tools/office_art_pack.py 从原图处理而来。
+-->
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星期零风控中心 · 数字员工办公室</title>
+<style>
+  :root{--paper:#F4F1EB;--panel:#FFFFFF;--ink:#2B1A46;--ink2:#5E5270;--ink3:#9A91A8;--line:#E9E4EE;--plum:#3E2A63;--plum-soft:#EFEAF6;
+    --ok:#2F9A5A;--warn:#B7791F;--bad:#C8452E;--idle:#A9A3B3}
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#E9E5DD}
+  body{font-family:"MiSans","PingFang SC","Microsoft YaHei",微软雅黑,Arial,sans-serif;color:var(--ink);display:grid;place-items:center}
+  #stage{width:1920px;height:1080px;background:var(--paper);padding:22px;display:grid;grid-template-columns:1440px 1fr;grid-template-rows:810px 1fr 46px;gap:16px;transform-origin:center}
+  .panel{background:var(--panel);border-radius:18px;box-shadow:0 2px 14px rgba(60,40,90,.07)}
+
+  /* —— 办公现场 —— */
+  #view{grid-column:1;grid-row:1}#strip{grid-column:1;grid-row:2}#tick{grid-column:1;grid-row:3}#rail{grid-column:2}
+  #view{position:relative;overflow:hidden;border-radius:18px;box-shadow:0 2px 14px rgba(60,40,90,.10);background:#6F86B6}
+  #scene{position:absolute;left:0;top:0;width:1672px;height:941px;transform-origin:0 0}
+  #scene img.bg{position:absolute;left:0;top:0;width:1672px;height:941px;display:block}
+  #scene img.logo{position:absolute;left:43.25%;top:89.25%;width:14.2%;height:5.4%;object-fit:contain;z-index:2}
+  .fgrow{position:absolute;left:0;width:1672px;background:url(office-art/fg.webp) no-repeat;background-size:1672px 941px;pointer-events:none}
+  .sp{position:absolute;background-repeat:no-repeat;pointer-events:none;will-change:transform}
+  .lamp{position:absolute;width:13px;height:13px;margin:-6.5px 0 0 -6.5px;border-radius:50%;border:2px solid rgba(255,255,255,.92);z-index:3000}
+  .lamp.ok{background:#48C774;box-shadow:0 0 0 3px rgba(72,199,116,.25),0 0 14px 4px rgba(72,199,116,.75)}
+  .lamp.err{background:#F0B13A;box-shadow:0 0 0 3px rgba(240,177,58,.28),0 0 14px 4px rgba(240,177,58,.85)}
+  .lamp.down{background:#E4492F;box-shadow:0 0 0 3px rgba(228,73,47,.3),0 0 16px 6px rgba(228,73,47,.9);animation:blink 1s infinite}
+  .lamp.off{background:#8F899B;border-color:rgba(255,255,255,.6)}
+  @keyframes blink{50%{opacity:.25}}
+  .np{position:absolute;height:20px;line-height:19px;padding:0 7px 0 6px;border-radius:5px;background:rgba(255,255,255,.94);border:1px solid rgba(62,42,99,.22);
+    font-size:12.5px;font-weight:700;color:var(--ink);white-space:nowrap;z-index:3000;box-shadow:0 1px 3px rgba(40,25,70,.18)}
+  .np i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px}
+  .np.off{color:#7D7689;font-weight:500}
+  .tag{position:absolute;transform:translateX(-50%);height:17px;line-height:16px;padding:0 6px;border-radius:4px;background:rgba(255,255,255,.92);
+    border:1px solid rgba(62,42,99,.2);font-size:11px;font-weight:700;color:var(--ink);white-space:nowrap;z-index:3000}
+  .bub{position:absolute;transform:translate(-50%,-100%);padding:5px 10px;border-radius:10px;background:#fff;border:1.5px solid var(--plum);color:var(--ink);
+    font-size:13px;font-weight:700;white-space:nowrap;z-index:3500;box-shadow:0 3px 10px rgba(40,25,70,.22);animation:pop .25s ease-out}
+  .bub::after{content:"";position:absolute;left:50%;bottom:-7px;width:10px;height:10px;margin-left:-5px;background:#fff;border-right:1.5px solid var(--plum);border-bottom:1.5px solid var(--plum);transform:rotate(45deg)}
+  .bub.warn{border-color:#E0A02A;background:#FFF6E0;font-size:17px;padding:1px 9px}.bub.warn::after{border-color:#E0A02A;background:#FFF6E0}
+  @keyframes pop{from{opacity:0;transform:translate(-50%,-80%) scale(.8)}}
+  .zz{position:absolute;font-weight:800;color:#5E5270;z-index:3500;animation:zz 3s ease-in infinite;opacity:0;text-shadow:0 1px 0 #fff}
+  @keyframes zz{0%{opacity:0;transform:translate(0,6px)}25%{opacity:.9}100%{opacity:0;transform:translate(12px,-22px)}}
+  .sheet{position:absolute;width:44px;height:6px;background:#fff;border:1px solid #C9C3D3;border-radius:1.5px;z-index:900}
+  .cnt{position:absolute;transform:translate(-50%,-100%);padding:2px 9px;border-radius:999px;background:#FFF1D6;border:1.5px solid #E0A02A;color:#8A5A0B;
+    font-size:12.5px;font-weight:700;white-space:nowrap;z-index:3000}
+  .dim{position:absolute;inset:0;background:rgba(30,15,60,.22);z-index:4900;opacity:0;transition:opacity .35s;pointer-events:none}.dim.on{opacity:1}
+  .dsp{position:absolute;left:836px;top:92px;width:580px;margin-left:-290px;z-index:5000;background:#fff;border-radius:18px;border:2px solid var(--plum);
+    box-shadow:0 20px 56px rgba(30,15,60,.42);overflow:hidden;animation:dspIn .45s cubic-bezier(.2,1.35,.4,1);transition:opacity .4s,transform .4s}
+  .dsp.out{opacity:0;transform:translateY(-18px) scale(.96)}
+  @keyframes dspIn{from{opacity:0;transform:translateY(-26px) scale(.9)}}
+  .dsp .hd{background:var(--plum);color:#fff;padding:13px 22px;display:flex;align-items:center;gap:12px}
+  .dsp .hd i{width:13px;height:13px;border-radius:50%;background:#FFD166;box-shadow:0 0 0 4px rgba(255,209,102,.3);animation:blink 1s infinite}
+  .dsp .hd b{font-size:24px;letter-spacing:.06em}.dsp .hd span{margin-left:auto;font-size:15.5px;opacity:.88}
+  .dsp .rw{display:flex;align-items:center;gap:15px;padding:12px 22px;border-bottom:1px solid var(--line);opacity:0;animation:rwIn .35s forwards}
+  .dsp .rw:last-child{border:0}
+  @keyframes rwIn{from{opacity:0;transform:translateX(-14px)}to{opacity:1}}
+  .dsp .av{width:54px;height:54px;border-radius:50%;flex:none;background-color:var(--plum-soft);background-repeat:no-repeat;box-shadow:0 0 0 2px var(--plum)}
+  .dsp .nm{font-size:20px;font-weight:800;line-height:1.25}.dsp .nm em{font-style:normal;font-weight:400;font-size:14px;color:var(--ink3);margin-left:9px}
+  .dsp .tx{font-size:16.5px;color:var(--ink2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:330px}
+  .dsp .st{margin-left:auto;font-size:14.5px;font-weight:700;padding:4px 13px;border-radius:99px;background:var(--plum-soft);color:var(--plum);white-space:nowrap}
+  .dsp .rw.sent .st{background:#E7F5EC;color:var(--ok)}
+  .dsp .more{padding:8px 22px;font-size:14.5px;color:var(--ink3)}
+  .fly{position:absolute;width:32px;height:40px;margin:-20px 0 0 -16px;background:#fff;border:1.5px solid var(--plum);border-radius:4px;z-index:5200;
+    box-shadow:0 5px 12px rgba(30,15,60,.34);transition:left .95s cubic-bezier(.45,0,.25,1),top .95s cubic-bezier(.6,-.35,.3,1),transform .95s,opacity .2s}
+  .fly::before{content:"";position:absolute;left:6px;right:6px;top:9px;height:3px;background:var(--plum);border-radius:2px;box-shadow:0 8px 0 #C9C3D3,0 16px 0 #C9C3D3}
+  .ring{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:50%;border:3px solid #48C774;z-index:3100;animation:ring .9s ease-out forwards;pointer-events:none}
+  @keyframes ring{to{transform:scale(4.2);opacity:0}}
+  .sampleMark{position:absolute;left:14px;top:14px;z-index:4000;font-size:13px;font-weight:700;color:#8A5A0B;background:rgba(255,241,214,.95);border:1px solid #E0A02A;border-radius:999px;padding:4px 12px;display:none}
+  .privacy{position:absolute;right:14px;bottom:10px;z-index:4000;font-size:12px;color:rgba(255,255,255,.92);background:rgba(43,26,70,.55);border-radius:999px;padding:3px 12px}
+
+  /* —— 下面一排数字 —— */
+  #strip{display:grid;grid-template-columns:repeat(4,232px) 1fr;gap:14px;min-height:0}
+  .kpi{padding:10px 22px;display:flex;flex-direction:column;justify-content:center}
+  .kpi .cap{font-size:13px;color:var(--ink3);letter-spacing:.1em;font-weight:700}
+  .kpi .v{font-size:48px;font-weight:800;line-height:1.05;margin-top:4px;color:var(--plum);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .kpi .v small{font-size:19px;color:var(--ink3);font-weight:400;margin-left:5px}
+  .kpi .d{font-size:13px;color:var(--ink3);margin-top:4px;white-space:nowrap}
+  .kpi.warn .v{color:var(--warn)}.kpi.bad .v{color:var(--bad)}
+  .kpi .d b{font-weight:700}.kpi .d b.b{color:var(--bad)}.kpi .d b.w{color:var(--warn)}
+  .zones{padding:10px 22px;display:grid;grid-template-columns:1fr 1fr;gap:3px 26px;align-content:center}
+  .zones h3{grid-column:1 / -1;font-size:14px;margin-bottom:2px}
+  .zones h3 span{color:var(--ink3);font-weight:400;font-size:12px;margin-left:8px}
+  .zr .t{display:flex;align-items:baseline;gap:7px;font-size:14px}
+  .zr .t em{font-style:normal;font-size:12px;color:var(--ink3)}
+  .zr .t b{margin-left:auto;font-size:12.5px;font-weight:400;color:var(--ink2);font-variant-numeric:tabular-nums}
+  .sw{width:9px;height:9px;border-radius:3px;align-self:center}
+  .tr{height:6px;background:var(--plum-soft);border-radius:99px;margin-top:5px;overflow:hidden}.tr i{display:block;height:100%;border-radius:99px}
+
+  /* —— 最底下：实时动态滚动条 —— */
+  #tick{background:#2B1A46;color:#E9E3F3;border-radius:14px;display:flex;align-items:center;overflow:hidden;box-shadow:0 4px 14px rgba(40,25,70,.22);min-height:0}
+  #tick .flag{flex:none;align-self:stretch;display:flex;align-items:center;gap:9px;background:var(--plum);padding:0 20px;font-size:14px;font-weight:700;letter-spacing:.1em;border-right:1px solid rgba(255,255,255,.12)}
+  #tick .flag i{width:9px;height:9px;border-radius:50%;background:#7FE0A3;animation:blink 1.4s infinite}
+  #tick .mq{flex:1;overflow:hidden;white-space:nowrap}
+  #tk{display:inline-block;animation:tkScroll 60s linear infinite}
+  #tk span{margin:0 30px;font-size:15.5px;color:#CFC6E0}
+  #tk span b{color:#fff;font-weight:700;margin-right:6px}
+  #tk span code{font-family:Consolas,"Cascadia Mono",monospace;font-size:14px;color:#FFD98A;margin-left:6px}
+  #tk span em{font-style:normal;margin-left:10px;color:#7FE0A3;font-weight:700}
+  #tk span em.w{color:#F0C36A}
+  #tk span u{text-decoration:none;color:#9A8FB3;margin-left:10px}
+  @keyframes tkScroll{to{transform:translateX(-50%)}}
+
+  /* —— 右边一栏 —— */
+  #rail{grid-row:1 / span 3;display:flex;flex-direction:column;gap:14px;min-height:0}
+  .head{padding:18px 22px}
+  .head .nm{font-size:22px;font-weight:800;letter-spacing:.02em}
+  .head .sub{font-size:12.5px;color:var(--ink3);letter-spacing:.14em;margin-top:2px}
+  .head .row{display:flex;align-items:flex-end;justify-content:space-between;margin-top:12px}
+  .clock b{font-size:44px;font-variant-numeric:tabular-nums;font-weight:800;letter-spacing:.01em;line-height:1}
+  .clock small{display:block;font-size:13px;color:var(--ink3);margin-top:5px}
+  .pill{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:7px 14px;font-size:14px;font-weight:700;background:#E7F5EC;color:var(--ok)}
+  .pill i{width:9px;height:9px;border-radius:50%;background:currentColor;animation:blink 2.4s infinite}
+  .pill.warn{background:#FFF1D6;color:var(--warn)}.pill.bad{background:#FCE6E1;color:var(--bad)}.pill.bad i{animation-duration:1s}
+  .box{padding:16px 20px;display:flex;flex-direction:column;min-height:0}
+  .box h3{font-size:15px;display:flex;align-items:center}
+  .box h3 span{color:var(--ink3);font-weight:400;font-size:12px;letter-spacing:.12em;margin-left:8px}
+  .al{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}.al:last-child{border:0}
+  .al .dot{width:9px;height:9px;border-radius:50%;margin-top:7px;flex:none}
+  .al .m{font-size:14.5px;line-height:1.45}.al .m .s{color:var(--ink3);font-size:12.5px}
+  .ros{margin-top:6px}
+  .fold{cursor:pointer;user-select:none}
+  .fold em{font-style:normal;font-weight:400;font-size:13px;color:var(--ink2);margin-left:auto;white-space:nowrap}
+  .fold em b{font-weight:700}.fold em b.b{color:var(--bad)}.fold em b.w{color:var(--warn)}
+  .fold::after{content:"";width:8px;height:8px;margin-left:12px;border-right:2px solid var(--ink3);border-bottom:2px solid var(--ink3);transform:rotate(-135deg) translate(-2px,-2px);transition:transform .2s}
+  .shut .fold::after{transform:rotate(45deg) translate(-2px,-2px)}
+  .shut .ros{display:none}
+  .ro{display:flex;align-items:center;gap:9px;padding:4px 0;border-bottom:1px solid var(--line);font-size:14px}.ro:last-child{border:0}
+  .ro i{width:9px;height:9px;border-radius:50%;flex:none}
+  .ro .n{font-weight:700;white-space:nowrap}.ro.off .n{font-weight:400;color:var(--ink3)}
+  .ro .r{margin-left:auto;font-size:12.5px;color:var(--ink2);white-space:nowrap;font-variant-numeric:tabular-nums}
+  .ro .r.b{color:var(--bad);font-weight:700}.ro .r.w{color:var(--warn);font-weight:700}
+  .feed{flex:1}
+  .evs{margin-top:4px;overflow:hidden;flex:1}
+  .ev{display:flex;gap:12px;padding:11px 12px;margin-top:8px;border-radius:12px;background:#FAF8FC;border:1px solid var(--line);border-left:4px solid #CFC5E0}
+  .ev.top{background:var(--plum-soft);border-color:#D9CFEA;border-left-color:var(--plum)}
+  .ev.bad{border-left-color:#E0A02A;background:#FFFAEE}
+  .ev.flash{animation:evIn 2.6s ease-out}
+  @keyframes evIn{0%{transform:translateX(26px);opacity:0;box-shadow:0 0 0 4px rgba(62,42,99,.35)}18%{transform:none;opacity:1}100%{box-shadow:0 0 0 0 rgba(62,42,99,0)}}
+  .ev .av{width:46px;height:46px;border-radius:50%;flex:none;background-color:#fff;background-repeat:no-repeat;box-shadow:0 0 0 1.5px #BFB3D6}
+  .ev .bd{min-width:0;flex:1}
+  .ev .l1{display:flex;align-items:center;gap:8px}
+  .ev .ro2{font-weight:700;font-size:14.5px;color:var(--ink2);white-space:nowrap}
+  .ev .tm{margin-left:auto;font-size:12.5px;color:var(--ink3);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .ev .tg{font-size:11.5px;font-weight:700;padding:1px 9px;border-radius:99px;white-space:nowrap}
+  .tg.done{background:#E7F5EC;color:var(--ok)}.tg.warn{background:#FFF1D6;color:var(--warn)}
+  .ev .hl{font-size:18.5px;font-weight:800;line-height:1.3;margin-top:3px;color:var(--ink)}
+  .ev.top .hl{font-size:21px}
+  .ev .rf{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;margin-top:5px;font-size:12.5px;color:var(--ink3)}
+  .ev .rf code,.dsp .rf2 code{font-family:Consolas,"Cascadia Mono",monospace;font-size:13.5px;font-weight:700;color:var(--plum);background:#fff;border:1px solid #D9CFEA;border-radius:5px;padding:0 6px;letter-spacing:.02em}
+  .dsp .rf2{font-size:13px;color:var(--ink3);margin-top:3px;white-space:nowrap}
+  .empty{padding:14px 0;font-size:14px;color:var(--ink3)}
+  @media (prefers-reduced-motion:reduce){#tk{animation:none}.lamp.down,.pill i{animation:none}.zz{animation:none;opacity:.8}}
+</style>
+
+<div id="stage">
+  <div id="view">
+    <div id="scene">
+      <img class="bg" id="bg" src="office-art/bg.webp" alt="">
+      <img class="logo" src="office-art/logo.jpg" alt="">
+    </div>
+    <div class="sampleMark" id="sample">样例数据 · 没连工作台</div>
+    <div class="privacy">本屏只显示件数、状态和单号 · 不显示供应商、客户和金额</div>
+  </div>
+
+  <div id="rail">
+    <div class="panel head">
+      <div class="nm">数字员工办公室</div><div class="sub">星期零风控中心 · 一个工位是一件自己在跑的活</div>
+      <div class="row"><div class="clock"><b id="clk">--:--</b><small id="dt">—</small></div>
+        <div class="pill" id="pill"><i></i><span id="pillT">正在取值班表…</span></div></div>
+    </div>
+    <div class="panel box"><h3>要人看一眼 <span>ATTENTION</span></h3><div id="als"></div></div>
+    <div class="panel box feed"><h3>刚干完的活 <span>LIVE</span></h3><div class="evs" id="evs"></div></div>
+    <div class="panel box shut" id="rosBox"><h3 class="fold" id="rosH" title="点一下展开 / 收起（或按 R）">值班表 <span>ON DUTY</span><em id="rosSum"></em></h3><div class="ros" id="ros"></div></div>
+  </div>
+
+  <div id="strip">
+    <div class="panel kpi" id="k1"></div><div class="panel kpi" id="k2"></div><div class="panel kpi" id="k3"></div><div class="panel kpi" id="k4"></div>
+    <div class="panel zones" id="zones"></div>
+  </div>
+
+  <div id="tick"><div class="flag"><i></i>实时动态 LIVE</div><div class="mq"><div id="tk"></div></div></div>
+</div>
+
+<script>
+(() => {
+  // ───────── 样例数据（形状与 /api/office/screen 一致；数字是编的）─────────
+  const SAMPLE = {
+    asOf: '15:20', since: '2026-10-04',
+    kpi: { on: 9, total: 12, down: 1, off: 2, err: 1, monthN: 412, todayN: 23, waiting: 3 },
+    desks: [
+      { key: 'fx', name: '汇率录入员', zone: '总账组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '汇率审核人', unit: '条', monthN: 8, lastAt: '10-08 14:00', lastAgoMin: 1500, waiting: 1, waitingLate: 1 },
+      { key: 'todo_check', name: '待办核对员', zone: '总账组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '不用交接', unit: '条', monthN: 31, lastAt: '今天 15:01', lastAgoMin: 19 },
+      { key: 'inv_intake', name: '发票接收员', zone: '发票组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '发票审核人', unit: '张单', monthN: 186, lastAt: '今天 15:20', lastAgoMin: 0, waiting: 2, waitingLate: 0 },
+      { key: 'inv_remind', name: '催票员', zone: '发票组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '申请人', unit: '张', monthN: 61, lastAt: '今天 09:00', lastAgoMin: 380 },
+      { key: 'inv_voucher', name: '发票凭证同步员', zone: '发票组', kind: 'desk', status: 'down', statusText: '9 小时没动静', handoff: '不用交接', unit: '张', monthN: 54, lastAt: '今天 06:20', lastAgoMin: 540 },
+      { key: 'bom_intake', name: 'BOM 立项员', zone: '成本组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '成本会计初审', unit: '单', monthN: 23, lastAt: '10-07 11:42', lastAgoMin: 3000 },
+      { key: 'bom_final', name: 'BOM 终审同步员', zone: '成本组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '不用交接', unit: '单', monthN: 2, lastAt: '10-06 17:10', lastAgoMin: 4000 },
+      { key: 'payreq', name: '物流请款单接收员', zone: '应付组', kind: 'desk', status: 'err', statusText: '上一轮出错了', handoff: '物流复核人', unit: '张单', monthN: 47, lastAt: '今天 15:20', lastAgoMin: 0 },
+      { key: 'contract', name: '合同预审员', zone: '法务组', kind: 'desk', status: 'off', statusText: '还没上岗：等法务签字', handoff: '法务、财务', unit: '份', monthN: 0, lastAt: '' },
+      { key: 'pull_rpt', name: '财务报表取件机', zone: '取件间', kind: 'machine', status: 'ok', statusText: '正常', handoff: '送达收件人', lastAt: '10-08 15:19' },
+      { key: 'pull_bank', name: '银行流水取件机', zone: '取件间', kind: 'machine', status: 'ok', statusText: '正常', handoff: '送达收件人', lastAt: '10-08 15:02' },
+      { key: 'pull_ecrecon', name: '电商资料取件机', zone: '取件间', kind: 'machine', status: 'off', statusText: '还没上岗：这台机器还没回报过', handoff: '送达收件人', lastAt: '' },
+    ],
+    feed: [
+      { at: '今天 15:20', desk: '发票接收员', key: 'inv_intake', text: '已接入 3 张钉钉单', ok: true, n: 3, refLabel: '钉钉单号', refs: ['202610081518000417', '202610081512000398', '202610081506000371'] },
+      { at: '今天 15:20', desk: '物流请款单接收员', key: 'payreq', text: '已接入 1 张请款单', ok: false, n: 1, refLabel: '钉钉单号', refs: ['202610081455000352'] },
+      { at: '今天 15:01', desk: '待办核对员', key: 'todo_check', text: '已核对 5 条，销账 2 条', ok: true, n: 2 },
+      { at: '今天 13:40', desk: '物流请款单接收员', key: 'payreq', text: '已接入 4 张请款单', ok: true, n: 4, refLabel: '钉钉单号', refs: ['202610081331000288', '202610081320000275', '202610081309000261', '202610081258000240'] },
+      { at: '今天 11:05', desk: '发票接收员', key: 'inv_intake', text: '已送审 2 个票夹（票齐了）', ok: true, refLabel: '钉钉单号', refs: ['202610071642000903', '202610071015000655'] },
+      { at: '今天 09:00', desk: '催票员', key: 'inv_remind', text: '该催 5 张，已发出 5 张', ok: true, n: 5 },
+      { at: '10-08 14:00', desk: '汇率录入员', key: 'fx', text: '2026 年 9 月已写入 8 条', ok: true, n: 8 },
+    ],
+  }
+  const $ = id => document.getElementById(id)
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  const ZORD = ['发票组', '总账组', '应付组', '成本组', '法务组', '取件间']
+  const zi = z => { const i = ZORD.indexOf(z); return i < 0 ? 98 : i }
+  const COL = { ok: 'var(--ok)', err: 'var(--warn)', down: 'var(--bad)', off: 'var(--idle)' }
+  const tok = ((location.hash || '').match(/k=([\w-]+)/) || [])[1]
+  const LIVE = !!tok && location.protocol !== 'file:'
+
+  // ───────── 右栏 / 下排 ─────────
+  // 头像：从这个工位的人物坐姿图里截头部（size＝圆的直径，cell＝一格放多大）
+  const face = (key, size, cell) => { const ch = CHAR_OF[key]; return ch ? `background-image:url(office-art/c${String(ch).padStart(2, '0')}-seat.webp);background-size:${cell * 4}px ${cell * 2}px;background-position:${-(2 * cell + (cell - size) / 2)}px ${-Math.round(cell * .05)}px` : '' }
+  const refsHtml = (f, max) => { const r = f.refs || []; return r.length ? `<em style="font-style:normal">${esc(f.refLabel || '单号')}</em>` + r.slice(0, max).map(x => `<code>${esc(x)}</code>`).join('') + ((f.n || r.length) > max ? `<span>共 ${Math.max(f.n || 0, r.length)} 张</span>` : '') : '' }
+  let topSeen = null
+  let tkLast = null
+  let rosOpen = false
+  try { rosOpen = localStorage.getItem('officeRosOpen') === '1' } catch (e) {}
+  const rosFold = () => $('rosBox').classList.toggle('shut', !rosOpen)
+  const rosToggle = () => { rosOpen = !rosOpen; try { localStorage.setItem('officeRosOpen', rosOpen ? '1' : '0') } catch (e) {} rosFold(); if (prev) panels(prev) }
+  $('rosH').addEventListener('click', rosToggle)
+  addEventListener('keydown', e => { if (e.key === 'r' || e.key === 'R') rosToggle() })
+  rosFold()
+  function panels(d) {
+    const k = d.kpi, bad = d.desks.filter(x => x.status === 'down'), err = d.desks.filter(x => x.status === 'err'), total = k.total || d.desks.length
+    $('pill').className = 'pill' + (bad.length ? ' bad' : err.length ? ' warn' : '')
+    $('pillT').textContent = bad.length ? `${bad.length} 个工位停了${err.length ? ` · ${err.length} 个出错` : ''}` : err.length ? `${err.length} 个工位上一轮出错` : '在岗工位都正常'
+    const late = d.desks.reduce((s, x) => s + (x.waitingLate || 0), 0)
+    $('k1').className = 'panel kpi' + (k.down ? ' bad' : '')
+    $('k1').innerHTML = `<div class="cap">在岗工位</div><div class="v">${k.on}<small>/${total}</small></div><div class="d">${k.down ? `<b class="b">${k.down} 个停了</b> · ` : ''}${k.off} 个没上岗</div>`
+    $('k2').innerHTML = `<div class="cap">今天干完</div><div class="v">${k.todayN || 0}<small>件</small></div><div class="d">更新于 ${esc(d.asOf)}</div>`
+    $('k3').innerHTML = `<div class="cap">本月干完</div><div class="v">${k.monthN}<small>件</small></div><div class="d">${d.since ? `从 ${esc(String(d.since).slice(5))} 开始记` : '从第一笔开始记'}</div>`
+    $('k4').className = 'panel kpi' + (k.waiting ? ' warn' : '')
+    $('k4').innerHTML = `<div class="cap">等人接手</div><div class="v">${k.waiting}<small>件</small></div><div class="d">${late ? `<b class="w">${late} 件超过 3 个工作日</b>` : k.waiting ? '都在 3 个工作日内' : '交出去的都接了'}</div>`
+    const zs = {}
+    d.desks.forEach(x => { const z = zs[x.zone] = zs[x.zone] || { on: 0, n: 0, down: 0, err: 0, m: 0, hasM: false }; z.n++
+      if (x.status === 'ok' || x.status === 'err') z.on++; if (x.status === 'down') z.down++; if (x.status === 'err') z.err++
+      if (x.monthN != null) { z.m += x.monthN; z.hasM = true } })
+    $('zones').innerHTML = '<h3>各组在岗 <span>WORKGROUPS</span></h3>' + Object.keys(zs).sort((a, b) => zi(a) - zi(b)).map(z => {
+      const v = zs[z], c = v.down ? 'var(--bad)' : v.err ? 'var(--warn)' : v.on ? 'var(--plum)' : 'var(--idle)'
+      return `<div class="zr"><div class="t"><span class="sw" style="background:${c}"></span>${esc(z)}<em>${v.on}/${v.n}${v.down ? ` · ${v.down} 停` : ''}</em><b>${v.hasM ? `本月 ${v.m} 件` : ''}</b></div>
+        <div class="tr"><i style="width:${Math.max(v.on ? 8 : 0, Math.round(v.on / v.n * 100))}%;background:${c}"></i></div></div>` }).join('')
+    const al = []
+    bad.forEach(x => al.push(['var(--bad)', `<b>${esc(x.name)}</b> 停了`, esc(x.statusText)]))
+    err.forEach(x => al.push(['var(--warn)', `<b>${esc(x.name)}</b> 上一轮出错`, '登录办公室点开这个工位看原因']))
+    d.desks.filter(x => x.waitingLate).forEach(x => al.push(['var(--warn)', `<b>${esc(x.handoff)}</b> 还有 ${x.waiting} 件没接`, `${x.waitingLate} 件超过 3 个工作日`]))
+    $('als').innerHTML = al.length ? al.slice(0, 3).map(a => `<div class="al"><span class="dot" style="background:${a[0]}"></span><div class="m">${a[1]}<div class="s">${a[2]}</div></div></div>`).join('')
+      : '<div class="al"><span class="dot" style="background:var(--ok)"></span><div class="m">都正常<div class="s">没有要人处理的</div></div></div>'
+    $('ros').innerHTML = d.desks.slice().sort((a, b) => zi(a.zone) - zi(b.zone)).map(x => {
+      const r = x.status === 'down' ? ['b', '停了 · ' + String(x.statusText).replace('没动静', '')] : x.status === 'err' ? ['w', '上一轮出错'] : x.status === 'off' ? ['', '没上岗']
+        : ['', x.monthN != null ? `本月 ${x.monthN} ${x.unit || '件'}` : '正常']
+      return `<div class="ro${x.status === 'off' ? ' off' : ''}"><i style="background:${COL[x.status] || COL.off}"></i><span class="n">${esc(x.name)}</span><span class="r ${r[0]}">${esc(r[1])}</span></div>` }).join('')
+    const offN = d.desks.filter(x => x.status === 'off').length
+    $('rosSum').innerHTML = `<b>${k.on}</b> 在岗` + (err.length ? `（<b class="w">${err.length} 出错</b>）` : '') + (bad.length ? ` · <b class="b">${bad.length} 停了</b>` : '') + (offN ? ` · ${offN} 没上岗` : '')
+    const feed = (d.feed || []).slice(0, rosOpen ? 2 : 6)
+    const topKey = feed.length ? [feed[0].key, feed[0].at, feed[0].text].join('|') : ''
+    $('evs').innerHTML = feed.length ? feed.map((f, i) => `<div class="ev${i ? '' : ' top'}${f.ok ? '' : ' bad'}${!i && topSeen != null && topKey !== topSeen ? ' flash' : ''}"><div class="av" style="${face(f.key, 46, 80)}"></div>
+      <div class="bd"><div class="l1"><span class="ro2">${esc(f.desk)}</span><span class="tg ${f.ok ? 'done' : 'warn'}">${f.ok ? '干成了' : '有没干成的'}</span><span class="tm">${esc(String(f.at).replace('今天 ', ''))}</span></div>
+      <div class="hl">${esc(f.text)}</div>${(f.refs || []).length ? `<div class="rf">${refsHtml(f, 2)}</div>` : ''}</div></div>`).join('') : '<div class="empty">还没有干活记录。</div>'
+    topSeen = topKey
+    // 底部滚动条：最近干完的活轮着滚（带单号）。内容没变就不重写，免得每分钟刷新把滚动打回开头
+    const tkHtml = (d.feed || []).slice(0, 10).map(f => `<span><b>${esc(f.desk)}</b>${esc(f.text)}${(f.refs || []).length ? ` · ${esc(f.refLabel || '单号')}` + f.refs.slice(0, 3).map(x => `<code>${esc(x)}</code>`).join('') : ''}<em class="${f.ok ? '' : 'w'}">${f.ok ? '干成了' : '有没干成的'}</em><u>${esc(f.at)}</u></span>`).join('')
+      || '<span>还没有干活记录——等定时任务扫到第一笔活，这里就会滚起来</span>'
+    if (tkHtml !== tkLast) {                      // 首尾相接地滚：内容不够一屏宽就多排几遍，再整体复制一份，滚到一半正好接上开头
+      tkLast = tkHtml; const tk = $('tk'); tk.innerHTML = tkHtml
+      const w = tk.scrollWidth || 1, reps = Math.max(1, Math.ceil(tk.parentElement.clientWidth / w))
+      tk.innerHTML = tkHtml.repeat(reps * 2); tk.style.animationDuration = Math.max(20, Math.round(w * reps / 85)) + 's'
+    }
+    const box = $('evs')                           // 放不下的整张拿掉，不留半张卡
+    while (box.children.length > 1 && box.scrollHeight > box.clientHeight + 1) box.lastElementChild.remove()
+  }
+
+  // ───────── 办公现场：底图上的座位、过道、去处（底图 1672×941 上量的）─────────
+  const scene = $('scene')
+  const DESK = [[333, 549, 318], [577, 785, 318], [813, 1019, 318], [1047, 1253, 318],
+    [323, 547, 481], [575, 787, 481], [815, 1023, 481], [1052, 1266, 481],
+    [316, 544, 645], [572, 786, 645], [816, 1032, 645], [1061, 1279, 645]]
+  const SEAT = DESK.map(([x0, x1, yt]) => ({ x: x0 + 100, yt, by: yt + 12, mon: [x0 + 184, yt - 22], np: [x0 + 9, yt + 33], aisle: yt - 40 }))
+  const SEAT_OF = { bom_intake: 0, bom_final: 1, contract: 2, fx: 4, todo_check: 5, payreq: 6, inv_intake: 8, inv_remind: 9, inv_voucher: 10 }
+  const CHAR_OF = { fx: 1, todo_check: 2, inv_intake: 3, inv_remind: 4, inv_voucher: 5, bom_intake: 6, bom_final: 7, payreq: 8, contract: 9 }
+  const SPARE = [3, 7, 11]
+  const DS = 140, DWK = 186, FOOT = 6 * DWK / 256                // 坐姿一格显示多大 / 走动一格显示多大 / 脚底离格子下沿
+  const LEFT_X = 236, RIGHT_X = 1338, TOP_AISLE = 278
+  const SPOTS = { tea: [{ x: 524, y: 238, busy: null }, { x: 598, y: 242, busy: null }], sofa: [{ x: 176, y: 852, busy: null }, { x: 286, y: 852, busy: null }] }
+  const COUNTER = { x: 1326, y: 846 }, BASKET = { x: 1561, y: 790 }
+  const PC = [{ x: 160, y: 66 }, { x: 238, y: 66 }, { x: 316, y: 66 }]
+  const add = (cls, style, html) => { const e = document.createElement('div'); e.className = cls; Object.assign(e.style, style); if (html != null) e.innerHTML = html; scene.appendChild(e); return e }
+  const px = n => n + 'px'
+  ;[318, 481, 645].forEach(yt => add('fgrow', { top: px(yt - 56), height: px(94), backgroundPosition: `0 ${-(yt - 56)}px`, zIndex: yt + 20 }))   // 显示器前景：盖在本排坐着的人前面
+  function frame(e, sheet, cols, rows, D, i) {
+    e.style.width = e.style.height = px(D); e.style.backgroundImage = `url(office-art/${sheet})`
+    e.style.backgroundSize = `${cols * D}px ${rows * D}px`; e.style.backgroundPosition = `${-(i % cols) * D}px ${-Math.floor(i / cols) * D}px`
+  }
+
+  // ───────── 工位上的人 ─────────
+  const actors = {}
+  let extras = []
+  class Actor {
+    constructor(d, si) {
+      this.d = d; this.si = si; this.s = SEAT[si]; this.ch = String(CHAR_OF[d.key] || ((si % 8) + 1)).padStart(2, '0')
+      this.chair = add('sp', { left: px(this.s.x - DS / 2), top: px(this.s.by - DS), zIndex: this.s.by - 1 }); frame(this.chair, 'chair.webp', 1, 1, DS, 0)
+      this.seat = add('sp', { left: px(this.s.x - DS / 2), top: px(this.s.by - DS), zIndex: this.s.by })
+      this.walk = add('sp', { display: 'none' })
+      this.lamp = add('lamp', { left: px(this.s.mon[0]), top: px(this.s.mon[1]) })
+      this.np = add('np', { left: px(this.s.np[0]), top: px(this.s.np[1]) })
+      this.state = 'seat'; this.t = 0; this.f = -1; this.sipUntil = 0; this.nextSip = 4000 + Math.random() * 9000
+      this.nextBreak = (LIVE ? 60000 : 9000) + Math.random() * (LIVE ? 150000 : 30000); this.workUntil = 0; this.queue = []; this.mark = null
+      this.update(d)
+    }
+    update(d) {
+      const was = this.d.status; this.d = d
+      this.lamp.className = 'lamp ' + (d.status || 'off')
+      this.np.className = 'np' + (d.status === 'off' ? ' off' : '')
+      this.np.innerHTML = `<i style="background:${COL[d.status] || COL.off}"></i>${esc(d.name)}`
+      const present = d.status !== 'off'
+      if (!present || d.status === 'down') { this.home() }
+      this.seat.style.display = present && this.state === 'seat' ? '' : 'none'
+      if (was !== d.status || !this.mark && (d.status === 'err' || d.status === 'down')) this.marks()
+    }
+    marks() {                                    // 头顶的小记号：出错冒叹号，停了飘 Zzz
+      (this.mark || []).forEach(e => e.remove()); this.mark = []
+      const hx = this.s.x, hy = this.s.by - DS + 6
+      if (this.d.status === 'err') this.mark.push(add('bub warn', { left: px(hx + 40), top: px(hy + 14) }, '!'))
+      if (this.d.status === 'down') [[30, 34, 15, 0], [42, 20, 19, 1], [56, 4, 24, 2]].forEach(([dx, dy, fs, i]) =>
+        this.mark.push(add('zz', { left: px(hx + dx), top: px(hy + dy), fontSize: px(fs), animationDelay: i + 's' }, 'z')))
+    }
+    busy() { return performance.now() < this.workUntil || (this.d.lastAgoMin != null && this.d.lastAgoMin <= 10) }
+    home() { if (this.state !== 'seat') { this.release(); this.state = 'seat'; this.walk.style.display = 'none'; this.queue = [] } }
+    release() { if (this.spot) { this.spot.busy = null; this.spot = null } }
+    say(text, ms = 6000) { const b = add('bub', { left: px(this.s.x), top: px(this.s.by - DS + 8) }, esc(text)); setTimeout(() => b.remove(), ms) }
+    // 从座位出发去某处：先退到本排身后的过道，再走到左 / 右走廊，再到目的地
+    route(tx, ty, via) {
+      const s = this.s, p = [[s.x, s.yt - 8], [s.x, s.aisle]]
+      if (via === 'top') { if (s.aisle !== TOP_AISLE) { const cx = s.x < 800 ? LEFT_X : RIGHT_X; p.push([cx, s.aisle], [cx, TOP_AISLE]) } p.push([tx, TOP_AISLE]) }
+      else if (via === 'left') p.push([LEFT_X, s.aisle], [LEFT_X, ty - 96], [tx, ty - 96])
+      else p.push([RIGHT_X, s.aisle], [RIGHT_X, ty])
+      p.push([tx, ty]); return p
+    }
+    trip(path, pose, ms, after) {
+      this.path = path; this.seg = 0; this.pos = path[0].slice(); this.pose = pose; this.stay = ms; this.after = after
+      this.state = 'go'; this.seat.style.display = 'none'; this.walk.style.display = ''
+    }
+    step(dt, now) {
+      const d = this.d
+      if (d.status === 'off') return
+      if (this.state === 'seat') {
+        let f
+        if (d.status === 'down') f = 6 + (Math.floor(now / 1500) % 2)
+        else if (now < this.workUntil) f = Math.floor(now / 200) % 2            // 刚接到活 / 刚巡了一圈：不管上一轮怎样，先敲键盘
+        else if (d.status === 'err') f = 4 + (Math.floor(now / 650) % 2)
+        else if (this.busy()) f = Math.floor((now + this.si * 97) / 230) % 2
+        else {                                   // 歇着：大部分时间放松坐着，隔一阵喝口水，偶尔敲两下键盘
+          this.nextSip -= dt
+          if (this.nextSip <= 0) { this.sipUntil = now + 2200; this.sipKind = Math.random() < .6 ? 3 : 0; this.nextSip = 7000 + Math.random() * 14000 }
+          f = now < this.sipUntil ? (this.sipKind === 3 ? 3 : Math.floor(now / 230) % 2) : 2
+        }
+        if (f !== this.f) { this.f = f; frame(this.seat, `c${this.ch}-seat.webp`, 4, 2, DS, f) }
+        if (d.status === 'ok' && !this.busy()) {
+          if (this.queue.length) { const q = this.queue.shift(); q() }
+          else { this.nextBreak -= dt; if (this.nextBreak <= 0) { this.nextBreak = (LIVE ? 90000 : 22000) + Math.random() * (LIVE ? 240000 : 40000); this.takeBreak() } }
+        } else if (d.status === 'ok' && this.queue.length && now > this.workUntil) { const q = this.queue.shift(); q() }
+        return
+      }
+      if (this.state === 'go' || this.state === 'back') {
+        const tgt = this.path[this.seg + 1]
+        if (!tgt) { return this.arrive(now) }
+        const dx = tgt[0] - this.pos[0], dy = tgt[1] - this.pos[1], dist = Math.hypot(dx, dy), stepLen = 150 * dt / 1000
+        if (dist <= stepLen) { this.pos = tgt.slice(); this.seg++ } else { this.pos[0] += dx / dist * stepLen; this.pos[1] += dy / dist * stepLen }
+        const side = Math.abs(dx) > Math.abs(dy), ph = [0, 1, 2, 1][Math.floor(now / 150) % 4]
+        this.draw(side ? 6 + ph : dy > 0 ? ph : 3 + ph, side && dx < 0)
+        return
+      }
+      if (this.state === 'stay') {
+        const p = this.pose
+        this.draw(p === 'tea' ? 12 + (Math.floor(now / 800) % 2) : p === 'sofa' ? (Math.floor(now / 4000) % 2 ? 15 : 14) : p === 'hand' ? 11 : 9 + (Math.floor(now / 2600) % 8 === 0 ? 1 : 0), false)
+        if (now > this.until || (this.busy() && p !== 'hand')) { this.release(); this.path = this.path.slice().reverse(); this.seg = 0; this.state = 'back' }
+      }
+    }
+    arrive(now) {
+      if (this.state === 'go') { this.state = 'stay'; this.until = now + this.stay; if (this.after) this.after() }
+      else { this.state = 'seat'; this.walk.style.display = 'none'; this.seat.style.display = ''; this.f = -1 }
+    }
+    draw(f, flip) {
+      const w = this.walk, [x, y] = this.pos
+      frame(w, `c${this.ch}-walk.webp`, 6, 3, DWK, f)
+      w.style.left = px(x - DWK / 2); w.style.top = px(y - DWK + FOOT); w.style.zIndex = Math.round(y); w.style.transform = flip ? 'scaleX(-1)' : ''
+    }
+    takeBreak() {
+      if (Object.values(actors).filter(a => a.state !== 'seat').length >= 2) return
+      const kind = Math.random() < .6 ? 'tea' : 'sofa', sp = SPOTS[kind].find(s => !s.busy) || SPOTS[kind === 'tea' ? 'sofa' : 'tea'].find(s => !s.busy)
+      if (!sp) return
+      const k = SPOTS.tea.includes(sp) ? 'tea' : 'sofa'
+      sp.busy = this; this.spot = sp
+      this.trip(this.route(sp.x, sp.y, k === 'tea' ? 'top' : 'left'), k, k === 'tea' ? 9000 : 16000)
+    }
+    accept() {                                   // 派工单飞到桌上：回到座位、说一句、敲一阵键盘，干完说交给谁；要交给人的再把活送去交接台
+      this.home(); this.workUntil = performance.now() + 6500; this.say('收到，开工', 2200)
+      setTimeout(() => {
+        if (actors[this.d.key] !== this || this.d.status === 'off' || this.d.status === 'down') return
+        const hand = this.d.handoff && this.d.handoff !== '不用交接'
+        this.say(hand ? `干完了 · 交给${this.d.handoff}` : '干完了', 4200)
+        if (hand) this.queue.push(() => this.trip(this.route(COUNTER.x, COUNTER.y, 'right'), 'hand', 1600, () => pulseBasket()))
+      }, 6600)
+    }
+    patrol() {                                   // 定时巡了一圈、没有新活：显示器闪一圈，在座位上的敲几下键盘
+      ring(this.s.mon[0], this.s.mon[1])
+      if (this.state === 'seat') this.workUntil = Math.max(this.workUntil, performance.now() + 3500)
+    }
+    destroy() { [this.chair, this.seat, this.walk, this.lamp, this.np, ...(this.mark || [])].forEach(e => e.remove()); this.release() }
+  }
+
+  let basketEls = []
+  function basket(n) {
+    basketEls.forEach(e => e.remove()); basketEls = []
+    for (let i = 0; i < Math.min(n, 5); i++) basketEls.push(add('sheet', { left: px(BASKET.x - 22 + (i % 2) * 2), top: px(BASKET.y - 8 - i * 4) }))
+    if (n) basketEls.push(add('cnt', { left: px(BASKET.x), top: px(BASKET.y - 34) }, `等人接手 ${n} 件`))
+  }
+  function pulseBasket() { const r = add('lamp err', { left: px(BASKET.x), top: px(BASKET.y - 6) }); setTimeout(() => r.remove(), 1500) }
+
+  // ───────── 派工单：有新活时弹出来，一张张飞到工位 ─────────
+  const ring = (x, y) => { const r = add('ring', { left: px(x), top: px(y) }); setTimeout(() => r.remove(), 950) }
+  let dspBusy = false
+  const dspQ = []
+  function dispatch(jobs, when) {
+    if (dspBusy) { dspQ.push([jobs, when]); return }
+    dspBusy = true
+    const show = jobs.slice(0, 4), AV = 94
+    const dim = add('dim', {}); dim.getBoundingClientRect(); dim.classList.add('on')
+    const el = add('dsp', {}, `<div class="hd"><i></i><b>新任务</b><span>${esc(when)} · 定时任务这一轮扫到 ${jobs.length} 个工位有新活</span></div>` +
+      show.map((j, i) => `<div class="rw" style="animation-delay:${.25 + i * .14}s"><div class="av" style="${face(j.a.d.key, 54, AV)}"></div>
+        <div><div class="nm">${esc(j.a.d.name)}<em>${esc(j.a.d.zone || '')}</em></div><div class="tx">${esc(j.text || '有新活')}</div>${j.f && (j.f.refs || []).length ? `<div class="rf2">${refsHtml(j.f, 1)}</div>` : ''}</div><span class="st">派工中…</span></div>`).join('') +
+      (jobs.length > show.length ? `<div class="more">还有 ${jobs.length - show.length} 个工位也有新活</div>` : ''))
+    const rows = el.querySelectorAll('.rw'), T0 = 1500, GAP = 600
+    jobs.forEach((j, i) => setTimeout(() => {
+      const a = j.a, rw = rows[i]
+      if (actors[a.d.key] !== a) return
+      if (!rw) return a.accept()                                              // 没排进弹窗的（超过 4 个）：不飞单子，直接开工
+      rw.classList.add('sent'); rw.querySelector('.st').textContent = '已派到工位'
+      const f = add('fly', { left: px(el.offsetLeft + rw.offsetLeft + 49), top: px(el.offsetTop + rw.offsetTop + rw.offsetHeight / 2) })
+      f.getBoundingClientRect()
+      const tx = a.s.x + 34, ty = a.s.yt + 4
+      f.style.left = px(tx); f.style.top = px(ty); f.style.transform = 'scale(.62) rotate(-8deg)'
+      setTimeout(() => { f.style.opacity = 0; ring(tx, ty); a.accept(); setTimeout(() => f.remove(), 250) }, 960)
+    }, T0 + Math.min(i, show.length) * GAP))
+    const end = T0 + show.length * GAP + 1500
+    setTimeout(() => { el.classList.add('out'); dim.classList.remove('on') }, end)
+    setTimeout(() => { el.remove(); dim.remove(); dspBusy = false; const n = dspQ.shift(); if (n) dispatch(n[0], n[1]) }, end + 450)
+  }
+
+  let prev = null
+  function apply(d) {
+    panels(d)
+    const seated = d.desks.filter(x => x.kind !== 'machine'), machines = d.desks.filter(x => x.kind === 'machine')
+    const used = new Set(seated.map(x => SEAT_OF[x.key]).filter(v => v != null)), spare = SPARE.filter(i => !used.has(i))
+    const seen = {}
+    seated.forEach(x => {
+      seen[x.key] = 1
+      if (actors[x.key]) return actors[x.key].update(x)
+      const si = SEAT_OF[x.key] != null ? SEAT_OF[x.key] : spare.shift()
+      if (si != null) actors[x.key] = new Actor(x, si)
+    })
+    Object.keys(actors).forEach(k => { if (!seen[k]) { actors[k].destroy(); delete actors[k] } })
+    extras.forEach(e => e.remove()); extras = []
+    const taken = new Set(Object.values(actors).map(a => a.si))
+    SEAT.forEach((s, i) => { if (!taken.has(i)) { const c = add('sp', { left: px(s.x - DS / 2), top: px(s.by - DS), zIndex: s.by - 1 }); frame(c, 'chair.webp', 1, 1, DS, 0); extras.push(c) } })   // 空着的预留工位：只有椅子
+    machines.slice(0, 3).forEach((m, i) => {
+      extras.push(add('lamp ' + (m.status || 'off'), { left: px(PC[i].x), top: px(PC[i].y) }))
+      extras.push(add('tag', { left: px(PC[i].x), top: px(134) }, esc(String(m.name).replace('取件机', '').replace('财务', ''))))
+    })
+    basket(d.kpi.waiting || 0)
+    if (prev) {                                    // 和上一次刷新比：干活记录变了且干成了＝来了新活 → 弹派工单；只有报到变了＝巡了一圈 → 桌上闪一下
+      const jobs = []
+      seated.forEach(x => {
+        const o = prev.desks.find(p => p.key === x.key), a = actors[x.key]
+        if (!o || !a || x.status === 'off' || x.status === 'down') return
+        const k = x.lastTs || x.lastAt, ko = o.lastTs || o.lastAt
+        const f = (d.feed || []).find(f => f.key === x.key)
+        if (k && k !== ko && x.status === 'ok' && (!f || f.ok)) jobs.push({ a, f, text: f ? f.text : x.lastText || '' })
+        else if ((x.beatTs && x.beatTs !== o.beatTs) || (k && k !== ko)) a.patrol()
+      })
+      if (jobs.length) dispatch(jobs, d.asOf || '')
+    }
+    prev = d
+  }
+  let last = performance.now()
+  const loop = now => { const dt = Math.min(100, now - last); last = now; for (const k in actors) actors[k].step(dt, now); requestAnimationFrame(loop) }
+  requestAnimationFrame(loop)
+
+  // ───────── 取数 ─────────
+  async function load() {
+    try {
+      const r = await fetch('/api/office/screen', { cache: 'no-store', headers: { 'X-Office-Token': tok } })
+      if (r.status === 401) { $('pill').className = 'pill bad'; $('pillT').textContent = '大屏链接已失效'; return }
+      if (!r.ok) throw new Error(r.status)
+      apply(await r.json())
+    } catch (e) { $('pill').className = 'pill warn'; $('pillT').textContent = '这次没取到 · 显示上一次的' }
+  }
+  $('bg').addEventListener('error', () => location.replace('office-screen-vector.html' + location.hash))   // 底图没加载出来 → 退回矢量版
+  if (LIVE) { load(); setInterval(load, 60000) }
+  else {
+    $('sample').style.display = 'block'; apply(SAMPLE)
+    if (location.hash.includes('spots')) {         // 调位置用：#spots 把几个人直接摆到茶水间 / 沙发 / 交接台 / 过道上，好一眼核对落点
+      const put = (k, x, y, pose) => { const a = actors[k]; if (!a) return; a.pos = [x, y]; a.pose = pose; a.path = [[x, y]]; a.seg = 0; a.state = 'stay'; a.until = 1e15; a.seat.style.display = 'none'; a.walk.style.display = '' }
+      put('inv_remind', SPOTS.tea[0].x, SPOTS.tea[0].y, 'tea'); put('bom_final', SPOTS.tea[1].x, SPOTS.tea[1].y, 'tea')
+      put('todo_check', SPOTS.sofa[0].x, SPOTS.sofa[0].y, 'sofa'); put('bom_intake', SPOTS.sofa[1].x, SPOTS.sofa[1].y, 'sofa')
+      put('fx', COUNTER.x, COUNTER.y, 'hand'); put('inv_intake', 700, SEAT[8].aisle, 'stand')
+    } else
+    setTimeout(() => demo(['inv_intake', 'todo_check']), 2500)                                        // 样例模式：开场演示一次派工
+    const DEMO_TX = { fx: '2026 年 10 月已写入 8 条', todo_check: '已核对 5 条，销账 2 条', inv_intake: '已接入 3 张钉钉单', inv_remind: '该催 5 张，已发出 5 张', bom_intake: '已自动立项 1 单', bom_final: '已同步终审：通过 1 单、退回 0 单' }
+    const DEMO_REF = { inv_intake: ['202610081518000417', '202610081512000398', '202610081506000371'], bom_intake: ['202610081411000302'], bom_final: ['202610061702000118'] }
+    // 样例模式演一笔新活：弹派工单，同时把这一笔放到「刚干完的活」最上面（和真数据到的时候一样）
+    function demo(keys) { const t = new Date(), hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+      const js = keys.map(k => actors[k]).filter(a => a && a.d.status === 'ok').map(a => { const r = DEMO_REF[a.d.key] || []
+        return { a, text: DEMO_TX[a.d.key] || '又干完一笔', f: { at: '今天 ' + hm, desk: a.d.name, key: a.d.key, text: DEMO_TX[a.d.key] || '又干完一笔', ok: true, n: r.length, refLabel: '钉钉单号', refs: r } } })
+      if (!js.length) return
+      SAMPLE.feed = js.map(j => j.f).reverse().concat(SAMPLE.feed).slice(0, 14); panels(SAMPLE); dispatch(js, hm) }
+    addEventListener('keydown', e => { if (e.key === 'd' || e.key === 'D') { const c = Object.values(actors).filter(a => a.d.status === 'ok').map(a => a.d.key).sort(() => Math.random() - .5); demo(c.slice(0, 1 + Math.floor(Math.random() * 3))) }
+      if (e.key === 'p' || e.key === 'P') Object.values(actors).filter(a => a.d.status === 'ok').forEach(a => a.patrol())
+      if (e.key === 'b' || e.key === 'B') { const c = Object.values(actors).filter(a => a.d.status === 'ok' && a.state === 'seat' && !a.busy()); const a = c[Math.floor(Math.random() * c.length)]; a && a.takeBreak() } })
+  }
+
+  // ───────── 时钟 / 缩放 ─────────
+  const p2 = n => String(n).padStart(2, '0')
+  const tick = () => { const t = new Date(); $('clk').textContent = `${p2(t.getHours())}:${p2(t.getMinutes())}`
+    $('dt').textContent = `${t.getFullYear()}年${t.getMonth() + 1}月${t.getDate()}日 · 周${'日一二三四五六'[t.getDay()]}` }
+  tick(); setInterval(tick, 5000)
+  const fit = () => { const w = innerWidth || document.documentElement.clientWidth, h = innerHeight || document.documentElement.clientHeight
+    if (!w || !h) return; $('stage').style.zoom = Math.min(w / 1920, h / 1080); scene.style.transform = `scale(${1440 / 1672})` }
+  addEventListener('resize', fit); addEventListener('load', fit); fit(); setTimeout(fit, 60)
+})()
+</script>
+</html>

@@ -104,13 +104,20 @@ def start_timer():
     if str(db.DB_URL).startswith("sqlite"):
         return
     def loop():
+        import worker_store      # 数字员工办公室·发票凭证同步员：每圈报到；真对上了凭证 / 出了错才记一笔（只写张数）
+        worker_store.beat("inv_voucher")
         while True:
             threading.Event().wait(20 * 60)
             try:
-                sync_once()
-            except Exception:
+                r = sync_once() or {}
+                worker_store.beat("inv_voucher")
+                if r.get("changed"):
+                    worker_store.record("inv_voucher", n=r["changed"], summary="已对上 %d 张发票的金蝶凭证" % r["changed"])
+            except Exception as e:
                 import logging
                 logging.getLogger(__name__).exception("发票凭证定时刷新失败，保留旧记录")
+                worker_store.beat("inv_voucher")
+                worker_store.record("inv_voucher", ok=False, summary="回查金蝶凭证出错", error=str(e))
     threading.Thread(target=loop, name="inv-vouchers", daemon=True).start()
 
 start_timer()

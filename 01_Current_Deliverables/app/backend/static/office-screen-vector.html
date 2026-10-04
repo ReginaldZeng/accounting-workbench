@@ -1,0 +1,613 @@
+<!doctype html>
+<!--
+[Change Log]
+Date: 2026-10-04 | Author: Claude Opus 5.5 | Version: V2.796（数字员工办公室）
+Description: 数字员工办公室 · 大屏（重新设计版）。底子是业务方 2026-07-19 做的等距办公室原型
+  （05 数字员工办公室/prototype/dashboard.html：米色 + 橄榄绿、等距工位、桌面小卡、小人交接），这一版把它从「一个合同预审组 + 假数字」
+  改成「照真实值班表摆工位」：
+  · 工位按组分区（发票组 / 总账组 / 应付组 / 成本组 / 法务组），有几个真工位摆几张桌子，不再摆「待认领」的空桌子。
+  · 四种状态一眼分得开（三米外看屏幕）：亮屏＝正常；黄屏＝上一轮出错；红灯闪＝停了；暗屏空椅＝没上岗。
+  · 取件机是机器不是人：单独一间「取件间」，画成机柜 + 指示灯。
+  · 原「收件箱」改成「交接台」：工位干完交出去、还没人接的活摞在这儿，有就亮灯（数字读首页待办表）。
+  · 茶水台、洽谈区拿掉——屏上每个元素都要有信息量（原项目说明里自己定的规矩）。
+  · 小人只在真有一次交接时走一趟（两次刷新之间某工位多了一笔干活记录）；平时各自坐着。样例模式开场演示一趟。
+  · 人物（业务方看后嫌方块人太死板，重画）：圆头小人，每个工位的发型、发色不同，衣服颜色跟组走；正常的在打字、偶尔点头，
+    出错的挠头冒「!」，停了的趴在桌上睡（Zzz），各有各的节奏不齐步。仍然不对应任何真人。
+  · 左栏四个数 + 各组在岗；右栏「刚干完的活」+「要人看一眼」；底部滚动。不显示工时（业务方定：暂时不用）。
+  · 全屏只有件数和状态，不显示供应商、客户、金额。
+  数据：地址栏 # 后面带大屏口令（#k=…）→ 每分钟读 /api/office/screen；不带口令 / 直接双击打开 → 用内置样例数据（右上角标「样例数据」）。
+  放在 frontend/public/：构建时原样拷进 backend/static/，线上地址 /office-screen.html#k=<大屏口令>。
+-->
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数字员工办公室 · 大屏</title>
+<style>
+  :root{
+    --oat:#EAE4D8; --oat-2:#EFEADF; --oat-deep:#DED7C6; --line:#D9D1BF;
+    --green:#758043; --green-deep:#415800; --green-soft:#8A9455; --green-lite:#B7D169;
+    --ink:#333333; --ink-soft:#5B5B54; --ink-mute:#8E8E86;
+    --ok:#3F8A46; --warn:#B7791F; --bad:#C0492F; --idle:#B4B0A4;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:radial-gradient(140% 120% at 50% -10%, #EAE9E0 0%, #D8D2C4 100%)}
+  body{font-family:"MiSans","MiSans Normal","Microsoft YaHei",微软雅黑,Arial,sans-serif;color:var(--ink);display:grid;place-items:center}
+  #stage{width:1920px;height:1080px;border-radius:34px;overflow:hidden;
+    box-shadow:0 24px 70px rgba(70,62,40,.22),0 0 0 1px rgba(120,110,80,.10);
+    background:radial-gradient(120% 120% at 50% 0%, #F3EEE3 0%, var(--oat) 62%, var(--oat-deep) 100%);
+    display:grid;grid-template-rows:auto 1fr auto;padding:30px 34px 24px;transform-origin:center}
+
+  header{display:flex;align-items:center;gap:18px;padding-bottom:22px}
+  .logo{width:52px;height:52px;border-radius:14px;background:linear-gradient(150deg,var(--green-soft),var(--green-deep));
+    display:grid;place-items:center;flex:none;box-shadow:0 6px 18px rgba(65,88,0,.28)}
+  .logo div{width:22px;height:22px;border:4px solid #fff;border-radius:50%}
+  .htxt b{font-size:30px;letter-spacing:.01em}
+  .htxt b span{color:var(--green-deep)}
+  .htxt small{display:block;font-size:14px;color:var(--ink-mute);letter-spacing:.16em;margin-top:3px;font-weight:400}
+  .sample{display:none;font-size:14px;font-weight:700;color:var(--warn);background:rgba(183,121,31,.14);border-radius:999px;padding:8px 16px}
+  .sample.on{display:block}
+  .hstat{margin-left:auto;display:flex;align-items:center;gap:11px;background:#fff;border-radius:999px;
+    padding:11px 20px;font-size:16px;color:var(--ink-soft);box-shadow:0 2px 10px rgba(90,80,55,.08)}
+  .hstat .d{width:11px;height:11px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px rgba(63,138,70,.16);animation:pulse 2.6s infinite}
+  .hstat.warn .d{background:var(--warn);box-shadow:0 0 0 4px rgba(183,121,31,.18)}
+  .hstat.bad{color:var(--bad);font-weight:700}
+  .hstat.bad .d{background:var(--bad);box-shadow:0 0 0 4px rgba(192,73,47,.18);animation:pulse 1.1s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .clock{margin-left:20px;text-align:right}
+  .clock b{font-size:38px;font-variant-numeric:tabular-nums;letter-spacing:.02em;font-weight:700}
+  .clock small{display:block;font-size:14px;color:var(--ink-mute);margin-top:1px}
+
+  main{display:grid;grid-template-columns:352px 1fr 400px;gap:20px;min-height:0}
+  .col{display:flex;flex-direction:column;gap:16px;min-height:0}
+  .panel{background:#fff;border-radius:20px;box-shadow:0 3px 16px rgba(90,80,55,.07)}
+
+  .kpis{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .kpi{padding:20px 22px}
+  .kpi .cap{font-size:13px;color:var(--ink-mute);letter-spacing:.12em;font-weight:700}
+  .kpi .v{font-size:50px;font-weight:700;line-height:1.05;margin-top:8px;color:var(--green-deep);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .kpi .v small{font-size:19px;color:var(--ink-mute);font-weight:400;margin-left:5px}
+  .kpi .d{font-size:13px;color:var(--ink-mute);margin-top:5px;white-space:nowrap}
+  .kpi.warn .v{color:var(--warn)} .kpi.bad .v{color:var(--bad)}
+  .kpi .d i{font-style:normal;font-weight:700}
+  .kpi .d i.b{color:var(--bad)} .kpi .d i.w{color:var(--warn)}
+
+  .comp{padding:22px 24px;flex:1;display:flex;flex-direction:column;min-height:0}
+  .comp h3,.feed h3,.alerts h3{font-size:15px;letter-spacing:.02em;display:flex;align-items:center}
+  .comp h3 span,.feed h3 span,.alerts h3 span{color:var(--ink-mute);font-weight:400;font-size:12px;letter-spacing:.14em;margin-left:8px}
+  .crow{margin-top:17px}
+  .crow .t{display:flex;align-items:baseline;gap:9px;font-size:15px}
+  .crow .t em{font-style:normal;font-size:13px;color:var(--ink-mute)}
+  .crow .t b{margin-left:auto;font-variant-numeric:tabular-nums;font-size:14px;font-weight:400;color:var(--ink-soft)}
+  .swatch{width:11px;height:11px;border-radius:3px;align-self:center}
+  .track{height:8px;background:var(--oat);border-radius:99px;margin-top:8px;overflow:hidden}
+  .track i{display:block;height:100%;border-radius:99px}
+  .comp .note{margin-top:auto;padding-top:14px;font-size:12.5px;color:var(--ink-mute);line-height:1.6}
+
+  .stagewrap{position:relative;overflow:hidden;flex:1;display:flex;flex-direction:column}
+  .sw-h{display:flex;align-items:baseline;gap:12px;padding:22px 26px 0}
+  .sw-h b{font-size:17px}
+  .sw-h span{font-size:13px;color:var(--ink-mute);letter-spacing:.1em}
+  .sw-legend{margin-left:auto;display:flex;gap:16px;font-size:13px;color:var(--ink-soft)}
+  .sw-legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .scene{flex:1;min-height:0}
+  .scene svg{width:100%;height:100%;display:block}
+  .privacy{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:13px;color:var(--ink-mute)}
+  .blink{animation:pulse 1.1s infinite}
+  /* 人物小动作：点头 / 打字 / 呼吸 / 冒叹号 / 睡觉。每个人的时长和起拍不同（行内 style 给），不齐步 */
+  .nod{animation:nod 3.2s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 92%}
+  @keyframes nod{0%,100%{transform:rotate(-2.5deg)}50%{transform:rotate(3.5deg) translateY(.8px)}}
+  .ty{animation:ty .42s ease-in-out infinite alternate}
+  .ty.b{animation-direction:alternate-reverse}
+  @keyframes ty{to{transform:translateY(-2.6px)}}
+  .br{animation:br 3.4s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 100%}
+  @keyframes br{50%{transform:scaleY(1.04)}}
+  .bub{animation:bub 1.3s ease-in-out infinite}
+  @keyframes bub{50%{transform:translateY(-3.5px)}}
+  .zz{animation:zz 3s ease-in infinite;opacity:0}
+  @keyframes zz{0%{opacity:0;transform:translate(0,6px)}25%{opacity:.85}100%{opacity:0;transform:translate(9px,-16px)}}
+  .scr{animation:scr 2.6s steps(1) infinite}
+  @keyframes scr{50%{opacity:.35}}
+
+  .feed{padding:22px 22px 16px;flex:1;display:flex;flex-direction:column;min-height:0}
+  .feed h3 .live{margin-left:auto;width:9px;height:9px;border-radius:50%;background:var(--ok);animation:pulse 1.6s infinite}
+  .evs{margin-top:8px;overflow:hidden;flex:1}
+  .ev{padding:10px 0;border-bottom:1px solid var(--oat-2)}
+  .ev .l1{display:flex;align-items:center;gap:10px}
+  .ev .tm{font-size:13px;color:var(--ink-mute);font-variant-numeric:tabular-nums;flex:none;min-width:44px}
+  .ev .role{font-weight:700;font-size:15px}
+  .ev .tag{margin-left:auto;font-size:12px;font-weight:700;padding:2px 10px;border-radius:99px;flex:none}
+  .ev .txt{font-size:14px;color:var(--ink-soft);margin:3px 0 0 54px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tag.done{background:rgba(63,138,70,.14);color:var(--ok)}
+  .tag.warn{background:rgba(183,121,31,.15);color:var(--warn)}
+  .empty{padding:18px 0;font-size:14px;color:var(--ink-mute)}
+
+  .alerts{padding:20px 22px}
+  .al{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--oat-2)}
+  .al:last-child{border:0}
+  .al .dot{width:9px;height:9px;border-radius:50%;margin-top:7px;flex:none}
+  .al .m{font-size:14.5px;line-height:1.5}
+  .al .m .sub{color:var(--ink-mute);font-size:12.5px;margin-top:1px}
+
+  footer{margin:20px 0 0;background:#20241a;color:#EAE9E2;height:56px;border-radius:16px;display:flex;align-items:center;overflow:hidden;
+    box-shadow:0 6px 18px rgba(40,44,26,.22)}
+  .flag{flex:none;display:flex;align-items:center;gap:9px;background:var(--green-deep);align-self:stretch;padding:0 22px;font-size:14px;
+    font-weight:700;letter-spacing:.1em;border-radius:16px 0 0 16px}
+  .flag i{width:9px;height:9px;border-radius:50%;background:var(--green-lite);animation:pulse 1.4s infinite}
+  .marquee{flex:1;overflow:hidden;white-space:nowrap}
+  .track2{display:inline-block;padding-left:100%;animation:scroll 48s linear infinite}
+  .track2 span{margin:0 34px;font-size:15px;color:#D7D5C8}
+  .track2 span b{color:#fff;font-weight:700}
+  .track2 span em{color:var(--green-lite);font-style:normal;margin-left:8px}
+  .track2 span em.w{color:#F0C36A}
+  @keyframes scroll{to{transform:translateX(-100%)}}
+  @media (prefers-reduced-motion:reduce){.track2{animation:none}.hstat .d,.feed h3 .live,.flag i,.blink,.nod,.ty,.br,.bub,.scr{animation:none}.zz{animation:none;opacity:.7}}
+</style>
+
+<div id="stage">
+  <header>
+    <div class="logo"><div></div></div>
+    <div class="htxt"><b>STARFIELD · <span>数字员工办公室</span></b>
+      <small>星期零 · 财务部 · 一个工位是一件自己在跑的活</small></div>
+    <div class="sample" id="sample">样例数据 · 没连工作台</div>
+    <div class="hstat" id="hstat"><span class="d"></span><span id="hstatT">正在取值班表…</span></div>
+    <div class="clock"><b id="clk">--:--:--</b><small id="dt">—</small></div>
+  </header>
+
+  <main>
+    <div class="col">
+      <div class="kpis" id="kpis"></div>
+      <div class="panel comp">
+        <h3>各组在岗 <span>WORKGROUPS</span></h3>
+        <div id="zones"></div>
+        <div class="note" id="since"></div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="panel stagewrap">
+        <div class="sw-h"><b>办公现场</b><span>按组分区 · 有几个真工位摆几张桌子</span>
+          <div class="sw-legend">
+            <span><i style="background:var(--ok)"></i>正常（亮屏）</span>
+            <span><i style="background:var(--warn)"></i>上一轮出错（黄屏）</span>
+            <span><i style="background:var(--bad)"></i>停了（红灯）</span>
+            <span><i style="background:var(--idle)"></i>没上岗（暗屏空椅）</span>
+          </div>
+        </div>
+        <div class="scene"><svg id="scene" viewBox="0 0 1040 720" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="privacy">本屏只显示件数和状态 · 不显示供应商、客户和金额</div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="panel feed">
+        <h3>刚干完的活 <span>LIVE ACTIVITY</span><span class="live"></span></h3>
+        <div class="evs" id="evs"></div>
+      </div>
+      <div class="panel alerts">
+        <h3>要人看一眼 <span>ATTENTION</span></h3>
+        <div id="als"></div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="flag"><i></i>实时动态 LIVE</div>
+    <div class="marquee"><div class="track2" id="tk"></div></div>
+  </footer>
+</div>
+
+<script>
+(() => {
+  // ───────── 样例数据（形状与 /api/office/screen 完全一致；数字是编的）─────────
+  const SAMPLE = {
+    asOf: '15:20', since: '2026-10-04',
+    kpi: { on: 9, total: 12, down: 1, off: 2, err: 1, monthN: 412, todayN: 23, waiting: 3 },
+    desks: [
+      { key: 'fx', name: '汇率录入员', zone: '总账组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '汇率审核人', unit: '条', monthN: 8, lastAt: '10-08 14:00', waiting: 1, waitingLate: 1 },
+      { key: 'todo_check', name: '待办核对员', zone: '总账组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '不用交接', unit: '条', monthN: 31, lastAt: '今天 15:01' },
+      { key: 'inv_intake', name: '发票接收员', zone: '发票组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '发票审核人', unit: '张单', monthN: 186, lastAt: '今天 15:20', waiting: 2, waitingLate: 0 },
+      { key: 'inv_remind', name: '催票员', zone: '发票组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '申请人', unit: '张', monthN: 61, lastAt: '今天 09:00' },
+      { key: 'inv_voucher', name: '发票凭证同步员', zone: '发票组', kind: 'desk', status: 'down', statusText: '9 小时没动静', handoff: '不用交接', unit: '张', monthN: 54, lastAt: '今天 06:20' },
+      { key: 'bom_intake', name: 'BOM 立项员', zone: '成本组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '成本会计初审', unit: '单', monthN: 23, lastAt: '10-07 11:42' },
+      { key: 'bom_final', name: 'BOM 终审同步员', zone: '成本组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '不用交接', unit: '单', monthN: 2, lastAt: '10-06 17:10' },
+      { key: 'payreq', name: '物流请款单接收员', zone: '应付组', kind: 'desk', status: 'err', statusText: '上一轮出错了', handoff: '物流复核人', unit: '张单', monthN: 47, lastAt: '今天 15:20' },
+      { key: 'contract', name: '合同预审员', zone: '法务组', kind: 'desk', status: 'off', statusText: '还没上岗：等法务签字', handoff: '法务、财务', unit: '份', monthN: 0, lastAt: '' },
+      { key: 'pull_rpt', name: '财务报表取件机', zone: '取件间', kind: 'machine', status: 'ok', statusText: '正常', handoff: '送达收件人', lastAt: '10-08 15:19' },
+      { key: 'pull_bank', name: '银行流水取件机', zone: '取件间', kind: 'machine', status: 'ok', statusText: '正常', handoff: '送达收件人', lastAt: '10-08 15:02' },
+      { key: 'pull_ecrecon', name: '电商资料取件机', zone: '取件间', kind: 'machine', status: 'off', statusText: '还没上岗：这台机器还没回报过', handoff: '送达收件人', lastAt: '' },
+    ],
+    feed: [
+      { at: '今天 15:20', desk: '发票接收员', key: 'inv_intake', text: '新接 3 张钉钉单', ok: true },
+      { at: '今天 15:20', desk: '物流请款单接收员', key: 'payreq', text: '新接 1 张请款单', ok: false },
+      { at: '今天 15:01', desk: '待办核对员', key: 'todo_check', text: '核对 5 条，销账 2 条', ok: true },
+      { at: '今天 13:40', desk: '物流请款单接收员', key: 'payreq', text: '新接 4 张请款单', ok: true },
+      { at: '今天 11:05', desk: '发票接收员', key: 'inv_intake', text: '2 个票夹票齐了，已自动送审', ok: true },
+      { at: '今天 09:00', desk: '催票员', key: 'inv_remind', text: '该催 5 张，发出 5 张', ok: true },
+      { at: '今天 06:20', desk: '发票凭证同步员', key: 'inv_voucher', text: '12 张发票对上了金蝶凭证', ok: true },
+      { at: '10-08 14:00', desk: '汇率录入员', key: 'fx', text: '2026 年 9 月写入 8 条', ok: true },
+      { at: '10-07 11:42', desk: 'BOM 立项员', key: 'bom_intake', text: '自动立项 1 单', ok: true },
+    ],
+  }
+
+  const $ = id => document.getElementById(id)
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  const ZORD = ['发票组', '总账组', '应付组', '成本组', '法务组', '取件间']
+  const zi = z => { const i = ZORD.indexOf(z); return i < 0 ? 98 : i }
+  const COL = { ok: '#3F8A46', err: '#B7791F', down: '#C0492F', off: '#B4B0A4' }
+
+  // ───────── 左栏 / 右栏 / 页眉 / 底部 ─────────
+  function renderPanels(d) {
+    const k = d.kpi, bad = d.desks.filter(x => x.status === 'down'), err = d.desks.filter(x => x.status === 'err')
+    const total = k.total || d.desks.length
+    const hs = $('hstat')
+    hs.className = 'hstat' + (bad.length ? ' bad' : err.length ? ' warn' : '')
+    $('hstatT').textContent = bad.length ? `${bad.length} 个工位停了${err.length ? ` · ${err.length} 个出了错` : ''}`
+      : err.length ? `${err.length} 个工位上一轮出了错` : '全部在岗工位正常'
+    const late = d.desks.reduce((s, x) => s + (x.waitingLate || 0), 0)
+    $('kpis').innerHTML =
+      `<div class="panel kpi${k.down ? ' bad' : ''}"><div class="cap">在岗工位</div><div class="v">${k.on}<small>/${total}</small></div>
+         <div class="d">${k.down ? `<i class="b">${k.down} 个停了</i> · ` : ''}${k.off} 个没上岗</div></div>
+       <div class="panel kpi"><div class="cap">今天干完</div><div class="v">${k.todayN || 0}<small>件</small></div><div class="d">更新于 ${esc(d.asOf)}</div></div>
+       <div class="panel kpi"><div class="cap">本月干完</div><div class="v">${k.monthN}<small>件</small></div><div class="d">只算真干成的</div></div>
+       <div class="panel kpi${k.waiting ? ' warn' : ''}"><div class="cap">等人接手</div><div class="v">${k.waiting}<small>件</small></div>
+         <div class="d">${late ? `<i class="w">${late} 件超过 3 个工作日</i>` : k.waiting ? '都在 3 个工作日内' : '交出去的都接了'}</div></div>`
+    // 各组在岗
+    const zs = {}
+    d.desks.forEach(x => { const z = zs[x.zone] = zs[x.zone] || { on: 0, n: 0, down: 0, err: 0, m: 0, hasM: false }; z.n++; if (x.status === 'ok' || x.status === 'err') z.on++
+      if (x.status === 'down') z.down++; if (x.status === 'err') z.err++; if (x.monthN != null) { z.m += x.monthN; z.hasM = true } })
+    $('zones').innerHTML = Object.keys(zs).sort((a, b) => zi(a) - zi(b)).map(z => {
+      const v = zs[z], c = v.down ? 'var(--bad)' : v.err ? 'var(--warn)' : v.on ? 'var(--green)' : 'var(--idle)'
+      return `<div class="crow"><div class="t"><span class="swatch" style="background:${c}"></span>${esc(z)}
+        <em>${v.on}/${v.n} 在岗${v.down ? ` · ${v.down} 个停了` : ''}</em><b>${v.hasM ? `本月 ${v.m} 件` : ''}</b></div>
+        <div class="track"><i style="width:${Math.max(v.on ? 8 : 0, Math.round(v.on / v.n * 100))}%;background:${c}"></i></div></div>`
+    }).join('')
+    $('since').textContent = d.since ? `件数从 ${d.since} 开始记，更早的没有统一记录，不倒推。` : '还没有工位干过活，件数从第一笔开始记。'
+    // 刚干完的活
+    const feed = (d.feed || []).slice(0, 9)
+    $('evs').innerHTML = feed.length ? feed.map(f =>
+      `<div class="ev"><div class="l1"><span class="tm">${esc(String(f.at).replace('今天 ', ''))}</span><span class="role">${esc(f.desk)}</span>
+        <span class="tag ${f.ok ? 'done' : 'warn'}">${f.ok ? '干成了' : '出错'}</span></div><div class="txt">${esc(f.text)}</div></div>`).join('')
+      : '<div class="empty">还没有干活记录。</div>'
+    $('tk').innerHTML = feed.length ? feed.map(f => `<span><b>${esc(f.desk)}</b> ${esc(f.text)}<em class="${f.ok ? '' : 'w'}">${f.ok ? '干成了' : '出错'}</em> · ${esc(f.at)}</span>`).join('')
+      : '<span>还没有干活记录</span>'
+    // 要人看一眼：停了 > 出错 > 交出去超期没人接
+    const al = []
+    bad.forEach(x => al.push(['var(--bad)', `<b>${esc(x.name)}</b> 停了`, esc(x.statusText) + ' · 看看后台任务还在不在']))
+    err.forEach(x => al.push(['var(--warn)', `<b>${esc(x.name)}</b> 上一轮出错了`, '登录办公室点开这个工位看原因']))
+    d.desks.filter(x => x.waitingLate).forEach(x => al.push(['var(--warn)', `<b>${esc(x.handoff)}</b> 还有 ${x.waiting} 件没接`, `${x.waitingLate} 件超过 3 个工作日 · ${esc(x.name)}交出去的`]))
+    $('als').innerHTML = al.length ? al.slice(0, 4).map(a => `<div class="al"><span class="dot" style="background:${a[0]}"></span><div class="m">${a[1]}<div class="sub">${a[2]}</div></div></div>`).join('')
+      : '<div class="al"><span class="dot" style="background:var(--ok)"></span><div class="m">都正常<div class="sub">没有要人处理的</div></div></div>'
+  }
+
+  // ───────── 办公现场（等距）─────────
+  const NS = 'http://www.w3.org/2000/svg'
+  const svgEl = $('scene')
+  const el = (t, a = {}) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); return e }
+  const OX = 350, OY = 140, C = 0.9, S = 0.5
+  const iso = (x, y, z = 0) => [OX + (x - y) * C, OY + (x + y) * S - z]
+  const pts = a => a.map(p => iso(...p).join(',')).join(' ')
+  let svg, cardG, curParent, walkerCtl = null
+  const poly = (p, fill, ex = {}) => { const e = el('polygon', { points: pts(p), fill, ...ex }); curParent.appendChild(e); return e }
+  const box = (x, y, z, w, dd, h, top, right, front) => {      // 立方体：前(y+d) + 右(x+w) + 顶
+    poly([[x, y + dd, z], [x + w, y + dd, z], [x + w, y + dd, z + h], [x, y + dd, z + h]], front)
+    poly([[x + w, y, z], [x + w, y + dd, z], [x + w, y + dd, z + h], [x + w, y, z + h]], right)
+    poly([[x, y, z + h], [x + w, y, z + h], [x + w, y + dd, z + h], [x, y + dd, z + h]], top)
+  }
+  const DW = 118, DD = 78, DTOP = 30, COLX = [20, 190, 360], ROWY = r => 160 - 180 * r
+  const AISLE_X = 545, SIDE_X = 618         // 右侧走道 / 取件间与交接台那一列
+  const ZTINT = { '发票组': 'rgba(117,128,67,.10)', '总账组': 'rgba(65,88,0,.07)', '应付组': 'rgba(183,121,31,.075)', '成本组': 'rgba(70,110,130,.07)', '法务组': 'rgba(140,140,130,.06)' }
+
+  // 桌面 / 机柜旁的小卡：上行名字，下行状态色点 + 一句话。停在桌子高度、从人的右手边往右展开（不盖住人），
+  // 统一画在最上层的 cardG 里（不会被后画的桌子压住一角）
+  const textW = (t, px) => [...t].reduce((a, ch) => a + (ch === ' ' ? .3 : ch.charCodeAt(0) < 128 ? .6 : 1), 0) * px
+  const card = (p, name, color, line) => {
+    const w = Math.max(96, Math.round(Math.max(textW(name, 14.4), textW(line, 12.6) + 16)) + 24), h = 42
+    const g = el('g', { transform: `translate(${p[0]},${p[1]})` })
+    g.appendChild(el('rect', { x: 0, y: -h, width: w, height: h, rx: 7, fill: '#F5F1E9', stroke: '#D6CEBD', 'stroke-width': 1 }))
+    const t1 = el('text', { x: 12, y: -h + 18, 'font-size': 14, 'font-weight': 700, fill: '#3E4A2A' }); t1.textContent = name; g.appendChild(t1)
+    g.appendChild(el('circle', { cx: 17, cy: -10.5, r: 4.5, fill: color }))
+    const t2 = el('text', { x: 27, y: -6, 'font-size': 12.5, fill: color === COL.off ? '#8E877A' : '#5B5B54' }); t2.textContent = line; g.appendChild(t2)
+    cardG.appendChild(g)
+  }
+  const cardLine = d => d.status === 'ok' ? (d.monthN != null ? `本月 ${d.monthN} ${d.unit || '件'}` : '正常')
+    : d.status === 'err' ? '上一轮出错' : d.status === 'down' ? `停了 · ${String(d.statusText).replace('没动静', '')}` : '没上岗'
+
+  // ── 人物：圆头小人。按工位 key 定造型（发色 / 发型 / 戴不戴耳机 / 小动作的节奏），衣服颜色跟组走。不对应任何真人 ──
+  const SKIN = '#EBC8A4', HAIR = ['#3B4230', '#4A3728', '#2E2E2C', '#6B4A32'], STYLE = ['short', 'bun', 'pony', 'bob']
+  const OUTFIT = { '发票组': ['#7E8A4B', '#5F6A34'], '总账组': ['#4F6B3A', '#3B5229'], '应付组': ['#C08A4E', '#9C6C38'], '成本组': ['#5E8591', '#476874'], '法务组': ['#8A7F6A', '#6E6453'] }
+  const hash = t => { let h = 7; for (const c of String(t)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h }
+  const lookOf = d => { const h = hash(d.key), o = OUTFIT[d.zone] || OUTFIT['发票组']
+    return { hair: HAIR[h % 4], style: STYLE[(h >>> 3) % 4], phones: (h >>> 6) % 3 === 0, out: o[0], outD: o[1], delay: -((h % 37) / 10), dur: 2.7 + (h % 9) / 6 } }
+  const hairExtra = (L, cx, cy) => L.style === 'bun' ? `<circle cx="${cx - 1}" cy="${cy - 14}" r="5.6" fill="${L.hair}"/>`
+    : L.style === 'pony' ? `<ellipse cx="${cx - 11}" cy="${cy + 5}" rx="4.6" ry="9" fill="${L.hair}" transform="rotate(24 ${cx - 11} ${cy + 5})"/>`
+    : L.style === 'bob' ? `<rect x="${cx - 13.5}" y="${cy - 3}" width="26" height="17" rx="7" fill="${L.hair}"/>` : ''
+  // 坐着的人（从背后斜着看：脸朝右上方的屏幕）。原点＝椅面中心；pose：ok 打字点头 / err 挠头冒叹号 / down 趴着睡
+  function seatedPerson(L, pose) {
+    const anim = `style="animation-delay:${L.delay}s;animation-duration:${L.dur}s"`
+    const arm = (d0, hx, hy, cls) => `<g class="${cls}" style="animation-delay:${L.delay}s"><path d="${d0}" fill="none" stroke="${L.outD}" stroke-width="7" stroke-linecap="round"/><circle cx="${hx}" cy="${hy}" r="3.7" fill="${SKIN}"/></g>`
+    const torso = `<rect class="br" ${anim} x="-14" y="-31" width="29" height="35" rx="12" fill="${L.out}"/>`
+    const head = (cx, cy) => `<circle cx="${cx + 2}" cy="${cy - .5}" r="12.4" fill="${SKIN}"/><circle cx="${cx + 13}" cy="${cy + 2}" r="3" fill="${SKIN}"/>` +
+      hairExtra(L, cx, cy) + `<circle cx="${cx}" cy="${cy}" r="12.6" fill="${L.hair}"/>` +
+      (L.phones ? `<path d="M${cx - 11},${cy - 5} Q${cx},${cy - 21} ${cx + 12},${cy - 4}" fill="none" stroke="#2E332A" stroke-width="3" stroke-linecap="round"/><rect x="${cx - 15}" y="${cy - 7}" width="6" height="10" rx="2.5" fill="#2E332A"/>` : '')
+    if (pose === 'down')          // 停了：趴在桌上睡着了
+      return arm('M7,-18 Q24,-22 38,-23', 38, -23, '') + arm('M-6,-15 Q12,-10 29,-13', 29, -13, '') +
+        `<g transform="translate(9,5) rotate(26)">${torso}${head(1, -43)}</g>` +
+        [[26, -58, 11, 0], [33, -68, 14, 1], [41, -80, 17, 2]].map(([x, y, f, i]) =>
+          `<text class="zz" style="animation-delay:${i}s" x="${x}" y="${y}" font-size="${f}" font-weight="700" fill="#8E8E86">z</text>`).join('')
+    if (pose === 'err')           // 上一轮出错：一只手挠头，头顶冒个叹号
+      return arm('M-6,-20 Q12,-14 30,-17', 30, -17, '') + torso + arm('M9,-24 Q22,-38 13,-50', 13, -51, '') +
+        `<g class="nod" ${anim}>${head(1, -44)}</g>` +
+        `<g class="bub"><rect x="16" y="-82" width="17" height="19" rx="6" fill="#E2A93B"/><path d="M21,-64 l3,5 l3,-5 z" fill="#E2A93B"/>` +
+        `<text x="24.5" y="-68" font-size="14" font-weight="700" text-anchor="middle" fill="#fff">!</text></g>`
+    return torso + arm('M9,-24 Q24,-30 38,-27', 38, -27, 'ty') + arm('M-6,-20 Q12,-14 30,-17', 30, -17, 'ty b') +
+      `<g class="nod" ${anim}>${head(1, -44)}</g>`
+  }
+  // 走动的小人（交接时用）：大头、看得见脸，穿着跟坐着时同一身
+  const walkerHTML = L => '<ellipse cx="0" cy="2" rx="15" ry="6" fill="rgba(120,108,80,.20)"/><g class="rig">' +
+    '<g class="legB"><rect x="-3.5" y="-1" width="7" height="18" rx="3.5" fill="#454A3A"/></g>' +
+    `<g class="armB"><rect x="-3" y="-1" width="6" height="16" rx="3" fill="${L.outD}"/></g>` +
+    `<rect x="-11.5" y="-50" width="23" height="28" rx="9" fill="${L.out}"/>` +
+    '<g class="legF"><rect x="-3.5" y="-1" width="7" height="18" rx="3.5" fill="#555B47"/></g>' +
+    `<g class="armF"><rect x="-3" y="-1" width="6" height="16" rx="3" fill="${L.outD}"/><circle cx="0" cy="15" r="3.4" fill="${SKIN}"/></g>` +
+    '<rect class="hf" x="9" y="-45" width="15" height="17" rx="2" fill="#FBF8F0" stroke="#CFC7B4" stroke-width="1"/>' +
+    hairExtra(L, 0, -62) + `<circle cx="0" cy="-62" r="12.4" fill="${L.hair}"/>` +
+    `<g class="face"><circle cx="1" cy="-60" r="10" fill="${SKIN}"/><path d="M-9,-64 Q0,-75 11,-65 Q3,-69 -9,-64 Z" fill="${L.hair}"/>` +
+    '<circle cx="-2.6" cy="-60" r="1.4" fill="#3B4230"/><circle cx="4.6" cy="-60" r="1.4" fill="#3B4230"/>' +
+    '<path d="M-1,-55.5 Q1,-53.5 3,-55.5" fill="none" stroke="#9A5B4A" stroke-width="1.2" stroke-linecap="round"/>' +
+    '<circle cx="-5.5" cy="-56.5" r="1.9" fill="#F0A58E" opacity=".55"/><circle cx="7.5" cy="-56.5" r="1.9" fill="#F0A58E" opacity=".55"/></g></g>'
+
+  function drawDesk(d) {
+    const cx = d.x + DW / 2, st = d.status, live = st === 'ok' || st === 'err'
+    const sh = iso(cx, d.y + DD / 2 + 16, 0)
+    svg.appendChild(el('ellipse', { cx: sh[0], cy: sh[1] + 8, rx: 92, ry: 48, fill: 'rgba(120,108,80,.15)', filter: 'url(#soft)' }))
+    box(d.x, d.y, 0, DW, DD, DTOP, '#EDE8DC', '#CFC6B2', '#DBD3C1')
+    const mw = 58, mh = 34, ms = 8, mx = d.x + (DW - mw) / 2, my = d.y + 14, zb = DTOP
+    const scr = st === 'ok' ? '#93AC4B' : st === 'err' ? '#E2A93B' : st === 'down' ? '#3B2420' : '#252A20'
+    const glow = st === 'ok' ? 'rgba(150,185,70,.36)' : 'rgba(226,169,59,.36)'
+    if (live) { const rf = iso(cx, my + 30, zb + 1); svg.appendChild(el('ellipse', { cx: rf[0], cy: rf[1], rx: 50, ry: 24, fill: glow, filter: 'url(#glow)' })) }
+    box(mx + mw / 2 - 9, my + 3, zb, 18, 7, 3, '#43473C', '#33372D', '#3A3E32')
+    box(mx + mw / 2 - 4, my + 4, zb, 8, 5, ms, '#3A3E34', '#2C3026', '#33372D')
+    box(mx, my, zb + ms, mw, 5, mh, '#40443A', '#2C3026', '#31352B')
+    poly([[mx + 3, my + 5, zb + ms + 3], [mx + mw - 3, my + 5, zb + ms + 3], [mx + mw - 3, my + 5, zb + ms + mh - 3], [mx + 3, my + 5, zb + ms + mh - 3]], scr)
+    if (live) {
+      const g = iso(cx, my + 7, zb + ms + mh / 2)
+      svg.appendChild(el('ellipse', { cx: g[0], cy: g[1], rx: 42, ry: 30, fill: glow, filter: 'url(#glow)' }))
+      const ln = st === 'ok' ? ['#EAF2CE', '#D2E3A0'] : ['#FFF3D2', '#F6DC9A']
+      ;[[9, 26, 0], [14, 38, 1], [19, 20, 1]].forEach(([dz, len, c]) =>
+        poly([[mx + 8, my + 5, zb + ms + mh - dz], [mx + 8 + len, my + 5, zb + ms + mh - dz], [mx + 8 + len, my + 5, zb + ms + mh - dz + 2], [mx + 8, my + 5, zb + ms + mh - dz + 2]], ln[c],
+          st === 'ok' && dz === 19 ? { class: 'scr', style: `animation-delay:${-(hash(d.key) % 20) / 10}s` } : {}))
+    }
+    if (st === 'down') {                       // 停了：显示器顶上一盏红灯闪——三米外的主信号
+      const b = iso(cx, my + 2, zb + ms + mh + 9)
+      svg.appendChild(el('ellipse', { cx: b[0], cy: b[1], rx: 20, ry: 14, fill: 'rgba(210,70,45,.55)', filter: 'url(#glow)', class: 'blink' }))
+      svg.appendChild(el('circle', { cx: b[0], cy: b[1], r: 6, fill: '#D2462D', class: 'blink' }))
+    }
+    box(d.x + (DW - 46) / 2, my + 34, zb, 46, 13, 2, '#E4DECF', '#CFC7B4', '#D8D0BE')
+    box(d.x + 10, my + 30, zb, 20, 18, 4, '#EFE9DB', '#D8CFBB', '#E4DBC8')
+    const bc = d.x + DW / 2, by = d.y + DD + 20, bp = iso(bc, by, 0)
+    if (st !== 'off') {
+      svg.appendChild(el('ellipse', { cx: bp[0], cy: bp[1], rx: 35, ry: 17, fill: 'none', stroke: '#B9B3A5', 'stroke-width': 4 }))
+      box(bc - 5, by - 5, 0, 10, 10, 20, '#9A9488', '#847E72', '#8F897D')
+      box(bc - 24, by - 22, 20, 48, 42, 11, '#4B4F45', '#3A3E36', '#42463C')
+      const sp = iso(bc, by - 3, 31)
+      const seat = el('g', { id: 'seat-' + d.key, transform: `translate(${sp[0]},${sp[1]})` })
+      seat.innerHTML = seatedPerson(lookOf(d), st === 'down' ? 'down' : st === 'err' ? 'err' : 'ok'); svg.appendChild(seat)
+      box(bc - 25, by + 7, 18, 50, 10, 30, '#5B5F52', '#474B40', '#50544A')      // 椅背放矮：露出肩膀和头
+    } else {                                   // 没上岗：空椅子
+      svg.appendChild(el('ellipse', { cx: bp[0], cy: bp[1], rx: 33, ry: 16, fill: 'none', stroke: '#CFC8BA', 'stroke-width': 4 }))
+      box(bc - 5, by - 5, 0, 10, 10, 20, '#C6BFB0', '#B2AB9C', '#BCB5A6')
+      box(bc - 22, by - 20, 20, 44, 40, 10, '#D6CFC0', '#BFB8A8', '#CBC4B4')
+      box(bc - 25, by + 6, 18, 50, 11, 52, '#DAD3C4', '#C5BEAE', '#D0C9B9')
+    }
+    card(iso(d.x + DW - 26, d.y + DD - 2, DTOP + 4), d.name, COL[st] || COL.off, cardLine(d))
+  }
+
+  function drawMachine(m) {                    // 取件机是机器不是人：机柜 + 指示灯
+    const w = 46, dp = 54, h = 64, st = m.status
+    const sh = iso(m.x + w / 2, m.y + dp / 2 + 8, 0)
+    svg.appendChild(el('ellipse', { cx: sh[0], cy: sh[1] + 6, rx: 52, ry: 26, fill: 'rgba(120,108,80,.15)', filter: 'url(#soft)' }))
+    box(m.x, m.y, 0, w, dp, h, '#E3DDCF', '#BDB5A1', '#CDC5B3')
+    for (let i = 0; i < 3; i++) poly([[m.x + 7, m.y + dp, 14 + i * 9], [m.x + w - 7, m.y + dp, 14 + i * 9], [m.x + w - 7, m.y + dp, 17 + i * 9], [m.x + 7, m.y + dp, 17 + i * 9]], '#B5AD99')
+    const led = iso(m.x + 12, m.y + dp, h - 12), c = st === 'ok' ? '#6FBF4A' : st === 'down' ? '#D2462D' : st === 'err' ? '#E2A93B' : '#8F8B80'
+    if (st !== 'off') svg.appendChild(el('ellipse', { cx: led[0], cy: led[1], rx: 13, ry: 10, fill: c, opacity: .5, filter: 'url(#glow)', class: st === 'down' ? 'blink' : '' }))
+    svg.appendChild(el('circle', { cx: led[0], cy: led[1], r: 4, fill: c, class: st === 'down' ? 'blink' : '' }))
+    card(iso(m.x + w + 6, m.y + dp, 44), m.name, COL[st] || COL.off,
+      st === 'ok' ? '正常' : st === 'down' ? `停了 · ${String(m.statusText).replace('没动静', '')}` : st === 'err' ? '上一轮出错' : '没上岗')
+  }
+
+  function drawOutbox(x, y, n) {               // 交接台：工位交出去、还没人接的活摞在这儿
+    const w = 50, dp = 62, h = 36
+    poly([[x - 7, y - 7], [x + w + 7, y - 7], [x + w + 7, y + dp + 7], [x - 7, y + dp + 7]], 'rgba(120,108,80,.10)')
+    box(x, y, 0, w, dp, h, '#E7E1D4', '#CBC2AE', '#D8D0BE')
+    box(x + 8, y + 13, h, 34, 36, 3, '#DAD2C1', '#C3BAA6', '#CEC6B4')
+    for (let i = 0; i < Math.min(n, 5); i++) box(x + 10, y + 15, h + 3 + i * 4, 30, 32, 4, '#FFFFFF', '#E4DED0', '#F5F1E7')
+    const l = iso(x + w / 2, y + 6, h + 30)
+    if (n) svg.appendChild(el('ellipse', { cx: l[0], cy: l[1], rx: 17, ry: 12, fill: 'rgba(226,169,59,.6)', filter: 'url(#glow)' }))
+    svg.appendChild(el('circle', { cx: l[0], cy: l[1], r: 4.5, fill: n ? '#D99A2B' : '#B4B0A4' }))
+    card(iso(x + w + 6, y + dp, 30), '交接台', n ? COL.err : COL.ok, n ? `等人接手 ${n} 件` : '交出去的都接了')
+  }
+
+  function drawScene(d) {
+    svgEl.innerHTML = ''
+    const defs = el('defs')
+    defs.innerHTML = '<filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="9"/></filter>' +
+      '<filter id="glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="7"/></filter>'
+    svgEl.appendChild(defs)
+    svgEl.appendChild(el('rect', { x: 0, y: 0, width: 1040, height: 720, fill: '#F1ECE1' }))
+    const root = el('g'); svgEl.appendChild(root)
+    const gridG = el('g'); root.appendChild(gridG)
+    svg = el('g'); root.appendChild(svg); curParent = svg
+    cardG = el('g'); root.appendChild(cardG)          // 小卡单独一层，永远在最上面
+
+    // 工位落座：按组排，三张一排，从前排往后排坐
+    const seated = d.desks.filter(x => x.kind !== 'machine').slice().sort((a, b) => zi(a.zone) - zi(b.zone))
+    const machines = d.desks.filter(x => x.kind === 'machine')
+    seated.forEach((x, i) => { x.r = Math.floor(i / 3); x.c = i % 3; x.x = COLX[x.c]; x.y = ROWY(x.r) })
+    const rows = Math.max(1, Math.ceil(seated.length / 3)), backY = ROWY(rows - 1), frontY = ROWY(0)
+    const WX = -40, WY = backY - 50, WH = 135, XM = SIDE_X + 130, YM = frontY + DD + 92
+
+    for (let gx = -700; gx <= 1100; gx += 95) { const a = iso(gx, -900), b = iso(gx, 900); gridG.appendChild(el('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: '#E7E0D0', 'stroke-width': 1.3 })) }
+    for (let gy = -900; gy <= 900; gy += 95) { const a = iso(-700, gy), b = iso(1100, gy); gridG.appendChild(el('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: '#E7E0D0', 'stroke-width': 1.3 })) }
+
+    // 分区地面 + 地面上的组名（字贴在过道地面上，不会挡桌子）
+    const seen = {}
+    for (let r = 0; r < rows; r++) {
+      const row = seated.filter(x => x.r === r)
+      let i = 0
+      while (i < row.length) {
+        let j = i; while (j + 1 < row.length && row[j + 1].zone === row[i].zone) j++
+        const x0 = COLX[row[i].c] - 14, x1 = COLX[row[j].c] + DW + 14, y0 = row[i].y - 16, y1 = row[i].y + DD + 66
+        poly([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], ZTINT[row[i].zone] || 'rgba(140,140,130,.05)')
+        if (!seen[row[i].zone]) {
+          seen[row[i].zone] = 1
+          const p = iso(x0 + 12, y1 - 8)
+          const t = el('text', { transform: `matrix(${C},${S},${-C},${S},${p[0]},${p[1]})`, 'font-size': 18, 'font-weight': 700, 'letter-spacing': 2, fill: 'rgba(65,88,0,.55)' })
+          t.textContent = row[i].zone; svg.appendChild(t)      // 只写组名：再长就会被前一排的小卡压住；几个在岗看左栏「各组在岗」
+        }
+        i = j + 1
+      }
+    }
+    const my0 = backY - 10, my1 = backY + Math.max(machines.length, 1) * 112 - 30
+    poly([[SIDE_X - 14, my0 - 6], [SIDE_X + 62, my0 - 6], [SIDE_X + 62, my1], [SIDE_X - 14, my1]], 'rgba(70,80,90,.06)')
+    if (machines.length) {
+      const p = iso(SIDE_X - 6, my1 + 16)
+      const t = el('text', { transform: `matrix(${C},${S},${-C},${S},${p[0]},${p[1]})`, 'font-size': 18, 'font-weight': 700, 'letter-spacing': 2, fill: 'rgba(60,70,80,.5)' })
+      t.textContent = '取件间'; svg.appendChild(t)
+    }
+
+    // 环境：后墙 / 窗 / 挂画 / 绿植
+    poly([[WX, WY, 0], [WX, YM, 0], [WX, YM, WH], [WX, WY, WH]], '#EBE6DA')
+    poly([[WX, WY, 0], [XM, WY, 0], [XM, WY, WH], [WX, WY, WH]], '#F2EEE4')
+    poly([[WX, WY, 0], [WX, YM, 0], [WX, YM, 9], [WX, WY, 9]], '#D9D1C0')
+    poly([[WX, WY, 0], [XM, WY, 0], [XM, WY, 9], [WX, WY, 9]], '#E0D8C7')
+    const win = (x0, x1) => { poly([[x0, WY, 48], [x1, WY, 48], [x1, WY, 112], [x0, WY, 112]], '#C9DCE4')
+      poly([[x0 + 4, WY, 52], [x1 - 4, WY, 52], [x1 - 4, WY, 108], [x0 + 4, WY, 108]], '#E6F1F5')
+      poly([[(x0 + x1) / 2 - 1.5, WY, 52], [(x0 + x1) / 2 + 1.5, WY, 52], [(x0 + x1) / 2 + 1.5, WY, 108], [(x0 + x1) / 2 - 1.5, WY, 108]], '#C9DCE4') }
+    win(20, 150); win(200, 330); win(370, 500); win(560, 700)
+    const pic = (y0, y1, c) => { poly([[WX, y0, 58], [WX, y1, 58], [WX, y1, 112], [WX, y0, 112]], '#CFC7B4'); poly([[WX, y0 + 5, 63], [WX, y1 - 5, 63], [WX, y1 - 5, 107], [WX, y0 + 5, 107]], c) }
+    pic(backY + 60, backY + 140, '#DCE3C8'); if (rows > 1) pic(frontY - 10, frontY + 70, '#EDE2CC')
+    const plant = (px, py, s) => { const p = iso(px, py, 0), g = el('g', { transform: `translate(${p[0]},${p[1]}) scale(${s})` })
+      g.innerHTML = '<ellipse cx="0" cy="0" rx="19" ry="9" fill="rgba(120,108,80,.18)"/><path d="M-13,-2 L13,-2 L9,-30 L-9,-30 Z" fill="#C6A583"/>' +
+        '<ellipse cx="0" cy="-30" rx="9" ry="3.5" fill="#A98A6A"/><circle cx="-9" cy="-46" r="13" fill="#7E8A4B"/>' +
+        '<circle cx="10" cy="-50" r="12" fill="#8E9A57"/><circle cx="0" cy="-61" r="13" fill="#6E7A3F"/>'
+      svg.appendChild(g) }
+    plant(-5, WY + 46, 1); plant(-5, YM - 40, 1.05)
+
+    // 所有立体物按远→近画（(x+y) 越大越靠前）；每件前放一个深度锚点，走动的小人据此插层
+    const things = seated.map(x => ({ depth: x.x + x.y, draw: () => drawDesk(x) }))
+    machines.forEach((m, i) => { m.x = SIDE_X; m.y = backY + i * 112; things.push({ depth: m.x + m.y, draw: () => drawMachine(m) }) })
+    const OB = { x: SIDE_X, y: Math.max(frontY + 4, backY + machines.length * 112 + 20) }
+    things.push({ depth: OB.x + OB.y, draw: () => drawOutbox(OB.x, OB.y, d.kpi.waiting || 0) })
+    things.sort((a, b) => a.depth - b.depth).forEach(t => { svg.appendChild(el('g', { class: 'dmark', 'data-depth': t.depth })); t.draw() })
+
+    // 整体居中缩放（量出内容实际范围，工位再多也不用手调坐标）
+    const b1 = svg.getBBox(), b2 = cardG.getBBox(), pad = 26
+    const bx = Math.min(b1.x, b2.x), by2 = Math.min(b1.y, b2.y)
+    const bb = { x: bx, y: by2, width: Math.max(b1.x + b1.width, b2.x + b2.width) - bx, height: Math.max(b1.y + b1.height, b2.y + b2.height) - by2 }
+    if (bb.width && bb.height) {
+      const s = Math.min(1.12, (1040 - pad * 2) / bb.width, (720 - pad * 2 - 20) / bb.height)
+      root.setAttribute('transform', `translate(${(1040 - bb.width * s) / 2 - bb.x * s},${(720 - 20 - bb.height * s) / 2 - bb.y * s}) scale(${s})`)
+    }
+    walkerCtl = makeWalker(seated, OB)
+  }
+
+  // ───────── 交接：真有一次交接才走一趟（事件触发，不循环）─────────
+  function makeWalker(seated, OB) {
+    const mkPath = WP => { const segL = []; let total = 0
+      for (let i = 0; i < WP.length - 1; i++) { const L = Math.hypot(WP[i + 1][0] - WP[i][0], WP[i + 1][1] - WP[i][1]); segL.push(L); total += L }
+      const at = s => { let acc = 0
+        for (let i = 0; i < segL.length; i++) { if (s <= acc + segL[i] || i === segL.length - 1) { const u = Math.max(0, Math.min(1, (s - acc) / (segL[i] || 1)))
+          return [WP[i][0] + (WP[i + 1][0] - WP[i][0]) * u, WP[i][1] + (WP[i + 1][1] - WP[i][1]) * u] } acc += segL[i] }
+        return WP[WP.length - 1] }
+      return { at, total } }
+    const walker = el('g'); walker.style.opacity = 0
+    svg.appendChild(walker)
+    let rig, hf, face, legF, legB, armF, armB
+    const dress = L => { walker.innerHTML = walkerHTML(L); const q = s => walker.querySelector(s)
+      rig = q('.rig'); hf = q('.hf'); face = q('.face'); legF = q('.legF'); legB = q('.legB'); armF = q('.armF'); armB = q('.armB') }
+    const end = [AISLE_X, OB.y + 30], ep = iso(SIDE_X + 10, OB.y + 30, 0)
+    const ring = el('circle', { cx: ep[0], cy: ep[1] - 30, r: 6, fill: 'none', stroke: '#D99A2B', 'stroke-width': 3, opacity: 0 }); svg.appendChild(ring)
+    const place = (wx, wy, phase, carry, dx, dy) => {
+      const p = iso(wx, wy, 0), bob = Math.abs(Math.sin(phase)) * 3.2
+      walker.setAttribute('transform', `translate(${p[0]},${p[1] - bob})`)
+      rig.setAttribute('transform', `scale(${(dx - dy) >= 0 ? 1 : -1},1)`); face.style.opacity = (dx + dy) > 0 ? 1 : 0
+      const a = Math.sin(phase) * 26
+      legF.setAttribute('transform', `translate(4,-24) rotate(${a})`); legB.setAttribute('transform', `translate(-4,-24) rotate(${-a})`)
+      armF.setAttribute('transform', `translate(10,-46) rotate(${carry ? 8 : -a * 0.85})`); armB.setAttribute('transform', `translate(-10,-46) rotate(${a * 0.85})`)
+      hf.style.opacity = carry ? 1 : 0
+      const D = wx + wy, t = [...svg.querySelectorAll('.dmark')].find(m => +m.getAttribute('data-depth') > D)
+      if (t) svg.insertBefore(walker, t); else svg.appendChild(walker)
+    }
+    let busy = false, queue = []
+    const run = key => {
+      const d = seated.find(x => x.key === key), seat = document.getElementById('seat-' + key)
+      if (!d || !seat || d.status === 'off' || d.status === 'down') return next()
+      busy = true; dress(lookOf(d))
+      const cx = d.x + DW / 2, ay = d.y + DD + 50
+      const P = mkPath([[cx, d.y + DD + 20], [cx, ay], [AISLE_X, ay], end])
+      const PH = [{ t: P.total * 11, k: 'walk', dir: 1, carry: true }, { t: 1300, k: 'hand' }, { t: P.total * 11, k: 'walk', dir: -1, carry: false }]
+      let t0 = null
+      const frame = ts => {
+        if (!walker.isConnected) { busy = false; return }      // 场景被重画了：这一趟作废
+        if (t0 == null) t0 = ts
+        let e = ts - t0, ph = null, local = 0
+        for (const x of PH) { if (e < x.t) { ph = x; local = e; break } e -= x.t }
+        if (!ph) { seat.style.opacity = 1; walker.style.opacity = 0; ring.setAttribute('opacity', 0); busy = false; return next() }
+        seat.style.opacity = 0; walker.style.opacity = 1
+        if (ph.k === 'walk') {
+          const u = local / ph.t, s = ph.dir > 0 ? P.total * u : P.total * (1 - u)
+          const c = P.at(s), n = P.at(Math.max(0, Math.min(P.total, s + ph.dir * 4)))
+          place(c[0], c[1], s / 10, ph.carry, n[0] - c[0], n[1] - c[1]); ring.setAttribute('opacity', 0)
+        } else {
+          place(end[0], end[1], 0, local < ph.t * 0.4, 1, -1)
+          const k = local / ph.t; ring.setAttribute('r', 6 + k * 24); ring.setAttribute('opacity', (1 - k) * 0.75)
+        }
+        requestAnimationFrame(frame)
+      }
+      requestAnimationFrame(frame)
+    }
+    const next = () => { if (!busy && queue.length) run(queue.shift()) }
+    return { go: key => { if (matchMedia('(prefers-reduced-motion: reduce)').matches) return; queue.push(key); next() }, isBusy: () => busy || queue.length > 0 }
+  }
+
+  // ───────── 取数与刷新 ─────────
+  const tok = ((location.hash || '').match(/k=([\w-]+)/) || [])[1]
+  let prev = null, pending = null
+  function show(d) {
+    renderPanels(d)
+    if (walkerCtl && walkerCtl.isBusy()) { pending = d; return }       // 小人还在路上：等他走完再重画现场
+    // 两次刷新之间哪个工位多了一笔干活记录、且要交给人 → 走一趟
+    const moved = prev ? d.desks.filter(x => x.kind !== 'machine' && x.lastAt && x.handoff !== '不用交接' &&
+      (prev.desks.find(p => p.key === x.key) || {}).lastAt !== x.lastAt).map(x => x.key) : []
+    drawScene(d); prev = d
+    moved.slice(0, 2).forEach(k => walkerCtl.go(k))
+  }
+  setInterval(() => { if (pending && !(walkerCtl && walkerCtl.isBusy())) { const d = pending; pending = null; show(d) } }, 1500)
+  async function load() {
+    if (!tok || location.protocol === 'file:') return
+    try {
+      const r = await fetch('/api/office/screen', { cache: 'no-store', headers: { 'X-Office-Token': tok } })
+      if (r.status === 401) { $('hstat').className = 'hstat bad'; $('hstatT').textContent = '大屏链接已失效 · 请主管理员重新生成'; return }
+      if (!r.ok) throw new Error(r.status)
+      show(await r.json())
+    } catch (e) { $('hstat').className = 'hstat warn'; $('hstatT').textContent = '这次没取到值班表 · 显示的是上一次的' }
+  }
+  if (tok && location.protocol !== 'file:') { load(); setInterval(load, 60000) }
+  else {
+    $('sample').classList.add('on'); show(SAMPLE)
+    setTimeout(() => walkerCtl && walkerCtl.go('inv_intake'), 2200)     // 样例模式：开场演示一趟交接（只走一次）
+    addEventListener('keydown', e => { if (e.key === 'd' || e.key === 'D') { const c = SAMPLE.desks.filter(x => x.kind !== 'machine' && x.status === 'ok' && x.handoff !== '不用交接'); walkerCtl.go(c[Math.floor(Math.random() * c.length)].key) } })
+  }
+
+  // ───────── 时钟 / 缩放 ─────────
+  const p2 = n => String(n).padStart(2, '0')
+  const tick = () => { const t = new Date(); $('clk').textContent = `${p2(t.getHours())}:${p2(t.getMinutes())}:${p2(t.getSeconds())}`
+    $('dt').textContent = `${t.getFullYear()}年${t.getMonth() + 1}月${t.getDate()}日 · 周${'日一二三四五六'[t.getDay()]}` }
+  tick(); setInterval(tick, 1000)
+  const stage = $('stage')
+  const fit = () => { const w = innerWidth || document.documentElement.clientWidth, h = innerHeight || document.documentElement.clientHeight
+    if (!w || !h) return; stage.style.zoom = Math.min(1, w / 1920, h / 1080) * 0.965 }
+  addEventListener('resize', fit); addEventListener('load', fit); fit(); requestAnimationFrame(fit); setTimeout(fit, 60)
+})()
+</script>
+</html>

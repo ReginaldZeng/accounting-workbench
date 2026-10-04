@@ -83,9 +83,10 @@ def ready_check(folder, items):
     return True, ""
 
 
-def auto_submit_ready():
+def auto_submit_ready(refs=None):
     """自动接入、还在收票中的票夹：票据齐全的直接提交进审核（提交人「系统」）。→ 这轮提交了几个。
-    被审核退回的（returned）不动：退回后由财务在收票台处理。"""
+    被审核退回的（returned）不动：退回后由财务在收票台处理。
+    refs 传一个列表进来 → 把这轮送审的票夹的钉钉审批编号放进去（数字员工办公室记干活记录用）。"""
     e = inv.E()
     with e.connect() as c:
         rows = [S._row(r) for r in c.execute(select(S.FOLDER).where(
@@ -98,6 +99,8 @@ def auto_submit_ready():
         out, bad = inv._submit_sync({"name": inv.SYSTEM_USER}, f["id"])
         if out:
             n += 1
+            if refs is not None and f.get("business_id"):
+                refs.append(str(f["business_id"]))
     return n
 
 
@@ -174,7 +177,7 @@ def _scan(trigger):
         got = list(ex.map(get, todo))
     got = [(i, x) if x else get(i) for i, x in got]     # 并发偶尔被钉钉限流回空：逐张再取一次
     n_new = n_wait = n_skip = n_fail = 0
-    fails = []
+    fails, new_ids = [], []
     for iid, x in got:
         if not x:
             n_fail += 1
@@ -192,6 +195,8 @@ def _scan(trigger):
             if r.get("ok"):
                 waiting.pop(iid, None)
                 n_new += 1
+                if x.get("business_id"):
+                    new_ids.append(str(x["business_id"]))
             else:
                 n_fail += 1
                 fails.append("%s：%s" % (x.get("business_id") or iid, r.get("msg")))
@@ -212,6 +217,7 @@ def _scan(trigger):
     state["last"] = last
     db.set_setting(STATE_KEY, state, inv.SYSTEM_USER)
     last["autoSubmitted"] = auto_submit_ready()
+    last["newIds"] = new_ids[:8]                 # 这一轮新接的钉钉审批编号（数字员工办公室的干活记录用；设置里不存）
     if n_new:
         inv.audit(inv.SYSTEM_USER, "钉钉自动接入", trigger, "新建票夹 %d 个；还没走到接入审批人的 %d 张" % (n_new, len(waiting)))
     return {"ok": True, **last}
@@ -276,11 +282,23 @@ def _loop():
     n = 0
     while True:
         try:
+            import worker_store      # 数字员工办公室·发票接收员：每圈报到；真接了单 / 出了错才记一笔（只写张数和钉钉单号）
+            has_cfg = bool((inv.get_settings().get("intake") or {}).get("approvers"))
+            worker_store.beat("inv_intake", off="" if has_cfg else "还没设接入审批人")
             if n % (EVERY_MIN * 60 // TICK_S) == 0:
-                if (inv.get_settings().get("intake") or {}).get("approvers"):
-                    scan_once("定时")
+                if has_cfg:
+                    r = scan_once("定时") or {}
+                    if not r.get("ok") and "还在扫" not in str(r.get("msg") or ""):
+                        worker_store.record("inv_intake", ok=False, summary="扫钉钉单出错", error=str(r.get("msg") or ""))
+                    elif r.get("created") or r.get("failed"):
+                        worker_store.record("inv_intake", n=r.get("created") or 0, ok=not r.get("failed"),
+                                            summary="已接入 %d 张钉钉单" % (r.get("created") or 0), refs=r.get("newIds"),
+                                            error=("%d 张没接成：%s" % (r["failed"], r.get("notes") or "")) if r.get("failed") else "")
             else:
-                auto_submit_ready()
+                ids = []
+                k = auto_submit_ready(ids)
+                if k:
+                    worker_store.record("inv_intake", summary="已送审 %d 个票夹（票齐了）" % k, refs=ids)
         except Exception:
             _STATE["lastError"] = traceback.format_exc()[-2000:]
         n += 1

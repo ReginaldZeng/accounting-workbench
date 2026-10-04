@@ -39,6 +39,7 @@ import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
 import Home, { RECENT_KEY } from './views/Home.jsx'
+import WorkerOffice from './views/WorkerOffice.jsx'   // V2.796 数字员工办公室（门户层；大屏模式免登录）
 import { getConfig, setConfig, getMe, apiLogout, getNavModules, getTodos } from './api.js'
 
 export default function App() {
@@ -64,7 +65,8 @@ export default function App() {
   useEffect(() => {
     if (!user) return
     const m = (window.location.hash || '').match(/^#\/([a-z][a-z0-9_]*)(\?|$)/)
-    if (m) { setZone('accounting'); setView(m[1]) }
+    if (m && m[1] === 'office') setZone('office')            // 数字员工办公室在门户层，不是核算工作台里的菜单
+    else if (m) { setZone('accounting'); setView(m[1]) }
   }, [user])
   useEffect(() => { if (user) getConfig().then(setCfg).catch(() => {}) }, [user])
   // V2.731 最近使用（首页「我有权限的」平铺时排前、打小标）：切到真页面就记一笔，只存本机
@@ -93,6 +95,11 @@ export default function App() {
     setView(first ? first.key : '__noperm__')
   }, [mods, navDef])
 
+  // 数字员工办公室·大屏模式（V2.796）：闲置电脑常开的值班表，`#/office-screen?k=<大屏口令>`——不登录、只认口令，
+  // 所以要排在登录门前面。口令放在 # 后面：浏览器不会把它发给服务器，只由页面自己读出来放进请求头。
+  const screenTok = ((window.location.hash || '').match(/^#\/office-screen\?k=([\w-]+)/) || [])[1]
+  if (screenTok) return <WorkerOffice kioskToken={screenTok} />
+
   if (user === undefined) return <div className="loading" style={{ padding: 40 }}>加载中…</div>
   if (!user) return <Login onLogin={u => { setZone('portal'); setUser(u) }} />
 
@@ -112,6 +119,8 @@ export default function App() {
   const canSettings = user?.role === 'admin' || !!user?.perms?.enter_settings   // 系统设置：默认仅主管理员，可由主管理员授权
   const logout = async () => { try { await apiLogout() } catch (e) {} setUser(null); setZone('portal'); setView('home') }
   const backToPortal = () => { setZone('portal'); setView('home') }
+
+  if (zone === 'office') return <WorkerOffice user={user} onBack={backToPortal} />
 
   // 目前仅核算组工作台已建成；BP/法务进入先给建设中占位
   if (zone !== 'accounting') {

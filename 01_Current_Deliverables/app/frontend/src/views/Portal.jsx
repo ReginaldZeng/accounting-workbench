@@ -13,7 +13,7 @@
 // 工具卡片仍由「门户管理」维护、经 /api/portal/tools 读取；「常用」标签当前＝进入对应工作台
 //   （BP/核算暂不支持按 URL 落到指定模块，点亮模块级直达记在 V2.325 台账遗留）。
 import React, { useState, useEffect, useRef } from 'react'
-import { apiLogout, getPortalTools, getLlmHubStatus, getMachinesSummary } from '../api.js'
+import { apiLogout, getPortalTools, getLlmHubStatus, getMachinesSummary, getOfficeRoster } from '../api.js'
 import UserAdmin from './UserAdmin.jsx'
 import PortalAdmin from './PortalAdmin.jsx'
 import ModelConfig from './ModelConfig.jsx'
@@ -262,6 +262,9 @@ export default function Portal({ user, onEnter }) {
   // 取件机总呼吸灯（V2.533）：全平台取件机健康一眼看——登录即可看，点进全页仅管理员
   const [machineStat, setMachineStat] = useState(null)
   useEffect(() => { getMachinesSummary().then(setMachineStat).catch(() => {}) }, [])
+  // 数字员工办公室入口（V2.796）：门户首页一个状态灯，点了进办公室。只读件数和状态，取不到就不显示。
+  const [officeStat, setOfficeStat] = useState(null)
+  useEffect(() => { getOfficeRoster().then(r => setOfficeStat(r.kpi)).catch(() => {}) }, [])
 
   // 工具目录：搜索（顶栏输入框，Ctrl+K 唤起）+ 组别/状态筛选（V2.325）
   const [q, setQ] = useState('')
@@ -359,6 +362,16 @@ export default function Portal({ user, onEnter }) {
               </div>
               {canModel && <div className="v">配置 ›</div>}
             </div>
+            {officeStat && (
+              <div className={'pt-mchip' + (officeStat.down ? ' down' : '')} onClick={() => onEnter('office')} title="进入数字员工办公室 · 看每个工位在干什么">
+                <div className="d"></div>
+                <div className="t">
+                  <b>数字员工办公室</b>
+                  <span>{officeStat.on} 个工位在岗{officeStat.down ? ` · ${officeStat.down} 个停了` : ''}{officeStat.err ? ` · ${officeStat.err} 个出了错` : ''} · 本月干完 {officeStat.monthN} 件</span>
+                </div>
+                <div style={{ marginLeft: 4, paddingLeft: 13, borderLeft: '1px solid rgba(255,255,255,.12)', fontSize: 11, color: 'var(--ink3)' }}>进入 ›</div>
+              </div>
+            )}
             {machineStat && (
               <div className={'pt-mchip' + (machineStat.state === 'down' ? ' down' : '') + (isAdmin ? '' : ' ro')}
                 onClick={isAdmin ? () => setTab('cms') : undefined}
