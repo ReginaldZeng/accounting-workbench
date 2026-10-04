@@ -263,6 +263,12 @@ textarea.ac-input{height:auto; padding:8px 10px; width:100%; box-sizing:border-b
 .ac-cmp tfoot td.muted{font-weight:400; font-size:11.5px;}
 .ac-cmp tr.ac-open > td{background:var(--bg-sub); padding:12px 14px 14px; white-space:normal; position:sticky; left:0;}
 .ac-drill{display:grid; grid-template-columns:340px minmax(0,1fr); gap:10px 28px; max-width:1180px;}
+.ac-map-set{display:flex; flex-direction:column; gap:7px; font-size:12px; line-height:1.7; padding:9px 11px; margin-bottom:10px; border-radius:7px; background:var(--amber-bg); border:1px solid var(--amber-line); color:var(--ink);}
+.ac-map-set.done{background:var(--green-bg); border-color:var(--green-line); flex-direction:row; align-items:center; flex-wrap:wrap;}
+.ac-map-set.done > span{flex:1 1 220px;}
+.ac-map-set .btn-sec,.ac-map-set .btn-pri{height:27px;}
+.ac-map-form{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-weight:600;}
+.ac-map-form select{max-width:100%; height:28px;}
 .ac-semi{font-size:12px; line-height:1.7; padding:7px 10px; margin-bottom:10px; border-radius:7px; background:var(--blue-bg); border:1px solid var(--blue-line); color:var(--ink);}
 .ac-semi .btn-sec{height:26px; margin-left:8px;}
 .ac-bills{word-break:break-all; font-size:11px; margin-top:4px;}

@@ -3,6 +3,7 @@
 // 没有底稿也能看；选了核算底稿就并排对比，带用量 / 单价 / 整体三个差异率、差异原因和合计（版式照用户的 Excel）。
 // 本期自制的半成品（如高浓豆浆）可以就地展开它自己的用料。数值全部来自后端，这里不另算口径；
 // 仅有的两处加工：半成品子项按「本产品对它的单耗」折算、以及由此得到的「其余（人工制费及计价差）」。
+// V2.792：单位不一致的料可以填换算系数、底稿里没有的料可以指成某颗料的替代料——都由人来定，系统不猜；设了才并，行上写明，随时可撤。
 // 规矩（沿用交接）：多份底稿不替人挑最新；空值显示「—」不显示 0；采购价、底稿计价、出库计价分开标；来源与版本提示常显。
 import React, { useEffect, useState } from 'react'
 import { api, Note, Num, Seg, fmt, fmtDate, fmtFull, fmtPct, isNum } from './actualCostShared.jsx'
@@ -20,6 +21,7 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
   const [open, setOpen] = useState(''), [incl, setIncl] = useState(false)
   const [semi, setSemi] = useState({})          // 半成品展开：物料编码 → { busy, error, res }
   const [drafts, setDrafts] = useState({}), [saving, setSaving] = useState('')
+  const [rev, setRev] = useState(0), [factor, setFactor] = useState(''), [aliasTo, setAliasTo] = useState(''), [mapBusy, setMapBusy] = useState(false)
   const base = { org, year, period, run_id: runId }
 
   useEffect(() => {
@@ -38,7 +40,7 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
     api.compare({ ...base, cc: target.cc, code: target.code, entry_id: choice })
       .then(d => { if (live) setData(d) }).catch(e => { if (live) setError(e.message) }).finally(() => { if (live) setBusy(false) })
     return () => { live = false }
-  }, [choice, org, year, period, runId, target.code, target.cc, detail])
+  }, [choice, org, year, period, runId, target.code, target.cc, detail, rev])
 
   const view = data || breakdown || { rows: [] }, overlay = !!data
   const sections = [...new Set(view.rows.map(r => r.section))].sort((a, b) => (a === '实际新增') - (b === '实际新增'))
@@ -62,9 +64,15 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
   }
   const toggle = (id, r) => {
     const next = open === id ? '' : id
-    setOpen(next)
+    setOpen(next); setFactor(''); setAliasTo('')
     const maker = makerOf(r.code)
     if (next && maker && !semi[r.code]?.res) loadSemi(r.code, maker, false)
+  }
+  // 保存 / 撤销一条匹配设定（单位换算或替代料），成功后重新对比
+  const saveMap = async body => {
+    setMapBusy(true); setError('')
+    try { await api.saveMap(org, body); setFactor(''); setAliasTo(''); setRev(v => v + 1) }
+    catch (e) { setError('匹配设定没存上：' + e.message) } finally { setMapBusy(false) }
   }
   const noteKey = r => `${r.code}|${r.unit}`
   const saveNote = async r => {
@@ -143,7 +151,9 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
                       <td className="pin-l">
                         <button className="ac-prod" aria-expanded={shown} aria-label={`${r.code} ${r.name}：展开明细`}><span className="mono">{r.code}</span><b>{r.name}</b></button>
                         <div className="sub">单位 {r.unit}{maker && <span className="ac-tag blue" title={`本期 ${maker.cc} 自制，点开可看它自己的用料`}>本期自制</span>}
-                          {!QUIET.includes(r.status) && <span className={'ac-tag ' + statusTone(r.status)}>{r.status}</span>}</div>
+                          {!QUIET.includes(r.status) && <span className={'ac-tag ' + statusTone(r.status)}>{r.status}</span>}
+                          {(r.merged || []).map(m => <span key={m.code + m.unit} className="ac-tag green" title="人工设定的匹配，点开这一行可以撤销">
+                            {m.alias ? `含替代料 ${m.code}` : `已换算 ${m.unit}→${m.to_unit}`}</span>)}</div>
                       </td>
                       <td className="num"><Num v={r.actual_qty} d={4} /></td><td className="num"><Num v={price(r)} d={4} /></td>
                       <td className="num strong"><Num v={cost(r)} d={4} /></td><td className="num">{isNum(r.actual_share) ? fmtPct(r.actual_share, 1) : <span className="ac-nil">—</span>}</td>
@@ -171,6 +181,44 @@ export default function ActualCostStandard({ org, year, period, runId, target, d
                     {shown && <tr className="ac-open"><td colSpan={cols}>
                       <div className="ac-drill">
                         <div>
+                          {/* 匹配设定：单位换算 / 替代料。都由人定，系统不猜 */}
+                          {overlay && (() => {
+                            const std = view.rows.filter(x => x.section !== '实际新增')
+                            const twin = view.rows.find(x => x.code === r.code && x.unit !== r.unit && (x.section === '实际新增') !== (r.section === '实际新增'))
+                            const act = r.section === '实际新增' ? r : twin, base0 = r.section === '实际新增' ? twin : r
+                            const targets = std.filter(x => x.unit === r.unit && x.code !== r.code)
+                            return <>
+                              {(r.merged || []).map(m => <div className="ac-map-set done" key={m.code + m.unit}>
+                                <span>{m.alias && <>已把 <b className="mono">{m.code}</b> {m.name} 当作这颗料的<b>替代料</b>并进来</>}
+                                  {m.alias && m.factor != null && '，并'}{m.factor != null && <>按 <b>1 {m.unit} ＝ {m.factor} {m.to_unit}</b> 换算</>}
+                                  ：原 {fmt(m.qty_per_kg, 4)} {m.unit}/kg，{fmt(m.cost_per_kg, 4)} 元/kg。</span>
+                                {canNote && m.alias && <button className="btn-sec" disabled={mapBusy} onClick={e => { e.stopPropagation(); saveMap({ kind: 'alias', code: m.code, to: '' }) }}>撤销替代料</button>}
+                                {canNote && m.factor != null && <button className="btn-sec" disabled={mapBusy} onClick={e => { e.stopPropagation(); saveMap({ kind: 'unit', code: m.code, factor: '' }) }}>撤销换算</button>}
+                              </div>)}
+                              {r.status === '单位不一致，待换算' && act && base0 && <div className="ac-map-set">
+                                <span><b>单位不一致</b>：底稿按 <b>{base0.unit}</b> 记，金蝶领料按 <b>{act.unit}</b> 记，系统不知道怎么折，所以没比。你填一个换算系数，两行就并成一行再比：</span>
+                                <span className="ac-map-form">1 {act.unit} ＝
+                                  <input className="ac-input sm" type="number" min="0" step="any" aria-label="换算系数" disabled={!canNote || mapBusy} value={factor}
+                                    onClick={e => e.stopPropagation()} onChange={e => setFactor(e.target.value)} /> {base0.unit}
+                                  <button className="btn-pri" disabled={!canNote || mapBusy || !(Number(factor) > 0)}
+                                    onClick={e => { e.stopPropagation(); saveMap({ kind: 'unit', code: r.code, from: act.unit, to: base0.unit, factor: Number(factor) }) }}>保存换算</button>
+                                </span>
+                                <span className="muted">这个系数跟物料走，对本账簿所有产品、所有月份都生效；之后可以撤销。</span>
+                              </div>}
+                              {r.section === '实际新增' && r.status === '实际新增用料' && <div className="ac-map-set">
+                                <span><b>底稿里没有这颗料</b>。如果它其实是底稿里某颗料的替代料（比如同一种包装袋换了编码），指给它，用量和成本就合并后再比：</span>
+                                <span className="ac-map-form">
+                                  <select aria-label="选择它替代的是哪颗料" disabled={!canNote || mapBusy} value={aliasTo} onClick={e => e.stopPropagation()} onChange={e => setAliasTo(e.target.value)}>
+                                    <option value="">它替代的是…</option>
+                                    {targets.map(x => <option key={x.code} value={x.code}>{x.code} {x.name}（{x.unit}）</option>)}
+                                  </select>
+                                  <button className="btn-pri" disabled={!canNote || mapBusy || !aliasTo}
+                                    onClick={e => { e.stopPropagation(); saveMap({ kind: 'alias', code: r.code, to: aliasTo }) }}>设为替代料</button>
+                                </span>
+                                <span className="muted">{targets.length ? '只列出单位相同的底稿物料。对本账簿所有产品、所有月份都生效；之后可以撤销。' : '底稿里没有单位相同的物料可以并。'}</span>
+                              </div>}
+                            </>
+                          })()}
                           {maker && <div className="ac-semi">
                             <b>本期自制：{maker.cc}</b>　完工 {fmt(maker.qty)} kg，单位成本 {fmt(maker.unit, 4)} 元/kg。
                             {sm?.busy && <span className="muted">　正在读取它的用料…</span>}

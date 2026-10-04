@@ -1,6 +1,8 @@
 # [Change Log] 2026-10-03 | Codex | V-draft | Accounting worksheet comparison, read-only
 # [Change Log] 2026-10-04 | Claude / c | V2.791 | 直接材料拆分：没有底稿也能按子项物料看每公斤单耗/单价/成本（breakdown）；
 #              底稿对比行补用量/单价/整体三个差异率、成本占比、含税口径（按底稿自身的含税÷不含税倍率折算）与合计。
+# [Change Log] 2026-10-04 | Claude / c | V2.792 | 人工设定的匹配关系：单位换算（1 个实际单位＝多少底稿单位）与替代料（实际编码并到底稿编码）。
+#              系统不猜系数、不猜替代关系；设了才并，行上写明并了什么，随时可撤。
 from collections import defaultdict
 import hashlib
 import json
@@ -49,6 +51,32 @@ def purchase_tax(detail):
     return found
 
 
+def apply_mapping(actual, std, mapping):
+    """按人工设定把实际领用并到底稿行。
+    替代料：实际编码在底稿里没有、而设定的目标编码在底稿里有，才并过去；
+    单位换算：实际单位在底稿该编码下没有、而换算后的单位有，才换（数量×系数，金额不变）。
+    并过去之后单位仍对不上的，一律不并（保持原样，照旧提示）。"""
+    units=(mapping or {}).get('units') or {};aliases=(mapping or {}).get('aliases') or {}
+    std_units=defaultdict(set)
+    for code,u in std: std_units[code].add(u)
+    out={}
+    for (code,u),a in actual.items():
+        target,tu,factor,how=code,u,1.,[]
+        alias=aliases.get(code) or {}
+        if code not in std_units and alias.get('to') in std_units: target=alias['to'];how.append('替代料')
+        if tu not in std_units.get(target,()):
+            conv=units.get(code) or {};f=numeric(conv.get('factor'))
+            if conv.get('from')==u and conv.get('to') in std_units.get(target,()) and f and f>0:
+                tu,factor=conv['to'],f;how.append('单位换算')
+        if how and tu not in std_units.get(target,()): target,tu,factor,how=code,u,1.,[]
+        o=out.setdefault((target,tu),{'qty':0.,'amount':0.,'name':'','bills':set(),'valid':True,'merged':[]})
+        o['valid']&=a['valid'];o['qty']+=a['qty']*factor;o['amount']+=a['amount'];o['bills']|=a['bills']
+        if not how or not o['name']: o['name']=a['name']
+        if how: o['merged'].append(dict(code=code,name=a['name'],unit=u,qty=a['qty'],amount=a['amount'],
+                                        kind='、'.join(how),alias='替代料' in how,factor=factor if '单位换算' in how else None,to_unit=tu))
+    return out
+
+
 def bridge(out, detail, actual, qty):
     """材料投入 → 完工材料的衔接：差额是在产和跨期影响，单列，不摊到物料。"""
     total=sum(a['amount'] for a in actual.values())
@@ -92,7 +120,7 @@ def breakdown(product, detail):
     return finish(out,bridge(out,detail,actual,qty),qty)
 
 
-def compare(e, product, detail):
+def compare(e, product, detail, mapping=None):
     if str(e.get('erp_code')) != str(product['code']): raise ValueError('核算底稿的产品编码不一致')
     out = {'standard':metadata(e), 'fingerprint':hashlib.sha256(json.dumps(e,ensure_ascii=False,sort_keys=True,default=str).encode()).hexdigest(),
            'rows':[], 'product_qty':product.get('qty'), 'actual_unit_cost':product.get('unit'), 'ready':bool(detail)}
@@ -103,7 +131,7 @@ def compare(e, product, detail):
     for i,m in enumerate(e.get('materials') or []):
         code = str(m.get('matCode') or '').strip()
         std[(code or '@missing-'+str(i), unit(m.get('unit')))].append(m)
-    actual = actual_materials(detail);tax = purchase_tax(detail)
+    actual = apply_mapping(actual_materials(detail),std,mapping);tax = purchase_tax(detail)
     for k in dict.fromkeys([*std,*actual]):
         ms=std.get(k,[]);m=ms[0] if ms else {};a=actual.get(k)
         code,u=k;sq=numeric(m.get('qtyPerKg'));sc=numeric(m.get('costExcl'))
@@ -133,6 +161,7 @@ def compare(e, product, detail):
             actual_price_incl=ap*factor if ap is not None and factor else None,
             actual_cost_incl=ac*factor if ac is not None and factor else None,
             net_qty=a['qty'] if a else None,net_amount=a['amount'] if a else None,
+            merged=[dict(x,qty_per_kg=x['qty']/qty,cost_per_kg=x['amount']/qty) for x in (a or {}).get('merged',[])],
             bills=sorted((a or {}).get('bills',[]))))
     out['standard_material_cost']=sum(numeric(m.get('costExcl')) or 0. for m in e.get('materials') or [])
     out['standard_material_incl']=sum(r['standard_cost_incl'] or 0. for r in out['rows'])

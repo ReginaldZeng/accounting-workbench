@@ -142,5 +142,52 @@ class TestMaterialBreakdown(unittest.TestCase):
         self.assertAlmostEqual(out['standard_material_incl'], 0.30 * 3.39 + 0.20 * 1.00)
 
 
+class TestMaterialMapping(unittest.TestCase):
+    """人工设定的匹配（V2.792）：单位换算、替代料。不设不并；设了只在对得上时才并；合计不变。"""
+    PRODUCT = dict(cc='小料车间', code='A001', qty=100.0, unit=2.0)
+    DETAIL = dict(
+        movements=[dict(code='CREAM', unit='升', name='稀奶油', net_qty=8.0, net_amount=264.0, bill='L1'),
+                   dict(code='BAG1', unit='Pcs', name='包装袋', net_qty=70.0, net_amount=21.0, bill='L2'),
+                   dict(code='BAG2', unit='Pcs', name='包装袋', net_qty=30.0, net_amount=9.0, bill='L3')],
+        prices=[], controls=dict(complete_material=294.0))
+    ENTRY = dict(erp_code='A001', status='已定稿', materials=[
+        dict(seg='原料', matCode='CREAM', matName='稀奶油', unit='kg', qtyPerKg=0.0824, priceIncl=36.0, taxRate=0.13, costExcl=2.6368),
+        dict(seg='包材', matCode='BAG1', matName='包装袋', unit='pcs', qtyPerKg=1.0, priceIncl=0.339, taxRate=0.13, costExcl=0.30)])
+
+    def rows(self, mapping=None):
+        import actual_cost_standard as standard
+        out = standard.compare(self.ENTRY, self.PRODUCT, self.DETAIL, mapping)
+        return out, {(r['code'], r['unit'], r['section']): r for r in out['rows']}
+
+    def test_nothing_merged_without_setting(self):
+        out, by = self.rows()
+        self.assertEqual(by[('CREAM', 'kg', '原料')]['status'], '单位不一致，待换算')
+        self.assertEqual(by[('CREAM', '升', '实际新增')]['status'], '单位不一致，待换算')
+        self.assertEqual(by[('BAG2', 'pcs', '实际新增')]['status'], '实际新增用料')
+        self.assertAlmostEqual(by[('BAG1', 'pcs', '包材')]['qty_rate'], -0.30)       # 只看到一半的袋子，看着像省了
+
+    def test_unit_conversion_and_substitute(self):
+        base, _ = self.rows()
+        out, by = self.rows(dict(units={'CREAM': {'from': '升', 'to': 'kg', 'factor': 1.03}}, aliases={'BAG2': {'to': 'BAG1'}}))
+        self.assertEqual(len(out['rows']), 2)                                          # 两行并回底稿行，「实际新增」清空
+        cream, bag = by[('CREAM', 'kg', '原料')], by[('BAG1', 'pcs', '包材')]
+        self.assertEqual((cream['status'], bag['status']), ('匹配', '匹配'))
+        self.assertAlmostEqual(cream['actual_qty'], 8.0 * 1.03 / 100)                  # 数量×系数
+        self.assertAlmostEqual(cream['actual_cost'], 2.64)                             # 金额不变
+        self.assertAlmostEqual(cream['merged'][0]['factor'], 1.03)
+        self.assertAlmostEqual(bag['actual_qty'], 1.0)                                 # 70＋30 个，实际没省
+        self.assertAlmostEqual(bag['qty_rate'], 0.0)
+        self.assertEqual((bag['merged'][0]['code'], bag['merged'][0]['alias']), ('BAG2', True))
+        self.assertAlmostEqual(out['actual_material_input_per_kg'], base['actual_material_input_per_kg'])   # 合计不因合并而变
+        self.assertAlmostEqual(sum(r['actual_share'] for r in out['rows']), 1)
+
+    def test_setting_that_does_not_fit_is_ignored(self):
+        # 换算到底稿里没有的单位、替代到底稿里没有的编码：都不并，保持原样提示
+        out, by = self.rows(dict(units={'CREAM': {'from': '升', 'to': '箱', 'factor': 2}}, aliases={'BAG2': {'to': 'NOPE'}}))
+        self.assertEqual(len(out['rows']), 4)
+        self.assertEqual(by[('CREAM', '升', '实际新增')]['status'], '单位不一致，待换算')
+        self.assertEqual(by[('BAG2', 'pcs', '实际新增')]['merged'], [])
+
+
 if __name__ == '__main__':
     unittest.main()

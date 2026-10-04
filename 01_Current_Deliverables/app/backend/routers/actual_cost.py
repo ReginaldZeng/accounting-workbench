@@ -2,6 +2,7 @@
 # [Change Log] 2026-10-04 | Claude / c | V2.789 | 建立本期配置可沿用任意一个有规则的月份（原先只能沿用更早的）；
 #              /state 返回有规则的月份清单与可归类去向；/inputs 可保存费用项目归类（水电/租金/氮气三类固定项不可改）。
 # [Change Log] 2026-10-04 | Claude / c | V2.791 | /product 带上直接材料拆分（没有底稿也能看）和各物料的差异原因备注；新增 /material-note 保存备注。
+# [Change Log] 2026-10-04 | Claude / c | V2.792 | 底稿对比按人工设定的单位换算、替代料合并；新增 /material-map 维护这两类设定（按账簿存，跨期间、跨产品通用）。
 import copy
 import json
 import re
@@ -48,7 +49,56 @@ def standard_comparison(request:Request,org:str,run_id:str,entry_id:int,cc:str=Q
     trace=trace_product(request,org,run_id,cc,code,year,period)
     entry=next((e for e in visible_standards(request,code) if e['id']==entry_id),None)
     if not entry: raise HTTPException(404,'未找到有权查看的对应产品底稿')
-    return standard.compare(entry,trace['product'],trace['detail'])
+    result=standard.compare(entry,trace['product'],trace['detail'],material_map(org))
+    result['mapping']=material_map(org)
+    return result
+
+
+def map_key(org):
+    return 'actual_cost_material_map:'+org
+
+
+def material_map(org):
+    """人工设定的匹配关系，按账簿存（物料的单位换算、替代关系是物料本身的属性，不随月份和产品变）。"""
+    saved=db.get_setting(map_key(org),None)
+    saved=saved if isinstance(saved,dict) else {}
+    return dict(units=saved.get('units') or {},aliases=saved.get('aliases') or {})
+
+
+@router.post('/material-map')
+def save_material_map(body:dict,request:Request,org:str):
+    """设定或撤销：单位换算（kind=unit：code、from、to、factor；factor 留空＝撤销）／替代料（kind=alias：code、to；to 留空＝撤销）。"""
+    user=authorized(request,org,'cost_ledger_wh')
+    kind,code=body.get('kind'),body.get('code')
+    ok=lambda v:isinstance(v,str) and 1<=len(v.strip())<=80 and v==v.strip()
+    if kind not in ('unit','alias') or not ok(code): raise HTTPException(400,'设定无效：需要物料编码和类型')
+    stamp=dict(by=user['name'],at=datetime.now(timezone.utc).isoformat())
+    with service._RUN_LOCK:
+        mapping=material_map(org)
+        if kind=='unit':
+            factor=body.get('factor')
+            if factor in (None,''):
+                mapping['units'].pop(code,None);summary=f'撤销 {code} 的单位换算'
+            else:
+                try:value=number(factor)
+                except ValueError as exc:raise HTTPException(400,'换算系数不是有效数字') from exc
+                if not 0<value<=1e6 or not ok(body.get('from')) or not ok(body.get('to')) or body['from']==body['to']:
+                    raise HTTPException(400,'换算设定无效：系数须大于 0，且两个单位不能相同')
+                mapping['units'][code]=dict(stamp,**{'from':body['from'],'to':body['to'],'factor':value})
+                summary=f"{code}：1 {body['from']} ＝ {value} {body['to']}"
+        else:
+            target=body.get('to')
+            if target in (None,''):
+                mapping['aliases'].pop(code,None);summary=f'撤销 {code} 的替代料设定'
+            else:
+                if not ok(target) or target==code: raise HTTPException(400,'替代料设定无效：目标编码不能为空，也不能是它自己')
+                if target in mapping['aliases']: raise HTTPException(400,'目标物料本身已被设成别的料的替代料，不能再接替代料')
+                if any(v.get('to')==code for v in mapping['aliases'].values()): raise HTTPException(400,'这颗料已经是别的替代料的目标，不能再把它设成替代料')
+                mapping['aliases'][code]=dict(stamp,to=target);summary=f'{code} 视同 {target}（替代料）'
+        if len(mapping['units'])+len(mapping['aliases'])>5000: raise HTTPException(400,'设定条数过多')
+        db.set_setting(map_key(org),mapping,operator=user['name'])
+    db.audit(user['name'],'全成本·物料匹配设定',org,summary)
+    return dict(ok=True,mapping=mapping)
 
 
 def trace_snapshot(org,year,period,run_id):

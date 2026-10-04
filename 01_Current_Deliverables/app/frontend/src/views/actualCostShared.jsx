@@ -28,6 +28,7 @@ export const api = {
   product: params => request('product', params),
   refreshProduct: params => request('product-refresh', params, 'POST'),
   saveNote: (params, body) => request('material-note', params, 'POST', body),
+  saveMap: (org, body) => request('material-map', { org }, 'POST', body),   // 单位换算 / 替代料（按账簿存）
   standards: (org, code) => request('standards', { org, code }),
   compare: params => request('standard-comparison', params),
   exportUrl: params => `/api/actual-cost/export?${new URLSearchParams(params)}`,
