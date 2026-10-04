@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# [Change Log] 2026-10-02 | Codex | V-draft | Cost-report pagination and read-only full-cost source snapshot
 # [Change Log]
 # Date: 2026-08-01 | Author: Claude / c | Version: V2.158
 # Description: 汇率录入P2：新增通用单据写入 save_bill()/submit_bill()/delete_bill()（不写死 formid，
@@ -1221,8 +1222,71 @@ def fetch_inventory_bydate(year, period, org="107", s=None, conf=None):
 RPT_COST_CALC = "CB_CostCalBill"          # 成本计算单（产品成本核算）
 
 
-def fetch_cost_calc(year, period, org="107", s=None, conf=None):
-    """成本计算单（V2.257）→ 规范化明细行，供制造费用三道勾稽与「车间×成本项目」透视。
+def fetch_accounting_period(org="107", s=None, conf=None):
+    """只读账簿当前期间；用于总账结账后的生成与反结账失效判断。"""
+    org = str(org)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", org): raise ValueError("无效组织")
+    s, conf = login(s, conf) if s is None else (s, conf or load_conf())
+    data = _query(s, conf, "BD_AccountBook", [("FNumber", "org"), ("FCRTYEARPERIOD", "current")],
+                  f"FNumber='{org}'")
+    if len(data) != 1 or str(data[0]['org']) != org or not re.fullmatch(r"\d{4}\.\d{1,2}", str(data[0]["current"])):
+        raise KingdeeError("未取得唯一有效的账簿当前期间")
+    y, m = map(int, data[0]["current"].split('.'))
+    if not 2000 <= y <= 2100 or not 1 <= m <= 12: raise KingdeeError("不支持的账簿调整期间")
+    return f"{y:04d}-{m:02d}"
+
+
+def fetch_actual_cost_sources(year, period, org="107", s=None, conf=None):
+    """全成本所需原始快照；不分摊、不回写、不把总账期间等同成本模块结账。"""
+    import datetime
+    year, period, org = int(year), int(period), str(org)
+    if not 2000 <= year <= 2100 or not 1 <= period <= 12 or not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", org):
+        raise ValueError("无效年度、期间或组织")
+    s, conf = login(s, conf) if s is None else (s, conf or load_conf())
+
+    before = fetch_accounting_period(org,s=s,conf=conf)
+    cost = fetch_cost_calc_raw(year, period, org=org, s=s, conf=conf)
+    codes = sorted({str(r[1]).strip() for r in cost if r[3] and r[1]})
+    materials = {}
+    for i in range(0, len(codes), 100):
+        values = ','.join("'%s'" % x.replace("'", "''") for x in codes[i:i+100])
+        rows = _query(s, conf, 'BD_MATERIAL', [("FNumber","code"),("FName","name"),
+                      ("FSpecification","spec"),("FBaseUnitId.FName","unit"),("FMaterialGroup.FName","group")],
+                      f"FUseOrgId.FNumber='{org}' AND FNumber in ({values})", 'FNumber')
+        for row in rows:
+            if row['code'] in materials and materials[row['code']] != row:
+                raise KingdeeError("物料档案返回冲突记录")
+            materials[row['code']] = row
+    if set(codes) != set(materials): raise KingdeeError("部分成本产品缺少本组织物料档案")
+    start = f'{year:04d}-{period:02d}-01'
+    next_month = f'{year+1:04d}-01-01' if period == 12 else f'{year:04d}-{period+1:02d}-01'
+    outbound = _query(s, conf, 'STK_MisDelivery', [('FBillNo','bill'),('FEntity_FEntryID','entry_id'),
+        ('FDate','date'),('FStockOrgId.FNumber','org'),('FDeptId.FName','dept'),
+        ('FDocumentStatus','status'),('FCancelStatus','cancel'),('FStockDirect','direction'),
+        ('F_ora_Assistant.FNumber','category'),('F_ora_Assistant.FDataValue','category_name'),
+        ('FMaterialId.FNumber','code'),('FMaterialId.FName','name'),('FBaseQty','base_qty'),
+        ('FBaseUnitId.FName','unit'),('FAmount','amount'),('FStockId.FName','warehouse')],
+        f"FStockOrgId.FNumber='{org}' AND FDate>='{start}' AND FDate<'{next_month}'", 'FBillNo,FEntity_FEntryID')
+    ledger = _query(s, conf, 'GL_VOUCHER', [('FBillNo','bill'),('FEntity_FEntryID','entry_id'),
+        ('FVOUCHERGROUPNO','voucher'),('FYear','year'),('FPeriod','period'),('FAccountBookId.FNumber','org'),
+        ('FDate','date'),('FAccountId.FNumber','account'),('FDetailId.FFLEX5.FName','dept'),
+        ('FDetailId.FFLEX9.FName','expense'),('FEXPLANATION','note'),('FDEBIT','debit'),('FCREDIT','credit'),
+        ('FDocumentStatus','status')],
+        f"FYear={year} AND FPeriod={period} AND FAccountBookId.FNumber='{org}' AND "
+        "(FAccountId.FNumber like '5101%' OR (FAccountId.FNumber like '5001%' AND FEXPLANATION like '%在产品成本调整%'))",
+        'FVOUCHERGROUPNO,FEntity_FEntryID')
+    for label, rows in [('其他出库',outbound),('凭证',ledger)]:
+        if len({(r['bill'],r['entry_id']) for r in rows}) != len(rows): raise KingdeeError(f'{label}分录重复')
+        if any(str(r['org']) != org for r in rows): raise KingdeeError(f'{label}组织不一致')
+    after = fetch_accounting_period(org,s=s,conf=conf)
+    if before != after: raise KingdeeError('取数期间账簿期间发生变化，请重新取数')
+    return {'org':org,'period':f'{year:04d}-{period:02d}',
+            'fetched_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'book_current_period':after, 'cost':cost, 'materials':materials, 'outbound':outbound,'ledger':ledger}
+
+
+def fetch_cost_calc_raw(year, period, org="107", s=None, conf=None):
+    """成本计算单的完整十列原始树，保留父工单数量及金额；规范化接口见fetch_cost_calc。
 
     ⚠**`FSHOWWAY` 必填但官方文档没给值域**，实测（107/2026-3）：
       ''/'2'/'3'/'4' → 394 行工单级汇总，**成本项目全空**（只看这个会以为报表不给成本项目）；
@@ -1234,7 +1298,7 @@ def fetch_cost_calc(year, period, org="107", s=None, conf=None):
     ⚠**树形结构两条坑**：
       ①车间/产品/工单只在父行出现，子行是空的 → 必须**向下填充**，否则车间维度全丢；
       ②成本项目行的金额＝其下费用项目之和 → **两层不能一起求和**，会翻倍。
-        故每行标 `level`：'item'＝成本项目层，'exp'＝费用项目层，各取各的。
+        fetch_cost_calc另标level：'item'＝成本项目层，'exp'＝费用项目层，各取各的。
 
     ⚠委外订单（工单前缀 SUB）**不走生产成本科目**，`outsourced=True` 单独标出——
     3 月 494,998.06，硬并进车间会让车间合计对不上总额。"""
@@ -1270,10 +1334,20 @@ def fetch_cost_calc(year, period, org="107", s=None, conf=None):
         if not r.get("IsSuccess"):
             raise KingdeeError(f"成本计算单取数失败：{json.dumps(res, ensure_ascii=False)[:250]}")
         batch = r.get("Rows") or []      # 无数据时 Rows 是 null 不是 []，见 _ROWS_NULL 注
+        if not isinstance(batch, list) or any(not isinstance(row, list) or len(row) != 10 for row in batch):
+            raise KingdeeError("成本计算单列结构变化，停止取数")
         raw += batch
         if len(batch) < 10000:      # 单页上限 10000，3 月 16,379 行必须分页
             break
-        start += 10000
+        # V-draft 全成本：该报表的正数StartRow为1起始；0也是第一行。
+        # 107/2026-08实测10000会重取上一页最后一行，下一页必须10001。
+        start = len(raw) + 1
+    return raw
+
+
+def fetch_cost_calc(year, period, org="107", s=None, conf=None):
+    """保持存货台账原有item/exp接口；原始父行供全成本表取完工数量。"""
+    raw = fetch_cost_calc_raw(year, period, org=org, s=s, conf=conf)
     cc = pno = pnm = wo = bt = ""
     out = []
     for row in raw:
@@ -1284,7 +1358,7 @@ def fetch_cost_calc(year, period, org="107", s=None, conf=None):
         bt = _cell(row[4]) or bt
         item, exp = _cell(row[5]), _cell(row[6])
         if not item and not exp:
-            continue                # 纯层级行（只有工单），本身不带金额
+            continue                # 父行含完工数量/总金额；既有item/exp接口不重复返回父行
         out.append({"cc": cc, "prod_no": pno, "prod_name": pnm, "wo": wo, "billtype": bt,
                     "level": "item" if item else "exp", "item": item, "exp": exp,
                     "amt": _rpt_num(row[7]), "cqty": _rpt_num(row[8]), "camt": _rpt_num(row[9]),

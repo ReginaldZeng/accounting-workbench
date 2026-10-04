@@ -1,0 +1,126 @@
+{
+  "rules": {
+    "version": "quantity-trial-20261002",
+    "org": "107",
+    "effective_from": "2026-08",
+    "effective_to": "2026-08",
+    "basis": "ledger",
+    "confirmed": false,
+    "close_gate": "manual",
+    "expense_map": {
+      "间接人工工资": "indirect",
+      "社会保险费": "indirect",
+      "住房公积金": "indirect",
+      "入库运费": "other",
+      "车间耗材": "other",
+      "车间燃料费": "nitrogen",
+      "车间共耗材料-燃气": "gas",
+      "团队活动费": "other",
+      "员工宿舍": "gold_rent",
+      "产品领用福利": "other",
+      "其他福利": "other",
+      "节日福利": "other",
+      "职工教育经费": "other",
+      "其他劳务费": "indirect",
+      "水电费": "gold_utilities",
+      "物业管理费": "gold_rent",
+      "除虫消杀": "other",
+      "环境保护费": "other",
+      "宽带网络管理费": "other",
+      "劳保用品": "other",
+      "设备设施测试费": "other",
+      "办公物料费": "other",
+      "保险费": "other",
+      "招待费": "other",
+      "交通差旅费": "other",
+      "快递费": "other",
+      "折旧费用": "gold_depreciation",
+      "无形资产摊销": "gold_depreciation",
+      "办公场所租赁费": "gold_rent",
+      "办公设备租赁费": "other",
+      "场地装修费": "gold_depreciation",
+      "办公设备维修": "other",
+      "生产设备维修": "other",
+      "小额改造": "other",
+      "设备设施维保费": "other",
+      "车间共耗材料-油": "other",
+      "搬运费": "other",
+      "低值资产采购": "other"
+    },
+    "oil_expense": "车间共耗材料-油",
+    "shared_categories": [
+      "劳动用品领用",
+      "实验用品领用",
+      "工程工具领用",
+      "福利领用",
+      "车间低值资产领用",
+      "车间耗材领用"
+    ],
+    "tea_department": "茶饮小料部",
+    "shared_basis": "completed_quantity",
+    "rent_plant_ratio": 0.3973,
+    "wip_departments": {
+      "生产制造部": "植物肉车间",
+      "生产管理部": "植物肉车间",
+      "茶饮小料部": "小料车间",
+      "包装车间": "包装中心",
+      "复配料车间": "复配料中心",
+      "试产中心": "试产中心"
+    },
+    "wip_policy": "reverse_addback",
+    "unallocated_wip": "separate",
+    "solar_departments": {
+      "植物肉车间": "生产制造部",
+      "小料车间": "茶饮小料部"
+    },
+    "dorm_departments": {
+      "植物肉车间": "生产制造部",
+      "小料车间": "茶饮小料部"
+    },
+    "shared_group_weights": {
+      "半成品": {
+        "tea": 0,
+        "total": 1
+      },
+      "小料": {
+        "tea": 1,
+        "total": 1
+      },
+      "植物肉": {
+        "tea": 0,
+        "total": 1
+      },
+      "豆蛋制品": {
+        "tea": 0,
+        "total": 1
+      },
+      "零售其他": {
+        "tea": 0,
+        "total": 1
+      },
+      "零售山姆": {
+        "tea": 0,
+        "total": 1
+      }
+    },
+    "shared_centre_weights": {
+      "包装中心": 0,
+      "复配料中心": 0,
+      "小料车间": 1,
+      "植物肉半成品车间": 1,
+      "植物肉车间": 1,
+      "试产中心": 1
+    }
+  },
+  "supplement": {
+    "period": "2026-08",
+    "org": "107",
+    "confirmed": false,
+    "shared_tea_ratio": null,
+    "reference_pools": {},
+    "provenance": {
+      "shared_quantity": "待核定试算：按金蝶本期完工产量，包含生产及试产，排除包装中心与复配料中心；原简报少列的5张试产合计270.8kg也计入。",
+      "reference_ratio": "原表比例96.25260709%；同152张工单按金蝶数量算96.25260692%；包含另5张试产后96.24041449%。历史比例仅供对照，不进入自动计算。"
+    }
+  }
+}

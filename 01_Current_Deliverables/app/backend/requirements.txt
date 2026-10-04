@@ -9,3 +9,4 @@ PyMuPDF>=1.24   # 理财对账单 PDF 渲染（理财对账用，免 poppler 系
 rapidocr_onnxruntime>=1.3   # 理财对账单离线中文 OCR（扫描件识别）
 pyzipper>=0.3   # 加密流水包解压（支持 AES + 老式 ZipCrypto）
 xlrd>=2.0   # 读老式 .xls 账单（物流对账·诚煜账单 parse_chengyu_bill）
+XlsxWriter>=3.2.9   # V-draft 全成本月度导出：公式及已校验缓存

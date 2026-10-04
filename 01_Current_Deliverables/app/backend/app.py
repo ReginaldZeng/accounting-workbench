@@ -896,6 +896,11 @@ NAV_MODULES = [
     # 准入闸只有 enter:costledger 一个；进组后基础资料见不见，看 act_cap=cost_ledger_wh。
     {"key": "clwh", "label": "基础资料", "sec": "cost", "order": 13, "parent": "costledger",
      "act_cap": "cost_ledger_wh", "default": "待验收"},
+    # 全成本溯源（V2.787，用户定名）：成本模块下独立二级，点了直接进页面 → 自动生成准入点 enter:fullcost（存量账号一律不给）。
+    #   不挂在「存货台账」组里：全成本含每个产品的单位成本，比存货台账敏感，不该跟着 enter:costledger 一起放开。
+    #   页面里的动作仍用存货台账那四个动作点（cost_ledger 查看 / _fetch 取数 / _wh 维护依据 / _close 确认结账），
+    #   接口侧 routers/actual_cost.py 每个口都判「准入点 + 动作点」。
+    {"key": "fullcost", "label": "全成本溯源", "sec": "cost", "order": 15, "default": "待验收"},
     # BOM报价审核（确认书 v1.0，2026-09-03）：二级分组 + 两个三级。分组不设共用闸 → 两子各自生成准入点
     #   （可见性口径不同：待办与复核=未审核只权限人看、标准成本台账=已审核公开）。
     #   待办与复核=未审核工作台（钉钉抓取/入账/复核/定稿/价格校验，enter:bomdraft 敏感、只给成本会计/Owner）；
@@ -4953,6 +4958,10 @@ app.include_router(archive.router)
 app.include_router(fxrate.router)
 app.include_router(logistics_recon.router)
 app.include_router(cost_ledger.router)
+# 全成本溯源（V2.787）：单独注册，不嵌进存货台账的 router——嵌套挂载在新版 FastAPI 下会让
+# kernels/test_api_surface.py 的路由自检报错，也不符合「一条工具线一个模块」。
+from routers import actual_cost
+app.include_router(actual_cost.router)
 app.include_router(rptexport.router)
 app.include_router(report_dashboard.router)
 app.include_router(ec.router)

@@ -16,6 +16,7 @@ import FundBoard from './views/FundBoard.jsx'
 import CostLedger from './views/CostLedger.jsx'
 import CostLedgerWh from './views/CostLedgerWh.jsx'
 import CostLedgerDash from './views/CostLedgerDash.jsx'
+import FullCost from './views/FullCost.jsx'
 import TempAttendance from './views/TempAttendance.jsx'
 import BomPrice from './views/BomPrice.jsx'
 import TempAttBoard from './views/TempAttBoard.jsx'
@@ -173,6 +174,8 @@ export default function App() {
         {view === 'clexport' && canView('clexport') && <CostLedger user={user} />}
         {view === 'cldash' && canView('cldash') && <CostLedgerDash user={user} />}
         {view === 'clwh' && canView('clwh') && <CostLedgerWh user={user} />}
+        {/* 全成本溯源（V2.787）：成本模块下独立二级，准入点 enter:fullcost；页面内动作沿用存货台账的四个动作点。 */}
+        {view === 'fullcost' && canView('fullcost') && <FullCost user={user} />}
         {view === 'rptexport' && canView('rptexport') && <RptExport user={user} />}
         {view === 'tempattrev' && canView('tempattrev') && <TempAttendance user={user} />}
         {view === 'bomdraft' && canView('bomdraft') && <BomPrice user={user} mode="draft" />}
