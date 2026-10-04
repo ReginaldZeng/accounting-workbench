@@ -28,7 +28,7 @@ const DOC_Q = [
   { f: 'price', n: '核价不符', k: 'price', cls: 'bad', dd: '包天包趟按报价核：运费≠数量×单价，或有报价未列的加班费' },
   { f: 'info', n: '免核', k: 'info', cls: 'neu', dd: '打托倒算托规 / 整车包车议价 / 调拨包天包趟 / 无单据调整，不核数量，仅提示' },
   { f: 'ok', n: '一致', k: 'ok', cls: 'ok', dd: '账单量＝金蝶核对量' },
-  { f: 'feediff', n: '费用类型不一致', k: 'feediff', cls: 'bad', dd: '物流部填的费用类型 ≠ 系统按金蝶单据判的（其他出库单看领料部门）' },
+  { f: 'feediff', n: '费用类型不一致', k: 'feediff', cls: 'bad', dd: '物流部填的费用类型 ≠ 系统按金蝶单据判的（其他出库单看领料部门）；人工定过费用类型的（特批）不算' },
   { f: 'done', n: '已确认', k: 'done', cls: 'ok', dd: '复核人核过没问题、已点「确认无误」的单据（不再算待核）' },
   { f: 'all', n: '全部', k: 'all', cls: '', dd: '' },
 ]
@@ -430,8 +430,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const allOpen = docs.length > 0 && docs.every((x, i) => open[dkey(x, i)])
   const setAll = v => setOpen(v ? Object.fromEntries(docs.map((x, i) => [dkey(x, i), true])) : {})
   const lrows = (L && L.rows) || []
-  const subjOpts = [...new Set(lrows.filter(r => r.kind !== 'gtotal').map(r => r.subject).filter(Boolean))]
-  const feeOpts = [...new Set([...lrows.filter(r => r.kind !== 'gtotal').map(r => r.fee_type), '采购入库运费', '销售出库运费', '调拨运费', '入库运费', '出库运费', '退货运费', '仓储费'].filter(Boolean))]
+  // 归类下拉(V2.788)：主体＝固定三家(总览表头那三家)＋本家账单里出现过的；费用类型＝规范六类。原来是带提示的输入框，只会提示当前那个值，选不到别的主体
+  const subjOpts = [...new Set([...((ov && ov.subjects) || []), ...lrows.filter(r => r.kind !== 'gtotal').map(r => r.subject)].filter(Boolean))]
+  const FEE_CANON = ['出库运费', '入库运费', '退货运费', '仓储费', '研发外购', '搬运费']
+  const withCur = (arr, cur) => (cur && !arr.includes(cur) ? [cur, ...arr] : arr)
   const QUEUE = [
     { f: 'miss', sw: 'warn', n: '核量 · 金蝶查无出库单', dd: '账单单号在金蝶未匹配（拆单后缀/未审核）', c: c.miss || 0, u: '笔' },
     { f: 'qtydiff', sw: 'warn', n: '核量 · 账单数量≠金蝶出库数量', dd: '账单件数与金蝶出库数量不符', c: c.qtydiff || 0, u: '笔' },
@@ -522,7 +524,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fixtag{font:inherit;font-size:12px;background:#FBF0DA;color:#8A5A00;border:1px solid #F0D9A8;border-radius:999px;padding:2px 10px;cursor:pointer;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
       .lrv .fixtag[disabled]{cursor:default}
       .lrv tr.rowfix td{background:#FFFBF2}
-      .lrv .fchk{color:#8A5A00}.lrv .fchk.bad{color:var(--bad);font-weight:600}
+      .lrv .fchk{color:#8A5A00}.lrv .fchk.bad{color:var(--bad);font-weight:600}.lrv .fchk.man{color:#6B4FA0}
+      .lrv select.clsinp{width:auto;min-width:104px;padding:2px 4px;cursor:pointer}.lrv .clsinp.wide{width:300px}
+      .lrv .xcls .ovr{color:#6B4FA0;font-size:12px}.lrv .xcls .lk{border:0;background:none;color:#1F6E8C;cursor:pointer;font-size:12px;text-decoration:underline;padding:0}
       .lrv .dtchip{display:inline-block;margin-top:3px;font:inherit;font-size:11px;line-height:1.6;padding:0 8px;border-radius:999px;border:1px solid transparent;cursor:pointer;white-space:nowrap}
       .lrv .dtchip.dtmine{background:#FDE7C8;color:#9A5200;border-color:#F2C27A;font-weight:600}.lrv .dtchip.dtrun{background:#E3EEF8;color:#2F5E8A}
       .lrv .dtchip.dtok{background:#E6F4EC;color:#2E7A50}.lrv .dtchip.dtpaid{background:#2E8B57;color:#fff}.lrv .dtchip.dtvoid{background:#EEF0F2;color:#8A96A2;text-decoration:line-through}
@@ -932,8 +936,6 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               ? <>没有待核单据 ✓　<button className="btn sm" onClick={() => { setGroup('all'); setPage(1) }}>看全部单据</button></>
               : '没有符合条件的单据'}</div>
             : <div className="tw">
-              <datalist id="lrv-subj">{subjOpts.map(s => <option key={s} value={s} />)}</datalist>
-              <datalist id="lrv-fee">{feeOpts.map(s => <option key={s} value={s} />)}</datalist>
               <table className="dtbl">
                 <thead><tr>
                   <th className="ck"><input type="checkbox" title="全选本页" checked={pageAllOn}
@@ -958,7 +960,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td><span className="mono">{x.doc_no || '—'}</span><span className="sub">{x.n_mat ? `${x.n_mat} 个物料` : (x.doc_no ? '金蝶无此单据' : '无单据')}</span></td>
                         <td><Cd c={cdBook(x.subject)} />{x.subject}<span className="sub">{(() => { const f = cdFee(x.subject, x.fee_item); return f ? <><Cd c={f[0]} />{f[1]}</> : x.fee_item })()}</span>
                           {x.fee_chk === 'diff' && <span className="sub fchk bad" title="物流部填的费用类型和系统按金蝶单据判的不一样，请双方核对">物流部填 {x.fee_fill} ≠ 系统判 {x.fee_sys}</span>}
-                          {x.fee_chk === 'nofill' && <span className="sub fchk" title="规范第4列「费用类型」每行必填">物流部未填 · 系统判 {x.fee_sys}</span>}</td>
+                          {x.fee_chk === 'nofill' && <span className="sub fchk" title="规范第4列「费用类型」每行必填">物流部未填 · 系统判 {x.fee_sys}</span>}
+                          {(x.subj_ovr || x.fee_chk === 'manual') && <span className="sub fchk man" title="这张单的归类是人工定的（特批等），以人工定的为准，不再和系统判的比">
+                            人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.fee_chk === 'manual' && x.fee_sys && x.fee_sys !== x.fee_ovr ? ` · 系统判 ${x.fee_sys}` : ''}</span>}
+                          {x.ovr_reason && <span className="sub fchk man" title={x.ovr_reason}>原因：{x.ovr_reason}</span>}</td>
                         <td>{x.bizline ? <><Cd c={cdBiz(x.bizline)} />{x.bizline}</> : <span className="dim">—</span>}</td>
                         <td className="party" title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</td>
                         <td className="num">{num(x.bill_amt)}<small className="u">{x.bill_unit}</small>
@@ -981,11 +986,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <div className="xpanel">
                           {x.doc_no && <div className="xcls">
                             <span className="dim">归类</span>
-                            <label>主体 <input className="clsinp" list="lrv-subj" disabled={locked} defaultValue={x.subject || ''} key={'s' + x.doc_no + (x.subject || '')}
-                              onBlur={e => { const v = e.target.value.trim(); if (v !== (x.subject || '')) saveClass(x.doc_no, { subject: v }) }} /></label>
-                            <label>费用类型 <input className="clsinp" list="lrv-fee" disabled={locked} defaultValue={x.fee_item || ''} key={'f' + x.doc_no + (x.fee_item || '')}
-                              onBlur={e => { const v = e.target.value.trim(); if (v !== (x.fee_item || '')) saveClass(x.doc_no, { fee_item: v }) }} /></label>
-                            <span className="dim" style={{ fontSize: 11.5 }}>改完离开输入框即保存，逐笔复核按新归类重算</span>
+                            <label>主体 <select className="clsinp" disabled={locked} value={x.subject || ''}
+                              onChange={e => saveClass(x.doc_no, { subject: e.target.value })}>
+                              {withCur(subjOpts, x.subject).map(s => <option key={s} value={s}>{s}{s === x.subj_bill ? '（账单原值）' : ''}</option>)}</select></label>
+                            <label>费用类型 <select className="clsinp" disabled={locked} value={x.fee_item || ''}
+                              onChange={e => saveClass(x.doc_no, { fee_item: e.target.value })}>
+                              {withCur(FEE_CANON, x.fee_item).map(s => <option key={s} value={s}>{s}{s === x.fee_sys ? '（系统判）' : ''}</option>)}</select></label>
+                            <label>原因 <input className="clsinp wide" disabled={locked} defaultValue={x.ovr_reason || ''} key={'r' + x.doc_no + (x.ovr_reason || '')}
+                              placeholder="特批/调整的原因，如：经××特批，由深圳星期零承担"
+                              onBlur={e => { const v = e.target.value.trim(); if (v !== (x.ovr_reason || '')) saveClass(x.doc_no, { reason: v }) }} /></label>
+                            {(x.subj_ovr || x.fee_ovr || x.ovr_reason) && !locked &&
+                              <button className="lk" title="清掉人工定的主体、费用类型和原因，回到账单原来的归类" onClick={() => saveClass(x.doc_no, { restore: true })}>恢复账单原值</button>}
+                            <span className="dim" style={{ fontSize: 11.5 }}>选完即保存，逐笔复核按新归类重算{x.subj_ovr || x.fee_ovr ? '；重新导入账单也会保留' : ''}</span>
                           </div>}
                           {x.sub_fees && <div className="xfee"><span className="dim">费用构成</span>
                             {Object.entries(x.sub_fees).map(([k, v]) => <span key={k} className="tag">{k} {typeof v === 'number' ? money(v) : v}</span>)}

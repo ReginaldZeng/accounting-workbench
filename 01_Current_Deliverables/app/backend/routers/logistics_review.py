@@ -336,10 +336,17 @@ def import_bill(carrier, period, data, operator, origin="手工上传"):
         scope = (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register"))
         if src:
             scope = scope & ((BL.c.bill_src == src) | (BL.c.bill_src.is_(None)) | (BL.c.bill_src == ""))
+        # V2.788：人工改过的归类(特批主体/费用类型+原因)按单号带到新导入的行上——原来重导一次就全没了(顺丰冷运 8 月因此一直不敢重导)
+        keep = {}
+        for o in c.execute(select(BL.c.doc_no, BL.c.subj_ovr, BL.c.fee_ovr, BL.c.ovr_reason).where(scope)).all():
+            if o[0] and (o[1] or o[2] or o[3]):
+                keep.setdefault(o[0], (o[1], o[2], o[3]))
         c.execute(delete(BL).where(scope))
         for grain in ("detail", "accrual"):
             for r in res[grain]:
                 vals = {k: r.get(k) for k in _DETAIL_KEYS}
+                if r.get("doc_no") in keep:
+                    vals["subj_ovr"], vals["fee_ovr"], vals["ovr_reason"] = keep[r.get("doc_no")]
                 vals["bill_src"] = src or None
                 vals["batch_id"] = batch
                 vals["review_mode"] = "audit"
@@ -870,9 +877,18 @@ def _sys_fee(doc_no, parties):
     return ""
 
 
+def _fee_ovr(r):
+    """人工定的费用类型(归一到规范类)；没定或填的不是规范类返回 ''。"""
+    fo = _fee_norm(r.get("fee_ovr")) if r.get("fee_ovr") else ""
+    return fo if fo in _CANON_FEES else ""
+
+
 def _fee_check(r, doc_no, parties):
-    """→ (系统判, 物流部填, 结论 ok/diff/nofill/nosys/na)。仓储、搬运(设备调拨)这类不看单据的，系统不判(na)。"""
+    """→ (系统判, 物流部填, 结论 ok/diff/nofill/nosys/na/manual)。仓储、搬运(设备调拨)这类不看单据的，系统不判(na)。
+    manual(V2.788)＝人工定过费用类型(特批：如采购入库单的运费经特批由深圳星期零按出库运费承担)，以人工定的为准，不再报「物流部填≠系统判」。"""
     fs, ff = _sys_fee(doc_no, parties), _fill_fee(r)
+    if _fee_ovr(r):
+        return fs, ff, "manual"
     if ff in ("仓储费", "搬运费"):
         return fs, ff, "na"
     if not fs:
@@ -2158,6 +2174,10 @@ def _box_docs(rsub, carrier):
                 "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                 "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
                 "note": r.get("note") or "", "bbiz": _bill_biz(r),
+                # 人工归类(V2.788)：账单原主体、主体有没有被人工改、人工定的费用类型、原因——页面据此标「特批」、可恢复账单原值
+                "subj_bill": _short_subject(str(r.get("subject") or "").strip()),
+                "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
+                "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
                 "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
@@ -2598,7 +2618,9 @@ async def review_doc_note(request: Request):
 @router.post("/api/logistics-review/doc-classify")
 async def review_doc_classify(request: Request):
     """复核台逐单手动改归类：改该单据的账单侧【主体/费用类型】，复核结论按新归类重算(缓存作废)。
-    用于把账单错配的行拨到对的计提组(如账单调拨费对不上计提、主体串号)，让逐组差异对平。"""
+    用于把账单错配的行拨到对的计提组(如账单调拨费对不上计提、主体串号)，让逐组差异对平。
+    V2.788(用户「特批调整到星期零的要怎么处理…就是主体和费用类型」)：加 reason(原因，留痕) 和 restore(恢复账单原值)；
+    费用类型只收规范类(原来填别的会被悄悄当成没填)；改动进操作日志。"""
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
@@ -2609,10 +2631,17 @@ async def review_doc_classify(request: Request):
     if not carrier or not doc_no:
         return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
     vals = {}
+    if b.get("restore"):
+        vals = {"subj_ovr": None, "fee_ovr": None, "ovr_reason": None}
     if b.get("subject") is not None:
         vals["subj_ovr"] = (b.get("subject") or "").strip() or None   # 存覆盖列，不动原 subject；空=清覆盖
     if b.get("fee_item") is not None:
-        vals["fee_ovr"] = (b.get("fee_item") or "").strip() or None
+        fv = (b.get("fee_item") or "").strip()
+        if fv and _fee_norm(fv) not in _CANON_FEES:
+            return JSONResponse({"ok": False, "msg": "费用类型只能选：出库运费 / 入库运费 / 退货运费 / 仓储费 / 研发外购 / 搬运费"}, status_code=400)
+        vals["fee_ovr"] = fv or None
+    if b.get("reason") is not None:
+        vals["ovr_reason"] = (b.get("reason") or "").strip()[:200] or None
     if not vals:
         return {"ok": True}
     lk = _locked(carrier, period)
@@ -2622,6 +2651,9 @@ async def review_doc_classify(request: Request):
         c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
                   (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(**vals))
     _bust(carrier, period)   # 归类变了 → 逐笔/结论缓存作废，重算
+    CN = {"subj_ovr": "主体", "fee_ovr": "费用类型", "ovr_reason": "原因"}
+    db.audit(_uname(u), "物流复核-改归类", "%s %s %s" % (carrier, period, doc_no),
+             "恢复账单原值" if b.get("restore") else "；".join("%s→%s" % (CN[k], v or "（清空）") for k, v in vals.items()))
     return {"ok": True}
 
 
