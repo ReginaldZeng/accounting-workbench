@@ -94,5 +94,53 @@ class TestMissingConfig(unittest.TestCase):
         self.assertEqual((cm.exception.kind, cm.exception.names), ('group', ['鲜食山姆']))
 
 
+class TestMaterialBreakdown(unittest.TestCase):
+    """直接材料拆分（V2.791）：按子项物料汇总到每公斤产品；底稿对比的差异率与含税口径。"""
+    PRODUCT = dict(cc='植物肉车间', code='A001', qty=100.0, unit=2.0)
+    DETAIL = dict(
+        movements=[dict(code='M1', unit='千克', name='大豆油', net_qty=30.0, net_amount=90.0, bill='L1'),
+                   dict(code='M1', unit='千克', name='大豆油', net_qty=-3.0, net_amount=-9.0, bill='T1'),   # 退料冲减
+                   dict(code='M2', unit='Pcs', name='纸箱', net_qty=20.0, net_amount=19.0, bill='L2')],
+        prices=[dict(code='M1', date='2026-07-05', tax_rate=13.0)],
+        controls=dict(complete_material=98.0))
+
+    def test_breakdown_without_standard(self):
+        import actual_cost_standard as standard
+        out = standard.breakdown(self.PRODUCT, self.DETAIL)
+        self.assertTrue(out['ready'])
+        oil, box = out['rows']                                # 按成本从大到小
+        self.assertEqual((oil['code'], oil['unit']), ('M1', 'kg'))
+        self.assertAlmostEqual(oil['actual_qty'], 0.27)       # (30−3)/100
+        self.assertAlmostEqual(oil['actual_price'], 3.0)
+        self.assertAlmostEqual(oil['actual_cost'], 0.81)
+        self.assertAlmostEqual(oil['actual_cost_incl'], 0.81 * 1.13)   # 有应付单税率才折含税
+        self.assertIsNone(box['actual_cost_incl'])                     # 没有税率依据就不折
+        self.assertAlmostEqual(sum(r['actual_share'] for r in out['rows']), 1)
+        self.assertAlmostEqual(out['actual_material_input_per_kg'], 1.0)
+        self.assertAlmostEqual(out['material_timing_bridge'], -0.02)   # (98−100)/100，单列不摊到物料
+        self.assertEqual(out['actual_incl_unknown'], 1)
+
+    def test_breakdown_needs_detail_and_output(self):
+        import actual_cost_standard as standard
+        self.assertFalse(standard.breakdown(self.PRODUCT, None)['ready'])
+        self.assertIn('完工量', standard.breakdown(dict(self.PRODUCT, qty=0), self.DETAIL)['issue'])
+
+    def test_compare_rates_and_tax_basis(self):
+        import actual_cost_standard as standard
+        entry = dict(erp_code='A001', status='已定稿', materials=[
+            dict(seg='原料', matCode='M1', matName='大豆油', unit='kg', qtyPerKg=0.30, priceIncl=3.39, taxRate=0.13, costExcl=0.90),
+            dict(seg='包材', matCode='M2', matName='纸箱', unit='个', qtyPerKg=0.20, priceIncl=1.00, taxRate=0.13, costExcl=0.20)])  # 普票：含税价＝计价
+        out = standard.compare(entry, self.PRODUCT, self.DETAIL)
+        oil, box = out['rows']
+        self.assertAlmostEqual(oil['qty_rate'], 0.27 / 0.30 - 1)       # 用量差异率
+        self.assertAlmostEqual(oil['price_rate'], 0.0)                 # 实际 3.0 对底稿计价 3.0
+        self.assertAlmostEqual(oil['cost_rate'], 0.81 / 0.90 - 1)      # 整体差异率
+        self.assertAlmostEqual(oil['standard_cost_incl'], 0.30 * 3.39)
+        self.assertAlmostEqual(oil['actual_cost_incl'], 0.81 * 3.39 / 3.0)   # 按底稿自己的含税÷不含税倍率折
+        self.assertAlmostEqual(box['actual_cost_incl'], box['actual_cost'])  # 普票倍率为 1，不重复加税
+        self.assertAlmostEqual(out['material_cost_rate'], 1.0 / 1.10 - 1)
+        self.assertAlmostEqual(out['standard_material_incl'], 0.30 * 3.39 + 0.20 * 1.00)
+
+
 if __name__ == '__main__':
     unittest.main()

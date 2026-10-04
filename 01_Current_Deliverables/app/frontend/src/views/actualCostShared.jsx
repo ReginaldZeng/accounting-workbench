@@ -27,6 +27,7 @@ export const api = {
   sources: params => request('sources', params),
   product: params => request('product', params),
   refreshProduct: params => request('product-refresh', params, 'POST'),
+  saveNote: (params, body) => request('material-note', params, 'POST', body),
   standards: (org, code) => request('standards', { org, code }),
   compare: params => request('standard-comparison', params),
   exportUrl: params => `/api/actual-cost/export?${new URLSearchParams(params)}`,

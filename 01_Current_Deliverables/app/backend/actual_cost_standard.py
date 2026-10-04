@@ -1,4 +1,6 @@
 # [Change Log] 2026-10-03 | Codex | V-draft | Accounting worksheet comparison, read-only
+# [Change Log] 2026-10-04 | Claude / c | V2.791 | 直接材料拆分：没有底稿也能按子项物料看每公斤单耗/单价/成本（breakdown）；
+#              底稿对比行补用量/单价/整体三个差异率、成本占比、含税口径（按底稿自身的含税÷不含税倍率折算）与合计。
 from collections import defaultdict
 import hashlib
 import json
@@ -22,6 +24,74 @@ def metadata(e):
     return {k:e.get(k) for k in ('id','cp_code','erp_code','product_name','calc_date','status','src_file','provenance_note')}
 
 
+def rate(actual, standard):
+    """差异率＝（实际−底稿）÷底稿；底稿为零或缺值不算。"""
+    return (actual-standard)/standard if actual is not None and standard not in (None, 0) else None
+
+
+def actual_materials(detail):
+    """本期净领补退料按（物料编码，单位）汇总。"""
+    actual = defaultdict(lambda:{'qty':0.,'amount':0.,'name':'','bills':set(),'valid':True})
+    for m in (detail or {}).get('movements',[]):
+        k=(str(m.get('code') or '').strip(),unit(m.get('unit')))
+        a=actual[k];q=numeric(m.get('net_qty'));v=numeric(m.get('net_amount'))
+        a['valid'] &= q is not None and v is not None
+        a['qty'] += q or 0.;a['amount'] += v or 0.;a['name']=m.get('name');a['bills'].add(m.get('bill',''))
+    return actual
+
+
+def purchase_tax(detail):
+    """各物料本期最近一张已审核应付单的税率（小数）。只用于把实际成本折成含税口径，没有记录就不折。"""
+    found={}
+    for p in sorted((detail or {}).get('prices',[]),key=lambda p:str(p.get('date') or '')):
+        r=numeric(p.get('tax_rate'))
+        if r is not None and 0<=r<100: found[str(p.get('code') or '').strip()]=r/100
+    return found
+
+
+def bridge(out, detail, actual, qty):
+    """材料投入 → 完工材料的衔接：差额是在产和跨期影响，单列，不摊到物料。"""
+    total=sum(a['amount'] for a in actual.values())
+    out['actual_material_input_per_kg']=total/qty if detail else None
+    complete=(detail or {}).get('controls',{}).get('complete_material')
+    out['completed_material_per_kg']=complete/qty if complete is not None else None
+    out['material_timing_bridge']=(complete-total)/qty if complete is not None else None
+    return total
+
+
+def finish(out, total, qty):
+    """占比、含税合计、整体差异率。"""
+    for r in out['rows']:
+        r['actual_share']=r['actual_cost']*qty/total if r['actual_cost'] is not None and total else None
+    known=[r for r in out['rows'] if r['actual_cost'] is not None]
+    out['actual_material_incl']=sum(r['actual_cost_incl'] for r in known if r['actual_cost_incl'] is not None) if known else None
+    out['actual_incl_unknown']=sum(1 for r in known if r['actual_cost_incl'] is None)   # 折不成含税的行数（没有税率依据）
+    return out
+
+
+def breakdown(product, detail):
+    """没有底稿也能看的直接材料拆分：本期净领用按子项物料汇总，折成每公斤完工产品的单耗、单价、成本。"""
+    out={'rows':[],'product_qty':product.get('qty'),'actual_unit_cost':product.get('unit'),'ready':bool(detail)}
+    qty=numeric(product.get('qty'))
+    if qty is None or qty<=0:
+        out.update(ready=False,issue='本期完工量不大于零，不能折成每公斤'); return out
+    if not detail: return out
+    actual=actual_materials(detail);tax=purchase_tax(detail)
+    for (code,u),a in actual.items():
+        aq=a['qty']/qty if a['valid'] else None;ac=a['amount']/qty if a['valid'] else None
+        ap=ac/aq if ac is not None and aq is not None and aq>0 else None
+        factor=1+tax[code] if code in tax else None
+        out['rows'].append(dict(code=code,name=a['name'],unit=u,section='实际用料',status='实际用料' if a['valid'] else '实际数量或金额缺失',
+            standard_qty=None,actual_qty=aq,standard_price=None,actual_price=ap,quote_price=None,tax_rate=tax.get(code),
+            standard_cost=None,actual_cost=ac,qty_difference=None,cost_difference=None,quantity_effect=None,price_effect=None,
+            qty_rate=None,price_rate=None,cost_rate=None,standard_cost_incl=None,
+            actual_price_incl=ap*factor if ap is not None and factor else None,
+            actual_cost_incl=ac*factor if ac is not None and factor else None,
+            net_qty=a['qty'],net_amount=a['amount'],bills=sorted(a['bills'])))
+    out['rows'].sort(key=lambda r:-(r['actual_cost'] or 0))
+    return finish(out,bridge(out,detail,actual,qty),qty)
+
+
 def compare(e, product, detail):
     if str(e.get('erp_code')) != str(product['code']): raise ValueError('核算底稿的产品编码不一致')
     out = {'standard':metadata(e), 'fingerprint':hashlib.sha256(json.dumps(e,ensure_ascii=False,sort_keys=True,default=str).encode()).hexdigest(),
@@ -33,12 +103,7 @@ def compare(e, product, detail):
     for i,m in enumerate(e.get('materials') or []):
         code = str(m.get('matCode') or '').strip()
         std[(code or '@missing-'+str(i), unit(m.get('unit')))].append(m)
-    actual = defaultdict(lambda:{'qty':0.,'amount':0.,'name':'','bills':set(),'valid':True})
-    for m in (detail or {}).get('movements',[]):
-        k=(str(m.get('code') or '').strip(),unit(m.get('unit')))
-        a=actual[k];q=numeric(m.get('net_qty'));v=numeric(m.get('net_amount'))
-        a['valid'] &= q is not None and v is not None
-        a['qty'] += q or 0.;a['amount'] += v or 0.;a['name']=m.get('name');a['bills'].add(m.get('bill',''))
+    actual = actual_materials(detail);tax = purchase_tax(detail)
     for k in dict.fromkeys([*std,*actual]):
         ms=std.get(k,[]);m=ms[0] if ms else {};a=actual.get(k)
         code,u=k;sq=numeric(m.get('qtyPerKg'));sc=numeric(m.get('costExcl'))
@@ -54,17 +119,25 @@ def compare(e, product, detail):
         elif not a['valid']: status='实际数量或金额缺失'
         elif sp is None or ap is None: status='零/负数量或价格缺失，待核查'
         valid=status=='匹配'
+        # 含税口径：底稿这一行自己的「含税价 ÷ 不含税计价」就是倍率（专票≈1+税率，普票＝1），实际成本按同一倍率折，两边才可比。
+        # 没有底稿行的（实际新增）退而用本期应付单税率；都没有就不折，页面显示「—」。
+        pi=numeric(m.get('priceIncl'))
+        factor=pi/sp if pi is not None and sp else (1+tax[code] if not ms and code in tax else None)
         out['rows'].append(dict(code=m.get('matCode') or code,name=m.get('matName') or (a or {}).get('name'),unit=u,
             section=m.get('seg') if ms else '实际新增',status=status,standard_qty=sq,actual_qty=aq,standard_price=sp,actual_price=ap,
-            quote_price=numeric(m.get('priceIncl')),tax_rate=numeric(m.get('taxRate')),standard_cost=sc,actual_cost=ac,
+            quote_price=pi,tax_rate=numeric(m.get('taxRate')) if ms else tax.get(code),standard_cost=sc,actual_cost=ac,
             qty_difference=aq-sq if valid else None,cost_difference=ac-sc if valid else None,
             quantity_effect=(aq-sq)*sp if valid else None,price_effect=aq*(ap-sp) if valid else None,
+            qty_rate=rate(aq,sq) if valid else None,price_rate=rate(ap,sp) if valid else None,cost_rate=rate(ac,sc) if valid else None,
+            standard_cost_incl=sq*pi if sq is not None and pi is not None else None,
+            actual_price_incl=ap*factor if ap is not None and factor else None,
+            actual_cost_incl=ac*factor if ac is not None and factor else None,
+            net_qty=a['qty'] if a else None,net_amount=a['amount'] if a else None,
             bills=sorted((a or {}).get('bills',[]))))
     out['standard_material_cost']=sum(numeric(m.get('costExcl')) or 0. for m in e.get('materials') or [])
-    out['actual_material_input_per_kg']=sum(a['amount'] for a in actual.values())/qty if detail else None
-    complete=(detail or {}).get('controls',{}).get('complete_material')
-    out['completed_material_per_kg']=complete/qty if complete is not None else None
-    out['material_timing_bridge']=(complete-sum(a['amount'] for a in actual.values()))/qty if complete is not None else None
+    out['standard_material_incl']=sum(r['standard_cost_incl'] or 0. for r in out['rows'])
+    total=bridge(out,detail,actual,qty)
+    out['material_cost_rate']=rate(out['actual_material_input_per_kg'],out['standard_material_cost'])
     out['fees_incl']={k:e.get('fee_'+k) for k in ('mfg','load','adm')}
     out['standard_full_incl']=e.get('full_cost_incl')
     out['actual_costs']={k:product.get(k)/qty if numeric(product.get(k)) is not None else None for k in
@@ -73,4 +146,4 @@ def compare(e, product, detail):
     if e.get('status')!='已定稿': out['issues'].append('所选底稿尚未定稿，仅作为本次比较参考；不改变原审核状态。')
     out['issues'].append('实际用量为本期净领补退料 ÷ 本期完工公斤，含在产和跨期影响，不直接判定超耗。实际价格为出库计价，采购价另见采购参考页。')
     out['issues'].append('逐料比较使用底稿存储的不含税成本；含税报价费用与金蝶费用分类尚未建立对应，不计算全成本差额。')
-    return out
+    return finish(out,total,qty)

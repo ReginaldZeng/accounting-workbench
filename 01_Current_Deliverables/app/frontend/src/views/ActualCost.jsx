@@ -157,7 +157,7 @@ export default function ActualCost({ org, year, period, user }) {
       {/* 产品明细整页打开；主表只是藏起来，返回时筛选、排序、滚动位置都还在 */}
       {targetProduct && latest?.run_id && <ActualCostTrace org={org} year={year} period={period} runId={latest.run_id} target={targetProduct}
         siblings={rows.some(p => keyOf(p) === target) ? rows : products} onNavigate={p => setTarget(keyOf(p))} onClose={() => setTarget(null)}
-        canFetch={can('cost_ledger_fetch')} trial={status !== 'ready'} sourceTime={data.source_time}
+        canFetch={can('cost_ledger_fetch')} canNote={can('cost_ledger_wh')} products={products} trial={status !== 'ready'} sourceTime={data.source_time}
         choice={standardChoice[target]} onChoice={id => setStandardChoice(c => ({ ...c, [target]: id }))} />}
 
       <div className="ac-main" hidden={!!targetProduct}>

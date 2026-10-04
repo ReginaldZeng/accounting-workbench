@@ -26,7 +26,7 @@ const TEXT_KEYS = /^(wo|code|name|unit|bom|bill|kind|supplier|currency|status|ca
 const SIZE = 100
 const keyOf = p => `${p.cc}|${p.code}`
 
-export default function ActualCostTrace({ org, year, period, runId, target, siblings, onNavigate, onClose, canFetch, trial, sourceTime, choice, onChoice }) {
+export default function ActualCostTrace({ org, year, period, runId, target, siblings, products, onNavigate, onClose, canFetch, canNote, trial, sourceTime, choice, onChoice }) {
   const [data, setData] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState('')
   const [tab, setTab] = useState('standard'), [q, setQ] = useState(''), [wo, setWo] = useState(''), [page, setPage] = useState(0)
   const [fromCompare, setFromCompare] = useState(false)
@@ -45,7 +45,8 @@ export default function ActualCostTrace({ org, year, period, runId, target, sibl
 
   const refresh = async () => {
     const ticket = ++serial.current; setBusy('fetch'); setError('')
-    try { const r = await api.refreshProduct(params); if (ticket === serial.current) setData(d => ({ ...d, detail: r.detail })) }
+    // 读完金蝶明细再整份重读一次产品：直接材料拆分是后端按新明细算的
+    try { await api.refreshProduct(params); const d = await api.product(params); if (ticket === serial.current) setData(d) }
     catch (e) { if (ticket === serial.current) setError(e.message) } finally { if (ticket === serial.current) setBusy('') }
   }
   const go = (key, filter = '', back = false) => { setTab(key); setQ(filter); setWo(''); setPage(0); setFromCompare(back) }
@@ -117,17 +118,18 @@ export default function ActualCostTrace({ org, year, period, runId, target, sibl
       </div>
 
       <Tabs label="成本明细类别" value={tab} onChange={k => go(k)} tabs={[
-        ['standard', '核算底稿对比'],
+        ['standard', '直接材料拆分', data?.breakdown?.rows?.length],
         ...Object.entries(VIEWS).map(([k, v]) => [k, v.label, k === 'cost_rows' ? data?.cost_rows?.length : detail?.[k]?.length]),
       ]} />
 
       {tab === 'standard'
         ? <ActualCostStandard org={org} year={year} period={period} runId={runId} target={target} detail={detail} choice={choice} onChoice={onChoice}
+            breakdown={data?.breakdown} notes={data?.notes} products={products} canNote={canNote} onNotes={notes => setData(d => ({ ...d, notes }))}
             canFetch={canFetch} fetching={busy === 'fetch'} onFetch={refresh} onPrices={code => go('prices', code, true)} />
         : <div className="ac-pane">
           <div className="ac-toolbar">
             <div className="ac-toolbar-l">
-              {fromCompare && <button className="btn-sec" onClick={() => go('standard')}>← 回底稿对比</button>}
+              {fromCompare && <button className="btn-sec" onClick={() => go('standard')}>← 回直接材料拆分</button>}
               <input className="ac-input" type="search" placeholder="搜物料编码、工单或单据号" aria-label="搜索明细" value={q} onChange={e => { setQ(e.target.value); setPage(0) }} />
               <select aria-label="按工单筛选" value={wo} onChange={e => { setWo(e.target.value); setPage(0) }}><option value="">全部工单（{orders.length}）</option>{orders.map(x => <option key={x}>{x}</option>)}</select>
             </div>

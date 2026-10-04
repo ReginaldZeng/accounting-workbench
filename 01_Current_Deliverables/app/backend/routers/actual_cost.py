@@ -1,6 +1,7 @@
 # [Change Log] 2026-10-02 | Codex | V-draft | Full-cost period API; Kingdee reads only
 # [Change Log] 2026-10-04 | Claude / c | V2.789 | 建立本期配置可沿用任意一个有规则的月份（原先只能沿用更早的）；
 #              /state 返回有规则的月份清单与可归类去向；/inputs 可保存费用项目归类（水电/租金/氮气三类固定项不可改）。
+# [Change Log] 2026-10-04 | Claude / c | V2.791 | /product 带上直接材料拆分（没有底稿也能看）和各物料的差异原因备注；新增 /material-note 保存备注。
 import copy
 import json
 import re
@@ -87,7 +88,40 @@ def trace_product(request:Request,org:str,run_id:str,cc:str=Query(max_length=200
     identity={'run_id':run_id,'cc':cc,'code':code};key='ac:t:'+service.fingerprint(identity,{}, {})[:32]
     cached=(db.get_period_input('actual_cost:'+org,year,period,key) or {}).get('payload')
     if cached and cached.get('identity')!=identity:raise HTTPException(409,'产品追溯键冲突')
-    return dict(product=product,cost_rows=rows,detail=(cached or {}).get('detail'),source_time=snapshot['sources']['fetched_at'])
+    detail=(cached or {}).get('detail')
+    return dict(product=product,cost_rows=rows,detail=detail,source_time=snapshot['sources']['fetched_at'],
+                breakdown=standard.breakdown(product,detail),notes=material_notes(org,year,period,cc,code))
+
+
+def note_key(cc,code):
+    # 差异原因跟「期间 + 产品」走，不跟某一次试算走：重新取数试算后备注还在。
+    return 'ac:n:'+service.fingerprint({'cc':cc,'code':code},{}, {})[:32]
+
+
+def material_notes(org,year,period,cc,code):
+    saved=(db.get_period_input('actual_cost:'+org,year,period,note_key(cc,code)) or {}).get('payload') or {}
+    return saved.get('notes') or {} if saved.get('identity')=={'cc':cc,'code':code} else {}
+
+
+@router.post('/material-note')
+def save_material_note(body:dict,request:Request,org:str,run_id:str,cc:str=Query(max_length=200),code:str=Query(max_length=80),
+                       year:int=Query(ge=2000,le=2100),period:int=Query(ge=1,le=12)):
+    """逐料差异原因（人写的说明，如「26 年采购单价降低」）。只是备注，不参与任何计算。"""
+    user=authorized(request,org,'cost_ledger_wh');snapshot=trace_snapshot(org,year,period,run_id)
+    try:product_rows(snapshot,cc,code)
+    except ValueError as exc:raise HTTPException(404,str(exc)) from exc
+    material,text=body.get('material'),body.get('text')
+    if not isinstance(material,str) or not 1<=len(material)<=120 or not isinstance(text,str) or len(text)>500:
+        raise HTTPException(400,'备注无效：物料标识必填，说明不超过500字')
+    with service._RUN_LOCK:
+        notes=material_notes(org,year,period,cc,code)
+        if text.strip():
+            notes[material]=dict(text=text.strip(),by=user['name'],at=datetime.now(timezone.utc).isoformat())
+        else: notes.pop(material,None)
+        if len(notes)>500: raise HTTPException(400,'备注条数过多')
+        db.set_period_input('actual_cost:'+org,year,period,note_key(cc,code),dict(identity={'cc':cc,'code':code},notes=notes),operator=user['name'])
+    db.audit(user['name'],'全成本·差异原因',f'{org}/{year}-{period:02d}',f'{cc}/{code}/{material}：{text.strip()[:80] or "（清空）"}')
+    return dict(ok=True,notes=notes)
 
 
 @router.post('/product-refresh')
