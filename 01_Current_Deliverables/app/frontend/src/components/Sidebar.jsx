@@ -87,7 +87,7 @@ function applyTheme(mode) {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
 }
 
-export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver, focusSection = '', focusParent = '' }) {
+export default function Sidebar({ view, onSelect, source, user, onLogout, onHome, closed, mods, navDef, ver, focusSection = '', focusParent = '', todoN = 0 }) {
   const kd = source === 'kingdee'
   // 主题档位；auto 档要监听系统切换（白天↔夜间自动跟）
   const [theme, setTheme] = React.useState(() => { try { return localStorage.getItem('fw_theme') || 'auto' } catch (e) { return 'auto' } })
@@ -286,7 +286,10 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
 
         <nav>
           <button type="button" className={'row' + (view === 'home' ? ' on' : '')} aria-current={view === 'home' ? 'page' : undefined} onClick={() => go('home')}>
-            <span className="ic">{IC.home}</span><span className="lb fx">首页</span>
+            {/* 首页待办区：待我处理的条数。收起态＝图标角上的数字，展开态＝行尾的数字；0 条不显示 */}
+            <span className="ic">{IC.home}{todoN > 0 && <span className="num" aria-hidden="true">{todoN > 99 ? '99+' : todoN}</span>}</span>
+            <span className="lb fx">首页</span>
+            {todoN > 0 && <span className="tail fx"><span className="pill todo" title={`待我处理 ${todoN} 件`}>待办 {todoN}</span></span>}
           </button>
           {sections.map(s => {
             const items = itemsOf(s)

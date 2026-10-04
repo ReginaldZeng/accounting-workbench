@@ -1,0 +1,344 @@
+<!doctype html>
+<!--
+[Change Log]
+Date: 2026-10-04
+Author: Claude Opus 5.5
+Version: V2.790
+Description: 首页待办区样机（配《首页待办区 需求确认书 v1.0》第五节）。纯静态、数据全是编的，只演示版式与交互：
+  问候区右侧两个数（待我处理 / 我发起的），点了才在下面展开清单、再点收起（D13）；清单三个页签（待我处理 / 我发起的 / 最近办结）、
+  侧栏首页角标、在金蝶办的行尾「立即核对」。
+  颜色与卡片样式照搬核算工作台 styles.css / home.css 的变量，上线后长相以真页面为准。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>首页待办区 · 样机</title>
+<style>
+:root{
+  --bg:#ffffff; --bg-sub:#fafbfc; --bg-rail:#f6f7f9;
+  --line:#e9ebef; --line-strong:#dcdfe5;
+  --ink:#181b21; --ink-2:#5a616d; --ink-3:#9298a4;
+  --accent:#4b53c4; --accent-soft:#edeefb;
+  --red:#c0392b; --red-bg:#fbecea; --red-line:#e6b7b0;
+  --amber:#a35a00; --amber-bg:#f8f0e0; --amber-line:#e6cfa6;
+  --violet:#6a52c4; --violet-bg:#eeeafb; --violet-line:#cfc4ee;
+  --blue:#2c6bcf; --blue-bg:#e7f0fc; --blue-line:#bcd4f4;
+  --green:#1f7a55; --green-bg:#e8f4ee; --green-line:#cbe4d5;
+  --gray:#6b7280; --gray-bg:#eef0f3;
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:var(--font-sans);font-size:13px;color:var(--ink);background:var(--bg-sub);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+
+/* —— 样机控制条（真页面没有这一条） —— */
+.proto{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 16px;background:#22263a;color:#cfd3e6;font-size:12px}
+.proto b{color:#fff;font-weight:600}
+.proto .seg{display:inline-flex;gap:4px;padding:3px;border-radius:9px;background:rgba(255,255,255,.08)}
+.proto .seg button{border:0;border-radius:6px;padding:4px 12px;background:transparent;color:#cfd3e6;cursor:pointer}
+.proto .seg button[aria-pressed="true"]{background:#fff;color:#22263a;font-weight:600}
+.proto .note{margin-left:auto;opacity:.75}
+
+.shell{display:grid;grid-template-columns:72px minmax(0,1fr);min-height:calc(100% - 38px)}
+
+/* —— 侧栏（收起态 72px，只画到够看角标） —— */
+.rail{background:var(--bg);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 0}
+.rail .logo{width:40px;height:40px;border-radius:11px;background:var(--accent);display:grid;place-items:center;color:#fff;margin-bottom:10px}
+.rail .it{position:relative;width:48px;height:40px;border-radius:10px;display:grid;place-items:center;color:var(--ink-2)}
+.rail .it.on{background:var(--accent-soft);color:var(--accent)}
+.rail .it svg{width:19px;height:19px}
+.rail .it .n{position:absolute;top:3px;right:4px;min-width:17px;height:17px;padding:0 4px;border-radius:999px;background:var(--red);color:#fff;
+  font-size:10.5px;font-weight:700;line-height:17px;text-align:center;box-shadow:0 0 0 2px var(--bg);font-variant-numeric:tabular-nums}
+.rail .sep{width:22px;height:1px;background:var(--line);margin:6px 0}
+
+/* —— 首页（照 home.css） —— */
+.kd-home{padding:18px 22px 44px;display:grid;gap:16px;align-content:start;min-width:0}
+.hero{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px 24px;padding:14px 20px;border-radius:12px;
+  border:1px solid var(--line);background:linear-gradient(120deg,var(--accent-soft) 0%,var(--bg-sub) 62%)}
+.hero h2{margin:0;font-size:22px;font-weight:800;letter-spacing:.3px}
+.hero .id{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12.5px;color:var(--ink-2)}
+
+/* —— 问候区右侧：待办提示（原「已开通页面 / 期间」那一块的位置） —— */
+.tip{display:flex;gap:8px;align-items:stretch}
+.tip button{display:grid;gap:1px;min-width:148px;padding:8px 14px;text-align:left;border:1px solid var(--line);border-radius:10px;background:var(--bg);cursor:pointer;
+  transition:border-color .15s,box-shadow .15s}
+.tip button:hover{border-color:var(--accent);box-shadow:0 4px 14px -8px rgba(75,83,196,.5)}
+.tip button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tip .k{font-size:12px;color:var(--ink-2)}
+.tip .v{font-size:22px;font-weight:800;line-height:1.25;font-variant-numeric:tabular-nums;color:var(--ink)}
+.tip .v small{font-size:12px;font-weight:500;color:var(--ink-2);margin-left:3px}
+.tip .s{font-size:11.5px;color:var(--ink-3);white-space:nowrap}
+.tip .mine.has{border-color:var(--red-line);background:linear-gradient(180deg,var(--red-bg),var(--bg) 70%)}
+.tip .mine.has .v{color:var(--red)}
+.tip .s.late{color:var(--amber);font-weight:600}
+.tip button.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.tip .car{display:inline-block;width:6px;height:6px;margin-left:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;
+  transform:translateY(-3px) rotate(45deg);transition:transform .15s;opacity:.7}
+.tip .car.up{transform:translateY(0) rotate(-135deg)}
+.tip .zero{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid var(--green-line);border-radius:10px;background:var(--green-bg);color:var(--green);font-size:13px;font-weight:600}
+.tip .zero svg{width:16px;height:16px}
+
+/* —— 待办区（新增） —— */
+.todo{border:1px solid var(--line);border-radius:12px;background:var(--bg);overflow:hidden}
+.todo-h{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 12px 0 14px;border-bottom:1px solid var(--line)}
+.tabs{display:flex;gap:2px}
+.tabs button{position:relative;display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 12px;border:0;background:transparent;
+  color:var(--ink-2);font-size:13.5px;font-weight:600;cursor:pointer;border-radius:8px 8px 0 0}
+.tabs button .c{min-width:20px;height:18px;padding:0 6px;border-radius:999px;display:inline-grid;place-items:center;font-size:11.5px;
+  background:var(--gray-bg);color:var(--ink-2);font-variant-numeric:tabular-nums}
+.tabs button[aria-selected="true"]{color:var(--ink)}
+.tabs button[aria-selected="true"]::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;border-radius:2px;background:var(--accent)}
+.tabs button.mine[aria-selected="true"] .c{background:var(--red-bg);color:var(--red)}
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.todo-h .sync{margin-left:auto;padding-bottom:6px;font-size:12px;color:var(--ink-3)}
+.todo-h .sync button{border:0;background:none;color:var(--accent);cursor:pointer;padding:0 0 0 10px}
+.todo-h .sync button:hover{text-decoration:underline}
+
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:860px}
+th{padding:7px 10px;text-align:left;font-size:11.5px;font-weight:600;color:var(--ink-3);background:var(--bg-sub);border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.5}
+tr:last-child td{border-bottom:0}
+tbody tr:hover td{background:var(--bg-sub)}
+th:first-child,td:first-child{padding-left:14px}
+th:last-child,td:last-child{padding-right:14px;text-align:right;white-space:nowrap}
+.tag{display:inline-block;font-size:11.5px;font-weight:600;line-height:19px;padding:0 7px;border-radius:5px;white-space:nowrap}
+.tag.rev{color:var(--accent);background:var(--accent-soft)}
+.tag.do{color:var(--violet);background:var(--violet-bg)}
+.tag.done{color:var(--green);background:var(--green-bg)}
+.tag.back{color:var(--gray);background:var(--gray-bg)}
+.what b{font-weight:600}
+.what .sub{display:block;font-size:12px;color:var(--ink-2)}
+.what .warn{display:block;font-size:12px;color:var(--amber)}
+.from{white-space:nowrap}
+.from .bot{display:inline-flex;align-items:center;gap:4px;color:var(--violet)}
+.from .bot svg{width:13px;height:13px}
+.age{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+.age.late{color:var(--amber);font-weight:600}
+.where{white-space:nowrap;color:var(--ink-2)}
+.where .kd{font-size:11px;font-weight:700;padding:0 5px;border-radius:4px;line-height:17px;display:inline-block;color:var(--blue);background:var(--blue-bg);margin-right:5px}
+.where .wb{font-size:11px;font-weight:700;padding:0 5px;border-radius:4px;line-height:17px;display:inline-block;color:var(--green);background:var(--green-bg);margin-right:5px}
+.st{font-size:12px;color:var(--ink-2)}
+.st .bad{color:var(--amber)}
+.act{display:inline-flex;gap:6px}
+.btn{height:26px;padding:0 10px;border-radius:7px;border:1px solid var(--line-strong);background:var(--bg);font-size:12px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn.pri{border-color:var(--accent);background:var(--accent);color:#fff}
+.btn.pri:hover{background:#3f47b4;color:#fff}
+.btn:disabled{opacity:.6;cursor:default}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.todo-f{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;padding:7px 14px;border-top:1px solid var(--line);background:var(--bg-sub);font-size:12px;color:var(--ink-3)}
+.todo-f .soon{margin-left:auto}
+.todo-f .soon i{font-style:normal;color:var(--ink-2)}
+.none{display:flex;align-items:center;gap:10px;padding:11px 14px;font-size:13px;color:var(--ink-2)}
+.none svg{width:16px;height:16px;color:var(--green);flex:none}
+tr.gone td{animation:gone .5s ease forwards}
+@keyframes gone{to{opacity:0}}
+
+/* —— 页面卡片（照 home.css，只画两组示意） —— */
+.vb{display:flex}
+.grp-h{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.grp-h b{font-size:14px;font-weight:700}
+.hgrp + .hgrp{margin-top:22px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(264px,1fr));gap:10px}
+.card{display:grid;grid-template-columns:32px minmax(0,1fr);column-gap:12px;row-gap:3px;align-items:center;padding:12px 14px;border:1px solid var(--line);
+  border-left:3px solid var(--green);border-radius:10px;background:var(--bg)}
+.card .ci{grid-row:1 / span 2;width:32px;height:32px;border-radius:8px;background:var(--green-bg);color:var(--green);display:grid;place-items:center}
+.card .ci svg{width:17px;height:17px}
+.card b{font-size:13.5px;display:flex;align-items:center;gap:6px}
+.card .beta{font-size:10.5px;font-weight:600;border-radius:4px;padding:0 5px;line-height:16px;color:var(--amber);background:var(--amber-bg)}
+.card .hint{font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .due{font-size:10.5px;font-weight:700;border-radius:999px;padding:0 6px;line-height:16px;color:var(--red);background:var(--red-bg)}
+</style>
+</head>
+<body>
+
+<div class="proto">
+  <b>样机</b><span>数据是编的，只看版式</span>
+  <div class="seg" role="group" aria-label="切换场景">
+    <button type="button" data-sc="reviewer" aria-pressed="true">审核人登录</button>
+    <button type="button" data-sc="maker" aria-pressed="false">做账人登录</button>
+    <button type="button" data-sc="empty" aria-pressed="false">没有待办的人登录</button>
+  </div>
+  <span class="note">这一条深色栏是样机用的，真页面没有</span>
+</div>
+
+<div class="shell">
+  <nav class="rail" aria-label="侧栏（收起态）">
+    <div class="logo"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 10l8-5 8 5M6 10v8M10 10v8M14 10v8M18 10v8M4 19h16"/></svg></div>
+    <div class="it on" title="首页">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 11l8-7 8 7v8a1 1 0 01-1 1h-4v-6h-6v6H5a1 1 0 01-1-1z"/></svg>
+      <span class="n" id="railN">4</span>
+    </div>
+    <div class="sep"></div>
+    <div class="it"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg></div>
+    <div class="it"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M10 10v9"/></svg></div>
+    <div class="it"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="6" width="16" height="14" rx="2"/><path d="M8 3v5M16 3v5M8 14l3 3 5-6"/></svg></div>
+  </nav>
+
+  <main class="kd-home">
+    <section class="hero">
+      <div>
+        <h2 id="hi">下午好，财务经理</h2>
+        <div class="id"><span id="post">财务经理</span><span>财务核算工作台 · 进入页面后才取数</span></div>
+      </div>
+      <div class="tip" id="tip" aria-label="待办提示"></div>
+    </section>
+
+    <!-- ===== 待办区（本次新增） ===== -->
+    <section class="todo" id="todo" aria-label="待办"></section>
+
+    <div>
+      <section class="hgrp">
+        <div class="grp-h"><b>总账板块</b></div>
+        <div class="cards">
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l5-5 4 3 7-8"/></svg></span>
+            <b>汇率录入 <span class="beta">人工并行</span></b><span class="hint">人行中间价 → 建汇率规则 → 写金蝶</span></div>
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 9h12l-3-3M19 15H7l3 3"/></svg></span>
+            <b>对账程序 <span class="beta">人工并行</span></b><span class="hint">银行流水 vs 金蝶 · 逐笔稽核认领</span></div>
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l5-5 4 3 7-8"/></svg></span>
+            <b>理财对账 <span class="beta">在建</span></b><span class="hint">理财对账单 OCR → 对金蝶交易性金融资产</span></div>
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 5v14h14M9 15l3-4 3 2 4-6"/></svg></span>
+            <b>资金看板 <span class="beta">在建</span></b><span class="hint">各账户余额 · 资金分布看板</span></div>
+        </div>
+      </section>
+      <section class="hgrp">
+        <div class="grp-h"><b>应付板块</b></div>
+        <div class="cards">
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg></span>
+            <b>账单上传 <span class="beta">在建</span></b><span class="hint">物流部：传账单 / 长表 → 质检 → 提交</span></div>
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h11v9H3zM14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.6"/><circle cx="17" cy="18" r="1.6"/></svg></span>
+            <b>物流计提 <span class="beta">在建</span></b><span class="hint">物流计提 · 复核 / 去向费率 / 录金蝶</span></div>
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 9h12l-3-3M19 15H7l3 3"/></svg></span>
+            <b>账单核对 <span class="beta">在建</span></b><span class="hint">物流账单核对 · 逐笔计提 / 逐单核价核量</span></div>
+          <div class="card"><span class="ci"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="7" rx="7" ry="3"/><path d="M5 7v10c0 1.7 3.1 3 7 3s7-1.3 7-3V7M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/></svg></span>
+            <b>付款做账 <span class="beta">在建</span></b><span class="hint">付款做账 · 红冲 / 更正 / 暂估转待认证 / 支付</span></div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script>
+// 样机数据（全是编的）。kind: rev=待审核 / do=待处理；where: kd=在金蝶办 / wb=在本工作台办
+const BOT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="8" width="14" height="11" rx="2.5"/><path d="M12 4v4M9 13h.01M15 13h.01"/></svg>'
+const SC = {
+  reviewer: {
+    hi: '下午好，财务经理', post: '财务经理',
+    mine: [
+      { id: 1, kind: 'rev', t: '汇率录入 · 2026 年 9 月（组织 101）', sub: '8 条汇率 · 金蝶里已审 0 条', bot: '系统 · 汇率定时录入', age: '4 天', late: true, where: 'kd', place: '金蝶 › 汇率体系', st: '已提交，等审核', chk: '上次核对 14:20' },
+      { id: 2, kind: 'rev', t: '物流计提凭证 · 2026 年 9 月', sub: '12 张 · 金蝶里已审 5 张', warn: '其中 4 张还是草稿、没提交，现在审不了', by: '应付会计', age: '1 天', where: 'kd', place: '金蝶 › 总账凭证', st: '已提交 3 张，等审核', chk: '上次核对 14:20' },
+      { id: 3, kind: 'rev', t: '付款做账 · 记-312　甲物流公司 9 月运费', sub: '含红冲更正 3 行 · 借贷 48,260.00', by: '应付会计', age: '2 小时', where: 'kd', place: '金蝶 › 总账凭证', st: '已提交，等审核', chk: '上次核对 14:20' },
+      { id: 4, kind: 'do', t: '计提更正 · 乙物流公司 2026 年 8 月', sub: '2 笔要改：费用项目 1 笔、部门 1 笔', by: '物流复核人', age: '5 天', late: true, where: 'wb', place: '付款做账', st: '还没合进付款凭证' },
+    ],
+    sent: [],
+    done: [
+      { kind: 'rev', t: '汇率录入 · 2026 年 8 月（组织 101）', sub: '8 条汇率', bot: '系统 · 汇率定时录入', who: '财务经理', at: '10-02 09:41', how: '金蝶里已审核，自动销账' },
+      { kind: 'rev', t: '付款做账 · 记-298　丙物流公司 8 月运费', sub: '含核销 1 行', by: '应付会计', who: '财务经理', at: '09-30 16:05', how: '金蝶里已审核，自动销账' },
+    ],
+  },
+  maker: {
+    hi: '下午好，应付会计', post: '应付会计',
+    mine: [
+      { id: 5, kind: 'do', t: '付款做账 · 丁物流公司 9 月运费', sub: '凭证已保存，但提交没成功', warn: '请到金蝶手动提交，提交后才会转给审核人', bot: '系统 · 付款做账', age: '20 分钟', where: 'kd', place: '金蝶 › 总账凭证', st: '保存了，没提交上', chk: '上次核对 14:20' },
+    ],
+    sent: [
+      { kind: 'rev', t: '物流计提凭证 · 2026 年 9 月', sub: '12 张 · 已审 5 张 · 草稿 4 张', to: '财务经理', age: '1 天', st: '等审核' },
+      { kind: 'rev', t: '付款做账 · 记-312　甲物流公司 9 月运费', sub: '含红冲更正 3 行', to: '财务经理', age: '2 小时', st: '等审核' },
+      { kind: 'rev', t: '付款做账 · 记-298　丙物流公司 8 月运费', sub: '含核销 1 行', to: '财务经理', age: '—', st: '已审核 · 09-30 16:05', ok: true },
+    ],
+    done: [
+      { kind: 'back', t: '物流计提凭证 · 2026 年 9 月（第一次录入）', sub: '3 张', by: '应付会计', who: '应付会计', at: '10-01 11:20', how: '录入被撤销，待办自动撤回' },
+    ],
+  },
+  empty: { hi: '下午好，成本会计', post: '成本会计', mine: [], sent: [], done: [] },
+}
+const TAG = { rev: ['rev', '待审核'], do: ['do', '待处理'], back: ['back', '已撤回'] }
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const from = r => r.bot ? `<span class="bot">${BOT}${esc(r.bot)}</span>` : esc(r.by || '')
+const what = r => `<td class="what"><b>${esc(r.t)}</b><span class="sub">${esc(r.sub || '')}</span>${r.warn ? `<span class="warn">${esc(r.warn)}</span>` : ''}</td>`
+
+let sc = 'reviewer', tab = 'mine', open = false   // 清单默认收着：点问候区的数字才展开
+function render() {
+  const d = SC[sc], el = document.getElementById('todo')
+  document.getElementById('hi').textContent = d.hi
+  document.getElementById('post').textContent = d.post
+  const n = document.getElementById('railN')
+  n.textContent = d.mine.length; n.style.display = d.mine.length ? '' : 'none'
+
+  // 问候区右侧的待办提示：两个数，点了切到下面对应的页签
+  const tip = document.getElementById('tip'), late = d.mine.filter(r => r.late).length, wait = d.sent.filter(r => !r.ok).length
+  const OKI = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></svg>'
+  // 什么都没有：提示里说一句就够了，下面的待办区整块不出现，页面卡片顶上来
+  if (!d.mine.length && !d.sent.length && !d.done.length) {
+    tip.innerHTML = `<span class="zero">${OKI}现在没有等你处理的事</span>`
+    el.style.display = 'none'; el.innerHTML = ''
+    return
+  }
+  el.style.display = open ? '' : 'none'
+  const car = k => `<i class="car${open && tab === k ? ' up' : ''}"></i>`
+  tip.innerHTML = `<button type="button" class="mine${d.mine.length ? ' has' : ''}${open && tab === 'mine' ? ' on' : ''}" data-tab="mine" title="点开看清单，再点一次收起"><span class="k">待我处理${car('mine')}</span>
+      <span class="v">${d.mine.length}<small>件</small></span>
+      <span class="s${late ? ' late' : ''}">${late ? `${late} 件超过 3 个工作日` : d.mine.length ? '都在 3 个工作日内' : '现在没有'}</span></button>
+    <button type="button" class="${open && tab === 'sent' ? 'on' : ''}" data-tab="sent" title="点开看清单，再点一次收起"><span class="k">我发起的${car('sent')}</span>
+      <span class="v">${wait}<small>件在等别人</small></span>
+      <span class="s">${wait ? '点开看在谁手上' : '没有在等的'}</span></button>`
+  const tabs = [['mine', '待我处理', d.mine.length], ['sent', '我发起的', d.sent.filter(r => !r.ok).length], ['done', '最近办结', d.done.length]]
+  let body = ''
+  if (tab === 'mine') {
+    body = d.mine.length ? `<div class="tw"><table><thead><tr><th>要做什么</th><th>事项</th><th>谁交过来的</th><th>等了多久</th><th>在哪办</th><th>现在的状态</th><th></th></tr></thead><tbody>` +
+      d.mine.map(r => `<tr data-id="${r.id}"><td><span class="tag ${TAG[r.kind][0]}">${TAG[r.kind][1]}</span></td>${what(r)}
+        <td class="from">${from(r)}</td><td class="age${r.late ? ' late' : ''}">${esc(r.age)}</td>
+        <td class="where"><span class="${r.where}">${r.where === 'kd' ? '金蝶' : '工作台'}</span>${esc(r.place.replace(/^金蝶 › /, ''))}</td>
+        <td class="st">${esc(r.st)}${r.chk ? `<br><span style="color:var(--ink-3)">${esc(r.chk)}</span>` : ''}</td>
+        <td><span class="act"><button type="button" class="btn">${r.where === 'kd' ? '看明细' : '去处理'}</button>${r.where === 'kd' ? `<button type="button" class="btn pri" data-check="${r.id}">我已办，立即核对</button>` : ''}</span></td></tr>`).join('') +
+      `</tbody></table></div>` : `<div class="none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></svg>现在没有等你处理的事。</div>`
+  } else if (tab === 'sent') {
+    body = d.sent.length ? `<div class="tw"><table><thead><tr><th>类型</th><th>事项</th><th>现在在谁手上</th><th>等了多久</th><th>状态</th><th></th></tr></thead><tbody>` +
+      d.sent.map(r => `<tr><td><span class="tag ${r.ok ? 'done' : 'rev'}">${r.ok ? '已办结' : '等审核'}</span></td>${what(r)}
+        <td class="from">${esc(r.to)}</td><td class="age">${esc(r.age)}</td><td class="st">${esc(r.st)}</td>
+        <td><span class="act"><button type="button" class="btn">看明细</button></span></td></tr>`).join('') + `</tbody></table></div>`
+      : `<div class="none">你没有交出去还没办完的事。</div>`
+  } else {
+    body = d.done.length ? `<div class="tw"><table><thead><tr><th>结果</th><th>事项</th><th>谁交过来的</th><th>谁办的</th><th>什么时候</th><th>怎么办结的</th></tr></thead><tbody>` +
+      d.done.map(r => `<tr><td><span class="tag ${r.kind === 'back' ? 'back' : 'done'}">${r.kind === 'back' ? '已撤回' : '已办结'}</span></td>${what(r)}
+        <td class="from">${from(r)}</td><td class="from">${esc(r.who)}</td><td class="age">${esc(r.at)}</td><td class="st" style="text-align:left">${esc(r.how)}</td></tr>`).join('') + `</tbody></table></div>`
+      : `<div class="none">近 7 天没有办结的。</div>`
+  }
+  el.innerHTML = `<div class="todo-h"><div class="tabs" role="tablist">` +
+    tabs.map(([k, l, c]) => `<button type="button" role="tab" class="${k === 'mine' ? 'mine' : ''}" data-tab="${k}" aria-selected="${tab === k}">${l}<span class="c">${c}</span></button>`).join('') +
+    `</div><span class="sync">在金蝶办的，每 20 分钟自动核对一次<button type="button" id="syncAll">全部核对</button><button type="button" id="fold">收起</button></span></div>${body}
+    <div class="todo-f"><span>超过 3 个工作日的「等了多久」会变色</span>
+    <span class="soon">二期汇总进来：<i>BOM 待终审 2</i> · <i>发票待审核 7</i> · <i>待验收 1</i></span></div>`
+}
+document.addEventListener('click', e => {
+  const s = e.target.closest('[data-sc]')
+  if (s) { sc = s.dataset.sc; tab = 'mine'; open = false; document.querySelectorAll('[data-sc]').forEach(b => b.setAttribute('aria-pressed', b === s)); return render() }
+  const t = e.target.closest('[data-tab]')
+  if (t) {
+    // 问候区的两个数：点了展开对应页签，再点同一个收起；清单里的页签只切换
+    if (t.closest('#tip')) { if (open && tab === t.dataset.tab) open = false; else { tab = t.dataset.tab; open = true } }
+    else tab = t.dataset.tab
+    return render()
+  }
+  if (e.target.closest('#fold')) { open = false; return render() }
+  const c = e.target.closest('[data-check]')
+  if (c) {
+    // 演示「立即核对」：第 3 条假装金蝶里已经审了 → 当场销；其余假装还没审 → 只更新核对时间
+    const id = +c.dataset.check, d = SC[sc]
+    c.disabled = true; c.textContent = '正在问金蝶…'
+    setTimeout(() => {
+      const r = d.mine.find(x => x.id === id)
+      if (id === 3) {
+        c.closest('tr').classList.add('gone')
+        setTimeout(() => { d.mine = d.mine.filter(x => x.id !== id); d.done.unshift({ kind: 'rev', t: r.t, sub: r.sub, by: r.by, who: '财务经理', at: '刚刚', how: '金蝶里已审核，自动销账' }); render() }, 500)
+      } else { r.chk = '刚刚核对：金蝶里还没审完'; render() }
+    }, 700)
+  }
+})
+render()
+</script>
+</body>
+</html>

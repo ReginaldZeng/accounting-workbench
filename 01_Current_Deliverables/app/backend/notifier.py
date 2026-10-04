@@ -2,6 +2,8 @@
 # [Change Log]
 # Date: 2026-08-01 | Author: Claude / c | Version: V2.160
 # Description: 汇率录入·统一通知（邮件 + 钉钉工作通知）。业务方定：保留邮件与消息两种，不做待办。
+#   （V2.790 首页待办区 2026-10-04 补注：这里的「不做待办」说的是通知渠道不走钉钉待办，这条不变。
+#     汇率写金蝶后另在工作台首页待办区给审核人记一笔——那是 routers/fxrate → todo_scenes.fx_touch，与本模块无关。）
 # Date: 2026-08-03 | Author: Claude / c | Version: V2.162
 # Description: 钉钉改「机器人单聊」为主、工作通知为回退。业务方为应用开了「机器人配置」，机器人消息
 #   （api.dingtalk.com v1.0 /robot/oToMessages/batchSend，robotCode=AppKey，msgKey=sampleText）比工作通知

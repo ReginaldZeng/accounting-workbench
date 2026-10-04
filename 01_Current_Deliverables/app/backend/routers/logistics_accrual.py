@@ -18,6 +18,7 @@ from typing import List
 from kernels import logistics_accrual as la
 from kernels import logistics_bills as lb
 import kingdee_client as kc
+import todo_scenes
 
 from core import (
     JSONResponse, _KD_STATUS_CN, _closed_block, _now, _require_perm, db,
@@ -1023,6 +1024,8 @@ def logistics_accrual_post(body: dict, request: Request):
     n_fail = len(results) - n_saved - n_skip
     db.audit(u["name"], "物流计提-一键录入", f"{year}年{period}期",
              f"勾选{len(vouchers)}张：成功{n_saved} 跳过{n_skip} 失败{n_fail}")
+    if n_saved:      # 首页待办区：录进金蝶了 → 给物流计提凭证审核人记一笔待办（失败只留痕，不拦）
+        todo_scenes.accrual_touch(year, period, u["name"])
     return {"ok": True, "year": year, "period": period,
             "成功": n_saved, "跳过": n_skip, "失败或拦下": n_fail, "results": results}
 
@@ -1079,11 +1082,13 @@ def logistics_accrual_unpost(body: dict, request: Request):
     except kc.KingdeeError as e:
         return {"ok": False, "msg": f"连接金蝶失败，未删除任何凭证：{e}"}
     results = []
+    touched = set()        # 撤到了哪几个落账月份——撤完看要不要把待办撤回
     for lid in ids:
         lg = db.get_logistics_post(lid)
         if not lg:
             results.append({"id": lid, "status": "skipped", "msg": "台账无此记录（可能已撤销）"})
             continue
+        touched.add((lg["year"], lg["period"]))
         item = {"id": lid, "摘要": lg["zhaiyao"], "凭证号": ("记-" + lg["vno"]) if lg["vno"] else lg["billno"]}
         chk = kc.view_voucher(lg["kd_id"], s, conf)
         if not chk.get("exists"):
@@ -1103,4 +1108,6 @@ def logistics_accrual_unpost(body: dict, request: Request):
     n_block = sum(1 for r in results if r["status"] == "blocked")
     db.audit(u["name"], "物流计提-撤销录入", f"{len(ids)}张",
              f"删除{n_del} 拦下{n_block}")
+    for y, p in touched:      # 首页待办区：这个月录的全撤光了 → 待办自动撤回
+        todo_scenes.accrual_touch(y, p, posted=False)
     return {"ok": True, "删除": n_del, "拦下": n_block, "失败": len(results) - n_del - n_block, "results": results}

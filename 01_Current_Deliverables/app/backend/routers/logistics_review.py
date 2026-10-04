@@ -16,6 +16,7 @@ from sqlalchemy import select, insert, delete, update, func
 
 from core import JSONResponse, _require_perm, db
 import kingdee_client as kc
+import todo_scenes
 from kernels import logistics_review_store as store
 from kernels import logistics_price as lp
 from kernels import logistics_review as lr
@@ -2786,6 +2787,8 @@ async def review_line_fix(request: Request):
                 c.execute(update(FX).where(FX.c.id == ex).values(**rec))
             elif r:
                 c.execute(insert(FX).values(carrier=carrier, period=period, line_key=key, **rec))
+    # 首页待办区：登记了更正 → 给计提更正处理人记一笔；这家这个月的更正全撤了 → 待办撤回。失败只留痕，不拦。
+    todo_scenes.fix_touch(carrier, period, _uname(u))
     # 只重挂更正，不作废逐笔缓存(不用重读金蝶)
     _attach_fixes(L, carrier, period)
     if not cc:

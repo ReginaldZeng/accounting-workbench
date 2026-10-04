@@ -16,6 +16,7 @@ from sqlalchemy import select, text
 
 from core import JSONResponse, _require_perm, db
 import kingdee_client as kc
+import todo_scenes
 from kernels import logistics_review_store as store
 from kernels import logistics_voucher as LV
 
@@ -218,7 +219,8 @@ def _fixes(carrier, period, subject):
             continue
         vno = str(snap.get("vno") or "").split("-")[-1]
         out.setdefault(vno, []).append({**{k: f.get(k) or "" for k in ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj",
-                                                                         "to_amt_tax", "to_rate", "to_amt", "memo")}, "snap": snap})
+                                                                         "to_amt_tax", "to_rate", "to_amt", "memo")}, "snap": snap,
+                                        "id": f.get("id")})     # id：写入金蝶时记下合进了哪几笔更正（首页待办区销账用）
     return out
 
 
@@ -501,6 +503,13 @@ def _post(inst, user):
     rec = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book, "at": _now(), "by": user,
            "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2,
            "submitted": not sub_err, "submit_err": sub_err, "status": m2.get("DocumentStatus")}
+    # 这张凭证合进了复核台登记的哪几笔计提更正（与 _preview_data 同口径：只算挂在这次用到的计提凭证上的）
+    try:
+        used = {a["vno"] for a in d2.get("accruals") or []}
+        rec["fix_ids"] = [x["id"] for k, v in _fixes(req.get("carrier"), req.get("period"), req.get("subject")).items()
+                          if k in used for x in v if x.get("id")]
+    except Exception:
+        rec["fix_ids"] = []          # 凭证已经写进金蝶了，下面的落记录绝不能被这一步拦住
     posted = dict(db.get_setting(_POSTED_KEY, None) or {})
     posted[inst] = rec
     db.set_setting(_POSTED_KEY, posted, user)
@@ -509,6 +518,9 @@ def _post(inst, user):
     db.audit(user, "物流付款做账-写入金蝶凭证", "记-%s" % vno, "%s 付款单 %s；补 %d 行；借 %s 贷 %s" % (book, pb["单号"], len(new), rec["dr"], rec["cr"]))
     steps.append("凭证 记-%s 补 %d 行、改支付摘要" % (vno, len(new)))
     steps.append("凭证已提交，等人审核" if not sub_err else "凭证提交失败：%s（凭证已保存，可在金蝶手动提交）" % sub_err)
+    # 首页待办区：提交成功 → 给付款凭证审核人记一笔；没提交上 → 挂回做账人。合进凭证的计提更正顺带销账。失败只留痕，不拦。
+    todo_scenes.voucher_touch(inst, rec, req, user)
+    todo_scenes.fix_touch(req.get("carrier"), req.get("period"), user)
     return {"ok": True, "vno": vno, "bill_no": pb["单号"], "steps": steps, "dr": rec["dr"], "cr": rec["cr"]}
 
 

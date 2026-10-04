@@ -15,6 +15,7 @@ import mailer
 import notifier
 import threading
 import time
+import todo_scenes
 
 from core import (
     JSONResponse, _KD_STATUS_CN, _require_perm, datetime, db, os,
@@ -215,6 +216,8 @@ def fxrate_post(body: dict, request: Request):
     n_fail = len(results) - n_ok - n_skip
     db.audit(u["name"], "汇率录入-写入金蝶", f"{year}年{month}月·组织{org}",
              f"应建{len(results)}：写入{n_ok} 跳过{n_skip} 失败{n_fail}")
+    if n_ok:      # 首页待办区：写进金蝶并提交了 → 给汇率审核人记一笔待办（失败只留痕，不拦）
+        todo_scenes.fx_touch(year, month, org, u["name"])
     notify_res = None
     if n_ok:      # 真写入了才通知；全跳过(已存在)不打扰
         rep = {"year": year, "month": month, "org": org, "org_name": _fxrate_org_name(org),
@@ -276,11 +279,13 @@ def fxrate_unpost(body: dict, request: Request):
     except kc.KingdeeError as e:
         return {"ok": False, "msg": f"连接金蝶失败，未撤销任何记录：{e}"}
     results = []
+    touched = set()        # 撤到了哪几个「年月×组织」——撤完看要不要把待办撤回
     for lid in ids:
         lg = db.get_fx_post(lid)
         if not lg:
             results.append({"id": lid, "status": "skipped", "msg": "台账无此记录（可能已撤销）"})
             continue
+        touched.add((lg["year"], lg["month"], lg["org"]))
         item = {"id": lid, "pair": lg["pair"]}
         kid = lg["kd_id"]
         try:
@@ -307,6 +312,8 @@ def fxrate_unpost(body: dict, request: Request):
     n_del = sum(1 for r in results if r["status"] in ("deleted", "cleared"))
     n_block = sum(1 for r in results if r["status"] == "blocked")
     db.audit(u["name"], "汇率录入-撤销", f"{len(ids)}条", f"撤销{n_del} 拦下{n_block}")
+    for y, m, o in touched:      # 首页待办区：这批全撤光了 → 待办自动撤回
+        todo_scenes.fx_touch(y, m, o, posted=False)
     return {"ok": True, "撤销": n_del, "拦下": n_block, "失败": len(results) - n_del - n_block, "results": results}
 
 
@@ -403,6 +410,8 @@ def _fxrate_autobuild(year, month, org, dry_run=False):
     rep["status"] = "written" if n_fail == 0 else "partial"
     rep["msg"] = f"写入 {n_ok} 条" + (f"，失败 {n_fail} 条" if n_fail else "")
     db.audit("系统自动", "汇率录入-自动写入金蝶", f"{year}年{month}月·组织{org}", rep["msg"])
+    if n_ok:      # 首页待办区：定时任务写进金蝶并提交了 → 给汇率审核人记一笔待办，「谁交过来的」写系统
+        todo_scenes.fx_touch(year, month, org, todo_scenes.BOT_FX, bot=True)
     return rep
 
 

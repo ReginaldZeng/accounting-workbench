@@ -161,6 +161,13 @@ export const submitAccessRequest = (cap, label, pages, note) => jp('/api/access-
 export const getMyAccessRequests = () => j('/api/access-request/mine')
 export const getAccessRequestConfig = () => j('/api/access-request/config')
 export const saveAccessRequestConfig = (entries) => j('/api/access-request/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries }) })
+// V2.790 首页待办区：/mine 只读本地待办表（不碰金蝶，首页可直接调）；check=「我已办，立即核对」去金蝶读状态；close 只有计提更正能手动办结
+export const getTodos = () => j('/api/todo/mine')
+export const checkTodo = id => jp('/api/todo/check', id ? { id } : {})
+export const closeTodo = (id, vno) => jp('/api/todo/close', { id, vno })
+export const voidTodo = (id, reason) => jp('/api/todo/void', { id, reason })
+export const getTodoConfig = () => j('/api/todo/config')
+export const saveTodoConfig = assignees => j('/api/todo/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assignees }) })
 export const saveNavModules = (state, posts, templates) => jpSoft('/api/nav-modules/save', { state, posts, templates })
 // 日志中心（V2.488-489）：运维请求日志 + 业务操作留痕。全部仅主管理员（enter_settings）可读。
 export const getOpsLive = () => j('/api/ops/live')

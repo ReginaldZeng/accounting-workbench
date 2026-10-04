@@ -8,6 +8,7 @@
 import React, { useState, useEffect } from 'react'
 import { setConfig, testKingdee, getNavModules, saveNavModules, addNavModule, delNavModule, moveNavModule, saveNavSections } from '../api.js'
 import AccessRequestPanel from './AccessRequestPanel.jsx'   // V2.731 首页「申请开通」钉钉接收人
+import TodoAssigneePanel from './TodoAssigneePanel.jsx'     // V2.790 首页待办区·各环节处理人
 import SysLog from './SysLog.jsx'   // V2.489 日志中心（运维请求日志 + 业务操作留痕），作为系统设置内的一个标签页
 
 // 状态色：灰=还没开放，琥珀=可进但未定稿，绿=正式可用
@@ -352,6 +353,7 @@ export default function Settings({ cfg, onChange, onModsChanged }) {
       {tab === 'settings' && <>
       <NavModules onModsChanged={onModsChanged} />
       <div style={{ margin: '16px 0' }}><AccessRequestPanel /></div>
+      <div style={{ margin: '16px 0' }}><TodoAssigneePanel /></div>
       <div style={{ maxWidth: 660 }}>
         <div className="cat">
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>数据源</div>

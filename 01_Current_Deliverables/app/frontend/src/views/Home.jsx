@@ -1,7 +1,14 @@
+// [Change Log] Date: 2026-10-04 | Author: Claude Opus 5.5 | Version: V2.790（首页待办区）
+// Description: 首页待办区（《首页待办区 需求确认书 v1.0》D1/D12）。
+//   · 问候区右侧：原「已开通页面进度条 + 当前期间 + 是否封存」整块去掉，改放待办提示——「待我处理 N 件」「我发起的 N 件在等别人」，点了切到下面对应页签。
+//   · 待办清单默认收着（D13，业务方看真页面后定）：点问候区的数字才在下面展开，再点一次收起——平时首页还是页面卡片在首屏。
+//     清单三个页签（待我处理 / 我发起的 / 最近办结），表格不做卡片。在金蝶办的行尾「我已办，立即核对」＝马上去金蝶读状态、审了当场销。
+//   · 什么待办都没有：提示里说一句，没有可展开的。
+//   ⚠ 首页铁律加一条例外：待办数据由 App 取（/api/todo/mine，只读本地待办表、不碰金蝶），侧栏角标用同一份。
 // [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.731
 // Description: 首页按权限分层（移植财务BP工作台 V2.550/V2.552/V2.553，交接提示词 §2，口径已定）。
 //   访问的人多、权限普遍小：要能区分哪些能用，又让人知道哪些没权限、可以申请。
-//   · 问候区（紧凑）：问候 + 岗位；右侧「已开通页面 x / y」+ 进度条（分母只算已上线）；当前期间/封存只给开了期间类页面的人。
+//   · 问候区（紧凑）：问候 + 岗位。（右侧「已开通页面 x / y」进度条与当前期间/封存已在首页待办区 D12 去掉，原位置放待办提示）
 //   · 两个高亮按钮「我有权限的 N / 显示全部 N」，选择记本机；没记过：没开全→前者，一个没开→后者（不给空白页），全开→不显示切换。
 //   · 卡片三色：绿＝已开通可点；灰紫+锁＝没权限（不用红/橙，没权限是正常状态不是报错）；未上线不成卡片，只在组标题旁一行小字。
 //   · 卡片统一两行等高（标题 + 一行说明，超长省略、悬停看全文）；锁卡只靠锁角标+颜色，「申请开通」是标题行右侧小链接。
@@ -11,14 +18,12 @@
 // V2.500（业务方：首页只留真的工具）：基础数据/基础资料/基础设置/系统设置这类维表·配置叶子不进首页（侧栏仍可达），计数同口径。
 import React, { useEffect, useState } from 'react'
 import { navIcon, LOCK_ICON } from '../components/Sidebar.jsx'
-import { submitAccessRequest, getMyAccessRequests } from '../api.js'
+import { submitAccessRequest, getMyAccessRequests, checkTodo, closeTodo, voidTodo } from '../api.js'
 import '../home.css'
 
 // 配置/维表叶子（非「工具」）：按 key 认（改名也挡得住）＋按标签兜底（将来新增的同类也挡得住）。
 const _CFG_KEYS = new Set(['basicdata', 'settings', 'logibase', 'clwh', 'bomconfig', 'ecombase'])
 const isConfigLeaf = m => _CFG_KEYS.has(m.key) || /^(基础(数据|资料|设置)|系统设置)$/.test(m.label || '')
-// 用全局「当前期间」的页面：开了这些的人才在问候区看期间/封存
-const PERIOD_KEYS = ['reconcile', 'ledger', 'fundboard', 'wealth', 'periodclose', 'fisbal', 'logistics', 'logisticspay']
 export const RECENT_KEY = 'fw-recent-pages'    // App 切页时写入（最近使用排前）
 const VIEW_KEY = 'fw-home-view'
 
@@ -69,7 +74,12 @@ function greeting() {
 const readLS = k => { try { return localStorage.getItem(k) } catch (e) { return null } }
 const writeLS = (k, v) => { try { localStorage.setItem(k, v) } catch (e) { /* 存不了就只本次有效 */ } }
 
-export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
+const OK_ICON = <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9" /><path d="M8 12l3 3 5-6" /></svg>
+const BOT_ICON = <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="5" y="8" width="14" height="11" rx="2.5" /><path d="M12 4v4M9 13h.01M15 13h.01" /></svg>
+const TODO_TAG = { rev: ['rev', '待审核'], do: ['do', '待处理'] }
+const DONE_TAG = { done: ['done', '已办结'], withdrawn: ['back', '已撤回'], void: ['back', '已作废'] }
+
+export default function Home({ user, navDef, mods, onNav, todos, onTodos }) {
   const modules = navDef?.modules || []
   const sections = (navDef?.sections || []).filter(s => !s.bottom).sort((a, b) => (a.order || 0) - (b.order || 0))
   const hasCap = c => user?.role === 'admin' || !!user?.perms?.[c]
@@ -85,7 +95,6 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
   const live = leaves.filter(isOn)                         // 已上线（未上线另算，不进分母）
   const mine = live.filter(canSee)
   const allOpen = mine.length === live.length
-  const showPeriod = mine.some(l => PERIOD_KEYS.includes(l.key))
   // 岗位存的是岗位 key（改名不丢绑定），显示翻成中文名
   const postName = (user?.post && ((navDef?.posts || []).find(p => p.key === user.post)?.label || user.post)) || (user?.role === 'admin' ? '管理员' : '')
 
@@ -166,9 +175,112 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
       return { ...g, items, liveN: liveKids.length, soon: g.kids.filter(k => !isOn(k)) }
     })
     .filter(g => g.items.length || (v === 'all' && g.soon.length))
-  const pct = live.length ? Math.round((mine.length / live.length) * 100) : 0
-  const period = cfg['期间'] || (cfg.year && cfg.period ? `${cfg.year}-${String(cfg.period).padStart(2, '0')}` : '')
-  const closed = !!cfg['封存']?.['已封存']
+
+  // —— 待办区（V2.790）：数据由 App 取好传进来；这里只管页签、立即核对、手动办结 ——
+  const [todoTab, setTodoTab] = useState('mine')
+  const [todoOpen, setTodoOpen] = useState(false)  // 清单默认收着；点问候区的数字展开，再点同一个数字收起
+  const tipClick = k => { if (todoOpen && todoTab === k) setTodoOpen(false); else { setTodoTab(k); setTodoOpen(true) } }
+  const CARET = open => <i className={'car' + (open ? ' up' : '')} aria-hidden="true" />
+  const [checking, setChecking] = useState(null)   // 正在核对的待办 id；'all'＝全部核对
+  const [ask, setAsk] = useState(null)             // {mode: 'close' | 'void', it} 手动办结 / 作废 的小弹框
+  const [askText, setAskText] = useState('')
+  const [askBusy, setAskBusy] = useState(false)
+  const td = todos || null
+  const tdMine = td?.mine || [], tdSent = td?.sent || [], tdDone = td?.done || []
+  const tdEmpty = !!td && !tdMine.length && !tdSent.length && !tdDone.length
+  const tdWaiting = tdSent.filter(x => x.status === 'open').length
+  const tdLate = tdMine.filter(x => x.late).length
+  const check = async id => {
+    setChecking(id || 'all')
+    try {
+      const r = await checkTodo(id)
+      onTodos && onTodos(r)
+      setToast({ ok: !(r.result?.kd_error || r.result?.failed), text: r.msg })
+    } catch (e) {
+      setToast({ ok: false, text: e.message })
+    } finally {
+      setChecking(null)
+    }
+  }
+  const submitAsk = async () => {
+    if (!ask) return
+    setAskBusy(true)
+    try {
+      const r = ask.mode === 'close' ? await closeTodo(ask.it.id, askText) : await voidTodo(ask.it.id, askText)
+      onTodos && onTodos(r)
+      setToast({ ok: true, text: ask.mode === 'close' ? '已办结' : '已作废（已留痕）' })
+      setAsk(null)
+    } catch (e) {
+      setToast({ ok: false, text: e.message })
+    } finally {
+      setAskBusy(false)
+    }
+  }
+  const openAskTodo = (mode, it) => { setAskText(''); setAsk({ mode, it }) }
+  const what = it => (
+    <td className="what"><b>{it.title}</b>
+      {it.sub && <span className="sub">{it.sub}</span>}
+      {it.warn && <span className="warn">{it.warn}</span>}
+      {it.note && <span className="warn">{it.note}</span>}</td>
+  )
+  const from = it => it.bot ? <span className="bot">{BOT_ICON}{it.origin}</span> : (it.origin || '—')
+  const none = text => <div className="none">{OK_ICON}{text}</div>
+  let todoBody = null
+  if (td && !tdEmpty) {
+    if (todoTab === 'mine') {
+      todoBody = !tdMine.length ? none('现在没有等你处理的事。') : (
+        <div className="tw"><table>
+          <thead><tr><th>要做什么</th><th>事项</th><th>谁交过来的</th><th>等了多久</th><th>在哪办</th><th>现在的状态</th><th /></tr></thead>
+          <tbody>{tdMine.map(it => (
+            <tr key={it.id}>
+              <td><span className={'tg ' + (TODO_TAG[it.kind] || TODO_TAG.rev)[0]}>{(TODO_TAG[it.kind] || TODO_TAG.rev)[1]}</span></td>
+              {what(it)}
+              <td className="from">{from(it)}</td>
+              <td className={'age' + (it.late ? ' late' : '')}>{it.age}</td>
+              <td className="where"><span className={it.where}>{it.where === 'kd' ? '金蝶' : '工作台'}</span>{it.place}</td>
+              <td className="st">{it.state}
+                {it.kd && <span className={'kdck' + (it.checkMsg ? ' bad' : '')}>{it.checkMsg || (it.checkedAt ? `上次核对 ${it.checkedAt}` : '还没去金蝶核对过')}</span>}</td>
+              <td><span className="act">
+                <button type="button" className="tb" onClick={() => onNav && onNav(it.nav)}>{it.where === 'kd' ? '看明细' : '去处理'}</button>
+                {it.kd && <button type="button" className="tb pri" disabled={!!checking} onClick={() => check(it.id)}>{checking === it.id ? '正在问金蝶…' : '我已办，立即核对'}</button>}
+                {it.manual && <button type="button" className="tb pri" onClick={() => openAskTodo('close', it)}>已在金蝶改好</button>}
+                {user?.role === 'admin' && <button type="button" className="tb quiet" title="主管理员作废这条待办（要写原因，会留痕）" onClick={() => openAskTodo('void', it)}>作废</button>}
+              </span></td>
+            </tr>))}</tbody>
+        </table></div>)
+    } else if (todoTab === 'sent') {
+      todoBody = !tdSent.length ? none('你没有交出去还没办完的事。') : (
+        <div className="tw"><table>
+          <thead><tr><th>进度</th><th>事项</th><th>现在在谁手上</th><th>等了多久</th><th>状态</th><th /></tr></thead>
+          <tbody>{tdSent.map(it => {
+            const ok = it.status !== 'open'
+            return (
+              <tr key={it.id}>
+                <td><span className={'tg ' + (ok ? 'done' : 'rev')}>{ok ? '已办结' : it.kind === 'do' ? '等处理' : '等审核'}</span></td>
+                {what(it)}
+                <td className="from">{ok ? (it.doneBy || '—') : (it.holders || []).join('、') || '—'}</td>
+                <td className={'age' + (it.late ? ' late' : '')}>{ok ? '—' : it.age}</td>
+                <td className="st">{ok ? `${it.doneHow}${it.doneAt ? ' · ' + it.doneAt : ''}` : it.state}</td>
+                <td><span className="act"><button type="button" className="tb" onClick={() => onNav && onNav(it.nav)}>看明细</button></span></td>
+              </tr>)
+          })}</tbody>
+        </table></div>)
+    } else {
+      todoBody = !tdDone.length ? none('近 7 天没有办结的。') : (
+        <div className="tw"><table>
+          <thead><tr><th>结果</th><th>事项</th><th>谁交过来的</th><th>谁办的</th><th>什么时候</th><th className="l">怎么办结的</th></tr></thead>
+          <tbody>{tdDone.map(it => (
+            <tr key={it.id}>
+              <td><span className={'tg ' + (DONE_TAG[it.status] || DONE_TAG.done)[0]}>{(DONE_TAG[it.status] || DONE_TAG.done)[1]}</span></td>
+              {what(it)}
+              <td className="from">{from(it)}</td>
+              <td className="from">{it.doneBy || '—'}</td>
+              <td className="age">{it.doneAt}</td>
+              <td className="st l">{it.doneHow}</td>
+            </tr>))}</tbody>
+        </table></div>)
+    }
+  }
 
   let body
   if (v === 'mine' && !mine.length) {
@@ -204,7 +316,7 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
 
   return (
     <div className="kd-home">
-      {/* 问候 + 我是谁 + 开通进度。不发业务请求：期间来自已在内存的全局态 cfg，身份由 App 传入 */}
+      {/* 问候 + 我是谁 + 待办提示。不发业务请求：身份与待办都由 App 传入 */}
       <section className="hero">
         <div>
           <h2>{greeting()}{user?.name ? `，${user.name}` : ''}</h2>
@@ -213,17 +325,40 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
             <span>财务核算工作台 · 进入页面后才取数</span>
           </div>
         </div>
-        <div className="meter">
-          <div className="t"><span>已开通页面</span><b>{allOpen ? `全部 ${live.length} 个` : `${mine.length} / ${live.length}`}</b></div>
-          <div className="bar"><i style={{ width: `${pct}%` }} /></div>
-          {showPeriod && period && (
-            <div className="row2">
-              <span className="chip per">当前期间 {period}</span>
-              <span className={'chip ' + (closed ? 'closed' : 'open')}>{closed ? '本期已封存' : '本期未封存'}</span>
-            </div>
-          )}
-        </div>
+        {/* 待办提示（D12：原「已开通页面 / 期间」的位置）。没取到就不显示，不占位也不报错 */}
+        {td && (tdEmpty ? <div className="tip"><span className="zero">{OK_ICON}现在没有等你处理的事</span></div> : (
+          <div className="tip">
+            <button type="button" className={'mine' + (tdMine.length ? ' has' : '') + (todoOpen && todoTab === 'mine' ? ' on' : '')}
+              aria-expanded={todoOpen && todoTab === 'mine'} title="点开看清单，再点一次收起" onClick={() => tipClick('mine')}>
+              <span className="k">待我处理{CARET(todoOpen && todoTab === 'mine')}</span>
+              <span className="v">{tdMine.length}<small>件</small></span>
+              <span className={'s' + (tdLate ? ' late' : '')}>{tdLate ? `${tdLate} 件超过 3 个工作日` : tdMine.length ? '都在 3 个工作日内' : '现在没有'}</span>
+            </button>
+            <button type="button" className={todoOpen && todoTab === 'sent' ? 'on' : ''}
+              aria-expanded={todoOpen && todoTab === 'sent'} title="点开看清单，再点一次收起" onClick={() => tipClick('sent')}>
+              <span className="k">我发起的{CARET(todoOpen && todoTab === 'sent')}</span>
+              <span className="v">{tdWaiting}<small>件在等别人</small></span>
+              <span className="s">{tdWaiting ? '点开看在谁手上' : '没有在等的'}</span>
+            </button>
+          </div>))}
       </section>
+
+      {/* 待办清单：点了上面的数字才展开（D13）；什么都没有时没有可展开的 */}
+      {td && !tdEmpty && todoOpen && (
+        <section className="todo" aria-label="待办">
+          <div className="todo-h">
+            <div className="tabs" role="tablist">
+              {[['mine', '待我处理', tdMine.length], ['sent', '我发起的', tdWaiting], ['done', '最近办结', tdDone.length]].map(([k, l, c]) => (
+                <button key={k} type="button" role="tab" className={k === 'mine' && c ? 'hot' : ''} aria-selected={todoTab === k} onClick={() => setTodoTab(k)}>
+                  {l}<span className="c">{c}</span></button>))}
+            </div>
+            <span className="sync">在金蝶办的，每 {td.everyMin || 20} 分钟自动核对一次
+              <button type="button" disabled={!!checking} onClick={() => check()}>{checking === 'all' ? '核对中…' : '全部核对'}</button>
+              <button type="button" onClick={() => setTodoOpen(false)}>收起</button></span>
+          </div>
+          {todoBody}
+          <div className="todo-f">挂了超过 3 个工作日的，「等了多久」会变色。在金蝶里审完会自动销账，不用在这里点。</div>
+        </section>)}
 
       <div className="viewbar">
         {allOpen ? (
@@ -249,6 +384,27 @@ export default function Home({ user, cfg = {}, navDef, mods, onNav }) {
       {body}
 
       {toast && <div className={'toast ' + (toast.ok ? 'ok' : 'bad')} role="status">{toast.text}</div>}
+
+      {ask && (
+        <div className="mask" onMouseDown={e => { if (e.target === e.currentTarget && !askBusy) setAsk(null) }}>
+          <div className="dlg" role="dialog" aria-label={ask.mode === 'close' ? '已在金蝶改好' : '作废这条待办'}>
+            <div className="dlg-h"><b>{ask.mode === 'close' ? '已在金蝶改好' : '作废这条待办'}</b>
+              <button type="button" className="x" onClick={() => setAsk(null)} aria-label="关闭">✕</button></div>
+            <div className="dlg-b">
+              <div><b>{ask.it.title}</b>{ask.it.sub ? `　${ask.it.sub}` : ''}</div>
+              <textarea value={askText} onChange={e => setAskText(e.target.value.slice(0, 150))} rows={2}
+                placeholder={ask.mode === 'close' ? '金蝶里改好的那张凭证号，如 记-312（必填，方便以后回查）' : '作废原因（必填，会留痕）'} />
+              <div className="fine">{ask.mode === 'close'
+                ? '这一类是照更正单在金蝶里手工改的，系统没法知道改的是哪张凭证，所以要你确认一下并留个凭证号。合进付款凭证的那种会自动销，不用点。'
+                : '作废后这条从处理人名下消失，记录留着，「最近办结」里看得到是谁、为什么作废的。'}</div>
+            </div>
+            <div className="dlg-f">
+              <button type="button" className="btn" onClick={() => setAsk(null)} disabled={askBusy}>取消</button>
+              <button type="button" className="btn btn-pri" onClick={submitAsk} disabled={askBusy || !askText.trim()}>{askBusy ? '提交中…' : ask.mode === 'close' ? '确认已改好' : '确认作废'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {askFor && (
         <div className="mask" onMouseDown={e => { if (e.target === e.currentTarget && !sending) setAskFor(null) }}>

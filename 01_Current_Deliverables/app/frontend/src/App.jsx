@@ -39,7 +39,7 @@ import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
 import Home, { RECENT_KEY } from './views/Home.jsx'
-import { getConfig, setConfig, getMe, apiLogout, getNavModules } from './api.js'
+import { getConfig, setConfig, getMe, apiLogout, getNavModules, getTodos } from './api.js'
 
 export default function App() {
   const [user, setUser] = useState(undefined)   // undefined=检查登录中 / null=未登录 / {..}=已登录
@@ -77,6 +77,11 @@ export default function App() {
     } catch (e) { /* 存不了就算了 */ }
   }, [view])
   useEffect(() => { if (user) getNavModules().then(r => { setMods(r.state); setNavDef({ modules: r.modules, sections: r.sections, posts: r.posts }) }).catch(() => {}) }, [user])
+  // 首页待办区（V2.790）：进核算工作台、以及每次回到首页时取一次「我的待办」（只读本地待办表，不碰金蝶）。
+  // 放在 App 而不是 Home：侧栏首页图标的角标要同一份数。取不到就当没有，不挡页面。
+  const [todos, setTodos] = useState(null)
+  const loadTodos = () => getTodos().then(setTodos).catch(() => {})
+  useEffect(() => { if (user && zone === 'accounting' && view === 'home') loadTodos() }, [user, zone, view])
   // 落地页：既要模块开着，**也要这个人进得去**（V2.52 准入点）。
   // 不看准入点的话，一个没有任何菜单权限的账号会直接落在「对账程序」上——侧栏空空如也，正文却把整页
   // 渲染给他看（实测抓到）。没有一个能进的 → 落到「无权限」占位，别白屏也别越权。
@@ -125,7 +130,7 @@ export default function App() {
   return (
     <div className="shell">
       <Sidebar view={view} onSelect={setView} source={cfg.source} user={user} onLogout={logout} onHome={backToPortal}
-        closed={!!cfg['封存']?.['已封存']} mods={mods} navDef={navDef} ver={cfg['版本']}
+        closed={!!cfg['封存']?.['已封存']} mods={mods} navDef={navDef} ver={cfg['版本']} todoN={todos?.counts?.mine || 0}
         focusSection={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ar' : INV_VIEWS.includes(view) ? 'inv' : ''}
         focusParent={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ecom' : ''} />
       <main className="main">
@@ -146,8 +151,9 @@ export default function App() {
             hint="该模块已上线，但你的账号没有它的准入权限。请联系主管理员在「账号管理」里开通。"
             body="这不是功能没做，是权限还没开——找主管理员即可。" />
         })()}
-        {/* 首页（V2.488）：轻量落地页，进核算工作台先落这里。恒可进、不取业务数据；卡片点开才进对应模块 */}
-        {view === 'home' && <Home user={user} cfg={cfg} navDef={navDef} mods={mods} onNav={setView} />}
+        {/* 首页（V2.488）：轻量落地页，进核算工作台先落这里。恒可进、不取业务数据；卡片点开才进对应模块。
+            待办区（V2.790）读的是本地待办表，由上面的 loadTodos 取，不算业务取数 */}
+        {view === 'home' && <Home user={user} cfg={cfg} navDef={navDef} mods={mods} onNav={setView} todos={todos} onTodos={setTodos} />}
         {view === 'import' && canView('reconcile') && <DataImport cfg={cfg} onChange={setCfg} onPeriod={changePeriod} onNav={setView} user={user} />}
         {view === 'fund' && canView('reconcile') && <FundDashboard cfg={cfg} onPeriod={changePeriod} onNav={setView} user={user} />}
         {view === 'fundboard' && canView('fundboard') && <FundBoard cfg={cfg} onPeriod={changePeriod} onNav={setView} />}

@@ -1,5 +1,7 @@
 /*
 [Change Log]
+Date: 2026-10-04 | Author: Claude Opus 5.5 | Version: V2.790（首页待办区）
+Description: 问候区右侧「已开通页面进度条 / 期间」样式去掉（D12），原位置放待办提示 .tip；新增待办区 .todo（三个页签 + 表格）。
 Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.731
 Description: 首页按权限分层（移植财务BP工作台 V2.550/V2.552 home.css）。两个高亮按钮切「我有权限的 / 显示全部」，
   卡片两色：绿＝已开通、灰紫+锁＝没权限可申请（未上线不成卡片）。颜色全走核算 CSS 变量，深色主题自动跟。
@@ -16,12 +18,87 @@ Description: 首页按权限分层（移植财务BP工作台 V2.550/V2.552 home.
 .kd-home .chip.per { border-color: var(--accent-soft); background: var(--accent-soft); color: var(--accent); }
 .kd-home .chip.closed { border-color: var(--green-line); background: var(--green-bg); color: var(--green); }
 .kd-home .chip.open { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
-.kd-home .meter { min-width: 210px; }
-.kd-home .meter .t { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--ink-2); }
-.kd-home .meter .t b { color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
-.kd-home .meter .bar { margin-top: 6px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
-.kd-home .meter .bar i { display: block; height: 100%; background: var(--green); border-radius: 3px; }
-.kd-home .meter .row2 { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* 问候区右侧：待办提示（两个数，点了切到下面对应页签） */
+.kd-home .tip { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
+.kd-home .tip button.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.kd-home .tip .car { display: inline-block; width: 6px; height: 6px; margin-left: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: translateY(-3px) rotate(45deg); transition: transform .15s; opacity: .7; }
+.kd-home .tip .car.up { transform: translateY(0) rotate(-135deg); }
+.kd-home .tip button { display: grid; gap: 1px; min-width: 148px; padding: 8px 14px; text-align: left; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg); font: inherit; color: inherit; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.kd-home .tip button:hover { border-color: var(--accent); box-shadow: 0 4px 14px -8px rgba(75, 83, 196, .5); }
+.kd-home .tip button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.kd-home .tip .k { font-size: 12px; color: var(--ink-2); }
+.kd-home .tip .v { font-size: 22px; font-weight: 800; line-height: 1.25; font-variant-numeric: tabular-nums; color: var(--ink); }
+.kd-home .tip .v small { font-size: 12px; font-weight: 500; color: var(--ink-2); margin-left: 3px; }
+.kd-home .tip .s { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.kd-home .tip .mine.has { border-color: var(--red-line); background: linear-gradient(180deg, var(--red-bg), var(--bg) 70%); }
+.kd-home .tip .mine.has .v { color: var(--red); }
+.kd-home .tip .s.late { color: var(--amber); font-weight: 600; }
+.kd-home .tip .zero { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid var(--green-line); border-radius: 10px;
+  background: var(--green-bg); color: var(--green); font-size: 13px; font-weight: 600; }
+.kd-home .tip .zero svg { width: 16px; height: 16px; }
+
+/* 待办区：三个页签 + 表格（不做卡片） */
+.kd-home .todo { border: 1px solid var(--line); border-radius: 12px; background: var(--bg); overflow: hidden; }
+.kd-home .todo-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 12px 0 14px; border-bottom: 1px solid var(--line); }
+.kd-home .todo .tabs { display: flex; gap: 2px; white-space: nowrap; }
+.kd-home .todo .tabs button { position: relative; display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 12px; border: 0; background: transparent;
+  font: inherit; color: var(--ink-2); font-size: 13.5px; font-weight: 600; cursor: pointer; border-radius: 8px 8px 0 0; }
+.kd-home .todo .tabs button .c { min-width: 20px; height: 18px; padding: 0 6px; border-radius: 999px; display: inline-grid; place-items: center; font-size: 11.5px;
+  background: var(--gray-bg); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.kd-home .todo .tabs button[aria-selected="true"] { color: var(--ink); }
+.kd-home .todo .tabs button[aria-selected="true"]::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent); }
+.kd-home .todo .tabs button.hot .c { background: var(--red-bg); color: var(--red); }
+.kd-home .todo .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.kd-home .todo .sync { margin-left: auto; padding-bottom: 6px; font-size: 12px; color: var(--ink-3); }
+.kd-home .todo .sync button { border: 0; background: none; font: inherit; color: var(--accent); cursor: pointer; padding: 0 0 0 10px; }
+.kd-home .todo .sync button:hover { text-decoration: underline; }
+.kd-home .todo .sync button:disabled { color: var(--ink-3); cursor: default; text-decoration: none; }
+.kd-home .todo .tw { overflow-x: auto; }
+.kd-home .todo table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 13px; }
+.kd-home .todo th { padding: 7px 10px; text-align: left; font-size: 11.5px; font-weight: 600; color: var(--ink-3); background: var(--bg-sub);
+  border: 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.kd-home .todo td { padding: 9px 10px; border: 0; border-bottom: 1px solid var(--line); vertical-align: top; line-height: 1.5; color: var(--ink); }
+.kd-home .todo tr:last-child td { border-bottom: 0; }
+.kd-home .todo tbody tr:hover td { background: var(--bg-sub); }
+.kd-home .todo th:first-child, .kd-home .todo td:first-child { padding-left: 14px; }
+.kd-home .todo th:last-child, .kd-home .todo td:last-child { padding-right: 14px; text-align: right; white-space: nowrap; }
+.kd-home .todo th.l, .kd-home .todo td.l { text-align: left; white-space: normal; }
+.kd-home .todo .tg { display: inline-block; font-size: 11.5px; font-weight: 600; line-height: 19px; padding: 0 7px; border-radius: 5px; white-space: nowrap; }
+.kd-home .todo .tg.rev { color: var(--accent); background: var(--accent-soft); }
+.kd-home .todo .tg.do { color: var(--violet); background: var(--violet-bg); }
+.kd-home .todo .tg.done { color: var(--green); background: var(--green-bg); }
+.kd-home .todo .tg.back { color: var(--gray); background: var(--gray-bg); }
+.kd-home .todo .what b { font-weight: 600; }
+.kd-home .todo .what .sub { display: block; font-size: 12px; color: var(--ink-2); }
+.kd-home .todo .what .warn { display: block; font-size: 12px; color: var(--amber); }
+.kd-home .todo .from { white-space: nowrap; }
+.kd-home .todo .from .bot { display: inline-flex; align-items: center; gap: 4px; color: var(--violet); }
+.kd-home .todo .from .bot svg { width: 13px; height: 13px; }
+.kd-home .todo .age { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.kd-home .todo .age.late { color: var(--amber); font-weight: 600; }
+.kd-home .todo .where { white-space: nowrap; color: var(--ink-2); }
+.kd-home .todo .where .kd, .kd-home .todo .where .wb { display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 4px; font-size: 11px; font-weight: 700; line-height: 17px; }
+.kd-home .todo .where .kd { color: var(--blue); background: var(--blue-bg); }
+.kd-home .todo .where .wb { color: var(--green); background: var(--green-bg); }
+.kd-home .todo .st { font-size: 12px; color: var(--ink-2); }
+.kd-home .todo .st .kdck { display: block; color: var(--ink-3); }
+.kd-home .todo .st .kdck.bad { color: var(--amber); }
+.kd-home .todo .act { display: inline-flex; gap: 6px; align-items: center; }
+.kd-home .todo .tb { height: 26px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line-strong); background: var(--bg); font: inherit; font-size: 12px;
+  color: var(--ink); cursor: pointer; white-space: nowrap; }
+.kd-home .todo .tb:hover { border-color: var(--accent); color: var(--accent); }
+.kd-home .todo .tb.pri { border-color: var(--accent); background: var(--accent); color: #fff; }
+.kd-home .todo .tb.pri:hover { background: var(--accent-strong); color: #fff; }
+.kd-home .todo .tb.quiet { border-color: transparent; background: transparent; color: var(--ink-3); padding: 0 4px; }
+.kd-home .todo .tb.quiet:hover { color: var(--red); }
+.kd-home .todo .tb:disabled { opacity: .6; cursor: default; }
+.kd-home .todo .tb:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.kd-home .todo-f { padding: 7px 14px; border-top: 1px solid var(--line); background: var(--bg-sub); font-size: 12px; color: var(--ink-3); }
+.kd-home .todo .none { display: flex; align-items: center; gap: 10px; padding: 14px; font-size: 13px; color: var(--ink-2); }
+.kd-home .todo .none svg { width: 16px; height: 16px; color: var(--green); flex: none; }
 
 /* 视图切换：两个高亮按钮 */
 .kd-home .viewbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }

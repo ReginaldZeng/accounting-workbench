@@ -5006,6 +5006,8 @@ from routers import access_request   # V2.731 首页「申请开通」→ 钉钉
 app.include_router(access_request.router)
 from routers import logistics_voucher   # V2.749 物流付款做账（红冲→更正→核销→支付 合成凭证预览）
 app.include_router(logistics_voucher.router)
+from routers import todo   # V2.790 首页待办区（待我处理 / 我发起的 / 最近办结 + 待办处理人设置 + 回读金蝶状态自动销账）
+app.include_router(todo.router)
 
 
 # 托管 React 构建产物 (SPA: /api/* 优先; 真实静态文件直接给; 其余非API路径回退 index.html,
