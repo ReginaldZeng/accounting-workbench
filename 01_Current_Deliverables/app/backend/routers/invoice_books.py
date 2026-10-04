@@ -2289,12 +2289,27 @@ def remind_tick(now=None, force=False):
     return out
 
 
+def _remind_next_in(r):
+    """离下一轮催票还有几秒（数字员工办公室的排队表用）：今天还没到点 → 今天整点；今天催过了 → 明天整点；到点了还没催成 → 下一圈。"""
+    try:
+        hour = int((inv.get_settings().get("remind") or {}).get("hour", 10))
+        now = datetime.now()
+        at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if r.get("reason") == "early":
+            return (at - now).total_seconds()
+        if r.get("ran") or r.get("reason") == "doneToday":
+            return (at + timedelta(days=1) - now).total_seconds()
+    except Exception:
+        pass
+    return 600
+
+
 def _remind_loop():
     import worker_store      # 数字员工办公室·催票员：每圈报到；当天真催了才记一笔（只写张数）
     while True:
         try:
             r = remind_tick() or {}
-            worker_store.beat("inv_remind", off="催票开关没开" if r.get("reason") == "disabled" else "")
+            worker_store.beat("inv_remind", off="催票开关没开" if r.get("reason") == "disabled" else "", next_in=_remind_next_in(r))
             if r.get("ran") and r.get("due"):
                 worker_store.record("inv_remind", n=r.get("sent") or 0, ok=not r.get("failed"),
                                     summary="该催 %d 张，已发出 %d 张" % (r["due"], r.get("sent") or 0),

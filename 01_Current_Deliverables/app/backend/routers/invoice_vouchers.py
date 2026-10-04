@@ -105,18 +105,18 @@ def start_timer():
         return
     def loop():
         import worker_store      # 数字员工办公室·发票凭证同步员：每圈报到；真对上了凭证 / 出了错才记一笔（只写张数）
-        worker_store.beat("inv_voucher")
+        worker_store.beat("inv_voucher", next_in=20 * 60)
         while True:
             threading.Event().wait(20 * 60)
             try:
                 r = sync_once() or {}
-                worker_store.beat("inv_voucher")
+                worker_store.beat("inv_voucher", next_in=20 * 60)
                 if r.get("changed"):
                     worker_store.record("inv_voucher", n=r["changed"], summary="已对上 %d 张发票的金蝶凭证" % r["changed"])
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).exception("发票凭证定时刷新失败，保留旧记录")
-                worker_store.beat("inv_voucher")
+                worker_store.beat("inv_voucher", next_in=20 * 60)
                 worker_store.record("inv_voucher", ok=False, summary="回查金蝶凭证出错", error=str(e))
     threading.Thread(target=loop, name="inv-vouchers", daemon=True).start()
 

@@ -648,7 +648,7 @@ def _scheduler():
                 worker_store.beat("payreq", off="本机测试库不自动跑")
                 continue
             r = scan_once("定时") or {}
-            worker_store.beat("payreq")
+            worker_store.beat("payreq", next_in=20 * 60)
             if r.get("new") or r.get("failed") or r.get("err"):
                 bad = r.get("failed") or r.get("err")
                 worker_store.record("payreq", n=r.get("new") or 0, ok=not bad, summary="已接入 %d 张请款单" % (r.get("new") or 0), refs=r.get("newIds"),

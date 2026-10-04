@@ -166,7 +166,7 @@ def _loop():
             r = _checks(None, "定时")
             _STATE.update(lastRun=ts._now(), lastResult=r, lastError=r.get("kd_error") or "")
             import worker_store      # 数字员工办公室·待办核对员：每圈报到；真销了账 / 没连上金蝶才记一笔（只写条数）
-            worker_store.beat("todo_check")
+            worker_store.beat("todo_check", next_in=EVERY_MIN * 60)
             if r.get("kd_error"):
                 worker_store.record("todo_check", ok=False, summary="没连上金蝶，这一轮没核对成", error=r["kd_error"])
             elif r.get("done") or r.get("withdrawn"):

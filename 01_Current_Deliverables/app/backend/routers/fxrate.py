@@ -622,7 +622,12 @@ def _fxrate_scheduler():
 
 def _office_beat():
     """数字员工办公室·汇率录入员报到：开关没开 / 本机测试库 → 记成「没上岗」并写明原因。"""
-    worker_store.beat("fx", off="" if _fxrate_autorun_enabled() else ("本机测试库不自动跑" if _fxrate_is_local() else "自动录入开关没开"))
+    now = datetime.datetime.now()             # 下一轮＝下一个 FX_AUTORUN_HOUR 整点（刚到点报到的算明天）
+    nxt = now.replace(hour=FX_AUTORUN_HOUR, minute=0, second=0, microsecond=0)
+    if nxt <= now + datetime.timedelta(seconds=60):
+        nxt += datetime.timedelta(days=1)
+    worker_store.beat("fx", off="" if _fxrate_autorun_enabled() else ("本机测试库不自动跑" if _fxrate_is_local() else "自动录入开关没开"),
+                      next_in=(nxt - now).total_seconds())
 
 
 def _office_report(reports):

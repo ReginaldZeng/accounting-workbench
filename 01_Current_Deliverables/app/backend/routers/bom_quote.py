@@ -2181,14 +2181,15 @@ async def bom_oa_final_run(request: Request):
 def _auto_intake_scheduler():
     while True:
         conf = _auto_conf()
-        time.sleep(max(120, conf["interval"] * 60))
+        gap = max(120, conf["interval"] * 60)       # 这一圈睡多久＝离下一轮多久（报到时带给数字员工办公室的排队表）
+        time.sleep(gap)
         try:
             if conf["enabled"] and not _auto_is_local():
-                _office_bom("bom_intake", _auto_intake_once(trigger="定时"))
+                _office_bom("bom_intake", _auto_intake_once(trigger="定时"), gap)
             else:
                 _office_bom("bom_intake", {"ran": False, "msg": "本机测试库不自动跑" if _auto_is_local() else "未启用（conf.ini [bom] auto_intake=0）"})
             if not _auto_is_local():
-                _office_bom("bom_final", _oa_final_sync_once(trigger="定时"))       # V2.584：OA 财务经理节点同意/退回 → 工作台自动终审
+                _office_bom("bom_final", _oa_final_sync_once(trigger="定时"), gap)       # V2.584：OA 财务经理节点同意/退回 → 工作台自动终审
             else:
                 _office_bom("bom_final", {"ran": False, "msg": "本机测试库不自动跑"})
         except Exception as e:
@@ -2199,22 +2200,22 @@ def _auto_intake_scheduler():
                 pass
 
 
-def _office_bom(desk, s):
+def _office_bom(desk, s, gap=None):
     """数字员工办公室·BOM 两个工位：每圈报到；真立了项 / 同步了终审 / 出了错才记一笔（只写单数，不写产品名）。"""
     try:
-        _office_bom_inner(desk, s)
+        _office_bom_inner(desk, s, gap)
     except Exception:
         pass          # 记不上绝不拦定时任务本身
 
 
-def _office_bom_inner(desk, s):
+def _office_bom_inner(desk, s, gap=None):
     import worker_store
     s = s or {}
     if not s.get("ran"):
         msg = str(s.get("msg") or "")
         worker_store.beat(desk, off="" if "还在跑" in msg else msg)
         return
-    worker_store.beat(desk)
+    worker_store.beat(desk, next_in=gap)
     if desk == "bom_intake":
         ok_n, bad = len(s.get("intaken") or []), s.get("failed") or []
         if ok_n or bad:

@@ -11,11 +11,14 @@
 #   · refs＝这一笔干的是哪几张单（钉钉审批编号这类单号，最多留 6 个）。业务方 2026-10-04 定：大屏「刚干完的活」要看得见单号。
 #     单号本身不带供应商、客户、金额；除了单号别的不许往里塞。
 #   · 不记工时（业务方 2026-10-04 定：暂时不用）。
-#   两张新表自带 MetaData，导入时 create_all（只建不改既有表）。beat/record 全部吞异常：记不上绝不拦工位本身的活。
+#   · beat(desk, next_in=秒)：报到时顺带说「下一轮还有多久」→ 值班表带出 nextTs，大屏据此排「定时任务排队」。
+#     单独放一张表 worker_next：新表 create_all 会自己建，不用去改已经上线的 worker_beat。
+#     一个工位可以有好几条定时任务（BP 的业绩快报员有日报 / 周报 / 月报 / 季报四条）→ set_queue(desk, [...]) 一次写一组。
+#   几张新表自带 MetaData，导入时 create_all（只建不改既有表）。beat/record 全部吞异常：记不上绝不拦工位本身的活。
 #   不 import 任何 router；取件机这类「状态在别处」的工位由 app.py 通过 PROVIDERS 注册进来。
 from datetime import datetime, timedelta
 
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, func, insert, inspect, select, text, update
+from sqlalchemy import Column, Integer, MetaData, String, Table, Text, delete, func, insert, inspect, select, text, update
 
 import db
 
@@ -38,6 +41,14 @@ worker_beat = Table(
     Column("ts", String(20)),                # 上次报到
     Column("off", String(200)),              # 非空＝没上岗的原因（开关没开 / 没配置 / 本机测试库）
 )
+worker_next = Table(
+    "worker_next", _md,
+    Column("desk", String(40), primary_key=True),
+    Column("job", String(40), primary_key=True),   # 这个工位的哪条任务；只有一条的工位填 ""
+    Column("ts", String(20)),                # 下一轮预计什么时候跑（任务自己报的）
+    Column("name", String(60)),              # 任务叫什么（空＝就用工位名）
+    Column("cadence", String(40)),           # 多久一轮（空＝用工位注册表里的）
+)
 _md.create_all(db._engine)
 try:          # refs 是后加的列：表已经建过的库（本机测试库）补上这一列；新库 create_all 时已经带了
     if "refs" not in {c["name"] for c in inspect(db._engine).get_columns("worker_run")}:
@@ -51,13 +62,15 @@ _FMT = "%Y-%m-%d %H:%M:%S"
 # 工位注册表（顺序即值班表顺序）。stale_min＝多久没报到算「停了」（按该线程转一圈的时长留三倍余量）；
 # todo_scene＝它交出去的活落在首页待办区的哪个环节（有的话，值班表上显示「还压着几件没人接」）。
 # zone＝坐在办公室哪一组（大屏按组分区摆工位）。
+# sched＝按钟点跑的定时任务（每天几点干一次）。没有这个标记的是「巡检」——每隔二三十分钟去钉钉 / 金蝶看一眼有没有新活，
+#   有才干、没有就空转；大屏的「定时任务排队」只排 sched 的，巡检的不算定时任务（业务方 2026-10-04 指出）。
 DESKS = [
     {"key": "fx", "zone": "总账组", "name": "汇率录入员", "what": "抓人行中间价 → 建汇率 → 过闸门 → 写金蝶并提交", "cadence": "每天 14:00",
-     "stale_min": 50 * 60, "handoff": "汇率审核人", "todo_scene": "fx_audit", "unit": "条"},
+     "stale_min": 50 * 60, "handoff": "汇率审核人", "todo_scene": "fx_audit", "unit": "条", "sched": True},
     {"key": "inv_intake", "zone": "发票组", "name": "发票接收员", "what": "扫钉钉审批单 → 建票夹 → 拉附件识别 → 票齐自动送审", "cadence": "每 20 分钟",
      "stale_min": 30, "handoff": "发票审核人", "unit": "张单", "ref": "钉钉单号"},
     {"key": "inv_remind", "zone": "发票组", "name": "催票员", "what": "后补单到期 → 钉钉催申请人交票", "cadence": "每天一轮",
-     "stale_min": 40, "handoff": "申请人", "unit": "张"},
+     "stale_min": 40, "handoff": "申请人", "unit": "张", "sched": True},
     {"key": "inv_voucher", "zone": "发票组", "name": "发票凭证同步员", "what": "回查金蝶 → 把发票标成「已做账·凭证号」", "cadence": "每 20 分钟",
      "stale_min": 70, "handoff": "不用交接", "unit": "张"},
     {"key": "bom_intake", "zone": "成本组", "name": "BOM 立项员", "what": "钉钉单走到成本核算节点 → 自动立项进待办", "cadence": "定时扫描",
@@ -68,6 +81,12 @@ DESKS = [
      "stale_min": 70, "handoff": "物流复核人", "unit": "张单", "ref": "钉钉单号"},
     {"key": "todo_check", "zone": "总账组", "name": "待办核对员", "what": "去金蝶看审了没 → 审了就把首页待办销掉", "cadence": "每 20 分钟",
      "stale_min": 70, "handoff": "不用交接", "unit": "条"},
+    # 下面两个的活在 BP 工作台里干（它自己的定时调度），核算这边每分钟去看一眼它的任务清单和运行记录，替它报到、记账
+    #（office_bp_bridge.py）。BP 连不上 → 没人替它报到 → 十分钟后值班表上显示「停了」。
+    {"key": "bp_sentinel", "zone": "经营分析组", "name": "驾驶舱值守员", "what": "从金蝶刷新驾驶舱 → 体检基础资料待办 → 有待办就钉钉推给负责人",
+     "cadence": "工作日 09:00、每天 14:00", "stale_min": 10, "handoff": "财务 BP", "unit": "次", "sched": True},
+    {"key": "bp_flash", "zone": "经营分析组", "name": "业绩快报员", "what": "按日 / 周 / 月 / 季把业绩快报推到钉钉群",
+     "cadence": "日报 / 周报 / 月报 / 季报", "stale_min": 10, "handoff": "各业务群", "unit": "个群", "sched": True},
     {"key": "contract", "zone": "法务组", "name": "合同预审员", "what": "钉钉合同审批发起 → 预审 → 意见贴回评论", "cadence": "审批事件",
      "stale_min": None, "handoff": "法务、财务", "unit": "份", "static_off": "还没上岗：等法务签字"},
 ]
@@ -80,7 +99,8 @@ def _now():
 
 
 # ---------------- 报到 / 记一笔（全部吞异常）----------------
-def beat(desk, off=""):
+def beat(desk, off="", next_in=None):
+    """报到。next_in＝离下一轮还有几秒（任务自己最清楚）；不传就不动上次报的。"""
     try:
         vals = {"ts": _now(), "off": str(off or "")[:200]}
         with db._engine.begin() as c:
@@ -88,6 +108,32 @@ def beat(desk, off=""):
                 c.execute(update(worker_beat).where(worker_beat.c.desk == desk).values(**vals))
             else:
                 c.execute(insert(worker_beat).values(desk=desk, **vals))
+    except Exception:
+        pass
+    if next_in is None:
+        return
+    try:
+        nxt = (datetime.now() + timedelta(seconds=max(0, float(next_in)))).strftime(_FMT)
+    except Exception:
+        return
+    set_queue(desk, [{"job": "", "ts": nxt}])
+
+
+def set_queue(desk, items):
+    """把这个工位接下来要跑的任务整组换掉。items＝[{job, ts(年-月-日 时:分:秒), name, cadence}]；传空列表＝清空。"""
+    try:
+        rows, seen = [], set()
+        for it in items or []:
+            job, ts = str(it.get("job") or "")[:40], str(it.get("ts") or "")[:19]
+            if not ts or job in seen:
+                continue
+            datetime.strptime(ts, _FMT)                       # 格式不对的不收
+            seen.add(job)
+            rows.append({"desk": desk, "job": job, "ts": ts, "name": str(it.get("name") or "")[:60], "cadence": str(it.get("cadence") or "")[:40]})
+        with db._engine.begin() as c:
+            c.execute(delete(worker_next).where(worker_next.c.desk == desk))
+            if rows:
+                c.execute(insert(worker_next), rows)
     except Exception:
         pass
 
@@ -156,6 +202,12 @@ def roster():
     month0 = now.strftime("%Y-%m-01 00:00:00")
     with db._engine.connect() as c:
         beats = {r["desk"]: dict(r) for r in c.execute(select(worker_beat)).mappings().all()}
+        try:
+            nexts = {}
+            for r in c.execute(select(worker_next).order_by(worker_next.c.ts)).mappings().all():
+                nexts.setdefault(r["desk"], []).append(dict(r))
+        except Exception:
+            nexts = {}
         month = {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in c.execute(
             select(worker_run.c.desk, func.sum(worker_run.c.n), func.count()).where(worker_run.c.ts >= month0)
             .group_by(worker_run.c.desk)).all()}
@@ -168,7 +220,7 @@ def roster():
         today_n = int(c.execute(select(func.sum(worker_run.c.n)).where(worker_run.c.ts >= now.strftime("%Y-%m-%d 00:00:00"))).scalar() or 0)
         recent = c.execute(select(worker_run).order_by(worker_run.c.ts.desc(), worker_run.c.id.desc()).limit(14)).mappings().all()
     waiting = _waiting_by_scene()
-    desks = []
+    desks, queue = [], []
     for d in DESKS:
         b, lr = beats.get(d["key"]), last.get(d["key"])
         if d.get("static_off"):
@@ -197,8 +249,15 @@ def roster():
                       "lastAgoMin": _ago_min(lr["ts"], now) if lr else None,      # 上次干活是几分钟前（大屏：刚干完的在打字，其余的歇着）
                       # 大屏拿这两个原始时间戳比「两次刷新之间有没有变」：干活记录变了＝来了新活（弹派工单）；只有报到变了＝巡了一圈没新活
                       "lastTs": lr["ts"] if lr else "", "beatTs": (b or {}).get("ts") or "",
+                      # 下一轮预计什么时候跑（任务自己报的；没上岗、停了的不排队）→ 大屏「定时任务排队」
+                      "nextTs": (nexts.get(d["key"]) or [{}])[0].get("ts", "") if status in ("ok", "err") else "", "sched": bool(d.get("sched")),
                       "lastOk": bool(lr["ok"]) if lr else True, "monthN": n_month, "monthRuns": runs_month,
                       "waiting": (w or {}).get("n"), "waitingLate": (w or {}).get("late", 0), "detail": True})
+        if status in ("ok", "err"):          # 定时任务排队：在岗的才排；一个工位可以有好几条
+            for r in nexts.get(d["key"]) or []:
+                queue.append({"key": d["key"], "desk": d["name"], "name": r.get("name") or d["name"], "cadence": r.get("cadence") or d["cadence"],
+                              "nextTs": r["ts"], "sched": bool(d.get("sched"))})
+    queue.sort(key=lambda q: q["nextTs"])
     for p in PROVIDERS:
         try:
             for x in p() or []:
@@ -212,7 +271,7 @@ def roster():
              "key": r["desk"], "text": r["summary"] or ("出错了" if not r["ok"] else ""), "ok": bool(r["ok"]),
              "n": r["n"] or 0, "refs": _refs_l(r.get("refs")), "refLabel": (_BY_KEY.get(r["desk"]) or {}).get("ref") or "单号",
              "agoMin": _ago_min(r["ts"], now)} for r in recent]
-    return {"desks": desks, "feed": feed, "asOf": now.strftime("%H:%M"), "since": since[:10],
+    return {"desks": desks, "feed": feed, "queue": queue, "asOf": now.strftime("%H:%M"), "nowTs": now.strftime(_FMT), "since": since[:10],
             "kpi": {"on": len(on), "total": len(desks), "todayN": today_n, "down": sum(1 for x in desks if x["status"] == "down"),
                     "off": sum(1 for x in desks if x["status"] == "off"),
                     "monthN": sum(x["monthN"] or 0 for x in desks),

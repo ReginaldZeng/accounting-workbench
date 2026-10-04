@@ -148,6 +148,79 @@ class WorkerOfficeTests(unittest.TestCase):
         ws.record("fx", n=8, summary="9 月已写入 8 条")      # 没有单号的活
         self.assertEqual(ws.roster()["feed"][0]["refs"], [])
 
+    def test_next_round_is_reported_only_for_desks_on_duty(self):
+        # 定时任务排队：任务报到时说「下一轮还有多久」→ 值班表带出 nextTs；没上岗、停了的不排队；不传就沿用上次报的
+        with db._engine.begin() as c:
+            c.execute(delete(ws.worker_next))
+        ws.beat("payreq", next_in=20 * 60)
+        r = ws.roster()
+        d = next(x for x in r["desks"] if x["key"] == "payreq")
+        gap = (datetime.strptime(d["nextTs"], ws._FMT) - datetime.strptime(r["nowTs"], ws._FMT)).total_seconds()
+        self.assertTrue(20 * 60 - 5 <= gap <= 20 * 60 + 5, gap)
+        ws.beat("payreq")                                   # 不带 next_in：不动上次报的
+        self.assertEqual(self._desk("payreq")["nextTs"], d["nextTs"])
+        ws.beat("fx", off="自动录入开关没开", next_in=3600)   # 没上岗的不排队
+        self.assertEqual(self._desk("fx")["nextTs"], "")
+        self._age_beat("payreq", 200)                       # 停了的不排队
+        self.assertEqual((self._desk("payreq")["status"], self._desk("payreq")["nextTs"]), ("down", ""))
+        ws.beat("todo_check", next_in="不是数字")            # 入参再怪也不往外抛
+        self.assertEqual(self._desk("todo_check")["nextTs"], "")
+        # 只有按钟点跑的算定时任务（汇率、催票）；每隔二十分钟去看一眼的是巡检，大屏不把它们排进定时任务
+        self.assertEqual(sorted(x["key"] for x in ws.roster()["desks"] if x.get("sched")), ["bp_flash", "bp_sentinel", "fx", "inv_remind"])
+
+    def _bp(self, runs=None, env_on=True, running=True, flash_on=True):
+        # 一份 BP「系统设置 › 定时任务」接口的样子（照它 routers/ops.py schedule_get 的返回写的）
+        jobs = [{"id": "sentinel-am", "kind": "sentinel", "name": "驾驶舱值守 · 早", "label": "早", "time": "09:00",
+                 "when": {"type": "weekly", "dows": [1, 2, 3, 4, 5]}, "enabled": True, "nextDue": "2026-10-06 09:00"},
+                {"id": "sentinel-pm", "kind": "sentinel", "name": "驾驶舱值守 · 下午", "label": "下午", "time": "14:00",
+                 "when": {"type": "weekly", "dows": [1, 2, 3, 4, 5, 6, 7]}, "enabled": True, "nextDue": "2026-10-05 14:00"},
+                {"id": "flash-week", "kind": "flash", "flashKind": "week", "name": "业绩快报 · 周报推送", "time": "09:10",
+                 "when": {"type": "weekly", "dows": [1]}, "enabled": flash_on, "nextDue": "2026-10-12 09:10"},
+                {"id": "flash-quarter", "kind": "flash", "flashKind": "quarter", "name": "业绩快报 · 季报推送", "time": "09:30",
+                 "when": {"type": "monthly", "dom": 1, "months": [1, 4, 7, 10]}, "enabled": flash_on, "nextDue": "2027-01-01 09:30"}]
+        return {"jobs": jobs, "runs": runs or {}, "scheduler": {"envOn": env_on, "running": running}}
+
+    def test_bp_jobs_become_two_desks_with_their_own_queue(self):
+        import office_bp_bridge as bp
+        with db._engine.begin() as c:
+            c.execute(delete(ws.worker_next))
+        old = {"flash-week": {"lastKey": "2026-09-28 09:10", "status": "ok", "note": "39周 → 3/3 个目标已推"}}
+        seen = bp.sync(self._bp(old), None)                 # 第一次连上：只记进度，不把以前跑的补记成刚干完
+        self.assertEqual(seen, {"flash-week": "2026-09-28 09:10|ok"})
+        r = ws.roster()
+        self.assertEqual([f for f in r["feed"] if f["key"].startswith("bp_")], [])
+        self.assertEqual((self._desk("bp_sentinel")["status"], self._desk("bp_flash")["status"]), ("ok", "ok"))
+        q = [(x["key"], x["name"], x["cadence"], x["nextTs"]) for x in r["queue"] if x["key"].startswith("bp_")]
+        self.assertEqual(q, [("bp_sentinel", "驾驶舱值守 · 下午", "每天 14:00", "2026-10-05 14:00:00"),
+                             ("bp_sentinel", "驾驶舱值守 · 早", "工作日 09:00", "2026-10-06 09:00:00"),
+                             ("bp_flash", "业绩快报 · 周报", "每周一 09:10", "2026-10-12 09:10:00"),
+                             ("bp_flash", "业绩快报 · 季报", "1、4、7、10 月 1 日 09:30", "2027-01-01 09:30:00")])
+        # 周报推完（3 个群里 1 个没推出去）、值守起了一次、季报还在推 → 记两笔；群名只进出错原文，不上大屏
+        runs = {"flash-week": {"lastKey": "2026-10-05 09:10", "status": "failed", "note": "40周 → 2/3 个目标已推；失败：华东大区群：超时"},
+                "sentinel-pm": {"lastKey": "2026-10-05 14:00", "status": "ok", "note": "已起子进程 PID 123"},
+                "flash-quarter": {"lastKey": "2026-10-01 09:30", "status": "running", "note": "推送中…"}}
+        seen = bp.sync(self._bp(runs), seen)
+        feed = {f["key"]: f for f in ws.roster()["feed"]}
+        self.assertEqual((feed["bp_flash"]["text"], feed["bp_flash"]["ok"], feed["bp_flash"]["n"]), ("业绩快报 · 周报已推 2/3 个群", False, 2))
+        self.assertEqual((feed["bp_sentinel"]["text"], feed["bp_sentinel"]["ok"]), ("驾驶舱值守 · 下午已开跑", True))
+        self.assertNotIn("华东", str(ws.roster()))
+        self.assertIn("华东大区群", ws.runs("bp_flash", show_error=True)["runs"][0]["error"])
+        n = len(ws.runs("bp_flash")["runs"])
+        self.assertEqual(bp.sync(self._bp(runs), seen), seen)   # 同一份结果再读一遍：不重复记
+        self.assertEqual(len(ws.runs("bp_flash")["runs"]), n)
+
+    def test_bp_scheduler_off_or_jobs_disabled_is_off_not_down(self):
+        import office_bp_bridge as bp
+        bp.sync(self._bp(env_on=False), {})
+        self.assertEqual((self._desk("bp_flash")["status"], self._desk("bp_flash")["statusText"]), ("off", "没上岗：BP 工作台的定时调度没开"))
+        bp.sync(self._bp(flash_on=False), {})
+        self.assertEqual(self._desk("bp_sentinel")["status"], "ok")
+        self.assertEqual(self._desk("bp_flash")["statusText"], "没上岗：这类定时任务在 BP 里都停用了")
+        self.assertEqual([x for x in ws.roster()["queue"] if x["key"] == "bp_flash"], [])
+        self._age_beat("bp_sentinel", 30)                   # BP 连不上（没人替它报到）超过十分钟 → 停了
+        bp.sync(self._bp(running=False), {})
+        self.assertEqual(self._desk("bp_sentinel")["status"], "down")
+
     def test_record_and_beat_never_raise(self):
         ws.record("fx", n="不是数字", summary=None)          # 入参再怪也不往外抛
         ws.beat(None)

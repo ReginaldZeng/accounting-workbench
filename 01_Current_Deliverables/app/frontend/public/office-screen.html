@@ -19,6 +19,16 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   · 刚干完的活：一笔一张卡——谁、干完了什么（件数）、哪几张单（钉钉单号，最多列两个）；最新一笔加重，新来的闪一下。
   · 值班表：默认收起成一行（几个在岗 / 停了 / 没上岗），点标题或按 R 展开，记在这台电脑的浏览器里。
     画面上每个工位的状态已经看得见，收起来把地方让给「刚干完的活」。
+  · 定时任务排队（V2.797 加）：只排真正按钟点跑的——几点、哪条任务、多久一轮、还有多久；到点了显示「轮到了」。最多列最近三条。
+    核算这边有汇率（每天 14:00）、催票（每天一轮）；BP 工作台那边有驾驶舱值守（早 / 下午）、业绩快报（日 / 周 / 月 / 季），
+    由「驾驶舱值守员」「业绩快报员」两个工位（经营分析组，坐最右一列）负责，一个工位可以排好几条。
+    新工位的人物图（10、11 号）还没到时先借用现有人物；图到了自动换。
+    每隔二三十分钟去钉钉 / 金蝶看一眼有没有新活的那几个工位是「巡检」，不算定时任务，不一个个排，只在最下面收成一行
+    （几个工位在巡检、最近一次什么时候）。各任务报到时自己说「下一轮什么时候」，这里不推算。
+  · 全屏：画面右上角「全屏」按钮、按 F、或双击画面；鼠标停三秒按钮和光标自动藏起来。
+    （浏览器规定全屏必须有人点一下才能进；要开机自动全屏，用浏览器的 kiosk 启动参数。）
+  · 去沙发：沿左边走廊下来，从沙发右端绕到前面再坐下（原来是从沙发背后直接穿过去）。
+    坐下时脚落在沙发前的地上，茶几桌面另盖一层挡住小腿（脚落在坐垫上看着像站在沙发上）。
   全屏只有件数、状态和单号，不显示供应商、客户、金额。不显示工时。
   数据：地址栏 # 后面带大屏口令（#k=…）→ 每分钟读 /api/office/screen；不带口令 / 直接双击打开 → 内置样例数据。
   底图加载失败 → 自动退回矢量版 office-screen-vector.html。素材由 backend/tools/office_art_pack.py 从原图处理而来。
@@ -33,7 +43,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{height:100%;overflow:hidden;background:#E9E5DD}
   body{font-family:"MiSans","PingFang SC","Microsoft YaHei",微软雅黑,Arial,sans-serif;color:var(--ink);display:grid;place-items:center}
-  #stage{width:1920px;height:1080px;background:var(--paper);padding:22px;display:grid;grid-template-columns:1440px 1fr;grid-template-rows:810px 1fr 46px;gap:16px;transform-origin:center}
+  #stage{width:1920px;height:1080px;background:var(--paper);padding:22px;display:grid;grid-template-columns:1440px 1fr;grid-template-rows:810px minmax(0,1fr) 46px;gap:16px;transform-origin:center}
   .panel{background:var(--panel);border-radius:18px;box-shadow:0 2px 14px rgba(60,40,90,.07)}
 
   /* —— 办公现场 —— */
@@ -43,6 +53,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   #scene img.bg{position:absolute;left:0;top:0;width:1672px;height:941px;display:block}
   #scene img.logo{position:absolute;left:43.25%;top:89.25%;width:14.2%;height:5.4%;object-fit:contain;z-index:2}
   .fgrow{position:absolute;left:0;width:1672px;background:url(office-art/fg.webp) no-repeat;background-size:1672px 941px;pointer-events:none}
+  .fgbg{position:absolute;background:url(office-art/bg.webp) no-repeat;background-size:1672px 941px;pointer-events:none}
   .sp{position:absolute;background-repeat:no-repeat;pointer-events:none;will-change:transform}
   .lamp{position:absolute;width:13px;height:13px;margin:-6.5px 0 0 -6.5px;border-radius:50%;border:2px solid rgba(255,255,255,.92);z-index:3000}
   .lamp.ok{background:#48C774;box-shadow:0 0 0 3px rgba(72,199,116,.25),0 0 14px 4px rgba(72,199,116,.75)}
@@ -51,7 +62,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   .lamp.off{background:#8F899B;border-color:rgba(255,255,255,.6)}
   @keyframes blink{50%{opacity:.25}}
   .np{position:absolute;height:20px;line-height:19px;padding:0 7px 0 6px;border-radius:5px;background:rgba(255,255,255,.94);border:1px solid rgba(62,42,99,.22);
-    font-size:12.5px;font-weight:700;color:var(--ink);white-space:nowrap;z-index:3000;box-shadow:0 1px 3px rgba(40,25,70,.18)}
+    font-size:12.5px;font-weight:700;color:var(--ink);white-space:nowrap;z-index:3000;box-shadow:0 1px 3px rgba(40,25,70,.18);transition:opacity .2s}
   .np i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px}
   .np.off{color:#7D7689;font-weight:500}
   .tag{position:absolute;transform:translateX(-50%);height:17px;line-height:16px;padding:0 6px;border-radius:4px;background:rgba(255,255,255,.92);
@@ -100,14 +111,14 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   .kpi .d{font-size:13px;color:var(--ink3);margin-top:4px;white-space:nowrap}
   .kpi.warn .v{color:var(--warn)}.kpi.bad .v{color:var(--bad)}
   .kpi .d b{font-weight:700}.kpi .d b.b{color:var(--bad)}.kpi .d b.w{color:var(--warn)}
-  .zones{padding:10px 22px;display:grid;grid-template-columns:1fr 1fr;gap:3px 26px;align-content:center}
-  .zones h3{grid-column:1 / -1;font-size:14px;margin-bottom:2px}
+  .zones{padding:8px 22px;display:grid;grid-template-columns:1fr 1fr;gap:2px 26px;align-content:center;overflow:hidden}
+  .zones h3{grid-column:1 / -1;font-size:13px;margin-bottom:0;line-height:1.3}
   .zones h3 span{color:var(--ink3);font-weight:400;font-size:12px;margin-left:8px}
-  .zr .t{display:flex;align-items:baseline;gap:7px;font-size:14px}
+  .zr .t{display:flex;align-items:baseline;gap:7px;font-size:13px;line-height:1.35}
   .zr .t em{font-style:normal;font-size:12px;color:var(--ink3)}
   .zr .t b{margin-left:auto;font-size:12.5px;font-weight:400;color:var(--ink2);font-variant-numeric:tabular-nums}
   .sw{width:9px;height:9px;border-radius:3px;align-self:center}
-  .tr{height:6px;background:var(--plum-soft);border-radius:99px;margin-top:5px;overflow:hidden}.tr i{display:block;height:100%;border-radius:99px}
+  .tr{height:4px;background:var(--plum-soft);border-radius:99px;margin-top:2px;overflow:hidden}.tr i{display:block;height:100%;border-radius:99px}
 
   /* —— 最底下：实时动态滚动条 —— */
   #tick{background:#2B1A46;color:#E9E3F3;border-radius:14px;display:flex;align-items:center;overflow:hidden;box-shadow:0 4px 14px rgba(40,25,70,.22);min-height:0}
@@ -153,6 +164,23 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   .ro .r{margin-left:auto;font-size:12.5px;color:var(--ink2);white-space:nowrap;font-variant-numeric:tabular-nums}
   .ro .r.b{color:var(--bad);font-weight:700}.ro .r.w{color:var(--warn);font-weight:700}
   .feed{flex:1}
+  .qr{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:14.5px}.qr:last-child{border:0}
+  .qr .t{font-variant-numeric:tabular-nums;font-weight:800;font-size:16.5px;min-width:54px;color:var(--plum);white-space:nowrap}
+  .qr .av{width:28px;height:28px;border-radius:50%;flex:none;background-color:var(--plum-soft);background-repeat:no-repeat;box-shadow:0 0 0 1.5px #BFB3D6}
+  .qr .n{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .qr .c{color:var(--ink3);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
+  .qr .t,.qr .in,.qr .av{flex:none}
+  .qr .in{margin-left:auto;font-size:12.5px;font-weight:700;padding:2px 10px;border-radius:99px;background:var(--plum-soft);color:var(--plum);white-space:nowrap}
+  .qr.soon .in{background:#FFF1D6;color:var(--warn)}
+  .qr.now .t{color:var(--ok)}.qr.now .in{background:#E7F5EC;color:var(--ok);animation:blink 1s infinite}
+  .qpoll{margin-top:5px;padding-top:7px;border-top:1px dashed var(--line);font-size:12.5px;line-height:1.4;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .qpoll b{color:var(--ink2);font-weight:700}
+  .qhead em{font-style:normal;font-weight:400;font-size:13px;color:var(--ink2);margin-left:auto;white-space:nowrap}
+  #fs{position:absolute;right:14px;top:14px;z-index:4000;font:inherit;font-size:13px;font-weight:700;color:#fff;background:rgba(43,26,70,.62);border:1px solid rgba(255,255,255,.35);
+    border-radius:999px;padding:5px 14px;cursor:pointer;transition:opacity .4s}
+  #fs:hover{background:rgba(43,26,70,.85)}
+  body.idle #fs{opacity:0;pointer-events:none}
+  body.idle{cursor:none}
   .evs{margin-top:4px;overflow:hidden;flex:1}
   .ev{display:flex;gap:12px;padding:11px 12px;margin-top:8px;border-radius:12px;background:#FAF8FC;border:1px solid var(--line);border-left:4px solid #CFC5E0}
   .ev.top{background:var(--plum-soft);border-color:#D9CFEA;border-left-color:var(--plum)}
@@ -183,6 +211,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
     </div>
     <div class="sampleMark" id="sample">样例数据 · 没连工作台</div>
     <div class="privacy">本屏只显示件数、状态和单号 · 不显示供应商、客户和金额</div>
+    <button type="button" id="fs" title="全屏 / 退出全屏（也可以按 F，或双击画面）">全屏</button>
   </div>
 
   <div id="rail">
@@ -193,6 +222,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
     </div>
     <div class="panel box"><h3>要人看一眼 <span>ATTENTION</span></h3><div id="als"></div></div>
     <div class="panel box feed"><h3>刚干完的活 <span>LIVE</span></h3><div class="evs" id="evs"></div></div>
+    <div class="panel box" id="qBox"><h3 class="qhead">定时任务排队 <span>NEXT UP</span><em id="qSum"></em></h3><div id="q"></div></div>
     <div class="panel box shut" id="rosBox"><h3 class="fold" id="rosH" title="点一下展开 / 收起（或按 R）">值班表 <span>ON DUTY</span><em id="rosSum"></em></h3><div class="ros" id="ros"></div></div>
   </div>
 
@@ -209,7 +239,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   // ───────── 样例数据（形状与 /api/office/screen 一致；数字是编的）─────────
   const SAMPLE = {
     asOf: '15:20', since: '2026-10-04',
-    kpi: { on: 9, total: 12, down: 1, off: 2, err: 1, monthN: 412, todayN: 23, waiting: 3 },
+    kpi: { on: 11, total: 14, down: 1, off: 2, err: 1, monthN: 441, todayN: 26, waiting: 3 },
     desks: [
       { key: 'fx', name: '汇率录入员', zone: '总账组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '汇率审核人', unit: '条', monthN: 8, lastAt: '10-08 14:00', lastAgoMin: 1500, waiting: 1, waitingLate: 1 },
       { key: 'todo_check', name: '待办核对员', zone: '总账组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '不用交接', unit: '条', monthN: 31, lastAt: '今天 15:01', lastAgoMin: 19 },
@@ -220,6 +250,8 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
       { key: 'bom_final', name: 'BOM 终审同步员', zone: '成本组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '不用交接', unit: '单', monthN: 2, lastAt: '10-06 17:10', lastAgoMin: 4000 },
       { key: 'payreq', name: '物流请款单接收员', zone: '应付组', kind: 'desk', status: 'err', statusText: '上一轮出错了', handoff: '物流复核人', unit: '张单', monthN: 47, lastAt: '今天 15:20', lastAgoMin: 0 },
       { key: 'contract', name: '合同预审员', zone: '法务组', kind: 'desk', status: 'off', statusText: '还没上岗：等法务签字', handoff: '法务、财务', unit: '份', monthN: 0, lastAt: '' },
+      { key: 'bp_sentinel', name: '驾驶舱值守员', zone: '经营分析组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '财务 BP', unit: '次', monthN: 9, lastAt: '今天 14:00', lastAgoMin: 80, sched: true },
+      { key: 'bp_flash', name: '业绩快报员', zone: '经营分析组', kind: 'desk', status: 'ok', statusText: '正常', handoff: '各业务群', unit: '个群', monthN: 20, lastAt: '今天 09:00', lastAgoMin: 380, sched: true },
       { key: 'pull_rpt', name: '财务报表取件机', zone: '取件间', kind: 'machine', status: 'ok', statusText: '正常', handoff: '送达收件人', lastAt: '10-08 15:19' },
       { key: 'pull_bank', name: '银行流水取件机', zone: '取件间', kind: 'machine', status: 'ok', statusText: '正常', handoff: '送达收件人', lastAt: '10-08 15:02' },
       { key: 'pull_ecrecon', name: '电商资料取件机', zone: '取件间', kind: 'machine', status: 'off', statusText: '还没上岗：这台机器还没回报过', handoff: '送达收件人', lastAt: '' },
@@ -236,7 +268,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   }
   const $ = id => document.getElementById(id)
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-  const ZORD = ['发票组', '总账组', '应付组', '成本组', '法务组', '取件间']
+  const ZORD = ['发票组', '总账组', '应付组', '成本组', '经营分析组', '法务组', '取件间']
   const zi = z => { const i = ZORD.indexOf(z); return i < 0 ? 98 : i }
   const COL = { ok: 'var(--ok)', err: 'var(--warn)', down: 'var(--bad)', off: 'var(--idle)' }
   const tok = ((location.hash || '').match(/k=([\w-]+)/) || [])[1]
@@ -244,9 +276,37 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
 
   // ───────── 右栏 / 下排 ─────────
   // 头像：从这个工位的人物坐姿图里截头部（size＝圆的直径，cell＝一格放多大）
-  const face = (key, size, cell) => { const ch = CHAR_OF[key]; return ch ? `background-image:url(office-art/c${String(ch).padStart(2, '0')}-seat.webp);background-size:${cell * 4}px ${cell * 2}px;background-position:${-(2 * cell + (cell - size) / 2)}px ${-Math.round(cell * .05)}px` : '' }
+  const face = (key, size, cell) => { const ch = chOf(key); return ch ? `background-image:url(office-art/c${String(ch).padStart(2, '0')}-seat.webp);background-size:${cell * 4}px ${cell * 2}px;background-position:${-(2 * cell + (cell - size) / 2)}px ${-Math.round(cell * .05)}px` : '' }
   const refsHtml = (f, max) => { const r = f.refs || []; return r.length ? `<em style="font-style:normal">${esc(f.refLabel || '单号')}</em>` + r.slice(0, max).map(x => `<code>${esc(x)}</code>`).join('') + ((f.n || r.length) > max ? `<span>共 ${Math.max(f.n || 0, r.length)} 张</span>` : '') : '' }
   let topSeen = null
+  // ───────── 定时任务排队 ─────────
+  // nextTs 是各任务报到时自己说的「下一轮什么时候」；nowTs 是服务器取数那一刻的时间，拿它校正这台电脑的钟
+  const pts = t => { const m = String(t || '').match(/(\d+)-(\d+)-(\d+) (\d+):(\d+):(\d+)/); return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : 0 }
+  let qData = null, skew = 0
+  const srvNow = () => Date.now() - skew
+  function queue() {
+    const d = qData; if (!d) return
+    const now = srvNow(), today = new Date(now).getDate()
+    // d.queue＝一条任务一行（一个工位可以有好几条）；老接口没有 queue 就按工位凑
+    const src = d.queue || d.desks.filter(x => x.nextTs && (x.status === 'ok' || x.status === 'err')).map(x => ({ key: x.key, desk: x.name, name: x.name, cadence: x.cadence, nextTs: x.nextTs, sched: x.sched }))
+    const all = src.map(x => ({ x, at: pts(x.nextTs) })).filter(r => r.at).sort((a, b) => a.at - b.at)
+    const rows = all.filter(r => r.x.sched), polls = all.filter(r => !r.x.sched)      // 按钟点跑的才算定时任务；巡检的收成一行
+    const left = rem => { const min = Math.round(rem / 60000); return rem <= 0 ? '轮到了' : rem < 60000 ? '马上' : min < 60 ? `${min} 分钟后` : min < 36 * 60 ? `${Math.round(min / 60)} 小时后` : `${Math.round(min / 1440)} 天后` }
+    const MAX = 3
+    $('q').innerHTML = (rows.length ? rows.slice(0, MAX).map(({ x, at }) => {
+      const rem = at - now, t = new Date(at), hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+      const when = t.getDate() === today && rem < 864e5 ? '今天 ' + hm : rem < 48 * 3600e3 && new Date(now + 864e5).getDate() === t.getDate() ? '明天 ' + hm : `${t.getMonth() + 1}-${t.getDate()} ${hm}`
+      return `<div class="qr${rem <= 0 ? ' now' : rem < 180000 ? ' soon' : ''}"><span class="t">${when}</span><span class="av" style="${face(x.key, 28, 50)}"></span><span class="n">${esc(x.name)}</span><span class="c">${esc(x.cadence || '')}</span><span class="in">${left(rem)}</span></div>` }).join('')
+      : '<div class="empty">在岗的工位里现在没有按钟点跑的定时任务。</div>')
+      + (rows.length > MAX || polls.length ? `<div class="qpoll">${rows.length > MAX ? `后面还排着 <b>${rows.length - MAX} 条</b>` : ''}${rows.length > MAX && polls.length ? ' · ' : ''}${polls.length ? `另有 <b>${polls.length} 个工位在巡检</b>，最近一次 <b>${left(polls[0].at - now)}</b>` : ''}</div>` : '')
+    const first = rows[0], rem0 = first ? first.at - now : 0
+    $('qSum').textContent = first ? (rem0 <= 0 ? `${first.x.name} 轮到了` : `下一条 ${left(rem0)}`) : ''
+    if (!LIVE) all.filter(r => r.at <= now).forEach(({ x }) => {       // 样例模式：到点了就真演一遍，然后排到下一轮
+      const step = /每周/.test(x.cadence || '') ? 7 * 864e5 : /每天|工作日|每月|月 /.test(x.cadence || '') ? 864e5 : 20 * 60000, t = new Date(pts(x.nextTs) + step)
+      x.nextTs = `${t.getFullYear()}-${t.getMonth() + 1}-${t.getDate()} ${t.getHours()}:${t.getMinutes()}:${t.getSeconds()}`
+      if (typeof sampleDue === 'function') sampleDue(x.key, x.name) })
+  }
+  let sampleDue = null
   let tkLast = null
   let rosOpen = false
   try { rosOpen = localStorage.getItem('officeRosOpen') === '1' } catch (e) {}
@@ -293,8 +353,9 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
       <div class="hl">${esc(f.text)}</div>${(f.refs || []).length ? `<div class="rf">${refsHtml(f, 2)}</div>` : ''}</div></div>`).join('') : '<div class="empty">还没有干活记录。</div>'
     topSeen = topKey
     // 底部滚动条：最近干完的活轮着滚（带单号）。内容没变就不重写，免得每分钟刷新把滚动打回开头
+    qData = d; queue()
     const tkHtml = (d.feed || []).slice(0, 10).map(f => `<span><b>${esc(f.desk)}</b>${esc(f.text)}${(f.refs || []).length ? ` · ${esc(f.refLabel || '单号')}` + f.refs.slice(0, 3).map(x => `<code>${esc(x)}</code>`).join('') : ''}<em class="${f.ok ? '' : 'w'}">${f.ok ? '干成了' : '有没干成的'}</em><u>${esc(f.at)}</u></span>`).join('')
-      || '<span>还没有干活记录——等定时任务扫到第一笔活，这里就会滚起来</span>'
+      || '<span>还没有干活记录——等哪个工位接到第一笔活，这里就会滚起来</span>'
     if (tkHtml !== tkLast) {                      // 首尾相接地滚：内容不够一屏宽就多排几遍，再整体复制一份，滚到一半正好接上开头
       tkLast = tkHtml; const tk = $('tk'); tk.innerHTML = tkHtml
       const w = tk.scrollWidth || 1, reps = Math.max(1, Math.ceil(tk.parentElement.clientWidth / w))
@@ -310,17 +371,22 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
     [323, 547, 481], [575, 787, 481], [815, 1023, 481], [1052, 1266, 481],
     [316, 544, 645], [572, 786, 645], [816, 1032, 645], [1061, 1279, 645]]
   const SEAT = DESK.map(([x0, x1, yt]) => ({ x: x0 + 100, yt, by: yt + 12, mon: [x0 + 184, yt - 22], np: [x0 + 9, yt + 33], aisle: yt - 40 }))
-  const SEAT_OF = { bom_intake: 0, bom_final: 1, contract: 2, fx: 4, todo_check: 5, payreq: 6, inv_intake: 8, inv_remind: 9, inv_voucher: 10 }
-  const CHAR_OF = { fx: 1, todo_check: 2, inv_intake: 3, inv_remind: 4, inv_voucher: 5, bom_intake: 6, bom_final: 7, payreq: 8, contract: 9 }
-  const SPARE = [3, 7, 11]
+  const SEAT_OF = { bom_intake: 0, bom_final: 1, contract: 2, bp_sentinel: 3, fx: 4, todo_check: 5, payreq: 6, bp_flash: 7, inv_intake: 8, inv_remind: 9, inv_voucher: 10 }
+  const CHAR_OF = { fx: 1, todo_check: 2, inv_intake: 3, inv_remind: 4, inv_voucher: 5, bom_intake: 6, bom_final: 7, payreq: 8, contract: 9, bp_sentinel: 10, bp_flash: 11 }
+  const BORROW = { 10: 9, 11: 6 }                  // 10、11 号人物的图还没到时先借谁的（9 号的工位没上岗，借它不会撞脸）；图到了 probe 认得出，自动换
+  const MISSING = {}                               // 开场先探一下 10、11 号的图在不在；不在的记在这儿
+  const chOf = key => { const c = CHAR_OF[key]; return c && MISSING[c] ? BORROW[c] || 1 : c }
+  const SPARE = [11]
   const DS = 140, DWK = 186, FOOT = 6 * DWK / 256                // 坐姿一格显示多大 / 走动一格显示多大 / 脚底离格子下沿
   const LEFT_X = 236, RIGHT_X = 1338, TOP_AISLE = 278
-  const SPOTS = { tea: [{ x: 524, y: 238, busy: null }, { x: 598, y: 242, busy: null }], sofa: [{ x: 176, y: 852, busy: null }, { x: 286, y: 852, busy: null }] }
+  const SOFA_BACK_Y = 748, SOFA_END_X = 366      // 第三排桌腿（到 742）和沙发靠背（758 起）之间那条缝；沙发右扶手（到 355）和矮墙（375 起）之间那条缝
+  const SPOTS = { tea: [{ x: 524, y: 238, busy: null }, { x: 598, y: 242, busy: null }], sofa: [{ x: 176, y: 884, busy: null }, { x: 286, y: 884, busy: null }] }   // 沙发：脚落在沙发前的地上（y=884），小腿被茶几挡住——落在坐垫上（原来 852）看着像站在沙发上
   const COUNTER = { x: 1326, y: 846 }, BASKET = { x: 1561, y: 790 }
   const PC = [{ x: 160, y: 66 }, { x: 238, y: 66 }, { x: 316, y: 66 }]
   const add = (cls, style, html) => { const e = document.createElement('div'); e.className = cls; Object.assign(e.style, style); if (html != null) e.innerHTML = html; scene.appendChild(e); return e }
   const px = n => n + 'px'
   ;[318, 481, 645].forEach(yt => add('fgrow', { top: px(yt - 56), height: px(94), backgroundPosition: `0 ${-(yt - 56)}px`, zIndex: yt + 20 }))   // 显示器前景：盖在本排坐着的人前面
+  add('fgbg', { left: px(149), top: px(860), width: px(150), height: px(38), backgroundPosition: '-149px -860px', zIndex: 900 })   // 茶几桌面再盖一层：坐在沙发上、从沙发前走过的人，小腿在茶几后面
   function frame(e, sheet, cols, rows, D, i) {
     e.style.width = e.style.height = px(D); e.style.backgroundImage = `url(office-art/${sheet})`
     e.style.backgroundSize = `${cols * D}px ${rows * D}px`; e.style.backgroundPosition = `${-(i % cols) * D}px ${-Math.floor(i / cols) * D}px`
@@ -331,7 +397,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
   let extras = []
   class Actor {
     constructor(d, si) {
-      this.d = d; this.si = si; this.s = SEAT[si]; this.ch = String(CHAR_OF[d.key] || ((si % 8) + 1)).padStart(2, '0')
+      this.d = d; this.si = si; this.s = SEAT[si]; this.ch = String(chOf(d.key) || ((si % 8) + 1)).padStart(2, '0')
       this.chair = add('sp', { left: px(this.s.x - DS / 2), top: px(this.s.by - DS), zIndex: this.s.by - 1 }); frame(this.chair, 'chair.webp', 1, 1, DS, 0)
       this.seat = add('sp', { left: px(this.s.x - DS / 2), top: px(this.s.by - DS), zIndex: this.s.by })
       this.walk = add('sp', { display: 'none' })
@@ -366,7 +432,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
     route(tx, ty, via) {
       const s = this.s, p = [[s.x, s.yt - 8], [s.x, s.aisle]]
       if (via === 'top') { if (s.aisle !== TOP_AISLE) { const cx = s.x < 800 ? LEFT_X : RIGHT_X; p.push([cx, s.aisle], [cx, TOP_AISLE]) } p.push([tx, TOP_AISLE]) }
-      else if (via === 'left') p.push([LEFT_X, s.aisle], [LEFT_X, ty - 96], [tx, ty - 96])
+      else if (via === 'left') p.push([LEFT_X, s.aisle], [LEFT_X, SOFA_BACK_Y], [SOFA_END_X, SOFA_BACK_Y], [SOFA_END_X, ty - 2], [tx, ty - 2])   // 去沙发：左走廊下来 → 沙发背后那条缝往右 → 从右端绕到沙发前面 → 走到座位前坐下
       else p.push([RIGHT_X, s.aisle], [RIGHT_X, ty])
       p.push([tx, ty]); return p
     }
@@ -419,9 +485,9 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
       frame(w, `c${this.ch}-walk.webp`, 6, 3, DWK, f)
       w.style.left = px(x - DWK / 2); w.style.top = px(y - DWK + FOOT); w.style.zIndex = Math.round(y); w.style.transform = flip ? 'scaleX(-1)' : ''
     }
-    takeBreak() {
+    takeBreak(want) {
       if (Object.values(actors).filter(a => a.state !== 'seat').length >= 2) return
-      const kind = Math.random() < .6 ? 'tea' : 'sofa', sp = SPOTS[kind].find(s => !s.busy) || SPOTS[kind === 'tea' ? 'sofa' : 'tea'].find(s => !s.busy)
+      const kind = want || (Math.random() < .6 ? 'tea' : 'sofa'), sp = SPOTS[kind].find(s => !s.busy) || SPOTS[kind === 'tea' ? 'sofa' : 'tea'].find(s => !s.busy)
       if (!sp) return
       const k = SPOTS.tea.includes(sp) ? 'tea' : 'sofa'
       sp.busy = this; this.spot = sp
@@ -460,7 +526,7 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
     dspBusy = true
     const show = jobs.slice(0, 4), AV = 94
     const dim = add('dim', {}); dim.getBoundingClientRect(); dim.classList.add('on')
-    const el = add('dsp', {}, `<div class="hd"><i></i><b>新任务</b><span>${esc(when)} · 定时任务这一轮扫到 ${jobs.length} 个工位有新活</span></div>` +
+    const el = add('dsp', {}, `<div class="hd"><i></i><b>新任务</b><span>${esc(when)} · 这一轮有 ${jobs.length} 个工位接到新活</span></div>` +
       show.map((j, i) => `<div class="rw" style="animation-delay:${.25 + i * .14}s"><div class="av" style="${face(j.a.d.key, 54, AV)}"></div>
         <div><div class="nm">${esc(j.a.d.name)}<em>${esc(j.a.d.zone || '')}</em></div><div class="tx">${esc(j.text || '有新活')}</div>${j.f && (j.f.refs || []).length ? `<div class="rf2">${refsHtml(j.f, 1)}</div>` : ''}</div><span class="st">派工中…</span></div>`).join('') +
       (jobs.length > show.length ? `<div class="more">还有 ${jobs.length - show.length} 个工位也有新活</div>` : ''))
@@ -517,7 +583,12 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
     prev = d
   }
   let last = performance.now()
-  const loop = now => { const dt = Math.min(100, now - last); last = now; for (const k in actors) actors[k].step(dt, now); requestAnimationFrame(loop) }
+  // 有人走到桌子前面时，把被他挡住的名牌和状态灯调淡（名牌、灯画在最上层，不调淡会盖在走路的人脸上）
+  const veil = () => { const ws = Object.values(actors).filter(a => a.state !== 'seat' && a.pos)
+    const hid = (x, y, hw) => ws.some(w => Math.abs(w.pos[0] - x) < hw && w.pos[1] > y + 10 && w.pos[1] - 172 < y)
+    for (const k in actors) { const a = actors[k], s = a.s
+      a.np.style.opacity = ws.length && hid(s.np[0] + 55, s.np[1] + 10, 95) ? .12 : ''; a.lamp.style.opacity = ws.length && hid(s.mon[0], s.mon[1], 42) ? .12 : '' } }
+  const loop = now => { const dt = Math.min(100, now - last); last = now; for (const k in actors) actors[k].step(dt, now); veil(); requestAnimationFrame(loop) }
   requestAnimationFrame(loop)
 
   // ───────── 取数 ─────────
@@ -526,21 +597,36 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
       const r = await fetch('/api/office/screen', { cache: 'no-store', headers: { 'X-Office-Token': tok } })
       if (r.status === 401) { $('pill').className = 'pill bad'; $('pillT').textContent = '大屏链接已失效'; return }
       if (!r.ok) throw new Error(r.status)
-      apply(await r.json())
+      const d = await r.json(); if (d.nowTs && pts(d.nowTs)) skew = Date.now() - pts(d.nowTs); apply(d)
     } catch (e) { $('pill').className = 'pill warn'; $('pillT').textContent = '这次没取到 · 显示上一次的' }
   }
   $('bg').addEventListener('error', () => location.replace('office-screen-vector.html' + location.hash))   // 底图没加载出来 → 退回矢量版
+  const start = () => {
   if (LIVE) { load(); setInterval(load, 60000) }
   else {
-    $('sample').style.display = 'block'; apply(SAMPLE)
+    $('sample').style.display = 'block'
+    {                                              // 样例排队：从现在起往后排（数字是编的）
+      const now = new Date(), ts = t => `${t.getFullYear()}-${t.getMonth() + 1}-${t.getDate()} ${t.getHours()}:${t.getMinutes()}:${t.getSeconds()}`
+      const inMin = m => ts(new Date(now.getTime() + m * 60000)), atHour = (h, mi, plus) => { const t = new Date(now); t.setHours(h, mi || 0, 0, 0); if (t <= now) t.setDate(t.getDate() + 1); if (plus) t.setDate(t.getDate() + plus); return ts(t) }
+      const nm = k => (SAMPLE.desks.find(x => x.key === k) || {}).name
+      const Q = (key, name, cadence, nextTs, sched) => ({ key, desk: nm(key), name: name || nm(key), cadence, nextTs, sched: !!sched })
+      SAMPLE.queue = [Q('inv_intake', '', '每 20 分钟', inMin(1.5)), Q('todo_check', '', '每 20 分钟', inMin(4)), Q('payreq', '', '每 20 分钟', inMin(7)), Q('bom_intake', '', '每 30 分钟', inMin(11)), Q('bom_final', '', '每 30 分钟', inMin(11)),
+        Q('bp_sentinel', '驾驶舱值守 · 下午', '每天 14:00', atHour(14), 1), Q('bp_sentinel', '驾驶舱值守 · 早', '工作日 09:00', atHour(9), 1),
+        Q('bp_flash', '业绩快报 · 日报', '每天 09:00', atHour(9), 1), Q('bp_flash', '业绩快报 · 周报', '每周一 09:10', atHour(9, 10, 3), 1), Q('bp_flash', '业绩快报 · 月报', '每月 1 日 09:30', atHour(9, 30, 26), 1),
+        Q('inv_remind', '', '每天一轮', atHour(10), 1), Q('fx', '', '每天 14:00', atHour(14), 1)]
+    }
+    apply(SAMPLE)
     if (location.hash.includes('spots')) {         // 调位置用：#spots 把几个人直接摆到茶水间 / 沙发 / 交接台 / 过道上，好一眼核对落点
       const put = (k, x, y, pose) => { const a = actors[k]; if (!a) return; a.pos = [x, y]; a.pose = pose; a.path = [[x, y]]; a.seg = 0; a.state = 'stay'; a.until = 1e15; a.seat.style.display = 'none'; a.walk.style.display = '' }
       put('inv_remind', SPOTS.tea[0].x, SPOTS.tea[0].y, 'tea'); put('bom_final', SPOTS.tea[1].x, SPOTS.tea[1].y, 'tea')
       put('todo_check', SPOTS.sofa[0].x, SPOTS.sofa[0].y, 'sofa'); put('bom_intake', SPOTS.sofa[1].x, SPOTS.sofa[1].y, 'sofa')
       put('fx', COUNTER.x, COUNTER.y, 'hand'); put('inv_intake', 700, SEAT[8].aisle, 'stand')
+      if (location.hash.includes('sofaroute')) {   // 核对去沙发的路线：把人摆在路线的几个拐点上
+        put('inv_remind', LEFT_X, 690, 'stand'); put('bom_final', 300, SOFA_BACK_Y, 'stand'); put('fx', SOFA_END_X, 800, 'stand'); put('payreq', 330, SPOTS.sofa[1].y - 2, 'stand')
+        put('todo_check', SPOTS.sofa[0].x, SPOTS.sofa[0].y, 'sofa'); put('bom_intake', SPOTS.sofa[1].x, SPOTS.sofa[1].y, 'sofa') }
     } else
     setTimeout(() => demo(['inv_intake', 'todo_check']), 2500)                                        // 样例模式：开场演示一次派工
-    const DEMO_TX = { fx: '2026 年 10 月已写入 8 条', todo_check: '已核对 5 条，销账 2 条', inv_intake: '已接入 3 张钉钉单', inv_remind: '该催 5 张，已发出 5 张', bom_intake: '已自动立项 1 单', bom_final: '已同步终审：通过 1 单、退回 0 单' }
+    const DEMO_TX = { fx: '2026 年 10 月已写入 8 条', todo_check: '已核对 5 条，销账 2 条', inv_intake: '已接入 3 张钉钉单', inv_remind: '该催 5 张，已发出 5 张', bom_intake: '已自动立项 1 单', bom_final: '已同步终审：通过 1 单、退回 0 单', bp_sentinel: '驾驶舱值守 · 下午已开跑', bp_flash: '业绩快报 · 日报已推 3/3 个群' }
     const DEMO_REF = { inv_intake: ['202610081518000417', '202610081512000398', '202610081506000371'], bom_intake: ['202610081411000302'], bom_final: ['202610061702000118'] }
     // 样例模式演一笔新活：弹派工单，同时把这一笔放到「刚干完的活」最上面（和真数据到的时候一样）
     function demo(keys) { const t = new Date(), hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
@@ -548,19 +634,37 @@ Description: 数字员工办公室 · 大屏（插画版）。画面换成业务
         return { a, text: DEMO_TX[a.d.key] || '又干完一笔', f: { at: '今天 ' + hm, desk: a.d.name, key: a.d.key, text: DEMO_TX[a.d.key] || '又干完一笔', ok: true, n: r.length, refLabel: '钉钉单号', refs: r } } })
       if (!js.length) return
       SAMPLE.feed = js.map(j => j.f).reverse().concat(SAMPLE.feed).slice(0, 14); panels(SAMPLE); dispatch(js, hm) }
+    sampleDue = (k, job) => { const a = actors[k]; if (a && a.d.status === 'ok' && DEMO_TX[k]) { if (/^bp_/.test(k) && job) DEMO_TX[k] = job + (k === 'bp_flash' ? '已推 3/3 个群' : '已开跑'); demo([k]) } else if (a) a.patrol() }   // 排队表里到点的：有活的演派工，没活的只闪一圈
     addEventListener('keydown', e => { if (e.key === 'd' || e.key === 'D') { const c = Object.values(actors).filter(a => a.d.status === 'ok').map(a => a.d.key).sort(() => Math.random() - .5); demo(c.slice(0, 1 + Math.floor(Math.random() * 3))) }
+      if (e.key === 's' || e.key === 'S') { const c = Object.values(actors).filter(a => a.d.status === 'ok' && a.state === 'seat'); const a = c[Math.floor(Math.random() * c.length)]; a && a.takeBreak('sofa') }
       if (e.key === 'p' || e.key === 'P') Object.values(actors).filter(a => a.d.status === 'ok').forEach(a => a.patrol())
       if (e.key === 'b' || e.key === 'B') { const c = Object.values(actors).filter(a => a.d.status === 'ok' && a.state === 'seat' && !a.busy()); const a = c[Math.floor(Math.random() * c.length)]; a && a.takeBreak() } })
   }
+  }
+  // 先探新人物的图到没到（没到的先借用），探完再开场
+  Promise.all(Object.keys(BORROW).map(n => new Promise(res => { const im = new Image(); im.onload = res; im.onerror = () => { MISSING[n] = 1; res() }
+    im.src = `office-art/c${String(n).padStart(2, '0')}-seat.webp` }))).then(start)
 
   // ───────── 时钟 / 缩放 ─────────
   const p2 = n => String(n).padStart(2, '0')
   const tick = () => { const t = new Date(); $('clk').textContent = `${p2(t.getHours())}:${p2(t.getMinutes())}`
     $('dt').textContent = `${t.getFullYear()}年${t.getMonth() + 1}月${t.getDate()}日 · 周${'日一二三四五六'[t.getDay()]}` }
-  tick(); setInterval(tick, 5000)
+  tick(); setInterval(() => { tick(); queue() }, 5000)
   const fit = () => { const w = innerWidth || document.documentElement.clientWidth, h = innerHeight || document.documentElement.clientHeight
     if (!w || !h) return; $('stage').style.zoom = Math.min(w / 1920, h / 1080); scene.style.transform = `scale(${1440 / 1672})` }
   addEventListener('resize', fit); addEventListener('load', fit); fit(); setTimeout(fit, 60)
+
+  // ───────── 全屏 ─────────
+  const fsOn = () => !!document.fullscreenElement
+  const fsHint = () => { $('fs').textContent = '这个浏览器不让网页自己全屏 · 请按 F11'; setTimeout(() => { $('fs').textContent = fsOn() ? '退出全屏' : '全屏' }, 4000) }
+  const fsToggle = () => { try { const r = fsOn() ? document.exitFullscreen() : document.documentElement.requestFullscreen(); if (r && r.catch) r.catch(fsHint) } catch (e) { fsHint() } }
+  $('fs').addEventListener('click', fsToggle)
+  $('view').addEventListener('dblclick', e => { if (e.target.id !== 'fs') fsToggle() })
+  addEventListener('keydown', e => { if (e.key === 'f' || e.key === 'F') fsToggle() })
+  document.addEventListener('fullscreenchange', () => { $('fs').textContent = fsOn() ? '退出全屏' : '全屏'; fit() })
+  let idleT = 0
+  const wake = () => { document.body.classList.remove('idle'); clearTimeout(idleT); idleT = setTimeout(() => document.body.classList.add('idle'), 3000) }
+  addEventListener('mousemove', wake); addEventListener('keydown', wake); wake()
 })()
 </script>
 </html>

@@ -5016,6 +5016,8 @@ from routers import todo   # V2.790 首页待办区（待我处理 / 我发起�
 app.include_router(todo.router)
 from routers import office   # V2.796 数字员工办公室（值班表 + 干活记录 + 大屏口令）
 app.include_router(office.router)
+import office_bp_bridge   # V2.797 数字员工办公室·接入 BP 定时任务：每分钟去 BP 读它的定时任务清单，替驾驶舱值守员 / 业绩快报员报到、记账（只读，不改 BP）
+office_bp_bridge.start()
 
 
 def _office_machines():

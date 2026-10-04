@@ -284,8 +284,9 @@ def _loop():
         try:
             import worker_store      # 数字员工办公室·发票接收员：每圈报到；真接了单 / 出了错才记一笔（只写张数和钉钉单号）
             has_cfg = bool((inv.get_settings().get("intake") or {}).get("approvers"))
-            worker_store.beat("inv_intake", off="" if has_cfg else "还没设接入审批人")
-            if n % (EVERY_MIN * 60 // TICK_S) == 0:
+            per = EVERY_MIN * 60 // TICK_S           # 每 per 圈整扫一次钉钉；报到时顺带说离下一次整扫还有多久
+            worker_store.beat("inv_intake", off="" if has_cfg else "还没设接入审批人", next_in=(per - n % per) * TICK_S)
+            if n % per == 0:
                 if has_cfg:
                     r = scan_once("定时") or {}
                     if not r.get("ok") and "还在扫" not in str(r.get("msg") or ""):
