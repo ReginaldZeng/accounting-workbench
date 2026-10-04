@@ -731,6 +731,13 @@ html[data-theme=dark] .ta-board{
 .bom-seg button.on{background:var(--bg); color:var(--ink); font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.08);}
 /* 台账表 */
 .bom-ledger td{white-space:nowrap;}
+.bom-ledger .bom-opcol{position:sticky; right:0; z-index:1; background:var(--bg); box-shadow:-10px 0 10px -10px rgba(0,0,0,.22);}
+.bom-ledger th.bom-opcol{z-index:2; background:var(--bg-sub);}
+.bom-ledger tr.row:hover td.bom-opcol{background:var(--bg-sub);}
+.bom-stat-click{cursor:pointer; border-radius:8px; transition:background .12s;}
+.bom-stat-click:hover{background:var(--bg-sub);}
+.bom-stat-click.on{background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent);}
+.bom-stat-click small{color:var(--accent);}
 .bom-dot{display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--blue); margin-left:5px; vertical-align:middle;}
 /* 涨跌：红▲=涨 绿▼=跌（中国财务惯例） */
 .bom-tri{font-size:10px; margin-left:4px;} .bom-tri.up,.up{color:var(--red);} .bom-tri.down,.down{color:var(--green);}

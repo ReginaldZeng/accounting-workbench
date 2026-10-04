@@ -423,6 +423,7 @@ function BomLedgerView({ user, mode = 'std' }) {
       {view === 'detail' && entry && <Detail entry={entry} all={data.all} cfg={cfg} mode={mode} onBack={backFromDetail}
         onFill={(e) => setManual({ approvalNo: e.approval || '', historical: true })}
         onOpen={openDetail} onCompare={openCompare} onChanged={async () => { const r = await getBomEntry(curId); setEntry(r.entry); load() }}
+        onFinalReview={data?.canFinalReview ? setFinalRow : null}
         flash={flash}
         isSuper={isSuper} onDelete={(target, label) => setDelM({ target, label, after: backFromDetail })} />}
       {delM && <DeleteModal target={delM.target} label={delM.label} flash={flash} onClose={() => setDelM(null)}
@@ -433,7 +434,8 @@ function BomLedgerView({ user, mode = 'std' }) {
       {manual && <IntakeModal cfg={cfg} init={typeof manual === 'object' ? manual : null} onClose={() => setManual(false)} flash={flash}
         onDone={(no) => { setManual(false); load(); openApproval(no) }} />}
       {finalRow && <FinalReviewModal row={finalRow} onClose={() => setFinalRow(null)}
-        onDone={() => { setFinalRow(null); load() }} flash={flash} />}
+        onDone={async () => { setFinalRow(null); load()
+          if (view === 'detail' && curId) { try { const r = await getBomEntry(curId); setEntry(r.entry) } catch { /* 详情刷新失败不挡 */ } } }} flash={flash} />}
       {toast && <div className="bom-toast">{toast}</div>}
     </div>
   )
@@ -449,6 +451,7 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
   const [fch, setFch] = useState('all')         // all | ecom | common | tob | toc
   const [q, setQ] = useState('')
   const [showObs, setShowObs] = useState(false) // 换码承接：已失效（被已终审新版替代）的旧版默认收起
+  const [onlyFinal, setOnlyFinal] = useState(false)   // 2026-10-04：点「待我终审」数字卡 → 只看已初审待终审的行
   const [showHist, setShowHist] = useState(false) // 历史版（答 C / 历史补录）：已归档不对外，默认收起
   const histRows = data.hist || []
   const rows = (data.rows || []).concat(showHist ? histRows : [])
@@ -458,6 +461,7 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
 
   const shown = rows.filter(r => {
     if (isStd && !showObs && isDead(r)) return false
+    if (isStd && onlyFinal && !r.needFinalReview) return false
     if (ftype !== 'all' && (r.kind || '成品') !== ftype) return false
     if (fch !== 'all' && r.channel !== fch) return false
     if (q.trim()) { const s = [r.cpCode, r.productName, r.customer, r.erpCode, r.approval].filter(Boolean).join('').toLowerCase(); if (!s.includes(q.trim().toLowerCase())) return false }   // V2.502：物料编码、钉钉单号也能搜
@@ -550,11 +554,11 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
         <td><span className={'tag ' + (STATUS[r.status]?.cls || 'unmap')}>{STATUS[r.status]?.txt || r.status}</span>
           {r.ack?.selfReview && <span className="bom-gvtag" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }} title="主管理员自审：初审与终审为同一人（单人模式），未经第二人把关">自审</span>}
           {r.hasGoodsVersion && <span className="bom-gvtag" title="附有成本会计商品版（脱敏公开版），已留档">＋商品版</span>}</td>
-        <td style={{ whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
-          <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>采购核算表 ›</a>
-          <a className="lk" style={{ marginRight: 10 }} title="补/改本产品的 ERP 物料编码" onClick={() => fillErp(r)}>补物料编码</a>
+        <td className="bom-opcol" style={{ whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
           {r.needFinalReview && onFinalReview &&
-            <a className="lk" style={{ fontWeight: 700, color: 'var(--green)' }} onClick={() => onFinalReview(r)}>⚑ 终审 ›</a>}
+            <a className="lk" style={{ fontWeight: 700, color: 'var(--green)', marginRight: 10 }} onClick={() => onFinalReview(r)}>⚑ 终审 ›</a>}
+          <a className="lk" style={{ marginRight: 10 }} onClick={() => onOpen(r.id)}>采购核算表 ›</a>
+          <a className="lk" title="补/改本产品的 ERP 物料编码" onClick={() => fillErp(r)}>补物料编码</a>
         </td>
       </tr>
     )
@@ -595,7 +599,8 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
             ? <><Stat lab="来源审批" v={stats.approvals} suf="单" />
               <Stat lab="勾稽校验" v="全平" green suf={`${stats.versions} 版 × 6 项`} />
               <Stat lab={data.canFinalReview ? '待我终审' : '待终审'} v={data.needAck || 0}
-                suf={`/ ${stats.total} 产品`} /></>
+                suf={onlyFinal ? '已筛出 · 再点取消' : ((data.needAck || 0) > 0 ? '点这里只看这几条' : `/ ${stats.total} 产品`)}
+                active={onlyFinal} onClick={(data.needAck || 0) > 0 || onlyFinal ? () => setOnlyFinal(v => !v) : null} /></>
             : <><Stat lab="待办单号" v={openAppr.length} suf={doneCount ? `单 · 另 ${doneCount} 单已完成初审` : '单'} />
               <Stat lab="组" v={openAppr.reduce((s, a) => s + a.groupCount, 0)}
                 suf="一个采购核算表文件=一组" />
@@ -682,7 +687,7 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
                 <th className="th" style={{ textAlign: 'right' }}>加工费</th><th className="th" style={{ textAlign: 'right' }}>装卸费</th>
                 <th className="th" style={{ textAlign: 'right' }}>管理费</th><th className="th" style={{ textAlign: 'right' }}>全成本（含税）</th>
                 <th className="th">审核日期</th><th className="th">钉钉单号</th><th className="th">客户</th>
-                <th className="th">当前状态</th><th className="th">操作</th>
+                <th className="th">当前状态</th><th className="th bom-opcol">操作</th>
               </tr></thead>
               <tbody>
                 {shown.length === 0 && <tr><td colSpan={15} style={{ textAlign: 'center', color: 'var(--ink-3)', padding: 30 }}>
@@ -698,8 +703,9 @@ function Ledger({ data, cfg, mode, onOpen, onCompare, onManual, onStdImport, onA
     </>
   )
 }
-function Stat({ lab, v, suf, small, green }) {
-  return <div className="bom-stat"><div className="bom-stat-l">{lab}</div>
+function Stat({ lab, v, suf, small, green, onClick, active }) {
+  return <div className={'bom-stat' + (onClick ? ' bom-stat-click' : '') + (active ? ' on' : '')} onClick={onClick || undefined}
+    title={onClick ? '点击筛选' : undefined}><div className="bom-stat-l">{lab}</div>
     <div className="bom-stat-v" style={{ fontSize: small ? 16 : undefined, color: green ? 'var(--green)' : undefined }}>{v}</div>
     {suf ? <small>{suf}</small> : null}</div>
 }
@@ -979,7 +985,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
 }
 
 // ============ 采购核算表详情 ============
-function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, flash, isSuper, onDelete, onFill }) {
+function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, onFinalReview, flash, isSuper, onDelete, onFill }) {
   const isStd = mode === 'std'
   const [edit, setEdit] = useState(false)
   const [fee, setFee] = useState(entry.fee)
@@ -1179,6 +1185,9 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, f
             {entry.active && !entry.voidPending && cfg?.canAudit && <button onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); setVoidM('request') }}>申请作废</button>}
             {isSuper && onDelete && <button className="danger" onClick={e => { e.currentTarget.closest('details').removeAttribute('open'); onDelete({ entryId: entry.id }, `记录 #${entry.id} · ${entry.cpCode} ${entry.productName}`) }}>删除记录</button>}
           </div></details>}
+          {entry.needFinalReview && onFinalReview && !edit &&
+            <button className="btn-pri" onClick={() => onFinalReview(entry)}
+              title="财务BP终审：通过＝盖已审核戳、对外给 BP 报价；也可退回成本会计（须写原因）">⚑ 终审</button>}
           {archived && !edit && cfg?.canAudit && (entry.status === '已审核' && !entry.backfill && !entry.imported && !isSuper
             ? <button className="btn-sec" disabled={entry.unfinalPending} onClick={unfinalRequest}
                 title={entry.unfinalPending ? '已申请，待财务BP批准' : '本版已终审对外：撤回要财务BP批准，批准即撤出对外、退回复核'}>{entry.unfinalPending ? '撤回申请待批' : '申请撤回终审'}</button>
