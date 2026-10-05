@@ -164,6 +164,9 @@ export const voucherDdConfig = url => j('/api/logistics-voucher/dd-config?url=' 
 export const voucherAuto = () => j('/api/logistics-voucher/auto')
 export const voucherAutoSet = patch => j('/api/logistics-voucher/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
 export const voucherAutoRun = () => j('/api/logistics-voucher/auto/run', { method: 'POST' })
+// 人工选择这张请款单核销哪些计提（可跨月）
+export const voucherAccrualCands = inst => j('/api/logistics-voucher/accrual-candidates?inst=' + encodeURIComponent(inst))
+export const voucherPick = (inst, picks) => j('/api/logistics-voucher/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, picks }) })
 export const voucherPaperOverride = (inst, on, note = '') => j('/api/logistics-voucher/paper-override', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, on, note }) })
 // V2.731 首页「申请开通」→ 钉钉推送（/mine 只读本人申请记录，首页唯一允许的轻量请求）
 export const submitAccessRequest = (cap, label, pages, note) => jp('/api/access-request', { cap, label, pages, note })

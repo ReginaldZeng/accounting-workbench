@@ -8,6 +8,7 @@
 #   分工(用户同意 A)：物流的发票内容审核在这一页做(暂估 vs 发票逐张比)；发票管家只管识别/查重/纸质件/凭证同步。
 #   凭证摘要待认证行以发票号开头 → 发票管家 V2.746 定时同步会自动把那张票标「已做账·凭证号」，这里不另回写。
 import json
+import re
 import time
 from datetime import datetime
 
@@ -25,6 +26,7 @@ PR = store.payreq
 FX = store.review_line_fix
 _OVR_KEY = "logi_voucher_paper_ok"          # {inst_id: {by, at}} 纸质件没到、手动放行做账
 _POSTED_KEY = "logi_voucher_posted"         # {inst_id: {bill_no, vid, vno, book, at, by}} 已写入金蝶
+_PICK_KEY = "logi_voucher_pick"             # {inst_id: {picks: [{year, month, vno}], by, at}} 人工选定这张请款单核销哪几张计提(V2.817)
 _ACC_CACHE = {}
 
 
@@ -326,9 +328,20 @@ def _preview_data(inst, self_vno=None):
         vouchers, notes = list(vouchers), list(notes)      # 缓存里的列表别被下面改到
     except Exception as e:
         return {"ok": False, "msg": "读金蝶计提凭证失败：%s" % str(e)[:160]}, 502
+    # V2.817(用户 2026-10-05「最好不写死代码，我们可以选择去核销哪些计提」)：人工选定了核销哪几张计提的，就用选定的——
+    #   可以跨月(诚煜 6 月账单 = 6 月记-518 + 7 月记-522)，也可以从同月几张里只挑一张(迅鸽同月按项目拆成几张请款单)。
+    #   选定以后不再自动挑子集、不再去别的主体账上找。
+    picked = (db.get_setting(_PICK_KEY, None) or {}).get(inst)
+    if picked and picked.get("picks"):
+        try:
+            vouchers = _picked_vouchers(r["subject_full"], r["sup_code"], picked["picks"])
+        except Exception as e:
+            return {"ok": False, "msg": "读人工选定的计提凭证失败：%s" % str(e)[:160]}, 502
+        notes = ["人工选定核销 %s（%s %s）" % ("、".join("%d/%s#" % (v["month"], v["vno"]) for v in vouchers) or "（选的计提在金蝶里找不到了）",
+                                     picked.get("by") or "", picked.get("at") or "")]
     # 同一家同月有几张请款单(或计提多记了一张)：计提比发票多时，挑出含税合计正好＝发票的那几张，其余不在这次请款里
     inv_tot = round(sum(i["gross"] for i in invs), 2)
-    if vouchers and invs and sum(v["gross"] for v in vouchers) - inv_tot > 0.004:
+    if not picked and vouchers and invs and sum(v["gross"] for v in vouchers) - inv_tot > 0.004:
         pick = LV._subset(vouchers, inv_tot)
         if pick:
             rest = [v for v in vouchers if v not in pick]
@@ -340,7 +353,7 @@ def _preview_data(inst, self_vno=None):
     #   再核销、支付(mode=move)；原主体的红冲 V2.798 先不写，V2.799(用户 2026-10-05「也是系统做星期零」)改成系统在那边账簿新建红冲凭证并提交，见 _post_xred。
     xbook = []
     own_g = round(sum(v["gross"] for v in vouchers), 2)
-    if invs and abs(own_g - inv_tot) > 0.004:
+    if not picked and invs and abs(own_g - inv_tot) > 0.004:
         need = round(inv_tot - own_g, 2) if own_g < inv_tot else inv_tot      # 本主体已有一部分计提的，只找缺的那部分
         for o in db.list_orgs() or []:
             ob = o.get("full_name")
@@ -446,7 +459,7 @@ def _preview_data(inst, self_vno=None):
         xb.append({"book": ob, "short": short, "vno": v["vno"], "year": v["year"], "month": v["month"], "ref": LV.ref_of(v, ctx["pay_year"]),
                    "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"],
                    "lines": LV.red_lines(v, ctx["pay_year"]), "reversed": rv})
-    return {"ok": True, "kind": kind, "kind_text": ktext, "xbook": xb, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
+    return {"ok": True, "kind": kind, "kind_text": ktext, "xbook": xb, "picked": picked or None, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
                                 "code": r.get("sup_code"), "subject": r.get("subject"), "subject_full": r.get("subject_full"),
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
@@ -462,6 +475,127 @@ def _preview_data(inst, self_vno=None):
             "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"]},
             "adjust": adjust,
             "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}, 200
+
+# ---------- 人工选择核销哪些计提（V2.817）----------
+def _picked_vouchers(book, sup_code, picks):
+    """人工选定的 [{year, month, vno}] → 计提凭证列表(按月去金蝶取，10 分钟缓存)。金蝶里找不到的那张跳过。"""
+    out = []
+    for ym in sorted({(int(p["year"]), int(p["month"])) for p in picks}):
+        vs, _ = _accruals(book, "%04d-%02d" % ym, sup_code)
+        want = {str(p["vno"]) for p in picks if (int(p["year"]), int(p["month"])) == ym}
+        out.extend(v for v in vs if v["vno"] in want)
+    return out
+
+
+def _accrual_candidates(r, invs):
+    """这张请款单可以选哪些计提：本主体账簿、这家供应商、账单月往前 2 个月 到 付款月(没付款到当月) 的全部计提凭证。
+    每张标出：是不是已经被别的凭证核销/红冲过(看这家 2241 分录摘要里的「核销6/518#」「红冲5/498#」)、是不是被别的请款单选走了。只读金蝶。"""
+    y, m = int(r["period"][:4]), int(r["period"][5:7])
+    pi = _paid_info(r) or {}
+    end = str(pi.get("date") or datetime.now().strftime("%Y-%m-%d"))
+    ey, em = int(end[:4]), int(end[5:7])
+    months, cy, cm = [], y, m
+    for _ in range(2):                                  # 往前两个月(跨年照退)
+        cm -= 1
+        if cm < 1:
+            cy, cm = cy - 1, 12
+    while (cy, cm) <= (ey, em) and len(months) < 14:
+        months.append((cy, cm))
+        cm += 1
+        if cm > 12:
+            cy, cm = cy + 1, 1
+    book, sup = r["subject_full"], r["sup_code"]
+    # 这家在本账簿的全部 2241 分录：一来知道哪几个月有计提(没有的月份不去取整张凭证)，二来认哪些计提已经被核销/红冲
+    s, conf = kc.login()
+    used, has = {}, set()
+    for yy in sorted({a for a, _ in months}):
+        rows = kc._query(s, conf, "GL_VOUCHER", [("FVOUCHERGROUPNO", "号"), ("FPeriod", "期"), ("FEXPLANATION", "摘要"), ("FCREDIT", "贷"), ("FDEBIT", "借")],
+                         "FACCOUNTBOOKID.FName='%s' and FYear=%d and FAccountID.FNumber like '2241%%' and FDetailID.FFLEX4.FNumber='%s'" % (
+                             book.replace("'", ""), yy, sup.replace("'", "")))
+        for x in rows:
+            z, pp = _s(x["摘要"]), int(x["期"] or 0)
+            if "计提" in z and float(x["贷"] or 0) and not any(k in z for k in ("红冲", "更正", "核销")):
+                has.add((yy, pp))
+            if z.startswith("核销") or z.startswith("红冲") or "核销" in z[:30]:
+                head = z.split("计提")[0]
+                for mo in re.finditer(r"(?:(\d{4})-)?(\d{1,2})/(\d+)#", head):
+                    used.setdefault((int(mo.group(1) or yy), int(mo.group(2)), mo.group(3)), "%d 月 记-%s" % (pp, _s(x["号"])))
+    others = {}
+    for i2, pk in (db.get_setting(_PICK_KEY, None) or {}).items():
+        if i2 != r["inst_id"]:
+            for p in pk.get("picks") or []:
+                others[(int(p["year"]), int(p["month"]), str(p["vno"]))] = i2
+    mine = {(int(p["year"]), int(p["month"]), str(p["vno"])) for p in ((db.get_setting(_PICK_KEY, None) or {}).get(r["inst_id"]) or {}).get("picks") or []}
+    cands = []
+    for (yy, mm) in months:
+        if (yy, mm) not in has:
+            continue
+        vs, _ = _accruals(book, "%04d-%02d" % (yy, mm), sup)
+        for v in vs:
+            k = (yy, mm, v["vno"])
+            cands.append({"year": yy, "month": mm, "vno": v["vno"], "expl": v["expl"], "gross": v["gross"], "tax": v["tax"], "net": v["net"], "rate": v["rate"],
+                          "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
+                          "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
+                          "used": used.get(k) or "", "other": bool(others.get(k)), "picked": k in mine, "bill_month": (yy, mm) == (y, m)})
+    # 建议：没被用过的里面，含税合计正好＝发票合计的一组(优先带上账单月的)
+    inv_tot = round(sum(i["gross"] for i in invs), 2)
+    free = sorted([c for c in cands if not c["used"] and not c["other"]], key=lambda c: (not c["bill_month"], c["year"], c["month"]))
+    sug = LV._subset(free, inv_tot) if (free and inv_tot) else None
+    for c in cands:
+        c["suggest"] = bool(sug and c in sug)
+    return cands, inv_tot
+
+
+@router.get("/api/logistics-voucher/accrual-candidates")
+def accrual_candidates(request: Request, inst: str):
+    """预览里「选择核销哪些计提」的候选清单。只读。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
+    if not r or not r.get("period"):
+        return JSONResponse({"ok": False, "msg": "没有这张请款单，或还没认出账单月"}, status_code=400)
+    r = dict(r)
+    _, invs = _invoices(inst)
+    try:
+        cands, inv_tot = _accrual_candidates(r, invs)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "读金蝶计提失败：%s" % str(e)[:160]}, status_code=502)
+    pk = (db.get_setting(_PICK_KEY, None) or {}).get(inst)
+    return {"ok": True, "inv_total": inv_tot, "period": r["period"], "picked": pk or None, "cands": cands}
+
+
+@router.post("/api/logistics-voucher/pick")
+async def pick_accruals(request: Request):
+    """人工选定这张请款单核销哪几张计提；picks 传空＝恢复系统自动认。已写金蝶的不能再改。留痕。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    if inst in (db.get_setting(_POSTED_KEY, None) or {}):
+        return JSONResponse({"ok": False, "msg": "这张已经写过金蝶，不能再改核销哪些计提"}, status_code=400)
+    picks = []
+    for p in b.get("picks") or []:
+        try:
+            picks.append({"year": int(p["year"]), "month": int(p["month"]), "vno": str(p["vno"])})
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse({"ok": False, "msg": "选的计提格式不对"}, status_code=400)
+    vnos = [p["vno"] for p in picks]
+    if len(set(vnos)) != len(vnos):
+        return JSONResponse({"ok": False, "msg": "选的计提里有两张凭证号相同（不同月份），系统暂时分不开，这张请人工做"}, status_code=400)
+    allp = dict(db.get_setting(_PICK_KEY, None) or {})
+    for i2, pk in allp.items():
+        if i2 != inst and any((p["year"], p["month"], p["vno"]) == (int(q["year"]), int(q["month"]), str(q["vno"])) for p in picks for q in pk.get("picks") or []):
+            return JSONResponse({"ok": False, "msg": "其中有计提已经被另一张请款单选走了，先到那张里取消"}, status_code=400)
+    if picks:
+        allp[inst] = {"picks": picks, "by": u["name"], "at": _now()}
+    else:
+        allp.pop(inst, None)
+    db.set_setting(_PICK_KEY, allp, u["name"])
+    db.audit(u["name"], "物流付款做账-选定核销的计提", inst, "、".join("%d-%d/%s#" % (p["year"], p["month"], p["vno"]) for p in picks) or "恢复系统自动认")
+    return {"ok": True}
+
 
 @router.post("/api/logistics-voucher/plans")
 async def plans(request: Request):

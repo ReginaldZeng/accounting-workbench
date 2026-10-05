@@ -16,7 +16,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAccrualCands, voucherPick } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -551,6 +551,49 @@ function AutoBar({ onChanged }) {
   </div>
 }
 
+// 选择核销哪些计提(V2.817，用户「最好不写死代码，我们可以选择去核销哪些计提」)：列出这家供应商账单月前后各月的计提，人来勾；
+// 系统只标建议(没被用过、含税合计正好等于发票的那一组)。可以跨月，也可以从同月几张里只挑一张。存下来以后预览、做账都按选定的来。
+function PickAccruals({ inst, onSaved, onClose }) {
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [on, setOn] = useState({})
+  const [busy, setBusy] = useState(false)
+  const key = c => `${c.year}-${c.month}/${c.vno}`
+  useEffect(() => {
+    voucherAccrualCands(inst).then(r => {
+      setD(r)
+      const o = {}
+      r.cands.forEach(c => { if (r.picked ? c.picked : c.suggest) o[key(c)] = true })
+      setOn(o)
+    }).catch(e => setErr(e.message))
+  }, [inst])
+  if (err) return <div className="lv-msg bad">候选计提没读到：{err}　<button className="lnk" onClick={onClose}>关闭</button></div>
+  if (!d) return <div className="lv-empty">读金蝶这家供应商各月的计提…</div>
+  const sel = d.cands.filter(c => on[key(c)])
+  const sum = r2(sel.reduce((s, c) => s + c.gross, 0)), diff = r2(d.inv_total - sum)
+  const save = picks => { setBusy(true); voucherPick(inst, picks).then(onSaved).catch(e => alert(e.message)).finally(() => setBusy(false)) }
+  return <div className="lv-pick">
+    <div className="ph"><b>选择这张请款单核销哪些计提</b>
+      <span className="dim">账单月 {d.period} 前 2 个月到付款月 · 可以跨月 · {d.picked ? `现在是人工选定的（${d.picked.by} ${d.picked.at}）` : '现在是系统自动认的，下面先勾了系统的建议'}</span>
+      <span style={{ flex: 1 }} /><button className="lnk" onClick={onClose}>收起</button></div>
+    <table className="lv-t"><thead><tr><th style={{ width: 34 }}></th><th style={{ width: 96 }}>月 / 凭证</th><th>摘要</th><th style={{ width: 150 }}>费用项目</th>
+      <th className="num" style={{ width: 110 }}>含税</th><th style={{ width: 60 }}>税率</th><th style={{ width: 210 }}>状态</th></tr></thead>
+      <tbody>{d.cands.map(c => { const k = key(c), lock = !!c.used || c.other; return <tr key={k} className={lock ? 'lock' : ''}>
+        <td><input type="checkbox" disabled={lock || busy} checked={!!on[k]} onChange={e => setOn(o => ({ ...o, [k]: e.target.checked }))} /></td>
+        <td className="mono">{c.month}/{c.vno}#{!c.bill_month && <div className="warn" style={{ fontFamily: 'inherit' }}>不是账单月</div>}</td>
+        <td className="expl" title={c.expl}>{c.expl}</td><td>{c.fee}{c.biz && <span className="dim"> · {c.biz}</span>}</td>
+        <td className="num">{money(c.gross)}</td><td>{pct(c.rate)}</td>
+        <td>{c.used ? <span className="dim">已被 {c.used} 核销 / 红冲</span> : c.other ? <span className="dim">已被另一张请款单选走</span> : c.suggest ? <span className="ok">建议（金额正好配上）</span> : <span className="dim">没用过</span>}</td></tr> })}
+        {!d.cands.length && <tr><td colSpan="7" className="lv-empty">这几个月金蝶里没有这家的计提</td></tr>}
+        <tr className="tot"><td colSpan="4">已选 {sel.length} 张　发票合计 {money(d.inv_total)}</td><td className="num">{money(sum)}</td><td colSpan="2">{Math.abs(diff) < 0.005
+          ? <span className="ok">和发票正好对上 ✓</span> : <span className="bad">和发票差 {money(diff)}（{diff > 0 ? '计提少' : '计提多'}）</span>}</td></tr></tbody></table>
+    <div className="pf">
+      <button className="btn btn-pri" disabled={busy || !sel.length} onClick={() => save(sel.map(c => ({ year: c.year, month: c.month, vno: c.vno })))}>{busy ? '保存中…' : '按勾选的核销'}</button>
+      {d.picked && <button className="btn" disabled={busy} onClick={() => save([])}>恢复系统自动认</button>}
+      <span className="dim">保存后下面的凭证预览按选定的重算；金额对不上也能存，但做不了账，会提示差多少。已被核销 / 红冲过的不能选。</span></div>
+  </div>
+}
+
 function Detail({ inst, onClose, onChanged }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -563,6 +606,7 @@ function Detail({ inst, onClose, onChanged }) {
     setBusy(true)
     voucherPaperOverride(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
+  const [picking, setPicking] = useState(false)  // 展开「选择核销哪些计提」
   const [posting, setPosting] = useState(null)   // 写金蝶结果 {ok, msg, steps}
   const post = () => {
     if (!window.confirm(`保存到金蝶：
@@ -645,7 +689,10 @@ function Detail({ inst, onClose, onChanged }) {
             })}</tbody>
           </table>
 
-          <div className="lv-sec">② 计提凭证 <span className="dim">{d.accruals.length} 张 · 金蝶 {d.req.period}{d.accruals.some(a => a.from) ? ' · 含记在别的主体账上的' : ''}</span></div>
+          <div className="lv-sec">② 计提凭证 <span className="dim">{d.accruals.length} 张 · {d.picked ? `人工选定（${d.picked.by} ${d.picked.at}）` : `金蝶 ${d.req.period}`}{d.accruals.some(a => a.from) ? ' · 含记在别的主体账上的' : ''}</span>
+            <span style={{ flex: 1 }} />
+            {!d.req.posted && <button className="btn sm" title="系统认的不对、或者这张账单的计提分在几个月里：自己勾选核销哪几张" onClick={() => setPicking(!picking)}>{picking ? '收起' : '选择核销哪些计提'}</button>}</div>
+          {picking && !d.req.posted && <PickAccruals inst={inst} onClose={() => setPicking(false)} onSaved={() => { setPicking(false); load(); onChanged() }} />}
           <table className="lv-t lv-fix">
             <colgroup><col style={{ width: 110 }} /><col /><col style={{ width: 130 }} /><col style={{ width: 120 }} /><col style={{ width: 110 }} /><col style={{ width: '30%' }} /></colgroup>
             <thead><tr><th>凭证</th><th>费用项目</th><th className="num">含税</th><th>税率</th><th className="num">暂估税</th><th>处理</th></tr></thead>
@@ -1003,6 +1050,9 @@ const CSS = `
 .lv .lv-auto .row.pg{margin-top:2px}.lv .lv-auto .lnk:disabled{opacity:.35;cursor:default}
 .lv .lv-auto .ck{display:inline-flex;gap:4px;align-items:center;white-space:nowrap}.lv .lv-auto table{background:var(--bg);border-radius:8px}
 .lv .lv-unpaid{font-size:12.5px;color:var(--ink-2);padding:2px 2px 0}
+.lv .lv-pick{border:1px solid var(--accent);border-radius:10px;padding:10px 12px;margin:6px 0 10px;background:var(--accent-soft)}
+.lv .lv-pick .ph{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;margin-bottom:6px}.lv .lv-pick table{background:var(--bg);border-radius:8px}
+.lv .lv-pick tr.lock td{color:var(--ink-3)}.lv .lv-pick .pf{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12.5px}.lv .lv-pick .warn{color:var(--amber);font-size:11px}
 .lv .lv-batch select{font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
 .lv .lv-batch+.lv-batch{margin-top:6px}
 .lv .lv-batch{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);font-size:12.5px}
