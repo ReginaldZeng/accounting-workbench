@@ -336,7 +336,7 @@ def _preview_data(inst, self_vno=None):
             vouchers = pick
     # 本账簿没有/对不上：去另外两个主体的账上找，计提可能记错了主体(实证 丰源 深圳星期九 918.93 记在深圳星期零 记-390)
     # V2.798(用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：不再只提示——那边的计提拿过来，在本张凭证里补提到本主体
-    #   再核销、支付(mode=move)；原主体的红冲系统不写(本页只往付款单自动生成的凭证里补分录，不在别的账簿新建凭证)，出一张更正单给那边的人做。
+    #   再核销、支付(mode=move)；原主体的红冲 V2.798 先不写，V2.799(用户 2026-10-05「也是系统做星期零」)改成系统在那边账簿新建红冲凭证并提交，见 _post_xred。
     xbook = []
     own_g = round(sum(v["gross"] for v in vouchers), 2)
     if invs and abs(own_g - inv_tot) > 0.004:
@@ -378,7 +378,7 @@ def _preview_data(inst, self_vno=None):
                 notes.append("%s：%s，要先在那边红冲、在本主体重新计提，再做这张" % (where, why))
             else:
                 vouchers = vouchers + mv
-                notes.append("%s：本张凭证里补提到%s再核销；%s那边要另做一张红冲（系统不写，按计提更正单在金蝶手工做）" % (where, r.get("subject") or "本主体", short))
+                notes.append("%s：本张凭证里补提到%s再核销；%s那边的红冲凭证系统一并建好并提交（不审核）" % (where, r.get("subject") or "本主体", short))
                 xbook = [(ob, short, v) for v in mv]
             break
     fixes = _fixes(r["carrier"], r["period"], r["subject"])
@@ -429,10 +429,22 @@ def _preview_data(inst, self_vno=None):
                                "rate": v["rate"] if p["mode"] == "tail" else p.get("new_rate"), "exp": exp_new}})
     # 主体更正：原主体那边要做的红冲分录 + 那边做了没有(读金蝶)
     xb = []
+    xdone = ((db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}).get("xred") or {}
     for ob, short, v in (xbook if lines else []):
+        rv = _reversed_in(ob, r["sup_code"], v)
+        mine = xdone.get("%s|%s" % (ob, v["vno"]))             # 系统建的那张(保存即有记-号)；金蝶查询一时查不到也认它
+        if mine and not rv:                                    # 金蝶查不到：确认那张还在(可能被人删了)，不在就当没做
+            try:
+                if not kc.view_voucher(mine.get("vid")).get("exists"):
+                    mine = None
+            except Exception:
+                pass
+        if mine and (not rv or rv.get("vno") == mine.get("vno")):
+            rv = {"vno": mine.get("vno"), "year": mine.get("year"), "month": mine.get("month"), "sys": True, "vid": mine.get("vid"),
+                  "by": mine.get("by"), "at": mine.get("at"), "submitted": mine.get("submitted")}
         xb.append({"book": ob, "short": short, "vno": v["vno"], "year": v["year"], "month": v["month"], "ref": LV.ref_of(v, ctx["pay_year"]),
                    "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"],
-                   "lines": LV.red_lines(v, ctx["pay_year"]), "reversed": _reversed_in(ob, r["sup_code"], v)})
+                   "lines": LV.red_lines(v, ctx["pay_year"]), "reversed": rv})
     return {"ok": True, "kind": kind, "kind_text": ktext, "xbook": xb, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
                                 "code": r.get("sup_code"), "subject": r.get("subject"), "subject_full": r.get("subject_full"),
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
@@ -621,12 +633,115 @@ def _post(inst, user):
     # 首页待办区：提交成功 → 给付款凭证审核人记一笔；没提交上 → 挂回做账人。合进凭证的计提更正顺带销账。失败只留痕，不拦。
     todo_scenes.voucher_touch(inst, rec, req, user)
     todo_scenes.fix_touch(req.get("carrier"), req.get("period"), user)
-    for x in d2.get("xbook") or []:            # 主体更正：原主体的红冲系统没写，提醒 + 留痕
-        if not x.get("reversed"):
-            steps.append("⚠ %s 记-%s 的红冲还没做：按计提更正单在金蝶手工做" % (x["short"], x["vno"]))
-        db.audit(user, "物流付款做账-主体更正", "记-%s" % vno, "%s 记-%s %.2f 补提到 %s；原主体红冲%s" % (
-            x["short"], x["vno"], x["gross"], req["subject"], "已做 记-%s" % x["reversed"]["vno"] if x.get("reversed") else "待手工做"))
+    if d2.get("xbook"):                        # 主体更正：到原主体账簿建红冲凭证(本主体这张已经写好了，那边建不成只提醒、可重试，不回滚)
+        for x in d2["xbook"]:
+            db.audit(user, "物流付款做账-主体更正", "记-%s" % vno, "%s 记-%s %.2f 补提到 %s" % (x["short"], x["vno"], x["gross"], req["subject"]))
+        try:
+            steps.extend(_post_xred(inst, user, d2, s, conf))
+        except Exception as e:
+            steps.append("⚠ 原主体的红冲凭证没建成：%s（本张已写好；可在预览里点「补做红冲」重试）" % str(e)[:160])
     return {"ok": True, "vno": vno, "bill_no": pb["单号"], "steps": steps, "dr": rec["dr"], "cr": rec["cr"]}
+
+
+def _xred_date(book, pay_date, s, conf):
+    """红冲凭证记哪天：和本主体那张付款凭证同一天；那边账簿这个月已经结账了，就记到它当前期间(今天在当前期间用今天，否则当期最后一天)。"""
+    import calendar
+    py, pm = int(pay_date[:4]), int(pay_date[5:7])
+    try:
+        bk = kc._query(s, conf, "BD_AccountBook", [("FCurrentYear", "年"), ("FCurrentPeriod", "期")], "FName='%s'" % book.replace("'", ""))
+        cy, cm = int(bk[0]["年"]), int(bk[0]["期"])
+    except Exception:
+        return pay_date, py, pm
+    if (py, pm) >= (cy, cm):
+        return pay_date, py, pm
+    today = datetime.now()
+    if (today.year, today.month) == (cy, cm):
+        return today.strftime("%Y-%m-%d"), cy, cm
+    return "%04d-%02d-%02d" % (cy, cm, calendar.monthrange(cy, cm)[1]), cy, cm
+
+
+def _post_xred(inst, user, d=None, s=None, conf=None):
+    """主体更正(V2.799，用户 2026-10-05「也是系统做星期零」)：到原主体账簿新建一张红冲凭证(原计提分录全额取负)并提交，不审核。
+    建凭证的写法沿用物流计提一键录入验证过的配方(账簿/凭证字/分录在前、FDate 在后)。防重复：那边已有红冲(金蝶查得到，或本系统建过且还在)就跳过。
+    只在本主体那张付款凭证写入之后做；本主体那张不受这一步成败影响。→ [步骤文字]"""
+    if d is None:
+        d, code = _preview_data(inst)
+        if code != 200:
+            raise RuntimeError(d.get("msg") or "读不到这张请款单")
+    posted = dict(db.get_setting(_POSTED_KEY, None) or {})
+    rec = dict(posted.get(inst) or {})
+    if not rec:
+        raise RuntimeError("本主体这张付款凭证还没写金蝶，先保存到金蝶")
+    if s is None:
+        s, conf = kc.login()
+    b2c = {o.get("full_name"): o.get("book_code") for o in (db.list_orgs() or [])}
+    xred, steps = dict(rec.get("xred") or {}), []
+    for x in d.get("xbook") or []:
+        key = "%s|%s" % (x["book"], x["vno"])
+        old = xred.get(key)
+        if old and kc.view_voucher(old.get("vid"), s, conf).get("exists"):
+            steps.append("%s 红冲凭证 记-%s 已建过，没重复建" % (x["short"], old.get("vno")))
+            continue
+        rv = x.get("reversed")
+        if rv and not rv.get("sys"):
+            steps.append("%s 记-%s 已经有人红冲过（%s 月 记-%s），没重复建" % (x["short"], x["vno"], rv.get("month"), rv.get("vno")))
+            continue
+        code = b2c.get(x["book"])
+        if not code:
+            raise RuntimeError("主体档案里没有「%s」的账簿编码" % x["short"])
+        date, y, m = _xred_date(x["book"], d["voucher"]["date"], s, conf)
+        ents = []
+        for l in x["lines"]:
+            e = dict(_KD_BASE, FEXPLANATION=l["expl"], FACCOUNTID={"FNumber": l["acct"]}, FDEBIT=l["dr"], FCREDIT=l["cr"])
+            dd = _kd_dims(l)
+            if dd:
+                e["FDetailID"] = dd
+            ents.append(e)
+        if abs(sum(l["dr"] for l in x["lines"]) - sum(l["cr"] for l in x["lines"])) >= 0.005:
+            raise RuntimeError("%s 记-%s 的红冲分录借贷不平，没建" % (x["short"], x["vno"]))
+        model = {"FACCOUNTBOOKID": {"FNumber": code}, "FVOUCHERGROUPID": {"FNumber": "PRE001"}, "FEntity": ents,
+                 "FDate": date, "FYear": y, "FPeriod": m}
+        r = kc.save_voucher(model, s, conf)
+        info = kc.view_voucher(r["id"], s, conf)
+        sub_err = ""
+        try:
+            kc.submit_bill("GL_VOUCHER", r["id"], s, conf)
+        except Exception as e:
+            sub_err = str(e)[:160]
+        xred[key] = {"vid": r["id"], "vno": info.get("vno") or "", "billno": r.get("billno"), "book": x["book"], "short": x["short"],
+                     "src_vno": x["vno"], "year": y, "month": m, "date": date, "gross": x["gross"], "at": _now(), "by": user,
+                     "submitted": not sub_err, "submit_err": sub_err}
+        rec["xred"] = xred
+        posted[inst] = rec
+        db.set_setting(_POSTED_KEY, posted, user)              # 建一张存一张，后面的失败不丢前面的记录
+        db.audit(user, "物流付款做账-原主体红冲凭证", "%s 记-%s" % (x["short"], xred[key]["vno"]),
+                 "红冲 %s %.2f，日期 %s；%s" % (x["ref"], x["gross"], date, "已提交" if not sub_err else "提交失败：" + sub_err))
+        steps.append("%s 红冲凭证 记-%s 已建（%s，冲 %s %.2f）%s" % (x["short"], xred[key]["vno"], date, x["ref"], x["gross"],
+                                                        "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err))
+    return steps
+
+
+@router.post("/api/logistics-voucher/post-xred")
+async def post_xred(request: Request):
+    """补做原主体的红冲凭证(保存到金蝶时那一步没成的重试)。已有红冲就不重复建。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    import threading
+    lk = _POST_LOCK.setdefault(inst, threading.Lock())
+    if not lk.acquire(blocking=False):
+        return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
+    try:
+        from starlette.concurrency import run_in_threadpool
+        steps = await run_in_threadpool(_post_xred, inst, u["name"])
+        r = {"ok": True, "steps": steps}
+    except Exception as e:
+        r = {"ok": False, "msg": "红冲凭证没建成：%s" % str(e)[:200]}
+    finally:
+        lk.release()
+    return r if r.get("ok") else JSONResponse(r, status_code=400)
 
 
 @router.post("/api/logistics-voucher/post")

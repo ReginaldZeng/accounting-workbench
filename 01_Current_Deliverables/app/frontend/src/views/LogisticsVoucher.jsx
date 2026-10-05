@@ -4,9 +4,10 @@
 //   点开：计提 vs 发票逐张比（核销 / 红冲更正 + 原因）+ 整张凭证预览（带全部核算维度，借贷平衡）。
 //   第一版只预览、不写金蝶；纸质件没到可手动放行（用户 2026-10-02 定）。
 // V2.798 计提记错主体(用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：本张凭证里直接补提到本主体再核销、支付；
-//   原主体的红冲系统不写，计提更正单出两张——① 原主体红冲(带红冲分录，交给做那边账的人) ② 本主体补提；页面显示那边红冲做了没有。
+//   计提更正单出两张——① 原主体红冲 ② 本主体补提；页面显示那边红冲做了没有。
+// V2.799(用户「也是系统做星期零」)：原主体的红冲凭证也由系统建——保存到金蝶时一并在那边账簿新建红冲凭证并提交(不审核)；没建成可点「补做红冲」。
 import React, { useEffect, useMemo, useState } from 'react'
-import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost } from '../api.js'
+import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred } from '../api.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
@@ -150,10 +151,10 @@ function sheetsOf(d) {
       `${l.dr ? '借' : '贷'} ${esc(l.acct)} ${esc(l.acct_name)} <b>${money(l.dr || l.cr)}</b>${dimText(l.dims).length ? `（${esc(dimText(l.dims).join('，'))}）` : ''}`).join('；') + '</div>').join('')
     // ① 原主体：整笔红冲
     out.push(adjustSheet(d, as.map(a => ({ ...a, new: zero(a.old.rate) })), {
-      side: 'from', noBy: true, ym: rev.length ? `${rev[0].year}-${String(rev[0].month).padStart(2, '0')}` : '待定', title: `计提更正单（主体更正 ① ${f} 红冲）`, subject: as[0].from_full || f, emptyNew: '冲回',
-      vno: rev.length ? rev.map(r => `${r.year}年${r.month}月 记-${esc(r.vno)}`).join('、') : `（${esc(f)}在金蝶做红冲后填写）`,
+      side: 'from', noBy: !rev.some(r => r.sys), ym: rev.length ? `${rev[0].year}-${String(rev[0].month).padStart(2, '0')}` : '待定', title: `计提更正单（主体更正 ① ${f} 红冲）`, subject: as[0].from_full || f, emptyNew: '冲回',
+      vno: rev.length ? rev.map(r => `${r.year}年${r.month}月 记-${esc(r.vno)}`).join('、') : '（保存到金蝶后生成）',
       why: () => `这笔费用应由${here}承担（发票开给${here}、由${here}付款），计提时记到了本主体，整笔红冲`,
-      note: hv => `<div class="note">说明：请<b>${esc(f)}</b>在金蝶做一张红冲凭证，把上面的计提整笔冲回（原分录全额取负，系统不代做）：${ent}
+      note: hv => `<div class="note">说明：<b>${esc(f)}</b>账簿做一张红冲凭证，把上面的计提整笔冲回（原分录全额取负；${rev.some(r => r.sys) ? '系统已建并提交，待审核' : rev.length ? '已做' : '保存到金蝶时系统建好并提交，待审核'}）：${ent}
         ${esc(here)}已在付款凭证 ${hv} 中补提并核销（见「主体更正 ② ${esc(here)} 补提」）。</div>`,
     }))
     // ② 本主体：补提
@@ -202,13 +203,22 @@ function Detail({ inst, onClose, onChanged }) {
 凭证不审核，留给你在金蝶核对后审核。${(d?.xbook || []).length ? `
 
 ⚠ 这张的计提原来记在别的主体：${d.xbook.map(x => `${x.short} 记-${x.vno}`).join('、')}。
-本张凭证会在${d.req.subject}补提后核销；${d.xbook.map(x => x.short).join('、')}那边的红冲系统不写，
-请打印计提更正单（两张），把「① 红冲」那张交给做那边账的同事在金蝶手工做。` : ''}
+本张凭证会在${d.req.subject}补提后核销；
+④ 系统在${d.xbook.map(x => x.short).join('、')}账簿新建一张红冲凭证（原计提全额取负）并提交，同样不审核。
+写完请打印计提更正单（两张：① 红冲 ② 补提），两边各附一张。` : ''}
 
 确定？`)) return
     setPosting({ busy: true })
     voucherPost(inst).then(r => { setPosting({ ok: true, ...r }); load(); onChanged() })
       .catch(e => setPosting({ ok: false, msg: e.message }))
+  }
+  const [xbusy, setXbusy] = useState(false)       // 补做原主体红冲
+  const [xmsg, setXmsg] = useState(null)
+  const xred = () => {
+    if (!window.confirm(`在${(d?.xbook || []).map(x => x.short).join('、')}账簿新建红冲凭证（原计提全额取负）并提交，不审核。已经有红冲的不会重复建。\n\n确定？`)) return
+    setXbusy(true); setXmsg(null)
+    voucherPostXred(inst).then(r => { setXmsg({ ok: true, text: (r.steps || []).join(' → ') }); load(); onChanged() })
+      .catch(e => setXmsg({ ok: false, text: e.message })).finally(() => setXbusy(false))
   }
   const lines = d?.voucher?.lines || []
   const rc = d ? rateCheck(d.accruals, d.invoices) : []
@@ -247,7 +257,11 @@ function Detail({ inst, onClose, onChanged }) {
           {(d.xbook || []).map(x => <div key={x.short + x.vno} className={'lv-msg ' + (x.reversed ? 'okb' : 'warn')}>
             {x.short} 记-{x.vno}（{money(x.gross)}）的红冲：{x.reversed
               ? <b>已做 · {x.reversed.month} 月 记-{x.reversed.vno}</b>
-              : <><b>还没做</b>——系统不写。打印计提更正单会出两张：「① {x.short} 红冲」交给做{x.short}账的同事在金蝶手工做，「② {d.req.subject} 补提」随本张付款凭证。</>}</div>)}
+              : d.req.posted
+                ? <><b>还没做</b>——保存到金蝶时这一步没成。<button className="btn sm" style={{ marginLeft: 8 }} disabled={!!xbusy} onClick={xred}>{xbusy ? '建凭证中…' : `补做红冲（在${x.short}账簿建红冲凭证并提交）`}</button></>
+                : <><b>还没做</b>——点「保存到金蝶」时系统一并在{x.short}账簿建红冲凭证并提交（不审核）。计提更正单出两张：「① {x.short} 红冲」「② {d.req.subject} 补提」。</>}
+            {x.reversed && x.reversed.sys && <span className="dim">　系统建 · {x.reversed.by} {x.reversed.at}{x.reversed.submitted === false ? ' · 提交没成功，请到金蝶手动提交' : ' · 已提交，等人审核'}</span>}</div>)}
+          {xmsg && <div className={'lv-msg ' + (xmsg.ok ? 'okb' : 'bad')}>{xmsg.text}</div>}
           {d.plan.msgs.filter(m => m !== d.kind_text).length > 0 &&
             <ul className="lv-notes">{d.plan.msgs.filter(m => m !== d.kind_text).map((m, i) => <li key={i}>{m}</li>)}</ul>}
 
@@ -415,7 +429,7 @@ export default function LogisticsVoucher() {
         <div className="lv-batch">
           <span>已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((s, r) => s + (r.amount || 0), 0))}</b></>}</span>
           <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}>批量保存到金蝶</button>
-          <span className="dim">能勾「可做账」且做账类型为 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的；计提记错主体的单张做（要出两张更正单），金额不符的要人工</span>
+          <span className="dim">能勾「可做账」且做账类型为 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的；计提记错主体的单张做（两边各出一张凭证、两张更正单），金额不符的要人工</span>
           {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
             {run.end && run.done.some(x => x.ok && x.redo) && <button className="lnk" onClick={() => printAdjust(Promise.all(run.done.filter(x => x.ok && x.redo).map(x => voucherPreview(x.inst))), '本批计提更正单')}>打印本批计提更正单（{run.done.filter(x => x.ok && x.redo).length} 张）</button>}
             {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
@@ -462,7 +476,7 @@ export default function LogisticsVoucher() {
                   if (['subj', 'manual', 'noacc', 'err'].includes(p.kind)) return <>
                     <td className="kd"><span className={KIND[p.kind] ? (KIND[p.kind][1] === 'bad' ? 'bad' : 'warn') : ''}>{KIND[p.kind]?.[0]}</span><div className="dim kt">{p.text}</div></td>
                     <td className="kd">{p.kind === 'subj' && p.auto ? <>{ACT.subjAuto}
-                      {(p.xrev || []).map(x => <div key={x.vno} className={x.reversed ? 'ok' : 'warn'}>{x.short} 记-{x.vno} 红冲{x.reversed ? `已做（记-${x.reversed.vno}）` : '待手工做'}</div>)}</> : ACT[p.kind]}</td></>
+                      {(p.xrev || []).map(x => <div key={x.vno} className={x.reversed ? 'ok' : 'warn'}>{x.short} 记-{x.vno} 红冲{x.reversed ? `已做（记-${x.reversed.vno}）` : '系统一并做'}</div>)}</> : ACT[p.kind]}</td></>
                   return <>
                     <td>{stack(a => a.mode === 'hx' ? <span className="ok">一致</span> : a.mode === 'tail' ? <span className="warn">一致 · 尾差 {money(a.tail)}</span>
                       : a.mode === 'rate' ? <span className="bad" title={a.why}>税率不符</span> : a.mode === 'fix' ? <span className="bad" title={a.why}>有计提更正</span> : '—')}</td>
