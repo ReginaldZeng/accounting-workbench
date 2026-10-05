@@ -418,9 +418,7 @@ export function VoucherScanPage({ user }) {
   const kv = c && c.ok ? [['制单人', a ? a.maker : ''], ['经办人', a && a.operator ? a.operator + '（在工作台做的账）' : ''],
     ['审核人', a ? (a.checker || (a.audited === false ? '还没审核' : '')) : ''],
     ['供应商', c.payee], ['金额', c.amount != null ? money(c.amount) : ''], ['审批编号', c.bid], ['付款单', a && a.bill_no]].filter(x => x[1]) : []
-  // iPhone 底部有一条横条(Home 指示条)：钉钉内置浏览器把页面铺到它下面、又不报安全区高度，主按钮下沿会被压住(用户真机截图)——iPhone 上底部固定多留 34px
-  const ios = /iPhone|iPad|iPod/i.test(navigator.userAgent || '')
-  return <div className={'lv vs' + (ios ? ' vs-ios' : '')}><style>{CSS}</style>
+  return <div className="lv vs"><style>{CSS}</style>
     <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={S.shot} />
     <header className="vs-top">
       <div><div className="vs-h1">扫码查凭证</div><div className="vs-sub">扫付款单右上角的二维码，看它记在哪个主体、哪张凭证</div></div>
@@ -877,10 +875,10 @@ const CSS = `
 .vs .vs-list{display:flex;flex-direction:column;gap:8px}.vs .vs-none{color:var(--ink-3);font-size:13px;text-align:center;padding:14px 0}
 .vs .vs-row{display:flex;align-items:center;gap:10px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:10px 12px 10px 0;overflow:hidden}
 .vs .vs-bar2{align-self:stretch;width:5px;border-radius:0 4px 4px 0;background:var(--tc);margin:-10px 0}
-.vs .vs-row .l{display:flex;flex-direction:column;min-width:0;flex:1}.vs .vs-row .l b{font-size:17px}
-.vs .vs-row .l span{font-size:12px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.vs .vs-row .r{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;min-width:0;max-width:46%}
-.vs .vs-row .r span{font-size:12px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}.vs .vs-row .r b{font-size:14px;font-variant-numeric:tabular-nums}
+.vs .vs-row .l{display:flex;flex-direction:column;flex:none;white-space:nowrap}.vs .vs-row .l b{font-size:17px}
+.vs .vs-row .l span{font-size:12px;color:var(--ink-2)}
+.vs .vs-row .r{flex:1;display:flex;flex-direction:column;align-items:flex-end;min-width:0;padding-left:8px}
+.vs .vs-row .r span{font-size:12px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}.vs .vs-row .r b{font-size:14px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .vs .vs-manual{display:flex;gap:8px}.vs .vs-manual input{flex:1;min-width:0;font:inherit;font-size:16px;padding:11px 12px;border:1px solid var(--line-strong);border-radius:10px;background:var(--bg);color:var(--ink)}
 .vs .vs-manual button{border:0;background:var(--accent);color:#fff;border-radius:10px;padding:0 20px;font-weight:700}.vs .vs-manual button:disabled{opacity:.45}
 .vs .vs-foot{text-align:center;color:var(--ink-3);font-size:11.5px;margin-top:auto;padding-top:8px}
@@ -892,7 +890,6 @@ const CSS = `
 .vs .vs-cam{display:inline-flex;align-items:center;gap:5px;border:0;background:none;color:var(--accent);font-size:14px;padding:4px 0;white-space:nowrap}.vs .vs-cam svg{width:18px;height:18px}
 .vs .vs-cam:disabled{opacity:.5}.vs .vs-tip{font-size:12px;color:var(--ink-2);line-height:1.5}
 .vs .vs-bottom{position:sticky;bottom:0;display:flex;flex-direction:column;gap:9px;padding:10px 16px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);box-shadow:0 -4px 16px rgba(20,28,58,.06)}
-.vs.vs-ios .vs-bottom{padding-bottom:max(34px,calc(12px + env(safe-area-inset-bottom)))}
 .vs .vs-go{width:100%;display:flex;gap:10px;align-items:center;justify-content:center;border:0;background:var(--accent);color:#fff;font-size:19px;font-weight:800;border-radius:14px;min-height:58px;letter-spacing:1px}
 .vs .vs-go:active{background:var(--accent-strong)}.vs .vs-go:disabled{opacity:.55}
 .vs .vs-side{flex:none;width:72px;white-space:nowrap;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-2);border-radius:14px;font-size:13px;font-weight:600}
