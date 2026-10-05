@@ -205,3 +205,11 @@
 .inv-lt-pv-tbl td{ vertical-align:top; }
 .inv-lt-pv-done{ color:var(--green); font-weight:600; }
 .inv-lt-pv-todo{ color:var(--accent); font-weight:600; }
+
+/* V2.836 以某人身份预览：整页展示 */
+.inv-lt-pv{ display:flex; flex-direction:column; gap:10px; }
+.inv-lt-pv-top{ display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 14px; }
+.inv-lt-pv-title{ font-size:16px; }
+.inv-lt-pv-q{ flex:1 1 240px; max-width:360px; }
+.inv-lt-pv-payee{ max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-lt-pv-cnt{ margin-top:8px; }

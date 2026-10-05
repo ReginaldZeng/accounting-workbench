@@ -1,6 +1,7 @@
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票后补池页：列表筛选（我接收的/全部＋状态＋搜索）、财务代填新建后补单、收到（扫码/上传/先标记）、催一下、详情、修改、关闭、导出欠票清单、「设置」页签
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 页头加「业务自助登记入口」（网址＋二维码，申请人自己登记发票后补）
 // [Change Log] Date: 2026-10-05 | Author: Claude / c | Version: V2.741 | 页头加「以某人身份预览」（管理员输入钉钉姓名，看这个人能选哪些单，核对审批模板配得对不对）
+// [Change Log] Date: 2026-10-06 | Author: Claude / c | Version: V2.836 | 「以某人身份预览」从弹窗改整页展示，加收款方列＋页内搜索
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 新建后补单按后端 notified/notifyMsg 如实说接收人收没收到钉钉消息；
 //   「收到」弹窗加高拍仪拍照（需求 v1.4 七「扫码枪或放高拍仪」），拍的照片走 receive-upload。
 // 需求确认书 v1.4 七 + 技术方案 §5.2「发票后补池」。接口全走 api.js 的 invLater*；共用组件来自 invShared.jsx。
@@ -822,26 +823,35 @@ function pvAppr(p) {
   return ''
 }
 
-// 管理员输入钉钉姓名 → 看这个人当前能选到哪些单（和他本人看到的完全一样），用来核对审批模板配得对不对、谁漏登记
-function PreviewModal({ onClose }) {
+const pvText = p => [p.title, p.template, p.payeeName, p.businessId, p.amount, money(p.amount), pvAppr(p)]
+  .join(' ').toLowerCase().replace(/,/g, '')
+
+// 管理员输入钉钉姓名 → 看这个人当前能选到哪些单（和他本人看到的完全一样），用来核对审批模板配得对不对、谁漏登记。整页展示（V2.836）
+function PreviewPage({ onBack }) {
   const [name, setName] = useState('')
   const [days, setDays] = useState(60)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [data, setData] = useState(null)
   const [choices, setChoices] = useState(null)
+  const [q, setQ] = useState('')
   const run = async (pick) => {
     if (!name.trim()) { setErr('写一下要预览谁（钉钉姓名）'); return }
     setBusy(true); setErr(''); setChoices(null)
     try {
       const r = await invSPreview(name.trim(), days, pick)
       if (r.need === 'pick') { setChoices(r.choices || []); setData(null) }
-      else setData(r)
+      else { setData(r); setQ('') }
     } catch (e) { setErr(errText(e)); setData(null) } finally { setBusy(false) }
   }
-  const rows = data?.rows || []
-  return <Modal title="以某人身份预览可登记的单子" onClose={onClose} width={860}
-    footer={<button type="button" className="btn" onClick={onClose}>关闭</button>}>
+  const all = data?.rows || []
+  const kw = q.trim().toLowerCase().replace(/,/g, '')
+  const rows = kw ? all.filter(p => pvText(p).includes(kw)) : all
+  return <div className="inv-lt-pv">
+    <div className="inv-lt-pv-top">
+      <button type="button" className="inv-lt-lkbtn" onClick={onBack}>← 返回后补池</button>
+      <b className="inv-lt-pv-title">以某人身份预览可登记的单子</b>
+    </div>
     <div className="inv-lt-pv-bar">
       <input className="inv-in" value={name} autoFocus placeholder="钉钉上的姓名" maxLength={20}
         onChange={e => { setName(e.target.value); setErr('') }} onKeyDown={e => { if (e.key === 'Enter') run() }} />
@@ -859,25 +869,29 @@ function PreviewModal({ onClose }) {
     {data && <>
       <div className="inv-lt-pv-head">
         <b>{data.person?.name}</b>{data.person?.dept && <span className="inv-muted">{data.person.dept.split('-').slice(-1)[0]}</span>}
-        <span className="inv-muted">近 {data.days} 天 · 能选 {rows.length} 张{data.truncated ? '（超上限，已截断）' : ''}</span>
+        <span className="inv-muted">近 {data.days} 天 · 能选 {all.length} 张{data.truncated ? '（超上限，已截断）' : ''}</span>
+        {all.length > 0 && <input className="inv-in inv-lt-pv-q" value={q} onChange={e => setQ(e.target.value)}
+          placeholder="搜审批单、模板、收款方、审批编号、金额" />}
       </div>
       {data.msg && <div className="inv-lt-note inv-lt-pv-msg">{data.msg}</div>}
-      {!rows.length ? <div className="inv-lt-empty">这段时间没有他发起的、可登记后补的单子。要么他近期没发起这类单，要么模板没勾「可登记后补」。</div>
-        : <div className="tbl-wrap"><table className="inv-lt-tbl inv-lt-pv-tbl">
-          <thead><tr><th>审批单</th><th>模板</th><th>审批编号</th><th className="num">金额</th><th>审批状态</th><th>后补情况</th></tr></thead>
-          <tbody>{rows.map(p => <tr key={p.procInstId}>
-            <td>{p.title || '—'}</td>
-            <td>{p.template || '—'}</td>
-            <td className="inv-num">{p.businessId || '—'}</td>
-            <td className="num">{money(p.amount)}</td>
-            <td>{pvAppr(p) || '—'}</td>
-            <td>{p.laterId ? <span className="inv-lt-pv-done">已登记 #{p.laterId}·{PV_ST[p.laterStatus] || ''}</span>
-              : p.hasInvoice ? <span className="inv-muted">已附发票</span>
-                : <span className="inv-lt-pv-todo">可登记</span>}</td>
-          </tr>)}</tbody>
-        </table></div>}
+      {!all.length ? <div className="inv-lt-empty">这段时间没有他发起的、可登记后补的单子。要么他近期没发起这类单，要么模板没勾「可登记后补」。</div>
+        : !rows.length ? <div className="inv-lt-empty">没有符合「{q.trim()}」的单子。</div>
+          : <div className="tbl-wrap"><table className="inv-lt-tbl inv-lt-pv-tbl">
+            <thead><tr><th>审批单</th><th>模板</th><th>收款方</th><th>审批编号</th><th className="num">金额</th><th>审批状态</th><th>后补情况</th></tr></thead>
+            <tbody>{rows.map(p => <tr key={p.procInstId}>
+              <td>{p.title || '—'}</td>
+              <td>{p.template || '—'}</td>
+              <td className="inv-lt-pv-payee" title={p.payeeName || ''}>{p.payeeName || '—'}</td>
+              <td className="inv-num">{p.businessId || '—'}</td>
+              <td className="num">{money(p.amount)}</td>
+              <td>{pvAppr(p) || '—'}</td>
+              <td>{p.laterId ? <span className="inv-lt-pv-done">已登记 #{p.laterId}·{PV_ST[p.laterStatus] || ''}</span>
+                : p.hasInvoice ? <span className="inv-muted">已附发票</span>
+                  : <span className="inv-lt-pv-todo">可登记</span>}</td>
+            </tr>)}</tbody>
+          </table>{kw && <div className="inv-muted inv-lt-pv-cnt">筛出 {rows.length} / {all.length} 张</div>}</div>}
     </>}
-  </Modal>
+  </div>
 }
 
 // ───────────────────────── 页面 ─────────────────────────
@@ -909,24 +923,24 @@ export default function InvLater({ user }) {
       </div>
       <div className="inv-lt-head">
         {can.config && <div className="inv-lt-seg">
-          <button type="button" className={tab === 'pool' ? 'on' : ''} onClick={() => setTab('pool')}>后补池</button>
-          <button type="button" className={tab === 'settings' ? 'on' : ''} onClick={goSettings}>设置</button>
+          <button type="button" className={tab === 'pool' ? 'on' : ''} onClick={() => { setTab('pool'); setPreview(false) }}>后补池</button>
+          <button type="button" className={tab === 'settings' ? 'on' : ''} onClick={() => { goSettings(); setPreview(false) }}>设置</button>
         </div>}
-        {tab === 'pool' && <a className="btn" href={invLaterExportUrl({ status: 'open' })}>导出欠票清单</a>}
-        {tab === 'pool' && <button type="button" className="btn" onClick={() => setSelfLink(true)}>业务自助登记入口</button>}
-        {tab === 'pool' && can.config && <button type="button" className="btn" onClick={() => setPreview(true)}>以某人身份预览</button>}
-        {tab === 'pool' && can.receive && <button type="button" className="btn-pri" onClick={() => setCreating(true)}>新建后补单</button>}
+        {tab === 'pool' && !preview && <a className="btn" href={invLaterExportUrl({ status: 'open' })}>导出欠票清单</a>}
+        {tab === 'pool' && !preview && <button type="button" className="btn" onClick={() => setSelfLink(true)}>业务自助登记入口</button>}
+        {tab === 'pool' && !preview && can.config && <button type="button" className="btn" onClick={() => setPreview(true)}>以某人身份预览</button>}
+        {tab === 'pool' && !preview && can.receive && <button type="button" className="btn-pri" onClick={() => setCreating(true)}>新建后补单</button>}
       </div>
     </div>
-    <div className="body" style={tab === 'pool' ? undefined : { display: 'none' }}>
+    <div className="body" style={tab === 'pool' && !preview ? undefined : { display: 'none' }}>
       <LaterPool cfg={cfg} cfgErr={cfgErr} can={can} me={me} flash={flash} onGoSettings={can.config ? goSettings : undefined}
         creating={creating && !!can.receive} setCreating={setCreating} />
     </div>
+    {tab === 'pool' && preview && <div className="body"><PreviewPage onBack={() => setPreview(false)} /></div>}
     {can.config && setSeen && <div style={tab === 'settings' ? undefined : { display: 'none' }}>
       <InvSettings user={user} embedded onSaved={loadCfg} />
     </div>}
     {selfLink && <SelfLinkModal onClose={() => setSelfLink(false)} />}
-    {preview && <PreviewModal onClose={() => setPreview(false)} />}
     {toast}
   </div>
 }
