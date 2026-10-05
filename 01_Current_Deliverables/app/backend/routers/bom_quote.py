@@ -1588,27 +1588,24 @@ async def bom_fetch(request: Request):
     res = dtb.fetch_approval(appno)
     if not res.get("ok"):
         return JSONResponse({"ok": False, "msg": res.get("msg") or "取数失败"}, status_code=400)
-    files, skipped, comment_pending = [], [], []
+    files, skipped = [], []
+    comment_pending = _comment_pending(res.get("attachments"))     # 评论区没取到的（多为重传前的旧件）；取到的照常进 files
     for a in res.get("attachments", []):
         if a.get("bytes") and str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")):
             # 带上钉钉控件标注(label)+渠道(source)，供来源方判定：商务输出→采购商务版、商品版本→成本会计商品版
             files.append((a["fileName"], a["bytes"], a.get("label") or "", a.get("source") or "dingtalk_form"))
         elif a.get("source") == "dingtalk_comment":
-            # 评论区补传的附件：钉钉把评论区文件存在钉盘/IM 空间，当前应用接口权限够不着（返「无访问权限」）。
-            # 不静默丢——显性抛给前端：知道有补传、取不到，请手工下载后用「上传」补入（或后台给应用补授评论区文件下载权限）。
-            comment_pending.append({"fileName": a.get("fileName"), "reason": a.get("error") or "评论区文件当前权限取不到"})
+            pass                                                   # 已在 comment_pending 里显性列出，不静默丢
         elif a.get("error"):
             skipped.append("%s：%s" % (a.get("fileName"), a["error"]))
     if not files:
-        msg = "该审批未取到可解析的 xlsx 表单附件。"
-        if comment_pending:
-            msg += "另有 %d 个评论区补传附件当前钉钉权限取不到，请手工下载后上传。" % len(comment_pending)
+        msg = "该审批未取到可解析的 xlsx 表单附件。" + _comment_pending_msg(comment_pending)
         return JSONResponse({"ok": False, "msg": msg + ("；".join(skipped) if skipped else ""),
                              "commentPending": comment_pending}, status_code=400)
     out = _stage_files(files, appno, "dingtalk_form")
     out["title"] = res.get("title")
     out["skipped"] = skipped
-    out["commentPending"] = comment_pending   # 评论区补传但取不到 → 前端提示手工上传
+    out["commentPending"] = comment_pending   # 评论区没取到的附件（带是否重传旧件的判断）→ 前端逐个提示
     db.audit(u["name"], "bom_fetch", target=appno, detail="附件 %d 个，评论区待补 %d" % (len(files), len(comment_pending)))
     return out
 
@@ -1795,17 +1792,47 @@ async def bom_intake(request: Request):
     return JSONResponse(out, status_code=code) if code != 200 else out
 
 
+def _comment_pending(atts):
+    """评论区里**没取到**的 xlsx 附件清单（2026-10-06 起评论区附件常规接口多数可取，这里只剩少数）。
+    每项判断是否为「重传前的旧件」：同一评论人、文件大小相同、且在它之后又传了一个已取到的文件 → replacedBy=那个文件名，可忽略。
+    → [{fileName, reason, at, replacedBy}]"""
+    cm = [a for a in (atts or []) if a.get("source") == "dingtalk_comment"]
+    got = [a for a in cm if a.get("bytes")]
+    out = []
+    for a in cm:
+        if a.get("bytes") or not str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")):
+            continue
+        rep = next((g for g in sorted(got, key=lambda g: str(g.get("at") or ""))
+                    if a.get("byUserId") and g.get("byUserId") == a.get("byUserId")
+                    and a.get("fileSize") and str(g.get("fileSize")) == str(a.get("fileSize"))
+                    and str(g.get("at") or "") >= str(a.get("at") or "")), None)
+        out.append({"fileName": a.get("fileName"), "at": str(a.get("at") or "")[:16], "replacedBy": rep.get("fileName") if rep else "",
+                    "reason": ("判断是重传前的旧件：同一位评论人随后传了大小相同的「%s」，已取到" % rep.get("fileName")) if rep
+                    else (a.get("error") or "钉钉没给下载链接")})
+    return out
+
+
+def _comment_pending_msg(pending):
+    """评论区未取到附件的一句话提示（空清单 → 空串）。"""
+    if not pending:
+        return ""
+    need = [p for p in pending if not p.get("replacedBy")]
+    if not need:
+        return "评论区有 %d 个附件没取到，判断都是重传前的旧件（其后重传的文件已取到），可忽略。" % len(pending)
+    return ("评论区有 %d 个附件没取到（钉钉回「无访问权限」，多见于评论人删除/撤回了文件）：%s。需要的话请从钉钉下载后手工上传。"
+            % (len(need), "、".join(str(p.get("fileName")) for p in need)))
+
+
 def _intake_core(appno, u, historical=False, action="立项"):
     """立项核心（V2.504 抽出：手填单号的接口 与 自动立项 共用）：抓附件 → 解析 → 能入的入、不能入的记待修。→ (result, http_code)"""
     res = dtb.fetch_approval(appno)
     if not res.get("ok"):
         return {"ok": False, "msg": res.get("msg") or "取数失败"}, 400
-    files, comment_pending = [], []
+    files = []
+    comment_pending = _comment_pending(res.get("attachments"))
     for a in res.get("attachments", []):
         if a.get("bytes") and str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")):
             files.append((a["fileName"], a["bytes"], a.get("label") or "", a.get("source") or "dingtalk_form"))
-        elif a.get("source") == "dingtalk_comment":
-            comment_pending.append({"fileName": a.get("fileName"), "reason": a.get("error") or "评论区文件当前权限取不到"})
     if not files:
         if res.get("originatorGone"):
             names = [a.get("fileName") for a in res.get("attachments", []) if a.get("fileName")]
@@ -1820,8 +1847,7 @@ def _intake_core(appno, u, historical=False, action="立项"):
         errs = sorted({(a.get("error") or "") for a in res.get("attachments", []) if a.get("error")})
         if errs:
             msg += "钉钉回的原因：%s。" % "；".join(errs)[:200]
-        if comment_pending:
-            msg += "另有 %d 个评论区补传附件当前钉钉权限取不到，请手工下载后上传。" % len(comment_pending)
+        msg += _comment_pending_msg(comment_pending)
         return {"ok": False, "msg": msg, "commentPending": comment_pending}, 400
     stg = _stage_files(files, appno, "dingtalk_form")
     r = _book_staged(_load_staging(stg["stagingId"]), stg["stagingId"],

@@ -147,10 +147,18 @@ def walk_attachments(obj, bag, label=None):
 
 def collect_attachments(inst):
     """表单附件 + 评论区附件（operation_records）。返回去重后的列表，标 source。
-    评论区结构在、理论可扫（交接文档 §3.4 尚无真实案例，遇到第一单实测）。"""
+    评论区附件另带 byUserId / at（哪位评论人、何时传的）——供上层判断「没取到的是不是重传前的旧件」。
+    实测（2026-10-06，350508/251965/027725/020869）：评论区附件走常规下载接口**已能取到**（早先一律回 400020 无访问权限，
+    2026-09-06 应用开通 Storage.DownloadInfo.Read 之后的某个时点起可取，确切原因未查明）；仍回 400020 的多为评论人删除/撤回后重传的旧件。"""
     form_bag, cmt_bag = [], []
     walk_attachments(inst.get("form_component_values"), form_bag)
     walk_attachments(inst.get("operation_records"), cmt_bag)
+    meta = {}
+    for r in (inst.get("operation_records") or []):
+        for a in (r.get("attachments") or []):
+            fid = str(a.get("file_id") or a.get("fileId") or "")
+            if fid:
+                meta[fid] = {"byUserId": r.get("userid") or "", "at": str(r.get("date") or "")}
     out, seen = [], set()
     for src, bag in (("dingtalk_form", form_bag), ("dingtalk_comment", cmt_bag)):
         for a in bag:
@@ -159,7 +167,8 @@ def collect_attachments(inst):
                 continue
             seen.add(fid)
             out.append({"fileId": fid, "fileName": a.get("fileName"), "spaceId": a.get("spaceId"),
-                        "fileSize": a.get("fileSize"), "source": src, "label": a.get("_label") or ""})
+                        "fileSize": a.get("fileSize"), "source": src, "label": a.get("_label") or "",
+                        **(meta.get(fid, {}) if src == "dingtalk_comment" else {})})
     return out
 
 
@@ -318,7 +327,8 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
                 headers = {}
                 if not url and via and any(k in via for k in ("用户不存在", "找不到该用户", "userNotExist")):
                     # 发起人账号没了 → 备用通道：授权在职审批人 + 钉盘代下载（需 Storage.DownloadInfo.Read）
-                    # ⚠ 评论区附件的 noPermission 不走这里：实测 cspace/preview 本身就回 400020，评论者本人也不行——官方不给 API
+                    # ⚠ 评论区附件回的 400020 不走这里（cspace/preview 对它也回 400020）；2026-10-06 起评论区附件常规接口多数已可取，
+                    #    仍 400020 的多是评论人删除/撤回后重传的旧件，见 collect_attachments 说明
                     url2, headers2, via2 = storage_download(tok_v2, tok, iid, a["fileId"], a.get("spaceId"), inst)
                     if url2:
                         url, via, headers = url2, via2, headers2 or {}

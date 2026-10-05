@@ -2871,7 +2871,7 @@ function IntakeModal({ cfg, onClose, onDone, flash, init }) {
 
         <div className="bom-mstep"><span className="bom-mno">1</span><div style={{ flex: 1 }}>
           <b>钉钉审批编号</b>
-          <div className="muted" style={{ fontSize: 12, margin: '3px 0 7px' }}>表单附件 + 评论区附件都会扫。</div>
+          <div className="muted" style={{ fontSize: 12, margin: '3px 0 7px' }}>表单附件 + 评论区补传的附件都会取（评论区后传的更新版采购核算表也会入账）。</div>
           <div style={{ display: 'flex', gap: 8 }}>
             <input className="bom-search" style={{ flex: 1 }} placeholder="如 202609011316000251965"
               value={appno} onChange={e => setAppno(e.target.value)}
@@ -2903,8 +2903,18 @@ function IntakeModal({ cfg, onClose, onDone, flash, init }) {
             {res.rejected.map((r, i) => <div key={i}>· <b>{r.productName}</b>：{r.reason}</div>)}
             <div style={{ marginTop: 4 }}>→ 这些<b>不进台账</b>（红线），但已记为「待修」留在待办里；进处理页可看逐料差异、替换修好的采购核算表。</div>
           </div>}
-          {(res.commentPending || []).length > 0 && <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', fontSize: 11.5, marginTop: 6 }}>
-            ⚠ 评论区补传了 {res.commentPending.length} 个附件，钉钉权限取不到——请手工下载后用上方上传补入：{res.commentPending.map(c => c.fileName).join('、')}</div>}
+          {(res.commentPending || []).length > 0 && (() => {
+            // 评论区附件现在能取到；这里只列没取到的少数，并说明是不是重传前的旧件（2026-10-06）
+            const need = res.commentPending.filter(c => !c.replacedBy)
+            const sty = need.length ? { background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)' }
+              : { background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)' }
+            return <div className="banner" style={{ display: 'block', ...sty, fontSize: 11.5, marginTop: 6, lineHeight: 1.6 }}>
+              {need.length ? '⚠ ' : 'ⓘ '}评论区有 {res.commentPending.length} 个附件没取到（其余评论区附件已取到并参与立项）：
+              {res.commentPending.map((c, i) => <div key={i}>· {c.fileName}{c.at ? `（${c.at}）` : ''}——{c.replacedBy
+                ? <>重传前的旧件，随后重传的「{c.replacedBy}」已取到，<b>可忽略</b></>
+                : <>钉钉回「无访问权限」（多见于评论人删除/撤回了文件）；需要的话请从钉钉下载后用上方上传补入</>}</div>)}
+            </div>
+          })()}
           {(res.warnings || []).map((w, i) => <div key={i} className="muted" style={{ fontSize: 11, marginTop: 4 }}>{w}</div>)}
         </div></div>}
 
