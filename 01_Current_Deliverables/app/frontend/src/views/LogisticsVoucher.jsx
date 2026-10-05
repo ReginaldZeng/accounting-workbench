@@ -6,6 +6,9 @@
 // V2.798 计提记错主体(用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：本张凭证里直接补提到本主体再核销、支付；
 //   计提更正单出两张——① 原主体红冲 ② 本主体补提；页面显示那边红冲做了没有。
 // V2.799(用户「也是系统做星期零」)：原主体的红冲凭证也由系统建——保存到金蝶时一并在那边账簿新建红冲凭证并提交(不审核)；没建成可点「补做红冲」。
+// V2.800 装订用(用户 2026-10-05「批量生成了就没人在付款单上写凭证号，装订的同事不好区分」)：已写金蝶的请款单打两样东西——
+//   《装订对照清单》(按主体×凭证月份分页、按凭证号排：凭证号/付款日/供应商/金额/钉钉审批编号/金蝶付款单号/发票/更正单/勾选栏)
+//   和《凭证号贴条》(一页 21 个，剪下贴在纸质付款单右上角，免手抄)。数据就是列表里的做账记录，不另取数。
 import React, { useEffect, useMemo, useState } from 'react'
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred } from '../api.js'
 
@@ -180,6 +183,84 @@ function printAdjust(ds, title) {
     w.document.body.innerHTML = ok.length ? ok.flatMap(sheetsOf).join('') : '<div class="wait">没有需要调整的计提</div>'
     if (ok.length) setTimeout(() => w.print(), 300)
   }).catch(e => { w.document.body.innerHTML = `<div class="wait">生成失败：${esc(e.message)}</div>` })
+}
+
+// ---------- 装订：对照清单 / 凭证号贴条 ----------
+const vnum = v => parseInt(String(v || '').replace(/\D/g, ''), 10) || 0
+const SUBJ_ORDER = ['深圳星期零', '深圳星期九', '孝感星期九']
+// 列表行 → 装订条目。系统写的取做账记录；金蝶里别人已做的取发票管家同步到的凭证号；主体更正在原主体账簿建的红冲凭证单列一条(没有纸质付款单)。
+function bindItems(rows, plans) {
+  const out = []
+  rows.forEach(r => {
+    const p = r.posted
+    const kd = !p ? [r.paid_voucher, ...(r.booked || []).map(b => (String(b).match(/'number': '([^']+)'/) || [])[1] || (/^记/.test(String(b)) ? b : ''))].filter(Boolean) : []
+    const vno = p ? p.vno : String(kd[0] || '').replace(/^记-?/, '')
+    if (!vno) return
+    const kind = (plans[r.inst] || {}).kind
+    out.push({ inst: r.inst, subject: r.subject, book: r.book, month: String(r.paid || (p && p.at) || '').slice(0, 7), vno, paid: r.paid, sup: r.sup_full || r.carrier,
+      code: r.code, amount: r.amount, bid: r.bid, bill: p ? p.bill_no : '', n_inv: r.n_inv, period: r.period,
+      adj: kind === 'subj' ? '有（② 补提）' : ['tail', 'redo'].includes(kind) ? '有' : '', src: p ? '' : '金蝶已有' })
+    Object.values((p && p.xred) || {}).forEach(x => out.push({ inst: r.inst + '|x' + x.src_vno, subject: x.short, book: '', red: true,
+      month: `${x.year}-${String(x.month).padStart(2, '0')}`, vno: x.vno, paid: x.date, sup: r.sup_full || r.carrier, code: r.code, amount: -x.gross,
+      bid: r.bid, bill: '', n_inv: 0, period: r.period, adj: '有（① 红冲）', src: `红冲凭证 · 冲 ${r.period ? Number(r.period.slice(5)) + '/' : ''}${x.src_vno}#，无纸质付款单` }))
+  })
+  const so = x => { const i = SUBJ_ORDER.indexOf(x); return i < 0 ? 9 : i }
+  return out.sort((a, b) => so(a.subject) - so(b.subject) || a.subject.localeCompare(b.subject) || a.month.localeCompare(b.month) || vnum(a.vno) - vnum(b.vno))
+}
+const ymCn = m => (m ? `${m.slice(0, 4)}年${Number(m.slice(5))}月` : '')
+
+function bindListHtml(items) {
+  const groups = []
+  items.forEach(x => { const g = groups[groups.length - 1]; if (g && g.subject === x.subject && g.month === x.month) g.items.push(x); else groups.push({ subject: x.subject, month: x.month, book: x.book, items: [x] }) })
+  return groups.map(g => {
+    const sum = r2(g.items.filter(x => !x.red).reduce((s, x) => s + (x.amount || 0), 0))
+    return `<div class="sheet"><div class="t1">付款凭证装订对照清单</div>
+    <div class="t2">${esc(g.subject)}${g.book ? `（账簿 ${esc(g.book)}）` : ''}　·　${esc(ymCn(g.month))}凭证　·　物流请款单</div>
+    <table class="bl"><colgroup><col style="width:5%"><col style="width:9%"><col style="width:9%"><col><col style="width:11%"><col style="width:19%"><col style="width:11%"><col style="width:6%"><col style="width:10%"><col style="width:6%"></colgroup>
+    <thead><tr><th>序号</th><th>凭证号</th><th>付款日</th><th>供应商</th><th>付款金额</th><th>钉钉审批编号</th><th>金蝶付款单号</th><th>发票</th><th>计提更正单</th><th>已装订</th></tr></thead>
+    <tbody>${g.items.map((x, i) => `<tr class="${x.red ? 'red' : ''}"><td class="c">${i + 1}</td><td class="c vno">记-${esc(x.vno)}</td><td class="c">${esc(String(x.paid || '').slice(5))}</td>
+      <td>${esc(x.sup)}<div class="sub">${esc(x.code || '')}${x.src ? ` · ${esc(x.src)}` : ''}</div></td><td class="n">${money(x.amount)}</td>
+      <td class="m">${esc(x.bid || '')}</td><td class="m c">${esc(x.bill || '—')}</td><td class="c">${x.n_inv ? x.n_inv + ' 张' : '—'}</td><td class="c">${esc(x.adj || '—')}</td><td class="c box">□</td></tr>`).join('')}
+    <tr class="tot"><td colspan="4" class="n">合计 ${g.items.length} 张凭证${g.items.some(x => x.red) ? `（其中红冲凭证 ${g.items.filter(x => x.red).length} 张，不计入金额）` : ''}</td><td class="n">${money(sum)}</td><td colspan="5"></td></tr></tbody></table>
+    <div class="note">用法：纸质付款单上印有钉钉审批编号，对着本表找到凭证号，按凭证号顺序装订；装好一张在「已装订」打勾。「计提更正单」写「有」的，更正单贴在该付款单后面一起装。${g.items.some(x => x.red) ? '红冲凭证没有纸质付款单，只附计提更正单 ①。' : ''}</div>
+    <div class="sign"><span>装订人：______________</span><span>日期：______________</span><span>复核人：______________</span></div>
+    <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString('zh-CN', { hour12: false })}</div></div>`
+  }).join('')
+}
+const BIND_CSS = `@page{size:A4 portrait;margin:12mm 10mm}*{box-sizing:border-box}body{font:11px/1.45 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
+.sheet{page-break-after:always}.sheet:last-child{page-break-after:auto}.t1{text-align:center;font-size:19px;font-weight:700;margin:2px 0 4px}
+.t2{text-align:center;font-size:12.5px;font-weight:700;margin-bottom:8px}table{width:100%;border-collapse:collapse;table-layout:fixed}
+.bl th,.bl td{border:1px solid #B8C4CC;padding:5px 5px;vertical-align:middle;word-break:break-all}.bl th{background:#5E6B78;color:#fff;font-weight:700;text-align:center}
+.bl tr{break-inside:avoid}.c{text-align:center}.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.m{font-family:Consolas,monospace;font-size:10.5px}
+.vno{font-weight:700;font-size:13px;white-space:nowrap}.sub{color:#7a8791;font-size:9.5px}.box{font-size:15px;line-height:1}tr.red td{background:#FBF3F3}tr.red .n{color:#B03A3A}
+tr.tot td{font-weight:700;background:#E7ECEF}.note{margin-top:7px;color:#5E6B78;font-size:10.5px;line-height:1.6}
+.sign{display:flex;justify-content:space-between;margin-top:18px;font-size:11.5px;padding:0 4px}.ft{margin-top:8px;color:#9AA5AE;font-size:9.5px;text-align:right}
+.wait{padding:40px;text-align:center;color:#555}@media screen{body{background:#eee}.sheet{background:#fff;width:210mm;min-height:297mm;margin:12px auto;padding:12mm 10mm;box-shadow:0 1px 4px #0002}}`
+
+function slipHtml(items) {
+  const pages = []
+  for (let i = 0; i < items.length; i += 21) pages.push(items.slice(i, i + 21))
+  return pages.map(pg => `<div class="pg">${pg.map(x => `<div class="slip${x.red ? ' red' : ''}">
+    <div class="top"><span class="vno">记-${esc(x.vno)}</span><span class="who">${esc(x.subject)}<br>${esc(ymCn(x.month))}</span></div>
+    <div class="sup">${esc(x.sup)}</div>
+    <div class="amt">${x.red ? '红冲 ' : '¥ '}${money(Math.abs(x.amount || 0))}${x.adj ? '<span class="tag">附更正单</span>' : ''}</div>
+    <div class="ids">审批 ${esc(x.bid || '—')}${x.bill ? `<br>付款单 ${esc(x.bill)}` : x.red ? '<br>无纸质付款单' : ''}</div></div>`).join('')}</div>`).join('')
+}
+const SLIP_CSS = `@page{size:A4 portrait;margin:8mm}*{box-sizing:border-box}body{font:10px/1.35 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
+.pg{display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:39.5mm;page-break-after:always}.pg:last-child{page-break-after:auto}
+.slip{border:1px dashed #8A96A2;padding:3mm 3.5mm;overflow:hidden;display:flex;flex-direction:column;gap:1mm}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:4px}.vno{font-size:21px;font-weight:800;line-height:1.05;white-space:nowrap}
+.who{text-align:right;font-size:9.5px;color:#3d4852;line-height:1.3;font-weight:700}.sup{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.amt{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}.tag{font-size:8.5px;font-weight:400;border:1px solid #8A5A00;color:#8A5A00;border-radius:3px;padding:0 3px;margin-left:5px;vertical-align:middle}
+.ids{font:8.5px/1.4 Consolas,monospace;color:#5E6B78;margin-top:auto}.slip.red .vno,.slip.red .amt{color:#B03A3A}
+.wait{padding:40px;text-align:center;color:#555}@media screen{body{background:#eee}.pg{background:#fff;width:210mm;min-height:297mm;margin:12px auto;padding:8mm;box-shadow:0 1px 4px #0002;align-content:start}}`
+
+function printHtml(title, css, html) {
+  const w = window.open('', '_blank')
+  if (!w) { alert('浏览器拦截了弹窗，请允许本站弹出窗口后再点'); return }
+  w.document.write(`<!doctype html><meta charset="utf-8"><title>${esc(title)}</title><style>${css}</style>${html || '<div class="wait">没有可打印的凭证</div>'}`)
+  w.document.close()
+  if (html) setTimeout(() => w.print(), 300)
 }
 
 function Detail({ inst, onClose, onChanged }) {
@@ -361,6 +442,7 @@ export default function LogisticsVoucher() {
   const [sel, setSel] = useState({})            // 批量做账勾选 inst → true
   const [run, setRun] = useState(null)          // 批量进度 {i, n, cur, done:[{inst, label, ok, msg, vno}]}
   const [kf, setKf] = useState('')
+  const [bm, setBm] = useState('')              // 装订打印的凭证月份，空=最新一个月
   const load = () => voucherList().then(r => {
     const rs = r.rows || []
     setRows(rs); setErr('')
@@ -407,6 +489,13 @@ export default function LogisticsVoucher() {
   const kcnt = useMemo(() => { const c = {}; Object.values(plans).forEach(p => { c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans])
   const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) &&
     (!q || [r.carrier, r.payee, r.sup_full, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
+  // 装订：当前筛选下已有凭证号的单(系统写的 + 金蝶里已有的)，按凭证月份挑一个月打
+  const bindAll = bindItems(shown, plans)
+  const bindMonths = [...new Set(bindAll.map(x => x.month).filter(Boolean))].sort().reverse()
+  const bmOn = bm && bindMonths.includes(bm) ? bm : (bindMonths[0] || '')
+  const bindNow = bindAll.filter(x => x.month === bmOn)
+  const batchInsts = run && run.end ? new Set(run.done.filter(x => x.ok).map(x => x.inst)) : null
+  const bindBatch = batchInsts ? bindItems((rows || []).filter(r => batchInsts.has(r.inst)), plans) : []
   return (
     <div className="lv">
       <style>{CSS}</style>
@@ -432,8 +521,18 @@ export default function LogisticsVoucher() {
           <span className="dim">能勾「可做账」且做账类型为 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的；计提记错主体的单张做（两边各出一张凭证、两张更正单），金额不符的要人工</span>
           {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
             {run.end && run.done.some(x => x.ok && x.redo) && <button className="lnk" onClick={() => printAdjust(Promise.all(run.done.filter(x => x.ok && x.redo).map(x => voucherPreview(x.inst))), '本批计提更正单')}>打印本批计提更正单（{run.done.filter(x => x.ok && x.redo).length} 张）</button>}
+            {run.end && bindBatch.length > 0 && <><button className="lnk" onClick={() => printHtml('本批装订对照清单', BIND_CSS, bindListHtml(bindBatch))}>打印本批装订清单（{bindBatch.length} 张）</button>
+              <button className="lnk" onClick={() => printHtml('本批凭证号贴条', SLIP_CSS, slipHtml(bindBatch))}>凭证号贴条</button></>}
             {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
         </div>
+        {bindAll.length > 0 && <div className="lv-batch">
+          <span>装订用 · 凭证月份</span>
+          <select value={bmOn} onChange={e => setBm(e.target.value)}>{bindMonths.map(m => <option key={m} value={m}>{ymCn(m)}</option>)}</select>
+          <span>已有凭证号 <b>{bindNow.length}</b> 张</span>
+          <button className="btn" title="按主体分页、按凭证号排序；装订的同事对着纸质付款单上的钉钉审批编号找凭证号" onClick={() => printHtml(`装订对照清单 ${bmOn}`, BIND_CSS, bindListHtml(bindNow))}>打印装订对照清单</button>
+          <button className="btn" title="一页 21 个，剪下来贴在纸质付款单右上角，不用手抄凭证号" onClick={() => printHtml(`凭证号贴条 ${bmOn}`, SLIP_CSS, slipHtml(bindNow))}>打印凭证号贴条</button>
+          <span className="dim">按当前筛选（上面的状态/搜索）出；批量做完的凭证号都在这里，不用手写到付款单上</span>
+        </div>}
         {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
           {pickedRedo.map(r => <span key={r.inst} className="lv-redo">{label(r)}<span className="dim">（{(plans[r.inst] || {}).text}）</span></span>)}
           建议先点开预览看一眼；写完后在金蝶重点核对红冲、更正两段。</div>}
@@ -531,6 +630,8 @@ const CSS = `
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
 .lv .lv-kind{font-size:13px;margin:6px 0}
+.lv .lv-batch select{font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
+.lv .lv-batch+.lv-batch{margin-top:6px}
 .lv .lv-batch{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);font-size:12.5px}
 .lv .lv-msg.warn{background:var(--amber-bg);border:1px solid var(--amber-line);color:var(--ink);padding:8px 12px;border-radius:8px;font-size:12.5px;line-height:1.9}
 .lv .lv-redo{display:inline-block;margin:0 10px 0 4px;font-weight:600}
