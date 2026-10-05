@@ -726,6 +726,42 @@ def _post_xred(inst, user, d=None, s=None, conf=None):
 # 纸质付款单右上角的二维码是钉钉审批单链接：解析出审批实例号 → 请款单 → 做账记录里的凭证号。只读，不建票夹、不拉附件。
 # 不是物流请款单的，退一步看发票管家票夹里同步到的凭证号(那边定时从金蝶凭证摘要里认发票号)。
 _SCAN_CACHE = {}
+_VPEOPLE = {}
+
+
+def _voucher_people(book, month, vno):
+    """金蝶里这张凭证的制单人、审核人、状态(V2.804，用户「加一个制单人」)。只读，缓存 5 分钟；查不到返回 {}。"""
+    k = (book, month, str(vno))
+    hit = _VPEOPLE.get(k)
+    if hit and time.time() - hit[1] < 300:
+        return hit[0]
+    out = {}
+    try:
+        y, m = int(str(month)[:4]), int(str(month)[5:7])
+        s, conf = kc.login()
+        rows = kc._query(s, conf, "GL_VOUCHER", [("FCREATORID.FName", "制单"), ("FCHECKERID.FName", "审核"), ("FDOCUMENTSTATUS", "状态")],
+                         "FACCOUNTBOOKID.FName='%s' and FYear=%d and FPeriod=%d and FVOUCHERGROUPNO='%s'" % (
+                             str(book).replace("'", ""), y, m, str(vno).replace("'", "")))
+        if rows:
+            out = {"maker": _s(rows[0].get("制单")), "checker": _s(rows[0].get("审核")), "status": _s(rows[0].get("状态"))}
+    except Exception:
+        out = {}
+    _VPEOPLE[k] = (out, time.time())
+    return out
+
+
+def _with_people(vs, makers=None):
+    """给每张凭证挂上制单人/审核人。系统写入的，金蝶里制单人是「系统操作员」——显示实际点「保存到金蝶」的那个人(makers={凭证号: 人})。"""
+    s2f = {o.get("short_name"): o.get("full_name") for o in (db.list_orgs() or [])}
+    for v in vs:
+        p = _voucher_people(s2f.get(v.get("subject")) or v.get("subject") or "", v.get("month") or "", v.get("vno"))
+        who = (makers or {}).get(str(v.get("vno")))
+        who = who.split("(")[0].split("（")[0].strip() if who else who      # 早期实测那张记的是「曾禹锡(实测)」，只显示人名
+        v["maker"] = who or p.get("maker") or ""
+        v["maker_sys"] = bool(who)
+        v["checker"] = p.get("checker") or ""
+        v["audited"] = (p.get("status") == "C") if p else None
+    return vs
 
 
 def _scan_lookup(code):
@@ -768,7 +804,7 @@ def _scan_lookup(code):
             return {"ok": False, "msg": "系统里没有这张审批单：不是物流请款单，发票管家也没收过它的票"}
         return {"ok": True, "inst": iid, "kind": "发票管家票夹 #%s" % folder["id"], "subject": (synced[0]["subject"] if synced else ""),
                 "payee": next((i["seller"] for i in invs if i.get("seller")), ""), "amount": round(sum(i["gross"] for i in invs), 2),
-                "vouchers": synced, "state": "" if synced else "发票管家里这张单的发票还没被金蝶凭证引用（还没做账，或还没同步到）"}
+                "vouchers": _with_people(synced), "state": "" if synced else "发票管家里这张单的发票还没被金蝶凭证引用（还没做账，或还没同步到）"}
     r = dict(r)
     pi = _paid_info(r) or {}
     posted = (db.get_setting(_POSTED_KEY, None) or {}).get(iid)
@@ -784,6 +820,12 @@ def _scan_lookup(code):
             vs.append({"subject": r.get("subject"), "month": str(pi.get("date") or "")[:7], "vno": str(pi["voucher"]).replace("记-", ""),
                        "what": "支付凭证", "src": "金蝶已有"})
         vs.extend(v for v in synced if not any(v["vno"] == o["vno"] and v["subject"] == o["subject"] for o in vs))
+    makers = {}
+    if posted:
+        makers[str(posted.get("vno"))] = posted.get("by") or ""
+        for x in (posted.get("xred") or {}).values():
+            makers[str(x.get("vno"))] = x.get("by") or ""
+    _with_people(vs, makers)
     try:
         from routers.logistics_payreq import _kd_suppliers
         full = (_kd_suppliers().get("code2name") or {}).get(r.get("sup_code"))

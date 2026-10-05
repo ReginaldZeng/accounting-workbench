@@ -357,15 +357,17 @@ function ScanBox({ onClose, page }) {
             : <div className="sc-big">{cur.state}</div>}
           <div className="sc-meta">{cur.dup && <b className="bad">这张刚才扫过了　</b>}{cur.kind} · {cur.payee}{cur.amount != null && <> · <b className="mono">{money(cur.amount)}</b></>}
             {cur.bid && <> · 审批 <span className="mono">{cur.bid}</span></>}{(cur.vouchers || [])[0]?.bill_no && <> · 付款单 <span className="mono">{cur.vouchers[0].bill_no}</span></>}
+            {(cur.vouchers || [])[0]?.maker && <> · 制单 <b>{cur.vouchers[0].maker}</b>{cur.vouchers[0].maker_sys ? '（系统做账）' : ''}</>}
+            {(cur.vouchers || [])[0] && <> · {cur.vouchers[0].checker ? `审核 ${cur.vouchers[0].checker}` : cur.vouchers[0].audited === false ? '还没审核' : ''}</>}
             {cur.n_adjust > 0 && <b className="warn">　附计提更正单</b>}{cur.has_xred && <b className="warn">（两张：① 红冲 ② 补提）</b>}</div>
         </div>}
         <div className="lv-sec">本次已扫 <span className="dim">{hist.length} 张{Object.keys(bySubj).length > 0 && '：' + Object.entries(bySubj).map(([k, n]) => `${k} ${n}`).join(' · ')}</span>
           <span style={{ flex: 1 }} />{hist.length > 0 && <button className="lnk" onClick={() => { setHist([]); setCur(null) }}>清空</button>}</div>
-        <table className="lv-t"><thead><tr><th style={{ width: 40 }}>#</th><th style={{ width: 110 }}>主体</th><th style={{ width: 110 }}>凭证号</th><th style={{ width: 90 }}>凭证月份</th><th>供应商</th><th className="num" style={{ width: 120 }}>金额</th><th style={{ width: 80 }}>时间</th></tr></thead>
+        <table className="lv-t"><thead><tr><th style={{ width: 40 }}>#</th><th style={{ width: 110 }}>主体</th><th style={{ width: 110 }}>凭证号</th><th style={{ width: 90 }}>凭证月份</th><th>供应商</th><th className="num" style={{ width: 120 }}>金额</th><th style={{ width: 80 }}>时间</th><th style={{ width: 90 }}>制单人</th></tr></thead>
           <tbody>{hist.map((h, i) => { const a = (h.vouchers || [])[0]; return <tr key={h.inst}>
             <td className="dim">{hist.length - i}</td><td>{a ? a.subject : '—'}</td><td className="mono"><b>{a ? '记-' + a.vno : '还没做账'}</b>{(h.vouchers || []).length > 1 && <span className="dim"> +{h.vouchers.length - 1}</span>}</td>
-            <td>{a ? ymCn(a.month) : ''}</td><td>{h.payee}</td><td className="num">{money(h.amount)}</td><td className="dim">{h.at}</td></tr> })}
-            {!hist.length && <tr><td colSpan="7" className="lv-empty">还没扫</td></tr>}</tbody></table>
+            <td>{a ? ymCn(a.month) : ''}</td><td>{h.payee}</td><td className="num">{money(h.amount)}</td><td className="dim">{h.at}</td><td>{a ? a.maker : ''}</td></tr> })}
+            {!hist.length && <tr><td colSpan="8" className="lv-empty">还没扫</td></tr>}</tbody></table>
       </div>
     </div>
   )
@@ -412,7 +414,10 @@ export function VoucherScanPage({ user }) {
   }
   const c = S.cur, vs = (c && c.vouchers) || [], a = vs[0]
   const tone = x => SUBJ_TONE[x] || 'g'
-  const kv = c && c.ok ? [['供应商', c.payee], ['金额', c.amount != null ? money(c.amount) : ''], ['审批编号', c.bid], ['付款单', a && a.bill_no]].filter(x => x[1]) : []
+  // 制单人：系统做的账，金蝶里制单人是「系统操作员」，这里显示实际点保存的那个人
+  const kv = c && c.ok ? [['制单人', a && a.maker ? a.maker + (a.maker_sys ? '（系统做账）' : '') : ''],
+    ['审核人', a ? (a.checker || (a.audited === false ? '还没审核' : '')) : ''],
+    ['供应商', c.payee], ['金额', c.amount != null ? money(c.amount) : ''], ['审批编号', c.bid], ['付款单', a && a.bill_no]].filter(x => x[1]) : []
   return <div className="lv vs"><style>{CSS}</style>
     <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={S.shot} />
     <header className="vs-top">
@@ -445,7 +450,7 @@ export function VoucherScanPage({ user }) {
       <div className="vs-list">
         {S.hist.map((h, i) => { const x = (h.vouchers || [])[0]; return <div key={h.inst} className="vs-row" onClick={() => S.setCur({ ...h, dup: false })}>
           <span className={'vs-bar2 tone-' + tone(x ? x.subject : h.subject)} />
-          <div className="l"><b>{x ? '记-' + x.vno : '还没做账'}</b><span>{x ? `${x.subject} · ${ymCn(x.month)}` : h.subject || ''}</span></div>
+          <div className="l"><b>{x ? '记-' + x.vno : '还没做账'}</b><span>{x ? `${x.subject} · ${ymCn(x.month)}${x.maker ? ' · ' + x.maker : ''}` : h.subject || ''}</span></div>
           <div className="r"><span>{h.payee}</span><b>{money(h.amount)}</b></div></div> })}
         {!S.hist.length && <div className="vs-none">还没扫。扫过的会排在这里，按主体计数。</div>}
       </div>
@@ -874,7 +879,7 @@ const CSS = `
 .vs .vs-bottom{position:sticky;bottom:0;display:flex;gap:10px;align-items:stretch;padding:10px 16px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);box-shadow:0 -4px 16px rgba(20,28,58,.06)}
 .vs .vs-go{flex:1;display:flex;gap:10px;align-items:center;justify-content:center;border:0;background:var(--accent);color:#fff;font-size:19px;font-weight:800;border-radius:14px;min-height:58px;letter-spacing:1px}
 .vs .vs-go:active{background:var(--accent-strong)}.vs .vs-go:disabled{opacity:.55}
-.vs .vs-side{flex:none;width:68px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-2);border-radius:14px;font-size:13px;font-weight:600}
+.vs .vs-side{flex:none;width:72px;white-space:nowrap;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-2);border-radius:14px;font-size:13px;font-weight:600}
 .vs .vs-side small{font-size:11.5px;font-weight:400}.vs .vs-side.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .lv .lv-scanpage{padding:10px;min-height:100vh;background:var(--bg-sub)}.lv .lv-scanpage .lv-dlg{width:100%;max-width:720px;margin:0 auto;box-shadow:none;padding:14px 14px 18px}
 .lv .sc-shot{display:flex;justify-content:center;align-items:center;width:100%;height:auto;min-height:60px;line-height:1.3;font-size:18px;padding:14px 10px;border-radius:12px;margin:10px 0 2px}.lv .sc-foot{text-align:center;color:var(--ink-2);font-size:12px;padding:10px}
