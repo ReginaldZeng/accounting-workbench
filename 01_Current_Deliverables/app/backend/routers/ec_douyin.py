@@ -58,32 +58,32 @@ def _sources(period, shop):
 
 @router.post('/upload')
 async def upload(request: Request, shop: str = Form(...), files: List[UploadFile] = File(...)):
-    """上传抖音动账明细 / 账户流水（csv 或 zip）。只看表头认类型；文件里有几个月就按月各存一份，重复流水号只留一份。"""
+    """上传抖音动账明细 / 账户流水（csv 或 zip）/ 旺店通订单明细（xlsx）。只看表头认类型；文件里有几个月就按月各存一份，重复的只留一份。"""
     user = require(request, write=True)
     selected = wbr.check_shop(shop)
     if selected['platform'] != '抖音': raise HTTPException(400, '这家店不是抖音店铺')
     results = []
     for f in files[:10]:
         blob = await f.read()
-        try: parts = model.parse(blob, f.filename or '未命名')
+        try: parts = model.parse(blob, f.filename or '未命名', shop)
         except (ValueError, OSError, KeyError) as e:
             results.append({'name': f.filename, 'ok': False, 'error': str(e)[:120]}); continue
         for part in parts:
             if not part['kind']:
                 results.append({'name': part['name'], 'ok': False, 'error': part['skip']}); continue
-            months, added = model.by_month(part['rows']), 0
+            months, fresh = model.by_month(part['rows']), False
             with db._engine.connect() as cx:
                 old = {r.period: r for r in _latest(cx, shop, list(months), [part['kind']])}
             for month, new in sorted(months.items()):
                 before = json.loads(gzip.decompress(old[month].payload))['rows'] if month in old else []
                 names = json.loads(old[month].filenames or '[]') if month in old else []
                 merged = model.merge(before, new)
-                added += len(merged) - len(before)
-                digest = hashlib.sha256(json.dumps([[r['id'], r['amt']] for r in merged]).encode()).hexdigest()
-                wbr.save_source(month, shop, part['kind'], digest, list(dict.fromkeys(names + [part['name']])),
-                                {'rows': merged, 'status': 'ready'}, user['name'])
+                digest = hashlib.sha256(json.dumps([model.FORMAT, [[r['id'], r.get('amt', r.get('recv')), r.get('status', '')] for r in merged]]).encode()).hexdigest()
+                saved = wbr.save_source(month, shop, part['kind'], digest, list(dict.fromkeys(names + [part['name']])),
+                                        {'rows': merged, 'status': 'ready'}, user['name'])
+                fresh = fresh or not saved['duplicate']
             results.append({'name': part['name'], 'ok': True, 'kind': part['kind'], 'label': model.KINDS[part['kind']],
-                            'rows': len(part['rows']), 'duplicate': added == 0,
+                            'rows': len(part['rows']), 'duplicate': not fresh,
                             'warnings': ['%s %d 行' % (m, len(v)) for m, v in sorted(months.items())]})
     db.audit(user['name'], 'ec_douyin_upload', target=shop, detail='；'.join('%s:%s' % (r['name'], r.get('label') or r.get('error')) for r in results)[:300])
     with _lock: _cache.clear()
@@ -119,10 +119,12 @@ def _sync(period, shop, customer, operator):
     started = time.time()
     s, conf = kc.login()
     since = open_items.month_shift(datetime.date(int(period[:4]), int(period[5:7]), 1), -LOOKBACK)
-    raw = kc._query(s, conf, 'AR_receivable', open_items.AR_FIELDS,
+    raw = kc._query(s, conf, 'AR_receivable', open_items.AR_FIELDS + [('F_ora_Text3', 't3')],
                     "FSETTLEORGID.FName='%s' and FCUSTOMERID.FName='%s' and FCancelStatus='A' and FDATE>='%s'" % (ORG, customer.replace("'", ''), since),
                     order='FBillNo ASC')
-    bills = open_items._merge(raw, lambda r: dict(order=open_items.order_key(r.get('t6'), r.get('t4'))))
+    # 蓝字应收：Text3=出库单号、Text4=交易单号；红字应收：Text3=交易单号、Text4=原订单号
+    ship = lambda r: next((str(r.get(k) or '').strip() for k in ('t3', 't4') if str(r.get(k) or '').strip().startswith('CK')), '')
+    bills = open_items._merge(raw, lambda r: dict(order=open_items.order_key(r.get('t6'), r.get('t4')), ship=ship(r)))
     try: book = _book(s, conf, customer.replace("'", ''), period)
     except Exception as e: book = {'error': '读金蝶账面余额失败（%s）' % type(e).__name__}
     path = _ar_path(period, shop); os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -173,7 +175,7 @@ def _result(period, shop):
         if hit and hit[0] == stamp: return hit[1], hit[2], counts
     with gzip.open(_ar_path(period, shop), 'rt', encoding='utf-8') as stream:
         saved = json.load(stream)
-    result = model.reconcile(period, rows['dy_settle'], rows['dy_ledger'], saved['bills'])
+    result = model.reconcile(period, rows['dy_settle'], rows['dy_ledger'], saved['bills'], rows['dy_orders'])
     with _lock: _cache[key] = (stamp, result, saved.get('book') or {}, rows, saved['bills'])
     return result, saved.get('book') or {}, counts
 
@@ -216,7 +218,11 @@ def order(request: Request, period: str, shop: str, order: str):
     _need(period, shop)
     with _lock: hit = _cache.get((period, shop))
     if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
-    return dict(model.order_detail(period, hit[3]['dy_settle'], hit[3]['dy_ledger'], hit[4], order.strip()), ok=True)
+    detail = model.order_detail(period, hit[3]['dy_settle'], hit[3]['dy_ledger'], hit[4], order.strip(), hit[3]['dy_orders'])
+    mine = [b for b in hit[1]['bills'] if b['order'] in detail['members']]
+    cats = {b['cat'] for b in mine}; detail['reason'] = next((b['reason'] for b in mine if b['reason']), '')
+    detail['categories'] = [model.category_label(c, hit[1]['overdue_days']) for c in model.CATEGORIES if c in cats]
+    return dict(detail, ok=True, period=period)
 
 
 @router.get('/missing')

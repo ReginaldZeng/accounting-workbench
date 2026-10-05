@@ -105,9 +105,76 @@ class DouyinTests(unittest.TestCase):
         self.assertEqual(m.order_detail('2026-09', m.merge([], s), [], BILLS, O4)['flows'], [])
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(m.export(r, '抖音店', {'account': '抖音177', 'open': 109.5, 'close': 109.5})))
-        self.assertEqual(wb.sheetnames, ['收款单草稿', '可核销(下推源单)', '金额对不上', '红蓝互冲', '该结没结', '在途', '无订单号', '流水有·应收对不上号'])
+        self.assertEqual(wb.sheetnames, ['收款单草稿', '交人工处理', '可核销(下推源单)', '金额对不上', '红蓝互冲', '该结没结', '在途', '无订单号', '流水有·应收对不上号'])
         self.assertEqual([c.value for c in wb['收款单草稿'][4]], [1, '支付宝', '抖音177', 97.5, '本月账户净变动（到账）'])
         self.assertEqual(wb['可核销(下推源单)'].max_row, 4); self.assertEqual(wb['可核销(下推源单)']['I3'].value + wb['可核销(下推源单)']['J3'].value, wb['可核销(下推源单)']['K3'].value)
+
+    def orders_xlsx(self, rows):
+        from openpyxl import Workbook
+        wb = Workbook(); ws = wb.active
+        ws.append(['订单编号', '店铺', '子单原始单号', '订单状态', '订单退款状态', '交易时间', '付款时间', '发货时间', '收件人', '买家实付', '应收金额', '货品名称', '实发数量', '分摊后总价'])
+        for r in rows: ws.append(r)
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    def test_wangdiantong_orders_group_merged_shipments(self):
+        A, B = '6930162745589599991', '6930162745589599992'
+        blob = self.orders_xlsx([
+            ['JY1', '抖音店', A, '已完成', '', '2026-09-05 10:00:00', '2026-09-05 10:00:05', '2026-09-06 09:00:00', '张三', 19.8, 35.7, '豆腐 & 辣条', 1, 19.8],
+            ['JY1', '抖音店', B + '-1', '已完成', '', '2026-09-05 10:01:00', '', '2026-09-06 09:00:00', '张三', 19.8, 35.7, '辣丝丝', 1, 15.9],
+            ['JY2', '抖音店', '6930162745589599993', '已取消', '全部退款', '2026-09-07 10:00:00', '', '', '李四', 0, 0, '辣丝丝', 0, 0],
+            ['JY3', '天猫店', '5127801625403010443A', '已完成', '', '2026-09-07 10:00:00', '', '', '王五', 9, 9, '辣丝丝', 1, 9],
+            ['JY4', '抖音店', 'AD202610020054', '已完成', '', '2026-09-07 10:00:00', '', '', '王五', 9, 9, '补发', 1, 9]])
+        part = m.parse(blob, '订单明细.xlsx', '抖音店')[0]
+        self.assertEqual((part['kind'], sorted(r['id'] for r in part['rows'])), ('dy_orders', ['JY1|' + A, 'JY1|' + B, 'JY2|6930162745589599993']))
+        first = next(r for r in part['rows'] if r['order'] == A)
+        self.assertEqual((first['recv'], first['amount'], first['ship'], first['goods'], first['t']), (35.7, 19.8, '2026-09-06 09:00:00', ['豆腐 & 辣条'], '2026-09-05 10:00:00'))
+        self.assertNotIn('张三', str(part['rows']))                                   # 收件人不留
+        with self.assertRaises(ValueError): m.parse(blob, '订单明细.xlsx', '别的店')
+        # 金蝶照合并后的旺店通订单开一张应收，只记了 A；抖音 A、B 各结各的
+        settle = m.parse(settle_csv(
+            f"2026-09-10 08:00:00,'M1,入账,19.40,聚合账户,货款结算入账,小店自卖,'{A},'{A},19.8,0,0,0,-0.40,0,0,0,订单结算",
+            f"2026-09-11 08:00:00,'M2,入账,15.58,聚合账户,货款结算入账,小店自卖,'{B},'{B},15.9,0,0,0,-0.32,0,0,0,订单结算"), 'x.csv')[0]['rows']
+        bills = [bill('ARM', '2026-09-06', 35.7, A)]
+        alone = m.reconcile('2026-09', settle, [], bills)
+        self.assertEqual((alone['bills'][0]['cat'], alone['buckets']['missing']['orders']), ('mismatch', 1))
+        r = m.reconcile('2026-09', settle, [], bills, part['rows'])
+        self.assertEqual((r['bills'][0]['cat'], r['bills'][0]['flow'], r['bills'][0]['merged'], r['buckets']['ok'], r['coverage']['merged_groups']), ('ok', 35.7, 2, {'orders': 2, 'flow': 35.7, 'ar': 35.7}, 1))
+        half = m.reconcile('2026-09', settle[:1], [], bills, part['rows'])
+        self.assertEqual((half['bills'][0]['cat'], half['bills'][0]['reason']), ('transit', '合单发货的 2 个订单里还有没结算的'))
+        d = m.order_detail('2026-09', settle, [], bills, B, part['rows'])
+        self.assertEqual((d['members'], [f['order'] for f in d['flows']], [b['no'] for b in d['bills']], d['flow_total'], d['open_total'], d['wdt'][0]['jy'], d['wdt'][0]['orders']), ([A, B], [A, B], ['ARM'], 35.7, 35.7, 'JY1', [A, B]))
+
+    def test_mismatch_reasons_and_settle_then_refund(self):
+        X, Y, Z = '6930162745589588881', '6930162745589588882', '6930162745589588883'
+        settle = m.parse(settle_csv(
+            f"2026-09-10 08:00:00,'R1,入账,48.90,聚合账户,货款结算入账,巨量千川,'{X},'{X},49.9,0,0,0,-1.00,0,0,0,订单结算",
+            f"2026-09-12 08:00:00,'R2,出账,49.90,聚合账户,退款-结算后退款-退用户,,'{X},'{X},0,0,0,0,0,0,0,0,退款",
+            f"2026-09-12 08:00:01,'R3,入账,1.00,聚合账户,退款-订单退款触发-退分账,,'{X},'{X},0,0,0,0,0,0,0,0,服务费返还",
+            f"2026-09-10 09:00:00,'R4,入账,48.90,聚合账户,货款结算入账,巨量千川,'{Y},'{Y},49.9,0,0,0,-1.00,0,0,0,订单结算",
+            f"2026-09-10 10:00:00,'R5,入账,44.00,聚合账户,货款结算入账,巨量千川,'{Z},'{Z},49.9,0,0,-5,-0.90,0,0,0,订单结算"), 'x.csv')[0]['rows']
+        bills = [bill('BX', '2026-09-05', 49.9, X), bill('BXR', '2026-09-13', -49.9, X), bill('BY', '2026-09-05', 49.9, Y), bill('BYR', '2026-09-08', -49.9, Y), bill('BZ', '2026-09-05', 49.9, Z)]
+        r = m.reconcile('2026-09', settle, [], bills)
+        got = {b['no']: (b['cat'], b['reason']) for b in r['bills']}
+        self.assertEqual(got['BX'][0], 'pair'); self.assertIn('先结算、后来又把钱退回去', got['BX'][1])
+        self.assertEqual(got['BY'], ('mismatch', '金蝶红字蓝字已全冲掉，抖音没退款、全额结了 49.90'))
+        self.assertEqual(got['BZ'], ('mismatch', '抖音结算时退了 5.00，金蝶没开红字'))
+        self.assertEqual((r['buckets']['refunded'], r['buckets']['mismatch']['orders']), ({'orders': 1, 'flow': 49.9, 'ar': 0.0}, 2))
+        self.assertEqual(round(sum(x['flow'] for x in r['buckets'].values()), 2), r['draft']['total'])
+        from openpyxl import load_workbook
+        todo = load_workbook(io.BytesIO(m.export(r, '抖音店')))['交人工处理']
+        self.assertEqual((todo.max_row, todo['A3'].value, todo['O3'].value), (5, '钱已到账·金额对不上', '抖音结算时退了 5.00，金蝶没开红字'))
+
+    def test_xlsx_reader_handles_shared_strings(self):
+        import zipfile as zf
+        sheet = ('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                 '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" s="1" t="s"><v>1</v></c><c r="C1"/><c r="AB1" t="s"><v>2</v></c></row>'
+                 '<row r="2"><c r="A2" t="s"><v>3</v></c><c r="B2"><v>35.7</v></c><c r="AB2" t="inlineStr"><is><t>a&amp;b</t></is></c></row></sheetData></worksheet>')
+        shared = ('<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>订单编号</t></si><si><t xml:space="preserve">应收金额</t></si>'
+                  '<si><r><t>备</t></r><r><t>注</t></r></si><si><t>JY1</t></si></sst>')
+        buf = io.BytesIO()
+        with zf.ZipFile(buf, 'w') as z:
+            z.writestr('[Content_Types].xml', '<Types/>'); z.writestr('xl/worksheets/sheet1.xml', sheet); z.writestr('xl/sharedStrings.xml', shared)
+        self.assertEqual(list(m._xlsx_rows(buf.getvalue(), '筛不到的'.encode())), [{0: '订单编号', 1: '应收金额', 2: '', 27: '备注'}, {0: 'JY1', 1: '35.7', 27: 'a&b'}])
 
 
 if __name__ == '__main__':

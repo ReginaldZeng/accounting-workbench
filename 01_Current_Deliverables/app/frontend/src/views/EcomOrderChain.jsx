@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useResource, query, money } from './ecomWorkbenchApi.js'
 import './ecomOrderChain.css'
 
-function ChainRow({name,summary,amount,status,date='未取得',detailLabel='查看明细',children,initialOpen=false}) {
+export function ChainRow({name,summary,amount,status,date='未取得',detailLabel='查看明细',children,initialOpen=false}) {
   const [open,setOpen]=useState(initialOpen)
   return <><tr><th scope="row">{name}</th><td className="ec-chain-date">{date}</td><td>{summary}{children&&<button className="ew-link ec-chain-toggle" aria-label={`${open?'收起':'展开'}${name}`} aria-expanded={open} onClick={()=>setOpen(!open)}>{open?'收起':detailLabel}</button>}</td><td>{amount||'—'}</td><td><span className="ec-chain-status">{status}</span></td></tr>{open&&<tr className="ec-chain-detail"><td colSpan="5">{children}</td></tr>}</>
 }

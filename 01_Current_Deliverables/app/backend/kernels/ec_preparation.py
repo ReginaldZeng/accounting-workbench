@@ -4,7 +4,7 @@ KINDS = {'order':'平台订单', 'item':'商品与子订单', 'wdt':'旺店通�
 TARGET = '星期零STARFIELD 天猫官旗店'
 KINDS['price_protection']='天猫价保赔付（补充）'
 # V2.811 抖音：一份订单维度动账明细（对金额、拆费用）+ 一份带余额的账户流水（对余额）
-DOUYIN_KINDS = {'dy_settle':'抖音动账明细（订单维度）', 'dy_ledger':'抖音账户流水（带余额）'}
+DOUYIN_KINDS = {'dy_settle':'抖音动账明细（订单维度）', 'dy_ledger':'抖音账户流水（带余额）', 'dy_orders':'旺店通订单明细（认合单）'}   # V2.816 加第三类
 KINDS.update(DOUYIN_KINDS)
 
 
