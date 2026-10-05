@@ -33,16 +33,19 @@ const ST = {
 const ORDER = ['ready', 'invdiff', 'noinv', 'booked']
 // 批量做账：一致只核销 + 红冲更正(含尾差)。红冲更正写法已在金蝶实测(跨越 记-261 / 易风达 记-264)后放进来，
 // 但要提示：勾到红冲更正的，批量条和确认框都单独列出来（用户 2026-10-02「放进去，但是要提示」）
+// V2.818 金额有差(用户「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：一张计提对一张发票的，系统默认按发票金额红冲更正；
+//   几张计提的、或要部分核销的，在「选择核销哪些计提」里给每张填「本次按多少」，选处理方式，部分核销必须写说明(进凭证摘要)。
 const BATCH_KINDS = ['hx', 'tail', 'redo']
 const REDO_KINDS = ['tail', 'redo']
 // 做账类型(要读金蝶计提，列表出来后再逐张补)：计提与发票一致只核销 / 含尾差 / 要红冲更正 / 计提记错主体 / 金额不符 / 没有计提
 const KIND = {
   hx: ['一致·只核销', 'ok'], tail: ['尾差·红冲更正', 'warn'], redo: ['需红冲更正', 'bad'],
   subj: ['计提记错主体', 'bad'], manual: ['金额不符·人工', 'warn'], noacc: ['没有计提', 'warn'], err: ['读取失败', 'neu'],
+  part: ['部分核销', 'warn'],
 }
 // 整单问题的建议动作
 const ACT = { subj: '原主体红冲、本主体补提后再做', subjAuto: '本张补提并核销（点「凭证预览」单张做）', manual: '人工核对差额（补提 / 查发票）', noacc: '先计提', err: '刷新重试' }
-const KIND_ORDER = ['hx', 'tail', 'redo', 'subj', 'manual', 'noacc']
+const KIND_ORDER = ['hx', 'tail', 'redo', 'part', 'subj', 'manual', 'noacc']
 const BLOCK_CLS = { 红冲: 'b-red', 更正: 'b-fix', 核销: 'b-hx', 支付: 'b-pay' }
 const MODE = { hx: ['核销', 'ok'], rate: ['红冲+更正', 'bad'], fix: ['红冲+更正', 'bad'], move: ['补提到本主体', 'bad'] }
 
@@ -66,7 +69,7 @@ function rateCheck(acc, inv) {
   // 每个税率：计提(原) / 更正后 / 发票，更正后 = 发票 才算对上
   const g = {}
   const put = (r, k, v) => { const key = Math.round(r * 10000); (g[key] = g[key] || { r, acc: 0, fixed: 0, inv: 0 })[k] += v }
-  acc.forEach(a => { put(a.rate, 'acc', a.gross); put(a.mode === 'rate' || a.mode === 'fix' || a.mode === 'move' ? (a.new_rate ?? a.rate) : a.rate, 'fixed', a.gross) })
+  acc.forEach(a => { put(a.rate, 'acc', a.gross); put(['rate', 'fix', 'move', 'amt'].includes(a.mode) ? (a.new_rate ?? a.rate) : a.rate, 'fixed', a.gross_new ?? a.gross) })
   inv.forEach(i => { const r = i.deduct === false ? 0 : rateOf(i.rate); if (r != null) put(r, 'inv', i.gross) })   // 普票不抵扣按 0%
   return Object.values(g).sort((a, b) => a.r - b.r).map(x => ({ ...x, acc: r2(x.acc), fixed: r2(x.fixed), inv: r2(x.inv) }))
 }
@@ -80,7 +83,7 @@ function dimLine(d) {
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
 const dimKey = l => [l.acct, l.fee_code, l.dept_code, l.biz_code, l.proj_code].join('|')
 const expText = l => esc([l.acct + ' ' + (l.acct_name || ''), ...dimText(l)].join(' · '))
-const MODE_CN = { rate: '改税率', fix: '改科目/维度/金额', tail: '尾差', move: '主体更正' }
+const MODE_CN = { rate: '改税率', fix: '改科目/维度/金额', tail: '尾差', move: '主体更正', amt: '改金额' }
 
 // 版式照复核台导出的《计提更正单》(logistics_review._fix_sheet，用户 2026-10-02「你看看那个设计」)：横向；抬头两行居中
 // (单名 / 供应商编码·名称)；每笔三行 原记账 / 应改为(没变写灰「不变」，变了标黄) / 原因；序号·主体·凭证号·费用归属月份·调账月份·更正人 三行合并；
@@ -557,40 +560,68 @@ function PickAccruals({ inst, onSaved, onClose }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [on, setOn] = useState({})
+  const [amt, setAmt] = useState({})          // 每张「本次按多少」(字符串，空＝按原计提)
+  const [part, setPart] = useState(false)     // 金额有差的处理方式：false 红冲更正 / true 部分核销
+  const [memo, setMemo] = useState('')
   const [busy, setBusy] = useState(false)
   const key = c => `${c.year}-${c.month}/${c.vno}`
   useEffect(() => {
     voucherAccrualCands(inst).then(r => {
       setD(r)
-      const o = {}
-      r.cands.forEach(c => { if (r.picked ? c.picked : c.suggest) o[key(c)] = true })
-      setOn(o)
+      const o = {}, am = {}
+      r.cands.forEach(c => { if (r.picked ? c.picked : c.suggest) o[key(c)] = true; if (c.to_gross != null) am[key(c)] = String(c.to_gross) })
+      // 还没人选过、系统也配不出正好的一组：账单月没用过的先勾上，只有一张时把金额填成发票合计(默认红冲更正)
+      if (!r.picked && !Object.keys(o).length) {
+        const bm = r.cands.filter(c => c.bill_month && !c.used && !c.other)
+        bm.forEach(c => { o[key(c)] = true })
+        if (bm.length === 1 && Math.abs(bm[0].gross - r.inv_total) >= 0.005) am[key(bm[0])] = String(r.inv_total)
+      }
+      setOn(o); setAmt(am); setPart(!!(r.picked && r.picked.part)); setMemo((r.picked && r.picked.memo) || '')
     }).catch(e => setErr(e.message))
   }, [inst])
   if (err) return <div className="lv-msg bad">候选计提没读到：{err}　<button className="lnk" onClick={onClose}>关闭</button></div>
   if (!d) return <div className="lv-empty">读金蝶这家供应商各月的计提…</div>
   const sel = d.cands.filter(c => on[key(c)])
-  const sum = r2(sel.reduce((s, c) => s + c.gross, 0)), diff = r2(d.inv_total - sum)
-  const save = picks => { setBusy(true); voucherPick(inst, picks).then(onSaved).catch(e => alert(e.message)).finally(() => setBusy(false)) }
+  const val = c => { const t = String(amt[key(c)] ?? '').replace(/,/g, '').trim(); const n = t === '' ? c.gross : Number(t); return Number.isFinite(n) ? n : c.gross }
+  const chg = c => Math.abs(val(c) - c.gross) >= 0.005
+  const sum = r2(sel.reduce((s, c) => s + val(c), 0)), diff = r2(d.inv_total - sum)
+  const anyChg = sel.some(chg), over = part && sel.some(c => val(c) - c.gross > 0.004)
+  const save = (picks, opt) => { setBusy(true); voucherPick(inst, picks, opt).then(onSaved).catch(e => alert(e.message)).finally(() => setBusy(false)) }
+  const doSave = () => {
+    if (part && anyChg && !memo.trim()) { alert('部分核销要写说明：为什么只核销一部分（会写进凭证摘要）'); return }
+    save(sel.map(c => ({ year: c.year, month: c.month, vno: c.vno, to_gross: chg(c) ? r2(val(c)) : null })), { part: part && anyChg, memo: anyChg ? memo.trim() : '' })
+  }
   return <div className="lv-pick">
     <div className="ph"><b>选择这张请款单核销哪些计提</b>
       <span className="dim">账单月 {d.period} 前 2 个月到付款月 · 可以跨月 · {d.picked ? `现在是人工选定的（${d.picked.by} ${d.picked.at}）` : '现在是系统自动认的，下面先勾了系统的建议'}</span>
       <span style={{ flex: 1 }} /><button className="lnk" onClick={onClose}>收起</button></div>
     <table className="lv-t"><thead><tr><th style={{ width: 34 }}></th><th style={{ width: 96 }}>月 / 凭证</th><th>摘要</th><th style={{ width: 150 }}>费用项目</th>
-      <th className="num" style={{ width: 110 }}>含税</th><th style={{ width: 60 }}>税率</th><th style={{ width: 210 }}>状态</th></tr></thead>
+      <th className="num" style={{ width: 110 }}>计提含税</th><th className="num" style={{ width: 150 }}>本次按多少</th><th style={{ width: 60 }}>税率</th><th style={{ width: 200 }}>状态</th></tr></thead>
       <tbody>{d.cands.map(c => { const k = key(c), lock = !!c.used || c.other; return <tr key={k} className={lock ? 'lock' : ''}>
         <td><input type="checkbox" disabled={lock || busy} checked={!!on[k]} onChange={e => setOn(o => ({ ...o, [k]: e.target.checked }))} /></td>
         <td className="mono">{c.month}/{c.vno}#{!c.bill_month && <div className="warn" style={{ fontFamily: 'inherit' }}>不是账单月</div>}</td>
         <td className="expl" title={c.expl}>{c.expl}</td><td>{c.fee}{c.biz && <span className="dim"> · {c.biz}</span>}</td>
-        <td className="num">{money(c.gross)}</td><td>{pct(c.rate)}</td>
+        <td className="num">{money(c.gross)}</td>
+        <td className="num">{on[k] && !lock ? <><input className={'amt' + (chg(c) ? ' chg' : '')} disabled={busy} value={amt[k] ?? ''} placeholder={money(c.gross)}
+          onChange={e => setAmt(o => ({ ...o, [k]: e.target.value }))} />
+          {Math.abs(diff) >= 0.005 && <button className="lnk" title="把和发票的差额全放到这一张上" onClick={() => setAmt(o => ({ ...o, [k]: String(r2(val(c) + diff)) }))}>补差</button>}</> : <span className="dim">—</span>}</td>
+        <td>{pct(c.rate)}</td>
         <td>{c.used ? <span className="dim">已被 {c.used} 核销 / 红冲</span> : c.other ? <span className="dim">已被另一张请款单选走</span> : c.suggest ? <span className="ok">建议（金额正好配上）</span> : <span className="dim">没用过</span>}</td></tr> })}
-        {!d.cands.length && <tr><td colSpan="7" className="lv-empty">这几个月金蝶里没有这家的计提</td></tr>}
-        <tr className="tot"><td colSpan="4">已选 {sel.length} 张　发票合计 {money(d.inv_total)}</td><td className="num">{money(sum)}</td><td colSpan="2">{Math.abs(diff) < 0.005
+        {!d.cands.length && <tr><td colSpan="8" className="lv-empty">这几个月金蝶里没有这家的计提</td></tr>}
+        <tr className="tot"><td colSpan="4">已选 {sel.length} 张　发票合计 {money(d.inv_total)}</td><td className="num">{money(r2(sel.reduce((s, c) => s + c.gross, 0)))}</td><td className="num">{money(sum)}</td><td colSpan="2">{Math.abs(diff) < 0.005
           ? <span className="ok">和发票正好对上 ✓</span> : <span className="bad">和发票差 {money(diff)}（{diff > 0 ? '计提少' : '计提多'}）</span>}</td></tr></tbody></table>
+    {anyChg && <div className="pm">
+      <b>金额和原计提不一样的 {sel.filter(chg).length} 张，怎么处理：</b>
+      <label><input type="radio" checked={!part} onChange={() => setPart(false)} /> 红冲更正<span className="dim">（原计提整笔红冲，按「本次按多少」重新计提，再核销）</span></label>
+      <label><input type="radio" checked={part} onChange={() => setPart(true)} /> 部分核销<span className="dim">（不红冲，只核销「本次按多少」，剩下的留在账上）</span></label>
+      <input className="memo" value={memo} onChange={e => setMemo(e.target.value)} maxLength={80}
+        placeholder={part ? '说明（必填，写进凭证摘要）：为什么只核销一部分，如「余款对方下月开票」' : '说明（可不填，写进更正单）'} />
+      {over && <span className="bad">部分核销不能比原计提多，多出来的请用红冲更正</span>}
+    </div>}
     <div className="pf">
-      <button className="btn btn-pri" disabled={busy || !sel.length} onClick={() => save(sel.map(c => ({ year: c.year, month: c.month, vno: c.vno })))}>{busy ? '保存中…' : '按勾选的核销'}</button>
+      <button className="btn btn-pri" disabled={busy || !sel.length || over} onClick={doSave}>{busy ? '保存中…' : '按勾选的核销'}</button>
       {d.picked && <button className="btn" disabled={busy} onClick={() => save([])}>恢复系统自动认</button>}
-      <span className="dim">保存后下面的凭证预览按选定的重算；金额对不上也能存，但做不了账，会提示差多少。已被核销 / 红冲过的不能选。</span></div>
+      <span className="dim">保存后下面的凭证预览按选定的重算；合计和发票对不上也能存，但做不了账，会提示差多少。已被核销 / 红冲过的不能选。</span></div>
   </div>
 }
 
@@ -702,7 +733,10 @@ function Detail({ inst, onClose, onChanged }) {
                 <td className="num">{money(a.gross)}</td>
                 <td className="nw">{a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate)}</td>
                 <td className="num">{money(a.tax)}</td>
-                <td>{a.mode === 'hx' ? <span className="ok">核销</span> : a.mode === 'move' ? <><span className="bad">补提到本主体 + 核销</span><span className="dim"> · {a.why}</span></>
+                <td>{a.mode === 'hx' ? <span className="ok">核销</span>
+                  : a.mode === 'part' ? <><span className="warn">部分核销 {money(a.gross_new)}</span><span className="dim"> · 余 {money(r2(a.gross - a.gross_new))} 留在账上，不红冲</span></>
+                  : a.mode === 'amt' ? <><span className="bad">红冲 + 更正</span><span className="dim"> · {money(a.gross)} → <b>{money(a.gross_new)}</b></span></>
+                  : a.mode === 'move' ? <><span className="bad">补提到本主体 + 核销</span><span className="dim"> · {a.why}</span></>
                   : a.mode ? <><span className="bad">红冲 + 更正</span><span className="dim"> · {a.why}</span></> : <span className="dim">—</span>}</td>
               </tr>)}
               {!d.accruals.length && <tr><td colSpan="6" className="lv-empty">金蝶本期没找到这家的计提凭证</td></tr>}
@@ -926,8 +960,11 @@ export default function LogisticsVoucher() {
                       {(p.xrev || []).map(x => <div key={x.vno} className={x.reversed ? 'ok' : 'warn'}>{x.short} 记-{x.vno} 红冲{x.reversed ? `已做（记-${x.reversed.vno}）` : '系统一并做'}</div>)}</> : ACT[p.kind]}</td></>
                   return <>
                     <td>{stack(a => a.mode === 'hx' ? <span className="ok">一致</span> : a.mode === 'tail' ? <span className="warn">一致 · 尾差 {money(a.tail)}</span>
-                      : a.mode === 'rate' ? <span className="bad" title={a.why}>税率不符</span> : a.mode === 'fix' ? <span className="bad" title={a.why}>有计提更正</span> : '—')}</td>
-                    <td>{stack(a => a.mode === 'hx' ? '核销' : a.mode === 'tail' ? <b className="warn">红冲 + 更正（尾差）</b> : a.mode ? <b className="bad">红冲 + 更正</b> : '—')}</td></>
+                      : a.mode === 'rate' ? <span className="bad" title={a.why}>税率不符</span> : a.mode === 'fix' ? <span className="bad" title={a.why}>有计提更正</span>
+                      : a.mode === 'amt' ? <span className="bad" title={a.why}>金额有差 {money(r2((a.gross_new ?? a.gross) - a.gross))}</span>
+                      : a.mode === 'part' ? <span className="warn" title={a.why}>部分核销 {money(a.gross_new)}</span> : '—')}</td>
+                    <td>{stack(a => a.mode === 'hx' ? '核销' : a.mode === 'tail' ? <b className="warn">红冲 + 更正（尾差）</b> : a.mode === 'part' ? <b className="warn">部分核销（单张做）</b>
+                      : a.mode ? <b className="bad">红冲 + 更正</b> : '—')}</td></>
                 })()}
                 <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
                 <td className="nw">{pay}<div className="dim">纸质件 {r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr ? ' · 已放行' : ''}</div>
@@ -1052,6 +1089,10 @@ const CSS = `
 .lv .lv-unpaid{font-size:12.5px;color:var(--ink-2);padding:2px 2px 0}
 .lv .lv-pick{border:1px solid var(--accent);border-radius:10px;padding:10px 12px;margin:6px 0 10px;background:var(--accent-soft)}
 .lv .lv-pick .ph{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;margin-bottom:6px}.lv .lv-pick table{background:var(--bg);border-radius:8px}
+.lv .lv-pick input.amt{width:104px;font:inherit;font-size:12.5px;text-align:right;padding:3px 6px;border:1px solid var(--line-strong);border-radius:6px;background:var(--bg);color:var(--ink);font-variant-numeric:tabular-nums}
+.lv .lv-pick input.amt.chg{border-color:var(--amber);background:var(--amber-bg);font-weight:700}.lv .lv-pick .lnk{margin-left:6px;font-size:12px}
+.lv .lv-pick .pm{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12.5px;background:var(--bg);border:1px solid var(--amber-line);border-radius:8px;padding:8px 10px}
+.lv .lv-pick .pm label{display:inline-flex;gap:4px;align-items:center}.lv .lv-pick .pm .memo{flex:1;min-width:300px;font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:6px;background:var(--bg);color:var(--ink)}
 .lv .lv-pick tr.lock td{color:var(--ink-3)}.lv .lv-pick .pf{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12.5px}.lv .lv-pick .warn{color:var(--amber);font-size:11px}
 .lv .lv-batch select{font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
 .lv .lv-batch+.lv-batch{margin-top:6px}

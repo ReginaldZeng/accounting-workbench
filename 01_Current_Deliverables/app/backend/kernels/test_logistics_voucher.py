@@ -169,5 +169,60 @@ class T(unittest.TestCase):
         self.assertEqual([l["dr"] for l in ls6 if l["block"] == "更正" and l["acct"] == "2221.01.07"], [75.87])
         self.assertEqual(V.balance(ls6)[0], V.balance(ls6)[1])
 
+    def test_amount_diff(self):
+        """V2.818 金额有差：默认红冲、按应为金额更正；特殊的部分核销(摘要写说明)。样本＝迅鸽 8 月 记-393 计提 29,792.38、发票 29,746.39。"""
+        sup = "武汉顺鸽科技有限公司"
+        sc = {"sup_code": "物流运输服务075", "sup_name": sup, "sup_grp": "供应商009"}
+        e = "计提%s8月线上零售出库运费" % sup
+        d0 = {"dept_code": "0011401", "dept": "永续物流中心", "fee_code": "FYXM008.002其他物流费用002", "fee": "出库运费", "biz_code": "CPFL003", "biz": "电商"}
+        mk = lambda: V.acc_voucher("393", [{"acct": "6601", "acct_name": "销售费用", "dr": 28106.02, "cr": 0, "expl": e, **d0},
+                                            {"acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 1686.36, "cr": 0, "expl": e, **sc},
+                                            {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": 29792.38, "expl": e, **sc}], 2026, 8)
+        inv = [{"number": "26422000003391316191", "rate": "6%", "gross": 29746.39, "tax": 1683.76}]
+        ctx = {"supplier": sup, "applicant": "陈慧娴", "pay_year": 2026, "pay_month": 10, "pay_amount": 29746.39, "bank": "x", "paid": True, "self_vno": "77"}
+        # 不给应为金额：还是判人工
+        self.assertEqual(V.plan([mk()], inv, {})["status"], "manual")
+        # ① 红冲更正到发票金额
+        v = mk()
+        pl = V.plan([v], inv, {}, {"393": {"gross": 29746.39}})
+        self.assertEqual((pl["status"], pl["per"]["393"]["mode"]), ("ok", "amt"))
+        ls = V.build(ctx, [v], inv, pl)
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in ls if l["block"] == "红冲"],
+                         [("6601", -28106.02, 0), ("2221.01.07", -1686.36, 0), ("2241.02", 0, -29792.38)])
+        fx = [(l["acct"], l["dr"], l["cr"]) for l in ls if l["block"] == "更正"]
+        self.assertEqual(fx, [("6601", 28062.63, 0), ("2221.01.07", 1683.76, 0), ("2241.02", 0, 29746.39)])
+        self.assertEqual([l["cr"] for l in ls if l["block"] == "核销" and l["acct"] == "2221.01.07"], [1683.76])
+        self.assertIn("核销10/77#计提", [l for l in ls if l["block"] == "核销"][0]["expl"])
+        self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+        # ② 部分核销：不红冲不更正，只转出本次那部分暂估税，摘要写明
+        v = mk()
+        pl = V.plan([v], inv, {}, {"393": {"gross": 29746.39, "part": True, "memo": "余款对方下月开票"}})
+        self.assertEqual((pl["status"], pl["per"]["393"]["mode"]), ("ok", "part"))
+        ls = V.build(ctx, [v], inv, pl)
+        self.assertFalse([l for l in ls if l["block"] in ("红冲", "更正")])
+        hx = [l for l in ls if l["block"] == "核销"]
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in hx], [("2221.01.06", 1683.76, 0), ("2221.01.07", 0, 1683.76)])
+        self.assertIn("核销8/393#（部分）计提", hx[1]["expl"])
+        self.assertIn("部分核销：计提29792.38，本次核销29746.39，余45.99未核销；余款对方下月开票", hx[1]["expl"])
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in ls if l["block"] == "支付"], [("2241.02", 29746.39, 0), ("1002", 0, 29746.39)])
+        self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+        # ③ 部分核销不能比计提多
+        self.assertEqual(V.plan([mk()], [dict(inv[0], gross=30000, tax=1698.11)], {}, {"393": {"gross": 30000, "part": True}})["status"], "manual")
+        # ④ 发票比计提多：红冲更正照样行
+        v = mk()
+        inv2 = [dict(inv[0], gross=30000.00, tax=1698.11)]
+        pl = V.plan([v], inv2, {}, {"393": {"gross": 30000.00}})
+        ls = V.build(dict(ctx, pay_amount=30000.00), [v], inv2, pl)
+        self.assertEqual([l["cr"] for l in ls if l["block"] == "更正" and l["acct"] == "2241.02"], [30000.00])
+        self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+        # ⑤ 复核台登记的金额更正(to_amt_tax)：plan 现在按更正后的金额比
+        v = mk()
+        fixes = {"393": [{"to_amt_tax": "29746.39", "snap": {"amt": 29792.38}}]}
+        pl = V.plan([v], inv, fixes)
+        self.assertEqual((pl["status"], pl["per"]["393"]["mode"]), ("ok", "fix"))
+        ls = V.build(ctx, [v], inv, pl, fixes)
+        self.assertEqual([l["cr"] for l in ls if l["block"] == "更正" and l["acct"] == "2241.02"], [29746.39])
+        self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+
 if __name__ == "__main__":
     unittest.main()

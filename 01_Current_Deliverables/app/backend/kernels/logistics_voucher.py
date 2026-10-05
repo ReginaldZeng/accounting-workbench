@@ -10,6 +10,10 @@
 #           (摘要以发票号开头，发票管家据此自动标「已做账」)+每张计提一行贷 2221.01.07；支付=借 2241.02 / 贷 1002。
 #   摘要：红冲/更正「红冲8/565#计提…」(跨年写 2026-6/424#)；核销「{发票号}核销8/552#、9/□#计提{供应商}8月线下A、B」
 #        (更正过的那笔引用本张凭证号，保存前用 □ 占位)；支付「{申请人}提起支付{供应商}8月线下A、B」。
+# V2.818 金额有差(用户 2026-10-05「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：
+#   amts={凭证号: {gross: 应为含税, part: 是否部分核销, memo: 说明}}——mode=amt 整笔红冲、按应为金额重新计提(更正)再核销；
+#   mode=part 不红冲，只核销应为金额那一部分，剩下的留在账上，核销摘要写明计提多少、本次核销多少、余多少和说明。
+#   复核台登记的金额更正(to_amt_tax)原来 plan 不认(仍拿原计提合计去比，永远判人工)，现在一并按更正后的金额比。
 # V2.798 主体更正(mode=move，用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：计提记到了别的主体账上
 #   (凭证带 from={short, full}，exp_lines 已由调用方换成本主体的科目/费用项目/部门)——本张凭证里不红冲(原凭证不在本账簿)，
 #   「更正」段直接在本主体补提，再核销、支付；原主体那边的红冲分录用 red_lines() 另出，给那边的人做账。
@@ -93,11 +97,27 @@ def merged_desc(vouchers, supplier):
 
 
 # ---------- ① 比对：哪张核销、哪张红冲更正 ----------
-def plan(vouchers, invoices, fixes=None):
-    """vouchers：acc_voucher(...) 列表；invoices：[{number, rate, gross, tax}]；fixes：{vno: [复核台计提更正]}。
-    → {status: ok/manual, msgs:[], per:{vno: {mode: hx/rate/fix, new_rate, why}}, tails:{vno: d}}"""
-    fixes = fixes or {}
+def eff_gross(v, fx, amt=None):
+    """这张计提「应为」的含税金额：人工/系统给了应为金额的用它；复核台登记了金额更正的按更正算；否则就是原计提。"""
+    if amt and amt.get("gross") is not None:
+        return r2(amt["gross"])
+    g = v["gross"]
+    for f in fx or []:
+        if f.get("to_amt_tax") not in (None, ""):
+            try:
+                g = r2(g - float((f.get("snap") or {}).get("amt") or 0) + float(str(f["to_amt_tax"]).replace(",", "")))
+            except (TypeError, ValueError):
+                pass
+    return r2(g)
+
+
+def plan(vouchers, invoices, fixes=None, amts=None):
+    """vouchers：acc_voucher(...) 列表；invoices：[{number, rate, gross, tax}]；fixes：{vno: [复核台计提更正]}；
+    amts：{vno: {gross, part, memo}} 应为金额(金额有差时)。
+    → {status: ok/manual, msgs:[], per:{vno: {mode: hx/rate/fix/tail/move/amt/part, new_rate, why, gross}}, tails:{vno: d}}"""
+    fixes, amts = fixes or {}, amts or {}
     msgs, per = [], {}
+    eff = {v["vno"]: eff_gross(v, None if v.get("from") else fixes.get(v["vno"]), amts.get(v["vno"])) for v in vouchers}
     inv_g, inv_t = {}, {}
     for i in invoices:
         r = rate_of(i.get("rate"))
@@ -106,16 +126,31 @@ def plan(vouchers, invoices, fixes=None):
             return {"status": "manual", "msgs": msgs, "per": {}, "tails": {}}
         inv_g[r] = r2(inv_g.get(r, 0) + float(i.get("gross") or 0))
         inv_t[r] = r2(inv_t.get(r, 0) + float(i.get("tax") or 0))
-    G_inv, G_acc = r2(sum(inv_g.values())), r2(sum(v["gross"] for v in vouchers))
+    G_inv, G_acc = r2(sum(inv_g.values())), r2(sum(eff.values()))
+    for v in vouchers:                       # 部分核销只能比原计提少
+        a = amts.get(v["vno"]) or {}
+        if a.get("part") and eff[v["vno"]] - v["gross"] > 0.004:
+            msgs.append("记-%s 要部分核销 %.2f，比计提 %.2f 还多：部分核销只能核销计提的一部分，多出来的请改用红冲更正，要人工处理" % (v["vno"], eff[v["vno"]], v["gross"]))
+            return {"status": "manual", "msgs": msgs, "per": {}, "tails": {}}
     if abs(G_inv - G_acc) >= 0.005:
         msgs.append("发票含税合计 %.2f ≠ 计提含税合计 %.2f（差 %.2f），要人工处理" % (G_inv, G_acc, G_inv - G_acc))
         return {"status": "manual", "msgs": msgs, "per": {}, "tails": {}}
     cur = {}
     for v in vouchers:
         f = fixes.get(v["vno"]) if not v.get("from") else None
+        a = amts.get(v["vno"]) or {}
+        chg = abs(eff[v["vno"]] - v["gross"]) >= 0.005 and a.get("gross") is not None      # 给了应为金额、且和原计提不一样
         if v.get("from"):
             per[v["vno"]] = {"mode": "move", "new_rate": v["rate"],
                              "why": "计提记在了「%s」的账上，补提到本主体" % v["from"].get("short", "")}
+            cur[v["vno"]] = v["rate"]
+        elif chg and a.get("part"):
+            per[v["vno"]] = {"mode": "part", "new_rate": v["rate"], "memo": str(a.get("memo") or "").strip(),
+                             "why": "部分核销：计提 %.2f，本次核销 %.2f，余 %.2f 留在账上" % (v["gross"], eff[v["vno"]], v["gross"] - eff[v["vno"]])}
+            cur[v["vno"]] = v["rate"]
+        elif chg:
+            per[v["vno"]] = {"mode": "amt", "new_rate": v["rate"], "memo": str(a.get("memo") or "").strip(),
+                             "why": "金额有差：计提 %.2f，应为 %.2f（%+.2f）" % (v["gross"], eff[v["vno"]], eff[v["vno"]] - v["gross"])}
             cur[v["vno"]] = v["rate"]
         elif f:
             nr = next((rate_of(x.get("to_rate")) for x in f if rate_of(x.get("to_rate")) is not None), None)
@@ -124,11 +159,12 @@ def plan(vouchers, invoices, fixes=None):
         else:
             per[v["vno"]] = {"mode": "hx", "new_rate": v["rate"], "why": ""}
             cur[v["vno"]] = v["rate"]
+        per[v["vno"]]["gross"] = eff[v["vno"]]
 
     def acc_g():
         g = {}
         for v in vouchers:
-            g[cur[v["vno"]]] = r2(g.get(cur[v["vno"]], 0) + v["gross"])
+            g[cur[v["vno"]]] = r2(g.get(cur[v["vno"]], 0) + eff[v["vno"]])
         return g
     # 税率组含税对不上：找哪几张计提挪到发票的税率能补平(计提税率开错/发票开了别的税率)
     for _ in range(3):
@@ -140,15 +176,17 @@ def plan(vouchers, invoices, fixes=None):
             break
         moved = False
         for r in short:
-            cand = [v for v in vouchers if per[v["vno"]]["mode"] in ("hx", "move") and need.get(cur[v["vno"]], 0) < -0.004]
+            cand = [v for v in vouchers if per[v["vno"]]["mode"] in ("hx", "move", "amt") and need.get(cur[v["vno"]], 0) < -0.004]
             hit = _subset(cand, need[r])
             if hit:
                 for v in hit:
                     why = "计提按 %s，发票开的是 %s" % (pct(v["rate"]), pct(r))
-                    if per[v["vno"]]["mode"] == "move":      # 主体更正的同时税率也不对：补提时直接按发票税率
-                        per[v["vno"]] = {"mode": "move", "new_rate": r, "why": per[v["vno"]]["why"] + "；" + why}
+                    if per[v["vno"]]["mode"] == "amt":       # 金额、税率都不对：一次红冲，按应为金额和发票税率更正
+                        per[v["vno"]] = dict(per[v["vno"]], new_rate=r, why=per[v["vno"]]["why"] + "；" + why)
+                    elif per[v["vno"]]["mode"] == "move":    # 主体更正的同时税率也不对：补提时直接按发票税率
+                        per[v["vno"]] = {"mode": "move", "new_rate": r, "why": per[v["vno"]]["why"] + "；" + why, "gross": eff[v["vno"]]}
                     else:
-                        per[v["vno"]] = {"mode": "rate", "new_rate": r, "why": why}
+                        per[v["vno"]] = {"mode": "rate", "new_rate": r, "why": why, "gross": eff[v["vno"]]}
                     cur[v["vno"]] = r
                 moved = True
                 break
@@ -163,7 +201,7 @@ def plan(vouchers, invoices, fixes=None):
     tails = {}
     for r in inv_g:
         vs = [v for v in vouchers if cur[v["vno"]] == r]
-        at = r2(sum(v["tax"] if _keep_tax(v, per[v["vno"]]) else split_gross(v["gross"], r)[1] for v in vs))
+        at = r2(sum(v["tax"] if _keep_tax(v, per[v["vno"]]) else split_gross(eff[v["vno"]], r)[1] for v in vs))
         d = r2(inv_t[r] - at)
         if abs(d) < 0.005:
             continue
@@ -171,10 +209,12 @@ def plan(vouchers, invoices, fixes=None):
             msgs.append("%s 这组含税一致，但发票税额 %.2f 和计提 %.2f 差 %.2f，要人工看" % (pct(r), inv_t[r], at, d))
             return {"status": "manual", "msgs": msgs, "per": per, "tails": {}}
         hx = [v for v in vs if per[v["vno"]]["mode"] == "hx"]
-        tgt = max(hx or vs, key=lambda v: v["gross"])
+        redone = [v for v in vs if per[v["vno"]]["mode"] in ("amt", "rate", "fix", "move")]
+        # 尾差挂在哪张：这组里已经要红冲更正的优先(反正要重做，带上这几分)，免得为一两分钱再多红冲一张好好的计提
+        tgt = max(redone or hx or vs, key=lambda v: v["gross"])
         tails[tgt["vno"]] = d
         if per[tgt["vno"]]["mode"] == "hx":       # 尾差也整笔红冲 + 更正：税额 +d、不含税 −d，含税不变
-            per[tgt["vno"]] = {"mode": "tail", "new_rate": per[tgt["vno"]]["new_rate"], "why": "发票税额与计提差 %.2f" % d}
+            per[tgt["vno"]] = {"mode": "tail", "new_rate": per[tgt["vno"]]["new_rate"], "why": "发票税额与计提差 %.2f" % d, "gross": eff[tgt["vno"]]}
         msgs.append("%s 尾差 %.2f：记-%s 整笔红冲后更正（税额 %+.2f）" % (pct(r), d, tgt["vno"], d))
     return {"status": "ok", "msgs": msgs, "per": per, "tails": tails}
 
@@ -185,6 +225,8 @@ def pct(r):
 
 def _keep_tax(v, p):
     """这张计提的税额沿用原值(核销、尾差、主体更正且税率没变)，还是按新税率重算(改税率/复核台更正)。"""
+    if abs(float(p.get("gross", v["gross"])) - v["gross"]) >= 0.005:      # 含税金额变了(金额更正/部分核销/复核台改金额)：税额必须重算
+        return False
     return p.get("mode") in ("hx", "tail") or (p.get("mode") == "move" and p.get("new_rate") == v["rate"])
 
 
@@ -254,8 +296,9 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     sup = ctx["supplier"]
     py = ctx["pay_year"]
     out = []
-    redo = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") in ("rate", "fix", "tail")]
+    redo = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") in ("rate", "fix", "tail", "amt")]
     moved = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") == "move"]     # 主体更正：本账簿没有原凭证，不红冲，只补提
+    parts = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") == "part"]     # 部分核销：不红冲不更正，只核销一部分
     renew = redo + moved
     # 本张凭证号：写金蝶时付款单自动凭证的号已知(ctx.self_vno)，直接填；预览时用 □ 占位
     self_ref = "%d/%s#" % (ctx["pay_month"], ctx.get("self_vno") or "□")
@@ -267,13 +310,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         p = pl["per"][v["vno"]]
         e = fix_expl(v, p, py)
         fx = fixes.get(v["vno"]) or []
-        gross = v["gross"]
-        for f in fx:
-            if f.get("to_amt_tax") not in (None, ""):
-                try:
-                    gross = r2(gross - float(f["snap"].get("amt") or 0) + float(str(f["to_amt_tax"]).replace(",", "")))
-                except (TypeError, ValueError, KeyError):
-                    pass
+        gross = p["gross"] if p.get("gross") is not None else eff_gross(v, fx)      # 应为金额(人工/系统给的，或复核台登记的金额更正)
         d_tail = pl["tails"].get(v["vno"], 0)
         if _keep_tax(v, p):                      # 尾差 / 主体更正(税率没变)：含税不变，税额沿用原计提、按发票口径 +d
             tax = r2(v["tax"] + d_tail)
@@ -301,15 +338,23 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
         v["_new"] = {"gross": gross, "tax": tax}
     # 核销：每张票一行待认证 + 每张计提一行贷暂估(更正过的用新税额、引用本凭证号)
-    refs = "、".join(self_ref if v in renew else ref_of(v, py) for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])))
+    for v in parts:                          # 部分核销：只转出本次核销那部分对应的暂估税
+        p = pl["per"][v["vno"]]
+        v["_new"] = {"gross": p["gross"], "tax": r2(split_gross(p["gross"], p["new_rate"])[1] + pl["tails"].get(v["vno"], 0))}
+    refs = "、".join(dict.fromkeys((self_ref if v in renew else ref_of(v, py) + ("（部分）" if v in parts else ""))
+                                  for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"]))))      # 几张都更正进本凭证的，本凭证号只写一次
     pre, items, mc = merged_desc(vouchers, sup)
     hx_desc = "核销%s%s%s" % (refs, pre, items)
+    for v in parts:                          # 凭证说明：计提多少、这次核销多少、余多少 + 人写的原因
+        p = pl["per"][v["vno"]]
+        hx_desc += "（%s部分核销：计提%.2f，本次核销%.2f，余%.2f未核销%s）" % (
+            ref_of(v, py), v["gross"], p["gross"], v["gross"] - p["gross"], ("；" + p["memo"]) if p.get("memo") else "")
     for i in invoices:
         if i.get("deduct") is False:            # 普票等不能抵扣：不出待认证行(调用方已按 0 税率、0 税额参与核对)
             continue
         out.append(_ln("核销", "%s%s" % (i["number"], hx_desc), "2221.01.06", "待认证进项税额", dr=float(i.get("tax") or 0)))
     for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])):
-        t = v["_new"]["tax"] if v in renew else v["tax"]
+        t = v["_new"]["tax"] if (v in renew or v in parts) else v["tax"]
         if t:
             out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
     # 支付

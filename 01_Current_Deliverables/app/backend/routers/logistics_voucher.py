@@ -303,7 +303,10 @@ def _kind(vouchers, notes, pl):
         return "noacc", "金蝶本期没找到这家的计提凭证"
     if pl["status"] != "ok":
         return "manual", (pl["msgs"] or ["要人工处理"])[0]
-    redo = [(k, p) for k, p in pl["per"].items() if p.get("mode") in ("rate", "fix")]
+    parts = [(k, p) for k, p in pl["per"].items() if p.get("mode") == "part"]
+    if parts:
+        return "part", "部分核销 %d 张：%s" % (len(parts), "；".join("记-%s %s" % (k, p.get("why") or "") for k, p in parts))
+    redo = [(k, p) for k, p in pl["per"].items() if p.get("mode") in ("rate", "fix", "amt")]
     tails = [(k, p) for k, p in pl["per"].items() if p.get("mode") == "tail"]
     if redo:
         return "redo", "需红冲更正 %d 张：%s" % (len(redo), "；".join("记-%s %s" % (k, p.get("why") or "") for k, p in redo))
@@ -404,7 +407,32 @@ def _preview_data(inst, self_vno=None):
     if nd:
         notes.append("%s 不能抵扣（%s），按含税全额进费用核对、不出待认证行，号码写进支付摘要" %
                      ("、".join(i["number"] or "无号码" for i in nd), "、".join(dict.fromkeys(i["type"] for i in nd))))
-    pl = LV.plan(vouchers, inv_in, fixes) if (vouchers and inv_in) else \
+    # V2.818 金额有差(用户 2026-10-05「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：
+    #   每张计提「应为」多少——人在「选择核销哪些计提」里填了的用填的(可选部分核销+说明)；没填、且只有一张计提的，默认按发票金额红冲更正；
+    #   几张计提对一张发票的，系统定不了各该多少，仍判人工并提示去填。
+    amts = {}
+    if picked:
+        for p in picked.get("picks") or []:
+            if p.get("to_gross") not in (None, ""):
+                amts[str(p["vno"])] = {"gross": float(p["to_gross"]), "part": bool(picked.get("part")), "memo": picked.get("memo") or ""}
+    if not amts and inv_in and len(vouchers) == 1 and not vouchers[0].get("from"):
+        v0 = vouchers[0]
+        g0 = LV.eff_gross(v0, fixes.get(v0["vno"]))
+        if abs(g0 - inv_tot) > 0.004 and abs(g0 - v0["gross"]) < 0.005:
+            # 先看是不是跨月核销：别的月份有没用过的计提、合起来金额正好等于发票(诚煜 6 月账单 = 6/518# + 7/522#)——有的话不擅自红冲，让人去确认
+            sug = []
+            if not picked:
+                try:
+                    sug = [c for c in _accrual_candidates(r, invs)[0] if c["suggest"]]
+                except Exception:
+                    sug = []
+            if len(sug) > 1:
+                notes.append("这家别的月份有计提、合起来正好等于发票（%s），多半是跨月核销：点「选择核销哪些计提」确认后再做" %
+                             "、".join("%d/%s# %.2f" % (c["month"], c["vno"], c["gross"]) for c in sug))
+            else:
+                amts[v0["vno"]] = {"gross": inv_tot}
+                notes.append("计提 %.2f 和发票 %.2f 差 %+.2f：按红冲处理——原计提整笔红冲，按发票金额重新计提后核销" % (v0["gross"], inv_tot, inv_tot - v0["gross"]))
+    pl = LV.plan(vouchers, inv_in, fixes, amts) if (vouchers and inv_in) else \
         {"status": "manual", "msgs": ["金蝶本期没找到这家的计提凭证" if not vouchers else "票夹里还没有发票"], "per": {}, "tails": {}}
     pi = _paid_info(r) or {}
     pay_date, bank = _bank_of(pi.get("bill_id")) if pi.get("bill_id") else (pi.get("date"), "")
@@ -415,6 +443,8 @@ def _preview_data(inst, self_vno=None):
     lines = LV.build(ctx, vouchers, inv_in, pl, fixes) if pl["status"] == "ok" else []
     dr, cr = LV.balance(lines)
     msgs = list(notes) + list(pl["msgs"])
+    if pl["status"] != "ok" and len(vouchers) > 1 and any("≠ 计提含税合计" in m for m in pl["msgs"]):
+        msgs.append("几张计提各该改成多少，系统定不了：点「选择核销哪些计提」，给每张填「本次按多少」（默认红冲更正；特殊的可选部分核销并写说明）")
     if pi.get("voucher"):
         msgs.append("这笔付款已经在金蝶 %s 记过支付凭证，本张不再出支付分录" % pi["voucher"])
     if not pi:
@@ -427,7 +457,7 @@ def _preview_data(inst, self_vno=None):
     adjust = []
     for v in (vouchers if lines else []):
         p = pl["per"].get(v["vno"]) or {}
-        if p.get("mode") not in ("rate", "fix", "tail", "move"):
+        if p.get("mode") not in ("rate", "fix", "tail", "move", "amt"):
             continue
         e = LV.fix_expl(v, p, ctx["pay_year"])
         nl = [l for l in lines if l["block"] == "更正" and l["expl"] == e]
@@ -436,7 +466,8 @@ def _preview_data(inst, self_vno=None):
         ng = sum(l["cr"] for l in nl if l["acct"] == "2241.02")
         nt = sum(l["dr"] for l in nl if l["acct"] == "2221.01.07")
         adjust.append({"ref": LV.ref_of(v, ctx["pay_year"]), "vno": v["vno"], "year": v["year"], "month": v["month"], "expl": v["expl"],
-                       "mode": p["mode"], "why": p.get("why") or "", "from": (v.get("from") or {}).get("short") or "",
+                       "mode": p["mode"], "why": (p.get("why") or "") + (("；" + p["memo"]) if p.get("memo") else ""),
+                       "from": (v.get("from") or {}).get("short") or "",
                        "from_full": (v.get("from") or {}).get("full") or "",
                        "old": {"gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"], "exp": exp_old},
                        "new": {"gross": LV.r2(ng), "tax": LV.r2(nt), "net": LV.r2(ng - nt),
@@ -468,6 +499,7 @@ def _preview_data(inst, self_vno=None):
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           "from": (v.get("from") or {}).get("short") or "",
+                          "gross_new": (pl["per"].get(v["vno"]) or {}).get("gross"),
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
                           "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
                           "tail": pl["tails"].get(v["vno"]),
@@ -525,7 +557,7 @@ def _accrual_candidates(r, invs):
         if i2 != r["inst_id"]:
             for p in pk.get("picks") or []:
                 others[(int(p["year"]), int(p["month"]), str(p["vno"]))] = i2
-    mine = {(int(p["year"]), int(p["month"]), str(p["vno"])) for p in ((db.get_setting(_PICK_KEY, None) or {}).get(r["inst_id"]) or {}).get("picks") or []}
+    mine = {(int(p["year"]), int(p["month"]), str(p["vno"])): p.get("to_gross") for p in ((db.get_setting(_PICK_KEY, None) or {}).get(r["inst_id"]) or {}).get("picks") or []}
     cands = []
     for (yy, mm) in months:
         if (yy, mm) not in has:
@@ -536,7 +568,7 @@ def _accrual_candidates(r, invs):
             cands.append({"year": yy, "month": mm, "vno": v["vno"], "expl": v["expl"], "gross": v["gross"], "tax": v["tax"], "net": v["net"], "rate": v["rate"],
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
                           "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
-                          "used": used.get(k) or "", "other": bool(others.get(k)), "picked": k in mine, "bill_month": (yy, mm) == (y, m)})
+                          "used": used.get(k) or "", "other": bool(others.get(k)), "picked": k in mine, "to_gross": mine.get(k), "bill_month": (yy, mm) == (y, m)})
     # 建议：没被用过的里面，含税合计正好＝发票合计的一组(优先带上账单月的)
     inv_tot = round(sum(i["gross"] for i in invs), 2)
     free = sorted([c for c in cands if not c["used"] and not c["other"]], key=lambda c: (not c["bill_month"], c["year"], c["month"]))
@@ -578,9 +610,19 @@ async def pick_accruals(request: Request):
     picks = []
     for p in b.get("picks") or []:
         try:
-            picks.append({"year": int(p["year"]), "month": int(p["month"]), "vno": str(p["vno"])})
+            one = {"year": int(p["year"]), "month": int(p["month"]), "vno": str(p["vno"])}
+            if p.get("to_gross") not in (None, ""):
+                one["to_gross"] = round(float(p["to_gross"]), 2)
+                if one["to_gross"] < 0:
+                    raise ValueError
+            picks.append(one)
         except (KeyError, TypeError, ValueError):
-            return JSONResponse({"ok": False, "msg": "选的计提格式不对"}, status_code=400)
+            return JSONResponse({"ok": False, "msg": "选的计提格式不对（金额要填数字）"}, status_code=400)
+    part, memo = bool(b.get("part")), str(b.get("memo") or "").strip()[:80]
+    if part and not any("to_gross" in p for p in picks):
+        return JSONResponse({"ok": False, "msg": "部分核销要给至少一张计提填「本次按多少」"}, status_code=400)
+    if part and not memo:
+        return JSONResponse({"ok": False, "msg": "部分核销要写说明（为什么只核销一部分，会写进凭证摘要）"}, status_code=400)
     vnos = [p["vno"] for p in picks]
     if len(set(vnos)) != len(vnos):
         return JSONResponse({"ok": False, "msg": "选的计提里有两张凭证号相同（不同月份），系统暂时分不开，这张请人工做"}, status_code=400)
@@ -589,11 +631,13 @@ async def pick_accruals(request: Request):
         if i2 != inst and any((p["year"], p["month"], p["vno"]) == (int(q["year"]), int(q["month"]), str(q["vno"])) for p in picks for q in pk.get("picks") or []):
             return JSONResponse({"ok": False, "msg": "其中有计提已经被另一张请款单选走了，先到那张里取消"}, status_code=400)
     if picks:
-        allp[inst] = {"picks": picks, "by": u["name"], "at": _now()}
+        allp[inst] = {"picks": picks, "part": part, "memo": memo, "by": u["name"], "at": _now()}
     else:
         allp.pop(inst, None)
     db.set_setting(_PICK_KEY, allp, u["name"])
-    db.audit(u["name"], "物流付款做账-选定核销的计提", inst, "、".join("%d-%d/%s#" % (p["year"], p["month"], p["vno"]) for p in picks) or "恢复系统自动认")
+    db.audit(u["name"], "物流付款做账-选定核销的计提", inst, ("、".join(
+        "%d-%d/%s#%s" % (p["year"], p["month"], p["vno"], ("→%.2f" % p["to_gross"]) if "to_gross" in p else "") for p in picks)
+        + ("；部分核销：" + memo if part else ("；" + memo if memo else ""))) if picks else "恢复系统自动认")
     return {"ok": True}
 
 
@@ -613,7 +657,7 @@ async def plans(request: Request):
                 if code == 200:
                     out[inst] = {"kind": d.get("kind"), "text": d.get("kind_text"), "auto": (d.get("plan") or {}).get("status") == "ok",
                                  "xrev": [{"short": x["short"], "vno": x["vno"], "reversed": x["reversed"]} for x in d.get("xbook") or []],
-                                 "acc": [{k: a.get(k) for k in ("vno", "month", "fee", "biz", "tail", "expl", "gross", "rate", "mode", "new_rate", "why", "from")}
+                                 "acc": [{k: a.get(k) for k in ("vno", "month", "fee", "biz", "tail", "expl", "gross", "rate", "mode", "new_rate", "why", "from", "gross_new")}
                                          for a in d.get("accruals") or []]}
                 else:
                     out[inst] = {"kind": "err", "text": d.get("msg"), "acc": []}
@@ -866,7 +910,8 @@ _AUTO_KEY = "logi_voucher_auto"             # {mode, kinds, cap, max_round, by, 
 _AUTO_LAST_KEY = "logi_voucher_auto_last"   # 上一轮：{at, mode, trigger, items:[…], done:[…]}
 _AUTO_LOCK = _th.Lock()
 AUTO_KINDS = ("hx", "tail", "redo")
-KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "需红冲更正", "subj": "计提记错主体", "manual": "金额不符", "noacc": "没有计提"}
+KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "需红冲更正", "subj": "计提记错主体", "manual": "金额不符", "noacc": "没有计提",
+           "part": "部分核销"}
 AUTO_USER = "系统自动"
 
 
@@ -897,6 +942,8 @@ def _auto_ok(d, cfg):
         return False, "%s，要人工" % (KIND_CN.get(k) or k or "做账类型认不出")
     if k not in cfg["kinds"]:
         return False, "「%s」没放进自动范围" % KIND_CN[k]
+    if any(a.get("mode") == "amt" for a in d.get("accruals") or []) and not d.get("picked"):
+        return False, "计提和发票金额有差（要红冲、按发票金额更正），金额更正留给人点；人确认过应为金额的才自动做"
     if not str(req.get("bill_id") or "").isdigit():
         return False, "没有金蝶付款单（或这笔付款已经记过支付凭证）"
     if not req.get("bank"):
