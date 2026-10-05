@@ -649,6 +649,11 @@ def _scheduler():
                 continue
             r = scan_once("定时") or {}
             worker_store.beat("payreq", next_in=20 * 60)
+            try:                      # 付款做账员(V2.809)：刚配完金蝶付款单，接着看有没有够条件自动做账的(关/演练/真做 三档，在付款做账页设)
+                from routers import logistics_voucher as _lv
+                _lv.auto_round("定时")
+            except Exception as e:
+                worker_store.record("voucher_auto", ok=False, summary="自动做账这一轮出错", error=str(e))
             if r.get("new") or r.get("failed") or r.get("err"):
                 bad = r.get("failed") or r.get("err")
                 worker_store.record("payreq", n=r.get("new") or 0, ok=not bad, summary="已接入 %d 张请款单" % (r.get("new") or 0), refs=r.get("newIds"),

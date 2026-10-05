@@ -722,6 +722,179 @@ def _post_xred(inst, user, d=None, s=None, conf=None):
     return steps
 
 
+# ---------- 自动做账（V2.809，用户 2026-10-05「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」）----------
+# 跟在「物流请款单接收员」每 20 分钟那一轮后面：已付款、票齐的单逐张算一遍，够条件的自动走「保存到金蝶」。
+# 三档：off 关 / dry 演练(只算「如果开着会做哪几张」，不碰金蝶，默认) / on 真做。真做＝没有人点按钮，系统自己审核付款单、写凭证并提交。
+# 自动范围(可配)：一致·只核销、尾差·红冲更正、需红冲更正。计提记错主体(要在别的账簿新建红冲凭证)、金额不符、没有计提 一律留给人。
+import threading as _th
+_AUTO_KEY = "logi_voucher_auto"             # {mode, kinds, cap, max_round, by, at}
+_AUTO_LAST_KEY = "logi_voucher_auto_last"   # 上一轮：{at, mode, trigger, items:[…], done:[…]}
+_AUTO_LOCK = _th.Lock()
+AUTO_KINDS = ("hx", "tail", "redo")
+KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "需红冲更正", "subj": "计提记错主体", "manual": "金额不符", "noacc": "没有计提"}
+AUTO_USER = "系统自动"
+
+
+def _auto_cfg():
+    c = dict(db.get_setting(_AUTO_KEY, None) or {})
+    kinds = c.get("kinds")
+    try:
+        cap = max(0.0, float(c.get("cap") or 0))
+    except (TypeError, ValueError):
+        cap = 0.0
+    try:
+        mx = min(50, max(1, int(c.get("max_round") or 10)))
+    except (TypeError, ValueError):
+        mx = 10
+    return {"mode": c.get("mode") if c.get("mode") in ("off", "dry", "on") else "dry",
+            "kinds": [k for k in (kinds if isinstance(kinds, list) else AUTO_KINDS) if k in AUTO_KINDS],
+            "cap": cap, "max_round": mx, "by": c.get("by") or "", "at": c.get("at") or ""}
+
+
+def _auto_ok(d, cfg):
+    """这一张够不够条件自动做 → (bool, 不做的原因)。条件比人点的时候严：任何一条提示里带「要人工」都不做。"""
+    req, k = d["req"], d.get("kind")
+    if d["plan"]["status"] != "ok":
+        return False, "计提和发票对不上：%s" % ((d["plan"]["msgs"] or ["要人工处理"])[0])
+    if k == "subj" or d.get("xbook"):
+        return False, "计提记错主体：要在别的账簿建红冲凭证，留给人单张做"
+    if k not in AUTO_KINDS:
+        return False, "%s，要人工" % (KIND_CN.get(k) or k or "做账类型认不出")
+    if k not in cfg["kinds"]:
+        return False, "「%s」没放进自动范围" % KIND_CN[k]
+    if not str(req.get("bill_id") or "").isdigit():
+        return False, "没有金蝶付款单（或这笔付款已经记过支付凭证）"
+    if not req.get("bank"):
+        return False, "金蝶付款单上没有我方银行账号"
+    v = d["voucher"]
+    if not v.get("lines") or abs(float(v.get("dr") or 0) - float(v.get("cr") or 0)) >= 0.005:
+        return False, "凭证借贷不平"
+    if cfg["cap"] and float(req.get("amount") or 0) > cfg["cap"] + 0.004:
+        return False, "金额 %.2f 超过单笔上限 %.2f" % (float(req.get("amount") or 0), cfg["cap"])
+    man = next((m for m in d["plan"]["msgs"] if "要人工" in m), "")
+    if man:
+        return False, man
+    return True, ""
+
+
+def auto_round(trigger="定时"):
+    """跑一轮。off 直接返回；dry 只算；on 真做(每轮最多 max_round 张)。结果存 _AUTO_LAST_KEY 给页面看，并向数字员工办公室报到。"""
+    try:
+        import worker_store
+    except Exception:
+        worker_store = None
+    cfg = _auto_cfg()
+    if cfg["mode"] == "off":
+        if worker_store:
+            worker_store.beat("voucher_auto", off="自动做账没打开（付款做账页可以开）")
+        return {"ok": True, "mode": "off"}
+    if not _AUTO_LOCK.acquire(blocking=False):
+        return {"ok": False, "msg": "上一轮还在跑"}
+    try:
+        posted = db.get_setting(_POSTED_KEY, None) or {}
+        with db._engine.connect() as c:
+            reqs = [dict(r) for r in c.execute(select(PR).where(PR.c.create_time >= "2026-09-01")).mappings().all()]
+        items = []
+        for r in reqs:
+            inst = r["inst_id"]
+            if r.get("excluded") or r.get("dt_status") == "TERMINATED" or r.get("dt_result") == "refuse" or inst in posted or not r.get("period"):
+                continue
+            folder, invs = _invoices(inst)
+            if _status(r, folder, invs, {}) != "ready":          # 还没付款 / 票不齐 / 发票≠请款：本来就做不了，不列
+                continue
+            it = {"inst": inst, "bid": r.get("business_id"), "payee": r.get("payee") or r.get("carrier"), "subject": r.get("subject"),
+                  "amount": r.get("amount"), "period": r.get("period"), "kind": "", "kind_cn": "", "ok": False, "why": ""}
+            try:
+                d, code = _preview_data(inst)
+                if code != 200:
+                    it["why"] = d.get("msg") or "读取失败"
+                else:
+                    it["kind"], it["kind_cn"] = d.get("kind") or "", KIND_CN.get(d.get("kind")) or ""
+                    it["ok"], it["why"] = _auto_ok(d, cfg)
+            except Exception as e:
+                it["why"] = "读取出错：%s" % str(e)[:120]
+            items.append(it)
+        done = []
+        if cfg["mode"] == "on":
+            for it in [x for x in items if x["ok"]][:cfg["max_round"]]:
+                lk = _POST_LOCK.setdefault(it["inst"], _th.Lock())
+                if not lk.acquire(blocking=False):
+                    continue
+                try:
+                    res = _post(it["inst"], AUTO_USER)
+                except Exception as e:
+                    res = {"ok": False, "msg": "写金蝶出错：%s" % str(e)[:200]}
+                finally:
+                    lk.release()
+                it["done"] = bool(res.get("ok"))
+                it["vno"] = res.get("vno") or ""
+                it["msg"] = " → ".join(res.get("steps") or []) if res.get("ok") else (res.get("msg") or "")
+                done.append({"inst": it["inst"], "bid": it["bid"], "ok": it["done"], "vno": it["vno"], "msg": it["msg"]})
+        last = {"at": _now(), "mode": cfg["mode"], "trigger": trigger, "items": items, "done": done}
+        db.set_setting(_AUTO_LAST_KEY, last, AUTO_USER)
+        n_ok, n_bad = sum(1 for x in done if x["ok"]), sum(1 for x in done if not x["ok"])
+        if done:
+            db.audit(AUTO_USER, "物流付款做账-自动做账", trigger, "做成 %d 张（%s）；失败 %d 张" % (
+                n_ok, "、".join("记-%s" % x["vno"] for x in done if x["ok"]), n_bad))
+        if worker_store:
+            worker_store.beat("voucher_auto", next_in=20 * 60)
+            if done:
+                worker_store.record("voucher_auto", n=n_ok, ok=not n_bad, summary="自动做账 %d 张" % n_ok, trigger=trigger,
+                                    refs=[x["bid"] for x in done if x["ok"]],
+                                    error=("%d 张没做成：%s" % (n_bad, "；".join(x["msg"] for x in done if not x["ok"])[:300])) if n_bad else "")
+        return {"ok": True, **last}
+    finally:
+        _AUTO_LOCK.release()
+
+
+@router.get("/api/logistics-voucher/auto")
+def auto_get(request: Request):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    return {"ok": True, "cfg": _auto_cfg(), "last": db.get_setting(_AUTO_LAST_KEY, None), "kinds": [{"k": k, "n": KIND_CN[k]} for k in AUTO_KINDS]}
+
+
+@router.post("/api/logistics-voucher/auto")
+async def auto_set(request: Request):
+    """改自动做账的档位/范围/限额。打开「真做」(on) 只有管理员能点；改动留痕。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    old = _auto_cfg()
+    new = dict(old)
+    if b.get("mode") in ("off", "dry", "on"):
+        new["mode"] = b["mode"]
+    if isinstance(b.get("kinds"), list):
+        new["kinds"] = [k for k in b["kinds"] if k in AUTO_KINDS]
+    if b.get("cap") is not None:
+        new["cap"] = b.get("cap")
+    if b.get("max_round") is not None:
+        new["max_round"] = b.get("max_round")
+    if new["mode"] == "on" and old["mode"] != "on" and u.get("role") != "admin":
+        return JSONResponse({"ok": False, "msg": "打开自动做账要管理员来点（它会让系统自己审核付款单、写凭证）"}, status_code=403)
+    new["by"], new["at"] = u["name"], _now()
+    db.set_setting(_AUTO_KEY, new, u["name"])
+    new = _auto_cfg()
+    db.audit(u["name"], "物流付款做账-自动做账设置", {"off": "关", "dry": "演练", "on": "真做"}[new["mode"]],
+             "范围 %s；单笔上限 %s；每轮最多 %d 张" % ("、".join(KIND_CN[k] for k in new["kinds"]) or "（空）",
+                                            ("%.2f" % new["cap"]) if new["cap"] else "不限", new["max_round"]))
+    return {"ok": True, "cfg": new}
+
+
+@router.post("/api/logistics-voucher/auto/run")
+async def auto_run(request: Request):
+    """现在就跑一轮(按当前档位：演练只算、真做才写)。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from starlette.concurrency import run_in_threadpool
+    try:
+        return await run_in_threadpool(auto_round, "%s 手动跑" % u["name"])
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "这一轮出错：%s" % str(e)[:200]}, status_code=400)
+
+
 # ---------- 扫付款单二维码查凭证（V2.801，用户 2026-10-05「扫描那个付款单二维码，就知道是什么凭证、哪个主体」）----------
 # 纸质付款单右上角的二维码是钉钉审批单链接：解析出审批实例号 → 请款单 → 做账记录里的凭证号。只读，不建票夹、不拉附件。
 # 不是物流请款单的，退一步看发票管家票夹里同步到的凭证号(那边定时从金蝶凭证摘要里认发票号)。

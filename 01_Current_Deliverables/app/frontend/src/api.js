@@ -160,6 +160,10 @@ export const voucherPostXred = inst => j('/api/logistics-voucher/post-xred', { m
 export const voucherScan = code => j('/api/logistics-voucher/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
 export const voucherScanPhoto = blob => j('/api/logistics-voucher/scan-photo', { method: 'POST', headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob })
 export const voucherDdConfig = url => j('/api/logistics-voucher/dd-config?url=' + encodeURIComponent(url))
+// 自动做账：档位(关/演练/真做)、范围、限额；上一轮结果
+export const voucherAuto = () => j('/api/logistics-voucher/auto')
+export const voucherAutoSet = patch => j('/api/logistics-voucher/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
+export const voucherAutoRun = () => j('/api/logistics-voucher/auto/run', { method: 'POST' })
 export const voucherPaperOverride = (inst, on, note = '') => j('/api/logistics-voucher/paper-override', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, on, note }) })
 // V2.731 首页「申请开通」→ 钉钉推送（/mine 只读本人申请记录，首页唯一允许的轻量请求）
 export const submitAccessRequest = (cap, label, pages, note) => jp('/api/access-request', { cap, label, pages, note })

@@ -79,6 +79,8 @@ DESKS = [
      "stale_min": 180, "handoff": "不用交接", "unit": "单", "ref": "钉钉单号"},
     {"key": "payreq", "zone": "应付组", "name": "物流请款单接收员", "what": "扫钉钉公对公付款申请 → 认承运商和账期 → 发票进票夹", "cadence": "每 20 分钟",
      "stale_min": 70, "handoff": "物流复核人", "unit": "张单", "ref": "钉钉单号"},
+    {"key": "voucher_auto", "zone": "应付组", "name": "付款做账员", "what": "金蝶有付款单、票齐、计提对平 → 审核付款单 → 补凭证分录并提交", "cadence": "每 20 分钟",
+     "stale_min": 70, "handoff": "付款凭证审核人", "todo_scene": "logi_voucher_audit", "unit": "张", "ref": "钉钉单号"},
     {"key": "todo_check", "zone": "总账组", "name": "待办核对员", "what": "去金蝶看审了没 → 审了就把首页待办销掉", "cadence": "每 20 分钟",
      "stale_min": 70, "handoff": "不用交接", "unit": "条"},
     # 下面两个的活在 BP 工作台里干（它自己的定时调度），核算这边每分钟去看一眼它的任务清单和运行记录，替它报到、记账

@@ -13,7 +13,10 @@
 //   → 大字显示 主体 + 凭证号；本次扫过的列在下面(重复扫会标)，可读出来。只读。
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.802 手机也能查(用户「手机可以吗」)：扫码查凭证加「拍二维码」(拍照上传、服务器认码)；`#/vscan` 是手机专用的单页(VoucherScanPage)。
-import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig } from '../api.js'
+// V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
+//   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
+import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
+  voucherAuto, voucherAutoSet, voucherAutoRun } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -475,6 +478,59 @@ export function VoucherScanPage({ user }) {
   </div>
 }
 
+// 自动做账栏：跟在每 20 分钟扫钉钉、配金蝶付款单那一轮后面跑。演练＝只算「如果开着会做哪几张」，不碰金蝶；真做＝系统自己审核付款单、写凭证并提交。
+const AUTO_MODE = { off: ['关', 'neu'], dry: ['演练（只算不写）', 'warn'], on: ['真做', 'ok'] }
+function AutoBar({ onChanged }) {
+  const [a, setA] = useState(null)
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState('')
+  const [err, setErr] = useState('')
+  const load = () => voucherAuto().then(r => { setA(r); setErr('') }).catch(e => setErr(e.message))
+  useEffect(() => { load() }, [])
+  if (!a) return err ? <div className="lv-msg bad">自动做账状态没读到：{err}</div> : null
+  const cfg = a.cfg, last = a.last, items = (last && last.items) || []
+  const yes = items.filter(x => x.ok), no = items.filter(x => !x.ok)
+  const save = patch => { setBusy('save'); voucherAutoSet(patch).then(load).catch(e => alert(e.message)).finally(() => setBusy('')) }
+  const setMode = m => {
+    if (m === cfg.mode) return
+    if (m === 'on' && !window.confirm(`打开「真做」：\n以后每 20 分钟，系统看到金蝶有付款单、票齐、计提对平的物流请款单，会自己审核付款单、往付款凭证里补分录并提交——没有人点按钮。\n凭证仍然不审核，留给人在金蝶审；做完会进首页待办。\n\n范围：${cfg.kinds.map(k => (a.kinds.find(x => x.k === k) || {}).n).join('、') || '（空）'}\n单笔上限：${cfg.cap ? money(cfg.cap) : '不限'}　每轮最多 ${cfg.max_round} 张\n\n确定打开？`)) return
+    save({ mode: m })
+  }
+  const run = () => {
+    if (cfg.mode === 'on' && !window.confirm(`现在跑一轮「真做」：够条件的 ${yes.length} 张（每轮最多 ${cfg.max_round} 张）会立刻写金蝶。确定？`)) return
+    setBusy('run'); voucherAutoRun().then(() => { load(); onChanged && onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(''))
+  }
+  const num = (label, key, hint) => { const v = window.prompt(label, String(cfg[key] || '')); if (v === null) return; save({ [key]: Number(v) || 0 }) }
+  return <div className={'lv-auto m-' + cfg.mode}>
+    <div className="row">
+      <b>自动做账</b>
+      <span className="seg">{['off', 'dry', 'on'].map(m => <button key={m} disabled={!!busy} className={cfg.mode === m ? 'on ' + AUTO_MODE[m][1] : ''} onClick={() => setMode(m)}>{AUTO_MODE[m][0]}</button>)}</span>
+      <span className="dim">范围</span>
+      {a.kinds.map(k => <label key={k.k} className="ck"><input type="checkbox" disabled={!!busy} checked={cfg.kinds.includes(k.k)}
+        onChange={e => save({ kinds: e.target.checked ? [...cfg.kinds, k.k] : cfg.kinds.filter(x => x !== k.k) })} />{k.n}</label>)}
+      <button className="lnk" disabled={!!busy} onClick={() => num('单笔金额上限（超过的不自动做；填 0 = 不限）', 'cap')}>单笔上限 {cfg.cap ? money(cfg.cap) : '不限'}</button>
+      <button className="lnk" disabled={!!busy} onClick={() => num('每一轮最多自动做几张（1～50）', 'max_round')}>每轮最多 {cfg.max_round} 张</button>
+      <span style={{ flex: 1 }} />
+      {cfg.mode !== 'off' && <button className="btn sm" disabled={!!busy} onClick={run}>{busy === 'run' ? '正在跑…' : cfg.mode === 'on' ? '现在跑一轮' : '现在演练一轮'}</button>}
+    </div>
+    <div className="row sub">
+      {cfg.mode === 'off' ? <span>没打开：付了款的单要人来点「保存到金蝶」。</span>
+        : !last ? <span>还没跑过。每 20 分钟跟着扫钉钉那一轮跑，也可以点右边先跑一轮看看。</span>
+          : <><span>上一轮 {last.at}（{last.mode === 'on' ? '真做' : '演练'} · {last.trigger}）：
+            {last.mode === 'on'
+              ? <><b className="ok">做成 {(last.done || []).filter(x => x.ok).length} 张</b>{(last.done || []).some(x => !x.ok) && <b className="bad">　没做成 {(last.done || []).filter(x => !x.ok).length} 张</b>}，</>
+              : <>如果开着<b className="ok">会做 {yes.length} 张</b>，</>}
+            <b className={no.length ? 'warn' : ''}>不做 {no.length} 张</b></span>
+            {items.length > 0 && <button className="lnk" onClick={() => setOpen(!open)}>{open ? '收起' : '看是哪几张、为什么'}</button>}</>}
+      <span className="dim">计提记错主体、金额不符的不会自动做；凭证不审核，留给人在金蝶审。{cfg.by && `（${cfg.by} ${cfg.at} 设）`}</span>
+    </div>
+    {open && items.length > 0 && <table className="lv-t"><thead><tr><th style={{ width: 90 }}>主体</th><th>物流商</th><th className="num" style={{ width: 110 }}>金额</th><th style={{ width: 120 }}>做账类型</th><th style={{ width: 110 }}></th><th>说明</th></tr></thead>
+      <tbody>{[...yes, ...no].map(x => <tr key={x.inst}><td>{x.subject}</td><td>{x.payee}</td><td className="num">{money(x.amount)}</td><td>{x.kind_cn || '—'}</td>
+        <td>{x.done === true ? <b className="ok">已做 记-{x.vno}</b> : x.done === false ? <b className="bad">没做成</b> : x.ok ? <span className="ok">{last.mode === 'on' ? '下一轮做' : '会做'}</span> : <span className="warn">不做</span>}</td>
+        <td className="dim">{x.done === false ? x.msg : x.ok ? (x.msg || '') : x.why}</td></tr>)}</tbody></table>}
+  </div>
+}
+
 function Detail({ inst, onClose, onChanged }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -729,6 +785,7 @@ export default function LogisticsVoucher() {
           {kf && <button className="lnk" onClick={() => setKf('')}>不限</button>}
         </div>
         {err && <div className="lv-msg bad">{err}</div>}
+        <AutoBar onChanged={load} />
         <div className="lv-batch">
           <span>已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((s, r) => s + (r.amount || 0), 0))}</b></>}</span>
           <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}>批量保存到金蝶</button>
@@ -745,6 +802,8 @@ export default function LogisticsVoucher() {
           <span>已有凭证号 <b>{bindNow.length}</b> 张</span>
           <button className="btn" title="按主体分页、按凭证号排序；装订的同事对着纸质付款单上的钉钉审批编号找凭证号" onClick={() => printHtml(`装订对照清单 ${bmOn}`, BIND_CSS, bindListHtml(bindNow))}>打印装订对照清单</button>
           <button className="btn" title="一页 21 个，剪下来贴在纸质付款单右上角，不用手抄凭证号" onClick={() => printHtml(`凭证号贴条 ${bmOn}`, SLIP_CSS, slipHtml(bindNow))}>打印凭证号贴条</button>
+          {bindNow.some(x => x.adj && !x.red) && <button className="btn" title="本月做过红冲更正 / 主体更正的单，把计提更正单一次打出来（自动做账的也在里面）"
+            onClick={() => printAdjust(Promise.all(bindNow.filter(x => x.adj && !x.red).map(x => voucherPreview(x.inst))), `计提更正单 ${bmOn}`)}>打印本月计提更正单（{bindNow.filter(x => x.adj && !x.red).length} 张单）</button>}
           <span className="dim">按当前筛选（上面的状态/搜索）出；批量做完的凭证号都在这里，不用手写到付款单上</span>
         </div>}
         {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
@@ -907,6 +966,13 @@ const CSS = `
 .lv .sc-v{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}.lv .sc-v.more{margin-top:6px;opacity:.85}.lv .sc-subj{font-size:26px;font-weight:700}
 .lv .sc-big{font-size:38px;font-weight:800;line-height:1.15}.lv .sc-res.warn .sc-big,.lv .sc-res.bad .sc-big{font-size:24px}.lv .sc-mon{font-size:16px;font-weight:600}
 .lv .sc-meta{margin-top:8px;font-size:12.5px;color:var(--ink-2)}.lv .sc-meta .warn{color:var(--amber)}
+.lv .lv-auto{border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);padding:8px 12px;font-size:12.5px;display:flex;flex-direction:column;gap:6px}
+.lv .lv-auto.m-on{border-color:var(--green-line);background:var(--green-bg)}.lv .lv-auto.m-dry{border-color:var(--amber-line);background:var(--amber-bg)}
+.lv .lv-auto .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.lv .lv-auto .row.sub{color:var(--ink-2)}.lv .lv-auto .ok{color:var(--green)}.lv .lv-auto .warn{color:var(--amber)}
+.lv .lv-auto .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--bg)}
+.lv .lv-auto .seg button{border:0;background:none;font:inherit;font-size:12.5px;padding:4px 12px;color:var(--ink-2);cursor:pointer;border-right:1px solid var(--line-strong)}.lv .lv-auto .seg button:last-child{border-right:0}
+.lv .lv-auto .seg button.on{font-weight:700;color:#fff;background:var(--gray)}.lv .lv-auto .seg button.on.warn{background:var(--amber);color:#fff}.lv .lv-auto .seg button.on.ok{background:var(--green);color:#fff}
+.lv .lv-auto .ck{display:inline-flex;gap:4px;align-items:center;white-space:nowrap}.lv .lv-auto table{background:var(--bg);border-radius:8px}
 .lv .lv-batch select{font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
 .lv .lv-batch+.lv-batch{margin-top:6px}
 .lv .lv-batch{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);font-size:12.5px}
