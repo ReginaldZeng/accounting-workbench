@@ -26,6 +26,7 @@ PR = store.payreq
 FX = store.review_line_fix
 _OVR_KEY = "logi_voucher_paper_ok"          # {inst_id: {by, at}} 纸质件没到、手动放行做账
 _POSTED_KEY = "logi_voucher_posted"         # {inst_id: {bill_no, vid, vno, book, at, by}} 已写入金蝶
+_LATER_KEY = "logi_voucher_later"           # {inst_id: {by, at, note}} 人工确认「发票后补，先做付款凭证」(V2.832)
 _PICK_KEY = "logi_voucher_pick"             # {inst_id: {picks: [{year, month, vno}], by, at}} 人工选定这张请款单核销哪几张计提(V2.817)
 _ACC_CACHE = {}
 
@@ -129,6 +130,7 @@ def vlist(request: Request, since: str = "2026-09-01"):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     ovr = db.get_setting(_OVR_KEY, None) or {}
     posted = db.get_setting(_POSTED_KEY, None) or {}
+    laters = db.get_setting(_LATER_KEY, None) or {}
     with db._engine.connect() as c:
         reqs = [dict(r) for r in c.execute(select(PR).where(PR.c.create_time >= since)).mappings().all()]
     out = []
@@ -157,6 +159,14 @@ def vlist(request: Request, since: str = "2026-09-01"):
                     "posted": posted.get(r["inst_id"]),
                     "status": "booked" if r["inst_id"] in posted else _status(r, folder, invs, ovr)})
         # 付款单往来单位编码选错的：不算「未付款」藏起来，单列一类亮出来(做不了账，要出纳先改付款单)
+        pr_ = posted.get(r["inst_id"]) or {}
+        if pr_.get("tax_later"):                      # 发票后补：付款凭证做了，第三笔(暂估转待认证)做了没有
+            out[-1]["later_state"] = "done" if pr_.get("later3") else ("todo" if invs else "wait")
+            out[-1]["later3_vno"] = (pr_.get("later3") or {}).get("vno") or ""
+            if out[-1]["later_state"] == "todo":
+                out[-1]["status"] = "latertax"
+        elif out[-1]["status"] == "noinv" and pi.get("bill_id") and r["inst_id"] in laters:
+            out[-1].update(status="ready", later=True)   # 人确认过发票后补：没票也列进可做账(只做支付)
         pw = _paywarn(r["inst_id"]) if out[-1]["status"] == "unpaid" else None
         if pw:
             out[-1].update(status="paycode", paywarn=pw)
@@ -330,6 +340,10 @@ def _kind(vouchers, notes, pl):
         return "subj", subj
     if not vouchers:
         return "noacc", "金蝶本期没找到这家的计提凭证"
+    if pl.get("pay_only") == "later":
+        return "later", "发票后补：这张付款凭证只做支付（借应付 / 贷银行），暂估进项税先挂着，发票到了再单独做「暂估转待认证」"
+    if pl.get("pay_only") == "tax06":
+        return "hx", "费用凭证做的时候税已经挂到待认证，付款只做支付"
     if pl["status"] != "ok":
         return "manual", (pl["msgs"] or ["要人工处理"])[0]
     parts = [(k, p) for k, p in pl["per"].items() if p.get("mode") == "part"]
@@ -463,13 +477,33 @@ def _preview_data(inst, self_vno=None):
                 notes.append("计提 %.2f 和发票 %.2f 差 %+.2f：按红冲处理——原计提整笔红冲，按发票金额重新计提后核销" % (v0["gross"], inv_tot, inv_tot - v0["gross"]))
     pl = LV.plan(vouchers, inv_in, fixes, amts) if (vouchers and inv_in) else \
         {"status": "manual", "msgs": ["金蝶本期没找到这家的计提凭证" if not vouchers else "票夹里还没有发票"], "per": {}, "tails": {}}
+    # V2.832 付款只做支付(不出核销)的两种情况：
+    #   tax06＝费用凭证做的时候就有票、税已经挂待认证了(禾享 5月记-155)，没有暂估要转；
+    #   later＝发票后补：人确认过「先做付款凭证」(或这张已经这样写过金蝶)，暂估税等发票到了另做一张转待认证。
+    posted_rec = (db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}
+    later = (db.get_setting(_LATER_KEY, None) or {}).get(inst)
+    g_acc = round(sum(v["gross"] for v in vouchers), 2)
+    pay_only = ""
+    if vouchers and not any(v.get("from") for v in vouchers) and not amts:
+        if all(not v["tax"] for v in vouchers) and any(v.get("tax06") for v in vouchers):
+            pay_only = "tax06"
+        elif posted_rec.get("tax_later") or (later and not invs):
+            pay_only = "later"
+    if pay_only:
+        if abs(g_acc - float(r.get("amount") or 0)) >= 0.005:
+            pl = {"status": "manual", "per": {}, "tails": {},
+                  "msgs": ["%s含税合计 %.2f ≠ 请款金额 %.2f，要人工处理" % ("费用凭证" if all(v.get("direct") for v in vouchers) else "计提", g_acc, float(r.get("amount") or 0))]}
+            pay_only = ""
+        else:
+            pl = {"status": "ok", "msgs": [], "tails": {}, "pay_only": pay_only,
+                  "per": {v["vno"]: {"mode": "hx", "new_rate": v["rate"], "why": "", "gross": v["gross"]} for v in vouchers}}
     pi = _paid_info(r) or {}
     pay_date, bank = _bank_of(pi.get("bill_id")) if pi.get("bill_id") else (pi.get("date"), "")
     pay_date = pay_date or pi.get("date") or datetime.now().strftime("%Y-%m-%d")
     ctx = {"supplier": r.get("payee") or "", "applicant": r.get("applicant") or "", "pay_year": int(pay_date[:4]),
            "pay_month": int(pay_date[5:7]), "pay_amount": float(r.get("amount") or 0), "bank": bank,
-           "paid": bool(pi) and not pi.get("voucher"), "self_vno": self_vno}
-    lines = LV.build(ctx, vouchers, inv_in, pl, fixes) if pl["status"] == "ok" else []
+           "paid": bool(pi) and not pi.get("voucher"), "self_vno": self_vno, "tax_later": bool(pay_only)}
+    lines = LV.build(ctx, vouchers, [] if pay_only else inv_in, pl, fixes) if pl["status"] == "ok" else []
     dr, cr = LV.balance(lines)
     msgs = list(notes) + list(pl["msgs"])
     if pl["status"] != "ok" and len(vouchers) > 1 and any("≠ 计提含税合计" in m for m in pl["msgs"]):
@@ -481,6 +515,18 @@ def _preview_data(inst, self_vno=None):
     if pi.get("bill_id") and not bank:
         msgs.append("金蝶付款单没取到我方银行账号，银行存款那行的账号待补")
     st = "booked" if inst in (db.get_setting(_POSTED_KEY, None) or {}) else _status(r, folder, invs, ovr)
+    if st == "noinv" and pay_only and pi.get("bill_id"):
+        st = "ready"                 # 没票也能做：只做支付
+    # 发票后补的第三笔：这张已经只做了支付，现在发票到了 → 暂估转待认证(单独一张凭证)
+    later3 = posted_rec.get("later3")
+    if posted_rec.get("tax_later") and not later3 and invs and vouchers:
+        if abs(inv_tot - g_acc) >= 0.005:
+            later3 = {"ok": False, "lines": [], "msg": "发票含税合计 %.2f ≠ 费用凭证/计提含税合计 %.2f：金额有差，不能直接转，要人工处理（红冲更正）" % (inv_tot, g_acc)}
+        else:
+            l3, d3 = LV.later_lines(vouchers, inv_in, datetime.now().year, r.get("payee") or "")
+            b3 = LV.balance(l3)
+            later3 = {"ok": abs(d3) <= LV.TAIL_MAX + 1e-9 and abs(b3[0] - b3[1]) < 0.005, "lines": l3, "dr": b3[0], "cr": b3[1], "tail": d3,
+                      "msg": "" if abs(d3) <= LV.TAIL_MAX + 1e-9 else "发票税额和暂估进项税差 %.2f，超过尾差上限，要人工处理" % d3}
     paywarn = _paywarn(inst) if st == "unpaid" else None
     if paywarn:
         st = "paycode"
@@ -528,7 +574,8 @@ def _preview_data(inst, self_vno=None):
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
                                 "paper_ovr": ovr.get(inst), "status": st, "posted": (db.get_setting(_POSTED_KEY, None) or {}).get(inst),
-                                "bill_id": pi.get("bill_id") or "", "paywarn": paywarn},
+                                "bill_id": pi.get("bill_id") or "", "paywarn": paywarn, "later": later, "pay_only": pay_only},
+            "later3": later3,
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           "from": (v.get("from") or {}).get("short") or "", "direct": bool(v.get("direct")),
@@ -537,7 +584,7 @@ def _preview_data(inst, self_vno=None):
                           "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
                           "tail": pl["tails"].get(v["vno"]),
                           **(pl["per"].get(v["vno"]) or {"mode": "", "new_rate": None, "why": ""})} for v in vouchers],
-            "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"]},
+            "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"], "pay_only": pl.get("pay_only") or ""},
             "adjust": adjust,
             "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}, 200
 
@@ -728,7 +775,7 @@ _AUDIT_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Audit.common.kd
 _POST_LOCK = {}
 _KD_BASE = {"FCURRENCYID": {"FNumber": "PRE001"}, "FEXCHANGERATETYPE": {"FNumber": "HLTX01_SYS"}, "FEXCHANGERATE": 1.0}
 ST_CN = {"ready": "可做账", "paper": "纸质件未到", "invdiff": "发票≠请款", "noinv": "票不齐", "unpaid": "未付款", "booked": "已做账",
-         "paycode": "付款单往来单位编码不对"}
+         "paycode": "付款单往来单位编码不对", "latertax": "发票到了·待转待认证"}
 
 
 def _kd_ok(res):
@@ -827,6 +874,7 @@ def _post(inst, user):
     sub_err = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["GL_VOUCHER", json.dumps({"Ids": str(vid)})]).json())
     m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
     rec = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book, "at": _now(), "by": user,
+           "tax_later": d2["plan"].get("pay_only") == "later",     # 发票后补：只做了支付，暂估税还没转(发票到了要补第三笔)
            "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
            "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2,
            "submitted": not sub_err, "submit_err": sub_err, "status": m2.get("DocumentStatus")}
@@ -946,7 +994,7 @@ _AUTO_LAST_KEY = "logi_voucher_auto_last"   # 上一轮：{at, mode, trigger, it
 _AUTO_LOCK = _th.Lock()
 AUTO_KINDS = ("hx", "tail", "redo")
 KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "需红冲更正", "subj": "计提记错主体", "manual": "金额不符", "noacc": "没有计提",
-           "part": "部分核销"}
+           "part": "部分核销", "later": "发票后补·先付款"}
 AUTO_USER = "系统自动"
 
 
@@ -1207,6 +1255,10 @@ def _scan_lookup(code):
         for x in (posted.get("xred") or {}).values():
             vs.append({"subject": x.get("short"), "month": "%s-%02d" % (x.get("year"), int(x.get("month") or 0)), "vno": x.get("vno"),
                        "what": "红冲凭证（没有纸质付款单，只附计提更正单 ①）", "src": "系统写入"})
+        if (posted.get("later3") or {}).get("vno"):
+            x = posted["later3"]
+            vs.append({"subject": r.get("subject"), "month": str(x.get("date") or "")[:7], "vno": x.get("vno"),
+                       "what": "暂估转待认证（发票后补，附发票）", "src": "系统写入"})
     else:
         if pi.get("voucher"):
             vs.append({"subject": r.get("subject"), "month": str(pi.get("date") or "")[:7], "vno": str(pi["voucher"]).replace("记-", ""),
@@ -1299,6 +1351,98 @@ async def scan_photo(request: Request):
         return await run_in_threadpool(run)
     except Exception as e:
         return {"ok": False, "msg": "识别出错：%s" % str(e)[:160]}
+
+
+@router.post("/api/logistics-voucher/later")
+async def set_later(request: Request):
+    """人工确认「发票后补，先做付款凭证」(on=false 撤销)。只对已有付款单、票夹里还没有发票、还没写金蝶的单有意义；原因必填，留痕。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst, note = str(b.get("inst") or ""), str(b.get("note") or "").strip()[:100]
+    if inst in (db.get_setting(_POSTED_KEY, None) or {}):
+        return JSONResponse({"ok": False, "msg": "这张已经写过金蝶，不能再改"}, status_code=400)
+    allp = dict(db.get_setting(_LATER_KEY, None) or {})
+    if b.get("on"):
+        if not note:
+            return JSONResponse({"ok": False, "msg": "要写一句原因（发票大概什么时候到、找谁要）"}, status_code=400)
+        allp[inst] = {"by": u["name"], "at": _now(), "note": note}
+    else:
+        allp.pop(inst, None)
+    db.set_setting(_LATER_KEY, allp, u["name"])
+    db.audit(u["name"], "物流付款做账-发票后补" + ("先付款" if b.get("on") else "撤销"), inst, note)
+    return {"ok": True}
+
+
+def _post_later(inst, user):
+    """发票后补的第三笔：新建「暂估转待认证」凭证并提交(不审核)。借 2221.01.06 每张票一行(摘要＝发票号+核销M/N#+原摘要) / 贷 2221.01.07。
+    只在这张的付款凭证已经写过金蝶(当时没票、只做了支付)、现在发票到了的时候做；做过了不重复。→ 步骤文字"""
+    d, code = _preview_data(inst)
+    if code != 200:
+        raise RuntimeError(d.get("msg") or "读不到这张请款单")
+    posted = dict(db.get_setting(_POSTED_KEY, None) or {})
+    rec = dict(posted.get(inst) or {})
+    if not rec.get("tax_later"):
+        raise RuntimeError("这张不是「发票后补、只做了支付」的单")
+    old = rec.get("later3")
+    s, conf = kc.login()
+    if old and kc.view_voucher(old.get("vid"), s, conf).get("exists"):
+        raise RuntimeError("暂估转待认证凭证 记-%s 已经建过了" % old.get("vno"))
+    l3 = d.get("later3") or {}
+    if not l3.get("lines"):
+        raise RuntimeError(l3.get("msg") or "票夹里还没有发票")
+    if not l3.get("ok"):
+        raise RuntimeError(l3.get("msg") or "借贷不平")
+    book = d["req"]["subject_full"]
+    code_ = {o.get("full_name"): o.get("book_code") for o in (db.list_orgs() or [])}.get(book)
+    if not code_:
+        raise RuntimeError("主体档案里没有「%s」的账簿编码" % book)
+    date, y, m = _xred_date(book, datetime.now().strftime("%Y-%m-%d"), s, conf)
+    ents = []
+    for l in l3["lines"]:
+        e = dict(_KD_BASE, FEXPLANATION=l["expl"], FACCOUNTID={"FNumber": l["acct"]}, FDEBIT=l["dr"], FCREDIT=l["cr"])
+        dd = _kd_dims(l)
+        if dd:
+            e["FDetailID"] = dd
+        ents.append(e)
+    r = kc.save_voucher({"FACCOUNTBOOKID": {"FNumber": code_}, "FVOUCHERGROUPID": {"FNumber": "PRE001"}, "FEntity": ents,
+                         "FDate": date, "FYear": y, "FPeriod": m}, s, conf)
+    info = kc.view_voucher(r["id"], s, conf)
+    sub_err = ""
+    try:
+        kc.submit_bill("GL_VOUCHER", r["id"], s, conf)
+    except Exception as e:
+        sub_err = str(e)[:160]
+    rec["later3"] = {"vid": r["id"], "vno": info.get("vno") or "", "billno": r.get("billno"), "book": book, "date": date, "at": _now(), "by": user,
+                     "tax": l3.get("dr"), "tail": l3.get("tail"), "submitted": not sub_err, "submit_err": sub_err}
+    posted[inst] = rec
+    db.set_setting(_POSTED_KEY, posted, user)
+    db.audit(user, "物流付款做账-暂估转待认证凭证", "记-%s" % rec["later3"]["vno"], "%s 发票后补：%s，日期 %s；%s" % (
+        d["req"]["payee"], "、".join(i["number"] for i in d["invoices"] if i.get("number")), date, "已提交" if not sub_err else "提交失败：" + sub_err))
+    return ["暂估转待认证凭证 记-%s 已建（%s，税额 %.2f）%s" % (rec["later3"]["vno"], date, float(l3.get("dr") or 0),
+                                                "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err)]
+
+
+@router.post("/api/logistics-voucher/post-later")
+async def post_later(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    import threading
+    lk = _POST_LOCK.setdefault(inst, threading.Lock())
+    if not lk.acquire(blocking=False):
+        return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
+    try:
+        from starlette.concurrency import run_in_threadpool
+        r = {"ok": True, "steps": await run_in_threadpool(_post_later, inst, u["name"])}
+    except Exception as e:
+        r = {"ok": False, "msg": "暂估转待认证凭证没建成：%s" % str(e)[:200]}
+    finally:
+        lk.release()
+    return r if r.get("ok") else JSONResponse(r, status_code=400)
 
 
 @router.post("/api/logistics-voucher/post-xred")

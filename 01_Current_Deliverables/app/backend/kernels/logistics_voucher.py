@@ -10,6 +10,11 @@
 #           (摘要以发票号开头，发票管家据此自动标「已做账」)+每张计提一行贷 2221.01.07；支付=借 2241.02 / 贷 1002。
 #   摘要：红冲/更正「红冲8/565#计提…」(跨年写 2026-6/424#)；核销「{发票号}核销8/552#、9/□#计提{供应商}8月线下A、B」
 #        (更正过的那笔引用本张凭证号，保存前用 □ 占位)；支付「{申请人}提起支付{供应商}8月线下A、B」。
+# V2.832 发票后补(用户 2026-10-05「这个是发票后补，所以可能收到发票之后，还要做一个账」「按照第一种做」)：
+#   ① 付款时还没票(ctx.tax_later)：付款凭证只出支付两行，不出核销，暂估进项税先挂着；
+#   ② 发票到了：later_lines() 单独出一张「暂估转待认证」——借 2221.01.06(摘要＝发票号+核销M/N#+原摘要) / 贷 2221.01.07(挂供应商)，
+#      写法照金蝶里已有的(孝感 9月记-97 易嘉达、深圳星期零 7月记-257 顺新晖)。税额尾差调到费用行(照孝感 6月记-251)。
+#   直接做账的费用凭证(direct，摘要「××提起支付…」)：核销、支付的摘要都用「核销M/N#＋原摘要」(照禾享 5月记-360)。
 # V2.818 金额有差(用户 2026-10-05「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：
 #   amts={凭证号: {gross: 应为含税, part: 是否部分核销, memo: 说明}}——mode=amt 整笔红冲、按应为金额重新计提(更正)再核销；
 #   mode=part 不红冲，只核销应为金额那一部分，剩下的留在账上，核销摘要写明计提多少、本次核销多少、余多少和说明。
@@ -64,7 +69,9 @@ def acc_voucher(vno, lines, year, month):
     expl = next((l.get("expl") for l in apl if l.get("expl")), None) or (lines[0].get("expl") if lines else "")
     return {"vno": str(vno), "year": int(year), "month": int(month), "expl": str(expl or "").strip(),
             "gross": gross, "tax": tax, "net": net, "rate": snap_rate(tax / net) if net else 0.0,
-            "lines": lines, "exp_lines": exp, "tax_line": taxl[0] if taxl else None, "ap_line": apl[0] if apl else None}
+            "lines": lines, "exp_lines": exp, "tax_line": taxl[0] if taxl else None, "ap_line": apl[0] if apl else None,
+            # 做这张的时候就有票、税直接挂了待认证的(禾享 5月记-155)：没有暂估要转，付款时只做支付
+            "tax06": r2(sum(l["dr"] for l in lines if str(l.get("acct", "")).startswith("2221.01.06") and l.get("dr")))}
 
 
 def ref_of(v, pay_year):
@@ -345,21 +352,26 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
                                   for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"]))))      # 几张都更正进本凭证的，本凭证号只写一次
     pre, items, mc = merged_desc(vouchers, sup)
     hx_desc = "核销%s%s%s" % (refs, pre, items)
+    all_direct = bool(vouchers) and all(v.get("direct") for v in vouchers)
+    if all_direct:                           # 直接做账的费用凭证：摘要不是「计提…」，核销/支付都写「核销M/N#＋原摘要」
+        hx_desc = "核销%s%s" % (refs, "、".join(dict.fromkeys(v["expl"] for v in vouchers)))
     for v in parts:                          # 凭证说明：计提多少、这次核销多少、余多少 + 人写的原因
         p = pl["per"][v["vno"]]
         hx_desc += "（%s部分核销：计提%.2f，本次核销%.2f，余%.2f未核销%s）" % (
             ref_of(v, py), v["gross"], p["gross"], v["gross"] - p["gross"], ("；" + p["memo"]) if p.get("memo") else "")
     for i in invoices:
-        if i.get("deduct") is False:            # 普票等不能抵扣：不出待认证行(调用方已按 0 税率、0 税额参与核对)
+        if i.get("deduct") is False or ctx.get("tax_later"):   # 普票等不能抵扣：不出待认证行(调用方已按 0 税率、0 税额参与核对)
             continue
         out.append(_ln("核销", "%s%s" % (i["number"], hx_desc), "2221.01.06", "待认证进项税额", dr=float(i.get("tax") or 0)))
     for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])):
         t = v["_new"]["tax"] if (v in renew or v in parts) else v["tax"]
-        if t:
+        if t and not ctx.get("tax_later"):       # 发票后补：这张不转暂估税，等发票到了另做
             out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
     # 支付
     if ctx.get("paid"):
         pe = "%s提起支付%s%s%s" % (ctx.get("applicant") or "", sup, mc, items)
+        if all_direct:
+            pe = hx_desc
         plain = [i["number"] for i in invoices if i.get("deduct") is False and i.get("number")]
         if plain:                                # 普票号码写进支付摘要，发票管家按摘要里的号码认「已做账」
             pe += "（普票%s）" % "、".join(plain)
@@ -370,6 +382,36 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     for v in vouchers:
         v.pop("_new", None)
     return out
+
+
+def later_lines(vouchers, invoices, pay_year, supplier):
+    """发票后补：发票到了以后单独做的「暂估转待认证」凭证 → (分录, 税额尾差)。
+    借 2221.01.06 每张票一行(摘要以发票号开头，发票管家据此标已做账) / 贷 2221.01.07 每张计提(费用凭证)一行(挂供应商)；
+    发票税额合计 − 暂估税合计 的尾差调到金额最大那张的费用行(借方负数＝费用减少)。金额对不对得上、尾差大不大由调用方把关。"""
+    vs = sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"]))
+    refs = "、".join(dict.fromkeys(ref_of(v, pay_year) for v in vs))
+    if vs and all(v.get("direct") for v in vs):
+        desc = "核销%s%s" % (refs, "、".join(dict.fromkeys(v["expl"] for v in vs)))
+    else:
+        pre, items, _ = merged_desc(vs, supplier)
+        desc = "核销%s%s%s" % (refs, pre, items)
+    out, it, at = [], 0.0, 0.0
+    for i in invoices:
+        if i.get("deduct") is False:
+            continue
+        out.append(_ln("核销", "%s%s" % (i["number"], desc), "2221.01.06", "待认证进项税额", dr=float(i.get("tax") or 0)))
+        it += float(i.get("tax") or 0)
+    for v in vs:
+        if v["tax"]:
+            out.append(_ln("核销", desc, "2221.01.07", "暂估进项税", cr=v["tax"], src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
+            at += v["tax"]
+    d = r2(it - at)
+    if abs(d) >= 0.005 and vs:
+        big = max(vs, key=lambda v: v["gross"])
+        e = (big.get("exp_lines") or [{}])[0]
+        if e.get("acct"):
+            out.append(_ln("核销", desc, e["acct"], e.get("acct_name", ""), dr=-d, src=e, keep=EXP_DIMS))
+    return out, d
 
 
 def balance(lines):

@@ -224,5 +224,41 @@ class T(unittest.TestCase):
         self.assertEqual([l["cr"] for l in ls if l["block"] == "更正" and l["acct"] == "2241.02"], [29746.39])
         self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
 
+    def test_invoice_later(self):
+        """V2.832 发票后补(禾享 9月记-196：直接做账的费用凭证，税挂暂估 13.09)：付款时没票只出支付两行；发票到了单独出暂估转待认证。"""
+        sup = "深圳市禾享国际物流有限公司"
+        sc = {"sup_code": "物流运输服务057", "sup_name": sup, "sup_grp": "供应商009"}
+        e = "陈慧娴提起支付%s新加坡样品运费" % sup
+        d0 = {"dept_code": "0011401", "dept": "永续物流中心", "fee_code": "FYXM008.001", "fee": "快递费", "biz_code": "CPFL000", "biz": "综合产品"}
+        v = V.acc_voucher("196", [{"acct": "6601", "acct_name": "销售费用", "dr": 1308.91, "cr": 0, "expl": e, **d0},
+                                  {"acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 13.09, "cr": 0, "expl": e, **sc},
+                                  {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": 1322.0, "expl": e, **sc}], 2026, 9)
+        v["direct"] = True
+        self.assertEqual(v["tax06"], 0)
+        ctx = {"supplier": sup, "applicant": "陈慧娴", "pay_year": 2026, "pay_month": 9, "pay_amount": 1322.0, "bank": "x", "paid": True, "self_vno": "300",
+               "tax_later": True}
+        pl = {"status": "ok", "msgs": [], "per": {"196": {"mode": "hx", "new_rate": v["rate"], "gross": 1322.0}}, "tails": {}}
+        ls = V.build(ctx, [v], [], pl)
+        self.assertEqual([(l["block"], l["acct"], l["dr"], l["cr"]) for l in ls], [("支付", "2241.02", 1322.0, 0), ("支付", "1002", 0, 1322.0)])
+        self.assertEqual(ls[0]["expl"], "核销9/196#" + e)
+        inv = [{"number": "26952000004000000001", "rate": "1%", "gross": 1322.0, "tax": 13.09}]
+        l3, d = V.later_lines([v], inv, 2026, sup)
+        self.assertEqual(d, 0)
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in l3], [("2221.01.06", 13.09, 0), ("2221.01.07", 0, 13.09)])
+        self.assertEqual(l3[0]["expl"], "26952000004000000001核销9/196#" + e)
+        self.assertEqual(l3[1]["expl"], "核销9/196#" + e)
+        self.assertEqual(l3[1]["dims"]["sup_code"], "物流运输服务057")
+        # 发票税额比暂估多 0.01：尾差调到费用行(借方负数)，借贷仍平
+        l3b, d = V.later_lines([v], [dict(inv[0], tax=13.10)], 2026, sup)
+        self.assertEqual(d, 0.01)
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in l3b], [("2221.01.06", 13.10, 0), ("2221.01.07", 0, 13.09), ("6601", -0.01, 0)])
+        self.assertEqual(V.balance(l3b)[0], V.balance(l3b)[1])
+        # 有票的时候(没后补)：直接做账的凭证照常在付款凭证里核销，摘要用「核销M/N#＋原摘要」
+        pl2 = V.plan([v], inv, {})
+        ls2 = V.build(dict(ctx, tax_later=False), [v], inv, pl2)
+        self.assertEqual([(l["block"], l["acct"]) for l in ls2], [("核销", "2221.01.06"), ("核销", "2221.01.07"), ("支付", "2241.02"), ("支付", "1002")])
+        self.assertEqual(ls2[0]["expl"], "26952000004000000001核销9/196#" + e)
+        self.assertEqual(V.balance(ls2)[0], V.balance(ls2)[1])
+
 if __name__ == "__main__":
     unittest.main()

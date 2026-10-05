@@ -16,7 +16,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAccrualCands, voucherPick } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -29,25 +29,29 @@ const ST = {
   unpaid: ['未付款', 'neu', '金蝶还没有付款单'],
   // V2.825(用户「这个在做凭证的时候你得提醒出来」)：金蝶有付款单，金额、主体、收款方都对，但往来单位编码选错了(路凯 物流运输服务074 选成 其他押金022)
   paycode: ['付款单编码不对', 'bad', '金蝶的付款单往来单位编码选错了：要出纳改了才能做账'],
+  latertax: ['发票到了·待转待认证', 'warn', '发票后补的单：付款凭证做过了，现在发票到了，还差一张「暂估转待认证」'],
   booked: ['已做账', 'done', '发票都已被金蝶凭证引用（发票管家同步）'],
 }
 // 没有金蝶付款单的(钉钉还在审批 / 已通过待付款)不在这一页显示(V2.815，用户「起码出了付款单，这里才显示」)，所以没有「未付款」这一栏了
-const ORDER = ['ready', 'paycode', 'invdiff', 'noinv', 'booked']
+const ORDER = ['ready', 'paycode', 'latertax', 'invdiff', 'noinv', 'booked']
 // 批量做账：一致只核销 + 红冲更正(含尾差)。红冲更正写法已在金蝶实测(跨越 记-261 / 易风达 记-264)后放进来，
 // 但要提示：勾到红冲更正的，批量条和确认框都单独列出来（用户 2026-10-02「放进去，但是要提示」）
 // V2.818 金额有差(用户「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：一张计提对一张发票的，系统默认按发票金额红冲更正；
 //   几张计提的、或要部分核销的，在「选择核销哪些计提」里给每张填「本次按多少」，选处理方式，部分核销必须写说明(进凭证摘要)。
+// V2.832 发票后补(用户「这个是发票后补，所以可能收到发票之后，还要做一个账」「按照第一种做」)：票夹里还没发票、但钱已经付了的，
+//   预览里点「发票后补，先做付款凭证」(写原因) → 付款凭证只出支付两行；发票到了，预览里出第⑤段「暂估转待认证」，点了新建一张凭证
+//   (摘要＝发票号+核销M/N#+原摘要)。列表多一类「发票到了·待转待认证」。
 const BATCH_KINDS = ['hx', 'tail', 'redo']
 const REDO_KINDS = ['tail', 'redo']
 // 做账类型(要读金蝶计提，列表出来后再逐张补)：计提与发票一致只核销 / 含尾差 / 要红冲更正 / 计提记错主体 / 金额不符 / 没有计提
 const KIND = {
   hx: ['一致·只核销', 'ok'], tail: ['尾差·红冲更正', 'warn'], redo: ['需红冲更正', 'bad'],
   subj: ['计提记错主体', 'bad'], manual: ['金额不符·人工', 'warn'], noacc: ['没有计提', 'warn'], err: ['读取失败', 'neu'],
-  part: ['部分核销', 'warn'],
+  part: ['部分核销', 'warn'], later: ['发票后补·先付款', 'warn'],
 }
 // 整单问题的建议动作
-const ACT = { subj: '原主体红冲、本主体补提后再做', subjAuto: '本张补提并核销（点「凭证预览」单张做）', manual: '人工核对差额（补提 / 查发票）', noacc: '先计提', err: '刷新重试' }
-const KIND_ORDER = ['hx', 'tail', 'redo', 'part', 'subj', 'manual', 'noacc']
+const ACT = { later: '先做付款凭证（点「凭证预览」单张做），发票到了再转待认证', subj: '原主体红冲、本主体补提后再做', subjAuto: '本张补提并核销（点「凭证预览」单张做）', manual: '人工核对差额（补提 / 查发票）', noacc: '先计提', err: '刷新重试' }
+const KIND_ORDER = ['hx', 'tail', 'redo', 'part', 'later', 'subj', 'manual', 'noacc']
 const BLOCK_CLS = { 红冲: 'b-red', 更正: 'b-fix', 核销: 'b-hx', 支付: 'b-pay' }
 const MODE = { hx: ['核销', 'ok'], rate: ['红冲+更正', 'bad'], fix: ['红冲+更正', 'bad'], move: ['补提到本主体', 'bad'] }
 
@@ -217,6 +221,11 @@ function bindItems(rows, plans) {
       month: `${x.year}-${String(x.month).padStart(2, '0')}`, vno: x.vno, paid: x.date, sup: r.sup_full || r.carrier, code: r.code, amount: -x.gross,
       bid: r.bid, bill: '', n_inv: 0, period: r.period, adj: '有（① 红冲）', src: `红冲凭证 · 冲 ${r.period ? Number(r.period.slice(5)) + '/' : ''}${x.src_vno}#，无纸质付款单` }))
   })
+  rows.forEach(r => {       // 发票后补的第三笔：暂估转待认证凭证(没有纸质付款单，附发票)
+    const x = r.posted && r.posted.later3
+    if (x && x.vno) out.push({ inst: r.inst + '|later', subject: r.subject, book: r.book, red: true, month: String(x.date || '').slice(0, 7), vno: x.vno, paid: x.date,
+      sup: r.sup_full || r.carrier, code: r.code, amount: x.tax || 0, tag: '转待认证', bid: r.bid, bill: '', n_inv: r.n_inv, period: r.period, adj: '', src: '暂估转待认证 · 发票后补，无纸质付款单，附发票' })
+  })
   const so = x => { const i = SUBJ_ORDER.indexOf(x); return i < 0 ? 9 : i }
   return out.sort((a, b) => so(a.subject) - so(b.subject) || a.subject.localeCompare(b.subject) || a.month.localeCompare(b.month) || vnum(a.vno) - vnum(b.vno))
 }
@@ -234,7 +243,7 @@ function bindListHtml(items) {
     <tbody>${g.items.map((x, i) => `<tr class="${x.red ? 'red' : ''}"><td class="c">${i + 1}</td><td class="c vno">记-${esc(x.vno)}</td><td class="c">${esc(String(x.paid || '').slice(5))}</td>
       <td>${esc(x.sup)}<div class="sub">${esc(x.code || '')}${x.src ? ` · ${esc(x.src)}` : ''}</div></td><td class="n">${money(x.amount)}</td>
       <td class="m">${esc(x.bid || '')}</td><td class="m c">${esc(x.bill || '—')}</td><td class="c">${x.n_inv ? x.n_inv + ' 张' : '—'}</td><td class="c">${esc(x.adj || '—')}</td><td class="c box">□</td></tr>`).join('')}
-    <tr class="tot"><td colspan="4" class="n">合计 ${g.items.length} 张凭证${g.items.some(x => x.red) ? `（其中红冲凭证 ${g.items.filter(x => x.red).length} 张，不计入金额）` : ''}</td><td class="n">${money(sum)}</td><td colspan="5"></td></tr></tbody></table>
+    <tr class="tot"><td colspan="4" class="n">合计 ${g.items.length} 张凭证${g.items.some(x => x.red) ? `（其中没有付款单的凭证 ${g.items.filter(x => x.red).length} 张——红冲 / 暂估转待认证，不计入金额）` : ''}</td><td class="n">${money(sum)}</td><td colspan="5"></td></tr></tbody></table>
     <div class="note">用法：纸质付款单上印有钉钉审批编号，对着本表找到凭证号，按凭证号顺序装订；装好一张在「已装订」打勾。「计提更正单」写「有」的，更正单贴在该付款单后面一起装。${g.items.some(x => x.red) ? '红冲凭证没有纸质付款单，只附计提更正单 ①。' : ''}</div>
     <div class="sign"><span>装订人：______________</span><span>日期：______________</span><span>复核人：______________</span></div>
     <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString('zh-CN', { hour12: false })}</div></div>`
@@ -256,7 +265,7 @@ function slipHtml(items) {
   return pages.map(pg => `<div class="pg">${pg.map(x => `<div class="slip${x.red ? ' red' : ''}">
     <div class="top"><span class="vno">记-${esc(x.vno)}</span><span class="who">${esc(x.subject)}<br>${esc(ymCn(x.month))}</span></div>
     <div class="sup">${esc(x.sup)}</div>
-    <div class="amt">${x.red ? '红冲 ' : '¥ '}${money(Math.abs(x.amount || 0))}${x.adj ? '<span class="tag">附更正单</span>' : ''}</div>
+    <div class="amt">${x.red ? (x.tag || '红冲') + ' ' : '¥ '}${money(Math.abs(x.amount || 0))}${x.adj ? '<span class="tag">附更正单</span>' : ''}</div>
     <div class="ids">审批 ${esc(x.bid || '—')}${x.bill ? `<br>付款单 ${esc(x.bill)}` : x.red ? '<br>无纸质付款单' : ''}</div></div>`).join('')}</div>`).join('')
 }
 const SLIP_CSS = `@page{size:A4 portrait;margin:8mm}*{box-sizing:border-box}body{font:10px/1.35 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
@@ -640,6 +649,19 @@ function Detail({ inst, onClose, onChanged }) {
     setBusy(true)
     voucherPaperOverride(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
+  const [l3busy, setL3busy] = useState(false)    // 发票后补第三笔：建暂估转待认证凭证
+  const [l3msg, setL3msg] = useState(null)
+  const setLater = on => {
+    let note = ''
+    if (on) { note = window.prompt('发票后补，先做付款凭证：\n这张付款凭证只出支付两行（借应付 / 贷银行），暂估进项税先挂着；发票到了再单独做「暂估转待认证」。\n\n写一句原因（发票大概什么时候到、找谁要），会留痕：', ''); if (note === null) return; if (!note.trim()) { alert('要写原因'); return } }
+    voucherLater(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message))
+  }
+  const postLater = () => {
+    if (!window.confirm('发票到了：新建一张「暂估转待认证」凭证并提交（不审核）。\n借 待认证进项税（摘要以发票号开头）/ 贷 暂估进项税。确定？')) return
+    setL3busy(true); setL3msg(null)
+    voucherPostLater(inst).then(r => { setL3msg({ ok: true, text: (r.steps || []).join(' → ') }); load(); onChanged() })
+      .catch(e => setL3msg({ ok: false, text: e.message })).finally(() => setL3busy(false))
+  }
   const [picking, setPicking] = useState(false)  // 展开「选择核销哪些计提」
   const [posting, setPosting] = useState(null)   // 写金蝶结果 {ok, msg, steps}
   const post = () => {
@@ -647,7 +669,10 @@ function Detail({ inst, onClose, onChanged }) {
 ① 系统提交并审核这张金蝶付款单（审核人显示「系统操作员」）
 ② 金蝶自动生成付款凭证后，往里补红冲/更正/核销分录、改支付摘要
 ③ 提交这张凭证（进审核人的待审列表）
-凭证不审核，留给你在金蝶核对后审核。${(d?.xbook || []).length ? `
+凭证不审核，留给你在金蝶核对后审核。${d?.plan?.pay_only === 'later' ? `
+
+⚠ 发票后补：这张付款凭证只出支付两行（借应付 / 贷银行），不转暂估进项税。
+发票到了以后回到这张的预览，做第⑤段「暂估转待认证」。` : ''}${(d?.xbook || []).length ? `
 
 ⚠ 这张的计提原来记在别的主体：${d.xbook.map(x => `${x.short} 记-${x.vno}`).join('、')}。
 本张凭证会在${d.req.subject}补提后核销；
@@ -701,6 +726,11 @@ function Detail({ inst, onClose, onChanged }) {
             {posting.ok && (d.adjust || []).length > 0 && <> · <button className="lnk" onClick={() => printAdjust([d], `计提更正单 ${d.req.payee}`)}>打印计提更正单（贴钉钉单据后）</button></>}</div>}
           {d.kind && KIND[d.kind] && <div className={'lv-verdict ' + KIND[d.kind][1]}><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span>{d.kind_text}
             {(d.adjust || []).length > 0 && <><span style={{ flex: 1 }} /><button className="btn sm" title="打印后贴在钉钉付款单据后面" onClick={() => printAdjust([d], `计提更正单 ${d.req.payee}`)}>打印计提更正单</button></>}</div>}
+          {!d.req.posted && d.req.status === 'noinv' && d.req.bill_id && !d.req.later && d.accruals.length > 0 && <div className="lv-msg warn">
+            票夹里还没有发票，但金蝶已经有付款单了。如果是<b>发票后补</b>，可以先把付款凭证做了：
+            <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setLater(true)}>发票后补，先做付款凭证</button></div>}
+          {d.req.later && <div className="lv-msg warn">已确认<b>发票后补</b>（{d.req.later.by} {d.req.later.at}：{d.req.later.note}）——付款凭证只做支付，发票到了再转待认证。
+            {!d.req.posted && <button className="lnk" style={{ marginLeft: 8 }} onClick={() => setLater(false)}>撤销</button>}</div>}
           {(d.xbook || []).map(x => <div key={x.short + x.vno} className={'lv-msg ' + (x.reversed ? 'okb' : 'warn')}>
             {x.short} 记-{x.vno}（{money(x.gross)}）的红冲：{x.reversed
               ? <b>已做 · {x.reversed.month} 月 记-{x.reversed.vno}</b>
@@ -799,6 +829,25 @@ function Detail({ inst, onClose, onChanged }) {
                   <td className="num">{money(d.voucher.dr)}</td><td className="num">{money(d.voucher.cr)}</td><td></td></tr>
               </tbody>
             </table>}
+          {d.later3 && <>
+            <div className="lv-sec">⑤ 发票后补 · 暂估转待认证 <span className="dim">付款时没票，只做了支付；发票到了单独做这一张</span>
+              <span style={{ flex: 1 }} />
+              {!d.later3.vno && <button className="btn btn-pri" disabled={l3busy || !d.later3.ok} onClick={postLater}>{l3busy ? '建凭证中…' : '保存到金蝶（新建凭证并提交）'}</button>}</div>
+            {l3msg && <div className={'lv-msg ' + (l3msg.ok ? 'okb' : 'bad')}>{l3msg.text}</div>}
+            {d.later3.vno
+              ? <div className="lv-verdict ok"><span className="lv-pill ok">已写入金蝶</span>暂估转待认证凭证 <b>记-{d.later3.vno}</b>（{d.later3.date}）· {d.later3.by} {d.later3.at}
+                {d.later3.submitted === false ? ' · 提交没成功，请到金蝶手动提交' : ' · 已提交，等人审核'}</div>
+              : <>{d.later3.msg && <div className="lv-msg bad">{d.later3.msg}</div>}
+                {(d.later3.lines || []).length > 0 && <table className="lv-t lv-v">
+                  <colgroup><col style={{ width: 34 }} /><col /><col style={{ width: 190 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: '26%' }} /></colgroup>
+                  <thead><tr><th>#</th><th>摘要</th><th>科目</th><th className="num">借方</th><th className="num">贷方</th><th>核算维度</th></tr></thead>
+                  <tbody>{d.later3.lines.map((l, i) => <tr key={i}><td className="dim">{i + 1}</td><td className="expl" title={l.expl}>{l.expl}</td>
+                    <td className="nw">{l.acct} {l.acct_name}</td><td className="num">{l.dr ? money(l.dr) : ''}</td><td className="num">{l.cr ? money(l.cr) : ''}</td>
+                    <td className="dims">{dimLine(l.dims)}</td></tr>)}
+                    <tr className="tot"><td colSpan="3">合计　{Math.abs((d.later3.dr || 0) - (d.later3.cr || 0)) < 0.005 ? <span className="ok">借贷平衡 ✓</span> : <span className="bad">借贷不平</span>}
+                      {d.later3.tail ? <span className="warn">　税额尾差 {money(d.later3.tail)} 调到费用行</span> : null}</td>
+                      <td className="num">{money(d.later3.dr)}</td><td className="num">{money(d.later3.cr)}</td><td></td></tr></tbody></table>}</>}
+          </>}
         </>}
       </div>
     </div>
@@ -882,7 +931,7 @@ export default function LogisticsVoucher() {
         <div className="h-sub">付款后合成一张凭证：红冲 → 更正 → 核销（暂估转待认证）→ 支付。计提取金蝶、发票取发票管家、维度更正取复核台登记。「保存到金蝶」＝系统审核付款单，再往金蝶自动生成的付款凭证里补分录并提交；凭证留给人在金蝶审核。</div></div></div>
       <div className="body">
         <div className="lv-bar">
-          {ORDER.filter(k => k !== 'paycode' || cnt.paycode).map(k => <button key={k} className={'lv-chip ' + ST[k][1] + (f === k ? ' on' : '')} title={ST[k][2]} onClick={() => setF(f === k ? '' : k)}>{ST[k][0]}<b>{cnt[k] || 0}</b></button>)}
+          {ORDER.filter(k => !['paycode', 'latertax'].includes(k) || cnt[k]).map(k => <button key={k} className={'lv-chip ' + ST[k][1] + (f === k ? ' on' : '')} title={ST[k][2]} onClick={() => setF(f === k ? '' : k)}>{ST[k][0]}<b>{cnt[k] || 0}</b></button>)}
           <button className={'lv-chip' + (!f ? ' on' : '')} onClick={() => setF('')}>全部<b>{(rows || []).length}</b></button>
           <span style={{ flex: 1 }} />
           <input type="search" placeholder="搜承运商/主体/审批编号" value={q} onChange={e => setQ(e.target.value)} />
@@ -961,7 +1010,7 @@ export default function LogisticsVoucher() {
                   // 审核结果＝比对出来的事实，建议动作＝要做什么；逐张计提一行，和左边对齐。整单问题(主体错/金额不符…)各写一句。
                   if (!calc) return <><td><span className="dim">{!r.period ? '未认账单月' : '票夹没有发票'}</span></td><td><span className="dim">{!r.period ? '到账单核对总表认领月份' : '收票台补票'}</span></td></>
                   if (pending) return <><td><span className="dim">计算中…</span></td><td></td></>
-                  if (['subj', 'manual', 'noacc', 'err'].includes(p.kind)) return <>
+                  if (['subj', 'manual', 'noacc', 'err', 'later'].includes(p.kind)) return <>
                     <td className="kd"><span className={KIND[p.kind] ? (KIND[p.kind][1] === 'bad' ? 'bad' : 'warn') : ''}>{KIND[p.kind]?.[0]}</span><div className="dim kt">{p.text}</div></td>
                     <td className="kd">{p.kind === 'subj' && p.auto ? <>{ACT.subjAuto}
                       {(p.xrev || []).map(x => <div key={x.vno} className={x.reversed ? 'ok' : 'warn'}>{x.short} 记-{x.vno} 红冲{x.reversed ? `已做（记-${x.reversed.vno}）` : '系统一并做'}</div>)}</> : ACT[p.kind]}</td></>
@@ -975,7 +1024,10 @@ export default function LogisticsVoucher() {
                 })()}
                 <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
                 <td className="nw">{pay}<div className="dim">纸质件 {r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr ? ' · 已放行' : ''}</div>
-                  <span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span>{r.posted && <div className="dim">已写金蝶 记-{r.posted.vno}</div>}</td>
+                  <span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span>{r.posted && <div className="dim">已写金蝶 记-{r.posted.vno}</div>}
+                  {r.later && <div className="warn">发票后补 · 只做支付</div>}
+                  {r.later_state === 'wait' && <div className="warn">发票后补 · 等发票</div>}
+                  {r.later_state === 'done' && <div className="dim">暂估已转待认证 记-{r.later3_vno}</div>}</td>
                 <td><button className="btn btn-pri" disabled={!r.period} onClick={() => setOpen(r.inst)}>{r.status === 'booked' ? '查看' : '凭证预览'}</button></td>
               </tr>
             })}
