@@ -29,7 +29,8 @@ const ST = {
   unpaid: ['未付款', 'neu', '金蝶还没有付款单'],
   booked: ['已做账', 'done', '发票都已被金蝶凭证引用（发票管家同步）'],
 }
-const ORDER = ['ready', 'invdiff', 'noinv', 'unpaid', 'booked']
+// 没有金蝶付款单的(钉钉还在审批 / 已通过待付款)不在这一页显示(V2.815，用户「起码出了付款单，这里才显示」)，所以没有「未付款」这一栏了
+const ORDER = ['ready', 'invdiff', 'noinv', 'booked']
 // 批量做账：一致只核销 + 红冲更正(含尾差)。红冲更正写法已在金蝶实测(跨越 记-261 / 易风达 记-264)后放进来，
 // 但要提示：勾到红冲更正的，批量条和确认框都单独列出来（用户 2026-10-02「放进去，但是要提示」）
 const BATCH_KINDS = ['hx', 'tail', 'redo']
@@ -720,7 +721,12 @@ function Detail({ inst, onClose, onChanged }) {
 }
 
 export default function LogisticsVoucher() {
-  const [rows, setRows] = useState(null)
+  const [allRows, setAllRows] = useState(null)   // 接口回来的全部请款单
+  const [showUnpaid, setShowUnpaid] = useState(false)
+  // 这一页只列出了付款单的：没付款单的收起来，只在下面留一行数，要看可以点开
+  const rows = useMemo(() => (allRows == null ? null : showUnpaid ? allRows : allRows.filter(r => r.status !== 'unpaid')), [allRows, showUnpaid])
+  const unpaid = useMemo(() => (allRows || []).filter(r => r.status === 'unpaid'), [allRows])
+  const setRows = setAllRows
   const [err, setErr] = useState('')
   const [f, setF] = useState('ready')
   const [q, setQ] = useState('')
@@ -735,7 +741,7 @@ export default function LogisticsVoucher() {
     const rs = r.rows || []
     setRows(rs); setErr('')
     // 做账类型：有账单月、有发票的才算；分几批取，先出的先显示
-    const ids = rs.filter(x => x.period && x.n_inv).map(x => x.inst)
+    const ids = rs.filter(x => x.period && x.n_inv && x.status !== 'unpaid').map(x => x.inst)     // 没付款单的不显示，也就不去金蝶算做账类型
     const batches = []
     for (let i = 0; i < ids.length; i += 5) batches.push(ids.slice(i, i + 5))
     batches.reduce((p, b) => p.then(() => voucherPlans(b).then(o => setPlans(old => ({ ...old, ...(o.plans || {}) }))).catch(() => {})), Promise.resolve())
@@ -774,7 +780,7 @@ export default function LogisticsVoucher() {
     setSel({})
     load()
   }
-  const kcnt = useMemo(() => { const c = {}; Object.values(plans).forEach(p => { c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans])
+  const kcnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { const p = plans[r.inst]; if (p) c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans, rows])
   const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) &&
     (!q || [r.carrier, r.payee, r.sup_full, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
   // 装订：当前筛选下已有凭证号的单(系统写的 + 金蝶里已有的)，按凭证月份挑一个月打
@@ -804,6 +810,9 @@ export default function LogisticsVoucher() {
           {kf && <button className="lnk" onClick={() => setKf('')}>不限</button>}
         </div>
         {err && <div className="lv-msg bad">{err}</div>}
+        {unpaid.length > 0 && <div className="lv-unpaid">另有 <b>{unpaid.length}</b> 张请款单金蝶还没有付款单（钉钉审批中 {unpaid.filter(r => r.dt_status === 'RUNNING').length} 张
+          {unpaid.some(r => r.dt_status !== 'RUNNING') && <>、已通过待付款 {unpaid.filter(r => r.dt_status !== 'RUNNING').length} 张</>}，合计 {money(unpaid.reduce((s, r) => s + (r.amount || 0), 0))}），出了付款单才在这里显示。
+          <button className="lnk" onClick={() => { const on = !showUnpaid; setShowUnpaid(on); if (on) { setF(''); voucherPlans(unpaid.filter(x => x.period && x.n_inv && !plans[x.inst]).map(x => x.inst)).then(o => setPlans(old => ({ ...old, ...(o.plans || {}) }))).catch(() => {}) } }}>{showUnpaid ? '收起' : '先看一眼'}</button></div>}
         <AutoBar onChanged={load} />
         <div className="lv-batch">
           <span>已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((s, r) => s + (r.amount || 0), 0))}</b></>}</span>
@@ -993,6 +1002,7 @@ const CSS = `
 .lv .lv-auto .seg button.on{font-weight:700;color:#fff;background:var(--gray)}.lv .lv-auto .seg button.on.warn{background:var(--amber);color:#fff}.lv .lv-auto .seg button.on.ok{background:var(--green);color:#fff}
 .lv .lv-auto .row.pg{margin-top:2px}.lv .lv-auto .lnk:disabled{opacity:.35;cursor:default}
 .lv .lv-auto .ck{display:inline-flex;gap:4px;align-items:center;white-space:nowrap}.lv .lv-auto table{background:var(--bg);border-radius:8px}
+.lv .lv-unpaid{font-size:12.5px;color:var(--ink-2);padding:2px 2px 0}
 .lv .lv-batch select{font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
 .lv .lv-batch+.lv-batch{margin-top:6px}
 .lv .lv-batch{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);font-size:12.5px}
