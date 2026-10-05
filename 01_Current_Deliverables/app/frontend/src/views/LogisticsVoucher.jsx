@@ -653,7 +653,12 @@ function Detail({ inst, onClose, onChanged }) {
   const [l3msg, setL3msg] = useState(null)
   const setLater = on => {
     let note = ''
-    if (on) { note = window.prompt('发票后补，先做付款凭证：\n这张付款凭证只出支付两行（借应付 / 贷银行），暂估进项税先挂着；发票到了再单独做「暂估转待认证」。\n\n写一句原因（发票大概什么时候到、找谁要），会留痕：', ''); if (note === null) return; if (!note.trim()) { alert('要写原因'); return } }
+    if (on) {     // V2.833：以发票管家登记了后补单为前提(没登记的后端会拒)；备注默认带后补单号和预计到票日
+      const sl = d && d.req.later_slip
+      note = window.prompt('发票后补，先做付款凭证：\n这张付款凭证只出支付两行（借应付 / 贷银行），暂估进项税先挂着；发票到了再单独做「暂估转待认证」。\n\n备注（可改，会留痕）：',
+        sl ? `后补单 #${sl.id}${sl.expect_date ? `，预计 ${sl.expect_date} 到` : ''}` : '')
+      if (note === null) return
+    }
     voucherLater(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message))
   }
   const postLater = () => {
@@ -727,8 +732,11 @@ function Detail({ inst, onClose, onChanged }) {
           {d.kind && KIND[d.kind] && <div className={'lv-verdict ' + KIND[d.kind][1]}><span className={'lv-pill ' + KIND[d.kind][1]}>{KIND[d.kind][0]}</span>{d.kind_text}
             {(d.adjust || []).length > 0 && <><span style={{ flex: 1 }} /><button className="btn sm" title="打印后贴在钉钉付款单据后面" onClick={() => printAdjust([d], `计提更正单 ${d.req.payee}`)}>打印计提更正单</button></>}</div>}
           {!d.req.posted && d.req.status === 'noinv' && d.req.bill_id && !d.req.later && d.accruals.length > 0 && <div className="lv-msg warn">
-            票夹里还没有发票，但金蝶已经有付款单了。如果是<b>发票后补</b>，可以先把付款凭证做了：
-            <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setLater(true)}>发票后补，先做付款凭证</button></div>}
+            票夹里还没有发票，但金蝶已经有付款单了。{d.req.later_slip
+              ? <>发票管家里登记了<b>后补单 #{d.req.later_slip.id}</b>（{d.req.later_slip.status_cn}{d.req.later_slip.expect_date ? ` · 预计 ${d.req.later_slip.expect_date} 到` : ''}
+                {d.req.later_slip.filed_by ? ` · ${d.req.later_slip.filed_by} 登记` : ''}），可以先把付款凭证做了：
+                <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setLater(true)}>发票后补，先做付款凭证</button></>
+              : <>要没票先做付款凭证，得先在<b>发票管家登记发票后补单</b>（申请人自助登记，或财务在后补池登记）——这张还没有登记，现在不能先做。</>}</div>}
           {d.req.later && <div className="lv-msg warn">已确认<b>发票后补</b>（{d.req.later.by} {d.req.later.at}：{d.req.later.note}）——付款凭证只做支付，发票到了再转待认证。
             {!d.req.posted && <button className="lnk" style={{ marginLeft: 8 }} onClick={() => setLater(false)}>撤销</button>}</div>}
           {(d.xbook || []).map(x => <div key={x.short + x.vno} className={'lv-msg ' + (x.reversed ? 'okb' : 'warn')}>

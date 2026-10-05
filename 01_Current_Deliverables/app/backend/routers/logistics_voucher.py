@@ -165,7 +165,7 @@ def vlist(request: Request, since: str = "2026-09-01"):
             out[-1]["later3_vno"] = (pr_.get("later3") or {}).get("vno") or ""
             if out[-1]["later_state"] == "todo":
                 out[-1]["status"] = "latertax"
-        elif out[-1]["status"] == "noinv" and pi.get("bill_id") and r["inst_id"] in laters:
+        elif out[-1]["status"] == "noinv" and pi.get("bill_id") and r["inst_id"] in laters and _later_slip(r["inst_id"]):
             out[-1].update(status="ready", later=True)   # 人确认过发票后补：没票也列进可做账(只做支付)
         pw = _paywarn(r["inst_id"]) if out[-1]["status"] == "unpaid" else None
         if pw:
@@ -185,6 +185,27 @@ _F = [("FVOUCHERGROUPNO", "号"), ("FEXPLANATION", "摘要"), ("FAccountID.FNumb
 
 def _s(v):
     return str(v or "").strip()
+
+
+_LATER_ST_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐"}
+
+
+def _later_slip(inst):
+    """发票管家里这张请款单的后补单(没关闭的最新一张) → {id, status, status_cn, expect_date, expect_amount, received_amount, inv_kind, filed_by} / None。
+    V2.833(用户 2026-10-06「要在发票后补单登记了才行」)：没票先做付款凭证，以登记了后补单为前提——只是漏传发票的不放行。只读。"""
+    try:
+        with db._engine.connect() as c:
+            r = c.execute(text("select id, status, expect_date, expect_amount, received_amount, inv_kind, tax_rate, filed_by, applicant, note "
+                               "from inv_later where inst_id=:i and coalesce(status,'open')<>'closed' order by id desc limit 1"), {"i": inst}).mappings().first()
+    except Exception:
+        return None
+    if not r:
+        return None
+    r = dict(r)
+    for k in ("expect_amount", "received_amount"):
+        r[k] = float(r[k]) if r.get(k) is not None else None
+    r["status_cn"] = _LATER_ST_CN.get(r.get("status") or "open", r.get("status") or "")
+    return r
 
 
 def _is_direct(z, credit):
@@ -482,6 +503,10 @@ def _preview_data(inst, self_vno=None):
     #   later＝发票后补：人确认过「先做付款凭证」(或这张已经这样写过金蝶)，暂估税等发票到了另做一张转待认证。
     posted_rec = (db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}
     later = (db.get_setting(_LATER_KEY, None) or {}).get(inst)
+    slip = _later_slip(inst)                 # 发票管家的后补单：没登记就不许「没票先付」
+    if later and not slip and not posted_rec.get("tax_later"):
+        later = None
+        notes.append("之前确认过发票后补，但发票管家里已经没有这张单的后补单了（被关闭或删除），不能没票先付")
     g_acc = round(sum(v["gross"] for v in vouchers), 2)
     pay_only = ""
     if vouchers and not any(v.get("from") for v in vouchers) and not amts:
@@ -574,7 +599,7 @@ def _preview_data(inst, self_vno=None):
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
                                 "paper_ovr": ovr.get(inst), "status": st, "posted": (db.get_setting(_POSTED_KEY, None) or {}).get(inst),
-                                "bill_id": pi.get("bill_id") or "", "paywarn": paywarn, "later": later, "pay_only": pay_only},
+                                "bill_id": pi.get("bill_id") or "", "paywarn": paywarn, "later": later, "pay_only": pay_only, "later_slip": slip},
             "later3": later3,
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
@@ -1365,9 +1390,11 @@ async def set_later(request: Request):
         return JSONResponse({"ok": False, "msg": "这张已经写过金蝶，不能再改"}, status_code=400)
     allp = dict(db.get_setting(_LATER_KEY, None) or {})
     if b.get("on"):
-        if not note:
-            return JSONResponse({"ok": False, "msg": "要写一句原因（发票大概什么时候到、找谁要）"}, status_code=400)
-        allp[inst] = {"by": u["name"], "at": _now(), "note": note}
+        slip = _later_slip(inst)
+        if not slip:
+            return JSONResponse({"ok": False, "msg": "发票管家里这张请款单还没有登记后补单：先让申请人（或财务）在发票管家登记发票后补，才能没票先做付款凭证"}, status_code=400)
+        note = note or "后补单 #%s%s" % (slip["id"], ("，预计 %s 到" % slip["expect_date"]) if slip.get("expect_date") else "")
+        allp[inst] = {"by": u["name"], "at": _now(), "note": note, "slip": slip["id"]}
     else:
         allp.pop(inst, None)
     db.set_setting(_LATER_KEY, allp, u["name"])
