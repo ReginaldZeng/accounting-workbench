@@ -485,11 +485,19 @@ function AutoBar({ onChanged }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
+  const [tab, setTab] = useState('')          // 明细看哪一栏：no 不做 / yes 会做；空＝有不做的先看不做的
+  const [page, setPage] = useState(1)
   const load = () => voucherAuto().then(r => { setA(r); setErr('') }).catch(e => setErr(e.message))
   useEffect(() => { load() }, [])
   if (!a) return err ? <div className="lv-msg bad">自动做账状态没读到：{err}</div> : null
   const cfg = a.cfg, last = a.last, items = (last && last.items) || []
   const yes = items.filter(x => x.ok), no = items.filter(x => !x.ok)
+  // 明细分页(V2.814，用户「这个是不是要做分页」)：展开后十几行把下面的请款单清单顶下去了——分「不做 / 会做」两栏(先看不做的)，每页 5 行
+  const AUTO_PAGE = 5
+  const tabOn = tab || (no.length ? 'no' : 'yes')
+  const listAll = tabOn === 'no' ? no : yes
+  const pages = Math.max(1, Math.ceil(listAll.length / AUTO_PAGE)), pg = Math.min(page, pages)
+  const list = listAll.slice((pg - 1) * AUTO_PAGE, pg * AUTO_PAGE)
   const save = patch => { setBusy('save'); voucherAutoSet(patch).then(load).catch(e => alert(e.message)).finally(() => setBusy('')) }
   const setMode = m => {
     if (m === cfg.mode) return
@@ -524,10 +532,21 @@ function AutoBar({ onChanged }) {
             {items.length > 0 && <button className="lnk" onClick={() => setOpen(!open)}>{open ? '收起' : '看是哪几张、为什么'}</button>}</>}
       <span className="dim">计提记错主体、金额不符的不会自动做；凭证不审核，留给人在金蝶审。{cfg.by && `（${cfg.by} ${cfg.at} 设）`}</span>
     </div>
+    {open && items.length > 0 && <div className="row pg">
+      <span className="seg">
+        <button className={tabOn === 'no' ? 'on warn' : ''} onClick={() => { setTab('no'); setPage(1) }}>不做 {no.length}</button>
+        <button className={tabOn === 'yes' ? 'on ok' : ''} onClick={() => { setTab('yes'); setPage(1) }}>{last.mode === 'on' ? '做了 / 会做' : '会做'} {yes.length}</button>
+      </span>
+      <span style={{ flex: 1 }} />
+      {pages > 1 && <><button className="lnk" disabled={pg <= 1} onClick={() => setPage(pg - 1)}>上一页</button>
+        <span className="dim">{pg} / {pages}</span>
+        <button className="lnk" disabled={pg >= pages} onClick={() => setPage(pg + 1)}>下一页</button></>}
+    </div>}
     {open && items.length > 0 && <table className="lv-t"><thead><tr><th style={{ width: 90 }}>主体</th><th>物流商</th><th className="num" style={{ width: 110 }}>金额</th><th style={{ width: 120 }}>做账类型</th><th style={{ width: 110 }}></th><th>说明</th></tr></thead>
-      <tbody>{[...yes, ...no].map(x => <tr key={x.inst}><td>{x.subject}</td><td>{x.payee}</td><td className="num">{money(x.amount)}</td><td>{x.kind_cn || '—'}</td>
+      <tbody>{list.map(x => <tr key={x.inst}><td>{x.subject}</td><td>{x.payee}</td><td className="num">{money(x.amount)}</td><td>{x.kind_cn || '—'}</td>
         <td>{x.done === true ? <b className="ok">已做 记-{x.vno}</b> : x.done === false ? <b className="bad">没做成</b> : x.ok ? <span className="ok">{last.mode === 'on' ? '下一轮做' : '会做'}</span> : <span className="warn">不做</span>}</td>
-        <td className="dim">{x.done === false ? x.msg : x.ok ? (x.msg || '') : x.why}</td></tr>)}</tbody></table>}
+        <td className="dim">{x.done === false ? x.msg : x.ok ? (x.msg || '') : x.why}</td></tr>)}
+        {!list.length && <tr><td colSpan="6" className="lv-empty">{tabOn === 'no' ? '没有不做的' : '没有会做的'}</td></tr>}</tbody></table>}
   </div>
 }
 
@@ -972,6 +991,7 @@ const CSS = `
 .lv .lv-auto .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--bg)}
 .lv .lv-auto .seg button{border:0;background:none;font:inherit;font-size:12.5px;padding:4px 12px;color:var(--ink-2);cursor:pointer;border-right:1px solid var(--line-strong)}.lv .lv-auto .seg button:last-child{border-right:0}
 .lv .lv-auto .seg button.on{font-weight:700;color:#fff;background:var(--gray)}.lv .lv-auto .seg button.on.warn{background:var(--amber);color:#fff}.lv .lv-auto .seg button.on.ok{background:var(--green);color:#fff}
+.lv .lv-auto .row.pg{margin-top:2px}.lv .lv-auto .lnk:disabled{opacity:.35;cursor:default}
 .lv .lv-auto .ck{display:inline-flex;gap:4px;align-items:center;white-space:nowrap}.lv .lv-auto table{background:var(--bg);border-radius:8px}
 .lv .lv-batch select{font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
 .lv .lv-batch+.lv-batch{margin-top:6px}
