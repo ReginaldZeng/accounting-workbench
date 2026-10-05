@@ -32,6 +32,7 @@ _SCAN_LOCK = threading.Lock()
 _NONLOGI = set()                                  # 看过、收款方不是物流供应商的实例号(进程内记着，不再取)
 _SUP = {"ts": 0.0, "name2code": {}, "code2name": {}}
 _SET_LAST, _SET_SINCE = "logi_payreq_last", "logi_payreq_auto_since"
+_SET_PAYWARN = "logi_payreq_paywarn"     # {inst_id: {…}} 金蝶有付款单、金额主体收款方都对得上，但往来单位编码选错了(V2.825)
 
 
 def _now():
@@ -125,6 +126,52 @@ def _paybills(since_date):
         return None
     return [{"id": r.get("id"), "code": r.get("码"), "org": r.get("组织"), "amount": r.get("金额"), "date": str(r.get("日期") or "")[:10],
              "status": r.get("状态")} for r in rows]
+
+
+def _pay_code_warn():
+    """已通过、却配不上付款单的请款单：再按「收款方名称 + 付款主体 + 金额」去金蝶找付款单——找得到说明出纳把往来单位编码选错了
+    (实证 路凯 2026-09-28 深圳星期零 1,002.09：同一家公司有 物流运输服务074 / 其他押金022 两个编码，付款单选成了押金那个；
+     计提挂在 074 上，照这样审核付款凭证会冲到 022，074 的计提核销不掉)。
+    结果存 _SET_PAYWARN，付款做账页据此把这张单亮出来并拦住(用户 2026-10-05「这个在做凭证的时候你得提醒出来」)。只读金蝶。"""
+    with db._engine.connect() as c:
+        allr = [dict(r) for r in c.execute(select(PR.c.inst_id, PR.c.payee, PR.c.subject_full, PR.c.sup_code, PR.c.amount, PR.c.create_time,
+                                                  PR.c.kd_paid, PR.c.excluded, PR.c.dt_status, PR.c.dt_result)).mappings().all()]
+    wait = [r for r in allr if r.get("dt_status") == "COMPLETED" and r.get("dt_result") == "agree" and not r.get("kd_paid")
+            and not r.get("excluded") and r.get("payee") and r.get("amount") is not None]
+    old = db.get_setting(_SET_PAYWARN, None) or {}
+    warn = {}
+    if wait:
+        taken = {str(r["kd_paid"]).split("|")[-1] for r in allr if r.get("kd_paid")}
+        cond = " or ".join("FCONTACTUNIT.FName='%s'" % str(n).replace("'", "") for n in sorted({r["payee"] for r in wait}))
+        s, conf = kc.login()
+        rows = kc._query(s, conf, "AP_PAYBILL",
+                         [("FID", "id"), ("FBillNo", "单号"), ("FDate", "日期"), ("FDOCUMENTSTATUS", "状态"), ("FPAYORGID.FName", "组织"),
+                          ("FCONTACTUNIT.FNumber", "码"), ("FCONTACTUNIT.FName", "供应商"), ("FPAYTOTALAMOUNTFOR", "金额"), ("FCREATORID.FName", "创建人")],
+                         "(%s) and FDate>='%s'" % (cond, min(str(r.get("create_time") or "")[:10] for r in wait)))
+        bills = {}
+        for b in rows:
+            bills.setdefault(str(b.get("id")), b)
+        used = set()
+        for r in sorted(wait, key=lambda x: str(x.get("create_time") or "")):
+            for bid, b in bills.items():
+                if bid in taken or bid in used or b.get("码") == r.get("sup_code"):
+                    continue
+                if b.get("供应商") != r["payee"] or b.get("组织") != r.get("subject_full"):
+                    continue
+                if abs(float(b.get("金额") or 0) - float(r["amount"])) >= 0.005 or str(b.get("日期") or "")[:10] < str(r.get("create_time") or "")[:10]:
+                    continue
+                used.add(bid)
+                warn[r["inst_id"]] = {"bill_id": bid, "bill_no": str(b.get("单号") or "").strip(), "date": str(b.get("日期") or "")[:10],
+                                      "status": b.get("状态"), "code": b.get("码"), "want": r.get("sup_code"), "name": b.get("供应商"),
+                                      "creator": b.get("创建人") or "", "amount": float(b.get("金额") or 0)}
+                break
+    if warn != old:
+        db.set_setting(_SET_PAYWARN, warn, "系统")
+        for i, w in warn.items():
+            if i not in old:
+                db.audit("系统", "物流请款单-付款单编码不对", i, "%s %.2f：金蝶付款单往来单位是 %s，应为 %s（%s 建，%s）" % (
+                    w["name"], w["amount"], w["code"], w["want"], w["creator"], w["date"]))
+    return warn
 
 
 def _paid_vouchers(since_date, want=None):
@@ -296,6 +343,10 @@ def _scan(trigger, days):
                 with db._engine.begin() as c:
                     c.execute(update(PR).where(PR.c.inst_id == iid).values(kd_paid=v))
                 n_paid += 1
+    try:
+        _pay_code_warn()
+    except Exception:
+        pass
     # 上线后提交的：自动建票夹拉发票 + 导账单
     n_auto = 0
     for r in allr:

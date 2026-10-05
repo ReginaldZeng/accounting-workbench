@@ -94,6 +94,20 @@ def _inv_type_text(inv_type, label):
     return full, short, tag
 
 
+_PAY_ST_CN = {"Z": "暂存", "A": "创建", "B": "审核中", "C": "已审核", "D": "重新审核"}
+
+
+def _paywarn(inst):
+    """这张请款单在金蝶有一张「金额、主体、收款方都对得上、但往来单位编码选错」的付款单 → {…, text} / None。扫描时写下的(logistics_payreq._pay_code_warn)。"""
+    w = (db.get_setting("logi_payreq_paywarn", None) or {}).get(inst)
+    if not w:
+        return None
+    return dict(w, text="金蝶有一张付款单（%s · %s · %s 建）金额、付款主体、收款方名称都和这张请款单对得上，但往来单位选的是「%s」，应为「%s」。"
+                        "请出纳把往来单位改成「%s」再做账——照现在这样审核，付款凭证会冲到「%s」上，「%s」的计提核销不掉。" % (
+                            w.get("date"), _PAY_ST_CN.get(w.get("status"), w.get("status") or ""), w.get("creator") or "—",
+                            w.get("code"), w.get("want"), w.get("want"), w.get("code"), w.get("want")))
+
+
 def _status(r, folder, invs, ovr):
     pi = _paid_info(r)
     tot = round(sum(i["gross"] for i in invs), 2)
@@ -142,6 +156,10 @@ def vlist(request: Request, since: str = "2026-09-01"):
                     "booked": sorted({str(v) for i in invs for v in (i["vouchers"] or [])})[:5],
                     "posted": posted.get(r["inst_id"]),
                     "status": "booked" if r["inst_id"] in posted else _status(r, folder, invs, ovr)})
+        # 付款单往来单位编码选错的：不算「未付款」藏起来，单列一类亮出来(做不了账，要出纳先改付款单)
+        pw = _paywarn(r["inst_id"]) if out[-1]["status"] == "unpaid" else None
+        if pw:
+            out[-1].update(status="paycode", paywarn=pw)
     out.sort(key=lambda x: (x["created"] or ""), reverse=True)
     return {"ok": True, "rows": out}
 
@@ -452,6 +470,10 @@ def _preview_data(inst, self_vno=None):
     if pi.get("bill_id") and not bank:
         msgs.append("金蝶付款单没取到我方银行账号，银行存款那行的账号待补")
     st = "booked" if inst in (db.get_setting(_POSTED_KEY, None) or {}) else _status(r, folder, invs, ovr)
+    paywarn = _paywarn(inst) if st == "unpaid" else None
+    if paywarn:
+        st = "paycode"
+        msgs.insert(0, paywarn["text"])
     kind, ktext = _kind(vouchers, notes, pl)
     # 计提调整单(V2.759，用户 2026-10-02「审核的时候就出来，打印后贴在钉钉单据后面」)：每张红冲更正的计提，原计提 vs 更正后
     adjust = []
@@ -495,7 +517,7 @@ def _preview_data(inst, self_vno=None):
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
                                 "paper_ovr": ovr.get(inst), "status": st, "posted": (db.get_setting(_POSTED_KEY, None) or {}).get(inst),
-                                "bill_id": pi.get("bill_id") or ""},
+                                "bill_id": pi.get("bill_id") or "", "paywarn": paywarn},
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           "from": (v.get("from") or {}).get("short") or "",
@@ -693,7 +715,8 @@ async def paper_override(request: Request):
 _AUDIT_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Audit.common.kdsvc"
 _POST_LOCK = {}
 _KD_BASE = {"FCURRENCYID": {"FNumber": "PRE001"}, "FEXCHANGERATETYPE": {"FNumber": "HLTX01_SYS"}, "FEXCHANGERATE": 1.0}
-ST_CN = {"ready": "可做账", "paper": "纸质件未到", "invdiff": "发票≠请款", "noinv": "票不齐", "unpaid": "未付款", "booked": "已做账"}
+ST_CN = {"ready": "可做账", "paper": "纸质件未到", "invdiff": "发票≠请款", "noinv": "票不齐", "unpaid": "未付款", "booked": "已做账",
+         "paycode": "付款单往来单位编码不对"}
 
 
 def _kd_ok(res):
