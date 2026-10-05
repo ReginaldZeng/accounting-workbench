@@ -57,7 +57,8 @@ def _invoices(inst_id):
         if not f:
             return None, []
         rows = c.execute(text("select id, number, inv_type, type_label, total, amount, tax, tax_rate, paper, review, flags_json, "
-                              "seller_name, buyer_name from inv_item where folder_id=:f and kind='invoice' and status='active' order by id"),
+                              "seller_name, buyer_name from inv_item where folder_id=:f and kind='invoice' and status='active' "
+                              "and coalesce(review,'')<>'void' order by id"),      # 作废的票不算(V2.812：原来只排除了「移除」的，作废的还被算进发票合计)
                          {"f": f["id"]}).mappings().all()
     out = []
     for x in rows:
