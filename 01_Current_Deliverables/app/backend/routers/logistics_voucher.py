@@ -810,6 +810,28 @@ async def scan_lookup(request: Request):
         return {"ok": False, "msg": "查询出错：%s" % str(e)[:160]}
 
 
+@router.get("/api/logistics-voucher/dd-config")
+async def scan_dd_config(request: Request, url: str = ""):
+    """手机页在钉钉里调「扫一扫」前的 dd.config 签名(V2.803，用户「扫描，而不是拍照」)。只给本站页面签，沿用发票管家那套签名和企业编号。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from urllib.parse import urlsplit
+    from kernels import invoice_dingtalk as idt
+    try:
+        parts = urlsplit(url[:500])
+    except ValueError:
+        parts = None
+    if not parts or parts.scheme not in ("http", "https") or (parts.hostname or "").lower() != (request.url.hostname or "").lower():
+        return {"ok": False, "msg": "只能给本站页面做钉钉鉴权"}
+    from starlette.concurrency import run_in_threadpool
+    try:
+        from routers.invoice import get_settings as _inv_settings
+        corp = (_inv_settings() or {}).get("corpId") or ""
+        return await run_in_threadpool(idt.jsapi_config, url[:500], corp)
+    except Exception as e:
+        return {"ok": False, "msg": "钉钉鉴权出错：%s" % str(e)[:120]}
+
+
 @router.post("/api/logistics-voucher/scan-photo")
 async def scan_photo(request: Request):
     """手机拍付款单右上角的二维码(V2.802，用户「手机可以吗」)：照片传上来，服务器认码再查凭证。只读。

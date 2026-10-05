@@ -13,7 +13,8 @@
 //   → 大字显示 主体 + 凭证号；本次扫过的列在下面(重复扫会标)，可读出来。只读。
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.802 手机也能查(用户「手机可以吗」)：扫码查凭证加「拍二维码」(拍照上传、服务器认码)；`#/vscan` 是手机专用的单页(VoucherScanPage)。
-import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto } from '../api.js'
+import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig } from '../api.js'
+import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
@@ -286,43 +287,49 @@ function shrinkPhoto(file, max = 2000) {
   })
 }
 
-function ScanBox({ onClose, page }) {
+// 扫码查凭证的状态与动作（电脑弹窗 ScanBox、手机页 VoucherScanPage 共用）。run(查询Promise) → 结果；after 每次查完调(电脑上用来把光标放回输入框)
+function useScan(after) {
   const [v, setV] = useState('')
   const [cur, setCur] = useState(null)        // 最近一次结果
   const [busy, setBusy] = useState(false)
   const [hist, setHist] = useState([])        // 本次扫过的(新的在前)
   const [say, setSay] = useState(false)
-  const ref = useRef(null)
-  const focus = () => { if (ref.current) ref.current.focus() }
-  useEffect(() => { if (!page) focus() }, [])      // 手机页不自动聚焦(会把键盘弹出来挡住按钮)
-  const speak = t => { try { if (say && window.speechSynthesis) { window.speechSynthesis.cancel(); window.speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(t), { lang: 'zh-CN', rate: 1.1 })) } } catch { /* 没有语音就算了 */ } }
-  const fileRef = useRef(null)
-  const shot = e => {                        // 拍照/选图 → 传上去认码
-    const f = e.target.files && e.target.files[0]
-    e.target.value = ''
-    if (f) run(shrinkPhoto(f).then(voucherScanPhoto))
-  }
-  const go = () => {
-    const code = v.trim()
-    if (!code || busy) return
-    setV('')
-    run(voucherScan(code))
-  }
+  const histRef = useRef(hist); histRef.current = hist
+  const sayRef = useRef(say); sayRef.current = say
+  const busyRef = useRef(false)
+  const speak = t => { try { if (sayRef.current && window.speechSynthesis) { window.speechSynthesis.cancel(); window.speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(t), { lang: 'zh-CN', rate: 1.1 })) } } catch { /* 没有语音就算了 */ } }
   const run = pr => {
-    if (busy) return
-    setBusy(true)
-    pr.then(r => {
-      const dup = r.ok && hist.some(h => h.inst === r.inst)
+    if (busyRef.current) return Promise.resolve(null)
+    busyRef.current = true; setBusy(true)
+    return pr.then(r => {
+      const dup = r.ok && histRef.current.some(h => h.inst === r.inst)
       setCur({ ...r, dup })
       if (r.ok) {
         if (!dup) setHist(h => [{ ...r, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) }, ...h])
         const a = (r.vouchers || [])[0]
         speak(a ? `${dup ? '重复，' : ''}${a.subject}，记 ${a.vno}` : '还没做账')
       } else speak('没查到')
-    }).catch(e => setCur({ ok: false, msg: e.message })).finally(() => { setBusy(false); if (!page) setTimeout(focus, 30) })
+      return r
+    }).catch(e => { const r = { ok: false, msg: e.message }; setCur(r); return r })
+      .finally(() => { busyRef.current = false; setBusy(false); if (after) after() })
+  }
+  const go = () => { const code = v.trim(); if (!code || busyRef.current) return; setV(''); run(voucherScan(code)) }
+  const shot = e => {                        // 拍照/选图 → 传上去认码
+    const f = e.target.files && e.target.files[0]
+    e.target.value = ''
+    if (f) run(shrinkPhoto(f).then(voucherScanPhoto))
   }
   const bySubj = {}
   hist.forEach(h => { const k = (h.vouchers || [])[0] ? h.vouchers[0].subject : '还没做账'; bySubj[k] = (bySubj[k] || 0) + 1 })
+  return { v, setV, cur, setCur, busy, hist, setHist, say, setSay, run, go, shot, bySubj }
+}
+
+function ScanBox({ onClose, page }) {
+  const ref = useRef(null)
+  const focus = () => { if (ref.current) ref.current.focus() }
+  useEffect(() => { if (!page) focus() }, [])
+  const { v, setV, cur, setCur, busy, hist, setHist, say, setSay, go, shot, bySubj } = useScan(() => { if (!page) setTimeout(focus, 30) })
+  const fileRef = useRef(null)
   const phoneUrl = `${window.location.origin}${window.location.pathname}#/vscan`
   return (
     <div className={page ? 'lv-scanpage' : 'lv-mask'} onMouseDown={e => { if (!page && e.target === e.currentTarget) onClose() }}>
@@ -365,10 +372,96 @@ function ScanBox({ onClose, page }) {
 }
 
 // 手机专用单页（#/vscan，App 在登录后直接出这一页）
+// ---------- 手机页（#/vscan，V2.803 重做：用户「是不是可以再优化下」「扫描，而不是拍照」）----------
+// 在钉钉里打开 → 底部大按钮调钉钉自带的「扫一扫」(实时扫，可连续扫)；别的浏览器(站点是 http，网页不能直接开摄像头)退回拍照识别。
+// 结果做成一张大卡：主体按颜色分(分堆时一眼认)，记-号最大；下面是本次已扫的卡片列表。
+const SUBJ_TONE = { 深圳星期零: 'b', 深圳星期九: 't', 孝感星期九: 'o' }
+const IcScan = () => <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16" /></svg>
+const IcCam = () => <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" /><circle cx="12" cy="13" r="3.5" /></svg>
+let _vsCfg = null
+const vsDdSetup = () => { if (!_vsCfg) { _vsCfg = ddConfig(voucherDdConfig, ['biz.util.scan']); _vsCfg.catch(() => { _vsCfg = null }) } return _vsCfg }
+
 export function VoucherScanPage({ user }) {
-  return <div className="lv"><style>{CSS}</style>
-    <ScanBox page onClose={() => {}} />
-    <div className="sc-foot">{user?.name} · 财务核算工作台 · <a href="#/" onClick={() => setTimeout(() => window.location.reload(), 0)}>回工作台</a></div>
+  const S = useScan()
+  const dd = inDingTalk()
+  const fileRef = useRef(null)
+  const [manual, setManual] = useState(false)
+  const [auto, setAuto] = useState(false)       // 连续扫：查到一张后自动再开扫一扫
+  const autoRef = useRef(auto); autoRef.current = auto
+  const timer = useRef(null)
+  const [note, setNote] = useState('')
+  useEffect(() => { if (dd) vsDdSetup().catch(() => {}); return () => clearTimeout(timer.current) }, [])
+  const photo = () => { clearTimeout(timer.current); if (fileRef.current) fileRef.current.click() }
+  const ddScan = async () => {
+    clearTimeout(timer.current); setNote('')
+    let cfgErr = ''
+    try {
+      await loadDd()
+      try { await vsDdSetup() } catch (e) { cfgErr = e.message }     // 鉴权没过也试着扫一次，调不起再报
+      const fn = window.dd && window.dd.biz && window.dd.biz.util && window.dd.biz.util.scan
+      if (!fn) throw new Error('这个钉钉版本调不起扫一扫')
+      const text = await ddCall(fn, { type: 'qrCode' }, x => (x && (x.text || x.content || x.result)) || '')
+      if (!text) return
+      const r = await S.run(voucherScan(text))
+      if (autoRef.current && r && r.ok) timer.current = setTimeout(ddScan, 1600)
+    } catch (e) {
+      const m = String((e && (e.errorMessage || e.message)) || e || '')
+      if (/cancel|取消/i.test(m) || String(e && e.errorCode) === '300001') return
+      setNote(`钉钉扫一扫没调起来：${m}${cfgErr && cfgErr !== m ? `（${cfgErr}）` : ''}。先用「拍照」识别，把这句话发给管理员。`)
+    }
+  }
+  const c = S.cur, vs = (c && c.vouchers) || [], a = vs[0]
+  const tone = x => SUBJ_TONE[x] || 'g'
+  const kv = c && c.ok ? [['供应商', c.payee], ['金额', c.amount != null ? money(c.amount) : ''], ['审批编号', c.bid], ['付款单', a && a.bill_no]].filter(x => x[1]) : []
+  return <div className="lv vs"><style>{CSS}</style>
+    <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={S.shot} />
+    <header className="vs-top">
+      <div><div className="vs-h1">扫码查凭证</div><div className="vs-sub">扫付款单右上角的二维码，看它记在哪个主体、哪张凭证</div></div>
+      <button className={'vs-chip' + (S.say ? ' on' : '')} onClick={() => S.setSay(!S.say)}>{S.say ? '读出来 · 开' : '读出来 · 关'}</button>
+    </header>
+    <main className="vs-main">
+      {S.busy ? <div className="vs-card vs-wait"><span className="vs-spin" />正在查…</div>
+        : !c ? <div className="vs-card vs-empty">
+          <svg width="92" height="112" viewBox="0 0 92 112" fill="none"><rect x="6" y="4" width="80" height="104" rx="6" fill="var(--bg)" stroke="var(--line-strong)" strokeWidth="2" />
+            <rect x="56" y="12" width="22" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)" strokeWidth="2" /><path d="M61 17h5v5h-5zM68 24h5v5h-5zM68 17h5M61 29h3" stroke="var(--accent)" strokeWidth="2" />
+            <path d="M16 20h30M16 44h60M16 56h60M16 68h60M16 80h40" stroke="var(--line-strong)" strokeWidth="3" strokeLinecap="round" /></svg>
+          <div><b>对准付款单右上角的二维码</b><br />{dd ? '点下面「扫一扫」，扫到就出结果' : '点下面「拍二维码」，拍近一点、别反光'}</div></div>
+          : !c.ok ? <div className="vs-card bad"><div className="vs-t">没查到</div><div className="vs-msg">{c.msg}</div></div>
+            : a ? <div className={'vs-card res tone-' + tone(a.subject)}>
+              {c.dup && <div className="vs-dup">这张刚才扫过了</div>}
+              <div className="vs-subj">{a.subject || '主体未知'}</div>
+              <div className="vs-vno">记-{a.vno}</div>
+              <div className="vs-mon">{ymCn(a.month)} · {a.what}{a.src === '金蝶已有' ? '（金蝶已有）' : ''}</div>
+              {vs.slice(1).map((x, i) => <div key={i} className="vs-more">另有　<b>{x.subject} 记-{x.vno}</b>　{x.what}</div>)}
+              {(c.n_adjust > 0 || c.has_xred) && <div className="vs-tag">附计提更正单{c.has_xred ? '（两张：① 红冲 ② 补提）' : ''}</div>}
+              <dl className="vs-kv">{kv.map(([k, x]) => <React.Fragment key={k}><dt>{k}</dt><dd>{x}</dd></React.Fragment>)}</dl></div>
+              : <div className="vs-card warn"><div className="vs-t">{c.state}</div>
+                <dl className="vs-kv">{kv.map(([k, x]) => <React.Fragment key={k}><dt>{k}</dt><dd>{x}</dd></React.Fragment>)}</dl></div>}
+      {note && <div className="vs-note bad">{note}</div>}
+      {!dd && <div className="vs-note">想对着就扫、不用拍照：把这个页面的网址发到<b>钉钉</b>里再点开，会用钉钉自带的扫一扫。现在这个浏览器只能拍照识别。</div>}
+      <div className="vs-sec"><b>本次已扫 {S.hist.length} 张</b>
+        <span className="vs-cnt">{Object.entries(S.bySubj).map(([k, n]) => <span key={k} className={'vs-pill tone-' + tone(k)}>{k} {n}</span>)}</span>
+        {S.hist.length > 0 && <button className="vs-lnk" onClick={() => { S.setHist([]); S.setCur(null) }}>清空</button>}</div>
+      <div className="vs-list">
+        {S.hist.map((h, i) => { const x = (h.vouchers || [])[0]; return <div key={h.inst} className="vs-row" onClick={() => S.setCur({ ...h, dup: false })}>
+          <span className={'vs-bar2 tone-' + tone(x ? x.subject : h.subject)} />
+          <div className="l"><b>{x ? '记-' + x.vno : '还没做账'}</b><span>{x ? `${x.subject} · ${ymCn(x.month)}` : h.subject || ''}</span></div>
+          <div className="r"><span>{h.payee}</span><b>{money(h.amount)}</b></div></div> })}
+        {!S.hist.length && <div className="vs-none">还没扫。扫过的会排在这里，按主体计数。</div>}
+      </div>
+      <button className="vs-lnk mid" onClick={() => setManual(!manual)}>{manual ? '收起' : '扫不了？输入审批编号'}</button>
+      {manual && <div className="vs-manual"><input value={S.v} onChange={e => S.setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') S.go() }}
+        placeholder="付款单上的 20 位审批编号" inputMode="numeric" autoComplete="off" />
+        <button disabled={S.busy || !S.v.trim()} onClick={S.go}>查</button></div>}
+      <div className="vs-foot">{user?.name} · 财务核算工作台</div>
+    </main>
+    <footer className="vs-bottom">
+      {dd ? <>
+        <button className={'vs-side' + (auto ? ' on' : '')} onClick={() => setAuto(!auto)}>连续扫<small>{auto ? '开' : '关'}</small></button>
+        <button className="vs-go" disabled={S.busy} onClick={ddScan}><IcScan />{S.hist.length ? '继续扫' : '扫一扫'}</button>
+        <button className="vs-side" disabled={S.busy} onClick={photo}><IcCam /><small>拍照</small></button></>
+        : <button className="vs-go" disabled={S.busy} onClick={photo}><IcCam />{S.busy ? '识别中…' : S.hist.length ? '拍下一张' : '拍二维码'}</button>}
+    </footer>
   </div>
 }
 
@@ -742,6 +835,47 @@ const CSS = `
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
 .lv .lv-kind{font-size:13px;margin:6px 0}
+.lv.vs{min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg-sub);color:var(--ink);font-size:15px;-webkit-tap-highlight-color:transparent}
+.lv.vs button{font:inherit;cursor:pointer}
+.vs .vs-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:16px 16px 6px}.vs .vs-h1{font-size:21px;font-weight:800;letter-spacing:.5px}
+.vs .vs-sub{font-size:12.5px;color:var(--ink-2);margin-top:3px;line-height:1.5}
+.vs .vs-chip{flex:none;border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-2);border-radius:999px;padding:6px 12px;font-size:12.5px;white-space:nowrap}
+.vs .vs-chip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:700}
+.vs .vs-main{flex:1;padding:8px 16px 16px;display:flex;flex-direction:column;gap:12px}
+.vs .vs-card{background:var(--bg);border:1px solid var(--line);border-radius:16px;padding:18px 18px 16px;box-shadow:0 2px 10px rgba(20,28,58,.05)}
+.vs .vs-empty{display:flex;gap:16px;align-items:center;color:var(--ink-2);font-size:13.5px;line-height:1.7;border-style:dashed;box-shadow:none;background:transparent}.vs .vs-empty b{color:var(--ink);font-size:15px}
+.vs .vs-wait{display:flex;gap:12px;align-items:center;justify-content:center;min-height:132px;color:var(--ink-2);font-size:16px}
+.vs .vs-spin{width:22px;height:22px;border-radius:50%;border:3px solid var(--line-strong);border-top-color:var(--accent);animation:vsspin .8s linear infinite}@keyframes vsspin{to{transform:rotate(360deg)}}
+.vs .vs-card.bad{background:var(--red-bg);border-color:var(--red-line);color:var(--red)}.vs .vs-card.warn{background:var(--amber-bg);border-color:var(--amber-line)}
+.vs .vs-t{font-size:22px;font-weight:800;line-height:1.3}.vs .vs-msg{margin-top:6px;font-size:14px;line-height:1.6}
+.vs .tone-b{--tc:var(--blue);--tb:var(--blue-bg);--tl:var(--blue-line)}.vs .tone-t{--tc:var(--teal);--tb:var(--teal-bg);--tl:#b5e8df}
+.vs .tone-o{--tc:#b25c00;--tb:#fdf1e0;--tl:#f1d3a6}.vs .tone-g{--tc:var(--green);--tb:var(--green-bg);--tl:var(--green-line)}
+.vs .vs-card.res{background:var(--tb);border-color:var(--tl);border-left:8px solid var(--tc);padding-left:16px}
+.vs .vs-subj{display:inline-block;background:var(--tc);color:#fff;font-size:17px;font-weight:700;border-radius:8px;padding:3px 12px}
+.vs .vs-vno{font-size:56px;font-weight:800;line-height:1.1;margin-top:8px;color:var(--ink);letter-spacing:1px}.vs .vs-mon{font-size:15px;font-weight:600;color:var(--tc);margin-top:2px}
+.vs .vs-dup{display:inline-block;background:var(--red);color:#fff;font-size:13px;font-weight:700;border-radius:6px;padding:2px 10px;margin-bottom:8px}
+.vs .vs-more{margin-top:8px;font-size:13.5px;color:var(--ink-2)}.vs .vs-more b{color:var(--ink)}
+.vs .vs-tag{display:inline-block;margin-top:10px;border:1px solid var(--amber-line);background:var(--amber-bg);color:var(--amber);font-size:13px;font-weight:700;border-radius:6px;padding:2px 9px}
+.vs .vs-kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;margin:14px 0 0;padding-top:12px;border-top:1px solid rgba(0,0,0,.08);font-size:13.5px}
+.vs .vs-kv dt{color:var(--ink-2);white-space:nowrap}.vs .vs-kv dd{margin:0;word-break:break-all;font-variant-numeric:tabular-nums}
+.vs .vs-note{font-size:12.5px;line-height:1.7;color:var(--ink-2);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:9px 12px}.vs .vs-note.bad{color:var(--red);background:var(--red-bg);border-color:var(--red-line)}
+.vs .vs-sec{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:14px}.vs .vs-cnt{display:flex;gap:6px;flex-wrap:wrap;flex:1}
+.vs .vs-pill{background:var(--tb);color:var(--tc);border:1px solid var(--tl);border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600}
+.vs .vs-lnk{border:0;background:none;color:var(--accent);font-size:13px;padding:4px 2px}.vs .vs-lnk.mid{align-self:center;margin-top:2px}
+.vs .vs-list{display:flex;flex-direction:column;gap:8px}.vs .vs-none{color:var(--ink-3);font-size:13px;text-align:center;padding:14px 0}
+.vs .vs-row{display:flex;align-items:center;gap:10px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:10px 12px 10px 0;overflow:hidden}
+.vs .vs-bar2{align-self:stretch;width:5px;border-radius:0 4px 4px 0;background:var(--tc);margin:-10px 0}
+.vs .vs-row .l{display:flex;flex-direction:column;min-width:0}.vs .vs-row .l b{font-size:17px}.vs .vs-row .l span{font-size:12px;color:var(--ink-2)}
+.vs .vs-row .r{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;min-width:0;max-width:56%}
+.vs .vs-row .r span{font-size:12px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}.vs .vs-row .r b{font-size:14px;font-variant-numeric:tabular-nums}
+.vs .vs-manual{display:flex;gap:8px}.vs .vs-manual input{flex:1;min-width:0;font:inherit;font-size:16px;padding:11px 12px;border:1px solid var(--line-strong);border-radius:10px;background:var(--bg);color:var(--ink)}
+.vs .vs-manual button{border:0;background:var(--accent);color:#fff;border-radius:10px;padding:0 20px;font-weight:700}.vs .vs-manual button:disabled{opacity:.45}
+.vs .vs-foot{text-align:center;color:var(--ink-3);font-size:11.5px;margin-top:auto;padding-top:8px}
+.vs .vs-bottom{position:sticky;bottom:0;display:flex;gap:10px;align-items:stretch;padding:10px 16px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);box-shadow:0 -4px 16px rgba(20,28,58,.06)}
+.vs .vs-go{flex:1;display:flex;gap:10px;align-items:center;justify-content:center;border:0;background:var(--accent);color:#fff;font-size:19px;font-weight:800;border-radius:14px;min-height:58px;letter-spacing:1px}
+.vs .vs-go:active{background:var(--accent-strong)}.vs .vs-go:disabled{opacity:.55}
+.vs .vs-side{flex:none;width:68px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-2);border-radius:14px;font-size:13px;font-weight:600}
+.vs .vs-side small{font-size:11.5px;font-weight:400}.vs .vs-side.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .lv .lv-scanpage{padding:10px;min-height:100vh;background:var(--bg-sub)}.lv .lv-scanpage .lv-dlg{width:100%;max-width:720px;margin:0 auto;box-shadow:none;padding:14px 14px 18px}
 .lv .sc-shot{display:flex;justify-content:center;align-items:center;width:100%;height:auto;min-height:60px;line-height:1.3;font-size:18px;padding:14px 10px;border-radius:12px;margin:10px 0 2px}.lv .sc-foot{text-align:center;color:var(--ink-2);font-size:12px;padding:10px}
 @media (max-width:640px){.lv .lv-scan .sc-subj{font-size:22px}.lv .lv-scan .sc-big{font-size:34px}.lv .lv-scan .sc-v{gap:10px}.lv .lv-scan .sc-in{flex-wrap:wrap}
