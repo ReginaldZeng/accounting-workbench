@@ -26,6 +26,7 @@ PR = store.payreq
 FX = store.review_line_fix
 _OVR_KEY = "logi_voucher_paper_ok"          # {inst_id: {by, at}} 纸质件没到、手动放行做账
 _POSTED_KEY = "logi_voucher_posted"         # {inst_id: {bill_no, vid, vno, book, at, by}} 已写入金蝶
+_FEE_KEY = "logi_voucher_fee"               # {inst_id: {vid, vno, year, month, date, book, by, at, …}} 审核时由系统生成的费用凭证(V2.835)
 _LATER_KEY = "logi_voucher_later"           # {inst_id: {by, at, note}} 人工确认「发票后补，先做付款凭证」(V2.832)
 _PICK_KEY = "logi_voucher_pick"             # {inst_id: {picks: [{year, month, vno}], by, at}} 人工选定这张请款单核销哪几张计提(V2.817)
 _ACC_CACHE = {}
@@ -1376,6 +1377,194 @@ async def scan_photo(request: Request):
         return await run_in_threadpool(run)
     except Exception as e:
         return {"ok": False, "msg": "识别出错：%s" % str(e)[:160]}
+
+
+# ---------- 审核时生成费用凭证（V2.835：不计提、直接做账的那一笔）----------
+# 用户 2026-10-06：「这种还是没法自动，因为维度需要人检查下」「连带审核一起吧，审核完检查之后生成凭证」。
+# 做法：复核台登记制的承运商审核时，系统把这家上一次费用凭证的科目/部门/费用项目/产品分类带出来，人核对(可改)、打勾确认后才生成；
+#   借 费用(不含税) + 借 进项税(有票＝待认证，每张票一行、摘要以发票号开头；没票＝暂估) / 贷 2241.02 供应商。提交不审核。
+#   生成后自动把这张凭证选定给这张请款单(付款做账、复核台总表就都认得)。不进自动做账。
+def _last_direct(book, sup_code):
+    """这家在本主体账簿最近一张直接做账的费用凭证(今年没有看去年) → acc_voucher / None。只读。"""
+    s, conf = kc.login()
+    for y in (datetime.now().year, datetime.now().year - 1):
+        rows = kc._query(s, conf, "GL_VOUCHER", [("FVOUCHERGROUPNO", "号"), ("FPeriod", "期"), ("FEXPLANATION", "摘要"), ("FCREDIT", "贷")],
+                         "FACCOUNTBOOKID.FName='%s' and FYear=%d and FAccountID.FNumber like '2241%%' and FCREDIT>0 and FDetailID.FFLEX4.FNumber='%s'" % (
+                             book.replace("'", ""), y, sup_code.replace("'", "")))
+        ds = sorted({(int(r["期"] or 0), _s(r["号"])) for r in rows if _is_direct(r["摘要"], r["贷"])}, key=lambda k: (k[0], int(k[1]) if k[1].isdigit() else 0))
+        if ds:
+            per, vno = ds[-1]
+            vs, _ = _accruals(book, "%04d-%02d" % (y, per), sup_code)
+            return next((v for v in vs if v["vno"] == vno), None)
+    return None
+
+
+def _fee_draft(inst):
+    with db._engine.connect() as c:
+        r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
+    if not r:
+        return {"ok": False, "msg": "没有这张请款单"}
+    r = dict(r)
+    folder, invs = _invoices(inst)
+    book, sup = r["subject_full"], r["sup_code"]
+    last = _last_direct(book, sup)
+    exist = []
+    if r.get("period"):
+        try:
+            exist = [c for c in _accrual_candidates(r, invs)[0] if c.get("direct") and not c["used"] and not c["other"]]
+        except Exception:
+            exist = []
+    e0 = ((last or {}).get("exp_lines") or [{}])[0]
+    s, conf = kc.login()
+    date, y, m = _xred_date(book, datetime.now().strftime("%Y-%m-%d"), s, conf)
+    ded = [i for i in invs if i.get("deduct")]
+    rec = (db.get_setting(_FEE_KEY, None) or {}).get(inst)
+    return {"ok": True, "fee": rec, "picked": (db.get_setting(_PICK_KEY, None) or {}).get(inst),
+            "req": {"inst": inst, "bid": r.get("business_id"), "subject": r.get("subject"), "subject_full": book, "payee": r.get("payee"), "code": sup,
+                    "amount": float(r.get("amount") or 0), "period": r.get("period") or "", "applicant": r.get("applicant") or "", "reason": r.get("reason") or ""},
+            "invoices": [{k: i.get(k) for k in ("number", "type_short", "gross", "tax", "rate", "deduct")} for i in invs],
+            "inv_total": round(sum(i["gross"] for i in invs), 2), "inv_tax": round(sum(i["tax"] for i in ded), 2),
+            "tax_mode": "inv" if ded else ("none" if invs else "est"),      # 有能抵扣的票＝待认证；有票但都不能抵扣＝不出税行；没票＝暂估
+            "last": ({"vno": last["vno"], "year": last["year"], "month": last["month"], "expl": last["expl"], "gross": last["gross"], "rate": last["rate"]} if last else None),
+            "defaults": {"acct": " ".join(x for x in (e0.get("acct"), e0.get("acct_name")) if x), "dept": " ".join(x for x in (e0.get("dept_code"), e0.get("dept")) if x),
+                         "fee": " ".join(x for x in (e0.get("fee_code"), e0.get("fee")) if x), "biz": " ".join(x for x in (e0.get("biz_code"), e0.get("biz")) if x),
+                         "proj": " ".join(x for x in (e0.get("proj_code"), e0.get("proj")) if x),
+                         "rate": (last or {}).get("rate"), "expl": (last or {}).get("expl") or "%s提起支付%s" % (r.get("applicant") or "", r.get("payee") or ""),
+                         "sup_grp": ((last or {}).get("ap_line") or {}).get("sup_grp") or ""},
+            "date": date, "exist": [{k: c[k] for k in ("year", "month", "vno", "gross", "expl")} for c in exist]}
+
+
+@router.get("/api/logistics-voucher/fee-draft")
+def fee_draft(request: Request, inst: str):
+    """审核时的费用凭证草稿：请款单、发票、这家上一次费用凭证的维度(默认值)、金蝶里有没有还没用过的费用凭证(防重复)。只读。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    try:
+        d = _fee_draft(inst)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "读金蝶失败：%s" % str(e)[:160]}, status_code=502)
+    return d if d.get("ok") else JSONResponse(d, status_code=400)
+
+
+def _fee_post(inst, b, user):
+    d = _fee_draft(inst)
+    if not d.get("ok"):
+        raise RuntimeError(d.get("msg"))
+    if not b.get("checked"):
+        raise RuntimeError("要先核对科目和维度并打勾确认")
+    s, conf = kc.login()
+    allf = dict(db.get_setting(_FEE_KEY, None) or {})
+    old = allf.get(inst)
+    if old and kc.view_voucher(old.get("vid"), s, conf).get("exists"):
+        raise RuntimeError("这张请款单的费用凭证 记-%s 已经生成过了" % old.get("vno"))
+    if d["exist"] and not b.get("force"):
+        raise RuntimeError("金蝶里已经有这家还没用过的费用凭证（%s），多半已经做过了；确实要再做一张请勾「仍然新建」" %
+                           "、".join("%d/%s# %.2f" % (x["month"], x["vno"], x["gross"]) for x in d["exist"]))
+    req = d["req"]
+    gross = round(req["amount"], 2)
+    if gross <= 0:
+        raise RuntimeError("请款金额不对")
+    dims = {}
+    for k, need in (("acct", True), ("dept", True), ("fee", True), ("biz", False), ("proj", False)):
+        code, name = LV._split_code(b.get(k))
+        if need and not code:
+            raise RuntimeError("%s没填" % {"acct": "科目", "dept": "部门", "fee": "费用项目"}[k])
+        dims[k] = (code, name)
+    expl = str(b.get("expl") or "").strip()
+    if not expl:
+        raise RuntimeError("摘要没填")
+    if "计提" in expl:
+        raise RuntimeError("这是直接做账的费用凭证，摘要不要写「计提」（系统靠摘要分辨计提和直接做账）")
+    # 税：有能抵扣的票→待认证(每张票一行)；没票→暂估(按填的税率)；有票但不能抵扣→全额进费用
+    _, invs = _invoices(inst)
+    ded = [i for i in invs if i.get("deduct")]
+    tax_lines, tax = [], 0.0
+    if invs:
+        if abs(sum(i["gross"] for i in invs) - gross) >= 0.005:
+            raise RuntimeError("票夹里发票含税合计 %.2f ≠ 请款金额 %.2f，先把发票弄对" % (sum(i["gross"] for i in invs), gross))
+        for i in ded:
+            if float(i.get("tax") or 0):
+                tax_lines.append(("2221.01.06", "%s%s" % (i["number"], expl), round(float(i["tax"]), 2)))
+        tax = round(sum(t for _, _, t in tax_lines), 2)
+    else:
+        try:
+            rate = float(str(b.get("rate") if b.get("rate") not in (None, "") else 0))
+        except ValueError:
+            raise RuntimeError("税率要填数字")
+        rate = rate / 100.0                 # 页面按百分数填(1 = 1%)
+        if not 0 <= rate <= 0.13:
+            raise RuntimeError("税率不对（0～13%）")
+        tax = LV.split_gross(gross, rate)[1] if rate else 0.0
+        if tax:
+            tax_lines.append(("2221.01.07", expl, tax))
+    net = round(gross - tax, 2)
+    book = req["subject_full"]
+    bcode = {o.get("full_name"): o.get("book_code") for o in (db.list_orgs() or [])}.get(book)
+    if not bcode:
+        raise RuntimeError("主体档案里没有「%s」的账簿编码" % book)
+    exp_dims = {"FDETAILID__FFLEX5": {"FNumber": dims["dept"][0]}, "FDETAILID__FFLEX9": {"FNumber": dims["fee"][0]}}
+    if dims["biz"][0]:
+        exp_dims["FDETAILID__FF100010"] = {"FNumber": dims["biz"][0]}
+    if dims["proj"][0]:
+        exp_dims["FDETAILID__FF100006"] = {"FNumber": dims["proj"][0]}
+    ents = [dict(_KD_BASE, FEXPLANATION=expl, FACCOUNTID={"FNumber": dims["acct"][0]}, FDEBIT=net, FCREDIT=0, FDetailID=exp_dims)]
+    for acct, e2, t in tax_lines:
+        ents.append(dict(_KD_BASE, FEXPLANATION=e2, FACCOUNTID={"FNumber": acct}, FDEBIT=t, FCREDIT=0))
+    ap = {"FDETAILID__FFLEX4": {"FNumber": req["code"]}}
+    if d["defaults"].get("sup_grp"):
+        ap["FDETAILID__FF100005"] = {"FNumber": d["defaults"]["sup_grp"]}
+    ents.append(dict(_KD_BASE, FEXPLANATION=expl, FACCOUNTID={"FNumber": "2241.02"}, FDEBIT=0, FCREDIT=gross, FDetailID=ap))
+    date, y, m = _xred_date(book, datetime.now().strftime("%Y-%m-%d"), s, conf)
+    r = kc.save_voucher({"FACCOUNTBOOKID": {"FNumber": bcode}, "FVOUCHERGROUPID": {"FNumber": "PRE001"}, "FEntity": ents,
+                         "FDate": date, "FYear": y, "FPeriod": m}, s, conf)
+    info = kc.view_voucher(r["id"], s, conf)
+    vno = info.get("vno") or ""
+    sub_err = ""
+    try:
+        kc.submit_bill("GL_VOUCHER", r["id"], s, conf)
+    except Exception as e:
+        sub_err = str(e)[:160]
+    rec = {"vid": r["id"], "vno": vno, "year": y, "month": m, "date": date, "book": book, "by": user, "at": _now(), "gross": gross, "net": net, "tax": tax,
+           "tax_acct": tax_lines[0][0] if tax_lines else "", "expl": expl, "dims": {k: " ".join(x for x in v if x) for k, v in dims.items()},
+           "submitted": not sub_err, "submit_err": sub_err}
+    allf[inst] = rec
+    db.set_setting(_FEE_KEY, allf, user)
+    _ACC_CACHE.clear()                      # 新凭证要马上能被候选/预览读到
+    steps = ["费用凭证 记-%s 已建（%s，%s）：借 %s %.2f%s / 贷 2241.02 %.2f%s" % (
+        vno, book[:7], date, dims["acct"][0], net, (" + 进项税 %.2f（%s）" % (tax, "待认证" if tax_lines and tax_lines[0][0].endswith("06") else "暂估")) if tax else "",
+        gross, "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err)]
+    # 自动选定给这张请款单(没人选过才写)
+    picks = dict(db.get_setting(_PICK_KEY, None) or {})
+    if vno and not (picks.get(inst) or {}).get("picks"):
+        picks[inst] = {"picks": [{"year": y, "month": m, "vno": vno}], "part": False, "memo": "", "by": user, "at": _now(), "auto": "fee"}
+        db.set_setting(_PICK_KEY, picks, user)
+        steps.append("已把这张凭证选定给这张请款单（付款时核销它）")
+    db.audit(user, "物流付款做账-审核生成费用凭证", "记-%s" % vno, "%s %s %.2f；%s；%s" % (
+        req["subject"], req["payee"], gross, " / ".join(rec["dims"][k] for k in ("acct", "dept", "fee", "biz", "proj") if rec["dims"].get(k)),
+        "已提交" if not sub_err else "提交失败：" + sub_err))
+    return {"ok": True, "vno": vno, "steps": steps, "fee": rec}
+
+
+@router.post("/api/logistics-voucher/fee-post")
+async def fee_post(request: Request):
+    """审核通过、人核对过维度后生成费用凭证并提交(不审核)。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    import threading
+    lk = _POST_LOCK.setdefault(inst, threading.Lock())
+    if not lk.acquire(blocking=False):
+        return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
+    try:
+        from starlette.concurrency import run_in_threadpool
+        r = await run_in_threadpool(_fee_post, inst, b, u["name"])
+    except Exception as e:
+        r = {"ok": False, "msg": "费用凭证没生成：%s" % str(e)[:220]}
+    finally:
+        lk.release()
+    return r if r.get("ok") else JSONResponse(r, status_code=400)
 
 
 @router.post("/api/logistics-voucher/later")

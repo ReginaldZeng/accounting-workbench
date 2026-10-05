@@ -170,6 +170,9 @@ export const voucherPick = (inst, picks, opt) => j('/api/logistics-voucher/pick'
 // 发票后补：确认「先做付款凭证」/ 发票到了以后建「暂估转待认证」凭证
 export const voucherLater = (inst, on, note) => j('/api/logistics-voucher/later', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, on, note }) })
 export const voucherPostLater = inst => j('/api/logistics-voucher/post-later', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst }) })
+// 审核时生成费用凭证（不计提、直接做账的那一笔）：草稿带出上次的维度，人核对后生成
+export const voucherFeeDraft = inst => j('/api/logistics-voucher/fee-draft?inst=' + encodeURIComponent(inst))
+export const voucherFeePost = (inst, body) => j('/api/logistics-voucher/fee-post', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, ...body }) })
 export const voucherPaperOverride = (inst, on, note = '') => j('/api/logistics-voucher/paper-override', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, on, note }) })
 // V2.731 首页「申请开通」→ 钉钉推送（/mine 只读本人申请记录，首页唯一允许的轻量请求）
 export const submitAccessRequest = (cap, label, pages, note) => jp('/api/access-request', { cap, label, pages, note })

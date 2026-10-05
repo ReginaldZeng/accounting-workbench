@@ -12,6 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
 import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
+import { voucherFeeDraft, voucherFeePost, voucherPick } from '../api.js'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -137,6 +138,104 @@ let DIMOPT = null                                                               
 const loadDimOpt = () => (DIMOPT = DIMOPT || reviewDimOptions().catch(() => { DIMOPT = null; return null }))
 
 // 计提更正弹窗：只改点的那一笔(用户 2026-09-30：同一账单金额下常常只有一笔记错)；只登记，打印交专人去金蝶改
+// 审核时生成费用凭证(V2.835，用户「这种还是没法自动，因为维度需要人检查下」「连带审核一起吧，审核完检查之后生成凭证」)：
+// 登记制的承运商不计提、直接做费用凭证——审核时系统带出这家上一次的科目/部门/费用项目/产品分类，人核对(可改)、打勾后才生成(提交不审核)。
+// 金蝶里已经有这家还没用过的费用凭证的(人已经做过了)，不新建，点「就认这张」把它选定给这张请款单即可。
+const FEE_F = [['acct', '科目', true], ['dept', '部门', true], ['fee', '费用项目', true], ['biz', '产品分类', false], ['proj', '产品项目', false]]
+function FeeVoucherModal({ row, onClose, onDone }) {
+  const reqs = Object.values(row.cells || {}).flatMap(c => c.reqs || []).filter(v => v.st && v.st.key !== 'void')
+  const [inst, setInst] = useState(reqs.length === 1 ? reqs[0].inst : '')
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [f, setF] = useState({ acct: '', dept: '', fee: '', biz: '', proj: '', expl: '', rate: '' })
+  const [chk, setChk] = useState(false)
+  const [force, setForce] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [dim, setDim] = useState(null)
+  useEffect(() => { loadDimOpt().then(x => setDim(x || { ok: false })) }, [])
+  const load = () => {
+    if (!inst) return
+    setD(null); setErr(''); setChk(false); setForce(false)
+    voucherFeeDraft(inst).then(r => {
+      setD(r)
+      const df = r.defaults || {}
+      setF({ acct: df.acct || '', dept: df.dept || '', fee: df.fee || '', biz: df.biz || '', proj: df.proj || '', expl: df.expl || '', rate: df.rate != null ? String(r2(df.rate * 100)) : '' })
+    }).catch(e => setErr(e.message))
+  }
+  useEffect(load, [inst])
+  const opts = k => ((dim && dim[k]) || []).map(o => cn(o.code, o.name))
+  const gross = d ? d.req.amount : 0
+  const rate = (Number(f.rate) || 0) / 100          // 按百分数填(1 = 1%)
+  const tax = !d ? 0 : d.tax_mode === 'inv' ? d.inv_tax : d.tax_mode === 'none' ? 0 : r2(gross - gross / (1 + rate))
+  const net = r2(gross - tax)
+  const bad = FEE_F.filter(([k, , need]) => (need && !f[k].trim()) || (f[k].trim() && opts(k).length && !opts(k).includes(f[k].trim()))).map(([, lb]) => lb)
+  const invBad = d && d.invoices.length > 0 && Math.abs(d.inv_total - gross) >= 0.005
+  const done = d && d.fee
+  const post = () => {
+    setBusy(true); setMsg(null)
+    voucherFeePost(inst, { ...f, checked: chk, force }).then(r => { setMsg({ ok: true, text: (r.steps || []).join(' → ') }); load(); onDone() })
+      .catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false))
+  }
+  const adopt = x => {
+    if (!window.confirm(`把金蝶里已有的 ${x.month}/${x.vno}#（${money(x.gross)}）认作这张请款单的费用凭证？不新建凭证。`)) return
+    voucherPick(inst, [{ year: x.year, month: x.month, vno: x.vno }]).then(() => { setMsg({ ok: true, text: `已认定 ${x.month}/${x.vno}# 是这张请款单的费用凭证，没有新建` }); load(); onDone() }).catch(e => setMsg({ ok: false, text: e.message }))
+  }
+  return (
+    <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="fxdlg" style={{ width: 'min(760px,100%)' }} role="dialog" aria-label="审核并生成费用凭证">
+        <div className="fxhead"><b>审核 · 生成费用凭证</b><span>{row.carrier}</span><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxsub">这家不计提：审核通过后直接做费用凭证（借 费用＋进项税 / 贷 应付），付款时再做付款凭证。维度先带出这家上一次用的，<b>请核对、可以改</b>，确认后才生成；生成后提交、不审核。</div>
+        {reqs.length > 1 && <div className="fxper">哪一张请款单：{reqs.map(v => <button key={v.inst} className={'btn sm' + (inst === v.inst ? ' pri' : '')} onClick={() => setInst(v.inst)}>{v.subject} {money(v.amount)}</button>)}</div>}
+        {!reqs.length && <div className="fxsub">这家这个月没有请款单。</div>}
+        {err && <div className="fxwarn">{err}</div>}
+        {inst && !d && !err && <div className="fxsub">读请款单、发票和金蝶里这家上一次的费用凭证…</div>}
+        {d && <>
+          <div className="fxamt">{d.req.subject} · 请款 <b className="mono">{money(gross)}</b> · {d.req.applicant} · {d.req.period || '未认月'} 账单
+            <div className="dim" style={{ fontSize: 12, marginTop: 2 }}>{String(d.req.reason || '').split('\n').slice(0, 2).join(' / ').slice(0, 90)}</div></div>
+          <div className="fxamt">发票：{d.invoices.length
+            ? <>{d.invoices.length} 张，含税 {money(d.inv_total)}{d.tax_mode === 'inv' ? <>，税额 {money(d.inv_tax)} → 挂<b>待认证进项税</b></> : '，不能抵扣 → 全额进费用'}{invBad && <b style={{ color: '#B03A3A' }}>　≠ 请款金额，先把发票弄对</b>}</>
+            : <>还没有 → 税按下面的税率挂<b>暂估进项税</b>，发票到了再转待认证（发票后补）</>}</div>
+          {done && <div className="fxok">这张请款单的费用凭证已经生成：<b>记-{d.fee.vno}</b>（{d.fee.date}，{d.fee.by} {d.fee.at}）{d.fee.submitted === false ? '，提交没成功，请到金蝶手动提交' : '，已提交，等人审核'}</div>}
+          {!done && d.exist.length > 0 && <div className="fxwarn">金蝶里已经有这家还没用过的费用凭证，这张请款单多半已经做过了，别重复做：
+            {d.exist.map(x => <div key={x.month + x.vno} style={{ marginTop: 4 }}><b className="mono">{x.month}/{x.vno}#</b> {money(x.gross)}　<span className="dim">{x.expl}</span>
+              　<button className="btn sm" onClick={() => adopt(x)}>就认这张（不新建）</button></div>)}
+            <label style={{ display: 'block', marginTop: 6 }}><input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} /> 那几张不是这张请款单的，仍然新建</label></div>}
+          {!done && <>
+            <table className="fxtbl">
+              <thead><tr><th style={{ width: 96 }}>项目</th><th>这次用 <small>（带出的是上一次{d.last ? ` ${d.last.month}/${d.last.vno}#` : ''}的，请核对；从下拉选）</small></th></tr></thead>
+              <tbody>
+                {FEE_F.map(([k, lb, need]) => <tr key={k}><td>{lb}{need && <span style={{ color: '#B03A3A' }}> *</span>}</td>
+                  <td><input list={'fee-' + k} value={f[k]} placeholder={need ? '必填' : '可不填'} onChange={e => setF({ ...f, [k]: e.target.value })} />
+                    <datalist id={'fee-' + k}>{opts(k).map(o => <option key={o} value={o} />)}</datalist></td></tr>)}
+                <tr className="fxsep"><td>摘要 <span style={{ color: '#B03A3A' }}>*</span></td><td><input value={f.expl} onChange={e => setF({ ...f, expl: e.target.value })} /></td></tr>
+                {d.tax_mode === 'est' && <tr><td>税率</td><td><span className="fxpct"><input inputMode="decimal" value={f.rate} placeholder="如 1；不含税填 0" onChange={e => setF({ ...f, rate: e.target.value })} />%</span>
+                  <span className="dim">　没票先按这个税率暂估</span></td></tr>}
+              </tbody>
+            </table>
+            <table className="fxtbl">
+              <thead><tr><th>凭证预览 <small>{d.req.subject_full} · {d.date}</small></th><th style={{ width: 110, textAlign: 'right' }}>借</th><th style={{ width: 110, textAlign: 'right' }}>贷</th></tr></thead>
+              <tbody>
+                <tr><td>{f.acct || '科目？'}<span className="dim">　{[f.dept, f.fee, f.biz, f.proj].filter(Boolean).map(nm).join(' · ')}</span></td><td style={{ textAlign: 'right' }} className="mono">{money(net)}</td><td></td></tr>
+                {tax > 0 && <tr><td>{d.tax_mode === 'inv' ? '2221.01.06 待认证进项税额（每张票一行，摘要以发票号开头）' : '2221.01.07 暂估进项税'}</td><td style={{ textAlign: 'right' }} className="mono">{money(tax)}</td><td></td></tr>}
+                <tr><td>2241.02 供应商往来<span className="dim">　{d.req.code} {d.req.payee}</span></td><td></td><td style={{ textAlign: 'right' }} className="mono">{money(gross)}</td></tr>
+              </tbody>
+            </table>
+            {bad.length > 0 && <div className="fxwarn">{bad.join('、')}：没填，或不在金蝶主数据里（请从下拉选）</div>}
+            <label className="fxamt"><input type="checkbox" checked={chk} onChange={e => setChk(e.target.checked)} /> 我已核对科目、部门、费用项目、产品分类和摘要，没有问题</label>
+          </>}
+          {msg && <div className={msg.ok ? 'fxok' : 'fxwarn'}>{msg.text}</div>}
+          <div className="fxbtns">
+            {!done && <button className="btn pri" disabled={busy || !chk || bad.length > 0 || invBad || !f.expl.trim() || (d.exist.length > 0 && !force)} onClick={post}>{busy ? '写金蝶中…' : '审核通过，生成费用凭证'}</button>}
+            <button className="btn" onClick={onClose}>关闭</button>
+            <span className="dim" style={{ fontSize: 12 }}>生成后会自动把这张凭证选定给这张请款单；付款凭证在「付款做账」里做。</span>
+          </div>
+        </>}
+      </div>
+    </div>
+  )
+}
+
 function FixEditor({ at, rows, period, onSave, onCancel }) {
   const accr = rows.filter(r => r.kind === 'accr')
   const me = accr.find(r => r.key === at.key) || {}
@@ -231,6 +330,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [supq, setSupq] = useState('')
   const [ovf, setOvf] = useState('')             // 总表按复核状态筛
   const [pr, setPr] = useState(null)             // 打开的钉钉请款单
+  const [feeRow, setFeeRow] = useState(null)     // 登记制：审核并生成费用凭证的那一行
   const [dtBusy, setDtBusy] = useState(false)
   const [ovBusy, setOvBusy] = useState(false)     // 总表「刷新」进行中
   const [open, setOpen] = useState({})            // 逐单：展开的单据号
@@ -561,6 +661,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fxdlg{background:#fff;border-radius:10px;width:min(620px,100%);max-height:90vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.22);
         padding:16px 18px;display:flex;flex-direction:column;gap:10px;border-top:4px solid #D9A441}
       .lrv .fxhead{font-size:15px;color:#1B2733;display:flex;gap:10px;align-items:center}
+      .lrv .fxok{font-size:13px;background:#E8F4EE;border:1px solid #CBE4D5;color:#1F7A55;border-radius:6px;padding:7px 10px}
+      .lrv .fxwarn{font-size:13px;background:#FBF0DA;border:1px solid #E6CFA6;color:#8A5A00;border-radius:6px;padding:7px 10px}
+      .lrv .fxbtns{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
       .lrv .fxhead .sp{flex:1}
       .lrv .fxx{font:inherit;background:none;border:none;font-size:16px;color:#7A8791;cursor:pointer;padding:0 4px}
       .lrv .fxsub{font-size:12px;color:#6B7A86}
@@ -745,7 +848,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     return <>{r.signed ? <span className="pill ok" title={r.signed.signed_at}>已登记 · {r.signed.reviewer}</span> : <span className={'pill ' + cl}>{lb}</span>}
                       {sub && <span className="sub">{sub}</span>}</>
                   })()}</td>
-                  <td>{r.register
+                  <td>{r.register && !r.signed && r.status === 'regnoacc' && <button className="btn" style={{ marginBottom: 4 }} title="这家不计提：审核通过后直接做费用凭证。系统带出上次的维度，核对后生成"
+                    onClick={() => setFeeRow(r)}>审核 · 费用凭证</button>}
+                    {r.register
                     ? (r.signed
                       ? <button className="btn" title="撤销这家这月的登记" onClick={() => { if (window.confirm(`撤销 ${r.carrier} ${period} 的登记？`)) reviewUnsign(r.short || r.carrier, period).then(refreshOv).catch(e => flash('撤销失败：' + e.message)) }}>撤销登记</button>
                       : <button className="btn pri" disabled={r.status === 'regnoacc'} title={r.status === 'regnoacc' ? '这家不计提、直接做费用凭证：先到「付款做账」这张请款单的预览里点「选择核销哪些计提」，把它的费用凭证选定，这里才有数可比' : '登记制：没有可逐单核的账单，只核对计提(或费用凭证)和请款两个数'} onClick={() => regSign(r)}>登记（不逐单）</button>)
@@ -755,6 +860,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             </tbody>
           </table></div>
           {pr && <PayReqDlg key={pr.inst} v={pr} onClose={() => setPr(null)} onChanged={reloadOv} flash={flash} />}
+          {feeRow && <FeeVoucherModal row={feeRow} onClose={() => setFeeRow(null)} onDone={refreshOv} />}
           <div className="ovfoot">付款(复核)下的小标＝钉钉请款单进度（待谁审批 / 已通过·待付款 / 已付款＝金蝶出现付款单），点开看节点和附件。承运商＝金蝶全称。计提＝2241 本期贷方；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径）；差异＝计提−复核应付。复核状态＝该承运商本月是否已「确认通过并登记」。只有已配取数说明的承运商可「开始复核」。</div>
         </div>
       )}
