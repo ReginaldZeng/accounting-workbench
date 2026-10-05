@@ -101,6 +101,14 @@ function OrderProof({period,shop,shopName,order,onClose}) {
         <div className="ec-tw-arrow">▶<em className="ec-warn">{d.settled?`平台费 ¥ ${money(d.fee_total)}`:'—'}</em></div>
         <div className="ec-tw-node"><small>账户到账</small><b className={d.settled?'':'ec-tw-mute'}>{d.settled?yuan(d.cash_total):'待到账'}</b></div>
       </div></div>
+      <div className="ec-formula">
+        <div><small>抖音这边的钱是这么算的</small>{d.settled?(d.paid_total!=null&&Math.abs(d.paid_total+d.subsidy_total-d.refund_total-d.fee_total-d.cash_total)<0.011
+          ?<span>买家实付 {money(d.paid_total)} ＋ 平台等补贴 {money(d.subsidy_total)} － 结算时退款 {money(d.refund_total)} － 平台扣费 {money(d.fee_total)} ＝ <b>到账 {money(d.cash_total)}</b></span>
+          :<span>到账 {money(d.cash_total)} ＋ 平台扣费 {money(d.fee_total)} ＝ 应冲应收 {money(d.flow_total)}{d.refund_total>0&&`（结算时已退款 ${money(d.refund_total)}）`}</span>):<span className="ew-muted-num">这单还没结算</span>}
+          {d.settled&&<span>所以应该冲掉的应收 ＝ 到账 {money(d.cash_total)} ＋ 扣费 {money(d.fee_total)} ＝ <b>{money(d.flow_total)}</b></span>}</div>
+        <div><small>金蝶这边挂着的应收</small>{d.bills.length?<span>{blue.length>0&&`蓝字 ${money(blue.reduce((n,b)=>n+b.open,0))}`}{red.length>0&&` ＋ 红字 ${money(red.reduce((n,b)=>n+b.open,0))}`} ＝ <b>未核销 {money(d.open_total)}</b>{d.written_total!==0&&`（已核销 ${money(d.written_total)}）`}</span>:<span className="ew-muted-num">没有应收单</span>}
+          {d.settled&&d.bills.length>0&&<span className={Math.abs(diff)>=0.005?'ew-open-red':''}>{Math.abs(diff)<0.005?'两边相等':`两边差 ${money(diff)}（金蝶 − 抖音）`}</span>}</div>
+      </div>
       <div className="ec-chain-badges">{d.categories.map(c=><span key={c}>{c}</span>)}{d.btype&&<span>{d.btype}</span>}{merged&&<span>合单发货 · {d.members.length} 个平台订单</span>}</div>
       {merged&&<p className="ec-chain-note">这 {d.members.length} 个平台订单在旺店通合成一张单发货，金蝶应收照合并后的单开、只记了其中一个订单号，所以放在一起对：{d.members.join('、')}。</p>}
       {d.reason&&<div className="ew-notice" role="status">{d.reason}</div>}
