@@ -2480,9 +2480,17 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         return (not fsub or sub == fsub) and (not ffee or fee == ffee) and (bset is None or bb in bset)
 
     rows_all = rows            # 单据视图缓存按整家承运商建，按组筛在缓存之后
+
+    def _nd(r):
+        """没有金蝶单号的账单行(仓储费、设备/托盘搬运费、延迟扣款…)：没法逐单核，第①步按汇总核(可逐单一栏写「否·汇总核」)。
+        V2.829(用户 2026-10-05「这几个否的，为什么我还能再逐单看到」)：第②步不再把它们列成单据(原来挂在「免核·无单据·账单调整」里)，只在表上方留一行数。"""
+        d = (r.get("doc_no") or "").split("+")[0]
+        return not d or d == "无单据"
     # 第②步三个下拉筛选(主体/费用类型/产品线)的选项：取整家本月全部账单行计张数(一行=表里一张，与列表条数一致；口径同 fsub/ffee/fbiz 筛选)
     _fc = {"subject": {}, "fee": {}, "biz": {}}
     for r in rows_all:
+        if _nd(r):
+            continue
         for fk, fv in (("subject", _eff_subject(r)), ("fee", _eff_fee(r)), ("biz", _bill_biz(r))):
             _fc[fk][fv or ""] = _fc[fk].get(fv or "", 0) + 1
     facets = {k: sorted(v.items(), key=lambda kv: (-kv[1], kv[0])) for k, v in _fc.items()}
@@ -2491,6 +2499,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         counts = lr.verdict_counts(rows)
 
     conf = _doc_ok(carrier, period)
+    nodoc = [{"subject": _eff_subject(r), "fee_item": _eff_fee(r), "bizline": _bill_biz(r), "amount": round(float(r.get("amount") or 0), 2),
+              "note": r.get("note") or ""} for r in rows if _nd(r)]
 
     def d0_of(r):
         return (r.get("doc_no") or "").split("+")[0]
@@ -2522,7 +2532,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         return True
 
     by_weight = carrier in _WEIGHT_CARRIERS
-    filt = [r for r in rows if keep(r)]
+    filt = [r for r in rows if keep(r) and not _nd(r)]
     page = max(1, int(page))
     sl = filt if q_on else filt[(page - 1) * size: page * size]   # 搜索不分页(结果集小)，全量取物料后按全字段筛
     # 统一物料模板：按重量(顺丰/天鹰)/按件数箱(丰源)/快递件数(迅鸽)共用同一分支
@@ -2543,6 +2553,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 _ACCR_CACHE[ck] = (pool, None, _t.time())
             for x in pool:                    # 缓存里的单据每次重挂确认态
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
+            pool = [x for x in pool if x["doc_no"]]      # 无单据的不列(见 _nd)；缓存里那份不动
             ex_all = sum(1 for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff", "price"))   # 步骤条用整家总数，不随筛选变
             if bucket_on:
                 pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
@@ -2558,8 +2569,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
             dc = {"miss": counts.get("miss", 0), "qtydiff": counts.get("qtydiff", 0),
-                  "info": sum(1 for r in rows if r.get("qty_state") == "na"),
-                  "ok": sum(1 for r in rows if r.get("qty_state") == "ok"), "all": len(rows), "done": 0}
+                  "info": sum(1 for r in rows if r.get("qty_state") == "na" and not _nd(r)),
+                  "ok": sum(1 for r in rows if r.get("qty_state") == "ok"), "all": sum(1 for r in rows if not _nd(r)), "done": 0}
             seen = set()
             for r in rows:                    # 大承运商按中间表行扣掉已确认的(行级近似，单号去重计已确认)
                 d0 = d0_of(r)
@@ -2598,7 +2609,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier)}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "nodoc": nodoc}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
