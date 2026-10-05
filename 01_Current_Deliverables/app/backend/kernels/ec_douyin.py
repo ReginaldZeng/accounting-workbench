@@ -331,10 +331,14 @@ def reconcile(period, settle, ledger, bills, orders=None, overdue_days=10, toler
             for name, value in r['fees'].items(): lines[name] += value
     for r in source:
         if r['scene'] != SETTLE: lines[r['scene'] or '未注明场景'] -= r['amt']
-    deductions = [{'name': k, 'amount': round(v, 2)} for k, v in sorted(lines.items(), key=lambda x: -abs(x[1])) if round(v, 2)]
+    deductions = [{'name': k, 'amount': round(v, 2), 'kind': 'fee' if k in FEE_COLUMNS else 'other'}
+                  for k, v in sorted(lines.items(), key=lambda x: -abs(x[1])) if round(v, 2)]
     draft = {'net': net, 'deductions': deductions, 'deduction_total': round(math.fsum(d['amount'] for d in deductions), 2),
              'from_ledger': bool(ledger_now)}
     draft['total'] = round(net + draft['deduction_total'], 2)
+    draft['fee_total'] = round(math.fsum(d['amount'] for d in deductions if d['kind'] == 'fee'), 2)
+    draft['other_total'] = round(math.fsum(d['amount'] for d in deductions if d['kind'] == 'other'), 2)
+    draft['settle_cash'] = round(net + draft['other_total'], 2)          # 货款结算实际进账户的钱（平台已扣完费用）
     draft['settled_gross'] = round(math.fsum(now.values()), 2)          # 本期结算订单应冲额合计，应等于 total
     # 余额：期初 / 期末 / 链是否连续
     balance = None
@@ -391,7 +395,8 @@ def category_label(cat, days):
 
 def select(result, cat='', q=''):
     q = _text(q).lower()
-    return [b for b in result['bills'] if (not cat or b['cat'] == cat) and (not q or q in b['no'].lower() or q in b['order'])]
+    hold = cat == 'hold'                                                # 可核销、但系统不下推的（订单带红字等）
+    return [b for b in result['bills'] if (not cat or (b.get('hold') if hold else b['cat'] == cat)) and (not q or q in b['no'].lower() or q in b['order'])]
 
 
 def page(rows, number=1, size=50):
@@ -417,13 +422,19 @@ def export(result, shop, book=None):
             c = WriteOnlyCell(ws, value=v); c.font = bold; cells.append(c)
         ws.append(cells)
     days, d, period = result['overdue_days'], result['draft'], result['period']
-    ws = wb.create_sheet('收款单草稿')
-    ws.append(['%s · %s 收款单草稿（只供照着做，系统不写金蝶）' % (shop, period)])
+    ws = wb.create_sheet('本月账户进出汇总')
+    ws.append(['%s · %s 账户进出汇总（用来和账户余额核对，不是收款单）' % (shop, period)])
     ws.append([])
-    head(ws, ['行', '结算方式', '收款账户', '金额', '摘要'])
-    ws.append([1, '支付宝', (book or {}).get('account', ''), d['net'], '本月账户净变动（到账）'])
-    for i, x in enumerate(d['deductions'], 2): ws.append([i, '内部转销', '', x['amount'], memo(period, x['name'], x['amount'])])
-    ws.append(['', '', '收款明细合计', d['total'], '应等于源单应收合计'])
+    head(ws, ['项目', '金额', '说明'])
+    ws.append(['货款结算到账', d['settle_cash'], '平台已扣完费用后进账户的钱'])
+    for x in d['deductions']:
+        if x['kind'] == 'other': ws.append(['　' + x['name'], -x['amount'], '不挂在订单上的账户进出，不在任何一张下推的收款单里'])
+    ws.append(['本月账户净变动', d['net'], '应等于账户期末余额 − 期初余额'])
+    ws.append([])
+    head(ws, ['结算时平台直接扣掉的费用（不经过账户）', '金额'])
+    for x in d['deductions']:
+        if x['kind'] == 'fee': ws.append([x['name'], x['amount']])
+    ws.append(['合计', d['fee_total']])
     ws.append([])
     head(ws, ['本月结算的订单', '订单数', '流水应冲应收', '金蝶挂着的应收', '两边差'])
     for k, label in BUCKETS.items():
@@ -441,6 +452,12 @@ def export(result, shop, book=None):
         ws.append(['系统判断不了、要人看的应收单：金额对不上的写明了两边各是什么情况；该结没结的要查买家是否一直没确认或已退款。'])
         head(ws, ['分类'] + COLUMNS)
         for b in sorted(todo, key=lambda b: (b['cat'], b['reason'][:8], b['date'])): ws.append([category_label(b['cat'], days)] + line(b))
+    hold = [b for b in result['bills'] if b.get('hold')]
+    if hold:
+        ws = wb.create_sheet('可核销但系统不推')
+        ws.append(['金额对得上，但系统不替你下推的应收单（订单带红字的要先红蓝对冲）。'])
+        head(ws, ['原因'] + COLUMNS)
+        for b in sorted(hold, key=lambda b: (b['hold'], b['order'], b['no'])): ws.append([PUSH_SKIP[b['hold']]] + line(b))
     titles = {'ok': '可核销(下推源单)', 'mismatch': '金额对不上', 'pair': '红蓝互冲', 'overdue': '该结没结', 'transit': '在途', 'no_order': '无订单号'}
     for cat, title in titles.items():
         rows = select(result, cat)
@@ -455,3 +472,84 @@ def export(result, shop, book=None):
         for m in result['missing']: ws.append([m['order'], m['flow'], BUCKETS[m['bucket']]])
     buf = io.BytesIO(); wb.save(buf)
     return buf.getvalue()
+
+
+# ---------------- 下推收款单（V2.821）：只挑最干净的应收，分批备成金蝶暂存收款单 ----------------
+PUSH_SKIP = {'red': '订单里有红字应收（要先红蓝对冲，留给人）', 'partial': '已经核销过一部分', 'unaudited': '应收单还没审核',
+             'earlier': '钱是更早月份结算的（那个月的到账已经入过账，不能再算一次）', 'cents': '两边差几分钱'}
+
+
+def push_lines(period, groups):
+    """一张收款单的收款明细：到账一行 + 一种扣款一行（金额按分累加，不走浮点）。"""
+    fees = defaultdict(int)
+    for g in groups:
+        for k, v in g['fees'].items(): fees[k] += v
+    lines = [{'kind': 'cash', 'name': '到账', 'amount': sum(g['cash'] for g in groups) / 100, 'memo': ''}]
+    return lines + [{'kind': 'fee', 'name': k, 'amount': v / 100, 'memo': memo(period, k, v / 100)} for k, v in sorted(fees.items(), key=lambda x: -x[1]) if v]
+
+
+def push_split(period, groups, receipts):
+    """金蝶一次下推可能自己拆成几张收款单（实测 16,070 张应收被拆成 2 张）。receipts 是每张收款单里的应收单号；
+    给每张各算一份收款明细。同一个订单的几张应收被拆到不同收款单里就算不了，返回 None。"""
+    where = {}
+    for i, nos in enumerate(receipts):
+        for no in nos: where[no] = i
+    parts = [[] for _ in receipts]
+    for g in groups:
+        homes = {where.get(no) for no in g['bills']}
+        if len(homes) != 1 or None in homes: return None
+        parts[homes.pop()].append(g)
+    if sum(len(g['bills']) for p in parts for g in p) != sum(len(nos) for nos in receipts): return None
+    return [{'lines': push_lines(period, p), 'total': sum(g['open'] for g in p) / 100, 'count': sum(len(g['bills']) for g in p)} for p in parts]
+
+
+def push_plan(period, settle, orders, result, taken=(), size=500):
+    """从"可核销"里挑能直接下推的，排出下一批。只推整张蓝字应收、本次收款＝应收全额：
+    订单（组）里不能有红字、不能核销过、必须已审核、两边分毫不差。
+    返回 {eligible, skipped, pushed, batch}；batch 里是这一批的应收单号和收款明细（到账一行 + 一种扣款一行），批内两边相等。"""
+    taken = set(taken)
+    group, _ = order_groups(orders)
+    gid = lambda o: min(group(o))
+    by_group = defaultdict(list)
+    for b in result['bills']:
+        if b['cat'] == 'ok' and b['order']: by_group[gid(b['order'])].append(b)
+    flows = defaultdict(list)
+    for r in settle:
+        if r['order'] and r['scene'] == SETTLE and r['t'][:7] == period: flows[gid(r['order'])].append(r)      # 只认本期结算的：每批的到账行是本期进账户的钱
+    cents = lambda v: int(round(v * 100))
+    eligible, skipped, held = [], {k: {'count': 0, 'amount': 0.0} for k in PUSH_SKIP}, {}
+    for g, rows in by_group.items():
+        why = ('red' if any(b['open'] < 0 for b in rows) else 'partial' if any(b['ws'] != 'A' or b['written'] for b in rows)
+               else 'unaudited' if any(b['ds'] != 'C' for b in rows) else '')
+        own = flows.get(g, [])
+        if not why and not own: why = 'earlier'
+        cash =sum(cents(r['amt']) for r in own); fee = sum(cents(v) for r in own for v in r['fees'].values())
+        if not why and cash + fee != sum(cents(b['open']) for b in rows): why = 'cents'
+        if why:
+            skipped[why]['count'] += len(rows); skipped[why]['amount'] += math.fsum(b['open'] for b in rows)
+            held.update({b['no']: why for b in rows}); continue
+        eligible.append({'gid': g, 'bills': sorted(rows, key=lambda b: b['no']), 'flows': own, 'date': min(b['date'] for b in rows)})
+    for v in skipped.values(): v['amount'] = round(v['amount'], 2)
+    eligible.sort(key=lambda e: (e['date'], e['bills'][0]['no']))
+    total = lambda es: round(math.fsum(b['open'] for e in es for b in e['bills']), 2)
+    count = lambda es: sum(len(e['bills']) for e in es)
+    left = [e for e in eligible if not any(b['no'] in taken for b in e['bills'])]
+    batch, n = [], 0
+    for e in left:
+        if batch and n + len(e['bills']) > size: break
+        batch.append(e); n += len(e['bills'])
+    groups = []
+    for e in batch:
+        fees = defaultdict(int)
+        for r in e['flows']:
+            for k, v in r['fees'].items(): fees[k] += cents(v)
+        groups.append({'bills': [b['no'] for b in e['bills']], 'open': sum(cents(b['open']) for b in e['bills']),
+                       'cash': sum(cents(r['amt']) for r in e['flows']), 'fees': dict(fees)})
+    lines = push_lines(period, groups)
+    nos = [b['no'] for e in batch for b in e['bills']]
+    return {'eligible': {'count': count(eligible), 'amount': total(eligible)}, 'skipped': skipped, 'held': held,
+            'pushed': {'count': count(eligible) - count(left), 'amount': round(total(eligible) - total(left), 2)},
+            'left': {'count': count(left), 'amount': total(left)},
+            'batch': {'bills': nos, 'groups': groups, 'count': len(nos), 'total': total(batch), 'lines': lines, 'line_total': round(math.fsum(l['amount'] for l in lines), 2),
+                      'first': nos[0] if nos else '', 'last': nos[-1] if nos else '',
+                      'from': batch[0]['date'] if batch else '', 'to': max((e['date'] for e in batch), default='')}}

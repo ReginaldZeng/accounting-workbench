@@ -105,8 +105,10 @@ class DouyinTests(unittest.TestCase):
         self.assertEqual(m.order_detail('2026-09', m.merge([], s), [], BILLS, O4)['flows'], [])
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(m.export(r, '抖音店', {'account': '抖音177', 'open': 109.5, 'close': 109.5})))
-        self.assertEqual(wb.sheetnames, ['收款单草稿', '交人工处理', '可核销(下推源单)', '金额对不上', '红蓝互冲', '该结没结', '在途', '无订单号', '流水有·应收对不上号'])
-        self.assertEqual([c.value for c in wb['收款单草稿'][4]], [1, '支付宝', '抖音177', 97.5, '本月账户净变动（到账）'])
+        self.assertEqual(wb.sheetnames, ['本月账户进出汇总', '交人工处理', '可核销(下推源单)', '金额对不上', '红蓝互冲', '该结没结', '在途', '无订单号', '流水有·应收对不上号'])
+        first = wb['本月账户进出汇总']
+        self.assertEqual([[c.value for c in first[i]][:2] for i in (4, 5, 6)], [['货款结算到账', 102.5], ['　退换货运费险', -5], ['本月账户净变动', 97.5]])
+        self.assertEqual((r['draft']['settle_cash'], r['draft']['fee_total'], r['draft']['other_total']), (102.5, 7.5, 5.0))
         self.assertEqual(wb['可核销(下推源单)'].max_row, 4); self.assertEqual(wb['可核销(下推源单)']['I3'].value + wb['可核销(下推源单)']['J3'].value, wb['可核销(下推源单)']['K3'].value)
 
     def orders_xlsx(self, rows):
@@ -175,6 +177,44 @@ class DouyinTests(unittest.TestCase):
         with zf.ZipFile(buf, 'w') as z:
             z.writestr('[Content_Types].xml', '<Types/>'); z.writestr('xl/worksheets/sheet1.xml', sheet); z.writestr('xl/sharedStrings.xml', shared)
         self.assertEqual(list(m._xlsx_rows(buf.getvalue(), '筛不到的'.encode())), [{0: '订单编号', 1: '应收金额', 2: '', 27: '备注'}, {0: 'JY1', 1: '35.7', 27: 'a&b'}])
+
+    def test_push_plan_takes_only_clean_blue_bills_and_balances_each_batch(self):
+        s, l = self.rows()
+        r = m.reconcile('2026-09', m.merge([], s), m.merge([], l), BILLS + [
+            bill('P1', '2026-09-07', 10, O6),                                                         # O6 结算毛额 10：干净
+            bill('P2', '2026-09-07', 30, '6930162745589511111', ds='A')])                             # 没结算 → 不在可核销里
+        plan = m.push_plan('2026-09', m.merge([], s), None, r)
+        self.assertEqual((plan['eligible'], plan['left'], plan['pushed']), ({'count': 3, 'amount': 90.0}, {'count': 3, 'amount': 90.0}, {'count': 0, 'amount': 0.0}))
+        b = plan['batch']
+        self.assertEqual((b['bills'], b['total'], b['line_total'], b['first'], b['last']), (['AR1', 'AR2', 'P1'], 90.0, 90.0, 'AR1', 'P1'))
+        self.assertEqual([(x['kind'], x['name'], x['amount']) for x in b['lines']], [('cash', '到账', 83.5), ('fee', '平台服务费', 3.5), ('fee', '佣金', 2.0), ('fee', '招商服务费', 0.5), ('fee', '站外推广费', 0.5)])
+        self.assertIn('2026年09月结算单扣款项 佣金2.00元', [x['memo'] for x in b['lines']])
+        self.assertEqual([(g['bills'], g['open'], g['cash'], g['fees']) for g in b['groups']][:2], [(['AR1'], 5000, 4850, {'平台服务费': 150}), (['AR2'], 3000, 2600, {'平台服务费': 100, '佣金': 200, '招商服务费': 50, '站外推广费': 50})])
+        halves = m.push_split('2026-09', b['groups'], [['AR1', 'P1'], ['AR2']])                          # 金蝶把一批拆成两张：各算各的，各自平
+        self.assertEqual([(x['count'], x['total'], sum(l['amount'] for l in x['lines'])) for x in halves], [(2, 60.0, 60.0), (1, 30.0, 30.0)])
+        self.assertEqual([(l['name'], l['amount']) for l in halves[1]['lines']], [('到账', 26.0), ('佣金', 2.0), ('平台服务费', 1.0), ('招商服务费', 0.5), ('站外推广费', 0.5)])
+        self.assertIsNone(m.push_split('2026-09', b['groups'], [['AR1'], ['AR2']]))                         # 少了一张应收：不认
+        one = m.push_plan('2026-09', m.merge([], s), None, r, size=1)['batch']
+        self.assertEqual((one['bills'], one['total'], one['line_total']), (['AR1'], 50.0, 50.0))
+        rest = m.push_plan('2026-09', m.merge([], s), None, r, taken={'AR1'}, size=1)
+        self.assertEqual((rest['batch']['bills'], rest['pushed'], rest['left']['count']), (['AR2'], {'count': 1, 'amount': 50.0}, 2))
+        self.assertEqual(m.push_plan('2026-09', m.merge([], s), None, r, taken={'AR1', 'AR2', 'P1'})['batch']['bills'], [])
+        late = m.reconcile('2026-10', m.merge([], s), [], [bill('AR1', '2026-09-05', 50, O1)])                       # 9 月结算的钱，10 月才来核
+        p10 = m.push_plan('2026-10', m.merge([], s), None, late)
+        self.assertEqual((late['bills'][0]['cat'], p10['batch']['bills'], p10['skipped']['earlier']), ('ok', [], {'count': 1, 'amount': 50.0}))
+        # 订单里有红字、核销过一部分、没审核的都不推
+        X = '6930162745589522222'
+        extra = m.parse(settle_csv(f"2026-09-10 08:00:00,'Q1,入账,25.48,聚合账户,货款结算入账,小店自卖,'{X},'{X},120.8,0,0,-94.8,-0.52,0,0,0,订单结算"), 'x.csv')[0]['rows']
+        dirty = [bill('D1', '2026-09-05', 120.8, X), bill('D1R', '2026-09-09', -94.8, X), bill('AR1', '2026-09-05', 50, O1, written=0, ws='A', ds='A'),
+                 dict(bill('AR2', '2026-09-05', 40, O2, written=10, ws='B'))]
+        r2 = m.reconcile('2026-09', m.merge(s, extra), [], dirty)
+        self.assertEqual({b['no']: b['cat'] for b in r2['bills']}, {'D1': 'ok', 'D1R': 'ok', 'AR1': 'ok', 'AR2': 'ok'})
+        p2 = m.push_plan('2026-09', m.merge(s, extra), None, r2)
+        self.assertEqual((p2['batch']['bills'], {k: v['count'] for k, v in p2['skipped'].items()}), ([], {'red': 2, 'partial': 1, 'unaudited': 1, 'earlier': 0, 'cents': 0}))
+        self.assertEqual(p2['held'], {'D1': 'red', 'D1R': 'red', 'AR1': 'unaudited', 'AR2': 'partial'})
+        for b in r2['bills']: b['hold'] = p2['held'].get(b['no'], '')
+        self.assertEqual(sorted(b['no'] for b in m.select(r2, 'hold')), ['AR1', 'AR2', 'D1', 'D1R'])
+        self.assertIn('可核销但系统不推', __import__('openpyxl').load_workbook(io.BytesIO(m.export(r2, '抖音店'))).sheetnames)
 
 
 if __name__ == '__main__':
