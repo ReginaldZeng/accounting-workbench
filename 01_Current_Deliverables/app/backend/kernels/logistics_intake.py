@@ -173,8 +173,12 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
         doc = _s(r[c_doc]) if c_doc is not None and c_doc < len(r) else _s(sp.get("doc", ""))
         if doc in blank_docs:
             doc = ""
+        loose = ""                        # 单号列里写的不是单号、但这行要收(doc_re_else=default)：原文留作备注
         if doc and sp.get("doc_re") and doc != _s(sp.get("doc_default", "")) and not re.match(sp["doc_re"], doc):
-            continue                      # 单号列里不像单号的(账单底下的透视小计「总计」「孝感市…公司」)不收(V2.762)
+            if sp.get("doc_re_else") != "default":
+                continue                  # 单号列里不像单号的(账单底下的透视小计「总计」「孝感市…公司」)不收(V2.762)
+            # V2.820(诚煜)：单号列里写的是说明(「延迟扣款，订单255083234」)，是一笔真的扣款——按无单据收，不沿用上一行的单号
+            loose, doc = doc, _s(sp.get("doc_default", ""))
         if c_doc is not None and not doc and sp.get("doc_ffill") and last_doc:
             # 单号只写在首行、下面几行沿用(恒茂入库：一张调拨单拆几个批次)。
             # doc_ffill_if_blank=[列名…]：这些列里有空的才算续行(天鹰：续行不写日期/序号；日期序号齐全却没单号的是漏填，不能并到上一单，V2.765)
@@ -185,7 +189,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
             doc = _s(sp.get("doc_default", ""))
             if not doc:
                 continue
-        if c_doc is not None and _s(r[c_doc] if c_doc < len(r) else ""):
+        if c_doc is not None and _s(r[c_doc] if c_doc < len(r) else "") and not loose:
             last_doc = doc
         base = sum((_f(r[c]) or 0) for c in c_amts) if c_amts else None
         sub = {}
@@ -217,6 +221,8 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
                          if c_wt is not None and c_wt < len(r) else None,
             "src_sheet": ws.title, "src_row": ri,
         }
+        if loose:
+            row["note"] = loose           # 单号列里写的说明原样留在备注里(复核台看得到这笔为什么没单据)
         if c_dk is not None and c_dk < len(r) and _s(r[c_dk]):
             row["_dk"] = _s(r[c_dk])
         if c_part is not None and c_part < len(r) and _s(r[c_part]) and base:

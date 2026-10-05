@@ -528,7 +528,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv select.clsinp{width:auto;min-width:104px;padding:2px 4px;cursor:pointer}.lrv .clsinp.wide{width:300px}
       .lrv .xcls .ovr{color:#6B4FA0;font-size:12px}.lrv .xcls .lk{border:0;background:none;color:#1F6E8C;cursor:pointer;font-size:12px;text-decoration:underline;padding:0}
       .lrv .dtchip{display:inline-block;margin-top:3px;font:inherit;font-size:11px;line-height:1.6;padding:0 8px;border-radius:999px;border:1px solid transparent;cursor:pointer;white-space:nowrap}
-      .lrv .dtchip.dtmine{background:#FDE7C8;color:#9A5200;border-color:#F2C27A;font-weight:600}.lrv .dtchip.dtrun{background:#E3EEF8;color:#2F5E8A}.lrv .dtchip.dtother{background:#F1EAFB;color:#5B3FA0;border-color:#D5C6F0}
+      .lrv .dtchip.dtmine{background:#FDE7C8;color:#9A5200;border-color:#F2C27A;font-weight:600}.lrv .dtchip.dtrun{background:#E3EEF8;color:#2F5E8A}.lrv .xmn{font-size:10.5px;color:#5B3FA0;white-space:nowrap}.lrv .dtchip.dtother{background:#F1EAFB;color:#5B3FA0;border-color:#D5C6F0}
       .lrv .dtchip.dtok{background:#E6F4EC;color:#2E7A50}.lrv .dtchip.dtpaid{background:#2E8B57;color:#fff}.lrv .dtchip.dtvoid{background:#EEF0F2;color:#8A96A2;text-decoration:line-through}
       .lrv .prbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:8px 15px;border-bottom:1px solid #E6EBEF;font-size:12.5px;color:#1B2733}
       .lrv .prgrp{display:inline-flex;gap:5px;align-items:center;flex-wrap:wrap}.lrv .prgrp .dtchip{margin-top:0}
@@ -708,7 +708,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     const mt = mk ? (fix ? `${s} 已通过，但计提与复核应付差 ${money(cc.diff)}，计提有误，需红冲更正（${mk.by}）`
                       : mk.status === 'ok' ? `${s} 已通过 · ${mk.by} ${mk.at}` : `${s} 有疑问：${mk.note || ''}（${mk.by}）`) : undefined
                     return [
-                      <td key={s + 'a'} className={'num' + mc} title={mt}>{cc.accr ? money(cc.accr) : ''}</td>,
+                      <td key={s + 'a'} className={'num' + mc} title={mt}>{cc.accr ? money(cc.accr) : ''}
+                        {(cc.xm || []).map((x, i) => <div key={i} className="xmn" title="付款做账里选定的跨月核销：复核按「一张请款单 + 它核销的计提」看">
+                          {x.dir === 'in' ? `含 ${Number(String(x.month).slice(5))} 月 记-${x.vno} ${money(x.amt)}` : `已减 记-${x.vno} ${money(x.amt)} → ${Number(String(x.month).slice(5))} 月账单`}</div>)}</td>,
                       <td key={s + 'p'} className={'num paid' + mc} title={mt}>{cc.paid ? money(cc.paid) : ''}{cc.reqs && <div><DtChip reqs={cc.reqs} onOpen={setPr} /></div>}</td>,
                       <td key={s + 'd'} className={'num ' + (cc.diff > 0.01 ? 'diffpos' : cc.diff < -0.01 ? 'diffneg' : '') + mc} title={mt}>
                         {mk && <span className={'mkdot ' + (fix ? 'fix' : mk.status)}>{fix ? '⚠ 需更正' : mk.status === 'ok' ? '✓' : '?'}</span>}{cc.diff ? money(cc.diff) : ''}</td>
@@ -866,6 +868,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {L.fixes.map(f => `${f.snap.vno || ''} ${money(f.snap.amt_net)} → ${fixShort(f)}${f.live ? '' : '（金蝶里原分录已变，可能已改好）'}`).join('；')}
           </div>}
           {L && !L.err && L.prior && L.prior.length > 0 && <div className="adjnote">上期计提的红冲 / 更正（本月做的账，属于上个月）不计入本月，净额 <b className="mono">{money(L.prior_total)}</b>：{L.prior.map(p => `${p.vno} ${p.subject} ${money(p.net)}`).join('；')}</div>}
+          {L && !L.err && L.xin && L.xin.length > 0 && <div className="adjnote">跨月核销：这张账单在付款做账里选定同时核销别的月份的计提，已并进下表——
+            {L.xin.map(x => `${x.subject} ${Number(String(x.month).slice(5))} 月 ${x.vno} ${money(x.amt)}`).join('；')}</div>}
+          {L && !L.err && L.xmoved && L.xmoved.length > 0 && <div className="adjnote">本月有计提已被别的月份的账单选定核销，不计入本月——
+            {L.xmoved.map(x => `${x.subject} ${x.vno} ${money(x.amt)} → ${x.to} 的账单`).join('；')}</div>}
           {L && !L.err && L.adj && L.adj.length > 0 && <div className="adjnote">另有 {L.adj.length} 张只有税额调整科目的凭证未计入：{L.adj.map(a => `${a.vno} ${a.acct} ${money(a.amt)}`).join('、')}</div>}
           {L && !L.err && <details className="spec"><summary>口径说明</summary>
             计提＝金蝶费用借方(6*/5*)逐分录，产品线/产品类型/部门取凭证核算维度；税率按凭证（同凭证进项税÷费用，税额按分录精确分摊），计提金额已含税与账单同口径。

@@ -157,6 +157,55 @@ def _ov_kd_rows(period, fresh=False):
     return rows, fetched_at, False
 
 
+def _xmonth_picks():
+    """付款做账里人工选定、且计提不在账单那个月的(跨月核销) → [{bill 账单月, accr 计提月, vno, subject, code, payee, carrier}]。
+    V2.820(用户 2026-10-05「这里应该接的是计提和请款一起」)：复核按「一张请款单 + 它核销的计提」看——诚煜 6 月账单核销 6 月记-518 + 7 月记-522，
+    记-522 就算在 6 期诚煜名下、从 7 期拿掉。只读本库设置，不碰金蝶。"""
+    picks = db.get_setting("logi_voucher_pick", None) or {}
+    if not picks:
+        return []
+    PRT = store.payreq
+    with db._engine.connect() as c:
+        rs = [dict(r) for r in c.execute(select(PRT.c.inst_id, PRT.c.period, PRT.c.subject, PRT.c.sup_code, PRT.c.payee, PRT.c.carrier).where(
+            PRT.c.inst_id.in_(list(picks.keys())))).mappings().all()]
+    out = []
+    for r in rs:
+        if not r.get("period"):
+            continue
+        for p in (picks.get(r["inst_id"]) or {}).get("picks") or []:
+            try:
+                ym = "%04d-%02d" % (int(p["year"]), int(p["month"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ym != r["period"]:
+                out.append({"bill": r["period"], "accr": ym, "vno": str(p["vno"]), "subject": r.get("subject"), "code": r.get("sup_code"),
+                            "payee": r.get("payee"), "carrier": r.get("carrier")})
+    return out
+
+
+def _ov_xmonth(accr, carriers, period, book2short):
+    """总表的计提按跨月核销调整：别的月份、被本期账单选定核销的计提加进来；本期计提被别的月份账单选走的减掉。→ 说明列表。"""
+    notes = []
+    for x in _xmonth_picks():
+        if x["bill"] != period and x["accr"] != period:
+            continue
+        rows, _, _ = _ov_kd_rows(x["accr"])
+        amt = sum(float(r.get("FCREDIT") or 0) for r in rows if str(r.get("FVOUCHERGROUPNO") or "").strip() == x["vno"]
+                  and str(r.get("供应商码") or "").strip() == (x["code"] or "") and book2short.get(str(r.get("账簿") or "")) == x["subject"]
+                  and "计提" in str(r.get("FEXPLANATION") or ""))
+        if not amt:
+            continue
+        key = x["code"] or x["payee"]
+        if x["bill"] == period:
+            accr[(x["subject"], key)] = accr.get((x["subject"], key), 0.0) + amt
+            carriers.setdefault(key, (x["payee"], x["code"] or ""))
+            notes.append({"key": key, "subject": x["subject"], "dir": "in", "vno": x["vno"], "month": x["accr"], "amt": round(amt, 2)})
+        else:
+            accr[(x["subject"], key)] = accr.get((x["subject"], key), 0.0) - amt
+            notes.append({"key": key, "subject": x["subject"], "dir": "out", "vno": x["vno"], "month": x["bill"], "amt": round(amt, 2)})
+    return notes
+
+
 def _ov_accr(rows, period, full2short=None):
     """2241 行 → 计提 {(主体简称, 供应商键): 含税} 与 承运商 {键: (金蝶全称, 编码)}。键=供应商编码，没有则摘要名。"""
     if full2short is None:
@@ -180,7 +229,15 @@ def _ov_accr(rows, period, full2short=None):
             key = scode or cf
             carriers[key] = (cf, scode)
             accr[(book, key)] = accr.get((book, key), 0.0) + float(cr)
+    try:
+        xm = _ov_xmonth(accr, carriers, period, book2short)
+    except Exception:
+        xm = []
+    _OV_XM[period] = xm
     return accr, carriers
+
+
+_OV_XM = {}     # period → 这期总表的跨月核销调整(给总表格子里写一句)
 
 
 @router.get("/api/logistics-review/overview")
@@ -255,6 +312,9 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
         st = ("signed" if signed.get(short) else ("allfix" if pg.get("subj_fix") else "allok") if (pg.get("subj_n") and pg.get("subj_ok") == pg.get("subj_n"))
               else "doing" if any(pg.values()) else "billed" if has_bill
               else "nobill" if short in specs else "nospec")
+        for n in _OV_XM.get(period) or []:          # 跨月核销：格子里写明这格的计提加了/减了哪张别的月份的凭证
+            if n["key"] == key and n["subject"] in cells:
+                cells[n["subject"]].setdefault("xm", []).append({k: n[k] for k in ("dir", "vno", "month", "amt")})
         out[key] = {"carrier": cf, "code": scode, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
                     "total_accr": round(tot_accr, 2), "signed": signed.get(short), "status": st, "progress": pg}
 
@@ -738,7 +798,7 @@ def _fetch_doc_materials_once(s, conf, docs_by_form):
     return out
 
 
-_BOX_CARRIERS = {"丰源", "极鲜达", "恒茂", "链盟", "跨越物流", "中通快运", "易风达"}  # 按件数/箱核对(有账单重量则按重量)：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
+_BOX_CARRIERS = {"丰源", "极鲜达", "恒茂", "链盟", "跨越物流", "中通快运", "易风达", "诚煜物流"}  # 按件数/箱核对(有账单重量则按重量)：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
 _QTY_CARRIERS = {"迅鸽"}  # 快递按件数核：账单件数 vs 金蝶出库件数(剔包装)，不做箱规换算
 _PACK_KW = ("纸箱", "包装袋", "包材", "运输袋", "编织袋", "拉链", "气泡", "胶带", "气枕", "葫芦膜", "文件封", "缠绕膜", "打托", "托盘", "护角")  # 包材(不摊运费、不进kg基数)
 # 费用类型按单据前缀通用推导（所有承运商共用，不再每家写死）
@@ -1736,6 +1796,40 @@ def _bill_biz(r):
 
 
 def _accr_entries(carrier, period, carrier_full=None):
+    """逐笔计提(按跨月核销调整后)：本期的计提分录，加上别的月份、被本期账单选定核销的(标 xm=计提月)，
+    去掉本期被别的月份账单选走的(列在 xmoved 里提示)。"""
+    got = _accr_entries_raw(carrier, period, carrier_full)
+    try:
+        xs = [x for x in _xmonth_picks() if x["carrier"] == carrier or (carrier_full and x["payee"] == carrier_full)]
+    except Exception:
+        xs = []
+    if not xs:
+        return got
+    ents, moved = list(got.get("entries") or []), []
+    out_k = {("记-" + x["vno"], x["subject"]): x["bill"] for x in xs if x["accr"] == period and x["bill"] != period}
+    if out_k:
+        keep = []
+        for e in ents:
+            to = out_k.get((e["vno"], e["subject"]))
+            if to:
+                m0 = next((m for m in moved if m["vno"] == e["vno"] and m["subject"] == e["subject"]), None)
+                if not m0:
+                    m0 = {"vno": e["vno"], "subject": e["subject"], "to": to, "amt": 0.0}
+                    moved.append(m0)
+                m0["amt"] = round(m0["amt"] + (e.get("amt") or 0), 2)
+            else:
+                keep.append(e)
+        ents = keep
+    for x in xs:
+        if x["bill"] == period and x["accr"] != period:
+            for e in (_accr_entries_raw(carrier, x["accr"], carrier_full).get("entries") or []):
+                if e["vno"] == "记-" + x["vno"] and e["subject"] == x["subject"]:
+                    ents.append(dict(e, xm=x["accr"], key=e["key"] + "|" + x["accr"]))
+    ents.sort(key=lambda e: (e["subject"], e["fee_norm"], e["biz"], e["proj"], e["vno"]))
+    return dict(got, entries=ents, xmoved=moved)
+
+
+def _accr_entries_raw(carrier, period, carrier_full=None):
     """逐笔计提：金蝶费用借方(6*/5*)每条分录一行——主体/费用项目/产品线(产品分类)/产品类型(产品项目)/部门/凭证号。
     税率按凭证：同凭证 2221.01.07 借方 ÷ 该凭证费用借方合计；含税＝费用×(1+税率)。
     分录没有稳定ID，行键=凭证号+科目+维度组合。只有 2221.01.06(税额调整)的凭证不计入，另列 adj 提示。
@@ -1950,6 +2044,8 @@ def _build_lines(request, carrier, period):
     return _attach_fixes({"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
             "accr_total": round(atot, 2), "bill_total": round(btot, 2), "diff_total": round(atot - btot, 2),
             "adj": adj, "prior": prior, "prior_total": round(sum(p["net"] for p in prior), 2),
+            "xmoved": got.get("xmoved") or [],
+            "xin": [{"vno": e["vno"], "month": e["xm"], "subject": e["subject"], "amt": e.get("amt")} for e in ents if e.get("xm")],
             "od_total": (lambda a: {"amt": a, "ratio": round(max(0.0, min(1.0, a / btot)), 4) if btot > 0 else 0.0})(
                 round(sum(det3[k]["amt"] for k in bill3 if k in det3), 2)),
             "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl,
