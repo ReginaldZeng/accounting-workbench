@@ -174,7 +174,7 @@ def _result(period, shop):
     with gzip.open(_ar_path(period, shop), 'rt', encoding='utf-8') as stream:
         saved = json.load(stream)
     result = model.reconcile(period, rows['dy_settle'], rows['dy_ledger'], saved['bills'])
-    with _lock: _cache[key] = (stamp, result, saved.get('book') or {})
+    with _lock: _cache[key] = (stamp, result, saved.get('book') or {}, rows, saved['bills'])
     return result, saved.get('book') or {}, counts
 
 
@@ -207,6 +207,16 @@ def bills(request: Request, period: str, shop: str, cat: str = '', q: str = '', 
     result, _ = _need(period, shop)
     if cat and cat not in model.CATEGORIES: raise HTTPException(400, '分类不对')
     return dict(model.page(model.select(result, cat, q), page), ok=True)
+
+
+@router.get('/order')
+def order(request: Request, period: str, shop: str, order: str):
+    """一个订单的依据：抖音每一笔动账 + 金蝶每一张应收单。"""
+    require(request); check(period, shop)
+    _need(period, shop)
+    with _lock: hit = _cache.get((period, shop))
+    if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
+    return dict(model.order_detail(period, hit[3]['dy_settle'], hit[3]['dy_ledger'], hit[4], order.strip()), ok=True)
 
 
 @router.get('/missing')

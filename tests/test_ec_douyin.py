@@ -97,11 +97,17 @@ class DouyinTests(unittest.TestCase):
         r = m.reconcile('2026-09', m.merge([], s), m.merge([], l), BILLS)
         self.assertEqual([b['no'] for b in m.select(r, 'pair')], ['AR4R', 'AR4']); self.assertEqual(len(m.select(r, q=O1[-6:])), 1)
         self.assertEqual(m.page(m.select(r, 'ok'))['amount'], 80.0)
+        ok = next(b for b in r['bills'] if b['no'] == 'AR2')
+        self.assertEqual((ok['cash'], ok['fee'], ok['flow'], ok['settled_at']), (26.0, 4.0, 30.0, '2026-09-10 08:00:00'))
+        d = m.order_detail('2026-09', m.merge([], s), m.merge([], l), BILLS, O2)
+        self.assertEqual((len(d['flows']), d['flows'][0]['id'], d['flows'][0]['bal'], d['flows'][0]['gross'], d['flows'][0]['fees']['佣金']), (1, 'S2', 184.0, 30.0, 2.0))
+        self.assertEqual(([b['no'] for b in d['bills']], d['flow_total'], d['cash_total'], d['fee_total'], d['open_total']), (['AR2'], 30.0, 26.0, 4.0, 30.0))
+        self.assertEqual(m.order_detail('2026-09', m.merge([], s), [], BILLS, O4)['flows'], [])
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(m.export(r, '抖音店', {'account': '抖音177', 'open': 109.5, 'close': 109.5})))
         self.assertEqual(wb.sheetnames, ['收款单草稿', '可核销(下推源单)', '金额对不上', '红蓝互冲', '该结没结', '在途', '无订单号', '流水有·应收对不上号'])
         self.assertEqual([c.value for c in wb['收款单草稿'][4]], [1, '支付宝', '抖音177', 97.5, '本月账户净变动（到账）'])
-        self.assertEqual(wb['可核销(下推源单)'].max_row, 4)
+        self.assertEqual(wb['可核销(下推源单)'].max_row, 4); self.assertEqual(wb['可核销(下推源单)']['I3'].value + wb['可核销(下推源单)']['J3'].value, wb['可核销(下推源单)']['K3'].value)
 
 
 if __name__ == '__main__':

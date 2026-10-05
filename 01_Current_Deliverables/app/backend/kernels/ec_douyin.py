@@ -134,10 +134,14 @@ def reconcile(period, settle, ledger, bills, overdue_days=10, tolerance=0.01):
     in_period = [r for r in settle if r['t'][:7] == period]
     # 每个订单：本期结算应冲额、截至期末累计应冲额
     now, total = defaultdict(float), defaultdict(float)
+    proof = {True: defaultdict(lambda: [0.0, 0.0, '']), False: defaultdict(lambda: [0.0, 0.0, ''])}      # 依据：到账 / 扣费 / 结算时间（True=本期，False=累计）
     for r in settle:
         if r['scene'] != SETTLE or not r['order']: continue
         total[r['order']] += _gross(r)
-        if r['t'][:7] == period: now[r['order']] += _gross(r)
+        this = r['t'][:7] == period
+        if this: now[r['order']] += _gross(r)
+        for scope in ((True, False) if this else (False,)):
+            p = proof[scope][r['order']]; p[0] += r['amt']; p[1] += math.fsum(r['fees'].values()); p[2] = max(p[2], r['t'])
     # 金蝶应收：只看业务日期在期末及以前的
     bills = [b for b in bills if b['date'] <= end]
     by_order = defaultdict(list)
@@ -149,15 +153,16 @@ def reconcile(period, settle, ledger, bills, overdue_days=10, tolerance=0.01):
         if b['ws'] == 'C': continue
         group = [x for x in by_order[b['order']] if x['ws'] != 'C'] if b['order'] else [b]
         open_net = round(math.fsum(x['open'] for x in group), 2)
-        expected = None
+        expected, cash, fee, settled_at = None, None, None, ''
         if not b['order']: cat = 'no_order'
         elif b['order'] in total:
             expected = round(now[b['order']] if b['order'] in now else total[b['order']], 2)
+            p = proof[b['order'] in now][b['order']]; cash, fee, settled_at = round(p[0], 2), round(p[1], 2), p[2]
             cat = 'ok' if abs(open_net - expected) <= tolerance else 'mismatch'
         elif len(group) > 1 and abs(open_net) <= tolerance and any(x['open'] < 0 for x in group): cat = 'pair'
         else: cat = 'overdue' if min(x['date'] for x in group) <= late else 'transit'
         rows.append(dict(no=b['no'], date=b['date'], order=b['order'], amount=b['amount'], written=b['written'], open=b['open'],
-                         ws=b['ws'], ds=b['ds'], cat=cat, order_open=open_net, flow=expected,
+                         ws=b['ws'], ds=b['ds'], cat=cat, order_open=open_net, flow=expected, cash=cash, fee=fee, settled_at=settled_at,
                          diff=None if expected is None else round(open_net - expected, 2)))
         c = cats[cat]; c['count'] += 1; c['amount'] += b['open']
         if (cat, b['order'] or b['no']) not in seen: seen.add((cat, b['order'] or b['no'])); c['orders'] += 1
@@ -199,6 +204,26 @@ def reconcile(period, settle, ledger, bills, overdue_days=10, tolerance=0.01):
             'coverage': {'settle_rows': len(in_period), 'settled_orders': len(now), 'ledger_rows': len(ledger_now),
                          'settle_first': in_period[0]['t'] if in_period else '', 'settle_last': in_period[-1]['t'] if in_period else '',
                          'open_bills': len(rows)}}
+
+
+def order_detail(period, settle, ledger, bills, order):
+    """一个订单的全部依据：抖音这边每一笔动账（到账、各项扣费、当时余额），金蝶那边每一张应收单。"""
+    end = period_end(period)
+    balance = {r['id']: r['bal'] for r in ledger}
+    flows = []
+    for r in settle:
+        if r['order'] != order or r['t'][:7] > period: continue
+        settled = r['scene'] == SETTLE
+        flows.append({'id': r['id'], 't': r['t'], 'scene': r['scene'], 'btype': r.get('btype', ''), 'amt': r['amt'], 'fees': r['fees'],
+                      'fee': round(math.fsum(r['fees'].values()), 2), 'refund': r['refund'], 'gross': round(_gross(r), 2) if settled else None,
+                      'bal': balance.get(r['id']), 'memo': r['memo'], 'in_period': r['t'][:7] == period})
+    own = sorted((b for b in bills if b['order'] == order and b['date'] <= end), key=lambda b: (b['date'], b['no']))
+    opened = [b for b in own if b['ws'] != 'C']
+    return {'order': order, 'flows': flows, 'bills': own,
+            'flow_total': round(math.fsum(f['gross'] for f in flows if f['gross'] is not None and f['in_period']), 2),
+            'cash_total': round(math.fsum(f['amt'] for f in flows if f['gross'] is not None and f['in_period']), 2),
+            'fee_total': round(math.fsum(f['fee'] for f in flows if f['gross'] is not None and f['in_period']), 2),
+            'open_total': round(math.fsum(b['open'] for b in opened), 2)}
 
 
 def category_label(cat, days):
@@ -255,8 +280,8 @@ def export(result, shop, book=None):
         if not rows: continue
         ws = wb.create_sheet(title)
         ws.append([category_label(cat, days)])
-        head(ws, ['应收单号', '业务日期', '平台订单号', '应收金额', '已核销', '未核销', '该订单未核销合计', '流水应冲额', '差额'])
-        for b in rows: ws.append([b['no'], b['date'], b['order'], b['amount'], b['written'], b['open'], b['order_open'], b['flow'], b['diff']])
+        head(ws, ['应收单号', '业务日期', '平台订单号', '应收金额', '已核销', '未核销', '该订单未核销合计', '抖音结算时间', '到账金额', '结算时扣费', '流水应冲额(到账+扣费)', '差额'])
+        for b in rows: ws.append([b['no'], b['date'], b['order'], b['amount'], b['written'], b['open'], b['order_open'], b['settled_at'], b['cash'], b['fee'], b['flow'], b['diff']])
     if result['missing']:
         ws = wb.create_sheet('流水有·应收对不上号')
         head(ws, ['平台订单号', '流水应冲额', '情况'])
