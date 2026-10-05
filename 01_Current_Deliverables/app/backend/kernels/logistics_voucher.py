@@ -10,6 +10,9 @@
 #           (摘要以发票号开头，发票管家据此自动标「已做账」)+每张计提一行贷 2221.01.07；支付=借 2241.02 / 贷 1002。
 #   摘要：红冲/更正「红冲8/565#计提…」(跨年写 2026-6/424#)；核销「{发票号}核销8/552#、9/□#计提{供应商}8月线下A、B」
 #        (更正过的那笔引用本张凭证号，保存前用 □ 占位)；支付「{申请人}提起支付{供应商}8月线下A、B」。
+# V2.798 主体更正(mode=move，用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：计提记到了别的主体账上
+#   (凭证带 from={short, full}，exp_lines 已由调用方换成本主体的科目/费用项目/部门)——本张凭证里不红冲(原凭证不在本账簿)，
+#   「更正」段直接在本主体补提，再核销、支付；原主体那边的红冲分录用 red_lines() 另出，给那边的人做账。
 import re
 
 STD_RATES = (0.0, 0.01, 0.03, 0.05, 0.06, 0.09, 0.13)
@@ -109,8 +112,12 @@ def plan(vouchers, invoices, fixes=None):
         return {"status": "manual", "msgs": msgs, "per": {}, "tails": {}}
     cur = {}
     for v in vouchers:
-        f = fixes.get(v["vno"])
-        if f:
+        f = fixes.get(v["vno"]) if not v.get("from") else None
+        if v.get("from"):
+            per[v["vno"]] = {"mode": "move", "new_rate": v["rate"],
+                             "why": "计提记在了「%s」的账上，补提到本主体" % v["from"].get("short", "")}
+            cur[v["vno"]] = v["rate"]
+        elif f:
             nr = next((rate_of(x.get("to_rate")) for x in f if rate_of(x.get("to_rate")) is not None), None)
             per[v["vno"]] = {"mode": "fix", "new_rate": nr if nr is not None else v["rate"], "why": "复核台登记了计提更正"}
             cur[v["vno"]] = per[v["vno"]]["new_rate"]
@@ -133,12 +140,15 @@ def plan(vouchers, invoices, fixes=None):
             break
         moved = False
         for r in short:
-            cand = [v for v in vouchers if per[v["vno"]]["mode"] == "hx" and need.get(cur[v["vno"]], 0) < -0.004]
+            cand = [v for v in vouchers if per[v["vno"]]["mode"] in ("hx", "move") and need.get(cur[v["vno"]], 0) < -0.004]
             hit = _subset(cand, need[r])
             if hit:
                 for v in hit:
-                    per[v["vno"]] = {"mode": "rate", "new_rate": r,
-                                     "why": "计提按 %s，发票开的是 %s" % (pct(v["rate"]), pct(r))}
+                    why = "计提按 %s，发票开的是 %s" % (pct(v["rate"]), pct(r))
+                    if per[v["vno"]]["mode"] == "move":      # 主体更正的同时税率也不对：补提时直接按发票税率
+                        per[v["vno"]] = {"mode": "move", "new_rate": r, "why": per[v["vno"]]["why"] + "；" + why}
+                    else:
+                        per[v["vno"]] = {"mode": "rate", "new_rate": r, "why": why}
                     cur[v["vno"]] = r
                 moved = True
                 break
@@ -153,7 +163,7 @@ def plan(vouchers, invoices, fixes=None):
     tails = {}
     for r in inv_g:
         vs = [v for v in vouchers if cur[v["vno"]] == r]
-        at = r2(sum(v["tax"] if per[v["vno"]]["mode"] == "hx" else split_gross(v["gross"], r)[1] for v in vs))
+        at = r2(sum(v["tax"] if _keep_tax(v, per[v["vno"]]) else split_gross(v["gross"], r)[1] for v in vs))
         d = r2(inv_t[r] - at)
         if abs(d) < 0.005:
             continue
@@ -171,6 +181,30 @@ def plan(vouchers, invoices, fixes=None):
 
 def pct(r):
     return ("%g%%" % round(r * 100, 2)) if r is not None else "?"
+
+
+def _keep_tax(v, p):
+    """这张计提的税额沿用原值(核销、尾差、主体更正且税率没变)，还是按新税率重算(改税率/复核台更正)。"""
+    return p.get("mode") in ("hx", "tail") or (p.get("mode") == "move" and p.get("new_rate") == v["rate"])
+
+
+def fix_expl(v, p, pay_year):
+    """「更正」段的摘要：更正8/565#计提…；主体更正带上原主体——更正深圳星期零8/390#计提…(8/390# 是那边账簿的凭证)。"""
+    src = v["from"].get("short", "") if (p.get("mode") == "move" and v.get("from")) else ""
+    return "更正%s%s%s" % (src, ref_of(v, pay_year), v["expl"])
+
+
+def red_lines(v, pay_year):
+    """一张计提整笔红冲的分录(原分录全额取负)。本主体红冲更正用；主体更正时拿去给原主体的人做账。"""
+    e = "红冲%s%s" % (ref_of(v, pay_year), v["expl"])
+    out = []
+    for l in v["lines"]:
+        if l.get("dr"):
+            keep = EXP_DIMS if str(l["acct"])[:1] in ("5", "6") else SUP_DIMS
+            out.append(_ln("红冲", e, l["acct"], l["acct_name"], dr=-l["dr"], src=l, keep=keep))
+        elif l.get("cr"):
+            out.append(_ln("红冲", e, l["acct"], l["acct_name"], cr=-l["cr"], src=l, keep=SUP_DIMS))
+    return out
 
 
 def _subset(cands, target):
@@ -221,21 +255,17 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     py = ctx["pay_year"]
     out = []
     redo = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") in ("rate", "fix", "tail")]
+    moved = [v for v in vouchers if pl["per"].get(v["vno"], {}).get("mode") == "move"]     # 主体更正：本账簿没有原凭证，不红冲，只补提
+    renew = redo + moved
     # 本张凭证号：写金蝶时付款单自动凭证的号已知(ctx.self_vno)，直接填；预览时用 □ 占位
     self_ref = "%d/%s#" % (ctx["pay_month"], ctx.get("self_vno") or "□")
     # 红冲：原分录全额取负
     for v in redo:
-        e = "红冲%s%s" % (ref_of(v, py), v["expl"])
-        for l in v["lines"]:
-            if l.get("dr"):
-                keep = EXP_DIMS if str(l["acct"])[:1] in ("5", "6") else SUP_DIMS
-                out.append(_ln("红冲", e, l["acct"], l["acct_name"], dr=-l["dr"], src=l, keep=keep))
-            elif l.get("cr"):
-                out.append(_ln("红冲", e, l["acct"], l["acct_name"], cr=-l["cr"], src=l, keep=SUP_DIMS))
-    # 更正：按新税率/更正值重做，税挂暂估
-    for v in redo:
+        out.extend(red_lines(v, py))
+    # 更正：按新税率/更正值重做，税挂暂估（主体更正＝在本主体补提）
+    for v in renew:
         p = pl["per"][v["vno"]]
-        e = "更正%s%s" % (ref_of(v, py), v["expl"])
+        e = fix_expl(v, p, py)
         fx = fixes.get(v["vno"]) or []
         gross = v["gross"]
         for f in fx:
@@ -244,11 +274,13 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
                     gross = r2(gross - float(f["snap"].get("amt") or 0) + float(str(f["to_amt_tax"]).replace(",", "")))
                 except (TypeError, ValueError, KeyError):
                     pass
-        if p["mode"] == "tail":                  # 尾差：含税不变，税额按发票口径 +d
-            tax = r2(v["tax"] + pl["tails"].get(v["vno"], 0))
+        d_tail = pl["tails"].get(v["vno"], 0)
+        if _keep_tax(v, p):                      # 尾差 / 主体更正(税率没变)：含税不变，税额沿用原计提、按发票口径 +d
+            tax = r2(v["tax"] + d_tail)
             net = r2(gross - tax)
-        else:
+        else:                                    # 改税率/更正：按新税率重算；尾差正好落在这张上的也带上(原来漏了，核销段会差这几分)
             net, tax = split_gross(gross, p["new_rate"])
+            tax, net = r2(tax + d_tail), r2(net - d_tail)
         exps = [dict(l) for l in v["exp_lines"]]
         for f in fx:
             sn = f.get("snap") or {}
@@ -269,7 +301,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
         v["_new"] = {"gross": gross, "tax": tax}
     # 核销：每张票一行待认证 + 每张计提一行贷暂估(更正过的用新税额、引用本凭证号)
-    refs = "、".join(self_ref if v in redo else ref_of(v, py) for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])))
+    refs = "、".join(self_ref if v in renew else ref_of(v, py) for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])))
     pre, items, mc = merged_desc(vouchers, sup)
     hx_desc = "核销%s%s%s" % (refs, pre, items)
     for i in invoices:
@@ -277,7 +309,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
             continue
         out.append(_ln("核销", "%s%s" % (i["number"], hx_desc), "2221.01.06", "待认证进项税额", dr=float(i.get("tax") or 0)))
     for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])):
-        t = v["_new"]["tax"] if v in redo else v["tax"]
+        t = v["_new"]["tax"] if v in renew else v["tax"]
         if t:
             out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
     # 支付

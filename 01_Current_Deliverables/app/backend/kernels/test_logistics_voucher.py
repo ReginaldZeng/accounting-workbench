@@ -129,5 +129,45 @@ class T(unittest.TestCase):
         self.assertFalse([l for l in ls2 if not l["dr"] and not l["cr"]])
         self.assertEqual(V.balance(ls2)[0], V.balance(ls2)[1])
 
+    def test_move_subject(self):
+        """V2.798 主体更正(丰源 8 月：深圳星期九付 918.93，计提记在深圳星期零 记-390)：
+        本张不红冲，更正段在本主体补提(部门换成本主体的)，核销引用本凭证号；原主体的红冲分录另出。"""
+        sup = "湖北丰源物流供应链管理有限公司"
+        sc = {"sup_code": "物流运输服务055", "sup_name": sup, "sup_grp": "供应商009"}
+        e = "计提%s8月线下小料出库运费" % sup
+        d0 = {"dept_code": "0011401", "dept": "永续物流中心", "fee_code": "FYXM008.002其他物流费用002", "fee": "出库运费", "biz_code": "CPFL009", "biz": "小料"}
+        v = V.acc_voucher("390", [{"acct": "6601", "acct_name": "销售费用", "dr": 843.06, "cr": 0, "expl": e, **d0},
+                                  {"acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 75.87, "cr": 0, "expl": e, **sc},
+                                  {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": 918.93, "expl": e, **sc}], 2026, 8)
+        v = dict(v, exp_orig=v["exp_lines"], exp_lines=[dict(v["exp_lines"][0], dept_code="0010401", dept="永续供应中心")])
+        v["from"] = {"short": "深圳星期零", "full": "深圳市星期零食品科技有限公司"}
+        inv = [{"number": "26422000003380468116", "rate": "9%", "gross": 918.93, "tax": 75.87}]
+        ctx = {"supplier": sup, "applicant": "陈慧娴", "pay_year": 2026, "pay_month": 9, "pay_amount": 918.93, "bank": "x", "paid": True, "self_vno": "88"}
+        pl = V.plan([v], inv, {"390": [{"to_rate": "6%"}]})      # 别的主体同号凭证的更正不能套到这张上
+        self.assertEqual(pl["status"], "ok")
+        self.assertEqual(pl["per"]["390"]["mode"], "move")
+        ls = V.build(ctx, [v], inv, pl)
+        self.assertFalse([l for l in ls if l["block"] == "红冲"])
+        fx = [l for l in ls if l["block"] == "更正"]
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in fx], [("6601", 843.06, 0), ("2221.01.07", 75.87, 0), ("2241.02", 0, 918.93)])
+        self.assertEqual(fx[0]["dims"]["dept_code"], "0010401")
+        self.assertTrue(fx[0]["expl"].startswith("更正深圳星期零8/390#计提"))
+        hx = [l for l in ls if l["block"] == "核销"]
+        self.assertIn("核销9/88#计提", hx[0]["expl"])
+        self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+        red = V.red_lines(v, 2026)
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in red], [("6601", -843.06, 0), ("2221.01.07", -75.87, 0), ("2241.02", 0, -918.93)])
+        self.assertEqual(red[0]["dims"]["dept_code"], "0011401")       # 红冲用原主体自己的部门
+        # 主体更正的同时税率也不对(计提 6%、发票 9%)：补提直接按发票税率
+        v6 = V.acc_voucher("391", [{"acct": "6601", "acct_name": "销售费用", "dr": 866.92, "cr": 0, "expl": e, **d0},
+                                   {"acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 52.01, "cr": 0, "expl": e, **sc},
+                                   {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": 918.93, "expl": e, **sc}], 2026, 8)
+        v6["from"] = {"short": "深圳星期零", "full": "x"}
+        pl6 = V.plan([v6], inv, {})
+        self.assertEqual((pl6["status"], pl6["per"]["391"]["mode"], pl6["per"]["391"]["new_rate"]), ("ok", "move", 0.09))
+        ls6 = V.build(ctx, [v6], inv, pl6)
+        self.assertEqual([l["dr"] for l in ls6 if l["block"] == "更正" and l["acct"] == "2221.01.07"], [75.87])
+        self.assertEqual(V.balance(ls6)[0], V.balance(ls6)[1])
+
 if __name__ == "__main__":
     unittest.main()
