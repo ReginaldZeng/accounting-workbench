@@ -2286,12 +2286,24 @@ async def bom_auto_intake_run(request: Request):
     return {"ok": True, **res}
 
 
-def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=None, historical=None):
+def _cp_base(cp):
+    """CP 码去掉修订后缀：CP4897807-3 → CP4897807；CP15113701-1（SN4) → CP15113701。只用于「人工点了替换」时的新旧配对。"""
+    s = str(cp or "").upper().replace("（", "(").strip()
+    s = re.sub(r"\(.*$", "", s).strip()
+    return re.sub(r"-\d+$", "", s)
+
+
+def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=None, historical=None,
+                      pair_loose=False, adopt=False, source_type="dingtalk_form", force_bom=False):
     """用新采购核算表替换一个组：新文件里勾稽平的产品 → 顶替同组同产品旧版（旧版标 active=0 留痕、退出标准库）。
     仍不平的产品不入、回报（供再修）；新增产品（旧组没有的、如原本不平未入的半成品）直接入组。返回结果字典。
     bom_lists：本次随单一并解析到的研发 BOM 清单（重连钉钉时把审批附件里的 BOM 文件也解析进来）——
     ⚠ V2.456 前只用同组既有记录的 bom_list 兜底，**组内新增的产品**（如复配料）没有旧记录可继承 → 明明 BOM 文件里有它那页，
-    替换后仍显「无清单/补挂」（业务方 2026-09-06 实证 522031 卤味复合调味酱）。"""
+    替换后仍显「无清单/补挂」（业务方 2026-09-06 实证 522031 卤味复合调味酱）。
+    V2.839「从评论区替换」另传：pair_loose＝研发改一次 BOM 换一个 CP 后缀（-2→-3）时，新旧产品键不同也按「同名+同 CP 主码」
+    （再不行：新旧各只剩一个）配成替换关系——**只在人明确点了替换时用**，自动流程不用（同名不同后缀也可能是并行产品）；
+    adopt＝这份文件的同一条记录已在本单别的组入账（立项时评论区附件自成一组）→ 把那条**并入本组**而不是再插一条重复的；
+    source_type＝来源渠道（评论区＝dingtalk_comment，来源方记「评论区上传」）；force_bom＝指定的 BOM 清单配不上名/码时，单产品对单清单直接挂。"""
     try:
         recs = bq.parse_workbook(data, fname)
     except Exception as e:
@@ -2300,6 +2312,20 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
         return {"ok": False, "msg": "这份不是采购核算表（找不到核算样表页）。"}
     recs = bq.recalc_workbook(recs)          # V2.516：小计漏行按明细重算 + 链路随上游重算
     old_active = {x.get("product_key"): x for x in db.bom_group_entries(src, gid, include_superseded=False)}
+    pair_old = {}
+    if pair_loose:
+        new_pks = [bq.product_key(x) for x in recs]
+        free_old = [x for kk, x in old_active.items() if kk not in new_pks]
+        free_new = [x for x in recs if bq.product_key(x) not in old_active]
+        for x in free_new:
+            cand = [o for o in free_old if bq.norm(o.get("product_name")) == bq.norm(x.get("productName"))
+                    and _cp_base(o.get("cp_code")) and _cp_base(o.get("cp_code")) == _cp_base(x.get("cpCode"))]
+            if len(cand) == 1:
+                pair_old[bq.product_key(x)] = cand[0]
+                free_old = [o for o in free_old if o["id"] != cand[0]["id"]]
+        rest_new = [x for x in free_new if bq.product_key(x) not in pair_old]
+        if len(rest_new) == 1 and len(free_old) == 1:
+            pair_old[bq.product_key(rest_new[0])] = free_old[0]
     # 补录承接（V2.501，业务方 2026-09-06「补录的时候也会更新评论区采购核算表上去」）：补录组替换/重拉采购核算表，新版**继承「补录」标记**，
     # 照常复核+初审、初审即定稿，不因换了表就掉进财务BP终审。显式传 historical 可覆盖；不传则看组里有没有补录记录。
     backfill = bool(historical) if historical is not None else any(x.get("historical") == 2 for x in db.bom_group_entries(src, gid))
@@ -2310,8 +2336,18 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             bom_pool.append({"productName": x.get("product_name"), "cpCode": x.get("cp_code"),
                              "customer": x.get("customer"), "sheet": x.get("sheet"),
                              "materials": x["bom_list"], "craft": x.get("craft")})
-    replaced, added, still_bad = [], [], []
-    origin = bq.origin_from_label(label, "dingtalk_form", is_bom_list=False)
+    replaced, added, still_bad, same = [], [], [], []
+    origin = bq.origin_from_label(label, source_type, is_bom_list=False)
+    ok_cnt = sum(1 for x in recs if bq.all_checks_ok(x))
+
+    def _bom_for(rec):
+        if force_bom and bom_lists:           # 人指定了 BOM：先在指定的里配，配不上且单对单就直接挂，再不行才退回组内既有
+            m = bq.match_bom_entry(rec, list(bom_lists))
+            if not m and len(bom_lists) == 1 and ok_cnt == 1:
+                m = bom_lists[0]
+            if m:
+                return m
+        return bq.match_bom_entry(rec, bom_pool) or {}
     pdir = os.path.join(UPLOAD_DIR, src)
     os.makedirs(pdir, exist_ok=True)
     for rec in recs:
@@ -2326,17 +2362,54 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             still_bad.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"),
                               "blockedBy": blocked, "failedChecks": []})
             continue
-        old = old_active.get(pk)
+        old = old_active.get(pk) or pair_old.get(pk)
         if old and _bp_stamped(old) and not db.is_super(db.get_user(user) or {}):     # V2.585：已终审对外的版本不能被直接替换掉
             still_bad.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"), "failedChecks": [],
                               "blockedFinal": True, "msg": "旧版已终审对外（财务BP戳），不能直接替换——请先「申请撤回终审」经财务BP批准"})
             continue
         comp = bq.compose(rec)
         fee = comp["srcFee"]
+        bm = _bom_for(rec)
+        twin = None
+        if adopt:      # 这份文件的这条记录是否已在本单入过账（同产品键 + 同数字指纹，仍有效）
+            fp = _num_fp(rec, comp)
+            twin = next((x for x in db.bom_list_entries(src) if (x.get("approval_no") or "") == appno and x.get("product_key") == pk
+                         and x.get("num_fp") == fp and x.get("active") in (1, None)), None)
+        if twin and old and twin["id"] == old["id"]:
+            same.append({"id": twin["id"], "productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode")})
+            continue                       # 本组当前版就是这份文件，不用换
+        if twin:
+            eid = twin["id"]
+            upd = {"group_id": gid}
+            if force_bom and bom_lists and bm.get("materials") and bm.get("materials") != twin.get("bom_list"):
+                if twin.get("status") in ("初审", "已审核"):
+                    still_bad.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"), "failedChecks": [],
+                                      "msg": "这条已审核通过，换 BOM 清单要先「撤销审核」"})
+                    continue
+                rs = dict(twin.get("review_steps") or {})
+                rs.pop("qty", None)        # 用量自洽是按旧清单确认的 → 清掉重认
+                upd.update({"bom_list": bm["materials"], "review_steps": rs})
+                if bm.get("craft"):
+                    upd["craft"] = bm["craft"]
+                if not any(rs.get(s) for s in REVIEW_STEPS) and twin.get("status") == "已复核":
+                    upd["status"] = "未复核"
+            db.bom_update_entry(eid, upd)
+            if (twin.get("group_id") or "") != gid:
+                db.bom_add_audit(eid, user, "并入本组（%s）" % via, "原组 %s" % (twin.get("group_id") or "—")[:10], "组 %s" % gid[:10])
+            if "bom_list" in upd:
+                db.bom_add_audit(eid, user, "换 BOM 清单（%s）" % via, "", (bm.get("srcFile") or "评论区 BOM 清单"))
+            if old:
+                db.bom_supersede_entry(old["id"], "被替换（%s）→ 第 %d 号，操作人 %s" % (via, eid, user))
+                db.bom_add_audit(eid, user, "替换采购核算表·" + (rec.get("productName") or ""),
+                                 "旧 #%d %s(%s)" % (old["id"], old.get("cp_code") or "", old.get("src_file") or ""), "新 #%d %s(%s)" % (eid, rec.get("cpCode") or "", fname))
+                replaced.append({"id": eid, "old": old["id"], "productName": (rec.get("productName") or "").strip(), "adopted": True})
+            else:
+                added.append({"id": eid, "productName": (rec.get("productName") or "").strip(), "adopted": True})
+            continue
         eid = db.bom_insert_entry({
             "source": src, "product_key": pk, "cp_code": rec.get("cpCode"),
-            "bom_list": (bq.match_bom_entry(rec, bom_pool) or {}).get("materials"),
-            "craft": (bq.match_bom_entry(rec, bom_pool) or {}).get("craft") or (old.get("craft") if old else None),
+            "bom_list": bm.get("materials"),
+            "craft": bm.get("craft") or (old.get("craft") if old else None),
             "erp_code": rec.get("erpCode"),
             "product_name": (rec.get("productName") or "").strip(), "customer": rec.get("customer") or "",
             "pack_spec": rec.get("packSpec") or "", "supplier": rec.get("supplier") or "",
@@ -2346,8 +2419,8 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             "pack_subtotal_excl": rec.get("packSubtotal"), "fee_mfg": fee["mfg"], "fee_load": fee["load"],
             "fee_adm": fee["adm"], "full_cost_incl": comp["full"], "src_full": comp["srcFull"],
             "src_fee": comp["srcFee"], "summary": rec.get("summary"), "materials": rec.get("materials"),
-            "checks": rec.get("checks"), "recalc": rec.get("recalc"), "num_fp": _num_fp(rec, comp), "source_type": "dingtalk_form",
-            "origin": origin, "src_label": label or (old.get("src_label") if old else ""),
+            "checks": rec.get("checks"), "recalc": rec.get("recalc"), "num_fp": _num_fp(rec, comp), "source_type": source_type,
+            "origin": origin, "src_label": label or ("" if source_type == "dingtalk_comment" else (old.get("src_label") if old else "")),
             "group_id": gid, "active": 1, "approval_no": appno,
             "src_file": rec.get("srcFile"), "sheet": rec.get("sheet"), "status": "未复核", "created_by": user,
             "historical": 2 if backfill else None,
@@ -2430,7 +2503,7 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
                                 "blockedBy": b.get("blockedBy") or []} for b in still_bad], operator=user)
     db.audit(user, "bom_replace_sheet", target="%s/%s" % (appno, gid),
              detail="替换 %d、新增 %d、仍不平 %d（%s）" % (len(replaced), len(added), len(still_bad), via))
-    return {"ok": True, "replaced": replaced, "added": added, "stillBad": still_bad,
+    return {"ok": True, "replaced": replaced, "added": added, "stillBad": still_bad, "same": same,
             "staleDownstream": stale, "via": via, "backfill": backfill}
 
 
@@ -2491,6 +2564,164 @@ def _refetch_replace_core(gid, appno, user_name, historical=None, via="重连钉
         out["bomSheets"] = [b.get("productName") for b in bom_lists]
         out["srcLabel"] = biz.get("label") or ""
     return out
+
+
+# ============ 从评论区替换（含 BOM 清单和采购核算表）V2.839 ============
+# 业务方 2026-10-06：评论区补传的更新版现在能取到了，但立项时它因 CP 后缀变了（-2→-3）自成一组、表单里的旧版原样留着——
+# 「是不是可以加多一个从评论区替换（含 BOM 和核算表）」。做成**人点**的动作：列出评论区里的采购核算表 / BOM 清单，选了再替换本组，
+# 不让工具自动判谁顶谁（同名不同后缀也可能是并行产品，如空白袋/印刷袋）。旧版标「被替换」留痕；评论区那条若已自成一组则并入本组。
+_APPR_CACHE = {}
+
+
+def _fetch_appr_cached(appno, fresh=False):
+    """取审批 + 下载附件，进程内缓存 10 分钟（列清单与随后替换共用一次下载）。"""
+    now = time.time()
+    hit = _APPR_CACHE.get(appno)
+    if hit and not fresh and now - hit[0] < 600:
+        return hit[1]
+    res = dtb.fetch_approval(appno)
+    if res.get("ok"):
+        _APPR_CACHE[appno] = (now, res)
+        for kk in [x for x, v in _APPR_CACHE.items() if now - v[0] > 600]:
+            _APPR_CACHE.pop(kk, None)
+    return res
+
+
+def _bom_lists_of(a):
+    """一个 xlsx 附件 → 研发 BOM 清单列表（带工艺流程与来源文件名）；不是 BOM 清单回 []。"""
+    try:
+        bl = bq.parse_bom_list(a["bytes"], a.get("fileName") or "") or []
+    except Exception:
+        bl = []
+    if bl:
+        try:
+            craft = bq.parse_craft(a["bytes"], a.get("fileName") or "")
+        except Exception:
+            craft = None
+        for b in bl:
+            b["craft"] = craft
+            b["srcFile"] = a.get("fileName") or ""
+    return bl
+
+
+@router.get("/api/bom/comment-files")
+async def bom_comment_files(request: Request, approvalNo: str = "", groupId: str = "", fresh: int = 0):
+    """某钉钉单评论区里取到的 xlsx：采购核算表（逐产品：CP/名称/全成本/料行/是否已入账在哪组）与 BOM 清单（CP/行数），带评论人与时间。"""
+    u = _require_perm(request, CAP_FETCH)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
+    appno = (approvalNo or "").strip()
+    if not appno:
+        return JSONResponse({"ok": False, "msg": "缺审批编号"}, status_code=400)
+    if not (dtb and dtb.configured()):
+        return JSONResponse({"ok": False, "msg": "未配置钉钉应用。"}, status_code=400)
+    res = _fetch_appr_cached(appno, fresh=bool(fresh))
+    if not res.get("ok"):
+        return JSONResponse({"ok": False, "msg": res.get("msg") or "取数失败"}, status_code=400)
+    src = _src()
+    live = [e for e in db.bom_list_entries(src) if (e.get("approval_no") or "") == appno and e.get("active") in (1, None)]
+    sheets, boms = [], []
+    for a in res.get("attachments", []):
+        if a.get("source") != "dingtalk_comment" or not a.get("bytes") or not str(a.get("fileName") or "").lower().endswith((".xlsx", ".xls")):
+            continue
+        base = {"fileId": a.get("fileId"), "fileName": a.get("fileName"), "at": str(a.get("at") or "")[:16], "by": dtb.user_name(a.get("byUserId"))}
+        try:
+            recs = bq.parse_workbook(a["bytes"], a.get("fileName") or "")
+        except Exception:
+            recs = []
+        if recs:
+            recs = bq.recalc_workbook(recs)
+            prods = []
+            for rec in recs:
+                comp = bq.compose(rec)
+                pk, fp = bq.product_key(rec), _num_fp(rec, comp)
+                tw = next((e for e in live if e.get("product_key") == pk and e.get("num_fp") == fp), None)
+                prods.append({"cpCode": rec.get("cpCode"), "productName": (rec.get("productName") or "").strip(), "full": comp["full"],
+                              "matCount": len(rec.get("materials") or []), "checksOk": bq.all_checks_ok(rec),
+                              "bookedId": tw["id"] if tw else None, "bookedGroupId": (tw.get("group_id") or "") if tw else "",
+                              "inThisGroup": bool(tw and groupId and (tw.get("group_id") or "") == groupId)})
+            sheets.append({**base, "products": prods})
+            continue
+        bl = _bom_lists_of(a)
+        if bl:
+            boms.append({**base, "lists": [{"cpCode": b.get("cpCode"), "productName": (b.get("productName") or "").strip(),
+                                            "rows": len(b.get("materials") or [])} for b in bl]})
+    sheets.sort(key=lambda x: x["at"], reverse=True)
+    boms.sort(key=lambda x: x["at"], reverse=True)
+    grp = [{"id": e["id"], "cpCode": e.get("cp_code"), "productName": e.get("product_name"), "status": e.get("status"),
+            "full": e.get("full_cost_incl"), "srcFile": e.get("src_file"), "hasBom": bool(e.get("bom_list"))}
+           for e in live if groupId and (e.get("group_id") or "") == groupId]
+    return {"ok": True, "approvalNo": appno, "sheets": sheets, "boms": boms, "group": grp,
+            "pending": _comment_pending(res.get("attachments"))}
+
+
+@router.post("/api/bom/replace-from-comment")
+async def bom_replace_from_comment(request: Request):
+    """用评论区里选定的采购核算表 / BOM 清单替换一个组。sheetFileId、bomFileId 至少给一个：
+    只给 BOM＝只换本组产品的 BOM 清单（用量自洽要重认）；给了核算表＝按 _do_replace_sheet 替换（宽配对 + 并入已入账的同一条）。"""
+    u = _require_perm(request, CAP_FETCH)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「抓取/录入」权限"}, status_code=403)
+    body = await request.json()
+    gid = str(body.get("groupId") or "").strip()
+    appno = str(body.get("approvalNo") or "").strip()
+    sfid, bfid = str(body.get("sheetFileId") or "").strip(), str(body.get("bomFileId") or "").strip()
+    if not (gid and appno):
+        return JSONResponse({"ok": False, "msg": "缺组标识或审批编号"}, status_code=400)
+    if not (sfid or bfid):
+        return JSONResponse({"ok": False, "msg": "请至少选一份评论区的采购核算表或 BOM 清单"}, status_code=400)
+    if not (dtb and dtb.configured()):
+        return JSONResponse({"ok": False, "msg": "未配置钉钉应用。"}, status_code=400)
+    res = _fetch_appr_cached(appno)
+    if not res.get("ok"):
+        return JSONResponse({"ok": False, "msg": res.get("msg") or "取数失败"}, status_code=400)
+    cm = {str(a.get("fileId")): a for a in res.get("attachments", []) if a.get("source") == "dingtalk_comment" and a.get("bytes")}
+    a_s, a_b = cm.get(sfid) if sfid else None, cm.get(bfid) if bfid else None
+    if sfid and not a_s:
+        return JSONResponse({"ok": False, "msg": "选的采购核算表不在这张单的评论区里（或没取到），请刷新后重选"}, status_code=400)
+    if bfid and not a_b:
+        return JSONResponse({"ok": False, "msg": "选的 BOM 清单不在这张单的评论区里（或没取到），请刷新后重选"}, status_code=400)
+    bom_lists = _bom_lists_of(a_b) if a_b else []
+    if a_b and not bom_lists:
+        return JSONResponse({"ok": False, "msg": "选的这份不是研发 BOM 清单。"}, status_code=400)
+    src = _src()
+    if a_s:
+        out = _do_replace_sheet(src, gid, a_s["bytes"], a_s["fileName"], "", u["name"], appno, "评论区替换", bom_lists=bom_lists,
+                                pair_loose=True, adopt=True, source_type="dingtalk_comment", force_bom=bool(bom_lists))
+        if out.get("ok"):
+            out["sheetFile"] = a_s["fileName"]
+            out["bomFile"] = a_b["fileName"] if a_b else ""
+        return JSONResponse(out, status_code=200 if out.get("ok") else 400)
+    # 只换 BOM 清单
+    ents = db.bom_group_entries(src, gid, include_superseded=False)
+    if not ents:
+        return JSONResponse({"ok": False, "msg": "本组没有已入账的产品，无处挂 BOM 清单。"}, status_code=400)
+    done, miss = [], []
+    for e in ents:
+        m = bq.match_bom_entry(_rec_from_entry(e), list(bom_lists))
+        if not m and len(bom_lists) == 1 and len(ents) == 1:
+            m = bom_lists[0]
+        nm = (e.get("product_name") or "").strip()
+        if not m:
+            miss.append({"productName": nm, "cpCode": e.get("cp_code"), "msg": "这份 BOM 清单里没有对得上的页"})
+            continue
+        if e.get("status") in ("初审", "已审核"):
+            miss.append({"productName": nm, "cpCode": e.get("cp_code"), "msg": "已审核通过，换 BOM 清单要先「撤销审核」"})
+            continue
+        rs = dict(e.get("review_steps") or {})
+        rs.pop("qty", None)
+        upd = {"bom_list": m.get("materials"), "review_steps": rs}
+        if m.get("craft"):
+            upd["craft"] = m["craft"]
+        if not any(rs.get(s) for s in REVIEW_STEPS) and e.get("status") == "已复核":
+            upd["status"] = "未复核"
+        db.bom_update_entry(e["id"], upd)
+        db.bom_add_audit(e["id"], u["name"], "换 BOM 清单（评论区替换）", "", a_b["fileName"])
+        done.append({"id": e["id"], "productName": nm})
+    db.audit(u["name"], "bom_replace_from_comment", target="%s/%s" % (appno, gid), detail="只换 BOM：%d 个产品（%s）" % (len(done), a_b["fileName"]))
+    return {"ok": bool(done), "bomOnly": True, "bomUpdated": done, "bomMissed": miss, "replaced": [], "added": [], "stillBad": [],
+            "staleDownstream": [], "bomFile": a_b["fileName"],
+            "msg": "" if done else "；".join("%s：%s" % (x["productName"], x["msg"]) for x in miss)}
 
 
 @router.post("/api/bom/refetch-replace")

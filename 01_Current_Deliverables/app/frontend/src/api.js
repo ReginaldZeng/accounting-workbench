@@ -434,6 +434,9 @@ export const bomVoidReview = (payload) => jp('/api/bom/void-review', payload)
 export const getBomPending = (groupId, productKey) =>
   j(`/api/bom/pending?groupId=${encodeURIComponent(groupId)}&productKey=${encodeURIComponent(productKey)}`)
 export const bomRefetchReplace = (groupId, approvalNo) => jp('/api/bom/refetch-replace', { groupId, approvalNo })
+// 从评论区替换（含 BOM 清单和采购核算表）：先列评论区取到的文件，再按选择替换本组
+export const getBomCommentFiles = (approvalNo, groupId, fresh) => j('/api/bom/comment-files?approvalNo=' + encodeURIComponent(approvalNo) + '&groupId=' + encodeURIComponent(groupId || '') + (fresh ? '&fresh=1' : ''))
+export const bomReplaceFromComment = (groupId, approvalNo, sheetFileId, bomFileId) => jp('/api/bom/replace-from-comment', { groupId, approvalNo, sheetFileId, bomFileId })
 export const bomReplaceSheet = (groupId, approvalNo, file) => {
   const fd = new FormData(); fd.append('groupId', groupId); fd.append('approvalNo', approvalNo || ''); fd.append('file', file)
   return fetch('/api/bom/replace-sheet', { method: 'POST', body: fd }).then(r => r.json())

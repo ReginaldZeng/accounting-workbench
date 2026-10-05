@@ -9,7 +9,7 @@ import {
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
-  getBomApproval, bomReplaceSheet, bomRefetchReplace, bomClassify, getBomPending,
+  getBomApproval, bomReplaceSheet, bomRefetchReplace, getBomCommentFiles, bomReplaceFromComment, bomClassify, getBomPending,
   bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
   getBomInvoiceRules, setBomInvoiceRules, getBomDeliverStatus,
 } from '../api.js'
@@ -754,6 +754,113 @@ function ChainStrip({ products }) {
 
 // ============ 处理页：一个钉钉单号 → 若干「组」（一个采购核算表文件=一组）============
 // 组内：当前版产品（成品/半成品/复配料）+ 各自 BOM 校验 + 可替换组内文件（重连钉钉/手动上传）+ 被替换旧版留痕。
+// 从评论区替换（V2.839）：列出这张钉钉单评论区里取到的采购核算表 / BOM 清单，选了替换本组。
+// 研发每改一次 BOM 换一个 CP 后缀（-2→-3），立项时评论区的新版会自成一组、表单里的旧版原样留着——由人在这里点替换，旧版标「被替换」留痕。
+function CommentReplaceModal({ no, g, idx, onClose, onDone, flash }) {
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [sheet, setSheet] = useState('')     // 选中的采购核算表 fileId（''＝不换）
+  const [bom, setBom] = useState('')         // 选中的 BOM 清单 fileId（''＝不换）
+  const [bomTouched, setBomTouched] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const bomFor = (data, sid) => {            // 默认 BOM＝与所选核算表 CP 相同的那份（最新）
+    const s = (data.sheets || []).find(x => x.fileId === sid)
+    const cps = new Set(((s && s.products) || []).map(p => p.cpCode))
+    const hit = (data.boms || []).find(b => (b.lists || []).some(l => cps.has(l.cpCode)))
+    return hit ? hit.fileId : ''
+  }
+  const loadFiles = async (fresh) => {
+    setD(null); setErr('')
+    try {
+      const r = await getBomCommentFiles(no, g.groupId, fresh)
+      if (!r.ok) { setErr(r.msg || '取评论区附件失败'); return }
+      setD(r)
+      const def = (r.sheets || []).find(s => !(s.products || []).every(p => p.inThisGroup))
+      const sid = def ? def.fileId : ''
+      setSheet(sid); setBom(sid ? bomFor(r, sid) : ''); setBomTouched(false)
+    } catch (e) { setErr('取评论区附件失败：' + e.message) }
+  }
+  useEffect(() => { loadFiles(false) }, [no, g.groupId])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
+  const pickSheet = (sid) => { setSheet(sid); if (!bomTouched && d) setBom(sid ? bomFor(d, sid) : bom) }
+  const go = async () => {
+    setBusy(true)
+    try { onDone(await bomReplaceFromComment(g.groupId, no, sheet, bom)) }
+    catch (e) { flash('替换失败：' + e.message); setBusy(false) }
+  }
+  const S = d && (d.sheets || []).find(x => x.fileId === sheet)
+  const B = d && (d.boms || []).find(x => x.fileId === bom)
+  const cur = (d && d.group) || []
+  const sameFile = S && (S.products || []).every(p => p.inThisGroup)
+  const opt = (on) => ({ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '9px 12px', border: '1px solid ' + (on ? 'var(--accent)' : 'var(--line)'),
+    background: on ? 'var(--accent-soft)' : 'transparent', borderRadius: 8, cursor: 'pointer', marginBottom: 6 })
+  const meta = (x) => <span className="muted" style={{ fontSize: 11 }}>{x.by || '评论人未知'} · {x.at || '—'} 传</span>
+  return (
+    <div className="bom-mask" onClick={e => { if (e.target.classList.contains('bom-mask')) onClose() }}>
+      <div className="bom-modal" style={{ width: 'min(760px,100%)' }}>
+        <div className="bom-mhead"><b>从评论区替换 · 组 {idx}</b><span className="bom-x" onClick={onClose}>✕</span></div>
+        <div style={{ maxHeight: '68vh', overflowY: 'auto', marginTop: 12, paddingRight: 4 }}>
+          {err && <div className="banner" style={{ background: 'var(--red-bg)', color: 'var(--red)', border: '1px solid var(--red)' }}>{err}</div>}
+          {!d && !err && <div className="muted" style={{ padding: 24, textAlign: 'center' }}>正在从钉钉取这张单评论区的附件…（几秒钟）</div>}
+          {d && <>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+              本组现在：{cur.length ? cur.map(c => `${c.cpCode} ${c.productName}（${fmt(c.full)}，${c.status}）`).join('；') : '（没有已入账的产品）'}
+            </div>
+            {(d.sheets || []).length === 0 && (d.boms || []).length === 0
+              ? <div className="muted" style={{ padding: 20, textAlign: 'center' }}>这张单的评论区里没有取到采购核算表或 BOM 清单。</div>
+              : <>
+                <div style={{ fontWeight: 700, fontSize: 13, margin: '4px 0 6px' }}>① 采购核算表（评论区）</div>
+                <label style={opt(sheet === '')}><input type="radio" checked={sheet === ''} onChange={() => pickSheet('')} />
+                  <span>不换采购核算表<span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>只换 BOM 清单</span></span></label>
+                {(d.sheets || []).map(s => { const mine = (s.products || []).every(p => p.inThisGroup); const other = (s.products || []).some(p => p.bookedId && !p.inThisGroup); return (
+                  <label key={s.fileId} style={opt(sheet === s.fileId)}><input type="radio" checked={sheet === s.fileId} onChange={() => pickSheet(s.fileId)} />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, wordBreak: 'break-all' }}>{s.fileName}
+                        {mine && <span className="bom-gvtag" style={{ marginLeft: 6 }}>本组当前就是这份</span>}
+                        {other && <span className="bom-gvtag" style={{ marginLeft: 6, color: 'var(--amber)', borderColor: 'var(--amber-line)' }}>已在本单另一组入账 · 替换后并入本组</span>}</div>
+                      {(s.products || []).map((p, i) => <div key={i} style={{ fontSize: 12 }}>
+                        <b className="mono">{p.cpCode}</b> {p.productName} · 全成本 ¥{fmt(p.full)} · {p.matCount} 行料 ·
+                        {p.checksOk ? <span style={{ color: 'var(--green)' }}> 勾稽全平</span> : <span style={{ color: 'var(--red)' }}> 勾稽不平（不会入账）</span>}</div>)}
+                      {meta(s)}
+                    </span></label>) })}
+                {(d.sheets || []).length === 0 && <div className="muted" style={{ fontSize: 12, margin: '0 0 8px 4px' }}>评论区没有采购核算表。</div>}
+
+                <div style={{ fontWeight: 700, fontSize: 13, margin: '12px 0 6px' }}>② 研发 BOM 清单（评论区）</div>
+                <label style={opt(bom === '')}><input type="radio" checked={bom === ''} onChange={() => { setBom(''); setBomTouched(true) }} />
+                  <span>不指定 BOM 清单<span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>沿用按 CP 码自动配到的那份</span></span></label>
+                {(d.boms || []).map(b => (
+                  <label key={b.fileId} style={opt(bom === b.fileId)}><input type="radio" checked={bom === b.fileId} onChange={() => { setBom(b.fileId); setBomTouched(true) }} />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, wordBreak: 'break-all' }}>{b.fileName}</div>
+                      {(b.lists || []).map((l, i) => <div key={i} style={{ fontSize: 12 }}><b className="mono">{l.cpCode}</b> {l.productName} · {l.rows} 行</div>)}
+                      {meta(b)}
+                    </span></label>))}
+                {(d.boms || []).length === 0 && <div className="muted" style={{ fontSize: 12, margin: '0 0 8px 4px' }}>评论区没有 BOM 清单。</div>}
+
+                {(d.pending || []).length > 0 && <div className="muted" style={{ fontSize: 11.5, marginTop: 10, lineHeight: 1.6 }}>
+                  另有 {d.pending.length} 个评论区附件没取到：{d.pending.map((p, i) => <span key={i}>{i ? '；' : ''}{p.fileName}{p.replacedBy ? '（重传前的旧件，可忽略）' : '（钉钉回无访问权限）'}</span>)}</div>}
+
+                <div className="banner" style={{ display: 'block', background: 'var(--bg-sub)', color: 'var(--ink-2)', border: '1px solid var(--line)', marginTop: 12, lineHeight: 1.7 }}>
+                  {!sheet && !bom ? '请选一份采购核算表或 BOM 清单。'
+                    : sameFile && !bom ? '本组当前已经是这份采购核算表，没有要换的。'
+                    : <>确认后：
+                      {S && !sameFile && <span>本组现有的 <b>{cur.map(c => c.cpCode).join('、') || '（无）'}</b> 标「被替换」留痕、退出当前版；换成评论区的 <b>{(S.products || []).filter(p => p.checksOk).map(p => `${p.cpCode}（¥${fmt(p.full)}）`).join('、') || '（无勾稽平的产品）'}</b>，状态从「未复核」重新走。</span>}
+                      {B && <span>{S && !sameFile ? ' ' : ''}BOM 清单用 <b>{(B.lists || []).map(l => l.cpCode).join('、')}</b>（{B.at}），用量自洽要重新确认。</span>}
+                      {' '}已财务BP终审的旧版不会被直接顶掉。</>}
+                </div>
+              </>}
+          </>}
+        </div>
+        <div className="bom-mfoot">
+          <a className="lk" style={{ marginRight: 'auto', fontSize: 12 }} onClick={() => loadFiles(true)}>重新从钉钉取 ›</a>
+          <button className="btn-sec" onClick={onClose}>取消</button>
+          <button className="btn-pri" disabled={busy || !d || (!sheet && !bom) || (sameFile && !bom)} onClick={go}>{busy ? '替换中…' : '确认替换'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
   const [d, setD] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -761,6 +868,7 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
   const [rep, setRep] = useState(null)      // 最近一次替换结果（含仍不平清单）
   const [auditP, setAuditP] = useState(null)   // 审核定性弹窗的目标产品
   const [pendP, setPendP] = useState(null)     // 不平下钻明细：{groupId, product}
+  const [cmtG, setCmtG] = useState(null)       // 「从评论区替换」弹窗目标：{g, idx}
   const load = useCallback(async () => {
     setLoading(true)
     try { setD(await getBomApproval(no)) } catch (e) { flash('加载失败：' + e.message) }
@@ -774,6 +882,15 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
     const st = (r.staleDownstream || []).length
     flash(`${how}：替换 ${r.replaced.length}、新增 ${r.added.length}` + (r.stillBad.length ? `，仍不平 ${r.stillBad.length}` : '') + (st ? `，下游 ${st} 个受影响已打回未复核` : '') + (r.backfill ? '　· 补录组：新版承接「补录」标记，初审通过即定稿' : ''))
     await load()
+  }
+  const afterCmt = async (r) => {      // 从评论区替换的结果
+    setCmtG(null)
+    if (r.bomOnly) {
+      flash(`已换 BOM 清单：${(r.bomUpdated || []).map(x => x.productName).join('、')}（用量自洽需重新确认）` + ((r.bomMissed || []).length ? `；未换：${r.bomMissed.map(x => x.productName + '·' + x.msg).join('；')}` : ''))
+      return load()
+    }
+    if (!r.replaced.length && !r.added.length && !r.stillBad.length && (r.same || []).length) { flash('本组当前已经是评论区这份文件，无需替换'); return load() }
+    await afterRep(r, '从评论区替换')
   }
   const doRefetch = async (gid) => {
     setBusy(gid + ':dt')
@@ -820,13 +937,15 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
       <div className="body">
         <div className="bom-crumbs"><a className="lk" onClick={onBack}>待办与复核</a> / 单号 {no}</div>
 
+        {cmtG && <CommentReplaceModal no={no} g={cmtG.g} idx={cmtG.idx} onClose={() => setCmtG(null)} onDone={afterCmt} flash={flash} />}
         {rep && (rep.stillBad || []).length > 0 && <div className="card bom-sect" style={{ borderLeft: '3px solid var(--amber)' }}>
           <div className="bom-secthead"><span className="bom-no" style={{ background: 'var(--amber-bg)', color: 'var(--amber)' }}>!</span>
-            <b>{rep.how}后仍有 {rep.stillBad.length} 个产品勾稽不平，未入账</b>
+            <b>{rep.how}后仍有 {rep.stillBad.length} 个产品没换成（勾稽不平或被拦）</b>
             <span style={{ flex: 1 }} /><a className="lk" onClick={() => setRep(null)}>关闭</a></div>
           <div style={{ padding: '10px 14px' }}>
             {rep.stillBad.map((b, i) => <div key={i} className="bom-chkfail">
               <b>{b.productName}（{b.cpCode || '无编码'}）</b>
+              {b.msg && <div style={{ color: 'var(--red)' }}>{b.msg}</div>}
               {b.recalcBlocked && <div style={{ color: 'var(--red)' }}>不能按明细重算：{b.recalcBlocked}</div>}
               {(b.failedChecks || []).map((c, j) => <div key={j}>✗ {c.check}：申报 {fmt(c.a, 4)} ≠ 逐料Σ {fmt(c.b, 4)}（差 {c.diff > 0 ? '+' : ''}{fmt(c.diff, 4)}）
                 {(c.missing || []).length > 0 && <span>　— 疑源表小计漏加：<b>{c.missing.map(m => m.matName).join('、')}</b></span>}</div>)}
@@ -937,6 +1056,9 @@ function ApprovalView({ no, cfg, onBack, onOpen, flash, isSuper, onDelete }) {
               <button className="btn-sec" disabled={!!busy || !cfg?.dingtalkConfigured} onClick={() => doRefetch(g.groupId)}
                 title={cfg?.dingtalkConfigured ? '重连钉钉重拉商务版采购核算表替换' : '本机未配置钉钉，请用上传替换'}>
                 {busy === g.groupId + ':dt' ? '重拉中…' : '⟳ 重连钉钉替换'}</button>
+              <button className="btn-sec" disabled={!!busy || !cfg?.dingtalkConfigured} onClick={() => setCmtG({ g, idx: gi + 1 })}
+                title={cfg?.dingtalkConfigured ? '研发/采购在钉钉评论区补传了更新版时用：列出评论区的采购核算表和 BOM 清单，选了替换本组；旧版留痕' : '本机未配置钉钉'}>
+                💬 从评论区替换</button>
               <label className="bom-minifile pri">{busy === g.groupId + ':up' ? '上传中…' : '⬆ 上传替换采购核算表'}
                 <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => doUpload(g.groupId, e.target.files)} /></label>
               {isSuper && onDelete && <button className="btn-sec" style={{ color: 'var(--red)', borderColor: 'var(--red)' }}

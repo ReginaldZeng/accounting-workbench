@@ -425,3 +425,24 @@ def final_node_state(business_id, node_ids, process_code=None):
         return final_state_from_inst(inst, node_ids, iid)
     except Exception as e:
         return {"ok": False, "msg": str(e)[:200]}
+
+
+_UNAME = {}
+
+
+def user_name(userid):
+    """钉钉 userid → 姓名（评论区附件显示「谁传的」用）。进程内缓存；取不到回空串，不抛。"""
+    uid = str(userid or "")
+    if not uid:
+        return ""
+    if uid in _UNAME:
+        return _UNAME[uid]
+    nm = ""
+    try:
+        ak, sk = _conf()
+        r = _oapi(_token(ak, sk), "topapi/v2/user/get", {"userid": uid})
+        nm = ((r.get("result") or {}).get("name") or "") if r.get("errcode") == 0 else ""
+    except Exception:
+        nm = ""
+    _UNAME[uid] = nm
+    return nm
