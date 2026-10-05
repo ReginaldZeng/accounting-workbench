@@ -964,9 +964,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <button className="btn sm" onClick={() => setSel({})}>清空选择</button>
             {selStat.nNoDoc > 0 && <small className="dim" style={{ width: '100%' }}>其中 {selStat.nNoDoc} 张无单据的调整行只参与统计，不打确认。</small>}
           </div>}
-          {d && (d.nodoc || []).length > 0 && <div className="adjnote">另有 <b>{d.nodoc.length}</b> 笔没有金蝶单号、不逐单（合计 {money(d.nodoc.reduce((s, x) => s + (x.amount || 0), 0))}）：
-            {d.nodoc.slice(0, 8).map((x, i) => `${x.subject} ${x.fee_item}${x.bizline ? '·' + x.bizline : ''} ${money(x.amount)}${x.note ? `（${x.note}）` : ''}`).join('；')}{d.nodoc.length > 8 ? ` 等` : ''}
-            　—— 这些在第①步按汇总核（那边「可逐单」一栏写「否·汇总核」），这里不列。</div>}
+          {(() => {     // 没有金蝶单号的账单行：不列成单据，只留一行数。金额为 0 的(迅鸽逐单表里不带钱的仓储行，钱在汇总行)不提
+            const nd = ((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)
+            return nd.length > 0 && <div className="adjnote">另有 <b>{nd.length}</b> 笔没有金蝶单号、不逐单（合计 {money(nd.reduce((s, x) => s + (x.amount || 0), 0))}）：
+              {nd.slice(0, 8).map(x => `${x.subject} ${x.fee_item}${x.bizline ? '·' + x.bizline : ''} ${money(x.amount)}${x.note ? `（${x.note}）` : ''}`).join('；')}{nd.length > 8 ? ' 等' : ''}
+              　—— 这些在第①步按汇总核（那边「可逐单」一栏写「否·汇总核」），这里不列。</div>
+          })()}
           {d === null && <div className="ovempty">读账单与金蝶出库单中…</div>}
           {d && d.by_box && (docs.length === 0
             ? <div className="ovempty">{group === 'ex' && !q
