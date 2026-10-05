@@ -460,6 +460,21 @@ def overview_merge(period, rows, user):
     mine_all = [v for v in mine_all if v["st"]["key"] == "mine"]
     cur = [req_view(r, me) for r in reqs if r.get("period") == period]
     unassigned = [req_view(r, me) for r in reqs if not r.get("period") and r.get("dt_status") != "TERMINATED"]
+    # V2.819(用户 2026-10-05「那诚煜的我怎么复核？其实这里应该接的是计提和请款一起？」)：账单是别的月份、但还没登记已复核的请款单也露出来
+    #   ——总表按「本月有计提」列承运商，诚煜 9 月才请 6 月账单的款，8 期里既没计提也没请款，根本看不到。点一下切到它账单那个月去复核。
+    other = []
+    try:
+        from routers.logistics_review import _signed
+        for r in reqs:
+            p = r.get("period")
+            if not p or p == period or r.get("dt_status") == "TERMINATED" or r.get("dt_result") == "refuse":
+                continue
+            if _signed(r.get("carrier"), p):
+                continue
+            other.append(req_view(r, me))
+        other.sort(key=lambda v: (v["period"], v["carrier"] or ""))
+    except Exception:
+        other = []
     by_code = {x.get("code"): x for x in rows if x.get("code")}
     for v in cur:
         x = by_code.get(v["code"])
@@ -485,7 +500,7 @@ def overview_merge(period, rows, user):
             elif any(v["bill_state"] in ("nospec", "parsefail", "exists") for v in vs) and x.get("status") in ("nobill", "nospec", "noaccr"):
                 x["status"] = "billarrived"
     last = db.get_setting(_SET_LAST, None) or {}
-    return {"mine": mine_all, "unassigned": unassigned, "excluded": excl, "last": last, "since": db.get_setting(_SET_SINCE, None)}
+    return {"mine": mine_all, "unassigned": unassigned, "excluded": excl, "other": other, "last": last, "since": db.get_setting(_SET_SINCE, None)}
 
 
 # ---------- 接口 ----------

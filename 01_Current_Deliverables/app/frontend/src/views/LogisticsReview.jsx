@@ -528,7 +528,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv select.clsinp{width:auto;min-width:104px;padding:2px 4px;cursor:pointer}.lrv .clsinp.wide{width:300px}
       .lrv .xcls .ovr{color:#6B4FA0;font-size:12px}.lrv .xcls .lk{border:0;background:none;color:#1F6E8C;cursor:pointer;font-size:12px;text-decoration:underline;padding:0}
       .lrv .dtchip{display:inline-block;margin-top:3px;font:inherit;font-size:11px;line-height:1.6;padding:0 8px;border-radius:999px;border:1px solid transparent;cursor:pointer;white-space:nowrap}
-      .lrv .dtchip.dtmine{background:#FDE7C8;color:#9A5200;border-color:#F2C27A;font-weight:600}.lrv .dtchip.dtrun{background:#E3EEF8;color:#2F5E8A}
+      .lrv .dtchip.dtmine{background:#FDE7C8;color:#9A5200;border-color:#F2C27A;font-weight:600}.lrv .dtchip.dtrun{background:#E3EEF8;color:#2F5E8A}.lrv .dtchip.dtother{background:#F1EAFB;color:#5B3FA0;border-color:#D5C6F0}
       .lrv .dtchip.dtok{background:#E6F4EC;color:#2E7A50}.lrv .dtchip.dtpaid{background:#2E8B57;color:#fff}.lrv .dtchip.dtvoid{background:#EEF0F2;color:#8A96A2;text-decoration:line-through}
       .lrv .prbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:8px 15px;border-bottom:1px solid #E6EBEF;font-size:12.5px;color:#1B2733}
       .lrv .prgrp{display:inline-flex;gap:5px;align-items:center;flex-wrap:wrap}.lrv .prgrp .dtchip{margin-top:0}
@@ -681,6 +681,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {(ov.payreq.unassigned || []).length > 0 && <span className="prgrp">没认出月份 {ov.payreq.unassigned.slice(0, 8).map(v =>
               <button key={v.inst} className="dtchip dtrun" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}
               {ov.payreq.unassigned.length > 8 && <span className="dim">等 {ov.payreq.unassigned.length} 张</span>}</span>}
+            {(ov.payreq.other || []).length > 0 && <span className="prgrp" title="账单是别的月份、还没登记已复核的请款单：下表按「本月有计提」列承运商，它们不在里面。点一下切到账单那个月去复核">别的月份的账单
+              {ov.payreq.other.slice(0, 8).map(v => <button key={v.inst} className="dtchip dtother" title={`${v.payee} · ${v.period} 账单 · 点击切到 ${v.period} 期`}
+                onClick={() => onPeriod && onPeriod(Number(v.period.slice(0, 4)), Number(v.period.slice(5)))}>{v.carrier}·{v.subject} {money(v.amount)} · {Number(v.period.slice(5))} 月账单 →</button>)}
+              {ov.payreq.other.length > 8 && <span className="dim">等 {ov.payreq.other.length} 张</span>}</span>}
             {(ov.payreq.excluded || []).length > 0 && <span className="prgrp"><span className="dim">本月已排除</span>{ov.payreq.excluded.map(v =>
               <button key={v.inst} className="dtchip dtvoid" title={v.excluded} onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}</span>}
             <span style={{ flex: 1 }} />
