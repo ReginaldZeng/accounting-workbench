@@ -127,9 +127,13 @@ def _paybills(since_date):
              "status": r.get("状态")} for r in rows]
 
 
-def _paid_vouchers(since_date):
-    """金蝶支付凭证(2241 借方、挂物流供应商、摘要「提起支付」) → 同 _paybills 结构。
-    付款单 9 月下旬才开始自动进金蝶，之前付过的只能从支付凭证认(实证 孝感 8月记-221 易风达 12,091)。"""
+def _paid_vouchers(since_date, want=None):
+    """金蝶支付凭证(2241 借方、挂物流供应商的支付行) → 同 _paybills 结构。
+    付款单 9 月下旬才开始自动进金蝶，之前付过的只能从支付凭证认(实证 孝感 8月记-221 易风达 12,091)。
+    V2.823(实证 比翼 6 月账单：深圳星期零 8月记-262，请款 6,150.02，凭证里 2241 借 8,150.02 = 预付款核销 2,000 + 银行 6,150.02，
+    摘要「陈慧娴厦门比翼…6月线上零售出库运费」没写「提起支付」——原来认不出，一直挂成「已通过没付款」)：
+    ① 支付行不再硬要「提起支付」四个字：不是计提/红冲/更正/核销的 2241 借方就算；
+    ② want={(供应商码, 账簿)}：这些还在等付款的，顺带取同一张凭证的银行贷方合计(alt)——有预付款/押金抵扣时请款金额等于银行实付、不等于 2241 借方。"""
     try:
         s, conf = kc.login()
         rows = kc._query(s, conf, "GL_VOUCHER",
@@ -138,14 +142,30 @@ def _paid_vouchers(since_date):
                          "FAccountID.FNumber like '2241%%' and FDEBIT>0 and FDetailID.FFLEX4.FNumber like '物流运输服务%%' and FDate>='%s'" % since_date)
     except Exception:
         return None
-    out = []
+    out, meta = [], []
     for r in rows:
-        if "提起支付" not in str(r.get("摘要") or ""):
+        z = str(r.get("摘要") or "")
+        if "提起支付" not in z and any(k in z for k in ("计提", "红冲", "更正", "核销", "冲回", "冲销")):
             continue
         vno = "%s-%s" % (str(r.get("字") or "记").strip(), str(r.get("号") or "").strip())
         gid = hashlib.md5(("%s|%s|%s" % (r.get("账簿"), str(r.get("日期"))[:7], vno)).encode("utf-8")).hexdigest()[:10]
         out.append({"id": "gl:" + gid, "code": r.get("码"), "org": r.get("账簿"),
                     "amount": r.get("借"), "date": str(r.get("日期") or "")[:10], "status": vno})
+        meta.append((r.get("账簿"), str(r.get("日期") or "")[:10], str(r.get("号") or "").strip()))
+    n = 0
+    for i, (book, date, no) in enumerate(meta):
+        if not want or (out[i]["code"], out[i]["org"]) not in want or n >= 30:
+            continue
+        n += 1
+        try:
+            bk = kc._query(s, conf, "GL_VOUCHER", [("FCREDIT", "贷")],
+                           "FACCOUNTBOOKID.FName='%s' and FDate='%s' and FVOUCHERGROUPNO='%s' and FAccountID.FNumber like '1002%%' and FCREDIT>0" % (
+                               str(book).replace("'", ""), date, no.replace("'", "")))
+        except Exception:
+            continue
+        alt = round(sum(float(x.get("贷") or 0) for x in bk), 2)
+        if alt and abs(alt - float(out[i]["amount"] or 0)) >= 0.005:
+            out[i]["alt"] = alt
     return out
 
 
@@ -271,7 +291,7 @@ def _scan(trigger, days):
                 taken.add(v.split("|")[-1])
             wait = [r for r in wait if r["inst_id"] not in hit]
         if wait:      # 付款单配不上的，再看支付凭证
-            gls = _paid_vouchers(min(str(r.get("create_time") or "")[:10] for r in wait))
+            gls = _paid_vouchers(min(str(r.get("create_time") or "")[:10] for r in wait), {(r.get("sup_code"), r.get("subject_full")) for r in wait})
             for iid, v in lpq.match_paybills(wait, gls or [], {str(r["kd_paid"]).split("|")[-1] for r in allr if r.get("kd_paid")}).items():
                 with db._engine.begin() as c:
                     c.execute(update(PR).where(PR.c.inst_id == iid).values(kd_paid=v))

@@ -207,7 +207,8 @@ def match_paybills(reqs, paybills, taken=()):
                 continue
             if b.get("code") != r.get("sup_code") or b.get("org") != r.get("subject_full"):
                 continue
-            if r.get("amount") is None or abs(float(b.get("amount") or 0) - float(r["amount"])) >= 0.005:
+            # alt＝同一张支付凭证的银行实付(有预付款/押金抵扣时和 2241 借方不一样)：两个数有一个对上就算
+            if r.get("amount") is None or all(abs(float(a or 0) - float(r["amount"])) >= 0.005 for a in (b.get("amount"), b.get("alt")) if a is not None):
                 continue
             if str(b.get("date") or "")[:10] < str(r.get("create_time") or "")[:10]:
                 continue
