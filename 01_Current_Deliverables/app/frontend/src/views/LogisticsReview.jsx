@@ -34,12 +34,13 @@ const DOC_Q = [
 ]
 // 总表复核状态：已登记 > 全部主体通过 > 复核中(标过主体/写过解释/确认过单据/登记过更正) > 账单已传 > 未传账单 > 未配
 const OV_ST = { signed: ['已登记', 'ok'], allfix: ['主体全通过·计提需更正', 'bad'], allok: ['主体全通过·待登记', 'ok'], doing: ['复核中', 'warn'], billed: ['账单已就绪', 'neu'],
-  billarrived: ['账单已到·待配置', 'warn'], noaccr: ['有请款·无计提', 'bad'], nobill: ['未传账单', 'neu'], nospec: ['未配', 'neu'] }
+  billarrived: ['账单已到·待配置', 'warn'], noaccr: ['有请款·无计提', 'bad'], nobill: ['未传账单', 'neu'], nospec: ['未配', 'neu'],
+  register: ['登记制·待登记', 'neu'] }   // V2.826 登记制(路凯卡板租赁、禾享国际寄样、货拉拉)：没有可逐单核的账单，只核对计提和请款，点「登记」
 // 钉钉请款单(V2.730)：进度标颜色 / 总表筛选 / 附件角色 / 账单导入状态 / 月份怎么认出来的
 const DT_CLS = { mine: 'dtmine', run: 'dtrun', agreed: 'dtok', paid: 'dtpaid', void: 'dtvoid' }
 const DT_F = [['dt:mine', '待我审批', 'warn', r => r.dt && r.dt.mine], ['dt:any', '已提交请款', 'neu', r => r.dt && r.dt.n], ['dt:paid', '已付款', 'ok', r => r.dt && r.dt.paid]]
 const ROLE_LB = [['bill', '账单'], ['stamp', '账单盖章件'], ['invoice', '发票'], ['review', '审核留档']]
-const BILL_LB = { imported: ['账单已就绪', 'ok'], exists: ['复核台已有账单·没覆盖', 'warn'], nospec: ['账单已到·待配置解析', 'warn'], parsefail: ['账单解析失败', 'bad'], nofile: ['请款单没附账单', 'neu'] }
+const BILL_LB = { imported: ['账单已就绪', 'ok'], register: ['登记制·不导账单', 'neu'], exists: ['复核台已有账单·没覆盖', 'warn'], nospec: ['账单已到·待配置解析', 'warn'], parsefail: ['账单解析失败', 'bad'], nofile: ['请款单没附账单', 'neu'] }
 const PSRC = { amount: '请款金额正好＝该月计提，自动认出', text: '按事由/附件名里写的月份认出', manual: '手工认领' }
 
 function DtChip({ reqs, onOpen }) {
@@ -267,6 +268,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     const row = (ov.rows || []).find(r => r.code === j.code)
     if (row && row.has_spec) enterReview(row.short || row.carrier)
   }, [ov])
+  // 登记制的登记：把各主体 计提 / 请款 / 差 列给人看一眼，写一句备注就登记(有差异时备注必填)
+  const regSign = r => {
+    const ls = Object.entries(r.cells || {}).filter(([, c]) => c.accr || c.paid).map(([sj, c]) => `${sj}：计提 ${money(c.accr || 0)} / 请款 ${money(c.paid || 0)} / 差 ${money(c.diff || 0)}`)
+    const bad = Object.values(r.cells || {}).some(c => Math.abs(c.diff || 0) >= 0.01)
+    const note = window.prompt(`${r.carrier} · ${period} · 登记制（不逐单核价核量）\n\n${ls.join('\n') || '（没有金额）'}\n\n${bad ? '⚠ 计提和请款有差异，请写明原因：' : '备注（可改）：'}`, bad ? '' : '登记制：计提与请款一致')
+    if (note === null) return
+    if (bad && !note.trim()) { flash('计提和请款有差异，要写原因才能登记'); return }
+    reviewSign(r.short || r.carrier, period, note.trim()).then(refreshOv).catch(e => flash('登记失败：' + e.message))
+  }
   const refreshOv = () => {
     setOvBusy(true)
     reviewOverview(period, true).then(setOv).catch(e => flash('刷新失败：' + e.message)).finally(() => setOvBusy(false))
@@ -735,7 +745,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     return <>{r.signed ? <span className="pill ok" title={r.signed.signed_at}>已登记 · {r.signed.reviewer}</span> : <span className={'pill ' + cl}>{lb}</span>}
                       {sub && <span className="sub">{sub}</span>}</>
                   })()}</td>
-                  <td><button className="btn pri" disabled={!r.has_spec} title={r.has_spec ? '进逐笔复核' : '该承运商未配取数说明'} onClick={() => enterReview(r.short || r.carrier)}>开始复核</button></td>
+                  <td>{r.register
+                    ? (r.signed
+                      ? <button className="btn" title="撤销这家这月的登记" onClick={() => { if (window.confirm(`撤销 ${r.carrier} ${period} 的登记？`)) reviewUnsign(r.short || r.carrier, period).then(refreshOv).catch(e => flash('撤销失败：' + e.message)) }}>撤销登记</button>
+                      : <button className="btn pri" disabled={r.status === 'noaccr'} title={r.status === 'noaccr' ? '这家这月有请款、金蝶没有计提，先处理计提' : '登记制：没有可逐单核的账单，只核对计提和请款两个数'} onClick={() => regSign(r)}>登记（不逐单）</button>)
+                    : <button className="btn pri" disabled={!r.has_spec} title={r.has_spec ? '进逐笔复核' : '该承运商未配取数说明'} onClick={() => enterReview(r.short || r.carrier)}>开始复核</button>}</td>
                 </tr>)}
               {ov && ov.rows && !ov.rows.length && <tr><td colSpan="12" className="ovempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）</td></tr>}
             </tbody>

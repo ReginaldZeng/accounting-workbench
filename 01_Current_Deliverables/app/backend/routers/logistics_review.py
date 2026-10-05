@@ -240,6 +240,20 @@ def _ov_accr(rows, period, full2short=None):
 _OV_XM = {}     # period → 这期总表的跨月核销调整(给总表格子里写一句)
 
 
+def _register_carriers():
+    """走登记制的承运商(取数说明里 review_mode=register)：没有可逐单核的账单——卡板租赁(路凯)、国际快递寄样(禾享)、议价报销(货拉拉)。
+    V2.826(用户 2026-10-05 同意路凯、禾享走登记制)：总表上只核对 计提 / 请款 两个数，点「登记」即可，不进逐单核价核量。"""
+    out = set()
+    with db._engine.connect() as c:
+        for cr, sj in c.execute(select(SP.c.carrier, SP.c.spec_json)).all():
+            try:
+                if (json.loads(sj or "{}") or {}).get("review_mode") == "register":
+                    out.add(cr)
+            except Exception:
+                pass
+    return out
+
+
 @router.get("/api/logistics-review/overview")
 def review_overview(request: Request, period: str = "", fresh: int = 0):
     """总表。金蝶 2241 凭证按账期缓存 30 分钟(fresh=1 强制重取)；账单应付与复核状态每次从本库现算(便宜、改了即时)。"""
@@ -327,6 +341,22 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
         payreq = LPQ.overview_merge(period, rowlist, u)
     except Exception as e:
         payreq = {"err": str(e)[:200]}
+    try:     # 登记制：没有账单可复核，「付款(复核)」那一格用请款金额顶上，和计提比
+        reg = _register_carriers()
+        for x in rowlist:
+            if x.get("short") not in reg:
+                continue
+            x["register"] = True
+            for cl in (x.get("cells") or {}).values():
+                live = [v for v in cl.get("reqs") or [] if v["st"]["key"] != "void"]
+                if live and not cl.get("paid"):
+                    cl["paid"] = round(sum(float(v.get("amount") or 0) for v in live), 2)
+                    cl["diff"] = round(float(cl.get("accr") or 0) - cl["paid"], 2)
+                    cl["reg"] = True
+            if not x.get("signed") and x.get("status") != "noaccr":
+                x["status"] = "register"
+    except Exception:
+        pass
     rowlist = sorted(rowlist, key=_natkey)
     return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": bool(rows),
             "fetched_at": fetched_at, "cached": cached, "payreq": payreq}
@@ -2994,6 +3024,12 @@ async def review_sign_month(request: Request):
         return JSONResponse({"ok": False, "msg": "本月已登记，无需重复"}, status_code=409)
     L = _build_lines(request, carrier, period)
     snap = {k: L.get(k) for k in ("accr_total", "bill_total", "diff_total", "n_unexplained", "bill_src")}
+    if carrier in _register_carriers():      # 登记制：快照里记请款合计(没有账单合计)
+        PRT = store.payreq
+        with db._engine.connect() as c:
+            rq = c.execute(select(PRT.c.amount, PRT.c.excluded, PRT.c.dt_status, PRT.c.dt_result).where(
+                (PRT.c.carrier == carrier) & (PRT.c.period == period))).all()
+        snap.update(mode="register", req_total=round(sum(float(a or 0) for a, ex, st, rs in rq if not ex and st != "TERMINATED" and rs != "refuse"), 2))
     rec = dict(carrier=carrier, period=period, status="signed", reviewer=_uname(u), signed_at=_now(), note=note,
                snap_json=json.dumps(snap, ensure_ascii=False))
     with db._engine.begin() as c:

@@ -475,6 +475,8 @@ def _import(r, bill, sha, operator, force=False, bills=None):
     if not _has_spec(carrier):
         return {"bill_state": "nospec", "bill_msg": "账单已到，%s 还没配取数说明，配好后点「导入账单」" % carrier}
     from routers import logistics_review as _LR
+    if (_LR._load_spec(carrier) or {}).get("review_mode") == "register":
+        return {"bill_state": "register", "bill_msg": "登记制：不导账单，只核对计提、请款、发票金额"}
     if (_LR._load_spec(carrier) or {}).get("multi_file"):
         return _import_multi(r, bills or [bill], operator, force)
     with db._engine.connect() as c:
