@@ -751,14 +751,16 @@ def _voucher_people(book, month, vno):
 
 
 def _with_people(vs, makers=None):
-    """给每张凭证挂上制单人/审核人。系统写入的，金蝶里制单人是「系统操作员」——显示实际点「保存到金蝶」的那个人(makers={凭证号: 人})。"""
+    """给每张凭证挂上制单人/审核人。制单人照金蝶的写(系统写入的在金蝶里就是「系统操作员」，和打印出来的凭证一致)；
+    实际在工作台点「保存到金蝶」的那个人另给一项 operator(经办人，makers={凭证号: 人})。
+    V2.804 曾把经办人当制单人显示，用户问「这两张是我制单的吗，不是系统操作员吗」→ V2.807 改回照金蝶。"""
     s2f = {o.get("short_name"): o.get("full_name") for o in (db.list_orgs() or [])}
     for v in vs:
         p = _voucher_people(s2f.get(v.get("subject")) or v.get("subject") or "", v.get("month") or "", v.get("vno"))
         who = (makers or {}).get(str(v.get("vno")))
         who = who.split("(")[0].split("（")[0].strip() if who else who      # 早期实测那张记的是「曾禹锡(实测)」，只显示人名
-        v["maker"] = who or p.get("maker") or ""
-        v["maker_sys"] = bool(who)
+        v["maker"] = p.get("maker") or ""
+        v["operator"] = who or ""
         v["checker"] = p.get("checker") or ""
         v["audited"] = (p.get("status") == "C") if p else None
     return vs

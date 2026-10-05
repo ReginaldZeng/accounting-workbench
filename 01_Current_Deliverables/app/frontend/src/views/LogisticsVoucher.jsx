@@ -357,16 +357,16 @@ function ScanBox({ onClose, page }) {
             : <div className="sc-big">{cur.state}</div>}
           <div className="sc-meta">{cur.dup && <b className="bad">这张刚才扫过了　</b>}{cur.kind} · {cur.payee}{cur.amount != null && <> · <b className="mono">{money(cur.amount)}</b></>}
             {cur.bid && <> · 审批 <span className="mono">{cur.bid}</span></>}{(cur.vouchers || [])[0]?.bill_no && <> · 付款单 <span className="mono">{cur.vouchers[0].bill_no}</span></>}
-            {(cur.vouchers || [])[0]?.maker && <> · 制单 <b>{cur.vouchers[0].maker}</b>{cur.vouchers[0].maker_sys ? '（系统做账）' : ''}</>}
+            {(cur.vouchers || [])[0]?.maker && <> · 制单 <b>{cur.vouchers[0].maker}</b>{cur.vouchers[0].operator ? `（经办 ${cur.vouchers[0].operator}）` : ''}</>}
             {(cur.vouchers || [])[0] && <> · {cur.vouchers[0].checker ? `审核 ${cur.vouchers[0].checker}` : cur.vouchers[0].audited === false ? '还没审核' : ''}</>}
             {cur.n_adjust > 0 && <b className="warn">　附计提更正单</b>}{cur.has_xred && <b className="warn">（两张：① 红冲 ② 补提）</b>}</div>
         </div>}
         <div className="lv-sec">本次已扫 <span className="dim">{hist.length} 张{Object.keys(bySubj).length > 0 && '：' + Object.entries(bySubj).map(([k, n]) => `${k} ${n}`).join(' · ')}</span>
           <span style={{ flex: 1 }} />{hist.length > 0 && <button className="lnk" onClick={() => { setHist([]); setCur(null) }}>清空</button>}</div>
-        <table className="lv-t"><thead><tr><th style={{ width: 40 }}>#</th><th style={{ width: 110 }}>主体</th><th style={{ width: 110 }}>凭证号</th><th style={{ width: 90 }}>凭证月份</th><th>供应商</th><th className="num" style={{ width: 120 }}>金额</th><th style={{ width: 80 }}>时间</th><th style={{ width: 90 }}>制单人</th></tr></thead>
+        <table className="lv-t"><thead><tr><th style={{ width: 40 }}>#</th><th style={{ width: 110 }}>主体</th><th style={{ width: 110 }}>凭证号</th><th style={{ width: 90 }}>凭证月份</th><th>供应商</th><th className="num" style={{ width: 120 }}>金额</th><th style={{ width: 80 }}>时间</th><th style={{ width: 90 }}>经办/制单</th></tr></thead>
           <tbody>{hist.map((h, i) => { const a = (h.vouchers || [])[0]; return <tr key={h.inst}>
             <td className="dim">{hist.length - i}</td><td>{a ? a.subject : '—'}</td><td className="mono"><b>{a ? '记-' + a.vno : '还没做账'}</b>{(h.vouchers || []).length > 1 && <span className="dim"> +{h.vouchers.length - 1}</span>}</td>
-            <td>{a ? ymCn(a.month) : ''}</td><td>{h.payee}</td><td className="num">{money(h.amount)}</td><td className="dim">{h.at}</td><td>{a ? a.maker : ''}</td></tr> })}
+            <td>{a ? ymCn(a.month) : ''}</td><td>{h.payee}</td><td className="num">{money(h.amount)}</td><td className="dim">{h.at}</td><td>{a ? (a.operator || a.maker) : ''}</td></tr> })}
             {!hist.length && <tr><td colSpan="8" className="lv-empty">还没扫</td></tr>}</tbody></table>
       </div>
     </div>
@@ -414,8 +414,8 @@ export function VoucherScanPage({ user }) {
   }
   const c = S.cur, vs = (c && c.vouchers) || [], a = vs[0]
   const tone = x => SUBJ_TONE[x] || 'g'
-  // 制单人：系统做的账，金蝶里制单人是「系统操作员」，这里显示实际点保存的那个人
-  const kv = c && c.ok ? [['制单人', a && a.maker ? a.maker + (a.maker_sys ? '（系统做账）' : '') : ''],
+  // 制单人照金蝶的写(系统做的账在金蝶里是「系统操作员」，和打印的凭证一致)；经办人＝在工作台点「保存到金蝶」的人
+  const kv = c && c.ok ? [['制单人', a ? a.maker : ''], ['经办人', a && a.operator ? a.operator + '（在工作台做的账）' : ''],
     ['审核人', a ? (a.checker || (a.audited === false ? '还没审核' : '')) : ''],
     ['供应商', c.payee], ['金额', c.amount != null ? money(c.amount) : ''], ['审批编号', c.bid], ['付款单', a && a.bill_no]].filter(x => x[1]) : []
   // iPhone 底部有一条横条(Home 指示条)：钉钉内置浏览器把页面铺到它下面、又不报安全区高度，主按钮下沿会被压住(用户真机截图)——iPhone 上底部固定多留 34px
@@ -451,7 +451,7 @@ export function VoucherScanPage({ user }) {
       <div className="vs-list">
         {S.hist.map((h, i) => { const x = (h.vouchers || [])[0]; return <div key={h.inst} className="vs-row" onClick={() => S.setCur({ ...h, dup: false })}>
           <span className={'vs-bar2 tone-' + tone(x ? x.subject : h.subject)} />
-          <div className="l"><b>{x ? '记-' + x.vno : '还没做账'}</b><span>{x ? `${x.subject} · ${x.month ? Number(String(x.month).slice(5)) + '月' : ''}${x.maker ? ' · ' + x.maker : ''}` : h.subject || ''}</span></div>
+          <div className="l"><b>{x ? '记-' + x.vno : '还没做账'}</b><span>{x ? `${x.subject} · ${x.month ? Number(String(x.month).slice(5)) + '月' : ''}${(x.operator || x.maker) ? ' · ' + (x.operator || x.maker) : ''}` : h.subject || ''}</span></div>
           <div className="r"><span>{h.payee}</span><b>{money(h.amount)}</b></div></div> })}
         {!S.hist.length && <div className="vs-none">还没扫。扫过的会排在这里，按主体计数。</div>}
       </div>
