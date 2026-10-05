@@ -1431,7 +1431,9 @@ def _fee_draft(inst):
                          "proj": " ".join(x for x in (e0.get("proj_code"), e0.get("proj")) if x),
                          "rate": (last or {}).get("rate"), "expl": (last or {}).get("expl") or "%s提起支付%s" % (r.get("applicant") or "", r.get("payee") or ""),
                          "sup_grp": ((last or {}).get("ap_line") or {}).get("sup_grp") or ""},
-            "date": date, "exist": [{k: c[k] for k in ("year", "month", "vno", "gross", "expl")} for c in exist]}
+            "date": date, "exist": [{k: c[k] for k in ("year", "month", "vno", "gross", "expl")} for c in exist],
+            # V2.837(用户「关联发票后补单」)：没票做账以发票管家登记了后补单为前提(同 V2.833 没票先付款)，页面把后补单号/预计到票日亮出来
+            "later_slip": _later_slip(inst)}
 
 
 @router.get("/api/logistics-voucher/fee-draft")
@@ -1477,6 +1479,9 @@ def _fee_post(inst, b, user):
         raise RuntimeError("这是直接做账的费用凭证，摘要不要写「计提」（系统靠摘要分辨计提和直接做账）")
     # 税：有能抵扣的票→待认证(每张票一行)；没票→暂估(按填的税率)；有票但不能抵扣→全额进费用
     _, invs = _invoices(inst)
+    slip = None if invs else _later_slip(inst)
+    if not invs and not slip:
+        raise RuntimeError("票夹里还没有发票，发票管家里也没有登记后补单：没票做账要先登记发票后补单（申请人自助登记，或财务在后补池登记）")
     ded = [i for i in invs if i.get("deduct")]
     tax_lines, tax = [], 0.0
     if invs:
@@ -1526,7 +1531,7 @@ def _fee_post(inst, b, user):
         sub_err = str(e)[:160]
     rec = {"vid": r["id"], "vno": vno, "year": y, "month": m, "date": date, "book": book, "by": user, "at": _now(), "gross": gross, "net": net, "tax": tax,
            "tax_acct": tax_lines[0][0] if tax_lines else "", "expl": expl, "dims": {k: " ".join(x for x in v if x) for k, v in dims.items()},
-           "submitted": not sub_err, "submit_err": sub_err}
+           "submitted": not sub_err, "submit_err": sub_err, "later_id": (slip or {}).get("id")}
     allf[inst] = rec
     db.set_setting(_FEE_KEY, allf, user)
     _ACC_CACHE.clear()                      # 新凭证要马上能被候选/预览读到
@@ -1539,9 +1544,9 @@ def _fee_post(inst, b, user):
         picks[inst] = {"picks": [{"year": y, "month": m, "vno": vno}], "part": False, "memo": "", "by": user, "at": _now(), "auto": "fee"}
         db.set_setting(_PICK_KEY, picks, user)
         steps.append("已把这张凭证选定给这张请款单（付款时核销它）")
-    db.audit(user, "物流付款做账-审核生成费用凭证", "记-%s" % vno, "%s %s %.2f；%s；%s" % (
+    db.audit(user, "物流付款做账-审核生成费用凭证", "记-%s" % vno, "%s %s %.2f；%s；%s%s" % (
         req["subject"], req["payee"], gross, " / ".join(rec["dims"][k] for k in ("acct", "dept", "fee", "biz", "proj") if rec["dims"].get(k)),
-        "已提交" if not sub_err else "提交失败：" + sub_err))
+        "已提交" if not sub_err else "提交失败：" + sub_err, "；没票，关联发票后补单 #%s" % slip["id"] if slip else ""))
     return {"ok": True, "vno": vno, "steps": steps, "fee": rec}
 
 
