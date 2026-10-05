@@ -158,6 +158,7 @@ export const voucherPost = inst => j('/api/logistics-voucher/post', { method: 'P
 export const voucherPostXred = inst => j('/api/logistics-voucher/post-xred', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst }) })
 // 扫付款单二维码查凭证：查不到也回 200(ok:false+msg)，不抛错
 export const voucherScan = code => j('/api/logistics-voucher/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
+export const voucherScanPhoto = blob => j('/api/logistics-voucher/scan-photo', { method: 'POST', headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob })
 export const voucherPaperOverride = (inst, on, note = '') => j('/api/logistics-voucher/paper-override', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, on, note }) })
 // V2.731 首页「申请开通」→ 钉钉推送（/mine 只读本人申请记录，首页唯一允许的轻量请求）
 export const submitAccessRequest = (cap, label, pages, note) => jp('/api/access-request', { cap, label, pages, note })

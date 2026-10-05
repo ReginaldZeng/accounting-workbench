@@ -5,7 +5,7 @@ import React, { useState, useEffect } from 'react'
 import LogisticsWorkspace from './views/LogisticsWorkspace.jsx'
 import LogisticsReview from './views/LogisticsReview.jsx'   // V2.632 物流账单复核台（核价×核量→归一态；本体页，取代内嵌样机）
 import LogisticsDocFreight from './views/LogisticsDocFreight.jsx'
-import LogisticsVoucher from './views/LogisticsVoucher.jsx'   // V2.748 付款做账   // V2.637 单据运费·其他单据（登记制：货拉拉等议价/报销）
+import LogisticsVoucher, { VoucherScanPage } from './views/LogisticsVoucher.jsx'   // V2.748 付款做账   // V2.637 单据运费·其他单据（登记制：货拉拉等议价/报销）
 import Sidebar from './components/Sidebar.jsx'
 import DataImport from './views/DataImport.jsx'
 import FundDashboard from './views/FundDashboard.jsx'
@@ -107,6 +107,9 @@ export default function App() {
   if (user.must_change_pwd) return <ForcePwd user={user}
     onDone={() => getMe().then(r => setUser(r.user)).catch(() => setUser(null))}
     onLogout={async () => { try { await apiLogout() } catch (e) {} setUser(null); setZone('portal') }} />
+
+  // 手机扫码查凭证（V2.802）：`#/vscan` 登录后只出这一页（拍付款单二维码 → 主体 + 凭证号），不进门户/侧栏。权限由接口把关。
+  if ((window.location.hash || '').startsWith('#/vscan')) return <VoucherScanPage user={user} />
 
   // 登录后先落门户；选组进入某工作台
   if (zone === 'portal') return <Portal user={user} onEnter={z => { setZone(z); if (z === 'accounting') setView('home') }} />

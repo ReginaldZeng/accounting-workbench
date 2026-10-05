@@ -810,6 +810,41 @@ async def scan_lookup(request: Request):
         return {"ok": False, "msg": "查询出错：%s" % str(e)[:160]}
 
 
+@router.post("/api/logistics-voucher/scan-photo")
+async def scan_photo(request: Request):
+    """手机拍付款单右上角的二维码(V2.802，用户「手机可以吗」)：照片传上来，服务器认码再查凭证。只读。
+    站点现在是 http(域名没备案)，手机浏览器不给网页直接开摄像头扫码，所以走「拍一张照片上传」——认码用发票管家认发票二维码的那套。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    ctype = request.headers.get("content-type", "")
+    if "multipart/form-data" in ctype:
+        form = await request.form()
+        f = form.get("file")
+        data = await f.read() if f is not None and hasattr(f, "read") else b""
+    else:
+        data = await request.body()
+    if not data:
+        return {"ok": False, "msg": "没收到照片"}
+    if len(data) > 15 * 1024 * 1024:
+        return {"ok": False, "msg": "照片太大了（超过 15M），请重拍"}
+    from starlette.concurrency import run_in_threadpool
+
+    def run():
+        from kernels import invoice_parse as ip
+        qrs = ip.decode_qr_image(data)
+        kinds = [(q, ip.classify_code(q)["kind"]) for q in qrs]
+        link = next((q for q, k in kinds if k == "approval_link"), None)
+        if not link:
+            if any(k == "invoice_qr" for _, k in kinds):
+                return {"ok": False, "msg": "照片里是发票的二维码：请拍付款单（审批单）右上角那个"}
+            return {"ok": False, "msg": "照片里没认出付款单的二维码：对准右上角那个码，拍近一点、别反光，再试一次"}
+        return _scan_lookup(link)
+    try:
+        return await run_in_threadpool(run)
+    except Exception as e:
+        return {"ok": False, "msg": "识别出错：%s" % str(e)[:160]}
+
+
 @router.post("/api/logistics-voucher/post-xred")
 async def post_xred(request: Request):
     """补做原主体的红冲凭证(保存到金蝶时那一步没成的重试)。已有红冲就不重复建。"""

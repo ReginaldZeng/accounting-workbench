@@ -12,7 +12,8 @@
 // V2.801 扫码查凭证(用户「扫描那个付款单二维码，就知道是什么凭证、哪个主体」)：扫码枪扫纸质付款单右上角的钉钉二维码(或输审批编号)
 //   → 大字显示 主体 + 凭证号；本次扫过的列在下面(重复扫会标)，可读出来。只读。
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan } from '../api.js'
+// V2.802 手机也能查(用户「手机可以吗」)：扫码查凭证加「拍二维码」(拍照上传、服务器认码)；`#/vscan` 是手机专用的单页(VoucherScanPage)。
+import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto } from '../api.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
@@ -266,7 +267,26 @@ function printHtml(title, css, html) {
 }
 
 // 扫码查凭证：扫码枪像键盘一样把二维码内容打进输入框再回车；输入框一直占着焦点，扫一张出一张。
-function ScanBox({ onClose }) {
+// 手机拍的照片先在本机缩到长边 2000 再传(原图 5～10M，传得慢)；缩不了就传原图
+function shrinkPhoto(file, max = 2000) {
+  return new Promise(res => {
+    try {
+      const url = URL.createObjectURL(file), img = new Image()
+      img.onload = () => {
+        const k = Math.min(1, max / Math.max(img.width, img.height))
+        const cv = document.createElement('canvas')
+        cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k)
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height)
+        URL.revokeObjectURL(url)
+        cv.toBlob(b => res(b || file), 'image/jpeg', 0.88)
+      }
+      img.onerror = () => { URL.revokeObjectURL(url); res(file) }
+      img.src = url
+    } catch { res(file) }
+  })
+}
+
+function ScanBox({ onClose, page }) {
   const [v, setV] = useState('')
   const [cur, setCur] = useState(null)        // 最近一次结果
   const [busy, setBusy] = useState(false)
@@ -274,13 +294,24 @@ function ScanBox({ onClose }) {
   const [say, setSay] = useState(false)
   const ref = useRef(null)
   const focus = () => { if (ref.current) ref.current.focus() }
-  useEffect(focus, [])
+  useEffect(() => { if (!page) focus() }, [])      // 手机页不自动聚焦(会把键盘弹出来挡住按钮)
   const speak = t => { try { if (say && window.speechSynthesis) { window.speechSynthesis.cancel(); window.speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(t), { lang: 'zh-CN', rate: 1.1 })) } } catch { /* 没有语音就算了 */ } }
+  const fileRef = useRef(null)
+  const shot = e => {                        // 拍照/选图 → 传上去认码
+    const f = e.target.files && e.target.files[0]
+    e.target.value = ''
+    if (f) run(shrinkPhoto(f).then(voucherScanPhoto))
+  }
   const go = () => {
     const code = v.trim()
     if (!code || busy) return
-    setBusy(true); setV('')
-    voucherScan(code).then(r => {
+    setV('')
+    run(voucherScan(code))
+  }
+  const run = pr => {
+    if (busy) return
+    setBusy(true)
+    pr.then(r => {
       const dup = r.ok && hist.some(h => h.inst === r.inst)
       setCur({ ...r, dup })
       if (r.ok) {
@@ -288,22 +319,29 @@ function ScanBox({ onClose }) {
         const a = (r.vouchers || [])[0]
         speak(a ? `${dup ? '重复，' : ''}${a.subject}，记 ${a.vno}` : '还没做账')
       } else speak('没查到')
-    }).catch(e => setCur({ ok: false, msg: e.message })).finally(() => { setBusy(false); setTimeout(focus, 30) })
+    }).catch(e => setCur({ ok: false, msg: e.message })).finally(() => { setBusy(false); if (!page) setTimeout(focus, 30) })
   }
   const bySubj = {}
   hist.forEach(h => { const k = (h.vouchers || [])[0] ? h.vouchers[0].subject : '还没做账'; bySubj[k] = (bySubj[k] || 0) + 1 })
+  const phoneUrl = `${window.location.origin}${window.location.pathname}#/vscan`
   return (
-    <div className="lv-mask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="lv-dlg lv-scan" role="dialog" aria-label="扫码查凭证" onClick={focus}>
-        <div className="lv-dh"><div className="lv-title"><b>扫码查凭证</b><span className="sep">·</span>扫付款单右上角的二维码，看它是哪个主体、哪张凭证</div>
-          <button className="lv-x" onClick={onClose} aria-label="关闭">✕</button></div>
+    <div className={page ? 'lv-scanpage' : 'lv-mask'} onMouseDown={e => { if (!page && e.target === e.currentTarget) onClose() }}>
+      <div className="lv-dlg lv-scan" role="dialog" aria-label="扫码查凭证" onClick={page ? undefined : focus}>
+        <div className="lv-dh"><div className="lv-title"><b>扫码查凭证</b>{!page && <><span className="sep">·</span>扫付款单右上角的二维码，看它是哪个主体、哪张凭证</>}</div>
+          {!page && <button className="lv-x" onClick={onClose} aria-label="关闭">✕</button>}</div>
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={shot} />
+        {page && <button className="btn btn-pri sc-shot" disabled={busy} onClick={() => fileRef.current && fileRef.current.click()}>{busy ? '识别中…' : '📷 拍付款单右上角的二维码'}</button>}
         <div className="sc-in">
           <input ref={ref} value={v} onChange={e => setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') go() }}
-            placeholder="用扫码枪扫付款单右上角的二维码；没有扫码枪就输 20 位审批编号再回车" autoComplete="off" spellCheck={false} />
+            placeholder={page ? '或输 20 位审批编号' : '用扫码枪扫付款单右上角的二维码；没有扫码枪就输 20 位审批编号再回车'} autoComplete="off" spellCheck={false} inputMode={page ? 'numeric' : undefined} />
           <button className="btn btn-pri" disabled={busy || !v.trim()} onClick={go}>{busy ? '查询中…' : '查'}</button>
+          {!page && <button className="btn" disabled={busy} title="没有扫码枪：选一张拍了二维码的照片/截图，系统认码" onClick={e => { e.stopPropagation(); fileRef.current && fileRef.current.click() }}>传照片</button>}
           <label className="sc-say"><input type="checkbox" checked={say} onChange={e => setSay(e.target.checked)} /> 读出来</label>
         </div>
-        {!cur && <div className="sc-hint">扫码枪要在英文输入法下用。光标停在上面的框里，扫一张出一张，不用点鼠标。</div>}
+        {!cur && (page
+          ? <div className="sc-hint">点上面的按钮拍照：对准付款单右上角的二维码，拍近一点、别反光。也可以在框里输 20 位审批编号。</div>
+          : <div className="sc-hint">扫码枪要在英文输入法下用。光标停在上面的框里，扫一张出一张，不用点鼠标。
+            <br />手机也能查：手机浏览器打开 <span className="mono" style={{ userSelect: 'all' }}>{phoneUrl}</span>，登录后点「拍二维码」。</div>)}
         {cur && !cur.ok && <div className="sc-res bad"><div className="sc-big">没查到</div><div>{cur.msg}</div></div>}
         {cur && cur.ok && <div className={'sc-res ' + ((cur.vouchers || []).length ? 'ok' : 'warn')}>
           {(cur.vouchers || []).length ? cur.vouchers.map((x, i) => <div key={i} className={'sc-v' + (i ? ' more' : '')}>
@@ -324,6 +362,14 @@ function ScanBox({ onClose }) {
       </div>
     </div>
   )
+}
+
+// 手机专用单页（#/vscan，App 在登录后直接出这一页）
+export function VoucherScanPage({ user }) {
+  return <div className="lv"><style>{CSS}</style>
+    <ScanBox page onClose={() => {}} />
+    <div className="sc-foot">{user?.name} · 财务核算工作台 · <a href="#/" onClick={() => setTimeout(() => window.location.reload(), 0)}>回工作台</a></div>
+  </div>
 }
 
 function Detail({ inst, onClose, onChanged }) {
@@ -696,6 +742,11 @@ const CSS = `
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
 .lv .lv-kind{font-size:13px;margin:6px 0}
+.lv .lv-scanpage{padding:10px;min-height:100vh;background:var(--bg-sub)}.lv .lv-scanpage .lv-dlg{width:100%;max-width:720px;margin:0 auto;box-shadow:none;padding:14px 14px 18px}
+.lv .sc-shot{display:flex;justify-content:center;align-items:center;width:100%;height:auto;min-height:60px;line-height:1.3;font-size:18px;padding:14px 10px;border-radius:12px;margin:10px 0 2px}.lv .sc-foot{text-align:center;color:var(--ink-2);font-size:12px;padding:10px}
+@media (max-width:640px){.lv .lv-scan .sc-subj{font-size:22px}.lv .lv-scan .sc-big{font-size:34px}.lv .lv-scan .sc-v{gap:10px}.lv .lv-scan .sc-in{flex-wrap:wrap}
+.lv .lv-scan .lv-t th:nth-child(4),.lv .lv-scan .lv-t td:nth-child(4),.lv .lv-scan .lv-t th:nth-child(7),.lv .lv-scan .lv-t td:nth-child(7),.lv .lv-scan .lv-t th:nth-child(6),.lv .lv-scan .lv-t td:nth-child(6){display:none}
+.lv .lv-scan .lv-t th,.lv .lv-scan .lv-t td{width:auto!important;padding:7px 6px}}
 .lv .lv-scan{max-width:900px}.lv .sc-in{display:flex;gap:10px;align-items:center;margin:10px 0}
 .lv .sc-in input[type=text],.lv .sc-in input:not([type]){flex:1;font:inherit;font-size:15px;padding:10px 12px;border:2px solid var(--accent);border-radius:9px;background:var(--bg);color:var(--ink)}
 .lv .sc-say{display:inline-flex;gap:5px;align-items:center;font-size:12.5px;color:var(--ink-2);white-space:nowrap}.lv .sc-hint{color:var(--ink-2);font-size:12.5px;padding:18px 4px}
