@@ -105,3 +105,24 @@
 /* 阶段导航待办角标：把导航条变成收口流水线 */
 .ew-stage-badge{margin-left:auto;align-self:center;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:9px;background:rgba(192,68,68,.12);color:#c04444;flex:none;line-height:1.5}
 .ew-stage-nav button.active .ew-stage-badge{background:rgba(192,68,68,.16)}
+/* V2.810 金蝶未核销清单：六栏导航 + 可点的汇总卡 + 店铺×账龄表 */
+.ew-workbench .ew-stage-nav{grid-template-columns:repeat(6,minmax(0,1fr))}
+.ew-workbench .ew-stage-nav button{padding:15px 14px;gap:10px}
+.ew-open-cards{grid-template-columns:1.4fr 1fr 1fr 1fr 1fr}
+.ew-workbench .ew-open-cards button.ew-co{border:0;border-left:1px solid var(--line,#e4e8f0);border-bottom:3px solid transparent;border-radius:0;padding:13px 16px;text-align:left;align-items:flex-start;background:var(--bg,#fff);line-height:1.4}
+.ew-workbench .ew-open-cards button.ew-co:first-child{border-left:0}
+.ew-workbench .ew-open-cards button.ew-co-primary{background:var(--accent-soft,#efeeff)}
+.ew-workbench .ew-open-cards button.ew-co.on{border-bottom-color:var(--accent,#4b53c4)}
+.ew-workbench .ew-open-cards button.ew-co:hover{filter:brightness(.98)}
+.ew-open-matrix .ew-num,.ew-open-table .ew-num{text-align:right;font-variant-numeric:tabular-nums}
+.ew-workbench .ew-open-matrix .ew-link{text-align:right}
+.ew-open-hints{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 16px;font-size:11px;color:var(--ink-3,#8993a4)}
+.ew-workbench .ew-open-hints button{padding:5px 10px;font-size:11px;color:var(--ink-2,#637089)}
+.ew-workbench .ew-open-hints button.active{background:var(--accent-soft,#efeeff);color:var(--accent,#4b53c4);border-color:var(--accent,#4b53c4)}
+.ew-open-red{color:#c04444}
+.ew-result-status .ew-readonly{flex:none}
+@media(max-width:900px){.ew-open-cards{grid-template-columns:1fr 1fr}.ew-workbench .ew-open-cards button.ew-co{border-top:1px solid var(--line,#e4e8f0)}}
+.ew-open-table .ew-zero{color:var(--ink-3,#8993a4)}
+/* V2.811 抖音月结 */
+.ew-dy-cards{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.ew-open-table tfoot td{padding:12px 14px}

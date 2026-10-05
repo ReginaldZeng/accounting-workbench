@@ -4975,6 +4975,10 @@ from routers import ec_flow_ledger
 app.include_router(ec_flow_ledger.router)
 from routers import ec_documents
 app.include_router(ec_documents.router)
+from routers import ec_open_items
+app.include_router(ec_open_items.router)   # V2.810 电商·金蝶未核销清单（只读）
+from routers import ec_douyin
+app.include_router(ec_douyin.router)       # V2.811 电商·抖音月结（只读金蝶）
 app.include_router(llm_hub.router)   # V2.301 门户模型配置 P0.5 聚合看板
 app.include_router(temp_attendance.router)
 app.include_router(bom_quote.router)   # V-draft BOM报价审核

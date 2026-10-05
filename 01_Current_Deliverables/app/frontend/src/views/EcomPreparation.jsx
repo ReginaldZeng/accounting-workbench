@@ -18,10 +18,18 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
     try {await fn();refresh()} catch(e) {notify(e.message)} finally {setBusy(false)}
   }
   function choose(row) {target.current=row;input.current?.click()}
+  const douyin=shopInfo?.platform==='抖音'
+  // 抖音两份动账明细：只看表头认类型，文件里有几个月就按月各存一份
+  async function uploadDouyin(files) {
+    const body=new FormData();files.forEach(f=>body.append('files',f));body.append('shop',shop)
+    const r=await requestJson('/api/ec/douyin/upload',{method:'POST',body})
+    setAutoResults(r.results||[])
+  }
   function uploadAuto(e) {
     const files=Array.from(e.target.files||[]);e.target.value=''
     if(!files.length) return
     setAutoResults(null)
+    if(douyin) {act(()=>uploadDouyin(files));return}
     act(async()=>{
       const body=new FormData();files.forEach(f=>body.append('files',f))
       body.append('period',period);body.append('shop',shop)
@@ -33,6 +41,7 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
     const files=Array.from(e.target.files||[]);e.target.value=''
     if (!files.length) return
     const row=target.current, cash=['alipay','fund'].includes(row.kind)
+    if(row.kind.startsWith('dy_')) {setAutoResults(null);act(()=>uploadDouyin(files));return}
     act(async()=>{
       const body=new FormData();files.forEach(f=>body.append('files',f))
       if(cash) {
@@ -57,9 +66,9 @@ export default function EcomPreparation({period,shop,shopInfo,revision,canEdit,r
     })
   }
   return <section className="ew-panel ew-preparation">
-    <header><div><h2>月结资料清单</h2><p>{shopInfo?.name||shop} · {period}</p></div><div style={{display:'flex',gap:8}}>{canEdit&&<button disabled={busy} onClick={()=>autoInput.current?.click()} title="一次选多个文件，按表头自动识别订单/子订单/退款/旺店通，逐个入库">批量上传 · 自动识别</button>}<button disabled={busy} onClick={()=>setShowPickup(v=>!v)} title="公盘取件机的运行状态与本店本期自动接入记录">取件记录</button></div></header>
-    <input ref={input} type="file" hidden multiple accept=".xlsx,.xls,.zip" onChange={upload}/>
-    <input ref={autoInput} type="file" hidden multiple accept=".xlsx,.xls,.zip" onChange={uploadAuto}/>
+    <header><div><h2>月结资料清单</h2><p>{shopInfo?.name||shop} · {period}</p></div><div style={{display:'flex',gap:8}}>{canEdit&&<button disabled={busy} onClick={()=>autoInput.current?.click()} title={douyin?"一次选多个文件（csv 或 zip），按表头自动识别动账明细/账户流水，按月入库":"一次选多个文件，按表头自动识别订单/子订单/退款/旺店通，逐个入库"}>批量上传 · 自动识别</button>}<button disabled={busy} onClick={()=>setShowPickup(v=>!v)} title="公盘取件机的运行状态与本店本期自动接入记录">取件记录</button></div></header>
+    <input ref={input} type="file" hidden multiple accept=".xlsx,.xls,.zip,.csv" onChange={upload}/>
+    <input ref={autoInput} type="file" hidden multiple accept=".xlsx,.xls,.zip,.csv" onChange={uploadAuto}/>
     {pickup&&<div className="ew-notice" style={{display:'flex',alignItems:'center',gap:6}}>{
       pickup.deployed&&pickup.alive
         ? <><span style={{color:'var(--green,#32a783)'}}>●</span><span>电商资料自动接入中 · 取件机最近扫描 {pickup.scan_at||'—'}{pickup.last_at?`　·　本店本期最近接入 ${pickup.last_at}（${pickup.files} 份）`:'　·　本店本期暂无自动接入'}</span></>
@@ -104,5 +113,5 @@ function SourceDrawer({source,shop,canEdit,onChanged,onClose}) {
     document.addEventListener('keydown',key)
     return()=>{document.body.style.overflow=overflow;document.removeEventListener('keydown',key);previous?.focus()}
   },[onClose])
-  return <div className="ew-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)onClose()}}><section ref={ref} tabIndex="-1" className="ew-drawer ew-source-drawer" role="dialog" aria-modal="true" aria-labelledby="preparation-source-title"><header><h2 id="preparation-source-title">{source.label} · 来源</h2><button onClick={onClose}>关闭</button></header><ul className="ew-source-files">{source.files?.map((f,i)=><li key={i}>{f}</li>)}{!source.files?.length&&<li>{source.legacy?'原版本核算快照已保留':'本期尚无来源文件'}</li>}</ul>{!['alipay','fund','kingdee'].includes(source.kind)&&<details><summary>补充跨期资料与查看历史来源</summary><EcomHistoricalDocuments shop={shop} canEdit={canEdit} onChanged={onChanged}/></details>}</section></div>
+  return <div className="ew-overlay" onMouseDown={e=>{if(e.target===e.currentTarget)onClose()}}><section ref={ref} tabIndex="-1" className="ew-drawer ew-source-drawer" role="dialog" aria-modal="true" aria-labelledby="preparation-source-title"><header><h2 id="preparation-source-title">{source.label} · 来源</h2><button onClick={onClose}>关闭</button></header><ul className="ew-source-files">{source.files?.map((f,i)=><li key={i}>{f}</li>)}{!source.files?.length&&<li>{source.legacy?'原版本核算快照已保留':'本期尚无来源文件'}</li>}</ul>{!['alipay','fund','kingdee'].includes(source.kind)&&!source.kind.startsWith('dy_')&&<details><summary>补充跨期资料与查看历史来源</summary><EcomHistoricalDocuments shop={shop} canEdit={canEdit} onChanged={onChanged}/></details>}</section></div>
 }

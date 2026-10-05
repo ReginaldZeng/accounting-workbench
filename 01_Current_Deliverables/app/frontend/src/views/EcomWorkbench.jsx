@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react'
 import EcomFlowLedger, { AccountTable } from './EcomFlowLedger.jsx'
 import Preparation from './EcomPreparation.jsx'
 import OrderDrawer from './EcomOrderChain.jsx'
+import OpenItems from './EcomOpenItems.jsx'
+import DouyinSettle from './EcomDouyinSettle.jsx'
 import { requestJson, wb, query, post, money, count, percent, useResource } from './ecomWorkbenchApi.js'
 import './ecomWorkbench.css'
 import overviewIcon from '../assets/ecom-nav/chart-bar.svg'
@@ -9,9 +11,11 @@ import prepareIcon from '../assets/ecom-nav/notes.svg'
 import incomeIcon from '../assets/ecom-nav/clipboard-check.svg'
 import cashIcon from '../assets/ecom-nav/coin-yuan.svg'
 import flowsIcon from '../assets/ecom-nav/receipt.svg'
+import openIcon from '../assets/ecom-nav/file-alert.svg'
 
 // Shops are resolved from source-backed base data, never a hardcoded display name.
 const NAV=[
+  ['open','未核销清单','金蝶里还挂着的单',openIcon],
   ['prepare','数据准备','按店铺准备资料',prepareIcon],
   ['overview','总览','经营与账户概览',overviewIcon],
   ['income','收入确认','发货与应收核对',incomeIcon],
@@ -19,12 +23,14 @@ const NAV=[
   ['flows','账户流水','全字段合并查找',flowsIcon],
 ]
 const BUSINESS={ '':'全部订单',normal:'正常销售',ufirst:'U先试用装',mixed:'混合订单',review:'待确认分类',unknown:'待分类' }
+// 月结做的是上个月的账：期间默认上月
+const lastMonth=()=>{const d=new Date();d.setDate(1);d.setMonth(d.getMonth()-1);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
 export const Notice=({children}) => children ? <div className="ew-notice" role="status">{children}</div> : null
 const Panel=({title,children,extra}) => <section className="ew-panel"><header><h2>{title}</h2>{extra}</header>{children}</section>
 function Metric({label,value,sub,onClick}) {const Tag=onClick?'button':'div';return <Tag className="ew-metric" onClick={onClick}><span>{label}</span><strong>{value}</strong><small>{sub}</small></Tag>}
 
-export default function EcomWorkbench({user,onNav,initialScreen='overview'}) {
-  const [screen,setScreen]=useState(initialScreen),[period,setPeriod]=useState('2026-08'),[shop,setShop]=useState(''),[business,setBusiness]=useState(''),[flag,setFlag]=useState(''),[revision,setRevision]=useState(0),[drawer,setDrawer]=useState(null),[message,setMessage]=useState(''),[flowFilter,setFlowFilter]=useState({})
+export default function EcomWorkbench({user,onNav,initialScreen='open'}) {
+  const [screen,setScreen]=useState(initialScreen),[period,setPeriod]=useState(lastMonth),[shop,setShop]=useState(''),[business,setBusiness]=useState(''),[flag,setFlag]=useState(''),[revision,setRevision]=useState(0),[drawer,setDrawer]=useState(null),[message,setMessage]=useState(''),[flowFilter,setFlowFilter]=useState({})
   const result=useResource(screen==='overview'?`/api/ec/workbench/overview?${query({period,business})}`:null,revision,`overview:${period}:${business}`)  // V2.617：轮询/刷新时保留上一份，不把页面清成"—"
   const shopResult=useResource(`/api/ec/workbench/shops?${query({period:screen==='prepare'?period:''})}`,revision)
   const stageSummary=useResource(shop?`/api/ec/workbench/summary?${query({period,shop})}`:null,revision)
@@ -45,7 +51,7 @@ export default function EcomWorkbench({user,onNav,initialScreen='overview'}) {
   const drill=(id,filter='',next='income')=>{setShop(id);setFlag(filter);setScreen(next)}
   const openLedger=(filter={})=>{setFlowFilter(filter);setDrawer(null);setScreen('flows')}
   return <div className="ew-workbench">
-    <header className="ew-header"><div><h1>电商对账工作台</h1><p>平台事实 → 发货确认 → 应收核对 → 账户收款</p></div><div className="ew-header-tools"><span className="ew-readonly">金蝶只读</span>{screen!=='flows' && <label>结算期间<input aria-label="结算期间" type="month" value={period} onChange={changePeriod}/></label>}<button onClick={()=>setRevision(v=>v+1)}>刷新数据</button><button className="ew-link ew-basic" onClick={()=>onNav?.('ecombase')}>基础资料</button></div></header>
+    <header className="ew-header"><div><h1>电商对账工作台</h1><p>平台事实 → 发货确认 → 应收核对 → 账户收款</p></div><div className="ew-header-tools"><span className="ew-readonly">金蝶只读</span>{!['flows','open'].includes(screen) && <label>结算期间<input aria-label="结算期间" type="month" value={period} onChange={changePeriod}/></label>}<button onClick={()=>setRevision(v=>v+1)}>刷新数据</button><button className="ew-link ew-basic" onClick={()=>onNav?.('ecombase')}>基础资料</button></div></header>
     <nav className="ew-nav ew-stage-nav" aria-label="电商工作流">{NAV.map(([key,label,description,icon])=>{
       const sm=stageSummary.data?.metrics,cur=shops.find(s=>s.id===shop)
       const badge=key==='income'?(sm?(sm.ar_diff_count||0)+(sm.ar_pending||0):0):key==='prepare'?Math.max(0,(cur?.required||0)-(cur?.ready||0)):0
@@ -53,8 +59,8 @@ export default function EcomWorkbench({user,onNav,initialScreen='overview'}) {
     })}</nav>
     {screen==='overview' && <div className="ew-filter"><span>业务范围</span>{Object.entries(BUSINESS).slice(0,4).map(([key,label])=><button key={key} className={business===key?'active':''} onClick={()=>setBusiness(key)}>{label}</button>)}<span className="ew-muted">覆盖 {overview?.coverage?.available ?? '—'} / {overview?.coverage?.total ?? '—'} 家店铺 · 缺数据不计作零</span></div>}
     <Notice>{message||(screen==='overview'?result.error:shopResult.error)}</Notice>
-    {screen==='flows' ? <EcomFlowLedger refreshToken={revision} onChanged={()=>setRevision(v=>v+1)} user={user} period={flowFilter.q?'':period} initialQuery={flowFilter.q||''} initialAccountId={flowFilter.account_id||''}/> : screen==='overview' ? <Overview data={overview} loading={result.loading} revision={revision} drill={drill} openCash={id=>openLedger({account_id:typeof id==='string'?id:''})}/> : screen==='prepare' ? <div className="ew-layout"><aside className="ew-shops"><h2>店铺 <small>{shops.length} 家</small></h2>{shops.map(s=>{const readiness=shopResult.loading?'linked':s.readiness||'linked',meta=shopResult.loading?'正在读取准备进度…':s.required?`齐套 ${s.ready}/${s.required} · 文件 ${s.files}`:'待配置所需资料';return <button key={s.id} className={shop===s.id?'active':''} onClick={()=>{setShop(s.id);setFlag('');setDrawer(null)}}><span><i className={readiness}/>{s.name}</span><small>{meta}</small></button>})}</aside><main className="ew-main">{shop&&<Preparation key={shop+period} period={period} shop={shop} shopInfo={shops.find(s=>s.id===shop)} revision={revision} canEdit={canEdit} refresh={()=>setRevision(v=>v+1)} notify={setMessage} onBasic={()=>onNav?.('ecombase')}/>}</main></div> : shop&&<OrderWorkspace key={period+screen} user={user} period={period} shop={shop} shops={shops} setShop={setShop} mode={screen} business={business} setBusiness={setBusiness} flag={flag} setFlag={setFlag} revision={revision} openOrder={(no,tab='flow',version='')=>setDrawer({no,tab,version})}/>}
-    <p className="ew-footnote">GSV = 支付成功金额 − 已成功退款，未扣平台费用。订单按创建月归属；收款以支付宝 / 聚合账户入账为止，不代表已提现到公司银行。今晚金蝶仅查询，禁止新增、下推、提交或审核。</p>
+    {screen==='open' ? <OpenItems canEdit={canEdit} revision={revision} notify={setMessage}/> : screen==='flows' ? <EcomFlowLedger refreshToken={revision} onChanged={()=>setRevision(v=>v+1)} user={user} period={flowFilter.q?'':period} initialQuery={flowFilter.q||''} initialAccountId={flowFilter.account_id||''}/> : screen==='overview' ? <Overview data={overview} loading={result.loading} revision={revision} drill={drill} openCash={id=>openLedger({account_id:typeof id==='string'?id:''})}/> : screen==='prepare' ? <div className="ew-layout"><aside className="ew-shops"><h2>店铺 <small>{shops.length} 家</small></h2>{shops.map(s=>{const readiness=shopResult.loading?'linked':s.readiness||'linked',meta=shopResult.loading?'正在读取准备进度…':s.required?`齐套 ${s.ready}/${s.required} · 文件 ${s.files}`:'待配置所需资料';return <button key={s.id} className={shop===s.id?'active':''} onClick={()=>{setShop(s.id);setFlag('');setDrawer(null)}}><span><i className={readiness}/>{s.name}</span><small>{meta}</small></button>})}</aside><main className="ew-main">{shop&&<Preparation key={shop+period} period={period} shop={shop} shopInfo={shops.find(s=>s.id===shop)} revision={revision} canEdit={canEdit} refresh={()=>setRevision(v=>v+1)} notify={setMessage} onBasic={()=>onNav?.('ecombase')}/>}</main></div> : screen==='cash'&&shops.find(s=>s.id===shop)?.platform==='抖音' ? <DouyinSettle period={period} shop={shop} shops={shops} setShop={setShop} canEdit={canEdit} revision={revision} notify={setMessage} onPrepare={()=>setScreen('prepare')}/> : shop&&<OrderWorkspace key={period+screen} user={user} period={period} shop={shop} shops={shops} setShop={setShop} mode={screen} business={business} setBusiness={setBusiness} flag={flag} setFlag={setFlag} revision={revision} openOrder={(no,tab='flow',version='')=>setDrawer({no,tab,version})}/>}
+    <p className="ew-footnote">GSV = 支付成功金额 − 已成功退款，未扣平台费用。订单按创建月归属；收款以支付宝 / 聚合账户入账为止，不代表已提现到公司银行。金蝶仅查询，不新增、不下推、不提交、不审核。</p>
     {drawer && <OrderDrawer period={period} shop={shop} orderNo={drawer.no} version={drawer.version} initialTab={drawer.tab} onClose={()=>setDrawer(null)} onOpenLedger={()=>openLedger({q:drawer.no})}/>}
   </div>
 }
@@ -156,7 +162,7 @@ function VoucherPreview({user,period,shop,revision}) {
   const sync=async()=>{try{await wb('kingdee-docs/refresh',post({period,shop}));setSyncMessage('已发起只读查询，完成后刷新预览。')}catch(e){setSyncMessage(e.message)}}
   const result=useResource(`/api/ec/workbench/preview?${query({period,shop})}`,`${revision}:${syncRevision}`),data=result.data
   const [onlyU,setOnlyU]=useState(true)
-  return <Panel title="金蝶凭证只读预览" extra={<div><button disabled={!canEdit} onClick={sync}>读取历史凭证</button><button onClick={()=>setSyncRevision(v=>v+1)}>刷新预览</button></div>}><Notice>{syncMessage||result.error||data?.notice}</Notice><div className="ew-tools"><label><input type="checkbox" checked={onlyU} onChange={e=>setOnlyU(e.target.checked)}/> 只看 U先相关凭证</label><button disabled title="今晚金蝶只读">下推收款单 / 入账（未开放）</button></div>{data?.existing_vouchers?.filter(v=>!onlyU||v.ufirst).map(v=><details className="ew-voucher" key={v.bill} open><summary>{v.number} · {v.date?.slice(0,10)} · 状态 {v.status} · 单据编号 {v.bill}</summary><p className="ew-muted">摘要提及 {v.receipt_references?.join('、')||'无收款单号'}；仅为参考，尚未证明订单与收款单来源关系。</p><div className="ew-scroll"><table><thead><tr><th>摘要</th><th>科目</th><th>借方</th><th>贷方</th></tr></thead><tbody>{v.lines?.map((l,i)=><tr key={i}><td>{l.memo}</td><td>{l.account} {l.account_name}</td><td>{money(l.debit)}</td><td>{money(l.credit)}</td></tr>)}</tbody></table></div></details>)}{!data?.existing_vouchers?.length&&<p className="ew-empty">尚未读取参考凭证。可点击上方“读取历史凭证”，仅查询、不写入。</p>}<div className="ew-padding"><strong>新凭证预览前待确认</strong><ul>{data?.draft?.checks?.map(c=><li key={c}>{c}</li>)}</ul></div></Panel>
+  return <Panel title="金蝶凭证只读预览" extra={<div><button disabled={!canEdit} onClick={sync}>读取历史凭证</button><button onClick={()=>setSyncRevision(v=>v+1)}>刷新预览</button></div>}><Notice>{syncMessage||result.error||data?.notice}</Notice><div className="ew-tools"><label><input type="checkbox" checked={onlyU} onChange={e=>setOnlyU(e.target.checked)}/> 只看 U先相关凭证</label><button disabled title="金蝶只读">下推收款单 / 入账（未开放）</button></div>{data?.existing_vouchers?.filter(v=>!onlyU||v.ufirst).map(v=><details className="ew-voucher" key={v.bill} open><summary>{v.number} · {v.date?.slice(0,10)} · 状态 {v.status} · 单据编号 {v.bill}</summary><p className="ew-muted">摘要提及 {v.receipt_references?.join('、')||'无收款单号'}；仅为参考，尚未证明订单与收款单来源关系。</p><div className="ew-scroll"><table><thead><tr><th>摘要</th><th>科目</th><th>借方</th><th>贷方</th></tr></thead><tbody>{v.lines?.map((l,i)=><tr key={i}><td>{l.memo}</td><td>{l.account} {l.account_name}</td><td>{money(l.debit)}</td><td>{money(l.credit)}</td></tr>)}</tbody></table></div></details>)}{!data?.existing_vouchers?.length&&<p className="ew-empty">尚未读取参考凭证。可点击上方“读取历史凭证”，仅查询、不写入。</p>}<div className="ew-padding"><strong>新凭证预览前待确认</strong><ul>{data?.draft?.checks?.map(c=><li key={c}>{c}</li>)}</ul></div></Panel>
 }
 function History({period,shop}) {
   const result=useResource(`/api/ec/workbench/history?${query({period,shop})}`)

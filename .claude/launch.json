@@ -99,6 +99,15 @@
         "8110"
       ],
       "port": 8110
+    },
+    {
+      "name": "wt-ecom-open-items",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-c",
+        "import os,uvicorn;os.environ.setdefault('KD_CONF_PATH',r'D:\\0 Claude 数据\\03 财务核算工作台\\01_Current_Deliverables\\app\\backend\\conf.ini');uvicorn.run('app:app',app_dir=r'D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\project-review-229d0b\\01_Current_Deliverables\\app\\backend',port=8130)"
+      ],
+      "port": 8130
     }
   ]
 }

@@ -316,9 +316,10 @@ def result_status(request:Request,period:str,shop:str):
 
 def preparation_cards(period, shop):
     """Read saved source metadata; never build orders or decode account statements here."""
-    kinds = preparation.requirements(db.get_setting('ec_preparation_rules', {}) or {}, shop)
+    platform = next((s['platform'] for s in shops() if s['id']==shop),'')
+    kinds = preparation.requirements(db.get_setting('ec_preparation_rules', {}) or {}, shop, platform)
     price_optional='price_protection' not in kinds
-    if price_optional and next((s['platform'] for s in shops() if s['id']==shop),'')=='天猫':kinds.append('price_protection')
+    if price_optional and platform=='天猫':kinds.append('price_protection')
     cards = {k:dict(kind=k,label=preparation.KINDS[k],available=False,state='missing',rows=None,
                     files=[],file_count=0,warnings=[],imported_at=None,accounts=[]) for k in kinds}
     if 'price_protection' in cards:cards['price_protection']['optional']=price_optional

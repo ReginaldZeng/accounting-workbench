@@ -3,11 +3,17 @@ KINDS = {'order':'平台订单', 'item':'商品与子订单', 'wdt':'旺店通�
          'alipay':'支付宝流水', 'fund':'聚合账户流水', 'refund':'退款售后明细', 'kingdee':'金蝶应收单'}
 TARGET = '星期零STARFIELD 天猫官旗店'
 KINDS['price_protection']='天猫价保赔付（补充）'
+# V2.811 抖音：一份订单维度动账明细（对金额、拆费用）+ 一份带余额的账户流水（对余额）
+DOUYIN_KINDS = {'dy_settle':'抖音动账明细（订单维度）', 'dy_ledger':'抖音账户流水（带余额）'}
+KINDS.update(DOUYIN_KINDS)
 
 
-def requirements(settings, shop):
+def requirements(settings, shop, platform=''):
     # Only the already-agreed pilot has defaults; other shops must choose their materials.
-    value = settings.get(shop, [k for k in KINDS if k!='price_protection'] if shop == TARGET else [])
+    # 抖音店默认就是那两份动账明细，不用逐店去配。
+    default = ([k for k in KINDS if k!='price_protection' and k not in DOUYIN_KINDS] if shop == TARGET
+               else list(DOUYIN_KINDS) if platform == '抖音' else [])
+    value = settings.get(shop, default)
     return [kind for kind in KINDS if kind in value] if isinstance(value, list) else []
 
 
