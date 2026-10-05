@@ -881,6 +881,36 @@ test('后补池：「业务自助登记入口」给网址和二维码', async (b
   await ctx.close()
 })
 
+test('后补池：管理员「以某人身份预览」查某人能选哪些单、标后补情况', async (browser, B) => {
+  const st = { rows: [] }
+  const base = laterApi(st)
+  const api = async c => {
+    if (c.path === '/api/inv/s/preview') {
+      if (c.query.name === '重名') return { ok: true, need: 'pick', choices: [{ i: 0, dept: '公司-A部' }, { i: 1, dept: '公司-B部' }] }
+      return { ok: true, person: { name: '申请人甲', dept: '公司-采购部' }, days: Number(c.query.days) || 60, truncated: false,
+        templates: ['付款申请（公对公）'],
+        rows: [{ procInstId: 'PI-1', title: '付款申请一', template: '付款申请（公对公）', businessId: '202610050001', amount: 500, approvalStatus: 'COMPLETED', approvalResult: 'agree', laterId: null, laterStatus: '', hasInvoice: false },
+          { procInstId: 'PI-2', title: '付款申请二', template: '付款申请（公对公）', businessId: '202610050002', amount: 800, approvalStatus: 'COMPLETED', laterId: 7, laterStatus: 'open', hasInvoice: false }] }
+    }
+    return base(c)
+  }
+  const { page, ctx, calls } = await open(browser, B, api)
+  await mount(page, 'InvLater', { user: { name: '测试会计' } })
+  await page.getByRole('button', { name: '以某人身份预览' }).click()
+  await page.getByPlaceholder('钉钉上的姓名').fill('申请人甲')
+  await page.locator('.inv-lt-pv-days').selectOption('120')
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  await page.locator('.inv-lt-pv-tbl tbody tr').first().waitFor({ timeout: 4000 })
+  assert.equal(await page.locator('.inv-lt-pv-tbl tbody tr').count(), 2)
+  assert.equal(await page.locator('.inv-lt-pv-todo').count(), 1, '一张「可登记」')
+  assert.ok(await page.getByText('已登记 #7', { exact: false }).isVisible(), '另一张标已登记')
+  assert.equal(calls.filter(c => c.path === '/api/inv/s/preview').pop().query.days, '120')
+  await page.getByPlaceholder('钉钉上的姓名').fill('重名')
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  await page.getByRole('button', { name: '公司-B部' }).waitFor({ timeout: 4000 })
+  await ctx.close()
+})
+
 // ───────────────────────── 跑 ─────────────────────────
 
 ;(async () => {

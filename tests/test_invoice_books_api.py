@@ -1284,5 +1284,32 @@ class InvoiceBooksApiTests(unittest.TestCase):
         with patch.object(inv.idt, "userinfo_by_code", MagicMock(return_value={"ok": False, "msg": "码无效"})):
             self.assertEqual(self.c.post("/api/inv/s/login/dd", json={"code": "x"}).status_code, 403)
 
+    def test_25_admin_preview_as_person(self):
+        """管理员「以某人身份预览」：输入钉钉姓名→拉这个人能选的后补可登记审批单（同他本人所见）；重名先选；要设置权限。号都是编的。"""
+        idt = self.inv.idt
+        self.assertEqual(self.get("/api/inv/s/preview?name=张三", "recv").status_code, 403)
+        self.assertEqual(self.c.get("/api/inv/s/preview?name=张三").status_code, 401)
+        roster = {"ok": True, "msg": "", "rows": [
+            {"userid": "dt-app", "name": "申请人丙", "title": "采购", "dept": "公司-采购部"},
+            {"userid": "dt-d1", "name": "重名", "title": "", "dept": "公司-A部"},
+            {"userid": "dt-d2", "name": "重名", "title": "", "dept": "公司-B部"}]}
+        pays = MagicMock(return_value={"ok": True, "msg": "", "rows": [
+            {"procInstId": "PI-PV-1", "businessId": "202610050001", "title": "预览单",
+             "template": "付款申请（公对公）", "createTime": "2026-10-01 09:00",
+             "amount": 500.0, "payeeName": "预览供应商", "hasAttachments": False,
+             "approvalStatus": "COMPLETED", "approvalResult": "agree"}]})
+        with patch.object(idt, "roster", MagicMock(return_value=roster)), patch.object(idt, "list_user_payments", pays):
+            self.assertEqual(self.get("/api/inv/s/preview?name=查无此人", "boss").status_code, 404)
+            r = self.ok(self.get("/api/inv/s/preview?name=重名", "boss"))
+            self.assertEqual((r["need"], len(r["choices"])), ("pick", 2))
+            r = self.ok(self.get("/api/inv/s/preview?name=重名&pick=1", "boss"))
+            self.assertTrue(r["person"]["dept"].endswith("B部"))
+            r = self.ok(self.get("/api/inv/s/preview?name=申请人丙&days=120", "boss"))
+        self.assertEqual((pays.call_args[0][0], pays.call_args[1]["days"]), ("dt-app", 120))
+        self.assertIn("付款申请（公对公）", pays.call_args[0][1])
+        self.assertEqual((r["person"]["name"], r["days"]), ("申请人丙", 120))
+        row = r["rows"][0]
+        self.assertEqual((row["procInstId"], row["laterId"], row["hasInvoice"]), ("PI-PV-1", None, False))
+
 if __name__ == "__main__":
     unittest.main()

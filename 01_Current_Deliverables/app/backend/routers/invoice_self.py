@@ -395,6 +395,56 @@ async def s_payments(request: Request):
     return await run_in_threadpool(run)
 
 
+@router.get("/api/inv/s/preview")
+async def s_preview(request: Request):
+    """管理员「以某人身份预览」：输入钉钉姓名 → 拉出这个人当前能选的后补可登记审批单（和他本人看到的一样），
+    用来核对审批模板配得对不对、某人是否漏登记。重名先回候选让管理员挑 pick。要发票后补池页面＋发票管家设置权限。"""
+    u, bad = inv.need(request, inv.ENTER_LATER, inv.CAP_CONFIG)
+    if bad:
+        return bad
+    name = inv._s(request.query_params.get("name"), 40).replace(" ", "")
+    if not name:
+        return err("写一下要预览谁（钉钉姓名）", 400)
+    pick = request.query_params.get("pick")
+    try:
+        days = int(request.query_params.get("days") or 60)
+    except ValueError:
+        days = 60
+    days = days if days in PAY_DAYS else 60
+
+    def run():
+        r = idt.roster()
+        if not r.get("ok"):
+            return err("拉不到钉钉通讯录：%s" % (r.get("msg") or "原因不明"), 503)
+        hits = [p for p in (r.get("rows") or []) if (p.get("name") or "").replace(" ", "") == name and p.get("userid")]
+        if not hits:
+            return err("钉钉通讯录里没找到「%s」：请写钉钉上的全名" % name, 404)
+        if len(hits) > 1:
+            try:
+                idx = int(pick)
+            except (TypeError, ValueError):
+                idx = -1
+            if not (0 <= idx < len(hits)):
+                return {"ok": True, "need": "pick",
+                        "choices": [{"i": i, "dept": p.get("dept") or "", "title": p.get("title") or ""} for i, p in enumerate(hits)]}
+            p = hits[idx]
+        else:
+            p = hits[0]
+        names = _later_templates()
+        pr = idt.list_user_payments(p["userid"], names, days=days, limit=PAY_LIMIT)
+        e = E()
+        rows = []
+        for x in pr.get("rows") or []:
+            ex = S.later_latest_by_inst(e, x["procInstId"])
+            f = S.folder_by_inst(e, x["procInstId"])
+            has_inv = bool(f) and any(i.get("kind") == "invoice" and i.get("review") != "void" and i.get("status") != "removed"
+                                      for i in S.folder_items(e, f["id"]))
+            rows.append(dict(x, laterId=ex["id"] if ex else None, laterStatus=(ex or {}).get("status") or "", hasInvoice=has_inv))
+        return {"ok": bool(pr.get("ok")), "rows": rows, "msg": pr.get("msg") or "", "truncated": bool(pr.get("truncated")),
+                "person": {"name": p.get("name") or name, "dept": p.get("dept") or ""}, "templates": names, "days": days}
+    return await run_in_threadpool(run)
+
+
 @router.get("/api/inv/s/receivers")
 async def s_receivers(request: Request):
     me, bad = _need(request)

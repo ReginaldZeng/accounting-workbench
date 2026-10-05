@@ -191,3 +191,17 @@
 .inv-lt-self-url{ display:flex; gap:8px; }
 .inv-lt-self-qr{ align-self:center; border:1px solid var(--line); border-radius:8px; background:#fff; padding:6px; }
 .inv-lt-self ul{ margin:0; padding-left:18px; line-height:1.7; }
+
+/* V2.741 以某人身份预览 */
+.inv-lt-pv-bar{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.inv-lt-pv-bar .inv-in{ flex:1 1 160px; }
+.inv-lt-pv-days{ flex:0 0 auto !important; width:auto; }
+.inv-lt-pv-hint{ margin:8px 0 2px; font-size:12px; }
+.inv-lt-pv-pick{ display:flex; flex-direction:column; gap:8px; align-items:flex-start; margin-top:10px; }
+.inv-lt-pv-pick .btn{ height:auto; min-height:34px; padding:6px 12px; text-align:left; }
+.inv-lt-pv-head{ display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 12px; margin:12px 0 6px; }
+.inv-lt-pv-head b{ font-size:15px; }
+.inv-lt-pv-msg{ margin:6px 0; }
+.inv-lt-pv-tbl td{ vertical-align:top; }
+.inv-lt-pv-done{ color:var(--green); font-weight:600; }
+.inv-lt-pv-todo{ color:var(--accent); font-weight:600; }
