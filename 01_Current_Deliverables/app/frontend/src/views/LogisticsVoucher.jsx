@@ -422,7 +422,6 @@ export function VoucherScanPage({ user }) {
     <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={S.shot} />
     <header className="vs-top">
       <div><div className="vs-h1">扫码查凭证</div><div className="vs-sub">扫付款单右上角的二维码，看它记在哪个主体、哪张凭证</div></div>
-      <button className={'vs-chip' + (S.say ? ' on' : '')} onClick={() => S.setSay(!S.say)}>{S.say ? '读出来 · 开' : '读出来 · 关'}</button>
     </header>
     <main className="vs-main">
       {S.busy ? <div className="vs-card vs-wait"><span className="vs-spin" />正在查…</div>
@@ -460,11 +459,17 @@ export function VoucherScanPage({ user }) {
         <button disabled={S.busy || !S.v.trim()} onClick={S.go}>查</button></div>}
       <div className="vs-foot">{user?.name} · 财务核算工作台</div>
     </main>
+    {/* 底部操作区(V2.805，用户「那几个连续扫，是不是可以优化一下」)：上面一排是开关(连续扫 / 读出来)和备用的拍照，下面一个通栏主按钮 */}
     <footer className="vs-bottom">
-      {dd ? <>
-        <button className={'vs-side' + (auto ? ' on' : '')} onClick={() => setAuto(!auto)}>连续扫<small>{auto ? '开' : '关'}</small></button>
-        <button className="vs-go" disabled={S.busy} onClick={ddScan}><IcScan />{S.hist.length ? '继续扫' : '扫一扫'}</button>
-        <button className="vs-side" disabled={S.busy} onClick={photo}><IcCam /><small>拍照</small></button></>
+      <div className="vs-opts">
+        {dd && <button className={'vs-sw' + (auto ? ' on' : '')} role="switch" aria-checked={auto} onClick={() => setAuto(!auto)}><i><span /></i>连续扫</button>}
+        <button className={'vs-sw' + (S.say ? ' on' : '')} role="switch" aria-checked={S.say} onClick={() => S.setSay(!S.say)}><i><span /></i>读出来</button>
+        <span style={{ flex: 1 }} />
+        {dd && <button className="vs-cam" disabled={S.busy} onClick={photo}><IcCam />拍照识别</button>}
+      </div>
+      {dd && auto && <div className="vs-tip">扫到一张会自动接着扫下一张；想停，在扫码界面点返回</div>}
+      {dd
+        ? <button className="vs-go" disabled={S.busy} onClick={ddScan}><IcScan />{S.busy ? '正在查…' : auto ? (S.hist.length ? '继续连续扫' : '开始连续扫') : S.hist.length ? '扫下一张' : '扫一扫'}</button>
         : <button className="vs-go" disabled={S.busy} onClick={photo}><IcCam />{S.busy ? '识别中…' : S.hist.length ? '拍下一张' : '拍二维码'}</button>}
     </footer>
   </div>
@@ -876,8 +881,15 @@ const CSS = `
 .vs .vs-manual{display:flex;gap:8px}.vs .vs-manual input{flex:1;min-width:0;font:inherit;font-size:16px;padding:11px 12px;border:1px solid var(--line-strong);border-radius:10px;background:var(--bg);color:var(--ink)}
 .vs .vs-manual button{border:0;background:var(--accent);color:#fff;border-radius:10px;padding:0 20px;font-weight:700}.vs .vs-manual button:disabled{opacity:.45}
 .vs .vs-foot{text-align:center;color:var(--ink-3);font-size:11.5px;margin-top:auto;padding-top:8px}
-.vs .vs-bottom{position:sticky;bottom:0;display:flex;gap:10px;align-items:stretch;padding:10px 16px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);box-shadow:0 -4px 16px rgba(20,28,58,.06)}
-.vs .vs-go{flex:1;display:flex;gap:10px;align-items:center;justify-content:center;border:0;background:var(--accent);color:#fff;font-size:19px;font-weight:800;border-radius:14px;min-height:58px;letter-spacing:1px}
+.vs .vs-opts{display:flex;align-items:center;gap:18px;min-height:32px}
+.vs .vs-sw{display:inline-flex;align-items:center;gap:8px;border:0;background:none;padding:4px 0;color:var(--ink-2);font-size:14px;white-space:nowrap}
+.vs .vs-sw i{position:relative;flex:none;width:42px;height:25px;border-radius:999px;background:var(--line-strong);transition:background .15s}
+.vs .vs-sw i span{position:absolute;top:2.5px;left:2.5px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .15s}
+.vs .vs-sw.on{color:var(--ink);font-weight:600}.vs .vs-sw.on i{background:var(--accent)}.vs .vs-sw.on i span{transform:translateX(17px)}
+.vs .vs-cam{display:inline-flex;align-items:center;gap:5px;border:0;background:none;color:var(--accent);font-size:14px;padding:4px 0;white-space:nowrap}.vs .vs-cam svg{width:18px;height:18px}
+.vs .vs-cam:disabled{opacity:.5}.vs .vs-tip{font-size:12px;color:var(--ink-2);line-height:1.5}
+.vs .vs-bottom{position:sticky;bottom:0;display:flex;flex-direction:column;gap:9px;padding:10px 16px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);box-shadow:0 -4px 16px rgba(20,28,58,.06)}
+.vs .vs-go{width:100%;display:flex;gap:10px;align-items:center;justify-content:center;border:0;background:var(--accent);color:#fff;font-size:19px;font-weight:800;border-radius:14px;min-height:58px;letter-spacing:1px}
 .vs .vs-go:active{background:var(--accent-strong)}.vs .vs-go:disabled{opacity:.55}
 .vs .vs-side{flex:none;width:72px;white-space:nowrap;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:1px solid var(--line-strong);background:var(--bg);color:var(--ink-2);border-radius:14px;font-size:13px;font-weight:600}
 .vs .vs-side small{font-size:11.5px;font-weight:400}.vs .vs-side.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
