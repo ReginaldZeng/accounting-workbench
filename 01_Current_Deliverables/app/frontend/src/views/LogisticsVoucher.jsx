@@ -9,8 +9,10 @@
 // V2.800 装订用(用户 2026-10-05「批量生成了就没人在付款单上写凭证号，装订的同事不好区分」)：已写金蝶的请款单打两样东西——
 //   《装订对照清单》(按主体×凭证月份分页、按凭证号排：凭证号/付款日/供应商/金额/钉钉审批编号/金蝶付款单号/发票/更正单/勾选栏)
 //   和《凭证号贴条》(一页 21 个，剪下贴在纸质付款单右上角，免手抄)。数据就是列表里的做账记录，不另取数。
-import React, { useEffect, useMemo, useState } from 'react'
-import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred } from '../api.js'
+// V2.801 扫码查凭证(用户「扫描那个付款单二维码，就知道是什么凭证、哪个主体」)：扫码枪扫纸质付款单右上角的钉钉二维码(或输审批编号)
+//   → 大字显示 主体 + 凭证号；本次扫过的列在下面(重复扫会标)，可读出来。只读。
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan } from '../api.js'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
@@ -263,6 +265,67 @@ function printHtml(title, css, html) {
   if (html) setTimeout(() => w.print(), 300)
 }
 
+// 扫码查凭证：扫码枪像键盘一样把二维码内容打进输入框再回车；输入框一直占着焦点，扫一张出一张。
+function ScanBox({ onClose }) {
+  const [v, setV] = useState('')
+  const [cur, setCur] = useState(null)        // 最近一次结果
+  const [busy, setBusy] = useState(false)
+  const [hist, setHist] = useState([])        // 本次扫过的(新的在前)
+  const [say, setSay] = useState(false)
+  const ref = useRef(null)
+  const focus = () => { if (ref.current) ref.current.focus() }
+  useEffect(focus, [])
+  const speak = t => { try { if (say && window.speechSynthesis) { window.speechSynthesis.cancel(); window.speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(t), { lang: 'zh-CN', rate: 1.1 })) } } catch { /* 没有语音就算了 */ } }
+  const go = () => {
+    const code = v.trim()
+    if (!code || busy) return
+    setBusy(true); setV('')
+    voucherScan(code).then(r => {
+      const dup = r.ok && hist.some(h => h.inst === r.inst)
+      setCur({ ...r, dup })
+      if (r.ok) {
+        if (!dup) setHist(h => [{ ...r, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) }, ...h])
+        const a = (r.vouchers || [])[0]
+        speak(a ? `${dup ? '重复，' : ''}${a.subject}，记 ${a.vno}` : '还没做账')
+      } else speak('没查到')
+    }).catch(e => setCur({ ok: false, msg: e.message })).finally(() => { setBusy(false); setTimeout(focus, 30) })
+  }
+  const bySubj = {}
+  hist.forEach(h => { const k = (h.vouchers || [])[0] ? h.vouchers[0].subject : '还没做账'; bySubj[k] = (bySubj[k] || 0) + 1 })
+  return (
+    <div className="lv-mask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="lv-dlg lv-scan" role="dialog" aria-label="扫码查凭证" onClick={focus}>
+        <div className="lv-dh"><div className="lv-title"><b>扫码查凭证</b><span className="sep">·</span>扫付款单右上角的二维码，看它是哪个主体、哪张凭证</div>
+          <button className="lv-x" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="sc-in">
+          <input ref={ref} value={v} onChange={e => setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') go() }}
+            placeholder="用扫码枪扫付款单右上角的二维码；没有扫码枪就输 20 位审批编号再回车" autoComplete="off" spellCheck={false} />
+          <button className="btn btn-pri" disabled={busy || !v.trim()} onClick={go}>{busy ? '查询中…' : '查'}</button>
+          <label className="sc-say"><input type="checkbox" checked={say} onChange={e => setSay(e.target.checked)} /> 读出来</label>
+        </div>
+        {!cur && <div className="sc-hint">扫码枪要在英文输入法下用。光标停在上面的框里，扫一张出一张，不用点鼠标。</div>}
+        {cur && !cur.ok && <div className="sc-res bad"><div className="sc-big">没查到</div><div>{cur.msg}</div></div>}
+        {cur && cur.ok && <div className={'sc-res ' + ((cur.vouchers || []).length ? 'ok' : 'warn')}>
+          {(cur.vouchers || []).length ? cur.vouchers.map((x, i) => <div key={i} className={'sc-v' + (i ? ' more' : '')}>
+            <span className="sc-subj">{x.subject || '主体未知'}</span><span className="sc-big">记-{x.vno}</span>
+            <span className="sc-mon">{ymCn(x.month)}</span><span className="dim">{x.what}{x.src === '金蝶已有' ? ' · 金蝶已有（不是本系统写的）' : ''}</span></div>)
+            : <div className="sc-big">{cur.state}</div>}
+          <div className="sc-meta">{cur.dup && <b className="bad">这张刚才扫过了　</b>}{cur.kind} · {cur.payee}{cur.amount != null && <> · <b className="mono">{money(cur.amount)}</b></>}
+            {cur.bid && <> · 审批 <span className="mono">{cur.bid}</span></>}{(cur.vouchers || [])[0]?.bill_no && <> · 付款单 <span className="mono">{cur.vouchers[0].bill_no}</span></>}
+            {cur.n_adjust > 0 && <b className="warn">　附计提更正单</b>}{cur.has_xred && <b className="warn">（两张：① 红冲 ② 补提）</b>}</div>
+        </div>}
+        <div className="lv-sec">本次已扫 <span className="dim">{hist.length} 张{Object.keys(bySubj).length > 0 && '：' + Object.entries(bySubj).map(([k, n]) => `${k} ${n}`).join(' · ')}</span>
+          <span style={{ flex: 1 }} />{hist.length > 0 && <button className="lnk" onClick={() => { setHist([]); setCur(null) }}>清空</button>}</div>
+        <table className="lv-t"><thead><tr><th style={{ width: 40 }}>#</th><th style={{ width: 110 }}>主体</th><th style={{ width: 110 }}>凭证号</th><th style={{ width: 90 }}>凭证月份</th><th>供应商</th><th className="num" style={{ width: 120 }}>金额</th><th style={{ width: 80 }}>时间</th></tr></thead>
+          <tbody>{hist.map((h, i) => { const a = (h.vouchers || [])[0]; return <tr key={h.inst}>
+            <td className="dim">{hist.length - i}</td><td>{a ? a.subject : '—'}</td><td className="mono"><b>{a ? '记-' + a.vno : '还没做账'}</b>{(h.vouchers || []).length > 1 && <span className="dim"> +{h.vouchers.length - 1}</span>}</td>
+            <td>{a ? ymCn(a.month) : ''}</td><td>{h.payee}</td><td className="num">{money(h.amount)}</td><td className="dim">{h.at}</td></tr> })}
+            {!hist.length && <tr><td colSpan="7" className="lv-empty">还没扫</td></tr>}</tbody></table>
+      </div>
+    </div>
+  )
+}
+
 function Detail({ inst, onClose, onChanged }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -443,6 +506,7 @@ export default function LogisticsVoucher() {
   const [run, setRun] = useState(null)          // 批量进度 {i, n, cur, done:[{inst, label, ok, msg, vno}]}
   const [kf, setKf] = useState('')
   const [bm, setBm] = useState('')              // 装订打印的凭证月份，空=最新一个月
+  const [scan, setScan] = useState(false)       // 扫码查凭证弹窗
   const load = () => voucherList().then(r => {
     const rs = r.rows || []
     setRows(rs); setErr('')
@@ -507,6 +571,7 @@ export default function LogisticsVoucher() {
           <button className={'lv-chip' + (!f ? ' on' : '')} onClick={() => setF('')}>全部<b>{(rows || []).length}</b></button>
           <span style={{ flex: 1 }} />
           <input type="search" placeholder="搜承运商/主体/审批编号" value={q} onChange={e => setQ(e.target.value)} />
+          <button className="btn" title="用扫码枪扫纸质付款单右上角的二维码，看它是哪个主体、哪张凭证（装订用）" onClick={() => setScan(true)}>扫码查凭证</button>
           <button className="btn" onClick={load}>刷新</button>
         </div>
         <div className="lv-bar">
@@ -591,6 +656,7 @@ export default function LogisticsVoucher() {
         </table></div>
       </div>
       {open && <Detail inst={open} onClose={() => setOpen(null)} onChanged={load} />}
+      {scan && <ScanBox onClose={() => setScan(false)} />}
     </div>
   )
 }
@@ -630,6 +696,14 @@ const CSS = `
 .lv .lv-meta{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin:10px 0}
 .lv .lv-ovr{color:var(--amber)}.lv .lnk{border:0;background:none;color:var(--accent);cursor:pointer;font:inherit;font-size:12px;margin-left:6px}
 .lv .lv-kind{font-size:13px;margin:6px 0}
+.lv .lv-scan{max-width:900px}.lv .sc-in{display:flex;gap:10px;align-items:center;margin:10px 0}
+.lv .sc-in input[type=text],.lv .sc-in input:not([type]){flex:1;font:inherit;font-size:15px;padding:10px 12px;border:2px solid var(--accent);border-radius:9px;background:var(--bg);color:var(--ink)}
+.lv .sc-say{display:inline-flex;gap:5px;align-items:center;font-size:12.5px;color:var(--ink-2);white-space:nowrap}.lv .sc-hint{color:var(--ink-2);font-size:12.5px;padding:18px 4px}
+.lv .sc-res{border-radius:12px;padding:16px 20px;margin:6px 0 4px;border:1px solid var(--line)}.lv .sc-res.ok{background:var(--green-bg);border-color:var(--green-line)}
+.lv .sc-res.warn{background:var(--amber-bg);border-color:var(--amber-line)}.lv .sc-res.bad{background:var(--red-bg);border-color:var(--red-line);color:var(--red)}
+.lv .sc-v{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}.lv .sc-v.more{margin-top:6px;opacity:.85}.lv .sc-subj{font-size:26px;font-weight:700}
+.lv .sc-big{font-size:38px;font-weight:800;line-height:1.15}.lv .sc-res.warn .sc-big,.lv .sc-res.bad .sc-big{font-size:24px}.lv .sc-mon{font-size:16px;font-weight:600}
+.lv .sc-meta{margin-top:8px;font-size:12.5px;color:var(--ink-2)}.lv .sc-meta .warn{color:var(--amber)}
 .lv .lv-batch select{font:inherit;font-size:12.5px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
 .lv .lv-batch+.lv-batch{margin-top:6px}
 .lv .lv-batch{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);font-size:12.5px}

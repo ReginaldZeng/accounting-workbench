@@ -613,6 +613,7 @@ def _post(inst, user):
     sub_err = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["GL_VOUCHER", json.dumps({"Ids": str(vid)})]).json())
     m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
     rec = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book, "at": _now(), "by": user,
+           "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
            "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2,
            "submitted": not sub_err, "submit_err": sub_err, "status": m2.get("DocumentStatus")}
     # 这张凭证合进了复核台登记的哪几笔计提更正（与 _preview_data 同口径：只算挂在这次用到的计提凭证上的）
@@ -719,6 +720,94 @@ def _post_xred(inst, user, d=None, s=None, conf=None):
         steps.append("%s 红冲凭证 记-%s 已建（%s，冲 %s %.2f）%s" % (x["short"], xred[key]["vno"], date, x["ref"], x["gross"],
                                                         "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err))
     return steps
+
+
+# ---------- 扫付款单二维码查凭证（V2.801，用户 2026-10-05「扫描那个付款单二维码，就知道是什么凭证、哪个主体」）----------
+# 纸质付款单右上角的二维码是钉钉审批单链接：解析出审批实例号 → 请款单 → 做账记录里的凭证号。只读，不建票夹、不拉附件。
+# 不是物流请款单的，退一步看发票管家票夹里同步到的凭证号(那边定时从金蝶凭证摘要里认发票号)。
+_SCAN_CACHE = {}
+
+
+def _scan_lookup(code):
+    from kernels import invoice_parse as ip, invoice_dingtalk as idt
+    c = ip.classify_code(code or "")
+    iid = ""
+    if c["kind"] == "approval_link":
+        iid = _SCAN_CACHE.get(c["value"]) or ""
+        if not iid:
+            rl = idt.resolve_link(c["value"])
+            if not rl.get("ok"):
+                return {"ok": False, "msg": rl.get("msg") or "这个二维码没解析出审批单"}
+            iid = _SCAN_CACHE[c["value"]] = rl["procInstId"]
+    elif c["kind"] == "business_id":
+        with db._engine.connect() as cx:
+            row = cx.execute(select(PR.c.inst_id).where(PR.c.business_id == c["value"])).first()
+            if not row:
+                row = cx.execute(text("select inst_id from inv_folder where business_id=:b order by id desc limit 1"), {"b": c["value"]}).first()
+        iid = (row[0] if row else "") or ""
+        if not iid:
+            return {"ok": False, "msg": "系统里没有审批编号 %s 的单子（不是物流请款单，发票管家也没收过它的票）" % c["value"]}
+    elif c["kind"] == "invoice_qr":
+        return {"ok": False, "msg": "这是发票上的二维码：请扫付款单（审批单）右上角那个"}
+    else:
+        return {"ok": False, "msg": "没认出这个码：请扫付款单右上角的二维码，或输入 20 位审批编号"}
+    with db._engine.connect() as cx:
+        r = cx.execute(select(PR).where(PR.c.inst_id == iid)).mappings().first()
+    f2s = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or [])}
+    folder, invs = _invoices(iid)
+    synced = []                                   # 发票管家同步到的凭证：[{book, period, number}]
+    for i in invs:
+        for v in i.get("vouchers") or []:
+            if isinstance(v, dict) and v.get("number"):
+                k = {"subject": f2s.get(v.get("book")) or v.get("book") or "", "month": str(v.get("period") or "")[:7],
+                     "vno": str(v["number"]).replace("记-", "").replace("记", ""), "what": "金蝶凭证", "src": "金蝶已有"}
+                if k not in synced:
+                    synced.append(k)
+    if not r:
+        if not folder:
+            return {"ok": False, "msg": "系统里没有这张审批单：不是物流请款单，发票管家也没收过它的票"}
+        return {"ok": True, "inst": iid, "kind": "发票管家票夹 #%s" % folder["id"], "subject": (synced[0]["subject"] if synced else ""),
+                "payee": next((i["seller"] for i in invs if i.get("seller")), ""), "amount": round(sum(i["gross"] for i in invs), 2),
+                "vouchers": synced, "state": "" if synced else "发票管家里这张单的发票还没被金蝶凭证引用（还没做账，或还没同步到）"}
+    r = dict(r)
+    pi = _paid_info(r) or {}
+    posted = (db.get_setting(_POSTED_KEY, None) or {}).get(iid)
+    vs = []
+    if posted:
+        vs.append({"subject": r.get("subject"), "month": str(pi.get("date") or posted.get("at") or "")[:7], "vno": posted.get("vno"),
+                   "what": "付款凭证", "src": "系统写入", "bill_no": posted.get("bill_no")})
+        for x in (posted.get("xred") or {}).values():
+            vs.append({"subject": x.get("short"), "month": "%s-%02d" % (x.get("year"), int(x.get("month") or 0)), "vno": x.get("vno"),
+                       "what": "红冲凭证（没有纸质付款单，只附计提更正单 ①）", "src": "系统写入"})
+    else:
+        if pi.get("voucher"):
+            vs.append({"subject": r.get("subject"), "month": str(pi.get("date") or "")[:7], "vno": str(pi["voucher"]).replace("记-", ""),
+                       "what": "支付凭证", "src": "金蝶已有"})
+        vs.extend(v for v in synced if not any(v["vno"] == o["vno"] and v["subject"] == o["subject"] for o in vs))
+    try:
+        from routers.logistics_payreq import _kd_suppliers
+        full = (_kd_suppliers().get("code2name") or {}).get(r.get("sup_code"))
+    except Exception:
+        full = None
+    st = "booked" if posted else _status(r, folder, invs, {})
+    return {"ok": True, "inst": iid, "kind": "物流请款单", "bid": r.get("business_id"), "subject": r.get("subject"),
+            "payee": full or r.get("payee") or r.get("carrier"), "code": r.get("sup_code"), "amount": r.get("amount"), "period": r.get("period") or "",
+            "applicant": r.get("applicant"), "paid": pi.get("date") or "", "vouchers": vs,
+            "n_adjust": (posted or {}).get("n_adjust"), "has_xred": bool((posted or {}).get("xred")),
+            "state": "" if vs else "这张还没做账（%s）" % (ST_CN.get(st) or st)}
+
+
+@router.post("/api/logistics-voucher/scan")
+async def scan_lookup(request: Request):
+    """扫付款单右上角的二维码(或输审批编号) → 哪个主体、哪张凭证。只读。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    from starlette.concurrency import run_in_threadpool
+    try:
+        return await run_in_threadpool(_scan_lookup, str(b.get("code") or "")[:600])
+    except Exception as e:
+        return {"ok": False, "msg": "查询出错：%s" % str(e)[:160]}
 
 
 @router.post("/api/logistics-voucher/post-xred")
