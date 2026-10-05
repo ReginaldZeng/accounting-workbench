@@ -108,6 +108,7 @@ class WorkerOfficeTests(unittest.TestCase):
             c.execute(update(ws.worker_run).where(ws.worker_run.c.summary == "两个多月前的").values(ts=old))
         k = ws.roster()["kpi"]
         self.assertEqual((k["on"], k["monthN"], k["err"], k["down"]), (2, 13, 0, 0))
+        self.assertEqual((k["monthRuns"], k["todayRuns"]), (3, 3))      # 干活次数：一笔记录算一次（两个多月前那笔不算）
         self.assertEqual(self._desk("payreq")["monthN"], 5)
 
     def test_static_desk_and_provider(self):
@@ -166,7 +167,7 @@ class WorkerOfficeTests(unittest.TestCase):
         ws.beat("todo_check", next_in="不是数字")            # 入参再怪也不往外抛
         self.assertEqual(self._desk("todo_check")["nextTs"], "")
         # 只有按钟点跑的算定时任务（汇率、催票）；每隔二十分钟去看一眼的是巡检，大屏不把它们排进定时任务
-        self.assertEqual(sorted(x["key"] for x in ws.roster()["desks"] if x.get("sched")), ["bp_flash", "bp_sentinel", "fx", "inv_remind"])
+        self.assertEqual(sorted(x["key"] for x in ws.roster()["desks"] if x.get("sched")), ["bp_ads", "bp_flash", "bp_sentinel", "fx", "inv_remind"])
 
     def _bp(self, runs=None, env_on=True, running=True, flash_on=True):
         # 一份 BP「系统设置 › 定时任务」接口的样子（照它 routers/ops.py schedule_get 的返回写的）
@@ -186,7 +187,7 @@ class WorkerOfficeTests(unittest.TestCase):
             c.execute(delete(ws.worker_next))
         old = {"flash-week": {"lastKey": "2026-09-28 09:10", "status": "ok", "note": "39周 → 3/3 个目标已推"}}
         seen = bp.sync(self._bp(old), None)                 # 第一次连上：只记进度，不把以前跑的补记成刚干完
-        self.assertEqual(seen, {"flash-week": "2026-09-28 09:10|ok"})
+        self.assertEqual(seen, {"flash-week": "2026-09-28 09:10|ok", "sentinel-am": "", "sentinel-pm": "", "flash-quarter": ""})
         r = ws.roster()
         self.assertEqual([f for f in r["feed"] if f["key"].startswith("bp_")], [])
         self.assertEqual((self._desk("bp_sentinel")["status"], self._desk("bp_flash")["status"]), ("ok", "ok"))
@@ -208,6 +209,45 @@ class WorkerOfficeTests(unittest.TestCase):
         n = len(ws.runs("bp_flash")["runs"])
         self.assertEqual(bp.sync(self._bp(runs), seen), seen)   # 同一份结果再读一遍：不重复记
         self.assertEqual(len(ws.runs("bp_flash")["runs"]), n)
+
+    def test_bp_ads_desk_keeps_money_off_the_screen_and_patrol_out_of_the_schedule(self):
+        # 投放数据员：千川拉数 / 投放ROI快报重建 / 推送是定时任务；千川实时预警是巡检（不进定时排队、正常的一轮不记账）。
+        # 重建的备注里有投放金额和 ROI——大屏、干活记录、出错原文里都不许出现。
+        import office_bp_bridge as bp
+        with db._engine.begin() as c:
+            c.execute(delete(ws.worker_next))
+        ev = {"type": "weekly", "dows": [1, 2, 3, 4, 5, 6, 7]}
+        jobs = [{"id": "qianchuan-pull", "kind": "qianchuan", "name": "千川数据 · 每日拉取", "time": "08:00", "when": ev, "enabled": True, "nextDue": "2026-10-06 08:00"},
+                {"id": "adroi-daily", "kind": "adroi", "name": "投放ROI快报 · 每日重建当月", "time": "08:40", "when": ev, "enabled": True, "nextDue": "2026-10-06 08:40"},
+                {"id": "adroi-push", "kind": "adroipush", "name": "投放ROI快报 · 定时推送", "time": "08:50", "when": ev, "enabled": True, "nextDue": "2026-10-06 08:50"},
+                {"id": "qc-watch", "kind": "qcwatch", "name": "千川实时预警（余额 / 爆量）", "time": "08:05", "enabled": True, "nextDue": "2026-10-05 13:05",
+                 "when": {"type": "interval", "every": 30, "start": "08:05", "end": "23:35", "dows": [1, 2, 3, 4, 5, 6, 7]}},
+                {"id": "x-new", "kind": "somethingnew", "name": "BP 以后加的新任务", "time": "07:00", "when": ev, "enabled": True, "nextDue": "2026-10-06 07:00"}]
+        sch = {"envOn": True, "running": True}
+        old = {"qianchuan-pull": {"lastKey": "2026-10-05 08:00", "status": "ok", "note": "3/3 账户、128 行"},
+               "adroi-daily": {"lastKey": "2026-10-05 08:40", "status": "failed", "note": "10-01~10-04 投放 12.34 万 · ROI 2.15 · 要处理 3 条；告警 1 条：某某"},
+               "qc-watch": {"lastKey": "2026-10-05 12:35", "status": "ok", "note": "余额 5.6 万，正常"}}
+        # 办公室以前只认识值守和快报：这四条是刚接进来的，今天早上已经跑过的不补记
+        seen = bp.sync({"jobs": jobs, "runs": old, "scheduler": sch}, {"flash-week": "2026-09-28 09:10|ok"})
+        self.assertEqual([f for f in ws.roster()["feed"] if f["key"] == "bp_ads"], [])
+        self.assertEqual(self._desk("bp_ads")["status"], "ok")
+        q = [(x["name"], x["cadence"], x["sched"]) for x in ws.roster()["queue"] if x["key"] == "bp_ads"]
+        self.assertEqual(q, [("千川实时预警", "08:05–23:35 每 30 分钟", False), ("千川数据拉取", "每天 08:00", True),
+                             ("投放ROI快报 · 重建", "每天 08:40", True), ("投放ROI快报 · 推送", "每天 08:50", True)])
+        new = {"qianchuan-pull": {"lastKey": "2026-10-06 08:00", "status": "ok", "note": "3/3 账户、131 行"},
+               "adroi-daily": {"lastKey": "2026-10-06 08:40", "status": "failed", "note": "10-01~10-05 投放 15.67 万 · ROI 2.08 · 要处理 4 条；告警 2 条：某某"},
+               "adroi-push": {"lastKey": "2026-10-06 08:50", "status": "ok", "note": "10-01~10-05 完整版 → 2/2 个对象已推"},
+               "qc-watch": {"lastKey": "2026-10-06 08:05", "status": "ok", "note": "余额 4.9 万，正常"}}
+        seen = bp.sync({"jobs": jobs, "runs": new, "scheduler": sch}, seen)
+        texts = [r["summary"] for r in ws.runs("bp_ads", show_error=True)["runs"]]
+        self.assertEqual(sorted(texts), sorted(["千川数据已拉取 3/3 个账户", "投放ROI快报已重建，要处理 4 条，有 2 条告警", "投放ROI快报已推 2/2 个对象"]))
+        everything = str(ws.roster()) + str(ws.runs("bp_ads", show_error=True))
+        for money in ("15.67", "2.08", "4.9 万", "12.34"):
+            self.assertNotIn(money, everything)
+        self.assertEqual(self._desk("bp_ads")["status"], "err")          # 重建有告警 → 上一轮出错
+        bad = dict(new, **{"qc-watch": {"lastKey": "2026-10-06 08:35", "status": "failed", "note": "Traceback …"}})
+        bp.sync({"jobs": jobs, "runs": bad, "scheduler": sch}, seen)     # 巡检出错才记一笔
+        self.assertEqual(ws.runs("bp_ads")["runs"][0]["summary"], "千川实时预警这一轮没查成")
 
     def test_bp_scheduler_off_or_jobs_disabled_is_off_not_down(self):
         import office_bp_bridge as bp

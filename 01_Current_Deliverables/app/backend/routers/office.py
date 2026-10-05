@@ -9,6 +9,7 @@
 #       谁走过去都能用那个账号。大屏口令只能读这一张脱敏的值班表，别的什么都干不了，丢了也只是让人看到件数。
 #   · GET/POST /api/office/screen-token   主管理员：看 / 生成 / 换一个 / 停用大屏口令（换了旧链接立刻失效，留痕）。
 #   口令没生成过＝空＝大屏通道整个关着，不是默认放行（同取件令牌的规矩）。
+import os
 import secrets
 
 from fastapi import APIRouter, Request
@@ -32,6 +33,22 @@ def screen_token_ok(request):
     return bool(tok) and secrets.compare_digest(request.headers.get("X-Office-Token", ""), tok)
 
 
+_STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
+
+
+def _page_stamp():
+    """大屏页面和图片最后改动的时间戳。大屏每次取数带回去，变了就自己重新加载——上线后不用再去那台电脑上手动刷新。
+    看文件改动时间而不是版本号：只改了页面没改后端的上线不会重启后端，版本号是启动时算的，会漏。"""
+    try:
+        m = os.path.getmtime(os.path.join(_STATIC, "office-screen.html"))
+        art = os.path.join(_STATIC, "office-art")
+        for f in os.listdir(art):
+            m = max(m, os.path.getmtime(os.path.join(art, f)))
+        return str(int(m))
+    except Exception:
+        return ""
+
+
 @router.get("/api/office/roster")
 def office_roster(request: Request):
     u = _current_user(request)
@@ -44,7 +61,7 @@ def office_roster(request: Request):
 def office_screen(request: Request):
     if not screen_token_ok(request):
         return JSONResponse({"ok": False, "msg": "大屏链接已失效，请主管理员在数字员工办公室里重新生成"}, status_code=401)
-    return {"ok": True, "canManage": False, **ws.roster()}
+    return {"ok": True, "canManage": False, "page": _page_stamp(), **ws.roster()}
 
 
 @router.get("/api/office/runs")

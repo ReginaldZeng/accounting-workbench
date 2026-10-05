@@ -89,6 +89,8 @@ DESKS = [
      "cadence": "工作日 09:00、每天 14:00", "stale_min": 10, "handoff": "财务 BP", "unit": "次", "sched": True},
     {"key": "bp_flash", "zone": "经营分析组", "name": "业绩快报员", "what": "按日 / 周 / 月 / 季把业绩快报推到钉钉群",
      "cadence": "日报 / 周报 / 月报 / 季报", "stale_min": 10, "handoff": "各业务群", "unit": "个群", "sched": True},
+    {"key": "bp_ads", "zone": "经营分析组", "name": "投放数据员", "what": "每天拉千川数据 → 重建投放 ROI 快报 → 推给订阅的群和人；白天每半小时看一眼千川余额和爆量",
+     "cadence": "每天 08:00 起", "stale_min": 10, "handoff": "订阅的群和人", "unit": "次", "sched": True},
     {"key": "contract", "zone": "法务组", "name": "合同预审员", "what": "钉钉合同审批发起 → 预审 → 意见贴回评论", "cadence": "审批事件",
      "stale_min": None, "handoff": "法务、财务", "unit": "份", "static_off": "还没上岗：等法务签字"},
 ]
@@ -122,11 +124,13 @@ def beat(desk, off="", next_in=None):
 
 
 def set_queue(desk, items):
-    """把这个工位接下来要跑的任务整组换掉。items＝[{job, ts(年-月-日 时:分:秒), name, cadence}]；传空列表＝清空。"""
+    """把这个工位接下来要跑的任务整组换掉。items＝[{job, ts(年-月-日 时:分:秒), name, cadence, patrol}]；传空列表＝清空。
+    patrol=True＝这条是巡检型的（隔一阵看一眼，不是几点干什么）：排队表里不算定时任务。存的时候在任务名前加个 ~ 记住它，
+    不为这一个标记去改已经上线的表。"""
     try:
         rows, seen = [], set()
         for it in items or []:
-            job, ts = str(it.get("job") or "")[:40], str(it.get("ts") or "")[:19]
+            job, ts = (("~" if it.get("patrol") else "") + str(it.get("job") or ""))[:40], str(it.get("ts") or "")[:19]
             if not ts or job in seen:
                 continue
             datetime.strptime(ts, _FMT)                       # 格式不对的不收
@@ -213,13 +217,23 @@ def roster():
         month = {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in c.execute(
             select(worker_run.c.desk, func.sum(worker_run.c.n), func.count()).where(worker_run.c.ts >= month0)
             .group_by(worker_run.c.desk)).all()}
-        last = {}
+        last, bad_job = {}, {}
         for d in DESKS:
-            r = c.execute(select(worker_run).where(worker_run.c.desk == d["key"]).order_by(worker_run.c.id.desc()).limit(1)).mappings().first()
-            if r:
-                last[d["key"]] = dict(r)
+            rs = c.execute(select(worker_run).where(worker_run.c.desk == d["key"]).order_by(worker_run.c.id.desc()).limit(40)).mappings().all()
+            if rs:
+                last[d["key"]] = dict(rs[0])
+                # 一个工位管好几条任务的（trigger 里用 # 带了任务名，如「定时#adroi-daily」）：每条任务各看自己最近一次，
+                # 有一条最近一次没干成，这个工位就算「有出错」——不能因为后面另一条任务干成了就把前一条的错盖掉。
+                seen_job = set()
+                for r in rs:
+                    job = str(r["trigger"] or "").partition("#")[2]
+                    if job and job not in seen_job:
+                        seen_job.add(job)
+                        if not r["ok"]:
+                            bad_job[d["key"]] = True
         since = c.execute(select(func.min(worker_run.c.ts))).scalar() or ""
         today_n = int(c.execute(select(func.sum(worker_run.c.n)).where(worker_run.c.ts >= now.strftime("%Y-%m-%d 00:00:00"))).scalar() or 0)
+        today_runs = int(c.execute(select(func.count()).select_from(worker_run).where(worker_run.c.ts >= now.strftime("%Y-%m-%d 00:00:00"))).scalar() or 0)
         recent = c.execute(select(worker_run).order_by(worker_run.c.ts.desc(), worker_run.c.id.desc()).limit(14)).mappings().all()
     waiting = _waiting_by_scene()
     desks, queue = [], []
@@ -238,7 +252,7 @@ def roster():
                 idle = 0
             if d["stale_min"] and idle > d["stale_min"]:
                 status, text = "down", "%s没动静" % _ago_text(idle)
-            elif lr and not lr["ok"]:
+            elif (lr and not lr["ok"]) or bad_job.get(d["key"]):
                 status, text = "err", "上一轮出错了"
             else:
                 status, text = "ok", "正常"
@@ -258,7 +272,7 @@ def roster():
         if status in ("ok", "err"):          # 定时任务排队：在岗的才排；一个工位可以有好几条
             for r in nexts.get(d["key"]) or []:
                 queue.append({"key": d["key"], "desk": d["name"], "name": r.get("name") or d["name"], "cadence": r.get("cadence") or d["cadence"],
-                              "nextTs": r["ts"], "sched": bool(d.get("sched"))})
+                              "nextTs": r["ts"], "sched": bool(d.get("sched")) and not str(r.get("job") or "").startswith("~")})
     queue.sort(key=lambda q: q["nextTs"])
     for p in PROVIDERS:
         try:
@@ -277,6 +291,8 @@ def roster():
             "kpi": {"on": len(on), "total": len(desks), "todayN": today_n, "down": sum(1 for x in desks if x["status"] == "down"),
                     "off": sum(1 for x in desks if x["status"] == "off"),
                     "monthN": sum(x["monthN"] or 0 for x in desks),
+                    # 干活次数（一笔干活记录算一次）：各工位的件数单位不一样（张、条、次、个群），加在一起没意义，大屏汇总用次数
+                    "todayRuns": today_runs, "monthRuns": sum(x["monthRuns"] or 0 for x in desks),
                     "waiting": sum(x["waiting"] or 0 for x in desks),
                     "err": sum(1 for x in desks if x["status"] == "err")}}
 
@@ -308,7 +324,7 @@ def runs(desk, limit=60, show_error=False):
             "beatAt": _short(b["ts"], now) if b else "", "off": (b or {}).get("off") or "",
             "runs": [{"at": _short(r["ts"], now), "ok": bool(r["ok"]), "n": r["n"] or 0, "summary": r["summary"] or "",
                       "error": (r["error"] or "") if show_error else ("" if r["ok"] else "出错原因只有管理员能看"),
-                      "trigger": r["trigger"] or "", "refs": _refs_l(r.get("refs"))} for r in rows]}
+                      "trigger": str(r["trigger"] or "").partition("#")[0], "refs": _refs_l(r.get("refs"))} for r in rows]}
 
 
 def purge(keep_days=400):
