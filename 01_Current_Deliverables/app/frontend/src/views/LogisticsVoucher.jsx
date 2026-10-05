@@ -608,7 +608,8 @@ function PickAccruals({ inst, onSaved, onClose }) {
           onChange={e => setAmt(o => ({ ...o, [k]: e.target.value }))} />
           {Math.abs(diff) >= 0.005 && <button className="lnk" title="把和发票的差额全放到这一张上" onClick={() => setAmt(o => ({ ...o, [k]: String(r2(val(c) + diff)) }))}>补差</button>}</> : <span className="dim">—</span>}</td>
         <td>{pct(c.rate)}</td>
-        <td>{c.used ? <span className="dim">已被 {c.used} 核销 / 红冲</span> : c.other ? <span className="dim">已被另一张请款单选走</span> : c.suggest ? <span className="ok">建议（金额正好配上）</span> : <span className="dim">没用过</span>}</td></tr> })}
+        <td>{c.used ? <span className="dim">已被 {c.used} 核销 / 红冲</span> : c.other ? <span className="dim">已被另一张请款单选走</span> : c.suggest ? <span className="ok">建议（金额正好配上）</span> : <span className="dim">没用过</span>}
+          {c.direct && <div className="warn" title="摘要是「××提起支付…」、不是「计提…」：没走计提，审批后直接做的费用凭证">直接做账的费用凭证</div>}</td></tr> })}
         {!d.cands.length && <tr><td colSpan="8" className="lv-empty">这几个月金蝶里没有这家的计提</td></tr>}
         <tr className="tot"><td colSpan="4">已选 {sel.length} 张　发票合计 {money(d.inv_total)}</td><td className="num">{money(r2(sel.reduce((s, c) => s + c.gross, 0)))}</td><td className="num">{money(sum)}</td><td colSpan="2">{Math.abs(diff) < 0.005
           ? <span className="ok">和发票正好对上 ✓</span> : <span className="bad">和发票差 {money(diff)}（{diff > 0 ? '计提少' : '计提多'}）</span>}</td></tr></tbody></table>
@@ -731,7 +732,8 @@ function Detail({ inst, onClose, onChanged }) {
             <thead><tr><th>凭证</th><th>费用项目</th><th className="num">含税</th><th>税率</th><th className="num">暂估税</th><th>处理</th></tr></thead>
             <tbody>
               {d.accruals.map(a => <tr key={a.vno} title={a.expl}>
-                <td className="mono">{a.month}/{a.vno}#{a.from && <div className="dim" style={{ fontFamily: 'inherit' }}>在{a.from}账上</div>}</td><td>{a.fee || '—'}</td>
+                <td className="mono">{a.month}/{a.vno}#{a.from && <div className="dim" style={{ fontFamily: 'inherit' }}>在{a.from}账上</div>}
+                  {a.direct && <div className="dim" style={{ fontFamily: 'inherit' }}>直接做账</div>}</td><td>{a.fee || '—'}</td>
                 <td className="num">{money(a.gross)}</td>
                 <td className="nw">{a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate)}</td>
                 <td className="num">{money(a.tax)}</td>

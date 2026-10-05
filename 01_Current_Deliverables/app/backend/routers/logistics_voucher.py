@@ -177,8 +177,16 @@ def _s(v):
     return str(v or "").strip()
 
 
+def _is_direct(z, credit):
+    """不走计提、直接做的费用凭证的应付行：贷 2241 挂供应商，摘要是「××提起支付…」而不是「计提…」
+    (实证 禾享 新加坡样品运费：深圳星期零 5月记-155 陈梓华、9月记-196 曾禹锡——借 6601 快递费 + 进项税 / 贷 2241.02；付款时另一张凭证「核销5/155#…」借 2241 贷银行)。
+    V2.831(用户 2026-10-05「禾享不属于计提，我们应该是直接做账了」)：这种凭证和计提凭证一样可以被请款单选定核销。"""
+    z = _s(z)
+    return "提起支付" in z and "计提" not in z and float(credit or 0) > 0 and not any(k in z for k in ("红冲", "更正", "核销", "冲回", "冲销"))
+
+
 def _accruals(book, period, sup_code):
-    """本期挂该供应商的计提凭证(整张分录) → ([acc_voucher], 提示)。10 分钟缓存。"""
+    """本期挂该供应商的计提凭证(整张分录；直接做账的费用凭证也算，标 direct) → ([acc_voucher], 提示)。10 分钟缓存。"""
     from routers.logistics_review import _accr_is_current
     k = (book, period, sup_code)
     hit = _ACC_CACHE.get(k)
@@ -189,7 +197,8 @@ def _accruals(book, period, sup_code):
     base = "FACCOUNTBOOKID.FName='%s' and FYear=%d and FPeriod=%d" % (book.replace("'", ""), y, m)
     heads = kc._query(s, conf, "GL_VOUCHER", _F, base + " and FAccountID.FNumber like '2241%%' and FCREDIT<>0 and "
                       "FDetailID.FFLEX4.FNumber='%s'" % sup_code.replace("'", ""))
-    vnos = sorted({_s(h["号"]) for h in heads if "计提" in _s(h["摘要"]) and _accr_is_current(h["摘要"], period)}, key=lambda x: int(x) if x.isdigit() else 0)
+    direct = {_s(h["号"]) for h in heads if _is_direct(h["摘要"], h["贷"])}
+    vnos = sorted({_s(h["号"]) for h in heads if "计提" in _s(h["摘要"]) and _accr_is_current(h["摘要"], period)} | direct, key=lambda x: int(x) if x.isdigit() else 0)
     notes, out = [], []
     if vnos:
         rows = kc._query(s, conf, "GL_VOUCHER", _F, base + " and FVOUCHERGROUPNO in (%s)" % ",".join("'%s'" % v for v in vnos))
@@ -207,6 +216,8 @@ def _accruals(book, period, sup_code):
                 notes.append("记-%s 一张凭证里计提了 %d 家供应商，整张红冲会动到别家，要人工处理" % (vno, len(sups)))
                 continue
             out.append(LV.acc_voucher(vno, ls, y, m))
+            if vno in direct:
+                out[-1]["direct"] = True
     res = (out, notes)
     _ACC_CACHE[k] = (res, time.time())
     return res
@@ -520,7 +531,7 @@ def _preview_data(inst, self_vno=None):
                                 "bill_id": pi.get("bill_id") or "", "paywarn": paywarn},
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
-                          "from": (v.get("from") or {}).get("short") or "",
+                          "from": (v.get("from") or {}).get("short") or "", "direct": bool(v.get("direct")),
                           "gross_new": (pl["per"].get(v["vno"]) or {}).get("gross"),
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
                           "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
@@ -568,7 +579,7 @@ def _accrual_candidates(r, invs):
                              book.replace("'", ""), yy, sup.replace("'", "")))
         for x in rows:
             z, pp = _s(x["摘要"]), int(x["期"] or 0)
-            if "计提" in z and float(x["贷"] or 0) and not any(k in z for k in ("红冲", "更正", "核销")):
+            if ("计提" in z and float(x["贷"] or 0) and not any(k in z for k in ("红冲", "更正", "核销"))) or _is_direct(z, x["贷"]):
                 has.add((yy, pp))
             if z.startswith("核销") or z.startswith("红冲") or "核销" in z[:30]:
                 head = z.split("计提")[0]
@@ -590,7 +601,8 @@ def _accrual_candidates(r, invs):
             cands.append({"year": yy, "month": mm, "vno": v["vno"], "expl": v["expl"], "gross": v["gross"], "tax": v["tax"], "net": v["net"], "rate": v["rate"],
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
                           "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
-                          "used": used.get(k) or "", "other": bool(others.get(k)), "picked": k in mine, "to_gross": mine.get(k), "bill_month": (yy, mm) == (y, m)})
+                          "used": used.get(k) or "", "other": bool(others.get(k)), "picked": k in mine, "to_gross": mine.get(k), "bill_month": (yy, mm) == (y, m),
+                          "direct": bool(v.get("direct"))})
     # 建议：没被用过的里面，含税合计正好＝发票合计的一组(优先带上账单月的)
     inv_tot = round(sum(i["gross"] for i in invs), 2)
     free = sorted([c for c in cands if not c["used"] and not c["other"]], key=lambda c: (not c["bill_month"], c["year"], c["month"]))

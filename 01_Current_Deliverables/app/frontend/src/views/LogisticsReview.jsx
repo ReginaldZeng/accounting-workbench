@@ -35,7 +35,7 @@ const DOC_Q = [
 // 总表复核状态：已登记 > 全部主体通过 > 复核中(标过主体/写过解释/确认过单据/登记过更正) > 账单已传 > 未传账单 > 未配
 const OV_ST = { signed: ['已登记', 'ok'], allfix: ['主体全通过·计提需更正', 'bad'], allok: ['主体全通过·待登记', 'ok'], doing: ['复核中', 'warn'], billed: ['账单已就绪', 'neu'],
   billarrived: ['账单已到·待配置', 'warn'], noaccr: ['有请款·无计提', 'bad'], nobill: ['未传账单', 'neu'], nospec: ['未配', 'neu'],
-  register: ['登记制·待登记', 'neu'] }   // V2.826 登记制(路凯卡板租赁、禾享国际寄样、货拉拉)：没有可逐单核的账单，只核对计提和请款，点「登记」
+  register: ['登记制·待登记', 'neu'], regnoacc: ['登记制·还没认到费用凭证', 'warn'] }   // V2.826 登记制(路凯卡板租赁、禾享国际寄样、货拉拉)：没有可逐单核的账单，只核对计提和请款，点「登记」
 // 钉钉请款单(V2.730)：进度标颜色 / 总表筛选 / 附件角色 / 账单导入状态 / 月份怎么认出来的
 const DT_CLS = { mine: 'dtmine', run: 'dtrun', agreed: 'dtok', paid: 'dtpaid', void: 'dtvoid' }
 const DT_F = [['dt:mine', '待我审批', 'warn', r => r.dt && r.dt.mine], ['dt:any', '已提交请款', 'neu', r => r.dt && r.dt.n], ['dt:paid', '已付款', 'ok', r => r.dt && r.dt.paid]]
@@ -730,7 +730,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     return [
                       <td key={s + 'a'} className={'num' + mc} title={mt}>{cc.accr ? money(cc.accr) : ''}
                         {(cc.xm || []).map((x, i) => <div key={i} className="xmn" title="付款做账里选定的跨月核销：复核按「一张请款单 + 它核销的计提」看">
-                          {x.dir === 'in' ? `含 ${Number(String(x.month).slice(5))} 月 记-${x.vno} ${money(x.amt)}` : `已减 记-${x.vno} ${money(x.amt)} → ${Number(String(x.month).slice(5))} 月账单`}</div>)}</td>,
+                          {x.dir === 'in' ? `含 ${Number(String(x.month).slice(5))} 月 记-${x.vno} ${money(x.amt)}${x.direct ? '（直接做账）' : ''}` : `已减 记-${x.vno} ${money(x.amt)} → ${Number(String(x.month).slice(5))} 月账单`}</div>)}</td>,
                       <td key={s + 'p'} className={'num paid' + mc} title={mt}>{cc.paid ? money(cc.paid) : ''}{cc.reqs && <div><DtChip reqs={cc.reqs} onOpen={setPr} /></div>}</td>,
                       <td key={s + 'd'} className={'num ' + (cc.diff > 0.01 ? 'diffpos' : cc.diff < -0.01 ? 'diffneg' : '') + mc} title={mt}>
                         {mk && <span className={'mkdot ' + (fix ? 'fix' : mk.status)}>{fix ? '⚠ 需更正' : mk.status === 'ok' ? '✓' : '?'}</span>}{cc.diff ? money(cc.diff) : ''}</td>
@@ -748,7 +748,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   <td>{r.register
                     ? (r.signed
                       ? <button className="btn" title="撤销这家这月的登记" onClick={() => { if (window.confirm(`撤销 ${r.carrier} ${period} 的登记？`)) reviewUnsign(r.short || r.carrier, period).then(refreshOv).catch(e => flash('撤销失败：' + e.message)) }}>撤销登记</button>
-                      : <button className="btn pri" disabled={r.status === 'noaccr'} title={r.status === 'noaccr' ? '这家这月有请款、金蝶没有计提，先处理计提' : '登记制：没有可逐单核的账单，只核对计提和请款两个数'} onClick={() => regSign(r)}>登记（不逐单）</button>)
+                      : <button className="btn pri" disabled={r.status === 'regnoacc'} title={r.status === 'regnoacc' ? '这家不计提、直接做费用凭证：先到「付款做账」这张请款单的预览里点「选择核销哪些计提」，把它的费用凭证选定，这里才有数可比' : '登记制：没有可逐单核的账单，只核对计提(或费用凭证)和请款两个数'} onClick={() => regSign(r)}>登记（不逐单）</button>)
                     : <button className="btn pri" disabled={!r.has_spec} title={r.has_spec ? '进逐笔复核' : '该承运商未配取数说明'} onClick={() => enterReview(r.short || r.carrier)}>开始复核</button>}</td>
                 </tr>)}
               {ov && ov.rows && !ov.rows.length && <tr><td colSpan="12" className="ovempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）</td></tr>}

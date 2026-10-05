@@ -190,19 +190,20 @@ def _ov_xmonth(accr, carriers, period, book2short):
         if x["bill"] != period and x["accr"] != period:
             continue
         rows, _, _ = _ov_kd_rows(x["accr"])
-        amt = sum(float(r.get("FCREDIT") or 0) for r in rows if str(r.get("FVOUCHERGROUPNO") or "").strip() == x["vno"]
-                  and str(r.get("供应商码") or "").strip() == (x["code"] or "") and book2short.get(str(r.get("账簿") or "")) == x["subject"]
-                  and "计提" in str(r.get("FEXPLANATION") or ""))
-        if not amt:
-            continue
+        mine = [r for r in rows if str(r.get("FVOUCHERGROUPNO") or "").strip() == x["vno"] and float(r.get("FCREDIT") or 0) > 0
+                and str(r.get("供应商码") or "").strip() == (x["code"] or "") and book2short.get(str(r.get("账簿") or "")) == x["subject"]]
+        amt_accr = sum(float(r["FCREDIT"]) for r in mine if "计提" in str(r.get("FEXPLANATION") or ""))
+        # 直接做账的费用凭证(摘要「××提起支付…」，不带「计提」，如禾享)：本来不算在哪个月的计提里，被账单选定后算到账单那个月；它所在的月份没东西可减
+        amt_direct = sum(float(r["FCREDIT"]) for r in mine if "计提" not in str(r.get("FEXPLANATION") or "") and "提起支付" in str(r.get("FEXPLANATION") or ""))
         key = x["code"] or x["payee"]
-        if x["bill"] == period:
-            accr[(x["subject"], key)] = accr.get((x["subject"], key), 0.0) + amt
+        if x["bill"] == period and (amt_accr or amt_direct):
+            accr[(x["subject"], key)] = accr.get((x["subject"], key), 0.0) + amt_accr + amt_direct
             carriers.setdefault(key, (x["payee"], x["code"] or ""))
-            notes.append({"key": key, "subject": x["subject"], "dir": "in", "vno": x["vno"], "month": x["accr"], "amt": round(amt, 2)})
-        else:
-            accr[(x["subject"], key)] = accr.get((x["subject"], key), 0.0) - amt
-            notes.append({"key": key, "subject": x["subject"], "dir": "out", "vno": x["vno"], "month": x["bill"], "amt": round(amt, 2)})
+            notes.append({"key": key, "subject": x["subject"], "dir": "in", "vno": x["vno"], "month": x["accr"], "amt": round(amt_accr + amt_direct, 2),
+                          "direct": bool(amt_direct)})
+        elif x["accr"] == period and amt_accr:
+            accr[(x["subject"], key)] = accr.get((x["subject"], key), 0.0) - amt_accr
+            notes.append({"key": key, "subject": x["subject"], "dir": "out", "vno": x["vno"], "month": x["bill"], "amt": round(amt_accr, 2)})
     return notes
 
 
@@ -328,7 +329,7 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
               else "nobill" if short in specs else "nospec")
         for n in _OV_XM.get(period) or []:          # 跨月核销：格子里写明这格的计提加了/减了哪张别的月份的凭证
             if n["key"] == key and n["subject"] in cells:
-                cells[n["subject"]].setdefault("xm", []).append({k: n[k] for k in ("dir", "vno", "month", "amt")})
+                cells[n["subject"]].setdefault("xm", []).append({k: n.get(k) for k in ("dir", "vno", "month", "amt", "direct")})
         out[key] = {"carrier": cf, "code": scode, "short": short, "full": cf, "has_spec": short in specs, "cells": cells,
                     "total_accr": round(tot_accr, 2), "signed": signed.get(short), "status": st, "progress": pg}
 
@@ -353,8 +354,10 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
                     cl["paid"] = round(sum(float(v.get("amount") or 0) for v in live), 2)
                     cl["diff"] = round(float(cl.get("accr") or 0) - cl["paid"], 2)
                     cl["reg"] = True
-            if not x.get("signed") and x.get("status") != "noaccr":
-                x["status"] = "register"
+            if not x.get("signed"):
+                # 登记制的多半不计提、直接做费用凭证：金蝶里没「计提」不是问题，但要在付款做账里把它的费用凭证选定了，这里才有数可比
+                has_accr = any(float(cl.get("accr") or 0) for cl in (x.get("cells") or {}).values())
+                x["status"] = "register" if has_accr else "regnoacc"
     except Exception:
         pass
     rowlist = sorted(rowlist, key=_natkey)
