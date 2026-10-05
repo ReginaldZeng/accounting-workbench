@@ -8,7 +8,7 @@
 //        每笔=产品线(产品类型·部门小字)/凭证号/含税计提(税率标签)/账单/差异/差异解释，有差异未解释的行淡红底
 //   → ② 逐单核价核量：账单每张单据核数量/重量，可手改归类
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
 import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
@@ -260,10 +260,19 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewOverview(period).then(r => { if (alive) setOv(r) }).catch(() => { if (alive) setOv(o => o || { rows: [], subjects: [] }) })
     return () => { alive = false }
   }, [period, mode])
+  useEffect(() => {
+    const j = jump.current
+    if (!j || !ov || ov.period !== j.period) return
+    jump.current = null
+    const row = (ov.rows || []).find(r => r.code === j.code)
+    if (row && row.has_spec) enterReview(row.short || row.carrier)
+  }, [ov])
   const refreshOv = () => {
     setOvBusy(true)
     reviewOverview(period, true).then(setOv).catch(e => flash('刷新失败：' + e.message)).finally(() => setOvBusy(false))
   }
+  // 「别的月份的账单」芯片：点了切到那个账期，总表回来后直接进那家的复核(V2.822，用户在 8 期找不到诚煜 6 月账单从哪进)
+  const jump = useRef(null)
   const enterReview = sc => { setCarrier(sc); setGroup('ex'); setPage(1); setStep('lines'); setPtsEdit(false); setOpen({}); setSel({}); setDfilt(null); setMode('detail') }
   // 第①步「可逐单」→ 第②步只看这一组单据
   const goDocs = od => {
@@ -682,8 +691,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <button key={v.inst} className="dtchip dtrun" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}
               {ov.payreq.unassigned.length > 8 && <span className="dim">等 {ov.payreq.unassigned.length} 张</span>}</span>}
             {(ov.payreq.other || []).length > 0 && <span className="prgrp" title="账单是别的月份、还没登记已复核的请款单：下表按「本月有计提」列承运商，它们不在里面。点一下切到账单那个月去复核">别的月份的账单
-              {ov.payreq.other.slice(0, 8).map(v => <button key={v.inst} className="dtchip dtother" title={`${v.payee} · ${v.period} 账单 · 点击切到 ${v.period} 期`}
-                onClick={() => onPeriod && onPeriod(Number(v.period.slice(0, 4)), Number(v.period.slice(5)))}>{v.carrier}·{v.subject} {money(v.amount)} · {Number(v.period.slice(5))} 月账单 →</button>)}
+              {ov.payreq.other.slice(0, 8).map(v => <button key={v.inst} className="dtchip dtother" title={`${v.payee} · ${v.period} 账单 · 点击去 ${v.period} 期复核这一家`}
+                onClick={() => { if (!onPeriod) return; jump.current = { period: v.period, code: v.code }; onPeriod(Number(v.period.slice(0, 4)), Number(v.period.slice(5))) }}>
+                {v.carrier}·{v.subject} {money(v.amount)} · {Number(v.period.slice(5))} 月账单{v.has_pay ? ' · 已付款待做账' : ''} · 去复核 →</button>)}
               {ov.payreq.other.length > 8 && <span className="dim">等 {ov.payreq.other.length} 张</span>}</span>}
             {(ov.payreq.excluded || []).length > 0 && <span className="prgrp"><span className="dim">本月已排除</span>{ov.payreq.excluded.map(v =>
               <button key={v.inst} className="dtchip dtvoid" title={v.excluded} onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}</span>}

@@ -465,14 +465,20 @@ def overview_merge(period, rows, user):
     other = []
     try:
         from routers.logistics_review import _signed
+        done = set((db.get_setting("logi_voucher_posted", None) or {}).keys())
         for r in reqs:
             p = r.get("period")
             if not p or p == period or r.get("dt_status") == "TERMINATED" or r.get("dt_result") == "refuse":
                 continue
+            # V2.822：只留还有事要办的——已经做过账的(系统写的，或金蝶里早就记了支付凭证的)不列，原来往月付完的几十张全挤在这一行，找不到要找的
+            if r["inst_id"] in done or "|gl:" in str(r.get("kd_paid") or ""):
+                continue
             if _signed(r.get("carrier"), p):
                 continue
-            other.append(req_view(r, me))
-        other.sort(key=lambda v: (v["period"], v["carrier"] or ""))
+            v = req_view(r, me)
+            v["has_pay"] = bool(r.get("kd_paid"))            # 金蝶已有付款单(待做账)的排前面
+            other.append(v)
+        other.sort(key=lambda v: (not v["has_pay"], v["period"], v["carrier"] or ""))
     except Exception:
         other = []
     by_code = {x.get("code"): x for x in rows if x.get("code")}
