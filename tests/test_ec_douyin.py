@@ -166,6 +166,18 @@ class DouyinTests(unittest.TestCase):
         todo = load_workbook(io.BytesIO(m.export(r, '抖音店')))['交人工处理']
         self.assertEqual((todo.max_row, todo['A3'].value, todo['O3'].value), (5, '钱已到账·金额对不上', '抖音结算时退了 5.00，金蝶没开红字'))
 
+    def test_refund_before_settle_takes_subsidy_back(self):
+        # 49.9 的一袋 26 小包：买家实付 28.9 + 平台补贴 21；吃了一包退 25 包 → 退买家 27.78，补贴同比例收回、只剩 0.81
+        P, Q = '6930162745589588891', '6930162745589588892'
+        settle = m.parse(settle_csv(
+            f"2026-09-28 07:54:38,'T1,入账,1.84,聚合账户,货款结算入账,巨量千川,'{P},'{P},28.9,0,0.81,-27.78,-0.09,0,0,0,订单结算",
+            f"2026-09-28 08:00:00,'T2,入账,44.00,聚合账户,货款结算入账,巨量千川,'{Q},'{Q},49.9,0,0,-5,-0.90,0,0,0,订单结算"), 'x.csv')[0]['rows']
+        bills = [bill('BP', '2026-09-22', 49.9, P), bill('BPR', '2026-09-27', -49.9, P), bill('BQ', '2026-09-22', 49.9, Q)]
+        d = m.order_detail('2026-09', settle, [], bills, P)
+        self.assertEqual(d['subsidy_back'], {'before': 21.0, 'back': 20.19, 'blue': 49.9, 'red': -49.9, 'keep': 1.93, 'red_should': -47.97})
+        self.assertEqual((d['flow_total'], d['open_total']), (1.93, 0.0))
+        self.assertIsNone(m.order_detail('2026-09', settle, [], bills, Q)['subsidy_back'])      # 没有补贴被收回：照旧一条算式
+
     def test_xlsx_reader_handles_shared_strings(self):
         import zipfile as zf
         sheet = ('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'

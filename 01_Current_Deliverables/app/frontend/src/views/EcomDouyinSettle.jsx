@@ -85,14 +85,14 @@ function OrderProof({period,shop,shopName,order,onClose}) {
   const res=useResource(`${BASE}/order?${query({period,shop,order})}`),d=res.data
   useEffect(()=>{const overflow=document.body.style.overflow;document.body.style.overflow='hidden';const key=e=>{if(e.key==='Escape')onClose()};document.addEventListener('keydown',key);return()=>{document.body.style.overflow=overflow;document.removeEventListener('keydown',key)}},[onClose])
   const body=()=>{
-    const diff=Math.round((d.open_total-d.flow_total)*100)/100,blue=d.bills.filter(b=>b.amount>0),red=d.bills.filter(b=>b.amount<0),opened=d.bills.filter(b=>b.ws!=='C')
+    const diff=Math.round((d.open_total-d.flow_total)*100)/100,blue=d.bills.filter(b=>b.amount>0),red=d.bills.filter(b=>b.amount<0),sb=d.subsidy_back,opened=d.bills.filter(b=>b.ws!=='C')
     const settleRows=d.flows.filter(f=>f.gross!=null),after=d.flows.filter(f=>f.gross==null),ships=[...new Set(d.bills.map(b=>b.ship).filter(Boolean))],merged=d.members.length>1,w=d.wdt||[]
     const v1=!d.bills.length?{c:'crit',v:'金蝶没有应收',s:'近 4 个月没找到这个订单的应收单'}:{c:'ok',v:`已开应收 ${yuan(d.ar_total)}`,s:`蓝字 ${blue.length} 张${red.length?` · 红字 ${red.length} 张`:''}`}
     const v2=!d.bills.length?{c:'na',v:'不适用',s:'没有应收单可对'}:!opened.length?{c:'ok',v:'已核销',s:`已核销 ${yuan(d.written_total)}`}:d.settled&&d.unsettled.length?{c:'warn',v:'合单没结完',s:`合单的 ${d.members.length} 个订单里还有 ${d.unsettled.length} 个没结算`}:!d.settled?{c:'warn',v:'待结算',s:`未核销 ${yuan(d.open_total)}，抖音还没结这单`}:Math.abs(diff)<0.005?{c:'ok',v:'对平 · 可核销',s:`未核销 ${yuan(d.open_total)} ＝ 流水应冲`}:{c:'crit',v:`差额 ${yuan(diff)}`,s:'金蝶未核销 ≠ 流水应冲'}
     const v3=!d.settled?{c:'warn',v:'还没到账',s:`到 ${period} 月底流水里没有这单`}:{c:after.length?'warn':'ok',v:`已到账 ${yuan(d.cash_total)}`,s:after.length?`结算后另有 ${after.length} 笔退款／调整 ${yuan(d.after_total)}`:`${d.settled_at.slice(0,16)} 结算进聚合账户`}
     const arrow1=!d.settled||!opened.length?['ec-warn',!d.settled?'待结算':'已核销']:Math.abs(diff)<0.005?['ec-ok','差 0 ✓']:['ec-diff',`差 ${money(diff)}`]
     return <>
-      <div className="ew-drawer-metrics">{[['订单金额',d.paid_total==null?null:d.paid_total+d.subsidy_total],['消费者实付',d.paid_total],['退款金额',d.settled?d.refund_total:null],['平台费用',d.settled?d.fee_total:null],['账户净收',d.settled?d.cash_total+d.after_total:null]].map(([label,value])=><div key={label}><small>{label}</small><strong>{yuan(value)}</strong></div>)}</div>
+      <div className="ew-drawer-metrics">{[['订单金额',d.paid_total==null?null:sb?sb.blue:d.paid_total+d.subsidy_total],['消费者实付',d.paid_total],[sb?'退款＋收回补贴':'退款金额',d.settled?d.refund_total+(sb?sb.back:0):null],['平台费用',d.settled?d.fee_total:null],['账户净收',d.settled?d.cash_total+d.after_total:null]].map(([label,value])=><div key={label}><small>{label}</small><strong>{yuan(value)}</strong></div>)}</div>
       <div className="ec-verdicts">{[['收入确认',v1],['应收核对',v2],['收款核对',v3]].map(([lab,v])=><div key={lab} className={`ec-vtile ec-v-${v.c}`}><small>{lab}</small><strong>{v.v}</strong><span>{v.s}</span></div>)}</div>
       <div className="ec-threeway"><div className="ec-tw-title">三方金额对账 · 金蝶未核销应收 → 流水应冲应收 → 账户到账</div><div className="ec-tw-flow">
         <div className="ec-tw-node"><small>金蝶未核销应收</small><b className={opened.length?'':'ec-tw-mute'}>{opened.length?yuan(d.open_total):d.bills.length?'已核销':'没有应收'}</b></div>
@@ -102,11 +102,16 @@ function OrderProof({period,shop,shopName,order,onClose}) {
         <div className="ec-tw-node"><small>账户到账</small><b className={d.settled?'':'ec-tw-mute'}>{d.settled?yuan(d.cash_total):'待到账'}</b></div>
       </div></div>
       <div className="ec-formula">
-        <div><small>抖音这边的钱是这么算的</small>{d.settled?(d.paid_total!=null&&Math.abs(d.paid_total+d.subsidy_total-d.refund_total-d.fee_total-d.cash_total)<0.011
+        <div><small>抖音这边的钱是这么算的</small>{d.settled&&sb?<>
+            <span>下单时：买家实付 {money(d.paid_total)} ＋ 平台补贴 {money(sb.before)} ＝ {money(sb.blue)}（和金蝶蓝字一样）</span>
+            <span>结算前退了一部分：退给买家 {money(d.refund_total)}，平台补贴按同样比例收回 {money(sb.back)}（只剩 {money(d.subsidy_total)}）</span>
+            <span>最后留下 {money(sb.blue)} － {money(d.refund_total)} － {money(sb.back)} ＝ <b>{money(sb.keep)}</b>，再扣平台费用 {money(d.fee_total)} ＝ <b>到账 {money(d.cash_total)}</b></span></>
+          :d.settled?(d.paid_total!=null&&Math.abs(d.paid_total+d.subsidy_total-d.refund_total-d.fee_total-d.cash_total)<0.011
           ?<span>买家实付 {money(d.paid_total)} ＋ 平台等补贴 {money(d.subsidy_total)} － 结算时退款 {money(d.refund_total)} － 平台扣费 {money(d.fee_total)} ＝ <b>到账 {money(d.cash_total)}</b></span>
           :<span>到账 {money(d.cash_total)} ＋ 平台扣费 {money(d.fee_total)} ＝ 应冲应收 {money(d.flow_total)}{d.refund_total>0&&`（结算时已退款 ${money(d.refund_total)}）`}</span>):<span className="ew-muted-num">这单还没结算</span>}
-          {d.settled&&<span>所以应该冲掉的应收 ＝ 到账 {money(d.cash_total)} ＋ 扣费 {money(d.fee_total)} ＝ <b>{money(d.flow_total)}</b></span>}</div>
+          {d.settled&&!sb&&<span>所以应该冲掉的应收 ＝ 到账 {money(d.cash_total)} ＋ 扣费 {money(d.fee_total)} ＝ <b>{money(d.flow_total)}</b></span>}</div>
         <div><small>金蝶这边挂着的应收</small>{d.bills.length?<span>{blue.length>0&&`蓝字 ${money(blue.reduce((n,b)=>n+b.open,0))}`}{red.length>0&&` ＋ 红字 ${money(red.reduce((n,b)=>n+b.open,0))}`} ＝ <b>未核销 {money(d.open_total)}</b>{d.written_total!==0&&`（已核销 ${money(d.written_total)}）`}</span>:<span className="ew-muted-num">没有应收单</span>}
+          {sb&&<span className={Math.abs(sb.red-sb.red_should)>=0.015?'ew-open-red':''}>蓝字没错。红字该冲 {money(sb.red_should)}（退给买家的＋收回的补贴），{red.length===0?'实际还没开红字':Math.abs(sb.red-sb.red_should)<0.015?'实际也是这么冲的':`实际冲了 ${money(sb.red)}，${sb.red<sb.red_should?'多':'少'}冲 ${money(Math.abs(sb.red-sb.red_should))}`}</span>}
           {d.settled&&d.bills.length>0&&<span className={Math.abs(diff)>=0.005?'ew-open-red':''}>{Math.abs(diff)<0.005?'两边相等':`两边差 ${money(diff)}（金蝶 − 抖音）`}</span>}</div>
       </div>
       <div className="ec-chain-badges">{d.categories.map(c=><span key={c}>{c}</span>)}{d.btype&&<span>{d.btype}</span>}{merged&&<span>合单发货 · {d.members.length} 个平台订单</span>}</div>

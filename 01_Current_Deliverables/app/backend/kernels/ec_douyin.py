@@ -378,7 +378,17 @@ def order_detail(period, settle, ledger, bills, order, orders=None):
         for r in info.get(o, []):
             w = wdt.setdefault(r['jy'], {'jy': r['jy'], 'status': r['status'], 'refund': r['refund'], 'recv': r['recv'], 'paid': r['paid'], 'ship': r['ship'], 'orders': [], 'goods': []})
             w['orders'].append(o); w['goods'] += [x for x in r['goods'] if x not in w['goods']]
-    return {'order': order, 'members': members, 'wdt': sorted(wdt.values(), key=lambda w: w['jy']), 'flows': flows, 'bills': own, 'settled': bool(settled),
+    # 结算前退了一部分：平台补贴按同样比例收回，动账明细里的补贴是收回以后剩下的，不能直接和蓝字比。
+    # 蓝字 − 实付 就是下单时的补贴；按退款比例折下来等于明细里的补贴，说明蓝字没错，该看的是红字冲了多少。
+    back = None
+    blue, red = total([b for b in own if b['amount'] > 0], 'amount'), total([b for b in own if b['amount'] < 0], 'amount')
+    paid, left, refund = (total(raw, 'paid'), total(raw, 'subsidy'), abs(total(settled, 'refund'))) if known else (0, 0, 0)
+    if known and refund > 0 and paid > 0 and blue > paid + left + 0.01:
+        before = round(blue - paid, 2)
+        if abs(before * (1 - refund / paid) - left) <= 0.02 * len(raw) + 0.01:
+            back = {'before': before, 'back': round(before - left, 2), 'blue': blue, 'red': red, 'keep': round(blue - refund - (before - left), 2),
+                    'red_should': round(-(refund + before - left), 2)}
+    return {'order': order, 'members': members, 'wdt': sorted(wdt.values(), key=lambda w: w['jy']), 'flows': flows, 'bills': own, 'settled': bool(settled), 'subsidy_back': back,
             'unsettled': [o for o in members if o not in {f['order'] for f in settled}] if len(members) > 1 else [],
             'flow_total': total([f for f in settled if f['in_period']] or settled, 'gross'),
             'cash_total': total(settled, 'amt'), 'fee_total': total(settled, 'fee'), 'refund_total': abs(total(settled, 'refund')),
