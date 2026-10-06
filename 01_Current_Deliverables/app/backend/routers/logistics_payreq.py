@@ -20,6 +20,7 @@ from sqlalchemy import select, insert, update
 
 from core import JSONResponse, _require_perm, db
 import kingdee_client as kc
+import logi_scope
 from kernels import logistics_review_store as store
 from kernels import logistics_payreq as lpq
 from kernels import invoice_dingtalk as idt
@@ -52,22 +53,9 @@ def _is_local():
 
 # ---------- 主数据：金蝶物流供应商 / 主体简称 / 复核台承运商简称 ----------
 def _kd_suppliers(force=False):
-    """金蝶 BD_Supplier 编码「物流运输服务…」→ {name2code, code2name}，缓存 12 小时。"""
-    if not force and _SUP["name2code"] and time.time() - _SUP["ts"] < 12 * 3600:
-        return _SUP
-    try:
-        s, conf = kc.login()
-        rows = kc._query(s, conf, "BD_Supplier", [("FNumber", "码"), ("FName", "名")], "FNumber like '物流运输服务%'")
-    except Exception:
-        rows = []
-    if rows:
-        n2c, c2n = {}, {}
-        for r in rows:
-            c, n = str(r.get("码") or "").strip(), str(r.get("名") or "").strip()
-            if c and n:
-                n2c.setdefault(n, c)
-                c2n.setdefault(c, n)
-        _SUP.update(ts=time.time(), name2code=n2c, code2name=c2n)
+    """物流供应商 → {name2code, code2name}。V2.846 起不认编码前缀，读金蝶供应商档案里「算物流」的那几个供应商分组(logi_scope，缓存 12 小时)。"""
+    d = logi_scope.data(force)
+    _SUP.update(ts=d.get("ts") or 0.0, name2code=d["name2code"], code2name=d["code2name"])
     return _SUP
 
 
@@ -118,10 +106,12 @@ def _paybills(since_date):
     """金蝶付款单(物流供应商) → [{code, org, amount, date, status}]。进金蝶＝已付款(用户 2026-10-01)。"""
     try:
         s, conf = kc.login()
-        rows = kc._query(s, conf, "AP_PAYBILL",
-                         [("FID", "id"), ("FCONTACTUNIT.FNumber", "码"), ("FPAYORGID.FName", "组织"), ("FPAYTOTALAMOUNTFOR", "金额"),
-                          ("FDate", "日期"), ("FDOCUMENTSTATUS", "状态")],
-                         "FCONTACTUNIT.FNumber like '物流运输服务%%' and FDate>='%s'" % since_date)
+        rows = []
+        for flt in logi_scope.in_filters("FCONTACTUNIT.FNumber"):       # 往来单位在物流供应商名单里的(名单读金蝶供应商分组)
+            rows += kc._query(s, conf, "AP_PAYBILL",
+                              [("FID", "id"), ("FCONTACTUNIT.FNumber", "码"), ("FPAYORGID.FName", "组织"), ("FPAYTOTALAMOUNTFOR", "金额"),
+                               ("FDate", "日期"), ("FDOCUMENTSTATUS", "状态")],
+                              flt + " and FDate>='" + since_date + "'")
     except Exception:
         return None
     return [{"id": r.get("id"), "code": r.get("码"), "org": r.get("组织"), "amount": r.get("金额"), "date": str(r.get("日期") or "")[:10],
@@ -183,10 +173,12 @@ def _paid_vouchers(since_date, want=None):
     ② want={(供应商码, 账簿)}：这些还在等付款的，顺带取同一张凭证的银行贷方合计(alt)——有预付款/押金抵扣时请款金额等于银行实付、不等于 2241 借方。"""
     try:
         s, conf = kc.login()
-        rows = kc._query(s, conf, "GL_VOUCHER",
-                         [("FACCOUNTBOOKID.FName", "账簿"), ("FDate", "日期"), ("FVOUCHERGROUPID.FName", "字"), ("FVOUCHERGROUPNO", "号"),
-                          ("FEXPLANATION", "摘要"), ("FDEBIT", "借"), ("FDetailID.FFLEX4.FNumber", "码")],
-                         "FAccountID.FNumber like '2241%%' and FDEBIT>0 and FDetailID.FFLEX4.FNumber like '物流运输服务%%' and FDate>='%s'" % since_date)
+        rows = []
+        for flt in logi_scope.in_filters("FDetailID.FFLEX4.FNumber"):
+            rows += kc._query(s, conf, "GL_VOUCHER",
+                              [("FACCOUNTBOOKID.FName", "账簿"), ("FDate", "日期"), ("FVOUCHERGROUPID.FName", "字"), ("FVOUCHERGROUPNO", "号"),
+                               ("FEXPLANATION", "摘要"), ("FDEBIT", "借"), ("FDetailID.FFLEX4.FNumber", "码")],
+                              "FAccountID.FNumber like '2241%' and FDEBIT>0 and " + flt + " and FDate>='" + since_date + "'")
     except Exception:
         return None
     out, meta = [], []
@@ -307,7 +299,7 @@ def _scan(trigger, days):
     for r in allr:
         if r.get("excluded") is None:
             texts = [r.get("reason")] + [x.get("fileName") for x in json.loads(r.get("files_json") or "[]")]
-            why = lpq.auto_exclude(texts, r.get("payee"))
+            why = lpq.auto_exclude(texts, r.get("payee"), *logi_scope.excl_rules())
             with db._engine.begin() as c:
                 c.execute(update(PR).where(PR.c.inst_id == r["inst_id"]).values(excluded=("自动：" + why) if why else ""))
             r["excluded"] = ("自动：" + why) if why else ""
@@ -623,6 +615,34 @@ async def payreq_assign(request: Request):
                                                                bill_state=None, bill_msg=None, updated_at=_now()))
     db.audit(u["name"], "物流复核-请款单认领月份", iid, p or "清空")
     return {"ok": True}
+
+
+@router.get("/api/logistics-review/scope")
+async def scope_get(request: Request, fresh: int = 0):
+    """哪些供应商算物流：现在勾的金蝶供应商分组、金蝶全部分组(家数)、范围内名单、排除规则。fresh=1 重新读金蝶。只读。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(logi_scope.view, bool(fresh))
+
+
+@router.post("/api/logistics-review/scope")
+async def scope_set(request: Request):
+    """改物流范围(勾哪几个金蝶供应商分组)和排除规则。改完下一轮扫钉钉、配付款单就按新范围；之前判成「不是物流」的请款单会重新看一遍。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    old = logi_scope.get_scope()
+    try:
+        sc = logi_scope.save(b.get("groups"), b.get("excl_kw"), b.get("excl_payee"), u["name"])
+    except ValueError as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+    _NONLOGI.clear()       # 之前判成「收款方不是物流供应商」的实例号清掉，下一轮扫钉钉按新范围重新看
+    db.audit(u["name"], "物流复核-改物流供应商范围", "金蝶供应商分组 " + "、".join(sc["groups"]),
+             "原来 %s；排除规则 %d 条" % ("、".join(old.get("groups") or []) or "（空）", len(sc["excl_kw"]) + len(sc["excl_payee"])))
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(logi_scope.view, False)
 
 
 @router.post("/api/logistics-review/payreq/exclude")

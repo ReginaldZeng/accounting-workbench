@@ -12,7 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
 import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
-import { voucherFeeDraft, voucherFeePost, voucherPick } from '../api.js'
+import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet } from '../api.js'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -49,6 +49,66 @@ function DtChip({ reqs, onOpen }) {
   const v = reqs[0], more = reqs.length - 1
   return <button className={'dtchip ' + (DT_CLS[v.st.key] || '')} title={`钉钉请款 ${money(v.amount)} · ${v.applicant || ''} ${v.created || ''}（点开看节点/附件）`}
     onClick={() => onOpen(v)}>{v.st.key === 'run' && v.cur && v.cur.length > 1 ? `待${v.cur[0].name}等审批` : v.st.label}{v.st.date ? ' ' + v.st.date.slice(5, 10) : ''}{more > 0 ? ` +${more}` : ''}</button>
+}
+
+// 哪些供应商算物流(V2.846，用户「你是怎么知道哪些是物流的」「不应该写死吧，应该读金蝶的供应商列表之类的」)：
+// 原来认编码前缀「物流运输服务」；现在读金蝶供应商档案的「供应商分组」，哪几个分组算物流在这里勾。排除规则(不走物流计提的)也在这里维护。
+function ScopeDlg({ onClose, onSaved, flash }) {
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [on, setOn] = useState({})
+  const [kw, setKw] = useState([])
+  const [py, setPy] = useState([])
+  const [busy, setBusy] = useState('')
+  const [showSup, setShowSup] = useState(false)
+  const apply = r => { setD(r); setOn(Object.fromEntries((r.groups || []).filter(g => g.on).map(g => [g.code, true]))); setKw((r.excl_kw || []).map(x => [...x])); setPy((r.excl_payee || []).map(x => [...x])) }
+  const load = fresh => { setBusy(fresh ? 'kd' : 'load'); setErr(''); reviewScope(fresh).then(apply).catch(e => setErr(e.message)).finally(() => setBusy('')) }
+  useEffect(() => { load(false) }, [])
+  const nSel = d ? d.groups.filter(g => on[g.code]).reduce((s, g) => s + g.n, 0) : 0
+  const dirty = d && (JSON.stringify(d.groups.filter(g => g.on).map(g => g.code)) !== JSON.stringify(d.groups.filter(g => on[g.code]).map(g => g.code))
+    || JSON.stringify(d.excl_kw || []) !== JSON.stringify(kw.filter(x => x[0].trim())) || JSON.stringify(d.excl_payee || []) !== JSON.stringify(py.filter(x => x[0].trim())))
+  const save = () => {
+    if (!window.confirm(`物流供应商范围改成：${d.groups.filter(g => on[g.code]).map(g => g.name || g.code).join('、')}（共 ${nSel} 家）。\n之后扫钉钉请款单、配金蝶付款单、总表认计提都按这个范围。确定？`)) return
+    setBusy('save')
+    reviewScopeSet({ groups: d.groups.filter(g => on[g.code]).map(g => g.code), excl_kw: kw, excl_payee: py })
+      .then(r => { apply(r); flash('物流供应商范围已保存'); onSaved && onSaved() }).catch(e => setErr(e.message)).finally(() => setBusy(''))
+  }
+  const rules = (xs, set, ph) => <table className="fxtbl scr"><tbody>
+    {xs.map((x, i) => <tr key={i}><td><input value={x[0]} placeholder={ph} onChange={e => set(xs.map((y, k) => (k === i ? [e.target.value, y[1]] : y)))} /></td>
+      <td><input value={x[1]} placeholder="原因（会显示在「本月已排除」上）" onChange={e => set(xs.map((y, k) => (k === i ? [y[0], e.target.value] : y)))} /></td>
+      <td><button className="lnk" onClick={() => set(xs.filter((_, k) => k !== i))}>删</button></td></tr>)}
+    <tr><td colSpan="3"><button className="lnk" onClick={() => set([...xs, ['', '']])}>＋ 加一条</button></td></tr></tbody></table>
+  return (
+    <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="fxdlg" style={{ width: 'min(760px,100%)' }} role="dialog" aria-label="哪些供应商算物流">
+        <div className="fxhead"><b>哪些供应商算物流</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxsub">系统按金蝶供应商档案里的<b>供应商分组</b>认物流商：下面勾上的分组里的供应商，才会被当成物流——钉钉请款单按收款方名称对这份名单、金蝶付款单按往来单位对、总表的计提按挂的供应商对。名单从金蝶现读，金蝶里新增、调分组的，这里跟着变。</div>
+        {err && <div className="fxwarn">{err}</div>}
+        {!d && !err && <div className="fxsub">读金蝶供应商档案…</div>}
+        {d && <>
+          {d.stale && <div className="fxwarn">这次没读到金蝶（{d.err || '原因不明'}），显示的是 {d.kd_at || '之前'} 存下的名单。</div>}
+          <div className="scgrid">{d.groups.map(g => <label key={g.code} className={on[g.code] ? 'on' : ''}><input type="checkbox" checked={!!on[g.code]} onChange={e => setOn({ ...on, [g.code]: e.target.checked })} />
+            <b>{g.name || '（没有名称）'}</b><span className="dim mono">{g.code}</span><span className="dim">{g.n} 家</span></label>)}
+            {!d.groups.length && <span className="dim">金蝶里没读到供应商分组</span>}</div>
+          <div className="fxamt">现在算物流的供应商 <b>{d.n}</b> 家{dirty && <>　→ 改完是 <b>{nSel}</b> 家（保存后生效）</>}　<button className="lnk" onClick={() => setShowSup(!showSup)}>{showSup ? '收起名单' : '看名单'}</button>
+            <span className="dim" style={{ marginLeft: 10, fontSize: 12 }}>金蝶名单取于 {d.kd_at || '—'}</span>
+            <button className="lnk" style={{ marginLeft: 8 }} disabled={!!busy} onClick={() => load(true)}>{busy === 'kd' ? '读金蝶中…' : '重新读金蝶'}</button></div>
+          {showSup && <div className="scsup">{d.sups.map(s => <span key={s.code}><i className="mono">{s.code}</i> {s.name}</span>)}</div>}
+          <div className="fxamt" style={{ marginTop: 4 }}><b>在名单里、但不走物流计提的</b><span className="dim" style={{ fontSize: 12 }}>　钉钉请款单命中下面任一条就自动排除（显示在总表「本月已排除」，可以手工恢复）</span></div>
+          <div className="fxsub">事由或附件名里带这些字的：</div>
+          {rules(kw, setKw, '关键词，如 办公室')}
+          <div className="fxsub">收款方名称带这些字的：</div>
+          {rules(py, setPy, '收款方，如 湖北顺丰速运')}
+          <div className="fxbtns">
+            <button className="btn pri" disabled={!dirty || !!busy || !nSel} onClick={save}>{busy === 'save' ? '保存中…' : '保存'}</button>
+            <button className="btn" onClick={onClose}>关闭</button>
+            <span className="dim" style={{ fontSize: 12 }}>{d.by ? `上次改：${d.by} ${d.at || ''}` : ''}</span>
+          </div>
+          <div className="fxsub">认不到的两种情况：收款方名称和金蝶供应商名称不完全一样（且银行账号以前没认过）；用的不是「付款申请（公对公）」这个审批模板。</div>
+        </>}
+      </div>
+    </div>
+  )
 }
 
 function PayReqDlg({ v, onClose, onChanged, flash }) {
@@ -339,6 +399,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [supq, setSupq] = useState('')
   const [ovf, setOvf] = useState('')             // 总表按复核状态筛
   const [pr, setPr] = useState(null)             // 打开的钉钉请款单
+  const [scopeDlg, setScopeDlg] = useState(false) // 「哪些供应商算物流」弹窗
+  const [scopeSum, setScopeSum] = useState(null)  // 总表头上那句：金蝶分组「…」N 家
+  const loadScopeSum = () => reviewScope().then(r => setScopeSum({ n: r.n, names: (r.groups || []).filter(g => g.on).map(g => g.name || g.code), stale: r.stale })).catch(() => {})
+  useEffect(() => { loadScopeSum() }, [])
   const [regNote, setRegNote] = useState('')     // 登记制：第③步登记时的备注
   const [feeDim, setFeeDim] = useState(null)     // 登记制：费用凭证卡的维度下拉(金蝶主数据)
   const [dtBusy, setDtBusy] = useState(false)
@@ -706,6 +770,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .lnk{font:inherit;background:none;border:none;color:var(--accent);text-decoration:underline;cursor:pointer;padding:0}
       .lrv .fxbtns{display:flex;gap:8px;align-items:center}.lrv .fxbtns .sp{flex:1}
       .lrv .feeb{display:flex;flex-direction:column;gap:10px;padding:12px 15px;max-width:1080px}
+      .lrv .scgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px}
+      .lrv .scgrid label{display:flex;gap:6px;align-items:center;border:1px solid #DCE2E7;border-radius:7px;padding:6px 9px;font-size:13px;cursor:pointer;white-space:nowrap}
+      .lrv .scgrid label.on{border-color:#D9A441;background:#FFFCF5}.lrv .scgrid label b{font-weight:600}.lrv .scgrid label .dim{font-size:11.5px}.lrv .scgrid label .dim:last-child{margin-left:auto}
+      .lrv .scsup{max-height:170px;overflow:auto;border:1px solid #DCE2E7;border-radius:7px;padding:8px 10px;font-size:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:3px 14px}
+      .lrv .scsup i{font-style:normal;color:#8A96A2;font-size:11px}
+      .lrv .fxtbl.scr td{width:auto!important;white-space:normal;color:#1B2733;padding:4px 6px}.lrv .fxtbl.scr td:first-child{width:34%!important}.lrv .fxtbl.scr td:last-child{width:44px!important;text-align:center}
       .lrv .fxtbl.fxv th:last-child{background:#E7ECEF;color:#1B2733}
       .lrv .fxtbl.fxv td:first-child{width:auto;white-space:normal;color:#1B2733}
       .lrv .fxtbl.fxv th:nth-child(n+2),.lrv .fxtbl.fxv td:nth-child(n+2){width:120px;text-align:right}
@@ -804,6 +874,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           <div className="ovhead">
             <div><b>本月有计提的承运商</b>　计提 vs 付款（金蝶 2241 供应商往来，按主体拆）　<span className="ovsub">点「开始复核」进三步流</span></div>
             <div style={{ flex: 1 }} />
+            <button className="lnk" style={{ fontSize: 12 }} title="系统按金蝶供应商档案的「供应商分组」认物流商，点开看 / 改" onClick={() => setScopeDlg(true)}>
+              物流范围：{scopeSum ? <>金蝶分组「{scopeSum.names.join('、') || '未设置'}」{scopeSum.n} 家{scopeSum.stale ? '（金蝶没读到，用的旧名单）' : ''}</> : '读取中…'}</button>
             {ov && ov.fetched_at && <span className="ovsub" title="金蝶计提数据缓存30分钟；复核状态、账单应付每次现算">金蝶数据取于 {ov.fetched_at.slice(5)}</span>}
             <button className="btn sm" disabled={ovBusy} onClick={refreshOv} title="重新从金蝶读取计提">{ovBusy ? '刷新中…' : '刷新'}</button>
             <input type="search" placeholder="搜承运商/编码" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 130 }} />
@@ -880,6 +952,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             </tbody>
           </table></div>
           {pr && <PayReqDlg key={pr.inst} v={pr} onClose={() => setPr(null)} onChanged={reloadOv} flash={flash} />}
+          {scopeDlg && <ScopeDlg onClose={() => setScopeDlg(false)} onSaved={() => { loadScopeSum(); refreshOv() }} flash={flash} />}
           <div className="ovfoot">付款(复核)下的小标＝钉钉请款单进度（待谁审批 / 已通过·待付款 / 已付款＝金蝶出现付款单），点开看节点和附件。承运商＝金蝶全称。计提＝2241 本期贷方；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径）；差异＝计提−复核应付。复核状态＝该承运商本月是否已「确认通过并登记」。只有已配取数说明的承运商可「开始复核」。</div>
         </div>
       )}

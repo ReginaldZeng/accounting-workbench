@@ -657,6 +657,9 @@ export const reviewLines = (carrier, period) => j(`/api/logistics-review/lines?c
 export const reviewLineNote = (carrier, period, line_key, note) => j('/api/logistics-review/line-note', { method: 'POST', body: JSON.stringify({ carrier, period, line_key, note }) })
 export const reviewDimOptions = () => j('/api/logistics-review/dim-options')
 export const reviewLineFix =(carrier, period, line_keys, fix) => j('/api/logistics-review/line-fix', { method: 'POST', body: JSON.stringify({ carrier, period, line_keys, ...fix }) })
+// 哪些供应商算物流(V2.846)：读金蝶供应商分组，勾哪几个分组存设置
+export const reviewScope = fresh => j('/api/logistics-review/scope' + (fresh ? '?fresh=1' : ''))
+export const reviewScopeSet = body => j('/api/logistics-review/scope', { method: 'POST', body: JSON.stringify(body) })
 export const reviewInvoices = (carrier, period) => j(`/api/logistics-review/invoices?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
 export const reviewCarrierPointsSet =(carrier, points) => j('/api/logistics-review/carrier-points', { method: 'POST', body: JSON.stringify({ carrier, points }) })

@@ -80,13 +80,13 @@ _EXCL_KW = (("办公室", "办公室快递月结"),)
 _EXCL_PAYEE = (("湖北顺丰速运", "各部门快递费"),)
 
 
-def auto_exclude(texts, payee=""):
-    """事由/附件名(+收款方) → 排除原因；不该排除返回 ''。"""
-    for kw, why in _EXCL_PAYEE:
+def auto_exclude(texts, payee="", kw_rules=None, payee_rules=None):
+    """事由/附件名(+收款方) → 排除原因；不该排除返回 ''。规则由调用方传(V2.846 起存在设置里、页面上维护，见 logi_scope)；不传用上面的初始值。"""
+    for kw, why in (_EXCL_PAYEE if payee_rules is None else payee_rules):
         if kw in str(payee or ""):
             return why
     for t in texts:
-        for kw, why in _EXCL_KW:
+        for kw, why in (_EXCL_KW if kw_rules is None else kw_rules):
             if kw in str(t or ""):
                 return why
     return ""

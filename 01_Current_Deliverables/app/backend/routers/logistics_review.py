@@ -218,6 +218,8 @@ def _ov_accr(rows, period, full2short=None):
         full2short = {s.get("full"): s.get("short") for s in (db.list_logi_suppliers() or []) if s.get("full")}
     book2short = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or []) if o.get("full_name")}
     # 计提=贷方(摘要「计提…运费/仓储费/装卸/搬运/物流」)
+    import logi_scope
+    logi_codes = logi_scope.data()["codes"]      # 物流供应商名单：读金蝶供应商分组(V2.846，原来认编码前缀「物流运输服务」)
     accr, carriers = {}, {}
     for r in rows:
         z = str(r.get("FEXPLANATION") or "")
@@ -226,7 +228,7 @@ def _ov_accr(rows, period, full2short=None):
         sname, scode = str(r.get("供应商") or "").strip(), str(r.get("供应商码") or "").strip()
         # 物流供应商(编码 物流运输服务…/在物流供应商档案里)的计提：摘要有「计提」即算，不再要求带费用关键词
         # (记-562「计提武汉顺鸽…8月线上kikiherb-花草茶」没写仓储费，原来被漏)
-        is_logi = scode.startswith("物流运输服务") or (sname and sname in full2short)
+        is_logi = scode in logi_codes or (sname and sname in full2short)
         if cr and "计提" in z and _accr_is_current(z, period) and (is_logi or any(k in z for k in lrc._ACCR_KW)):
             mo = lrc._ACCR_RE.search(z)
             if not sname and not mo:
