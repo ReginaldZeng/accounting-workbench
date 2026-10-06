@@ -18,6 +18,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
   voucherAuto, voucherAutoSet, voucherAutoRun, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
+import qrcode from '../vendor/qrcode-generator.mjs'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
@@ -102,6 +103,12 @@ const cnj = (c, n) => [c, n].filter(Boolean).join(' ')
 // opt(主体更正的两张用)：title 单名 / subject 主体栏 / vno 调整凭证 / emptyOld、emptyNew 空格子写什么 / why(a) 原因行 / note 说明 / noBy 不印制单人(别人做账)
 // V2.851(用户「在审批付款的时候一并打出来」)：更正单在审批时就打、订在纸质付款单后面，那时还没有付款凭证——凭证号留一道横线，
 //   做完账由装订的同事扫码看到凭证号后手填。
+// V2.854(用户「做错主体需要更正的，他没有二维码，我们怎么去让小朋友知道呢」)：原主体那张红冲凭证没有纸质付款单、也就没有钉钉二维码——
+//   给每张计提更正单印上系统自己的二维码(内容＝审批编号#页别：0 普通 / 1 主体更正①原主体红冲 / 2 主体更正②本主体补提)。
+//   装订时扫更正单，「凭证装订」直接显示这一页该订在哪个主体、哪张凭证后面。扫不了可以输更正单上的审批编号。
+function adjQr(text) {
+  try { const q = qrcode(0, 'M'); q.addData(String(text)); q.make(); return q.createSvgTag({ cellSize: 3, margin: 0, scalable: true }) } catch { return '' }
+}
 const VNO_BLANK = '<span style="white-space:nowrap">______年____月 记-________</span>（做账后填）'
 function adjustSheet(d, adjIn, opt = {}) {
   const q = d.req, p = q.posted, adj = adjIn || d.adjust || []
@@ -132,9 +139,13 @@ function adjustSheet(d, adjIn, opt = {}) {
   const S = (k, w) => r2(adj.reduce((s, a) => s + (a[w][k] || 0), 0))
   const tot = (lb, w, cls) => `<tr class="tot ${cls}"><td colspan="11" class="n">${lb}</td><td class="n">${money(S('gross', w))}</td><td></td><td class="n">${money(S('net', w))}</td><td class="n">${money(S('tax', w))}</td><td></td></tr>`
   const invTxt = inv.map(i => `<span class="m">${esc(i.number)}</span>（${esc(i.rate)}${i.deduct === false ? '·不抵扣' : ''}，含税 ${money(i.gross)}，税额 ${money(i.tax)}）`).join('；')
+  const side = opt.side === 'from' ? 1 : opt.side === 'here' ? 2 : 0
+  const qr = q.bid ? adjQr(`${q.bid}#${side}`) : ''
   return `<div class="sheet">
+  ${qr ? `<div class="qr">${qr}<div>装订时扫这里</div></div>` : ''}
   <div class="t1">${esc(opt.title || '计提更正单')}</div>
   <div class="t2">供应商编码：${esc(q.code)}　　　供应商名称：${esc(q.payee)}</div>
+  ${side === 1 ? `<div class="t3 where">本页订在 <b>${esc(opt.subject || '')}</b> 的红冲凭证后面（那张凭证没有纸质付款单）；凭证号扫右上角二维码看</div>` : ''}
   <div class="t3">钉钉审批 ${esc(q.bid)}（${esc(q.applicant)}）　·　账单期间 ${esc(q.period)}　·　付款 ${money(q.amount)}${p ? `（付款单 ${esc(p.bill_no)}）` : ''}　·　调整凭证 <b>${vno}</b></div>
   <table class="fx"><colgroup><col style="width:3.2%"><col style="width:7.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:4.6%">
     <col style="width:8.5%"><col style="width:10%"><col style="width:8%"><col style="width:7%"><col style="width:6%"><col style="width:6.8%"><col style="width:4.2%"><col style="width:6.8%"><col style="width:5.2%"><col></colgroup>
@@ -149,7 +160,9 @@ function adjustSheet(d, adjIn, opt = {}) {
 }
 
 const SHEET_CSS = `@page{size:A4 landscape;margin:10mm 10mm}*{box-sizing:border-box}body{font:11px/1.45 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
-.sheet{page-break-after:always}.sheet:last-child{page-break-after:auto}
+.sheet{page-break-after:always;position:relative}.sheet:last-child{page-break-after:auto}
+.qr{position:absolute;right:0;top:0;width:21mm;text-align:center;font-size:9px;color:#5E6B78;line-height:1.3}.qr svg{width:21mm;height:21mm;display:block}
+.t3.where{font-weight:700;color:#8A5A00}
 .t1{text-align:center;font-size:20px;font-weight:700;margin:2px 0 4px}.t2{text-align:center;font-size:12.5px;font-weight:700;margin-bottom:4px}
 .t3{text-align:center;font-size:11px;color:#5E6B78;margin-bottom:8px}.t3 b{color:#1B2733}
 table{width:100%;border-collapse:collapse;table-layout:fixed}.fx th,.fx td{border:1px solid #B8C4CC;padding:4px 5px;vertical-align:middle;word-break:break-all}
@@ -422,6 +435,7 @@ export function VoucherScanPage({ user }) {
           <div><b>对准付款单右上角的二维码</b><br />{dd ? '点下面「扫一扫」，扫到就出结果' : '点下面「拍二维码」，拍近一点、别反光'}</div></div>
           : !c.ok ? <div className="vs-card bad"><div className="vs-t">没查到</div><div className="vs-msg">{c.msg}</div></div>
             : a ? <div className={'vs-card res tone-' + tone(a.subject)}>
+              {c.sheet != null && <div className="vs-more" style={{ marginTop: 0, marginBottom: 6 }}><b>这是计提更正单{c.sheet === 1 ? ' ①（原主体红冲）' : c.sheet === 2 ? ' ②（本主体补提）' : ''}</b>：订在下面这张凭证后面</div>}
               {c.dup && <div className="vs-dup">这张刚才扫过了</div>}
               {!c.dup && c.scanned_before && <div className="vs-more" style={{ marginTop: 0, marginBottom: 6 }}>之前扫过：{c.scanned_before.by} {String(c.scanned_before.at || '').slice(5)}</div>}
               <div className="vs-subj">{a.subject || '主体未知'}</div>

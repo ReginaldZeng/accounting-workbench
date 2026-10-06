@@ -1263,6 +1263,30 @@ def _with_people(vs, makers=None):
 
 
 def _scan_lookup(code):
+    """扫码 → 哪个主体、哪张凭证。V2.854：计提更正单上印的是系统自己的二维码「审批编号#页别」(0 普通 / 1 主体更正①原主体红冲 / 2 ②本主体补提)，
+    按审批编号查，再按页别把该订的那张凭证排在最前面——原主体的红冲凭证没有纸质付款单、没有钉钉二维码，靠这个让装订的人知道。"""
+    import unicodedata
+    m = re.fullmatch(r"(\d{20,21})#([012])", re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(code or ""))))
+    if not m:
+        return _scan_lookup0(code)
+    r = _scan_lookup0(m.group(1))
+    if not r.get("ok"):
+        return r
+    sheet = int(m.group(2))
+    r["sheet"] = sheet
+    if sheet == 1:
+        red = [v for v in r.get("vouchers") or [] if str(v.get("what") or "").startswith("红冲凭证")]
+        if red:
+            r["vouchers"] = red + [v for v in r["vouchers"] if v not in red]
+            r["has_xred"] = False            # 这一页就是 ①，不再提示「后面订着两张」
+        else:
+            r["vouchers"] = []
+            r["state"] = "这张更正单 ① 对应的红冲凭证还没建"
+            r["sheet_note"] = "原主体的红冲凭证要等这张请款单的付款凭证保存到金蝶时，系统一并建好；建好再扫。"
+    return r
+
+
+def _scan_lookup0(code):
     from kernels import invoice_parse as ip, invoice_dingtalk as idt
     c = ip.classify_code(code or "")
     iid = ""
@@ -1398,7 +1422,7 @@ def _scan_done(r, user):
     posted = (db.get_setting(_POSTED_KEY, None) or {}).get(r["inst"])
     if posted:
         r["n_adjust"] = _adj_n(r["inst"], posted)
-    if r.get("vouchers"):
+    if r.get("vouchers") and r.get("sheet") is None:        # 扫的是更正单就不算「纸质付款单扫过了」
         prev = _bind_touch(r["inst"], user, "；".join("%s 记-%s" % (v.get("subject") or "", v.get("vno")) for v in r["vouchers"]))
         r["scanned_before"] = prev
         mk = _bind_marks().get(r["inst"]) or {}
@@ -1562,7 +1586,7 @@ async def scan_photo(request: Request):
         from kernels import invoice_parse as ip
         qrs = ip.decode_qr_image(data)
         kinds = [(q, ip.classify_code(q)["kind"]) for q in qrs]
-        link = next((q for q, k in kinds if k == "approval_link"), None)
+        link = next((q for q, k in kinds if k == "approval_link"), None) or next((q for q in qrs if re.fullmatch(r"\s*\d{20,21}#[012]\s*", str(q))), None)
         if not link:
             if any(k == "invoice_qr" for _, k in kinds):
                 return {"ok": False, "msg": "照片里是发票的二维码：请拍付款单（审批单）右上角那个"}

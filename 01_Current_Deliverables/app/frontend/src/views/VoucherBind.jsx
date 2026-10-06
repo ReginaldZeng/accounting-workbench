@@ -56,7 +56,7 @@ export default function VoucherBind({ user }) {
             <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={S.shot} />
             <div className="sc-in">
               <input ref={ref} value={S.v} onChange={e => S.setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') S.go() }} autoComplete="off" spellCheck={false}
-                placeholder="光标停在这里，用扫码枪扫付款单右上角的二维码；或输入 20 位审批编号后回车" />
+                placeholder="光标停在这里，用扫码枪扫付款单（或计提更正单）右上角的二维码；或输入 20 位审批编号后回车" />
               <button className="btn btn-pri" disabled={S.busy || !S.v.trim()} onClick={S.go}>{S.busy ? '查询中…' : '查'}</button>
               <button className="btn" disabled={S.busy} title="没有扫码枪：选一张拍了二维码的照片 / 截图，系统认码" onClick={e => { e.stopPropagation(); fileRef.current && fileRef.current.click() }}>传照片</button>
             </div>
@@ -66,11 +66,14 @@ export default function VoucherBind({ user }) {
                   : !a ? <div className="vb-res warn"><div className="vb-big">{c.state}</div>
                     <div style={{ marginTop: 6 }}>{c.subject} · {c.payee}{c.amount != null && <> · <b className="mono">{money(c.amount)}</b></>}<br />付款凭证还没做——<b>先放一边</b>，做完再扫。</div></div>
                     : <div className={'vb-res tone-' + tone(a.subject)}>
+                      {c.sheet != null && <div className="vb-sheet">这是<b>计提更正单{c.sheet === 1 ? ' ①（原主体红冲）' : c.sheet === 2 ? ' ②（本主体补提）' : ''}</b>：把这一页订在下面这张凭证后面，凭证号填到更正单上</div>}
                       {c.dup && <div className="vb-dup">这张刚才扫过了</div>}
                       <span className="vb-subj">{a.subject || '主体未知'}</span>
                       <div className="vb-vno">记-{a.vno}</div>
                       <div className="vb-mon">{ymCn(a.month)}凭证 · {a.what}{a.src === '金蝶已有' ? '（金蝶已有，不是本系统写的）' : ''}</div>
                       {vs.slice(1).map((x, i) => <div key={i} className="vb-more">另有　<b>{x.subject} 记-{x.vno}</b>　{ymCn(x.month)} · {x.what}</div>)}
+                      {c.sheet == null && c.has_xred && <div className="vb-sheet">这张是<b>主体更正</b>，付款单后面订着两张更正单：<b>②</b> 留在这张付款单后面；<b>①</b> 抽出来，订到上面那张<b>红冲凭证</b>后面（它没有纸质付款单）。拿不准就扫更正单右上角的二维码。</div>}
+                      {c.sheet_note && <div className="vb-sheet">{c.sheet_note}</div>}
                       <div className="vb-tags">
                         {a.checker ? <span className="vb-tag ok">已审核 · {a.checker}</span> : a.audited === false ? <span className="vb-tag warn">还没审核 · 凭证号可能会变</span> : null}
                         {needAdj && <span className="vb-tag warn">后面应订着计提更正单{c.has_xred ? '（两张：① 红冲 ② 补提）' : ''} · 把凭证号填上去</span>}
@@ -144,6 +147,7 @@ const CSS = `
 .vb .vb-subj{display:inline-block;background:var(--tc);color:#fff;font-size:16px;font-weight:700;border-radius:8px;padding:2px 12px}
 .vb .vb-vno{font-size:56px;font-weight:800;line-height:1.1;margin-top:6px;letter-spacing:1px;color:var(--ink)}
 .vb .vb-mon{font-size:14.5px;font-weight:700;margin-top:2px;color:var(--tc)}.vb .vb-more{margin-top:6px;font-size:13px;color:var(--ink-2)}.vb .vb-more b{color:var(--ink);font-size:15px}
+.vb .vb-sheet{margin:8px 0;padding:7px 10px;border-radius:8px;background:rgba(255,255,255,.75);border:1px dashed var(--tc,var(--line-strong));font-size:13px;line-height:1.7}
 .vb .vb-dup{display:inline-block;background:var(--red);color:#fff;font-size:12.5px;font-weight:700;border-radius:6px;padding:2px 10px;margin-bottom:8px}
 .vb .vb-tags{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .vb .vb-tag{display:inline-block;border-radius:6px;padding:2px 9px;font-size:12.5px;font-weight:700;border:1px solid}
