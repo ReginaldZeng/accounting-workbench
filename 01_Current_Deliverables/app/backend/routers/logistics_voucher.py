@@ -40,6 +40,11 @@ def _perm(request):
     return _require_perm(request, "logistics_upload")
 
 
+def _perm_scan(request):
+    """扫码查凭证(只读)：能做账的可以用；装订的同事只勾「扫码查凭证」也可以用(V2.848)。"""
+    return _require_perm(request, "logistics_upload") or _require_perm(request, "voucher_scan")
+
+
 # 金蝶付款单单据状态：Z 暂存 / A 创建 / B 审核中 / C 已审核 / D 重新审核
 _PAY_ST = {"Z": "暂存", "A": "创建", "B": "审核中", "C": "已审核", "D": "重新审核"}
 
@@ -1339,7 +1344,7 @@ def _scan_lookup(code):
 @router.post("/api/logistics-voucher/scan")
 async def scan_lookup(request: Request):
     """扫付款单右上角的二维码(或输审批编号) → 哪个主体、哪张凭证。只读。"""
-    if not _perm(request):
+    if not _perm_scan(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     b = await request.json()
     from starlette.concurrency import run_in_threadpool
@@ -1352,7 +1357,7 @@ async def scan_lookup(request: Request):
 @router.get("/api/logistics-voucher/dd-config")
 async def scan_dd_config(request: Request, url: str = ""):
     """手机页在钉钉里调「扫一扫」前的 dd.config 签名(V2.803，用户「扫描，而不是拍照」)。只给本站页面签，沿用发票管家那套签名和企业编号。"""
-    if not _perm(request):
+    if not _perm_scan(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     from urllib.parse import urlsplit
     from kernels import invoice_dingtalk as idt
@@ -1375,7 +1380,7 @@ async def scan_dd_config(request: Request, url: str = ""):
 async def scan_photo(request: Request):
     """手机拍付款单右上角的二维码(V2.802，用户「手机可以吗」)：照片传上来，服务器认码再查凭证。只读。
     站点现在是 http(域名没备案)，手机浏览器不给网页直接开摄像头扫码，所以走「拍一张照片上传」——认码用发票管家认发票二维码的那套。"""
-    if not _perm(request):
+    if not _perm_scan(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     ctype = request.headers.get("content-type", "")
     if "multipart/form-data" in ctype:

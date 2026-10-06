@@ -744,6 +744,10 @@ CAP_META_STATIC = [
     {"key": "logistics_upload", "label": "上传物流计提表·维护税率", "ws": "accounting", "group": "物流计提", "tier": "act", "mod": "logistics"},
     {"key": "logistics_post", "label": "物流计提·一键录入金蝶", "ws": "accounting", "group": "物流计提", "sensitive": True,
      "tier": "act", "mod": "logistics"},
+    # V2.848(用户 2026-10-06「实习生我可以给账号」「实习生扫码知道是哪个凭证，标注一下就好」)：装订的同事只要这一项——
+    #   手机/扫码枪扫纸质付款单的二维码看主体和凭证号(#/vscan)，只读；不带做账、上传的权限。sensitive＝默认不给，要勾才有。
+    {"key": "voucher_scan", "label": "扫码查凭证（装订用·只读）", "ws": "accounting", "group": "物流计提", "sensitive": True,
+     "tier": "act", "mod": "logistics"},
     # 成本台账（V2.128 重分）：按【动作】分点，同银行对账惯例。
     # 查看＝进页面/看勾稽透视异常/导出台账（导出不单设点，同银行对账——屏幕上都看得见的数，导成 Excel 不多泄什么）。
     # **取数/上传单独一个点**：V2.122 数据改为按主体+期间落库、全员共享后，取数会【覆盖全员可见的数据】，

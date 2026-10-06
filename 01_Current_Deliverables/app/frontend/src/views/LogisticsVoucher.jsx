@@ -206,7 +206,7 @@ function printAdjust(ds, title) {
   }).catch(e => { w.document.body.innerHTML = `<div class="wait">生成失败：${esc(e.message)}</div>` })
 }
 
-// ---------- 装订：对照清单 / 凭证号贴条 ----------
+// ---------- 装订：对照清单（凭证号贴条 V2.848 撤掉：用户「不需要贴条，实习生扫码知道是哪个凭证，标注一下就好」）----------
 const vnum = v => parseInt(String(v || '').replace(/\D/g, ''), 10) || 0
 const SUBJ_ORDER = ['深圳星期零', '深圳星期九', '孝感星期九']
 // 列表行 → 装订条目。系统写的取做账记录；金蝶里别人已做的取发票管家同步到的凭证号；主体更正在原主体账簿建的红冲凭证单列一条(没有纸质付款单)。
@@ -263,23 +263,6 @@ tr.tot td{font-weight:700;background:#E7ECEF}.note{margin-top:7px;color:#5E6B78;
 .sign{display:flex;justify-content:space-between;margin-top:18px;font-size:11.5px;padding:0 4px}.ft{margin-top:8px;color:#9AA5AE;font-size:9.5px;text-align:right}
 .wait{padding:40px;text-align:center;color:#555}@media screen{body{background:#eee}.sheet{background:#fff;width:210mm;min-height:297mm;margin:12px auto;padding:12mm 10mm;box-shadow:0 1px 4px #0002}}`
 
-function slipHtml(items) {
-  const pages = []
-  for (let i = 0; i < items.length; i += 21) pages.push(items.slice(i, i + 21))
-  return pages.map(pg => `<div class="pg">${pg.map(x => `<div class="slip${x.red ? ' red' : ''}">
-    <div class="top"><span class="vno">记-${esc(x.vno)}</span><span class="who">${esc(x.subject)}<br>${esc(ymCn(x.month))}</span></div>
-    <div class="sup">${esc(x.sup)}</div>
-    <div class="amt">${x.red ? (x.tag || '红冲') + ' ' : '¥ '}${money(Math.abs(x.amount || 0))}${x.adj ? '<span class="tag">附更正单</span>' : ''}</div>
-    <div class="ids">审批 ${esc(x.bid || '—')}${x.bill ? `<br>付款单 ${esc(x.bill)}` : x.red ? '<br>无纸质付款单' : ''}</div></div>`).join('')}</div>`).join('')
-}
-const SLIP_CSS = `@page{size:A4 portrait;margin:8mm}*{box-sizing:border-box}body{font:10px/1.35 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
-.pg{display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:39.5mm;page-break-after:always}.pg:last-child{page-break-after:auto}
-.slip{border:1px dashed #8A96A2;padding:3mm 3.5mm;overflow:hidden;display:flex;flex-direction:column;gap:1mm}
-.top{display:flex;justify-content:space-between;align-items:flex-start;gap:4px}.vno{font-size:21px;font-weight:800;line-height:1.05;white-space:nowrap}
-.who{text-align:right;font-size:9.5px;color:#3d4852;line-height:1.3;font-weight:700}.sup{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.amt{font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}.tag{font-size:8.5px;font-weight:400;border:1px solid #8A5A00;color:#8A5A00;border-radius:3px;padding:0 3px;margin-left:5px;vertical-align:middle}
-.ids{font:8.5px/1.4 Consolas,monospace;color:#5E6B78;margin-top:auto}.slip.red .vno,.slip.red .amt{color:#B03A3A}
-.wait{padding:40px;text-align:center;color:#555}@media screen{body{background:#eee}.pg{background:#fff;width:210mm;min-height:297mm;margin:12px auto;padding:8mm;box-shadow:0 1px 4px #0002;align-content:start}}`
 
 function printHtml(title, css, html) {
   const w = window.open('', '_blank')
@@ -990,8 +973,7 @@ export default function LogisticsVoucher() {
           <span className="dim">能勾「可做账」且做账类型为 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的；计提记错主体的单张做（两边各出一张凭证、两张更正单），金额不符的要人工</span>
           {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
             {run.end && run.done.some(x => x.ok && x.redo) && <button className="lnk" onClick={() => printAdjust(Promise.all(run.done.filter(x => x.ok && x.redo).map(x => voucherPreview(x.inst))), '本批计提更正单')}>打印本批计提更正单（{run.done.filter(x => x.ok && x.redo).length} 张）</button>}
-            {run.end && bindBatch.length > 0 && <><button className="lnk" onClick={() => printHtml('本批装订对照清单', BIND_CSS, bindListHtml(bindBatch))}>打印本批装订清单（{bindBatch.length} 张）</button>
-              <button className="lnk" onClick={() => printHtml('本批凭证号贴条', SLIP_CSS, slipHtml(bindBatch))}>凭证号贴条</button></>}
+            {run.end && bindBatch.length > 0 && <><button className="lnk" onClick={() => printHtml('本批装订对照清单', BIND_CSS, bindListHtml(bindBatch))}>打印本批装订清单（{bindBatch.length} 张）</button></>}
             {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
         </div>
         {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
@@ -1117,10 +1099,9 @@ export default function LogisticsVoucher() {
           <select value={bmOn} onChange={e => setBm(e.target.value)}>{bindMonths.map(m => <option key={m} value={m}>{ymCn(m)}</option>)}</select>
           <span>已有凭证号 <b>{bindNow.length}</b> 张</span>
           <button className="btn" title="按主体分页、按凭证号排序；装订的同事对着纸质付款单上的钉钉审批编号找凭证号" onClick={() => printHtml(`装订对照清单 ${bmOn}`, BIND_CSS, bindListHtml(bindNow))}>打印装订对照清单</button>
-          <button className="btn" title="一页 21 个，剪下来贴在纸质付款单右上角，不用手抄凭证号" onClick={() => printHtml(`凭证号贴条 ${bmOn}`, SLIP_CSS, slipHtml(bindNow))}>打印凭证号贴条</button>
           {bindNow.some(x => x.adj && !x.red) && <button className="btn" title="本月做过红冲更正 / 主体更正的单，把计提更正单一次打出来（自动做账的也在里面）"
             onClick={() => printAdjust(Promise.all(bindNow.filter(x => x.adj && !x.red).map(x => voucherPreview(x.inst))), `计提更正单 ${bmOn}`)}>打印本月计提更正单（{bindNow.filter(x => x.adj && !x.red).length} 张单）</button>}
-          <span className="dim">按当前筛选（上面的状态/搜索）出；批量做完的凭证号都在这里，不用手写到付款单上</span>
+          <span className="dim">按当前筛选（上面的状态/搜索）出。凭证号不用贴条：装订的同事扫纸质付款单上的二维码就能看到主体和凭证号，手写标上（给他的账号勾「扫码查凭证」）</span>
         </div>}
       </div>
       {open && <Detail inst={open} onClose={() => setOpen(null)} onChanged={load} />}
