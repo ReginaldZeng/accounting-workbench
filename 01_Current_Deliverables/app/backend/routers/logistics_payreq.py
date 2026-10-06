@@ -453,7 +453,8 @@ def _import_multi(r, bills, operator, force=False):
         if has and not force:
             kept.append(src or b.get("fileName"))
             continue
-        res = LR.import_bill(carrier, period, data, operator, origin="钉钉请款单 %s「%s」" % (r.get("business_id"), b.get("fileName")))
+        res = LR.import_bill(carrier, period, data, operator, origin="钉钉请款单 %s「%s」" % (r.get("business_id"), b.get("fileName")),
+                             fname=b.get("fileName") or "")
         if not res.get("ok"):
             fail.append(b.get("fileName"))
             continue
@@ -491,7 +492,8 @@ def _import(r, bill, sha, operator, force=False, bills=None):
     with db._engine.connect() as c:
         data = c.execute(select(PF.c.data).where((PF.c.inst_id == r["inst_id"]) & (PF.c.file_id == str(bill["fileId"])))).scalar()
     from routers import logistics_review as LR
-    res = LR.import_bill(carrier, period, data, operator, origin="钉钉请款单 %s「%s」" % (r.get("business_id"), bill.get("fileName")))
+    res = LR.import_bill(carrier, period, data, operator, origin="钉钉请款单 %s「%s」" % (r.get("business_id"), bill.get("fileName")),
+                         fname=bill.get("fileName") or "")
     if not res.get("ok"):
         return {"bill_state": "parsefail", "bill_msg": "账单已到但解析失败：%s" % res.get("msg")}
     return {"bill_state": "imported", "bill_msg": "账单已就绪：明细 %d 行 / 汇总 %d 行（%s）" % (
@@ -711,20 +713,25 @@ def _inv_block(r, me):
     return out
 
 
+def inv_blocks(carrier, period, me=""):
+    """这家这月每张钉钉请款单(撤回/拒绝/已排除的不算)的「发票对暂估」结论。第③步页面和导出复核结果(V2.843)共用。只读，要读金蝶。"""
+    with db._engine.connect() as c:
+        reqs = [dict(r) for r in c.execute(select(PR).where((PR.c.carrier == carrier) & (PR.c.period == period))).mappings().all()]
+    reqs = [r for r in reqs if not r.get("excluded") and str(r.get("dt_status") or "").upper() != "TERMINATED"
+            and str(r.get("dt_result") or "").lower() != "refuse"]
+    reqs.sort(key=lambda r: (r.get("subject") or "", r.get("create_time") or ""))
+    return [_inv_block(r, me) for r in reqs]
+
+
 @router.get("/api/logistics-review/invoices")
 async def review_invoices(request: Request, carrier: str = "", period: str = ""):
     """第③步·发票与暂估：这家这月每张钉钉请款单(撤回/拒绝/已排除的不算) → 发票清单 + 按税率的计提暂估 vs 发票。只读。"""
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
-    with db._engine.connect() as c:
-        reqs = [dict(r) for r in c.execute(select(PR).where((PR.c.carrier == carrier) & (PR.c.period == period))).mappings().all()]
-    reqs = [r for r in reqs if not r.get("excluded") and str(r.get("dt_status") or "").upper() != "TERMINATED"
-            and str(r.get("dt_result") or "").lower() != "refuse"]
-    reqs.sort(key=lambda r: (r.get("subject") or "", r.get("create_time") or ""))
     from starlette.concurrency import run_in_threadpool
     me = _me_uid(u)
-    blocks = await run_in_threadpool(lambda: [_inv_block(r, me) for r in reqs])
+    blocks = await run_in_threadpool(inv_blocks, carrier, period, me)
     return {"ok": True, "carrier": carrier, "period": period, "blocks": blocks,
             "req_total": round(sum(float(b.get("amount") or 0) for b in blocks), 2),
             "inv_total": round(sum(b.get("inv_total") or 0 for b in blocks), 2),

@@ -25,6 +25,7 @@ from kernels import logistics_recon as lrc
 
 router = APIRouter()
 BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
+BR = store.bill_raw            # 账单原件(V2.843)
 SG, LN, CP = store.review_sign, store.review_line_note, store.review_carrier_pts   # 复核登记 / 逐笔差异解释 / 供应商复核要点
 FX = store.review_line_fix   # 计提更正(只登记应改为什么，打印交专人去金蝶改)
 DK = store.review_doc_ok     # 逐单已确认(复核人核过没问题的单据)
@@ -66,6 +67,10 @@ async def _read_upload(request):
         form = await request.form()
         f = form.get("file") or form.get("files")
         if f is not None and hasattr(f, "read"):
+            try:
+                request.state.upload_name = getattr(f, "filename", "") or ""     # 存账单原件时记原文件名(V2.843)
+            except Exception:
+                pass
             return await f.read()
     return await request.body()
 
@@ -407,13 +412,128 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
     data = await _read_upload(request)
     if not data:
         return JSONResponse({"ok": False, "msg": "未收到文件"}, status_code=400)
-    r = import_bill(carrier, period, data, u["name"])
+    r = import_bill(carrier, period, data, u["name"], fname=getattr(request.state, "upload_name", "") or "")
     if not r.get("ok"):
         return JSONResponse(r, status_code=400)
     return r
 
 
-def import_bill(carrier, period, data, operator, origin="手工上传"):
+def _save_raw_bill(carrier, period, src, data, operator, origin, fname):
+    """导入账单时把原文件存一份(同一份账单重导就换掉)，导出复核结果时附在后面。存不成不影响导入。V2.843"""
+    import hashlib
+    try:
+        data = bytes(data)
+        with db._engine.begin() as c:
+            scope = (BR.c.carrier == carrier) & (BR.c.period == period)
+            if src:      # 一家一月几份账单：只换同一份(没标份的旧件一并换)，和 bill_lines 的替换范围一致
+                scope = scope & ((BR.c.bill_src == src) | (BR.c.bill_src.is_(None)) | (BR.c.bill_src == ""))
+            c.execute(delete(BR).where(scope))
+            c.execute(insert(BR).values(carrier=carrier, period=period, bill_src=src or "", name=(fname or "")[:200], origin=(origin or "")[:200],
+                                        sha256=hashlib.sha256(data).hexdigest(), size=len(data), data=data, created_by=operator, created_at=_now()))
+    except Exception:
+        pass
+
+
+def _raw_bill_files(carrier, period):
+    """这家这月的账单原件 → [(文件名, bytes)]。先取导入时存下的(V2.843 起)；之前导的没存，退回钉钉请款单里已导入的那份账单附件(按内容去重)。只读。"""
+    out, seen = [], set()
+    try:
+        with db._engine.connect() as c:
+            for n, sha, data in c.execute(select(BR.c.name, BR.c.sha256, BR.c.data).where(
+                    (BR.c.carrier == carrier) & (BR.c.period == period)).order_by(BR.c.id)).all():
+                if data and sha not in seen:
+                    seen.add(sha); out.append((n or "", bytes(data)))
+    except Exception:
+        out = []
+    if out:
+        return out
+    PRT, PFT = store.payreq, store.payreq_file
+    try:
+        with db._engine.connect() as c:
+            for n, sha, data in c.execute(select(PFT.c.name, PFT.c.sha256, PFT.c.data).select_from(PFT.join(PRT, PRT.c.inst_id == PFT.c.inst_id)).where(
+                    (PRT.c.carrier == carrier) & (PRT.c.period == period) & (PRT.c.bill_state == "imported") & (PFT.c.role == "bill") &
+                    ((PRT.c.excluded.is_(None)) | (PRT.c.excluded == ""))).order_by(PFT.c.id)).all():
+                if data and sha not in seen:
+                    seen.add(sha); out.append((n or "", bytes(data)))
+    except Exception:
+        pass
+    return out
+
+
+def _attach_raw_sheets(wb, files):
+    """把账单原件逐表原样附到导出里(页名「原账单-表名」)：值、合并格、列宽行高、字体底色边框数字格式照搬(图片/印章带不过来)；
+    老格式 .xls 只搬值；隐藏的表不搬。返回附上的页名。"""
+    from copy import copy
+    from io import BytesIO
+    import openpyxl
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.utils import get_column_letter
+    used, added, total = set(wb.sheetnames), [], 0
+
+    def title(base):
+        t = ("原账单-" + re.sub(r"[\\/*?:\[\]]", "_", str(base or "表")))[:31]
+        k = 2
+        while t in used:
+            suf = "(%d)" % k
+            t = t[:31 - len(suf)] + suf
+            k += 1
+        used.add(t)
+        return t
+
+    for _fname, data in files:
+        try:
+            if bytes(data[:4]) == bytes.fromhex("d0cf11e0"):       # 老 .xls
+                for sh in intake.open_book(data).worksheets:
+                    ws = wb.create_sheet(title(sh.title))
+                    for row in sh.iter_rows(values_only=True):
+                        try:
+                            ws.append(list(row))
+                        except Exception:
+                            ws.append([None if v is None else str(v) for v in row])
+                    added.append(ws.title)
+                continue
+            src = openpyxl.load_workbook(BytesIO(data), data_only=True)
+        except Exception:
+            continue
+        for sh in src.worksheets:
+            if sh.sheet_state != "visible":
+                continue
+            ws = wb.create_sheet(title(sh.title))
+            # 只走表里真有的格子(_cells)：有的账单把格式刷到第 100 万行，按行列范围 iter_rows 会把整片空格子都建出来，导出卡死。
+            cells = list(getattr(sh, "_cells", {}).values())
+            styled = len(cells) <= 40000 and total <= 200000       # 特别大的表只搬值和数字格式，免得导出太慢
+            total += len(cells)
+            for cell in cells:
+                if isinstance(cell, MergedCell) or (cell.value is None and not (styled and cell.has_style)):
+                    continue
+                try:
+                    nc = ws.cell(row=cell.row, column=cell.column, value=cell.value)
+                except Exception:
+                    nc = ws.cell(row=cell.row, column=cell.column, value=re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(cell.value)))
+                nc.number_format = cell.number_format
+                if styled and cell.has_style:
+                    nc.font = copy(cell.font); nc.fill = copy(cell.fill); nc.border = copy(cell.border); nc.alignment = copy(cell.alignment)
+            for rg in sh.merged_cells.ranges:
+                try:
+                    ws.merge_cells(str(rg))
+                except Exception:
+                    pass
+            for dim in sh.column_dimensions.values():
+                if dim.width and dim.min and dim.max:
+                    for i in range(dim.min, min(dim.max, 300) + 1):
+                        ws.column_dimensions[get_column_letter(i)].width = dim.width
+            for k, dim in list(sh.row_dimensions.items())[:20000]:
+                if dim.height:
+                    ws.row_dimensions[k].height = dim.height
+            try:
+                ws.freeze_panes = sh.freeze_panes
+            except Exception:
+                pass
+            added.append(ws.title)
+    return added
+
+
+def import_bill(carrier, period, data, operator, origin="手工上传", fname=""):
     """解析一份账单落 bill_lines（上传页与钉钉请款单自动导入共用）→ {ok, bill_src, detail, accrual, skipped, sources} / {ok:False,msg}。"""
     spec = _load_spec(carrier)
     if not spec:
@@ -449,6 +569,7 @@ def import_bill(carrier, period, data, operator, origin="手工上传"):
     db.audit(operator, "物流复核-解析账单", "%s %s" % (carrier, period),
              "%s：明细 %d 行 / 计提 %d 行 / 跳过 %d 表" % (origin, len(res["detail"]), len(res["accrual"]), len(res["skipped"])))
     _bust(carrier, period)   # 账单重解析 → 逐笔/逐单视图缓存作废
+    _save_raw_bill(carrier, period, src, data, operator, origin, fname)
     with db._engine.connect() as c:   # 本月现有几份账单(按货主)：汇总行合计，没有汇总行用明细合计
         srcs = {}
         for r in c.execute(select(BL.c.bill_src, BL.c.grain, func.count(), func.sum(BL.c.amount)).where(
@@ -3089,6 +3210,23 @@ def _dw(t):
     return sum(2 if ord(ch) > 0x2E80 else 1 for ch in str(t or ""))
 
 
+def _merge_fast(ws, r1, c1, r2, c2):
+    """同 ws.merge_cells，但跳过 openpyxl「这一块是不是已经在合并区里」的逐块比对——合并几万块时那一步是平方级的：
+    迅鸽 2026-08 复核明细 7,725 行、每张单十几列要合并，线上实测整个导出 501 秒，全耗在这里(V2.843 查出)。调用方保证各块互不重叠。"""
+    from openpyxl.worksheet.merge import MergedCellRange
+    from openpyxl.utils import get_column_letter
+    mcr = MergedCellRange(ws, "%s%d:%s%d" % (get_column_letter(c1), r1, get_column_letter(c2), r2))
+    rs = ws.merged_cells.ranges
+    (rs.add if hasattr(rs, "add") else rs.append)(mcr)
+    ws._clean_merge_range(mcr)
+
+
+def _raw_json_exists(carrier, period):
+    """早先手工备的原账单 json(raw_bills/承运商_账期.json，带右侧复核列)在不在——在就照旧用它，不再另附原件。"""
+    import os as _os
+    return _os.path.exists(_os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "..", "raw_bills", "%s_%s.json" % (carrier, period)))
+
+
 def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     """《计提更正单》（第二页，可直接打印交专人）。抬头两行居中：①计提更正单 ②供应商编码/名称(取计提凭证上挂的供应商维度)。
     每笔三行(用户 2026-09-30 定)：原记账 / 应改为(不变的写"不变") / 原因(横跨维度与金额列)；
@@ -3295,7 +3433,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     HROW = 5
     for hc0 in ws[HROW]:
         hc0.font = HFONT; hc0.fill = HFILL; hc0.alignment = center; hc0.border = BORDER
-    gt_rows, fix_rows = [], []
+    gt_rows, fix_rows, spans = [], [], []
     for r in L.get("rows", []):
         if r.get("kind") == "gtotal":
             sj = _cn(r.get("book_code"), r.get("subject"))
@@ -3317,6 +3455,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                    r.get("amt"), r.get("tax_rate"), r.get("bill"), r.get("diff"), nt or None])
         if r.get("fix"):
             fix_rows.append(ws.max_row)
+        if (r.get("bill_span") or 0) > 1:
+            spans.append((ws.max_row, int(r["bill_span"])))
     ws.append(["合计", None, None, None, None, None, acc_t, None, bill_t, dif_t, None])
     LAST = ws.max_row
     for rr in range(HROW + 1, LAST + 1):
@@ -3339,12 +3479,57 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         if rr in fix_rows:
             ws.cell(rr, 11).fill = PatternFill("solid", fgColor="FBF0DA")
             ws.cell(rr, 11).font = Font(color="8A5A00")
+    # V2.843(用户看易风达导出「为什么小料出库运费没有数据」)：几笔计提合起来对同一个账单数的(记-553 6,255 + 记-566 68,900 对账单 75,155)，
+    #   账单金额、差异两格跨这几行合并，和页面一致；并在表下注明。
+    vmid = Alignment(horizontal="right", vertical="center")
+    for r1, n in spans:
+        r2 = min(r1 + n - 1, LAST - 1)
+        if r2 <= r1:
+            continue
+        for cc in (9, 10):
+            ws.merge_cells(start_row=r1, start_column=cc, end_row=r2, end_column=cc)
+            ws.cell(r1, cc).alignment = vmid
     fixes = L.get("fixes") or []
+    raw_files = [] if _raw_json_exists(carrier, period) else _raw_bill_files(carrier, period)
+    foot = []
+    if spans:
+        foot.append(("账单金额、差异跨几行合并的：那几笔计提合起来对同一个账单数（账单上分不到每一笔计提）。", "5E6B78"))
     if fixes:
-        r0 = LAST + 2
+        foot.append(("另有 %d 笔计提需要更正（登记更正不影响本表对账），明细见《计提更正单》，打印交专人在金蝶修改。" % len(fixes), "8A5A00"))
+    else:
+        foot.append(("复核台第①步没有登记维度/金额的更正，所以这份导出里没有《计提更正单》页。要登记：第①步在那一笔上点「改维度」，再导出。", "5E6B78"))
+    # 发票对暂估(税率开错、税额尾差、记错主体)的更正不在本表(本表比含税金额，看不出来)：在「付款做账」里随付款凭证红冲更正，更正单也在那边打印。
+    #   用户 2026-10-06 看易风达导出问「计提更正单是在哪里出」「不是有差异吗」——记-565 计提按 6%、发票 9%，已在付款凭证里更正，导出里却一个字没有。
+    try:
+        from routers import logistics_payreq as _PQ
+        blocks = _PQ.inv_blocks(carrier, period)
+    except Exception:
+        blocks = None
+    if blocks is None:
+        foot.append(("发票对暂估：这次没取到（读金蝶没成功），请看复核台第③步「发票与暂估」。", "B23B2E"))
+    else:
+        nfix = 0
+        for b in blocks:
+            if b.get("kind") in (None, "", "hx"):
+                continue
+            nfix += 1
+            pv = b.get("posted") or {}
+            txt = "发票对暂估 · %s 请款 %s：%s。" % (b.get("subject") or "", f"{float(b.get('amount') or 0):,.2f}", b.get("kind_text") or b.get("kind_cn") or "")
+            if b.get("kind") in ("tail", "redo", "subj"):
+                txt += ("已在付款凭证 记-%s 里红冲更正；" % pv.get("vno") if pv.get("vno") else "还没做付款凭证，做的时候随付款凭证红冲更正；") + \
+                       "这种《计提更正单》在「付款做账」这张请款单的预览里打印。"
+            foot.append((txt, "8A5A00"))
+        if blocks and not nfix:
+            foot.append(("发票对暂估：%d 张请款单的发票和计提暂估都一致，只核销，不用更正。" % len(blocks), "5E6B78"))
+    if not _raw_json_exists(carrier, period):
+        foot.append(("原账单：见后面「原账单-…」页（%d 份文件，原样附上）。" % len(raw_files), "5E6B78") if raw_files else
+                    ("原账单：系统里没有这家这月的账单原件（这版之前导入的账单没留原件，钉钉请款单里也没找到已导入的那份）；重新导入一次，再导出就会附上。", "B23B2E"))
+    for i, (txt, color) in enumerate(foot):
+        r0 = LAST + 2 + i
         ws.merge_cells(start_row=r0, start_column=1, end_row=r0, end_column=NCOL)
-        c0 = ws.cell(r0, 1, "另有 %d 笔计提需要更正（登记更正不影响本表对账），明细见《计提更正单》，打印交专人在金蝶修改。" % len(fixes))
-        c0.font = Font(bold=True, color="8A5A00"); c0.alignment = left
+        c0 = ws.cell(r0, 1, txt)
+        c0.font = Font(bold=(color == "8A5A00"), color=color); c0.alignment = left
+        ws.row_dimensions[r0].height = 32 if len(txt) > 70 else 18
     for i, w in enumerate([16, 26, 20, 17, 20, 10, 14, 7, 14, 13, 30], 1):     # 主体/产品线/产品类型/部门带编码后加宽
         ws.column_dimensions[chr(64 + i)].width = w
     ws.freeze_panes = "A6"
@@ -3460,7 +3645,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 continue
             for k, ci in col_of_key.items():
                 if _is_doclvl(k):
-                    ws2.merge_cells(start_row=s, start_column=ci, end_row=e, end_column=ci)
+                    _merge_fast(ws2, s, ci, e, ci)
                     ws2.cell(row=s, column=ci).alignment = midv
         ws2.freeze_panes = "F3"
         widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 11, 8, 9, 8, 11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
@@ -3529,6 +3714,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     for j in range(len(addcols)):   # 仅追加列数据配淡底，原始列不动
                         ws3.cell(rn, base_n + 1 + j).fill = ALIGHT
                 ws3.freeze_panes = "A2"
+    if raw_files:
+        _attach_raw_sheets(wb, raw_files)
     bio = BytesIO(); wb.save(bio)
     fn = "%s_%s_复核结果.xlsx" % (carrier, period)
     return Response(content=bio.getvalue(),

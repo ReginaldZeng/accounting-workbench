@@ -210,8 +210,25 @@ payreq_file = Table(
     Column("created_at", String(20)),
 )
 
+# 账单原件(V2.843)：导入账单时把原文件存一份，导出复核结果时逐表原样附在后面(「原账单-表名」)。
+# 用户 2026-10-06 看易风达导出：「而且源表呢」——原来只有手工备过 raw_bills/*.json 的三家才带原账单页。
+bill_raw = Table(
+    "logistics_bill_raw", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("carrier", String(40)),
+    Column("period", String(7)),
+    Column("bill_src", String(120)),               # 一家一月几份账单时的份名(同 bill_lines.bill_src)，只有一份的为空
+    Column("name", String(200)),                   # 原文件名(手工上传的可能没有)
+    Column("origin", String(200)),                 # 手工上传 / 钉钉请款单 xxx「文件名」
+    Column("sha256", String(64)),
+    Column("size", Integer),
+    Column("data", LargeBinary(2 ** 32 - 1)),
+    Column("created_by", String(40)),
+    Column("created_at", String(20)),
+)
+
 TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok, review_subj,
-          payreq, payreq_file]
+          payreq, payreq_file, bill_raw]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {
