@@ -244,7 +244,8 @@ export function printAdjust(ds, title, opt = {}) {
     }
     const sheets = ok.flatMap(sheetsOf)
     show(sheets.join(''))
-    q('n').textContent = `${ok.length} 张请款单 · ${sheets.length} 页纸（A4 横向）`
+    const names = sheets.map(h => (h.match(/<div class="t1">([^<]*)<\/div>/) || [])[1] || '计提更正单')
+    q('n').textContent = `${ok.length} 张请款单 · ${sheets.length} 页纸（A4 横向）` + (sheets.length > 1 && sheets.length <= 6 ? '：' + names.map((n, i) => `第${i + 1}页 ${n.replace(/^计提更正单/, '').replace(/[（）]/g, '') || '更正'}`).join(' / ') : '')
     q('hint').textContent = (opt.remind ? opt.remind + '　' : '') + '核对一下内容，点右上角「确认打印」；浏览器会再弹出系统的打印框，选好打印机点「打印」。打出来订在纸质付款单后面。'
     const pb = q('print')
     pb.disabled = false; pb.style.opacity = '1'

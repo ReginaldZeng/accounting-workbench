@@ -2197,7 +2197,7 @@ def _build_lines(request, carrier, period):
       atot += sa; btot += sb
     n_unexpl = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None
                    and abs(r["diff"]) >= 0.01 and not (r.get("note") or "").strip())
-    return _attach_fixes({"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
+    return _attach_xsubj(_attach_fixes({"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
             "accr_total": round(atot, 2), "bill_total": round(btot, 2), "diff_total": round(atot - btot, 2),
             "adj": adj, "prior": prior, "prior_total": round(sum(p["net"] for p in prior), 2),
             "xmoved": got.get("xmoved") or [],
@@ -2205,7 +2205,44 @@ def _build_lines(request, carrier, period):
             "od_total": (lambda a: {"amt": a, "ratio": round(max(0.0, min(1.0, a / btot)), 4) if btot > 0 else 0.0})(
                 round(sum(det3[k]["amt"] for k in bill3 if k in det3), 2)),
             "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl,
-            "suppliers": got.get("suppliers") or []}, carrier, period)
+            "suppliers": got.get("suppliers") or []}, carrier, period), carrier, period)
+
+
+def _attach_xsubj(L, carrier, period):
+    """计提记错主体的提示(V2.856，用户看丰源第①步 记-390 显示「平」问「这怎么会平呢」)：
+    第①步比的是「计提 对 账单」——账单上那张单也标在同一个主体，所以是平的；主体记错是从发票和请款单看出来的(发票开给另一个主体、由它付款)，
+    原来只在第③步「发票与暂估」和付款做账里说。这里把付款做账的判断接过来：哪几笔计提会在付款时被红冲、补提到别的主体，标在那一行上并在表下说明。只读。"""
+    L["xsubj"] = []
+    try:
+        from routers import logistics_voucher as LVR
+        PRT = store.payreq
+        with db._engine.connect() as c:
+            reqs = [dict(r) for r in c.execute(select(PRT.c.inst_id, PRT.c.subject, PRT.c.amount, PRT.c.business_id, PRT.c.excluded,
+                                                    PRT.c.dt_status, PRT.c.dt_result).where((PRT.c.carrier == carrier) & (PRT.c.period == period))).mappings().all()]
+        hints = {}
+        for r in reqs:
+            if r.get("excluded") or str(r.get("dt_status") or "").upper() == "TERMINATED" or str(r.get("dt_result") or "").lower() == "refuse":
+                continue
+            try:
+                d, code = LVR._preview_data(r["inst_id"])
+            except Exception:
+                continue
+            if code != 200:
+                continue
+            posted = bool((d.get("req") or {}).get("posted"))
+            for x in d.get("xbook") or []:
+                rv = x.get("reversed") or None
+                hints[(x.get("short"), "记-%s" % x.get("vno"))] = {
+                    "to": r.get("subject"), "req_amount": round(float(r.get("amount") or 0), 2), "bid": r.get("business_id") or "", "posted": posted,
+                    "reversed": ("%s月 记-%s" % (rv.get("month"), rv.get("vno"))) if rv else ""}
+        for row in L.get("rows", []):
+            h = hints.get((row.get("subject"), row.get("vno"))) if row.get("kind") == "accr" else None
+            if h:
+                row["xsubj"] = h
+                L["xsubj"].append(dict(h, subject=row.get("subject"), vno=row.get("vno"), amt=row.get("amt")))
+    except Exception:
+        pass
+    return L
 
 
 _FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj", "to_amt_tax", "to_rate", "to_amt", "memo", "split_amt")

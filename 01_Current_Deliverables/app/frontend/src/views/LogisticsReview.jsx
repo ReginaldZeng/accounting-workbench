@@ -1108,6 +1108,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           <td><div className="notecell">{bad || (r.note || '').trim()
                             ? <input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
                               placeholder="为什么差…" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} />
+                            : r.xsubj ? <span className="tag bad" title={`账单上这张单也标在${r.subject}，所以计提对账单是平的；但发票、请款单是${r.xsubj.to}的——这笔计提记错了主体，付款做账时在${r.subject}红冲、在${r.xsubj.to}补提`}>对账单平 · 记错主体 → {r.xsubj.to}</span>
                             : flat ? <span className="tag ok">平</span>
                               : (!anchor && gdiff != null ? <span className="dim" style={{ fontSize: 12 }} title="这几笔共用一个账单金额，差异解释写在本组第一笔">差异见本组首笔</span> : null)}{fixCell}</div></td>
                         </tr>
@@ -1132,6 +1133,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {L && !L.err && L.prior && L.prior.length > 0 && <div className="adjnote">上期计提的红冲 / 更正（本月做的账，属于上个月）不计入本月，净额 <b className="mono">{money(L.prior_total)}</b>：{L.prior.map(p => `${p.vno} ${p.subject} ${money(p.net)}`).join('；')}</div>}
           {L && !L.err && L.xin && L.xin.length > 0 && <div className="adjnote">跨月核销：这张账单在付款做账里选定同时核销别的月份的计提，已并进下表——
             {L.xin.map(x => `${x.subject} ${Number(String(x.month).slice(5))} 月 ${x.vno} ${money(x.amt)}`).join('；')}</div>}
+          {L && !L.err && L.xsubj && L.xsubj.length > 0 && <div className="adjnote"><b>计提记错主体</b>（这一页比的是计提对账单；主体对不对是从发票和请款单看出来的）：
+            {L.xsubj.map(x => <div key={x.subject + x.vno} style={{ marginTop: 3 }}>{x.subject} {x.vno} {money(x.amt)} —— 发票、请款单（{money(x.req_amount)}，审批 {x.bid}）是 <b>{x.to}</b> 的。
+              {x.reversed ? `${x.subject}已红冲（${x.reversed}）` : x.posted ? `${x.to}的付款凭证已做` : `付款做账时：${x.subject}红冲这笔、${x.to}补提后核销（系统一并做）`}；计提更正单两张（① 红冲 ② 补提）。</div>)}</div>}
           {L && !L.err && L.xmoved && L.xmoved.length > 0 && <div className="adjnote">本月有计提已被别的月份的账单选定核销，不计入本月——
             {L.xmoved.map(x => `${x.subject} ${x.vno} ${money(x.amt)} → ${x.to} 的账单`).join('；')}</div>}
           {L && !L.err && L.adj && L.adj.length > 0 && <div className="adjnote">另有 {L.adj.length} 张只有税额调整科目的凭证未计入：{L.adj.map(a => `${a.vno} ${a.acct} ${money(a.amt)}`).join('、')}</div>}
