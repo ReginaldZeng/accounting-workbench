@@ -12,7 +12,8 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
 import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
-import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet } from '../api.js'
+import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, voucherPlans, voucherPreview } from '../api.js'
+import { printAdjust } from './LogisticsVoucher.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -111,8 +112,19 @@ function ScopeDlg({ onClose, onSaved, flash }) {
   )
 }
 
+// V2.851(用户 2026-10-06「在审批付款的时候一并打出来」)：计提更正单在审批这张请款单的时候就打——那时纸质付款单还在自己手里，订在后面一起流转；
+//   弹窗里先给出「做账预判」(计提和发票比对的结论)，要红冲更正 / 记错主体的出打印按钮。凭证号那时还没有，更正单上留空，做完账由装订的同事扫码后手填。
+const ADJ_KINDS = ['tail', 'redo', 'subj']
+const printAdj = insts => printAdjust(Promise.all(insts.map(i => voucherPreview(i).catch(() => null))), '计提更正单')
 function PayReqDlg({ v, onClose, onChanged, flash }) {
   const [p, setP] = useState(v.period || '')
+  const [plan, setPlan] = useState(null)        // 做账预判 {kind, text} / {err}
+  useEffect(() => {
+    if (!v.period || v.excluded) return
+    let off = false
+    voucherPlans([v.inst]).then(r => { if (!off) setPlan((r.plans || {})[v.inst] || { none: true }) }).catch(e => { if (!off) setPlan({ err: e.message }) })
+    return () => { off = true }
+  }, [v.inst])
   const [busy, setBusy] = useState('')
   const pull = force => {
     if (force && !window.confirm('用钉钉请款单里这份账单替换复核台现有的账单？\n现有账单明细会被换掉。')) return
@@ -149,6 +161,11 @@ function PayReqDlg({ v, onClose, onChanged, flash }) {
         <div className="prrow"><b>发票</b>{v.folder ? <a href={`#/invdesk?folder=${v.folder}`} target="_blank" rel="noopener">在发票管家打开票夹#{v.folder} ↗</a>
           : <span className="dim">还没进发票管家{v.auto ? '（下一轮扫描会自动拉）' : '（上线前的老单，点下面「拉进来」）'}</span>}</div>
         <div className="prrow"><b>账单</b><span className={'pill ' + bc}>{bl}</span><span className="dim">{v.bill_msg}</span></div>
+        {v.period && !v.excluded && <div className="prrow"><b>做账预判</b>{!plan ? <span className="dim">在比计提和发票…</span>
+          : plan.err ? <span className="dim">没算出来：{plan.err}</span> : plan.none ? <span className="dim">票夹里还没有发票，比不了</span>
+            : <><span className={'pill ' + (plan.kind === 'hx' ? 'ok' : ADJ_KINDS.includes(plan.kind) ? 'bad' : 'warn')}>{plan.kind === 'hx' ? '一致·只核销' : ADJ_KINDS.includes(plan.kind) ? '要更正' : '要人工看'}</span>
+              <span className="dim" style={{ flex: 1, minWidth: 200 }}>{plan.text}</span>
+              {ADJ_KINDS.includes(plan.kind) && <button className="btn pri" title="审批的时候一并打出来，订在纸质付款单后面；凭证号留空，做完账由装订的同事填" onClick={() => printAdj([v.inst])}>打印计提更正单</button>}</>}</div>}
         <div className="prrow"><b>归属月份</b><input type="month" value={p} onChange={e => setP(e.target.value)} />
           <button className="btn sm" disabled={busy !== '' || p === (v.period || '')} onClick={assign}>保存</button>
           <span className="dim">{v.period ? (PSRC[v.period_src] || '') : '没认出归哪个月：按账单月份选一下'}</span></div>
@@ -895,7 +912,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {ov && ov.payreq && !ov.payreq.err && <div className="prbar">
             <b>钉钉请款单</b>
             {(ov.payreq.mine || []).length > 0 && <span className="prgrp">待我审批 {ov.payreq.mine.map(v =>
-              <button key={v.inst} className="dtchip dtmine" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}</span>}
+              <button key={v.inst} className="dtchip dtmine" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}
+              <button className="lnk" style={{ fontSize: 12 }} title="把待我审批的这几张里要红冲更正 / 记错主体的计提更正单一次打出来，审批时订在纸质付款单后面；不用更正的不出纸"
+                onClick={() => printAdj(ov.payreq.mine.filter(v => v.period).map(v => v.inst))}>打印这几张的计提更正单</button></span>}
             {(ov.payreq.unassigned || []).length > 0 && <span className="prgrp">没认出月份 {ov.payreq.unassigned.slice(0, 8).map(v =>
               <button key={v.inst} className="dtchip dtrun" onClick={() => setPr(v)}>{v.carrier}·{v.subject} {money(v.amount)}</button>)}
               {ov.payreq.unassigned.length > 8 && <span className="dim">等 {ov.payreq.unassigned.length} 张</span>}</span>}

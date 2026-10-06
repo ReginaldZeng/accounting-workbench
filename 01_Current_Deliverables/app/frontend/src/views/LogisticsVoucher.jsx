@@ -100,10 +100,13 @@ const MODE_CN = { rate: '改税率', fix: '改科目/维度/金额', tail: '尾�
 // 表下合计(原记账/应改为两行)、说明、签字栏。付款做账多一行钉钉审批/付款/调整凭证信息，和对应发票。
 const cnj = (c, n) => [c, n].filter(Boolean).join(' ')
 // opt(主体更正的两张用)：title 单名 / subject 主体栏 / vno 调整凭证 / emptyOld、emptyNew 空格子写什么 / why(a) 原因行 / note 说明 / noBy 不印制单人(别人做账)
+// V2.851(用户「在审批付款的时候一并打出来」)：更正单在审批时就打、订在纸质付款单后面，那时还没有付款凭证——凭证号留一道横线，
+//   做完账由装订的同事扫码看到凭证号后手填。
+const VNO_BLANK = '<span style="white-space:nowrap">______年____月 记-________</span>（做账后填）'
 function adjustSheet(d, adjIn, opt = {}) {
   const q = d.req, p = q.posted, adj = adjIn || d.adjust || []
   const ym = String(d.voucher.date || '').slice(0, 7)
-  const hereVno = p ? `${ym.replace('-', '年')}月 记-${esc(p.vno)}`.replace('年0', '年') : '（保存到金蝶后生成）'
+  const hereVno = p ? `${ym.replace('-', '年')}月 记-${esc(p.vno)}`.replace('年0', '年') : VNO_BLANK
   const vno = opt.vno || hereVno
   const inv = d.invoices || []
   const dimsOf = ls => [
@@ -117,7 +120,7 @@ function adjustSheet(d, adjIn, opt = {}) {
     const by = p && !opt.noBy ? `${esc(p.by)}<br>${esc(String(p.at || '').slice(0, 10))}` : ''
     return `<tbody class="blk"><tr><td rowspan="3" class="c">${i + 1}</td><td rowspan="3">${esc(opt.subject || q.subject_full || q.subject)}</td>
       <td rowspan="3" class="c">${opt.vnoOf ? opt.vnoOf(a) : '记-' + esc(a.vno)}</td><td rowspan="3" class="c nw">${esc(a.year)}-${String(a.month).padStart(2, '0')}</td>
-      <td rowspan="3" class="c nw${(opt.ym || ym) !== `${a.year}-${String(a.month).padStart(2, '0')}` ? ' hotf' : ''}">${esc(opt.ym || ym)}</td>
+      <td rowspan="3" class="c nw${(opt.ym || ym) !== `${a.year}-${String(a.month).padStart(2, '0')}` ? ' hotf' : ''}">${esc(opt.ym || ym)}${p || opt.ym ? '' : '<br><span class="dim">预计</span>'}</td>
       <td class="lb old">原记账</td>${od.map(x => `<td class="old">${x || opt.emptyOld || '空'}</td>`).join('')}
       <td class="n old">${money(a.old.gross)}</td><td class="c old">${pct(a.old.rate)}</td><td class="n old">${money(a.old.net)}</td><td class="n old">${money(a.old.tax)}</td>
       <td rowspan="3" class="c">${by}</td></tr>
@@ -142,7 +145,7 @@ function adjustSheet(d, adjIn, opt = {}) {
     本次付款共核销计提 ${(d.accruals || []).length} 张（${(d.accruals || []).map(a => '记-' + esc(a.vno)).join('、')}），其余未列的按原计提直接核销。</div>`}
   <div class="note">对应发票 ${inv.length} 张：${invTxt}</div>
   <div class="sign"><span>制单人：${esc(p && !opt.noBy ? p.by : '') || (opt.noBy ? '______________' : '')}</span><span>复核人：______________</span><span>审核人：______________</span><span>日期：${p ? esc(String(p.at || '').slice(0, 10)) : '______________'}</span></div>
-  <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString('zh-CN', { hour12: false })}${p ? '' : ' · 未写金蝶，凭证号待定'}</div></div>`
+  <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString('zh-CN', { hour12: false })}${p ? '' : ' · 审批时打印，还没做账：凭证号、调账月份以做账为准'}</div></div>`
 }
 
 const SHEET_CSS = `@page{size:A4 landscape;margin:10mm 10mm}*{box-sizing:border-box}body{font:11px/1.45 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
@@ -176,7 +179,7 @@ function sheetsOf(d) {
     // ① 原主体：整笔红冲
     out.push(adjustSheet(d, as.map(a => ({ ...a, new: zero(a.old.rate) })), {
       side: 'from', noBy: !rev.some(r => r.sys), ym: rev.length ? `${rev[0].year}-${String(rev[0].month).padStart(2, '0')}` : '待定', title: `计提更正单（主体更正 ① ${f} 红冲）`, subject: as[0].from_full || f, emptyNew: '冲回',
-      vno: rev.length ? rev.map(r => `${r.year}年${r.month}月 记-${esc(r.vno)}`).join('、') : '（保存到金蝶后生成）',
+      vno: rev.length ? rev.map(r => `${r.year}年${r.month}月 记-${esc(r.vno)}`).join('、') : VNO_BLANK,
       why: () => `这笔费用应由${here}承担（发票开给${here}、由${here}付款），计提时记到了本主体，整笔红冲`,
       note: hv => `<div class="note">说明：<b>${esc(f)}</b>账簿做一张红冲凭证，把上面的计提整笔冲回（原分录全额取负；${rev.some(r => r.sys) ? '系统已建并提交，待审核' : rev.length ? '已做' : '保存到金蝶时系统建好并提交，待审核'}）：${ent}
         ${esc(here)}已在付款凭证 ${hv} 中补提并核销（见「主体更正 ② ${esc(here)} 补提」）。</div>`,

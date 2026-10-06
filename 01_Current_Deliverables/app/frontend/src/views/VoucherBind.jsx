@@ -5,7 +5,8 @@
 //   「没审核的显示」「先做物流试运行」。
 //   三个页签：① 扫码标注(扫码枪/审批编号 → 主体、凭证号、审没审核、要不要附计提更正单；这一轮已扫的清单)
 //            ② 还没扫到的(这个凭证月份已有凭证号、但还没人扫过的纸质单——系统只知道扫没扫过，不知道有没有真写上去)
-//            ③ 计提更正单(由装订的人打：扫到那张当场打，或在这里把扫过、还没打的一次打出来)
+//   计提更正单不在这里打(V2.851，用户「在审批付款的时候一并打出来」)：审批请款单时就打好、订在付款单后面，凭证号留空；
+//   这里扫到要附更正单的，提醒核对后面订没订、把凭证号填到更正单上；万一丢了可以补打。
 //   手机用 #/vscan(钉钉扫一扫)，扫过的同样记到这里。扫码、取更正单都只读，不动金蝶。
 import React, { useEffect, useRef, useState } from 'react'
 import { voucherBindList, voucherBindAdjust } from '../api.js'
@@ -14,7 +15,7 @@ import { useScan, printAdjust, ymCn, SUBJ_TONE, LV_CSS } from './LogisticsVouche
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const tone = s => SUBJ_TONE[s] || 'g'
 const hm = t => String(t || '').slice(5, 16)
-const TABS = [['scan', '扫码标注'], ['todo', '还没扫到的'], ['adj', '计提更正单']]
+const TABS = [['scan', '扫码标注'], ['todo', '还没扫到的']]
 
 export default function VoucherBind({ user }) {
   const [tab, setTab] = useState('scan')
@@ -37,9 +38,6 @@ export default function VoucherBind({ user }) {
   const items = (L && L.items) || []
   const paper = items.filter(x => x.paper)
   const todo = paper.filter(x => !x.scanned)
-  const adjInsts = [...new Set(items.filter(x => x.adj > 0).map(x => x.inst))]
-  const adjRows = adjInsts.map(inst => { const xs = items.filter(x => x.inst === inst); const main = xs.find(x => x.paper) || xs[0]; return { inst, main, xs, scanned: main.scanned, printed: xs.map(x => x.printed).find(Boolean) || null } })
-  const adjReady = adjRows.filter(r => r.scanned && !r.printed)
   const phoneUrl = `${window.location.origin}${window.location.pathname}#/vscan`
 
   return (
@@ -48,7 +46,7 @@ export default function VoucherBind({ user }) {
       <div className="head"><div><div className="h-title">凭证装订</div>
         <div className="h-sub">纸质付款单到手后：扫右上角的钉钉二维码 → 看它是哪个主体、哪张凭证 → 手写标到单子上。只读，不动金蝶、不做账。试运行：目前认得物流请款单和发票管家收过票的审批单。</div></div>
         <div className="h-tools"><span className="lv-seg">{TABS.map(([k, t]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{t}
-          {k === 'todo' && L ? ` ${todo.length}` : k === 'adj' && L ? ` ${adjRows.filter(r => !r.printed).length}` : ''}</button>)}</span></div></div>
+          {k === 'todo' && L ? ` ${todo.length}` : ''}</button>)}</span></div></div>
       <div className="body">
         {lerr && <div className="lv-msg bad">清单没读出来：{lerr}</div>}
 
@@ -75,14 +73,14 @@ export default function VoucherBind({ user }) {
                       {vs.slice(1).map((x, i) => <div key={i} className="vb-more">另有　<b>{x.subject} 记-{x.vno}</b>　{ymCn(x.month)} · {x.what}</div>)}
                       <div className="vb-tags">
                         {a.checker ? <span className="vb-tag ok">已审核 · {a.checker}</span> : a.audited === false ? <span className="vb-tag warn">还没审核 · 凭证号可能会变</span> : null}
-                        {needAdj && <span className="vb-tag warn">要附计提更正单{c.has_xred ? '（两张：① 红冲 ② 补提）' : ''}</span>}
+                        {needAdj && <span className="vb-tag warn">后面应订着计提更正单{c.has_xred ? '（两张：① 红冲 ② 补提）' : ''} · 把凭证号填上去</span>}
                         {c.scanned_before && !c.dup && <span className="vb-tag neu">之前扫过 · {c.scanned_before.by} {hm(c.scanned_before.at)}</span>}
                       </div>
                       <dl className="vb-kv"><dt>收款方</dt><dd>{c.payee}</dd><dt>金额</dt><dd className="mono">{money(c.amount)}</dd>
                         {c.bid && <><dt>审批编号</dt><dd className="mono">{c.bid}</dd></>}
                         {a.maker && <><dt>制单人</dt><dd>{a.maker}{a.operator ? `（经办 ${a.operator}）` : ''}</dd></>}
-                        {needAdj && <><dt>更正单</dt><dd><button className="btn sm" onClick={e => { e.stopPropagation(); printInsts([c.inst]) }}>打印这张的更正单</button>
-                          {c.adj_printed && <span className="dim">　打过：{c.adj_printed.by} {hm(c.adj_printed.at)}</span>}</dd></>}
+                        {needAdj && <><dt>更正单</dt><dd>审批时已经打好、订在付款单后面；没找到的话 <button className="lnk" onClick={e => { e.stopPropagation(); printInsts([c.inst]) }}>补打一张</button>
+                          {c.adj_printed && <span className="dim">　补打过：{c.adj_printed.by} {hm(c.adj_printed.at)}</span>}</dd></>}
                       </dl>
                     </div>}
           </div>
@@ -106,8 +104,6 @@ export default function VoucherBind({ user }) {
           <select className="lv-sel" value={(L && L.month) || ''} onChange={e => { setL(null); loadL(e.target.value) }}>{((L && L.months) || []).map(m => <option key={m} value={m}>{ymCn(m)}</option>)}</select>
           {tab === 'todo' && L && <><span>有纸质付款单的凭证 <b>{paper.length}</b> 张 · 扫过 <b>{paper.length - todo.length}</b> · 还没扫到 <b className={todo.length ? 'warn' : 'ok'}>{todo.length}</b></span>
             <label className="sc-say"><input type="checkbox" checked={all} onChange={e => setAll(e.target.checked)} /> 扫过的也列出来</label></>}
-          {tab === 'adj' && L && <><span>要附更正单的 <b>{adjRows.length}</b> 张 · 还没打 <b className={adjRows.some(r => !r.printed) ? 'warn' : 'ok'}>{adjRows.filter(r => !r.printed).length}</b></span>
-            <button className="btn btn-pri" disabled={!adjReady.length} title="只打纸质单已经扫到过的：单子在手里才订得上" onClick={() => printInsts(adjReady.map(r => r.inst), `计提更正单 ${L.month}`)}>打印扫过、还没打的（{adjReady.length} 张）</button></>}
           <span style={{ flex: 1 }} /><button className="btn" onClick={() => loadL()}>刷新</button>
         </div>}
 
@@ -127,22 +123,6 @@ export default function VoucherBind({ user }) {
             </tbody></table></div>
         </>}
 
-        {tab === 'adj' && <>
-          <div className="vb-note">做账时发生过红冲更正 / 主体更正的，要把《计提更正单》订在纸质付款单后面。<b>谁装订谁打</b>：扫到那张单时当场点「打印这张的更正单」，或者在这里把扫过、还没打的一次打出来。更正单上印着凭证号，所以要等付款凭证做好才打得出来。</div>
-          <div className="tbl-wrap"><table className="lv-t">
-            <thead><tr><th>主体</th><th>凭证号</th><th>收款方</th><th className="num">金额</th><th>更正单</th><th>纸质单</th><th>打印</th><th></th></tr></thead>
-            <tbody>
-              {!L && <tr><td colSpan="8" className="lv-empty">读取中…</td></tr>}
-              {L && adjRows.map(r => <tr key={r.inst}>
-                <td>{r.xs.map(x => <span key={x.key} className={'vb-pill tone-' + tone(x.subject)} style={{ marginRight: 4 }}>{x.subject}</span>)}</td>
-                <td className="mono"><b>{r.xs.map(x => '记-' + x.vno).join(' / ')}</b></td><td>{r.main.payee}</td><td className="num">{money(r.main.amount)}</td>
-                <td>{r.xs.some(x => !x.paper) ? '两张：① 原主体红冲（没有纸质付款单，订在红冲凭证后面）② 本主体补提' : `红冲更正 ${r.main.adj} 笔`}</td>
-                <td>{r.scanned ? <span className="lv-pill ok">扫过 · {hm(r.scanned.at)}</span> : <span className="lv-pill neu">还没扫到</span>}</td>
-                <td>{r.printed ? <span className="lv-pill ok">打过 · {r.printed.by} {hm(r.printed.at)}</span> : <span className="lv-pill neu">还没打</span>}</td>
-                <td><button className="btn sm" onClick={() => printInsts([r.inst])}>{r.printed ? '再打一次' : '打印'}</button></td></tr>)}
-              {L && !adjRows.length && <tr><td colSpan="8" className="lv-empty">这个月没有要附更正单的凭证</td></tr>}
-            </tbody></table></div>
-        </>}
       </div>
     </div>
   )
