@@ -296,6 +296,18 @@ def _own_claim(book, period, sup_code):
     return round(sum(float(a or 0) for a, ex, st, rs_ in rs if not ex and st != "TERMINATED" and rs_ != "refuse"), 2)
 
 
+def _siblings(r):
+    """同一主体、同一家、同一账期的其他请款单(撤回/拒绝/已排除的不算) → [{inst, amount, picks}]，金额大的在前。picks＝人工给它选定的计提。只读。"""
+    with db._engine.connect() as c:
+        rs = c.execute(select(PR.c.inst_id, PR.c.amount, PR.c.excluded, PR.c.dt_status, PR.c.dt_result).where(
+            (PR.c.subject_full == r["subject_full"]) & (PR.c.period == r["period"]) & (PR.c.sup_code == r["sup_code"]) &
+            (PR.c.inst_id != r["inst_id"]))).all()
+    picks = db.get_setting(_PICK_KEY, None) or {}
+    out = [{"inst": i, "amount": round(float(a or 0), 2), "picks": (picks.get(i) or {}).get("picks") or []}
+           for i, a, ex, st, rs_ in rs if not ex and str(st or "").upper() != "TERMINATED" and str(rs_ or "").lower() != "refuse"]
+    return sorted(out, key=lambda x: -x["amount"])
+
+
 def _reversed_in(book, sup_code, v):
     """原主体账上这张计提红冲了没有：计提月及以后、2241 贷方＝负的含税额、挂这家供应商、摘要带「红冲」。→ {vno, year, month} / None。只读。"""
     try:
@@ -416,6 +428,21 @@ def _preview_data(inst, self_vno=None):
             notes.append("本期这家还有 %s 不在这次请款里（含税合计正好对上发票的是另外几张）" %
                          "、".join("记-%s %.2f" % (v["vno"], v["gross"]) for v in rest))
             vouchers = pick
+    # V2.844(用户看迅鸽 8 月「发票 3,151.50 ≠ 计提合计 3,919.50，差 -768.00」)：同月按项目拆成几张请款单、这张的金额和计提又有差的，
+    #   上面挑不出「正好＝发票」的子集，就把这家这月的计提全算到这张头上，差额虚大(真差只有 24.00：记-561 3,175.50 对发票 3,151.50；
+    #   另外 744.00 的 记-562 是同月 kikiherb 那张请款单的)。先把兄弟请款单的计提让出去——人工选定的按选定，没选的按「金额正好对得上」——剩下的才是这张的。
+    if not picked and invs and len(vouchers) > 1 and abs(sum(v["gross"] for v in vouchers) - inv_tot) > 0.004:
+        rest, gave = list(vouchers), []
+        for sib in _siblings(r):
+            sp = [str(x.get("vno")) for x in sib["picks"]]
+            pk = [v for v in rest if v["vno"] in sp] if sp else (LV._subset(rest, sib["amount"]) or [])
+            if pk and len(pk) < len(rest):
+                gave += pk
+                rest = [v for v in rest if v not in pk]
+        if gave and rest:
+            notes.append("本期这家的 %s 是同月另一张请款单的（金额正好对上那张，或已选定给那张），不算在这次请款里" %
+                         "、".join("记-%s %.2f" % (v["vno"], v["gross"]) for v in gave))
+            vouchers = rest
     # 本账簿没有/对不上：去另外两个主体的账上找，计提可能记错了主体(实证 丰源 深圳星期九 918.93 记在深圳星期零 记-390)
     # V2.798(用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：不再只提示——那边的计提拿过来，在本张凭证里补提到本主体
     #   再核销、支付(mode=move)；原主体的红冲 V2.798 先不写，V2.799(用户 2026-10-05「也是系统做星期零」)改成系统在那边账簿新建红冲凭证并提交，见 _post_xred。
