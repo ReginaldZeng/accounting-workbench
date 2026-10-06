@@ -758,6 +758,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .notecell{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
       .lrv .fixlnk{font:inherit;font-size:11.5px;color:#7A8791;background:none;border:1px dashed #CBD5DC;border-radius:4px;padding:1px 7px;cursor:pointer;opacity:.5}
       .lrv tr:hover .fixlnk{opacity:1}.lrv .fixlnk:hover{color:#8A5A00;border-color:#D9A441}
+      .lrv tr.rowbad .fixlnk{opacity:1;color:#8A5A00;border:1px solid #D9A441;background:#FFFCF5}
       .lrv .fixtag{font:inherit;font-size:12px;background:#FBF0DA;color:#8A5A00;border:1px solid #F0D9A8;border-radius:999px;padding:2px 10px;cursor:pointer;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
       .lrv .fixtag[disabled]{cursor:default}
       .lrv tr.rowfix td{background:#FFFBF2}
