@@ -50,6 +50,10 @@ const KIND = {
   part: ['部分核销', 'warn'], later: ['发票后补·先付款', 'warn'],
 }
 // 整单问题的建议动作
+// 总表(V2.845，用户 2026-10-06 贴复核台总表「做账的页面，也可以按照这个整理下吗」)：承运商一行、三个主体各一组列(计提｜付款｜做账)，
+//   一张请款单一小块，同一格几张就上下排；状态筛选、搜索、批量勾选照旧。原来一张请款单一行的表留作「明细」视图。
+const KS = { hx: ['✓ 一致', 'ok'], tail: ['尾差·红冲', 'warn'], redo: ['红冲更正', 'bad'], subj: ['记错主体', 'bad'], manual: ['金额不符', 'warn'],
+  noacc: ['没有计提', 'warn'], err: ['读取失败', 'dim'], part: ['部分核销', 'warn'], later: ['发票后补', 'warn'] }
 const ACT = { later: '先做付款凭证（点「凭证预览」单张做），发票到了再转待认证', subj: '原主体红冲、本主体补提后再做', subjAuto: '本张补提并核销（点「凭证预览」单张做）', manual: '人工核对差额（补提 / 查发票）', noacc: '先计提', err: '刷新重试' }
 const KIND_ORDER = ['hx', 'tail', 'redo', 'part', 'later', 'subj', 'manual', 'noacc']
 const BLOCK_CLS = { 红冲: 'b-red', 更正: 'b-fix', 核销: 'b-hx', 支付: 'b-pay' }
@@ -870,7 +874,7 @@ export default function LogisticsVoucher() {
   const unpaid = useMemo(() => (allRows || []).filter(r => r.status === 'unpaid'), [allRows])
   const setRows = setAllRows
   const [err, setErr] = useState('')
-  const [f, setF] = useState('ready')
+  const [f, setF] = useState('')                // 状态筛选，空=全部(总表默认看全部，V2.845；原来默认只看「可做账」)
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(null)
   const [plans, setPlans] = useState({})        // inst → {kind, text}
@@ -879,6 +883,8 @@ export default function LogisticsVoucher() {
   const [kf, setKf] = useState('')
   const [bm, setBm] = useState('')              // 装订打印的凭证月份，空=最新一个月
   const [scan, setScan] = useState(false)       // 扫码查凭证弹窗
+  const [view, setView] = useState('grid')      // grid 总表(承运商 × 主体) / list 明细(一张请款单一行)
+  const [pf, setPf] = useState('')              // 账单月筛选，空=全部
   const load = () => voucherList().then(r => {
     const rs = r.rows || []
     setRows(rs); setErr('')
@@ -923,13 +929,30 @@ export default function LogisticsVoucher() {
     load()
   }
   const kcnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { const p = plans[r.inst]; if (p) c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans, rows])
-  const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) &&
+  const periods = useMemo(() => [...new Set((rows || []).map(r => r.period).filter(Boolean))].sort().reverse(), [rows])
+  const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) && (!pf || r.period === pf) &&
     (!q || [r.carrier, r.payee, r.sup_full, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
   // 装订：当前筛选下已有凭证号的单(系统写的 + 金蝶里已有的)，按凭证月份挑一个月打
   const bindAll = bindItems(shown, plans)
   const bindMonths = [...new Set(bindAll.map(x => x.month).filter(Boolean))].sort().reverse()
   const bmOn = bm && bindMonths.includes(bm) ? bm : (bindMonths[0] || '')
   const bindNow = bindAll.filter(x => x.month === bmOn)
+  // 总表：按供应商编码归行、按主体归格
+  const subjects = [...SUBJ_ORDER, ...[...new Set(shown.map(r => r.subject))].filter(x => x && !SUBJ_ORDER.includes(x))]
+  const grid = (() => {
+    const m = new Map()
+    shown.forEach(r => {
+      const k = r.code || r.sup_full || r.carrier
+      if (!m.has(k)) m.set(k, { key: k, name: r.sup_full || r.carrier, code: r.code, cells: {}, all: [] })
+      const g = m.get(k)
+      ;(g.cells[r.subject] = g.cells[r.subject] || []).push(r); g.all.push(r)
+    })
+    return [...m.values()]
+  })()
+  // 账单月小标：只给「不是多数那个月」的请款单打(诚煜 6 月账单、迅鸽 7 月)，免得满屏都是「8月」
+  const mainPeriod = (() => { const c = {}; shown.forEach(r => { if (r.period) c[r.period] = (c[r.period] || 0) + 1 }); return Object.keys(c).sort((a, b) => c[b] - c[a] || (a < b ? 1 : -1))[0] || '' })()
+  const accSum = r => { const a = (plans[r.inst] || {}).acc || []; return a.length ? r2(a.reduce((x, y) => x + (y.gross || 0), 0)) : null }
+  const vnoOf = r => (r.posted && r.posted.vno ? '记-' + r.posted.vno : r.paid_voucher || '')
   const batchInsts = run && run.end ? new Set(run.done.filter(x => x.ok).map(x => x.inst)) : null
   const bindBatch = batchInsts ? bindItems((rows || []).filter(r => batchInsts.has(r.inst)), plans) : []
   return (
@@ -942,7 +965,10 @@ export default function LogisticsVoucher() {
           {ORDER.filter(k => !['paycode', 'latertax'].includes(k) || cnt[k]).map(k => <button key={k} className={'lv-chip ' + ST[k][1] + (f === k ? ' on' : '')} title={ST[k][2]} onClick={() => setF(f === k ? '' : k)}>{ST[k][0]}<b>{cnt[k] || 0}</b></button>)}
           <button className={'lv-chip' + (!f ? ' on' : '')} onClick={() => setF('')}>全部<b>{(rows || []).length}</b></button>
           <span style={{ flex: 1 }} />
+          {periods.length > 1 && <select className="lv-sel" value={pf} onChange={e => setPf(e.target.value)} title="按账单月份看"><option value="">全部账单月</option>{periods.map(m => <option key={m} value={m}>{ymCn(m)}账单</option>)}</select>}
           <input type="search" placeholder="搜承运商/主体/审批编号" value={q} onChange={e => setQ(e.target.value)} />
+          <span className="lv-seg"><button className={view === 'grid' ? 'on' : ''} title="承运商一行、三个主体各一组列" onClick={() => setView('grid')}>总表</button>
+            <button className={view === 'list' ? 'on' : ''} title="一张请款单一行，看每张计提的费用类型、税率、凭证号" onClick={() => setView('list')}>明细</button></span>
           <button className="btn" title="用扫码枪扫纸质付款单右上角的二维码，看它是哪个主体、哪张凭证（装订用）" onClick={() => setScan(true)}>扫码查凭证</button>
           <button className="btn" onClick={load}>刷新</button>
         </div>
@@ -968,21 +994,64 @@ export default function LogisticsVoucher() {
               <button className="lnk" onClick={() => printHtml('本批凭证号贴条', SLIP_CSS, slipHtml(bindBatch))}>凭证号贴条</button></>}
             {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
         </div>
-        {bindAll.length > 0 && <div className="lv-batch">
-          <span>装订用 · 凭证月份</span>
-          <select value={bmOn} onChange={e => setBm(e.target.value)}>{bindMonths.map(m => <option key={m} value={m}>{ymCn(m)}</option>)}</select>
-          <span>已有凭证号 <b>{bindNow.length}</b> 张</span>
-          <button className="btn" title="按主体分页、按凭证号排序；装订的同事对着纸质付款单上的钉钉审批编号找凭证号" onClick={() => printHtml(`装订对照清单 ${bmOn}`, BIND_CSS, bindListHtml(bindNow))}>打印装订对照清单</button>
-          <button className="btn" title="一页 21 个，剪下来贴在纸质付款单右上角，不用手抄凭证号" onClick={() => printHtml(`凭证号贴条 ${bmOn}`, SLIP_CSS, slipHtml(bindNow))}>打印凭证号贴条</button>
-          {bindNow.some(x => x.adj && !x.red) && <button className="btn" title="本月做过红冲更正 / 主体更正的单，把计提更正单一次打出来（自动做账的也在里面）"
-            onClick={() => printAdjust(Promise.all(bindNow.filter(x => x.adj && !x.red).map(x => voucherPreview(x.inst))), `计提更正单 ${bmOn}`)}>打印本月计提更正单（{bindNow.filter(x => x.adj && !x.red).length} 张单）</button>}
-          <span className="dim">按当前筛选（上面的状态/搜索）出；批量做完的凭证号都在这里，不用手写到付款单上</span>
-        </div>}
         {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
           {pickedRedo.map(r => <span key={r.inst} className="lv-redo">{label(r)}<span className="dim">（{(plans[r.inst] || {}).text}）</span></span>)}
           建议先点开预览看一眼；写完后在金蝶重点核对红冲、更正两段。</div>}
         {run && run.done.length > 0 && <ul className="lv-runlist">{run.done.map(x => <li key={x.inst} className={x.ok ? 'ok' : 'bad'}>{x.ok ? '✓' : '✗'} {x.label}：{x.msg}</li>)}</ul>}
-        <div className="tbl-wrap"><table className="lv-t lv-list">
+        {view === 'grid' && <div className="tbl-wrap"><table className="lv-t lv-grid">
+          <thead>
+            <tr><th rowSpan="2" className="car">承运商</th>
+              {subjects.map(sj => <th key={sj} colSpan="3" className="sg">{sj}</th>)}
+              <th rowSpan="2">做账状态</th><th rowSpan="2"></th></tr>
+            <tr>{subjects.map(sj => <React.Fragment key={sj}><th className="num sl">计提</th><th className="num">付款</th>
+              <th><label className="gck" title="勾选当前筛选里能批量做账的"><input type="checkbox" checked={shown.filter(r => r.subject === sj).some(canBatch) && shown.filter(r => r.subject === sj && canBatch(r)).every(r => sel[r.inst])}
+                disabled={!shown.some(r => r.subject === sj && canBatch(r))}
+                onChange={e => { const on = e.target.checked; setSel(o => { const n = { ...o }; shown.filter(r => r.subject === sj && canBatch(r)).forEach(r => { n[r.inst] = on }); return n }) }} />做账</label></th></React.Fragment>)}</tr>
+          </thead>
+          <tbody>
+            {rows === null && <tr><td colSpan={subjects.length * 3 + 3} className="lv-empty">读取中…</td></tr>}
+            {rows && !grid.length && <tr><td colSpan={subjects.length * 3 + 3} className="lv-empty">没有</td></tr>}
+            {grid.map(g => {
+              const nb = g.all.filter(r => r.status === 'booked').length
+              const nr = g.all.filter(r => r.status === 'ready').length
+              const worst = ORDER.find(k => k !== 'ready' && k !== 'booked' && g.all.some(r => r.status === k)) || (g.all.some(r => r.status === 'unpaid') ? 'unpaid' : '')
+              const next = g.all.find(r => r.status !== 'booked' && r.period) || g.all[0]
+              const blk = (r, body) => <div key={r.inst} className="gb">{body}</div>
+              return <tr key={g.key} className={nb === g.all.length ? 'alldone' : ''}>
+                <td className="car" title={g.name}>{g.name}<div className="code2">{g.code}</div></td>
+                {subjects.map(sj => {
+                  const rs = g.cells[sj] || []
+                  if (!rs.length) return <React.Fragment key={sj}><td className="sl"></td><td></td><td></td></React.Fragment>
+                  return <React.Fragment key={sj}>
+                    <td className="num sl">{rs.map(r => { const a = accSum(r), acc = (plans[r.inst] || {}).acc || [], calc = !!r.period && !!r.n_inv
+                      return blk(r, <>{a != null ? <span title={acc.map(x => `${x.month}/${x.vno}# ${money(x.gross)} ${x.fee || ''}`).join('\n')}>{money(a)}</span> : <span className="dim">{calc && !plans[r.inst] ? '计算中…' : '—'}</span>}
+                        {acc.length > 0 && <span className="dim mono">{acc.length === 1 ? `${acc[0].month}/${acc[0].vno}#` : `${acc.length} 张计提`}</span>}</>) })}</td>
+                    <td className="num">{rs.map(r => blk(r, <><span><b>{money(r.amount)}</b>{r.period && r.period !== mainPeriod && <i className="pm" title="账单月份">{Number(r.period.slice(5))}月</i>}</span>
+                      <button className={'lv-pill ' + ST[r.status][1]} title={ST[r.status][2] + (r.paywarn ? '：' + r.paywarn.text : '') + '　点开看凭证预览'} disabled={!r.period} onClick={() => setOpen(r.inst)}>
+                        {r.status === 'booked' ? `已做账 ${vnoOf(r)}` : ST[r.status][0]}</button></>))}</td>
+                    <td>{rs.map(r => { const pl = plans[r.inst], calc = !!r.period && !!r.n_inv
+                      const [lb, cl] = pl ? (KS[pl.kind] || [pl.kind, 'dim']) : ['', '']
+                      return blk(r, <>{!calc ? <span className="dim">{!r.period ? '未认账单月' : '票夹没有发票'}</span> : !pl ? <span className="dim">计算中…</span>
+                        : <label className="gck"><input type="checkbox" disabled={!canBatch(r)} checked={!!sel[r.inst] && canBatch(r)}
+                            title={canBatch(r) ? (isRedo(r) ? '勾选批量做账（⚠ 这张要红冲更正）' : '勾选批量做账') : r.posted ? '已写金蝶' : r.status !== 'ready' ? '还不能做账' : '这种要点开单张做，不进批量'}
+                            onChange={e => setSel(o => ({ ...o, [r.inst]: e.target.checked }))} /><b className={cl}>{lb}</b></label>}
+                        {pl && pl.kind !== 'hx' && <span className="dim kt" title={pl.text}>{pl.text}</span>}
+                        {r.later_state === 'wait' && <span className="warn kt">发票后补 · 等发票</span>}</>) })}</td>
+                  </React.Fragment>
+                })}
+                <td className="gst">{nb === g.all.length ? <span className="lv-pill done">已做账 {nb}/{g.all.length}</span>
+                  : nr ? <span className="lv-pill ok">可做账 {nr} 张</span> : worst ? <span className={'lv-pill ' + ST[worst][1]}>{ST[worst][0]}</span> : null}
+                  <div className="dim">{g.all.length} 张请款单 · 已做账 {nb}</div></td>
+                <td><button className="btn btn-pri" disabled={!next.period} title={g.all.length > 1 ? `这家有 ${g.all.length} 张请款单：这里打开还没做的第一张，别的点格子里的状态` : ''} onClick={() => setOpen(next.inst)}>{nb === g.all.length ? '查看' : '凭证预览'}</button></td>
+              </tr>
+            })}
+            {grid.length > 0 && <tr className="tot"><td className="car">合计 · {grid.length} 家 {shown.length} 张</td>
+              {subjects.map(sj => { const rs = shown.filter(r => r.subject === sj); return <React.Fragment key={sj}><td className="sl"></td>
+                <td className="num">{rs.length ? money(rs.reduce((x, r) => x + (r.amount || 0), 0)) : ''}</td><td className="dim">{rs.length ? `已做账 ${rs.filter(r => r.status === 'booked').length}/${rs.length}` : ''}</td></React.Fragment> })}
+              <td></td><td></td></tr>}
+          </tbody>
+        </table></div>}
+        {view === 'list' && <div className="tbl-wrap"><table className="lv-t lv-list">
           <thead><tr><th className="ck"><input type="checkbox" title="勾选当前列表里能批量做账的"
             checked={shown.some(canBatch) && shown.filter(canBatch).every(r => sel[r.inst])}
             onChange={e => { const on = e.target.checked; setSel(o => { const n = { ...o }; shown.filter(canBatch).forEach(r => { n[r.inst] = on }); return n }) }} /></th><th>主体</th><th>物流商</th><th>费用类型</th><th className="num">计提金额</th><th>税率</th><th>计提凭证</th>
@@ -1040,7 +1109,19 @@ export default function LogisticsVoucher() {
               </tr>
             })}
           </tbody>
-        </table></div>
+        </table></div>}
+        {view === 'grid' && <div className="lv-foot">一行一家承运商，三个主体各一组列：计提＝这张请款单要核销的金蝶计提合计（鼠标停留看是哪几张）；付款＝请款金额，下面的状态点开就是凭证预览；
+          做账＝计提和发票比对的结论，能批量做的可以勾。同一格里有几张请款单的上下排。要看每张计提的费用类型、税率、凭证号，切到右上角「明细」。</div>}
+        {bindAll.length > 0 && <div className="lv-batch">
+          <span>装订用 · 凭证月份</span>
+          <select value={bmOn} onChange={e => setBm(e.target.value)}>{bindMonths.map(m => <option key={m} value={m}>{ymCn(m)}</option>)}</select>
+          <span>已有凭证号 <b>{bindNow.length}</b> 张</span>
+          <button className="btn" title="按主体分页、按凭证号排序；装订的同事对着纸质付款单上的钉钉审批编号找凭证号" onClick={() => printHtml(`装订对照清单 ${bmOn}`, BIND_CSS, bindListHtml(bindNow))}>打印装订对照清单</button>
+          <button className="btn" title="一页 21 个，剪下来贴在纸质付款单右上角，不用手抄凭证号" onClick={() => printHtml(`凭证号贴条 ${bmOn}`, SLIP_CSS, slipHtml(bindNow))}>打印凭证号贴条</button>
+          {bindNow.some(x => x.adj && !x.red) && <button className="btn" title="本月做过红冲更正 / 主体更正的单，把计提更正单一次打出来（自动做账的也在里面）"
+            onClick={() => printAdjust(Promise.all(bindNow.filter(x => x.adj && !x.red).map(x => voucherPreview(x.inst))), `计提更正单 ${bmOn}`)}>打印本月计提更正单（{bindNow.filter(x => x.adj && !x.red).length} 张单）</button>}
+          <span className="dim">按当前筛选（上面的状态/搜索）出；批量做完的凭证号都在这里，不用手写到付款单上</span>
+        </div>}
       </div>
       {open && <Detail inst={open} onClose={() => setOpen(null)} onChanged={load} />}
       {scan && <ScanBox onClose={() => setScan(false)} />}
@@ -1154,6 +1235,25 @@ const CSS = `
 .lv .lv-auto .row.pg{margin-top:2px}.lv .lv-auto .lnk:disabled{opacity:.35;cursor:default}
 .lv .lv-auto .ck{display:inline-flex;gap:4px;align-items:center;white-space:nowrap}.lv .lv-auto table{background:var(--bg);border-radius:8px}
 .lv .lv-unpaid{font-size:12.5px;color:var(--ink-2);padding:2px 2px 0}
+.lv .lv-sel{font:inherit;font-size:12.5px;padding:5px 8px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--ink)}
+.lv .lv-seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--bg)}
+.lv .lv-seg button{border:0;background:none;font:inherit;font-size:12.5px;padding:5px 12px;color:var(--ink-2);cursor:pointer}.lv .lv-seg button+button{border-left:1px solid var(--line-strong)}
+.lv .lv-seg button.on{background:var(--accent);color:#fff;font-weight:600}
+.lv .lv-grid th,.lv .lv-grid td{padding:7px 8px}.lv .lv-grid th{text-align:center}.lv .lv-grid th.num{text-align:right}.lv .lv-grid th.car{text-align:left}
+.lv .lv-grid th.sg{background:var(--accent-soft);color:var(--accent);border-left:1px solid var(--line);font-size:12.5px}
+.lv .lv-grid td{vertical-align:top;border-right:1px solid var(--line)}.lv .lv-grid td:last-child,.lv .lv-grid td.gst{border-right:0}
+.lv .lv-grid .sl{border-left:1px solid var(--line-strong)}
+.lv .lv-grid td.car{font-weight:600;min-width:150px;max-width:190px;position:sticky;left:0;background:var(--bg);vertical-align:middle}
+.lv .lv-grid tr.alldone td{background:var(--green-bg)}.lv .lv-grid tr.alldone td.car{background:var(--green-bg)}
+.lv .lv-grid .gb{min-height:42px;display:flex;flex-direction:column;justify-content:center;gap:3px}.lv .lv-grid td.num .gb{align-items:flex-end}
+.lv .lv-grid .gb+.gb{border-top:1px dashed var(--line-strong);margin-top:6px;padding-top:6px}
+.lv .lv-grid button.lv-pill{border:0;cursor:pointer;font:inherit;font-size:11.5px}.lv .lv-grid button.lv-pill:hover:not(:disabled){filter:brightness(.95);text-decoration:underline}.lv .lv-grid button.lv-pill:disabled{cursor:default}
+.lv .lv-grid .pm{font-style:normal;font-size:10.5px;color:var(--ink-2);background:var(--gray-bg);border-radius:3px;padding:0 4px;margin-left:5px}
+.lv .lv-grid .gck{display:inline-flex;gap:5px;align-items:center;white-space:nowrap;cursor:pointer}.lv .lv-grid .gck b{font-weight:600}
+.lv .lv-grid .kt{max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.lv .lv-grid td.gst{min-width:118px;vertical-align:middle}.lv .lv-grid td.gst .dim{margin-top:4px;white-space:nowrap}.lv .lv-grid td:last-child{vertical-align:middle}
+.lv .lv-grid tr.tot td.car{background:var(--bg-sub)}
+.lv .lv-foot{font-size:11.5px;color:var(--ink-3);line-height:1.7;padding:8px 4px 2px}
 .lv .lv-pick{border:1px solid var(--accent);border-radius:10px;padding:10px 12px;margin:6px 0 10px;background:var(--accent-soft)}
 .lv .lv-pick .ph{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;margin-bottom:6px}.lv .lv-pick table{background:var(--bg);border-radius:8px}
 .lv .lv-pick input.amt{width:104px;font:inherit;font-size:12.5px;text-align:right;padding:3px 6px;border:1px solid var(--line-strong);border-radius:6px;background:var(--bg);color:var(--ink);font-variant-numeric:tabular-nums}
