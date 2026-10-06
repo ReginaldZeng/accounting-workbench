@@ -115,7 +115,7 @@ function ScopeDlg({ onClose, onSaved, flash }) {
 // V2.851(用户 2026-10-06「在审批付款的时候一并打出来」)：计提更正单在审批这张请款单的时候就打——那时纸质付款单还在自己手里，订在后面一起流转；
 //   弹窗里先给出「做账预判」(计提和发票比对的结论)，要红冲更正 / 记错主体的出打印按钮。凭证号那时还没有，更正单上留空，做完账由装订的同事扫码后手填。
 const ADJ_KINDS = ['tail', 'redo', 'subj']
-const printAdj = insts => printAdjust(Promise.all(insts.map(i => voucherPreview(i).catch(() => null))), '计提更正单')
+const printAdj = (insts, title, opt) => printAdjust(Promise.all(insts.map(i => voucherPreview(i).catch(() => null))), title || '计提更正单', opt)
 function PayReqDlg({ v, onClose, onChanged, flash }) {
   const [p, setP] = useState(v.period || '')
   const [plan, setPlan] = useState(null)        // 做账预判 {kind, text} / {err}
@@ -580,9 +580,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     if (v !== null) markSubj(subject, 'question', v.trim())
   }
   const savePts = () => { reviewCarrierPointsSet(carrier, pts).then(() => { setPtsSaved(pts); setPtsEdit(false); flash('复核要点已保存') }).catch(e => flash('保存失败：' + e.message)) }
+  // V2.853(用户「我指的是审批钉钉OA的时候噢，就是第三步那里的」)：第③步点「确认通过并登记已复核」成功后，这家这月的请款单里有要红冲更正 / 记错主体的，
+  //   马上弹出计提更正单的预览，点「确认打印」——登记完就去钉钉批 OA，纸质付款单这时还在手里，订在后面一起流转。凭证号那时还没有，更正单上留空。
+  const adjBlocks = ((inv3 && inv3.blocks) || []).filter(b => ADJ_KINDS.includes(b.kind))
+  const remindAdj = () => (inv3 && !inv3.err ? Promise.resolve(inv3) : reviewInvoices(carrier, period)).then(r => {
+    const xs = (r.blocks || []).filter(b => ADJ_KINDS.includes(b.kind))
+    if (xs.length) printAdj(xs.map(b => b.inst), `计提更正单 ${carrier} ${period}`,
+      { remind: `已登记复核。${carrier} 有 ${xs.length} 张请款单要附计提更正单：现在打出来，审批钉钉时订在纸质付款单后面。` })
+  }).catch(() => {})
   const doSign = () => {
     if (!window.confirm(`确认 ${carrier} ${period} 复核通过并登记？登记后当月的归类与备注将锁定（可撤销）。`)) return
-    setBusy('sign'); reviewSign(carrier, period).then(() => { flash('已登记复核'); refetchL() }).catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
+    setBusy('sign'); reviewSign(carrier, period).then(() => { flash('已登记复核'); refetchL(); remindAdj() }).catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
   }
   const doUnsign = () => {
     if (!window.confirm('撤销本月复核登记？撤销后才能修改归类/备注。')) return
@@ -599,7 +607,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const regSign = () => {
     if (regBad && !regNote.trim()) { flash('计提和请款有差异，要写原因才能登记'); return }
     if (!window.confirm(`确认 ${carrier} ${period} 复核通过并登记？（登记制：不逐单核价核量）`)) return
-    setBusy('sign'); reviewSign(carrier, period, regNote.trim() || '登记制：计提与请款一致').then(() => { flash('已登记复核'); refetchL(); refreshOv() })
+    setBusy('sign'); reviewSign(carrier, period, regNote.trim() || '登记制：计提与请款一致').then(() => { flash('已登记复核'); refetchL(); refreshOv(); remindAdj() })
       .catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
   }
   const regUnsign = () => {
@@ -1331,7 +1339,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </div>
         <div className="card">
           <h3 style={{ display: 'flex', alignItems: 'center' }}>发票与暂估 · {carrier} · {period}
-            <span style={{ flex: 1 }} /><a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
+            <span style={{ flex: 1 }} />
+            {adjBlocks.length > 0 && <button className="btn sm" style={{ marginRight: 10 }} title="登记复核时会自动弹出；这里可以随时再打。审批钉钉时订在纸质付款单后面，凭证号做账后填"
+              onClick={() => printAdj(adjBlocks.map(b => b.inst), `计提更正单 ${carrier} ${period}`)}>打印计提更正单（{adjBlocks.length} 张请款单）</button>}
+            <a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
           <LogisticsInvCompare data={inv3} lines={L} />
         </div>
       </>)}
@@ -1363,7 +1374,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         <div className="card">
           <h3 style={{ display: 'flex', alignItems: 'center' }}>发票与暂估 · {carrier} · {period}
             <small style={{ fontWeight: 400, color: '#5E6B78', marginLeft: 10, fontSize: 12 }}>钉钉请款单的发票（发票管家）对金蝶计提的暂估，口径同付款做账</small>
-            <span style={{ flex: 1 }} /><a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
+            <span style={{ flex: 1 }} />
+            {adjBlocks.length > 0 && <button className="btn sm" style={{ marginRight: 10 }} title="登记复核时会自动弹出；这里可以随时再打。审批钉钉时订在纸质付款单后面，凭证号做账后填"
+              onClick={() => printAdj(adjBlocks.map(b => b.inst), `计提更正单 ${carrier} ${period}`)}>打印计提更正单（{adjBlocks.length} 张请款单）</button>}
+            <a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
           <LogisticsInvCompare data={inv3} lines={L} />
         </div>
         <div className="navbar"><button className="btn" onClick={() => goStep('docs')}>‹ 上一步：逐单核价核量</button></div>

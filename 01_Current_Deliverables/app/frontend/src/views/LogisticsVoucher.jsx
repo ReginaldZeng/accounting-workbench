@@ -197,6 +197,7 @@ function sheetsOf(d) {
 }
 
 // 计提更正单：先在本页弹出预览，人看一眼再点「确认打印」(V2.852，用户「如果有更正单，再点击保存的时候就跳出来打印提醒…我们只需要点击确认打印，还有预览」)。
+// 用户说的「保存」是复核台第③步的「确认通过并登记已复核」(登记完去钉钉批 OA)——自动弹在那一步(V2.853)，不在付款做账的「保存到金蝶」。
 // 原来是另开一个窗口直接调打印(会被浏览器拦弹窗，也看不到预览)。ds 可以是数组或 Promise；opt.remind＝顶上那句提醒(保存到金蝶后自动弹出时用)。
 // 点「确认打印」后浏览器还会弹一次系统自己的打印框(选打印机)，网页绕不过去——要连这一下也省，得给这台电脑的浏览器加「静默打印」启动参数。
 export function printAdjust(ds, title, opt = {}) {
@@ -658,12 +659,7 @@ function Detail({ inst, onClose, onChanged }) {
 
 确定？`)) return
     setPosting({ busy: true })
-    const hasAdj = (d.adjust || []).length > 0, who = d.req.payee
-    voucherPost(inst).then(r => {
-      setPosting({ ok: true, ...r }); load(); onChanged()
-      // 有计提更正单的：保存成功马上弹出预览，点一下就打(重新取一次预览，更正单上才有刚生成的凭证号)
-      if (hasAdj) printAdjust(voucherPreview(inst).then(x => [x]), `计提更正单 ${who}`, { remind: `已保存到金蝶 记-${r.vno}。这张有计提更正单。` })
-    })
+    voucherPost(inst).then(r => { setPosting({ ok: true, ...r }); load(); onChanged() })
       .catch(e => setPosting({ ok: false, msg: e.message }))
   }
   const [xbusy, setXbusy] = useState(false)       // 补做原主体红冲
@@ -899,9 +895,6 @@ export default function LogisticsVoucher() {
     setRun({ i: list.length, n: list.length, cur: '', done, end: true })
     setSel({})
     load()
-    const adjOk = done.filter(x => x.ok && x.redo)      // 本批做了红冲更正的：做完自动弹出更正单预览
-    if (adjOk.length) printAdjust(Promise.all(adjOk.map(x => voucherPreview(x.inst).catch(() => null))), '本批计提更正单',
-      { remind: `本批保存完了：成功 ${done.filter(x => x.ok).length} 张，其中 ${adjOk.length} 张有计提更正单。` })
   }
   const kcnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { const p = plans[r.inst]; if (p) c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans, rows])
   const periods = useMemo(() => [...new Set((rows || []).map(r => r.period).filter(Boolean))].sort().reverse(), [rows])
