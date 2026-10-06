@@ -60,7 +60,17 @@ def source_summary(value):
     if not isinstance(value,dict):raise ValueError('来源格式错误')
     rows=value.get('rows')
     valid=isinstance(rows,list) and bool(rows) and value.get('status') in ('ready','warning')
-    return {'rows':len(rows) if isinstance(rows,list) else 0,'valid':valid,'warnings':list(value.get('warnings',[]) or [])}
+    extra={'extra':value['extra']} if isinstance(value.get('extra'),dict) else {}      # 抖音快照带的覆盖日期 / 是否旧版解析
+    return dict({'rows':len(rows) if isinstance(rows,list) else 0,'valid':valid,'warnings':list(value.get('warnings',[]) or [])},**extra)
+
+
+def _douyin_note(cx, rid, kind, meta):
+    """抖音快照的覆盖日期、是不是旧版解析：早先存的摘要里没有，解压一次补上并回写（同一连接）。"""
+    from kernels import ec_douyin
+    packed=cx.execute(select(TABLE.c.payload).where(TABLE.c.id==rid)).scalar_one()
+    meta=dict(meta,extra=ec_douyin.snapshot_note(kind,json.loads(gzip.decompress(packed)).get('rows') or []))
+    cx.execute(update(TABLE).where(TABLE.c.id==rid).values(summary=json.dumps(meta,ensure_ascii=False)))
+    return meta
 
 
 def _backfill_summary(cx, rid):
@@ -321,25 +331,35 @@ def preparation_cards(period, shop):
     price_optional='price_protection' not in kinds
     if price_optional and platform=='天猫':kinds.append('price_protection')
     cards = {k:dict(kind=k,label=preparation.KINDS[k],available=False,state='missing',rows=None,
-                    files=[],file_count=0,warnings=[],imported_at=None,accounts=[]) for k in kinds}
+                    files=[],file_count=0,warnings=[],imported_at=None,accounts=[],by=None,span=None,
+                    purpose=preparation.PURPOSE.get(k,'')) for k in kinds}
     if 'price_protection' in cards:cards['price_protection']['optional']=price_optional
     with db._engine.connect() as cx:
         latest = select(func.max(TABLE.c.id)).where(TABLE.c.period==period,TABLE.c.shop==shop).group_by(TABLE.c.kind)
         # V2.617：只取摘要列，不把几 MB 的快照搬出来解压；老记录没摘要的当场补算一次并回写（同一连接，避免 SQLite 锁）
         backfilled=False
-        for r in cx.execute(select(TABLE.c.id,TABLE.c.kind,TABLE.c.filenames,TABLE.c.ts,TABLE.c.summary).where(TABLE.c.id.in_(latest))).fetchall():
+        for r in cx.execute(select(TABLE.c.id,TABLE.c.kind,TABLE.c.filenames,TABLE.c.ts,TABLE.c.summary,TABLE.c.operator).where(TABLE.c.id.in_(latest))).fetchall():
             if r.kind not in cards or r.kind in ('alipay','fund'):continue
             try:
                 names=json.loads(r.filenames or '[]')
                 if r.summary:meta=json.loads(r.summary)
                 else:meta=_backfill_summary(cx,r.id);backfilled=True
                 if not isinstance(meta,dict) or not isinstance(names,list):raise ValueError('来源格式错误')
-            except (OSError,ValueError,TypeError):
+                if r.kind.startswith('dy_') and 'extra' not in meta:meta=_douyin_note(cx,r.id,r.kind,meta);backfilled=True
+            except (OSError,ValueError,TypeError,KeyError):
                 cards[r.kind].update(state='warning',warnings=['已保存快照不可读，原始记录保留；请补充资料'])
                 continue
             valid=bool(meta.get('valid'))
             cards[r.kind].update(available=valid,state='ready' if valid else 'warning',rows=meta.get('rows',0),
-                files=names,file_count=len(names),imported_at=r.ts,warnings=list(meta.get('warnings',[]) or []))
+                files=names,file_count=len(names),imported_at=r.ts,warnings=list(meta.get('warnings',[]) or []),by=r.operator)
+            note=meta.get('extra') or {}
+            if note.get('span'):cards[r.kind]['span']=note['span']
+            if note.get('stale') and valid:
+                # 状态不改：资料是好的，对账和下推都不受影响，只是点开订单看算式时少两项
+                cards[r.kind]['warnings'].insert(0,'这份是系统升级前传的，点开订单时看不到买家实付和平台补贴（对账、下推不受影响）；把这个月的动账明细重新传一遍就补上')
+            if r.kind=='dy_orders' and valid and int(note.get('format') or 0)<4:
+                # 升级前存的旺店通订单明细，买家实付只取了每单第一行货品；新传的摘要里带 format，老的没有
+                cards[r.kind]['warnings'].insert(0,'这份是系统升级前传的，点开订单时旺店通那行的买家实付可能偏小（对账、下推不受影响）；重新传一遍就更正')
         if backfilled:cx.commit()
         # Original imports remain valid evidence, even before the new document index exists.
         if shop==TARGET:
@@ -379,7 +399,8 @@ def preparation_cards(period, shop):
             imported=list(cx.execute(select(source_files).where(source_files.c.id.in_(select(origins.c.file_id).join(rows,rows.c.id==origins.c.flow_id).where(rows.c.account_id.in_(ids),rows.c.period==period)))))
             c.update(available=bool(totals),state='ready' if len(totals)==len(ids) else 'warning' if totals else 'missing',
                 rows=sum(totals.values()),files=[f.filename for f in imported],file_count=len(imported),
-                imported_at=max((f.ts for f in imported),default=None))
+                imported_at=max((f.ts for f in imported),default=None),
+                by=max(imported,key=lambda f:f.ts or '').operator if imported else None)
             if len(totals)<len(ids):c['warnings']=[f'{len(ids)-len(totals)} 个关联账户缺少本期流水']
     if 'kingdee' in cards:
         meta=ec._kd_cache_meta(period)
@@ -426,7 +447,15 @@ def overview(request:Request,period:str,business:str=''):
 def sources_view(request:Request,period:str,shop:str):
     require(request); check_period(period); selected=check_shop(shop)
     cards=preparation_cards(period,shop)
+    # 抖音：金蝶应收由系统只读同步，不是要人准备的资料，不进清单、不计齐套；只把同步情况带给页面显示。
+    # 是否正在同步、上次有没有失败，以抖音月结那边记的为准（两页说法要一致）；ec_douyin 引用了本模块，只能在这里面引用它
+    synced=job=None
+    if selected['platform']=='抖音':
+        from routers import ec_douyin
+        synced=ec_douyin._ar_meta(period,shop); job=ec_douyin._jobs.get((period,shop),{})
     return {'ok':True,'shop':selected,'sources':cards,'progress':preparation.progress(cards),
+        'douyin_ar':{'bills':synced.get('bills'),'ts':synced.get('ts'),'by':synced.get('operator'),'since':str(synced.get('since') or '')[:10]} if synced else None,
+        'douyin_job':{'running':bool(job.get('running')),'error':job.get('error','')} if job is not None else None,
         'kingdee':{'refreshing':bool(ec._KD_REFRESH.get(period,{}).get('running'))},
         'collector_configured':bool(os.environ.get('EC_INBOX_ROOT')),'pickup':_pickup_status(period,shop),
         'voucher_sync':_sync.get((period,shop),{}),'kingdee_read_only':True}

@@ -32,3 +32,19 @@
 .ec-tw-arrow em{font-style:normal;font-size:10px;font-weight:600;margin-top:3px;white-space:nowrap}
 .ec-tw-arrow em.ec-ok{color:#2f9d78}.ec-tw-arrow em.ec-diff{color:#c04444}.ec-tw-arrow em.ec-warn{color:#a86a00}
 @media(max-width:520px){.ec-verdicts{grid-template-columns:1fr}}
+
+/* 环节行 vs 展开的明细：主行展开时左侧色条；明细缩进成一张带标题的小卡，表头用小字，和主行不在一个层级 */
+.ec-chain-table .ec-chain-toggle::before{content:"▸ ";font-size:10px}.ec-chain-table .ec-chain-toggle[aria-expanded="true"]::before{content:"▾ "}
+.ec-chain-table>tbody>tr.ec-chain-open>th{box-shadow:inset 3px 0 0 var(--accent,#4b53c4)}
+.ec-chain-table>tbody>tr.ec-chain-open>th,.ec-chain-table>tbody>tr.ec-chain-open>td{background:var(--accent-soft,#f1f2fd)}
+.ec-chain-table>tbody>tr.ec-chain-detail>td{padding:0 12px 14px 30px;border-top:0;background:var(--accent-soft,#f1f2fd);box-shadow:inset 3px 0 0 var(--accent,#4b53c4)}
+.ec-chain-sub{border:1px solid var(--line,#e4e8f0);border-radius:8px;background:var(--bg,#fff);overflow:hidden}
+.ec-chain-sub-title{display:flex;align-items:baseline;gap:6px;padding:7px 10px;font-size:11px;color:var(--ink-2,#637089);background:var(--bg-sub,#f6f8fb);border-bottom:1px solid var(--line,#e4e8f0)}
+.ec-chain-sub-title b{color:var(--accent,#4b53c4);font-weight:600}.ec-chain-sub-title span{margin-left:auto;color:var(--ink-3,#8993a4)}
+.ec-chain-sub .ew-scroll{border:0;border-radius:0}.ec-chain-sub>p{margin:0;padding:8px 10px}
+.ec-chain-detail .ec-chain-sub th{font-size:11px;font-weight:500;color:var(--ink-3,#8993a4);background:transparent}
+.ec-chain-detail .ec-chain-sub td{font-size:12px}.ec-chain-detail .ec-chain-sub tbody tr:last-child td{border-bottom:0}
+.ec-chain-detail .ec-chain-sub td,.ec-chain-detail .ec-chain-sub th{padding:8px 10px}
+.ec-chain-sub>.ew-evidence{margin:8px 10px}.ec-chain-sub>button{margin:0 10px 10px}
+/* 主表各行自己的格子可以换行：全站有一条“除第一列外不换行”的规则，长状态、长单号串会顶出格子 */
+.ew-workbench .ec-chain-table>tbody>tr>td{white-space:normal}

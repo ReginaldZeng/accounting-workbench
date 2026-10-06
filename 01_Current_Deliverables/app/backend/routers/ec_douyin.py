@@ -1,17 +1,24 @@
 # V2.811: 电商工作台·抖音月结。两份动账明细入库（复用资料快照表）→ 与金蝶应收逐单对 → 收款单草稿。金蝶只读。
+import csv
 import datetime
 import gzip
 import hashlib
 import json
+import logging
 import os
+import re
 import tempfile
 import threading
 import time
+import zipfile
+import zlib
 from typing import List
 from urllib.parse import quote
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select, func
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.concurrency import run_in_threadpool
 import kingdee_client as kc
 from core import db
 from routers import ec, ec_workbench as wbr
@@ -24,7 +31,13 @@ META_KEY = 'ec_douyin_ar_meta'
 TABLE = wbr.TABLE
 _lock = threading.Lock()
 _jobs = {}                                 # (period, shop) -> {'running', 'error'}
-_cache = {}                                # (period, shop) -> (版本键, 对账结果)
+_cache = {}                                # (period, shop) -> (版本键, 对账结果, 账面, 四类资料行, 应收)
+_building = {}                             # (period, shop) -> 锁：同时进来的请求等第一个算完，别各算一遍
+_bill_cache = {}                           # (period, shop, 应收单号…) -> (时刻, 分录)：同一张单反复打开不重复查金蝶
+CACHE_KEEP = 3                             # 对账结果最多留几个「期间 × 店」：每份连四类资料行一起有几十 MB
+MAX_UPLOAD = 60 << 20                      # 单个上传文件的上限
+_upload_lock = threading.Lock()            # 上传放到线程池里跑：读旧快照 → 合并 → 存 这一段要排队，免得两个人互相盖掉
+log = logging.getLogger(__name__)
 require = wbr.require
 
 
@@ -40,14 +53,27 @@ def _periods(period):
     return [open_items.month_shift(first, -i)[:7] for i in range(LOOKBACK, -1, -1)]
 
 
-def _latest(cx, shop, periods, kinds):
+def _latest(cx, shop, periods, kinds, payload=True):
     latest = (select(func.max(TABLE.c.id)).where(TABLE.c.shop == shop, TABLE.c.kind.in_(kinds), TABLE.c.period.in_(periods))
               .group_by(TABLE.c.period, TABLE.c.kind))
-    return cx.execute(select(TABLE.c.id, TABLE.c.period, TABLE.c.kind, TABLE.c.filenames, TABLE.c.payload).where(TABLE.c.id.in_(latest))).fetchall()
+    last = TABLE.c.payload if payload else TABLE.c.summary             # 不要内容时只取摘要（里面有行数），不把几 MB 的快照搬出来
+    return cx.execute(select(TABLE.c.id, TABLE.c.period, TABLE.c.kind, TABLE.c.filenames, last).where(TABLE.c.id.in_(latest))).fetchall()
+
+
+def _version(period, shop):
+    """现用的是哪几份快照、本期各类资料多少行——只查编号和摘要，不解压内容。返回 (版本键, {kind: 本期行数})。"""
+    with db._engine.connect() as cx:
+        heads = _latest(cx, shop, _periods(period), list(model.KINDS), payload=False)
+    counts = {k: 0 for k in model.KINDS}
+    for r in heads:
+        if r.period == period:
+            try: counts[r.kind] = int(json.loads(r.summary or '{}').get('rows') or 0)
+            except (ValueError, TypeError): pass
+    return tuple(sorted(r.id for r in heads)), counts
 
 
 def _sources(period, shop):
-    """截至本期的两份流水（含前几个月）。返回 (版本键, {kind: rows})。"""
+    """截至本期的四类资料（含前几个月），整份解开。返回 (版本键, {kind: rows})。慢，只在缓存对不上时才调。"""
     with db._engine.connect() as cx:
         records = _latest(cx, shop, _periods(period), list(model.KINDS))
     rows = {k: [] for k in model.KINDS}
@@ -58,36 +84,80 @@ def _sources(period, shop):
 
 @router.post('/upload')
 async def upload(request: Request, shop: str = Form(...), files: List[UploadFile] = File(...)):
-    """上传抖音动账明细 / 账户流水（csv 或 zip）/ 旺店通订单明细（xlsx）。只看表头认类型；文件里有几个月就按月各存一份，重复的只留一份。"""
+    """上传抖音动账明细 / 账户流水 / 抖店订单导出（csv 或 zip）/ 旺店通订单明细（xlsx）。只看表头认类型；文件里有几个月就按月各存一份，重复的只留一份。"""
     user = require(request, write=True)
     selected = wbr.check_shop(shop)
     if selected['platform'] != '抖音': raise HTTPException(400, '这家店不是抖音店铺')
     results = []
-    for f in files[:10]:
-        blob = await f.read()
-        try: parts = model.parse(blob, f.filename or '未命名', shop)
-        except (ValueError, OSError, KeyError) as e:
-            results.append({'name': f.filename, 'ok': False, 'error': str(e)[:120]}); continue
-        for part in parts:
-            if not part['kind']:
-                results.append({'name': part['name'], 'ok': False, 'error': part['skip']}); continue
-            months, fresh = model.by_month(part['rows']), False
-            with db._engine.connect() as cx:
-                old = {r.period: r for r in _latest(cx, shop, list(months), [part['kind']])}
-            for month, new in sorted(months.items()):
-                before = json.loads(gzip.decompress(old[month].payload))['rows'] if month in old else []
-                names = json.loads(old[month].filenames or '[]') if month in old else []
-                merged = model.merge(before, new)
-                digest = hashlib.sha256(json.dumps([model.FORMAT, [[r['id'], r.get('amt', r.get('recv')), r.get('status', '')] for r in merged]]).encode()).hexdigest()
-                saved = wbr.save_source(month, shop, part['kind'], digest, list(dict.fromkeys(names + [part['name']])),
-                                        {'rows': merged, 'status': 'ready'}, user['name'])
-                fresh = fresh or not saved['duplicate']
-            results.append({'name': part['name'], 'ok': True, 'kind': part['kind'], 'label': model.KINDS[part['kind']],
-                            'rows': len(part['rows']), 'duplicate': not fresh,
-                            'warnings': ['%s %d 行' % (m, len(v)) for m, v in sorted(months.items())]})
-    db.audit(user['name'], 'ec_douyin_upload', target=shop, detail='；'.join('%s:%s' % (r['name'], r.get('label') or r.get('error')) for r in results)[:300])
-    with _lock: _cache.clear()
+    try:
+        for f in files[:10]:
+            name = f.filename or '未命名'
+            blob = await f.read(MAX_UPLOAD + 1)
+            if len(blob) > MAX_UPLOAD:
+                results.append({'name': name, 'ok': False, 'error': '超过 60 MB，没有入库'}); continue
+            # 解析、合并、压缩、入库要好几秒：放到线程池里，别让整个工作台这几秒不响应
+            results += await run_in_threadpool(_ingest_safely, shop, name, blob, user['name'])
+    finally:                                   # 中途出错也留痕、也清缓存：排在前面的文件可能已经入库了
+        if results:
+            db.audit(user['name'], 'ec_douyin_upload', target=shop, detail='；'.join('%s:%s' % (r['name'], r.get('label') or r.get('error')) for r in results)[:300])
+        with _lock: _cache.clear()
     return {'ok': True, 'results': results}
+
+
+def _body(rows):
+    """比较两份快照内容是否一样：不看 n（文件内行序）、x（哪次导出），也不看行的先后（同一秒的几行，两次导出里先后可能不同）。"""
+    return sorted(({k: v for k, v in r.items() if k not in ('n', 'x')} for r in rows), key=lambda r: r['id'])
+
+
+def _ingest(shop, name, blob, operator, out):
+    """一个文件：认类型 → 按月和库里现用的那份合并 → 和现用的不一样才存。结果逐条记进 out（zip 里有几个 csv 就有几条）。"""
+    for part in model.parse(blob, name, shop):
+        if not part['kind']:
+            out.append({'name': part['name'], 'ok': False, 'error': part['skip']}); continue
+        kind, rows = part['kind'], part['rows']
+        if kind == 'dy_platform':              # 订单状态是哪次导出时的：只认文件名里的导出时刻；文件改过名认不出就不记，新旧改按订单状态有没有倒退来判断
+            x = model.export_time(part['name'])
+            rows = [dict(r, x=x) for r in rows]
+        months, fresh, skipped = model.by_month(rows), False, []
+        # 先把月份都看一遍再动手存：有一个不对就整份不收，免得存了一半却说没入库
+        if any(not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', k) for k in months):
+            raise ValueError('「%s」有日期被改过格式（像是用 Excel 打开后另存的），请传平台导出的原始文件' % part['name'])
+        with db._engine.connect() as cx:
+            old = {r.period: r for r in _latest(cx, shop, list(months), [kind])}
+        for month, new in sorted(months.items()):
+            wbr.check_period(month)
+            before = json.loads(gzip.decompress(old[month].payload))['rows'] if month in old else []
+            names = json.loads(old[month].filenames or '[]') if month in old else []
+            merged = model.merge(before, new, kind if kind in ('dy_platform', 'dy_orders') else '', skipped)
+            # 判重按内容比：和现用的那份逐行一样才算重复。只比几个字段的话，补了新字段的重传、只改了备注的导出都会被当成重复；
+            # 指纹里带上现用那份的编号，保证不一样就一定存得进去（表上有唯一约束，会和历史上任何一版比）
+            if month in old and _body(merged) == _body(before): continue
+            digest = hashlib.sha256(json.dumps([model.FORMAT, old[month].id if month in old else 0, _body(merged)], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            saved = wbr.save_source(month, shop, kind, digest, list(dict.fromkeys(names + [part['name']])),
+                                    {'rows': merged, 'status': 'ready', 'extra': dict(model.snapshot_note(kind, merged), format=model.FORMAT)}, operator)
+            fresh = fresh or not saved['duplicate']
+        warnings = ['%s %d 行' % (m, len(v)) for m, v in sorted(months.items())]
+        if skipped: warnings.append('这份导出比系统里的旧，%d 行没有覆盖' % len(skipped))
+        out.append({'name': part['name'], 'ok': True, 'kind': kind, 'label': model.KINDS[kind], 'rows': len(rows), 'duplicate': not fresh, 'warnings': warnings})
+
+
+def _ingest_safely(shop, name, blob, operator):
+    """每个文件各出各的结果，一个读不了不连累同批其它文件；读不了的说人话，原始报错只进服务器日志。"""
+    out = []
+    fail = lambda why: out + [{'name': name, 'ok': False, 'error': why}]
+    try:
+        with _upload_lock: _ingest(shop, name, blob, operator, out)
+    except (zipfile.BadZipFile, zlib.error): return fail('压缩包损坏，请重新下载后再传')
+    except csv.Error: return fail('文件内容格式不对，不像平台导出的原始文件')
+    except HTTPException as e: return fail(str(e.detail)[:120])
+    except (ValueError, OSError, KeyError) as e: return fail(str(e)[:120])
+    except SQLAlchemyError:
+        log.exception('抖音资料入库失败：%s', name)
+        return fail('系统保存时出错，文件没有入库（不是文件的问题）；请稍后重传，还不行请找管理员')
+    except Exception:
+        log.exception('抖音资料上传读不了：%s', name)
+        return fail('这个文件读不了，请确认是平台导出的原始文件')
+    return out
 
 
 def _ar_path(period, shop):
@@ -126,7 +196,9 @@ def _sync(period, shop, customer, operator):
     ship = lambda r: next((str(r.get(k) or '').strip() for k in ('t3', 't4') if str(r.get(k) or '').strip().startswith('CK')), '')
     bills = open_items._merge(raw, lambda r: dict(order=open_items.order_key(r.get('t6'), r.get('t4')), ship=ship(r)))
     try: book = _book(s, conf, customer.replace("'", ''), period)
-    except Exception as e: book = {'error': '读金蝶账面余额失败（%s）' % type(e).__name__}
+    except Exception as e:
+        log.warning('抖音月结读金蝶账面余额失败 %s %s：%s', period, shop, type(e).__name__)
+        book = {'error': '金蝶账面余额这次没读到，重新同步一次再看'}
     path = _ar_path(period, shop); os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = None
     try:
@@ -155,7 +227,11 @@ def ar_refresh(request: Request, period: str = Form(...), shop: str = Form(...))
 
     def job():
         try: _sync(period, shop, selected['kd_name'], user['name'])
-        except Exception as e: _jobs[key]['error'] = '金蝶同步失败（%s），请检查金蝶连接后重试' % type(e).__name__
+        except Exception as e:
+            _jobs[key]['error'] = '金蝶这会儿没连上，应收没有同步成；过一会儿再点一次同步'
+            log.exception('抖音应收同步失败 %s %s', period, shop)
+            try: db.audit(user['name'], 'ec_douyin_ar_refresh_failed', target='%s %s' % (period, shop), detail=type(e).__name__)
+            except Exception: pass
         finally:
             _jobs[key]['running'] = False
             with _lock: _cache.pop(key, None)
@@ -164,23 +240,38 @@ def ar_refresh(request: Request, period: str = Form(...), shop: str = Form(...))
 
 
 def _result(period, shop):
-    """对账结果（按资料版本 + 应收同步时间缓存）。没同步过应收返回 (None, None, 资料行数)。"""
-    version, rows = _sources(period, shop)
-    counts = {k: sum(1 for r in v if r['t'][:7] == period) for k, v in rows.items()}
+    """对账结果（按资料版本 + 应收同步时间缓存）。没同步过应收返回 (None, None, 资料行数)。
+    先只查现用的是哪几份快照；和缓存对得上就直接用，对不上才把四类资料整份解开重算。"""
+    version, counts = _version(period, shop)
     meta = _ar_meta(period, shop)
     if not meta: return None, None, counts
     key = (period, shop); stamp = (version, meta['ts'])
     with _lock:
         hit = _cache.get(key)
         if hit and hit[0] == stamp: return hit[1], hit[2], counts
-    with gzip.open(_ar_path(period, shop), 'rt', encoding='utf-8') as stream:
-        saved = json.load(stream)
-    result = model.reconcile(period, rows['dy_settle'], rows['dy_ledger'], saved['bills'], rows['dy_orders'])
-    first = model.push_plan(period, rows['dy_settle'], rows['dy_orders'], result)          # 不看推没推过：只为标出"可核销但系统不推"的
-    for b in result['bills']: b['hold'] = first['held'].get(b['no'], '')
-    result['held'] = [dict(key=k, label=model.PUSH_SKIP[k], **v) for k, v in first['skipped'].items() if v['count']]
-    result['pushable'] = first['eligible']
-    with _lock: _cache[key] = (stamp, result, saved.get('book') or {}, rows, saved['bills'])
+        gate = _building.setdefault(key, threading.Lock())
+    with gate:                                  # 页面一打开是几个请求同时到：等第一个算完直接用
+        with _lock:
+            hit = _cache.get(key)
+            if hit and hit[0] == stamp: return hit[1], hit[2], counts
+        loaded, rows = _sources(period, shop)
+        with gzip.open(_ar_path(period, shop), 'rt', encoding='utf-8') as stream:
+            saved = json.load(stream)
+        result = model.reconcile(period, rows['dy_settle'], rows['dy_ledger'], saved['bills'], rows['dy_orders'])
+        first = model.push_plan(period, rows['dy_settle'], rows['dy_orders'], result)      # 不看推没推过：只为标出"可核销但系统不推"的
+        for b in result['bills']: b['hold'] = first['held'].get(b['no'], '')
+        # 还没结算的蓝字应收：平台订单现在什么情况（已关闭 / 售后中 / 等结算），有平台订单明细才有。
+        # 红字不说（那句话说的是钱来不来，套在红字上分不清指哪笔）；合单的说同组里还没结算的那几个订单
+        index = model.platform_index(rows['dy_platform'])
+        for b in result['bills']:
+            waiting = b['cat'] in ('overdue', 'transit') and b['open'] > 0
+            b['pstate'] = model.platform_states(index, b.get('pending') or [b['order']], result['end'], b.get('merged') or 0) if waiting else ''
+        result['held'] = [dict(key=k, label=model.PUSH_SKIP[k], **v) for k, v in first['skipped'].items() if v['count']]
+        result['pushable'] = first['eligible']
+        with _lock:
+            _cache.pop(key, None)
+            _cache[key] = ((loaded, meta['ts']), result, saved.get('book') or {}, rows, saved['bills'])
+            while len(_cache) > CACHE_KEEP: _cache.pop(next(iter(_cache)))            # 最早放进去的先丢
     return result, saved.get('book') or {}, counts
 
 
@@ -223,11 +314,40 @@ def order(request: Request, period: str, shop: str, order: str):
     _need(period, shop)
     with _lock: hit = _cache.get((period, shop))
     if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
-    detail = model.order_detail(period, hit[3]['dy_settle'], hit[3]['dy_ledger'], hit[4], order.strip(), hit[3]['dy_orders'])
+    detail = model.order_detail(period, hit[3]['dy_settle'], hit[3]['dy_ledger'], hit[4], order.strip(), hit[3]['dy_orders'], hit[3]['dy_platform'])
     mine = [b for b in hit[1]['bills'] if b['order'] in detail['members']]
     cats = {b['cat'] for b in mine}; detail['reason'] = next((b['reason'] for b in mine if b['reason']), '')
     detail['categories'] = [model.category_label(c, hit[1]['overdue_days']) for c in model.CATEGORIES if c in cats]
     return dict(detail, ok=True, period=period)
+
+
+@router.get('/order-bills')
+def order_bills(request: Request, period: str, shop: str, nos: str):
+    """订单抽屉里应收单的分录明细（物料、数量、单价、税、来源单据）：现查金蝶，只读。只认这家店对账结果里有的应收单号。"""
+    require(request); check(period, shop)
+    _need(period, shop)
+    with _lock: hit = _cache.get((period, shop))
+    if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
+    known = {b['no'] for b in hit[4]}
+    wanted = [n for n in dict.fromkeys(x.strip() for x in nos.split(',')) if n in known][:60]
+    if not wanted: return {'ok': True, 'bills': {}}
+    key, now = (period, shop, hit[0][1], tuple(wanted)), time.time()
+    with _lock:
+        kept = _bill_cache.get(key)
+        if kept and now - kept[0] < 300: return {'ok': True, 'bills': kept[1]}
+    try:
+        s, conf = kc.login()
+        rows, err = kc._query_raw(s, conf, 'AR_receivable', ','.join(model.BILL_LINE_KEYS), 'FBillNo in (%s)' % ','.join("'%s'" % n for n in wanted), 0)
+    except Exception as e:
+        rows, err = None, str(e) or type(e).__name__
+    if err:                                     # 金蝶的报错原文带服务器地址、程序字样：只进日志，页面上说人话
+        log.warning('抖音订单抽屉取金蝶应收分录失败 %s %s：%s', period, shop, str(err)[:500])
+        return {'ok': True, 'bills': {}, 'error': '金蝶这会儿没连上，物料、数量这些明细暂时看不了；上面的对账不受影响，稍后重开这张单再试'}
+    found = model.bill_lines(rows)
+    with _lock:
+        for k in [k for k, v in _bill_cache.items() if now - v[0] >= 300]: _bill_cache.pop(k, None)
+        _bill_cache[key] = (now, found)
+    return {'ok': True, 'bills': found}
 
 
 @router.get('/missing')

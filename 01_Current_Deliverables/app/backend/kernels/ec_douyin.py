@@ -1,23 +1,32 @@
 # V2.811: 抖音月结——两份动账明细的解析、与金蝶应收逐单对、收款单草稿。纯计算：不连金蝶、不碰库。
 import calendar
+import codecs
 import csv
+import datetime
 import html
 import io
 import math
 import re
+import unicodedata
 import zipfile
 from collections import defaultdict
 
-KINDS = {'dy_settle': '抖音动账明细（订单维度）', 'dy_ledger': '抖音账户流水（带余额）', 'dy_orders': '旺店通订单明细（认合单）'}
+KINDS = {'dy_settle': '抖音动账明细（订单维度）', 'dy_ledger': '抖音账户流水（带余额）', 'dy_orders': '旺店通订单明细（认合单）',
+         'dy_platform': '抖音平台订单明细（抖店订单导出）'}
 SETTLE = '货款结算入账'
 # 结算时从货款里直接扣掉的费用列（文件里是负数）
 FEE_COLUMNS = ['平台服务费', '佣金', '服务商佣金', '渠道分成', '招商服务费', '站外推广费', '其他分成']
 SUBSIDY_COLUMNS = ['实际平台补贴_运费', '实际平台补贴', '其他平台补贴', '以旧换新抵扣', '政府补贴平台垫资', '实际达人补贴', '实际抖音支付补贴', '实际抖音月付营销补贴', '银行补贴']
-FORMAT = 3                                  # 解析出的字段变了就加一：让同一份文件重新上传时能覆盖旧快照
+FORMAT = 4                                  # 解析出的字段变了就加一：让同一份文件重新上传时能覆盖旧快照
+MAX_ROWS = 1000000                          # 一份资料最多这么多行：平台导出一个月几万行，超过这个数不像导出的原始文件
+MAX_UNZIPPED = 150 << 20                    # 压缩包里单个 csv 解开后的上限（真实最大的一份解开 26 MB）
+MAX_ZIP_FILES = 20                          # 一个压缩包里最多处理几个 csv
+_TIME = re.compile(r'20\d{2}-\d{2}-\d{2}')    # 平台原始导出的时间都是这个开头；被 Excel 另存过会变成 2026/9/22
 _SETTLE_HEAD = {'动帐流水号', '动账方向', '动账金额', '动账场景', '订单号', '订单实付应结', '订单退款', '平台服务费'}
 _LEDGER_HEAD = {'动账流水号', '账户方向', '动账金额(元)', '动账场景', '账户余额(元)'}
 _INSURANCE_HEAD = {'保险单号', '动账流水号', '金额(元)'}
 _ORDERS_HEAD = {'订单编号', '店铺', '子单原始单号', '订单状态', '应收金额', '分摊后总价'}
+_PLATFORM_HEAD = {'主订单编号', '子订单编号', '订单应付金额', '订单状态', '售后状态', '订单提交时间', '平台实际承担优惠金额'}
 # 结算后把钱退给买家 / 退回补贴：冲的是应收；其余结算后场景（分账、退分账）是费用的返还
 REFUND_SCENES = {'退款-结算后退款-退用户', '退款-订单退款触发-退补贴'}
 CATEGORIES = {'ok': '钱已到账·金额一致，可核销', 'mismatch': '钱已到账·金额对不上', 'pair': '结算前已退款·红字蓝字互冲即平',
@@ -41,18 +50,38 @@ def _decode(blob):
     raise ValueError('文件编码无法识别')
 
 
+def _encoding(blob):
+    """分块把整份验一遍，返回能读通的编码；不把整份转成字符串留在内存里。"""
+    for encoding in ('utf-8-sig', 'gb18030'):
+        check = codecs.getincrementaldecoder(encoding)()
+        try:
+            for i in range(0, len(blob), 1 << 20): check.decode(blob[i:i + (1 << 20)])
+            check.decode(b'', final=True)
+            return encoding
+        except UnicodeDecodeError: continue
+    raise ValueError('文件编码无法识别')
+
+
 def _tables(blob, filename):
     """上传的可能是 csv，也可能是装着多个 csv 的 zip。逐个产出 (文件名, 行字典列表, 表头)。"""
+    if blob[:4] == b'\xd0\xcf\x11\xe0': raise ValueError('「%s」是老版 Excel（.xls），系统读不了；请传平台导出的原始文件' % filename)
     if zipfile.is_zipfile(io.BytesIO(blob)):
         with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            found = 0
             for info in z.infolist():
                 if info.is_dir() or not info.filename.lower().endswith('.csv'): continue
                 try: name = info.filename.encode('cp437').decode('gbk')
                 except (UnicodeEncodeError, UnicodeDecodeError): name = info.filename
+                if info.flag_bits & 1: raise ValueError('压缩包带密码，系统打不开；请先解压，把里面的 csv 传上来')
+                if info.file_size > MAX_UNZIPPED: raise ValueError('压缩包里的「%s」解开超过 %d MB，不像平台导出的文件' % (name.rsplit('/', 1)[-1], MAX_UNZIPPED >> 20))
+                found += 1
+                if found > MAX_ZIP_FILES: raise ValueError('压缩包里的 csv 超过 %d 个，不像平台导出的文件' % MAX_ZIP_FILES)
                 yield from _tables(z.read(info), name.rsplit('/', 1)[-1])
         return
-    reader = csv.DictReader(io.StringIO(_decode(blob), newline=''))
-    yield filename, list(reader), set(reader.fieldnames or [])
+    # 不整表读进内存（26MB 的订单导出整表读要吃 400 多 MB）：把读取器交出去，边读边转成要用的那几列
+    reader = csv.DictReader(io.TextIOWrapper(io.BytesIO(blob), encoding=_encoding(blob), newline=''))
+    head = set(reader.fieldnames or [])
+    yield filename, reader, head
 
 
 def _settle_row(r):
@@ -98,7 +127,9 @@ def _xlsx_rows(blob, must=b''):
     if 'xl/sharedStrings.xml' in z.namelist():
         shared = [html.unescape(b''.join(_TEXT.findall(m.group(1))).decode('utf-8')) for m in _SHARED.finditer(z.read('xl/sharedStrings.xml'))]
     if shared: must = b''
-    sheet = sorted(n for n in z.namelist() if n.startswith('xl/worksheets/') and n.endswith('.xml'))[0]
+    sheets = sorted(n for n in z.namelist() if n.startswith('xl/worksheets/') and n.endswith('.xml'))
+    if not sheets: raise ValueError('文件不是 Excel 表格（里面没有工作表）')
+    sheet = sheets[0]
     buf, first = b'', True
     with z.open(sheet) as f:
         while True:
@@ -137,13 +168,121 @@ def _orders(blob, filename, shop):
         if r is None:
             r = agg[jy + '|' + order] = {'id': jy + '|' + order, 'jy': jy, 'order': order, 't': t, 'n': i, 'status': _text(cell(row, '订单状态')),
                                          'refund': _text(cell(row, '订单退款状态')), 'recv': round(_num(cell(row, '应收金额')), 2),
-                                         'paid': round(_num(cell(row, '买家实付')), 2), 'ship': when(row, '发货时间'), 'amount': 0.0, 'qty': 0.0, 'goods': []}
-        r['amount'] = round(r['amount'] + _num(cell(row, '分摊后总价')), 2); r['qty'] += _num(cell(row, '实发数量'))
+                                         'paid': 0.0, 'ship': when(row, '发货时间'), 'amount': 0.0, 'qty': 0.0, 'goods': []}
+        r['amount'] += _num(cell(row, '分摊后总价')); r['qty'] += _num(cell(row, '实发数量'))
+        r['paid'] += _num(cell(row, '买家实付'))                                          # 买家实付在明细里是按货品行分摊的（带三位小数），逐行加完再取整
         goods = _text(cell(row, '货品名称'))[:30]
         if goods and goods not in r['goods'] and len(r['goods']) < 4: r['goods'].append(goods)
     if not agg:
         raise ValueError(('「%s」里没有「%s」的订单，请确认导出时包含了这家店' % (filename, shop)) if shop else '「%s」里没有带平台订单号的订单' % filename)
+    for r in agg.values(): r['amount'], r['paid'] = round(r['amount'], 2), round(r['paid'], 2)
     return list(agg.values())
+
+
+_PHONE = re.compile(r'(?<!\d)(?:\+?86[- ]?)?1[3-9]\d(?:[-. ]?\d){8}(?!\d)|(?<!\d)0\d{2,3}[- ]?\d{7,8}(?!\d)|(?<!\d)\d{17}[\dXx](?!\d)')
+_PLACE = re.compile(r'[\u4e00-\u9fa5]{2}(?:省|自治区)|[\u4e00-\u9fa5]{2}市[\u4e00-\u9fa5]{1,12}(?:区|县|镇)|(?:路|街|巷|弄|道)\d+号|\d+(?:栋|幢|单元|室|号楼)')
+_PRIVATE_WORDS = ('地址', '收件', '收货', '电话', '手机', '改址', '门牌', '姓名', '改寄', '转寄', '寄到', '发到', '微信', '身份证')
+MEMO_HIDDEN = '（备注里有收货信息，未保留）'
+
+
+def _memo(value):
+    """商家备注是客服手写的：退款原因、补发单号有用，但改地址时会把买家的电话、地址、姓名写进去。
+    先拿整段判断、再截断（先截的话号码可能正好被切断认不出）；有一点迹象就整条不留。"""
+    text = _text(value)
+    if not text or text == '-': return ''
+    seen = unicodedata.normalize('NFKC', text[:300])                  # 全角数字转成半角再判断；只存前 80 字，看前 300 字足够
+    if _PHONE.search(seen) or _PLACE.search(seen) or any(w in seen for w in _PRIVATE_WORDS): return MEMO_HIDDEN
+    return text[:80]
+
+
+def _platform_row(r):
+    """抖店后台「订单导出」的一行＝一个子订单。只留对账用的列；收件人、电话、地址、买家留言一概不留，
+    商家备注里带电话、地址迹象的整条不留（见 _memo）。"""
+    text = lambda k, n=40: '' if _text(r.get(k)) == '-' else _text(r.get(k))[:n]
+    money = lambda k: round(_num(_text(r.get(k))), 2)
+    return {'id': text('子订单编号'), 'order': text('主订单编号'), 't': text('订单提交时间'), 'goods': text('选购商品', 60), 'spec': text('商品规格'),
+            'code': text('商家编码'), 'qty': _num(_text(r.get('商品数量'))), 'pay': money('订单应付金额'), 'plat': money('平台实际承担优惠金额'),
+            'kol': money('达人实际承担优惠金额'), 'shop': money('商家实际承担优惠金额'), 'freight': money('运费'),
+            'status': text('订单状态'), 'after': text('售后状态'), 'ship': text('发货时间'), 'done': text('订单完成时间'),
+            'cancel': text('取消原因', 30), 'memo': _memo(r.get('商家备注'))}
+
+
+def export_time(filename):
+    """抖店导出的 csv 文件名以导出时刻（10 位秒数）开头，取出来写成北京时间；认不出返回空串。"""
+    m = re.match(r'(1[6-9]\d{8})_', _text(filename).rsplit('/', 1)[-1])
+    if not m: return ''
+    return datetime.datetime.fromtimestamp(int(m.group(1)), datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
+
+
+_AFTER_DONE = {'售后关闭', '售后已拒绝', '换货成功', '补寄成功'}      # 售后已经办完、不退钱的：不影响结算
+_AFTER_OPEN = {'待收退货', '待退货', '售后待处理'}                    # 售后还在办的
+
+
+def _unshipped(r):
+    """没发货就退款关闭的子订单：金蝶不给它开应收，它的售后也不该算到这张应收头上。"""
+    return r['status'] == '已关闭' and not r['ship']
+
+
+def platform_index(rows):
+    """平台订单明细按主订单汇总。gross＝下单时这单值多少钱（买家应付 ＋ 平台、达人承担的优惠）；unshipped＝其中没发货就关闭的子订单。
+    金蝶蓝字照发货开，所以该等于 gross，或等于 gross − unshipped（2026 年 8、9 月实测：没退款的 16,599 笔结算，
+    动账明细的 实付＋补贴 与导出逐个子订单相等；按订单看，不等的都是有子订单没发货就关闭的）。
+    状态、售后只看发过货的子订单；整单都没发货才看全部。x＝这单的状态是哪次导出时的（各子订单里最早的那次）。"""
+    out = {}
+    for r in rows or []:
+        o = out.setdefault(r['order'], {'t': r['t'], 'gross': 0.0, 'pay': 0.0, 'subsidy': 0.0, 'unshipped': 0.0, 'freight': 0.0,
+                                        'status': [], 'after': [], 'done': '', 'ship': '', 'x': r.get('x', ''), 'subs': []})
+        value = r['pay'] + r['plat'] + r['kol']
+        o['gross'] += value; o['pay'] += r['pay']; o['subsidy'] += r['plat'] + r['kol']; o['freight'] += r.get('freight', 0)
+        if _unshipped(r): o['unshipped'] += value
+        o['t'] = min(o['t'], r['t']); o['x'] = min(o['x'], r.get('x', '')); o['subs'].append(r)
+    for o in out.values():
+        live = [r for r in o['subs'] if not _unshipped(r)] or o['subs']
+        live = [r for r in live if r['pay'] + r['plat'] + r['kol'] > 0] or live       # 有带金额的子订单时，0 元子订单（赠品）不参与判断状态
+        for r in live:
+            if r['status'] not in o['status']: o['status'].append(r['status'])
+            if r['after'] and r['after'] not in o['after']: o['after'].append(r['after'])
+            o['done'] = max(o['done'], r['done']); o['ship'] = max(o['ship'], r['ship'])
+        for k in ('gross', 'pay', 'subsidy', 'unshipped', 'freight'): o[k] = round(o[k], 2)
+    return out
+
+
+def platform_closed(o):
+    return bool(o) and set(o['status']) == {'已关闭'}
+
+
+def platform_state(o, end):
+    """一句话说这单在平台上什么情况——给还没结算的蓝字应收看：这笔钱还会不会来。
+    状态是订单导出那一刻的，不是月底的；知道是哪天导出的就写在句尾。"""
+    if not o: return ''
+    status, after = set(o['status']), o['after']
+    tail = '（按 %s 的订单导出）' % o['x'][5:10] if o.get('x') else ''
+    if status == {'已关闭'}:
+        why = '（%s）' % '、'.join(after) if after else ''
+        if o.get('freight') and o['ship']: return '平台订单已关闭%s，货款不会结算，运费 %.2f 元可能照结%s' % (why, o['freight'], tail)
+        return '平台订单已关闭%s，这笔钱不会结算了%s' % (why, tail)
+    if '退款成功' in after: return '平台上有退款成功的售后，会少结或不结' + tail
+    doing = [a for a in after if a in _AFTER_OPEN]
+    other = [a for a in after if a not in _AFTER_OPEN and a not in _AFTER_DONE]
+    if doing: return '平台上售后还在处理（%s）%s' % ('、'.join(doing), tail)
+    if other: return '平台上有售后记录（%s）%s' % ('、'.join(other), tail)      # 不认识的售后状态：不猜它办没办完
+    if status <= {'已完成', '已关闭'} and o['done']:
+        return '买家 %s 确认收货%s，等平台结算%s' % (o['done'][5:10], '（月底时还没确认）' if o['done'][:10] > end else '', tail)
+    if '已发货' in status: return '买家还没确认收货' + tail
+    return '平台订单状态：' + '、'.join(o['status']) + tail
+
+
+def platform_states(index, orders, end, group=0):
+    """几个订单各自在平台上的情况拼成一句。group＝这组（合单）一共几个订单：
+    说法不止一种、或说到的只是合单里的一部分时，句子前带订单尾号，免得读成整张应收都是这个情况。
+    合单里下单金额是 0 的订单（赠品单）不会有结算，不说。"""
+    if max(group, len(orders)) > 1: orders = [o for o in orders if not (index.get(o) and index[o]['gross'] == 0)]
+    said = [(o, platform_state(index.get(o), end)) for o in orders]
+    said = [(o, s) for o, s in said if s]
+    if not said: return ''
+    sentences = list(dict.fromkeys(s for _, s in said))
+    if len(sentences) == 1 and len(said) >= max(group, 1): return sentences[0]
+    return '；'.join('尾号 %s：%s' % ('、'.join(o[-4:] for o, x in said if x == s), s) for s in sentences)
 
 
 def parse(blob, filename, shop=''):
@@ -155,14 +294,28 @@ def parse(blob, filename, shop=''):
     for name, rows, head in _tables(blob, filename):
         if _SETTLE_HEAD <= head: kind, make = 'dy_settle', _settle_row
         elif _LEDGER_HEAD <= head: kind, make = 'dy_ledger', _ledger_row
+        elif _PLATFORM_HEAD <= head: kind, make = 'dy_platform', _platform_row
         elif _INSURANCE_HEAD <= head:
             out.append({'name': name, 'kind': '', 'skip': '保费明细已含在账户流水里，不单独接入'}); continue
-        else: raise ValueError('「%s」表头不是抖音动账明细、带余额的账户流水，也不是旺店通订单明细' % name)
-        parsed = [dict(x, n=i) for i, x in enumerate(map(make, rows)) if x['id'] and len(x['t']) >= 7]      # n=文件内行序
+        else: raise ValueError('「%s」表头不是抖音动账明细、带余额的账户流水、抖店订单导出，也不是旺店通订单明细' % name)
+        parsed, bad = [], 0
+        for i, x in enumerate(map(make, rows)):                                      # n=文件内行序
+            if i >= MAX_ROWS: raise ValueError('「%s」超过 %d 万行，不像平台导出的原始文件' % (name, MAX_ROWS // 10000))
+            if not x['id'] or not x['t']: continue
+            if not _TIME.match(x['t']) or 'E+' in x['id'].upper(): bad += 1; continue
+            parsed.append(dict(x, n=i))
+        # 有一行不对就整份不收：收一半的话，另一半会被存进一个不存在的月份，页面上还显示成功
+        if bad: raise ValueError('「%s」有 %d 行的日期或单号被改过格式（像是用 Excel 打开后另存的），请传平台导出的原始文件' % (name, bad))
         if not parsed: raise ValueError('「%s」里没有可用的流水行' % name)
         out.append({'name': name, 'kind': kind, 'rows': parsed})
     if not out: raise ValueError('压缩包里没有 csv 文件')
     return out
+
+
+def snapshot_note(kind, rows):
+    """数据准备清单上要看的两件事：这份资料盖到哪几天；动账明细是不是旧版解析的（缺买家实付 / 补贴，订单抽屉的算式要用）。"""
+    days = sorted(r['t'][:10] for r in rows if r.get('t'))
+    return {'span': [days[0], days[-1]] if days else [], 'stale': kind == 'dy_settle' and any('paid' not in r for r in rows)}
 
 
 def by_month(rows):
@@ -171,10 +324,28 @@ def by_month(rows):
     return dict(months)
 
 
-def merge(old, new):
-    """同一流水号只留一份（新文件覆盖旧的），按时间排好。"""
+_PLATFORM_RANK = {'已支付': 1, '待发货': 1, '已发货': 2, '已完成': 3, '已关闭': 3}
+
+
+def older(kind, old, new):
+    """后传的这一行是不是比库里那行还旧（误传了一份更早的导出）。只凭看得出先后的迹象判断，看不出就当它是新的。"""
+    if kind == 'dy_platform':
+        if old.get('x') and new.get('x') and new['x'] < old['x']: return True
+        return bool(old.get('done') and not new.get('done')) or _PLATFORM_RANK.get(new.get('status'), 9) < _PLATFORM_RANK.get(old.get('status'), 0)
+    if kind == 'dy_orders':
+        return (old.get('status') == '已取消' and new.get('status') != '已取消') or (old.get('status') == '已完成' and new.get('status') == '已发货')
+    return False
+
+
+def merge(old, new, kind='', skipped=None):
+    """同一流水号只留一份（新文件覆盖旧的），按时间排好。
+    订单类资料（kind 给 dy_platform / dy_orders）：新文件里明显比库里更旧的行不覆盖；skipped 给个列表就把没覆盖的号记进去。"""
     rows = {r['id']: r for r in old}
-    rows.update({r['id']: r for r in new})
+    for r in new:
+        if kind and r['id'] in rows and older(kind, rows[r['id']], r):
+            if skipped is not None: skipped.append(r['id'])
+            continue
+        rows[r['id']] = r
     return sorted(rows.values(), key=lambda r: (r['t'], r.get('n', 0), r['id']))
 
 
@@ -300,7 +471,8 @@ def reconcile(period, settle, ledger, bills, orders=None, overdue_days=10, toler
         verdict[g or b['no']] = cat
         rows.append(dict(no=b['no'], date=b['date'], order=b['order'], amount=b['amount'], written=b['written'], open=b['open'],
                          ws=b['ws'], ds=b['ds'], cat=cat, order_open=open_net, flow=expected, cash=cash, fee=fee, settled_at=settled_at,
-                         diff=None if expected is None else round(open_net - expected, 2), reason=reason, merged=len(members) if len(members) > 1 else 0))
+                         diff=None if expected is None else round(open_net - expected, 2), reason=reason, merged=len(members) if len(members) > 1 else 0,
+                         pending=sorted(o for o in members if o not in settled_orders) if len(members) > 1 else []))
         c = cats[cat]; c['count'] += 1; c['amount'] += b['open']
         if (cat, g or b['no']) not in seen: seen.add((cat, g or b['no'])); c['orders'] += 1
     for c in cats.values(): c['amount'] = round(c['amount'], 2)
@@ -353,7 +525,7 @@ def reconcile(period, settle, ledger, bills, orders=None, overdue_days=10, toler
                          'open_bills': len(rows), 'order_rows': len(orders or []), 'merged_groups': len(merged)}}
 
 
-def order_detail(period, settle, ledger, bills, order, orders=None):
+def order_detail(period, settle, ledger, bills, order, orders=None, platform=None):
     """一个订单的全部依据：抖音这边每一笔动账（到账、各项扣费、当时余额），金蝶那边每一张应收单。
     合单发货的，把同组的平台订单一起列出来——金蝶应收是按合并后的那张单开的。"""
     end = period_end(period)
@@ -376,27 +548,72 @@ def order_detail(period, settle, ledger, bills, order, orders=None):
     wdt = {}
     for o in members:
         for r in info.get(o, []):
-            w = wdt.setdefault(r['jy'], {'jy': r['jy'], 'status': r['status'], 'refund': r['refund'], 'recv': r['recv'], 'paid': r['paid'], 'ship': r['ship'], 'orders': [], 'goods': []})
+            w = wdt.setdefault(r['jy'], {'jy': r['jy'], 'status': r['status'], 'refund': r['refund'], 'recv': r['recv'], 'paid': 0.0, 'ship': r['ship'], 'orders': [], 'goods': []})
             w['orders'].append(o); w['goods'] += [x for x in r['goods'] if x not in w['goods']]
+            w['paid'] = round(w['paid'] + r['paid'], 2)                 # 合单：这张旺店通单里几个平台订单的买家实付加起来（应收金额本来就是整张单的数）
     # 结算前退了一部分：平台补贴按同样比例收回，动账明细里的补贴是收回以后剩下的，不能直接和蓝字比。
     # 蓝字 − 实付 就是下单时的补贴；按退款比例折下来等于明细里的补贴，说明蓝字没错，该看的是红字冲了多少。
+    # 平台订单明细（抖店订单导出）：下单时这单值多少、现在什么状态。合单的把同组订单都列上；有一个订单没在导出里就不给合计，免得拿半个数去比蓝字
+    index = platform_index([r for r in platform or [] if r['order'] in members])
+    whole = bool(index) and all(o in index for o in members)
+    subs = [dict(r, order=o) for o in members for r in index.get(o, {}).get('subs', [])]
+    p_gross = round(math.fsum(index[o]['gross'] for o in members), 2) if whole else None
+    p_unshipped = round(math.fsum(index[o]['unshipped'] for o in members), 2) if whole else None
     back = None
     blue, red = total([b for b in own if b['amount'] > 0], 'amount'), total([b for b in own if b['amount'] < 0], 'amount')
     paid, left, refund = (total(raw, 'paid'), total(raw, 'subsidy'), abs(total(settled, 'refund'))) if known else (0, 0, 0)
-    if known and refund > 0 and paid > 0 and blue > paid + left + 0.01:
+    # 有平台订单明细时，「蓝字没错」先要和平台下单金额对得上（全部子订单，或去掉没发货就关闭的）；
+    # 不然退款接近全额时，下面按比例的那条判断几乎什么蓝字都放行
+    blue_fits = p_gross is None or abs(blue - p_gross) <= 0.02 or abs(blue - (p_gross - p_unshipped)) <= 0.02
+    if known and refund > 0 and paid > 0 and blue > paid + left + 0.01 and blue_fits:
         before = round(blue - paid, 2)
         if abs(before * (1 - refund / paid) - left) <= 0.02 * len(raw) + 0.01:
             back = {'before': before, 'back': round(before - left, 2), 'blue': blue, 'red': red, 'keep': round(blue - refund - (before - left), 2),
                     'red_should': round(-(refund + before - left), 2)}
+    # 平台状态只对「还没结算、金蝶还挂着没核销蓝字」的订单说：已结算的不说，只剩红字的也不说
+    waiting = [o for o in members if o not in {f['order'] for f in settled}]
+    priced = [o for o in waiting if not (index.get(o) and index[o]['gross'] == 0)] or waiting   # 合单里 0 元的赠品单不会有结算，判关没关不看它
+    # 平台状态是订单导出那天的，应收只看到期末：月底发货、下月初退货的，红字记在下个月，这里单独带出来给卡片说明
+    later = [b for b in bills if b['order'] in members and b['date'] > end and b['amount'] < 0]
+    flow_total = total([f for f in settled if f['in_period']] or settled, 'gross')
+    even = bool(settled) and abs(total(opened, 'open') - flow_total) <= 0.01      # 钱已到账、和未核销应收一分不差：没什么还欠着
+    owed = any(b['ws'] != 'C' and b['open'] > 0 for b in own) and not even
     return {'order': order, 'members': members, 'wdt': sorted(wdt.values(), key=lambda w: w['jy']), 'flows': flows, 'bills': own, 'settled': bool(settled), 'subsidy_back': back,
+            'platform': subs, 'platform_gross': p_gross, 'platform_unshipped': p_unshipped,
+            'platform_pay': round(math.fsum(index[o]['pay'] for o in members), 2) if whole else None,
+            'platform_state': platform_states(index, waiting, end, len(members)) if owed else '',
+            'platform_closed': owed and bool(waiting) and all(platform_closed(index.get(o)) for o in priced),
+            'later_red': total(later, 'amount'), 'later_red_at': max((b['date'] for b in later), default=''),
+            'platform_at': min((index[o]['t'] for o in index), default=''), 'blue_total': blue,
             'unsettled': [o for o in members if o not in {f['order'] for f in settled}] if len(members) > 1 else [],
-            'flow_total': total([f for f in settled if f['in_period']] or settled, 'gross'),
+            'flow_total': flow_total,
             'cash_total': total(settled, 'amt'), 'fee_total': total(settled, 'fee'), 'refund_total': abs(total(settled, 'refund')),
             'after_total': total([f for f in flows if f['gross'] is None], 'amt'),
             'paid_total': total(raw, 'paid') if known else None, 'subsidy_total': total(raw, 'subsidy') if known else None,
             'ordered_at': min((r['ot'] for r in raw if r.get('ot')), default=''), 'goods': list(dict.fromkeys(r['goods'] for r in raw if r.get('goods'))),
             'settled_at': max((f['t'] for f in settled), default=''), 'btype': next((f['btype'] for f in settled if f['btype']), ''),
             'ar_total': total(own, 'amount'), 'written_total': total(own, 'written'), 'open_total': total(opened, 'open')}
+
+
+# 订单抽屉里应收单的分录明细：打开抽屉时现查金蝶（只读），不进快照。顺序就是 bill_lines 拆行的顺序。
+BILL_LINE_KEYS = ['FBillNo', 'FBillTypeID.FName', 'F_ora_Text3', 'F_ora_Text4', 'FCreatorId.FName', 'FCreateDate', 'FAPPROVERID.FName', 'FAPPROVEDATE',
+                  'FMATERIALID.FNumber', 'FMATERIALID.FName', 'FPRICEUNITID.FName', 'FPriceQty', 'FTaxPrice', 'FEntryTaxRate',
+                  'FNoTaxAmountFor_D', 'FTAXAMOUNTFOR_D', 'FALLAMOUNTFOR_D', 'FSourceBillNo', 'FSOURCETYPE']
+SOURCE_TYPES = {'SAL_OUTSTOCK': '销售出库单', 'SAL_RETURNSTOCK': '销售退货单'}
+
+
+def bill_lines(rows):
+    """金蝶应收单分录（列序同 BILL_LINE_KEYS）→ {应收单号: 单据类型、旺店通单号、生成人、审核人 + 各行物料／数量／单价／税／来源单据}。"""
+    when = lambda v: _text(v).replace('T', ' ')[:16]
+    out = {}
+    for r in rows or []:
+        no, kind, t3, t4, creator, created, approver, approved, code, name, unit, qty, price, rate, net, tax, amount, src, src_type = (list(r) + [None] * 19)[:19]
+        bill = out.setdefault(_text(no), {'type': _text(kind), 'jy': next((x for x in (_text(t3), _text(t4)) if x.startswith('JY')), ''),
+                                          'creator': _text(creator), 'created': when(created), 'approver': _text(approver), 'approved': when(approved), 'lines': []})
+        bill['lines'].append({'code': _text(code), 'name': _text(name), 'unit': _text(unit), 'qty': round(_num(qty), 4), 'price': round(_num(price), 4), 'rate': round(_num(rate), 2),
+                              'net': round(_num(net), 2), 'tax': round(_num(tax), 2), 'amount': round(_num(amount), 2),
+                              'src': _text(src), 'src_type': SOURCE_TYPES.get(_text(src_type), _text(src_type))})
+    return out
 
 
 def category_label(cat, days):

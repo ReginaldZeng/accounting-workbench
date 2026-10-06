@@ -4,7 +4,12 @@ KINDS = {'order':'平台订单', 'item':'商品与子订单', 'wdt':'旺店通�
 TARGET = '星期零STARFIELD 天猫官旗店'
 KINDS['price_protection']='天猫价保赔付（补充）'
 # V2.811 抖音：一份订单维度动账明细（对金额、拆费用）+ 一份带余额的账户流水（对余额）
-DOUYIN_KINDS = {'dy_settle':'抖音动账明细（订单维度）', 'dy_ledger':'抖音账户流水（带余额）', 'dy_orders':'旺店通订单明细（认合单）'}   # V2.816 加第三类
+DOUYIN_KINDS = {'dy_settle':'抖音动账明细（订单维度）', 'dy_ledger':'抖音账户流水（带余额）', 'dy_orders':'旺店通订单明细（认合单）',
+                'dy_platform':'抖音平台订单明细（抖店订单导出）'}   # V2.816 加第三类；平台订单明细是第四类（下单时的订单金额、状态、售后）
+# 每类资料是干什么用的，写在清单上（会计的话）
+PURPOSE = {'dy_settle':'对金额、拆平台扣费：每笔结算到账多少、扣了什么', 'dy_ledger':'对账户余额：账户里每一笔进出和当时余额',
+           'dy_orders':'认合单发货：几个平台订单合成一张单发的，金蝶应收只记其中一个订单号',
+           'dy_platform':'核蓝字金额、看没结算的单在平台上是等结算、售后中还是已关闭；不传也能对账和下推'}
 KINDS.update(DOUYIN_KINDS)
 
 
@@ -13,6 +18,8 @@ def requirements(settings, shop, platform=''):
     # 抖音店默认就是那两份动账明细，不用逐店去配。
     default = ([k for k in KINDS if k!='price_protection' and k not in DOUYIN_KINDS] if shop == TARGET
                else list(DOUYIN_KINDS) if platform == '抖音' else [])
+    # 抖音店固定这四类：基础资料页没有抖音资料的勾选项，那一行一旦被动过保存，存下来的就不含抖音资料，清单会整个消失
+    if platform == '抖音': return list(DOUYIN_KINDS)
     value = settings.get(shop, default)
     return [kind for kind in KINDS if kind in value] if isinstance(value, list) else []
 

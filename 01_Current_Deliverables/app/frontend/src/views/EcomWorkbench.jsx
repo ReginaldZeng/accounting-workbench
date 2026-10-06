@@ -32,7 +32,7 @@ function Metric({label,value,sub,onClick}) {const Tag=onClick?'button':'div';ret
 export default function EcomWorkbench({user,onNav,initialScreen='open'}) {
   const [screen,setScreen]=useState(initialScreen),[period,setPeriod]=useState(lastMonth),[shop,setShop]=useState(''),[business,setBusiness]=useState(''),[flag,setFlag]=useState(''),[revision,setRevision]=useState(0),[drawer,setDrawer]=useState(null),[message,setMessage]=useState(''),[flowFilter,setFlowFilter]=useState({})
   const result=useResource(screen==='overview'?`/api/ec/workbench/overview?${query({period,business})}`:null,revision,`overview:${period}:${business}`)  // V2.617：轮询/刷新时保留上一份，不把页面清成"—"
-  const shopResult=useResource(`/api/ec/workbench/shops?${query({period:screen==='prepare'?period:''})}`,revision)
+  const shopResult=useResource(`/api/ec/workbench/shops?${query({period:screen==='prepare'?period:''})}`,revision,'shops')   // 重读时保留上一份店铺列表：空档里不会把抖音店当成别的平台
   const stageSummary=useResource(shop?`/api/ec/workbench/summary?${query({period,shop})}`:null,revision)
   const overview=result.data
   const overviewPending=overview?.shops?.some(s=>['pending','building'].includes(s.result?.status))
@@ -54,7 +54,7 @@ export default function EcomWorkbench({user,onNav,initialScreen='open'}) {
     <header className="ew-header"><div><h1>电商对账工作台</h1><p>平台事实 → 发货确认 → 应收核对 → 账户收款</p></div><div className="ew-header-tools"><span className="ew-readonly">金蝶只读</span>{!['flows','open'].includes(screen) && <label>结算期间<input aria-label="结算期间" type="month" value={period} onChange={changePeriod}/></label>}<button onClick={()=>setRevision(v=>v+1)}>刷新数据</button><button className="ew-link ew-basic" onClick={()=>onNav?.('ecombase')}>基础资料</button></div></header>
     <nav className="ew-nav ew-stage-nav" aria-label="电商工作流">{NAV.map(([key,label,description,icon])=>{
       const sm=stageSummary.data?.metrics,cur=shops.find(s=>s.id===shop)
-      const badge=key==='income'?(sm?(sm.ar_diff_count||0)+(sm.ar_pending||0):0):key==='prepare'?Math.max(0,(cur?.required||0)-(cur?.ready||0)):0
+      const badge=key==='income'?(sm?(sm.ar_diff_count||0)+(sm.ar_pending||0):0):key==='prepare'&&!shopResult.loading?Math.max(0,(cur?.required||0)-(cur?.ready||0)):0
       return <button key={key} aria-label={label} aria-current={screen===key?'page':undefined} className={screen===key?'active':''} onClick={()=>{setScreen(key);setFlag('')}}><span className="ew-stage-symbol" aria-hidden="true"><span className="ew-stage-icon" style={{maskImage:`url(${JSON.stringify(icon)})`,WebkitMaskImage:`url(${JSON.stringify(icon)})`}}/></span><span className="ew-stage-copy"><strong>{label}</strong><small>{description}</small></span>{badge>0&&<span className="ew-stage-badge" title={key==='income'?'应收差异 + 待同步金蝶':'缺资料类数'}>{count(badge)}</span>}</button>
     })}</nav>
     {screen==='overview' && <div className="ew-filter"><span>业务范围</span>{Object.entries(BUSINESS).slice(0,4).map(([key,label])=><button key={key} className={business===key?'active':''} onClick={()=>setBusiness(key)}>{label}</button>)}<span className="ew-muted">覆盖 {overview?.coverage?.available ?? '—'} / {overview?.coverage?.total ?? '—'} 家店铺 · 缺数据不计作零</span></div>}
