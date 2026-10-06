@@ -350,6 +350,25 @@ def order_bills(request: Request, period: str, shop: str, nos: str):
     return {'ok': True, 'bills': found}
 
 
+@router.get('/flows')
+def flows(request: Request, period: str, shop: str, scene: str, q: str = '', page: int = 1):
+    """「账户进出汇总」里某一项的逐笔明细：运费险按保单逐单（来自账户流水压缩包里的保费支出），其余按账户流水逐笔。只读已上传的资料。"""
+    require(request); check(period, shop)
+    _need(period, shop)
+    with _lock: hit = _cache.get((period, shop))
+    if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
+    rows = hit[3]
+    end = model.period_end(period)                                                # 和订单抽屉取数的范围一致：到本期末为止有应收或有动账的才点得开
+    known = {b['order'] for b in hit[4] if b['order'] and b['date'] <= end} | {r['order'] for r in rows['dy_settle'] if r['order'] and r['t'][:7] <= period}
+    sub2main = {r['id']: r['order'] for r in rows['dy_platform']}
+    kind, found = model.flow_rows(period, rows['dy_ledger'], rows['dy_settle'], rows['dy_insure'], scene.strip(), known, sub2main)
+    q = q.strip()
+    if q: found = [r for r in found if q in r['id'] or q in (r.get('order') or '') or q in (r.get('flow') or '')]
+    size = 50; pages = max(1, -(-len(found) // size)); page = min(max(1, page), pages)
+    return {'ok': True, 'kind': kind, 'rows': found[(page - 1) * size:page * size], 'total': len(found), 'page': page, 'pages': pages,
+            'amount': round(sum(r['amt'] for r in found), 2), 'insure_missing': scene.strip() == model.INSURE_SCENE and kind != 'insure'}
+
+
 @router.get('/missing')
 def missing(request: Request, period: str, shop: str):
     require(request); check(period, shop)

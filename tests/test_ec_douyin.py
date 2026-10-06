@@ -52,7 +52,14 @@ class DouyinTests(unittest.TestCase):
         with zipfile.ZipFile(buf, 'w') as z:
             z.writestr('a.csv', LEDGER); z.writestr('b.csv', '﻿保险单号,动账流水号,关联子订单号,摘要描述,动账时间,金额(元)\n1,X1,,退换货运费险,2026-09-12 10:00:00,5\n'.encode())
         parts = m.parse(buf.getvalue(), '包.zip')
-        self.assertEqual([p['kind'] for p in parts], ['dy_ledger', '']); self.assertIn('不单独接入', parts[1]['skip'])
+        self.assertEqual([p['kind'] for p in parts], ['dy_ledger', 'dy_insure'])                       # 保费支出：列齐了就逐单接入
+        self.assertEqual(parts[1]['rows'][0], {'id': '1', 'flow': 'X1', 'order': '', 't': '2026-09-12 10:00:00', 'amt': -5.0, 'memo': '退换货运费险', 'n': 0})
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:                                                           # 列不齐的老样子、或者是空的：跳过，不连累同包的账户流水
+            z.writestr('a.csv', LEDGER); z.writestr('b.csv', '\ufeff保险单号,动账流水号,金额(元)\n1,X1,5\n'.encode('utf-8'))
+            z.writestr('c.csv', '\ufeff保险单号,动账流水号,关联子订单号,摘要描述,动账时间,金额(元)\n'.encode('utf-8'))
+        skipped = m.parse(buf.getvalue(), 'x.zip')
+        self.assertEqual([p['kind'] for p in skipped], ['dy_ledger', '', '']); self.assertIn('不单独接入', skipped[1]['skip'])
         with self.assertRaises(ValueError): m.parse('a,b\n1,2\n'.encode(), 'x.csv')
         s, _ = self.rows()
         self.assertEqual((s[1]['id'], s[1]['order'], s[1]['amt'], s[1]['fees']), ('S2', O2, 26.0, {'平台服务费': 1.0, '佣金': 2.0, '招商服务费': 0.5, '站外推广费': 0.5}))
@@ -357,6 +364,31 @@ class DouyinTests(unittest.TestCase):
         with zipfile.ZipFile(buf, 'w') as z:
             for i in range(m.MAX_ZIP_FILES + 1): z.writestr('%d.csv' % i, settle_csv(line))
         with self.assertRaisesRegex(ValueError, '超过 20 个'): m.parse(buf.getvalue(), '很多.zip')
+
+    def test_flow_rows_list_what_makes_up_each_account_movement(self):
+        O = '6930162745589588821'
+        ledger = [{'id': 'L1', 't': '2026-09-12 10:00:00', 'amt': -0.4, 'scene': '退换货运费险', 'order': 'TRA2026', 'bal': 100.0, 'memo': '保费扣除（2笔保单）'},
+                  {'id': 'L2', 't': '2026-09-13 10:00:00', 'amt': -49.9, 'scene': '退款-结算后退款-退用户', 'order': O, 'bal': 50.1, 'memo': '退款'},
+                  {'id': 'L3', 't': '2026-09-14 10:00:00', 'amt': 30.0, 'scene': m.SETTLE, 'order': O, 'bal': 80.1, 'memo': '结算'},
+                  {'id': 'L4', 't': '2026-08-14 10:00:00', 'amt': -9.0, 'scene': '退款-结算后退款-退用户', 'order': O, 'bal': 1.0, 'memo': '上月的'}]
+        insure = [{'id': 'P2', 'flow': 'L1', 'order': O + '9', 't': '2026-09-12 10:00:00', 'amt': -0.2, 'memo': '退换货运费险'},
+                  {'id': 'P1', 'flow': 'L1', 'order': O, 't': '2026-09-12 10:00:00', 'amt': -0.2, 'memo': '退换货运费险'}]
+        kind, rows = m.flow_rows('2026-09', ledger, [], insure, m.INSURE_SCENE, {O}, {O + '9': O})
+        self.assertEqual((kind, [(r['id'], r['flow'], r['order'], r['amt'], r['known']) for r in rows]), ('insure', [('P1', 'L1', O, -0.2, True), ('P2', 'L1', O, -0.2, True)]))   # 逐单；子订单号换成主订单号
+        kind, rows = m.flow_rows('2026-09', ledger, [], [], m.INSURE_SCENE, {O})
+        self.assertEqual((kind, [(r['id'], r['order'], r['known']) for r in rows]), ('ledger', [('L1', 'TRA2026', False)]))    # 没有保费明细：退回按账户流水一批一笔
+        kind, rows = m.flow_rows('2026-09', ledger, [], insure, '退款-结算后退款-退用户', {O})
+        self.assertEqual([(r['id'], r['order'], r['amt'], r['bal'], r['known']) for r in rows], [('L2', O, -49.9, 50.1, True)])   # 只要本期的，不含结算，不含上月
+        settle = [{'id': 'S9', 't': '2026-09-13 10:00:00', 'amt': -49.9, 'scene': '退款-结算后退款-退用户', 'order': O, 'memo': '退款'}]
+        self.assertEqual([r['id'] for r in m.flow_rows('2026-09', [], settle, [], '退款-结算后退款-退用户', {O})[1]], ['S9'])   # 没有账户流水：用订单维度动账明细
+        # 保单跟着它所在的那笔流水走：平台改场景名之前叫「权益保险」，保单摘要却写运费险——归到权益保险那一行，运费险那一行不多算
+        ledger.append({'id': 'L5', 't': '2026-09-01 09:00:00', 'amt': -0.01, 'scene': '权益保险', 'order': 'TRA2025', 'bal': 0.0, 'memo': '保费扣除（1笔保单）'})
+        insure.append({'id': 'P0', 'flow': 'L5', 'order': O, 't': '2026-09-01 09:00:12', 'amt': -0.01, 'memo': '退换货运费险'})
+        self.assertEqual([r['id'] for r in m.flow_rows('2026-09', ledger, [], insure, m.INSURE_SCENE, {O})[1]], ['P1', 'P2'])
+        self.assertEqual((lambda k, rows: (k, [r['id'] for r in rows]))(*m.flow_rows('2026-09', ledger, [], insure, '权益保险', {O})), ('insure', ['P0']))
+        # 有一笔流水没配上保单（保费明细不全）：逐单列出来会比汇总少，整项退回按流水列
+        ledger.append({'id': 'L6', 't': '2026-09-20 09:00:00', 'amt': -0.3, 'scene': '退换货运费险', 'order': 'TRA2027', 'bal': 0.0, 'memo': '保费扣除（1笔保单）'})
+        self.assertEqual((lambda k, rows: (k, [r['id'] for r in rows]))(*m.flow_rows('2026-09', ledger, [], insure, m.INSURE_SCENE, {O})), ('ledger', ['L1', 'L6']))
 
     def test_password_zip_is_refused_with_plain_words(self):
         buf = io.BytesIO()

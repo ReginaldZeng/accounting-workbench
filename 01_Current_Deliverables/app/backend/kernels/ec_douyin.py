@@ -12,7 +12,8 @@ import zipfile
 from collections import defaultdict
 
 KINDS = {'dy_settle': '抖音动账明细（订单维度）', 'dy_ledger': '抖音账户流水（带余额）', 'dy_orders': '旺店通订单明细（认合单）',
-         'dy_platform': '抖音平台订单明细（抖店订单导出）'}
+         'dy_platform': '抖音平台订单明细（抖店订单导出）', 'dy_insure': '抖音运费险保费明细（逐单）'}
+INSURE_SCENE = '退换货运费险'               # 账户流水里这一种，一笔流水是一批保单；逐单的在同一个压缩包的「保费支出」里
 SETTLE = '货款结算入账'
 # 结算时从货款里直接扣掉的费用列（文件里是负数）
 FEE_COLUMNS = ['平台服务费', '佣金', '服务商佣金', '渠道分成', '招商服务费', '站外推广费', '其他分成']
@@ -25,6 +26,7 @@ _TIME = re.compile(r'20\d{2}-\d{2}-\d{2}')    # 平台原始导出的时间都�
 _SETTLE_HEAD = {'动帐流水号', '动账方向', '动账金额', '动账场景', '订单号', '订单实付应结', '订单退款', '平台服务费'}
 _LEDGER_HEAD = {'动账流水号', '账户方向', '动账金额(元)', '动账场景', '账户余额(元)'}
 _INSURANCE_HEAD = {'保险单号', '动账流水号', '金额(元)'}
+_INSURE_FULL = _INSURANCE_HEAD | {'关联子订单号', '动账时间'}        # 列齐了才逐单接入；不齐的照旧跳过
 _ORDERS_HEAD = {'订单编号', '店铺', '子单原始单号', '订单状态', '应收金额', '分摊后总价'}
 _PLATFORM_HEAD = {'主订单编号', '子订单编号', '订单应付金额', '订单状态', '售后状态', '订单提交时间', '平台实际承担优惠金额'}
 # 结算后把钱退给买家 / 退回补贴：冲的是应收；其余结算后场景（分账、退分账）是费用的返还
@@ -100,6 +102,12 @@ def _ledger_row(r):
     return {'id': _text(r.get('动账流水号')), 't': _text(r.get('动账时间')), 'amt': round(_num(r.get('动账金额(元)')), 2),
             'scene': _text(r.get('动账场景')), 'order': _text(r.get('关联订单号')), 'bal': round(_num(r.get('账户余额(元)')), 2),
             'memo': _text(r.get('备注'))[:60]}
+
+
+def _insure_row(r):
+    """账户流水压缩包里的「保费支出」：一张保单一行，带着它所属的那笔账户流水和关联的子订单。文件里金额是正数（支出），这里记成负数，和账户流水同向。"""
+    return {'id': _text(r.get('保险单号')), 'flow': _text(r.get('动账流水号')), 'order': _text(r.get('关联子订单号')), 't': _text(r.get('动账时间')),
+            'amt': round(-_num(r.get('金额(元)')), 2), 'memo': _text(r.get('摘要描述'))[:30]}
 
 
 def _platform_order(value):
@@ -295,6 +303,7 @@ def parse(blob, filename, shop=''):
         if _SETTLE_HEAD <= head: kind, make = 'dy_settle', _settle_row
         elif _LEDGER_HEAD <= head: kind, make = 'dy_ledger', _ledger_row
         elif _PLATFORM_HEAD <= head: kind, make = 'dy_platform', _platform_row
+        elif _INSURE_FULL <= head: kind, make = 'dy_insure', _insure_row
         elif _INSURANCE_HEAD <= head:
             out.append({'name': name, 'kind': '', 'skip': '保费明细已含在账户流水里，不单独接入'}); continue
         else: raise ValueError('「%s」表头不是抖音动账明细、带余额的账户流水、抖店订单导出，也不是旺店通订单明细' % name)
@@ -306,6 +315,8 @@ def parse(blob, filename, shop=''):
             parsed.append(dict(x, n=i))
         # 有一行不对就整份不收：收一半的话，另一半会被存进一个不存在的月份，页面上还显示成功
         if bad: raise ValueError('「%s」有 %d 行的日期或单号被改过格式（像是用 Excel 打开后另存的），请传平台导出的原始文件' % (name, bad))
+        if not parsed and kind == 'dy_insure':                                         # 这个月没买运费险：不算错，别连累同包的账户流水
+            out.append({'name': name, 'kind': '', 'skip': '保费明细是空的'}); continue
         if not parsed: raise ValueError('「%s」里没有可用的流水行' % name)
         out.append({'name': name, 'kind': kind, 'rows': parsed})
     if not out: raise ValueError('压缩包里没有 csv 文件')
@@ -616,6 +627,27 @@ def bill_lines(rows):
     return out
 
 
+def flow_rows(period, ledger, settle, insure, scene, known=(), sub2main=None):
+    """「账户进出汇总」里某一项（货款结算以外的一种进出）的逐笔明细。返回 (哪种明细, 行)。
+    保费类的：这一项的每笔账户流水都配得上保费明细、金额也相等，就按保单逐单列（一张保单对一个子订单）；其余按账户流水逐笔列，没有账户流水时退回订单维度动账明细。
+    保单跟着它所在的那笔账户流水走，不看保单自己的时间和摘要：平台改过场景名（权益保险 → 退换货运费险），保单摘要却一律写运费险，按流水归才和汇总那一行相等。
+    known＝认得的平台订单号（有结算或有应收的）：关联单号在里面才值得点开看订单。"""
+    sub2main = sub2main or {}
+    now = [r for r in ledger if r['t'][:7] == period]
+    mine = [r for r in now or [r for r in settle if r['t'][:7] == period] if r['scene'] != SETTLE and (r['scene'] or '未注明场景') == scene]
+    if now:
+        ids = {r['id'] for r in mine}
+        rows = [r for r in insure or [] if r['flow'] in ids]
+        # 有流水没配上保单，或者保单加起来不等于流水：逐单列出来会和汇总对不上，整项退回按流水列
+        if {r['flow'] for r in rows} != ids or abs(math.fsum(r['amt'] for r in rows) - math.fsum(r['amt'] for r in mine)) >= 0.005: rows = []
+    else: rows = [r for r in insure or [] if scene == INSURE_SCENE and r['t'][:7] == period]
+    if rows:
+        main = lambda r: sub2main.get(r['order'], r['order'])
+        return 'insure', [{'t': r['t'], 'id': r['id'], 'flow': r['flow'], 'order': main(r), 'amt': r['amt'], 'memo': r['memo'], 'known': main(r) in known}
+                          for r in sorted(rows, key=lambda r: (r['t'], r['id']))]
+    return 'ledger', [{'t': r['t'], 'id': r['id'], 'order': r['order'], 'amt': r['amt'], 'memo': r['memo'], 'bal': r.get('bal'), 'known': r['order'] in known} for r in mine]
+
+
 def category_label(cat, days):
     return CATEGORIES[cat].format(days=days)
 
@@ -655,7 +687,7 @@ def export(result, shop, book=None):
     head(ws, ['项目', '金额', '说明'])
     ws.append(['货款结算到账', d['settle_cash'], '平台已扣完费用后进账户的钱'])
     for x in d['deductions']:
-        if x['kind'] == 'other': ws.append(['　' + x['name'], -x['amount'], '不挂在订单上的账户进出，不在任何一张下推的收款单里'])
+        if x['kind'] == 'other': ws.append(['　' + x['name'], -x['amount'], '货款结算以外的账户进出，不在任何一张下推的收款单里'])
     ws.append(['本月账户净变动', d['net'], '应等于账户期末余额 − 期初余额'])
     ws.append([])
     head(ws, ['结算时平台直接扣掉的费用（不经过账户）', '金额'])

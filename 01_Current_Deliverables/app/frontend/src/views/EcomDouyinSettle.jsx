@@ -7,13 +7,19 @@ const BASE='/api/ec/douyin'
 const WS={A:'未核销',B:'部分核销',C:'已核销'}
 
 export default function EcomDouyinSettle({period,shop,shops,setShop,canEdit,revision,notify,onPrepare}) {
-  const [tick,setTick]=useState(0),[cat,setCat]=useState(''),[q,setQ]=useState(''),[search,setSearch]=useState(''),[page,setPage]=useState(1),[error,setError]=useState(''),[showMissing,setShowMissing]=useState(false),[proof,setProof]=useState('')
+  const [tick,setTick]=useState(0),[cat,setCat]=useState(''),[q,setQ]=useState(''),[search,setSearch]=useState(''),[page,setPage]=useState(1),[error,setError]=useState(''),[showMissing,setShowMissing]=useState(false),[proof,setProof]=useState(''),[tab,setTab]=useState('auto'),[goto,setGoto]=useState(''),[flowScene,setFlowScene]=useState(''),[flowPage,setFlowPage]=useState(1),[flowTick,setFlowTick]=useState(0),[plan,setPlan]=useState(null)
   const top=useResource(`${BASE}/settle?${query({period,shop})}`,`${revision}:${tick}`,`dy:${period}:${shop}`),data=top.data,r=data?.result,ar=data?.ar
   const refreshing=!!data?.refreshing
   useEffect(()=>{if(!refreshing)return;const timer=setInterval(()=>setTick(v=>v+1),3000);return()=>clearInterval(timer)},[refreshing])
-  useEffect(()=>{setCat('');setQ('');setSearch('');setPage(1);setShowMissing(false);setProof('')},[period,shop])
+  useEffect(()=>{setCat('');setQ('');setSearch('');setPage(1);setShowMissing(false);setProof('');setFlowScene('');setFlowPage(1)},[period,shop])
   const key=JSON.stringify([period,shop,cat,search,ar?.ts])
   const list=useResource(r?`${BASE}/bills?${query({period,shop,cat,q:search,page})}`:null,ar?.ts||'',key),bills=list.data
+  useEffect(()=>{
+    if(!goto||list.loading) return
+    const timer=setTimeout(()=>{document.getElementById(goto)?.scrollIntoView({behavior:'smooth',block:'start'});setGoto('')},60)
+    return()=>clearTimeout(timer)
+  },[goto,tab,list.loading])
+  const flowRes=useResource(r&&flowScene?`${BASE}/flows?${query({period,shop,scene:flowScene,page:flowPage})}`:null,`${ar?.ts||''}:${flowTick}`,`flows:${period}:${shop}:${flowScene}`)
   const lost=useResource(r&&showMissing?`${BASE}/missing?${query({period,shop})}`:null,ar?.ts||'')
   const sync=async()=>{try{setError('');const body=new FormData();body.append('period',period);body.append('shop',shop);await requestJson(`${BASE}/ar-refresh`,{method:'POST',body});notify?.('已发起金蝶只读查询，完成后自动更新。');setTick(v=>v+1)}catch(e){setError(e.message)}}
   const src=data?.sources||{},hasSettle=src.dy_settle>0,hasLedger=src.dy_ledger>0,hasOrders=src.dy_orders>0,hasPlatform=src.dy_platform>0
@@ -33,24 +39,26 @@ export default function EcomDouyinSettle({period,shop,shops,setShop,canEdit,revi
   const d=r.draft,bal=r.balance,book=r.book||{},catOf=k=>r.categories.find(c=>c.key===k)||{count:0,amount:0}
   const booked=book.debit||book.credit,miss=r.buckets.find(x=>x.key==='missing'),others=d.deductions.filter(x=>x.kind==='other'),fees=d.deductions.filter(x=>x.kind==='fee')
   const held={count:r.held.reduce((n,x)=>n+x.count,0),amount:r.held.reduce((n,x)=>n+x.amount,0)}
-  const jump=id=>document.getElementById(id)?.scrollIntoView({behavior:'smooth',block:'start'})
-  const pick=k=>{setCat(cat===k?'':k);setPage(1);jump('dy-bills')}
+  const jump=(id,to)=>{if(to)setTab(to);setGoto(id)}
+  const pick=k=>{setCat(cat===k?'':k);setPage(1);jump('dy-bills','todo')}
   const todo=[['mismatch','金额对不上',catOf('mismatch'),'两边说法不一样，每张写明了是哪种情况'],
     ['hold','金额对得上，但系统不推',held,r.held.map(x=>x.label).join('；')],
     ['overdue',`发货超过 ${r.overdue_days} 天还没结算`,catOf('overdue'),'查买家是不是一直没确认收货，或者已经退款'],
     ['no_order','应收单上没有平台订单号',catOf('no_order'),'系统对不了，要人看']].filter(x=>x[2].count)
+  const todoCount=todo.reduce((n,x)=>n+x[2].count,0)
+  const pushSub=!plan?`干净的应收 ${count(r.pushable?.count)} 张`:plan.left>0?`还剩 ${count(plan.left)} 张可下推`:plan.eligible>0?'都推完了':'现在没有可下推的'
   return <>{bar}{notes}
-    <div className="ew-closeout ew-open-cards ew-dy-cards">{r.categories.filter(c=>c.count||c.key!=='no_order').map(c=><button type="button" key={c.key} className={`ew-co${c.key==='ok'?' ew-co-primary':''}${cat===c.key?' on':''}`} onClick={()=>{setCat(cat===c.key?'':c.key);setPage(1)}}><span className="ew-co-lab">{c.label}</span><strong>¥ {money(c.amount)}</strong><small>{count(c.count)} 张应收 · {count(c.orders)} 单</small></button>)}</div>
-    <h3 className="ew-dy-step"><b>①</b>系统替你做的<small>干净的应收，分批备成金蝶暂存收款单</small></h3>
-    <PushPanel period={period} shop={shop} canEdit={canEdit} stamp={ar?.ts||''} notify={notify}/>
-    <h3 className="ew-dy-step"><b>②</b>要你处理的<small>系统判断不了，或者不该由系统做的</small></h3>
+    <div className="ew-closeout ew-open-cards ew-dy-cards">{r.categories.filter(c=>c.count||c.key!=='no_order').map(c=><button type="button" key={c.key} className={`ew-co${c.key==='ok'?' ew-co-primary':''}${cat===c.key?' on':''}`} onClick={()=>{setCat(cat===c.key?'':c.key);setPage(1);jump('dy-bills','todo')}}><span className="ew-co-lab">{c.label}</span><strong>¥ {money(c.amount)}</strong><small>{count(c.count)} 张应收 · {count(c.orders)} 单</small></button>)}</div>
+    <div className="ew-dy-tabs" role="tablist" aria-label="收款核销分三步看">{[['auto','①','系统替你做的',pushSub],['todo','②','要你处理的',todoCount?`${count(todoCount)} 张应收要看`:(miss.orders||others.length)?'有事项要看':'没有要人处理的'],['check','③','用来核对的','账户余额、本月进出']].map(([k,n,label,sub])=><button type="button" key={k} role="tab" aria-selected={tab===k} className={tab===k?'on':''} onClick={()=>setTab(k)}><b>{n}</b>{label}<small>{sub}</small></button>)}</div>
+    <div hidden={tab!=='auto'}><PushPanel period={period} shop={shop} canEdit={canEdit} stamp={ar?.ts||''} notify={notify} onPlan={setPlan}/></div>
+    <div hidden={tab!=='todo'}>
     <section className="ew-panel"><div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>事项</th><th className="ew-num">数量</th><th className="ew-num">金额</th><th>说明</th><th></th></tr></thead><tbody>
       {todo.map(([k,label,c,tip])=><tr key={k}><td><strong>{label}</strong></td><td className="ew-num">{count(c.count)} 张应收</td><td className="ew-num">{money(c.amount)}</td><td className="ew-issue">{tip}</td><td><button className="ew-link" onClick={()=>pick(k)}>{cat===k?'取消筛选':'看清单'}</button></td></tr>)}
       {miss.orders>0&&<tr><td><strong>钱结进来了，金蝶里没有应收</strong></td><td className="ew-num">{count(miss.orders)} 个订单</td><td className="ew-num">{money(miss.flow)}</td><td className="ew-issue">查旺店通有没有这单、应收为什么没开</td><td><button className="ew-link" onClick={()=>setShowMissing(v=>!v)}>{showMissing?'收起':'看订单'}</button></td></tr>}
-      {others.length>0&&<tr><td><strong>不挂在订单上的账户进出</strong></td><td className="ew-num">{others.length} 种</td><td className="ew-num">{money(d.other_total)}</td><td className="ew-issue">{others.slice(0,3).map(x=>x.name).join('、')}{others.length>3?' 等':''}；不在任何一张下推的收款单里，要另外入账</td><td><button className="ew-link" onClick={()=>jump('dy-flow')}>看明细</button></td></tr>}
+      {others.length>0&&<tr><td><strong>货款结算以外的账户进出</strong></td><td className="ew-num">{others.length} 种</td><td className="ew-num">{money(d.other_total)}</td><td className="ew-issue">{others.slice(0,3).map(x=>x.name).join('、')}{others.length>3?' 等':''}；不在任何一张下推的收款单里，要另外入账</td><td><button className="ew-link" onClick={()=>jump('dy-flow','check')}>看明细</button></td></tr>}
       {!todo.length&&!miss.orders&&!others.length&&<tr><td colSpan="5" className="ew-empty">没有要人处理的</td></tr>}
     </tbody></table></div>
-      {showMissing&&<div className="ew-scroll" style={{maxHeight:260}}><table className="ew-open-table"><thead><tr><th>平台订单号</th><th className="ew-num">流水应冲额</th><th>情况</th></tr></thead><tbody>{lost.data?.rows?.map(m=><tr key={m.order}><td><button className="ew-link" onClick={()=>setProof(m.order)}>{m.order}</button></td><td className="ew-num">{money(m.flow)}</td><td>{m.label}</td></tr>)}{!lost.data&&<tr><td colSpan="3" className="ew-empty">正在读取…</td></tr>}</tbody></table></div>}
+      {showMissing&&<div id="dy-missing" className="ew-scroll" style={{maxHeight:260}}><table className="ew-open-table"><thead><tr><th>平台订单号</th><th className="ew-num">流水应冲额</th><th>情况<button className="ew-link" style={{float:'right'}} onClick={()=>setShowMissing(false)}>收起</button></th></tr></thead><tbody>{lost.data?.rows?.map(m=><tr key={m.order}><td><button className="ew-link" onClick={()=>setProof(m.order)}>{m.order}</button></td><td className="ew-num">{money(m.flow)}</td><td>{m.label}</td></tr>)}{!lost.data&&<tr><td colSpan="3" className="ew-empty">正在读取…</td></tr>}</tbody></table></div>}
     </section>
     <div id="dy-bills"/>
     <form className="ew-order-filters ew-order-filters-expanded" onSubmit={e=>{e.preventDefault();setSearch(q);setPage(1)}}>
@@ -63,21 +71,39 @@ export default function EcomDouyinSettle({period,shop,shops,setShop,canEdit,revi
       <tbody>{bills?.rows?.map(b=><tr key={b.no}><td>{b.order?<button className="ew-link" title="看这张单的依据：抖音每笔动账 + 金蝶每张应收" onClick={()=>setProof(b.order)}>{b.no}</button>:b.no}<small>{WS[b.ws]||b.ws}{b.ds!=='C'&&' · 未审核'}</small></td><td>{b.date}</td><td>{b.order||<span className="ew-muted-num">—</span>}</td><td className="ew-num">{money(b.amount)}</td><td className={`ew-num ${b.written===0?'ew-zero':''}`}>{money(b.written)}</td><td className={`ew-num ${b.open<0?'ew-open-red':''}`}><strong>{money(b.open)}</strong></td><td>{b.settled_at?b.settled_at.slice(0,16):<span className="ew-muted-num">还没结算</span>}</td><td className="ew-num">{b.flow==null?'—':money(b.cash)}</td><td className="ew-num">{b.flow==null?'—':money(b.fee)}</td><td className="ew-num">{b.flow==null?'—':money(b.flow)}</td><td className={`ew-num ${b.diff?'ew-open-red':''}`}>{b.diff==null?'—':money(b.diff)}</td><td className="ew-issue">{r.categories.find(c=>c.key===b.cat)?.label}{b.merged>0&&<small>合单发货 · {b.merged} 个平台订单一起对</small>}{b.reason&&<small>{b.reason}</small>}{b.pstate&&<small>{b.pstate}</small>}</td></tr>)}
         {!bills?.rows?.length&&<tr><td colSpan="12" className="ew-empty">{list.loading?'正在读取…':'当前筛选下没有应收单'}</td></tr>}</tbody></table></div>
     <div className="ew-pagination"><span>{list.loading&&bills?`正在读取第 ${page} 页…`:`共 ${count(bills?.total)} 张 · 未核销合计 ¥ ${money(bills?.amount)} · 截至 ${r.end} · 每页 50 张 · 点应收单号看依据${hasPlatform?' · 分类下面写的平台情况是订单导出那天的，不是月底的':''}`}</span><button disabled={page<=1||list.loading} onClick={()=>setPage(p=>p-1)}>上一页</button>{bills?.page??page} / {bills?.pages??'—'}<button disabled={!bills?.pages||(bills?.page??page)>=bills.pages||list.loading} onClick={()=>setPage(p=>p+1)}>下一页</button></div>
-    <h3 className="ew-dy-step"><b>③</b>用来核对的<small>账户余额、这个月钱的进出、两边各多少</small></h3>
+    </div>
+    <div hidden={tab!=='check'}>
     <section className="ew-panel"><header><h2>账户余额核对</h2><span className="ew-muted">{bal?`流水 ${count(bal.rows)} 笔 · ${bal.first.slice(0,10)} 至 ${bal.last.slice(0,10)}`:'需要带余额的账户流水'}</span></header><div className="ew-scroll"><table className="ew-open-table"><thead><tr><th></th><th className="ew-num">期初</th><th className="ew-num">本月净变动</th><th className="ew-num">期末</th><th>说明</th></tr></thead><tbody>
       <tr><td>抖音账户流水</td><td className="ew-num">{money(bal?.open)}</td><td className="ew-num">{money(bal?.net)}</td><td className="ew-num">{money(bal?.close)}</td><td>{bal?(bal.breaks?<span className="ew-open-red">余额链有 {bal.breaks} 处接不上，流水可能不全</span>:'余额逐笔接得上'):'—'}</td></tr>
       <tr><td>金蝶账面{book.account&&<small>{book.account}</small>}</td><td className="ew-num">{money(book.open)}</td><td className="ew-num">{book.error?'—':money((book.debit||0)-(book.credit||0))}</td><td className="ew-num">{money(book.close)}</td><td>{book.error||(!bal?'—':Math.abs(book.open-bal.open)>=0.005?<span className="ew-open-red">期初和流水差 {money(book.open-bal.open)}</span>:booked?(Math.abs(book.close-bal.close)<0.005?'期初、期末都和流水一致':<span className="ew-open-red">期末和流水差 {money(book.close-bal.close)}</span>):'期初和流水一致 · 本月还没入账')}</td></tr>
     </tbody></table></div></section>
     <section className="ew-panel" id="dy-flow"><header><h2>{period} 账户进出汇总</h2><span className="ew-muted">用来和账户余额核对，不是收款单</span></header><div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>项目</th><th className="ew-num">金额</th><th>说明</th></tr></thead>
       <tbody><tr><td>货款结算到账</td><td className="ew-num">{money(d.settle_cash)}</td><td>平台已扣完费用后进账户的钱 · {count(r.coverage.settled_orders)} 个订单</td></tr>
-        {others.map(x=><tr key={x.name}><td>　{x.name}</td><td className={`ew-num ${x.amount>0?'ew-open-red':''}`}>{money(-x.amount)}</td><td className="ew-muted-num">不挂在订单上，不在任何一张下推的收款单里</td></tr>)}</tbody>
+        {others.map(x=><React.Fragment key={x.name}><tr className={flowScene===x.name?'ew-flow-open':undefined}><td>　{x.name}</td><td className={`ew-num ${x.amount>0?'ew-open-red':''}`}>{money(-x.amount)}</td><td className="ew-muted-num">货款结算以外的进出，不在任何一张下推的收款单里　<button className="ew-link" aria-expanded={flowScene===x.name} onClick={()=>{setFlowScene(flowScene===x.name?'':x.name);setFlowPage(1)}}>{flowScene===x.name?'收起明细':'看明细'}</button></td></tr>
+          {flowScene===x.name&&<tr className="ew-flow-detail"><td colSpan="3"><FlowDetail res={flowRes} setPage={p=>{setFlowPage(p);setFlowTick(v=>v+1)}} onOrder={setProof}/></td></tr>}</React.Fragment>)}</tbody>
       <tfoot><tr><td>本月账户净变动</td><td className="ew-num">{money(d.net)}</td><td>＝ 期末余额 − 期初余额{!d.from_ledger&&'（没有账户流水，按订单维度明细算）'}</td></tr></tfoot></table></div>
       <p className="ew-muted ew-padding" style={{paddingTop:12}}>结算时平台直接扣掉、不经过账户的费用共 ¥ {money(d.fee_total)}：{fees.map(x=>`${x.name} ${money(x.amount)}`).join('、')||'无'}。货款结算到账 + 这些费用 = 本月结算订单应冲的应收 ¥ {money(d.total-d.other_total)}，下面按两边对不对得上分开列。</p>
       <div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>本月结算的订单</th><th className="ew-num">订单数</th><th className="ew-num">流水应冲应收</th><th className="ew-num">金蝶挂着的应收</th><th className="ew-num">两边差</th></tr></thead>
-        <tbody>{r.buckets.map(b=><tr key={b.key}><td>{b.label}{['written','missing'].includes(b.key)&&b.orders>0&&<> <button className="ew-link" onClick={()=>setShowMissing(v=>!v)}>{showMissing?'收起':'看订单'}</button></>}</td><td className="ew-num">{count(b.orders)}</td><td className="ew-num">{money(b.flow)}</td><td className="ew-num">{money(b.ar)}</td><td className={`ew-num ${b.key!=='ok'&&Math.abs(b.flow-b.ar)>=0.005?'ew-open-red':''}`}>{money(b.flow-b.ar)}</td></tr>)}</tbody></table></div>
+        <tbody>{r.buckets.map(b=><tr key={b.key}><td>{b.label}{['written','missing'].includes(b.key)&&b.orders>0&&<> <button className="ew-link" onClick={()=>{setShowMissing(true);jump('dy-missing','todo')}}>看订单</button></>}</td><td className="ew-num">{count(b.orders)}</td><td className="ew-num">{money(b.flow)}</td><td className="ew-num">{money(b.ar)}</td><td className={`ew-num ${b.key!=='ok'&&Math.abs(b.flow-b.ar)>=0.005?'ew-open-red':''}`}>{money(b.flow-b.ar)}</td></tr>)}</tbody></table></div>
     </section>
+    </div>
     {proof&&<OrderProof period={period} shop={shop} shopName={shops.find(s=>s.id===shop)?.name||shop} order={proof} onClose={()=>setProof('')}/>}
   </>
+}
+
+// 「账户进出汇总」里一项的逐笔明细：运费险按保单逐单（一张保单一个订单），其余按账户流水逐笔；关联的是认得的平台订单就能点开看
+function FlowDetail({res,setPage,onOrder}) {
+  const f=res.data
+  if(!f) return <p className="ew-muted">{res.error?`明细没读到：${res.error}`:'正在读取明细…'}</p>
+  const insure=f.kind==='insure'
+  return <div className="ew-flow-box">
+    {res.error&&<p className="ew-open-red" role="status">这一页没读到：{res.error}。再点一次翻页重试。</p>}
+    {f.insure_missing&&<p className="ew-muted">这里一笔是一批保单。想按订单看每张保单的保费：把这个月的账户流水压缩包整包重新传一次（逐单的在包里那张「保费支出」表）。</p>}
+    <div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>动账时间</th><th>{insure?'保险单号':'动账流水号'}</th><th>{insure?'关联订单':'关联单号'}</th><th className="ew-num">金额</th><th>{insure?'所在的那笔账户流水':'备注'}</th></tr></thead>
+      <tbody>{f.rows.map(x=><tr key={x.id}><td>{x.t}</td><td>{x.id}</td><td>{!x.order?<span className="ew-muted-num">—</span>:x.known?<button className="ew-link" title="看这个订单的全部依据" onClick={()=>onOrder(x.order)}>{x.order}</button>:x.order}</td><td className={`ew-num ${x.amt<0?'ew-open-red':''}`}>{money(x.amt)}</td><td className="ew-issue">{insure?x.flow:x.memo}</td></tr>)}
+        {!f.rows.length&&<tr><td colSpan="5" className="ew-empty">没有明细</td></tr>}</tbody></table></div>
+    <div className="ew-pagination"><span>{res.loading?'正在读取…':`共 ${count(f.total)} ${insure?'张保单':'笔'} · 合计 ${money(f.amount)} · 每页 50`}</span><button disabled={f.page<=1||res.loading} onClick={()=>setPage(f.page-1)}>上一页</button>{f.page} / {f.pages}<button disabled={f.page>=f.pages||res.loading} onClick={()=>setPage(f.page+1)}>下一页</button></div>
+  </div>
 }
 
 // 订单全链路（抖音）：版式照天猫那张——先给三个结论，再三方金额对账，下面按业务环节逐行列证据
@@ -179,11 +205,12 @@ function OrderProof({period,shop,shopName,order,onClose}) {
 }
 
 // 下推收款单到金蝶「暂存」：只挑最干净的应收，分批备好；保存、提交、审核都留给会计在金蝶里做
-function PushPanel({period,shop,canEdit,stamp,notify}) {
+function PushPanel({period,shop,canEdit,stamp,notify,onPlan}) {
   const [tick,setTick]=useState(0),[busy,setBusy]=useState(false),[error,setError]=useState(''),[mode,setMode]=useState(''),[size,setSize]=useState('')
   const res=useResource(`${BASE}/push/plan?${query({period,shop})}`,`${stamp}:${tick}`,`push:${period}:${shop}`),p=res.data
   useEffect(()=>{setError('');setMode('');setSize('')},[period,shop])
-  const running=!!p?.job?.running
+  const running=!!p?.job?.running,leftCount=p?p.left.count:null,eligibleCount=p?p.eligible.count:null
+  useEffect(()=>{onPlan?.(leftCount==null?null:{left:leftCount,eligible:eligibleCount})},[leftCount,eligibleCount])   // 页签上那句「还剩多少张可下推」用
   useEffect(()=>{if(!running)return;const timer=setInterval(()=>setTick(v=>v+1),3000);return()=>clearInterval(timer)},[running])
   const form=values=>{const body=new FormData();Object.entries(values).forEach(([k,v])=>body.append(k,v));return {method:'POST',body}}
   const act=async(fn,done)=>{setBusy(true);setError('');try{const r=await fn();notify?.(done(r))}catch(e){setError(e.message)}finally{setBusy(false);setTick(v=>v+1)}}
@@ -220,6 +247,6 @@ function PushPanel({period,shop,canEdit,stamp,notify}) {
       :<p className="ew-empty">{p.eligible.count?'可以下推的应收都推完了。':'现在没有可以直接下推的应收。'}</p>}
     {p.batches.length>0&&<div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>下推时间</th><th>操作人</th><th className="ew-num">应收张数</th><th className="ew-num">金额</th><th>应收单号</th><th>用时</th><th>金蝶里的现状</th><th>操作</th></tr></thead>
       <tbody>{p.batches.map(x=><tr key={x.fid}><td>{x.at}</td><td>{x.by}</td><td className="ew-num">{count(x.count)}</td><td className="ew-num">{money(x.total)}</td><td>{x.first} ～ {x.last}</td><td>{x.seconds!=null?`${x.seconds} 秒`:'—'}</td><td>{x.state}{x.number&&<small>{x.number}</small>}</td><td>{x.can_undo?<button disabled={!canEdit||busy} onClick={()=>undo(x)}>撤回</button>:'—'}</td></tr>)}</tbody></table></div>}
-    {p.other.lines.length>0&&<p className="ew-muted ew-padding" style={{paddingTop:12}}>注意：不挂在订单上的账户进出共 ¥ {money(p.other.total)}（{p.other.lines.slice(0,4).map(x=>`${x.name} ${money(x.amount)}`).join('、')}{p.other.lines.length>4?' 等':''}）<b>不在任何一批里</b>，要另外入账；在这之前金蝶账面余额会比流水余额多出这一块。</p>}
+    {p.other.lines.length>0&&<p className="ew-muted ew-padding" style={{paddingTop:12}}>注意：货款结算以外的账户进出共 ¥ {money(p.other.total)}（{p.other.lines.slice(0,4).map(x=>`${x.name} ${money(x.amount)}`).join('、')}{p.other.lines.length>4?' 等':''}）<b>不在任何一批里</b>，要另外入账；在这之前金蝶账面余额会比流水余额多出这一块。</p>}
   </section>
 }

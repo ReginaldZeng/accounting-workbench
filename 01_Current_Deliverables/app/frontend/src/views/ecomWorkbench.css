@@ -127,9 +127,6 @@
 /* V2.811 抖音月结 */
 .ew-dy-cards{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
 .ew-open-table tfoot td{padding:12px 14px}
-.ew-dy-step{display:flex;align-items:baseline;gap:10px;margin:26px 0 12px;font-size:15px;font-weight:650;color:var(--ink,#17233a)}
-.ew-dy-step b{color:var(--accent,#4b53c4);font-size:17px}
-.ew-dy-step small{font-size:11px;font-weight:400;color:var(--ink-3,#8993a4)}
 .ec-formula{display:grid;grid-template-columns:1.5fr 1fr;gap:8px;margin:0 0 8px}
 .ec-formula>div{border:1px solid var(--line,#e4e8f0);border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.9;font-variant-numeric:tabular-nums}
 .ec-formula small{display:block;font-size:11px;font-weight:600;color:var(--ink-3,#8993a4)}
@@ -140,3 +137,20 @@
 .ec-chain-detail table.ec-bill-lines{table-layout:auto;min-width:0}
 .ew-workbench .ec-bill-lines td.ec-wrap{white-space:normal;min-width:150px}
 .ec-bill-lines td small{white-space:normal}
+/* 页头照全站统一的样子（styles.css 的 .head / .h-title / .h-sub）：16px 标题、12px 副标题、同样的留白，不比别的页面高 */
+.ew-workbench .ew-header{padding-top:16px;padding-bottom:14px;border-bottom:1px solid var(--line,#e4e8f0);align-items:flex-start}
+.ew-workbench .ew-header h1{font-size:16px;font-weight:600;letter-spacing:0;line-height:1.5;margin:0}
+.ew-workbench .ew-header p{font-size:12px;line-height:1.5;color:var(--ink-2,#637089);margin:3px 0 0}
+/* 抖音月结：①②③ 三段做成页签，一次只看一段 */
+.ew-dy-tabs{display:flex;margin:18px 0 14px;border-bottom:1px solid var(--line,#e4e8f0);overflow-x:auto}
+.ew-workbench .ew-dy-tabs button{flex-shrink:0;display:flex;align-items:baseline;gap:8px;padding:10px 20px 9px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;font-size:14px;font-weight:600;color:var(--ink-2,#637089);white-space:nowrap}
+.ew-workbench .ew-dy-tabs button b{font-size:15px;color:var(--ink-3,#8993a4)}
+.ew-workbench .ew-dy-tabs button small{font-size:11px;font-weight:400;color:var(--ink-3,#8993a4)}
+.ew-workbench .ew-dy-tabs button:hover{color:var(--ink,#17233a)}
+.ew-workbench .ew-dy-tabs button.on{color:var(--ink,#17233a);border-bottom-color:var(--accent,#4b53c4)}
+.ew-workbench .ew-dy-tabs button.on b{color:var(--accent,#4b53c4)}
+/* 账户进出汇总：点开一项看逐笔明细（缩进成一块，和上面的汇总行分开） */
+.ew-open-table tr.ew-flow-open>td{background:var(--accent-soft,#f1f2fd)}
+.ew-open-table tr.ew-flow-detail>td{padding:0 16px 14px 30px;background:var(--accent-soft,#f1f2fd);box-shadow:inset 3px 0 0 var(--accent,#4b53c4)}
+.ew-flow-box{border:1px solid var(--line,#e4e8f0);border-radius:8px;background:var(--bg,#fff);overflow:hidden}
+.ew-flow-box>p{margin:0;padding:10px 12px}.ew-flow-box .ew-pagination{padding:8px 12px;margin:0}

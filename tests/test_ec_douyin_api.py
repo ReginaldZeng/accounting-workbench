@@ -270,10 +270,32 @@ class DouyinApiTests(unittest.TestCase):
         got = {b['no']: b['pstate'] for b in first['rows']}
         self.assertEqual(got['ARQ'], '买家还没确认收货（按 10-05 的订单导出）'); self.assertEqual(got['ARR'], '')       # 红字不说“钱来不来”
         self.assertEqual((detail['platform_gross'], detail['platform_unshipped'], detail['platform_closed']), (33.0, 0.0, False))
-        self.assertEqual(self.client.get('/api/ec/douyin/settle', params=args).json()['sources'], {'dy_settle': 1, 'dy_ledger': 0, 'dy_orders': 0, 'dy_platform': 2})
+        self.assertEqual(self.client.get('/api/ec/douyin/settle', params=args).json()['sources'], {'dy_settle': 1, 'dy_ledger': 0, 'dy_orders': 0, 'dy_platform': 2, 'dy_insure': 0})
         self.up((NEW, platform_csv(q_status='已关闭', q_after='退款成功')))                                             # 资料有了新版本：缓存作废，重算
         again = {b['no']: b['pstate'] for b in self.client.get('/api/ec/douyin/bills', params=args).json()['rows']}
         self.assertEqual(again['ARQ'], '平台订单已关闭（退款成功），这笔钱不会结算了（按 10-08 的订单导出）')
+
+    def test_flows_endpoint_lists_premiums_by_order_and_ledger_rows(self):
+        ledger_head = '动账流水号,关联订单号,关联子订单号,动账时间,账户方向,动账金额(元),动账场景,账户余额(元),备注'
+        ledger = ('\ufeff' + ledger_head + '\n' + '\n'.join([
+            f"T0,,,2026-09-03 08:00:00,收入,9.00,货款结算入账,9.00,结算",
+            f"X1,TRA2026,,2026-09-12 10:00:00,支出,-0.40,退换货运费险,8.60,保费扣除（2笔保单）",
+            f"X2,{P},,2026-09-13 10:00:00,支出,-5.00,退款-结算后退款-退用户,3.60,退款"]) + '\n').encode('utf-8')
+        insure = ('\ufeff保险单号,动账流水号,关联子订单号,摘要描述,动账时间,金额(元)\n' + f"B1,X1,{P},退换货运费险,2026-09-12 10:00:01,0.2\nB2,X1,{Q},退换货运费险,2026-09-12 10:00:02,0.2\n").encode('utf-8')
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z: z.writestr('动账明细 - 聚合账户.csv', ledger); z.writestr('保费支出 - 聚合账户.csv', insure)
+        got = self.up(('DL.csv', settle_csv(FIRST_HALF, SECOND_HALF)), ('FL.zip', buf.getvalue()))
+        self.assertEqual([(r['kind'], r['rows']) for r in got], [('dy_settle', 2), ('dy_ledger', 3), ('dy_insure', 2)])
+        self.sync_ar([self.bill('AR1', '2026-09-22', 49.9, P)])
+        ask = lambda scene, **kw: self.client.get('/api/ec/douyin/flows', params=dict({'period': '2026-09', 'shop': SHOP, 'scene': scene}, **kw)).json()
+        j = ask('退换货运费险')
+        self.assertEqual((j['kind'], j['total'], j['amount'], j['insure_missing']), ('insure', 2, -0.4, False))
+        self.assertEqual([(r['id'], r['flow'], r['order'], r['known']) for r in j['rows']], [('B1', 'X1', P, True), ('B2', 'X1', Q, False)])   # P 有应收，点得开；Q 没有
+        self.assertEqual(ask('退换货运费险', q=Q)['total'], 1)
+        j = ask('退款-结算后退款-退用户')
+        self.assertEqual((j['kind'], [(r['id'], r['order'], r['amt'], r['known']) for r in j['rows']]), ('ledger', [('X2', P, -5.0, True)]))
+        self.assertEqual(ask('没有这种')['total'], 0)
+        self.assertEqual(self.client.get('/api/ec/douyin/settle', params={'period': '2026-09', 'shop': SHOP}).json()['sources']['dy_insure'], 2)
 
     # ---- 抽屉里现查金蝶 ----
     def test_order_bills_only_asks_for_known_bills_caches_and_never_leaks_errors(self):
