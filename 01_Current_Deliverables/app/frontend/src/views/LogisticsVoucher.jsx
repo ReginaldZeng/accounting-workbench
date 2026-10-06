@@ -196,17 +196,47 @@ function sheetsOf(d) {
   return out
 }
 
-// 先同步开窗(避免被拦截)，数据到了再写；ds 可以是数组或 Promise
-export function printAdjust(ds, title) {
-  const w = window.open('', '_blank')
-  if (!w) { alert('浏览器拦截了弹窗，请允许本站弹出窗口后再点'); return }
-  w.document.write(`<!doctype html><meta charset="utf-8"><title>${esc(title || '计提更正单')}</title><style>${SHEET_CSS}</style><div class="wait">正在生成计提更正单…</div>`)
-  w.document.close()
+// 计提更正单：先在本页弹出预览，人看一眼再点「确认打印」(V2.852，用户「如果有更正单，再点击保存的时候就跳出来打印提醒…我们只需要点击确认打印，还有预览」)。
+// 原来是另开一个窗口直接调打印(会被浏览器拦弹窗，也看不到预览)。ds 可以是数组或 Promise；opt.remind＝顶上那句提醒(保存到金蝶后自动弹出时用)。
+// 点「确认打印」后浏览器还会弹一次系统自己的打印框(选打印机)，网页绕不过去——要连这一下也省，得给这台电脑的浏览器加「静默打印」启动参数。
+export function printAdjust(ds, title, opt = {}) {
+  const el = document.createElement('div')
+  el.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(20,28,40,.5);display:flex;align-items:center;justify-content:center;padding:18px'
+  const btn = 'font:inherit;font-size:14px;border-radius:8px;padding:8px 18px;cursor:pointer;'
+  el.innerHTML = `<div style="background:#fff;border-radius:12px;width:min(1200px,100%);height:min(880px,100%);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.3);font:13px/1.5 'Microsoft YaHei','PingFang SC',sans-serif;color:#1B2733">
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #DCE2E7"><b data-t style="font-size:15px"></b><span data-n style="color:#6B7A86"></span><span style="flex:1"></span>
+      <button data-print disabled style="${btn}border:0;background:#4650c4;color:#fff;font-weight:700;opacity:.5">确认打印</button><button data-close style="${btn}border:1px solid #CBD5DC;background:#fff;color:#1B2733">先不打</button></div>
+    <div data-hint style="padding:8px 16px;background:#FDF3E0;color:#6B4A00;font-size:12.5px;border-bottom:1px solid #F0D9A8"></div>
+    <iframe data-f title="计提更正单预览" style="flex:1;border:0;background:#eee"></iframe></div>`
+  const q = k => el.querySelector(`[data-${k}]`)
+  const close = () => { document.removeEventListener('keydown', onKey); el.remove() }
+  const onKey = e => { if (e.key === 'Escape') close() }
+  q('t').textContent = title || '计提更正单'
+  q('hint').textContent = (opt.remind ? opt.remind + '　' : '') + '正在生成预览…'
+  q('close').onclick = close
+  el.addEventListener('mousedown', e => { if (e.target === el) close() })
+  document.addEventListener('keydown', onKey)
+  document.body.appendChild(el)
+  const frame = q('f')
+  const show = html => { frame.srcdoc = `<!doctype html><meta charset="utf-8"><title>${esc(title || '计提更正单')}</title><style>${SHEET_CSS}</style>${html}` }
+  show('<div class="wait">正在生成计提更正单…</div>')
   Promise.resolve(ds).then(list => {
-    const ok = list.filter(d => d && (d.adjust || []).length)
-    w.document.body.innerHTML = ok.length ? ok.flatMap(sheetsOf).join('') : '<div class="wait">没有需要调整的计提</div>'
-    if (ok.length) setTimeout(() => w.print(), 300)
-  }).catch(e => { w.document.body.innerHTML = `<div class="wait">生成失败：${esc(e.message)}</div>` })
+    const ok = (list || []).filter(d => d && (d.adjust || []).length)
+    if (!ok.length) {
+      show('<div class="wait">没有需要更正的计提，不用打</div>')
+      q('hint').textContent = '这几张的计提和发票对得上（或者还比不了），没有计提更正单要打。'
+      q('close').textContent = '关闭'
+      return
+    }
+    const sheets = ok.flatMap(sheetsOf)
+    show(sheets.join(''))
+    q('n').textContent = `${ok.length} 张请款单 · ${sheets.length} 页纸（A4 横向）`
+    q('hint').textContent = (opt.remind ? opt.remind + '　' : '') + '核对一下内容，点右上角「确认打印」；浏览器会再弹出系统的打印框，选好打印机点「打印」。打出来订在纸质付款单后面。'
+    const pb = q('print')
+    pb.disabled = false; pb.style.opacity = '1'
+    pb.onclick = () => { try { frame.contentWindow.focus(); frame.contentWindow.print() } catch (e) { alert('没调起打印：' + e.message) } }
+    pb.focus()
+  }).catch(e => { show(`<div class="wait">生成失败：${esc(e.message)}</div>`); q('hint').textContent = '更正单没生成出来：' + e.message })
 }
 
 // ---------- 装订：对照清单（凭证号贴条 V2.848 撤掉：用户「不需要贴条，实习生扫码知道是哪个凭证，标注一下就好」）----------
@@ -628,7 +658,12 @@ function Detail({ inst, onClose, onChanged }) {
 
 确定？`)) return
     setPosting({ busy: true })
-    voucherPost(inst).then(r => { setPosting({ ok: true, ...r }); load(); onChanged() })
+    const hasAdj = (d.adjust || []).length > 0, who = d.req.payee
+    voucherPost(inst).then(r => {
+      setPosting({ ok: true, ...r }); load(); onChanged()
+      // 有计提更正单的：保存成功马上弹出预览，点一下就打(重新取一次预览，更正单上才有刚生成的凭证号)
+      if (hasAdj) printAdjust(voucherPreview(inst).then(x => [x]), `计提更正单 ${who}`, { remind: `已保存到金蝶 记-${r.vno}。这张有计提更正单。` })
+    })
       .catch(e => setPosting({ ok: false, msg: e.message }))
   }
   const [xbusy, setXbusy] = useState(false)       // 补做原主体红冲
@@ -864,6 +899,9 @@ export default function LogisticsVoucher() {
     setRun({ i: list.length, n: list.length, cur: '', done, end: true })
     setSel({})
     load()
+    const adjOk = done.filter(x => x.ok && x.redo)      // 本批做了红冲更正的：做完自动弹出更正单预览
+    if (adjOk.length) printAdjust(Promise.all(adjOk.map(x => voucherPreview(x.inst).catch(() => null))), '本批计提更正单',
+      { remind: `本批保存完了：成功 ${done.filter(x => x.ok).length} 张，其中 ${adjOk.length} 张有计提更正单。` })
   }
   const kcnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { const p = plans[r.inst]; if (p) c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans, rows])
   const periods = useMemo(() => [...new Set((rows || []).map(r => r.period).filter(Boolean))].sort().reverse(), [rows])
