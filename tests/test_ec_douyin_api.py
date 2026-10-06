@@ -297,6 +297,14 @@ class DouyinApiTests(unittest.TestCase):
         self.assertEqual(ask('没有这种')['total'], 0)
         self.assertEqual(self.client.get('/api/ec/douyin/settle', params={'period': '2026-09', 'shop': SHOP}).json()['sources']['dy_insure'], 2)
 
+    def test_matched_order_with_a_red_bill_says_the_system_will_not_push_it(self):
+        self.up(('DL.csv', settle_csv(FIRST_HALF, SECOND_HALF)))
+        self.sync_ar([self.bill('AR1', '2026-09-22', 29.71, P), self.bill('AR1R', '2026-09-26', -27.78, P)])       # 蓝 − 红 ＝ 1.93 ＝ 流水应冲
+        get = lambda path, **kw: self.client.get('/api/ec/douyin/' + path, params=dict({'period': '2026-09', 'shop': SHOP}, **kw)).json()
+        self.assertEqual(sorted((b['no'], b['cat'], b['hold']) for b in get('bills', q=P)['rows']), [('AR1', 'ok', 'red'), ('AR1R', 'ok', 'red')])   # 对得上，但清单上要标出系统不推
+        self.assertIn('红字', get('order', order=P)['hold'])                                                        # 抽屉里也说
+        self.assertEqual(get('order', order='6917926768823643799')['hold'], '')
+
     # ---- 抽屉里现查金蝶 ----
     def test_order_bills_only_asks_for_known_bills_caches_and_never_leaks_errors(self):
         self.up(('DL.csv', settle_csv(FIRST_HALF)))

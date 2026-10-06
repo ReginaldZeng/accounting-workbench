@@ -318,6 +318,7 @@ def order(request: Request, period: str, shop: str, order: str):
     mine = [b for b in hit[1]['bills'] if b['order'] in detail['members']]
     cats = {b['cat'] for b in mine}; detail['reason'] = next((b['reason'] for b in mine if b['reason']), '')
     detail['categories'] = [model.category_label(c, hit[1]['overdue_days']) for c in model.CATEGORIES if c in cats]
+    detail['hold'] = next((model.PUSH_SKIP[b['hold']] for b in mine if b.get('hold')), '')      # 金额对得上、但系统不下推的原因
     return dict(detail, ok=True, period=period)
 
 
