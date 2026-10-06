@@ -154,3 +154,15 @@
 .ew-open-table tr.ew-flow-detail>td{padding:0 16px 14px 30px;background:var(--accent-soft,#f1f2fd);box-shadow:inset 3px 0 0 var(--accent,#4b53c4)}
 .ew-flow-box{border:1px solid var(--line,#e4e8f0);border-radius:8px;background:var(--bg,#fff);overflow:hidden}
 .ew-flow-box>p{margin:0;padding:10px 12px}.ew-flow-box .ew-pagination{padding:8px 12px;margin:0}
+/* 抖音月结应收清单：按底色分系统会不会推。绿＝系统成批下推，黄＝对得上但系统不推（要人做），没底色＝还不能核销 */
+.ew-workbench{--ew-push-bg:#e9f6ee;--ew-push-line:#b7dcc4}
+:root[data-theme="dark"] .ew-workbench{--ew-push-bg:#16291e;--ew-push-line:#2f5a40}
+.ew-open-table tr.ew-row-push>td{background:var(--ew-push-bg)}
+.ew-open-table tr.ew-row-hold>td{background:var(--amber-bg,#f8f0e0)}
+.ew-row-legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:10px 0 8px;font-size:12px;color:var(--ink-2,#637089)}
+.ew-row-legend span{display:inline-flex;align-items:center;gap:6px}
+.ew-row-legend i{width:14px;height:14px;border-radius:3px;border:1px solid var(--line,#e4e8f0);background:var(--bg,#fff)}
+.ew-row-legend i.ew-row-push{background:var(--ew-push-bg);border-color:var(--ew-push-line)}
+.ew-row-legend i.ew-row-hold{background:var(--amber-bg,#f8f0e0);border-color:var(--amber-line,#e6cfa6)}
+/* 行里那句「系统不推，要人做」要显眼：小字默认是灰的，这里压过去 */
+.ew-workbench .ew-open-table td small.ew-open-red{color:var(--red,#c0392b)}
