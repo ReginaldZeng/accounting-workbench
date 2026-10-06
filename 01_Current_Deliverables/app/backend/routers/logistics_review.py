@@ -2259,6 +2259,34 @@ def _next_period(p):
         return p or ""
 
 
+def _pair_split_fixes(L):
+    """拆分更正和「账单有、计提无」配对(V2.858)。
+    用户 2026-10-06：「这笔业务实质是计提的时候全都归集在了零售，但是我们在付款复核发现有问题，他应该是电商，所以计提数肯定是0」——
+    这种情形页面上是两行：零售那笔计提多出 X(+X)，电商那行账单有、计提无(−X)。登记了「记-N 其中 X 改到电商」以后，这两行的差异就有了着落：
+    计提那行标 fix_cover(差异正好＝拆出去的金额)，账单那行标 fix_from(从哪张计提拆过来)，都不再算「有差异没解释」。对账数字不变(金蝶还没改)。"""
+    rows = L.get("rows", [])
+    for r in rows:
+        r.pop("fix_from", None); r.pop("fix_cover", None)
+    for a in rows:
+        fx = a.get("fix") if a.get("kind") == "accr" else None
+        if not fx or not fx.get("split_amt"):
+            continue
+        try:
+            sp = float(fx["split_amt"])
+        except ValueError:
+            continue
+        to_biz = str(fx.get("to_biz") or "").split(" ", 1)[-1].strip()
+        cand = [b for b in rows if b.get("kind") == "bill_only" and b.get("subject") == a.get("subject") and not b.get("fix_from")
+                and abs(float(b.get("bill") or 0) - sp) < 0.01]
+        cand.sort(key=lambda b: (b.get("fee_type") != a.get("fee_type"), bool(to_biz) and to_biz not in str(b.get("biz") or "")))
+        if cand:
+            cand[0]["fix_from"] = {"vno": a.get("vno"), "key": a.get("key"), "amt": sp}
+        if a.get("diff") is not None and abs(float(a["diff"]) - sp) < 0.01:
+            a["fix_cover"] = True
+    L["n_unexplained"] = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None and abs(r["diff"]) >= 0.01
+                             and not (r.get("note") or "").strip() and not r.get("fix_from") and not r.get("fix_cover"))
+
+
 def _attach_fixes(L, carrier, period):
     """把已登记的计提更正挂到逐笔行(row.fix)，另回 fixes(按登记快照，金蝶改好后原行不在了也照样列出)。"""
     with db._engine.connect() as c:
@@ -2279,6 +2307,7 @@ def _attach_fixes(L, carrier, period):
         if r.get("kind") == "accr":
             r["fix"] = by_key.get(r["key"])
             live.add(r["key"])
+    _pair_split_fixes(L)
     for it in out:
         it["live"] = it["key"] in live
     out.sort(key=lambda it: (it["snap"].get("subject", ""), it["snap"].get("vno", "")))

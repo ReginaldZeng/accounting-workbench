@@ -326,7 +326,7 @@ function FeeVoucherCard({ v, accr, dim, locked, onDone }) {
 function FixEditor({ at, rows, period, onSave, onCancel }) {
   const accr = rows.filter(r => r.kind === 'accr')
   const me = accr.find(r => r.key === at.key) || {}
-  const init = me.fix || {}
+  const init = me.fix || at.init || {}     // at.init：从「账单有、计提无」那一行点过来时预填(只改其中 X、改到那一行的产品分类)
   const [f, setF] = useState(Object.fromEntries(Object.keys(FIX_EMPTY).map(k => [k,
     k === 'to_rate' && init[k] ? String(r2(Number(init[k]) * 100)) : (init[k] || '')])))   // 税率页面按百分数填(9)
   const [drv, setDrv] = useState(init.to_amt && !init.to_amt_tax ? 'N' : 'T')   // 金额联动以哪项为准：T 含税 / N 不含税
@@ -1069,7 +1069,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     ...lines.flatMap(r => {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
-                      const unexpl = bad && !(r.note || '').trim()
+                      const unexpl = bad && !(r.note || '').trim() && !r.fix_from && !r.fix_cover
+                      // V2.858 账单有、计提无(用户「计提的时候全都归集在了零售…应该是电商，所以计提数肯定是0」)：钱其实计提在同主体别的行里——
+                      //   找那笔多出来的计提(差异为正、最接近这行金额的)，点一下就带着「只改其中 X、产品分类改成这一行的」去登记更正
+                      const src = r.kind === 'bill_only' && bad && !r.fix_from ? lines.filter(x => x.kind === 'accr' && !x.fix && x.bill != null && x.diff > 0.004 && x.amt > r.bill + 0.004)
+                        .sort((x, y) => (x.fee_type !== r.fee_type) - (y.fee_type !== r.fee_type) || Math.abs(x.diff - r.bill) - Math.abs(y.diff - r.bill))[0] : null
                       const gdiff = anchor ? r.diff : ancDiff[r.anc]          // 本行所在账单金额的差异
                       const flat = gdiff != null && isZero(gdiff)
                       // 第一行=费用项目(FYXM编码+金蝶名称)；小字=产品分类 · 产品项目 · 部门，都带金蝶编码(用户 2026-09-30)
@@ -1111,7 +1115,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                               placeholder="为什么差…" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} />
                             : r.xsubj ? <span className="tag bad" title={`账单上这张单也标在${r.subject}，所以计提对账单是平的；但发票、请款单是${r.xsubj.to}的——这笔计提记错了主体，付款做账时在${r.subject}红冲、在${r.xsubj.to}补提`}>对账单平 · 记错主体 → {r.xsubj.to}</span>
                             : flat ? <span className="tag ok">平</span>
-                              : (!anchor && gdiff != null ? <span className="dim" style={{ fontSize: 12 }} title="这几笔共用一个账单金额，差异解释写在本组第一笔">差异见本组首笔</span> : null)}{fixCell}</div></td>
+                              : (!anchor && gdiff != null ? <span className="dim" style={{ fontSize: 12 }} title="这几笔共用一个账单金额，差异解释写在本组第一笔">差异见本组首笔</span> : null)}{fixCell}
+                            {r.fix_cover && <span className="dim" style={{ fontSize: 12 }}>多出的 {money(r.diff)} 由这笔更正拆走</span>}
+                            {r.fix_from && <button className="fixtag" disabled={locked} onClick={() => setFixAt({ key: r.fix_from.key })} title="这一行的钱计提在别的行里，已经登记了更正：付款做账时拆过来">待更正 ← 从 {r.fix_from.vno} 拆 {money(r.fix_from.amt)} 过来</button>}
+                            {src && !locked && <button className="fixlnk" onClick={() => setFixAt({ key: src.key, init: { split_amt: String(r.bill), to_biz: cn(r.biz_code, (r.biz || '').startsWith('（') ? '' : r.biz) } })}
+                              title={`这笔钱其实计提在 ${src.vno}（${src.biz || ''} ${money(src.amt)}，比账单多 ${money(src.diff)}）里：登记「其中 ${money(r.bill)} 改到这一行的产品分类」，付款做账时系统拆过来`}>计提在 {src.vno} 里 → 拆 {money(r.bill)} 过来</button>}</div></td>
                         </tr>
                       ]
                     })
