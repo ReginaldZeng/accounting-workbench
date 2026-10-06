@@ -1069,10 +1069,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     ...lines.flatMap(r => {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
-                      const unexpl = bad && !(r.note || '').trim() && !r.fix_from && !r.fix_cover
+                      const unexpl = bad && !(r.note || '').trim() && !r.fix_from && !r.fix_cover && !r.xsubj && !r.xsubj_in
                       // V2.858 账单有、计提无(用户「计提的时候全都归集在了零售…应该是电商，所以计提数肯定是0」)：钱其实计提在同主体别的行里——
                       //   找那笔多出来的计提(差异为正、最接近这行金额的)，点一下就带着「只改其中 X、产品分类改成这一行的」去登记更正
-                      const src = r.kind === 'bill_only' && bad && !r.fix_from ? lines.filter(x => x.kind === 'accr' && !x.fix && x.bill != null && x.diff > 0.004 && x.amt > r.bill + 0.004)
+                      const src = r.kind === 'bill_only' && bad && !r.fix_from && !r.xsubj_in ? lines.filter(x => x.kind === 'accr' && !x.fix && x.bill != null && x.diff > 0.004 && x.amt > r.bill + 0.004)
                         .sort((x, y) => (x.fee_type !== r.fee_type) - (y.fee_type !== r.fee_type) || Math.abs(x.diff - r.bill) - Math.abs(y.diff - r.bill))[0] : null
                       const gdiff = anchor ? r.diff : ancDiff[r.anc]          // 本行所在账单金额的差异
                       const flat = gdiff != null && isZero(gdiff)
@@ -1096,7 +1096,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           </td>
                           <td className="mono">{r.vno || <span className="dim">—</span>}</td>
                           <td className="num">{r.amt == null ? <span className="dim">—</span> : <>{money(r.amt)}{r.tax_rate != null && <span className="tag">{pct(r.tax_rate)}</span>}</>}</td>
-                          {anchor && <td rowSpan={r.bill_span || 1} className="num">{money(r.bill)}<span className="tag">{r.level === 'biz' ? '按产品线' : '按组'}</span></td>}
+                          {anchor && <td rowSpan={r.bill_span || 1} className="num">{money(r.bill)}<span className="tag">{r.level === 'xsubj' ? '不在本主体账单' : r.level === 'biz' ? '按产品线' : '按组'}</span></td>}
                           {anchor && <td rowSpan={r.bill_span || 1} className={'num ' + dcls(r.diff)}>{dtxt(r.diff)}</td>}
                           {anchor && <td rowSpan={r.bill_span || 1}>{(() => {
                             const od = r.od
@@ -1110,10 +1110,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                                 : `${od.n} 单带金蝶单号，覆盖账单 ${money(od.amt)}；点击去第②步只看这一组`}>
                               {full ? `✓ ${od.n} 单` : qonly ? `${od.n} 单 · 只核量` : `部分 ${Math.round(od.ratio * 100)}% · ${od.n} 单`} ›</button>
                           })()}</td>}
-                          <td><div className="notecell">{bad || (r.note || '').trim()
+                          <td><div className="notecell">{r.xsubj
+                            ? <span className="tag bad" title={`发票、请款单是${r.xsubj.to}的（审批 ${r.xsubj.bid}）：这笔计提记错了主体，付款做账时在${r.subject}红冲、在${r.xsubj.to}补提`}>记错主体 → {r.xsubj.to} · 付款做账时红冲</span>
+                            : r.xsubj_in
+                              ? <span className="tag bad" title="这笔的计提记在了别的主体，付款做账时补提到本主体">计提记在 {r.xsubj_in.from} {r.xsubj_in.vno} · 付款做账时补提</span>
+                            : bad || (r.note || '').trim()
                             ? <input className="noteinp wide" disabled={locked} defaultValue={r.note || ''} key={r.key + '|' + (r.note || '')}
                               placeholder="为什么差…" onBlur={e => { const v = e.target.value.trim(); if (v !== (r.note || '')) saveLineNote(r.key, v) }} />
-                            : r.xsubj ? <span className="tag bad" title={`账单上这张单也标在${r.subject}，所以计提对账单是平的；但发票、请款单是${r.xsubj.to}的——这笔计提记错了主体，付款做账时在${r.subject}红冲、在${r.xsubj.to}补提`}>对账单平 · 记错主体 → {r.xsubj.to}</span>
                             : flat ? <span className="tag ok">平</span>
                               : (!anchor && gdiff != null ? <span className="dim" style={{ fontSize: 12 }} title="这几笔共用一个账单金额，差异解释写在本组第一笔">差异见本组首笔</span> : null)}{fixCell}
                             {r.fix_cover && <span className="dim" style={{ fontSize: 12 }}>多出的 {money(r.diff)} 由这笔更正拆走</span>}
@@ -1142,8 +1145,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {L && !L.err && L.prior && L.prior.length > 0 && <div className="adjnote">上期计提的红冲 / 更正（本月做的账，属于上个月）不计入本月，净额 <b className="mono">{money(L.prior_total)}</b>：{L.prior.map(p => `${p.vno} ${p.subject} ${money(p.net)}`).join('；')}</div>}
           {L && !L.err && L.xin && L.xin.length > 0 && <div className="adjnote">跨月核销：这张账单在付款做账里选定同时核销别的月份的计提，已并进下表——
             {L.xin.map(x => `${x.subject} ${Number(String(x.month).slice(5))} 月 ${x.vno} ${money(x.amt)}`).join('；')}</div>}
-          {L && !L.err && L.xsubj && L.xsubj.length > 0 && <div className="adjnote"><b>计提记错主体</b>（这一页比的是计提对账单；主体对不对是从发票和请款单看出来的）：
-            {L.xsubj.map(x => <div key={x.subject + x.vno} style={{ marginTop: 3 }}>{x.subject} {x.vno} {money(x.amt)} —— 发票、请款单（{money(x.req_amount)}，审批 {x.bid}）是 <b>{x.to}</b> 的。
+          {L && !L.err && L.xsubj && L.xsubj.length > 0 && <div className="adjnote"><b>计提记错主体</b>（主体对不对是从发票和请款单看出来的；这几笔不拿去配本主体的账单，单列）：
+            {L.xsubj.map(x => <div key={x.subject + x.vno} style={{ marginTop: 3 }}>{x.subject} {x.vno} {money(x.amt)} —— 发票、请款单（{money(x.req_amount)}，审批 {x.bid}）是 <b>{x.to}</b> 的{x.bill_at ? `，账单上这笔也在${x.bill_at}` : `；账单上没在${x.to}找到同金额的行，请到第②步核对这张单的主体`}。
               {x.reversed ? `${x.subject}已红冲（${x.reversed}）` : x.posted ? `${x.to}的付款凭证已做` : `付款做账时：${x.subject}红冲这笔、${x.to}补提后核销（系统一并做）`}；计提更正单两张（① 红冲 ② 补提）。</div>)}</div>}
           {L && !L.err && L.xmoved && L.xmoved.length > 0 && <div className="adjnote">本月有计提已被别的月份的账单选定核销，不计入本月——
             {L.xmoved.map(x => `${x.subject} ${x.vno} ${money(x.amt)} → ${x.to} 的账单`).join('；')}</div>}

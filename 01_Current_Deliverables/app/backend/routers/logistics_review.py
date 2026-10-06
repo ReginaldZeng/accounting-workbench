@@ -2114,8 +2114,15 @@ def _build_lines(request, carrier, period):
         return {"n": n, "amt": amt, "ratio": round(ratio, 4), "fsub": keys[0][0] if keys else "",
                 "ffee": keys[0][1] if keys else "", "fbiz": "|".join(b or "-" for b in bizs),
                 "blabel": "、".join(b or "无产品线" for b in bizs)}
+    # V2.859(用户看丰源第①步：「这里应该是918账单数0」「深圳星期九，计提数0，账单时918」)：付款做账判定「记错主体」的计提
+    #   (发票、请款单是另一个主体的)，不拿它去配本主体的账单——单列一行：账单 0、差异＝计提数，标「记错主体 → 那个主体」；
+    #   那个主体账单上对应的那一行(账单有、计提无)标上「计提在××记-N」。两行都由主体更正解决，不算有差异没解释。
+    xh = _xsubj_hints(carrier, period)
+    xents = [e for e in ents if (e.get("subject"), e.get("vno")) in xh]
     groups = {}
     for e in ents:
+        if (e.get("subject"), e.get("vno")) in xh:
+            continue
         groups.setdefault((e["subject"], e["fee_norm"]), []).append(e)
     # 页面/复核表都带编码(用户 2026-09-30)：主体→账簿编码(本期凭证优先，主体档案兜底)；账单侧产品线→产品分类编码(本期凭证实证优先，BIZLINE_CODE 兜底)
     s2book = {o.get("short_name"): o.get("book_code") for o in (db.list_orgs() or []) if o.get("short_name") and o.get("book_code")}
@@ -2136,7 +2143,7 @@ def _build_lines(request, carrier, period):
     rows, atot, btot = [], 0.0, 0.0
     smk = _subj_marks(period, carrier)
     allkeys = set(list(groups.keys()) + list(bill2.keys()))
-    for s in sorted({k[0] for k in allkeys}):
+    for s in sorted({k[0] for k in allkeys} | {e["subject"] for e in xents}):
       srows, sa, sb = [], 0.0, 0.0
       for gk in sorted(k for k in allkeys if k[0] == s):
         s, f = gk
@@ -2188,6 +2195,12 @@ def _build_lines(request, carrier, period):
             grows[0]["ffirst"] = True          # 主体组内每段费用类型的首行(前端画细分隔)
         srows.extend(grows)
         sa += ga; sb += gb
+      for e in xents:
+          if e["subject"] != s:
+              continue
+          srows.append({**e, "fee_type": e["fee_norm"], "kind": "accr", "level": "xsubj", "bill": 0.0, "bill_span": 1, "diff": round(e["amt"], 2),
+                        "note": notes.get(e["key"], ""), "anc": "", "ffirst": True, "xsubj": xh[(e["subject"], e["vno"])]})
+          sa += e["amt"]
       if srows:
           srows[0]["gfirst"] = True
       rows.extend(srows)
@@ -2195,8 +2208,15 @@ def _build_lines(request, carrier, period):
                    "mark": smk.get((carrier, s)),
                    "diff": round(sa - sb, 2), "key": "gt|%s" % s})
       atot += sa; btot += sb
+    for e in xents:      # 那个主体账单上对应的那一行
+        h = xh[(e["subject"], e["vno"])]
+        b = next((r for r in rows if r.get("kind") == "bill_only" and r.get("subject") == h["to"] and not r.get("xsubj_in")
+                  and abs(float(r.get("bill") or 0) - float(e["amt"])) < 0.01), None)
+        if b:
+            b["xsubj_in"] = {"from": e["subject"], "vno": e["vno"], "amt": round(e["amt"], 2)}
+            h["bill_at"] = h["to"]
     n_unexpl = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None
-                   and abs(r["diff"]) >= 0.01 and not (r.get("note") or "").strip())
+                   and abs(r["diff"]) >= 0.01 and not (r.get("note") or "").strip() and not r.get("xsubj") and not r.get("xsubj_in"))
     return _attach_xsubj(_attach_fixes({"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
             "accr_total": round(atot, 2), "bill_total": round(btot, 2), "diff_total": round(atot - btot, 2),
             "adj": adj, "prior": prior, "prior_total": round(sum(p["net"] for p in prior), 2),
@@ -2208,18 +2228,16 @@ def _build_lines(request, carrier, period):
             "suppliers": got.get("suppliers") or []}, carrier, period), carrier, period)
 
 
-def _attach_xsubj(L, carrier, period):
-    """计提记错主体的提示(V2.856，用户看丰源第①步 记-390 显示「平」问「这怎么会平呢」)：
-    第①步比的是「计提 对 账单」——账单上那张单也标在同一个主体，所以是平的；主体记错是从发票和请款单看出来的(发票开给另一个主体、由它付款)，
-    原来只在第③步「发票与暂估」和付款做账里说。这里把付款做账的判断接过来：哪几笔计提会在付款时被红冲、补提到别的主体，标在那一行上并在表下说明。只读。"""
-    L["xsubj"] = []
+def _xsubj_hints(carrier, period):
+    """付款做账对「计提记错主体」的判断 → {(原主体简称, "记-N"): {to, req_amount, bid, posted, reversed}}。只读，要读金蝶(有缓存)；取不到返回 {}。
+    主体对不对是从发票和请款单看出来的：发票开给另一个主体、由它付款，而计提记在了这个主体。"""
+    hints = {}
     try:
         from routers import logistics_voucher as LVR
         PRT = store.payreq
         with db._engine.connect() as c:
             reqs = [dict(r) for r in c.execute(select(PRT.c.inst_id, PRT.c.subject, PRT.c.amount, PRT.c.business_id, PRT.c.excluded,
                                                     PRT.c.dt_status, PRT.c.dt_result).where((PRT.c.carrier == carrier) & (PRT.c.period == period))).mappings().all()]
-        hints = {}
         for r in reqs:
             if r.get("excluded") or str(r.get("dt_status") or "").upper() == "TERMINATED" or str(r.get("dt_result") or "").lower() == "refuse":
                 continue
@@ -2235,13 +2253,15 @@ def _attach_xsubj(L, carrier, period):
                 hints[(x.get("short"), "记-%s" % x.get("vno"))] = {
                     "to": r.get("subject"), "req_amount": round(float(r.get("amount") or 0), 2), "bid": r.get("business_id") or "", "posted": posted,
                     "reversed": ("%s月 记-%s" % (rv.get("month"), rv.get("vno"))) if rv else ""}
-        for row in L.get("rows", []):
-            h = hints.get((row.get("subject"), row.get("vno"))) if row.get("kind") == "accr" else None
-            if h:
-                row["xsubj"] = h
-                L["xsubj"].append(dict(h, subject=row.get("subject"), vno=row.get("vno"), amt=row.get("amt")))
     except Exception:
-        pass
+        return {}
+    return hints
+
+
+def _attach_xsubj(L, carrier, period):
+    """把标了「记错主体」的行汇总成一份给页面表下的说明用。"""
+    L["xsubj"] = [dict(r["xsubj"], subject=r.get("subject"), vno=r.get("vno"), amt=r.get("amt"))
+                  for r in L.get("rows", []) if r.get("kind") == "accr" and r.get("xsubj")]
     return L
 
 
@@ -2284,7 +2304,8 @@ def _pair_split_fixes(L):
         if a.get("diff") is not None and abs(float(a["diff"]) - sp) < 0.01:
             a["fix_cover"] = True
     L["n_unexplained"] = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None and abs(r["diff"]) >= 0.01
-                             and not (r.get("note") or "").strip() and not r.get("fix_from") and not r.get("fix_cover"))
+                             and not (r.get("note") or "").strip() and not r.get("fix_from") and not r.get("fix_cover")
+                             and not r.get("xsubj") and not r.get("xsubj_in"))
 
 
 def _attach_fixes(L, carrier, period):
@@ -3544,6 +3565,10 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         nt = r.get("note") or ""
         if r.get("fix"):
             nt = ("%s\n" % nt if nt else "") + "【待更正】改为 " + _fix_to_txt(r["fix"])
+        if r.get("xsubj"):
+            nt = ("%s\n" % nt if nt else "") + "【记错主体】发票、请款单是%s的：付款做账时本主体红冲、%s补提" % (r["xsubj"]["to"], r["xsubj"]["to"])
+        if r.get("xsubj_in"):
+            nt = ("%s\n" % nt if nt else "") + "【记错主体】计提记在%s %s：付款做账时补提到本主体" % (r["xsubj_in"]["from"], r["xsubj_in"]["vno"])
         fee = _cn(r.get("fee_code"), r.get("fee")) if r.get("fee_code") else r.get("fee_type")   # 费用类型=金蝶费用项目(编码 名称)，账单有计提无的用复核归类
         ws.append([_cn(r.get("book_code"), r.get("subject")), fee, biz,
                    _cn(r.get("proj_code"), r.get("proj")) or None, _cn(r.get("dept_code"), r.get("dept")) or None, r.get("vno") or None,
