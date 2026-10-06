@@ -25,6 +25,7 @@ import ResultExport from './views/ResultExport.jsx'
 import Settings from './views/Settings.jsx'
 import BasicData from './views/BasicData.jsx'
 import Archive from './views/Archive.jsx'
+import VoucherBind from './views/VoucherBind.jsx'
 import FxRate from './views/FxRate.jsx'
 import RptExport from './views/RptExport.jsx'
 import EcomWorkbench from './views/EcomWorkbench.jsx'
@@ -201,6 +202,7 @@ export default function App() {
         {view === 'bomconfig' && canView('bomconfig') && <BomPrice user={user} mode="config" />}
         {view === 'tempattboard' && canView('tempattboard') && <TempAttBoard user={user} />}
         {view === 'archive' && canView('archive') && <Archive user={user} />}
+        {view === 'vbind' && canView('vbind') && <VoucherBind user={user} />}
         {view === 'basicdata' && canView('basicdata') && <BasicData user={user} />}
         {/* 发票管家（V-draft）：收票工作台 / 发票后补池 / 发票审核 / 发票台账。票夹详情、看图等子画面都是页内状态，不另开菜单 key */}
         {view === 'invdesk' && canView('invdesk') && <InvDesk user={user} />}
@@ -243,7 +245,7 @@ const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodc
   'ecommonth', 'ecomsettle', 'ecombase',
   'tempattrev', 'tempattboard',
   'invdesk', 'invlater', 'invaudit', 'invledger',
-  'archive', 'basicdata', 'settings'])
+  'archive', 'vbind', 'basicdata', 'settings'])
 // 发票管家四页：进入时侧栏展开「发票管家」板块（同电商页展开「应收模块」的做法）
 const INV_VIEWS = ['invdesk', 'invlater', 'invaudit', 'invledger']
 // body 默认是「二期开发」——但权限类占位不能这么说，那会让人以为是功能没做，跑去催开发而不是找管理员开权限

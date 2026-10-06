@@ -941,6 +941,8 @@ NAV_MODULES = [
     {"key": "invledger", "label": "发票台账", "sec": "inv", "order": 40, "default": "开发中"},
     # ── 其它模块 ──
     {"key": "archive", "label": "凭证归档", "sec": "misc", "order": 10, "default": "待验收"},
+    # 凭证装订(V2.850，用户「这个扫码放在其他模块里面，命名为凭证装订」「先做物流试运行」)：纸质付款单扫码 → 主体+凭证号，手写标注；计提更正单在这里打
+    {"key": "vbind", "label": "凭证装订", "sec": "misc", "order": 20, "default": "测试验证"},
     # ── 通用（钉底部）──
     # 基础数据/基础设置=平台基础设施（配主体档案、数据源、金蝶连接），恒常可用，不参与上线开关（always）
     {"key": "basicdata", "label": "基础数据", "sec": "common", "order": 10, "default": "已上线", "always": True},
@@ -1449,7 +1451,7 @@ _ACC_MODULE_BOARD = {
     "bomdraft": "BOM报价审核", "bomstd": "BOM报价审核", "bomconfig": "BOM报价审核",
     "tempattrev": "临时工考勤", "tempattboard": "临时工考勤",
     "ecommonth": "电商对账", "ecomsettle": "电商对账", "ecombase": "电商对账",
-    "archive": "凭证归档", "basicdata": "基础数据", "settings": "系统设置",
+    "archive": "凭证归档", "vbind": "凭证装订", "basicdata": "基础数据", "settings": "系统设置",
     "invdesk": "发票管家", "invlater": "发票管家", "invaudit": "发票管家", "invledger": "发票管家",
 }
 

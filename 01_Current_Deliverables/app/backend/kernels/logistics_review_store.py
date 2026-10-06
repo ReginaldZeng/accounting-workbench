@@ -227,8 +227,21 @@ bill_raw = Table(
     Column("created_at", String(20)),
 )
 
+# 凭证装订(V2.850)：纸质付款单扫过没有、计提更正单打过没有。一张审批单一行。
+# 「扫过」只说明有人拿着这张纸质单扫了码、看到了凭证号——系统不知道他有没有真写上去(用户问「你怎么知道哪些没标」)。
+bind_scan = Table(
+    "logistics_bind_scan", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("inst_id", String(64), index=True),
+    Column("vnos", String(200)),                   # 扫到时显示的凭证号(主体 记-N；…)，留个底
+    Column("first_by", String(40)), Column("first_at", String(20)),
+    Column("last_by", String(40)), Column("last_at", String(20)),
+    Column("n", Integer),
+    Column("adj_by", String(40)), Column("adj_at", String(20)),      # 计提更正单最近一次是谁、什么时候打的
+)
+
 TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok, review_subj,
-          payreq, payreq_file, bill_raw]
+          payreq, payreq_file, bill_raw, bind_scan]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {

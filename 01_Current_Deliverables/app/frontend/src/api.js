@@ -158,6 +158,9 @@ export const voucherPost = inst => j('/api/logistics-voucher/post', { method: 'P
 export const voucherPostXred = inst => j('/api/logistics-voucher/post-xred', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst }) })
 // 扫付款单二维码查凭证：查不到也回 200(ok:false+msg)，不抛错
 export const voucherScan = code => j('/api/logistics-voucher/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
+// 凭证装订(V2.850)：这个凭证月份已有凭证号的纸质单扫过没有 / 取一张请款单的计提更正单内容(顺带记下谁打的)
+export const voucherBindList = month => j('/api/logistics-voucher/bind-list' + (month ? '?month=' + encodeURIComponent(month) : ''))
+export const voucherBindAdjust = (inst, peek) => j('/api/logistics-voucher/bind-adjust', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, peek: !!peek }) })
 export const voucherScanPhoto = blob => j('/api/logistics-voucher/scan-photo', { method: 'POST', headers: { 'Content-Type': blob.type || 'image/jpeg' }, body: blob })
 export const voucherDdConfig = url => j('/api/logistics-voucher/dd-config?url=' + encodeURIComponent(url))
 // 自动做账：档位(关/演练/真做)、范围、限额；上一轮结果

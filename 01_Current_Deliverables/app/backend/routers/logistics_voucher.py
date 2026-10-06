@@ -42,7 +42,7 @@ def _perm(request):
 
 def _perm_scan(request):
     """扫码查凭证(只读)：能做账的可以用；装订的同事只勾「扫码查凭证」也可以用(V2.848)。"""
-    return _require_perm(request, "logistics_upload") or _require_perm(request, "voucher_scan")
+    return _require_perm(request, "logistics_upload") or _require_perm(request, "voucher_scan") or _require_perm(request, "enter:vbind")
 
 
 # 金蝶付款单单据状态：Z 暂存 / A 创建 / B 审核中 / C 已审核 / D 重新审核
@@ -1341,15 +1341,176 @@ def _scan_lookup(code):
             "state": "" if vs else "这张还没做账（%s）" % (ST_CN.get(st) or st)}
 
 
+# ---------- 凭证装订（V2.850：其它模块 › 凭证装订，先做物流试运行）----------
+# 用户 2026-10-06 梳理流程：钉钉审核 → 出纳付款 → 纸质付款单到实习生手里；付款凭证工作台做、财务经理审核。
+#   定：不要贴条，实习生扫码看到凭证号手写标上；没审核的也显示(提醒一句)；扫码不混在付款做账页里。
+#   计提更正单：由装订的人打——扫到那张单时当场打(电脑)，或回到电脑在「计提更正单」页签把扫过、还没打的一次打出来。
+#   「还没扫到的」只能按「扫没扫过」算，系统不知道人有没有真写上去。
+BS = store.bind_scan
+
+
+def _bind_marks():
+    with db._engine.connect() as c:
+        return {r["inst_id"]: dict(r) for r in c.execute(select(BS)).mappings().all()}
+
+
+def _bind_touch(inst, user, vnos):
+    """记一笔「这张纸质单扫过了」→ 这次之前的状态 {by, at, n} / None(第一次)。"""
+    from sqlalchemy import insert, update
+    now = _now()
+    with db._engine.begin() as c:
+        r = c.execute(select(BS).where(BS.c.inst_id == inst)).mappings().first()
+        if r:
+            c.execute(update(BS).where(BS.c.id == r["id"]).values(last_by=user, last_at=now, n=int(r["n"] or 0) + 1, vnos=vnos[:200]))
+            return {"by": r["first_by"], "at": r["first_at"], "n": int(r["n"] or 0)}
+        c.execute(insert(BS).values(inst_id=inst, vnos=vnos[:200], first_by=user, first_at=now, last_by=user, last_at=now, n=1))
+    return None
+
+
+def _bind_printed(inst, user):
+    from sqlalchemy import insert, update
+    now = _now()
+    with db._engine.begin() as c:
+        r = c.execute(select(BS).where(BS.c.inst_id == inst)).mappings().first()
+        if r:
+            c.execute(update(BS).where(BS.c.id == r["id"]).values(adj_by=user, adj_at=now))
+        else:
+            c.execute(insert(BS).values(inst_id=inst, vnos="", n=0, adj_by=user, adj_at=now))
+
+
+def _adj_n(inst, posted_rec):
+    """这张做账时有没有红冲更正/主体更正(要不要附计提更正单) → 张数。做账记录里记了就用记的；早先做的三张没记，现算一次。"""
+    if not posted_rec:
+        return 0
+    if posted_rec.get("n_adjust") is not None:
+        return int(posted_rec.get("n_adjust") or 0)
+    try:
+        d, code = _preview_data(inst)
+        return len(d.get("adjust") or []) if code == 200 else 0
+    except Exception:
+        return 0
+
+
+def _scan_done(r, user):
+    """扫码结果出来以后：补上要不要附更正单、以前扫没扫过，并记一笔。"""
+    if not (r and r.get("ok") and r.get("inst")):
+        return r
+    posted = (db.get_setting(_POSTED_KEY, None) or {}).get(r["inst"])
+    if posted:
+        r["n_adjust"] = _adj_n(r["inst"], posted)
+    if r.get("vouchers"):
+        prev = _bind_touch(r["inst"], user, "；".join("%s 记-%s" % (v.get("subject") or "", v.get("vno")) for v in r["vouchers"]))
+        r["scanned_before"] = prev
+        mk = _bind_marks().get(r["inst"]) or {}
+        r["adj_printed"] = {"by": mk.get("adj_by"), "at": mk.get("adj_at")} if mk.get("adj_at") else None
+    return r
+
+
+def _bind_items(month=""):
+    """已有凭证号的物流请款单 → 装订条目 + 扫过/打过的记录。month 空＝最近一个凭证月份。只读(审核人要读金蝶，5 分钟缓存)。"""
+    posted = db.get_setting(_POSTED_KEY, None) or {}
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(PR)).mappings().all()]
+    try:
+        from routers.logistics_payreq import _kd_suppliers
+        c2n = _kd_suppliers().get("code2name") or {}
+    except Exception:
+        c2n = {}
+    f2s = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or [])}
+    out = []
+    for r in rows:
+        if r.get("excluded"):
+            continue
+        iid, p, pi = r["inst_id"], posted.get(r["inst_id"]), (_paid_info(r) or {})
+        base = {"inst": iid, "payee": c2n.get(r.get("sup_code")) or r.get("payee") or r.get("carrier"), "bid": r.get("business_id"), "period": r.get("period") or ""}
+        if p:
+            out.append(dict(base, key=iid, subject=r.get("subject"), month=str(pi.get("date") or p.get("at") or "")[:7], vno=str(p.get("vno")), amount=r.get("amount"),
+                            what="付款凭证", paper=True, by=p.get("by") or "", _p=p))
+            for x in (p.get("xred") or {}).values():
+                out.append(dict(base, key="%s|x%s" % (iid, x.get("src_vno")), subject=x.get("short"), month="%s-%02d" % (x.get("year"), int(x.get("month") or 0)),
+                                vno=str(x.get("vno")), amount=-float(x.get("gross") or 0), what="红冲凭证（没有纸质付款单）", paper=False, by=x.get("by") or "", adj=1))
+            x = p.get("later3") or {}
+            if x.get("vno"):
+                out.append(dict(base, key=iid + "|later", subject=r.get("subject"), month=str(x.get("date") or "")[:7], vno=str(x.get("vno")), amount=x.get("tax") or 0,
+                                what="暂估转待认证（没有纸质付款单，附发票）", paper=False, by=x.get("by") or ""))
+        else:
+            vs = []
+            if pi.get("voucher"):
+                vs.append((r.get("subject"), str(pi.get("date") or "")[:7], str(pi["voucher"]).replace("记-", "")))
+            try:
+                for i in _invoices(iid)[1]:
+                    for v in i.get("vouchers") or []:
+                        if isinstance(v, dict) and v.get("number"):
+                            k = (f2s.get(v.get("book")) or v.get("book") or "", str(v.get("period") or "")[:7], str(v["number"]).replace("记-", "").replace("记", ""))
+                            if k not in vs and not any(k[2] == o[2] and k[0] == o[0] for o in vs):
+                                vs.append(k)
+            except Exception:
+                pass
+            for j, (sj, mo, vno) in enumerate(vs):
+                out.append(dict(base, key=iid if j == 0 else "%s|k%d" % (iid, j), subject=sj, month=mo, vno=vno, amount=r.get("amount"),
+                                what="金蝶已有的凭证（不是本系统写的）", paper=j == 0, by=""))
+    months = sorted({x["month"] for x in out if x["month"]}, reverse=True)
+    month = month if month in months else (months[0] if months else "")
+    out = [x for x in out if x["month"] == month]
+    for x in out:
+        p = x.pop("_p", None)
+        if p is not None:
+            x["adj"] = _adj_n(x["inst"], p)
+            x["has_xred"] = bool(p.get("xred"))
+        x.setdefault("adj", 0)
+    _with_people(out, {x["vno"]: x["by"] for x in out if x.get("by")})
+    marks = _bind_marks()
+    for x in out:
+        m = marks.get(x["inst"]) or {}
+        x["scanned"] = {"by": m.get("first_by"), "at": m.get("first_at"), "n": m.get("n")} if (x["paper"] and m.get("first_at")) else None
+        x["printed"] = {"by": m.get("adj_by"), "at": m.get("adj_at")} if (x["adj"] and m.get("adj_at")) else None
+    so = {"深圳星期零": 0, "深圳星期九": 1, "孝感星期九": 2}
+    out.sort(key=lambda x: (so.get(x["subject"], 9), x["subject"] or "", int(x["vno"]) if str(x["vno"]).isdigit() else 0))
+    return {"ok": True, "months": months, "month": month, "items": out}
+
+
+@router.get("/api/logistics-voucher/bind-list")
+async def bind_list(request: Request, month: str = ""):
+    """凭证装订：这个凭证月份已有凭证号的物流请款单——扫过没有、要不要附更正单、更正单打过没有。只读。"""
+    if not _perm_scan(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from starlette.concurrency import run_in_threadpool
+    try:
+        return await run_in_threadpool(_bind_items, month)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "读取失败：%s" % str(e)[:160]}, status_code=502)
+
+
+@router.post("/api/logistics-voucher/bind-adjust")
+async def bind_adjust(request: Request):
+    """凭证装订：取一张请款单的计提更正单内容(同付款做账的凭证预览，只读)，并记下谁、什么时候打的。"""
+    u = _perm_scan(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    from starlette.concurrency import run_in_threadpool
+    try:
+        d, code = await run_in_threadpool(_preview_data, inst)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "读取失败：%s" % str(e)[:160]}, status_code=502)
+    if code != 200:
+        return JSONResponse(d, status_code=code)
+    if (d.get("adjust") or []) and not b.get("peek"):
+        _bind_printed(inst, u["name"])
+    return d
+
+
 @router.post("/api/logistics-voucher/scan")
 async def scan_lookup(request: Request):
     """扫付款单右上角的二维码(或输审批编号) → 哪个主体、哪张凭证。只读。"""
-    if not _perm_scan(request):
+    u = _perm_scan(request)
+    if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     b = await request.json()
     from starlette.concurrency import run_in_threadpool
     try:
-        return await run_in_threadpool(_scan_lookup, str(b.get("code") or "")[:600])
+        return await run_in_threadpool(lambda: _scan_done(_scan_lookup(str(b.get("code") or "")[:600]), u["name"]))
     except Exception as e:
         return {"ok": False, "msg": "查询出错：%s" % str(e)[:160]}
 
@@ -1380,8 +1541,10 @@ async def scan_dd_config(request: Request, url: str = ""):
 async def scan_photo(request: Request):
     """手机拍付款单右上角的二维码(V2.802，用户「手机可以吗」)：照片传上来，服务器认码再查凭证。只读。
     站点现在是 http(域名没备案)，手机浏览器不给网页直接开摄像头扫码，所以走「拍一张照片上传」——认码用发票管家认发票二维码的那套。"""
-    if not _perm_scan(request):
+    _u = _perm_scan(request)
+    if not _u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    _uname = _u["name"]
     ctype = request.headers.get("content-type", "")
     if "multipart/form-data" in ctype:
         form = await request.form()
@@ -1404,7 +1567,7 @@ async def scan_photo(request: Request):
             if any(k == "invoice_qr" for _, k in kinds):
                 return {"ok": False, "msg": "照片里是发票的二维码：请拍付款单（审批单）右上角那个"}
             return {"ok": False, "msg": "照片里没认出付款单的二维码：对准右上角那个码，拍近一点、别反光，再试一次"}
-        return _scan_lookup(link)
+        return _scan_done(_scan_lookup(link), _uname)
     try:
         return await run_in_threadpool(run)
     except Exception as e:

@@ -194,7 +194,7 @@ function sheetsOf(d) {
 }
 
 // 先同步开窗(避免被拦截)，数据到了再写；ds 可以是数组或 Promise
-function printAdjust(ds, title) {
+export function printAdjust(ds, title) {
   const w = window.open('', '_blank')
   if (!w) { alert('浏览器拦截了弹窗，请允许本站弹出窗口后再点'); return }
   w.document.write(`<!doctype html><meta charset="utf-8"><title>${esc(title || '计提更正单')}</title><style>${SHEET_CSS}</style><div class="wait">正在生成计提更正单…</div>`)
@@ -233,7 +233,7 @@ function bindItems(rows, plans) {
   const so = x => { const i = SUBJ_ORDER.indexOf(x); return i < 0 ? 9 : i }
   return out.sort((a, b) => so(a.subject) - so(b.subject) || a.subject.localeCompare(b.subject) || a.month.localeCompare(b.month) || vnum(a.vno) - vnum(b.vno))
 }
-const ymCn = m => (m ? `${m.slice(0, 4)}年${Number(m.slice(5))}月` : '')
+export const ymCn = m => (m ? `${m.slice(0, 4)}年${Number(m.slice(5))}月` : '')
 
 function bindListHtml(items) {
   const groups = []
@@ -293,7 +293,7 @@ function shrinkPhoto(file, max = 2000) {
 }
 
 // 扫码查凭证的状态与动作（电脑弹窗 ScanBox、手机页 VoucherScanPage 共用）。run(查询Promise) → 结果；after 每次查完调(电脑上用来把光标放回输入框)
-function useScan(after) {
+export function useScan(after) {
   const [v, setV] = useState('')
   const [cur, setCur] = useState(null)        // 最近一次结果
   const [busy, setBusy] = useState(false)
@@ -329,60 +329,11 @@ function useScan(after) {
   return { v, setV, cur, setCur, busy, hist, setHist, say, setSay, run, go, shot, bySubj }
 }
 
-function ScanBox({ onClose, page }) {
-  const ref = useRef(null)
-  const focus = () => { if (ref.current) ref.current.focus() }
-  useEffect(() => { if (!page) focus() }, [])
-  const { v, setV, cur, setCur, busy, hist, setHist, say, setSay, go, shot, bySubj } = useScan(() => { if (!page) setTimeout(focus, 30) })
-  const fileRef = useRef(null)
-  const phoneUrl = `${window.location.origin}${window.location.pathname}#/vscan`
-  return (
-    <div className={page ? 'lv-scanpage' : 'lv-mask'} onMouseDown={e => { if (!page && e.target === e.currentTarget) onClose() }}>
-      <div className="lv-dlg lv-scan" role="dialog" aria-label="扫码查凭证" onClick={page ? undefined : focus}>
-        <div className="lv-dh"><div className="lv-title"><b>扫码查凭证</b>{!page && <><span className="sep">·</span>扫付款单右上角的二维码，看它是哪个主体、哪张凭证</>}</div>
-          {!page && <button className="lv-x" onClick={onClose} aria-label="关闭">✕</button>}</div>
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={shot} />
-        {page && <button className="btn btn-pri sc-shot" disabled={busy} onClick={() => fileRef.current && fileRef.current.click()}>{busy ? '识别中…' : '📷 拍付款单右上角的二维码'}</button>}
-        <div className="sc-in">
-          <input ref={ref} value={v} onChange={e => setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') go() }}
-            placeholder={page ? '或输 20 位审批编号' : '用扫码枪扫付款单右上角的二维码；没有扫码枪就输 20 位审批编号再回车'} autoComplete="off" spellCheck={false} inputMode={page ? 'numeric' : undefined} />
-          <button className="btn btn-pri" disabled={busy || !v.trim()} onClick={go}>{busy ? '查询中…' : '查'}</button>
-          {!page && <button className="btn" disabled={busy} title="没有扫码枪：选一张拍了二维码的照片/截图，系统认码" onClick={e => { e.stopPropagation(); fileRef.current && fileRef.current.click() }}>传照片</button>}
-          <label className="sc-say"><input type="checkbox" checked={say} onChange={e => setSay(e.target.checked)} /> 读出来</label>
-        </div>
-        {!cur && (page
-          ? <div className="sc-hint">点上面的按钮拍照：对准付款单右上角的二维码，拍近一点、别反光。也可以在框里输 20 位审批编号。</div>
-          : <div className="sc-hint">扫码枪要在英文输入法下用。光标停在上面的框里，扫一张出一张，不用点鼠标。
-            <br />手机也能查：手机浏览器打开 <span className="mono" style={{ userSelect: 'all' }}>{phoneUrl}</span>，登录后点「拍二维码」。</div>)}
-        {cur && !cur.ok && <div className="sc-res bad"><div className="sc-big">没查到</div><div>{cur.msg}</div></div>}
-        {cur && cur.ok && <div className={'sc-res ' + ((cur.vouchers || []).length ? 'ok' : 'warn')}>
-          {(cur.vouchers || []).length ? cur.vouchers.map((x, i) => <div key={i} className={'sc-v' + (i ? ' more' : '')}>
-            <span className="sc-subj">{x.subject || '主体未知'}</span><span className="sc-big">记-{x.vno}</span>
-            <span className="sc-mon">{ymCn(x.month)}</span><span className="dim">{x.what}{x.src === '金蝶已有' ? ' · 金蝶已有（不是本系统写的）' : ''}</span></div>)
-            : <div className="sc-big">{cur.state}</div>}
-          <div className="sc-meta">{cur.dup && <b className="bad">这张刚才扫过了　</b>}{cur.kind} · {cur.payee}{cur.amount != null && <> · <b className="mono">{money(cur.amount)}</b></>}
-            {cur.bid && <> · 审批 <span className="mono">{cur.bid}</span></>}{(cur.vouchers || [])[0]?.bill_no && <> · 付款单 <span className="mono">{cur.vouchers[0].bill_no}</span></>}
-            {(cur.vouchers || [])[0]?.maker && <> · 制单 <b>{cur.vouchers[0].maker}</b>{cur.vouchers[0].operator ? `（经办 ${cur.vouchers[0].operator}）` : ''}</>}
-            {(cur.vouchers || [])[0] && <> · {cur.vouchers[0].checker ? `审核 ${cur.vouchers[0].checker}` : cur.vouchers[0].audited === false ? '还没审核' : ''}</>}
-            {cur.n_adjust > 0 && <b className="warn">　附计提更正单</b>}{cur.has_xred && <b className="warn">（两张：① 红冲 ② 补提）</b>}</div>
-        </div>}
-        <div className="lv-sec">本次已扫 <span className="dim">{hist.length} 张{Object.keys(bySubj).length > 0 && '：' + Object.entries(bySubj).map(([k, n]) => `${k} ${n}`).join(' · ')}</span>
-          <span style={{ flex: 1 }} />{hist.length > 0 && <button className="lnk" onClick={() => { setHist([]); setCur(null) }}>清空</button>}</div>
-        <table className="lv-t"><thead><tr><th style={{ width: 40 }}>#</th><th style={{ width: 110 }}>主体</th><th style={{ width: 110 }}>凭证号</th><th style={{ width: 90 }}>凭证月份</th><th>供应商</th><th className="num" style={{ width: 120 }}>金额</th><th style={{ width: 80 }}>时间</th><th style={{ width: 90 }}>经办/制单</th></tr></thead>
-          <tbody>{hist.map((h, i) => { const a = (h.vouchers || [])[0]; return <tr key={h.inst}>
-            <td className="dim">{hist.length - i}</td><td>{a ? a.subject : '—'}</td><td className="mono"><b>{a ? '记-' + a.vno : '还没做账'}</b>{(h.vouchers || []).length > 1 && <span className="dim"> +{h.vouchers.length - 1}</span>}</td>
-            <td>{a ? ymCn(a.month) : ''}</td><td>{h.payee}</td><td className="num">{money(h.amount)}</td><td className="dim">{h.at}</td><td>{a ? (a.operator || a.maker) : ''}</td></tr> })}
-            {!hist.length && <tr><td colSpan="8" className="lv-empty">还没扫</td></tr>}</tbody></table>
-      </div>
-    </div>
-  )
-}
-
 // 手机专用单页（#/vscan，App 在登录后直接出这一页）
 // ---------- 手机页（#/vscan，V2.803 重做：用户「是不是可以再优化下」「扫描，而不是拍照」）----------
 // 在钉钉里打开 → 底部大按钮调钉钉自带的「扫一扫」(实时扫，可连续扫)；别的浏览器(站点是 http，网页不能直接开摄像头)退回拍照识别。
 // 结果做成一张大卡：主体按颜色分(分堆时一眼认)，记-号最大；下面是本次已扫的卡片列表。
-const SUBJ_TONE = { 深圳星期零: 'b', 深圳星期九: 't', 孝感星期九: 'o' }
+export const SUBJ_TONE = { 深圳星期零: 'b', 深圳星期九: 't', 孝感星期九: 'o' }
 const IcScan = () => <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16" /></svg>
 const IcCam = () => <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" /><circle cx="12" cy="13" r="3.5" /></svg>
 let _vsCfg = null
@@ -421,12 +372,12 @@ export function VoucherScanPage({ user }) {
   const tone = x => SUBJ_TONE[x] || 'g'
   // 制单人照金蝶的写(系统做的账在金蝶里是「系统操作员」，和打印的凭证一致)；经办人＝在工作台点「保存到金蝶」的人
   const kv = c && c.ok ? [['制单人', a ? a.maker : ''], ['经办人', a && a.operator ? a.operator + '（在工作台做的账）' : ''],
-    ['审核人', a ? (a.checker || (a.audited === false ? '还没审核' : '')) : ''],
+    ['审核人', a ? (a.checker || (a.audited === false ? '还没审核（凭证号可能会变）' : '')) : ''],
     ['供应商', c.payee], ['金额', c.amount != null ? money(c.amount) : ''], ['审批编号', c.bid], ['付款单', a && a.bill_no]].filter(x => x[1]) : []
   return <div className="lv vs"><style>{CSS}</style>
     <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={S.shot} />
     <header className="vs-top">
-      <div><div className="vs-h1">扫码查凭证</div><div className="vs-sub">扫付款单右上角的二维码，看它记在哪个主体、哪张凭证</div></div>
+      <div><div className="vs-h1">凭证装订</div><div className="vs-sub">扫付款单右上角的二维码，看它记在哪个主体、哪张凭证</div></div>
     </header>
     <main className="vs-main">
       {S.busy ? <div className="vs-card vs-wait"><span className="vs-spin" />正在查…</div>
@@ -438,6 +389,7 @@ export function VoucherScanPage({ user }) {
           : !c.ok ? <div className="vs-card bad"><div className="vs-t">没查到</div><div className="vs-msg">{c.msg}</div></div>
             : a ? <div className={'vs-card res tone-' + tone(a.subject)}>
               {c.dup && <div className="vs-dup">这张刚才扫过了</div>}
+              {!c.dup && c.scanned_before && <div className="vs-more" style={{ marginTop: 0, marginBottom: 6 }}>之前扫过：{c.scanned_before.by} {String(c.scanned_before.at || '').slice(5)}</div>}
               <div className="vs-subj">{a.subject || '主体未知'}</div>
               <div className="vs-vno">记-{a.vno}</div>
               <div className="vs-mon">{ymCn(a.month)} · {a.what}{a.src === '金蝶已有' ? '（金蝶已有）' : ''}</div>
@@ -865,7 +817,6 @@ export default function LogisticsVoucher() {
   const [run, setRun] = useState(null)          // 批量进度 {i, n, cur, done:[{inst, label, ok, msg, vno}]}
   const [kf, setKf] = useState('')
   const [bm, setBm] = useState('')              // 装订打印的凭证月份，空=最新一个月
-  const [scan, setScan] = useState(false)       // 扫码查凭证弹窗
   const [view, setView] = useState('grid')      // grid 总表(承运商 × 主体) / list 明细(一张请款单一行)
   const [pf, setPf] = useState('')              // 账单月筛选，空=全部
   const load = () => voucherList().then(r => {
@@ -952,7 +903,7 @@ export default function LogisticsVoucher() {
           <input type="search" placeholder="搜承运商/主体/审批编号" value={q} onChange={e => setQ(e.target.value)} />
           <span className="lv-seg"><button className={view === 'grid' ? 'on' : ''} title="承运商一行、三个主体各一组列" onClick={() => setView('grid')}>总表</button>
             <button className={view === 'list' ? 'on' : ''} title="一张请款单一行，看每张计提的费用类型、税率、凭证号" onClick={() => setView('list')}>明细</button></span>
-          <button className="btn" title="用扫码枪扫纸质付款单右上角的二维码，看它是哪个主体、哪张凭证（装订用）" onClick={() => setScan(true)}>扫码查凭证</button>
+          <a className="btn" href="#/vbind" title="扫纸质付款单的二维码看主体和凭证号、打计提更正单：挪到「其它模块 › 凭证装订」了">凭证装订 ↗</a>
           <button className="btn" onClick={load}>刷新</button>
         </div>
         <div className="lv-bar">
@@ -1105,7 +1056,6 @@ export default function LogisticsVoucher() {
         </div>}
       </div>
       {open && <Detail inst={open} onClose={() => setOpen(null)} onChanged={load} />}
-      {scan && <ScanBox onClose={() => setScan(false)} />}
     </div>
   )
 }
@@ -1263,3 +1213,5 @@ const CSS = `
 .lv .lv-v tr.b-red td{background:var(--red-bg);color:var(--red)}.lv .lv-v tr.b-fix td{background:var(--amber-bg);color:var(--amber)}
 .lv .lv-v tr.b-hx td{background:var(--accent-soft);color:var(--accent)}.lv .lv-v tr.b-pay td{background:var(--green-bg);color:var(--green)}
 `
+
+export const LV_CSS = CSS
