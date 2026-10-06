@@ -357,7 +357,7 @@ def _fixes(carrier, period, subject):
             continue
         vno = str(snap.get("vno") or "").split("-")[-1]
         out.setdefault(vno, []).append({**{k: f.get(k) or "" for k in ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj",
-                                                                         "to_amt_tax", "to_rate", "to_amt", "memo")}, "snap": snap,
+                                                                         "to_amt_tax", "to_rate", "to_amt", "memo", "split_amt")}, "snap": snap,
                                         "id": f.get("id")})     # id：写入金蝶时记下合进了哪几笔更正（首页待办区销账用）
     return out
 
@@ -603,7 +603,11 @@ def _preview_data(inst, self_vno=None):
         ng = sum(l["cr"] for l in nl if l["acct"] == "2241.02")
         nt = sum(l["dr"] for l in nl if l["acct"] == "2221.01.07")
         adjust.append({"ref": LV.ref_of(v, ctx["pay_year"]), "vno": v["vno"], "year": v["year"], "month": v["month"], "expl": v["expl"],
-                       "mode": p["mode"], "why": (p.get("why") or "") + (("；" + p["memo"]) if p.get("memo") else ""),
+                       "mode": p["mode"], "why": (p.get("why") or "") + (("；" + p["memo"]) if p.get("memo") else "") + "".join(
+                           "；其中 %s（含税）改为 %s，其余不动%s" % (
+                               "{:,.2f}".format(float(x["split_amt"])), " · ".join(x[k] for k in ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj") if x.get(k)),
+                               ("（%s）" % x["memo"]) if x.get("memo") else "")
+                           for x in (fixes.get(v["vno"]) or []) if x.get("split_amt")),
                        "from": (v.get("from") or {}).get("short") or "",
                        "from_full": (v.get("from") or {}).get("full") or "",
                        "old": {"gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"], "exp": exp_old},

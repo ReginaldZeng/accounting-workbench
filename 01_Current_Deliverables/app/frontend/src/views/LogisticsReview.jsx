@@ -199,15 +199,16 @@ function toGroups(rows) {
 
 // 计提更正：应改为(空=不变)的一句话。值存「编码 名称」(改账按编码找，用户 2026-09-30 定)
 const FIX_F = [['to_acct', '科目', 'acct'], ['to_fee', '费用项目', 'fee'], ['to_dept', '部门', 'dept'], ['to_biz', '产品分类', 'biz'], ['to_proj', '产品项目', 'proj']]
-const FIX_EMPTY = { to_acct: '', to_fee: '', to_dept: '', to_biz: '', to_proj: '', to_amt_tax: '', to_rate: '', to_amt: '', memo: '' }
+// split_amt(V2.855)：只改其中这一部分(含税)——这笔计提拆成两行，这一部分按「应改为」的维度记，其余不动。空=整笔改。
+const FIX_EMPTY = { to_acct: '', to_fee: '', to_dept: '', to_biz: '', to_proj: '', to_amt_tax: '', to_rate: '', to_amt: '', memo: '', split_amt: '' }
 const amtNum = v => { const n = Number(String(v || '').replace(/[,，\s]/g, '')); return String(v || '').trim() && isFinite(n) ? n : null }
 const CLEAR = '（清空）'
 const nm = v => (v && v.includes(' ') ? v.slice(v.indexOf(' ') + 1) : v)          // 「编码 名称」只取名称(页面标签用)
 const cn = (code, name) => [code, name && name !== code ? name : ''].filter(Boolean).join(' ')
 // 金额三项(后端存：含税/不含税两位小数，税率小数 0.09)
 const fixAmts = f => [f.to_amt_tax && '金额 ' + money(f.to_amt_tax), f.to_rate && '税率 ' + pct(Number(f.to_rate)), f.to_amt && '不含税 ' + money(f.to_amt)]
-const fixShort = f => [...FIX_F.map(([k]) => nm(f[k])), ...fixAmts(f)].filter(Boolean).join(' · ') || (f.memo ? '见原因' : '')
-const fixTxt = f => [...FIX_F.map(([k, lb]) => f[k] && lb + ' ' + f[k]), ...fixAmts(f)].filter(Boolean).join(' · ') + (f.memo ? '；原因：' + f.memo : '')
+const fixShort = f => (f.split_amt ? `其中 ${money(f.split_amt)} → ` : '') + ([...FIX_F.map(([k]) => nm(f[k])), ...fixAmts(f)].filter(Boolean).join(' · ') || (f.memo ? '见原因' : ''))
+const fixTxt = f => (f.split_amt ? `其中 ${money(f.split_amt)}（含税）改为 ` : '') + [...FIX_F.map(([k, lb]) => f[k] && lb + ' ' + f[k]), ...fixAmts(f)].filter(Boolean).join(' · ') + (f.split_amt ? '，其余不动' : '') + (f.memo ? '；原因：' + f.memo : '')
 const r2 = x => Math.round(x * 100) / 100
 const Cd = ({ c }) => (c ? <span className="cd">{c}</span> : null)                // 金蝶编码小标签(主体/产品分类/产品项目/部门/费用项目)
 const nextPeriod = p => { const [y, m] = String(p || '').split('-').map(Number); return y && m ? (m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`) : p }
@@ -355,7 +356,13 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
     if (!String(v).trim() && !f.to_amt_tax.trim()) return setF({ ...f, to_rate: v, to_amt: '' })
     setF({ ...f, to_rate: v, to_amt_tax: String(t), to_amt: String(r2(t / (1 + r))) })
   }
-  const amtBad = ['to_amt_tax', 'to_rate', 'to_amt'].some(k => f[k].trim() && amtNum(f[k]) == null)
+  const amtBad = ['to_amt_tax', 'to_rate', 'to_amt', 'split_amt'].some(k => f[k].trim() && amtNum(f[k]) == null)
+  // 只改其中一部分：要大于 0、小于这一笔；要选了改成什么；不能和改金额/税率一起填
+  const sp = amtNum(f.split_amt)
+  const spOn = f.split_amt.trim() !== ''
+  const spErr = !spOn || sp == null ? '' : sp <= 0 || sp >= (me.amt || 0) - 0.004 ? `要大于 0、小于这一笔的 ${money(me.amt)}；整笔都要改就把它留空`
+    : !FIX_F.some(([k]) => f[k].trim()) ? '还要在上面选这一部分改成什么（科目 / 费用项目 / 部门 / 产品分类 / 产品项目至少一项）'
+      : (f.to_amt_tax.trim() || f.to_rate.trim() || f.to_amt.trim()) ? '「只改其中一部分」不能和改金额、改税率一起填' : ''
   const amtDiff = amtNum(f.to_amt_tax) != null ? r2(amtNum(f.to_amt_tax) - (me.amt || 0)) : null
   const newNet = amtNum(f.to_amt), newRate = amtNum(f.to_rate)
   const clean = { ...Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v.trim()])), adj_period: adj }
@@ -376,6 +383,8 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
             {FIX_F.map(([k, lb, ok]) => <tr key={k}><td>{lb}</td><td className="mono">{orig[ok] || <span className="dim">空</span>}</td>
               <td><input list={'fx-' + ok} value={f[k]} placeholder={dim ? '不变' : '读金蝶主数据中…'} onChange={e => setF({ ...f, [k]: e.target.value })} />
                 <datalist id={'fx-' + ok}>{opts[ok].map(o => <option key={o} value={o} />)}</datalist></td></tr>)}
+            <tr className="fxsep"><td>只改其中<small className="dim">含税</small></td><td className="dim" style={{ fontSize: 12 }}>这笔里只有一部分要改时填，系统拆成两行</td>
+              <td><input inputMode="decimal" value={f.split_amt} placeholder="留空＝整笔改（例：4,117.46 里只有 1,450 要改就填 1450）" onChange={e => setF({ ...f, split_amt: e.target.value })} /></td></tr>
             <tr className="fxsep"><td>金额<small className="dim">含税</small></td><td className="mono">{money(me.amt)}</td>
               <td><input inputMode="decimal" value={f.to_amt_tax} placeholder="不变（部分调走或金额记错时填）" onChange={e => onTax(e.target.value)} /></td></tr>
             <tr><td>税率</td><td className="mono">{me.tax_rate != null ? pct(me.tax_rate) : '—'}</td>
@@ -387,6 +396,9 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
         </table>
         {dim && dim.ok === false && <div className="fxhint">金蝶主数据没取到，下拉是空的；可以手填「编码 名称」。</div>}
         {amtBad && <div className="fxhint">金额、税率只能填数字（金额可带千分位逗号，税率填 9 表示 9%）。</div>}
+        {spErr && <div className="fxhint">只改其中一部分：{spErr}。</div>}
+        {spOn && !spErr && sp != null && <div className="fxhint">这笔会拆成两行（做付款凭证时系统先整笔红冲、再按两行重新计提，税额和应付不变）：
+          <b className="mono">{money(r2((me.amt || 0) - sp))}</b> 维度不动；<b className="mono">{money(sp)}</b> 改为 {FIX_F.filter(([k]) => f[k].trim()).map(([k, lb]) => `${lb} ${f[k].trim()}`).join(' · ')}。</div>}
         {!amtBad && newRate != null && Math.abs(newRate / 100 - (me.tax_rate || 0)) >= 0.00005 && newNet != null &&
           <div className="fxhint">税率改为 {r2(newRate)}%：含税 <b className="mono">{money(amtNum(f.to_amt_tax))}</b> ＝ 不含税 <b className="mono">{money(newNet)}</b> ＋ 进项税 <b className="mono">{money(r2(amtNum(f.to_amt_tax) - newNet))}</b>（原进项税 {money(me.tax)}）。</div>}
         {amtDiff != null && Math.abs(amtDiff) >= 0.005 && <div className="fxhint">应改为含税金额比原来{amtDiff > 0 ? '多' : '少'} <b className="mono">{money(Math.abs(amtDiff))}</b>，差额怎么处理请写在原因里（例：其余仍按原维度 / 多提冲回）。</div>}
@@ -398,7 +410,7 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
           {me.fix && <button className="btn sm" onClick={() => onSave([me.key], FIX_EMPTY)}>撤掉这笔更正</button>}
           <span className="sp" />
           <button className="btn sm" onClick={onCancel}>取消</button>
-          <button className="btn sm pri" disabled={!any || amtBad} onClick={() => onSave([me.key], clean)}>保存更正</button>
+          <button className="btn sm pri" disabled={!any || amtBad || !!spErr} onClick={() => onSave([me.key], clean)}>保存更正</button>
         </div>
       </div>
     </div>)

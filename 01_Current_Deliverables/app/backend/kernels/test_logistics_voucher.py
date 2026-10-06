@@ -259,6 +259,33 @@ class T(unittest.TestCase):
         self.assertEqual([(l["block"], l["acct"]) for l in ls2], [("核销", "2221.01.06"), ("核销", "2221.01.07"), ("支付", "2241.02"), ("支付", "1002")])
         self.assertEqual(ls2[0]["expl"], "26952000004000000001核销9/196#" + e)
         self.assertEqual(V.balance(ls2)[0], V.balance(ls2)[1])
+    def test_fix_split_part(self):
+        """V2.855 只改其中一部分：丰源 深圳星期零 8 月记-389 出库运费·零售 4,117.46，其中调拨的 1,450 应是电商——
+        红冲整笔后重提成两行：零售 2,447.21(含税 2,667.46) + 电商 1,330.28(含税 1,450)，税额、应付不变。"""
+        sup = "湖北丰源物流供应链管理有限公司"
+        sc = {"sup_code": "物流运输服务055", "sup_name": sup}
+        d = {"dept_code": "0011401", "dept": "永续物流中心", "fee_code": "FYXM008.002其他物流费用002", "fee": "出库运费", "biz_code": "CPFL011", "biz": "零售"}
+        e = "计提%s8月线下零售出库运费" % sup
+        v = V.acc_voucher("389", [{"acct": "6601", "acct_name": "销售费用", "dr": 3777.49, "cr": 0, "expl": e, **d},
+                                  {"acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 339.97, "cr": 0, "expl": e, **sc},
+                                  {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": 4117.46, "expl": e, **sc}], 2026, 8)
+        inv = [{"number": "26422000003380174971", "rate": "9%", "gross": 4117.46, "tax": 339.97}]
+        fx = {"389": [{"to_acct": "", "to_fee": "", "to_dept": "", "to_biz": "CPFL002 电商", "to_proj": "", "to_amt_tax": "", "to_rate": "", "to_amt": "", "memo": "调拨到电商仓",
+                       "split_amt": "1450.00", "snap": {"acct": "6601", "fee_code": d["fee_code"], "dept_code": d["dept_code"], "biz_code": "CPFL011", "amt": 4117.46}}]}
+        pl = V.plan([v], inv, fx)
+        self.assertEqual(pl["per"]["389"]["mode"], "fix")
+        ctx = dict(CTX, supplier=sup, pay_amount=4117.46)
+        ls = V.build(ctx, [v], inv, pl, fx)
+        fixl = [l for l in ls if l["block"] == "更正" and l["acct"] == "6601"]
+        self.assertEqual([(l["dims"].get("biz"), l["dr"]) for l in fixl], [("零售", 2447.21), ("电商", 1330.28)])
+        self.assertTrue(all(l["dims"].get("dept_code") == "0011401" and l["dims"].get("fee") == "出库运费" for l in fixl))
+        self.assertEqual(round(sum(l["dr"] for l in ls if l["block"] == "更正"), 2), 4117.46)
+        self.assertEqual(round(sum(l["dr"] - l["cr"] for l in ls), 2), 0)
+        # 不填 / 填得不小于整笔 → 还是整笔改
+        fx2 = {"389": [dict(fx["389"][0], split_amt="4117.46")]}
+        ls2 = V.build(ctx, [v], inv, V.plan([v], inv, fx2), fx2)
+        self.assertEqual([(l["dims"].get("biz"), l["dr"]) for l in ls2 if l["block"] == "更正" and l["acct"] == "6601"], [("电商", 3777.49)])
+
 
 if __name__ == "__main__":
     unittest.main()

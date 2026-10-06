@@ -132,6 +132,7 @@ review_line_fix = Table(
     Column("to_amt", String(30)),         # 应改为不含税金额(空=不变；部分调走/金额记错时填)
     Column("to_amt_tax", String(30)),     # 应改为金额(含税)
     Column("to_rate", String(12)),        # 应改为税率(小数，0.09)
+    Column("split_amt", String(30)),      # 只改其中这一部分(含税)：空=整笔改；填了=这笔计提拆成两行，这一部分按「应改为」的维度记，其余不动(V2.855)
     Column("memo", Text),
     Column("updated_by", String(50)),
     Column("updated_at", String(20)),
@@ -317,6 +318,14 @@ def migrate_cols(engine):
         for col, typ in need:
             if col not in have:
                 c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN %s %s" % (col, typ)))
+        # 计提更正「只改其中一部分」(V2.855)
+        if "mysql" in drv:
+            fhave = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                                                  "WHERE TABLE_NAME='logistics_review_line_fix'")).fetchall()}
+        else:
+            fhave = {r[1] for r in c.execute(text("PRAGMA table_info(logistics_review_line_fix)")).fetchall()}
+        if fhave and "split_amt" not in fhave:
+            c.execute(text("ALTER TABLE logistics_review_line_fix ADD COLUMN split_amt VARCHAR(30)"))
         # doc_no 加宽到 300：物流部一格写多个金蝶单号(换行/区间)，按"+"连起来 80 字不够(7单=83字、27单区间=296字)。
         # MySQL 用 MODIFY；SQLite 不校验 VARCHAR 长度，不用改。
         if "mysql" in drv:

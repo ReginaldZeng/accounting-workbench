@@ -2208,7 +2208,7 @@ def _build_lines(request, carrier, period):
             "suppliers": got.get("suppliers") or []}, carrier, period)
 
 
-_FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj", "to_amt_tax", "to_rate", "to_amt", "memo")
+_FIX_KEYS = ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj", "to_amt_tax", "to_rate", "to_amt", "memo", "split_amt")
 _SNAP_KEYS = ("subject", "book_code", "vno", "acct", "acct_name", "fee", "fee_code", "fee_type", "dept", "dept_code",
               "biz", "biz_code", "proj", "proj_code", "amt_net", "tax_rate", "amt")
 
@@ -3001,6 +3001,10 @@ async def review_line_note(request: Request):
     return {"ok": True}
 
 
+class _FixErr(Exception):
+    pass
+
+
 @router.post("/api/logistics-review/line-fix")
 async def review_line_fix(request: Request):
     """计提更正：对一笔或同一账单下几笔计提登记"应改为"(科目/费用项目/部门/产品分类/产品项目/金额+说明)。不改金蝶、不影响本页对账，
@@ -3024,6 +3028,22 @@ async def review_line_fix(request: Request):
             except ValueError:
                 return JSONResponse({"ok": False, "msg": "应改为%s不是数字：%s" % (lb, vals[k])}, status_code=400)
             vals[k] = ("%.4f" % (v / 100 if v >= 1 else v)) if k == "to_rate" else "%.2f" % v
+    # 只改其中一部分(V2.855，用户「我要改到电商」——记-389 4,117.46 里只有调拨的 1,450 该是电商)：填含税金额；
+    #   必须同时选了要改成的维度，且不能和「改金额/税率」混用(那是整笔的事)；金额要大于 0、小于这一笔。
+    if vals["split_amt"]:
+        try:
+            sv = float(vals["split_amt"].replace(",", "").replace("，", ""))
+        except ValueError:
+            return JSONResponse({"ok": False, "msg": "「只改其中」的金额不是数字：%s" % vals["split_amt"]}, status_code=400)
+        if sv <= 0:
+            return JSONResponse({"ok": False, "msg": "「只改其中」的金额要大于 0"}, status_code=400)
+        if not any(vals[k] for k in ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj")):
+            return JSONResponse({"ok": False, "msg": "填了「只改其中」的金额，还要选这一部分改成什么（科目/费用项目/部门/产品分类/产品项目至少一项）"}, status_code=400)
+        if any(vals[k] for k in ("to_amt", "to_amt_tax", "to_rate")):
+            return JSONResponse({"ok": False, "msg": "「只改其中一部分」不能和改金额、改税率一起填"}, status_code=400)
+        if len(keys) > 1:
+            return JSONResponse({"ok": False, "msg": "「只改其中一部分」一次只能对一笔计提登记"}, status_code=400)
+        vals["split_amt"] = "%.2f" % sv
     # 调账月份：不填默认归属月份的下个月(复核多在次月，原月份一般已结账)；只有它不算"有更正"
     adj = str(b.get("adj_period") or "").strip()[:7] or _next_period(period)
     import time as _t
@@ -3031,7 +3051,8 @@ async def review_line_fix(request: Request):
     cc = _ACCR_CACHE.get(ck)
     L = cc[0] if cc else _build_lines(request, carrier, period)
     rows = {r["key"]: r for r in L.get("rows", []) if r.get("kind") == "accr"}
-    with db._engine.begin() as c:
+    try:
+      with db._engine.begin() as c:
         for key in keys:
             ex = c.execute(select(FX.c.id).where((FX.c.carrier == carrier) & (FX.c.period == period) & (FX.c.line_key == key))).scalar()
             if not any(vals.values()):
@@ -3039,6 +3060,8 @@ async def review_line_fix(request: Request):
                     c.execute(delete(FX).where(FX.c.id == ex))
                 continue
             r = rows.get(key)
+            if vals["split_amt"] and r and r.get("amt") is not None and float(vals["split_amt"]) >= float(r["amt"]) - 0.004:
+                raise _FixErr("「只改其中」的金额 %s 不小于这一笔的金额 %.2f：要整笔改就把它留空" % (vals["split_amt"], float(r["amt"])))
             rec = dict(vals, adj_period=adj, updated_by=_uname(u), updated_at=_now())
             if r:   # 金额/税率填的和原记账一样 → 存空(更正单印"不变")
                 for k, ok, tol in (("to_amt", "amt_net", 0.005), ("to_amt_tax", "amt", 0.005), ("to_rate", "tax_rate", 0.00005)):
@@ -3050,6 +3073,8 @@ async def review_line_fix(request: Request):
                 c.execute(update(FX).where(FX.c.id == ex).values(**rec))
             elif r:
                 c.execute(insert(FX).values(carrier=carrier, period=period, line_key=key, **rec))
+    except _FixErr as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
     # 首页待办区：登记了更正 → 给计提更正处理人记一笔；这家这个月的更正全撤了 → 待办撤回。失败只留痕，不拦。
     todo_scenes.fix_touch(carrier, period, _uname(u))
     # 只重挂更正，不作废逐笔缓存(不用重读金蝶)
@@ -3198,6 +3223,8 @@ def _fix_to_txt(fx):
              ("税率 {:g}%".format(round(float(fx["to_rate"]) * 100, 2))) if fx.get("to_rate") else "",
              ("不含税 {:,.2f}".format(float(fx["to_amt"]))) if fx.get("to_amt") else ""]
     s = " · ".join(p for p in parts if p) or "（见原因）"
+    if fx.get("split_amt"):
+        s = "其中 {:,.2f}（含税）改为 ".format(float(fx["split_amt"])) + s + "，其余不动"
     return s + (("；原因：" + fx["memo"]) if fx.get("memo") else "")
 
 
@@ -3335,7 +3362,7 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
         t_new[1] += n_n if n_n is not None else (o_n or 0)
         # 原因：横跨维度与金额列
         ws.merge_cells(start_row=r3, start_column=DIM0, end_row=r3, end_column=NET)
-        why = ws.cell(r3, DIM0, fx.get("memo") or "")
+        why = ws.cell(r3, DIM0, (("只改其中 {:,.2f}（含税），其余不动。".format(float(fx["split_amt"]))) if fx.get("split_amt") else "") + (fx.get("memo") or ""))
         why.alignment = LFT
         for j in range(1, N + 1):            # 合并之后再上边框，每笔最后一行下沿粗线
             ws.cell(r1, j).border = BD

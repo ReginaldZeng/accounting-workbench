@@ -286,6 +286,18 @@ def _split_code(v):
     return (p[0], p[1] if len(p) > 1 else "")
 
 
+def split_part(f, v, line_net, base_net):
+    """计提更正填了「只改其中一部分(含税)」→ 这一部分占这条费用行的不含税额；没填 / 填得不对(≤0、不小于这一行) → 0(整笔改)。"""
+    try:
+        x = float(str(f.get("split_amt") or "").replace(",", ""))
+    except ValueError:
+        return 0.0
+    line_gross = float(v["gross"]) * line_net / (base_net or 1.0)          # 这一行对应的含税额(一张计提几行费用时按不含税额占比)
+    if x <= 0.004 or x >= line_gross - 0.004 or line_gross <= 0:
+        return 0.0
+    return line_net * x / line_gross
+
+
 def _apply_fix(l, f):
     """把一条计提更正的「应改为」套到费用分录上(只改填了的)。"""
     l = dict(l)
@@ -326,17 +338,23 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
             net, tax = split_gross(gross, p["new_rate"])
             tax, net = r2(tax + d_tail), r2(net - d_tail)
         exps = [dict(l) for l in v["exp_lines"]]
+        ws = [float(l["dr"] or 0) for l in v["exp_lines"]]          # 各费用行按原记账的不含税额分摊新的不含税额
+        base = sum(ws) or 1.0
         for f in fx:
             sn = f.get("snap") or {}
             for i, l in enumerate(exps):
                 if l.get("acct") == sn.get("acct") and (l.get("fee_code") or "") == (sn.get("fee_code") or "") and \
                         (l.get("dept_code") or "") == (sn.get("dept_code") or "") and (l.get("biz_code") or "") == (sn.get("biz_code") or ""):
-                    exps[i] = _apply_fix(l, f)
+                    part = split_part(f, v, ws[i], base)
+                    if part:                     # 只改其中一部分(V2.855)：这一行拆成两行——拆出去的按「应改为」记，剩下的维度不动
+                        exps[i:i + 1] = [l, _apply_fix(l, f)]
+                        ws[i:i + 1] = [ws[i] - part, part]
+                    else:
+                        exps[i] = _apply_fix(l, f)
                     break
-        base = sum(l["dr"] for l in v["exp_lines"]) or 1.0
         acc = 0.0
         for i, l in enumerate(exps):
-            amt = r2(net - acc) if i == len(exps) - 1 else r2(net * v["exp_lines"][i]["dr"] / base)
+            amt = r2(net - acc) if i == len(exps) - 1 else r2(net * ws[i] / base)
             acc = r2(acc + amt)
             out.append(_ln("更正", e, l["acct"], l["acct_name"], dr=amt, src=l, keep=EXP_DIMS))
         tl = v["tax_line"] or v["ap_line"] or {}
