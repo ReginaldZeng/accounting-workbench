@@ -66,17 +66,17 @@ export default function VoucherBind({ user }) {
                   : !a ? <div className="vb-res warn"><div className="vb-big">{c.state}</div>
                     <div style={{ marginTop: 6 }}>{c.subject} · {c.payee}{c.amount != null && <> · <b className="mono">{money(c.amount)}</b></>}<br />付款凭证还没做——<b>先放一边</b>，做完再扫。</div></div>
                     : <div className={'vb-res tone-' + tone(a.subject)}>
-                      {c.sheet != null && <div className="vb-sheet">这是<b>计提更正单{c.sheet === 1 ? ' ①（原主体红冲）' : c.sheet === 2 ? ' ②（本主体补提）' : ''}</b>：把这一页订在下面这张凭证后面，凭证号填到更正单上</div>}
+                      {c.sheet != null && <div className="vb-sheet">这是<b>计提更正单上{c.sheet === 1 ? '「记错主体 · 红冲」' : c.sheet === 2 ? '「记错主体 · 补提」' : ''}的那一项</b>：下面是它的凭证，把凭证号填到更正单这一项的「调整凭证」上{c.sheet === 1 ? '（红冲凭证没有纸质付款单）' : ''}</div>}
                       {c.dup && <div className="vb-dup">这张刚才扫过了</div>}
                       <span className="vb-subj">{a.subject || '主体未知'}</span>
                       <div className="vb-vno">记-{a.vno}</div>
                       <div className="vb-mon">{ymCn(a.month)}凭证 · {a.what}{a.src === '金蝶已有' ? '（金蝶已有，不是本系统写的）' : ''}</div>
                       {vs.slice(1).map((x, i) => <div key={i} className="vb-more">另有　<b>{x.subject} 记-{x.vno}</b>　{ymCn(x.month)} · {x.what}</div>)}
-                      {c.sheet == null && c.has_xred && <div className="vb-sheet">这张是<b>主体更正</b>，付款单后面订着两张更正单：<b>②</b> 留在这张付款单后面；<b>①</b> 抽出来，订到上面那张<b>红冲凭证</b>后面（它没有纸质付款单）。拿不准就扫更正单右上角的二维码。</div>}
+                      {c.sheet == null && c.has_xred && <div className="vb-sheet">这张是<b>主体更正</b>：本主体补提的更正单订在这张付款单后面；另一个主体那张<b>红冲凭证</b>没有纸质付款单，它那一项写在另一个主体的更正单上（更正单按主体出，一个主体一张）。</div>}
                       {c.sheet_note && <div className="vb-sheet">{c.sheet_note}</div>}
                       <div className="vb-tags">
                         {a.checker ? <span className="vb-tag ok">已审核 · {a.checker}</span> : a.audited === false ? <span className="vb-tag warn">还没审核 · 凭证号可能会变</span> : null}
-                        {needAdj && <span className="vb-tag warn">后面应订着计提更正单{c.has_xred ? '（两张：① 红冲 ② 补提）' : ''} · 把凭证号填上去</span>}
+                        {needAdj && <span className="vb-tag warn">后面应订着计提更正单 · 把凭证号填上去</span>}
                         {c.scanned_before && !c.dup && <span className="vb-tag neu">之前扫过 · {c.scanned_before.by} {hm(c.scanned_before.at)}</span>}
                       </div>
                       <dl className="vb-kv"><dt>收款方</dt><dd>{c.payee}</dd><dt>金额</dt><dd className="mono">{money(c.amount)}</dd>

@@ -1300,7 +1300,7 @@ def _scan_lookup(code):
             r["has_xred"] = False            # 这一页就是 ①，不再提示「后面订着两张」
         else:
             r["vouchers"] = []
-            r["state"] = "这张更正单 ① 对应的红冲凭证还没建"
+            r["state"] = "更正单上这一项对应的红冲凭证还没建"
             r["sheet_note"] = "原主体的红冲凭证要等这张请款单的付款凭证保存到金蝶时，系统一并建好；建好再扫。"
     return r
 
@@ -1355,7 +1355,7 @@ def _scan_lookup0(code):
                    "what": "付款凭证", "src": "系统写入", "bill_no": posted.get("bill_no")})
         for x in (posted.get("xred") or {}).values():
             vs.append({"subject": x.get("short"), "month": "%s-%02d" % (x.get("year"), int(x.get("month") or 0)), "vno": x.get("vno"),
-                       "what": "红冲凭证（没有纸质付款单，只附计提更正单 ①）", "src": "系统写入"})
+                       "what": "红冲凭证（没有纸质付款单）", "src": "系统写入"})
         if (posted.get("later3") or {}).get("vno"):
             x = posted["later3"]
             vs.append({"subject": r.get("subject"), "month": str(x.get("date") or "")[:7], "vno": x.get("vno"),

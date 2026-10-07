@@ -1147,7 +1147,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {L.xin.map(x => `${x.subject} ${Number(String(x.month).slice(5))} 月 ${x.vno} ${money(x.amt)}`).join('；')}</div>}
           {L && !L.err && L.xsubj && L.xsubj.length > 0 && <div className="adjnote"><b>计提记错主体</b>（主体对不对是从发票和请款单看出来的；这几笔不拿去配本主体的账单，单列）：
             {L.xsubj.map(x => <div key={x.subject + x.vno} style={{ marginTop: 3 }}>{x.subject} {x.vno} {money(x.amt)} —— 发票、请款单（{money(x.req_amount)}，审批 {x.bid}）是 <b>{x.to}</b> 的{x.bill_at ? `，账单上这笔也在${x.bill_at}` : `；账单上没在${x.to}找到同金额的行，请到第②步核对这张单的主体`}。
-              {x.reversed ? `${x.subject}已红冲（${x.reversed}）` : x.posted ? `${x.to}的付款凭证已做` : `付款做账时：${x.subject}红冲这笔、${x.to}补提后核销（系统一并做）`}；计提更正单两张（① 红冲 ② 补提）。</div>)}</div>}
+              {x.reversed ? `${x.subject}已红冲（${x.reversed}）` : x.posted ? `${x.to}的付款凭证已做` : `付款做账时：${x.subject}红冲这笔、${x.to}补提后核销（系统一并做）`}；计提更正单按主体出，{x.subject}、{x.to}各一张。</div>)}</div>}
           {L && !L.err && L.xmoved && L.xmoved.length > 0 && <div className="adjnote">本月有计提已被别的月份的账单选定核销，不计入本月——
             {L.xmoved.map(x => `${x.subject} ${x.vno} ${money(x.amt)} → ${x.to} 的账单`).join('；')}</div>}
           {L && !L.err && L.adj && L.adj.length > 0 && <div className="adjnote">另有 {L.adj.length} 张只有税额调整科目的凭证未计入：{L.adj.map(a => `${a.vno} ${a.acct} ${money(a.amt)}`).join('、')}</div>}
