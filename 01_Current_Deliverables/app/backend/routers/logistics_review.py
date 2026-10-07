@@ -2321,6 +2321,9 @@ def _attach_fixes(L, carrier, period):
             snap = {}
         item = {"key": f["line_key"], "snap": snap, "by": f.get("updated_by") or "", "at": f.get("updated_at") or "",
                 "adj_period": f.get("adj_period") or _next_period(period), **{k: (f.get(k) or "") for k in _FIX_KEYS}}
+        for k, ck in (("to_acct", "acct"), ("to_fee", "fee_code"), ("to_dept", "dept_code"), ("to_biz", "biz_code"), ("to_proj", "proj_code")):
+            if item.get(k) and item[k].split(" ", 1)[0] == str(snap.get(ck) or "").strip():
+                item[k] = ""            # 登记时选的和原记账一样的维度不算更正(V2.860 之前存进去的也这样显示)
         by_key[f["line_key"]] = item
         out.append(item)
     live = set()
@@ -3154,6 +3157,12 @@ async def review_line_fix(request: Request):
                 for k, ok, tol in (("to_amt", "amt_net", 0.005), ("to_amt_tax", "amt", 0.005), ("to_rate", "tax_rate", 0.00005)):
                     if rec.get(k) and r.get(ok) is not None and abs(float(rec[k]) - float(r[ok])) < tol:
                         rec[k] = ""
+            if r:   # 维度选的和原记账一样 → 存空(更正单、待更正标记里就不会把没变的也列一遍)
+                for k, ck in (("to_acct", "acct"), ("to_fee", "fee_code"), ("to_dept", "dept_code"), ("to_biz", "biz_code"), ("to_proj", "proj_code")):
+                    if rec.get(k) and rec[k].split(" ", 1)[0] == str(r.get(ck) or "").strip():
+                        rec[k] = ""
+                if rec.get("split_amt") and not any(rec.get(k) for k in ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj")):
+                    raise _FixErr("「只改其中」那一部分要改成的维度和原记账一样，等于没改：请选一个不同的科目 / 费用项目 / 部门 / 产品分类 / 产品项目")
             if r:
                 rec["snap_json"] = json.dumps({k: r.get(k) for k in _SNAP_KEYS}, ensure_ascii=False)
             if ex:

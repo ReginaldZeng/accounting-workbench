@@ -125,15 +125,26 @@ function adjustSheet(d, adjIn, opt = {}) {
   const blocks = adj.map((a, i) => {
     const od = dimsOf(a.old.exp), nd = dimsOf(a.new.exp)
     const by = p && !opt.noBy ? `${esc(p.by)}<br>${esc(String(p.at || '').slice(0, 10))}` : ''
-    return `<tbody class="blk"><tr><td rowspan="3" class="c">${i + 1}</td><td rowspan="3">${esc(opt.subject || q.subject_full || q.subject)}</td>
-      <td rowspan="3" class="c">${opt.vnoOf ? opt.vnoOf(a) : '记-' + esc(a.vno)}</td><td rowspan="3" class="c nw">${esc(a.year)}-${String(a.month).padStart(2, '0')}</td>
-      <td rowspan="3" class="c nw${(opt.ym || ym) !== `${a.year}-${String(a.month).padStart(2, '0')}` ? ' hotf' : ''}">${esc(opt.ym || ym)}${p || opt.ym ? '' : '<br><span class="dim">预计</span>'}</td>
+    // V2.860(用户看丰源 记-389 的更正单「看着怪怪的」)：一笔计提拆成几行的(只改其中一部分)，「应改为」一行写一条——各自的维度和金额；
+    //   原来把两条的产品分类挤在一格里、金额写「不变」，看不出各是多少。含税按不含税占比分，最后一行拿余数；税＝含税−不含税。
+    const split = (a.new.exp || []).length > 1 && (a.old.exp || []).length === 1
+    const parts = split ? (() => { const base = a.new.exp.reduce((s, l) => s + (l.dr || 0), 0) || 1; let acc = 0
+      return a.new.exp.map((l, j) => { const g = j === a.new.exp.length - 1 ? r2(a.new.gross - acc) : r2(a.new.gross * (l.dr || 0) / base); acc = r2(acc + g); return { l, g, net: r2(l.dr || 0), tax: r2(g - (l.dr || 0)) } }) })() : []
+    const rs = split ? 2 + parts.length : 3
+    const newRows = split
+      ? parts.map((x, j) => { const d1 = dimsOf([x.l]); const moved = d1.some((v, k) => v !== od[k])
+        return `<tr><td class="lb new">${moved ? '拆出去' : '留原处'}</td>${d1.map((v, k) => v === od[k] ? '<td class="gray">不变</td>' : `<td class="hot">${v || '空'}</td>`).join('')}
+          <td class="n hot">${money(x.g)}</td>${same(a.old.rate, a.new.rate) ? '<td class="c gray">不变</td>' : `<td class="c hot">${pct(a.new.rate)}</td>`}<td class="n hot">${money(x.net)}</td><td class="n hot">${money(x.tax)}</td></tr>` }).join('')
+      : `<tr><td class="lb new">应改为</td>${nd.map((x, k) => x === od[k] ? `<td class="gray">${!x && opt.side ? '—' : '不变'}</td>` : `<td class="hot">${x || opt.emptyNew || '空'}</td>`).join('')}
+      ${td(a.old.gross, a.new.gross, money, 'n')}${same(a.old.rate, a.new.rate) ? '<td class="c gray">不变</td>' : `<td class="c hot">${pct(a.new.rate)}</td>`}
+      ${td(a.old.net, a.new.net, money, 'n')}${td(a.old.tax, a.new.tax, money, 'n')}</tr>`
+    return `<tbody class="blk"><tr><td rowspan="${rs}" class="c">${i + 1}</td><td rowspan="${rs}">${esc(opt.subject || q.subject_full || q.subject)}</td>
+      <td rowspan="${rs}" class="c">${opt.vnoOf ? opt.vnoOf(a) : '记-' + esc(a.vno)}</td><td rowspan="${rs}" class="c nw">${esc(a.year)}-${String(a.month).padStart(2, '0')}</td>
+      <td rowspan="${rs}" class="c nw${(opt.ym || ym) !== `${a.year}-${String(a.month).padStart(2, '0')}` ? ' hotf' : ''}">${esc(opt.ym || ym)}${p || opt.ym ? '' : '<br><span class="dim">预计</span>'}</td>
       <td class="lb old">原记账</td>${od.map(x => `<td class="old">${x || opt.emptyOld || '空'}</td>`).join('')}
       <td class="n old">${money(a.old.gross)}</td><td class="c old">${pct(a.old.rate)}</td><td class="n old">${money(a.old.net)}</td><td class="n old">${money(a.old.tax)}</td>
-      <td rowspan="3" class="c">${by}</td></tr>
-      <tr><td class="lb new">应改为</td>${nd.map((x, k) => x === od[k] ? `<td class="gray">${!x && opt.side ? '—' : '不变'}</td>` : `<td class="hot">${x || opt.emptyNew || '空'}</td>`).join('')}
-      ${td(a.old.gross, a.new.gross, money, 'n')}${same(a.old.rate, a.new.rate) ? '<td class="c gray">不变</td>' : `<td class="c hot">${pct(a.new.rate)}</td>`}
-      ${td(a.old.net, a.new.net, money, 'n')}${td(a.old.tax, a.new.tax, money, 'n')}</tr>
+      <td rowspan="${rs}" class="c">${by}</td></tr>
+      ${newRows}
       <tr class="why"><td class="lb">原因</td><td colspan="9">${esc(MODE_CN[a.mode] || a.mode)}：${esc(opt.why ? opt.why(a) : (a.why || ''))}　<span class="dim">摘要：${esc(a.expl)}</span></td></tr></tbody>`
   }).join('')
   const S = (k, w) => r2(adj.reduce((s, a) => s + (a[w][k] || 0), 0))

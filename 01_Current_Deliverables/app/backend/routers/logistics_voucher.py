@@ -343,6 +343,21 @@ def _bank_of(bill_id):
     return str(rows[0].get("日期") or "")[:10], _s(rows[0].get("账号"))
 
 
+_FIX_DIMS = (("to_acct", "科目", "acct", "acct_name"), ("to_fee", "费用项目", "fee_code", "fee"), ("to_dept", "部门", "dept_code", "dept"),
+             ("to_biz", "产品分类", "biz_code", "biz"), ("to_proj", "产品项目", "proj_code", "proj"))
+
+
+def _fix_changed(fx):
+    """一条计提更正里真正变了的维度 → ["产品分类 CPFL002 电商", …]。登记时把没变的也选上了(和原记账一样)的不算。"""
+    sn = fx.get("snap") or {}
+    out = []
+    for k, lb, ck, nk in _FIX_DIMS:
+        v = str(fx.get(k) or "").strip()
+        if v and v.split(" ", 1)[0] != str(sn.get(ck) or "").strip():
+            out.append("%s %s" % (lb, v))
+    return out
+
+
 def _fixes(carrier, period, subject):
     """复核台登记的计提更正 → {vno: [fix]}。"""
     with db._engine.connect() as c:
@@ -605,7 +620,7 @@ def _preview_data(inst, self_vno=None):
         adjust.append({"ref": LV.ref_of(v, ctx["pay_year"]), "vno": v["vno"], "year": v["year"], "month": v["month"], "expl": v["expl"],
                        "mode": p["mode"], "why": (p.get("why") or "") + (("；" + p["memo"]) if p.get("memo") else "") + "".join(
                            "；其中 %s（含税）改为 %s，其余不动%s" % (
-                               "{:,.2f}".format(float(x["split_amt"])), " · ".join(x[k] for k in ("to_acct", "to_fee", "to_dept", "to_biz", "to_proj") if x.get(k)),
+                               "{:,.2f}".format(float(x["split_amt"])), " · ".join(_fix_changed(x)) or "（见复核台登记）",
                                ("（%s）" % x["memo"]) if x.get("memo") else "")
                            for x in (fixes.get(v["vno"]) or []) if x.get("split_amt")),
                        "from": (v.get("from") or {}).get("short") or "",
