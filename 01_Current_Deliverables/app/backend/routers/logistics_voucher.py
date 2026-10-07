@@ -313,6 +313,29 @@ def _siblings(r):
     return sorted(out, key=lambda x: -x["amount"])
 
 
+def _pending_req(book, period, sup_code):
+    """这个主体(账簿)这家供应商这个账期、还没做账的请款单里排最前的一张 → {inst, subject, bid, amount} / None。
+    V2.862(用户「一个主体都是一次性在支付凭证那里调好啊」)：别的主体发现这边有计提记错了主体，红冲不再单开一张凭证——
+    这边自己有付款凭证要做的，就放进这边这张付款凭证里一起调；这边没有请款单、或已经做完了的，才单开红冲凭证。"""
+    posted = db.get_setting(_POSTED_KEY, None) or {}
+    with db._engine.connect() as c:
+        rs = c.execute(select(PR.c.inst_id, PR.c.subject, PR.c.business_id, PR.c.amount, PR.c.excluded, PR.c.dt_status, PR.c.dt_result).where(
+            (PR.c.subject_full == book) & (PR.c.period == period) & (PR.c.sup_code == sup_code)).order_by(PR.c.create_time, PR.c.inst_id)).all()
+    for i, sj, bid, amt, ex, st, rs_ in rs:
+        if ex or str(st or "").upper() == "TERMINATED" or str(rs_ or "").lower() == "refuse" or i in posted:
+            continue
+        return {"inst": i, "subject": sj, "bid": bid or "", "amount": round(float(amt or 0), 2)}
+    return None
+
+
+def _other_reqs(r):
+    """同一家供应商、同一账期、别的主体的请款单(撤回/拒绝/已排除的不算) → [inst_id]。"""
+    with db._engine.connect() as c:
+        rs = c.execute(select(PR.c.inst_id, PR.c.excluded, PR.c.dt_status, PR.c.dt_result).where(
+            (PR.c.sup_code == r["sup_code"]) & (PR.c.period == r["period"]) & (PR.c.subject_full != r["subject_full"]))).all()
+    return [i for i, ex, st, rs_ in rs if not ex and str(st or "").upper() != "TERMINATED" and str(rs_ or "").lower() != "refuse"]
+
+
 def _reversed_in(book, sup_code, v):
     """原主体账上这张计提红冲了没有：计提月及以后、2241 贷方＝负的含税额、挂这家供应商、摘要带「红冲」。→ {vno, year, month} / None。只读。"""
     try:
@@ -413,7 +436,7 @@ def _kind(vouchers, notes, pl):
     return "hx", "计提与发票一致，只核销"
 
 
-def _preview_data(inst, self_vno=None):
+def _preview_data(inst, self_vno=None, _nest=False):
     with db._engine.connect() as c:
         r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
     if not r:
@@ -466,7 +489,7 @@ def _preview_data(inst, self_vno=None):
     # 本账簿没有/对不上：去另外两个主体的账上找，计提可能记错了主体(实证 丰源 深圳星期九 918.93 记在深圳星期零 记-390)
     # V2.798(用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：不再只提示——那边的计提拿过来，在本张凭证里补提到本主体
     #   再核销、支付(mode=move)；原主体的红冲 V2.798 先不写，V2.799(用户 2026-10-05「也是系统做星期零」)改成系统在那边账簿新建红冲凭证并提交，见 _post_xred。
-    xbook = []
+    xbook, xvia = [], None
     own_g = round(sum(v["gross"] for v in vouchers), 2)
     if not picked and invs and abs(own_g - inv_tot) > 0.004:
         need = round(inv_tot - own_g, 2) if own_g < inv_tot else inv_tot      # 本主体已有一部分计提的，只找缺的那部分
@@ -507,8 +530,12 @@ def _preview_data(inst, self_vno=None):
                 notes.append("%s：%s，要先在那边红冲、在本主体重新计提，再做这张" % (where, why))
             else:
                 vouchers = vouchers + mv
-                notes.append("%s：本张凭证里补提到%s再核销；%s那边的红冲凭证系统一并建好并提交（不审核）" % (where, r.get("subject") or "本主体", short))
+                via = _pending_req(ob, r["period"], r["sup_code"])
+                notes.append(("%s：本张凭证里补提到%s再核销；%s那边的红冲放在它自己这家的付款凭证里一起做（审批 %s，还没做账）" % (
+                    where, r.get("subject") or "本主体", short, via["bid"])) if via else
+                    ("%s：本张凭证里补提到%s再核销；%s那边的红冲凭证系统一并建好并提交（不审核）" % (where, r.get("subject") or "本主体", short)))
                 xbook = [(ob, short, v) for v in mv]
+                xvia = via
             break
     fixes = _fixes(r["carrier"], r["period"], r["subject"])
     fixes = {k: v for k, v in fixes.items() if any(x["vno"] == k and not x.get("from") for x in vouchers)}
@@ -577,6 +604,39 @@ def _preview_data(inst, self_vno=None):
            "pay_month": int(pay_date[5:7]), "pay_amount": float(r.get("amount") or 0), "bank": bank,
            "paid": bool(pi) and not pi.get("voucher"), "self_vno": self_vno, "tax_later": bool(pay_only)}
     lines = LV.build(ctx, vouchers, [] if pay_only else inv_in, pl, fixes) if pl["status"] == "ok" else []
+    xout = []          # [(计提凭证, 应归主体简称, 那张请款单的审批编号)]
+    xkept = ((db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}).get("xout")
+    if not _nest and lines and xkept:
+        try:
+            all_here = list(_accruals(r["subject_full"], r["period"], r["sup_code"])[0])
+        except Exception:
+            all_here = []
+        for k in xkept:
+            v = next((a for a in all_here if a["vno"] == str(k.get("vno"))), None)
+            if v:
+                xout.append((v, k.get("to") or "", k.get("bid") or ""))
+    elif not _nest and lines and (_pending_req(r["subject_full"], r["period"], r["sup_code"]) or {}).get("inst") == inst:
+        try:
+            all_here = list(_accruals(r["subject_full"], r["period"], r["sup_code"])[0])
+        except Exception:
+            all_here = []
+        mine = {v["vno"] for v in vouchers if not v.get("from")}
+        for oi in _other_reqs(r):
+            try:
+                od, oc = _preview_data(oi, _nest=True)
+            except Exception:
+                continue
+            if oc != 200:
+                continue
+            for x in od.get("xbook") or []:
+                v = next((a for a in all_here if a["vno"] == str(x.get("vno"))), None)
+                if x.get("book") == r["subject_full"] and not x.get("reversed") and v and v["vno"] not in mine and not any(y[0]["vno"] == v["vno"] for y in xout):
+                    xout.append((v, od["req"].get("subject") or "", od["req"].get("bid") or ""))
+    if xout:
+        lines = [l for v, _to, _bid in xout for l in LV.red_lines(v, ctx["pay_year"])] + lines
+        for v, to, bid in xout:
+            notes.append("本主体的 记-%s %.2f 记错了主体（发票、请款单是%s的，审批 %s）：在这张付款凭证里一起整笔红冲，%s在它自己的付款凭证里补提" % (
+                v["vno"], v["gross"], to, bid, to))
     dr, cr = LV.balance(lines)
     msgs = list(notes) + list(pl["msgs"])
     if pl["status"] != "ok" and len(vouchers) > 1 and any("≠ 计提含税合计" in m for m in pl["msgs"]):
@@ -605,6 +665,9 @@ def _preview_data(inst, self_vno=None):
         st = "paycode"
         msgs.insert(0, paywarn["text"])
     kind, ktext = _kind(vouchers, notes, pl)
+    if xout and kind in ("hx", "tail", "redo"):
+        xt = "另红冲 %s（记错主体，应是%s的）" % ("、".join("记-%s %.2f" % (v["vno"], v["gross"]) for v, _to, _bid in xout), "、".join(dict.fromkeys(to for _v, to, _bid in xout)))
+        kind, ktext = "redo", (ktext + "；" + xt) if kind != "hx" else ("本主体的计提与发票一致；" + xt)
     # 计提调整单(V2.759，用户 2026-10-02「审核的时候就出来，打印后贴在钉钉单据后面」)：每张红冲更正的计提，原计提 vs 更正后
     adjust = []
     for v in (vouchers if lines else []):
@@ -628,6 +691,13 @@ def _preview_data(inst, self_vno=None):
                        "old": {"gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"], "exp": exp_old},
                        "new": {"gross": LV.r2(ng), "tax": LV.r2(nt), "net": LV.r2(ng - nt),
                                "rate": v["rate"] if p["mode"] == "tail" else p.get("new_rate"), "exp": exp_new}})
+    for v, to, bid in xout:        # 更正单上也列：这张计提整笔冲回
+        adjust.append({"ref": LV.ref_of(v, ctx["pay_year"]), "vno": v["vno"], "year": v["year"], "month": v["month"], "expl": v["expl"], "mode": "xout",
+                       "why": "这笔费用应由%s承担（发票开给%s、由%s付款，审批 %s），计提时记到了本主体，在本张付款凭证里整笔红冲；%s在它自己的付款凭证里补提" % (to, to, to, bid, to),
+                       "from": "", "from_full": "",
+                       "old": {"gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
+                               "exp": [{k: l.get(k) for k in ("acct", "acct_name", "dr") + LV.EXP_DIMS} for l in v["exp_lines"]]},
+                       "new": {"gross": 0.0, "tax": 0.0, "net": 0.0, "rate": v["rate"], "exp": []}})
     # 主体更正：原主体那边要做的红冲分录 + 那边做了没有(读金蝶)
     xb = []
     xdone = ((db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}).get("xred") or {}
@@ -645,8 +715,9 @@ def _preview_data(inst, self_vno=None):
                   "by": mine.get("by"), "at": mine.get("at"), "submitted": mine.get("submitted")}
         xb.append({"book": ob, "short": short, "vno": v["vno"], "year": v["year"], "month": v["month"], "ref": LV.ref_of(v, ctx["pay_year"]),
                    "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"],
-                   "lines": LV.red_lines(v, ctx["pay_year"]), "reversed": rv})
-    return {"ok": True, "kind": kind, "kind_text": ktext, "xbook": xb, "picked": picked or None, "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
+                   "lines": LV.red_lines(v, ctx["pay_year"]), "reversed": rv, "via": (xvia if not rv else None)})
+    return {"ok": True, "kind": kind, "kind_text": ktext, "xbook": xb, "picked": picked or None,
+            "xout": [{"vno": v["vno"], "gross": v["gross"], "to": to, "bid": bid} for v, to, bid in xout], "req": {"inst": inst, "bid": r.get("business_id"), "carrier": r.get("carrier"), "payee": r.get("payee"),
                                 "code": r.get("sup_code"), "subject": r.get("subject"), "subject_full": r.get("subject_full"),
                                 "amount": r.get("amount"), "period": r.get("period"), "applicant": r.get("applicant"),
                                 "paid": pay_date if pi else "", "bank": bank, "folder": folder["id"] if folder else None,
@@ -952,6 +1023,7 @@ def _post(inst, user):
     m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
     rec = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book, "at": _now(), "by": user,
            "tax_later": d2["plan"].get("pay_only") == "later",     # 发票后补：只做了支付，暂估税还没转(发票到了要补第三笔)
+           "xout": d2.get("xout") or [],                     # 顺带红冲的「记错主体」计提(V2.862)：做完账再看这张、补打更正单时按这个出
            "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
            "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2,
            "submitted": not sub_err, "submit_err": sub_err, "status": m2.get("DocumentStatus")}
@@ -1021,6 +1093,9 @@ def _post_xred(inst, user, d=None, s=None, conf=None):
         old = xred.get(key)
         if old and kc.view_voucher(old.get("vid"), s, conf).get("exists"):
             steps.append("%s 红冲凭证 记-%s 已建过，没重复建" % (x["short"], old.get("vno")))
+            continue
+        if x.get("via") and not x.get("reversed"):
+            steps.append("%s 记-%s 的红冲不单开凭证：放在%s自己的付款凭证里一起做（审批 %s，那张还没做账）" % (x["short"], x["vno"], x["short"], x["via"].get("bid")))
             continue
         rv = x.get("reversed")
         if rv and not rv.get("sys"):
