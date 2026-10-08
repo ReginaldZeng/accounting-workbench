@@ -4003,7 +4003,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         # 接上原账单：每单费用分项(sub_fees)+运输方式(carrier_sub)+账单计入金额+账单计费重量，doc级仅首个物料行填
         with db._engine.connect() as c:
             braw = {r[0]: (r[1], r[2], r[3], r[4]) for r in c.execute(select(
-                BL.c.doc_no, BL.c.carrier_sub, BL.c.sub_fees, BL.c.amount, BL.c.charge_wt).where(
+                BL.c.id, BL.c.carrier_sub, BL.c.sub_fees, BL.c.amount, BL.c.charge_wt).where(
                 (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()}
         feekeys = []
         for _no, (cs, sf, amt, cw) in braw.items():
@@ -4049,48 +4049,92 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                    "bill_amt", "bill_unit", "mode_cn", "conv", "note", "_ok"}
         def _is_doclvl(k):
             return k in _DOCLVL or k.startswith("_fee:")
+        # V2.870(用户看恒茂导出「吨数*19.4对吗」)：一张单账单上拆了几行(恒茂按批次、极鲜达按车次)的，原来按单号并成一块——
+        #   账单量写的是第 1 行的(255 箱)、处置费取的却是最后 1 行的(141.16)，金蝶物料还照账单行数重复列几遍(5 行账单 × 5 行物料 = 25 行)。
+        #   改成一张单一块：金蝶物料只列一遍(取物料最全的那行账单带出来的)；账单量、各费用分项、账单金额、计费量按这张单几行的合计；
+        #   分摊运费/单位运费/费比按整单金额等比放大；备注里写明账单上是几行。逐行明细看后面附的原账单页。
         rownum = 3
-        prev = None
-        doc_start = None
         ranges = []
-        for r in res.get("detail", []):
-            d0 = r.get("doc_no"); firstdoc = (d0 != prev)
-            if firstdoc:
-                if doc_start is not None:
-                    ranges.append((doc_start, rownum - 1))
-                doc_start = rownum
-            cs, sf, amt, cw = braw.get(d0, (None, None, None, None))
-            sfd = {}
-            if sf:
+        _byd, _ord = {}, []
+        for x in res.get("docs") or []:
+            k = x.get("doc_no") or ("#%s" % x.get("lid"))
+            if k not in _byd:
+                _byd[k] = []
+                _ord.append(k)
+            _byd[k].append(x)
+        for k in _ord:
+            xs = _byd[k]
+            x0 = max(xs, key=lambda y: (len(y.get("materials") or []), float(y.get("doc_fee") or 0)))   # 物料最全的那行；一样多就取金额最大的(拿 0.2 元的行当底去放大会放大出尾差)
+            n = len(xs)
+            d0 = x0.get("doc_no")
+            tot_fee = round(sum(float(y.get("doc_fee") or 0) for y in xs), 2)
+            # 几行账单合成一张单：分摊运费按物料原来的占比重分整单金额，最后一个有分摊的物料拿余数，合计正好＝整单金额
+            mfee = {}
+            if n > 1:
+                ws_ = [float(m.get("fee") or 0) for m in (x0.get("materials") or [])]
+                if sum(ws_) > 0:
+                    acc_, last_ = 0.0, max(i for i, w in enumerate(ws_) if w > 0)
+                    for i, w in enumerate(ws_):
+                        mfee[i] = round(tot_fee - acc_, 2) if i == last_ else round(tot_fee * w / sum(ws_), 2)
+                        acc_ = round(acc_ + mfee[i], 2)
+            same_unit = len({y.get("bill_unit") for y in xs}) == 1
+            docv = {kk: x0.get(kk) for kk in ("subject", "carrier", "fee_item", "bizline", "doc_no", "bill_amt", "bill_unit", "mode_cn", "conv", "note")}
+            if n > 1:
+                if same_unit:
+                    docv["bill_amt"] = round(sum(float(y.get("bill_amt") or 0) for y in xs), 2)
+                docv["note"] = ((docv.get("note") or "") + "　" if docv.get("note") else "") + "账单上 %d 行，这里按整单合计；逐行见原账单页" % n
+            cs, amt, cw, sfd = None, 0.0, None, {}
+            for y in xs:
+                b_cs, b_sf, b_amt, b_cw = braw.get(y.get("lid"), (None, None, None, None))
+                cs = cs or b_cs
+                amt += float(b_amt or 0)
+                if b_cw not in (None, ""):
+                    cw = round((cw or 0) + float(b_cw), 4)
                 try:
-                    sfd = json.loads(sf)
+                    one = json.loads(b_sf) if b_sf else {}
                 except Exception:
-                    sfd = {}
-            col = 1
-            for name, gc, hc, doclvl, cols in groups:
-                for (_h, k) in cols:
-                    if _is_doclvl(k) and not firstdoc:
-                        val = None                       # 单据级列仅首行写值，其余留空待合并
-                    elif k == "_cs":
-                        val = cs
-                    elif k == "_amt":
-                        val = amt
-                    elif k == "_cw":
-                        val = cw
-                    elif k == "_ok":
-                        ok_ = okmap.get(d0) if d0 else None
-                        val = ("✓ %s %s" % (ok_["by"], ok_["at"])).strip() if ok_ else None
-                    elif k.startswith("_fee:"):
-                        val = sfd.get(k[5:])
-                    elif k == "ratio":
-                        val = round(r["ratio"], 4) if r.get("ratio") is not None else None
+                    one = {}
+                for fk, fv in one.items():
+                    if isinstance(fv, (int, float)) and not isinstance(fv, bool):
+                        sfd[fk] = round(float(sfd.get(fk) or 0) + fv, 2) if isinstance(sfd.get(fk, 0), (int, float)) else sfd[fk]
                     else:
-                        val = r.get(k)
-                    ws2.cell(row=rownum, column=col, value=val)
-                    col += 1
-            prev = d0
-            rownum += 1
-        if doc_start is not None:
+                        sfd.setdefault(fk, fv)
+            amt = (braw.get(x0.get("lid")) or (None, None, None, None))[2] if n == 1 else (round(amt, 6) if any(braw.get(y.get("lid")) for y in xs) else None)
+            doc_start = rownum
+            for mi, r in enumerate(x0.get("materials") or [{}]):
+                firstdoc = (mi == 0)
+                col = 1
+                for name, gc, hc, doclvl, cols in groups:
+                    for (_h, k) in cols:
+                        if _is_doclvl(k) and not firstdoc:
+                            val = None                       # 单据级列仅首行写值，其余留空待合并
+                        elif k == "_cs":
+                            val = cs
+                        elif k == "_amt":
+                            val = amt
+                        elif k == "_cw":
+                            val = cw
+                        elif k == "_ok":
+                            ok_ = okmap.get(d0) if d0 else None
+                            val = ("✓ %s %s" % (ok_["by"], ok_["at"])).strip() if ok_ else None
+                        elif k.startswith("_fee:"):
+                            val = sfd.get(k[5:])
+                        elif k in docv:
+                            val = docv[k]
+                        elif k == "fee" and mi in mfee:
+                            val = mfee[mi]
+                        elif k == "unit_fee" and mi in mfee:
+                            _kg = r.get("kg_eq") if r.get("kg_eq") else (r.get("base_kg") if _is_kg(r.get("kg_unit")) and not r.get("is_pack") else None)
+                            val = round(mfee[mi] / float(_kg), 2) if _kg else None
+                        elif k == "ratio" and mi in mfee:
+                            val = round(mfee[mi] / float(r["sales"]), 4) if r.get("sales") else None
+                        elif k == "ratio":
+                            val = round(r["ratio"], 4) if r.get("ratio") is not None else None
+                        else:
+                            val = r.get(k)
+                        ws2.cell(row=rownum, column=col, value=val)
+                        col += 1
+                rownum += 1
             ranges.append((doc_start, rownum - 1))
         midv = Alignment(vertical="center")
         for s, e in ranges:
