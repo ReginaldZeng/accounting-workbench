@@ -2951,21 +2951,23 @@ function FinalReviewModal({ row, onClose, onDone, flash }) {
 function IntakeModal({ cfg, onClose, onDone, flash, init }) {
   const [appno, setAppno] = useState(init?.approvalNo || '')
   const [hist, setHist] = useState(!!init?.historical)     // 历史补录（V2.472 口径）：照常复核+初审，初审通过即盖「补录」戳定稿，不经BP终审；init 可预填（V2.514 导入行「补明细」）
+  const [err, setErr] = useState(null)     // 立项没成的原因，留在输入框下方（V2.872：以前只闪一下提示条，长一点的原因来不及看）
   const [busy, setBusy] = useState('')
   const [res, setRes] = useState(null)
   useEffect(() => { const h = (e) => { if (e.key === 'Escape') onClose() }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [onClose])
 
   const doIntake = async () => {
     if (!appno.trim()) return flash('请填钉钉审批编号')
-    setBusy('dt')
+    setBusy('dt'); setErr(null)
     try {
       const r = await bomIntake(appno.trim(), hist)
-      if (!r.ok) { flash(r.msg || '立项失败'); setRes(r.commentPending ? r : null) }
+      if (!r.ok) { setErr({ msg: r.msg || '立项失败', tooOld: !!r.tooOld }); flash(r.tooOld ? '这张单超过一年，按编号取不到——原因和办法见输入框下方' : '立项没成，原因见输入框下方'); setRes(r.commentPending ? r : null) }
       else setRes(r)
-    } catch (e) { flash('立项失败：' + e.message) } finally { setBusy('') }
+    } catch (e) { setErr({ msg: '立项失败：' + e.message }); flash('立项失败：' + e.message) } finally { setBusy('') }
   }
   const doUpload = async (files) => {
     if (!files || !files.length) return
+    if (/https?:|=/.test(appno)) return flash('上传立项时，上面的框请填审批编号（数字），不要留着链接')   // V2.872：框里可能贴了审批单链接，别把链接当单号存
     setBusy('up')
     try {
       const up = await bomUpload([...files], appno.trim())
@@ -2980,7 +2982,7 @@ function IntakeModal({ cfg, onClose, onDone, flash, init }) {
     <div className="bom-mask" onClick={e => { if (e.target.classList.contains('bom-mask')) onClose() }}>
       <div className="bom-modal" style={{ width: 'min(620px,100%)' }}>
         <div className="bom-mhead"><b>立项（生成待办）</b><span className="bom-x" onClick={onClose}>✕</span></div>
-        <div className="bom-msub">录入钉钉审批编号即可立项。系统会抓附件、解析、**能入账的自动入账，不能入的记为「待修」**——
+        <div className="bom-msub">录入钉钉审批编号即可立项。系统会抓附件、解析、<b>能入账的自动入账，不能入的记为「待修」</b>——
           具体哪些能入、哪里不对、怎么修，都在<b>处理页</b>里看。</div>
         {/* 历史补录（业务方定 2026-09-06「历史补录也是要审核的，只是这时候盖补录戳」）：照常复核+初审，初审通过即定稿，不经BP终审 */}
         <label className="banner" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', margin: '8px 0 4px',
@@ -2993,16 +2995,17 @@ function IntakeModal({ cfg, onClose, onDone, flash, init }) {
 
         <div className="bom-mstep"><span className="bom-mno">1</span><div style={{ flex: 1 }}>
           <b>钉钉审批编号</b>
-          <div className="muted" style={{ fontSize: 12, margin: '3px 0 7px' }}>表单附件 + 评论区补传的附件都会取（评论区后传的更新版采购核算表也会入账）。</div>
+          <div className="muted" style={{ fontSize: 12, margin: '3px 0 7px' }}>表单附件 + 评论区补传的附件都会取（评论区后传的更新版采购核算表也会入账）。<b>一年以前发起的老单</b>钉钉不让按编号查，请贴这张审批单的链接。</div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <input className="bom-search" style={{ flex: 1 }} placeholder="如 202609011316000251965"
-              value={appno} onChange={e => setAppno(e.target.value)}
+            <input className="bom-search" style={{ flex: 1 }} placeholder="如 202609011316000251965；一年以前的老单贴审批单链接"
+              value={appno} onChange={e => { setAppno(e.target.value); setErr(null) }}
               onKeyDown={e => { if (e.key === 'Enter') doIntake() }} />
             <button className="btn-pri" disabled={!!busy || !cfg?.dingtalkConfigured} onClick={doIntake}
               title={cfg?.dingtalkConfigured ? '' : '本机未配置钉钉，用下方上传'}>
               {busy === 'dt' ? '立项中…' : '立项'}</button>
           </div>
           {!cfg?.dingtalkConfigured && <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>本机未配置钉钉应用——请用下方上传。</div>}
+          {err && <div className="banner" style={{ display: 'block', marginTop: 8, fontSize: 12, lineHeight: 1.7, background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)' }}><b>{err.tooOld ? '这张单超过一年，按编号取不到' : '立项没成'}</b>　{err.msg}</div>}
         </div></div>
 
         <div className="bom-mor">钉钉扫不到 / 无审批单据时</div>

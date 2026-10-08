@@ -30,12 +30,23 @@ try:
     from kernels import dingtalk_bom as dtb
 except Exception:                       # 缺 requests / 没配钉钉都不该拖垮整条线
     dtb = None
+if dtb:
+    # 审批编号 → 钉钉实例号，记进通用设置（V2.872）：钉钉只让按编号查近 365 天发起的单，记下实例号后这张单再老也取得到
+    dtb.set_iid_store(lambda b: db_iid_get(b), lambda b, i: db_iid_set(b, i))
 try:
     import notifier                     # 自动立项提醒（V2.504）
 except Exception:
     notifier = None
 
 from core import pull_token_ok, CFG, JSONResponse, _current_user, _require_perm, db
+
+
+def db_iid_get(business_id):
+    return db.get_setting("bom_dt_iid:%s" % business_id, "") or ""
+
+
+def db_iid_set(business_id, iid):
+    db.set_setting("bom_dt_iid:%s" % business_id, str(iid), operator="钉钉取单")
 
 router = APIRouter()
 
@@ -1788,7 +1799,12 @@ async def bom_intake(request: Request):
         return JSONResponse({"ok": False, "msg": "请填钉钉审批编号"}, status_code=400)
     if not (dtb and dtb.configured()):
         return JSONResponse({"ok": False, "msg": "未配置钉钉应用——请在服务器 conf.ini [dingtalk] 配 appkey/appsecret，或改用手工上传。"}, status_code=400)
-    out, code = _intake_core(appno, u, historical=bool(body.get("historical")))
+    iid = ""
+    if not appno.isdigit():              # 不是纯数字的审批编号 → 看是不是贴了审批单链接（V2.872：一年以前的老单走链接）
+        iid = dtb.parse_instance_ref(appno)
+        if not iid:
+            return JSONResponse({"ok": False, "msg": "没认出来：这里填钉钉审批编号（一串数字），或贴钉钉里这张审批单的链接。"}, status_code=400)
+    out, code = _intake_core("" if iid else appno, u, historical=bool(body.get("historical")), instance_id=iid)
     return JSONResponse(out, status_code=code) if code != 200 else out
 
 
@@ -1823,11 +1839,13 @@ def _comment_pending_msg(pending):
             % (len(need), "、".join(str(p.get("fileName")) for p in need)))
 
 
-def _intake_core(appno, u, historical=False, action="立项"):
-    """立项核心（V2.504 抽出：手填单号的接口 与 自动立项 共用）：抓附件 → 解析 → 能入的入、不能入的记待修。→ (result, http_code)"""
-    res = dtb.fetch_approval(appno)
+def _intake_core(appno, u, historical=False, action="立项", instance_id=""):
+    """立项核心（V2.504 抽出：手填单号的接口 与 自动立项 共用）：抓附件 → 解析 → 能入的入、不能入的记待修。→ (result, http_code)
+    instance_id（V2.872）：人贴审批单链接立项时给，审批编号以钉钉回的为准。"""
+    res = dtb.fetch_approval(appno, instance_id=instance_id) if instance_id else dtb.fetch_approval(appno)
     if not res.get("ok"):
-        return {"ok": False, "msg": res.get("msg") or "取数失败"}, 400
+        return {"ok": False, "msg": res.get("msg") or "取数失败", "tooOld": bool(res.get("tooOld"))}, 400
+    appno = str(res.get("businessId") or appno)
     files = []
     comment_pending = _comment_pending(res.get("attachments"))
     for a in res.get("attachments", []):
@@ -1853,7 +1871,8 @@ def _intake_core(appno, u, historical=False, action="立项"):
     r = _book_staged(_load_staging(stg["stagingId"]), stg["stagingId"],
                      set(x["idx"] for x in stg["records"]), u, historical=historical)
     db.audit(u["name"], "bom_intake", target=appno,
-             detail="%s：附件 %d、入账 %d、待修 %d" % ("历史补录" if historical else action, len(files), len(r["booked"]), len(r["rejected"])))
+             detail="%s%s：附件 %d、入账 %d、待修 %d" % ("历史补录" if historical else action, "（贴审批单链接）" if instance_id else "",
+                                              len(files), len(r["booked"]), len(r["rejected"])))
     return {"ok": True, "approvalNo": appno, "title": res.get("title"), "historical": historical,
             "booked": r["booked"], "rejected": r["rejected"], "skipped": r["skipped"],
             "commentPending": comment_pending, "warnings": stg.get("warnings") or []}, 200

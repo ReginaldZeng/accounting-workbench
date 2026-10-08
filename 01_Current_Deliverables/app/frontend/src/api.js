@@ -430,7 +430,7 @@ export const bomLinkParallel = (entryId, otherId, on = true) => jp('/api/bom/lin
 export const bomDelete = (target, key, reason, dryRun = false) => jp('/api/bom/delete', { ...target, key, reason, dryRun })
 export const getBomApproval = (no) => j('/api/bom/approval?no=' + encodeURIComponent(no))
 // historical（V2.464）：历史补录——入账后直接归档为历史版，不走四步/初审/终审，不对外、不动定稿指针
-export const bomIntake = (approvalNo, historical = false) => jp('/api/bom/intake', { approvalNo, historical })
+export const bomIntake = (approvalNo, historical = false) => jpSoft('/api/bom/intake', { approvalNo, historical })   // V2.872 用 jpSoft：立项没成也要拿到整包回执（tooOld/commentPending），不只一句报错
 export const bomFinalReview = (entryId, approve, note) => jp('/api/bom/final-review', { entryId, approve, note })
 export const bomVoidRequest = (payload) => jp('/api/bom/void-request', payload)
 export const bomVoidReview = (payload) => jp('/api/bom/void-review', payload)

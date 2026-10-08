@@ -93,12 +93,15 @@ def find_process_code(tok, name_hint=None):
     return DEFAULT_PROCESS_CODE          # 名字查不到 → 用实测的默认 processCode 兜底
 
 
-def list_ids(tok, pc, start_ms, end_ms):
+def list_ids(tok, pc, start_ms, end_ms, errs=None):
+    """errs 传个 list 进来 → 钉钉报错时把原话记进去（V2.872：以前静默 break，「接口报错」和「确实没有」分不清）。"""
     cursor, out = 0, []
     while True:
         r = _oapi(tok, "topapi/processinstance/listids",
                   {"process_code": pc, "start_time": start_ms, "end_time": end_ms, "size": 20, "cursor": cursor})
         if r.get("errcode") != 0:
+            if errs is not None:
+                errs.append("%s（%s）" % (r.get("errmsg") or "未知错误", r.get("errcode")))
             break
         res = r.get("result") or {}
         out += res.get("list") or []
@@ -109,11 +112,114 @@ def list_ids(tok, pc, start_ms, end_ms):
     return out
 
 
-def get_inst(tok, iid):
+def get_inst(tok, iid, errs=None):
     r = _oapi(tok, "topapi/processinstance/get", {"process_instance_id": iid})
     if r.get("errcode") != 0:
+        if errs is not None:
+            errs.append("%s（%s）" % (r.get("errmsg") or "未知错误", r.get("errcode")))
         return None
     return r.get("process_instance") or r.get("result")
+
+
+# ---- 审批编号 ↔ 实例号（V2.872）----
+# 钉钉**没有**「按审批编号直接取单」的接口：只能按发起日期列出当天的单再逐个比对编号，而「按日期列单」新老两个接口都只给查
+# **近 365 天内发起**的（2026-10-08 实测：往回 365 天可查、366 天起老接口回 400003「时间戳无效」、新接口回 invalidEndTime）。
+# 所以：①找到过一次就把「编号→实例号」记下来，以后直接按实例号取（不怕单子变老，也省掉逐个比对）；
+#       ②一年以前的老单，让人贴钉钉里这张审批单的链接（链接里带实例号），按实例号取。
+LIST_MAX_DAYS = 365
+_IID_MEM = {}
+_IID_STORE = [None, None]               # [getter(business_id)->iid, setter(business_id, iid)]，路由层注入持久化；不注入只在进程内记
+_REF_KEYS = ("procInstId", "procInsId", "processInstanceId", "process_instance_id", "proc_inst_id", "instanceId", "instance_id")
+
+
+def set_iid_store(getter, setter):
+    _IID_STORE[0], _IID_STORE[1] = getter, setter
+
+
+def known_iid(business_id):
+    bid = str(business_id or "")
+    if not bid:
+        return ""
+    if bid in _IID_MEM:
+        return _IID_MEM[bid]
+    try:
+        v = _IID_STORE[0](bid) if _IID_STORE[0] else ""
+    except Exception:
+        v = ""
+    if v:
+        _IID_MEM[bid] = str(v)
+    return str(v or "")
+
+
+def remember_iid(business_id, iid):
+    bid, iid = str(business_id or ""), str(iid or "")
+    if not bid or not iid or _IID_MEM.get(bid) == iid:
+        return
+    _IID_MEM[bid] = iid
+    try:
+        if _IID_STORE[1]:
+            _IID_STORE[1](bid, iid)
+    except Exception:
+        pass
+
+
+def parse_instance_ref(text):
+    """人贴进来的东西里认出实例号：钉钉审批单链接（带 procInstId= 之类）或直接一串实例号。纯数字（审批编号）→ ""。"""
+    s = str(text or "").strip()
+    if not s or s.isdigit():
+        return ""
+    from urllib.parse import unquote
+    u = unquote(unquote(s))
+    for k in _REF_KEYS:
+        m = re.search(r"(?:^|[?&#/;])%s=([A-Za-z0-9_\-]{8,96})" % re.escape(k), u)
+        if m:
+            return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_\-]{16,96}", s) and re.search(r"[A-Za-z]", s):
+        return s                         # 直接贴了实例号
+    return ""
+
+
+def age_days(business_id):
+    """审批编号前 8 位＝发起日期 → 距今多少天；认不出 → None。"""
+    try:
+        t = time.mktime(time.strptime(str(business_id)[:8], "%Y%m%d"))
+    except Exception:
+        return None
+    return int((time.time() - t) // 86400)
+
+
+def too_old_msg(business_id):
+    d = str(business_id)[:8]
+    return ("这张单是 %s-%s-%s 发起的，距今 %s 天。钉钉只允许按编号查近 %d 天内发起的审批单，所以按编号取不到（不是单号填错）。"
+            "两条路：①在钉钉里打开这张审批单 → 复制它的链接 → 贴到这个输入框再点立项（链接里带着这张单的内部号，不受一年限制）；"
+            "②或在钉钉下载附件，用下面的「上传采购核算表」立项（单号照填）。"
+            % (d[:4], d[4:6], d[6:8], age_days(business_id), LIST_MAX_DAYS))
+
+
+def _locate(tok, business_id, process_code=None, start=None, end=None):
+    """按审批编号定位实例。→ (iid, inst, why, n)；why：""=找到 / "too_old" / "api:<钉钉原话>" / "not_found"；n=当天该模板的单数。"""
+    bid = str(business_id or "")
+    iid = known_iid(bid)
+    if iid:
+        inst = get_inst(tok, iid)
+        if inst and str(inst.get("business_id") or "") == bid:
+            return iid, inst, "", 0
+    st, et = _day_window(bid, start, end)
+    floor = int(time.time() * 1000) - LIST_MAX_DAYS * 86400000 + 60000     # 钉钉能查到的最早时刻（留 1 分钟余量）
+    if et < floor:
+        return None, None, "too_old", 0
+    st = max(st, floor)                  # 恰好卡在第 365 天的单：把起点收到允许范围内，别整窗被拒
+    pc = find_process_code(tok, process_code)
+    errs = []
+    ids = list_ids(tok, pc, st, et, errs)
+    for i in ids:
+        inst = get_inst(tok, i)
+        if inst and str(inst.get("business_id") or "") == bid:
+            remember_iid(bid, i)
+            return i, inst, "", len(ids)
+    if errs:
+        return None, None, "api:" + errs[0], len(ids)
+    return None, None, "not_found", len(ids)
 
 
 def walk_attachments(obj, bag, label=None):
@@ -296,8 +402,9 @@ def _day_window(business_id, start=None, end=None):
     return st, et
 
 
-def fetch_approval(business_id, process_code=None, start=None, end=None, download=True):
+def fetch_approval(business_id, process_code=None, start=None, end=None, download=True, instance_id=None):
     """按审批编号抓实例 + 下载附件字节。永不抛：出错回 {ok:False, msg}。
+    instance_id 给了（人贴的审批单链接里认出来的）→ 直接按实例号取，business_id 以钉钉回的为准（V2.872，一年以前的老单走这条）。
     返回 {ok, instanceId, title, businessId, status, attachments:[{fileName,fileId,source,fileSize,bytes?}], msg}。"""
     if not configured():
         return {"ok": False, "msg": "未配置钉钉应用或缺 requests——请在服务器 conf.ini [dingtalk] 配 appkey/appsecret 后再取数。"}
@@ -305,19 +412,26 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
     try:
         ak, sk = _conf()
         tok = _token(ak, sk)
-        st, et = _day_window(business_id, start, end)
-        pc = find_process_code(tok, process_code)
-        ids = list_ids(tok, pc, st, et)
-        target = None
-        for iid in ids:
-            inst = get_inst(tok, iid)
-            if inst and str(inst.get("business_id") or "") == str(business_id):
-                target = (iid, inst)
-                break
-        if not target:
-            return {"ok": False, "msg": "当日该模板未找到编号 %s 的实例（模板或日期窗口可能不对）。" % business_id,
-                    "instanceCount": len(ids)}
-        iid, inst = target
+        if instance_id:
+            errs = []
+            iid, inst = str(instance_id), get_inst(tok, str(instance_id), errs)
+            if not inst:
+                return {"ok": False, "msg": "按贴进来的链接没取到这张审批单（钉钉回：%s）。请确认复制的是这张审批单自己的链接；"
+                                            "仍不行就在钉钉下载附件，用下面的「上传采购核算表」立项。" % (errs[0] if errs else "空")}
+            business_id = str(inst.get("business_id") or business_id or "")
+            if not business_id:
+                return {"ok": False, "msg": "按链接取到了审批单，但钉钉没回审批编号，没法立项。"}
+            remember_iid(business_id, iid)
+        else:
+            iid, inst, why, n = _locate(tok, business_id, process_code, start, end)
+            if why == "too_old" or (why.startswith("api:") and "时间戳" in why and (age_days(business_id) or 0) >= LIST_MAX_DAYS):
+                return {"ok": False, "tooOld": True, "msg": too_old_msg(business_id)}
+            if why.startswith("api:"):
+                return {"ok": False, "msg": "钉钉没让查这一天的审批单（钉钉回：%s）——是接口报错，不是确认没有这张单。稍后再试；急用可下载附件走下面的上传。" % why[4:]}
+            if why:
+                return {"ok": False, "instanceCount": n,
+                        "msg": "钉钉里这一天「BOM表报价」模板共 %d 张单，没有编号 %s 的。请核对单号有没有输错位；"
+                               "如果这张单不是用「BOM表报价（研发使用）」模板发起的，也会找不到——那就贴这张审批单的链接，或用下面的上传。" % (n, business_id)}
         atts = collect_attachments(inst)
         if download:
             tok_v2 = _v2_token(ak, sk)
@@ -358,14 +472,9 @@ def fetch_approval(business_id, process_code=None, start=None, end=None, downloa
 
 
 def _find_inst(tok, business_id, process_code=None):
-    """按审批编号定位实例（当日窗口 + business_id 精确匹配）。→ (iid, inst) / (None, None)"""
-    st, et = _day_window(business_id)
-    pc = find_process_code(tok, process_code)
-    for iid in list_ids(tok, pc, st, et):
-        inst = get_inst(tok, iid)
-        if inst and str(inst.get("business_id") or "") == str(business_id):
-            return iid, inst
-    return None, None
+    """按审批编号定位实例（记过实例号的直接取；否则当日窗口 + business_id 精确匹配）。→ (iid, inst) / (None, None)"""
+    iid, inst, _why, _n = _locate(tok, business_id, process_code)
+    return iid, inst
 
 
 def final_state_from_inst(inst, node_ids, iid=""):
