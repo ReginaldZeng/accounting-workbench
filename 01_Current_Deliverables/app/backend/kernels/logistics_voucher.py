@@ -183,12 +183,16 @@ def plan(vouchers, invoices, fixes=None, amts=None):
             break
         moved = False
         for r in short:
-            cand = [v for v in vouchers if per[v["vno"]]["mode"] in ("hx", "move", "amt") and need.get(cur[v["vno"]], 0) < -0.004]
+            # V2.869：登记了更正(改科目/维度、没另填税率)的计提，税率也可能和发票不一样(恒茂 8 月 记-564 计提没拆税、发票 1%)——一并按发票税率重提
+            cand = [v for v in vouchers if need.get(cur[v["vno"]], 0) < -0.004 and (per[v["vno"]]["mode"] in ("hx", "move", "amt") or (
+                per[v["vno"]]["mode"] == "fix" and not any(rate_of(x.get("to_rate")) is not None for x in (fixes.get(v["vno"]) or []))))]
             hit = _subset(cand, need[r])
             if hit:
                 for v in hit:
                     why = "计提按 %s，发票开的是 %s" % (pct(v["rate"]), pct(r))
                     if per[v["vno"]]["mode"] == "amt":       # 金额、税率都不对：一次红冲，按应为金额和发票税率更正
+                        per[v["vno"]] = dict(per[v["vno"]], new_rate=r, why=per[v["vno"]]["why"] + "；" + why)
+                    elif per[v["vno"]]["mode"] == "fix":     # 登记了更正、税率也不对：一次红冲，按更正后的科目维度和发票税率重提
                         per[v["vno"]] = dict(per[v["vno"]], new_rate=r, why=per[v["vno"]]["why"] + "；" + why)
                     elif per[v["vno"]]["mode"] == "move":    # 主体更正的同时税率也不对：补提时直接按发票税率
                         per[v["vno"]] = {"mode": "move", "new_rate": r, "why": per[v["vno"]]["why"] + "；" + why, "gross": eff[v["vno"]]}
@@ -298,12 +302,18 @@ def split_part(f, v, line_net, base_net):
     return line_net * x / line_gross
 
 
+_CLEAR = ("（清空）", "(清空)")
+
+
 def _apply_fix(l, f):
     """把一条计提更正的「应改为」套到费用分录上(只改填了的)。"""
     l = dict(l)
     for fk, ck, nk in (("to_acct", "acct", "acct_name"), ("to_fee", "fee_code", "fee"), ("to_dept", "dept_code", "dept"),
                        ("to_biz", "biz_code", "biz"), ("to_proj", "proj_code", "proj")):
         if f.get(fk):
+            if str(f[fk]).strip() in _CLEAR:       # 复核台选了「（清空）」：这个维度不挂了(6601 改到 5101 时产品分类要拿掉)，不是把这三个字当编码
+                l[ck], l[nk] = "", ""
+                continue
             c, n = _split_code(f[fk])
             l[ck], l[nk] = c, n or l.get(nk)
     return l
