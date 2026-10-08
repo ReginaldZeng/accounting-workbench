@@ -137,10 +137,13 @@ def parse_sheet(ws, src_file):
                 m["costExcl"] = c
         return m
 
-    def read_block(hdr_row, seg):
+    def read_block(hdr_row, seg, base=None):
         if hdr_row is None:
             return [], None, hdr_row
         m = header_map(hdr_row)
+        for k in ("matName", "matCode", "unit", "brand", "model", "spec"):     # 包材段表头缺这几列时沿用原料段表头的列位（同一张表、列对齐）
+            if k not in m and k in (base or {}):                                 # 只补「认料」要用的列；报价说明等不补，新模板结果保持不变
+                m[k] = base[k]
         rows, r, subtotal = [], hdr_row + 1, None
         while r < R:
             if any(norm(cell(r, c)) == "小计" for c in range(C)) and num(cell(r, m.get("costExcl", -1))) is not None:
@@ -169,9 +172,19 @@ def parse_sheet(ws, src_file):
         return rows, subtotal, r
 
     mats, sub_mat, r_end = read_block(r_var, "原料")
-    r_pack_hdr = find_row(lambda r: any("包材" in norm(cell(r, c)) and "编码" in norm(cell(r, c))
-                                        for c in range(C)), r_end or 0)
-    packs, sub_pack, _ = read_block(r_pack_hdr, "包材") if r_pack_hdr else ([], None, r_end)
+    # 包材段表头：新模板有「包材编码」列；2025 年的老模板这一行只写「类别｜项目｜添加量｜包材含税含运采购价…」，没有「包材编码」
+    # 也没有「物料名称」（实证 2026-10-08 钉钉单 202509221346000166946 鸡蛋豆腐 CP1384107：包材 8 行整段没读到，
+    # 报「变动=原料+包材 少算 3.5307」，其实源表是平的）。→ 认「包材…采购价」也算包材表头，只在「2、制造费用」之前找；
+    # 表头缺的列（物料名称/编码/品牌/型号…）沿用原料段表头的列位。
+    r_mfg_hdr = find_row(lambda r: row_has(r, "2、制造费用"), r_end or 0)
+
+    def _is_pack_hdr(r):
+        ts = [norm(cell(r, c)).replace("\n", "") for c in range(C)]
+        return any("包材" in t and ("编码" in t or "采购价" in t) for t in ts)
+    r_pack_hdr = find_row(_is_pack_hdr, r_end or 0)
+    if r_pack_hdr is not None and r_mfg_hdr is not None and r_pack_hdr > r_mfg_hdr:
+        r_pack_hdr = None
+    packs, sub_pack, _ = read_block(r_pack_hdr, "包材", base=header_map(r_var)) if r_pack_hdr else ([], None, r_end)
 
     def label_value(text, want_col=None, start=0):
         for r in range(start, R):
