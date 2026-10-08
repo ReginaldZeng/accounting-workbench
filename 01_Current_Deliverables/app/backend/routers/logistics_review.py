@@ -2664,6 +2664,9 @@ def _code_maps(request, carrier, period):
     return {"book": book, "biz": biz, "fee": fee}
 
 
+_FULL_DOCS = 1500      # 单据数在这以内的承运商：第②步整家逐张现算(取金蝶物料)再筛选/计数；超过的只算当前页、计数用中间表
+
+
 @router.get("/api/logistics-review/result")
 def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                   group: str = "ex", page: int = 1, size: int = 50, q: str = "",
@@ -2687,7 +2690,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     qs = (q or "").strip()
     q_on = bool(qs)
     n_docs = len({(r.get("doc_no") or "").split("+")[0] for r in rows})   # 大小按单据数算(取金蝶物料的量)，不按账单行数(恒茂 598 行只 43 张单)
-    q_small = n_docs <= 300   # 小承运商搜索时全量取物料，支持按客户/物料名搜(大承运商仍按单号/省预筛省金蝶)
+    q_small = n_docs <= _FULL_DOCS   # 小承运商搜索时全量取物料，支持按客户/物料名搜(大承运商仍按单号/省预筛省金蝶)
 
     bucket_on = bool(fsub or ffee or fbiz)
     bset = {("" if t == "-" else t) for t in fbiz.split("|")} if fbiz else None
@@ -2758,7 +2761,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         import time as _t
         # 小承运商(≤300单)：全量出单据视图、缓存10分钟，按真实核对结果筛/计数/翻页，不用每次翻页都拉金蝶；
         # 大承运商(迅鸽几千单)：只按当前页取金蝶物料，计数沿用中间表核量态。
-        full = len({(r.get("doc_no") or "").split("+")[0] for r in rows_all}) <= 300
+        # V2.863(用户看天鹰 8 月「数量不符 161」，点进去每张都写着一致)：天鹰 306 张单刚好过了原来 300 张的线，页签上的数退回用中间表的粗口径
+        #   (账单「箱数」直接比金蝶「千克」，2,300 箱 对 23,000 千克 → 全判不符)，而表里每张是按计费重量现算的(真不符只有 56 张)。
+        #   线提到 1500：天鹰全量现算实测 3.8 秒、缓存 10 分钟；只有迅鸽(五千多张)还走大承运商那条路，它按件数核、中间表口径本来就对。
+        full = len({(r.get("doc_no") or "").split("+")[0] for r in rows_all}) <= _FULL_DOCS
         if full:
             ck = ("view", carrier, period)
             cc = _ACCR_CACHE.get(ck)
