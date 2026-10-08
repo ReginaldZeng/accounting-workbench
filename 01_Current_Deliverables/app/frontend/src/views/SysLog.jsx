@@ -7,7 +7,7 @@
 // 本页只读、无副作用；权限闸在后端逐点挂 enter_settings（无权直接 403，前端据 catch 提示）。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  getOpsLive, getOpsStats, getOpsLogs, getOpsUserSessions, opsLogsCsvUrl,
+  getOpsLive, getOpsStats, getOpsLogs, getOpsUserSessions, opsLogsCsvUrl, getOpsKingdee,
   getAudit, auditCsvUrl,
 } from '../api.js'
 
@@ -45,6 +45,7 @@ const CSS = `
 .sl-tab.on{color:var(--accent);border-bottom-color:var(--accent)}
 .sl-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;margin-bottom:14px}
 .sl-bar .sp{flex:1}
+.sl-btn{font-family:inherit;border:1px solid var(--line);background:var(--bg);color:var(--ink-2);cursor:pointer;font-size:12px;padding:5px 11px;border-radius:6px}
 .sl-seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden}
 .sl-seg button{font-family:inherit;border:0;background:var(--bg);color:var(--ink-2);cursor:pointer;font-size:12px;padding:5px 11px}
 .sl-seg button+button{border-left:1px solid var(--line)}
@@ -418,6 +419,68 @@ function AuditPanel() {
 }
 
 // ═════════════ 外壳 ═════════════
+// ═════════════ Tab 3：金蝶接口调用（V2.875）═════════════
+// 金蝶 WebAPI 每天限 50,000 次，超了全系统读写金蝶都失败到第二天。2026-10-08 撞过一次、事后查不出谁用的，所以每次调用都记一笔。
+function KdPanel() {
+  const [day, setDay] = useState('')
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const pull = useCallback(() => { getOpsKingdee(day).then(r => { setD(r); setErr('') }).catch(e => setErr(String(e.message || e))) }, [day])
+  useEffect(() => { pull() }, [pull])
+  const n = v => Number(v || 0).toLocaleString('zh-CN')
+  const tot = d ? d.total : 0, lim = d ? d.limit : 50000, pct = lim ? tot / lim : 0
+  const color = pct >= 0.9 ? '#B3261E' : pct >= 0.7 ? '#B06A12' : '#2E7D57'
+  const maxH = d ? Math.max(1, ...d.by_hour.map(x => x.n)) : 1
+  const peak = d && d.by_hour.length ? d.by_hour.reduce((a, b) => (b.n > a.n ? b : a)) : null
+  const tbl = (title, rows, k, lb, hint) => <div style={{ flex: '1 1 380px', minWidth: 0 }}>
+    <div className="sl-h">{title}<span className="cnt">{hint}</span></div>
+    <div className="sl-twrap"><div className="sl-scroll" style={{ '--mh': '420px' }}>
+      <table className="sl-t"><thead><tr><th>{lb}</th><th style={{ textAlign: 'right' }}>次数</th><th style={{ textAlign: 'right' }}>占当天</th></tr></thead>
+        <tbody>{rows.map(x => <tr key={x[k]}><td style={{ wordBreak: 'break-all' }}>{x[k]}</td><td style={{ textAlign: 'right' }}>{n(x.n)}</td>
+          <td style={{ textAlign: 'right' }}>{tot ? (x.n / tot * 100).toFixed(1) + '%' : '—'}</td></tr>)}
+          {!rows.length && <tr><td colSpan="3" style={{ color: '#8A96A2' }}>这一天没有记录</td></tr>}</tbody></table></div></div></div>
+  return (
+    <div>
+      {err && <div className="sl-adv warn" style={{ marginBottom: 12 }}>取数出错：{err}（若提示无权限，本页仅主管理员可看）</div>}
+      <div className="sl-bar">
+        <span className="sl-lbl">哪一天</span>
+        <input type="date" value={day || (d ? d.day : '')} onChange={e => setDay(e.target.value)} style={{ padding: '4px 8px', border: '1px solid #CBD5DC', borderRadius: 6, font: 'inherit' }} />
+        {day && <button className="sl-btn" onClick={() => setDay('')}>回到今天</button>}
+        <button className="sl-btn" onClick={pull}>刷新</button>
+        <span style={{ color: '#6B7A86', fontSize: 12.5 }}>金蝶接口每天限 {n(lim)} 次，超了全系统读写金蝶都会失败，到第二天才恢复。{d && d.since ? `从 ${d.since} 开始记的，之前的查不到。` : '还没有记录（上线后第一次调金蝶才开始记）。'}</span>
+      </div>
+      {d && <>
+        <div className="sl-cards">
+          <Kpi v={n(tot)} k={`${d.day} 已调用`} sub={`上限 ${n(lim)} · 已用 ${(pct * 100).toFixed(1)}%`} color={color} />
+          <Kpi v={n(Math.max(0, lim - tot))} k="还剩" sub={pct >= 0.9 ? '快用完了，大批量的操作先停一停' : pct >= 0.7 ? '用得偏多，留意一下' : '够用'} color={color} />
+          <Kpi v={peak ? `${peak.hour} 时` : '—'} k="调得最多的一小时" sub={peak ? `${n(peak.n)} 次 · 主要是 ${peak.top || '—'}` : ''} />
+          <Kpi v={d.by_src[0] ? n(d.by_src[0].n) : '—'} k="最大的一个来源" sub={d.by_src[0] ? d.by_src[0].src : ''} />
+        </div>
+        <div style={{ height: 10, background: '#E7ECEF', borderRadius: 5, overflow: 'hidden', margin: '2px 0 14px' }}>
+          <div style={{ width: Math.min(100, pct * 100) + '%', height: '100%', background: color }} /></div>
+        <div className="sl-h">按小时<span className="cnt">（每格下面是这一小时调得最多的来源）</span></div>
+        <div className="sl-twrap"><table className="sl-t"><thead><tr><th style={{ width: 60 }}>小时</th><th style={{ width: 90, textAlign: 'right' }}>次数</th><th>占比</th><th>主要来源</th></tr></thead>
+          <tbody>{d.by_hour.map(x => <tr key={x.hour}><td>{String(x.hour).padStart(2, '0')}:00</td><td style={{ textAlign: 'right' }}>{n(x.n)}</td>
+            <td><div style={{ width: Math.max(2, x.n / maxH * 100) + '%', height: 10, background: '#1F6F8B', borderRadius: 3 }} /></td><td style={{ wordBreak: 'break-all' }}>{x.top}</td></tr>)}
+            {!d.by_hour.length && <tr><td colSpan="4" style={{ color: '#8A96A2' }}>这一天没有记录</td></tr>}</tbody></table></div>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 }}>
+          {tbl('按来源', d.by_src, 'src', '从哪来的', '（页面＝哪个接口；后台＝哪个定时线程；脚本＝服务器上跑的哪个脚本）')}
+          {tbl('按模块', d.by_caller, 'caller', '哪段程序调的', '（文件:函数）')}
+        </div>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 }}>
+          {tbl('按操作', d.by_svc, 'svc', '调的是什么', '')}
+          <div style={{ flex: '1 1 380px', minWidth: 0 }}>
+            <div className="sl-h">最近几天每日合计<span className="cnt">（点日期看那一天）</span></div>
+            <div className="sl-twrap"><table className="sl-t"><thead><tr><th>日期</th><th style={{ textAlign: 'right' }}>次数</th><th style={{ textAlign: 'right' }}>占上限</th></tr></thead>
+              <tbody>{d.recent.map(x => <tr key={x.day} style={{ cursor: 'pointer' }} onClick={() => setDay(x.day)}><td>{x.day}</td><td style={{ textAlign: 'right' }}>{n(x.n)}</td>
+                <td style={{ textAlign: 'right', color: x.n / lim >= 0.9 ? '#B3261E' : x.n / lim >= 0.7 ? '#B06A12' : undefined }}>{(x.n / lim * 100).toFixed(1)}%</td></tr>)}
+                {!d.recent.length && <tr><td colSpan="3" style={{ color: '#8A96A2' }}>还没有记录</td></tr>}</tbody></table></div></div>
+        </div>
+      </>}
+    </div>
+  )
+}
+
 export default function SysLog() {
   const [tab, setTab] = useState('ops')
   return (
@@ -426,8 +489,9 @@ export default function SysLog() {
       <div className="sl-tabs">
         <button className={'sl-tab' + (tab === 'ops' ? ' on' : '')} onClick={() => setTab('ops')}>运维请求日志</button>
         <button className={'sl-tab' + (tab === 'audit' ? ' on' : '')} onClick={() => setTab('audit')}>业务操作留痕</button>
+        <button className={'sl-tab' + (tab === 'kd' ? ' on' : '')} onClick={() => setTab('kd')}>金蝶接口调用</button>
       </div>
-      {tab === 'ops' ? <OpsPanel /> : <AuditPanel />}
+      {tab === 'ops' ? <OpsPanel /> : tab === 'kd' ? <KdPanel /> : <AuditPanel />}
     </div>
   )
 }

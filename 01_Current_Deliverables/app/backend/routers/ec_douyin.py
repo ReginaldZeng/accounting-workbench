@@ -443,6 +443,7 @@ def _kd_err(res):
 
 def _post_long(s, conf, svc, params):
     """同 kc._post，只是等得久。"""
+    kc.count_call(svc)      # 这里绕开了 kc._post(要等更久)，调用次数自己记一笔(V2.875)
     r = s.post('%s/%s' % (conf['server_url'], svc), data=json.dumps({'parameters': params}, ensure_ascii=False).encode('utf-8'),
                headers={'Content-Type': 'application/json;charset=utf-8'}, timeout=_PUSH_TIMEOUT)
     r.raise_for_status()

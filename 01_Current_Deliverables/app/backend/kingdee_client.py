@@ -21,7 +21,13 @@
 #              conf.ini 查找顺序：环境变量 KD_CONF_PATH → backend/conf.ini → 金蝶配置文件/conf.ini。
 import os
 import re
+import sys
 import json
+import time
+import atexit
+import sqlite3
+import datetime
+import threading
 import base64
 import zlib
 import configparser
@@ -73,11 +79,107 @@ def load_conf():
     return conf
 
 
+# ── 调用计数(V2.875)：金蝶 WebAPI 每天限 50,000 次，超了全系统读写金蝶都失败到第二天。──────────────────
+#   2026-10-08 撞过一次，事后查不出是谁用掉的(请求日志只记页面耗时，不记调了几次金蝶)。这里每调一次记一笔：
+#   哪天、几点、从哪来(页面的哪个接口 / 后台哪个定时线程 / 服务器上跑的哪个脚本)、哪个模块调的、调的是查询还是保存。
+#   记在运维日志库 ops_log.db 的 kd_calls 表(不进业务库)，日志中心「金蝶接口调用」页签看。
+#   计数自己出任何问题都不能影响业务：全程 try/except，攒一小批再落库。
+KD_DAILY_LIMIT = 50000
+_KD_DDL = ("create table if not exists kd_calls(day text not null, hour integer not null, src text not null, caller text not null, "
+           "svc text not null, n integer not null, primary key(day, hour, src, caller, svc))")
+_SVC_CN = {"LoginByAppSecret": "登录", "ExecuteBillQuery": "查询", "QueryBusinessInfo": "查元数据", "Save": "保存", "Draft": "暂存", "Delete": "删除",
+           "View": "查看单据", "Submit": "提交", "Audit": "审核", "UnAudit": "反审核", "CancelAssign": "撤销", "Push": "下推", "GetSysReportData": "取报表"}
+_kd_lock = threading.Lock()
+_kd_buf = {}
+_kd_state = {"last": 0.0, "init": False}
+_THIS = os.path.abspath(__file__)
+_BACKEND = os.path.dirname(_THIS)
+
+
+def _kd_db_path():
+    return os.getenv("WB_OPS_DB") or os.path.join(_BACKEND, "ops_log.db")
+
+
+def _kd_src():
+    """这次调用是从哪来的：页面请求(带接口路径) / 后台线程(带线程名) / 脚本(带脚本名)。"""
+    o = sys.modules.get("ops")
+    try:
+        p = o.CUR_REQ.get() if o is not None and hasattr(o, "CUR_REQ") else None
+    except Exception:
+        p = None
+    if p:
+        return "页面 " + str(p)[:80]
+    a0 = os.path.basename(sys.argv[0] or "") if sys.argv else ""
+    if "uvicorn" not in " ".join(sys.argv[:3]) and a0 not in ("", "-c", "-m"):
+        return "脚本 " + a0[:60]
+    tn = threading.current_thread().name or ""
+    return "后台 " + (re.sub(r"^Thread-\d+\s*", "线程", tn) or "线程")[:60]
+
+
+def _kd_caller():
+    """是哪个模块调的金蝶(调用栈里第一个不是本文件的 .py)。"""
+    try:
+        f = sys._getframe(2)
+        while f is not None:
+            fn = os.path.abspath(f.f_code.co_filename)
+            if fn != _THIS:
+                if fn.startswith(_BACKEND + os.sep):
+                    return fn[len(_BACKEND) + 1:].replace(os.sep, "/")[:-3][:60] + ":" + f.f_code.co_name[:30]
+                return os.path.basename(fn)[:60]
+            f = f.f_back
+    except Exception:
+        pass
+    return "?"
+
+
+def _kd_flush(force=False):
+    now = time.time()
+    with _kd_lock:
+        if not _kd_buf or (not force and sum(_kd_buf.values()) < 20 and now - _kd_state["last"] < 15):
+            return
+        items = list(_kd_buf.items())
+        _kd_buf.clear()
+        _kd_state["last"] = now
+    try:
+        conn = sqlite3.connect(_kd_db_path(), timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=4000")
+            if not _kd_state["init"]:
+                conn.execute(_KD_DDL)
+                conn.execute("delete from kd_calls where day < ?", ((datetime.date.today() - datetime.timedelta(days=200)).isoformat(),))
+                _kd_state["init"] = True
+            conn.executemany("insert into kd_calls(day, hour, src, caller, svc, n) values(?,?,?,?,?,?) "
+                             "on conflict(day, hour, src, caller, svc) do update set n = n + excluded.n", [k + (v,) for k, v in items])
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass            # 记不上就算了，不能挡业务
+
+
+def count_call(svc):
+    """记一次金蝶接口调用。_post 里自动调；绕开 _post 直接发请求的地方(电商下推)自己调一下。"""
+    try:
+        m = re.search(r"\.(\w+)\.common\.kdsvc", str(svc))
+        op = m.group(1) if m else str(svc)[-30:]
+        d = datetime.datetime.now()
+        k = (d.strftime("%Y-%m-%d"), d.hour, _kd_src(), _kd_caller(), _SVC_CN.get(op, op))
+        with _kd_lock:
+            _kd_buf[k] = _kd_buf.get(k, 0) + 1
+        _kd_flush()
+    except Exception:
+        pass
+
+
+atexit.register(lambda: _kd_flush(True))
+
+
 def _post(s, conf, svc, params):
     url = f"{conf['server_url']}/{svc}"
     try:
         r = s.post(url, data=json.dumps({"parameters": params}, ensure_ascii=False).encode("utf-8"),
                    headers={"Content-Type": "application/json;charset=utf-8"}, timeout=120)
+        count_call(svc)        # 请求发到金蝶了就算一次(不管金蝶回的是成功还是报错)
         r.raise_for_status()
     except requests.RequestException as e:
         raise KingdeeError(f"连接金蝶失败（检查网络/防火墙/ServerUrl）：{e}")

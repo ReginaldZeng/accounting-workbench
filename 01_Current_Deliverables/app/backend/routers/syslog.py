@@ -36,6 +36,14 @@ def get_live(request: Request):
     return ops.live()
 
 
+@router.get("/api/ops/kingdee")
+def get_kingdee_usage(request: Request, day: str = Query("", max_length=10)):
+    """金蝶接口调用统计：今天(或指定某天)调了多少次、谁调的、哪个小时调得多；每天上限 50,000 次。"""
+    if not _require_perm(request, _GATE):
+        return _deny()
+    return ops.kd_usage(day=day or None)
+
+
 @router.get("/api/ops/stats")
 def get_stats(request: Request, days: int = Query(7, ge=1, le=90), slowLimit: int = Query(15, ge=1, le=50)):
     """历史聚合：并发曲线 / 活跃用户 / 板块使用 / 慢接口榜 / 错误列表 / 容量建议。"""

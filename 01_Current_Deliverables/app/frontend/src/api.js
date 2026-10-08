@@ -198,6 +198,7 @@ export const saveTodoConfig = assignees => j('/api/todo/config', { method: 'PUT'
 export const saveNavModules = (state, posts, templates) => jpSoft('/api/nav-modules/save', { state, posts, templates })
 // 日志中心（V2.488-489）：运维请求日志 + 业务操作留痕。全部仅主管理员（enter_settings）可读。
 export const getOpsLive = () => j('/api/ops/live')
+export const getOpsKingdee = (day = '') => j('/api/ops/kingdee' + (day ? `?day=${day}` : ''))
 export const getOpsStats = (days = 7, slowLimit = 15) => j(`/api/ops/stats?days=${days}&slowLimit=${slowLimit}`)
 export const getOpsLogs = ({ days = 7, limit = 300, user = '', board = '', onlyErrors = false } = {}) =>
   j(`/api/ops/logs?days=${days}&limit=${limit}` + (user ? `&user=${encodeURIComponent(user)}` : '')

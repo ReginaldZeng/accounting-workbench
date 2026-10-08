@@ -38,6 +38,7 @@ Description: 运维观测埋点（并发 / 日志 / 慢接口 / 错误 / 谁在�
 import os
 import re
 import queue
+import contextvars
 import sqlite3
 import threading
 import time
@@ -330,6 +331,11 @@ def _header(scope, name):
     return None
 
 
+# 当前正在处理的是哪个接口(归一化路径)。金蝶调用计数(kingdee_client.count_call)靠它知道「这次调金蝶是哪个页面接口引起的」；
+# 同步接口跑在线程池里，上下文会带过去；后台线程里取到的是 None。
+CUR_REQ = contextvars.ContextVar("ops_cur_req", default=None)
+
+
 class OpsMiddleware:
     """记录每个 HTTP 请求。异常安全：埋点自身出任何问题都不能影响业务响应。"""
 
@@ -371,6 +377,11 @@ class OpsMiddleware:
             await send(message)
 
         err = None
+        _tok = None
+        try:
+            _tok = CUR_REQ.set(rec["path"])
+        except Exception:
+            _tok = None
         try:
             await self.app(scope, receive, _send)
         except Exception as e:
@@ -378,6 +389,11 @@ class OpsMiddleware:
             holder["status"] = holder["status"] or 500
             raise
         finally:
+            try:
+                if _tok is not None:
+                    CUR_REQ.reset(_tok)
+            except Exception:
+                pass
             try:
                 # 内层已跑完，身份此刻可读（登录门只对非白名单 /api 塞身份，其余保持匿名，见文件头口径）
                 st = scope.get("state") or {}
@@ -598,6 +614,32 @@ def stats(days=7, slow_limit=15, error_limit=100):
 
 
 # ── 当前在线用户 ─────────────────────────────────────────────────────────────────
+def kd_usage(day=None, days=14):
+    """金蝶接口调用统计(kingdee_client 记的 kd_calls)：某一天的合计、按来源、按模块、按小时、按操作；最近几天每日合计。"""
+    import kingdee_client as _kc
+    day = day or datetime.now().strftime("%Y-%m-%d")
+    out = {"day": day, "limit": _kc.KD_DAILY_LIMIT, "total": 0, "by_src": [], "by_caller": [], "by_hour": [], "by_svc": [], "recent": [], "since": None}
+    conn = _connect()
+    try:
+        try:
+            conn.execute(_kc._KD_DDL)
+        except Exception:
+            pass
+        q = lambda sql, args=(): conn.execute(sql, args).fetchall()
+        out["total"] = int((q("select coalesce(sum(n),0) from kd_calls where day=?", (day,))[0][0]) or 0)
+        out["by_src"] = [{"src": r[0], "n": r[1]} for r in q("select src, sum(n) s from kd_calls where day=? group by src order by s desc limit 60", (day,))]
+        out["by_caller"] = [{"caller": r[0], "n": r[1]} for r in q("select caller, sum(n) s from kd_calls where day=? group by caller order by s desc limit 60", (day,))]
+        out["by_hour"] = [{"hour": r[0], "n": r[1], "top": r[2]} for r in q(
+            "select hour, sum(n), (select src from kd_calls b where b.day=a.day and b.hour=a.hour group by src order by sum(n) desc limit 1) "
+            "from kd_calls a where day=? group by hour order by hour", (day,))]
+        out["by_svc"] = [{"svc": r[0], "n": r[1]} for r in q("select svc, sum(n) s from kd_calls where day=? group by svc order by s desc", (day,))]
+        out["recent"] = [{"day": r[0], "n": r[1]} for r in q("select day, sum(n) from kd_calls group by day order by day desc limit ?", (int(days),))]
+        out["since"] = (q("select min(day) from kd_calls")[0][0])
+    finally:
+        conn.close()
+    return out
+
+
 def online_users(window_min=5):
     """当前在线：最近 window_min 分钟内有请求的用户（去重）。
 
