@@ -9,7 +9,7 @@ import {
   bomStdImportTemplateUrl, bomStdImportUpload, getBomStdImportBatches, getBomStdImportBatch, bomStdImportConfirm, bomStdImportDiscard, bomOutboxRedo,
   getBomOutboxStatus,
   getBomKdPurchase, getBomMaterialUsage, bomConfirmStep, bomApplyGoods, getBomSettings, setBomSettings,
-  getBomApproval, bomReplaceSheet, bomRefetchReplace, getBomCommentFiles, bomReplaceFromComment, bomClassify, getBomPending,
+  getBomApproval, bomReplaceSheet, bomRefetchReplace, getBomCommentFiles, bomReplaceFromComment, bomClassify, getBomPending, bomAlignUpstream,
   bomIntake, bomFinalReview, bomVoidRequest, bomVoidReview, bomSetMatType, bomSetErpCode, getBomUsageSpreads, getBomErpLookup, bomLinkParallel, getBomKdBom, bomDelete,
   getBomInvoiceRules, setBomInvoiceRules, getBomDeliverStatus,
 } from '../api.js'
@@ -1212,6 +1212,13 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, o
     try { await bomConfirmStep(entry.id, s, on); flash(on ? '已确认' : '已撤销确认'); await onChanged() }
     catch (e) { flash('操作失败：' + e.message) }
   }
+  // V2.875 上游链路价格对不上 → 把这味料的含税价改成上游核算表的全成本（只能改成这一个数，留痕；④要重新确认）
+  const alignUpstream = async (up) => {
+    if (!window.confirm(`把「${up.matName}」的含税价从 ${fmt(up.priceUsed, 4)} 改成它自己那张核算表的全成本 ${fmt(up.upFull, 4)}？\n\n改后本品成本会重算，④报价核算要重新确认；这次改动会留痕。`)) return
+    try { const r = await bomAlignUpstream(entry.id, up.matName); if (!r.ok) return flash(r.msg || '改价失败')
+      flash(`已把「${r.matName}」的含税价改为 ${fmt(r.price, 4)} 并留痕，④报价核算请重新确认`); await onChanged() }
+    catch (e) { flash('改价失败：' + e.message) }
+  }
   const applyGoods = async () => {
     try { const r = await bomApplyGoods(entry.id); if (!r.ok) return flash(r.msg || '采纳失败')
       flash(`已采纳商品版 ${r.changed} 项价/税调整并留痕`); await onChanged() }
@@ -1409,7 +1416,8 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, o
 
             {/* ④ 报价核算（逐料成本 + 「核价」金蝶实采 + 编辑态改税率 + 商品版价税差异）*/}
             {step === 'price' && <>
-              {(entry.upstream || []).length > 0 && <UpstreamSection entry={entry} onOpen={onOpen} />}
+              {(entry.upstream || []).length > 0 && <UpstreamSection entry={entry} onOpen={onOpen}
+                onAlign={!archived && !isStd && !edit && cfg?.canAudit ? alignUpstream : null} />}
               {entry.hasGoodsVersion && <GoodsSection entry={entry} isStd={isStd} canAudit={cfg?.canAudit}
                 onApply={applyGoods} />}
               <MatSection no={1} title="原料明细" rows={mats}
@@ -2126,7 +2134,7 @@ function BomListSection({ entry, cfg, onChanged, flash }) {
 
 // 上游链路（半成品/复配料作原料进上层）：口径 quirk#5——下层「全成本含税」＝本品料行的「含税价」。
 // 上游未定稿 / 价格对不上 → 本品**不许先定稿**（成本建在未经确认的数上）；台账里找不到 → 链路不通，警告。
-function UpstreamSection({ entry, onOpen }) {
+function UpstreamSection({ entry, onOpen, onAlign }) {
   const ups = entry.upstream || []
   const block = entry.upstreamBlock || []
   if (!ups.length) return null
@@ -2155,13 +2163,17 @@ function UpstreamSection({ entry, onOpen }) {
             <td>{!u.priceOk
               ? <><span className="num" style={{ color: 'var(--red)', fontWeight: 600 }}>{diff > 0 ? '+' : ''}{fmt(diff, 4)}</span> <span className="tag leak">价格对不上</span> {st}</>
               : <><span className="muted">0.00</span> {st}</>}</td>
-            <td><a className="lk" onClick={() => onOpen(u.entryId)}>看子采购核算表 ›</a></td>
+            <td style={{ whiteSpace: 'nowrap' }}>{onAlign && !u.priceOk && (u.reviewed ?? u.isFinal) &&
+              <button className="btn-sec" style={{ marginRight: 10, padding: '2px 8px', fontSize: 11.5, color: 'var(--accent)', borderColor: 'var(--accent)' }}
+                title="把本品这味料的含税价改成上游那张核算表的全成本（留痕；④报价核算要重新确认）" onClick={() => onAlign(u)}>按上游改为 {fmt(u.upFull, 4)}</button>}
+              <a className="lk" onClick={() => onOpen(u.entryId)}>看子采购核算表 ›</a></td>
           </tr>)
         })}
       </tbody></table></div>
       {block.length > 0 && <div className="bom-chkfail" style={{ margin: '0 14px 12px' }}>
         <b>⛔ 上游未就绪，本品不能定稿</b>：{block.join('；')}。<br />
-        半成品的成本没确认，成品的成本就是建在未确认的数上——先把上游复核定稿，再回来定本品。</div>}
+        半成品的成本没确认，成品的成本就是建在未确认的数上——先把上游复核定稿，再回来定本品。
+        {onAlign && ups.some(u => !u.priceOk && (u.reviewed ?? u.isFinal)) && <><br />价格对不上、而上游已审核的：点该行的「按上游改为…」可把本品用价改成上游全成本（留痕）。</>}</div>}
       <div className="foot" style={{ padding: '0 14px 10px' }}>只列**台账里真有同名（或型号栏研发码同 CP）子采购核算表**的料行；外购原料/包材不在此列（名字带「复合/复配料」的外购件不算上游）。</div>
     </div>
   )

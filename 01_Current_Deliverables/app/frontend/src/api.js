@@ -420,6 +420,7 @@ export const bomBook = (stagingId, indexes, historical = false) => jp('/api/bom/
 export const bomReview = (entryId, fee, channel, materials) => jp('/api/bom/review', { entryId, fee, channel, materials })
 export const bomConfirmStep = (entryId, step, on = true) => jp('/api/bom/confirm-step', { entryId, step, on })
 export const bomApplyGoods = (entryId) => jp('/api/bom/apply-goods', { entryId })
+export const bomAlignUpstream = (entryId, matName) => jpSoft('/api/bom/align-upstream', { entryId, matName })   // V2.875 上游价格对不上 → 按上游全成本改价
 // confirmObsolete（V2.440 换码承接）：同CP/同物料编码已有审核版时，须明确答「原版失效」才定稿；不传→只存定性并回 needConfirm
 // parallelLink（V2.449）：答 B「并行但关联」——都对外、互不替代，串成一个并行组
 // historical（V2.462）：答 C「补录历史版」——只审不替代、不动定稿指针、不对外

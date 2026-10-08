@@ -674,6 +674,7 @@ bom_quote_pending = Table(                           # 「待修」批次：整�
     Column("reasons", Text),                         # JSON：[{productName,cpCode,reason,blockedBy}]
     Column("created_by", String(50)), Column("created_at", String(20)),
     Column("void_req", Text),                        # 待修批次同样走「申请作废 + 终审批准」（作废不删除、只标记）
+    Column("historical", Integer),                   # 2＝立项时勾了「历史补录」（V2.874）：整组被拦进待修，修好替换入账时承接补录标记
     UniqueConstraint("source", "approval_no", "group_id", name="uq_bom_pending_grp"),
 )
 bom_quote_audit = Table(                             # 复核留痕（改税率/费用/渠道逐项）
@@ -3563,6 +3564,13 @@ def _ensure_bom_columns():
                     c.execute(_text("ALTER TABLE bom_quote_entry ADD COLUMN %s %s" % (col, ddl)))
     except Exception:
         pass
+    try:                                             # 待修批次表补列（V2.874）
+        from sqlalchemy import inspect as _inspect, text as _text
+        if "historical" not in {c["name"] for c in _inspect(_engine).get_columns("bom_quote_pending")}:
+            with _engine.begin() as c:
+                c.execute(_text("ALTER TABLE bom_quote_pending ADD COLUMN historical INTEGER"))
+    except Exception:
+        pass
 
 
 _ensure_bom_columns()
@@ -3643,19 +3651,22 @@ def bom_update_entry(entry_id, fields):
         c.execute(update(bom_quote_entry).where(bom_quote_entry.c.id == int(entry_id)).values(**row))
 
 
-def bom_pending_upsert(source, approval_no, group_id, src_file, stash_path, reasons, operator=""):
-    """记一个「待修」组（整组被拦、没入账）。同组重复记则覆盖。"""
+def bom_pending_upsert(source, approval_no, group_id, src_file, stash_path, reasons, operator="", historical=None):
+    """记一个「待修」组（整组被拦、没入账）。同组重复记则覆盖。
+    historical（V2.874）：2＝立项时勾了「历史补录」；不传(None)＝覆盖时保留原值（修了还不平、再记一次待修时别把补录标记冲掉）。"""
     v = json.dumps(reasons, ensure_ascii=False, default=str)
     w = ((bom_quote_pending.c.source == source) & (bom_quote_pending.c.approval_no == approval_no)
          & (bom_quote_pending.c.group_id == group_id))
     with _engine.begin() as c:
         if c.execute(select(bom_quote_pending.c.id).where(w)).first():
-            c.execute(update(bom_quote_pending).where(w).values(
-                src_file=src_file, stash_path=stash_path, reasons=v, created_by=operator, created_at=_now()))
+            vals = dict(src_file=src_file, stash_path=stash_path, reasons=v, created_by=operator, created_at=_now())
+            if historical is not None:
+                vals["historical"] = historical
+            c.execute(update(bom_quote_pending).where(w).values(**vals))
         else:
             c.execute(insert(bom_quote_pending).values(
                 source=source, approval_no=approval_no, group_id=group_id, src_file=src_file,
-                stash_path=stash_path, reasons=v, created_by=operator, created_at=_now()))
+                stash_path=stash_path, reasons=v, created_by=operator, created_at=_now(), historical=historical))
 
 
 def bom_pending_list(source, approval_no=None):

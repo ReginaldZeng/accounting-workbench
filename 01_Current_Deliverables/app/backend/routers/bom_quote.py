@@ -1765,7 +1765,8 @@ def _book_staged(prev, sid, idxs, u, historical=False):
                 shutil.copy2(spath, stash)
         except Exception:
             pass
-        db.bom_pending_upsert(src, appno, gid, wb, stash, rs, operator=u["name"])
+        db.bom_pending_upsert(src, appno, gid, wb, stash, rs, operator=u["name"],
+                              historical=2 if historical else None)      # V2.874：补录单整组进待修，把补录标记记在待修批次上
     db.audit(u["name"], "bom_book", target=prev.get("approvalNo") or "-",
              detail="入账 %d，跳过 %d，拒 %d" % (len(booked), len(skipped), len(rejected)))
     return {"ok": True, "booked": booked, "skipped": skipped, "rejected": rejected}
@@ -2347,7 +2348,12 @@ def _do_replace_sheet(src, gid, data, fname, label, user, appno, via, bom_lists=
             pair_old[bq.product_key(rest_new[0])] = free_old[0]
     # 补录承接（V2.501，业务方 2026-09-06「补录的时候也会更新评论区采购核算表上去」）：补录组替换/重拉采购核算表，新版**继承「补录」标记**，
     # 照常复核+初审、初审即定稿，不因换了表就掉进财务BP终审。显式传 historical 可覆盖；不传则看组里有没有补录记录。
-    backfill = bool(historical) if historical is not None else any(x.get("historical") == 2 for x in db.bom_group_entries(src, gid))
+    # V2.874：整组都没入账（全在「待修」）的补录单，组里没有记录可看 → 看待修批次上记的补录标记。
+    #   实证 2026-10-08 钉钉单 202509221346000166946：补录立项因解析问题整组进待修，修好后「上传替换」入账的那条丢了补录标记，
+    #   初审后没定稿、停在等财务BP终审，BP 那边一直显示「在核算等终审」。
+    backfill = (bool(historical) if historical is not None
+                else (any(x.get("historical") == 2 for x in db.bom_group_entries(src, gid))
+                      or any(p.get("group_id") == gid and p.get("historical") == 2 for p in db.bom_pending_list(src, appno or None))))
     # 组内的 BOM清单：本次随单解析到的研发 BOM 优先（最新），再用同组既有 bom_list 兜底
     bom_pool = list(bom_lists or [])
     for x in db.bom_group_entries(src, gid):
@@ -2943,6 +2949,65 @@ async def bom_apply_goods(request: Request):
     db.audit(u["name"], "bom_apply_goods", target=str(e["id"]), detail="采纳商品版 %d 项价/税" % changed)
     finals = db.bom_finals(_src())
     return {"ok": True, "changed": changed, "reviewReset": reset, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
+
+
+@router.post("/api/bom/align-upstream")
+async def bom_align_upstream(request: Request):
+    """上游链路「价格对不上」时，把本品这味料的含税价**改成上游那张核算表的全成本含税**（V2.875）。
+    口径 quirk#5 本来就是「下层全成本含税＝上层料行含税价」；源表里这个数填错（实证 2026-10-08 钉钉单 202603031631000599056：
+    商务版 6.95、商品版 5.54，半成品自己算出来 5.4466）时，以前只能改 Excel 重传。只许改成上游全成本这一个数、且上游须已审核，
+    不是放开手改价。重算成本不含税/小计/全成本，逐项留痕；④报价核算确认清掉重认。"""
+    u = _require_perm(request, CAP_AUDIT)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无「审核」权限（仅成本会计）"}, status_code=403)
+    body = await request.json()
+    e = db.bom_get_entry(body.get("entryId"))
+    if not e or e.get("source") != _src():
+        return JSONResponse({"ok": False, "msg": "记录不存在"}, status_code=404)
+    if e.get("status") in ("初审", "已审核"):
+        return JSONResponse({"ok": False, "msg": "已归档（%s戳在），不能直接改价：先「撤销归档」" % e["status"]}, status_code=400)
+    nm = str(body.get("matName") or "").strip()
+    up = next((x for x in _upstream_status(e) if x.get("matName") == nm), None)
+    if not up:
+        return JSONResponse({"ok": False, "msg": "「%s」在上游链路里没有对应的子采购核算表，没有可对齐的价。" % nm}, status_code=400)
+    if up.get("priceOk"):
+        return JSONResponse({"ok": False, "msg": "「%s」的用价已经和上游全成本一致，不用改。" % nm}, status_code=400)
+    if not up.get("reviewed", up.get("isFinal")):
+        return JSONResponse({"ok": False, "msg": "上游「%s」自己还没审核（当前 %s），它的全成本还不算数——先把上游审完再来对齐。"
+                                                 % (nm, up.get("status") or "未复核")}, status_code=400)
+    new_price = round(float(up.get("upFull") or 0), 4)
+    if new_price <= 0:
+        return JSONResponse({"ok": False, "msg": "上游「%s」的全成本是 0，不能拿来改价。" % nm}, status_code=400)
+    inv_rules = _invoice_rules()
+    merged, changed = [], 0
+    for m in (e.get("materials") or []):
+        m = dict(m)
+        if (m.get("matName") or "").strip() == nm and m.get("seg") != "包材":
+            old = m.get("priceIncl")
+            db.bom_add_audit(e["id"], u["name"], "含税采购价·按上游全成本·%s" % nm, old, new_price)
+            m["priceIncl"] = new_price
+            q, tr = m.get("qtyPerKg"), m.get("taxRate")
+            if q is not None and tr is not None:
+                m["costExcl"] = bq.invoice_cost_excl(q, new_price, tr, m.get("invoiceType"), inv_rules)
+            changed += 1
+        merged.append(m)
+    if not changed:
+        return JSONResponse({"ok": False, "msg": "本品料行里没找到「%s」。" % nm}, status_code=400)
+    mat_sub = round(sum((x.get("costExcl") or 0) for x in merged if x.get("seg") == "原料"), 4)
+    pack_sub = round(sum((x.get("costExcl") or 0) for x in merged if x.get("seg") == "包材"), 4)
+    rec = {**_rec_from_entry(e), "materials": merged, "matSubtotal": mat_sub, "packSubtotal": pack_sub}
+    fields = {"materials": merged, "mat_subtotal_excl": mat_sub, "pack_subtotal_excl": pack_sub,
+              "full_cost_incl": bq.compose(rec, _fee_of(e))["full"]}
+    rs = dict(e.get("review_steps") or {})
+    rs.pop("price", None)                # 价改 → ④报价核算需重新确认
+    fields["review_steps"] = rs
+    reset = _invalidate_review(e, fields)
+    db.bom_update_entry(e["id"], fields)
+    db.audit(u["name"], "bom_align_upstream", target=str(e["id"]),
+             detail="「%s」含税价按上游 #%s 全成本改为 %s" % (nm, up.get("entryId"), new_price))
+    finals = db.bom_finals(_src())
+    return {"ok": True, "matName": nm, "price": new_price, "upEntryId": up.get("entryId"), "reviewReset": reset,
+            "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
 
 
 def _final_review_apply(e, u, approve, note, via="工作台", oa=None):
