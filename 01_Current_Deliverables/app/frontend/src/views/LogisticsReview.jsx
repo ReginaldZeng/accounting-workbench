@@ -61,18 +61,25 @@ function UnitKgDlg({ carrier, period, onClose, onSaved, flash }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [val, setVal] = useState({})
+  const [pk, setPk] = useState({})      // 备选箱规(V2.867)：物料编码 → 输入框里的字(「12」或「12, 15」)
   const [busy, setBusy] = useState(false)
   const txt = v => (v == null ? '' : String(v))
-  useEffect(() => { reviewUnitKg(carrier, period).then(r => { setD(r); setVal(Object.fromEntries([...r.items, ...r.others].map(x => [x.code, txt(x.kg)]))) }).catch(e => setErr(e.message)) }, [])
+  useEffect(() => { reviewUnitKg(carrier, period).then(r => { setD(r); setVal(Object.fromEntries([...r.items, ...r.others].map(x => [x.code, txt(x.kg)])))
+    setPk(Object.fromEntries([...(r.packs || []), ...(r.pack_others || [])].map(x => [x.code, (x.alts || []).join(', ')]))) }).catch(e => setErr(e.message)) }, [])
   const parse = s => { const t = String(s || '').trim(); if (!t) return 0
     const m = t.match(/^(\d+(?:\.\d+)?)\s*[\/÷]\s*(\d+(?:\.\d+)?)$/); const f = m ? Number(m[1]) / Number(m[2]) : Number(t); return Number.isFinite(f) && f >= 0 ? f : NaN }
   const all = d ? [...d.items, ...d.others] : []
   const bad = all.filter(x => Number.isNaN(parse(val[x.code])))
   const changed = all.filter(x => !Number.isNaN(parse(val[x.code])) && Math.abs(parse(val[x.code]) - (x.kg || 0)) > 1e-12)
+  const pall = d ? [...(d.packs || []), ...(d.pack_others || [])] : []
+  const pparse = s => { const ps = String(s || '').split(/[,，、;；\s]+/).filter(Boolean).map(Number); return ps.every(f => Number.isFinite(f) && f > 0) ? [...new Set(ps)] : null }
+  const pbad = pall.filter(x => pparse(pk[x.code]) === null)
+  const pchanged = pall.filter(x => pparse(pk[x.code]) !== null && JSON.stringify(pparse(pk[x.code])) !== JSON.stringify(x.alts || []))
   const save = () => {
     setBusy(true); setErr('')
-    reviewUnitKgSet(changed.map(x => ({ code: x.code, kg: parse(val[x.code]) || '', unit: x.unit, name: x.name })))
-      .then(r => { flash(`单位换算已保存（${r.changed} 种物料），按新换算重判`); onSaved && onSaved(); onClose() }).catch(e => setErr(e.message)).finally(() => setBusy(false))
+    reviewUnitKgSet(changed.map(x => ({ code: x.code, kg: parse(val[x.code]) || '', unit: x.unit, name: x.name })),
+      pchanged.map(x => ({ code: x.code, alts: pparse(pk[x.code]), unit: x.unit, name: x.name })))
+      .then(r => { flash(`已保存（${r.changed} 种物料），按新的换算/箱规重判`); onSaved && onSaved(); onClose() }).catch(e => setErr(e.message)).finally(() => setBusy(false))
   }
   const row = (x, cur) => { const v = val[x.code] ?? ''; const f = parse(v)
     return <tr key={x.code}>
@@ -90,7 +97,8 @@ function UnitKgDlg({ carrier, period, onClose, onSaved, flash }) {
   return (
     <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
       <div className="fxdlg" style={{ width: 'min(900px,100%)' }} role="dialog" aria-label="单位换算">
-        <div className="fxhead"><b>单位换算 · 折成千克</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxhead"><b>单位换算 · 箱规</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxamt"><b>一、折成千克</b><span className="dim" style={{ fontSize: 12 }}>　按重量核量用</span></div>
         <div className="fxsub">按重量核量时，拿账单的千克数比金蝶单据的千克数。下面这些物料金蝶<b>不是按千克计量</b>（按升、按个），金蝶档案里也没登记重量，
           不填换算就比不了——这些单会一直挂在「数量不符」。填「每 1 个金蝶单位折多少千克」，按物料存，各家承运商、各月共用；留空＝不换算。
           右边两个参考点一下才采用，系统不替你定。可以写分数，如 <span className="mono">0.445/200</span>（200 个重 0.445 千克）。</div>
@@ -99,14 +107,30 @@ function UnitKgDlg({ carrier, period, onClose, onSaved, flash }) {
         {d && <>
           {d.items.length > 0 ? <table className="fxtbl ukt"><thead><tr><th>物料编码</th><th>物料</th><th>金蝶单位</th><th className="num">本月数量</th><th>参考</th><th>换算</th></tr></thead>
             <tbody>{d.items.map(x => row(x, true))}</tbody></table>
-            : <div className="fxsub">{carrier} {period} 的金蝶单据里，没有不按千克计量的物料。</div>}
+            : <div className="fxsub">{carrier} {period} 按重量核的单据里，没有不按千克计量的物料。</div>}
           {d.others.length > 0 && <>
             <div className="fxamt" style={{ marginTop: 6 }}><b>其它已经填过换算的物料</b><span className="dim" style={{ fontSize: 12 }}>　这家这月没用到，别家别月在用</span></div>
             <table className="fxtbl ukt"><thead><tr><th>物料编码</th><th>物料</th><th>金蝶单位</th><th>换算</th></tr></thead><tbody>{d.others.map(x => row(x, false))}</tbody></table></>}
+          <div className="fxamt" style={{ marginTop: 10 }}><b>二、同一个物料有几种箱规</b><span className="dim" style={{ fontSize: 12 }}>　按箱数核量用</span></div>
+          <div className="fxsub">按箱数核量时，系统拿金蝶数量 ÷ 规格里写的箱规折成箱，再和账单箱数比。同一个物料编码实际有别的装法（规格写 10 升一件，也有 12 升一箱的），就在这里加上。
+            规矩：按规格折能对上的不动；对不上时才试这里加的箱规，而且要和账单<b>几乎分毫不差</b>（差 1 箱或千分之二以内）才算一致——不是拿来凑数的。多种用逗号隔开。</div>
+          {(d.packs || []).length > 0 ? <table className="fxtbl ukt"><thead><tr><th>物料编码</th><th>物料</th><th>金蝶数量单位</th><th>规格的箱规</th><th>参考</th><th>也有这些箱规</th></tr></thead>
+            <tbody>{d.packs.map(x => <tr key={x.code}>
+              <td className="mono">{x.code}</td><td>{x.name}{x.spec && <div className="dim" style={{ fontSize: 11.5 }}>{x.spec}</div>}</td><td>{x.unit}</td>
+              <td>{x.pack_spec} {x.unit}/箱{x.bad > 0 && <div className="diffbad" style={{ fontSize: 11.5 }}>这月 {x.bad} 张单对不上</div>}</td>
+              <td>{x.hint != null ? <button className="lnk" title="这几张单只有这一种物料，金蝶数量 ÷ 账单箱数 正好是这个整数" onClick={() => setPk({ ...pk, [x.code]: [...new Set([...(pparse(pk[x.code]) || []), x.hint])].join(', ') })}>
+                按 {x.hint} {x.unit}/箱，{x.hint_n} 张单正好对上</button> : <span className="dim">反推不出</span>}</td>
+              <td style={{ whiteSpace: 'nowrap' }}><input value={pk[x.code] ?? ''} placeholder="没有" style={{ width: 96, textAlign: 'right', borderColor: pparse(pk[x.code]) === null ? '#B3261E' : undefined }}
+                onChange={e => setPk({ ...pk, [x.code]: e.target.value })} /> {x.unit}/箱{x.by && <div className="dim" style={{ fontSize: 11.5 }}>{x.by} {x.at}</div>}</td></tr>)}</tbody></table>
+            : <div className="fxsub">{carrier} {period} 按箱数核的单据里，没有对不上、又折得出箱规的物料。</div>}
+          {(d.pack_others || []).length > 0 && <table className="fxtbl ukt" style={{ marginTop: 6 }}><thead><tr><th>物料编码</th><th>物料（这家这月没用到）</th><th>金蝶数量单位</th><th>也有这些箱规</th></tr></thead>
+            <tbody>{d.pack_others.map(x => <tr key={x.code}><td className="mono">{x.code}</td><td>{x.name}</td><td>{x.unit}</td>
+              <td style={{ whiteSpace: 'nowrap' }}><input value={pk[x.code] ?? ''} placeholder="没有" style={{ width: 96, textAlign: 'right', borderColor: pparse(pk[x.code]) === null ? '#B3261E' : undefined }}
+                onChange={e => setPk({ ...pk, [x.code]: e.target.value })} /> {x.unit}/箱{x.by && <div className="dim" style={{ fontSize: 11.5 }}>{x.by} {x.at}</div>}</td></tr>)}</tbody></table>}
           <div className="fxbtns">
-            <button className="btn pri" disabled={busy || !changed.length || bad.length > 0} onClick={save}>{busy ? '保存中…' : changed.length ? `保存（改了 ${changed.length} 种）` : '保存'}</button>
+            <button className="btn pri" disabled={busy || !(changed.length + pchanged.length) || bad.length + pbad.length > 0} onClick={save}>{busy ? '保存中…' : changed.length + pchanged.length ? `保存（改了 ${changed.length + pchanged.length} 种）` : '保存'}</button>
             <button className="btn" onClick={onClose}>关闭</button>
-            {bad.length > 0 && <span className="diffbad" style={{ fontSize: 12.5 }}>有 {bad.length} 格不是数字</span>}
+            {bad.length + pbad.length > 0 && <span className="diffbad" style={{ fontSize: 12.5 }}>有 {bad.length + pbad.length} 格不是数字</span>}
           </div>
         </>}
       </div>
@@ -1264,7 +1288,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {d && d.by_box && <button className="btn sm" onClick={editWt} title="按重量核量时，账单重量÷金蝶净重 落在这个范围内算一致。快递/快运含包装、抛重，一般 1～2；整车用默认（差 2% 以内）。一家一档，各月通用">
               毛重比 {d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认±2%'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={() => setUnitDlg(true)} title="金蝶按升、按个计量的物料（牛奶、稀奶油、内袋），填每 1 升/个 折多少千克，才能和账单的千克比。按物料存，各家各月共用。">
-              单位换算{d.unit_gap && d.unit_gap.n_mat > 0 ? <b className="diffbad"> {d.unit_gap.n_mat} 种没填</b> : ''} ⚙</button>}
+              单位换算·箱规{d.unit_gap && d.unit_gap.n_mat > 0 ? <b className="diffbad"> {d.unit_gap.n_mat} 种没填</b> : ''} ⚙</button>}
             <label className="btn sm">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
             <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee} title="重新从金蝶取出库单物料，刷新核量">{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
             <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
@@ -1378,7 +1402,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                                   {m.kg_eq != null && <span className="sub" title={`单位换算：1${m.kg_unit}＝${m.kg_per}千克`}>折 {num(m.kg_eq)} 千克</span>}
                                   {m.unit_gap && <span className="sub diffbad">没填单位换算，未计入</span>}</td>
                                 <td className="num">{num(m.base_qty)}<small className="u">{m.base_unit}</small></td>
-                                <td className="num">{num(m.kd)}</td>
+                                <td className="num">{num(m.kd)}{m.pack_used != null && <span className="sub" title={`规格折出来是 ${m.pack_spec}/箱，这张按备选箱规算才和账单对上`}>按 {m.pack_used}{m.base_unit}/箱</span>}</td>
                                 <td className="num">{money(m.fee)}</td>
                                 <td className="num">{m.unit_fee == null ? '—' : m.unit_fee}</td>
                                 <td className="num">{m.sales == null ? '—' : money(m.sales)}</td>

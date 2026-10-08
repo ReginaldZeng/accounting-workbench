@@ -5,6 +5,7 @@
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
+import collections
 import json
 import re
 import calendar
@@ -2397,6 +2398,62 @@ def _unit_kg():
     return out
 
 
+_PACK_ALT_KEY = "logi_pack_alt"    # {物料编码: {packs: [每箱多少个金蝶计价单位, …], unit, name, by, at}}
+
+
+def _pack_alt():
+    """备选箱规(V2.867，用户 2026-10-08 选「第一种」)：同一个物料编码有几种装法(安佳稀奶油金蝶规格写 10L/件，实际也有 12 升一箱的)，
+    按箱数核量时系统只会按规格里那一种折，对不上。财务在「单位换算」里给这个物料加上别的箱规，核量时几种都试。按物料编码存，各家各月共用。"""
+    out = {}
+    for k, v in (db.get_setting(_PACK_ALT_KEY, None) or {}).items():
+        ps = []
+        for x in (v or {}).get("packs") or []:
+            try:
+                f = float(x)
+            except (TypeError, ValueError):
+                continue
+            if f > 0 and f not in ps:
+                ps.append(f)
+        if ps:
+            out[str(k)] = ps
+    return out
+
+
+def _pick_packs(cands, target):
+    """cands＝每行物料按各种箱规折出来的箱数 [[按规格的, 按备选1的, …], …]；target＝账单箱数。→ (各行取的箱数, 用了备选箱规的行下标)。
+    规矩：全按规格折能对上(差 2% 或 1 箱以内)就用规格的，不碰备选；对不上时才在有备选的行里找一种组合，
+    而且要和账单**几乎分毫不差**(差 1 箱或千分之二以内)才认——备选是用来解释「正好对得上」的，不是用来凑数的。找不到就退回规格。"""
+    from itertools import product
+    base = [c[0] for c in cands]
+    tot0 = sum(base)
+    idx = [i for i, c in enumerate(cands) if len(c) > 1]
+    if not idx or not target or len(idx) > 12 or abs(tot0 - target) <= max(1.0, 0.02 * tot0):
+        return base, []
+    best = None
+    for combo in product(*[range(len(cands[i])) for i in idx]):
+        if not any(combo):
+            continue
+        tot = tot0 + sum(cands[i][k] - cands[i][0] for i, k in zip(idx, combo))
+        if abs(tot - target) <= max(1.0, 0.002 * tot):
+            key = (sum(1 for k in combo if k), abs(tot - target))
+            if best is None or key < best[0]:
+                best = (key, combo)
+    if not best:
+        return base, []
+    out, used = list(base), []
+    for i, k in zip(idx, best[1]):
+        if k:
+            out[i] = cands[i][k]
+            used.append(i)
+    return out, used
+
+
+def _pack_note(used):
+    """用了备选箱规的物料 → 写在核对结论后面的一句。used=[(物料名, 箱规, 单位)]"""
+    seen = list(dict.fromkeys((str(n or "")[:12], "%g" % pk, str(u or "")) for n, pk, u in used))
+    return " · " + "、".join("%s按 %s%s/箱" % x for x in seen[:3]) if seen else ""
+
+
 def _is_kg(u):
     u = str(u or "")
     return "千克" in u or "kg" in u.lower()
@@ -2469,6 +2526,7 @@ def _box_docs(rsub, carrier):
     # 毛重比允许范围(基础设置·供应商列表，V2.763)：配了就按 账单重量÷金蝶净重 落在范围内算一致；没配走默认(差 2% 以内)
     wt_rng = _wt_range(carrier)
     uk = _unit_kg()
+    pka = _pack_alt()
     docs = []
     for r in rsub:
         d0 = (r.get("doc_no") or "").split("+")[0]
@@ -2492,6 +2550,7 @@ def _box_docs(rsub, carrier):
             chg_wt = billcnt * (1000.0 if _u0.lower() in ("吨", "t") else 1.0)
             wt_from_qty = "账单 %s %s" % (_fmt_amt(billcnt), _u0)
         use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
+        kda, pack_used, packs_of = None, {}, None
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
             per = [_m_kg(m, uk) for m in lines]     # 千克计量的取基本数量；按升/个计量的按单位换算表折(V2.865)，没填换算的算 0
@@ -2531,14 +2590,23 @@ def _box_docs(rsub, carrier):
             mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
         else:
             # 无账单重量 → 按件数/箱核：金蝶箱数=数量件÷规格箱规
-            per = []
+            cands, packs_of = [], []
             for m in lines:
                 br = _box_div(m)                  # 袋/箱、计价单位箱、20kg/箱·10L/件(按千克/升折)
                 try:
                     qcnt = float(m.get("数量件") or 0)
                 except (TypeError, ValueError):
                     qcnt = 0.0
-                per.append((qcnt / br) if (br and qcnt) else 0.0)
+                mu = str(m.get("计价单位") or m.get("基本单位") or "").strip()
+                alts = [x for x in pka.get(str(m.get("编码") or ""), []) if qcnt and mu != "箱" and abs(x - (br or 0)) > 1e-9]   # 备选箱规(V2.867)
+                cands.append([(qcnt / br) if (br and qcnt) else 0.0] + [qcnt / x for x in alts])
+                packs_of.append([br] + alts)
+            _tu0 = str(r.get("unit") or "").replace("元/", "").strip()
+            per, _used = _pick_packs(cands, 0 if _tu0 in ("天", "趟") else billcnt)
+            pack_used = {i: packs_of[i][cands[i].index(per[i])] for i in _used}
+            kda = {}
+            for (dx, m), cv, pv in zip(pairs, cands, packs_of):
+                kda.setdefault(dx, []).append({"v": cv, "p": pv, "n": m.get("名称"), "u": str(m.get("计价单位") or m.get("基本单位") or "")})
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
             ratio_tuo = (kd_sum / billcnt) if billcnt else 0
@@ -2571,6 +2639,8 @@ def _box_docs(rsub, carrier):
                 mode_cn, cnt_state = "无箱规待核", "qtydiff"
             else:
                 mode_cn, cnt_state = "待核", "qtydiff"
+            if pack_used:
+                mode_cn += _pack_note([(lines[i].get("名称"), pk, lines[i].get("计价单位") or lines[i].get("基本单位")) for i, pk in pack_used.items()])
             conv = round(kd_sum / billcnt, 3) if billcnt else None   # 按件数：换算系数=金蝶箱数÷账单件(整车按箱≈1、打托=托规)
             mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
             mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
@@ -2626,10 +2696,11 @@ def _box_docs(rsub, carrier):
                 mrows.append({**base, "party": m.get("往来") or "", "code": m.get("编码"), "name": m.get("名称"),
                               "base_qty": bq, "base_unit": mku(m),
                               "base_kg": base_kg, "kg_unit": m.get("基本单位"), "is_pack": ispack,
-                              "unit_gap": _unit_gap(m, uk),                                   # 不按千克计量、还没填换算
+                              "unit_gap": bool(use_weight) and _unit_gap(m, uk),                                   # 不按千克计量、还没填换算
                               "kg_eq": (round(_m_kg(m, uk), 2) if not _is_kg(m.get("基本单位")) and _m_kg(m, uk) else None),   # 折后千克
                               "kg_per": (uk.get(str(m.get("编码") or "")) if not _is_kg(m.get("基本单位")) else None),
                               "kd": kd or None, "spec": m.get("规格"),
+                              "pack_spec": (packs_of[i][0] if packs_of else None), "pack_used": pack_used.get(i),   # 规格折出来的箱规 / 这次实际用的备选箱规
                               "fee": fline, "unit_fee": round(fline / kg, 2) if kg else None,
                               "sales": round(sales, 2) if sales is not None else None,
                               "ratio": round(fline / sales, 4) if sales else None})
@@ -2652,7 +2723,7 @@ def _box_docs(rsub, carrier):
         _kdd = {}
         for (dx, _m), v in zip(pairs, per if lines else []):
             _kdd[dx] = _kdd.get(dx, 0.0) + v
-        docs.append({**base, "_kdd": _kdd, "state": state, "fee_sys": f_sys, "fee_fill": f_fill, "fee_chk": f_chk, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
+        docs.append({**base, "_kdd": _kdd, "_kda": kda, "state": state, "fee_sys": f_sys, "fee_fill": f_fill, "fee_chk": f_chk, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
                      "unit_fee": round(fee / kgbase, 2) if kgbase else None, "sales": ssum,
                      "ratio": round(fee / ssum, 4) if ssum else None,
                      "parties": list(dict.fromkeys(m.get("party") for m in mrows if m.get("party"))),
@@ -2700,17 +2771,29 @@ def _box_docs(rsub, carrier):
                 for x in xs:
                     _un.update({alias.get(k, k): v for k, v in (x.get("_kdd") or {}).items()})
                 kd = round(sum(_un.values()), 2) if _un else xs[0]["kd_sum"]
+                _gnote = ""
+                if all(x.get("_kda") is not None for x in xs):       # 都是按箱核的：备选箱规要拿整单的账单箱数来挑(单行各挑各的不算数)
+                    _ua = {}
+                    for x in xs:
+                        _ua.update({alias.get(k, k): v for k, v in x["_kda"].items()})
+                    _flat = [c for cs in _ua.values() for c in cs]
+                    if _flat:
+                        _vals, _usd = _pick_packs([c["v"] for c in _flat], bsum)
+                        kd = round(sum(_vals), 2)
+                        _gnote = _pack_note([(_flat[i]["n"], _flat[i]["p"][_flat[i]["v"].index(_vals[i])], _flat[i]["u"]) for i in _usd])
                 st = "ok" if abs(bsum - kd) <= max(1.0, 0.02 * kd) else "qtydiff"
                 for x in xs:
                     x["kd_sum"] = kd
                     x["state"], x["q_diff"], x["doc_bill_all"] = st, round(bsum - kd, 2), bsum
                     x["mode_cn"] = "本单 %d 行合计 %s%s" % (len(xs), _fmt_amt(bsum), x.get("bill_unit") or "")
+                    x["mode_cn"] += _gnote
                     _others = sorted({y["doc_no"] for y in xs} - {x["doc_no"]})
                     if _others:
                         x["mode_cn"] += "（和 %s 是同一笔调拨，合起来比）" % "、".join(_others)
                     x["conv"] = round(kd / bsum, 3) if bsum else None
     for x in docs:
         x.pop("_kdd", None)
+        x.pop("_kda", None)
     return docs
 
 
@@ -3362,7 +3445,40 @@ def review_unit_kg(request: Request, carrier: str = "", period: str = ""):
     out.sort(key=lambda x: (x["kg"] is not None, str(x["unit"]), str(x["code"])))
     others = [{"code": k, "name": (v or {}).get("name"), "unit": (v or {}).get("unit"), "kg": uk.get(k), "by": (v or {}).get("by"), "at": (v or {}).get("at")}
               for k, v in sorted(saved.items()) if k not in items and uk.get(k)]
-    return {"ok": True, "carrier": carrier, "period": period, "items": out, "others": others}
+    # 箱规：按箱数核、现在还对不上的单里的物料(规格折得出箱规的)，加上已经配过备选箱规的。提示＝一张单只有这一种物料时，金蝶数量÷账单箱数 正好是个整数
+    psaved, pka, packs = db.get_setting(_PACK_ALT_KEY, None) or {}, _pack_alt(), {}
+    if carrier and period:
+        bydoc = {}
+        for x in pool:
+            if x.get("doc_no") and x.get("kd_unit") == "箱":
+                bydoc.setdefault(x["doc_no"], []).append(x)
+        for dno, xs in bydoc.items():
+            x = max(xs, key=lambda y: len(y["materials"]))
+            ms = [m for m in x["materials"] if m.get("code") and not m.get("is_pack") and m.get("pack_spec") and str(m.get("base_unit") or "") != "箱" and m.get("base_qty")]
+            bad = any(y["state"] == "qtydiff" for y in xs)
+            for m in ms:
+                if not bad and m["code"] not in pka:
+                    continue
+                it = packs.setdefault(m["code"], {"code": m["code"], "name": m.get("name"), "spec": m.get("spec"), "unit": m.get("base_unit"),
+                                                  "pack_spec": m.get("pack_spec"), "bad": set(), "hints": []})
+                if bad:
+                    it["bad"].add(dno)
+            bill = float(x.get("doc_bill_all") or x.get("bill_amt") or 0)
+            allm = [m for m in x["materials"] if m.get("code") and m.get("base_qty")]
+            if bad and bill and ms and len({m["code"] for m in allm}) == 1 and len(ms) == len(allm):
+                pk = sum(float(m["base_qty"]) for m in ms) / bill
+                if pk > 1 and abs(pk - round(pk)) <= 0.002 * pk and abs(round(pk) - float(ms[0]["pack_spec"])) > 1e-9:
+                    packs[ms[0]["code"]]["hints"].append(float(round(pk)))
+    pout = []
+    for it in packs.values():
+        hc = collections.Counter(it.pop("hints")).most_common(1)
+        sv = psaved.get(it["code"]) or {}
+        pout.append({**it, "bad": len(it["bad"]), "alts": pka.get(it["code"], []), "hint": (hc[0][0] if hc else None), "hint_n": (hc[0][1] if hc else 0),
+                     "by": sv.get("by"), "at": sv.get("at")})
+    pout.sort(key=lambda x: (-x["bad"], str(x["code"])))
+    pothers = [{"code": k, "name": (v or {}).get("name"), "unit": (v or {}).get("unit"), "alts": pka.get(k), "by": (v or {}).get("by"), "at": (v or {}).get("at")}
+               for k, v in sorted(psaved.items()) if k not in packs and pka.get(k)]
+    return {"ok": True, "carrier": carrier, "period": period, "items": out, "others": others, "packs": pout, "pack_others": pothers}
 
 
 @router.post("/api/logistics-review/unit-kg")
@@ -3393,12 +3509,42 @@ async def review_unit_kg_set(request: Request):
         else:
             cur.pop(code, None)
         log.append("%s %s 1%s＝%s千克（原 %s）" % (code, str(it.get("name") or "")[:20], it.get("unit") or "", ("%g" % f) if f else "不换算", ("%g" % old) if old else "没填"))
+    # 备选箱规：packs=[{code, alts:[12] 或 "12,15", unit, name}]，空＝删掉
+    pcur, plog = dict(db.get_setting(_PACK_ALT_KEY, None) or {}), []
+    for it in (b.get("packs") or [])[:500]:
+        code = str(it.get("code") or "").strip()
+        if not code:
+            continue
+        raw = it.get("alts")
+        parts = [x for x in re.split(r"[,，、;；\s]+", raw.strip()) if x] if isinstance(raw, str) else list(raw or [])
+        new = []
+        for x in parts[:6]:
+            try:
+                f = float(x)
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "msg": "物料 %s 的箱规不是数字：%s" % (code, x)}, status_code=400)
+            if f <= 0 or f > 100000:
+                return JSONResponse({"ok": False, "msg": "物料 %s 的箱规 %s 不合理（每箱多少个金蝶计价单位）" % (code, x)}, status_code=400)
+            if f not in new:
+                new.append(f)
+        old = [float(x) for x in (pcur.get(code) or {}).get("packs") or []]
+        if old == new:
+            continue
+        if new:
+            pcur[code] = {"packs": new, "unit": str(it.get("unit") or "")[:20], "name": str(it.get("name") or "")[:80], "by": _uname(u), "at": _now()}
+        else:
+            pcur.pop(code, None)
+        plog.append("%s %s 也有 %s %s/箱（原 %s）" % (code, str(it.get("name") or "")[:20], "、".join("%g" % x for x in new) or "不设", it.get("unit") or "", "、".join("%g" % x for x in old) or "没设"))
     if log:
         db.set_setting(_UNIT_KG_KEY, cur)
         db.audit(_uname(u), "物流复核-单位换算", "%d 种物料" % len(log), "；".join(log)[:900])
+    if plog:
+        db.set_setting(_PACK_ALT_KEY, pcur)
+        db.audit(_uname(u), "物流复核-备选箱规", "%d 种物料" % len(plog), "；".join(plog)[:900])
+    if log or plog:
         for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and k and k[0] == "view"]:
             _ACCR_CACHE.pop(k, None)
-    return {"ok": True, "changed": len(log)}
+    return {"ok": True, "changed": len(log) + len(plog)}
 
 
 @router.post("/api/logistics-review/wt-range")
