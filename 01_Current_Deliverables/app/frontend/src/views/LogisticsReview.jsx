@@ -704,6 +704,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const pageSomeOn = docs.some((x, i) => sel[dkey(x, i)])
   const togglePage = () => setSel(o => { const n = { ...o }; docs.forEach((x, i) => { const k = dkey(x, i); if (pageAllOn) delete n[k]; else n[k] = snap(x) }); return n })
   const selList = Object.values(sel)
+  const selHidden = Object.keys(sel).filter(k => !docs.some((x, i) => dkey(x, i) === k)).length   // 勾了、但不在当前这页/这个筛选里的
   const selStat = (() => {
     const fee = selList.reduce((a, x) => a + (x.fee || 0), 0)
     const once = (arr, f) => { const m = {}; arr.forEach((x, i) => { m[x.doc_no || '#' + i] = f(x) }); return Object.values(m).reduce((a, v) => a + v, 0) }
@@ -712,7 +713,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     const billSum = selList.reduce((a, x) => a + (Number(x.bill) || 0), 0)
     const bill = units.length === 1 && billSum > 0 ? billSum : null
     const ws = selList.filter(x => x.sales > 0), sales = once(ws, x => x.sales), feeS = ws.reduce((a, x) => a + (x.fee || 0), 0)
-    return { n: selList.length, fee, kg, unitFee: kg > 0 ? feeKg / kg : null, nKg: wk.length, bill, unit: units[0] || '', multiUnit: units.length > 1,
+    return { n: selList.length, nDocs: new Set(selList.map((x, i) => x.doc_no || '#' + i)).size, fee, kg, unitFee: kg > 0 ? feeKg / kg : null, nKg: wk.length, bill, unit: units[0] || '', multiUnit: units.length > 1,
       sales, ratio: sales > 0 ? feeS / sales : null, nSales: ws.length,
       toConfirm: [...new Set(selList.filter(x => x.doc_no && !x.confirmed).map(x => x.doc_no))], toUndo: [...new Set(selList.filter(x => x.doc_no && x.confirmed).map(x => x.doc_no))],
       nConfirmRows: selList.filter(x => x.doc_no && !x.confirmed).length, nUndoRows: selList.filter(x => x.doc_no && x.confirmed).length,
@@ -1065,7 +1066,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           <button key={k} className={'stepbtn' + (k === step ? ' on' : '') + (i < stepIdx ? ' done' : '')} onClick={() => goStep(k)}>
             <span className="no">{i < stepIdx ? '✓' : i + 1}</span><span>{name}</span>
             {k === 'lines' && L && !L.err && <span className={'st ' + dcls(L.diff_total)}>{dtxt(L.diff_total)}</span>}
-            {k === 'docs' && d && (() => { const n = d.ex_all != null ? d.ex_all : dc ? dc.ex : (c.miss || 0) + (c.qtydiff || 0); return <span className={'st ' + (n ? 'diffbad' : 'diffok')}>{n ? `${n} 张待核` : '无异常'}</span> })()}
+            {k === 'docs' && d && (() => { const n = d.ex_all != null ? d.ex_all : dc ? dc.ex : (c.miss || 0) + (c.qtydiff || 0); const nd = d.ex_docs
+              return <span className={'st ' + (n ? 'diffbad' : 'diffok')} title={nd != null && nd !== n ? '同一张单据账单上拆成了几行（按批次/车次），按单据算是 ' + nd + ' 张' : ''}>{n ? (nd != null && nd !== n ? `${nd} 张单待核（${n} 行）` : `${n} 张待核`) : '无异常'}</span> })()}
             {k === 'sign' && <span className={'st ' + (locked ? 'diffok' : 'dim')}>{locked ? '已登记' : '待登记'}</span>}
           </button>)}
       </div>
@@ -1246,7 +1248,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <span className="dim" style={{ fontSize: 12 }}>账单合计 <b className="mono" style={{ color: 'var(--accent)', fontSize: 13 }}>{money(d.total_bill)}</b></span>
           </div>}
           <div className="toolbar">
-            <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{d ? d.detail_total : 0}</b> {d && d.by_box ? '张单据' : '行'}</span>
+            <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{d ? d.detail_total : 0}</b> {d && d.by_box ? (d.detail_docs != null && d.detail_docs !== d.detail_total ? <>行 · <b>{d.detail_docs}</b> 张单据</> : '张单据') : '行'}</span>
             {d && d.by_box && docs.length > 0 && <button className="btn sm" onClick={() => setAll(!allOpen)}>{allOpen ? '全部收起' : '全部展开'}</button>}
             {d && d.by_box && d.facets && <>
               {[['fsub', 'subject', '全部主体'], ['ffee', 'fee', '全部费用类型'], ['fbiz', 'biz', '全部产品线']].map(([k, fk, all]) => {
@@ -1269,7 +1271,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <input type="search" placeholder="搜单号/客户/物料" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
           </div>
           {selStat.n > 0 && <div className="selbar">
-            <span>已选 <b>{selStat.n}</b> 张</span>
+            <span>已选 <b>{selStat.n}</b> {selStat.nDocs !== selStat.n ? <>行（{selStat.nDocs} 张单）</> : '张'}
+              {selHidden > 0 && <small className="diffbad" title="换了筛选或翻了页，之前勾的还留着；统计和「确认无误」都包含它们。不要的话点「清空选择」">　其中 {selHidden} {selStat.nDocs !== selStat.n ? '行' : '张'}不在当前列表里</small>}</span>
             <span>运费 <b className="mono">{money(selStat.fee)}</b></span>
             {selStat.bill != null && <span>账单量 <b className="mono">{num(selStat.bill)}</b> {selStat.unit}</span>}
             {selStat.multiUnit && <span className="dim">账单量单位不一，不合计</span>}

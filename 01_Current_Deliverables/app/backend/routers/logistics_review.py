@@ -873,7 +873,7 @@ _DOC_MAT_FIELDS = {
     "STK_TransferIn": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
                        ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
                        ("FSrcStockId.FName", "源仓"), ("FDestStockId.FName", "目的仓"),
-                       ("FMaterialId.FSpecification", "规格"), ("FQty", "数量件"), ("FUnitId.FName", "计价单位")],
+                       ("FMaterialId.FSpecification", "规格"), ("FQty", "数量件"), ("FUnitId.FName", "计价单位"), ("FSrcBillNo", "源单号")],
     "STK_TransferOut": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
                         ("FBaseQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"),
                         ("FSrcStockId.FName", "源仓"), ("FDestStockId.FName", "目的仓"),
@@ -942,7 +942,7 @@ def _fetch_doc_materials_once(s, conf, docs_by_form):
                     "编码": r.get("编码"), "名称": r.get("名称"),
                     "基本数量": r.get("基本数量"), "基本单位": r.get("基本单位"),
                     "往来": lai, "销售额": r.get("销售额"),
-                    "规格": r.get("规格"), "数量件": r.get("数量件"), "计价单位": r.get("计价单位")})
+                    "规格": r.get("规格"), "数量件": r.get("数量件"), "计价单位": r.get("计价单位"), "源单号": r.get("源单号")})
     return out
 
 
@@ -2474,7 +2474,8 @@ def _box_docs(rsub, carrier):
         d0 = (r.get("doc_no") or "").split("+")[0]
         if d0 == "无单据":          # 迅鸽退货/仓储/卸货行单号列写的字面量"无单据"，与空单号同样按无单据处理
             d0 = ""
-        lines = [m for dx in (r.get("doc_no") or "").split("+") if dx and dx != "无单据" for m in (mats.get(dx) or [])] if d0 else []
+        pairs = [(dx, m) for dx in (r.get("doc_no") or "").split("+") if dx and dx != "无单据" for m in (mats.get(dx) or [])] if d0 else []
+        lines = [m for _dx, m in pairs]
         billcnt = float(r.get("qty") or 0)
         fee = float(r.get("amount") or 0)
         biz = r.get("bizline") or _bizline_of(r.get("annot"))
@@ -2483,6 +2484,13 @@ def _box_docs(rsub, carrier):
             chg_wt = float(r.get("charge_wt")) if r.get("charge_wt") not in (None, "") else None
         except (TypeError, ValueError):
             chg_wt = None
+        # V2.866(用户看恒茂 8 月出库装卸「账单 15 吨、金蝶 1,500 箱、换算系数 100、整车包车·免核」)：账单量的单位就是吨/千克的，
+        #   它本身就是重量——折成千克按重量核(15 吨＝15,000 千克，金蝶正好 15,000 千克)，不要拿「吨数」去比「箱数」。
+        wt_from_qty = ""
+        _u0 = str(r.get("unit") or "").replace("元/", "").strip()
+        if chg_wt is None and billcnt and _rev != "qty" and _u0.lower() in ("吨", "t", "千克", "kg", "公斤"):
+            chg_wt = billcnt * (1000.0 if _u0.lower() in ("吨", "t") else 1.0)
+            wt_from_qty = "账单 %s %s" % (_fmt_amt(billcnt), _u0)
         use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
@@ -2494,6 +2502,8 @@ def _box_docs(rsub, carrier):
                 mode_cn = "按重量 · 有物料金蝶按%s计量，没填单位换算" % "/".join(dict.fromkeys(str(m.get("基本单位")) for m in lines if _unit_gap(m, uk)))
             elif any(not _is_kg(m.get("基本单位")) and _m_kg(m, uk) for m in lines):
                 mode_cn = "按重量 · %s已折千克" % "/".join(dict.fromkeys(str(m.get("基本单位")) for m in lines if not _is_kg(m.get("基本单位")) and _m_kg(m, uk)))
+            if wt_from_qty:
+                mode_cn += "（%s）" % wt_from_qty
             if wt_rng and kd_sum:
                 cnt_state = "ok" if wt_rng[0] - 1e-9 <= wbase / kd_sum <= wt_rng[1] + 1e-9 else "qtydiff"
             else:
@@ -2536,6 +2546,7 @@ def _box_docs(rsub, carrier):
             tu = str(r.get("unit") or "").replace("元/", "").strip()
             is_trip = tu in ("天", "趟") or ((not billcnt) and (d0.upper().startswith("FBDR") or "调拨" in str(r.get("annot") or "")))
             trip = _trip_check(r, tu, billcnt, fee, pmap) if is_trip else None
+            decided = True     # V2.866：上面几种一旦判定就不再往下走(原来 if 链断成两截，「免核量」会被下面的打托/包车/待核盖掉)
             if is_trip and trip and trip["verdict"] == "ok":
                 mode_cn, cnt_state = trip["label"], "ok"
             elif is_trip and trip:
@@ -2543,9 +2554,13 @@ def _box_docs(rsub, carrier):
             elif kd_sum and is_trip:
                 mode_cn, cnt_state = "包天包趟·免核量", "na"
             elif str(r.get("unit") or "").strip() in lr._NOQTY_UNITS:
-                mode_cn, cnt_state = "按%s计费·免核量" % str(r.get("unit")).strip(), "na"   # 恒茂出库装卸按吨、冷藏按板
+                mode_cn, cnt_state = "按%s计费·免核量" % str(r.get("unit")).strip(), "na"   # 冷藏按板、搬运按方
+            else:
+                decided = False
             if is_trip and tu:
                 bill_unit = tu                   # 账单量显示 1 天 / 2 趟
+            if decided:
+                pass
             elif kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
                 mode_cn, cnt_state = "整车按箱", "ok"
             elif kd_sum and billcnt and 3 <= ratio_tuo <= 60:
@@ -2634,7 +2649,10 @@ def _box_docs(rsub, carrier):
         ssum = round(sum(svals), 2) if svals else None
         _pts = list(dict.fromkeys(m.get("party") for m in mrows if m.get("party")))
         f_sys, f_fill, f_chk = _fee_check(r, d0, _pts)
-        docs.append({**base, "state": state, "fee_sys": f_sys, "fee_fill": f_fill, "fee_chk": f_chk, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
+        _kdd = {}
+        for (dx, _m), v in zip(pairs, per if lines else []):
+            _kdd[dx] = _kdd.get(dx, 0.0) + v
+        docs.append({**base, "_kdd": _kdd, "state": state, "fee_sys": f_sys, "fee_fill": f_fill, "fee_chk": f_chk, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
                      "unit_fee": round(fee / kgbase, 2) if kgbase else None, "sales": ssum,
                      "ratio": round(fee / ssum, 4) if ssum else None,
                      "parties": list(dict.fromkeys(m.get("party") for m in mrows if m.get("party"))),
@@ -2653,10 +2671,18 @@ def _box_docs(rsub, carrier):
                 x["trip"] = {"verdict": "ok", "msg": "%s = %s ✓" % (sf.get("公式") or "按公式", _fmt_amt(sf["标准"]))}
     # 同一单号账单上有多行(包天包趟一车一行 / 恒茂一张调拨单拆几个批次)：每行注明本单共几行、合计运费；单位运费/费比按本单合计运费算；
     # 按件数/箱核的，拿本单几行账单量之和比金蝶(不再单行比整单)
+    # V2.866(恒茂 8 月)：同一笔调拨，账单上有几行写的是调入单号(FBDR075386)、有一行写成了调出单号(FBDC075377)——金蝶调入单的「源单号」就是那张调出单。
+    #   两个单号在这份账单里都出现时，当成同一张单合起来比一次金蝶(原来一边「少 980 箱」、另一边被判成「打托」)。只认金蝶里登记的源单关系，不按数量去猜。
+    alias = {}
+    _seen = {x["doc_no"] for x in docs if x["doc_no"]}
+    for dno, ms in mats.items():
+        for sdoc in {str(m.get("源单号") or "").strip() for m in ms}:
+            if sdoc and sdoc != dno and sdoc in _seen and dno in _seen:
+                alias[sdoc] = dno
     grp = {}
     for x in docs:
         if x["doc_no"]:
-            grp.setdefault(x["doc_no"], []).append(x)
+            grp.setdefault(alias.get(x["doc_no"], x["doc_no"]), []).append(x)
     for xs in grp.values():
         if len(xs) > 1:
             tot = round(sum(x["doc_fee"] for x in xs), 2)
@@ -2669,12 +2695,22 @@ def _box_docs(rsub, carrier):
             # 一张单拆几行批次(恒茂入库)：单行比整单会被误判成打托/包车，先把几行账单量加起来再比金蝶
             if all(x.get("kd_sum") for x in xs) and not any(str(x.get("mode_cn", "")).startswith("包天") or x.get("state") == "price" for x in xs)                     and len({x.get("bill_unit") for x in xs}) == 1 and all(x.get("bill_amt") for x in xs):
                 bsum = round(sum(float(x.get("bill_amt") or 0) for x in xs), 2)
-                kd = xs[0]["kd_sum"]
+                # 几行写的单号不全一样(首行只写一张、后面几行写「A+B」)：金蝶量按这几行提到的全部单号算一次(V2.866；原来只拿首行的，恒茂 CGRK182049 账单 1,015 箱对 778 箱)
+                _un = {}
+                for x in xs:
+                    _un.update({alias.get(k, k): v for k, v in (x.get("_kdd") or {}).items()})
+                kd = round(sum(_un.values()), 2) if _un else xs[0]["kd_sum"]
                 st = "ok" if abs(bsum - kd) <= max(1.0, 0.02 * kd) else "qtydiff"
                 for x in xs:
+                    x["kd_sum"] = kd
                     x["state"], x["q_diff"], x["doc_bill_all"] = st, round(bsum - kd, 2), bsum
                     x["mode_cn"] = "本单 %d 行合计 %s%s" % (len(xs), _fmt_amt(bsum), x.get("bill_unit") or "")
+                    _others = sorted({y["doc_no"] for y in xs} - {x["doc_no"]})
+                    if _others:
+                        x["mode_cn"] += "（和 %s 是同一笔调拨，合起来比）" % "、".join(_others)
                     x["conv"] = round(kd / bsum, 3) if bsum else None
+    for x in docs:
+        x.pop("_kdd", None)
     return docs
 
 
@@ -2823,6 +2859,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
             pool = [x for x in pool if x["doc_no"]]      # 无单据的不列(见 _nd)；缓存里那份不动
             ex_all = sum(1 for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff", "price"))   # 步骤条用整家总数，不随筛选变
+            ex_docs = len({x["doc_no"] for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff", "price")})   # 同上，按单号数(一张单拆几行的只算一张)
             if bucket_on:
                 pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
             dc = {"miss": 0, "qtydiff": 0, "price": 0, "info": 0, "ok": 0, "done": 0}
@@ -2838,7 +2875,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                         _gap.setdefault(m.get("code"), set()).add(x["doc_no"])
             unit_gap = {"n_mat": len(_gap), "n_doc": len({d for ds in _gap.values() for d in ds})}
         else:
-            ex_all, unit_gap = None, None
+            ex_all, unit_gap, ex_docs = None, None, None
             pool = _box_docs(sl, carrier)
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
@@ -2874,6 +2911,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         elif full and group != "all":
             want = {"ex": ("miss", "qtydiff", "price"), "pass": ("ok",)}.get(group, (group,))
             pool = [x for x in pool if not x.get("confirmed") and x["state"] in want]
+        dtot_docs = len({x["doc_no"] for x in pool}) if full else None
         if full:
             dtot, docs = len(pool), pool[(page - 1) * size: page * size]
         else:
@@ -2883,7 +2921,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "nodoc": nodoc, "unit_gap": unit_gap}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
