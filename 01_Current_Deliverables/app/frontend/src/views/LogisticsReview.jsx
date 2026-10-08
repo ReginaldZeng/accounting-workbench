@@ -12,7 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
 import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
-import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, voucherPlans, voucherPreview } from '../api.js'
+import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -54,6 +54,66 @@ function DtChip({ reqs, onOpen }) {
 
 // 哪些供应商算物流(V2.846，用户「你是怎么知道哪些是物流的」「不应该写死吧，应该读金蝶的供应商列表之类的」)：
 // 原来认编码前缀「物流运输服务」；现在读金蝶供应商档案的「供应商分组」，哪几个分组算物流在这里勾。排除规则(不走物流计提的)也在这里维护。
+// 单位换算(V2.865，用户 2026-10-08「需要我们来换算」)：金蝶按升/个计量的物料(牛奶、稀奶油、印刷内袋)，按重量核量时和账单的千克比不了。
+//   金蝶物料档案里净重/毛重都是 0、没有单位换算记录，读不到现成的——由财务在这里填「每 1 升/个 折多少千克」，按物料编码存，各家各月共用。
+//   系统只给两个参考(规格里自己写的比重、这家账单实际是按多少折的)，点一下才采用，不替人定。可以写分数：0.445/200。
+function UnitKgDlg({ carrier, period, onClose, onSaved, flash }) {
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [val, setVal] = useState({})
+  const [busy, setBusy] = useState(false)
+  const txt = v => (v == null ? '' : String(v))
+  useEffect(() => { reviewUnitKg(carrier, period).then(r => { setD(r); setVal(Object.fromEntries([...r.items, ...r.others].map(x => [x.code, txt(x.kg)]))) }).catch(e => setErr(e.message)) }, [])
+  const parse = s => { const t = String(s || '').trim(); if (!t) return 0
+    const m = t.match(/^(\d+(?:\.\d+)?)\s*[\/÷]\s*(\d+(?:\.\d+)?)$/); const f = m ? Number(m[1]) / Number(m[2]) : Number(t); return Number.isFinite(f) && f >= 0 ? f : NaN }
+  const all = d ? [...d.items, ...d.others] : []
+  const bad = all.filter(x => Number.isNaN(parse(val[x.code])))
+  const changed = all.filter(x => !Number.isNaN(parse(val[x.code])) && Math.abs(parse(val[x.code]) - (x.kg || 0)) > 1e-12)
+  const save = () => {
+    setBusy(true); setErr('')
+    reviewUnitKgSet(changed.map(x => ({ code: x.code, kg: parse(val[x.code]) || '', unit: x.unit, name: x.name })))
+      .then(r => { flash(`单位换算已保存（${r.changed} 种物料），按新换算重判`); onSaved && onSaved(); onClose() }).catch(e => setErr(e.message)).finally(() => setBusy(false))
+  }
+  const row = (x, cur) => { const v = val[x.code] ?? ''; const f = parse(v)
+    return <tr key={x.code}>
+      <td className="mono">{x.code}</td><td>{x.name}{x.spec && <div className="dim" style={{ fontSize: 11.5 }}>{x.spec}</div>}</td><td>{x.unit}</td>
+      {cur && <td className="num">{num(x.qty)}<div className="dim" style={{ fontSize: 11.5 }}>{x.docs} 张单</div></td>}
+      {cur && <td>{x.hint_spec != null ? <button className="lnk" title="采用规格里写的比重" onClick={() => setVal({ ...val, [x.code]: String(x.hint_spec) })}>规格写 1{x.unit}＝{x.hint_spec} 千克</button> : <span className="dim">规格没写</span>}
+        <div>{x.hint_bill != null
+          ? <button className="lnk" title="这家账单上的千克数 ÷ 金蝶数量 反推出来的；采用它＝按账单的算法" onClick={() => setVal({ ...val, [x.code]: String(x.hint_bill) })}>
+            账单按 1{x.unit}＝{x.hint_bill} 千克{x.hint_bill_same ? `（${x.hint_bill_n} 张单都是）` : `（${x.hint_bill_n} 张单不完全一样，取中间值）`}</button>
+          : <span className="dim">账单反推不出（一张单里混了几种）</span>}</div></td>}
+      <td style={{ whiteSpace: 'nowrap' }}>1 {x.unit} ＝ <input value={v} placeholder="没填" style={{ width: 96, textAlign: 'right', borderColor: Number.isNaN(f) ? '#B3261E' : undefined }}
+        onChange={e => setVal({ ...val, [x.code]: e.target.value })} /> 千克
+        {!Number.isNaN(f) && f > 0 && /[\/÷]/.test(v) && <div className="dim" style={{ fontSize: 11.5 }}>＝ {Number(f.toPrecision(6))}</div>}
+        {x.by && <div className="dim" style={{ fontSize: 11.5 }}>{x.by} {x.at}</div>}</td></tr> }
+  return (
+    <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="fxdlg" style={{ width: 'min(900px,100%)' }} role="dialog" aria-label="单位换算">
+        <div className="fxhead"><b>单位换算 · 折成千克</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxsub">按重量核量时，拿账单的千克数比金蝶单据的千克数。下面这些物料金蝶<b>不是按千克计量</b>（按升、按个），金蝶档案里也没登记重量，
+          不填换算就比不了——这些单会一直挂在「数量不符」。填「每 1 个金蝶单位折多少千克」，按物料存，各家承运商、各月共用；留空＝不换算。
+          右边两个参考点一下才采用，系统不替你定。可以写分数，如 <span className="mono">0.445/200</span>（200 个重 0.445 千克）。</div>
+        {err && <div className="fxwarn">{err}</div>}
+        {!d && !err && <div className="fxsub">读这家这月的金蝶物料…</div>}
+        {d && <>
+          {d.items.length > 0 ? <table className="fxtbl ukt"><thead><tr><th>物料编码</th><th>物料</th><th>金蝶单位</th><th className="num">本月数量</th><th>参考</th><th>换算</th></tr></thead>
+            <tbody>{d.items.map(x => row(x, true))}</tbody></table>
+            : <div className="fxsub">{carrier} {period} 的金蝶单据里，没有不按千克计量的物料。</div>}
+          {d.others.length > 0 && <>
+            <div className="fxamt" style={{ marginTop: 6 }}><b>其它已经填过换算的物料</b><span className="dim" style={{ fontSize: 12 }}>　这家这月没用到，别家别月在用</span></div>
+            <table className="fxtbl ukt"><thead><tr><th>物料编码</th><th>物料</th><th>金蝶单位</th><th>换算</th></tr></thead><tbody>{d.others.map(x => row(x, false))}</tbody></table></>}
+          <div className="fxbtns">
+            <button className="btn pri" disabled={busy || !changed.length || bad.length > 0} onClick={save}>{busy ? '保存中…' : changed.length ? `保存（改了 ${changed.length} 种）` : '保存'}</button>
+            <button className="btn" onClick={onClose}>关闭</button>
+            {bad.length > 0 && <span className="diffbad" style={{ fontSize: 12.5 }}>有 {bad.length} 格不是数字</span>}
+          </div>
+        </>}
+      </div>
+    </div>
+  )
+}
+
 function ScopeDlg({ onClose, onSaved, flash }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -429,6 +489,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [ovf, setOvf] = useState('')             // 总表按复核状态筛
   const [pr, setPr] = useState(null)             // 打开的钉钉请款单
   const [scopeDlg, setScopeDlg] = useState(false) // 「哪些供应商算物流」弹窗
+  const [unitDlg, setUnitDlg] = useState(false)   // 「单位换算」弹窗(升/个 折千克)
   const [scopeSum, setScopeSum] = useState(null)  // 总表头上那句：金蝶分组「…」N 家
   const loadScopeSum = () => reviewScope().then(r => setScopeSum({ n: r.n, names: (r.groups || []).filter(g => g.on).map(g => g.name || g.code), stale: r.stale })).catch(() => {})
   useEffect(() => { loadScopeSum() }, [])
@@ -796,6 +857,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fxtbl th{background:#E7ECEF;font-weight:600;color:#1B2733}
       .lrv .fxtbl th:last-child{background:#FBF0DA;color:#8A5A00}
       .lrv .fxtbl th small{font-weight:400;color:#8A96A2}
+      .lrv .fxtbl.ukt th:last-child{background:#FBF0DA;color:#8A5A00}.lrv .fxtbl.ukt td{vertical-align:top}.lrv .fxtbl.ukt input{padding:3px 6px;border:1px solid #CBD5DC;border-radius:5px;font:inherit}
       .lrv .fxtbl td:first-child{width:72px;color:#5E6B78;white-space:nowrap}
       .lrv .fxtbl td:first-child small{display:block;font-size:11px}
       .lrv .fxtbl tr.fxsep td{border-top:2px solid #CBD5DC}
@@ -1199,6 +1261,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <div style={{ flex: 1 }} />
             {d && d.by_box && <button className="btn sm" onClick={editWt} title="按重量核量时，账单重量÷金蝶净重 落在这个范围内算一致。快递/快运含包装、抛重，一般 1～2；整车用默认（差 2% 以内）。一家一档，各月通用">
               毛重比 {d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认±2%'} ⚙</button>}
+            {d && d.by_box && <button className="btn sm" onClick={() => setUnitDlg(true)} title="金蝶按升、按个计量的物料（牛奶、稀奶油、内袋），填每 1 升/个 折多少千克，才能和账单的千克比。按物料存，各家各月共用。">
+              单位换算{d.unit_gap && d.unit_gap.n_mat > 0 ? <b className="diffbad"> {d.unit_gap.n_mat} 种没填</b> : ''} ⚙</button>}
             <label className="btn sm">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
             <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee} title="重新从金蝶取出库单物料，刷新核量">{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
             <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
@@ -1218,6 +1282,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <button className="btn sm" onClick={() => setSel({})}>清空选择</button>
             {selStat.nNoDoc > 0 && <small className="dim" style={{ width: '100%' }}>其中 {selStat.nNoDoc} 张无单据的调整行只参与统计，不打确认。</small>}
           </div>}
+          {d && d.unit_gap && d.unit_gap.n_mat > 0 && <div className="adjnote">有 <b>{d.unit_gap.n_mat}</b> 种物料金蝶不是按千克计量（按升、按个），还没填单位换算，涉及 <b>{d.unit_gap.n_doc}</b> 张单——
+            这些单的金蝶重量没算全，多半会挂在「数量不符」。<button className="lnk" onClick={() => setUnitDlg(true)}>去填单位换算</button></div>}
+          {unitDlg && <UnitKgDlg carrier={carrier} period={period} onClose={() => setUnitDlg(false)} onSaved={() => { load(); refetchL() }} flash={flash} />}
           {(() => {     // 没有金蝶单号的账单行：不列成单据，只留一行数。金额为 0 的(迅鸽逐单表里不带钱的仓储行，钱在汇总行)不提
             const nd = ((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)
             return nd.length > 0 && <div className="adjnote">另有 <b>{nd.length}</b> 笔没有金蝶单号、不逐单（合计 {money(nd.reduce((s, x) => s + (x.amount || 0), 0))}）：
@@ -1304,7 +1371,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                                 <td className="mono">{m.code || '—'}</td>
                                 <td>{m.name}{m.is_pack && <span className="tag">包材·不摊运费</span>}</td>
                                 <td>{m.party || <span className="dim">—</span>}</td>
-                                <td className="num">{num(m.base_kg)}<small className="u">{m.kg_unit}</small></td>
+                                <td className="num">{num(m.base_kg)}<small className="u">{m.kg_unit}</small>
+                                  {m.kg_eq != null && <span className="sub" title={`单位换算：1${m.kg_unit}＝${m.kg_per}千克`}>折 {num(m.kg_eq)} 千克</span>}
+                                  {m.unit_gap && <span className="sub diffbad">没填单位换算，未计入</span>}</td>
                                 <td className="num">{num(m.base_qty)}<small className="u">{m.base_unit}</small></td>
                                 <td className="num">{num(m.kd)}</td>
                                 <td className="num">{money(m.fee)}</td>

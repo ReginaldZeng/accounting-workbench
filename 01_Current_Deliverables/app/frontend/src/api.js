@@ -664,6 +664,8 @@ export const reviewLineFix =(carrier, period, line_keys, fix) => j('/api/logisti
 export const reviewScope = fresh => j('/api/logistics-review/scope' + (fresh ? '?fresh=1' : ''))
 export const reviewScopeSet = body => j('/api/logistics-review/scope', { method: 'POST', body: JSON.stringify(body) })
 export const reviewInvoices = (carrier, period) => j(`/api/logistics-review/invoices?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
+export const reviewUnitKg = (carrier, period) => j(`/api/logistics-review/unit-kg?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
+export const reviewUnitKgSet = items => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items }) })
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
 export const reviewCarrierPointsSet =(carrier, points) => j('/api/logistics-review/carrier-points', { method: 'POST', body: JSON.stringify({ carrier, points }) })
 export const reviewSign = (carrier, period, note = '') => j('/api/logistics-review/sign', { method: 'POST', body: JSON.stringify({ carrier, period, note }) })

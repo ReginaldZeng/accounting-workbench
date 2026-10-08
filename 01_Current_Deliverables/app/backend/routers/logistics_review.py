@@ -600,17 +600,9 @@ def _kd_weight_by_doc(s, conf, docs):
         for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
             by_form.setdefault(form, set()).add(d0)
     mats = _fetch_doc_materials(s, conf, by_form) if by_form else {}
-    out = {}
+    out, uk = {}, _unit_kg()
     for no, ms in mats.items():
-        kg = 0.0
-        for m in ms:
-            u = str(m.get("基本单位") or "")
-            if "千克" in u or "kg" in u.lower():
-                try:
-                    kg += float(m.get("基本数量") or 0)
-                except (TypeError, ValueError):
-                    pass
-        out[no] = round(kg, 2)
+        out[no] = round(sum(_m_kg(m, uk) for m in ms), 2)      # 按升/个计量的按单位换算表折(V2.865)
     return out
 
 
@@ -2387,6 +2379,65 @@ def _trip_check(r, tu, n, fee, pmap):
             "msg": "；".join(msgs) if msgs else "按报价 %s×%g=%s" % (_fmt_amt(price), n, _fmt_amt(std))}
 
 
+_UNIT_KG_KEY = "logi_unit_kg"      # {物料编码: {kg: 每 1 个金蝶基本单位折多少千克, unit, name, by, at}}
+
+
+def _unit_kg():
+    """单位换算表(V2.865，用户 2026-10-08「需要我们来换算」)：金蝶不是按千克计量的物料(牛奶、稀奶油按升，印刷内袋按个)，
+    按重量核量时没法和账单的千克比。金蝶物料档案里净重/毛重都是 0、也没有单位换算记录(实测)，读不到现成的——
+    所以由财务在页面上填「每 1 升/个 折多少千克」，按物料编码存、各家承运商共用。没填的物料照旧不计入金蝶重量，并在页面上标出来。"""
+    out = {}
+    for k, v in (db.get_setting(_UNIT_KG_KEY, None) or {}).items():
+        try:
+            f = float((v or {}).get("kg") or 0)
+        except (TypeError, ValueError):
+            f = 0.0
+        if f > 0:
+            out[str(k)] = f
+    return out
+
+
+def _is_kg(u):
+    u = str(u or "")
+    return "千克" in u or "kg" in u.lower()
+
+
+def _m_kg(m, uk):
+    """一行金蝶物料 → 千克数：本来按千克计量的取基本数量；不是的按单位换算表折，没填换算的算 0。"""
+    try:
+        bw = float(m.get("基本数量") or 0)
+    except (TypeError, ValueError):
+        bw = 0.0
+    if _is_kg(m.get("基本单位")):
+        return bw
+    f = uk.get(str(m.get("编码") or ""))
+    return bw * f if f else 0.0
+
+
+def _unit_gap(m, uk):
+    """这行物料是不是「不按千克计量、又没填换算」(包材不算：纸箱托盘本来就不计入货重)。"""
+    if _is_kg(m.get("基本单位")) or not str(m.get("基本单位") or "").strip():
+        return False
+    if any(k in str(m.get("名称") or "") for k in _PACK_KW):
+        return False
+    try:
+        if not float(m.get("基本数量") or 0):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return str(m.get("编码") or "") not in uk
+
+
+def _spec_kg_hint(spec):
+    """规格里自己写了比重的(「1L=0.997kg」「10L*1.035=10.35KG」) → 每升千克数；认不出返回 None。只当提示，不自动用。"""
+    t = str(spec or "")
+    m = re.search(r"(?<![\d.])1\s*[lL升]\s*[=＝]\s*(\d+(?:\.\d+)?)\s*(?:kg|KG|Kg|千克)", t) or re.search(r"\d+\s*[lL升]\s*[*×xX]\s*(\d+(?:\.\d+)?)\s*[=＝]", t)
+    if not m:
+        return None
+    f = float(m.group(1))
+    return f if 0.3 <= f <= 3 else None
+
+
 def _wt_range(carrier):
     """该承运商的毛重比允许范围 (下限, 上限)；没配返回 None=默认差 2% 以内。存供应商档案 logistics_suppliers.wt_lo/wt_hi。"""
     sup = next((x for x in (db.list_logi_suppliers() or []) if x.get("short") == carrier), None) or {}
@@ -2417,6 +2468,7 @@ def _box_docs(rsub, carrier):
     pmap = {(_car_norm(x.get("car")), x.get("unit")): float(x.get("price") or 0) for x in (_sp.get("shuttle_prices") or [])}
     # 毛重比允许范围(基础设置·供应商列表，V2.763)：配了就按 账单重量÷金蝶净重 落在范围内算一致；没配走默认(差 2% 以内)
     wt_rng = _wt_range(carrier)
+    uk = _unit_kg()
     docs = []
     for r in rsub:
         d0 = (r.get("doc_no") or "").split("+")[0]
@@ -2434,17 +2486,14 @@ def _box_docs(rsub, carrier):
         use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
-            per = []
-            for m in lines:
-                u = str(m.get("基本单位") or "")
-                try:
-                    bw = float(m.get("基本数量") or 0)
-                except (TypeError, ValueError):
-                    bw = 0.0
-                per.append(bw if ("千克" in u or "kg" in u.lower()) else 0.0)
+            per = [_m_kg(m, uk) for m in lines]     # 千克计量的取基本数量；按升/个计量的按单位换算表折(V2.865)，没填换算的算 0
             kd_sum = round(sum(per), 2)
             wbase = chg_wt if chg_wt else kd_sum
             bill_amt, bill_unit, kd_unit, mode_cn = wbase, "千克", "千克", "按重量"
+            if any(_unit_gap(m, uk) for m in lines):
+                mode_cn = "按重量 · 有物料金蝶按%s计量，没填单位换算" % "/".join(dict.fromkeys(str(m.get("基本单位")) for m in lines if _unit_gap(m, uk)))
+            elif any(not _is_kg(m.get("基本单位")) and _m_kg(m, uk) for m in lines):
+                mode_cn = "按重量 · %s已折千克" % "/".join(dict.fromkeys(str(m.get("基本单位")) for m in lines if not _is_kg(m.get("基本单位")) and _m_kg(m, uk)))
             if wt_rng and kd_sum:
                 cnt_state = "ok" if wt_rng[0] - 1e-9 <= wbase / kd_sum <= wt_rng[1] + 1e-9 else "qtydiff"
             else:
@@ -2533,12 +2582,7 @@ def _box_docs(rsub, carrier):
             kgs = []
             for m in lines:
                 ispack = any(k in str(m.get("名称") or "") for k in _PACK_KW)
-                u = str(m.get("基本单位") or "")
-                try:
-                    kg = float(m.get("基本数量") or 0)
-                except (TypeError, ValueError):
-                    kg = 0.0
-                kgs.append(0.0 if ispack else (kg if ("千克" in u or "kg" in u.lower()) else 0.0))
+                kgs.append(0.0 if ispack else _m_kg(m, uk))     # 运费分摊的重量也按折后千克
             kgbase = sum(kgs)
             nnp = sum(1 for x in kgs if x)  # 非包材(有kg)物料数，用于kgbase=0时兜底均摊
             for i, m in enumerate(lines):
@@ -2567,6 +2611,9 @@ def _box_docs(rsub, carrier):
                 mrows.append({**base, "party": m.get("往来") or "", "code": m.get("编码"), "name": m.get("名称"),
                               "base_qty": bq, "base_unit": mku(m),
                               "base_kg": base_kg, "kg_unit": m.get("基本单位"), "is_pack": ispack,
+                              "unit_gap": _unit_gap(m, uk),                                   # 不按千克计量、还没填换算
+                              "kg_eq": (round(_m_kg(m, uk), 2) if not _is_kg(m.get("基本单位")) and _m_kg(m, uk) else None),   # 折后千克
+                              "kg_per": (uk.get(str(m.get("编码") or "")) if not _is_kg(m.get("基本单位")) else None),
                               "kd": kd or None, "spec": m.get("规格"),
                               "fee": fline, "unit_fee": round(fline / kg, 2) if kg else None,
                               "sales": round(sales, 2) if sales is not None else None,
@@ -2784,8 +2831,14 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 dc[k] = dc.get(k, 0) + 1
             dc["all"] = len(pool)
             dc["feediff"] = sum(1 for x in pool if x.get("fee_chk") == "diff")    # 费用类型 物流部填≠系统判(V2.735)
+            _gap = {}
+            for x in pool:
+                for m in x["materials"]:
+                    if m.get("unit_gap"):
+                        _gap.setdefault(m.get("code"), set()).add(x["doc_no"])
+            unit_gap = {"n_mat": len(_gap), "n_doc": len({d for ds in _gap.values() for d in ds})}
         else:
-            ex_all = None
+            ex_all, unit_gap = None, None
             pool = _box_docs(sl, carrier)
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
@@ -2830,7 +2883,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "nodoc": nodoc}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "nodoc": nodoc, "unit_gap": unit_gap}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
@@ -3226,6 +3279,88 @@ def review_dim_options(request: Request):
     if all(out[k] for k in ("acct", "fee", "dept", "biz", "proj")):
         _DIMOPT_CACHE["v"] = (out, _t.time())
     return out
+
+
+@router.get("/api/logistics-review/unit-kg")
+def review_unit_kg(request: Request, carrier: str = "", period: str = ""):
+    """单位换算表：这家这月账单的金蝶单据里，不按千克计量的物料(包材除外)各一行——金蝶单位、本月数量、涉及几张单、
+    规格里自己写的比重、账单实际是按多少折的(一张单里只有一种这类物料时能反推)、现在填的换算；另附其它已填过换算的物料。只读。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    saved = db.get_setting(_UNIT_KG_KEY, None) or {}
+    uk = _unit_kg()
+    items = {}
+    if carrier and period:
+        with db._engine.connect() as c:
+            rows = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+        if len({(r.get("doc_no") or "").split("+")[0] for r in rows}) > _FULL_DOCS:
+            return JSONResponse({"ok": False, "msg": "这家单据太多，没法整家列出来；先在逐单表里看哪张标了「没填单位换算」"}, status_code=400)
+        import time as _t
+        cc = _ACCR_CACHE.get(("view", carrier, period))
+        pool = cc[0] if (cc and _t.time() - cc[2] < 600) else _box_docs(rows, carrier)
+        for x in pool:
+            ms = [m for m in x["materials"] if m.get("code") and m.get("kg_unit") and not _is_kg(m.get("kg_unit")) and not m.get("is_pack") and m.get("base_kg")]
+            if not ms or x.get("bill_unit") != "千克":
+                continue
+            kg_part = sum(float(m.get("base_kg") or 0) for m in x["materials"] if _is_kg(m.get("kg_unit")))
+            one = len({m["code"] for m in ms}) == 1
+            qsum = sum(float(m.get("base_kg") or 0) for m in ms)
+            for m in ms:
+                it = items.setdefault(m["code"], {"code": m["code"], "name": m.get("name"), "spec": m.get("spec"), "unit": m.get("kg_unit"),
+                                                  "qty": 0.0, "docs": set(), "implied": []})
+                it["qty"] += float(m.get("base_kg") or 0)
+                it["docs"].add(x["doc_no"])
+            if one and qsum and not x.get("trips"):
+                items[ms[0]["code"]]["implied"].append(round((float(x.get("bill_amt") or 0) - kg_part) / qsum, 4))
+    out = []
+    for it in items.values():
+        imp = sorted(it.pop("implied"))
+        sv = saved.get(it["code"]) or {}
+        out.append({**it, "qty": round(it["qty"], 2), "docs": len(it["docs"]), "kg": uk.get(it["code"]), "by": sv.get("by"), "at": sv.get("at"),
+                    "hint_spec": _spec_kg_hint(it.get("spec")),
+                    "hint_bill": (imp[len(imp) // 2] if imp else None), "hint_bill_n": len(imp),
+                    "hint_bill_same": bool(imp) and abs(imp[-1] - imp[0]) <= 0.002})
+    out.sort(key=lambda x: (x["kg"] is not None, str(x["unit"]), str(x["code"])))
+    others = [{"code": k, "name": (v or {}).get("name"), "unit": (v or {}).get("unit"), "kg": uk.get(k), "by": (v or {}).get("by"), "at": (v or {}).get("at")}
+              for k, v in sorted(saved.items()) if k not in items and uk.get(k)]
+    return {"ok": True, "carrier": carrier, "period": period, "items": out, "others": others}
+
+
+@router.post("/api/logistics-review/unit-kg")
+async def review_unit_kg_set(request: Request):
+    """存单位换算：items=[{code, kg, unit, name}]，kg 留空/0＝删掉这条。按物料编码存，各家承运商各月共用；存完各家逐单视图缓存作废、按新换算重判。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    cur = dict(db.get_setting(_UNIT_KG_KEY, None) or {})
+    log = []
+    for it in (b.get("items") or [])[:500]:
+        code = str(it.get("code") or "").strip()
+        if not code:
+            continue
+        raw = it.get("kg")
+        try:
+            f = float(raw) if raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "msg": "物料 %s 的换算不是数字：%s" % (code, raw)}, status_code=400)
+        if f < 0 or f > 100000:
+            return JSONResponse({"ok": False, "msg": "物料 %s 的换算 %s 不合理（每 1 个基本单位折多少千克）" % (code, raw)}, status_code=400)
+        old = float((cur.get(code) or {}).get("kg") or 0)
+        if abs(old - f) < 1e-12:
+            continue
+        if f:
+            cur[code] = {"kg": f, "unit": str(it.get("unit") or "")[:20], "name": str(it.get("name") or "")[:80], "by": _uname(u), "at": _now()}
+        else:
+            cur.pop(code, None)
+        log.append("%s %s 1%s＝%s千克（原 %s）" % (code, str(it.get("name") or "")[:20], it.get("unit") or "", ("%g" % f) if f else "不换算", ("%g" % old) if old else "没填"))
+    if log:
+        db.set_setting(_UNIT_KG_KEY, cur)
+        db.audit(_uname(u), "物流复核-单位换算", "%d 种物料" % len(log), "；".join(log)[:900])
+        for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and k and k[0] == "view"]:
+            _ACCR_CACHE.pop(k, None)
+    return {"ok": True, "changed": len(log)}
 
 
 @router.post("/api/logistics-review/wt-range")
