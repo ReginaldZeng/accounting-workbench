@@ -639,7 +639,11 @@ export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '', fi
 export const reviewSpec = (carrier) => j(`/api/logistics-review/spec?carrier=${encodeURIComponent(carrier)}`)
 export const reviewPriceCard = (carrier) => j(`/api/logistics-review/price-card?carrier=${encodeURIComponent(carrier)}`)
 export const reviewImportPriceCard = (carrier, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/price-card/import?carrier=${encodeURIComponent(carrier)}`, { method: 'POST', body: fd }) }
-export const reviewParseBill = (carrier, period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/parse?carrier=${encodeURIComponent(carrier)}&period=${period}`, { method: 'POST', body: fd }) }
+export const reviewParseBill = (carrier, period, file, opt = {}) => { const fd = new FormData(); fd.append('file', file)
+  const q = `carrier=${encodeURIComponent(carrier)}&period=${period}` + (opt.mode ? `&mode=${opt.mode}&src=${encodeURIComponent(opt.src || '')}${opt.force ? '&force=1' : ''}` : '')
+  return j(`/api/logistics-review/parse?${q}`, { method: 'POST', body: fd }) }
+export const reviewBills = (carrier, period) => j(`/api/logistics-review/bills?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
+export const reviewBillDelete = (carrier, period, src) => j('/api/logistics-review/bill-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ carrier, period, src }) })
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 
 export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)

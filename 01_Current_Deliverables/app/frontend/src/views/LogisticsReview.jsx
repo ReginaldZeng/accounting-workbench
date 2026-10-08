@@ -12,7 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
 import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
-import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, voucherPlans, voucherPreview } from '../api.js'
+import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -57,6 +57,71 @@ function DtChip({ reqs, onOpen }) {
 // 单位换算(V2.865，用户 2026-10-08「需要我们来换算」)：金蝶按升/个计量的物料(牛奶、稀奶油、印刷内袋)，按重量核量时和账单的千克比不了。
 //   金蝶物料档案里净重/毛重都是 0、没有单位换算记录，读不到现成的——由财务在这里填「每 1 升/个 折多少千克」，按物料编码存，各家各月共用。
 //   系统只给两个参考(规格里自己写的比重、这家账单实际是按多少折的)，点一下才采用，不替人定。可以写分数：0.445/200。
+// 账单弹窗(V2.871，用户 2026-10-08「点击上传账单解析，跳出弹窗，当前解析的是那几份，上传人和时间，替换按钮，删除按钮」)：
+//   先看清楚这家这月现在解析着哪几份，再决定是替换哪一份、删哪一份、还是新增一份——原来一点按钮就直接选文件，传完才知道换掉了谁。
+function BillsDlg({ carrier, period, onClose, onChanged, flash }) {
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState('')
+  const fileRef = useRef(null)
+  const want = useRef(null)          // 这次选文件是要干什么：{mode:'add'} / {mode:'replace', src}
+  const load = () => reviewBills(carrier, period).then(setD).catch(e => setErr(e.message))
+  useEffect(() => { load() }, [])
+  const nm = s => s || '（未标份名）'
+  const pick = w => { want.current = w; setErr(''); fileRef.current && fileRef.current.click() }
+  const send = (f, w, force) => {
+    setBusy(w.mode + (w.src || '')); setErr('')
+    reviewParseBill(carrier, period, f, { ...w, force })
+      .then(r => { flash(`已解析「${nm(r.bill_src)}」：明细 ${r.detail} 行${r.accrual ? `、汇总 ${r.accrual} 行` : ''}${r.replaced != null ? `；原来的「${nm(r.replaced)}」已换掉` : ''}`); load(); onChanged && onChanged() })
+      .catch(e => { if (e.status === 412) { if (window.confirm(e.message.replace(/\*\*/g, '') + '\n\n确定继续？')) return send(f, w, true) } else setErr(e.message) })
+      .finally(() => setBusy(''))
+  }
+  const onFile = e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f && want.current) send(f, want.current, false) }
+  const del = x => {
+    if (!window.confirm(`删除「${nm(x.src)}」这一份账单？\n\n明细 ${x.n_detail} 行${x.n_accrual ? `、汇总 ${x.n_accrual} 行` : ''}，金额 ${money(x.amount)}。\n删掉以后这一份的账单行就没有了，核对结论跟着重算；这一份里人工改过的归类也一起没了。要恢复只能重新上传原文件。`)) return
+    setBusy('del' + x.src); setErr('')
+    reviewBillDelete(carrier, period, x.src).then(() => { flash(`已删除「${nm(x.src)}」`); load(); onChanged && onChanged() }).catch(e => setErr(e.message)).finally(() => setBusy(''))
+  }
+  const bills = (d && d.bills) || []
+  const tot = bills.reduce((s, x) => s + (x.amount || 0), 0)
+  const off = !!busy || !!(d && d.locked)
+  return (
+    <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="fxdlg" style={{ width: 'min(1000px,100%)' }} role="dialog" aria-label="账单">
+        <div className="fxhead"><b>{carrier} {period} 的账单</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxsub">下面是这家这月<b>现在解析着的账单</b>，一份一行（一个文件里几张表算一份，份名＝表名）。「替换」只换那一份，别的不动；
+          人工改过的归类按单号带到新账单上。请款金额不会跟着变，账单金额改了要留意两边的差。</div>
+        {err && <div className="fxwarn">{err}</div>}
+        {d && d.locked && <div className="fxwarn">{d.locked}</div>}
+        {d && !d.has_spec && <div className="fxwarn">这家还没配取数说明，账单解析不了。</div>}
+        {!d && !err && <div className="fxsub">读取中…</div>}
+        {d && <>
+          {bills.length > 0 ? <table className="fxtbl blt"><colgroup><col style={{ width: '37%' }} /><col style={{ width: '11%' }} /><col style={{ width: '12%' }} /><col style={{ width: '25%' }} /><col style={{ width: '15%' }} /></colgroup>
+            <thead><tr><th>份（表名）· 原文件</th><th className="num">行数</th><th className="num">金额</th><th>上传人 · 时间 · 怎么来的</th><th>操作</th></tr></thead>
+            <tbody>{bills.map(x => <tr key={x.src}>
+              <td><b>{nm(x.src)}</b><div className="dim" style={{ fontSize: 12, wordBreak: 'break-all' }}>{x.file || '没留原件（V2.843 以前导入的）'}</div></td>
+              <td className="num">{x.n_detail}{x.n_accrual > 0 && <span className="dim"> + 汇总 {x.n_accrual}</span>}
+                <div className="dim" style={{ fontSize: 11.5 }}>{x.n_doc} 张单{x.n_nodoc > 0 ? ` · ${x.n_nodoc} 行没单号` : ''}</div></td>
+              <td className="num mono">{money(x.amount)}</td>
+              <td><b style={{ fontWeight: 600 }}>{x.by || '没记录'}</b>　<span className="mono" style={{ fontSize: 12 }}>{x.at}</span>
+                <div className="dim" style={{ fontSize: 11.5, wordBreak: 'break-all' }}>{x.origin ? x.origin.replace(/「[^」]*」$/, '') : '来源没记录'}</div></td>
+              <td style={{ whiteSpace: 'nowrap' }}>
+                <button className="btn sm" disabled={off} onClick={() => pick({ mode: 'replace', src: x.src })}>{busy === 'replace' + x.src ? '解析中…' : '替换'}</button>{' '}
+                <button className="btn sm" disabled={off} style={{ color: '#B3261E' }} onClick={() => del(x)}>{busy === 'del' + x.src ? '删除中…' : '删除'}</button></td></tr>)}
+              <tr><td className="num"><b>合计 {bills.length} 份</b></td><td></td><td className="num mono"><b>{money(tot)}</b></td><td colSpan="2"></td></tr></tbody></table>
+            : <div className="fxsub">这家这月还没有解析过账单。</div>}
+          <input ref={fileRef} type="file" accept=".xlsx,.xls" hidden onChange={onFile} />
+          <div className="fxbtns">
+            <button className="btn pri" disabled={off || !d.has_spec} onClick={() => pick({ mode: 'add' })}>{busy === 'add' ? '解析中…' : bills.length ? '上传新的一份' : '上传账单'}</button>
+            <button className="btn" onClick={onClose}>关闭</button>
+            <span className="dim" style={{ fontSize: 12 }}>一次传一个文件（.xlsx / .xls）。新文件和已有的某一份同名时，会先问你是不是要替换。</span>
+          </div>
+        </>}
+      </div>
+    </div>
+  )
+}
+
 function UnitKgDlg({ carrier, period, onClose, onSaved, flash }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -514,6 +579,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [pr, setPr] = useState(null)             // 打开的钉钉请款单
   const [scopeDlg, setScopeDlg] = useState(false) // 「哪些供应商算物流」弹窗
   const [unitDlg, setUnitDlg] = useState(false)   // 「单位换算」弹窗(升/个 折千克)
+  const [billDlg, setBillDlg] = useState(false)   // 「账单」弹窗(现在解析着哪几份、替换、删除、新增)
   const [scopeSum, setScopeSum] = useState(null)  // 总表头上那句：金蝶分组「…」N 家
   const loadScopeSum = () => reviewScope().then(r => setScopeSum({ n: r.n, names: (r.groups || []).filter(g => g.on).map(g => g.name || g.code), stale: r.stale })).catch(() => {})
   useEffect(() => { loadScopeSum() }, [])
@@ -882,6 +948,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .fxtbl th{background:#E7ECEF;font-weight:600;color:#1B2733}
       .lrv .fxtbl th:last-child{background:#FBF0DA;color:#8A5A00}
       .lrv .fxtbl th small{font-weight:400;color:#8A96A2}
+      .lrv .fxtbl.blt{table-layout:fixed}.lrv .fxtbl.blt th:last-child{background:#E7ECEF;color:#1B2733}.lrv .fxtbl.blt td{vertical-align:top;white-space:normal;overflow-wrap:anywhere}.lrv .fxtbl.blt .btn.sm{padding:3px 10px}
       .lrv .fxtbl.ukt th:last-child{background:#FBF0DA;color:#8A5A00}.lrv .fxtbl.ukt td{vertical-align:top}.lrv .fxtbl.ukt input{padding:3px 6px;border:1px solid #CBD5DC;border-radius:5px;font:inherit}
       .lrv .fxtbl td:first-child{width:72px;color:#5E6B78;white-space:nowrap}
       .lrv .fxtbl td:first-child small{display:block;font-size:11px}
@@ -1289,7 +1356,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               毛重比 {d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认±2%'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={() => setUnitDlg(true)} title="金蝶按升、按个计量的物料（牛奶、稀奶油、内袋），填每 1 升/个 折多少千克，才能和账单的千克比。按物料存，各家各月共用。">
               单位换算·箱规{d.unit_gap && d.unit_gap.n_mat > 0 ? <b className="diffbad"> {d.unit_gap.n_mat} 种没填</b> : ''} ⚙</button>}
-            <label className="btn sm">上传账单解析<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewParseBill, carrier, period)} /></label>
+            <button className="btn sm" onClick={() => setBillDlg(true)} title="看这家这月现在解析着哪几份账单（谁传的、什么时候），替换、删除或新增一份">上传账单解析</button>
             <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee} title="重新从金蝶取出库单物料，刷新核量">{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
             <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
             <input type="search" placeholder="搜单号/客户/物料" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
@@ -1311,6 +1378,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           </div>}
           {d && d.unit_gap && d.unit_gap.n_mat > 0 && <div className="adjnote">有 <b>{d.unit_gap.n_mat}</b> 种物料金蝶不是按千克计量（按升、按个），还没填单位换算，涉及 <b>{d.unit_gap.n_doc}</b> 张单——
             这些单的金蝶重量没算全，多半会挂在「数量不符」。<button className="lnk" onClick={() => setUnitDlg(true)}>去填单位换算</button></div>}
+          {billDlg && <BillsDlg carrier={carrier} period={period} onClose={() => setBillDlg(false)} onChanged={() => { setGroup('ex'); setPage(1); load(); refetchL() }} flash={flash} />}
           {unitDlg && <UnitKgDlg carrier={carrier} period={period} onClose={() => setUnitDlg(false)} onSaved={() => { load(); refetchL() }} flash={flash} />}
           {(() => {     // 没有金蝶单号的账单行：不列成单据，只留一行数。金额为 0 的(迅鸽逐单表里不带钱的仓储行，钱在汇总行)不提
             const nd = ((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)

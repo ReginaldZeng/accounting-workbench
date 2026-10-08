@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
-from sqlalchemy import select, insert, delete, update, func
+from sqlalchemy import select, insert, delete, update, func, text
 
 from core import JSONResponse, _require_perm, db
 import kingdee_client as kc
@@ -404,20 +404,162 @@ def price_card_read(request: Request, carrier: str = "迅鸽"):
 
 
 # ---------- 上传账单解析 → 中间表 ----------
+def _src_scope(carrier, period, src):
+    """这家这月某一份账单的行(登记制的行不是账单导进来的，不算)。src 空＝没标份名的那份。"""
+    sc = (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register"))
+    return sc & ((BL.c.bill_src == src) if src else ((BL.c.bill_src.is_(None)) | (BL.c.bill_src == "")))
+
+
+def _bill_sources(carrier, period):
+    """这家这月现在解析着哪几份账单(V2.871，用户「点击上传账单解析，跳出弹窗，当前解析的是那几份，上传人和时间，替换按钮，删除按钮」)。
+    → [{src, n_detail, n_accrual, amount, n_doc, n_nodoc, file, origin, by, at}]。
+    上传人/时间/原文件名：先看导入时存的原件记录(V2.843 起才有)；没有的，去操作日志里找同一分钟、明细行数对得上的那条「解析账单」；再没有就只给账单行的导入时间。"""
+    with db._engine.connect() as c:
+        rows = c.execute(select(BL.c.bill_src, BL.c.grain, BL.c.amount, BL.c.doc_no, BL.c.created_at).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register")))).all()
+        raws = c.execute(select(BR.c.bill_src, BR.c.name, BR.c.origin, BR.c.created_by, BR.c.created_at, BR.c.size).where(
+            (BR.c.carrier == carrier) & (BR.c.period == period)).order_by(BR.c.id)).all()
+        try:
+            logs = c.execute(text("select ts, operator, detail from audit_log where action='物流复核-解析账单' and target=:t order by id desc limit 200"),
+                             {"t": "%s %s" % (carrier, period)}).all()
+        except Exception:
+            logs = []
+    g = {}
+    for src, grain, amt, doc, at in rows:
+        k = src or ""
+        x = g.setdefault(k, {"src": k, "n_detail": 0, "n_accrual": 0, "amt_d": 0.0, "amt_a": 0.0, "docs": set(), "n_nodoc": 0, "at": ""})
+        if grain == "accrual":
+            x["n_accrual"] += 1
+            x["amt_a"] += float(amt or 0)
+        else:
+            x["n_detail"] += 1
+            x["amt_d"] += float(amt or 0)
+            d0 = (doc or "").split("+")[0]
+            if d0 and d0 != "无单据":
+                x["docs"].add(d0)
+            else:
+                x["n_nodoc"] += 1
+        x["at"] = max(x["at"], str(at or ""))
+    rawby = {(r[0] or ""): r for r in raws}
+    out = []
+    for k, x in sorted(g.items()):
+        it = {"src": k, "n_detail": x["n_detail"], "n_accrual": x["n_accrual"], "n_doc": len(x["docs"]), "n_nodoc": x["n_nodoc"],
+              "amount": round(x["amt_a"] if x["n_accrual"] else x["amt_d"], 2), "at": x["at"][:16], "by": "", "file": "", "origin": "", "size": None}
+        rw = rawby.get(k)
+        if rw:
+            it.update(file=rw[1] or "", origin=rw[2] or "", by=rw[3] or "", at=str(rw[4] or it["at"])[:16], size=rw[5])
+        else:
+            hit = [l for l in logs if str(l[0] or "")[:16] == it["at"] and ("明细 %d 行" % x["n_detail"]) in str(l[2] or "")]
+            if len(hit) == 1:
+                dt = str(hit[0][2] or "")
+                it.update(by=hit[0][1] or "", origin=dt.split("：明细")[0] if "：明细" in dt else "")      # 早期的日志没写来源
+        out.append(it)
+    return out
+
+
+@router.get("/api/logistics-review/bills")
+def review_bills(request: Request, carrier: str = "", period: str = ""):
+    """账单弹窗：这家这月现在解析着哪几份账单。只读。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    sg = _signed(carrier, period)
+    spec = _load_spec(carrier) or {}
+    return {"ok": True, "carrier": carrier, "period": period, "bills": _bill_sources(carrier, period),
+            "locked": ("本月已登记复核（%s %s），撤销登记后才能换账单" % (sg.get("reviewer") or "", sg.get("signed_at") or "")) if sg else "",
+            "has_spec": bool(spec), "multi": bool(spec.get("multi_file") or spec.get("src_from_sheets")),
+            "register": spec.get("review_mode") == "register"}
+
+
+@router.post("/api/logistics-review/bill-delete")
+async def review_bill_delete(request: Request):
+    """删掉这家这月的某一份账单(账单行＋存下的原件)。已登记复核的月份不许删。留操作日志(行数、金额)。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period, src = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("src") or "").strip()
+    if not carrier or not period:
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    old = next((x for x in _bill_sources(carrier, period) if x["src"] == src), None)
+    if not old:
+        return JSONResponse({"ok": False, "msg": "没有这一份账单（可能已经被删或被替换了），刷新看看"}, status_code=404)
+    with db._engine.begin() as c:
+        n = c.execute(delete(BL).where(_src_scope(carrier, period, src))).rowcount
+        c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) &
+                                   ((BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))))
+    db.audit(_uname(u), "物流复核-删除账单", "%s %s" % (carrier, period),
+             "「%s」：明细 %d 行 / 汇总 %d 行，金额 %.2f；原文件 %s（%s %s 导入）" % (src or "（未标份名）", old["n_detail"], old["n_accrual"], old["amount"],
+                                                                   old.get("file") or "—", old.get("by") or "—", old.get("at") or ""))
+    _bust(carrier, period)
+    return {"ok": True, "deleted": n, "bills": _bill_sources(carrier, period)}
+
+
 @router.post("/api/logistics-review/parse")
-async def review_parse(request: Request, carrier: str = "迅鸽", period: str = ""):
+async def review_parse(request: Request, carrier: str = "迅鸽", period: str = "", mode: str = "", src: str = "", force: int = 0):
+    """上传一份账单解析。mode 空＝老用法(表名对上哪份就换哪份)；
+    mode=add 新增一份：表名和已有的某一份一样时先不动、回 412 让人确认(force=1 才替换)；
+    mode=replace 替换 src 这一份：新文件的表名变了也照样换(先删旧的那份、人工改过的归类按单号带到新行上)；
+      新文件的表名对上的是**另一份**时回 412 让人确认。已登记复核的月份不许换。"""
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     spec = _load_spec(carrier)
     if not spec:
         return JSONResponse({"ok": False, "msg": "该承运商还没配取数说明"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
     data = await _read_upload(request)
     if not data:
         return JSONResponse({"ok": False, "msg": "未收到文件"}, status_code=400)
-    r = import_bill(carrier, period, data, u["name"], fname=getattr(request.state, "upload_name", "") or "")
+    fname = getattr(request.state, "upload_name", "") or ""
+    src = (src or "").strip()
+    keep, dropped = {}, None
+    if mode in ("add", "replace"):
+        sp2 = dict(spec, period=period)
+        try:
+            pre = intake.parse_bill(sp2, data)
+        except Exception:
+            return JSONResponse({"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}, status_code=400)
+        if not pre.get("detail") and not pre.get("accrual"):
+            return JSONResponse({"ok": False, "msg": "这个文件里没认出费用明细表（表名或表头和取数说明对不上），没有动现有的账单"}, status_code=400)
+        new_src = (pre.get("bill_src") or "").strip()
+        have = {x["src"]: x for x in _bill_sources(carrier, period)}
+        nm = lambda v: "「%s」" % (v or "（未标份名）")
+        if mode == "add" and new_src in have and not force:
+            return JSONResponse({"ok": False, "need_confirm": True, "msg": "这个文件解析出来是 %s，和已有的一份同名（现有 %d 行、%.2f）。继续的话会**替换**那一份，不是新增。" % (
+                nm(new_src), have[new_src]["n_detail"] + have[new_src]["n_accrual"], have[new_src]["amount"])}, status_code=412)
+        if mode == "replace":
+            if src not in have:
+                return JSONResponse({"ok": False, "msg": "要替换的那一份 %s 已经不在了，刷新看看" % nm(src)}, status_code=404)
+            if new_src != src and new_src in have and not force:
+                return JSONResponse({"ok": False, "need_confirm": True, "msg": "这个文件解析出来是 %s，对上的是**另一份**已有的账单，不是你要替换的 %s。继续的话：%s 被这个文件替换，%s 被删掉。" % (
+                    nm(new_src), nm(src), nm(new_src), nm(src))}, status_code=412)
+            if new_src != src:        # 表名变了：旧的那份要删；人工改过的归类先记下，导完按单号带过去
+                with db._engine.begin() as c:
+                    for o in c.execute(select(BL.c.doc_no, BL.c.subj_ovr, BL.c.fee_ovr, BL.c.ovr_reason).where(_src_scope(carrier, period, src))).all():
+                        if o[0] and (o[1] or o[2] or o[3]):
+                            keep.setdefault(o[0], (o[1], o[2], o[3]))
+                    c.execute(delete(BL).where(_src_scope(carrier, period, src)))
+                    c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) &
+                                               ((BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))))
+                dropped = have[src]
+    r = import_bill(carrier, period, data, u["name"], origin=("手工上传·替换" if mode == "replace" else "手工上传"), fname=fname)
     if not r.get("ok"):
         return JSONResponse(r, status_code=400)
+    if keep:
+        with db._engine.begin() as c:
+            for dno, (so, fo, rs) in keep.items():
+                c.execute(update(BL).where(_src_scope(carrier, period, (r.get("bill_src") or "").strip()) & (BL.c.doc_no == dno)).values(subj_ovr=so, fee_ovr=fo, ovr_reason=rs))
+        _bust(carrier, period)
+    if dropped:
+        db.audit(u["name"], "物流复核-删除账单", "%s %s" % (carrier, period), "替换时表名变了，旧的那份「%s」一并删掉：明细 %d 行 / 汇总 %d 行，金额 %.2f；换成「%s」" % (
+            src or "（未标份名）", dropped["n_detail"], dropped["n_accrual"], dropped["amount"], r.get("bill_src") or "（未标份名）"))
+    r["bills"] = _bill_sources(carrier, period)
+    r["replaced"] = (src if dropped else None)
     return r
 
 
