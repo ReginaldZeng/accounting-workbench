@@ -118,7 +118,63 @@ def box_prices_from(wb, spec):
     return out
 
 
-def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
+def merged_rows(data):
+    """xlsx 里跨行的合并单元格 → {表名: {列号(0 起): {行号(1 起): 合并块首行的行号}}}，只记首行以下的那几行。
+    V2.864(用户看天鹰 8 月不符的单「是不是有一些合并单元格啊」)：物流部把同一张单的两三行在「金蝶单号」列合并成一格，
+    下面几行读出来是空的；这几行自己又写了序号、日期，原来按「日期序号齐全却没单号＝漏填」甩成无单据，那张单的重量就少了一半。
+    合并单元格是物流部明写的「这几行同一张单」，比按空不空去猜可靠。直接读 xlsx 里的 mergeCells(账单是只读方式打开的，拿不到合并信息；
+    恒茂入库页带一百多万行空格式，也不能整本正常打开)，按块读、不把整张表放进内存。老格式 .xls、读不出来的一律当没有合并。"""
+    import zipfile
+    from io import BytesIO
+    from html import unescape
+    out = {}
+    try:
+        zf = zipfile.ZipFile(BytesIO(bytes(data)) if isinstance(data, (bytes, bytearray)) else data)
+        attr = lambda tag, k: (re.search(r'(?:^|\s)%s="([^"]*)"' % k, tag) or [None, ""])[1]      # 不用 XML 解析器(账单是外来文件)，两个小清单用正则抠
+        rels = {attr(t, "Id"): attr(t, "Target") for t in re.findall(r"<Relationship\b[^>]*>", zf.read("xl/_rels/workbook.xml.rels")[:2000000].decode("utf-8", "ignore"))}
+        names = set(zf.namelist())
+        pat = re.compile(rb'mergeCell\s+ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"')
+        for tag in re.findall(r"<(?:\w+:)?sheet\b[^>]*>", zf.read("xl/workbook.xml")[:2000000].decode("utf-8", "ignore")):
+            tgt = rels.get(attr(tag, r"\w+:id"), "")
+            path = tgt.lstrip("/") if tgt.startswith("/") else "xl/" + tgt
+            if path not in names:
+                continue
+            found, tail = set(), b""
+            with zf.open(path) as fh:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    buf = tail + chunk
+                    if b"mergeCell" in buf:
+                        found.update(m.groups() for m in pat.finditer(buf))
+                    tail = buf[-200:]
+                    if len(found) > 20000:
+                        break
+            cols = {}
+            for c1, r1, c2, r2 in found:
+                r1, r2 = int(r1), int(r2)
+                if r2 <= r1 or r2 - r1 > 2000:
+                    continue
+                for ci in range(_col_idx(c1), _col_idx(c2) + 1):
+                    d = cols.setdefault(ci, {})
+                    for rr in range(r1 + 1, r2 + 1):
+                        d[rr] = r1
+            if cols:
+                out[unescape(attr(tag, "name"))] = cols
+    except Exception:
+        return {}
+    return out
+
+
+def _col_idx(letters):
+    n = 0
+    for ch in letters.decode() if isinstance(letters, bytes) else letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
     """detail 角色 sheet → 逐单据行。按 spec 的 doc_col/amount_cols/qty_col/wt_col/prov_col/carrier_sub_col 认列。
     spec.fee_parts={分项名: [列名…]} 时按分项求和记 sub_fees；spec.box_col 时按箱型查汇总页物料单价加「箱子」分项(迅鸽 V2.720)。"""
     # 逐行读、连续 300 行空就停(恒茂入库页带 104 万行空格式，整表 list 会拖死)
@@ -179,6 +235,12 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None):
                 continue                  # 单号列里不像单号的(账单底下的透视小计「总计」「孝感市…公司」)不收(V2.762)
             # V2.820(诚煜)：单号列里写的是说明(「延迟扣款，订单255083234」)，是一笔真的扣款——按无单据收，不沿用上一行的单号
             loose, doc = doc, _s(sp.get("doc_default", ""))
+        if c_doc is not None and not doc and not loose and merged and merged.get(c_doc, {}).get(ri):
+            # 单号这一格是合并单元格的下半截：就是上面那张单(V2.864)，不看这行写没写日期序号
+            top = merged[c_doc][ri]
+            v = _s(rows[top - 1][c_doc]) if top - 1 < len(rows) and c_doc < len(rows[top - 1]) else ""
+            if v and v not in blank_docs and (not sp.get("doc_re") or re.match(sp["doc_re"], v)):
+                doc = v
         if c_doc is not None and not doc and sp.get("doc_ffill") and last_doc:
             # 单号只写在首行、下面几行沿用(恒茂入库：一张调拨单拆几个批次)。
             # doc_ffill_if_blank=[列名…]：这些列里有空的才算续行(天鹰：续行不写日期/序号；日期序号齐全却没单号的是漏填，不能并到上一单，V2.765)
@@ -425,6 +487,7 @@ def parse_bill(spec, data):
     """按取数说明解析整本账单 xlsx/xls → {'detail':[...], 'accrual':[...], 'skipped':[表名], 'period':...}。
     data=bytes 或路径。period 从 spec 传入或调用方补。"""
     wb = open_book(data)
+    mg = merged_rows(data)
     carrier = spec.get("carrier", "")
     period = spec.get("period", "")
     detail, accrual, skipped = [], [], []
@@ -442,7 +505,7 @@ def parse_bill(spec, data):
             skipped.append(ws.title)
             continue
         if sp["role"] == "detail":
-            got = parse_detail_sheet(sp, ws, period, carrier, boxp)
+            got = parse_detail_sheet(sp, ws, period, carrier, boxp, mg.get(ws.title))
             detail += got
             if sp.get("per_row_fees"):
                 per_row.append((sp, got))

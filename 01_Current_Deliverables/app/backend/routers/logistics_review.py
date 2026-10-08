@@ -2400,12 +2400,11 @@ def _box_docs(rsub, carrier):
     _rev = "weight" if carrier in _WEIGHT_CARRIERS else ("qty" if carrier in _QTY_CARRIERS else "box")
     by_form = {}
     for r in rsub:
-        d0 = (r.get("doc_no") or "").split("+")[0]
-        if not d0 or d0 == "无单据":
-            continue
-        pre = "".join(ch for ch in d0 if ch.isalpha())
-        for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
-            by_form.setdefault(form, set()).add(d0)
+        # V2.864：一格里写了两张单号的(天鹰「CGRK179615/CGRK179614」一车卸两张入库单)，金蝶量要把几张都加上；原来只取第一张，账单 11 吨对金蝶 8.275 吨
+        for dx in [x for x in (r.get("doc_no") or "").split("+") if x and x != "无单据"]:
+            pre = "".join(ch for ch in dx if ch.isalpha())
+            for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
+                by_form.setdefault(form, set()).add(dx)
     mats = {}
     if by_form:
         try:
@@ -2423,7 +2422,7 @@ def _box_docs(rsub, carrier):
         d0 = (r.get("doc_no") or "").split("+")[0]
         if d0 == "无单据":          # 迅鸽退货/仓储/卸货行单号列写的字面量"无单据"，与空单号同样按无单据处理
             d0 = ""
-        lines = mats.get(d0) or []
+        lines = [m for dx in (r.get("doc_no") or "").split("+") if dx and dx != "无单据" for m in (mats.get(dx) or [])] if d0 else []
         billcnt = float(r.get("qty") or 0)
         fee = float(r.get("amount") or 0)
         biz = r.get("bizline") or _bizline_of(r.get("annot"))
