@@ -236,7 +236,7 @@ class DouyinApiTests(unittest.TestCase):
     def test_checklist_always_has_four_douyin_kinds_and_reports_sync_state(self):
         self.db.set_setting('ec_preparation_rules', {SHOP: []})                                # 基础资料页那一行被动过：抖音店照样四类
         j = self.cards()
-        self.assertEqual([c['kind'] for c in j['sources']], ['dy_settle', 'dy_ledger', 'dy_orders', 'dy_platform'])
+        self.assertEqual([(c['kind'], bool(c.get('optional'))) for c in j['sources']], [('dy_settle', False), ('dy_ledger', False), ('dy_orders', False), ('dy_platform', False), ('dy_returns', True)])
         self.assertTrue(all(c['purpose'] for c in j['sources']))
         self.assertEqual((j['douyin_ar'], j['douyin_job']), (None, {'running': False, 'error': ''}))
         self.sync_ar([self.bill('AR1', '2026-09-22', 49.9, P)])
@@ -270,7 +270,7 @@ class DouyinApiTests(unittest.TestCase):
         got = {b['no']: b['pstate'] for b in first['rows']}
         self.assertEqual(got['ARQ'], '买家还没确认收货（按 10-05 的订单导出）'); self.assertEqual(got['ARR'], '')       # 红字不说“钱来不来”
         self.assertEqual((detail['platform_gross'], detail['platform_unshipped'], detail['platform_closed']), (33.0, 0.0, False))
-        self.assertEqual(self.client.get('/api/ec/douyin/settle', params=args).json()['sources'], {'dy_settle': 1, 'dy_ledger': 0, 'dy_orders': 0, 'dy_platform': 2, 'dy_insure': 0})
+        self.assertEqual(self.client.get('/api/ec/douyin/settle', params=args).json()['sources'], {'dy_settle': 1, 'dy_ledger': 0, 'dy_orders': 0, 'dy_platform': 2, 'dy_insure': 0, 'dy_returns': 0})
         self.up((NEW, platform_csv(q_status='已关闭', q_after='退款成功')))                                             # 资料有了新版本：缓存作废，重算
         again = {b['no']: b['pstate'] for b in self.client.get('/api/ec/douyin/bills', params=args).json()['rows']}
         self.assertEqual(again['ARQ'], '平台订单已关闭（退款成功），这笔钱不会结算了（按 10-08 的订单导出）')
@@ -304,6 +304,25 @@ class DouyinApiTests(unittest.TestCase):
         self.assertEqual(sorted((b['no'], b['cat'], b['hold']) for b in get('bills', q=P)['rows']), [('AR1', 'ok', 'red'), ('AR1R', 'ok', 'red')])   # 对得上，但清单上要标出系统不推
         self.assertIn('红字', get('order', order=P)['hold'])                                                        # 抽屉里也说
         self.assertEqual(get('order', order='6917926768823643799')['hold'], '')
+
+    def test_wdt_returns_upload_is_optional_and_annotates_list_and_drawer(self):
+        head = '退换单号,类型,退款阶段,退换原因,处理状态,平台退款状态,货品名称,货品编号,登记数量,入库数量,登记时间,店铺,原始单号,原始子订单号,分摊退款金额,退款总额,退款成功时间'
+        body = f'TK1,退款不退货,售后,与商家协商一致退款,已完成,退款成功,辣丝丝,="A1",1,0,="2026-09-27 10:00:00",{SHOP},="{P}",="{P}",27.7800,27.7800,="2026-09-27 10:00:05"'
+        before = self.cards()
+        got = self.up(('DL.csv', settle_csv(FIRST_HALF, SECOND_HALF)), ('退换单.csv', (head + '\n' + body + '\n合计:,NA,NA,NA,NA,NA,NA,NA,1,0,NA,NA,NA,NA,27.78,27.78,NA\n').encode('gb18030')))
+        self.assertEqual([(r['kind'], r['rows']) for r in got], [('dy_settle', 2), ('dy_returns', 1)])
+        after = self.cards()
+        card = next(c for c in after['sources'] if c['kind'] == 'dy_returns')
+        self.assertEqual((card['optional'], card['available'], card['rows'], bool(card['purpose'])), (True, True, 1, True))
+        self.assertEqual([c['kind'] for c in after['sources'] if not c.get('optional')], ['dy_settle', 'dy_ledger', 'dy_orders', 'dy_platform'])
+        self.assertEqual(after['progress']['required'], before['progress']['required'])                               # 不算进齐套
+        self.sync_ar([self.bill('AR1', '2026-09-22', 29.71, P)])                                                          # 抖音结算时退了 27.78，金蝶只有蓝字
+        get = lambda path, **kw: self.client.get('/api/ec/douyin/' + path, params=dict({'period': '2026-09', 'shop': SHOP}, **kw)).json()
+        row = get('bills', q=P)['rows'][0]
+        self.assertEqual(row['cat'], 'mismatch'); self.assertIn('登记了退款不退货 27.78', row['rnote']); self.assertIn('要手工补红字 27.78', row['rnote'])
+        d = get('order', order=P)
+        self.assertEqual(([(r['tk'], r['amt'], r['back']) for r in d['returns']], d['rnote']), ([('TK1', 27.78, 0.0)], row['rnote']))
+        self.assertEqual(get('order', order='6917926768823643799')['returns'], [])
 
     # ---- 抽屉里现查金蝶 ----
     def test_order_bills_only_asks_for_known_bills_caches_and_never_leaks_errors(self):

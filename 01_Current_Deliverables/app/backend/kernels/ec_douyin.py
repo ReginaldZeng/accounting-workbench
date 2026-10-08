@@ -12,7 +12,8 @@ import zipfile
 from collections import defaultdict
 
 KINDS = {'dy_settle': '抖音动账明细（订单维度）', 'dy_ledger': '抖音账户流水（带余额）', 'dy_orders': '旺店通订单明细（认合单）',
-         'dy_platform': '抖音平台订单明细（抖店订单导出）', 'dy_insure': '抖音运费险保费明细（逐单）'}
+         'dy_platform': '抖音平台订单明细（抖店订单导出）', 'dy_insure': '抖音运费险保费明细（逐单）',
+         'dy_returns': '旺店通退换单（退款不退货等）'}
 INSURE_SCENE = '退换货运费险'               # 账户流水里这一种，一笔流水是一批保单；逐单的在同一个压缩包的「保费支出」里
 SETTLE = '货款结算入账'
 # 结算时从货款里直接扣掉的费用列（文件里是负数）
@@ -27,6 +28,8 @@ _SETTLE_HEAD = {'动帐流水号', '动账方向', '动账金额', '动账场景
 _LEDGER_HEAD = {'动账流水号', '账户方向', '动账金额(元)', '动账场景', '账户余额(元)'}
 _INSURANCE_HEAD = {'保险单号', '动账流水号', '金额(元)'}
 _INSURE_FULL = _INSURANCE_HEAD | {'关联子订单号', '动账时间'}        # 列齐了才逐单接入；不齐的照旧跳过
+# 旺店通「退换管理」导出：退款不退货没有退货入库，金蝶不会自动出红字——这张表说的是"为什么没红字"
+_RETURNS_HEAD = {'退换单号', '类型', '退款阶段', '退换原因', '店铺', '原始单号', '原始子订单号', '货品编号', '入库数量', '分摊退款金额', '登记时间'}
 _ORDERS_HEAD = {'订单编号', '店铺', '子单原始单号', '订单状态', '应收金额', '分摊后总价'}
 _PLATFORM_HEAD = {'主订单编号', '子订单编号', '订单应付金额', '订单状态', '售后状态', '订单提交时间', '平台实际承担优惠金额'}
 # 结算后把钱退给买家 / 退回补贴：冲的是应收；其余结算后场景（分账、退分账）是费用的返还
@@ -108,6 +111,24 @@ def _insure_row(r):
     """账户流水压缩包里的「保费支出」：一张保单一行，带着它所属的那笔账户流水和关联的子订单。文件里金额是正数（支出），这里记成负数，和账户流水同向。"""
     return {'id': _text(r.get('保险单号')), 'flow': _text(r.get('动账流水号')), 'order': _text(r.get('关联子订单号')), 't': _text(r.get('动账时间')),
             'amt': round(-_num(r.get('金额(元)')), 2), 'memo': _text(r.get('摘要描述'))[:30]}
+
+
+def _cell(value):
+    """旺店通 csv 把长数字和时间包成 ="…"（防 Excel 改格式），取里面的。"""
+    text = _text(value)
+    return text[2:-1].strip() if text.startswith('="') and text.endswith('"') else text
+
+
+def _return_row(r, shop=''):
+    """旺店通退换单：一张退换单一个子订单一种货品一行。只留对账用的列；客户网名、地址、各种备注不要。
+    金额用「分摊退款金额」：一张退换单分几行时，「退款总额」每行都重复写整张单的数。别的店的行、末尾的合计行不要。"""
+    tk = _cell(r.get('退换单号'))
+    if tk in ('', 'NA') or (shop and _cell(r.get('店铺')) != shop): return {'id': '', 't': ''}
+    sub = _cell(r.get('原始子订单号'))
+    return {'id': '%s|%s|%s' % (tk, sub, _cell(r.get('货品编号'))), 'tk': tk, 't': _cell(r.get('登记时间')), 'order': _platform_order(_cell(r.get('原始单号'))), 'sub': sub,
+            'type': _cell(r.get('类型')), 'stage': _cell(r.get('退款阶段')), 'why': _cell(r.get('退换原因'))[:30], 'state': _cell(r.get('处理状态')),
+            'pstate': _cell(r.get('平台退款状态')), 'goods': _cell(r.get('货品名称'))[:40], 'qty': _num(_cell(r.get('登记数量'))), 'back': _num(_cell(r.get('入库数量'))),
+            'amt': round(_num(_cell(r.get('分摊退款金额'))), 2), 'done': _cell(r.get('退款成功时间'))}
 
 
 def _platform_order(value):
@@ -304,9 +325,10 @@ def parse(blob, filename, shop=''):
         elif _LEDGER_HEAD <= head: kind, make = 'dy_ledger', _ledger_row
         elif _PLATFORM_HEAD <= head: kind, make = 'dy_platform', _platform_row
         elif _INSURE_FULL <= head: kind, make = 'dy_insure', _insure_row
+        elif _RETURNS_HEAD <= head: kind, make = 'dy_returns', lambda r: _return_row(r, shop)
         elif _INSURANCE_HEAD <= head:
             out.append({'name': name, 'kind': '', 'skip': '保费明细已含在账户流水里，不单独接入'}); continue
-        else: raise ValueError('「%s」表头不是抖音动账明细、带余额的账户流水、抖店订单导出，也不是旺店通订单明细' % name)
+        else: raise ValueError('「%s」表头不是抖音动账明细、带余额的账户流水、抖店订单导出，也不是旺店通订单明细、退换单' % name)
         parsed, bad = [], 0
         for i, x in enumerate(map(make, rows)):                                      # n=文件内行序
             if i >= MAX_ROWS: raise ValueError('「%s」超过 %d 万行，不像平台导出的原始文件' % (name, MAX_ROWS // 10000))
@@ -317,6 +339,7 @@ def parse(blob, filename, shop=''):
         if bad: raise ValueError('「%s」有 %d 行的日期或单号被改过格式（像是用 Excel 打开后另存的），请传平台导出的原始文件' % (name, bad))
         if not parsed and kind == 'dy_insure':                                         # 这个月没买运费险：不算错，别连累同包的账户流水
             out.append({'name': name, 'kind': '', 'skip': '保费明细是空的'}); continue
+        if not parsed and kind == 'dy_returns': raise ValueError('「%s」里没有%s的退换单' % (name, '「%s」' % shop if shop else '可用'))
         if not parsed: raise ValueError('「%s」里没有可用的流水行' % name)
         out.append({'name': name, 'kind': kind, 'rows': parsed})
     if not out: raise ValueError('压缩包里没有 csv 文件')
@@ -646,6 +669,51 @@ def flow_rows(period, ledger, settle, insure, scene, known=(), sub2main=None):
         return 'insure', [{'t': r['t'], 'id': r['id'], 'flow': r['flow'], 'order': main(r), 'amt': r['amt'], 'memo': r['memo'], 'known': main(r) in known}
                           for r in sorted(rows, key=lambda r: (r['t'], r['id']))]
     return 'ledger', [{'t': r['t'], 'id': r['id'], 'order': r['order'], 'amt': r['amt'], 'memo': r['memo'], 'bal': r.get('bal'), 'known': r['order'] in known} for r in mine]
+
+
+def returns_index(rows, period):
+    """平台订单 → 旺店通到本期末为止登记的退换单（合计、类型、原因、有没有退货入库）。"""
+    out = {}
+    for r in rows or []:
+        if not r['order'] or r['t'][:7] > period: continue
+        o = out.setdefault(r['order'], {'amt': 0.0, 'back': 0.0, 't': '', 'tks': [], 'types': [], 'why': []})
+        o['amt'] = round(o['amt'] + r['amt'], 2); o['back'] += r.get('back') or 0; o['t'] = max(o['t'], r['t'])
+        for k, v in (('tks', r['tk']), ('types', r['type']), ('why', r['why'])):
+            if v and v not in o[k]: o[k].append(v)
+    return out
+
+
+def returns_notes(bills, index, orders=None):
+    """给应收清单的每张蓝字写一句：旺店通登记了什么退换单、金蝶有没有对应的红字、要不要人补。只加说明（rnote），不改分类，不影响下推。
+    合单发货的按同组订单一起看。没有退货入库又没有红字的，才说"要手工补"——有退货入库的金蝶会跟着入库单自动出红字。"""
+    group, _ = order_groups(orders)
+    members = {}
+    for b in bills:
+        if b['order']: members.setdefault(b['order'], sorted(group(b['order'])))
+    blue, red = defaultdict(float), defaultdict(float)
+    for b in bills:
+        if not b['order']: continue
+        key = members[b['order']][0]
+        if b['amount'] > 0: blue[key] += b['amount']
+        else: red[key] += b['amount']
+    for b in bills:
+        b['rnote'] = ''
+        if not b['order'] or b['amount'] <= 0: continue
+        hits = [index[o] for o in members[b['order']] if o in index]
+        if not hits: continue
+        key = members[b['order']][0]
+        amt = round(math.fsum(h['amt'] for h in hits), 2); back = sum(h['back'] for h in hits)
+        types = '、'.join(dict.fromkeys(t for h in hits for t in h['types'])); why = next((w for h in hits for w in h['why']), '')
+        when = max(h['t'] for h in hits)[5:10]
+        said = '旺店通 %s 登记了%s %.2f%s' % (when, types or '退换单', amt, '（%s）' % why if why else '')
+        settled = b.get('flow') is not None
+        if red[key] or back: tail = ''                                   # 已有红字，或者货退回来了（金蝶会跟着入库单出红字）：只说登记了什么
+        elif not settled and amt >= blue[key] - 0.005: tail = '：全额退了、没有退货入库，这单不会再结算，金蝶也不会自动出红字，要手工补红字冲掉'
+        elif not settled: tail = '：没有退货入库，金蝶不会自动出红字；结算时会少结这一块，到时要手工补红字'
+        elif b['cat'] == 'mismatch' and (b.get('diff') or 0) > 0:
+            tail = '：没有退货入库，金蝶不会自动出红字；要手工补红字 %.2f（就是两边的差额%s）' % (b['diff'], '，含平台按比例收回的补贴' if b['diff'] > amt + 0.005 else '')
+        else: tail = '：结算时没扣这笔退款，金蝶也没有对应的红字；要是结算之后才退的，钱在「货款结算以外的账户进出」里，红字要另外补'
+        b['rnote'] = said + tail
 
 
 def category_label(cat, days):

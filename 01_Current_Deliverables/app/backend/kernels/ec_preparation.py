@@ -11,17 +11,21 @@ PURPOSE = {'dy_settle':'对金额、拆平台扣费：每笔结算到账多少�
            'dy_orders':'认合单发货：几个平台订单合成一张单发的，金蝶应收只记其中一个订单号',
            'dy_platform':'核蓝字金额、看没结算的单在平台上是等结算、售后中还是已关闭；不传也能对账和下推'}
 KINDS.update(DOUYIN_KINDS)
+# 旺店通退换单：只用来说明"为什么金蝶没红字"，不传不影响对账和下推，所以不算进齐套（不在 DOUYIN_KINDS 里）
+DOUYIN_OPTIONAL = {'dy_returns':'旺店通退换单（退款不退货等）'}
+PURPOSE['dy_returns'] = '说明差异原因：哪些单在旺店通登记了退款不退货——这类没有退货入库，金蝶不会自动出红字，要手工补；不传不影响对账和下推'
+KINDS.update(DOUYIN_OPTIONAL)
 
 
 def requirements(settings, shop, platform=''):
     # Only the already-agreed pilot has defaults; other shops must choose their materials.
     # 抖音店默认就是那两份动账明细，不用逐店去配。
-    default = ([k for k in KINDS if k!='price_protection' and k not in DOUYIN_KINDS] if shop == TARGET
+    default = ([k for k in KINDS if k!='price_protection' and k not in DOUYIN_KINDS and k not in DOUYIN_OPTIONAL] if shop == TARGET
                else list(DOUYIN_KINDS) if platform == '抖音' else [])
     # 抖音店固定这四类：基础资料页没有抖音资料的勾选项，那一行一旦被动过保存，存下来的就不含抖音资料，清单会整个消失
     if platform == '抖音': return list(DOUYIN_KINDS)
     value = settings.get(shop, default)
-    return [kind for kind in KINDS if kind in value] if isinstance(value, list) else []
+    return [kind for kind in KINDS if kind in value and kind not in DOUYIN_OPTIONAL] if isinstance(value, list) else []
 
 
 def validate(settings):

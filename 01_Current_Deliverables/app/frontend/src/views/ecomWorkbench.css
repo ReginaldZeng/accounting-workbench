@@ -166,3 +166,5 @@
 .ew-row-legend i.ew-row-hold{background:var(--amber-bg,#f8f0e0);border-color:var(--amber-line,#e6cfa6)}
 /* 行里那句「系统不推，要人做」要显眼：小字默认是灰的，这里压过去 */
 .ew-workbench .ew-open-table td small.ew-open-red{color:var(--red,#c0392b)}
+/* 应收清单里那句旺店通退换单的说明：比普通小字深一点，看得见 */
+.ew-workbench .ew-open-table td small.ew-rnote{color:var(--amber,#a35a00)}

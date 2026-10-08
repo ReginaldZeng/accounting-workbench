@@ -390,6 +390,35 @@ class DouyinTests(unittest.TestCase):
         ledger.append({'id': 'L6', 't': '2026-09-20 09:00:00', 'amt': -0.3, 'scene': '退换货运费险', 'order': 'TRA2027', 'bal': 0.0, 'memo': '保费扣除（1笔保单）'})
         self.assertEqual((lambda k, rows: (k, [r['id'] for r in rows]))(*m.flow_rows('2026-09', ledger, [], insure, m.INSURE_SCENE, {O})), ('ledger', ['L1', 'L6']))
 
+    def test_wdt_returns_sheet_is_read_per_shop_and_explains_missing_red_bills(self):
+        head = '商家编码,退换单号,退货单备注,类型,退款阶段,退换原因,处理状态,平台退款状态,货品名称,货品编号,登记数量,入库数量,登记时间,店铺,客户网名,原始单号,原始子订单号,分摊退款金额,退款总额,地址,退款成功时间'
+        O, O2, O3 = '6917945661848301051', '6917945661848301052', '6917945661848301053'
+        line = lambda tk, typ, order, sub, code, back, part, total, shop='甲店', t='2026-09-25 16:48:26': (
+            f'="{code}",{tk},改寄张三 13800000000,{typ},售后,与商家协商一致退款,已完成,退款成功,辣丝丝,="{code}",1,{back},="{t}",{shop},某买家,="{order}",="{sub}",{part},{total},某省某市某路 1 号,="{t}"')
+        text = '\n'.join([head, line('TK1', '退款不退货', O, O, 'A1', 0, '3.0000', '5.0000'), line('TK1', '退款不退货', O, O, 'A2', 0, '2.0000', '5.0000'),
+                          line('TK2', '退款不退货', O2, O2, 'A1', 0, '49.9000', '49.9000'), line('TK3', '退货', O3, O3, 'A1', 1, '49.9000', '49.9000'),
+                          line('TK9', '退款不退货', O, O, 'A1', 0, '9.0000', '9.0000', shop='乙店'), '合计:,NA,NA,NA,NA,NA,NA,NA,NA,NA,4,0,NA,NA,NA,NA,NA,54.9,54.9,NA,NA']) + '\n'
+        part = m.parse(text.encode('gb18030'), '退换单.csv', '甲店')[0]                  # 旺店通导出是 GBK，长数字和时间包成 ="…"
+        rows = part['rows']
+        self.assertEqual((part['kind'], [(r['tk'], r['order'], r['amt'], r['back'], r['t']) for r in rows][:2]),
+                         ('dy_returns', [('TK1', O, 3.0, 0.0, '2026-09-25 16:48:26'), ('TK1', O, 2.0, 0.0, '2026-09-25 16:48:26')]))
+        self.assertEqual((len(rows), len({r['id'] for r in rows})), (4, 4))                 # 别的店、合计行不要；同一张退换单的两行各算各的
+        self.assertFalse(any('138' in str(v) or '张三' in str(v) or '某省' in str(v) or '某买家' in str(v) for r in rows for v in r.values()))   # 备注、网名、地址不入库
+        with self.assertRaisesRegex(ValueError, '没有「丙店」的退换单'): m.parse(text.encode('gb18030'), '退换单.csv', '丙店')
+        index = m.returns_index(rows + [dict(rows[0], id='late', t='2026-10-02 10:00:00', amt=7.0)], '2026-09')
+        self.assertEqual((index[O]['amt'], index[O]['tks'], index[O]['types']), (5.0, ['TK1'], ['退款不退货']))    # 用分摊金额加，不用每行重复的退款总额；下个月才登记的不算
+        bill = lambda no, order, amount, cat, flow=None, diff=None: dict(no=no, order=order, amount=amount, open=amount, cat=cat, flow=flow, diff=diff)
+        bills = [bill('B1', O, 49.9, 'mismatch', 41.56, 8.34), bill('B2', O2, 49.9, 'overdue'), bill('B3', O3, 49.9, 'transit'), bill('B3R', O3, -49.9, 'transit'),
+                 bill('B4', '6917945661848301099', 49.9, 'ok', 49.9, 0.0), bill('B5', '', 10.0, 'no_order')]
+        m.returns_notes(bills, index)
+        note = {b['no']: b['rnote'] for b in bills}
+        self.assertIn('登记了退款不退货 5.00（与商家协商一致退款）', note['B1'])
+        self.assertIn('要手工补红字 8.34', note['B1']); self.assertIn('含平台按比例收回的补贴', note['B1'])       # 该补的是两边差额，不是旺店通登记的 5.00
+        self.assertIn('全额退了', note['B2']); self.assertIn('不会再结算', note['B2'])
+        self.assertEqual(note['B3'], '旺店通 09-25 登记了退货 49.90（与商家协商一致退款）')                       # 货退回来了、红字也有了：只说登记了什么，不喊人补
+        self.assertEqual((note['B3R'], note['B4'], note['B5']), ('', '', ''))
+        self.assertEqual([b['cat'] for b in bills], ['mismatch', 'overdue', 'transit', 'transit', 'ok', 'no_order'])   # 只加说明，不改分类
+
     def test_password_zip_is_refused_with_plain_words(self):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w') as z: z.writestr('a.csv', 'x')

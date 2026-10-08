@@ -330,10 +330,13 @@ def preparation_cards(period, shop):
     kinds = preparation.requirements(db.get_setting('ec_preparation_rules', {}) or {}, shop, platform)
     price_optional='price_protection' not in kinds
     if price_optional and platform=='天猫':kinds.append('price_protection')
+    if platform=='抖音':kinds+=[k for k in preparation.DOUYIN_OPTIONAL if k not in kinds]
     cards = {k:dict(kind=k,label=preparation.KINDS[k],available=False,state='missing',rows=None,
                     files=[],file_count=0,warnings=[],imported_at=None,accounts=[],by=None,span=None,
                     purpose=preparation.PURPOSE.get(k,'')) for k in kinds}
     if 'price_protection' in cards:cards['price_protection']['optional']=price_optional
+    for k in preparation.DOUYIN_OPTIONAL:
+        if k in cards:cards[k]['optional']=True
     with db._engine.connect() as cx:
         latest = select(func.max(TABLE.c.id)).where(TABLE.c.period==period,TABLE.c.shop==shop).group_by(TABLE.c.kind)
         # V2.617：只取摘要列，不把几 MB 的快照搬出来解压；老记录没摘要的当场补算一次并回写（同一连接，避免 SQLite 锁）

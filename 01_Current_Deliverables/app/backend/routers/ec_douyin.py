@@ -266,6 +266,7 @@ def _result(period, shop):
         for b in result['bills']:
             waiting = b['cat'] in ('overdue', 'transit') and b['open'] > 0
             b['pstate'] = model.platform_states(index, b.get('pending') or [b['order']], result['end'], b.get('merged') or 0) if waiting else ''
+        model.returns_notes(result['bills'], model.returns_index(rows['dy_returns'], period), rows['dy_orders'])
         result['held'] = [dict(key=k, label=model.PUSH_SKIP[k], **v) for k, v in first['skipped'].items() if v['count']]
         result['pushable'] = first['eligible']
         with _lock:
@@ -319,6 +320,8 @@ def order(request: Request, period: str, shop: str, order: str):
     cats = {b['cat'] for b in mine}; detail['reason'] = next((b['reason'] for b in mine if b['reason']), '')
     detail['categories'] = [model.category_label(c, hit[1]['overdue_days']) for c in model.CATEGORIES if c in cats]
     detail['hold'] = next((model.PUSH_SKIP[b['hold']] for b in mine if b.get('hold')), '')      # 金额对得上、但系统不下推的原因
+    detail['rnote'] = next((b['rnote'] for b in mine if b.get('rnote')), '')
+    detail['returns'] = [r for r in hit[3]['dy_returns'] if r['order'] in detail['members'] and r['t'][:7] <= period]
     return dict(detail, ok=True, period=period)
 
 
