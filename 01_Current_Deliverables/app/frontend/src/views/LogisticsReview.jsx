@@ -10,7 +10,7 @@
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewDocMode, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
@@ -712,6 +712,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewDocClassify(carrier, period, doc_no, patch)
       .then(() => { load(); refetchL(); flash('已改归类，逐笔复核重算') })
       .catch(e => flash('归类保存失败：' + e.message))
+  }
+  // 逐单指定核对方式(V2.885)：这一张按重量还是按箱数核；空＝交回系统自动
+  const saveMode = (doc_no, mode) => {
+    reviewDocMode(carrier, period, doc_no, mode)
+      .then(() => { load(); flash(mode ? `${doc_no} 已改成${mode === 'weight' ? '按重量' : '按箱数'}核，已重判` : `${doc_no} 已交回系统自动判断`) })
+      .catch(e => flash('核对方式保存失败：' + e.message))
   }
   // 逐笔差异解释：存后本地回填（含未解释计数），不整表重拉
   const saveLineNote = (key, note) => {
@@ -1470,6 +1476,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                             {(x.subj_ovr || x.fee_ovr || x.ovr_reason) && !locked &&
                               <button className="lk" title="清掉人工定的主体、费用类型和原因，回到账单原来的归类" onClick={() => saveClass(x.doc_no, { restore: true })}>恢复账单原值</button>}
                             <span className="dim" style={{ fontSize: 11.5 }}>选完即保存，逐笔复核按新归类重算{x.subj_ovr || x.fee_ovr ? '；重新导入账单也会保留' : ''}</span>
+                          </div>}
+                          {x.doc_no && x.can_mode && <div className="xcls">
+                            <span className="dim">核对方式</span>
+                            <label><select className="clsinp" disabled={locked} value={x.force_mode || ''} onChange={e => saveMode(x.doc_no, e.target.value)}>
+                              <option value="">系统自动</option>
+                              <option value="weight" disabled={!x.can_weight}>按重量核：账单重量 对 金蝶重量{x.can_weight ? '' : '（账单这行没写重量）'}</option>
+                              <option value="box" disabled={!x.can_box}>按箱数核：账单件数 对 金蝶箱数{x.can_box ? '' : '（账单这行没写件数）'}</option>
+                            </select></label>
+                            <span className="dim" style={{ fontSize: 11.5 }}>只改这一张单拿什么比，尺子不变；选完即保存、重判，结论里会写明是谁哪天指定的。这家的常规在上面「按托 ⚙」「毛重比 ⚙」里设</span>
                           </div>}
                           {x.sub_fees && <div className="xfee"><span className="dim">费用构成</span>
                             {Object.entries(x.sub_fees).map(([k, v]) => <span key={k} className="tag">{k} {typeof v === 'number' ? money(v) : v}</span>)}

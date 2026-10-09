@@ -2771,6 +2771,25 @@ def _pallet_kg(carrier):
         return 0.0
 
 
+_DOC_MODE_KEY = "logi_doc_mode"          # {"承运商|账期": {单号: {"mode": "weight"|"box", "by": 谁, "at": 什么时候}}}
+_DOC_MODE_CN = {"weight": "按重量", "box": "按箱数"}
+
+
+def _doc_modes(carrier):
+    """逐单指定核对方式(V2.885，用户 2026-10-09「所以其实我可以针对每一张单改计费标准？」→「加」)。→ {(账期, 单号): {mode, by, at}}。
+    核对方式平时由系统按规则挑(有账单重量按重量、按托的按箱数、没重量按箱数)；个别单和这家的常规不一样时(极鲜达山姆页里夹着两张按实际毛重收的)，
+    人可以指定这一张按重量还是按箱数核。只换「拿什么比」，不放宽尺子；结论里写明是谁哪天指定的。按件数核的快递(迅鸽)不用这个。"""
+    out = {}
+    for k, v in (db.get_setting(_DOC_MODE_KEY, None) or {}).items():
+        ca, _sep, pe = str(k).partition("|")
+        if ca != carrier or not isinstance(v, dict):
+            continue
+        for no, x in v.items():
+            if isinstance(x, dict) and x.get("mode") in _DOC_MODE_CN:
+                out[(pe, str(no))] = x
+    return out
+
+
 def _wt_range(carrier):
     """该承运商的毛重比允许范围 (下限, 上限)；没配返回 None=默认差 2% 以内。存供应商档案 logistics_suppliers.wt_lo/wt_hi。"""
     sup = next((x for x in (db.list_logi_suppliers() or []) if x.get("short") == carrier), None) or {}
@@ -2802,6 +2821,7 @@ def _box_docs(rsub, carrier):
     # 毛重比允许范围(基础设置·供应商列表，V2.763)：配了就按 账单重量÷金蝶净重 落在范围内算一致；没配走默认(差 2% 以内)
     wt_rng = _wt_range(carrier)
     pal_kg = _pallet_kg(carrier)
+    dmode = _doc_modes(carrier) if _rev != "qty" else {}
     uk = _unit_kg()
     pka = _pack_alt()
     extra = {}
@@ -2844,10 +2864,22 @@ def _box_docs(rsub, carrier):
             chg_wt = billcnt * (1000.0 if _u0.lower() in ("吨", "t") else 1.0)
             wt_from_qty = "账单 %s %s" % (_fmt_amt(billcnt), _u0)
         use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
+        # 人工指定这一张单怎么核(V2.885)：只换「拿什么比」。指定的那种比不了(账单这行没有重量/件数)就不听，照系统的办法并写明
+        can_wt = bool(chg_wt)
+        can_box = bool(billcnt) and not wt_from_qty and _u0 not in ("天", "趟") and _u0 not in lr._NOQTY_UNITS     # 账单量是天/趟/方/板的不是件数
+        fm = (dmode.get((str(r.get("period") or ""), d0)) or {}) if d0 else {}
+        fmode, fnote = fm.get("mode"), ""
+        if fmode == "weight" and not can_wt:
+            fmode, fnote = None, " · 指定了按重量核，但账单这一行没有重量，仍按系统的办法"
+        elif fmode == "box" and not can_box:
+            fmode, fnote = None, " · 指定了按箱数核，但账单这一行没有件数，仍按系统的办法"
+        elif fmode:
+            use_weight = (fmode == "weight")
+            fnote = " · 人工指定%s核（%s %s）" % (_DOC_MODE_CN[fmode], fm.get("by") or "", str(fm.get("at") or "")[:10])
         # 按托计费(V2.883)：计费重量正好是半托的整数倍、账单又写了件数的——金蝶箱数和账单件数一件不差就按箱数核，不比重量；
         #   箱数对不上的照旧按重量核(会判不符)，并写明箱数各是多少，不替它遮。
         pal_n, pal_note = None, ""
-        if pal_kg and use_weight and _rev == "box" and not wt_from_qty and chg_wt and billcnt and lines \
+        if pal_kg and not fmode and use_weight and _rev == "box" and not wt_from_qty and chg_wt and billcnt and lines \
                 and abs(chg_wt / (pal_kg / 2.0) - round(chg_wt / (pal_kg / 2.0))) < 1e-6:
             _bx = 0.0
             for m in lines:
@@ -2972,6 +3004,8 @@ def _box_docs(rsub, carrier):
                 mode_cn, cnt_state = "无箱规待核", "qtydiff"
             else:
                 mode_cn, cnt_state = "待核", "qtydiff"
+            if fmode == "box" and mode_cn == "整车按箱":
+                mode_cn = "箱数一致"
             if pal_n and cnt_state == "ok":
                 mode_cn = "按托计费 %s 托（每托 %s 千克，约 %s 箱/托）· 按箱数核" % (_fmt_amt(pal_n), _fmt_amt(pal_kg), _fmt_amt(round(billcnt / pal_n, 1)))
             if pack_used:
@@ -2979,6 +3013,8 @@ def _box_docs(rsub, carrier):
             conv = round(kd_sum / billcnt, 3) if billcnt else None   # 按件数：换算系数=金蝶箱数÷账单件(整车按箱≈1、打托=托规)
             mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
             mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
+        if fnote:
+            mode_cn += fnote
         if not d0:
             mode_cn, cnt_state = "无单据·账单调整", "na"   # 如托盘丢失扣款：只登记不核量
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
@@ -2990,6 +3026,7 @@ def _box_docs(rsub, carrier):
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
+                "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
                 "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
         kgbase = 0.0
@@ -3595,6 +3632,44 @@ async def review_doc_confirm(request: Request):
             if todo:
                 c.execute(delete(DK).where((DK.c.carrier == carrier) & (DK.c.period == period) & (DK.c.doc_no.in_(todo))))
     return {"ok": True, "n": len(todo), "on": on}
+
+
+@router.post("/api/logistics-review/doc-mode")
+async def review_doc_mode(request: Request):
+    """逐单指定核对方式：mode＝weight 按重量 / box 按箱数 / 空＝交回系统自动。已登记复核的月份不可改。见 _doc_modes。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period = (b.get("carrier") or "").strip(), (b.get("period") or "").strip()
+    no, mode = str(b.get("doc_no") or "").strip().split("+")[0], str(b.get("mode") or "").strip()
+    if not carrier or not period or not no:
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期/单号"}, status_code=400)
+    if mode and mode not in _DOC_MODE_CN:
+        return JSONResponse({"ok": False, "msg": "核对方式只能选：系统自动 / 按重量 / 按箱数"}, status_code=400)
+    if carrier in _QTY_CARRIERS:
+        return JSONResponse({"ok": False, "msg": "%s 是按件数核的，不分按重量、按箱数" % carrier}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    allm = dict(db.get_setting(_DOC_MODE_KEY, None) or {})
+    k = "%s|%s" % (carrier, period)
+    cur = dict(allm.get(k) or {})
+    old = (cur.get(no) or {}).get("mode")
+    if mode:
+        cur[no] = {"mode": mode, "by": _uname(u), "at": _now()}
+    else:
+        cur.pop(no, None)
+    if cur:
+        allm[k] = cur
+    else:
+        allm.pop(k, None)
+    db.set_setting(_DOC_MODE_KEY, allm)
+    db.audit(_uname(u), "物流复核-逐单核对方式", "%s %s %s" % (carrier, period, no),
+             "%s → %s" % (_DOC_MODE_CN.get(old, "系统自动"), _DOC_MODE_CN.get(mode, "系统自动")))
+    for ck in [ck for ck in list(_ACCR_CACHE) if isinstance(ck, tuple) and carrier in ck]:
+        _ACCR_CACHE.pop(ck, None)
+    return {"ok": True, "doc_no": no, "mode": mode}
 
 
 @router.post("/api/logistics-review/line-note")
