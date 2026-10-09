@@ -10,7 +10,7 @@
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewDocMode, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewVolKg, reviewDocMode, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
@@ -706,6 +706,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     if (v === null) return
     reviewPalletKg(carrier, v.trim()).then(() => { flash(v.trim() ? `已保存：每托 ${v.trim()} 千克，按新口径重判` : '已取消按托计费'); load() }).catch(e => flash('保存失败：' + e.message))
   }
+  // 按体积计费(V2.888)：这家每方折多少千克。账单行带箱子尺寸的，计重＝件数×每件体积×这个数；填了就复算一遍
+  const editVol = () => {
+    const v = window.prompt(`「${carrier}」按体积计费：每方（立方米）折多少千克？\n账单行带了箱子尺寸（如 38*25.5*12）的，计重＝件数 × 每件体积 × 这个数，系统按这个复算；件数仍和金蝶箱数比。\n常见是 333.33（＝长×宽×高÷3000）。留空＝不复算。`, d && d.vol_kg ? d.vol_kg : '')
+    if (v === null) return
+    reviewVolKg(carrier, v.trim()).then(() => { flash(v.trim() ? `已保存：每方 ${v.trim()} 千克，按新口径重判` : '已取消按体积复算'); load() }).catch(e => flash('保存失败：' + e.message))
+  }
   const saveNote = (doc_no, note) => { reviewDocNote(carrier, period, doc_no, note).catch(e => flash('备注保存失败：' + e.message)) }
   // 逐单手改归类(主体/费用类型)→存账单侧覆盖列→逐笔复核按新归类重算
   const saveClass = (doc_no, patch) => {
@@ -1385,6 +1391,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               毛重比 {d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认±2%'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={editPallet} title="有的线路按托收费，账单上的计费重量是「托数 × 每托千克数」，不是货的真实重量。填了以后，计费重量是半托整数倍的单改按箱数核（账单件数 对 金蝶箱数）。一家一档，各月通用">
               按托 {d.pallet_kg ? `${d.pallet_kg} 千克/托` : '未设'} ⚙</button>}
+            {d && d.by_box && <button className="btn sm" onClick={editVol} title="有的货按体积收费（抛重）：账单计重＝件数 × 箱子体积 × 每方千克数，不是货的净重。账单行带了箱子尺寸的，系统按这里填的数复算计重，件数仍和金蝶箱数比。一家一档，各月通用">
+              按体积 {d.vol_kg ? `${d.vol_kg} 千克/方` : '未设'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={() => setUnitDlg(true)} title="金蝶按升、按个计量的物料（牛奶、稀奶油、内袋），填每 1 升/个 折多少千克，才能和账单的千克比。按物料存，各家各月共用。">
               单位换算·箱规{d.unit_gap && d.unit_gap.n_mat > 0 ? <b className="diffbad"> {d.unit_gap.n_mat} 种没填</b> : ''} ⚙</button>}
             <button className="btn sm" onClick={() => setBillDlg(true)} title="看这家这月现在解析着哪几份账单（谁传的、什么时候），替换、删除或新增一份">上传账单解析</button>

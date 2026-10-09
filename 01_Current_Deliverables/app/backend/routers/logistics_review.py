@@ -2760,6 +2760,18 @@ def _spec_kg_hint(spec):
 
 
 _PALLET_KG_KEY = "logi_pallet_kg"
+_VOL_KG_KEY = "logi_vol_kg"
+
+
+def _vol_kg(carrier):
+    """按体积计费的承运商：每方(立方米)折多少千克(V2.888，用户 2026-10-09 贴极鲜达账单公式 ＝件数*0.38*0.255*0.12*333.33「是不是还有一种按体积呢」)。
+    页面上填、一家一档；没填返回 0(那就不复算，只把账单自己折出来的系数写出来)。
+    账单行带了箱子尺寸(sub_fees 里的「箱子尺寸」，解析时从备注列读进来)的，计重＝件数×每件体积×这个数，是抛重不是货的净重——
+    不拿去和金蝶重量比，改按箱数核；填了这个数的还复算一遍计重对不对。"""
+    try:
+        return float((db.get_setting(_VOL_KG_KEY, None) or {}).get(carrier) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _pallet_kg(carrier):
@@ -2837,6 +2849,7 @@ def _box_docs(rsub, carrier):
     # 毛重比允许范围(基础设置·供应商列表，V2.763)：配了就按 账单重量÷金蝶净重 落在范围内算一致；没配走默认(差 2% 以内)
     wt_rng = _wt_range(carrier)
     pal_kg = _pallet_kg(carrier)
+    vol_kg = _vol_kg(carrier)
     dmode = _doc_modes(carrier) if _rev != "qty" else {}
     uk = _unit_kg()
     pka = _pack_alt()
@@ -2892,10 +2905,23 @@ def _box_docs(rsub, carrier):
         elif fmode:
             use_weight = (fmode == "weight")
             fnote = " · 人工指定%s核（%s %s）" % (_DOC_MODE_CN[fmode], fm.get("by") or "", str(fm.get("at") or "")[:10])
+        # 按体积计费(V2.888)：账单这一行带了箱子尺寸的，计重是抛重(件数×每件体积×每方千克数)——按箱数核，不比重量；人工指定了的听人的
+        vol = None
+        _dm = intake.DIM_RE.match(str((_subfees(r.get("sub_fees")) or {}).get("箱子尺寸") or "")) if _rev != "qty" else None
+        if _dm and chg_wt and billcnt and not wt_from_qty:
+            _vl, _vw, _vh = (float(x) for x in _dm.groups())
+            _v1 = _vl * _vw * _vh / 1e6               # 每件多少方(尺寸按厘米)
+            if _v1 > 0:
+                _vk = vol_kg or round(chg_wt / (billcnt * _v1), 2)
+                _vc = round(billcnt * _v1 * _vk, 2)
+                vol = {"dims": "%g×%g×%g" % (_vl, _vw, _vh), "k": _vk, "calc": _vc, "set": bool(vol_kg),
+                       "ok": abs(_vc - chg_wt) <= max(0.05, 0.005 * chg_wt)}
+                if not fmode:
+                    use_weight = False
         # 按托计费(V2.883)：计费重量正好是半托的整数倍、账单又写了件数的——金蝶箱数和账单件数一件不差就按箱数核，不比重量；
         #   箱数对不上的照旧按重量核(会判不符)，并写明箱数各是多少，不替它遮。
         pal_n, pal_note = None, ""
-        if pal_kg and not fmode and use_weight and _rev == "box" and not wt_from_qty and chg_wt and billcnt and lines \
+        if pal_kg and not fmode and not vol and use_weight and _rev == "box" and not wt_from_qty and chg_wt and billcnt and lines \
                 and abs(chg_wt / (pal_kg / 2.0) - round(chg_wt / (pal_kg / 2.0))) < 1e-6:
             _bx = 0.0
             for m in lines:
@@ -3010,7 +3036,7 @@ def _box_docs(rsub, carrier):
                 bill_unit = tu                   # 账单量显示 1 天 / 2 趟
             if decided:
                 pass
-            elif kd_sum and abs(billcnt - kd_sum) <= (lr.qty_tol(kd_sum, True) if fmode == "box" else max(1.0, 0.02 * kd_sum)):
+            elif kd_sum and abs(billcnt - kd_sum) <= (lr.qty_tol(kd_sum, True) if (fmode == "box" or vol) else max(1.0, 0.02 * kd_sum)):
                 mode_cn, cnt_state = "整车按箱", "ok"      # 人工指定按箱数核的(V2.886)：50 箱以下必须一箱不差，12 件对 11 箱不算一致
             elif kd_sum and billcnt and 3 <= ratio_tuo <= 60:
                 mode_cn, cnt_state = "打托(托规%s)" % round(ratio_tuo, 1), "na"
@@ -3029,12 +3055,23 @@ def _box_docs(rsub, carrier):
             conv = round(kd_sum / billcnt, 3) if billcnt else None   # 按件数：换算系数=金蝶箱数÷账单件(整车按箱≈1、打托=托规)
             mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)
             mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
+        if vol:
+            _vt = "按体积计费：%s 件 × %s 厘米 × 每方 %s 千克 ＝ %s 千克" % (_fmt_amt(billcnt), vol["dims"], _fmt_amt(vol["k"]), _fmt_amt(vol["calc"]))
+            if not vol["ok"]:           # 只有页面上填了每方千克数才会复算出不一致
+                _vt += "，和账单计重 %s 千克对不上" % _fmt_amt(chg_wt)
+                if cnt_state in ("ok", "na"):
+                    cnt_state = "qtydiff"
+            if fmode:
+                mode_cn += " · " + _vt
+            else:
+                mode_cn = _vt + " · 按箱数核" + ("" if mode_cn in ("整车按箱", "箱数一致") else (
+                    "：账单 %s 件、金蝶 %s 箱，对不上" % (_fmt_amt(billcnt), _fmt_amt(kd_sum)) if kd_sum else "（%s）" % mode_cn))
         if fnote:
             mode_cn += fnote
         # 建议核对方式(V2.887，用户 2026-10-09「能不能出一个建议核对方式呢」)：现在这种比法对不上、换另一种比法正好对得上的，给个建议和理由；
         #   只建议不替人改(点了才改)。按箱数的建议要每种物料都折得出箱、且和账单件数一件不差；按重量的建议要落在这家的毛重比范围内。
         sugg = None
-        if _rev != "qty" and d0 and lines and not fmode and cnt_state == "qtydiff":
+        if _rev != "qty" and d0 and lines and not fmode and not vol and cnt_state == "qtydiff":
             if use_weight and can_box:
                 _sb, _smiss = _kd_boxes(lines)
                 if not _smiss and abs(_sb - billcnt) < 0.01:
@@ -3056,7 +3093,7 @@ def _box_docs(rsub, carrier):
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
-                "suggest": sugg, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
+                "suggest": sugg, "vol": vol, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
                 "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
         kgbase = 0.0
@@ -3427,7 +3464,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "vol_kg": _vol_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
@@ -4032,6 +4069,36 @@ async def review_wt_range(request: Request):
     for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and carrier in k]:
         _ACCR_CACHE.pop(k, None)          # 各月逐单视图缓存一并作废，按新范围重判
     return {"ok": True, "wt_range": _wt_range(carrier)}
+
+
+@router.post("/api/logistics-review/vol-kg")
+async def review_vol_kg(request: Request):
+    """按体积计费：这家每方折多少千克(一家一档，不分月)；留空/0＝不复算。见 _vol_kg。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier = (b.get("carrier") or "").strip()
+    if not carrier:
+        return JSONResponse({"ok": False, "msg": "缺承运商"}, status_code=400)
+    raw = str(b.get("kg") if b.get("kg") is not None else "").strip()
+    try:
+        kg = float(raw) if raw else 0.0
+    except ValueError:
+        return JSONResponse({"ok": False, "msg": "每方千克数要填数字"}, status_code=400)
+    if kg < 0 or kg > 2000:
+        return JSONResponse({"ok": False, "msg": "每方千克数不像对的（%s）" % raw}, status_code=400)
+    cur = dict(db.get_setting(_VOL_KG_KEY, None) or {})
+    old = cur.get(carrier)
+    if kg:
+        cur[carrier] = kg
+    else:
+        cur.pop(carrier, None)
+    db.set_setting(_VOL_KG_KEY, cur)
+    db.audit(_uname(u), "物流复核-按体积计费", carrier, "每方 %s 千克（原 %s）" % (_fmt_amt(kg) if kg else "不复算", _fmt_amt(old) if old else "没设"))
+    for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and carrier in k]:
+        _ACCR_CACHE.pop(k, None)
+    return {"ok": True, "vol_kg": _vol_kg(carrier) or None}
 
 
 @router.post("/api/logistics-review/pallet-kg")

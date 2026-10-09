@@ -59,5 +59,32 @@ class MergedDocCell(unittest.TestCase):
         self.assertEqual(len(by["无单据"]), 2)
 
 
+class DimCol(unittest.TestCase):
+    """V2.888 按体积计费：备注列里的箱子尺寸读进分项(文字，不进金额)；不是尺寸的备注不收。合成数据。"""
+
+    def test_dim_col(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "零担"
+        ws.append(["合成账单"])
+        ws.append(["金蝶单号", "总件数", "计重", "运费", "送货费", "备注"])
+        ws.append(["XSCKD000001", 41, 158.91, 286.05, 100, "38*25.5*12"])
+        ws.append(["XSCKD000002", 6, 30, 165, None, "起步价"])
+        ws.append(["XSCKD000003", 2, 7.75, 20, None, " 38 × 25.5 × 12 cm "])
+        bio = io.BytesIO()
+        wb.save(bio)
+        spec = {"carrier": "合成", "period": "2026-08", "sheets": [{
+            "name": "零担", "role": "detail", "header_row": 2, "doc_col": ["金蝶单号"], "qty_col": "总件数", "wt_col": "计重",
+            "fee_parts": {"运费": ["运费"], "送货费": ["送货费"]}, "dim_col": "备注"}]}
+        got = {r["doc_no"]: r for r in li.parse_bill(spec, bio.getvalue())["detail"]}
+        import json as _j
+        sf = {k: _j.loads(v.get("sub_fees") or "{}") for k, v in got.items()}
+        self.assertEqual(sf["XSCKD000001"].get("箱子尺寸"), "38*25.5*12")
+        self.assertEqual(got["XSCKD000001"]["amount"], 386.05)          # 尺寸是文字，不进金额
+        self.assertNotIn("箱子尺寸", sf["XSCKD000002"])
+        self.assertEqual(sf["XSCKD000003"].get("箱子尺寸"), "38×25.5×12cm")
+        self.assertTrue(li.DIM_RE.match(sf["XSCKD000003"]["箱子尺寸"]))
+
+
 if __name__ == "__main__":
     unittest.main()

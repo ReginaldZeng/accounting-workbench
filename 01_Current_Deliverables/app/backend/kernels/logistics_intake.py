@@ -174,6 +174,10 @@ def _col_idx(letters):
     return n - 1
 
 
+# 箱子尺寸「38*25.5*12」(长×宽×高，厘米)：按体积计费的行，承运商写在备注里(极鲜达，V2.888)
+DIM_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[*×xX]\s*(\d+(?:\.\d+)?)\s*[*×xX]\s*(\d+(?:\.\d+)?)\s*(?:cm|CM|厘米)?\s*$")
+
+
 def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
     """detail 角色 sheet → 逐单据行。按 spec 的 doc_col/amount_cols/qty_col/wt_col/prov_col/carrier_sub_col 认列。
     spec.fee_parts={分项名: [列名…]} 时按分项求和记 sub_fees；spec.box_col 时按箱型查汇总页物料单价加「箱子」分项(迅鸽 V2.720)。"""
@@ -206,6 +210,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
     parts = {nm: [c for c in (find_col(hdr, x) for x in cols) if c is not None] for nm, cols in (sp.get("fee_parts") or {}).items()}
     c_box = find_col(hdr, sp["box_col"]) if sp.get("box_col") else None
     c_dk = find_col(hdr, sp["dedupe_col"]) if sp.get("dedupe_col") else None   # 跨 sheet 去重键(运单号)
+    c_dim = find_col(hdr, sp["dim_col"]) if sp.get("dim_col") else None        # 箱子尺寸写在哪一列(按体积计费的行才有)
     # row_re={"col": 列名, "re": 正则}：只收该列对得上的行(易风达运输页只收「序号」是数字的行，表底合计/开票信息/透视小计都不收，V2.764)
     # part_col：分项名取这一列的值(顺丰一个运单拆 运费/保费/签回单 几行，按「服务」列记分项)；
     # wt_once_col：同一运单(该列值相同)的几行重量、件数只算一次，并单时才不会把计费重量加三遍(V2.766)
@@ -265,6 +270,8 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
                 sub["箱子"] = bp if bp is not None else 0.0
                 sub["箱型"] = _s(r[c_box]) + ("" if bp is not None else "(单价未识别)")   # 文字，不参与求和
             base = sum(v for v in sub.values() if isinstance(v, (int, float)))
+        if c_dim is not None and c_dim < len(r) and DIM_RE.match(_s(r[c_dim])):
+            sub["箱子尺寸"] = re.sub(r"\s+", "", _s(r[c_dim]))      # 文字，不参与求和；复核台据此按体积复算计重
         row = {
             "period": period, "carrier": carrier, "grain": "detail",
             "subject": _subject(sp.get("subject"), r, hdr),
