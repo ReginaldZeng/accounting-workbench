@@ -678,6 +678,7 @@ export const reviewInvoices = (carrier, period) => j(`/api/logistics-review/invo
 export const reviewUnitKg = (carrier, period) => j(`/api/logistics-review/unit-kg?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewUnitKgSet = (items, packs) => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items, packs: packs || [] }) })
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
+export const reviewPalletKg = (carrier, kg) => j('/api/logistics-review/pallet-kg', { method: 'POST', body: JSON.stringify({ carrier, kg }) })
 export const reviewCarrierPointsSet =(carrier, points) => j('/api/logistics-review/carrier-points', { method: 'POST', body: JSON.stringify({ carrier, points }) })
 export const reviewSign = (carrier, period, note = '') => j('/api/logistics-review/sign', { method: 'POST', body: JSON.stringify({ carrier, period, note }) })
 export const reviewUnsign = (carrier, period) => j('/api/logistics-review/unsign', { method: 'POST', body: JSON.stringify({ carrier, period }) })

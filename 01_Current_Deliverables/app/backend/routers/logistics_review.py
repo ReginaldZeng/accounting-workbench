@@ -2759,6 +2759,18 @@ def _spec_kg_hint(spec):
     return f if 0.3 <= f <= 3 else None
 
 
+_PALLET_KG_KEY = "logi_pallet_kg"
+
+
+def _pallet_kg(carrier):
+    """按托计费的承运商：每托折多少千克(V2.883，用户 2026-10-09 看极鲜达山姆的单「这个是按照托来计算的，一托650kg」)。页面上填、一家一档；没填返回 0。
+    账单的计费重量是「托数 × 这个数」(半托起算)，不是货的真实重量，不能拿去和金蝶重量比——这种行改按箱数核(账单件数 对 金蝶箱数)。"""
+    try:
+        return float((db.get_setting(_PALLET_KG_KEY, None) or {}).get(carrier) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _wt_range(carrier):
     """该承运商的毛重比允许范围 (下限, 上限)；没配返回 None=默认差 2% 以内。存供应商档案 logistics_suppliers.wt_lo/wt_hi。"""
     sup = next((x for x in (db.list_logi_suppliers() or []) if x.get("short") == carrier), None) or {}
@@ -2789,6 +2801,7 @@ def _box_docs(rsub, carrier):
     pmap = {(_car_norm(x.get("car")), x.get("unit")): float(x.get("price") or 0) for x in (_sp.get("shuttle_prices") or [])}
     # 毛重比允许范围(基础设置·供应商列表，V2.763)：配了就按 账单重量÷金蝶净重 落在范围内算一致；没配走默认(差 2% 以内)
     wt_rng = _wt_range(carrier)
+    pal_kg = _pallet_kg(carrier)
     uk = _unit_kg()
     pka = _pack_alt()
     extra = {}
@@ -2831,6 +2844,26 @@ def _box_docs(rsub, carrier):
             chg_wt = billcnt * (1000.0 if _u0.lower() in ("吨", "t") else 1.0)
             wt_from_qty = "账单 %s %s" % (_fmt_amt(billcnt), _u0)
         use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
+        # 按托计费(V2.883)：计费重量正好是半托的整数倍、账单又写了件数的——金蝶箱数和账单件数一件不差就按箱数核，不比重量；
+        #   箱数对不上的照旧按重量核(会判不符)，并写明箱数各是多少，不替它遮。
+        pal_n, pal_note = None, ""
+        if pal_kg and use_weight and _rev == "box" and not wt_from_qty and chg_wt and billcnt and lines \
+                and abs(chg_wt / (pal_kg / 2.0) - round(chg_wt / (pal_kg / 2.0))) < 1e-6:
+            _bx = 0.0
+            for m in lines:
+                _br = _box_div(m)
+                try:
+                    _bx += (float(m.get("数量件") or 0) / _br) if _br else 0.0
+                except (TypeError, ValueError):
+                    pass
+            _kw = sum(_m_kg(m, uk) for m in lines)
+            _wok = (wt_rng[0] - 1e-9 <= chg_wt / _kw <= wt_rng[1] + 1e-9) if (wt_rng and _kw) else bool(_kw and abs(chg_wt - _kw) <= max(1.0, 0.02 * _kw))
+            if _wok:
+                pass                 # 重量本来就对得上的(碰巧是半托的整数倍)照旧按重量核
+            elif abs(_bx - billcnt) < 0.01:
+                use_weight, pal_n = False, round(chg_wt / pal_kg, 2)
+            else:
+                pal_note = " · 计费重量像按托(%s 托)，但箱数对不上：账单 %s 件、金蝶 %s 箱" % (_fmt_amt(chg_wt / pal_kg), _fmt_amt(billcnt), _fmt_amt(round(_bx, 2)))
         kda, pack_used, packs_of, kall = None, {}, None, None
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
@@ -2844,6 +2877,7 @@ def _box_docs(rsub, carrier):
                 mode_cn = "按重量 · %s已折千克" % "/".join(dict.fromkeys(str(m.get("基本单位")) for m in lines if not _is_kg(m.get("基本单位")) and _m_kg(m, uk)))
             if wt_from_qty:
                 mode_cn += "（%s）" % wt_from_qty
+            mode_cn += pal_note
             if wt_rng and kd_sum:
                 cnt_state = "ok" if wt_rng[0] - 1e-9 <= wbase / kd_sum <= wt_rng[1] + 1e-9 else "qtydiff"
             else:
@@ -2938,6 +2972,8 @@ def _box_docs(rsub, carrier):
                 mode_cn, cnt_state = "无箱规待核", "qtydiff"
             else:
                 mode_cn, cnt_state = "待核", "qtydiff"
+            if pal_n and cnt_state == "ok":
+                mode_cn = "按托计费 %s 托（每托 %s 千克，约 %s 箱/托）· 按箱数核" % (_fmt_amt(pal_n), _fmt_amt(pal_kg), _fmt_amt(round(billcnt / pal_n, 1)))
             if pack_used:
                 mode_cn += _pack_note([(lines[i].get("名称"), pk, lines[i].get("计价单位") or lines[i].get("基本单位")) for i, pk in pack_used.items()])
             conv = round(kd_sum / billcnt, 3) if billcnt else None   # 按件数：换算系数=金蝶箱数÷账单件(整车按箱≈1、打托=托规)
@@ -3320,7 +3356,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
@@ -3884,6 +3920,36 @@ async def review_wt_range(request: Request):
     for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and carrier in k]:
         _ACCR_CACHE.pop(k, None)          # 各月逐单视图缓存一并作废，按新范围重判
     return {"ok": True, "wt_range": _wt_range(carrier)}
+
+
+@router.post("/api/logistics-review/pallet-kg")
+async def review_pallet_kg(request: Request):
+    """按托计费：这家每托折多少千克(一家一档，不分月)；留空/0＝不按托。见 _pallet_kg。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier = (b.get("carrier") or "").strip()
+    if not carrier:
+        return JSONResponse({"ok": False, "msg": "缺承运商"}, status_code=400)
+    raw = str(b.get("kg") if b.get("kg") is not None else "").strip()
+    try:
+        kg = float(raw) if raw else 0.0
+    except ValueError:
+        return JSONResponse({"ok": False, "msg": "每托千克数要填数字"}, status_code=400)
+    if kg < 0 or kg > 5000:
+        return JSONResponse({"ok": False, "msg": "每托千克数不像对的（%s）" % raw}, status_code=400)
+    cur = dict(db.get_setting(_PALLET_KG_KEY, None) or {})
+    old = cur.get(carrier)
+    if kg:
+        cur[carrier] = kg
+    else:
+        cur.pop(carrier, None)
+    db.set_setting(_PALLET_KG_KEY, cur)
+    db.audit(_uname(u), "物流复核-按托计费", carrier, "每托 %s 千克（原 %s）" % (_fmt_amt(kg) if kg else "不按托", _fmt_amt(old) if old else "没设"))
+    for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and carrier in k]:
+        _ACCR_CACHE.pop(k, None)          # 各月逐单视图缓存一并作废，按新口径重判
+    return {"ok": True, "pallet_kg": _pallet_kg(carrier) or None}
 
 
 @router.post("/api/logistics-review/carrier-points")
