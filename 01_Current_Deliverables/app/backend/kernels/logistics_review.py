@@ -40,9 +40,18 @@ def price_check(row, card):
 _NOQTY_UNITS = ("方", "板", "托", "天", "趟", "平", "㎡", "元/天", "元/趟", "吨")
 
 
-def qty_check(row, kd_qty):
+def qty_tol(kd_qty, exact=False):
+    """核量允许差多少。默认：差 1 以内或 2% 以内算一致(整车按箱、按重量的小出入)。
+    exact＝按件数核的快递(迅鸽)：一张单就一两件，差 1 件就是差一半，不能算一致——50 件以下必须一件不差，50 件以上才给 2%。(V2.882)"""
+    t = 0.02 * abs(kd_qty or 0)
+    if exact:
+        return t if t >= 1.0 else 0.005
+    return max(1.0, t)
+
+
+def qty_check(row, kd_qty, exact=False):
     """核量：账单数量 vs 金蝶出库数量（口径由取数说明按承运商定，此处按行已带的 qty/单位）。
-    返回 (金蝶数量, 核量差, 核量态)。kd_qty=该单号金蝶数量 或 None(查无)。"""
+    返回 (金蝶数量, 核量差, 核量态)。kd_qty=该单号金蝶数量 或 None(查无)。exact 见 qty_tol。"""
     qty = row.get("qty")
     no = (row.get("doc_no") or "").split("+")[0].strip()
     if not no or no == "无单据" or str(row.get("unit") or "").strip() in _NOQTY_UNITS:
@@ -52,7 +61,7 @@ def qty_check(row, kd_qty):
     if qty is None:
         return kd_qty, None, "na"
     diff = round(qty - kd_qty, 3)
-    return kd_qty, diff, ("ok" if abs(diff) <= max(1.0, 0.02 * abs(kd_qty)) else "qtydiff")   # 与逐单视图同口径：差≤1件或2%
+    return kd_qty, diff, ("ok" if abs(diff) <= qty_tol(kd_qty, exact) else "qtydiff")   # 与逐单视图同口径
 
 
 def verdict(price_state, qty_state):
@@ -67,7 +76,7 @@ def verdict(price_state, qty_state):
     return "pass"
 
 
-def review_details(rows, card, kd_qty_map):
+def review_details(rows, card, kd_qty_map, exact=False):
     """给一批 detail 行做两轴复核，就地填 std_amount/price_diff/price_state/kd_qty/qty_diff/qty_state/verdict。返回同一 list。"""
     for r in rows:
         if r.get("review_mode") == "register":
@@ -78,7 +87,7 @@ def review_details(rows, card, kd_qty_map):
         std, pdiff, pstate, tier = price_check(r, card)
         r["std_amount"], r["price_diff"], r["price_state"], r["tier"] = std, pdiff, pstate, tier
         kd = kd_qty_map.get((r.get("doc_no") or "").split("+")[0]) if kd_qty_map else None
-        kq, qdiff, qstate = qty_check(r, kd)
+        kq, qdiff, qstate = qty_check(r, kd, exact)
         r["kd_qty"], r["qty_diff"], r["qty_state"] = kq, qdiff, qstate
         r["verdict"] = verdict(pstate, qstate)
     return rows

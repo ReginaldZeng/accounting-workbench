@@ -2801,7 +2801,7 @@ def _box_docs(rsub, carrier):
                 continue
             goods = sum(_m_qty(m) for m in ms if not any(k in str(m.get("名称") or "") for k in _PACK_KW))
             bq = float(r.get("qty") or 0)
-            if bq and abs(bq - goods) > max(1.0, 0.02 * goods):
+            if bq and abs(bq - goods) > lr.qty_tol(goods, True):
                 need.append(d0)
         if need:
             try:
@@ -2863,7 +2863,9 @@ def _box_docs(rsub, carrier):
                     per.append(0.0)
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit, mode_cn = billcnt, (r.get("unit") or "件"), "件", "按件数"
-            cnt_state = "miss" if not kd_sum else ("ok" if abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum) else "qtydiff")
+            # V2.882(用户看迅鸽「这种差 1 的，为什么是一致」)：按件数核不再有「差 1 件以内算一致」——一张单一两件，差 1 件就是差一半。
+            #   对不上的照旧去找同号的其他出库单/包装(V2.878)，找到了写明多出来的是什么；找不到就是不符。
+            cnt_state = "miss" if not kd_sum else ("ok" if abs(billcnt - kd_sum) <= lr.qty_tol(kd_sum, True) else "qtydiff")
             kall = round(sum(_m_qty(m) for m in list(lines) + list(extra.get(d0) or [])), 2) if lines else None      # 这张单全部物料(含包装、同号其他出库单)的件数，多行合并时用
             if lines and cnt_state != "ok":
                 # V2.878(用户 2026-10-08「是不是其他出库里面也有涉及的箱子和周边」，真机证实)：这张单金蝶里的全部物料(含同号其他出库单的周边/赠品/箱子、包装袋)
@@ -2877,7 +2879,7 @@ def _box_docs(rsub, carrier):
                     per = [_m_qty(m) for m in lines]
                     kd_sum, cnt_state = hit[1], "ok"
                     _bits = (["同号%s %s 件（%s）" % (_FORM_CN.get(_ex[0].get("_form"), "另一张单据"), _fmt_amt(sum(_m_qty(m) for m in _ex)),
-                                                   "、".join(dict.fromkeys(str(m.get("名称") or "")[:10] for m in _ex)))] if _ex else []) + \
+                                                   "、".join(dict.fromkeys(str(m.get("名称") or "")[:16] for m in _ex)))] if _ex else []) + \
                             (["包装 %s 件" % _fmt_amt(_np)] if _np else [])
                     mode_cn = "按件数 · 含" + "、".join(_bits)
             if str(r.get("unit") or "").strip() in lr._NOQTY_UNITS:
@@ -3078,7 +3080,7 @@ def _box_docs(rsub, carrier):
                         _vals, _usd = _pick_packs([c["v"] for c in _flat], bsum)
                         kd = round(sum(_vals), 2)
                         _gnote = _pack_note([(_flat[i]["n"], _flat[i]["p"][_flat[i]["v"].index(_vals[i])], _flat[i]["u"]) for i in _usd])
-                st = "ok" if abs(bsum - kd) <= max(1.0, 0.02 * kd) else "qtydiff"
+                st = "ok" if abs(bsum - kd) <= lr.qty_tol(kd, xs[0].get("_kall") is not None) else "qtydiff"      # _kall 有值＝按件数核的
                 if st != "ok" and xs[0].get("_kall") is not None and abs(bsum - float(xs[0]["_kall"])) < 0.01:
                     # 按件数核、几行账单合计正好＝这张单全部物料(含包装、同号其他出库单)的件数(V2.878)
                     _gnote += " · 含包装/同号其他出库单 %s 件" % _fmt_amt(float(xs[0]["_kall"]) - kd)
@@ -3156,10 +3158,11 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     for r in rows:
         _d = (r.get("doc_no") or "").split("+")[0]
         _nrow[_d] = _nrow.get(_d, 0) + 1
-    lr.review_details(rows, card, kdmap)
+    _exact = carrier in _QTY_CARRIERS          # 按件数核的快递：差 1 件不算一致(V2.882)
+    lr.review_details(rows, card, kdmap, _exact)
     for r in rows:
         if _nrow.get((r.get("doc_no") or "").split("+")[0], 0) > 1 and _own.get(r.get("id")) is not None and r.get("review_mode") != "register":
-            r["kd_qty"], r["qty_diff"], r["qty_state"] = lr.qty_check(r, _own[r.get("id")])
+            r["kd_qty"], r["qty_diff"], r["qty_state"] = lr.qty_check(r, _own[r.get("id")], _exact)
             r["verdict"] = lr.verdict(r.get("price_state"), r["qty_state"])
     summary = lr.summarize(rows)
     counts = lr.verdict_counts(rows)
