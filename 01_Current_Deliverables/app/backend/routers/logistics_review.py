@@ -814,17 +814,20 @@ def review_kingdee_qty(request: Request, carrier: str = "迅鸽", period: str = 
             if h:
                 qty[no] = h[1]
                 n_extra += 1
+        own = [no for no, v in qty.items() if bq.get(no) and abs(bq[no] - v) < 0.01]
     except Exception:
-        pass
-    hit = _fill_kd(carrier, period, qty)
+        own = []
+    hit = _fill_kd(carrier, period, qty, own)
     db.audit(u["name"], "物流复核-接金蝶核量", "%s %s" % (carrier, period),
              "只读取数；金蝶单据 %d 张(%s)，回填 %d 行%s" % (len(qty), "/".join(sorted(by_form)), hit,
                                                     "；其中 %d 张把同号其他出库单/包装算进去才对上" % n_extra if n_extra else ""))
     return {"ok": True, "kd_docs": len(qty), "filled": hit, "want_docs": sum(len(v) for v in by_form.values()), "with_extra": n_extra}
 
 
-def _fill_kd(carrier, period, kmap):
-    """金蝶量回填中间表：先清空本月旧值，再按「首个单号完全相等」回填(不用前缀匹配)。返回回填行数。"""
+def _fill_kd(carrier, period, kmap, own_rows=None):
+    """金蝶量回填中间表：先清空本月旧值，再按「首个单号完全相等」回填(不用前缀匹配)。返回回填行数。
+    own_rows＝这些单号账单上有几行、几行合计和金蝶对得上：每行回填它自己的账单量(中间表逐行比，回填整单的数会让每行都显示不符，V2.878)。"""
+    own_rows = set(own_rows or [])
     with db._engine.begin() as c:
         rows = c.execute(select(BL.c.id, BL.c.doc_no).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()
@@ -836,7 +839,7 @@ def _fill_kd(carrier, period, kmap):
         for no, v in kmap.items():
             ids = ids_by.get(no)
             if ids:
-                c.execute(update(BL).where(BL.c.id.in_(ids)).values(kd_qty=v))
+                c.execute(update(BL).where(BL.c.id.in_(ids)).values(kd_qty=(BL.c.qty if (no in own_rows and len(ids) > 1) else v)))
                 hit += len(ids)
     return hit
 
@@ -2762,7 +2765,7 @@ def _box_docs(rsub, carrier):
             chg_wt = billcnt * (1000.0 if _u0.lower() in ("吨", "t") else 1.0)
             wt_from_qty = "账单 %s %s" % (_fmt_amt(billcnt), _u0)
         use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
-        kda, pack_used, packs_of = None, {}, None
+        kda, pack_used, packs_of, kall = None, {}, None, None
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
             per = [_m_kg(m, uk) for m in lines]     # 千克计量的取基本数量；按升/个计量的按单位换算表折(V2.865)，没填换算的算 0
@@ -2795,6 +2798,7 @@ def _box_docs(rsub, carrier):
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit, mode_cn = billcnt, (r.get("unit") or "件"), "件", "按件数"
             cnt_state = "miss" if not kd_sum else ("ok" if abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum) else "qtydiff")
+            kall = round(sum(_m_qty(m) for m in list(lines) + list(extra.get(d0) or [])), 2) if lines else None      # 这张单全部物料(含包装、同号其他出库单)的件数，多行合并时用
             if lines and cnt_state != "ok":
                 # V2.878(用户 2026-10-08「是不是其他出库里面也有涉及的箱子和周边」，真机证实)：这张单金蝶里的全部物料(含同号其他出库单的周边/赠品/箱子、包装袋)
                 #   合计正好＝账单件数的，算一致，并写明多出来的是什么
@@ -2950,7 +2954,7 @@ def _box_docs(rsub, carrier):
         _kdd = {}
         for (dx, _m), v in zip(pairs, per if lines else []):
             _kdd[dx] = _kdd.get(dx, 0.0) + v
-        docs.append({**base, "_kdd": _kdd, "_kda": kda, "state": state, "fee_sys": f_sys, "fee_fill": f_fill, "fee_chk": f_chk, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
+        docs.append({**base, "_kdd": _kdd, "_kda": kda, "_kall": kall, "state": state, "fee_sys": f_sys, "fee_fill": f_fill, "fee_chk": f_chk, "doc_fee": round(fee, 2), "doc_kg": round(kgbase, 2) if kgbase else None,
                      "unit_fee": round(fee / kgbase, 2) if kgbase else None, "sales": ssum,
                      "ratio": round(fee / ssum, 4) if ssum else None,
                      "parties": list(dict.fromkeys(m.get("party") for m in mrows if m.get("party"))),
@@ -3009,6 +3013,10 @@ def _box_docs(rsub, carrier):
                         kd = round(sum(_vals), 2)
                         _gnote = _pack_note([(_flat[i]["n"], _flat[i]["p"][_flat[i]["v"].index(_vals[i])], _flat[i]["u"]) for i in _usd])
                 st = "ok" if abs(bsum - kd) <= max(1.0, 0.02 * kd) else "qtydiff"
+                if st != "ok" and xs[0].get("_kall") is not None and abs(bsum - float(xs[0]["_kall"])) < 0.01:
+                    # 按件数核、几行账单合计正好＝这张单全部物料(含包装、同号其他出库单)的件数(V2.878)
+                    _gnote += " · 含包装/同号其他出库单 %s 件" % _fmt_amt(float(xs[0]["_kall"]) - kd)
+                    kd, st = float(xs[0]["_kall"]), "ok"
                 for x in xs:
                     x["kd_sum"] = kd
                     x["state"], x["q_diff"], x["doc_bill_all"] = st, round(bsum - kd, 2), bsum
@@ -3021,6 +3029,7 @@ def _box_docs(rsub, carrier):
     for x in docs:
         x.pop("_kdd", None)
         x.pop("_kda", None)
+        x.pop("_kall", None)
     return docs
 
 
