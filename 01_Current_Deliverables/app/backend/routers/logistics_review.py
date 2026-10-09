@@ -798,10 +798,29 @@ def review_kingdee_qty(request: Request, carrier: str = "迅鸽", period: str = 
             except (TypeError, ValueError):
                 pass
         qty[no] = round(q, 2)
+    # V2.878：货品件数对不上的单，补查同号的别种单据(其他出库单)；全部物料合计正好＝账单件数的，按那个数回填
+    n_extra = 0
+    try:
+        with db._engine.connect() as c:
+            bq = {}
+            for dno, q0 in c.execute(select(BL.c.doc_no, BL.c.qty).where(
+                    (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all():
+                d0 = (dno or "").split("+")[0].strip()
+                bq[d0] = bq.get(d0, 0.0) + float(q0 or 0)
+        need = sorted(no for no, v in qty.items() if bq.get(no) and abs(bq[no] - v) >= 0.01)
+        ex = _same_no_extra(s, conf, mats, need) if need else {}
+        for no in need:
+            h = _qty_with_extra(bq[no], mats.get(no) or [], ex.get(no))
+            if h:
+                qty[no] = h[1]
+                n_extra += 1
+    except Exception:
+        pass
     hit = _fill_kd(carrier, period, qty)
     db.audit(u["name"], "物流复核-接金蝶核量", "%s %s" % (carrier, period),
-             "只读取数；金蝶单据 %d 张(%s)，回填 %d 行" % (len(qty), "/".join(sorted(by_form)), hit))
-    return {"ok": True, "kd_docs": len(qty), "filled": hit, "want_docs": sum(len(v) for v in by_form.values())}
+             "只读取数；金蝶单据 %d 张(%s)，回填 %d 行%s" % (len(qty), "/".join(sorted(by_form)), hit,
+                                                    "；其中 %d 张把同号其他出库单/包装算进去才对上" % n_extra if n_extra else ""))
+    return {"ok": True, "kd_docs": len(qty), "filled": hit, "want_docs": sum(len(v) for v in by_form.values()), "with_extra": n_extra}
 
 
 def _fill_kd(carrier, period, kmap):
@@ -1085,8 +1104,42 @@ def _fetch_doc_materials_once(s, conf, docs_by_form):
                     "编码": r.get("编码"), "名称": r.get("名称"),
                     "基本数量": r.get("基本数量"), "基本单位": r.get("基本单位"),
                     "往来": lai, "销售额": r.get("销售额"),
-                    "规格": r.get("规格"), "数量件": r.get("数量件"), "计价单位": r.get("计价单位"), "源单号": r.get("源单号")})
+                    "规格": r.get("规格"), "数量件": r.get("数量件"), "计价单位": r.get("计价单位"), "源单号": r.get("源单号"),
+                    "_form": form})
     return out
+
+
+_FORM_CN = {"SAL_OUTSTOCK": "销售出库单", "STK_MisDelivery": "其他出库单", "STK_TransferIn": "调入单", "STK_TransferOut": "调出单",
+            "STK_InStock": "采购入库单", "SAL_RETURNSTOCK": "销售退货单", "PUR_MRB": "采购退料单"}
+
+
+def _m_qty(m):
+    try:
+        return float(m.get("数量件") if m.get("数量件") not in (None, "") else (m.get("基本数量") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _same_no_extra(s, conf, mats, need):
+    """同一个单号在金蝶里还有没有别种单据(V2.878)。迅鸽的电商订单：货走销售出库单，随单送的周边、赠品、箱子另走一张**同号**的其他出库单。
+    原来的取数是「先查销售出库，查不到才查其他出库」，同号两边都有时其他出库那张就丢了。
+    need＝要补查的单号；mats＝已经取到的(用来知道每张单是从哪种单据取的，避免把同一张单再取一遍)。→ {单号: [物料行(带 _form)]}"""
+    by_form = {}
+    for d in need:
+        pre = "".join(ch for ch in str(d) if ch.isalpha())
+        got = {m.get("_form") for m in (mats.get(d) or [])}
+        for f in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"]):
+            if f not in got:
+                by_form.setdefault(f, set()).add(str(d))
+    return _fetch_doc_materials_once(s, conf, by_form) if by_form else {}
+
+
+def _qty_with_extra(bill, ms, extra):
+    """按件数核、货品件数(剔包装)对不上时的第二种算法：这张单在金蝶里的全部物料行都算(销售出库＋同号其他出库，包装袋、箱子也算一件)。
+    正好等于账单件数才认(→ 全部行, 件数)；不等返回 None，照旧算不符。和备选箱规一个规矩：只用来解释「正好对得上」的，不凑数。"""
+    allm = list(ms) + list(extra or [])
+    tot = round(sum(_m_qty(m) for m in allm), 2)
+    return (allm, tot) if bill and abs(tot - float(bill)) < 0.01 else None
 
 
 _BOX_CARRIERS = {"丰源", "极鲜达", "恒茂", "链盟", "跨越物流", "中通快运", "易风达", "诚煜物流"}  # 按件数/箱核对(有账单重量则按重量)：金蝶数量(袋)÷规格箱规=箱数，整车比箱、打托倒算托规
@@ -2669,6 +2722,23 @@ def _box_docs(rsub, carrier):
     wt_rng = _wt_range(carrier)
     uk = _unit_kg()
     pka = _pack_alt()
+    extra = {}
+    if _rev == "qty" and mats:          # 按件数核：货品件数对不上的单，看金蝶里同号还有没有别种单据(其他出库单)
+        need = []
+        for r in rsub:
+            d0 = (r.get("doc_no") or "").split("+")[0]
+            ms = mats.get(d0) or []
+            if not ms or d0 == "无单据":
+                continue
+            goods = sum(_m_qty(m) for m in ms if not any(k in str(m.get("名称") or "") for k in _PACK_KW))
+            bq = float(r.get("qty") or 0)
+            if bq and abs(bq - goods) > max(1.0, 0.02 * goods):
+                need.append(d0)
+        if need:
+            try:
+                extra = _same_no_extra(s2, conf2, mats, sorted(set(need)))
+            except Exception:
+                extra = {}
     docs = []
     for r in rsub:
         d0 = (r.get("doc_no") or "").split("+")[0]
@@ -2725,6 +2795,21 @@ def _box_docs(rsub, carrier):
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit, mode_cn = billcnt, (r.get("unit") or "件"), "件", "按件数"
             cnt_state = "miss" if not kd_sum else ("ok" if abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum) else "qtydiff")
+            if lines and cnt_state != "ok":
+                # V2.878(用户 2026-10-08「是不是其他出库里面也有涉及的箱子和周边」，真机证实)：这张单金蝶里的全部物料(含同号其他出库单的周边/赠品/箱子、包装袋)
+                #   合计正好＝账单件数的，算一致，并写明多出来的是什么
+                hit = _qty_with_extra(billcnt, lines, extra.get(d0))
+                if hit:
+                    _ex = extra.get(d0) or []
+                    _np = round(sum(_m_qty(m) for m in lines if any(k in str(m.get("名称") or "") for k in _PACK_KW)), 2)
+                    lines = [dict(m) for m in lines] + [dict(m, 名称="%s〔%s〕" % (m.get("名称") or "", _FORM_CN.get(m.get("_form"), "同号另一张单据"))) for m in _ex]
+                    pairs = [(d0, m) for m in lines]
+                    per = [_m_qty(m) for m in lines]
+                    kd_sum, cnt_state = hit[1], "ok"
+                    _bits = (["同号%s %s 件（%s）" % (_FORM_CN.get(_ex[0].get("_form"), "另一张单据"), _fmt_amt(sum(_m_qty(m) for m in _ex)),
+                                                   "、".join(dict.fromkeys(str(m.get("名称") or "")[:10] for m in _ex)))] if _ex else []) + \
+                            (["包装 %s 件" % _fmt_amt(_np)] if _np else [])
+                    mode_cn = "按件数 · 含" + "、".join(_bits)
             if str(r.get("unit") or "").strip() in lr._NOQTY_UNITS:
                 mode_cn, cnt_state = "按%s计费·免核量" % str(r.get("unit")).strip(), "na"   # 搬运费按方、存储费按板：核不了件数
             conv = round(kd_sum / billcnt, 3) if billcnt else None
