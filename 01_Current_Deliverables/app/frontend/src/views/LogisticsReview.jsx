@@ -1000,6 +1000,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .dfilt{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 15px;background:#F5FAFC;border-bottom:1px solid #DCE2E7;font-size:12.5px;color:#1B2733}
       .lrv .ltbl td.pl{line-height:1.25}
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
+      .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:360px}
       .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
       .lrv .tag.ok{color:var(--ok);background:#DCEFE4}
       .lrv .diffok{color:var(--ok);font-weight:600}.lrv .diffbad{color:var(--bad);font-weight:600}
@@ -1412,6 +1413,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <button className="btn sm" onClick={() => setSel({})}>清空选择</button>
             {selStat.nNoDoc > 0 && <small className="dim" style={{ width: '100%' }}>其中 {selStat.nNoDoc} 张无单据的调整行只参与统计，不打确认。</small>}
           </div>}
+          {d && d.suggest_docs && ((d.suggest_docs.box || []).length + (d.suggest_docs.weight || []).length) > 0 && <div className="adjnote">
+            数量不符的单里，有的换一种核法就对得上，系统给了建议（每张单的结论下面写了理由）：
+            {(d.suggest_docs.box || []).length > 0 && <span>　<b>{d.suggest_docs.box.length}</b> 张建议按箱数核（账单件数和金蝶箱数一件不差）
+              {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => saveModeMany(d.suggest_docs.box, 'box')}>这 {d.suggest_docs.box.length} 张都采纳</button>}</span>}
+            {(d.suggest_docs.weight || []).length > 0 && <span>　<b>{d.suggest_docs.weight.length}</b> 张建议按重量核（账单重量和金蝶重量在允许范围内）
+              {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => saveModeMany(d.suggest_docs.weight, 'weight')}>这 {d.suggest_docs.weight.length} 张都采纳</button>}</span>}
+            <span className="dim">　只是建议，不点不会改。</span></div>}
           {d && d.unit_gap && d.unit_gap.n_mat > 0 && <div className="adjnote">有 <b>{d.unit_gap.n_mat}</b> 种物料金蝶不是按千克计量（按升、按个），还没填单位换算，涉及 <b>{d.unit_gap.n_doc}</b> 张单——
             这些单的金蝶重量没算全，多半会挂在「数量不符」。<button className="lnk" onClick={() => setUnitDlg(true)}>去填单位换算</button></div>}
           {billDlg && <BillsDlg carrier={carrier} period={period} onClose={() => setBillDlg(false)} onChanged={() => { setGroup('ex'); setPage(1); load(); refetchL() }} flash={flash} />}
@@ -1464,6 +1472,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td>{cf
                           ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className="sub">{pl || x.mode_cn} · {cf.by}</span></>
                           : <><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}
+                            {x.suggest && x.state === 'qtydiff' && <span className="sub sugg" title={x.suggest.txt + '。点「采纳」就把这一张改成这种核法并重判；不点不会改'}>
+                              建议{x.suggest.mode === 'box' ? '按箱数核' : '按重量核'}：{x.suggest.txt}
+                              {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={e => { e.stopPropagation(); saveMode(x.doc_no, x.suggest.mode) }}>采纳</button>}</span>}
                             {x.trip && <span className={'sub' + (x.trip.verdict === 'ok' ? '' : ' diffbad')} title={x.trip.msg}>{x.trip.msg}</span>}</>}</td>
                         <td className="num">{money(x.doc_fee)}{x.trips > 1 && <span className="sub" title="同一单号账单上有几行(包天包趟一车一行)，单位运费/费比按本单合计算">共 {x.trips} 行 · 合计 {money(x.doc_fee_all)}</span>}
                           {x.sub_fees && Object.keys(x.sub_fees).filter(k => typeof x.sub_fees[k] === 'number').length > 1 &&

@@ -2771,6 +2771,22 @@ def _pallet_kg(carrier):
         return 0.0
 
 
+def _kd_boxes(lines):
+    """这张单金蝶物料按规格箱规折成的箱数 → (箱数, 有几种物料折不出箱)。有折不出的，箱数就不全，不能拿来下结论。"""
+    tot, miss = 0.0, 0
+    for m in lines:
+        br = _box_div(m)
+        try:
+            q = float(m.get("数量件") or 0)
+        except (TypeError, ValueError):
+            q = 0.0
+        if br and q:
+            tot += q / br
+        elif q:
+            miss += 1
+    return round(tot, 4), miss
+
+
 _DOC_MODE_KEY = "logi_doc_mode"          # {"承运商|账期": {单号: {"mode": "weight"|"box", "by": 谁, "at": 什么时候}}}
 _DOC_MODE_CN = {"weight": "按重量", "box": "按箱数"}
 
@@ -3015,6 +3031,20 @@ def _box_docs(rsub, carrier):
             mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
         if fnote:
             mode_cn += fnote
+        # 建议核对方式(V2.887，用户 2026-10-09「能不能出一个建议核对方式呢」)：现在这种比法对不上、换另一种比法正好对得上的，给个建议和理由；
+        #   只建议不替人改(点了才改)。按箱数的建议要每种物料都折得出箱、且和账单件数一件不差；按重量的建议要落在这家的毛重比范围内。
+        sugg = None
+        if _rev != "qty" and d0 and lines and not fmode and cnt_state == "qtydiff":
+            if use_weight and can_box:
+                _sb, _smiss = _kd_boxes(lines)
+                if not _smiss and abs(_sb - billcnt) < 0.01:
+                    sugg = {"mode": "box", "txt": "账单 %s 件 ＝ 金蝶 %s 箱，一件不差%s" % (
+                        _fmt_amt(billcnt), _fmt_amt(_sb), ("；账单重量折下来每件 %s 千克，像是按件数算的毛重，不是金蝶的净重" % _fmt_amt(round(chg_wt / billcnt, 3))) if chg_wt else "")}
+            elif (not use_weight) and can_wt:
+                _sw = sum(_m_kg(m, uk) for m in lines)
+                _swok = (wt_rng[0] - 1e-9 <= chg_wt / _sw <= wt_rng[1] + 1e-9) if (wt_rng and _sw) else bool(_sw and abs(chg_wt - _sw) <= max(1.0, 0.02 * _sw))
+                if _swok:
+                    sugg = {"mode": "weight", "txt": "账单重量 %s 千克 对 金蝶 %s 千克，在允许范围内" % (_fmt_amt(chg_wt), _fmt_amt(round(_sw, 2)))}
         if not d0:
             mode_cn, cnt_state = "无单据·账单调整", "na"   # 如托盘丢失扣款：只登记不核量
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
@@ -3026,7 +3056,7 @@ def _box_docs(rsub, carrier):
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
-                "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
+                "suggest": sugg, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
                 "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
         kgbase = 0.0
@@ -3332,6 +3362,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             pool = [x for x in pool if x["doc_no"]]      # 无单据的不列(见 _nd)；缓存里那份不动
             ex_all = sum(1 for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff", "price"))   # 步骤条用整家总数，不随筛选变
             ex_docs = len({x["doc_no"] for x in pool if not x.get("confirmed") and x["state"] in ("miss", "qtydiff", "price")})   # 同上，按单号数(一张单拆几行的只算一张)
+            sugg_docs = {}                    # 整家本月有建议核对方式的单(V2.887)：{box: [单号], weight: [单号]}，页面顶上一键采纳用
+            for x in pool:
+                if x.get("suggest") and not x.get("confirmed") and x["state"] == "qtydiff" and x["doc_no"] not in sugg_docs.setdefault(x["suggest"]["mode"], []):
+                    sugg_docs[x["suggest"]["mode"]].append(x["doc_no"])
             if bucket_on:
                 pool = [x for x in pool if inb(x["subject"], x["fee_item"], x.get("bbiz", ""))]
             dc = {"miss": 0, "qtydiff": 0, "price": 0, "info": 0, "ok": 0, "done": 0}
@@ -3347,7 +3381,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                         _gap.setdefault(m.get("code"), set()).add(x["doc_no"])
             unit_gap = {"n_mat": len(_gap), "n_doc": len({d for ds in _gap.values() for d in ds})}
         else:
-            ex_all, unit_gap, ex_docs = None, None, None
+            ex_all, unit_gap, ex_docs, sugg_docs = None, None, None, None
             pool = _box_docs(sl, carrier)
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
@@ -3393,7 +3427,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
