@@ -3083,7 +3083,18 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         accr = [dict(r) for r in c.execute(select(BL).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "accrual"))).mappings().all()]
     kdmap = {(r.get("doc_no") or "").split("+")[0]: r["kd_qty"] for r in rows if r.get("kd_qty") is not None}
+    # 一张单账单上有几行的：每行按它自己回填的金蝶量比(V2.878；上面那张表是按单号一个数，几行会拿同一个数去比，
+    #   迅鸽 QTCK011583 两行 205＋1,550 合计对得上、逐行却都显示不符)。只有一行的单不受影响。
+    _own = {r.get("id"): r.get("kd_qty") for r in rows}
+    _nrow = {}
+    for r in rows:
+        _d = (r.get("doc_no") or "").split("+")[0]
+        _nrow[_d] = _nrow.get(_d, 0) + 1
     lr.review_details(rows, card, kdmap)
+    for r in rows:
+        if _nrow.get((r.get("doc_no") or "").split("+")[0], 0) > 1 and _own.get(r.get("id")) is not None and r.get("review_mode") != "register":
+            r["kd_qty"], r["qty_diff"], r["qty_state"] = lr.qty_check(r, _own[r.get("id")])
+            r["verdict"] = lr.verdict(r.get("price_state"), r["qty_state"])
     summary = lr.summarize(rows)
     counts = lr.verdict_counts(rows)
     total_bill = round(sum((a.get("amount") or 0) for a in accr) or sum((r.get("amount") or 0) for r in rows), 2)
