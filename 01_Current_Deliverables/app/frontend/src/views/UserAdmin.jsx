@@ -8,7 +8,69 @@
 //  取消某菜单准入 → 它底下动作跟着收回（前端即时 + 后端 _cascade_revoke 兜底，绕不过）。
 //  常规/敏感由后端 sensitive 标记驱动；tier/mod 也在后端注册表，此页自动渲染。加权限点只改后端。
 import React, { useEffect, useMemo, useState } from 'react'
-import { listUsers, createUser, setUserActive, resetPwd, deleteUser, getPermCaps, getBpPermDrift, setUserPerms, setCapSensitivity, getNavModules, setUserPost, saveNavTemplates, saveNavPosts } from '../api.js'
+import { listUsers, createUser, setUserActive, resetPwd, deleteUser, getPermCaps, getBpPermDrift, setUserPerms, setCapSensitivity, getNavModules, setUserPost, saveNavTemplates, saveNavPosts, ddBindUser, ddUnbindUser, getDingtalkRoster } from '../api.js'
+
+// 钉钉免登（V2.884）：这个账号认的是钉钉上的谁。认了＝对方从钉钉工作台点开直接进，不用输密码。
+// 没认：本人从钉钉打开、输一次账号密码就自动认上；主管理员也可以在这里搜钉钉姓名直接指定。
+// 通讯录只在点「指定」时才去拉一次（要走一遍钉钉部门树），拉回来的交给父层存着，换账号不重拉。
+function DdBind({ u, isSuper, roster, setRoster, onDone, flash }) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setOpen(false); setQ(''); setErr('') }, [u.name])
+  const start = () => {
+    setOpen(true)
+    if (roster !== null) return
+    getDingtalkRoster().then(r => { if (r.ok) setRoster(r.people || []); else setErr(r.msg || '读不到钉钉通讯录') })
+      .catch(e => setErr(e.message || '读不到钉钉通讯录'))
+  }
+  const pick = async (p) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const r = await ddBindUser({ name: u.name, userid: p.userid })
+      flash(r.ok, r.ok ? `已指定：${u.name} 认钉钉上的「${r.dt_name}」` : r.msg)
+      if (r.ok) { setOpen(false); setQ(''); onDone() }
+    } catch (e) { flash(false, e.message) } finally { setBusy(false) }
+  }
+  const unbind = async () => {
+    if (!window.confirm(`解除后，「${u.name}」从钉钉点开要重新输一次密码才能进。确认解除？`)) return
+    try { const r = await ddUnbindUser({ name: u.name }); flash(r.ok, r.ok ? '已解除' : r.msg); if (r.ok) onDone() }
+    catch (e) { flash(false, e.message) }
+  }
+  const kw = q.trim()
+  const hits = kw && Array.isArray(roster)
+    ? roster.filter(p => (p.name || '').includes(kw) || (p.dept || '').includes(kw)).slice(0, 8) : []
+  const link = { color: 'var(--accent)', cursor: 'pointer', marginLeft: 8 }
+  return (
+    <div className="ua-dmeta" style={{ marginTop: 4 }}>
+      钉钉免登：{u.dt_bound
+        ? <>已认钉钉上的「<b>{u.dt_name || '姓名未知'}</b>」
+          {u.dt_name && u.dt_name !== u.name && <span style={{ color: 'var(--red)', marginLeft: 6 }}>和账号名不一样，请确认是同一个人</span>}
+          <a style={link} onClick={unbind}>解除</a></>
+        : <>还没认（本人从钉钉打开、输一次密码就会自动认上）
+          {isSuper && !open && <a style={link} onClick={start}>直接指定</a>}</>}
+      {open && !u.dt_bound && (
+        <div style={{ marginTop: 6, maxWidth: 420 }}>
+          <input className="srch" autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="输钉钉上的姓名搜人"
+            style={{ width: '100%' }} />
+          {err ? <div style={{ color: 'var(--red)', marginTop: 4 }}>{err}</div>
+            : roster === null ? <div style={{ marginTop: 4 }}>正在读钉钉通讯录…</div>
+              : kw && hits.length === 0 ? <div style={{ marginTop: 4 }}>没搜到「{kw}」</div>
+                : hits.map(p => (
+                  <div key={p.userid} onClick={() => pick(p)}
+                    style={{ display: 'flex', gap: 8, padding: '6px 8px', cursor: 'pointer', borderBottom: '1px solid var(--line)' }}>
+                    <span style={{ color: 'var(--ink)' }}>{p.name}</span>
+                    <span style={{ marginLeft: 'auto' }}>{[p.title, p.dept].filter(Boolean).join(' · ')}</span>
+                  </div>
+                ))}
+          <a style={{ ...link, marginLeft: 0, display: 'inline-block', marginTop: 6 }} onClick={() => setOpen(false)}>不指定了</a>
+        </div>
+      )}
+    </div>
+  )
+}
 
 // V2.324 加 platform：平台级权限点（如 model_config「模型配置」）的渲染区块。它不是工作台——
 // 不在后端 WS_LABEL 里、没有准入/任命开关，子管理员不可授（assignable 过滤会对其隐藏整块）。
@@ -233,6 +295,7 @@ const CSS = `
 
 export default function UserAdmin({ me }) {
   const [rows, setRows] = useState([])
+  const [ddRoster, setDdRoster] = useState(null)   // 钉钉通讯录（给账号指定钉钉身份时才拉一次）；null=没拉过
   const [caps, setCaps] = useState([])
   const [bpDrift, setBpDrift] = useState(null)   // V2.106 BP 码表对账（null=未查/不可用）
   const [scope, setScope] = useState({ is_super: true, assignable: [], manageable_grps: null })
@@ -616,6 +679,7 @@ export default function UserAdmin({ me }) {
                         待认领：{cur.post}</span>}
                     {cur.grp === '外部协作' && <span className="ua-tag ext">外部</span>}</div>
                   <div className="ua-dmeta">分组：{cur.grp} · {cur.role === 'admin' ? '管理员' : '普通'} · {cur.active ? '启用中' : '已禁用'} · 创建 {cur.created_at}</div>
+                  <DdBind u={cur} isSuper={isSuper} roster={ddRoster} setRoster={setDdRoster} onDone={load} flash={flash} />
                 </div>
                 <div className="ua-acts">
                   {cur.role !== 'admin' && postKnown(cur.post) &&

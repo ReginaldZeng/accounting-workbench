@@ -103,6 +103,8 @@ users = Table(
     Column("created_at", String(20)),
     Column("perms", Text),                        # JSON 细粒度权限 {能力:bool}（NULL=全开，向后兼容）
     Column("must_change_pwd", Integer),           # V2.330 首登强制改密：新建/重置=1，本人改密后=0（老库 _ensure_user_columns 补列）
+    Column("dt_userid", String(64)),              # V2.884 钉钉免登：这个账号认的钉钉身份（本人在钉钉里用密码登录一次时记下；空=没认过）
+    Column("dt_name", String(50)),                # 认下时钉钉上的姓名（账号管理页显示，方便看出认错人）
 )
 sessions = Table(
     "sessions", _md,
@@ -1139,6 +1141,11 @@ def _ensure_user_columns():
             # 存量账号默认 0（不强制）——要强制某个老账号，管理员给他重置一次密码即可。
             if "must_change_pwd" not in cols:
                 c.execute(text("ALTER TABLE users ADD COLUMN must_change_pwd INTEGER DEFAULT 0"))
+            # V2.884 钉钉免登：账号认的钉钉身份
+            if "dt_userid" not in cols:
+                c.execute(text("ALTER TABLE users ADD COLUMN dt_userid VARCHAR(64)"))
+            if "dt_name" not in cols:
+                c.execute(text("ALTER TABLE users ADD COLUMN dt_name VARCHAR(50)"))
     except Exception:
         pass
 
@@ -1584,11 +1591,14 @@ def get_user(name):
 def list_users():
     with _engine.connect() as c:
         rows = c.execute(select(users.c.id, users.c.name, users.c.grp, users.c.post, users.c.role,
-                                users.c.active, users.c.created_at, users.c.perms).order_by(users.c.id)).mappings().all()
+                                users.c.active, users.c.created_at, users.c.perms,
+                                users.c.dt_userid, users.c.dt_name).order_by(users.c.id)).mappings().all()
     out = []
     for r in rows:
         d = dict(r)
         d["post"] = d.get("post") or ""
+        d["dt_bound"] = bool(d.pop("dt_userid", None))     # 只告诉前端认没认过钉钉；钉钉内部编号不外露
+        d["dt_name"] = d.get("dt_name") or ""
         d["perms"] = parse_perms(d.pop("perms", None))     # 规范化成 dict 返给前端
         out.append(d)
     return out
@@ -1658,6 +1668,47 @@ def change_own_pwd(name, old_pwd, new_pwd):
 def delete_user(name):
     with _engine.begin() as c:
         c.execute(delete(users).where(users.c.name == name))
+
+
+# 钉钉免登（V2.884）：账号 ↔ 钉钉身份，一对一
+def user_by_dt(userid):
+    """钉钉 userid → 认了它的那个账号（含已禁用的，由调用方判）；没人认过 → None。"""
+    uid = str(userid or "").strip()
+    if not uid:
+        return None
+    with _engine.connect() as c:
+        r = c.execute(select(users).where(users.c.dt_userid == uid)).mappings().first()
+    return dict(r) if r else None
+
+
+def bind_user_dt(name, userid, dt_name=""):
+    """把钉钉身份记到账号上 → (成没成, 原因)。一个钉钉身份只能认一个账号；账号已认了别人就不改（要先由管理员解除）。"""
+    uid = str(userid or "").strip()
+    if not uid:
+        return False, "没拿到钉钉身份"
+    with _engine.begin() as c:
+        me = c.execute(select(users.c.dt_userid, users.c.dt_name).where(users.c.name == name)).mappings().first()
+        if me is None:
+            return False, "账号不存在"
+        if me["dt_userid"] == uid:
+            return True, ""
+        if me["dt_userid"]:
+            return False, "这个账号已经认了另一个钉钉身份（%s），要换人请管理员先在账号管理里解除" % (me["dt_name"] or "姓名未知")
+        other = c.execute(select(users.c.name).where(users.c.dt_userid == uid)).first()
+        if other:
+            return False, "你的钉钉已经认了另一个账号（%s），一个钉钉只能对一个账号" % other[0]
+        c.execute(update(users).where(users.c.name == name).values(dt_userid=uid, dt_name=str(dt_name or "")[:50]))
+    return True, ""
+
+
+def unbind_user_dt(name):
+    """解除账号认的钉钉身份 → 原来认的钉钉姓名（没认过回 None）。"""
+    with _engine.begin() as c:
+        me = c.execute(select(users.c.dt_userid, users.c.dt_name).where(users.c.name == name)).mappings().first()
+        if not me or not me["dt_userid"]:
+            return None
+        c.execute(update(users).where(users.c.name == name).values(dt_userid=None, dt_name=None))
+    return me["dt_name"] or ""
 
 
 def seed_admin():

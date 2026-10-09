@@ -98,6 +98,8 @@ const CSS = `
 .lg-err{color:var(--lred);font-size:12.5px;margin:-6px 0 12px;min-height:16px}
 .lg-err.show{animation:lgshake .3s}
 @keyframes lgshake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+.lg-dd{margin:-10px 0 18px;padding:10px 12px;border-radius:10px;font-size:12.5px;line-height:1.8;background:#EEF0FE;color:#3B3F8F}
+.lg-dd.warn{background:#FFF4E5;color:#8A5A00}
 .lg-cardfoot{margin-top:24px;text-align:center;color:var(--link3);font-size:12px}
 .lg-cardfoot b{color:var(--link2);font-weight:600}
 @media (max-width:860px){
@@ -272,11 +274,14 @@ const FORMAL_ART = `
   </g>
 </svg>`
 
-export default function Login({ onLogin }) {
+// dd（V2.884 钉钉免登）：在钉钉里打开、但还没直接进去时 App 传进来——
+//   {ticket,name}＝钉钉认出是谁但还没认过账号：这次用密码登录成功就把钉钉身份记到账号上，下次直接进；
+//   {note}＝钉钉没认成的原因。不在钉钉里打开时为 null，登录页和以前一样。
+export default function Login({ onLogin, dd }) {
   const rootRef = useRef(null)
   const userRef = useRef(null)
   const passRef = useRef(null)
-  const [name, setName] = useState(() => { try { return localStorage.getItem('fw_login_name') || '' } catch (e) { return '' } })
+  const [name, setName] = useState(() => { try { return localStorage.getItem('fw_login_name') || dd?.name || '' } catch (e) { return dd?.name || '' } })
   const [pwd, setPwd] = useState('')
   const [showPwd, setShowPwd] = useState(false)
   const [remember, setRemember] = useState(() => { try { return !!localStorage.getItem('fw_login_name') } catch (e) { return false } })
@@ -298,11 +303,13 @@ export default function Login({ onLogin }) {
     if (!name.trim() || !pwd) { showErr('请输入用户名和密码'); return }
     setBusy(true); setErr('')
     try {
-      const r = await login({ name: name.trim(), password: pwd })
+      const r = await login({ name: name.trim(), password: pwd, ...(dd?.ticket ? { ddTicket: dd.ticket } : {}) })
       try {
         if (remember) localStorage.setItem('fw_login_name', name.trim())
         else localStorage.removeItem('fw_login_name')
       } catch (e2) {}
+      // 登录成了但钉钉身份没记上（账号已认了别人等）：说一声原因，不挡登录
+      if (r.dd && !r.dd.bound && r.dd.msg) window.alert('已登录。但钉钉免登没开通：' + r.dd.msg)
       onLogin(r.user)
     } catch (e3) {
       showErr('姓名或密码错误，或账号已被禁用')
@@ -533,6 +540,9 @@ export default function Login({ onLogin }) {
             </div>
             <h1>登录</h1>
             <p className="lg-hsub">{formal ? '请使用管理员开通的账号登录。' : '请输入用户名与密码以继续。'}</p>
+            {dd?.ticket && <div className="lg-dd">钉钉认出你是「{dd.name || '本公司同事'}」，但还没对上工作台账号。
+              已有账号的：输一次账号密码就对上了，以后从钉钉点开直接进。还没有账号的：请联系管理员开通。</div>}
+            {!dd?.ticket && dd?.note && <div className="lg-dd warn">这次没能用钉钉直接进（{dd.note}），请用账号密码登录。</div>}
 
             <div className="lg-field">
               <div className="lg-lbl"><label htmlFor="lg-username">用户名</label><span className="lg-hint">姓名</span></div>

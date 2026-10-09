@@ -105,6 +105,8 @@ _BOARD_MAP = {
     "/api/llm": "模型配置",
     "/api/me": "身份·登录",
     "/api/login": "身份·登录",
+    "/api/login/dd": "身份·登录",
+    "/api/dd/hello": "身份·登录",
     "/api/logout": "身份·登录",
     "/api/ops": "运维日志",
     "/api/health": "健康检查",

@@ -252,7 +252,12 @@ def api_login(body: dict, request: Request, response: Response):
     # cookie 名按端口隔离（V2.196，见 core.sid_name）——本机多实例并行时各端口互不顶号
     response.set_cookie(sid_name(request), tok, httponly=True, max_age=7 * 24 * 3600, samesite="lax")
     db.audit(name, "登录")
-    return {"ok": True, "user": _user_public(u)}
+    out = {"ok": True, "user": _user_public(u)}
+    # V2.884 钉钉免登：在钉钉里第一次用密码登录时带着「认人凭条」→ 把钉钉身份记到这个账号上，下次从钉钉点开直接进
+    dd = dd_login.bind_after_login(u, body.get("ddTicket"))
+    if dd is not None:
+        out["dd"] = dd
+    return out
 
 
 @app.post("/api/logout")
@@ -580,6 +585,45 @@ def api_user_perms(body: dict, request: Request):
     if dropped:
         db.audit(adm["name"], "级联收回动作权限", name, "（因无对应菜单准入）" + "、".join(dropped)[:260])
     return {"ok": True, "cascadeRevoked": dropped}
+
+
+@app.post("/api/users/dd-bind")
+def api_user_dd_bind(body: dict, request: Request):
+    """主管理员给账号指定钉钉身份（V2.884 钉钉免登）：从钉钉通讯录里选的人，对方从钉钉点开就直接进，不用输密码。
+    只给主管理员——指定了谁，谁就能以这个账号进系统，分量等同重置密码。
+    钉钉姓名以服务器从通讯录查到的为准，不信页面传来的；通讯录里没有这个人就不认。"""
+    adm = _admin(request)
+    if not adm:
+        return JSONResponse({"ok": False, "msg": "仅主管理员可指定钉钉身份"}, status_code=403)
+    name = str(body.get("name", "") or "").strip()
+    uid = str(body.get("userid", "") or "").strip()[:64]
+    if not db.get_user(name):
+        return JSONResponse({"ok": False, "msg": "账号不存在"}, status_code=404)
+    people = dd_login.idt.roster()
+    if not people.get("ok"):
+        return {"ok": False, "msg": "读不到钉钉通讯录（%s），这次没指定" % (people.get("msg") or "原因不明")}
+    person = next((p for p in people.get("rows") or [] if uid and p.get("userid") == uid), None)
+    if not person:
+        return {"ok": False, "msg": "钉钉通讯录里没有这个人，请重新搜一下再选"}
+    ok, msg = db.bind_user_dt(name, uid, person.get("name") or "")
+    if not ok:
+        return {"ok": False, "msg": msg}
+    db.audit(adm["name"], "钉钉免登-指定钉钉身份", name, "钉钉姓名：%s" % (person.get("name") or "未知"))
+    return {"ok": True, "dt_name": person.get("name") or ""}
+
+
+@app.post("/api/users/dd-unbind")
+def api_user_dd_unbind(body: dict, request: Request):
+    """解除账号认的钉钉身份（认错人、换人、离职）。解除后对方从钉钉点开要重新输一次密码，或由主管理员重新指定。"""
+    name = str(body.get("name", "") or "").strip()
+    adm, u, err = _scoped_target(request, name)
+    if err:
+        return err
+    old = db.unbind_user_dt(name)
+    if old is None:
+        return {"ok": False, "msg": "这个账号本来就没认钉钉身份"}
+    db.audit(adm["name"], "钉钉免登-解除钉钉身份", name, "原钉钉姓名：%s" % (old or "未知"))
+    return {"ok": True}
 
 
 @app.post("/api/users/post")
@@ -5022,7 +5066,9 @@ from routers import todo   # V2.790 首页待办区（待我处理 / 我发起�
 app.include_router(todo.router)
 from routers import office   # V2.796 数字员工办公室（值班表 + 干活记录 + 大屏口令）
 app.include_router(office.router)
-import office_bp_bridge   # V2.797 数字员工办公室·接入 BP 定时任务：每分钟去 BP 读它的定时任务清单，替驾驶舱值守员 / 业绩快报员报到、记账（只读，不改 BP）
+from routers import dd_login   # V2.884 钉钉免登（从钉钉工作台点开直接认人登录；/api/dd/hello、/api/login/dd 在登录门白名单里）
+app.include_router(dd_login.router)
+import office_bp_bridge  # V2.797 数字员工办公室·接入 BP 定时任务：每分钟去 BP 读它的定时任务清单，替驾驶舱值守员 / 业绩快报员报到、记账（只读，不改 BP）
 office_bp_bridge.start()
 
 

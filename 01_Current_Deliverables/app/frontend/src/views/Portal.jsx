@@ -14,6 +14,7 @@
 //   （BP/核算暂不支持按 URL 落到指定模块，点亮模块级直达记在 V2.325 台账遗留）。
 import React, { useState, useEffect, useRef } from 'react'
 import { apiLogout, getPortalTools, getLlmHubStatus, getMachinesSummary, getOfficeRoster } from '../api.js'
+import { markDdSkip } from './ddLogin.js'
 import UserAdmin from './UserAdmin.jsx'
 import PortalAdmin from './PortalAdmin.jsx'
 import ModelConfig from './ModelConfig.jsx'
@@ -283,7 +284,7 @@ export default function Portal({ user, onEnter }) {
   const catTools = dbTools.filter(t =>
     (fLane === 'all' || t.lane === fLane) && (fSt === 'all' || t.status === fSt) && (!qq || hay(t).includes(qq)))
 
-  const logout = async () => { try { await apiLogout() } catch (e) {} location.reload() }
+  const logout = async () => { markDdSkip(); try { await apiLogout() } catch (e) {} location.reload() }   // 钉钉里退出后不再自动免登（V2.884）
   const initial = (user?.name || '·').slice(0, 1)
 
   const nav = ['工作台门户', '验收台账', '使用指南', ...(canModel ? ['模型配置'] : [])]

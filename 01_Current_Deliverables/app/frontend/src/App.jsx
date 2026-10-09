@@ -42,6 +42,7 @@ import Portal from './views/Portal.jsx'
 import Home, { RECENT_KEY } from './views/Home.jsx'
 import WorkerOffice from './views/WorkerOffice.jsx'   // V2.796 数字员工办公室（门户层；大屏模式免登录）
 import { getConfig, setConfig, getMe, apiLogout, getNavModules, getTodos } from './api.js'
+import { tryDdLogin, markDdSkip } from './views/ddLogin.js'   // V2.884 钉钉免登
 
 export default function App() {
   const [user, setUser] = useState(undefined)   // undefined=检查登录中 / null=未登录 / {..}=已登录
@@ -60,7 +61,15 @@ export default function App() {
     if (!m) return false
     return !m.cap || user?.role === 'admin' || !!user?.perms?.[m.cap]
   }
-  useEffect(() => { getMe().then(r => setUser(r.user)).catch(() => setUser(null)) }, [])
+  // V2.884 钉钉免登：没登录、又是在钉钉里打开的 → 先让钉钉认人；认过账号的直接进，没认过的把结果交给登录页提示
+  const [dd, setDd] = useState(null)             // {ticket,name}=钉钉认出是谁但还没认过账号 / {note}=没认成的原因 / null=不在钉钉里
+  useEffect(() => {
+    getMe().then(r => setUser(r.user)).catch(async () => {
+      const r = await tryDdLogin()
+      if (r.user) { setUser(r.user); return }
+      setDd(r.dd || null); setUser(null)
+    })
+  }, [])
   // 深链（V2.442）：`#/bomstd?entry=17` 这种带菜单 key 的 hash → 登录后直接落核算工作台该菜单（BP 只读台账「关联采购核算表 / 去终审」用）。
   // 只定位菜单；菜单内的 entry/compare/final 由该页面自己解析 hash。准入仍走 canView，无权限照常落占位页。
   useEffect(() => {
@@ -102,12 +111,12 @@ export default function App() {
   if (screenTok) return <WorkerOffice kioskToken={screenTok} />
 
   if (user === undefined) return <div className="loading" style={{ padding: 40 }}>加载中…</div>
-  if (!user) return <Login onLogin={u => { setZone('portal'); setUser(u) }} />
+  if (!user) return <Login dd={dd} onLogin={u => { setDd(null); setZone('portal'); setUser(u) }} />
 
   // V2.330 首登强制改密：新建/重置后的账号先改密才放进门户（服务端 _auth_gate 同步硬拦，此处是 UX）
   if (user.must_change_pwd) return <ForcePwd user={user}
     onDone={() => getMe().then(r => setUser(r.user)).catch(() => setUser(null))}
-    onLogout={async () => { try { await apiLogout() } catch (e) {} setUser(null); setZone('portal') }} />
+    onLogout={async () => { markDdSkip(); try { await apiLogout() } catch (e) {} setUser(null); setZone('portal') }} />
 
   // 手机扫码查凭证（V2.802）：`#/vscan` 登录后只出这一页（拍付款单二维码 → 主体 + 凭证号），不进门户/侧栏。权限由接口把关。
   if ((window.location.hash || '').startsWith('#/vscan')) return <VoucherScanPage user={user} />
@@ -121,7 +130,7 @@ export default function App() {
   const modOn = k => !mods || mods[k]?.['可进入'] !== false
   const modSt = k => mods?.[k]?.status || ''
   const canSettings = user?.role === 'admin' || !!user?.perms?.enter_settings   // 系统设置：默认仅主管理员，可由主管理员授权
-  const logout = async () => { try { await apiLogout() } catch (e) {} setUser(null); setZone('portal'); setView('home') }
+  const logout = async () => { markDdSkip(); try { await apiLogout() } catch (e) {} setUser(null); setZone('portal'); setView('home') }
   const backToPortal = () => { setZone('portal'); setView('home') }
 
   if (zone === 'office') return <WorkerOffice user={user} onBack={backToPortal} />

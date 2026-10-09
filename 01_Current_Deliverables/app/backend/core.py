@@ -263,7 +263,8 @@ def _require_perm(request, cap):
     return u if db.user_can(u, cap) else None
 
 
-_OPEN_API = {"/api/login", "/api/logout", "/api/me", "/api/health"}
+_OPEN_API = {"/api/login", "/api/logout", "/api/me", "/api/health",
+             "/api/dd/hello", "/api/login/dd"}      # V2.884 钉钉免登：登录前就要能调（routers/dd_login.py）
 
 # ── 机器取件通道（V2.241）──────────────────────────────────
 # 报表导出的文件要落到办公室内网 NAS，而服务器在公网、够不着内网。

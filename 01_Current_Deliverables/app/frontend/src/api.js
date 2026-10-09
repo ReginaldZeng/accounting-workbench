@@ -29,6 +29,11 @@ const jp = (url, body) => j(url, {method:'POST', headers:{'Content-Type':'applic
 export const login = (b) => jp('/api/login', b)
 export const apiLogout = () => jp('/api/logout')
 export const getMe = () => j('/api/me')
+// 钉钉免登（V2.884）：从钉钉工作台点开时自动认人。loginDd 回 {ok:true,user} 或 {ok:false,code:'unbound',ddName,ticket}
+export const ddHello = () => j('/api/dd/hello')
+export const loginDd = (code) => jp('/api/login/dd', { code })
+export const ddBindUser = (b) => jp('/api/users/dd-bind', b)       // 主管理员给账号指定钉钉身份 {name, userid}
+export const ddUnbindUser = (b) => jp('/api/users/dd-unbind', b)   // 解除 {name}
 export const listUsers = () => j('/api/users')
 export const createUser = (b) => jp('/api/users/create', b)
 export const setUserActive = (b) => jp('/api/users/active', b)
