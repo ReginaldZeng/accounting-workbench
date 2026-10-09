@@ -30,6 +30,34 @@ _FEE_KEY = "logi_voucher_fee"               # {inst_id: {vid, vno, year, month, 
 _LATER_KEY = "logi_voucher_later"           # {inst_id: {by, at, note}} 人工确认「发票后补，先做付款凭证」(V2.832)
 _PICK_KEY = "logi_voucher_pick"             # {inst_id: {picks: [{year, month, vno}], by, at}} 人工选定这张请款单核销哪几张计提(V2.817)
 _ACC_CACHE = {}
+# V2.876 省金蝶调用(每天上限 50,000 次；V2.875 的计数显示：定时扫请款单那个线程一轮 125 次、一天 9,000 次，其中一半是重复登录)：
+#   ① 只读取数一分钟内共用一次登录(按线程，各用各的会话)；② 付款单的日期和银行账号、原主体红冲了没有，查过的 10 分钟内不重查(和计提凭证的缓存一样长)；真写金蝶前全部清掉现读。
+#   写金蝶的那几条路(保存凭证、审核付款单、建红冲凭证)不走这里，照旧每次自己登录。
+_KD_TLS = None
+_BANK_CACHE, _REV_CACHE = {}, {}
+
+
+def _kd():
+    """只读取数用的金蝶会话：同一个线程 60 秒内复用。"""
+    global _KD_TLS
+    import threading as _t
+    if _KD_TLS is None:
+        _KD_TLS = _t.local()
+    hit = getattr(_KD_TLS, "sess", None)
+    if hit and time.time() - hit[2] < 60:
+        return hit[0], hit[1]
+    s, conf = kc.login()
+    _KD_TLS.sess = (s, conf, time.time())
+    return s, conf
+
+
+def _kd_drop():
+    """这次取数失败了：会话可能过期，下次重新登录。"""
+    try:
+        if _KD_TLS is not None:
+            _KD_TLS.sess = None
+    except Exception:
+        pass
 
 
 def _now():
@@ -230,10 +258,14 @@ def _accruals(book, period, sup_code):
     if hit and time.time() - hit[1] < 600:
         return hit[0]
     y, m = int(period[:4]), int(period[5:7])
-    s, conf = kc.login()
+    s, conf = _kd()
     base = "FACCOUNTBOOKID.FName='%s' and FYear=%d and FPeriod=%d" % (book.replace("'", ""), y, m)
-    heads = kc._query(s, conf, "GL_VOUCHER", _F, base + " and FAccountID.FNumber like '2241%%' and FCREDIT<>0 and "
-                      "FDetailID.FFLEX4.FNumber='%s'" % sup_code.replace("'", ""))
+    try:
+        heads = kc._query(s, conf, "GL_VOUCHER", _F, base + " and FAccountID.FNumber like '2241%%' and FCREDIT<>0 and "
+                          "FDetailID.FFLEX4.FNumber='%s'" % sup_code.replace("'", ""))
+    except Exception:
+        _kd_drop()
+        raise
     direct = {_s(h["号"]) for h in heads if _is_direct(h["摘要"], h["贷"])}
     vnos = sorted({_s(h["号"]) for h in heads if "计提" in _s(h["摘要"]) and _accr_is_current(h["摘要"], period)} | direct, key=lambda x: int(x) if x.isdigit() else 0)
     notes, out = [], []
@@ -274,7 +306,7 @@ def _here_dims(book, year, month, fee_name, biz_code):
     if hit and time.time() - hit[1] < 600:
         return hit[0]
     from collections import Counter
-    s, conf = kc.login()
+    s, conf = _kd()
     res = None
     for per in ("FYear=%d and FPeriod=%d" % (year, month), "FYear=%d" % year):
         try:
@@ -337,14 +369,30 @@ def _other_reqs(r):
 
 
 def _reversed_in(book, sup_code, v):
+    k = (book, sup_code, str(v.get("vno")), round(float(v.get("gross") or 0), 2), v.get("year"), v.get("month"))
+    hit = _REV_CACHE.get(k)
+    if hit and time.time() - hit[1] < 600:
+        return hit[0]
+    r = _reversed_in0(book, sup_code, v)
+    if r is not _KD_FAIL:
+        _REV_CACHE[k] = (r, time.time())
+        return r
+    return None
+
+
+_KD_FAIL = object()
+
+
+def _reversed_in0(book, sup_code, v):
     """原主体账上这张计提红冲了没有：计提月及以后、2241 贷方＝负的含税额、挂这家供应商、摘要带「红冲」。→ {vno, year, month} / None。只读。"""
     try:
-        s, conf = kc.login()
+        s, conf = _kd()
         rows = kc._query(s, conf, "GL_VOUCHER", [("FVOUCHERGROUPNO", "号"), ("FEXPLANATION", "摘要"), ("FYear", "年"), ("FPeriod", "期")],
                          "FACCOUNTBOOKID.FName='%s' and FAccountID.FNumber like '2241%%' and FCREDIT=%.2f and FDetailID.FFLEX4.FNumber='%s' "
                          "and FYear>=%d" % (book.replace("'", ""), -float(v["gross"]), sup_code.replace("'", ""), v["year"]))
     except Exception:
-        return None
+        _kd_drop()
+        return _KD_FAIL          # 没读到(不是「确实没红冲」)：不进缓存
     for r in rows:
         y, m = int(r.get("年") or 0), int(r.get("期") or 0)
         if "红冲" in _s(r["摘要"]) and (y, m) >= (v["year"], v["month"]):
@@ -356,14 +404,21 @@ def _bank_of(bill_id):
     """付款单 FID → (付款日, 我方银行账号)。"""
     if not str(bill_id or "").isdigit():
         return None, ""
+    hit = _BANK_CACHE.get(str(bill_id))
+    if hit and time.time() - hit[1] < 600:
+        return hit[0]
     try:
-        s, conf = kc.login()
+        s, conf = _kd()
         rows = kc._query(s, conf, "AP_PAYBILL", [("FDate", "日期"), ("FACCOUNTID.FNumber", "账号"), ("FBillNo", "单号")], "FID=%s" % int(bill_id))
     except Exception:
+        _kd_drop()
         return None, ""
     if not rows:
         return None, ""
-    return str(rows[0].get("日期") or "")[:10], _s(rows[0].get("账号"))
+    res = (str(rows[0].get("日期") or "")[:10], _s(rows[0].get("账号")))
+    if res[0] and res[1]:
+        _BANK_CACHE[str(bill_id)] = (res, time.time())       # 付款日和账号都有了才记(出纳还没填账号的下次接着查)
+    return res
 
 
 _FIX_DIMS = (("to_acct", "科目", "acct", "acct_name"), ("to_fee", "费用项目", "fee_code", "fee"), ("to_dept", "部门", "dept_code", "dept"),
@@ -944,6 +999,7 @@ def _kd_dims(l):
 
 def _post(inst, user):
     from datetime import datetime as _dt, timedelta
+    _ACC_CACHE.clear(); _BANK_CACHE.clear(); _REV_CACHE.clear()      # 真要写金蝶了：不用缓存，计提、付款单、红冲情况都现读(V2.876)
     d, code = _preview_data(inst)
     if code != 200:
         return {"ok": False, "msg": d.get("msg")}
@@ -1194,6 +1250,24 @@ def _auto_ok(d, cfg):
     return True, ""
 
 
+def _auto_fp(cfg, cands):
+    """这一轮要看的东西的「指纹」：自动做账的设置 + 每张够条件的请款单(付款单、发票、人工选的计提、发票后补) + 复核台登记的计提更正。
+    和上一轮一样＝这 20 分钟里我们这边什么都没变，定时的那一轮就不用再把每张都去金蝶读一遍。"""
+    import hashlib
+    picks = db.get_setting(_PICK_KEY, None) or {}
+    laters = db.get_setting(_LATER_KEY, None) or {}
+    with db._engine.connect() as c:
+        fx = c.execute(text("select count(*), coalesce(max(updated_at), '') from %s" % FX.name)).first()
+    body = {"cfg": {k: cfg.get(k) for k in ("mode", "kinds", "cap", "max_round")}, "fx": [int(fx[0] or 0), str(fx[1] or "")],
+            "c": [[r["inst_id"], str(r.get("kd_paid") or ""), str(r.get("amount")), str(r.get("period")), str(r.get("subject_full")),
+                   sorted([i["number"], i["gross"], i["rate"], bool(i["deduct"])] for i in invs),
+                   picks.get(r["inst_id"]), bool(laters.get(r["inst_id"]))] for r, invs in sorted(cands, key=lambda t: t[0]["inst_id"])]}
+    return hashlib.md5(json.dumps(body, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+_AUTO_REFRESH_S = 6 * 3600        # 我们这边没变化时，隔多久还是去金蝶重读一遍(金蝶那边有人改了凭证，指纹看不出来)
+
+
 def auto_round(trigger="定时"):
     """跑一轮。off 直接返回；dry 只算；on 真做(每轮最多 max_round 张)。结果存 _AUTO_LAST_KEY 给页面看，并向数字员工办公室报到。"""
     try:
@@ -1211,7 +1285,7 @@ def auto_round(trigger="定时"):
         posted = db.get_setting(_POSTED_KEY, None) or {}
         with db._engine.connect() as c:
             reqs = [dict(r) for r in c.execute(select(PR).where(PR.c.create_time >= "2026-09-01")).mappings().all()]
-        items = []
+        items, cands = [], []
         for r in reqs:
             inst = r["inst_id"]
             if r.get("excluded") or r.get("dt_status") == "TERMINATED" or r.get("dt_result") == "refuse" or inst in posted or not r.get("period"):
@@ -1219,6 +1293,25 @@ def auto_round(trigger="定时"):
             folder, invs = _invoices(inst)
             if _status(r, folder, invs, {}) != "ready":          # 还没付款 / 票不齐 / 发票≠请款：本来就做不了，不列
                 continue
+            cands.append((r, invs))
+        # V2.876：定时的这一轮，和上一轮比什么都没变(设置、够条件的请款单、付款单、发票、人工选的计提、计提更正)就不重算——
+        #   原来每 20 分钟把每张都去金蝶读一遍，一天 9,000 次调用，绝大多数轮次结果一模一样。人手点的「现在跑一轮」照样重算；
+        #   上一轮有没做成的要重试；最多隔 6 小时还是重读一次(金蝶那边改了凭证，这边看不出来)。
+        fp = _auto_fp(cfg, cands)
+        prev = db.get_setting(_AUTO_LAST_KEY, None) or {}
+        if trigger == "定时" and prev.get("fp") == fp and not any(not x.get("ok") for x in prev.get("done") or []):
+            try:
+                age = (datetime.now() - datetime.strptime(str(prev.get("at") or "")[:16], "%Y-%m-%d %H:%M")).total_seconds()
+            except Exception:
+                age = _AUTO_REFRESH_S + 1
+            if 0 <= age < _AUTO_REFRESH_S:
+                prev["checked_at"], prev["skipped"] = _now(), int(prev.get("skipped") or 0) + 1
+                db.set_setting(_AUTO_LAST_KEY, prev, AUTO_USER)
+                if worker_store:
+                    worker_store.beat("voucher_auto", next_in=20 * 60)
+                return {"ok": True, "same": True, **prev}
+        for r, invs in cands:
+            inst = r["inst_id"]
             it = {"inst": inst, "bid": r.get("business_id"), "payee": r.get("payee") or r.get("carrier"), "subject": r.get("subject"),
                   "amount": r.get("amount"), "period": r.get("period"), "kind": "", "kind_cn": "", "ok": False, "why": ""}
             try:
@@ -1247,7 +1340,7 @@ def auto_round(trigger="定时"):
                 it["vno"] = res.get("vno") or ""
                 it["msg"] = " → ".join(res.get("steps") or []) if res.get("ok") else (res.get("msg") or "")
                 done.append({"inst": it["inst"], "bid": it["bid"], "ok": it["done"], "vno": it["vno"], "msg": it["msg"]})
-        last = {"at": _now(), "mode": cfg["mode"], "trigger": trigger, "items": items, "done": done}
+        last = {"at": _now(), "mode": cfg["mode"], "trigger": trigger, "items": items, "done": done, "fp": fp, "checked_at": _now(), "skipped": 0}
         db.set_setting(_AUTO_LAST_KEY, last, AUTO_USER)
         n_ok, n_bad = sum(1 for x in done if x["ok"]), sum(1 for x in done if not x["ok"])
         if done:
@@ -1848,6 +1941,7 @@ def _fee_post(inst, b, user):
     allf[inst] = rec
     db.set_setting(_FEE_KEY, allf, user)
     _ACC_CACHE.clear()                      # 新凭证要马上能被候选/预览读到
+    _REV_CACHE.clear()
     steps = ["费用凭证 记-%s 已建（%s，%s）：借 %s %.2f%s / 贷 2241.02 %.2f%s" % (
         vno, book[:7], date, dims["acct"][0], net, (" + 进项税 %.2f（%s）" % (tax, "待认证" if tax_lines and tax_lines[0][0].endswith("06") else "暂估")) if tax else "",
         gross, "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err)]

@@ -603,7 +603,8 @@ function AutoBar({ onChanged }) {
             {last.mode === 'on'
               ? <><b className="ok">做成 {(last.done || []).filter(x => x.ok).length} 张</b>{(last.done || []).some(x => !x.ok) && <b className="bad">　没做成 {(last.done || []).filter(x => !x.ok).length} 张</b>}，</>
               : <>如果开着<b className="ok">会做 {yes.length} 张</b>，</>}
-            <b className={no.length ? 'warn' : ''}>不做 {no.length} 张</b></span>
+            <b className={no.length ? 'warn' : ''}>不做 {no.length} 张</b>
+            {last.skipped > 0 && <span className="dim" title="定时的那一轮，我们这边（设置、够条件的请款单、付款单、发票、计提更正）和上一轮一样就不去金蝶重读，省接口调用；最多隔 6 小时重读一次，点右边的按钮随时重算">　之后 {last.skipped} 轮没有新变化、没重算（最近看过 {String(last.checked_at || '').slice(11, 16)}）</span>}</span>
             {items.length > 0 && <button className="lnk" onClick={() => setOpen(!open)}>{open ? '收起' : '看是哪几张、为什么'}</button>}</>}
       <span className="dim">计提记错主体、金额不符的不会自动做；凭证不审核，留给人在金蝶审。{cfg.by && `（${cfg.by} ${cfg.at} 设）`}</span>
     </div>
