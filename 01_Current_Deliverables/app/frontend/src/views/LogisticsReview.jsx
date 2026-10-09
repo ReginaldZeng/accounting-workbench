@@ -1224,7 +1224,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     ...lines.flatMap(r => {
                       const anchor = r.bill != null
                       const bad = anchor && r.diff != null && !isZero(r.diff)
-                      const unexpl = bad && !(r.note || '').trim() && !r.fix_from && !r.fix_cover && !r.xsubj && !r.xsubj_in
+                      // V2.879 部门挂错(金额对得上也要更正)：小料的入库运费按口径挂茶饮小料部，这笔计提挂的是别的部门
+                      const dw = r.dept_warn && !r.dept_warn.fixed && !(r.note || '').trim() ? r.dept_warn : null
+                      const unexpl = (bad && !(r.note || '').trim() && !r.fix_from && !r.fix_cover && !r.xsubj && !r.xsubj_in) || !!dw
                       // V2.858 账单有、计提无(用户「计提的时候全都归集在了零售…应该是电商，所以计提数肯定是0」)：钱其实计提在同主体别的行里——
                       //   找那笔多出来的计提(差异为正、最接近这行金额的)，点一下就带着「只改其中 X、产品分类改成这一行的」去登记更正
                       const src = r.kind === 'bill_only' && bad && !r.fix_from && !r.xsubj_in ? lines.filter(x => x.kind === 'accr' && !x.fix && x.bill != null && x.diff > 0.004 && x.amt > r.bill + 0.004)
@@ -1232,7 +1234,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       const gdiff = anchor ? r.diff : ancDiff[r.anc]          // 本行所在账单金额的差异
                       const flat = gdiff != null && isZero(gdiff)
                       // 第一行=费用项目(FYXM编码+金蝶名称)；小字=产品分类 · 产品项目 · 部门，都带金蝶编码(用户 2026-09-30)
-                      const bizEl = (r.biz || '').startsWith('（') ? <span className="dim">无产品分类</span> : <><Cd c={r.biz_code} />{r.biz}</>
+                      const bizEl = (r.biz || '').startsWith('（') ? <span className="dim">无产品分类{r.mbiz ? <span title="凭证上没有产品分类；按计提口径，这个部门的这类费用是这个业务线的，配账单时按它配">（按部门认作 {r.mbiz}）</span> : ''}</span> : <><Cd c={r.biz_code} />{r.biz}</>
                       const subline = [<>{bizEl}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}</>,
                         r.proj && <><Cd c={r.proj_code} />{r.proj}</>, r.dept && <><Cd c={r.dept_code} />{r.dept}</>]
                         .filter(Boolean).map((x, i) => <React.Fragment key={i}>{i > 0 && ' · '}{x}</React.Fragment>)
@@ -1275,6 +1277,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                             : flat ? <span className="tag ok">平</span>
                               : (!anchor && gdiff != null ? <span className="dim" style={{ fontSize: 12 }} title="这几笔共用一个账单金额，差异解释写在本组第一笔">差异见本组首笔</span> : null)}{fixCell}
                             {r.fix_cover && <span className="dim" style={{ fontSize: 12 }}>多出的 {money(r.diff)} 由这笔更正拆走</span>}
+                            {r.dept_warn && (r.dept_warn.fixed
+                              ? <span className="dim" style={{ fontSize: 12 }}>账单 {r.dept_warn.biz} {money(r.dept_warn.bill)} 应挂{r.dept_warn.want}：已登记改部门</span>
+                              : <><span className="tag bad" title={`账单上有 ${r.dept_warn.n_doc} 张采购入库单是${r.dept_warn.biz}的原料（${money(r.dept_warn.bill)}）。按计提口径，${r.dept_warn.biz}的${r.fee || r.fee_type}挂${r.dept_warn.want}；这笔计提挂的是${r.dept || '（空）'}。金额对得上，部门要更正。`}>
+                                部门不对：{r.dept_warn.biz}原料入库 {money(r.dept_warn.bill)} 应挂{r.dept_warn.want}</span>
+                                {!locked && !r.fix && <button className="fixlnk" onClick={() => setFixAt({ key: r.key, init: { to_dept: r.dept_warn.to_dept, ...(r.dept_warn.whole ? {} : { split_amt: String(r.dept_warn.bill) }) } })}
+                                  title="登记计提更正：部门改成口径里的那个，付款做账时系统红冲重提">改部门 → {r.dept_warn.want}</button>}</>)}
                             {r.fix_from && <button className="fixtag" disabled={locked} onClick={() => setFixAt({ key: r.fix_from.key })} title="这一行的钱计提在别的行里，已经登记了更正：付款做账时拆过来">待更正 ← 从 {r.fix_from.vno} 拆 {money(r.fix_from.amt)} 过来</button>}
                             {src && !locked && <button className="fixlnk" onClick={() => setFixAt({ key: src.key, init: { split_amt: String(r.bill), to_biz: cn(r.biz_code, (r.biz || '').startsWith('（') ? '' : r.biz) } })}
                               title={`这笔钱其实计提在 ${src.vno}（${src.biz || ''} ${money(src.amt)}，比账单多 ${money(src.diff)}）里：登记「其中 ${money(r.bill)} 改到这一行的产品分类」，付款做账时系统拆过来`}>计提在 {src.vno} 里 → 拆 {money(r.bill)} 过来</button>}</div></td>

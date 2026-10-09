@@ -2263,12 +2263,42 @@ def _accr_entries_raw(carrier, period, carrier_full=None):
             "suppliers": [{"code": k, "name": v} for k, v in sorted(sups.items())]}
 
 
+def _dept_biz_rules():
+    """计提口径表(kernels.logistics_accrual.MAP：主体×费用归属 → 科目/部门/费用项目/业务线)里，「同一主体同一费用项目，哪个业务线挂哪个部门」。
+    → (impl {(主体, 费用项目, 部门): 业务线}, want {(主体, 费用项目, 业务线): (部门, 部门编码)})。只收业务线写死、且这个部门只对一个业务线的。
+    用处(V2.879，用户 2026-10-09「这部分入库运费你留意下，如果是小料，我们和其它的操作是不同的」)：入库运费记 5101 制造费用，凭证上没有产品分类，
+    是不是小料只能看部门——小料入库挂茶饮小料部，工厂/植物肉入库挂仓储物流部。原来第①步不看部门，链盟 记-554 把 5 张小料入库单记在仓储物流部，金额对上就显示「平」。"""
+    impl, want = {}, {}
+    try:
+        from kernels import logistics_accrual as _la
+        by, depts = {}, {}
+        for (subj, _col), (_acct, dept, fee, biz) in _la.MAP.items():
+            depts.setdefault((subj, fee), set()).add(dept)
+            if biz and biz != "?":
+                by.setdefault((subj, fee, dept), set()).add(biz)
+        for (subj, fee, dept), bs in by.items():
+            if len(bs) == 1 and len(depts[(subj, fee)]) > 1:        # 同一主体同一费用项目要有不止一个部门，部门才分得出业务线
+                b = next(iter(bs))
+                impl[(subj, fee, dept)] = b
+                want.setdefault((subj, fee, b), (dept, _la.DEPT_CODE.get(dept, "")))
+    except Exception:
+        return {}, {}
+    return impl, want
+
+
 def _build_lines(request, carrier, period):
     """逐笔计提复核（第二页主表）：以计提分录为主线每笔一行，**按主体分组**(组头=主体小计，用户 2026-09-30 定)；
     组内账单先按 费用类型×产品线 配到笔(level=biz)，配不到的退回按 费用类型 挂该段首笔(level=group)；账单有计提无的单独成行。
     账单侧优先费用项汇总行(accrual)，无则逐单(detail)。差异＝计提含税−账单。附：差异解释/上期更正/供应商复核要点/登记状态。"""
     got = _accr_entries(carrier, period, _carrier_full(carrier))
     ents, adj, prior = got["entries"], got["adj"], got.get("prior") or []
+    # 凭证上没有产品分类的计提(入库运费记 5101)：按部门认它是哪个业务线的，配账单时用(mbiz)；凭证本身的产品分类不改
+    _impl, _want = _dept_biz_rules()
+    for e in ents:
+        if str(e.get("biz") or "").startswith("（"):
+            _b = _impl.get((e.get("subject"), e.get("fee"), e.get("dept")))
+            if _b:
+                e["mbiz"] = _b
     with db._engine.connect() as c:
         allrows = [dict(r) for r in c.execute(select(
             BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
@@ -2285,7 +2315,7 @@ def _build_lines(request, carrier, period):
         k = (_eff_subject(r), _eff_fee(r), _bill_biz(r))
         bill3[k] = bill3.get(k, 0.0) + float(r.get("amount") or 0)
     # 可逐单：每个账单归口里，有多少金额是带金蝶单号的逐单明细撑着的(无单据/只有月结汇总行的只能按汇总核)
-    det3 = {}
+    det3, pin3 = {}, {}
     for r in allrows:
         if r.get("grain") != "detail":
             continue
@@ -2295,6 +2325,12 @@ def _build_lines(request, carrier, period):
         d = det3.setdefault((_eff_subject(r), _eff_fee(r), _bill_biz(r)), {"docs": set(), "amt": 0.0})
         d["docs"].add(no)
         d["amt"] += float(r.get("amount") or 0)
+        # 其中是采购入库单(原料入库)的部分：部门口径只对这部分下结论(调拨单的小料该挂哪个部门没人定过，不乱报)
+        _pre = "".join(ch for ch in no.split("+")[0] if ch.isalpha())
+        if (_FORM_BY_PREFIX.get(_pre) or [""])[0] == "STK_InStock":
+            pi = pin3.setdefault((_eff_subject(r), _eff_fee(r), _bill_biz(r)), {"docs": set(), "amt": 0.0})
+            pi["docs"].add(no)
+            pi["amt"] += float(r.get("amount") or 0)
 
     def _od(keys, bill):
         # fbiz：产品线集合用 | 连，空产品线记 "-"，第②步按同一口径筛单据
@@ -2343,7 +2379,7 @@ def _build_lines(request, carrier, period):
         ga = round(sum(e["amt"] for e in es), 2)
         subs = {}
         for e in es:
-            subs.setdefault(e["biz"], []).append(e)
+            subs.setdefault(e.get("mbiz") or e["biz"], []).append(e)
         # 能按产品线配上的子组先排，配不上的排后面连成一段，组级账单才能跨行合并
         ordered = sorted(subs.items(), key=lambda kv: 0 if (s, f, kv[0]) in bill3 else 1)
         grows, matched, used = [], 0.0, set()
@@ -2370,6 +2406,17 @@ def _build_lines(request, carrier, period):
             for x in un:
                 x["level"] = "group"
                 x["anc"] = un[0]["key"]
+            # 这一段剩下的账单里有按口径该挂别的部门的业务线(小料入库 → 茶饮小料部)，而这几笔计提挂的不是那个部门：金额就算对上，部门也要更正
+            for (ss, ff, b) in list(bill3):
+                _pi = pin3.get((ss, ff, b))
+                if ss != s or ff != f or not b or b in used or not _pi or abs(_pi["amt"]) < 0.01:
+                    continue
+                for x in un:
+                    w = _want.get((s, x.get("fee"), b))
+                    if w and x.get("dept") != w[0] and not x.get("dept_warn"):
+                        x["dept_warn"] = {"biz": b, "want": w[0], "want_code": w[1], "bill": round(_pi["amt"], 2), "n_doc": len(_pi["docs"]),
+                                          "whole": abs(_pi["amt"] - float(x.get("amt") or 0)) < 0.01,      # 这笔计提整笔都是这部分 → 整笔改部门；否则只改其中一部分
+                                          "to_dept": ("%s %s" % (w[1], w[0])).strip()}
         elif abs(rest) >= 0.01:
             key = "bill|%s|%s" % (s, f)
             grows.append({"subject": s, "book_code": s2book.get(s, ""), "biz_code": biz2code.get((rest_biz or "").lower(), ""),
@@ -2381,7 +2428,7 @@ def _build_lines(request, carrier, period):
         for x in grows:
             if x.get("bill") is None:
                 continue
-            x["od"] = _od([(s, f, x["biz"])] if x.get("level") == "biz" else rkeys, x["bill"])
+            x["od"] = _od([(s, f, x.get("mbiz") or x["biz"])] if x.get("level") == "biz" else rkeys, x["bill"])
         if grows:
             grows[0]["ffirst"] = True          # 主体组内每段费用类型的首行(前端画细分隔)
         srows.extend(grows)
@@ -2494,9 +2541,14 @@ def _pair_split_fixes(L):
             cand[0]["fix_from"] = {"vno": a.get("vno"), "key": a.get("key"), "amt": sp}
         if a.get("diff") is not None and abs(float(a["diff"]) - sp) < 0.01:
             a["fix_cover"] = True
-    L["n_unexplained"] = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None and abs(r["diff"]) >= 0.01
-                             and not (r.get("note") or "").strip() and not r.get("fix_from") and not r.get("fix_cover")
-                             and not r.get("xsubj") and not r.get("xsubj_in"))
+    for r in rows:        # 部门挂错的：登记了改部门的更正就算有着落
+        if r.get("dept_warn"):
+            r["dept_warn"]["fixed"] = bool((r.get("fix") or {}).get("to_dept"))
+    L["n_unexplained"] = sum(1 for r in rows if r.get("kind") != "gtotal" and (
+        (r.get("diff") is not None and abs(r["diff"]) >= 0.01
+         and not (r.get("note") or "").strip() and not r.get("fix_from") and not r.get("fix_cover")
+         and not r.get("xsubj") and not r.get("xsubj_in"))
+        or (r.get("dept_warn") and not r["dept_warn"].get("fixed") and not (r.get("note") or "").strip())))
 
 
 def _attach_fixes(L, carrier, period):
