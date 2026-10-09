@@ -322,6 +322,62 @@ class InvoiceBooksApiTests(unittest.TestCase):
         with patch.object(self.vouchers, "fetch_rows", return_value=[{**row, "number": 32}]):
             self.assertEqual(self.ok(self.post(url, "acct", {"itemId": iid}))["changed"], 1)
 
+    def test_vouchers_timer_round_saves_kingdee_calls(self):
+        """V2.877 定时同步省金蝶调用：夜里不跑；当天第一轮全量(已对上的成批核实、没对上的才逐张查)；
+        之后每轮只查「最近新建/改过的凭证」；那种查法失败就退回逐张查没对上的，一小时最多一次。"""
+        from datetime import datetime as _dt
+        V = self.vouchers
+        a, _ = self.make_item(num(9741), 100, fields={"buyer_name": "测试公司"})
+        b, _ = self.make_item(num(9742), 200, fields={"buyer_name": "测试公司"})
+        row = lambda n, no: {"book": "测试公司会计账簿", "year": 2026, "month": 10, "group": "记", "number": no, "summary": "转待认证 发票" + n}
+        bk = lambda i: self.item(i)["flags_json"].get("_bookkeeping") or {}
+        self.db.set_setting(V._STATE_KEY, {})
+        log = {"rows": [], "byv": [], "mod": []}
+
+        def mk(key, ret):
+            def f(arg):
+                log[key].append(arg)
+                if isinstance(ret, Exception):
+                    raise ret
+                return list(ret)
+            return f
+
+        def run(when, rows=(), byv=(), mod=()):
+            for k in log:
+                log[k].clear()
+            with patch.object(V, "fetch_rows", mk("rows", rows)), patch.object(V, "fetch_by_vouchers", mk("byv", byv)), patch.object(V, "fetch_modified", mk("mod", mod)):
+                return V.timer_round(when)
+
+        # 夜里：一次金蝶都不调
+        self.assertEqual(run(_dt(2026, 10, 9, 23, 5))["how"], "night")
+        self.assertEqual(run(_dt(2026, 10, 9, 6, 59))["how"], "night")
+        self.assertEqual((log["rows"], log["byv"], log["mod"]), ([], [], []))
+        # 当天第一轮：全量。a 对上，b 没对上
+        r = run(_dt(2026, 10, 9, 9, 0), rows=[row(num(9741), 31)])
+        self.assertEqual((r["how"], bk(a).get("status"), bk(b).get("status")), ("full", "booked", "unknown"))
+        self.assertIn(num(9741), log["rows"][0]); self.assertIn(num(9742), log["rows"][0])
+        self.assertEqual(log["mod"], [])
+        # 同一天后面的轮次：只查最近改过的凭证，不再逐张查；b 的凭证出现了就对上，a 不受影响
+        r = run(_dt(2026, 10, 9, 9, 20), mod=[row(num(9742), 32)])
+        self.assertEqual((r["how"], log["rows"], bk(b).get("status"), bk(a).get("status")), ("inc", [], "booked", "booked"))
+        self.assertEqual(log["mod"], ["2026-10-09 08:50:00"])            # 从上一轮往回多看 10 分钟
+        r = run(_dt(2026, 10, 9, 9, 40), mod=[])                         # 没有新凭证：什么都不动(不会把已对上的改回未知)
+        self.assertEqual((r["changed"], bk(a).get("status"), bk(b).get("status")), (0, "booked", "booked"))
+        r = run(_dt(2026, 10, 9, 10, 0), mod=[row(num(9741), 40)])       # a 又多了一张凭证：并进去
+        self.assertEqual([v["number"] for v in bk(a)["vouchers"]], ["记-31", "记-40"])
+        # 第二天第一轮：已对上的按凭证号成批核实。a 的凭证还在 → 不逐张查；b 的凭证没了 → 才逐张查，查不到就改回未知
+        r = run(_dt(2026, 10, 10, 9, 0), byv=[row(num(9741), 31), row(num(9741), 40)], rows=[])
+        self.assertEqual(r["how"], "full")
+        self.assertTrue(any(v["number"] == "记-32" for v in log["byv"][0]))
+        self.assertNotIn(num(9741), log["rows"][0]); self.assertIn(num(9742), log["rows"][0])
+        self.assertEqual((bk(a).get("status"), bk(b).get("status")), ("booked", "unknown"))
+        # 「最近改过的凭证」查不了：退回逐张查没对上的；一小时内不重复
+        r = run(_dt(2026, 10, 10, 9, 20), mod=RuntimeError("字段不支持"), rows=[row(num(9742), 33)])
+        self.assertEqual((r["how"], bk(b).get("status")), ("fallback", "booked"))
+        self.assertNotIn(num(9741), log["rows"][0])
+        r = run(_dt(2026, 10, 10, 9, 40), mod=RuntimeError("字段不支持"), rows=[])
+        self.assertEqual((r["how"], log["rows"]), ("wait", []))
+
     def test_audit_records_paper_and_voucher_before_approval(self):
         iid, _ = self.make_item(num(9745), 321, approve=False)
         self.assertEqual(self.post("/api/inv/paper/mark", "viewer", {"itemId": iid, "paper": True}).status_code, 403)
