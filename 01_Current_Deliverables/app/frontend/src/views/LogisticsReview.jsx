@@ -719,6 +719,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .then(() => { load(); flash(mode ? `${doc_no} 已改成${mode === 'weight' ? '按重量' : '按箱数'}核，已重判` : `${doc_no} 已交回系统自动判断`) })
       .catch(e => flash('核对方式保存失败：' + e.message))
   }
+  // 勾选的一批一起改核对方式(V2.886)
+  const saveModeMany = (nos, v) => {
+    const mode = v === 'auto' ? '' : v
+    const cn = mode === 'weight' ? '按重量核' : mode === 'box' ? '按箱数核' : '系统自动'
+    if (!nos.length || !window.confirm(`把勾选的 ${nos.length} 张单的核对方式改成「${cn}」？\n只换拿什么比，尺子不变；改完马上重判，对不上的仍然是数量不符。`)) return
+    reviewDocMode(carrier, period, nos, mode).then(r => { flash(`已把 ${r.n} 张改成${cn}，已重判`); setSel({}); load() }).catch(e => flash('核对方式保存失败：' + e.message))
+  }
   // 逐笔差异解释：存后本地回填（含未解释计数），不整表重拉
   const saveLineNote = (key, note) => {
     reviewLineNote(carrier, period, key, note)
@@ -800,7 +807,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const cdBiz = b => { const m = cds.biz || {}; return m[b] || m[(b || '').toLowerCase()] || '' }
   const cdFee = (s, f) => { const m = cds.fee || {}; return m[s + '|' + f] || m[f] || null }
   const dkey = (x, i) => (x.lid != null ? 'l' + x.lid : x.doc_no ? `${x.doc_no}|${page}|${i}` : `nd|${x.subject}|${x.fee_item}|${x.doc_fee}|${page}|${i}`)
-  const snap = x => ({ doc_no: x.doc_no || '', fee: x.doc_fee || 0, kg: x.doc_kg || 0, bill: x.bill_amt, unit: x.bill_unit || '', sales: x.sales, confirmed: !!x.confirmed })
+  const snap = x => ({ doc_no: x.doc_no || '', fee: x.doc_fee || 0, kg: x.doc_kg || 0, bill: x.bill_amt, unit: x.bill_unit || '', sales: x.sales, confirmed: !!x.confirmed, can_mode: !!x.can_mode })
   const toggleSel = (x, i) => setSel(o => { const k = dkey(x, i); const n = { ...o }; if (n[k]) delete n[k]; else n[k] = snap(x); return n })
   const pageAllOn = docs.length > 0 && docs.every((x, i) => sel[dkey(x, i)])
   const pageSomeOn = docs.some((x, i) => sel[dkey(x, i)])
@@ -819,7 +826,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       sales, ratio: sales > 0 ? feeS / sales : null, nSales: ws.length,
       toConfirm: [...new Set(selList.filter(x => x.doc_no && !x.confirmed).map(x => x.doc_no))], toUndo: [...new Set(selList.filter(x => x.doc_no && x.confirmed).map(x => x.doc_no))],
       nConfirmRows: selList.filter(x => x.doc_no && !x.confirmed).length, nUndoRows: selList.filter(x => x.doc_no && x.confirmed).length,
-      nNoDoc: selList.filter(x => !x.doc_no).length }
+      nNoDoc: selList.filter(x => !x.doc_no).length,
+      modeNos: [...new Set(selList.filter(x => x.doc_no && x.can_mode).map(x => x.doc_no))] }      // 能改核对方式的(V2.886 批量)
   })()
   useEffect(() => { setSel({}) }, [carrier, period])
   const doConfirm = (nos, on) => {
@@ -1395,6 +1403,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <span className="sp" />
             {selStat.toConfirm.length > 0 && <button className="btn sm pri" disabled={locked || busy === 'confirm'} onClick={() => doConfirm(selStat.toConfirm, true)}>✓ 确认无误（{selStat.nConfirmRows}）</button>}
             {selStat.toUndo.length > 0 && <button className="btn sm" disabled={locked || busy === 'confirm'} onClick={() => doConfirm(selStat.toUndo, false)}>取消确认（{selStat.nUndoRows}）</button>}
+            {selStat.modeNos.length > 0 && !locked && <select className="clsinp" value="" title="把勾选的这些单一起改成按箱数核 / 按重量核，或交回系统自动。只换拿什么比，尺子不变"
+              onChange={e => { const v = e.target.value; e.target.value = ''; if (v) saveModeMany(selStat.modeNos, v) }}>
+              <option value="">改核对方式（{selStat.modeNos.length} 张）…</option>
+              <option value="box">按箱数核：账单件数 对 金蝶箱数</option>
+              <option value="weight">按重量核：账单重量 对 金蝶重量</option>
+              <option value="auto">交回系统自动</option></select>}
             <button className="btn sm" onClick={() => setSel({})}>清空选择</button>
             {selStat.nNoDoc > 0 && <small className="dim" style={{ width: '100%' }}>其中 {selStat.nNoDoc} 张无单据的调整行只参与统计，不打确认。</small>}
           </div>}

@@ -1308,7 +1308,7 @@ def _fee_check(r, doc_no, parties):
 
 def _box_reg(spec):
     """从规格型号解析箱规（N袋/箱）。返回 int 或 None。"""
-    m = re.search(r"(\d+)\s*(?:袋|盒|包|瓶|罐|桶|支|个|件|盒装)\s*/\s*箱", str(spec or ""))   # 10袋/箱、12盒/箱…
+    m = re.search(r"(\d+)\s*[大中小]?(?:袋|盒|包|瓶|罐|桶|支|个|件|盒装)\s*/\s*箱", str(spec or ""))   # 10袋/箱、12盒/箱、16大盒/箱(气调鸡蛋豆腐，V2.886)…
     return int(m.group(1)) if m else None
 
 
@@ -2994,8 +2994,8 @@ def _box_docs(rsub, carrier):
                 bill_unit = tu                   # 账单量显示 1 天 / 2 趟
             if decided:
                 pass
-            elif kd_sum and abs(billcnt - kd_sum) <= max(1.0, 0.02 * kd_sum):
-                mode_cn, cnt_state = "整车按箱", "ok"
+            elif kd_sum and abs(billcnt - kd_sum) <= (lr.qty_tol(kd_sum, True) if fmode == "box" else max(1.0, 0.02 * kd_sum)):
+                mode_cn, cnt_state = "整车按箱", "ok"      # 人工指定按箱数核的(V2.886)：50 箱以下必须一箱不差，12 件对 11 箱不算一致
             elif kd_sum and billcnt and 3 <= ratio_tuo <= 60:
                 mode_cn, cnt_state = "打托(托规%s)" % round(ratio_tuo, 1), "na"
             elif kd_sum and billcnt and ratio_tuo > 60:
@@ -3642,8 +3642,9 @@ async def review_doc_mode(request: Request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     b = await request.json()
     carrier, period = (b.get("carrier") or "").strip(), (b.get("period") or "").strip()
-    no, mode = str(b.get("doc_no") or "").strip().split("+")[0], str(b.get("mode") or "").strip()
-    if not carrier or not period or not no:
+    mode = str(b.get("mode") or "").strip()
+    nos = list(dict.fromkeys(str(x).strip().split("+")[0] for x in ([b.get("doc_no")] + list(b.get("doc_nos") or [])) if str(x or "").strip()))   # 一张或勾选的一批(V2.886)
+    if not carrier or not period or not nos:
         return JSONResponse({"ok": False, "msg": "缺承运商/账期/单号"}, status_code=400)
     if mode and mode not in _DOC_MODE_CN:
         return JSONResponse({"ok": False, "msg": "核对方式只能选：系统自动 / 按重量 / 按箱数"}, status_code=400)
@@ -3655,21 +3656,23 @@ async def review_doc_mode(request: Request):
     allm = dict(db.get_setting(_DOC_MODE_KEY, None) or {})
     k = "%s|%s" % (carrier, period)
     cur = dict(allm.get(k) or {})
-    old = (cur.get(no) or {}).get("mode")
-    if mode:
-        cur[no] = {"mode": mode, "by": _uname(u), "at": _now()}
-    else:
-        cur.pop(no, None)
+    olds = collections.Counter(_DOC_MODE_CN.get((cur.get(no) or {}).get("mode"), "系统自动") for no in nos)
+    for no in nos:
+        if mode:
+            cur[no] = {"mode": mode, "by": _uname(u), "at": _now()}
+        else:
+            cur.pop(no, None)
     if cur:
         allm[k] = cur
     else:
         allm.pop(k, None)
     db.set_setting(_DOC_MODE_KEY, allm)
-    db.audit(_uname(u), "物流复核-逐单核对方式", "%s %s %s" % (carrier, period, no),
-             "%s → %s" % (_DOC_MODE_CN.get(old, "系统自动"), _DOC_MODE_CN.get(mode, "系统自动")))
+    db.audit(_uname(u), "物流复核-逐单核对方式", "%s %s %s" % (carrier, period, nos[0] if len(nos) == 1 else "%d 张" % len(nos)),
+             "%s → %s%s" % ("、".join("%s %d 张" % kv for kv in olds.items()) if len(nos) > 1 else next(iter(olds)), _DOC_MODE_CN.get(mode, "系统自动"),
+                           ("：" + "、".join(nos))[:1500] if len(nos) > 1 else ""))
     for ck in [ck for ck in list(_ACCR_CACHE) if isinstance(ck, tuple) and carrier in ck]:
         _ACCR_CACHE.pop(ck, None)
-    return {"ok": True, "doc_no": no, "mode": mode}
+    return {"ok": True, "n": len(nos), "mode": mode}
 
 
 @router.post("/api/logistics-review/line-note")
