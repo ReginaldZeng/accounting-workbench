@@ -2310,9 +2310,19 @@ def _build_lines(request, carrier, period):
     acc_rows = [r for r in allrows if r.get("grain") == "accrual" and (r.get("amount") or 0)]
     brows = acc_rows if acc_rows else [r for r in allrows if r.get("grain") == "detail"]
     bill_src = "accrual" if acc_rows else "detail"
-    bill3 = {}
+    # V2.881(用户看迅鸽 8 月「是不是漏了计提更正单」)：账单的退货运费(销售退货的退件服务费)，金蝶这个主体没有单独计提退货运费、
+    #   只计提了出库运费的——按账单标注规范附表 H「销售退货单按销售出库费用」并进出库运费一起比(迅鸽：退货 228 就在 记-393/记-394 的出库运费里)。
+    #   原来单列一行「账单有这一类，金蝶没有对应的计提」，出库运费那行又显示账单比计提少，看着像漏了更正。金蝶单独计提了退货运费的主体不并。
+    _fa = {}
+    for e in ents:
+        _fa.setdefault(e.get("subject"), set()).add(e.get("fee_norm"))
+    _ret_fold = {s for s, fs in _fa.items() if "出库运费" in fs and "退货运费" not in fs}
+    bill3, ret3 = {}, {}
     for r in brows:
         k = (_eff_subject(r), _eff_fee(r), _bill_biz(r))
+        if k[1] == "退货运费" and k[0] in _ret_fold:
+            k = (k[0], "出库运费", k[2])
+            ret3[k] = ret3.get(k, 0.0) + float(r.get("amount") or 0)
         bill3[k] = bill3.get(k, 0.0) + float(r.get("amount") or 0)
     # 可逐单：每个账单归口里，有多少金额是带金蝶单号的逐单明细撑着的(无单据/只有月结汇总行的只能按汇总核)
     det3, pin3 = {}, {}
@@ -2428,7 +2438,11 @@ def _build_lines(request, carrier, period):
         for x in grows:
             if x.get("bill") is None:
                 continue
-            x["od"] = _od([(s, f, x.get("mbiz") or x["biz"])] if x.get("level") == "biz" else rkeys, x["bill"])
+            _ks = [(s, f, x.get("mbiz") or x["biz"])] if x.get("level") == "biz" else rkeys
+            x["od"] = _od(_ks, x["bill"])
+            _ri = round(sum(ret3.get(k, 0.0) for k in _ks), 2)
+            if _ri:
+                x["ret_in"] = _ri        # 账单数里含并进来的退货运费
         if grows:
             grows[0]["ffirst"] = True          # 主体组内每段费用类型的首行(前端画细分隔)
         srows.extend(grows)

@@ -45,9 +45,9 @@ function billMap(lines) {
   lines.rows.forEach(r => {
     if (r.kind === 'accr') {
       const o = subj(r.subject)
-      const g = (o.anc[r.anc || r.key] = o.anc[r.anc || r.key] || { vnos: new Set(), bill: 0, diff: 0, has: false })
+      const g = (o.anc[r.anc || r.key] = o.anc[r.anc || r.key] || { vnos: new Set(), bill: 0, diff: 0, has: false, ret: 0 })
       g.vnos.add(String(r.vno || '').replace(/^记-/, ''))
-      if (r.bill != null) { g.bill += r.bill; g.diff += -(r.diff || 0); g.has = true }
+      if (r.bill != null) { g.bill += r.bill; g.diff += -(r.diff || 0); g.has = true; g.ret += r.ret_in || 0 }
     } else if (r.kind === 'bill_only' && !isZero(r.bill || 0)) {
       subj(r.subject).extra.push({ fee: r.fee_type || r.fee || '', biz: r.biz || '', bill: r.bill })
     }
@@ -58,7 +58,7 @@ function billMap(lines) {
       let m = g
       ;[...g.vnos].forEach(v => {
         const e = o.byVno[v]
-        if (e && e !== m) { e.vnos.forEach(x => m.vnos.add(x)); m.bill += e.bill; m.diff += e.diff; m.has = m.has || e.has; e.vnos.forEach(x => { o.byVno[x] = m }) }
+        if (e && e !== m) { e.vnos.forEach(x => m.vnos.add(x)); m.bill += e.bill; m.diff += e.diff; m.ret = (m.ret || 0) + (e.ret || 0); m.has = m.has || e.has; e.vnos.forEach(x => { o.byVno[x] = m }) }
         o.byVno[v] = m
       })
     })
@@ -156,7 +156,7 @@ export default function LogisticsInvCompare({ data, lines }) {
                 else {
                   shown.add(grp); grp.first = `${a.month}/${a.vno}#`
                   const gsum = r2((b.accruals || []).filter(x => grp.vnos.has(String(x.vno))).reduce((t, x) => t + (x.gross || 0), 0))
-                  billCells = <><td rowSpan={r.run} className="num gl hl">{money(grp.bill)}{grp.vnos.size > 1 && <div className="subt">{grp.vnos.size} 张计提合计 {money(gsum)}</div>}</td>
+                  billCells = <><td rowSpan={r.run} className="num gl hl">{money(grp.bill)}{grp.vnos.size > 1 && <div className="subt">{grp.vnos.size} 张计提合计 {money(gsum)}</div>}{!isZero(grp.ret || 0) && <div className="subt" title="销售退货的退件服务费按销售出库费用算，并在出库运费里一起比">含退货运费 {money(grp.ret)}</div>}</td>
                     <td rowSpan={r.run} className="num hl"><Diff v={grp.diff} /></td></>
                 }
               }
