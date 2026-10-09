@@ -85,10 +85,10 @@ Error generating stack: `+r.message+`
       ${v}
       <tr class="why"><td class="lb">原因</td><td colspan="9">${xs(V3[m.mode]||m.mode)}：${xs(t.why?t.why(m):m.why||"")}　<span class="dim">摘要：${xs(m.expl)}</span></td></tr></tbody>`}).join("")}function K3(s,n,t={}){const l=s.req,a=l.posted,r=n||s.adjust||[],i=String(s.voucher.date||"").slice(0,7),h=a?`${i.replace("-","年")}月 记-${xs(a.vno)}`.replace("年0","年"):Px,o=t.vno||h,u=s.invoices||[],m=R0(s,r,t,0),d=(f,g)=>dn(r.reduce((v,b)=>v+(b[g][f]||0),0)),j=(f,g,v)=>`<tr class="tot ${v}"><td colspan="11" class="n">${f}</td><td class="n">${ns(d("gross",g))}</td><td></td><td class="n">${ns(d("net",g))}</td><td class="n">${ns(d("tax",g))}</td><td></td></tr>`,x=u.map(f=>`<span class="m">${xs(f.number)}</span>（${xs(f.rate)}${f.deduct===!1?"·不抵扣":""}，含税 ${ns(f.gross)}，税额 ${ns(f.tax)}）`).join("；"),y=t.side==="from"?1:t.side==="here"?2:0,p=l.bid?T0(`${l.bid}#${y}`):"";return`<div class="sheet">
   ${p?`<div class="qr">${p}<div>装订时扫这里</div></div>`:""}
-  <div class="t1">${xs(t.title||"计提更正单")}</div>
+  <div class="hd${p?" q":""}"><div class="t1">${xs(t.title||"计提更正单")}</div>
   <div class="t2">供应商编码：${xs(l.code)}　　　供应商名称：${xs(l.payee)}</div>
   ${y===1?`<div class="t3 where">本页订在 <b>${xs(t.subject||"")}</b> 的红冲凭证后面（那张凭证没有纸质付款单）；凭证号扫右上角二维码看</div>`:""}
-  <div class="t3">钉钉审批 ${xs(l.bid)}（${xs(l.applicant)}）　·　账单期间 ${xs(l.period)}　·　付款 ${ns(l.amount)}${a?`（付款单 ${xs(a.bill_no)}）`:""}　·　调整凭证 <b>${o}</b></div>
+  <div class="t3">钉钉审批 ${xs(l.bid)}（${xs(l.applicant)}）　·　账单期间 ${xs(l.period)}　·　付款 ${ns(l.amount)}${a?`（付款单 ${xs(a.bill_no)}）`:""}　·　调整凭证 <b>${o}</b></div></div>
   <table class="fx"><colgroup><col style="width:3.2%"><col style="width:7.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:4.6%">
     <col style="width:8.5%"><col style="width:10%"><col style="width:8%"><col style="width:7%"><col style="width:6%"><col style="width:6.8%"><col style="width:4.2%"><col style="width:6.8%"><col style="width:5.2%"><col></colgroup>
   <thead><tr><th>序号</th><th>主体</th><th>凭证号</th><th>费用归属<br>月份</th><th>调账<br>月份</th><th></th><th>科目</th><th>费用项目</th><th>部门</th><th>产品分类</th><th>产品项目</th>
@@ -99,11 +99,11 @@ Error generating stack: `+r.message+`
     本次付款共核销计提 ${(s.accruals||[]).length} 张（${(s.accruals||[]).map(f=>"记-"+xs(f.vno)).join("、")}），其余未列的按原计提直接核销。</div>`}
   <div class="note">对应发票 ${u.length} 张：${x}</div>
   <div class="sign"><span>制单人：${xs(a&&!t.noBy?a.by:"")||(t.noBy?"______________":"")}</span><span>复核人：______________</span><span>审核人：______________</span><span>日期：${a?xs(String(a.at||"").slice(0,10)):"______________"}</span></div>
-  <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString("zh-CN",{hour12:!1})}${a?"":" · 审批时打印，还没做账：凭证号、调账月份以做账为准"}</div></div>`}const Y3=`@page{size:A4 landscape;margin:10mm 10mm}*{box-sizing:border-box}body{font:11px/1.45 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
+  <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString("zh-CN",{hour12:!1})}${a?"":" · 审批时打印，还没做账：凭证号、调账月份以做账为准"}</div></div>`}const Y3=`@page{size:A4 landscape;margin:10mm 10mm;@top-left{content:""}@top-center{content:""}@top-right{content:""}@bottom-left{content:""}@bottom-center{content:""}@bottom-right{content:counter(page) " / " counter(pages);font:9px "Microsoft YaHei",sans-serif;color:#9AA5AE}}*{box-sizing:border-box}body{font:11px/1.45 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
 .sheet{page-break-after:always;position:relative}.sheet:last-child{page-break-after:auto}
 .qrs{position:absolute;right:0;top:0;display:flex;gap:4mm}.qrs .qr{position:static}.note.seg{margin-top:9px;padding-top:6px;border-top:1px dashed #B8C4CC;color:#1B2733}
 .qr{position:absolute;right:0;top:0;width:21mm;text-align:center;font-size:9px;color:#5E6B78;line-height:1.3}.qr svg{width:21mm;height:21mm;display:block}
-.t3.where{font-weight:700;color:#8A5A00}
+.t3.where{font-weight:700;color:#8A5A00}.hd.q{min-height:30mm}
 .t1{text-align:center;font-size:20px;font-weight:700;margin:2px 0 4px}.t2{text-align:center;font-size:12.5px;font-weight:700;margin-bottom:4px}
 .t3{text-align:center;font-size:11px;color:#5E6B78;margin-bottom:8px}.t3 b{color:#1B2733}
 table{width:100%;border-collapse:collapse;table-layout:fixed}.fx th,.fx td{border:1px solid #B8C4CC;padding:4px 5px;vertical-align:middle;word-break:break-all}
@@ -120,9 +120,9 @@ tr.tot td{font-weight:700;border:1px solid #B8C4CC}tr.tot.o td{background:#E7ECE
         ${xs(r)}已在付款凭证 ${p} 中补提并核销（见${xs(r)}的更正单）。</div>`}}),a.push({d:s,adj:u.map(p=>({...p,old:h(null)})),opt:{short:r,side:"here",title:`计提更正单（${r} · 记错主体补提）`,subject:i,emptyOld:"未计提",vnoOf:p=>`原 ${xs(p.from)}<br>记-${xs(p.vno)}`,why:p=>`原记在${p.from} 记-${p.vno}，本主体没有计提，补提到本主体${String(p.why||"").includes("；")?"；"+String(p.why).split("；").slice(1).join("；"):""}`,note:p=>`<div class="note">说明：这笔计提原记在${xs(o)}（${j}），${d?`由${xs(o)}在它自己的付款凭证里一起红冲`:`由${xs(o)}另做红冲`}（见${xs(o)}的更正单）。
         本主体在付款凭证 ${p} 中按「应改为」补提（税额挂暂估进项税），随后凭发票核销转待认证、支付。</div>`}})}),a}function G3(s){const n=[];s.flatMap(Q3).forEach(l=>{const a=`${l.opt.short||l.d.req.subject}|${l.d.req.code||""}`,r=n.find(i=>i.k===a);r?r.ps.push(l):n.push({k:a,short:l.opt.short||l.d.req.subject,ps:[l]})});const t=l=>{const a=["深圳星期零","深圳星期九","孝感星期九"].indexOf(l.short);return a<0?9:a};return n.sort((l,a)=>t(l)-t(a)).map(l=>l.ps.length===1?K3(l.ps[0].d,l.ps[0].adj,l.ps[0].opt):Z3(l.short,l.ps))}function Z3(s,n){let t=0;const l=n.map(({d,adj:j,opt:x})=>{const y=d.req,p=y.posted,f=String(d.voucher.date||"").slice(0,7),g=p?`${f.replace("-","年")}月 记-${xs(p.vno)}`.replace("年0","年"):Px,v=x.side==="from"?1:x.side==="here"?2:0,b={d,adj:j,opt:x,q:y,p,hereVno:g,vno:x.vno||g,side:v,from:t+1,to:t+j.length,blocks:R0(d,j,x,t),inv:d.invoices||[],kind:v===1?"计提记错主体，本主体整笔红冲":v===2?"计提记在别的主体，本主体补提":"红冲后按「应改为」重新计提"};return t=b.to,b}),a=l.flatMap(d=>d.adj),r=d=>d.from===d.to?`第 ${d.from} 项`:`第 ${d.from}–${d.to} 项`,i=(d,j)=>dn(a.reduce((x,y)=>x+(y[j][d]||0),0)),h=(d,j,x)=>`<tr class="tot ${x}"><td colspan="11" class="n">${d}</td><td class="n">${ns(i("gross",j))}</td><td></td><td class="n">${ns(i("net",j))}</td><td class="n">${ns(i("tax",j))}</td><td></td></tr>`,o=l[0].q,u=l[0].opt.subject||o.subject_full||s,m=l.every(d=>d.p);return`<div class="sheet">
   <div class="qrs">${l.map(d=>d.q.bid?`<div class="qr">${T0(`${d.q.bid}#${d.side}`)}<div>${r(d)} · 装订时扫</div></div>`:"").join("")}</div>
-  <div class="t1">计提更正单（${xs(s)} · ${a.length} 项）</div>
+  <div class="hd q"><div class="t1">计提更正单（${xs(s)} · ${a.length} 项）</div>
   <div class="t2">供应商编码：${xs(o.code)}　　　供应商名称：${xs(o.payee)}</div>
-  <div class="t3">主体 <b>${xs(u)}</b>　·　这个主体的更正合在这一张：${l.map(d=>`${r(d)} ${d.kind}`).join("；")}</div>
+  <div class="t3">主体 <b>${xs(u)}</b>　·　这个主体的更正合在这一张：${l.map(d=>`${r(d)} ${d.kind}`).join("；")}</div></div>
   <table class="fx"><colgroup><col style="width:3.2%"><col style="width:7.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:4.6%">
     <col style="width:8.5%"><col style="width:10%"><col style="width:8%"><col style="width:7%"><col style="width:6%"><col style="width:6.8%"><col style="width:4.2%"><col style="width:6.8%"><col style="width:5.2%"><col></colgroup>
   <thead><tr><th>序号</th><th>主体</th><th>凭证号</th><th>费用归属<br>月份</th><th>调账<br>月份</th><th></th><th>科目</th><th>费用项目</th><th>部门</th><th>产品分类</th><th>产品项目</th>

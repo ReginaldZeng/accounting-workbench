@@ -161,10 +161,10 @@ function adjustSheet(d, adjIn, opt = {}) {
   const qr = q.bid ? adjQr(`${q.bid}#${side}`) : ''
   return `<div class="sheet">
   ${qr ? `<div class="qr">${qr}<div>装订时扫这里</div></div>` : ''}
-  <div class="t1">${esc(opt.title || '计提更正单')}</div>
+  <div class="hd${qr ? ' q' : ''}"><div class="t1">${esc(opt.title || '计提更正单')}</div>
   <div class="t2">供应商编码：${esc(q.code)}　　　供应商名称：${esc(q.payee)}</div>
   ${side === 1 ? `<div class="t3 where">本页订在 <b>${esc(opt.subject || '')}</b> 的红冲凭证后面（那张凭证没有纸质付款单）；凭证号扫右上角二维码看</div>` : ''}
-  <div class="t3">钉钉审批 ${esc(q.bid)}（${esc(q.applicant)}）　·　账单期间 ${esc(q.period)}　·　付款 ${money(q.amount)}${p ? `（付款单 ${esc(p.bill_no)}）` : ''}　·　调整凭证 <b>${vno}</b></div>
+  <div class="t3">钉钉审批 ${esc(q.bid)}（${esc(q.applicant)}）　·　账单期间 ${esc(q.period)}　·　付款 ${money(q.amount)}${p ? `（付款单 ${esc(p.bill_no)}）` : ''}　·　调整凭证 <b>${vno}</b></div></div>
   <table class="fx"><colgroup><col style="width:3.2%"><col style="width:7.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:4.6%">
     <col style="width:8.5%"><col style="width:10%"><col style="width:8%"><col style="width:7%"><col style="width:6%"><col style="width:6.8%"><col style="width:4.2%"><col style="width:6.8%"><col style="width:5.2%"><col></colgroup>
   <thead><tr><th>序号</th><th>主体</th><th>凭证号</th><th>费用归属<br>月份</th><th>调账<br>月份</th><th></th><th>科目</th><th>费用项目</th><th>部门</th><th>产品分类</th><th>产品项目</th>
@@ -178,11 +178,11 @@ function adjustSheet(d, adjIn, opt = {}) {
   <div class="ft">财务核算工作台 · 付款做账 · 打印于 ${new Date().toLocaleString('zh-CN', { hour12: false })}${p ? '' : ' · 审批时打印，还没做账：凭证号、调账月份以做账为准'}</div></div>`
 }
 
-const SHEET_CSS = `@page{size:A4 landscape;margin:10mm 10mm}*{box-sizing:border-box}body{font:11px/1.45 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
+const SHEET_CSS = `@page{size:A4 landscape;margin:10mm 10mm;@top-left{content:""}@top-center{content:""}@top-right{content:""}@bottom-left{content:""}@bottom-center{content:""}@bottom-right{content:counter(page) " / " counter(pages);font:9px "Microsoft YaHei",sans-serif;color:#9AA5AE}}*{box-sizing:border-box}body{font:11px/1.45 "Microsoft YaHei","PingFang SC",sans-serif;color:#1B2733;margin:0}
 .sheet{page-break-after:always;position:relative}.sheet:last-child{page-break-after:auto}
 .qrs{position:absolute;right:0;top:0;display:flex;gap:4mm}.qrs .qr{position:static}.note.seg{margin-top:9px;padding-top:6px;border-top:1px dashed #B8C4CC;color:#1B2733}
 .qr{position:absolute;right:0;top:0;width:21mm;text-align:center;font-size:9px;color:#5E6B78;line-height:1.3}.qr svg{width:21mm;height:21mm;display:block}
-.t3.where{font-weight:700;color:#8A5A00}
+.t3.where{font-weight:700;color:#8A5A00}.hd.q{min-height:30mm}
 .t1{text-align:center;font-size:20px;font-weight:700;margin:2px 0 4px}.t2{text-align:center;font-size:12.5px;font-weight:700;margin-bottom:4px}
 .t3{text-align:center;font-size:11px;color:#5E6B78;margin-bottom:8px}.t3 b{color:#1B2733}
 table{width:100%;border-collapse:collapse;table-layout:fixed}.fx th,.fx td{border:1px solid #B8C4CC;padding:4px 5px;vertical-align:middle;word-break:break-all}
@@ -265,9 +265,9 @@ function mergedSheet(short, ps) {
   const posted = parts.every(x => x.p)
   return `<div class="sheet">
   <div class="qrs">${parts.map(x => (x.q.bid ? `<div class="qr">${adjQr(`${x.q.bid}#${x.side}`)}<div>${no(x)} · 装订时扫</div></div>` : '')).join('')}</div>
-  <div class="t1">计提更正单（${esc(short)} · ${all.length} 项）</div>
+  <div class="hd q"><div class="t1">计提更正单（${esc(short)} · ${all.length} 项）</div>
   <div class="t2">供应商编码：${esc(q0.code)}　　　供应商名称：${esc(q0.payee)}</div>
-  <div class="t3">主体 <b>${esc(full)}</b>　·　这个主体的更正合在这一张：${parts.map(x => `${no(x)} ${x.kind}`).join('；')}</div>
+  <div class="t3">主体 <b>${esc(full)}</b>　·　这个主体的更正合在这一张：${parts.map(x => `${no(x)} ${x.kind}`).join('；')}</div></div>
   <table class="fx"><colgroup><col style="width:3.2%"><col style="width:7.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:5.4%"><col style="width:4.6%">
     <col style="width:8.5%"><col style="width:10%"><col style="width:8%"><col style="width:7%"><col style="width:6%"><col style="width:6.8%"><col style="width:4.2%"><col style="width:6.8%"><col style="width:5.2%"><col></colgroup>
   <thead><tr><th>序号</th><th>主体</th><th>凭证号</th><th>费用归属<br>月份</th><th>调账<br>月份</th><th></th><th>科目</th><th>费用项目</th><th>部门</th><th>产品分类</th><th>产品项目</th>
