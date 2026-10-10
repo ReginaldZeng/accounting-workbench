@@ -680,6 +680,8 @@ export const reviewUnitKg = (carrier, period) => j(`/api/logistics-review/unit-k
 export const reviewUnitKgSet = (items, packs) => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items, packs: packs || [] }) })
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
 export const reviewDocMode = (carrier, period, doc_no, mode) => j('/api/logistics-review/doc-mode', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, mode } : { carrier, period, doc_no, mode }) })
+export const reviewCarryAdj = body => j('/api/logistics-review/carry-adj', { method: 'POST', body: JSON.stringify(body) })
+export const reviewCarrySettle = body => j('/api/logistics-review/carry-settle', { method: 'POST', body: JSON.stringify(body) })
 export const reviewVolKg = (carrier, kg) => j('/api/logistics-review/vol-kg', { method: 'POST', body: JSON.stringify({ carrier, kg }) })
 export const reviewPalletKg = (carrier, kg) => j('/api/logistics-review/pallet-kg', { method: 'POST', body: JSON.stringify({ carrier, kg }) })
 export const reviewCarrierPointsSet =(carrier, points) => j('/api/logistics-review/carrier-points', { method: 'POST', body: JSON.stringify({ carrier, points }) })

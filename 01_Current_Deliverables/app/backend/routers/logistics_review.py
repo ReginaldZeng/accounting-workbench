@@ -2799,6 +2799,57 @@ def _kd_boxes(lines):
     return round(tot, 4), miss
 
 
+_CARRY_KEY = "logi_carry_adj"      # {承运商: [{id, from_period, doc_no, amount, reason, by, at, done: {period, by, at, note} | None, skips: {账期: 说明}}]}
+
+
+def _carry_list(carrier):
+    """待下月账单扣回(V2.894，用户 2026-10-10：极鲜达 XSCKD219281「最后确认是供应商多收我们钱了，要在下个月账单调整」)。
+    这个月的账单、发票已经开了不改，多收的钱等供应商在后面月份的账单里扣回——登记在这里，后面月份打开这家复核台时提醒去核，
+    没核到又没写说明的，不让登记复核。amount＝含税、正数＝供应商该退给我们的。"""
+    return [dict(x) for x in ((db.get_setting(_CARRY_KEY, None) or {}).get(carrier) or []) if isinstance(x, dict) and x.get("id")]
+
+
+def _carry_save(carrier, items):
+    allc = dict(db.get_setting(_CARRY_KEY, None) or {})
+    if items:
+        allc[carrier] = items
+    else:
+        allc.pop(carrier, None)
+    db.set_setting(_CARRY_KEY, allc)
+
+
+def _carry_view(carrier, period, bill_rows=None):
+    """→ {"out": 这个月登记的, "in": 以前月份登记、到这个月还没核到的＋就在这个月核到的}。
+    in 里每条带 need(这个月还要处理吗)、hint(这个月账单里有没有一行金额正好是负的这个数)。"""
+    items = _carry_list(carrier)
+    out = [x for x in items if x.get("from_period") == period]
+    inn = []
+    for x in items:
+        if not (str(x.get("from_period") or "") < period):
+            continue
+        dn = x.get("done") or None
+        if dn and dn.get("period") != period:
+            continue
+        y = dict(x)
+        y["skip"] = (x.get("skips") or {}).get(period) or ""
+        y["need"] = (not dn) and not y["skip"]
+        if not dn and bill_rows:
+            amt = float(x.get("amount") or 0)
+            hit = [r for r in bill_rows if r.get("amount") is not None and abs(float(r.get("amount") or 0) + amt) < 0.005]
+            if hit:
+                h = hit[0]
+                y["hint"] = "这个月账单「%s」页有一行 %s%s" % (h.get("src_sheet") or "", _fmt_amt(float(h.get("amount") or 0)),
+                                                    ("（%s）" % str(h.get("note") or h.get("fee_item") or h.get("doc_no") or "")[:30]) if (h.get("note") or h.get("fee_item") or h.get("doc_no")) else "")
+        inn.append(y)
+    return {"out": out, "in": inn}
+
+
+def _carry_block(carrier, period):
+    """这个月登记复核前还没着落的待扣回 → [说明文字]。"""
+    return ["%s %s 多收 %s 元" % (x.get("from_period"), x.get("doc_no") or "", _fmt_amt(float(x.get("amount") or 0)))
+            for x in _carry_view(carrier, period)["in"] if x.get("need")]
+
+
 _DOC_MODE_KEY = "logi_doc_mode"          # {"承运商|账期": {单号: {"mode": "weight"|"box", "by": 谁, "at": 什么时候}}}
 _DOC_MODE_CN = {"weight": "按重量", "box": "按箱数"}
 
@@ -3530,7 +3581,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "vol_kg": _vol_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs}
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "vol_kg": _vol_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs,
+                "carry": _carry_view(carrier, period, rows + accr)}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
@@ -3769,6 +3821,93 @@ async def review_doc_confirm(request: Request):
             if todo:
                 c.execute(delete(DK).where((DK.c.carrier == carrier) & (DK.c.period == period) & (DK.c.doc_no.in_(todo))))
     return {"ok": True, "n": len(todo), "on": on}
+
+
+@router.post("/api/logistics-review/carry-adj")
+async def review_carry_adj(request: Request):
+    """登记/撤销「供应商多收，等后面月份账单扣回」。action＝add(默认) / del。add 同时把这张单标成已确认(有着落)。见 _carry_list。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, action = (b.get("carrier") or "").strip(), (b.get("action") or "add").strip()
+    if not carrier:
+        return JSONResponse({"ok": False, "msg": "缺承运商"}, status_code=400)
+    items = _carry_list(carrier)
+    if action == "del":
+        it = next((x for x in items if x.get("id") == b.get("id")), None)
+        if not it:
+            return JSONResponse({"ok": False, "msg": "没找到这条登记"}, status_code=404)
+        if it.get("done"):
+            return JSONResponse({"ok": False, "msg": "这笔已经在 %s 的账单里核到了，要撤销先去那个月取消打勾" % (it["done"].get("period") or "")}, status_code=409)
+        lk = _locked(carrier, it.get("from_period") or "")
+        if lk:
+            return lk
+        _carry_save(carrier, [x for x in items if x.get("id") != it["id"]])
+        db.audit(_uname(u), "物流复核-待下月扣回", "%s %s %s" % (carrier, it.get("from_period"), it.get("doc_no") or ""), "撤销：多收 %s 元（%s）" % (_fmt_amt(float(it.get("amount") or 0)), it.get("reason") or ""))
+        return {"ok": True, "carry": _carry_view(carrier, it.get("from_period") or "")}
+    period, no, reason = (b.get("period") or "").strip(), str(b.get("doc_no") or "").strip().split("+")[0], (b.get("reason") or "").strip()
+    try:
+        amt = round(float(str(b.get("amount") or "").replace(",", "").strip()), 2)
+    except ValueError:
+        return JSONResponse({"ok": False, "msg": "多收金额要填数字"}, status_code=400)
+    if not period or not no:
+        return JSONResponse({"ok": False, "msg": "缺账期/单号"}, status_code=400)
+    if amt <= 0 or amt > 1e7:
+        return JSONResponse({"ok": False, "msg": "多收金额填含税的正数（供应商该退给我们多少）"}, status_code=400)
+    if not reason:
+        return JSONResponse({"ok": False, "msg": "写一句原因（多收了什么、和谁确认的）"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    if any(x.get("from_period") == period and x.get("doc_no") == no for x in items):
+        return JSONResponse({"ok": False, "msg": "这张单这个月已经登记过待扣回，要改先撤销"}, status_code=409)
+    it = {"id": "%s%s" % (int(time.time() * 1000), len(items)), "from_period": period, "doc_no": no, "amount": amt, "reason": reason[:200],
+          "by": _uname(u), "at": _now(), "done": None, "skips": {}}
+    _carry_save(carrier, items + [it])
+    if no not in _doc_ok(carrier, period):          # 有着落了：一并标成已确认，不再挂在待核
+        with db._engine.begin() as c:
+            c.execute(insert(DK).values(carrier=carrier, period=period, doc_no=no, confirmed_by=_uname(u), confirmed_at=_now()))
+    db.audit(_uname(u), "物流复核-待下月扣回", "%s %s %s" % (carrier, period, no), "登记：供应商多收 %s 元（含税），等后面月份账单扣回；原因→%s" % (_fmt_amt(amt), reason[:200]))
+    return {"ok": True, "carry": _carry_view(carrier, period)}
+
+
+@router.post("/api/logistics-review/carry-settle")
+async def review_carry_settle(request: Request):
+    """后面月份核「待扣回」：action＝done 这个月账单已扣回 / undo 取消 / skip 这个月没扣(必须写说明，下个月接着提醒) / unskip。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period, action, note = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("action") or "").strip(), (b.get("note") or "").strip()
+    if not carrier or not period or action not in ("done", "undo", "skip", "unskip"):
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期/动作"}, status_code=400)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    items = _carry_list(carrier)
+    it = next((x for x in items if x.get("id") == b.get("id")), None)
+    if not it or not (str(it.get("from_period") or "") < period):
+        return JSONResponse({"ok": False, "msg": "没找到这条登记（或它不是以前月份的）"}, status_code=404)
+    if action == "done":
+        if it.get("done"):
+            return JSONResponse({"ok": False, "msg": "这笔已经在 %s 核到过了" % (it["done"].get("period") or "")}, status_code=409)
+        it["done"] = {"period": period, "by": _uname(u), "at": _now(), "note": note[:200]}
+    elif action == "undo":
+        if not it.get("done") or it["done"].get("period") != period:
+            return JSONResponse({"ok": False, "msg": "这笔不是在这个月核到的"}, status_code=409)
+        it["done"] = None
+    elif action == "skip":
+        if not note:
+            return JSONResponse({"ok": False, "msg": "这个月没扣回的，写一句原因（下个月会接着提醒）"}, status_code=400)
+        it["skips"] = {**(it.get("skips") or {}), period: note[:200]}
+    else:
+        it["skips"] = {k: v for k, v in (it.get("skips") or {}).items() if k != period}
+    _carry_save(carrier, items)
+    db.audit(_uname(u), "物流复核-待下月扣回", "%s %s %s" % (carrier, it.get("from_period"), it.get("doc_no") or ""),
+             {"done": "%s 账单已扣回 %s 元", "undo": "取消「%s 账单已扣回」（%s 元）", "skip": "%s 账单没扣（%s 元），下月接着提醒", "unskip": "取消「%s 没扣」的说明（%s 元）"}[action] % (
+                 period, _fmt_amt(float(it.get("amount") or 0))) + (("；" + note[:200]) if note else ""))
+    return {"ok": True, "carry": _carry_view(carrier, period)}
 
 
 @router.post("/api/logistics-review/doc-mode")
@@ -4231,6 +4370,10 @@ async def review_sign_month(request: Request):
         return JSONResponse({"ok": False, "msg": "缺承运商/账期"}, status_code=400)
     if _signed(carrier, period):
         return JSONResponse({"ok": False, "msg": "本月已登记，无需重复"}, status_code=409)
+    _cb = _carry_block(carrier, period)
+    if _cb:      # 以前月份登记的「待后面账单扣回」，这个月还没核到、也没写说明(V2.894)
+        return JSONResponse({"ok": False, "msg": "还有 %d 笔以前月份多收、等账单扣回的没着落：%s。在页面顶上核到了打勾，这个月没扣的写明原因，再登记。" % (
+            len(_cb), "；".join(_cb[:5]))}, status_code=409)
     L = _build_lines(request, carrier, period)
     snap = {k: L.get(k) for k in ("accr_total", "bill_total", "diff_total", "n_unexplained", "bill_src")}
     if carrier in _register_carriers():      # 登记制：快照里记请款合计(没有账单合计)

@@ -10,7 +10,7 @@
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewVolKg, reviewDocMode, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewVolKg, reviewDocMode, reviewCarryAdj, reviewCarrySettle, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
@@ -719,6 +719,22 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .then(() => { load(); refetchL(); flash('已改归类，逐笔复核重算') })
       .catch(e => flash('归类保存失败：' + e.message))
   }
+  // 待下月扣回(V2.894)：这张单确认是供应商多收了，这个月账单发票不改，等后面月份账单扣回——登记在这里，后面月份会提醒去核
+  const [carryForm, setCarryForm] = useState({})      // {单号: {amount, reason}}
+  const carryOf = no => ((d && d.carry && d.carry.out) || []).find(x => x.doc_no === no)
+  const addCarry = no => {
+    const f = carryForm[no] || {}
+    reviewCarryAdj({ carrier, period, doc_no: no, amount: f.amount, reason: f.reason })
+      .then(() => { flash(`${no} 已登记待后面月份账单扣回，并标成已确认`); setCarryForm(o => ({ ...o, [no]: undefined })); load() })
+      .catch(e => flash('登记失败：' + e.message))
+  }
+  const delCarry = it => { if (window.confirm(`撤销「${it.doc_no} 多收 ${money(it.amount)} 元，待扣回」这条登记？（这张单的「已确认」不会跟着撤）`)) reviewCarryAdj({ carrier, action: 'del', id: it.id }).then(() => { flash('已撤销'); load() }).catch(e => flash('撤销失败：' + e.message)) }
+  const settleCarry = (it, action) => {
+    let note = ''
+    if (action === 'skip') { note = window.prompt(`${it.from_period} ${it.doc_no} 多收的 ${money(it.amount)} 元，这个月账单没扣回？写一句原因（下个月会接着提醒）`, ''); if (note === null) return; if (!note.trim()) { flash('要写原因'); return } }
+    reviewCarrySettle({ carrier, period, id: it.id, action, note: (note || '').trim() }).then(() => { flash({ done: '已记：这个月账单扣回了', undo: '已取消', skip: '已记：这个月没扣，下个月接着提醒', unskip: '已取消说明' }[action]); load() })
+      .catch(e => flash('没记上：' + e.message))
+  }
   // 逐单指定核对方式(V2.885)：这一张按重量还是按箱数核；空＝交回系统自动
   const saveMode = (doc_no, mode) => {
     reviewDocMode(carrier, period, doc_no, mode)
@@ -1008,6 +1024,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
       .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:300px}
       .lrv .dtbl td.concl .sub{white-space:normal;max-width:300px;line-height:1.45;overflow-wrap:anywhere}
+      .lrv .carrybar{margin:10px 0;padding:10px 14px;border:1px solid #F0D9A8;background:#FDF6E8;border-radius:10px;font-size:12.5px;color:#3d4852}
+      .lrv .carrybar .ci{margin-top:6px;padding-top:6px;border-top:1px dashed #F0D9A8}.lrv .carrybar .ci.need{color:#6B4E00}.lrv .carrybar .hint{color:#1F6F4A}
       .lrv .mini td.spec{color:#5E6B78;font-size:11.5px;white-space:nowrap}
       .lrv .dtbl td.concl .sub.tip{cursor:help;text-decoration:underline dotted #B8C4CC;text-underline-offset:3px}
       .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
@@ -1195,6 +1213,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       {msg && <div className="msg">{msg}</div>}
       {regRow && step !== 'sign' && <div className="msg">登记制：这家没有可逐单核的账单，第①②步基本是空的——直接到第③步核对、做费用凭证、登记。　<button className="btn sm" onClick={() => goStep('sign')}>去第③步</button></div>}
       {locked && <div className="lock">🔒 本月已登记复核 · {L.signed.reviewer} · {L.signed.signed_at}　归类与备注已锁定，要修改请先在第③步撤销登记。</div>}
+      {d && d.carry && (d.carry.in || []).length > 0 && <div className="carrybar">
+        <b>以前月份多收、等账单扣回的 {d.carry.in.length} 笔</b><span className="dim">　核对这个月的账单里有没有扣回来；没着落的不能登记复核</span>
+        {d.carry.in.map(it => <div key={it.id} className={'ci' + (it.need ? ' need' : '')}>
+          <span className="mono">{it.from_period} {it.doc_no}</span>　多收 <b>{money(it.amount)}</b> 元（含税）　<span className="dim">{it.reason} · {it.by} {String(it.at || '').slice(0, 10)}</span>
+          {it.done ? <span className="st diffok">　✓ 这个月账单已扣回 · {it.done.by}{it.done.note ? ' · ' + it.done.note : ''}{!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => settleCarry(it, 'undo')}>取消</button>}</span>
+            : it.skip ? <span className="dim">　这个月没扣：{it.skip}（下个月接着提醒）{!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => settleCarry(it, 'unskip')}>取消</button>}</span>
+              : <>{it.hint && <span className="hint">　{it.hint}</span>}{!locked && <><button className="btn sm okb" style={{ marginLeft: 8 }} onClick={() => settleCarry(it, 'done')}>✓ 这个月账单已扣回</button>
+                <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => settleCarry(it, 'skip')}>这个月没扣…</button></>}</>}
+        </div>)}</div>}
 
       {step === 'lines' && (<>
         {L && !L.err && (
@@ -1481,8 +1508,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           <span className="sub">金蝶 {num(x.kd_sum)}{x.kd_unit}{qd != null && !isZero(qd) && <span className={x.state === 'qtydiff' ? 'diffbad' : ''}> · 差{qd > 0 ? '+' : ''}{num(qd)}</span>}</span></td>
                         <td className="num">{x.conv == null ? '—' : x.conv}</td>
                         <td className="concl">{cf
-                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className={'sub' + (x.mode_tip ? ' tip' : '')} title={x.mode_tip || undefined}>{pl || x.mode_short || x.mode_cn} · {cf.by}</span></>
+                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className={'sub' + (x.mode_tip ? ' tip' : '')} title={x.mode_tip || undefined}>{pl || x.mode_short || x.mode_cn} · {cf.by}</span>
+                            {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}</>
                           : <><span className={'pill ' + pc} title={!pl && x.mode_tip ? x.mode_tip : undefined}>{pl || x.mode_short || x.mode_cn}</span>{pl && <span className={'sub' + (x.mode_tip ? ' tip' : '')} title={x.mode_tip || undefined}>{x.mode_short || x.mode_cn}</span>}
+                            {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}
                             {x.suggest && x.state === 'qtydiff' && <span className="sub sugg" title={x.suggest.txt + '。点「采纳」就把这一张改成这种核法并重判；不点不会改'}>
                               建议{x.suggest.mode === 'box' ? '按箱数核' : '按重量核'}：{x.suggest.txt}
                               {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={e => { e.stopPropagation(); saveMode(x.doc_no, x.suggest.mode) }}>采纳</button>}</span>}
@@ -1522,6 +1551,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                             </select></label>
                             <span className="dim" style={{ fontSize: 11.5 }}>只改这一张单拿什么比，尺子不变；选完即保存、重判，结论里会写明是谁哪天指定的。这家的常规在上面「按托 ⚙」「毛重比 ⚙」里设</span>
                           </div>}
+                          {x.doc_no && (() => { const it = carryOf(x.doc_no), f = carryForm[x.doc_no] || {}
+                            return <div className="xcls">
+                              <span className="dim">多收扣回</span>
+                              {it ? <><span>已登记：供应商多收 <b>{money(it.amount)}</b> 元（含税），等后面月份账单扣回　<span className="dim">{it.reason} · {it.by} {String(it.at || '').slice(0, 10)}</span></span>
+                                {it.done ? <span className="st diffok">　✓ {it.done.period} 账单已扣回</span> : (!locked && <button className="lk" onClick={() => delCarry(it)}>撤销</button>)}</>
+                                : <><label>多收 <input className="clsinp" style={{ width: 90, textAlign: 'right' }} disabled={locked} placeholder="含税金额" value={f.amount || ''}
+                                    onChange={e => setCarryForm(o => ({ ...o, [x.doc_no]: { ...f, amount: e.target.value } }))} /> 元</label>
+                                  <label>原因 <input className="clsinp wide" disabled={locked} placeholder="多收了什么、和谁确认的，如：多算 7 件，物流部已和供应商确认" value={f.reason || ''}
+                                    onChange={e => setCarryForm(o => ({ ...o, [x.doc_no]: { ...f, reason: e.target.value } }))} /></label>
+                                  <button className="btn sm" disabled={locked || !String(f.amount || '').trim() || !String(f.reason || '').trim()} onClick={() => addCarry(x.doc_no)}>登记待扣回</button>
+                                  <span className="dim" style={{ fontSize: 11.5 }}>确认是供应商多收、这个月账单发票不改时用：登记后这张单算已确认，后面月份打开这家会提醒去核账单有没有扣回</span></>}
+                            </div> })()}
                           {x.sub_fees && <div className="xfee"><span className="dim">费用构成</span>
                             {Object.entries(x.sub_fees).map(([k, v]) => <span key={k} className="tag">{k} {typeof v === 'number' ? money(v) : v}</span>)}
                             <b className="mono">= {money(x.doc_fee)}</b></div>}
