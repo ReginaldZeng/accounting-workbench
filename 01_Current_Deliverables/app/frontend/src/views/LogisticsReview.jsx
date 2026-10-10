@@ -1006,7 +1006,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .dfilt{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 15px;background:#F5FAFC;border-bottom:1px solid #DCE2E7;font-size:12.5px;color:#1B2733}
       .lrv .ltbl td.pl{line-height:1.25}
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
-      .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:360px}
+      .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:300px}
+      .lrv .dtbl td.concl .sub{white-space:normal;max-width:300px;line-height:1.45;overflow-wrap:anywhere}
       .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
       .lrv .tag.ok{color:var(--ok);background:#DCEFE4}
       .lrv .diffok{color:var(--ok);font-weight:600}.lrv .diffbad{color:var(--bad);font-weight:600}
@@ -1477,7 +1478,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td className="num">{num(x.bill_amt)}<small className="u">{x.bill_unit}</small>
                           <span className="sub">金蝶 {num(x.kd_sum)}{x.kd_unit}{qd != null && !isZero(qd) && <span className={x.state === 'qtydiff' ? 'diffbad' : ''}> · 差{qd > 0 ? '+' : ''}{num(qd)}</span>}</span></td>
                         <td className="num">{x.conv == null ? '—' : x.conv}</td>
-                        <td>{cf
+                        <td className="concl">{cf
                           ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className="sub">{pl || x.mode_cn} · {cf.by}</span></>
                           : <><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}
                             {x.suggest && x.state === 'qtydiff' && <span className="sub sugg" title={x.suggest.txt + '。点「采纳」就把这一张改成这种核法并重判；不点不会改'}>
