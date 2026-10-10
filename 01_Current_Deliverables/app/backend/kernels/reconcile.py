@@ -690,6 +690,9 @@ def _row(status, b, k, confidence="", lag=None):
         "日期差天": lag,
         "晚记": late_txt,
         "账号": ref.acct,
+        # 账号原文：流水/凭证上原样的那串（金蝶侧＝银行账号核算维度）。「账号」只是从里面抠出的数字，
+        # 邮箱式的电商户（淘宝xxx@…）会被抠成空或半截——对不上台账的行要给人看原文才知道说的是哪个户。
+        "账号原文": (ref.acct_raw or ""),
         "开户行": (ref.bank_name or ""),
         "主体": (ref.subject or (b.holder if b else (k.holder if k else ""))),
         "账户已映射": bool(ref.mapped),

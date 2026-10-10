@@ -2278,6 +2278,31 @@ def _scheme_map():
     return m
 
 
+def _mark_nonbank_accts(results):
+    """「账号对不上台账」里再分出一种，给行加提示（不改分类、不改笔数）：
+    凭证上的银行账号维度，和台账某一行的【账户全名】一字不差，而那一行不是银行账户（电商渠道/理财产品）。
+    这类户在台账里账号栏是空的、只有全名，按账号数字永远对不上，所以落在「账号对不上」——
+    但它不是"台账没登记"，而是【银行存款科目下挂了一个非银行户】，多半是凭证选错了科目
+    （实例：2026-09 深圳星期零 记-269/记-270，支付宝与宁波行之间调拨，支付宝那一行记进了银行存款；
+    同样的户 7、8 月全部记在其他货币资金）。页面据此亮出原户名和"疑选错科目"，不再让人去台账补登记。"""
+    by_name = {}
+    for lr in _auth_ledger_rows():
+        nm = str(lr.get("账户全名") or "").strip()
+        if nm and lr.get("类别", "银行账户") != "银行账户":
+            by_name.setdefault(nm, lr)
+    if not by_name:
+        return
+    for r in results:
+        if r.get("status") != "unmapped":
+            continue
+        hit = by_name.get(str(r.get("账号原文") or "").strip())
+        if hit:
+            cat = hit.get("类别", "")
+            r["非银行户"] = {"账户全名": hit.get("账户全名", ""), "类别": cat,
+                          "开户行": hit.get("开户行", ""), "主体": hit.get("主体", ""),
+                          "应在科目": _CAT2SUBJ.get(cat, "")}
+
+
 def _real_bank_kd():
     """金蝶模式真数据：本期已定格的 金蝶1002序时账 + 已上传解析好的银行流水。
     返回 (bank_rows, kd_rows, manifest, bank_src)。金蝶未取数→KdNotFetched；银行未上传→空+提示。"""
@@ -2336,6 +2361,7 @@ def _reconcile():
         pass
     gn.discard("")
     results, summary = rc.reconcile(bank, kd, group_names=gn or None)
+    _mark_nonbank_accts(results)
     _assign_keys(results)
     return {"period": _period_str(), "source": CFG["source"],
             "bank_source": bank_src,
