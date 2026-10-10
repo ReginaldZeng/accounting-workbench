@@ -3443,6 +3443,7 @@ def _box_docs(rsub, carrier):
                     x["mode_short"] = x["mode_tip"] = ""         # 几行合起来比的，短写法不适用
                     x["mode_cn"] += _gnote
                     _others = sorted({y["doc_no"] for y in xs} - {x["doc_no"]})
+                    x["grp_others"] = _others              # 和这张合起来比的别的单号(导出复核明细时，差异要拿几张的账单量加起来算)
                     if _others:
                         x["mode_cn"] += "（和 %s 是同一笔调拨，合起来比）" % "、".join(_others)
                     x["conv"] = round(kd / bsum, 3) if bsum else None
@@ -5154,7 +5155,9 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                         elif k == "_kdsum":
                             val = x0.get("kd_sum") if (d0 and _cmpq) else None
                         elif k == "_diff":
-                            _b, _k = _xl_num(docv.get("bill_amt")), _xl_num(x0.get("kd_sum"))
+                            # 和别的单号合起来比的(同一笔调拨的调入单＋调出单)：差异拿合计的账单量算，不拿这一张自己的(V2.903)
+                            _b = _xl_num(x0.get("doc_bill_all")) if x0.get("grp_others") else _xl_num(docv.get("bill_amt"))
+                            _k = _xl_num(x0.get("kd_sum"))
                             val = round(_b - _k, 2) if (d0 and _cmpq and _b is not None and _k is not None) else None
                         elif k == "_fchk":
                             val = _STATE_TXT.get(x0.get("state"), "") if d0 else None
@@ -5180,6 +5183,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         # —— 核对用公式算(V2.898)：只给「一张单一行账单、状态是一致/数量不符」的写；每条公式写之前先按同一个算法算一遍，和系统的数对得上才写 ——
         CL = {k: get_column_letter(ci) for k, ci in col_of_key.items()}
         n_formula = 0
+        row_of_doc = {rc["d0"]: rc["s"] for rc in recs if rc["d0"]}
         for rc in recs:
             x0, s0, e0 = rc["x0"], rc["s"], rc["e"]
             ck = x0.get("chk") or {}
@@ -5231,13 +5235,24 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 n_formula += 1
             if kds is None or bill is None:
                 continue
-            ws2.cell(row=s0, column=col_of_key["_diff"], value="=ROUND(%s%d-%s%d,2)" % (CL["bill_amt"], s0, CL["_kdsum"], s0))
+            bill_x = "%s%d" % (CL["bill_amt"], s0)                 # 公式里「账单量」那一项
+            oth = x0.get("grp_others") or []
+            if oth:                                                # 和别的单号合起来比：账单量＝本单 + 那几张(各自那一格)，合计要等于系统比的那个数
+                orow = [row_of_doc.get(o) for o in oth]
+                ovals = [_xl_num(ws2.cell(row=r_, column=col_of_key["bill_amt"]).value) if r_ else None for r_ in orow]
+                ball = _xl_num(x0.get("doc_bill_all"))
+                if any(v is None for v in ovals) or ball is None or abs(bill + sum(ovals) - ball) > 0.011:
+                    continue                                       # 凑不出系统比的那个合计：不写公式，留着上面写死的差异和结论
+                bill_x = "(" + "+".join(["%s%d" % (CL["bill_amt"], s0)] + ["%s%d" % (CL["bill_amt"], r_) for r_ in orow]) + ")"
+                bill = ball
+            ws2.cell(row=s0, column=col_of_key["_diff"], value="=ROUND(%s-%s%d,2)" % (bill_x, CL["_kdsum"], s0))
             n_formula += 1
             cv = _xl_num(x0.get("conv"))
             by_w = kind in ("weight", "vol", "pallet")
             if cv is not None and kds and bill and abs(round((bill / kds) if by_w else (kds / bill), 3) - cv) < 0.0015:
-                a_, b_ = (CL["bill_amt"], CL["_kdsum"]) if by_w else (CL["_kdsum"], CL["bill_amt"])
-                ws2.cell(row=s0, column=col_of_key["conv"], value='=IF(%s%d<>0,ROUND(%s%d/%s%d,3),"")' % (b_, s0, a_, s0, b_, s0))
+                kd_x = "%s%d" % (CL["_kdsum"], s0)
+                a_, b_ = (bill_x, kd_x) if by_w else (kd_x, bill_x)
+                ws2.cell(row=s0, column=col_of_key["conv"], value='=IF(%s<>0,ROUND(%s/%s,3),"")' % (b_, a_, b_))
                 n_formula += 1
             rg = ck.get("rng")
             if kind == "weight" and rg:                                              # 配了毛重比范围的：看 账单÷金蝶 落不落在范围里
