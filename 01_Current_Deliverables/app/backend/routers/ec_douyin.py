@@ -365,7 +365,7 @@ def flows(request: Request, period: str, shop: str, scene: str, q: str = '', pag
     end = model.period_end(period)                                                # 和订单抽屉取数的范围一致：到本期末为止有应收或有动账的才点得开
     known = {b['order'] for b in hit[4] if b['order'] and b['date'] <= end} | {r['order'] for r in rows['dy_settle'] if r['order'] and r['t'][:7] <= period}
     sub2main = {r['id']: r['order'] for r in rows['dy_platform']}
-    kind, found = model.flow_rows(period, rows['dy_ledger'], rows['dy_settle'], rows['dy_insure'], scene.strip(), known, sub2main)
+    kind, found = model.flow_rows(period, rows['dy_ledger'], rows['dy_settle'], rows['dy_insure'], scene.strip(), known, sub2main, model.red_orders(period, hit[4]))
     q = q.strip()
     if q: found = [r for r in found if q in r['id'] or q in (r.get('order') or '') or q in (r.get('flow') or '')]
     size = 50; pages = max(1, -(-len(found) // size)); page = min(max(1, page), pages)
@@ -555,6 +555,33 @@ def push_extras(request: Request, shop: str = Form(...), keys: str = Form('[]'))
     db.set_setting(EXTRA_KEY, every, operator=user['name'])
     if want != before: db.audit(user['name'], 'ec_douyin_push_extras', target=shop, detail='随收款单推的账户支出：%s → %s' % ('、'.join(before) or '无', '、'.join(want) or '无'))
     return {'ok': True, 'keys': want}
+
+
+def _red_list(period, shop):
+    _need(period, shop)
+    with _lock: hit = _cache.get((period, shop))
+    if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
+    return model.red_list(period, hit[3]['dy_settle'], hit[3]['dy_ledger'], hit[4], hit[1], hit[3]['dy_returns'])
+
+
+@router.get('/red-list')
+def red_list(request: Request, period: str, shop: str):
+    """退了款、金蝶没有红字的订单：每单退给买家多少、平台收回补贴多少（该建的红字）。只读。"""
+    require(request); check(period, shop)
+    rows, special = _red_list(period, shop)
+    total = lambda key: round(sum(int(round(x[key] * 100)) for x in rows) / 100, 2)
+    return {'ok': True, 'count': len(rows), 'buyer': total('buyer'), 'coupon': total('coupon'), 'reds': sum(1 for x in rows if x['coupon'] > 0), 'special': len(special)}
+
+
+@router.get('/red-list/export')
+def red_list_export(request: Request, period: str, shop: str):
+    user = require(request); selected = check(period, shop)
+    rows, special = _red_list(period, shop)
+    db.audit(user['name'], 'ec_douyin_red_list', target='%s %s' % (period, shop), detail='%d 单，特殊 %d 单' % (len(rows), len(special)))
+    name = '抖音红字清单_%s_%s.xlsx' % (selected['name'], period)
+    return Response(model.red_export(selected['name'], period, rows, special),
+                    media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': "attachment; filename*=UTF-8''%s" % quote(name)})
 
 
 @router.get('/push/export')

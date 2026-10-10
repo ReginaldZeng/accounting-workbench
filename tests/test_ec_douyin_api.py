@@ -319,7 +319,7 @@ class DouyinApiTests(unittest.TestCase):
         self.sync_ar([self.bill('AR1', '2026-09-22', 29.71, P)])                                                          # 抖音结算时退了 27.78，金蝶只有蓝字
         get = lambda path, **kw: self.client.get('/api/ec/douyin/' + path, params=dict({'period': '2026-09', 'shop': SHOP}, **kw)).json()
         row = get('bills', q=P)['rows'][0]
-        self.assertEqual(row['cat'], 'mismatch'); self.assertIn('登记了退款不退货 27.78', row['rnote']); self.assertIn('要手工补红字 27.78', row['rnote'])
+        self.assertEqual(row['cat'], 'mismatch'); self.assertIn('登记了退款不退货 27.78', row['rnote']); self.assertIn('两边差 27.78，就是退给买家的钱', row['rnote'])
         d = get('order', order=P)
         self.assertEqual(([(r['tk'], r['amt'], r['back']) for r in d['returns']], d['rnote']), ([('TK1', 27.78, 0.0)], row['rnote']))
         self.assertEqual(get('order', order='6917926768823643799')['returns'], [])

@@ -650,12 +650,22 @@ def bill_lines(rows):
     return out
 
 
-def flow_rows(period, ledger, settle, insure, scene, known=(), sub2main=None):
+def red_orders(period, bills):
+    """到本期末为止，金蝶里已经开了红字应收的平台订单。"""
+    end = period_end(period)
+    return {b['order'] for b in bills if b['order'] and b['amount'] < 0 and b['date'] <= end}
+
+
+def flow_rows(period, ledger, settle, insure, scene, known=(), sub2main=None, red=None):
     """「账户进出汇总」里某一项（货款结算以外的一种进出）的逐笔明细。返回 (哪种明细, 行)。
     保费类的：这一项的每笔账户流水都配得上保费明细、金额也相等，就按保单逐单列（一张保单对一个子订单）；其余按账户流水逐笔列，没有账户流水时退回订单维度动账明细。
     保单跟着它所在的那笔账户流水走，不看保单自己的时间和摘要：平台改过场景名（权益保险 → 退换货运费险），保单摘要却一律写运费险，按流水归才和汇总那一行相等。
     known＝认得的平台订单号（有结算或有应收的）：关联单号在里面才值得点开看订单。"""
     sub2main = sub2main or {}
+    if scene in (REFUND_PLAIN, REFUND_RED, COUPON_BACK, FEE_BACK):       # 勾选区里拆出来的几行退款：是哪几笔流水，备注写它原来是哪一种
+        red = red or set()
+        return 'ledger', [{'t': r['t'], 'id': r['id'], 'order': r['order'], 'amt': r['amt'], 'memo': ' '.join(x for x in (r['scene'], r['memo']) if x), 'bal': r.get('bal'), 'known': r['order'] in known}
+                          for r in ledger if r['t'][:7] == period and (r['scene'] or '').startswith('退款') and refund_key(r['scene'], r['order'], red) == scene]
     now = [r for r in ledger if r['t'][:7] == period]
     mine = [r for r in now or [r for r in settle if r['t'][:7] == period] if r['scene'] != SETTLE and (r['scene'] or '未注明场景') == scene]
     if now:
@@ -711,7 +721,7 @@ def returns_notes(bills, index, orders=None):
         elif not settled and amt >= blue[key] - 0.005: tail = '：全额退了、没有退货入库，这单不会再结算，金蝶也不会自动出红字，要手工补红字冲掉'
         elif not settled: tail = '：没有退货入库，金蝶不会自动出红字；结算时会少结这一块，到时要手工补红字'
         elif b['cat'] == 'mismatch' and (b.get('diff') or 0) > 0:
-            tail = '：没有退货入库，金蝶不会自动出红字；要手工补红字 %.2f（就是两边的差额%s）' % (b['diff'], '，含平台按比例收回的补贴' if b['diff'] > amt + 0.005 else '')
+            tail = '：没有退货入库，金蝶不会自动出红字；两边差 %.2f%s' % (b['diff'], '：退给买家的按退款不退货处理，其余是平台收回的补贴，建红字应收' if b['diff'] > amt + 0.005 else '，就是退给买家的钱，按退款不退货处理')
         else: tail = '：结算时没扣这笔退款，金蝶也没有对应的红字；要是结算之后才退的，钱在「货款结算以外的账户进出」里，红字要另外补'
         b['rnote'] = said + tail
 
@@ -854,27 +864,105 @@ def push_lines(period, groups):
 
 
 REFUND_PLAIN, REFUND_RED = '退款不退货', '退款（订单在金蝶已有红字）'
+COUPON_BACK, FEE_BACK = '退回平台补贴（建红字应收）', '平台退回的佣金'
+_REFUND_PART = {'退用户': REFUND_PLAIN, '退补贴': COUPON_BACK, '退分账': FEE_BACK, '分账': FEE_BACK}
+
+
+def refund_key(scene, order, red):
+    """账户流水里一笔「退款-…」归到勾选区的哪一行：订单在金蝶已有红字的整堆锁住；没红字的按这笔钱是什么分——
+    退给买家的（退款不退货，可以随收款单推）、平台收回的补贴（冲收入：建红字应收）、平台退回的佣金（进账）。认不出的照原名单列。"""
+    if order in red: return REFUND_RED
+    return _REFUND_PART.get(scene.rsplit('-', 1)[-1], scene)
 
 
 def push_extras(period, ledger, bills):
-    """货款结算以外的账户进出里，哪些可以随收款单列成扣款行（由会计勾选）。返回 [{key, name, amount(支出为正), count, locked, why}]。
-    各种「退款-…」按订单分成两堆：订单在金蝶没有红字的（退款不退货，收入一分没冲）合成一项，可以勾；
-    订单已经有红字的锁住不让勾——那笔退款金蝶已经用红字记过一次，再进费用就重复了。
-    净进账的项目也锁住：收款单不收负数行。"""
-    end = period_end(period)
-    red = {b['order'] for b in bills if b['order'] and b['amount'] < 0 and b['date'] <= end}
-    sums, counts = defaultdict(int), defaultdict(int)
+    """货款结算以外的账户进出里，哪些可以随收款单列成扣款行（由会计勾选）。返回 [{key, name, amount(支出为正), count, locked, why, tip}]。
+    各种「退款-…」见 refund_key。锁住不让勾的三种：订单已有红字的退款（红字已经记过一次，再进费用就重复）、
+    平台收回的补贴（冲的是收入，建红字应收，不进费用）、净进账的项目（收款单不收负数行）。"""
+    red = red_orders(period, bills)
+    sums, counts, orders = defaultdict(int), defaultdict(int), defaultdict(set)
     for r in ledger:
         if r['t'][:7] != period or r['scene'] == SETTLE: continue
         scene = r['scene'] or '未注明场景'
-        key = (REFUND_RED if r['order'] in red else REFUND_PLAIN) if scene.startswith('退款') else scene
+        key = refund_key(scene, r['order'], red) if scene.startswith('退款') else scene
         sums[key] -= int(round(r['amt'] * 100)); counts[key] += 1
+        if r['order']: orders[key].add(r['order'])
+    tips = {REFUND_PLAIN: '结算之后才退、订单在金蝶没有红字的：退给买家的钱，共 %d 个订单',
+            COUPON_BACK: '同样这些订单，平台跟着收回的优惠券（补贴），共 %d 个订单',
+            FEE_BACK: '同样这些订单，平台把之前扣的佣金退回来的钱，共 %d 个订单',
+            REFUND_RED: '账户流水里各种「退款-…」当中，订单在金蝶已经开了红字的那部分：共 %d 个订单'}
+    locks = {REFUND_RED: '这些订单金蝶已经开了红字，退款已经记过一次；再进费用就重复了，要和红字对应着处理',
+             COUPON_BACK: '平台收回的优惠券冲的是收入：建红字应收，不随收款单进费用（清单在 ②「要你处理的」里下载）'}
     out = []
     for key in sorted(sums, key=lambda k: -sums[k]):
-        why = ('这些订单金蝶已经开了红字，退款已经记过一次；再进费用就重复了，要和红字对应着处理' if key == REFUND_RED
-               else '这一项是净进账，收款单不收负数行' if sums[key] <= 0 else '')
-        out.append({'key': key, 'name': key, 'amount': sums[key] / 100, 'count': counts[key], 'locked': bool(why), 'why': why})
+        why = locks.get(key) or ('这一项是净进账，收款单不收负数行' if sums[key] <= 0 else '')
+        out.append({'key': key, 'name': key, 'amount': sums[key] / 100, 'count': counts[key], 'locked': bool(why), 'why': why,
+                    'tip': tips[key] % len(orders[key]) if key in tips else ''})
     return out
+
+
+def red_list(period, settle, ledger, bills, result, returns=None):
+    """退了款、但金蝶没有红字的订单，逐单拆成两个数：退给买家多少（按退款不退货处理）、平台收回补贴多少（建红字应收冲收入）。
+    金额以抖音为准：结算时就退的，退给买家＝结算行上的「订单退款」，补贴收回＝应收 − 结算应冲 − 退给买家；
+    结算后才退的，两个数直接取账户流水的「退用户」「退补贴」。旺店通登记的退款额只列出来对照。
+    返回 (正常的行, 另列的行)：订单已有红字、清单里没有蓝字、合单发货、旺店通没登记退款不退货、算出来补贴收回是负数的，单独列出不进合计。"""
+    cents = lambda v: int(round(v * 100))
+    red = red_orders(period, bills)
+    blue = defaultdict(list)
+    for b in result['bills']:
+        if b['order'] and b['amount'] > 0: blue[b['order']].append(b)
+    gross, refund = defaultdict(int), defaultdict(int)
+    for r in settle:
+        if r['scene'] == SETTLE and r['t'][:7] == period and r['order']: gross[r['order']] += cents(_gross(r)); refund[r['order']] += cents(-r['refund'])
+    after = defaultdict(lambda: defaultdict(int))
+    for r in ledger:
+        if r['t'][:7] == period and (r['scene'] or '').startswith('退款') and r['order']: after[r['order']][r['scene'].rsplit('-', 1)[-1]] += cents(r['amt'])
+    registered = returns_index(returns, period) if returns else {}
+    rows, special = [], []
+    for o in sorted({o for o, v in refund.items() if v > 0} | set(after)):
+        bs, a = blue.get(o, []), after.get(o)
+        ar = sum(cents(b['open']) for b in bs)
+        if a: kind, buyer, coupon, plat = '结算后才退', -a.get('退用户', 0), -a.get('退补贴', 0), gross[o] + a.get('退用户', 0) + a.get('退补贴', 0)
+        else: kind, buyer, plat = '结算时就退了', refund[o], gross[o]; coupon = ar - plat - buyer
+        why = ('订单在金蝶已有红字' if o in red else '结算时和结算后都有退款' if a and refund[o] > 0 else '未核销清单里没有这单的蓝字应收' if not bs and not a
+               else '合单发货，几个订单共用一张应收' if any(b.get('merged') for b in bs)
+               else '旺店通没登记退款不退货（可能是退货还在路上，红字会跟着退货入库自动出；确认是退款不退货后在旺店通登记、重传退换单）' if o not in registered
+               else '算出来的补贴收回是负数（两边差额比退款还小）' if coupon < 0 else '')
+        row = {'order': o, 'bills': [b['no'] for b in bs], 'date': min((b['date'] for b in bs), default=''), 'ar': ar / 100, 'plat': plat / 100, 'buyer': buyer / 100, 'coupon': coupon / 100,
+               'kind': kind, 'wdt': registered[o]['amt'] if o in registered else None, 'why': why}
+        (special if why else rows).append(row)
+    return rows, special
+
+
+def red_export(shop, period, rows, special):
+    """红字清单：每单一行（订单、应收单、应收、平台、退给买家、补贴收回），合计就是本月该建的红字；特殊单另起一页。"""
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font
+    wb = Workbook(write_only=True); bold = Font(bold=True)
+    def head(ws, values):
+        cells = []
+        for v in values:
+            c = WriteOnlyCell(ws, value=v); c.font = bold; cells.append(c)
+        ws.append(cells)
+    def sheet(title, lines, note, last):
+        ws = wb.create_sheet(title)
+        ws.column_dimensions['A'].width = 24; ws.column_dimensions['B'].width = 26
+        for col in 'CDEFGH': ws.column_dimensions[col].width = 14
+        ws.column_dimensions['I'].width = 44
+        ws.append([note])
+        head(ws, ['原始订单', '应收单号', '应收金额', '平台', '退给买家（退款不退货）', '补贴收回（建红字应收）', '旺店通登记的退款', '情况', last])
+        for x in lines:
+            wdt = x['wdt']; diff = wdt is not None and abs(wdt - x['buyer']) >= 0.005
+            ws.append([x['order'], ' '.join(x['bills']), x['ar'], x['plat'], x['buyer'], x['coupon'], wdt if wdt is not None else '没登记', x['kind'],
+                       x['why'] or ('旺店通登记的退款和抖音实际退的不一样，按抖音的算' if diff else '')])
+        return ws
+    ws = sheet('红字清单', rows, '%s · %s 退了款、金蝶没有红字的订单：退给买家的按退款不退货处理，平台收回的补贴建红字应收。应收 ＝ 平台 ＋ 退给买家 ＋ 补贴收回（结算后才退的，平台＝结算应冲 − 退给买家 − 补贴收回）' % (shop, period), '备注')
+    f = lambda key: round(math.fsum(x[key] for x in rows), 2)
+    ws.append(['合计 %d 单' % len(rows), '', f('ar'), f('plat'), f('buyer'), f('coupon')])
+    if special: sheet('另列（不进合计）', special, '这些订单也有退款，但不该由这张清单建红字：多数是金蝶已经有红字的（退货退款），其余每单写了原因', '为什么另列')
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
 
 
 def with_extras(period, lines, extras):

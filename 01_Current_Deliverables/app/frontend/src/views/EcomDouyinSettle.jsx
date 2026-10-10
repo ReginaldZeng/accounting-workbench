@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { requestJson, query, money, count, useResource } from './ecomWorkbenchApi.js'
 import { ChainRow } from './EcomOrderChain.jsx'
 
@@ -20,6 +21,7 @@ export default function EcomDouyinSettle({period,shop,shops,setShop,canEdit,revi
     return()=>clearTimeout(timer)
   },[goto,tab,list.loading])
   const flowRes=useResource(r&&flowScene?`${BASE}/flows?${query({period,shop,scene:flowScene,page:flowPage})}`:null,`${ar?.ts||''}:${flowTick}`,`flows:${period}:${shop}:${flowScene}`)
+  const reds=useResource(r?`${BASE}/red-list?${query({period,shop})}`:null,ar?.ts||'').data
   const lost=useResource(r&&showMissing?`${BASE}/missing?${query({period,shop})}`:null,ar?.ts||'')
   const sync=async()=>{try{setError('');const body=new FormData();body.append('period',period);body.append('shop',shop);await requestJson(`${BASE}/ar-refresh`,{method:'POST',body});notify?.('已发起金蝶只读查询，完成后自动更新。');setTick(v=>v+1)}catch(e){setError(e.message)}}
   const src=data?.sources||{},hasSettle=src.dy_settle>0,hasLedger=src.dy_ledger>0,hasOrders=src.dy_orders>0,hasPlatform=src.dy_platform>0
@@ -53,13 +55,14 @@ export default function EcomDouyinSettle({period,shop,shops,setShop,canEdit,revi
   return <>{bar}{notes}
     <div className="ew-closeout ew-open-cards ew-dy-cards">{r.categories.filter(c=>c.count||c.key!=='no_order').map(c=><button type="button" key={c.key} className={`ew-co${c.key==='ok'?' ew-co-primary':''}${cat===c.key?' on':''}`} onClick={()=>{setCat(cat===c.key?'':c.key);setPage(1);jump('dy-bills','todo')}}><span className="ew-co-lab">{c.label}</span><strong>¥ {money(c.amount)}</strong><small>{count(c.count)} 张应收 · {count(c.orders)} 单{c.key==='ok'&&held.count>0&&` · 其中 ${count(held.count)} 张系统不推`}</small></button>)}</div>
     <div className="ew-dy-tabs" role="tablist" aria-label="收款核销分三步看">{[['auto','①','系统替你做的',pushSub],['todo','②','要你处理的',todoCount?`${count(todoCount)} 张应收要看`:(miss.orders||others.length)?'有事项要看':'没有要人处理的'],['check','③','用来核对的','账户余额、本月进出']].map(([k,n,label,sub])=><button type="button" key={k} role="tab" aria-selected={tab===k} className={tab===k?'on':''} onClick={()=>setTab(k)}><b>{n}</b>{label}<small>{sub}</small></button>)}</div>
-    <div hidden={tab!=='auto'}><PushPanel period={period} shop={shop} canEdit={canEdit} stamp={ar?.ts||''} notify={notify} onPlan={setPlan}/></div>
+    <div hidden={tab!=='auto'}><PushPanel period={period} shop={shop} canEdit={canEdit} stamp={ar?.ts||''} notify={notify} onPlan={setPlan} onOrder={setProof} onJump={()=>jump('dy-flow','check')}/></div>
     <div hidden={tab!=='todo'}>
     <section className="ew-panel"><div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>事项</th><th className="ew-num">数量</th><th className="ew-num">金额</th><th>说明</th><th></th></tr></thead><tbody>
       {todo.map(([k,label,c,tip])=><tr key={k}><td><strong>{label}</strong></td><td className="ew-num">{count(c.count)} 张应收</td><td className="ew-num">{money(c.amount)}</td><td className="ew-issue">{tip}</td><td><button className="ew-link" onClick={()=>pick(k)}>{cat===k?'取消筛选':'看清单'}</button></td></tr>)}
       {miss.orders>0&&<tr><td><strong>钱结进来了，金蝶里没有应收</strong></td><td className="ew-num">{count(miss.orders)} 个订单</td><td className="ew-num">{money(miss.flow)}</td><td className="ew-issue">查旺店通有没有这单、应收为什么没开</td><td><button className="ew-link" onClick={()=>setShowMissing(v=>!v)}>{showMissing?'收起':'看订单'}</button></td></tr>}
       {others.length>0&&<tr><td><strong>货款结算以外的账户进出</strong></td><td className="ew-num">{others.length} 种</td><td className="ew-num">{money(d.other_total)}</td><td className="ew-issue">{others.slice(0,3).map(x=>x.name).join('、')}{others.length>3?' 等':''}；不在任何一张下推的收款单里，要另外入账</td><td><button className="ew-link" onClick={()=>jump('dy-flow','check')}>看明细</button></td></tr>}
-      {!todo.length&&!miss.orders&&!others.length&&<tr><td colSpan="5" className="ew-empty">没有要人处理的</td></tr>}
+      {reds?.count>0&&<tr><td><strong>退了款、金蝶没有红字</strong></td><td className="ew-num">{count(reds.count)} 个订单</td><td className="ew-num">{money(reds.coupon)}</td><td className="ew-issue">退给买家的 ¥ {money(reds.buyer)} 按退款不退货处理；平台跟着收回的补贴 ¥ {money(reds.coupon)} 要建红字应收（{count(reds.reds)} 单）。清单里每单两个数都算好了{reds.special>0&&`；另有 ${count(reds.special)} 单金蝶已有红字或情况不同，清单里另起一页，不进合计`}</td><td><button className="ew-link" onClick={()=>window.open(`${BASE}/red-list/export?${query({period,shop})}`,'_blank')}>下载清单</button></td></tr>}
+      {!todo.length&&!miss.orders&&!others.length&&!reds?.count&&<tr><td colSpan="5" className="ew-empty">没有要人处理的</td></tr>}
     </tbody></table></div>
       {showMissing&&<div id="dy-missing" className="ew-scroll" style={{maxHeight:260}}><table className="ew-open-table"><thead><tr><th>平台订单号</th><th className="ew-num">流水应冲额</th><th>情况<button className="ew-link" style={{float:'right'}} onClick={()=>setShowMissing(false)}>收起</button></th></tr></thead><tbody>{lost.data?.rows?.map(m=><tr key={m.order}><td><button className="ew-link" onClick={()=>setProof(m.order)}>{m.order}</button></td><td className="ew-num">{money(m.flow)}</td><td>{m.label}</td></tr>)}{!lost.data&&<tr><td colSpan="3" className="ew-empty">正在读取…</td></tr>}</tbody></table></div>}
     </section>
@@ -81,10 +84,12 @@ export default function EcomDouyinSettle({period,shop,shops,setShop,canEdit,revi
       <tr><td>抖音账户流水</td><td className="ew-num">{money(bal?.open)}</td><td className="ew-num">{money(bal?.net)}</td><td className="ew-num">{money(bal?.close)}</td><td>{bal?(bal.breaks?<span className="ew-open-red">余额链有 {bal.breaks} 处接不上，流水可能不全</span>:'余额逐笔接得上'):'—'}</td></tr>
       <tr><td>金蝶账面{book.account&&<small>{book.account}</small>}</td><td className="ew-num">{money(book.open)}</td><td className="ew-num">{book.error?'—':money((book.debit||0)-(book.credit||0))}</td><td className="ew-num">{money(book.close)}</td><td>{book.error||(!bal?'—':Math.abs(book.open-bal.open)>=0.005?<span className="ew-open-red">期初和流水差 {money(book.open-bal.open)}</span>:booked?(Math.abs(book.close-bal.close)<0.005?'期初、期末都和流水一致':<span className="ew-open-red">期末和流水差 {money(book.close-bal.close)}</span>):'期初和流水一致 · 本月还没入账')}</td></tr>
     </tbody></table></div></section>
-    <section className="ew-panel" id="dy-flow"><header><h2>{period} 账户进出汇总</h2><span className="ew-muted">用来和账户余额核对，不是收款单</span></header><div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>项目</th><th className="ew-num">金额</th><th>说明</th></tr></thead>
+    <section className="ew-panel" id="dy-flow"><header><h2>{period} 账户进出汇总</h2><span className="ew-muted">用来和账户余额核对，不是收款单</span></header>
+      {plan?.extras?.length>0&&<p className="ew-muted ew-padding" style={{paddingTop:10}}>货款结算以外的每一项前面有个勾：<b>勾上的会随收款单一起推</b>——到账那一行减掉这笔钱、另列一行扣款，收款单合计不变，金蝶账面余额就能和抖音流水对上。勾一次，以后每个月都照这样推；整月只随一张收款单推一次。各种「退款-…」按订单分成了两行：金蝶没红字的可以勾，已有红字的不能。</p>}<div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>项目</th><th className="ew-num">金额</th><th>说明</th></tr></thead>
       <tbody><tr><td>货款结算到账</td><td className="ew-num">{money(d.settle_cash)}</td><td>平台已扣完费用后进账户的钱 · {count(r.coverage.settled_orders)} 个订单</td></tr>
-        {others.map(x=><React.Fragment key={x.name}><tr className={flowScene===x.name?'ew-flow-open':undefined}><td>　{x.name}</td><td className={`ew-num ${x.amount>0?'ew-open-red':''}`}>{money(-x.amount)}</td><td className="ew-muted-num">{otherNote(x.name)}　<button className="ew-link" aria-expanded={flowScene===x.name} onClick={()=>{setFlowScene(flowScene===x.name?'':x.name);setFlowPage(1)}}>{flowScene===x.name?'收起明细':'看明细'}</button></td></tr>
+        {!plan?.extras?.length&&others.map(x=><React.Fragment key={x.name}><tr className={flowScene===x.name?'ew-flow-open':undefined}><td>　{x.name}</td><td className={`ew-num ${x.amount>0?'ew-open-red':''}`}>{money(-x.amount)}</td><td className="ew-muted-num">{otherNote(x.name)}　<button className="ew-link" aria-expanded={flowScene===x.name} onClick={()=>{setFlowScene(flowScene===x.name?'':x.name);setFlowPage(1)}}>{flowScene===x.name?'收起明细':'看明细'}</button></td></tr>
           {flowScene===x.name&&<tr className="ew-flow-detail"><td colSpan="3"><FlowDetail res={flowRes} setPage={p=>{setFlowPage(p);setFlowTick(v=>v+1)}} onOrder={setProof}/></td></tr>}</React.Fragment>)}</tbody>
+      <tbody id="dy-extras-slot"/>
       <tfoot><tr><td>本月账户净变动</td><td className="ew-num">{money(d.net)}</td><td>＝ 期末余额 − 期初余额{!d.from_ledger&&'（没有账户流水，按订单维度明细算）'}</td></tr></tfoot></table></div>
       <p className="ew-muted ew-padding" style={{paddingTop:12}}>结算时平台直接扣掉、不经过账户的费用共 ¥ {money(d.fee_total)}：{fees.map(x=>`${x.name} ${money(x.amount)}`).join('、')||'无'}。货款结算到账 + 这些费用 = 本月结算订单应冲的应收 ¥ {money(d.total-d.other_total)}，下面按两边对不对得上分开列。</p>
       <div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>本月结算的订单</th><th className="ew-num">订单数</th><th className="ew-num">流水应冲应收</th><th className="ew-num">金蝶挂着的应收</th><th className="ew-num">两边差</th></tr></thead>
@@ -215,10 +220,15 @@ function OrderProof({period,shop,shopName,order,onClose}) {
 }
 
 // 下推收款单到金蝶「暂存」：只挑最干净的应收，分批备好；保存、提交、审核都留给会计在金蝶里做
-function PushPanel({period,shop,canEdit,stamp,notify,onPlan}) {
+function PushPanel({period,shop,canEdit,stamp,notify,onPlan,onOrder,onJump}) {
   const [tick,setTick]=useState(0),[busy,setBusy]=useState(false),[error,setError]=useState(''),[mode,setMode]=useState(''),[size,setSize]=useState('')
   const res=useResource(`${BASE}/push/plan?${query({period,shop})}`,`${stamp}:${tick}`,`push:${period}:${shop}`),p=res.data
-  useEffect(()=>{setError('');setMode('');setSize('')},[period,shop])
+  useEffect(()=>{setError('');setMode('');setSize('');setFx('');setFxPage(1)},[period,shop])
+  // 勾选区里点「看明细」：这一项是哪几笔流水（和 ③ 账户进出汇总里点开看到的是同一份）
+  const [fx,setFx]=useState(''),[fxPage,setFxPage]=useState(1),[fxTick,setFxTick]=useState(0)
+  const [slot,setSlot]=useState(null)
+  useEffect(()=>{setSlot(document.getElementById('dy-extras-slot'))},[])          // ③ 账户进出汇总表里留的位置：勾选行画到那里去
+  const fxRes=useResource(fx?`${BASE}/flows?${query({period,shop,scene:fx,page:fxPage})}`:null,`${stamp}:${fxTick}`,`pushflows:${period}:${shop}:${fx}`)
   const running=!!p?.job?.running,leftCount=p?p.left.count:null,eligibleCount=p?p.eligible.count:null
   const extrasSig=JSON.stringify((p?.extras||[]).map(x=>[x.key,x.picked,x.carried]))
   useEffect(()=>{onPlan?.(leftCount==null?null:{left:leftCount,eligible:eligibleCount,extras:p?.extras||[]})},[leftCount,eligibleCount,extrasSig])   // 页签上那句「还剩多少张可下推」用
@@ -227,6 +237,7 @@ function PushPanel({period,shop,canEdit,stamp,notify,onPlan}) {
   const act=async(fn,done)=>{setBusy(true);setError('');try{const r=await fn();notify?.(done(r))}catch(e){setError(e.message)}finally{setBusy(false);setTick(v=>v+1)}}
   if(!p) return <section className="ew-panel"><header><h2>下推收款单到金蝶（暂存）</h2></header><p className="ew-empty">{res.error||'正在读取…'}</p></section>
   const b=p.batch,on=p.conf.mode==='on',lines=b.lines||[]
+  const pickedExtras=(p.extras||[]).filter(x=>x.picked)
   const rest=(p.extras||[]).filter(x=>!x.picked&&!x.carried)          // 没勾、也没随哪一批推过的：还要另外入账
   const run=()=>{if(!window.confirm(`把这一批 ${count(b.count)} 张应收（合计 ¥${money(b.total)}）下推成一张金蝶暂存收款单？\n\n只建暂存草稿，不保存、不提交、不审核。`))return
     act(()=>requestJson(`${BASE}/push/run`,form({period,shop,times:1})),()=>'已开始下推，在后台进行；这一块会自动刷新进度，可以离开页面。')}
@@ -247,14 +258,13 @@ function PushPanel({period,shop,canEdit,stamp,notify,onPlan}) {
         <button disabled={busy||(!mode&&!size)} onClick={save}>保存设置</button></>}
       {p.conf.by&&<span className="ew-muted">上次改动：{p.conf.by} · {p.conf.at}（对所有人、所有抖音店生效，每次改动都有记录）</span>}</div>
     {(error||p.problem||p.job.error)&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>{error||p.job.error||p.problem}</div>}
-    {p.extras?.length>0&&<div className="ew-extras">
-      <p className="ew-muted ew-padding" style={{paddingTop:10}}><b>随收款单一起推的账户支出</b>：勾上的，到账那一行减掉这笔钱、另列一行扣款，收款单合计不变，金蝶账面余额就能和抖音流水对上。勾一次，以后每个月都照这样推；整月只随一张收款单推一次。</p>
-      <div className="ew-scroll"><table className="ew-open-table"><thead><tr><th style={{width:44}}>随单推</th><th>项目</th><th className="ew-num">支出</th><th className="ew-num">笔数</th><th>现在的情况</th></tr></thead>
-        <tbody>{p.extras.map(x=><tr key={x.key} className={x.picked?'ew-row-push':undefined}><td><input type="checkbox" aria-label={`随收款单推：${x.name}`} checked={!!x.picked} disabled={!canEdit||busy||running||x.locked||!!x.carried} onChange={e=>pickExtra(x.key,e.target.checked)}/></td>
-          <td>{x.name}</td><td className="ew-num">{money(x.amount)}</td><td className="ew-num">{count(x.count)}</td>
-          <td className="ew-issue">{x.locked?x.why:x.carried?`已经随 ${x.carried} 那一批收款单推下去了（撤回那一批，它会回到待推）`:x.picked?(p.batch.extras?.some(e=>e.key===x.key)?'会随下一批收款单推下去':'已勾选，等一张到账够减的收款单'):'没勾：不进收款单，要另外入账'}</td></tr>)}</tbody></table></div>
-      {p.extras_short>0&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>勾选的支出合计 ¥ {money(p.extras_short)}，这一批的到账只有 ¥ {money(lines.find(l=>l.kind==='cash')?.amount)}，不够减，所以这一批不带。把「每批」张数调大再推，或者等后面到账够的批。</div>}
-    </div>}
+    {p.extras?.length>0&&<p className="ew-muted ew-padding" style={{paddingTop:10}}><b>随收款单一起推的账户支出</b>：{pickedExtras.length?`已勾 ${pickedExtras.length} 项，合计 ¥ ${money(pickedExtras.reduce((s,x)=>s+x.amount,0))}`:'还没有勾'}。在 ③「用来核对的」的账户进出汇总里勾选，那里每一项都能点开看明细。{onJump&&<> <button className="ew-link" onClick={onJump}>去勾选</button></>}</p>}
+    {p.extras_short>0&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>勾选的支出合计 ¥ {money(p.extras_short)}，这一批的到账只有 ¥ {money(lines.find(l=>l.kind==='cash')?.amount)}，不够减，所以这一批不带。把「每批」张数调大再推，或者等后面到账够的批。</div>}
+    {slot&&p.extras?.length>0&&createPortal(p.extras.map(x=><React.Fragment key={x.key}><tr className={fx===x.key?'ew-flow-open':x.picked?'ew-row-push':undefined}>
+      <td><label className="ew-extra-pick"><input type="checkbox" aria-label={`随收款单推：${x.name}`} checked={!!x.picked} disabled={!canEdit||busy||running||x.locked||!!x.carried} onChange={e=>pickExtra(x.key,e.target.checked)}/>{x.name}</label>{x.tip&&<small>{x.tip}</small>}</td>
+      <td className={`ew-num ${x.amount>0?'ew-open-red':''}`}>{money(-x.amount)}<small>{count(x.count)} 笔</small></td>
+      <td className="ew-issue">{x.locked?`不能勾：${x.why}`:x.carried?`已经随 ${x.carried} 那一批收款单推下去了（撤回那一批，它会回到待推）`:x.picked?(p.batch.extras?.some(e=>e.key===x.key)?'已勾：会随下一批收款单推下去':'已勾：等一张到账够减的收款单'):'没勾：不进收款单，要另外入账'}　<button className="ew-link" aria-expanded={fx===x.key} onClick={()=>{setFx(fx===x.key?'':x.key);setFxPage(1)}}>{fx===x.key?'收起明细':'看明细'}</button></td></tr>
+      {fx===x.key&&<tr className="ew-flow-detail"><td colSpan="3"><FlowDetail res={fxRes} setPage={n=>{setFxPage(n);setFxTick(v=>v+1)}} onOrder={onOrder}/></td></tr>}</React.Fragment>),slot)}
     {running&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>正在下推第 {p.job.batch} 批（已 {p.job.seconds} 秒）：{p.job.stage}。{p.job.done&&`前面已推成 ${p.job.done.batches} 批、${count(p.job.done.count)} 张。`}在后台进行，可以离开页面。</div>}
     {!running&&p.job.done&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>上一次下推完成：{p.job.done.batches>1&&`${p.job.done.batches} 批 · `}{count(p.job.done.count)} 张应收 · ¥ {money(p.job.done.total)} · 用时 {p.job.done.seconds} 秒（其中金蝶下推 {p.job.done.push_seconds} 秒）{p.job.done.receipts.length>1&&`，共 ${p.job.done.receipts.length} 张暂存收款单（${p.job.done.receipts.map(x=>count(x.count)+' 张').join(' + ')}），每张各自两边平`}。请到金蝶收款单列表按“暂存”查看。</div>}
     {p.orphans.length>0&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>金蝶里有 {p.orphans.length} 张接口账号建的暂存收款单没有登记在下面（多半是下推中途断掉留下的）：{p.orphans.map(x=><span key={x.fid} style={{marginRight:12}}>内码 {x.fid} · {x.at} <button disabled={!canEdit||busy} onClick={()=>undo(x)}>删掉</button></span>)}</div>}

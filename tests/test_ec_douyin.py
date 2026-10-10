@@ -413,7 +413,7 @@ class DouyinTests(unittest.TestCase):
         m.returns_notes(bills, index)
         note = {b['no']: b['rnote'] for b in bills}
         self.assertIn('登记了退款不退货 5.00（与商家协商一致退款）', note['B1'])
-        self.assertIn('要手工补红字 8.34', note['B1']); self.assertIn('含平台按比例收回的补贴', note['B1'])       # 该补的是两边差额，不是旺店通登记的 5.00
+        self.assertIn('两边差 8.34', note['B1']); self.assertIn('其余是平台收回的补贴，建红字应收', note['B1'])       # 该补的是两边差额，不是旺店通登记的 5.00
         self.assertIn('全额退了', note['B2']); self.assertIn('不会再结算', note['B2'])
         self.assertEqual(note['B3'], '旺店通 09-25 登记了退货 49.90（与商家协商一致退款）')                       # 货退回来了、红字也有了：只说登记了什么，不喊人补
         self.assertEqual((note['B3R'], note['B4'], note['B5']), ('', '', ''))
@@ -438,23 +438,50 @@ class DouyinTests(unittest.TestCase):
         O1, O2 = '6917945661848301051', '6917945661848301052'
         row = lambda i, scene, amt, order='': dict(id='L%d' % i, t='2026-09-1%d 10:00:00' % (i % 9), scene=scene, amt=amt, order=order, memo='', bal=0.0)
         ledger = [row(1, m.SETTLE, 500.0, O1), row(2, '退换货运费险', -2.0), row(3, '退换货运费险', -0.78), row(4, '充值千川账户', -50000.0),
+                  dict(row(5, '退款-订单退款触发-退补贴', -2.0, O1), id='L5b'),                                          # 平台收回的补贴：建红字应收，不能勾
                   row(5, '退款-结算后退款-退用户', -5.0, O1), row(6, '退款-订单退款触发-退分账', 0.1, O1),              # O1 金蝶没红字：退款不退货
                   row(7, '退款-结算后退款-退用户', -47.6, O2), row(8, '退款-订单退款触发-分账', 1.0, O2),                # O2 金蝶已有红字
                   row(9, '平台补贴返还', 3.0), dict(row(2, '退换货运费险', -9.0), t='2026-08-30 10:00:00')]           # 净进账；上个月的不算
         bills = [dict(no='B1', order=O1, amount=49.9, date='2026-09-01'), dict(no='B2', order=O2, amount=49.9, date='2026-09-01'), dict(no='R2', order=O2, amount=-49.9, date='2026-09-20')]
         got = {x['key']: x for x in m.push_extras('2026-09', ledger, bills)}
         self.assertEqual({k: (v['amount'], v['count'], v['locked']) for k, v in got.items()},
-                         {'充值千川账户': (50000.0, 1, False), '退换货运费险': (2.78, 2, False), m.REFUND_PLAIN: (4.9, 2, False), m.REFUND_RED: (46.6, 2, True), '平台补贴返还': (-3.0, 1, True)})
-        self.assertIn('红字', got[m.REFUND_RED]['why']); self.assertIn('负数行', got['平台补贴返还']['why'])
+                         {'充值千川账户': (50000.0, 1, False), '退换货运费险': (2.78, 2, False), m.REFUND_PLAIN: (5.0, 1, False), m.FEE_BACK: (-0.1, 1, True),
+                          m.COUPON_BACK: (2.0, 1, True), m.REFUND_RED: (46.6, 2, True), '平台补贴返还': (-3.0, 1, True)})   # 没红字的退款按这笔钱是什么拆开：只有退给买家的能勾
+        self.assertIn('红字', got[m.REFUND_RED]['why']); self.assertIn('负数行', got['平台补贴返还']['why']); self.assertIn('建红字应收', got[m.COUPON_BACK]['why'])
+        self.assertIn('共 1 个订单', got[m.REFUND_PLAIN]['tip']); self.assertEqual(got['退换货运费险']['tip'], '')
+        for key in (m.REFUND_PLAIN, m.REFUND_RED, m.COUPON_BACK, m.FEE_BACK):                                                                                # 点开看明细：就是组成这一行的那几笔流水
+            kind, rows = m.flow_rows('2026-09', ledger, [], [], key, {O1}, None, m.red_orders('2026-09', bills))
+            self.assertEqual((kind, round(-sum(r['amt'] for r in rows), 2), len(rows)), ('ledger', got[key]['amount'], got[key]['count']))
+        self.assertEqual([(r['id'], r['order'], r['known'], r['memo']) for r in m.flow_rows('2026-09', ledger, [], [], m.REFUND_PLAIN, {O1}, None, {O2})[1]],
+                         [('L5', O1, True, '退款-结算后退款-退用户')])
         lines = [dict(kind='cash', name='到账', amount=95.0, memo=''), dict(kind='fee', name='平台服务费', amount=4.8, memo='x')]
         new = m.with_extras('2026-09', lines, [got['退换货运费险'], got[m.REFUND_PLAIN]])
-        self.assertEqual([(l['kind'], l['amount']) for l in new], [('cash', 87.32), ('fee', 4.8), ('extra', 2.78), ('extra', 4.9)])     # 到账行减掉、各列一行
+        self.assertEqual([(l['kind'], l['amount']) for l in new], [('cash', 87.22), ('fee', 4.8), ('extra', 2.78), ('extra', 5.0)])     # 到账行减掉、各列一行
         self.assertEqual(round(sum(l['amount'] for l in new), 2), 99.8)                                                           # 合计不变
         self.assertEqual(new[2]['memo'], '2026年09月结算单扣款项 退换货运费险2.78元')
         self.assertEqual(lines[0]['amount'], 95.0)                                                                                # 不改原来的行
         self.assertIsNone(m.with_extras('2026-09', lines, [got['充值千川账户']]))                                                  # 到账不够减：这张单不带
         self.assertIsNone(m.with_extras('2026-09', lines, [dict(key='x', name='x', amount=95.0)]))                                 # 减完剩 0 也不行
         self.assertIsNone(m.with_extras('2026-09', lines, []))
+
+    def test_red_list_splits_each_refunded_order_into_buyer_refund_and_coupon_clawback(self):
+        A1, A2, A3, A4, A5, A6 = ('69170000000000000%02d' % i for i in range(1, 7))
+        srow = lambda i, o, amt, fee, refund: dict(id='S%d' % i, t='2026-09-15 10:00:00', scene=m.SETTLE, order=o, amt=amt, fees={'平台服务费': fee}, refund=refund)
+        settle = [srow(1, A1, 30.28, 0.62, -11.0), srow(2, A2, 48.9, 1.0, 0.0), srow(3, A3, 20.0, 0.0, -5.0), srow(4, A5, 9.0, 1.0, 0.0), srow(5, A4, 44.0, 0.9, -8.0), srow(6, A6, 40.0, 0.9, -5.0)]
+        lrow = lambda i, o, scene, amt: dict(id='L%d' % i, t='2026-09-20 10:00:00', scene=scene, order=o, amt=amt, memo='', bal=0.0)
+        ledger = [lrow(1, A2, '退款-结算后退款-退用户', -3.0), lrow(2, A2, '退款-订单退款触发-退补贴', -2.0), lrow(3, A2, '退款-订单退款触发-退分账', 0.1)]
+        bill = lambda no, o, amount, **kw: dict(dict(no=no, order=o, amount=amount, open=amount, date='2026-09-10', merged=0), **kw)
+        ar = [bill('B1', A1, 49.9), bill('B3', A3, 49.9), bill('R3', A3, -24.9), bill('B4', A4, 49.9), bill('B6', A6, 49.9)]                    # A2 的蓝字早收完了，不在未核销清单里；A3 已有红字；A4 差额比退款还小
+        rows, special = m.red_list('2026-09', settle, ledger, ar, {'bills': ar}, [dict(id='t%d' % i, tk='TK%d' % i, t='2026-09-12 10:00:00', order=o, amt=v, back=0, type='退款不退货', why='其他') for i, (o, v) in enumerate(((A1, 9.0), (A2, 3.0), (A4, 8.0)))])
+        self.assertEqual([(x['order'], x['kind'], x['ar'], x['plat'], x['buyer'], x['coupon'], x['wdt']) for x in rows],
+                         [(A1, '结算时就退了', 49.9, 30.9, 11.0, 8.0, 9.0), (A2, '结算后才退', 0.0, 44.9, 3.0, 2.0, 3.0)])     # 应收 ＝ 平台 ＋ 退给买家 ＋ 补贴收回；按抖音的 11.00 算，不按旺店通登记的 9.00
+        self.assertEqual([(x['order'], x['why'][:8]) for x in special], [(A3, '订单在金蝶已有红'), (A4, '算出来的补贴收回'), (A6, '旺店通没登记退款')])   # 没登记成退款不退货的不建红字：退货可能还在路上
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(m.red_export('抖音店', '2026-09', rows, special)))
+        got = [list(r) for r in wb['红字清单'].iter_rows(values_only=True)]
+        self.assertEqual(got[2][:8], [A1, 'B1', 49.9, 30.9, 11.0, 8.0, 9.0, '结算时就退了']); self.assertIn('按抖音的算', got[2][8])
+        self.assertEqual(got[-1][:6], ['合计 2 单', None, 49.9, 75.8, 14.0, 10.0])
+        self.assertEqual(len(list(wb['另列（不进合计）'].iter_rows(values_only=True))), 5)
 
     def test_password_zip_is_refused_with_plain_words(self):
         buf = io.BytesIO()
