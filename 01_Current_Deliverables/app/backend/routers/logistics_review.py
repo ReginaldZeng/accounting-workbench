@@ -5155,7 +5155,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                         elif k == "_kdsum":
                             val = x0.get("kd_sum") if (d0 and _cmpq) else None
                         elif k == "_diff":
-                            # 和别的单号合起来比的(同一笔调拨的调入单＋调出单)：差异拿合计的账单量算，不拿这一张自己的(V2.903)
+                            # 和别的单号合起来比的(同一笔调拨的调入单＋调出单)：差异拿合计的账单量算，不拿这一张自己的(V2.904)
                             _b = _xl_num(x0.get("doc_bill_all")) if x0.get("grp_others") else _xl_num(docv.get("bill_amt"))
                             _k = _xl_num(x0.get("kd_sum"))
                             val = round(_b - _k, 2) if (d0 and _cmpq and _b is not None and _k is not None) else None
