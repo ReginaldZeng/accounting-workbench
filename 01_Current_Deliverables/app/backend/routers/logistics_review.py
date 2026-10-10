@@ -2989,7 +2989,7 @@ def _box_docs(rsub, carrier):
             if _v1 > 0:
                 _vk = vol_kg or round(chg_wt / (billcnt * _v1), 2)
                 _vc = round(billcnt * _v1 * _vk, 2)
-                vol = {"dims": "%g×%g×%g" % (_vl, _vw, _vh), "k": _vk, "calc": _vc, "set": bool(vol_kg), "per": _v1 * _vk,      # per＝每件折多少千克(体积重)
+                vol = {"dims": "%g×%g×%g" % (_vl, _vw, _vh), "lwh": [_vl, _vw, _vh], "k": _vk, "calc": _vc, "set": bool(vol_kg), "per": _v1 * _vk,      # per＝每件折多少千克(体积重)
                        "ok": abs(_vc - chg_wt) <= max(0.05, 0.005 * chg_wt)}
                 # V2.895(用户 2026-10-10「我们是要用计费的那个来核对，比如极鲜达，是用计重来算，我们应该核对的是这个有没有错」)：
                 #   按体积计费的单默认就核计重——金蝶折成体积重和账单计重比(见下面 vol_wt)，不再默认改成比箱数。人工指定按箱数的仍听人的。
@@ -3235,6 +3235,17 @@ def _box_docs(rsub, carrier):
                 _swok = (wt_rng[0] - 1e-9 <= chg_wt / _sw <= wt_rng[1] + 1e-9) if (wt_rng and _sw) else bool(_sw and abs(chg_wt - _sw) <= max(1.0, 0.02 * _sw))
                 if _swok:
                     sugg = {"mode": "weight", "txt": "账单重量 %s 千克 对 金蝶 %s 千克，在允许范围内" % (_fmt_amt(chg_wt), _fmt_amt(round(_sw, 2)))}
+        # 这张单是拿什么比的、允许差多少(V2.897：导出的复核明细据此把核对量、差异、结论写成公式，人能在表里自己复算)
+        if vol_wt:
+            chk = {"kind": "vol", "lwh": vol["lwh"], "k": vol["k"], "tol": round(max(0.05, 0.005 * kd_sum), 4)}
+        elif pal_wt:
+            chk = {"kind": "pallet", "pal_box": pal_box, "pal_kg": pal_kg, "tol": round(max(0.05, 0.005 * kd_sum), 4)}
+        elif use_weight:
+            chk = {"kind": "weight", "rng": list(wt_rng) if wt_rng else None, "tol": round(max(1.0, 0.02 * kd_sum), 4)}
+        elif _rev == "qty":
+            chk = {"kind": "qty", "tol": round(lr.qty_tol(kd_sum, True), 4)}
+        else:
+            chk = {"kind": "box", "tol": 0.005 if pal_n else round(lr.qty_tol(kd_sum, True) if (fmode == "box" or vol) else max(1.0, 0.02 * kd_sum), 4)}
         if not d0:
             mode_cn, cnt_state = "无单据·账单调整", "na"   # 如托盘丢失扣款：只登记不核量
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
@@ -3246,7 +3257,7 @@ def _box_docs(rsub, carrier):
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
-                "suggest": sugg, "vol": vol, "mode_short": mode_short, "mode_tip": mode_tip, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
+                "suggest": sugg, "vol": vol, "chk": chk, "mode_short": mode_short, "mode_tip": mode_tip, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
                 "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
         kgbase = 0.0
@@ -4667,6 +4678,96 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     return ws
 
 
+# ---------- 复核明细：账单数链接原账单页、核对用公式算(V2.897) ----------
+# 用户 2026-10-11 看导出的复核明细：「这里可以加一个规格吗，还有账单数可以用公式链接原账单吗。还有复核的那个可以用公式算吗」。
+# 规矩：公式算出来的数必须和系统算的一样才写公式——写之前先在这边按同一个公式算一遍，对得上才写，对不上的照旧写数。
+_XL_AMT_H = ("总运费", "合计费用", "总金额", "含税金额", "金额合计", "费用合计", "总费用", "运费合计", "合计", "金额")
+_XL_WT_H = ("计重", "结算重量", "计费重量", "重量", "吨数(T)", "重量/吨", "重量/kg", "计费重量(kg)", "重量(kg)")
+_XL_QTY_H = ("总件数", "件数", "箱数", "数量", "计费数量", "计费板数", "板数")
+
+
+def _xl_norm(v):
+    return re.sub(r"\s+", "", str(v if v is not None else ""))
+
+
+def _xl_num(v):
+    if isinstance(v, bool) or v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def _xl_ref(title, row, col):
+    from openpyxl.utils import get_column_letter
+    return "'%s'!%s%d" % (str(title).replace("'", "''"), get_column_letter(col), row)
+
+
+def _xl_raw_maps(wb):
+    """导出里附的原账单页 → [{title, base(去掉「原账单-」), ws, hrow(表头行), hdr{表头: [列…]}, docrows{金蝶单号: [行…]}}]。"""
+    out = []
+    for ws in wb.worksheets:
+        if not ws.title.startswith("原账单-"):
+            continue
+        best, hrow = 0, 1
+        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=8, values_only=True), start=1):
+            n = sum(1 for v in row if isinstance(v, str) and v.strip())
+            if n > best:
+                best, hrow = n, i
+        hdr = {}
+        for j, v in enumerate(next(ws.iter_rows(min_row=hrow, max_row=hrow, values_only=True), ()), start=1):
+            if isinstance(v, str) and v.strip():
+                hdr.setdefault(_xl_norm(v), []).append(j)
+        dcol = next((cs[0] for h, cs in hdr.items() if "金蝶单" in h), None)
+        docrows = {}
+        if dcol:
+            for i, row in enumerate(ws.iter_rows(min_row=hrow + 1, min_col=dcol, max_col=dcol, values_only=True), start=hrow + 1):
+                for tok in re.split(r"[\s+、,，/]+", str(row[0] if row and row[0] is not None else "")):
+                    if tok:
+                        docrows.setdefault(tok, []).append(i)
+        out.append({"title": ws.title, "base": ws.title[4:], "ws": ws, "hrow": hrow, "hdr": hdr, "dcol": dcol, "docrows": docrows, "rowc": {}})
+    return out
+
+
+def _xl_find(maps, src_sheet, src_row, doc_no, target, heads, used, scales=(1.0,), fallback=True):
+    """在原账单页里找「这一行账单的这个数」在哪一格 → (页名, 行, 列, 倍数) / None。
+    行：解析时记了行号的用行号(原件原样附上，位置不变)，没记的按金蝶单号找；列：先按表头名，表头对不上再找这一行里唯一等于这个数的格子。
+    找到的格子里的数 × 倍数 必须等于 target(差 0.005 以内)，否则不算。used＝已经被别的账单行占用的 (页, 行)，同一张单几行账单时防止指到同一行。"""
+    if target is None or abs(target) < 1e-9:
+        return None
+    want = ("原账单-" + re.sub(r"[\\/*?:\[\]]", "_", str(src_sheet or "")))[:31]
+    for mp in maps:
+        if not (mp["title"] == want or mp["title"].startswith(want[:27])):
+            continue
+        ws = mp["ws"]
+        rows = []
+        if src_row and int(src_row) > mp["hrow"]:
+            rows.append(int(src_row))
+        rows += [i for i in mp["docrows"].get(str(doc_no or ""), []) if i not in rows]
+        for ri in rows:
+            if ri not in mp["rowc"]:        # 这一行的值只读一次(迅鸽几千张单、每张要找好几个数)
+                mp["rowc"][ri] = {c.column: c.value for c in ws[ri]}
+            rowv = mp["rowc"][ri]
+            if doc_no and mp["dcol"] and str(doc_no) not in str(rowv.get(mp["dcol"]) or ""):
+                continue                    # 行号对不上这张单(原件被改过)：不认
+            vals = [(_xl_num(v), cj) for cj, v in rowv.items()]
+            for h in heads:
+                for cj in mp["hdr"].get(_xl_norm(h), []):
+                    v = _xl_num(rowv.get(cj))
+                    for f in scales:
+                        if v is not None and abs(v * f - target) < 0.005 and (mp["title"], ri, cj) not in used:
+                            return mp["title"], ri, cj, f
+            if not heads or not fallback:      # 费用分项只按表头名认，不靠「这一行里正好有个相等的数」去猜
+                continue
+            hit = [(v, cj) for v, cj in vals if v is not None and abs(v - target) < 0.005]
+            if len(hit) == 1 and (mp["title"], ri, hit[0][1]) not in used:
+                return mp["title"], ri, hit[0][1], 1.0
+    return None
+
+
 @router.get("/api/logistics-review/export")
 def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     """导出该承运商本月复核结果 xlsx：费用项汇总 + 逐单/物料级复核明细（按重量承运商=物料级17列）。"""
@@ -4853,11 +4954,13 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             ("归属·计提", "5E6B78", "E7ECEF", False, [("费用主体", "subject"), ("承运商", "carrier"),
                 ("费用类型", "fee_item"), ("业务线", "bizline"), ("单据号", "doc_no")]),
             ("ERP·金蝶数据", "2E7D57", "DCEFE4", False, [("客户/仓库", "party"), ("物料编码", "code"),
-                ("物料名称", "name"), ("基本单位数量", "base_kg"), ("基本单位", "kg_unit"),
-                ("金蝶数量", "base_qty"), ("数量单位", "base_unit"), ("金蝶核对量", "kd"), ("销售额", "sales")]),
+                ("物料名称", "name"), ("规格", "spec"), ("基本单位数量", "base_kg"), ("基本单位", "kg_unit"),
+                ("金蝶数量", "base_qty"), ("数量单位", "base_unit"), ("每箱数量", "box_div"), ("折箱数", "box_n"),
+                ("金蝶核对量", "kd"), ("销售额", "sales")]),
             ("账单·%s原账单" % carrier, "B06A12", "FBF0DA", True, [("运输方式", "_cs")] +
                 [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费量", "_cw")]),
             ("复核数据", "B23B2E", "F8DDD8", False, [("账单量", "bill_amt"), ("账单单位", "bill_unit"),
+                ("金蝶核对量合计", "_kdsum"), ("★差异(账单−金蝶)", "_diff"), ("★公式复算", "_fchk"),
                 ("★计费方式", "mode_cn"), ("★换算系数", "conv"), ("运费(分摊)", "fee"),
                 ("单位运费(元/kg)", "unit_fee"), ("★费比", "ratio"), ("备注", "note"), ("已确认", "_ok")]),
         ]
@@ -4878,7 +4981,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             col += span
         # 单据级列(跨该单所有物料行合并单元格)；物料级列(客户/物料/数量/运费分摊/单位运费/费比/销售额)不合并
         _DOCLVL = {"subject", "carrier", "fee_item", "bizline", "doc_no", "_cs", "_amt", "_cw",
-                   "bill_amt", "bill_unit", "mode_cn", "conv", "note", "_ok"}
+                   "bill_amt", "bill_unit", "mode_cn", "conv", "note", "_ok", "_kdsum", "_diff", "_fchk"}
         def _is_doclvl(k):
             return k in _DOCLVL or k.startswith("_fee:")
         # V2.870(用户看恒茂导出「吨数*19.4对吗」)：一张单账单上拆了几行(恒茂按批次、极鲜达按车次)的，原来按单号并成一块——
@@ -4887,6 +4990,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         #   分摊运费/单位运费/费比按整单金额等比放大；备注里写明账单上是几行。逐行明细看后面附的原账单页。
         rownum = 3
         ranges = []
+        recs = []                 # 每张单一条：写公式、链接原账单用(V2.897)
+        _STATE_TXT = {"ok": "一致", "qtydiff": "数量不符", "miss": "金蝶查无", "price": "核价不符", "info": "", "na": "免核"}
         _byd, _ord = {}, []
         for x in res.get("docs") or []:
             k = x.get("doc_no") or ("#%s" % x.get("lid"))
@@ -4933,6 +5038,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                         sfd.setdefault(fk, fv)
             amt = (braw.get(x0.get("lid")) or (None, None, None, None))[2] if n == 1 else (round(amt, 6) if any(braw.get(y.get("lid")) for y in xs) else None)
             doc_start = rownum
+            # 这张单是不是「拿量比」出来的结论(包天包趟按价目核、打托/包车免核的不是)：是才写金蝶核对量合计和差异
+            _cmpq = x0.get("state") in ("ok", "qtydiff") and not x0.get("trip") and str(x0.get("bill_unit") or "") not in ("天", "趟") and same_unit
             for mi, r in enumerate(x0.get("materials") or [{}]):
                 firstdoc = (mi == 0)
                 col = 1
@@ -4951,6 +5058,13 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                             val = ("✓ %s %s" % (ok_["by"], ok_["at"])).strip() if ok_ else None
                         elif k.startswith("_fee:"):
                             val = sfd.get(k[5:])
+                        elif k == "_kdsum":
+                            val = x0.get("kd_sum") if (d0 and _cmpq) else None
+                        elif k == "_diff":
+                            _b, _k = _xl_num(docv.get("bill_amt")), _xl_num(x0.get("kd_sum"))
+                            val = round(_b - _k, 2) if (d0 and _cmpq and _b is not None and _k is not None) else None
+                        elif k == "_fchk":
+                            val = _STATE_TXT.get(x0.get("state"), "") if d0 else None
                         elif k in docv:
                             val = docv[k]
                         elif k == "fee" and mi in mfee:
@@ -4968,6 +5082,78 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                         col += 1
                 rownum += 1
             ranges.append((doc_start, rownum - 1))
+            recs.append({"s": doc_start, "e": rownum - 1, "x0": x0, "xs": xs, "n": n, "d0": d0})
+        # —— 核对用公式算(V2.897)：只给「一张单一行账单、状态是一致/数量不符」的写；每条公式写之前先按同一个算法算一遍，和系统的数对得上才写 ——
+        CL = {k: get_column_letter(ci) for k, ci in col_of_key.items()}
+        n_formula = 0
+        for rc in recs:
+            x0, s0, e0 = rc["x0"], rc["s"], rc["e"]
+            ck = x0.get("chk") or {}
+            ms = x0.get("materials") or []
+            if rc["n"] != 1 or not rc["d0"] or x0.get("state") not in ("ok", "qtydiff") or not ck or len(ms) != e0 - s0 + 1                     or x0.get("trip") or str(x0.get("bill_unit") or "") in ("天", "趟"):
+                continue
+            kind = ck.get("kind")
+            for i, m in enumerate(ms):
+                rr = s0 + i
+                bq, bd, bn, kd, bkg = _xl_num(m.get("base_qty")), _xl_num(m.get("box_div")), _xl_num(m.get("box_n")), _xl_num(m.get("kd")), _xl_num(m.get("base_kg"))
+                box_f = False
+                if bq and bd and bn is not None and abs(bq / bd - bn) < 0.006:          # 折箱数 ＝ 金蝶数量 ÷ 每箱数量
+                    ws2.cell(row=rr, column=col_of_key["box_n"], value='=IF(%s%d>0,ROUND(%s%d/%s%d,2),"")' % (CL["box_div"], rr, CL["base_qty"], rr, CL["box_div"], rr))
+                    box_f = True
+                    n_formula += 1
+                if kd is None:
+                    continue
+                if kind == "weight" and bkg is not None and abs(bkg - kd) < 0.006:      # 按重量：核对量＝基本单位数量(千克)
+                    ws2.cell(row=rr, column=col_of_key["kd"], value="=%s%d" % (CL["base_kg"], rr))
+                    n_formula += 1
+                elif kind in ("box",) and bn is not None and abs(bn - kd) < 0.006:      # 按箱数：核对量＝折箱数
+                    ws2.cell(row=rr, column=col_of_key["kd"], value="=%s%d" % (CL["box_n"], rr))
+                    n_formula += 1
+                elif kind == "vol" and bn is not None:                                  # 按体积：折箱数 × 长×宽×高(厘米)÷1000000 × 每方千克数
+                    l_, w_, h_ = ck["lwh"]
+                    if abs(round(bn * l_ * w_ * h_ / 1e6 * ck["k"], 2) - kd) < 0.011:
+                        ws2.cell(row=rr, column=col_of_key["kd"], value="=ROUND(%s%d*%g*%g*%g/1000000*%g,2)" % (CL["box_n"], rr, l_, w_, h_, ck["k"]))
+                        n_formula += 1
+            kds, bill = _xl_num(x0.get("kd_sum")), _xl_num(x0.get("bill_amt"))
+            rng_kd = "%s%d:%s%d" % (CL["kd"], s0, CL["kd"], e0)
+            rng_bn = "%s%d:%s%d" % (CL["box_n"], s0, CL["box_n"], e0)
+            bns = [_xl_num(m.get("box_n")) for m in ms]
+            f_sum = None
+            if kds is not None:
+                if kind == "pallet" and all(b is not None for b in bns) and ck.get("pal_box"):
+                    _h = sum(bns) / ck["pal_box"] * 2.0
+                    _tn = (int(_h) + (1 if _h - int(_h) > 1e-9 else 0)) / 2.0
+                    if abs(_tn * ck["pal_kg"] - kds) < 0.011:                            # 按托：折箱数合计 ÷ 每托箱数，不足半托按半托，× 每托千克数
+                        f_sum = "=CEILING(ROUND(SUM(%s)/%g,6),0.5)*%g" % (rng_bn, ck["pal_box"], ck["pal_kg"])
+                elif kind == "vol" and all(b is not None for b in bns):
+                    l_, w_, h_ = ck["lwh"]
+                    if abs(round(sum(bns) * l_ * w_ * h_ / 1e6 * ck["k"], 2) - kds) < 0.011:
+                        f_sum = "=ROUND(SUM(%s)*%g*%g*%g/1000000*%g,2)" % (rng_bn, l_, w_, h_, ck["k"])
+                elif abs(round(sum(_xl_num(m.get("kd")) or 0 for m in ms), 2) - kds) < 0.011:
+                    f_sum = "=ROUND(SUM(%s),2)" % rng_kd
+            if f_sum:
+                ws2.cell(row=s0, column=col_of_key["_kdsum"], value=f_sum)
+                n_formula += 1
+            if kds is None or bill is None:
+                continue
+            ws2.cell(row=s0, column=col_of_key["_diff"], value="=ROUND(%s%d-%s%d,2)" % (CL["bill_amt"], s0, CL["_kdsum"], s0))
+            n_formula += 1
+            cv = _xl_num(x0.get("conv"))
+            by_w = kind in ("weight", "vol", "pallet")
+            if cv is not None and kds and bill and abs(round((bill / kds) if by_w else (kds / bill), 3) - cv) < 0.0015:
+                a_, b_ = (CL["bill_amt"], CL["_kdsum"]) if by_w else (CL["_kdsum"], CL["bill_amt"])
+                ws2.cell(row=s0, column=col_of_key["conv"], value='=IF(%s%d<>0,ROUND(%s%d/%s%d,3),"")' % (b_, s0, a_, s0, b_, s0))
+                n_formula += 1
+            rg = ck.get("rng")
+            if kind == "weight" and rg:                                              # 配了毛重比范围的：看 账单÷金蝶 落不落在范围里
+                ok_f = rg[0] - 1e-9 <= (bill / kds if kds else 0) <= rg[1] + 1e-9
+                f_chk = '=IF(AND(%s%d>=%g,%s%d<=%g),"一致","数量不符")' % (CL["conv"], s0, rg[0], CL["conv"], s0, rg[1])
+            else:
+                ok_f = abs(bill - kds) <= float(ck.get("tol") or 0) + 1e-9
+                f_chk = '=IF(ABS(%s%d)<=%g,"一致","数量不符")' % (CL["_diff"], s0, float(ck.get("tol") or 0))
+            if ok_f == (x0.get("state") == "ok"):                                    # 公式的结论和系统的一样才写
+                ws2.cell(row=s0, column=col_of_key["_fchk"], value=f_chk)
+                n_formula += 1
         midv = Alignment(vertical="center")
         for s, e in ranges:
             if e <= s:
@@ -4977,8 +5163,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     _merge_fast(ws2, s, ci, e, ci)
                     ws2.cell(row=s, column=ci).alignment = midv
         ws2.freeze_panes = "F3"
-        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 11, 8, 9, 8, 11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
-                  [10, 8, 14, 9, 10, 12, 8, 16])
+        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 18, 11, 8, 9, 8, 9, 9, 11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
+                  [10, 8, 12, 12, 10, 14, 9, 10, 12, 8, 16])
         for i, w in enumerate(widths, 1):
             ws2.column_dimensions[get_column_letter(i)].width = w
     else:
@@ -5045,6 +5231,50 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 ws3.freeze_panes = "A2"
     if raw_files:
         _attach_raw_sheets(wb, raw_files)
+    # 账单数链接原账单页(V2.897)：复核明细里「账单」那几列和「账单量」，原账单页里找得到同一个数的，换成指过去的公式(点一下就跳到原账单那一格)
+    if res.get("material"):
+        try:
+            maps = _xl_raw_maps(wb)
+            if maps:
+                with db._engine.connect() as c:
+                    bsrc = {r[0]: (r[1], r[2], (r[3] or "").split("+")[0]) for r in c.execute(select(BL.c.id, BL.c.src_sheet, BL.c.src_row, BL.c.doc_no).where(
+                        (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()}
+                keys = [k for k in col_of_key if k in ("_amt", "_cw", "bill_amt") or k.startswith("_fee:")]
+                for rc in recs:
+                    metas = [bsrc.get(y.get("lid")) for y in rc["xs"]]
+                    if not rc["d0"] or not metas or any(not mt for mt in metas):
+                        continue
+                    for k in keys:
+                        cell = ws2.cell(row=rc["s"], column=col_of_key[k])
+                        tot = _xl_num(cell.value)
+                        if tot is None or isinstance(cell.value, str):
+                            continue
+                        heads = (_XL_AMT_H if k == "_amt" else _XL_WT_H if k == "_cw" else (_XL_WT_H + _XL_QTY_H if str(rc["x0"].get("bill_unit") or "") in ("千克", "kg") else _XL_QTY_H + _XL_WT_H)
+                                 if k == "bill_amt" else (k[5:],))
+                        scales = (1.0, 1000.0) if k in ("_cw", "bill_amt") else (1.0,)
+                        refs, used, acc = [], set(), 0.0
+                        for y, mt in zip(rc["xs"], metas):
+                            if len(rc["xs"]) == 1:
+                                tgt = tot
+                            else:           # 一张单几行账单：每行各找各的，合起来要等于这一格的数
+                                yb = braw.get(y.get("lid")) or (None, None, None, None)
+                                try:
+                                    ysf = json.loads(yb[1]) if yb[1] else {}
+                                except Exception:
+                                    ysf = {}
+                                tgt = _xl_num(yb[2] if k == "_amt" else yb[3] if k == "_cw" else y.get("bill_amt") if k == "bill_amt" else ysf.get(k[5:]))
+                            hit = _xl_find(maps, mt[0], mt[1], mt[2], tgt, heads, used, scales, fallback=not k.startswith("_fee:")) if tgt is not None else None
+                            if not hit:
+                                refs = None
+                                break
+                            used.add(hit[:3])
+                            acc += tgt
+                            refs.append(_xl_ref(hit[0], hit[1], hit[2]) + ("*%g" % hit[3] if hit[3] != 1.0 else ""))
+                        if refs and abs(acc - tot) < 0.006:
+                            cell.value = "=" + "+".join(refs)
+                            n_formula += 1
+        except Exception:
+            pass                  # 链接是锦上添花：出任何岔子都保留原来写的数，不让导出失败
     bio = BytesIO(); wb.save(bio)
     fn = "%s_%s_复核结果.xlsx" % (carrier, period)
     return Response(content=bio.getvalue(),
