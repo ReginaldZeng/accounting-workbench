@@ -415,7 +415,8 @@ def _push_conf():
     c = db.get_setting(PUSH_KEY, {}) or {}
     size = c.get('size') if isinstance(c.get('size'), int) and 1 <= c['size'] <= PUSH_MAX else 500
     return {'mode': c.get('mode') if c.get('mode') in PUSH_MODES else 'dry', 'size': size,
-            'base': str(c.get('base') or 'FYXM001.001产品销售002')}        # 扣款行上的费用项目：照 8 月抖音收款单填「电商」
+            'base': str(c.get('base') or 'FYXM001.001产品销售002'),        # 扣款行上的费用项目：照 8 月抖音收款单填「电商」
+            'by': str(c.get('by') or ''), 'at': str(c.get('at') or '')}    # 最后一次是谁、什么时候改的档位 / 每批张数
 
 
 def _push_log_path(period, shop):
@@ -511,7 +512,7 @@ def push_plan(request: Request, period: str, shop: str):
     batch = dict(plan['batch']); batch.pop('bills'); batch.pop('groups')
     fee_names = set(model.FEE_COLUMNS)
     other = [d for d in result['draft']['deductions'] if d['name'] not in fee_names]
-    return {'ok': True, 'conf': dict(conf_, mode_label=PUSH_MODES[conf_['mode']], max=PUSH_MAX), 'account': book.get('account', ''), 'can_admin': user.get('role') == 'admin',
+    return {'ok': True, 'conf': dict(conf_, mode_label=PUSH_MODES[conf_['mode']], max=PUSH_MAX), 'account': book.get('account', ''), 'can_admin': True,                       # 老前端用的字段：现在能不能改设置看的是上传 / 跑批权限，由页面按 canEdit 判断
             'eligible': plan['eligible'], 'pushed': plan['pushed'], 'left': plan['left'], 'batch': batch,
             'skipped': [dict(key=k, label=model.PUSH_SKIP[k], **v) for k, v in plan['skipped'].items() if v['count']],
             'other': {'lines': other, 'total': round(sum(d['amount'] for d in other), 2)},
@@ -523,18 +524,19 @@ def push_plan(request: Request, period: str, shop: str):
 
 @router.post('/push/mode')
 def push_mode(request: Request, mode: str = Form(''), size: int = Form(0)):
-    """改档位 / 每批张数。只有管理员能改；改动留痕。"""
+    """改档位 / 每批张数。有电商对账上传 / 跑批权限的人都能改（能点下推的人就能改）；每次改动留痕：谁、什么时候、从什么改成什么。"""
     user = require(request, write=True)
-    if user.get('role') != 'admin': raise HTTPException(403, '只有管理员能改下推档位')
-    c = _push_conf()
+    c = _push_conf(); before = '%s · 每批 %d 张' % (PUSH_MODES[c['mode']], c['size'])
     if mode:
         if mode not in PUSH_MODES: raise HTTPException(400, '档位不对')
         c['mode'] = mode
     if size:
         if not 1 <= size <= PUSH_MAX: raise HTTPException(400, '每批 1 到 %d 张' % PUSH_MAX)
         c['size'] = size
+    after = '%s · 每批 %d 张' % (PUSH_MODES[c['mode']], c['size'])
+    if after != before: c.update(by=user['name'], at=ec._now())
     db.set_setting(PUSH_KEY, c, operator=user['name'])
-    db.audit(user['name'], 'ec_douyin_push_mode', detail='%s · 每批 %d 张' % (PUSH_MODES[c['mode']], c['size']))
+    db.audit(user['name'], 'ec_douyin_push_mode', detail='%s → %s' % (before, after))
     return {'ok': True, 'conf': c}
 
 

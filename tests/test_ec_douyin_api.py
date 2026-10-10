@@ -50,7 +50,7 @@ class DouyinApiTests(unittest.TestCase):
         cls.db = db
         cls.role = ['admin']
         def require(request, permission):
-            if permission == 'ec_settle_upload' and cls.role[0] != 'admin': raise HTTPException(403, '测试权限拦截')
+            if permission == 'ec_settle_upload' and cls.role[0] not in ('admin', 'writer'): raise HTTPException(403, '测试权限拦截')   # writer＝有上传 / 跑批权限的普通账号
             return {'name': '测试会计', 'role': cls.role[0]}
         core = types.ModuleType('core'); core.db = db; core._require_perm = require; core.pull_token_ok = lambda request: False
         sys.modules['core'] = core
@@ -323,6 +323,20 @@ class DouyinApiTests(unittest.TestCase):
         d = get('order', order=P)
         self.assertEqual(([(r['tk'], r['amt'], r['back']) for r in d['returns']], d['rnote']), ([('TK1', 27.78, 0.0)], row['rnote']))
         self.assertEqual(get('order', order='6917926768823643799')['returns'], [])
+
+    def test_push_settings_open_to_anyone_who_may_push_and_every_change_is_recorded(self):
+        post = lambda **kw: self.client.post('/api/ec/douyin/push/mode', data=kw)
+        self.role[0] = 'viewer'
+        try: self.assertEqual(post(size=10).status_code, 403)                                     # 只能看的账号改不了
+        finally: self.role[0] = 'writer'
+        try:
+            r = post(mode='dry', size=10)                                                         # 有上传 / 跑批权限的普通账号（不是管理员）可以改
+            self.assertEqual((r.status_code, r.json()['conf']['mode'], r.json()['conf']['size'], r.json()['conf']['by']), (200, 'dry', 10, '测试会计'))
+            at = r.json()['conf']['at']; self.assertTrue(at)
+            self.assertEqual(post(size=10001).status_code, 400)                                   # 上限还是金蝶一张收款单能挂的行数
+            self.assertEqual(post(mode='dry', size=10).json()['conf']['at'], at)                  # 没改动不算一次改动
+        finally: self.role[0] = 'admin'
+        self.assertEqual(self.db.get_setting('ec_douyin_push')['by'], '测试会计')
 
     # ---- 抽屉里现查金蝶 ----
     def test_order_bills_only_asks_for_known_bills_caches_and_never_leaks_errors(self):

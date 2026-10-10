@@ -234,10 +234,11 @@ function PushPanel({period,shop,canEdit,stamp,notify,onPlan}) {
   return <section className="ew-panel"><header><h2>下推收款单到金蝶（暂存）</h2><span className="ew-muted">系统只把单子备到“暂存”；保存、提交、审核由会计在金蝶里做，审核时金蝶才核销</span></header>
     <div className="ew-result-status" style={{padding:'12px 18px 0'}}><span className={`ew-order-pill ${on?'ew-pill-ok':'ew-pill-wait'}`}>当前档位：{p.conf.mode_label}</span>
       <span>{p.conf.mode==='off'?'已关闭，不能下推。':p.conf.mode==='dry'?'演练：下面只是“如果真做会建什么单”，不会写金蝶。':'真做：点下推会在金蝶里建一张暂存收款单。'}</span>
-      {p.can_admin&&<><label style={{display:'flex',alignItems:'center',gap:6}}>档位<select aria-label="下推档位" value={mode||p.conf.mode} onChange={e=>setMode(e.target.value)}><option value="off">关</option><option value="dry">演练</option><option value="on">真做</option></select></label>
+      {canEdit&&<><label style={{display:'flex',alignItems:'center',gap:6}}>档位<select aria-label="下推档位" value={mode||p.conf.mode} onChange={e=>setMode(e.target.value)}><option value="off">关</option><option value="dry">演练</option><option value="on">真做</option></select></label>
         <label style={{display:'flex',alignItems:'center',gap:6}}>每批<input aria-label="每批张数" type="number" min="1" max={p.conf.max} style={{width:90}} value={size||p.conf.size} onChange={e=>setSize(e.target.value)}/>张</label>
         {p.left.count>0&&<button type="button" disabled={busy} title="金蝶一张收款单最多挂 10,000 行源单，所以每批最多 10,000 张" onClick={()=>setSize(String(Math.min(p.left.count,p.conf.max)))}>{p.left.count>p.conf.max?`最多（${count(p.conf.max)} 张）`:`全部（${count(p.left.count)} 张）`}</button>}
-        <button disabled={busy||(!mode&&!size)} onClick={save}>保存设置</button></>}</div>
+        <button disabled={busy||(!mode&&!size)} onClick={save}>保存设置</button></>}
+      {p.conf.by&&<span className="ew-muted">上次改动：{p.conf.by} · {p.conf.at}（对所有人、所有抖音店生效，每次改动都有记录）</span>}</div>
     {(error||p.problem||p.job.error)&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>{error||p.job.error||p.problem}</div>}
     {running&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>正在下推第 {p.job.batch} 批（已 {p.job.seconds} 秒）：{p.job.stage}。{p.job.done&&`前面已推成 ${p.job.done.batches} 批、${count(p.job.done.count)} 张。`}在后台进行，可以离开页面。</div>}
     {!running&&p.job.done&&<div className="ew-notice" role="status" style={{margin:'10px 18px'}}>上一次下推完成：{p.job.done.batches>1&&`${p.job.done.batches} 批 · `}{count(p.job.done.count)} 张应收 · ¥ {money(p.job.done.total)} · 用时 {p.job.done.seconds} 秒（其中金蝶下推 {p.job.done.push_seconds} 秒）{p.job.done.receipts.length>1&&`，共 ${p.job.done.receipts.length} 张暂存收款单（${p.job.done.receipts.map(x=>count(x.count)+' 张').join(' + ')}），每张各自两边平`}。请到金蝶收款单列表按“暂存”查看。</div>}
