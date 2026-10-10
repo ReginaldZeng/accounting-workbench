@@ -86,3 +86,6 @@ Thumbs.db
 .claude/worktrees/
 # 旧 .git 备份（迁移时把旧历史备份成 .git.bak_*，绝不能被加回新仓库）
 .git.bak*
+
+# 自动部署「准备重启」标记（V2.908，见 backend/busy.py）：部署脚本在服务器运行目录里临时放的，不进 git
+.deploy_draining

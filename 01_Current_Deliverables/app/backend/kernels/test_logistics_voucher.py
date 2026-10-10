@@ -377,5 +377,52 @@ class T(unittest.TestCase):
         self.assertEqual(V.plan([v], inv, carry={"999": [{"gross": -10.00}]})["per"]["386"]["mode"], "hx")     # 登记在别的凭证上的不影响这张
 
 
+class TestResume(unittest.TestCase):
+    """V2.908 做到一半接着做：样本＝2026-10-10 被重启掐断的那张(顺丰冷运·深圳星期九 622.00，付款单 FKD00008357)。"""
+    PAY = [{"acct": "2241.02", "dr": 622.00, "cr": 0, "sup_code": "物流运输服务011"}, {"acct": "1002.03", "dr": 0, "cr": 622.00, "sup_code": ""}]
+    ADD = [{"acct": "2221.01.06", "dr": 51.36, "cr": 0}, {"acct": "2221.01.07", "dr": 0, "cr": 51.36}]
+
+    def step(self, ents, status, add=None, sup="物流运输服务011"):
+        return V.resume_step(ents, status, self.ADD if add is None else add, 622.00, sup)[0]
+
+    def test_raw_voucher_gets_amended(self):
+        """金蝶刚出的原样两行、没提交 → 补分录。暂存(Z)和创建(A)都算没提交。"""
+        self.assertEqual(self.step(self.PAY, "A"), "amend")
+        self.assertEqual(self.step(self.PAY, "Z"), "amend")
+        self.assertEqual(self.step(self.PAY, "A", add=[]), "amend")           # 发票后补只做支付：没有要补的行，只改摘要
+
+    def test_already_amended_is_not_amended_twice(self):
+        """上次分录已经补进去了(补完没来得及记就断了)：绝不能再补一遍。"""
+        self.assertEqual(self.step(self.PAY + self.ADD, "A"), "submit")       # 还没提交 → 提交、落记录
+        self.assertEqual(self.step(self.PAY + self.ADD, "B"), "record")       # 也提交了 → 只落记录
+        self.assertEqual(self.step(self.PAY + self.ADD, "C"), "record")       # 连审核都过了 → 只落记录
+        self.assertEqual(self.step(list(reversed(self.PAY + self.ADD)), "A"), "submit")      # 和分录顺序无关
+
+    def test_same_amount_lines_are_counted_not_just_present(self):
+        """要补两行一样的(两张票同税额)，凭证里只有一行 → 不算补过。"""
+        two = [dict(self.ADD[0]), dict(self.ADD[0]), {"acct": "2221.01.07", "dr": 0, "cr": 102.72}]
+        self.assertEqual(self.step(self.PAY + two, "A", add=two), "submit")
+        self.assertEqual(self.step(self.PAY + two[1:], "A", add=two), "stop")
+
+    def test_stop_when_not_ours_to_touch(self):
+        self.assertEqual(self.step(self.PAY, "B"), "stop")                    # 原样就被人提交了：系统不改已提交的凭证
+        self.assertEqual(self.step(self.PAY, "C"), "stop")
+        self.assertEqual(self.step(self.PAY + self.ADD[:1], "A"), "stop")     # 只补了一半 / 有人改过
+        self.assertEqual(self.step(self.PAY + self.ADD + [{"acct": "6601", "dr": 1, "cr": 0}], "A"), "stop")     # 多了别的行
+        self.assertEqual(self.step(self.PAY, "A", sup="物流运输服务027"), "stop")       # 同一天同金额、别家的付款凭证
+        self.assertEqual(self.step([{"acct": "2241.02", "dr": 600.00, "cr": 0}, {"acct": "1002.03", "dr": 0, "cr": 600.00}], "A"), "stop")   # 金额不是这笔
+        self.assertEqual(self.step([], "A"), "stop")
+        self.assertIn("撤销提交", V.resume_step(self.PAY, "B", self.ADD, 622.00)[1])          # 告诉人下一步怎么办
+
+    def test_pay_only_submitted_is_recorded(self):
+        """发票后补只做支付、凭证已提交：内容本来就只有这两行 → 落记录，不去改已提交的凭证。"""
+        self.assertEqual(self.step(self.PAY, "B", add=[]), "record")
+
+    def test_supplier_unknown_does_not_block(self):
+        """凭证分录上没带供应商(科目不挂这个维度)：没法比，不因此拦。"""
+        pay = [dict(self.PAY[0], sup_code=""), self.PAY[1]]
+        self.assertEqual(self.step(pay, "A"), "amend")
+
+
 if __name__ == "__main__":
     unittest.main()

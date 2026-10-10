@@ -16,6 +16,7 @@ from fastapi import APIRouter, Request
 from sqlalchemy import select, text
 
 from core import JSONResponse, _require_perm, db
+import busy
 import kingdee_client as kc
 import todo_scenes
 from kernels import logistics_review_store as store
@@ -768,6 +769,9 @@ def _preview_data(inst, self_vno=None, _nest=False):
                 v["vno"], v["gross"], to, bid, to))
     dr, cr = LV.balance(lines)
     msgs = list(notes) + list(pl["msgs"])
+    half = (db.get_setting(_PENDING_KEY, None) or {}).get(inst)
+    if half and not posted_rec and not (_POST_LOCK.get(inst) and _POST_LOCK[inst].locked()):
+        msgs.insert(0, "上次「保存到金蝶」做到一半（付款单 %s 已由系统审核，凭证还没做完）：再点一次「保存到金蝶」，系统从断的地方接着做，不会重复审核、重复补分录" % (half.get("bill_no") or ""))
     if pl["status"] != "ok" and len(vouchers) > 1 and any("≠ 计提含税合计" in m for m in pl["msgs"]):
         msgs.append("几张计提各该改成多少，系统定不了：点「选择核销哪些计提」，给每张填「本次按多少」（默认红冲更正；特殊的可选部分核销并写说明）")
     if pi.get("voucher"):
@@ -1072,7 +1076,84 @@ def _kd_dims(l):
     return dd
 
 
+def _held(what, fn, *a):
+    """挂着「占线」牌子跑一段写金蝶的操作(V2.908，见 busy.py)。系统正准备重启时抛 busy.Draining，调用方把那句话原样告诉人。"""
+    with busy.hold(what):
+        return fn(*a)
+
+
 def _post(inst, user):
+    """保存到金蝶。整段挂「占线」牌子(V2.908，见 busy.py)：自动部署要重启后端时等它做完；系统正准备重启时不开始，告诉人过一分钟再点。"""
+    try:
+        with busy.hold("物流付款做账·保存到金蝶"):
+            return _post_run(inst, user)
+    except busy.Draining as e:
+        return {"ok": False, "msg": str(e), "draining": True}
+
+
+# V2.908 做到一半接着做：付款单是系统审核的、但凭证没补完(后端重启 / 金蝶没出凭证 / 补分录报错)，再点一次从断的地方接着做。
+#   原来付款单一旦「已审核」就一律拦住(「不去改别人生成的凭证」)，系统自己做到一半的也被拦，只能人工收尾。
+#   认「是系统审核的」两个依据：① 审核前先记一笔 _PENDING_KEY(先记后做，断在哪一步都认得)；② 留痕里有「系统审核付款单」这张单号
+#   (V2.908 之前断掉的单没有 ①，靠 ② 认)。别人审核的付款单照旧不碰。
+_PENDING_KEY = "logi_voucher_pending"       # {inst_id: {fid, bill_no, at, by}} 系统正要(或已经)审核付款单、凭证还没补完
+
+
+def _pending_set(inst, fid, bill_no, user):
+    p = dict(db.get_setting(_PENDING_KEY, None) or {})
+    p[inst] = {"fid": fid, "bill_no": bill_no, "at": _now(), "by": user}
+    db.set_setting(_PENDING_KEY, p, user)
+
+
+def _pending_clear(inst, user):
+    p = dict(db.get_setting(_PENDING_KEY, None) or {})
+    if p.pop(inst, None) is not None:
+        db.set_setting(_PENDING_KEY, p, user)
+
+
+def _we_audited(inst, fid, bill_no):
+    if str(((db.get_setting(_PENDING_KEY, None) or {}).get(inst) or {}).get("fid") or "") == str(fid):
+        return True
+    if not str(bill_no or "").strip():
+        return False
+    with db._engine.connect() as c:
+        return bool(c.execute(text("select 1 from audit_log where action=:a and target=:t limit 1"),
+                              {"a": "物流付款做账-系统审核付款单", "t": str(bill_no)}).first())
+
+
+_VE = [("FVOUCHERID", "id"), ("FVOUCHERGROUPNO", "号"), ("FDOCUMENTSTATUS", "状态"), ("FAccountID.FNumber", "科目"),
+       ("FDEBIT", "借"), ("FCREDIT", "贷"), ("FDetailID.FFLEX4.FNumber", "供应商码")]
+
+
+def _resume_find(s, conf, book, pb, sup_code):
+    """接着做时找这张付款单的付款凭证：同账簿、同付款日、贷 1002 = 付款金额、付款单审核之后生成的(不管谁点的生成、提交了没有)。
+    同一天同金额不止一张的，按往来单位认；还分不清就不猜。→ (凭证内码, 凭证号, 状态, [分录], 说明)，找不到/分不清时内码为 None。"""
+    from datetime import datetime as _dt, timedelta
+    try:
+        since = (_dt.strptime(str(pb.get("审核时间") or "")[:19], "%Y-%m-%dT%H:%M:%S") - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        since = str(pb["日期"])[:10] + " 00:00:00"
+    flt = ("FACCOUNTBOOKID.FName='" + book + "' and FDate='" + str(pb["日期"])[:10] + "' and FAccountID.FNumber like '1002%' and FCREDIT="
+           + ("%.2f" % float(pb["金额"])) + " and FCreateDate>='" + since + "'")
+    ids = sorted({r["id"] for r in kc._query(s, conf, "GL_VOUCHER", [("FVOUCHERID", "id")], flt)})
+    if not ids:
+        return None, "", "", [], ("付款单 %s 已经审核，但金蝶没有给它生成付款凭证（这个账簿可能没开「审核后自动生成凭证」）。"
+                                  "请在金蝶对这张付款单点「凭证生成」，生成后回来再点一次「保存到金蝶」，系统接着补分录" % pb["单号"])
+    rows = kc._query(s, conf, "GL_VOUCHER", _VE, "FVOUCHERID in (%s)" % ",".join(str(int(i)) for i in ids))
+    by = {}
+    for r in rows:
+        by.setdefault(r["id"], []).append(r)
+    if len(by) > 1:
+        mine = {i: rs for i, rs in by.items() if any(str(r.get("供应商码") or "") == str(sup_code) for r in rs)}
+        if len(mine) != 1:
+            return None, "", "", [], "金蝶里同一天、同金额的付款凭证有 %d 张（%s），系统分不清哪张是付款单 %s 的，没动，请人工处理" % (
+                len(by), "、".join("记-%s" % rs[0]["号"] for rs in by.values()), pb["单号"])
+        by = mine
+    vid, rs = next(iter(by.items()))
+    ents = [{"acct": r["科目"], "dr": r["借"], "cr": r["贷"], "sup_code": r.get("供应商码") or ""} for r in rs]
+    return vid, str(rs[0]["号"] or ""), str(rs[0]["状态"] or ""), ents, ""
+
+
+def _post_run(inst, user):
     from datetime import datetime as _dt, timedelta
     _ACC_CACHE.clear(); _BANK_CACHE.clear(); _REV_CACHE.clear()      # 真要写金蝶了：不用缓存，计提、付款单、红冲情况都现读(V2.876)
     d, code = _preview_data(inst)
@@ -1089,13 +1170,31 @@ def _post(inst, user):
         return {"ok": False, "msg": "没有金蝶付款单（或付款已经记过支付凭证），这一版只支持从付款单出凭证"}
     fid = int(req["bill_id"])
     s, conf = kc.login()
-    F = [("FBillNo", "单号"), ("FDOCUMENTSTATUS", "状态"), ("FPAYTOTALAMOUNTFOR", "金额"), ("FCONTACTUNIT.FNumber", "码"), ("FDate", "日期")]
+    F = [("FBillNo", "单号"), ("FDOCUMENTSTATUS", "状态"), ("FPAYTOTALAMOUNTFOR", "金额"), ("FCONTACTUNIT.FNumber", "码"), ("FDate", "日期"),
+         ("FAPPROVEDATE", "审核时间")]
     pb = (kc._query(s, conf, "AP_PAYBILL", F, "FID=%d" % fid) or [None])[0]
     if not pb or pb["码"] != req["code"] or abs(float(pb["金额"] or 0) - float(req["amount"] or 0)) >= 0.01:
         return {"ok": False, "msg": "金蝶付款单和请款单对不上（供应商或金额），没动"}
     steps = []
     if pb["状态"] == "C":
-        return {"ok": False, "msg": "付款单 %s 已经被人审核过，金蝶已出过凭证；这一版不去改别人生成的凭证，请人工处理" % pb["单号"]}
+        if not _we_audited(inst, fid, pb["单号"]):
+            return {"ok": False, "msg": "付款单 %s 已经被人审核过，金蝶已出过凭证；这一版不去改别人生成的凭证，请人工处理" % pb["单号"]}
+        # 是系统自己审核的、上次没做完(V2.908)：不再审核，找到那张付款凭证接着做
+        steps.append("付款单 %s 上次已经由系统审核，这次接着做" % pb["单号"])
+        vid, vno, vst, qents, why = _resume_find(s, conf, req["subject_full"], pb, req["code"])
+        if not vid:
+            return {"ok": False, "msg": why, "steps": steps}
+        pend = (db.get_setting(_PENDING_KEY, None) or {}).get(inst) or {}
+        if str(pend.get("vid") or "") == str(vid) and isinstance(pend.get("add"), list) and isinstance(pend.get("rec"), dict):
+            # 上次已经走到「补分录」那一步：拿当时发给金蝶的那几行去对，在里面了就不再补，只把没做完的(提交、落记录)做完
+            act, why = LV.resume_step(qents, vst, [{"acct": a, "dr": x, "cr": y} for a, x, y in pend["add"]], pb["金额"], req["code"])
+            if act == "stop":
+                return {"ok": False, "msg": "付款凭证 记-%s：%s" % (vno, why), "steps": steps, "vno": vno}
+            if act in ("submit", "record"):
+                steps.append("凭证 记-%s 上次已经补好分录（%d 行），这次没有重复补" % (vno, len(pend["add"])))
+                return _post_finish(inst, user, req, pb, fid, vid, vno, s, conf, steps, pend["rec"], len(pend["add"]),
+                                    submit=(act == "submit"), resumed=True, xbook_hint=bool(pend.get("xbook")))
+        return _post_amend(inst, user, req, pb, fid, vid, s, conf, steps, found=(vst, qents))
     if pb["状态"] == "Z" or not str(pb["单号"] or "").strip():
         e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["AP_PAYBILL", json.dumps({"IsDeleteEntry": False, "Model": {"FID": fid}})]).json())
         if e:
@@ -1108,8 +1207,10 @@ def _post(inst, user):
             return {"ok": False, "msg": "付款单提交失败：" + e, "steps": steps}
         steps.append("付款单提交")
     t0 = _dt.now() - timedelta(seconds=30)
+    _pending_set(inst, fid, pb["单号"], user)           # 先记后做(V2.908)：审核发出去之后断在哪一步，再点都认得是系统审核的、能接着做
     e = _kd_ok(kc._post(s, conf, _AUDIT_SVC, ["AP_PAYBILL", json.dumps({"Ids": str(fid)})]).json())
     if e:
+        _pending_clear(inst, user)                      # 金蝶明确说没审核成：不算做到一半
         return {"ok": False, "msg": "付款单审核失败：" + e, "steps": steps}
     steps.append("付款单审核 %s" % pb["单号"])
     db.audit(user, "物流付款做账-系统审核付款单", pb["单号"], "%s %s %.2f" % (req["subject"], req["payee"], float(req["amount"] or 0)))
@@ -1125,17 +1226,25 @@ def _post(inst, user):
             vid = rows[-1]["id"]
             break
     if not vid:
-        return {"ok": False, "msg": "付款单已审核，但 30 秒内没等到金蝶生成付款凭证，请到金蝶看一下", "steps": steps}
+        return {"ok": False, "msg": "付款单 %s 已审核，但 30 秒内没等到金蝶生成付款凭证。过一会儿再点一次「保存到金蝶」，系统接着做；"
+                                    "一直没有的话，请在金蝶对这张付款单点「凭证生成」后再点" % pb["单号"], "steps": steps}
+    return _post_amend(inst, user, req, pb, fid, vid, s, conf, steps)
+
+
+def _post_amend(inst, user, req, pb, fid, vid, s, conf, steps, found=None):
+    """往金蝶出的付款凭证里补红冲/更正/核销分录、改支付摘要，然后提交、落记录。
+    found＝(凭证状态, [分录])：接着做时从金蝶读到的这张凭证现状(V2.908)；刚审核完、金蝶新出的那张不传。"""
+    book = req["subject_full"]
     m = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
     ents = [x for x in m.get("GL_VOUCHERENTRY") or [] if x.get("FACCOUNTID") and x.get("Id")]
     vno = str(m.get("VOUCHERGROUPNO") or "")
-    if m.get("DocumentStatus") not in ("A", "Z") or len(ents) != 2:
-        return {"ok": False, "msg": "金蝶付款凭证 记-%s 状态/分录不是预期(状态 %s，%d 行)，没动" % (vno, m.get("DocumentStatus"), len(ents)), "steps": steps}
     # 有了凭证号，核销摘要里引用本凭证的 □ 直接填上
     d2, _ = _preview_data(inst, self_vno=vno)
     lines = d2["voucher"]["lines"]
     add = [l for l in lines if l["block"] in ("红冲", "更正", "核销")]
-    pay_expl = next(l["expl"] for l in lines if l["block"] == "支付")
+    pay_expl = next((l["expl"] for l in lines if l["block"] == "支付"), None)
+    if d2["plan"]["status"] != "ok" or pay_expl is None:
+        return {"ok": False, "msg": "付款单 %s 已审核、凭证 记-%s 已生成，但重新算分录时计提和发票对不上了，没补，请人工处理" % (pb["单号"], vno), "steps": steps, "vno": vno}
     new = []
     for l in add:
         x = dict(_KD_BASE, FEXPLANATION=l["expl"], FACCOUNTID={"FNumber": l["acct"]}, FDEBIT=l["dr"], FCREDIT=l["cr"])
@@ -1143,48 +1252,77 @@ def _post(inst, user):
         if dd:
             x["FDetailID"] = dd
         new.append(x)
-    body = {"IsDeleteEntry": False, "NeedUpDateFields": ["FEntity", "FEXPLANATION", "FACCOUNTID", "FDEBIT", "FCREDIT", "FDetailID",
-                                                         "FCURRENCYID", "FEXCHANGERATETYPE", "FEXCHANGERATE"],
-            "Model": {"FVOUCHERID": vid, "FEntity": new + [{"FEntryID": x["Id"], "FEXPLANATION": pay_expl} for x in ents]}}
-    e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["GL_VOUCHER", json.dumps(body, ensure_ascii=False)]).json())
-    if e:
-        return {"ok": False, "msg": "付款单已审核、凭证 记-%s 已生成，但补分录失败：%s（凭证还是金蝶原样，可人工补）" % (vno, e), "steps": steps, "vno": vno}
-    # 补完分录就提交凭证(用户 2026-10-02：公司凭证做完都提交，进审核人的待审列表；审核仍留给人)
-    sub_err = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["GL_VOUCHER", json.dumps({"Ids": str(vid)})]).json())
-    m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
-    rec = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book, "at": _now(), "by": user,
-           "tax_later": d2["plan"].get("pay_only") == "later",     # 发票后补：只做了支付，暂估税还没转(发票到了要补第三笔)
-           "xout": d2.get("xout") or [],                     # 顺带红冲的「记错主体」计提(V2.862)：做完账再看这张、补打更正单时按这个出
-           "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
-           "carry_out": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "out"],     # 这张按正确金额重提、没进费用的「多收待扣回」(V2.896)：扣回那个月据此才加回
-           "carry_in": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "in"],
-           "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2,
-           "submitted": not sub_err, "submit_err": sub_err, "status": m2.get("DocumentStatus")}
+    rec0 = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book,
+            "tax_later": d2["plan"].get("pay_only") == "later",     # 发票后补：只做了支付，暂估税还没转(发票到了要补第三笔)
+            "xout": d2.get("xout") or [],                     # 顺带红冲的「记错主体」计提(V2.862)：做完账再看这张、补打更正单时按这个出
+            "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
+            "carry_out": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "out"],     # 这张按正确金额重提、没进费用的「多收待扣回」(V2.896)：扣回那个月据此才加回
+            "carry_in": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "in"]}
     # 这张凭证合进了复核台登记的哪几笔计提更正（与 _preview_data 同口径：只算挂在这次用到的计提凭证上的）
     try:
         used = {a["vno"] for a in d2.get("accruals") or [] if not a.get("from")}      # 别的主体拿过来补提的(V2.798)不算：凭证号是那边账簿的
-        rec["fix_ids"] = [x["id"] for k, v in _fixes(req.get("carrier"), req.get("period"), req.get("subject")).items()
-                          if k in used for x in v if x.get("id")]
+        rec0["fix_ids"] = [x["id"] for k, v in _fixes(req.get("carrier"), req.get("period"), req.get("subject")).items()
+                           if k in used for x in v if x.get("id")]
     except Exception:
-        rec["fix_ids"] = []          # 凭证已经写进金蝶了，下面的落记录绝不能被这一步拦住
+        rec0["fix_ids"] = []         # 这一步出错不能拦住后面的写入和落记录
+    act = "amend"
+    if found:
+        act, why = LV.resume_step(found[1], found[0], [{"acct": l["acct"], "dr": l["dr"], "cr": l["cr"]} for l in add], pb["金额"], req["code"])
+        if act == "stop":
+            return {"ok": False, "msg": "付款凭证 记-%s：%s" % (vno, why), "steps": steps, "vno": vno}
+        if act != "amend":
+            steps.append("凭证 记-%s 里已经有要补的分录（%d 行），这次没有重复补" % (vno, len(new)))
+    if act == "amend":
+        if m.get("DocumentStatus") not in ("A", "Z") or len(ents) != 2:
+            return {"ok": False, "msg": "金蝶付款凭证 记-%s 状态/分录不是预期(状态 %s，%d 行)，没动" % (vno, m.get("DocumentStatus"), len(ents)), "steps": steps}
+        # 先记下这次要发给金蝶的分录(V2.908)：发出去之后、落记录之前断了，再点时拿它去对，在里面了就不重复补
+        p = dict(db.get_setting(_PENDING_KEY, None) or {})
+        p[inst] = {"fid": fid, "bill_no": pb["单号"], "at": _now(), "by": user, "vid": vid, "vno": vno,
+                   "add": [[l["acct"], l["dr"], l["cr"]] for l in add], "rec": rec0, "xbook": bool(d2.get("xbook"))}
+        db.set_setting(_PENDING_KEY, p, user)
+        body = {"IsDeleteEntry": False, "NeedUpDateFields": ["FEntity", "FEXPLANATION", "FACCOUNTID", "FDEBIT", "FCREDIT", "FDetailID",
+                                                             "FCURRENCYID", "FEXCHANGERATETYPE", "FEXCHANGERATE"],
+                "Model": {"FVOUCHERID": vid, "FEntity": new + [{"FEntryID": x["Id"], "FEXPLANATION": pay_expl} for x in ents]}}
+        e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["GL_VOUCHER", json.dumps(body, ensure_ascii=False)]).json())
+        if e:
+            return {"ok": False, "msg": "付款单已审核、凭证 记-%s 已生成，但补分录失败：%s（凭证还是金蝶原样；问题解决后再点一次「保存到金蝶」可以接着补，也可以人工补）" % (vno, e),
+                    "steps": steps, "vno": vno}
+        steps.append("凭证 记-%s 补 %d 行、改支付摘要" % (vno, len(new)))
+    return _post_finish(inst, user, req, pb, fid, vid, vno, s, conf, steps, rec0, len(new), submit=(act != "record"), resumed=bool(found), d2=d2)
+
+
+def _post_finish(inst, user, req, pb, fid, vid, vno, s, conf, steps, rec0, n_new, submit=True, resumed=False, d2=None, xbook_hint=False):
+    """分录已经在凭证里了：提交凭证 → 系统落记录(已做账) → 首页待办、主体更正的红冲。rec0＝补分录前算好的那部分记录。"""
+    book = req["subject_full"]
+    # 补完分录就提交凭证(用户 2026-10-02：公司凭证做完都提交，进审核人的待审列表；审核仍留给人)
+    sub_err = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["GL_VOUCHER", json.dumps({"Ids": str(vid)})]).json()) if submit else ""
+    m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
+    rec = dict(rec0, at=_now(), by=user, dr=m2.get("DEBITTOTAL"), cr=m2.get("FCREDITTOTAL"), lines=n_new + 2,
+               submitted=not sub_err, submit_err=sub_err, status=m2.get("DocumentStatus"))
     posted = dict(db.get_setting(_POSTED_KEY, None) or {})
     posted[inst] = rec
     db.set_setting(_POSTED_KEY, posted, user)
     with db._engine.begin() as c:
         c.execute(text("update logistics_payreq set kd_paid=:v where inst_id=:i"), {"v": "%s|C|%s" % (str(pb["日期"])[:10], fid), "i": inst})
-    db.audit(user, "物流付款做账-写入金蝶凭证", "记-%s" % vno, "%s 付款单 %s；补 %d 行；借 %s 贷 %s" % (book, pb["单号"], len(new), rec["dr"], rec["cr"]))
-    steps.append("凭证 记-%s 补 %d 行、改支付摘要" % (vno, len(new)))
-    steps.append("凭证已提交，等人审核" if not sub_err else "凭证提交失败：%s（凭证已保存，可在金蝶手动提交）" % sub_err)
+    _pending_clear(inst, user)
+    db.audit(user, "物流付款做账-写入金蝶凭证", "记-%s" % vno, "%s 付款单 %s；补 %d 行；借 %s 贷 %s%s" % (
+        book, pb["单号"], n_new, rec["dr"], rec["cr"], "；上次做到一半，这次接着做完" if resumed else ""))
+    if submit:
+        steps.append("凭证已提交，等人审核" if not sub_err else "凭证提交失败：%s（凭证已保存，可在金蝶手动提交）" % sub_err)
+    else:
+        steps.append("凭证之前已经提交过，这次只补了系统里的做账记录")
     # 首页待办区：提交成功 → 给付款凭证审核人记一笔；没提交上 → 挂回做账人。合进凭证的计提更正顺带销账。失败只留痕，不拦。
     todo_scenes.voucher_touch(inst, rec, req, user)
     todo_scenes.fix_touch(req.get("carrier"), req.get("period"), user)
-    if d2.get("xbook"):                        # 主体更正：到原主体账簿建红冲凭证(本主体这张已经写好了，那边建不成只提醒、可重试，不回滚)
+    if d2 and d2.get("xbook"):                 # 主体更正：到原主体账簿建红冲凭证(本主体这张已经写好了，那边建不成只提醒、可重试，不回滚)
         for x in d2["xbook"]:
             db.audit(user, "物流付款做账-主体更正", "记-%s" % vno, "%s 记-%s %.2f 补提到 %s" % (x["short"], x["vno"], x["gross"], req["subject"]))
         try:
             steps.extend(_post_xred(inst, user, d2, s, conf))
         except Exception as e:
             steps.append("⚠ 原主体的红冲凭证没建成：%s（本张已写好；可在预览里点「补做红冲」重试）" % str(e)[:160])
+    elif xbook_hint:
+        steps.append("⚠ 这张还要在原主体账簿建红冲凭证：请在预览里点「补做红冲」")
     return {"ok": True, "vno": vno, "bill_no": pb["单号"], "steps": steps, "dr": rec["dr"], "cr": rec["cr"]}
 
 
@@ -1414,6 +1552,8 @@ def auto_round(trigger="定时"):
                     res = {"ok": False, "msg": "写金蝶出错：%s" % str(e)[:200]}
                 finally:
                     lk.release()
+                if res.get("draining"):          # 系统正准备重启(V2.908)：这一张没开始，剩下的也不做了，下一轮再来；不算失败
+                    break
                 it["done"] = bool(res.get("ok"))
                 it["vno"] = res.get("vno") or ""
                 it["msg"] = " → ".join(res.get("steps") or []) if res.get("ok") else (res.get("msg") or "")
@@ -2049,7 +2189,7 @@ async def fee_post(request: Request):
         return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
     try:
         from starlette.concurrency import run_in_threadpool
-        r = await run_in_threadpool(_fee_post, inst, b, u["name"])
+        r = await run_in_threadpool(_held, "物流付款做账·生成费用凭证", _fee_post, inst, b, u["name"])
     except Exception as e:
         r = {"ok": False, "msg": "费用凭证没生成：%s" % str(e)[:220]}
     finally:
@@ -2143,7 +2283,7 @@ async def post_later(request: Request):
         return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
     try:
         from starlette.concurrency import run_in_threadpool
-        r = {"ok": True, "steps": await run_in_threadpool(_post_later, inst, u["name"])}
+        r = {"ok": True, "steps": await run_in_threadpool(_held, "物流付款做账·暂估转待认证凭证", _post_later, inst, u["name"])}
     except Exception as e:
         r = {"ok": False, "msg": "暂估转待认证凭证没建成：%s" % str(e)[:200]}
     finally:
@@ -2165,7 +2305,7 @@ async def post_xred(request: Request):
         return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
     try:
         from starlette.concurrency import run_in_threadpool
-        steps = await run_in_threadpool(_post_xred, inst, u["name"])
+        steps = await run_in_threadpool(_held, "物流付款做账·原主体红冲凭证", _post_xred, inst, u["name"])
         r = {"ok": True, "steps": steps}
     except Exception as e:
         r = {"ok": False, "msg": "红冲凭证没建成：%s" % str(e)[:200]}

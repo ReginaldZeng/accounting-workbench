@@ -495,3 +495,42 @@ def balance(lines):
     dr = r2(sum(l["dr"] for l in lines))
     cr = r2(sum(l["cr"] for l in lines))
     return dr, cr
+
+
+# ---------- 做到一半接着做（V2.908）----------
+# 起因(2026-10-10)：「保存到金蝶」是一串动作——审核付款单 → 等金蝶出付款凭证 → 往里补分录 → 提交 → 系统落记录。
+# 中间断了(后端重启、金蝶一时没出凭证、补分录报错)，付款单已经是「已审核」，原来再点只会被拦住、只能人工收尾。
+# 现在再点一次就接着做：先看金蝶里那张付款凭证现在是什么样，再决定从哪一步接。这里只做判断，不连金蝶。
+def resume_step(ents, status, add, amount, sup_code=""):
+    """→ (动作, 说明)。
+    ents＝凭证现有分录 [{acct, dr, cr, sup_code}]；status＝凭证单据状态(Z 暂存 / A 创建 / B 审核中 / C 已审核 / D 重新审核)；
+    add＝系统要补的分录 [{acct, dr, cr}]；amount＝付款金额；sup_code＝请款单的供应商编码。
+      amend   还是金蝶出的原样两行(贷银行存款＝付款金额)，没提交 → 补分录、提交、落记录
+      submit  系统要补的分录已经都在里面(上次补完没来得及记)，还没提交 → 提交、落记录
+      record  分录都在、也提交了 → 只落记录
+      stop    别的情况(往来单位不对、原样就被提交了、有人改过) → 不动，交给人"""
+    from collections import Counter
+
+    def key(e):
+        return (str(e.get("acct") or ""), r2(e.get("dr")), r2(e.get("cr")))
+
+    def raw(c):          # 是不是金蝶出的原样两行：一行贷银行存款＝付款金额，另一行借方同额
+        ks, amt = list(c.elements()), r2(amount)
+        bank = any(a.startswith("1002") and abs(cr - amt) < 0.005 for a, _dr, cr in ks)
+        other = any(not a.startswith("1002") and abs(dr - amt) < 0.005 for a, dr, _cr in ks)
+        return len(ks) == 2 and bank and other
+
+    sups = {str(e.get("sup_code") or "") for e in ents} - {""}
+    if sup_code and sups and str(sup_code) not in sups:
+        return "stop", "这张凭证的往来单位不是这张请款单的供应商，系统没动"
+    have, want = Counter(key(e) for e in ents), Counter(key(e) for e in add)
+    open_ = str(status or "") in ("A", "Z")
+    if raw(have):
+        if open_:
+            return "amend", ""
+        if not want:
+            return "record", "凭证已经提交过，摘要没有再改"
+        return "stop", "这张凭证已经提交（或审核）了，但里面还没有核销分录。系统不改已经提交的凭证：请在金蝶把它撤销提交（已审核的先反审核），再点一次"
+    if want and not (want - have) and raw(have - want):
+        return ("submit", "") if open_ else ("record", "")
+    return "stop", "这张凭证里的分录和系统要补的对不上（可能有人改过），系统没动，请人工处理"

@@ -730,9 +730,12 @@ def _bank_accounts():
 # ---------------- 通用 ----------------
 @app.get("/api/health")
 def health():
+    import busy
+    b = busy.snapshot()        # 占线登记(V2.908)：正在写金蝶时 busy=true，自动部署脚本等它变 false 再重启
     return {"ok": True, "period": _period_str(), "source": CFG["source"],
             "conf": kc.conf_path() or "(未找到 conf.ini)", "db": db.backend_info(),
-            "version": _compute_version_info()}
+            "version": _compute_version_info(),
+            "busy": b["busy"], "busy_what": b["what"], "draining": b["draining"]}
 
 
 @app.get("/api/config")
