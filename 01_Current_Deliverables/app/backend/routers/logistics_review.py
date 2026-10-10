@@ -2914,7 +2914,7 @@ def _box_docs(rsub, carrier):
             if _v1 > 0:
                 _vk = vol_kg or round(chg_wt / (billcnt * _v1), 2)
                 _vc = round(billcnt * _v1 * _vk, 2)
-                vol = {"dims": "%g×%g×%g" % (_vl, _vw, _vh), "k": _vk, "calc": _vc, "set": bool(vol_kg),
+                vol = {"dims": "%g×%g×%g" % (_vl, _vw, _vh), "k": _vk, "calc": _vc, "set": bool(vol_kg), "per": _v1 * _vk,      # per＝每件折多少千克(体积重)
                        "ok": abs(_vc - chg_wt) <= max(0.05, 0.005 * chg_wt)}
                 if not fmode:
                     use_weight = False
@@ -2938,7 +2938,7 @@ def _box_docs(rsub, carrier):
                 use_weight, pal_n = False, round(chg_wt / pal_kg, 2)
             else:
                 pal_note = " · 计费重量像按托(%s 托)，但箱数对不上：账单 %s 件、金蝶 %s 箱" % (_fmt_amt(chg_wt / pal_kg), _fmt_amt(billcnt), _fmt_amt(round(_bx, 2)))
-        kda, pack_used, packs_of, kall = None, {}, None, None
+        kda, pack_used, packs_of, kall, vol_wt = None, {}, None, None, None
         box_txt, mode_short, mode_tip = "", "", ""      # 金蝶箱数是怎么折出来的(逐个物料)；结论的短写法和悬停说明(V2.890)
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
@@ -2953,13 +2953,42 @@ def _box_docs(rsub, carrier):
             if wt_from_qty:
                 mode_cn += "（%s）" % wt_from_qty
             mode_cn += pal_note
-            if wt_rng and kd_sum:
+            # V2.892(用户看 XSCKD219281 按重量核「这种是不是涉及换算啊，比如41箱子，用箱规，乘上规格，再乘以333.33的换算系数」)：
+            #   按体积计费的单按重量核时，账单的计重是体积重，金蝶那边也要折成体积重才能比——金蝶出库数量 ÷ 箱规 ＝ 箱数，× 每件体积 × 每方千克数。
+            #   每种物料都折得出箱才这样比；有折不出的仍比净重并写明。
+            vol_wt = None
+            if vol and lines:
+                _vb = []
+                for m in lines:
+                    _br = _box_div(m)
+                    try:
+                        _vb.append((float(m.get("数量件") or 0) / _br) if _br else None)
+                    except (TypeError, ValueError):
+                        _vb.append(None)
+                if all(x for x in _vb):
+                    _net = kd_sum
+                    per = [x * vol["per"] for x in _vb]
+                    kd_sum = round(sum(per), 2)
+                    vol_wt = {"boxes": round(sum(_vb), 2), "net": _net,
+                              "txt": "；".join("%s %s%s ÷ %s ＝ %s 箱" % (str(m.get("名称") or "")[:12], _fmt_amt(float(m.get("数量件") or 0)), m.get("计价单位") or m.get("基本单位") or "",
+                                                                    _fmt_amt(_box_div(m)), _fmt_amt(round(x, 2))) for m, x in zip(lines[:10], _vb[:10])) + ("；…" if len(lines) > 10 else "")}
+                    mode_cn = "按体积重核"
+                else:
+                    mode_cn += " · 有物料没有箱规，金蝶折不成体积重，仍拿净重比"
+            if vol_wt:
+                cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(0.05, 0.005 * kd_sum)) else "qtydiff"      # 两边同一把尺子，箱数相等就该分毫不差
+            elif wt_rng and kd_sum:
                 cnt_state = "ok" if wt_rng[0] - 1e-9 <= wbase / kd_sum <= wt_rng[1] + 1e-9 else "qtydiff"
             else:
                 cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
             conv = round(wbase / kd_sum, 3) if kd_sum else None   # 按重量：换算系数=账单重量÷金蝶重量(毛重比)
-            mkq = lambda m: (float(m.get("基本数量") or 0) if ("千克" in str(m.get("基本单位") or "")) else None)
-            mku = lambda m: m.get("基本单位")
+            if vol_wt:
+                _vq = {id(m): round(x, 2) for m, x in zip(lines, per)}
+                mkq = lambda m: _vq.get(id(m))                    # 物料行的核对量＝这个物料折出来的体积重
+                mku = lambda m: "千克"
+            else:
+                mkq = lambda m: (float(m.get("基本数量") or 0) if ("千克" in str(m.get("基本单位") or "")) else None)
+                mku = lambda m: m.get("基本单位")
         elif _rev == "qty":
             # 快递 → 按件数核：金蝶件数=货品数量件之和(剔包装)，比账单件数
             per = []
@@ -3071,7 +3100,12 @@ def _box_docs(rsub, carrier):
                     cnt_state = "qtydiff"
             # 页面上只写短的一句，算式和箱数怎么折出来的放悬停(V2.890，用户「改悬停，还有这个是怎么来的」)；mode_cn 仍是全句(导出用)
             _vs = "按体积计费" + ("" if vol["ok"] else "，计重复算对不上")
-            if fmode:
+            if vol_wt:      # 人工指定按重量核、金蝶折成了体积重
+                _d = round(chg_wt - kd_sum, 2)
+                _cmp = "账单 %s 千克、金蝶折 %s 千克，%s" % (_fmt_amt(chg_wt), _fmt_amt(kd_sum), "一致" if cnt_state == "ok" else "差 %s%s 千克" % ("+" if _d > 0 else "", _fmt_amt(_d)))
+                mode_short = "按体积重核：" + _cmp + fnote
+                mode_cn = _vt + " · 金蝶 %s 箱 × 每件 %s 千克 ＝ %s 千克 · %s" % (_fmt_amt(vol_wt["boxes"]), "%g" % round(vol["per"], 3), _fmt_amt(kd_sum), _cmp)
+            elif fmode:
                 mode_short = mode_cn + " · " + _vs + fnote
                 mode_cn += " · " + _vt
             else:
@@ -3080,8 +3114,16 @@ def _box_docs(rsub, carrier):
                 mode_short = _vs + " · 按箱数核" + (_tail or "，一致")
                 mode_cn = _vt + " · 按箱数核" + _tail
             mode_tip = "账单计重怎么来的：" + _vt.replace("按体积计费：", "")
-            if box_txt and not use_weight:
+            _pk = "%g" % round(vol["per"], 3)          # 每件折多少千克，留三位(3.876)，免得人拿两位小数去乘对不上
+            if vol_wt:
+                mode_tip += "\n金蝶 %s 千克怎么来的：先把出库数量折成箱（数量 ÷ 规格里的每箱数量）——%s；合计 %s 箱 × 每件 %s 千克（%s 厘米 × 每方 %s 千克）＝ %s 千克。金蝶净重是 %s 千克，和体积重不是一回事，不拿来比。" % (
+                    _fmt_amt(kd_sum), vol_wt["txt"], _fmt_amt(vol_wt["boxes"]), _pk, vol["dims"], _fmt_amt(vol["k"]), _fmt_amt(kd_sum), _fmt_amt(vol_wt["net"]))
+            elif box_txt and not use_weight:
                 mode_tip += "\n金蝶 %s 箱怎么来的（金蝶出库数量 ÷ 规格里的每箱数量）：%s" % (_fmt_amt(kd_sum), box_txt)
+                if kd_sum:
+                    _kw2 = round(kd_sum * vol["per"], 2)
+                    mode_tip += "\n折成重量看：金蝶 %s 箱 × 每件 %s 千克 ＝ %s 千克，账单 %s 千克%s" % (
+                        _fmt_amt(kd_sum), _pk, _fmt_amt(_kw2), _fmt_amt(chg_wt), "，一致" if abs(_kw2 - chg_wt) <= max(0.05, 0.005 * _kw2) else "，差 %s 千克" % _fmt_amt(round(chg_wt - _kw2, 2)))
         if fnote:
             mode_cn += fnote
         # 建议核对方式(V2.887，用户 2026-10-09「能不能出一个建议核对方式呢」)：现在这种比法对不上、换另一种比法正好对得上的，给个建议和理由；
