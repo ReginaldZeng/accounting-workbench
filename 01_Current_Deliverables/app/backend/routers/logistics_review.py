@@ -579,6 +579,31 @@ def _save_raw_bill(carrier, period, src, data, operator, origin, fname):
         pass
 
 
+_RAW_SAME = {}          # {(承运商, 账期, 附件sha, 账单行数, 账单合计): 是不是同一份}——同一份附件对同一批账单行只验一次
+
+
+def _same_bill(carrier, period, sha, data):
+    """这份附件是不是库里这批账单行的来源(V2.899)：按取数说明重新解析一遍，明细行的 来源页·行号·金额 和库里的逐行一样才算。只读。"""
+    with db._engine.connect() as c:
+        have = sorted((r[0] or "", int(r[1] or 0), round(float(r[2] or 0), 2)) for r in c.execute(select(BL.c.src_sheet, BL.c.src_row, BL.c.amount).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all())
+    if not have:
+        return False
+    k = (carrier, period, sha, len(have), round(sum(x[2] for x in have), 2))
+    if k not in _RAW_SAME:
+        ok = False
+        try:
+            spec = _load_spec(carrier)
+            if spec and spec.get("sheets"):
+                spec["period"] = period
+                got = sorted((r.get("src_sheet") or "", int(r.get("src_row") or 0), round(float(r.get("amount") or 0), 2)) for r in intake.parse_bill(spec, data).get("detail") or [])
+                ok = got == have
+        except Exception:
+            ok = False
+        _RAW_SAME[k] = ok
+    return _RAW_SAME[k]
+
+
 def _raw_bill_files(carrier, period):
     """这家这月的账单原件 → [(文件名, bytes)]。先取导入时存下的(V2.843 起)；之前导的没存，退回钉钉请款单里已导入的那份账单附件(按内容去重)。只读。"""
     out, seen = [], set()
@@ -600,6 +625,20 @@ def _raw_bill_files(carrier, period):
                     ((PRT.c.excluded.is_(None)) | (PRT.c.excluded == ""))).order_by(PFT.c.id)).all():
                 if data and sha not in seen:
                     seen.add(sha); out.append((n or "", bytes(data)))
+    except Exception:
+        pass
+    if out:
+        return out
+    # V2.899(用户看恒茂导出没有原账单页「恒茂的有办法吗」)：账单是早先手工上传的(那时不存原件)，请款单又没走「自动导入」——
+    #   请款单里带的那份账单附件，只要按取数说明重新解析出来和库里的账单行逐行一样，就是同一份，照样当原件附上。
+    try:
+        with db._engine.connect() as c:
+            cand = c.execute(select(PFT.c.name, PFT.c.sha256, PFT.c.data).select_from(PFT.join(PRT, PRT.c.inst_id == PFT.c.inst_id)).where(
+                (PRT.c.carrier == carrier) & (PRT.c.period == period) & (PFT.c.role == "bill") &
+                ((PRT.c.excluded.is_(None)) | (PRT.c.excluded == ""))).order_by(PFT.c.id)).all()
+        for n, sha, data in cand:
+            if data and sha not in seen and _same_bill(carrier, period, sha, bytes(data)):
+                seen.add(sha); out.append((n or "", bytes(data)))
     except Exception:
         pass
     return out
@@ -4751,8 +4790,9 @@ def _xl_find(maps, src_sheet, src_row, doc_no, target, heads, used, scales=(1.0,
             if ri not in mp["rowc"]:        # 这一行的值只读一次(迅鸽几千张单、每张要找好几个数)
                 mp["rowc"][ri] = {c.column: c.value for c in ws[ri]}
             rowv = mp["rowc"][ri]
-            if doc_no and mp["dcol"] and str(doc_no) not in str(rowv.get(mp["dcol"]) or ""):
-                continue                    # 行号对不上这张单(原件被改过)：不认
+            _dv = str(rowv.get(mp["dcol"]) or "").strip() if mp["dcol"] else ""
+            if doc_no and mp["dcol"] and str(doc_no) not in _dv and not (ri == (int(src_row) if src_row else None) and not _dv):
+                continue                    # 这一行写的是别的单号(原件被改过)：不认。单号格是空的(只写在首行、下面沿用)且行号是解析时记下的：认
             vals = [(_xl_num(v), cj) for cj, v in rowv.items()]
             for h in heads:
                 for cj in mp["hdr"].get(_xl_norm(h), []):
@@ -5039,7 +5079,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             amt = (braw.get(x0.get("lid")) or (None, None, None, None))[2] if n == 1 else (round(amt, 6) if any(braw.get(y.get("lid")) for y in xs) else None)
             doc_start = rownum
             # 这张单是不是「拿量比」出来的结论(包天包趟按价目核、打托/包车免核的不是)：是才写金蝶核对量合计和差异
-            _cmpq = x0.get("state") in ("ok", "qtydiff") and not x0.get("trip") and str(x0.get("bill_unit") or "") not in ("天", "趟") and same_unit
+            _cmpq = x0.get("state") in ("ok", "qtydiff") and not str(x0.get("mode_cn") or "").startswith("包天包趟") and str(x0.get("bill_unit") or "") not in ("天", "趟") and same_unit
             for mi, r in enumerate(x0.get("materials") or [{}]):
                 firstdoc = (mi == 0)
                 col = 1
@@ -5082,7 +5122,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                         col += 1
                 rownum += 1
             ranges.append((doc_start, rownum - 1))
-            recs.append({"s": doc_start, "e": rownum - 1, "x0": x0, "xs": xs, "n": n, "d0": d0})
+            recs.append({"s": doc_start, "e": rownum - 1, "x0": x0, "xs": xs, "n": n, "d0": d0,
+                         "uni": same_unit and len({(y.get("chk") or {}).get("kind") for y in xs}) == 1 and len({y.get("state") for y in xs}) == 1})
         # —— 核对用公式算(V2.898)：只给「一张单一行账单、状态是一致/数量不符」的写；每条公式写之前先按同一个算法算一遍，和系统的数对得上才写 ——
         CL = {k: get_column_letter(ci) for k, ci in col_of_key.items()}
         n_formula = 0
@@ -5090,7 +5131,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             x0, s0, e0 = rc["x0"], rc["s"], rc["e"]
             ck = x0.get("chk") or {}
             ms = x0.get("materials") or []
-            if rc["n"] != 1 or not rc["d0"] or x0.get("state") not in ("ok", "qtydiff") or not ck or len(ms) != e0 - s0 + 1                     or x0.get("trip") or str(x0.get("bill_unit") or "") in ("天", "趟"):
+            if not rc["uni"] or not rc["d0"] or x0.get("state") not in ("ok", "qtydiff") or not ck or len(ms) != e0 - s0 + 1 or str(x0.get("mode_cn") or "").startswith("包天包趟") or str(x0.get("bill_unit") or "") in ("天", "趟"):
                 continue
             kind = ck.get("kind")
             for i, m in enumerate(ms):
@@ -5114,7 +5155,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     if abs(round(bn * l_ * w_ * h_ / 1e6 * ck["k"], 2) - kd) < 0.011:
                         ws2.cell(row=rr, column=col_of_key["kd"], value="=ROUND(%s%d*%g*%g*%g/1000000*%g,2)" % (CL["box_n"], rr, l_, w_, h_, ck["k"]))
                         n_formula += 1
-            kds, bill = _xl_num(x0.get("kd_sum")), _xl_num(x0.get("bill_amt"))
+            kds = _xl_num(x0.get("kd_sum"))
+            bill = _xl_num(x0.get("bill_amt")) if rc["n"] == 1 else _xl_num(ws2.cell(row=s0, column=col_of_key["bill_amt"]).value)      # 几行账单的：账单量是这几行的合计
             rng_kd = "%s%d:%s%d" % (CL["kd"], s0, CL["kd"], e0)
             rng_bn = "%s%d:%s%d" % (CL["box_n"], s0, CL["box_n"], e0)
             bns = [_xl_num(m.get("box_n")) for m in ms]
