@@ -314,5 +314,68 @@ class T(unittest.TestCase):
         self.assertEqual(V.plan([v], inv, fx3)["status"], "manual")
 
 
+    def test_carry_overcharge_and_settle(self):
+        """V2.896 供应商多收、等后面月份账单扣回：多收月按正确金额重提(费用、暂估税都按正确金额)，核销按发票税额、支付按实付；
+        扣回月反过来。两个月合起来 供应商往来、暂估进项税 都归零。合成数据。"""
+        # 科目余额(借－贷)＝原计提凭证的分录 ＋ 付款凭证的分录
+        bal = lambda ls, acct, *orig: V.r2(sum(l["dr"] - l["cr"] for l in ls if l["acct"] == acct) + sum(l["dr"] - l["cr"] for o in orig for l in o["lines"] if l["acct"] == acct))
+        # 多收月：计提 1,090(9%)，发票 1,090(税 90)，其中多收 109(含税)
+        v = acc("386", "计提%s8月线下零售出库运费" % SUP, "6601", "销售费用", 1000.00, 90.00, 1090, D6601_OUT)
+        inv = [{"number": "26420000000000000001", "rate": "9%", "gross": 1090.00, "tax": 90.00}]
+        self.assertEqual(V.plan([v], inv)["per"]["386"]["mode"], "hx")               # 不登记多收：照旧只核销
+        pl = V.plan([v], inv, carry={"386": [{"gross": -109.00, "memo": "多算 7 件"}]})
+        self.assertEqual(pl["status"], "ok", pl["msgs"])
+        p = pl["per"]["386"]
+        self.assertEqual((p["mode"], p["gross"], p["gross0"], p["carry"]), ("amt", 981.00, 1090.00, -109.00))
+        self.assertIn("多算 7 件", p["why"])
+        ctx = dict(CTX, pay_amount=1090.00)
+        a = V.build(ctx, [v], inv, pl)
+        self.assertEqual(V.balance(a)[0], V.balance(a)[1])
+        fix = [(l["acct"], l["dr"], l["cr"]) for l in a if l["block"] == "更正"]
+        self.assertEqual(fix, [("6601", 900.00, 0), ("2221.01.07", 81.00, 0), ("2241.02", 0, 981.00)])        # 费用、暂估税都按正确金额
+        hx = [(l["acct"], l["dr"], l["cr"]) for l in a if l["block"] == "核销"]
+        self.assertEqual(hx, [("2221.01.06", 90.00, 0), ("2221.01.07", 0, 81.00), ("2221.01.07", 0, 9.00)])   # 待认证按发票税额；多认证的 9 另挂一行
+        self.assertIn("供应商多收109.00元", [l for l in a if l["block"] == "核销"][-1]["expl"])
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in a if l["block"] == "支付"], [("2241.02", 1090.00, 0), ("1002", 0, 1090.00)])
+        # 扣回月：真实费用 2,180(9%)，账单扣了 109，计提、发票都是 2,071(税 171)
+        w = acc("401", "计提%s9月线下零售出库运费" % SUP, "6601", "销售费用", 1900.00, 171.00, 2071, D6601_OUT)
+        w["month"] = 9
+        inv2 = [{"number": "26420000000000000002", "rate": "9%", "gross": 2071.00, "tax": 171.00}]
+        pl2 = V.plan([w], inv2, carry={"401": [{"gross": 109.00, "memo": "扣回 8 月多收"}]})
+        self.assertEqual(pl2["status"], "ok", pl2["msgs"])
+        self.assertEqual((pl2["per"]["401"]["mode"], pl2["per"]["401"]["gross"]), ("amt", 2180.00))
+        b = V.build(dict(CTX, pay_amount=2071.00, pay_month=10), [w], inv2, pl2)
+        self.assertEqual(V.balance(b)[0], V.balance(b)[1])
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in b if l["block"] == "更正"], [("6601", 2000.00, 0), ("2221.01.07", 180.00, 0), ("2241.02", 0, 2180.00)])
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in b if l["block"] == "核销"], [("2221.01.06", 171.00, 0), ("2221.01.07", 0, 180.00), ("2221.01.07", 0, -9.00)])
+        # 两个月合起来：往来、暂估税、待认证之外不留尾巴；费用＝真实数(900＋2,000)
+        both = a + b
+        self.assertEqual(bal(both, "2241.02", v, w), 0.0)
+        self.assertEqual(bal(both, "2221.01.07", v, w), 0.0)
+        self.assertEqual(bal(both, "6601", v, w), 2900.00)
+        self.assertEqual(bal(a, "6601", v), 900.00)              # 多收月费用＝正确金额
+        self.assertEqual(bal(a, "2241.02", v), 109.00)           # 多收月底：供应商欠我们 109(含税)，挂在往来借方
+        self.assertEqual(bal(a, "2221.01.07", v), -9.00)         # 暂估进项税贷方 9：随票多认证的税
+
+    def test_carry_with_other_vouchers_and_guards(self):
+        """多张计提里只动登记的那张；部分核销的、减完不剩的 → 人工。"""
+        vs = vouchers()
+        pl = V.plan(vs, INV, carry={"566": [{"gross": -218.00}]})
+        self.assertEqual(pl["status"], "ok", pl["msgs"])
+        self.assertEqual({k: p["mode"] for k, p in pl["per"].items()}, {"552": "hx", "553": "hx", "563": "hx", "565": "rate", "566": "amt"})
+        self.assertEqual(pl["per"]["566"]["gross"], 68682.00)
+        ls = V.build(CTX, vs, INV, pl)
+        self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+        ap = V.r2(sum(l["dr"] - l["cr"] for l in ls if l["acct"] == "2241.02") + sum(l["dr"] - l["cr"] for v in vs for l in v["lines"] if l["acct"] == "2241.02"))
+        self.assertEqual(ap, 218.00)                             # 连原计提一起看：往来借方余 218
+        self.assertEqual(V.r2(sum(l["dr"] for l in ls if l["acct"] == "2221.01.06")), V.r2(sum(i["tax"] for i in INV)))          # 待认证仍是发票税额
+        v = acc("386", "计提%s8月线下零售出库运费" % SUP, "6601", "销售费用", 1000.00, 90.00, 1090, D6601_OUT)
+        inv = [{"number": "26420000000000000001", "rate": "9%", "gross": 1090.00, "tax": 90.00}]
+        self.assertEqual(V.plan([v], inv, carry={"386": [{"gross": -1090.00}]})["status"], "manual")
+        inv_p = [{"number": "26420000000000000003", "rate": "9%", "gross": 545.00, "tax": 45.00}]
+        self.assertEqual(V.plan([v], inv_p, amts={"386": {"gross": 545.00, "part": True}}, carry={"386": [{"gross": -10.00}]})["status"], "manual")
+        self.assertEqual(V.plan([v], inv, carry={"999": [{"gross": -10.00}]})["per"]["386"]["mode"], "hx")     # 登记在别的凭证上的不影响这张
+
+
 if __name__ == "__main__":
     unittest.main()

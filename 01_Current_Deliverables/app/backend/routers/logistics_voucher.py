@@ -455,6 +455,73 @@ def _fixes(carrier, period, subject):
     return out
 
 
+_CARRY_KEY = "logi_carry_adj"               # 复核台登记的「供应商多收、等后面月份账单扣回」(routers.logistics_review._carry_list，V2.894)
+
+
+def _lcs_len(a, b):
+    """两段字最长的连续相同部分有多长(挑计提用：账单标注「销售单-零售其他」更像「零售出库运费」还是「山姆零售出库运费」)。"""
+    a, b = str(a or ""), str(b or "")
+    best, prev = 0, [0] * (len(b) + 1)
+    for ch in a:
+        cur = [0] * (len(b) + 1)
+        for j, cj in enumerate(b, 1):
+            if ch == cj:
+                cur[j] = prev[j - 1] + 1
+                best = max(best, cur[j])
+        prev = cur
+    return best
+
+
+def _carries(r, vouchers):
+    """这张请款单要带上的「多收待扣回 / 本月扣回」(V2.896) → (carry {凭证号: [{gross, memo, id, kind}]}, 提示, 做不了的原因)。
+    多收的那个月(kind=out)：登记月份＝账单月份的，按负数落到对应的计提上(那张按正确金额重提)；
+    扣回的那个月(kind=in)：在这个月打了「账单已扣回」的，按正数加回——但只有多收那个月的付款凭证确实按正确金额做过的才加回
+    (登记晚于做账的，那个月是按票全额进的费用，这个月再加回就重复了)。
+    落在哪张计提上：按这张单在账单里的 主体·费用类型·产品线 去找本次核销的计提，同样的有几张取金额最大的(科目维度相同，落哪张不影响科目余额)。"""
+    items = [x for x in ((db.get_setting(_CARRY_KEY, None) or {}).get(r.get("carrier")) or []) if isinstance(x, dict) and x.get("id")]
+    pe = r.get("period") or ""
+    outs = [x for x in items if x.get("from_period") == pe]
+    ins = [x for x in items if (x.get("done") or {}).get("period") == pe and str(x.get("from_period") or "") < pe]
+    if not outs and not ins:
+        return {}, [], ""
+    from routers import logistics_review as LR
+    posted = db.get_setting(_POSTED_KEY, None) or {}
+    applied = {i for rec in posted.values() if isinstance(rec, dict) for i in (rec.get("carry_out") or [])}
+    BL = store.bill_lines
+    carry, notes, bad = {}, [], ""
+    own = [v for v in vouchers if not v.get("from")]
+    for kind, x in [("out", x) for x in outs] + [("in", x) for x in ins]:
+        no, amt = str(x.get("doc_no") or ""), float(x.get("amount") or 0)
+        with db._engine.connect() as c:
+            br = [dict(b) for b in c.execute(select(BL.c.subject, BL.c.subj_ovr, BL.c.doc_no, BL.c.fee_item, BL.c.fee_ovr, BL.c.annot, BL.c.bizline).where(
+                (BL.c.carrier == r.get("carrier")) & (BL.c.period == x.get("from_period")) & (BL.c.grain == "detail") & (BL.c.doc_no.like(no + "%")))).mappings().all()]
+        br = [b for b in br if (b.get("doc_no") or "").split("+")[0] == no]
+        if not br:
+            if kind == "out":
+                bad = "登记了多收待扣回的 %s 在这个月的账单里找不到了（账单重新解析过？），不知道该减在哪个主体哪张计提上" % no
+            continue
+        subj, fee, biz = LR._eff_subject(br[0]), LR._eff_fee(br[0]), LR._bill_biz(br[0])
+        if subj != r.get("subject"):
+            continue                              # 别的主体那张请款单的事
+        tag = "%s %s 多收 %.2f 元" % (x.get("from_period"), no, amt)
+        if kind == "in" and x["id"] not in applied:
+            notes.append("%s：这个月账单已扣回，但多收那个月的付款凭证不是按正确金额做的（登记晚于做账，或那张还没做），这次按票处理、不加回费用" % tag)
+            continue
+        hit = [v for v in own if any(LR._fee_norm(l.get("fee") or l.get("acct_name")) == fee and (l.get("biz") or "") == (biz or "") for l in v["exp_lines"])] or \
+              [v for v in own if any(LR._fee_norm(l.get("fee") or l.get("acct_name")) == fee for l in v["exp_lines"])]
+        if not hit:
+            bad = "%s（%s·%s）：这次核销的计提里没有对应的那一类，不知道该%s在哪张上" % (tag, fee, biz or "无产品线", "减" if kind == "out" else "加")
+            continue
+        # 同一类有几张计提的(极鲜达：山姆零售出库运费 / 零售出库运费)：挑摘要和账单标注最像的——相同的字最多、多余的字最少；再相同取金额大的
+        seg = str(br[0].get("annot") or "").split("-")[-1]
+        item = lambda z: LV.desc_parts(z["expl"], r.get("payee") or "")[1]
+        v = sorted(hit, key=lambda z: (-_lcs_len(seg, item(z)), len(item(z)) - _lcs_len(seg, item(z)), -z["gross"]))[0]
+        carry.setdefault(v["vno"], []).append({"gross": -amt if kind == "out" else amt, "memo": "%s %s" % (no, x.get("reason") or ""), "id": x["id"], "kind": kind})
+        notes.append(("%s，等后面月份账单扣回：不进本月费用，记-%s 按正确金额重提；核销按发票税额、支付按实付，供应商往来借方会留 %.2f（供应商欠我们的）" % (tag, v["vno"], amt)) if kind == "out" else
+                     ("%s：这个月账单已扣回，记-%s 的费用按真实数加回 %.2f；供应商往来上月留的借方余额这次冲平" % (tag, v["vno"], amt)))
+    return carry, notes, bad
+
+
 @router.get("/api/logistics-voucher/preview")
 def preview(request: Request, inst: str):
     if not _perm(request):
@@ -626,8 +693,12 @@ def _preview_data(inst, self_vno=None, _nest=False):
             else:
                 amts[v0["vno"]] = {"gross": inv_tot}
                 notes.append("计提 %.2f 和发票 %.2f 差 %+.2f：按红冲处理——原计提整笔红冲，按发票金额重新计提后核销" % (v0["gross"], inv_tot, inv_tot - v0["gross"]))
-    pl = LV.plan(vouchers, inv_in, fixes, amts) if (vouchers and inv_in) else \
+    carry, cnotes, cbad = _carries(r, vouchers) if vouchers else ({}, [], "")      # 复核台登记的多收待扣回 / 本月扣回(V2.896)
+    notes += cnotes
+    pl = LV.plan(vouchers, inv_in, fixes, amts, carry) if (vouchers and inv_in) else \
         {"status": "manual", "msgs": ["金蝶本期没找到这家的计提凭证" if not vouchers else "票夹里还没有发票"], "per": {}, "tails": {}}
+    if cbad and pl["status"] == "ok":
+        pl = {"status": "manual", "per": pl["per"], "tails": {}, "msgs": pl["msgs"] + [cbad + "，要人工处理"]}
     # V2.832 付款只做支付(不出核销)的两种情况：
     #   tax06＝费用凭证做的时候就有票、税已经挂待认证了(禾享 5月记-155)，没有暂估要转；
     #   later＝发票后补：人确认过「先做付款凭证」(或这张已经这样写过金蝶)，暂估税等发票到了另做一张转待认证。
@@ -644,6 +715,9 @@ def _preview_data(inst, self_vno=None, _nest=False):
             pay_only = "tax06"
         elif posted_rec.get("tax_later") or (later and not invs):
             pay_only = "later"
+    if pay_only and carry:
+        pl = {"status": "manual", "per": {}, "tails": {}, "msgs": ["这张只做支付（发票后补 / 税已挂待认证），又登记了多收待扣回：两样叠在一起系统做不了，要人工处理"]}
+        pay_only = ""
     if pay_only:
         if abs(g_acc - float(r.get("amount") or 0)) >= 0.005:
             pl = {"status": "manual", "per": {}, "tails": {},
@@ -779,6 +853,7 @@ def _preview_data(inst, self_vno=None, _nest=False):
                                 "paper_ovr": ovr.get(inst), "status": st, "posted": (db.get_setting(_POSTED_KEY, None) or {}).get(inst),
                                 "bill_id": pi.get("bill_id") or "", "paywarn": paywarn, "later": later, "pay_only": pay_only, "later_slip": slip},
             "later3": later3,
+            "carry": [dict(x, vno=k) for k, xs in carry.items() for x in xs] if pl["status"] == "ok" else [],      # 这张凭证里带上的多收待扣回/本月扣回
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           "from": (v.get("from") or {}).get("short") or "", "direct": bool(v.get("direct")),
@@ -1081,6 +1156,8 @@ def _post(inst, user):
            "tax_later": d2["plan"].get("pay_only") == "later",     # 发票后补：只做了支付，暂估税还没转(发票到了要补第三笔)
            "xout": d2.get("xout") or [],                     # 顺带红冲的「记错主体」计提(V2.862)：做完账再看这张、补打更正单时按这个出
            "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
+           "carry_out": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "out"],     # 这张按正确金额重提、没进费用的「多收待扣回」(V2.896)：扣回那个月据此才加回
+           "carry_in": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "in"],
            "dr": m2.get("DEBITTOTAL"), "cr": m2.get("FCREDITTOTAL"), "lines": len(new) + 2,
            "submitted": not sub_err, "submit_err": sub_err, "status": m2.get("DocumentStatus")}
     # 这张凭证合进了复核台登记的哪几笔计提更正（与 _preview_data 同口径：只算挂在这次用到的计提凭证上的）
@@ -1259,6 +1336,7 @@ def _auto_fp(cfg, cands):
     with db._engine.connect() as c:
         fx = c.execute(text("select count(*), coalesce(max(updated_at), '') from %s" % FX.name)).first()
     body = {"cfg": {k: cfg.get(k) for k in ("mode", "kinds", "cap", "max_round")}, "fx": [int(fx[0] or 0), str(fx[1] or "")],
+            "carry": db.get_setting(_CARRY_KEY, None) or {},        # 复核台登记的多收待扣回变了，凭证也会变(V2.896)
             "c": [[r["inst_id"], str(r.get("kd_paid") or ""), str(r.get("amount")), str(r.get("period")), str(r.get("subject_full")),
                    sorted([i["number"], i["gross"], i["rate"], bool(i["deduct"])] for i in invs),
                    picks.get(r["inst_id"]), bool(laters.get(r["inst_id"]))] for r, invs in sorted(cands, key=lambda t: t[0]["inst_id"])]}

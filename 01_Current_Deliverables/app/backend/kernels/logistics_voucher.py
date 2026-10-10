@@ -22,6 +22,12 @@
 # V2.798 主体更正(mode=move，用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：计提记到了别的主体账上
 #   (凭证带 from={short, full}，exp_lines 已由调用方换成本主体的科目/费用项目/部门)——本张凭证里不红冲(原凭证不在本账簿)，
 #   「更正」段直接在本主体补提，再核销、支付；原主体那边的红冲分录用 red_lines() 另出，给那边的人做账。
+# V2.896 供应商多收、等后面月份账单扣回(用户 2026-10-10「支付凭证…全部按照支付金额去走，但是红冲更正，是不是应该按照正确的金额去红冲」
+#   →「改」，口径＝费用和暂估进项税都按正确金额、核销按发票税额、支付按实付)：
+#   carry={凭证号: [{gross: 含税(负＝这个月多收了、不进费用；正＝这个月账单扣回了以前多收的、费用加回), memo}]}。
+#   plan 先照旧按发票把各张计提「应为多少」定下来，再在指定的那张上加减这笔——那张整笔红冲、按正确金额重提；
+#   build 的核销段：待认证仍按发票税额，暂估进项税除了各张计提的(正确金额的)税，再多出一行差额——
+#   多收的那个月是贷方(随票多认证的税)、扣回的那个月是贷方红字，两个月合起来为零；供应商往来同理(多收月借方余额＝供应商欠我们的含税数)。
 import re
 
 STD_RATES = (0.0, 0.01, 0.03, 0.05, 0.06, 0.09, 0.13)
@@ -118,10 +124,42 @@ def eff_gross(v, fx, amt=None):
     return r2(g)
 
 
-def plan(vouchers, invoices, fixes=None, amts=None):
+def plan(vouchers, invoices, fixes=None, amts=None, carry=None):
     """vouchers：acc_voucher(...) 列表；invoices：[{number, rate, gross, tax}]；fixes：{vno: [复核台计提更正]}；
-    amts：{vno: {gross, part, memo}} 应为金额(金额有差时)。
+    amts：{vno: {gross, part, memo}} 应为金额(金额有差时)；carry：{vno: [{gross, memo}]} 多收待扣回/本月扣回(见文件头 V2.896)。
     → {status: ok/manual, msgs:[], per:{vno: {mode: hx/rate/fix/tail/move/amt/part, new_rate, why, gross}}, tails:{vno: d}}"""
+    pl = _plan(vouchers, invoices, fixes, amts)
+    return _apply_carry(pl, vouchers, carry) if (carry and pl["status"] == "ok") else pl
+
+
+def _apply_carry(pl, vouchers, carry):
+    """按发票对平之后，把「多收待扣回 / 本月扣回」落到指定的计提上：应为金额加减这笔，整笔红冲按正确金额重提。"""
+    per = pl["per"]
+    for v in vouchers:
+        items = [x for x in (carry.get(v["vno"]) or []) if abs(float(x.get("gross") or 0)) >= 0.005]
+        if not items:
+            continue
+        p = per[v["vno"]]
+        cg = r2(sum(float(x["gross"]) for x in items))
+        if abs(cg) < 0.005:
+            continue
+        if p["mode"] in ("part", "move"):
+            return {"status": "manual", "per": per, "tails": {}, "msgs": pl["msgs"] + [
+                "记-%s 是%s，又登记了多收待扣回 %.2f：两样叠在一张上系统做不了，要人工处理" % (v["vno"], "部分核销" if p["mode"] == "part" else "别的主体记过来的", cg)]}
+        g0 = p["gross"]
+        g1 = r2(g0 + cg)
+        if g1 <= 0.004:
+            return {"status": "manual", "per": per, "tails": {}, "msgs": pl["msgs"] + [
+                "记-%s 按发票应为 %.2f，减掉多收的 %.2f 就不剩了：登记的多收金额不对，要人工处理" % (v["vno"], g0, -cg)]}
+        memo = "；".join(dict.fromkeys(str(x.get("memo") or "").strip() for x in items if str(x.get("memo") or "").strip()))
+        why = ("供应商多收 %.2f 等后面月份账单扣回，不进本月费用：按正确金额 %.2f 重提" % (-cg, g1)) if cg < 0 else \
+              ("本月账单扣回了以前多收的 %.2f，费用按真实数加回：按 %.2f 重提" % (cg, g1))
+        per[v["vno"]] = dict(p, mode=("amt" if p["mode"] in ("hx", "tail") else p["mode"]), gross=g1, gross0=g0, mode0=p["mode"], carry=cg,
+                             why=(p.get("why") + "；" if p.get("why") else "") + why + (("（%s）" % memo) if memo else ""))
+    return pl
+
+
+def _plan(vouchers, invoices, fixes=None, amts=None):
     fixes, amts = fixes or {}, amts or {}
     msgs, per = [], {}
     eff = {v["vno"]: eff_gross(v, None if v.get("from") else fixes.get(v["vno"]), amts.get(v["vno"])) for v in vouchers}
@@ -341,7 +379,13 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         fx = fixes.get(v["vno"]) or []
         gross = p["gross"] if p.get("gross") is not None else eff_gross(v, fx)      # 应为金额(人工/系统给的，或复核台登记的金额更正)
         d_tail = pl["tails"].get(v["vno"], 0)
-        if _keep_tax(v, p):                      # 尾差 / 主体更正(税率没变)：含税不变，税额沿用原计提、按发票口径 +d
+        carry_tax = 0.0
+        if p.get("carry"):                       # 多收待扣回/本月扣回(V2.896)：费用和暂估税都按正确金额算；
+            p0 = dict(p, gross=p.get("gross0", gross), mode=p.get("mode0") or p["mode"])      # 按发票口径这张该挂多少税(含尾差)——
+            tax0 = r2(v["tax"] + d_tail) if _keep_tax(v, p0) else r2(split_gross(p0["gross"], p["new_rate"])[1] + d_tail)
+            net, tax = split_gross(gross, p["new_rate"])
+            carry_tax = r2(tax0 - tax)           # ——两者的差就是核销段要另挂的那一行暂估进项税
+        elif _keep_tax(v, p):                    # 尾差 / 主体更正(税率没变)：含税不变，税额沿用原计提、按发票口径 +d
             tax = r2(v["tax"] + d_tail)
             net = r2(gross - tax)
         else:                                    # 改税率/更正：按新税率重算；尾差正好落在这张上的也带上(原来漏了，核销段会差这几分)
@@ -371,7 +415,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         if tax:                                  # 更正到 0%(普票不抵扣)不出 0 金额的税行
             out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=("sup_code", "sup_name")))
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
-        v["_new"] = {"gross": gross, "tax": tax}
+        v["_new"] = {"gross": gross, "tax": tax, "carry_tax": carry_tax}
     # 核销：每张票一行待认证 + 每张计提一行贷暂估(更正过的用新税额、引用本凭证号)
     for v in parts:                          # 部分核销：只转出本次核销那部分对应的暂估税
         p = pl["per"][v["vno"]]
@@ -395,6 +439,11 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         t = v["_new"]["tax"] if (v in renew or v in parts) else v["tax"]
         if t and not ctx.get("tax_later"):       # 发票后补：这张不转暂估税，等发票到了另做
             out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
+        ct = (v.get("_new") or {}).get("carry_tax") or 0
+        if abs(ct) >= 0.005 and not ctx.get("tax_later"):      # 发票税额和正确金额的税差的那一点(V2.896)：多收月贷方、扣回月贷方红字
+            cg = pl["per"][v["vno"]]["carry"]
+            note = ("（供应商多收%.2f元等后面月份账单扣回，随票多认证的进项税）" % -cg) if cg < 0 else ("（本月账单扣回以前多收的%.2f元，本月发票少开的进项税）" % cg)
+            out.append(_ln("核销", hx_desc + note, "2221.01.07", "暂估进项税", cr=ct, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
     # 支付
     if ctx.get("paid"):
         pe = "%s提起支付%s%s%s" % (ctx.get("applicant") or "", sup, mc, items)
