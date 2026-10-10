@@ -4746,28 +4746,35 @@ def _xl_ref(title, row, col):
 
 
 def _xl_raw_maps(wb):
-    """导出里附的原账单页 → [{title, base(去掉「原账单-」), ws, hrow(表头行), hdr{表头: [列…]}, docrows{金蝶单号: [行…]}}]。"""
+    """导出里附的原账单页 → [{title, ws, hrow(表头行), hdr{表头: [列…]}, dcol(金蝶单号列), docrows{金蝶单号: [行…]}, rows{行: {列: 值}}}]。
+    V2.900：只看表里真有的格子(ws._cells)，绝不按行列范围去遍历——恒茂「入库」页的格式一直刷到第 104 万行，
+    按范围遍历会凭空建出一百万个空格子：导出要一分钟、文件变大、服务器内存也被吃掉(V2.899 上线后用户点导出一直转圈)。"""
     out = []
     for ws in wb.worksheets:
         if not ws.title.startswith("原账单-"):
             continue
+        rows = {}
+        for (r, c), cell in list(getattr(ws, "_cells", {}).items()):
+            if cell.value is not None and cell.value != "":
+                rows.setdefault(r, {})[c] = cell.value
         best, hrow = 0, 1
-        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=8, values_only=True), start=1):
-            n = sum(1 for v in row if isinstance(v, str) and v.strip())
+        for i in range(1, 9):
+            n = sum(1 for v in (rows.get(i) or {}).values() if isinstance(v, str) and v.strip())
             if n > best:
                 best, hrow = n, i
         hdr = {}
-        for j, v in enumerate(next(ws.iter_rows(min_row=hrow, max_row=hrow, values_only=True), ()), start=1):
+        for j, v in sorted((rows.get(hrow) or {}).items()):
             if isinstance(v, str) and v.strip():
                 hdr.setdefault(_xl_norm(v), []).append(j)
         dcol = next((cs[0] for h, cs in hdr.items() if "金蝶单" in h), None)
         docrows = {}
         if dcol:
-            for i, row in enumerate(ws.iter_rows(min_row=hrow + 1, min_col=dcol, max_col=dcol, values_only=True), start=hrow + 1):
-                for tok in re.split(r"[\s+、,，/]+", str(row[0] if row and row[0] is not None else "")):
-                    if tok:
-                        docrows.setdefault(tok, []).append(i)
-        out.append({"title": ws.title, "base": ws.title[4:], "ws": ws, "hrow": hrow, "hdr": hdr, "dcol": dcol, "docrows": docrows, "rowc": {}})
+            for i in sorted(rows):
+                if i > hrow and rows[i].get(dcol) is not None:
+                    for tok in re.split(r"[\s+、,，/]+", str(rows[i][dcol])):
+                        if tok:
+                            docrows.setdefault(tok, []).append(i)
+        out.append({"title": ws.title, "base": ws.title[4:], "ws": ws, "hrow": hrow, "hdr": hdr, "dcol": dcol, "docrows": docrows, "rows": rows})
     return out
 
 
@@ -4787,9 +4794,7 @@ def _xl_find(maps, src_sheet, src_row, doc_no, target, heads, used, scales=(1.0,
             rows.append(int(src_row))
         rows += [i for i in mp["docrows"].get(str(doc_no or ""), []) if i not in rows]
         for ri in rows:
-            if ri not in mp["rowc"]:        # 这一行的值只读一次(迅鸽几千张单、每张要找好几个数)
-                mp["rowc"][ri] = {c.column: c.value for c in ws[ri]}
-            rowv = mp["rowc"][ri]
+            rowv = mp["rows"].get(ri) or {}       # 只查索引里已有的格子，不碰工作表(碰了会建空格子)
             _dv = str(rowv.get(mp["dcol"]) or "").strip() if mp["dcol"] else ""
             if doc_no and mp["dcol"] and str(doc_no) not in _dv and not (ri == (int(src_row) if src_row else None) and not _dv):
                 continue                    # 这一行写的是别的单号(原件被改过)：不认。单号格是空的(只写在首行、下面沿用)且行号是解析时记下的：认
