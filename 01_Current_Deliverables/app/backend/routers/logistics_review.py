@@ -2939,6 +2939,7 @@ def _box_docs(rsub, carrier):
             else:
                 pal_note = " · 计费重量像按托(%s 托)，但箱数对不上：账单 %s 件、金蝶 %s 箱" % (_fmt_amt(chg_wt / pal_kg), _fmt_amt(billcnt), _fmt_amt(round(_bx, 2)))
         kda, pack_used, packs_of, kall = None, {}, None, None
+        box_txt, mode_short, mode_tip = "", "", ""      # 金蝶箱数是怎么折出来的(逐个物料)；结论的短写法和悬停说明(V2.890)
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
             per = [_m_kg(m, uk) for m in lines]     # 千克计量的取基本数量；按升/个计量的按单位换算表折(V2.865)，没填换算的算 0
@@ -3016,6 +3017,13 @@ def _box_docs(rsub, carrier):
                 kda.setdefault(dx, []).append({"v": cv, "p": pv, "n": m.get("名称"), "u": str(m.get("计价单位") or m.get("基本单位") or "")})
             kd_sum = round(sum(per), 2)
             bill_amt, bill_unit, kd_unit = billcnt, (r.get("unit") or "件"), "箱"
+            _bt = []
+            for _i, m in enumerate(lines[:10]):
+                _pk = packs_of[_i][cands[_i].index(per[_i])] if per[_i] in cands[_i] else None
+                _q = m.get("数量件")
+                _bt.append("%s %s%s ÷ %s ＝ %s 箱" % (str(m.get("名称") or "")[:12], _fmt_amt(float(_q or 0)), m.get("计价单位") or m.get("基本单位") or "", _fmt_amt(_pk), _fmt_amt(round(per[_i], 2)))
+                           if (_pk and per[_i]) else "%s 没有箱规，折不出箱" % str(m.get("名称") or "")[:12])
+            box_txt = "；".join(_bt) + ("；…" if len(lines) > 10 else "")
             ratio_tuo = (kd_sum / billcnt) if billcnt else 0
             # 调拨(分布式调出)按包天包趟计费：一张单可能跑几车、账单一车一行 → 核不了量；有车型/天趟/价目时按报价核价(用户 2026-09-30)
             tu = str(r.get("unit") or "").replace("元/", "").strip()
@@ -3061,11 +3069,19 @@ def _box_docs(rsub, carrier):
                 _vt += "，和账单计重 %s 千克对不上" % _fmt_amt(chg_wt)
                 if cnt_state in ("ok", "na"):
                     cnt_state = "qtydiff"
+            # 页面上只写短的一句，算式和箱数怎么折出来的放悬停(V2.890，用户「改悬停，还有这个是怎么来的」)；mode_cn 仍是全句(导出用)
+            _vs = "按体积计费" + ("" if vol["ok"] else "，计重复算对不上")
             if fmode:
+                mode_short = mode_cn + " · " + _vs + fnote
                 mode_cn += " · " + _vt
             else:
-                mode_cn = _vt + " · 按箱数核" + ("" if mode_cn in ("整车按箱", "箱数一致") else (
-                    "：账单 %s 件、金蝶 %s 箱，对不上" % (_fmt_amt(billcnt), _fmt_amt(kd_sum)) if kd_sum else "（%s）" % mode_cn))
+                _tail = "" if mode_cn in ("整车按箱", "箱数一致") else (
+                    "：账单 %s 件、金蝶 %s 箱，对不上" % (_fmt_amt(billcnt), _fmt_amt(kd_sum)) if kd_sum else "（%s）" % mode_cn)
+                mode_short = _vs + " · 按箱数核" + (_tail or "，一致")
+                mode_cn = _vt + " · 按箱数核" + _tail
+            mode_tip = "账单计重怎么来的：" + _vt.replace("按体积计费：", "")
+            if box_txt and not use_weight:
+                mode_tip += "\n金蝶 %s 箱怎么来的（金蝶出库数量 ÷ 规格里的每箱数量）：%s" % (_fmt_amt(kd_sum), box_txt)
         if fnote:
             mode_cn += fnote
         # 建议核对方式(V2.887，用户 2026-10-09「能不能出一个建议核对方式呢」)：现在这种比法对不上、换另一种比法正好对得上的，给个建议和理由；
@@ -3093,7 +3109,7 @@ def _box_docs(rsub, carrier):
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
-                "suggest": sugg, "vol": vol, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
+                "suggest": sugg, "vol": vol, "mode_short": mode_short, "mode_tip": mode_tip, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
                 "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
         kgbase = 0.0
@@ -3229,6 +3245,7 @@ def _box_docs(rsub, carrier):
                     x["kd_sum"] = kd
                     x["state"], x["q_diff"], x["doc_bill_all"] = st, round(bsum - kd, 2), bsum
                     x["mode_cn"] = "本单 %d 行合计 %s%s" % (len(xs), _fmt_amt(bsum), x.get("bill_unit") or "")
+                    x["mode_short"] = x["mode_tip"] = ""         # 几行合起来比的，短写法不适用
                     x["mode_cn"] += _gnote
                     _others = sorted({y["doc_no"] for y in xs} - {x["doc_no"]})
                     if _others:

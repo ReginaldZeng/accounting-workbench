@@ -1008,6 +1008,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
       .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:300px}
       .lrv .dtbl td.concl .sub{white-space:normal;max-width:300px;line-height:1.45;overflow-wrap:anywhere}
+      .lrv .dtbl td.concl .sub.tip{cursor:help;text-decoration:underline dotted #B8C4CC;text-underline-offset:3px}
       .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
       .lrv .tag.ok{color:var(--ok);background:#DCEFE4}
       .lrv .diffok{color:var(--ok);font-weight:600}.lrv .diffbad{color:var(--bad);font-weight:600}
@@ -1479,8 +1480,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           <span className="sub">金蝶 {num(x.kd_sum)}{x.kd_unit}{qd != null && !isZero(qd) && <span className={x.state === 'qtydiff' ? 'diffbad' : ''}> · 差{qd > 0 ? '+' : ''}{num(qd)}</span>}</span></td>
                         <td className="num">{x.conv == null ? '—' : x.conv}</td>
                         <td className="concl">{cf
-                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className="sub">{pl || x.mode_cn} · {cf.by}</span></>
-                          : <><span className={'pill ' + pc}>{pl || x.mode_cn}</span>{pl && <span className="sub">{x.mode_cn}</span>}
+                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className={'sub' + (x.mode_tip ? ' tip' : '')} title={x.mode_tip || undefined}>{pl || x.mode_short || x.mode_cn} · {cf.by}</span></>
+                          : <><span className={'pill ' + pc} title={!pl && x.mode_tip ? x.mode_tip : undefined}>{pl || x.mode_short || x.mode_cn}</span>{pl && <span className={'sub' + (x.mode_tip ? ' tip' : '')} title={x.mode_tip || undefined}>{x.mode_short || x.mode_cn}</span>}
                             {x.suggest && x.state === 'qtydiff' && <span className="sub sugg" title={x.suggest.txt + '。点「采纳」就把这一张改成这种核法并重判；不点不会改'}>
                               建议{x.suggest.mode === 'box' ? '按箱数核' : '按重量核'}：{x.suggest.txt}
                               {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={e => { e.stopPropagation(); saveMode(x.doc_no, x.suggest.mode) }}>采纳</button>}</span>}
