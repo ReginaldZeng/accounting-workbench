@@ -168,3 +168,7 @@
 .ew-workbench .ew-open-table td small.ew-open-red{color:var(--red,#c0392b)}
 /* 应收清单里那句旺店通退换单的说明：比普通小字深一点，看得见 */
 .ew-workbench .ew-open-table td small.ew-rnote{color:var(--amber,#a35a00)}
+/* 抖音月结：随收款单一起推的账户支出（勾选区） */
+.ew-extras{border-top:1px solid var(--line,#e4e8f0);border-bottom:1px solid var(--line,#e4e8f0);margin:10px 0 4px;padding-bottom:8px}
+.ew-extras input[type=checkbox]{width:16px;height:16px;cursor:pointer}
+.ew-extras input[type=checkbox]:disabled{cursor:default}

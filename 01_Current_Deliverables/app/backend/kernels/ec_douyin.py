@@ -853,6 +853,41 @@ def push_lines(period, groups):
     return lines + [{'kind': 'fee', 'name': k, 'amount': v / 100, 'memo': memo(period, k, v / 100)} for k, v in sorted(fees.items(), key=lambda x: -x[1]) if v]
 
 
+REFUND_PLAIN, REFUND_RED = '退款不退货', '退款（订单在金蝶已有红字）'
+
+
+def push_extras(period, ledger, bills):
+    """货款结算以外的账户进出里，哪些可以随收款单列成扣款行（由会计勾选）。返回 [{key, name, amount(支出为正), count, locked, why}]。
+    各种「退款-…」按订单分成两堆：订单在金蝶没有红字的（退款不退货，收入一分没冲）合成一项，可以勾；
+    订单已经有红字的锁住不让勾——那笔退款金蝶已经用红字记过一次，再进费用就重复了。
+    净进账的项目也锁住：收款单不收负数行。"""
+    end = period_end(period)
+    red = {b['order'] for b in bills if b['order'] and b['amount'] < 0 and b['date'] <= end}
+    sums, counts = defaultdict(int), defaultdict(int)
+    for r in ledger:
+        if r['t'][:7] != period or r['scene'] == SETTLE: continue
+        scene = r['scene'] or '未注明场景'
+        key = (REFUND_RED if r['order'] in red else REFUND_PLAIN) if scene.startswith('退款') else scene
+        sums[key] -= int(round(r['amt'] * 100)); counts[key] += 1
+    out = []
+    for key in sorted(sums, key=lambda k: -sums[k]):
+        why = ('这些订单金蝶已经开了红字，退款已经记过一次；再进费用就重复了，要和红字对应着处理' if key == REFUND_RED
+               else '这一项是净进账，收款单不收负数行' if sums[key] <= 0 else '')
+        out.append({'key': key, 'name': key, 'amount': sums[key] / 100, 'count': counts[key], 'locked': bool(why), 'why': why})
+    return out
+
+
+def with_extras(period, lines, extras):
+    """把勾选的账户支出挂到一张收款单上：到账行减掉这些钱，每项另列一行扣款，收款明细合计不变。
+    到账不够减（减完必须还大于 0，金蝶不收 0 和负数行）返回 None，这张单就不带。"""
+    cents = lambda v: int(round(v * 100))
+    need = sum(cents(e['amount']) for e in extras)
+    cash = next((l for l in lines if l['kind'] == 'cash'), None)
+    if not extras or need <= 0 or cash is None or cents(cash['amount']) - need <= 0: return None
+    out = [dict(l, amount=(cents(l['amount']) - need) / 100) if l is cash else l for l in lines]
+    return out + [{'kind': 'extra', 'name': e['name'], 'amount': e['amount'], 'memo': memo(period, e['name'], e['amount'])} for e in extras]
+
+
 def push_split(period, groups, receipts):
     """金蝶一次下推可能自己拆成几张收款单（实测 16,070 张应收被拆成 2 张）。receipts 是每张收款单里的应收单号；
     给每张各算一份收款明细。同一个订单的几张应收被拆到不同收款单里就算不了，返回 None。"""

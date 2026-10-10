@@ -434,6 +434,28 @@ class DouyinTests(unittest.TestCase):
         self.assertIn([1, '支付宝', 102.7, '这批订单结算到账的钱'], lines); self.assertIn([2, '内部转销', 2.1, '2026年09月结算单扣款项 平台服务费2.1元'], lines)
         self.assertEqual(lines[-1][2], 104.8)
 
+    def test_account_outflows_can_ride_on_a_receipt_but_refunds_already_covered_by_red_bills_cannot(self):
+        O1, O2 = '6917945661848301051', '6917945661848301052'
+        row = lambda i, scene, amt, order='': dict(id='L%d' % i, t='2026-09-1%d 10:00:00' % (i % 9), scene=scene, amt=amt, order=order, memo='', bal=0.0)
+        ledger = [row(1, m.SETTLE, 500.0, O1), row(2, '退换货运费险', -2.0), row(3, '退换货运费险', -0.78), row(4, '充值千川账户', -50000.0),
+                  row(5, '退款-结算后退款-退用户', -5.0, O1), row(6, '退款-订单退款触发-退分账', 0.1, O1),              # O1 金蝶没红字：退款不退货
+                  row(7, '退款-结算后退款-退用户', -47.6, O2), row(8, '退款-订单退款触发-分账', 1.0, O2),                # O2 金蝶已有红字
+                  row(9, '平台补贴返还', 3.0), dict(row(2, '退换货运费险', -9.0), t='2026-08-30 10:00:00')]           # 净进账；上个月的不算
+        bills = [dict(no='B1', order=O1, amount=49.9, date='2026-09-01'), dict(no='B2', order=O2, amount=49.9, date='2026-09-01'), dict(no='R2', order=O2, amount=-49.9, date='2026-09-20')]
+        got = {x['key']: x for x in m.push_extras('2026-09', ledger, bills)}
+        self.assertEqual({k: (v['amount'], v['count'], v['locked']) for k, v in got.items()},
+                         {'充值千川账户': (50000.0, 1, False), '退换货运费险': (2.78, 2, False), m.REFUND_PLAIN: (4.9, 2, False), m.REFUND_RED: (46.6, 2, True), '平台补贴返还': (-3.0, 1, True)})
+        self.assertIn('红字', got[m.REFUND_RED]['why']); self.assertIn('负数行', got['平台补贴返还']['why'])
+        lines = [dict(kind='cash', name='到账', amount=95.0, memo=''), dict(kind='fee', name='平台服务费', amount=4.8, memo='x')]
+        new = m.with_extras('2026-09', lines, [got['退换货运费险'], got[m.REFUND_PLAIN]])
+        self.assertEqual([(l['kind'], l['amount']) for l in new], [('cash', 87.32), ('fee', 4.8), ('extra', 2.78), ('extra', 4.9)])     # 到账行减掉、各列一行
+        self.assertEqual(round(sum(l['amount'] for l in new), 2), 99.8)                                                           # 合计不变
+        self.assertEqual(new[2]['memo'], '2026年09月结算单扣款项 退换货运费险2.78元')
+        self.assertEqual(lines[0]['amount'], 95.0)                                                                                # 不改原来的行
+        self.assertIsNone(m.with_extras('2026-09', lines, [got['充值千川账户']]))                                                  # 到账不够减：这张单不带
+        self.assertIsNone(m.with_extras('2026-09', lines, [dict(key='x', name='x', amount=95.0)]))                                 # 减完剩 0 也不行
+        self.assertIsNone(m.with_extras('2026-09', lines, []))
+
     def test_password_zip_is_refused_with_plain_words(self):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w') as z: z.writestr('a.csv', 'x')

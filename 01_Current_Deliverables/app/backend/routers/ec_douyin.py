@@ -403,6 +403,7 @@ _DRAFT_SVC = 'Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Draft.common.kd
 _PUSH_RULE, _SETTLE_CASH, _SETTLE_INNER, _PURPOSE = 'AR_recableToRecBill', 'JSFS32_SYS', 'JSFS41_SYS', 'SFKYT01_SYS'
 _API_USER = '系统操作员'
 PUSH_KEY = 'ec_douyin_push'
+EXTRA_KEY = 'ec_douyin_push_extras'           # {店铺: [勾了随收款单推的账户支出项目]}：勾一次，以后每个月都照这样推
 PUSH_MODES = {'off': '关', 'dry': '演练', 'on': '真做'}
 PUSH_MAX = 10000                              # 每批上限＝金蝶一张收款单最多挂的源单行数：一次下推正好一张收款单（实测超过会被金蝶拆单）
 _PUSH_TIMEOUT = 1800                          # 大批量下推金蝶要算很久：单独放宽到 30 分钟（kc._post 只等 2 分钟）
@@ -501,6 +502,21 @@ def _push_plan(period, shop, customer='', session=None):
     conf_ = _push_conf()
     log, taken, problem, orphans = _push_state(period, shop, customer, session)
     plan = model.push_plan(period, hit[3]['dy_settle'], hit[3]['dy_orders'], result, taken, conf_['size'])
+    # 勾了随收款单推的账户支出：还没随哪一批推过的，挂到这一批上（到账行减掉、各列一行扣款，合计不变）；到账不够减就不挂，等后面够的批
+    picked = set((db.get_setting(EXTRA_KEY, {}) or {}).get(shop) or [])
+    carried = {}
+    for b in log:
+        if b.get('deleted') or b.get('state') == '金蝶里已被删掉': continue
+        for e in b.get('extras') or []: carried[e['key']] = b.get('at', '')
+    extras = model.push_extras(period, hit[3]['dy_ledger'], hit[4])
+    for x in extras: x.update(picked=x['key'] in picked and not x['locked'], carried=carried.get(x['key'], ''))
+    todo = [x for x in extras if x['picked'] and not x['carried']]
+    batch = plan['batch']
+    lines = model.with_extras(period, batch['lines'], todo) if todo and batch['bills'] else None
+    batch['extras'] = [{'key': x['key'], 'name': x['name'], 'amount': x['amount']} for x in todo] if lines else []
+    if lines: batch['lines'] = lines; batch['line_total'] = round(sum(int(round(l['amount'] * 100)) for l in lines) / 100, 2)
+    plan['extras'] = extras
+    plan['extras_short'] = round(sum(x['amount'] for x in todo), 2) if todo and batch['bills'] and not lines else 0
     return plan, log, problem, conf_, book, result, orphans
 
 
@@ -516,10 +532,29 @@ def push_plan(request: Request, period: str, shop: str):
             'eligible': plan['eligible'], 'pushed': plan['pushed'], 'left': plan['left'], 'batch': batch,
             'skipped': [dict(key=k, label=model.PUSH_SKIP[k], **v) for k, v in plan['skipped'].items() if v['count']],
             'other': {'lines': other, 'total': round(sum(d['amount'] for d in other), 2)},
+            'extras': plan['extras'], 'extras_short': plan['extras_short'],
             'batches': [{k: b.get(k) for k in ('fid', 'at', 'by', 'count', 'total', 'first', 'last', 'state', 'number', 'can_undo', 'seconds')} for b in reversed(log)],
             'orphans': orphans, 'problem': problem,
             'job': {'running': bool(job.get('running')), 'stage': job.get('stage', ''), 'error': job.get('error', ''), 'done': job.get('done'), 'batch': job.get('batch', 1),
                     'seconds': round(time.time() - job['started']) if job.get('running') else 0}}
+
+
+@router.post('/push/extras')
+def push_extras(request: Request, shop: str = Form(...), keys: str = Form('[]')):
+    """勾哪些账户支出随收款单一起推（列成扣款行）。有上传 / 跑批权限的人能改；按店铺存，以后每个月都照这样推；每次改动留痕。"""
+    user = require(request, write=True)
+    selected = wbr.check_shop(shop)
+    if selected['platform'] != '抖音': raise HTTPException(400, '这家店不是抖音店铺')
+    try: want = json.loads(keys)
+    except ValueError: raise HTTPException(400, '勾选内容不对')
+    if not isinstance(want, list) or len(want) > 60 or any(not isinstance(k, str) or not k.strip() or len(k) > 60 for k in want): raise HTTPException(400, '勾选内容不对')
+    want = sorted({k.strip() for k in want} - {model.REFUND_RED})                 # 金蝶已有红字的退款不能随单推，传了也不收
+    every = db.get_setting(EXTRA_KEY, {}) or {}
+    before = sorted(every.get(shop) or [])
+    every[shop] = want
+    db.set_setting(EXTRA_KEY, every, operator=user['name'])
+    if want != before: db.audit(user['name'], 'ec_douyin_push_extras', target=shop, detail='随收款单推的账户支出：%s → %s' % ('、'.join(before) or '无', '、'.join(want) or '无'))
+    return {'ok': True, 'keys': want}
 
 
 @router.get('/push/export')
@@ -619,6 +654,11 @@ def _push_do(period, shop, selected, user, job):
     parts = model.push_split(period, batch['groups'], inside)
     if not parts or sorted(n for nos_ in inside for n in nos_) != sorted(nos):
         raise drop_all('金蝶生成的 %d 张收款单里挂的应收和这一批对不上（或同一订单的应收被拆到了两张单里）' % len(fids))
+    carry = None
+    if batch.get('extras'):
+        for i, part in enumerate(parts):
+            lines = model.with_extras(period, part['lines'], batch['extras'])
+            if lines: part['lines'] = lines; carry = i; break
     job['stage'] = '正在把 %d 张收款单的收款明细改成 到账行 + 扣款行' % len(fids)
     t2 = time.time()
     for i, (m, part) in enumerate(zip(made, parts)):
@@ -637,12 +677,14 @@ def _push_do(period, shop, selected, user, job):
         if err: raise drop_all('收款明细没改成功：%s' % err)
     log = _push_log(period, shop)
     seconds = round(time.time() - started, 1)
-    for f, nos_, part in zip(fids, inside, parts):
+    for i, (f, nos_, part) in enumerate(zip(fids, inside, parts)):
         log.append({'fid': f, 'at': ec._now(), 'by': user['name'], 'count': part['count'], 'total': part['total'], 'first': min(nos_), 'last': max(nos_),
-                    'lines': part['lines'], 'bills': nos_, 'seconds': seconds, 'push_seconds': pushed_in, 'edit_seconds': round(time.time() - t2, 1)})
+                    'lines': part['lines'], 'bills': nos_, 'seconds': seconds, 'push_seconds': pushed_in, 'edit_seconds': round(time.time() - t2, 1),
+                    'extras': batch['extras'] if i == carry else []})          # 这张单带下去的账户支出：撤回了它们就回到待推
     _push_log_save(period, shop, log)
     db.audit(user['name'], 'ec_douyin_push', target='%s %s' % (period, shop),
-             detail='下推 %d 张应收 %.2f → 金蝶暂存收款单 %d 张（内码 %s，%s 秒）' % (len(nos), batch['total'], len(fids), '、'.join(map(str, fids)), seconds))
+             detail='下推 %d 张应收 %.2f → 金蝶暂存收款单 %d 张（内码 %s，%s 秒）%s' % (len(nos), batch['total'], len(fids), '、'.join(map(str, fids)), seconds,
+                    ('；随单带下去的账户支出：' + '、'.join('%s %.2f' % (e['name'], e['amount']) for e in batch['extras'])) if carry is not None else ''))
     return {'fids': fids, 'receipts': [{'fid': f, 'count': p['count'], 'total': p['total']} for f, p in zip(fids, parts)],
             'count': len(nos), 'total': batch['total'], 'seconds': seconds, 'push_seconds': pushed_in}
 
