@@ -4861,7 +4861,7 @@ def _xl_unit_price(mp, ri):
 
 
 def _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets, mon):
-    """把复核直接写到原账单页上(V2.905，用户 2026-10-11 看导出的原账单页「最好是在原账单上面同步放这个…更直观」)：
+    """把复核直接写到原账单页上(V2.906，用户 2026-10-11 看导出的原账单页「最好是在原账单上面同步放这个…更直观」)：
     每一行账单的右边接一组「系统复核」列——
       价：标准金额(用这一行自己的格子算：取数说明定的算法 / 包天包趟报价 / 账单自己的单价×计费量)、价差、价的复算、核价依据；
       量：这张单第一行写 账单量(本单合计)、金蝶核对量、量差、量的复算、核对方式——都指回「复核明细」那一页对应的格子，两边永远是同一个数。
@@ -5435,7 +5435,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 dn = dd.get("doc_no")
                 if dn and dn not in docmode:
                     docmode[dn] = dd.get("mode_cn")
-            addcols = []      # V2.905：原来右边接五列写死的复核(计费类别/ERP重量/账单数量/差异/结论)，数取自中间表的老值、会和现在的结论打架——不再写，由「系统复核」列(_xl_raw_review)代替
+            addcols = []      # V2.906：原来右边接五列写死的复核(计费类别/ERP重量/账单数量/差异/结论)，数取自中间表的老值、会和现在的结论打架——不再写，由「系统复核」列(_xl_raw_review)代替
             AFILL = PatternFill("solid", fgColor="B06A12")      # 追加列表头：琥珀底
             ALIGHT = PatternFill("solid", fgColor="FBF0DA")     # 追加列数据：淡琥珀底
             acenter = Alignment(horizontal="center", vertical="center")
@@ -5615,7 +5615,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 n_formula += 4
         except Exception:
             pass                  # 同上：出岔子就不写价的公式，不让导出失败
-        try:                      # 原账单页上同步放复核(V2.905)
+        try:                      # 原账单页上同步放复核(V2.906)
             if maps:
                 n_formula += _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets, mon)
         except Exception:
