@@ -4188,6 +4188,11 @@ _BANKPULL_ALERT_MOB = "bank_pull_alert_mobiles"  # 停机钉钉告警收件人�
 # 每小时一轮 → 正常每 60 分钟才回报一次。阈值必须 > 1 轮间隔，否则每轮正常间隔前都会误判"停了"。
 # 取 130 分钟：漏跑约 2 轮才算停，既不误报、真停了也能在两小时内发现。页面红灯与钉钉告警共用此阈值。
 _BANKPULL_ALIVE_SEC = 130 * 60
+# V2.891 起新版取件脚本每分钟来问一次「有没有人点立即扫描」（整盘扫仍是每小时整点一轮，回报也还是那时才发，
+# 所以上面的停机阈值不动）。来问的时刻只记内存：每分钟一次不值得写库，重启后一分钟内自己补上。
+_BANKPULL_ASK = {"ts": 0.0}
+_BANKPULL_ASK_FRESH_SEC = 150          # 两分半内来问过＝确实在每分钟问
+_BANKPULL_BOOT = time.time()
 
 # BOM 采购核算表落公盘「送达通知」（V2.530，业务方定 2026-09-08）：报表取件机把 outbox 镜像到公盘(bom_dest)时，
 # 本轮新落的文件回报到 sync-report 的 bomCopied → 服务器发钉钉给【送达收件人】（与停机告警是两拨人，前端配）。
@@ -4211,8 +4216,17 @@ def bank_pull_pending(request: Request):
     if not pull_token_ok(request):
         return JSONResponse({"ok": False, "msg": "取件令牌无效"}, status_code=403)
     _pull_alert_check_all()   # 顺手自检三台取件机停机告警（银行来问＝它还活着，报表/BOM 靠别处入口发现"没来问"）
+    _BANKPULL_ASK["ts"] = time.time()
     w = db.get_setting(_BANKPULL_WANT, None)
-    return {"ok": True, "pending": bool(w), "at": (w or {}).get("at", ""), "by": (w or {}).get("by", "")}
+    if w and not (w.get("picked_at") and w.get("id")):
+        # 问到留话的那一刻记「已取走」，页面据此从"等它来取"翻到"正在扫"。只在有留话时写库，平时每分钟空问不落盘。
+        # 老留话没编号的顺手补一个——新版脚本靠编号认领，没编号就永远清不掉、每分钟都当成有人点了。
+        w = dict(w)
+        w.setdefault("id", os.urandom(6).hex())
+        w["picked_at"] = datetime.datetime.now().strftime("%H:%M:%S")
+        db.set_setting(_BANKPULL_WANT, w, "取件机")
+    return {"ok": True, "pending": bool(w), "at": (w or {}).get("at", ""), "by": (w or {}).get("by", ""),
+            "id": (w or {}).get("id", "")}
 
 
 @app.post("/api/bank-pull/push")
@@ -4288,8 +4302,17 @@ def bank_pull_report(body: dict, request: Request):
     rec = dict(body or {})
     rec["at"] = _now()
     db.set_setting(_BANKPULL_SYNC, rec, "取件机")
-    # 回报即视为消费掉「立即扫描」请求
-    db.set_setting(_BANKPULL_WANT, None, "取件机")
+    # 回报即视为消费掉「立即扫描」请求。新版脚本(v≥2)只清它自己认领的那条留话（按编号）：
+    # 整点那轮扫到一半、或上一条留话正在扫时又有人点了，新点的那条不能被这次回报顺手清掉。
+    # 老脚本不带编号，照旧无条件清。
+    w = db.get_setting(_BANKPULL_WANT, None)
+    if w:
+        try:
+            ver = int(rec.get("v") or 1)
+        except Exception:
+            ver = 1
+        if ver < 2 or (rec.get("forced") and str(rec.get("want_id") or "") == str(w.get("id") or "")):
+            db.set_setting(_BANKPULL_WANT, None, "取件机")
     return {"ok": True}
 
 
@@ -4302,8 +4325,46 @@ def bank_pull_request_scan(request: Request):
         return JSONResponse({"ok": False, "msg": "无「上传资金流水」权限"}, status_code=403)
     if not pull_token():
         return {"ok": False, "msg": "服务器没配取件码（conf.ini [rptexport] pull_token），取件通道未启用。"}
-    db.set_setting(_BANKPULL_WANT, {"at": _now(), "by": u["name"]}, u["name"])
-    return {"ok": True, "msg": "已通知取件机，下一轮来取时会立即扫共享盘（间隔取决于取件机轮询）。"}
+    db.set_setting(_BANKPULL_WANT, {"at": _now(), "by": u["name"], "id": os.urandom(6).hex()}, u["name"])
+    bp = _bankpull_view()
+    # 说实话：多久能开始，取决于那台取件机多久来问一次——新版每分钟、老版每小时整点，停了就不会来
+    if not bp or not bp.get("alive"):
+        msg = "话留下了，但取件机没在跑（很久没回报）——它不来问就不会扫。请先检查那台内网电脑，或用上方①手工上传。"
+    elif bp.get("fast"):
+        msg = "已留话。取件机每分钟来问一次，约 1 分钟内开始扫共享盘。"
+    else:
+        msg = "已留话。这台取件机现在是每小时整点才来问一次，最快要到下一个整点才开始扫。"
+    return {"ok": True, "msg": msg, "fast": bool(bp and bp.get("fast")), "want": _bankpull_want_view()}
+
+
+@app.get("/api/bank-pull/status")
+def bank_pull_status():
+    """「共享盘取件机」卡片的实时状态：留话还在不在、取件机取走没、最近一轮扫出了什么。只读两个设置，极轻。
+    页面进来读一次、点完「立即扫描」后轮询——/api/data-sources 是带缓存的，里面那份取件机状态可能是旧的，不能拿来判进度。"""
+    return {"ok": True, "bank_pull": _bankpull_view(), "want": _bankpull_want_view()}
+
+
+def _bankpull_want_view():
+    """页面上那条「立即扫描」留话的现状：谁哪时留的、取件机取走没。没留话返回 None。"""
+    w = db.get_setting(_BANKPULL_WANT, None)
+    if not w:
+        return None
+    return {"at": w.get("at", ""), "by": w.get("by", ""), "picked_at": w.get("picked_at", "")}
+
+
+def _bankpull_fast(rec):
+    """这台取件机是不是「每分钟来问一次留话」的。两个条件都要：脚本是新版（回报里 v≥2），
+    且最近真的每分钟在来问（防脚本换了、计划任务却还是每小时那种半截升级）。
+    「最近来问」只记在内存里，后端刚重启的头两三分钟还没数据，先信脚本版本。"""
+    try:
+        if int((rec or {}).get("v") or 1) < 2:
+            return False
+    except Exception:
+        return False
+    now = time.time()
+    if _BANKPULL_ASK["ts"]:
+        return now - _BANKPULL_ASK["ts"] <= _BANKPULL_ASK_FRESH_SEC
+    return now - _BANKPULL_BOOT <= _BANKPULL_ASK_FRESH_SEC
 
 
 def _bankpull_view():
@@ -4312,6 +4373,7 @@ def _bankpull_view():
     if not rec:
         return None
     out = dict(rec)
+    out["fast"] = _bankpull_fast(rec)
     ago = None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):   # _now() 是分钟精度，回报时间戳无秒；两种都试
         try:
@@ -4394,7 +4456,7 @@ def _pull_registry():
          ],
          "down_hint": "此时新导出的报表不会自动同步到共享盘，BOM 核算表也不会送到公盘。请检查那台常开内网电脑是否关机、或计划任务停了。",
          "recover_hint": "报表同步已恢复正常。"},
-        {"id": "bank", "name": "银行流水取件机", "lane": "accounting", "dir": "up", "freq": "每小时一轮",
+        {"id": "bank", "name": "银行流水取件机", "lane": "accounting", "dir": "up", "freq": "每小时整点扫一轮 · 每分钟来问一次有没有人点「立即扫描」",
          "purpose": "把出纳放共享盘的流水推上云端", "alert": "legacy", "always_on": True,
          "sync_key": _BANKPULL_SYNC, "alive_sec": _BANKPULL_ALIVE_SEC,
          "alerted_key": _BANKPULL_ALERTED, "mob_key": _BANKPULL_ALERT_MOB,

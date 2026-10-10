@@ -79,6 +79,8 @@ select,.btn,.btn-pri,.btn-primary,.btn-sec,.selctl{
 .btn[disabled],.btn-pri[disabled],.btn-sec[disabled]{opacity:.5; cursor:not-allowed; box-shadow:none; transform:none;}
 .btn[disabled]:hover,.btn-pri[disabled]:hover,.btn-sec[disabled]:hover{background:var(--accent); transform:none;}
 .btn[disabled]:hover,.btn-sec[disabled]:hover{background:var(--bg);}
+/* 主按钮写作 class="btn btn-pri"，上一行会把它一并刷成白底——白字白底，鼠标停在禁用的主按钮上字就没了。这里把主按钮改回来。 */
+.btn-primary[disabled]:hover,.btn-pri[disabled]:hover,.btn.primary[disabled]:hover{background:var(--accent); border-color:var(--accent);}
 .btn.primary[disabled]:hover{background:var(--accent); border-color:var(--accent);}   /* 不可点的主按钮悬停别变白底（白字会看不见） */
 
 /* 外壳 + 侧栏 */

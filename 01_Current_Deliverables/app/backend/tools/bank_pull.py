@@ -13,12 +13,20 @@
 #      再向服务器 commit——否则解析到出纳还没传完的半个月数据，静默少账。
 #   ③ 增量：记每个文件的 大小+mtime，没变的不重推（省带宽）。
 #   ④ 服务器侧不覆盖人工上传（见 /api/bank-pull/commit）；解析后保留人工确认闸，不自动确认。
+# [Change Log]
+# Date: 2026-10-10 | Author: Claude Opus 5.5 | Version: V2.891
+# Description: 「立即扫描」真做到约 1 分钟内开始（与 bank_pull.ps1 同步改，逻辑一致）——计划任务改成【每分钟】
+#   拉起本脚本，但绝大多数时候只问服务器一句「有没有人点立即扫描」；没人点、也没到整点那一轮就立刻退出，
+#   不碰共享盘、不回报、不写文件。真去扫只在：① 有人点了 ② 每小时整点那一轮 ③ 上轮有月份在等文件稳定。
+#   另修：出纳刚改完文件就点立即扫描，以前本轮只记「内容仍在变」就跳过；现在隔 5 秒再看一眼，没在变就当轮推。
+#   手工验证/想马上整盘扫一次：python bank_pull.py --full
 """银行流水上行取件机
 
 用法（内网常开电脑，装了 Python）：
     复制 bank_pull.ini.example → bank_pull.ini，填 server / pull_token / src_root
     手工验证：  python bank_pull.py
-    定时：      每小时跑一次（用「注册定时任务.bat」同款方式，或系统计划任务）
+    整盘扫一次：python bank_pull.py --full
+    定时：      每分钟跑一次（系统计划任务）——平时只问一句有没有人点「立即扫描」，整盘扫仍是每小时整点一轮
 """
 import os
 import sys
@@ -39,6 +47,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INI = os.path.join(HERE, "bank_pull.ini")
 LOGF = os.path.join(HERE, "bank_pull.log")
 STATEF = os.path.join(HERE, "bank_pull_state.json")
+ERRF = os.path.join(HERE, "bank_pull_lasterr.txt")
 
 # 共享盘月份目录名 → 期间 YYYY-MM。出纳按「5月流水 / 6月流水 / 2026年08月」等命名，尽量宽松认。
 _MONTH_PATTERNS = [
@@ -58,6 +67,28 @@ def log(msg):
                 old = f.read().splitlines()[-1999:]
         with open(LOGF, "w", encoding="utf-8") as f:
             f.write("\n".join(old + [line]))
+    except Exception:
+        pass
+
+
+def log_hourly(kind, msg):
+    """每分钟跑一次以后，「连不上服务器」「共享盘没连上」这类错会一分钟一条，把日志冲光。
+    这类错同一个钟点、同一种只往日志里记一条（屏幕上照常每次都显示）。"""
+    tag = datetime.datetime.now().strftime("%Y%m%d%H") + "|" + kind
+    last = ""
+    try:
+        if os.path.exists(ERRF):
+            with open(ERRF, encoding="ascii", errors="replace") as f:
+                last = f.read().strip()
+    except Exception:
+        pass
+    if last == tag:
+        print(msg)
+        return
+    log(msg)
+    try:
+        with open(ERRF, "w", encoding="ascii") as f:
+            f.write(tag)
     except Exception:
         pass
 
@@ -142,34 +173,68 @@ def main():
     default_year = None
     if re.match(r"^\d{4}$", cfg["year"]):
         default_year = int(cfg["year"])
-    if not os.path.isdir(cfg["src_root"]):
-        log("[X] 源目录不存在：%s —— 共享盘没连上？先在资源管理器里打开确认。" % cfg["src_root"])
-        sys.exit(1)
+    full = "--full" in sys.argv[1:]
+    host = os.environ.get("COMPUTERNAME", "?")
 
-    # 有人在页面点了「立即扫描」→ 忽略 settle 窗口、本轮直接推（人主动要的，别让他等 10 分钟）
-    forced = False
+    # ① 每分钟先问一句：页面上有没有人点「立即扫描」（响应极小）
+    forced, want_id = False, ""
     try:
         pend = api(cfg, "/api/bank-pull/pending")
         forced = bool(pend.get("pending"))
+        want_id = str(pend.get("id") or "")
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            log("[X] 服务器拒绝（HTTP %s）：取件码不对，或服务器没配 pull_token。" % e.code)
+            log_hourly("token", "[X] 服务器拒绝（HTTP %s）：取件码不对，或服务器没配 pull_token。" % e.code)
             sys.exit(1)
-        log("[X] 连服务器失败：%s" % e)
+        log_hourly("server", "[X] 连服务器失败：%s" % e)
         sys.exit(1)
     except Exception as e:
-        log("[X] 连服务器失败：%s" % e)
+        log_hourly("server", "[X] 连服务器失败：%s" % e)
         sys.exit(1)
-    if forced:
-        log("收到「立即扫描」请求，本轮忽略稳定期直接推")
+
+    def report(payload):
+        # 回报统一带上：脚本版本 v=2（服务器据此知道这台是「每分钟来问」的新版）、这轮是不是有人点的、认领的是哪条留话。
+        # 服务器只清编号对得上的那条留话——扫到一半又有人点的那条不会被这次回报顺手清掉。
+        payload.update({"v": 2, "forced": forced, "want_id": want_id})
+        _report(cfg, payload)
 
     state = {}
     if os.path.exists(STATEF):
         try:
-            with open(STATEF, encoding="utf-8") as f:
+            with open(STATEF, encoding="utf-8-sig") as f:
                 state = json.load(f)
         except Exception:
             state = {}
+    if not isinstance(state, dict):
+        state = {}
+
+    def save_state():
+        try:
+            with open(STATEF, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    # ② 这一分钟要不要真去扫共享盘：有人点了 / 到了整点那一轮（本钟点还没扫过）/ 上轮有月份在等文件稳定 / 手工加了 --full。
+    #    都不是就立刻退出——不碰共享盘、不回报、不写文件，所以每分钟跑一次也不费事。
+    sched = state.get("_meta")   # 排班记录：本钟点扫过没、要不要下一分钟复查（别叫 meta——下面推文件的循环里有同名变量）
+    if not isinstance(sched, dict):
+        sched = state["_meta"] = {}
+    hour_key = datetime.datetime.now().strftime("%Y%m%d%H")
+    due = (str(sched.get("last_hour") or "") != hour_key) or bool(sched.get("recheck"))
+    if not (forced or due or full):
+        print("没人点「立即扫描」，也没到整点那一轮，这次不扫。（要马上整盘扫一次：加 --full）")
+        return
+    if forced:
+        log("收到「立即扫描」请求，本轮不等稳定期、直接推")
+
+    if not os.path.isdir(cfg["src_root"]):
+        log_hourly("share", "[X] 源目录不存在：%s —— 共享盘没连上？先在资源管理器里打开确认。" % cfg["src_root"])
+        # 有人在页面上等着：把「共享盘连不上」回报回去，别让他干等。整点那轮照旧不回报（不回报久了页面才会亮红灯、发停机告警）。
+        if forced:
+            report({"scanned": 0, "pushed": 0, "committed": [], "waiting": [], "host": host,
+                    "error": "取件机连不上共享盘：" + cfg["src_root"]})
+        sys.exit(1)
 
     # 枚举月份目录
     months = {}
@@ -183,10 +248,15 @@ def main():
 
     if not months:
         log("源目录下没有可识别的月份文件夹（如「6月流水」「2026年08月」）：%s" % cfg["src_root"])
-        _report(cfg, {"scanned": 0, "pushed": 0, "committed": [], "waiting": [], "note": "无月份目录"})
+        report({"scanned": 0, "pushed": 0, "committed": [], "waiting": [], "host": host, "note": "无月份目录",
+                "error": "共享盘目录下没有认得出月份的文件夹：" + cfg["src_root"]})
+        # 记下「这个钟点扫过了」，否则下一分钟又当成该扫、每分钟回报一次
+        sched["last_hour"], sched["recheck"] = hour_key, False
+        save_state()
         return
 
     pushed_total, committed, waiting = 0, [], []
+    recheck = False   # 有月份还在等文件稳定 → 下一分钟接着看，稳了就推（不必再等一整个钟点）
     for key, d in sorted(months.items()):
         sig = scan_dir_signature(d)
         if not sig:
@@ -203,15 +273,35 @@ def main():
             st["sig"] = cur
             st["seen_at"] = now
             st["committed"] = False
-            waiting.append("%s（内容仍在变，重新计时）" % key)
-            continue
-        settled = forced or (prev_seen and (now - prev_seen) >= cfg["settle_minutes"] * 60)
-        if not settled and not st.get("committed"):
-            left = int(cfg["settle_minutes"] * 60 - (now - (prev_seen or now)))
-            waiting.append("%s（稳定中，约 %d 秒后可推）" % (key, max(0, left)))
-            continue
-        if st.get("committed") and not forced:
-            continue   # 这个月已经推过且没再变，跳过
+            go = False
+            if forced:
+                # 人点了「立即扫描」＝他说出纳改完了，不让他等 10 分钟稳定期；但隔 5 秒再看一眼，
+                # 文件还在变（正在往里拷）就不推半截的，照常走稳定期，稳了自动推。
+                time.sleep(5)
+                sig2 = scan_dir_signature(d)
+                if sig2 == sig:
+                    go = True
+                else:
+                    sig = sig2
+                    st["sig"] = {k: list(v) for k, v in sig2.items()}
+                    st["seen_at"] = time.time()
+            if not go:
+                recheck = True
+                if forced:
+                    waiting.append("%s（文件正在写入，没推半截的；写完后约 %d 分钟内自动推，或写完再点一次）"
+                                   % (key, cfg["settle_minutes"]))
+                else:
+                    waiting.append("%s（文件有变化，等 %d 分钟不再变就推）" % (key, cfg["settle_minutes"]))
+                continue
+        else:
+            settled = forced or (prev_seen and (now - prev_seen) >= cfg["settle_minutes"] * 60)
+            if not settled and not st.get("committed"):
+                left = int(cfg["settle_minutes"] * 60 - (now - (prev_seen or now)))
+                recheck = True
+                waiting.append("%s（稳定中，约 %d 秒后可推）" % (key, max(0, left)))
+                continue
+            if st.get("committed") and not forced:
+                continue   # 这个月已经推过且没再变，跳过
 
         # 推该月所有文件（增量：与已推签名一致的跳过）
         done_sig = st.get("pushed_sig", {})
@@ -235,7 +325,7 @@ def main():
 
         # 收齐 → commit（服务器按当前所选期间落库；非当前期会返回 need_switch_period，不算错）
         try:
-            r = api(cfg, "/api/bank-pull/commit", data={"period": key, "host": os.environ.get("COMPUTERNAME", "?")})
+            r = api(cfg, "/api/bank-pull/commit", data={"period": key, "host": host})
             if r.get("ok"):
                 st["committed"] = True
                 if r.get("skipped"):
@@ -250,18 +340,15 @@ def main():
         except Exception as e:
             log("   [X] commit 失败 %s：%s" % (key, e))
 
-    try:
-        with open(STATEF, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=1)
-    except Exception:
-        pass
+    sched["last_hour"], sched["recheck"] = hour_key, recheck
+    save_state()
 
     if pushed_total or committed or waiting or forced:
         log("扫描 %d 个月目录 · 本轮推送 %d 个文件 · 提交 %s · 等待 %s"
             % (len(months), pushed_total, "，".join(committed) or "无", "，".join(waiting) or "无"))
-    _report(cfg, {"scanned": len(months), "pushed": pushed_total,
-                  "committed": committed, "waiting": waiting,
-                  "host": os.environ.get("COMPUTERNAME", "?"), "src_root": cfg["src_root"]})
+    report({"scanned": len(months), "pushed": pushed_total,
+            "committed": committed, "waiting": waiting,
+            "host": host, "src_root": cfg["src_root"]})
 
 
 def _report(cfg, payload):

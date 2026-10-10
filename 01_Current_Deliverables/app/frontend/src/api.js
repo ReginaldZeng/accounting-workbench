@@ -77,6 +77,7 @@ export const syncChannelAdjust = () => j('/api/channel-adjust/sync', {method:'PO
 export const uploadBankZip = (file, password) => j('/api/bank-import/upload', {method:'POST', body:file, headers: password ? {'X-Zip-Password': encodeURIComponent(password)} : {}})
 export const confirmBankDup = () => jp('/api/bank-import/confirm-dup', {})
 export const requestBankScan = () => jp('/api/bank-pull/request-scan', {})
+export const getBankPullStatus = () => j('/api/bank-pull/status')   // V2.891 取件机卡片实时状态（留话取走没/扫完没），不走缓存
 export const getBankAlertRecipients = () => j('/api/bank-pull/alert-recipients')
 export const setBankAlertRecipients = (mobiles) => jp('/api/bank-pull/alert-recipients', { mobiles })
 export const getSubjectBalance = () => j('/api/subject-balance')

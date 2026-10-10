@@ -6,6 +6,16 @@
 #   跑在【公司内网一台常开电脑】上：扫共享盘月度流水目录 → 把散件推给云端工作台 → 服务器收齐后自动解析定格
 #   （财资归并/逐笔查重/重复待确认弹窗一并继承）。连接方向内网主动出去，办公室零入口。
 #   三条铁律（服务器侧强制）：只推绝不删共享盘、不覆盖人工上传、保留人工确认闸。
+# [Change Log]
+# Date: 2026-10-10 | Author: Claude Opus 5.5 | Version: V2.891
+# Description: 「立即扫描」真做到约 1 分钟内开始——计划任务改成【每分钟】拉起本脚本，但绝大多数时候只做一件极轻的事：
+#   问服务器一句「有没有人点立即扫描」。没人点、也没到整点那一轮 → 立刻退出，不碰共享盘、不回报、不写任何文件。
+#   真去扫共享盘只在三种时候：① 有人点了立即扫描 ② 每小时整点那一轮（和以前一样）③ 上一轮有月份还在等文件稳定。
+#   另修：以前出纳刚改完文件就点立即扫描，本轮只会记一句「内容仍在变」然后跳过，要到下一轮才推——
+#   现在有人点了就隔 5 秒再看一眼，文件没在变就当轮直接推。
+#   手工验证/想马上整盘扫一次：加 -Full。
+
+param([switch]$Full)
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
@@ -14,6 +24,7 @@ $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path
 $INI = Join-Path $HERE 'bank_pull.ini'
 $LOGF = Join-Path $HERE 'bank_pull.log'
 $STATEF = Join-Path $HERE 'bank_pull_state.json'
+$ERRF = Join-Path $HERE 'bank_pull_lasterr.txt'
 
 function Write-Log([string]$msg) {
     $line = '{0}  {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
@@ -23,6 +34,17 @@ function Write-Log([string]$msg) {
         if (Test-Path -LiteralPath $LOGF) { $old = @(Get-Content -LiteralPath $LOGF -Encoding UTF8 -EA SilentlyContinue | Select-Object -Last 1999) }
         ($old + $line) | Out-File -LiteralPath $LOGF -Encoding utf8
     } catch {}
+}
+
+# 每分钟跑一次以后，「连不上服务器」「共享盘没连上」这类错会一分钟一条，一天半就把 2000 行日志冲光。
+# 这类错同一个钟点、同一种只往日志里记一条（屏幕上照常每次都显示，手工跑时看得见）。$kind 用纯英文短词区分是哪种错。
+function Write-LogHourly([string]$kind, [string]$msg) {
+    $tag = (Get-Date -Format 'yyyyMMddHH') + '|' + $kind
+    $last = ''
+    try { if (Test-Path -LiteralPath $ERRF) { $last = ([string](Get-Content -LiteralPath $ERRF -Raw -EA SilentlyContinue)).Trim() } } catch {}
+    if ($last -eq $tag) { Write-Output $msg; return }
+    Write-Log $msg
+    try { $tag | Out-File -LiteralPath $ERRF -Encoding ascii } catch {}
 }
 
 function Read-Ini {
@@ -89,7 +111,18 @@ function Get-DirSig([string]$dir) {
     return $sig
 }
 
+function Test-SameSig($a, $b) {
+    if (-not $a -or -not $b -or $a.Count -ne $b.Count) { return $false }
+    foreach ($k in $b.Keys) { if ($a[$k] -ne $b[$k]) { return $false } }
+    return $true
+}
+
+# 回报统一带上：脚本版本 v=2（服务器据此知道这台是「每分钟来问」的新版）、这轮是不是有人点的、认领的是哪条留话。
+# 服务器只清编号对得上的那条留话——扫到一半又有人点的那条不会被这次回报顺手清掉。
 function Send-Report($cfg, $payload) {
+    $payload['v'] = 2
+    $payload['forced'] = [bool]$script:forced
+    $payload['want_id'] = [string]$script:wantId
     try { [void](Invoke-ApiJson $cfg '/api/bank-pull/report' $payload) }
     catch { Write-Log ('[!] 回执没发出去（不影响已推文件）：' + $_.Exception.Message) }
 }
@@ -97,22 +130,19 @@ function Send-Report($cfg, $payload) {
 # ───────────────────────── 主流程 ─────────────────────────
 $cfg = Read-Ini
 $defaultYear = if ($cfg.year -match '^\d{4}$') { [int]$cfg.year } else { $null }
-if (-not (Test-Path -LiteralPath $cfg.src_root)) {
-    Write-Log ('[X] 源目录不存在：{0} —— 共享盘没连上？先在资源管理器里打开确认。' -f $cfg.src_root); exit 1
-}
 
-# 页面点了「立即扫描」→ 本轮忽略稳定期直推
-$forced = $false
+# ① 每分钟先问一句：页面上有没有人点「立即扫描」（响应极小）
+$forced = $false; $wantId = ''
 try {
     $pend = Invoke-ApiJson $cfg '/api/bank-pull/pending' $null
     $forced = [bool]$pend.pending
+    $wantId = [string]$pend.id
 } catch {
     $code = $_.Exception.Response.StatusCode.value__
-    if ($code -eq 401 -or $code -eq 403) { Write-Log "[X] 服务器拒绝（HTTP $code）：取件码不对，或服务器没配 pull_token。" }
-    else { Write-Log ('[X] 连不上服务器 {0}：{1}' -f $cfg.server, $_.Exception.Message) }
+    if ($code -eq 401 -or $code -eq 403) { Write-LogHourly 'token' "[X] 服务器拒绝（HTTP $code）：取件码不对，或服务器没配 pull_token。" }
+    else { Write-LogHourly 'server' ('[X] 连不上服务器 {0}：{1}' -f $cfg.server, $_.Exception.Message) }
     exit 1
 }
-if ($forced) { Write-Log '收到「立即扫描」请求，本轮忽略稳定期直接推' }
 
 # 读状态（PSCustomObject → hashtable）
 $state = @{}
@@ -131,6 +161,25 @@ if (Test-Path -LiteralPath $STATEF) {
     } catch { $state = @{} }
 }
 
+# ② 这一分钟要不要真去扫共享盘：有人点了 / 到了整点那一轮（本钟点还没扫过）/ 上轮有月份在等文件稳定 / 手工加了 -Full。
+#    都不是就立刻退出——不碰共享盘、不回报、不写文件，所以每分钟跑一次也不费事。
+if (-not $state.ContainsKey('_meta')) { $state['_meta'] = @{} }
+$meta = $state['_meta']
+$hourKey = Get-Date -Format 'yyyyMMddHH'
+$due = ([string]$meta['last_hour'] -ne $hourKey) -or [bool]$meta['recheck']
+if (-not ($forced -or $due -or $Full)) {
+    Write-Output '没人点「立即扫描」，也没到整点那一轮，这次不扫。（要马上整盘扫一次：加 -Full）'
+    exit 0
+}
+if ($forced) { Write-Log '收到「立即扫描」请求，本轮不等稳定期、直接推' }
+
+if (-not (Test-Path -LiteralPath $cfg.src_root)) {
+    Write-LogHourly 'share' ('[X] 源目录不存在：{0} —— 共享盘没连上？先在资源管理器里打开确认。' -f $cfg.src_root)
+    # 有人在页面上等着：把「共享盘连不上」回报回去，别让他干等。整点那轮照旧不回报（不回报久了页面才会亮红灯、发停机告警）。
+    if ($forced) { Send-Report $cfg @{ scanned = 0; pushed = 0; committed = @(); waiting = @(); host = $env:COMPUTERNAME; error = ('取件机连不上共享盘：' + $cfg.src_root) } }
+    exit 1
+}
+
 # 枚举月份目录
 $months = @{}
 Get-ChildItem -LiteralPath $cfg.src_root -Directory -EA SilentlyContinue | ForEach-Object {
@@ -139,36 +188,50 @@ Get-ChildItem -LiteralPath $cfg.src_root -Directory -EA SilentlyContinue | ForEa
 }
 if ($months.Count -eq 0) {
     Write-Log ('源目录下没有可识别的月份文件夹（如「6月流水」「2026年08月」）：' + $cfg.src_root)
-    Send-Report $cfg @{ scanned = 0; pushed = 0; committed = @(); waiting = @(); note = '无月份目录' }
+    Send-Report $cfg @{ scanned = 0; pushed = 0; committed = @(); waiting = @(); host = $env:COMPUTERNAME; note = '无月份目录'; error = ('共享盘目录下没有认得出月份的文件夹：' + $cfg.src_root) }
+    # 记下「这个钟点扫过了」，否则下一分钟又当成该扫、每分钟回报一次
+    $meta['last_hour'] = $hourKey; $meta['recheck'] = $false
+    try { $state | ConvertTo-Json -Depth 6 | Out-File -LiteralPath $STATEF -Encoding utf8 } catch {}
     exit 0
 }
 
 $pushedTotal = 0; $committed = @(); $waiting = @()
-$now = [int][double]::Parse((Get-Date -UFormat %s))
+$recheck = $false   # 有月份还在等文件稳定 → 下一分钟接着看，稳了就推（不必再等一整个钟点）
 foreach ($key in ($months.Keys | Sort-Object)) {
     $d = $months[$key]
     $sig = Get-DirSig $d
     if ($sig.Count -eq 0) { continue }
     if (-not $state.ContainsKey($key)) { $state[$key] = @{} }
     $st = $state[$key]
+    $now = [int][double]::Parse((Get-Date -UFormat %s))
 
     # 稳定期：签名与上轮完全一致，且保持 settle_minutes 分钟 → 认定"齐了"
-    $prevSig = $st['sig']
-    $same = $false
-    if ($prevSig -and $prevSig.Count -eq $sig.Count) {
-        $same = $true
-        foreach ($k2 in $sig.Keys) { if ($prevSig[$k2] -ne $sig[$k2]) { $same = $false; break } }
-    }
-    if (-not $same) {
+    if (-not (Test-SameSig $st['sig'] $sig)) {
         $st['sig'] = $sig; $st['seen_at'] = $now; $st['committed'] = $false
-        $waiting += ('{0}（内容仍在变，重新计时）' -f $key); continue
+        $go = $false
+        if ($forced) {
+            # 人点了「立即扫描」＝他说出纳改完了，不让他等 10 分钟稳定期；但隔 5 秒再看一眼，
+            # 文件还在变（正在往里拷）就不推半截的，照常走稳定期，稳了自动推。
+            Start-Sleep -Seconds 5
+            $sig2 = Get-DirSig $d
+            if (Test-SameSig $sig $sig2) { $go = $true }
+            else { $sig = $sig2; $st['sig'] = $sig2; $st['seen_at'] = [int][double]::Parse((Get-Date -UFormat %s)) }
+        }
+        if (-not $go) {
+            $recheck = $true
+            if ($forced) { $waiting += ('{0}（文件正在写入，没推半截的；写完后约 {1} 分钟内自动推，或写完再点一次）' -f $key, $cfg.settle_minutes) }
+            else { $waiting += ('{0}（文件有变化，等 {1} 分钟不再变就推）' -f $key, $cfg.settle_minutes) }
+            continue
+        }
+    } else {
+        $settled = $forced -or ($st['seen_at'] -and ($now - [int]$st['seen_at']) -ge $cfg.settle_minutes * 60)
+        if (-not $settled -and -not $st['committed']) {
+            $left = [int]($cfg.settle_minutes * 60 - ($now - [int]$st['seen_at']))
+            $recheck = $true
+            $waiting += ('{0}（稳定中，约 {1} 秒后可推）' -f $key, [Math]::Max(0, $left)); continue
+        }
+        if ($st['committed'] -and -not $forced) { continue }
     }
-    $settled = $forced -or ($st['seen_at'] -and ($now - [int]$st['seen_at']) -ge $cfg.settle_minutes * 60)
-    if (-not $settled -and -not $st['committed']) {
-        $left = [int]($cfg.settle_minutes * 60 - ($now - [int]$st['seen_at']))
-        $waiting += ('{0}（稳定中，约 {1} 秒后可推）' -f $key, [Math]::Max(0, $left)); continue
-    }
-    if ($st['committed'] -and -not $forced) { continue }
 
     # 推该月文件（增量：与已推签名一致的跳过）
     if (-not $st['pushed_sig']) { $st['pushed_sig'] = @{} }
@@ -200,6 +263,7 @@ foreach ($key in ($months.Keys | Sort-Object)) {
     } catch { Write-Log ('   [X] commit 失败 {0}：{1}' -f $key, $_.Exception.Message) }
 }
 
+$meta['last_hour'] = $hourKey; $meta['recheck'] = $recheck
 try { $state | ConvertTo-Json -Depth 6 | Out-File -LiteralPath $STATEF -Encoding utf8 } catch {}
 
 if ($pushedTotal -or $committed.Count -or $waiting.Count -or $forced) {

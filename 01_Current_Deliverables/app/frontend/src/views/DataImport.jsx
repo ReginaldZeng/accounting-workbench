@@ -1,3 +1,7 @@
+// [Change Log] Date:2026-10-10 Author:Claude Opus 5.5 Version:V2.891
+// 「立即扫描共享盘」说实话＋看得见进度：点完显示「已留话，等取件机来取 → 取件机已取走正在扫 → 扫完了（推了几个文件/接入了哪个月）」，
+// 扫完自动刷新本页数据。多久能开始按那台取件机的实际情况写：新版每分钟来问（约 1 分钟内）、老版每小时整点、停了就不会来。
+// 卡片状态改读实时接口（/api/bank-pull/status），不再用 data-sources 缓存里那份可能过时的。
 // [Change Log] Date:2026-09-06 Author:Claude/c Version:V2.494
 // 取件机停机钉钉告警：卡片加「🔔停机钉钉告警」收件人配置（前端配手机号，停了自动发风控AI机器人钉钉）。
 // [Change Log] Date:2026-09-06 Author:Claude/c Version:V2.486
@@ -9,7 +13,7 @@
 // [Change Log] Date:2026-07-04 Author:Claude/c Version:V1.3
 // 数据接入页（四步工作流第1步，独立成页）：银行流水来源(导入目录+解析清单) / 金蝶序时账 / 每家银行覆盖对照。
 import React, { useEffect, useState } from 'react'
-import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee, confirmBankDup, requestBankScan, setBankAlertRecipients } from '../api.js'
+import { getDataSources, syncDataSources, setConfig, getConfig, uploadBankZip, refreshKingdee, confirmBankDup, requestBankScan, getBankPullStatus, setBankAlertRecipients } from '../api.js'
 import Steps from '../components/Steps.jsx'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
@@ -26,6 +30,9 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
   const [msg, setMsg] = useState(null)
   const [dupOpen, setDupOpen] = useState(false), [dupBusy, setDupBusy] = useState(false)
   const [scanBusy, setScanBusy] = useState(false), [scanMsg, setScanMsg] = useState('')
+  // 「立即扫描」是给取件机留话：want＝那条留话的现状（{at,by,picked_at}，没留话为 null）；
+  // bpLive＝取件机最近一轮的实时回报；scanDone＝这次留话扫完后的那轮回报（只在本次打开页面期间显示）
+  const [want, setWant] = useState(null), [bpLive, setBpLive] = useState(null), [scanDone, setScanDone] = useState(null)
   const [alertOpen, setAlertOpen] = useState(false), [alertMob, setAlertMob] = useState(''), [alertMsg, setAlertMsg] = useState('')
   useEffect(() => { if (d && d.bank_pull_alert_mobiles) setAlertMob((d.bank_pull_alert_mobiles || []).join('，')) }, [d && d.bank_pull_alert_mobiles])
   useEffect(() => { getDataSources().then(x => { _cache = x; setD(x) }).catch(() => {}) }, [cfg.source, cfg.year, cfg.period])
@@ -65,10 +72,44 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
     finally { setRef(false) }
   }
   const doScan = async () => {
-    setScanBusy(true); setScanMsg('')
-    try { const r = await requestBankScan(); setScanMsg(r.msg || (r.ok ? '已通知取件机' : '通知失败')) }
-    catch (e) { setScanMsg('通知失败：' + String(e)) } finally { setScanBusy(false) }
+    setScanBusy(true); setScanMsg(''); setScanDone(null)
+    try {
+      const r = await requestBankScan()
+      if (r.ok) setWant(r.want || { at: '', by: '', picked_at: '' })
+      else setScanMsg('⚠ ' + (r.msg || '留话失败'))
+    } catch (e) { setScanMsg('⚠ 留话失败：' + String(e)) } finally { setScanBusy(false) }
   }
+  // 进页面先读一次取件机实时状态（有没有还挂着的留话）
+  const pullOn = !!(d && d.pull_enabled)
+  useEffect(() => {
+    if (!pullOn) return
+    getBankPullStatus().then(s => { if (s && s.ok) { setBpLive(s.bank_pull || null); setWant(s.want || null) } }).catch(() => {})
+  }, [pullOn, cfg.source, cfg.year, cfg.period])
+  // 留话挂着就盯着：取件机取走没、扫完没。留话没了＝这轮扫完了 → 记下结果、刷新本页数据。
+  // 每分钟来问的取件机 3 秒看一次；每小时才来的那种 20 秒看一次就够。
+  const waiting = !!want
+  useEffect(() => {
+    if (!waiting) return
+    let stop = false, timer = null
+    const tick = async () => {
+      let gap = 3000
+      try {
+        const s = await getBankPullStatus()
+        if (stop) return
+        setBpLive(s.bank_pull || null)
+        if (!s.want) {
+          setWant(null); setScanDone(s.bank_pull || {})
+          try { const x = await getDataSources(); _cache = x; setD(x); await syncStatus() } catch (e) {}
+          return
+        }
+        setWant(s.want)
+        if (!(s.bank_pull && s.bank_pull.fast)) gap = 20000
+      } catch (e) { gap = 20000 }
+      if (!stop) timer = setTimeout(tick, gap)
+    }
+    timer = setTimeout(tick, 3000)
+    return () => { stop = true; clearTimeout(timer) }
+  }, [waiting])
   const doSaveAlert = async () => {
     setAlertMsg('')
     try {
@@ -184,10 +225,12 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
           </div>
         </details>
 
-        {/* 取件机自动接入（V2.486）：出纳把流水放共享盘，取件机每小时扫→推给服务器→自动解析定格。
-            服务器进不了内网，此按钮只是"留个话"，取件机下轮来问时看到就立即扫（延迟＝取件机轮询间隔）。 */}
+        {/* 取件机自动接入（V2.486）：出纳把流水放共享盘，取件机每小时整点扫→推给服务器→自动解析定格。
+            服务器进不了内网，此按钮只是"留个话"；新版取件机每分钟来问一次留话（V2.891），所以点完约 1 分钟内开始。
+            老版每小时整点才来问——页面按那台机器的实际情况（bp.fast）写等多久，不许诺做不到的"马上"。 */}
         {kd && d && d.pull_enabled && (() => {
-          const bp = d.bank_pull, alive = bp && bp.alive
+          const bp = bpLive || d.bank_pull, alive = bp && bp.alive, fast = !!(bp && bp.fast)
+          const nextHour = String((new Date().getHours() + 1) % 24).padStart(2, '0') + ':00'
           // 三态：在跑=绿(呼吸灯)｜停/未部署=红色告警(取件机停了数据就不流，得有人去查那台内网电脑)
           const down = !alive
           const agoTxt = bp && bp.ago_sec != null ? (bp.ago_sec < 90 ? '刚刚' : bp.ago_sec < 3600 ? Math.round(bp.ago_sec / 60) + ' 分钟前' : Math.round(bp.ago_sec / 3600) + ' 小时前') : ''
@@ -204,8 +247,9 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
                 border: '1px solid ' + (alive ? 'var(--green-line)' : 'var(--red-line, #e6b8b8)') }}>
                 {alive ? '● 在跑' : (bp ? '⚠ 可能已停' : '⚠ 未部署')}</span>
               <button className="btn btn-pri" style={{ marginLeft: 'auto', height: 34, fontSize: 13, fontWeight: 600, padding: '0 16px' }}
-                onClick={doScan} disabled={scanBusy || !canUpload}
-                title={!canUpload ? '需「上传资金流水」权限' : ''}>{scanBusy ? '通知中…' : '↻ 立即扫描共享盘'}</button>
+                onClick={doScan} disabled={scanBusy || !canUpload || !!want}
+                title={!canUpload ? '需「上传资金流水」权限' : ''}>
+                {scanBusy ? '留话中…' : want ? (want.picked_at ? '取件机正在扫…' : '已留话，等取件机来取…') : '↻ 立即扫描共享盘'}</button>
             </div>
             <div style={{ marginTop: 7, fontSize: 12, color: 'var(--ink-2)', lineHeight: 1.7 }}>
               {bp
@@ -220,11 +264,33 @@ export default function DataImport({ cfg, onChange, onPeriod, onNav, user }) {
                   期间可照旧用上方①手工上传流水包兜底。
                 </div>
               : <div style={{ marginTop: 4, fontSize: 12, color: 'var(--ink-3)' }}>
-                  💡 <b>发现数据有误、让出纳更新共享盘后，点右上「立即扫描共享盘」即可马上重新接入</b>，不必等每小时那轮（服务器进不了内网，此按钮是留个话，取件机下一轮来问时立即扫）。
+                  {fast
+                    ? <>💡 <b>发现数据有误、让出纳更新共享盘后，点右上「立即扫描共享盘」，约 1 分钟内开始重新接入</b>，不必等每小时整点那轮（服务器进不了内网，按钮是给取件机留话；它每分钟来问一次）。</>
+                    : <>💡 发现数据有误、让出纳更新共享盘后，可点右上「立即扫描共享盘」留话。<b style={{ color: 'var(--amber)' }}>这台取件机现在每小时整点才来问一次，点了也要等到下一个整点才开始</b>；管理员给取件机换上新版脚本、重新注册一次计划任务后，约 1 分钟内开始。</>}
                 </div>}
             {(bp && (bp.waiting || []).length > 0) &&
               <div style={{ marginTop: 6, fontSize: 12, color: 'var(--ink-3)' }}>等待中：{(bp.waiting || []).join('；')}</div>}
-            {scanMsg && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>{scanMsg}</div>}
+            {/* 留话进度三态：等它来取 → 已取走正在扫 → 扫完了。每一态都写明现在卡在哪、还要等多久 */}
+            {want && !want.picked_at && <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--amber)', fontWeight: 600, lineHeight: 1.7 }}>
+              ⏳ 已留话{want.by ? `（${want.by} ${want.at}）` : ''}，等取件机来取——
+              {!alive ? '但取件机没在跑，它不来问就不会扫。请先检查那台内网电脑，或用上方①手工上传。'
+                : fast ? '它每分钟来问一次，约 1 分钟内开始。'
+                  : `这台取件机现在每小时整点才来问一次，最快 ${nextHour} 开始。`}
+            </div>}
+            {want && want.picked_at && <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--green)', fontWeight: 600, lineHeight: 1.7 }}>
+              🔄 取件机已在 {want.picked_at} 取走这条留话，正在扫共享盘、往上推文件…（文件多时要几分钟；扫完本页自动更新，不用刷新）
+            </div>}
+            {!want && scanDone && (scanDone.error
+              ? <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--red)', fontWeight: 600, lineHeight: 1.7 }}>
+                  ⚠ 取件机来过了，但这轮没扫成：{scanDone.error}
+                </div>
+              : <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--green)', fontWeight: 600, lineHeight: 1.7 }}>
+                  ✓ 取件机扫完了{scanDone.at ? `（${scanDone.at}）` : ''}：推上来 {typeof scanDone.pushed === 'number' ? scanDone.pushed : '—'} 个有变化的文件
+                  {(scanDone.committed || []).length > 0
+                    ? <>；已重新接入：{(scanDone.committed || []).join('；')}</>
+                    : <>；<span style={{ color: 'var(--amber)' }}>这轮没有哪个月被重新接入{(scanDone.waiting || []).length > 0 ? '，原因见上面「等待中」' : ''}</span></>}
+                </div>)}
+            {scanMsg && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--red)', fontWeight: 600 }}>{scanMsg}</div>}
 
             {/* 停机钉钉告警收件人（前端配）：停了自动发钉钉给这些人，不必盯着页面 */}
             <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--line)' }}>
