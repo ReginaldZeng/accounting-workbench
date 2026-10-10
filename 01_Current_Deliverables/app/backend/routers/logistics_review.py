@@ -4813,6 +4813,52 @@ def _xl_find(maps, src_sheet, src_row, doc_no, target, heads, used, scales=(1.0,
     return None
 
 
+def _xl_rowof(maps, src_sheet, src_row, doc_no, amount, used):
+    """一行账单在原账单页的哪一行 → (页, 行号) / None。解析时记了行号的用行号；没记的按金蝶单号找，同一单号有几行的挑金额对得上、还没用过的那行。"""
+    want = ("原账单-" + re.sub(r"[\\/*?:\[\]]", "_", str(src_sheet or "")))[:31]
+    for mp in maps:
+        if not (mp["title"] == want or mp["title"].startswith(want[:27])):
+            continue
+        if src_row and int(src_row) > mp["hrow"] and int(src_row) in mp["rows"]:
+            dv = str(mp["rows"][int(src_row)].get(mp["dcol"]) or "").strip() if mp["dcol"] else ""
+            if not (doc_no and dv and str(doc_no) not in dv):
+                return mp, int(src_row)
+        cand = [i for i in mp["docrows"].get(str(doc_no or ""), []) if (mp["title"], i) not in used]
+        if amount is not None:
+            hit = [i for i in cand if any(_xl_num(v) is not None and abs(_xl_num(v) - amount) < 0.005 for v in mp["rows"][i].values())]
+            cand = hit or cand
+        if len(cand) >= 1 and (len(cand) == 1 or amount is not None):
+            return mp, cand[0]
+    return None
+
+
+def _xl_unit_price(mp, ri):
+    """这一行账单自己写的 单价×计费量＝哪一项金额 → (量的列, 单价的列, 金额的列) / None。只认表头带「单价」的列；量从件数/重量那些列里找；
+    金额要等于 量×单价(差 1 分以内)，有几格都相等的取单价右边最近的那格。"""
+    row = mp["rows"].get(ri) or {}
+    inv = {}
+    for h, cs in mp["hdr"].items():
+        for c in cs:
+            inv[c] = h
+    pcols = [c for c, h in inv.items() if "单价" in h and _xl_num(row.get(c)) not in (None, 0)]
+    qnames = {_xl_norm(h) for h in _XL_WT_H + _XL_QTY_H + ("天数", "计费数量", "吨重", "到货箱数", "实际重量", "数量(箱）", "重量/T")}
+    qcols = [c for c, h in inv.items() if h in qnames and _xl_num(row.get(c)) not in (None, 0)]
+    best = None
+    for pc in sorted(pcols):
+        pv = _xl_num(row.get(pc))
+        for qc in sorted(qcols):
+            qv = _xl_num(row.get(qc))
+            for ac in sorted(row):
+                av = _xl_num(row.get(ac))
+                if ac in (pc, qc) or av in (None, 0) or "单价" in inv.get(ac, "") or ac not in inv:
+                    continue
+                if abs(qv * pv - av) <= 0.011:
+                    key = (0 if ac > pc else 1, abs(ac - pc))
+                    if best is None or key < best[0]:
+                        best = (key, (qc, pc, ac))
+    return best[1] if best else None
+
+
 @router.get("/api/logistics-review/export")
 def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     """导出该承运商本月复核结果 xlsx：费用项汇总 + 逐单/物料级复核明细（按重量承运商=物料级17列）。"""
@@ -5005,7 +5051,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             ("账单·%s原账单" % carrier, "B06A12", "FBF0DA", True, [("运输方式", "_cs")] +
                 [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费量", "_cw")]),
             ("复核数据", "B23B2E", "F8DDD8", False, [("账单量", "bill_amt"), ("账单单位", "bill_unit"),
-                ("金蝶核对量合计", "_kdsum"), ("★差异(账单−金蝶)", "_diff"), ("★公式复算", "_fchk"),
+                ("金蝶核对量合计", "_kdsum"), ("★差异(账单−金蝶)", "_diff"), ("★量的复算", "_fchk"),
+                ("核价依据", "_pbasis"), ("核价对象(账单金额)", "_pamt"), ("标准金额", "_pstd"), ("★价差(账单−标准)", "_pdiff"), ("★价的复算", "_pchk"),
                 ("★计费方式", "mode_cn"), ("★换算系数", "conv"), ("运费(分摊)", "fee"),
                 ("单位运费(元/kg)", "unit_fee"), ("★费比", "ratio"), ("备注", "note"), ("已确认", "_ok")]),
         ]
@@ -5026,7 +5073,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             col += span
         # 单据级列(跨该单所有物料行合并单元格)；物料级列(客户/物料/数量/运费分摊/单位运费/费比/销售额)不合并
         _DOCLVL = {"subject", "carrier", "fee_item", "bizline", "doc_no", "_cs", "_amt", "_cw",
-                   "bill_amt", "bill_unit", "mode_cn", "conv", "note", "_ok", "_kdsum", "_diff", "_fchk"}
+                   "bill_amt", "bill_unit", "mode_cn", "conv", "note", "_ok", "_kdsum", "_diff", "_fchk",
+                   "_pbasis", "_pamt", "_pstd", "_pdiff", "_pchk"}
         def _is_doclvl(k):
             return k in _DOCLVL or k.startswith("_fee:")
         # V2.870(用户看恒茂导出「吨数*19.4对吗」)：一张单账单上拆了几行(恒茂按批次、极鲜达按车次)的，原来按单号并成一块——
@@ -5211,7 +5259,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     ws2.cell(row=s, column=ci).alignment = midv
         ws2.freeze_panes = "F3"
         widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 18, 11, 8, 9, 8, 9, 9, 11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
-                  [10, 8, 12, 12, 10, 14, 9, 10, 12, 8, 16])
+                  [10, 8, 12, 12, 10, 22, 12, 12, 12, 10, 14, 9, 10, 12, 8, 16])
         for i, w in enumerate(widths, 1):
             ws2.column_dimensions[get_column_letter(i)].width = w
     else:
@@ -5322,6 +5370,112 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                             n_formula += 1
         except Exception:
             pass                  # 链接是锦上添花：出任何岔子都保留原来写的数，不让导出失败
+        # 价的核对(V2.902，用户看恒茂导出「不对，除了量，还有价的核对」)：每张单一个「标准金额」和账单金额比，全用公式、指到原账单页的格子。
+        #   依据按有什么用什么：①取数说明里定了算法的(恒茂 吨重×19.4、冷藏 天数×数量×单价；天鹰 吨数×18.5) ②包天包趟按报价(数量×报价)
+        #   ③都没有的，按账单自己写的 单价×计费量(只能说明账单自己算得对，合同价对不对系统里没有资料)。一行都定位不到的写明原因、不写公式。
+        try:
+            maps = _xl_raw_maps(wb)
+            spec_sheets = [sh for sh in ((_load_spec(carrier) or {}).get("sheets") or []) if sh.get("role") == "detail"]
+            mon = str(int(period[5:7])) if len(period) >= 7 and period[5:7].isdigit() else ""
+            if not maps:
+                recs_p = []
+            else:
+                recs_p = recs
+                with db._engine.connect() as c:
+                    bsrc = {r[0]: (r[1], r[2], (r[3] or "").split("+")[0]) for r in c.execute(select(BL.c.id, BL.c.src_sheet, BL.c.src_row, BL.c.doc_no).where(
+                        (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all()}
+            for rc in recs_p:
+                if not rc["d0"]:
+                    continue
+                terms, arefs, std_tot, amt_tot, basis, why, used, kinds, sysbad = [], [], 0.0, 0.0, "", "", set(), set(), ""
+                for y in rc["xs"]:
+                    mt = bsrc.get(y.get("lid"))
+                    yb = braw.get(y.get("lid")) or (None, None, None, None)
+                    try:
+                        ysf = json.loads(yb[1]) if yb[1] else {}
+                    except Exception:
+                        ysf = {}
+                    loc = _xl_rowof(maps, mt[0], mt[1], mt[2], _xl_num(yb[2]), used) if mt else None
+                    if not loc:
+                        why = "原账单页里找不到这一行"
+                        break
+                    mp, ri = loc
+                    used.add((mp["title"], ri))
+                    row = mp["rows"][ri]
+                    sp = next((sh for sh in spec_sheets if sh.get("calc") and intake.match_sheet((sh["name"].replace("{m}", mon) if mon else sh["name"]), mt[0] or "")), None)
+                    tp = y.get("trip") or {}
+                    if sp:                                   # ① 取数说明里定了算法
+                        cal = sp["calc"]
+                        hrow = int(sp.get("header_row", 1))
+                        hr = mp["rows"].get(hrow) or {}
+                        hdr = [intake._s(hr.get(cj)) for cj in range(1, (max(hr) if hr else 0) + 1)]
+                        fcs = [intake.find_col(hdr, f) for f in cal.get("factors", [])]
+                        tc = intake.find_col(hdr, cal["target"])
+                        fvs = [_xl_num(row.get(fc + 1)) if fc is not None else None for fc in fcs]
+                        tv = _xl_num(row.get(tc + 1)) if tc is not None else None
+                        if tc is None or tv is None or any(v is None for v in fvs):
+                            why = "原账单这一行缺「%s」里的数" % cal.get("label", "")
+                            break
+                        rate = float(cal.get("rate", 1))
+                        sv = 1.0
+                        for v in fvs:
+                            sv *= v
+                        sv = round(sv * rate, 2)
+                        if ysf.get("标准") is not None and abs(sv - float(ysf["标准"])) > 0.005:
+                            why = "按原账单的格子复算出来和系统的标准不一样，不写公式"
+                            break
+                        terms.append("ROUND(%s%s,2)" % ("*".join(_xl_ref(mp["title"], ri, fc + 1) for fc in fcs), ("*%g" % rate) if rate != 1 else ""))
+                        arefs.append(_xl_ref(mp["title"], ri, tc + 1))
+                        std_tot += sv; amt_tot += tv
+                        basis = "取数说明：" + cal.get("label", "")
+                        kinds.add("calc")
+                        if "核价差" in ysf:
+                            sysbad = "y"
+                    elif tp.get("price") is not None and tp.get("std") is not None:      # ② 包天包趟按报价
+                        qc = next((cj for h in ("数量", "计费数量", "趟数", "天数") for cj in mp["hdr"].get(_xl_norm(h), []) if _xl_num(row.get(cj)) is not None and abs(_xl_num(row.get(cj)) - float(tp.get("n") or 0)) < 1e-6), None)
+                        ac = next((cj for h in ("运费",) for cj in mp["hdr"].get(_xl_norm(h), []) if _xl_num(row.get(cj)) is not None and abs(_xl_num(row.get(cj)) - float(tp.get("run") or 0)) < 0.005), None)
+                        if qc is None or ac is None:
+                            why = "原账单这一行没找到数量或运费"
+                            break
+                        terms.append("ROUND(%s*%g,2)" % (_xl_ref(mp["title"], ri, qc), float(tp["price"])))
+                        arefs.append(_xl_ref(mp["title"], ri, ac))
+                        std_tot += float(tp["std"]); amt_tot += float(tp.get("run") or 0)
+                        basis = "报价：%s 每%s %s 元 × 数量" % (str(tp.get("car") or ""), tp.get("unit") or "", _fmt_amt(float(tp["price"])))
+                        kinds.add("trip")
+                        if tp.get("ot"):
+                            sysbad = "加班 %s 报价未列价，需确认" % _fmt_amt(float(tp["ot"]))
+                    else:                                    # ③ 账单自己的 单价×计费量
+                        up = _xl_unit_price(mp, ri)
+                        if not up:
+                            why = "账单这一行没有写单价（一口价、起步价之类），系统里也没有合同价，核不了价"
+                            break
+                        qc, pc, ac = up
+                        terms.append("ROUND(%s*%s,2)" % (_xl_ref(mp["title"], ri, qc), _xl_ref(mp["title"], ri, pc)))
+                        arefs.append(_xl_ref(mp["title"], ri, ac))
+                        std_tot += round(_xl_num(row.get(qc)) * _xl_num(row.get(pc)), 2); amt_tot += _xl_num(row.get(ac))
+                        inv = {cj: h for h, cs in mp["hdr"].items() for cj in cs}
+                        basis = "账单自己的 %s×%s＝%s（合同价系统里没有，只核账单算得对不对）" % (inv.get(qc, "量"), inv.get(pc, "单价"), inv.get(ac, "金额"))
+                        kinds.add("unit")
+                s0 = rc["s"]
+                if why or not terms or len(kinds) != 1:
+                    ws2.cell(row=s0, column=col_of_key["_pbasis"], value=why or "这张单几行账单的核价办法不一样，没写公式")
+                    continue
+                kind = next(iter(kinds))
+                tol = 0.05 if kind == "unit" else round(0.01 * len(terms) + 0.004, 3)
+                ws2.cell(row=s0, column=col_of_key["_pbasis"], value=basis)
+                ws2.cell(row=s0, column=col_of_key["_pamt"], value="=" + "+".join(arefs))
+                ws2.cell(row=s0, column=col_of_key["_pstd"], value="=" + "+".join(terms))
+                ws2.cell(row=s0, column=col_of_key["_pdiff"], value="=ROUND(%s%d-%s%d,2)" % (CL["_pamt"], s0, CL["_pstd"], s0))
+                ok_f = abs(round(amt_tot - std_tot, 2)) <= tol + 1e-9
+                if sysbad and sysbad != "y":             # 系统另有话说(加班没有报价)：结论写系统的，不让公式盖过去
+                    ws2.cell(row=s0, column=col_of_key["_pchk"], value=("运费和报价一致；" if ok_f else "运费和报价对不上；") + sysbad)
+                elif ok_f == (not sysbad):               # 公式的结论和系统核价的结论一样才写公式
+                    ws2.cell(row=s0, column=col_of_key["_pchk"], value='=IF(ABS(%s%d)<=%g,"一致","核价不符")' % (CL["_pdiff"], s0, tol))
+                else:
+                    ws2.cell(row=s0, column=col_of_key["_pchk"], value="核价不符" if sysbad else "一致")
+                n_formula += 4
+        except Exception:
+            pass                  # 同上：出岔子就不写价的公式，不让导出失败
     bio = BytesIO(); wb.save(bio)
     fn = "%s_%s_复核结果.xlsx" % (carrier, period)
     return Response(content=bio.getvalue(),
