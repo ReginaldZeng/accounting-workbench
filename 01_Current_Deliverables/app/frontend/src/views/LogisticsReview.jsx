@@ -1008,6 +1008,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
       .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:300px}
       .lrv .dtbl td.concl .sub{white-space:normal;max-width:300px;line-height:1.45;overflow-wrap:anywhere}
+      .lrv .mini td.spec{color:#5E6B78;font-size:11.5px;white-space:nowrap}
       .lrv .dtbl td.concl .sub.tip{cursor:help;text-decoration:underline dotted #B8C4CC;text-underline-offset:3px}
       .lrv .tag{display:inline-block;font-size:10.5px;color:#5E6B78;background:#EEF1F3;border-radius:4px;padding:0 5px;margin-left:5px;vertical-align:1px;font-family:inherit;font-weight:500}
       .lrv .tag.ok{color:var(--ok);background:#DCEFE4}
@@ -1525,18 +1526,20 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                             {Object.entries(x.sub_fees).map(([k, v]) => <span key={k} className="tag">{k} {typeof v === 'number' ? money(v) : v}</span>)}
                             <b className="mono">= {money(x.doc_fee)}</b></div>}
                           {x.n_mat > 0 ? <table className="mini">
-                            <thead><tr><th>物料编码</th><th>物料名称</th><th>往来</th><th className="num">基本单位数量</th><th className="num">金蝶数量</th>
+                            <thead><tr><th>物料编码</th><th>物料名称</th><th>规格</th><th>往来</th><th className="num">基本单位数量</th><th className="num">金蝶数量</th>
                               <th className="num">核对量<small>{x.kd_unit}</small></th><th className="num">分摊运费</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th></tr></thead>
                             <tbody>{x.materials.map((m, i) =>
                               <tr key={i} className={m.is_pack ? 'pack' : ''}>
                                 <td className="mono">{m.code || '—'}</td>
                                 <td>{m.name}{m.is_pack && <span className="tag">包材·不摊运费</span>}</td>
+                                <td className="spec" title="金蝶物料档案里的规格；按箱数核、按体积核时，每箱数量就是从这里读的">{m.spec || <span className="dim">—</span>}</td>
                                 <td>{m.party || <span className="dim">—</span>}</td>
                                 <td className="num">{num(m.base_kg)}<small className="u">{m.kg_unit}</small>
                                   {m.kg_eq != null && <span className="sub" title={`单位换算：1${m.kg_unit}＝${m.kg_per}千克`}>折 {num(m.kg_eq)} 千克</span>}
                                   {m.unit_gap && <span className="sub diffbad">没填单位换算，未计入</span>}</td>
-                                <td className="num">{num(m.base_qty)}<small className="u">{m.base_unit}</small></td>
-                                <td className="num">{num(m.kd)}{m.pack_used != null && <span className="sub" title={`规格折出来是 ${m.pack_spec}/箱，这张按备选箱规算才和账单对上`}>按 {m.pack_used}{m.base_unit}/箱</span>}</td>
+                                <td className="num">{num(m.base_qty)}<small className="u">{m.base_unit}</small>
+                                  {m.box_n != null && m.out_unit !== '箱' && <span className="sub" title="金蝶出库数量 ÷ 规格里的每箱数量">{num(m.out_qty)}{m.out_unit} ÷ {num(m.box_div)} ＝ {num(m.box_n)} 箱</span>}</td>
+                                <td className="num">{num(m.kd)}{m.vol_per != null && m.box_n != null && <span className="sub" title="箱数 × 每箱折多少千克（箱子体积 × 每方千克数）">{num(m.box_n)} 箱 × {m.vol_per}</span>}{m.pack_used != null && <span className="sub" title={`规格折出来是 ${m.pack_spec}/箱，这张按备选箱规算才和账单对上`}>按 {m.pack_used}{m.base_unit}/箱</span>}</td>
                                 <td className="num">{money(m.fee)}</td>
                                 <td className="num">{m.unit_fee == null ? '—' : m.unit_fee}</td>
                                 <td className="num">{m.sales == null ? '—' : money(m.sales)}</td>

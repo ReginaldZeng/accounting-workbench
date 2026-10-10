@@ -2983,9 +2983,8 @@ def _box_docs(rsub, carrier):
                 cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
             conv = round(wbase / kd_sum, 3) if kd_sum else None   # 按重量：换算系数=账单重量÷金蝶重量(毛重比)
             if vol_wt:
-                _vq = {id(m): round(x, 2) for m, x in zip(lines, per)}
-                mkq = lambda m: _vq.get(id(m))                    # 物料行的核对量＝这个物料折出来的体积重
-                mku = lambda m: "千克"
+                mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)      # 「金蝶数量」照金蝶原样(112 盒)；折出来的体积重在「核对量」(V2.893)
+                mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
             else:
                 mkq = lambda m: (float(m.get("基本数量") or 0) if ("千克" in str(m.get("基本单位") or "")) else None)
                 mku = lambda m: m.get("基本单位")
@@ -3190,6 +3189,12 @@ def _box_docs(rsub, carrier):
                     base_kg = float(m.get("基本数量")) if m.get("基本数量") not in (None, "") else None
                 except (TypeError, ValueError):
                     base_kg = None
+                try:        # 规格里的每箱数量、这个物料折成几箱(V2.893：物料表里写出来，人能自己复算)
+                    _bd = pack_used.get(i) or _box_div(m)
+                    _oq = float(m.get("数量件") or 0)
+                    box_n = round(_oq / _bd, 2) if (_bd and _oq and not ispack) else None
+                except (TypeError, ValueError, ZeroDivisionError):
+                    _bd, _oq, box_n = None, 0.0, None
                 mrows.append({**base, "party": m.get("往来") or "", "code": m.get("编码"), "name": m.get("名称"),
                               "base_qty": bq, "base_unit": mku(m),
                               "base_kg": base_kg, "kg_unit": m.get("基本单位"), "is_pack": ispack,
@@ -3197,6 +3202,8 @@ def _box_docs(rsub, carrier):
                               "kg_eq": (round(_m_kg(m, uk), 2) if not _is_kg(m.get("基本单位")) and _m_kg(m, uk) else None),   # 折后千克
                               "kg_per": (uk.get(str(m.get("编码") or "")) if not _is_kg(m.get("基本单位")) else None),
                               "kd": kd or None, "spec": m.get("规格"),
+                              "out_qty": _oq or None, "out_unit": m.get("计价单位") or m.get("基本单位") or "", "box_div": _bd if box_n is not None else None, "box_n": box_n,
+                              "vol_per": (round(vol["per"], 3) if (vol and vol_wt) else None),      # 按体积重核时：每箱折多少千克
                               "pack_spec": (packs_of[i][0] if packs_of else None), "pack_used": pack_used.get(i),   # 规格折出来的箱规 / 这次实际用的备选箱规
                               "fee": fline, "unit_fee": round(fline / kg, 2) if kg else None,
                               "sales": round(sales, 2) if sales is not None else None,
