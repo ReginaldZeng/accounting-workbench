@@ -3235,7 +3235,7 @@ def _box_docs(rsub, carrier):
                 _swok = (wt_rng[0] - 1e-9 <= chg_wt / _sw <= wt_rng[1] + 1e-9) if (wt_rng and _sw) else bool(_sw and abs(chg_wt - _sw) <= max(1.0, 0.02 * _sw))
                 if _swok:
                     sugg = {"mode": "weight", "txt": "账单重量 %s 千克 对 金蝶 %s 千克，在允许范围内" % (_fmt_amt(chg_wt), _fmt_amt(round(_sw, 2)))}
-        # 这张单是拿什么比的、允许差多少(V2.897：导出的复核明细据此把核对量、差异、结论写成公式，人能在表里自己复算)
+        # 这张单是拿什么比的、允许差多少(V2.898：导出的复核明细据此把核对量、差异、结论写成公式，人能在表里自己复算)
         if vol_wt:
             chk = {"kind": "vol", "lwh": vol["lwh"], "k": vol["k"], "tol": round(max(0.05, 0.005 * kd_sum), 4)}
         elif pal_wt:
@@ -4678,7 +4678,7 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
     return ws
 
 
-# ---------- 复核明细：账单数链接原账单页、核对用公式算(V2.897) ----------
+# ---------- 复核明细：账单数链接原账单页、核对用公式算(V2.898) ----------
 # 用户 2026-10-11 看导出的复核明细：「这里可以加一个规格吗，还有账单数可以用公式链接原账单吗。还有复核的那个可以用公式算吗」。
 # 规矩：公式算出来的数必须和系统算的一样才写公式——写之前先在这边按同一个公式算一遍，对得上才写，对不上的照旧写数。
 _XL_AMT_H = ("总运费", "合计费用", "总金额", "含税金额", "金额合计", "费用合计", "总费用", "运费合计", "合计", "金额")
@@ -4990,7 +4990,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         #   分摊运费/单位运费/费比按整单金额等比放大；备注里写明账单上是几行。逐行明细看后面附的原账单页。
         rownum = 3
         ranges = []
-        recs = []                 # 每张单一条：写公式、链接原账单用(V2.897)
+        recs = []                 # 每张单一条：写公式、链接原账单用(V2.898)
         _STATE_TXT = {"ok": "一致", "qtydiff": "数量不符", "miss": "金蝶查无", "price": "核价不符", "info": "", "na": "免核"}
         _byd, _ord = {}, []
         for x in res.get("docs") or []:
@@ -5083,7 +5083,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 rownum += 1
             ranges.append((doc_start, rownum - 1))
             recs.append({"s": doc_start, "e": rownum - 1, "x0": x0, "xs": xs, "n": n, "d0": d0})
-        # —— 核对用公式算(V2.897)：只给「一张单一行账单、状态是一致/数量不符」的写；每条公式写之前先按同一个算法算一遍，和系统的数对得上才写 ——
+        # —— 核对用公式算(V2.898)：只给「一张单一行账单、状态是一致/数量不符」的写；每条公式写之前先按同一个算法算一遍，和系统的数对得上才写 ——
         CL = {k: get_column_letter(ci) for k, ci in col_of_key.items()}
         n_formula = 0
         for rc in recs:
@@ -5231,7 +5231,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 ws3.freeze_panes = "A2"
     if raw_files:
         _attach_raw_sheets(wb, raw_files)
-    # 账单数链接原账单页(V2.897)：复核明细里「账单」那几列和「账单量」，原账单页里找得到同一个数的，换成指过去的公式(点一下就跳到原账单那一格)
+    # 账单数链接原账单页(V2.898)：复核明细里「账单」那几列和「账单量」，原账单页里找得到同一个数的，换成指过去的公式(点一下就跳到原账单那一格)
     if res.get("material"):
         try:
             maps = _xl_raw_maps(wb)
