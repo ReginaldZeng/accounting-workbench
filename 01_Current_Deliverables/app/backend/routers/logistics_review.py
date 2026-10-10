@@ -2730,14 +2730,14 @@ def _pick_packs(cands, target):
     base = [c[0] for c in cands]
     tot0 = sum(base)
     idx = [i for i, c in enumerate(cands) if len(c) > 1]
-    if not idx or not target or len(idx) > 12 or abs(tot0 - target) <= max(1.0, 0.02 * tot0):
+    if not idx or not target or len(idx) > 12 or abs(tot0 - target) < 0.01:      # V2.907：按规格折一箱不差才不碰备选(原来差 2% 以内就不试了)
         return base, []
     best = None
     for combo in product(*[range(len(cands[i])) for i in idx]):
         if not any(combo):
             continue
         tot = tot0 + sum(cands[i][k] - cands[i][0] for i, k in zip(idx, combo))
-        if abs(tot - target) <= max(1.0, 0.002 * tot):
+        if abs(tot - target) < 0.01:                 # V2.907：备选箱规的组合也要一箱不差才认
             key = (sum(1 for k in combo if k), abs(tot - target))
             if best is None or key < best[0]:
                 best = (key, combo)
@@ -3200,7 +3200,7 @@ def _box_docs(rsub, carrier):
                 bill_unit = tu                   # 账单量显示 1 天 / 2 趟
             if decided:
                 pass
-            elif kd_sum and abs(billcnt - kd_sum) <= (lr.qty_tol(kd_sum, True) if (fmode == "box" or vol) else max(1.0, 0.02 * kd_sum)):
+            elif kd_sum and abs(billcnt - kd_sum) <= lr.qty_tol(kd_sum, True):      # V2.907：按箱数核一律一箱不差(原来系统自动判的留着「差 1 箱或 2% 以内」)
                 mode_cn, cnt_state = "整车按箱", "ok"      # 人工指定按箱数核的(V2.886)：50 箱以下必须一箱不差，12 件对 11 箱不算一致
             elif kd_sum and billcnt and 3 <= ratio_tuo <= 60:
                 mode_cn, cnt_state = "打托(托规%s)" % round(ratio_tuo, 1), "na"
@@ -3209,7 +3209,8 @@ def _box_docs(rsub, carrier):
             elif not kd_sum:
                 mode_cn, cnt_state = "无箱规待核", "qtydiff"
             else:
-                mode_cn, cnt_state = "待核", "qtydiff"
+                _fr = any(abs(v - round(v)) > 0.005 for v in per)
+                mode_cn, cnt_state = "箱数对不上：账单 %s、金蝶 %s%s" % (_fmt_amt(billcnt), _fmt_amt(kd_sum), "（金蝶折出来有小数箱，规格里的箱规可能不对）" if _fr else ""), "qtydiff"
             if fmode == "box" and mode_cn == "整车按箱":
                 mode_cn = "箱数一致"
             if pal_n and cnt_state == "ok":
@@ -3284,7 +3285,7 @@ def _box_docs(rsub, carrier):
         elif _rev == "qty":
             chk = {"kind": "qty", "tol": round(lr.qty_tol(kd_sum, True), 4)}
         else:
-            chk = {"kind": "box", "tol": 0.005 if pal_n else round(lr.qty_tol(kd_sum, True) if (fmode == "box" or vol) else max(1.0, 0.02 * kd_sum), 4)}
+            chk = {"kind": "box", "tol": 0.005}
         if not d0:
             mode_cn, cnt_state = "无单据·账单调整", "na"   # 如托盘丢失扣款：只登记不核量
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
@@ -3431,7 +3432,8 @@ def _box_docs(rsub, carrier):
                         _vals, _usd = _pick_packs([c["v"] for c in _flat], bsum)
                         kd = round(sum(_vals), 2)
                         _gnote = _pack_note([(_flat[i]["n"], _flat[i]["p"][_flat[i]["v"].index(_vals[i])], _flat[i]["u"]) for i in _usd])
-                st = "ok" if abs(bsum - kd) <= lr.qty_tol(kd, xs[0].get("_kall") is not None) else "qtydiff"      # _kall 有值＝按件数核的
+                _cnt = xs[0].get("_kall") is not None or (xs[0].get("chk") or {}).get("kind") in ("box", "qty")      # 数个数的(按件数、按箱数)：一个不差(V2.907)
+                st = "ok" if abs(bsum - kd) <= lr.qty_tol(kd, _cnt) else "qtydiff"
                 if st != "ok" and xs[0].get("_kall") is not None and abs(bsum - float(xs[0]["_kall"])) < 0.01:
                     # 按件数核、几行账单合计正好＝这张单全部物料(含包装、同号其他出库单)的件数(V2.878)
                     _gnote += " · 含包装/同号其他出库单 %s 件" % _fmt_amt(float(xs[0]["_kall"]) - kd)
@@ -3440,6 +3442,9 @@ def _box_docs(rsub, carrier):
                     x["kd_sum"] = kd
                     x["state"], x["q_diff"], x["doc_bill_all"] = st, round(bsum - kd, 2), bsum
                     x["mode_cn"] = "本单 %d 行合计 %s%s" % (len(xs), _fmt_amt(bsum), x.get("bill_unit") or "")
+                    if st != "ok" and _cnt:
+                        x["mode_cn"] += "，金蝶 %s，差 %s%s" % (_fmt_amt(kd), ("+" if bsum > kd else "") + _fmt_amt(round(bsum - kd, 2)),
+                                                         "（金蝶折出来有小数箱，规格里的箱规可能不对）" if abs(kd - round(kd)) > 0.005 else "")
                     x["mode_short"] = x["mode_tip"] = ""         # 几行合起来比的，短写法不适用
                     x["mode_cn"] += _gnote
                     _others = sorted({y["doc_no"] for y in xs} - {x["doc_no"]})
