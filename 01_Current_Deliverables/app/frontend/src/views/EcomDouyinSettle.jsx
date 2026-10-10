@@ -230,6 +230,7 @@ function PushPanel({period,shop,canEdit,stamp,notify,onPlan}) {
     act(()=>requestJson(`${BASE}/push/run`,form({period,shop,times:0})),()=>`已开始全部下推，共 ${rounds} 批，在后台进行；这一块会自动刷新进度，可以离开页面。`)}
   const undo=x=>{if(!window.confirm(x.count?`撤回这一批（${count(x.count)} 张应收）？会把金蝶里那张暂存收款单删掉。`:`删掉金蝶里这张没登记的暂存收款单（内码 ${x.fid}）？`))return
     act(()=>requestJson(`${BASE}/push/undo`,form({period,shop,fid:x.fid})),()=>'已撤回，金蝶里的暂存收款单已删除。')}
+  const gone=x=>/撤回|删掉/.test(x.state||'')          // 撤回了、或金蝶里已经没有的批：没有清单可下
   const save=()=>act(()=>requestJson(`${BASE}/push/mode`,form({mode:mode||p.conf.mode,size:size||p.conf.size})),()=>'下推设置已保存。')
   return <section className="ew-panel"><header><h2>下推收款单到金蝶（暂存）</h2><span className="ew-muted">系统只把单子备到“暂存”；保存、提交、审核由会计在金蝶里做，审核时金蝶才核销</span></header>
     <div className="ew-result-status" style={{padding:'12px 18px 0'}}><span className={`ew-order-pill ${on?'ew-pill-ok':'ew-pill-wait'}`}>当前档位：{p.conf.mode_label}</span>
@@ -254,7 +255,8 @@ function PushPanel({period,shop,canEdit,stamp,notify,onPlan}) {
         <span className="ew-muted">业务日期填 {period} 月末；扣款行的费用项目照 8 月抖音收款单填“电商”。推之前系统会到金蝶逐张复核状态，有一张变了就整批不推。</span></div></>
       :<p className="ew-empty">{p.eligible.count?'可以下推的应收都推完了。':'现在没有可以直接下推的应收。'}</p>}
     {p.batches.length>0&&<div className="ew-scroll"><table className="ew-open-table"><thead><tr><th>下推时间</th><th>操作人</th><th className="ew-num">应收张数</th><th className="ew-num">金额</th><th>应收单号</th><th>用时</th><th>金蝶里的现状</th><th>操作</th></tr></thead>
-      <tbody>{p.batches.map(x=><tr key={x.fid}><td>{x.at}</td><td>{x.by}</td><td className="ew-num">{count(x.count)}</td><td className="ew-num">{money(x.total)}</td><td>{x.first} ～ {x.last}</td><td>{x.seconds!=null?`${x.seconds} 秒`:'—'}</td><td>{x.state}{x.number&&<small>{x.number}</small>}</td><td>{x.can_undo?<button disabled={!canEdit||busy} onClick={()=>undo(x)}>撤回</button>:'—'}</td></tr>)}</tbody></table></div>}
+      <tbody>{p.batches.map(x=><tr key={x.fid}><td>{x.at}</td><td>{x.by}</td><td className="ew-num">{count(x.count)}</td><td className="ew-num">{money(x.total)}</td><td>{x.first} ～ {x.last}</td><td>{x.seconds!=null?`${x.seconds} 秒`:'—'}</td><td>{x.state}{x.number&&<small>{x.number}</small>}</td><td>{gone(x)?'—':<button type="button" title="这一批推了哪些应收：源单编号、本次收款金额、平台订单号" onClick={()=>window.open(`${BASE}/push/export?${query({period,shop,fid:x.fid})}`,'_blank')}>下载清单</button>}{x.can_undo&&<> <button disabled={!canEdit||busy} onClick={()=>undo(x)}>撤回</button></>}</td></tr>)}</tbody></table></div>}
+    {p.batches.filter(x=>!gone(x)).length>1&&<p className="ew-padding" style={{paddingTop:10}}><button type="button" onClick={()=>window.open(`${BASE}/push/export?${query({period,shop,fid:p.batches.filter(x=>!gone(x)).map(x=>x.fid).join(',')})}`,'_blank')}>下载全部已推清单（{p.batches.filter(x=>!gone(x)).length} 批）</button></p>}
     {p.other.lines.length>0&&<p className="ew-muted ew-padding" style={{paddingTop:12}}>注意：货款结算以外的账户进出共 ¥ {money(p.other.total)}（{p.other.lines.slice(0,4).map(x=>`${x.name} ${money(x.amount)}`).join('、')}{p.other.lines.length>4?' 等':''}）<b>不在任何一批里</b>，要另外入账；在这之前金蝶账面余额会比流水余额多出这一块。</p>}
   </section>
 }

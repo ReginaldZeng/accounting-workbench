@@ -716,6 +716,44 @@ def returns_notes(bills, index, orders=None):
         b['rnote'] = said + tail
 
 
+def push_export(shop, period, batches, bills):
+    """推了什么：每张应收一行（源单编号、本次收款金额、平台订单号），另附每批收款单的收款明细。
+    batches＝下推记录里还算数的批（没撤回的）；bills＝金蝶应收快照。只推整张蓝字，所以本次收款金额＝应收金额。"""
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font
+    wb = Workbook(write_only=True); bold = Font(bold=True)
+    def head(ws, values):
+        cells = []
+        for v in values:
+            c = WriteOnlyCell(ws, value=v); c.font = bold; cells.append(c)
+        ws.append(cells)
+    by_no = {b['no']: b for b in bills}
+    ws = wb.create_sheet('下推清单')
+    ws.column_dimensions['A'].width = 18; ws.column_dimensions['B'].width = 14; ws.column_dimensions['C'].width = 26
+    for col in 'DEF': ws.column_dimensions[col].width = 20
+    head(ws, ['单据编号/源单编号', '本次收款金额', '旺店通原始单号/订单号', '应收业务日期', '下推时间', '操作人', '金蝶收款单内码'])
+    count, total = 0, []
+    for x in batches:
+        for no in x['bills']:
+            b = by_no.get(no, {})
+            ws.append([no, b.get('amount'), b.get('order', ''), b.get('date', ''), x.get('at', ''), x.get('by', ''), x.get('fid')])
+            count += 1; total.append(b.get('amount') or 0)
+    ws.append(['合计 %d 张' % count, round(math.fsum(total), 2)])
+    ws = wb.create_sheet('收款明细')
+    ws.column_dimensions['A'].width = 22; ws.column_dimensions['B'].width = 14; ws.column_dimensions['C'].width = 14; ws.column_dimensions['D'].width = 60
+    ws.append(['%s · %s 已下推的收款单：每张的收款明细（到账一行 + 一种扣款一行）' % (shop, period)])
+    for x in batches:
+        ws.append([])
+        head(ws, ['%s 下推 · %s · %d 张应收 · 内码 %s' % (x.get('at', ''), x.get('by', ''), x.get('count') or len(x['bills']), x.get('fid'))])
+        head(ws, ['行', '结算方式', '金额', '摘要'])
+        for i, line in enumerate(x.get('lines') or [], 1):
+            ws.append([i, '支付宝' if line.get('kind') == 'cash' else '内部转销', line.get('amount'), line.get('memo', '')])
+        ws.append(['收款明细合计', '', round(math.fsum(l.get('amount') or 0 for l in x.get('lines') or []), 2), '应等于这一批应收合计 %.2f' % (x.get('total') or 0)])
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
+
+
 def category_label(cat, days):
     return CATEGORIES[cat].format(days=days)
 

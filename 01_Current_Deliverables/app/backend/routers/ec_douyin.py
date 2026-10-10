@@ -522,6 +522,23 @@ def push_plan(request: Request, period: str, shop: str):
                     'seconds': round(time.time() - job['started']) if job.get('running') else 0}}
 
 
+@router.get('/push/export')
+def push_list(request: Request, period: str, shop: str, fid: str = ''):
+    """推了什么，下载成 Excel：每张应收一行（源单编号、本次收款金额、平台订单号）+ 每批的收款明细。fid 给了（可以逗号隔开给几个）只出那几批，不给出全部没撤回的。"""
+    user = require(request); selected = check(period, shop)
+    _need(period, shop)
+    with _lock: hit = _cache.get((period, shop))
+    if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
+    want = {int(x) for x in fid.split(',') if x.strip().isdigit()}
+    batches = [b for b in _push_log(period, shop) if not b.get('deleted') and (not want or int(b['fid']) in want)]
+    if not batches: raise HTTPException(404, '没有这一批，或者已经撤回了')
+    db.audit(user['name'], 'ec_douyin_push_export', target='%s %s' % (period, shop), detail='%d 批 %d 张' % (len(batches), sum(len(b['bills']) for b in batches)))
+    name = '抖音已下推清单_%s_%s%s.xlsx' % (selected['name'], period, ('_%s' % batches[0]['at'][:16].replace(':', '').replace(' ', '_')) if len(want) == 1 else '')
+    return Response(model.push_export(selected['name'], period, batches, hit[4]),
+                    media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': "attachment; filename*=UTF-8''%s" % quote(name)})
+
+
 @router.post('/push/mode')
 def push_mode(request: Request, mode: str = Form(''), size: int = Form(0)):
     """改档位 / 每批张数。有电商对账上传 / 跑批权限的人都能改（能点下推的人就能改）；每次改动留痕：谁、什么时候、从什么改成什么。"""
@@ -613,9 +630,8 @@ def _push_do(period, shop, selected, user, job):
             else: x.update(FSETTLETYPEID={'FNumber': _SETTLE_INNER}, F_ora_Base={'FNumber': conf_['base']})
             if eid: x['FEntryID'] = eid
             lines.append(x)
-        remark = '电商工作台下推 · %s %s · %d 张应收%s · 待会计保存审核' % (selected['name'], period, part['count'], (' · 第 %d/%d 张' % (i + 1, len(fids))) if len(fids) > 1 else '')
         try:
-            err = _kd_err(_post_long(s, conf, _DRAFT_SVC, ['AR_RECEIVEBILL', json.dumps({'IsDeleteEntry': 'true', 'Model': {'FID': fids[i], 'FDATE': model.period_end(period), 'FREMARK': remark,
+            err = _kd_err(_post_long(s, conf, _DRAFT_SVC, ['AR_RECEIVEBILL', json.dumps({'IsDeleteEntry': 'true', 'Model': {'FID': fids[i], 'FDATE': model.period_end(period),     # 表头备注不写（业务方 2026-10-10 定）：是哪批、谁推的，看工作台的下推记录和清单
                                                                                                                           'FRECEIVEBILLENTRY': lines}}, ensure_ascii=False)]))
         except Exception as e: err = '请求中断（%s）' % type(e).__name__
         if err: raise drop_all('收款明细没改成功：%s' % err)

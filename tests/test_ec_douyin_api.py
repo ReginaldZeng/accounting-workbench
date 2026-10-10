@@ -338,6 +338,25 @@ class DouyinApiTests(unittest.TestCase):
         finally: self.role[0] = 'admin'
         self.assertEqual(self.db.get_setting('ec_douyin_push')['by'], '测试会计')
 
+    def test_pushed_list_can_be_downloaded_per_batch_and_skips_undone_batches(self):
+        from openpyxl import load_workbook
+        self.up(('DL.csv', settle_csv(FIRST_HALF, SECOND_HALF)))
+        self.sync_ar([self.bill('AR1', '2026-09-22', 29.71, P), self.bill('AR2', '2026-09-01', 10.0, '6917926768823643799')])
+        line = lambda amount: [dict(kind='cash', amount=amount, memo='这批订单结算到账的钱')]
+        self.dy._push_log_save('2026-09', SHOP, [
+            dict(fid=11, at='2026-10-10 15:00:00', by='测试会计', count=1, total=10.0, first='AR2', last='AR2', bills=['AR2'], lines=line(10.0)),
+            dict(fid=12, at='2026-10-10 15:05:00', by='测试会计', count=1, total=29.71, first='AR1', last='AR1', bills=['AR1'], lines=line(29.71), deleted=True)])
+        get = lambda **kw: self.client.get('/api/ec/douyin/push/export', params=dict({'period': '2026-09', 'shop': SHOP}, **kw))
+        r = get()
+        self.assertEqual(r.status_code, 200, r.text)
+        rows = [list(x)[:3] for x in load_workbook(io.BytesIO(r.content))['下推清单'].iter_rows(values_only=True)]
+        self.assertEqual(rows[1:], [['AR2', 10.0, '6917926768823643799'], ['合计 1 张', 10.0, None]])       # 撤回的那批不在清单里
+        self.assertEqual(get(fid='11').status_code, 200)
+        self.assertEqual(get(fid='12').status_code, 404)                                              # 已撤回的批没有清单可下
+        self.role[0] = 'viewer'
+        try: self.assertEqual(get().status_code, 200)                                                 # 只能看的账号也能下载（只读）
+        finally: self.role[0] = 'admin'
+
     # ---- 抽屉里现查金蝶 ----
     def test_order_bills_only_asks_for_known_bills_caches_and_never_leaks_errors(self):
         self.up(('DL.csv', settle_csv(FIRST_HALF)))

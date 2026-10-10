@@ -419,6 +419,21 @@ class DouyinTests(unittest.TestCase):
         self.assertEqual((note['B3R'], note['B4'], note['B5']), ('', '', ''))
         self.assertEqual([b['cat'] for b in bills], ['mismatch', 'overdue', 'transit', 'transit', 'ok', 'no_order'])   # 只加说明，不改分类
 
+    def test_push_export_lists_every_pushed_bill_with_amount_and_platform_order(self):
+        from openpyxl import load_workbook
+        bills = [dict(no='AR1', date='2026-09-01', amount=54.9, order='6955343441722610972'), dict(no='AR2', date='2026-09-02', amount=49.9, order='6955398719026188100'),
+                 dict(no='AR9', date='2026-09-03', amount=10.0, order='6955000000000000009')]
+        batches = [dict(fid=101, at='2026-10-10 15:00:00', by='黄春艳', count=2, total=104.8, bills=['AR1', 'AR2'],
+                        lines=[dict(kind='cash', amount=102.7, memo='这批订单结算到账的钱'), dict(kind='fee', amount=2.1, memo='2026年09月结算单扣款项 平台服务费2.1元')])]
+        wb = load_workbook(io.BytesIO(m.push_export('抖音店', '2026-09', batches, bills)))
+        rows = [list(r) for r in wb['下推清单'].iter_rows(values_only=True)]
+        self.assertEqual(rows[0][:3], ['单据编号/源单编号', '本次收款金额', '旺店通原始单号/订单号'])
+        self.assertEqual([r[:3] for r in rows[1:3]], [['AR1', 54.9, '6955343441722610972'], ['AR2', 49.9, '6955398719026188100']])   # 只列推了的；订单号是文本，不会变成科学计数
+        self.assertEqual(rows[3][:2], ['合计 2 张', 104.8])
+        lines = [list(r) for r in wb['收款明细'].iter_rows(values_only=True)]
+        self.assertIn([1, '支付宝', 102.7, '这批订单结算到账的钱'], lines); self.assertIn([2, '内部转销', 2.1, '2026年09月结算单扣款项 平台服务费2.1元'], lines)
+        self.assertEqual(lines[-1][2], 104.8)
+
     def test_password_zip_is_refused_with_plain_words(self):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w') as z: z.writestr('a.csv', 'x')
