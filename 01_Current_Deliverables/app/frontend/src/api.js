@@ -683,7 +683,7 @@ export const reviewDocMode = (carrier, period, doc_no, mode) => j('/api/logistic
 export const reviewCarryAdj = body => j('/api/logistics-review/carry-adj', { method: 'POST', body: JSON.stringify(body) })
 export const reviewCarrySettle = body => j('/api/logistics-review/carry-settle', { method: 'POST', body: JSON.stringify(body) })
 export const reviewVolKg = (carrier, kg) => j('/api/logistics-review/vol-kg', { method: 'POST', body: JSON.stringify({ carrier, kg }) })
-export const reviewPalletKg = (carrier, kg) => j('/api/logistics-review/pallet-kg', { method: 'POST', body: JSON.stringify({ carrier, kg }) })
+export const reviewPalletKg = (carrier, kg, boxes) => j('/api/logistics-review/pallet-kg', { method: 'POST', body: JSON.stringify(boxes === undefined ? { carrier, kg } : { carrier, kg, boxes }) })
 export const reviewCarrierPointsSet =(carrier, points) => j('/api/logistics-review/carrier-points', { method: 'POST', body: JSON.stringify({ carrier, points }) })
 export const reviewSign = (carrier, period, note = '') => j('/api/logistics-review/sign', { method: 'POST', body: JSON.stringify({ carrier, period, note }) })
 export const reviewUnsign = (carrier, period) => j('/api/logistics-review/unsign', { method: 'POST', body: JSON.stringify({ carrier, period }) })

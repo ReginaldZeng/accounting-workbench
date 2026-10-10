@@ -702,9 +702,14 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   }
   // 按托计费(V2.883)：这家每托折多少千克。账单计费重量是半托整数倍的行，改按箱数核(账单件数 对 金蝶箱数)，不比重量
   const editPallet = () => {
-    const v = window.prompt(`「${carrier}」按托计费：每托折多少千克？\n账单的计费重量是「托数 × 这个数」（半托起算）的单，不比重量，改按箱数核（账单件数 对 金蝶箱数）。\n不按托计费的留空。`, d && d.pallet_kg ? d.pallet_kg : '')
+    const v = window.prompt(`「${carrier}」按托计费 ①：每托折多少千克？\n账单的计重是「托数 × 这个数」（半托起算）。不按托计费的留空。`, d && d.pallet_kg ? d.pallet_kg : '')
     if (v === null) return
-    reviewPalletKg(carrier, v.trim()).then(() => { flash(v.trim() ? `已保存：每托 ${v.trim()} 千克，按新口径重判` : '已取消按托计费'); load() }).catch(e => flash('保存失败：' + e.message))
+    let bx = ''
+    if (v.trim()) {
+      bx = window.prompt(`「${carrier}」按托计费 ②：每托装多少箱？\n填了系统才能核计重：金蝶箱数 ÷ 每托箱数，不足半托按半托算，× 每托千克数 ＝ 应该的计重，和账单计重比。\n不知道就留空，系统只核账单件数和金蝶箱数。`, d && d.pallet_box ? d.pallet_box : '')
+      if (bx === null) return
+    }
+    reviewPalletKg(carrier, v.trim(), String(bx).trim()).then(() => { flash(v.trim() ? `已保存：每托 ${v.trim()} 千克${String(bx).trim() ? '、' + String(bx).trim() + ' 箱' : ''}，按新口径重判` : '已取消按托计费'); load() }).catch(e => flash('保存失败：' + e.message))
   }
   // 按体积计费(V2.888)：这家每方折多少千克。账单行带箱子尺寸的，计重＝件数×每件体积×这个数；填了就复算一遍
   const editVol = () => {
@@ -1420,7 +1425,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {d && d.by_box && <button className="btn sm" onClick={editWt} title="按重量核量时，账单重量÷金蝶净重 落在这个范围内算一致。快递/快运含包装、抛重，一般 1～2；整车用默认（差 2% 以内）。一家一档，各月通用">
               毛重比 {d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认±2%'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={editPallet} title="有的线路按托收费，账单上的计费重量是「托数 × 每托千克数」，不是货的真实重量。填了以后，计费重量是半托整数倍的单改按箱数核（账单件数 对 金蝶箱数）。一家一档，各月通用">
-              按托 {d.pallet_kg ? `${d.pallet_kg} 千克/托` : '未设'} ⚙</button>}
+              按托 {d.pallet_kg ? `${d.pallet_kg} 千克/托${d.pallet_box ? ' · ' + d.pallet_box + ' 箱/托' : ''}` : '未设'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={editVol} title="有的货按体积收费（抛重）：账单计重＝件数 × 箱子体积 × 每方千克数，不是货的净重。账单行带了箱子尺寸的，系统按这里填的数复算计重，件数仍和金蝶箱数比。一家一档，各月通用">
               按体积 {d.vol_kg ? `${d.vol_kg} 千克/方` : '未设'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={() => setUnitDlg(true)} title="金蝶按升、按个计量的物料（牛奶、稀奶油、内袋），填每 1 升/个 折多少千克，才能和账单的千克比。按物料存，各家各月共用。">
