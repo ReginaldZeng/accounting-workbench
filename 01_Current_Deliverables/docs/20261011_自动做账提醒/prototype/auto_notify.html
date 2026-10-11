@@ -1,0 +1,262 @@
+<!doctype html>
+<!--
+[Change Log]
+Date: 2026-10-11
+Author: Claude Opus 5.5
+Version: 样机 v0.1（未开发）
+Description: 「自动做账做完提醒」样机。用户 2026-10-11：「那个自动做账的功能是不是要加一个提醒，就是得提醒对应同事，那些他做了」→「做样机」。
+  纯静态，数据全是编的（承运商名字借了真的，金额、凭证号是编的），只演示三样：
+  ① 付款做账页「自动做账」栏里多出来的「做完通知」一行长什么样；② 同事在钉钉里收到的那条消息怎么写（四种情形可切换）；
+  ③ 什么时候发、什么时候不发。颜色照搬核算工作台 styles.css 的变量，上线后长相以真页面为准。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自动做账提醒 · 样机</title>
+<style>
+:root{
+  --bg:#ffffff; --bg-sub:#fafbfc;
+  --line:#e9ebef; --line-strong:#dcdfe5;
+  --ink:#181b21; --ink-2:#5a616d; --ink-3:#9298a4;
+  --accent:#4b53c4; --accent-soft:#edeefb;
+  --red:#c0392b; --red-bg:#fbecea; --red-line:#e6b7b0;
+  --amber:#a35a00; --amber-bg:#f8f0e0; --amber-line:#e6cfa6;
+  --green:#1f7a55; --green-bg:#e8f4ee; --green-line:#cbe4d5;
+  --gray:#6b7280; --gray-bg:#eef0f3;
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"SF Mono",Consolas,"Cascadia Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:var(--font-sans);font-size:13px;line-height:1.55;color:var(--ink);background:var(--bg-sub);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+
+/* —— 样机控制条（真页面没有这一条） —— */
+.proto{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 16px;background:#22263a;color:#cfd3e6;font-size:12px}
+.proto b{color:#fff;font-weight:600}
+.proto .seg{display:inline-flex;flex-wrap:wrap;gap:4px;padding:3px;border-radius:9px;background:rgba(255,255,255,.08)}
+.proto .seg button{border:0;border-radius:6px;padding:4px 12px;background:transparent;color:#cfd3e6;cursor:pointer}
+.proto .seg button[aria-pressed="true"]{background:#fff;color:#22263a;font-weight:600}
+.proto .note{margin-left:auto;opacity:.75}
+
+.wrap{max-width:1180px;margin:0 auto;padding:18px 16px 40px}
+h1{font-size:19px;margin:4px 0 2px;letter-spacing:.2px}
+.lede{color:var(--ink-2);margin:0 0 16px;max-width:820px}
+.sec{margin-top:22px}
+.sec > h2{font-size:14px;margin:0 0 8px;display:flex;align-items:center;gap:8px}
+.sec > h2 .no{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--ink);color:#fff;font-size:11.5px;font-weight:700}
+.sec > h2 small{font-weight:400;color:var(--ink-3);font-size:12px}
+.grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,.9fr);gap:18px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
+.card{overflow-x:auto}
+.card{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px}
+.dim{color:var(--ink-3)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.new{outline:2px dashed var(--accent);outline-offset:3px;border-radius:8px}
+.newtag{display:inline-block;font-size:11px;font-weight:700;color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:1px 8px;margin-left:6px}
+
+/* —— ① 自动做账栏（照搬真页面 .lv-auto 的样子，只多最后一行） —— */
+.lv-auto{border:1px solid var(--green-line);border-radius:9px;background:var(--green-bg);padding:8px 12px;font-size:12.5px;display:flex;flex-direction:column;gap:7px}
+.lv-auto .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.lv-auto .row.sub{color:var(--ink-2)}
+.lv-auto .ok{color:var(--green)} .lv-auto .bad{color:var(--red)}
+.seg2{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--bg)}
+.seg2 span{font-size:12.5px;padding:4px 12px;color:var(--ink-2);border-right:1px solid var(--line-strong)}
+.seg2 span:last-child{border-right:0}
+.seg2 span.on{font-weight:700;color:#fff;background:var(--green)}
+.ck{display:inline-flex;align-items:center;gap:4px;color:var(--ink-2)}
+.lnk{border:0;background:none;padding:0;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:3px;font-size:12.5px}
+.btn{border:1px solid var(--line-strong);background:var(--bg);border-radius:7px;padding:4px 11px;cursor:pointer;font-size:12.5px}
+.btn:hover{border-color:var(--accent)}
+.sw{position:relative;display:inline-block;width:34px;height:19px;border-radius:999px;background:var(--green);vertical-align:middle;cursor:pointer;border:0}
+.sw::after{content:"";position:absolute;top:2px;left:17px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .15s}
+.sw[aria-checked="false"]{background:#c6cad2}.sw[aria-checked="false"]::after{left:2px}
+.who{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line-strong);background:var(--bg);border-radius:999px;padding:2px 9px 2px 3px;font-size:12.5px}
+.who i{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-style:normal;font-size:11px;font-weight:700}
+.who.off{border-style:dashed;color:var(--ink-3)}.who.off i{background:var(--gray-bg);color:var(--gray)}
+.chip{display:inline-block;font-size:11.5px;border-radius:999px;padding:1px 8px;border:1px solid var(--amber-line);background:var(--amber-bg);color:var(--amber)}
+.rowN{border-top:1px dashed var(--green-line);padding-top:8px}
+.hint{font-size:12px;color:var(--ink-2);margin:10px 2px 0}
+.hint li{margin:2px 0}
+
+/* —— ② 钉钉里收到的样子（示意，不是钉钉真界面） —— */
+.phone{background:#eef0f4;border:1px solid var(--line);border-radius:16px;padding:12px;max-width:430px}
+.phone .bar{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-2);margin-bottom:10px}
+.phone .bar .av{width:30px;height:30px;border-radius:8px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700;font-size:13px}
+.phone .bar b{color:var(--ink);font-size:13px}
+.msg{background:#fff;border-radius:4px 12px 12px 12px;padding:11px 13px;font-size:13px;line-height:1.62;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;box-shadow:0 1px 0 rgba(0,0,0,.04)}
+.msg .t{font-weight:700}
+.msg .g{color:var(--green);font-weight:600}.msg .r{color:var(--red);font-weight:600}.msg .a{color:var(--amber);font-weight:600}
+.msg .s{color:var(--ink-2)}
+.msg .lk{color:var(--accent);text-decoration:underline;text-underline-offset:3px}
+.none{border:1.5px dashed var(--line-strong);border-radius:12px;padding:22px 14px;text-align:center;color:var(--ink-2);background:#fff}
+.time{font-size:11px;color:var(--ink-3);text-align:center;margin:0 0 8px}
+.cap{font-size:12px;color:var(--ink-3);margin-top:8px}
+
+/* —— ③ ④ —— */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}
+th{color:var(--ink-2);font-weight:600;background:var(--bg-sub)}
+td.y{color:var(--green);font-weight:600;white-space:nowrap}td.n{color:var(--ink-3);white-space:nowrap}
+.q{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+.q .card h3{font-size:13px;margin:0 0 6px}
+.q .card p{margin:0 0 6px;color:var(--ink-2)}
+.q .card .rec{color:var(--ink);font-size:12.5px}
+.q .card .rec b{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<div class="proto">
+  <b>样机</b><span>自动做账 · 做完提醒</span>
+  <span class="seg" role="group" aria-label="切换情形">
+    <button data-s="a" aria-pressed="true">都做成了</button>
+    <button data-s="b" aria-pressed="false">里面有红冲更正</button>
+    <button data-s="c" aria-pressed="false">有没做成的</button>
+    <button data-s="d" aria-pressed="false">这一轮没东西可做</button>
+  </span>
+  <span class="note">数据是编的，只看版式和话术 · 还没开发</span>
+</div>
+
+<div class="wrap">
+  <h1>自动做账做完，谁该知道</h1>
+  <p class="lede">系统自动做的付款凭证只提交、不审核。现在做完了不会主动告诉任何人——同事不打开页面就不知道，凭证就没人去金蝶审。
+    这份样机演示加一条钉钉提醒之后的样子：页面上多一行设置，同事手机上多一条消息。上面的按钮可以切四种情形。</p>
+
+  <div class="grid">
+    <!-- ① -->
+    <div class="sec" style="margin-top:0">
+      <h2><span class="no">1</span>付款做账页：「自动做账」栏多一行 <small>虚线框住的是新增的</small></h2>
+      <div class="card">
+        <div class="lv-auto">
+          <div class="row">
+            <b>自动做账</b>
+            <span class="seg2"><span>关</span><span>演练（只算不写）</span><span class="on">真做</span></span>
+            <span class="dim">范围</span>
+            <label class="ck"><input type="checkbox" checked disabled>一致·只核销</label>
+            <label class="ck"><input type="checkbox" checked disabled>尾差·红冲更正</label>
+            <label class="ck"><input type="checkbox" checked disabled>需红冲更正</label>
+            <span class="lnk" style="cursor:default">单笔上限 不限</span>
+            <span class="lnk" style="cursor:default">每轮最多 10 张</span>
+          </div>
+          <div class="row sub" id="lastline"></div>
+          <div class="row rowN new">
+            <b>做完通知</b><span class="newtag">新增</span>
+            <button class="sw" id="sw" role="switch" aria-checked="true" title="开 / 关"></button>
+            <span class="dim">发给</span>
+            <span class="who"><i>吴</i>吴卓文</span>
+            <span class="who"><i>曾</i>曾禹锡</span>
+            <span class="who off" title="这个账号没有认过钉钉身份，钉钉消息发不到"><i>管</i>管理员 · 发不到</span>
+            <span class="dim">＝「付款凭证审核人」</span>
+            <button class="lnk">改处理人</button>
+            <button class="lnk">＋ 另外抄送</button>
+            <span style="flex:1"></span>
+            <button class="btn" id="testbtn">发一条测试</button>
+          </div>
+          <div class="row sub" id="sentline"></div>
+        </div>
+        <ul class="hint">
+          <li><b>发给谁</b>默认跟着「系统设置 › 待办处理人」里的<b>付款凭证审核人</b>走——提醒和首页待办是同一拨人，换人只改一处。</li>
+          <li>没认过钉钉身份的账号会灰着标出来，不会悄悄发不到。</li>
+          <li>「另外抄送」给想知道但不负责审核的人（比如原来手工做这几笔的同事）。</li>
+          <li>「发一条测试」只发给点按钮的人自己，内容写明是测试。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ② -->
+    <div class="sec" style="margin-top:0">
+      <h2><span class="no">2</span>同事在钉钉里收到的 <small>示意，不是钉钉真界面</small></h2>
+      <div class="phone">
+        <div class="bar"><span class="av">衡</span><span><b>星衡智策</b><br>工作通知</span></div>
+        <p class="time" id="mtime"></p>
+        <div id="msgbox"></div>
+      </div>
+      <p class="cap" id="mcap"></p>
+    </div>
+  </div>
+
+  <!-- ③ -->
+  <div class="sec">
+    <h2><span class="no">3</span>什么时候发，什么时候不发</h2>
+    <div class="card" style="padding:4px 6px">
+      <table>
+        <thead><tr><th style="width:38%">情形</th><th style="width:11%">发不发</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>这一轮真做成了至少 1 张</td><td class="y">发</td><td>一轮一条，把这一轮做的全列出来，不是一张一条。</td></tr>
+          <tr><td>这一轮有没做成的（写金蝶报错、付款单已被人审过……）</td><td class="y">发</td><td>哪怕一张都没做成也发，写明哪张、为什么、系统动没动金蝶。</td></tr>
+          <tr><td>这一轮没有够条件的单，或者和上一轮一样</td><td class="n">不发</td><td>每 20 分钟跑一轮，大多数轮次没事可做，发了就是刷屏。</td></tr>
+          <tr><td>「演练」档</td><td class="n">不发</td><td>演练不碰金蝶，没有东西需要人接手。</td></tr>
+          <tr><td>人在页面上自己点「保存到金蝶」做的</td><td class="n">不发</td><td>自己做的自己知道。首页待办照常挂给审核人。</td></tr>
+          <tr><td>有不做的单（计提记错主体、金额不符等，系统不敢自动做）</td><td class="n">不发</td><td>这类一直挂在页面上等人处理；要不要每天汇总提醒一次，见下面第 3 个问题。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ④ -->
+  <div class="sec">
+    <h2><span class="no">4</span>要你定的三件事</h2>
+    <div class="q">
+      <div class="card"><h3>① 发给谁</h3>
+        <p>审核凭证的人，还是原来手工做这几笔的人，还是两边都发。</p>
+        <p class="rec"><b>样机里画的：</b>发给「付款凭证审核人」，另留一个「抄送」口。现在这个环节还没指定人，默认落在管理员、曾禹锡、吴卓文三个账号上。</p></div>
+      <div class="card"><h3>② 红冲更正的要不要单独说</h3>
+        <p>做了红冲更正的，装订时要附计提更正单。消息里要不要把这几张单拎出来、提醒去打印。</p>
+        <p class="rec"><b>样机里画的：</b>拎出来，并写明去哪打印（切到「里面有红冲更正」看）。</p></div>
+      <div class="card"><h3>③ 系统不敢做的，要不要每天提醒一次</h3>
+        <p>计提记错主体、金额不符这类，系统不会自动做，一直挂着。</p>
+        <p class="rec"><b>样机里画的：</b>先不提醒。要的话可以每天早上汇总一条「还有 N 张等人处理」。</p></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// 四种情形的话术。金额、凭证号都是编的。
+var S = {
+  a: {
+    time: "10月11日 14:20",
+    last: '上一轮 2026-10-11 14:20（真做 · 定时）：<b class="ok">做成 3 张</b>，<b>不做 1 张</b>　<span class="lnk" style="cursor:default">看是哪几张、为什么</span>',
+    sent: '上一条通知 14:20 已发给 吴卓文、曾禹锡 · 写了 3 张凭证　<span class="lnk" style="cursor:default">看发了什么</span>',
+    cap: "三张都是「一致·只核销」，同事要做的只有一件事：去金蝶审核。",
+    msg: '<span class="t">【自动做账】刚做了 3 张付款凭证，请到金蝶审核</span>\n<span class="s">10-11 14:20 这一轮 · </span><span class="g">都做成了</span>\n\n① 深圳星期零｜上海顺丰冷运｜17,630.95\n    <span class="mono">记-330</span> · 一致，只核销\n② 深圳星期九｜东莞链盟｜7,100.00\n    <span class="mono">记-87</span> · 一致，只核销\n③ 孝感星期九｜深圳跨越速运｜644.15\n    <span class="mono">记-412</span> · 一致，只核销\n\n<span class="t">接下来</span>\n到金蝶审核这 3 张凭证（系统只提交、不审核）。\n\n<span class="lk">在工作台看这一轮 ›</span>'
+  },
+  b: {
+    time: "10月11日 14:20",
+    last: '上一轮 2026-10-11 14:20（真做 · 定时）：<b class="ok">做成 4 张</b>，<b>不做 1 张</b>　<span class="lnk" style="cursor:default">看是哪几张、为什么</span>',
+    sent: '上一条通知 14:20 已发给 吴卓文、曾禹锡 · 写了 4 张凭证，其中 2 张要打更正单　<span class="lnk" style="cursor:default">看发了什么</span>',
+    cap: "有红冲更正的拎出来放在后面，写清改了什么、要打几张更正单、去哪打。",
+    msg: '<span class="t">【自动做账】刚做了 4 张付款凭证，其中 2 张有红冲更正</span>\n<span class="s">10-11 14:20 这一轮 · </span><span class="g">都做成了</span>\n\n<span class="s">只核销</span>\n① 深圳星期零｜上海顺丰冷运｜17,630.95　<span class="mono">记-330</span>\n② 深圳星期九｜东莞链盟｜7,100.00　<span class="mono">记-87</span>\n\n<span class="a">有红冲更正，要附计提更正单</span>\n③ 深圳星期零｜东莞链盟｜19,820.00　<span class="mono">记-331</span>\n    尾差：<span class="mono">记-378</span> 税额差 0.01，整笔红冲后更正\n④ 孝感星期九｜东莞链盟｜446,295.00　<span class="mono">记-413</span>\n    <span class="mono">记-554</span> 部门由仓储物流部改为茶饮小料部\n\n<span class="t">接下来</span>\n1. 到金蝶审核这 4 张凭证（系统只提交、不审核）。\n2. 打印 2 张计提更正单，装订时附在付款单后面：\n    付款做账 › 打印本月计提更正单\n\n<span class="lk">在工作台看这一轮 ›</span>'
+  },
+  c: {
+    time: "10月11日 14:20",
+    last: '上一轮 2026-10-11 14:20（真做 · 定时）：<b class="ok">做成 2 张</b><b class="bad">　没做成 1 张</b>，<b>不做 1 张</b>　<span class="lnk" style="cursor:default">看是哪几张、为什么</span>',
+    sent: '上一条通知 14:20 已发给 吴卓文、曾禹锡 · 写了 2 张凭证，1 张没做成　<span class="lnk" style="cursor:default">看发了什么</span>',
+    cap: "没做成的放最前面：哪张、为什么、系统有没有动金蝶、要人做什么。标题里也带上。",
+    msg: '<span class="t">【自动做账】做成 2 张，</span><span class="r">1 张没做成，要人处理</span>\n<span class="s">10-11 14:20 这一轮</span>\n\n<span class="r">没做成</span>\n✕ 深圳星期零｜路凯包装设备租赁｜1,002.09\n    付款单已经被人审核过，金蝶已出过凭证。\n    系统没有动这张凭证，要人到金蝶把核销分录补上。\n\n<span class="g">做成了</span>\n① 深圳星期零｜上海顺丰冷运｜17,630.95　<span class="mono">记-330</span> · 只核销\n② 深圳星期九｜东莞链盟｜7,100.00　<span class="mono">记-87</span> · 只核销\n\n<span class="t">接下来</span>\n1. 处理没做成的那 1 张。\n2. 到金蝶审核做成的 2 张凭证（系统只提交、不审核）。\n\n<span class="lk">在工作台看这一轮 ›</span>'
+  },
+  d: {
+    time: "",
+    last: '上一轮 2026-10-11 14:40（真做 · 定时）：<b class="ok">做成 0 张</b>，<b>不做 1 张</b>　<span class="dim">之后 2 轮没有新变化、没重算</span>',
+    sent: '上一条通知 14:20 已发给 吴卓文、曾禹锡 · 写了 3 张凭证　<span class="dim">这一轮没有真做东西，没发</span>',
+    cap: "没有真做任何东西的轮次不发消息。页面上那一行仍然看得到上一次发的是什么。",
+    msg: null
+  }
+};
+function show(k) {
+  var s = S[k];
+  document.querySelectorAll(".proto .seg button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.s === k ? "true" : "false"); });
+  document.getElementById("lastline").innerHTML = "<span>" + s.last + "</span><span class='dim'>计提记错主体、金额不符的不会自动做；凭证不审核，留给人在金蝶审。</span>";
+  document.getElementById("sentline").innerHTML = "<span>" + s.sent + "</span>";
+  document.getElementById("mtime").textContent = s.time;
+  document.getElementById("mcap").textContent = s.cap;
+  document.getElementById("msgbox").innerHTML = s.msg ? '<div class="msg">' + s.msg + "</div>" : '<div class="none">这一轮没有真做任何东西<br><b>不发通知</b></div>';
+}
+document.querySelectorAll(".proto .seg button").forEach(function (b) { b.addEventListener("click", function () { show(b.dataset.s); }); });
+document.getElementById("sw").addEventListener("click", function () { this.setAttribute("aria-checked", this.getAttribute("aria-checked") === "true" ? "false" : "true"); });
+document.getElementById("testbtn").addEventListener("click", function () { this.textContent = "已发给你自己（样机里不会真发）"; });
+show((location.hash || "#a").slice(1) in S ? location.hash.slice(1) : "a");
+</script>
+</body>
+</html>
