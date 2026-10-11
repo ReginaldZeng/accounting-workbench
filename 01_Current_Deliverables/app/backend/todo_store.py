@@ -77,6 +77,15 @@ def _row(r):
 
 
 # ---------------- 记一笔 / 撤回 / 办结 ----------------
+def _dt_kick():
+    """待办有变动：让钉钉待办那边过几秒对一遍账(V2.911)。没打开同步时什么都不做；出任何错都不管。"""
+    try:
+        import todo_dingtalk
+        todo_dingtalk.kick()
+    except Exception:
+        pass
+
+
 def open_item(scene, ref, title, sub="", origin="", bot=False, payload=None, state="", warn="", holder="scene"):
     """记一笔待办（同环节同业务键只有一条）。已有且没办完 → 更新内容、不动「等了多久」的起点；
     已办结/已撤回的又来了（撤了重录、办结后又登记了新的）→ 重新挂上，从现在起算。返回 id。
@@ -94,13 +103,17 @@ def open_item(scene, ref, title, sub="", origin="", bot=False, payload=None, sta
         if ex and ex[1] == "open":
             c.execute(update(todo_item).where(todo_item.c.id == ex[0])
                       .values(**base, **{k: v for k, v in shown.items() if v is not None}))
-            return ex[0]
-        fresh = dict(base, status="open", created_ts=now, done_ts="", done_by="", done_how="", checked_ts="", check_msg="",
-                     sub=str(sub or ""), warn=str(warn or ""), state=str(state or "")[:200], holder=shown["holder"] or "scene")
-        if ex:
-            c.execute(update(todo_item).where(todo_item.c.id == ex[0]).values(**fresh))
-            return ex[0]
-        return c.execute(insert(todo_item).values(scene=scene, ref=ref, **fresh)).inserted_primary_key[0]
+            rid = ex[0]
+        else:
+            fresh = dict(base, status="open", created_ts=now, done_ts="", done_by="", done_how="", checked_ts="", check_msg="",
+                         sub=str(sub or ""), warn=str(warn or ""), state=str(state or "")[:200], holder=shown["holder"] or "scene")
+            if ex:
+                c.execute(update(todo_item).where(todo_item.c.id == ex[0]).values(**fresh))
+                rid = ex[0]
+            else:
+                rid = c.execute(insert(todo_item).values(scene=scene, ref=ref, **fresh)).inserted_primary_key[0]
+    _dt_kick()
+    return rid
 
 
 def finish(item_id, by="", how="", status="done"):
@@ -109,6 +122,8 @@ def finish(item_id, by="", how="", status="done"):
         n = c.execute(update(todo_item).where((todo_item.c.id == int(item_id)) & (todo_item.c.status == "open"))
                       .values(status=status, done_ts=_now(), done_by=str(by or "")[:50], done_how=str(how or "")[:200],
                               updated_ts=_now())).rowcount
+    if n:
+        _dt_kick()
     return bool(n)
 
 
@@ -217,6 +232,8 @@ def set_assignees(mapping, operator):
             changes.append((scene, old.get(scene) or [], names))
         new[scene] = names
     db.set_setting(ASSIGN_KEY, new, operator)
+    if changes:
+        _dt_kick()                       # 换了处理人：钉钉待办跟到新人名下
     return changes
 
 

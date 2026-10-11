@@ -201,6 +201,7 @@ export const getOfficeScreen = token => j('/api/office/screen', { headers: { 'X-
 export const getOfficeRuns = desk => j('/api/office/runs?desk=' + encodeURIComponent(desk))
 export const getOfficeToken = () => j('/api/office/screen-token')
 export const setOfficeToken = action => jp('/api/office/screen-token', { action })
+export const saveTodoDingtalk = (on, url) => j('/api/todo/dingtalk', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on, url }) })
 export const saveTodoConfig = assignees => j('/api/todo/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assignees }) })
 export const saveNavModules = (state, posts, templates) => jpSoft('/api/nav-modules/save', { state, posts, templates })
 // 日志中心（V2.488-489）：运维请求日志 + 业务操作留痕。全部仅主管理员（enter_settings）可读。
