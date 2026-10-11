@@ -16,7 +16,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 import qrcode from '../vendor/qrcode-generator.mjs'
 
@@ -562,6 +562,9 @@ function AutoBar({ onChanged }) {
   const [err, setErr] = useState('')
   const [tab, setTab] = useState('')          // 明细看哪一栏：no 不做 / yes 会做；空＝有不做的先看不做的
   const [page, setPage] = useState(1)
+  const [who, setWho] = useState(false)       // 做完提醒：展开选收件人
+  const [seen, setSeen] = useState(false)     // 做完提醒：看上一条发了什么
+  const [tested, setTested] = useState('')
   const load = () => voucherAuto().then(r => { setA(r); setErr('') }).catch(e => setErr(e.message))
   useEffect(() => { load() }, [])
   if (!a) return err ? <div className="lv-msg bad">自动做账状态没读到：{err}</div> : null
@@ -576,7 +579,7 @@ function AutoBar({ onChanged }) {
   const save = patch => { setBusy('save'); voucherAutoSet(patch).then(load).catch(e => alert(e.message)).finally(() => setBusy('')) }
   const setMode = m => {
     if (m === cfg.mode) return
-    if (m === 'on' && !window.confirm(`打开「真做」：\n以后每 20 分钟，系统看到金蝶有付款单、票齐、计提对平的物流请款单，会自己审核付款单、往付款凭证里补分录并提交——没有人点按钮。\n凭证仍然不审核，留给人在金蝶审；做完会进首页待办。\n\n范围：${cfg.kinds.map(k => (a.kinds.find(x => x.k === k) || {}).n).join('、') || '（空）'}\n单笔上限：${cfg.cap ? money(cfg.cap) : '不限'}　每轮最多 ${cfg.max_round} 张\n\n确定打开？`)) return
+    if (m === 'on' && !window.confirm(`打开「真做」：\n以后每 20 分钟，系统看到金蝶有付款单、票齐、计提对平的物流请款单，会自己审核付款单、往付款凭证里补分录并提交——没有人点按钮。\n凭证仍然不审核，留给人在金蝶审；做完会进首页待办${cfg.notify ? '，并发钉钉提醒（' + (nt.names.join('、') || '还没有收件人') + '）' : '（钉钉提醒没开）'}。\n\n范围：${cfg.kinds.map(k => (a.kinds.find(x => x.k === k) || {}).n).join('、') || '（空）'}\n单笔上限：${cfg.cap ? money(cfg.cap) : '不限'}　每轮最多 ${cfg.max_round} 张\n\n确定打开？`)) return
     save({ mode: m })
   }
   const run = () => {
@@ -584,6 +587,14 @@ function AutoBar({ onChanged }) {
     setBusy('run'); voucherAutoRun().then(() => { load(); onChanged && onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(''))
   }
   const num = (label, key, hint) => { const v = window.prompt(label, String(cfg[key] || '')); if (v === null) return; save({ [key]: Number(v) || 0 }) }
+  // 做完提醒(V2.910)：发给谁默认跟首页待办「付款凭证审核人」；也可以单独指定。没认过钉钉身份的人标出来，不悄悄发不到。
+  const nt = a.notify || { names: [], miss: [], src: 'admin', people: [] }, notice = a.notice
+  const pickWho = n => save({ notify_to: cfg.notify_to.includes(n) ? cfg.notify_to.filter(x => x !== n) : [...cfg.notify_to, n] })
+  const test = () => {
+    setBusy('test'); setTested('')
+    voucherAutoNotifyTest().then(() => setTested('已发到你的钉钉')).catch(e => setTested(e.message)).finally(() => setBusy(''))
+  }
+  const st = (notice && notice.stat) || {}
   return <div className={'lv-auto m-' + cfg.mode}>
     <div className="row">
       <b>自动做账</b>
@@ -608,6 +619,33 @@ function AutoBar({ onChanged }) {
             {items.length > 0 && <button className="lnk" onClick={() => setOpen(!open)}>{open ? '收起' : '看是哪几张、为什么'}</button>}</>}
       <span className="dim">计提记错主体、金额不符的不会自动做；凭证不审核，留给人在金蝶审。{cfg.by && `（${cfg.by} ${cfg.at} 设）`}</span>
     </div>
+    <div className="row nt">
+      <b>做完提醒</b>
+      <label className="ck"><input type="checkbox" disabled={!!busy} checked={cfg.notify} onChange={e => save({ notify: e.target.checked })} />发钉钉</label>
+      {cfg.notify && <>
+        <span className="dim">发给</span>
+        {nt.names.map(n => <span key={n} className={'who' + (nt.miss.includes(n) ? ' off' : '')} title={nt.miss.includes(n) ? '这个账号没认过钉钉身份，发不到；本人用钉钉登录一次工作台就认上了' : ''}>{n}{nt.miss.includes(n) && ' · 发不到'}</span>)}
+        {!nt.names.length && <span className="who off">还没有人</span>}
+        <span className="dim">{nt.src === 'set' ? '（单独指定的）' : nt.src === 'scene' ? '＝首页待办「付款凭证审核人」' : '（「付款凭证审核人」还没指定，先发给主管理员）'}</span>
+        <button className="lnk" disabled={!!busy} onClick={() => setWho(!who)}>{who ? '收起' : '改收件人'}</button>
+        <span style={{ flex: 1 }} />
+        {tested && <span className="dim">{tested}</span>}
+        <button className="btn sm" disabled={!!busy} onClick={test} title="按上一轮的结果、照正式提醒的样子排一条，只发给你自己；不碰金蝶">{busy === 'test' ? '正在发…' : '发一条试试'}</button>
+      </>}
+    </div>
+    {cfg.notify && who && <div className="row nt pick">
+      <span className="dim">勾了谁就只发给谁；一个都不勾＝跟「付款凭证审核人」走。</span>
+      {nt.people.map(p => <label key={p.name} className="ck" title={p.dt ? '' : '没认过钉钉身份，勾了也发不到'}>
+        <input type="checkbox" disabled={!!busy} checked={cfg.notify_to.includes(p.name)} onChange={() => pickWho(p.name)} />{p.name}{!p.dt && <span className="dim">（发不到）</span>}</label>)}
+    </div>}
+    {cfg.notify && <div className="row sub">
+      {cfg.mode !== 'on' ? <span>「真做」那一档才发：系统真写了凭证、或者有没做成的才发一条；演练不发。</span>
+        : !notice ? <span>还没发过。系统真写了凭证、或者有没做成的，那一轮做完发一条；没有新东西的轮次不发。</span>
+          : <span>上一条 {notice.at}：{notice.sent ? <>已发给 {(notice.to || []).join('、')}</> : <b className="bad">没发出去（{notice.err}）</b>}
+            　做成 {st.ok || 0} 张{st.bad > 0 && <b className="bad">、没做成 {st.bad} 张</b>}{st.fix > 0 && <>、其中红冲更正 {st.fix} 张</>}{st.multi > 0 && <b className="warn">（{st.multi} 张涉及两个主体）</b>}{st.pending > 0 && <b className="warn">、要人做 {st.pending} 张</b>}</span>}
+      {notice && <button className="lnk" onClick={() => setSeen(!seen)}>{seen ? '收起' : '看发了什么'}</button>}
+    </div>}
+    {cfg.notify && seen && notice && <pre className="ntx">{notice.text}</pre>}
     {open && items.length > 0 && <div className="row pg">
       <span className="seg">
         <button className={tabOn === 'no' ? 'on warn' : ''} onClick={() => { setTab('no'); setPage(1) }}>不做 {no.length}</button>
@@ -1291,6 +1329,10 @@ const CSS = `
 .lv .lv-auto .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--bg)}
 .lv .lv-auto .seg button{border:0;background:none;font:inherit;font-size:12.5px;padding:4px 12px;color:var(--ink-2);cursor:pointer;border-right:1px solid var(--line-strong)}.lv .lv-auto .seg button:last-child{border-right:0}
 .lv .lv-auto .seg button.on{font-weight:700;color:#fff;background:var(--gray)}.lv .lv-auto .seg button.on.warn{background:var(--amber);color:#fff}.lv .lv-auto .seg button.on.ok{background:var(--green);color:#fff}
+.lv .lv-auto .row.nt{border-top:1px dashed var(--line-strong);padding-top:7px;margin-top:1px}.lv .lv-auto .row.nt.pick{border-top:0;padding-top:0;margin-top:0}
+.lv .lv-auto .who{display:inline-block;border:1px solid var(--line-strong);background:var(--bg);border-radius:999px;padding:1px 9px;font-size:12px}
+.lv .lv-auto .who.off{border-style:dashed;color:var(--ink-3)}
+.lv .lv-auto .ntx{margin:0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:inherit;font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
 .lv .lv-auto .row.pg{margin-top:2px}.lv .lv-auto .lnk:disabled{opacity:.35;cursor:default}
 .lv .lv-auto .ck{display:inline-flex;gap:4px;align-items:center;white-space:nowrap}.lv .lv-auto table{background:var(--bg);border-radius:8px}
 .lv .lv-unpaid{font-size:12.5px;color:var(--ink-2);padding:2px 2px 0}

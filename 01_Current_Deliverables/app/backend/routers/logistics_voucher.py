@@ -1434,7 +1434,9 @@ def _auto_cfg():
         mx = 10
     return {"mode": c.get("mode") if c.get("mode") in ("off", "dry", "on") else "dry",
             "kinds": [k for k in (kinds if isinstance(kinds, list) else AUTO_KINDS) if k in AUTO_KINDS],
-            "cap": cap, "max_round": mx, "by": c.get("by") or "", "at": c.get("at") or ""}
+            "cap": cap, "max_round": mx, "by": c.get("by") or "", "at": c.get("at") or "",
+            "notify": c.get("notify") is not False,                       # 做完发钉钉提醒(V2.910)，默认开
+            "notify_to": [str(n) for n in c["notify_to"] if n] if isinstance(c.get("notify_to"), list) else []}     # 空＝跟「付款凭证审核人」
 
 
 def _auto_ok(d, cfg):
@@ -1482,6 +1484,80 @@ def _auto_fp(cfg, cands):
 
 
 _AUTO_REFRESH_S = 6 * 3600        # 我们这边没变化时，隔多久还是去金蝶重读一遍(金蝶那边有人改了凭证，指纹看不出来)
+
+# ---------- 做完提醒（V2.910，用户 2026-10-11「自动做账的功能是不是要加一个提醒，得提醒对应同事，那些他做了」）----------
+# 系统做的凭证只提交、不审核，原来做完只写在页面和首页待办里，没人打开就没人去金蝶审。现在「真做」的一轮做完发一条钉钉：
+# 做成了哪几张(凭证号)、哪几张有红冲更正、哪几张涉及两个主体的红冲、没做成的和原因。一轮一条；演练不发；没有新东西的轮次不发。
+# 用户同日补充：计提更正单是复核时打印的，这里只提醒装订时附上；多主体红冲要特别标出来——系统不自动做的那种(计提记错主体)也提醒一次。
+_AUTO_NOTICE_KEY = "logi_voucher_auto_notice"   # 最近发的那一条：{at, to, miss, sent, via, err, text, stat, trigger}
+_AUTO_TOLD_KEY = "logi_voucher_auto_told"       # 说过的不重复说：{fail: {inst: 原因}, multi: {inst: 时间}}(只留还挂着的)
+_AUTO_SCENE = "logi_voucher_audit"
+
+
+def _auto_people(cfg):
+    """提醒发给谁 → (名单, 钉钉 userid, 没认过钉钉身份的, 名单来源 set/scene/admin)。没单独指定就跟首页待办「付款凭证审核人」走。"""
+    with db._engine.connect() as c:
+        rows = c.execute(select(db.users.c.name, db.users.c.dt_userid, db.users.c.active)).mappings().all()
+    act = {r["name"]: (r["dt_userid"] or "") for r in rows if r["active"] is None or r["active"]}
+    names, src = [n for n in cfg.get("notify_to") or [] if n in act], "set"
+    if not names:
+        try:
+            import todo_store
+            names, conf_ = todo_store.assignees(_AUTO_SCENE)
+            names, src = [n for n in names if n in act], "scene" if conf_ else "admin"
+        except Exception:
+            names, src = [], "admin"
+    return names, [act[n] for n in names if act[n]], [n for n in names if not act[n]], src
+
+
+def _auto_notice_parts(last, trial=False, cap=10):
+    """上一轮的结果 → 提醒里要写的三样：(这一轮写了金蝶的, 系统不自动做的多主体红冲, 够条件但没排上的张数)。试发时把「会做的」当成做成了来排。"""
+    items = last.get("items") or []
+    if trial:
+        done = [dict(x, done=True, vno=x.get("vno") or "") for x in items if x.get("ok")][:cap]
+    else:
+        done = [x for x in items if x.get("done") is not None]
+    pend = [x for x in items if not x.get("ok") and x.get("multi")]
+    left = sum(1 for x in items if x.get("ok")) - len(done)
+    return done, pend, max(0, left)
+
+
+def _auto_notify(last, cfg):
+    """这一轮做完，要不要告诉人。只在「真做」档；做成了的每张只会说一次(做完就不在清单里了)，没做成的同一个原因、
+    要人做的多主体红冲 各只说一次，免得每 20 分钟刷一遍。发不出去不影响做账，如实记下来给页面看。"""
+    try:
+        if not cfg.get("notify") or last.get("mode") != "on":
+            return None
+        done, pend, left = _auto_notice_parts(last)
+        told = db.get_setting(_AUTO_TOLD_KEY, None) or {}
+        tf, tm = told.get("fail") or {}, told.get("multi") or {}
+        bad = [x for x in done if not x.get("done")]
+        fresh = any(x.get("done") for x in done) or any(tf.get(x["inst"]) != (x.get("msg") or "") for x in bad) or any(x["inst"] not in tm for x in pend)
+        if not fresh:
+            return None
+        txt, stat = LV.notice_text(last.get("at"), done, pend, left)
+        names, uids, miss, _src = _auto_people(cfg)
+        if uids:
+            import notifier
+            r = notifier.send_dingtalk_to(uids, txt)
+        else:
+            r = {"sent": False, "msg": "收件人都没有认过钉钉身份（本人用钉钉登录一次工作台就认上了）" if names else "没有收件人"}
+        rec = {"at": _now(), "to": [n for n in names if n not in miss], "miss": miss, "sent": bool(r.get("sent")), "via": r.get("via") or "",
+               "err": "" if r.get("sent") else str(r.get("msg") or "")[:300], "text": txt, "stat": stat, "trigger": last.get("trigger") or ""}
+        db.set_setting(_AUTO_NOTICE_KEY, rec, AUTO_USER)
+        if rec["sent"]:
+            db.set_setting(_AUTO_TOLD_KEY, {"fail": {x["inst"]: x.get("msg") or "" for x in bad}, "multi": {x["inst"]: tm.get(x["inst"]) or rec["at"] for x in pend}}, AUTO_USER)
+        db.audit(AUTO_USER, "物流付款做账-自动做账提醒", "已发" if rec["sent"] else "没发出去",
+                 "发给 %s；做成 %d 张、没做成 %d 张、其中红冲更正 %d 张(涉及两个主体 %d 张)、要人做 %d 张%s" % (
+                     "、".join(rec["to"]) or "（无）", stat["ok"], stat["bad"], stat["fix"], stat["multi"], stat["pending"],
+                     ("；" + rec["err"]) if rec["err"] else ""))
+        return rec
+    except Exception as e:
+        try:
+            db.audit(AUTO_USER, "物流付款做账-自动做账提醒", "出错", str(e)[:300])
+        except Exception:
+            pass
+        return None
 
 
 def auto_round(trigger="定时"):
@@ -1537,6 +1613,9 @@ def auto_round(trigger="定时"):
                 else:
                     it["kind"], it["kind_cn"] = d.get("kind") or "", KIND_CN.get(d.get("kind")) or ""
                     it["ok"], it["why"] = _auto_ok(d, cfg)
+                    it["text"] = str(d.get("kind_text") or "")[:300]             # 提醒里要写「改了什么」(V2.910)
+                    it["xout"] = [{"vno": x.get("vno"), "gross": x.get("gross"), "to": x.get("to")} for x in d.get("xout") or []]      # 这张里红冲了记错主体的计提
+                    it["multi"] = bool(d.get("kind") == "subj" or d.get("xbook") or it["xout"])                                    # 涉及两个主体
             except Exception as e:
                 it["why"] = "读取出错：%s" % str(e)[:120]
             items.append(it)
@@ -1557,6 +1636,7 @@ def auto_round(trigger="定时"):
                 it["done"] = bool(res.get("ok"))
                 it["vno"] = res.get("vno") or ""
                 it["msg"] = " → ".join(res.get("steps") or []) if res.get("ok") else (res.get("msg") or "")
+                it["warn"] = "；".join(s for s in (res.get("steps") or []) if "⚠" in s or "提交失败" in s) if res.get("ok") else ""      # 做成了但有要人接手的尾巴
                 done.append({"inst": it["inst"], "bid": it["bid"], "ok": it["done"], "vno": it["vno"], "msg": it["msg"]})
         last = {"at": _now(), "mode": cfg["mode"], "trigger": trigger, "items": items, "done": done, "fp": fp, "checked_at": _now(), "skipped": 0}
         db.set_setting(_AUTO_LAST_KEY, last, AUTO_USER)
@@ -1570,6 +1650,7 @@ def auto_round(trigger="定时"):
                 worker_store.record("voucher_auto", n=n_ok, ok=not n_bad, summary="自动做账 %d 张" % n_ok, trigger=trigger,
                                     refs=[x["bid"] for x in done if x["ok"]],
                                     error=("%d 张没做成：%s" % (n_bad, "；".join(x["msg"] for x in done if not x["ok"])[:300])) if n_bad else "")
+        _auto_notify(last, cfg)                    # 做完告诉人(V2.910)；自己不抛错
         return {"ok": True, **last}
     finally:
         _AUTO_LOCK.release()
@@ -1579,7 +1660,12 @@ def auto_round(trigger="定时"):
 def auto_get(request: Request):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
-    return {"ok": True, "cfg": _auto_cfg(), "last": db.get_setting(_AUTO_LAST_KEY, None), "kinds": [{"k": k, "n": KIND_CN[k]} for k in AUTO_KINDS]}
+    cfg = _auto_cfg()
+    names, _uids, miss, src = _auto_people(cfg)
+    return {"ok": True, "cfg": cfg, "last": db.get_setting(_AUTO_LAST_KEY, None), "kinds": [{"k": k, "n": KIND_CN[k]} for k in AUTO_KINDS],
+            "notice": db.get_setting(_AUTO_NOTICE_KEY, None),
+            "notify": {"names": names, "miss": miss, "src": src,
+                       "people": [{"name": u["name"], "dt": bool(u.get("dt_bound"))} for u in db.list_users() if u.get("active", 1)]}}
 
 
 @router.post("/api/logistics-voucher/auto")
@@ -1599,15 +1685,47 @@ async def auto_set(request: Request):
         new["cap"] = b.get("cap")
     if b.get("max_round") is not None:
         new["max_round"] = b.get("max_round")
+    if isinstance(b.get("notify"), bool):
+        new["notify"] = b["notify"]
+    if isinstance(b.get("notify_to"), list):               # 空名单＝跟「付款凭证审核人」
+        act = {x["name"] for x in db.list_users() if x.get("active", 1)}
+        new["notify_to"] = [n for n in dict.fromkeys(str(x) for x in b["notify_to"]) if n in act]
     if new["mode"] == "on" and old["mode"] != "on" and u.get("role") != "admin":
         return JSONResponse({"ok": False, "msg": "打开自动做账要管理员来点（它会让系统自己审核付款单、写凭证）"}, status_code=403)
     new["by"], new["at"] = u["name"], _now()
     db.set_setting(_AUTO_KEY, new, u["name"])
     new = _auto_cfg()
     db.audit(u["name"], "物流付款做账-自动做账设置", {"off": "关", "dry": "演练", "on": "真做"}[new["mode"]],
-             "范围 %s；单笔上限 %s；每轮最多 %d 张" % ("、".join(KIND_CN[k] for k in new["kinds"]) or "（空）",
-                                            ("%.2f" % new["cap"]) if new["cap"] else "不限", new["max_round"]))
+             "范围 %s；单笔上限 %s；每轮最多 %d 张；做完提醒 %s" % ("、".join(KIND_CN[k] for k in new["kinds"]) or "（空）",
+                                                      ("%.2f" % new["cap"]) if new["cap"] else "不限", new["max_round"],
+                                                      ("发给 " + ("、".join(new["notify_to"]) or "付款凭证审核人")) if new["notify"] else "关"))
     return {"ok": True, "cfg": new}
+
+
+@router.post("/api/logistics-voucher/auto/notify-test")
+async def auto_notify_test(request: Request):
+    """发一条试发给点按钮的人自己：按上一轮的结果、照正式提醒的样子排，标明【试发】。不碰金蝶、不改任何记录。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        me = c.execute(select(db.users.c.dt_userid).where(db.users.c.name == u["name"])).mappings().first()
+    uid = (me or {}).get("dt_userid")
+    if not uid:
+        return JSONResponse({"ok": False, "msg": "你这个账号还没认过钉钉身份，发不到：用钉钉登录一次工作台就认上了"}, status_code=400)
+    last = db.get_setting(_AUTO_LAST_KEY, None) or {}
+    done, pend, left = _auto_notice_parts(last, trial=True, cap=_auto_cfg()["max_round"])
+    if done or pend:
+        txt, _stat = LV.notice_text(last.get("at"), done, pend, left, trial=True)
+    else:
+        txt = "【试发】自动做账提醒：这是一条试发，系统没有做任何凭证。\n上一轮没有够条件的单，所以没有可以排的内容；能收到这条，说明以后做完的提醒也能收到。"
+    import notifier
+    from starlette.concurrency import run_in_threadpool
+    r = await run_in_threadpool(notifier.send_dingtalk_to, [uid], txt)
+    if not r.get("sent"):
+        return JSONResponse({"ok": False, "msg": "没发出去：%s" % (r.get("msg") or "")}, status_code=400)
+    db.audit(u["name"], "物流付款做账-自动做账提醒", "试发", "发给自己")
+    return {"ok": True, "text": txt}
 
 
 @router.post("/api/logistics-voucher/auto/run")

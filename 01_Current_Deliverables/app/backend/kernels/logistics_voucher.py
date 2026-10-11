@@ -534,3 +534,123 @@ def resume_step(ents, status, add, amount, sup_code=""):
     if want and not (want - have) and raw(have - want):
         return ("submit", "") if open_ else ("record", "")
     return "stop", "这张凭证里的分录和系统要补的对不上（可能有人改过），系统没动，请人工处理"
+
+
+# ---------- 自动做账做完，发给同事的那条提醒（V2.910）----------
+def _nt_amt(v):
+    try:
+        return "{:,.2f}".format(float(v or 0))
+    except (TypeError, ValueError):
+        return str(v or "")
+
+
+def notice_text(at, done, pending=None, left=0, trial=False):
+    """自动做账一轮做完，发给同事的钉钉消息 → (文字, 统计 {ok, bad, fix, multi, pending})。
+    钉钉单聊是纯文字(不认颜色、加粗)，靠小标题和空行分段；要紧的放前面：没做成的 → 涉及两个主体的红冲 → 有红冲更正 → 只核销。
+    done＝这一轮真去写金蝶的每一张 {subject, payee, amount, kind, text, vno, done(True/False), msg, warn, xout:[{vno, gross, to}]}；
+    pending＝系统不自动做、要人单张做的(计提记错主体) {subject, payee, amount, text 怎么回事, why 为什么不自动做}；left＝够条件但这一轮没排上的张数。
+    用户 2026-10-11「计提更正单是在复核时候打印，所以这里只需要提醒，尤其是多主体红冲」：不写去哪打印，只提醒装订时附上；
+    一张凭证里红冲了记错主体的计提(另一个主体在它自己的付款凭证里补提)的，单独拎出来，提醒两个主体对着审。"""
+    done, pending = list(done or []), list(pending or [])
+    good = [x for x in done if x.get("done")]
+    bad = [x for x in done if not x.get("done")]
+    multi = [x for x in good if x.get("xout")]
+    fix = [x for x in good if not x.get("xout") and x.get("kind") not in ("hx", "", None)]
+    hx = [x for x in good if not x.get("xout") and x.get("kind") in ("hx", "", None)]
+    stat = {"ok": len(good), "bad": len(bad), "fix": len(fix) + len(multi), "multi": len(multi), "pending": len(pending)}
+    head = lambda x: "%s｜%s｜%s" % (x.get("subject") or "", x.get("payee") or "", _nt_amt(x.get("amount")))
+    vno = lambda x: "记-%s" % x["vno"] if x.get("vno") else "记-（待出）"
+    cut = lambda s, n=150: (s[:n] + "…") if len(s) > n else s
+
+    def build(fold):
+        L = []
+        if trial:
+            L += ["【试发】这是一条试发，系统没有做任何凭证。下面按上一轮的结果、照正式提醒的样子排的；凭证号要真做了才有。", ""]
+        if good and bad:
+            t = "【自动做账】做成 %d 张，%d 张没做成，要人处理" % (len(good), len(bad))
+        elif bad:
+            t = "【自动做账】%d 张没做成，要人处理" % len(bad)
+        elif good:
+            t = "【自动做账】刚做了 %d 张付款凭证" % len(good)
+            if stat["fix"]:
+                t += "，其中 %d 张有红冲更正" % stat["fix"]
+                if multi:
+                    t += "（%d 张涉及两个主体）" % len(multi)
+            else:
+                t += "，请到金蝶审核"
+        else:
+            t = "【自动做账】有 %d 张涉及两个主体的红冲，系统不自动做，要人来做" % len(pending)
+        L += [t, "%s 这一轮" % str(at or "")[5:16], ""]
+        if bad:
+            L.append("没做成（%d 张）" % len(bad))
+            for x in bad:
+                L.append("× %s" % head(x))
+                L.append("    %s" % cut(str(x.get("msg") or "原因没取到，请到付款做账页看"), 220))
+            L.append("")
+        n = 0
+        if multi:
+            L.append("涉及两个主体的红冲（%d 张）" % len(multi))
+            for x in multi:
+                n += 1
+                L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                own = str(x.get("text") or "").split("；另红冲")[0]
+                if own:
+                    L.append("    %s" % cut(own))
+                for o in x["xout"]:
+                    L.append("    另外整笔红冲了 记-%s %s：这笔计提记错了主体，应是%s的；%s在它自己的付款凭证里补提" % (
+                        o.get("vno"), _nt_amt(o.get("gross")), o.get("to") or "另一个主体", o.get("to") or "那个主体"))
+                if x.get("warn"):
+                    L.append("    %s" % cut(str(x["warn"])))
+            L.append("")
+        if fix:
+            L.append("有红冲更正（%d 张）" % len(fix))
+            for x in fix:
+                n += 1
+                L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                if x.get("text"):
+                    L.append("    %s" % cut(str(x["text"])))
+                if x.get("warn"):
+                    L.append("    %s" % cut(str(x["warn"])))
+            L.append("")
+        if hx:
+            if fold:
+                L.append("只核销 %d 张，合计 %s（逐张在付款做账页看）" % (len(hx), _nt_amt(sum(float(x.get("amount") or 0) for x in hx))))
+                for x in hx:
+                    if x.get("warn"):
+                        L.append("    %s %s：%s" % (head(x), vno(x), cut(str(x["warn"]))))
+            else:
+                if multi or fix or bad:
+                    L.append("只核销（%d 张）" % len(hx))
+                for x in hx:
+                    n += 1
+                    L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                    if x.get("warn"):
+                        L.append("    %s" % cut(str(x["warn"])))
+            L.append("")
+        if pending:
+            L.append("要人来做（%d 张，涉及两个主体，系统不自动做）" % len(pending))
+            for x in pending:
+                L.append("· %s" % head(x))
+                L.append("    %s" % cut(str(x.get("text") or x.get("why") or "计提记错主体"), 200))
+            L.append("")
+        L.append("接下来")
+        todo = []
+        if bad:
+            todo.append("没做成的 %d 张：到付款做账页看原因，处理好以后系统下一轮会再试。" % len(bad))
+        if good:
+            todo.append("到金蝶审核做成的 %d 张凭证（系统只提交、不审核）。" % len(good))
+        if stat["fix"]:
+            todo.append("有红冲更正的 %d 张：装订时记得附计提更正单（复核时打印的那张）。" % stat["fix"])
+        if multi:
+            todo.append("涉及两个主体的 %d 张：一边红冲、一边补提，两个主体的凭证对着审，金额要对得上。" % len(multi))
+        if pending:
+            todo.append("要人来做的 %d 张：到付款做账页打开那张单，单张做（本主体补提、记错的那个主体红冲，两边对着看）。" % len(pending))
+        L += ["%d. %s" % (i + 1, s) for i, s in enumerate(todo)]
+        if left:
+            L += ["", "（够条件的还有 %d 张这一轮没排上，下一轮做。）" % left]
+        return "\n".join(L)
+
+    s = build(False)
+    if len(s) > 1800 and len(hx) > 3:      # 太长：只核销的合成一行，要人留意的逐张留着
+        s = build(True)
+    return s, stat

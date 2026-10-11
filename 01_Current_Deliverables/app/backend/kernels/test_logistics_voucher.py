@@ -424,5 +424,65 @@ class TestResume(unittest.TestCase):
         self.assertEqual(self.step(pay, "A"), "amend")
 
 
+class NoticeText(unittest.TestCase):
+    """V2.910 自动做账做完的提醒话术。"""
+    HX = {"subject": "深圳星期零", "payee": "上海顺丰冷运", "amount": 17630.95, "kind": "hx", "text": "计提与发票一致，只核销", "vno": "330", "done": True}
+    FIX = {"subject": "深圳星期零", "payee": "东莞链盟", "amount": 19820, "kind": "tail", "text": "计提与发票一致，尾差 0.01：记-378 整笔红冲后更正", "vno": "331", "done": True}
+    XO = {"subject": "深圳星期零", "payee": "湖北丰源", "amount": 5000, "kind": "redo", "vno": "332", "done": True,
+          "text": "本主体的计提与发票一致；另红冲 记-390 918.93（记错主体，应是深圳星期九的）", "xout": [{"vno": "390", "gross": 918.93, "to": "深圳星期九"}]}
+    BAD = {"subject": "深圳星期零", "payee": "路凯", "amount": 1002.09, "kind": "hx", "done": False, "msg": "付款单审核失败：已审核"}
+    PEND = {"subject": "深圳星期九", "payee": "湖北丰源", "amount": 918.93, "why": "计提记错主体：要在别的账簿建红冲凭证，留给人单张做",
+            "text": "计提记在了「深圳星期零」的账上（记-390 918.93），主体记错：本张凭证里补提到深圳星期九再核销"}
+
+    def test_all_plain(self):
+        s, st = V.notice_text("2026-10-11 14:20", [self.HX])
+        self.assertEqual(st, {"ok": 1, "bad": 0, "fix": 0, "multi": 0, "pending": 0})
+        self.assertIn("刚做了 1 张付款凭证，请到金蝶审核", s)
+        self.assertIn("深圳星期零｜上海顺丰冷运｜17,630.95　记-330", s)
+        self.assertNotIn("计提更正单", s)
+        self.assertNotIn("两个主体", s)
+
+    def test_fix_only_reminds_not_print(self):
+        """有红冲更正：只提醒装订时附更正单(复核时打印的)，不写去哪打印。"""
+        s, st = V.notice_text("2026-10-11 14:20", [self.HX, self.FIX])
+        self.assertEqual((st["fix"], st["multi"]), (1, 0))
+        self.assertIn("其中 1 张有红冲更正", s)
+        self.assertIn("装订时记得附计提更正单（复核时打印的那张）", s)
+        self.assertNotIn("打印本月计提更正单", s)
+        self.assertLess(s.index("有红冲更正（1 张）"), s.index("只核销（1 张）"))
+
+    def test_multi_subject_stands_out(self):
+        """涉及两个主体的红冲：排在最前、写明红冲了哪张、该哪个主体补提、两边对着审；系统不做的那张列进「要人来做」。"""
+        s, st = V.notice_text("2026-10-11 14:20", [self.HX, self.FIX, self.XO], pending=[self.PEND], left=3)
+        self.assertEqual(st, {"ok": 3, "bad": 0, "fix": 2, "multi": 1, "pending": 1})
+        self.assertIn("其中 2 张有红冲更正（1 张涉及两个主体）", s)
+        self.assertIn("另外整笔红冲了 记-390 918.93：这笔计提记错了主体，应是深圳星期九的", s)
+        self.assertEqual(s.count("另红冲"), 0)                                   # 做账类型里那半句不重复写
+        self.assertLess(s.index("涉及两个主体的红冲（1 张）"), s.index("有红冲更正（1 张）"))
+        self.assertIn("要人来做（1 张，涉及两个主体，系统不自动做）", s)
+        self.assertIn("计提记在了「深圳星期零」的账上（记-390 918.93）", s)             # 写怎么回事，不是写「为什么不自动做」
+        self.assertIn("两个主体的凭证对着审", s)
+        self.assertIn("还有 3 张这一轮没排上", s)
+
+    def test_failed_first_and_pending_alone(self):
+        s, st = V.notice_text("2026-10-11 14:20", [self.HX, self.BAD])
+        self.assertIn("做成 1 张，1 张没做成，要人处理", s)
+        self.assertLess(s.index("没做成（1 张）"), s.index("记-330"))
+        self.assertIn("付款单审核失败：已审核", s)
+        s, st = V.notice_text("2026-10-11 14:20", [], pending=[self.PEND])
+        self.assertIn("有 1 张涉及两个主体的红冲，系统不自动做，要人来做", s)
+        self.assertNotIn("到金蝶审核", s)
+
+    def test_trial_and_long_folds(self):
+        s, _ = V.notice_text("2026-10-11 14:20", [dict(self.HX, vno="")], trial=True)
+        self.assertTrue(s.startswith("【试发】"))
+        self.assertIn("记-（待出）", s)
+        many = [dict(self.HX, payee="某某某某某某供应链管理有限责任公司%d" % i, vno=str(i)) for i in range(60)]
+        s, st = V.notice_text("2026-10-11 14:20", many + [self.XO])
+        self.assertLess(len(s), 1800)
+        self.assertIn("只核销 60 张，合计", s)
+        self.assertIn("记-390", s)                                               # 要人留意的不折叠
+
+
 if __name__ == "__main__":
     unittest.main()
