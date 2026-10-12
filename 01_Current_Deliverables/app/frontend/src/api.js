@@ -173,6 +173,8 @@ export const voucherDdConfig = url => j('/api/logistics-voucher/dd-config?url=' 
 export const voucherAuto = () => j('/api/logistics-voucher/auto')
 export const voucherAutoSet = patch => j('/api/logistics-voucher/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
 export const voucherAutoRun = () => j('/api/logistics-voucher/auto/run', { method: 'POST' })
+export const voucherAutoProgress = () => j('/api/logistics-voucher/auto/progress')
+export const voucherAutoNotifyTest = () => j('/api/logistics-voucher/auto/notify-test', { method: 'POST' })
 // 人工选择这张请款单核销哪些计提（可跨月）
 export const voucherAccrualCands = inst => j('/api/logistics-voucher/accrual-candidates?inst=' + encodeURIComponent(inst))
 export const voucherPick = (inst, picks, opt) => j('/api/logistics-voucher/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, picks, ...(opt || {}) }) })
@@ -200,6 +202,7 @@ export const getOfficeScreen = token => j('/api/office/screen', { headers: { 'X-
 export const getOfficeRuns = desk => j('/api/office/runs?desk=' + encodeURIComponent(desk))
 export const getOfficeToken = () => j('/api/office/screen-token')
 export const setOfficeToken = action => jp('/api/office/screen-token', { action })
+export const saveTodoDingtalk = (on, url) => j('/api/todo/dingtalk', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on, url }) })
 export const saveTodoConfig = assignees => j('/api/todo/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ assignees }) })
 export const saveNavModules = (state, posts, templates) => jpSoft('/api/nav-modules/save', { state, posts, templates })
 // 日志中心（V2.488-489）：运维请求日志 + 业务操作留痕。全部仅主管理员（enter_settings）可读。
@@ -679,7 +682,7 @@ export const reviewScope = fresh => j('/api/logistics-review/scope' + (fresh ? '
 export const reviewScopeSet = body => j('/api/logistics-review/scope', { method: 'POST', body: JSON.stringify(body) })
 export const reviewInvoices = (carrier, period) => j(`/api/logistics-review/invoices?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewUnitKg = (carrier, period) => j(`/api/logistics-review/unit-kg?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
-export const reviewUnitKgSet = (items, packs) => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items, packs: packs || [] }) })
+export const reviewUnitKgSet = (items, packs, boxkg, carrier) => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items, packs: packs || [], boxkg: boxkg || [], carrier: carrier || '' }) })
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
 export const reviewDocMode = (carrier, period, doc_no, mode) => j('/api/logistics-review/doc-mode', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, mode } : { carrier, period, doc_no, mode }) })
 export const reviewCarryAdj = body => j('/api/logistics-review/carry-adj', { method: 'POST', body: JSON.stringify(body) })

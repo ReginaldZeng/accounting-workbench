@@ -33,6 +33,8 @@ import zlib
 import configparser
 import requests
 
+import busy
+
 LOGIN_SVC = "Kingdee.BOS.WebApi.ServicesStub.AuthService.LoginByAppSecret.common.kdsvc"
 QUERY_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.ExecuteBillQuery.common.kdsvc"
 META_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.QueryBusinessInfo.common.kdsvc"
@@ -157,9 +159,20 @@ def _kd_flush(force=False):
         pass            # 记不上就算了，不能挡业务
 
 
+_READ_OPS = {"LoginByAppSecret", "ExecuteBillQuery", "QueryBusinessInfo", "View", "GetSysReportData"}
+
+
+def _is_write(svc):
+    """这个接口会不会改金蝶的数据(保存/暂存/提交/审核/反审核/撤销/删除/下推…)：只读的那几个之外都算。"""
+    m = re.search(r"\.(\w+)\.common\.kdsvc", str(svc))
+    return bool(m) and m.group(1) not in _READ_OPS
+
+
 def count_call(svc):
     """记一次金蝶接口调用。_post 里自动调；绕开 _post 直接发请求的地方(电商下推)自己调一下。"""
     try:
+        if _is_write(svc):
+            busy.wrote()       # 刚写过金蝶：之后一小段时间算占线，自动部署不在这时候重启(V2.908，见 busy.py)
         m = re.search(r"\.(\w+)\.common\.kdsvc", str(svc))
         op = m.group(1) if m else str(svc)[-30:]
         d = datetime.datetime.now()
@@ -175,6 +188,13 @@ atexit.register(lambda: _kd_flush(True))
 
 
 def _post(s, conf, svc, params):
+    if _is_write(svc):         # 写请求发出去到回来这一段挂「占线」牌子：自动部署等它回来再重启(V2.908，见 busy.py)
+        with busy.writing("写金蝶"):
+            return _post_raw(s, conf, svc, params)
+    return _post_raw(s, conf, svc, params)
+
+
+def _post_raw(s, conf, svc, params):
     url = f"{conf['server_url']}/{svc}"
     try:
         r = s.post(url, data=json.dumps({"parameters": params}, ensure_ascii=False).encode("utf-8"),

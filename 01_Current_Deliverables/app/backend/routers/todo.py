@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from core import JSONResponse, _current_user, db
 import todo_store as ts
 import todo_scenes as sc
+import todo_dingtalk as dt
 
 router = APIRouter()
 
@@ -141,6 +142,7 @@ def todo_config(request: Request):
                        "names": names if configured else [], "fallback": [] if configured else names,
                        "open": sum(1 for it in opens if it["scene"] == k)})
     return {"ok": True, "scenes": scenes, "local": _is_local(), "everyMin": EVERY_MIN, "thread": dict(_STATE),
+            "dingtalk": dict(dt.cfg(), **dt.preview()),          # 同步到钉钉待办(V2.911)：开没开、打开后会给谁写几条
             "users": [{"name": n, "post": u.get("post") or "", "grp": u.get("grp") or "", "admin": u.get("role") == "admin"}
                       for n, u in users.items()]}
 
@@ -158,6 +160,22 @@ async def todo_config_save(request: Request):
     return {"ok": True, "changed": len(changes)}
 
 
+@router.put("/api/todo/dingtalk")
+async def todo_dingtalk_save(request: Request):
+    """打开 / 关掉「同步到钉钉待办」。打开：现在没办完的都写到处理人的钉钉待办里；关掉：已经写过去的全部收回。当场对一遍账并回结果。"""
+    u = _settings_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "仅主管理员"}, status_code=403)
+    b = await request.json()
+    on, url = bool(b.get("on")), str(b.get("url") or "").strip()
+    if on and not url.startswith(("http://", "https://")):
+        return JSONResponse({"ok": False, "msg": "门户网址要以 http:// 或 https:// 开头——钉钉里点「去查看」就是打开它"}, status_code=400)
+    old, new = dt.set_cfg(on, url if on else None, u["name"])
+    db.audit(u["name"], "待办-同步钉钉待办设置", "开" if new["on"] else "关", "门户网址 %s（原来：%s）" % (new["url"] or "（空）", "开" if old["on"] else "关"))
+    res = await run_in_threadpool(dt.sync)
+    return {"ok": True, "result": res, "dingtalk": dict(dt.cfg(), **dt.preview())}
+
+
 # ---------------- 后台核对线程 ----------------
 def _loop():
     time.sleep(120)                      # 开机先让别的线程起来
@@ -165,6 +183,7 @@ def _loop():
         try:
             r = _checks(None, "定时")
             _STATE.update(lastRun=ts._now(), lastResult=r, lastError=r.get("kd_error") or "")
+            dt.sync()                    # 钉钉待办跟着对一遍(V2.911)：这一轮销掉的标完成、内容变了的改、之前没写上的补；没打开就直接返回
             import worker_store      # 数字员工办公室·待办核对员：每圈报到；真销了账 / 没连上金蝶才记一笔（只写条数）
             worker_store.beat("todo_check", next_in=EVERY_MIN * 60)
             if r.get("kd_error"):

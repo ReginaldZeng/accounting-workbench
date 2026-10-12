@@ -50,7 +50,7 @@ class DouyinApiTests(unittest.TestCase):
         cls.db = db
         cls.role = ['admin']
         def require(request, permission):
-            if permission == 'ec_settle_upload' and cls.role[0] != 'admin': raise HTTPException(403, '测试权限拦截')
+            if permission == 'ec_settle_upload' and cls.role[0] not in ('admin', 'writer'): raise HTTPException(403, '测试权限拦截')   # writer＝有上传 / 跑批权限的普通账号
             return {'name': '测试会计', 'role': cls.role[0]}
         core = types.ModuleType('core'); core.db = db; core._require_perm = require; core.pull_token_ok = lambda request: False
         sys.modules['core'] = core
@@ -319,10 +319,80 @@ class DouyinApiTests(unittest.TestCase):
         self.sync_ar([self.bill('AR1', '2026-09-22', 29.71, P)])                                                          # 抖音结算时退了 27.78，金蝶只有蓝字
         get = lambda path, **kw: self.client.get('/api/ec/douyin/' + path, params=dict({'period': '2026-09', 'shop': SHOP}, **kw)).json()
         row = get('bills', q=P)['rows'][0]
-        self.assertEqual(row['cat'], 'mismatch'); self.assertIn('登记了退款不退货 27.78', row['rnote']); self.assertIn('要手工补红字 27.78', row['rnote'])
+        self.assertEqual(row['cat'], 'mismatch'); self.assertIn('登记了退款不退货 27.78', row['rnote']); self.assertIn('两边差 27.78，就是退给买家的钱', row['rnote'])
         d = get('order', order=P)
         self.assertEqual(([(r['tk'], r['amt'], r['back']) for r in d['returns']], d['rnote']), ([('TK1', 27.78, 0.0)], row['rnote']))
         self.assertEqual(get('order', order='6917926768823643799')['returns'], [])
+
+    def test_push_settings_open_to_anyone_who_may_push_and_every_change_is_recorded(self):
+        post = lambda **kw: self.client.post('/api/ec/douyin/push/mode', data=kw)
+        self.role[0] = 'viewer'
+        try: self.assertEqual(post(size=10).status_code, 403)                                     # 只能看的账号改不了
+        finally: self.role[0] = 'writer'
+        try:
+            r = post(mode='dry', size=10)                                                         # 有上传 / 跑批权限的普通账号（不是管理员）可以改
+            self.assertEqual((r.status_code, r.json()['conf']['mode'], r.json()['conf']['size'], r.json()['conf']['by']), (200, 'dry', 10, '测试会计'))
+            at = r.json()['conf']['at']; self.assertTrue(at)
+            self.assertEqual(post(size=10001).status_code, 400)                                   # 上限还是金蝶一张收款单能挂的行数
+            self.assertEqual(post(mode='dry', size=10).json()['conf']['at'], at)                  # 没改动不算一次改动
+        finally: self.role[0] = 'admin'
+        self.assertEqual(self.db.get_setting('ec_douyin_push')['by'], '测试会计')
+
+    def test_pushed_list_can_be_downloaded_per_batch_and_skips_undone_batches(self):
+        from openpyxl import load_workbook
+        self.up(('DL.csv', settle_csv(FIRST_HALF, SECOND_HALF)))
+        self.sync_ar([self.bill('AR1', '2026-09-22', 29.71, P), self.bill('AR2', '2026-09-01', 10.0, '6917926768823643799')])
+        line = lambda amount: [dict(kind='cash', amount=amount, memo='这批订单结算到账的钱')]
+        self.dy._push_log_save('2026-09', SHOP, [
+            dict(fid=11, at='2026-10-10 15:00:00', by='测试会计', count=1, total=10.0, first='AR2', last='AR2', bills=['AR2'], lines=line(10.0)),
+            dict(fid=12, at='2026-10-10 15:05:00', by='测试会计', count=1, total=29.71, first='AR1', last='AR1', bills=['AR1'], lines=line(29.71), deleted=True)])
+        get = lambda **kw: self.client.get('/api/ec/douyin/push/export', params=dict({'period': '2026-09', 'shop': SHOP}, **kw))
+        r = get()
+        self.assertEqual(r.status_code, 200, r.text)
+        rows = [list(x)[:3] for x in load_workbook(io.BytesIO(r.content))['下推清单'].iter_rows(values_only=True)]
+        self.assertEqual(rows[1:], [['AR2', 10.0, '6917926768823643799'], ['合计 1 张', 10.0, None]])       # 撤回的那批不在清单里
+        self.assertEqual(get(fid='11').status_code, 200)
+        self.assertEqual(get(fid='12').status_code, 404)                                              # 已撤回的批没有清单可下
+        self.role[0] = 'viewer'
+        try: self.assertEqual(get().status_code, 200)                                                 # 只能看的账号也能下载（只读）
+        finally: self.role[0] = 'admin'
+
+    def test_ticked_account_outflows_ride_on_the_next_batch_once_and_come_back_after_undo(self):
+        ledger_head = '动账流水号,关联订单号,关联子订单号,动账时间,账户方向,动账金额(元),动账场景,账户余额(元),备注'
+        ledger = ('\ufeff' + ledger_head + '\n' + '\n'.join([
+            "T0,6917926768823643799,,2026-09-03 08:00:00,收入,9.00,货款结算入账,9.00,结算",
+            "X1,TRA2026,,2026-09-12 10:00:00,支出,-0.40,退换货运费险,8.60,保费扣除",
+            "X2,,,2026-09-13 10:00:00,支出,-50.00,充值千川账户,-41.40,充值"]) + '\n').encode('utf-8')
+        self.dy._push_log_save('2026-09', SHOP, []); self.db.set_setting('ec_douyin_push_extras', {})          # 别的用例留下的下推记录、勾选先清掉
+        self.up(('DL.csv', settle_csv(FIRST_HALF)), ('FL.csv', ledger))
+        self.sync_ar([self.bill('AR1', '2026-09-01', 10.0, '6917926768823643799')])
+        args = {'period': '2026-09', 'shop': SHOP}
+        plan = lambda: self.client.get('/api/ec/douyin/push/plan', params=args).json()
+        tick = lambda keys: self.client.post('/api/ec/douyin/push/extras', data={'shop': SHOP, 'keys': json.dumps(keys, ensure_ascii=False)})
+        p = plan()
+        self.assertEqual([(x['key'], x['amount'], x['picked'], x['carried']) for x in p['extras']], [('充值千川账户', 50.0, False, ''), ('退换货运费险', 0.4, False, '')])
+        self.assertEqual([(l['kind'], l['amount']) for l in p['batch']['lines']], [('cash', 9.0), ('fee', 1.0)])                 # 没勾：收款单还是原来的样子
+        self.role[0] = 'viewer'
+        try: self.assertEqual(tick(['退换货运费险']).status_code, 403)
+        finally: self.role[0] = 'admin'
+        self.assertEqual(tick(['退换货运费险', self.dy.model.REFUND_RED]).json()['keys'], ['退换货运费险'])                     # 已有红字的退款传了也不收
+        p = plan()
+        self.assertEqual([(l['kind'], l['amount']) for l in p['batch']['lines']], [('cash', 8.6), ('fee', 1.0), ('extra', 0.4)])
+        self.assertEqual((p['batch']['line_total'], p['batch']['total'], p['batch']['extras'][0]['key'], p['extras_short']), (10.0, 10.0, '退换货运费险', 0))
+        tick(['退换货运费险', '充值千川账户'])                                                                                # 到账不够减：这一批不带，页面给提示
+        p = plan()
+        self.assertEqual(([(l['kind'], l['amount']) for l in p['batch']['lines']], p['batch']['extras'], p['extras_short']), ([('cash', 9.0), ('fee', 1.0)], [], 50.4))
+        tick(['退换货运费险'])
+        # 假装这一批已经推下去了并带着运费险：下一批不再带；撤回后回到待推
+        self.dy._push_log_save('2026-09', SHOP, [dict(fid=21, at='2026-10-10 16:00:00', by='测试会计', count=0, total=0.0, first='', last='', bills=[], lines=[],
+                                                      extras=[dict(key='退换货运费险', name='退换货运费险', amount=0.4)])])
+        self.kd['rows'] = [[21, '', 'Z', 'A', '系统操作员']]                                                                 # 金蝶里那张暂存单还在
+        p = plan()
+        self.assertEqual(([x['carried'] for x in p['extras'] if x['key'] == '退换货运费险'], [(l['kind'], l['amount']) for l in p['batch']['lines']]),
+                         (['2026-10-10 16:00:00'], [('cash', 9.0), ('fee', 1.0)]))
+        self.dy._push_log_save('2026-09', SHOP, [dict(self.dy._push_log('2026-09', SHOP)[0], deleted=True)])
+        self.assertEqual([(l['kind'], l['amount']) for l in plan()['batch']['lines']], [('cash', 8.6), ('fee', 1.0), ('extra', 0.4)])
+        self.assertEqual(self.db.get_setting('ec_douyin_push_extras'), {SHOP: ['退换货运费险']})
 
     # ---- 抽屉里现查金蝶 ----
     def test_order_bills_only_asks_for_known_bills_caches_and_never_leaks_errors(self):

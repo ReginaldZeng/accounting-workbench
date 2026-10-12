@@ -365,7 +365,7 @@ def flows(request: Request, period: str, shop: str, scene: str, q: str = '', pag
     end = model.period_end(period)                                                # 和订单抽屉取数的范围一致：到本期末为止有应收或有动账的才点得开
     known = {b['order'] for b in hit[4] if b['order'] and b['date'] <= end} | {r['order'] for r in rows['dy_settle'] if r['order'] and r['t'][:7] <= period}
     sub2main = {r['id']: r['order'] for r in rows['dy_platform']}
-    kind, found = model.flow_rows(period, rows['dy_ledger'], rows['dy_settle'], rows['dy_insure'], scene.strip(), known, sub2main)
+    kind, found = model.flow_rows(period, rows['dy_ledger'], rows['dy_settle'], rows['dy_insure'], scene.strip(), known, sub2main, model.red_orders(period, hit[4]))
     q = q.strip()
     if q: found = [r for r in found if q in r['id'] or q in (r.get('order') or '') or q in (r.get('flow') or '')]
     size = 50; pages = max(1, -(-len(found) // size)); page = min(max(1, page), pages)
@@ -403,6 +403,7 @@ _DRAFT_SVC = 'Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Draft.common.kd
 _PUSH_RULE, _SETTLE_CASH, _SETTLE_INNER, _PURPOSE = 'AR_recableToRecBill', 'JSFS32_SYS', 'JSFS41_SYS', 'SFKYT01_SYS'
 _API_USER = '系统操作员'
 PUSH_KEY = 'ec_douyin_push'
+EXTRA_KEY = 'ec_douyin_push_extras'           # {店铺: [勾了随收款单推的账户支出项目]}：勾一次，以后每个月都照这样推
 PUSH_MODES = {'off': '关', 'dry': '演练', 'on': '真做'}
 PUSH_MAX = 10000                              # 每批上限＝金蝶一张收款单最多挂的源单行数：一次下推正好一张收款单（实测超过会被金蝶拆单）
 _PUSH_TIMEOUT = 1800                          # 大批量下推金蝶要算很久：单独放宽到 30 分钟（kc._post 只等 2 分钟）
@@ -415,7 +416,8 @@ def _push_conf():
     c = db.get_setting(PUSH_KEY, {}) or {}
     size = c.get('size') if isinstance(c.get('size'), int) and 1 <= c['size'] <= PUSH_MAX else 500
     return {'mode': c.get('mode') if c.get('mode') in PUSH_MODES else 'dry', 'size': size,
-            'base': str(c.get('base') or 'FYXM001.001产品销售002')}        # 扣款行上的费用项目：照 8 月抖音收款单填「电商」
+            'base': str(c.get('base') or 'FYXM001.001产品销售002'),        # 扣款行上的费用项目：照 8 月抖音收款单填「电商」
+            'by': str(c.get('by') or ''), 'at': str(c.get('at') or '')}    # 最后一次是谁、什么时候改的档位 / 每批张数
 
 
 def _push_log_path(period, shop):
@@ -444,8 +446,10 @@ def _kd_err(res):
 def _post_long(s, conf, svc, params):
     """同 kc._post，只是等得久。"""
     kc.count_call(svc)      # 这里绕开了 kc._post(要等更久)，调用次数自己记一笔(V2.875)
-    r = s.post('%s/%s' % (conf['server_url'], svc), data=json.dumps({'parameters': params}, ensure_ascii=False).encode('utf-8'),
-               headers={'Content-Type': 'application/json;charset=utf-8'}, timeout=_PUSH_TIMEOUT)
+    import busy
+    with busy.writing('电商下推·写金蝶'):      # 请求在路上时挂「占线」牌子：自动部署等它回来再重启(V2.908，见 busy.py)。一批下推一次请求能跑几分钟
+        r = s.post('%s/%s' % (conf['server_url'], svc), data=json.dumps({'parameters': params}, ensure_ascii=False).encode('utf-8'),
+                   headers={'Content-Type': 'application/json;charset=utf-8'}, timeout=_PUSH_TIMEOUT)
     r.raise_for_status()
     return r.json()
 
@@ -500,6 +504,21 @@ def _push_plan(period, shop, customer='', session=None):
     conf_ = _push_conf()
     log, taken, problem, orphans = _push_state(period, shop, customer, session)
     plan = model.push_plan(period, hit[3]['dy_settle'], hit[3]['dy_orders'], result, taken, conf_['size'])
+    # 勾了随收款单推的账户支出：还没随哪一批推过的，挂到这一批上（到账行减掉、各列一行扣款，合计不变）；到账不够减就不挂，等后面够的批
+    picked = set((db.get_setting(EXTRA_KEY, {}) or {}).get(shop) or [])
+    carried = {}
+    for b in log:
+        if b.get('deleted') or b.get('state') == '金蝶里已被删掉': continue
+        for e in b.get('extras') or []: carried[e['key']] = b.get('at', '')
+    extras = model.push_extras(period, hit[3]['dy_ledger'], hit[4])
+    for x in extras: x.update(picked=x['key'] in picked and not x['locked'], carried=carried.get(x['key'], ''))
+    todo = [x for x in extras if x['picked'] and not x['carried']]
+    batch = plan['batch']
+    lines = model.with_extras(period, batch['lines'], todo) if todo and batch['bills'] else None
+    batch['extras'] = [{'key': x['key'], 'name': x['name'], 'amount': x['amount']} for x in todo] if lines else []
+    if lines: batch['lines'] = lines; batch['line_total'] = round(sum(int(round(l['amount'] * 100)) for l in lines) / 100, 2)
+    plan['extras'] = extras
+    plan['extras_short'] = round(sum(x['amount'] for x in todo), 2) if todo and batch['bills'] and not lines else 0
     return plan, log, problem, conf_, book, result, orphans
 
 
@@ -511,30 +530,94 @@ def push_plan(request: Request, period: str, shop: str):
     batch = dict(plan['batch']); batch.pop('bills'); batch.pop('groups')
     fee_names = set(model.FEE_COLUMNS)
     other = [d for d in result['draft']['deductions'] if d['name'] not in fee_names]
-    return {'ok': True, 'conf': dict(conf_, mode_label=PUSH_MODES[conf_['mode']], max=PUSH_MAX), 'account': book.get('account', ''), 'can_admin': user.get('role') == 'admin',
+    return {'ok': True, 'conf': dict(conf_, mode_label=PUSH_MODES[conf_['mode']], max=PUSH_MAX), 'account': book.get('account', ''), 'can_admin': True,                       # 老前端用的字段：现在能不能改设置看的是上传 / 跑批权限，由页面按 canEdit 判断
             'eligible': plan['eligible'], 'pushed': plan['pushed'], 'left': plan['left'], 'batch': batch,
             'skipped': [dict(key=k, label=model.PUSH_SKIP[k], **v) for k, v in plan['skipped'].items() if v['count']],
             'other': {'lines': other, 'total': round(sum(d['amount'] for d in other), 2)},
+            'extras': plan['extras'], 'extras_short': plan['extras_short'],
             'batches': [{k: b.get(k) for k in ('fid', 'at', 'by', 'count', 'total', 'first', 'last', 'state', 'number', 'can_undo', 'seconds')} for b in reversed(log)],
             'orphans': orphans, 'problem': problem,
             'job': {'running': bool(job.get('running')), 'stage': job.get('stage', ''), 'error': job.get('error', ''), 'done': job.get('done'), 'batch': job.get('batch', 1),
                     'seconds': round(time.time() - job['started']) if job.get('running') else 0}}
 
 
+@router.post('/push/extras')
+def push_extras(request: Request, shop: str = Form(...), keys: str = Form('[]')):
+    """勾哪些账户支出随收款单一起推（列成扣款行）。有上传 / 跑批权限的人能改；按店铺存，以后每个月都照这样推；每次改动留痕。"""
+    user = require(request, write=True)
+    selected = wbr.check_shop(shop)
+    if selected['platform'] != '抖音': raise HTTPException(400, '这家店不是抖音店铺')
+    try: want = json.loads(keys)
+    except ValueError: raise HTTPException(400, '勾选内容不对')
+    if not isinstance(want, list) or len(want) > 60 or any(not isinstance(k, str) or not k.strip() or len(k) > 60 for k in want): raise HTTPException(400, '勾选内容不对')
+    want = sorted({k.strip() for k in want} - {model.REFUND_RED})                 # 金蝶已有红字的退款不能随单推，传了也不收
+    every = db.get_setting(EXTRA_KEY, {}) or {}
+    before = sorted(every.get(shop) or [])
+    every[shop] = want
+    db.set_setting(EXTRA_KEY, every, operator=user['name'])
+    if want != before: db.audit(user['name'], 'ec_douyin_push_extras', target=shop, detail='随收款单推的账户支出：%s → %s' % ('、'.join(before) or '无', '、'.join(want) or '无'))
+    return {'ok': True, 'keys': want}
+
+
+def _red_list(period, shop):
+    _need(period, shop)
+    with _lock: hit = _cache.get((period, shop))
+    if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
+    return model.red_list(period, hit[3]['dy_settle'], hit[3]['dy_ledger'], hit[4], hit[1], hit[3]['dy_returns'])
+
+
+@router.get('/red-list')
+def red_list(request: Request, period: str, shop: str):
+    """退了款、金蝶没有红字的订单：每单退给买家多少、平台收回补贴多少（该建的红字）。只读。"""
+    require(request); check(period, shop)
+    rows, special = _red_list(period, shop)
+    total = lambda key: round(sum(int(round(x[key] * 100)) for x in rows) / 100, 2)
+    return {'ok': True, 'count': len(rows), 'buyer': total('buyer'), 'coupon': total('coupon'), 'reds': sum(1 for x in rows if x['coupon'] > 0), 'special': len(special)}
+
+
+@router.get('/red-list/export')
+def red_list_export(request: Request, period: str, shop: str):
+    user = require(request); selected = check(period, shop)
+    rows, special = _red_list(period, shop)
+    db.audit(user['name'], 'ec_douyin_red_list', target='%s %s' % (period, shop), detail='%d 单，特殊 %d 单' % (len(rows), len(special)))
+    name = '抖音红字清单_%s_%s.xlsx' % (selected['name'], period)
+    return Response(model.red_export(selected['name'], period, rows, special),
+                    media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': "attachment; filename*=UTF-8''%s" % quote(name)})
+
+
+@router.get('/push/export')
+def push_list(request: Request, period: str, shop: str, fid: str = ''):
+    """推了什么，下载成 Excel：每张应收一行（源单编号、本次收款金额、平台订单号）+ 每批的收款明细。fid 给了（可以逗号隔开给几个）只出那几批，不给出全部没撤回的。"""
+    user = require(request); selected = check(period, shop)
+    _need(period, shop)
+    with _lock: hit = _cache.get((period, shop))
+    if not hit: raise HTTPException(404, '对账结果已更新，请刷新后重试')
+    want = {int(x) for x in fid.split(',') if x.strip().isdigit()}
+    batches = [b for b in _push_log(period, shop) if not b.get('deleted') and (not want or int(b['fid']) in want)]
+    if not batches: raise HTTPException(404, '没有这一批，或者已经撤回了')
+    db.audit(user['name'], 'ec_douyin_push_export', target='%s %s' % (period, shop), detail='%d 批 %d 张' % (len(batches), sum(len(b['bills']) for b in batches)))
+    name = '抖音已下推清单_%s_%s%s.xlsx' % (selected['name'], period, ('_%s' % batches[0]['at'][:16].replace(':', '').replace(' ', '_')) if len(want) == 1 else '')
+    return Response(model.push_export(selected['name'], period, batches, hit[4]),
+                    media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': "attachment; filename*=UTF-8''%s" % quote(name)})
+
+
 @router.post('/push/mode')
 def push_mode(request: Request, mode: str = Form(''), size: int = Form(0)):
-    """改档位 / 每批张数。只有管理员能改；改动留痕。"""
+    """改档位 / 每批张数。有电商对账上传 / 跑批权限的人都能改（能点下推的人就能改）；每次改动留痕：谁、什么时候、从什么改成什么。"""
     user = require(request, write=True)
-    if user.get('role') != 'admin': raise HTTPException(403, '只有管理员能改下推档位')
-    c = _push_conf()
+    c = _push_conf(); before = '%s · 每批 %d 张' % (PUSH_MODES[c['mode']], c['size'])
     if mode:
         if mode not in PUSH_MODES: raise HTTPException(400, '档位不对')
         c['mode'] = mode
     if size:
         if not 1 <= size <= PUSH_MAX: raise HTTPException(400, '每批 1 到 %d 张' % PUSH_MAX)
         c['size'] = size
+    after = '%s · 每批 %d 张' % (PUSH_MODES[c['mode']], c['size'])
+    if after != before: c.update(by=user['name'], at=ec._now())
     db.set_setting(PUSH_KEY, c, operator=user['name'])
-    db.audit(user['name'], 'ec_douyin_push_mode', detail='%s · 每批 %d 张' % (PUSH_MODES[c['mode']], c['size']))
+    db.audit(user['name'], 'ec_douyin_push_mode', detail='%s → %s' % (before, after))
     return {'ok': True, 'conf': c}
 
 
@@ -600,6 +683,11 @@ def _push_do(period, shop, selected, user, job):
     parts = model.push_split(period, batch['groups'], inside)
     if not parts or sorted(n for nos_ in inside for n in nos_) != sorted(nos):
         raise drop_all('金蝶生成的 %d 张收款单里挂的应收和这一批对不上（或同一订单的应收被拆到了两张单里）' % len(fids))
+    carry = None
+    if batch.get('extras'):
+        for i, part in enumerate(parts):
+            lines = model.with_extras(period, part['lines'], batch['extras'])
+            if lines: part['lines'] = lines; carry = i; break
     job['stage'] = '正在把 %d 张收款单的收款明细改成 到账行 + 扣款行' % len(fids)
     t2 = time.time()
     for i, (m, part) in enumerate(zip(made, parts)):
@@ -611,20 +699,21 @@ def _push_do(period, shop, selected, user, job):
             else: x.update(FSETTLETYPEID={'FNumber': _SETTLE_INNER}, F_ora_Base={'FNumber': conf_['base']})
             if eid: x['FEntryID'] = eid
             lines.append(x)
-        remark = '电商工作台下推 · %s %s · %d 张应收%s · 待会计保存审核' % (selected['name'], period, part['count'], (' · 第 %d/%d 张' % (i + 1, len(fids))) if len(fids) > 1 else '')
         try:
-            err = _kd_err(_post_long(s, conf, _DRAFT_SVC, ['AR_RECEIVEBILL', json.dumps({'IsDeleteEntry': 'true', 'Model': {'FID': fids[i], 'FDATE': model.period_end(period), 'FREMARK': remark,
+            err = _kd_err(_post_long(s, conf, _DRAFT_SVC, ['AR_RECEIVEBILL', json.dumps({'IsDeleteEntry': 'true', 'Model': {'FID': fids[i], 'FDATE': model.period_end(period),     # 表头备注不写（业务方 2026-10-10 定）：是哪批、谁推的，看工作台的下推记录和清单
                                                                                                                           'FRECEIVEBILLENTRY': lines}}, ensure_ascii=False)]))
         except Exception as e: err = '请求中断（%s）' % type(e).__name__
         if err: raise drop_all('收款明细没改成功：%s' % err)
     log = _push_log(period, shop)
     seconds = round(time.time() - started, 1)
-    for f, nos_, part in zip(fids, inside, parts):
+    for i, (f, nos_, part) in enumerate(zip(fids, inside, parts)):
         log.append({'fid': f, 'at': ec._now(), 'by': user['name'], 'count': part['count'], 'total': part['total'], 'first': min(nos_), 'last': max(nos_),
-                    'lines': part['lines'], 'bills': nos_, 'seconds': seconds, 'push_seconds': pushed_in, 'edit_seconds': round(time.time() - t2, 1)})
+                    'lines': part['lines'], 'bills': nos_, 'seconds': seconds, 'push_seconds': pushed_in, 'edit_seconds': round(time.time() - t2, 1),
+                    'extras': batch['extras'] if i == carry else []})          # 这张单带下去的账户支出：撤回了它们就回到待推
     _push_log_save(period, shop, log)
     db.audit(user['name'], 'ec_douyin_push', target='%s %s' % (period, shop),
-             detail='下推 %d 张应收 %.2f → 金蝶暂存收款单 %d 张（内码 %s，%s 秒）' % (len(nos), batch['total'], len(fids), '、'.join(map(str, fids)), seconds))
+             detail='下推 %d 张应收 %.2f → 金蝶暂存收款单 %d 张（内码 %s，%s 秒）%s' % (len(nos), batch['total'], len(fids), '、'.join(map(str, fids)), seconds,
+                    ('；随单带下去的账户支出：' + '、'.join('%s %.2f' % (e['name'], e['amount']) for e in batch['extras'])) if carry is not None else ''))
     return {'fids': fids, 'receipts': [{'fid': f, 'count': p['count'], 'total': p['total']} for f, p in zip(fids, parts)],
             'count': len(nos), 'total': batch['total'], 'seconds': seconds, 'push_seconds': pushed_in}
 

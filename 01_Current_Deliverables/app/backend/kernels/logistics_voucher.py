@@ -22,6 +22,12 @@
 # V2.798 主体更正(mode=move，用户 2026-10-05「这得出两张了，一张给星期零做账，一张给星期九做账」)：计提记到了别的主体账上
 #   (凭证带 from={short, full}，exp_lines 已由调用方换成本主体的科目/费用项目/部门)——本张凭证里不红冲(原凭证不在本账簿)，
 #   「更正」段直接在本主体补提，再核销、支付；原主体那边的红冲分录用 red_lines() 另出，给那边的人做账。
+# V2.896 供应商多收、等后面月份账单扣回(用户 2026-10-10「支付凭证…全部按照支付金额去走，但是红冲更正，是不是应该按照正确的金额去红冲」
+#   →「改」，口径＝费用和暂估进项税都按正确金额、核销按发票税额、支付按实付)：
+#   carry={凭证号: [{gross: 含税(负＝这个月多收了、不进费用；正＝这个月账单扣回了以前多收的、费用加回), memo}]}。
+#   plan 先照旧按发票把各张计提「应为多少」定下来，再在指定的那张上加减这笔——那张整笔红冲、按正确金额重提；
+#   build 的核销段：待认证仍按发票税额，暂估进项税除了各张计提的(正确金额的)税，再多出一行差额——
+#   多收的那个月是贷方(随票多认证的税)、扣回的那个月是贷方红字，两个月合起来为零；供应商往来同理(多收月借方余额＝供应商欠我们的含税数)。
 import re
 
 STD_RATES = (0.0, 0.01, 0.03, 0.05, 0.06, 0.09, 0.13)
@@ -118,10 +124,42 @@ def eff_gross(v, fx, amt=None):
     return r2(g)
 
 
-def plan(vouchers, invoices, fixes=None, amts=None):
+def plan(vouchers, invoices, fixes=None, amts=None, carry=None):
     """vouchers：acc_voucher(...) 列表；invoices：[{number, rate, gross, tax}]；fixes：{vno: [复核台计提更正]}；
-    amts：{vno: {gross, part, memo}} 应为金额(金额有差时)。
+    amts：{vno: {gross, part, memo}} 应为金额(金额有差时)；carry：{vno: [{gross, memo}]} 多收待扣回/本月扣回(见文件头 V2.896)。
     → {status: ok/manual, msgs:[], per:{vno: {mode: hx/rate/fix/tail/move/amt/part, new_rate, why, gross}}, tails:{vno: d}}"""
+    pl = _plan(vouchers, invoices, fixes, amts)
+    return _apply_carry(pl, vouchers, carry) if (carry and pl["status"] == "ok") else pl
+
+
+def _apply_carry(pl, vouchers, carry):
+    """按发票对平之后，把「多收待扣回 / 本月扣回」落到指定的计提上：应为金额加减这笔，整笔红冲按正确金额重提。"""
+    per = pl["per"]
+    for v in vouchers:
+        items = [x for x in (carry.get(v["vno"]) or []) if abs(float(x.get("gross") or 0)) >= 0.005]
+        if not items:
+            continue
+        p = per[v["vno"]]
+        cg = r2(sum(float(x["gross"]) for x in items))
+        if abs(cg) < 0.005:
+            continue
+        if p["mode"] in ("part", "move"):
+            return {"status": "manual", "per": per, "tails": {}, "msgs": pl["msgs"] + [
+                "记-%s 是%s，又登记了多收待扣回 %.2f：两样叠在一张上系统做不了，要人工处理" % (v["vno"], "部分核销" if p["mode"] == "part" else "别的主体记过来的", cg)]}
+        g0 = p["gross"]
+        g1 = r2(g0 + cg)
+        if g1 <= 0.004:
+            return {"status": "manual", "per": per, "tails": {}, "msgs": pl["msgs"] + [
+                "记-%s 按发票应为 %.2f，减掉多收的 %.2f 就不剩了：登记的多收金额不对，要人工处理" % (v["vno"], g0, -cg)]}
+        memo = "；".join(dict.fromkeys(str(x.get("memo") or "").strip() for x in items if str(x.get("memo") or "").strip()))
+        why = ("供应商多收 %.2f 等后面月份账单扣回，不进本月费用：按正确金额 %.2f 重提" % (-cg, g1)) if cg < 0 else \
+              ("本月账单扣回了以前多收的 %.2f，费用按真实数加回：按 %.2f 重提" % (cg, g1))
+        per[v["vno"]] = dict(p, mode=("amt" if p["mode"] in ("hx", "tail") else p["mode"]), gross=g1, gross0=g0, mode0=p["mode"], carry=cg,
+                             why=(p.get("why") + "；" if p.get("why") else "") + why + (("（%s）" % memo) if memo else ""))
+    return pl
+
+
+def _plan(vouchers, invoices, fixes=None, amts=None):
     fixes, amts = fixes or {}, amts or {}
     msgs, per = [], {}
     eff = {v["vno"]: eff_gross(v, None if v.get("from") else fixes.get(v["vno"]), amts.get(v["vno"])) for v in vouchers}
@@ -341,7 +379,13 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         fx = fixes.get(v["vno"]) or []
         gross = p["gross"] if p.get("gross") is not None else eff_gross(v, fx)      # 应为金额(人工/系统给的，或复核台登记的金额更正)
         d_tail = pl["tails"].get(v["vno"], 0)
-        if _keep_tax(v, p):                      # 尾差 / 主体更正(税率没变)：含税不变，税额沿用原计提、按发票口径 +d
+        carry_tax = 0.0
+        if p.get("carry"):                       # 多收待扣回/本月扣回(V2.896)：费用和暂估税都按正确金额算；
+            p0 = dict(p, gross=p.get("gross0", gross), mode=p.get("mode0") or p["mode"])      # 按发票口径这张该挂多少税(含尾差)——
+            tax0 = r2(v["tax"] + d_tail) if _keep_tax(v, p0) else r2(split_gross(p0["gross"], p["new_rate"])[1] + d_tail)
+            net, tax = split_gross(gross, p["new_rate"])
+            carry_tax = r2(tax0 - tax)           # ——两者的差就是核销段要另挂的那一行暂估进项税
+        elif _keep_tax(v, p):                    # 尾差 / 主体更正(税率没变)：含税不变，税额沿用原计提、按发票口径 +d
             tax = r2(v["tax"] + d_tail)
             net = r2(gross - tax)
         else:                                    # 改税率/更正：按新税率重算；尾差正好落在这张上的也带上(原来漏了，核销段会差这几分)
@@ -371,7 +415,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         if tax:                                  # 更正到 0%(普票不抵扣)不出 0 金额的税行
             out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=("sup_code", "sup_name")))
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
-        v["_new"] = {"gross": gross, "tax": tax}
+        v["_new"] = {"gross": gross, "tax": tax, "carry_tax": carry_tax}
     # 核销：每张票一行待认证 + 每张计提一行贷暂估(更正过的用新税额、引用本凭证号)
     for v in parts:                          # 部分核销：只转出本次核销那部分对应的暂估税
         p = pl["per"][v["vno"]]
@@ -395,6 +439,11 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         t = v["_new"]["tax"] if (v in renew or v in parts) else v["tax"]
         if t and not ctx.get("tax_later"):       # 发票后补：这张不转暂估税，等发票到了另做
             out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
+        ct = (v.get("_new") or {}).get("carry_tax") or 0
+        if abs(ct) >= 0.005 and not ctx.get("tax_later"):      # 发票税额和正确金额的税差的那一点(V2.896)：多收月贷方、扣回月贷方红字
+            cg = pl["per"][v["vno"]]["carry"]
+            note = ("（供应商多收%.2f元等后面月份账单扣回，随票多认证的进项税）" % -cg) if cg < 0 else ("（本月账单扣回以前多收的%.2f元，本月发票少开的进项税）" % cg)
+            out.append(_ln("核销", hx_desc + note, "2221.01.07", "暂估进项税", cr=ct, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
     # 支付
     if ctx.get("paid"):
         pe = "%s提起支付%s%s%s" % (ctx.get("applicant") or "", sup, mc, items)
@@ -446,3 +495,162 @@ def balance(lines):
     dr = r2(sum(l["dr"] for l in lines))
     cr = r2(sum(l["cr"] for l in lines))
     return dr, cr
+
+
+# ---------- 做到一半接着做（V2.908）----------
+# 起因(2026-10-10)：「保存到金蝶」是一串动作——审核付款单 → 等金蝶出付款凭证 → 往里补分录 → 提交 → 系统落记录。
+# 中间断了(后端重启、金蝶一时没出凭证、补分录报错)，付款单已经是「已审核」，原来再点只会被拦住、只能人工收尾。
+# 现在再点一次就接着做：先看金蝶里那张付款凭证现在是什么样，再决定从哪一步接。这里只做判断，不连金蝶。
+def resume_step(ents, status, add, amount, sup_code=""):
+    """→ (动作, 说明)。
+    ents＝凭证现有分录 [{acct, dr, cr, sup_code}]；status＝凭证单据状态(Z 暂存 / A 创建 / B 审核中 / C 已审核 / D 重新审核)；
+    add＝系统要补的分录 [{acct, dr, cr}]；amount＝付款金额；sup_code＝请款单的供应商编码。
+      amend   还是金蝶出的原样两行(贷银行存款＝付款金额)，没提交 → 补分录、提交、落记录
+      submit  系统要补的分录已经都在里面(上次补完没来得及记)，还没提交 → 提交、落记录
+      record  分录都在、也提交了 → 只落记录
+      stop    别的情况(往来单位不对、原样就被提交了、有人改过) → 不动，交给人"""
+    from collections import Counter
+
+    def key(e):
+        return (str(e.get("acct") or ""), r2(e.get("dr")), r2(e.get("cr")))
+
+    def raw(c):          # 是不是金蝶出的原样两行：一行贷银行存款＝付款金额，另一行借方同额
+        ks, amt = list(c.elements()), r2(amount)
+        bank = any(a.startswith("1002") and abs(cr - amt) < 0.005 for a, _dr, cr in ks)
+        other = any(not a.startswith("1002") and abs(dr - amt) < 0.005 for a, dr, _cr in ks)
+        return len(ks) == 2 and bank and other
+
+    sups = {str(e.get("sup_code") or "") for e in ents} - {""}
+    if sup_code and sups and str(sup_code) not in sups:
+        return "stop", "这张凭证的往来单位不是这张请款单的供应商，系统没动"
+    have, want = Counter(key(e) for e in ents), Counter(key(e) for e in add)
+    open_ = str(status or "") in ("A", "Z")
+    if raw(have):
+        if open_:
+            return "amend", ""
+        if not want:
+            return "record", "凭证已经提交过，摘要没有再改"
+        return "stop", "这张凭证已经提交（或审核）了，但里面还没有核销分录。系统不改已经提交的凭证：请在金蝶把它撤销提交（已审核的先反审核），再点一次"
+    if want and not (want - have) and raw(have - want):
+        return ("submit", "") if open_ else ("record", "")
+    return "stop", "这张凭证里的分录和系统要补的对不上（可能有人改过），系统没动，请人工处理"
+
+
+# ---------- 自动做账做完，发给同事的那条提醒（V2.910）----------
+def _nt_amt(v):
+    try:
+        return "{:,.2f}".format(float(v or 0))
+    except (TypeError, ValueError):
+        return str(v or "")
+
+
+def notice_text(at, done, pending=None, left=0, trial=False):
+    """自动做账一轮做完，发给同事的钉钉消息 → (文字, 统计 {ok, bad, fix, multi, pending})。
+    钉钉单聊是纯文字(不认颜色、加粗)，靠小标题和空行分段；要紧的放前面：没做成的 → 涉及两个主体的红冲 → 有红冲更正 → 只核销。
+    done＝这一轮真去写金蝶的每一张 {subject, payee, amount, kind, text, vno, done(True/False), msg, warn, xout:[{vno, gross, to}]}；
+    pending＝系统不自动做、要人单张做的(计提记错主体) {subject, payee, amount, text 怎么回事, why 为什么不自动做}；left＝够条件但这一轮没排上的张数。
+    用户 2026-10-11「计提更正单是在复核时候打印，所以这里只需要提醒，尤其是多主体红冲」：不写去哪打印，只提醒装订时附上；
+    一张凭证里红冲了记错主体的计提(另一个主体在它自己的付款凭证里补提)的，单独拎出来，提醒两个主体对着审。"""
+    done, pending = list(done or []), list(pending or [])
+    good = [x for x in done if x.get("done")]
+    bad = [x for x in done if not x.get("done")]
+    multi = [x for x in good if x.get("xout")]
+    fix = [x for x in good if not x.get("xout") and x.get("kind") not in ("hx", "", None)]
+    hx = [x for x in good if not x.get("xout") and x.get("kind") in ("hx", "", None)]
+    stat = {"ok": len(good), "bad": len(bad), "fix": len(fix) + len(multi), "multi": len(multi), "pending": len(pending)}
+    head = lambda x: "%s｜%s｜%s" % (x.get("subject") or "", x.get("payee") or "", _nt_amt(x.get("amount")))
+    vno = lambda x: "记-%s" % x["vno"] if x.get("vno") else "记-（待出）"
+    cut = lambda s, n=150: (s[:n] + "…") if len(s) > n else s
+
+    def build(fold):
+        L = []
+        if trial:
+            L += ["【试发】这是一条试发，系统没有做任何凭证。下面按上一轮的结果、照正式提醒的样子排的；凭证号要真做了才有。", ""]
+        if good and bad:
+            t = "【自动做账】做成 %d 张，%d 张没做成，要人处理" % (len(good), len(bad))
+        elif bad:
+            t = "【自动做账】%d 张没做成，要人处理" % len(bad)
+        elif good:
+            t = "【自动做账】刚做了 %d 张付款凭证" % len(good)
+            if stat["fix"]:
+                t += "，其中 %d 张有红冲更正" % stat["fix"]
+                if multi:
+                    t += "（%d 张涉及两个主体）" % len(multi)
+            else:
+                t += "，请到金蝶审核"
+        else:
+            t = "【自动做账】有 %d 张涉及两个主体的红冲，系统不自动做，要人来做" % len(pending)
+        L += [t, "%s 这一轮" % str(at or "")[5:16], ""]
+        if bad:
+            L.append("没做成（%d 张）" % len(bad))
+            for x in bad:
+                L.append("× %s" % head(x))
+                L.append("    %s" % cut(str(x.get("msg") or "原因没取到，请到付款做账页看"), 220))
+            L.append("")
+        n = 0
+        if multi:
+            L.append("涉及两个主体的红冲（%d 张）" % len(multi))
+            for x in multi:
+                n += 1
+                L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                own = str(x.get("text") or "").split("；另红冲")[0]
+                if own:
+                    L.append("    %s" % cut(own))
+                for o in x["xout"]:
+                    L.append("    另外整笔红冲了 记-%s %s：这笔计提记错了主体，应是%s的；%s在它自己的付款凭证里补提" % (
+                        o.get("vno"), _nt_amt(o.get("gross")), o.get("to") or "另一个主体", o.get("to") or "那个主体"))
+                if x.get("warn"):
+                    L.append("    %s" % cut(str(x["warn"])))
+            L.append("")
+        if fix:
+            L.append("有红冲更正（%d 张）" % len(fix))
+            for x in fix:
+                n += 1
+                L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                if x.get("text"):
+                    L.append("    %s" % cut(str(x["text"])))
+                if x.get("warn"):
+                    L.append("    %s" % cut(str(x["warn"])))
+            L.append("")
+        if hx:
+            if fold:
+                L.append("只核销 %d 张，合计 %s（逐张在付款做账页看）" % (len(hx), _nt_amt(sum(float(x.get("amount") or 0) for x in hx))))
+                for x in hx:
+                    if x.get("warn"):
+                        L.append("    %s %s：%s" % (head(x), vno(x), cut(str(x["warn"]))))
+            else:
+                if multi or fix or bad:
+                    L.append("只核销（%d 张）" % len(hx))
+                for x in hx:
+                    n += 1
+                    L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                    if x.get("warn"):
+                        L.append("    %s" % cut(str(x["warn"])))
+            L.append("")
+        if pending:
+            L.append("要人来做（%d 张，涉及两个主体，系统不自动做）" % len(pending))
+            for x in pending:
+                L.append("· %s" % head(x))
+                L.append("    %s" % cut(str(x.get("text") or x.get("why") or "计提记错主体"), 200))
+            L.append("")
+        L.append("接下来")
+        todo = []
+        if bad:
+            todo.append("没做成的 %d 张：到付款做账页看原因，处理好以后系统下一轮会再试。" % len(bad))
+        if good:
+            todo.append("到金蝶审核做成的 %d 张凭证（系统只提交、不审核）。" % len(good))
+        if stat["fix"]:
+            todo.append("有红冲更正的 %d 张：装订时记得附计提更正单（复核时打印的那张）。" % stat["fix"])
+        if multi:
+            todo.append("涉及两个主体的 %d 张：一边红冲、一边补提，两个主体的凭证对着审，金额要对得上。" % len(multi))
+        if pending:
+            todo.append("要人来做的 %d 张：到付款做账页打开那张单，单张做（本主体补提、记错的那个主体红冲，两边对着看）。" % len(pending))
+        L += ["%d. %s" % (i + 1, s) for i, s in enumerate(todo)]
+        if left:
+            L += ["", "（够条件的还有 %d 张这一轮没排上，下一轮做。）" % left]
+        return "\n".join(L)
+
+    s = build(False)
+    if len(s) > 1800 and len(hx) > 3:      # 太长：只核销的合成一行，要人留意的逐张留着
+        s = build(True)
+    return s, stat

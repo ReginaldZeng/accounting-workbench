@@ -1,3 +1,6 @@
+// [Change Log] Date:2026-10-10 Author:Claude Opus 5.5 Version:V2.909
+// 「账号对不上」行：显示凭证/流水上的原户名（不再显示抠出来的半截数字）；台账里是电商渠道/理财户、却记在银行存款科目下的，
+// 行内红字「疑选错科目」，切片说明同步改写（这种不用去台账补登记）。
 // [Change Log] Date:2026-07-06 Author:Claude/c Version:V2.32
 // 币别区分：加「币别」列(外币蓝字)；外币户金额=原币不带¥号、行下挂本位币小字；详情面板列 原币/本位币/汇率；
 // 新状态「汇兑损益·账面调整」(fx_adjust,期末重估无银行流水)入切片器与状态标签；页脚补外币口径说明。
@@ -113,7 +116,7 @@ const SLICE_DESC = {
   combo: '组合待确认＝一笔=多笔且合计分毫不差（合并缴税/理财本息拆张等）——两边都已做账，点开核对每张凭证，确认后认领留痕，不算错漏账。',
   late: '晚记＝配对上了，但金蝶比银行晚≥1天入账——本月内为轻，跨会计月为重（会扭曲期末数）。',
   fx_adjust: '汇兑·账面调整＝外币户期末汇率重估（原币0、只动本位币）——纯账面调整，本来就没有银行流水，不参与配对。',
-  unmapped: '账号对不上＝流水/凭证上的账号在账户台账里找不到是谁（掩码/短号等）——先到账户台账补登记。',
+  unmapped: '账号对不上＝流水/凭证上的账号，在账户台账的银行账户里找不到。两种情况：台账确实没有（掩码/短号/新开户）→到账户台账补登记；台账里有、但它是电商渠道或理财户→行里有红字「疑选错科目」，是凭证记错了科目，不用补台账。',
   matched: '已匹配＝同账户、同方向、金额(4位)相等、金蝶当天入账——无异常。',
 }
 const SLICE_ST = {}   // 切片器 key -> 涵盖的后端状态集，供筛选/计数展开
@@ -347,7 +350,14 @@ export default function Reconcile({ cfg, onPeriod, onNav, user }) {
               <td><Conf v={r['置信度']} /></td>
               <td>{r['日期'] || '—'}{r['晚记'] ? <div className="sub" style={{ color: 'var(--violet)' }}>{r['晚记']}</div> : null}</td>
               <td>{r['开户行'] || '—'}</td>
-              <td><div className="acct">{r['账号'] || '—'}</div><div className="sub">{r['主体'] || r['户名'] || ''}</div></td>
+              <td>{(() => {
+                // 对不上台账的行：显示凭证/流水上的原户名，不显示从里面抠出来的半截数字（邮箱式电商户会被抠成 — 或一串看不懂的数）
+                const nb = r['非银行户'], raw = String(r['账号原文'] || '').trim()
+                if (r.status === 'unmapped' && (nb || (raw && raw !== String(r['账号'] || ''))))
+                  return <><div className="acct" style={{ wordBreak: 'break-all' }}>{raw || r['账号'] || '—'}</div>
+                    <div className="sub">{(nb && nb['主体']) || r['主体'] || r['户名'] || ''}</div></>
+                return <><div className="acct">{r['账号'] || '—'}</div><div className="sub">{r['主体'] || r['户名'] || ''}</div></>
+              })()}</td>
               <td>{cur ? <span style={foreign ? { color: 'var(--blue)', fontWeight: 600 } : null}>{cur}</span> : '—'}</td>
               {/* V2.170：此格自 V2.7 起一直缺失，表头 13 列行只有 12 格，「收(付)方」起整体左移一列 */}
               <td className="muted">{r['收(付)方名称'] || '—'}</td>
@@ -363,7 +373,8 @@ export default function Reconcile({ cfg, onPeriod, onNav, user }) {
                   </div>
                 }
                 return r['组合候选说明'] ? <div className="sub" style={{ color: 'var(--violet)' }}>{r['组合候选说明']}</div> : null
-              })()}{r['记错户对应'] ? <div className="sub" style={{ color: 'var(--amber)' }}>{r['记错户对应']} · 核实后请更正凭证的账号维度</div> : null}<XferLegs r={r} /></td>
+              })()}{r['记错户对应'] ? <div className="sub" style={{ color: 'var(--amber)' }}>{r['记错户对应']} · 核实后请更正凭证的账号维度</div> : null}{r['非银行户'] ? <div className="sub" style={{ color: 'var(--red)', fontWeight: 600 }}>
+                疑选错科目：这个户在账户台账里是「{r['非银行户']['类别']}」{r['非银行户']['开户行'] ? `（${r['非银行户']['开户行']}）` : ''}，{r['非银行户']['应在科目'] ? `按台账应记在「${r['非银行户']['应在科目']}」，` : ''}这一行却记在银行存款科目下 · 核实后请改凭证的科目（不用去台账补登记）</div> : null}<XferLegs r={r} /></td>
               <td className="muted">{r['金蝶凭证'] || '—'}{r['差额'] != null ? <span style={{ color: 'var(--amber)', fontWeight: 600 }}> 差 {yuan4(r['差额'])}</span> : null}{r['制单人'] ? <div className="sub">制单 {r['制单人']}</div> : null}</td>
               <td>{r.status === 'matched'
                 ? (canExp ? <span className="lk">{open ? '收起 ▴' : '看详情 ▾'}</span> : <span className="muted">—</span>)
