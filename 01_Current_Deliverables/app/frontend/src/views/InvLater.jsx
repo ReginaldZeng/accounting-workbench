@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.916（后补单详情重排版）| 详情上半部分从 22 个字段的四列小格子改成：金额一排＋到票进度＋「收款方与发票」「付款单」两张卡＋通栏事由（按编号断行，长的先收起）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票后补池页：列表筛选（我接收的/全部＋状态＋搜索）、财务代填新建后补单、收到（扫码/上传/先标记）、催一下、详情、修改、关闭、导出欠票清单、「设置」页签
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 页头加「业务自助登记入口」（网址＋二维码，申请人自己登记发票后补）
 // [Change Log] Date: 2026-10-05 | Author: Claude / c | Version: V2.741 | 页头加「以某人身份预览」（管理员输入钉钉姓名，看这个人能选哪些单，核对审批模板配得对不对）
@@ -98,18 +99,18 @@ function LaterBadges({ l }) {
   </span>
 }
 
-/** 预计到票日：超期标红写「超期N天」；3 天内到期标琥珀 */
+/** 预计到票日的提示：超期标红写「超期N天」；3 天内到期标琥珀；其余不提示 */
+function dueInfo(l) {
+  const d = l?.daysLeft
+  const live = isLive(l)
+  if (live && (l.overdue || (typeof d === 'number' && d < 0))) return { tone: 'err', note: `超期${typeof d === 'number' ? Math.abs(d) : ''}天` }
+  if (live && typeof d === 'number' && d <= 3) return { tone: 'warn', note: d === 0 ? '今天到期' : `还剩${d}天` }
+  return { tone: '', note: '' }
+}
 function DueCell({ l }) {
   if (!l?.expectDate) return <span className="inv-muted">未填</span>
-  const d = l.daysLeft
-  const live = isLive(l)
-  if (live && (l.overdue || (typeof d === 'number' && d < 0))) {
-    return <span className="inv-lt-due err">{l.expectDate}<em>超期{typeof d === 'number' ? Math.abs(d) : ''}天</em></span>
-  }
-  if (live && typeof d === 'number' && d <= 3) {
-    return <span className="inv-lt-due warn">{l.expectDate}<em>{d === 0 ? '今天到期' : `还剩${d}天`}</em></span>
-  }
-  return <span className="inv-lt-due">{l.expectDate}</span>
+  const { tone, note } = dueInfo(l)
+  return <span className={'inv-lt-due' + (tone ? ' ' + tone : '')}>{l.expectDate}{note && <em>{note}</em>}</span>
 }
 
 // 用 div 不用 label：label 会把点击转给里面第一个可聚焦控件（文件框/分段按钮），点标题就误弹选文件
@@ -273,6 +274,30 @@ function KV({ k, children }) {
   return <div className="inv-lt-kv"><span>{k}</span><div>{children || <span className="inv-muted">—</span>}</div></div>
 }
 
+// 详情卡片里的一行：左边字段名，右边内容（空的写「—」）
+function Row({ k, children }) {
+  return <div className="inv-lt-row"><span>{k}</span><div>{children || <span className="inv-muted">—</span>}</div></div>
+}
+
+// 事由常是钉钉里分点写的一段话，存下来时换行成了空格：在「一、」「1、」这类编号前断行。只加换行，不动内容。
+export function reasonLines(s) {
+  return String(s || '').replace(/[ \t　]+(?=(?:[一二三四五六七八九十]{1,3}|\d{1,2})、)/g, '\n')   /* 方括号里是：半角空格、制表符、全角空格 */.split('\n').map(x => x.trim()).filter(Boolean)
+}
+const REASON_FOLD = 6     // 事由超过这么多行（或很长的一整段）先收起，点了再展开——别把下面收到的票挤到看不见
+
+function Reason({ text }) {
+  const [open, setOpen] = useState(false)
+  const lines = reasonLines(text)
+  if (!lines.length) return <span className="inv-muted">—</span>
+  const long = lines.length > REASON_FOLD || String(text).length > 260
+  return <div className="inv-lt-reason">
+    <div className={'inv-lt-reason-tx' + (long && !open ? ' fold' : '')}>
+      {lines.map((x, i) => <p key={i} className={/^[一二三四五六七八九十]{1,3}、/.test(x) ? 'top' : ''}>{x}</p>)}
+    </div>
+    {long && <button type="button" className="inv-lt-more" onClick={() => setOpen(o => !o)}>{open ? '收起' : `展开全部（共 ${lines.length} 行）`}</button>}
+  </div>
+}
+
 function logDetail(d) {
   if (d === null || d === undefined || d === '') return ''
   if (typeof d === 'string') return d
@@ -315,6 +340,10 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
   }
 
   const live = isLive(l)
+  const left = remainingOf(l)
+  const due = dueInfo(l)
+  // 占预计到票金额的百分之几（0–100，取整）
+  const pct = v => Math.max(0, Math.min(100, Math.round(num(v) / (num(l?.expectAmount) || 1) * 100)))
   const footer = <>
     {remindRes && <span className={'inv-lt-inline ' + (remindRes.ok ? 'ok' : 'err')}>{remindRes.text}</span>}
     {l && can.receive && live && <button type="button" className="btn" disabled={reminding} onClick={remind}>{reminding ? '发送中…' : '催一下'}</button>}
@@ -328,31 +357,51 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     {err && <div className="banner err">没打开这张后补单：{err}</div>}
     {!data && !err && <div className="loading">正在打开后补单…</div>}
     {l && <div className="inv-lt-detail">
-      <div className="inv-lt-dhead"><LaterBadges l={l} /><DueCell l={l} /></div>
-      <div className="inv-lt-kvs">
-        <KV k="收款方">{l.payee?.name}</KV>
-        <KV k="开户行">{l.payee?.bank}</KV>
-        <KV k="银行账号"><span className="inv-num">{l.payee?.account}</span></KV>
-        <KV k="付款金额"><span className="inv-num">{money(l.payAmount)}</span></KV>
-        <KV k="发票种类">{KIND_LABEL[l.invKind] || l.invKind}</KV>
-        <KV k="税率">{l.taxRate}</KV>
-        <KV k="预计到票日">{l.expectDate}</KV>
-        <KV k="预计到票金额"><span className="inv-num">{money(l.expectAmount)}</span></KV>
-        <KV k="已到"><span className="inv-num">{money(l.receivedAmount)}</span></KV>
-        <KV k="已收未登记">{num(l.unregisteredAmount) ? <span className="inv-num inv-lt-amber">{money(l.unregisteredAmount)}</span> : null}</KV>
-        <KV k="还差"><b className="inv-num">{money(remainingOf(l))}</b></KV>
-        <KV k="财务接收人">{l.receiverName || l.receiver}</KV>
-        <KV k="申请人">{[l.applicant, l.dept].filter(Boolean).join(' · ')}</KV>
-        <KV k="公司主体">{l.company}</KV>
-        <KV k="审批模板">{l.template}</KV>
-        <KV k="审批编号"><span className="inv-num">{l.businessId}</span></KV>
-        <KV k="ERP 单号"><span className="inv-num">{l.erpNo}</span></KV>
-        <KV k="登记人">{l.filedBy ? `${l.filedBy}（${l.filedVia === 'self' ? '业务自助' : '财务代填'}）` : ''}</KV>
-        <KV k="登记时间">{fmtTime(l.createdAt)}</KV>
-        <KV k="上次催票">{l.lastRemindAt ? `${fmtTime(l.lastRemindAt)}（共 ${l.remindCount || 0} 次）` : '还没催过'}</KV>
-        <KV k="事由" >{txt(l.reason)}</KV>
-        <KV k="备注">{l.note}</KV>
+      <div className="inv-lt-dhead"><LaterBadges l={l} /></div>
+      <div className="inv-lt-nums">
+        <div><span>付款金额</span><b className="inv-num">{money(l.payAmount)}</b></div>
+        <div><span>预计到票金额</span><b className="inv-num">{money(l.expectAmount)}</b></div>
+        <div className={num(l.receivedAmount) > 0 ? 'ok' : ''}><span>已到</span><b className="inv-num">{money(l.receivedAmount)}</b></div>
+        {num(l.unregisteredAmount) > 0 && <div className="warn" title="点过「先标记收到」，发票号码还没扫进来"><span>已收未登记</span><b className="inv-num">{money(l.unregisteredAmount)}</b></div>}
+        <div className={left > 0 && live ? 'hot' : left > 0 ? '' : 'ok'}><span>还差</span><b className="inv-num">{money(left)}</b></div>
+        <div className={due.tone}><span>预计到票日</span><b className="inv-num">{l.expectDate || '未填'}</b>{due.note && <em>{due.note}</em>}</div>
       </div>
+      {num(l.expectAmount) > 0 && <div className="inv-lt-prog" title={`已到 ${money(l.receivedAmount)} / 预计 ${money(l.expectAmount)}`}>
+        <span>到票进度</span>
+        <div className="bar"><i style={{ width: pct(l.receivedAmount) + '%' }} /><i className="un" style={{ width: pct(l.unregisteredAmount) + '%' }} /></div>
+        <b className="inv-num">{pct(l.receivedAmount)}%</b>
+      </div>}
+
+      <div className="inv-lt-cards">
+        <section className="inv-lt-card">
+          <h5>收款方与发票</h5>
+          <Row k="收款方">{l.payee?.name}</Row>
+          <Row k="开户行">{l.payee?.bank}</Row>
+          <Row k="银行账号">{l.payee?.account && <span className="inv-num inv-lt-nowrap">{l.payee.account}</span>}</Row>
+          <Row k="发票种类">{KIND_LABEL[l.invKind] || l.invKind}</Row>
+          <Row k="税率">{l.taxRate}</Row>
+          <Row k="财务接收人">{l.receiverName || l.receiver}</Row>
+          <Row k="上次催票">{l.lastRemindAt ? `${fmtTime(l.lastRemindAt)}（共 ${l.remindCount || 0} 次）` : '还没催过'}</Row>
+        </section>
+        <section className="inv-lt-card">
+          <h5>付款单</h5>
+          <Row k="申请人">{l.applicant}</Row>
+          <Row k="部门">{l.dept}</Row>
+          <Row k="公司主体">{l.company}</Row>
+          <Row k="审批模板">{l.template}</Row>
+          <Row k="审批编号">{l.businessId && <span className="inv-num inv-lt-nowrap">{l.businessId}</span>}</Row>
+          <Row k="ERP 单号">{l.erpNo && <span className="inv-num inv-lt-nowrap">{l.erpNo}</span>}</Row>
+          <Row k="登记">{[l.filedBy && `${l.filedBy}（${l.filedVia === 'self' ? '业务自助' : '财务代填'}）`, fmtTime(l.createdAt)].filter(Boolean).join(' · ')}</Row>
+        </section>
+      </div>
+      <section className="inv-lt-card">
+        <h5>事由</h5>
+        <Reason text={txt(l.reason)} />
+      </section>
+      {l.note && <section className="inv-lt-card">
+        <h5>备注</h5>
+        <p className="inv-lt-note">{l.note}</p>
+      </section>}
 
       <h4 className="inv-lt-h">收到的票（{items.length}）</h4>
       {items.length

@@ -584,6 +584,45 @@ function laterApi(st) {
   }
 }
 
+test('后补单详情：金额排成一排、字段分两张卡、长事由按编号断行并先收起', async (browser, B) => {
+  const reason = '一、费用名称：样品甲 1、发货时间：8月10日 2、费用明细：首重89+22*41斤=991元 3、物流查询单号：HX001 4、签收时间：8月13日 ' +
+    '二、费用名称：样品乙 1、发货时间：8月25日 2、费用明细：单价 12.5 元，共 3 箱 3、物流查询单号：HX002 4、签收时间：8月28日'
+  const later = {
+    id: 2, status: 'partial', overdue: true, daysLeft: -2, businessId: '202609231721000398295', template: '付款申请（公对公）',
+    applicant: '申请人甲', dept: '合成公司-供应中心-物流部', company: '合成公司', payee: { name: '合成物流', bank: '合成银行某支行', account: '8110301014200104827' },
+    payAmount: 1322, expectAmount: 1322, receivedAmount: 800, unregisteredAmount: 200, remaining: 322, expectDate: '2026-10-10', invKind: 'special', taxRate: '1%',
+    receiverName: '财务甲', filedBy: '申请人甲', filedVia: 'self', createdAt: '2026-10-12 12:18:00', reason, note: '',
+  }
+  const { page, ctx, errors } = await open(browser, B, laterApi({ rows: [later] }), { hash: '#/invlater?id=2' })
+  await mount(page, 'InvLater', { user: { name: '测试会计' } })
+  await page.locator('.inv-lt-nums').waitFor({ timeout: 4000 })
+  const tiles = await page.locator('.inv-lt-nums > div').evaluateAll(els => els.map(e => [e.querySelector('span').textContent, e.querySelector('b').textContent, e.className]))
+  assert.deepEqual(tiles.map(t => t[0]), ['付款金额', '预计到票金额', '已到', '已收未登记', '还差', '预计到票日'])
+  assert.deepEqual([tiles[2][1], tiles[3][1], tiles[4][1]], ['800.00', '200.00', '322.00'])
+  assert.equal(tiles[4][2], 'hot'); assert.equal(tiles[5][2], 'err', '超期的到票日标红')
+  assert.ok(await page.locator('.inv-lt-nums em', { hasText: '超期2天' }).isVisible())
+  assert.equal(await page.locator('.inv-lt-prog b').textContent(), '61%')
+  assert.equal(await page.locator('.inv-lt-cards .inv-lt-card').count(), 2)
+  // 账号、审批编号各占一行不折断
+  for (const v of ['8110301014200104827', '202609231721000398295']) {
+    const h = await page.getByText(v, { exact: true }).evaluate(e => e.getBoundingClientRect().height)
+    assert.ok(h < 26, v + ' 折行了，高 ' + h)
+  }
+  // 事由：在「一、」「1、」这类编号前断行；小数 12.5 不能被当成编号断开
+  const lines = await page.locator('.inv-lt-reason-tx p').allTextContents()
+  assert.equal(lines.length, 10)
+  assert.equal(lines[0], '一、费用名称：样品甲'); assert.equal(lines[5], '二、费用名称：样品乙')
+  assert.ok(lines.includes('2、费用明细：单价 12.5 元，共 3 箱'), JSON.stringify(lines))
+  assert.equal(lines.join(''), reason.replace(/\s+(?=(?:[一二]|\d)、)/g, ''), '只加换行，内容一个字不少')
+  assert.ok(await page.locator('.inv-lt-reason-tx.fold').count(), '长事由先收起')
+  await page.getByRole('button', { name: '展开全部（共 10 行）' }).click()
+  assert.equal(await page.locator('.inv-lt-reason-tx.fold').count(), 0)
+  assert.ok(await page.getByRole('button', { name: '收起' }).isVisible())
+  assert.equal(await page.locator('.inv-lt-note').count(), 0, '没有备注就不占地方')
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
 test('F12/C5 新建后补单：接收人没收到钉钉消息要如实说，不能报「已通知」', async (browser, B) => {
   const st = {
     rows: [],
