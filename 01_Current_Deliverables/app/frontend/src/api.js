@@ -680,7 +680,7 @@ export const reviewScope = fresh => j('/api/logistics-review/scope' + (fresh ? '
 export const reviewScopeSet = body => j('/api/logistics-review/scope', { method: 'POST', body: JSON.stringify(body) })
 export const reviewInvoices = (carrier, period) => j(`/api/logistics-review/invoices?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewUnitKg = (carrier, period) => j(`/api/logistics-review/unit-kg?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
-export const reviewUnitKgSet = (items, packs) => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items, packs: packs || [] }) })
+export const reviewUnitKgSet = (items, packs, boxkg, carrier) => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items, packs: packs || [], boxkg: boxkg || [], carrier: carrier || '' }) })
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
 export const reviewDocMode = (carrier, period, doc_no, mode) => j('/api/logistics-review/doc-mode', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, mode } : { carrier, period, doc_no, mode }) })
 export const reviewCarryAdj = body => j('/api/logistics-review/carry-adj', { method: 'POST', body: JSON.stringify(body) })

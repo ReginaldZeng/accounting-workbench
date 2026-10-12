@@ -2701,6 +2701,26 @@ def _unit_kg():
     return out
 
 
+_BOX_KG_KEY = "logi_box_kg"        # {承运商: {物料编码: {kg: 每箱计费千克, pack: 填的时候规格里的每箱数量, unit, name, spec, by, at}}}
+
+
+def _box_kg(carrier):
+    """每箱计费重量(V2.913，用户 2026-10-12 看恒茂入库处置费「你核价依据是按照吨去复核……数量复核吨才对，如果需要换算系数，是不是要补充上去」)。
+    有的费用按吨收，账单的吨重＝箱数 × 每箱多少千克(含包装的毛重，供应商自己写的：净重 10 千克的箱子写 10.5)。原来这种页只存了箱数、按箱数核，
+    吨重这个真正拿来算钱的数没人核。现在按吨重核：金蝶出库数量 ÷ 规格里的每箱数量 ＝ 箱数，× 这里填的每箱计费千克 ＝ 金蝶折出来的计费重量，
+    和账单吨重比，两边同一把尺子、应当分毫不差。金蝶里没有毛重(档案里净重毛重都是 0)，所以这个数由财务填，按承运商、按物料存；
+    账单上各行自己写的每箱千克列出来当参考，点了才采用，系统不替人定。哪些页是这种算法，在取数说明里标 wt_by_box。"""
+    out = {}
+    for k, v in ((db.get_setting(_BOX_KG_KEY, None) or {}).get(carrier) or {}).items():
+        try:
+            f = float((v or {}).get("kg") or 0)
+        except (TypeError, ValueError):
+            f = 0.0
+        if f > 0:
+            out[str(k)] = f
+    return out
+
+
 _PACK_ALT_KEY = "logi_pack_alt"    # {物料编码: {packs: [每箱多少个金蝶计价单位, …], unit, name, by, at}}
 
 
@@ -2967,6 +2987,8 @@ def _box_docs(rsub, carrier):
     dmode = _doc_modes(carrier) if _rev != "qty" else {}
     uk = _unit_kg()
     pka = _pack_alt()
+    bkm = _box_kg(carrier)
+    _bw_pat = [str(sh.get("name") or "") for sh in (_sp.get("sheets") or []) if sh.get("wt_by_box")]      # 取数说明里标了「计费重量＝箱数×每箱计费千克」的页
     extra = {}
     if _rev == "qty" and mats:          # 按件数核：货品件数对不上的单，看金蝶里同号还有没有别种单据(其他出库单)
         need = []
@@ -3006,6 +3028,10 @@ def _box_docs(rsub, carrier):
         if chg_wt is None and billcnt and _rev != "qty" and _u0.lower() in ("吨", "t", "千克", "kg", "公斤"):
             chg_wt = billcnt * (1000.0 if _u0.lower() in ("吨", "t") else 1.0)
             wt_from_qty = "账单 %s %s" % (_fmt_amt(billcnt), _u0)
+        _mon = str(r.get("period") or "")[5:7]
+        _mon = str(int(_mon)) if _mon.isdigit() else ""
+        is_bw = bool(_bw_pat and chg_wt and billcnt and not wt_from_qty and _rev != "qty" and d0
+                     and any(intake.match_sheet(p.replace("{m}", _mon) if _mon else p, str(r.get("src_sheet") or "")) for p in _bw_pat))
         use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
         # 人工指定这一张单怎么核(V2.885)：只换「拿什么比」。指定的那种比不了(账单这行没有重量/件数)就不听，照系统的办法并写明
         can_wt = bool(chg_wt)
@@ -3059,6 +3085,7 @@ def _box_docs(rsub, carrier):
             else:
                 pal_note = " · 计费重量像按托(%s 托)，但箱数对不上：账单 %s 件、金蝶 %s 箱" % (_fmt_amt(chg_wt / pal_kg), _fmt_amt(billcnt), _fmt_amt(round(_bx, 2)))
         kda, pack_used, packs_of, kall, vol_wt = None, {}, None, None, None
+        box_wt, bw_lack = None, ""        # 按计费吨重核(V2.913)：金蝶折出来的计费重量是怎么来的 / 哪些物料还没填每箱计费重量
         box_txt, mode_short, mode_tip = "", "", ""      # 金蝶箱数是怎么折出来的(逐个物料)；结论的短写法和悬停说明(V2.890)
         if use_weight:
             # 有账单重量 → 按重量核：金蝶量=千克计量物料基本数量之和
@@ -3103,14 +3130,47 @@ def _box_docs(rsub, carrier):
                 mode_cn = "按托计重核"
             else:
                 pal_wt = None
-            if vol_wt or pal_wt:
+            if is_bw and lines and not vol_wt and not pal_wt and fmode != "weight":
+                # V2.913：这一页的吨重＝箱数 × 每箱计费千克。金蝶也按同一个算法折：出库数量 ÷ 规格里的每箱数量 × 每箱计费千克(页面上填的)，再和账单吨重比。
+                #   每种货品物料都折得出才这样比；有没填的，仍拿金蝶净重比(多半对不上)并写明差在哪、要去填什么。包材不计。
+                _bl, _lack, _bt = [], [], []
+                for m in lines:
+                    if any(k in str(m.get("名称") or "") for k in _PACK_KW):
+                        _bl.append(0.0)
+                        continue
+                    try:
+                        _q = float(m.get("数量件") or 0)
+                    except (TypeError, ValueError):
+                        _q = 0.0
+                    _br, _cf = _box_div(m), bkm.get(str(m.get("编码") or ""))
+                    if not _q:
+                        _bl.append(0.0)
+                    elif _br and _cf:
+                        _bl.append(_q / _br * _cf)
+                        _bt.append("%s %s%s ÷ %s ＝ %s 箱 × 每箱 %g 千克 ＝ %s 千克" % (
+                            str(m.get("名称") or "")[:12], _fmt_amt(_q), m.get("计价单位") or m.get("基本单位") or "", _fmt_amt(_br), _fmt_amt(round(_q / _br, 2)), _cf, _fmt_amt(round(_q / _br * _cf, 2))))
+                    else:
+                        _bl.append(None)
+                        _lack.append(str(m.get("名称") or m.get("编码") or "")[:14] + ("（规格里读不出每箱数量）" if not _br else ""))
+                if not _lack:
+                    box_wt = {"net": kd_sum, "txt": "；".join(_bt[:10]) + ("；…" if len(_bt) > 10 else "")}
+                    per = _bl
+                    kd_sum = round(sum(per), 2)
+                    mode_cn = "按计费吨重核"
+                else:
+                    bw_lack = "账单的吨重是按箱折的（这一行每箱 %g 千克），%s还没填每箱计费重量，金蝶折不成同口径的吨重，先拿金蝶净重比" % (
+                        round(chg_wt / billcnt, 3), "、".join(dict.fromkeys(_lack)))
+                    mode_cn += " · " + bw_lack
+            if box_wt:
+                cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= 0.05) else "qtydiff"      # 箱数 × 每箱计费千克，两边同一个算法，应当分毫不差
+            elif vol_wt or pal_wt:
                 cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(0.05, 0.005 * kd_sum)) else "qtydiff"      # 两边同一把尺子，箱数相等就该分毫不差
             elif wt_rng and kd_sum:
                 cnt_state = "ok" if wt_rng[0] - 1e-9 <= wbase / kd_sum <= wt_rng[1] + 1e-9 else "qtydiff"
             else:
                 cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(1.0, 0.02 * kd_sum)) else "qtydiff"
             conv = round(wbase / kd_sum, 3) if kd_sum else None   # 按重量：换算系数=账单重量÷金蝶重量(毛重比)
-            if vol_wt or pal_wt:
+            if vol_wt or pal_wt or box_wt:
                 mkq = lambda m: (float(m.get("数量件")) if m.get("数量件") not in (None, "") else None)      # 「金蝶数量」照金蝶原样(112 盒)；折出来的体积重在「核对量」(V2.893)
                 mku = lambda m: (m.get("计价单位") or m.get("基本单位"))
             else:
@@ -3259,12 +3319,23 @@ def _box_docs(rsub, carrier):
             mode_cn = "按托计费 · " + _pt + " · " + _cmp
             mode_tip = "账单计重怎么来的：%s 托 × 每托 %s 千克 ＝ %s 千克\n金蝶 %s 千克怎么来的：%s\n其中箱数（出库数量 ÷ 规格里的每箱数量）：%s。金蝶净重是 %s 千克，和按托的计重不是一回事，不拿来比。" % (
                 _fmt_amt(chg_wt / pal_kg), _fmt_amt(pal_kg), _fmt_amt(chg_wt), _fmt_amt(kd_sum), _pt, _box_txt(lines), _fmt_amt(pal_wt.get("net") or 0))
+        if box_wt and use_weight:
+            _tn = lambda v: "%g" % round(v / 1000.0, 4)
+            _d = round(chg_wt - kd_sum, 2)
+            _cmp = "账单 %s 吨、金蝶折 %s 吨，%s" % (_tn(chg_wt), _tn(kd_sum), "一致" if cnt_state == "ok" else "差 %s%s 千克" % ("+" if _d > 0 else "", _fmt_amt(_d)))
+            mode_short = "按计费吨重核：" + _cmp
+            mode_cn = "按计费吨重核 · " + _cmp
+            mode_tip = "账单吨重怎么来的：%s 箱 × 每箱 %g 千克 ＝ %s 千克\n金蝶 %s 千克怎么来的（出库数量 ÷ 规格里的每箱数量 × 每箱计费千克）：%s\n金蝶净重是 %s 千克，不含包装，和计费重量不是一回事，不拿来比。" % (
+                _fmt_amt(billcnt), round(chg_wt / billcnt, 3), _fmt_amt(chg_wt), _fmt_amt(kd_sum), box_wt["txt"], _fmt_amt(box_wt["net"]))
+        elif bw_lack and use_weight:
+            mode_short = "按吨重核：有物料没填每箱计费重量，先拿金蝶净重比"
+            mode_tip = bw_lack + "。\n到上面「单位换算·箱规」里的「每箱计费重量」填上，系统就按 金蝶箱数 × 每箱计费千克 折成吨重再比。"
         if fnote:
             mode_cn += fnote
         # 建议核对方式(V2.887，用户 2026-10-09「能不能出一个建议核对方式呢」)：现在这种比法对不上、换另一种比法正好对得上的，给个建议和理由；
         #   只建议不替人改(点了才改)。按箱数的建议要每种物料都折得出箱、且和账单件数一件不差；按重量的建议要落在这家的毛重比范围内。
         sugg = None
-        if _rev != "qty" and d0 and lines and not fmode and not vol and cnt_state == "qtydiff":
+        if _rev != "qty" and d0 and lines and not fmode and not vol and not is_bw and cnt_state == "qtydiff":
             if use_weight and can_box:
                 _sb, _smiss = _kd_boxes(lines)
                 if not _smiss and abs(_sb - billcnt) < 0.01:
@@ -3280,6 +3351,8 @@ def _box_docs(rsub, carrier):
             chk = {"kind": "vol", "lwh": vol["lwh"], "k": vol["k"], "tol": round(max(0.05, 0.005 * kd_sum), 4)}
         elif pal_wt:
             chk = {"kind": "pallet", "pal_box": pal_box, "pal_kg": pal_kg, "tol": round(max(0.05, 0.005 * kd_sum), 4)}
+        elif box_wt:
+            chk = {"kind": "boxwt", "tol": 0.05}
         elif use_weight:
             chk = {"kind": "weight", "rng": list(wt_rng) if wt_rng else None, "tol": round(max(1.0, 0.02 * kd_sum), 4)}
         elif _rev == "qty":
@@ -3297,7 +3370,7 @@ def _box_docs(rsub, carrier):
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
-                "suggest": sugg, "vol": vol, "chk": chk, "mode_short": mode_short, "mode_tip": mode_tip, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
+                "bw": is_bw, "bw_lack": bw_lack, "bill_cnt": (billcnt or None), "suggest": sugg, "vol": vol, "chk": chk, "mode_short": mode_short, "mode_tip": mode_tip, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
                 "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
         mrows = []
         kgbase = 0.0
@@ -3351,6 +3424,8 @@ def _box_docs(rsub, carrier):
                               "kd": kd or None, "spec": m.get("规格"),
                               "out_qty": _oq or None, "out_unit": m.get("计价单位") or m.get("基本单位") or "", "box_div": _bd if box_n is not None else None, "box_n": box_n,
                               "vol_per": (round(vol["per"], 3) if (vol and vol_wt) else None),      # 按体积重核时：每箱折多少千克
+                              "box_kg": (bkm.get(str(m.get("编码") or "")) if (is_bw and not ispack) else None),                                   # 每箱计费千克(V2.913)
+                              "bw_gap": bool(is_bw and not ispack and _oq and not (bkm.get(str(m.get("编码") or "")) and _box_div(m))),            # 按吨重核、这个物料还没填每箱计费重量
                               "pack_spec": (packs_of[i][0] if packs_of else None), "pack_used": pack_used.get(i),   # 规格折出来的箱规 / 这次实际用的备选箱规
                               "fee": fline, "unit_fee": round(fline / kg, 2) if kg else None,
                               "sales": round(sales, 2) if sales is not None else None,
@@ -3433,7 +3508,8 @@ def _box_docs(rsub, carrier):
                         kd = round(sum(_vals), 2)
                         _gnote = _pack_note([(_flat[i]["n"], _flat[i]["p"][_flat[i]["v"].index(_vals[i])], _flat[i]["u"]) for i in _usd])
                 _cnt = xs[0].get("_kall") is not None or (xs[0].get("chk") or {}).get("kind") in ("box", "qty")      # 数个数的(按件数、按箱数)：一个不差(V2.907)
-                st = "ok" if abs(bsum - kd) <= lr.qty_tol(kd, _cnt) else "qtydiff"
+                _bwk = (xs[0].get("chk") or {}).get("kind") == "boxwt"                                     # 按计费吨重核(V2.913)：箱数 × 每箱计费千克，同一个算法，差 0.05 千克以内
+                st = "ok" if abs(bsum - kd) <= (0.05 if _bwk else lr.qty_tol(kd, _cnt)) else "qtydiff"
                 if st != "ok" and xs[0].get("_kall") is not None and abs(bsum - float(xs[0]["_kall"])) < 0.01:
                     # 按件数核、几行账单合计正好＝这张单全部物料(含包装、同号其他出库单)的件数(V2.878)
                     _gnote += " · 含包装/同号其他出库单 %s 件" % _fmt_amt(float(xs[0]["_kall"]) - kd)
@@ -3445,6 +3521,11 @@ def _box_docs(rsub, carrier):
                     if st != "ok" and _cnt:
                         x["mode_cn"] += "，金蝶 %s，差 %s%s" % (_fmt_amt(kd), ("+" if bsum > kd else "") + _fmt_amt(round(bsum - kd, 2)),
                                                          "（金蝶折出来有小数箱，规格里的箱规可能不对）" if abs(kd - round(kd)) > 0.005 else "")
+                    if _bwk:
+                        x["mode_cn"] = "按计费吨重核 · " + x["mode_cn"] + "（%g 吨），金蝶按 箱数 × 每箱计费千克 折 %s 千克（%g 吨）%s" % (
+                            round(bsum / 1000.0, 4), _fmt_amt(kd), round(kd / 1000.0, 4), "，一致" if st == "ok" else "，差 %s%s 千克" % ("+" if bsum > kd else "", _fmt_amt(round(bsum - kd, 2))))
+                    elif x.get("bw_lack"):
+                        x["mode_cn"] += " · " + x["bw_lack"]
                     x["mode_short"] = x["mode_tip"] = ""         # 几行合起来比的，短写法不适用
                     x["mode_cn"] += _gnote
                     _others = sorted({y["doc_no"] for y in xs} - {x["doc_no"]})
@@ -3635,8 +3716,14 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                     if m.get("unit_gap"):
                         _gap.setdefault(m.get("code"), set()).add(x["doc_no"])
             unit_gap = {"n_mat": len(_gap), "n_doc": len({d for ds in _gap.values() for d in ds})}
+            _bg = {}
+            for x in pool:
+                for m in x["materials"]:
+                    if m.get("bw_gap"):
+                        _bg.setdefault(m.get("code"), set()).add(x["doc_no"])
+            bw_gap = {"n_mat": len(_bg), "n_doc": len({d for ds in _bg.values() for d in ds}), "on": any(x.get("bw") for x in pool)}
         else:
-            ex_all, unit_gap, ex_docs, sugg_docs = None, None, None, None
+            ex_all, unit_gap, ex_docs, sugg_docs, bw_gap = None, None, None, None, None
             pool = _box_docs(sl, carrier)
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
@@ -3682,7 +3769,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
-                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "pallet_box": _pallet_box(carrier) or None, "vol_kg": _vol_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs,
+                "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "pallet_box": _pallet_box(carrier) or None, "vol_kg": _vol_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "bw_gap": bw_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs,
                 "carry": _carry_view(carrier, period, rows + accr)}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
@@ -4285,7 +4372,41 @@ def review_unit_kg(request: Request, carrier: str = "", period: str = ""):
     pout.sort(key=lambda x: (-x["bad"], str(x["code"])))
     pothers = [{"code": k, "name": (v or {}).get("name"), "unit": (v or {}).get("unit"), "alts": pka.get(k), "by": (v or {}).get("by"), "at": (v or {}).get("at")}
                for k, v in sorted(psaved.items()) if k not in packs and pka.get(k)]
-    return {"ok": True, "carrier": carrier, "period": period, "items": out, "others": others, "packs": pout, "pack_others": pothers}
+    # 每箱计费重量(V2.913)：这家这月按吨重核的账单行里的货品物料。参考＝账单这一行自己写的每箱千克(吨重 ÷ 箱数)，
+    #   这一行的箱数正好等于金蝶这张单里某一种物料折出来的箱数、且只有这一种对得上时，才算到那个物料头上；金蝶净重每箱多少也列出来对照。
+    bsaved, bkm, bx = (db.get_setting(_BOX_KG_KEY, None) or {}).get(carrier) or {}, _box_kg(carrier) if carrier else {}, {}
+    if carrier and period:
+        for x in pool:
+            if not x.get("bw") or not x.get("doc_no"):
+                continue
+            goods = [m for m in x["materials"] if m.get("code") and not m.get("is_pack") and m.get("out_qty")]
+            for m in goods:
+                it = bx.setdefault(m["code"], {"code": m["code"], "name": m.get("name"), "spec": m.get("spec"), "unit": m.get("out_unit"), "pack": None,
+                                               "docs": set(), "imp": [], "net": []})
+                it["docs"].add(x["doc_no"])
+                bd = m.get("pack_spec") or (m.get("box_div") if not m.get("pack_used") else None)
+                if bd and not it["pack"]:
+                    it["pack"] = bd
+                nk = m.get("kg_eq") if m.get("kg_eq") else (m.get("base_kg") if _is_kg(m.get("kg_unit")) else None)
+                if nk and m.get("box_n"):
+                    it["net"].append(round(float(nk) / float(m["box_n"]), 3))
+            bc, bk = x.get("bill_cnt"), x.get("bill_amt")
+            if bc and bk and x.get("bill_unit") == "千克":
+                hit = [m for m in goods if m.get("box_n") is not None and abs(float(m["box_n"]) - float(bc)) < 0.01]
+                if len(hit) == 1 and not hit[0].get("pack_used"):
+                    bx[hit[0]["code"]]["imp"].append(round(float(bk) / float(bc), 3))
+    bout = []
+    for it in bx.values():
+        ic = collections.Counter(it.pop("imp")).most_common()
+        nc = collections.Counter(it.pop("net")).most_common(1)
+        sv = bsaved.get(it["code"]) or {}
+        bout.append({**it, "docs": len(it["docs"]), "kg": bkm.get(it["code"]), "by": sv.get("by"), "at": sv.get("at"),
+                     "net": (nc[0][0] if nc else None), "hint": (ic[0][0] if ic else None), "hint_n": (ic[0][1] if ic else 0),
+                     "hint_others": [[v, n] for v, n in ic[1:4]]})
+    bout.sort(key=lambda x: (x["kg"] is not None, str(x["code"])))
+    bothers = [{"code": k, "name": (v or {}).get("name"), "spec": (v or {}).get("spec"), "unit": (v or {}).get("unit"), "pack": (v or {}).get("pack"),
+                "kg": bkm.get(k), "by": (v or {}).get("by"), "at": (v or {}).get("at")} for k, v in sorted(bsaved.items()) if k not in bx and bkm.get(k)]
+    return {"ok": True, "boxkg": bout, "boxkg_others": bothers, "carrier": carrier, "period": period, "items": out, "others": others, "packs": pout, "pack_others": pothers}
 
 
 @router.post("/api/logistics-review/unit-kg")
@@ -4348,10 +4469,44 @@ async def review_unit_kg_set(request: Request):
     if plog:
         db.set_setting(_PACK_ALT_KEY, pcur)
         db.audit(_uname(u), "物流复核-备选箱规", "%d 种物料" % len(plog), "；".join(plog)[:900])
+    # 每箱计费重量(V2.913)：boxkg=[{code, kg, pack, unit, name, spec}]，按承运商存；kg 留空/0＝删掉
+    blog, ball, ca = [], dict(db.get_setting(_BOX_KG_KEY, None) or {}), str(b.get("carrier") or "").strip()
+    bcur = dict(ball.get(ca) or {})
+    for it in (b.get("boxkg") or [])[:500]:
+        code = str(it.get("code") or "").strip()
+        if not code:
+            continue
+        if not ca:
+            return JSONResponse({"ok": False, "msg": "每箱计费重量是按承运商存的，没带承运商"}, status_code=400)
+        raw = it.get("kg")
+        try:
+            f = float(raw) if raw not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "msg": "物料 %s 的每箱计费重量不是数字：%s" % (code, raw)}, status_code=400)
+        if f < 0 or f > 100000:
+            return JSONResponse({"ok": False, "msg": "物料 %s 的每箱计费重量 %s 不合理（每箱多少千克）" % (code, raw)}, status_code=400)
+        old = float((bcur.get(code) or {}).get("kg") or 0)
+        if abs(old - f) < 1e-12:
+            continue
+        if f:
+            bcur[code] = {"kg": f, "pack": it.get("pack"), "unit": str(it.get("unit") or "")[:20], "name": str(it.get("name") or "")[:80],
+                          "spec": str(it.get("spec") or "")[:80], "by": _uname(u), "at": _now()}
+        else:
+            bcur.pop(code, None)
+        blog.append("%s %s 每箱 %s 千克（原 %s）" % (code, str(it.get("name") or "")[:20], ("%g" % f) if f else "不设", ("%g" % old) if old else "没填"))
+    if blog:
+        if bcur:
+            ball[ca] = bcur
+        else:
+            ball.pop(ca, None)
+        db.set_setting(_BOX_KG_KEY, ball)
+        db.audit(_uname(u), "物流复核-每箱计费重量", "%s %d 种物料" % (ca, len(blog)), "；".join(blog)[:900])
+        for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and k and k[0] == "view"]:
+            _ACCR_CACHE.pop(k, None)
     if log or plog:
         for k in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and k and k[0] == "view"]:
             _ACCR_CACHE.pop(k, None)
-    return {"ok": True, "changed": len(log) + len(plog)}
+    return {"ok": True, "changed": len(log) + len(plog) + len(blog)}
 
 
 @router.post("/api/logistics-review/wt-range")
@@ -4727,7 +4882,7 @@ def _fix_sheet(wb, carrier, period, fixes, suppliers=None, carrier_full=""):
 # 用户 2026-10-11 看导出的复核明细：「这里可以加一个规格吗，还有账单数可以用公式链接原账单吗。还有复核的那个可以用公式算吗」。
 # 规矩：公式算出来的数必须和系统算的一样才写公式——写之前先在这边按同一个公式算一遍，对得上才写，对不上的照旧写数。
 _XL_AMT_H = ("总运费", "合计费用", "总金额", "含税金额", "金额合计", "费用合计", "总费用", "运费合计", "合计", "金额")
-_XL_WT_H = ("计重", "结算重量", "计费重量", "重量", "吨数(T)", "重量/吨", "重量/kg", "计费重量(kg)", "重量(kg)")
+_XL_WT_H = ("计重", "结算重量", "计费重量", "重量", "吨数(T)", "重量/吨", "重量/kg", "计费重量(kg)", "重量(kg)", "吨重")
 _XL_QTY_H = ("总件数", "件数", "箱数", "数量", "计费数量", "计费板数", "板数")
 
 
@@ -5336,6 +5491,9 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 elif kind in ("box",) and bn is not None and abs(bn - kd) < 0.006:      # 按箱数：核对量＝折箱数
                     ws2.cell(row=rr, column=col_of_key["kd"], value="=%s%d" % (CL["box_n"], rr))
                     n_formula += 1
+                elif kind == "boxwt" and bq and bd and m.get("box_kg") and abs(round(bq / bd * float(m["box_kg"]), 2) - kd) < 0.011:      # 按计费吨重：金蝶数量 ÷ 每箱数量 × 每箱计费千克
+                    ws2.cell(row=rr, column=col_of_key["kd"], value="=ROUND(%s%d/%s%d*%g,2)" % (CL["base_qty"], rr, CL["box_div"], rr, float(m["box_kg"])))
+                    n_formula += 1
                 elif kind == "vol" and bn is not None:                                  # 按体积：折箱数 × 长×宽×高(厘米)÷1000000 × 每方千克数
                     l_, w_, h_ = ck["lwh"]
                     if abs(round(bn * l_ * w_ * h_ / 1e6 * ck["k"], 2) - kd) < 0.011:
@@ -5377,7 +5535,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             ws2.cell(row=s0, column=col_of_key["_diff"], value="=ROUND(%s-%s%d,2)" % (bill_x, CL["_kdsum"], s0))
             n_formula += 1
             cv = _xl_num(x0.get("conv"))
-            by_w = kind in ("weight", "vol", "pallet")
+            by_w = kind in ("weight", "vol", "pallet", "boxwt")
             if cv is not None and kds and bill and abs(round((bill / kds) if by_w else (kds / bill), 3) - cv) < 0.0015:
                 kd_x = "%s%d" % (CL["_kdsum"], s0)
                 a_, b_ = (bill_x, kd_x) if by_w else (kd_x, bill_x)
