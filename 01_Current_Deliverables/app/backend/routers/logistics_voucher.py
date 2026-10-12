@@ -1176,6 +1176,7 @@ def _post_run(inst, user):
     if not pb or pb["码"] != req["code"] or abs(float(pb["金额"] or 0) - float(req["amount"] or 0)) >= 0.01:
         return {"ok": False, "msg": "金蝶付款单和请款单对不上（供应商或金额），没动"}
     steps = []
+    _POST_STEPS[inst] = steps          # 做到第几步了，给「正在做哪一张」的进度窗看(V2.912)；同一个列表，边做边长
     if pb["状态"] == "C":
         if not _we_audited(inst, fid, pb["单号"]):
             return {"ok": False, "msg": "付款单 %s 已经被人审核过，金蝶已出过凭证；这一版不去改别人生成的凭证，请人工处理" % pb["单号"]}
@@ -1415,7 +1416,29 @@ import threading as _th
 _AUTO_KEY = "logi_voucher_auto"             # {mode, kinds, cap, max_round, by, at}
 _AUTO_LAST_KEY = "logi_voucher_auto_last"   # 上一轮：{at, mode, trigger, items:[…], done:[…]}
 _AUTO_LOCK = _th.Lock()
-AUTO_KINDS = ("hx", "tail", "redo")
+# 这一轮跑到哪了(V2.912，用户 2026-10-12 点了「现在跑一轮」之后：「这里是不是可以加个弹窗，正在做那一笔，不然我完全不知道他在做什么」)。
+# 只放在内存里(后端单进程)：{on, trigger, mode, started, ended, phase, i, n, cur, inst, done:[…]}；页面跑的时候每两秒来读一次。
+_AUTO_PROG = {"on": False}
+_POST_STEPS = {}                 # {审批实例号: 「保存到金蝶」已经做完的步骤}——_post_run 边做边往里加
+
+
+def _prog(**kw):
+    _AUTO_PROG.update(kw)
+
+
+def _prog_cur(r, **more):
+    return dict({"subject": r.get("subject") or "", "payee": r.get("payee") or r.get("carrier") or "", "amount": r.get("amount")}, **more)
+
+
+def _prog_view():
+    p = dict(_AUTO_PROG)
+    p["steps"] = list(_POST_STEPS.get(p.get("inst")) or []) if p.get("on") and p.get("phase") == "post" else []
+    p["done"] = list(p.get("done") or [])
+    p.pop("inst", None)
+    return p
+
+
+AUTO_KINDS =("hx", "tail", "redo")
 KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "需红冲更正", "subj": "计提记错主体", "manual": "金额不符", "noacc": "没有计提",
            "part": "部分核销", "later": "发票后补·先付款"}
 AUTO_USER = "系统自动"
@@ -1574,6 +1597,8 @@ def auto_round(trigger="定时"):
     if not _AUTO_LOCK.acquire(blocking=False):
         return {"ok": False, "msg": "上一轮还在跑"}
     try:
+        _AUTO_PROG.clear()
+        _prog(on=True, trigger=trigger, mode=cfg["mode"], started=_now(), ended="", phase="scan", i=0, n=0, cur=None, inst="", done=[])
         posted = db.get_setting(_POSTED_KEY, None) or {}
         with db._engine.connect() as c:
             reqs = [dict(r) for r in c.execute(select(PR).where(PR.c.create_time >= "2026-09-01")).mappings().all()]
@@ -1602,8 +1627,9 @@ def auto_round(trigger="定时"):
                 if worker_store:
                     worker_store.beat("voucher_auto", next_in=20 * 60)
                 return {"ok": True, "same": True, **prev}
-        for r, invs in cands:
+        for _pi, (r, invs) in enumerate(cands):
             inst = r["inst_id"]
+            _prog(phase="calc", i=_pi + 1, n=len(cands), cur=_prog_cur(r))
             it = {"inst": inst, "bid": r.get("business_id"), "payee": r.get("payee") or r.get("carrier"), "subject": r.get("subject"),
                   "amount": r.get("amount"), "period": r.get("period"), "kind": "", "kind_cn": "", "ok": False, "why": ""}
             try:
@@ -1621,7 +1647,10 @@ def auto_round(trigger="定时"):
             items.append(it)
         done = []
         if cfg["mode"] == "on":
-            for it in [x for x in items if x["ok"]][:cfg["max_round"]]:
+            _todo = [x for x in items if x["ok"]][:cfg["max_round"]]
+            for _pi, it in enumerate(_todo):
+                _POST_STEPS.pop(it["inst"], None)
+                _prog(phase="post", i=_pi + 1, n=len(_todo), cur=_prog_cur(it, kind_cn=it.get("kind_cn") or ""), inst=it["inst"])
                 lk = _POST_LOCK.setdefault(it["inst"], _th.Lock())
                 if not lk.acquire(blocking=False):
                     continue
@@ -1638,6 +1667,9 @@ def auto_round(trigger="定时"):
                 it["msg"] = " → ".join(res.get("steps") or []) if res.get("ok") else (res.get("msg") or "")
                 it["warn"] = "；".join(s for s in (res.get("steps") or []) if "⚠" in s or "提交失败" in s) if res.get("ok") else ""      # 做成了但有要人接手的尾巴
                 done.append({"inst": it["inst"], "bid": it["bid"], "ok": it["done"], "vno": it["vno"], "msg": it["msg"]})
+                _AUTO_PROG["done"] = _AUTO_PROG.get("done", []) + [_prog_cur(it, kind_cn=it.get("kind_cn") or "", ok=it["done"], vno=it["vno"],
+                                                                               msg="" if it["done"] else str(it["msg"])[:200], warn=it.get("warn") or "")]
+        _prog(phase="wrap", cur=None, inst="", n_ok=sum(1 for x in items if x["ok"]), n_no=sum(1 for x in items if not x["ok"]))
         last = {"at": _now(), "mode": cfg["mode"], "trigger": trigger, "items": items, "done": done, "fp": fp, "checked_at": _now(), "skipped": 0}
         db.set_setting(_AUTO_LAST_KEY, last, AUTO_USER)
         n_ok, n_bad = sum(1 for x in done if x["ok"]), sum(1 for x in done if not x["ok"])
@@ -1652,8 +1684,20 @@ def auto_round(trigger="定时"):
                                     error=("%d 张没做成：%s" % (n_bad, "；".join(x["msg"] for x in done if not x["ok"])[:300])) if n_bad else "")
         _auto_notify(last, cfg)                    # 做完告诉人(V2.910)；自己不抛错
         return {"ok": True, **last}
+    except Exception as e:
+        _prog(error=str(e)[:200])
+        raise
     finally:
+        _prog(on=False, ended=_now(), cur=None, inst="")
         _AUTO_LOCK.release()
+
+
+@router.get("/api/logistics-voucher/auto/progress")
+def auto_progress(request: Request):
+    """自动做账这一轮跑到哪了：正在找单 / 正在算第几张 / 正在写金蝶第几张、做到哪一步、已经做完哪几张。只读内存，不碰金蝶。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    return {"ok": True, "prog": _prog_view()}
 
 
 @router.get("/api/logistics-voucher/auto")

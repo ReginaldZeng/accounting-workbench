@@ -16,7 +16,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 import qrcode from '../vendor/qrcode-generator.mjs'
 
@@ -555,6 +555,44 @@ export function VoucherScanPage({ user }) {
 
 // 自动做账栏：跟在每 20 分钟扫钉钉、配金蝶付款单那一轮后面跑。演练＝只算「如果开着会做哪几张」，不碰金蝶；真做＝系统自己审核付款单、写凭证并提交。
 const AUTO_MODE = { off: ['关', 'neu'], dry: ['演练（只算不写）', 'warn'], on: ['真做', 'ok'] }
+// 自动做账进度窗(V2.912)：正在找单 / 正在算第几张 / 正在写金蝶第几张——哪家、多少钱、做到哪一步；下面是这一轮已经做完的。
+function AutoProgress({ p, onClose }) {
+  const live = !!p.on
+  const cur = p.cur, done = p.done || [], steps = p.steps || []
+  const real = p.mode === 'on'
+  const who = c => <><b>{c.subject}</b>｜{c.payee}｜<span className="mono">{money(c.amount)}</span>{c.kind_cn ? <span className="dim">　{c.kind_cn}</span> : null}</>
+  const head = !live ? (p.error ? '这一轮出错停了' : '这一轮跑完了')
+    : p.phase === 'scan' ? '① 正在找：付了款、票齐、还没做账的请款单'
+      : p.phase === 'calc' ? `② 正在逐张算怎么做：第 ${p.i} / ${p.n} 张`
+        : p.phase === 'post' ? `③ 正在写金蝶：第 ${p.i} / ${p.n} 张`
+          : '④ 收尾：记结果、发提醒'
+  const nOk = done.filter(x => x.ok).length, nBad = done.filter(x => !x.ok).length
+  return <div className="lv-mask ap" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+    <div className="lv-dlg lv-ap" role="dialog" aria-label="自动做账进度">
+      <div className="aph"><b>自动做账 · {real ? '真做' : '演练（只算不写）'}</b><span className="dim">{p.trigger}{p.started ? ` · ${String(p.started).slice(11, 16)} 开始` : ''}</span>
+        <span style={{ flex: 1 }} /><button className="lnk" onClick={onClose}>{live ? '收起（不影响它继续跑）' : '关闭'}</button></div>
+      <div className={'apnow' + (live ? '' : ' end')}>
+        {live && <span className="apspin" aria-hidden="true" />}
+        <div>
+          <div className="apt">{head}</div>
+          {live && cur && <div className="apc">{who(cur)}</div>}
+          {live && p.phase === 'post' && <div className="aps">
+            {steps.map((x, i) => <span key={i} className="ok">✓ {x}</span>)}
+            <span className="dim">{steps.length ? '下一步进行中…' : '正在审核付款单、等金蝶出凭证…'}</span></div>}
+          {live && p.phase === 'calc' && <div className="dim" style={{ marginTop: 3 }}>读金蝶的付款单、计提凭证和发票，看这张该只核销还是要红冲更正；这一步不写金蝶。</div>}
+          {!live && <div className="apc">{p.error ? <span className="bad">{p.error}</span>
+            : real ? <>做成 <b className="ok">{nOk}</b> 张{nBad > 0 && <>、<b className="bad">没做成 {nBad} 张</b></>}{!done.length && '（这一轮没有要写金蝶的）'}；系统不自动做的 {p.n_no || 0} 张，在下面「看是哪几张、为什么」里。</>
+              : <>如果开着会做 <b className="ok">{p.n_ok || 0}</b> 张，不做 {p.n_no || 0} 张；演练不写金蝶。</>}</div>}
+        </div>
+      </div>
+      {done.length > 0 && <table className="lv-t apd"><thead><tr><th style={{ width: 30 }}></th><th>这一轮已经做完的</th><th style={{ width: 110 }}>凭证号</th><th>说明</th></tr></thead>
+        <tbody>{done.map((x, i) => <tr key={i}><td>{x.ok ? <b className="ok">✓</b> : <b className="bad">✕</b>}</td><td>{who(x)}</td>
+          <td>{x.ok ? <b className="mono">记-{x.vno}</b> : <b className="bad">没做成</b>}</td><td className="dim">{x.ok ? (x.warn || '已提交，等人在金蝶审核') : x.msg}</td></tr>)}</tbody></table>}
+      {live && real && <div className="dim" style={{ marginTop: 8, fontSize: 12 }}>凭证只提交、不审核。可以收起这个窗口，也可以离开这个页面，不影响它继续跑；这期间系统更新会等它做完。</div>}
+    </div>
+  </div>
+}
+
 function AutoBar({ onChanged }) {
   const [a, setA] = useState(null)
   const [open, setOpen] = useState(false)
@@ -565,8 +603,27 @@ function AutoBar({ onChanged }) {
   const [who, setWho] = useState(false)       // 做完提醒：展开选收件人
   const [seen, setSeen] = useState(false)     // 做完提醒：看上一条发了什么
   const [tested, setTested] = useState('')
+  // 这一轮跑到哪了(V2.912，用户「加个弹窗，正在做那一笔，不然我完全不知道他在做什么」)：跑的时候每 1.5 秒读一次进度；
+  // 定时那一轮正好在跑时打开页面也看得到。窗口可以收起，不影响它继续跑。
+  const [prog, setProg] = useState(null)
+  const [watching, setWatching] = useState(false)
+  const [progOpen, setProgOpen] = useState(false)
+  const inflight = useRef(false)
   const load = () => voucherAuto().then(r => { setA(r); setErr('') }).catch(e => setErr(e.message))
   useEffect(() => { load() }, [])
+  useEffect(() => { voucherAutoProgress().then(r => { if (r.prog && r.prog.on) { setProg(r.prog); setWatching(true); setProgOpen(true) } }).catch(() => {}) }, [])
+  useEffect(() => {
+    if (!watching) return undefined
+    let stop = false
+    const tick = () => voucherAutoProgress().then(r => {
+      if (stop) return
+      if (r.prog && (r.prog.on || !inflight.current)) setProg(r.prog)          // 刚点下去、后端还没开始的那一下，别把上一轮的结果显示出来
+      if (!(r.prog && r.prog.on) && !inflight.current) { setWatching(false); load(); onChanged && onChanged() }
+    }).catch(() => {})
+    tick()
+    const t = setInterval(tick, 1500)
+    return () => { stop = true; clearInterval(t) }
+  }, [watching])
   if (!a) return err ? <div className="lv-msg bad">自动做账状态没读到：{err}</div> : null
   const cfg = a.cfg, last = a.last, items = (last && last.items) || []
   const yes = items.filter(x => x.ok), no = items.filter(x => !x.ok)
@@ -584,7 +641,10 @@ function AutoBar({ onChanged }) {
   }
   const run = () => {
     if (cfg.mode === 'on' && !window.confirm(`现在跑一轮「真做」：够条件的 ${yes.length} 张（每轮最多 ${cfg.max_round} 张）会立刻写金蝶。确定？`)) return
-    setBusy('run'); voucherAutoRun().then(() => { load(); onChanged && onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(''))
+    inflight.current = true
+    setProg({ on: true, phase: 'scan', mode: cfg.mode, trigger: '你点的', done: [], steps: [] }); setProgOpen(true); setWatching(true)
+    setBusy('run'); voucherAutoRun().then(r => { if (r && r.ok === false && r.msg) alert(r.msg); load(); onChanged && onChanged() }).catch(e => alert(e.message))
+      .finally(() => { inflight.current = false; setBusy('') })
   }
   const num = (label, key, hint) => { const v = window.prompt(label, String(cfg[key] || '')); if (v === null) return; save({ [key]: Number(v) || 0 }) }
   // 做完提醒(V2.910)：发给谁默认跟首页待办「付款凭证审核人」；也可以单独指定。没认过钉钉身份的人标出来，不悄悄发不到。
@@ -605,7 +665,8 @@ function AutoBar({ onChanged }) {
       <button className="lnk" disabled={!!busy} onClick={() => num('单笔金额上限（超过的不自动做；填 0 = 不限）', 'cap')}>单笔上限 {cfg.cap ? money(cfg.cap) : '不限'}</button>
       <button className="lnk" disabled={!!busy} onClick={() => num('每一轮最多自动做几张（1～50）', 'max_round')}>每轮最多 {cfg.max_round} 张</button>
       <span style={{ flex: 1 }} />
-      {cfg.mode !== 'off' && <button className="btn sm" disabled={!!busy} onClick={run}>{busy === 'run' ? '正在跑…' : cfg.mode === 'on' ? '现在跑一轮' : '现在演练一轮'}</button>}
+      {prog && prog.on && !progOpen && <button className="lnk" onClick={() => setProgOpen(true)}>正在跑，看做到哪了</button>}
+      {cfg.mode !== 'off' && <button className="btn sm" disabled={!!busy || !!(prog && prog.on)} onClick={run}>{busy === 'run' || (prog && prog.on) ? '正在跑…' : cfg.mode === 'on' ? '现在跑一轮' : '现在演练一轮'}</button>}
     </div>
     <div className="row sub">
       {cfg.mode === 'off' ? <span>没打开：付了款的单要人来点「保存到金蝶」。</span>
@@ -646,6 +707,7 @@ function AutoBar({ onChanged }) {
       {notice && <button className="lnk" onClick={() => setSeen(!seen)}>{seen ? '收起' : '看发了什么'}</button>}
     </div>}
     {cfg.notify && seen && notice && <pre className="ntx">{notice.text}</pre>}
+    {progOpen && prog && <AutoProgress p={prog} onClose={() => setProgOpen(false)} />}
     {open && items.length > 0 && <div className="row pg">
       <span className="seg">
         <button className={tabOn === 'no' ? 'on warn' : ''} onClick={() => { setTab('no'); setPage(1) }}>不做 {no.length}</button>
@@ -1333,6 +1395,15 @@ const CSS = `
 .lv .lv-auto .who{display:inline-block;border:1px solid var(--line-strong);background:var(--bg);border-radius:999px;padding:1px 9px;font-size:12px}
 .lv .lv-auto .who.off{border-style:dashed;color:var(--ink-3)}
 .lv .lv-auto .ntx{margin:0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:inherit;font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
+.lv .lv-mask.ap{align-items:center}.lv .lv-ap{width:min(760px,100%);padding:14px 18px 16px;font-size:13px}
+.lv .lv-ap .aph{display:flex;gap:10px;align-items:baseline;margin-bottom:10px}.lv .lv-ap .ok{color:var(--green)}.lv .lv-ap .bad{color:var(--red)}
+.lv .lv-ap .apnow{display:flex;gap:12px;align-items:flex-start;border:1px solid var(--green-line);background:var(--green-bg);border-radius:10px;padding:11px 14px}
+.lv .lv-ap .apnow.end{border-color:var(--line);background:var(--bg-sub)}
+.lv .lv-ap .apspin{flex:none;width:18px;height:18px;margin-top:2px;border-radius:50%;border:3px solid var(--green-line);border-top-color:var(--green);animation:lvapspin .8s linear infinite}@keyframes lvapspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.lv .lv-ap .apspin{animation:none}}
+.lv .lv-ap .apt{font-weight:700}.lv .lv-ap .apc{margin-top:4px;font-size:13.5px}
+.lv .lv-ap .aps{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:12.5px}
+.lv .lv-ap .apd{margin-top:10px}.lv .lv-ap .apd td{vertical-align:top}
 .lv .lv-auto .row.pg{margin-top:2px}.lv .lv-auto .lnk:disabled{opacity:.35;cursor:default}
 .lv .lv-auto .ck{display:inline-flex;gap:4px;align-items:center;white-space:nowrap}.lv .lv-auto table{background:var(--bg);border-radius:8px}
 .lv .lv-unpaid{font-size:12.5px;color:var(--ink-2);padding:2px 2px 0}
