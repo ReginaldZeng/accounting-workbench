@@ -1,0 +1,364 @@
+<!doctype html>
+<!-- [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: 样机（未开发、不占版号）
+     Description: 钉钉入口「二选一」样机——有工作台账号的同事从钉钉点开「星衡智策」时先选去哪：发票后补单 / 财务工作台。
+     只是给人看的静态样机：名字是示意，不连后端。卡片上不放"欠几张票"的提示（用户 2026-10-12 定：没登记的后补系统看不到，放了容易让人以为没提示就是不欠票）。品牌素材（标志、黄猫和小伙伴、紫色面板）取自现有登录页 Login.jsx。 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>样机 · 钉钉入口二选一</title>
+<style>
+:root{
+  --deep:#2B1A46; --brand:#3E2C63; --on-deep:#B9AEDA;
+  --acc:#5C63F2; --acc-d:#4A51E0; --acc-soft:#EEF0FE;
+  --plum:#4A3A8C; --plum-soft:#EEECF7;
+  --ink1:#20242E; --ink2:#5B6270; --ink3:#8A91A0; --line:#E6E7EE; --page:#ECEDF1;
+  --cat:#FFC93C; --cat-d:#F2B01E; --cat-dd:#D99B10; --ear:#FF9AA2; --nose:#F2778E; --blush:#FFB0B0; --catink:#4a3a1c;
+  --font:"PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:var(--font); color:var(--ink1); background:#F3F4F8; -webkit-font-smoothing:antialiased}
+
+/* ───────── 展示页外壳（不是产品的一部分） ───────── */
+.pk{max-width:1520px; margin:0 auto; padding:34px 28px 60px}
+.pk-top{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:26px}
+.pk-top h1{font-size:24px; margin:0; letter-spacing:.3px}
+.pk-top p{margin:8px 0 0; color:var(--ink2); font-size:14px; line-height:1.7}
+.pk-tag{font-size:12px; font-weight:700; color:var(--plum); background:var(--plum-soft); border:1px solid #E0DCF0; padding:6px 12px; border-radius:8px; white-space:nowrap}
+.pk-row{display:flex; gap:36px; flex-wrap:wrap; align-items:flex-start}
+.pk-fig{margin:0; display:flex; flex-direction:column; gap:14px; max-width:100%}
+.pk-fig figcaption{font-size:14px; color:var(--ink2); line-height:1.6}
+.pk-fig figcaption b{display:block; font-size:15px; color:var(--ink1); margin-bottom:2px}
+.pk-rules{flex:1 1 380px; max-width:560px; background:#fff; border:1px solid var(--line); border-radius:16px; padding:22px 24px}
+.pk-rules h2{font-size:16px; margin:0 0 12px}
+.pk-rules ol{margin:0; padding-left:20px; font-size:14px; line-height:1.9; color:var(--ink2)}
+.pk-rules ol b{color:var(--ink1)}
+.pk-rules .q{margin-top:16px; padding:12px 14px; border-radius:10px; background:#FFF7E0; color:#7A5200; font-size:13.5px; line-height:1.75}
+.pk-sep{height:1px; background:var(--line); margin:40px 0 30px}
+
+/* 设备框 */
+.dev-phone{width:395px; height:800px; border-radius:44px; border:10px solid #17131F; background:#fff; overflow:hidden; position:relative;
+  box-shadow:0 30px 70px rgba(38,32,74,.22), 0 2px 8px rgba(38,32,74,.10); display:flex; flex-direction:column}
+.dd-bar{flex:none; height:46px; display:flex; align-items:center; justify-content:center; position:relative; background:#fff; border-bottom:1px solid #EEEFF3;
+  font-size:16px; font-weight:600; color:#1F2329}
+.dd-bar .x, .dd-bar .m{position:absolute; top:0; height:46px; display:grid; place-items:center; width:46px; color:#5B6270}
+.dd-bar .x{left:4px} .dd-bar .m{right:4px}
+.dd-bar svg{width:20px; height:20px}
+.dev-desk{width:1000px; height:640px; border-radius:14px; border:1px solid #D5D8E3; background:var(--page); overflow:hidden;
+  box-shadow:0 30px 70px rgba(38,32,74,.16), 0 2px 8px rgba(38,32,74,.06); display:flex; flex-direction:column}
+.dd-win{flex:none; height:38px; background:#F7F8FA; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; padding:0 14px; font-size:13px; color:var(--ink2)}
+.dd-win i{width:11px; height:11px; border-radius:50%; background:#D9DCE5}
+.dd-win span{margin-left:8px}
+.dev-body{flex:1; min-height:0; position:relative}
+
+/* ───────── 入口页本体（.en；手机是默认，.wide 是电脑钉钉） ───────── */
+.en{height:100%; background:var(--deep); display:flex; overflow-y:auto}
+.en-shell{flex:1; display:flex; flex-direction:column; min-width:0}
+.en-hero{flex:none; position:relative; color:#fff; padding:20px 22px 0; min-height:258px}
+.en-brand{display:flex; align-items:center; gap:11px}
+.en-brand img{height:36px; width:auto; display:block}
+.en-name{font-size:14px; font-weight:800; letter-spacing:.4px}
+.en-sub{font-size:9px; color:var(--on-deep); letter-spacing:1.4px; margin-top:4px; white-space:nowrap}
+.en-hi{margin:24px 0 0; font-size:15px; color:var(--on-deep)}
+.en-q{margin:6px 0 0; font-size:27px; font-weight:800; letter-spacing:.5px; line-height:1.3}
+.en-tip{display:none}
+.en-stage{position:absolute; right:4px; bottom:-9px; width:250px; z-index:2; pointer-events:none}
+.en-stage svg{display:block; width:100%; height:auto}
+.en-stage .sh{fill:rgba(20,12,40,.16)}
+.en-stage .pp{transition:transform .28s cubic-bezier(.3,.7,.3,1); transform:translate(-1px,5px)}
+.en-stage.look-a .pp{transform:translate(-5px,5px)}
+.en-stage.look-b .pp{transform:translate(-3px,7px)}
+
+.en-sheet{flex:1 0 auto; position:relative; z-index:1; background:#fff; border-radius:26px 26px 0 0; padding:24px 18px 18px; display:flex; flex-direction:column}
+.en-lbl{font-size:13px; font-weight:700; color:var(--ink3); letter-spacing:1px; margin:0 4px 12px}
+.en-cards{display:flex; flex-direction:column; gap:12px}
+.en-card{appearance:none; font:inherit; text-align:left; cursor:pointer; width:100%; display:flex; align-items:center; gap:14px;
+  background:#fff; border:1px solid var(--line); border-radius:18px; padding:18px 14px 18px 16px; color:inherit;
+  box-shadow:0 1px 2px rgba(38,32,74,.04); transition:border-color .2s, box-shadow .2s, background .2s; -webkit-tap-highlight-color:transparent}
+.en-card:hover{border-color:#C9CCFB; box-shadow:0 12px 28px rgba(92,99,242,.14)}
+.en-card:active{background:#FAFAFE}
+.en-card:focus-visible{outline:3px solid rgba(92,99,242,.38); outline-offset:2px}
+.en-ic{flex:none; width:52px; height:52px; border-radius:15px; display:grid; place-items:center}
+.en-ic svg{width:26px; height:26px; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round}
+.en-ic.a{background:var(--acc-soft)} .en-ic.a svg{stroke:var(--acc)}
+.en-ic.b{background:var(--plum-soft)} .en-ic.b svg{stroke:var(--plum)}
+.en-tx{flex:1; min-width:0; display:flex; flex-direction:column; gap:5px}
+.en-tx b{font-size:17.5px; font-weight:800; letter-spacing:.3px}
+.en-tx small{font-size:14px; line-height:1.55; color:var(--ink2)}
+.en-meta{align-self:flex-start; display:inline-flex; align-items:center; gap:6px; margin-top:3px; font-size:12.5px; font-weight:600; padding:4px 10px; border-radius:999px}
+.en-meta i{width:6px; height:6px; border-radius:50%}
+.en-meta.all{background:var(--acc-soft); color:#3F46C8} .en-meta.all i{background:var(--acc)}
+.en-meta.ok{background:#E9F7EF; color:#17794B} .en-meta.ok i{background:#22A565}
+.en-go{flex:none; width:32px; height:32px; border-radius:50%; display:grid; place-items:center; color:var(--ink3); transition:transform .2s, color .2s, background .2s}
+.en-go svg{width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round}
+.en-card:hover .en-go{transform:translateX(3px); color:var(--acc); background:var(--acc-soft)}
+.en-card.busy{pointer-events:none; border-color:#C9CCFB}
+.en-card.busy .en-go svg{display:none}
+.en-card.busy .en-go::after{content:""; width:16px; height:16px; border-radius:50%; border:2.2px solid #D5D8FB; border-top-color:var(--acc); animation:enspin .7s linear infinite}
+@keyframes enspin{to{transform:rotate(360deg)}}
+.en-foot{margin-top:auto; padding-top:18px; display:flex; align-items:center; justify-content:center; gap:7px; font-size:12px; color:var(--ink3); text-align:center}
+.en-foot svg{flex:none; width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round}
+
+/* 矮屏手机（钉钉标题栏还要占一截）：品牌区收一点，两张卡和底部说明一屏放下 */
+@media (max-height:640px){
+  .en:not(.wide) .en-hero{min-height:232px; padding-top:16px}
+  .en:not(.wide) .en-hi{margin-top:16px}
+  .en:not(.wide) .en-sheet{padding-top:20px}
+  .en:not(.wide) .en-card{padding-top:15px; padding-bottom:15px}
+  .en:not(.wide) .en-foot{padding-top:14px}
+}
+
+/* 电脑钉钉：和登录页同一个壳——左边品牌面板，右边选入口 */
+.en.wide{background:var(--page); align-items:center; justify-content:center; padding:28px; overflow:hidden}
+.en.wide .en-shell{flex:none; width:100%; max-width:900px; height:100%; max-height:546px; flex-direction:row; background:#fff; border-radius:26px; overflow:hidden;
+  box-shadow:0 24px 70px rgba(38,32,74,.16), 0 2px 8px rgba(38,32,74,.06)}
+.en.wide .en-hero{flex:1 1 47%; min-width:0; min-height:0; background:var(--deep); padding:32px 36px 0; overflow:hidden}
+.en.wide .en-brand img{height:46px}
+.en.wide .en-name{font-size:16.5px}
+.en.wide .en-sub{font-size:10px; letter-spacing:1.8px}
+.en.wide .en-hi{margin-top:36px; font-size:14px}
+.en.wide .en-q{font-size:27px}
+.en.wide .en-tip{display:block; margin:12px 0 0; font-size:13px; line-height:2; color:var(--on-deep); max-width:300px}
+.en.wide .en-stage{left:0; right:0; bottom:30px; width:auto}
+.en.wide .en-stage .pp{transform:translate(5px,2px)}
+.en.wide .en-stage.look-a .pp{transform:translate(6px,-2px)}
+.en.wide .en-stage.look-b .pp{transform:translate(6px,4px)}
+.en.wide .en-sheet{flex:1 1 53%; min-height:0; border-radius:0; padding:0 44px; justify-content:center}
+.en.wide .en-lbl{margin:0 2px 18px; font-size:22px; font-weight:800; color:var(--ink1); letter-spacing:.5px}
+.en.wide .en-cards{gap:14px}
+.en.wide .en-card{padding:18px 16px 18px 18px}
+.en.wide .en-foot{margin-top:26px; padding-top:0}
+
+/* 没有账号的同事：直接落在发票后补登记页（现有页面，这里只画个大概） */
+.sk{height:100%; background:#fff; display:flex; flex-direction:column}
+.sk-head{height:56px; display:flex; align-items:center; gap:10px; padding:0 18px; border-bottom:1px solid #E3E7EF; font-size:16px; color:#0D1B3B}
+.sk-head b{font-size:17px} .sk-head span{color:#687690} .sk-head i{width:1px; height:18px; background:#B6BDCA}
+.sk-main{flex:1; padding:22px 18px}
+.sk-main h3{margin:0 0 6px; font-size:24px; color:#0D1B3B; letter-spacing:-.3px}
+.sk-main p{margin:0 0 18px; font-size:14.5px; color:#687791}
+.sk-tabs{display:flex; gap:22px; border-bottom:1px solid #E7EBF3; margin-bottom:16px; font-size:15px; color:#77849B}
+.sk-tabs span{padding-bottom:10px} .sk-tabs .on{color:#5654D8; font-weight:700; border-bottom:2px solid #5654D8}
+.sk-row{height:74px; border:1px solid #E7EBF3; border-radius:12px; margin-bottom:10px; padding:14px; display:flex; flex-direction:column; gap:10px}
+.sk-row u{display:block; height:12px; border-radius:6px; background:#EEF1F6; text-decoration:none}
+.sk-row u:first-child{width:62%} .sk-row u:last-child{width:38%}
+.sk-new{flex:none; margin:0 14px 16px; border:1.5px dashed #B9BCF8; background:#F6F6FF; border-radius:14px; padding:13px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px;
+  font-size:14.5px; color:var(--ink2)}
+.sk-new b{color:var(--acc); font-weight:700; white-space:nowrap}
+.sk-flag{position:absolute; right:22px; bottom:86px; font-size:12px; font-weight:700; color:#fff; background:var(--acc); padding:4px 10px; border-radius:8px}
+.sk-flag::after{content:""; position:absolute; right:22px; bottom:-5px; width:10px; height:10px; background:var(--acc); transform:rotate(45deg)}
+
+/* 手机上直接打开这个文件：不看展示页，只看入口页本身 */
+#live{display:none}
+@media (max-width:720px){
+  .pk{display:none}
+  #live{display:block; position:fixed; inset:0}
+  body{background:var(--deep)}
+}
+/* 地址后面加 #phone 或 #desk：只看入口页本身（截图用） */
+.solo .pk{display:none}
+.solo #live{display:block; position:fixed; inset:0}
+@media (prefers-reduced-motion:reduce){
+  .en-stage .pp, .en-card, .en-go{transition:none}
+  .en-card.busy .en-go::after{animation-duration:1.6s}
+}
+</style>
+</head>
+<body>
+
+<div class="pk">
+  <div class="pk-top">
+    <div>
+      <h1>样机 · 钉钉入口「二选一」</h1>
+      <p>有工作台账号的同事从钉钉点开「星衡智策」，先看到这一页，选去哪儿。名字是示意。</p>
+    </div>
+    <span class="pk-tag">样机 · 未开发 · 不占版号 · 2026-10-12</span>
+  </div>
+
+  <div class="pk-row">
+    <figure class="pk-fig">
+      <div class="dev-phone">
+        <div class="dd-bar"><span class="x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>星衡智策<span class="m"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></span></div>
+        <div class="dev-body" data-mount="phone"></div>
+      </div>
+      <figcaption><b>手机钉钉</b>大多数同事从这里进。两张卡都够大，单手点得到。</figcaption>
+    </figure>
+
+    <figure class="pk-fig">
+      <div class="dev-desk">
+        <div class="dd-win"><i></i><i></i><i></i><span>钉钉 · 星衡智策</span></div>
+        <div class="dev-body" data-mount="desk"></div>
+      </div>
+      <figcaption><b>电脑钉钉</b>和现在的登录页是同一个壳：左边品牌面板，右边选入口。</figcaption>
+    </figure>
+  </div>
+
+  <div class="pk-sep"></div>
+
+  <div class="pk-row">
+    <figure class="pk-fig">
+      <div class="dev-phone">
+        <div class="dd-bar"><span class="x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>星衡智策<span class="m"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></span></div>
+        <div class="dev-body">
+          <div class="sk">
+            <div class="sk-head"><b>核算工作台</b><i></i><span>发票管家</span></div>
+            <div class="sk-main">
+              <h3>发票后补登记</h3>
+              <p>先登记，发票到了再交给财务。</p>
+              <div class="sk-tabs"><span class="on">登记后补</span><span>我的后补单</span></div>
+              <div class="sk-row"><u></u><u></u></div>
+              <div class="sk-row"><u></u><u></u></div>
+              <div class="sk-row"><u></u><u></u></div>
+            </div>
+            <span class="sk-flag">新增的小入口</span>
+            <div class="sk-new"><span>有工作台账号？</span><b>进财务工作台 ›</b></div>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>没有工作台账号的同事</b>不出二选一，点开直接就是发票后补登记页（现有页面，这里只画了个大概）。</figcaption>
+    </figure>
+
+    <div class="pk-rules">
+      <h2>这一页什么时候出现</h2>
+      <ol>
+        <li>从钉钉点开「星衡智策」，钉钉先认出是谁。</li>
+        <li><b>有工作台账号</b>：出二选一这一页，点哪张卡进哪边。</li>
+        <li><b>没有工作台账号</b>：不出这一页，直接进发票后补单。</li>
+        <li>有账号、但钉钉还没和账号对上的人：也会先落到发票后补单，点底部「进财务工作台」去登录一次，以后就出二选一了。</li>
+        <li>从提醒消息里的链接点进来、本来就指明去哪一页的：不出这一页，直接去那一页。</li>
+        <li>电脑浏览器（不在钉钉里）：还是现在的登录页，另加一个「登记发票后补」的入口。</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<div id="live"></div>
+
+<!-- 入口页本体 -->
+<template id="tpl-entry">
+  <div class="en">
+    <div class="en-shell">
+      <section class="en-hero">
+        <div class="en-brand">
+          <img alt="星期零 STARFIELD" data-logo>
+          <div>
+            <div class="en-name">星期零风控中心AI赋能中台</div>
+            <div class="en-sub">STARFIELD RISK CONTROL CENTER</div>
+          </div>
+        </div>
+        <p class="en-hi">你好，曾禹锡</p>
+        <h2 class="en-q">今天要办哪件事？</h2>
+        <p class="en-tip">钉钉已经认出你了，不用再输账号密码。<br>选右边一个入口就行。</p>
+        <div class="en-stage" data-scene></div>
+      </section>
+      <section class="en-sheet">
+        <div class="en-lbl">选一个进入</div>
+        <div class="en-cards">
+          <button type="button" class="en-card" data-look="a">
+            <span class="en-ic a"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></span>
+            <span class="en-tx">
+              <b>发票后补单</b>
+              <small>付了款，发票还没到？<br>先登记，票到了再交给财务。</small>
+              <span class="en-meta all"><i></i>全公司同事都能用</span>
+            </span>
+            <span class="en-go"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>
+          </button>
+          <button type="button" class="en-card" data-look="b">
+            <span class="en-ic b"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"/></svg></span>
+            <span class="en-tx">
+              <b>财务工作台</b>
+              <small>对账、核算、报表都在这里。</small>
+              <span class="en-meta ok"><i></i>已认出你的账号，直接进</span>
+            </span>
+            <span class="en-go"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>
+          </button>
+        </div>
+        <div class="en-foot"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>钉钉已确认你是本公司同事 · 仅限授权人员访问</div>
+      </section>
+    </div>
+  </div>
+</template>
+
+<!-- 黄猫和三个小伙伴：与登录页 Login.jsx 同一套图形（去掉了登录页专用的眨眼/捂眼部件） -->
+<template id="tpl-scene">
+<svg viewBox="0 0 560 430" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <ellipse class="sh" cx="350" cy="418" rx="115" ry="9"/>
+  <ellipse class="sh" cx="88" cy="418" rx="42" ry="6"/>
+  <ellipse class="sh" cx="153" cy="418" rx="26" ry="5"/>
+  <ellipse class="sh" cx="193" cy="418" rx="18" ry="4"/>
+  <g>
+    <path d="M40,406 C40,360 62,340 88,340 C114,340 136,360 136,406 Q136,414 127,414 L49,414 Q40,414 40,406 Z" fill="#F08A4E"/>
+    <ellipse cx="74" cy="376" rx="7.5" ry="8.5" fill="#fff"/><ellipse cx="102" cy="376" rx="7.5" ry="8.5" fill="#fff"/>
+    <circle class="pp" cx="74" cy="376" r="3.2" fill="#2b2530"/><circle class="pp" cx="102" cy="376" r="3.2" fill="#2b2530"/>
+    <path d="M81,398 h14" stroke="#B85C28" stroke-width="2.2" stroke-linecap="round"/>
+  </g>
+  <g>
+    <rect x="130" y="286" width="46" height="128" rx="23" fill="#7A67D9"/>
+    <ellipse cx="143" cy="324" rx="6.5" ry="7.5" fill="#fff"/><ellipse cx="163" cy="324" rx="6.5" ry="7.5" fill="#fff"/>
+    <circle class="pp" cx="143" cy="324" r="2.8" fill="#2b2530"/><circle class="pp" cx="163" cy="324" r="2.8" fill="#2b2530"/>
+    <path d="M147,348 Q153,353 159,348" fill="none" stroke="#4E3D9E" stroke-width="2.2" stroke-linecap="round"/>
+  </g>
+  <g>
+    <rect x="178" y="346" width="30" height="68" rx="15" fill="#3A2B5E"/>
+    <ellipse cx="186" cy="370" rx="4.5" ry="5.5" fill="#fff"/><ellipse cx="200" cy="370" rx="4.5" ry="5.5" fill="#fff"/>
+    <circle class="pp" cx="186" cy="370" r="2.2" fill="#2b2530"/><circle class="pp" cx="200" cy="370" r="2.2" fill="#2b2530"/>
+  </g>
+  <g>
+    <path d="M470,388 C506,382 512,352 490,340" fill="none" stroke="var(--cat-d)" stroke-width="16" stroke-linecap="round"/>
+    <g transform="translate(300,252) rotate(-22)"><rect x="-19" y="-62" width="38" height="72" rx="19" fill="var(--cat)"/><rect x="-10" y="-48" width="20" height="46" rx="10" fill="var(--ear)"/></g>
+    <g transform="translate(400,252) rotate(22)"><rect x="-19" y="-62" width="38" height="72" rx="19" fill="var(--cat)"/><rect x="-10" y="-48" width="20" height="46" rx="10" fill="var(--ear)"/></g>
+    <path d="M222,396 C222,296 268,224 350,224 C432,224 478,296 478,396 Q478,410 462,410 L238,410 Q222,410 222,396 Z" fill="var(--cat)"/>
+    <g stroke="var(--cat-dd)" stroke-width="2.2" stroke-linecap="round" opacity=".7">
+      <path d="M288,332 L238,324"/><path d="M286,343 L234,343"/><path d="M288,354 L238,362"/>
+      <path d="M412,332 L462,324"/><path d="M414,343 L466,343"/><path d="M412,354 L462,362"/>
+    </g>
+    <ellipse cx="297" cy="352" rx="13" ry="7" fill="var(--blush)" opacity=".5"/><ellipse cx="403" cy="352" rx="13" ry="7" fill="var(--blush)" opacity=".5"/>
+    <ellipse cx="318" cy="302" rx="27" ry="24" fill="#fff"/><ellipse cx="382" cy="302" rx="27" ry="24" fill="#fff"/>
+    <g class="pp"><circle cx="318" cy="302" r="8.5" fill="#2b2530"/><circle cx="382" cy="302" r="8.5" fill="#2b2530"/><circle cx="315" cy="297" r="3" fill="#fff"/><circle cx="379" cy="297" r="3" fill="#fff"/></g>
+    <ellipse cx="350" cy="331" rx="4.5" ry="3.5" fill="var(--nose)"/>
+    <path d="M350,334 Q344,342 337,338 M350,334 Q356,342 363,338" fill="none" stroke="var(--catink)" stroke-width="2.2" stroke-linecap="round"/>
+    <g transform="translate(315,398)"><ellipse rx="30" ry="26" fill="var(--cat)" stroke="var(--cat-dd)" stroke-width="1.5"/><path d="M-9,-17 V-5 M0,-19 V-6 M9,-17 V-5" stroke="var(--cat-dd)" stroke-width="2.2" stroke-linecap="round"/></g>
+    <g transform="translate(385,398)"><ellipse rx="30" ry="26" fill="var(--cat)" stroke="var(--cat-dd)" stroke-width="1.5"/><path d="M-9,-17 V-5 M0,-19 V-6 M9,-17 V-5" stroke="var(--cat-dd)" stroke-width="2.2" stroke-linecap="round"/></g>
+  </g>
+</svg>
+</template>
+
+<script>
+(function () {
+  var LOGO = 'data:image/png;base64,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'
+  var entry = document.getElementById('tpl-entry'), scene = document.getElementById('tpl-scene')
+  function mount(host, wide) {
+    if (!host) return
+    var node = entry.content.cloneNode(true)
+    var en = node.querySelector('.en')
+    if (wide) en.classList.add('wide')
+    node.querySelector('[data-logo]').src = LOGO
+    var stage = node.querySelector('[data-scene]')
+    stage.appendChild(scene.content.cloneNode(true))
+    // 猫和小伙伴看向你正要点的那张卡
+    Array.prototype.forEach.call(node.querySelectorAll('.en-card'), function (card) {
+      var k = 'look-' + card.getAttribute('data-look')
+      function on() { stage.classList.add(k) } function off() { stage.classList.remove(k) }
+      card.addEventListener('pointerenter', on); card.addEventListener('pointerleave', off)
+      card.addEventListener('focus', on); card.addEventListener('blur', off)
+      // 样机里点一下只演示「正在进入」的样子
+      card.addEventListener('click', function () {
+        card.classList.add('busy'); card.setAttribute('aria-busy', 'true')
+        setTimeout(function () { card.classList.remove('busy'); card.removeAttribute('aria-busy') }, 1100)
+      })
+    })
+    host.appendChild(node)
+  }
+  mount(document.querySelector('[data-mount="phone"]'), false)
+  mount(document.querySelector('[data-mount="desk"]'), true)
+  // 展示页窄的时候（比如侧边预览窗）把电脑那一框等比缩小，不出横向滚动条
+  var desk = document.querySelector('.dev-desk'), pk = document.querySelector('.pk')
+  function fit() { if (desk && pk.clientWidth) desk.style.zoom = Math.min(1, (pk.clientWidth - 56) / 1000) }
+  fit(); window.addEventListener('resize', fit)
+  var solo = (location.hash || '').replace('#', '')
+  if (solo === 'phone' || solo === 'desk') document.body.classList.add('solo')
+  mount(document.getElementById('live'), solo === 'desk')
+})()
+</script>
+</body>
+</html>

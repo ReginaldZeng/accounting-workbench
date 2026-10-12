@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.915（钉钉入口二选一）| 从钉钉点开首页：有账号的先出 DdEntry 选「发票后补单 / 财务工作台」，钉钉认出人但没账号的直接去 #/invself；带具体去处的链接、不在钉钉里的都照旧
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 挂接发票管家四页（invdesk/invlater/invaudit/invledger）+ CODED_VIEWS + 进入时展开「发票管家」板块
 // [Change Log] Date: 2026-09-10 | Author: Codex | Version: V2.553
 // Description: 接入电商月结工作台路由，并在进入时展开「应收模块 › 电商对账」承接链路。
@@ -42,7 +43,8 @@ import Portal from './views/Portal.jsx'
 import Home, { RECENT_KEY } from './views/Home.jsx'
 import WorkerOffice from './views/WorkerOffice.jsx'   // V2.796 数字员工办公室（门户层；大屏模式免登录）
 import { getConfig, setConfig, getMe, apiLogout, getNavModules, getTodos } from './api.js'
-import { tryDdLogin, markDdSkip } from './views/ddLogin.js'   // V2.884 钉钉免登
+import { tryDdLogin, markDdSkip, shouldAskEntry, chooseWorkbench, goInvSelf } from './views/ddLogin.js'   // V2.884 钉钉免登；入口二选一
+import DdEntry from './views/DdEntry.jsx'   // 钉钉入口二选一：有账号的同事从钉钉点开先选「发票后补单 / 财务工作台」
 
 export default function App() {
   const [user, setUser] = useState(undefined)   // undefined=检查登录中 / null=未登录 / {..}=已登录
@@ -63,10 +65,15 @@ export default function App() {
   }
   // V2.884 钉钉免登：没登录、又是在钉钉里打开的 → 先让钉钉认人；认过账号的直接进，没认过的把结果交给登录页提示
   const [dd, setDd] = useState(null)             // {ticket,name}=钉钉认出是谁但还没认过账号 / {note}=没认成的原因 / null=不在钉钉里
+  // 钉钉入口二选一：从钉钉点开首页（没带具体去处、这次还没选过工作台）→ 有账号的先选去哪；没账号的直接去发票后补单
+  const [askEntry, setAskEntry] = useState(shouldAskEntry)
   useEffect(() => {
     getMe().then(r => setUser(r.user)).catch(async () => {
       const r = await tryDdLogin()
       if (r.user) { setUser(r.user); return }
+      // 钉钉认出是本公司的人、但没对上工作台账号：多数是没有账号的同事 → 直接进发票后补单（那一页不用账号）。
+      // 有账号只是钉钉还没对上的，在那一页底部点「进财务工作台」回来，这里就照旧出登录框（输一次密码对上）。
+      if (r.dd?.ticket && shouldAskEntry()) { goInvSelf(); return }
       setDd(r.dd || null); setUser(null)
     })
   }, [])
@@ -120,6 +127,9 @@ export default function App() {
 
   // 手机扫码查凭证（V2.802）：`#/vscan` 登录后只出这一页（拍付款单二维码 → 主体 + 凭证号），不进门户/侧栏。权限由接口把关。
   if ((window.location.hash || '').startsWith('#/vscan')) return <VoucherScanPage user={user} />
+
+  // 钉钉入口二选一：选「财务工作台」→ 记下这次不再问、照常进门户；选「发票后补单」→ 换到申请人自助登记页
+  if (askEntry) return <DdEntry user={user} onLater={goInvSelf} onWorkbench={() => { chooseWorkbench(); setAskEntry(false) }} />
 
   // 登录后先落门户；选组进入某工作台
   if (zone === 'portal') return <Portal user={user} onEnter={z => { setZone(z); if (z === 'accounting') setView('home') }} />

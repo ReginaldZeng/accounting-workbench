@@ -108,6 +108,29 @@
         "import os,uvicorn;os.environ.setdefault('KD_CONF_PATH',r'D:\\0 Claude 数据\\03 财务核算工作台\\01_Current_Deliverables\\app\\backend\\conf.ini');uvicorn.run('app:app',app_dir=r'D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\project-review-229d0b\\01_Current_Deliverables\\app\\backend',port=8130)"
       ],
       "port": 8130
+    },
+    {
+      "name": "wt-invoice-export",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-c",
+        "import os,uvicorn;os.environ.setdefault('INV_WORKER_OFF','1');uvicorn.run('app:app',app_dir=r'D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\invoice-manager-export-35530d\\01_Current_Deliverables\\app\\backend',port=8143)"
+      ],
+      "port": 8143
+    },
+    {
+      "name": "proto-entry-choice",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8144",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\invoice-manager-export-35530d\\01_Current_Deliverables\\docs\\20261012_钉钉入口二选一\\prototype"
+      ],
+      "port": 8144
     }
   ]
 }

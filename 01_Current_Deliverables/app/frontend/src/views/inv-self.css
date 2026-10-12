@@ -112,3 +112,8 @@
 
 .inv-sf-qr{display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;}
 .inv-sf-qr p{margin:0;color:var(--ink-2);}
+
+/* 钉钉入口二选一：有工作台账号的人从这里去工作台（没账号的同事从钉钉点开是直接落在这一页的） */
+.inv-sf-wb{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:28px; padding:12px 14px;
+  border:1.5px dashed var(--line-strong); border-radius:12px; font-size:13.5px; color:var(--ink-2); }
+.inv-sf-wb .inv-sf-link{ font-size:13.5px; font-weight:700; min-height:28px; }

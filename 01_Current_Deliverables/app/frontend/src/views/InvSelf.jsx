@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.915（钉钉入口二选一）| 页面底部加「有工作台账号？进财务工作台」（没账号的同事从钉钉点开直接落在这页）
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621（发票管家·申请人自助登记发票后补）
 // 业务同事自己登记发票后补：main.jsx 按 #/invself 分流到这里，不走工作台登录（业务同事没有工作台账号）。
 // 认人：在钉钉里打开 → 自动免登；电脑浏览器 → 输入手机号、确认姓名 → 钉钉收 6 位验证码 → 输入即登录。
@@ -10,6 +11,7 @@ import {
   invSPayments, invSReceivers, invSLaterCreate, invSLaters, invSLaterDocs,
 } from '../api.js'
 import { inDingTalk, getAuthCode } from './ddBridge.js'
+import { goWorkbench } from './ddLogin.js'
 import { money } from './invShared.jsx'
 import './inv.css'
 import './inv-self.css'
@@ -36,6 +38,13 @@ function plusDays(n) {
 const num = v => (v === null || v === undefined || v === '' ? 0 : Number(v) || 0)
 
 // ───────────────────────── 登录 ─────────────────────────
+
+// 钉钉入口二选一：没有工作台账号的同事从钉钉点开是直接落在这一页的；有账号的从这里去工作台
+// （钉钉还没和账号对上的，过去会先看到登录框，输一次密码就对上了）
+function ToWorkbench() {
+  return <div className="inv-sf-wb"><span>有工作台账号？</span>
+    <button type="button" className="inv-sf-link" onClick={goWorkbench}>进财务工作台 ›</button></div>
+}
 
 function LoginLayout({ children }) {
   return <div className="inv-auth">
@@ -520,6 +529,7 @@ export default function InvSelf() {
     {phase === 'loading' && <div className="inv-sf-wait"><span className="inv-spin" /> 正在识别钉钉身份…</div>}
     {phase === 'down' && <div className="inv-sf-err">页面没连上服务器：{down}</div>}
     {phase === 'login' && <Login hello={hello} onIn={signIn} />}
+    {phase === 'login' && !scan && <ToWorkbench />}
   </LoginLayout>
 
   return <div className="inv-sf">
@@ -550,6 +560,7 @@ export default function InvSelf() {
           onDone={m => { setFlash(m); setPick(null); setTab('mine'); loadLaters(); loadPays(true) }} />
       </section>}
       {tab === 'mine' && <section className="inv-sf-sec"><MyLaters token={tok} rows={laters} onReload={loadLaters} /></section>}
+      {!pick && <ToWorkbench />}
     </>}
   </div>
 }
