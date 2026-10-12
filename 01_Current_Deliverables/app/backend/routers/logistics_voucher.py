@@ -200,8 +200,12 @@ def vlist(request: Request, since: str = "2026-09-01"):
             out[-1]["later3_vno"] = (pr_.get("later3") or {}).get("vno") or ""
             if out[-1]["later_state"] == "todo":
                 out[-1]["status"] = "latertax"
-        elif out[-1]["status"] == "noinv" and pi.get("bill_id") and r["inst_id"] in laters and _later_slip(r["inst_id"]):
-            out[-1].update(status="ready", later=True)   # 人确认过发票后补：没票也列进可做账(只做支付)
+        elif out[-1]["status"] == "noinv" and pi.get("bill_id"):
+            _sl = _later_slip(r["inst_id"])
+            if _sl and r["inst_id"] in laters:
+                out[-1].update(status="ready", later=True)   # 人确认过发票后补：没票也列进可做账(只做支付)
+            elif _sl:                                        # 登记了后补单、还没人确认(V2.919)：页面上直接给「确认发票后补」
+                out[-1]["later_slip"] = {"id": _sl["id"], "status_cn": _sl.get("status_cn"), "expect_date": _sl.get("expect_date"), "filed_by": _sl.get("filed_by")}
         pw = _paywarn(r["inst_id"]) if out[-1]["status"] == "unpaid" else None
         if pw:
             out[-1].update(status="paycode", paywarn=pw)
@@ -1438,9 +1442,13 @@ def _prog_view():
     return p
 
 
-AUTO_KINDS =("hx", "tail", "redo")
+# V2.919(用户 2026-10-12 看禾享 1,322「如果发票一直不到做不了？其实应该是直接去核销供应商往来吧，然后等发票到了单独做一个待认证」
+#   「如果提交了后补单的话」「应该要在第三步确认下已确认登记发票后补之后」)：发票后补的单也能自动做——
+#   前提是人在付款做账页点过「确认发票后补」(发票管家里登记了后补单才点得了)。确认之后：第一笔只做支付(借应付/贷银行)系统自动做；
+#   发票到了、在发票管家审核通过、税额和挂着的暂估进项税对得上，第二笔「暂估转待认证」也自动建。对不上的停下来等人。
+AUTO_KINDS = ("hx", "tail", "redo", "later")
 KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "需红冲更正", "subj": "计提记错主体", "manual": "金额不符", "noacc": "没有计提",
-           "part": "部分核销", "later": "发票后补·先付款"}
+           "part": "部分核销", "later": "发票后补·先付款", "later3": "发票到了·暂估转待认证"}
 AUTO_USER = "系统自动"
 
 
@@ -1490,7 +1498,7 @@ def _auto_ok(d, cfg):
     return True, ""
 
 
-def _auto_fp(cfg, cands):
+def _auto_fp(cfg, cands, l3=None):
     """这一轮要看的东西的「指纹」：自动做账的设置 + 每张够条件的请款单(付款单、发票、人工选的计提、发票后补) + 复核台登记的计提更正。
     和上一轮一样＝这 20 分钟里我们这边什么都没变，定时的那一轮就不用再把每张都去金蝶读一遍。"""
     import hashlib
@@ -1500,6 +1508,7 @@ def _auto_fp(cfg, cands):
         fx = c.execute(text("select count(*), coalesce(max(updated_at), '') from %s" % FX.name)).first()
     body = {"cfg": {k: cfg.get(k) for k in ("mode", "kinds", "cap", "max_round")}, "fx": [int(fx[0] or 0), str(fx[1] or "")],
             "carry": db.get_setting(_CARRY_KEY, None) or {},        # 复核台登记的多收待扣回变了，凭证也会变(V2.896)
+            "l3": sorted(l3 or []),                                 # 发票后补等发票的那几张：票到没到、审没审(V2.919)
             "c": [[r["inst_id"], str(r.get("kd_paid") or ""), str(r.get("amount")), str(r.get("period")), str(r.get("subject_full")),
                    sorted([i["number"], i["gross"], i["rate"], bool(i["deduct"])] for i in invs),
                    picks.get(r["inst_id"]), bool(laters.get(r["inst_id"]))] for r, invs in sorted(cands, key=lambda t: t[0]["inst_id"])]}
@@ -1603,18 +1612,31 @@ def auto_round(trigger="定时"):
         with db._engine.connect() as c:
             reqs = [dict(r) for r in c.execute(select(PR).where(PR.c.create_time >= "2026-09-01")).mappings().all()]
         items, cands = [], []
+        laters = db.get_setting(_LATER_KEY, None) or {}
         for r in reqs:
             inst = r["inst_id"]
             if r.get("excluded") or r.get("dt_status") == "TERMINATED" or r.get("dt_result") == "refuse" or inst in posted or not r.get("period"):
                 continue
             folder, invs = _invoices(inst)
-            if _status(r, folder, invs, {}) != "ready":          # 还没付款 / 票不齐 / 发票≠请款：本来就做不了，不列
+            st_ = _status(r, folder, invs, {})
+            if st_ == "noinv" and inst in laters and (_paid_info(r) or {}).get("bill_id") and _later_slip(inst):
+                pass                                             # 人确认过发票后补(V2.919)：没票也列进来，只做支付
+            elif st_ != "ready":                                 # 还没付款 / 票不齐 / 发票≠请款：本来就做不了，不列
                 continue
             cands.append((r, invs))
+        # 发票后补的第二笔(V2.919)：付款凭证当时只做了支付、暂估进项税还挂着的，发票到了没有。只看本地票夹，票没到的不去金蝶读。
+        wait3 = []
+        for r in reqs:
+            rec = posted.get(r["inst_id"]) if isinstance(posted.get(r["inst_id"]), dict) else None
+            if not rec or not rec.get("tax_later") or rec.get("later3") or r.get("excluded"):
+                continue
+            _f3, invs3 = _invoices(r["inst_id"])
+            if invs3:
+                wait3.append((r, invs3))
         # V2.876：定时的这一轮，和上一轮比什么都没变(设置、够条件的请款单、付款单、发票、人工选的计提、计提更正)就不重算——
         #   原来每 20 分钟把每张都去金蝶读一遍，一天 9,000 次调用，绝大多数轮次结果一模一样。人手点的「现在跑一轮」照样重算；
         #   上一轮有没做成的要重试；最多隔 6 小时还是重读一次(金蝶那边改了凭证，这边看不出来)。
-        fp = _auto_fp(cfg, cands)
+        fp = _auto_fp(cfg, cands, [[r["inst_id"], sorted([i["number"], i["review"], i["tax"]] for i in iv)] for r, iv in wait3])
         prev = db.get_setting(_AUTO_LAST_KEY, None) or {}
         if trigger == "定时" and prev.get("fp") == fp and not any(not x.get("ok") for x in prev.get("done") or []):
             try:
@@ -1645,6 +1667,30 @@ def auto_round(trigger="定时"):
             except Exception as e:
                 it["why"] = "读取出错：%s" % str(e)[:120]
             items.append(it)
+        for r, invs3 in wait3:
+            inst = r["inst_id"]
+            _prog(phase="calc", cur=_prog_cur(r))
+            it = {"inst": inst, "bid": r.get("business_id"), "payee": r.get("payee") or r.get("carrier"), "subject": r.get("subject"),
+                  "amount": r.get("amount"), "period": r.get("period"), "kind": "later3", "kind_cn": KIND_CN["later3"], "ok": False, "why": "", "xout": [], "multi": False}
+            try:
+                if "later" not in cfg["kinds"]:
+                    it["why"] = "「%s」没放进自动范围" % KIND_CN["later"]
+                elif any(i["review"] != "approved" for i in invs3):
+                    it["why"] = "发票到了，但发票管家里还没审核通过；审核通过后系统再转待认证"
+                else:
+                    d, code = _preview_data(inst)
+                    l3 = (d.get("later3") or {}) if code == 200 else {}
+                    if code != 200:
+                        it["why"] = d.get("msg") or "读取失败"
+                    elif not l3.get("lines") or not l3.get("ok"):
+                        _m3 = l3.get("msg") or "发票税额和挂着的暂估进项税对不上"
+                        it["why"] = _m3 if "要人工" in _m3 else _m3 + "，要人工处理"
+                    else:
+                        it["ok"] = True
+                        it["text"] = "发票 %s 到了，暂估进项税 %.2f 转待认证" % ("、".join(i["number"] for i in invs3 if i.get("number"))[:60], float(l3.get("dr") or 0))
+            except Exception as e:
+                it["why"] = "读取出错：%s" % str(e)[:120]
+            items.append(it)
         done = []
         if cfg["mode"] == "on":
             _todo = [x for x in items if x["ok"]][:cfg["max_round"]]
@@ -1655,7 +1701,14 @@ def auto_round(trigger="定时"):
                 if not lk.acquire(blocking=False):
                     continue
                 try:
-                    res = _post(it["inst"], AUTO_USER)
+                    if it.get("kind") == "later3":                   # 发票后补的第二笔：新建暂估转待认证凭证(V2.919)
+                        try:
+                            _st3 = _held("物流付款做账·暂估转待认证凭证", _post_later, it["inst"], AUTO_USER)
+                            res = {"ok": True, "steps": _st3, "vno": (((db.get_setting(_POSTED_KEY, None) or {}).get(it["inst"]) or {}).get("later3") or {}).get("vno") or ""}
+                        except busy.Draining:
+                            res = {"ok": False, "draining": True}
+                    else:
+                        res = _post(it["inst"], AUTO_USER)
                 except Exception as e:
                     res = {"ok": False, "msg": "写金蝶出错：%s" % str(e)[:200]}
                 finally:

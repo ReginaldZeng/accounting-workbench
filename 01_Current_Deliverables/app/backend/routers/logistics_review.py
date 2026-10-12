@@ -3526,7 +3526,15 @@ def _box_docs(rsub, carrier):
                             round(bsum / 1000.0, 4), _fmt_amt(kd), round(kd / 1000.0, 4), "，一致" if st == "ok" else "，差 %s%s 千克" % ("+" if bsum > kd else "", _fmt_amt(round(bsum - kd, 2))))
                     elif x.get("bw_lack"):
                         x["mode_cn"] += " · " + x["bw_lack"]
-                    x["mode_short"] = x["mode_tip"] = ""         # 几行合起来比的，短写法不适用
+                    x["mode_short"] = x["mode_tip"] = ""         # 几行合起来比的，单行的短写法不适用
+                    # V2.917(用户看恒茂页面「这个变得emm」：结论那一格被一长串说明挤成一个字一行)：按吨重核的几行合计也给一句短的，全文放悬停
+                    if _bwk:
+                        x["mode_short"] = "按计费吨重核：本单 %d 行合计 %g 吨、金蝶折 %g 吨，%s" % (
+                            len(xs), round(bsum / 1000.0, 4), round(kd / 1000.0, 4), "一致" if st == "ok" else "差 %s%s 千克" % ("+" if bsum > kd else "", _fmt_amt(round(bsum - kd, 2))))
+                        x["mode_tip"] = x["mode_cn"] + "\n账单上这张单拆成 %d 行，吨重加起来比；金蝶按 出库数量 ÷ 规格里的每箱数量 × 每箱计费千克 折成吨重。" % len(xs)
+                    elif x.get("bw_lack"):
+                        x["mode_short"] = "按吨重核：有物料没填每箱计费重量，先拿净重比"
+                        x["mode_tip"] = x["mode_cn"] + "\n到上面「单位换算·箱规·每箱计费重量」里填上，系统就按 金蝶箱数 × 每箱计费千克 折成吨重再比。"
                     x["mode_cn"] += _gnote
                     _others = sorted({y["doc_no"] for y in xs} - {x["doc_no"]})
                     x["grp_others"] = _others              # 和这张合起来比的别的单号(导出复核明细时，差异要拿几张的账单量加起来算)

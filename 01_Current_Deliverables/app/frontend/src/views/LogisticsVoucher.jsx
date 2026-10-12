@@ -1047,6 +1047,11 @@ export default function LogisticsVoucher() {
   const [bm, setBm] = useState('')              // 装订打印的凭证月份，空=最新一个月
   const [view, setView] = useState('grid')      // grid 总表(承运商 × 主体) / list 明细(一张请款单一行)
   const [pf, setPf] = useState('')              // 账单月筛选，空=全部
+  // V2.920(用户「不是在付款做账点，是在账单审核点」)：发票后补的确认挪到账单复核台第③步，这里只写去哪确认
+  const noInvCell = r => !r.period ? <span className="dim">未认账单月</span>
+    : r.later ? <span className="warn kt">已确认发票后补 · 只做支付</span>
+      : r.later_slip ? <span className="warn kt" title="发票管家里登记了后补单。到「账单复核台」这家这月的第③步「确认与登记」里点「确认发票后补」，确认之后系统自动只做支付">已登记后补单 #{r.later_slip.id} · 待账单审核确认</span>
+        : <span className="dim">票夹没有发票</span>
   const load = () => voucherList().then(r => {
     const rs = r.rows || []
     setRows(rs); setErr('')
@@ -1192,7 +1197,7 @@ export default function LogisticsVoucher() {
                         {r.status === 'booked' ? `已做账 ${vnoOf(r)}` : ST[r.status][0]}</button></>))}</td>
                     <td>{rs.map(r => { const pl = plans[r.inst], calc = !!r.period && !!r.n_inv
                       const [lb, cl] = pl ? (KS[pl.kind] || [pl.kind, 'dim']) : ['', '']
-                      return blk(r, <>{!calc ? <span className="dim">{!r.period ? '未认账单月' : '票夹没有发票'}</span> : !pl ? <span className="dim">计算中…</span>
+                      return blk(r, <>{!calc ? noInvCell(r) : !pl ? <span className="dim">计算中…</span>
                         : <label className="gck"><input type="checkbox" disabled={!canBatch(r)} checked={!!sel[r.inst] && canBatch(r)}
                             title={canBatch(r) ? (isRedo(r) ? '勾选批量做账（⚠ 这张要红冲更正）' : '勾选批量做账') : r.posted ? '已写金蝶' : r.status !== 'ready' ? '还不能做账' : '这种要点开单张做，不进批量'}
                             onChange={e => setSel(o => ({ ...o, [r.inst]: e.target.checked }))} /><b className={cl}>{lb}</b></label>}
@@ -1246,7 +1251,7 @@ export default function LogisticsVoucher() {
                 <td>{stack(a => <><span className="mono">{a.month}/{a.vno}#</span>{a.from && <span className="dim"> {a.from}</span>}</>)}</td>
                 {(() => {
                   // 审核结果＝比对出来的事实，建议动作＝要做什么；逐张计提一行，和左边对齐。整单问题(主体错/金额不符…)各写一句。
-                  if (!calc) return <><td><span className="dim">{!r.period ? '未认账单月' : '票夹没有发票'}</span></td><td><span className="dim">{!r.period ? '到账单核对总表认领月份' : '收票台补票'}</span></td></>
+                  if (!calc) return <><td>{noInvCell(r)}</td><td><span className="dim">{!r.period ? '到账单核对总表认领月份' : r.later ? '系统自动只做支付；发票到了再转待认证' : r.later_slip ? '到账单复核台第③步确认发票后补，确认后系统自动只做支付' : '收票台补票'}</span></td></>
                   if (pending) return <><td><span className="dim">计算中…</span></td><td></td></>
                   if (['subj', 'manual', 'noacc', 'err', 'later'].includes(p.kind)) return <>
                     <td className="kd"><span className={KIND[p.kind] ? (KIND[p.kind][1] === 'bad' ? 'bad' : 'warn') : ''}>{KIND[p.kind]?.[0]}</span><div className="dim kt">{p.text}</div></td>
