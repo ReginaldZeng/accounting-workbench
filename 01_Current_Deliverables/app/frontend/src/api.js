@@ -593,6 +593,8 @@ export const invTaxlistReport = (batch) => j(invWithQs('/api/inv/taxlist/report'
 export const invTaxpackImport = (files) => invPost('/api/inv/taxpack/import', invFd(files, 'files'))
 export const invDeductPrepare = (file) => invPost('/api/inv/deduct/prepare', invFd(file, 'file'))
 export const invDeductDownloadUrl = (token) => invWithQs('/api/inv/deduct/download', { token })
+// 直接从台账出税局勾选清单：params={subject 购方税号, from, to 开票日期, marked 之前导出过的也带上}；回预览＋下载凭证，下载同上（下载才记"已标注勾选"）
+export const invDeductTickPrepare = (params) => jp('/api/inv/deduct/tick/prepare', params)
 export const invSellers = (params) => j(invWithQs('/api/inv/sellers', params))
 export const invSellerCheck = (body) => jp('/api/inv/sellers/check', body)
 export const invOpeningPreview = (file) => invPost('/api/inv/opening/preview', invFd(file, 'file'))

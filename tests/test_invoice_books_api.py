@@ -1367,5 +1367,90 @@ class InvoiceBooksApiTests(unittest.TestCase):
         row = r["rows"][0]
         self.assertEqual((row["procInstId"], row["laterId"], row["hasInvoice"]), ("PI-PV-1", None, False))
 
+    @unittest.skipUnless(HAS_XL, "缺 openpyxl")
+    def test_26_deduct_tick_export(self):
+        """直接从台账出税局勾选清单：审核通过＋可抵扣的才进；按购方主体分开出；下载才记"已标注"，下次默认不再带。
+        「金额」列照用户给的实物：专票写价税合计、行程单写不含税、铁路客票票面没有税额的金额也留空。
+        开票日期都放在 2024-02（别的用例不用这个月），号码、税号都是编的。"""
+        OUR, TID, OTHER = self.OUR, self.OUR_TID, self.OTHER_TID
+        face = dict(amount=100, tax=6, total=106, buyer_name=OUR, buyer_tax_id=TID, seller_name="勾选销方甲", seller_tax_id="91tick0a")
+        a, _ = self.make_item(num(26001), 106, "31", "20240202", face)                             # 专票：进
+        b, _ = self.make_item(num(26002), 106, "31", "20240203", face, decisions={"deductible": False})   # 会计判不可抵：不进也不提
+        c, _ = self.make_item(num(26003), 106, "31", "20240204", face, approve=False)               # 没审核：不进，报张数
+        d, _ = self.make_item(num(26004), 300, "51", "20240205", dict(buyer_name=OUR, buyer_tax_id=""))   # 铁路客票：票面没税号没税额
+        e, _ = self.make_item(num(26005), 212, "31", "20240206", dict(face, amount=200, tax=12, total=212,
+                                                                     buyer_name="别家公司", buyer_tax_id=OTHER))
+        g, _ = self.make_item(num(26006), 530, "31", "20240207", dict(face, amount=None, tax=30, total=530))   # 没读到不含税金额也不碍事
+        h, _ = self.make_item(num(26007), 530, "31", "20240207", dict(face, amount=None, tax=30, total=530))
+        self.S.item_update(self.e, h, number=num(26006), dup_key=self.item(g)["dup_key"])           # 同一张票拆到两张单上
+        k, _ = self.make_item(num(26008), 1090, "61", "20240208", dict(amount=1000, tax=90, total=1090, buyer_name=OUR, buyer_tax_id=TID))   # 行程单
+        url, rng = "/api/inv/deduct/tick/prepare", {"from": "2024-02-01", "to": "2024/2/29"}
+        self.assertEqual(self.c.post(url, json=rng).status_code, 401)
+        self.assertEqual(self.post(url, "viewer", rng).status_code, 403)
+        self.assertEqual(self.post(url, "nogate", rng).status_code, 403)
+        self.assertEqual(self.post(url, "acct", {"from": "二月"}).status_code, 400)
+        j = self.ok(self.post(url, "acct", rng))
+        s = j["summary"]
+        self.assertEqual((s["rows"], s["tax"], s["marked"]), (5, 138.0, 0), s)
+        self.assertEqual([(x["key"], x["count"]) for x in s["skipped"]], [("notApproved", 1)])
+        self.assertEqual([(x["taxId"], x["count"]) for x in j["buyers"]], [(TID, 4), (OTHER, 1)])
+        self.assertEqual({x["type"]: x["count"] for x in s["byType"]}, {"电子发票(增值税专用发票)": 3, "电子发票(铁路电子客票)": 1,
+                                                                        "电子发票(航空运输电子客票行程单)": 1})
+        pv = {x["number"]: x for x in j["preview"]}
+        self.assertEqual(sorted(pv), [num(26001), num(26004), num(26005), num(26006), num(26008)])
+        self.assertIn("不在本公司抬头清单", pv[num(26005)]["warn"])
+        self.assertEqual((pv[num(26004)]["buyerTaxId"], pv[num(26004)]["amount"]), (TID, None))    # 抬头是本公司 → 补设置里的税号
+        self.assertIn("没有税额", pv[num(26004)]["warn"])
+        self.assertEqual((pv[num(26001)]["amount"], pv[num(26006)]["amount"], pv[num(26008)]["amount"]), (106.0, 530.0, 1000.0))
+        # 税局按纳税人分别导入：选一家再出
+        j = self.ok(self.post(url, "acct", dict(rng, subject=TID.lower())))
+        self.assertEqual((j["summary"]["rows"], len(j["buyers"])), (4, 2))
+        self.assertEqual(self.item(a)["deduct_status"], "")                                        # 下载前不动
+        self.assertEqual(self.get("/api/inv/deduct/download?token=%s" % j["token"], "viewer").status_code, 403)
+        r = self.get("/api/inv/deduct/download?token=%s" % j["token"], "acct")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn(quote("增值税发票勾选抵扣_"), r.headers["content-disposition"])
+        from openpyxl import load_workbook
+        ws = load_workbook(io.BytesIO(r.content))["invoices"]
+        vals = [[x or "" for x in row] for row in ws.values]
+        self.assertEqual(vals[0], self.ie.TAX_TICK_COLUMNS)
+        self.assertEqual([v[:13] for v in vals[1:]], [
+            ["是", num(26001), "", num(26001), "2024-02-02", "106.00", "6.00", "6.00", TID, "勾选销方甲", "91TICK0A", "",
+             "电子发票(增值税专用发票)"],
+            ["是", num(26004), "", num(26004), "2024-02-05", "", "", "", TID, "", "", "", "电子发票(铁路电子客票)"],
+            ["是", num(26006), "", num(26006), "2024-02-07", "530.00", "30.00", "30.00", TID, "勾选销方甲", "91TICK0A", "",
+             "电子发票(增值税专用发票)"],
+            ["是", num(26008), "", num(26008), "2024-02-08", "1000.00", "90.00", "90.00", TID, "", "", "",
+             "电子发票(航空运输电子客票行程单)"]])
+        st = lambda *ids: [self.item(i)["deduct_status"] or "" for i in ids]
+        self.assertEqual(st(a, b, c, d, e, g, h, k), ["marked", "", "", "marked", "", "marked", "marked", "marked"])
+        self.assertTrue(any(x["action"] == "标注抵扣勾选" for x in self.S.logs_of(self.e, item_id=h)))
+        # 导出过的下次默认不带；勾「之前导出过的也带上」才带
+        j = self.ok(self.post(url, "acct", dict(rng, subject=TID)))
+        self.assertEqual((j["summary"]["rows"], j["token"]), (0, ""))
+        self.assertEqual([(x["key"], x["count"]) for x in j["summary"]["skipped"]], [("notApproved", 1), ("marked", 4)])
+        j = self.ok(self.post(url, "acct", dict(rng, subject=TID, marked=True)))
+        self.assertEqual((j["summary"]["rows"], j["summary"]["marked"]), (4, 4))
+        self.assertTrue(j["token"])
+        # 税局已显示勾选过的、显示作废红冲的不进
+        self.S.item_update(self.e, a, deduct_status="checked")
+        self.S.item_update(self.e, d, verify="red")
+        j = self.ok(self.post(url, "acct", dict(rng, subject=TID, marked=True)))
+        self.assertEqual(j["summary"]["rows"], 2)
+        self.assertEqual({x["key"]: x["count"] for x in j["summary"]["skipped"]}, {"notApproved": 1, "checked": 1, "red": 1})
+
+    def test_27_tax_tick_type(self):
+        """票种的税局写法：有二维码票种代码就用官方名（半角括号），没有就按票种＋是不是数电票推。"""
+        t = self.books.tax_tick_type
+        n20 = num(27001)
+        self.assertEqual(t({"qr_type": "31", "inv_type": "special", "number": n20}), "电子发票(增值税专用发票)")
+        self.assertEqual(t({"qr_type": "61", "inv_type": "flight", "number": n20}), "电子发票(航空运输电子客票行程单)")
+        self.assertEqual(t({"qr_type": "32", "inv_type": "travel", "number": n20}), "电子发票(普通发票)")
+        self.assertEqual(t({"qr_type": "01", "inv_type": "special", "number": "12345678", "code": "044001900111"}), "增值税专用发票")
+        self.assertEqual(t({"qr_type": "", "inv_type": "special", "number": n20}), "电子发票(增值税专用发票)")
+        self.assertEqual(t({"inv_type": "special", "number": "12345678", "code": "044001900111"}), "增值税专用发票")
+        self.assertEqual(t({"inv_type": "train", "number": n20}), "电子发票(铁路电子客票)")
+        self.assertEqual(t({"inv_type": "travel", "number": n20}), "电子发票(普通发票)")
+
 if __name__ == "__main__":
     unittest.main()

@@ -648,6 +648,38 @@ class TestExports(unittest.TestCase):
         self.assertEqual(ws["H3"].value, "无记录")
         self.assertAlmostEqual(ws["E4"].value, 1334.5, places=2)
 
+    def test_tax_tick(self):
+        """税局勾选清单：表名、表头、样式、列宽照实物；格子全是文本；数电票号码写两列、老票写代码＋号码；没有的留空。"""
+        n20 = "26449900000000000001"
+        rows = [{"number": n20, "code": "", "date": "2026-09-04", "amount": 307.96, "tax": 40.04, "buyerTaxId": TAX_A.lower(),
+                 "sellerName": SELLER_A, "sellerTaxId": TAX_B, "taxType": "电子发票(增值税专用发票)"},
+                {"number": "12345678", "code": "044001900111", "date": "2026-09-05", "amount": 1000, "tax": 130,
+                 "deductTax": 65, "buyerTaxId": TAX_A, "sellerName": "=cmd()", "sellerTaxId": TAX_B, "taxType": "增值税专用发票"},
+                {"number": "26519147621000218960", "date": "2026-09-14", "amount": None, "tax": None, "buyerTaxId": TAX_A,
+                 "taxType": "电子发票(铁路电子客票)"}]
+        wb = load_workbook(io.BytesIO(ie.export_tax_tick(rows)))
+        self.assertEqual(wb.sheetnames, ["invoices"])
+        ws = wb.active
+        self.assertEqual([c.value for c in ws[1]], ie.TAX_TICK_COLUMNS)
+        self.assertEqual((len(ie.TAX_TICK_COLUMNS), ws.max_row, ws.max_column), (20, 4, 20))
+        h = ws["A1"]
+        self.assertEqual((h.font.name, h.font.b, h.fill.fgColor.rgb[-6:], h.alignment.horizontal), ("Arial", True, "A9D08E", "center"))
+        self.assertEqual({round(ws.column_dimensions[c.column_letter].width, 4) for c in ws[1]}, {23.4375})
+        v = lambda r: [c.value or "" for c in ws[r]]
+        self.assertEqual(v(2)[:13], ["是", n20, "", n20, "2026-09-04", "307.96", "40.04", "40.04", TAX_A, SELLER_A, TAX_B, "",
+                                     "电子发票(增值税专用发票)"])
+        self.assertEqual(v(3)[:13], ["是", "", "044001900111", "12345678", "2026-09-05", "1000.00", "130.00", "65.00", TAX_A,
+                                     "=cmd()", TAX_B, "", "增值税专用发票"])
+        self.assertEqual(v(4)[:13], ["是", "26519147621000218960", "", "26519147621000218960", "2026-09-14", "", "", "", TAX_A,
+                                     "", "", "", "电子发票(铁路电子客票)"])
+        self.assertEqual({x for r in (2, 3, 4) for x in v(r)[13:]}, {""})
+        for row in ws.iter_rows(min_row=2):
+            for c in row:
+                self.assertIn(c.data_type, ("s", "n"), c.coordinate)        # n＝空格子；没有一格是公式或数字
+                self.assertTrue(c.value is None or isinstance(c.value, str), c.coordinate)
+                self.assertEqual(c.number_format, "@", c.coordinate)
+        self.assertEqual(ie.export_tax_tick([])[:2], b"PK")                   # 没有票也出得来（只有表头）
+
 
 class TestLazyImports(unittest.TestCase):
     def test_module_has_no_heavy_top_level_imports(self):

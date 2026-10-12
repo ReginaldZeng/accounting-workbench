@@ -9,6 +9,8 @@
 #   写：export_ledger 发票台账（只写模式，大表不爆内存）、export_later 欠票清单（按供应商汇总＋明细）、
 #       export_sellers 新销方核查清单。
 #   ⚠ 三份导入件（票总管、税局两份）一期都还没见到实物——列名全靠同义词自动认，拿到样本后只需补同义词表。
+# Date: 2026-10-10 | Author: Claude / c | Version: V2.914（发票管家·税局勾选清单）
+# Description: 加 export_tax_tick——电子税务局「清单导入勾选」格式的勾选清单（照业务方给的实物：表名 invoices、20 列、全文本格）。
 #   ⚠ openpyxl / xlrd 一律函数内懒加载：缺库只让对应功能报友好话，不拖垮 import。
 from __future__ import annotations
 
@@ -1296,3 +1298,61 @@ def export_sellers(rows):
         ])
     sw.finish()
     return _save(wb)
+
+
+# ============================================================
+# 八、税局勾选清单（电子税务局「清单导入勾选」能直接吃的格式）
+# ============================================================
+# 照业务方 2026-10-10 给的实物《增值税发票勾选抵扣(默认)_20261010.xlsx》：表名 invoices、20 列、表头 Arial 加粗绿底居中、
+# 每列一样宽、所有格子都是文本（号码不丢位、金额写成 "348.00"）。后 8 列（发票来源…差额扣除标识）实物里除销方税号外全空，照样留空。
+TAX_TICK_SHEET = "invoices"
+TAX_TICK_COLUMNS = [
+    "是否勾选*", "数电发票号码", "发票代码", "发票号码", "开票日期*", "金额*", "票面税额*", "有效抵扣税额*", "购买方识别号*",
+    "销售方纳税人名称", "销售方纳税人识别号", "发票来源", "票种*", "发票状态", "红字锁定标志", "转内销证明编号", "业务类型",
+    "勾选时间", "发票风险等级", "差额扣除标识",
+]
+_TAX_TICK_WIDTH = 23.4375
+_TAX_TICK_FILL = "A9D08E"
+
+
+def _money_text(v):
+    """金额 → "348.00"（文本）；没有 → ""。"""
+    x = _money(v)
+    return "" if x is None else "%.2f" % x
+
+
+def export_tax_tick(rows):
+    """税局勾选清单导出。rows 每行：number 发票号码 / code 发票代码（数电票为空）/ date 开票日期 YYYY-MM-DD /
+    amount 「金额」列要写的数（含税还是不含税由调用方定，这里不换算）/ tax 票面税额 / deductTax 有效抵扣税额（不给＝同票面税额）/ buyerTaxId / sellerName / sellerTaxId /
+    taxType 票种（税局写法，调用方给）。数电票（没有发票代码）号码同时写进「数电发票号码」和「发票号码」两列，同实物。
+    → xlsx 字节。每行都标「是」：进不进这张清单由调用方筛。"""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = TAX_TICK_SHEET
+    font = Font(name="Arial", bold=True)
+    fill = PatternFill("solid", fgColor=_TAX_TICK_FILL)
+    center = Alignment(horizontal="center", vertical="center")
+    for i, h in enumerate(TAX_TICK_COLUMNS, 1):
+        c = ws.cell(row=1, column=i, value=h)
+        c.font, c.fill, c.alignment = font, fill, center
+        ws.column_dimensions[get_column_letter(i)].width = _TAX_TICK_WIDTH
+    blank = [""] * (len(TAX_TICK_COLUMNS) - 13)
+    for n, r in enumerate(rows or [], 2):
+        number, code = _txt(r.get("number")), _txt(r.get("code"))
+        tax = _money_text(r.get("tax"))
+        ded = r.get("deductTax")
+        vals = ["是", "" if code else number, code, number, _txt(r.get("date")), _money_text(r.get("amount")), tax,
+                tax if ded in (None, "") else _money_text(ded), _txt(r.get("buyerTaxId")).upper(),
+                _txt(r.get("sellerName")), _txt(r.get("sellerTaxId")).upper(), "", _txt(r.get("taxType"))] + blank
+        for i, v in enumerate(vals, 1):
+            c = ws.cell(row=n, column=i)
+            c.number_format = "@"             # 文本格式：在 Excel 里双击再回车也不会变成科学计数
+            if v != "":                       # 没有的就是个空格子（不写空字符串：有的读表程序不认没内容的文本格）
+                c.value = _xl_val(v)
+                c.data_type = "s"             # 一律文本：20 位号码不丢位；"=…" 也不会被当公式
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

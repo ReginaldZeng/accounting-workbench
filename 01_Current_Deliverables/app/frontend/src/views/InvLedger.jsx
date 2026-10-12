@@ -1,13 +1,15 @@
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票台账五页签：台账查询（筛选/分页/合计/导出/右侧详情/作废）、税局对账（清单四色+文件包补全）、抵扣勾选、新销方核查、期初导入
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 「含作废」只多列作废票（review=withvoid＝已通过＋已作废，不再把草稿/待审票拉进台账和合计）；
 //   作废后把后端的税务提醒（进项税额转出/撤销勾选）原话留在页面上；详情「留痕」按 log.itemId 列这张票自己的记录（新的在前）。
+// [Change Log] Date: 2026-10-10 | Author: Claude / c | Version: V2.914（发票管家·税局勾选清单）| 抵扣勾选页签加「方式一：直接从台账出勾选清单」
+//   （选购方主体/开票日期→生成→预览→核对后下载，文件是税局「清单导入勾选」的格式）；原来的拖税局清单标注改叫「方式二」。
 // 接口契约见 docs/20260923_发票管家/发票管家_技术方案 §5.2「发票台账」。后端与本页同时开发：凡契约没写死的字段一律可选链+默认值兜底。
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
-  invDeductPrepare, invDeductDownloadUrl,
+  invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare,
   invSellers, invSellerCheck,
   invOpeningPreview, invOpeningCommit, invOpeningStats,
 } from '../api.js'
@@ -599,6 +601,105 @@ function TaxlistTab({ can, flash }) {
 
 // ───────────────────────── 页签 3：抵扣勾选 ─────────────────────────
 
+const TICK_EMPTY = { subject: '', from: '', to: '', marked: false }
+
+// 方式一：直接从台账出税局勾选清单（不用先去税局导未勾选清单）。先生成看预览，核对后下载；下载才把票记为「已标注勾选」。
+function TickExport({ can }) {
+  const [f, setF] = useState(TICK_EMPTY)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [res, setRes] = useState(null)
+  const [buyers, setBuyers] = useState([])
+  const [ok, setOk] = useState(false)
+  // 条件一改，下面的预览就不是这个条件的了：收起来，免得拿旧清单去下载
+  const set = (k, v) => { setF(p => ({ ...p, [k]: v })); setRes(null); setOk(false); setErr('') }
+  const go = async () => {
+    setBusy(true); setErr(''); setRes(null); setOk(false)
+    try {
+      const r = await invDeductTickPrepare(f)
+      setRes(r); setBuyers(asList(r?.buyers))
+    } catch (e) { setErr(errText(e)) } finally { setBusy(false) }
+  }
+  const s = res?.summary || {}
+  const prev = asList(res?.preview)
+  const skipped = asList(s.skipped)
+  const mixed = res && !f.subject && asList(res.buyers).length > 1
+  return (
+    <section className="inv-lg-sec">
+      <div className="inv-lg-sec-h">方式一：直接从台账出勾选清单（不用先去税局导清单）</div>
+      <ol className="inv-lg-steps">
+        <li>选购方主体和开票日期，点 <b>生成清单</b>：台账里 <b>审核通过＋可抵扣＋还没勾选过</b> 的票都列出来；</li>
+        <li>对着预览核一遍，下载。文件就是电子税务局 <b>清单导入勾选</b> 要的格式，每张都标了「是」；「金额」一列专票写<b>价税合计（含税）</b>，机票行程单写不含税，火车票票面没有税额的留空；</li>
+        <li>回电子税务局导入；<b>提交勾选</b> 和 <b>统计确认</b> 仍由人在税局里点，系统不替你提交。</li>
+      </ol>
+      {can.deduct ? (
+        <div className="fbar inv-lg-fbar">
+          <label>购方主体
+            <select value={f.subject} onChange={e => set('subject', e.target.value)}>
+              <option value="">全部主体</option>
+              {buyers.map(b => <option key={b.taxId || '-'} value={b.taxId}>{(b.name || '没读到抬头') + (b.taxId ? `（${b.taxId}）` : '')}</option>)}
+            </select>
+          </label>
+          <label>开票日期
+            <input type="date" value={f.from} onChange={e => set('from', e.target.value)} aria-label="开票日期从" />
+            <span className="muted">至</span>
+            <input type="date" value={f.to} onChange={e => set('to', e.target.value)} aria-label="开票日期到" />
+          </label>
+          <label className="inv-lg-ck"><input type="checkbox" checked={f.marked} onChange={e => set('marked', e.target.checked)} />之前导出过的也带上</label>
+          <button type="button" className="btn primary" onClick={go} disabled={busy}>{busy ? <><span className="inv-spin" /> 正在生成…</> : '生成清单'}</button>
+        </div>
+      ) : <NoPerm what="抵扣勾选" />}
+      <ErrLine msg={err && '清单没生成出来：' + err} />
+      {res && (
+        <>
+          <div className="inv-lg-chips">
+            <span className={'inv-lg-chip' + (n0(s.rows) ? ' ok' : '')}>要勾选 <b>{n0(s.rows)}</b> 张</span>
+            <span className="inv-lg-chip">税额合计 <b>{money(s.tax)}</b></span>
+            <span className="inv-lg-chip">金额列合计 <b>{money(s.amount)}</b></span>
+            {asList(s.byType).map(t => <span key={t.type} className="inv-lg-chip">{t.type} <b>{n0(t.count)}</b></span>)}
+            {n0(s.warned) > 0 && <span className="inv-lg-chip warn">要留意 <b>{n0(s.warned)}</b></span>}
+          </div>
+          {skipped.length > 0 && (
+            <div className="inv-lg-warn">另有可抵扣的票没进这张清单：{skipped.map(x => `${x.label} ${n0(x.count)} 张`).join('；')}。</div>
+          )}
+          {mixed && <div className="inv-lg-warn">这张清单里有 {asList(res.buyers).length} 个购方税号。税局是按纳税人分别导入的：请在上面选一个购方主体，一家出一份。</div>}
+          {n0(s.rows) === 0 && <div className="inv-lg-empty">按这个条件，台账里没有要去勾选的票。{skipped.length ? '原因见上面一行。' : '台账里只有审核通过、判定可抵扣的票才会进清单。'}</div>}
+          {prev.length > 0 && (
+            <div className="tbl-wrap inv-lg-mini">
+              <table>
+                <thead><tr><th>发票号码</th><th>开票日期</th><th>销方</th><th>票种</th><th className="num">金额</th><th className="num">税额</th><th>购方税号</th><th>备注</th></tr></thead>
+                <tbody>{prev.map(p => (
+                  <tr key={p.number}>
+                    <td className="mono">{p.number}</td>
+                    <td className="inv-lg-nowrap">{p.date || '—'}</td>
+                    <td><div className="inv-lg-seller" title={p.sellerName || undefined}>{p.sellerName || '—'}</div></td>
+                    <td className="inv-lg-nowrap">{p.taxType}</td>
+                    <td className="num">{money(p.amount)}</td>
+                    <td className="num">{money(p.tax)}</td>
+                    <td className="mono">{p.buyerTaxId || '—'}</td>
+                    <td className="inv-lg-nowrap">{p.warn ? <span className="inv-lg-red">{p.warn}</span> : ''}{p.marked ? <span className="inv-muted">{p.warn ? '；' : ''}之前导出过</span> : ''}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              {n0(s.rows) > prev.length && <div className="inv-muted inv-lg-pad">预览只列前 {prev.length} 张，下载的文件里是全部 {n0(s.rows)} 张。</div>}
+            </div>
+          )}
+          {res.token && (
+            <>
+              <label className="inv-lg-ck big"><input type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} />我已核对上面的清单</label>
+              <div className="inv-lg-row">
+                <a className={'btn primary' + (ok ? '' : ' inv-lg-off')} href={ok ? invDeductDownloadUrl(res.token) : undefined}
+                  aria-disabled={!ok} onClick={e => { if (!ok) e.preventDefault() }}>下载勾选清单</a>
+                <span className="inv-muted">下载后这些票记为「已标注勾选」，下次默认不再带出来。去税局「清单导入勾选」导入，再人工 <b>提交勾选</b>、<b>统计确认</b>。</span>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
 function DeductTab({ can }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -617,8 +718,9 @@ function DeductTab({ can }) {
   const decText = d => (d === true || d === 'yes' ? '是' : d === false || d === 'no' ? '否' : (d || '未判定'))
   return (
     <div className="inv-lg-stack">
+      <TickExport can={can} />
       <section className="inv-lg-sec">
-        <div className="inv-lg-sec-h">抵扣勾选：系统标注，人来确认和提交</div>
+        <div className="inv-lg-sec-h">方式二：在税局导出的未勾选清单上标注（税局有、台账没有的票也看得出来）</div>
         <ol className="inv-lg-steps">
           <li>电子税务局 <b>抵扣类勾选</b> 里导出<b>未勾选清单</b>；</li>
           <li>把导出的文件原样拖进来，系统逐张标「是否勾选」：<b>审核通过＋可抵扣＋已验真</b> 的标「是」，其余标「否」或留空；</li>
@@ -944,7 +1046,7 @@ export default function InvLedger({ user }) {
   const sub = {
     query: '审核通过的票都在这里，一票一行；点一行看详情',
     taxlist: '拿电子税务局导出的清单逐张验真',
-    deduct: '按台账给税局的未勾选清单标注，人来确认、提交',
+    deduct: '从台账直接出税局勾选清单，或在税局的未勾选清单上标注；人来确认、提交',
     sellers: '每月第一次出现的销方，人工查一次失信名单',
     opening: '导入历史发票清单，作为查重底子',
   }[tab]

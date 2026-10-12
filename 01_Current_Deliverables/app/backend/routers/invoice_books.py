@@ -9,6 +9,9 @@
 #   税局对账只判清单所属公司的票、绿不降黄、部分红冲不算作废、清单显示已勾选记"已勾选"；税局文件包逐包处理、
 #   已审票只补空字段（对不上只标出来）；作废/收票/改票后后补单统一重算（另有兜底自愈），发钉钉与重算一律进线程池；
 #   催票"今天已跑"取清单成功后才算；登记后补回 notified/notifyMsg。
+# Date: 2026-10-10 | Author: Claude / c | Version: V2.914（发票管家·税局勾选清单）
+# Description: 抵扣勾选加「直接从台账出税局勾选清单」——POST /api/inv/deduct/tick/prepare（按购方主体/开票日期筛，
+#   审核通过＋可抵扣＋没勾选过的才进；回预览＋下载凭证），下载仍走 /api/inv/deduct/download（下载才记"已标注勾选"）。
 """发票管家（Invoice Butler）台账与后补池路由。接口契约见 docs/20260923_发票管家/发票管家_技术方案 §5.2。"""
 import os
 import re
@@ -1228,7 +1231,173 @@ async def deduct_download(request: Request):
         return err("文件已过期（只保留 2 小时），请重新拖一次", 400)
     n = await run_in_threadpool(_mark_items, meta.get("yes") or [], u["name"], meta.get("name") or "")
     inv.audit(u, "下载抵扣勾选标注件", meta.get("name") or "", "标「是」%d 张，本次记为已标注 %d 张" % (len(meta.get("yes") or []), n))
+    if meta.get("tick"):             # 直接从台账出的税局勾选清单：文件名照税局那份的叫法
+        return _xlsx(data, "增值税发票勾选抵扣_%s.xlsx" % _stamp(), "vat_tick_%s.xlsx" % _stamp())
     return _xlsx(data, "抵扣勾选_已标注_%s.xlsx" % _stamp(), "deduct_marked_%s.xlsx" % _stamp())
+
+
+# ── 直接从台账出税局勾选清单（不用先去税局导未勾选清单）──
+# 格式照业务方 2026-10-10 给的实物《增值税发票勾选抵扣(默认)_20261010.xlsx》（ie.export_tax_tick）。
+# 「金额」列的口径照实物（用户 2026-10-10 定：专票写含税）：专票等发票写价税合计；航空行程单写不含税；
+# 铁路客票票面没有税额的，金额、税额都留空（实物里 92 张铁路客票就是空的）。票面没有的数不替它算。
+TICK_PREVIEW = 500
+_PAREN_HALF = str.maketrans({"（": "(", "）": ")"})
+_TICK_TYPES = {
+    "special": ("电子发票(增值税专用发票)", "增值税专用发票"),
+    "vehicle": ("电子发票(机动车销售统一发票)", "机动车销售统一发票"),
+    "toll": ("电子发票(普通发票)", "增值税电子普通发票(通行费)"),
+    "train": ("电子发票(铁路电子客票)",) * 2,
+    "flight": ("电子发票(航空运输电子客票行程单)",) * 2,
+}
+TICK_SKIP_CN = [                      # 没进清单的可抵扣票：页面按这个顺序把原因和张数列出来
+    ("notApproved", "还没审核通过（审核后才会进清单）"),
+    ("marked", "之前已经导出/标注过（要再出一次就勾「之前导出过的也带上」）"),
+    ("checked", "税局已显示勾选过"),
+    ("red", "税局显示已作废/全额红冲"),
+    ("partialRed", "部分红冲：有效抵扣税额以税局为准，请用下面「在税局清单上标注」的办法"),
+    ("noNumber", "没有发票号码"),
+]
+
+
+def tax_tick_type(it):
+    """这张票在税局勾选清单「票种」列的写法（半角括号）。实物里见过三种：电子发票(增值税专用发票) / 电子发票(铁路电子客票) /
+    电子发票(航空运输电子客票行程单)；其余按发票二维码票种代码的官方名推，还没见过实物。"""
+    qr = ip.QR_TYPES.get(str(it.get("qr_type") or "").strip())
+    if qr:
+        return qr[1].translate(_PAREN_HALF)
+    digital = len(str(it.get("number") or "")) == 20 and not (it.get("code") or "")
+    pair = _TICK_TYPES.get(it.get("inv_type") or "") or ("电子发票(普通发票)", "增值税普通发票")
+    return pair[0] if digital else pair[1]
+
+
+def _can_deduct(x):
+    """会计判可抵；会计没表态的按系统建议（同「在税局清单上标注」的口径）。"""
+    return x.get("deductible") == 1 or (x.get("deductible") is None and x.get("deduct_suggest") == "yes")
+
+
+def _tick_collect(f):
+    """台账里该去税局勾选的票 → (rows, skipped{原因: 张数}, buyers[{taxId,name,count}])。
+    进清单：审核通过＋可抵扣＋没作废＋税局没显示作废/红冲＋税局还没显示已勾选；之前导出/标注过的默认不带（f.marked 才带）。
+    f：subject 购方税号（税局按纳税人分别导入，一次出一家）、date_from/date_to 开票日期、marked。
+    一张票拆到几张单上（同一个查重键多行）只出一行，金额按票面、不按分摊额。buyers 不受 subject 筛选影响（给页面做下拉）。
+    行里的 amount＝「金额」列要写的数（口径见上面的说明：专票等价税合计、行程单不含税）。"""
+    e = E()
+    c = S.ITEM.c
+    cols = [c.id, c.dup_key, c.number, c.code, c.issue_date, c.inv_type, c.qr_type, c.amount, c.tax, c.total,
+            c.buyer_name, c.buyer_tax_id, c.seller_name, c.seller_tax_id, c.review, c.deductible, c.deduct_suggest,
+            c.deduct_status, c.verify, c.verify_note]
+    conds = [c.kind == "invoice", _active(), _not_void()]
+    if f.get("date_from"):
+        conds.append(c.issue_date >= f["date_from"])
+    if f.get("date_to"):
+        conds.append(c.issue_date <= f["date_to"])
+    groups = {}
+    with e.connect() as cx:
+        for r in cx.execute(select(*cols).where(*conds).order_by(c.id)).mappings():
+            groups.setdefault(r["dup_key"] or ("#%d" % r["id"]), []).append(dict(r))
+    comps = inv.get_settings().get("company") or []
+    ours = _ours({"company": comps})
+    by_name = {ip.normalize_name(x.get("name")): str(x.get("taxId") or "").strip().upper() for x in comps if x.get("name")}
+    subject = str(f.get("subject") or "").strip().upper()
+    rows, skipped, buyers = [], {}, {}
+    for its in groups.values():
+        appr = [x for x in its if x.get("review") == "approved"]
+        x = (appr or its)[0]
+        if not _can_deduct(x):
+            continue
+        # 票面没读到购方税号、抬头又正是本公司某一家 → 用设置里那家的税号；读到了就原样写（不替票面改）
+        tid = str(x.get("buyer_tax_id") or "").strip().upper() or by_name.get(ip.normalize_name(x.get("buyer_name")), "")
+        why = ""
+        if not appr:
+            why = "notApproved"
+        elif any(a.get("verify") == "red" for a in appr):
+            why = "red"
+        elif any("部分红冲" in (a.get("verify_note") or "") for a in appr):
+            why = "partialRed"
+        elif any(a.get("deduct_status") == "checked" for a in appr):
+            why = "checked"
+        elif not (x.get("number") or "").strip():
+            why = "noNumber"
+        marked = any(a.get("deduct_status") == "marked" for a in appr)
+        if not why and marked and not f.get("marked"):
+            why = "marked"
+        if not why:
+            b = buyers.setdefault(tid, {"taxId": tid, "name": x.get("buyer_name") or "", "count": 0})
+            b["count"] += 1
+        if subject and tid != subject:
+            continue
+        if why:
+            skipped[why] = skipped.get(why, 0) + 1
+            continue
+        amount, tax, total = _f(x.get("amount")), _f(x.get("tax")), _f(x.get("total"))
+        typ = x.get("inv_type") or ""
+        if typ == "flight":                       # 行程单：不含税
+            money = amount if amount is not None else (round(total - tax, 2) if None not in (total, tax) else None)
+        elif typ == "train" and tax is None:      # 铁路客票票面没有税额：金额也留空
+            money = None
+        else:                                     # 专票等：价税合计
+            money = total if total is not None else (round(amount + tax, 2) if None not in (amount, tax) else None)
+        warn = []
+        if ours[0] and tid not in ours[0]:
+            warn.append("购方税号不在本公司抬头清单里" if tid else "票面没有购方税号")
+        if not x.get("issue_date"):
+            warn.append("没有开票日期")
+        if tax is None:
+            warn.append("票面没有税额（留空）")
+        rows.append({"ids": [a["id"] for a in appr], "number": x["number"].strip(), "code": (x.get("code") or "").strip(),
+                     "date": x.get("issue_date") or "", "amount": money, "tax": tax, "buyerTaxId": tid,
+                     "buyerName": x.get("buyer_name") or "", "sellerName": x.get("seller_name") or "",
+                     "sellerTaxId": (x.get("seller_tax_id") or "").strip().upper(), "taxType": tax_tick_type(x),
+                     "marked": marked, "warn": "；".join(warn)})
+    rows.sort(key=lambda r: (r["date"], r["number"]))
+    return rows, skipped, sorted(buyers.values(), key=lambda b: (-b["count"], b["taxId"]))
+
+
+def _tick_run(f, user):
+    rows, skipped, buyers = _tick_collect(f)
+    by_type = {}
+    for r in rows:
+        t = by_type.setdefault(r["taxType"], {"type": r["taxType"], "count": 0, "tax": 0.0})
+        t["count"] += 1
+        t["tax"] = round(t["tax"] + (r["tax"] or 0), 2)
+    summary = {"rows": len(rows), "amount": round(sum(r["amount"] or 0 for r in rows), 2),
+               "tax": round(sum(r["tax"] or 0 for r in rows), 2), "byType": sorted(by_type.values(), key=lambda t: -t["count"]),
+               "warned": sum(1 for r in rows if r["warn"]), "marked": sum(1 for r in rows if r["marked"]),
+               "skipped": [{"key": k, "label": cn, "count": skipped[k]} for k, cn in TICK_SKIP_CN if skipped.get(k)]}
+    res = {"ok": True, "summary": summary, "buyers": buyers, "token": "",
+           "preview": [{k: r[k] for k in ("number", "date", "sellerName", "taxType", "amount", "tax", "buyerTaxId", "marked", "warn")}
+                       for r in rows[:TICK_PREVIEW]]}
+    if not rows:
+        return res
+    _tmp_clean()
+    token = secrets.token_urlsafe(16)
+    name = "台账直接导出勾选清单（%s）" % (f.get("subject") or "全部主体")
+    meta = {"kind": "deduct", "tick": True, "user": user, "name": name, "created": time.time(),
+            "yes": sorted({i for r in rows for i in r["ids"]}), "summary": summary}
+    _tmp_write(_tmp_path(token, ".xlsx"), ie.export_tax_tick(rows))
+    _tmp_write(_tmp_path(token, ".json"), json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+    res.update(token=token, expiresAt=(datetime.now() + timedelta(seconds=TMP_TTL)).strftime("%Y-%m-%d %H:%M:%S"))
+    return res
+
+
+@router.post("/api/inv/deduct/tick/prepare")
+async def deduct_tick_prepare(request: Request):
+    """直接从台账出税局勾选清单：先给预览＋下载凭证；下载走 /api/inv/deduct/download（下载才把票记为"已标注勾选"）。"""
+    u, bad = need(request, ENTER_LEDGER, CAP_DEDUCT)
+    if bad:
+        return bad
+    body = await inv.body_json(request)
+    try:
+        f = {"subject": inv._s(body.get("subject"), 32), "marked": inv._b(body.get("marked")),
+             "date_from": inv._norm_date(body.get("from")), "date_to": inv._norm_date(body.get("to"))}
+    except ValueError:
+        return err("开票日期写得不对，请按 2026-09-01 这样填", 400)
+    res = await run_in_threadpool(_tick_run, f, u["name"])
+    s = res["summary"]
+    inv.audit(u, "生成税局勾选清单", f["subject"] or "全部主体", "%d 张，税额 %s；开票日期 %s ~ %s；没进清单：%s" % (
+        s["rows"], inv._money_str(s["tax"]), f["date_from"] or "不限", f["date_to"] or "不限",
+        "、".join("%s %d" % (x["label"].split("（")[0].split("：")[0], x["count"]) for x in s["skipped"]) or "无"))
+    return res
 
 
 # ═══════════════════════════ 新销方核查 ═══════════════════════════
