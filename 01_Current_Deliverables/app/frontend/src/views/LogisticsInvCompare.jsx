@@ -66,7 +66,7 @@ function billMap(lines) {
   return out
 }
 
-export default function LogisticsInvCompare({ data, lines }) {
+export default function LogisticsInvCompare({ data, lines, onLater }) {
   if (data === null) return <div className="ivc"><style>{CSS}</style><div className="ivc-empty">读钉钉请款单、发票管家票夹、金蝶计提凭证…</div></div>
   if (data.err) return <div className="ivc"><style>{CSS}</style><div className="ivc-empty bad">读取失败：{data.err}</div></div>
   const blocks = data.blocks || []
@@ -110,6 +110,15 @@ export default function LogisticsInvCompare({ data, lines }) {
             <div className="sub">{noInv ? <span className="pill warn">还没有发票</span>
               : b.kind_cn && <span className={'pill ' + (KIND_CLS[b.kind] || 'neu')}>{b.kind_cn}</span>}
               {b.posted && <span className="pill ok">已做账 记-{b.posted.vno}</span>}</div>
+            {/* 发票后补的确认(V2.920，用户「不是在付款做账点，是在账单审核点」)：没票的请款单，发票管家里登记了后补单的，在这里确认；
+                确认之后付了款系统自动只做支付，发票到了再自动转待认证 */}
+            {noInv && !b.posted && (b.later
+              ? <div className="sub"><span className="pill ok" title={`${b.later.by || ''} ${b.later.at || ''}：${b.later.note || ''}\n付了款之后系统自动只做支付（借供应商往来 / 贷银行存款），发票到了、审核通过再自动转待认证`}>已确认发票后补</span>
+                {onLater && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => onLater(b, false)}>撤销</button>}</div>
+              : b.later_slip
+                ? <div className="sub"><span title={`发票管家里登记了后补单 #${b.later_slip.id}${b.later_slip.filed_by ? '（' + b.later_slip.filed_by + ' 登记）' : ''}`}>后补单 #{b.later_slip.id} · {b.later_slip.status_cn}{b.later_slip.expect_date ? ` · 预计 ${b.later_slip.expect_date}` : ''}</span>
+                  {onLater && <div style={{ marginTop: 4 }}><button className="btn sm pri" onClick={() => onLater(b, true)}>确认发票后补</button></div>}</div>
+                : <div className="sub"><span className="dim" title="没票先付款，要先让申请人（或财务）在发票管家登记发票后补">没登记后补单：票到之前做不了账</span></div>)}
             <div className="sub"><span className="dim" title={`审批编号 ${b.bid}`}>{b.applicant} · …{String(b.bid || '').slice(-6)}</span></div>
           </td>
           if (b.err || !gs.length) return <tbody key={b.inst}><tr>{head}<td colSpan="10" className={b.err ? 'bad' : 'z'} style={{ textAlign: 'center' }}>{b.err || '没有计提、也没有发票'}</td></tr></tbody>

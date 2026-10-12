@@ -12,7 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
 import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewVolKg, reviewDocMode, reviewCarryAdj, reviewCarrySettle, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
-import { voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
+import { voucherLater, voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -820,6 +820,17 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   // V2.853(用户「我指的是审批钉钉OA的时候噢，就是第三步那里的」)：第③步点「确认通过并登记已复核」成功后，这家这月的请款单里有要红冲更正 / 记错主体的，
   //   马上弹出计提更正单的预览，点「确认打印」——登记完就去钉钉批 OA，纸质付款单这时还在手里，订在后面一起流转。凭证号那时还没有，更正单上留空。
   const adjBlocks = ((inv3 && inv3.blocks) || []).filter(b => ADJ_KINDS.includes(b.kind))
+  // 第③步确认发票后补(V2.920，用户「应该要在第三步确认下已确认登记发票后补之后」「不是在付款做账点，是在账单审核点」)：
+  //   没票的请款单、发票管家里登记了后补单的，在账单审核这一步确认；确认之后付了款系统自动只做支付，发票到了再自动转待认证。
+  const confirmLater = (b, on) => {
+    let note = ''
+    if (on) {
+      const sl = b.later_slip || {}
+      note = window.prompt(`确认发票后补：${carrier} ${b.subject} ${money(b.amount)}\n\n发票管家里已登记后补单 #${sl.id}（${sl.status_cn || ''}${sl.expect_date ? '，预计 ' + sl.expect_date + ' 到' : ''}${sl.filed_by ? '，' + sl.filed_by + ' 登记' : ''}）。\n确认之后：\n· 这张请款单付了款，系统自动做付款凭证，只做支付（借供应商往来 / 贷银行存款），暂估进项税先挂着；\n· 发票到了、在发票管家审核通过、税额对得上，系统再自动建「暂估转待认证」凭证。\n\n备注（可改，会留痕）：`, `后补单 #${sl.id}${sl.expect_date ? '，预计 ' + sl.expect_date + ' 到' : ''}`)
+      if (note === null) return
+    } else if (!window.confirm(`撤销「已确认发票后补」：${carrier} ${b.subject} ${money(b.amount)}\n撤销后这张请款单要等发票到了才能做账。确定？`)) return
+    voucherLater(b.inst, on, note).then(() => reviewInvoices(carrier, period)).then(setInv3).catch(e => alert(e.message))
+  }
   const remindAdj = () => (inv3 && !inv3.err ? Promise.resolve(inv3) : reviewInvoices(carrier, period)).then(r => {
     const xs = (r.blocks || []).filter(b => ADJ_KINDS.includes(b.kind))
     if (xs.length) printAdj(xs.map(b => b.inst), `计提更正单 ${carrier} ${period}`,
@@ -1687,7 +1698,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {adjBlocks.length > 0 && <button className="btn sm" style={{ marginRight: 10 }} title="登记复核时会自动弹出；这里可以随时再打。审批钉钉时订在纸质付款单后面，凭证号做账后填"
               onClick={() => printAdj(adjBlocks.map(b => b.inst), `计提更正单 ${carrier} ${period}`)}>打印计提更正单（{adjBlocks.length} 张请款单）</button>}
             <a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
-          <LogisticsInvCompare data={inv3} lines={L} />
+          <LogisticsInvCompare data={inv3} lines={L} onLater={confirmLater} />
         </div>
       </>)}
       {step === 'sign' && !regRow && (<>
@@ -1722,7 +1733,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {adjBlocks.length > 0 && <button className="btn sm" style={{ marginRight: 10 }} title="登记复核时会自动弹出；这里可以随时再打。审批钉钉时订在纸质付款单后面，凭证号做账后填"
               onClick={() => printAdj(adjBlocks.map(b => b.inst), `计提更正单 ${carrier} ${period}`)}>打印计提更正单（{adjBlocks.length} 张请款单）</button>}
             <a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
-          <LogisticsInvCompare data={inv3} lines={L} />
+          <LogisticsInvCompare data={inv3} lines={L} onLater={confirmLater} />
         </div>
         <div className="navbar"><button className="btn" onClick={() => goStep('docs')}>‹ 上一步：逐单核价核量</button></div>
       </>)}

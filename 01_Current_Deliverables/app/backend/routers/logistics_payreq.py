@@ -752,6 +752,17 @@ async def review_invoices(request: Request, carrier: str = "", period: str = "")
     from starlette.concurrency import run_in_threadpool
     me = _me_uid(u)
     blocks = await run_in_threadpool(inv_blocks, carrier, period, me)
+    # V2.920(用户 2026-10-12「不是在付款做账点，是在账单审核点」)：发票后补的确认放在这一步——没票的请款单把发票管家的后补单、确认记录带出来
+    try:
+        from routers import logistics_voucher as _lv
+        _lat = db.get_setting(_lv._LATER_KEY, None) or {}
+        for b in blocks:
+            if not (b.get("invoices") or []) and b.get("inst"):
+                _sl = _lv._later_slip(b["inst"])
+                b["later_slip"] = {k: _sl.get(k) for k in ("id", "status_cn", "expect_date", "expect_amount", "filed_by")} if _sl else None
+                b["later"] = _lat.get(b["inst"]) or None
+    except Exception:
+        pass
     return {"ok": True, "carrier": carrier, "period": period, "blocks": blocks,
             "req_total": round(sum(float(b.get("amount") or 0) for b in blocks), 2),
             "inv_total": round(sum(b.get("inv_total") or 0 for b in blocks), 2),
