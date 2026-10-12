@@ -66,7 +66,7 @@ function billMap(lines) {
   return out
 }
 
-export default function LogisticsInvCompare({ data, lines, onLater }) {
+export default function LogisticsInvCompare({ data, lines, onLater, reg }) {
   if (data === null) return <div className="ivc"><style>{CSS}</style><div className="ivc-empty">读钉钉请款单、发票管家票夹、金蝶计提凭证…</div></div>
   if (data.err) return <div className="ivc"><style>{CSS}</style><div className="ivc-empty bad">读取失败：{data.err}</div></div>
   const blocks = data.blocks || []
@@ -79,7 +79,8 @@ export default function LogisticsInvCompare({ data, lines, onLater }) {
   return (
     <div className="ivc">
       <style>{CSS}</style>
-      <div className="ivc-sec">计提对账单、对发票 <small>一行一张计提凭证。先看蓝底的「账单」两列：差额落在哪张计提上一眼能看到；发票是按税率开的，同税率的几张计提合在一起比。差额为 0 不显示</small></div>
+      <div className="ivc-sec">{reg ? '费用凭证对发票' : '计提对账单、对发票'} <small>{reg ? '登记制没有账单，蓝底的账单两列不比；发票到了以后，在右边三列和费用凭证比。差额为 0 不显示'
+        : '一行一张计提凭证。先看蓝底的「账单」两列：差额落在哪张计提上一眼能看到；发票是按税率开的，同税率的几张计提合在一起比。差额为 0 不显示'}</small></div>
       <table className="ivc-t">
         <colgroup><col style={{ width: '15%' }} /><col style={{ width: '14%' }} /><col style={{ width: '6%' }} /><col style={{ width: '6.5%' }} /><col style={{ width: '9%' }} />
           <col style={{ width: '9.5%' }} /><col style={{ width: '8%' }} /><col style={{ width: '7.5%' }} />
@@ -157,6 +158,7 @@ export default function LogisticsInvCompare({ data, lines, onLater }) {
               </>
               let billCells = null
               if (!a) billCells = <><td className="gl hl"></td><td className="hl"></td></>
+              else if (reg) billCells = <><td className="num gl hl z" title="登记制：这家没有可逐单核的账单，这两列不比">—</td><td className="num hl z">—</td></>
               else if (!BM) billCells = <><td className="num gl hl z">…</td><td className="num hl z">…</td></>
               else if (!r.grp) billCells = <><td className="num gl hl"><span className="z">账单没有这一类</span></td><td className="num hl"><Diff v={-(a.gross || 0)} /></td></>
               else if (r.runStart) {
@@ -193,13 +195,14 @@ export default function LogisticsInvCompare({ data, lines, onLater }) {
         <tfoot><tr>
           <td colSpan="4">合计 <span className="dim">{blocks.length} 张请款单 · 请款 {money(data.req_total)}{nNoInv ? `　·　${nNoInv === blocks.length ? '都还没有发票' : nNoInv + ' 张请款单还没有发票'}` : ''}</span></td>
           <td className="num">{money(T.acc)}</td>
-          <td className="num gl">{billTot == null ? <span className="z">…</span> : money(billTot)}</td><td className="num">{billTot == null ? <span className="z">…</span> : <Diff v={billTot - T.acc} />}</td>
+          <td className="num gl">{reg ? <span className="z">—</span> : billTot == null ? <span className="z">…</span> : money(billTot)}</td><td className="num">{reg ? <span className="z">—</span> : billTot == null ? <span className="z">…</span> : <Diff v={billTot - T.acc} />}</td>
           <td className="num gl">{money(T.accTax)}</td>
           <td className="num gl">{money(T.inv)}</td><td className="num">{nNoInv ? <span className="z">—</span> : <Diff v={T.inv - T.acc} />}</td>
           <td className="num">{money(T.invTax)}{!nNoInv && !isZero(T.invTax - T.accTax) && <div className="subt d">比暂估 {T.invTax - T.accTax > 0 ? '+' : ''}{money(T.invTax - T.accTax)}</div>}</td>
         </tr></tfoot>
       </table>
 
+      {data.n_inv > 0 && <>
       <div className="ivc-sec">发票明细 <small>{data.n_inv} 张 · 发票管家</small></div>
       <table className="ivc-t">
         <colgroup><col style={{ width: '14%' }} /><col style={{ width: '18%' }} /><col /><col style={{ width: '9%' }} /><col style={{ width: '11%' }} /><col style={{ width: '10%' }} />
@@ -224,6 +227,7 @@ export default function LogisticsInvCompare({ data, lines, onLater }) {
           </tbody>
         })}
       </table>
+      </>}
     </div>
   )
 }

@@ -454,7 +454,7 @@ function FeeVoucherCard({ v, accr, dim, locked, onDone }) {
             <span className="dim" style={{ fontSize: 12, marginLeft: 8 }}>{String(d.req.reason || '').split('\n').slice(0, 2).join(' / ').slice(0, 90)}</span></div>
           <div className="fxamt">发票：{d.invoices.length
             ? <>{d.invoices.length} 张，含税 {money(d.inv_total)}{d.tax_mode === 'inv' ? <>，税额 {money(d.inv_tax)} → 挂<b>待认证进项税</b></> : '，不能抵扣 → 全额进费用'}{invBad && <b style={{ color: '#B03A3A' }}>　≠ 请款金额，先把发票弄对</b>}</>
-            : sl ? <>还没到 · 发票管家<b>后补单 #{sl.id}</b>（{sl.status_cn}{sl.expect_date ? ` · 预计 ${sl.expect_date} 到` : ''}{sl.filed_by ? ` · ${sl.filed_by} 登记` : ''}）→ 税按下面的税率挂<b>暂估进项税</b>，发票到了再转待认证</>
+            : sl ? <>还没到 · 发票管家<b>后补单 #{sl.id}</b>（{sl.status_cn}{sl.expect_date ? ` · 预计 ${sl.expect_date} 到` : ''}{sl.filed_by ? ` · ${sl.filed_by} 登记` : ''}）{!done && !picks.length ? <> → 税按下面的税率挂<b>暂估进项税</b>，发票到了再转待认证</> : <span className="dim">　在下面「发票与暂估」里确认发票后补</span>}</>
               : <b style={{ color: '#B03A3A' }}>还没到，发票管家里也没有登记后补单</b>}</div>
           {done && <div className="fxok">这张请款单的费用凭证已经生成：<b>记-{d.fee.vno}</b>（{d.fee.date}，{d.fee.by} {d.fee.at}）{d.fee.submitted === false ? '，提交没成功，请到金蝶手动提交' : '，已提交，等人在金蝶审核'}
             {d.fee.later_id ? `　· 没票，关联后补单 #${d.fee.later_id}` : ''}</div>}
@@ -1698,7 +1698,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {adjBlocks.length > 0 && <button className="btn sm" style={{ marginRight: 10 }} title="登记复核时会自动弹出；这里可以随时再打。审批钉钉时订在纸质付款单后面，凭证号做账后填"
               onClick={() => printAdj(adjBlocks.map(b => b.inst), `计提更正单 ${carrier} ${period}`)}>打印计提更正单（{adjBlocks.length} 张请款单）</button>}
             <a href="#/logisticsvoucher" target="_blank" rel="noopener" style={{ fontSize: 12, fontWeight: 400, color: 'var(--accent)' }}>付款做账 ↗</a></h3>
-          <LogisticsInvCompare data={inv3} lines={L} onLater={confirmLater} />
+          <LogisticsInvCompare data={inv3} lines={L} onLater={confirmLater} reg />
         </div>
       </>)}
       {step === 'sign' && !regRow && (<>
