@@ -173,9 +173,13 @@ def _cf_rules():
 
 def _cf_plan(d):
     """预览数据 → (这张付款的现金流量该拆成的几项, 定不了的原因)。每笔计提的金额取这次核销的含税数(有更正的按更正后)。
-    做完账以后费用改记过别的类的(fee_fix，见 _post_feefix)，按改后的类算、不再看原摘要。"""
+    V2.928：计提更正把费用项目改了的(易风达仓储费 → 入库运费)，按改后的费用项目算，不再看原摘要(原摘要写的还是改之前那一类)。"""
     newg = {str(a["vno"]): float(a["new"]["gross"]) for a in d.get("adjust") or [] if a.get("mode") != "xout" and a.get("new")}
-    acc = [{"fee": (a.get("fee_fix") or {}).get("to_fee") or a.get("fee"), "expl": "" if a.get("fee_fix") else a.get("expl"),
+    oldf = lambda a: "、".join(dict.fromkeys(_s(e.get("fee") or e.get("acct_name")) for e in (a.get("old") or {}).get("exp") or []))
+    newf = {str(a["vno"]): "、".join(dict.fromkeys(_s(e.get("fee") or e.get("acct_name")) for e in a["new"]["exp"]))
+            for a in d.get("adjust") or [] if a.get("mode") != "xout" and (a.get("new") or {}).get("exp")}
+    newf = {k: v for k, v in newf.items() if v and v != oldf(next(a for a in d["adjust"] if str(a["vno"]) == k))}
+    acc = [{"fee": newf.get(str(a["vno"])) or a.get("fee"), "expl": "" if newf.get(str(a["vno"])) else a.get("expl"),
             "gross": float(a["gross_new"]) if a.get("gross_new") is not None else newg.get(str(a["vno"]), float(a.get("gross") or 0))} for a in d.get("accruals") or []]
     return LV.cashflow_split(acc, (d.get("req") or {}).get("amount"), _cf_rules())
 
@@ -1075,7 +1079,6 @@ def _preview_data(inst, self_vno=None, _nest=False):
                        "new": {"gross": 0.0, "tax": 0.0, "net": 0.0, "rate": v["rate"], "exp": []}})
     # 主体更正：原主体那边要做的红冲分录 + 那边做了没有(读金蝶)
     xb = []
-    feefix = ((db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}).get("feefix") or {}
     xdone = ((db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}).get("xred") or {}
     for ob, short, v in (xbook if lines else []):
         rv = _reversed_in(ob, r["sup_code"], v)
@@ -1105,7 +1108,6 @@ def _preview_data(inst, self_vno=None, _nest=False):
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
                           "from": (v.get("from") or {}).get("short") or "", "direct": bool(v.get("direct")),
                           "gross_new": (pl["per"].get(v["vno"]) or {}).get("gross"),
-                          "fee_fix": feefix.get(str(v["vno"])),          # 做完账以后这笔费用改记过别的类(V2.927)
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
                           "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
                           "tail": pl["tails"].get(v["vno"]),
@@ -1657,95 +1659,102 @@ def _post_xred(inst, user, d=None, s=None, conf=None):
     return steps
 
 
-# ---------- 做完账以后才发现计提的费用记错了类（V2.927，用户 2026-10-12「易丰达的…仓储费应该是入库运费吧」「是，要改过来，是入库费用」）----------
-# 正常的路是复核时登记计提更正、在付款凭证里一起红冲更正。付款凭证已经做完(甚至审核了)才发现的，往来和税早核销过了，只剩费用记错了类：
-# 另建一张更正凭证——原费用行红字冲掉、同样的金额改记到这类费用本主体平时挂的科目/费用项目/部门，不动往来和税；提交、不审核。
-# 记在这张请款单的做账记录里(feefix)：现金流量按改后的类拆，凭证预览、扫码查凭证、装订清单都带上这张更正凭证。
-def _post_feefix(inst, src_vno, to_fee, reason, user, year=None, month=None):
-    """→ [步骤文字]。src_vno＝这张付款核销的哪张计提；to_fee＝改记成哪类费用(费用项目名，如「入库运费」)。只对已经做过账的请款单。"""
-    with db._engine.connect() as c:
-        r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
+# ---------- 做完账以后才登记的计提更正：补进这张付款凭证（V2.928，用户 2026-10-12 易风达 8 月仓储费该是入库运费，「这个删掉，我去反审那张付款」）----------
+# 一个主体的调整都在它自己的付款凭证里一次做完(V2.862)——做完账、甚至审核了以后才发现计提记错的也一样：不另开更正凭证，
+# 人在金蝶把付款凭证反审核，复核台登记计提更正，这里把多出来的红冲/更正分录补进这张凭证、重新提交(不审核)、现金流量重拆。
+# 只补不删：金蝶这张凭证里已有的分录，在重新算出来的分录里都得找得到；找不到(有人手工改过)就不动，留给人。
+def _refix_diff(ents, lines):
+    """金蝶凭证现有分录 vs 重新算的分录 → (要补的行, 金蝶里多出来的行)。先按 科目+借+贷+摘要 配，再按 科目+借+贷 配。"""
+    dr = lambda e: LV.r2(float(e.get("DEBIT") if e.get("DEBIT") is not None else (e.get("FDEBIT") or 0) or 0))
+    cr = lambda e: LV.r2(float(e.get("FCREDIT") if e.get("FCREDIT") is not None else (e.get("CREDIT") or 0) or 0))
+    ex = lambda e: _s(e.get("FEXPLANATION") or e.get("EXPLANATION"))
+    kd = [{"acct": (e.get("FACCOUNTID") or {}).get("Number"), "dr": dr(e), "cr": cr(e), "expl": ex(e)} for e in ents]
+    left = list(lines)
+    for full in (True, False):
+        rest = []
+        for k in kd:
+            hit = next((l for l in left if l["acct"] == k["acct"] and abs(l["dr"] - k["dr"]) < 0.005 and abs(l["cr"] - k["cr"]) < 0.005
+                        and (not full or _s(l["expl"]) == k["expl"])), None)
+            if hit is not None:
+                left.remove(hit)
+            else:
+                rest.append(k)
+        kd = rest
+    return left, kd
+
+
+def _post_refix(inst, user, dry=False):
+    """→ [步骤文字]。dry=True 只算不写(演练)。"""
     posted = dict(db.get_setting(_POSTED_KEY, None) or {})
     rec = dict(posted.get(inst) or {})
-    if not r or not rec or not str(rec.get("vid") or "").isdigit():
-        raise RuntimeError("这张请款单还没做账：还没做账的，在复核台登记计提更正，付款凭证里会一起更正")
-    r, src_vno, to_fee = dict(r), str(src_vno), _s(to_fee)
-    if not _s(reason):
-        raise RuntimeError("要写原因")
+    if not str(rec.get("vid") or "").isdigit():
+        raise RuntimeError("这张请款单还没做账")
+    vid, vno = int(rec["vid"]), str(rec.get("vno") or "")
+    _ACC_CACHE.clear(); _BANK_CACHE.clear(); _REV_CACHE.clear()
     s, conf = kc.login()
-    fixes = dict(rec.get("feefix") or {})
-    old = fixes.get(src_vno)
-    if old and kc.view_voucher(old.get("vid"), s, conf).get("exists"):
-        return ["记-%s 的费用已经更正过了（%s 月 记-%s），没重复建" % (src_vno, old.get("month"), old.get("vno"))]
-    book = r["subject_full"]
-    y, m = (int(year), int(month)) if year and month else (int(r["period"][:4]), int(r["period"][5:7]))
-    _ACC_CACHE.clear()
-    v = next((x for x in _accruals(book, "%04d-%02d" % (y, m), r["sup_code"])[0] if str(x["vno"]) == src_vno and not x.get("from")), None)
-    if not v or not v["exp_lines"]:
-        raise RuntimeError("金蝶 %d 年 %d 月没找到这家的计提 记-%s" % (y, m, src_vno))
-    pay = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(rec["vid"])})]).json()["Result"]["Result"] or {}
-    pay_date = str(pay.get("Date") or "")[:10]
-    if len(pay_date) != 10:
-        raise RuntimeError("读不到付款凭证 记-%s 的日期" % rec.get("vno"))
-    ref = LV.ref_of(v, int(pay_date[:4]))
-    lines = []
-    for l in v["exp_lines"]:
-        to = _here_dims(book, y, m, to_fee, l.get("biz_code"))
-        if not to:
-            raise RuntimeError("本主体账上没见过「%s」的计提，不知道该挂哪个科目和部门，没建" % to_fee)
-        if (to["acct"], to["fee_code"]) == (l.get("acct"), l.get("fee_code")):
-            raise RuntimeError("记-%s 本来就记在%s—%s上" % (src_vno, to["acct_name"], to["fee"]))
-        nl = dict(l, acct=to["acct"], acct_name=to["acct_name"], dept_code=to["dept_code"], dept=to["dept"], fee_code=to["fee_code"], fee=to["fee"])
-        if to["acct"][:1] == "5":        # 制造费用不挂产品分类、产品项目(和复核台计提更正「6601 改到 5101 时产品分类要拿掉」一个口径)
-            nl.update(biz_code="", biz="", proj_code="", proj="")
-        lines.append(LV._ln("红冲", "红冲%s%s" % (ref, v["expl"]), l["acct"], l["acct_name"], dr=-l["dr"], src=l, keep=LV.EXP_DIMS))
-        lines.append(LV._ln("更正", "更正%s%s，改记%s" % (ref, v["expl"], to["fee"]), nl["acct"], nl["acct_name"], dr=l["dr"], src=nl, keep=LV.EXP_DIMS))
-    if abs(sum(l["dr"] for l in lines)) >= 0.005:
-        raise RuntimeError("更正分录借贷不平，没建")
-    b2c = {o.get("full_name"): o.get("book_code") for o in (db.list_orgs() or [])}
-    if not b2c.get(book):
-        raise RuntimeError("主体档案里没有「%s」的账簿编码" % r.get("subject"))
-    date, vy, vm = _xred_date(book, pay_date, s, conf)
-    ents = []
-    for l in lines:
-        e = dict(_KD_BASE, FEXPLANATION=l["expl"], FACCOUNTID={"FNumber": l["acct"]}, FDEBIT=l["dr"], FCREDIT=l["cr"])
+    m = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"] or {}
+    ents = [x for x in m.get("GL_VOUCHERENTRY") or [] if x.get("FACCOUNTID") and x.get("Id")]
+    if not ents:
+        raise RuntimeError("金蝶里读不到凭证 记-%s" % vno)
+    d2, code = _preview_data(inst, self_vno=vno)
+    if code != 200 or d2["plan"]["status"] != "ok":
+        raise RuntimeError("重新算分录时计提和发票对不上，没动：%s" % "；".join((d2.get("plan") or {}).get("msgs") or [d2.get("msg") or ""])[:160])
+    add, extra = _refix_diff(ents, d2["voucher"]["lines"])
+    if extra:
+        raise RuntimeError("金蝶这张凭证里有 %d 行在重新算的分录里找不到（%s），可能有人手工改过，没动" % (
+            len(extra), "；".join("%s 借 %.2f 贷 %.2f" % (k["acct"], k["dr"], k["cr"]) for k in extra[:3])))
+    if not add:
+        return ["凭证 记-%s 的分录和现在登记的更正一致，没有要补的" % vno]
+    if any(l["block"] not in ("红冲", "更正") for l in add):
+        raise RuntimeError("要补的不只是红冲/更正分录（还有%s），没动，请人工处理" % "、".join(dict.fromkeys(l["block"] for l in add if l["block"] not in ("红冲", "更正"))))
+    if abs(sum(l["dr"] for l in add) - sum(l["cr"] for l in add)) >= 0.005:
+        raise RuntimeError("要补的分录借贷不平，没动")
+    steps = ["凭证 记-%s 要补 %d 行：%s" % (vno, len(add), "；".join(dict.fromkeys(l["expl"][:24] for l in add)))]
+    if dry:
+        return steps + ["%s｜%s｜借 %.2f 贷 %.2f｜%s" % (l["expl"], l["acct"], l["dr"], l["cr"], {k: v for k, v in (l.get("dims") or {}).items() if k.endswith("_code")}) for l in add]
+    if m.get("DocumentStatus") not in ("A", "D", "Z"):
+        raise RuntimeError("凭证 记-%s 现在是%s状态，改不了：先在金蝶反审核" % (vno, {"B": "已提交", "C": "已审核"}.get(m.get("DocumentStatus"), m.get("DocumentStatus"))))
+    new = []
+    for l in add:
+        x = dict(_KD_BASE, FEXPLANATION=l["expl"], FACCOUNTID={"FNumber": l["acct"]}, FDEBIT=l["dr"], FCREDIT=l["cr"])
         dd = _kd_dims(l)
         if dd:
-            e["FDetailID"] = dd
-        ents.append(e)
-    res = kc.save_voucher({"FACCOUNTBOOKID": {"FNumber": b2c[book]}, "FVOUCHERGROUPID": {"FNumber": "PRE001"}, "FEntity": ents,
-                           "FDate": date, "FYear": vy, "FPeriod": vm}, s, conf)
-    info = kc.view_voucher(res["id"], s, conf)
-    sub_err = ""
+            x["FDetailID"] = dd
+        new.append(x)
+    body = {"IsDeleteEntry": False, "NeedUpDateFields": ["FEntity", "FEXPLANATION", "FACCOUNTID", "FDEBIT", "FCREDIT", "FDetailID",
+                                                         "FCURRENCYID", "FEXCHANGERATETYPE", "FEXCHANGERATE"],
+            "Model": {"FVOUCHERID": vid, "FEntity": new}}
+    e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["GL_VOUCHER", json.dumps(body, ensure_ascii=False)]).json())
+    if e:
+        raise RuntimeError("补分录失败：%s（凭证还是原样）" % e[:160])
+    sub_err = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["GL_VOUCHER", json.dumps({"Ids": str(vid)})]).json())
+    m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"] or {}
     try:
-        kc.submit_bill("GL_VOUCHER", res["id"], s, conf)
-    except Exception as e:
-        sub_err = str(e)[:160]
-    new = [l for l in lines if l["block"] == "更正"]
-    fixes[src_vno] = {"vid": res["id"], "vno": info.get("vno") or "", "billno": res.get("billno"), "year": vy, "month": vm, "date": date,
-                      "src_vno": src_vno, "src_year": y, "src_month": m, "ref": ref, "net": LV.r2(sum(l["dr"] for l in new)), "gross": v["gross"],
-                      "from_fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
-                      "from_acct": "、".join(dict.fromkeys(l.get("acct") or "" for l in v["exp_lines"])),
-                      "to_fee": new[0]["dims"].get("fee") or to_fee, "to_acct": new[0]["acct"], "to_acct_name": new[0]["acct_name"],
-                      "reason": _s(reason)[:200], "by": user, "at": _now(), "submitted": not sub_err, "submit_err": sub_err}
-    f = fixes[src_vno]
-    rec["feefix"] = fixes
+        cfr = _set_cashflow(inst, vid, s, conf, d2, vno)
+    except Exception as ex:
+        cfr = {"ok": False, "items": {}, "msg": "出错：%s" % str(ex)[:140]}
+    req = d2["req"]
+    try:
+        used = {a["vno"] for a in d2.get("accruals") or [] if not a.get("from")}
+        fix_ids = [x["id"] for k, v in _fixes(req.get("carrier"), req.get("period"), req.get("subject")).items() if k in used for x in v if x.get("id")]
+    except Exception:
+        fix_ids = rec.get("fix_ids") or []
+    posted = dict(db.get_setting(_POSTED_KEY, None) or {})
+    rec = dict(posted.get(inst) or rec)
+    rec.update(dr=m2.get("DEBITTOTAL"), cr=m2.get("FCREDITTOTAL"), lines=len(ents) + len(new), submitted=not sub_err, submit_err=sub_err,
+               status=m2.get("DocumentStatus"), cashflow=cfr, n_adjust=len(d2.get("adjust") or []), fix_ids=fix_ids,
+               refix=(rec.get("refix") or []) + [{"at": _now(), "by": user, "n": len(new)}])
     posted[inst] = rec
     db.set_setting(_POSTED_KEY, posted, user)
-    db.audit(user, "物流付款做账-做账后费用更正凭证", "%s 记-%s" % (r.get("subject"), f["vno"]),
-             "%s 的费用 %.2f 从 %s—%s 改记 %s—%s，日期 %s；原因：%s；%s" % (ref, f["net"], f["from_acct"], f["from_fee"], f["to_acct"], f["to_fee"], date, f["reason"],
-                                                               "已提交" if not sub_err else "提交失败：" + sub_err))
-    steps = ["更正凭证 记-%s 已建（%s，%s 的费用 %.2f 从%s改记%s—%s）%s" % (
-        f["vno"], date, ref, f["net"], f["from_fee"], f["to_acct_name"], f["to_fee"], "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err)]
-    try:                                   # 现金流量跟着改后的类重拆(只动现金流量)
-        cf = _set_cashflow(inst, int(rec["vid"]), s, conf, vno=rec.get("vno") or "")
-    except Exception as e:
-        cf = {"ok": False, "items": {}, "msg": str(e)[:160]}
-    posted = dict(db.get_setting(_POSTED_KEY, None) or {})
-    posted[inst] = dict(posted.get(inst) or rec, cashflow=cf)
-    db.set_setting(_POSTED_KEY, posted, user)
-    db.audit(user, "物流付款做账-改凭证现金流量", "%s 记-%s" % (r.get("subject"), rec.get("vno") or ""), _cf_step(cf))
-    steps.append("付款凭证 记-%s 的%s" % (rec.get("vno"), _cf_step(cf)) if cf.get("ok") else _cf_step(cf))
+    db.audit(user, "物流付款做账-做账后补计提更正", "记-%s" % vno, "%s；补 %d 行（%s）；借 %s 贷 %s；%s" % (
+        req.get("subject_full"), len(new), "；".join(dict.fromkeys(l["expl"][:30] for l in add)), rec["dr"], rec["cr"], "已提交" if not sub_err else "提交失败：" + sub_err))
+    steps = ["凭证 记-%s 补 %d 行（%s）" % (vno, len(new), "；".join(dict.fromkeys(l["expl"][:24] for l in add))),
+             "凭证已重新提交，等人审核" if not sub_err else "凭证提交失败：%s（分录已补好，可在金蝶手动提交）" % sub_err, _cf_step(cfr)]
+    try:
+        todo_scenes.voucher_touch(inst, rec, req, user)
+        todo_scenes.fix_touch(req.get("carrier"), req.get("period"), user)
+    except Exception:
+        pass
     return steps
 
 
@@ -2294,9 +2303,6 @@ def _scan_lookup0(code):
         for x in (posted.get("xred") or {}).values():
             vs.append({"subject": x.get("short"), "month": "%s-%02d" % (x.get("year"), int(x.get("month") or 0)), "vno": x.get("vno"),
                        "what": "红冲凭证（没有纸质付款单）", "src": "系统写入"})
-        for x in (posted.get("feefix") or {}).values():
-            vs.append({"subject": r.get("subject"), "month": "%s-%02d" % (x.get("year"), int(x.get("month") or 0)), "vno": x.get("vno"),
-                       "what": "费用更正凭证（没有纸质付款单）", "src": "系统写入"})
         if (posted.get("later3") or {}).get("vno"):
             x = posted["later3"]
             vs.append({"subject": r.get("subject"), "month": str(x.get("date") or "")[:7], "vno": x.get("vno"),
@@ -2309,7 +2315,7 @@ def _scan_lookup0(code):
     makers = {}
     if posted:
         makers[str(posted.get("vno"))] = posted.get("by") or ""
-        for x in list((posted.get("xred") or {}).values()) + list((posted.get("feefix") or {}).values()):
+        for x in (posted.get("xred") or {}).values():
             makers[str(x.get("vno"))] = x.get("by") or ""
     _with_people(vs, makers)
     try:
@@ -2413,9 +2419,6 @@ def _bind_items(month=""):
             for x in (p.get("xred") or {}).values():
                 out.append(dict(base, key="%s|x%s" % (iid, x.get("src_vno")), subject=x.get("short"), month="%s-%02d" % (x.get("year"), int(x.get("month") or 0)),
                                 vno=str(x.get("vno")), amount=-float(x.get("gross") or 0), what="红冲凭证（没有纸质付款单）", paper=False, by=x.get("by") or "", adj=1))
-            for x in (p.get("feefix") or {}).values():
-                out.append(dict(base, key="%s|f%s" % (iid, x.get("src_vno")), subject=r.get("subject"), month="%s-%02d" % (x.get("year"), int(x.get("month") or 0)),
-                                vno=str(x.get("vno")), amount=0.0, what="费用更正凭证（没有纸质付款单）", paper=False, by=x.get("by") or ""))
             x = p.get("later3") or {}
             if x.get("vno"):
                 out.append(dict(base, key=iid + "|later", subject=r.get("subject"), month=str(x.get("date") or "")[:7], vno=str(x.get("vno")), amount=x.get("tax") or 0,
@@ -2872,9 +2875,9 @@ async def post_xred(request: Request):
     return r if r.get("ok") else JSONResponse(r, status_code=400)
 
 
-@router.post("/api/logistics-voucher/feefix")
-async def post_feefix(request: Request):
-    """做完账以后才发现某张计提的费用记错了类：另建一张更正凭证(红字冲原费用、改记到对的类)，提交不审核；现金流量跟着重拆。见 _post_feefix。"""
+@router.post("/api/logistics-voucher/refix")
+async def post_refix(request: Request):
+    """做完账以后才登记的计提更正：把多出来的红冲/更正分录补进这张付款凭证(凭证要先在金蝶反审核)，重新提交、现金流量重拆。dry=1 只看要补哪几行。"""
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
@@ -2886,13 +2889,12 @@ async def post_feefix(request: Request):
         return JSONResponse({"ok": False, "msg": "这张正在写金蝶，稍等"}, status_code=409)
     try:
         from starlette.concurrency import run_in_threadpool
-        steps = await run_in_threadpool(_held, "物流付款做账·做账后费用更正凭证", _post_feefix, inst, b.get("vno"), b.get("to_fee"), b.get("reason"), u["name"],
-                                        b.get("year"), b.get("month"))
+        steps = await run_in_threadpool(_held, "物流付款做账·做账后补计提更正", _post_refix, inst, u["name"], bool(b.get("dry")))
         r = {"ok": True, "steps": steps}
     except busy.Draining as e:
         r = {"ok": False, "msg": str(e)}
     except Exception as e:
-        r = {"ok": False, "msg": "更正凭证没建成：%s" % str(e)[:200]}
+        r = {"ok": False, "msg": str(e)[:240]}
     finally:
         lk.release()
     return r if r.get("ok") else JSONResponse(r, status_code=400)
