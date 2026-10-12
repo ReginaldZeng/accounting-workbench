@@ -1,0 +1,233 @@
+<!doctype html>
+<!--
+[Change Log]
+Date: 2026-10-12
+Author: Claude Opus 5.5
+Version: 样机 v0.1（未开发）
+Description: 物流账单复核台 · 登记制承运商（禾享、路凯这类没有账单的）第③步「确认与登记」重排样机。
+  用户 2026-10-12 看禾享 2026-08 第③步：「这个页面好乱的感觉」→ V2.921 先删了没意义的字和空表 →「做样机」。
+  现在是三张卡各说各的（费用凭证卡 / 登记卡 / 一张为有账单的承运商设计的大对照表）；样机改成一张请款单一张清单，从上到下四件事：
+  ① 费用凭证 ② 和请款比 ③ 发票（没到就看后补单、在这里确认）④ 做账；最后才是登记。原来的大对照表收起来，要看再点开。
+  纯静态，数据照禾享 2026-08 的真数（1,322.00、9 月记-196、后补单 #2），凭证号 记-361 / 记-402 是编的。顶部深色条切换几种情形。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登记制第③步重排 · 样机</title>
+<style>
+:root{
+  --bg:#F5F7F8; --card:#fff; --line:#DCE2E7; --line2:#EDF0F2;
+  --ink:#1F2A33; --ink2:#5E6B78; --ink3:#8A96A2;
+  --accent:#1F6E8C; --accent-bg:#E6F1F5;
+  --ok:#2E7D57; --ok-bg:#DCEFE4; --warn:#B06A12; --warn-bg:#F7E9CF; --bad:#B23B2E; --bad-bg:#F8DDD8; --neu-bg:#E7ECEF;
+  --mono:Consolas,Menlo,"Cascadia Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font:13px/1.55 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);background:var(--bg);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.dim{color:var(--ink3)}
+
+.proto{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 16px;background:#22263a;color:#cfd3e6;font-size:12px}
+.proto b{color:#fff;font-weight:600}
+.proto .seg{display:inline-flex;flex-wrap:wrap;gap:4px;padding:3px;border-radius:9px;background:rgba(255,255,255,.08)}
+.proto .seg button{border:0;border-radius:6px;padding:4px 11px;background:transparent;color:#cfd3e6;cursor:pointer}
+.proto .seg button[aria-pressed="true"]{background:#fff;color:#22263a;font-weight:600}
+.proto .note{margin-left:auto;opacity:.75}
+
+.wrap{max-width:1240px;margin:0 auto;padding:14px 16px 40px}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.head .back{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:5px 11px;font-size:12.5px;color:var(--ink2)}
+.head h1{font-size:17px;margin:0}.head .sub{font-size:12px;color:var(--ink3)}
+.head .sp{flex:1}
+.btn{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:6px 13px;cursor:pointer;font-size:12.5px}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn.sm{padding:4px 10px;font-size:12px}
+.lnk{border:0;background:none;padding:0;color:var(--accent);text-decoration:underline;text-underline-offset:3px;cursor:pointer;font-size:12.5px}
+.steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line);border-radius:10px;background:var(--card);overflow:hidden;margin-bottom:12px}
+.steps div{display:flex;align-items:center;gap:8px;padding:10px 14px;border-right:1px solid var(--line);font-size:13px;color:var(--ink2)}
+.steps div:last-child{border-right:0}
+.steps .no{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--ok-bg);color:var(--ok);font-size:12px;font-weight:700}
+.steps .on{color:var(--ink);font-weight:700;box-shadow:inset 0 -3px 0 var(--accent)}
+.steps .on .no{background:var(--accent);color:#fff}
+.steps .r{margin-left:auto;font-size:12px;font-weight:400;color:var(--ink3)}
+
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden}
+.pill{display:inline-block;font-size:11.5px;padding:2px 9px;border-radius:999px;white-space:nowrap}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.pill.bad{background:var(--bad-bg);color:var(--bad)}.pill.neu{background:var(--neu-bg);color:var(--ink2)}
+
+/* 一张请款单一张清单 */
+.rq-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;padding:12px 16px;border-bottom:1px solid var(--line);background:#FAFBFC}
+.rq-h .t{font-size:14.5px;font-weight:700}
+.rq-h .amt{font-family:var(--mono);font-size:15px;font-weight:700}
+.rq-h .meta{font-size:12px;color:var(--ink3)}
+.rq-h .sp{flex:1}
+.ck{display:grid;grid-template-columns:34px 92px minmax(0,1fr) auto;gap:0 12px;align-items:start;padding:11px 16px;border-bottom:1px solid var(--line2)}
+.ck:last-child{border-bottom:0}
+.ck .ic{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:12.5px;font-weight:700;margin-top:1px}
+.ck.ok .ic{background:var(--ok-bg);color:var(--ok)}
+.ck.todo .ic{background:var(--warn-bg);color:var(--warn)}
+.ck.wait .ic{background:var(--neu-bg);color:var(--ink3)}
+.ck.bad .ic{background:var(--bad-bg);color:var(--bad)}
+.ck .k{font-weight:700;padding-top:2px}
+.ck .v{padding-top:2px;min-width:0}
+.ck .v .s{font-size:12px;color:var(--ink3);margin-top:2px}
+.ck .a{display:flex;gap:8px;align-items:center;padding-top:1px;white-space:nowrap}
+.ck.todo{background:#FFFCF5}
+.ck.wait .k,.ck.wait .v{color:var(--ink3)}
+.je{display:grid;justify-content:start;grid-template-columns:auto auto auto;gap:1px 14px;font-family:var(--mono);font-size:12.5px;margin-top:4px;color:var(--ink2)}
+.je span:nth-child(3n){text-align:right}
+
+.sign{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 16px}
+.sign input{flex:1;min-width:220px;font:inherit;font-size:12.5px;padding:6px 10px;border:1px solid var(--line);border-radius:8px}
+.sign .why{font-size:12px;color:var(--ink3);flex-basis:100%}
+details{border-top:1px solid var(--line)}
+details summary{cursor:pointer;padding:10px 16px;font-size:12.5px;color:var(--accent);list-style:none}
+details summary::-webkit-details-marker{display:none}
+details .in{padding:0 16px 14px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:640px}
+th,td{border:1px solid var(--line2);padding:6px 9px;text-align:left}
+th{background:#F4F6F8;color:var(--ink2);font-weight:600}
+td.num,th.num{text-align:right;font-family:var(--mono)}
+
+.cmp{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-top:18px}
+.cmp .card{margin:0;padding:12px 14px}
+.cmp h3{font-size:13px;margin:0 0 6px}
+.cmp ul{margin:0;padding-left:18px;color:var(--ink2)}
+.cmp li{margin:3px 0}
+@media (max-width:720px){.ck{grid-template-columns:30px minmax(0,1fr)}.ck .k{grid-column:2}.ck .v,.ck .a{grid-column:2}.ck .a{margin-top:6px;white-space:normal;flex-wrap:wrap}.steps{grid-template-columns:1fr}.steps div{border-right:0;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+
+<div class="proto">
+  <b>样机</b><span>登记制第③步 · 重排</span>
+  <span class="seg" role="group" aria-label="切换情形">
+    <button data-s="a" aria-pressed="true">票没到 · 还没确认</button>
+    <button data-s="b" aria-pressed="false">已确认 · 等系统做</button>
+    <button data-s="c" aria-pressed="false">支付做了 · 等发票</button>
+    <button data-s="d" aria-pressed="false">发票到了 · 都做完</button>
+    <button data-s="e" aria-pressed="false">没登记后补单</button>
+  </span>
+  <span class="note">数据照禾享 2026-08 · 记-361、记-402 是编的 · 还没开发</span>
+</div>
+
+<div class="wrap">
+  <div class="head">
+    <span class="back">‹ 返回总表</span>
+    <div><h1>物流账单复核台 · 禾享</h1><div class="sub">登记制：这家没有可逐单核的账单，直接到第③步</div></div>
+    <span class="sp"></span>
+    <button class="btn pri">导出复核表</button>
+    <span class="btn">2026 年 8 期</span>
+  </div>
+  <div class="steps">
+    <div><span class="no">✓</span>逐笔计提复核<span class="r">0 · 平</span></div>
+    <div><span class="no">✓</span>逐单核价核量<span class="r">无异常</span></div>
+    <div class="on"><span class="no">3</span>确认与登记<span class="r" id="stepr"></span></div>
+  </div>
+
+  <!-- 一张请款单一张清单 -->
+  <div class="card">
+    <div class="rq-h">
+      <span class="t">请款单 · 深圳星期零</span><span class="amt">1,322.00</span>
+      <span class="meta">陈慧娴 提 · 2026-08 账单 · 新加坡样品运费 · 审批 …398295</span>
+      <span class="sp"></span>
+      <span class="pill ok">已付款 2026-09-28</span>
+    </div>
+    <div id="list"></div>
+  </div>
+
+  <!-- 登记 -->
+  <div class="card">
+    <div class="sign" id="sign"></div>
+    <details>
+      <summary>看明细对照表（费用凭证 / 暂估税 / 发票，一行一张凭证）</summary>
+      <div class="in">
+        <table>
+          <thead><tr><th>费用类型 · 产品线</th><th>费用凭证</th><th>税率</th><th class="num">含税</th><th class="num">暂估税</th><th class="num">发票含税</th><th class="num">发票−凭证</th><th class="num">发票税额</th></tr></thead>
+          <tbody><tr><td><b>快递费</b> · 综合产品</td><td class="mono">9/196#</td><td>1%</td><td class="num">1,322.00</td><td class="num">13.09</td>
+            <td class="num" id="t1"></td><td class="num" id="t2"></td><td class="num" id="t3"></td></tr></tbody>
+        </table>
+        <div class="dim" style="font-size:12px;margin-top:6px">登记制没有账单，原来的「账单金额 / 账单−计提」两列不放了。</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="cmp">
+    <div class="card"><h3>和现在比，改了什么</h3><ul>
+      <li>三张卡并成<b>一张请款单一张清单</b>，从上到下四件事，每件事右边一个结论。</li>
+      <li><b>要你动手的那一行有底色</b>，按钮就在那一行；别的行不用看。</li>
+      <li>发票后补的确认放在「③ 发票」这一行，不用到下面的大表里找。</li>
+      <li>「④ 做账」直接写系统接下来会做什么、做完的凭证号。</li>
+      <li>原来的大对照表<b>收起来</b>，点开才看；账单两列去掉。</li></ul></div>
+    <div class="card"><h3>没变的</h3><ul>
+      <li>费用凭证还没做的：①那一行展开成现在那张「项目｜上一次｜这次用」的填写表，核对打勾后生成。</li>
+      <li>一家一个月有几张请款单的：一张一个清单，往下排。</li>
+      <li>登记、撤销登记的规则不变；有账单的承运商（恒茂、极鲜达…）的第③步不动。</li></ul></div>
+    <div class="card"><h3>要你定的</h3><ul>
+      <li>四件事的顺序和叫法行不行。</li>
+      <li>「③ 发票」没确认发票后补时，<b>能不能登记已复核</b>？样机里是能登记，只是提醒一句。</li>
+      <li>大对照表收起来行不行，还是要一直摊着。</li></ul></div>
+  </div>
+</div>
+
+<script>
+var FV = '<b class="mono">9 月 记-196</b>　快递费 · 综合产品　含税 <b class="mono">1,322.00</b><div class="s">税率 1%，暂估进项税 13.09 · 曾禹锡 2026-10-06 认定这张，没有新建</div>';
+var CMP = '费用凭证 <span class="mono">1,322.00</span> ＝ 请款 <span class="mono">1,322.00</span>';
+var SLIP = '后补单 <b>#2</b> · 待收 · 预计 2026-10-15 到 · 陈慧娴 登记';
+function row(st, ic, k, v, a) { return '<div class="ck ' + st + '"><span class="ic">' + ic + '</span><span class="k">' + k + '</span><div class="v">' + v + '</div><div class="a">' + (a || '') + '</div></div>'; }
+var PAY = '<div class="je"><span>借</span><span>供应商往来</span><span>1,322.00</span><span>贷</span><span>银行存款</span><span>1,322.00</span></div>';
+var S = {
+  a: { stepr: '待登记',
+    rows: [row('ok', '✓', '① 费用凭证', FV, '<span class="pill ok">已认定</span>'),
+           row('ok', '✓', '② 和请款比', CMP, '<span class="pill ok">一致</span>'),
+           row('todo', '!', '③ 发票', '还没到<div class="s">' + SLIP + '</div>', '<button class="btn sm pri" data-go="b">确认发票后补</button>'),
+           row('wait', '4', '④ 做账', '等上面确认发票后补<div class="s">确认之后，系统自动做付款凭证（只做支付）；发票到了再自动转待认证</div>', '')],
+    sign: '<input placeholder="备注（可不填，默认「登记制：费用凭证与请款一致」）"><button class="btn pri">确认通过并登记已复核</button><div class="why">发票后补还没确认：可以登记，但这张请款单在确认之前系统不会做账。</div>',
+    t: ['无票', '—', '—'] },
+  b: { stepr: '待登记',
+    rows: [row('ok', '✓', '① 费用凭证', FV, '<span class="pill ok">已认定</span>'),
+           row('ok', '✓', '② 和请款比', CMP, '<span class="pill ok">一致</span>'),
+           row('ok', '✓', '③ 发票', '还没到，已确认发票后补<div class="s">' + SLIP + ' · 曾禹锡 2026-10-12 15:20 确认</div>', '<span class="pill ok">已确认后补</span><button class="lnk" data-go="a">撤销</button>'),
+           row('todo', '…', '④ 做账', '系统下一轮自动做付款凭证，只做支付（20 分钟内）' + PAY + '<div class="s">暂估进项税 13.09 先挂着；发票到了、在发票管家审核通过、税额对得上，再自动转待认证</div>', '<span class="pill warn">等系统做</span>')],
+    sign: '<input placeholder="备注（可不填，默认「登记制：费用凭证与请款一致」）"><button class="btn pri">确认通过并登记已复核</button>',
+    t: ['无票', '—', '—'] },
+  c: { stepr: '已登记',
+    rows: [row('ok', '✓', '① 费用凭证', FV, '<span class="pill ok">已认定</span>'),
+           row('ok', '✓', '② 和请款比', CMP, '<span class="pill ok">一致</span>'),
+           row('ok', '✓', '③ 发票', '还没到，已确认发票后补<div class="s">' + SLIP + ' · 曾禹锡 2026-10-12 15:20 确认</div>', '<span class="pill ok">已确认后补</span>'),
+           row('todo', '…', '④ 做账', '付款凭证 <b class="mono">记-361</b> 已做，只做了支付 · 系统自动 2026-10-12 15:38 · 已提交，等人在金蝶审核' + PAY + '<div class="s">暂估进项税 13.09 还挂着，等发票</div>', '<span class="pill warn">等发票</span>')],
+    sign: '<span class="pill ok">已复核 · 曾禹锡 · 2026-10-06 00:53</span><span class="dim" style="font-size:12px">登记制：费用凭证与请款一致</span><button class="btn sm">撤销登记</button>',
+    t: ['无票', '—', '—'] },
+  d: { stepr: '已登记',
+    rows: [row('ok', '✓', '① 费用凭证', FV, '<span class="pill ok">已认定</span>'),
+           row('ok', '✓', '② 和请款比', CMP, '<span class="pill ok">一致</span>'),
+           row('ok', '✓', '③ 发票', '到了 1 张 · 专票 1% · 含税 <span class="mono">1,322.00</span>、税额 <span class="mono">13.09</span><div class="s">2026-10-15 进票夹 · 发票管家已审核 · 和费用凭证一致</div>', '<span class="pill ok">票齐</span>'),
+           row('ok', '✓', '④ 做账', '付款凭证 <b class="mono">记-361</b>（只做支付）　＋　暂估转待认证 <b class="mono">记-402</b>（13.09）<div class="s">两张都是系统自动做的，已提交，等人在金蝶审核</div>', '<span class="pill ok">做完了</span>')],
+    sign: '<span class="pill ok">已复核 · 曾禹锡 · 2026-10-06 00:53</span><span class="dim" style="font-size:12px">登记制：费用凭证与请款一致</span><button class="btn sm">撤销登记</button>',
+    t: ['1,322.00', '—', '13.09'] },
+  e: { stepr: '待登记',
+    rows: [row('ok', '✓', '① 费用凭证', FV, '<span class="pill ok">已认定</span>'),
+           row('ok', '✓', '② 和请款比', CMP, '<span class="pill ok">一致</span>'),
+           row('bad', '×', '③ 发票', '还没到，发票管家里也<b>没有登记后补单</b><div class="s">没票先付款，要先让申请人（或财务）在发票管家登记发票后补；登记了这里才能确认</div>', '<span class="pill bad">缺后补单</span>'),
+           row('wait', '4', '④ 做账', '票到之前做不了账', '')],
+    sign: '<input placeholder="备注（可不填，默认「登记制：费用凭证与请款一致」）"><button class="btn pri">确认通过并登记已复核</button><div class="why">这张请款单没票、也没登记后补单：可以登记，但在票到或登记后补之前系统不会做账。</div>',
+    t: ['无票', '—', '—'] }
+};
+function show(k) {
+  var s = S[k];
+  document.querySelectorAll('.proto .seg button').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.s === k ? 'true' : 'false'); });
+  document.getElementById('list').innerHTML = s.rows.join('');
+  document.getElementById('sign').innerHTML = s.sign;
+  document.getElementById('stepr').textContent = s.stepr;
+  ['t1', 't2', 't3'].forEach(function (id, i) { document.getElementById(id).textContent = s.t[i]; });
+  document.querySelectorAll('[data-go]').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.go); }); });
+}
+document.querySelectorAll('.proto .seg button').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.s); }); });
+show((location.hash || '#a').slice(1) in S ? location.hash.slice(1) : 'a');
+</script>
+</body>
+</html>
