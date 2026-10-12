@@ -555,9 +555,11 @@ def notice_text(at, done, pending=None, left=0, trial=False):
     good = [x for x in done if x.get("done")]
     bad = [x for x in done if not x.get("done")]
     multi = [x for x in good if x.get("xout")]
-    fix = [x for x in good if not x.get("xout") and x.get("kind") not in ("hx", "", None)]
+    lat = [x for x in good if not x.get("xout") and x.get("kind") == "later"]        # 发票后补：只做了支付(V2.919)
+    lat3 = [x for x in good if not x.get("xout") and x.get("kind") == "later3"]      # 发票到了：暂估转待认证
+    fix = [x for x in good if not x.get("xout") and x.get("kind") not in ("hx", "", None, "later", "later3")]
     hx = [x for x in good if not x.get("xout") and x.get("kind") in ("hx", "", None)]
-    stat = {"ok": len(good), "bad": len(bad), "fix": len(fix) + len(multi), "multi": len(multi), "pending": len(pending)}
+    stat = {"ok": len(good), "bad": len(bad), "fix": len(fix) + len(multi), "multi": len(multi), "pending": len(pending), "later": len(lat), "later3": len(lat3)}
     head = lambda x: "%s｜%s｜%s" % (x.get("subject") or "", x.get("payee") or "", _nt_amt(x.get("amount")))
     vno = lambda x: "记-%s" % x["vno"] if x.get("vno") else "记-（待出）"
     cut = lambda s, n=150: (s[:n] + "…") if len(s) > n else s
@@ -571,7 +573,7 @@ def notice_text(at, done, pending=None, left=0, trial=False):
         elif bad:
             t = "【自动做账】%d 张没做成，要人处理" % len(bad)
         elif good:
-            t = "【自动做账】刚做了 %d 张付款凭证" % len(good)
+            t = "【自动做账】刚做了 %d 张凭证" % len(good) if lat3 else "【自动做账】刚做了 %d 张付款凭证" % len(good)
             if stat["fix"]:
                 t += "，其中 %d 张有红冲更正" % stat["fix"]
                 if multi:
@@ -612,6 +614,22 @@ def notice_text(at, done, pending=None, left=0, trial=False):
                 if x.get("warn"):
                     L.append("    %s" % cut(str(x["warn"])))
             L.append("")
+        if lat:
+            L.append("发票后补，只做了支付（%d 张）" % len(lat))
+            for x in lat:
+                n += 1
+                L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                if x.get("warn"):
+                    L.append("    %s" % cut(str(x["warn"])))
+            L.append("")
+        if lat3:
+            L.append("发票到了，暂估转待认证（%d 张）" % len(lat3))
+            for x in lat3:
+                n += 1
+                L.append("%d. %s　%s" % (n, head(x), vno(x)))
+                if x.get("text"):
+                    L.append("    %s" % cut(str(x["text"])))
+            L.append("")
         if hx:
             if fold:
                 L.append("只核销 %d 张，合计 %s（逐张在付款做账页看）" % (len(hx), _nt_amt(sum(float(x.get("amount") or 0) for x in hx))))
@@ -641,6 +659,8 @@ def notice_text(at, done, pending=None, left=0, trial=False):
             todo.append("到金蝶审核做成的 %d 张凭证（系统只提交、不审核）。" % len(good))
         if stat["fix"]:
             todo.append("有红冲更正的 %d 张：装订时记得附计提更正单（复核时打印的那张）。" % stat["fix"])
+        if lat:
+            todo.append("发票后补的 %d 张：只做了支付，暂估进项税还挂着；发票到了、在发票管家审核通过后，系统自动转待认证。" % len(lat))
         if multi:
             todo.append("涉及两个主体的 %d 张：一边红冲、一边补提，两个主体的凭证对着审，金额要对得上。" % len(multi))
         if pending:

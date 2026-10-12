@@ -436,7 +436,7 @@ class NoticeText(unittest.TestCase):
 
     def test_all_plain(self):
         s, st = V.notice_text("2026-10-11 14:20", [self.HX])
-        self.assertEqual(st, {"ok": 1, "bad": 0, "fix": 0, "multi": 0, "pending": 0})
+        self.assertEqual(st, {"ok": 1, "bad": 0, "fix": 0, "multi": 0, "pending": 0, "later": 0, "later3": 0})
         self.assertIn("刚做了 1 张付款凭证，请到金蝶审核", s)
         self.assertIn("深圳星期零｜上海顺丰冷运｜17,630.95　记-330", s)
         self.assertNotIn("计提更正单", s)
@@ -454,7 +454,7 @@ class NoticeText(unittest.TestCase):
     def test_multi_subject_stands_out(self):
         """涉及两个主体的红冲：排在最前、写明红冲了哪张、该哪个主体补提、两边对着审；系统不做的那张列进「要人来做」。"""
         s, st = V.notice_text("2026-10-11 14:20", [self.HX, self.FIX, self.XO], pending=[self.PEND], left=3)
-        self.assertEqual(st, {"ok": 3, "bad": 0, "fix": 2, "multi": 1, "pending": 1})
+        self.assertEqual(st, {"ok": 3, "bad": 0, "fix": 2, "multi": 1, "pending": 1, "later": 0, "later3": 0})
         self.assertIn("其中 2 张有红冲更正（1 张涉及两个主体）", s)
         self.assertIn("另外整笔红冲了 记-390 918.93：这笔计提记错了主体，应是深圳星期九的", s)
         self.assertEqual(s.count("另红冲"), 0)                                   # 做账类型里那半句不重复写
@@ -472,6 +472,22 @@ class NoticeText(unittest.TestCase):
         s, st = V.notice_text("2026-10-11 14:20", [], pending=[self.PEND])
         self.assertIn("有 1 张涉及两个主体的红冲，系统不自动做，要人来做", s)
         self.assertNotIn("到金蝶审核", s)
+
+    def test_invoice_later(self):
+        """V2.919 发票后补：第一笔只做支付、第二笔暂估转待认证，各列一段；不算进红冲更正。"""
+        a = {"subject": "深圳星期零", "payee": "禾享国际物流", "amount": 1322, "kind": "later", "text": "发票后补", "vno": "361", "done": True}
+        b = {"subject": "深圳星期零", "payee": "禾享国际物流", "amount": 1322, "kind": "later3", "vno": "402", "done": True,
+             "text": "发票 2644 到了，暂估进项税 13.09 转待认证"}
+        s, st = V.notice_text("2026-10-12 14:20", [self.HX, a])
+        self.assertEqual((st["fix"], st["later"], st["later3"]), (0, 1, 0))
+        self.assertIn("发票后补，只做了支付（1 张）", s)
+        self.assertIn("暂估进项税还挂着", s)
+        self.assertNotIn("红冲更正", s)
+        s, st = V.notice_text("2026-10-20 09:00", [b])
+        self.assertEqual((st["fix"], st["later3"]), (0, 1))
+        self.assertIn("刚做了 1 张凭证", s)
+        self.assertIn("发票到了，暂估转待认证（1 张）", s)
+        self.assertIn("暂估进项税 13.09 转待认证", s)
 
     def test_trial_and_long_folds(self):
         s, _ = V.notice_text("2026-10-11 14:20", [dict(self.HX, vno="")], trial=True)
