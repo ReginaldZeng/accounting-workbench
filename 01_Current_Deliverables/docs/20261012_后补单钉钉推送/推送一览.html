@@ -1,0 +1,58 @@
+<!doctype html>
+<!-- [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: 说明件（随「申请人上传发票到后补单」一起）
+     Description: 发票后补单的钉钉推送一览——什么情况、发给谁、发什么。卡片内容由 routers/invoice_books.py 的拼句函数生成（样例数据是编排好的一张单）；
+     卡片的蓝色标题条、红字、按钮是照 2026-10-12 真机截图画的示意，真样子以钉钉里为准。 -->
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>后补单钉钉推送一览</title>
+<style>
+:root{--ink:#20242E;--ink2:#5B6270;--ink3:#8A91A0;--line:#E6E7EE;--acc:#5C63F2;--soft:#EEF0FE;--bg:#F3F4F8}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"PingFang SC","Microsoft YaHei",-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;line-height:1.6}
+.wrap{max-width:1040px;margin:0 auto;padding:34px 22px 70px}
+h1{font-size:24px;margin:0 0 6px}.lead{margin:0 0 6px;color:var(--ink2);font-size:14px}
+h2{font-size:16px;margin:34px 0 12px;padding-left:10px;border-left:4px solid var(--acc)}
+.rules{margin:14px 0 0;padding:14px 18px;border:1px solid var(--line);border-radius:12px;background:#fff;font-size:14px;color:var(--ink2)}
+.rules b{color:var(--ink)}.rules ul{margin:6px 0 0;padding-left:20px}
+.card{display:grid;grid-template-columns:minmax(0,4fr) minmax(0,6fr);gap:22px;align-items:start;margin-bottom:14px;padding:18px 20px;border:1px solid var(--line);border-radius:14px;background:#fff}
+.meta{display:flex;gap:12px}.no{flex:none;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:var(--soft);color:var(--acc);font-weight:800}
+.meta h3{margin:2px 0 6px;font-size:16px}.meta p{margin:0;font-size:13.5px;color:var(--ink2)}
+.tag{margin-left:8px;padding:2px 8px;border-radius:6px;background:#F1F2F6;color:var(--ink2);font-size:11.5px;font-weight:600;vertical-align:2px}
+.tag.new{background:#E9F7EF;color:#17794B}
+.bub{padding:12px 14px;border-radius:4px 14px 14px 14px;background:#F6F7FB;border:1px solid var(--line);font-size:13.5px;line-height:1.75;word-break:break-all}
+.alt{margin:14px 0 6px;font-size:12px;color:var(--ink3)}.alt:first-child{margin-top:0}
+.old .bub{background:#FFF7F7;border-color:#F3D6D6}
+.dcard{border:1px solid #E3E6EE;border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 1px 2px rgba(20,22,34,.04)}
+.dhead{padding:10px 14px;background:#DCE9FF;color:#1560E0;font-weight:700;font-size:14.5px}
+.dbody{padding:10px 14px 4px}.row{padding:4px 0 6px;font-size:14px;line-height:1.6;word-break:break-all}
+.c-red{color:#F5361D}.c-orange{color:#FF8F1F}.c-green{color:#00B042}
+.act{display:flex;align-items:center;gap:12px;margin:0 14px;padding:11px 0 13px;border-top:1px solid #ECEEF3}
+.btn{display:inline-block;padding:6px 20px;border-radius:999px;background:#F1F3F7;color:#1560E0;font-weight:700;font-size:14px}
+.act i{font-style:normal;font-size:12px;color:var(--ink3)}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}
+td{padding:11px 16px;border-top:1px solid var(--line);vertical-align:top}tr:first-child td{border-top:0}td:first-child{width:42%;font-weight:600}
+@media (max-width:760px){.card{grid-template-columns:minmax(0,1fr)}td:first-child{width:auto}}
+</style></head><body><div class="wrap">
+<h1>发票后补单 · 钉钉推送一览</h1>
+<p class="lead">什么情况、发给谁、发什么。右边就是对方在钉钉里收到的卡片（样例是一张 ¥1,322.00 的专票后补单；卡片的样子照真机截图画的）。</p>
+<div class="rules"><b>这次定的规矩：</b><ul>
+<li><b>发卡片，不发一长句话</b>：蓝色标题条 + 一行一件事 + 底下一个按钮，和 NPI 的通知一个样子。卡片万一发不出去，自动改发文字，不会漏。</li>
+<li><b>字的颜色跟着状态走</b>：已超期<span class="c-red"><b>红</b></span>、3 天内到期和等财务确认<span class="c-orange"><b>橙</b></span>、已签收<span class="c-green"><b>绿</b></span>，其它不上色。要对方做的那句话加粗。</li>
+<li><b>标题条固定是蓝色</b>：钉钉这种标准卡片的标题条改不了颜色、标题里也不能写带颜色的字（真机试过）。想让标题条按状态变色，得在钉钉开发者后台另搭一张专用卡片。</li>
+<li><b>谁收到就按谁的口气写</b>：催票以前是申请人和财务收同一条，现在分成两张。</li>
+<li><b>按钮</b>：给业务的「上传发票」在钉钉里面打开（自动认人）；给财务的「查看后补单 / 去确认」用浏览器打开后补池。</li></ul></div>
+<h2>先看一条对比：催票提醒</h2>
+<section class="card old"><div class="meta"><div class="no">前</div><div><h3>以前</h3><p>申请人和财务接收人收到同一条；一长句；末尾的"财务查看"是点不开的半截地址，而且申请人本来也打不开那个页面。</p></div></div><div class="bub">【核算工作台·发票管家】催票提醒：审批编号 202609231721000398295 付给「深圳市禾享国际物流有限公司」的款 ¥1322.00，预计 2026-10-15 到票（还有 3 天），还差 ¥1322.00 的专票没到。请尽快把发票交给财务（接收人 曾禹锡）。财务查看 → /#/invlater?id=2</div></section>
+<section class="card"><div class="meta"><div class="no">后</div><div><h3>现在 · 申请人收到的</h3><p>财务接收人另收一张"已向申请人催票"（见下面第 ③ 条）。</p></div></div><div class="dcard"><div class="dhead">发票管家 · 催票提醒</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">付款金额：¥1,322.00（审批编号 202609231721000398295）</div><div class="row">预计到票：2026-10-15<span class="c-orange"><b>（还有 3 天）</b></span></div><div class="row">还差：<span class="c-orange"><b>¥1,322.00</b></span> 的专票没到</div><div class="row"><b>发票到了请先上传，再把纸质的交给 曾禹锡。</b></div></div><div class="act"><span class="btn">上传发票</span><i>点了在钉钉里面打开</i></div></div></section>
+<h2>给财务接收人</h2>
+<section class="card"><div class="meta"><div class="no">①</div><div><h3>有新的后补单交给你</h3><p>业务登记了后补单（或财务代填）并选了你当接收人；换接收人时，新接收人也收到这一张。</p></div></div><div><div class="dcard"><div class="dhead">发票管家 · 有一张发票后补单交给你接收</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">付款金额：¥1,322.00</div><div class="row">预计到票：2026-10-15，专票 ¥1,322.00</div><div class="row">申请人：陈慧娴（审批编号 202609231721000398295）</div><div class="row">申请人传上发票后会再通知你确认；纸质的直接交到你手上时，在后补池点「收到」。</div></div><div class="act"><span class="btn">查看后补单</span><i>点了用浏览器打开</i></div></div></div></section>
+<section class="card"><div class="meta"><div class="no">②</div><div><h3>业务传了发票，等你确认<span class="tag new">新增</span></h3><p>业务在「我的后补单」传发票成功时，每次上传发一张。</p></div></div><div><div class="dcard"><div class="dhead">发票管家 · 申请人传了发票，等你确认</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">申请人：陈慧娴（审批编号 202609231721000398295）</div><div class="row">这次上传 1 张，现在共 <span class="c-orange"><b>¥1,322.00</b></span> 等确认</div><div class="row"><b>核对无误、纸质的也收到后点「确认收到」。</b></div></div><div class="act"><span class="btn">去确认</span><i>点了用浏览器打开</i></div></div></div></section>
+<section class="card"><div class="meta"><div class="no">③</div><div><h3>已向申请人催票（抄送）</h3><p>系统催申请人的同时告诉你一声。以前你和申请人收到的是同一条。</p></div></div><div><div class="dcard"><div class="dhead">发票管家 · 已向申请人催票</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">申请人：陈慧娴（审批编号 202609231721000398295）</div><div class="row">预计到票：2026-10-08<span class="c-red"><b>（已超期 4 天）</b></span>，还差 <span class="c-red"><b>¥1,322.00</b></span></div></div><div class="act"><span class="btn">查看后补单</span><i>点了用浏览器打开</i></div></div><div class="alt">申请人没有钉钉身份、催不到时</div><div class="dcard"><div class="dhead">发票管家 · 催票没发到申请人（他没有钉钉身份），请你直接联系他</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">申请人：陈慧娴（审批编号 202609231721000398295）</div><div class="row">预计到票：2026-10-08<span class="c-red"><b>（已超期 4 天）</b></span>，还差 <span class="c-red"><b>¥1,322.00</b></span></div></div><div class="act"><span class="btn">查看后补单</span><i>点了用浏览器打开</i></div></div></div></section>
+<h2>给申请人（业务同事）</h2>
+<section class="card"><div class="meta"><div class="no">④</div><div><h3>催票提醒</h3><p>每天上午 10 点自动查：预计到票日前 3 天内提醒一次；超期后没催过就催、之后每隔 7 天再催。财务在后补池点「催一下」也发这一张。</p></div></div><div><div class="alt">3 天内到期（橙）</div><div class="dcard"><div class="dhead">发票管家 · 催票提醒</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">付款金额：¥1,322.00（审批编号 202609231721000398295）</div><div class="row">预计到票：2026-10-15<span class="c-orange"><b>（还有 3 天）</b></span></div><div class="row">还差：<span class="c-orange"><b>¥1,322.00</b></span> 的专票没到</div><div class="row"><b>发票到了请先上传，再把纸质的交给 曾禹锡。</b></div></div><div class="act"><span class="btn">上传发票</span><i>点了在钉钉里面打开</i></div></div><div class="alt">已超期（红）</div><div class="dcard"><div class="dhead">发票管家 · 催票提醒</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">付款金额：¥1,322.00（审批编号 202609231721000398295）</div><div class="row">预计到票：2026-10-08<span class="c-red"><b>（已超期 4 天）</b></span></div><div class="row">还差：<span class="c-red"><b>¥1,322.00</b></span> 的专票没到</div><div class="row"><b>发票到了请先上传，再把纸质的交给 曾禹锡。</b></div></div><div class="act"><span class="btn">上传发票</span><i>点了在钉钉里面打开</i></div></div></div></section>
+<section class="card"><div class="meta"><div class="no">⑤</div><div><h3>发票财务已签收</h3><p>财务确认后这张后补单收齐了（已到金额够数）。只发一次。</p></div></div><div><div class="dcard"><div class="dhead">发票管家 · 发票财务已签收</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">付款单：审批编号 202609231721000398295</div><div class="row">共到票：<span class="c-green"><b>¥1,322.00</b></span></div><div class="row">这张后补单已完成，不用再操作。</div></div></div></div></section>
+<section class="card"><div class="meta"><div class="no">⑥</div><div><h3>登录验证码<span class="tag">仍是文字</span></h3><p>业务在电脑浏览器上登录后补登记页、确认姓名后。在钉钉里打开不用验证码。</p></div></div><div><div class="bub">【核算工作台·发票管家】你的登录验证码：482913（5 分钟内有效）。用于登记发票后补；不是你本人操作请忽略。</div></div></section>
+<h2>这些情况不发消息</h2><table><tr><td>业务传的够数了、只差财务确认</td><td>不再催申请人（球在财务这边）。</td></tr><tr><td>后补单已收齐 / 已关闭</td><td>不催。</td></tr><tr><td>财务确认了但还没收齐（部分到票）</td><td>不通知申请人，到期照常催剩下的。</td></tr><tr><td>业务自己删了传错的发票</td><td>不通知财务；财务再打开看到的就是删后的样子。</td></tr><tr><td>每日催票开关在发票管家设置里关掉</td><td>自动催票全停，手动「催一下」不受影响。</td></tr></table>
+<h2>还缺的一张（没做，等你定）</h2>
+<section class="card"><div class="meta"><div class="no">?</div><div><h3>业务传的发票在审核里被退回</h3><p>现在没人通知业务：审核退回只通知「提交票夹的财务账号」，业务没有账号。建议加一张给申请人，拟为右边这样。</p></div></div><div class="dcard"><div class="dhead">发票管家 · 你传的发票被财务退回</div><div class="dbody"><div class="row">收款方：深圳市禾享国际物流有限公司</div><div class="row">付款单：审批编号 202609231721000398295</div><div class="row">原因：<span class="c-red"><b>发票抬头不是本公司</b></span></div><div class="row"><b>请删掉这张、重新上传正确的发票。</b></div></div><div class="act"><span class="btn">上传发票</span><i>点了在钉钉里面打开</i></div></div></section>
+<h2>卡片发不出去时的退路：文字版</h2>
+<section class="card"><div class="meta"><div class="no">!</div><div><h3>同一件事的纯文字</h3><p>钉钉拒收卡片（比如权限被关了）时，自动给这个人改发这段文字；系统留痕里记的也是这段。</p></div></div><div class="bub">【核算工作台·发票管家】催票提醒<br>收款方：深圳市禾享国际物流有限公司<br>付款金额：¥1,322.00（审批编号 202609231721000398295）<br>预计到票：2026-10-08（已超期 4 天）<br>还差：¥1,322.00 的专票没到<br>发票到了请先上传，再把纸质的交给 曾禹锡。<br>上传：钉钉工作台 →「星衡智策」→ 发票后补单<br>或直接打开：http://111.229.72.116/#/invself</div></section>
+</div></body></html>

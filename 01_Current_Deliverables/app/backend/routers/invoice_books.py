@@ -1,4 +1,5 @@
 # [Change Log]
+# Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 申请人传的票（来源 self）财务确认前不算已到：_counted 排除、确认接口 confirm-self、财务扫到同一张也算确认、够数了不催申请人
 # Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 发票管家·台账与后补池路由（B2）——发票台账（查询/导出/作废）、税局对账（清单四色验真＋文件包补全）、
 #   抵扣勾选标注、新销方核查、期初导入（票总管）、发票后补池（代填/收票/标记/催票/修改/关闭/导出）、每日催票线程。
@@ -1619,10 +1620,19 @@ def _is_doc(it):
     return it.get("kind") == "other" and it.get("origin") == "later"
 
 
-def _counted(items):
-    """算进"已到票"的：发票/收据、没移除没作废、不是重复票。"""
+def _live_tickets(items):
     return [i for i in items or [] if i.get("kind") in ("invoice", "receipt") and i.get("status") != "removed"
             and i.get("review") != "void" and not ((i.get("flags_json") or {}).get("dup"))]
+
+
+def _counted(items):
+    """算进"已到票"的：发票/收据、没移除没作废、不是重复票；申请人自己传上来、财务还没确认的不算（inv.self_pending）。"""
+    return [i for i in _live_tickets(items) if not inv.self_pending(i)]
+
+
+def _self_waiting(items):
+    """申请人自己传上来、等财务确认的票。"""
+    return [i for i in _live_tickets(items) if inv.self_pending(i)]
 
 
 def _status_of(l, received, unreg):
@@ -1643,10 +1653,119 @@ def _later_link(l):
     return inv.portal_link("/#/invlater?id=%d" % l["id"])
 
 
+# ── 钉钉消息：统一成"标题一行 + 一行一件事"，谁收到就按谁的口气写（清单见 docs/20261012_后补单钉钉推送/）──
+DT_APP = "星衡智策"          # 钉钉工作台里这个应用的名字：告诉申请人从哪进
+
+
+def _yuan(v):
+    try:
+        return "¥{:,.2f}".format(float(v))
+    except (TypeError, ValueError):
+        return "¥—"
+
+
+def _site(path):
+    """站内完整链接；不知道门户网址就回空——别把"/#/…"这种点不开的半截地址发出去。"""
+    u = inv.portal_link(path)
+    return u if u.startswith("http") else ""
+
+
+class _Msg(str):
+    """一条钉钉消息。本身就是纯文字版（留痕、测试断言、卡片发不出去时的退路都用它），
+    另外带一张钉钉标准卡片 card——inv.notify_dt 见到 card 就发卡片。"""
+    card = None
+
+
+# 要上色的片段用记号包起来（⟦颜色⟨文字⟧）：文字版去掉记号，卡片里变成带颜色的粗体字。
+# 颜色按状态分：red 已超期 / orange 快到期、等财务确认 / green 已签收。
+# 钉钉标准卡片只认它自己的颜色名（common_red1_color 这类），不认 red、#RRGGBB；标题条固定是蓝色、标题里也不能写颜色（2026-10-12 真机验过）。
+TONES = ("red", "orange", "green")
+_TONE_RE = re.compile("\u27e6(%s)\u27e8(.*?)\u27e7" % "|".join(TONES), re.S)
+
+
+def _tone(tone, s):
+    return "\u27e6%s\u27e8%s\u27e7" % (tone, s) if tone in TONES else str(s)
+
+
+def _red(s):
+    return _tone("red", s)
+
+
+def _plain(s):
+    return _TONE_RE.sub(lambda m: m.group(2), str(s)).replace("**", "")
+
+
+def _rich(s):
+    return _TONE_RE.sub(lambda m: "<font color=common_%s1_color>**%s**</font>" % (m.group(1), m.group(2)), str(s))
+
+
+def _due_tone(l, today=None):
+    """这张后补单现在急不急：超期 red；今天到期或 3 天内 orange；还早 → ''（不上色）。"""
+    days = _days_left(l, today)
+    if days is None:
+        return ""
+    return "red" if days < 0 else ("orange" if days <= 3 else "")
+
+
+def _inside(url):
+    """在钉钉里面打开的链接写法（电脑钉钉在右侧滑出页面）：页面算在钉钉里，后补登记页能自动认人。"""
+    return "dingtalk://dingtalkclient/page/link?url=%s&pc_slide=true" % quote(url, safe="")
+
+
+def _msg(title, *lines, go=None):
+    """title 标题；lines 一行一件事（可带 _red(…) 和 **加粗**）；go＝去处 {"label" 按钮上的字, "url" 完整链接或空,
+    "inside" 是否在钉钉里面打开, "hint" 文字版里怎么说}。→ _Msg（文字版＋卡片）。"""
+    body = [x for x in lines if x]
+    hint = (go or {}).get("hint") or ""
+    m = _Msg(MSG_HEAD + title + "\n" + "\n".join(_plain(x) for x in body + ([hint] if hint else [])))
+    contents = [{"type": "markdown", "text": _rich(x), "id": "markdown_%d" % i} for i, x in enumerate(body, 1)]
+    if go and go.get("url"):
+        contents += [{"type": "divider", "id": "divider_1"},
+                     {"type": "action", "id": "action_1", "actions": [{
+                         "type": "button", "id": "button_1", "status": "primary", "actionType": "openLink",
+                         "label": {"type": "text", "text": go["label"], "id": "text_button_1"},
+                         "url": {"all": _inside(go["url"]) if go.get("inside") else go["url"]}}]}]
+    elif hint:
+        contents.append({"type": "markdown", "text": hint, "id": "markdown_go"})      # 不知道门户网址：没法给按钮，写清楚在哪个页面
+    m.card = {"config": {"autoLayout": True, "enableForward": True},
+              "header": {"title": {"type": "text", "text": "发票管家 · " + title}, "logo": "@lALPDfJ6V_FPDmvNAfTNAfQ"},
+              "contents": contents}
+    return m
+
+
+def _line_who(l):
+    return "申请人：%s（%s）" % (l.get("applicant") or "—", _later_title(l))
+
+
+def _go_view(l, verb="查看"):
+    """给财务的去处：后补池里这张单。页面宽，用浏览器开（财务的浏览器里一般已经登着工作台）。"""
+    u = _site("/#/invlater?id=%d" % l["id"])
+    return {"label": {"查看": "查看后补单", "确认": "去确认"}.get(verb, verb), "url": u, "inside": False,
+            "hint": "%s：%s" % (verb, u or "工作台 → 发票后补池 → 后补单 #%d" % l["id"])}
+
+
+def _go_upload():
+    """给申请人的去处：后补登记页。在钉钉里面打开（自动认人，不用输手机号收验证码）。"""
+    u = _site("/#/invself")
+    return {"label": "上传发票", "url": u, "inside": True,
+            "hint": "上传：钉钉工作台 →「%s」→ 发票后补单" % DT_APP + (("\n或直接打开：" + u) if u else "")}
+
+
+def _line_due(l, today=None):
+    days = _days_left(l, today)
+    when = "预计到票：%s" % (l.get("expect_date") or "没填")
+    if days is not None:
+        when += _tone(_due_tone(l, today), ("（已超期 %d 天）" % -days) if days < 0 else ("（就是今天）" if days == 0 else "（还有 %d 天）" % days))
+    return when
+
+
 def _notify_done(l, user):
     """收齐 → 钉钉告诉申请人"已签收"（不发给没绑钉钉的人；测试环境 dry-run）。"""
-    text = MSG_HEAD + "你的付款单（%s，收款方「%s」）的发票财务已签收：共到票 ¥%s。" % (
-        _later_title(l), l.get("payee_name") or "", inv._money_str(float(l.get("received_amount") or 0) + float(l.get("unregistered_amount") or 0)))
+    text = _msg("发票财务已签收",
+                "收款方：%s" % (l.get("payee_name") or "—"),
+                "付款单：%s" % _later_title(l),
+                "共到票：%s" % _tone("green", _yuan(float(l.get("received_amount") or 0) + float(l.get("unregistered_amount") or 0))),
+                "这张后补单已完成，不用再操作。")
     res = inv.notify_dt([l.get("applicant_uid")], text)
     inv.log(user, "后补收齐通知", l.get("folder_id"), None, l["id"],
             {"to": l.get("applicant") or "", "sent": bool(res.get("sent")), "msg": res.get("msg") or ""})
@@ -1826,10 +1945,13 @@ def _receiver_of(account, st):
 
 def _assign_text(l):
     rem = l.get("expect_amount") if l.get("expect_amount") is not None else l.get("pay_amount")
-    return MSG_HEAD + "有一张发票后补单指派给你接收：收款方「%s」，付款金额 ¥%s，预计 %s 到票 ¥%s（%s，申请人 %s）。" \
-        "发票到了在「发票后补池」点「收到」→ %s" % (
-            l.get("payee_name") or "", inv._money_str(l.get("pay_amount")), l.get("expect_date") or "",
-            inv._money_str(rem), _later_title(l), l.get("applicant") or "", _later_link(l))
+    return _msg("有一张发票后补单交给你接收",
+                "收款方：%s" % (l.get("payee_name") or "—"),
+                "付款金额：%s" % _yuan(l.get("pay_amount")),
+                "预计到票：%s，%s %s" % (l.get("expect_date") or "没填", LATER_KIND_CN.get(l.get("inv_kind") or "", "发票"), _yuan(rem)),
+                _line_who(l),
+                "申请人传上发票后会再通知你确认；纸质的直接交到你手上时，在后补池点「收到」。",
+                go=_go_view(l))
 
 
 def _lv(l):
@@ -2145,9 +2267,26 @@ def store_later_docs(l, lid, files, uname):
     return out, _later_docs(e, S.items_of_later(e, lid))
 
 
+def _self_ok(ids, user, how):
+    """把申请人自己传的票记成"财务已确认"（flags.selfOk）→ 实际确认了的票 id。只动还在等确认的，别的票不碰。"""
+    e = E()
+    done = []
+    for iid in ids:
+        it = S.item_get(e, iid)
+        if not it or not inv.self_pending(it):
+            continue
+        fl = dict(it.get("flags_json") or {})
+        fl["selfOk"] = {"by": inv._uname(user), "at": inv.now_s(), "how": how}
+        S.item_update(e, iid, flags_json=fl)
+        done.append(iid)
+    return done
+
+
 def _after_receive(results, lid, user):
     """后补收票之后（线程池里跑）：同夹已有的票挂上这张后补单 → 重算已到金额/状态（收齐发"已签收"）→ 补视图。→ 后补单视图。"""
     _link_confirmed(results, lid)
+    # 申请人先传了电子件、财务这次扫到/传了同一张（同票夹同号＝合并，action=confirm）：实物到财务手上了，等于确认
+    _self_ok([r["itemId"] for r in results if r.get("action") == "confirm" and r.get("itemId")], user, "财务收到同一张票")
     l2 = _later_recalc(lid, user)
     inv.attach_views(results)
     return _lv(l2)
@@ -2214,6 +2353,68 @@ async def later_receive_upload(lid: int, request: Request):
     return {"ok": True, "results": results, "later": lv}
 
 
+def self_uploaded(results):
+    """这次上传里算"传上来了"的：认出是发票/收据的，加上照片还在识别中的（识别完才知道是不是票）。"""
+    return [r for r in results if r.get("action") == "item"
+            or (r.get("action") == "other" and ((r.get("item") or {}).get("procStatus") in ("pending", "running")))]
+
+
+def self_upload_invoices(l, lid, files, uname):
+    """申请人给自己的后补单上传发票（线程池里跑）：和财务「收到·上传」走同一条进票流水线，当场识别、查重、登记；
+    来源记 self——财务确认前不算"已到"，后补单状态不变、不发"已签收"。传成了就用钉钉告诉接收人去确认。
+    → (逐个文件的结果, 后补单视图)。uname＝申请人的钉钉姓名（没有工作台账号）。"""
+    extra = {"via": "申请人上传发票", "laterId": lid}
+    budget = {"left": inv.MAX_TOTAL}
+    results = []
+    for name, data in files:
+        results.extend(inv.ingest_bytes(l["folder_id"], name, data, "self", uname, later_id=lid, allow_switch=False,
+                                        log_extra=extra, budget=budget))
+    inv.wake()
+    l2 = _later_recalc(lid, uname) or l
+    inv.attach_views(results)
+    lv = _lv(l2)
+    got = self_uploaded(results)
+    to_uid = l2.get("receiver_uid") or inv.dt_uid_of(l2.get("receiver"))
+    if got and to_uid:
+        text = _msg("申请人传了发票，等你确认",
+                    "收款方：%s" % (l2.get("payee_name") or "—"),
+                    _line_who(dict(l2, applicant=uname or l2.get("applicant"))),
+                    "这次上传 %d 张，现在共 %s 等确认" % (len(got), _tone("orange", _yuan(lv.get("selfAmount") or 0))),
+                    "**核对无误、纸质的也收到后点「确认收到」。**",
+                    go=_go_view(l2, "确认"))
+        res = inv.notify_dt([to_uid], text)
+        inv.log(uname, "申请人上传发票·通知接收人", l2.get("folder_id"), None, lid,
+                {"to": l2.get("receiver_name") or l2.get("receiver") or "", "sent": bool(res.get("sent")), "msg": res.get("msg") or ""})
+    return results, lv
+
+
+def _confirm_self_sync(u, l, lid):
+    ids = _self_ok([i["id"] for i in _self_waiting(S.items_of_later(E(), lid))], u, "财务点确认")
+    if not ids:
+        return None
+    inv.log(u, "确认收到申请人上传的发票", l.get("folder_id"), None, lid, {"items": ids})
+    inv.audit(u, "后补确认收到", "后补单#%d %s" % (lid, l.get("payee_name") or ""), "%d 张" % len(ids))
+    return len(ids), _lv(_later_recalc(lid, u["name"]))
+
+
+@router.post("/api/inv/later/{lid}/confirm-self")
+async def later_confirm_self(lid: int, request: Request):
+    """申请人自己传上来的发票，财务核对后确认收到：这些票才算进"已到"（收齐照常发"已签收"）。"""
+    u, bad = need(request, ENTER_LATER, CAP_RECEIVE)
+    if bad:
+        return bad
+    l, bad = _later_get_or_404(lid)
+    if bad:
+        return bad
+    g = _later_writable(l)
+    if g:
+        return g
+    out = await run_in_threadpool(_confirm_self_sync, u, l, lid)
+    if not out:
+        return err("这张后补单没有等确认的发票（可能别人刚确认过）", 400)
+    return {"ok": True, "msg": "已确认收到 %d 张" % out[0], "later": out[1]}
+
+
 def _mark_sync(u, l, lid, amt, note):
     with _LATER_LOCK:
         cur = S.later_get(E(), lid)
@@ -2255,30 +2456,49 @@ def _days_left(l, today=None):
         return None
 
 
+def _owe(l, rem, today=None):
+    amt = _yuan(rem if rem is not None else 0)
+    return _tone(_due_tone(l, today), amt) if _due_tone(l, today) else "**%s**" % amt
+
+
 def _remind_text(l, today=None):
-    days = _days_left(l, today)
-    when = "预计 %s 到票" % (l.get("expect_date") or "—")
-    if days is not None:
-        when += ("（已超期 %d 天）" % -days) if days < 0 else ("（就是今天）" if days == 0 else "（还有 %d 天）" % days)
+    """催票·给申请人：还差多少、什么时候该到、到了怎么办。"""
     rem = _later_remaining(l)
-    rn = l.get("receiver_name") or l.get("receiver") or ""
-    return MSG_HEAD + "催票提醒：%s 付给「%s」的款 ¥%s，%s，还差 ¥%s 的%s没到。请尽快把发票交给财务%s。财务查看 → %s" % (
-        _later_title(l), l.get("payee_name") or "", inv._money_str(l.get("pay_amount")), when,
-        inv._money_str(rem if rem is not None else 0), LATER_KIND_CN.get(l.get("inv_kind") or "", "发票"),
-        ("（接收人 %s）" % rn) if rn else "", _later_link(l))
+    rn = l.get("receiver_name") or l.get("receiver") or "财务"
+    return _msg("催票提醒",
+                "收款方：%s" % (l.get("payee_name") or "—"),
+                "付款金额：%s（%s）" % (_yuan(l.get("pay_amount")), _later_title(l)),
+                _line_due(l, today),
+                "还差：%s 的%s没到" % (_owe(l, rem, today), LATER_KIND_CN.get(l.get("inv_kind") or "", "发票")),
+                "**发票到了请先上传，再把纸质的交给 %s。**" % rn,
+                go=_go_upload())
+
+
+def _remind_cc_text(l, today=None, reached=True):
+    """催票·抄送接收人：告诉他催过了（或者申请人没有钉钉身份、催不到，要他自己去催）。"""
+    rem = _later_remaining(l)
+    return _msg("已向申请人催票" if reached else "催票没发到申请人（他没有钉钉身份），请你直接联系他",
+                "收款方：%s" % (l.get("payee_name") or "—"),
+                _line_who(l),
+                "%s，还差 %s" % (_line_due(l, today), _owe(l, rem, today)),
+                go=_go_view(l))
 
 
 def send_remind(l, user, auto=False, reason="", st=None, today=None):
-    """催票：发给申请人＋抄送接收人（一条消息两个人）。发出去（或测试 dry-run）才记"上次催票/次数"，
-    没发出去不记——免得自动催票以为催过了就不再催。→ notify_dt 的结果 {sent, msg}。"""
+    """催票：申请人一条（催他）、接收人一条（告诉他催过了），两个人看到的话不一样。
+    任一条发出去（或测试 dry-run）就记"上次催票/次数"，都没发出去不记——免得自动催票以为催过了就不再催。
+    → {sent, msg}：优先回发给申请人那条的结果。"""
     st = st or inv.get_settings()
-    uids = [l.get("applicant_uid") or "", l.get("receiver_uid") or inv.dt_uid_of(l.get("receiver"), st)]
-    uids = [x for x in uids if x]
-    if not uids:
+    a_uid = l.get("applicant_uid") or ""
+    r_uid = l.get("receiver_uid") or inv.dt_uid_of(l.get("receiver"), st)
+    good = lambda r: bool(r) and (bool(r.get("sent")) or r.get("msg") == "dry-run")
+    if not a_uid and not r_uid:
         res = {"sent": False, "msg": "申请人和接收人都没有钉钉身份（申请人取自审批单，接收人要在设置里绑定钉钉），没发出去"}
     else:
-        res = inv.notify_dt(uids, _remind_text(l, today))
-    ok = bool(res.get("sent")) or res.get("msg") == "dry-run"
+        ra = inv.notify_dt([a_uid], _remind_text(l, today)) if a_uid else None
+        rr = inv.notify_dt([r_uid], _remind_cc_text(l, today, reached=bool(a_uid))) if r_uid else None
+        res = ra if good(ra) else (rr if good(rr) else (ra or rr))
+    ok = good(res)
     if ok:
         S.later_update(E(), l["id"], last_remind_at=inv.now_s(), remind_count=int(l.get("remind_count") or 0) + 1)
     inv.log(user, "自动催票" if auto else "催票", l.get("folder_id"), None, l["id"],
@@ -2439,6 +2659,11 @@ def remind_tick(now=None, force=False):
         try:
             l = _later_recalc(d["id"], "系统")
             if not l or l.get("status") not in LATER_ACTIVE:
+                skipped += 1
+                continue
+            # 申请人已经把票传上来、够数了，只差财务确认：不再催申请人（球在财务这边）
+            waiting = sum(inv._share(i) for i in _self_waiting(S.items_of_later(E(), l["id"])))
+            if waiting > 0 and waiting >= (_later_remaining(l) or 0) - 0.01:
                 skipped += 1
                 continue
             res = send_remind(l, "系统", auto=True, reason=d.get("remind_reason") or "", st=st, today=now.date())

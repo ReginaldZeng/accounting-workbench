@@ -584,6 +584,97 @@ function laterApi(st) {
   }
 }
 
+test('申请人上传发票：传完弹 5 秒提醒（如果为专票打印 2 张、普票 1 张，张数红字）；关掉后能看到传了哪些，传错的能删、财务确认过的不能删', async (browser, B) => {
+  const later = { id: 5, status: 'open', businessId: '202610120001', payee: { name: '合成物流' }, expectAmount: 600, receivedAmount: 0, unregisteredAmount: 0,
+    remaining: 600, expectDate: '2026-10-20', receiverName: '财务甲', filedVia: 'self', createdAt: '2026-10-12 10:00:00', selfCount: 0, selfAmount: 0 }
+  const tk = (id, o) => ({ id, kind: 'invoice', number: '2644200000000000000' + id, typeLabel: '电子发票（增值税专用发票）', total: 600, mine: true, pending: true, canRemove: true, procStatus: 'done', ...o })
+  const st = { laters: [later], tickets: [tk(8, { total: 100, pending: false, canRemove: false })] }
+  const api = async c => {
+    if (c.path === '/api/inv/s/hello') return { ok: true, corpId: '', dingtalk: true, me: { name: '申请人甲', dept: '公司-采购部', via: 'code' }, templates: [] }
+    if (c.path === '/api/inv/s/later/5/invoices' && c.method === 'GET') return { ok: true, rows: st.tickets }
+    if (c.path === '/api/inv/s/later/5/invoices/9/remove') { st.tickets = st.tickets.filter(x => x.id !== 9); st.laters = [later]; return { ok: true, msg: '已删除', later } }
+    if (c.path === '/api/inv/s/payments') return { ok: true, msg: '', rows: [] }
+    if (c.path === '/api/inv/s/receivers') return { ok: true, rows: [] }
+    if (c.path === '/api/inv/s/laters') return { ok: true, rows: st.laters }
+    if (c.path === '/api/inv/s/later/5/invoices') {
+      st.laters = [{ ...later, selfCount: 1, selfAmount: 600 }]
+      st.tickets = [...st.tickets, tk(9)]
+      return { ok: true, uploaded: 1, later: st.laters[0], results: [{ name: '票.pdf', action: 'item', msg: '已登记', item: { id: 9, procStatus: 'done' } },
+        { name: '合同.pdf', action: 'other', msg: '已留存（不是发票：合同）', item: { id: 10, procStatus: 'done' } }] }
+    }
+    return { ok: true }
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, api, { hash: '#/invself', clock: true, init: () => { sessionStorage.setItem('inv_self_t', 'SELF-TOK') } })
+  await mount(page, 'InvSelf')
+  await page.getByRole('button', { name: /我的后补单/ }).click()
+  assert.equal(await page.locator('.inv-sf-tip').count(), 0)
+  const pdf = n => ({ name: n, mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 fake') })
+  await page.locator('label.inv-sf-upl.pri input[type=file]').setInputFiles([pdf('票.pdf'), pdf('合同.pdf')])
+  const tip = page.locator('.inv-sf-tip')
+  await tip.waitFor({ timeout: 4000 })
+  assert.deepEqual(await tip.locator('li').allTextContents(), ['如果为专票，请打印 2 张，交给 财务甲', '如果为普票，请打印 1 张，交给 财务甲'])
+  const reds = await tip.locator('li > b').evaluateAll(els => els.map(e => [e.textContent, getComputedStyle(e).color.match(/\d+/g).map(Number)]))
+  assert.deepEqual(reds.map(r => r[0]), ['2 张', '1 张'])
+  for (const [, [r, g, b]] of reds) assert.ok(r > 170 && g < 110 && b < 110, '张数要是红字，实际 rgb(' + [r, g, b] + ')')
+  assert.ok(await tip.getByText('5 秒后自动关闭').isVisible())
+  for (let i = 0; i < 6; i += 1) { await page.clock.runFor(500); await sleep(25) }
+  assert.ok(await tip.getByText('2 秒后自动关闭').isVisible(), '3 秒时还在')
+  for (let i = 0; i < 5; i += 1) { await page.clock.runFor(500); await sleep(25) }
+  await tip.waitFor({ state: 'detached', timeout: 2000 })
+  // 关了之后同样的话还留在页面上；没算发票的那份把原因说出来；这张单写着等财务确认
+  const note = page.locator('.inv-sf-note')
+  assert.ok((await note.textContent()).includes('如果为专票，请打印 2 张；如果为普票，请打印 1 张；交给 财务甲'), await note.textContent())
+  assert.ok((await note.textContent()).includes('「合同.pdf」已留存（不是发票：合同）'))
+  assert.ok(await page.getByText('已上传 600.00，等财务确认').isVisible())
+  const up = calls.filter(c => c.path === '/api/inv/s/later/5/invoices' && c.method === 'POST')
+  assert.equal(up.length, 1); assert.equal(up[0].headers['x-inv-self'], 'SELF-TOK')
+  // 传完自动把这张单上的发票列出来：刚传的等财务确认、能删；财务确认过的那张不能删
+  const lis = page.locator('.inv-sf-tk li')
+  await lis.nth(1).waitFor({ timeout: 3000 })
+  assert.ok((await lis.nth(0).textContent()).includes('财务已确认')); assert.ok((await lis.nth(0).textContent()).includes('不能删了'))
+  assert.equal(await lis.nth(0).getByRole('button', { name: '删除' }).count(), 0)
+  assert.ok((await lis.nth(1).textContent()).includes('26442000000000000009')); assert.ok((await lis.nth(1).textContent()).includes('等财务确认'))
+  await lis.nth(1).getByRole('button', { name: '删除' }).click()       // 确认框由夹具自动点「确定」
+  await page.locator('.inv-sf-note', { hasText: '已删除一张发票' }).waitFor({ timeout: 3000 })
+  assert.equal(calls.filter(c => c.path === '/api/inv/s/later/5/invoices/9/remove' && c.method === 'POST').length, 1)
+  await page.waitForFunction(() => document.querySelectorAll('.inv-sf-tk li').length === 1, null, { timeout: 3000 })
+  assert.equal(await page.getByText('已上传 600.00，等财务确认').count(), 0)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('后补单详情：申请人传上来的发票要财务点「确认收到」才算已到', async (browser, B) => {
+  const base = { id: 6, status: 'open', payee: { name: '合成物流' }, payAmount: 600, expectAmount: 600, receivedAmount: 0, unregisteredAmount: 0, remaining: 600,
+    expectDate: '2026-10-20', invKind: 'special', receiverName: '财务甲', reason: '运费' }
+  const st = { later: { ...base, selfCount: 2, selfAmount: 600 }, items: [inv({ id: 31, origin: 'self', selfPending: true, total: 300 }), inv({ id: 32, origin: 'self', selfPending: true, total: 300 })] }
+  const api = c => {
+    if (c.path === '/api/inv/config') return cfg()
+    if (c.path === '/api/inv/later') return { ok: true, total: 1, rows: [st.later] }
+    if (c.path === '/api/inv/later/6') return { ok: true, later: st.later, items: st.items, docs: [], logs: [] }
+    if (c.path === '/api/inv/later/6/confirm-self') {
+      st.later = { ...base, status: 'done', receivedAmount: 600, remaining: 0, selfCount: 0, selfAmount: 0 }
+      st.items = st.items.map(x => ({ ...x, selfPending: false }))
+      return { ok: true, msg: '已确认收到 2 张', later: st.later }
+    }
+    return { ok: true }
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, api, { hash: '#/invlater?id=6' })
+  await mount(page, 'InvLater', { user: { name: '测试会计' } })
+  const bar = page.locator('.inv-lt-selfbar')
+  await bar.waitFor({ timeout: 4000 })
+  assert.ok((await bar.textContent()).includes('申请人已经传上来 2 张发票（600.00）'))
+  assert.ok(await page.locator('.inv-modal .inv-badge', { hasText: '申请人已传 600.00 待确认' }).first().isVisible())
+  assert.ok(await page.locator('.inv-lt-cur .inv-badge', { hasText: '申请人上传 · 待确认' }).isVisible())
+  assert.equal((await page.locator('.inv-lt-nums > div').nth(2).locator('b').textContent()), '0.00', '确认前不算已到')
+  await bar.getByRole('button', { name: '确认收到' }).click()
+  await bar.waitFor({ state: 'detached', timeout: 4000 })
+  assert.equal(calls.filter(c => c.path === '/api/inv/later/6/confirm-self' && c.method === 'POST').length, 1)
+  assert.equal((await page.locator('.inv-lt-nums > div').nth(2).locator('b').textContent()), '600.00')
+  assert.equal(await page.locator('.inv-lt-cur .inv-badge', { hasText: '待确认' }).count(), 0)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
 test('后补单详情：金额排成一排、字段分两张卡、长事由按编号断行并先收起', async (browser, B) => {
   const reason = '一、费用名称：样品甲 1、发货时间：8月10日 2、费用明细：首重89+22*41斤=991元 3、物流查询单号：HX001 4、签收时间：8月13日 ' +
     '二、费用名称：样品乙 1、发货时间：8月25日 2、费用明细：单价 12.5 元，共 3 箱 3、物流查询单号：HX002 4、签收时间：8月28日'

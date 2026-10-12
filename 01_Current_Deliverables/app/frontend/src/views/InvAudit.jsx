@@ -244,7 +244,7 @@ function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loa
 
 const ORIGIN_CN = {
   attachment: '审批附件自动拉取', photo_field: '审批图片栏自动拉取', camera: '高拍仪', phone: '手机拍照',
-  upload: '上传', scanner: '扫码枪', later: '发票后补池收票', taxpack: '税局文件包',
+  upload: '上传', scanner: '扫码枪', later: '发票后补池收票', taxpack: '税局文件包', self: '申请人自己上传',
 }
 const TYPE_SHORT = {
   special: '专票', normal: '普票', travel: '旅客运输', toll: '通行费', train: '火车票', flight: '机票行程单',

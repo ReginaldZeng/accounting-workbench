@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 申请人传上来的发票：徽标、详情提示条和底部按钮「确认收到」
 // [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.916（后补单详情重排版）| 详情上半部分从 22 个字段的四列小格子改成：金额一排＋到票进度＋「收款方与发票」「付款单」两张卡＋通栏事由（按编号断行，长的先收起）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票后补池页：列表筛选（我接收的/全部＋状态＋搜索）、财务代填新建后补单、收到（扫码/上传/先标记）、催一下、详情、修改、关闭、导出欠票清单、「设置」页签
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 页头加「业务自助登记入口」（网址＋二维码，申请人自己登记发票后补）
@@ -10,7 +11,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLaterList, invLater, invLaterResolve, invLaterCreate, invLaterDocs, invLaterReceive,
-  invLaterReceiveUpload, invLaterMark, invLaterRemind, invLaterUpdate, invLaterClose, invLaterExportUrl, invSLink, invSPreview,
+  invLaterReceiveUpload, invLaterMark, invLaterConfirmSelf, invLaterRemind, invLaterUpdate, invLaterClose, invLaterExportUrl, invSLink, invSPreview,
 } from '../api.js'
 import { Modal, useToast, ScanInput, FileDrop, CameraPanel, ThumbStrip, InvViewer, StatusBadges, money, fmtTime } from './invShared.jsx'
 import InvSettings from './InvSettings.jsx'
@@ -95,6 +96,7 @@ function LaterBadges({ l }) {
     <Tag tone={st.tone}>{st.label}</Tag>
     {l?.overdue && isLive(l) && <Tag tone="err">超期</Tag>}
     {num(l?.unregisteredAmount) > 0 && <Tag tone="warn" title="点过「先标记收到」，发票号码还没扫进来">已收未登记 {money(l.unregisteredAmount)}</Tag>}
+    {num(l?.selfCount) > 0 && isLive(l) && <Tag tone="info" title="申请人自己把发票传上来了，等财务核对后点「确认收到」才算已到">申请人已传 {money(l.selfAmount)} 待确认</Tag>}
     {sm && <Tag tone="err" title={smTip}>销方不符</Tag>}
   </span>
 }
@@ -305,7 +307,7 @@ function logDetail(d) {
   return txt(d)
 }
 
-function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLater, rev, flash }) {
+function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLater, onChanged, rev, flash }) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
   const [act, setAct] = useState(null)
@@ -338,6 +340,13 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     setReminding(true); setRemindRes(null)
     try { const r = await onRemind(l); setRemindRes(r); load() } finally { setReminding(false) }
   }
+  // 申请人自己传上来的发票：财务核对后确认，才算进"已到"
+  const [confirming, setConfirming] = useState(false)
+  const confirmSelf = async () => {
+    setConfirming(true)
+    try { const r = await invLaterConfirmSelf(id); flash?.(r?.msg || '已确认收到', 'ok'); onChanged?.(); load() }
+    catch (e) { flash?.('没确认上：' + errText(e), 'err') } finally { setConfirming(false) }
+  }
 
   const live = isLive(l)
   const left = remainingOf(l)
@@ -346,6 +355,8 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
   const pct = v => Math.max(0, Math.min(100, Math.round(num(v) / (num(l?.expectAmount) || 1) * 100)))
   const footer = <>
     {remindRes && <span className={'inv-lt-inline ' + (remindRes.ok ? 'ok' : 'err')}>{remindRes.text}</span>}
+    {l && can.receive && live && num(l.selfCount) > 0 && <button type="button" className="btn-pri" disabled={confirming} onClick={confirmSelf}
+      title="申请人自己传上来的发票：核对无误、纸质的也收到后点这里，才算已到">{confirming ? '正在确认…' : `确认收到申请人传的 ${l.selfCount} 张`}</button>}
     {l && can.receive && live && <button type="button" className="btn" disabled={reminding} onClick={remind}>{reminding ? '发送中…' : '催一下'}</button>}
     {l && can.receive && l.status !== 'closed' && <button type="button" className="btn" onClick={() => onEdit(l)}>修改</button>}
     {l && can.receive && live && <button type="button" className="btn" onClick={() => onCloseLater(l)}>关闭此单</button>}
@@ -358,6 +369,10 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     {!data && !err && <div className="loading">正在打开后补单…</div>}
     {l && <div className="inv-lt-detail">
       <div className="inv-lt-dhead"><LaterBadges l={l} /></div>
+      {num(l.selfCount) > 0 && live && <div className="inv-lt-selfbar">
+        <span>申请人已经传上来 <b>{l.selfCount}</b> 张发票（<b className="inv-num">{money(l.selfAmount)}</b>），在下面「收到的票」里。核对无误、纸质的也收到后点确认，才算已到。</span>
+        {can.receive && <button type="button" className="btn-pri" disabled={confirming} onClick={confirmSelf}>{confirming ? '正在确认…' : '确认收到'}</button>}
+      </div>}
       <div className="inv-lt-nums">
         <div><span>付款金额</span><b className="inv-num">{money(l.payAmount)}</b></div>
         <div><span>预计到票金额</span><b className="inv-num">{money(l.expectAmount)}</b></div>
@@ -416,6 +431,7 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
             {cur.date && <span>{cur.date}</span>}
             {cur.sellerName && <span>销方 {cur.sellerName}</span>}
             <b className="inv-num">{money(cur.total)}</b>
+            {cur.selfPending && <Tag tone="info">申请人上传 · 待确认</Tag>}
             <StatusBadges item={cur} />
           </div>}
         </div>
@@ -805,7 +821,7 @@ function LaterPool({ cfg, cfgErr, can, me, flash, onGoSettings, creating, setCre
     </div>}
 
     {detailId && <DetailModal id={detailId} can={can} rev={detailRev} flash={flash} onClose={() => setDetailId(null)}
-      onReceive={setRecv} onRemind={remind} onEdit={setEdit} onCloseLater={setClosing} />}
+      onReceive={setRecv} onRemind={remind} onEdit={setEdit} onCloseLater={setClosing} onChanged={() => setRev(x => x + 1)} />}
     {recv && <ReceiveModal later={recv} onClose={() => { setRecv(null); refresh() }} onChanged={() => setRev(x => x + 1)} />}
     {edit && <EditModal later={edit} receivers={receivers} onClose={() => setEdit(null)}
       onSaved={() => { setEdit(null); flash('已保存', 'ok'); refresh() }} />}

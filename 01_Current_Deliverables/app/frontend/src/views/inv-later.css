@@ -249,3 +249,9 @@
 .inv-lt-more:hover{ text-decoration:underline; }
 .inv-lt-note{ margin:0; padding:8px 0; border-top:1px solid var(--line); font-size:13px; line-height:1.8; color:var(--ink); white-space:pre-wrap; overflow-wrap:anywhere; }
 @media (max-width:820px){ .inv-lt-cards{ grid-template-columns:minmax(0, 1fr); } .inv-lt-nums > div > b{ font-size:17px; } }
+
+/* 申请人自己传上来的发票等财务确认：详情顶上一条提示 + 确认按钮 */
+.inv-lt-selfbar{ display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-bottom:10px; padding:10px 14px;
+  border:1px solid var(--blue-line); border-radius:10px; background:var(--blue-bg); color:var(--ink); font-size:13px; line-height:1.6; }
+.inv-lt-selfbar > span{ flex:1 1 320px; }
+.inv-lt-selfbar b{ color:var(--blue); }

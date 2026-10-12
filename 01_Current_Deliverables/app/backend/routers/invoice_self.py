@@ -1,4 +1,5 @@
 # [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621（发票管家·申请人自助登记发票后补）
+# Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 加 POST /api/inv/s/later/{id}/invoices：申请人给自己的后补单上传发票，等财务确认才算已到
 # Description: 业务同事（付款单/报销单的申请人）自己登记发票后补，不用工作台账号：
 #   /api/inv/s/*（不走工作台登录，app._auth_gate 放行，本文件每个接口自己认人）。
 #   认人两条路：① 在钉钉里打开 → 钉钉免登（dd.config 鉴权后 requestAuthCode）；
@@ -505,6 +506,83 @@ async def s_later_docs(lid: int, request: Request):
     results.extend(out)
     inv.audit(_actor(me), "申请人上传后补资料", "后补单#%d" % lid, "、".join(n for n, _ in files)[:400])
     return {"ok": True, "results": results, "docs": docs}
+
+
+@router.post("/api/inv/s/later/{lid}/invoices")
+async def s_later_invoices(lid: int, request: Request):
+    """给自己的后补单上传发票（电子票文件或照片）：当场识别登记，记为"已上传、等财务确认"。
+    财务确认（或财务自己扫到同一张票、或这张票审核通过）之后才算已到；纸质票仍要交给接收人。"""
+    me, bad = _need(request)
+    if bad:
+        return bad
+    l, bad = _mine(me, lid)
+    if bad:
+        return bad
+    g = books._later_writable(l, allow_done=False)
+    if g:
+        return g
+    files, fields, results, bad = await inv.read_upload_files(request)
+    if bad:
+        return bad
+    if not files and not results:
+        return err("没收到文件", 400)
+    who = _actor(me)["name"]
+    out, lv = await run_in_threadpool(books.self_upload_invoices, l, lid, files, who)
+    results.extend(out)
+    if files:
+        inv.audit(_actor(me), "申请人上传发票", "后补单#%d" % lid, "%d 个文件：%s" % (len(files), inv._upload_summary(out)))
+    return {"ok": True, "results": results, "later": lv,
+            "uploaded": len(books.self_uploaded(out))}
+
+
+def _my_ticket(i):
+    fl = i.get("flags_json") or {}
+    return {"id": i["id"], "kind": i.get("kind") or "other", "number": i.get("number") or "", "date": i.get("issue_date") or "",
+            "total": i.get("total") if i.get("total") is not None else i.get("amount"),
+            "typeLabel": i.get("type_label") or "", "invType": i.get("inv_type") or "", "sellerName": i.get("seller_name") or "",
+            "mine": i.get("origin") == "self", "pending": inv.self_pending(i), "canRemove": i.get("origin") == "self" and inv.self_pending(i),
+            "procStatus": i.get("proc_status") or "done", "dup": bool(fl.get("dup")), "review": i.get("review") or "",
+            "createdAt": i.get("created_at") or ""}
+
+
+@router.get("/api/inv/s/later/{lid}/invoices")
+async def s_later_invoice_list(lid: int, request: Request):
+    """我这张后补单上的发票：自己传的（等财务确认的可以删）和财务已经收到的。"""
+    me, bad = _need(request)
+    if bad:
+        return bad
+    l, bad = _mine(me, lid)
+    if bad:
+        return bad
+
+    def run():
+        its = [i for i in S.items_of_later(E(), lid) if i.get("status") != "removed" and i.get("review") != "void"
+               and (i.get("kind") in ("invoice", "receipt") or i.get("origin") == "self")]
+        return {"ok": True, "rows": [_my_ticket(i) for i in its]}
+    return await run_in_threadpool(run)
+
+
+@router.post("/api/inv/s/later/{lid}/invoices/{iid}/remove")
+async def s_later_invoice_remove(lid: int, iid: int, request: Request):
+    """传错了自己删：只能删自己传到这张后补单上、财务还没确认的票；财务确认了（或审核通过了）就不能删。"""
+    me, bad = _need(request)
+    if bad:
+        return bad
+    l, bad = _mine(me, lid)
+    if bad:
+        return bad
+
+    def run():
+        it = S.item_get(E(), iid)
+        if not it or it.get("later_id") != lid or it.get("origin") != "self" or it.get("status") == "removed":
+            return err("这张发票不在你的这张后补单上（可能已经删过了）", 404)
+        if not inv.self_pending(it):
+            return err("财务已经确认收到这张发票了，不能再删；确实传错了请联系财务 %s" % (l.get("receiver_name") or l.get("receiver") or ""), 400)
+        out, bad2 = inv._item_remove_sync(_actor(me), iid, "申请人自己删除", guard=False)
+        if bad2:
+            return bad2
+        return {"ok": True, "msg": "已删除", "later": books._lv(S.later_get(E(), lid))}
+    return await run_in_threadpool(run)
 
 
 # ───────────────────────── 给财务：入口网址和二维码 ─────────────────────────

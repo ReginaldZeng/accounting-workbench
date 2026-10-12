@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 「我的后补单」加「上传发票」；传完弹 5 秒提醒（专票打印 2 张、普票 1 张，张数红字，交给接收人）
 // [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.915（钉钉入口二选一）| 页面底部加「有工作台账号？进财务工作台」（没账号的同事从钉钉点开直接落在这页）
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621（发票管家·申请人自助登记发票后补）
 // 业务同事自己登记发票后补：main.jsx 按 #/invself 分流到这里，不走工作台登录（业务同事没有工作台账号）。
@@ -8,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   invSQrCreate, invSQrCheck, invSQrApprove, invSHello, invSLoginDd, invSLoginLookup, invSLoginSend, invSLoginVerify, invSLogout,
-  invSPayments, invSReceivers, invSLaterCreate, invSLaters, invSLaterDocs,
+  invSPayments, invSReceivers, invSLaterCreate, invSLaters, invSLaterDocs, invSLaterInvoices, invSLaterInvoiceList, invSLaterInvoiceRemove,
 } from '../api.js'
 import { inDingTalk, getAuthCode } from './ddBridge.js'
 import { goWorkbench } from './ddLogin.js'
@@ -329,7 +330,7 @@ function Form({ token, pay, receivers, onBack, onDone }) {
         try { await invSLaterDocs(token, r.later.id, files) } catch (x) { docMsg = '，但资料没传上去（' + errText(x) + '），可在「我的后补单」里重传' }
       }
       const rn = r?.later?.receiverName || ''
-      onDone(`已登记后补单 #${r?.later?.id}${docMsg}。${r?.notified ? `已通过钉钉通知财务 ${rn}。` : ''}发票到了请交给 ${rn || '财务'}。`)
+      onDone(`已登记后补单 #${r?.later?.id}${docMsg}。${r?.notified ? `已通过钉钉通知财务 ${rn}。` : ''}发票到了：先在「我的后补单」点「上传发票」，再把纸质的交给 ${rn || '财务'}。`)
     } catch (x) { setErr({ _: '没登记上：' + errText(x) }) } finally { setBusy(false) }
   }
 
@@ -405,15 +406,76 @@ const MINE_CATS = [
 const laterText = l => [l.id, '#' + l.id, l.businessId, l.payee?.name, l.receiverName, l.expectDate, (l.createdAt || '').slice(0, 10),
   money(l.expectAmount), l.expectAmount, ST_LABEL[l.status], l.note].join(' ').toLowerCase().replace(/,/g, '')
 
+// 上传发票之后还要把纸质的交给财务：专票打印 2 张、普票打印 1 张（财务定的规矩）
+const PRINT_RULES = [['专票', 2], ['普票', 1]]
+const TIP_SECONDS = 5
+
+// 发票传上去之后弹出来的提醒：打印几张、交给谁。5 秒后自己关，张数用红字。
+export function PrintTip({ receiver, count, onClose }) {
+  const [left, setLeft] = useState(TIP_SECONDS)
+  useEffect(() => {
+    if (left <= 0) { onClose(); return undefined }
+    const t = setTimeout(() => setLeft(x => x - 1), 1000)
+    return () => clearTimeout(t)
+  }, [left, onClose])
+  const who = receiver || '财务'
+  return <div className="inv-sf-tipmask" role="dialog" aria-modal="true" aria-label="发票已上传">
+    <div className="inv-sf-tip">
+      <div className="inv-sf-tip-ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></div>
+      <h3>发票已上传{count > 1 ? `（${count} 张）` : ''}</h3>
+      <p>还差一步：把纸质的交给财务。</p>
+      <ul>{PRINT_RULES.map(([kind, n]) =>
+        <li key={kind}>如果为<span>{kind}</span>，请打印 <b>{n} 张</b>，交给 <strong>{who}</strong></li>)}</ul>
+      <div className="inv-sf-tip-foot"><span>{left} 秒后自动关闭</span>
+        <button type="button" className="btn-pri" onClick={onClose}>知道了</button></div>
+    </div>
+  </div>
+}
+
 function MyLaters({ token, rows: all, onReload }) {
   const [busy, setBusy] = useState(0)
   const [note, setNote] = useState('')
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('owe')
+  const [tip, setTip] = useState(null)       // 刚传完发票：{receiver, count}
+  const closeTip = useCallback(() => setTip(null), [])
+  // 某张后补单上的发票（自己传的＋财务收到的）：点开看，传错了能删（财务确认前）
+  const [open, setOpen] = useState(0)
+  const [tickets, setTickets] = useState(null)
+  const showTickets = async id => {
+    setOpen(id); setTickets(null)
+    try { const r = await invSLaterInvoiceList(token, id); setTickets(r?.rows || []) } catch (e) { setTickets([]); setNote('发票列表没取到：' + errText(e)) }
+  }
+  const removeTicket = async (l, t) => {
+    if (!window.confirm(`确定删除这张发票${t.number ? '（号码 ' + t.number + '）' : ''}吗？删掉后要重新上传。`)) return
+    try { await invSLaterInvoiceRemove(token, l.id, t.id); setNote(`后补单 #${l.id} 已删除一张发票`); showTickets(l.id); onReload() }
+    catch (e) { setNote('没删掉：' + errText(e)); showTickets(l.id) }
+  }
+  const ticketState = t => (t.dup ? '重复票，不算数' : ['pending', 'running'].includes(t.procStatus) ? '正在识别…'
+    : t.kind === 'other' ? '没认出是发票' : t.pending ? '等财务确认' : t.mine ? '财务已确认' : '财务已收到')
   const up = async (l, fs) => {
     if (!fs.length) return
     setBusy(l.id); setNote('')
     try { await invSLaterDocs(token, l.id, fs); setNote(`后补单 #${l.id} 资料已上传`); onReload() } catch (e) { setNote('没传上去：' + errText(e)) } finally { setBusy(0) }
+  }
+  // 上传发票：系统当场识别登记，等财务确认才算到票；传成了弹提醒（打印几张、交给谁）
+  const upInv = async (l, fs) => {
+    if (!fs.length) return
+    setBusy(-l.id); setNote('')
+    try {
+      const r = await invSLaterInvoices(token, l.id, fs)
+      const n = num(r?.uploaded)
+      const who = l.receiverName || '财务'
+      // 没算传上来的文件（传过了、重复票、不是发票、出错）把系统的原话说出来
+      const rest = (r?.results || []).filter(x => !(x.action === 'item' || (x.action === 'other' && ['pending', 'running'].includes(x.item?.procStatus))))
+        .map(x => `「${x.name || '文件'}」${x.msg || '没登记上'}`)
+      if (n > 0) {
+        setTip({ receiver: l.receiverName, count: n })
+        setNote(`后补单 #${l.id} 已上传 ${n} 张发票，等财务确认。${PRINT_RULES.map(([k, c]) => `如果为${k}，请打印 ${c} 张`).join('；')}；交给 ${who}。${rest.length ? '另外：' + rest.join('；') : ''}`)
+        showTickets(l.id)                 // 顺手把这张单上传了哪些列出来：认错了、传错了当场能看见、能删
+      } else setNote(`后补单 #${l.id} 这次没有传上发票：${rest.join('；') || '没认出发票'}`)
+      onReload()
+    } catch (e) { setNote('发票没传上去：' + errText(e)) } finally { setBusy(0) }
   }
   if (!all.length) return <div className="inv-sf-empty">还没有登记过发票后补单。</div>
   const kw = q.trim().toLowerCase().replace(/,/g, '')
@@ -435,7 +497,8 @@ function MyLaters({ token, rows: all, onReload }) {
         <th>预计日期</th><th>交给</th><th>状态</th><th>登记</th><th /></tr></thead>
       <tbody>{rows.map(l => {
         const live = l.status === 'open' || l.status === 'partial'
-        return <tr key={l.id} className={l.overdue && live ? 'late' : ''}>
+        const has = num(l.selfCount) > 0 || num(l.receivedAmount) > 0
+        return <React.Fragment key={l.id}><tr className={l.overdue && live ? 'late' : ''}>
           <td className="inv-num">{l.id}</td>
           <td>{l.businessId || '—'}</td>
           <td className="inv-sf-ell" title={l.payee?.name || ''}>{l.payee?.name || '—'}</td>
@@ -444,13 +507,34 @@ function MyLaters({ token, rows: all, onReload }) {
           <td className="num">{live ? money(l.remaining) : '—'}</td>
           <td>{l.expectDate}{l.overdue && live && <b className="inv-sf-late">已超期</b>}</td>
           <td>{l.receiverName}</td>
-          <td className={'st-' + l.status}>{l.status === 'done' ? '财务已收齐' : (ST_LABEL[l.status] || l.status)}</td>
+          <td className={'st-' + l.status}>{l.status === 'done' ? '财务已收齐' : (ST_LABEL[l.status] || l.status)}
+            {live && num(l.selfAmount) > 0 && <div className="inv-sf-sub2 inv-sf-wait2">已上传 {money(l.selfAmount)}，等财务确认</div>}
+            {has && <button type="button" className="inv-sf-link inv-sf-seetk" onClick={() => (open === l.id ? setOpen(0) : showTickets(l.id))}>{open === l.id ? '收起发票' : '看传了哪些发票'}</button>}</td>
           <td>{l.filedVia === 'self' ? '自己' : '财务代填'}<div className="inv-sf-sub2">{(l.createdAt || '').slice(0, 10)}</div></td>
-          <td>{live && <label className={'inv-sf-upl' + (busy === l.id ? ' busy' : '')}>{busy === l.id ? '上传中…' : '补传资料'}
-            <input type="file" multiple disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; up(l, fs) }} /></label>}</td>
+          <td>{live && <div className="inv-sf-acts">
+            <label className={'inv-sf-upl pri' + (busy === -l.id ? ' busy' : '')}>{busy === -l.id ? '识别中…' : '上传发票'}
+              <input type="file" multiple accept=".pdf,.ofd,.xml,.zip,image/*" disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; upInv(l, fs) }} /></label>
+            <label className={'inv-sf-upl' + (busy === l.id ? ' busy' : '')}>{busy === l.id ? '上传中…' : '补传资料'}
+              <input type="file" multiple disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; up(l, fs) }} /></label>
+          </div>}</td>
         </tr>
+        {open === l.id && <tr className="inv-sf-tk"><td colSpan={11}>
+          {tickets === null && <span className="inv-sf-sub2">正在取这张单上的发票…</span>}
+          {tickets && !tickets.length && <span className="inv-sf-sub2">这张单上还没有发票。</span>}
+          {tickets && tickets.length > 0 && <ul>{tickets.map(t => <li key={t.id}>
+            <span className="inv-num">{t.number || '（号码还没读出来）'}</span>
+            <span>{t.typeLabel || (t.kind === 'receipt' ? '收据' : '')}</span>
+            <b className="inv-num">{t.total === null || t.total === undefined ? '' : money(t.total)}</b>
+            <em className={t.pending && t.kind !== 'other' && !t.dup ? 'wait' : ''}>{ticketState(t)}</em>
+            {t.canRemove
+              ? <button type="button" className="inv-sf-link del" onClick={() => removeTicket(l, t)}>删除</button>
+              : t.mine && <i title="财务已经确认收到，不能再删；确实传错了请联系财务">不能删了</i>}
+          </li>)}</ul>}
+        </td></tr>}
+        </React.Fragment>
       })}</tbody>
     </table></div>}
+    {tip && <PrintTip receiver={tip.receiver} count={tip.count} onClose={closeTip} />}
   </div>
 }
 

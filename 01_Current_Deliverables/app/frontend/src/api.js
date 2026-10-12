@@ -612,6 +612,7 @@ export const invLaterDocs = (id, files) => invPost(`/api/inv/later/${id}/docs`, 
 export const invLaterReceive = (id, code) => jp(`/api/inv/later/${id}/receive`, { code })
 export const invLaterReceiveUpload = (id, files) => invPost(`/api/inv/later/${id}/receive-upload`, invFd(files, 'files'))
 export const invLaterMark = (id, body) => jp(`/api/inv/later/${id}/mark`, body)        // body={amount, note}
+export const invLaterConfirmSelf = (id) => jp(`/api/inv/later/${id}/confirm-self`)     // 申请人自己传上来的发票，财务确认收到（之后才算已到）
 export const invLaterRemind = (id) => jp(`/api/inv/later/${id}/remind`)
 export const invLaterUpdate = (id, body) => jp(`/api/inv/later/${id}/update`, body)
 export const invLaterClose = (id, note) => jp(`/api/inv/later/${id}/close`, { note })
@@ -642,6 +643,11 @@ export const invSReceivers = (token) => invSJ('/api/inv/s/receivers', token)
 export const invSLaterCreate = (token, body) => invSJ('/api/inv/s/later', token, body)
 export const invSLaters = (token) => invSJ('/api/inv/s/laters', token)
 export const invSLaterDocs = (token, id, files) => invPost(`/api/inv/s/later/${id}/docs`, invFd(files, 'files'), invSH(token))
+// 申请人给自己的后补单上传发票：当场识别登记，等财务确认才算已到。回 {results, later, uploaded 传上来几张}
+export const invSLaterInvoices = (token, id, files) => invPost(`/api/inv/s/later/${id}/invoices`, invFd(files, 'files'), invSH(token))
+// 这张后补单上的发票（自己传的＋财务收到的）；传错了自己删（财务确认前才能删）
+export const invSLaterInvoiceList = (token, id) => invSJ(`/api/inv/s/later/${id}/invoices`, token)
+export const invSLaterInvoiceRemove = (token, id, iid) => invSJ(`/api/inv/s/later/${id}/invoices/${iid}/remove`, token, {})
 // 后补池页「业务同事自助登记」入口：网址＋二维码（要后补池权限）
 export const invSLink = () => j('/api/inv/s/link')
 export const invSPreview = (name, days = 60, pick) => j('/api/inv/s/preview?name=' + encodeURIComponent(name) + '&days=' + days + (pick === undefined || pick === null ? '' : '&pick=' + pick))

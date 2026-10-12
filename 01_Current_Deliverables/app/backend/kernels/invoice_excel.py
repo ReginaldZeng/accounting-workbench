@@ -1013,7 +1013,7 @@ VERIFY_LABELS = {"green": "已验真", "red": "作废/红冲", "yellow": "税局
 DEDUCT_STATUS_LABELS = {"": "", "marked": "已标注勾选", "checked": "已勾选"}
 ORIGIN_LABELS = {
     "attachment": "审批附件", "photo_field": "审批图片栏", "camera": "电脑摄像头", "phone": "手机",
-    "upload": "上传", "taxpack": "税局文件包", "later": "后补收票", "scanner": "扫码枪",
+    "upload": "上传", "taxpack": "税局文件包", "later": "后补收票", "scanner": "扫码枪", "self": "申请人上传",
 }
 INV_KIND_LABELS = {"special": "专票", "normal": "普票", "receipt": "收据"}
 LATER_STATUS_LABELS = {"open": "未到票", "partial": "部分到票", "done": "已收齐", "closed": "已关闭"}

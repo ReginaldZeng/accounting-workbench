@@ -39,7 +39,7 @@ const APPROVAL_RES = { agree: '同意', refuse: '拒绝' }
 const LATER_ST = { open: '待收票', partial: '部分收到', done: '已收齐', closed: '已关闭' }
 const ORIGIN_LABEL = {
   attachment: '审批附件', photo_field: '审批图片栏', camera: '高拍仪', phone: '手机', upload: '拖入文件',
-  taxpack: '税局文件包', later: '后补收票', scanner: '扫码枪',
+  taxpack: '税局文件包', later: '后补收票', scanner: '扫码枪', self: '申请人上传',
 }
 const ACTION_TONE = { folder: 'ok', item: 'ok', confirm: 'ok', dup: 'err', noFolder: 'warn', unknown: 'warn', error: 'err', failed: 'err' }
 

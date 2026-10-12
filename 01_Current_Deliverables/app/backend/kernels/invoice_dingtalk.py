@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.923 | 加 send_card：按 userid 发钉钉标准卡片（机器人单聊），哪个人没发成就给他补发文字
 # [Change Log]
 # Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 【发票管家】钉钉内核——扫审批单取单、按审批编号找单、规范化表单、拉附件/图片栏、H5 免登换身份、
@@ -948,6 +949,44 @@ def send_text(userids, text):
                 "via": r.get("via") or ""}
     except Exception as e:
         return {"sent": False, "msg": "发钉钉失败：%s" % _clean(e, conf)}
+
+
+CARD_API = "https://api.dingtalk.com/v1.0/im/v1.0/robot/interactiveCards/send"
+
+
+def send_card(userids, card, text):
+    """按 userid 发钉钉「标准卡片」（机器人单聊；标题条、分行、红字、按钮——2026-10-12 真机验过能显示）。
+    card＝标准卡片的内容（header/contents）；text＝同一件事的纯文字版：哪个人的卡片没发出去，就给他补发文字（send_text）。
+    → {sent, msg, via}：via=card 全是卡片 / text 全退成了文字 / mixed。未配置钉钉时一个请求都不发。"""
+    uids = [str(u).strip() for u in (userids or []) if str(u or "").strip()]
+    uids = list(dict.fromkeys(uids))
+    if not uids:
+        return {"sent": False, "msg": "没有收件人"}
+    conf = _load_conf() if (requests and notifier) else None
+    if not conf:
+        return {"sent": False, "msg": "未配置钉钉（conf.ini [dingtalk]），未发送"}
+    ok, back, why = [], [], ""
+    for uid in uids:
+        try:
+            body = {"cardTemplateId": "StandardCard", "singleChatReceiver": json.dumps({"userId": uid}),
+                    "cardBizId": "inv-%d-%s" % (int(time.time() * 1000), uid[-6:]), "robotCode": conf["appkey"],
+                    "cardData": json.dumps(card, ensure_ascii=False), "pullStrategy": False}
+            r = requests.post(CARD_API, headers={"x-acs-dingtalk-access-token": notifier._dt_v2_token(conf),
+                                                 "Content-Type": "application/json"},
+                              data=json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=20).json()
+            if r.get("processQueryKey"):
+                ok.append(uid)
+                continue
+            why = _clean(r.get("message") or r.get("code") or "原因不明", conf)
+        except Exception as e:
+            why = _clean(e, conf)
+        back.append(uid)
+    if not back:
+        return {"sent": True, "msg": "已发送", "via": "card"}
+    r = send_text(back, text)
+    if r.get("sent"):
+        return {"sent": True, "msg": "已发送（卡片没发成，改发了文字：%s）" % why, "via": "mixed" if ok else "text"}
+    return {"sent": bool(ok), "msg": "卡片没发成（%s），文字也没发成：%s" % (why, r.get("msg") or ""), "via": "card" if ok else ""}
 
 
 def roster(fresh=False):

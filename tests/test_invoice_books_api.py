@@ -684,8 +684,11 @@ class InvoiceBooksApiTests(unittest.TestCase):
                              ("open", "recv2", "recv", "proxy"))
             uids, text = sent.call_args[0]
             self.assertEqual(uids, ["dt-recv2"])
-            for w in ("后补收款方有限公司", "1000.00", day, "#/invlater?id=%d" % lid):
+            for w in ("有一张发票后补单交给你接收", "收款方：后补收款方有限公司", "付款金额：¥1,000.00", day, "申请人：申请人丙"):
                 self.assertIn(w, text)
+            self.assertTrue(("后补单 #%d" % lid) in text or ("#/invlater?id=%d" % lid) in text, text)
+            self.assertNotIn("：/#/", text)                                 # 不发点不开的半截地址
+            self.assertEqual(text.count("\n"), 6)                           # 标题一行 + 一行一件事
             fo = S.folder_by_inst(e, "PI-LATER-1")
             self.assertEqual((fo["source"], fo["payee_name"]), ("later", "后补收款方有限公司"))
             r = self.post("/api/inv/later/create", "recv", body)
@@ -776,10 +779,14 @@ class InvoiceBooksApiTests(unittest.TestCase):
         with patch.object(self.inv, "notify_dt", sent):
             j = self.ok(self.post("/api/inv/later/%d/remind" % lid, "recv"))
         self.assertTrue(j["sent"])
-        uids, text = sent.call_args[0]
-        self.assertEqual(uids, ["dt-app2", "dt-recv2"])
-        self.assertIn("催票提醒", text)
-        self.assertIn("还有 2 天", text)
+        (a_uids, a_text), (r_uids, r_text) = [c[0] for c in sent.call_args_list]
+        self.assertEqual((a_uids, r_uids), (["dt-app2"], ["dt-recv2"]))     # 申请人一条、接收人一条
+        for w in ("催票提醒", "还有 2 天", "还差：¥500.00 的专票没到", "再把纸质的交给 接收人乙", "上传：钉钉工作台"):
+            self.assertIn(w, a_text)
+        self.assertNotIn("发票后补池", a_text)                              # 财务的页面不发给申请人
+        for w in ("已向申请人催票", "申请人：申请人丁", "还差 ¥500.00"):
+            self.assertIn(w, r_text)
+        self.assertNotIn("上传：", r_text)
         l = S.later_get(e, lid)
         self.assertEqual(l["remind_count"], 1)
         self.assertTrue(l["last_remind_at"])
@@ -1438,6 +1445,191 @@ class InvoiceBooksApiTests(unittest.TestCase):
         j = self.ok(self.post(url, "acct", dict(rng, subject=TID, marked=True)))
         self.assertEqual(j["summary"]["rows"], 2)
         self.assertEqual({x["key"]: x["count"] for x in j["summary"]["skipped"]}, {"notApproved": 1, "checked": 1, "red": 1})
+
+    def test_28_applicant_uploads_invoice_to_later(self):
+        """申请人自己把发票传到后补单上：当场识别登记，但财务确认前不算已到、不发"已签收"；
+        财务点「确认收到」、财务自己扫到同一张票、这张票审核通过——三种都算确认。别人的单传不了，够数了不再催申请人。
+        人名、单号、发票都是编的。"""
+        inv, books, sf, S, e = self.inv, self.books, self.sf, self.S, self.e
+        f = self.tip.FAKE
+        for i, inst in enumerate(("PI-SELFUP-A", "PI-SELFUP-B", "PI-SELFUP-C")):
+            S.folder_upsert_from_approval(e, self._norm(instId=inst, businessId="20261012280000%d" % i, applicant="申请人戊",
+                                                        applicantUid="dt-up", payeeName=f["seller"], amount=600.0), "recv", "later")
+        H = {"X-Inv-Self": sf._new_session("dt-up", "申请人戊", "公司-销售部", "dingtalk", "t")}
+        other = {"X-Inv-Self": sf._new_session("dt-else", "路人己", "公司-别的部", "dingtalk", "t")}
+        day = (date.today() + timedelta(days=2)).isoformat()
+        body = {"invKind": "special", "taxRate": "6%", "expectDate": day, "expectAmount": 600, "receiver": "recv2"}
+        up = lambda lid, files, h=H: self.c.post("/api/inv/s/later/%d/invoices" % lid, files=[("files", x) for x in files], headers=h)
+        xml = lambda n, total: ("票%s.xml" % n[-4:], einv_xml(n, f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"],
+                                                              round(total / 1.06, 2), round(total - total / 1.06, 2), total), "application/xml")
+        sent = MagicMock(return_value={"sent": True, "msg": "已发送"})
+        with patch.object(inv, "notify_dt", sent):
+            A = self.ok(self.post("/api/inv/later/create", "recv", dict(body, instId="PI-SELFUP-A")))["later"]["id"]
+            sent.reset_mock()
+            # 没登录 / 别人的单 / 没带文件
+            self.assertEqual(self.c.post("/api/inv/s/later/%d/invoices" % A, files=[("files", xml(num(28001), 300))]).status_code, 401)
+            self.assertEqual(up(A, [xml(num(28001), 300)], other).status_code, 404)
+            self.assertEqual(self.c.post("/api/inv/s/later/%d/invoices" % A, headers=H).status_code, 400)
+            # 传一张 300：登记了、挂在这张后补单上，但不算已到
+            j = self.ok(up(A, [xml(num(28001), 300)]))
+            it = j["results"][0]["item"]
+            self.assertEqual((j["uploaded"], j["results"][0]["action"], it["origin"], it["laterId"], it["selfPending"], it["paper"]),
+                             (1, "item", "self", A, True, False))
+            lv = j["later"]
+            self.assertEqual((lv["status"], lv["receivedAmount"], lv["remaining"], lv["selfCount"], lv["selfAmount"]), ("open", 0.0, 600.0, 1, 300.0))
+            uids, text = sent.call_args[0]                                   # 钉钉告诉接收人去确认，不告诉申请人"已签收"
+            self.assertEqual(uids, ["dt-recv2"])
+            for w in ("申请人传了发票，等你确认", "申请人：申请人戊", "这次上传 1 张，现在共 ¥300.00 等确认", "确认："):
+                self.assertIn(w, text)
+            # 同一份再传一次不重复登记
+            again = self.ok(up(A, [xml(num(28001), 300)]))
+            self.assertEqual((again["uploaded"], again["results"][0]["action"], again["later"]["selfCount"]), (0, "same", 1))
+            # 申请人自己看：我的后补单里带着"已上传、等确认"
+            mine = [x for x in self.ok(self.c.get("/api/inv/s/laters", headers=H))["rows"] if x["id"] == A][0]
+            self.assertEqual((mine["selfCount"], mine["selfAmount"], mine["status"]), (1, 300.0, "open"))
+            # 财务详情里看得到这张票，标着等确认；别的权限点不了确认
+            d = self.ok(self.get("/api/inv/later/%d" % A, "recv2"))
+            self.assertEqual([(x["number"], x["selfPending"]) for x in d["items"]], [(num(28001), True)])
+            self.assertEqual(self.post("/api/inv/later/%d/confirm-self" % A, "viewer").status_code, 403)
+            # 传错了自己删：只能删自己这张单上、财务还没确认的；别人删不了
+            wrong = self.ok(up(A, [xml(num(28008), 50)]))["results"][0]["item"]["id"]
+            rows = self.ok(self.c.get("/api/inv/s/later/%d/invoices" % A, headers=H))["rows"]
+            self.assertEqual([(x["number"], x["mine"], x["pending"], x["canRemove"]) for x in rows],
+                             [(num(28001), True, True, True), (num(28008), True, True, True)])
+            self.assertEqual(self.c.get("/api/inv/s/later/%d/invoices" % A, headers=other).status_code, 404)
+            rm = lambda iid, h=H: self.c.post("/api/inv/s/later/%d/invoices/%d/remove" % (A, iid), headers=h)
+            self.assertEqual(rm(wrong, other).status_code, 404)
+            self.assertEqual(rm(999999).status_code, 404)
+            j = self.ok(rm(wrong))
+            self.assertEqual((j["later"]["selfCount"], j["later"]["selfAmount"]), (1, 300.0))
+            self.assertEqual(S.item_get(e, wrong)["status"], "removed")
+            self.assertEqual(rm(wrong).status_code, 404)                                              # 删过了
+            self.assertTrue(any(x["action"] == "移除票据" and x["user"] == "申请人戊" for x in S.logs_of(e, item_id=wrong)))
+            self.assertEqual(self.ok(up(A, [xml(num(28008), 50)]))["uploaded"], 1)                     # 删掉的那份可以重新传
+            self.ok(rm([x["id"] for x in self.ok(self.c.get("/api/inv/s/later/%d/invoices" % A, headers=H))["rows"]][-1]))
+            sent.reset_mock()
+            # 再传一张 300 凑够数：还是不算收齐，也不发"已签收"
+            sent.reset_mock()
+            j = self.ok(up(A, [xml(num(28002), 300)]))
+            self.assertEqual((j["later"]["status"], j["later"]["selfCount"], j["later"]["selfAmount"]), ("open", 2, 600.0))
+            self.assertEqual([c[0][0] for c in sent.call_args_list], [["dt-recv2"]])
+            # 够数了、只差财务确认：每日催票不再催申请人
+            S.later_update(e, A, expect_date=(date.today() - timedelta(days=3)).isoformat())
+            sent.reset_mock()
+            books._REMIND["lastDay"] = ""
+            res = books.remind_tick(now=datetime.combine(date.today(), dtime(11, 0)), force=True)
+            self.assertNotIn(A, res["ids"])
+            # 财务确认：两张都算进已到 → 收齐 → 这时才告诉申请人"已签收"
+            sent.reset_mock()
+            c = self.ok(self.post("/api/inv/later/%d/confirm-self" % A, "recv2"))
+            self.assertEqual((c["later"]["status"], c["later"]["receivedAmount"], c["later"]["selfCount"]), ("done", 600.0, 0))
+            self.assertIn("2 张", c["msg"])
+            self.assertEqual(sent.call_args[0][0], ["dt-up"])
+            self.assertIn("已签收", sent.call_args[0][1])
+            self.assertEqual(self.post("/api/inv/later/%d/confirm-self" % A, "recv2").status_code, 400)       # 没有等确认的了
+            r = rm(it["id"])                                                                          # 财务确认了就不能删
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("财务已经确认", r.json()["msg"])
+            self.assertEqual([x["canRemove"] for x in self.ok(self.c.get("/api/inv/s/later/%d/invoices" % A, headers=H))["rows"]], [False, False])
+            self.assertEqual(up(A, [xml(num(28009), 10)]).status_code, 400)                                    # 已收齐不用再传
+            self.assertTrue(any(x["action"] == "确认收到申请人上传的发票" for x in S.logs_of(e, later_id=A)))
+            self.assertTrue(S.item_get(e, it["id"])["flags_json"]["selfOk"]["by"] == "recv2")
+            # 第二张单：申请人先传电子件，财务后来扫到同一张纸质票 → 等于确认
+            B = self.ok(self.post("/api/inv/later/create", "recv", dict(body, instId="PI-SELFUP-B")))["later"]["id"]
+            j = self.ok(up(B, [xml(num(28003), 600)]))
+            self.assertEqual((j["later"]["status"], j["later"]["selfAmount"]), ("open", 600.0))
+            rc = self.ok(self.post("/api/inv/later/%d/receive" % B, "recv2", {"code": qr(num(28003), 600)}))
+            self.assertEqual((rc["action"], rc["later"]["status"], rc["later"]["receivedAmount"], rc["later"]["selfCount"]),
+                             ("confirm", "done", 600.0, 0))
+            # 第三张单：没人点确认，但这张票审核通过了 → 也算已到
+            C = self.ok(self.post("/api/inv/later/create", "recv", dict(body, instId="PI-SELFUP-C")))["later"]["id"]
+            j = self.ok(up(C, [xml(num(28004), 600)]))
+            iid = j["results"][0]["item"]["id"]
+            self.assertEqual(self.ok(self.get("/api/inv/later/%d" % C, "recv2"))["later"]["status"], "open")
+            S.item_update(e, iid, review="approved", review_by="acct", review_at=inv.now_s())
+            lv = self.ok(self.get("/api/inv/later/%d" % C, "recv2"))["later"]
+            self.assertEqual((lv["status"], lv["receivedAmount"], lv["selfCount"]), ("done", 600.0, 0))
+
+    def test_29_later_messages_are_cards(self):
+        """后补单的钉钉推送：每条消息既是纯文字（留痕、退路），又带一张钉钉标准卡片（标题条、红字、按钮）；
+        卡片发不出去就给那个人补发文字。数据都是编的，钉钉全部 mock。"""
+        from urllib.parse import quote as q
+        inv, books, idt = self.inv, self.books, self.inv.idt
+        today = date.today()
+        l = {"id": 77, "business_id": "202610120000000029001", "payee_name": "卡片收款方有限公司", "pay_amount": 1322, "expect_amount": 1322,
+             "received_amount": 0, "unregistered_amount": 0, "expect_date": (today - timedelta(days=4)).isoformat(), "inv_kind": "special",
+             "applicant": "申请人庚", "receiver_name": "接收人乙", "receiver": "recv2"}
+        md = lambda m: [c["text"] for c in m.card["contents"] if c["type"] == "markdown"]
+        btn = lambda m: next((c["actions"][0] for c in m.card["contents"] if c["type"] == "action"), None)
+        with patch.object(inv, "portal_link", lambda p: "http://wb.test" + p):
+            a, cc, asg = books._remind_text(l, today), books._remind_cc_text(l, today), books._assign_text(l)
+        # 文字版：干净的字，没有红字记号和加粗符号
+        self.assertIsInstance(a, str)
+        self.assertIn("预计到票：%s（已超期 4 天）" % l["expect_date"], a)
+        self.assertIn("还差：¥1,322.00 的专票没到", a)
+        for mark in ("\u27e6", "\u27e8", "\u27e7", "**", "<font"):
+            self.assertNotIn(mark, a)
+        # 卡片：标题条、超期和还差金额标红、按钮在钉钉里面打开后补登记页
+        self.assertEqual(a.card["header"]["title"]["text"], "发票管家 · 催票提醒")
+        rows = md(a)
+        self.assertIn("<font color=common_red1_color>**（已超期 4 天）**</font>", rows[2])
+        self.assertIn("<font color=common_red1_color>**¥1,322.00**</font>", rows[3])
+        self.assertEqual(rows[4], "**发票到了请先上传，再把纸质的交给 接收人乙。**")
+        b = btn(a)
+        self.assertEqual((b["label"]["text"], b["actionType"]), ("上传发票", "openLink"))
+        self.assertEqual(b["url"]["all"], "dingtalk://dingtalkclient/page/link?url=%s&pc_slide=true" % q("http://wb.test/#/invself", safe=""))
+        self.assertFalse(any("上传：" in x for x in rows))                    # 有按钮了，卡片里不再重复写去处
+        # 颜色跟着状态走：超期红、3 天内橙、还早不上色只加粗；已签收绿、等确认橙
+        soon, far = dict(l, expect_date=(today + timedelta(days=2)).isoformat()), dict(l, expect_date=(today + timedelta(days=20)).isoformat())
+        rs, rf = md(books._remind_text(soon, today)), md(books._remind_text(far, today))
+        self.assertIn("<font color=common_orange1_color>**（还有 2 天）**</font>", rs[2])
+        self.assertIn("<font color=common_orange1_color>**¥1,322.00**</font>", rs[3])
+        self.assertEqual((rf[2], rf[3]), ("预计到票：%s（还有 20 天）" % far["expect_date"], "还差：**¥1,322.00** 的专票没到"))
+        self.assertEqual(books._rich("共到票：" + books._tone("green", "¥1.00")), "共到票：<font color=common_green1_color>**¥1.00**</font>")
+        self.assertEqual(books._plain("共到票：" + books._tone("green", "¥1.00") + "，" + books._tone("orange", "等确认")), "共到票：¥1.00，等确认")
+        self.assertEqual(books._tone("pink", "x"), "x")                       # 不认识的颜色不上色，也不留记号
+        # 给财务的：按钮用浏览器开后补池（不走钉钉内打开）
+        self.assertEqual((btn(cc)["label"]["text"], btn(cc)["url"]["all"]), ("查看后补单", "http://wb.test/#/invlater?id=77"))
+        self.assertEqual(asg.card["header"]["title"]["text"], "发票管家 · 有一张发票后补单交给你接收")
+        # 不知道门户网址：不给按钮（给了也点不开），卡片最后一行写清楚在哪个页面
+        with patch.object(inv, "portal_link", lambda p: p):
+            a0, cc0 = books._remind_text(l, today), books._remind_cc_text(l, today)
+        self.assertIsNone(btn(a0)); self.assertIsNone(btn(cc0))
+        self.assertIn("钉钉工作台 →「%s」→ 发票后补单" % books.DT_APP, md(a0)[-1])
+        self.assertIn("工作台 → 发票后补池 → 后补单 #77", md(cc0)[-1])
+        self.assertNotIn("/#/", a0 + cc0)
+        # 出口：消息带卡片就发卡片，普通文字还是发文字
+        old = os.environ.pop("INV_DRY_SEND", None)
+        try:
+            with patch.object(idt, "send_card", MagicMock(return_value={"sent": True, "msg": "已发送", "via": "card"})) as sc, \
+                    patch.object(idt, "send_text", MagicMock(return_value={"sent": True, "msg": "已发送"})) as stx:
+                self.assertEqual(inv.notify_dt(["dt-x"], a)["via"], "card")
+                self.assertEqual(sc.call_args[0], (["dt-x"], a.card, str(a)))
+                stx.assert_not_called()
+                inv.notify_dt(["dt-x"], "普通一句话")
+                self.assertEqual(stx.call_args[0], (["dt-x"], "普通一句话"))
+                self.assertEqual(sc.call_count, 1)
+            # 卡片接口：发成了回 card；钉钉拒了（比如没权限）→ 给这个人补发文字
+            resp = MagicMock()
+            with patch.object(idt, "_load_conf", MagicMock(return_value={"appkey": "robot-k", "appsecret": "s"})), \
+                    patch.object(idt.notifier, "_dt_v2_token", MagicMock(return_value="tok")), \
+                    patch.object(idt.requests, "post", MagicMock(return_value=resp)) as post, \
+                    patch.object(idt, "send_text", MagicMock(return_value={"sent": True, "msg": "已发送"})) as stx:
+                resp.json.return_value = {"processQueryKey": "pk"}
+                self.assertEqual(idt.send_card(["dt-x", "dt-x"], a.card, str(a)), {"sent": True, "msg": "已发送", "via": "card"})
+                self.assertEqual(post.call_count, 1)                                # 同一个人只发一张
+                sentb = json.loads(post.call_args[1]["data"].decode("utf-8"))
+                self.assertEqual((sentb["cardTemplateId"], sentb["robotCode"], json.loads(sentb["singleChatReceiver"])), ("StandardCard", "robot-k", {"userId": "dt-x"}))
+                self.assertEqual(json.loads(sentb["cardData"]), a.card)
+                stx.assert_not_called()
+                resp.json.return_value = {"code": "Forbidden.AccessDenied", "message": "没有调用该接口的权限"}
+                r = idt.send_card(["dt-y"], a.card, str(a))
+                self.assertEqual((r["sent"], r["via"]), (True, "text"))
+                self.assertIn("改发了文字", r["msg"])
+                self.assertEqual(stx.call_args[0], (["dt-y"], str(a)))
+        finally:
+            if old is not None:
+                os.environ["INV_DRY_SEND"] = old
 
     def test_27_tax_tick_type(self):
         """票种的税局写法：有二维码票种代码就用官方名（半角括号），没有就按票种＋是不是数电票推。"""

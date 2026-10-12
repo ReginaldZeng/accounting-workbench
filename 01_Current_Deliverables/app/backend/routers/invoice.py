@@ -1,4 +1,5 @@
 # [Change Log]
+# Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | self_pending：申请人自己传到后补单上、财务还没确认的票；后补单视图带 selfCount/selfAmount，票视图带 selfPending
 # Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 发票管家·核心路由（B1）——权限闸（页面准入点 AND 动作点）、设置、文件落盘与取图、进票流水线
 #   （解析→查重→校验→可否抵扣建议）、后台线程（拉审批附件＋照片识别）、扫审批单、收票工作台、手机配对
@@ -91,7 +92,7 @@ USER_ORIGINS = ("upload", "camera", "phone", "scanner")   # 人手送进来的�
 OPEN_STATUSES = ("collecting", "returned")          # 收票工作台/手机只能往这两种状态的票夹里放票
 # 重算时要保留的标记（其余 flags 每次按字段重算）：原始码串、识别提示、已审票后到文件不一致、同票文件不一致、人手改机读字段、改票种
 STICKY_FLAGS = ("_qrRaw", "_warnings", "_region", "_splitDone", "_audOk", "_doubt", "postApprovalMismatch", "fileMismatch",
-                "manualOverride", "kindChanged")
+                "manualOverride", "kindChanged", "selfOk")
 SYSTEM_USER = "系统"                                 # 后台线程拉下来的附件记在"系统"名下（不算打开票夹那个人登记的）
 PAIR_ACTIVE_S = 120                                 # 手机 120 秒内来过＝正在用（电脑端据此快轮询）
 _DUP_LOCK = threading.RLock()                       # 查重"查＋插"必须原子（两个人同时扫同一张票只能一个算正主）；可重入：合并路径里还要重算
@@ -472,14 +473,16 @@ def log(user, action, folder_id=None, item_id=None, later_id=None, detail=None):
 
 def notify_dt(userids, text):
     """发钉钉的唯一出口：设了环境变量 INV_DRY_SEND → 不发，回 {'sent': False, 'msg': 'dry-run'}；
-    否则 invoice_dingtalk.send_text（未配置钉钉时它自己一个请求都不发）。永不抛异常。"""
+    否则 invoice_dingtalk.send_text（未配置钉钉时它自己一个请求都不发）。永不抛异常。
+    text 身上带着 card（后补单那几条消息，见 invoice_books._msg）→ 发钉钉标准卡片，卡片发不出去再退回发这段文字。"""
     uids = [str(x).strip() for x in (userids or []) if str(x or "").strip()]
     if not uids:
         return {"sent": False, "msg": "对方没在设置里绑定钉钉，没发通知"}
     if os.environ.get("INV_DRY_SEND"):
         return {"sent": False, "msg": "dry-run"}
     try:
-        return idt.send_text(uids, text)
+        card = getattr(text, "card", None)
+        return idt.send_card(uids, card, str(text)) if card else idt.send_text(uids, text)
     except Exception as ex:
         return {"sent": False, "msg": "发钉钉失败：%s" % ex}
 
@@ -762,6 +765,7 @@ def item_view(it, idx=None, mobile=False):
          "voidBy": it.get("void_by") or "", "voidAt": it.get("void_at") or "", "voidNote": it.get("void_note") or "",
          "status": it.get("status") or "active", "page": int(it.get("page") or 0), "dupKey": it.get("dup_key") or "",
          "createdBy": it.get("created_by") or "", "createdAt": it.get("created_at") or "", "updatedAt": it.get("updated_at") or "",
+         "selfPending": self_pending(it),
          "file": file_view(f, mobile, int(it.get("page") or 0)), "paperFile": file_view(pf, mobile)}
     for k, col in FIELD_COLS:
         v[k] = it.get(col)
@@ -773,6 +777,13 @@ def item_views(items, mobile=False):
     items = [i for i in (items or []) if i]
     idx = _file_index(E(), [i.get("folder_id") for i in items])
     return [item_view(i, idx, mobile) for i in items]
+
+
+def self_pending(it):
+    """申请人自己传到后补单上的票（origin=self），财务还没确认 → True：不算进"已到"。
+    算财务确认的三种：财务点了「确认收到」、财务自己扫到/传了同一张票（这两种记 flags.selfOk）、这张票审核通过。"""
+    return bool(it) and it.get("origin") == "self" and it.get("review") != "approved" \
+        and not ((it.get("flags_json") or {}).get("selfOk"))
 
 
 def _share(it):
@@ -945,6 +956,9 @@ def later_view(l, items=None, today=None):
         rem = round(max(0.0, float(exp) - float(l.get("received_amount") or 0) - float(l.get("unregistered_amount") or 0)), 2)
     mism = any((i.get("flags_json") or {}).get("sellerMismatch") for i in (items or [])
                if i.get("status") != "removed" and i.get("review") != "void")
+    # 申请人自己传上来、财务还没确认的票：不算已到，单独报张数和金额（重复票不算）
+    mine = [i for i in (items or []) if i.get("kind") in ("invoice", "receipt") and i.get("status") != "removed"
+            and i.get("review") != "void" and not (i.get("flags_json") or {}).get("dup") and self_pending(i)]
     return {"id": l["id"], "folderId": l.get("folder_id"), "instId": l.get("inst_id") or "",
             "businessId": l.get("business_id") or "", "template": l.get("template") or "",
             "applicant": l.get("applicant") or "", "dept": l.get("dept") or "", "company": l.get("company") or "",
@@ -958,6 +972,7 @@ def later_view(l, items=None, today=None):
             "overdue": bool(l.get("overdue")) if "overdue" in l else bool(active and days is not None and days < 0),
             "daysLeft": days, "lastRemindAt": l.get("last_remind_at") or "", "remindCount": int(l.get("remind_count") or 0),
             "note": l.get("note") or "", "sellerMismatch": bool(mism),
+            "selfCount": len(mine), "selfAmount": round(sum(_share(i) for i in mine), 2),
             "closedBy": l.get("closed_by") or "", "closedAt": l.get("closed_at") or "", "closeNote": l.get("close_note") or "",
             "createdAt": l.get("created_at") or "", "updatedAt": l.get("updated_at") or ""}
 
@@ -1582,7 +1597,8 @@ def ingest_bytes(folder_id, name, data, origin, user, later_id=None, role="origi
     结果 {name, action, msg, itemId?, folderId?}：action ∈ item/confirm/dup/same/other/folder/error/noFolder
     （要给前端的 item/folder 视图用 attach_views(results) 补）。
     folder_id 可为 None：只认审批单打印件/审批码照片（→ 打开那张单的票夹，action=folder），其它回 noFolder。
-    origin：upload/camera/phone/scanner/attachment/photo_field/later/taxpack；user＝工作台登录名。
+    origin：upload/camera/phone/scanner/attachment/photo_field/later/taxpack/self（申请人自己传到后补单上的，见 self_pending）；
+    user＝工作台登录名（申请人自助上传时是钉钉姓名）。
     later_id：后补池收票时给（票直接进审核 pending）；review 可强制初始审核状态；
     allow_switch：审批单打印件是否当"扫审批单"切换票夹（默认人手送进来的才切，钉钉附件里的审批单 PDF 只留存）。
     票夹已提交/已审核时，人手送进来的文件一律不收（folder_locked），审批单打印件照样能切换票夹。
@@ -2852,11 +2868,12 @@ def _item_update_sync(u, iid, body):
     return out, None
 
 
-def _item_remove_sync(u, iid, note):
+def _item_remove_sync(u, iid, note, guard=True):
+    """移除一张票。guard=False：调用方已经自己判过能不能删（申请人删自己传的、财务还没确认的票，见 invoice_self）。"""
     e = E()
     it = S.item_get(e, iid)
     folder = S.folder_get(e, (it or {}).get("folder_id")) if it else None
-    g = item_guard(u, it, folder)
+    g = item_guard(u, it, folder) if guard else None
     if g:
         return None, g
     S.item_update(e, iid, status="removed")
