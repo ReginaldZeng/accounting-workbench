@@ -159,6 +159,95 @@ def _status(r, folder, invs, ovr):
     return "ready"
 
 
+# ---------- 付款单往来单位编码选错：人点一下，系统把它改对（V2.925）----------
+# 用户 2026-10-12 看路凯那张(同一家公司有「物流运输服务074」「其他押金022」两条供应商档案，出纳把付款单选成了押金那条)：
+# 「这个路凯的，我们可以直接调整付款单编码吗」。先拿这一张手工试通了(改完系统下一轮自己提交、审核、出凭证、补核销分录，制单人系统操作员)，再做成按钮。
+# 这是在改出纳建的单据，所以：①只在人点了之后改，不自动改；②只改往来单位、收款单位两格，别的不碰，不提交不审核；
+# ③前提一条不满足就不动——付款单没在审核状态、组织和金额对得上、两格现在都是那个错的编码、两条档案在这个组织是同一个公司名、这笔付款还没有凭证。
+_PC_F = [("FID", "id"), ("FBillNo", "单号"), ("FDate", "日期"), ("FDOCUMENTSTATUS", "状态"), ("FPAYORGID.FName", "组织"), ("FPAYTOTALAMOUNTFOR", "金额"),
+         ("FCONTACTUNITTYPE", "往来类型"), ("FCONTACTUNIT.FNumber", "往来码"), ("FCONTACTUNIT.FName", "往来名"),
+         ("FRECTUNITTYPE", "收款类型"), ("FRECTUNIT.FNumber", "收款码")]
+
+
+def _fix_paycode(inst, user):
+    from kernels import logistics_payreq as lpq
+    wk = "logi_payreq_paywarn"
+    w = (db.get_setting(wk, None) or {}).get(inst)
+    if not w or not str(w.get("bill_id") or "").isdigit():
+        raise RuntimeError("这张请款单现在没有「付款单编码不对」的提示（可能已经改好了），刷新看看")
+    with db._engine.connect() as c:
+        r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
+        allr = [dict(x) for x in c.execute(select(PR.c.inst_id, PR.c.kd_paid)).mappings().all()]
+    if not r:
+        raise RuntimeError("请款单不存在")
+    r = dict(r)
+    old, new, org = str(w.get("code") or ""), str(r.get("sup_code") or ""), str(r.get("subject_full") or "")
+    if not old or not new or old == new:
+        raise RuntimeError("没认出该从哪个编码改成哪个编码")
+    s, conf = kc.login()
+    pb = (kc._query(s, conf, "AP_PAYBILL", _PC_F, "FID=%d" % int(w["bill_id"])) or [None])[0]
+    if not pb:
+        raise RuntimeError("金蝶里找不到这张付款单了")
+    no = str(pb.get("单号") or "").strip()
+    if pb["状态"] not in ("A", "D", "Z"):
+        raise RuntimeError("付款单 %s 现在是「%s」，改不了：请先在金蝶%s，再点" % (
+            no, _PAY_ST_CN.get(pb["状态"], pb["状态"]), "反审核（已经出了凭证的先把凭证删掉）" if pb["状态"] == "C" else "撤销提交"))
+    if pb["组织"] != org or abs(float(pb["金额"] or 0) - float(r.get("amount") or 0)) >= 0.005:
+        raise RuntimeError("付款单 %s 的付款组织或金额和这张请款单对不上了，没动" % no)
+    if pb["往来码"] == new and pb["收款码"] == new:
+        raise RuntimeError("付款单 %s 的往来单位已经是「%s」了，等下一次扫描（20 分钟内）就会配上" % (no, new))
+    if not (pb["往来类型"] == "BD_Supplier" and pb["收款类型"] == "BD_Supplier" and pb["往来码"] == old and pb["收款码"] == old):
+        raise RuntimeError("付款单 %s 的往来单位、收款单位不是都填的「%s」（往来 %s、收款 %s），情况和预想的不一样，没动，请人到金蝶看" % (
+            no, old, pb["往来码"], pb["收款码"]))
+    sup = {x["码"]: x["名"] for x in kc._query(s, conf, "BD_Supplier", [("FNumber", "码"), ("FName", "名")],
+                                             "FNumber in ('%s','%s') and FUseOrgId.FName='%s'" % (old.replace("'", ""), new.replace("'", ""), org.replace("'", "")))}
+    if not sup.get(old) or sup.get(old) != sup.get(new) or sup.get(new) != pb["往来名"]:
+        raise RuntimeError("「%s」和「%s」在金蝶里不是同一个公司名（%s / %s），不能直接换，请人到金蝶看" % (old, new, sup.get(old) or "没有", sup.get(new) or "没有"))
+    vs = kc._query(s, conf, "GL_VOUCHER", [("FVOUCHERID", "id")], "FACCOUNTBOOKID.FName='%s' and FDate='%s' and FAccountID.FNumber like '1002%%' and FCREDIT=%.2f" % (
+        org.replace("'", ""), str(pb["日期"])[:10], float(pb["金额"])))
+    if vs:
+        raise RuntimeError("金蝶里已经有这笔付款的凭证了（同账簿、同日、贷银行存款 %.2f）：先把那张凭证处理掉再改付款单" % float(pb["金额"]))
+    body = {"NeedUpDateFields": ["FCONTACTUNIT", "FRECTUNIT"], "IsDeleteEntry": False,
+            "Model": {"FID": int(pb["id"]), "FCONTACTUNITTYPE": "BD_Supplier", "FCONTACTUNIT": {"FNumber": new}, "FRECTUNITTYPE": "BD_Supplier", "FRECTUNIT": {"FNumber": new}}}
+    e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["AP_PAYBILL", json.dumps(body, ensure_ascii=False)]).json())
+    if e:
+        raise RuntimeError(("金蝶里有人正开着这张付款单（%s），改不进去：请把那个页签关掉再点。金蝶原话：%s" % (no, e)) if "冲突" in e else "金蝶没让改：%s" % e)
+    pb2 = (kc._query(s, conf, "AP_PAYBILL", _PC_F, "FID=%d" % int(pb["id"])) or [pb])[0]
+    if pb2["往来码"] != new or pb2["收款码"] != new:
+        raise RuntimeError("金蝶说保存成功，但读回来往来单位还是「%s」，没改成，请人到金蝶看" % pb2["往来码"])
+    db.audit(user, "物流付款做账-改付款单往来单位", no, "%s %s %.2f：往来单位、收款单位 %s → %s（同一家公司的两条档案）；没提交没审核" % (
+        r.get("subject") or "", r.get("payee") or "", float(r.get("amount") or 0), old, new))
+    # 本地：马上把这张付款单配给请款单、消掉提示(和 20 分钟一轮的扫描同一个配法)，不用等
+    taken = {str(x["kd_paid"]).split("|")[-1] for x in allr if x.get("kd_paid")}
+    hit = lpq.match_paybills([r], [{"id": pb2["id"], "code": new, "org": pb2["组织"], "amount": pb2["金额"], "date": str(pb2["日期"])[:10], "status": pb2["状态"]}], taken)
+    if hit.get(inst):
+        with db._engine.begin() as c:
+            c.execute(text("update %s set kd_paid=:v where inst_id=:i" % PR.name), {"v": hit[inst], "i": inst})
+    pw = dict(db.get_setting(wk, None) or {})
+    if pw.pop(inst, None) is not None:
+        db.set_setting(wk, pw, user)
+    return {"bill_no": no, "old": old, "new": new, "matched": bool(hit.get(inst))}
+
+
+@router.post("/api/logistics-voucher/fix-paycode")
+async def fix_paycode(request: Request):
+    """把金蝶付款单的往来单位、收款单位从选错的编码改成请款单的编码(同一家公司的两条供应商档案)。人点了才改；不提交不审核；留痕。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    from starlette.concurrency import run_in_threadpool
+    try:
+        r = await run_in_threadpool(_held, "物流付款做账·改付款单往来单位", _fix_paycode, str(b.get("inst") or ""), u["name"])
+    except busy.Draining as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=409)
+    except RuntimeError as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "改付款单出错：%s" % str(e)[:200]}, status_code=400)
+    return {"ok": True, **r}
+
+
 @router.get("/api/logistics-voucher/list")
 def vlist(request: Request, since: str = "2026-09-01"):
     if not _perm(request):

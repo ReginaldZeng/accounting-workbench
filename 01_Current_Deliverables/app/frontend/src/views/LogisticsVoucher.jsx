@@ -16,7 +16,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 import qrcode from '../vendor/qrcode-generator.mjs'
 
@@ -1048,6 +1048,12 @@ export default function LogisticsVoucher() {
   const [view, setView] = useState('grid')      // grid 总表(承运商 × 主体) / list 明细(一张请款单一行)
   const [pf, setPf] = useState('')              // 账单月筛选，空=全部
   // V2.920(用户「不是在付款做账点，是在账单审核点」)：发票后补的确认挪到账单复核台第③步，这里只写去哪确认
+  // 付款单往来单位编码选错(V2.925，用户「这个路凯的，我们可以直接调整付款单编码吗」)：人点一下，系统把金蝶付款单的往来单位、收款单位改对——不提交不审核，后面照常做账
+  const fixPaycode = r => {
+    const w = r.paywarn || {}
+    if (!window.confirm(`把金蝶付款单 ${w.bill_no || ''} 的往来单位、收款单位改成「${w.want}」？\n\n${r.sup_full || r.carrier} · ${r.subject} · ${money(r.amount)}\n现在填的是「${w.code}」——同一家公司的另一条供应商档案，出纳选错了。\n\n· 只改这两格，别的不动；不提交、不审核。\n· 付款单已经审核过的改不了，要先在金蝶反审核。\n· 改完这张单就能照常做账（开着自动做账的话系统下一轮自己做）。\n· 这是在改出纳建的单据，会留操作日志。`)) return
+    voucherFixPaycode(r.inst).then(x => { alert(`已把付款单 ${x.bill_no} 的往来单位从「${x.old}」改成「${x.new}」。${x.matched ? '已经配到这张请款单上，可以做账了。' : '下一次扫描（20 分钟内）会配上。'}`); load() }).catch(e => alert(e.message))
+  }
   const noInvCell = r => !r.period ? <span className="dim">未认账单月</span>
     : r.later ? <span className="warn kt">已确认发票后补 · 只做支付</span>
       : r.later_slip ? <span className="warn kt" title="发票管家里登记了后补单。到「账单复核台」这家这月的第③步「确认与登记」里点「确认发票后补」，确认之后系统自动只做支付">已登记后补单 #{r.later_slip.id} · 待账单审核确认</span>
@@ -1146,7 +1152,9 @@ export default function LogisticsVoucher() {
         </div>
         {err && <div className="lv-msg bad">{err}</div>}
         {(rows || []).filter(r => r.status === 'paycode').map(r => <div key={r.inst} className="lv-msg bad">
-          <b>付款单往来单位编码不对 · {r.sup_full || r.carrier} · {r.subject} · {money(r.amount)}</b>　{r.paywarn && r.paywarn.text}</div>)}
+          <b>付款单往来单位编码不对 · {r.sup_full || r.carrier} · {r.subject} · {money(r.amount)}</b>　{r.paywarn && r.paywarn.text}
+          {r.paywarn && <div style={{ marginTop: 6 }}><button className="btn sm" onClick={() => fixPaycode(r)}>把往来单位改成「{r.paywarn.want}」</button>
+            <span className="dim" style={{ marginLeft: 8, fontSize: 12 }}>系统替你改金蝶付款单的往来单位、收款单位两格；付款单已审核的要先在金蝶反审核</span></div>}</div>)}
         {unpaid.length > 0 && <div className="lv-unpaid">另有 <b>{unpaid.length}</b> 张请款单金蝶还没有付款单（钉钉审批中 {unpaid.filter(r => r.dt_status === 'RUNNING').length} 张
           {unpaid.some(r => r.dt_status !== 'RUNNING') && <>、已通过待付款 {unpaid.filter(r => r.dt_status !== 'RUNNING').length} 张</>}，合计 {money(unpaid.reduce((s, r) => s + (r.amount || 0), 0))}），出了付款单才在这里显示。
           <button className="lnk" onClick={() => { const on = !showUnpaid; setShowUnpaid(on); if (on) { setF(''); voucherPlans(unpaid.filter(x => x.period && x.n_inv && !plans[x.inst]).map(x => x.inst)).then(o => setPlans(old => ({ ...old, ...(o.plans || {}) }))).catch(() => {}) } }}>{showUnpaid ? '收起' : '先看一眼'}</button></div>}
