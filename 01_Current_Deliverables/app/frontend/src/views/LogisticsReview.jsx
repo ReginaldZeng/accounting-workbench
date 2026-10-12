@@ -1056,6 +1056,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .ltbl td.pl{line-height:1.25}
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
       .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:300px}
+      .lrv .dtbl td.concl{min-width:220px}
       .lrv .dtbl td.concl .sub{white-space:normal;max-width:300px;line-height:1.45;overflow-wrap:anywhere}
       .lrv .carrybar{margin:10px 0;padding:10px 14px;border:1px solid #F0D9A8;background:#FDF6E8;border-radius:10px;font-size:12.5px;color:#3d4852}
       .lrv .carrybar .ci{margin-top:6px;padding-top:6px;border-top:1px dashed #F0D9A8}.lrv .carrybar .ci.need{color:#6B4E00}.lrv .carrybar .hint{color:#1F6F4A}
@@ -1524,6 +1525,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     const on = !!sel[dkey(x, i)]
                     const cf = x.confirmed
                     const [pl, pc] = STATE_PILL[x.state] || [null, 'neu']
+                    // 结论那一格只放短句(V2.917，用户「这个变得emm」)：太长的截掉、全文放悬停，这一列再给个最小宽度——免得被一长串说明挤成一个字一行
+                    const mfull = x.mode_short || x.mode_cn || ''
+                    const mtxt = mfull.length > 44 ? mfull.slice(0, 42) + '…' : mfull
+                    const mtip = x.mode_tip || (mfull.length > 44 ? mfull : '')
                     const qd = x.q_diff
                     const ps = x.parties || []
                     return [
@@ -1543,9 +1548,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           <span className="sub">金蝶 {num(x.kd_sum)}{x.kd_unit}{qd != null && !isZero(qd) && <span className={x.state === 'qtydiff' ? 'diffbad' : ''}> · 差{qd > 0 ? '+' : ''}{num(qd)}</span>}</span></td>
                         <td className="num">{x.conv == null ? '—' : x.conv}</td>
                         <td className="concl">{cf
-                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className={'sub' + (x.mode_tip ? ' tip' : '')} title={x.mode_tip || undefined}>{pl || x.mode_short || x.mode_cn} · {cf.by}</span>
+                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className={'sub' + (mtip ? ' tip' : '')} title={mtip || undefined}>{pl || mtxt} · {cf.by}</span>
                             {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}</>
-                          : <><span className={'pill ' + pc} title={!pl && x.mode_tip ? x.mode_tip : undefined}>{pl || x.mode_short || x.mode_cn}</span>{pl && <span className={'sub' + (x.mode_tip ? ' tip' : '')} title={x.mode_tip || undefined}>{x.mode_short || x.mode_cn}</span>}
+                          : <><span className={'pill ' + pc} title={!pl && mtip ? mtip : undefined}>{pl || mtxt}</span>{pl && <span className={'sub' + (mtip ? ' tip' : '')} title={mtip || undefined}>{mtxt}</span>}
                             {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}
                             {x.suggest && x.state === 'qtydiff' && <span className="sub sugg" title={x.suggest.txt + '。点「采纳」就把这一张改成这种核法并重判；不点不会改'}>
                               建议{x.suggest.mode === 'box' ? '按箱数核' : '按重量核'}：{x.suggest.txt}
