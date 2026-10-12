@@ -991,7 +991,8 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
             <tbody>
               {d.accruals.map(a => <tr key={a.vno} title={a.expl}>
                 <td className="mono">{a.month}/{a.vno}#{a.from && <div className="dim" style={{ fontFamily: 'inherit' }}>在{a.from}账上</div>}
-                  {a.direct && <div className="dim" style={{ fontFamily: 'inherit' }}>直接做账</div>}</td><td>{a.fee || '—'}</td>
+                  {a.direct && <div className="dim" style={{ fontFamily: 'inherit' }}>直接做账</div>}</td>
+                <td>{a.fee_fix ? <>{a.fee_fix.to_fee}<div className="dim" title={a.fee_fix.reason || ''}>原记{a.fee || '—'}，做账后另做了更正凭证 {a.fee_fix.month}月 记-{a.fee_fix.vno}</div></> : (a.fee || '—')}</td>
                 <td className="num">{money(a.gross)}</td>
                 <td className="nw">{a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate)}</td>
                 <td className="num">{money(a.tax)}</td>
