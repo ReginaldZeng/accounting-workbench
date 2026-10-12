@@ -1057,6 +1057,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .sub{display:block;font-size:11px;color:#8A96A2;margin-top:2px;font-weight:400}
       .lrv .sub.sugg{color:#6B4E00;white-space:normal;max-width:300px}
       .lrv .dtbl td.concl{min-width:220px}
+      .lrv .sub.hov{cursor:help;text-decoration:underline dotted #B8C4CC;text-underline-offset:3px}
       .lrv .dtbl td.concl .sub{white-space:normal;max-width:300px;line-height:1.45;overflow-wrap:anywhere}
       .lrv .carrybar{margin:10px 0;padding:10px 14px;border:1px solid #F0D9A8;background:#FDF6E8;border-radius:10px;font-size:12.5px;color:#3d4852}
       .lrv .carrybar .ci{margin-top:6px;padding-top:6px;border-top:1px dashed #F0D9A8}.lrv .carrybar .ci.need{color:#6B4E00}.lrv .carrybar .hint{color:#1F6F4A}
@@ -1539,9 +1540,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td><Cd c={cdBook(x.subject)} />{x.subject}<span className="sub">{(() => { const f = cdFee(x.subject, x.fee_item); return f ? <><Cd c={f[0]} />{f[1]}</> : x.fee_item })()}</span>
                           {x.fee_chk === 'diff' && <span className="sub fchk bad" title="物流部填的费用类型和系统按金蝶单据判的不一样，请双方核对">物流部填 {x.fee_fill} ≠ 系统判 {x.fee_sys}</span>}
                           {x.fee_chk === 'nofill' && <span className="sub fchk" title="规范第4列「费用类型」每行必填">物流部未填 · 系统判 {x.fee_sys}</span>}
-                          {(x.subj_ovr || x.fee_chk === 'manual') && <span className="sub fchk man" title="这张单的归类是人工定的（特批等），以人工定的为准，不再和系统判的比">
-                            人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.fee_chk === 'manual' && x.fee_sys && x.fee_sys !== x.fee_ovr ? ` · 系统判 ${x.fee_sys}` : ''}</span>}
-                          {x.ovr_reason && <span className="sub fchk man" title={x.ovr_reason}>原因：{x.ovr_reason}</span>}</td>
+                          {/* V2.918(用户「这个原因也是好奇怪」)：人工定的原因原来每一行都整句写出来，一家几百行全是同一句话——改成只标「人工定 · 有原因」，原因放悬停；点开这一行还能看到全文 */}
+                          {(x.subj_ovr || x.fee_chk === 'manual' || x.ovr_reason) && <span className="sub fchk man hov"
+                            title={'这张单的归类是人工定的（特批等），以人工定的为准，不再和系统判的比。' + (x.ovr_reason ? '\n原因：' + x.ovr_reason : '')}>
+                            人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.fee_chk === 'manual' && x.fee_sys && x.fee_sys !== x.fee_ovr ? ` · 系统判 ${x.fee_sys}` : ''}{x.ovr_reason ? ' · 有原因' : ''}</span>}</td>
                         <td>{x.bizline ? <><Cd c={cdBiz(x.bizline)} />{x.bizline}</> : <span className="dim">—</span>}</td>
                         <td className="party" title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</td>
                         <td className="num">{num(x.bill_amt)}<small className="u">{x.bill_unit}</small>
