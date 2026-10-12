@@ -424,6 +424,39 @@ class TestResume(unittest.TestCase):
         self.assertEqual(self.step(pay, "A"), "amend")
 
 
+class CashflowSplit(unittest.TestCase):
+    """V2.926 付款凭证的现金流量按计提性质拆。样本取自 2026-10-12 实际改过的那 20 张。"""
+
+    def test_single_and_split(self):
+        rows, why = V.cashflow_split([{"fee": "出库运费", "expl": "计提顺丰冷运8月线下植物肉出库运费", "gross": 17630.95}], 17630.95)
+        self.assertEqual((why, [(x["name"], x["amount"]) for x in rows]), ("", [("运费", 17630.95)]))
+        rows, why = V.cashflow_split([{"fee": "入库运费", "expl": "计提链盟8月线下小料入库运费", "gross": 36500},
+                                      {"fee": "出库运费", "expl": "计提链盟8月线下小料出库运费", "gross": 409795}], 446295)
+        self.assertEqual((why, {x["name"]: x["amount"] for x in rows}), ("", {"成本运费": 36500.0, "运费": 409795.0}))
+
+    def test_other_kinds(self):
+        one = lambda fee, expl="": V.cashflow_split([{"fee": fee, "expl": expl, "gross": 100}], 100)[0][0]["name"]
+        self.assertEqual(one("货物仓储费"), "仓储费")
+        self.assertEqual(one("快递费", "陈慧娴提起支付禾享新加坡样品运费"), "其他业务活动费用")
+        self.assertEqual(one("出库运费", "计提顺捷8月线下研发样品出库运费"), "研发类")           # 摘要里带研发的归研发类
+        self.assertEqual(one("制造费用", "计提丰源8月线下孝感工厂入库运费"), "成本运费")           # 费用项目没写、摘要写了入库
+
+    def test_refuses_to_guess(self):
+        """归不到项目的(搬运费)、合计对不上的，都不猜——返回原因，由人处理。「搬运费」里有「运费」两个字，不能被当成运费。"""
+        rows, why = V.cashflow_split([{"fee": "出库运费", "gross": 75155}, {"fee": "搬运费", "expl": "计提易风达8月线下设备转移费", "gross": 300}], 75455)
+        self.assertEqual(rows, [])
+        self.assertIn("搬运费", why)
+        rows, why = V.cashflow_split([{"fee": "出库运费", "gross": 100}], 120)
+        self.assertEqual(rows, [])
+        self.assertIn("对不上", why)
+        self.assertEqual(V.cashflow_split([], 100)[0], [])
+
+    def test_custom_rules(self):
+        rules = [{"kw": "搬运", "expl": False, "code": "CI01.02.01.00202", "name": "成本运费"}] + V.CASHFLOW_RULES
+        rows, why = V.cashflow_split([{"fee": "搬运费", "gross": 300}, {"fee": "入库运费", "gross": 400}], 700, rules)
+        self.assertEqual((why, [(x["name"], x["amount"]) for x in rows]), ("", [("成本运费", 700.0)]))
+
+
 class NoticeText(unittest.TestCase):
     """V2.910 自动做账做完的提醒话术。"""
     HX = {"subject": "深圳星期零", "payee": "上海顺丰冷运", "amount": 17630.95, "kind": "hx", "text": "计提与发票一致，只核销", "vno": "330", "done": True}

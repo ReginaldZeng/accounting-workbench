@@ -536,6 +536,51 @@ def resume_step(ents, status, add, amount, sup_code=""):
     return "stop", "这张凭证里的分录和系统要补的对不上（可能有人改过），系统没动，请人工处理"
 
 
+# ---------- 付款凭证的现金流量：按核销的计提是什么性质来拆（V2.926）----------
+# 用户 2026-10-12：「我怎么感觉你的现金流量都有点问题」。查实：金蝶出付款凭证时按「供应商往来」科目的预设把现金流量自动指定成「货款」，
+# 以前是人在审核前手工改对，系统做的凭证跳过了这一步——工作台做过账的 20 张全挂在「货款」上。
+# 人的做法(7–8 月物流付款凭证实证：入库 10/11、出库 39/39、仓储 4/4、快递 6/6)：按这张付款核销的每笔计提是什么性质分，金额＝该计提的含税数(有更正的按更正后)。
+# 下面是默认规则，从上往下先中先用；kw 是正则，对着计提的「费用项目」找，expl=True 的也对着摘要找。页面上可以改(存设置)，这里只是出厂值。
+CASHFLOW_RULES = [
+    {"kw": "仓储|冷藏", "expl": False, "code": "CI01.02.04.00802", "name": "仓储费"},
+    {"kw": "快递", "expl": False, "code": "CI01.02.04.00506", "name": "其他业务活动费用"},
+    {"kw": "研发", "expl": True, "code": "CI01.02.04.00505", "name": "研发类"},
+    {"kw": "入库", "expl": True, "code": "CI01.02.01.00202", "name": "成本运费"},
+    {"kw": "出库运费|调拨运费|^运费$", "expl": False, "code": "CI01.02.04.00801", "name": "运费"},
+]
+
+
+def cashflow_split(accruals, amount, rules=None):
+    """这张付款的现金流量该拆成哪几项 → ([{code, name, amount}], 定不了的原因)。原因非空时第一项为空：有计提归不到项目、或各项合计≠付款金额，都不猜。
+    accruals: [{fee 费用项目, expl 摘要, gross 这笔计提这次核销的含税数(有更正的传更正后的)}]。"""
+    rules = rules if rules else CASHFLOW_RULES
+    out, miss = {}, []
+    for a in accruals or []:
+        fee, expl = str(a.get("fee") or ""), str(a.get("expl") or "")
+        hit = None
+        for r in rules:
+            try:
+                if re.search(r["kw"], fee) or (r.get("expl") and re.search(r["kw"], expl)):
+                    hit = r
+                    break
+            except re.error:
+                continue
+        if not hit:
+            miss.append(fee or "（没有费用项目）")
+            continue
+        o = out.setdefault(hit["code"], {"code": hit["code"], "name": hit.get("name") or hit["code"], "amount": 0.0})
+        o["amount"] = r2(o["amount"] + float(a.get("gross") or 0))
+    if miss:
+        return [], "费用项目「%s」还没有对应的现金流量项目" % "、".join(dict.fromkeys(miss))
+    rows = [x for x in out.values() if abs(x["amount"]) >= 0.005]
+    tot = r2(sum(x["amount"] for x in rows))
+    if not rows:
+        return [], "没有计提，不知道该挂哪个现金流量项目"
+    if abs(tot - float(amount or 0)) >= 0.005:
+        return [], "按计提拆出来合计 %.2f，和付款金额 %.2f 对不上" % (tot, float(amount or 0))
+    return rows, ""
+
+
 # ---------- 自动做账做完，发给同事的那条提醒（V2.910）----------
 def _nt_amt(v):
     try:

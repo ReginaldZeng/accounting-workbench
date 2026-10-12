@@ -159,6 +159,144 @@ def _status(r, folder, invs, ovr):
     return "ready"
 
 
+# ---------- 付款凭证的现金流量（V2.926，见内核 CASHFLOW_RULES 的说明）----------
+# 做完账顺手把现金流量从金蝶默认的「货款」改成按计提性质拆的项目：用金蝶的「现金流量引入」(GL_IMPORTCASHFLOW)——本方分录＝银行存款那一行、
+# 对方分录＝借 供应商往来(＝付款金额)那一行、主表项目、金额。实测(2026-10-12)：未审核、已审核的凭证都能改，一行拆几个项目也行，只动现金流量、不动分录。
+# 拆不出来(有计提归不到项目、合计对不上)或分录认不准的，不猜、不写，在做账步骤里用「⚠」写明，人去金蝶指定。
+_CF_RULES_KEY = "logi_cashflow_rules"      # [{kw, expl, code, name}]，没存过用内核的出厂值
+
+
+def _cf_rules():
+    rs = db.get_setting(_CF_RULES_KEY, None)
+    return [r for r in rs if isinstance(r, dict) and r.get("kw") and r.get("code")] if isinstance(rs, list) and rs else [dict(r) for r in LV.CASHFLOW_RULES]
+
+
+def _cf_plan(d):
+    """预览数据 → (这张付款的现金流量该拆成的几项, 定不了的原因)。每笔计提的金额取这次核销的含税数(有更正的按更正后)。"""
+    newg = {str(a["vno"]): float(a["new"]["gross"]) for a in d.get("adjust") or [] if a.get("mode") != "xout" and a.get("new")}
+    acc = [{"fee": a.get("fee"), "expl": a.get("expl"),
+            "gross": float(a["gross_new"]) if a.get("gross_new") is not None else newg.get(str(a["vno"]), float(a.get("gross") or 0))} for a in d.get("accruals") or []]
+    return LV.cashflow_split(acc, (d.get("req") or {}).get("amount"), _cf_rules())
+
+
+def _cf_now(vid, s, conf):
+    """金蝶里这张凭证现在的现金流量 → {主表项目: 金额}。只读。"""
+    out = {}
+    for r in kc._query(s, conf, "BAS_CASHFLOWBAL", [("FVOUCHERID", "vid"), ("FITEMID.FName", "名"), ("FAMOUNT", "金额")], "FVOUCHERID=%d" % int(vid), "FVOUCHERID"):
+        out[r["名"] or "（空）"] = LV.r2(out.get(r["名"] or "（空）", 0) + float(r["金额"] or 0))
+    return out
+
+
+def _cf_txt(items):
+    return " ＋ ".join("%s %s" % (k, "{:,.2f}".format(v)) for k, v in items.items()) or "没有"
+
+
+def _set_cashflow(inst, vid, s, conf, d=None, vno=""):
+    """把这张付款凭证的现金流量改成按计提性质拆的项目 → {ok, items, msg}。不抛错由调用方兜；什么都没改时 ok=False 并说明原因。"""
+    if d is None:
+        d, code = _preview_data(inst, self_vno=vno or None)
+        if code != 200:
+            return {"ok": False, "items": {}, "msg": d.get("msg") or "读不到这张请款单"}
+    rows, why = _cf_plan(d)
+    if why:
+        return {"ok": False, "items": {}, "msg": why}
+    amt = float(d["req"].get("amount") or 0)
+    target = {x["name"]: x["amount"] for x in rows}
+    m = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
+    ents = [e for e in (m or {}).get("GL_VOUCHERENTRY") or [] if e.get("FACCOUNTID")]
+    dr = lambda e: float(e.get("DEBIT") if e.get("DEBIT") is not None else (e.get("FDEBIT") or 0) or 0)       # 金蝶「查看」返回的借方键是 DEBIT、贷方键是 FCREDIT
+    cr = lambda e: float(e.get("FCREDIT") if e.get("FCREDIT") is not None else (e.get("CREDIT") or 0) or 0)
+    bank = [e for e in ents if (e["FACCOUNTID"].get("IsBank") or e["FACCOUNTID"].get("IsCash")) and cr(e) > 0]
+    if len(bank) != 1 or abs(cr(bank[0]) - amt) >= 0.005:
+        return {"ok": False, "items": {}, "msg": "凭证里银行存款那一行认不准（%d 行贷方）" % len(bank)}
+    opp = [e for e in ents if e["FACCOUNTID"].get("Number") == "2241.02" and abs(dr(e) - amt) < 0.005]
+    if len(opp) != 1:
+        return {"ok": False, "items": {}, "msg": "凭证里「借 供应商往来＝付款金额」那一行认不准（%d 行）" % len(opp)}
+    if _cf_now(vid, s, conf) == target:
+        return {"ok": True, "items": target, "msg": "本来就是对的"}
+    body = {"Model": {"FACCOUNTBOOKID": {"FNumber": (m.get("AccountBookID") or {}).get("Number")},
+                      "FEntity": [{"FVCHENTRYID": bank[0]["Id"], "FOPPVCHENTRYID": opp[0]["Id"], "FAMOUNT": x["amount"], "FITEMID": {"FNumber": x["code"]}} for x in rows]}}
+    e = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["GL_IMPORTCASHFLOW", json.dumps(body, ensure_ascii=False)]).json())
+    if e:
+        return {"ok": False, "items": {}, "msg": "金蝶没让改：%s" % e[:160]}
+    after = _cf_now(vid, s, conf)
+    if after != target:
+        return {"ok": False, "items": after, "msg": "写进去了，但读回来是 %s，和要的 %s 不一样" % (_cf_txt(after), _cf_txt(target))}
+    return {"ok": True, "items": target, "msg": ""}
+
+
+def _cf_step(r):
+    return ("现金流量：%s" % _cf_txt(r["items"])) if r.get("ok") else "⚠ 现金流量没指定成，还是金蝶默认的「货款」：%s。请在金蝶手工指定" % (r.get("msg") or "原因不明")
+
+
+@router.post("/api/logistics-voucher/cashflow")
+async def cashflow_fix(request: Request):
+    """已经做过账的凭证：按现在的规则重新指定一次现金流量(规则改过、或当时没指定成的)。只动现金流量，不动分录。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    rec = (db.get_setting(_POSTED_KEY, None) or {}).get(inst)
+    if not rec or not str(rec.get("vid") or "").isdigit():
+        return JSONResponse({"ok": False, "msg": "这张还没做账"}, status_code=400)
+
+    def run():
+        s, conf = kc.login()
+        r = _set_cashflow(inst, int(rec["vid"]), s, conf, vno=rec.get("vno") or "")
+        posted = dict(db.get_setting(_POSTED_KEY, None) or {})
+        if isinstance(posted.get(inst), dict):
+            posted[inst] = dict(posted[inst], cashflow=r)
+            db.set_setting(_POSTED_KEY, posted, u["name"])
+        db.audit(u["name"], "物流付款做账-改凭证现金流量", "记-%s" % (rec.get("vno") or ""), _cf_step(r))
+        return r
+    from starlette.concurrency import run_in_threadpool
+    try:
+        r = await run_in_threadpool(_held, "物流付款做账·指定现金流量", run)
+    except busy.Draining as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=409)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": "指定现金流量出错：%s" % str(e)[:200]}, status_code=400)
+    return {"ok": bool(r.get("ok")), "msg": _cf_step(r), "cashflow": r}
+
+
+@router.get("/api/logistics-voucher/cashflow-rules")
+def cashflow_rules_get(request: Request):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    try:
+        s, conf = kc.login()
+        opts = [{"code": x["码"], "name": x["名"]} for x in sorted(kc._query(s, conf, "GL_CashFlow", [("FNumber", "码"), ("FName", "名"), ("FIsDetail", "明细")], "FNumber like 'CI01.02%'"),
+                                                                  key=lambda x: x["码"]) if x.get("明细")]
+    except Exception:
+        opts = []
+    return {"ok": True, "rules": _cf_rules(), "custom": isinstance(db.get_setting(_CF_RULES_KEY, None), list), "defaults": LV.CASHFLOW_RULES, "options": opts}
+
+
+@router.post("/api/logistics-voucher/cashflow-rules")
+async def cashflow_rules_set(request: Request):
+    """存现金流量规则(从上往下先中先用)；rules 传空＝恢复出厂值。留痕。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    rs = []
+    for r in (b.get("rules") or [])[:60]:
+        kw, code = str(r.get("kw") or "").strip(), str(r.get("code") or "").strip()
+        if not kw and not code:
+            continue
+        if not kw or not code:
+            return JSONResponse({"ok": False, "msg": "每条规则都要有字眼和现金流量项目"}, status_code=400)
+        try:
+            re.compile(kw)
+        except re.error:
+            return JSONResponse({"ok": False, "msg": "字眼「%s」写法不对（几个字眼用 | 隔开）" % kw}, status_code=400)
+        rs.append({"kw": kw, "expl": bool(r.get("expl")), "code": code, "name": str(r.get("name") or "").strip() or code})
+    db.set_setting(_CF_RULES_KEY, rs or None, u["name"])
+    db.audit(u["name"], "物流付款做账-现金流量规则", "%d 条" % len(rs) if rs else "恢复出厂值", "；".join("%s%s→%s" % (r["kw"], "(含摘要)" if r["expl"] else "", r["name"]) for r in rs)[:900])
+    return {"ok": True, "rules": _cf_rules()}
+
+
 # ---------- 付款单往来单位编码选错：人点一下，系统把它改对（V2.925）----------
 # 用户 2026-10-12 看路凯那张(同一家公司有「物流运输服务074」「其他押金022」两条供应商档案，出纳把付款单选成了押金那条)：
 # 「这个路凯的，我们可以直接调整付款单编码吗」。先拿这一张手工试通了(改完系统下一轮自己提交、审核、出凭证、补核销分录，制单人系统操作员)，再做成按钮。
@@ -621,6 +759,16 @@ def preview(request: Request, inst: str):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     d, code = _preview_data(inst)
+    if code == 200:                      # 现金流量(V2.926)：这张会怎么拆；已经做过账的，再读金蝶现在实际挂的
+        try:
+            rows, why = _cf_plan(d)
+            d["cashflow"] = {"rows": rows, "why": why}
+            prec = (d.get("req") or {}).get("posted") or {}
+            if str(prec.get("vid") or "").isdigit():
+                s, conf = kc.login()
+                d["cashflow"]["now"] = _cf_now(prec["vid"], s, conf)
+        except Exception as e:
+            d["cashflow"] = {"rows": [], "why": "现金流量没算出来：%s" % str(e)[:100]}
     return d if code == 200 else JSONResponse(d, status_code=code)
 
 
@@ -1391,8 +1539,12 @@ def _post_finish(inst, user, req, pb, fid, vid, vno, s, conf, steps, rec0, n_new
     # 补完分录就提交凭证(用户 2026-10-02：公司凭证做完都提交，进审核人的待审列表；审核仍留给人)
     sub_err = _kd_ok(kc._post(s, conf, kc.SUBMIT_SVC, ["GL_VOUCHER", json.dumps({"Ids": str(vid)})]).json()) if submit else ""
     m2 = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(vid)})]).json()["Result"]["Result"]
+    try:                                    # 现金流量(V2.926)：从金蝶默认的「货款」改成按计提性质拆的项目；改不成只提醒，不拦做账
+        cfr = _set_cashflow(inst, vid, s, conf, d2, vno)
+    except Exception as e:
+        cfr = {"ok": False, "items": {}, "msg": "出错：%s" % str(e)[:140]}
     rec = dict(rec0, at=_now(), by=user, dr=m2.get("DEBITTOTAL"), cr=m2.get("FCREDITTOTAL"), lines=n_new + 2,
-               submitted=not sub_err, submit_err=sub_err, status=m2.get("DocumentStatus"))
+               submitted=not sub_err, submit_err=sub_err, status=m2.get("DocumentStatus"), cashflow=cfr)
     posted = dict(db.get_setting(_POSTED_KEY, None) or {})
     posted[inst] = rec
     db.set_setting(_POSTED_KEY, posted, user)
@@ -1405,6 +1557,7 @@ def _post_finish(inst, user, req, pb, fid, vid, vno, s, conf, steps, rec0, n_new
         steps.append("凭证已提交，等人审核" if not sub_err else "凭证提交失败：%s（凭证已保存，可在金蝶手动提交）" % sub_err)
     else:
         steps.append("凭证之前已经提交过，这次只补了系统里的做账记录")
+    steps.append(_cf_step(cfr))
     # 首页待办区：提交成功 → 给付款凭证审核人记一笔；没提交上 → 挂回做账人。合进凭证的计提更正顺带销账。失败只留痕，不拦。
     todo_scenes.voucher_touch(inst, rec, req, user)
     todo_scenes.fix_touch(req.get("carrier"), req.get("period"), user)

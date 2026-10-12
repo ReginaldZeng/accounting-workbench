@@ -16,7 +16,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherCashflowFix, voucherCashflowRules, voucherCashflowRulesSet, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 import qrcode from '../vendor/qrcode-generator.mjs'
 
@@ -555,6 +555,43 @@ export function VoucherScanPage({ user }) {
 
 // 自动做账栏：跟在每 20 分钟扫钉钉、配金蝶付款单那一轮后面跑。演练＝只算「如果开着会做哪几张」，不碰金蝶；真做＝系统自己审核付款单、写凭证并提交。
 const AUTO_MODE = { off: ['关', 'neu'], dry: ['演练（只算不写）', 'warn'], on: ['真做', 'ok'] }
+// 现金流量规则(V2.926，用户「我怎么感觉你的现金流量都有点问题」)：付款凭证的现金流量按核销的计提是什么性质来拆——计提的费用项目(或摘要)里带哪些字，挂哪个主表项目。
+//   从上往下先中先用；归不到的系统不猜，做账时会提醒去金蝶手工指定。出厂值是从以前人做的凭证里归纳的。
+function CashflowRules({ onClose, onSaved }) {
+  const [d, setD] = useState(null)
+  const [rows, setRows] = useState([])
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { voucherCashflowRules().then(r => { setD(r); setRows(r.rules.map(x => ({ ...x }))) }).catch(e => setErr(e.message)) }, [])
+  const set = (i, k, v) => setRows(rows.map((x, n) => (n === i ? { ...x, [k]: v, ...(k === 'code' ? { name: ((d.options || []).find(o => o.code === v) || {}).name || x.name } : {}) } : x)))
+  const move = (i, dlt) => { const j = i + dlt; if (j < 0 || j >= rows.length) return; const r = [...rows]; [r[i], r[j]] = [r[j], r[i]]; setRows(r) }
+  const save = rs => { setBusy(true); setErr(''); voucherCashflowRulesSet(rs).then(() => { onSaved && onSaved(); onClose() }).catch(e => setErr(e.message)).finally(() => setBusy(false)) }
+  return <div className="lv-mask ap" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+    <div className="lv-dlg lv-ap" role="dialog" aria-label="现金流量规则" style={{ width: 'min(820px,100%)' }}>
+      <div className="aph"><b>现金流量规则</b><span className="dim">付款凭证的现金流量，按核销的计提是什么性质来拆</span><span style={{ flex: 1 }} /><button className="lnk" onClick={onClose}>关闭</button></div>
+      <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.7, marginBottom: 8 }}>计提的<b>费用项目</b>里带这些字，这笔计提的含税金额就挂到右边的项目上；勾了「也看摘要」的，摘要里带也算。从上往下，先对上哪条用哪条。
+        几个字眼用 <span className="mono">|</span> 隔开。一条都对不上的，系统不猜：做账时会提醒你去金蝶手工指定。</div>
+      {err && <div className="lv-msg bad">{err}</div>}
+      {!d && !err && <div className="dim">读规则和金蝶的现金流量项目…</div>}
+      {d && <><table className="lv-t"><thead><tr><th style={{ width: 44 }}></th><th>费用项目里带这些字</th><th style={{ width: 90 }}>也看摘要</th><th style={{ width: 300 }}>现金流量主表项目</th><th style={{ width: 40 }}></th></tr></thead>
+        <tbody>{rows.map((x, i) => <tr key={i}>
+          <td><button className="lnk" disabled={i === 0} onClick={() => move(i, -1)} title="上移">↑</button> <button className="lnk" disabled={i === rows.length - 1} onClick={() => move(i, 1)} title="下移">↓</button></td>
+          <td><input value={x.kw} onChange={e => set(i, 'kw', e.target.value)} style={{ width: '100%' }} aria-label="字眼" /></td>
+          <td><input type="checkbox" checked={!!x.expl} onChange={e => set(i, 'expl', e.target.checked)} aria-label="也看摘要" /></td>
+          <td>{(d.options || []).length ? <select value={x.code} onChange={e => set(i, 'code', e.target.value)} style={{ width: '100%' }} aria-label="现金流量项目">
+            {!(d.options || []).some(o => o.code === x.code) && <option value={x.code}>{x.code} {x.name}</option>}
+            {d.options.map(o => <option key={o.code} value={o.code}>{o.code} {o.name}</option>)}</select> : <span className="mono">{x.code} {x.name}</span>}</td>
+          <td><button className="lnk" onClick={() => setRows(rows.filter((_, n) => n !== i))}>删</button></td></tr>)}</tbody></table>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 10 }}>
+          <button className="lnk" onClick={() => setRows([...rows, { kw: '', expl: false, code: (d.options[0] || {}).code || '', name: (d.options[0] || {}).name || '' }])}>＋ 加一条</button>
+          <span style={{ flex: 1 }} />
+          {d.custom && <button className="lnk" disabled={busy} onClick={() => { if (window.confirm('恢复成出厂的 ' + d.defaults.length + ' 条规则？')) save([]) }}>恢复出厂值</button>}
+          <button className="btn pri" disabled={busy || rows.some(x => !String(x.kw).trim() || !x.code)} onClick={() => save(rows)}>{busy ? '保存中…' : '保存'}</button>
+        </div></>}
+    </div>
+  </div>
+}
+
 // 自动做账进度窗(V2.912)：正在找单 / 正在算第几张 / 正在写金蝶第几张——哪家、多少钱、做到哪一步；下面是这一轮已经做完的。
 function AutoProgress({ p, onClose }) {
   const live = !!p.on
@@ -811,6 +848,9 @@ function Detail({ inst, onClose, onChanged }) {
     voucherPaperOverride(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
   const [l3busy, setL3busy] = useState(false)    // 发票后补第三笔：建暂估转待认证凭证
+  const [cfRules, setCfRules] = useState(false)   // 现金流量规则弹窗(V2.926)
+  const [cfBusy, setCfBusy] = useState(false)
+  const cfFix = () => { setCfBusy(true); voucherCashflowFix(inst).then(r => { alert(r.msg); load() }).catch(e => alert(e.message)).finally(() => setCfBusy(false)) }
   const [l3msg, setL3msg] = useState(null)
   const setLater = on => {
     let note = ''
@@ -902,6 +942,19 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
                 {d.req.later_slip.filed_by ? ` · ${d.req.later_slip.filed_by} 登记` : ''}），可以先把付款凭证做了：
                 <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setLater(true)}>发票后补，先做付款凭证</button></>
               : <>要没票先做付款凭证，得先在<b>发票管家登记发票后补单</b>（申请人自助登记，或财务在后补池登记）——这张还没有登记，现在不能先做。</>}</div>}
+          {d.cashflow && (() => {       // 现金流量(V2.926)：这张付款会挂到哪几个主表项目上；已做账的把金蝶里现在实际挂的也读出来对一下
+            const cf = d.cashflow, want = Object.fromEntries((cf.rows || []).map(x => [x.name, x.amount]))
+            const txt = o => Object.entries(o).map(([k, v]) => `${k} ${money(v)}`).join(' ＋ ') || '没有'
+            const same = cf.now && !cf.why && JSON.stringify(Object.entries(cf.now).sort()) === JSON.stringify(Object.entries(want).sort())
+            return <div className={'lv-msg' + (cf.why || (cf.now && !same) ? ' warn' : '')} style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', alignItems: 'center' }}>
+              <b>现金流量</b>
+              {cf.why ? <span>定不了：{cf.why}。做账时系统不会猜，要到金蝶手工指定，或者先把规则补上</span> : <span>{d.req.posted ? '按规则应挂' : '做账时会挂'}：{txt(want)}</span>}
+              {cf.now && <span className={same ? 'ok' : ''}>金蝶里现在挂的：{txt(cf.now)}{same ? ' ✓' : ''}</span>}
+              {d.req.posted && cf.now && !same && !cf.why && <button className="btn sm" disabled={cfBusy} onClick={cfFix}>{cfBusy ? '正在改…' : '按规则重新指定'}</button>}
+              <button className="lnk" onClick={() => setCfRules(true)}>规则</button>
+            </div>
+          })()}
+          {cfRules && <CashflowRules onClose={() => setCfRules(false)} onSaved={load} />}
           {d.req.later && <div className="lv-msg warn">已确认<b>发票后补</b>（{d.req.later.by} {d.req.later.at}：{d.req.later.note}）——付款凭证只做支付，发票到了再转待认证。
             {!d.req.posted && <button className="lnk" style={{ marginLeft: 8 }} onClick={() => setLater(false)}>撤销</button>}</div>}
           {(d.xbook || []).map(x => <div key={x.short + x.vno} className={'lv-msg ' + (x.reversed ? 'okb' : 'warn')}>
