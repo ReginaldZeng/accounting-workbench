@@ -5336,13 +5336,18 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         # 分组：ERP/金蝶数据、账单原始数据、复核数据分开配色；★=重点关注列。(组名, 组色, 列头浅色, doc级仅首行填, [(列头, 取值键)])
         # V2.930(用户看恒茂导出「这个10.5得放出来吧？」)：按计费吨重核的，每箱计费千克单独一列，核对量的公式引用这一格；没有这种单的承运商不出这一列
         _has_bw = any(m.get("box_kg") for x in res.get("docs") or [] for m in x.get("materials") or [])
+        # V2.931(用户「放」)：按体积计费的箱子长宽高和每方千克、按托计费的每托箱数和每托千克，也各放成列，公式引用这些格
+        _ckinds = {(x.get("chk") or {}).get("kind") for x in res.get("docs") or []}
+        _has_vol, _has_pal = "vol" in _ckinds, "pallet" in _ckinds
         groups = [
             ("归属·计提", "5E6B78", "E7ECEF", False, [("费用主体", "subject"), ("承运商", "carrier"),
                 ("费用类型", "fee_item"), ("业务线", "bizline"), ("单据号", "doc_no")]),
             ("ERP·金蝶数据", "2E7D57", "DCEFE4", False, [("客户/仓库", "party"), ("物料编码", "code"),
                 ("物料名称", "name"), ("规格", "spec"), ("基本单位数量", "base_kg"), ("基本单位", "kg_unit"),
                 ("金蝶数量", "base_qty"), ("数量单位", "base_unit"), ("每箱数量", "box_div"), ("折箱数", "box_n")] +
-                ([("每箱计费千克", "box_kg")] if _has_bw else []) + [("金蝶核对量", "kd"), ("销售额", "sales")]),
+                ([("每箱计费千克", "box_kg")] if _has_bw else []) +
+                ([("箱长(厘米)", "_vl"), ("箱宽(厘米)", "_vw"), ("箱高(厘米)", "_vh"), ("每方千克", "_vk")] if _has_vol else []) +
+                ([("每托箱数", "_pbox"), ("每托千克", "_pkg")] if _has_pal else []) + [("金蝶核对量", "kd"), ("销售额", "sales")]),
             ("账单·%s原账单" % carrier, "B06A12", "FBF0DA", True, [("运输方式", "_cs")] +
                 [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费量", "_cw")]),
             ("复核数据", "B23B2E", "F8DDD8", False, [("账单量", "bill_amt"), ("账单单位", "bill_unit"),
@@ -5435,6 +5440,13 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     for (_h, k) in cols:
                         if _is_doclvl(k) and not firstdoc:
                             val = None                       # 单据级列仅首行写值，其余留空待合并
+                        elif k in ("_vl", "_vw", "_vh", "_vk", "_pbox", "_pkg"):      # 这张单按体积 / 按托核时用的系数，每个物料行都写(公式引用本行)
+                            _ck = x0.get("chk") or {}
+                            val = None
+                            if r and _ck.get("kind") == "vol" and k[:2] == "_v":
+                                val = _ck["k"] if k == "_vk" else _ck["lwh"]["lwh".index(k[2])]
+                            elif r and _ck.get("kind") == "pallet" and k[:2] == "_p":
+                                val = _ck.get("pal_box") if k == "_pbox" else _ck.get("pal_kg")
                         elif k == "_cs":
                             val = cs
                         elif k == "_amt":
@@ -5507,7 +5519,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 elif kind == "vol" and bn is not None:                                  # 按体积：折箱数 × 长×宽×高(厘米)÷1000000 × 每方千克数
                     l_, w_, h_ = ck["lwh"]
                     if abs(round(bn * l_ * w_ * h_ / 1e6 * ck["k"], 2) - kd) < 0.011:
-                        ws2.cell(row=rr, column=col_of_key["kd"], value="=ROUND(%s%d*%g*%g*%g/1000000*%g,2)" % (CL["box_n"], rr, l_, w_, h_, ck["k"]))
+                        ws2.cell(row=rr, column=col_of_key["kd"], value="=ROUND(%s%d*%s%d*%s%d*%s%d/1000000*%s%d,2)" % (
+                            CL["box_n"], rr, CL["_vl"], rr, CL["_vw"], rr, CL["_vh"], rr, CL["_vk"], rr))
                         n_formula += 1
             kds = _xl_num(x0.get("kd_sum"))
             bill = _xl_num(x0.get("bill_amt")) if rc["n"] == 1 else _xl_num(ws2.cell(row=s0, column=col_of_key["bill_amt"]).value)      # 几行账单的：账单量是这几行的合计
@@ -5520,11 +5533,11 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     _h = sum(bns) / ck["pal_box"] * 2.0
                     _tn = (int(_h) + (1 if _h - int(_h) > 1e-9 else 0)) / 2.0
                     if abs(_tn * ck["pal_kg"] - kds) < 0.011:                            # 按托：折箱数合计 ÷ 每托箱数，不足半托按半托，× 每托千克数
-                        f_sum = "=CEILING(ROUND(SUM(%s)/%g,6),0.5)*%g" % (rng_bn, ck["pal_box"], ck["pal_kg"])
+                        f_sum = "=CEILING(ROUND(SUM(%s)/%s%d,6),0.5)*%s%d" % (rng_bn, CL["_pbox"], s0, CL["_pkg"], s0)
                 elif kind == "vol" and all(b is not None for b in bns):
                     l_, w_, h_ = ck["lwh"]
                     if abs(round(sum(bns) * l_ * w_ * h_ / 1e6 * ck["k"], 2) - kds) < 0.011:
-                        f_sum = "=ROUND(SUM(%s)*%g*%g*%g/1000000*%g,2)" % (rng_bn, l_, w_, h_, ck["k"])
+                        f_sum = "=ROUND(SUM(%s)*%s%d*%s%d*%s%d/1000000*%s%d,2)" % (rng_bn, CL["_vl"], s0, CL["_vw"], s0, CL["_vh"], s0, CL["_vk"], s0)
                 elif abs(round(sum(_xl_num(m.get("kd")) or 0 for m in ms), 2) - kds) < 0.011:
                     f_sum = "=ROUND(SUM(%s),2)" % rng_kd
             if f_sum:
@@ -5570,7 +5583,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     _merge_fast(ws2, s, ci, e, ci)
                     ws2.cell(row=s, column=ci).alignment = midv
         ws2.freeze_panes = "F3"
-        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 18, 11, 8, 9, 8, 9, 9] + ([11] if _has_bw else []) + [11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
+        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 18, 11, 8, 9, 8, 9, 9] + ([11] if _has_bw else []) + ([9, 9, 9, 10] if _has_vol else []) + ([10, 10] if _has_pal else []) + [11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
                   [10, 8, 12, 12, 10, 22, 12, 12, 12, 10, 14, 9, 10, 12, 8, 16])
         for i, w in enumerate(widths, 1):
             ws2.column_dimensions[get_column_letter(i)].width = w
