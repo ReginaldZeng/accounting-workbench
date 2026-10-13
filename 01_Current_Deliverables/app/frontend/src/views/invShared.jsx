@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| 票上的小标签加「初审后才到」
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票管家各页共用组件：看图器/缩略条/字段面板/状态徽标/弹窗/toast/轮询/扫码框/拖拽上传/相机/手机配对/选人
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 看图器从这张票所在页打开（合并 PDF 第 3 张票不再显示第 1 张）；
 //   弹窗挂到 body（台账侧栏是 sticky，弹窗在里面会被左侧导航盖住）；扫码框人在选字/按着鼠标时不抢焦点；手机已连上时打开「手机当相机」只看状态、要换手机须明确点。
@@ -199,6 +200,13 @@ export function itemBadges(it) {
   if (_isBusy(it)) out.push({ key: 'proc', label: '识别中', tone: 'info', tip: '正在读票面，几秒后字段会补上' })
   else if (it.procStatus === 'failed') out.push({ key: 'proc', label: '识别失败', tone: 'err', tip: it.procError || '图片读不出来，请手工补字段或重新识别' })
   if (f.dup) out.push({ key: 'dup', label: '重复', tone: 'err', tip: _dupTip(f.dup) })
+  // 财务初审通过后才发到钉钉流程里的票：按后补票处理（有没收齐的后补单就记上去，没有就只标着）
+  if (it.fromFlow || f.lateFlow) {
+    const lf = f.lateFlow || {}
+    out.push({ key: 'late', label: '初审后才到', tone: 'info',
+      tip: `这张票是 ${lf.at || '财务初审通过后'} 才发到钉钉流程里的${lf.after ? `（财务初审 ${lf.after} 就过了）` : ''}，按后补票处理：`
+        + (it.laterId ? `已记到后补单 #${it.laterId}，审核通过就算已到` : '这张单现在没有没收齐的后补单，票先留在付款单名下') })
+  }
   const pend = Array.isArray(it.pending) ? it.pending.length : 0
   if (pend) out.push({ key: 'pending', label: `待核${pend}`, tone: 'warn', tip: '这些字段是照片识别出来的，要对着图核一下' })
   if (it.kind === 'other' || f.notInvoice) out.push({ key: 'other', label: '非发票', tone: 'mute', tip: '附件不是发票（合同、清单、截图等），只留存不入台账' })

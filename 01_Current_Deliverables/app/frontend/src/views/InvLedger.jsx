@@ -1,15 +1,20 @@
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票台账五页签：台账查询（筛选/分页/合计/导出/右侧详情/作废）、税局对账（清单四色+文件包补全）、抵扣勾选、新销方核查、期初导入
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 「含作废」只多列作废票（review=withvoid＝已通过＋已作废，不再把草稿/待审票拉进台账和合计）；
 //   作废后把后端的税务提醒（进项税额转出/撤销勾选）原话留在页面上；详情「留痕」按 log.itemId 列这张票自己的记录（新的在前）。
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.944（发票管家·票总管已有）| 过渡期「票总管已有」记号：抵扣一列显示、能按它筛；
+//   右侧详情里有抵扣勾选权限的人可以事后补记 / 取消；抵扣勾选页签最上面加一块「票总管已有的票」——拖票总管清单进来，系统记住并自动记号，
+//   列出两边都有的票；方式一说明里写上有这个记号的票不带。
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.942（发票管家·台账表格被挤）| 台账查询点开一行（右侧详情打开）后「主体」被挤成一个字一行：
+//   整张表不折行，主体/销方/票种太长用省略号、鼠标停上去看全称＋税号；详情开着时名称列和留白收窄，1920 宽刚好不用横向滚动。
 // [Change Log] Date: 2026-10-10 | Author: Claude / c | Version: V2.914（发票管家·税局勾选清单）| 抵扣勾选页签加「方式一：直接从台账出勾选清单」
 //   （选购方主体/开票日期→生成→预览→核对后下载，文件是税局「清单导入勾选」的格式）；原来的拖税局清单标注改叫「方式二」。
 // 接口契约见 docs/20260923_发票管家/发票管家_技术方案 §5.2「发票台账」。后端与本页同时开发：凡契约没写死的字段一律可选链+默认值兜底。
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invFolder,
+  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invItemOtherSystem, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
-  invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare,
+  invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invOther, invOtherImport,
   invSellers, invSellerCheck,
   invOpeningPreview, invOpeningCommit, invOpeningStats,
 } from '../api.js'
@@ -33,7 +38,7 @@ const INV_TYPE_LABEL = {
 }
 const KIND_LABEL = { receipt: '收据', other: '非发票附件' }
 const VERIFY_OPTS = [['', '全部'], ['green', '已验真'], ['red', '作废红冲'], ['yellow', '税局未见'], ['gray', '不适用'], ['unset', '未对账']]
-const DEDUCT_OPTS = [['', '全部'], ['yes', '可抵扣'], ['no', '不可抵扣'], ['unset', '未判定'], ['marked', '已标注勾选']]
+const DEDUCT_OPTS = [['', '全部'], ['yes', '可抵扣'], ['no', '不可抵扣'], ['unset', '未判定'], ['marked', '已标注勾选'], ['other', '票总管已有']]
 const VERIFY_TONE = { green: 'ok', red: 'err', yellow: 'warn', gray: 'mute' }
 const VERIFY_TEXT = { green: '已验真', red: '作废红冲', yellow: '税局未见', gray: '不适用' }
 const PAGE_SIZE = 50
@@ -56,6 +61,7 @@ const fBiz = f => first(f?.businessId, f?.business_id)
 function deductText(it) {
   if (it?.deductStatus === 'checked') return '已勾选'
   if (it?.deductStatus === 'marked') return '已标注勾选'
+  if (it?.deductStatus === 'other') return '票总管已有'
   if (it?.deductible === true || it?.deductible === 1) return '可抵扣'
   if (it?.deductible === false || it?.deductible === 0) return '不可抵扣'
   return '未判定'
@@ -169,10 +175,10 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
               <tr key={r.id} className={'row' + (r.id === selId ? ' on' : '') + (isVoid ? ' void' : '')} tabIndex={0}
                 onClick={() => onPick(r)} onKeyDown={e => { if (e.key === 'Enter') onPick(r) }}>
                 <td className="mono">{r.date || '—'}</td>
-                <td title={r.buyerTaxId}>{r.buyerName || '未识别主体'}</td>
+                <td className="inv-lg-buyer" title={[r.buyerName, r.buyerTaxId].filter(Boolean).join('　') || undefined}>{r.buyerName || '未识别主体'}</td>
                 <td className="inv-lg-type" title={typeText(r)}>{typeShort(r)}{isVoid && <span className="inv-badge err inv-lg-ml">已作废</span>}</td>
                 <td className="mono">{r.number || '—'}{r.split ? <span className="inv-lg-sub">分摊 {money(r.alloc)}</span> : null}</td>
-                <td className="inv-lg-seller" title={r.sellerTaxId || undefined}>{r.sellerName || '—'}</td>
+                <td className="inv-lg-seller" title={[r.sellerName, r.sellerTaxId].filter(Boolean).join('　') || undefined}>{r.sellerName || '—'}</td>
                 <td className="num">{money(r.amount)}</td>
                 <td className="num">{money(r.tax)}</td>
                 <td className="num">{money(r.total)}</td>
@@ -263,6 +269,29 @@ export function Bookkeeping({ row, canEdit, onSaved }) {
   </section>
 }
 
+// 过渡期：把这张票记为 / 取消「票总管已有」。税局已显示勾选过的不用改（不画）；没有抵扣勾选权限的只看不动。
+function OtherSystem({ row, can, onChanged }) {
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const on = row.deductStatus === 'other'
+  if (row.kind !== 'invoice' || row.review === 'void' || row.deductStatus === 'checked') return null
+  if (!on && !can.deduct) return null
+  const flip = async () => {
+    setBusy(true); setMsg('')
+    try { const r = await invItemOtherSystem(row.id, !on); onChanged?.(r || {}) } catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
+  }
+  return (
+    <div className={'inv-lg-box inv-lg-oth' + (on ? ' on' : '')}>
+      <div className="inv-lg-box-h">过渡期 · 票总管</div>
+      <div className="inv-lg-othtx">{on
+        ? <>这张票记的是 <b>票总管已有</b>：抵扣勾选归票总管做，发票管家出税局勾选清单时不带它。</>
+        : <>这张票票总管那边也录了的话，记一下：出税局勾选清单时就不带它，免得两边报两次。</>}</div>
+      {can.deduct && <button type="button" className="btn" onClick={flip} disabled={busy}>{busy ? '正在改…' : on ? '取消这个记号' : '记为「票总管已有」'}</button>}
+      {msg && <div className="inv-lg-err">{msg}</div>}
+    </div>
+  )
+}
+
 function DetailPanel({ row, can, onClose, onVoided, onBooked }) {
   const [view, setView] = useState(false)
   const [field, setField] = useState('')
@@ -301,6 +330,7 @@ function DetailPanel({ row, can, onClose, onVoided, onBooked }) {
       </button>
       <Bookkeeping key={row.id} row={row} canEdit={can.auditAct && row.review === 'approved'} onSaved={onBooked} />
       <FieldPanel item={row} activeField={field} onFieldFocus={k => { setField(k); if (file) setView(true) }} />
+      <OtherSystem key={'oth' + row.id} row={row} can={can} onChanged={onBooked} />
 
       <div className="inv-lg-box">
         <div className="inv-lg-box-h">挂靠审批单</div>
@@ -601,6 +631,83 @@ function TaxlistTab({ can, flash }) {
 
 // ───────────────────────── 页签 3：抵扣勾选 ─────────────────────────
 
+// 过渡期：票总管已有的票。把票总管导出的清单拖进来，系统记住；发票管家里票号对得上的票自动记「票总管已有」
+// （现在已有的马上记，以后接进来的——包括钉钉自动接入的——一送审就记）。有这个记号的票出勾选清单时不带。
+const OTHER_TONE = { new: 'ok', flagged: 'info', marked: 'err', notDeduct: 'warn', off: 'mute', checked: 'mute' }
+
+function OtherList({ can }) {
+  const [st, setSt] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [res, setRes] = useState(null)
+  const alive = useRef(true)
+  useEffect(() => () => { alive.current = false }, [])
+  const load = useCallback(() => invOther().then(r => { if (alive.current) setSt(r) }).catch(() => {}), [])
+  useEffect(() => { load() }, [load])
+  const go = async files => {
+    if (!files[0]) return
+    setBusy(true); setErr(''); setRes(null)
+    try { const r = await invOtherImport(files[0]); if (alive.current) { setRes(r); load() } } catch (e) { if (alive.current) setErr(errText(e)) } finally { if (alive.current) setBusy(false) }
+  }
+  const list = asList(res?.list)
+  const cnt = res?.counts || {}
+  return (
+    <section className="inv-lg-sec inv-lg-othsec">
+      <div className="inv-lg-sec-h">过渡期：票总管已有的票（两边不重复勾选）</div>
+      <div className="inv-lg-note">
+        同一张票票总管、发票管家两边都录了的，<b>抵扣勾选归票总管做</b>，发票管家出勾选清单时不带它。
+        把票总管导出的清单拖到下面，<b>系统会记住</b>：发票管家里票号对得上的票自动记上「票总管已有」——现在已有的马上记；
+        以后接进来的（<b>包括钉钉自动接入的</b>）一送审就记，审核时看到的就是勾好的。记错了，审核时或台账详情里可以取消。
+        票总管每出一期新清单，再拖一次就行（重复的不会重复记）。
+      </div>
+      <div className="inv-lg-chips">
+        <span className="inv-lg-chip">系统已记住票总管清单 <b>{n0(st?.count)}</b> 张</span>
+        <span className={'inv-lg-chip' + (n0(st?.marked) ? ' ok' : '')}>台账里带「票总管已有」记号的 <b>{n0(st?.marked)}</b> 张</span>
+        {st?.lastAt && <span className="inv-muted inv-lg-othlast">最近一次：{fmtTime(st.lastAt)} {st.lastBy || ''}{st.lastFile ? ` · ${st.lastFile}` : ''}</span>}
+      </div>
+      {can.deduct ? (
+        <FileDrop onFiles={go} accept=".xlsx,.xls,.csv" multiple={false} disabled={busy} className="inv-lg-odrop">
+          <span className="inv-drop-tx">{busy ? <><span className="inv-spin" /> 正在对票号…</> : <>把票总管导出的清单（勾选清单或发票清单都行）拖到这里，或<b>点击选择</b></>}</span>
+        </FileDrop>
+      ) : <NoPerm what="抵扣勾选" />}
+      <ErrLine msg={err} />
+      {res && (
+        <>
+          {asList(res.warnings).map((w, i) => <div key={i} className="inv-lg-err">{w}</div>)}
+          <div className="inv-lg-ok">
+            「{res.file}」读到 {n0(res.keys)} 张票{n0(res.added) ? `，新记住 ${n0(res.added)} 张` : '，都是之前记住过的'}。
+            其中 {n0(res.both)} 张发票管家里也有：这次记上「票总管已有」 {n0(res.marked)} 张{n0(cnt.flagged) ? `，之前就记了 ${n0(cnt.flagged)} 张` : ''}。
+            其余 {Math.max(0, n0(res.keys) - n0(res.both))} 张发票管家里还没有——以后接进来会自动记上。
+          </div>
+          {(n0(cnt.marked) > 0 || n0(cnt.notDeduct) > 0) && <div className="inv-lg-warn">
+            {n0(cnt.marked) > 0 && <>有 {n0(cnt.marked)} 张之前已经从发票管家这边出过勾选清单，票总管这份里也有——两边可能已经报重了，请对着下表核一下。</>}
+            {n0(cnt.notDeduct) > 0 && <> 有 {n0(cnt.notDeduct)} 张这边判的是不抵扣、票总管那边却在清单里，请核一下哪边对。</>}
+          </div>}
+          {list.length > 0 && (
+            <div className="tbl-wrap inv-lg-mini">
+              <table>
+                <thead><tr><th>发票号码</th><th>开票日期</th><th>销方</th><th className="num">价税合计</th><th className="num">税额</th><th>发票管家这边</th></tr></thead>
+                <tbody>{list.map(b => (
+                  <tr key={b.number}>
+                    <td className="mono">{b.number}</td>
+                    <td className="inv-lg-nowrap">{b.date || '—'}</td>
+                    <td><div className="inv-lg-seller" title={b.sellerName || undefined}>{b.sellerName || '—'}</div></td>
+                    <td className="num">{money(b.total)}</td>
+                    <td className="num">{money(b.tax)}</td>
+                    <td className="inv-lg-nowrap"><span className={'inv-badge ' + (OTHER_TONE[b.state] || 'mute')}>{b.stateLabel || b.state}</span>
+                      {!b.approved && <span className="inv-muted inv-lg-ml">还没审核</span>}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+              {n0(res.both) > list.length && <div className="inv-muted inv-lg-pad">只列了前 {list.length} 张，一共 {n0(res.both)} 张。</div>}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
 const TICK_EMPTY = { subject: '', from: '', to: '', marked: false }
 
 // 方式一：直接从台账出税局勾选清单（不用先去税局导未勾选清单）。先生成看预览，核对后下载；下载才把票记为「已标注勾选」。
@@ -628,7 +735,7 @@ function TickExport({ can }) {
     <section className="inv-lg-sec">
       <div className="inv-lg-sec-h">方式一：直接从台账出勾选清单（不用先去税局导清单）</div>
       <ol className="inv-lg-steps">
-        <li>选购方主体和开票日期，点 <b>生成清单</b>：台账里 <b>审核通过＋可抵扣＋还没勾选过</b> 的票都列出来；</li>
+        <li>选购方主体和开票日期，点 <b>生成清单</b>：台账里 <b>审核通过＋可抵扣＋还没勾选过</b> 的票都列出来；记了<b>「票总管已有」</b>的票不带（见上面一块）；</li>
         <li>对着预览核一遍，下载。文件就是电子税务局 <b>清单导入勾选</b> 要的格式，每张都标了「是」；「金额」一列专票写<b>价税合计（含税）</b>，机票行程单写不含税，火车票票面没有税额的留空；</li>
         <li>回电子税务局导入；<b>提交勾选</b> 和 <b>统计确认</b> 仍由人在税局里点，系统不替你提交。</li>
       </ol>
@@ -718,6 +825,7 @@ function DeductTab({ can }) {
   const decText = d => (d === true || d === 'yes' ? '是' : d === false || d === 'no' ? '否' : (d || '未判定'))
   return (
     <div className="inv-lg-stack">
+      <OtherList can={can} />
       <TickExport can={can} />
       <section className="inv-lg-sec">
         <div className="inv-lg-sec-h">方式二：在税局导出的未勾选清单上标注（税局有、台账没有的票也看得出来）</div>

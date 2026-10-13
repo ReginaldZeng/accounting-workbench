@@ -73,7 +73,6 @@
 .inv-lt-step:not(:first-child){ margin-top:18px; }
 .inv-lt-step span{ width:22px; height:22px; border-radius:50%; background:var(--accent-soft); color:var(--accent); display:inline-flex;
   align-items:center; justify-content:center; font-size:12px; }
-.inv-lt-pre{ margin-top:12px; border:1px solid var(--line); border-radius:10px; padding:12px 14px; background:var(--bg-sub); }
 .inv-lt-files{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
 .inv-lt-file{ display:inline-flex; align-items:center; gap:4px; font-size:12px; padding:3px 4px 3px 9px; border-radius:6px;
   border:1px solid var(--line-strong); background:var(--bg); color:var(--ink-2); max-width:100%; word-break:break-all; }
@@ -111,11 +110,6 @@
 .inv-lt-detail{ display:flex; flex-direction:column; }
 .inv-lt-dhead{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
 /* 不用"gap+底色"画格线：最后一行不满时空格会露出一块灰底 */
-.inv-lt-kvs{ display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); border:1px solid var(--line); border-bottom:none;
-  border-radius:8px; overflow:hidden; background:var(--bg); }
-.inv-lt-kv{ display:flex; gap:10px; padding:7px 10px; background:var(--bg); font-size:12.5px; min-width:0; border-bottom:1px solid var(--line); }
-.inv-lt-kv > span{ flex:0 0 78px; color:var(--ink-3); font-size:12px; }
-.inv-lt-kv > div{ min-width:0; word-break:break-all; color:var(--ink); }
 .inv-lt-imgs{ display:flex; flex-direction:column; gap:8px; }
 .inv-lt-cur{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12.5px; color:var(--ink-2); }
 .inv-lt-cur b{ color:var(--ink); }
@@ -176,6 +170,23 @@
 .inv-set-adv[open] > summary{ border-bottom:1px solid var(--line); }
 .inv-set-advin{ padding:12px 16px; display:flex; flex-direction:column; gap:8px; }
 .inv-set-advin .inv-in[readonly]{ background:var(--bg-sub); color:var(--ink-2); }
+/* ⑧ 清空试运行数据（只有主管理员看得到）：红边框提醒这是件大事；左右两栏「会清掉 / 会留下」 */
+.inv-set-reset{ border-color:var(--red-line); }
+.inv-set-reset > summary{ color:var(--red); }
+.inv-set-rs{ display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:10px; }
+.inv-set-rsbox{ border:1px solid var(--line); border-radius:9px; background:var(--bg); padding:10px 14px; }
+.inv-set-rsbox.del{ border-color:var(--red-line); background:var(--red-bg); }
+.inv-set-rsh{ font-size:12px; font-weight:700; color:var(--ink-2); margin-bottom:4px; }
+.inv-set-rsbox.del .inv-set-rsh{ color:var(--red); }
+.inv-set-rsbox ul{ margin:0; padding-left:18px; font-size:12.5px; line-height:1.85; color:var(--ink-2); }
+.inv-set-rsbox b{ color:var(--ink); font-variant-numeric:tabular-nums; }
+.inv-set-rsline{ align-items:center; flex-wrap:wrap; gap:8px; font-size:12.5px; color:var(--ink); }
+.inv-set-rsline input[type=date]{ width:150px; }
+.inv-set-rsin{ width:90px; text-align:center; }
+.btn.inv-set-rsbtn{ background:var(--red); border-color:var(--red); color:#fff; font-weight:600; }
+.btn.inv-set-rsbtn:hover:not(:disabled){ filter:brightness(.92); }
+.btn.inv-set-rsbtn:disabled{ opacity:.45; cursor:not-allowed; }
+.inv-set-rsok{ font-size:12.5px; line-height:1.6; color:var(--green); background:var(--green-bg); border:1px solid var(--green-line); border-radius:8px; padding:8px 12px; font-weight:600; }
 /* 保存条贴在滚动容器底部：整页滚动时贴视口底，放进弹窗时贴弹窗正文底 */
 .inv-set-bar{ position:sticky; bottom:0; z-index:5; display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 14px;
   border:1px solid var(--line-strong); border-radius:var(--radius); background:var(--bg); box-shadow:0 -6px 18px rgba(0,0,0,.08); }
@@ -247,7 +258,30 @@
 .inv-lt-reason-tx.fold::after{ content:""; position:absolute; left:0; right:0; bottom:0; height:44px; background:linear-gradient(to bottom, transparent, var(--bg)); pointer-events:none; }
 .inv-lt-more{ margin-top:4px; border:0; background:none; padding:4px 0; font:inherit; font-size:12.5px; font-weight:600; color:var(--accent); cursor:pointer; }
 .inv-lt-more:hover{ text-decoration:underline; }
-.inv-lt-note{ margin:0; padding:8px 0; border-top:1px solid var(--line); font-size:13px; line-height:1.8; color:var(--ink); white-space:pre-wrap; overflow-wrap:anywhere; }
+/* 详情卡片里「备注」那一段。原来也叫 .inv-lt-note，和上面的提示条重名，把全页的黄条/绿条挤成贴边没留白——改名 */
+.inv-lt-memo{ margin:0; padding:8px 0; border-top:1px solid var(--line); font-size:13px; line-height:1.8; color:var(--ink); white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* ── 新建后补单：找到付款单后的那张卡（和详情弹窗同一套）＋两栏表单 ── */
+.inv-lt-pre2{ margin-top:12px; }
+.inv-lt-pre2-h{ display:flex; align-items:flex-end; justify-content:space-between; gap:8px 20px; flex-wrap:wrap; padding:13px 16px;
+  border:1px solid var(--line); border-radius:10px; background:var(--bg-sub); }
+.inv-lt-pre2-who{ display:flex; flex-direction:column; gap:3px; min-width:0; flex:1 1 280px; }
+.inv-lt-pre2-who b{ font-size:16px; line-height:1.4; color:var(--ink); overflow-wrap:anywhere; }
+.inv-lt-pre2-who span{ font-size:12px; color:var(--ink-3); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.inv-lt-pre2-amt{ display:flex; flex-direction:column; align-items:flex-end; gap:2px; flex:0 0 auto; }
+.inv-lt-pre2-amt span{ font-size:12px; color:var(--ink-3); }
+.inv-lt-pre2-amt b{ font-size:22px; line-height:1.2; color:var(--ink); white-space:nowrap; }
+.inv-lt-pre2 .inv-lt-cards{ margin-top:12px; }
+.inv-lt-pre2 .inv-lt-note{ margin:12px 0 0; }
+.inv-lt-form.two{ grid-template-columns:repeat(2, minmax(0, 1fr)); gap:14px 20px; }
+.inv-lt-form.two .inv-in{ width:100%; }
+.inv-lt-seg.wide{ display:flex; }
+.inv-lt-seg.wide button{ flex:1 1 0; }
+.inv-lt-qd{ display:flex; flex-wrap:wrap; gap:6px; }
+.inv-lt-qd button{ height:24px; padding:0 10px; border:1px solid var(--line-strong); border-radius:12px; background:var(--bg); color:var(--ink-2);
+  font-size:11.5px; cursor:pointer; font-family:inherit; }
+.inv-lt-qd button:hover{ border-color:var(--accent); color:var(--accent); }
+@media (max-width:640px){ .inv-lt-form.two{ grid-template-columns:minmax(0, 1fr); } }
 @media (max-width:820px){ .inv-lt-cards{ grid-template-columns:minmax(0, 1fr); } .inv-lt-nums > div > b{ font-size:17px; } }
 
 /* 申请人自己传上来的发票等财务确认：详情顶上一条提示 + 确认按钮 */

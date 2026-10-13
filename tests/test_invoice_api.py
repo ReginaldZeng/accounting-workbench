@@ -1485,7 +1485,7 @@ class InvoiceApiTests(unittest.TestCase):
         r = self.post("/api/inv/settings", "boss", {"settings": {"intake": {
             "approvers": [{"dtUserid": "boss-dt", "dtName": "老板"}, {"dtUserid": "boss-dt"}], "since": "2026-09-01"}}})
         self.assertEqual(r.json()["settings"]["intake"], {"approvers": [{"dtUserid": "boss-dt", "dtName": "老板"}],
-                                                          "since": "2026-09-01"})
+                                                          "firstReviewers": [], "since": "2026-09-01"})
         from datetime import datetime as _dt, timedelta as _td
         ct = (_dt.now() - _td(days=1)).strftime("%Y-%m-%d %H:%M:%S")     # 跳过记录只留几天：用近日的单子
         insts = {

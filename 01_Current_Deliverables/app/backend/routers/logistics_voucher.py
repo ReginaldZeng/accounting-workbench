@@ -1906,6 +1906,18 @@ def _scan_lookup(code):
     return r
 
 
+def _scan_invoice(code):
+    """装订时扫的是发票（用户 2026-10-13：纸质发票是原始凭证，要贴到凭证后面）：报出这张发票在金蝶哪张凭证里。只读。
+    查法在发票管家那边（routers/invoice_vouchers._scan：先看已经对上的，没有再拿发票号去金蝶摘要里现查）；这里换成装订页认的字段，
+    再照扫付款单的做法补上制单人/审核人（没审核的凭证号可能会变，要提醒）。"""
+    from routers import invoice_vouchers as iv
+    f2s = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or [])}
+    r = iv.bind_view(iv._scan(code), f2s)
+    if r.get("ok") and r.get("vouchers"):
+        _with_people(r["vouchers"])
+    return r
+
+
 def _scan_lookup0(code):
     from kernels import invoice_parse as ip, invoice_dingtalk as idt
     c = ip.classify_code(code or "")
@@ -1925,10 +1937,10 @@ def _scan_lookup0(code):
         iid = (row[0] if row else "") or ""
         if not iid:
             return {"ok": False, "msg": "系统里没有审批编号 %s 的单子（不是物流请款单，发票管家也没收过它的票）" % c["value"]}
-    elif c["kind"] == "invoice_qr":
-        return {"ok": False, "msg": "这是发票上的二维码：请扫付款单（审批单）右上角那个"}
+    elif c["kind"] == "invoice_qr" or re.fullmatch(r"\d{8,20}", re.sub(r"\s+", "", str(code or ""))):
+        return _scan_invoice(code)       # 扫的是发票（或敲的是发票号码）：报这张发票在哪张凭证里
     else:
-        return {"ok": False, "msg": "没认出这个码：请扫付款单右上角的二维码，或输入 20 位审批编号"}
+        return {"ok": False, "msg": "没认出这个码：请扫付款单右上角的二维码、发票上的二维码，或输入 20 位审批编号 / 发票号码"}
     with db._engine.connect() as cx:
         r = cx.execute(select(PR).where(PR.c.inst_id == iid)).mappings().first()
     f2s = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or [])}
@@ -2038,6 +2050,8 @@ def _adj_n(inst, posted_rec):
 def _scan_done(r, user):
     """扫码结果出来以后：补上要不要附更正单、以前扫没扫过，并记一笔。"""
     if not (r and r.get("ok") and r.get("inst")):
+        return r
+    if r.get("is_invoice"):          # 扫的是发票：只报凭证号，不记「这张纸质付款单扫过了」
         return r
     posted = (db.get_setting(_POSTED_KEY, None) or {}).get(r["inst"])
     if posted:

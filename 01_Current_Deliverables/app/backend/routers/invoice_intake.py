@@ -1,3 +1,7 @@
+# [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）
+# Description: Owner 2026-10-13：还欠票的单子（有没收齐后补单的付款单、自动接入还在收票的票夹）每轮顺带再去钉钉流程里看一眼
+#   （recheck_flows：同一张单至少隔 60 分钟、一轮最多 30 张、只取上次看过之后发到评论区的新文件）；财务初审通过后才到的发票
+#   记到后补单上进审核（invoice.flow_recheck / link_late）。后补登记建的票夹（source=later）票齐了也自己进审核。
 # [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.736（发票管家·钉钉自动接入）
 # Description: Owner 2026-10-01 定：发票管家要集成全公司进项票，先接钉钉；只接「审批流走到接入审批人节点」的单子
 #   （审批单 tasks 里有他的 userid）。模板＝设置里的审批模板（付款申请（公对公）、费用报销），起始日 9/1 往前补。
@@ -29,6 +33,10 @@ router = APIRouter()
 
 STATE_KEY = "inv_intake_state"
 SOURCE = "dingtalk"
+AUTO_SUBMIT_SOURCES = (SOURCE, "later")   # 票齐了自己进审核的票夹来源：钉钉自动接入的、后补登记时系统建的
+RECHECK_KEY = "inv_flow_recheck"         # {票夹 id: 上次去钉钉流程里看的时间}
+RECHECK_MIN = 60                         # 同一张单最少隔多少分钟再看一次
+RECHECK_MAX = 30                         # 一轮最多看几张（一张一次钉钉接口）
 EVERY_MIN = 20
 RECENT_DAYS = 3                  # 首扫之后每轮只列最近几天新提交的（更早的靠 waiting 跟）
 SKIP_KEEP_DAYS = RECENT_DAYS + 2  # 判过"不接"的单子记几天（列表窗口滑过去就不会再出现，不用一直记）
@@ -90,7 +98,8 @@ def auto_submit_ready(refs=None):
     e = inv.E()
     with e.connect() as c:
         rows = [S._row(r) for r in c.execute(select(S.FOLDER).where(
-            (S.FOLDER.c.source == SOURCE) & (S.FOLDER.c.status == "collecting") & (S.FOLDER.c.attach_status == "done")))]
+            S.FOLDER.c.source.in_(AUTO_SUBMIT_SOURCES) & (S.FOLDER.c.status == "collecting")
+            & (S.FOLDER.c.attach_status == "done")))]
     n = 0
     for f in rows:
         ok, _ = ready_check(f, S.folder_items(e, f["id"]))
@@ -102,6 +111,40 @@ def auto_submit_ready(refs=None):
             if refs is not None and f.get("business_id"):
                 refs.append(str(f["business_id"]))
     return n
+
+
+def recheck_flows(refs=None, now=None):
+    """还欠票的单子再去钉钉流程里找新发票 → {checked, new, linked}。
+    范围：有没收齐后补单的付款单 ＋ 自动接入、还在收票的票夹。同一张单至少隔 RECHECK_MIN 分钟，一轮最多 RECHECK_MAX 张
+    （最久没看的先看）；只取上次看过之后发到评论区的新文件。refs 传列表 → 放进这轮记上后补单的钉钉审批编号。"""
+    e = inv.E()
+    with e.connect() as c:
+        ids = {r[0] for r in c.execute(select(S.LATER.c.folder_id).where(S.LATER.c.status.in_(("open", "partial"))))}
+        ids |= {r[0] for r in c.execute(select(S.FOLDER.c.id).where(
+            (S.FOLDER.c.source == SOURCE) & (S.FOLDER.c.status == "collecting")))}
+    ids = {int(i) for i in ids if i}
+    st = db.get_setting(RECHECK_KEY, None)
+    st = {str(k): str(v) for k, v in (st if isinstance(st, dict) else {}).items() if str(k).isdigit() and int(k) in ids}
+    now = now or inv.now_s()
+    edge = (datetime.strptime(now[:19], "%Y-%m-%d %H:%M:%S") - timedelta(minutes=RECHECK_MIN)).strftime("%Y-%m-%d %H:%M:%S")
+    due = sorted((i for i in ids if st.get(str(i), "") <= edge), key=lambda i: (st.get(str(i), ""), i))[:RECHECK_MAX]
+    out = {"checked": 0, "new": 0, "linked": 0}
+    for fid in due:
+        f = S.folder_get(e, fid)
+        if not f or not f.get("inst_id"):
+            st[str(fid)] = now                      # 手工票夹没有流程可看：记一下，免得每轮都排在前面
+            continue
+        r = inv.flow_recheck(fid, manual=False, since=st.get(str(fid)) or f.get("created_at") or "")
+        if not r.get("ok"):
+            continue                                # 没看成（钉钉没给/正在拉附件）：不记时间，下一轮再看
+        st[str(fid)] = now
+        out["checked"] += 1
+        out["new"] += r.get("new") or 0
+        out["linked"] += r.get("linked") or 0
+        if r.get("linked") and refs is not None and f.get("business_id"):
+            refs.append(str(f["business_id"]))
+    db.set_setting(RECHECK_KEY, st, inv.SYSTEM_USER)
+    return out
 
 
 def _folder_insts(ids):
@@ -287,6 +330,11 @@ def _loop():
             per = EVERY_MIN * 60 // TICK_S           # 每 per 圈整扫一次钉钉；报到时顺带说离下一次整扫还有多久
             worker_store.beat("inv_intake", off="" if has_cfg else "还没设接入审批人", next_in=(per - n % per) * TICK_S)
             if n % per == 0:
+                ids2 = []
+                rc = recheck_flows(ids2)              # 还欠票的单子：再去钉钉流程里找新发票（不用设接入审批人也看）
+                if rc.get("linked"):
+                    worker_store.record("inv_intake", n=rc["linked"], refs=ids2,
+                                        summary="钉钉流程里后到的发票 %d 张，已记到后补单、进审核" % rc["linked"])
                 if has_cfg:
                     r = scan_once("定时") or {}
                     if not r.get("ok") and "还在扫" not in str(r.get("msg") or ""):

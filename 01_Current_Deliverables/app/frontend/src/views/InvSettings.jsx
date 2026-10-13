@@ -1,3 +1,6 @@
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| ④ 钉钉自动接入里加「财务初审人」：他点同意之后才发到流程里的发票算后补票
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.943（发票管家·清空试运行数据）| 最下面加「⑧ 清空试运行数据」：只有主管理员看得到
+//   （别人打预览接口回 403，这一块整个不画）；列出会清多少、留多少，填重新接钉钉审批单的起始日，手打「清零」才能点。
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票管家设置：财务人员名单（钉钉绑定＋接收人）、本公司抬头、审批模板、催票规则、没附发票的付款单拦/提醒、站点地址；未保存提示＋逐项校验
 // [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.736 | 加「④ 钉钉自动接入」：接入审批人（审批流走到他节点的单子自动建票夹）＋起始日＋上次扫描情况＋立即扫一次；后面几节顺延编号
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 和后端校验对齐：名单里没绑工作台账号的人直接挡保存并在行内说清楚（后端本来就拒）；
@@ -6,7 +9,7 @@
 // 既能当后补池的「设置」页签（embedded，不再画页头），也能被收票工作台放进 Modal 里用——宽度全跟容器走，不写死页面宽。
 // 保存时把后端给的其它键（corpId 等本页不编辑的）原样带回去，免得本页一保存把别处的配置抹掉。
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { invSettings, invSaveSettings, invAccounts, invIntake, invIntakeScan } from '../api.js'
+import { invSettings, invSaveSettings, invAccounts, invIntake, invIntakeScan, invResetPreview, invResetRun } from '../api.js'
 import { PersonPicker, useToast } from './invShared.jsx'
 import './inv-later.css'
 
@@ -41,6 +44,7 @@ function toDraft(s) {
     portalUrl: str(src.portalUrl),
     intake: {
       approvers: (Array.isArray(ik.approvers) ? ik.approvers : []).map(a => ({ dtUserid: str(a?.dtUserid), dtName: str(a?.dtName) })),
+      firstReviewers: (Array.isArray(ik.firstReviewers) ? ik.firstReviewers : []).map(a => ({ dtUserid: str(a?.dtUserid), dtName: str(a?.dtName) })),
       since: str(ik.since || '2026-09-01'),
     },
   }
@@ -61,7 +65,7 @@ function toPayload(d, raw) {
     },
     blockNoInvoice: !!d.blockNoInvoice,
     portalUrl: d.portalUrl.trim(),
-    intake: { approvers: d.intake.approvers, since: d.intake.since.trim() },
+    intake: { approvers: d.intake.approvers, firstReviewers: d.intake.firstReviewers, since: d.intake.since.trim() },
   }
 }
 // 比较有没有改动：不看 _k（每次载入都会重新编号）
@@ -246,6 +250,14 @@ function IntakeSection({ v, set, dirty, errors }) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState(null)
   const [addErr, setAddErr] = useState('')
+  const [frErr, setFrErr] = useState('')
+  const firsts = v.firstReviewers || []
+  const addFirst = (p) => {
+    if (!p) return
+    if (firsts.some(a => a.dtUserid === p.userid)) { setFrErr(`${p.name} 已经在里面了`); return }
+    setFrErr('')
+    set({ ...v, firstReviewers: [...firsts, { dtUserid: p.userid, dtName: p.name }] })
+  }
   const loadSt = useCallback(() => {
     invIntake().then(r => { setSt(r); setStErr('') }).catch(e => setStErr(errText(e)))
   }, [])
@@ -277,6 +289,17 @@ function IntakeSection({ v, set, dirty, errors }) {
     </div>
     {addErr && <div className="inv-lt-fe">{addErr}</div>}
     {!v.approvers.length && <div className="inv-set-warn">还没加人：自动接入不会运行，仍可在收票台手工扫审批码。</div>}
+    <div className="inv-set-add" style={{ marginTop: 10 }}>
+      <span className="inv-set-addl">财务初审人</span>
+      {firsts.map(a => <span key={a.dtUserid} className="inv-badge">{a.dtName || a.dtUserid}
+        <button type="button" className="inv-set-del" style={{ marginLeft: 6 }}
+          onClick={() => set({ ...v, firstReviewers: firsts.filter(x => x.dtUserid !== a.dtUserid) })}>×</button></span>)}
+      <PersonPicker value={null} onChange={addFirst} placeholder="打名字，从钉钉通讯录里搜" />
+    </div>
+    {frErr && <div className="inv-lt-fe">{frErr}</div>}
+    <div className="inv-set-ss">钉钉流程里的发票按财务初审分：初审人点同意之前就有的，算这张单的正常发票；之后才发到流程里的（多半在评论区），算后补票，
+      系统记到这张单的后补单上、再进发票审核。可以加多位；一张单的流程没经过这里的人，就按上面接入审批人那一步算。
+      {!firsts.length && ' 现在还没加人：都按接入审批人那一步算。'}</div>
     <div className="inv-set-add" style={{ marginTop: 10 }}>
       <span className="inv-set-addl">从这天提交的单子起</span>
       <input type="date" className="inv-in inv-num" style={{ width: 170 }} value={v.since} onChange={e => set({ ...v, since: e.target.value })} />
@@ -336,6 +359,90 @@ function AdvancedSection({ v, set, err }) {
         </div>
         {!edit && <button type="button" className="btn" onClick={() => setEdit(true)}>修改</button>}
       </div>
+    </div>
+  </details>
+}
+
+// ───────────────────────── ⑧ 清空试运行数据（只有主管理员） ─────────────────────────
+
+const mb = n => (Number(n || 0) / 1048576).toFixed(1)
+
+/** 清空试运行数据。dirty＝上面的设置有没保存的改动（清零会改「钉钉自动接入」的起始日，先让人把改动落定）；onDone＝清完重读设置。 */
+function ResetSection({ dirty, onDone }) {
+  const [pv, setPv] = useState(null)        // null＝还没读到 / 不是主管理员（整块不画）
+  const [since, setSince] = useState('')
+  const [phrase, setPhrase] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [done, setDone] = useState(null)
+  const alive = useRef(true)
+  useEffect(() => () => { alive.current = false }, [])
+  const load = useCallback(keepDate => invResetPreview().then(r => {
+    if (!alive.current) return
+    setPv(r); if (!keepDate) setSince(str(r.since))
+  }).catch(() => { if (alive.current) setPv(null) }), [])
+  useEffect(() => { load() }, [load])
+  if (!pv) return null
+  const c = pv.clear || {}, k = pv.keep || {}
+  const blockers = [...(pv.busy || [])]
+  if (pv.scanning) blockers.push('钉钉自动接入正在扫单')
+  if (dirty) blockers.push('上面的设置有改动还没保存：先保存或撤销')
+  const nothing = !c.folders && !c.invoices && !c.others && !c.files && !c.logs
+  const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(since)
+  const ready = !busy && !blockers.length && dateOk && phrase.trim() === pv.phrase
+  const run = async () => {
+    setBusy(true); setErr(''); setDone(null)
+    try {
+      const r = await invResetRun(phrase.trim(), since)
+      if (!alive.current) return
+      setDone(r); setPhrase('')
+      await load(true)
+      onDone?.()
+    } catch (e) { if (alive.current) setErr(errText(e)) } finally { if (alive.current) setBusy(false) }
+  }
+  return <details className="inv-set-adv inv-set-reset">
+    <summary>⑧ 清空试运行数据（只有主管理员看得到）</summary>
+    <div className="inv-set-advin">
+      <div className="inv-set-ss">把试运行攒下的票夹、发票、附件和操作记录清掉，重新开始。<b>后补单和它挂的票夹留着</b>，
+        人员、公司抬头、审批模板这些设置不动。清之前系统先在服务器上留一份底；原件是挪进留底目录，不是删掉。</div>
+      <div className="inv-set-rs">
+        <div className="inv-set-rsbox del">
+          <div className="inv-set-rsh">会清掉</div>
+          <ul>
+            <li>票夹 <b>{c.folders || 0}</b> 个</li>
+            <li>发票 <b>{c.invoices || 0}</b> 张（含审核通过、等审核、还在收票的）</li>
+            <li>其他附件 <b>{c.others || 0}</b> 条</li>
+            <li>原始文件 <b>{c.files || 0}</b> 个（{mb(c.bytes)} MB）</li>
+            <li>操作记录 <b>{c.logs || 0}</b> 条、新销方名单 <b>{c.sellers || 0}</b> 个</li>
+          </ul>
+        </div>
+        <div className="inv-set-rsbox">
+          <div className="inv-set-rsh">会留下</div>
+          <ul>
+            <li>后补单 <b>{k.laters || 0}</b> 张</li>
+            <li>后补单挂的票夹 <b>{k.folders || 0}</b> 个，里面的票据 <b>{k.items || 0}</b> 条、文件 <b>{k.files || 0}</b> 个</li>
+            <li>后补单的经办记录、期初导入的清单</li>
+            <li>这一页的全部设置</li>
+          </ul>
+        </div>
+      </div>
+      <div className="inv-set-line inv-set-rsline">
+        <span>清完以后，钉钉审批单从</span>
+        <input type="date" className="inv-in" value={since} onChange={e => { setSince(e.target.value); setDone(null) }} disabled={busy} aria-label="重新接钉钉审批单的起始日" />
+        <span>起重新接。</span>
+      </div>
+      <div className="inv-set-ss">这一天以后提交、已经走到接入审批人的审批单，会被系统自动重新拉进来（已有票夹的不会重复拉），
+        票要重新审核。几分钟后到收票工作台看。钉钉最多只能往前取 {pv.maxDays || 119} 天。</div>
+      {blockers.map((b, i) => <div key={i} className="inv-set-warn">现在还不能清：{b}。</div>)}
+      {nothing && !done && <div className="inv-set-ss">现在没有可清的数据。</div>}
+      <div className="inv-set-line inv-set-rsline">
+        <span>确认要清，请在框里打「{pv.phrase}」两个字：</span>
+        <input className="inv-in inv-set-rsin" value={phrase} onChange={e => setPhrase(e.target.value)} disabled={busy} placeholder={pv.phrase} aria-label="确认字样" />
+        <button type="button" className="btn inv-set-rsbtn" onClick={run} disabled={!ready}>{busy ? '正在清…' : '清空试运行数据'}</button>
+      </div>
+      {err && <div className="inv-lt-fe">{err}</div>}
+      {done && <div className="inv-set-rsok">{done.msg}
+        {(done.fileErrors || []).length > 0 && <div>有 {done.fileErrors.length} 个原件没挪进留底目录（还在原地，没丢），请告诉管理员。</div>}</div>}
     </div>
   </details>
 }
@@ -433,6 +540,7 @@ export default function InvSettings({ user, embedded, onSaved, onDirtyChange }) 
       <RemindSection v={d.remind} set={put('remind')} errors={shownErr} />
       <BlockSection v={d.blockNoInvoice} set={put('blockNoInvoice')} />
       <AdvancedSection v={d.portalUrl} set={put('portalUrl')} err={shownErr.portalUrl} />
+      <ResetSection dirty={dirty} onDone={load} />
       <div className={'inv-set-bar' + (dirty ? ' dirty' : '')}>
         <span className="inv-set-state">{saving ? '正在保存…' : dirty ? '● 有改动还没保存' : '已是最新，没有改动'}</span>
         {saveErr && <span className="inv-lt-inline err">{saveErr}</span>}
