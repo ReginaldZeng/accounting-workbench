@@ -3,7 +3,7 @@
 [Change Log]
 Date: 2026-10-13
 Author: Claude Opus 5.5
-Version: 样机 v0.5（未开发）
+Version: 样机 v0.6（未开发）
 Description: 物流对账 · 付款做账总表重排样机。
   用户 2026-10-13 看付款做账总表：「感觉这个页面不太对。我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序，但是现在付款就开始做了好像」
   → V2.934 先把「账单没复核不能做账」这道闸补上（只加了一个状态），没动页面 →「有样机吗」。
@@ -15,6 +15,7 @@ Description: 物流对账 · 付款做账总表重排样机。
     每格两行——上面一句结论、下面一行灰字，图标和字上下居中；灰字 ② 写票种＋审核状态（专票已审核 / 普票待审核 / 发票后补已确认），
     ③ 写金蝶付款单号，④ 写制单人 · 期间-凭证号。
   v0.4（「待审核应该是黄色？」）：② 的灰字里，还没审核通过的（待审核、草稿）标黄，已审核的还是灰色。
+  v0.6（「这里应该是全称-金蝶供应商编码-简称会好一点？」）：承运商那一行写 全称 · 金蝶供应商编码 · 简称。
   v0.5（「这个绿色勾勾有点奇怪，应该别的符号」）：② 的图标分三种——审核通过才是绿勾；票收到了还没审核通过的是黄圈三个点；发票后补的是「补」。
 -->
 <html lang="zh-CN">
@@ -67,7 +68,10 @@ thead th{font-size:12px;font-weight:600;color:var(--ink2);background:#FAFBFC;bor
 thead th .hd{display:inline-flex;align-items:center;gap:6px}
 thead th .no{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--accent-bg);color:var(--accent);font-weight:700;font-size:11.5px;line-height:1}
 tr.grp td{background:#F3F6F8;font-weight:600;padding:6px 10px;border-bottom:1px solid var(--line)}
-tr.grp .cnt{font-weight:400;color:var(--ink3);margin-left:8px;font-size:12px}
+tr.grp .gh{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+tr.grp .code{font-weight:400;color:var(--ink2);font-size:12px}
+tr.grp .short{font-weight:400;font-size:12px;color:var(--accent);background:var(--accent-bg);border-radius:999px;padding:0 8px;line-height:18px}
+tr.grp .cnt{font-weight:400;color:var(--ink3);margin-left:auto;font-size:12px}
 td.num{text-align:right;white-space:nowrap}
 tbody tr:last-child td{border-bottom:0}
 /* 每格：图标 + 两行字(上面结论、下面灰字)，图标和这两行字整体上下居中 */
@@ -165,6 +169,12 @@ const D = [
   {"ca": "路凯（13%）", "sj": "深圳星期零", "amt": 1002.09, "rev": "", "sjok": "", "invs": [["专票", "draft"]], "later": false, "paid": "09-28", "fkd": "FKD00008407", "vno": "记-399", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
   {"ca": "顺丰速运", "sj": "深圳星期零", "amt": 960.0, "rev": "10-08", "sjok": "", "invs": [["专票", "draft"]], "later": false, "paid": "09-28", "fkd": "FKD00008269", "vno": "记-260", "at": "10-02", "by": "曾禹锡(实测)", "maker": "系统操作员", "vst": "C", "per": "2026-09"}
 ];
+// 承运商简称 → [金蝶供应商编码, 金蝶全称](金蝶供应商档案里的真数)
+const SUP = {'极鲜达':['物流运输服务063','湖北极鲜达供应链有限责任公司'],'恒茂':['物流运输服务082','孝感市恒茂食品有限责任公司'],'天鹰物流':['物流运输服务044','湖北天鹰物流有限公司'],
+  '迅鸽':['物流运输服务075','武汉顺鸽科技有限公司'],'链盟':['物流运输服务066','东莞市链盟供应链有限公司'],'易风达':['物流运输服务027','武汉易风达冷链物流有限公司'],
+  '顺丰冷运':['物流运输服务016','上海顺丰冷运供应链有限公司'],'丰源':['物流运输服务055','湖北丰源物流供应链管理有限公司'],'跨越物流':['物流运输服务017','深圳市跨越速运有限公司'],
+  '中通快运':['物流运输服务054','孝感市顺捷物流有限公司'],'禾享':['物流运输服务057','深圳市禾享国际物流有限公司'],'路凯（13%）':['物流运输服务074','路凯包装设备租赁（上海）有限公司'],
+  '顺丰速运':['物流运输服务001','顺丰速运有限公司']};
 const REV_CN = {approved:'已审核', pending:'待审核', draft:'草稿'};
 let invRule = 'has', filt = '';
 const money = n => n.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -206,7 +216,9 @@ function render(){
   let h = '';
   for (const g of groups){
     const rs = show.filter(r => r.ca === g);
-    h += `<tr class="grp"><td colspan="7">${g}<span class="cnt">${rs.length} 张请款单 · ${money(rs.reduce((a,r)=>a+r.amt,0))}</span></td></tr>`;
+    const [code, full] = SUP[g] || ['', g];
+    h += `<tr class="grp"><td colspan="7"><div class="gh"><span>${full}</span><span class="code mono">${code}</span><span class="short">${g}</span>` +
+         `<span class="cnt">${rs.length} 张请款单 · ${money(rs.reduce((a,r)=>a+r.amt,0))}</span></div></td></tr>`;
     for (const r of rs){
       const s = r.st, done = s === 9;
       const at = n => !done && s === n;                 // 卡在这一步
