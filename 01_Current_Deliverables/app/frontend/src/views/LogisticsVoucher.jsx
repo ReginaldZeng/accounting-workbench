@@ -16,14 +16,20 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherCashflowFix, voucherCashflowRules, voucherCashflowRulesSet, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
+// V2.936 总表换成「四步」的表(账单复核 → 收票 → 付款 → 做账，一张请款单一行)：画法和「卡在哪一步」在 LogisticsVoucherFlow.jsx
+import { FlowTiles, FlowTable, StepsDlg, FLOW_CSS, FLOW_KPI, flowKey, flowHay } from './LogisticsVoucherFlow.jsx'
 import qrcode from '../vendor/qrcode-generator.mjs'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
 const ST = {
-  ready: ['可做账', 'ok', '已付款、发票齐（纸质件不卡做账，月末统一查验）'],
+  ready: ['可做账', 'ok', '账单已复核、已付款、发票齐（纸质件不卡做账，月末统一查验）'],
+  // V2.934(用户「我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序」)：账单没在复核台登记复核的，付了款、票齐了也不能做账
+  noreview: ['账单没复核', 'warn', '这家这个月的账单还没复核：在账单复核台整月登记复核，或者第①步给这个主体标「本主体通过」，之后才能做账'],
+  // V2.936(用户「发票审核才算」)：票收到了，但发票管家里还没审核通过的，不算收票
+  invwait: ['发票没审核', 'warn', '票夹里的发票还没在发票管家审核通过：审核通过以后才能做账'],
   paper: ['纸质件未到', 'warn', '纸质付款单/发票还没交到财务；可手动放行'],
   invdiff: ['发票≠请款', 'bad', '票夹里发票含税合计和请款金额对不上'],
   noinv: ['票不齐', 'warn', '票夹里还没有发票（流程里没传，要财务在收票台补）'],
@@ -34,7 +40,7 @@ const ST = {
   booked: ['已做账', 'done', '发票都已被金蝶凭证引用（发票管家同步）'],
 }
 // 没有金蝶付款单的(钉钉还在审批 / 已通过待付款)不在这一页显示(V2.815，用户「起码出了付款单，这里才显示」)，所以没有「未付款」这一栏了
-const ORDER = ['ready', 'paycode', 'latertax', 'invdiff', 'noinv', 'booked']
+const ORDER = ['ready', 'paycode', 'latertax', 'noreview', 'invwait', 'invdiff', 'noinv', 'booked']
 // 批量做账：一致只核销 + 红冲更正(含尾差)。红冲更正写法已在金蝶实测(跨越 记-261 / 易风达 记-264)后放进来，
 // 但要提示：勾到红冲更正的，批量条和确认框都单独列出来（用户 2026-10-02「放进去，但是要提示」）
 // V2.818 金额有差(用户「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：一张计提对一张发票的，系统默认按发票金额红冲更正；
@@ -555,6 +561,43 @@ export function VoucherScanPage({ user }) {
 
 // 自动做账栏：跟在每 20 分钟扫钉钉、配金蝶付款单那一轮后面跑。演练＝只算「如果开着会做哪几张」，不碰金蝶；真做＝系统自己审核付款单、写凭证并提交。
 const AUTO_MODE = { off: ['关', 'neu'], dry: ['演练（只算不写）', 'warn'], on: ['真做', 'ok'] }
+// 现金流量规则(V2.926，用户「我怎么感觉你的现金流量都有点问题」)：付款凭证的现金流量按核销的计提是什么性质来拆——计提的费用项目(或摘要)里带哪些字，挂哪个主表项目。
+//   从上往下先中先用；归不到的系统不猜，做账时会提醒去金蝶手工指定。出厂值是从以前人做的凭证里归纳的。
+function CashflowRules({ onClose, onSaved }) {
+  const [d, setD] = useState(null)
+  const [rows, setRows] = useState([])
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { voucherCashflowRules().then(r => { setD(r); setRows(r.rules.map(x => ({ ...x }))) }).catch(e => setErr(e.message)) }, [])
+  const set = (i, k, v) => setRows(rows.map((x, n) => (n === i ? { ...x, [k]: v, ...(k === 'code' ? { name: ((d.options || []).find(o => o.code === v) || {}).name || x.name } : {}) } : x)))
+  const move = (i, dlt) => { const j = i + dlt; if (j < 0 || j >= rows.length) return; const r = [...rows]; [r[i], r[j]] = [r[j], r[i]]; setRows(r) }
+  const save = rs => { setBusy(true); setErr(''); voucherCashflowRulesSet(rs).then(() => { onSaved && onSaved(); onClose() }).catch(e => setErr(e.message)).finally(() => setBusy(false)) }
+  return <div className="lv-mask ap" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+    <div className="lv-dlg lv-ap" role="dialog" aria-label="现金流量规则" style={{ width: 'min(820px,100%)' }}>
+      <div className="aph"><b>现金流量规则</b><span className="dim">付款凭证的现金流量，按核销的计提是什么性质来拆</span><span style={{ flex: 1 }} /><button className="lnk" onClick={onClose}>关闭</button></div>
+      <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.7, marginBottom: 8 }}>计提的<b>费用项目</b>里带这些字，这笔计提的含税金额就挂到右边的项目上；勾了「也看摘要」的，摘要里带也算。从上往下，先对上哪条用哪条。
+        几个字眼用 <span className="mono">|</span> 隔开。一条都对不上的，系统不猜：做账时会提醒你去金蝶手工指定。</div>
+      {err && <div className="lv-msg bad">{err}</div>}
+      {!d && !err && <div className="dim">读规则和金蝶的现金流量项目…</div>}
+      {d && <><table className="lv-t"><thead><tr><th style={{ width: 44 }}></th><th>费用项目里带这些字</th><th style={{ width: 90 }}>也看摘要</th><th style={{ width: 300 }}>现金流量主表项目</th><th style={{ width: 40 }}></th></tr></thead>
+        <tbody>{rows.map((x, i) => <tr key={i}>
+          <td><button className="lnk" disabled={i === 0} onClick={() => move(i, -1)} title="上移">↑</button> <button className="lnk" disabled={i === rows.length - 1} onClick={() => move(i, 1)} title="下移">↓</button></td>
+          <td><input value={x.kw} onChange={e => set(i, 'kw', e.target.value)} style={{ width: '100%' }} aria-label="字眼" /></td>
+          <td><input type="checkbox" checked={!!x.expl} onChange={e => set(i, 'expl', e.target.checked)} aria-label="也看摘要" /></td>
+          <td>{(d.options || []).length ? <select value={x.code} onChange={e => set(i, 'code', e.target.value)} style={{ width: '100%' }} aria-label="现金流量项目">
+            {!(d.options || []).some(o => o.code === x.code) && <option value={x.code}>{x.code} {x.name}</option>}
+            {d.options.map(o => <option key={o.code} value={o.code}>{o.code} {o.name}</option>)}</select> : <span className="mono">{x.code} {x.name}</span>}</td>
+          <td><button className="lnk" onClick={() => setRows(rows.filter((_, n) => n !== i))}>删</button></td></tr>)}</tbody></table>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 10 }}>
+          <button className="lnk" onClick={() => setRows([...rows, { kw: '', expl: false, code: (d.options[0] || {}).code || '', name: (d.options[0] || {}).name || '' }])}>＋ 加一条</button>
+          <span style={{ flex: 1 }} />
+          {d.custom && <button className="lnk" disabled={busy} onClick={() => { if (window.confirm('恢复成出厂的 ' + d.defaults.length + ' 条规则？')) save([]) }}>恢复出厂值</button>}
+          <button className="btn pri" disabled={busy || rows.some(x => !String(x.kw).trim() || !x.code)} onClick={() => save(rows)}>{busy ? '保存中…' : '保存'}</button>
+        </div></>}
+    </div>
+  </div>
+}
+
 // 自动做账进度窗(V2.912)：正在找单 / 正在算第几张 / 正在写金蝶第几张——哪家、多少钱、做到哪一步；下面是这一轮已经做完的。
 function AutoProgress({ p, onClose }) {
   const live = !!p.on
@@ -601,6 +644,9 @@ function AutoBar({ onChanged }) {
   const [tab, setTab] = useState('')          // 明细看哪一栏：no 不做 / yes 会做；空＝有不做的先看不做的
   const [page, setPage] = useState(1)
   const [who, setWho] = useState(false)       // 做完提醒：展开选收件人
+  // V2.937(用户看四步的表上面这一块：「这部分好占位置」)：默认收成一行——档位、上一轮会做 / 不做几张、提醒发给谁、跑一轮；要改设置点「展开设置」。记在这台电脑上。
+  const [fold, setFold0] = useState(() => { try { return localStorage.getItem('lv_auto_fold') !== '0' } catch (e) { return true } })
+  const setFold = v => { setFold0(v); try { localStorage.setItem('lv_auto_fold', v ? '1' : '0') } catch (e) { /* 存不了就只管这一次 */ } }
   const [seen, setSeen] = useState(false)     // 做完提醒：看上一条发了什么
   const [tested, setTested] = useState('')
   // 这一轮跑到哪了(V2.912，用户「加个弹窗，正在做那一笔，不然我完全不知道他在做什么」)：跑的时候每 1.5 秒读一次进度；
@@ -655,6 +701,26 @@ function AutoBar({ onChanged }) {
     voucherAutoNotifyTest().then(() => setTested('已发到你的钉钉')).catch(e => setTested(e.message)).finally(() => setBusy(''))
   }
   const st = (notice && notice.stat) || {}
+  const runBtn = cfg.mode !== 'off' && <button className="btn sm" disabled={!!busy || !!(prog && prog.on)} onClick={run}>{busy === 'run' || (prog && prog.on) ? '正在跑…' : cfg.mode === 'on' ? '现在跑一轮' : '现在演练一轮'}</button>
+  if (fold) return <div className={'lv-auto fold m-' + cfg.mode}>
+    <div className="row">
+      <b>自动做账</b>
+      <span className={'lv-pill ' + AUTO_MODE[cfg.mode][1]}>{cfg.mode === 'dry' ? '演练' : AUTO_MODE[cfg.mode][0]}</span>
+      {cfg.mode === 'off' ? <span className="dim">没打开：付了款的单要人来点</span>
+        : !last ? <span className="dim">还没跑过，每 20 分钟跑一轮</span>
+          : <span>上一轮 {String(last.at || '').slice(5)}：
+            {last.mode === 'on'
+              ? <><b className="ok">做成 {(last.done || []).filter(x => x.ok).length} 张</b>{(last.done || []).some(x => !x.ok) && <b className="bad">、没做成 {(last.done || []).filter(x => !x.ok).length} 张</b>}</>
+              : <>开着会做 <b className="ok">{yes.length}</b> 张</>}，
+            {items.length > 0 ? <button className="lnk" title="展开看是哪几张、为什么" onClick={() => { setFold(false); setOpen(true) }}>不做 {no.length} 张</button> : <>不做 {no.length} 张</>}</span>}
+      <span className="dim">做完提醒：{cfg.notify ? (nt.names.length ? nt.names.join('、') : '还没有人') : '不发'}{cfg.notify && nt.miss.length > 0 && <b className="warn">（有人发不到）</b>}</span>
+      <span style={{ flex: 1 }} />
+      {prog && prog.on && !progOpen && <button className="lnk" onClick={() => setProgOpen(true)}>正在跑，看做到哪了</button>}
+      {runBtn}
+      <button className="lnk" onClick={() => setFold(false)}>展开设置</button>
+    </div>
+    {progOpen && prog && <AutoProgress p={prog} onClose={() => setProgOpen(false)} />}
+  </div>
   return <div className={'lv-auto m-' + cfg.mode}>
     <div className="row">
       <b>自动做账</b>
@@ -666,7 +732,8 @@ function AutoBar({ onChanged }) {
       <button className="lnk" disabled={!!busy} onClick={() => num('每一轮最多自动做几张（1～50）', 'max_round')}>每轮最多 {cfg.max_round} 张</button>
       <span style={{ flex: 1 }} />
       {prog && prog.on && !progOpen && <button className="lnk" onClick={() => setProgOpen(true)}>正在跑，看做到哪了</button>}
-      {cfg.mode !== 'off' && <button className="btn sm" disabled={!!busy || !!(prog && prog.on)} onClick={run}>{busy === 'run' || (prog && prog.on) ? '正在跑…' : cfg.mode === 'on' ? '现在跑一轮' : '现在演练一轮'}</button>}
+      {runBtn}
+      <button className="lnk" onClick={() => setFold(true)}>收起</button>
     </div>
     <div className="row sub">
       {cfg.mode === 'off' ? <span>没打开：付了款的单要人来点「保存到金蝶」。</span>
@@ -811,6 +878,9 @@ function Detail({ inst, onClose, onChanged }) {
     voucherPaperOverride(inst, on, note).then(() => { load(); onChanged() }).catch(e => alert(e.message)).finally(() => setBusy(false))
   }
   const [l3busy, setL3busy] = useState(false)    // 发票后补第三笔：建暂估转待认证凭证
+  const [cfRules, setCfRules] = useState(false)   // 现金流量规则弹窗(V2.926)
+  const [cfBusy, setCfBusy] = useState(false)
+  const cfFix = () => { setCfBusy(true); voucherCashflowFix(inst).then(r => { alert(r.msg); load() }).catch(e => alert(e.message)).finally(() => setCfBusy(false)) }
   const [l3msg, setL3msg] = useState(null)
   const setLater = on => {
     let note = ''
@@ -902,6 +972,19 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
                 {d.req.later_slip.filed_by ? ` · ${d.req.later_slip.filed_by} 登记` : ''}），可以先把付款凭证做了：
                 <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setLater(true)}>发票后补，先做付款凭证</button></>
               : <>要没票先做付款凭证，得先在<b>发票管家登记发票后补单</b>（申请人自助登记，或财务在后补池登记）——这张还没有登记，现在不能先做。</>}</div>}
+          {d.cashflow && (() => {       // 现金流量(V2.926)：这张付款会挂到哪几个主表项目上；已做账的把金蝶里现在实际挂的也读出来对一下
+            const cf = d.cashflow, want = Object.fromEntries((cf.rows || []).map(x => [x.name, x.amount]))
+            const txt = o => Object.entries(o).map(([k, v]) => `${k} ${money(v)}`).join(' ＋ ') || '没有'
+            const same = cf.now && !cf.why && JSON.stringify(Object.entries(cf.now).sort()) === JSON.stringify(Object.entries(want).sort())
+            return <div className={'lv-msg' + (cf.why || (cf.now && !same) ? ' warn' : '')} style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 12px', alignItems: 'center' }}>
+              <b>现金流量</b>
+              {cf.why ? <span>定不了：{cf.why}。做账时系统不会猜，要到金蝶手工指定，或者先把规则补上</span> : <span>{d.req.posted ? '按规则应挂' : '做账时会挂'}：{txt(want)}</span>}
+              {cf.now && <span className={same ? 'ok' : ''}>金蝶里现在挂的：{txt(cf.now)}{same ? ' ✓' : ''}</span>}
+              {d.req.posted && cf.now && !same && !cf.why && <button className="btn sm" disabled={cfBusy} onClick={cfFix}>{cfBusy ? '正在改…' : '按规则重新指定'}</button>}
+              <button className="lnk" onClick={() => setCfRules(true)}>规则</button>
+            </div>
+          })()}
+          {cfRules && <CashflowRules onClose={() => setCfRules(false)} onSaved={load} />}
           {d.req.later && <div className="lv-msg warn">已确认<b>发票后补</b>（{d.req.later.by} {d.req.later.at}：{d.req.later.note}）——付款凭证只做支付，发票到了再转待认证。
             {!d.req.posted && <button className="lnk" style={{ marginLeft: 8 }} onClick={() => setLater(false)}>撤销</button>}</div>}
           {(d.xbook || []).map(x => <div key={x.short + x.vno} className={'lv-msg ' + (x.reversed ? 'okb' : 'warn')}>
@@ -1005,14 +1088,14 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
               </tbody>
             </table>}
           {d.later3 && <>
-            <div className="lv-sec">⑤ 发票后补 · 暂估转待认证 <span className="dim">付款时没票，只做了支付；发票到了单独做这一张</span>
+            <div className="lv-sec">⑤ 发票后补 · 暂估转待认证 <span className="dim">付款时没票，暂估进项税没转；发票到了单独做这一张（和账上对不上的，先整笔红冲更正再核销）</span>
               <span style={{ flex: 1 }} />
               {!d.later3.vno && <button className="btn btn-pri" disabled={l3busy || !d.later3.ok} onClick={postLater}>{l3busy ? '建凭证中…' : '保存到金蝶（新建凭证并提交）'}</button>}</div>
             {l3msg && <div className={'lv-msg ' + (l3msg.ok ? 'okb' : 'bad')}>{l3msg.text}</div>}
             {d.later3.vno
               ? <div className="lv-verdict ok"><span className="lv-pill ok">已写入金蝶</span>暂估转待认证凭证 <b>记-{d.later3.vno}</b>（{d.later3.date}）· {d.later3.by} {d.later3.at}
                 {d.later3.submitted === false ? ' · 提交没成功，请到金蝶手动提交' : ' · 已提交，等人审核'}</div>
-              : <>{d.later3.msg && <div className="lv-msg bad">{d.later3.msg}</div>}
+              : <>{d.later3.msg && <div className={'lv-msg ' + (d.later3.ok ? 'warn' : 'bad')}>{d.later3.msg}</div>}
                 {(d.later3.lines || []).length > 0 && <table className="lv-t lv-v">
                   <colgroup><col style={{ width: 34 }} /><col /><col style={{ width: 190 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: '26%' }} /></colgroup>
                   <thead><tr><th>#</th><th>摘要</th><th>科目</th><th className="num">借方</th><th className="num">贷方</th><th>核算维度</th></tr></thead>
@@ -1020,7 +1103,7 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
                     <td className="nw">{l.acct} {l.acct_name}</td><td className="num">{l.dr ? money(l.dr) : ''}</td><td className="num">{l.cr ? money(l.cr) : ''}</td>
                     <td className="dims">{dimLine(l.dims)}</td></tr>)}
                     <tr className="tot"><td colSpan="3">合计　{Math.abs((d.later3.dr || 0) - (d.later3.cr || 0)) < 0.005 ? <span className="ok">借贷平衡 ✓</span> : <span className="bad">借贷不平</span>}
-                      {d.later3.tail ? <span className="warn">　税额尾差 {money(d.later3.tail)} 调到费用行</span> : null}</td>
+                      {d.later3.tail ? <span className="warn">　税额尾差 {money(d.later3.tail)}：整笔红冲后更正</span> : null}</td>
                       <td className="num">{money(d.later3.dr)}</td><td className="num">{money(d.later3.cr)}</td><td></td></tr></tbody></table>}</>}
           </>}
         </>}
@@ -1045,22 +1128,31 @@ export default function LogisticsVoucher() {
   const [run, setRun] = useState(null)          // 批量进度 {i, n, cur, done:[{inst, label, ok, msg, vno}]}
   const [kf, setKf] = useState('')
   const [bm, setBm] = useState('')              // 装订打印的凭证月份，空=最新一个月
-  const [view, setView] = useState('grid')      // grid 总表(承运商 × 主体) / list 明细(一张请款单一行)
+  const [stamp, setStamp] = useState(null)      // 这一页的数是什么时候、谁刷的(列表接口带回来)
+  const [busyLoad, setBusyLoad] = useState(false)
   const [pf, setPf] = useState('')              // 账单月筛选，空=全部
+  const [sf, setSf] = useState('')              // 四步表上面五个数的筛选：'' 全部 / 0 可以做账 / 1 2 3 卡在哪一步 / 9 已做账
+  const [steps, setSteps] = useState(null)      // 「做账步骤」弹窗开着的那张请款单
   // V2.920(用户「不是在付款做账点，是在账单审核点」)：发票后补的确认挪到账单复核台第③步，这里只写去哪确认
+  // 付款单往来单位编码选错(V2.925，用户「这个路凯的，我们可以直接调整付款单编码吗」)：人点一下，系统把金蝶付款单的往来单位、收款单位改对——不提交不审核，后面照常做账
+  const fixPaycode = r => {
+    const w = r.paywarn || {}
+    if (!window.confirm(`把金蝶付款单 ${w.bill_no || ''} 的往来单位、收款单位改成「${w.want}」？\n\n${r.sup_full || r.carrier} · ${r.subject} · ${money(r.amount)}\n现在填的是「${w.code}」——同一家公司的另一条供应商档案，出纳选错了。\n\n· 只改这两格，别的不动；不提交、不审核。\n· 付款单已经审核过的改不了，要先在金蝶反审核。\n· 改完这张单就能照常做账（开着自动做账的话系统下一轮自己做）。\n· 这是在改出纳建的单据，会留操作日志。`)) return
+    voucherFixPaycode(r.inst).then(x => { alert(`已把付款单 ${x.bill_no} 的往来单位从「${x.old}」改成「${x.new}」。${x.matched ? '已经配到这张请款单上，可以做账了。' : '下一次扫描（20 分钟内）会配上。'}`); load() }).catch(e => alert(e.message))
+  }
   const noInvCell = r => !r.period ? <span className="dim">未认账单月</span>
     : r.later ? <span className="warn kt">已确认发票后补 · 只做支付</span>
       : r.later_slip ? <span className="warn kt" title="发票管家里登记了后补单。到「账单复核台」这家这月的第③步「确认与登记」里点「确认发票后补」，确认之后系统自动只做支付">已登记后补单 #{r.later_slip.id} · 待账单审核确认</span>
         : <span className="dim">票夹没有发票</span>
-  const load = () => voucherList().then(r => {
+  const load = () => { setBusyLoad(true); return voucherList().then(r => {
     const rs = r.rows || []
-    setRows(rs); setErr('')
+    setRows(rs); setErr(''); setStamp({ at: r.at, by: r.by })
     // 做账类型：有账单月、有发票的才算；分几批取，先出的先显示
-    const ids = rs.filter(x => x.period && x.n_inv && x.status !== 'unpaid').map(x => x.inst)     // 没付款单的不显示，也就不去金蝶算做账类型
+    const ids = [...rs.filter(x => x.period && !x.posted), ...rs.filter(x => x.period && x.posted)].map(x => x.inst)     // 四步表每行都要计提合计；没做账的先取
     const batches = []
     for (let i = 0; i < ids.length; i += 5) batches.push(ids.slice(i, i + 5))
     batches.reduce((p, b) => p.then(() => voucherPlans(b).then(o => setPlans(old => ({ ...old, ...(o.plans || {}) }))).catch(() => {})), Promise.resolve())
-  }).catch(e => { setErr(e.message); setRows([]) })
+  }).catch(e => { setErr(e.message); setRows([]) }).finally(() => setBusyLoad(false)) }
   useEffect(() => { load() }, [])
   const cnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { c[r.status] = (c[r.status] || 0) + 1 }); return c }, [rows])
   const canBatch = r => r.status === 'ready' && !r.posted && plans[r.inst] && BATCH_KINDS.includes(plans[r.inst].kind)
@@ -1097,8 +1189,11 @@ export default function LogisticsVoucher() {
   }
   const kcnt = useMemo(() => { const c = {}; (rows || []).forEach(r => { const p = plans[r.inst]; if (p) c[p.kind] = (c[p.kind] || 0) + 1 }); return c }, [plans, rows])
   const periods = useMemo(() => [...new Set((rows || []).map(r => r.period).filter(Boolean))].sort().reverse(), [rows])
-  const shown = (rows || []).filter(r => (!f || r.status === f) && (!kf || (plans[r.inst] || {}).kind === kf) && (!pf || r.period === pf) &&
-    (!q || [r.carrier, r.payee, r.sup_full, r.subject, r.bid, r.code].some(x => String(x || '').includes(q))))
+  // 总表(四步)：金蝶还没出付款单的也列(账单、票可以先办)，按上面五个数筛；明细：照旧只列出了付款单的，按状态、做账类型筛
+  const ql = q.trim().toLowerCase()
+  const flowBase = (allRows || []).filter(r => !pf || r.period === pf)
+  const stKey = flowKey
+  const shown = flowBase.filter(r => (!sf || stKey(r) === sf) && (!ql || flowHay(r, plans[r.inst]).includes(ql)))
   // 装订：当前筛选下已有凭证号的单(系统写的 + 金蝶里已有的)，按凭证月份挑一个月打
   const bindAll = bindItems(shown, plans)
   const bindMonths = [...new Set(bindAll.map(x => x.month).filter(Boolean))].sort().reverse()
@@ -1122,162 +1217,51 @@ export default function LogisticsVoucher() {
   const vnoOf = r => (r.posted && r.posted.vno ? '记-' + r.posted.vno : r.paid_voucher || '')
   const batchInsts = run && run.end ? new Set(run.done.filter(x => x.ok).map(x => x.inst)) : null
   const bindBatch = batchInsts ? bindItems((rows || []).filter(r => batchInsts.has(r.inst)), plans) : []
+  const runInfo = run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
+    {run.end && run.done.some(x => x.ok && x.redo) && <button className="lnk" onClick={() => printAdjust(Promise.all(run.done.filter(x => x.ok && x.redo).map(x => voucherPreview(x.inst))), '本批计提更正单')}>打印本批计提更正单（{run.done.filter(x => x.ok && x.redo).length} 张）</button>}
+    {run.end && bindBatch.length > 0 && <><button className="lnk" onClick={() => printHtml('本批装订对照清单', BIND_CSS, bindListHtml(bindBatch))}>打印本批装订清单（{bindBatch.length} 张）</button></>}
+    {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>
   return (
     <div className="lv">
-      <style>{CSS}</style>
+      <style>{CSS + FLOW_CSS}</style>
       <div className="head"><div><div className="h-title">付款做账 · 物流请款单</div>
-        <div className="h-sub">付款后合成一张凭证：红冲 → 更正 → 核销（暂估转待认证）→ 支付。计提取金蝶、发票取发票管家、维度更正取复核台登记。「保存到金蝶」＝系统审核付款单，再往金蝶自动生成的付款凭证里补分录并提交；凭证留给人在金蝶审核。</div></div></div>
+        <div className="h-sub">账单复核、收票、付款都过了，系统才做账；凭证只提交，审核留给人在金蝶做。</div></div>
+        {/* 右上角照「银行–金蝶稽核」的排法(V2.940)：上面一行 账单月、刷新；下面一行小字写谁、什么时候刷的 */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {periods.length > 1 && <select value={pf} onChange={e => setPf(e.target.value)} title="按账单月份看"><option value="">全部账单月</option>{periods.map(m => <option key={m} value={m}>{ymCn(m)}账单</option>)}</select>}
+            <button className="btn" disabled={busyLoad} onClick={load} title="重新读一遍请款单、金蝶付款单、发票、复核状态">{busyLoad ? '刷新中…' : '刷新数据'}</button>
+          </div>
+          {stamp && stamp.at ? <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>数据：{stamp.by || '—'} 于 {stamp.at} 刷新</div> : null}
+        </div></div>
       <div className="body">
-        <div className="lv-bar">
-          {ORDER.filter(k => !['paycode', 'latertax'].includes(k) || cnt[k]).map(k => <button key={k} className={'lv-chip ' + ST[k][1] + (f === k ? ' on' : '')} title={ST[k][2]} onClick={() => setF(f === k ? '' : k)}>{ST[k][0]}<b>{cnt[k] || 0}</b></button>)}
-          <button className={'lv-chip' + (!f ? ' on' : '')} onClick={() => setF('')}>全部<b>{(rows || []).length}</b></button>
-          <span style={{ flex: 1 }} />
-          {periods.length > 1 && <select className="lv-sel" value={pf} onChange={e => setPf(e.target.value)} title="按账单月份看"><option value="">全部账单月</option>{periods.map(m => <option key={m} value={m}>{ymCn(m)}账单</option>)}</select>}
-          <input type="search" placeholder="搜承运商/主体/审批编号" value={q} onChange={e => setQ(e.target.value)} />
-          <span className="lv-seg"><button className={view === 'grid' ? 'on' : ''} title="承运商一行、三个主体各一组列" onClick={() => setView('grid')}>总表</button>
-            <button className={view === 'list' ? 'on' : ''} title="一张请款单一行，看每张计提的费用类型、税率、凭证号" onClick={() => setView('list')}>明细</button></span>
-          <a className="btn" href="#/vbind" title="扫纸质付款单的二维码看主体和凭证号、打计提更正单：挪到「其它模块 › 凭证装订」了">凭证装订 ↗</a>
-          <button className="btn" onClick={load}>刷新</button>
-        </div>
-        <div className="lv-bar">
-          <span className="dim">做账类型</span>
-          {KIND_ORDER.map(k => <button key={k} className={'lv-chip ' + KIND[k][1] + (kf === k ? ' on' : '')} onClick={() => setKf(kf === k ? '' : k)}>{KIND[k][0]}<b>{kcnt[k] || 0}</b></button>)}
-          {kf && <button className="lnk" onClick={() => setKf('')}>不限</button>}
-        </div>
         {err && <div className="lv-msg bad">{err}</div>}
         {(rows || []).filter(r => r.status === 'paycode').map(r => <div key={r.inst} className="lv-msg bad">
-          <b>付款单往来单位编码不对 · {r.sup_full || r.carrier} · {r.subject} · {money(r.amount)}</b>　{r.paywarn && r.paywarn.text}</div>)}
-        {unpaid.length > 0 && <div className="lv-unpaid">另有 <b>{unpaid.length}</b> 张请款单金蝶还没有付款单（钉钉审批中 {unpaid.filter(r => r.dt_status === 'RUNNING').length} 张
-          {unpaid.some(r => r.dt_status !== 'RUNNING') && <>、已通过待付款 {unpaid.filter(r => r.dt_status !== 'RUNNING').length} 张</>}，合计 {money(unpaid.reduce((s, r) => s + (r.amount || 0), 0))}），出了付款单才在这里显示。
-          <button className="lnk" onClick={() => { const on = !showUnpaid; setShowUnpaid(on); if (on) { setF(''); voucherPlans(unpaid.filter(x => x.period && x.n_inv && !plans[x.inst]).map(x => x.inst)).then(o => setPlans(old => ({ ...old, ...(o.plans || {}) }))).catch(() => {}) } }}>{showUnpaid ? '收起' : '先看一眼'}</button></div>}
+          <b>付款单往来单位编码不对 · {r.sup_full || r.carrier} · {r.subject} · {money(r.amount)}</b>　{r.paywarn && r.paywarn.text}
+          {r.paywarn && <div style={{ marginTop: 6 }}><button className="btn sm" onClick={() => fixPaycode(r)}>把往来单位改成「{r.paywarn.want}」</button>
+            <span className="dim" style={{ marginLeft: 8, fontSize: 12 }}>系统替你改金蝶付款单的往来单位、收款单位两格；付款单已审核的要先在金蝶反审核</span></div>}</div>)}
         <AutoBar onChanged={load} />
-        <div className="lv-batch">
-          <span>已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((s, r) => s + (r.amount || 0), 0))}</b></>}</span>
-          <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}>批量保存到金蝶</button>
-          <span className="dim">能勾「可做账」且做账类型为 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的；计提记错主体的单张做（两边各出一张凭证、两张更正单），金额不符的要人工</span>
-          {run && <span className="lv-run">{run.end ? `完成：成功 ${run.done.filter(x => x.ok).length} 张，失败 ${run.done.filter(x => !x.ok).length} 张` : `正在写第 ${run.i}/${run.n} 张：${run.cur}…`}
-            {run.end && run.done.some(x => x.ok && x.redo) && <button className="lnk" onClick={() => printAdjust(Promise.all(run.done.filter(x => x.ok && x.redo).map(x => voucherPreview(x.inst))), '本批计提更正单')}>打印本批计提更正单（{run.done.filter(x => x.ok && x.redo).length} 张）</button>}
-            {run.end && bindBatch.length > 0 && <><button className="lnk" onClick={() => printHtml('本批装订对照清单', BIND_CSS, bindListHtml(bindBatch))}>打印本批装订清单（{bindBatch.length} 张）</button></>}
-            {run.end && <button className="lnk" onClick={() => setRun(null)}>收起</button>}</span>}
+        <FlowTiles rows={flowBase} value={sf} onChange={setSf} />
+        <div className="fbar">
+          <span className="fl">筛选</span>
+          <label>搜索<input type="text" style={{ width: 320 }} aria-label="搜索请款单" placeholder="承运商 / 主体 / 金额 / 付款单号 / 凭证号" value={q} onChange={e => setQ(e.target.value)} autoComplete="off" /></label>
+          {q && <button className="lnk" onClick={() => setQ('')}>清空</button>}
+          <span style={{ flex: 1 }} />
+          <label>已勾选 <b style={{ color: 'var(--ink)' }}>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono" style={{ color: 'var(--ink)' }}>{money(picked.reduce((x, r) => x + (r.amount || 0), 0))}</b></>}</label>
+          <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}
+            title="四步都过了、做账类型是 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的才能勾；计提记错主体的单张做，金额不符的要人工">批量保存到金蝶</button>
+          {runInfo}
         </div>
+        <div className="foot" style={{ marginTop: -6 }}>点上方数字筛选 · 当前：<b style={{ color: 'var(--ink)' }}>{(FLOW_KPI.find(k => k[0] === sf) || FLOW_KPI[0])[1]}</b>（{shown.length} 张{ql ? `，共 ${flowBase.length} 张` : ''}）
+          {sf && (FLOW_KPI.find(k => k[0] === sf) || [])[3] ? <span style={{ color: (FLOW_KPI.find(k => k[0] === sf) || [])[2], marginLeft: 8, fontWeight: 600 }}>{(FLOW_KPI.find(k => k[0] === sf) || [])[3]}</span> : null}</div>
         {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
           {pickedRedo.map(r => <span key={r.inst} className="lv-redo">{label(r)}<span className="dim">（{(plans[r.inst] || {}).text}）</span></span>)}
           建议先点开预览看一眼；写完后在金蝶重点核对红冲、更正两段。</div>}
         {run && run.done.length > 0 && <ul className="lv-runlist">{run.done.map(x => <li key={x.inst} className={x.ok ? 'ok' : 'bad'}>{x.ok ? '✓' : '✗'} {x.label}：{x.msg}</li>)}</ul>}
-        {view === 'grid' && <div className="tbl-wrap"><table className="lv-t lv-grid">
-          <thead>
-            <tr><th rowSpan="2" className="car">承运商</th>
-              {subjects.map(sj => <th key={sj} colSpan="3" className="sg">{sj}</th>)}
-              <th rowSpan="2">做账状态</th><th rowSpan="2"></th></tr>
-            <tr>{subjects.map(sj => <React.Fragment key={sj}><th className="num sl">计提</th><th className="num">付款</th>
-              <th><label className="gck" title="勾选当前筛选里能批量做账的"><input type="checkbox" checked={shown.filter(r => r.subject === sj).some(canBatch) && shown.filter(r => r.subject === sj && canBatch(r)).every(r => sel[r.inst])}
-                disabled={!shown.some(r => r.subject === sj && canBatch(r))}
-                onChange={e => { const on = e.target.checked; setSel(o => { const n = { ...o }; shown.filter(r => r.subject === sj && canBatch(r)).forEach(r => { n[r.inst] = on }); return n }) }} />做账</label></th></React.Fragment>)}</tr>
-          </thead>
-          <tbody>
-            {rows === null && <tr><td colSpan={subjects.length * 3 + 3} className="lv-empty">读取中…</td></tr>}
-            {rows && !grid.length && <tr><td colSpan={subjects.length * 3 + 3} className="lv-empty">没有</td></tr>}
-            {grid.map(g => {
-              const nb = g.all.filter(r => r.status === 'booked').length
-              const nr = g.all.filter(r => r.status === 'ready').length
-              const worst = ORDER.find(k => k !== 'ready' && k !== 'booked' && g.all.some(r => r.status === k)) || (g.all.some(r => r.status === 'unpaid') ? 'unpaid' : '')
-              const next = g.all.find(r => r.status !== 'booked' && r.period) || g.all[0]
-              const blk = (r, body) => <div key={r.inst} className="gb">{body}</div>
-              return <tr key={g.key} className={nb === g.all.length ? 'alldone' : ''}>
-                <td className="car" title={g.name}>{g.name}<div className="code2">{g.code}</div></td>
-                {subjects.map(sj => {
-                  const rs = g.cells[sj] || []
-                  if (!rs.length) return <React.Fragment key={sj}><td className="sl"></td><td></td><td></td></React.Fragment>
-                  return <React.Fragment key={sj}>
-                    <td className="num sl">{rs.map(r => { const a = accSum(r), acc = (plans[r.inst] || {}).acc || [], calc = !!r.period && !!r.n_inv
-                      return blk(r, <>{a != null ? <span title={acc.map(x => `${x.month}/${x.vno}# ${money(x.gross)} ${x.fee || ''}`).join('\n')}>{money(a)}</span> : <span className="dim">{calc && !plans[r.inst] ? '计算中…' : '—'}</span>}
-                        {acc.length > 0 && <span className="dim mono">{acc.length === 1 ? `${acc[0].month}/${acc[0].vno}#` : `${acc.length} 张计提`}</span>}</>) })}</td>
-                    <td className="num">{rs.map(r => blk(r, <><span><b>{money(r.amount)}</b>{r.period && r.period !== mainPeriod && <i className="pm" title="账单月份">{Number(r.period.slice(5))}月</i>}</span>
-                      <button className={'lv-pill ' + ST[r.status][1]} title={ST[r.status][2] + (r.paywarn ? '：' + r.paywarn.text : '') + '　点开看凭证预览'} disabled={!r.period} onClick={() => setOpen(r.inst)}>
-                        {r.status === 'booked' ? `已做账 ${vnoOf(r)}` : ST[r.status][0]}</button></>))}</td>
-                    <td>{rs.map(r => { const pl = plans[r.inst], calc = !!r.period && !!r.n_inv
-                      const [lb, cl] = pl ? (KS[pl.kind] || [pl.kind, 'dim']) : ['', '']
-                      return blk(r, <>{!calc ? noInvCell(r) : !pl ? <span className="dim">计算中…</span>
-                        : <label className="gck"><input type="checkbox" disabled={!canBatch(r)} checked={!!sel[r.inst] && canBatch(r)}
-                            title={canBatch(r) ? (isRedo(r) ? '勾选批量做账（⚠ 这张要红冲更正）' : '勾选批量做账') : r.posted ? '已写金蝶' : r.status !== 'ready' ? '还不能做账' : '这种要点开单张做，不进批量'}
-                            onChange={e => setSel(o => ({ ...o, [r.inst]: e.target.checked }))} /><b className={cl}>{lb}</b></label>}
-                        {pl && pl.kind !== 'hx' && <span className="dim kt" title={pl.text}>{pl.text}</span>}
-                        {r.later_state === 'wait' && <span className="warn kt">发票后补 · 等发票</span>}</>) })}</td>
-                  </React.Fragment>
-                })}
-                <td className="gst">{nb === g.all.length ? <span className="lv-pill done">已做账 {nb}/{g.all.length}</span>
-                  : nr ? <span className="lv-pill ok">可做账 {nr} 张</span> : worst ? <span className={'lv-pill ' + ST[worst][1]}>{ST[worst][0]}</span> : null}
-                  <div className="dim">{g.all.length} 张请款单 · 已做账 {nb}</div></td>
-                <td><button className="btn btn-pri" disabled={!next.period} title={g.all.length > 1 ? `这家有 ${g.all.length} 张请款单：这里打开还没做的第一张，别的点格子里的状态` : ''} onClick={() => setOpen(next.inst)}>{nb === g.all.length ? '查看' : '凭证预览'}</button></td>
-              </tr>
-            })}
-            {grid.length > 0 && <tr className="tot"><td className="car">合计 · {grid.length} 家 {shown.length} 张</td>
-              {subjects.map(sj => { const rs = shown.filter(r => r.subject === sj); return <React.Fragment key={sj}><td className="sl"></td>
-                <td className="num">{rs.length ? money(rs.reduce((x, r) => x + (r.amount || 0), 0)) : ''}</td><td className="dim">{rs.length ? `已做账 ${rs.filter(r => r.status === 'booked').length}/${rs.length}` : ''}</td></React.Fragment> })}
-              <td></td><td></td></tr>}
-          </tbody>
-        </table></div>}
-        {view === 'list' && <div className="tbl-wrap"><table className="lv-t lv-list">
-          <thead><tr><th className="ck"><input type="checkbox" title="勾选当前列表里能批量做账的"
-            checked={shown.some(canBatch) && shown.filter(canBatch).every(r => sel[r.inst])}
-            onChange={e => { const on = e.target.checked; setSel(o => { const n = { ...o }; shown.filter(canBatch).forEach(r => { n[r.inst] = on }); return n }) }} /></th><th>主体</th><th>物流商</th><th>费用类型</th><th className="num">计提金额</th><th>税率</th><th>计提凭证</th>
-            <th>审核结果</th><th>建议动作</th><th className="num">付款金额</th><th>付款单状态</th><th></th></tr></thead>
-          <tbody>
-            {rows === null && <tr><td colSpan="12" className="lv-empty">读取中…</td></tr>}
-            {rows && !shown.length && <tr><td colSpan="12" className="lv-empty">没有</td></tr>}
-            {shown.map(r => {
-              const p = plans[r.inst]
-              const acc = (p && p.acc) || []
-              const calc = !!r.period && !!r.n_inv
-              const pending = calc && !p
-              // 一张请款单对应几张计提：费用类型/金额/税率/凭证号/审核结果 逐张上下对齐
-              const stack = (fn, cls = '') => acc.length
-                ? <div className={'ml ' + cls}>{acc.map(a => <div key={a.vno} title={a.expl}>{fn(a)}</div>)}</div>
-                : <span className="dim">{pending ? '计算中…' : '—'}</span>
-              const [klb, kcl] = p ? (KIND[p.kind] || [p.kind, 'neu']) : ['', '']
-              const pay = r.paid
-                ? (r.paid_voucher ? <>已记支付凭证 <b>{r.paid_voucher}</b></> : <>付款单 · {r.pay_st || '已生成'}<div className="dim">{r.paid}</div></>)
-                : r.paywarn ? <span className="bad" title={r.paywarn.text}>付款单选成「{r.paywarn.code}」<div>应为「{r.paywarn.want}」· {r.paywarn.creator} {String(r.paywarn.date || '').slice(5)}</div></span>
-                  : (r.dt_status === 'RUNNING' ? <span className="dim">钉钉审批中</span> : <span className="dim">已通过 · 待付款</span>)
-              return <tr key={r.inst}>
-                <td className="ck"><input type="checkbox" disabled={!canBatch(r)} checked={!!sel[r.inst] && canBatch(r)}
-                  title={canBatch(r) ? (isRedo(r) ? '勾选批量做账（⚠ 这张要红冲更正）' : '勾选批量做账') : r.posted ? '已写金蝶' : r.status !== 'ready' ? '还不能做账' : '计提记错主体的点「凭证预览」单张做；金额不符的要人工，不进批量'}
-                  onChange={e => setSel(o => ({ ...o, [r.inst]: e.target.checked }))} /></td>
-                <td className="nw">{r.subject}<div className="code2">{r.book}</div></td>
-                <td className="sup">{r.sup_full}<div className="code2">{r.code}</div></td>
-                <td>{stack(a => <>{a.fee || '—'}{a.biz && <span className="dim"> · {a.biz}</span>}</>)}</td>
-                <td className="num">{stack(a => money(a.gross))}</td>
-                <td>{stack(a => a.mode === 'rate' ? <>{pct(a.rate)} → <b className="bad">{pct(a.new_rate)}</b></> : pct(a.rate))}</td>
-                <td>{stack(a => <><span className="mono">{a.month}/{a.vno}#</span>{a.from && <span className="dim"> {a.from}</span>}</>)}</td>
-                {(() => {
-                  // 审核结果＝比对出来的事实，建议动作＝要做什么；逐张计提一行，和左边对齐。整单问题(主体错/金额不符…)各写一句。
-                  if (!calc) return <><td>{noInvCell(r)}</td><td><span className="dim">{!r.period ? '到账单核对总表认领月份' : r.later ? '系统自动只做支付；发票到了再转待认证' : r.later_slip ? '到账单复核台第③步确认发票后补，确认后系统自动只做支付' : '收票台补票'}</span></td></>
-                  if (pending) return <><td><span className="dim">计算中…</span></td><td></td></>
-                  if (['subj', 'manual', 'noacc', 'err', 'later'].includes(p.kind)) return <>
-                    <td className="kd"><span className={KIND[p.kind] ? (KIND[p.kind][1] === 'bad' ? 'bad' : 'warn') : ''}>{KIND[p.kind]?.[0]}</span><div className="dim kt">{p.text}</div></td>
-                    <td className="kd">{p.kind === 'subj' && p.auto ? <>{ACT.subjAuto}
-                      {(p.xrev || []).map(x => <div key={x.vno} className={x.reversed ? 'ok' : 'warn'}>{x.short} 记-{x.vno} 红冲{x.reversed ? `已做（记-${x.reversed.vno}）` : '系统一并做'}</div>)}</> : ACT[p.kind]}</td></>
-                  return <>
-                    <td>{stack(a => a.mode === 'hx' ? <span className="ok">一致</span> : a.mode === 'tail' ? <span className="warn">一致 · 尾差 {money(a.tail)}</span>
-                      : a.mode === 'rate' ? <span className="bad" title={a.why}>税率不符</span> : a.mode === 'fix' ? <span className="bad" title={a.why}>有计提更正</span>
-                      : a.mode === 'amt' ? <span className="bad" title={a.why}>金额有差 {money(r2((a.gross_new ?? a.gross) - a.gross))}</span>
-                      : a.mode === 'part' ? <span className="warn" title={a.why}>部分核销 {money(a.gross_new)}</span> : '—')}</td>
-                    <td>{stack(a => a.mode === 'hx' ? '核销' : a.mode === 'tail' ? <b className="warn">红冲 + 更正（尾差）</b> : a.mode === 'part' ? <b className="warn">部分核销（单张做）</b>
-                      : a.mode ? <b className="bad">红冲 + 更正</b> : '—')}</td></>
-                })()}
-                <td className="num">{money(r.amount)}<div className="dim">{r.n_inv ? `发票 ${r.n_inv} 张 · ${money(r.inv_total)}` : '没有发票'}</div></td>
-                <td className="nw">{pay}<div className="dim">纸质件 {r.n_inv ? `${r.n_paper}/${r.n_inv}` : '—'}{r.paper_ovr ? ' · 已放行' : ''}</div>
-                  <span className={'lv-pill ' + ST[r.status][1]}>{ST[r.status][0]}</span>{r.posted && <div className="dim">已写金蝶 记-{r.posted.vno}</div>}
-                  {r.later && <div className="warn">发票后补 · 只做支付</div>}
-                  {r.later_state === 'wait' && <div className="warn">发票后补 · 等发票</div>}
-                  {r.later_state === 'done' && <div className="dim">暂估已转待认证 记-{r.later3_vno}</div>}</td>
-                <td><button className="btn btn-pri" disabled={!r.period} onClick={() => setOpen(r.inst)}>{r.status === 'booked' ? '查看' : '凭证预览'}</button></td>
-              </tr>
-            })}
-          </tbody>
-        </table></div>}
-        {view === 'grid' && <div className="lv-foot">一行一家承运商，三个主体各一组列：计提＝这张请款单要核销的金蝶计提合计（鼠标停留看是哪几张）；付款＝请款金额，下面的状态点开就是凭证预览；
-          做账＝计提和发票比对的结论，能批量做的可以勾。同一格里有几张请款单的上下排。要看每张计提的费用类型、税率、凭证号，切到右上角「明细」。</div>}
+        <FlowTable rows={shown} loading={allRows === null} plans={plans} sel={sel} setSel={setSel} canBatch={canBatch} onSteps={setSteps} fixPaycode={fixPaycode}
+          emptyText={ql ? `没搜到「${q.trim()}」：换个词，或者点上面的数字把筛选去掉` : sf ? '这一类现在没有' : '没有请款单'} />
+        <div className="lv-foot">一张请款单一行，从左到右四步：① 账单复核（整月登记，或这个主体标了「本主体通过」）② 收票（发票管家审核通过才算；发票后补已确认的也算）③ 付款（金蝶有付款单）④ 做账。前一步没过后面不做，卡在哪一步那一格标黄。每格下面的灰字是依据：② 票种和审核状态，③ 金蝶付款单号，④ 制单人 · 期间 凭证号。
+          「计提」是这张单要核销的金蝶计提含税合计和它跟请款的差异；怎么做（只核销还是红冲更正）点每行最后的「做账步骤」。要看每张计提的费用类型、税率，在「做账步骤」里点「凭证预览」。</div>
         {bindAll.length > 0 && <div className="lv-batch">
           <span>装订用 · 凭证月份</span>
           <select value={bmOn} onChange={e => setBm(e.target.value)}>{bindMonths.map(m => <option key={m} value={m}>{ymCn(m)}</option>)}</select>
@@ -1288,6 +1272,8 @@ export default function LogisticsVoucher() {
           <span className="dim">按当前筛选（上面的状态/搜索）出。凭证号不用贴条：装订的同事扫纸质付款单上的二维码就能看到主体和凭证号，手写标上（给他的账号勾「扫码查凭证」）</span>
         </div>}
       </div>
+      {steps && <StepsDlg row={(allRows || []).find(x => x.inst === steps.inst) || steps} plan={plans[steps.inst]} onClose={() => setSteps(null)}
+        onPreview={() => { const i = steps.inst; setSteps(null); setOpen(i) }} />}
       {open && <Detail inst={open} onClose={() => setOpen(null)} onChanged={load} />}
     </div>
   )
@@ -1391,6 +1377,9 @@ const CSS = `
 .lv .sc-big{font-size:38px;font-weight:800;line-height:1.15}.lv .sc-res.warn .sc-big,.lv .sc-res.bad .sc-big{font-size:24px}.lv .sc-mon{font-size:16px;font-weight:600}
 .lv .sc-meta{margin-top:8px;font-size:12.5px;color:var(--ink-2)}.lv .sc-meta .warn{color:var(--amber)}
 .lv .lv-auto{border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);padding:8px 12px;font-size:12.5px;display:flex;flex-direction:column;gap:6px}
+.lv>.head{flex-wrap:nowrap}.lv>.head>div:first-child{flex:1;min-width:0}
+.lv .lv-htools{display:flex;align-items:center;gap:8px;flex:none;margin-left:auto;white-space:nowrap}.lv .lv-htools .stamp{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.lv .lv-auto.fold{padding:6px 12px}.lv .lv-auto.fold .row{gap:10px}.lv .lv-auto.fold .lv-pill{background:var(--bg);font-weight:600}
 .lv .lv-auto.m-on{border-color:var(--green-line);background:var(--green-bg)}.lv .lv-auto.m-dry{border-color:var(--amber-line);background:var(--amber-bg)}
 .lv .lv-auto .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.lv .lv-auto .row.sub{color:var(--ink-2)}.lv .lv-auto .ok{color:var(--green)}.lv .lv-auto .warn{color:var(--amber)}
 .lv .lv-auto .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--bg)}

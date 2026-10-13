@@ -173,6 +173,10 @@ export const voucherDdConfig = url => j('/api/logistics-voucher/dd-config?url=' 
 export const voucherAuto = () => j('/api/logistics-voucher/auto')
 export const voucherAutoSet = patch => j('/api/logistics-voucher/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
 export const voucherAutoRun = () => j('/api/logistics-voucher/auto/run', { method: 'POST' })
+export const voucherCashflowFix = inst => j('/api/logistics-voucher/cashflow', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst }) })
+export const voucherCashflowRules = () => j('/api/logistics-voucher/cashflow-rules')
+export const voucherCashflowRulesSet = rules => j('/api/logistics-voucher/cashflow-rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rules }) })
+export const voucherFixPaycode = inst => j('/api/logistics-voucher/fix-paycode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst }) })
 export const voucherAutoProgress = () => j('/api/logistics-voucher/auto/progress')
 export const voucherAutoNotifyTest = () => j('/api/logistics-voucher/auto/notify-test', { method: 'POST' })
 // 人工选择这张请款单核销哪些计提（可跨月）
@@ -309,6 +313,7 @@ export const fxRateHistory = (b) => jpSoft('/api/fxrate/history', b)
 export const getFxNotifyConfig = () => j('/api/fxrate/notify-config')
 export const saveFxNotifyConfig = (b) => jpSoft('/api/fxrate/notify-config', b)
 export const testFxNotify = () => jpSoft('/api/fxrate/notify-test', {})
+export const getFxNotifyRoster = () => j('/api/fxrate/notify-roster')   // 通知设置·搜名字加人：钉钉花名册 + 名单里老号码对应的 userid
 // 报表导出（V2.241）——run/config 用 jpSoft，好让 {ok:false} 的路径/口令提示原样透传给用户
 export const getRptExportOrgs = (year, period) => j(`/api/rptexport/orgs?year=${year}&period=${period}`)
 export const getRptExportConfig = () => j('/api/rptexport/config')

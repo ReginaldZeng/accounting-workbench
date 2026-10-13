@@ -400,7 +400,7 @@ const loadDimOpt = () => (DIMOPT = DIMOPT || reviewDimOptions().catch(() => { DI
 //   一张请款单一张卡；表改成 项目｜上一次｜这次用 三列(原来两列套了三列表的列宽，左列撑宽、右列挤)；没票的把发票管家的后补单亮出来，
 //   没票又没登记后补单的不让生成(同 V2.833 没票先付款的口径)。
 const FEE_F = [['acct', '科目', true], ['dept', '部门', true], ['fee', '费用项目', true], ['biz', '产品分类', false], ['proj', '产品项目', false]]
-function FeeVoucherCard({ v, accr, dim, locked, onDone, blk, onLater, noFee }) {
+function FeeVoucherCard({ v, accr, dim, locked, onDone, blk, onLater, noFee, bill }) {
   const inst = v.inst
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
@@ -457,6 +457,12 @@ function FeeVoucherCard({ v, accr, dim, locked, onDone, blk, onLater, noFee }) {
   const l3 = posted && posted.later3 && posted.later3.vno ? posted.later3 : null
   const paid = !!(v.st && v.st.key === 'paid')
   const known = !!(d || blk)
+  // V2.924(用户「你看看天鹰物流的」)：拿天鹰的真数据渲染出来，三处不对——
+  //   ① 工作台上线前就付了款、金蝶里早记过支付凭证的(天鹰 7 月)，四行里三行在等、一行报红，其实早就做完了；
+  //   ② 有账单的承运商，计提和请款差几百块是常事(第①步已经核过、做账时红冲更正)，不该标红「不一致」；
+  //   ③ 还在审批、没付款的请款单，票没到就标红「缺后补单」，太早了——付了款还没票才是问题。
+  const bookedElse = (blk && (blk.msgs || []).find(m => String(m).startsWith('这笔付款已经在金蝶'))) || ''
+  const billEq = bill != null && Math.abs(bill - amt) < 0.005
   const haveV = !!done || picks.length > 0 || (plain && accs.length > 0)
   const needForm = !!d && !plain && !done && !picks.length
   const slipTxt = slip ? `后补单 #${slip.id} · ${slip.status_cn || ''}${slip.expect_date ? ' · 预计 ' + slip.expect_date + ' 到' : ''}${slip.filed_by ? ' · ' + slip.filed_by + ' 登记' : ''}` : ''
@@ -477,6 +483,7 @@ function FeeVoucherCard({ v, accr, dim, locked, onDone, blk, onLater, noFee }) {
     <div className="rq-s">已提交，等人在金蝶审核</div></>, <span className="pill ok">做完了</span>)
   else if (posted) r4 = row('ok', '✓', '④ 做账', <>付款凭证 <b className="mono">记-{posted.vno}</b> 已做 · {posted.by} {posted.at}<div className="rq-s">{posted.submitted === false ? '提交没成功，请到金蝶手动提交' : '已提交，等人在金蝶审核'}</div></>, <span className="pill ok">已做账</span>)
   else if (!blk) r4 = row('wait', '4', '④ 做账', <span className="dim">读取中…</span>, null)
+  else if (bookedElse) r4 = row('ok', '✓', '④ 做账', <>{bookedElse.split('，')[0]}<div className="rq-s">不是在工作台做的；工作台不再给它做付款凭证</div></>, <span className="pill ok">金蝶已记账</span>)
   else if (!paid) r4 = row('wait', '4', '④ 做账', <>还没付款<div className="rq-s">付了款之后{later ? '系统自动做付款凭证（只做支付）' : invOk ? '系统自动做付款凭证' : '、票齐（或确认了发票后补）再做付款凭证'}</div></>, null)
   else if (invOk && eq && !kindBad) r4 = row('todo', '…', '④ 做账', <>已付款、票齐：系统下一轮自动做付款凭证<div className="rq-s">开着自动做账、这一类在自动范围里才会自己做；否则到「付款做账」单张做</div></>,
     <a className="lnk" href="#/logisticsvoucher" target="_blank" rel="noopener">付款做账 ↗</a>)
@@ -489,10 +496,10 @@ function FeeVoucherCard({ v, accr, dim, locked, onDone, blk, onLater, noFee }) {
       <div className="rq-h"><span className="t">请款单 · {v.subject}</span><span className="amt">{money(v.amount)}</span><span className="meta">{meta}</span>
         <span style={{ flex: 1 }} />
         {v.st && <span className={'pill ' + (['paid', 'agreed'].includes(v.st.key) ? 'ok' : v.st.key === 'mine' ? 'warn' : 'neu')}>{v.st.label}</span>}</div>
-      {row(haveV ? 'ok' : needForm ? 'todo' : 'wait', haveV ? '✓' : '1', plain ? '① 计提凭证' : '① 费用凭证', <>
+      {row(haveV ? 'ok' : needForm ? 'todo' : (plain && blk && !bookedElse) ? 'bad' : 'wait', haveV ? '✓' : (plain && blk && !bookedElse) ? '×' : '1', plain ? '① 计提凭证' : '① 费用凭证', <>
         {err && <div className="fxwarn">{err}</div>}
         {!d && !err && !plain && <span className="dim">读请款单、发票、后补单和金蝶里这家上一次的费用凭证…</span>}
-        {plain && (accs.length ? accLine : <span className="dim">{blk ? '金蝶里没找到这张请款单对应的计提' : '读取中…'}</span>)}
+        {plain && (accs.length ? accLine : <span className={bookedElse ? 'dim' : ''}>{blk ? (blk.kind_text && blk.kind === 'noacc' ? blk.kind_text : '金蝶里没找到这张请款单对应的计提') : '读取中…'}</span>)}
         {done && <div>费用凭证 <b className="mono">记-{d.fee.vno}</b>（{d.fee.date}，{d.fee.by} {d.fee.at}）{d.fee.submitted === false ? '，提交没成功，请到金蝶手动提交' : '，已提交，等人在金蝶审核'}
           {d.fee.later_id ? `　· 没票，关联后补单 #${d.fee.later_id}` : ''}</div>}
         {!done && picks.length > 0 && <div>已认定 <b className="mono">{picks.map(x => `${x.month}/${x.vno}#`).join('、')}</b> 是这张请款单的费用凭证
@@ -536,21 +543,30 @@ function FeeVoucherCard({ v, accr, dim, locked, onDone, blk, onLater, noFee }) {
           </>}
         </div>}
         {msg && <div className={msg.ok ? 'fxok' : 'fxwarn'} style={{ marginTop: 6 }}>{msg.text}</div>}
-      </>, haveV ? <span className="pill ok">{done ? '已生成' : plain ? '已计提' : '已认定'}</span> : needForm ? <span className="pill warn">待做</span> : null)}
-      {row(accSum == null ? 'wait' : eq ? 'ok' : 'bad', accSum == null ? '2' : eq ? '✓' : '×', '② 和请款比',
-        accSum == null ? <span>等{plain ? '计提' : '费用凭证'}</span>
-          : <>{plain ? '计提' : '费用凭证'} <span className="mono">{money(accSum)}</span> {eq ? '＝' : '≠'} 请款 <span className="mono">{money(amt)}</span>{!eq && <b className="diffbad">　差 {money(r2(accSum - amt))}</b>}</>,
-        accSum == null ? null : <span className={'pill ' + (eq ? 'ok' : 'bad')}>{eq ? '一致' : '不一致'}</span>)}
-      {row(invs.length ? (invOk && !kindBad ? 'ok' : 'bad') : later ? 'ok' : slip ? 'todo' : known ? 'bad' : 'wait', invs.length ? (invOk && !kindBad ? '✓' : '×') : later ? '✓' : slip ? '!' : known ? '×' : '3', '③ 发票',
+      </>, haveV ? <span className="pill ok">{done ? '已生成' : plain ? '已计提' : '已认定'}</span> : needForm ? <span className="pill warn">待做</span> : (plain && blk && !bookedElse) ? <span className="pill bad">没有计提</span> : null)}
+      {noFee
+        ? row(accSum == null ? 'wait' : (bill != null && !billEq) ? 'bad' : eq ? 'ok' : 'todo', accSum == null ? '2' : (bill != null && !billEq) ? '×' : eq ? '✓' : '!', '② 和请款比',
+          accSum == null ? <span>{bookedElse ? '—' : '等计提'}</span> : <>
+            {bill != null && <>请款 <span className="mono">{money(amt)}</span> {billEq ? '＝' : '≠'} 账单 <span className="mono">{money(bill)}</span>{!billEq && <b className="diffbad">　差 {money(r2(amt - bill))}</b>}　·　</>}
+            计提 <span className="mono">{money(accSum)}</span>{eq ? ' ＝ 请款' : <>，比请款{accSum > amt ? '多' : '少'} <b className="mono">{money(Math.abs(r2(accSum - amt)))}</b></>}
+            {!eq && <div className="rq-s">计提和请款有差是常事：第①步逐笔核过，付款做账时红冲更正。差在哪张计提上，看下面的对照表</div>}</>,
+          accSum == null ? null : (bill != null && !billEq) ? <span className="pill bad">请款 ≠ 账单</span> : <span className={'pill ' + (eq ? 'ok' : 'warn')}>{eq ? '一致' : '计提要更正'}</span>)
+        : row(accSum == null ? 'wait' : eq ? 'ok' : 'bad', accSum == null ? '2' : eq ? '✓' : '×', '② 和请款比',
+          accSum == null ? <span>等{plain ? '计提' : '费用凭证'}</span>
+            : <>{plain ? '计提' : '费用凭证'} <span className="mono">{money(accSum)}</span> {eq ? '＝' : '≠'} 请款 <span className="mono">{money(amt)}</span>{!eq && <b className="diffbad">　差 {money(r2(accSum - amt))}</b>}</>,
+          accSum == null ? null : <span className={'pill ' + (eq ? 'ok' : 'bad')}>{eq ? '一致' : '不一致'}</span>)}
+      {row(invs.length ? (invOk && !kindBad ? 'ok' : 'bad') : later ? 'ok' : slip ? 'todo' : !known || bookedElse || !paid ? 'wait' : 'bad', invs.length ? (invOk && !kindBad ? '✓' : '×') : later ? '✓' : slip ? '!' : !known || bookedElse || !paid ? '3' : '×', '③ 发票',
         invs.length ? <>到了 {invs.length} 张，含税 <span className="mono">{money(invTot)}</span>、税额 <span className="mono">{money(invTax)}</span>{!invOk && <b className="diffbad">　≠ 请款金额，先把发票弄对</b>}{kindLine}</>
           : later ? <>还没到，已确认发票后补<div className="rq-s">{slipTxt || later.note}{later.by ? ` · ${later.by} ${later.at || ''} 确认` : ''}</div></>
             : slip ? <>还没到<div className="rq-s">{slipTxt}</div></>
-              : known ? <>还没到，发票管家里也<b>没有登记后补单</b><div className="rq-s">没票先付款，要先让申请人（或财务）在发票管家登记发票后补；登记了这里才能确认</div></>
-                : <span className="dim">读取中…</span>,
+              : !known ? <span className="dim">读取中…</span>
+                : bookedElse ? <>票夹里没有发票<div className="rq-s">这张是工作台接手之前付的，发票没有进发票管家</div></>
+                  : !paid ? <>还没到<div className="rq-s">票夹里还没有发票：在收票台补票；要没票先付款的，先让申请人在发票管家登记发票后补</div></>
+                    : <>还没到，发票管家里也<b>没有登记后补单</b><div className="rq-s">已经付款了还没有票：先让申请人（或财务）在发票管家登记发票后补，登记了这里才能确认</div></>,
         invs.length ? <span className={'pill ' + (!invOk || kindBad ? 'bad' : kindLine ? 'warn' : 'ok')}>{!invOk ? '对不上' : kindBad ? '和计提对不上' : kindLine ? '票齐 · 要更正' : '票齐'}</span>
           : later ? <><span className="pill ok">已确认后补</span>{onLater && !posted && <button className="lnk" onClick={() => onLater(lb, false)}>撤销</button>}</>
             : slip ? (onLater && <button className="btn sm pri" onClick={() => onLater(lb, true)}>确认发票后补</button>)
-              : known ? <span className="pill bad">缺后补单</span> : null)}
+              : !known || bookedElse ? null : !paid ? <span className="pill neu">票没到</span> : <span className="pill bad">缺后补单</span>)}
       {r4}
     </div>
   )
@@ -906,6 +922,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const regRow = (mode === 'detail' && ov && (ov.rows || []).find(r => r.register && (r.short || r.carrier) === carrier)) || null
   const regCells = regRow ? Object.entries(regRow.cells || {}).filter(([, x]) => x.accr || x.paid || (x.reqs || []).some(v => v.st && v.st.key !== 'void')) : []
   const regBad = regCells.some(([, x]) => Math.abs(x.diff || 0) >= 0.01)
+  const billOfSubj = sj => {       // 这个主体的账单合计(第①步的小计)；一个主体有几张请款单时没法一张对一个账单数，不比
+    const g = L && (L.rows || []).find(r => r.kind === 'gtotal' && r.subject === sj)
+    const n = ((inv3 && inv3.blocks) || []).filter(x => !x.err && x.subject === sj).length
+    return g && g.bill != null && n === 1 ? g.bill : null
+  }
   const reloadInv3 = () => reviewInvoices(carrier, period).then(setInv3).catch(() => {})
   const regNoLater = ((inv3 && inv3.blocks) || []).filter(b => !(b.invoices || []).length && !b.posted && !b.later).length     // 没票、发票后补也没确认的请款单
   const regReqs = regCells.flatMap(([, x]) => (x.reqs || []).filter(v => v.st && v.st.key !== 'void').map(v => ({ v, accr: x.accr || 0 })))
@@ -1393,7 +1414,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           {!locked && <button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button>}</span>
                         if (mk && mk.status === 'question') return <span className="smk q" title={`${mk.by} ${mk.at}`}>? 有疑问：{mk.note || '（未写）'}
                           {!locked && <><button className="lnk" onClick={() => askSubj(h.subject, mk.note)}>改</button><button className="lnk" onClick={() => markSubj(h.subject, 'ok')}>改为通过</button><button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button></>}</span>
-                        return !locked && <span className="smkbtns"><button className="btn sm okb" onClick={() => markSubj(h.subject, 'ok')}>✓ 本主体通过</button>
+                        return !locked && <span className="smkbtns"><button className="btn sm okb" title="这个主体的账单没问题了：标通过以后，这个主体的请款单就可以做账，不用等别的主体、也不用等整月登记" onClick={() => markSubj(h.subject, 'ok')}>✓ 本主体通过</button>
                           <button className="btn sm" onClick={() => askSubj(h.subject, '')}>? 有疑问</button></span>
                       })()}</td>
                     </tr>,
@@ -1803,7 +1824,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </div>
         {/* V2.922(用户「别的物流账单也可以这样吗」)：有账单的承运商也一张请款单一张清单——计提凭证 / 和请款比 / 发票·后补 / 做账 */}
         {((inv3 && inv3.blocks) || []).filter(b => !b.err).map(b => <FeeVoucherCard key={b.inst} noFee v={{ inst: b.inst, bid: b.bid, subject: b.subject, amount: b.amount, st: b.st }}
-          accr={1} dim={null} locked={locked} onDone={() => {}} blk={b} onLater={confirmLater} />)}
+          accr={1} dim={null} locked={locked} onDone={() => {}} blk={b} onLater={confirmLater} bill={billOfSubj(b.subject)} />)}
         <div className="card">
           <h3 style={{ display: 'flex', alignItems: 'center' }}>发票与暂估 · {carrier} · {period}
             <small style={{ fontWeight: 400, color: '#5E6B78', marginLeft: 10, fontSize: 12 }}>钉钉请款单的发票（发票管家）对金蝶计提的暂估，口径同付款做账</small>

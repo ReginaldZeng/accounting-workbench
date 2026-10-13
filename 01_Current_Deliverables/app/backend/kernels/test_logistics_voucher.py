@@ -259,6 +259,82 @@ class T(unittest.TestCase):
         self.assertEqual([(l["block"], l["acct"]) for l in ls2], [("核销", "2221.01.06"), ("核销", "2221.01.07"), ("支付", "2241.02"), ("支付", "1002")])
         self.assertEqual(ls2[0]["expl"], "26952000004000000001核销9/196#" + e)
         self.assertEqual(V.balance(ls2)[0], V.balance(ls2)[1])
+    def test_invoice_later_with_diff(self):
+        """V2.929 发票后补、计提和请款又有差(天鹰：复核完、付了款才开票)：付款凭证里照样红冲更正(税按原税率、仍挂暂估)，不出核销；
+        到票时拿「付款凭证里更正后的样子」和发票比——对得上只核销，对不上再整笔红冲、更正、核销(冲的是付款凭证里的更正分录)。"""
+        sup = "湖北天鹰物流有限公司"
+        sc = {"sup_code": "物流运输服务044", "sup_name": sup, "sup_grp": "供应商009"}
+        d1 = {"dept_code": "0030301", "dept": "仓储物流部", "fee_code": "FYXM002.002运费成本002", "fee": "入库运费"}
+        d2 = {"dept_code": "0030902", "dept": "茶饮小料部", "fee_code": "FYXM002.002运费成本002", "fee": "入库运费"}
+
+        def mk(vno, item, net, tax, gross, dims):
+            e = "计提%s8月线下%s" % (sup, item)
+            return V.acc_voucher(vno, [{"acct": "5101", "acct_name": "制造费用", "dr": net, "cr": 0, "expl": e, **dims},
+                                       {"acct": "2221.01.07", "acct_name": "暂估进项税", "dr": tax, "cr": 0, "expl": e, **sc},
+                                       {"acct": "2241.02", "acct_name": "供应商往来", "dr": 0, "cr": gross, "expl": e, **sc}], 2026, 8)
+        vs = lambda: [mk("559", "孝感工厂入库运费", 2682.12, 160.93, 2843.05, d1), mk("560", "小料入库运费", 38064.22, 2283.85, 40348.07, d2)]
+        ctx = {"supplier": sup, "applicant": "陈慧娴", "pay_year": 2026, "pay_month": 9, "pay_amount": 42441.29, "bank": "x", "paid": True, "self_vno": "264",
+               "tax_later": True}
+        # 没差的：和原来一样，全是核销(只做支付)
+        pl0 = V.plan_later(vs())
+        self.assertEqual((pl0["status"], {k: p["mode"] for k, p in pl0["per"].items()}, pl0["tails"]), ("ok", {"559": "hx", "560": "hx"}, {}))
+        self.assertEqual([l["block"] for l in V.build(dict(ctx, pay_amount=43191.12), vs(), [], pl0)], ["支付", "支付"])
+        # 有差：人给了每张「本次按多少」→ 两张都红冲更正，税按 6% 重算挂暂估，不出核销
+        amts = {"559": {"gross": 833.90}, "560": {"gross": 41607.39}}
+        v = vs()
+        pl = V.plan_later(v, {}, amts)
+        self.assertEqual((pl["status"], {k: p["mode"] for k, p in pl["per"].items()}, pl["tails"]), ("ok", {"559": "amt", "560": "amt"}, {}))
+        ls = V.build(ctx, v, [], pl)
+        self.assertEqual([b for b in dict.fromkeys(l["block"] for l in ls)], ["红冲", "更正", "支付"])
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in ls if l["block"] == "更正"],
+                         [("5101", 786.70, 0), ("2221.01.07", 47.20, 0), ("2241.02", 0, 833.90), ("5101", 39252.25, 0), ("2221.01.07", 2355.14, 0), ("2241.02", 0, 41607.39)])
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in ls if l["block"] == "支付"], [("2241.02", 42441.29, 0), ("1002", 0, 42441.29)])
+        self.assertEqual(V.balance(ls)[0], V.balance(ls)[1])
+        # 复核台登记的金额更正也一样认
+        fixes = {"559": [{"to_amt_tax": "833.90", "snap": {"amt": 2843.05}}], "560": [{"to_amt_tax": "41607.39", "snap": {"amt": 40348.07}}]}
+        plf = V.plan_later(vs(), fixes)
+        self.assertEqual((plf["status"], round(sum(p["gross"] for p in plf["per"].values()), 2)), ("ok", 42441.29))
+        # 部分核销在没票时不做
+        self.assertEqual(V.plan_later(vs(), {}, {"559": {"gross": 833.90, "part": True}})["status"], "manual")
+        # —— 到票 ——账上现在是付款凭证 9/264# 里更正后的样子
+        new = {"559": {"gross": 833.90, "tax": 47.20, "exp": [dict(d1, acct="5101", acct_name="制造费用", dr=786.70)]},
+               "560": {"gross": 41607.39, "tax": 2355.14, "exp": [dict(d2, acct="5101", acct_name="制造费用", dr=39252.25)]}}
+        eff = lambda: [V.renewed(x, new[x["vno"]], "9/264#") for x in vs()]
+        e0 = eff()
+        self.assertEqual([(x["gross"], x["tax"], x["rate"], V.ref_of(x, 2026)) for x in e0], [(833.90, 47.20, 0.06, "9/264#"), (41607.39, 2355.14, 0.06, "9/264#")])
+        self.assertEqual(e0[1]["exp_lines"][0]["dept"], "茶饮小料部")
+        ctx3 = {"supplier": sup, "applicant": "陈慧娴", "pay_year": 2026, "pay_month": 10, "pay_amount": 0, "bank": "", "paid": False}
+        # ① 发票和账上一致：只核销
+        inv = [{"number": "26422000009990000001", "rate": "6%", "gross": 42441.29, "tax": 2402.34}]
+        p3 = V.plan(e0, inv, {})
+        l3 = V.build(ctx3, e0, inv, p3)
+        self.assertEqual([(l["block"], l["acct"], l["dr"], l["cr"]) for l in l3],
+                         [("核销", "2221.01.06", 2402.34, 0), ("核销", "2221.01.07", 0, 47.20), ("核销", "2221.01.07", 0, 2355.14)])
+        self.assertTrue(l3[0]["expl"].startswith("26422000009990000001核销9/264#计提"))
+        self.assertEqual(l3[0]["expl"].count("9/264#"), 1)
+        # ② 发票税额多 0.01：整笔红冲(冲付款凭证里那几行更正)、更正、再核销，核销引用本凭证
+        e1 = eff()
+        inv1 = [dict(inv[0], tax=2402.35)]
+        p3 = V.plan(e1, inv1, {})
+        self.assertEqual((p3["status"], p3["per"]["560"]["mode"], p3["per"]["559"]["mode"]), ("ok", "tail", "hx"))
+        l3 = V.build(ctx3, e1, inv1, p3)
+        red = [l for l in l3 if l["block"] == "红冲"]
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in red], [("5101", -39252.25, 0), ("2221.01.07", -2355.14, 0), ("2241.02", 0, -41607.39)])
+        self.assertTrue(all(l["expl"].startswith("红冲9/264#计提") for l in red))
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in l3 if l["block"] == "更正"], [("5101", 39252.24, 0), ("2221.01.07", 2355.15, 0), ("2241.02", 0, 41607.39)])
+        hx = [l for l in l3 if l["block"] == "核销"]
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in hx], [("2221.01.06", 2402.35, 0), ("2221.01.07", 0, 47.20), ("2221.01.07", 0, 2355.15)])
+        self.assertIn("核销9/264#、10/□#计提", hx[0]["expl"])
+        self.assertEqual(V.balance(l3)[0], V.balance(l3)[1])
+        # ③ 发票金额和付款不一样(多开 100)：只有一张时按发票金额红冲更正，往来会留 100
+        one = [V.renewed(vs()[0], new["559"], "9/264#")]
+        inv2 = [{"number": "N2", "rate": "6%", "gross": 933.90, "tax": 52.86}]
+        p3 = V.plan(one, inv2, {}, {"559": {"gross": 933.90}})
+        l3 = V.build(ctx3, one, inv2, p3)
+        self.assertEqual(p3["per"]["559"]["mode"], "amt")
+        self.assertEqual(round(sum(l["cr"] for l in l3 if l["acct"] == "2241.02"), 2), 100.00)
+        self.assertEqual(V.balance(l3)[0], V.balance(l3)[1])
+
     def test_fix_split_part(self):
         """V2.855 只改其中一部分：丰源 深圳星期零 8 月记-389 出库运费·零售 4,117.46，其中调拨的 1,450 应是电商——
         红冲整笔后重提成两行：零售 2,447.21(含税 2,667.46) + 电商 1,330.28(含税 1,450)，税额、应付不变。"""
@@ -422,6 +498,39 @@ class TestResume(unittest.TestCase):
         """凭证分录上没带供应商(科目不挂这个维度)：没法比，不因此拦。"""
         pay = [dict(self.PAY[0], sup_code=""), self.PAY[1]]
         self.assertEqual(self.step(pay, "A"), "amend")
+
+
+class CashflowSplit(unittest.TestCase):
+    """V2.926 付款凭证的现金流量按计提性质拆。样本取自 2026-10-12 实际改过的那 20 张。"""
+
+    def test_single_and_split(self):
+        rows, why = V.cashflow_split([{"fee": "出库运费", "expl": "计提顺丰冷运8月线下植物肉出库运费", "gross": 17630.95}], 17630.95)
+        self.assertEqual((why, [(x["name"], x["amount"]) for x in rows]), ("", [("运费", 17630.95)]))
+        rows, why = V.cashflow_split([{"fee": "入库运费", "expl": "计提链盟8月线下小料入库运费", "gross": 36500},
+                                      {"fee": "出库运费", "expl": "计提链盟8月线下小料出库运费", "gross": 409795}], 446295)
+        self.assertEqual((why, {x["name"]: x["amount"] for x in rows}), ("", {"成本运费": 36500.0, "运费": 409795.0}))
+
+    def test_other_kinds(self):
+        one = lambda fee, expl="": V.cashflow_split([{"fee": fee, "expl": expl, "gross": 100}], 100)[0][0]["name"]
+        self.assertEqual(one("货物仓储费"), "仓储费")
+        self.assertEqual(one("快递费", "陈慧娴提起支付禾享新加坡样品运费"), "其他业务活动费用")
+        self.assertEqual(one("出库运费", "计提顺捷8月线下研发样品出库运费"), "研发类")           # 摘要里带研发的归研发类
+        self.assertEqual(one("制造费用", "计提丰源8月线下孝感工厂入库运费"), "成本运费")           # 费用项目没写、摘要写了入库
+
+    def test_refuses_to_guess(self):
+        """归不到项目的(搬运费)、合计对不上的，都不猜——返回原因，由人处理。「搬运费」里有「运费」两个字，不能被当成运费。"""
+        rows, why = V.cashflow_split([{"fee": "出库运费", "gross": 75155}, {"fee": "搬运费", "expl": "计提易风达8月线下设备转移费", "gross": 300}], 75455)
+        self.assertEqual(rows, [])
+        self.assertIn("搬运费", why)
+        rows, why = V.cashflow_split([{"fee": "出库运费", "gross": 100}], 120)
+        self.assertEqual(rows, [])
+        self.assertIn("对不上", why)
+        self.assertEqual(V.cashflow_split([], 100)[0], [])
+
+    def test_custom_rules(self):
+        rules = [{"kw": "搬运", "expl": False, "code": "CI01.02.01.00202", "name": "成本运费"}] + V.CASHFLOW_RULES
+        rows, why = V.cashflow_split([{"fee": "搬运费", "gross": 300}, {"fee": "入库运费", "gross": 400}], 700, rules)
+        self.assertEqual((why, [(x["name"], x["amount"]) for x in rows]), ("", [("成本运费", 700.0)]))
 
 
 class NoticeText(unittest.TestCase):

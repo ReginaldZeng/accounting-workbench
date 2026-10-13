@@ -81,7 +81,9 @@ def acc_voucher(vno, lines, year, month):
 
 
 def ref_of(v, pay_year):
-    """引用原计提凭证：同年 8/565#，跨年 2026-6/424#。"""
+    """引用原计提凭证：同年 8/565#，跨年 2026-6/424#。付款凭证里更正过的(renewed)改指那张付款凭证。"""
+    if v.get("ref"):
+        return v["ref"]
     return ("%d/%s#" % (v["month"], v["vno"])) if v["year"] == pay_year else ("%d-%d/%s#" % (v["year"], v["month"], v["vno"]))
 
 
@@ -266,6 +268,45 @@ def _plan(vouchers, invoices, fixes=None, amts=None):
             per[tgt["vno"]] = {"mode": "tail", "new_rate": per[tgt["vno"]]["new_rate"], "why": "发票税额与计提差 %.2f" % d, "gross": eff[tgt["vno"]]}
         msgs.append("%s 尾差 %.2f：记-%s 整笔红冲后更正（税额 %+.2f）" % (pct(r), d, tgt["vno"], d))
     return {"status": "ok", "msgs": msgs, "per": per, "tails": tails}
+
+
+def plan_later(vouchers, fixes=None, amts=None):
+    """发票后补、付款时还没有票(V2.929，用户 2026-10-13 天鹰「我们复核完，付了款，才会开发票」)：计提和请款有差的，照样在付款凭证里红冲更正——
+    按复核台登记的计提更正 / 人填的「本次按多少」，税按这张计提原来的税率(登记了改税率的按新税率)重算、仍挂暂估，等票到了再转待认证。
+    做法：把每张计提「应为」的样子当成一张票去走 _plan，红冲更正的判定就和有票时完全一样，只是不会有尾差。→ 同 plan()；部分核销在没票时不做。"""
+    fixes, amts = fixes or {}, amts or {}
+    if any((amts.get(v["vno"]) or {}).get("part") for v in vouchers):
+        return {"status": "manual", "per": {}, "tails": {}, "msgs": ["发票后补又要部分核销：两样叠在一起系统做不了，要人工处理"]}
+    pseudo = []
+    for v in vouchers:
+        fx = None if v.get("from") else fixes.get(v["vno"])
+        g = eff_gross(v, fx, amts.get(v["vno"]))
+        nr = next((rate_of(x.get("to_rate")) for x in fx or [] if rate_of(x.get("to_rate")) is not None), None)
+        r = nr if nr is not None else v["rate"]
+        keep = abs(g - v["gross"]) < 0.005 and (not fx) and not v.get("from")
+        pseudo.append({"number": "", "rate": r, "gross": g, "tax": v["tax"] if keep else split_gross(g, r)[1]})
+    pl = _plan(vouchers, pseudo, fixes, amts)
+    if pl["status"] == "ok" and pl["tails"]:        # 不该出现：「票」就是照计提自己算出来的
+        return {"status": "manual", "per": pl["per"], "tails": {}, "msgs": ["没有发票时算出了税额尾差，系统自己对不上，要人工处理"]}
+    return pl
+
+
+def renewed(v, new, ref):
+    """付款凭证里红冲更正过的计提，现在账上是「更正」后的样子：金额、税、费用行按更正后的(new＝{gross, tax, exp:[费用行]})，
+    引用改指那张付款凭证(ref＝「9/264#」)。发票后补到票时拿它去和发票比——还对不上、要再红冲的，冲的是付款凭证里那几行更正分录。"""
+    expl = v["expl"]
+    lines = [dict({k: e.get(k) or "" for k in EXP_DIMS}, acct=e["acct"], acct_name=e.get("acct_name") or "", dr=r2(e["dr"]), cr=0.0, expl=expl)
+             for e in new.get("exp") or []]
+    tl, al = v.get("tax_line") or v.get("ap_line") or {}, v.get("ap_line") or {}
+    tax = r2(new.get("tax") or 0)
+    if tax:
+        lines.append(dict({k: tl.get(k) or "" for k in ("sup_code", "sup_name")}, acct="2221.01.07", acct_name="暂估进项税", dr=tax, cr=0.0, expl=expl))
+    lines.append(dict({k: al.get(k) or "" for k in SUP_DIMS}, acct="2241.02", acct_name="供应商往来", dr=0.0, cr=r2(new["gross"]), expl=expl))
+    nv = acc_voucher(v["vno"], lines, v["year"], v["month"])
+    nv.update(expl=expl, ref=ref)
+    if v.get("direct"):
+        nv["direct"] = True
+    return nv
 
 
 def pct(r):
@@ -534,6 +575,51 @@ def resume_step(ents, status, add, amount, sup_code=""):
     if want and not (want - have) and raw(have - want):
         return ("submit", "") if open_ else ("record", "")
     return "stop", "这张凭证里的分录和系统要补的对不上（可能有人改过），系统没动，请人工处理"
+
+
+# ---------- 付款凭证的现金流量：按核销的计提是什么性质来拆（V2.926）----------
+# 用户 2026-10-12：「我怎么感觉你的现金流量都有点问题」。查实：金蝶出付款凭证时按「供应商往来」科目的预设把现金流量自动指定成「货款」，
+# 以前是人在审核前手工改对，系统做的凭证跳过了这一步——工作台做过账的 20 张全挂在「货款」上。
+# 人的做法(7–8 月物流付款凭证实证：入库 10/11、出库 39/39、仓储 4/4、快递 6/6)：按这张付款核销的每笔计提是什么性质分，金额＝该计提的含税数(有更正的按更正后)。
+# 下面是默认规则，从上往下先中先用；kw 是正则，对着计提的「费用项目」找，expl=True 的也对着摘要找。页面上可以改(存设置)，这里只是出厂值。
+CASHFLOW_RULES = [
+    {"kw": "仓储|冷藏", "expl": False, "code": "CI01.02.04.00802", "name": "仓储费"},
+    {"kw": "快递", "expl": False, "code": "CI01.02.04.00506", "name": "其他业务活动费用"},
+    {"kw": "研发", "expl": True, "code": "CI01.02.04.00505", "name": "研发类"},
+    {"kw": "入库", "expl": True, "code": "CI01.02.01.00202", "name": "成本运费"},
+    {"kw": "出库运费|调拨运费|^运费$", "expl": False, "code": "CI01.02.04.00801", "name": "运费"},
+]
+
+
+def cashflow_split(accruals, amount, rules=None):
+    """这张付款的现金流量该拆成哪几项 → ([{code, name, amount}], 定不了的原因)。原因非空时第一项为空：有计提归不到项目、或各项合计≠付款金额，都不猜。
+    accruals: [{fee 费用项目, expl 摘要, gross 这笔计提这次核销的含税数(有更正的传更正后的)}]。"""
+    rules = rules if rules else CASHFLOW_RULES
+    out, miss = {}, []
+    for a in accruals or []:
+        fee, expl = str(a.get("fee") or ""), str(a.get("expl") or "")
+        hit = None
+        for r in rules:
+            try:
+                if re.search(r["kw"], fee) or (r.get("expl") and re.search(r["kw"], expl)):
+                    hit = r
+                    break
+            except re.error:
+                continue
+        if not hit:
+            miss.append(fee or "（没有费用项目）")
+            continue
+        o = out.setdefault(hit["code"], {"code": hit["code"], "name": hit.get("name") or hit["code"], "amount": 0.0})
+        o["amount"] = r2(o["amount"] + float(a.get("gross") or 0))
+    if miss:
+        return [], "费用项目「%s」还没有对应的现金流量项目" % "、".join(dict.fromkeys(miss))
+    rows = [x for x in out.values() if abs(x["amount"]) >= 0.005]
+    tot = r2(sum(x["amount"] for x in rows))
+    if not rows:
+        return [], "没有计提，不知道该挂哪个现金流量项目"
+    if abs(tot - float(amount or 0)) >= 0.005:
+        return [], "按计提拆出来合计 %.2f，和付款金额 %.2f 对不上" % (tot, float(amount or 0))
+    return rows, ""
 
 
 # ---------- 自动做账做完，发给同事的那条提醒（V2.910）----------

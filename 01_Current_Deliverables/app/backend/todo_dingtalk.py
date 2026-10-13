@@ -12,6 +12,7 @@
 #   · 要钉钉应用开「待办应用中待办写权限」(Todo.Todo.Write)；按人写待办用 unionId（由 dt_userid 换，换到的记下来不重复查）。
 #   · 本模块出任何错都不往外抛：钉钉待办没写上，不能拦记账、不能拦待办本身。
 import json
+import re
 import threading
 import time
 
@@ -25,6 +26,10 @@ API = "https://api.dingtalk.com/v1.0/todo/users/%s/tasks"
 _LOCK = threading.Lock()
 _KICK = {"pending": False}
 STATE = {"lastRun": "", "lastResult": None, "lastError": ""}
+_VOUCHER_TITLE = re.compile(r"^付款做账 · (记-\S+)　(.*)$")     # todo_scenes.voucher_touch 写的事项：凭证号＋全角空格＋收款方 账期
+
+
+_ENDS_YM = re.compile(r" \d{4}-\d{2}$")
 
 
 def cfg():
@@ -39,14 +44,61 @@ def set_cfg(on, url, by):
     return old, cfg()
 
 
+# 钉钉那一行开头两段（用户 2026-10-13 定）：方括号里写「在哪办的什么事」，紧跟着写「是什么业务来的」。
+# 值＝(在金蝶里审的是什么；不在金蝶办的填 None, 不在金蝶办的方括号里写什么, 什么业务来的)
+_DT_HEAD = {"fx_audit": ("金蝶汇率", "", "汇率录入"),
+            "logi_accrual_audit": ("金蝶凭证", "", "物流计提"),
+            "logi_voucher_audit": ("金蝶凭证", "", "物流付款做账"),
+            "logi_fix": (None, "计提更正", "物流对账复核")}
+
+
+def _lead(it):
+    """方括号里那几个字：金蝶凭证审核 / 金蝶汇率审核；提交没成功挂回做账人的是「提交」，金蝶里找不到的是「核实」。"""
+    thing, own, _ = _DT_HEAD[it["scene"]]
+    if not thing:
+        return own
+    if "找不到" in str(it.get("state") or ""):
+        return thing + "核实"
+    return thing + ("提交" if it.get("holder") == "origin" else "审核")
+
+
+def _what(it):
+    """业务后面那几段：哪个主体哪张、哪家、多少——按环节各拼各的。认不出的老格式原样用「事项｜说明」。"""
+    p, title, sub = it.get("payload") or {}, str(it.get("title") or ""), str(it.get("sub") or "")
+    nums = sub.replace(" · ", "，")
+    try:
+        if it["scene"] == "fx_audit":
+            from kernels.fx_rate import FX_ORGS
+            org = next((o["name"] for o in FX_ORGS if o["code"] == str(p["org"])), "组织 %s" % p["org"])
+            return ["%s 年 %s 月" % (p["year"], p["month"]), org, nums]
+        if it["scene"] == "logi_accrual_audit":
+            return ["%s 年 %s 月" % (p["year"], p["period"]), nums]
+        if it["scene"] == "logi_voucher_audit":
+            m = _VOUCHER_TITLE.match(title)
+            bits = sub.split(" · ")
+            amt = next((b[3:] for b in bits if b.startswith("借贷 ")), "")
+            who = [b for b in bits if not b.startswith(("借贷 ", "共 "))]
+            ym = str(p.get("ym") or "")                                   # 凭证是哪个月的（凭证号每月从 1 排）
+            month = ["%s 年 %d 月" % (ym[:4], int(ym[5:7]))] if len(ym) == 7 else []
+            paid = m.group(2).strip()                                     # 收款方 + 账期：账期后面标「账单」，别和凭证月份混
+            return [" ".join(who + month + [m.group(1)]), paid + (" 账单" if _ENDS_YM.search(paid) else ""), ("金额 " + amt) if amt else ""]
+        if it["scene"] == "logi_fix":
+            return ["%s %s" % (p["carrier"], p["period"]), nums]
+    except Exception:
+        pass
+    return [title, sub]
+
+
 def title_of(it):
-    """钉钉待办列表只显示这一行：事项 + 主体金额那句 + 要如实提醒的情形。"""
-    t = str(it.get("title") or "")
-    if it.get("sub"):
-        t += "｜" + str(it["sub"])
-    if it.get("warn"):
-        t += "｜⚠ " + str(it["warn"])
-    return t[:180]
+    """钉钉待办列表只显示这一行，所以一行里要说全：【在哪办的什么事】什么业务来的｜哪个主体哪张｜哪家｜多少。
+    例：【金蝶凭证审核】物流付款做账｜深圳星期九 2026 年 10 月 记-1｜湖北极鲜达供应链有限责任公司 2026-08 账单｜金额 6,093.62"""
+    sc, warn = ts.SCENES[it["scene"]], str(it.get("warn") or "")
+    parts = [_DT_HEAD[it["scene"]][2]] + [x for x in _what(it) if x]
+    if warn:                                         # 有要如实提醒的情形：它本身就写了该怎么办
+        parts.append("⚠ " + warn)
+    elif not sc["kd"]:                               # 在金蝶办的方括号里已经写了；不在金蝶办的要说去哪办
+        parts.append("在工作台「%s」处理" % sc["place"])
+    return ("【%s】%s" % (_lead(it), "｜".join(parts)))[:180]
 
 
 def desc_of(it):

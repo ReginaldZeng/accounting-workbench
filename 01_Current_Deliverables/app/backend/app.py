@@ -4717,8 +4717,6 @@ def portal_machines_test_notify(body: dict, request: Request):
     return {"ok": False, "msg": "发送未成功：" + (res.get("msg") or "钉钉返回失败")}
 
 
-_ROSTER_CACHE = {"ts": 0.0, "people": None}   # 花名册进程内缓存（单 worker）：拉一次缓存 30 分钟，之后秒开；新人入职过半小时自动刷新，或加 ?fresh=1 立即重拉
-
 @app.get("/api/dingtalk/roster")
 def dingtalk_roster(request: Request, fresh: int = 0):
     """通讯录·全公司花名册（门户管理·仅管理员）——供「搜名字选人」：返回 [{userid,name,title,dept}]，
@@ -4727,14 +4725,7 @@ def dingtalk_roster(request: Request, fresh: int = 0):
     u = _current_user(request)
     if not u or u.get("role") != "admin":
         return JSONResponse({"ok": False, "msg": "仅管理员"}, status_code=403)
-    now = time.time()
-    if not fresh and _ROSTER_CACHE["people"] is not None and (now - _ROSTER_CACHE["ts"]) < 1800:
-        return {"ok": True, "people": _ROSTER_CACHE["people"], "cached": True}
-    r = notifier.dt_roster()
-    if r.get("ok"):
-        _ROSTER_CACHE["people"] = r.get("people") or []
-        _ROSTER_CACHE["ts"] = now
-    return r
+    return notifier.dt_roster_cached(fresh=bool(fresh))   # 缓存挪进 notifier，和汇率通知设置共用一份
 
 
 @app.get("/api/dingtalk/depts")
