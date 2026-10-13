@@ -598,7 +598,7 @@ export function FieldPanel({ item, editable = false, onSave, onConfirm, activeFi
         const s = src[k]
         const isPend = pending.has(k)
         return (
-          <div key={k} className={'inv-fp-row' + (k === activeField ? ' on' : '') + (isPend ? ' pend' : '') + (k in draft ? ' dirty' : '')}
+          <div key={k} data-k={k} className={'inv-fp-row' + (k === activeField ? ' on' : '') + (isPend ? ' pend' : '') + (k in draft ? ' dirty' : '')}
             onClick={() => onFieldFocus?.(k)}>
             <span className="inv-fp-k">{label}</span>
             <span className="inv-fp-v">

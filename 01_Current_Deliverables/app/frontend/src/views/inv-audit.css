@@ -224,6 +224,34 @@
 .inv-au-ask ul{ margin:0; padding-left:18px; }
 .inv-au-ask.err{ border-color:var(--red-line); background:var(--red-bg); }
 .inv-au-ask.err b{ color:var(--red); }
+/* 单张弹窗重排（样机第 3 版）：左 发票图＋系统核对；右 票面＋这张票要办的事 */
+.inv-au-dlg .inv-au-dlg-view{ position:static; display:grid; gap:12px; align-content:start; }
+.inv-au-card{ border:1px solid var(--line); border-radius:10px; padding:0 12px 10px; display:grid; gap:8px; min-width:0; }
+.inv-au-card > h3{ margin:0 -12px; padding:8px 12px; font-size:13px; display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+  border-bottom:1px solid var(--line); background:var(--bg-sub); border-radius:10px 10px 0 0; }
+.inv-au-card > h3 small{ font-weight:400; color:var(--ink-3); font-size:12px; }
+.inv-au-chk{ display:grid; grid-template-columns:20px 64px minmax(0,1fr); gap:0 8px; align-items:start; font-size:13px; padding:2px 0; }
+.inv-au-chk i{ font-style:normal; width:18px; height:18px; border-radius:50%; display:grid; place-items:center; font-size:11px; font-weight:700; margin-top:2px;
+  background:var(--green-bg); color:var(--green); }
+.inv-au-chk.warn i{ background:var(--amber-bg); color:var(--amber); }
+.inv-au-chk.err i{ background:var(--red-bg); color:var(--red); }
+.inv-au-chk.todo i{ background:var(--bg-rail); color:var(--ink-3); }
+.inv-au-chk.info i{ background:var(--blue-bg); color:var(--blue); }
+.inv-au-chk .k{ color:var(--ink-2); }
+.inv-au-chk .v b{ font-weight:500; }
+.inv-au-chk.warn .v b{ color:var(--amber); } .inv-au-chk.err .v b{ color:var(--red); } .inv-au-chk.todo .v b{ color:var(--ink-2); font-weight:400; }
+.inv-au-chk .v span{ display:block; color:var(--ink-3); font-size:12px; word-break:break-all; }
+/* 票面：两栏紧凑；不是待核的字段平时不画输入框的边（像字一样），点进去才出框 */
+.inv-au-fields .inv-fp{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:0 14px; grid-auto-flow:dense; }
+.inv-au-fields .inv-fp > :not(.inv-fp-row){ grid-column:1 / -1; }
+.inv-au-fields .inv-fp-row[data-k="typeLabel"], .inv-au-fields .inv-fp-row[data-k="number"], .inv-au-fields .inv-fp-row[data-k="buyerName"],
+.inv-au-fields .inv-fp-row[data-k="sellerName"], .inv-au-fields .inv-fp-row[data-k="category"], .inv-au-fields .inv-fp-row[data-k="remark"],
+.inv-au-fields .inv-fp-row[data-k="buyerTaxId"], .inv-au-fields .inv-fp-row[data-k="sellerTaxId"]{ grid-column:1 / -1; }
+.inv-au-fields .inv-fp-row:not(.pend):not(.dirty) .inv-in:not(:focus):not(:hover){ border-color:transparent; background:transparent; }
+.inv-au-fields .inv-fp-why{ display:none; }
+/* 这张票要办的事：三样压在一张卡里 */
+.inv-au-jobs > .inv-au-l3{ margin:0; }
+@media (max-width:1100px){ .inv-au-fields .inv-fp{ grid-template-columns:1fr; } }
 /* 后补票「核销暂估」（暂估转待认证） */
 .inv-au-l3{ border:1px solid var(--line); border-left:3px solid var(--line); border-radius:8px; padding:10px 12px; margin:10px 0; display:grid; gap:6px; font-size:13px; }
 .inv-au-l3.ok{ border-left-color:var(--green); }

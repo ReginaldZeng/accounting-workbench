@@ -2328,6 +2328,51 @@ class InvoiceBooksApiTests(unittest.TestCase):
             self.assertEqual(L3.run_due(), 0)
         self.db.set_setting(L3.CFG_KEY, {"mode": "dry"}, "test")
 
+    def test_38_item_checks_for_audit_dialog(self):
+        """审核弹窗「系统核对」（用户 2026-10-14：「比如购买方税号已查验，销方税号与库里一致」）：系统替人核过的结论一行一句——
+        购买方对抬头清单、销售方对销方档案（第几次来票／新销方／名称变了）、收款方、金额、查重、来源、税局查验。号码、公司是编的。"""
+        inv, S, e = self.inv, self.S, self.e
+        f = self.tip.FAKE
+        st = inv.get_settings()
+        folder = {"id": 0, "payee_name": f["seller"], "company": self.OUR}
+        tid = self.tip._uscc("91440300MA38CHK01")          # 这条用例自己的销方税号：别的用例没用过，档案从零开始
+        base = dict(folder_id=None, kind="invoice", inv_type="special", origin="upload", review="pending", proc_status="done",
+                    buyer_name=self.OUR, buyer_tax_id=self.OUR_TID, seller_name=f["seller"], seller_tax_id=tid,
+                    amount=283.02, tax=16.98, total=300, tax_rate="6%", field_src_json={"number": {"src": "xml"}})
+        fo = self.ok(self.post("/api/inv/folder/manual", "intern", {"title": "系统核对测试", "amount": 300, "company": self.OUR}))["folder"]
+        a = S.item_insert(e, **dict(base, folder_id=fo["id"], number=num(38001)))
+        S.seller_seen(e, tid, f["seller"], "2026-10-01", a)
+
+        def checks(iid, fd=folder):
+            return {c["key"]: c for c in inv.item_checks(e, self.item(iid), fd, st)}
+        c = checks(a)
+        self.assertEqual([c[k]["tone"] for k in ("buyer", "payee", "amount", "dup", "source", "verify")], ["ok", "ok", "ok", "ok", "ok", "todo"])
+        self.assertEqual(c["buyer"]["text"], "名称、税号都和本公司抬头清单一致")
+        self.assertIn("电子原件", c["source"]["text"])
+        self.assertEqual((c["seller"]["tone"], "新销方" in c["seller"]["text"]), ("info", True))      # 第一次来票
+        b = S.item_insert(e, **dict(base, folder_id=fo["id"], number=num(38002)))
+        self.assertEqual(checks(b)["seller"]["tone"], "ok")
+        self.assertIn("和销方档案一致 · 这家第 2 次来票", checks(b)["seller"]["text"])
+        # 有问题的：购方税号不在清单、销方名称和档案不一样、开票的不是收款方、金额加不上、重复、税局清单里没有、拍照识别还有待核
+        bad = S.item_insert(e, **dict(base, folder_id=fo["id"], number=num(38003), buyer_tax_id=self.OTHER_TID, seller_name="另一个名字有限公司",
+                                      amount=280, tax=16.98, total=300, verify="yellow", field_src_json={"number": {"src": "ocr"}},
+                                      pending_json=["sellerName", "amount"],
+                                      flags_json={"dup": {"kind": "opening", "source": "期初导入"}, "sellerMismatch": {"seller": "另一个名字有限公司", "payee": f["seller"]}}))
+        c = checks(bad)
+        self.assertEqual([c[k]["tone"] for k in ("buyer", "seller", "payee", "amount", "dup", "source", "verify")],
+                         ["warn", "warn", "warn", "warn", "err", "warn", "warn"])
+        self.assertIn("不在清单里", c["buyer"]["text"])
+        self.assertIn("销方档案里的名称是「%s」" % f["seller"], c["seller"]["text"])
+        self.assertIn("差 3.02", c["amount"]["text"])
+        self.assertIn("2 个字段要你对着图核一下", c["source"]["text"])
+        # 收据不出核对；票夹详情接口里每张票带 checks
+        r = S.item_insert(e, folder_id=fo["id"], kind="receipt", origin="upload", review="pending", proc_status="done", total=50)
+        self.assertEqual(inv.item_checks(e, self.item(r), folder, st), [])
+        d = self.ok(self.get("/api/inv/folder/%d" % fo["id"], "acct"))
+        got = {i["id"]: i["checks"] for i in d["items"]}
+        self.assertEqual(got[r], [])
+        self.assertEqual([x["label"] for x in got[a]], ["购买方", "销售方", "金额", "查重", "来源", "税局查验"])    # 手工票夹没有收款方，不出那一行
+
     def test_99_reset_trial_data(self):
         """清空试运行数据（名字排最后跑：它会把前面用例攒的数据清掉）。只有主管理员能点、要手打「清零」；
         先留底再清，原件挪进留底目录不删；后补单和它挂的票夹（连同里面的票、文件、经办记录）整体保留；

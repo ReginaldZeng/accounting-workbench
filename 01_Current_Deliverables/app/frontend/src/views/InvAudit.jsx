@@ -1,5 +1,6 @@
 import { Bookkeeping } from './InvLedger.jsx'
 import { invPaperMark } from '../api.js'
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排）| 单张弹窗按样机第 3 版重排：左边 发票图＋「系统核对」（一行一句结论），右边「票面」（两栏紧凑）＋「这张票要办的事」（纸质票／转待认证／金蝶凭证）
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）| 物流请款单的后补票：这一栏写明付款做账那条线会怎么做、列出它的分录；颜色按「会不会自动做」
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）| 单张弹窗里，后补票多一栏「核销暂估」：系统到金蝶找到的原凭证、对不对得上、打算怎么做；多张时在这里选；可以点「现在做」
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍）| 后补票已经交来、等审核的那部分不再算「还没到」：金额核对下面说明一句，后补单那一行写「已交来 x 待审核」
@@ -532,6 +533,30 @@ function ReceiptRecord({ item, editable, onRecorded }) {
   </div>
 }
 
+// 「系统核对」：系统替你核过什么、结论是什么，一行一句（后端 item_checks 给）。有问题的排最前。放在发票图下面。
+const CHK_ORDER = { err: 0, warn: 1, todo: 3, info: 2, ok: 2 }
+const CHK_MARK = { ok: '✓', info: 'i', warn: '!', err: '✕', todo: '–' }
+function ItemChecks({ item }) {
+  const list = Array.isArray(item.checks) ? item.checks : []
+  const rows = list.map((c, i) => [c, i]).sort((x, y) => (CHK_ORDER[x[0].tone] ?? 2) - (CHK_ORDER[y[0].tone] ?? 2) || x[1] - y[1]).map(x => x[0])
+  const n = t => list.filter(c => c.tone === t).length
+  const bad = n('err') + n('warn')
+  return <section className="inv-au-card inv-au-chks">
+    <h3>系统核对
+      {bad > 0 ? <span className="inv-badge warn">{bad} 项要看</span> : list.length > 0 ? <span className="inv-badge ok">都正常</span> : null}
+      {n('todo') > 0 && <span className="inv-badge mute">{n('todo')} 项没核</span>}
+      <small>系统替你核过的，看结论就行</small></h3>
+    <StatusBadges item={item} />
+    {Array.isArray(item.warnings) && item.warnings.length > 0 && <ul className="inv-au-warns">{item.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>}
+    {rows.map(c => <div key={c.key} className={'inv-au-chk ' + c.tone}>
+      <i aria-hidden="true">{CHK_MARK[c.tone] || '·'}</i>
+      <span className="k">{c.label}</span>
+      <div className="v"><b>{c.text}</b>{c.sub ? <span>{c.sub}</span> : null}</div>
+    </div>)}
+    {!rows.length && item.kind === 'receipt' && <div className="inv-muted">收据不做系统核对，对着图看金额和抬头。</div>}
+  </section>
+}
+
 // 后补票「核销暂估」：这张票审核通过、后补单收齐后，系统要做「暂估转待认证」凭证——先把它到金蝶找到的原凭证亮出来。
 // 对得上的不用管；找到几张的在这里选；对不上、找不到的写明原因（系统不自动做）。开关（关／演练／真做）在发票管家设置里。
 function LaterVoucher({ laterId }) {
@@ -653,7 +678,8 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, other
     <Modal title={title} onClose={onClose} width={1280}>
       <div className="inv-au-dlg">
         <div className="inv-au-dlg-view">
-          <InvViewer item={item} activeField={activeField} height={520} onRotate={editable ? onRotate : undefined} />
+          <InvViewer item={item} activeField={activeField} height={440} onRotate={editable ? onRotate : undefined} />
+          {item.kind !== 'other' && <ItemChecks item={item} />}
         </div>
         <div className="inv-au-dlg-side">
           {err && <div className="inv-au-err">{err}</div>}
@@ -680,17 +706,20 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, other
             <span className="inv-muted">{item.doubt.by} {item.doubt.at ? fmtTime(item.doubt.at) : ''}</span>
             {editable && <span className="inv-au-row-end"><button type="button" className="btn" disabled={busy} onClick={() => run(onClearDoubt)}>清掉疑问</button></span>}
           </div>}
-          <StatusBadges item={item} />
-          {Array.isArray(item.warnings) && item.warnings.length > 0 && <ul className="inv-au-warns">{item.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>}
           {item.kind === 'other'
-            ? <div className="inv-au-note">这是附件（合同、清单、水单、行程单等），只留存不入台账，不用核字段。</div>
+            ? <><StatusBadges item={item} /><div className="inv-au-note">这是附件（合同、清单、水单、行程单等），只留存不入台账，不用核字段。</div></>
             : <>
-              <div className="inv-muted inv-au-tip">点一行字段，左边图上框出它的位置。二维码读的、系统已核的不用再看，黄色「待核」的看一眼。</div>
-              <ReceiptRecord item={item} editable={editable} onRecorded={onRecorded} />
-              {item.kind === 'invoice' && item.laterId ? <LaterVoucher key={'l3-' + item.id} laterId={item.laterId} /> : null}
-              <Bookkeeping key={item.id} row={item} canEdit={editable} onSaved={onRecorded} />
-              <FieldPanel item={item} editable={editable} activeField={activeField} onFieldFocus={setActiveField}
-                onSave={onSave} hideConfirm onDirtyChange={d => { dirty.current = d }} />
+              <section className="inv-au-card inv-au-fields">
+                <h3>票面<small>点一行，左边图上框出它的位置。读自原件、系统已核的不用再看，黄色「待核」的看一眼</small></h3>
+                <FieldPanel item={item} editable={editable} activeField={activeField} onFieldFocus={setActiveField}
+                  onSave={onSave} hideConfirm onDirtyChange={d => { dirty.current = d }} />
+              </section>
+              <section className="inv-au-card inv-au-jobs">
+                <h3>这张票要办的事</h3>
+                <ReceiptRecord item={item} editable={editable} onRecorded={onRecorded} />
+                {item.kind === 'invoice' && item.laterId ? <LaterVoucher key={'l3-' + item.id} laterId={item.laterId} /> : null}
+                <Bookkeeping key={item.id} row={item} canEdit={editable} onSaved={onRecorded} />
+              </section>
               {item.kind === 'invoice' && <div className="inv-au-dedrow">
                 <span>本张可抵扣进项税 <b className={'inv-num ' + ((needsDecision(item) ? decision : item.deductible) ? 'yes' : 'no')}>{money(item.tax)}</b></span>
                 <span className="inv-muted">{dedTip}</span>

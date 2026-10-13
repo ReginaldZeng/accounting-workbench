@@ -1,4 +1,5 @@
 # [Change Log]
+# Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排） | item_checks：系统替人核过的结论一行一句（购买方和抬头清单、销售方和销方档案、收款方、金额、查重、来源、税局查验），票夹详情里每张发票带 checks
 # Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证） | 后补票审核通过后排队做「暂估转待认证」（later_voucher_kick，实现在 routers/invoice_later_voucher.py）；后台线程顺带取队
 # Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍） | folder_gap：已经交来、还在等确认的后补票（申请人自己传的、钉钉流程里后到的）已算进专票/普票，后补单那头不再算它「还没到」；later_row_view 带 waiting
 # Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单） | first_review：财务初审过没过（设置里的财务初审人→接入审批人→发票管家整单通过）；初审通过后才发到评论区的发票标 lateFlow，link_late 记到没收齐的后补单上并送审；flow_recheck 再看一次流程（定时/后补单上手动）
@@ -31,7 +32,7 @@ from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, FileResponse
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from starlette.concurrency import run_in_threadpool
 
 from core import JSONResponse, _current_user, db
@@ -1443,6 +1444,99 @@ def _register_doc(folder, f, d, origin, user, later_id=None, paper=False, review
     det.update(log_extra or {})
     log(user, "登记重复票" if dup else "登记票据", folder["id"], iid, later_id, det)
     return _res(name, action, msg, itemId=iid, folderId=folder["id"])
+
+
+def _seller_times(e, tax_id):
+    """这个税号的销方一共来过几张发票（没移除、没作废的）。"""
+    with e.connect() as cx:
+        return int(cx.execute(select(func.count()).select_from(S.ITEM).where(
+            S.ITEM.c.seller_tax_id == tax_id, S.ITEM.c.kind == "invoice", S._item_active(),
+            func.coalesce(S.ITEM.c.review, "") != "void")).scalar() or 0)
+
+
+def item_checks(e, it, folder, st):
+    """审核弹窗「系统核对」：系统替人核过什么、结论是什么，一行一句 → [{key, label, tone, text, sub}]。
+    tone：ok 正常 / warn 要看一眼 / err 有问题 / info 提示 / todo 还没核。只对发票出；只读、不改任何东西。
+    （用户 2026-10-14：「比如购买方税号已查验，销方税号与库里一致」——电子原件的票原来只显示「原件」，看不到系统核了什么。）"""
+    if (it or {}).get("kind") != "invoice":
+        return []
+    fl = it.get("flags_json") or {}
+    out = []
+
+    def add(key, label, tone, text, sub=""):
+        out.append({"key": key, "label": label, "tone": tone, "text": text, "sub": sub})
+    comps = (st or {}).get("company") or []
+    names = {ip.normalize_name(c.get("name") or "") for c in comps if c.get("name")}
+    tids = {(c.get("taxId") or "").upper() for c in comps if c.get("taxId")}
+    bn, bt = str(it.get("buyer_name") or "").strip(), str(it.get("buyer_tax_id") or "").strip().upper()
+    who = "　".join(x for x in (bn, bt) if x)
+    if fl.get("buyerNotCompany"):
+        add("buyer", "购买方", "err", "抬头不是本公司任何一个主体", who)
+    elif fl.get("buyerMismatch"):
+        bm = fl["buyerMismatch"] if isinstance(fl["buyerMismatch"], dict) else {}
+        add("buyer", "购买方", "err", "发票抬头和这张单的公司主体不是同一个", "发票：%s；这张单：%s" % (bm.get("buyer") or bn or "—", bm.get("expected") or "—"))
+    elif not bn and not bt:
+        add("buyer", "购买方", "todo", "票面上没读到购买方")
+    elif ip.normalize_name(bn) in names and bt in tids:
+        add("buyer", "购买方", "ok", "名称、税号都和本公司抬头清单一致", who)
+    elif ip.normalize_name(bn) in names:
+        add("buyer", "购买方", "warn" if bt else "ok", ("名称和本公司抬头清单一致，但税号 %s 不在清单里" % bt) if bt else "名称和本公司抬头清单一致（票面没有购方税号）", who)
+    else:
+        add("buyer", "购买方", "warn", "购买方不在本公司抬头清单里", who)
+    sn, stid = str(it.get("seller_name") or "").strip(), str(it.get("seller_tax_id") or "").strip().upper()
+    who = "　".join(x for x in (sn, stid) if x)
+    if not stid:
+        add("seller", "销售方", "todo" if not sn else "warn", "票面上没读到销方税号", sn)
+    else:
+        arch = S.seller_get(e, stid) or {}
+        n = _seller_times(e, stid)
+        if arch.get("check_result") == "命中":
+            add("seller", "销售方", "err", "销方核查有记录：%s" % (arch.get("check_note") or "命中"), who)
+        elif arch.get("name") and sn and ip.normalize_name(arch["name"]) != ip.normalize_name(sn):
+            add("seller", "销售方", "warn", "同一个税号，销方档案里的名称是「%s」，这张票写的不一样" % arch["name"], who)
+        elif not (len(stid) == 18 and ip.uscc_ok(stid)):
+            add("seller", "销售方", "warn", "销方税号的校验位不对，可能识别错了", who)
+        elif n <= 1:
+            add("seller", "销售方", "info", "新销方：第一次收到这家的票，已建销方档案", who)
+        else:
+            add("seller", "销售方", "ok", "税号、名称和销方档案一致 · 这家第 %d 次来票" % n, who)
+    payee = str((folder or {}).get("payee_name") or "").strip()
+    if fl.get("sellerMismatch"):
+        sm = fl["sellerMismatch"] if isinstance(fl["sellerMismatch"], dict) else {}
+        add("payee", "收款方", "warn", "开票的和付款单的收款方不是同一家——钱付给了一家，票是另一家开的",
+            "发票销方：%s；收款方：%s" % (sm.get("seller") or sn or "—", sm.get("payee") or payee or "—"))
+    elif payee and sn:
+        add("payee", "收款方", "ok", "开票的就是付款单的收款方")
+    a, t, tt = it.get("amount"), it.get("tax"), it.get("total")
+    if a is not None and t is not None and tt is not None:
+        calc = "%s ＋ %s ＝ %s" % (_money_str(a), _money_str(t), _money_str(float(a) + float(t)))
+        if abs(float(a) + float(t) - float(tt)) <= 0.011:
+            add("amount", "金额", "ok", "金额＋税额＝价税合计" + ((" · 税率 %s" % it["tax_rate"]) if it.get("tax_rate") else ""), calc)
+        else:
+            add("amount", "金额", "warn", "金额＋税额 ≠ 价税合计 %s（差 %s）" % (_money_str(tt), _money_str(abs(float(a) + float(t) - float(tt)))), calc)
+    else:
+        add("amount", "金额", "todo", "金额、税额、价税合计没读全，要对着票面补")
+    if fl.get("dup"):
+        add("dup", "查重", "err", _dup_msg(fl["dup"]) if isinstance(fl["dup"], dict) else "重复票：这张票在别处已经有了")
+    else:
+        add("dup", "查重", "ok", "这张票没在别的单上出现过" + ("；票总管清单里已有（抵扣勾选归票总管）" if it.get("deduct_status") == "other" else ""))
+    src = ((it.get("field_src_json") or {}).get("number") or {}).get("src") or ""
+    pend = len(it.get("pending_json") or [])
+    if src in ("pdf", "ofd", "xml", "taxpack", "taxlist"):
+        add("source", "来源", "ok", "电子原件：号码、金额直接读自原件，不是拍照识别的", ("还有 %d 个字段要你核" % pend) if pend else "")
+    elif src == "qr":
+        add("source", "来源", "ok", "号码、金额读自发票二维码", ("其余 %d 个字段是照片识别的，要你对着图核" % pend) if pend else "")
+    elif src == "manual":
+        add("source", "来源", "info", "号码是人手录的/改过的", ("还有 %d 个字段要你核" % pend) if pend else "")
+    else:
+        add("source", "来源", "warn" if pend else "info", "照片识别的" + ("：%d 个字段要你对着图核一下" % pend if pend else "，字段都核过了"))
+    vf = {"green": ("ok", "税局清单里有这张票，状态正常"), "red": ("err", "税局清单显示这张票已作废或红冲"),
+          "yellow": ("warn", "税局清单里没有这张票：可能还没上传、抬头税号填错，需核实"), "gray": ("info", "税局清单覆盖不到这种票")}.get(it.get("verify") or "")
+    if vf:
+        add("verify", "税局查验", vf[0], vf[1], it.get("verify_note") or "")
+    else:
+        add("verify", "税局查验", "todo", "还没和税局清单对过（导入税局清单后自动对）")
+    return out
 
 
 def _field_diffs(ex, d):
@@ -2883,7 +2977,9 @@ async def folder_detail(fid: int, request: Request):
         # 留痕：票夹级的＋这夹里每张票（含已移除的）自己的，按 itemId/laterId 可筛单张票的历史
         ids = [i["id"] for i in S.folder_items(e, fid, include_removed=True)]
         logs = S.logs_of(e, folder_id=fid, item_ids=ids, limit=300)
-        return {"ok": True, "folder": fv, "items": item_views(items), "logs": [log_view(r) for r in logs]}
+        st = get_settings()
+        views = [dict(v, checks=item_checks(e, it, f, st)) for v, it in zip(item_views(items), items)]
+        return {"ok": True, "folder": fv, "items": views, "logs": [log_view(r) for r in logs]}
     out = await run_in_threadpool(run)
     return out if out else err("票夹不存在", 404)
 
