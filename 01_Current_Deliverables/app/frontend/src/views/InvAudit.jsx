@@ -1,5 +1,6 @@
 import { Bookkeeping } from './InvLedger.jsx'
 import { invPaperMark } from '../api.js'
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.953（后补票转待认证·物流单也由后补单这边做）| 「核销暂估」：物流请款单在开关＝真做时也归这边做，徽标和「现在做」按钮跟着显示
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排）| 单张弹窗按样机第 3 版重排：左边 发票图＋「系统核对」（一行一句结论），右边「票面」（两栏紧凑）＋「这张票要办的事」（纸质票／转待认证／金蝶凭证）
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）| 物流请款单的后补票：这一栏写明付款做账那条线会怎么做、列出它的分录；颜色按「会不会自动做」
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）| 单张弹窗里，后补票多一栏「核销暂估」：系统到金蝶找到的原凭证、对不对得上、打算怎么做；多张时在这里选；可以点「现在做」
@@ -581,7 +582,7 @@ function LaterVoucher({ laterId }) {
     <div className="inv-au-l3h">
       <b>核销暂估</b>
       <span className="inv-muted">后补票：审核通过、后补单收齐后，系统做「暂估转待认证」凭证</span>
-      {p.kind === 'logistics'
+      {p.kind === 'logistics' && p.by !== 'later'
         ? <span className="inv-badge mute" title="物流请款单的转待认证不归发票管家的开关管，由「付款做账」页的自动做账开关管">物流请款单 · 付款做账那边做</span>
         : <span className={'inv-badge ' + (d.mode === 'on' ? 'ok' : 'mute')} title="开关在发票管家设置里：关＝不做；演练＝只算、不写金蝶；真做＝往金蝶新建凭证并提交（不审核）">自动转待认证：{d.modeText}</span>}
     </div>
@@ -603,7 +604,7 @@ function LaterVoucher({ laterId }) {
     </div>}
     {!done && st.status && st.msg && st.msg !== p.why && <div className="inv-muted">上一次：{st.msg}</div>}
     {err && <div className="inv-au-l3bad">{err}</div>}
-    {!done && d.ready && d.mode !== 'off' && p.kind !== 'logistics' && p.kind !== 'none' && <div>
+    {!done && d.ready && d.mode !== 'off' && (p.kind !== 'logistics' || p.by === 'later') && p.kind !== 'none' && <div>
       <button type="button" className="btn" disabled={busy} onClick={() => act(() => invLaterVoucherRun(laterId))}
         title={d.mode === 'on' ? '不等后台，现在就往金蝶新建这张凭证并提交（不审核）' : '演练：只算一遍、把打算怎么做记下来，不写金蝶'}>{busy ? '正在做…' : (d.mode === 'on' ? '现在做' : '现在演练一次')}</button>
     </div>}

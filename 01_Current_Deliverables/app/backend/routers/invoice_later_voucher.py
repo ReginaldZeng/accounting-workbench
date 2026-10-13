@@ -1,3 +1,5 @@
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.953（后补票转待认证·物流单也由后补单这边做）
+# Description: Owner 2026-10-14：「因为这个是后补，我们的付款凭证已经做完了，所以不可能在付款那条线转待认证」——物流请款单的后补票，转待认证也由发票后补单这边触发（审核通过、后补单收齐马上做，不等付款做账 20 分钟一轮）。开关＝真做时接管；分录和保存仍调付款做账那条线的 _post_later（同一把锁、同一份做账记录，那边记了 later3 就不会重复建），不另写一套算法。开关不是真做时不接管，维持那边自己做。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）
 # Description: 用户上线当晚看到物流请款单的后补票写着「这里不重复做」，以为系统不做了。改成把「付款做账」那条线现在的打算原样亮出来：付款凭证做没做、转待认证税额多少、对不对得上、两行分录、是审核通过后自动做还是要去那边手动点（_logistics_plan，只读）。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）
@@ -236,8 +238,10 @@ def _logistics_plan(inst):
     """物流请款单的后补票：转待认证归「付款做账」那条线做（routers/logistics_voucher，开关也是那边的）。
     把那条线现在的打算原样亮出来（只读，要读金蝶）→ {kind:'logistics', ok, why, lines?, taxInv?, taxEst?}。
     ok＝审核通过后它会自己做（或已经做了／不用做）；False＝它现在不会自动做，要人去付款做账页处理。"""
-    head = "这张是物流请款单，转待认证由「付款做账」那条线做："
-    out = {"kind": "logistics", "ok": False, "why": ""}
+    mine = cfg()["mode"] == "on"          # 开关是真做：这张也由发票后补单这边触发（分录按付款做账那条线的记录和算法算）
+    head = "这张是物流请款单，转待认证由发票后补单这边做、分录按「付款做账」那条线的记录算：" if mine else \
+        "这张是物流请款单，转待认证由「付款做账」那条线做："
+    out = {"kind": "logistics", "ok": False, "why": "", "by": "later" if mine else "logistics"}
     try:
         LVR = _lvr()
         c = LVR._auto_cfg()
@@ -258,15 +262,91 @@ def _logistics_plan(inst):
         l3 = d.get("later3") or {}
         if not (l3.get("lines") and l3.get("ok")) or l3.get("gross_diff"):
             why = l3.get("msg") or ("发票和付款金额不一样" if l3.get("gross_diff") else "发票税额和挂着的暂估进项税对不上")
-            return dict(out, why=head + "但它现在不会自动做——%s。请到「付款做账」页处理" % why)
+            return dict(out, why=head + "但现在不会自动做——%s。请到「付款做账」页处理" % why)
         tax = round(float(l3.get("tax") if l3.get("tax") is not None else l3.get("dr") or 0), 2)
         how = ("发票和账上对不上，会先整笔红冲更正 %d 张，再转待认证 %s" % (l3["redo"], inv._money_str(tax))) if l3.get("redo") else \
             ("发票和账上对得上，转待认证税额 %s" % inv._money_str(tax))
+        if mine:
+            return dict(out, ok=True, why=head + "你审核通过、后补单收齐后，这边马上建凭证并提交、不审核。" + how,
+                        lines=l3["lines"], taxInv=tax, taxEst=tax)
         when = "你审核通过后，那边下一轮（每 20 分钟一轮）自动建凭证并提交、不审核" if auto else \
             "不过那边的自动做账现在没开到「真做」（或没把发票后补放进自动范围），审核通过后要到「付款做账」页手动点"
         return dict(out, ok=auto, why=head + when + "。" + how, lines=l3["lines"], taxInv=tax, taxEst=tax)
     except Exception as ex:
         return dict(out, why=head + "现在读不出它的打算（%s），过一会儿再打开看" % str(ex)[:120])
+
+
+def _run_logistics(l, lid, bills, p, who, mode):
+    """物流请款单的后补票：开关＝真做时由发票后补单这边触发转待认证（Owner 2026-10-14：付款凭证做完，那条线的事就结束了）。
+    分录、保存用付款做账那条线的 _post_later——同一把锁、同一份做账记录（那边记了 later3 就不会重复建），不另写一套算法。
+    开关不是真做：不接管，那条线自己的自动做账照旧。"""
+    inst = l.get("inst_id")
+    if mode != "on":
+        _put(lid, status="skip", kind="logistics", msg=p["why"], at=inv.now_s())
+        return {"ok": True, "status": "skip", "msg": p["why"]}
+    import busy
+    LVR = _lvr()
+
+    def rec_():
+        r = (db.get_setting(LVR._POSTED_KEY, None) or {}).get(inst)
+        return r if isinstance(r, dict) else {}
+    rec = rec_()
+    if not rec.get("vno"):                                  # 付款凭证还没做：等着，下一轮再看
+        return {"ok": False, "status": "wait", "msg": p["why"]}
+    if not rec.get("tax_later"):
+        _put(lid, status="none", kind="logistics", msg=p["why"], at=inv.now_s())
+        return {"ok": True, "status": "none", "msg": p["why"]}
+    if not (rec.get("later3") or {}).get("vno"):
+        if not p["ok"]:
+            _put(lid, status="manual", kind="logistics", msg=p["why"], at=inv.now_s())
+            _tell(l, lid, p["why"])
+            return {"ok": False, "status": "manual", "msg": p["why"]}
+        lk = LVR._POST_LOCK.setdefault(inst, threading.Lock())
+        if not lk.acquire(blocking=False):
+            return {"ok": False, "status": "wait", "msg": "这张单正在做账，稍后再看"}
+        try:
+            LVR._held("发票后补·暂估转待认证凭证", LVR._post_later, inst, who)
+        except busy.Draining as ex:
+            return {"ok": False, "status": "wait", "msg": str(ex)}
+        except Exception as ex:
+            why = "建暂估转待认证凭证没成：%s。可以到「付款做账」页看这张单，或在这里点「现在做」重试" % str(ex)[:200]
+            _put(lid, status="manual", kind="logistics", msg=why, at=inv.now_s())
+            _tell(l, lid, why)
+            return {"ok": False, "status": "manual", "msg": why}
+        finally:
+            lk.release()
+        rec = rec_()
+    l3 = rec.get("later3") or {}
+    vno, date, book = str(l3.get("vno") or ""), str(l3.get("date") or ""), str(l3.get("book") or "")
+    if not vno:
+        why = "凭证建了但没读到凭证号，请到「付款做账」页看这张单"
+        _put(lid, status="manual", kind="logistics", msg=why, at=inv.now_s())
+        return {"ok": False, "status": "manual", "msg": why}
+    try:
+        y, m = int(date[:4]), int(date[5:7])
+    except ValueError:
+        y, m = datetime.now().year, datetime.now().month
+    sub_ok = l3.get("submitted", True) is not False
+    msg = "已新建暂估转待认证凭证 %s %d年%d月 记-%s（%s），%s" % (
+        book, y, m, vno, date, "已提交、等人在金蝶审核" if sub_ok else "但提交失败：%s（凭证已保存，请到金蝶手动提交）" % (l3.get("submit_err") or ""))
+    st = _put(lid, status="done", kind="logistics", msg=msg, vid=l3.get("vid"), vno=vno, book=book, date=date, vyear=y, vperiod=m,
+              tax=l3.get("tax"), submitted=sub_ok, at=inv.now_s(), by=l3.get("by") or who)
+    one = {"book": book, "period": "%04d-%02d" % (y, m), "number": "记-%s" % vno}
+    for i in bills:
+        if i.get("kind") != "invoice":
+            continue
+        fl = dict((S.item_get(inv.E(), i["id"]) or {}).get("flags_json") or {})
+        old = fl.get("_bookkeeping") or {}
+        vs = [v for v in (old.get("vouchers") or []) if v != one] if old.get("status") == "booked" else []
+        fl["_bookkeeping"] = {"status": "booked", "vouchers": vs + [one], "source": "auto", "by": "系统自动转待认证", "at": inv.now_s()}
+        S.item_update(inv.E(), i["id"], flags_json=fl)
+        inv.log(who, "暂估转待认证凭证", l.get("folder_id"), i["id"], lid, {"voucher": "记-%s" % vno, "period": one["period"], "book": book, "via": "物流付款做账的算法"})
+    try:
+        import todo_scenes
+        todo_scenes.later_voucher_touch(lid, st, l, who)
+    except Exception as ex:
+        print("[发票管家] 转待认证凭证的首页待办没记上：%s" % ex)
+    return {"ok": True, "status": "done", "msg": msg, "vno": vno}
 
 
 def _ref(v):
@@ -324,7 +404,7 @@ def run_one(lid, user=None, manual=False):
     if (l.get("status") or "") != "done" or not bills or any(i.get("review") != "approved" for i in bills):
         return {"ok": False, "status": "wait", "msg": "要等后补单收齐、上面的票都审核通过"}
     st = state_of(lid)
-    if st.get("status") in ("done", "none", "skip"):
+    if st.get("status") in ("done", "none") or (st.get("status") == "skip" and (st.get("kind") != "logistics" or mode != "on")):
         return {"ok": True, "status": st["status"], "msg": st.get("msg") or ""}
     if st.get("status") == "posting":
         why = "上次建这张凭证做到一半中断了：请到金蝶看有没有摘要带发票号 %s 的凭证，有就不用再做，没有再手工做" % (
@@ -338,8 +418,7 @@ def run_one(lid, user=None, manual=False):
         return {"ok": False, "status": "old", "msg": why}
     p = plan(lid)
     if p["kind"] == "logistics":
-        _put(lid, status="skip", kind="logistics", msg=p["why"], at=inv.now_s())
-        return {"ok": True, "status": "skip", "msg": p["why"]}
+        return _run_logistics(l, lid, bills, p, who, mode)
     if p["kind"] == "none":
         _put(lid, status="none", kind="none", msg=p["why"], src=p["src"], at=inv.now_s())
         return {"ok": True, "status": "none", "msg": p["why"]}
@@ -491,7 +570,7 @@ def _view(lid):
               "expl": x["expl"], "supplier": (x.get("dims") or {}).get("sup_name") or ""} for x in p.get("lines") or []]
     st = state_of(lid)
     return {"ok": True, "laterId": lid, "mode": cfg()["mode"], "modeText": MODE_CN[cfg()["mode"]], "ready": ready,
-            "plan": {k: p.get(k) for k in ("ok", "kind", "why", "book", "cands", "src", "taxInv", "taxEst")}, "lines": lines,
+            "plan": {k: p.get(k) for k in ("ok", "kind", "why", "book", "cands", "src", "taxInv", "taxEst", "by")}, "lines": lines,
             "state": {k: st.get(k) for k in ("status", "kind", "msg", "vno", "vyear", "vperiod", "book", "date", "at", "by", "submitted", "picks")}}
 
 

@@ -1963,6 +1963,17 @@ KIND_CN = {"hx": "一致·只核销", "tail": "尾差·红冲更正", "redo": "�
 AUTO_USER = "系统自动"
 
 
+def _later3_elsewhere():
+    """发票后补的第二笔（暂估转待认证）是不是交给发票管家那边触发了：它的「后补票自动转待认证」开到「真做」时接管
+    （Owner 2026-10-14「付款凭证已经做完了，不可能在付款那条线转待认证」）。接管后，登记了后补单的请款单，本线定时这一轮不再做这一步，
+    免得两边各做一遍；没有后补单的照旧由本线做；页面上人手点的不受影响（_post_later 自己防重复）。"""
+    try:
+        from routers import invoice_later_voucher as L3
+        return L3.cfg()["mode"] == "on"
+    except Exception:
+        return False
+
+
 def _auto_cfg():
     c = dict(db.get_setting(_AUTO_KEY, None) or {})
     kinds = c.get("kinds")
@@ -2139,9 +2150,12 @@ def auto_round(trigger="定时"):
             cands.append((r, invs))
         # 发票后补的第二笔(V2.919)：付款凭证当时只做了支付、暂估进项税还挂着的，发票到了没有。只看本地票夹，票没到的不去金蝶读。
         wait3 = []
+        _by_slip = _later3_elsewhere()       # 发票管家那边开到「真做」：有后补单的，转待认证由后补单那边触发，这一轮不做（V2.953）
         for r in reqs:
             rec = posted.get(r["inst_id"]) if isinstance(posted.get(r["inst_id"]), dict) else None
             if not rec or not rec.get("tax_later") or rec.get("later3") or r.get("excluded"):
+                continue
+            if _by_slip and _later_slip(r["inst_id"]):
                 continue
             _f3, invs3 = _invoices(r["inst_id"])
             if invs3:

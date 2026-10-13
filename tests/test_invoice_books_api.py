@@ -2286,23 +2286,46 @@ class InvoiceBooksApiTests(unittest.TestCase):
                 self.assertEqual((p["kind"], p["ok"]), ("logistics", False))
                 self.assertIn("付款凭证还没做", p["why"])
                 self.db.set_setting(LVR._POSTED_KEY, {"PI-L3-D": {"vno": "391", "tax_later": True}}, "test")
+                # 开关是真做：物流请款单的后补票也由发票后补单这边做（用户 2026-10-14「付款凭证已经做完了，不可能在付款那条线转待认证」），
+                # 分录按付款做账那条线的算法；那条线定时那一轮对登记了后补单的请款单让开
                 v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % ld, "acct"))
-                self.assertEqual((v["plan"]["kind"], v["plan"]["ok"], [(x["dc"], x["acct"], x["amount"]) for x in v["lines"]]),
-                                 ("logistics", True, [("借", "2221.01.06", 8.0), ("贷", "2221.01.07", 8.0)]))
-                for w in ("由「付款做账」那条线做", "你审核通过后，那边下一轮", "对得上，转待认证税额 8.00"):
+                self.assertEqual((v["plan"]["kind"], v["plan"]["by"], v["plan"]["ok"], [(x["dc"], x["acct"], x["amount"]) for x in v["lines"]]),
+                                 ("logistics", "later", True, [("借", "2221.01.06", 8.0), ("贷", "2221.01.07", 8.0)]))
+                for w in ("由发票后补单这边做", "这边马上建凭证", "对得上，转待认证税额 8.00"):
                     self.assertIn(w, v["plan"]["why"])
-                logi["cfg"] = {"mode": "dry", "kinds": ["later"]}                       # 那边没开真做：要人去付款做账页点
+                self.assertTrue(LVR._later3_elsewhere())
+                logi["l3"] = {"ok": False, "lines": [], "msg": "发票税额和挂着的暂估进项税对不上"}
+                p = L3.plan(ld)
+                self.assertEqual((p["ok"], "现在不会自动做" in p["why"]), (False, True))
+                logi["l3"] = {"ok": True, "lines": l3_lines, "tax": 8.0, "redo": 0, "gross_diff": 0.0, "msg": ""}
+                posts = []
+
+                def fake_post_later(inst, user):
+                    posts.append((inst, user))
+                    self.db.set_setting(LVR._POSTED_KEY, {inst: {"vno": "391", "tax_later": True, "later3": {
+                        "vid": 7001, "vno": "402", "date": "2026-10-14", "book": self.OUR, "tax": 8.0, "submitted": True, "by": user}}}, "test")
+                    return ["暂估转待认证凭证 记-402 已建"]
+                with patch.object(LVR, "_post_later", fake_post_later):
+                    approve(fd, idd)
+                    L3.drain()
+                    st = L3.state_of(ld)
+                    self.assertEqual((st["status"], st["kind"], st["vno"], st["vyear"], st["vperiod"], posts), ("done", "logistics", "402", 2026, 10, [("PI-L3-D", "系统自动")]))
+                    self.assertEqual(self.item(idd)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-402"}])
+                    L3.run_one(ld)
+                    L3.run_due()
+                    self.assertEqual(len(posts), 1)                                     # 做过了不重复做
+                self.assertIn("已经建好了，记-402", L3.plan(ld)["why"])
+                # 开关不是真做：不接管，那条线自己做；这边只把它的打算亮出来
+                self.db.set_setting(L3.CFG_KEY, {"mode": "dry"}, "boss")
+                self.db.set_setting(LVR._POSTED_KEY, {"PI-L3-D": {"vno": "391", "tax_later": True}}, "test")
+                p = L3.plan(ld)
+                self.assertEqual((p["by"], p["ok"], "由「付款做账」那条线做" in p["why"], "那边下一轮" in p["why"]), ("logistics", True, True, True))
+                self.assertFalse(LVR._later3_elsewhere())
+                logi["cfg"] = {"mode": "dry", "kinds": ["later"]}                       # 那边也没开真做：要人去付款做账页点
                 p = L3.plan(ld)
                 self.assertEqual((p["ok"], "手动点" in p["why"]), (False, True))
-                logi["cfg"], logi["l3"] = {"mode": "on", "kinds": ["later"]}, {"ok": False, "lines": [], "msg": "发票税额和挂着的暂估进项税对不上"}
-                p = L3.plan(ld)
-                self.assertEqual((p["ok"], "它现在不会自动做" in p["why"]), (False, True))
-                self.db.set_setting(LVR._POSTED_KEY, {"PI-L3-D": {"vno": "391", "tax_later": True, "later3": {"vno": "402", "date": "2026-10-14"}}}, "test")
-                self.assertIn("已经建好了，记-402", L3.plan(ld)["why"])
-                approve(fd, idd)
-                L3.drain()
+                self.db.set_setting(L3.CFG_KEY, {"mode": "on", "by": "boss", "at": "2026-10-01 00:00:00"}, "boss")
             self.db.set_setting(LVR._POSTED_KEY, {}, "test")
-            self.assertEqual(L3.state_of(ld)["status"], "skip")
             fe, le, ie = mk("E", 300.0, 3.0, 5)
             voucher("500", 300.0, 0, "戊提起支付")
             approve(fe, ie)
