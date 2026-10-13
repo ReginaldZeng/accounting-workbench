@@ -5334,13 +5334,15 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
         _ORD = {"运费": 0, "快递费": 0, "操作费": 1, "箱子": 2, "箱型": 3, "加班": 4}
         feekeys.sort(key=lambda k: (_ORD.get(k, 9), k))
         # 分组：ERP/金蝶数据、账单原始数据、复核数据分开配色；★=重点关注列。(组名, 组色, 列头浅色, doc级仅首行填, [(列头, 取值键)])
+        # V2.930(用户看恒茂导出「这个10.5得放出来吧？」)：按计费吨重核的，每箱计费千克单独一列，核对量的公式引用这一格；没有这种单的承运商不出这一列
+        _has_bw = any(m.get("box_kg") for x in res.get("docs") or [] for m in x.get("materials") or [])
         groups = [
             ("归属·计提", "5E6B78", "E7ECEF", False, [("费用主体", "subject"), ("承运商", "carrier"),
                 ("费用类型", "fee_item"), ("业务线", "bizline"), ("单据号", "doc_no")]),
             ("ERP·金蝶数据", "2E7D57", "DCEFE4", False, [("客户/仓库", "party"), ("物料编码", "code"),
                 ("物料名称", "name"), ("规格", "spec"), ("基本单位数量", "base_kg"), ("基本单位", "kg_unit"),
-                ("金蝶数量", "base_qty"), ("数量单位", "base_unit"), ("每箱数量", "box_div"), ("折箱数", "box_n"),
-                ("金蝶核对量", "kd"), ("销售额", "sales")]),
+                ("金蝶数量", "base_qty"), ("数量单位", "base_unit"), ("每箱数量", "box_div"), ("折箱数", "box_n")] +
+                ([("每箱计费千克", "box_kg")] if _has_bw else []) + [("金蝶核对量", "kd"), ("销售额", "sales")]),
             ("账单·%s原账单" % carrier, "B06A12", "FBF0DA", True, [("运输方式", "_cs")] +
                 [(k, "_fee:" + k) for k in feekeys] + [("账单计入金额", "_amt"), ("账单计费量", "_cw")]),
             ("复核数据", "B23B2E", "F8DDD8", False, [("账单量", "bill_amt"), ("账单单位", "bill_unit"),
@@ -5500,7 +5502,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     ws2.cell(row=rr, column=col_of_key["kd"], value="=%s%d" % (CL["box_n"], rr))
                     n_formula += 1
                 elif kind == "boxwt" and bq and bd and m.get("box_kg") and abs(round(bq / bd * float(m["box_kg"]), 2) - kd) < 0.011:      # 按计费吨重：金蝶数量 ÷ 每箱数量 × 每箱计费千克
-                    ws2.cell(row=rr, column=col_of_key["kd"], value="=ROUND(%s%d/%s%d*%g,2)" % (CL["base_qty"], rr, CL["box_div"], rr, float(m["box_kg"])))
+                    ws2.cell(row=rr, column=col_of_key["kd"], value="=ROUND(%s%d/%s%d*%s%d,2)" % (CL["base_qty"], rr, CL["box_div"], rr, CL["box_kg"], rr))
                     n_formula += 1
                 elif kind == "vol" and bn is not None:                                  # 按体积：折箱数 × 长×宽×高(厘米)÷1000000 × 每方千克数
                     l_, w_, h_ = ck["lwh"]
@@ -5568,7 +5570,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     _merge_fast(ws2, s, ci, e, ci)
                     ws2.cell(row=s, column=ci).alignment = midv
         ws2.freeze_panes = "F3"
-        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 18, 11, 8, 9, 8, 9, 9, 11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
+        widths = ([12, 14, 12, 10, 15] + [16, 12, 22, 18, 11, 8, 9, 8, 9, 9] + ([11] if _has_bw else []) + [11, 10] + [14] + [10] * len(feekeys) + [13, 13] +
                   [10, 8, 12, 12, 10, 22, 12, 12, 12, 10, 14, 9, 10, 12, 8, 16])
         for i, w in enumerate(widths, 1):
             ws2.column_dimensions[get_column_letter(i)].width = w
