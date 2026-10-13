@@ -335,6 +335,11 @@ def _loop():
                 if rc.get("linked"):
                     worker_store.record("inv_intake", n=rc["linked"], refs=ids2,
                                         summary="钉钉流程里后到的发票 %d 张，已记到后补单、进审核" % rc["linked"])
+                try:                                   # 后补票「暂估转待认证」的定时兜底（排队漏了的、开关刚切到真做的）
+                    from routers import invoice_later_voucher as L3
+                    L3.run_due()
+                except Exception:
+                    _STATE["lastError"] = traceback.format_exc()[-2000:]
                 if has_cfg:
                     r = scan_once("定时") or {}
                     if not r.get("ok") and "还在扫" not in str(r.get("msg") or ""):

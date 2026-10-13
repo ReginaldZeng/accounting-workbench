@@ -1,5 +1,7 @@
 import { Bookkeeping } from './InvLedger.jsx'
 import { invPaperMark } from '../api.js'
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）| 单张弹窗里，后补票多一栏「核销暂估」：系统到金蝶找到的原凭证、对不对得上、打算怎么做；多张时在这里选；可以点「现在做」
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍）| 后补票已经交来、等审核的那部分不再算「还没到」：金额核对下面说明一句，后补单那一行写「已交来 x 待审核」
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| 已收发票表里，财务初审后才到的票在号码后面标「后补·初审后到」
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.945（发票管家·审核弹窗右上角）| 用户定：单张弹窗右上角依次放 □票总管（默认不勾）
 //   □可抵扣（默认按系统建议，专票是勾上的）、存疑（原「有疑问」）、删除、审核（原「提交」）；下面只留一行说明，不用再滚到底去点。
@@ -21,7 +23,7 @@ import { invPaperMark } from '../api.js'
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invAuditQueue, invAuditBatch, invAuditApprove, invAuditItemsApprove, invAuditReturn, invAuditMark,
-  invFolder, invItemUpdate, invItemRotate, invItemRemove,
+  invFolder, invItemUpdate, invItemRotate, invItemRemove, invLaterVoucherPlan, invLaterVoucherSource, invLaterVoucherRun,
 } from '../api.js'
 import {
   money, fmtTime, useToast, usePoll, Modal, StatusBadges, itemBadges, InvViewer, FieldPanel,
@@ -316,6 +318,7 @@ function AuditHeader({ folder }) {
         </> : <span className="inv-muted">没取到金额核对</span>}
       </div>
       {g && gap === null && <div className="inv-muted">这张单没有付款金额（手工票夹没填），不做差额核对</div>}
+      {g && num(g.laterWait) > 0 && <div className="inv-muted">发票后补单里有 {money(g.laterWait)} 的票已经交来、在下面等你审核，已经算在发票里了，后补单这边不再算「还没到」。</div>}
       {off && <div className="inv-au-focus">有差额 {money(Math.abs(gap))}（{gap > 0 ? '票比付款少' : '票比付款多'}），重点关注：提交时要写明差额原因</div>}
       {reason ? <div className={'inv-au-why' + (open || !long ? ' open' : '')}>事由：{reason}
         {long && <button type="button" className="inv-lk inv-au-lkb" onClick={() => setOpen(o => !o)}>{open ? '收起' : '展开'}</button>}</div> : null}
@@ -481,11 +484,13 @@ function LaterTable({ laters }) {
               <td>{l.filedBy || '—'}{l.filedAt ? <span className="inv-muted"> · {fmtTime(l.filedAt)}</span> : null}</td>
               <td className="num">{money(l.expectAmount)}</td>
               <td className="num">{money(got)}</td>
-              <td className="num"><b className={num(l.left) ? 'inv-au-lt' : ''}>{money(l.left)}</b></td>
+              <td className="num"><b className={num(l.left) - num(l.waiting) > 0.005 ? 'inv-au-lt' : ''}>{money(Math.max(0, num(l.left) - num(l.waiting)))}</b>
+                {num(l.waiting) > 0 && <div className="inv-muted" title="申请人已经把票交来（自己传的，或发在钉钉流程里的），就是上面已收发票里待审的票；你审核通过才算已到">已交来 {money(l.waiting)} 待审核</div>}</td>
               <td><i className="inv-au-bar"><i style={{ width: pct + '%' }} /></i> {pct}%</td>
               <td className="inv-num">{l.expectDate || '—'}</td>
               <td>{l.receiverName || '—'}</td>
-              <td><span className={'inv-badge ' + (l.status === 'done' ? 'ok' : l.status === 'closed' ? 'mute' : 'info')}>{l.statusText || l.status}</span>
+              <td><span className={'inv-badge ' + (l.status === 'done' ? 'ok' : l.status === 'closed' ? 'mute' : 'info')}>
+                {num(l.waiting) > 0 && num(l.left) - num(l.waiting) <= 0.005 && l.status !== 'done' && l.status !== 'closed' ? '票已交来·待审核' : (l.statusText || l.status)}</span>
                 {l.remindCount ? <span className="inv-muted"> 已催 {l.remindCount} 次</span> : null}</td>
             </tr>
           })}</tbody>
@@ -523,6 +528,57 @@ function ReceiptRecord({ item, editable, onRecorded }) {
     {!item.paper && editable && <span className="inv-muted">点「审核」就记为已收到</span>}
     {!item.paper && editable && <button type="button" className="btn" disabled={busy} onClick={mark}>{busy ? '保存中…' : '先记已收到'}</button>}
     {error && <span role="alert">{error}</span>}
+  </div>
+}
+
+// 后补票「核销暂估」：这张票审核通过、后补单收齐后，系统要做「暂估转待认证」凭证——先把它到金蝶找到的原凭证亮出来。
+// 对得上的不用管；找到几张的在这里选；对不上、找不到的写明原因（系统不自动做）。开关（关／演练／真做）在发票管家设置里。
+function LaterVoucher({ laterId }) {
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(() => {
+    setErr('')
+    invLaterVoucherPlan(laterId).then(setD).catch(e => setErr(e.message || String(e)))
+  }, [laterId])
+  useEffect(() => { setD(null); load() }, [load])
+  const act = async (fn) => {
+    setBusy(true); setErr('')
+    try { const r = await fn(); setD(x => ({ ...(x || {}), ...r })) } catch (e) { setErr(e.message || String(e)) } finally { setBusy(false) }
+  }
+  if (!d && !err) return <div className="inv-au-l3"><b>核销暂估</b> <span className="inv-muted">正在到金蝶找这张付款单当时的凭证…</span></div>
+  if (!d) return <div className="inv-au-l3 bad"><b>核销暂估</b> <span className="inv-au-l3bad">没读出来：{err}</span> <button type="button" className="inv-lk" onClick={load}>重试</button></div>
+  const p = d.plan || {}, st = d.state || {}
+  const done = st.status === 'done'
+  const good = done || p.kind === 'exact' || p.kind === 'none' || p.kind === 'logistics'
+  return <div className={'inv-au-l3 ' + (good ? 'ok' : 'bad')}>
+    <div className="inv-au-l3h">
+      <b>核销暂估</b>
+      <span className="inv-muted">后补票：审核通过、后补单收齐后，系统做「暂估转待认证」凭证</span>
+      <span className={'inv-badge ' + (d.mode === 'on' ? 'ok' : 'mute')} title="开关在发票管家设置里：关＝不做；演练＝只算、不写金蝶；真做＝往金蝶新建凭证并提交（不审核）">自动转待认证：{d.modeText}</span>
+    </div>
+    <div className={good ? 'inv-au-l3ok' : 'inv-au-l3bad'}>{done ? st.msg : p.why}</div>
+    {!done && (p.cands || []).length > 0 && <table className="inv-au-l3t">
+      <thead><tr><th /><th>原凭证</th><th>摘要</th><th className="num">供应商往来</th><th className="num">暂估进项税</th></tr></thead>
+      <tbody>{p.cands.map(c => <tr key={c.key}>
+        <td><input type="radio" name={'l3-' + laterId} aria-label={`核销 ${c.year}年${c.month}月 记-${c.vno}`} checked={(p.src || []).includes(c.key)}
+          disabled={busy || !c.tax} onChange={() => act(() => invLaterVoucherSource(laterId, [c.key]))} /></td>
+        <td className="inv-num">{c.year}年{c.month}月 记-{c.vno}</td>
+        <td>{c.expl}</td>
+        <td className="num inv-num">{money(c.gross)}</td>
+        <td className="num inv-num">{c.tax ? money(c.tax) : (c.tax06 ? '当时已挂待认证' : '没有暂估')}</td>
+      </tr>)}</tbody>
+    </table>}
+    {!done && (d.lines || []).length > 0 && <div className="inv-au-l3l">
+      {d.lines.map((x, i) => <div key={i}><b>{x.dc}</b> <span className="inv-num">{x.acct}</span> {x.acctName} <b className="inv-num">{money(x.amount)}</b>
+        <span className="inv-muted">　{x.supplier ? x.supplier + '｜' : ''}{x.expl}</span></div>)}
+    </div>}
+    {!done && st.status && st.msg && st.msg !== p.why && <div className="inv-muted">上一次：{st.msg}</div>}
+    {err && <div className="inv-au-l3bad">{err}</div>}
+    {!done && d.ready && d.mode !== 'off' && p.kind !== 'logistics' && p.kind !== 'none' && <div>
+      <button type="button" className="btn" disabled={busy} onClick={() => act(() => invLaterVoucherRun(laterId))}
+        title={d.mode === 'on' ? '不等后台，现在就往金蝶新建这张凭证并提交（不审核）' : '演练：只算一遍、把打算怎么做记下来，不写金蝶'}>{busy ? '正在做…' : (d.mode === 'on' ? '现在做' : '现在演练一次')}</button>
+    </div>}
   </div>
 }
 
@@ -628,6 +684,7 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, other
             : <>
               <div className="inv-muted inv-au-tip">点一行字段，左边图上框出它的位置。二维码读的、系统已核的不用再看，黄色「待核」的看一眼。</div>
               <ReceiptRecord item={item} editable={editable} onRecorded={onRecorded} />
+              {item.kind === 'invoice' && item.laterId ? <LaterVoucher key={'l3-' + item.id} laterId={item.laterId} /> : null}
               <Bookkeeping key={item.id} row={item} canEdit={editable} onSaved={onRecorded} />
               <FieldPanel item={item} editable={editable} activeField={activeField} onFieldFocus={setActiveField}
                 onSave={onSave} hideConfirm onDirtyChange={d => { dirty.current = d }} />

@@ -1,4 +1,6 @@
 # [Change Log]
+# Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证） | 后补票审核通过后排队做「暂估转待认证」（later_voucher_kick，实现在 routers/invoice_later_voucher.py）；后台线程顺带取队
+# Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍） | folder_gap：已经交来、还在等确认的后补票（申请人自己传的、钉钉流程里后到的）已算进专票/普票，后补单那头不再算它「还没到」；later_row_view 带 waiting
 # Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单） | first_review：财务初审过没过（设置里的财务初审人→接入审批人→发票管家整单通过）；初审通过后才发到评论区的发票标 lateFlow，link_late 记到没收齐的后补单上并送审；flow_recheck 再看一次流程（定时/后补单上手动）
 # Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | self_pending：申请人自己传到后补单上、财务还没确认的票；后补单视图带 selfCount/selfAmount，票视图带 selfPending
 # Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
@@ -842,10 +844,19 @@ def later_left(l):
     return round(max(0.0, float(base) - float(l.get("received_amount") or 0) - float(l.get("unregistered_amount") or 0)), 2)
 
 
-def later_row_view(l):
-    """审核页「发票后补单」列表的一行。"""
+def later_waiting(l, items):
+    """这张后补单上已经交来、还在等确认的票的金额（申请人自己传的、钉钉流程里后到的；审核通过或接收人确认后才算已到）。
+    不超过这张后补单还没到的金额。重复票不算。"""
+    w = sum(_share(i) for i in (items or []) if i.get("later_id") == l.get("id") and i.get("status") != "removed"
+            and i.get("review") != "void" and i.get("kind") in ("invoice", "receipt")
+            and not (i.get("flags_json") or {}).get("dup") and self_pending(i))
+    return round(min(later_left(l), w), 2)
+
+
+def later_row_view(l, items=None):
+    """审核页「发票后补单」列表的一行。items＝这张单的票（给了才算得出 waiting：已交来、等确认的金额）。"""
     exp = l.get("expect_amount") if l.get("expect_amount") is not None else l.get("pay_amount")
-    return {"id": l["id"], "filedBy": l.get("filed_by") or "", "filedAt": l.get("created_at") or "",
+    return {"id": l["id"], "filedBy": l.get("filed_by") or "", "filedAt": l.get("created_at") or "", "waiting": later_waiting(l, items),
             "expectAmount": _money_val(exp), "receivedAmount": _money_val(l.get("received_amount")) or 0.0,
             "unregisteredAmount": _money_val(l.get("unregistered_amount")) or 0.0, "left": later_left(l),
             "expectDate": l.get("expect_date") or "", "receiverName": l.get("receiver_name") or l.get("receiver") or "",
@@ -855,18 +866,21 @@ def later_row_view(l):
 
 def folder_gap(folder, items, laters):
     """金额核对：差额＝付款金额 −（专票 ＋ 普票 ＋ 发票后补单还没到的）。正数＝票比付款少，负数＝票比付款多。
-    专票＝增值税专用发票（含电子专票）；普票＝其余发票和收据。拆分票按本单分摊额。付款金额没有（手工票夹没填）→ gap=None。"""
+    专票＝增值税专用发票（含电子专票）；普票＝其余发票和收据。拆分票按本单分摊额。付款金额没有（手工票夹没填）→ gap=None。
+    已经交来、还在等确认的后补票（申请人自己传的、钉钉流程里后到的）：票已经算进专票/普票了，后补单那头就不能再算它「还没到」，
+    否则同一笔钱算两遍、平的单子报出一笔假差额（线上实例 2026-10-13：1,322 的单报差额 −1,322）。这部分金额单列在 laterWait。"""
     act = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"
            and i.get("kind") in ("invoice", "receipt")]
     sp = [i for i in act if i.get("kind") == "invoice" and i.get("inv_type") == "special"]
     nm = [i for i in act if not (i.get("kind") == "invoice" and i.get("inv_type") == "special")]
     s_sp = round(sum(_share(i) for i in sp), 2)
     s_nm = round(sum(_share(i) for i in nm), 2)
-    left = round(sum(later_left(l) for l in (laters or [])), 2)
+    wait = round(sum(later_waiting(l, act) for l in (laters or [])), 2)
+    left = round(sum(later_left(l) for l in (laters or [])) - wait, 2)
     pay = (folder or {}).get("amount")
     gap = None if pay is None else round(float(pay) - s_sp - s_nm - left, 2)
     return {"pay": _money_val(pay), "special": s_sp, "specialN": len(sp), "normal": s_nm, "normalN": len(nm),
-            "later": left, "gap": gap}
+            "later": left, "laterWait": wait, "gap": gap}
 
 
 def gap_msg(g):
@@ -1947,6 +1961,11 @@ def worker_step(max_items=3):
             flow_recheck(fid, manual=True)       # 正在拉附件的会回 busy：那一轮拉完自己会记后补单，不用再排
         except Exception:
             _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
+    try:                                         # 后补票审核通过后排队的「暂估转待认证」
+        from routers import invoice_later_voucher as L3
+        done += L3.drain(2)
+    except Exception:
+        _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
     for it in S.items_pending_proc(e, limit=max_items):
         if S.item_claim(e, it["id"]):
             done += 1
@@ -2859,7 +2878,7 @@ async def folder_detail(fid: int, request: Request):
         # 审核页从链接直接打开票夹时也要看到异常清单（不依赖它是否在当前队列页里）
         fv["anomalies"], fv["clean"] = folder_anomalies(f, items, "pending")
         laters = folder_laters(e, f)
-        fv["laters"] = [later_row_view(l) for l in laters]
+        fv["laters"] = [later_row_view(l, items) for l in laters]
         fv["gap"] = folder_gap(f, items, laters)
         # 留痕：票夹级的＋这夹里每张票（含已移除的）自己的，按 itemId/laterId 可筛单张票的历史
         ids = [i["id"] for i in S.folder_items(e, fid, include_removed=True)]
@@ -3796,7 +3815,20 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
     audit(u, act, folder.get("title") or ("票夹#%d" % folder["id"]), det)
     # 等确认的后补票（申请人自己传的、钉钉流程里后到的）审核通过＝财务确认收到：后补单这就重算已到金额，不用等下次兜底自愈
     _later_sync([it.get("later_id") for it in pend if it.get("later_id")])
+    later_voucher_kick([it.get("later_id") for it in pend if it.get("later_id")])
     return True, 200, "已通过 %d 张" % len(pend), {"selfReview": self_rev, "folderDone": done}
+
+
+def later_voucher_kick(lids):
+    """后补票审核通过了：排队让后台线程去做「暂估转待认证」凭证（routers/invoice_later_voucher；开关关着、没收齐的它自己会跳过）。"""
+    ids = [x for x in (lids or []) if x]
+    if not ids:
+        return
+    try:
+        from routers import invoice_later_voucher as L3
+        L3.kick(ids)
+    except Exception as ex:
+        print("[发票管家] 后补票转待认证没排上队：%s" % ex)
 
 
 def _approve_empty_folder(u, folder, note, batch):

@@ -224,6 +224,18 @@
 .inv-au-ask ul{ margin:0; padding-left:18px; }
 .inv-au-ask.err{ border-color:var(--red-line); background:var(--red-bg); }
 .inv-au-ask.err b{ color:var(--red); }
+/* 后补票「核销暂估」（暂估转待认证） */
+.inv-au-l3{ border:1px solid var(--line); border-left:3px solid var(--line); border-radius:8px; padding:10px 12px; margin:10px 0; display:grid; gap:6px; font-size:13px; }
+.inv-au-l3.ok{ border-left-color:var(--green); }
+.inv-au-l3.bad{ border-left-color:var(--amber, #d98a00); }
+.inv-au-l3h{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.inv-au-l3ok{ color:var(--ink); }
+.inv-au-l3bad{ color:var(--red); }
+.inv-au-l3t{ width:100%; border-collapse:collapse; }
+.inv-au-l3t th{ text-align:left; font-weight:500; color:var(--muted); padding:3px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+.inv-au-l3t td{ padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+.inv-au-l3t .num{ text-align:right; white-space:nowrap; }
+.inv-au-l3l{ display:grid; gap:2px; padding:6px 8px; background:var(--bg2, rgba(127,127,127,.08)); border-radius:6px; }
 @media (max-width:1100px){
   .inv-au-dlg{ grid-template-columns:1fr; }
   .inv-au-dlg-view{ position:static; }

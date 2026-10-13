@@ -501,6 +501,44 @@ test('审核改版：弹窗 Enter 审核这张并跳到下一张没审的；扫�
   await ctx.close()
 })
 
+test('后补票「核销暂估」：弹窗里亮出系统到金蝶找到的原凭证；找到两张时选一张，再点「现在演练一次」', async (browser, B) => {
+  const cand = (vno, picked) => ({ key: '2026-09-' + vno, year: 2026, month: 9, vno, expl: '某某提起支付运费', gross: 500, net: 495, tax: 5, tax06: 0, picked })
+  const view = (kind, src, extra) => ({ ok: true, laterId: 8, mode: 'dry', modeText: '演练', ready: true, lines: [],
+    plan: { ok: kind === 'exact', kind, why: kind === 'exact' ? '发票税额和账上暂估进项税都是 5.00，对得上' : '金蝶里有 2 张都对得上，请选是哪一张',
+      book: '合成主体', cands: [cand('401', src.includes('2026-09-401')), cand('402', src.includes('2026-09-402'))], src, taxInv: 5, taxEst: 5 },
+    state: {}, ...extra })
+  const st = {
+    folder: { id: 13, status: 'collecting', title: '后补票的单', amount: 500, gap: GAP0(500), laters: [] },
+    items: [inv({ id: 131, laterId: 8, origin: 'self', selfPending: true, total: 500, tax: 5 })], logs: [],
+  }
+  st.queue = [{ id: 13, title: '后补票的单', amount: 500, anomalies: [], clean: false }]
+  const base = auditApi(st)
+  const api = c => {
+    if (c.path === '/api/inv/later/8/voucher-plan') return view('multi', [])
+    if (c.path === '/api/inv/later/8/voucher-source') return view('exact', c.body.picks, { lines: [
+      { dc: '借', acct: '2221.01.06', acctName: '待认证进项税额', amount: 5, expl: '2644核销9/402#某某提起支付运费', supplier: '' },
+      { dc: '贷', acct: '2221.01.07', acctName: '暂估进项税', amount: 5, expl: '核销9/402#某某提起支付运费', supplier: '合成物流' }] })
+    if (c.path === '/api/inv/later/8/voucher-run') return { ...view('exact', ['2026-09-402']), status: 'dry', msg: '演练（没写金蝶）', state: { status: 'dry', msg: '演练（没写金蝶）：会新建一张凭证' } }
+    return base(c)
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, api)
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  const box = page.locator('.inv-au-l3')
+  await box.locator('.inv-au-l3bad', { hasText: '请选是哪一张' }).waitFor({ timeout: 4000 })
+  assert.ok((await box.textContent()).includes('自动转待认证：演练'))
+  assert.equal(await box.locator('.inv-au-l3t tbody tr').count(), 2)
+  await box.getByLabel('核销 2026年9月 记-402').click()      // 选中状态等后端回来才变（受控），所以用 click 不用 check
+  await box.locator('.inv-au-l3ok', { hasText: '对得上' }).waitFor({ timeout: 4000 })
+  assert.deepEqual(calls.find(c => c.path === '/api/inv/later/8/voucher-source').body.picks, ['2026-09-402'])
+  assert.equal(await box.locator('.inv-au-l3l > div').count(), 2)
+  await box.getByRole('button', { name: '现在演练一次' }).click()
+  await box.getByText('上一次：演练（没写金蝶）').waitFor({ timeout: 4000 })
+  assert.equal(calls.filter(c => c.path === '/api/inv/later/8/voucher-run' && c.method === 'POST').length, 1)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
 test('审核改版：记了疑问 → 底部「提交」变成退回，并带上疑问', async (browser, B) => {
   const st = {
     folder: { id: 13, status: 'submitted', title: '有疑问的单', amount: 100, gap: GAP0(100), laters: [] },

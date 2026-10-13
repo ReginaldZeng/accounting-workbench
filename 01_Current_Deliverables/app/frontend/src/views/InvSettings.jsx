@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）| 加「后补票自动转待认证」开关：关／演练／真做（真做只有主管理员能开）
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| ④ 钉钉自动接入里加「财务初审人」：他点同意之后才发到流程里的发票算后补票
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.943（发票管家·清空试运行数据）| 最下面加「⑧ 清空试运行数据」：只有主管理员看得到
 //   （别人打预览接口回 403，这一块整个不画）；列出会清多少、留多少，填重新接钉钉审批单的起始日，手打「清零」才能点。
@@ -9,7 +10,7 @@
 // 既能当后补池的「设置」页签（embedded，不再画页头），也能被收票工作台放进 Modal 里用——宽度全跟容器走，不写死页面宽。
 // 保存时把后端给的其它键（corpId 等本页不编辑的）原样带回去，免得本页一保存把别处的配置抹掉。
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import { invSettings, invSaveSettings, invAccounts, invIntake, invIntakeScan, invResetPreview, invResetRun } from '../api.js'
+import { invSettings, invSaveSettings, invAccounts, invIntake, invIntakeScan, invResetPreview, invResetRun, invLaterVoucherConfig, invLaterVoucherConfigSet } from '../api.js'
 import { PersonPicker, useToast } from './invShared.jsx'
 import './inv-later.css'
 
@@ -368,6 +369,41 @@ function AdvancedSection({ v, set, err }) {
 const mb = n => (Number(n || 0) / 1048576).toFixed(1)
 
 /** 清空试运行数据。dirty＝上面的设置有没保存的改动（清零会改「钉钉自动接入」的起始日，先让人把改动落定）；onDone＝清完重读设置。 */
+// ───────────────────────── 后补票自动转待认证（开关单独存，点了就生效，不跟下面的「保存」走） ─────────────────────────
+
+const L3_MODES = [
+  ['off', '关', '系统什么都不做，转待认证凭证还是人在金蝶手工做。'],
+  ['dry', '演练', '只算不写：系统照样去金蝶找原凭证、算分录，把「打算怎么做」记在后补票上给你看，不往金蝶写任何东西。'],
+  ['on', '真做', '对得上的，系统往金蝶新建「暂估转待认证」凭证并提交（不审核），凭证号记到这张发票上，并在首页待办提醒审核人。只管切到真做以后审核通过的票；之前的不自动补做，要做在审核弹窗「核销暂估」里点「现在做」。'],
+]
+
+function LaterVoucherSection() {
+  const [c, setC] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { invLaterVoucherConfig().then(setC).catch(e => setErr(errText(e))) }, [])
+  const set = async (mode) => {
+    if (mode === 'on' && !window.confirm('切到「真做」后，后补票审核通过、后补单收齐，系统会往金蝶新建「暂估转待认证」凭证并提交（不审核）。确定切换吗？')) return
+    setBusy(true); setErr('')
+    try { const r = await invLaterVoucherConfigSet(mode); setC(x => ({ ...(x || {}), ...r })) } catch (e) { setErr(errText(e)) } finally { setBusy(false) }
+  }
+  if (!c && !err) return null
+  const n = (c && c.count) || {}
+  return <Section title="后补票自动转待认证" sub={'后补单的发票到了、你审核通过、后补单收齐以后，那张「暂估转待认证」凭证（借待认证进项税额／贷暂估进项税）由系统在后台做。'
+    + '系统到金蝶找这张付款单当时的费用凭证（同一个主体、供应商往来贷方＝付款金额、挂同一家供应商），发票税额和账上暂估对得上才做；'
+    + '对不上、找到好几张、找不到的不自动做，在审核弹窗「核销暂估」里写明原因，并发钉钉提醒。物流请款单不归这里，由「付款做账」那条线做。'}>
+    {c && <div className="inv-set-add">
+      <span className="inv-set-addl">现在是</span>
+      {L3_MODES.map(([k, label]) => <button key={k} type="button" className={c.mode === k ? 'btn-pri' : 'btn'} disabled={busy || c.mode === k}
+        onClick={() => set(k)}>{label}</button>)}
+      <span className="inv-muted">{c.by ? `${c.by} 于 ${c.at} 设的` : '默认（还没人改过）'}</span>
+    </div>}
+    {c && <div className="inv-set-ss">{(L3_MODES.find(m => m[0] === c.mode) || [])[2]}
+      {' '}到现在：已做 {n.done || 0} 张，演练 {n.dry || 0} 张，要人工 {n.manual || 0} 张，不用做 {n.none || 0} 张。切到「真做」只有主管理员能点。</div>}
+    {err && <div className="inv-lt-fe">{err}</div>}
+  </Section>
+}
+
 function ResetSection({ dirty, onDone }) {
   const [pv, setPv] = useState(null)        // null＝还没读到 / 不是主管理员（整块不画）
   const [since, setSince] = useState('')
@@ -540,6 +576,7 @@ export default function InvSettings({ user, embedded, onSaved, onDirtyChange }) 
       <RemindSection v={d.remind} set={put('remind')} errors={shownErr} />
       <BlockSection v={d.blockNoInvoice} set={put('blockNoInvoice')} />
       <AdvancedSection v={d.portalUrl} set={put('portalUrl')} err={shownErr.portalUrl} />
+      <LaterVoucherSection />
       <ResetSection dirty={dirty} onDone={load} />
       <div className={'inv-set-bar' + (dirty ? ' dirty' : '')}>
         <span className="inv-set-state">{saving ? '正在保存…' : dirty ? '● 有改动还没保存' : '已是最新，没有改动'}</span>

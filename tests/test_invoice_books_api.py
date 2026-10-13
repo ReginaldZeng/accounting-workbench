@@ -139,13 +139,16 @@ class InvoiceBooksApiTests(unittest.TestCase):
         cls.vouchers = invoice_vouchers
         app.include_router(invoice_vouchers.router)
         # 清空试运行数据（连带钉钉自动接入模块）：摘掉别的测试留下的旧模块，让它们绑到这次新导入的 routers.invoice 上
-        for a in ("invoice_intake", "invoice_reset"):
+        for a in ("invoice_intake", "invoice_reset", "invoice_later_voucher", "logistics_voucher"):
             sys.modules.pop("routers." + a, None)
             if pkg is not None and hasattr(pkg, a):
                 delattr(pkg, a)
         from routers import invoice_reset
         cls.reset = invoice_reset
         app.include_router(invoice_reset.router)
+        from routers import invoice_later_voucher
+        cls.l3 = invoice_later_voucher
+        app.include_router(invoice_later_voucher.router)
         cls.c = TestClient(app)
 
         def mk(name, perms=None, role="normal"):
@@ -2064,6 +2067,243 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertIn(fid3, inv._RECHECK_Q)
         inv._RECHECK_Q.discard(fid3)
         self.ok(self.post("/api/inv/settings", "cfg", {"settings": {"intake": {"firstReviewers": []}}}))
+
+    def test_36_gap_does_not_count_waiting_later_invoice_twice(self):
+        """金额核对：后补票已经交来、还在等确认时，票已经算进专票了，后补单那头不能再算它「还没到」——
+        线上 2026-10-13 一张 1,322 的单（申请人登记了后补单、又自己把票传上来）报出假差额 −1,322。号码、单号是编的。"""
+        inv, S, e = self.inv, self.S, self.e
+        f = self.tip.FAKE
+        S.folder_upsert_from_approval(e, self._norm(instId="PI-GAP-1", businessId="202610149900000000036", applicant="申请人壬",
+                                                    applicantUid="dt-gap", payeeName=f["seller"], amount=600.0), "recv", "later")
+        fo = S.folder_by_inst(e, "PI-GAP-1")
+        fid = fo["id"]
+        lid = self.later_row(inst_id="PI-GAP-1", folder_id=fid, payee_name=f["seller"], pay_amount=600, expect_amount=600)
+
+        def gap():
+            return inv.folder_gap(S.folder_get(e, fid), S.folder_items(e, fid), inv.folder_laters(e, S.folder_get(e, fid)))
+
+        def bill(n, total, **kw):
+            cols = dict(folder_id=fid, kind="invoice", inv_type="special", origin="self", later_id=lid, review="pending", number=num(n),
+                        total=total, amount=round(total / 1.06, 2), tax=round(total - total / 1.06, 2), proc_status="done",
+                        buyer_name=self.OUR, buyer_tax_id=self.OUR_TID, seller_name=f["seller"], created_by="申请人壬")
+            cols.update(kw)
+            return S.item_insert(e, **cols)
+        # 还没交票：后补 600 没到，平
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [0.0, 600.0, 0.0, 0.0])
+        # 申请人自己传来 200（等确认）：票算进专票 200，后补还没到只剩 400，仍然平；后补单本身的「已到」不变（审核通过才算）
+        a = bill(36001, 200)
+        self.books._later_recalc(lid)
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [200.0, 400.0, 200.0, 0.0])
+        l = S.later_get(e, lid)
+        self.assertEqual((float(l["received_amount"] or 0), inv.later_left(l)), (0.0, 600.0))
+        self.assertEqual(inv.later_row_view(l, S.folder_items(e, fid))["waiting"], 200.0)
+        self.assertEqual(inv.later_row_view(l)["waiting"], 0.0)
+        # 剩下 400 也传来了（钉钉流程里后到的那种）：整张单平，后补「还没到」是 0，不再报票比付款多
+        b = bill(36002, 400, origin="attachment", flags_json={"lateFlow": {"at": "2099-01-01 10:00:00", "after": "2026-10-12 13:51:00", "by": "first"}})
+        self.books._later_recalc(lid)
+        g = gap()
+        self.assertEqual([g[k] for k in ("special", "later", "laterWait", "gap")], [600.0, 0.0, 600.0, 0.0])
+        self.assertFalse(inv.gap_off(g))
+        # 交多了（多传一张 100）：等确认的最多顶掉后补单还没到的 600，多出来的照实报「票比付款多 100」
+        c = bill(36003, 100)
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [700.0, 0.0, 600.0, -100.0])
+        S.item_update(e, c, status="removed")
+        # 审核通过一张：这张转成「已到」，等确认的少了它，两头加起来还是平
+        with patch.object(inv, "notify_dt", MagicMock(return_value={"sent": True, "msg": "已发送"})):
+            self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [a]}))
+            l = S.later_get(e, lid)
+            self.assertEqual((float(l["received_amount"]), l["status"]), (200.0, "partial"))
+            self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [600.0, 0.0, 400.0, 0.0])
+            self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [b]}))
+        l = S.later_get(e, lid)
+        self.assertEqual((float(l["received_amount"]), l["status"]), (600.0, "done"))
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [600.0, 0.0, 0.0, 0.0])
+        # 接收人自己扫到的票（当场就算已到）不受影响：没有「等确认」，不会被多减
+        S.folder_upsert_from_approval(e, self._norm(instId="PI-GAP-2", businessId="202610149900000000037", applicant="申请人壬",
+                                                    applicantUid="dt-gap", payeeName=f["seller"], amount=500.0), "recv", "later")
+        fo2 = S.folder_by_inst(e, "PI-GAP-2")
+        lid2 = self.later_row(inst_id="PI-GAP-2", folder_id=fo2["id"], payee_name=f["seller"], pay_amount=500, expect_amount=500)
+        S.item_insert(e, folder_id=fo2["id"], kind="invoice", inv_type="special", origin="scanner", later_id=lid2, review="pending",
+                      number=num(36004), total=300, amount=283.02, tax=16.98, proc_status="done", created_by="接收人乙")
+        self.books._later_recalc(lid2)
+        g2 = inv.folder_gap(fo2, S.folder_items(e, fo2["id"]), inv.folder_laters(e, fo2))
+        self.assertEqual([g2[k] for k in ("special", "later", "laterWait", "gap")], [300.0, 200.0, 0.0, 0.0])
+
+    def test_37_later_invoice_auto_transfer_voucher(self):
+        """后补票审核通过后系统自己做「暂估转待认证」（用户 2026-10-14 定）：到金蝶找这张付款单当时的费用凭证（供应商往来贷方＝付款金额、
+        挂同一家供应商），发票税额＝账上暂估就新建 借待认证／贷暂估 的凭证并提交；默认演练不写金蝶，真做只有主管理员能开；
+        对不上、找到多张、做到一半中断的不自动做；金蝶里已有人做了、物流请款单、原凭证没有暂估的不重复做。金蝶全是假的，号码是编的。"""
+        inv, S, e, L3 = self.inv, self.S, self.e, self.l3
+        from routers import logistics_voucher as LVR
+        from routers import invoice_vouchers as iv
+        seller = self.tip.FAKE["seller"]
+        HEAD = {k: "" for _, k in LVR._F}
+        books, heads, calls = {}, [], {"save": [], "submit": []}
+
+        def row(vno, acct, name, dr=0.0, cr=0.0, expl="", sup=True, **kw):
+            r = dict(HEAD, **{"号": vno, "摘要": expl, "科目": acct, "科目名": name, "借": dr, "贷": cr})
+            if sup:
+                r.update({"供应商码": "S001", "供应商": seller})
+            r.update(kw)
+            return r
+
+        def voucher(vno, gross, tax, expl):
+            books[vno] = [row(vno, "6601.05", "快递费", dr=round(gross - tax, 2), expl=expl, sup=False, **{"部门码": "D01", "费用码": "F01"})]
+            if tax:
+                books[vno].append(row(vno, "2221.01.07", "暂估进项税", dr=tax, expl=expl))
+            books[vno].append(row(vno, "2241.02", "供应商往来", cr=gross, expl=expl))
+            heads.append((vno, gross))
+            L3._CACHE.clear()
+
+        def q(s_, conf, form, fields, filt, order=""):
+            if "FCREDIT=" in filt:
+                amt = float(filt.split("FCREDIT=")[1])
+                return [dict(books[v][-1], **{"年": 2026, "期": 9}) for v, g in heads if abs(g - amt) < 0.005]
+            return books.get(filt.split("FVOUCHERGROUPNO='")[1].split("'")[0], [])
+
+        def save(model, s_=None, conf=None):
+            calls["save"].append(model)
+            return {"id": 9000 + len(calls["save"]), "billno": "PZ%d" % len(calls["save"])}
+
+        def mk(tag, amount, tax, n):
+            S.folder_upsert_from_approval(e, self._norm(instId="PI-L3-" + tag, businessId="20260923172100039%04d" % n, applicant="申请人癸",
+                                                        applicantUid="dt-l3", payeeName=seller, amount=amount), "recv", "later")
+            fo = S.folder_by_inst(e, "PI-L3-" + tag)
+            lid = self.later_row(inst_id=fo["inst_id"], folder_id=fo["id"], business_id=fo["business_id"], company=self.OUR,
+                                 payee_name=seller, pay_amount=amount, expect_amount=amount)
+            iid = S.item_insert(e, folder_id=fo["id"], kind="invoice", inv_type="special", origin="self", later_id=lid, review="pending",
+                                number=num(37000 + n), total=amount, amount=round(amount - tax, 2), tax=tax, tax_rate="1%", proc_status="done",
+                                buyer_name=self.OUR, buyer_tax_id=self.OUR_TID, seller_name=seller, created_by="申请人癸")
+            self.books._later_recalc(lid)
+            return fo["id"], lid, iid
+
+        def approve(fid, iid):
+            self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [iid]}))
+
+        sent = MagicMock(return_value={"sent": True, "msg": "已发送"})
+        booked = {"rows": []}
+
+        def told():                 # 「没自动做」的钉钉提醒发了几条（后补单收齐给申请人的「已签收」不算）
+            return sum(1 for c in sent.call_args_list if "没自动做" in c[0][1])
+        with patch.object(LVR.kc, "_query", q), patch.object(LVR, "_kd", lambda: (None, {})), \
+                patch.object(LVR.kc, "login", lambda s_=None, conf=None: (None, {})), patch.object(LVR.kc, "save_voucher", save), \
+                patch.object(LVR.kc, "view_voucher", lambda vid, s_=None, conf=None: {"exists": True, "vno": str(vid - 8770), "status": "A"}), \
+                patch.object(LVR.kc, "submit_bill", lambda form, ids, s_=None, conf=None: calls["submit"].append(ids)), \
+                patch.object(LVR, "_xred_date", lambda book, d, s_, conf: ("2026-10-14", 2026, 10)), \
+                patch.object(iv, "fetch_rows", lambda numbers: list(booked["rows"])), \
+                patch.object(self.db, "list_orgs", lambda: [{"full_name": self.OUR, "book_code": "101"}]), \
+                patch.object(inv, "notify_dt", sent):
+            # ① 默认是演练：审核前只能看打算怎么做；审核通过后排上队，演练不写金蝶
+            self.assertEqual(L3.cfg()["mode"], "dry")
+            fa, la, ia = mk("A", 1322.0, 13.09, 1)
+            voucher("196", 1322.0, 13.09, "禾享提起支付新加坡样品运费")
+            self.assertEqual(L3.run_one(la)["status"], "wait")
+            self.assertEqual(self.get("/api/inv/later/%d/voucher-plan" % la, "viewer").status_code, 403)
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
+            self.assertEqual((v["mode"], v["ready"], v["plan"]["kind"], v["plan"]["taxInv"], v["plan"]["taxEst"], v["plan"]["src"]),
+                             ("dry", False, "exact", 13.09, 13.09, ["2026-09-196"]))
+            self.assertEqual([(x["dc"], x["acct"], x["amount"]) for x in v["lines"]], [("借", "2221.01.06", 13.09), ("贷", "2221.01.07", 13.09)])
+            self.assertTrue(v["lines"][0]["expl"].startswith(num(37001) + "核销9/196#"), v["lines"][0]["expl"])
+            self.assertEqual(v["lines"][1]["supplier"], seller)
+            approve(fa, ia)
+            self.assertIn(la, L3._Q)
+            L3.drain()
+            st = L3.state_of(la)
+            self.assertEqual(st["status"], "dry")
+            self.assertIn("演练（没写金蝶）", st["msg"])
+            self.assertEqual(calls["save"], [])
+            # 演练不打扰人：对不上的只把原因记在后补票上，不发钉钉
+            fz, lz, iz = mk("Z", 4000.0, 226.42, 9)
+            voucher("990", 4000.0, 40.0, "壬提起支付服务费")
+            approve(fz, iz)
+            L3.drain()
+            self.assertEqual((L3.state_of(lz)["status"], L3.state_of(lz)["kind"], told()), ("manual", "diff", 0))
+            # ② 开关：切真做只有主管理员能点。不翻旧账：切之前审核通过的票，定时那一轮不自动补做；人在弹窗里点「现在做」才做
+            self.assertEqual(self.post("/api/inv/later-voucher/config", "cfg", {"mode": "x"}).status_code, 400)
+            self.assertEqual(self.post("/api/inv/later-voucher/config", "cfg", {"mode": "on"}).status_code, 403)
+            self.db.set_setting(L3.CFG_KEY, {"mode": "on", "by": "boss", "at": "2099-01-01 00:00:00"}, "boss")      # 开关是「以后」才开的
+            L3.run_due()
+            self.assertEqual((L3.state_of(la)["status"], calls["save"]), ("old", []))
+            self.assertEqual(L3.run_due(), 0)
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-run" % la, "recv2").status_code, 403)
+            r = self.ok(self.post("/api/inv/later/%d/voucher-run" % la, "acct"))
+            self.assertEqual((r["status"], r["state"]["vno"]), ("done", "231"))
+            self.assertEqual(len(calls["save"]), 1)
+            self.db.set_setting(L3.CFG_KEY, {"mode": "dry"}, "boss")
+            self.assertEqual(self.ok(self.post("/api/inv/later-voucher/config", "boss", {"mode": "on"}))["mode"], "on")   # 现在起开：下面审的都自动做
+            m = calls["save"][0]
+            self.assertEqual((m["FACCOUNTBOOKID"], m["FDate"], m["FYear"], m["FPeriod"]), ({"FNumber": "101"}, "2026-10-14", 2026, 10))
+            self.assertEqual([(x["FACCOUNTID"]["FNumber"], x["FDEBIT"], x["FCREDIT"]) for x in m["FEntity"]],
+                             [("2221.01.06", 13.09, 0.0), ("2221.01.07", 0.0, 13.09)])
+            self.assertEqual(m["FEntity"][1]["FDetailID"], {"FDETAILID__FFLEX4": {"FNumber": "S001"}})
+            self.assertNotIn("FDetailID", m["FEntity"][0])
+            self.assertEqual(calls["submit"], [9001])
+            st = L3.state_of(la)
+            self.assertEqual((st["status"], st["vno"], st["submitted"], st["vyear"], st["vperiod"]), ("done", "231", True, 2026, 10))
+            bk = self.item(ia)["flags_json"]["_bookkeeping"]
+            self.assertEqual((bk["status"], bk["vouchers"]), ("booked", [{"book": self.OUR, "period": "2026-10", "number": "记-231"}]))
+            L3.run_due()
+            L3.run_one(la)
+            self.assertEqual(len(calls["save"]), 1)                                     # 做过了不重复建
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-source" % la, "acct", {"picks": []}).status_code, 400)
+            # ③ 对不上（票面税额 ≠ 账上暂估）：不自动做，写明差多少，提醒一次
+            fb, lb, ib = mk("B", 2000.0, 113.21, 2)
+            voucher("300", 2000.0, 20.0, "某某提起支付服务费")
+            approve(fb, ib)
+            L3.drain()
+            st = L3.state_of(lb)
+            self.assertEqual((st["status"], st["kind"]), ("manual", "diff"))
+            self.assertIn("发票税额 113.21 ≠ 账上暂估进项税 20.00", st["msg"])
+            self.assertEqual(told(), 1)
+            L3._put(lb, status="")
+            L3.run_one(lb)
+            self.assertEqual(told(), 1)                                                 # 同一个原因不重复提醒
+            # ④ 找到两张都对得上：要审核人选；选定后「现在做」
+            fc, lc, ic = mk("C", 500.0, 5.0, 3)
+            voucher("401", 500.0, 5.0, "甲提起支付")
+            voucher("402", 500.0, 5.0, "乙提起支付")
+            approve(fc, ic)
+            L3.drain()
+            self.assertEqual(L3.state_of(lc)["kind"], "multi")
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % lc, "acct"))
+            self.assertEqual((v["plan"]["kind"], len(v["plan"]["cands"])), ("multi", 2))
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-source" % lc, "recv2", {"picks": ["2026-09-402"]}).status_code, 403)
+            v = self.ok(self.post("/api/inv/later/%d/voucher-source" % lc, "acct", {"picks": ["2026-09-402"]}))
+            self.assertEqual((v["plan"]["kind"], v["plan"]["src"], [c["picked"] for c in v["plan"]["cands"]]), ("exact", ["2026-09-402"], [False, True]))
+            r = self.ok(self.post("/api/inv/later/%d/voucher-run" % lc, "acct"))
+            self.assertEqual((r["status"], r["state"]["status"], len(calls["save"])), ("done", "done", 2))
+            self.assertIn("9/402#", calls["save"][1]["FEntity"][1]["FEXPLANATION"])
+            # ⑤ 物流请款单不归这里；原凭证没有暂估的不用做；上次做到一半的不重复建；金蝶里已有人做了的不再做
+            fd, ld, idd = mk("D", 800.0, 8.0, 4)
+            voucher("450", 800.0, 8.0, "丁提起支付")
+            with patch.object(L3, "_is_logistics", lambda i: True):
+                approve(fd, idd)
+                L3.drain()
+            self.assertEqual(L3.state_of(ld)["status"], "skip")
+            fe, le, ie = mk("E", 300.0, 3.0, 5)
+            voucher("500", 300.0, 0, "戊提起支付")
+            approve(fe, ie)
+            L3.drain()
+            self.assertEqual((L3.state_of(le)["status"], "没有暂估进项税" in L3.state_of(le)["msg"]), ("none", True))
+            ff, lf, i_f = mk("F", 900.0, 9.0, 6)
+            voucher("600", 900.0, 9.0, "己提起支付")
+            L3._put(lf, status="posting")
+            approve(ff, i_f)
+            L3.drain()
+            self.assertEqual((L3.state_of(lf)["status"], L3.state_of(lf)["kind"]), ("manual", "half"))
+            fg, lg, ig = mk("G", 700.0, 7.0, 7)
+            voucher("700", 700.0, 7.0, "庚提起支付")
+            booked["rows"] = [{"book": self.OUR, "year": 2026, "month": 10, "group": "记", "number": "88", "summary": num(37007) + "核销9/700#庚提起支付"}]
+            approve(fg, ig)
+            L3.drain()
+            self.assertEqual((L3.state_of(lg)["status"], L3.state_of(lg)["kind"]), ("done", "byhand"))
+            self.assertEqual(self.item(ig)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-88"}])
+            self.assertEqual(len(calls["save"]), 2)                                     # 这四种都没有新建凭证
+            # ⑥ 关掉以后什么都不做
+            self.ok(self.post("/api/inv/later-voucher/config", "boss", {"mode": "off"}))
+            self.assertEqual(L3.run_one(lb)["status"], "skip")
+            self.assertEqual(L3.run_due(), 0)
+        self.db.set_setting(L3.CFG_KEY, {"mode": "dry"}, "test")
 
     def test_99_reset_trial_data(self):
         """清空试运行数据（名字排最后跑：它会把前面用例攒的数据清掉）。只有主管理员能点、要手打「清零」；
