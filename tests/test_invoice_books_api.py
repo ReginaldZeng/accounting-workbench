@@ -2276,9 +2276,32 @@ class InvoiceBooksApiTests(unittest.TestCase):
             # ⑤ 物流请款单不归这里；原凭证没有暂估的不用做；上次做到一半的不重复建；金蝶里已有人做了的不再做
             fd, ld, idd = mk("D", 800.0, 8.0, 4)
             voucher("450", 800.0, 8.0, "丁提起支付")
-            with patch.object(L3, "_is_logistics", lambda i: True):
+            l3_lines = [{"block": "核销", "expl": num(37004) + "核销9/450#丁提起支付", "acct": "2221.01.06", "acct_name": "待认证进项税额", "dr": 8.0, "cr": 0.0, "dims": {}},
+                        {"block": "核销", "expl": "核销9/450#丁提起支付", "acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 0.0, "cr": 8.0, "dims": {}}]
+            logi = {"cfg": {"mode": "on", "kinds": ["later"]}, "l3": {"ok": True, "lines": l3_lines, "tax": 8.0, "redo": 0, "gross_diff": 0.0, "msg": ""}}
+            with patch.object(L3, "_is_logistics", lambda i: True), patch.object(LVR, "_auto_cfg", lambda: logi["cfg"]), \
+                    patch.object(LVR, "_preview_data", lambda inst: ({"later3": logi["l3"]}, 200)):
+                # 物流请款单：这一栏要把「付款做账」那条线的打算说清楚，不能只说"这里不做"
+                p = L3.plan(ld)
+                self.assertEqual((p["kind"], p["ok"]), ("logistics", False))
+                self.assertIn("付款凭证还没做", p["why"])
+                self.db.set_setting(LVR._POSTED_KEY, {"PI-L3-D": {"vno": "391", "tax_later": True}}, "test")
+                v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % ld, "acct"))
+                self.assertEqual((v["plan"]["kind"], v["plan"]["ok"], [(x["dc"], x["acct"], x["amount"]) for x in v["lines"]]),
+                                 ("logistics", True, [("借", "2221.01.06", 8.0), ("贷", "2221.01.07", 8.0)]))
+                for w in ("由「付款做账」那条线做", "你审核通过后，那边下一轮", "对得上，转待认证税额 8.00"):
+                    self.assertIn(w, v["plan"]["why"])
+                logi["cfg"] = {"mode": "dry", "kinds": ["later"]}                       # 那边没开真做：要人去付款做账页点
+                p = L3.plan(ld)
+                self.assertEqual((p["ok"], "手动点" in p["why"]), (False, True))
+                logi["cfg"], logi["l3"] = {"mode": "on", "kinds": ["later"]}, {"ok": False, "lines": [], "msg": "发票税额和挂着的暂估进项税对不上"}
+                p = L3.plan(ld)
+                self.assertEqual((p["ok"], "它现在不会自动做" in p["why"]), (False, True))
+                self.db.set_setting(LVR._POSTED_KEY, {"PI-L3-D": {"vno": "391", "tax_later": True, "later3": {"vno": "402", "date": "2026-10-14"}}}, "test")
+                self.assertIn("已经建好了，记-402", L3.plan(ld)["why"])
                 approve(fd, idd)
                 L3.drain()
+            self.db.set_setting(LVR._POSTED_KEY, {}, "test")
             self.assertEqual(L3.state_of(ld)["status"], "skip")
             fe, le, ie = mk("E", 300.0, 3.0, 5)
             voucher("500", 300.0, 0, "戊提起支付")

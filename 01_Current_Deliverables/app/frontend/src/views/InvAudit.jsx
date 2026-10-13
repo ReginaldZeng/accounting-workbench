@@ -1,5 +1,6 @@
 import { Bookkeeping } from './InvLedger.jsx'
 import { invPaperMark } from '../api.js'
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）| 物流请款单的后补票：这一栏写明付款做账那条线会怎么做、列出它的分录；颜色按「会不会自动做」
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）| 单张弹窗里，后补票多一栏「核销暂估」：系统到金蝶找到的原凭证、对不对得上、打算怎么做；多张时在这里选；可以点「现在做」
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍）| 后补票已经交来、等审核的那部分不再算「还没到」：金额核对下面说明一句，后补单那一行写「已交来 x 待审核」
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| 已收发票表里，财务初审后才到的票在号码后面标「后补·初审后到」
@@ -550,12 +551,14 @@ function LaterVoucher({ laterId }) {
   if (!d) return <div className="inv-au-l3 bad"><b>核销暂估</b> <span className="inv-au-l3bad">没读出来：{err}</span> <button type="button" className="inv-lk" onClick={load}>重试</button></div>
   const p = d.plan || {}, st = d.state || {}
   const done = st.status === 'done'
-  const good = done || p.kind === 'exact' || p.kind === 'none' || p.kind === 'logistics'
+  const good = done || !!p.ok
   return <div className={'inv-au-l3 ' + (good ? 'ok' : 'bad')}>
     <div className="inv-au-l3h">
       <b>核销暂估</b>
       <span className="inv-muted">后补票：审核通过、后补单收齐后，系统做「暂估转待认证」凭证</span>
-      <span className={'inv-badge ' + (d.mode === 'on' ? 'ok' : 'mute')} title="开关在发票管家设置里：关＝不做；演练＝只算、不写金蝶；真做＝往金蝶新建凭证并提交（不审核）">自动转待认证：{d.modeText}</span>
+      {p.kind === 'logistics'
+        ? <span className="inv-badge mute" title="物流请款单的转待认证不归发票管家的开关管，由「付款做账」页的自动做账开关管">物流请款单 · 付款做账那边做</span>
+        : <span className={'inv-badge ' + (d.mode === 'on' ? 'ok' : 'mute')} title="开关在发票管家设置里：关＝不做；演练＝只算、不写金蝶；真做＝往金蝶新建凭证并提交（不审核）">自动转待认证：{d.modeText}</span>}
     </div>
     <div className={good ? 'inv-au-l3ok' : 'inv-au-l3bad'}>{done ? st.msg : p.why}</div>
     {!done && (p.cands || []).length > 0 && <table className="inv-au-l3t">

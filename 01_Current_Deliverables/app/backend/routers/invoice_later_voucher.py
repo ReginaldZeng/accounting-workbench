@@ -1,3 +1,5 @@
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）
+# Description: 用户上线当晚看到物流请款单的后补票写着「这里不重复做」，以为系统不做了。改成把「付款做账」那条线现在的打算原样亮出来：付款凭证做没做、转待认证税额多少、对不对得上、两行分录、是审核通过后自动做还是要去那边手动点（_logistics_plan，只读）。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）
 # Description: Owner 2026-10-13/14 定：后补单的发票到了、审核通过以后，那张「暂估转待认证」凭证系统在后台自己做
 #   （「我只会审核发票，以及确认收到」），审核时把它要核销的暂估亮出来、对不上或找不准的由审核人在这里选。
@@ -168,7 +170,7 @@ def plan(lid):
     if not l:
         return dict(out, kind="gone", why="后补单不存在")
     if _is_logistics(l.get("inst_id")):
-        return dict(out, kind="logistics", why="这张是物流请款单：暂估转待认证由「付款做账」那条线自动做，这里不重复做")
+        return dict(out, **_logistics_plan(l.get("inst_id")))
     folder = S.folder_get(e, l.get("folder_id")) or {}
     book, code = _book(l, folder)
     out["book"] = book
@@ -228,6 +230,43 @@ def plan(lid):
         return dict(out, kind="diff", why="按发票和原凭证拼出来的分录借贷不平（借 %s／贷 %s），要人工处理" % (inv._money_str(dr), inv._money_str(cr)))
     return dict(out, ok=True, kind="exact", lines=lines,
                 why="发票税额和账上暂估进项税都是 %s，对得上：借待认证进项税额／贷暂估进项税（核销 %s）" % (inv._money_str(it), "、".join(_ref(v) for v in src)))
+
+
+def _logistics_plan(inst):
+    """物流请款单的后补票：转待认证归「付款做账」那条线做（routers/logistics_voucher，开关也是那边的）。
+    把那条线现在的打算原样亮出来（只读，要读金蝶）→ {kind:'logistics', ok, why, lines?, taxInv?, taxEst?}。
+    ok＝审核通过后它会自己做（或已经做了／不用做）；False＝它现在不会自动做，要人去付款做账页处理。"""
+    head = "这张是物流请款单，转待认证由「付款做账」那条线做："
+    out = {"kind": "logistics", "ok": False, "why": ""}
+    try:
+        LVR = _lvr()
+        c = LVR._auto_cfg()
+        auto = c.get("mode") == "on" and "later" in (c.get("kinds") or [])
+        rec = (db.get_setting(LVR._POSTED_KEY, None) or {}).get(inst)
+        rec = rec if isinstance(rec, dict) else {}
+        if not rec.get("vno"):
+            return dict(out, why=head + "那边这张单的付款凭证还没做。付款凭证做了、这张票审核通过以后才会转待认证")
+        if not rec.get("tax_later"):
+            return dict(out, ok=True, why=head + "付款凭证 记-%s 当时不是按「发票后补」做的，账上没有挂着的暂估进项税，不用转" % rec.get("vno"))
+        l3d = rec.get("later3") or {}
+        if l3d.get("vno"):
+            return dict(out, ok=True, why=head + "已经建好了，记-%s（%s）%s" % (
+                l3d["vno"], l3d.get("date") or "", "" if l3d.get("submitted", True) else "，但没提交上，请到金蝶手动提交"))
+        d, code = LVR._preview_data(inst)
+        if code != 200:
+            return dict(out, why=head + "现在读不出它的打算（%s），过一会儿再打开看" % str(d.get("msg") or "读取失败")[:120])
+        l3 = d.get("later3") or {}
+        if not (l3.get("lines") and l3.get("ok")) or l3.get("gross_diff"):
+            why = l3.get("msg") or ("发票和付款金额不一样" if l3.get("gross_diff") else "发票税额和挂着的暂估进项税对不上")
+            return dict(out, why=head + "但它现在不会自动做——%s。请到「付款做账」页处理" % why)
+        tax = round(float(l3.get("tax") if l3.get("tax") is not None else l3.get("dr") or 0), 2)
+        how = ("发票和账上对不上，会先整笔红冲更正 %d 张，再转待认证 %s" % (l3["redo"], inv._money_str(tax))) if l3.get("redo") else \
+            ("发票和账上对得上，转待认证税额 %s" % inv._money_str(tax))
+        when = "你审核通过后，那边下一轮（每 20 分钟一轮）自动建凭证并提交、不审核" if auto else \
+            "不过那边的自动做账现在没开到「真做」（或没把发票后补放进自动范围），审核通过后要到「付款做账」页手动点"
+        return dict(out, ok=auto, why=head + when + "。" + how, lines=l3["lines"], taxInv=tax, taxEst=tax)
+    except Exception as ex:
+        return dict(out, why=head + "现在读不出它的打算（%s），过一会儿再打开看" % str(ex)[:120])
 
 
 def _ref(v):

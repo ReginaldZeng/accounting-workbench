@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>样机 · 发票审核单张弹窗重排</title>
+<!-- 样机（未开发、不占版号）2026-10-14：发票审核 › 点开一张票的弹窗，右半边重排。数据全是编的。 -->
+<style>
+:root{ --bg:#fff; --bg-sub:#fafbfc; --bg-rail:#f6f7f9; --line:#e9ebef; --line-strong:#dcdfe5; --ink:#181b21; --ink-2:#5a616d; --ink-3:#9298a4;
+  --red:#c0392b; --red-bg:#fbecea; --amber:#a35a00; --amber-bg:#f8f0e0; --amber-line:#e6cfa6; --blue:#2c6bcf; --blue-bg:#e7f0fc;
+  --green:#1f7a55; --green-bg:#e8f4ee; --green-line:#cbe4d5; }
+*{ box-sizing:border-box; }
+body{ margin:0; background:#eef0f3; color:var(--ink); font:14px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+.num{ font-variant-numeric:tabular-nums; font-family:ui-monospace,Consolas,monospace; }
+.note{ max-width:1280px; margin:16px auto 0; padding:0 16px; color:var(--ink-2); font-size:13px; }
+.note b{ color:var(--ink); }
+.dlg{ max-width:1280px; margin:12px auto 32px; background:var(--bg); border-radius:12px; box-shadow:0 8px 30px rgba(20,24,36,.12); overflow:hidden; }
+.hd{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line); }
+.hd h1{ font-size:15px; margin:0; }
+.hd .who{ color:var(--ink-2); font-size:12.5px; border:1px solid var(--line); border-radius:6px; padding:2px 8px; }
+.hd .sp{ flex:1; }
+.ck{ display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line-strong); border-radius:7px; padding:5px 10px; font-size:13px; }
+.ck.on{ border-color:var(--green-line); background:var(--green-bg); color:var(--green); font-weight:600; }
+.btn{ border:1px solid var(--line-strong); background:var(--bg); border-radius:7px; padding:6px 12px; font-size:13px; cursor:pointer; }
+.btn.red{ color:var(--red); } .btn.pri{ background:#3c4fc9; border-color:#3c4fc9; color:#fff; font-weight:600; }
+.body{ display:grid; grid-template-columns:minmax(0,1.05fr) minmax(0,1fr); gap:16px; padding:16px; }
+.pic{ border:1px solid var(--line); border-radius:10px; background:var(--bg-rail); min-height:400px; display:grid; place-items:center; color:var(--ink-3); }
+.col{ display:grid; gap:12px; align-content:start; }
+.card{ border:1px solid var(--line); border-radius:10px; }
+.card > h2{ margin:0; padding:9px 12px; font-size:13px; display:flex; align-items:center; gap:8px; border-bottom:1px solid var(--line); background:var(--bg-sub); border-radius:10px 10px 0 0; }
+.card > h2 small{ font-weight:400; color:var(--ink-3); }
+.tag{ font-size:12px; border-radius:5px; padding:1px 7px; font-weight:600; }
+.tag.ok{ background:var(--green-bg); color:var(--green); } .tag.warn{ background:var(--amber-bg); color:var(--amber); }
+.tag.info{ background:var(--blue-bg); color:var(--blue); } .tag.mute{ background:var(--bg-rail); color:var(--ink-2); font-weight:400; }
+/* ① 系统核对：一行一个结论 */
+.chk{ display:grid; grid-template-columns:22px 76px minmax(0,1fr); gap:2px 8px; padding:8px 12px; border-bottom:1px solid var(--line); align-items:start; }
+.chk:last-child{ border-bottom:0; }
+.chk i{ font-style:normal; width:18px; height:18px; border-radius:50%; display:grid; place-items:center; font-size:12px; font-weight:700; margin-top:2px; }
+.chk.ok i{ background:var(--green-bg); color:var(--green); } .chk.warn i{ background:var(--amber-bg); color:var(--amber); } .chk.todo i{ background:var(--bg-rail); color:var(--ink-3); }
+.chk .k{ color:var(--ink-2); } .chk .v b{ font-weight:600; } .chk .v span{ color:var(--ink-2); } .chk .v em{ font-style:normal; color:var(--green); }
+.chk.warn .v em{ color:var(--amber); }
+/* ② 这张票要办的三件事：一行一件 */
+.job{ display:grid; grid-template-columns:76px minmax(0,1fr) auto; gap:8px; padding:9px 12px; border-bottom:1px solid var(--line); align-items:center; }
+.job:last-child{ border-bottom:0; } .job .k{ color:var(--ink-2); } .job .v span{ color:var(--ink-2); }
+.lk{ color:var(--blue); background:none; border:0; padding:0; font-size:13px; cursor:pointer; }
+/* ③ 票面：两栏紧凑，读自原件的只显示字，不再一格一个输入框 */
+.kv{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; padding:6px 12px 10px; }
+.kv div{ display:grid; grid-template-columns:70px minmax(0,1fr); gap:8px; padding:5px 0; border-bottom:1px dashed var(--line); }
+.kv dt{ color:var(--ink-2); } .kv dd{ margin:0; word-break:break-all; }
+.kv .wide{ grid-column:1 / -1; }
+.need{ background:var(--amber-bg); border:1px solid var(--amber-line); border-radius:6px; padding:2px 6px; width:100%; font:inherit; }
+@media (max-width:900px){ .body{ grid-template-columns:1fr; } .pic{ min-height:260px; } .kv{ grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<p class="note"><b>样机 · 发票审核单张弹窗重排</b>（没开发，数据是编的）。第 3 版（2026-10-14，按你说的摆）：<b>左边</b>＝发票图，图下面接<b>系统核对</b>——系统替你核过什么、结论是什么，一行一句，有问题的排最前、标黄；<b>右边</b>＝<b>票面</b>（两栏紧凑，读自电子原件的只显示字，只有要你核的才是黄色输入框），下面是<b>这张票要办的事</b>（纸质票、转待认证、金蝶凭证，原来三个大框压成三行）。</p>
+
+<div class="dlg">
+  <div class="hd">
+    <h1>第 1 张 · 专票 · <span class="num">1,322.00</span></h1>
+    <span class="tag warn">待审核</span>
+    <span class="who">申请人自己上传 · 演示申请人 · 10-13 17:31</span>
+    <span class="sp"></span>
+    <label class="ck"><input type="checkbox"> 票总管</label>
+    <label class="ck on"><input type="checkbox" checked> 可抵扣 <span class="num">13.09</span></label>
+    <button class="btn">存疑</button><button class="btn red">删除</button><button class="btn pri">审核</button>
+  </div>
+  <div class="body">
+    <div class="col">
+      <div class="pic">（发票图片，和现在一样：可放大、旋转、下载原件）</div>
+      <section class="card">
+        <h2>系统核对 <span class="tag ok">6 项正常</span><span class="tag mute">1 项没查</span><small>系统替你核过的，看结论就行；有问题的排最前、标黄</small></h2>
+        <div class="chk ok"><i>✓</i><span class="k">购买方</span><div class="v"><b>演示食品科技有限公司</b> <span class="num">9144 0300 MA5E XXXX 7X</span><br><em>名称、税号都和本公司抬头清单一致</em></div></div>
+        <div class="chk ok"><i>✓</i><span class="k">销售方</span><div class="v"><b>合成国际物流有限公司</b> <span class="num">9144 0300 MA5D XXXX 25</span><br><em>税号和销方档案一致</em> <span>· 这家第 3 次来票，名称没变过</span></div></div>
+        <div class="chk ok"><i>✓</i><span class="k">收款方</span><div class="v"><em>开票的就是付款单的收款方</em></div></div>
+        <div class="chk ok"><i>✓</i><span class="k">金额</span><div class="v"><span class="num">1,308.91 ＋ 13.09 ＝ 1,322.00</span> <em>金额＋税额＝价税合计</em> <span>· 税率 1% 算得上</span></div></div>
+        <div class="chk ok"><i>✓</i><span class="k">查重</span><div class="v"><em>这张票没在别的单上出现过</em> <span>· 票总管清单里也没有</span></div></div>
+        <div class="chk ok"><i>✓</i><span class="k">来源</span><div class="v"><em>电子原件（数电票）</em> <span>· 号码、金额直接读自原件，不是拍照识别的</span></div></div>
+        <div class="chk todo"><i>–</i><span class="k">税局查验</span><div class="v"><span>还没查（导入税局清单后自动对）</span></div></div>
+      </section>
+    </div>
+    <div class="col">
+      <section class="card">
+        <h2>票面 <small>读自电子原件的不用核，黄色的是拍照识别的、要你看一眼</small><span class="sp" style="flex:1"></span><button class="lk">改字段</button></h2>
+        <dl class="kv">
+          <div><dt>票种</dt><dd>电子发票（增值税专用发票）</dd></div>
+          <div><dt>开票日期</dt><dd class="num">2026-10-12</dd></div>
+          <div class="wide"><dt>发票号码</dt><dd class="num">2644 9900 0000 0035 0002 <button class="lk">复制</button></dd></div>
+          <div><dt>金额</dt><dd class="num">1,308.91</dd></div>
+          <div><dt>税额</dt><dd class="num">13.09</dd></div>
+          <div><dt>价税合计</dt><dd class="num"><b>1,322.00</b></dd></div>
+          <div><dt>税率</dt><dd class="num">1%</dd></div>
+          <div class="wide"><dt>项目</dt><dd>*生产生活服务*物流服务费</dd></div>
+          <div class="wide"><dt>备注</dt><dd><input class="need" value="（拍照识别的字段长这样：黄色、可改）"></dd></div>
+        </dl>
+      </section>
+      <section class="card">
+        <h2>这张票要办的事</h2>
+        <div class="job"><span class="k">纸质票</span><div class="v">未收到 <span>· 点「审核」就记为已收到</span></div><button class="lk">先记已收到</button></div>
+        <div class="job"><span class="k">转待认证</span><div class="v"><span class="tag info">后补票</span> 审核通过后自动做：转待认证 <b class="num">13.09</b> <span>· 核销 9月 记-196 的暂估 · 对得上</span></div><button class="lk">看分录</button></div>
+        <div class="job"><span class="k">金蝶凭证</span><div class="v">还没做账 <span>· 每 20 分钟自动对一次</span></div><button class="lk">现在对一下</button></div>
+      </section>
+    </div>
+  </div>
+</div>
+</body>
+</html>
