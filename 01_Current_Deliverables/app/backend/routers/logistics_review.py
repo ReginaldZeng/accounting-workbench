@@ -5033,6 +5033,7 @@ def _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets
     每一行账单的右边接一组「系统复核」列——
       价：标准金额(用这一行自己的格子算：取数说明定的算法 / 包天包趟报价 / 账单自己的单价×计费量)、价差、价的复算、核价依据；
       量：这张单第一行写 账单量(本单合计)、金蝶核对量、量差、量的复算、核对方式——都指回「复核明细」那一页对应的格子，两边永远是同一个数。
+          V2.932(用户「这里是不是有的可以用合并单元格」)：一张单在账单上占连续几行的，这五列按这几行合并、竖着居中；几行不挨着的还是只写第一行。
     没有金蝶单号的行(恒茂冷藏费按天收)不在复核明细里，价的那几列照样写——这部分原来导出里完全没有核。
     规矩同前：公式写之前先按格子里的数算一遍，和系统记的标准/结论对得上才写公式。返回写了多少格。"""
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -5136,6 +5137,8 @@ def _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets
             n += 1
     # —— 量：每张单的第一行，指回「复核明细」 ——
     q2 = "'" + ws2.title.replace("'", "''") + "'!"
+    mid = Alignment(vertical="center", wrap_text=True)
+    wide = {}          # 原账单页上本来就有、而且伸到了我们这几列的合并区(极少见)：碰到就不合并
     for rc in recs:
         locs = sorted((place[y.get("lid")][0]["title"], place[y.get("lid")][1]) for y in rc["xs"] if y.get("lid") in place)
         if not rc["d0"] or not locs:
@@ -5147,8 +5150,18 @@ def _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets
                 ws.cell(row=ri, column=c0 + j, value="=%s%s%d" % (q2, GL(col_of_key[k]), s0))
                 n += 1
         x0 = rc["x0"]
-        ws.cell(row=ri, column=c0 + 8, value=str(x0.get("mode_short") or x0.get("mode_cn") or "")[:120] + ("（这张单在账单上 %d 行，量写在第一行）" % len(locs) if len(locs) > 1 else ""))
+        rows_ = [l[1] for l in locs]
+        if mp["title"] not in wide:
+            wide[mp["title"]] = [(g.min_row, g.max_row) for g in ws.merged_cells.ranges if g.max_col >= c0 + 4]
+        together = len(locs) > 1 and len({l[0] for l in locs}) == 1 and rows_ == list(range(rows_[0], rows_[0] + len(rows_))) and \
+            not any(a <= rows_[-1] and b >= rows_[0] for a, b in wide[mp["title"]])
+        ws.cell(row=ri, column=c0 + 8, value=str(x0.get("mode_short") or x0.get("mode_cn") or "")[:120] + (
+            ("（这张单在账单上 %d 行）" % len(locs)) if together else ("（这张单在账单上 %d 行，不挨着，量写在第一行）" % len(locs)) if len(locs) > 1 else ""))
         n += 1
+        if together:
+            for j in range(4, 9):
+                _merge_fast(ws, rows_[0], c0 + j, rows_[-1], c0 + j)
+                ws.cell(row=ri, column=c0 + j).alignment = mid
     return n
 
 
