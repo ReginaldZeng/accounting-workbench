@@ -533,7 +533,11 @@ def vlist(request: Request, since: str = "2026-09-01"):
         o["review"] = _review_info(r.get("carrier"), r.get("period"), r.get("subject"))
         o["invs"] = [[i.get("type_short") or i.get("type") or "发票", i.get("review") or "pending"] for i in invs]
         o["inv_state"] = _inv_state(r, invs)
-        o["later_ok"] = bool(not invs and o["inst"] in laters and (o.get("later") or _later_slip(o["inst"])))
+        _sl = None if (invs or o.get("posted")) else _later_slip(o["inst"])
+        o["later_ok"] = bool(not invs and o["inst"] in laters and (o.get("later") or _sl))
+        # V2.941(用户登记了后补单，页面上还是「票夹里还没有发票」)：后补单登记了、还没在复核台确认的，没付款的也带出来(原来只给付了款的带)
+        if _sl and not o["later_ok"] and not o.get("later_slip"):
+            o["later_slip"] = {"id": _sl["id"], "status_cn": _sl.get("status_cn"), "expect_date": _sl.get("expect_date"), "filed_by": _sl.get("filed_by")}
         o["fkd"] = bills.get((_paid_info(r) or {}).get("bill_id")) or (o.get("posted") or {}).get("bill_no") or ""
         o["vinfo"] = vinfo.get(str((o.get("posted") or {}).get("vid"))) if o.get("posted") else None
     out.sort(key=lambda x: (x["created"] or ""), reverse=True)
