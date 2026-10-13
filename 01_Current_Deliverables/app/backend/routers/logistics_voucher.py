@@ -474,7 +474,8 @@ async def fix_paycode(request: Request):
 
 @router.get("/api/logistics-voucher/list")
 def vlist(request: Request, since: str = "2026-09-01"):
-    if not _perm(request):
+    u = _perm(request)
+    if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     ovr = db.get_setting(_OVR_KEY, None) or {}
     posted = db.get_setting(_POSTED_KEY, None) or {}
@@ -536,7 +537,7 @@ def vlist(request: Request, since: str = "2026-09-01"):
         o["fkd"] = bills.get((_paid_info(r) or {}).get("bill_id")) or (o.get("posted") or {}).get("bill_no") or ""
         o["vinfo"] = vinfo.get(str((o.get("posted") or {}).get("vid"))) if o.get("posted") else None
     out.sort(key=lambda x: (x["created"] or ""), reverse=True)
-    return {"ok": True, "rows": out}
+    return {"ok": True, "rows": out, "at": _now(), "by": (u.get("name") if isinstance(u, dict) else "") or ""}      # 页头右上角写「什么时候、谁刷的」
 
 
 # ---------- 金蝶：计提凭证 / 付款单 ----------
