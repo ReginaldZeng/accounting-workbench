@@ -19,7 +19,7 @@ import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, vouche
   voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherCashflowFix, voucherCashflowRules, voucherCashflowRulesSet, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 // V2.936 总表换成「四步」的表(账单复核 → 收票 → 付款 → 做账，一张请款单一行)：画法和「卡在哪一步」在 LogisticsVoucherFlow.jsx
-import { FlowTiles, FlowTable, StepsDlg, FLOW_CSS, stageOf, flowHay } from './LogisticsVoucherFlow.jsx'
+import { FlowTiles, FlowTable, StepsDlg, FLOW_CSS, FLOW_KPI, flowKey, flowHay } from './LogisticsVoucherFlow.jsx'
 import qrcode from '../vendor/qrcode-generator.mjs'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -1192,7 +1192,7 @@ export default function LogisticsVoucher() {
   // 总表(四步)：金蝶还没出付款单的也列(账单、票可以先办)，按上面五个数筛；明细：照旧只列出了付款单的，按状态、做账类型筛
   const ql = q.trim().toLowerCase()
   const flowBase = (allRows || []).filter(r => !pf || r.period === pf)
-  const stKey = r => { const x = stageOf(r); return String(x === 8 ? 9 : x) }
+  const stKey = flowKey
   const shown = flowBase.filter(r => (!sf || stKey(r) === sf) && (!ql || flowHay(r, plans[r.inst]).includes(ql)))
   // 装订：当前筛选下已有凭证号的单(系统写的 + 金蝶里已有的)，按凭证月份挑一个月打
   const bindAll = bindItems(shown, plans)
@@ -1226,11 +1226,13 @@ export default function LogisticsVoucher() {
       <style>{CSS + FLOW_CSS}</style>
       <div className="head"><div><div className="h-title">付款做账 · 物流请款单</div>
         <div className="h-sub">账单复核、收票、付款都过了，系统才做账；凭证只提交，审核留给人在金蝶做。</div></div>
-        {/* V2.938(用户「切换账单月和刷新（注明刷新日期和谁）挪到右上角，跟别的模块一样」) */}
-        <div className="lv-htools">
-          {periods.length > 1 && <select className="lv-sel" value={pf} onChange={e => setPf(e.target.value)} title="按账单月份看"><option value="">全部账单月</option>{periods.map(m => <option key={m} value={m}>{ymCn(m)}账单</option>)}</select>}
-          {stamp && <span className="stamp" title="这一页的请款单、付款单、发票、复核状态是这个时间读的；点「刷新」重读">{String(stamp.at || '').slice(5)} 刷新{stamp.by ? ` · ${stamp.by}` : ''}</span>}
-          <button className="btn" disabled={busyLoad} onClick={load}>{busyLoad ? '刷新中…' : '刷新'}</button>
+        {/* 右上角照「银行–金蝶稽核」的排法(V2.940)：上面一行 账单月、刷新；下面一行小字写谁、什么时候刷的 */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {periods.length > 1 && <select value={pf} onChange={e => setPf(e.target.value)} title="按账单月份看"><option value="">全部账单月</option>{periods.map(m => <option key={m} value={m}>{ymCn(m)}账单</option>)}</select>}
+            <button className="btn" disabled={busyLoad} onClick={load} title="重新读一遍请款单、金蝶付款单、发票、复核状态">{busyLoad ? '刷新中…' : '刷新数据'}</button>
+          </div>
+          {stamp && stamp.at ? <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>数据：{stamp.by || '—'} 于 {stamp.at} 刷新</div> : null}
         </div></div>
       <div className="body">
         {err && <div className="lv-msg bad">{err}</div>}
@@ -1240,17 +1242,18 @@ export default function LogisticsVoucher() {
             <span className="dim" style={{ marginLeft: 8, fontSize: 12 }}>系统替你改金蝶付款单的往来单位、收款单位两格；付款单已审核的要先在金蝶反审核</span></div>}</div>)}
         <AutoBar onChanged={load} />
         <FlowTiles rows={flowBase} value={sf} onChange={setSf} />
-        <div className="lvf-bar">
-          <div className="q"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
-            <input type="search" aria-label="搜索请款单" placeholder="搜承运商、主体、金额、付款单号、凭证号…" value={q} onChange={e => setQ(e.target.value)} autoComplete="off" />
-            {q && <button className="x" aria-label="清空搜索" onClick={() => setQ('')}>×</button>}</div>
-          <span className="n">{(ql || sf) ? `找到 ${shown.length} 张（共 ${flowBase.length} 张）` : `共 ${flowBase.length} 张请款单`}</span>
+        <div className="fbar">
+          <span className="fl">筛选</span>
+          <label>搜索<input type="text" style={{ width: 320 }} aria-label="搜索请款单" placeholder="承运商 / 主体 / 金额 / 付款单号 / 凭证号" value={q} onChange={e => setQ(e.target.value)} autoComplete="off" /></label>
+          {q && <button className="lnk" onClick={() => setQ('')}>清空</button>}
           <span style={{ flex: 1 }} />
-          <span className="n">已勾选 <b>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono">{money(picked.reduce((x, r) => x + (r.amount || 0), 0))}</b></>}</span>
+          <label>已勾选 <b style={{ color: 'var(--ink)' }}>{picked.length}</b> 张{picked.length > 0 && <> · 付款合计 <b className="mono" style={{ color: 'var(--ink)' }}>{money(picked.reduce((x, r) => x + (r.amount || 0), 0))}</b></>}</label>
           <button className="btn btn-pri" disabled={!picked.length || (run && !run.end)} onClick={runBatch}
             title="四步都过了、做账类型是 一致·只核销 / 尾差·红冲更正 / 需红冲更正 的才能勾；计提记错主体的单张做，金额不符的要人工">批量保存到金蝶</button>
           {runInfo}
         </div>
+        <div className="foot" style={{ marginTop: -6 }}>点上方数字筛选 · 当前：<b style={{ color: 'var(--ink)' }}>{(FLOW_KPI.find(k => k[0] === sf) || FLOW_KPI[0])[1]}</b>（{shown.length} 张{ql ? `，共 ${flowBase.length} 张` : ''}）
+          {sf && (FLOW_KPI.find(k => k[0] === sf) || [])[3] ? <span style={{ color: (FLOW_KPI.find(k => k[0] === sf) || [])[2], marginLeft: 8, fontWeight: 600 }}>{(FLOW_KPI.find(k => k[0] === sf) || [])[3]}</span> : null}</div>
         {pickedRedo.length > 0 && <div className="lv-msg warn">⚠ 勾选里有 <b>{pickedRedo.length}</b> 张要<b>红冲更正</b>（原计提整笔红冲，再按发票重新计提）：
           {pickedRedo.map(r => <span key={r.inst} className="lv-redo">{label(r)}<span className="dim">（{(plans[r.inst] || {}).text}）</span></span>)}
           建议先点开预览看一眼；写完后在金蝶重点核对红冲、更正两段。</div>}

@@ -54,15 +54,23 @@ export function FlowRule() {
     <span>前一步没过，后面不做。卡在哪一步，那一格标黄。</span></div>
 }
 
+// 上面那一排数字：写法照「银行–金蝶稽核」的切片卡(全站共用的 .kpis / .kpi)——圆点＋名称在上、大数字在下，点一下只看那一类(V2.940，用户贴那一页：「参考一下吧」)
+// 顺序照四步走(用户看原来「可以做账」排最前：「这个顺序好像也不太对」)：全部 → 卡在① → 卡在② → 等③付款 → 可以做账 → 已做账
+export const FLOW_KPI = [['', '全部', 'var(--gray)', ''],
+  ['1', '卡在 ① 账单复核', 'var(--amber)', '整月没登记，这个主体也没标通过'], ['2', '卡在 ② 收票', 'var(--amber)', '没票，或发票管家还没审核通过'],
+  ['3', '等 ③ 付款', 'var(--blue)', '账单、票都好了，金蝶还没有付款单'], ['0', '④ 可以做账', 'var(--green)', '前三步都过了'], ['9', '已做账', 'var(--accent)', '']]
 export function FlowTiles({ rows, value, onChange }) {
-  const n = k => rows.filter(r => stageOf(r) === k).length
-  const done = rows.filter(r => stageOf(r) >= 8), other = n(8)
-  const T = [['0', 'ok', '可以做账', '四步都过了', n(0)], ['1', 'warn', '卡在 ① 账单复核', '整月没登记，这个主体也没标通过', n(1)],
-    ['2', 'warn', '卡在 ② 收票', '没票，或发票管家还没审核通过', n(2)], ['3', 'neu', '等 ③ 付款', '账单、票都好了，金蝶还没有付款单', n(3)],
-    ['9', 'done', '已做账', other ? `其中 ${other} 张是别人早在金蝶做的` : '', done.length]]
-  return <div className="lvf-tiles">{T.map(t => <button key={t[0]} className={'tile ' + t[1]} aria-pressed={value === t[0]} onClick={() => onChange(value === t[0] ? '' : t[0])}>
-    <div className="n">{t[4]}</div><div className="t">{t[2]}</div><div className="s">{t[3]}</div></button>)}</div>
+  const other = rows.filter(r => stageOf(r) === 8).length
+  return <div className="kpis">{FLOW_KPI.map(([k, label, color, tip]) => {
+    const n = k === '' ? rows.length : rows.filter(r => flowKey(r) === k).length
+    return <div key={k || 'all'} className={'kpi slice' + (value === k ? ' on' : '')} role="button" tabIndex={0}
+      title={(k === '9' && other ? `其中 ${other} 张是别人早在金蝶做的` : tip) || undefined}
+      onClick={() => onChange(k)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onChange(k) } }}>
+      <div className="kl"><span className="dot" style={{ background: color }} />{label}</div><div className="kv">{n}</div></div>
+  })}</div>
 }
+
+export const flowKey = r => { const x = stageOf(r); return String(x === 8 ? 9 : x) }
 
 export function FlowTable({ rows, loading, plans, sel, setSel, canBatch, onSteps, fixPaycode, emptyText }) {
   const groups = []
