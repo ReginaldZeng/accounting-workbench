@@ -1414,7 +1414,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           {!locked && <button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button>}</span>
                         if (mk && mk.status === 'question') return <span className="smk q" title={`${mk.by} ${mk.at}`}>? 有疑问：{mk.note || '（未写）'}
                           {!locked && <><button className="lnk" onClick={() => askSubj(h.subject, mk.note)}>改</button><button className="lnk" onClick={() => markSubj(h.subject, 'ok')}>改为通过</button><button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button></>}</span>
-                        return !locked && <span className="smkbtns"><button className="btn sm okb" onClick={() => markSubj(h.subject, 'ok')}>✓ 本主体通过</button>
+                        return !locked && <span className="smkbtns"><button className="btn sm okb" title="这个主体的账单没问题了：标通过以后，这个主体的请款单就可以做账，不用等别的主体、也不用等整月登记" onClick={() => markSubj(h.subject, 'ok')}>✓ 本主体通过</button>
                           <button className="btn sm" onClick={() => askSubj(h.subject, '')}>? 有疑问</button></span>
                       })()}</td>
                     </tr>,
