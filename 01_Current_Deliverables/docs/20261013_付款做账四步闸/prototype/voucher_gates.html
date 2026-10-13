@@ -3,7 +3,7 @@
 [Change Log]
 Date: 2026-10-13
 Author: Claude Opus 5.5
-Version: 样机 v0.8（未开发）
+Version: 样机 v0.9（未开发）
 Description: 物流对账 · 付款做账总表重排样机。
   用户 2026-10-13 看付款做账总表：「感觉这个页面不太对。我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序，但是现在付款就开始做了好像」
   → V2.934 先把「账单没复核不能做账」这道闸补上（只加了一个状态），没动页面 →「有样机吗」。
@@ -15,6 +15,7 @@ Description: 物流对账 · 付款做账总表重排样机。
     每格两行——上面一句结论、下面一行灰字，图标和字上下居中；灰字 ② 写票种＋审核状态（专票已审核 / 普票待审核 / 发票后补已确认），
     ③ 写金蝶付款单号，④ 写制单人 · 期间-凭证号。
   v0.4（「待审核应该是黄色？」）：② 的灰字里，还没审核通过的（待审核、草稿）标黄，已审核的还是灰色。
+  v0.9（「还要加一个搜索功能」）：表格上面加搜索框，边打边筛——承运商全称 / 简称 / 金蝶编码、主体、请款金额、计提数、付款单号、凭证号、计提凭证号（8/563#）都能搜；和上面五个数的筛选可以叠着用。
   v0.8（「能不能就是，只显示计提数和差异，然后最后面加一个自动做账的步骤动图（弹窗形式）」）：「计提」那一列只留计提含税合计和差异；
     每行最后一个「做账步骤」按钮，点开弹窗，一步一步放这张单系统是怎么做的（先过三道闸，再审核付款单 → 出凭证 → 红冲更正 → 核销 → 提交 → 现金流量 → 收尾），
     每一步写这张单自己的数；已做账的放当时做的，没做的放到时候会怎么做。动效只放一遍（用户：「播放一遍就好啦」），放完停住，没有重播。
@@ -66,6 +67,15 @@ button{font:inherit;color:inherit}
 .tile .s{font-size:11.5px;color:var(--ink3);margin-top:2px;min-height:17px}
 .tile.ok .n{color:var(--ok)} .tile.warn .n{color:var(--warn)} .tile.neu .n{color:var(--ink2)} .tile.done .n{color:var(--accent)}
 
+.bar{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.bar .q{position:relative;flex:0 1 380px}
+.bar .q input{width:100%;height:34px;padding:0 30px 0 32px;border:1px solid var(--line);border-radius:8px;background:var(--card);font:inherit;color:var(--ink);outline:none}
+.bar .q input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg)}
+.bar .q input::-webkit-search-cancel-button{display:none}
+.bar .q svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:15px;height:15px;stroke:var(--ink3);fill:none;stroke-width:2;stroke-linecap:round}
+.bar .q .x{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:0;background:none;color:var(--ink3);cursor:pointer;font-size:15px;line-height:1;padding:4px;display:none}
+.bar .q.has .x{display:block}
+.bar .n{font-size:12px;color:var(--ink3)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow-x:auto}
 table{width:100%;border-collapse:collapse}
 th,td{padding:9px 8px;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line2)}
@@ -160,6 +170,13 @@ ol.steps li.run .dot{animation:pulse .5s ease-out 1}
   </div>
 
   <div class="tiles" id="tiles"></div>
+
+  <div class="bar">
+    <div class="q" id="qw"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="q" type="search" placeholder="搜承运商、主体、金额、付款单号、凭证号…" aria-label="搜索请款单" autocomplete="off">
+      <button class="x" id="qx" aria-label="清空搜索">×</button></div>
+    <span class="n" id="qn"></span>
+  </div>
 
   <div class="card">
     <table>
@@ -256,7 +273,13 @@ function render(){
   ];
   document.getElementById('tiles').innerHTML = T.map(t =>
     `<button class="tile ${t[1]}" data-k="${t[0]}" aria-pressed="${filt===t[0]}"><div class="n">${t[4].length}</div><div class="t">${t[2]}</div><div class="s">${t[3]}</div></button>`).join('');
-  const show = rows.filter(r => filt === '' || String(r.st) === filt);
+  // 搜索：全称 / 简称 / 金蝶编码、主体、请款金额、计提数、付款单号、凭证号、计提凭证号；金额带不带千分位都认
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const hay = r => { const [code, full] = SUP[r.ca] || ['', r.ca];
+    return [full, code, r.ca, r.sj, r.amt.toFixed(2), money(r.amt), r.acc.toFixed(2), money(r.acc), r.fkd, r.vno, r.vno.replace('记-', ''), r.per, r.maker, ...r.refs].join(' ').toLowerCase(); };
+  const show = rows.filter(r => filt === '' || String(r.st) === filt).filter(r => !q || hay(r).includes(q));
+  document.getElementById('qw').classList.toggle('has', !!q);
+  document.getElementById('qn').textContent = (q || filt !== '') ? `找到 ${show.length} 张（共 ${rows.length} 张）` : `共 ${rows.length} 张请款单`;
   const groups = [...new Set(show.map(r => r.ca))];
   let h = '';
   for (const g of groups){
@@ -302,8 +325,9 @@ function render(){
       h += `<tr><td>${r.sj}</td><td class="num mono">${money(r.amt)}</td><td class="acc">${cA}</td><td${sc(1)}>${c1}</td><td${sc(2)}>${c2}</td><td${sc(3)}>${c3}</td><td>${c4}</td><td>${act}</td></tr>`;
     }
   }
-  document.getElementById('tb').innerHTML = h || '<tr><td colspan="8" class="dim" style="padding:22px;text-align:center">这一类现在没有</td></tr>';
+  document.getElementById('tb').innerHTML = h || `<tr><td colspan="8" class="dim" style="padding:22px;text-align:center">${q ? '没搜到「' + q.replace(/[<>&]/g, '') + '」：换个词，或者点上面的数字把筛选去掉' : '这一类现在没有'}</td></tr>`;
   document.getElementById('foot').innerHTML =
+    '搜索框：承运商全称 / 简称 / 金蝶编码、主体、金额、付款单号、凭证号、计提凭证号都能搜，和上面五个数的筛选可以叠着用。<br>' +
     '「计提」那一列：上面是这张单核销的计提含税合计，下面是和请款的差异，有差标黄（鼠标停一下看是哪几张计提）。怎么做——只核销还是红冲更正——点每行最后的「做账步骤」，弹窗里一步一步放出来。<br>' +
     '每格两行：上面是结论，下面灰字是依据——① 整月登记还是本主体通过、哪天；② 票种和发票管家的审核状态；③ 金蝶付款单号（鼠标停一下看付款日期）；④ 制单人 · 期间 凭证号（鼠标停一下看工作台里是谁点的）。<br>' +
     '和现在的页面比：现在一格里只有 计提 / 付款 / 做账，看不到账单复核、收票走到哪了；金蝶没出付款单的现在不显示，这里也列出来；红冲更正的分录细节在「凭证预览」里。<br>' +
@@ -380,6 +404,8 @@ document.getElementById('tb').addEventListener('click', e => { const b = e.targe
 document.getElementById('dClose').addEventListener('click', closeSteps);
 document.getElementById('mask').addEventListener('mousedown', e => { if (e.target.id === 'mask') closeSteps(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSteps(); });
+document.getElementById('q').addEventListener('input', render);
+document.getElementById('qx').addEventListener('click', () => { const i = document.getElementById('q'); i.value = ''; render(); i.focus(); });
 document.getElementById('segInv').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   invRule = b.dataset.v;
