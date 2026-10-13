@@ -3,7 +3,7 @@
 [Change Log]
 Date: 2026-10-13
 Author: Claude Opus 5.5
-Version: 样机 v0.4（未开发）
+Version: 样机 v0.5（未开发）
 Description: 物流对账 · 付款做账总表重排样机。
   用户 2026-10-13 看付款做账总表：「感觉这个页面不太对。我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序，但是现在付款就开始做了好像」
   → V2.934 先把「账单没复核不能做账」这道闸补上（只加了一个状态），没动页面 →「有样机吗」。
@@ -15,6 +15,7 @@ Description: 物流对账 · 付款做账总表重排样机。
     每格两行——上面一句结论、下面一行灰字，图标和字上下居中；灰字 ② 写票种＋审核状态（专票已审核 / 普票待审核 / 发票后补已确认），
     ③ 写金蝶付款单号，④ 写制单人 · 期间-凭证号。
   v0.4（「待审核应该是黄色？」）：② 的灰字里，还没审核通过的（待审核、草稿）标黄，已审核的还是灰色。
+  v0.5（「这个绿色勾勾有点奇怪，应该别的符号」）：② 的图标分三种——审核通过才是绿勾；票收到了还没审核通过的是黄圈三个点；发票后补的是「补」。
 -->
 <html lang="zh-CN">
 <head>
@@ -80,6 +81,10 @@ tbody tr:last-child td{border-bottom:0}
 .c.stop .ic{background:var(--warn-bg);color:var(--warn)} .c.stop .tx .m{color:var(--warn);font-weight:600}
 .c.wait .ic{background:var(--neu-bg);color:var(--ink3)} .c.wait .tx .m{color:var(--ink3)}
 .c.go .ic{background:var(--ok);color:#fff} .c.go .tx .m{font-weight:600;color:var(--ok)}
+/* 票收到了、还没审核通过：黄圈三个点(不是办完了的绿勾，也不是卡住的实心黄叹号) */
+.c.pend .ic{background:#fff;box-shadow:inset 0 0 0 1.5px var(--warn);gap:2px}
+.c.pend .ic i{width:3px;height:3px;border-radius:50%;background:var(--warn)}
+.c.later .ic{background:var(--accent-bg);color:var(--accent);font-size:11px}
 td.stopcell{background:#FFFAF0}
 .tag{display:inline-flex;align-items:center;padding:0 7px;height:18px;border-radius:999px;font-size:11.5px;font-weight:400;white-space:nowrap}
 .tag.warn{background:var(--warn-bg);color:var(--warn)} .tag.ok{background:var(--ok-bg);color:var(--ok)}
@@ -212,15 +217,16 @@ function render(){
         : (done ? cell('stop','!','没复核','做账时就没复核') : cell('stop','!','还没复核','<button class="lnk">去账单复核台</button>'));
       // ② 收票：灰字＝票种＋审核状态
       let c2;
-      if (r.later) c2 = cell('ok','✓','票后到','发票后补已确认');
+      if (r.later) c2 = cell('later','补','票后到','发票后补已确认');
       else if (!r.invs.length) c2 = after(2) ? cell('wait','○','没票') : cell('stop','!','没票','<button class="lnk">去发票管家</button>');
       else {
         const main = `已收 ${r.invs.length} 张`, grey = invText(r);
-        c2 = invOk(r) ? cell('ok','✓',main,grey) : (after(2) ? cell('wait','○',main,grey) : cell('stop','!',main, grey + (done ? '' : ' · <button class="lnk">去审核</button>')));
+        const allOk = r.invs.every(i => i[1] === 'approved');
+        c2 = invOk(r) ? (allOk ? cell('ok','✓',main,grey) : cell('pend','<i></i><i></i><i></i>',main,grey)) : (after(2) ? cell('wait','○',main,grey) : cell('stop','!',main, grey + (done ? '' : ' · <button class="lnk">去审核</button>')));
       }
       // ③ 付款：灰字＝金蝶付款单号
       const fkd = r.fkd ? `<span class="mono">${r.fkd}</span>` : '付款单还是暂存，没编号';
-      const c3 = r.paid ? cell('ok','✓','已付款', fkd, `付款日期 ${r.paid}`) : (after(3) ? cell('wait','○','没付款') : cell(at(3)?'stop':'wait', at(3)?'…':'○','等付款','金蝶还没有付款单'));
+      const c3 = r.paid ? cell('ok','✓','已付款', fkd, `付款日期 ${r.paid}`) : (after(3) ? cell('wait','○','没付款') : cell(at(3)?'stop':'wait', at(3)?'⋯':'○','等付款','金蝶还没有付款单'));
       // ④ 做账：灰字＝制单人 · 期间-凭证号
       let c4, act = '';
       if (done){
