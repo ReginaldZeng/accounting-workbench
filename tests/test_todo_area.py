@@ -248,6 +248,22 @@ class TodoAreaTests(unittest.TestCase):
         self.assertEqual(it["title"], "付款做账 · 记-312　甲物流公司 2026-09")
         self.assertIn("借贷 48,260.00", it["sub"])
 
+    def test_voucher_month_recorded_or_filled_in_on_next_check(self):
+        # 凭证号每月从 1 排：做账时记了金蝶凭证的年、期 → 待办里带上是哪个月的
+        rec = {"vid": 5002, "vno": "1", "dr": 100.0, "lines": 3, "submitted": True, "vyear": 2026, "vperiod": 10}
+        db.set_setting(sc.VOUCHER_POSTED_KEY, {"inst2": rec}, "做账丙")
+        sc.voucher_touch("inst2", rec, {"payee": "甲物流公司", "period": "2026-08", "subject": "深圳主体"}, "做账丙")
+        self.assertEqual(ts.get("logi_voucher_audit", "inst2")["payload"]["ym"], "2026-10")
+        # 早先挂上的没记：下一轮核对按付款单日期补上（凭证是付款单生成的，日期相同）；查不到就空着，不瞎写
+        it = self._voucher("inst3")
+        self.assertEqual(it["payload"]["ym"], "")
+        with db._engine.begin() as c:
+            c.execute(insert(sc.lr_store.payreq).values(inst_id="inst3", kd_paid="2026-10-08|C|778899"))
+        sc.run_checks()
+        self.assertEqual(ts.get("logi_voucher_audit", "inst3")["payload"]["ym"], "2026-10")
+        with db._engine.begin() as c:
+            c.execute(delete(sc.lr_store.payreq).where(sc.lr_store.payreq.c.inst_id == "inst3"))
+
     # ---------- ④ 计提更正 ----------
     def _fix(self, key, carrier="乙物流", period="2026-08"):
         with db._engine.begin() as c:

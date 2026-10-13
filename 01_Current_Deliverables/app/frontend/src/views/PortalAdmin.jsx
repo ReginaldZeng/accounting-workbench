@@ -4,6 +4,7 @@
 // 门户管理（门户内页签，仅管理员）：维护各工作台的工具卡片——所属工作台/名称/状态/概述/通用技能/AI技能。
 // 数据存 portal_tools 表，门户卡片实时读取；改这里 = 门户即时更新，无需改代码/发版。深色 pa- 作用域。
 import React, { useEffect, useState } from 'react'
+import PersonSearchAdd from '../components/PersonSearchAdd.jsx'
 import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify, getDingtalkRoster } from '../api.js'
 
 const LANES = [{ key: 'accounting', label: '财务核算组' }, { key: 'bp', label: '财务分析组 · BP' }, { key: 'legal', label: '法务部' }]
@@ -218,48 +219,7 @@ export default function PortalAdmin({ onChange }) {
 // 取件机运行监控（V2.532）：门户管理内的只读监控 + 收件人配置（仅管理员进得来这页）。
 // 收件人加人（V2.543 直接搜人，取代旧「通讯录选」弹窗）：输名字→下拉搜通讯录（姓名｜岗位｜部门）点一下加；
 // 输 11 位号码→回车/点「加外部号码」当外部人。花名册由父层拉一次共享，首次聚焦时懒加载。
-function PersonSearchAdd({ roster, rosterErr, onFocusLoad, onPick, onAddNumber }) {
-  const [q, setQ] = useState('')
-  const [focused, setFocused] = useState(false)
-  const kw = q.trim()
-  const isNum = /^\d+$/.test(kw)
-  const hits = (!isNum && kw && Array.isArray(roster))
-    ? roster.filter(p => (p.name || '').includes(kw) || (p.title || '').includes(kw) || (p.dept || '').includes(kw)).slice(0, 8)
-    : []
-  const pick = (p) => { onPick(p); setQ('') }
-  const addNum = () => { if (/^\d{11}$/.test(kw)) { onAddNumber(kw); setQ('') } }
-  const open = focused && !!kw
-  return (
-    <div className="pa-srwrap">
-      <input className="srch" value={q} placeholder="输名字搜人加，或填 11 位手机号"
-        onFocus={() => { setFocused(true); onFocusLoad() }}
-        onBlur={() => setTimeout(() => setFocused(false), 150)}
-        onChange={e => setQ(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter' && isNum) { e.preventDefault(); addNum() } }} />
-      {open && (
-        <div className="pa-sr">
-          {isNum
-            ? (kw.length === 11
-              ? <div className="pa-sr-item" onMouseDown={e => { e.preventDefault(); addNum() }}>➕ 加外部号码 {kw}</div>
-              : <div className="pa-sr-msg">手机号 11 位，还差 {11 - kw.length} 位…</div>)
-            : (roster === null
-              ? <div className="pa-sr-msg">加载通讯录中…</div>
-              : rosterErr
-                ? <div className="pa-sr-msg" style={{ color: 'var(--red)' }}>{rosterErr}</div>
-                : hits.length === 0
-                  ? <div className="pa-sr-msg">没搜到「{kw}」</div>
-                  : hits.map(p => (
-                    <div key={p.userid} className="pa-sr-item" onMouseDown={e => { e.preventDefault(); pick(p) }}>
-                      <span>👤 {p.name}</span>
-                      {(p.title || p.dept) && <span style={{ color: 'var(--ink3)', marginLeft: 'auto', fontSize: 11.5 }}>{[p.title, p.dept].filter(Boolean).join(' · ')}</span>}
-                    </div>
-                  )))}
-        </div>
-      )}
-    </div>
-  )
-}
-
+// 搜人框本身在 components/PersonSearchAdd.jsx（V2.933 抽出，汇率通知设置共用）。
 function MachineMonitor() {
   const [d, setD] = useState(null)
   const [msg, setMsg] = useState(null)

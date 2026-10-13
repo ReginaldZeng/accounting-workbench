@@ -177,7 +177,21 @@ def voucher_touch(inst, rec, req, origin=""):
                         holder="scene" if ok else "origin",
                         state="已提交，等审核" if ok else "保存了，没提交上",
                         warn="" if ok else "请到金蝶手动提交，提交后才会转给审核人",
-                        payload={"inst": str(inst), "vid": rec.get("vid"), "vno": rec.get("vno")})
+                        payload={"inst": str(inst), "vid": rec.get("vid"), "vno": rec.get("vno"), "ym": _voucher_ym(rec, inst)})
+
+
+def _voucher_ym(rec, inst):
+    """这张付款凭证是哪个月的 → 'YYYY-MM'（凭证号每月从 1 排，不写月份分不清是哪张）。
+    做账时记了金蝶凭证的年、期就用它；早先做的没记 → 用付款单日期的月份（凭证是付款单生成的，日期相同）。都没有 → ''。"""
+    try:
+        if rec.get("vyear") and rec.get("vperiod"):
+            return "%d-%02d" % (int(rec["vyear"]), int(rec["vperiod"]))
+        from sqlalchemy import text
+        with db._engine.connect() as c:
+            d = str(c.execute(text("select kd_paid from logistics_payreq where inst_id=:i"), {"i": str(inst)}).scalar() or "")
+        return d[:7] if len(d) >= 7 and d[4] == "-" and d[:4].isdigit() and d[5:7].isdigit() else ""
+    except Exception:
+        return ""
 
 
 def _check_voucher(it, s, conf):
@@ -190,10 +204,13 @@ def _check_voucher(it, s, conf):
     if st is None:
         return {"status": "open", "holder": "origin", "state": "金蝶里已找不到",
                 "warn": "金蝶里已找不到这张凭证 记-%s（可能被人删了），请做账人到金蝶看一下" % (rec.get("vno") or "")}
-    if st == "B":
-        return {"status": "open", "holder": "scene", "state": "已提交，等审核", "warn": ""}
-    return {"status": "open", "holder": "origin", "state": "保存了，没提交上",
-            "warn": "请到金蝶手动提交，提交后才会转给审核人"}
+    out = ({"status": "open", "holder": "scene", "state": "已提交，等审核", "warn": ""} if st == "B" else
+           {"status": "open", "holder": "origin", "state": "保存了，没提交上", "warn": "请到金蝶手动提交，提交后才会转给审核人"})
+    if not it["payload"].get("ym"):                    # 早先挂上的没记凭证月份：这一轮补上
+        ym = _voucher_ym(rec, it["ref"])
+        if ym:
+            out["payload"] = dict(it["payload"], ym=ym)
+    return out
 
 
 # ============ ④ 计提更正待办：一家承运商 × 一个账期 一条 ============

@@ -1610,6 +1610,7 @@ def _post_finish(inst, user, req, pb, fid, vid, vno, s, conf, steps, rec0, n_new
     except Exception as e:
         cfr = {"ok": False, "items": {}, "msg": "出错：%s" % str(e)[:140]}
     rec = dict(rec0, at=_now(), by=user, dr=m2.get("DEBITTOTAL"), cr=m2.get("FCREDITTOTAL"), lines=n_new + 2,
+               vyear=m2.get("YEAR"), vperiod=m2.get("PERIOD"),          # 凭证是哪年哪期的（待办那一行要写「几月的 记-N」）
                submitted=not sub_err, submit_err=sub_err, status=m2.get("DocumentStatus"), cashflow=cfr)
     posted = dict(db.get_setting(_POSTED_KEY, None) or {})
     posted[inst] = rec
@@ -1803,6 +1804,7 @@ def _post_refix(inst, user, dry=False):
     posted = dict(db.get_setting(_POSTED_KEY, None) or {})
     rec = dict(posted.get(inst) or rec)
     rec.update(dr=m2.get("DEBITTOTAL"), cr=m2.get("FCREDITTOTAL"), lines=len(ents) + len(new), submitted=not sub_err, submit_err=sub_err,
+               vyear=m2.get("YEAR"), vperiod=m2.get("PERIOD"),
                status=m2.get("DocumentStatus"), cashflow=cfr, n_adjust=len(d2.get("adjust") or []), fix_ids=fix_ids,
                refix=(rec.get("refix") or []) + [{"at": _now(), "by": user, "n": len(new)}])
     posted[inst] = rec

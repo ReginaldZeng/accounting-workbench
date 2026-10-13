@@ -363,3 +363,42 @@ def dt_roster(conf=None, max_users=5000, max_depts=800, workers=8):
         return {"ok": True, "people": list(people.values())}
     except Exception as e:
         return {"ok": False, "msg": "拉花名册异常：%s" % e}
+
+
+_ROSTER_CACHE = {"ts": 0.0, "people": None}   # 花名册进程内缓存（单 worker）：拉一次缓存 30 分钟，之后秒开；新人入职过半小时自动刷新，或 fresh 立即重拉
+
+
+def dt_roster_cached(fresh=False, ttl=1800):
+    """带缓存的花名册（门户取件机监控、汇率通知设置共用一份）：返回同 dt_roster，命中缓存多带 cached=True。"""
+    now = time.time()
+    if not fresh and _ROSTER_CACHE["people"] is not None and (now - _ROSTER_CACHE["ts"]) < ttl:
+        return {"ok": True, "people": _ROSTER_CACHE["people"], "cached": True}
+    r = dt_roster()
+    if r.get("ok"):
+        _ROSTER_CACHE["people"] = r.get("people") or []
+        _ROSTER_CACHE["ts"] = now
+    return r
+
+
+_MOBILE_UID_CACHE = {}   # 手机号 → userid（进程内；只记查到的，查不到的下次再查）
+
+
+def dt_userids_by_mobiles(mobiles, conf=None):
+    """手机号 → 钉钉 userid（只为把老名单里的号码认成名字，**不用于发送**）。查不到/没权限/未配置的不在返回里，不抛错。"""
+    out = {m: _MOBILE_UID_CACHE[m] for m in (mobiles or []) if m in _MOBILE_UID_CACHE}
+    todo = [m for m in (mobiles or []) if m not in out]
+    conf = conf or load_dingtalk_conf()
+    if not todo or not conf:
+        return out
+    try:
+        import requests
+        tok = _dt_token(conf)
+        for m in todo:
+            r = requests.post("https://oapi.dingtalk.com/topapi/v2/user/getbymobile",
+                              params={"access_token": tok}, json={"mobile": m}, timeout=15).json()
+            uid = (r.get("result") or {}).get("userid") if r.get("errcode") == 0 else None
+            if uid:
+                out[m] = _MOBILE_UID_CACHE[m] = str(uid)
+    except Exception:
+        pass
+    return out

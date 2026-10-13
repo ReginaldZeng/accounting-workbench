@@ -313,6 +313,7 @@ export const fxRateHistory = (b) => jpSoft('/api/fxrate/history', b)
 export const getFxNotifyConfig = () => j('/api/fxrate/notify-config')
 export const saveFxNotifyConfig = (b) => jpSoft('/api/fxrate/notify-config', b)
 export const testFxNotify = () => jpSoft('/api/fxrate/notify-test', {})
+export const getFxNotifyRoster = () => j('/api/fxrate/notify-roster')   // 通知设置·搜名字加人：钉钉花名册 + 名单里老号码对应的 userid
 // 报表导出（V2.241）——run/config 用 jpSoft，好让 {ok:false} 的路径/口令提示原样透传给用户
 export const getRptExportOrgs = (year, period) => j(`/api/rptexport/orgs?year=${year}&period=${period}`)
 export const getRptExportConfig = () => j('/api/rptexport/config')

@@ -562,6 +562,22 @@ def _fxrate_effective_confs():
     return dt, sm, ch
 
 
+def _fxrate_dt_names(mobiles, userids):
+    """钉钉收件人的名字（只供页面把名单显示成人名，发送不看它）：键＝手机号 或 `u:<userid>`（同门户取件机监控的写法）。
+    先取本页保存时记下的，没有再借门户那张全局「收件人→名字」表。认不出的不在返回里。"""
+    try:
+        own = (db.get_setting("fx_notify_cfg", None) or {}).get("dt_names") or {}
+        shared = db.get_setting("recipient_names", {}) or {}
+    except Exception:
+        own, shared = {}, {}
+    out = {}
+    for k in list(mobiles or []) + ["u:" + str(x) for x in (userids or [])]:
+        n = own.get(k) or shared.get(k)
+        if n:
+            out[k] = n
+    return out
+
+
 def _fxrate_send_report_notify(rep):
     """按一份跑批结果 rep 发通知（钉钉机器人 + 邮件），收件人/开关用 DB 覆盖后的值。"""
     subj, html = _fxrate_mail_for(rep)
@@ -698,8 +714,9 @@ def fxrate_notify_config(request: Request):
     if not _require_perm(request, "fxrate_post"):
         return JSONResponse({"ok": False, "msg": "无「汇率录入·写入金蝶」权限"}, status_code=403)
     dt, sm, ch = _fxrate_effective_confs()
+    mobiles, userids = (dt or {}).get("mobiles", []), (dt or {}).get("userids", [])
     return {"ok": True,
-            "dt_mobiles": (dt or {}).get("mobiles", []), "dt_userids": (dt or {}).get("userids", []),
+            "dt_mobiles": mobiles, "dt_userids": userids, "dt_names": _fxrate_dt_names(mobiles, userids),
             "mail_to": (sm or {}).get("to", []), "mail_cc": (sm or {}).get("cc", []),
             "mail_bcc": (sm or {}).get("bcc", []),
             "dingtalk_on": ch["dingtalk"], "email_on": ch["email"],
@@ -721,7 +738,14 @@ def fxrate_notify_config_save(body: dict, request: Request):
     if str(body.get("passcode") or "").strip() != pc:
         db.audit(u["name"], "汇率录入-通知设置", "口令错误，未保存")
         return JSONResponse({"ok": False, "msg": "口令错误，未保存"}, status_code=403)
-    cfg = {"dt_mobiles": _aslist(body.get("dt_mobiles")), "dt_userids": _aslist(body.get("dt_userids")),
+    dt_mobiles, dt_userids = _aslist(body.get("dt_mobiles")), _aslist(body.get("dt_userids"))
+    bad = [m for m in dt_mobiles if not (m.isdigit() and len(m) == 11)]
+    if bad:
+        return {"ok": False, "msg": "手机号要 11 位数字：" + "、".join(bad) + "，未保存"}
+    keys = set(dt_mobiles) | {"u:" + x for x in dt_userids}          # 名字只留当前名单里的人
+    raw_names = body.get("dt_names") if isinstance(body.get("dt_names"), dict) else {}
+    dt_names = {str(k): str(v).strip()[:40] for k, v in raw_names.items() if str(k) in keys and str(v).strip()}
+    cfg = {"dt_mobiles": dt_mobiles, "dt_userids": dt_userids, "dt_names": dt_names,
            "mail_to": _aslist(body.get("mail_to")), "mail_cc": _aslist(body.get("mail_cc")),
            "mail_bcc": _aslist(body.get("mail_bcc")),
            "dingtalk_on": bool(body.get("dingtalk_on", True)), "email_on": bool(body.get("email_on", True))}
@@ -729,6 +753,19 @@ def fxrate_notify_config_save(body: dict, request: Request):
     db.audit(u["name"], "汇率录入-通知设置", "更新收发件人/开关",
              f"钉钉{len(cfg['dt_mobiles'])+len(cfg['dt_userids'])}人/邮件 收{len(cfg['mail_to'])} 抄{len(cfg['mail_cc'])} 密{len(cfg['mail_bcc'])}")
     return {"ok": True, "msg": "已保存", "cfg": cfg}
+
+
+@router.get("/api/fxrate/notify-roster")
+def fxrate_notify_roster(request: Request, fresh: int = 0):
+    """通知设置·搜名字加人用的钉钉花名册 [{userid,name,title,dept}]（不含手机号；和门户取件机监控共用 30 分钟缓存）。
+    顺带把名单里现有的手机号认成 userid（mobile_uid），页面好把老号码显示成人名。需 fxrate_post。"""
+    if not _require_perm(request, "fxrate_post"):
+        return JSONResponse({"ok": False, "msg": "无「汇率录入·写入金蝶」权限"}, status_code=403)
+    r = notifier.dt_roster_cached(fresh=bool(fresh))
+    if not r.get("ok"):
+        return r
+    dt, _sm, _ch = _fxrate_effective_confs()
+    return {**r, "mobile_uid": notifier.dt_userids_by_mobiles((dt or {}).get("mobiles", []))}
 
 
 @router.post("/api/fxrate/notify-test")

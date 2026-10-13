@@ -2,8 +2,9 @@
 // 汇率录入·前端页（P3）。两页签：①本期建汇率（四步：选期间+组织 → 取人行数 → 核对预览+闸门 → 写入结果）
 // ②历史复核（金蝶已建对回人行，偏差+已知豁免）。样式取自已签样机 v0.1（fx- 前缀作用域，复用工作台 CSS 变量）。
 // 写入走「只提交、不审核」（确认书 v1.1 D11）；组织可选下拉、默认 101（D9）；四道机器闸门（D17）。
-import React, { useEffect, useState } from 'react'
-import { getFxOrgs, getFxStatus, autorunFxRate, getFxAutorunConfig, toggleFxAutorun, previewFxRate, postFxRate, getFxPosted, unpostFxRate, fxRateHistory, getFxNotifyConfig, saveFxNotifyConfig, testFxNotify } from '../api.js'
+import React, { useEffect, useMemo, useState } from 'react'
+import PersonSearchAdd from '../components/PersonSearchAdd.jsx'
+import { getFxOrgs, getFxStatus, autorunFxRate, getFxAutorunConfig, toggleFxAutorun, previewFxRate, postFxRate, getFxPosted, unpostFxRate, fxRateHistory, getFxNotifyConfig, saveFxNotifyConfig, testFxNotify, getFxNotifyRoster } from '../api.js'
 
 const YEARS = [2026, 2025]
 const MONTHS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -58,7 +59,11 @@ export default function FxRate({ user }) {
   const [arCfg, setArCfg] = useState(null)   // 自动跑批配置/状态（是否启用/下次检查时点）
   // 通知设置
   const [nCfg, setNCfg] = useState(null)     // 后端读回的当前配置 + 密钥状态
-  const [nForm, setNForm] = useState(null)   // 编辑中的表单（收发件人用多行文本）
+  const [nForm, setNForm] = useState(null)   // 编辑中的表单（钉钉收件人 dt_list=[{m,n}]，m＝手机号 或 u:<钉钉userid>；邮件用多行文本）
+  const [nSnap, setNSnap] = useState('')     // 读回时的表单快照——和当前不一样＝有改动没保存
+  const [roster, setRoster] = useState(null) // 钉钉花名册 [{userid,name,title,dept}]；null=还没拉到
+  const [rosterErr, setRosterErr] = useState('')
+  const [mobUid, setMobUid] = useState({})   // 名单里老手机号 → 钉钉 userid（只为把号码显示成人名）
   const [nPass, setNPass] = useState('')     // 改动口令
   const [nBusy, setNBusy] = useState('')
   const [nMsg, setNMsg] = useState('')
@@ -70,6 +75,17 @@ export default function FxRate({ user }) {
   useEffect(() => { if (tab === 'status' && org) loadStatus() }, [tab, org, year])
   // 进「通知设置」拉当前收发件人 + 密钥状态
   useEffect(() => { if (tab === 'notify' && canPost && !nForm) loadNotify() }, [tab])
+  // 同时拉一次钉钉花名册（后端缓存 30 分钟）：搜名字加人用，也用来把名单里的号码 / userid 认成人名
+  useEffect(() => {
+    if (tab !== 'notify' || !canPost || roster !== null) return
+    getFxNotifyRoster().then(r => {
+      if (r && r.ok) { setRoster(r.people || []); setMobUid(r.mobile_uid || {}) }
+      else { setRoster([]); setRosterErr((r && r.msg) || '拉通讯录失败') }
+    }).catch(e => { setRoster([]); setRosterErr(String(e.message || e)) })
+  }, [tab])
+  const rosterName = useMemo(() => Object.fromEntries((roster || []).map(p => [p.userid, p.name || ''])), [roster])
+  const dtUid = m => m.startsWith('u:') ? m.slice(2) : (mobUid[m] || '')
+  const dtName = e => e.n || rosterName[dtUid(e.m)] || ''      // 存过的名字优先，没有再去花名册里认
 
   const orgName = c => (orgs.find(o => o.code === c) || {}).name || c
   const gates = pv && pv.gates ? pv.gates.gates : []
@@ -94,24 +110,44 @@ export default function FxRate({ user }) {
     setPostRes(r); setStep(4)
   }
   const _lines = arr => (arr || []).join('\n')
-  const loadNotify = async () => {
-    setNMsg('')
+  const loadNotify = async (keepMsg) => {     // keepMsg：保存后重读时别把「已保存」那句冲掉
+    if (keepMsg !== true) setNMsg('')
     const r = await getFxNotifyConfig().catch(e => ({ ok: false, msg: String(e.message || e) }))
     if (!r || !r.ok) { setNMsg('✗ ' + ((r && r.msg) || '读取失败')); return }
     setNCfg(r)
-    setNForm({
-      dt_mobiles: _lines(r.dt_mobiles), dt_userids: _lines(r.dt_userids),
+    const nm = r.dt_names || {}
+    const form = {
+      dt_list: [...(r.dt_mobiles || []).map(m => ({ m, n: nm[m] || '' })),
+        ...(r.dt_userids || []).map(u => ({ m: 'u:' + u, n: nm['u:' + u] || '' }))],
       mail_to: _lines(r.mail_to), mail_cc: _lines(r.mail_cc), mail_bcc: _lines(r.mail_bcc),
       dingtalk_on: r.dingtalk_on !== false, email_on: r.email_on !== false,
-    })
+    }
+    setNForm(form); setNSnap(JSON.stringify(form))
   }
+  const nDirty = !!nForm && JSON.stringify(nForm) !== nSnap
+  const addDtPerson = p => {          // 搜名字选中：存钉钉 userid，发的时候直接按 userid 发，不用查手机号
+    const tok = 'u:' + p.userid
+    if (nForm.dt_list.some(e => e.m === tok || dtUid(e.m) === p.userid)) { setNMsg((p.name || '此人') + ' 已经在名单里了'); return }
+    setNForm({ ...nForm, dt_list: [...nForm.dt_list, { m: tok, n: p.name || '' }] }); setNMsg('')
+  }
+  const addDtNumber = mo => {         // 手打号码：通讯录里搜不到的人（外部 / 没进钉钉组织）
+    if (nForm.dt_list.some(e => e.m === mo)) { setNMsg('这个号码已经在名单里了'); return }
+    setNForm({ ...nForm, dt_list: [...nForm.dt_list, { m: mo, n: '' }] }); setNMsg('')
+  }
+  const removeDt = m => setNForm({ ...nForm, dt_list: nForm.dt_list.filter(e => e.m !== m) })
   const saveNotify = async () => {
     if (!nForm || !nPass) return
     setNBusy('save'); setNMsg('')
-    const r = await saveFxNotifyConfig({ ...nForm, passcode: nPass })
-      .catch(e => ({ ok: false, msg: String(e.message || e) }))
+    const { dt_list, ...rest } = nForm
+    const dt_names = {}
+    dt_list.forEach(e => { const n = dtName(e); if (n) dt_names[e.m] = n })
+    const r = await saveFxNotifyConfig({
+      ...rest, passcode: nPass, dt_names,
+      dt_mobiles: dt_list.filter(e => !e.m.startsWith('u:')).map(e => e.m),
+      dt_userids: dt_list.filter(e => e.m.startsWith('u:')).map(e => e.m.slice(2)),
+    }).catch(e => ({ ok: false, msg: String(e.message || e) }))
     setNBusy('')
-    if (r && r.ok) { setNMsg('✓ 已保存'); setNPass(''); loadNotify() }
+    if (r && r.ok) { setNMsg('✓ 已保存'); setNPass(''); loadNotify(true) }
     else setNMsg('✗ ' + ((r && r.msg) || '保存失败'))
   }
   const testNotify = async () => {
@@ -470,11 +506,25 @@ export default function FxRate({ user }) {
 
           <div className="fx-ncard">
             <label className="fx-nhead"><input type="checkbox" checked={nForm.dingtalk_on} onChange={e => setNForm({ ...nForm, dingtalk_on: e.target.checked })} /> 钉钉通知</label>
-            <div className="fx-ngrid" style={{ opacity: nForm.dingtalk_on ? 1 : .5 }}>
-              <div className="fx-field"><label>钉钉手机号（每行一个）</label>
-                <textarea className="fx-ta" disabled={!nForm.dingtalk_on} value={nForm.dt_mobiles} onChange={e => setNForm({ ...nForm, dt_mobiles: e.target.value })} placeholder="13800000000" /></div>
-              <div className="fx-field"><label>钉钉 userid（可选，每行一个）</label>
-                <textarea className="fx-ta" disabled={!nForm.dingtalk_on} value={nForm.dt_userids} onChange={e => setNForm({ ...nForm, dt_userids: e.target.value })} placeholder="留空即用手机号自动解析" /></div>
+            <div className="fx-field" style={{ opacity: nForm.dingtalk_on ? 1 : .5, transition: 'opacity .15s' }}>
+              <label>发给谁（{nForm.dt_list.length} 人）</label>
+              <div className="fx-chips">
+                {nForm.dt_list.length === 0 && <span className="fx-chip-empty">还没有人——在下面搜名字加</span>}
+                {nForm.dt_list.map(e => {
+                  const isUid = e.m.startsWith('u:'), name = dtName(e)
+                  const show = name || (isUid ? (roster === null ? '认名字中…' : '钉钉联系人') : e.m)
+                  return (
+                    <span key={e.m} className={'fx-chip' + (name || isUid ? '' : ' num')} title={isUid ? show : (name ? name + ' · ' + e.m : e.m + '（通讯录里没认出这个号码）')}>
+                      {show}
+                      {nForm.dingtalk_on && <span className="fx-chip-x" title="移出名单" onClick={() => removeDt(e.m)}>×</span>}
+                    </span>
+                  )
+                })}
+              </div>
+              <PersonSearchAdd cls="fx" inputClass="selctl fx-srinp" disabled={!nForm.dingtalk_on}
+                roster={roster} rosterErr={rosterErr} onPick={addDtPerson} onAddNumber={addDtNumber} />
+              <div className="fx-hint">打名字（或岗位、部门）搜钉钉通讯录，点一下就加进来；通讯录里没有的人填 11 位手机号。改完要点下面的「保存收发件人」才生效。</div>
+              {rosterErr && <div className="fx-hint" style={{ color: 'var(--red)' }}>通讯录没拉下来：{rosterErr}。已有名单照常发；要加人可以先填 11 位手机号。</div>}
             </div>
           </div>
 
@@ -495,6 +545,7 @@ export default function FxRate({ user }) {
             <input type="password" className="selctl" style={{ width: 180, height: 30, padding: '0 10px' }} value={nPass} onChange={e => setNPass(e.target.value)} placeholder="改收发件人需口令" />
             <button className="btn-pri" disabled={!!nBusy || !nPass} onClick={saveNotify}>{nBusy === 'save' ? '保存中…' : '保存收发件人'}</button>
             <button className="btn-sec" disabled={!!nBusy} onClick={testNotify}>{nBusy === 'test' ? '发送中…' : '发送测试通知'}</button>
+            {nDirty && <span style={{ fontSize: 12, color: 'var(--amber)' }}>有改动还没保存——现在点测试，发的是上次保存的名单</span>}
           </div>
           {nMsg && <div className={'fx-note' + (nMsg.startsWith('✗') ? ' danger' : '')}>{nMsg}</div>}
         </>}
@@ -635,5 +686,18 @@ function FxStyle() {
 .fx-wrap .fx-ta{border:1px solid var(--line-strong);border-radius:8px;background:var(--bg);color:var(--ink);font-size:12.5px;font-family:inherit;padding:8px 10px;resize:vertical;min-height:62px;line-height:1.7}
 .fx-wrap .fx-ta:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
 .fx-wrap .fx-ta:disabled{background:var(--bg-sub);cursor:not-allowed}
+.fx-wrap .fx-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:26px}
+.fx-wrap .fx-chip{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;padding:3px 5px 3px 11px;border-radius:14px;background:var(--accent-soft);border:1px solid var(--accent-soft);color:var(--ink)}
+.fx-wrap .fx-chip.num{background:var(--bg-rail);border-color:var(--line-strong);color:var(--ink-2);font-variant-numeric:tabular-nums}
+.fx-wrap .fx-chip-x{cursor:pointer;color:var(--ink-3);font-weight:700;line-height:1;padding:2px 5px;border-radius:9px}
+.fx-wrap .fx-chip-x:hover{background:var(--red-bg);color:var(--red)}
+.fx-wrap .fx-chip-empty{font-size:12px;color:var(--ink-3)}
+.fx-wrap .fx-hint{font-size:11.5px;color:var(--ink-3);line-height:1.6}
+.fx-wrap .fx-srwrap{position:relative;align-self:flex-start}
+.fx-wrap .fx-srinp{width:280px;height:30px;padding:0 10px}
+.fx-wrap .fx-sr{position:absolute;z-index:30;top:34px;left:0;width:340px;max-height:240px;overflow-y:auto;background:var(--bg);border:1px solid var(--line-strong);border-radius:9px;padding:4px;box-shadow:0 12px 30px rgba(0,0,0,.18)}
+.fx-wrap .fx-sr-item{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:7px;cursor:pointer;font-size:12.5px;color:var(--ink)}
+.fx-wrap .fx-sr-item:hover{background:var(--accent-soft)}
+.fx-wrap .fx-sr-msg{padding:8px 9px;color:var(--ink-3);font-size:12px;line-height:1.6}
 `}</style>
 }
