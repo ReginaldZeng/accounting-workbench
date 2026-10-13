@@ -3,16 +3,17 @@
 [Change Log]
 Date: 2026-10-13
 Author: Claude Opus 5.5
-Version: 样机 v0.2（未开发）
+Version: 样机 v0.3（未开发）
 Description: 物流对账 · 付款做账总表重排样机。
   用户 2026-10-13 看付款做账总表：「感觉这个页面不太对。我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序，但是现在付款就开始做了好像」
   → V2.934 先把「账单没复核不能做账」这道闸补上（只加了一个状态），没动页面 →「有样机吗」。
   现在的总表是 承运商 × 三个主体，每格只有 计提 / 付款 / 做账，看不出一张请款单走到了四步里的哪一步、卡在哪。
   样机改成一张请款单一行，从左到右就是那四步：① 账单复核 ② 收票 ③ 付款 ④ 做账；前一步没过，后面不做，卡在哪一步就标哪一步。
   纯静态，数据照 2026-08 的真数（2026-10-13 取）。顶部深色条可以切「收票算到哪一步」，看两种口径下各卡住几张。
-  v0.2（用户看 v0.1：「第一步，是不是可以按主体复核登记？就是可能这个主体没问题了，先放行这种」「第四步，能不能放出来收款单号呢，以及制单人」）：
-    ① 整月登记复核，或者这个主体在复核台第①步标了「本主体通过」，都算过（这条规则 V2.935 已经做进系统）；
-    ④ 写出金蝶付款单号、金蝶凭证上的制单人、凭证审没审核，以及工作台里是谁点的。
+  v0.2（「第一步，是不是可以按主体复核登记」「第四步，能不能放出来收款单号呢，以及制单人」）：① 整月登记复核，或这个主体标了「本主体通过」，都算过（V2.935 已做进系统）。
+  v0.3（「注意字体上下居中，第二个灰色字体应该是专票已审核，普票已审核，发票后补已确认，第三个应该是放付款单号，第四个就是制单人，期间-凭证号」）：
+    每格两行——上面一句结论、下面一行灰字，图标和字上下居中；灰字 ② 写票种＋审核状态（专票已审核 / 普票待审核 / 发票后补已确认），
+    ③ 写金蝶付款单号，④ 写制单人 · 期间-凭证号。
 -->
 <html lang="zh-CN">
 <head>
@@ -29,7 +30,7 @@ Description: 物流对账 · 付款做账总表重排样机。
 }
 *{box-sizing:border-box}
 html,body{margin:0}
-body{font:13px/1.55 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);background:var(--bg);-webkit-font-smoothing:antialiased}
+body{font:13px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);background:var(--bg);-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .dim{color:var(--ink3)}
@@ -59,29 +60,32 @@ button{font:inherit;color:inherit}
 
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
 table{width:100%;border-collapse:collapse}
-th,td{padding:8px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line2)}
+th,td{padding:9px 10px;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line2)}
 thead th{font-size:12px;font-weight:600;color:var(--ink2);background:#FAFBFC;border-bottom:1px solid var(--line);white-space:nowrap}
-thead th .no{display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:var(--accent-bg);color:var(--accent);font-weight:700;margin-right:5px;font-size:11.5px}
+thead th .hd{display:inline-flex;align-items:center;gap:6px}
+thead th .no{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--accent-bg);color:var(--accent);font-weight:700;font-size:11.5px;line-height:1}
 tr.grp td{background:#F3F6F8;font-weight:600;padding:6px 10px;border-bottom:1px solid var(--line)}
 tr.grp .cnt{font-weight:400;color:var(--ink3);margin-left:8px;font-size:12px}
 td.num{text-align:right;white-space:nowrap}
 tbody tr:last-child td{border-bottom:0}
-.c{display:flex;gap:7px;align-items:flex-start}
-.c .ic{flex:none;width:18px;height:18px;line-height:18px;border-radius:50%;text-align:center;font-size:11.5px;font-weight:700;margin-top:1px}
-.c .tx{min-width:0}
-.c .tx small{display:block;color:var(--ink3);font-size:11.5px;white-space:nowrap}
+/* 每格：图标 + 两行字(上面结论、下面灰字)，图标和这两行字整体上下居中 */
+.c{display:flex;gap:8px;align-items:center;min-height:36px}
+.c .ic{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;font-size:12px;font-weight:700;line-height:1}
+.c .tx{min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px}
+.c .tx .m{display:flex;align-items:center;gap:6px;line-height:1.4;white-space:nowrap}
+.c .tx .g{color:var(--ink3);font-size:11.5px;line-height:1.4;white-space:nowrap}
 .c.ok .ic{background:var(--ok-bg);color:var(--ok)}
-.c.stop .ic{background:var(--warn-bg);color:var(--warn)} .c.stop .tx b{color:var(--warn)}
-.c.wait .ic{background:var(--neu-bg);color:var(--ink3)} .c.wait .tx{color:var(--ink3)}
-.c.go .ic{background:var(--ok);color:#fff}
+.c.stop .ic{background:var(--warn-bg);color:var(--warn)} .c.stop .tx .m{color:var(--warn);font-weight:600}
+.c.wait .ic{background:var(--neu-bg);color:var(--ink3)} .c.wait .tx .m{color:var(--ink3)}
+.c.go .ic{background:var(--ok);color:#fff} .c.go .tx .m{font-weight:600;color:var(--ok)}
 td.stopcell{background:#FFFAF0}
-.tag{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11.5px;white-space:nowrap}
-.tag.warn{background:var(--warn-bg);color:var(--warn)} .tag.ok{background:var(--ok-bg);color:var(--ok)} .tag.done{background:var(--accent-bg);color:var(--accent)}
+.tag{display:inline-flex;align-items:center;padding:0 7px;height:18px;border-radius:999px;font-size:11.5px;font-weight:400;white-space:nowrap}
+.tag.warn{background:var(--warn-bg);color:var(--warn)} .tag.ok{background:var(--ok-bg);color:var(--ok)}
 .btn{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:4px 11px;cursor:pointer;font-size:12px;white-space:nowrap}
 .btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-.lnk{border:0;background:none;padding:0;color:var(--accent);text-decoration:underline;text-underline-offset:3px;cursor:pointer;font-size:12px}
+.lnk{border:0;background:none;padding:0;color:var(--accent);text-decoration:underline;text-underline-offset:3px;cursor:pointer;font-size:11.5px;line-height:1.4}
 .foot{margin-top:12px;font-size:12px;color:var(--ink3);line-height:1.8}
-@media (max-width:900px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))} .card{overflow-x:auto} table{min-width:900px}}
+@media (max-width:900px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))} .card{overflow-x:auto} table{min-width:960px}}
 </style>
 </head>
 <body>
@@ -110,8 +114,9 @@ td.stopcell{background:#FFFAF0}
   <div class="card">
     <table>
       <thead><tr>
-        <th style="width:150px">主体</th><th style="width:110px;text-align:right">请款金额</th>
-        <th><span class="no">1</span>账单复核</th><th><span class="no">2</span>收票</th><th><span class="no">3</span>付款</th><th><span class="no">4</span>做账</th>
+        <th style="width:130px">主体</th><th style="width:110px;text-align:right">请款金额</th>
+        <th><span class="hd"><span class="no">1</span>账单复核</span></th><th><span class="hd"><span class="no">2</span>收票</span></th>
+        <th><span class="hd"><span class="no">3</span>付款</span></th><th><span class="hd"><span class="no">4</span>做账</span></th>
         <th style="width:96px"></th>
       </tr></thead>
       <tbody id="tb"></tbody>
@@ -121,40 +126,42 @@ td.stopcell{background:#FFFAF0}
 </div>
 
 <script>
-// 2026-08 真数(10-13 取)：rev＝整月登记复核的日期；sjok＝这个主体在复核台第①步标「本主体通过」的日期和人；inv＝[张数, 发票管家状态]，null 没票，'later' 发票后补；
-// paid＝金蝶付款单日期；fkd＝金蝶付款单号(空＝付款单还是暂存、没编号)；vno/at/by＝工作台做的凭证号、哪天、谁点的；maker＝金蝶凭证上的制单人；vst＝凭证状态 C 已审核 / B 已提交。
+// 2026-08 真数(10-13 取)：rev＝整月登记复核的日期；sjok＝这个主体在复核台第①步标「本主体通过」的日期和人；
+// invs＝票夹里的票 [[票种, 发票管家状态 approved/pending/draft]…]；later＝确认过发票后补；
+// paid＝金蝶付款单日期；fkd＝金蝶付款单号(空＝付款单还是暂存、没编号)；vno/at/by＝工作台做的凭证号、哪天、谁点的；
+// maker＝金蝶凭证上的制单人；vst＝凭证状态 C 已审核 / B 已提交；per＝凭证所在期间。
 const D = [
-  {"ca": "极鲜达", "sj": "孝感星期九", "amt": 99860.0, "rev": "", "sjok": "10-01 曾禹锡", "inv": [2, "approved"], "paid": "", "fkd": "", "vno": "", "by": "", "at": "", "maker": "", "vst": ""},
-  {"ca": "极鲜达", "sj": "深圳星期零", "amt": 75093.68, "rev": "", "sjok": "10-01 曾禹锡", "inv": [1, "draft"], "paid": "", "fkd": "", "vno": "", "by": "", "at": "", "maker": "", "vst": ""},
-  {"ca": "极鲜达", "sj": "深圳星期九", "amt": 5628.85, "rev": "", "sjok": "10-01 曾禹锡", "inv": [1, "pending"], "paid": "10-08", "fkd": "FKD00008385", "vno": "记-1", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "B"},
-  {"ca": "恒茂", "sj": "孝感星期九", "amt": 78733.53, "rev": "10-13", "sjok": "", "inv": [1, "pending"], "paid": "", "fkd": "", "vno": "", "by": "", "at": "", "maker": "", "vst": ""},
-  {"ca": "天鹰物流", "sj": "孝感星期九", "amt": 42441.29, "rev": "", "sjok": "", "inv": null, "paid": "", "fkd": "", "vno": "", "by": "", "at": "", "maker": "", "vst": ""},
-  {"ca": "天鹰物流", "sj": "深圳星期零", "amt": 12437.18, "rev": "", "sjok": "", "inv": null, "paid": "", "fkd": "", "vno": "", "by": "", "at": "", "maker": "", "vst": ""},
-  {"ca": "迅鸽", "sj": "深圳星期零", "amt": 29746.39, "rev": "", "sjok": "", "inv": [1, "pending"], "paid": "10-10", "fkd": "", "vno": "", "by": "", "at": "", "maker": "", "vst": ""},
-  {"ca": "迅鸽", "sj": "孝感星期九", "amt": 3151.5, "rev": "", "sjok": "", "inv": [1, "approved"], "paid": "10-10", "fkd": "", "vno": "", "by": "", "at": "", "maker": "", "vst": ""},
-  {"ca": "迅鸽", "sj": "孝感星期九", "amt": 744.0, "rev": "", "sjok": "", "inv": [1, "pending"], "paid": "10-10", "fkd": "FKD00008382", "vno": "记-12", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "B"},
-  {"ca": "迅鸽", "sj": "深圳星期零", "amt": 309.24, "rev": "", "sjok": "", "inv": [1, "draft"], "paid": "10-10", "fkd": "FKD00008387", "vno": "记-4", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "B"},
-  {"ca": "链盟", "sj": "孝感星期九", "amt": 446295.0, "rev": "10-09", "sjok": "", "inv": [2, "pending"], "paid": "09-28", "fkd": "FKD00008390", "vno": "记-193", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "链盟", "sj": "深圳星期零", "amt": 19820.0, "rev": "10-09", "sjok": "", "inv": [1, "pending"], "paid": "09-28", "fkd": "FKD00008386", "vno": "记-355", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "链盟", "sj": "深圳星期九", "amt": 7100.0, "rev": "10-09", "sjok": "", "inv": [1, "draft"], "paid": "09-28", "fkd": "FKD00008383", "vno": "记-13", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "易风达", "sj": "孝感星期九", "amt": 87168.0, "rev": "10-06", "sjok": "", "inv": [4, "draft"], "paid": "09-28", "fkd": "FKD00008271", "vno": "记-264", "by": "曾禹锡", "at": "2026-10-02", "maker": "系统操作员", "vst": "C"},
-  {"ca": "易风达", "sj": "深圳星期零", "amt": 800.0, "rev": "10-06", "sjok": "", "inv": [1, "pending"], "paid": "09-28", "fkd": "FKD00008392", "vno": "记-357", "by": "曾禹锡", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "顺丰冷运", "sj": "深圳星期零", "amt": 17630.95, "rev": "10-04", "sjok": "", "inv": [1, "pending"], "paid": "09-29", "fkd": "FKD00008355", "vno": "记-330", "by": "曾禹锡", "at": "2026-10-10", "maker": "系统操作员", "vst": "C"},
-  {"ca": "顺丰冷运", "sj": "深圳星期九", "amt": 622.0, "rev": "10-04", "sjok": "", "inv": [1, "pending"], "paid": "09-29", "fkd": "FKD00008357", "vno": "记-14", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "丰源", "sj": "深圳星期零", "amt": 4117.46, "rev": "", "sjok": "", "inv": [1, "pending"], "paid": "09-30", "fkd": "FKD00008395", "vno": "记-360", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "丰源", "sj": "孝感星期九", "amt": 2288.0, "rev": "", "sjok": "", "inv": [1, "pending"], "paid": "09-30", "fkd": "FKD00008388", "vno": "记-158", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "丰源", "sj": "深圳星期九", "amt": 918.93, "rev": "", "sjok": "", "inv": [1, "pending"], "paid": "09-30", "fkd": "FKD00008401", "vno": "记-12", "by": "曾禹锡", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "跨越物流", "sj": "深圳星期零", "amt": 2675.03, "rev": "10-05", "sjok": "", "inv": [1, "pending"], "paid": "09-28", "fkd": "FKD00008270", "vno": "记-261", "by": "曾禹锡", "at": "2026-10-02", "maker": "系统操作员", "vst": "C"},
-  {"ca": "跨越物流", "sj": "孝感星期九", "amt": 644.15, "rev": "10-05", "sjok": "", "inv": [1, "pending"], "paid": "09-28", "fkd": "FKD00008391", "vno": "记-475", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "中通快运", "sj": "深圳星期零", "amt": 1555.7, "rev": "", "sjok": "", "inv": [1, "pending"], "paid": "09-28", "fkd": "FKD00008393", "vno": "记-358", "by": "曾禹锡", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "禾享", "sj": "深圳星期零", "amt": 1322.0, "rev": "10-06", "sjok": "", "inv": "later", "paid": "09-28", "fkd": "FKD00008268", "vno": "记-391", "by": "曾禹锡", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "路凯（13%）", "sj": "深圳星期零", "amt": 1002.09, "rev": "", "sjok": "", "inv": [1, "draft"], "paid": "09-28", "fkd": "FKD00008407", "vno": "记-399", "by": "系统自动", "at": "2026-10-12", "maker": "系统操作员", "vst": "C"},
-  {"ca": "顺丰速运", "sj": "深圳星期零", "amt": 960.0, "rev": "10-08", "sjok": "", "inv": [1, "draft"], "paid": "09-28", "fkd": "FKD00008269", "vno": "记-260", "by": "曾禹锡(实测)", "at": "2026-10-02", "maker": "系统操作员", "vst": "C"}
+  {"ca": "极鲜达", "sj": "孝感星期九", "amt": 99860.0, "rev": "", "sjok": "10-01 曾禹锡", "invs": [["专票", "approved"], ["专票", "approved"]], "later": false, "paid": "", "fkd": "", "vno": "", "at": "", "by": "", "maker": "", "vst": "", "per": ""},
+  {"ca": "极鲜达", "sj": "深圳星期零", "amt": 75093.68, "rev": "", "sjok": "10-01 曾禹锡", "invs": [["专票", "draft"]], "later": false, "paid": "", "fkd": "", "vno": "", "at": "", "by": "", "maker": "", "vst": "", "per": ""},
+  {"ca": "极鲜达", "sj": "深圳星期九", "amt": 5628.85, "rev": "", "sjok": "10-01 曾禹锡", "invs": [["专票", "pending"]], "later": false, "paid": "10-08", "fkd": "FKD00008385", "vno": "记-1", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "B", "per": "2026-10"},
+  {"ca": "恒茂", "sj": "孝感星期九", "amt": 78733.53, "rev": "10-13", "sjok": "", "invs": [["普票", "pending"]], "later": false, "paid": "", "fkd": "", "vno": "", "at": "", "by": "", "maker": "", "vst": "", "per": ""},
+  {"ca": "天鹰物流", "sj": "孝感星期九", "amt": 42441.29, "rev": "", "sjok": "", "invs": [], "later": false, "paid": "", "fkd": "", "vno": "", "at": "", "by": "", "maker": "", "vst": "", "per": ""},
+  {"ca": "天鹰物流", "sj": "深圳星期零", "amt": 12437.18, "rev": "", "sjok": "", "invs": [], "later": false, "paid": "", "fkd": "", "vno": "", "at": "", "by": "", "maker": "", "vst": "", "per": ""},
+  {"ca": "迅鸽", "sj": "深圳星期零", "amt": 29746.39, "rev": "", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "10-10", "fkd": "", "vno": "", "at": "", "by": "", "maker": "", "vst": "", "per": ""},
+  {"ca": "迅鸽", "sj": "孝感星期九", "amt": 3151.5, "rev": "", "sjok": "", "invs": [["专票", "approved"]], "later": false, "paid": "10-10", "fkd": "", "vno": "", "at": "", "by": "", "maker": "", "vst": "", "per": ""},
+  {"ca": "迅鸽", "sj": "孝感星期九", "amt": 744.0, "rev": "", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "10-10", "fkd": "FKD00008382", "vno": "记-12", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "B", "per": "2026-10"},
+  {"ca": "迅鸽", "sj": "深圳星期零", "amt": 309.24, "rev": "", "sjok": "", "invs": [["专票", "draft"]], "later": false, "paid": "10-10", "fkd": "FKD00008387", "vno": "记-4", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "B", "per": "2026-10"},
+  {"ca": "链盟", "sj": "孝感星期九", "amt": 446295.0, "rev": "10-09", "sjok": "", "invs": [["专票", "pending"], ["专票", "pending"]], "later": false, "paid": "09-28", "fkd": "FKD00008390", "vno": "记-193", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "链盟", "sj": "深圳星期零", "amt": 19820.0, "rev": "10-09", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-28", "fkd": "FKD00008386", "vno": "记-355", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "链盟", "sj": "深圳星期九", "amt": 7100.0, "rev": "10-09", "sjok": "", "invs": [["专票", "draft"]], "later": false, "paid": "09-28", "fkd": "FKD00008383", "vno": "记-13", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "易风达", "sj": "孝感星期九", "amt": 87168.0, "rev": "10-06", "sjok": "", "invs": [["专票", "draft"], ["专票", "draft"], ["专票", "draft"], ["专票", "draft"]], "later": false, "paid": "09-28", "fkd": "FKD00008271", "vno": "记-264", "at": "10-02", "by": "曾禹锡", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "易风达", "sj": "深圳星期零", "amt": 800.0, "rev": "10-06", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-28", "fkd": "FKD00008392", "vno": "记-357", "at": "10-12", "by": "曾禹锡", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "顺丰冷运", "sj": "深圳星期零", "amt": 17630.95, "rev": "10-04", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-29", "fkd": "FKD00008355", "vno": "记-330", "at": "10-10", "by": "曾禹锡", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "顺丰冷运", "sj": "深圳星期九", "amt": 622.0, "rev": "10-04", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-29", "fkd": "FKD00008357", "vno": "记-14", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "丰源", "sj": "深圳星期零", "amt": 4117.46, "rev": "", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-30", "fkd": "FKD00008395", "vno": "记-360", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "丰源", "sj": "孝感星期九", "amt": 2288.0, "rev": "", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-30", "fkd": "FKD00008388", "vno": "记-158", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "丰源", "sj": "深圳星期九", "amt": 918.93, "rev": "", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-30", "fkd": "FKD00008401", "vno": "记-12", "at": "10-12", "by": "曾禹锡", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "跨越物流", "sj": "深圳星期零", "amt": 2675.03, "rev": "10-05", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-28", "fkd": "FKD00008270", "vno": "记-261", "at": "10-02", "by": "曾禹锡", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "跨越物流", "sj": "孝感星期九", "amt": 644.15, "rev": "10-05", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-28", "fkd": "FKD00008391", "vno": "记-475", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "中通快运", "sj": "深圳星期零", "amt": 1555.7, "rev": "", "sjok": "", "invs": [["专票", "pending"]], "later": false, "paid": "09-28", "fkd": "FKD00008393", "vno": "记-358", "at": "10-12", "by": "曾禹锡", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "禾享", "sj": "深圳星期零", "amt": 1322.0, "rev": "10-06", "sjok": "", "invs": [], "later": true, "paid": "09-28", "fkd": "FKD00008268", "vno": "记-391", "at": "10-12", "by": "曾禹锡", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "路凯（13%）", "sj": "深圳星期零", "amt": 1002.09, "rev": "", "sjok": "", "invs": [["专票", "draft"]], "later": false, "paid": "09-28", "fkd": "FKD00008407", "vno": "记-399", "at": "10-12", "by": "系统自动", "maker": "系统操作员", "vst": "C", "per": "2026-09"},
+  {"ca": "顺丰速运", "sj": "深圳星期零", "amt": 960.0, "rev": "10-08", "sjok": "", "invs": [["专票", "draft"]], "later": false, "paid": "09-28", "fkd": "FKD00008269", "vno": "记-260", "at": "10-02", "by": "曾禹锡(实测)", "maker": "系统操作员", "vst": "C", "per": "2026-09"}
 ];
-const INV_CN = {approved:'已审核通过', pending:'待审核', draft:'草稿（还没提交）'};
+const REV_CN = {approved:'已审核', pending:'待审核', draft:'草稿'};
 let invRule = 'has', filt = '';
 const money = n => n.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
-const invOk = r => r.inv === 'later' ? true : !!r.inv && (invRule === 'has' || r.inv[1] === 'approved');
+const invOk = r => r.later ? true : r.invs.length > 0 && (invRule === 'has' || r.invs.every(i => i[1] === 'approved'));
 // 这张单卡在第几步：0＝四步都过了(可以做账)，1/2/3＝卡在那一步，9＝已做账
 function stage(r){
   if (r.vno) return 9;
@@ -163,14 +170,20 @@ function stage(r){
   if (!r.paid) return 3;
   return 0;
 }
-function cell(kind, ic, main, sub){
-  return `<div class="c ${kind}"><span class="ic">${ic}</span><span class="tx">${kind==='stop'?'<b>'+main+'</b>':main}${sub?'<small>'+sub+'</small>':''}</span></div>`;
+// 灰字：票种＋审核状态，如「专票已审核」「专票 2 张待审核」「专票已审核、普票待审核」
+function invText(r){
+  const by = {};
+  for (const [t, st] of r.invs) by[t + '|' + st] = (by[t + '|' + st] || 0) + 1;
+  return Object.entries(by).map(([k, n]) => { const [t, st] = k.split('|'); return t + (n > 1 ? ` ${n} 张` : '') + REV_CN[st]; }).join('、');
+}
+function cell(kind, ic, main, grey, title){
+  return `<div class="c ${kind}"${title ? ` title="${title}"` : ''}><span class="ic">${ic}</span><span class="tx"><span class="m">${main}</span>${grey ? `<span class="g">${grey}</span>` : ''}</span></div>`;
 }
 function render(){
   const rows = D.map(r => ({...r, st:stage(r)}));
   const cnt = k => rows.filter(r => r.st === k);
-  const late = r => !!r.vno && !r.sjok && !!r.rev && r.at.slice(5) < r.rev;      // 先做的账、后来才整月登记
-  const skipped = rows.filter(r => r.vno && ((!r.rev && !r.sjok) || late(r) || (invRule==='approved' && r.inv!=='later' && r.inv && r.inv[1]!=='approved')));
+  const late = r => !!r.vno && !r.sjok && !!r.rev && r.at < r.rev;      // 先做的账、后来才整月登记
+  const skipped = rows.filter(r => r.vno && ((!r.rev && !r.sjok) || late(r) || (invRule==='approved' && !r.later && !r.invs.every(i => i[1]==='approved'))));
   const T = [
     ['0','ok','可以做账','四步都过了', cnt(0)],
     ['1','warn','卡在 ① 账单复核','整月没登记，这个主体也没标通过', cnt(1)],
@@ -191,41 +204,39 @@ function render(){
       const at = n => !done && s === n;                 // 卡在这一步
       const after = n => !done && s !== 0 && s < n;     // 前面有没过的，这一步先不看
       // ① 账单复核
-      const c1 = r.rev ? cell('ok','✓','整月已登记复核', r.rev + (late(r)?' · 是做账以后才登记的':''))
-        : r.sjok ? cell('ok','✓','本主体已通过', r.sjok + ' · 整月还没登记')
+      const c1 = r.rev ? cell('ok','✓','已复核', `整月登记 ${r.rev}` + (late(r) ? ' · 做账以后才登记的' : ''))
+        : r.sjok ? cell('ok','✓','已复核', `本主体通过 ${r.sjok}`)
         : (done ? cell('stop','!','没复核','做账时就没复核') : cell('stop','!','还没复核','<button class="lnk">去账单复核台</button>'));
-      // ② 收票
+      // ② 收票：灰字＝票种＋审核状态
       let c2;
-      if (r.inv === 'later') c2 = cell('ok','✓','发票后补','已登记后补单，先付款、票到了再转待认证');
-      else if (!r.inv) c2 = after(2) ? cell('wait','○','没票') : cell('stop','!','没票','<button class="lnk">去发票管家</button>');
+      if (r.later) c2 = cell('ok','✓','票后到','发票后补已确认');
+      else if (!r.invs.length) c2 = after(2) ? cell('wait','○','没票') : cell('stop','!','没票','<button class="lnk">去发票管家</button>');
       else {
-        const txt = `${r.inv[0]} 张 · ${INV_CN[r.inv[1]]}`;
-        const good = invRule === 'has' || r.inv[1] === 'approved';
-        c2 = good ? cell('ok','✓',txt) : (after(2) ? cell('wait','○',txt) : cell('stop','!',txt, done ? '做账时还没审核通过' : '<button class="lnk">去发票管家审核</button>'));
+        const main = `已收 ${r.invs.length} 张`, grey = invText(r);
+        c2 = invOk(r) ? cell('ok','✓',main,grey) : (after(2) ? cell('wait','○',main,grey) : cell('stop','!',main, grey + (done ? '' : ' · <button class="lnk">去审核</button>')));
       }
-      // ③ 付款
-      const c3 = r.paid ? cell('ok','✓','已付款', r.paid) : (after(3) ? cell('wait','○','没付款') : cell(at(3)?'stop':'wait', at(3)?'…':'○','等付款','金蝶还没有付款单'));
-      const fkd = r.paid ? ('付款单 ' + (r.fkd ? '<span class="mono">' + r.fkd + '</span>' : '还是暂存，没编号')) : '';
-      // ④ 做账
+      // ③ 付款：灰字＝金蝶付款单号
+      const fkd = r.fkd ? `<span class="mono">${r.fkd}</span>` : '付款单还是暂存，没编号';
+      const c3 = r.paid ? cell('ok','✓','已付款', fkd, `付款日期 ${r.paid}`) : (after(3) ? cell('wait','○','没付款') : cell(at(3)?'stop':'wait', at(3)?'…':'○','等付款','金蝶还没有付款单'));
+      // ④ 做账：灰字＝制单人 · 期间-凭证号
       let c4, act = '';
       if (done){
         const who = r.by === '系统自动' ? '系统自动做的' : `工作台里 ${r.by} 点的`;
-        c4 = cell('ok','✓',`已做账 <span class="mono">${r.vno}</span> <span class="tag ${r.vst==='C'?'ok':'warn'}">${r.vst==='C'?'已审核':'已提交 · 等审核'}</span>`,
-                  `${fkd}</small><small>制单人 ${r.maker} · ${who} ${r.at.slice(5)}`);
+        c4 = cell('ok','✓',`已做账<span class="tag ${r.vst==='C'?'ok':'warn'}">${r.vst==='C'?'已审核':'等审核'}</span>`,
+                  `${r.maker} · <span class="mono">${r.per} ${r.vno}</span>`, `${who}，${r.at}`);
         act = '<button class="btn">查看</button>';
       }
-      else if (s === 0){ c4 = cell('go','→','可以做账', fkd + '</small><small>自动做账下一轮会做'); act = '<button class="btn pri">凭证预览</button>'; }
-      else { c4 = cell('wait','○','还不能做',`卡在 ${'①②③'[s-1]}` + (fkd ? '</small><small>' + fkd : '')); act = '<button class="btn">凭证预览</button>'; }
+      else if (s === 0){ c4 = cell('go','→','可以做账','自动做账下一轮会做'); act = '<button class="btn pri">凭证预览</button>'; }
+      else { c4 = cell('wait','○','还不能做',`卡在 ${'①②③'[s-1]}`); act = '<button class="btn">凭证预览</button>'; }
       const sc = n => (at(n) ? ' class="stopcell"' : '');
       h += `<tr><td>${r.sj}</td><td class="num mono">${money(r.amt)}</td><td${sc(1)}>${c1}</td><td${sc(2)}>${c2}</td><td${sc(3)}>${c3}</td><td>${c4}</td><td>${act}</td></tr>`;
     }
   }
   document.getElementById('tb').innerHTML = h || '<tr><td colspan="7" class="dim" style="padding:22px;text-align:center">这一类现在没有</td></tr>';
   document.getElementById('foot').innerHTML =
-    '和现在的页面比：① 现在一格里只有 计提 / 付款 / 做账，看不到账单复核、收票走到哪了；② 现在金蝶没出付款单的不显示，这里也列出来（账单、票可以先办）；' +
-    '③ 计提金额、红冲更正这些做账细节收进「凭证预览」，总表只回答「走到哪一步、卡在哪」。<br>' +
-    '已做账里标了「做账时就没复核」「是做账以后才登记的」的，是 V2.934 之前没有这道闸时做的。<br>' +
-    '第 ④ 步的「制单人」是金蝶凭证上的制单人：系统审核付款单、金蝶自动出的凭证，制单人都是「系统操作员」；后面写的是工作台里谁点的、哪天。';
+    '每格两行：上面是结论，下面灰字是依据——① 整月登记还是本主体通过、哪天；② 票种和发票管家的审核状态；③ 金蝶付款单号（鼠标停一下看付款日期）；④ 制单人 · 期间 凭证号（鼠标停一下看工作台里是谁点的）。<br>' +
+    '和现在的页面比：现在一格里只有 计提 / 付款 / 做账，看不到账单复核、收票走到哪了；金蝶没出付款单的现在不显示，这里也列出来；计提金额、红冲更正这些细节收进「凭证预览」。<br>' +
+    '④ 的制单人是金蝶凭证上的：系统审核付款单、金蝶自动出的凭证，制单人都是「系统操作员」。标了「做账时就没复核」「做账以后才登记的」的，是 V2.934 之前没有这道闸时做的。';
 }
 document.getElementById('segInv').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
