@@ -644,6 +644,9 @@ function AutoBar({ onChanged }) {
   const [tab, setTab] = useState('')          // 明细看哪一栏：no 不做 / yes 会做；空＝有不做的先看不做的
   const [page, setPage] = useState(1)
   const [who, setWho] = useState(false)       // 做完提醒：展开选收件人
+  // V2.937(用户看四步的表上面这一块：「这部分好占位置」)：默认收成一行——档位、上一轮会做 / 不做几张、提醒发给谁、跑一轮；要改设置点「展开设置」。记在这台电脑上。
+  const [fold, setFold0] = useState(() => { try { return localStorage.getItem('lv_auto_fold') !== '0' } catch (e) { return true } })
+  const setFold = v => { setFold0(v); try { localStorage.setItem('lv_auto_fold', v ? '1' : '0') } catch (e) { /* 存不了就只管这一次 */ } }
   const [seen, setSeen] = useState(false)     // 做完提醒：看上一条发了什么
   const [tested, setTested] = useState('')
   // 这一轮跑到哪了(V2.912，用户「加个弹窗，正在做那一笔，不然我完全不知道他在做什么」)：跑的时候每 1.5 秒读一次进度；
@@ -698,6 +701,26 @@ function AutoBar({ onChanged }) {
     voucherAutoNotifyTest().then(() => setTested('已发到你的钉钉')).catch(e => setTested(e.message)).finally(() => setBusy(''))
   }
   const st = (notice && notice.stat) || {}
+  const runBtn = cfg.mode !== 'off' && <button className="btn sm" disabled={!!busy || !!(prog && prog.on)} onClick={run}>{busy === 'run' || (prog && prog.on) ? '正在跑…' : cfg.mode === 'on' ? '现在跑一轮' : '现在演练一轮'}</button>
+  if (fold) return <div className={'lv-auto fold m-' + cfg.mode}>
+    <div className="row">
+      <b>自动做账</b>
+      <span className={'lv-pill ' + AUTO_MODE[cfg.mode][1]}>{cfg.mode === 'dry' ? '演练' : AUTO_MODE[cfg.mode][0]}</span>
+      {cfg.mode === 'off' ? <span className="dim">没打开：付了款的单要人来点</span>
+        : !last ? <span className="dim">还没跑过，每 20 分钟跑一轮</span>
+          : <span>上一轮 {String(last.at || '').slice(5)}：
+            {last.mode === 'on'
+              ? <><b className="ok">做成 {(last.done || []).filter(x => x.ok).length} 张</b>{(last.done || []).some(x => !x.ok) && <b className="bad">、没做成 {(last.done || []).filter(x => !x.ok).length} 张</b>}</>
+              : <>开着会做 <b className="ok">{yes.length}</b> 张</>}，
+            {items.length > 0 ? <button className="lnk" title="展开看是哪几张、为什么" onClick={() => { setFold(false); setOpen(true) }}>不做 {no.length} 张</button> : <>不做 {no.length} 张</>}</span>}
+      <span className="dim">做完提醒：{cfg.notify ? (nt.names.length ? nt.names.join('、') : '还没有人') : '不发'}{cfg.notify && nt.miss.length > 0 && <b className="warn">（有人发不到）</b>}</span>
+      <span style={{ flex: 1 }} />
+      {prog && prog.on && !progOpen && <button className="lnk" onClick={() => setProgOpen(true)}>正在跑，看做到哪了</button>}
+      {runBtn}
+      <button className="lnk" onClick={() => setFold(false)}>展开设置</button>
+    </div>
+    {progOpen && prog && <AutoProgress p={prog} onClose={() => setProgOpen(false)} />}
+  </div>
   return <div className={'lv-auto m-' + cfg.mode}>
     <div className="row">
       <b>自动做账</b>
@@ -709,7 +732,8 @@ function AutoBar({ onChanged }) {
       <button className="lnk" disabled={!!busy} onClick={() => num('每一轮最多自动做几张（1～50）', 'max_round')}>每轮最多 {cfg.max_round} 张</button>
       <span style={{ flex: 1 }} />
       {prog && prog.on && !progOpen && <button className="lnk" onClick={() => setProgOpen(true)}>正在跑，看做到哪了</button>}
-      {cfg.mode !== 'off' && <button className="btn sm" disabled={!!busy || !!(prog && prog.on)} onClick={run}>{busy === 'run' || (prog && prog.on) ? '正在跑…' : cfg.mode === 'on' ? '现在跑一轮' : '现在演练一轮'}</button>}
+      {runBtn}
+      <button className="lnk" onClick={() => setFold(true)}>收起</button>
     </div>
     <div className="row sub">
       {cfg.mode === 'off' ? <span>没打开：付了款的单要人来点「保存到金蝶」。</span>
@@ -1430,6 +1454,7 @@ const CSS = `
 .lv .sc-big{font-size:38px;font-weight:800;line-height:1.15}.lv .sc-res.warn .sc-big,.lv .sc-res.bad .sc-big{font-size:24px}.lv .sc-mon{font-size:16px;font-weight:600}
 .lv .sc-meta{margin-top:8px;font-size:12.5px;color:var(--ink-2)}.lv .sc-meta .warn{color:var(--amber)}
 .lv .lv-auto{border:1px solid var(--line);border-radius:9px;background:var(--bg-sub);padding:8px 12px;font-size:12.5px;display:flex;flex-direction:column;gap:6px}
+.lv .lv-auto.fold{padding:6px 12px}.lv .lv-auto.fold .row{gap:10px}.lv .lv-auto.fold .lv-pill{background:var(--bg);font-weight:600}
 .lv .lv-auto.m-on{border-color:var(--green-line);background:var(--green-bg)}.lv .lv-auto.m-dry{border-color:var(--amber-line);background:var(--amber-bg)}
 .lv .lv-auto .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.lv .lv-auto .row.sub{color:var(--ink-2)}.lv .lv-auto .ok{color:var(--green)}.lv .lv-auto .warn{color:var(--amber)}
 .lv .lv-auto .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--bg)}
