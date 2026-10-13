@@ -144,7 +144,7 @@ def _paywarn(inst):
                             w.get("code"), w.get("want"), w.get("want"), w.get("code"), w.get("want")))
 
 
-_RS_CACHE = {"ts": 0.0, "set": set(), "subj": set()}
+_RS_CACHE = {"ts": 0.0, "set": set(), "subj": set(), "info": {}}
 
 
 def _reviewed(carrier, period, subject=None):
@@ -154,12 +154,71 @@ def _reviewed(carrier, period, subject=None):
     if time.time() - _RS_CACHE["ts"] > 15:
         SG, SJ = store.review_sign, store.review_subj
         with db._engine.connect() as c:
-            _RS_CACHE["set"] = {(a, b) for a, b in c.execute(select(SG.c.carrier, SG.c.period).where(SG.c.status == "signed")).all()}
-            _RS_CACHE["subj"] = {(a, b, s_) for a, b, s_ in c.execute(select(SJ.c.carrier, SJ.c.period, SJ.c.subject).where(SJ.c.status == "ok")).all()}
+            sg = c.execute(select(SG.c.carrier, SG.c.period, SG.c.reviewer, SG.c.signed_at).where(SG.c.status == "signed")).all()
+            sj = c.execute(select(SJ.c.carrier, SJ.c.period, SJ.c.subject, SJ.c.updated_by, SJ.c.updated_at).where(SJ.c.status == "ok")).all()
+        _RS_CACHE["set"] = {(a, b) for a, b, _w, _t in sg}
+        _RS_CACHE["subj"] = {(a, b, s_) for a, b, s_, _w, _t in sj}
+        info = {(a, b, s_): {"how": "subj", "by": w or "", "at": t or ""} for a, b, s_, w, t in sj}
+        info.update({(a, b, None): {"how": "month", "by": w or "", "at": t or ""} for a, b, w, t in sg})
+        _RS_CACHE["info"] = info
         _RS_CACHE["ts"] = time.time()
     if not (carrier and period):
         return False
     return (carrier, period) in _RS_CACHE["set"] or (bool(subject) and (carrier, period, subject) in _RS_CACHE["subj"])
+
+
+def _review_info(carrier, period, subject):
+    """① 是怎么过的 → {how: month 整月登记 / subj 本主体通过, by, at} / None。整月登记了的以整月为准。"""
+    if not _reviewed(carrier, period, subject):
+        return None
+    return _RS_CACHE["info"].get((carrier, period, None)) or _RS_CACHE["info"].get((carrier, period, subject))
+
+
+def _inv_state(r, invs):
+    """② 收票过没过 → ok 过了 / none 没票 / diff 发票合计≠请款 / wait 票收到了、发票管家还没审核通过。
+    V2.936(用户 2026-10-13「发票审核才算」)：原来票夹里有票、合计等于请款就算；现在每张票都要在发票管家审核通过。"""
+    if not invs:
+        return "none"
+    if abs(round(sum(i["gross"] for i in invs), 2) - float(r.get("amount") or 0)) >= 0.005:
+        return "diff"
+    return "ok" if all((i.get("review") or "") == "approved" for i in invs) else "wait"
+
+
+_KDX = {"bill": {}, "bill_ts": {}, "v": {}, "v_ts": 0.0}
+
+
+def _bill_nos(ids):
+    """金蝶付款单内码 → 单号。有号的一直记着；还是暂存、没编号的 5 分钟后重查。读不到金蝶就返回已知的，不让列表挂掉。"""
+    now = time.time()
+    need = [i for i in {str(x) for x in ids if str(x).isdigit()} if not _KDX["bill"].get(i) and now - _KDX["bill_ts"].get(i, 0) > 300]
+    if need:
+        try:
+            s_, conf = _kd()
+            for x in kc._query(s_, conf, "AP_PAYBILL", [("FID", "id"), ("FBillNo", "单号")], "FID in (%s)" % ",".join(need)):
+                _KDX["bill"][str(x["id"])] = _s(x["单号"])
+        except Exception:
+            _kd_drop()
+        for i in need:
+            _KDX["bill_ts"][i] = now
+    return {i: _KDX["bill"].get(str(i), "") for i in ids}
+
+
+def _voucher_info(vids):
+    """工作台做的那些付款凭证，金蝶里现在的 制单人 / 状态 / 年 / 期 → {内码: {...}}。3 分钟内不重查。"""
+    vids = sorted({str(v) for v in vids if str(v).isdigit()})
+    if vids and (time.time() - _KDX["v_ts"] > 180 or any(v not in _KDX["v"] for v in vids)):
+        try:
+            s_, conf = _kd()
+            got = {}
+            for i in range(0, len(vids), 80):
+                for x in kc._query(s_, conf, "GL_VOUCHER", [("FVOUCHERID", "vid"), ("FCREATORID.FName", "制单"), ("FDocumentStatus", "状态"), ("FYear", "年"), ("FPeriod", "期")],
+                                   "FVOUCHERID in (%s)" % ",".join(vids[i:i + 80])):
+                    got[str(x["vid"])] = {"maker": _s(x["制单"]), "status": _s(x["状态"]), "year": x["年"], "period": x["期"]}
+            _KDX["v"].update(got)
+            _KDX["v_ts"] = time.time()
+        except Exception:
+            _kd_drop()
+    return {v: _KDX["v"].get(v) for v in vids}
 
 
 def _status(r, folder, invs, ovr):
@@ -174,10 +233,9 @@ def _status(r, folder, invs, ovr):
     #   现在：这家这个月的账单登记复核了才往下看；没登记的一律「账单没复核」，人点、系统自动都做不了。
     if not _reviewed(r.get("carrier"), r.get("period"), r.get("subject")):
         return "noreview"
-    if not invs:
-        return "noinv"
-    if abs(tot - float(r.get("amount") or 0)) >= 0.005:
-        return "invdiff"
+    st2 = _inv_state(r, invs)
+    if st2 != "ok":
+        return {"none": "noinv", "diff": "invdiff", "wait": "invwait"}[st2]
     # 纸质件不卡做账(用户 2026-10-02 改：月末统一查验，同发票管家 V2.739/740)，列表只提示到了几张
     return "ready"
 
@@ -464,6 +522,19 @@ def vlist(request: Request, since: str = "2026-09-01"):
         pw = _paywarn(r["inst_id"]) if out[-1]["status"] == "unpaid" else None
         if pw:
             out[-1].update(status="paycode", paywarn=pw)
+    # 四步的表(V2.936)：每一步的依据——① 复核怎么过的；② 票种、发票管家审核状态、发票后补确认；③ 金蝶付款单号；④ 凭证的制单人、状态、期间
+    bills = _bill_nos([(_paid_info(r) or {}).get("bill_id") for r in reqs if r.get("kd_paid")])
+    vinfo = _voucher_info([p.get("vid") for p in posted.values() if isinstance(p, dict)])
+    by_inst = {r["inst_id"]: r for r in reqs}
+    for o in out:
+        r = by_inst[o["inst"]]
+        _f, invs = _invoices(o["inst"])
+        o["review"] = _review_info(r.get("carrier"), r.get("period"), r.get("subject"))
+        o["invs"] = [[i.get("type_short") or i.get("type") or "发票", i.get("review") or "pending"] for i in invs]
+        o["inv_state"] = _inv_state(r, invs)
+        o["later_ok"] = bool(not invs and o["inst"] in laters and (o.get("later") or _later_slip(o["inst"])))
+        o["fkd"] = bills.get((_paid_info(r) or {}).get("bill_id")) or (o.get("posted") or {}).get("bill_no") or ""
+        o["vinfo"] = vinfo.get(str((o.get("posted") or {}).get("vid"))) if o.get("posted") else None
     out.sort(key=lambda x: (x["created"] or ""), reverse=True)
     return {"ok": True, "rows": out}
 
@@ -1191,7 +1262,8 @@ def _preview_data(inst, self_vno=None, _nest=False):
                           "fee": "、".join(dict.fromkeys(l.get("fee") or l.get("acct_name") or "" for l in v["exp_lines"])),
                           "biz": "、".join(dict.fromkeys(l.get("biz") for l in v["exp_lines"] if l.get("biz"))),
                           "tail": pl["tails"].get(v["vno"]),
-                          **(pl["per"].get(v["vno"]) or {"mode": "", "new_rate": None, "why": ""})} for v in vouchers],
+                          **(pl["per"].get(v["vno"]) or {"mode": "", "new_rate": None, "why": ""}),
+                          "gross0": v["gross"]} for v in vouchers],          # 原计提的含税数(上面的 gross 定了应为金额以后是应为的数)
             "plan": {"status": pl["status"], "msgs": msgs, "tails": pl["tails"], "pay_only": pl.get("pay_only") or ""},
             "adjust": adjust,
             "voucher": {"date": pay_date, "book": r.get("subject_full"), "lines": lines, "dr": dr, "cr": cr}}, 200
@@ -1345,6 +1417,7 @@ async def plans(request: Request):
                 d, code = _preview_data(str(inst))
                 if code == 200:
                     out[inst] = {"kind": d.get("kind"), "text": d.get("kind_text"), "auto": (d.get("plan") or {}).get("status") == "ok",
+                                 "acc_sum": round(sum(float(a.get("gross0") or 0) for a in d.get("accruals") or []), 2), "acc_n": len(d.get("accruals") or []),
                                  "xrev": [{"short": x["short"], "vno": x["vno"], "reversed": x["reversed"]} for x in d.get("xbook") or []],
                                  "acc": [{k: a.get(k) for k in ("vno", "month", "fee", "biz", "tail", "expl", "gross", "rate", "mode", "new_rate", "why", "from", "gross_new")}
                                          for a in d.get("accruals") or []]}
@@ -1383,7 +1456,7 @@ _AUDIT_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Audit.common.kd
 _POST_LOCK = {}
 _KD_BASE = {"FCURRENCYID": {"FNumber": "PRE001"}, "FEXCHANGERATETYPE": {"FNumber": "HLTX01_SYS"}, "FEXCHANGERATE": 1.0}
 ST_CN = {"ready": "可做账", "paper": "纸质件未到", "invdiff": "发票≠请款", "noinv": "票不齐", "unpaid": "未付款", "booked": "已做账",
-         "noreview": "账单还没复核（整月没登记，这个主体也没标通过）",
+         "noreview": "账单还没复核（整月没登记，这个主体也没标通过）", "invwait": "发票还没在发票管家审核通过",
          "paycode": "付款单往来单位编码不对", "latertax": "发票到了·待转待认证"}
 
 
