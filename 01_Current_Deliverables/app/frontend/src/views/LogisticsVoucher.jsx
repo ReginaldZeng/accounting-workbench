@@ -19,7 +19,7 @@ import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, vouche
   voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherCashflowFix, voucherCashflowRules, voucherCashflowRulesSet, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 // V2.936 总表换成「四步」的表(账单复核 → 收票 → 付款 → 做账，一张请款单一行)：画法和「卡在哪一步」在 LogisticsVoucherFlow.jsx
-import { FlowRule, FlowTiles, FlowTable, StepsDlg, FLOW_CSS, stageOf, flowHay } from './LogisticsVoucherFlow.jsx'
+import { FlowTiles, FlowTable, StepsDlg, FLOW_CSS, stageOf, flowHay } from './LogisticsVoucherFlow.jsx'
 import qrcode from '../vendor/qrcode-generator.mjs'
 
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -1225,7 +1225,7 @@ export default function LogisticsVoucher() {
     <div className="lv">
       <style>{CSS + FLOW_CSS}</style>
       <div className="head"><div><div className="h-title">付款做账 · 物流请款单</div>
-        <div className="h-sub">付款后合成一张凭证：红冲 → 更正 → 核销（暂估转待认证）→ 支付。计提取金蝶、发票取发票管家、维度更正取复核台登记。「保存到金蝶」＝系统审核付款单，再往金蝶自动生成的付款凭证里补分录并提交；凭证留给人在金蝶审核。</div></div>
+        <div className="h-sub">账单复核、收票、付款都过了，系统才做账；凭证只提交，审核留给人在金蝶做。</div></div>
         {/* V2.938(用户「切换账单月和刷新（注明刷新日期和谁）挪到右上角，跟别的模块一样」) */}
         <div className="lv-htools">
           {periods.length > 1 && <select className="lv-sel" value={pf} onChange={e => setPf(e.target.value)} title="按账单月份看"><option value="">全部账单月</option>{periods.map(m => <option key={m} value={m}>{ymCn(m)}账单</option>)}</select>}
@@ -1233,7 +1233,6 @@ export default function LogisticsVoucher() {
           <button className="btn" disabled={busyLoad} onClick={load}>{busyLoad ? '刷新中…' : '刷新'}</button>
         </div></div>
       <div className="body">
-        <div className="lv-bar"><FlowRule /></div>
         {err && <div className="lv-msg bad">{err}</div>}
         {(rows || []).filter(r => r.status === 'paycode').map(r => <div key={r.inst} className="lv-msg bad">
           <b>付款单往来单位编码不对 · {r.sup_full || r.carrier} · {r.subject} · {money(r.amount)}</b>　{r.paywarn && r.paywarn.text}
