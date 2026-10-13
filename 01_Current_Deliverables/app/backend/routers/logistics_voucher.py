@@ -144,6 +144,19 @@ def _paywarn(inst):
                             w.get("code"), w.get("want"), w.get("want"), w.get("code"), w.get("want")))
 
 
+_RS_CACHE = {"ts": 0.0, "set": set()}
+
+
+def _reviewed(carrier, period):
+    """这家这个月的账单在账单复核台登记复核了没有。15 秒内共用一次查询(总表一屏几十张请款单)。"""
+    if time.time() - _RS_CACHE["ts"] > 15:
+        SG = store.review_sign
+        with db._engine.connect() as c:
+            _RS_CACHE["set"] = {(a, b) for a, b in c.execute(select(SG.c.carrier, SG.c.period).where(SG.c.status == "signed")).all()}
+        _RS_CACHE["ts"] = time.time()
+    return bool(carrier and period) and (carrier, period) in _RS_CACHE["set"]
+
+
 def _status(r, folder, invs, ovr):
     pi = _paid_info(r)
     tot = round(sum(i["gross"] for i in invs), 2)
@@ -151,6 +164,11 @@ def _status(r, folder, invs, ovr):
         return "booked"
     if not pi:
         return "unpaid"
+    # V2.934(用户 2026-10-13「我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序，但是现在付款就开始做了好像」)：
+    #   原来只看付没付款、票齐不齐，账单没在复核台登记复核的也算可做账(查实做过的 20 张里 9 张做账时账单没登记、3 张是先做账后登记)。
+    #   现在：这家这个月的账单登记复核了才往下看；没登记的一律「账单没复核」，人点、系统自动都做不了。
+    if not _reviewed(r.get("carrier"), r.get("period")):
+        return "noreview"
     if not invs:
         return "noinv"
     if abs(tot - float(r.get("amount") or 0)) >= 0.005:
@@ -1360,6 +1378,7 @@ _AUDIT_SVC = "Kingdee.BOS.WebApi.ServicesStub.DynamicFormService.Audit.common.kd
 _POST_LOCK = {}
 _KD_BASE = {"FCURRENCYID": {"FNumber": "PRE001"}, "FEXCHANGERATETYPE": {"FNumber": "HLTX01_SYS"}, "FEXCHANGERATE": 1.0}
 ST_CN = {"ready": "可做账", "paper": "纸质件未到", "invdiff": "发票≠请款", "noinv": "票不齐", "unpaid": "未付款", "booked": "已做账",
+         "noreview": "账单还没在复核台登记复核",
          "paycode": "付款单往来单位编码不对", "latertax": "发票到了·待转待认证"}
 
 
@@ -1882,6 +1901,8 @@ def _auto_cfg():
 def _auto_ok(d, cfg):
     """这一张够不够条件自动做 → (bool, 不做的原因)。条件比人点的时候严：任何一条提示里带「要人工」都不做。"""
     req, k = d["req"], d.get("kind")
+    if req.get("status") == "noreview":
+        return False, "账单还没在复核台登记复核"
     if d["plan"]["status"] != "ok":
         return False, "计提和发票对不上：%s" % ((d["plan"]["msgs"] or ["要人工处理"])[0])
     if k == "subj" or d.get("xbook"):

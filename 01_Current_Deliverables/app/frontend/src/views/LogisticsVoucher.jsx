@@ -23,7 +23,9 @@ import qrcode from '../vendor/qrcode-generator.mjs'
 const money = n => (n == null || n === '' ? '' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : `${Math.round(r * 10000) / 100}%`)
 const ST = {
-  ready: ['可做账', 'ok', '已付款、发票齐（纸质件不卡做账，月末统一查验）'],
+  ready: ['可做账', 'ok', '账单已复核、已付款、发票齐（纸质件不卡做账，月末统一查验）'],
+  // V2.934(用户「我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序」)：账单没在复核台登记复核的，付了款、票齐了也不能做账
+  noreview: ['账单没复核', 'warn', '这家这个月的账单还没在账单复核台登记复核：登记复核以后才能做账'],
   paper: ['纸质件未到', 'warn', '纸质付款单/发票还没交到财务；可手动放行'],
   invdiff: ['发票≠请款', 'bad', '票夹里发票含税合计和请款金额对不上'],
   noinv: ['票不齐', 'warn', '票夹里还没有发票（流程里没传，要财务在收票台补）'],
@@ -34,7 +36,7 @@ const ST = {
   booked: ['已做账', 'done', '发票都已被金蝶凭证引用（发票管家同步）'],
 }
 // 没有金蝶付款单的(钉钉还在审批 / 已通过待付款)不在这一页显示(V2.815，用户「起码出了付款单，这里才显示」)，所以没有「未付款」这一栏了
-const ORDER = ['ready', 'paycode', 'latertax', 'invdiff', 'noinv', 'booked']
+const ORDER = ['ready', 'paycode', 'latertax', 'noreview', 'invdiff', 'noinv', 'booked']
 // 批量做账：一致只核销 + 红冲更正(含尾差)。红冲更正写法已在金蝶实测(跨越 记-261 / 易风达 记-264)后放进来，
 // 但要提示：勾到红冲更正的，批量条和确认框都单独列出来（用户 2026-10-02「放进去，但是要提示」）
 // V2.818 金额有差(用户「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：一张计提对一张发票的，系统默认按发票金额红冲更正；
