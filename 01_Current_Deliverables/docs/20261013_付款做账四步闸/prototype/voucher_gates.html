@@ -3,7 +3,7 @@
 [Change Log]
 Date: 2026-10-13
 Author: Claude Opus 5.5
-Version: 样机 v0.3（未开发）
+Version: 样机 v0.4（未开发）
 Description: 物流对账 · 付款做账总表重排样机。
   用户 2026-10-13 看付款做账总表：「感觉这个页面不太对。我们是工作台审核账单，工作台收票，付款成功，才执行自动化做账程序，但是现在付款就开始做了好像」
   → V2.934 先把「账单没复核不能做账」这道闸补上（只加了一个状态），没动页面 →「有样机吗」。
@@ -14,6 +14,7 @@ Description: 物流对账 · 付款做账总表重排样机。
   v0.3（「注意字体上下居中，第二个灰色字体应该是专票已审核，普票已审核，发票后补已确认，第三个应该是放付款单号，第四个就是制单人，期间-凭证号」）：
     每格两行——上面一句结论、下面一行灰字，图标和字上下居中；灰字 ② 写票种＋审核状态（专票已审核 / 普票待审核 / 发票后补已确认），
     ③ 写金蝶付款单号，④ 写制单人 · 期间-凭证号。
+  v0.4（「待审核应该是黄色？」）：② 的灰字里，还没审核通过的（待审核、草稿）标黄，已审核的还是灰色。
 -->
 <html lang="zh-CN">
 <head>
@@ -74,6 +75,7 @@ tbody tr:last-child td{border-bottom:0}
 .c .tx{min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px}
 .c .tx .m{display:flex;align-items:center;gap:6px;line-height:1.4;white-space:nowrap}
 .c .tx .g{color:var(--ink3);font-size:11.5px;line-height:1.4;white-space:nowrap}
+.c .tx .g .w{color:var(--warn);font-weight:600}
 .c.ok .ic{background:var(--ok-bg);color:var(--ok)}
 .c.stop .ic{background:var(--warn-bg);color:var(--warn)} .c.stop .tx .m{color:var(--warn);font-weight:600}
 .c.wait .ic{background:var(--neu-bg);color:var(--ink3)} .c.wait .tx .m{color:var(--ink3)}
@@ -174,7 +176,8 @@ function stage(r){
 function invText(r){
   const by = {};
   for (const [t, st] of r.invs) by[t + '|' + st] = (by[t + '|' + st] || 0) + 1;
-  return Object.entries(by).map(([k, n]) => { const [t, st] = k.split('|'); return t + (n > 1 ? ` ${n} 张` : '') + REV_CN[st]; }).join('、');
+  return Object.entries(by).map(([k, n]) => { const [t, st] = k.split('|'); const x = t + (n > 1 ? ` ${n} 张` : '') + REV_CN[st];
+    return st === 'approved' ? x : `<span class="w">${x}</span>`; }).join('、');      // 还没审核通过的标黄
 }
 function cell(kind, ic, main, grey, title){
   return `<div class="c ${kind}"${title ? ` title="${title}"` : ''}><span class="ic">${ic}</span><span class="tx"><span class="m">${main}</span>${grey ? `<span class="g">${grey}</span>` : ''}</span></div>`;
