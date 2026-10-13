@@ -777,6 +777,39 @@ def preview(request: Request, inst: str):
     return d if code == 200 else JSONResponse(d, status_code=code)
 
 
+def _later3_plan(rec, vouchers, inv_in, inv_tot, r):
+    """发票后补、到票以后那张凭证怎么做(V2.929，用户 2026-10-13「到票时候，如果对不上，也是整个红冲，再更正，再核销转待认证」)：
+    拿账上现在的样子(付款凭证里红冲更正过的，按更正后的、引用那张付款凭证)和发票走一遍和有票时一样的比对——
+    对得上只核销(借待认证 / 贷暂估)；税率、税额、金额对不上的，整笔红冲、按发票更正，再核销。不出支付(早付过了)。
+    → {ok, lines, dr, cr, tail, tax, redo, gross_diff, msg}"""
+    now = datetime.now()
+    adj = rec.get("later_adj") or {}
+    pref = LV.ref_of({"year": int(rec.get("vyear") or now.year), "month": int(rec.get("vmonth") or now.month), "vno": rec.get("vno")}, now.year) if adj else ""
+    effv = [LV.renewed(v, adj[v["vno"]], pref) if adj.get(v["vno"]) else v for v in vouchers]
+    g_eff = round(sum(v["gross"] for v in effv), 2)
+    a3, gd = {}, round(inv_tot - g_eff, 2)
+    if abs(gd) >= 0.005:
+        if len(effv) != 1:
+            return {"ok": False, "lines": [], "msg": "发票含税合计 %.2f ≠ 账上这几张计提含税合计 %.2f：几张各该改成多少系统定不了，要人工处理" % (inv_tot, g_eff)}
+        a3 = {effv[0]["vno"]: {"gross": inv_tot}}
+    pl3 = LV.plan(effv, inv_in, {}, a3)
+    if pl3["status"] != "ok":
+        return {"ok": False, "lines": [], "msg": "；".join(pl3["msgs"]) or "发票和账上对不上，要人工处理"}
+    ctx3 = {"supplier": r.get("payee") or "", "applicant": r.get("applicant") or "", "pay_year": now.year, "pay_month": now.month,
+            "pay_amount": 0.0, "bank": "", "paid": False, "self_vno": None, "tax_later": False}
+    l3 = LV.build(ctx3, effv, inv_in, pl3, {})
+    b3 = LV.balance(l3)
+    redo = [k for k, p in pl3["per"].items() if p.get("mode") in ("rate", "tail", "amt", "fix")]
+    msg = ""
+    if redo:
+        msg = "发票和账上对不上（%s）：整笔红冲、按发票更正，再核销转待认证" % "；".join("记-%s %s" % (k, pl3["per"][k].get("why") or "") for k in redo)
+    if abs(gd) >= 0.005:
+        msg += "%s发票比付款%s %.2f，做完以后供应商往来会留这个差额（%s）" % ("；" if msg else "", "多" if gd > 0 else "少", abs(gd), "还要补付" if gd > 0 else "供应商多收了")
+    return {"ok": bool(l3) and abs(b3[0] - b3[1]) < 0.005, "lines": l3, "dr": b3[0], "cr": b3[1], "tail": round(sum(pl3["tails"].values()), 2),
+            "tax": round(sum(l["dr"] for l in l3 if l["acct"] == "2221.01.06"), 2), "redo": len(redo),
+            "gross_diff": gd if abs(gd) >= 0.005 else 0.0, "msg": msg}
+
+
 def _kind(vouchers, notes, pl):
     """一句话做账类型(列表用)：hx 一致·只核销 / tail 核销含尾差 / redo 需红冲更正 / subj 计提记错主体 / manual 金额不符 / noacc 没有计提。"""
     subj = next((n for n in notes if "主体记错" in n), "")
@@ -787,6 +820,10 @@ def _kind(vouchers, notes, pl):
     if not vouchers:
         return "noacc", "金蝶本期没找到这家的计提凭证"
     if pl.get("pay_only") == "later":
+        redo = [(k, p) for k, p in pl["per"].items() if p.get("mode") in ("rate", "fix", "amt")]
+        if redo:          # 没票、计提和请款又有差(V2.929)：付款凭证里先红冲更正，再支付
+            return "later", "发票后补：付款凭证里红冲更正 %d 张（%s），再做支付；暂估进项税先挂着，发票到了再做「暂估转待认证」" % (
+                len(redo), "；".join("记-%s %s" % (k, p.get("why") or "") for k, p in redo))
         return "later", "发票后补：这张付款凭证只做支付（借应付 / 贷银行），暂估进项税先挂着，发票到了再单独做「暂估转待认证」"
     if pl.get("pay_only") == "tax06":
         return "hx", "费用凭证做的时候税已经挂到待认证，付款只做支付"
@@ -918,12 +955,14 @@ def _preview_data(inst, self_vno=None, _nest=False):
     # V2.818 金额有差(用户 2026-10-05「金额有差的，按照红冲处理，或者特殊的按照部分核销处理（凭证说明）」)：
     #   每张计提「应为」多少——人在「选择核销哪些计提」里填了的用填的(可选部分核销+说明)；没填、且只有一张计提的，默认按发票金额红冲更正；
     #   几张计提对一张发票的，系统定不了各该多少，仍判人工并提示去填。
+    posted_rec = (db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}
     amts = {}
     if picked:
         for p in picked.get("picks") or []:
             if p.get("to_gross") not in (None, ""):
                 amts[str(p["vno"])] = {"gross": float(p["to_gross"]), "part": bool(picked.get("part")), "memo": picked.get("memo") or ""}
-    if not amts and inv_in and len(vouchers) == 1 and not vouchers[0].get("from"):
+    # 发票后补、付款凭证已经只做了支付的(tax_later)：发票是后来到的，不拿它回头改付款凭证的应为金额——发票和账上对不上的，在到票那张凭证里红冲更正
+    if not amts and inv_in and len(vouchers) == 1 and not vouchers[0].get("from") and not posted_rec.get("tax_later"):
         v0 = vouchers[0]
         g0 = LV.eff_gross(v0, fixes.get(v0["vno"]))
         if abs(g0 - inv_tot) > 0.004 and abs(g0 - v0["gross"]) < 0.005:
@@ -949,30 +988,54 @@ def _preview_data(inst, self_vno=None, _nest=False):
     # V2.832 付款只做支付(不出核销)的两种情况：
     #   tax06＝费用凭证做的时候就有票、税已经挂待认证了(禾享 5月记-155)，没有暂估要转；
     #   later＝发票后补：人确认过「先做付款凭证」(或这张已经这样写过金蝶)，暂估税等发票到了另做一张转待认证。
-    posted_rec = (db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}
     later = (db.get_setting(_LATER_KEY, None) or {}).get(inst)
     slip = _later_slip(inst)                 # 发票管家的后补单：没登记就不许「没票先付」
     if later and not slip and not posted_rec.get("tax_later"):
         later = None
         notes.append("之前确认过发票后补，但发票管家里已经没有这张单的后补单了（被关闭或删除），不能没票先付")
     g_acc = round(sum(v["gross"] for v in vouchers), 2)
+    amt_req = float(r.get("amount") or 0)
     pay_only = ""
-    if vouchers and not any(v.get("from") for v in vouchers) and not amts:
-        if all(not v["tax"] for v in vouchers) and any(v.get("tax06") for v in vouchers):
+    if vouchers and not any(v.get("from") for v in vouchers):
+        if not amts and all(not v["tax"] for v in vouchers) and any(v.get("tax06") for v in vouchers):
             pay_only = "tax06"
         elif posted_rec.get("tax_later") or (later and not invs):
             pay_only = "later"
     if pay_only and carry:
         pl = {"status": "manual", "per": {}, "tails": {}, "msgs": ["这张只做支付（发票后补 / 税已挂待认证），又登记了多收待扣回：两样叠在一起系统做不了，要人工处理"]}
         pay_only = ""
-    if pay_only:
-        if abs(g_acc - float(r.get("amount") or 0)) >= 0.005:
+    if pay_only == "tax06":
+        if abs(g_acc - amt_req) >= 0.005:
             pl = {"status": "manual", "per": {}, "tails": {},
-                  "msgs": ["%s含税合计 %.2f ≠ 请款金额 %.2f，要人工处理" % ("费用凭证" if all(v.get("direct") for v in vouchers) else "计提", g_acc, float(r.get("amount") or 0))]}
+                  "msgs": ["%s含税合计 %.2f ≠ 请款金额 %.2f，要人工处理" % ("费用凭证" if all(v.get("direct") for v in vouchers) else "计提", g_acc, amt_req)]}
             pay_only = ""
         else:
             pl = {"status": "ok", "msgs": [], "tails": {}, "pay_only": pay_only,
                   "per": {v["vno"]: {"mode": "hx", "new_rate": v["rate"], "why": "", "gross": v["gross"]} for v in vouchers}}
+    elif pay_only == "later":
+        # V2.929(用户 2026-10-13 天鹰「我们复核完，付了款，才会开发票」)：没票时计提和请款有差的，也在付款凭证里红冲更正——
+        #   各张「应为」多少：复核台登记的计提更正、人填的「本次按多少」；都没有且只有一张计提的，按请款金额。税按原税率重算、仍挂暂估。
+        a2 = dict(amts)
+        if not a2 and len(vouchers) == 1:
+            v0 = vouchers[0]
+            g0 = LV.eff_gross(v0, fixes.get(v0["vno"]))
+            if abs(g0 - amt_req) > 0.004 and abs(g0 - v0["gross"]) < 0.005:
+                a2[v0["vno"]] = {"gross": amt_req}
+                notes.append("%s %.2f 和请款 %.2f 差 %+.2f：按红冲处理——原%s整笔红冲，按请款金额重新计提（发票后补，税按原税率暂估）" % (
+                    "费用凭证" if v0.get("direct") else "计提", v0["gross"], amt_req, amt_req - v0["gross"], "费用凭证" if v0.get("direct") else "计提"))
+        pl2 = LV.plan_later(vouchers, fixes, a2)
+        g_eff = round(sum(float(p.get("gross") or 0) for p in pl2["per"].values()), 2) if pl2["status"] == "ok" else None
+        if pl2["status"] != "ok":
+            pl, pay_only = {"status": "manual", "per": pl2.get("per") or {}, "tails": {}, "msgs": pl2["msgs"] or ["要人工处理"]}, ""
+        elif abs(g_eff - amt_req) >= 0.005:
+            what = "费用凭证" if all(v.get("direct") for v in vouchers) else "计提"
+            pl = {"status": "manual", "per": {}, "tails": {}, "msgs": [
+                ("%s含税合计 %.2f ≠ 请款金额 %.2f，要人工处理" % (what, g_acc, amt_req)) if abs(g_eff - g_acc) < 0.005 else
+                ("%s含税合计 %.2f，按登记的更正算是 %.2f，还是 ≠ 请款金额 %.2f，要人工处理" % (what, g_acc, g_eff, amt_req)),
+                "发票后补、计提和请款有差的：在复核台登记计提更正（改金额 / 改科目），或点「选择核销哪些计提」给每张填「本次按多少」，系统就在付款凭证里一起红冲更正"]}
+            pay_only = ""
+        else:
+            pl, amts = dict(pl2, pay_only="later"), a2
     pi = _paid_info(r) or {}
     pay_date, bank = _bank_of(pi.get("bill_id")) if pi.get("bill_id") else (pi.get("date"), "")
     pay_date = pay_date or pi.get("date") or datetime.now().strftime("%Y-%m-%d")
@@ -1032,13 +1095,7 @@ def _preview_data(inst, self_vno=None, _nest=False):
     # 发票后补的第三笔：这张已经只做了支付，现在发票到了 → 暂估转待认证(单独一张凭证)
     later3 = posted_rec.get("later3")
     if posted_rec.get("tax_later") and not later3 and invs and vouchers:
-        if abs(inv_tot - g_acc) >= 0.005:
-            later3 = {"ok": False, "lines": [], "msg": "发票含税合计 %.2f ≠ 费用凭证/计提含税合计 %.2f：金额有差，不能直接转，要人工处理（红冲更正）" % (inv_tot, g_acc)}
-        else:
-            l3, d3 = LV.later_lines(vouchers, inv_in, datetime.now().year, r.get("payee") or "")
-            b3 = LV.balance(l3)
-            later3 = {"ok": abs(d3) <= LV.TAIL_MAX + 1e-9 and abs(b3[0] - b3[1]) < 0.005, "lines": l3, "dr": b3[0], "cr": b3[1], "tail": d3,
-                      "msg": "" if abs(d3) <= LV.TAIL_MAX + 1e-9 else "发票税额和暂估进项税差 %.2f，超过尾差上限，要人工处理" % d3}
+        later3 = _later3_plan(posted_rec, vouchers, inv_in, inv_tot, r)
     paywarn = _paywarn(inst) if st == "unpaid" else None
     if paywarn:
         st = "paycode"
@@ -1501,6 +1558,10 @@ def _post_amend(inst, user, req, pb, fid, vid, s, conf, steps, found=None):
         new.append(x)
     rec0 = {"bill_no": pb["单号"], "vid": vid, "vno": vno, "book": book,
             "tax_later": d2["plan"].get("pay_only") == "later",     # 发票后补：只做了支付，暂估税还没转(发票到了要补第三笔)
+            # 发票后补时这张凭证里红冲更正过的计提，更正后的样子(V2.929)：到票时拿它和发票比，再对不上要红冲的是这张里的更正分录
+            "later_adj": ({a["vno"]: a["new"] for a in d2.get("adjust") or [] if a.get("mode") != "xout" and (a.get("new") or {}).get("exp")}
+                          if d2["plan"].get("pay_only") == "later" else {}),
+            "vyear": int(str(pb["日期"])[:4]), "vmonth": int(str(pb["日期"])[5:7]),
             "xout": d2.get("xout") or [],                     # 顺带红冲的「记错主体」计提(V2.862)：做完账再看这张、补打更正单时按这个出
             "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
             "carry_out": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "out"],     # 这张按正确金额重提、没进费用的「多收待扣回」(V2.896)：扣回那个月据此才加回
@@ -1828,7 +1889,7 @@ def _auto_ok(d, cfg):
     if k not in cfg["kinds"]:
         return False, "「%s」没放进自动范围" % KIND_CN[k]
     if any(a.get("mode") == "amt" for a in d.get("accruals") or []) and not d.get("picked"):
-        return False, "计提和发票金额有差（要红冲、按发票金额更正），金额更正留给人点；人确认过应为金额的才自动做"
+        return False, "计提的金额要更正（系统默认按发票或请款金额），金额更正留给人点；人确认过应为金额的才自动做"
     if not str(req.get("bill_id") or "").isdigit():
         return False, "没有金蝶付款单（或这笔付款已经记过支付凭证）"
     if not req.get("bank"):
@@ -2031,9 +2092,13 @@ def auto_round(trigger="定时"):
                     elif not l3.get("lines") or not l3.get("ok"):
                         _m3 = l3.get("msg") or "发票税额和挂着的暂估进项税对不上"
                         it["why"] = _m3 if "要人工" in _m3 else _m3 + "，要人工处理"
+                    elif l3.get("gross_diff"):
+                        it["why"] = "发票和付款金额不一样（差 %+.2f），红冲更正以后供应商往来会留差额，留给人看过再点" % float(l3["gross_diff"])
                     else:
                         it["ok"] = True
-                        it["text"] = "发票 %s 到了，暂估进项税 %.2f 转待认证" % ("、".join(i["number"] for i in invs3 if i.get("number"))[:60], float(l3.get("dr") or 0))
+                        it["text"] = "发票 %s 到了，%s暂估进项税转待认证 %.2f" % (
+                            "、".join(i["number"] for i in invs3 if i.get("number"))[:60],
+                            ("和账上对不上，整笔红冲更正 %d 张后" % l3["redo"]) if l3.get("redo") else "", float(l3.get("tax") if l3.get("tax") is not None else l3.get("dr") or 0))
             except Exception as e:
                 it["why"] = "读取出错：%s" % str(e)[:120]
             items.append(it)
@@ -2816,19 +2881,37 @@ def _post_later(inst, user):
     r = kc.save_voucher({"FACCOUNTBOOKID": {"FNumber": code_}, "FVOUCHERGROUPID": {"FNumber": "PRE001"}, "FEntity": ents,
                          "FDate": date, "FYear": y, "FPeriod": m}, s, conf)
     info = kc.view_voucher(r["id"], s, conf)
+    ref_err = ""
+    if any("□" in l["expl"] for l in l3["lines"]):       # 这张里有红冲更正：核销摘要引用的「本凭证」号，保存后才知道，回填(月份按这张实际记的月)
+        try:
+            mv = kc._post(s, conf, kc.VIEW_SVC, ["GL_VOUCHER", json.dumps({"Id": str(r["id"])})]).json()["Result"]["Result"] or {}
+            fixd = [{"FEntryID": x["Id"], "FEXPLANATION": re.sub(r"\d+/□#", "%d/%s#" % (m, info.get("vno") or ""), _s(x.get("FEXPLANATION") or x.get("EXPLANATION")))}
+                    for x in mv.get("GL_VOUCHERENTRY") or [] if x.get("Id") and "□" in _s(x.get("FEXPLANATION") or x.get("EXPLANATION"))]
+            ref_err = _kd_ok(kc._post(s, conf, kc.SAVE_SVC, ["GL_VOUCHER", json.dumps({"IsDeleteEntry": False, "NeedUpDateFields": ["FEntity", "FEXPLANATION"],
+                             "Model": {"FVOUCHERID": r["id"], "FEntity": fixd}}, ensure_ascii=False)]).json()) if (fixd and info.get("vno")) else ""
+        except Exception as e:
+            ref_err = str(e)[:160]
     sub_err = ""
     try:
         kc.submit_bill("GL_VOUCHER", r["id"], s, conf)
     except Exception as e:
         sub_err = str(e)[:160]
+    tax3 = float(l3.get("tax") if l3.get("tax") is not None else l3.get("dr") or 0)
     rec["later3"] = {"vid": r["id"], "vno": info.get("vno") or "", "billno": r.get("billno"), "book": book, "date": date, "at": _now(), "by": user,
-                     "tax": l3.get("dr"), "tail": l3.get("tail"), "submitted": not sub_err, "submit_err": sub_err}
+                     "tax": tax3, "tail": l3.get("tail"), "redo": l3.get("redo") or 0, "gross_diff": l3.get("gross_diff") or 0,
+                     "submitted": not sub_err, "submit_err": sub_err, "ref_err": ref_err}
     posted[inst] = rec
     db.set_setting(_POSTED_KEY, posted, user)
     db.audit(user, "物流付款做账-暂估转待认证凭证", "记-%s" % rec["later3"]["vno"], "%s 发票后补：%s，日期 %s；%s" % (
         d["req"]["payee"], "、".join(i["number"] for i in d["invoices"] if i.get("number")), date, "已提交" if not sub_err else "提交失败：" + sub_err))
-    return ["暂估转待认证凭证 记-%s 已建（%s，税额 %.2f）%s" % (rec["later3"]["vno"], date, float(l3.get("dr") or 0),
-                                                "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err)]
+    steps = ["暂估转待认证凭证 记-%s 已建（%s，%s转待认证税额 %.2f）%s" % (
+        rec["later3"]["vno"], date, ("发票和账上对不上，整笔红冲更正 %d 张；" % l3["redo"]) if l3.get("redo") else "", tax3,
+        "、已提交，等人审核" if not sub_err else "，但提交失败：%s（可在金蝶手动提交）" % sub_err)]
+    if ref_err:
+        steps.append("⚠ 摘要里「本凭证」的号没回填上（还是 □）：%s。请在金蝶把 □ 改成 %s" % (ref_err, rec["later3"]["vno"]))
+    if l3.get("gross_diff"):
+        steps.append("⚠ 发票比付款%s %.2f，供应商往来留了这个差额" % ("多" if l3["gross_diff"] > 0 else "少", abs(l3["gross_diff"])))
+    return steps
 
 
 @router.post("/api/logistics-voucher/post-later")

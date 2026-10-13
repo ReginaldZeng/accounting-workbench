@@ -1058,14 +1058,14 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
               </tbody>
             </table>}
           {d.later3 && <>
-            <div className="lv-sec">⑤ 发票后补 · 暂估转待认证 <span className="dim">付款时没票，只做了支付；发票到了单独做这一张</span>
+            <div className="lv-sec">⑤ 发票后补 · 暂估转待认证 <span className="dim">付款时没票，暂估进项税没转；发票到了单独做这一张（和账上对不上的，先整笔红冲更正再核销）</span>
               <span style={{ flex: 1 }} />
               {!d.later3.vno && <button className="btn btn-pri" disabled={l3busy || !d.later3.ok} onClick={postLater}>{l3busy ? '建凭证中…' : '保存到金蝶（新建凭证并提交）'}</button>}</div>
             {l3msg && <div className={'lv-msg ' + (l3msg.ok ? 'okb' : 'bad')}>{l3msg.text}</div>}
             {d.later3.vno
               ? <div className="lv-verdict ok"><span className="lv-pill ok">已写入金蝶</span>暂估转待认证凭证 <b>记-{d.later3.vno}</b>（{d.later3.date}）· {d.later3.by} {d.later3.at}
                 {d.later3.submitted === false ? ' · 提交没成功，请到金蝶手动提交' : ' · 已提交，等人审核'}</div>
-              : <>{d.later3.msg && <div className="lv-msg bad">{d.later3.msg}</div>}
+              : <>{d.later3.msg && <div className={'lv-msg ' + (d.later3.ok ? 'warn' : 'bad')}>{d.later3.msg}</div>}
                 {(d.later3.lines || []).length > 0 && <table className="lv-t lv-v">
                   <colgroup><col style={{ width: 34 }} /><col /><col style={{ width: 190 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: '26%' }} /></colgroup>
                   <thead><tr><th>#</th><th>摘要</th><th>科目</th><th className="num">借方</th><th className="num">贷方</th><th>核算维度</th></tr></thead>
@@ -1073,7 +1073,7 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
                     <td className="nw">{l.acct} {l.acct_name}</td><td className="num">{l.dr ? money(l.dr) : ''}</td><td className="num">{l.cr ? money(l.cr) : ''}</td>
                     <td className="dims">{dimLine(l.dims)}</td></tr>)}
                     <tr className="tot"><td colSpan="3">合计　{Math.abs((d.later3.dr || 0) - (d.later3.cr || 0)) < 0.005 ? <span className="ok">借贷平衡 ✓</span> : <span className="bad">借贷不平</span>}
-                      {d.later3.tail ? <span className="warn">　税额尾差 {money(d.later3.tail)} 调到费用行</span> : null}</td>
+                      {d.later3.tail ? <span className="warn">　税额尾差 {money(d.later3.tail)}：整笔红冲后更正</span> : null}</td>
                       <td className="num">{money(d.later3.dr)}</td><td className="num">{money(d.later3.cr)}</td><td></td></tr></tbody></table>}</>}
           </>}
         </>}
