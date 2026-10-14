@@ -130,14 +130,14 @@ function logBrief(d) {
   return t ? String(t).slice(0, 80) : ''
 }
 
-function FilterBar({ f, setF, exportUrl, total, subjects, reviewers, refresh, refreshing, refreshLabel }) {
+function FilterBar({ f, setF, exportUrl, total, subjects, subjectShort, reviewers, refresh, refreshing, refreshLabel }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
   const dirty = Object.keys(EMPTY_FILTER).some(k => f[k] !== EMPTY_FILTER[k])
   const moreOn = MORE_KEYS.some(k => f[k] !== EMPTY_FILTER[k])
   const [more, setMore] = useState(moreOn)
   return (
     <div className="fbar inv-lg-fbar">
-      <label>主体<select value={f.subject} onChange={e => set('subject', e.target.value)}><option value="">全部主体</option>{(subjects || []).map(x => <option key={x} value={x}>{x}</option>)}</select></label>
+      <label>主体<select value={f.subject} onChange={e => set('subject', e.target.value)}><option value="">全部主体</option>{(subjects || []).map(x => <option key={x} value={x} title={x}>{(subjectShort && subjectShort[x]) || x}</option>)}</select></label>
       <label>开票月份<input type="month" value={f.month} onChange={e => setF(p => ({ ...p, month: e.target.value, from: '', to: '' }))} /></label>
       <label title="系统在金蝶对上的凭证在这个月（认证跟着做账月走）">做账月份<input type="month" value={f.bookMonth} onChange={e => set('bookMonth', e.target.value)} aria-label="做账月份" /></label>
       <label>票种
@@ -218,7 +218,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid, checked, onChe
                 <td className="inv-lg-ckcol" onClick={e => e.stopPropagation()}>
                   {!isVoid && <input type="checkbox" checked={checked.has(r.id)} aria-label={'勾选 ' + (r.number || '')} onChange={e => onCheck(r, e.target.checked)} />}</td>
                 <td className="mono">{r.date || '—'}</td>
-                <td className="inv-lg-buyer" title={[r.buyerName, r.buyerTaxId].filter(Boolean).join('　') || undefined}>{r.buyerName || '未识别主体'}</td>
+                <td className="inv-lg-buyer" title={[r.buyerName, r.buyerTaxId].filter(Boolean).join('　') || undefined}>{r.buyerShort || r.buyerName || '未识别主体'}</td>
                 <td className="inv-lg-type" title={typeText(r)}>{typeShort(r)}{isVoid && <span className="inv-badge err inv-lg-ml">已作废</span>}</td>
                 <td className="mono">{r.number || '—'}{r.split ? <span className="inv-lg-sub">分摊 {money(r.alloc)}</span> : null}</td>
                 <td className="inv-lg-seller" title={[r.sellerName, r.sellerTaxId].filter(Boolean).join('　') || undefined}>{r.sellerName || '—'}</td>
@@ -227,7 +227,8 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid, checked, onChe
                 <td className="num">{money(r.total)}</td>
                 <td><VerifyBadge v={r.verify} note={r.verifyNote} /></td>
                 <td className="inv-lg-nowrap"><DeductPill it={r} /></td>
-                <td className="inv-lg-nowrap">{fBiz(f) ? <span className="mono">{fBiz(f)}</span> : <span>{f.title || '—'}</span>}
+                <td className="inv-lg-biz">{fBiz(f) ? <span className="mono">{fBiz(f)}</span>
+                  : <span className="inv-lg-ftitle" title={f.title || undefined}>{f.title || '—'}</span>}
                   {f.applicant ? <span className="inv-lg-sub">{f.applicant}</span> : null}</td>
                 <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}{r.reviewBy && r.folder?.ownerName && r.folder.ownerName !== r.reviewBy ? ' · 归' + r.folder.ownerName : ''}</span></td>
                 <td><span className={'inv-badge ' + (r.paper ? 'ok' : 'warn')}>{r.paper ? '已收到' : '未收到'}</span></td>
@@ -467,7 +468,7 @@ function QueryTab({ can, flash }) {
     try {
       const r = await invLedger({ ...JSON.parse(key), page: p, size: PAGE_SIZE })
       if (my !== seq.current) return
-      setData({ total: n0(r?.total), sum: r?.sum || {}, rows: asList(r?.rows), subjects: asList(r?.subjects), reviewers: asList(r?.reviewers) })
+      setData({ total: n0(r?.total), sum: r?.sum || {}, rows: asList(r?.rows), subjects: asList(r?.subjects), subjectShort: r?.subjectShort || {}, reviewers: asList(r?.reviewers) })
     } catch (e) {
       if (my === seq.current) setErr(errText(e))
     } finally {
@@ -513,7 +514,7 @@ function QueryTab({ can, flash }) {
 
   return (
     <>
-      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects} reviewers={data?.reviewers}
+      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects} subjectShort={data?.subjectShort} reviewers={data?.reviewers}
         refreshing={!!(job && job.running)} refreshLabel={refreshLabel} refresh={can.auditAct ? startRefresh : undefined} />
       {data && (checked.size > 0
         ? <CheckedBar rows={[...checked.values()]} onClear={() => setChecked(new Map())} />

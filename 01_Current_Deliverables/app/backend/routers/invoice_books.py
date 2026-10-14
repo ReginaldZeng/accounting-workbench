@@ -356,10 +356,11 @@ def _ledger_page(filters, page, size):
     views = inv.item_views(rows)
     for v, r in zip(views, rows):
         v["folder"] = _folder_brief(r.get("folder"))
+        v["buyerShort"] = inv.org_short(r.get("buyer_name")) or ""      # V2.978 台账主体栏写简称（主体档案）
     with E().connect() as cx:
         subjects = [x for x in cx.execute(select(S.ITEM.c.buyer_name).where(S._item_active(), S.ITEM.c.review.in_(("approved", "void")), S.ITEM.c.buyer_name.isnot(None), S.ITEM.c.buyer_name != "").distinct().order_by(S.ITEM.c.buyer_name)).scalars()]
         reviewers = [x for x in cx.execute(select(S.ITEM.c.review_by).where(S._item_active(), S.ITEM.c.review.in_(("approved", "void")), S.ITEM.c.review_by.isnot(None), S.ITEM.c.review_by != "").distinct().order_by(S.ITEM.c.review_by)).scalars()]
-    return total, sums, views, subjects, reviewers
+    return total, sums, views, subjects, reviewers, {x: inv.org_short(x) or x for x in subjects}
 
 
 def _bookkeeping_body(body):
@@ -416,8 +417,9 @@ async def ledger_list(request: Request):
     if msg:
         return err(msg, 400)
     page, size = _page_args(request, 50, 500)
-    total, sums, views, subjects, reviewers = await run_in_threadpool(_ledger_page, filters, page, size)
-    return {"ok": True, "total": total, "sum": sums, "rows": views, "page": page, "size": size, "subjects": subjects, "reviewers": reviewers}
+    total, sums, views, subjects, reviewers, short = await run_in_threadpool(_ledger_page, filters, page, size)
+    return {"ok": True, "total": total, "sum": sums, "rows": views, "page": page, "size": size, "subjects": subjects,
+            "subjectShort": short, "reviewers": reviewers}
 
 
 @router.get("/api/inv/ledger/export")

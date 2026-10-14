@@ -1823,6 +1823,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertIn(a, {r["id"] for r in jr["rows"]})
         self.assertEqual({r["id"] for r in lg("reviewer=没有这个人")["rows"]}, set())
         self.assertIn("deductTax", j3["sum"])
+        self.assertIn("buyerShort", j3["rows"][0])                              # V2.978 主体栏写简称
+        self.assertTrue(all(j3["subjectShort"].get(x) for x in j3["subjects"]))
         self.assertGreater(j3["sum"]["deductTax"], 0)
         # 不筛做账月份：照旧四张都进
         self.assertEqual(self.ok(self.post(url, "acct", rng))["summary"]["rows"], 4)
