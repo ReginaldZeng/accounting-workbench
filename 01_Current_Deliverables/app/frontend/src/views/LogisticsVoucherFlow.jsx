@@ -31,10 +31,12 @@ const invParts = r => {
   return Object.entries(by).map(([k, n]) => { const [t, st] = k.split('|'); return { txt: t + (n > 1 ? ` ${n} 张` : '') + revCn(st), ok: st === 'approved', st, n } })
 }
 const invPlain = r => invParts(r).map(x => x.txt).join('、')
-// V2.961(用户看禾享那一行「已收 1 张 / 专票已审核」：「这里应该是后补单已审核？红字」)：这张单当初是没票先付款、登记了发票后补单的，
-// 票是后来经后补单到的——收票那一格要看得出来，不能和当场带票的写成一样。later_state 只有做付款凭证时走了发票后补的才有。
+// V2.963(用户看禾享那一行：「这里应该是后补单已审核？红字」，V2.961 我把发票写成了「后补单已审核」，用户：「还是不太对，这里的做账是依靠后补单，而不是发票」)：
+// 没票先付款的单，过 ② 这道闸靠的是发票后补单(登记了、人确认了)，不是发票——发票是后来到的，到没到、审没审只当附带的话写在后面。
+// later_state 只有付款凭证是凭后补单做的才有；later_ok 是还没做账、凭后补单放行的。
 const viaLater = r => !!r.later_state
-const laterTxt = x => '后补单' + (x.n > 1 ? ` ${x.n} 张` : '') + revCn(x.st)
+const byLater = r => !!(r.later_ok || r.later_state)
+const laterWho = r => { const g = r.later_gate || {}; return (g.id ? `后补单 #${g.id}` : '后补单') + (g.by ? `，${g.by} ${md(g.at)} 确认` : '') }
 const periodOf = r => {                                              // 凭证所在期间：金蝶读到的优先，其次做账记录里记的，最后按付款日
   const v = r.vinfo || {}, p = r.posted || {}
   const y = v.year || p.vyear, m = v.period || p.vperiod || p.vmonth
@@ -114,11 +116,11 @@ export function FlowTable({ rows, loading, plans, sel, setSel, canBatch, onSteps
               : <Cell kind="stop" ic="!" main="还没复核" grey={r.period ? '到账单复核台登记，或标本主体通过' : '请款单还没认出是哪个月的账单'} />
           // ② 收票：灰字＝票种＋发票管家审核状态
           const parts = invParts(r)
-          const grey2 = !parts.length ? null
-            : viaLater(r) ? parts.map((x, i) => <React.Fragment key={i}>{i > 0 && '、'}<span className={x.ok ? 'lt' : 'w'} title={x.txt + '（发票后补单到的票）'}>{laterTxt(x)}</span></React.Fragment>)
-              : parts.map((x, i) => <React.Fragment key={i}>{i > 0 && '、'}{x.ok ? x.txt : <span className="w">{x.txt}</span>}</React.Fragment>)
+          const grey2 = parts.length ? parts.map((x, i) => <React.Fragment key={i}>{i > 0 && '、'}{x.ok ? x.txt : <span className="w">{x.txt}</span>}</React.Fragment>) : null
+          const nInv = (r.invs || []).length, invPend = parts.some(x => !x.ok)
           const main2 = `已收 ${(r.invs || []).length} 张`
-          const c2 = r.later_ok ? <Cell kind="later" ic="补" main="票后到" grey="发票后补已确认" />
+          const c2 = byLater(r) ? <Cell kind="later" ic="补" main="票后到" title={`凭发票后补单${done ? '做的账' : '放行'}：${laterWho(r)}${nInv ? `；后来到的票：${invPlain(r)}` : '；发票还没到'}`}
+            grey={<><span className="lt">后补单已审核</span>{nInv > 0 && <> · 票已到 {nInv} 张{invPend && <span className="w">，待审核</span>}</>}</>} />
             : !(r.invs || []).length ? ((after(2) || done) ? <Cell kind="wait" ic="○" main="没票" grey={r.later_slip ? `已登记后补单 #${r.later_slip.id}，待确认` : ''} />
               : <Cell kind="stop" ic="!" main="没票" grey={r.later_slip ? `已登记后补单 #${r.later_slip.id}，到复核台第③步确认` : '票夹里还没有发票'} />)
               : r.inv_state === 'ok' ? <Cell kind="ok" ic="✓" main={main2} grey={grey2} />
@@ -158,10 +160,10 @@ export function FlowTable({ rows, loading, plans, sel, setSel, canBatch, onSteps
 // —— 做账步骤弹窗：先过三道闸，再是系统自动做的那几步；每一步写这张单自己的数。动效只放一遍(用户「播放一遍就好啦」)。——
 function buildSteps(r, d) {
   const s = stageOf(r), done = s === 9
-  const g1 = !!r.review, g2 = invOk(r), g3 = !!r.paid
+  const g1 = !!r.review, g2 = invOk(r) || viaLater(r), g3 = !!r.paid
   const G = [
     { ok: g1, t: '① 账单复核', d: g1 ? (r.review.how === 'month' ? `整月登记 ${md(r.review.at)}` : `本主体通过 ${md(r.review.at)} ${r.review.by || ''}`) : done ? '做账时没复核（那时还没有这道闸）' : '整月没登记，这个主体也没标通过' },
-    { ok: g2, t: '② 收票', d: r.later_ok ? '发票后补已确认：先付款，票到了再转税' : (r.invs || []).length ? `已收 ${r.invs.length} 张，${invPlain(r)}${viaLater(r) ? '（发票后补单到的票）' : ''}` + (r.inv_state === 'diff' ? `；合计 ${money(r.inv_total)} 和请款对不上` : '') : '票夹里没票' },
+    { ok: g2, t: '② 收票', d: byLater(r) ? `凭发票后补单放行（${laterWho(r)}），` + (done ? '做付款凭证时还没有发票' : '先付款，票到了再转税') : (r.invs || []).length ? `已收 ${r.invs.length} 张，${invPlain(r)}` + (r.inv_state === 'diff' ? `；合计 ${money(r.inv_total)} 和请款对不上` : '') : '票夹里没票' },
     { ok: g3, t: '③ 付款', d: g3 ? `已付款 ${r.paid}` + (r.fkd ? `，付款单 ${r.fkd}` : r.paid_voucher ? `，金蝶已记 ${r.paid_voucher}` : '，付款单还是暂存') : '金蝶还没有付款单' },
   ]
   const A = []
@@ -190,7 +192,9 @@ function buildSteps(r, d) {
   else if ((cf.rows || []).length) A.push({ t: '指定现金流量', d: cf.rows.map(x => `${x.name} ${money(x.amount)}`).join(' ＋ ') })
   else A.push({ bad: 1, t: '指定现金流量', d: (cf.why || '拆不出来') + '：系统不猜，要人到金蝶指定' })
   ;(d.xbook || []).forEach(x => A.push({ t: `${x.short}账上红冲 ${x.ref}`, d: x.reversed ? `${x.short}那边已经红冲过了（${money(x.gross)}），不重复做` : x.via ? `放在${x.short}自己的付款凭证里一起做` : `到${x.short}账簿建红冲凭证 ${money(x.gross)}，提交不审核` }))
-  if (later && done) A.push(r.later_state === 'done' ? { t: '票到了，暂估转待认证', d: `已另做一张凭证 记-${r.later3_vno}` } : { skip: 1, t: '票到了，暂估转待认证', d: r.later_state === 'todo' ? '发票到了，这一张还没做：在凭证预览里做' : '发票还没到' })
+  // 付款凭证做完，付款这条线的事就结束了；票到了那张「暂估转待认证」归发票后补单那边做(V2.953)，这里只写它做了没有
+  if (later && done) A.push(r.later_state === 'done' ? { t: '票到了，暂估转待认证', d: `${(r.invs || []).length ? invPlain(r) + '；' : ''}发票后补单那边已另做一张凭证 记-${r.later3_vno}` }
+    : { skip: 1, t: '票到了，暂估转待认证', d: r.later_state === 'todo' ? `发票到了（${invPlain(r)}），这一张还没做：票审核通过、后补单收齐后，由发票后补单那边做` : '发票还没到；到了由发票后补单那边做' })
   A.push({ t: '收尾', d: '记做账记录；首页待办转给审核人；发钉钉提醒' })
   return { G, A, done, s }
 }

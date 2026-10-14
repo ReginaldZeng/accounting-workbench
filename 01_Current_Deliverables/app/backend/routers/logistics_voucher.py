@@ -535,6 +535,11 @@ def vlist(request: Request, since: str = "2026-09-01"):
         o["inv_state"] = _inv_state(r, invs)
         _sl = None if (invs or o.get("posted")) else _later_slip(o["inst"])
         o["later_ok"] = bool(not invs and o["inst"] in laters and (o.get("later") or _sl))
+        # V2.963(用户：「这里的做账是依靠后补单，而不是发票」)：凭发票后补单放行 / 做了账的，把依据带出来——哪张后补单、谁什么时候确认的
+        if o["later_ok"] or o.get("later_state"):
+            _c = laters.get(o["inst"]) or {}
+            _s2 = _sl or _later_slip(o["inst"]) or {}
+            o["later_gate"] = {"id": _s2.get("id"), "status_cn": _s2.get("status_cn") or "", "by": _c.get("by") or "", "at": _c.get("at") or ""}
         # V2.941(用户登记了后补单，页面上还是「票夹里还没有发票」)：后补单登记了、还没在复核台确认的，没付款的也带出来(原来只给付了款的带)
         if _sl and not o["later_ok"] and not o.get("later_slip"):
             o["later_slip"] = {"id": _sl["id"], "status_cn": _sl.get("status_cn"), "expect_date": _sl.get("expect_date"), "filed_by": _sl.get("filed_by")}
