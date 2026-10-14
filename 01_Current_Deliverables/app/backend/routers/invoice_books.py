@@ -277,6 +277,12 @@ def _ledger_filters(qp):
                 f[k] = inv._norm_date(raw)
             except ValueError:
                 return None, "日期格式不对（要 2026-09-01 这样）：%s" % raw
+    raw_ids = inv._s(qp.get("ids"), 20000)
+    if raw_ids:
+        try:
+            f["ids"] = [int(x) for x in raw_ids.split(",") if x.strip()][:2000]
+        except ValueError:
+            return None, "勾选的票号不对"
     if f.get("booked") and f["booked"] not in ("booked", "unbooked", "unknown"):
         return None, "做账状态不正确"
     rv = inv._s(qp.get("review"), 12) or "approved"
@@ -434,6 +440,74 @@ async def ledger_export(request: Request):
     inv.audit(u, "导出发票台账", "发票台账", "%d 行%s；筛选：%s" % (
         n, "（到上限，后面的没导出）" if n >= EXPORT_CAP else "", json.dumps(filters, ensure_ascii=False)))
     return _xlsx(data, "发票台账_%s.xlsx" % _stamp(), "invoice_ledger_%s.xlsx" % _stamp())
+
+
+ORIG_ZIP_CAP_N = 500                  # 一次最多打包多少张
+ORIG_ZIP_CAP_BYTES = 300 * 1024 * 1024
+
+
+def _originals_zip(filters, user):
+    """批量下载原件（V2.984）→ (临时 zip 路径, 打进去几个文件, 一共几张, 下载名)。
+    文件夹＝主体简称/开票月份/，文件名＝开票日期-主体简称-销售方-￥价税合计（同名加 -2/-3）；附「清单.xlsx」：每张票打进了哪个文件、没打进的写原因。"""
+    import zipfile
+    import tempfile
+    e = E()
+    used, lines, n_in, total_b, n = set(), [], 0, 0, 0
+    tmp = tempfile.NamedTemporaryFile(prefix="inv_orig_", suffix=".zip", delete=False)
+    tmp.close()
+    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as z:
+        for r in S.ledger_iter(e, dict(filters, kind=filters.get("kind") or ""), cap=ORIG_ZIP_CAP_N + 1):
+            if r.get("review") == "void":
+                continue
+            n += 1
+            sub = inv.org_short(r.get("buyer_name")) or r.get("buyer_name") or "未识别主体"
+            month = str(r.get("issue_date") or "")[:7] or "无开票日期"
+            folder = "%s/%s" % (inv._FN_BAD.sub("", sub) or "未识别主体", month)
+            vch = "、".join(inv.voucher_labels_of(r))
+            base = [r.get("issue_date") or "", sub, r.get("seller_name") or "", r.get("number") or "", r.get("total"), vch]
+            if n > ORIG_ZIP_CAP_N:
+                lines.append(["", "", *base, "超过一次 %d 张的上限，没打包：请缩小条件分几次下" % ORIG_ZIP_CAP_N])
+                break
+            data, ext = inv.item_original(r, e)
+            if data is None:
+                lines.append([folder, "", *base, ext])
+                continue
+            if total_b + len(data) > ORIG_ZIP_CAP_BYTES:
+                lines.append([folder, "", *base, "压缩包超过 %dMB，没打进去：请缩小条件分几次下" % (ORIG_ZIP_CAP_BYTES // 1024 // 1024)])
+                continue
+            name = inv.unique_name("%s/%s.%s" % (folder, inv.orig_base_name(r), ext), used)
+            z.writestr(name, data)
+            total_b += len(data)
+            n_in += 1
+            lines.append([folder, name.rsplit("/", 1)[-1], *base, ""])
+        wb = ie._new_wb()
+        sw = ie._SheetWriter(wb, "清单", ["文件夹", "文件名", "开票日期", "主体", "销方", "发票号码", "价税合计", "凭证", "没打包的原因"],
+                             money=("价税合计",), text=("发票号码",),
+                             widths={"文件夹": 22, "文件名": 60, "销方": 32, "发票号码": 24, "凭证": 22, "没打包的原因": 36})
+        for ln in lines:
+            sw.add(ln)
+        sw.finish()
+        z.writestr("清单.xlsx", ie._save(wb))
+    name = "发票原件-%s-%s-%d张.zip" % (inv._FN_BAD.sub("", user or "") or "导出", datetime.now().strftime("%Y%m%d"), n_in)
+    return tmp.name, n_in, min(n, ORIG_ZIP_CAP_N), name
+
+
+@router.get("/api/inv/ledger/originals")
+async def ledger_originals(request: Request):
+    """批量下载原件：台账当前条件（或 ids＝勾上的那几张）→ zip。"""
+    u, bad = need(request, ENTER_LEDGER)
+    if bad:
+        return bad
+    filters, msg = _ledger_filters(request.query_params)
+    if msg:
+        return err(msg, 400)
+    path, n_in, n, name = await run_in_threadpool(_originals_zip, filters, u["name"])
+    inv.audit(u, "批量下载发票原件", "发票台账", "%d 张里打包 %d 个原件；筛选：%s" % (n, n_in, json.dumps(filters, ensure_ascii=False)[:300]))
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+    return FileResponse(path, media_type="application/zip", background=BackgroundTask(os.remove, path), headers={
+        "Content-Disposition": "attachment; filename=invoice_originals_%s.zip; filename*=UTF-8''%s" % (_stamp(), quote(name)),
+        "X-Content-Type-Options": "nosniff"})
 
 
 def _void_sync(u, iid, note):

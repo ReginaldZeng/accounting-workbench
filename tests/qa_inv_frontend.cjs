@@ -1339,6 +1339,10 @@ test('V2.975 台账：筛选条先列 主体/开票月份/做账月份/票种/�
   assert.match(await bar.innerText(), /可抵扣税额\s*0\.00/)
   await page.getByLabel('勾选这一页').check()
   assert.match(await bar.innerText(), /已勾选\s*2\s*张/)
+  // V2.984 下载原件：勾了几张就只下这几张
+  const dl = page.getByRole('link', { name: /下载原件（勾选的 2 张）/ })
+  const href = await dl.getAttribute('href')
+  assert.ok(href.startsWith('/api/inv/ledger/originals?') && /ids=(301%2C302|302%2C301)/.test(href), href)
   assert.match(await bar.innerText(), /可抵扣税额\s*11\.50/)
   await bar.getByRole('button', { name: '清掉勾选' }).click()
   assert.equal(await page.locator('.inv-lg-checked').count(), 0)

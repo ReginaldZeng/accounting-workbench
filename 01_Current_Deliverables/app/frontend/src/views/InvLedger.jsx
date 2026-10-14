@@ -12,7 +12,7 @@
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invItemOtherSystem, invFolder,
+  invConfig, invLedger, invLedgerExportUrl, invLedgerOriginalsUrl, invVouchersRefresh, invItemVoid, invItemOtherSystem, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
   invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invDeductTickOptions, invOther, invOtherImport, invTickLists, invTickListUrl,
   invSellers, invSellerCheck,
@@ -131,7 +131,7 @@ function logBrief(d) {
   return t ? String(t).slice(0, 80) : ''
 }
 
-function FilterBar({ f, setF, exportUrl, total, subjects, subjectShort, reviewers, refresh, refreshing, refreshLabel }) {
+function FilterBar({ f, setF, exportUrl, origUrl, origN, total, subjects, subjectShort, reviewers, refresh, refreshing, refreshLabel }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
   const dirty = Object.keys(EMPTY_FILTER).some(k => f[k] !== EMPTY_FILTER[k])
   const moreOn = MORE_KEYS.some(k => f[k] !== EMPTY_FILTER[k])
@@ -178,6 +178,8 @@ function FilterBar({ f, setF, exportUrl, total, subjects, subjectShort, reviewer
       <span className="inv-lg-grow" />
       {refresh && <button className="btn" disabled={refreshing} onClick={refresh}
         title="去金蝶按发票号找凭证：一次查一批，十几秒；查的时候台账照常用">{refreshLabel || '刷新全部金蝶凭证'}</button>}
+      <a className="btn" href={origUrl} title="原件打成压缩包：主体简称/开票月份/ 分文件夹，文件名＝开票日期-主体简称-销售方-￥价税合计，附清单；一次最多 500 张">
+        {origN ? `下载原件（勾选的 ${origN} 张）` : '下载原件'}</a>
       <a className="btn" href={exportUrl} title={total ? `按当前条件导出 ${total} 张` : '按当前条件导出'}>导出 Excel</a>
     </div>
   )
@@ -515,7 +517,8 @@ function QueryTab({ can, flash }) {
 
   return (
     <>
-      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects} subjectShort={data?.subjectShort} reviewers={data?.reviewers}
+      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total}
+        origUrl={invLedgerOriginalsUrl(params, [...checked.keys()])} origN={checked.size} subjects={data?.subjects} subjectShort={data?.subjectShort} reviewers={data?.reviewers}
         refreshing={!!(job && job.running)} refreshLabel={refreshLabel} refresh={can.auditAct ? startRefresh : undefined} />
       {data && (checked.size > 0
         ? <CheckedBar rows={[...checked.values()]} onClear={() => setChecked(new Map())} />

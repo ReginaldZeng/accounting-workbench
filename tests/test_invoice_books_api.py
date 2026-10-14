@@ -445,6 +445,53 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(V._since([{"issue_date": "2026-09-10"}, {"issue_date": "2026-07-15"}]), "2026-07")
         self.assertEqual(V._since([{"issue_date": "2026-09-10"}, {"issue_date": None}]), "")
 
+    def test_originals_naming_and_zip(self):
+        """V2.984 下载原件：名字＝开票日期-主体简称-销售方-￥价税合计；同名加 -2；PDF 装了几张票只给这一页；
+        批量＝主体简称/开票月份/ 分文件夹的压缩包＋清单，没原件的写原因；ids 只打勾上的。"""
+        import io
+        import zipfile
+        from openpyxl import load_workbook
+        inv = self.inv
+        it = {"issue_date": "2026-09-10", "buyer_name": "测试买方有限公司", "seller_name": "徐州/云龙:酒店", "total": 249}
+        self.assertEqual(inv.orig_base_name(it), "2026年9月10日-%s-徐州云龙酒店-￥249.00" % (inv.org_short("测试买方有限公司") or "测试买方有限公司"))
+        self.assertTrue(inv.orig_base_name({"inv_type": "train", "total": 25}).startswith("无开票日期-未识别主体-铁路电子客票-￥25.00"))
+        used = set()
+        self.assertEqual([inv.unique_name("a/x.pdf", used), inv.unique_name("a/x.pdf", used), inv.unique_name("a/X.pdf", used)], ["a/x.pdf", "a/x-2.pdf", "a/X-3.pdf"])
+        # PDF 里装了两张票：只给这一页
+        fitz = self.inv.ip._fitz()
+        doc = fitz.open()
+        for t in ("PAGE-ONE", "PAGE-TWO"):
+            doc.new_page().insert_text((72, 72), t)
+        two = doc.tobytes()
+        with patch.object(inv.S, "file_get", return_value={"id": 1, "ext": "pdf", "pages": 2, "name": "x.pdf"}), \
+                patch.object(inv, "read_file_bytes", return_value=two):
+            a, _ = self.make_item(num(9841), 100, fields={"buyer_name": "测试公司"})
+            self.S.item_update(self.e, a, file_id=987654, page=1)
+            b, _ = self.make_item(num(9842), 200, fields={"buyer_name": "测试公司"})
+            self.S.item_update(self.e, b, file_id=987654, page=0)
+            data, ext = inv.item_original(self.item(a))
+        self.assertEqual(ext, "pdf")
+        one = fitz.open(stream=data, filetype="pdf")
+        self.assertEqual((one.page_count, "PAGE-TWO" in one[0].get_text()), (1, True))
+        # 批量：只打勾上的两张 + 一张没原件的
+        c, _ = self.make_item(num(9843), 300, fields={"buyer_name": "测试公司"})
+        fake = lambda r, e=None: (b"%PDF-1.4 " + str(r["id"]).encode(), "pdf") if r["id"] in (a, b) else (None, "这张票没有原件（只有二维码信息）")
+        with patch.object(inv, "item_original", side_effect=fake):
+            r = self.get("/api/inv/ledger/originals?ids=%d,%d,%d" % (a, b, c), "acct")
+        self.assertEqual(r.status_code, 200, r.text[:200])
+        self.assertIn("%E5%8F%91%E7%A5%A8%E5%8E%9F%E4%BB%B6", r.headers["content-disposition"])        # 发票原件
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        names = z.namelist()
+        self.assertIn("清单.xlsx", names)
+        pdfs = [n for n in names if n.endswith(".pdf")]
+        self.assertEqual(len(pdfs), 2)
+        self.assertTrue(all(n.count("/") == 2 for n in pdfs), pdfs)            # 主体简称/开票月份/文件
+        ws = load_workbook(io.BytesIO(z.read("清单.xlsx"))).active
+        reasons = [row[-1] for row in ws.iter_rows(min_row=2, values_only=True) if row and row[0] is not None]
+        self.assertTrue(any(x and "没有原件" in str(x) for x in reasons), reasons)
+        self.assertEqual(self.get("/api/inv/ledger/originals?ids=x", "acct").status_code, 400)
+        self.assertEqual(self.c.get("/api/inv/ledger/originals").status_code, 401)     # 没登录不给；能进台账的（同导出 Excel）都能下
+
     def test_vouchers_refresh_all_runs_in_background(self):
         """V2.966：「刷新全部金蝶凭证」后台跑、带进度：已对上的成批核实，只逐张查没对上的；查完一张就落库；
         正在跑时再点只回进度不报错；定时同步正占着时让人等一下；定时那一轮顺手查「从没查过」的票（有上限）。"""

@@ -332,6 +332,13 @@ export function viewerStartPage(item, page) {
  * @param {() => void} [p.onPrev] 上一张（不传不显示按钮）
  * @param {() => void} [p.onNext] 下一张（不传不显示按钮）
  */
+// 「下载原件」（V2.984）：发票 / 收据走统一命名（开票日期-主体简称-销售方-￥价税合计；一份 PDF 装了几张票的只给这一页）；
+// 别的附件、手机端照旧下原文件
+function origLink(item, file) {
+  const own = item && item.id && (item.kind === 'invoice' || item.kind === 'receipt') && String(file.orig || '').startsWith('/api/inv/file/')
+  return own ? { href: `/api/inv/item/${item.id}/download`, download: true } : { href: file.orig, download: file.name || true }
+}
+
 export function InvViewer({ item, page, onPage, activeField, onRotate, height = 520, onPrev, onNext }) {
   const file = item?.file || null
   const previews = (file && Array.isArray(file.preview) && file.preview.length) ? file.preview : (file?.thumb ? [file.thumb] : [])
@@ -453,7 +460,7 @@ export function InvViewer({ item, page, onPage, activeField, onRotate, height = 
         <span className="inv-vw-pct">这张票在原件第 {pg + 1} 页</span>
         {nPages > 0 && <button type="button" className="inv-ib wide" onClick={() => go(nPages - 1)} title="看有预览图的最后一页">看第 {nPages} 页</button>}
         <span className="inv-vw-grow" />
-        {file.orig && <a className="inv-lk" href={file.orig} download={file.name || true}>下载原件</a>}
+        {file.orig && <a className="inv-lk" {...origLink(item, file)}>下载原件</a>}
       </div>
       <div className="inv-vw-stage">
         <div className="inv-vw-ph">原件第 {pg + 1} 页没有生成预览图，请点右上角「下载原件」翻到这一页核对（别拿别的页的票面核字段）</div>
@@ -485,7 +492,7 @@ export function InvViewer({ item, page, onPage, activeField, onRotate, height = 
           <button type="button" className="inv-ib" disabled={pg >= nPages - 1} onClick={() => go(pg + 1)} title="下一页">›</button>
         </>}
         <span className="inv-vw-grow" />
-        {file.orig && <a className="inv-lk" href={file.orig} download={file.name || true}>下载原件</a>}
+        {file.orig && <a className="inv-lk" {...origLink(item, file)}>下载原件</a>}
       </div>
       <div className="inv-vw-stage grab" ref={stage}
         onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}

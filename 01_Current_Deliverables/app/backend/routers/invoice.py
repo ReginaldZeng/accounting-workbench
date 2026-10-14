@@ -1074,6 +1074,88 @@ def file_response(f, v="o", page=0, inline=False):
     return FileResponse(p, media_type=mime, headers=headers)
 
 
+_FN_BAD = re.compile(r'[\\/:*?"<>|\r\n\t]+')
+_TYPE_SELLER = {"train": "铁路电子客票", "flight": "航空运输电子客票行程单", "taxi": "出租车票", "tollpaper": "过路费发票", "quota": "定额发票"}
+
+
+def orig_base_name(it):
+    """原件下载名（不带扩展名，用户 2026-10-14 定）：开票日期-主体简称-销售方-￥价税合计
+    例「2026年9月10日-深圳星期九-徐州市云龙区粤彭大酒店-￥249.00」。没有销方（铁路客票等）写票种；读不到的写「无…」。"""
+    it = it or {}
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", str(it.get("issue_date") or ""))
+    day = "%d年%d月%d日" % (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else "无开票日期"
+    sub = org_short(it.get("buyer_name")) or it.get("buyer_name") or "未识别主体"
+    seller = it.get("seller_name") or _TYPE_SELLER.get(it.get("inv_type") or "") or it.get("type_label") or "无销方"
+    tot = it.get("total")
+    try:
+        amt = "￥%.2f" % float(tot)
+    except (TypeError, ValueError):
+        amt = "￥无金额"
+    name = _FN_BAD.sub("", "-".join([day, sub, seller, amt])).strip(" .")
+    return name[:120] or "发票原件"
+
+
+def item_original(it, e=None):
+    """这张票的原件 → (字节, 扩展名) 或 (None, 原因)。一份 PDF 里登记了几张票、这张票有页号 → 只取这一页（单页 PDF），
+    免得下一张票拿到整份几十页的扫描件。"""
+    e = e or E()
+    if not it or not it.get("file_id"):
+        return None, "这张票没有原件（只有二维码信息）"
+    f = S.file_get(e, it["file_id"])
+    data = read_file_bytes(f) if f else None
+    if not data:
+        return None, "原件文件找不到了"
+    ext = (f.get("ext") or "").lower().lstrip(".") or (os.path.splitext(f.get("name") or "")[1].lstrip(".").lower() or "bin")
+    if ext == "pdf" and int(f.get("pages") or 1) > 1 and it.get("page") is not None:
+        with e.connect() as cx:
+            n = cx.execute(select(func.count()).select_from(S.ITEM).where(S.ITEM.c.file_id == it["file_id"], S._item_active(),
+                                                                          S.ITEM.c.kind.in_(("invoice", "receipt")))).scalar() or 0
+        if n > 1:
+            try:
+                fitz = ip._fitz()
+                src = fitz.open(stream=data, filetype="pdf")
+                pg = int(it.get("page") or 0)
+                if 0 <= pg < src.page_count:
+                    out = fitz.open()
+                    out.insert_pdf(src, from_page=pg, to_page=pg)
+                    data = out.tobytes()
+            except Exception:
+                pass                     # 拆不开就给整份，不挡下载
+    return data, ext
+
+
+def unique_name(name, used):
+    """同一批里重名的加 -2、-3（扩展名前）。used＝已经用过的名字集合（小写比较），会被改。"""
+    base, dot, ext = name.rpartition(".")
+    if not dot:
+        base, ext = name, ""
+    cand, k = name, 2
+    while cand.lower() in used:
+        cand = "%s-%d%s" % (base, k, ("." + ext) if ext else "")
+        k += 1
+    used.add(cand.lower())
+    return cand
+
+
+@router.get("/api/inv/item/{iid}/download")
+async def item_download(iid: int, request: Request):
+    """下载这张票的原件，按统一名字（开票日期-主体简称-销售方-￥价税合计）；PDF 里装了几张票的只给这一页。"""
+    u, bad = need(request)
+    if bad:
+        return bad
+    it = S.item_get(E(), iid)
+    if not it or it.get("status") == "removed":
+        return err("没有这张票", 404)
+    data, ext = await run_in_threadpool(item_original, it)
+    if data is None:
+        return err(ext, 404)
+    name = orig_base_name(it) + "." + ext
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return Response(content=data, media_type=mime, headers={
+        "Content-Disposition": "attachment; filename=invoice_%d.%s; filename*=UTF-8''%s" % (iid, ext, quote(name)),
+        "X-Content-Type-Options": "nosniff"})
+
+
 async def read_upload_files(request):
     """multipart → (files[(文件名, 字节)], fields{字段: 值}, errors[结果 dict], bad 响应|None)。
     单个文件超 MAX_FILE：记进 errors（action=error），其余照收；整包超 MAX_TOTAL、或一个能收的都没有且全是超限 → bad=413。

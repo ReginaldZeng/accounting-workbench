@@ -625,6 +625,7 @@ export const invCheckExportUrl = (id, only = 'missing') => `/api/inv/check/${id}
 // 发票台账
 export const invLedger = (params) => j(invWithQs('/api/inv/ledger', params))
 export const invLedgerExportUrl = (params) => invWithQs('/api/inv/ledger/export', params)
+export const invLedgerOriginalsUrl = (params, ids) => '/api/inv/ledger/originals?' + new URLSearchParams(Object.fromEntries(Object.entries({ ...(params || {}), ids: (ids || []).join(',') }).filter(([, v]) => v !== '' && v != null))).toString()   // 批量下载原件（V2.984）：当前条件或勾上的几张 → 压缩包
 export const invTaxlistImport = (file) => invPost('/api/inv/taxlist/import', invFd(file, 'file'))
 export const invTaxlistReport = (batch) => j(invWithQs('/api/inv/taxlist/report', { batch }))
 export const invTaxpackImport = (files) => invPost('/api/inv/taxpack/import', invFd(files, 'files'))

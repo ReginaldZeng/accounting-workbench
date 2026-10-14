@@ -1376,6 +1376,9 @@ def _ledger_conds(filters):
     if bm and re.fullmatch(r"\d{4}-\d{2}", bm):
         fj = func.coalesce(ITEM.c.flags_json, "")
         conds.append(or_(fj.like('%%"period": "%s%%' % bm), fj.like('%%"period":"%s%%' % bm)))
+    ids = f.get("ids")                   # 只要这几张（台账上勾上的，V2.984 批量下载原件用）
+    if isinstance(ids, (list, tuple)) and ids:
+        conds.append(ITEM.c.id.in_([int(x) for x in ids][:2000]))
     rv = g("reviewer")                   # 审核人：谁审核通过的
     if rv:
         conds.append(ITEM.c.review_by == rv)
