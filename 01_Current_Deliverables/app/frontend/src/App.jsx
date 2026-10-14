@@ -37,6 +37,7 @@ import InvDesk from './views/InvDesk.jsx'
 import InvLater from './views/InvLater.jsx'
 import InvAudit from './views/InvAudit.jsx'
 import InvLedger from './views/InvLedger.jsx'
+import InvVoucherJob from './views/InvVoucherJob.jsx'
 import Login from './views/Login.jsx'
 import ForcePwd from './views/ForcePwd.jsx'
 import Portal from './views/Portal.jsx'
@@ -243,6 +244,8 @@ export default function App() {
           <Placeholder title={(navDef?.modules || []).find(m => m.key === view)?.label || view}
             hint="这个模块还没接上功能——是在「系统设置 › 导航模块上线管理」自建的规划占位。开发接上同名标识后即可使用。" />}
       </main>
+      {/* V2.968「刷新全部金蝶凭证」进度浮窗：挂在外壳上，换页面也在 */}
+      <InvVoucherJob enabled={canView('invledger')} />
     </div>
   )
 }

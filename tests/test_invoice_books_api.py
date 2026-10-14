@@ -457,6 +457,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertNotIn(num(9661), asked)
         self.assertIn(num(9662), asked)
         self.assertEqual(j["checked"], j["total"])
+        self.assertEqual(j["ledgerN"] + j["auditN"], j["total"])             # V2.968：台账几张＋还在审核的几张
         self.assertEqual((bk(a).get("status"), bk(b).get("status"), bk(b)["vouchers"][0]["number"]), ("booked", "booked", "记-44"))
         # 定时同步正占着：让人等一下
         V._LOCK.acquire()

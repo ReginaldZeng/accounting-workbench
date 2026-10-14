@@ -12,7 +12,7 @@
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invVouchersJob, invItemVoid, invItemOtherSystem, invFolder,
+  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invItemOtherSystem, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
   invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invOther, invOtherImport, invTickLists, invTickListUrl,
   invSellers, invSellerCheck,
@@ -21,6 +21,7 @@ import {
 import { Modal, InvViewer, FieldPanel, StatusBadges, FileDrop, useToast, money, fmtTime } from './invShared.jsx'
 import PaperCheckButton from './InvCheck.jsx'
 import './inv-ledger.css'
+import { announceStart, useVouchersJob } from './InvVoucherJob.jsx'
 
 // ───────────────────────── 小工具 ─────────────────────────
 
@@ -447,32 +448,18 @@ function QueryTab({ can, flash }) {
   const rows = data?.rows || []
   const exportUrl = invLedgerExportUrl(params)
 
-  // 「刷新全部金蝶凭证」在后台跑（V2.966）：这里每 2 秒看一次进度，查到新的就重读这一页，查完说一声
-  const [job, setJob] = useState(null)
-  const jobSeen = useRef(-1)
-  useEffect(() => { invVouchersJob().then(r => setJob(r?.job || null)).catch(() => { /* 看不到进度不影响台账 */ }) }, [])
+  // 「刷新全部金蝶凭证」在后台跑（V2.966）；进度由外壳上的浮窗（InvVoucherJob，V2.968）统一盯着，这里跟着变：查到新的就重读这一页
+  const job = useVouchersJob()
+  const jobSeen = useRef(null)
   useEffect(() => {
-    if (!job || !job.running) return undefined
-    const t = setInterval(async () => {
-      try {
-        const r = await invVouchersJob()
-        const j = r?.job
-        if (!j) return
-        if (j.checked !== jobSeen.current) { jobSeen.current = j.checked; load(page) }
-        if (!j.running) {
-          if (j.error) flash(j.error, 'err')
-          else flash(`金蝶凭证查完了：${j.total} 张里对上 ${j.matched} 张，这次有变化的 ${j.changed} 张`, 'ok')
-          load(page)
-        }
-        setJob(j)
-      } catch { /* 下一轮再看 */ }
-    }, 2000)
-    return () => clearInterval(t)
-  }, [job && job.running, page, load])
+    if (!job) return
+    if (jobSeen.current !== null && job.checked !== jobSeen.current) load(page)
+    jobSeen.current = job.checked
+  }, [job && job.checked, job && job.running])
   const startRefresh = async () => {
     try {
       const r = await invVouchersRefresh()
-      if (r && r.job) { jobSeen.current = -1; setJob(r.job) }
+      if (r && r.job && r.ok) announceStart(r.job)
       if (r && !r.ok && r.msg) flash(r.msg, 'err')
     } catch (e) { flash('没开始刷新：' + errText(e), 'err') }
   }

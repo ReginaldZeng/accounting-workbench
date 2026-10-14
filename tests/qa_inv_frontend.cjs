@@ -35,6 +35,7 @@ import InvLater from '%SRC%/views/InvLater.jsx'
 import InvSettings from '%SRC%/views/InvSettings.jsx'
 import InvPhone from '%SRC%/views/InvPhone.jsx'
 import InvSelf from '%SRC%/views/InvSelf.jsx'
+import InvVoucherJob from '%SRC%/views/InvVoucherJob.jsx'
 import '%SRC%/styles.css'
 
 function ViewerSwitch({ items }) {
@@ -63,7 +64,16 @@ function PairHarness(p) {
   const [open, setOpen] = useState(true)
   return open ? <S.PairModal {...p} onClose={() => setOpen(false)} /> : <div id="qa-closed">已关</div>
 }
-const VIEWS = { ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf }
+// 外壳：台账页＋外壳上的「刷新金蝶凭证」浮窗；点「去别的页面」把台账页卸掉、浮窗还在
+function LedgerShell(p) {
+  const [on, setOn] = useState(true)
+  return <div>
+    <button id="qa-away" type="button" onClick={() => setOn(x => !x)}>去别的页面</button>
+    {on ? <InvLedger {...p} /> : <div id="qa-other">别的页面</div>}
+    <InvVoucherJob enabled />
+  </div>
+}
+const VIEWS = { LedgerShell, ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf }
 window.__mount = (name, props) => {
   const root = createRoot(document.getElementById('root'))
   root.render(React.createElement(VIEWS[name], props || {}))
@@ -1084,39 +1094,67 @@ test('F3/C3 勾「含作废」只多要作废票（review=withvoid），不再�
   await ctx.close()
 })
 
-test('V2.966 刷新全部金蝶凭证：后台跑，按钮显示进度、再点不报错、查完提示，不再写「台账没读出来」', async (browser, B) => {
+test('V2.968 刷新全部金蝶凭证：窗口正中浮窗转圈＋进度条，写清台账几张＋审核中几张；换页面浮窗还在；查完在浮窗里说结果', async (browser, B) => {
   const st = { rows: [inv({ id: 301, review: 'approved', folder: { id: 30 }, folderId: 30 })], logs: [] }
-  const job = { running: false, total: 0, checked: 0, matched: 0, changed: 0, error: '' }
+  const job = { running: false, total: 0, checked: 0, matched: 0, changed: 0, ledgerN: 0, auditN: 0, error: '' }
   let posts = 0
   const base = ledgerApi(st)
   const api = (c) => {
     if (c.path === '/api/inv/vouchers/refresh' && c.method === 'POST') {
       posts++
-      if (!job.running) Object.assign(job, { running: true, total: 30, checked: 12 })
+      if (!job.running) Object.assign(job, { running: true, total: 29, checked: 12, ledgerN: 15, auditN: 14, matched: 10 })
       return { ok: true, msg: '', job: { ...job } }
     }
     if (c.path === '/api/inv/vouchers/refresh') return { ok: true, job: { ...job } }
     return base(c)
   }
   const { page, ctx, calls } = await open(browser, B, api)
-  await mount(page, 'InvLedger', { user: { name: '测试会计' } })
+  await mount(page, 'LedgerShell', { user: { name: '测试会计' } })
   await page.locator('.inv-lg-tbl').waitFor()
+  assert.equal(await page.locator('.ivj-card').count(), 0, '没点之前不出浮窗')
   await page.getByRole('button', { name: '刷新全部金蝶凭证' }).click()
-  await page.getByRole('button', { name: '正在查金蝶 12/30' }).waitFor()
-  assert.equal(await page.getByRole('button', { name: /正在查金蝶/ }).isDisabled(), true)
+  const card = page.locator('.ivj-card')
+  await card.waitFor()
+  await card.getByText('正在去金蝶找凭证').waitFor()
+  assert.match(await card.innerText(), /12\s*\/\s*29 张/)
+  assert.match(await card.innerText(), /台账 15 张 ＋ 还在审核的 14 张/)
+  assert.match(await card.innerText(), /普票不入账，不查/)
+  await card.locator('.ivj-spin').waitFor()
+  await sleep(400)                                                       // 等弹出动画走完再量
+  const box = await card.boundingBox()
+  const vp = page.viewportSize()
+  assert.ok(Math.abs(box.x + box.width / 2 - vp.width / 2) < 4 && Math.abs(box.y + box.height / 2 - vp.height / 2) < 4, '在窗口正中')
+  await page.getByRole('button', { name: '正在查金蝶 12/29' }).waitFor()
+  // 浮窗不挡别处：还能点台账上的东西
+  await page.locator('#qa-away').click()
+  await page.locator('#qa-other').waitFor()
+  await card.waitFor()
   const before = calls.filter(c => c.path === '/api/inv/ledger').length
   Object.assign(job, { checked: 20 })
-  await page.getByRole('button', { name: '正在查金蝶 20/30' }).waitFor({ timeout: 5000 })
+  await card.getByText(/20\s*\/\s*29/).waitFor({ timeout: 5000 })
+  // 收起成右下角小条，点开又回来
+  await card.getByRole('button', { name: '收起' }).click()
+  await page.locator('.ivj-pill', { hasText: '金蝶凭证 20/29' }).waitFor()
+  await page.locator('.ivj-pill').click()
+  await card.waitFor()
+  // 回到台账：按钮跟着进度，查到新的会重读
+  await page.locator('#qa-away').click()
+  await page.getByRole('button', { name: /正在查金蝶 20\/29/ }).waitFor()
+  Object.assign(job, { checked: 25 })
+  await page.getByRole('button', { name: '正在查金蝶 25/29' }).waitFor({ timeout: 5000 })
   assert.ok(calls.filter(c => c.path === '/api/inv/ledger').length > before, '查到新的就重读这一页')
-  Object.assign(job, { running: false, checked: 30, matched: 25, changed: 3 })
-  await page.getByText('30 张里对上 25 张，这次有变化的 3 张').waitFor({ timeout: 5000 })
+  Object.assign(job, { running: false, checked: 29, matched: 25, changed: 3 })
+  await card.getByText('金蝶凭证查完了').waitFor({ timeout: 5000 })
+  assert.match(await card.innerText(), /29 张里对上 25 张，这次有变化的 3 张/)
   await page.getByRole('button', { name: '刷新全部金蝶凭证' }).waitFor()
+  await card.getByRole('button', { name: '知道了' }).click()
+  assert.equal(await page.locator('.ivj-card').count(), 0)
   assert.equal(posts, 1)
   assert.equal(await page.getByText('台账没读出来').count(), 0)
   await ctx.close()
 })
 
-test('V2.966 刷新全部：定时同步正占着 → 提示等一下（不当成台账读不出来）；打开页面时后台正在跑就接着显示进度', async (browser, B) => {
+test('V2.966 刷新全部：定时同步正占着 → 提示等一下（不当成台账读不出来、不出浮窗）；别人点的在跑 → 台账按钮显示进度、不弹浮窗', async (browser, B) => {
   const st = { rows: [inv({ id: 301, review: 'approved', folder: { id: 30 }, folderId: 30 })], logs: [] }
   const base = ledgerApi(st)
   let running = false
@@ -1126,16 +1164,18 @@ test('V2.966 刷新全部：定时同步正占着 → 提示等一下（不当�
     return base(c)
   }
   let r = await open(browser, B, api)
-  await mount(r.page, 'InvLedger', { user: { name: '测试会计' } })
+  await mount(r.page, 'LedgerShell', { user: { name: '测试会计' } })
   await r.page.locator('.inv-lg-tbl').waitFor()
   await r.page.getByRole('button', { name: '刷新全部金蝶凭证' }).click()
   await r.page.getByText('定时同步正在查金蝶').waitFor()
   assert.equal(await r.page.getByText('台账没读出来').count(), 0)
+  assert.equal(await r.page.locator('.ivj-card').count(), 0)
   await r.ctx.close()
   running = true
   r = await open(browser, B, api)
-  await mount(r.page, 'InvLedger', { user: { name: '测试会计' } })
+  await mount(r.page, 'LedgerShell', { user: { name: '测试会计' } })
   await r.page.getByRole('button', { name: '正在查金蝶 3/8' }).waitFor()
+  assert.equal(await r.page.locator('.ivj-card').count(), 0, '别人点的不弹浮窗')
   await r.ctx.close()
 })
 

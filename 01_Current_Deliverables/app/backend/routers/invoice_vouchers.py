@@ -113,7 +113,8 @@ def _numbers(items):
 
 # ── 人点的「刷新全部」：后台跑、带进度 ──
 _JOB = {"running": False, "total": 0, "checked": 0, "verified": 0, "queried": 0, "toQuery": 0, "matched": 0, "changed": 0,
-        "by": "", "startedAt": "", "finishedAt": "", "error": ""}
+        "ledgerN": 0, "auditN": 0, "by": "", "startedAt": "", "finishedAt": "", "error": ""}
+# total＝审核通过的（台账里能看到的）＋还在审核的（对纸质票、审核页也要知道凭证），普票不查；ledgerN / auditN 是这两块各几张
 NEW_PER_ROUND = 10                   # 定时每一轮最多顺手查几张「从没查过」的票（一张一次查询，免得一轮拖太久、吃额度）
 
 
@@ -125,6 +126,8 @@ def _run_job():
     """后台线程里跑：先成批核实已对上的，再一张张查没对上的；每查完一张就落库、更新进度。出错停下，已查的照样算数。"""
     try:
         items = _active_items()
+        ap = sum(1 for i in items if i.get("review") == "approved")
+        _JOB.update(total=len(items), ledgerN=ap, auditN=len(items) - ap)
         kd = [i for i in items if _bk(i).get("status") == "booked" and _bk(i).get("source") == "kingdee" and _bk(i).get("vouchers")]
         rows_v = fetch_by_vouchers([v for i in kd for v in _bk(i)["vouchers"]]) if kd else []
         still = [i for i in kd if match_vouchers(i, rows_v)]
@@ -158,7 +161,7 @@ def start_job(user):
         return job_status(), ""
     if not _LOCK.acquire(blocking=False):
         return job_status(), "系统自己的定时同步正在查金蝶，一两分钟后再点"
-    _JOB.update(running=True, total=0, checked=0, verified=0, queried=0, toQuery=0, matched=0, changed=0,
+    _JOB.update(running=True, total=0, checked=0, verified=0, queried=0, toQuery=0, matched=0, changed=0, ledgerN=0, auditN=0,
                 by=inv._uname(user), startedAt=inv.now_s(), finishedAt="", error="")
     threading.Thread(target=_run_job, name="inv-vouchers-refresh", daemon=True).start()
     return job_status(), ""
