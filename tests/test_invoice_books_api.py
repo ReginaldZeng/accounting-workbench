@@ -529,6 +529,14 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertTrue(self.ok(self.get("/api/inv/ledger?size=200&q=" + num(9673), "acct"))["rows"][0]["noBook"])
         self.S.item_update(self.e, t, deductible=1)
         self.assertIn(t, {i["id"] for i in V._active_items()})
+        # V2.980 抵扣筛选「可抵扣未勾选」：判了可抵扣、没标注没勾选、不归票总管
+        self.S.item_update(self.e, b, deductible=1, deduct_status=None)
+        opn = lambda: {r["id"] for r in self.ok(self.get("/api/inv/ledger?size=500&deduct=open", "acct"))["rows"]}
+        self.assertIn(b, opn())
+        self.S.item_update(self.e, a, deductible=0)
+        self.assertNotIn(a, opn())                                             # 判了不可抵扣的（普票）不在
+        self.S.item_update(self.e, b, deduct_status="marked")
+        self.assertNotIn(b, opn())
         # 台账筛选「票总管」：记了「票总管已有」的算在
         self.S.item_update(self.e, b, deduct_status="other")
         yes = {r["id"] for r in self.ok(self.get("/api/inv/ledger?size=500&other=yes", "acct"))["rows"]}

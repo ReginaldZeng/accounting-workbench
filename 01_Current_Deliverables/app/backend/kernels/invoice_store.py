@@ -1342,6 +1342,8 @@ def _ledger_conds(filters):
         conds.append(ITEM.c.deductible == 0)
     elif dd == "unset":
         conds.append(ITEM.c.deductible.is_(None))
+    elif dd == "open":               # 可抵扣未勾选（V2.980）：会计判了可抵扣、还没标注 / 勾选、也不归票总管——就是还要去勾的
+        conds.append(and_(ITEM.c.deductible == 1, func.coalesce(ITEM.c.deduct_status, "") == ""))
     elif dd == "marked":
         conds.append(func.coalesce(ITEM.c.deduct_status, "").in_(("marked", "checked")))
     elif dd == "checked":

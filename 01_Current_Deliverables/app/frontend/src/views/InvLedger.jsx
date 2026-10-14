@@ -40,7 +40,8 @@ const INV_TYPE_LABEL = {
 }
 const KIND_LABEL = { receipt: '收据', other: '非发票附件' }
 const VERIFY_OPTS = [['', '全部'], ['green', '已验真'], ['red', '作废红冲'], ['yellow', '税局未见'], ['gray', '不适用'], ['unset', '未对账']]
-const DEDUCT_OPTS = [['', '全部'], ['yes', '可抵扣'], ['no', '不可抵扣'], ['unset', '未判定'], ['marked', '已标注勾选'], ['other', '票总管已有']]
+// 抵扣筛选（V2.980 用户定，四档互不重叠）：已标注勾选（含税局已勾）／可抵扣未勾选（还要去勾的）／不可抵扣（含普票）／票总管（勾选归票总管做）
+const DEDUCT_OPTS = [['', '全部'], ['marked', '已标注勾选'], ['open', '可抵扣未勾选'], ['no', '不可抵扣'], ['other', '票总管']]
 const VERIFY_TONE = { green: 'ok', red: 'err', yellow: 'warn', gray: 'mute' }
 const VERIFY_TEXT = { green: '已验真', red: '作废红冲', yellow: '税局未见', gray: '不适用' }
 const PAGE_SIZE = 50
@@ -64,7 +65,7 @@ function deductText(it) {
   if (it?.deductStatus === 'checked') return '已勾选'
   if (it?.deductStatus === 'marked') return '已标注勾选'
   if (it?.deductStatus === 'other') return '票总管已有'
-  if (it?.deductible === true || it?.deductible === 1) return '可抵扣'
+  if (it?.deductible === true || it?.deductible === 1) return '可抵扣未勾选'      // 和筛选「可抵扣未勾选」一个叫法（V2.980）
   if (it?.deductible === false || it?.deductible === 0) return '不可抵扣'
   return '未判定'
 }
