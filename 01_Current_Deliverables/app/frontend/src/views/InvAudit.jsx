@@ -1,5 +1,6 @@
 import { Bookkeeping } from './InvLedger.jsx'
 import { invPaperMark } from '../api.js'
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.957（审核弹窗·要办的事压扁）| 「这张票要办的事」三样压成各一两行；核销暂估做完后不再重复那句说明，「撤回重做」跟在结论后面
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.955（后补票转待认证·撤回重做）| 「核销暂估」：系统建好的凭证旁加「撤回重做」（还没审核的才撤得掉）
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.953（后补票转待认证·物流单也由后补单这边做）| 「核销暂估」：物流请款单在开关＝真做时也归这边做，徽标和「现在做」按钮跟着显示
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排）| 单张弹窗按样机第 3 版重排：左边 发票图＋「系统核对」（一行一句结论），右边「票面」（两栏紧凑）＋「这张票要办的事」（纸质票／转待认证／金蝶凭证）
@@ -582,12 +583,16 @@ function LaterVoucher({ laterId }) {
   return <div className={'inv-au-l3 ' + (good ? 'ok' : 'bad')}>
     <div className="inv-au-l3h">
       <b>核销暂估</b>
-      <span className="inv-muted">后补票：审核通过、后补单收齐后，系统做「暂估转待认证」凭证</span>
+      {!done && <span className="inv-muted">后补票：审核通过、后补单收齐后，系统做「暂估转待认证」凭证</span>}
       {p.kind === 'logistics' && p.by !== 'later'
         ? <span className="inv-badge mute" title="物流请款单的转待认证不归发票管家的开关管，由「付款做账」页的自动做账开关管">物流请款单 · 付款做账那边做</span>
         : <span className={'inv-badge ' + (d.mode === 'on' ? 'ok' : 'mute')} title="开关在发票管家设置里：关＝不做；演练＝只算、不写金蝶；真做＝往金蝶新建凭证并提交（不审核）">自动转待认证：{d.modeText}</span>}
     </div>
-    <div className={good ? 'inv-au-l3ok' : 'inv-au-l3bad'}>{done ? st.msg : p.why}</div>
+    <div className={good ? 'inv-au-l3ok' : 'inv-au-l3bad'}>{done ? st.msg : p.why}
+      {done && d.canRedo && <>　<button type="button" className="inv-lk" disabled={busy}
+        title="这张凭证不对（比如规则改了）时用：系统把金蝶里这张还没审核的凭证撤销提交并删除，再按现在的规则重建一张。已经审核的撤不了"
+        onClick={() => { if (window.confirm(`系统会把金蝶里这张还没审核的凭证（记-${st.vno}）撤销提交并删除，再按现在的规则重建一张，凭证号可能会变。确定吗？`)) act(() => invLaterVoucherRedo(laterId)) }}>
+        {busy ? '正在撤回重做…' : '撤回重做'}</button></>}</div>
     {!done && (p.cands || []).length > 0 && <table className="inv-au-l3t">
       <thead><tr><th /><th>原凭证</th><th>摘要</th><th className="num">供应商往来</th><th className="num">暂估进项税</th></tr></thead>
       <tbody>{p.cands.map(c => <tr key={c.key}>
@@ -605,12 +610,6 @@ function LaterVoucher({ laterId }) {
     </div>}
     {!done && st.status && st.msg && st.msg !== p.why && <div className="inv-muted">上一次：{st.msg}</div>}
     {err && <div className="inv-au-l3bad">{err}</div>}
-    {done && d.canRedo && <div>
-      <button type="button" className="btn" disabled={busy}
-        title="这张凭证不对（比如规则改了）时用：系统把金蝶里这张还没审核的凭证撤销提交并删除，再按现在的规则重建一张。已经审核的撤不了"
-        onClick={() => { if (window.confirm(`系统会把金蝶里这张还没审核的凭证（记-${st.vno}）撤销提交并删除，再按现在的规则重建一张，凭证号可能会变。确定吗？`)) act(() => invLaterVoucherRedo(laterId)) }}>
-        {busy ? '正在撤回重做…' : '撤回重做'}</button>
-    </div>}
     {!done && d.ready && d.mode !== 'off' && (p.kind !== 'logistics' || p.by === 'later') && p.kind !== 'none' && <div>
       <button type="button" className="btn" disabled={busy} onClick={() => act(() => invLaterVoucherRun(laterId))}
         title={d.mode === 'on' ? '不等后台，现在就往金蝶新建这张凭证并提交（不审核）' : '演练：只算一遍、把打算怎么做记下来，不写金蝶'}>{busy ? '正在做…' : (d.mode === 'on' ? '现在做' : '现在演练一次')}</button>

@@ -250,7 +250,22 @@
 .inv-au-fields .inv-fp-row:not(.pend):not(.dirty) .inv-in:not(:focus):not(:hover){ border-color:transparent; background:transparent; }
 .inv-au-fields .inv-fp-why{ display:none; }
 /* 这张票要办的事：三样压在一张卡里 */
-.inv-au-jobs > .inv-au-l3{ margin:0; }
+/* 压扁（V2.957·要办的事压扁）：纸质票／核销暂估／金蝶做账凭证 各占一两行，中间一条细线，不再是三个带边框的大框 */
+.inv-au-jobs{ gap:0; padding-bottom:2px; }
+.inv-au-jobs > :not(h3){ border:0; border-top:1px solid var(--line); border-radius:0; background:none; margin:0; padding:7px 0; }
+.inv-au-jobs > h3 + *{ border-top:0; }
+.inv-au-jobs .btn{ padding:2px 10px; font-size:12px; }
+.inv-au-jobs .inv-au-dedrow{ gap:4px 10px; font-size:13px; }
+.inv-au-jobs .inv-au-dedrow b{ font-size:13px; }
+.inv-au-jobs .inv-lg-box{ flex-direction:row; flex-wrap:wrap; align-items:baseline; gap:2px 10px; font-size:13px; }
+.inv-au-jobs .inv-lg-box-h{ font-size:13px; font-weight:600; color:var(--ink); }
+.inv-au-jobs .inv-lg-box p{ margin:0; }
+.inv-au-jobs .inv-lg-box p:empty{ display:none; }
+.inv-au-jobs .inv-lg-box p.inv-muted{ font-size:12px; }
+.inv-au-jobs .inv-lg-box p.inv-muted + p.inv-muted{ display:none; }
+.inv-au-jobs > .inv-au-l3{ gap:4px; }
+.inv-au-jobs > .inv-au-l3 .inv-au-l3h b::before{ content:"✓ "; color:var(--green); }
+.inv-au-jobs > .inv-au-l3.bad .inv-au-l3h b::before{ content:"! "; color:var(--amber); }
 @media (max-width:1100px){ .inv-au-fields .inv-fp{ grid-template-columns:1fr; } }
 /* 后补票「核销暂估」（暂估转待认证） */
 .inv-au-l3{ border:1px solid var(--line); border-left:3px solid var(--line); border-radius:8px; padding:10px 12px; margin:10px 0; display:grid; gap:6px; font-size:13px; }
