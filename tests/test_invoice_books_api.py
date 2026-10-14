@@ -2209,8 +2209,12 @@ class InvoiceBooksApiTests(unittest.TestCase):
             self.assertEqual([(x["dc"], x["acct"], x["amount"]) for x in v["lines"]], [("借", "2221.01.06", 13.09), ("贷", "2221.01.07", 13.09)])
             self.assertTrue(v["lines"][0]["expl"].startswith(num(37001) + "核销9/196#"), v["lines"][0]["expl"])
             self.assertEqual(v["lines"][1]["supplier"], seller)
+            S.item_insert(e, folder_id=fa, kind="other", origin="attachment", review="draft", proc_status="done")     # 付款单上的附件（草稿）
             approve(fa, ia)
             self.assertIn(la, L3._Q)
+            # 后补票审完，付款单还在收票中、附件是草稿：「已通过」里要搜得到（线上审完三个页签都搜不到，没法回来点「撤回重做」）；待审核里没有了
+            self.assertIn(fa, [r["id"] for r in self.ok(self.get("/api/inv/audit/queue?tab=done&q=" + num(37001), "acct"))["rows"]])
+            self.assertNotIn(fa, [r["id"] for r in self.ok(self.get("/api/inv/audit/queue?tab=pending&q=" + num(37001), "acct"))["rows"]])
             L3.drain()
             st = L3.state_of(la)
             self.assertEqual(st["status"], "dry")
