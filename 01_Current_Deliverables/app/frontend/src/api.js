@@ -620,6 +620,7 @@ export const invCheckGet = (id) => j(`/api/inv/check/${id}`)
 export const invCheckScan = (id, code) => jp(`/api/inv/check/${id}/scan`, { code })
 export const invCheckMark = (id, itemId, on) => jp(`/api/inv/check/${id}/mark`, { itemId, on })
 export const invCheckClose = (id) => jp(`/api/inv/check/${id}/close`)
+export const invCheckRestart = (id) => jp(`/api/inv/check/${id}/restart`)     // 从头再对：同一份清单 / 票夹开新的一次
 export const invCheckExportUrl = (id, only = 'missing') => `/api/inv/check/${id}/export?only=${only}`
 // 发票台账
 export const invLedger = (params) => j(invWithQs('/api/inv/ledger', params))

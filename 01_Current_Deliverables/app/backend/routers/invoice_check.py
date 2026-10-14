@@ -217,6 +217,18 @@ def start(u, folder_ids, entry):
     return view(S.check_get(inv.E(), cid)), None
 
 
+def restart(u, ck):
+    """从头再对：对着同一份清单 / 同一批票夹开新的一次（S.check_create 会把旧的这次收掉、记录留着；扫到的勾全清；「纸质件已到」不撤）。"""
+    if ck.get("list_id"):
+        out, bad = start_list(u, ck["list_id"], ck.get("entry"))
+    else:
+        out, bad = start(u, list(ck.get("folder_ids") or []), ck.get("entry"))
+    if bad:
+        return None, bad
+    inv.audit(u, "对纸质票·从头再对", "点验#%d → #%d" % (ck["id"], out["check"]["id"]), "")
+    return out, None
+
+
 def _mine(u, cid):
     """这次点验是不是这个人开的、还开着 → (行, None) 或 (None, 错误响应)。"""
     ck = S.check_get(inv.E(), cid) if cid else None
@@ -403,6 +415,22 @@ async def check_current(request: Request):
     def run():
         ck = S.check_current(inv.E(), u["name"])
         return _with_phone(u, view(ck)) if ck else {"ok": True, "check": None}
+    return await run_in_threadpool(run)
+
+
+@router.post("/api/inv/check/{cid}/restart")
+async def check_restart(cid: int, request: Request):
+    """从头再对：开新的一次（同一份清单 / 同一批票夹），旧的这次收掉。"""
+    u, bad = inv.need(request, GATES)
+    if bad:
+        return bad
+    ck, bad = _mine(u, cid)
+    if bad:
+        return bad
+
+    def run():
+        out, bad2 = restart(u, ck)
+        return bad2 if bad2 else _with_phone(u, out)
     return await run_in_threadpool(run)
 
 

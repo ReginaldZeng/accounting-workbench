@@ -6,7 +6,7 @@
 // 手机扫的记到同一次点验上：这里每 2 秒重读一次，手机扫到的那一行跟着变绿。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invCheckStart, invCheckStartList, invCheckCurrent, invCheckGet, invCheckScan, invCheckMark, invCheckClose, invCheckExportUrl, invAuditItemsApprove,
+  invCheckStart, invCheckStartList, invCheckCurrent, invCheckGet, invCheckScan, invCheckMark, invCheckClose, invCheckRestart, invCheckExportUrl, invAuditItemsApprove,
   invTickLists,
 } from '../api.js'
 import { money, fmtTime, usePoll, Modal, ScanInput, PairModal } from './invShared.jsx'
@@ -203,6 +203,16 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
   const mark = async (it, on) => {
     try { await invCheckMark(cid, it.id, on); await reload() } catch (e) { setAlertMsg({ tone: 'err', text: errText(e) }) }
   }
+  // 从头再对（V2.973）：扫到的勾全清、开新的一次；已记上的「纸质件已到」不撤
+  const redo = async () => {
+    if (!window.confirm('把这次扫到的 ' + (v.stats ? v.stats.hit : 0) + ' 张清掉，从头再对一遍？\n（这一次的记录留着；票上已记的「纸质件已到」不撤）')) return
+    setBusy('redo')
+    try {
+      const r = await invCheckRestart(cid)
+      if (r && r.check) { lastSeen.current = r.last ? r.last.id : null; setV(r); setCard(null); setAlertMsg(null); setDone(null); setOnlyMiss(false) }
+      onChanged && onChanged()
+    } catch (e) { setAlertMsg({ tone: 'err', text: '没能从头开始：' + errText(e) }) } finally { setBusy('') }
+  }
   const finish = async () => {
     setBusy('close')
     try { const r = await invCheckClose(cid); if (r && r.check) setV(r); onChanged && onChanged() } catch (e) { setAlertMsg({ tone: 'err', text: errText(e) }) } finally { setBusy('') }
@@ -241,6 +251,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
         <a className="btn" href={invCheckExportUrl(cid, 'missing')}>导出没扫到的</a>
         {entry === 'audit' && canAudit && <button type="button" className="btn primary" disabled={!hitPending.length || !!busy} onClick={approveHits}>
           {busy === 'audit' ? '正在审核…' : `审核扫到的（${hitPending.length}）`}</button>}
+        {open && <button type="button" className="btn" disabled={!!busy} onClick={redo} title="扫到的勾全清掉，对着同一份清单 / 同一批票夹从头再对">{busy === 'redo' ? '正在重开…' : '从头再对'}</button>}
         {open && <button type="button" className="btn" disabled={!!busy} onClick={finish}>{busy === 'close' ? '正在收…' : '对完了，收'}</button>}
         <button type="button" className="btn" onClick={onClose}>关闭</button>
       </>}>

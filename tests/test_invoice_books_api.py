@@ -1886,6 +1886,16 @@ class InvoiceBooksApiTests(unittest.TestCase):
         v2 = ck_.view(self.S.check_get(self.e, ck["id"]))
         self.assertEqual((v2["stats"]["hit"], v2["stats"]["strangers"], [x.get("bookMonth") for x in v2["strangers"][:2]]), (1, 6, ["2023-03", ""]))
         self.assertEqual((v2["last"]["show"]["big"], v2["last"]["viaLabel"]), ("不在清单", "手机"))   # 电脑上据此弹手机扫的那张
+        # V2.973 从头再对：同一份清单开新的一次，扫到的勾清零；旧的这次收掉；「纸质件已到」不撤
+        paper_before = self.item(a)["paper"]
+        nv, bad = ck_.restart(u, self.S.check_get(self.e, ck["id"]))
+        self.assertIsNone(bad)
+        self.assertNotEqual(nv["check"]["id"], ck["id"])
+        self.assertEqual((nv["check"]["listId"], nv["stats"]["hit"], nv["stats"]["total"]), (lst["id"], 0, 2))
+        self.assertTrue(self.S.check_get(self.e, ck["id"])["closed_at"])
+        self.assertEqual(self.item(a)["paper"], paper_before)
+        r = self.post("/api/inv/check/%d/restart" % nv["check"]["id"], "maker", {})
+        self.assertEqual(r.status_code, 404)                                   # 别人开的不能替他重开
         sys.modules.pop("routers.invoice_check", None)
 
     def test_27_tax_tick_type(self):

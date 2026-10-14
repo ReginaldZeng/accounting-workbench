@@ -1005,6 +1005,7 @@ test('对纸质票·选认证清单：对着一份清单开始，按凭证排；
     if (c.path === '/api/inv/check/current') return ck.started ? view() : { ok: true, check: null }
     if (c.path === '/api/inv/check/start') { ck.started = c.body; return view() }
     if (c.path === '/api/inv/check/9') return view()
+    if (c.path === '/api/inv/check/9/restart') { ck.restarted = (ck.restarted || 0) + 1; items.forEach(i => { i.hit = null }); ck.strangers = []; return view() }
     if (c.path === '/api/inv/check/9/scan') {
       if (c.body.code === 'N202') { items[1].hit = { at: '2026-10-31 09:01:00', by: '测试会计', via: 'scanner', viaLabel: '扫码枪' }; return { ok: true, result: 'ok', say: '确认', msg: '对上了：N202', item: items[1], show: { tone: 'ok', big: '这一批', small: '销方乙 N202' } } }
       ck.strangers.push({ kind: 'other', number: 'N900', total: 66, bookMonth: '2026-09', voucher: '深圳星期零-9-230#' })
@@ -1045,6 +1046,10 @@ test('对纸质票·选认证清单：对着一份清单开始，按凭证排；
   await dlg.locator('.inv-ck-str', { hasText: '深圳星期零-9-230#' }).waitFor()
   assert.deepEqual(await page.evaluate(() => window.__said), ['9 月'], '对上的只嘀不念，别的念出来')
   assert.deepEqual(await page.evaluate(() => window.__rates), [1], '1 倍速')
+  // 从头再对：确认后换成新的一次（扫到 0）；确认框由测试外壳自动点确定
+  await dlg.getByRole('button', { name: '从头再对' }).click()
+  await dlg.locator('.inv-ck-num', { hasText: /扫到 0 \/ 2/ }).waitFor()
+  assert.equal(ck.restarted, 1)
   await ctx.close()
 })
 

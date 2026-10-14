@@ -1,4 +1,4 @@
-# V-draft 发票管家：刷新金蝶凭证一次查一批（未上线）
+# V-draft 发票管家：刷新金蝶凭证一次查一批＋对纸质票「从头再对」（未上线）
 
 - 日期：2026-10-14
 - 作者：Claude Opus 5.5
@@ -16,12 +16,17 @@
 
 `fetch_rows` 改成：要查的 20 位数电号码有 2 张以上 → 按号码头两位分组，一组一次查「摘要里带这两位开头的 20 位数字」（只看这批票最早开票月以来的期间），拉回来在本地挑出含这些号码的分录；老式 8 位号码照旧一个号码一次。刷新全部、每天早上的全量、定时那一轮顺手查新票、退回逐张查，都走这个。55 张从好几分钟变成十几秒（核实已对上的 1～2 次 + 这一次）。定时每轮顺手查新票的上限从 10 张放到 200 张（一批一次查询，不再按张数花时间）。
 
+## 对纸质票「从头再对」
+
+用户 2026-10-14 截图（对纸质票·深圳星期九 2026-09 认证清单，扫到 5/19）：「这里要做一个重头核对的」。弹窗底部加 **「从头再对」**：确认后对着同一份清单 / 同一批票夹开新的一次，扫到的勾全清、不相干的票清单清空；旧的这次自动收掉（记录留着，日志写「对纸质票·从头再对 点验#旧→#新」）；票上已记的「纸质件已到」不撤（实物确实到过手）。只有开这次点验的人能重开。接口 `POST /api/inv/check/{id}/restart`。
+
 ## 涉及文件
 
 - 后端：`routers/invoice_vouchers.py`（`fetch_rows` 加 `since`、`_since`、`BULK_MIN`；后台任务、全量、定时都改调一次）
-- 测试：`tests/test_invoice_books_api.py`（`test_fetch_rows_bulk_query`；几处假的 fetch_rows 加 since 参数）
+- 对纸质票：`routers/invoice_check.py`（`restart`、接口）、`frontend/src/api.js`（`invCheckRestart`）、`frontend/src/views/InvCheck.jsx`（「从头再对」按钮）
+- 测试：`tests/test_invoice_books_api.py`（`test_fetch_rows_bulk_query`；几处假的 fetch_rows 加 since 参数；从头再对：清零、旧的收掉、纸质件不撤、别人不能重开）、`tests/qa_inv_frontend.cjs`（点「从头再对」后扫到 0）
 
 ## 验证
 
-- `tests.test_invoice_books_api` 49 条全过；线上用同一个查询条件实测 8.8 秒、1826 行、能找到火车票号码。
+- `tests.test_invoice_books_api` 49 条全过；页面回归 56 条过 53 条（没过的 3 条是「自助登记」老用例）；线上用同一个查询条件实测 8.8 秒、1826 行、能找到火车票号码。
 - 上线后实测整页刷新多久，待用户看。
