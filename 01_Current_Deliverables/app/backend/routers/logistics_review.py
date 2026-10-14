@@ -5662,6 +5662,25 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     for j in range(len(addcols)):   # 仅追加列数据配淡底，原始列不动
                         ws3.cell(rn, base_n + 1 + j).fill = ALIGHT
                 ws3.freeze_panes = "A2"
+                # V2.975(用户看极鲜达导出的原账单页「好像乱码了」)：这几页是早先存下的数据重画的，没有原件的列宽和数字格式——
+                #   12 位运单号被 Excel 显示成 8.00505E+11、发货日期是 46235 这种日期序号、列太窄字被截断。只补显示格式和列宽，格子里的值不动。
+                widths = {}
+                for cc in list(ws3._cells.values()):
+                    v = cc.value
+                    if v is None or v == "":
+                        continue
+                    shown = ("%.2f" % v) if isinstance(v, float) else str(v)     # 算出来的小数(455.9999999999999)按两位量宽，Excel 常规格式会按列宽自己收
+                    if cc.row > 1 and isinstance(v, int) and not isinstance(v, bool):
+                        h = str(hdr[cc.column - 1]) if cc.column - 1 < len(hdr) else ""
+                        if abs(v) >= 10 ** 10:                                   # 运单号这种长数字：照原样显示全，不用科学计数
+                            cc.number_format = "0"
+                        elif 30000 <= v <= 60000 and re.search(r"日期|时间", h):  # Excel 日期序号
+                            cc.number_format = "yyyy-mm-dd"
+                            shown = "2026-08-01"
+                    w = sum(2 if ord(ch) > 0x2E80 else 1 for ch in shown.split("\n")[0])
+                    widths[cc.column] = max(widths.get(cc.column, 0), w)
+                for cj, w in widths.items():
+                    ws3.column_dimensions[get_column_letter(cj)].width = min(40, max(6, w + 2))
     if raw_files:
         _attach_raw_sheets(wb, raw_files)
     # 账单数链接原账单页(V2.898)：复核明细里「账单」那几列和「账单量」，原账单页里找得到同一个数的，换成指过去的公式(点一下就跳到原账单那一格)
