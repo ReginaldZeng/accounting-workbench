@@ -2267,6 +2267,18 @@ class InvoiceBooksApiTests(unittest.TestCase):
             self.assertEqual((r["state"]["vno"], r["state"]["redoOf"]), ("232", "记-231"))
             self.assertEqual(self.item(ia)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-232"}])
             self.assertEqual(self.post("/api/inv/later/%d/voucher-redo" % 999999, "acct").status_code, 404)
+            # 这一栏跟着金蝶走（用户在金蝶审核了，弹窗里还写「等人在金蝶审核」、还摆着撤回重做）：已提交→等审核、可撤回；
+            # 已审核→写「金蝶里已审核」、不给撤回重做，并记下来以后不再问金蝶
+            L3._LIVE.clear()
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
+            self.assertEqual((v["voucherStatus"], v["canRedo"], "记-232" in v["state"]["msg"], "等人在金蝶审核" in v["state"]["msg"]), ("B", True, True, True))
+            gone["status"][9002] = "C"
+            L3._LIVE.clear()
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
+            self.assertEqual((v["voucherStatus"], v["canRedo"], "金蝶里已审核" in v["state"]["msg"], "等人" in v["state"]["msg"]), ("C", False, True, False))
+            self.assertTrue(L3.state_of(la)["audited"])
+            gone["status"][9002] = "B"                                                   # 记下来了：不再去问金蝶
+            self.assertEqual(self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))["voucherStatus"], "C")
             # ③ 对不上（票面税额 ≠ 账上暂估）：不自动做，写明差多少，提醒一次
             fb, lb, ib = mk("B", 2000.0, 113.21, 2)
             voucher("300", 2000.0, 20.0, "某某提起支付服务费")
