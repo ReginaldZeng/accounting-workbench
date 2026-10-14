@@ -49,7 +49,8 @@ def set_cfg(on, url, by):
 _DT_HEAD = {"fx_audit": ("金蝶汇率", "", "汇率录入"),
             "logi_accrual_audit": ("金蝶凭证", "", "物流计提"),
             "logi_voucher_audit": ("金蝶凭证", "", "物流付款做账"),
-            "logi_fix": (None, "计提更正", "物流对账复核")}
+            "logi_fix": (None, "计提更正", "物流对账复核"),
+            "inv_later_audit": ("金蝶凭证", "", "发票后补转待认证")}
 
 
 def _lead(it):
@@ -84,6 +85,12 @@ def _what(it):
             return [" ".join(who + month + [m.group(1)]), paid + (" 账单" if _ENDS_YM.search(paid) else ""), ("金额 " + amt) if amt else ""]
         if it["scene"] == "logi_fix":
             return ["%s %s" % (p["carrier"], p["period"]), nums]
+        if it["scene"] == "inv_later_audit":           # 主体 年月 记-N｜收款方｜税额
+            bits = sub.split(" · ")
+            ym = str(p.get("ym") or "")
+            month = ["%s 年 %d 月" % (ym[:4], int(ym[5:7]))] if len(ym) == 7 else []
+            vno, _, paid = title.replace("后补转待认证 · ", "", 1).partition("　")
+            return [" ".join(bits[:1] + month + [vno]), paid.strip(), "｜".join(bits[1:])]
     except Exception:
         pass
     return [title, sub]

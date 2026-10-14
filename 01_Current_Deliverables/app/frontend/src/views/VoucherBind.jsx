@@ -8,6 +8,10 @@
 //   计提更正单不在这里打(V2.851，用户「在审批付款的时候一并打出来」)：审批请款单时就打好、订在付款单后面，凭证号留空；
 //   这里扫到要附更正单的，提醒核对后面订没订、把凭证号填到更正单上；万一丢了可以补打。
 //   手机用 #/vscan(钉钉扫一扫)，扫过的同样记到这里。扫码、取更正单都只读，不动金蝶。
+// Date: 2026-10-13 | Author: Claude / c | Version: V2.946（凭证装订·扫发票报凭证号）
+// Description: 用户「扫描发票，报出来凭证号」「如果是装订环节，直接在装订那里做」：同一个扫码框也认发票上的二维码（或直接敲发票号码）——
+//   纸质发票是原始凭证、要贴到凭证后面，扫一下报出它在金蝶哪张凭证里（发票管家里已对上的直接报，没有就按发票号去金蝶摘要现查）。
+//   结果还是那张大字卡片；发票的结果多显示发票号码、销方、挂在哪张审批单、审没审。扫发票不算「纸质付款单扫过了」。
 import React, { useEffect, useRef, useState } from 'react'
 import { voucherBindList, voucherBindAdjust } from '../api.js'
 import { useScan, printAdjust, ymCn, SUBJ_TONE, LV_CSS } from './LogisticsVoucher.jsx'
@@ -44,7 +48,7 @@ export default function VoucherBind({ user }) {
     <div className="lv vb">
       <style>{LV_CSS}</style><style>{CSS}</style>
       <div className="head"><div><div className="h-title">凭证装订</div>
-        <div className="h-sub">纸质付款单到手后：扫右上角的钉钉二维码 → 看它是哪个主体、哪张凭证 → 手写标到单子上。只读，不动金蝶、不做账。试运行：目前认得物流请款单和发票管家收过票的审批单。</div></div>
+        <div className="h-sub">纸质付款单到手后：扫右上角的钉钉二维码 → 看它是哪个主体、哪张凭证 → 手写标到单子上。<b>纸质发票也能扫</b>：扫发票上的二维码，报出这张发票在哪张凭证里。只读，不动金蝶、不做账。试运行：目前认得物流请款单和发票管家收过票的审批单。</div></div>
         <div className="h-tools"><span className="lv-seg">{TABS.map(([k, t]) => <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{t}
           {k === 'todo' && L ? ` ${todo.length}` : ''}</button>)}</span></div></div>
       <div className="body">
@@ -56,15 +60,17 @@ export default function VoucherBind({ user }) {
             <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={S.shot} />
             <div className="sc-in">
               <input ref={ref} value={S.v} onChange={e => S.setV(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') S.go() }} autoComplete="off" spellCheck={false}
-                placeholder="光标停在这里，用扫码枪扫付款单（或计提更正单）右上角的二维码；或输入 20 位审批编号后回车" />
+                placeholder="光标停在这里，用扫码枪扫付款单（或计提更正单）右上角的二维码，或发票上的二维码；也可以输入审批编号 / 发票号码后回车" />
               <button className="btn btn-pri" disabled={S.busy || !S.v.trim()} onClick={S.go}>{S.busy ? '查询中…' : '查'}</button>
               <button className="btn" disabled={S.busy} title="没有扫码枪：选一张拍了二维码的照片 / 截图，系统认码" onClick={e => { e.stopPropagation(); fileRef.current && fileRef.current.click() }}>传照片</button>
             </div>
             {S.busy ? <div className="vb-res empty">正在查…</div>
-              : !c ? <div className="vb-res empty">还没扫。扫一张，这里显示主体和凭证号<br /><span className="dim">扫码枪要在英文输入法下用；扫一张出一张，不用点鼠标</span></div>
+              : !c ? <div className="vb-res empty">还没扫。扫一张付款单或发票，这里显示主体和凭证号<br /><span className="dim">扫码枪要在英文输入法下用；扫一张出一张，不用点鼠标</span></div>
                 : !c.ok ? <div className="vb-res bad"><div className="vb-big">没查到</div><div style={{ marginTop: 6 }}>{c.msg}</div></div>
                   : !a ? <div className="vb-res warn"><div className="vb-big">{c.state}</div>
-                    <div style={{ marginTop: 6 }}>{c.subject} · {c.payee}{c.amount != null && <> · <b className="mono">{money(c.amount)}</b></>}<br />付款凭证还没做——<b>先放一边</b>，做完再扫。</div></div>
+                    {c.is_invoice
+                      ? <div style={{ marginTop: 6 }}>发票 <b className="mono">{c.invoice && c.invoice.number}</b>{c.payee ? ` · ${c.payee}` : ''}{c.amount != null && <> · <b className="mono">{money(c.amount)}</b></>}<br />{c.msg}——<b>先放一边</b>，做完账再扫。</div>
+                      : <div style={{ marginTop: 6 }}>{c.subject} · {c.payee}{c.amount != null && <> · <b className="mono">{money(c.amount)}</b></>}<br />付款凭证还没做——<b>先放一边</b>，做完再扫。</div>}</div>
                     : <div className={'vb-res tone-' + tone(a.subject)}>
                       {c.sheet != null && <div className="vb-sheet">这是<b>计提更正单上{c.sheet === 1 ? '「记错主体 · 红冲」' : c.sheet === 2 ? '「记错主体 · 补提」' : ''}的那一项</b>：下面是它的凭证，把凭证号填到更正单这一项的「调整凭证」上{c.sheet === 1 ? '（红冲凭证没有纸质付款单）' : ''}</div>}
                       {c.dup && <div className="vb-dup">这张刚才扫过了</div>}
@@ -79,7 +85,11 @@ export default function VoucherBind({ user }) {
                         {needAdj && <span className="vb-tag warn">后面应订着计提更正单 · 把凭证号填上去</span>}
                         {c.scanned_before && !c.dup && <span className="vb-tag neu">之前扫过 · {c.scanned_before.by} {hm(c.scanned_before.at)}</span>}
                       </div>
-                      <dl className="vb-kv"><dt>收款方</dt><dd>{c.payee}</dd><dt>金额</dt><dd className="mono">{money(c.amount)}</dd>
+                      <dl className="vb-kv">
+                        {c.is_invoice && c.invoice && <><dt>发票号码</dt><dd className="mono">{c.invoice.number}</dd></>}
+                        <dt>{c.is_invoice ? '销方' : '收款方'}</dt><dd>{c.payee || (c.is_invoice ? '（发票管家里没登记过这张票）' : '')}</dd>
+                        <dt>{c.is_invoice ? '价税合计' : '金额'}</dt><dd className="mono">{money(c.amount)}{c.is_invoice && c.invoice && c.invoice.tax != null ? <span className="dim">　税额 {money(c.invoice.tax)}</span> : null}</dd>
+                        {c.is_invoice && c.invoice && c.invoice.inLedger && <><dt>发票管家</dt><dd>{c.invoice.reviewText || '—'}{c.invoice.folderTitle ? ` · 挂在「${c.invoice.folderTitle}」` : ''}</dd></>}
                         {c.bid && <><dt>审批编号</dt><dd className="mono">{c.bid}</dd></>}
                         {a.maker && <><dt>制单人</dt><dd>{a.maker}{a.operator ? `（经办 ${a.operator}）` : ''}</dd></>}
                         {needAdj && <><dt>更正单</dt><dd>审批时已经打好、订在付款单后面；没找到的话 <button className="lnk" onClick={e => { e.stopPropagation(); printInsts([c.inst]) }}>补打一张</button>
@@ -90,11 +100,11 @@ export default function VoucherBind({ user }) {
           <div className="vb-card">
             <div className="vb-t">② 这一轮已扫 <span className="dim">{S.hist.length} 张{Object.keys(S.bySubj).length > 0 && '：' + Object.entries(S.bySubj).map(([k, n]) => `${k} ${n}`).join(' · ')}</span>
               <span style={{ flex: 1 }} />{S.hist.length > 0 && <button className="lnk" onClick={() => { S.setHist([]); S.setCur(null) }}>清空</button>}</div>
-            <table className="lv-t"><thead><tr><th>#</th><th>主体</th><th>凭证号</th><th>凭证月份</th><th>收款方</th><th className="num">金额</th><th>更正单</th><th>时间</th></tr></thead>
+            <table className="lv-t"><thead><tr><th>#</th><th>主体</th><th>凭证号</th><th>凭证月份</th><th>收款方 / 销方</th><th className="num">金额</th><th>更正单</th><th>时间</th></tr></thead>
               <tbody>{S.hist.map((h, i) => { const x = (h.vouchers || [])[0]; return <tr key={h.inst}>
                 <td className="dim">{S.hist.length - i}</td><td>{x ? <span className={'vb-pill tone-' + tone(x.subject)}>{x.subject}</span> : '—'}</td>
                 <td className="mono"><b>{x ? '记-' + x.vno : '还没做账'}</b>{(h.vouchers || []).length > 1 && <span className="dim"> +{h.vouchers.length - 1}</span>}</td>
-                <td>{x ? ymCn(x.month) : ''}</td><td className="ell">{h.payee}</td><td className="num">{money(h.amount)}</td>
+                <td>{x ? ymCn(x.month) : ''}</td><td className="ell">{h.is_invoice && <span className="lv-pill neu">发票</span>} {h.payee || (h.is_invoice && h.invoice ? h.invoice.number : '')}</td><td className="num">{money(h.amount)}</td>
                 <td>{(h.n_adjust > 0 || h.has_xred) ? <span className="lv-pill warn">附</span> : ''}</td><td className="dim">{h.at}</td></tr> })}
                 {!S.hist.length && <tr><td colSpan="8" className="lv-empty">扫过的单子按顺序列在这里，方便回头核对有没有漏标</td></tr>}</tbody></table>
             <div className="dim" style={{ marginTop: 10, lineHeight: 1.8 }}>手机也能扫：钉钉里打开 <span className="mono" style={{ userSelect: 'all' }}>{phoneUrl}</span>，点「扫一扫」，扫过的同样记在这里。

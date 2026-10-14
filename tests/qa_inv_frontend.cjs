@@ -312,6 +312,19 @@ function auditApi(st) {
       })
       return { ok: true, item: st.items.find(it => it.id === id) }
     }
+    if (c.path === '/api/inv/audit/items/approve') {     // 审一张过一张：勾的票当场通过；发票都过完、差额为 0 → 整单结掉
+      const ids = (c.body && c.body.itemIds) || [], dec = (c.body && c.body.decisions) || {}
+      st.items = st.items.map(it => !ids.includes(it.id) ? it : {
+        ...it, review: 'approved', pending: [], paper: true, reviewBy: '测试会计', reviewAt: '2026-09-25 10:00:00',
+        deductible: dec[it.id] ? !!dec[it.id].deductible : true,
+        deductStatus: dec[it.id] && 'otherSystem' in dec[it.id] ? (dec[it.id].otherSystem ? 'other' : '') : (it.deductStatus || ''),
+      })
+      const left = st.items.filter(it => (it.kind === 'invoice' || it.kind === 'receipt') && it.review === 'pending')
+      const gap = st.folder.gap ? st.folder.gap.gap : null
+      const done = !left.length && gap !== null && Math.abs(gap) <= 0.005
+      if (done) st.folder = { ...st.folder, status: 'approved' }
+      return { ok: true, items: st.items.filter(it => ids.includes(it.id)), folder: st.folder, folderDone: done }
+    }
     if (c.path === '/api/inv/audit/approve') return st.onApprove(c)
     if (c.path === '/api/inv/audit/return') return st.onReturn ? st.onReturn(c) : { ok: true, folder: { ...st.folder, status: 'returned', reviewNote: c.body.note } }
     return { ok: true }
@@ -341,19 +354,79 @@ test('F2/C2 弹窗里改字段后建议变「不可抵扣」，没手动改判�
   await page.locator('.inv-au-tbl tbody tr').first().click()
   const cat = page.locator('.inv-au-dlg-side .inv-fp-row', { hasText: '项目类别' }).locator('input')
   await cat.waitFor()
-  assert.equal(await page.locator('.inv-au-dlg-side').getByRole('button', { name: '核对无误' }).count(), 0, '弹窗里用右上角「提交」，不再有「核对无误」')
+  assert.equal(await page.locator('.inv-au-dlg-side').getByRole('button', { name: '核对无误' }).count(), 0, '弹窗里用右上角「审核」，不再有「核对无误」')
   await cat.fill('餐饮')
   await page.locator('.inv-au-dlg-side .inv-fp-act').getByRole('button', { name: '保存' }).click()
   await page.getByText('建议不可抵扣', { exact: false }).first().waitFor()
-  await page.locator('.inv-mhead').getByRole('button', { name: '提交', exact: true }).click()
+  assert.equal(await page.locator('.inv-mhead .inv-au-hck', { hasText: '可抵扣' }).locator('input').isChecked(), false, '建议变「不可抵扣」后，右上角「可抵扣」的勾跟着去掉')
+  await page.locator('.inv-mhead').getByRole('button', { name: '审核', exact: true }).click()
   await page.waitForFunction(() => !document.querySelector('.inv-au-dlg'))
-  assert.ok(calls.some(c => c.path === '/api/inv/audit/item/101/mark' && c.body.mark === 'ok'), '弹窗「提交」要记这张已核')
-  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
-  await page.waitForFunction(() => document.body.innerText.includes('已通过'))
-  const ap = calls.find(c => c.path === '/api/inv/audit/approve')
+  // 审一张过一张：弹窗「审核」＝这张当场通过；这张单只有这一张票、金额一致，整单跟着结掉，不用再点底部
+  await page.waitForFunction(() => document.body.innerText.includes('这张单已整单通过'))
+  const ap = calls.find(c => c.path === '/api/inv/audit/items/approve')
   assert.ok(ap, '没发出通过请求')
+  assert.equal(calls.filter(c => c.path === '/api/inv/audit/approve').length, 0, '不用再发整单通过')
   assert.equal(ap.body.decisions['101'].deductible, false, '建议已变「不可抵扣」，没改判时应按新建议提交')
   assert.deepEqual(ap.body.itemIds, [101], '通过要带上看过的待审票 itemIds')
+  await ctx.close()
+})
+
+test('审一张过一张：已收发票表上勾选要审的票、点「审核所选」当场通过；票都过完且金额一致整单自动结掉，带上勾的「票总管」「可抵扣」', async (browser, B) => {
+  const st = {
+    folder: { id: 14, status: 'submitted', title: '七张票的报销单', amount: 400, gap: { pay: 400, special: 400, specialN: 4, normal: 0, normalN: 0, later: 0, gap: 0 }, laters: [] },
+    items: [inv({ id: 141, pending: ['sellerName', 'amount'] }), inv({ id: 142 }), inv({ id: 143 }),
+      inv({ id: 144, flags: { buyerNotCompany: true } })], logs: [],                       // 第 4 张抬头不是本公司：系统核对有问题
+  }
+  st.queue = [{ id: 14, title: '七张票的报销单', amount: 400, anomalies: [], clean: false, stats: { invoices: 4 } }]
+  st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  const passCalls = () => calls.filter(c => c.path === '/api/inv/audit/items/approve')
+  const marks = () => passCalls().flatMap(c => c.body.itemIds)                          // 一共送去审核通过的票，按先后
+  const rows = page.locator('.inv-au-tbl tbody tr')
+  await rows.first().waitFor()
+  const sel = i => rows.nth(i).locator('.inv-au-sel input')
+  const go = n => page.getByRole('button', { name: n ? `审核所选（${n}）` : '审核所选', exact: true })
+  assert.equal(await rows.locator('.inv-au-sel input').count(), 4, '四张没审的票，每行最左一个选择框')
+  assert.ok(await go(0).isDisabled(), '没勾票时「审核所选」点不了')
+  // 只勾一张：只审这一张，不打开弹窗
+  await sel(1).check()
+  assert.equal(await page.locator('.inv-au-dlg').count(), 0, '勾选不打开核对弹窗')
+  await go(1).click()
+  await rows.nth(1).locator('.inv-au-st-ok', { hasText: '已审核' }).waitFor()
+  assert.deepEqual(marks(), [142])
+  assert.deepEqual(passCalls()[0].body.decisions, { 142: { deductible: true } }, '审这张时带上它的「可抵扣」（没动过「票总管」就不带）')
+  assert.equal(await rows.locator('.inv-au-sel input').count(), 3, '审过的那张没有选择框了')
+  await page.getByText('已审核 1/4').first().waitFor()
+  // 表头全选：只选系统核对正常的（第 1、3 张），抬头不对的第 4 张不带
+  await page.getByText('系统核对有问题的 1 张「全选」不带').waitFor()
+  await page.locator('.inv-au-tbl thead .inv-au-sel input').check()
+  assert.deepEqual([await sel(0).isChecked(), await sel(2).isChecked(), await sel(3).isChecked()], [true, true, false])
+  await go(2).click()
+  await rows.nth(2).locator('.inv-au-st-ok').waitFor()
+  assert.deepEqual(marks(), [142, 141, 143])
+  assert.deepEqual(passCalls()[1].body.itemIds, [141, 143], '勾的两张一次送去')
+  assert.equal(await rows.locator('.inv-au-sel input').count(), 1, '只剩抬头不对的那张还能勾')
+  // 审过的票：表里的勾变成结果（不能再改），弹窗右上角也只显示结果
+  assert.equal(await rows.nth(0).getByRole('checkbox').count(), 0, '审过的票表里没有能勾的框了')
+  await page.getByText('金额一致：票都审核完，这张单自动整单通过').waitFor()
+  // 最后一张（抬头不对）：点开弹窗，右上角票总管默认不勾、可抵扣默认按建议勾上；改了再点「审核」
+  await rows.nth(3).click()
+  const hck = t => page.locator('.inv-mhead .inv-au-hck', { hasText: t }).locator('input')
+  assert.deepEqual([await hck('票总管').isChecked(), await hck('可抵扣').isChecked()], [false, true])
+  await hck('票总管').check()
+  await hck('可抵扣').uncheck()
+  await page.keyboard.press('Escape')
+  const tck = (i, t) => rows.nth(i).getByRole('checkbox', { name: new RegExp(t) })
+  assert.deepEqual([await tck(3, '票总管').isChecked(), await tck(3, '可抵扣').isChecked()], [true, false], '弹窗右上角勾的，表里那一行跟着变')
+  await tck(3, '可抵扣').check()                                                      // 表里也能直接勾：点勾不打开弹窗
+  assert.equal(await page.locator('.inv-au-dlg').count(), 0, '在表里勾选不打开核对弹窗')
+  // 这张也审了、金额一致：整单跟着结掉，不用点底部
+  await sel(3).check()
+  await go(1).click()
+  await page.waitForFunction(() => document.body.innerText.includes('这张单已整单通过'))
+  assert.deepEqual(passCalls()[2].body, { folderId: 14, itemIds: [144], decisions: { 144: { deductible: true, otherSystem: true } } }, '亲手改过的两个勾都带上')
+  assert.equal(calls.filter(c => c.path === '/api/inv/audit/approve').length, 0, '票都逐张过了、金额一致：不用再发整单通过')
   await ctx.close()
 })
 
@@ -371,8 +444,8 @@ test('C2 审核期间进了新票：409 后提示并重读票夹、打开新票'
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
   await page.locator('.inv-au-tbl tbody tr').first().waitFor()
   const before = st.folderGets
-  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
-  await page.getByRole('button', { name: '不逐张看了，仍然提交' }).click()
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '整单通过', exact: true }).click()
+  await page.getByRole('button', { name: '不逐张看了，仍然整单通过' }).click()
   await page.getByText('审核期间这个票夹又进了新票', { exact: false }).first().waitFor()
   assert.ok(st.folderGets > before, '409 之后要重读票夹')
   await page.locator('.inv-au-dlg-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
@@ -410,7 +483,7 @@ test('C7 弹窗里的留痕只列这张票自己的（按 log.itemId）', async 
   await ctx.close()
 })
 
-test('审核改版：弹窗 Enter 提交这张并跳到下一张没核的；扫描人显示在弹窗标题', async (browser, B) => {
+test('审核改版：弹窗 Enter 审核这张并跳到下一张没审的；扫描人显示在弹窗标题', async (browser, B) => {
   const st = {
     folder: { id: 12, status: 'submitted', title: '两张票', amount: 200, gap: GAP0(200), laters: [] },
     items: [inv({ id: 121, createdBy: '李四', origin: 'camera', createdAt: '2026-09-25 09:01:00' }), inv({ id: 122 })], logs: [],
@@ -424,7 +497,45 @@ test('审核改版：弹窗 Enter 提交这张并跳到下一张没核的；扫�
   await page.locator('.inv-au-dlg').click({ position: { x: 5, y: 5 } })
   await page.keyboard.press('Enter')
   await page.locator('.inv-au-dlg-h', { hasText: '第 2 张' }).waitFor({ timeout: 3000 })
-  assert.ok(calls.some(c => c.path === '/api/inv/audit/item/121/mark' && c.body.mark === 'ok'))
+  assert.ok(calls.some(c => c.path === '/api/inv/audit/items/approve' && String(c.body.itemIds) === '121'), 'Enter＝这张当场审核通过')
+  await ctx.close()
+})
+
+test('后补票「核销暂估」：弹窗里亮出系统到金蝶找到的原凭证；找到两张时选一张，再点「现在演练一次」', async (browser, B) => {
+  const cand = (vno, picked) => ({ key: '2026-09-' + vno, year: 2026, month: 9, vno, expl: '某某提起支付运费', gross: 500, net: 495, tax: 5, tax06: 0, picked })
+  const view = (kind, src, extra) => ({ ok: true, laterId: 8, mode: 'dry', modeText: '演练', ready: true, lines: [],
+    plan: { ok: kind === 'exact', kind, why: kind === 'exact' ? '发票税额和账上暂估进项税都是 5.00，对得上' : '金蝶里有 2 张都对得上，请选是哪一张',
+      book: '合成主体', cands: [cand('401', src.includes('2026-09-401')), cand('402', src.includes('2026-09-402'))], src, taxInv: 5, taxEst: 5 },
+    state: {}, ...extra })
+  const st = {
+    folder: { id: 13, status: 'collecting', title: '后补票的单', amount: 500, gap: GAP0(500), laters: [] },
+    items: [inv({ id: 131, laterId: 8, origin: 'self', selfPending: true, total: 500, tax: 5 })], logs: [],
+  }
+  st.queue = [{ id: 13, title: '后补票的单', amount: 500, anomalies: [], clean: false }]
+  const base = auditApi(st)
+  const api = c => {
+    if (c.path === '/api/inv/later/8/voucher-plan') return view('multi', [])
+    if (c.path === '/api/inv/later/8/voucher-source') return view('exact', c.body.picks, { lines: [
+      { dc: '借', acct: '2221.01.06', acctName: '待认证进项税额', amount: 5, expl: '2644核销9/402#某某提起支付运费', supplier: '' },
+      { dc: '贷', acct: '2221.01.07', acctName: '暂估进项税', amount: 5, expl: '核销9/402#某某提起支付运费', supplier: '合成物流' }] })
+    if (c.path === '/api/inv/later/8/voucher-run') return { ...view('exact', ['2026-09-402']), status: 'dry', msg: '演练（没写金蝶）', state: { status: 'dry', msg: '演练（没写金蝶）：会新建一张凭证' } }
+    return base(c)
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, api)
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-tbl tbody tr').first().click()
+  const box = page.locator('.inv-au-l3')
+  await box.locator('.inv-au-l3bad', { hasText: '请选是哪一张' }).waitFor({ timeout: 4000 })
+  assert.ok((await box.textContent()).includes('自动转待认证：演练'))
+  assert.equal(await box.locator('.inv-au-l3t tbody tr').count(), 2)
+  await box.getByLabel('核销 2026年9月 记-402').click()      // 选中状态等后端回来才变（受控），所以用 click 不用 check
+  await box.locator('.inv-au-l3ok', { hasText: '对得上' }).waitFor({ timeout: 4000 })
+  assert.deepEqual(calls.find(c => c.path === '/api/inv/later/8/voucher-source').body.picks, ['2026-09-402'])
+  assert.equal(await box.locator('.inv-au-l3l > div').count(), 2)
+  await box.getByRole('button', { name: '现在演练一次' }).click()
+  await box.getByText('上一次：演练（没写金蝶）').waitFor({ timeout: 4000 })
+  assert.equal(calls.filter(c => c.path === '/api/inv/later/8/voucher-run' && c.method === 'POST').length, 1)
+  assert.deepEqual(errors, [])
   await ctx.close()
 })
 
@@ -437,13 +548,13 @@ test('审核改版：记了疑问 → 底部「提交」变成退回，并带上
   const { page, ctx, calls } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
   await page.locator('.inv-au-tbl tbody tr').first().click()
-  await page.locator('.inv-mhead').getByRole('button', { name: '有疑问' }).click()
+  await page.locator('.inv-mhead').getByRole('button', { name: '存疑' }).click()
   await page.locator('.inv-au-qbox').getByRole('button', { name: '抬头不对' }).click()
   await page.getByRole('button', { name: '记下疑问' }).click()
   await page.locator('.inv-au-qbox', { hasText: '疑问：抬头不对' }).waitFor()
   await page.keyboard.press('Escape')
   await page.locator('.inv-au-st-q').waitFor()
-  const btn = page.locator('.inv-au-bar2').getByRole('button', { name: '提交（退回 1 个疑问）' })
+  const btn = page.locator('.inv-au-bar2').getByRole('button', { name: '整单退回（1 张存疑）' })
   await btn.click()
   await page.getByRole('button', { name: '确认退回' }).click()
   await page.waitForFunction(() => document.body.innerText.includes('已退回'))
@@ -453,13 +564,36 @@ test('审核改版：记了疑问 → 底部「提交」变成退回，并带上
   await ctx.close()
 })
 
+test('票都审核通过了但金额有差额：整单不自动结，仍要人点底部写差额说明', async (browser, B) => {
+  const st = {
+    folder: { id: 15, status: 'submitted', title: '差十块的单', amount: 110, gap: { pay: 110, special: 100, specialN: 1, normal: 0, normalN: 0, later: 0, gap: 10 }, laters: [] },
+    items: [inv({ id: 151 })], logs: [],
+  }
+  st.queue = [{ id: 15, title: '差十块的单', amount: 110, anomalies: [], clean: false }]
+  st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  const row = page.locator('.inv-au-tbl tbody tr').first()
+  await row.locator('.inv-au-sel input').check()
+  await page.getByRole('button', { name: '审核所选（1）', exact: true }).click()
+  await row.locator('.inv-au-st-ok', { hasText: '已审核' }).waitFor()
+  await page.waitForTimeout(400)
+  assert.equal(calls.filter(c => c.path === '/api/inv/audit/items/approve').length, 1, '票照样当场审核通过')
+  assert.equal(calls.filter(c => c.path === '/api/inv/audit/approve').length, 0, '有差额：票过了整单也不自动结')
+  assert.equal(await page.locator('.inv-au-bar2').getByText('这张单自动整单通过').count(), 0, '有差额时底部不提示会自动通过')
+  await page.getByText('票都审核了，但金额有差额').waitFor()
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '整单通过', exact: true }).click()
+  await page.getByRole('button', { name: '确认差额并通过' }).waitFor()
+  await ctx.close()
+})
+
 test('审核改版：有差额要写差额说明才能提交（点常用说明可快填），说明随 gapNote 发出；后补单列表照实列出', async (browser, B) => {
   const st = {
     folder: { id: 14, status: 'submitted', title: '有差额的单', amount: 160.8,
       gap: { pay: 160.8, special: 100, specialN: 1, normal: 0, normalN: 0, later: 60, gap: 0.8 },
       laters: [{ id: 12, filedBy: '张三', filedAt: '2026-09-10 10:00:00', expectAmount: 60, receivedAmount: 0, unregisteredAmount: 0,
         left: 60, expectDate: '2026-10-10', receiverName: '王五', status: 'open', statusText: '待收', remindCount: 1 }] },
-    items: [inv({ id: 141, auditOk: { by: '测试会计', at: '2026-09-25 10:00:00' } })], logs: [],
+    items: [inv({ id: 141, review: 'approved', deductible: true })], logs: [],
   }
   st.queue = [{ id: 14, title: '有差额的单', amount: 160.8, anomalies: [], clean: false }]
   st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
@@ -467,8 +601,8 @@ test('审核改版：有差额要写差额说明才能提交（点常用说明�
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
   await page.locator('.inv-au-ltbl', { hasText: '#12' }).waitFor()
   assert.ok(await page.locator('.inv-au-ltbl', { hasText: '王五' }).isVisible())
-  await page.locator('.inv-au-bar2').getByRole('button', { name: '提交', exact: true }).click()
-  const ok = page.getByRole('button', { name: '确认差额并提交' })
+  await page.locator('.inv-au-bar2').getByRole('button', { name: '整单通过', exact: true }).click()
+  const ok = page.getByRole('button', { name: '确认差额并通过' })
   await ok.waitFor()
   assert.ok(await ok.isDisabled(), '没写差额说明不能提交')
   await page.locator('.inv-au-ask').getByRole('button', { name: '付款抹零' }).click()
@@ -639,6 +773,41 @@ test('申请人上传发票：传完弹 5 秒提醒（如果为专票打印 2 �
   assert.equal(calls.filter(c => c.path === '/api/inv/s/later/5/invoices/9/remove' && c.method === 'POST').length, 1)
   await page.waitForFunction(() => document.querySelectorAll('.inv-sf-tk li').length === 1, null, { timeout: 3000 })
   assert.equal(await page.getByText('已上传 600.00，等财务确认').count(), 0)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('后补单详情：钉钉流程里取到的发票（财务初审后才到）标出来、也是待确认；「去钉钉找发票」能点', async (browser, B) => {
+  const base = { id: 7, instId: 'PI-QA-LATE', status: 'open', payee: { name: '合成物流' }, payAmount: 600, expectAmount: 600, receivedAmount: 0, unregisteredAmount: 0,
+    remaining: 600, expectDate: '2026-10-20', invKind: 'special', receiverName: '财务甲', reason: '运费' }
+  const late = { at: '2026-10-13 10:19:00', after: '2026-10-12 13:51:00', by: 'first' }
+  const st = { later: { ...base, selfCount: 0, selfAmount: 0, flowCount: 0 }, items: [] }
+  const api = c => {
+    if (c.path === '/api/inv/config') return cfg()
+    if (c.path === '/api/inv/later') return { ok: true, total: 1, rows: [st.later] }
+    if (c.path === '/api/inv/later/7') return { ok: true, later: st.later, items: st.items, docs: [], logs: [] }
+    if (c.path === '/api/inv/later/7/flow-check') {
+      st.later = { ...base, selfCount: 1, selfAmount: 600, flowCount: 1 }
+      st.items = [inv({ id: 41, origin: 'attachment', selfPending: true, fromFlow: true, laterId: 7, total: 600, flags: { lateFlow: late } })]
+      return { ok: true, msg: '钉钉流程里有 1 张财务初审后才到的发票，已记到后补单上、进了发票审核', new: 1, linked: 1, later: st.later }
+    }
+    return { ok: true }
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, api, { hash: '#/invlater?id=7' })
+  await mount(page, 'InvLater', { user: { name: '测试会计' } })
+  const btn = page.locator('.inv-modal').getByRole('button', { name: '去钉钉找发票' })
+  await btn.waitFor({ timeout: 4000 })
+  assert.equal(await page.locator('.inv-lt-selfbar').count(), 0, '还没取到票时不出提示条')
+  await btn.click()
+  const bar = page.locator('.inv-lt-selfbar')
+  await bar.waitFor({ timeout: 4000 })
+  assert.equal(calls.filter(c => c.path === '/api/inv/later/7/flow-check' && c.method === 'POST').length, 1)
+  const t = await bar.textContent()
+  assert.ok(t.includes('申请人已经交来 1 张发票（600.00）') && t.includes('其中 1 张是系统从钉钉流程里取到的'), t)
+  assert.ok(await page.locator('.inv-modal .inv-badge', { hasText: '钉钉流程里到了 600.00 待确认' }).first().isVisible())
+  assert.ok(await page.locator('.inv-lt-cur .inv-badge', { hasText: '钉钉流程里取到 · 待确认' }).isVisible())
+  assert.ok(await page.locator('.inv-lt-cur .inv-badge', { hasText: '初审后才到' }).isVisible())
+  assert.equal((await page.locator('.inv-lt-nums > div').nth(2).locator('b').textContent()), '0.00', '审核/确认前不算已到')
   assert.deepEqual(errors, [])
   await ctx.close()
 })

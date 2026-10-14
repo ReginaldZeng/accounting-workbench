@@ -559,6 +559,9 @@ export const invRoster = (fresh = false) => j('/api/inv/roster' + (fresh ? '?fre
 export const invAccounts = () => j('/api/inv/accounts')
 export const invIntake = () => j('/api/inv/intake')                // V2.736 钉钉自动接入：上次扫描情况
 export const invIntakeScan = () => jp('/api/inv/intake/scan', {})   // 立即扫一轮
+// 清空试运行数据（只有主管理员；别人打这个接口回 403）：先看会清多少，再带确认字样和重新接单的起始日真清
+export const invResetPreview = () => j('/api/inv/admin/reset')
+export const invResetRun = (phrase, since) => jp('/api/inv/admin/reset', { phrase, since })
 // 收票工作台
 export const invDesk = () => j('/api/inv/desk')
 export const invDeskAuto = () => j('/api/inv/desk/auto')   // V2.737 钉钉接入·待收票（系统自动建的票夹）
@@ -582,6 +585,8 @@ export const invItemRotate = (id, rotation) => jp(`/api/inv/item/${id}/rotate`, 
 export const invItemReprocess = (id) => jp(`/api/inv/item/${id}/reprocess`)
 export const invItemBookkeeping = (id, body) => jp(`/api/inv/item/${id}/bookkeeping`, body)
 export const invItemVoid = (id, note) => jp(`/api/inv/item/${id}/void`, { note })
+// 过渡期：台账里把一张票记为 / 取消「票总管已有」（抵扣勾选归票总管做，发票管家出勾选清单不带）
+export const invItemOtherSystem = (id, on) => jp(`/api/inv/item/${id}/other-system`, { on: !!on })
 // 手机配对（电脑端）
 export const invPairCreate = () => jp('/api/inv/pair')
 export const invPairRevoke = () => jp('/api/inv/pair/revoke')
@@ -590,6 +595,9 @@ export const invAuditQueue = (params) => j(invWithQs('/api/inv/audit/queue', par
 // body={folderId, itemIds:[审核人看到的待审票 id], decisions:{id:{deductible}}, note}；后端只通过 itemIds 里的票。
 // 被拦时返回 {ok:false,msg,blockers?,httpStatus}；审核期间又进了新票 → httpStatus 409 + newItems:[id]（页面提示并重读票夹）
 export const invAuditApprove = (body) => invJpSoft('/api/inv/audit/approve', body)
+// 审一张过一张：body={folderId, itemIds:[勾的票], decisions?}；勾的票当场审核通过、进台账。回 {items, folder, folderDone（整单是不是也结了）}；
+// 被拦时不抛、原样回 body（带 blockers / httpStatus），页面要把原因列给人看
+export const invAuditItemsApprove = (body) => invJpSoft('/api/inv/audit/items/approve', body)
 export const invAuditBatch = (folderIds) => jp('/api/inv/audit/batch', { folderIds })
 export const invAuditMark = (id, body) => jp(`/api/inv/audit/item/${id}/mark`, body)   // body={mark:'ok'|'doubt'|'clear', text?}
 export const invAuditReturn = (body) => jp('/api/inv/audit/return', body)             // body={folderId, note}
@@ -603,6 +611,10 @@ export const invDeductPrepare = (file) => invPost('/api/inv/deduct/prepare', inv
 export const invDeductDownloadUrl = (token) => invWithQs('/api/inv/deduct/download', { token })
 // 直接从台账出税局勾选清单：params={subject 购方税号, from, to 开票日期, marked 之前导出过的也带上}；回预览＋下载凭证，下载同上（下载才记"已标注勾选"）
 export const invDeductTickPrepare = (params) => jp('/api/inv/deduct/tick/prepare', params)
+// 过渡期：票总管已有的票。invOther＝系统现在记住了多少张、台账里多少张带着记号；invOtherImport＝传一份票总管导出的清单，
+// 回 {rows, added, total, both, marked, counts, list[两边都有的票], warnings}（票号对得上的票当场记上「票总管已有」）
+export const invOther = () => j('/api/inv/other')
+export const invOtherImport = (file) => invPost('/api/inv/other/import', invFd(file, 'file'))
 export const invSellers = (params) => j(invWithQs('/api/inv/sellers', params))
 export const invSellerCheck = (body) => jp('/api/inv/sellers/check', body)
 export const invOpeningPreview = (file) => invPost('/api/inv/opening/preview', invFd(file, 'file'))
@@ -617,6 +629,13 @@ export const invLaterDocs = (id, files) => invPost(`/api/inv/later/${id}/docs`, 
 export const invLaterReceive = (id, code) => jp(`/api/inv/later/${id}/receive`, { code })
 export const invLaterReceiveUpload = (id, files) => invPost(`/api/inv/later/${id}/receive-upload`, invFd(files, 'files'))
 export const invLaterMark = (id, body) => jp(`/api/inv/later/${id}/mark`, body)        // body={amount, note}
+// 后补票自动转待认证：审核弹窗「核销暂估」看系统找到的原凭证和打算怎么做 / 选定核销哪张 / 现在做；设置里的三档开关
+export const invLaterVoucherPlan = (id) => j(`/api/inv/later/${id}/voucher-plan`)
+export const invLaterVoucherSource = (id, picks) => jp(`/api/inv/later/${id}/voucher-source`, { picks })
+export const invLaterVoucherRun = (id) => jp(`/api/inv/later/${id}/voucher-run`)
+export const invLaterVoucherConfig = () => j('/api/inv/later-voucher/config')
+export const invLaterVoucherConfigSet = (mode) => jp('/api/inv/later-voucher/config', { mode })
+export const invLaterFlowCheck = (id) => jp(`/api/inv/later/${id}/flow-check`)         // 现在就去这张付款单的钉钉流程里找发票（财务初审后才到的记到后补单、进审核）
 export const invLaterConfirmSelf = (id) => jp(`/api/inv/later/${id}/confirm-self`)     // 申请人自己传上来的发票，财务确认收到（之后才算已到）
 export const invLaterRemind = (id) => jp(`/api/inv/later/${id}/remind`)
 export const invLaterUpdate = (id, body) => jp(`/api/inv/later/${id}/update`, body)

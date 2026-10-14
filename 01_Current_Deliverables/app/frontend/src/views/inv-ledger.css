@@ -50,7 +50,15 @@
 .inv-lg-main.has-side{ grid-template-columns:minmax(0,1fr) 380px; }
 @media (max-width:1180px){ .inv-lg-main.has-side{ grid-template-columns:minmax(0,1fr); } }
 .inv-lg-list{ display:flex; flex-direction:column; gap:10px; min-width:0; }
-.inv-lg-tbl td{ padding:8px 10px; }
+/* 整张表不折行：右侧详情一打开表格变窄，能折行的那一列（原来是「主体」）会被挤成一个字一行、一行撑到几百像素高。
+   放不下就在表格框里横向滚动；名称太长的两列用省略号，鼠标停上去看全称。 */
+.inv-lg-tbl td{ padding:8px 10px; white-space:nowrap; }
+.inv-lg-buyer{ min-width:120px; max-width:230px; overflow:hidden; text-overflow:ellipsis; }
+/* 右侧详情开着：名称列收窄、格子左右留白收一点，1920 宽的屏上刚好不用横向滚动 */
+.inv-lg-main.has-side .inv-lg-buyer{ max-width:140px; }
+.inv-lg-main.has-side .inv-lg-seller{ max-width:160px; }
+.inv-lg-main.has-side .inv-lg-tbl .inv-lg-sub{ max-width:134px; }
+.inv-lg-main.has-side .inv-lg-tbl td, .inv-lg-main.has-side .inv-lg-tbl thead th{ padding-left:7px; padding-right:7px; }
 .inv-lg-tbl thead th{ padding:9px 10px; }
 .inv-lg-tbl tr.row:focus-visible{ outline:2px solid var(--accent); outline-offset:-2px; }
 .inv-lg-tbl tr.on td, .inv-lg-tbl tr.on:hover td{ background:var(--accent-soft); }
@@ -58,7 +66,7 @@
 .inv-lg-tbl tr.void td{ color:var(--ink-3); }
 .inv-lg-tbl tr.void .num{ text-decoration:line-through; }
 .inv-lg-tbl td.mono{ white-space:nowrap; }
-.inv-lg-type{ min-width:96px; max-width:150px; }
+.inv-lg-type{ min-width:96px; max-width:150px; overflow:hidden; text-overflow:ellipsis; }
 .inv-lg-seller{ min-width:120px; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .inv-lg-sum td{ background:var(--bg-sub); font-weight:700; border-top:1px solid var(--line-strong); color:var(--ink); }
 .inv-lg-pager{ display:flex; align-items:center; justify-content:center; gap:12px; font-size:12.5px; color:var(--ink-2); }
@@ -145,6 +153,16 @@
 .inv-lg-chip.warn b{ color:var(--amber); }
 .inv-lg-chip.err{ color:var(--red); border-color:var(--red-line); background:var(--red-bg); }
 .inv-lg-chip.err b{ color:var(--red); }
+
+/* ── 抵扣勾选页签最上面：过渡期「票总管已有的票」（拖清单的窄条 + 两边都有的票） ── */
+.inv-drop.inv-lg-odrop{ min-height:48px; padding:10px 14px; }
+.inv-lg-othsec .inv-lg-mini{ max-height:320px; }
+.inv-lg-othlast{ align-self:center; }
+
+/* 右侧详情：过渡期「票总管已有」的记号和按钮 */
+.inv-lg-oth.on{ border-color:var(--blue-line); background:var(--blue-bg); }
+.inv-lg-othtx{ font-size:12.5px; line-height:1.6; color:var(--ink-2); margin-bottom:8px; }
+.inv-lg-othtx b{ color:var(--ink); }
 
 /* 未确认前的下载按钮：链接没有 disabled 属性，用类模拟 */
 .btn.inv-lg-off{ opacity:.5; cursor:not-allowed; box-shadow:none; }

@@ -25,6 +25,7 @@ sys.path.insert(0, str(BACKEND))
 from fastapi import FastAPI                      # noqa: E402
 from fastapi.responses import JSONResponse       # noqa: E402
 from fastapi.testclient import TestClient        # noqa: E402
+from sqlalchemy import select                    # noqa: E402
 
 
 def _has(mod):
@@ -138,6 +139,17 @@ class InvoiceBooksApiTests(unittest.TestCase):
         from routers import invoice_vouchers
         cls.vouchers = invoice_vouchers
         app.include_router(invoice_vouchers.router)
+        # 清空试运行数据（连带钉钉自动接入模块）：摘掉别的测试留下的旧模块，让它们绑到这次新导入的 routers.invoice 上
+        for a in ("invoice_intake", "invoice_reset", "invoice_later_voucher", "logistics_voucher"):
+            sys.modules.pop("routers." + a, None)
+            if pkg is not None and hasattr(pkg, a):
+                delattr(pkg, a)
+        from routers import invoice_reset
+        cls.reset = invoice_reset
+        app.include_router(invoice_reset.router)
+        from routers import invoice_later_voucher
+        cls.l3 = invoice_later_voucher
+        app.include_router(invoice_later_voucher.router)
         cls.c = TestClient(app)
 
         def mk(name, perms=None, role="normal"):
@@ -150,6 +162,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         mk("recv2", ["enter_accounting", "enter:invlater", "inv_receive"])
         mk("viewer", ["enter_accounting", "enter:invledger"])
         mk("nogate", ["enter_accounting", "inv_deduct", "inv_unbind", "inv_opening", "inv_receive"])
+        mk("cfg", ["enter_accounting", "enter:invledger", "inv_config"])      # 有发票管家设置权限、但不是主管理员
         f = tip.FAKE
         cls.OUR, cls.OUR_TID = f["buyer"], f["buyer_tid"]
         cls.OTHER_TID = tip._uscc("91440300MA99WXYW9")
@@ -164,6 +177,10 @@ class InvoiceBooksApiTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.c.close()
         cls.db._engine.dispose()
+        for a in ("invoice_intake", "invoice_reset"):       # 这两个绑着本次的 routers.invoice，别留给后面的测试
+            sys.modules.pop("routers." + a, None)
+            if sys.modules.get("routers") is not None and hasattr(sys.modules["routers"], a):
+                delattr(sys.modules["routers"], a)
         for k, v in cls.mods.items():
             if v is None:
                 sys.modules.pop(k, None)
@@ -202,7 +219,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
                 self.c.post("/api/inv/audit/claim", json={"folderId": fid}, headers=self.H(user))
 
     def post(self, url, user, body=None):
-        if self.AUTO_CLAIM and re.match(r"/api/inv/(audit/(approve|return|batch|item/)|item/)", url):
+        if self.AUTO_CLAIM and re.match(r"/api/inv/(audit/(approve|return|batch|items?/)|item/)", url):
             self._claim_for(user, url, body or {})
         if self.AUTO_CLAIM and url in ("/api/inv/folder/manual", "/api/inv/desk/scan") and "auditor" not in (body or {}):
             body = dict(body or {}, auditor="acct")      # 老用例：建票夹（含扫付款单建的）一律指定 acct 来审（建的时候必须指派清楚）
@@ -304,9 +321,12 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(vals[-1][cols.index("价税合计")], 600)
 
     def test_ledger_subject_month_paper_and_export(self):
-        self.make_item(num(9748), 100, fields={"buyer_name": "主体甲", "paper": 0})
+        a, _ = self.make_item(num(9748), 100, fields={"buyer_name": "主体甲", "paper": 0})
         self.make_item(num(9749), 200, dt="20260801", fields={"buyer_name": "主体甲", "paper": 1})
-        self.make_item(num(9750), 300, fields={"buyer_name": "主体乙", "paper": 0})
+        c, _ = self.make_item(num(9750), 300, fields={"buyer_name": "主体乙", "paper": 0})
+        # 2026-10-13 起审核＝纸质票已收到，审核通过时都记成已到了；这里把两张改回没到，当作新规则之前审的老票
+        self.S.item_update(self.e, a, paper=0)
+        self.S.item_update(self.e, c, paper=0)
         q = "?subject=" + quote("主体甲") + "&month=2026-09&paper=missing"
         r = self.ok(self.get("/api/inv/ledger" + q, "viewer"))
         self.assertEqual(r["total"], 1)
@@ -1662,6 +1682,843 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(t({"inv_type": "special", "number": "12345678", "code": "044001900111"}), "增值税专用发票")
         self.assertEqual(t({"inv_type": "train", "number": n20}), "电子发票(铁路电子客票)")
         self.assertEqual(t({"inv_type": "travel", "number": n20}), "电子发票(普通发票)")
+
+    def test_30_other_system_list(self):
+        """过渡期票总管、发票管家并行：把票总管导出的清单传进来，系统记住；票号对得上的票自动记「票总管已有」——
+        现在已有的马上记，以后接进来的（钉钉自动接入的也一样）一送审就记；有记号的出勾选清单不带。
+        人工取消过的不再自动记；会计判了不抵扣的、之前已从这边出过清单的不记，只列出来。
+        开票日期都放在 2024-03，号码、税号都是编的。"""
+        S, e = self.S, self.e
+        OUR, TID, OTHER = self.OUR, self.OUR_TID, self.OTHER_TID
+        face = dict(amount=100, tax=6, total=106, buyer_name=OUR, buyer_tax_id=TID, seller_name="过渡销方甲", seller_tax_id="91both0a")
+        a, _ = self.make_item(num(30001), 106, "31", "20240302", face)                             # 两边都有、已审核：记上
+        b, _ = self.make_item(num(30002), 106, "31", "20240303", face)                             # 只在发票管家
+        c, _ = self.make_item(num(30003), 106, "31", "20240304", face, approve=False)               # 两边都有、还没审核：也记上
+        d, _ = self.make_item(num(30004), 106, "31", "20240305", face, decisions={"deductible": False})   # 两边都有、这边判不抵扣：不记
+        g, _ = self.make_item(num(30005), 106, "31", "20240306", face)                             # 两边都有、之前已从这边出过清单：不记，提醒
+        S.item_update(e, g, deduct_status="marked")
+        lst = lambda nums, tid=TID: ("增值税发票勾选抵扣(默认)_20240331.xlsx", self.ie.export_tax_tick([
+            {"number": n, "date": "2024-03-01", "amount": 106, "tax": 6, "buyerTaxId": tid, "sellerName": "过渡销方甲",
+             "taxType": "电子发票(增值税专用发票)"} for n in nums]), "application/octet-stream")
+        imp = lambda f, user="acct": self.upload("/api/inv/other/import", user, [f], "file")
+        st = lambda *ids: [self.item(i)["deduct_status"] or "" for i in ids]
+        nums = [num(30001), num(30003), num(30004), num(30005), num(30099), num(30098), num(30097)]   # 后三张现在只在票总管
+        self.assertEqual(imp(lst(nums), "viewer").status_code, 403)
+        r = imp(("乱写的.xlsx", b"not an excel", "application/octet-stream"))
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("票总管清单没读出来", r.json()["msg"])
+        self.assertEqual(self.ok(self.get("/api/inv/other", "viewer"))["count"], 0)
+        j = self.ok(imp(lst(nums)))
+        self.assertEqual((j["rows"], j["keys"], j["added"], j["total"], j["both"], j["marked"], j["warnings"]), (7, 7, 7, 7, 4, 2, []), j)
+        self.assertEqual({k: v for k, v in j["counts"].items() if v}, {"new": 2, "notDeduct": 1, "marked": 1})
+        self.assertEqual({x["number"]: (x["state"], x["approved"]) for x in j["list"]},
+                         {num(30001): ("new", True), num(30003): ("new", False), num(30004): ("notDeduct", True), num(30005): ("marked", True)})
+        self.assertEqual(st(a, b, c, d, g), ["other", "", "other", "", "marked"])
+        logs = S.logs_of(e, item_id=c)
+        self.assertTrue(any(x["action"] == "记为票总管已有" and "票总管清单" in json.dumps(x, ensure_ascii=False, default=str) for x in logs), logs)
+        s0 = self.ok(self.get("/api/inv/other", "viewer"))
+        self.assertEqual((s0["count"], s0["marked"], s0["lastBy"]), (7, 2, "acct"))
+        # 同一份再传一遍：不重复记
+        j = self.ok(imp(lst(nums)))
+        self.assertEqual((j["added"], j["marked"], j["counts"]["flagged"], j["counts"]["new"]), (0, 0, 2, 0))
+        # 出勾选清单：有记号的不带（不用再拖什么文件）
+        url, rng = "/api/inv/deduct/tick/prepare", {"from": "2024-03-01", "to": "2024-03-31", "subject": TID}
+        j = self.ok(self.post(url, "acct", rng))
+        self.assertEqual([x["number"] for x in j["preview"]], [num(30002)])
+        self.assertEqual([(x["key"], x["count"]) for x in j["summary"]["skipped"]], [("inOther", 1), ("notApproved", 1), ("marked", 1)])
+        # 以后接进来的票（票号在清单里）：一送审就自动记上，审核的人看到的就是勾好的；批量通过也不会丢
+        h, fh = self.make_item(num(30099), 106, "31", "20240307", face, approve=False)
+        self.assertEqual(st(h), ["other"])
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fh, "itemIds": [h]}))       # 不带这张的勾选决定
+        self.assertEqual((st(h), self.item(h)["review"]), (["other"], "approved"))
+        # 审核的人把系统记的号取消了：这张以后不再自动记
+        k, fk = self.make_item(num(30098), 106, "31", "20240308", face, approve=False)
+        self.assertEqual(st(k), ["other"])
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fk, "itemIds": [k],
+                                                             "decisions": {str(k): {"deductible": True, "otherSystem": False}}}))
+        self.assertEqual(st(k), [""])
+        self.assertEqual((self.books.other_apply(), st(k)), (0, [""]))
+        # 没送审就先放着的票：审核通过前、出清单前也会对一次
+        m, fm = self.make_item(num(30097), 106, "31", "20240309", face, approve=False, submit=False)
+        self.assertEqual(st(m), [""])
+        j = self.ok(self.post(url, "acct", rng))
+        self.assertEqual(st(m), ["other"])
+        self.assertEqual(sorted(x["number"] for x in j["preview"]), [num(30002), num(30098)])
+        # 台账里手工取消：不再自动记；再传清单时列为「手工取消过」；重新记上后恢复
+        u = lambda i: "/api/inv/item/%d/other-system" % i
+        self.ok(self.post(u(a), "acct", {"on": False}))
+        self.assertEqual((self.books.other_apply(), st(a)), (0, [""]))
+        j = self.ok(imp(lst(nums)))
+        self.assertEqual(({x["number"]: x["state"] for x in j["list"]}[num(30001)], j["marked"], st(a)), ("off", 0, [""]))
+        self.ok(self.post(u(a), "acct", {"on": True}))
+        self.assertEqual(st(a), ["other"])
+        self.ok(self.post(u(a), "acct", {"on": False}))
+        S.other_set_off(e, self.item(a)["dup_key"], 0)
+        self.assertEqual((self.books.other_apply(), st(a)), (1, ["other"]))
+        # 传错了别家公司的清单：提醒
+        j = self.ok(imp(lst([num(30096)], OTHER)))
+        self.assertIn("不在本公司抬头清单里", j["warnings"][0])
+
+    def test_31_other_system_mark(self):
+        """过渡期「票总管已有」记号：审核时逐张勾 → 出勾选清单不带、台账里看得到、能按它筛；台账里事后能补记 / 取消；
+        方式二在税局未勾选清单上标注时也不替它标「是」。开票日期都放在 2024-05，号码、税号都是编的。"""
+        OUR, TID = self.OUR, self.OUR_TID
+        face = dict(amount=100, tax=6, total=106, buyer_name=OUR, buyer_tax_id=TID, seller_name="过渡销方乙", seller_tax_id="91mark0a")
+        a, fa = self.make_item(num(31001), 106, "31", "20240502", face, approve=False)             # 审核时勾「票总管已有」
+        b, fb = self.make_item(num(31002), 106, "31", "20240503", face, approve=False)             # 审核时不勾
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fa, "itemIds": [a],
+                                                             "decisions": {str(a): {"deductible": True, "otherSystem": True}}}))
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fb, "itemIds": [b],
+                                                             "decisions": {str(b): {"deductible": True, "otherSystem": False}}}))
+        st = lambda *ids: [self.item(i)["deduct_status"] or "" for i in ids]
+        self.assertEqual((st(a, b), self.item(a)["deductible"]), (["other", ""], 1))              # 可抵扣照常判，只是勾选归票总管
+        rng = {"from": "2024-05-01", "to": "2024-05-31", "subject": TID}
+        j = self.ok(self.post("/api/inv/deduct/tick/prepare", "acct", rng))
+        self.assertEqual(([x["number"] for x in j["preview"]], [(x["key"], x["count"]) for x in j["summary"]["skipped"]]),
+                         ([num(31002)], [("inOther", 1)]))
+        # 台账：显示这个记号、能按它筛、导出的 Excel 里也写
+        led = self.ok(self.get("/api/inv/ledger?from=2024-05-01&to=2024-05-31&deduct=other", "viewer"))
+        self.assertEqual([(r["id"], r["deductStatus"]) for r in led["rows"]], [(a, "other")])
+        self.assertEqual(self.ie.DEDUCT_STATUS_LABELS["other"], "票总管已有")
+        # 台账里事后取消 / 补记：要抵扣勾选权限
+        u = lambda i: "/api/inv/item/%d/other-system" % i
+        self.assertEqual(self.post(u(a), "viewer", {"on": False}).status_code, 403)
+        self.assertEqual(self.post(u(999999), "acct", {"on": True}).status_code, 404)
+        r = self.ok(self.post(u(a), "acct", {"on": False}))
+        self.assertEqual((r["changed"], r["item"]["deductStatus"], st(a)), (1, "", [""]))
+        r = self.ok(self.post(u(b), "acct", {"on": True}))
+        self.assertEqual((r["changed"], r["item"]["deductStatus"], st(b)), (1, "other", ["other"]))
+        self.assertEqual(self.ok(self.post(u(b), "acct", {"on": True}))["changed"], 0)             # 再点一次不重复记
+        self.assertTrue(any(x["action"] == "记为票总管已有" for x in self.S.logs_of(self.e, item_id=b)))
+        self.assertTrue(any(x["action"] == "取消票总管已有" for x in self.S.logs_of(self.e, item_id=a)))
+        j = self.ok(self.post("/api/inv/deduct/tick/prepare", "acct", rng))
+        self.assertEqual([x["number"] for x in j["preview"]], [num(31001)])
+        # 税局已显示勾选过的：不让改
+        self.S.item_update(self.e, a, deduct_status="checked")
+        r = self.post(u(a), "acct", {"on": True})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("勾选过", r.json()["msg"])
+        # 方式二（在税局未勾选清单上标注）：有记号的不替它标「是」
+        data = xlsx(["发票号码", "开票日期", "销方名称", "金额", "税额", "价税合计", "是否勾选"],
+                    [[num(31002), "2024-05-03", "过渡销方乙", 100, 6, 106, ""]])
+        j = self.ok(self.upload("/api/inv/deduct/prepare", "acct", [("未勾选.xlsx", data, "application/octet-stream")], "file"))
+        self.assertEqual((j["summary"]["yes"], j["preview"][0]["decision"] or ""), (0, ""), j["preview"])
+        self.assertIn("票总管已有", j["preview"][0]["reason"])
+
+    def test_32_audit_means_paper_received(self):
+        """审核＝纸质票已收到（用户 2026-10-13 定）：单张点「审核」（弹窗右上角或已收发票表上，同一个接口）、整单审核通过，
+        都把还没到的纸质件记为已到并留痕；记疑问、清标记不算。号码是编的。"""
+        S, e = self.S, self.e
+        face = dict(buyer_name=self.OUR, buyer_tax_id=self.OUR_TID, origin="attachment", paper=0)
+        a, fa = self.make_item(num(32001), 106, "31", "20240602", face, approve=False)
+        b, fb = self.make_item(num(32002), 106, "31", "20240603", face, approve=False)
+        mark = lambda i, body: self.post("/api/inv/audit/item/%d/mark" % i, "acct", body)
+        self.ok(mark(a, {"mark": "doubt", "text": "金额对不上"}))
+        self.assertEqual(self.item(a)["paper"], 0)
+        self.ok(mark(a, {"mark": "clear"}))
+        self.assertEqual(self.item(a)["paper"], 0)
+        r = self.ok(mark(a, {"mark": "ok"}))
+        self.assertEqual((bool(r["item"]["paper"]), self.item(a)["paper"], bool(r["item"]["auditOk"])), (True, 1, True))
+        got = [x for x in S.logs_of(e, item_id=a) if x["action"] == "纸质件到件（审核时确认）"]
+        self.assertEqual(len(got), 1)
+        self.ok(mark(a, {"mark": "ok"}))                                                    # 再点一次不重复留痕
+        self.assertEqual(len([x for x in S.logs_of(e, item_id=a) if x["action"] == "纸质件到件（审核时确认）"]), 1)
+        # 整单审核通过：没单张点过「审核」的票也记
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fb, "itemIds": [b]}))
+        self.assertEqual((self.item(b)["review"], self.item(b)["paper"]), ("approved", 1))
+        self.assertTrue(any(x["action"] == "纸质件到件（审核时确认）" for x in S.logs_of(e, item_id=b)))
+        # 只审其中一两张：这张勾的「可抵扣」「票总管」当场存下（过几天回来接着审不会丢）；整单通过时没再带判定的沿用已存的，不被系统建议盖掉
+        c, fc = self.make_item(num(32003), 106, "31", "20240604", face, approve=False)
+        d, _ = self.S.item_insert(e, folder_id=fc, kind="invoice", origin="attachment", inv_type="special", number=num(32004),
+                                  dup_key="N:" + num(32004), total=50, tax=3, deduct_suggest="yes", review="pending", proc_status="done"), None
+        r = self.ok(mark(c, {"mark": "ok", "deductible": False, "otherSystem": True}))
+        self.assertEqual((self.item(c)["deductible"], self.item(c)["deduct_status"], self.item(c)["review"]), (0, "other", "pending"))
+        self.assertEqual((r["item"]["deductible"], r["item"]["deductStatus"]), (False, "other"))
+        self.assertEqual((self.item(d)["deductible"], self.item(d)["review"]), (None, "pending"))      # 没审的那张原样
+        self.assertEqual(S.folder_get(e, fc)["status"], "submitted")                                    # 单子还在待审核
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fc, "itemIds": [c, d], "gapNote": "测试：只为走通"}))
+        self.assertEqual((self.item(c)["deductible"], self.item(c)["deduct_status"], self.item(d)["deductible"]), (0, "other", 1))
+        # 审核过的票不再亮「纸质件还没到」
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fa, "itemIds": [a]}))
+        an, _ = self.inv.folder_anomalies(S.folder_get(e, fa), S.folder_items(e, fa), "done")
+        self.assertNotIn("paper", [x["code"] for x in an])
+
+    def test_33_approve_invoice_one_by_one(self):
+        """审一张过一张（用户 2026-10-13 定）：勾的票当场审核通过、进台账、纸质票记已到，待核字段一并确认，付款单留在待审核；
+        最后一张也过了、金额一致 → 整单自动结掉（非发票附件跟着过）；金额有差额的票照样能过但整单不自动结，结单时写的差额说明要记下；
+        记了存疑的不能过（一起勾的也不过）。号码是编的。"""
+        S, e = self.S, self.e
+        OUR, TID = self.OUR, self.OUR_TID
+        face = dict(amount=100, tax=6, total=106, buyer_name=OUR, buyer_tax_id=TID, origin="attachment", paper=0)
+        fo = self.ok(self.post("/api/inv/folder/manual", "intern", {"title": "逐张审的付款单", "amount": 318, "company": OUR}))["folder"]
+        ids = []
+        for n in (33001, 33002, 33003):
+            s = self.ok(self.post("/api/inv/desk/scan", "intern", {"code": qr(num(n), 106, "31", "20240702")}))
+            S.item_update(e, s["item"]["id"], **face)
+            ids.append(s["item"]["id"])
+        a, b, c = ids
+        att = S.item_insert(e, folder_id=fo["id"], kind="other", origin="attachment", proc_status="done")
+        self.ok(self.post("/api/inv/folder/%d/submit" % fo["id"], "intern"))
+        url = "/api/inv/audit/items/approve"
+        self.assertEqual(self.post(url, "viewer", {"folderId": fo["id"], "itemIds": [a]}).status_code, 403)
+        self.assertEqual(self.post(url, "acct", {"folderId": fo["id"], "itemIds": []}).status_code, 400)
+        # 只审第 1 张：当场通过、进台账；这张勾的「不可抵」「票总管」存下；别的票和整张单不动
+        S.item_update(e, a, pending_json=["sellerName"])
+        r = self.ok(self.post(url, "acct", {"folderId": fo["id"], "itemIds": [a],
+                                            "decisions": {str(a): {"deductible": False, "otherSystem": True}}}))
+        self.assertEqual((r["folderDone"], [i["id"] for i in r["items"]], r["items"][0]["review"]), (False, [a], "approved"))
+        ia = self.item(a)
+        self.assertEqual((ia["review"], ia["deductible"], ia["deduct_status"], ia["paper"], ia["pending_json"] or []),
+                         ("approved", 0, "other", 1, []))
+        self.assertEqual((self.item(b)["review"], S.folder_get(e, fo["id"])["status"]), ("pending", "submitted"))
+        led = self.ok(self.get("/api/inv/ledger?from=2024-07-01&to=2024-07-31", "viewer"))
+        self.assertEqual([x["id"] for x in led["rows"]], [a])                       # 审过的这张已经在台账里，没审的不在
+        self.assertTrue(any(x["action"] == "审核通过" for x in S.logs_of(e, item_id=a)))
+        self.assertEqual(self.post(url, "acct", {"folderId": fo["id"], "itemIds": [a]}).status_code, 400)   # 审过的再点：提示刷新
+        # 记了存疑的不能过，一起勾的也不过
+        self.ok(self.post("/api/inv/audit/item/%d/mark" % b, "acct", {"mark": "doubt", "text": "金额不对"}))
+        r = self.post(url, "acct", {"folderId": fo["id"], "itemIds": [b, c]})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("存疑", r.json()["msg"])
+        self.assertEqual(self.item(c)["review"], "pending")
+        self.ok(self.post("/api/inv/audit/item/%d/mark" % b, "acct", {"mark": "clear"}))
+        # 剩下两张一起过：票都过完、金额一致 → 整单自动结掉，非发票附件跟着过
+        r = self.ok(self.post(url, "acct", {"folderId": fo["id"], "itemIds": [b, c]}))
+        self.assertEqual((r["folderDone"], r["folder"]["status"]), (True, "approved"))
+        self.assertEqual((S.folder_get(e, fo["id"])["status"], S.item_get(e, att)["review"], self.item(b)["deductible"]),
+                         ("approved", "approved", 1))
+        # 金额有差额的单：票照样一张张过，但整单不自动结；结单时写的差额说明记下
+        g, fg = self.make_item(num(33004), 106, "31", "20240703", face, approve=False)
+        S.folder_update(e, fg, amount=200)
+        r = self.ok(self.post(url, "acct", {"folderId": fg, "itemIds": [g]}))
+        self.assertEqual((r["folderDone"], self.item(g)["review"], S.folder_get(e, fg)["status"]), (False, "approved", "submitted"))
+        self.ok(self.post("/api/inv/audit/approve", "acct", {"folderId": fg, "itemIds": [], "gapNote": "多付的下月抵"}))
+        f2 = S.folder_get(e, fg)
+        self.assertEqual(f2["status"], "approved")
+        self.assertIn("差额说明", f2["review_note"] or "")
+        self.assertIn("多付的下月抵", f2["review_note"] or "")
+
+    def test_34_scan_invoice_tells_voucher_number(self):
+        """扫发票，报凭证号（用户 2026-10-13 要：纸质发票是原始凭证，贴票时要知道它在哪张凭证里）。
+        发票管家里已经对上的直接报、不去问金蝶；没对上的去金蝶现查一次并顺手记到票上；没登记过的票按摘要里的发票号也查得到；
+        扫的不是发票、金蝶查不了，都说清楚。号码和凭证都是编的。"""
+        V = self.vouchers
+        url = "/api/inv/vouchers/scan"
+        a, _ = self.make_item(num(34001), 106, "31", "20240802", dict(buyer_name="测试公司", buyer_tax_id=self.OUR_TID))
+        row = lambda n, no, book="测试公司会计账簿", extra="": {"book": book, "year": 2024, "month": 8, "group": "记", "number": no,
+                                                            "summary": n + "支付某某报销差旅费" + extra}
+        self.assertEqual(self.c.post(url, json={"code": num(34001)}).status_code, 401)
+        # 没对上过：去金蝶查一次，报出来，并记到这张票上
+        with patch.object(V, "fetch_rows", return_value=[row(num(34001), 230), row(num(34001), 230)]) as fr:
+            j = self.ok(self.post(url, "viewer", {"code": qr(num(34001), 106, "31", "20240802")}))
+            self.assertEqual(fr.call_count, 1)
+        self.assertEqual((j["action"], j["inLedger"], j["vouchers"], j["say"]),
+                         ("found", True, [{"book": "测试公司会计账簿", "period": "2024-08", "number": "记-230"}], "8 月，记 230 号"))
+        self.assertEqual((j["item"]["id"], j["item"]["reviewText"], j["item"]["total"]), (a, "已审核", 106))
+        self.assertEqual(self.item(a)["flags_json"]["_bookkeeping"]["vouchers"][0]["number"], "记-230")
+        # 已经对上的：直接报，不再去问金蝶；直接敲发票号码也行
+        with patch.object(V, "fetch_rows", side_effect=AssertionError("不该再查金蝶")):
+            j = self.ok(self.post(url, "viewer", {"code": " " + num(34001) + " "}))
+        self.assertEqual((j["action"], j["say"]), ("found", "8 月，记 230 号"))
+        # 发票管家里没登记过的票：按摘要里的发票号也查得到（两张凭证都报）
+        with patch.object(V, "fetch_rows", return_value=[row(num(34009), 12, "别的账簿"), row(num(34009), 391), row(num(34009) + "1", 5)]):
+            j = self.ok(self.post(url, "viewer", {"code": num(34009)}))
+        self.assertEqual((j["action"], j["inLedger"], [v["number"] for v in j["vouchers"]], "item" in j), ("found", False, ["记-12", "记-391"], False))
+        self.assertTrue(j["say"].startswith("有 2 张凭证"))
+        # 哪儿都没有
+        with patch.object(V, "fetch_rows", return_value=[]):
+            j = self.ok(self.post(url, "viewer", {"code": num(34008)}))
+        self.assertEqual((j["action"], j["say"], j["vouchers"]), ("none", "没找到凭证", []))
+        self.assertIn("没有登记这张票", j["msg"])
+        # 扫的不是发票
+        j = self.ok(self.post(url, "viewer", {"code": "https://aflow.dingtalk.com/qr/abc"}))
+        self.assertEqual((j["action"], j["say"]), ("notInvoice", "这是审批单"))
+        self.assertEqual(self.ok(self.post(url, "viewer", {"code": "随便打的字"}))["action"], "notInvoice")
+        # 金蝶查不了：不报错，照实说
+        b, _ = self.make_item(num(34002), 106, "31", "20240803", dict(buyer_name="测试公司", buyer_tax_id=self.OUR_TID))
+        with patch.object(V, "fetch_rows", side_effect=RuntimeError("超时")):
+            j = self.ok(self.post(url, "viewer", {"code": num(34002)}))
+        self.assertEqual((j["action"], j["inLedger"]), ("none", True))
+        self.assertIn("金蝶现在查不了", j["msg"])
+        # 「凭证装订」扫码页用的样子：和扫付款单同一套字段（主体简称、凭证号不带「记-」、凭证月份）；扫的不是发票 → ok False
+        bv = V.bind_view(V._scan(num(34001)), {"测试公司会计账簿": "测试主体"})
+        self.assertEqual((bv["ok"], bv["is_invoice"], bv["inst"], bv["subject"], bv["payee"], bv["amount"]),
+                         (True, True, "发票:" + num(34001), "测试主体", self.item(a)["seller_name"] or "", 106))
+        self.assertEqual([(v["subject"], v["month"], v["vno"]) for v in bv["vouchers"]], [("测试主体", "2024-08", "230")])
+        self.assertEqual((bv["invoice"]["number"], bv["invoice"]["inLedger"], bv["invoice"]["reviewText"]), (num(34001), True, "已审核"))
+        with patch.object(V, "fetch_rows", return_value=[]):
+            bv = V.bind_view(V._scan(num(34008)))
+        self.assertEqual((bv["ok"], bv["vouchers"], bv["state"]), (True, [], "这张发票还没做账"))
+        self.assertEqual(V.bind_view(V._scan("随便打的字"))["ok"], False)
+
+    def test_35_late_invoice_in_dingtalk_flow_goes_to_later(self):
+        """财务初审这条线（用户 2026-10-13 定）：钉钉流程里的发票，财务初审人点同意之前就有的算这张单的正常票；
+        之后才发到评论区的算后补票——记到这张单没收齐的后补单上、进发票审核，审核通过才算已到。
+        以前就取进来、当时没分的老票，再看一次流程时补分。人名、单号、发票都是编的。"""
+        inv, S, e = self.inv, self.S, self.e
+        from routers import invoice_intake as intake
+        f = self.tip.FAKE
+
+        def op(uid, typ, res, at):
+            return {"userid": uid, "operation_type": typ, "operation_result": res, "date": at}
+        # ① 纯判断：初审人退回重审过 → 以最后一次同意为准；他名下还有待办＝没过；流程没经过他 → 看接入审批人；都没有 → 看发票管家审没审
+        st = {"intake": {"firstReviewers": [{"dtUserid": "dt-first"}], "approvers": [{"dtUserid": "dt-gate"}]}}
+        ops = [op("dt-late", "START_PROCESS_INSTANCE", "NONE", "2026-09-20 13:23:00"),
+               op("dt-first", "EXECUTE_TASK_NORMAL", "AGREE", "2026-09-29 15:25:00"),
+               op("dt-x", "REDIRECT_PROCESS", "NONE", "2026-09-29 15:58:00"),
+               op("dt-first", "EXECUTE_TASK_NORMAL", "AGREE", "2026-10-12 13:51:00"),
+               op("dt-late", "ADD_REMARK", "NONE", "2099-01-01 10:00:00")]
+        inst = {"operation_records": ops, "tasks": []}
+        fr = inv.first_review(inst, None, st)
+        self.assertEqual(fr, {"passed": True, "at": "2026-10-12 13:51:00", "by": "first"})
+        self.assertFalse(inv.first_review(dict(inst, tasks=[{"userid": "dt-first", "task_status": "RUNNING"}]), None, st)["passed"])
+        gate = {"operation_records": [op("dt-gate", "EXECUTE_TASK_NORMAL", "AGREE", "2026-10-01 09:00:00")], "tasks": []}
+        self.assertEqual(inv.first_review(gate, None, st), {"passed": True, "at": "2026-10-01 09:00:00", "by": "approver"})
+        other = {"operation_records": [op("dt-x", "EXECUTE_TASK_NORMAL", "AGREE", "2026-10-01 09:00:00")], "tasks": []}
+        self.assertFalse(inv.first_review(other, {"status": "collecting"}, st)["passed"])
+        self.assertEqual(inv.first_review(other, {"status": "approved", "reviewed_at": "2026-10-05 10:00:00"}, st),
+                         {"passed": True, "at": "2026-10-05 10:00:00", "by": "audit"})
+        self.assertEqual(inv._late_info({"source": "dingtalk_comment", "at": "2099-01-01 10:00:00"}, fr),
+                         {"at": "2099-01-01 10:00:00", "after": "2026-10-12 13:51:00", "by": "first"})
+        self.assertIsNone(inv._late_info({"source": "dingtalk_comment", "at": "2026-10-11 10:00:00"}, fr))   # 初审前发的
+        self.assertIsNone(inv._late_info({"source": "dingtalk_form", "at": "2099-01-01 10:00:00"}, fr))      # 表单里带的
+        # ② 设置里存财务初审人：去重，接入审批人和起始日不动
+        before = self.ok(self.get("/api/inv/settings", "cfg"))["settings"]["intake"]
+        self.ok(self.post("/api/inv/settings", "cfg", {"settings": {"intake": {
+            "firstReviewers": [{"dtUserid": "dt-first", "dtName": "初审甲"}, {"dtUserid": "dt-first", "dtName": "重复的"}]}}}))
+        got = self.ok(self.get("/api/inv/settings", "cfg"))["settings"]["intake"]
+        self.assertEqual(got["firstReviewers"], [{"dtUserid": "dt-first", "dtName": "初审甲"}])
+        self.assertEqual((got["approvers"], got["since"]), (before["approvers"], before["since"]))
+        # ③ 一张付款单 900：表单里带 300 的票（初审前就有），后补单等 600；初审通过后评论区来了那张 600 的
+        norm = dict(instId="PI-LATE-1", businessId="202610139900000000035", applicant="申请人辛", applicantUid="dt-late",
+                    payeeName=f["seller"], amount=900.0, hasAttachments=True)
+        S.folder_upsert_from_approval(e, self._norm(**norm), "recv", "later")
+        fid = S.folder_by_inst(e, "PI-LATE-1")["id"]
+        lid = self.later_row(inst_id="PI-LATE-1", folder_id=fid, payee_name=f["seller"], pay_amount=900, expect_amount=600)
+        blobs = {"F-FORM": einv_xml(num(35001), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 283.02, 16.98, 300),
+                 "F-LATE": einv_xml(num(35002), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 566.04, 33.96, 600),
+                 "F-OLD": einv_xml(num(35003), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 471.70, 28.30, 500)}
+        a_form = {"fileId": "F-FORM", "fileName": "表单里的票.xml", "source": "dingtalk_form"}
+        a_late = {"fileId": "F-LATE", "fileName": "评论区的票.xml", "source": "dingtalk_comment", "at": "2099-01-01 10:00:00"}
+        a_old = {"fileId": "F-OLD", "fileName": "早先取过的票.xml", "source": "dingtalk_comment", "at": "2099-01-01 10:00:00"}
+        flow = {"PI-LATE-1": (inst, [a_form])}
+
+        def fake_get(iid):
+            return {"ok": True, "inst": dict(flow.get(str(iid), ({}, []))[0], _iid=str(iid)), "msg": ""}
+
+        def fake_norm(x, iid=None, tpl=None):
+            return self._norm(instId=str(iid), attachments=list(flow.get(str(iid), ({}, []))[1]), hasAttachments=True)
+
+        def by_num(n):
+            return next(i for i in S.folder_items(e, fid) if i.get("number") == n)
+        with patch.object(inv.idt, "get_instance", MagicMock(side_effect=fake_get)), \
+                patch.object(inv.idt, "normalize_instance", MagicMock(side_effect=fake_norm)), \
+                patch.object(inv.idt, "download_attachment", MagicMock(side_effect=lambda i, a, x=None: {
+                    "ok": True, "bytes": blobs[a["fileId"]], "via": "", "msg": ""})), \
+                patch.object(inv, "notify_dt", MagicMock(return_value={"sent": True, "msg": "已发送"})), \
+                patch.object(intake, "RECHECK_MAX", 10000):
+            # 头一回取附件：只有表单里那张 → 正常票，不沾后补单
+            S.folder_update(e, fid, attach_status="pending")
+            inv.worker_step()
+            a = by_num(num(35001))
+            self.assertEqual((a["later_id"], a["review"], (a["flags_json"] or {}).get("lateFlow")), (None, "draft", None))
+            # 后补单上手动「去钉钉流程里找发票」：没有新东西；没权限的点不了
+            self.assertEqual(self.post("/api/inv/later/%d/flow-check" % lid, "viewer").status_code, 403)
+            j = self.ok(self.post("/api/inv/later/%d/flow-check" % lid, "recv2"))
+            self.assertEqual((j["new"], j["linked"]), (0, 0))
+            self.assertIn("没有新的文件", j["msg"])
+            # 评论区来了一张：定时那一轮取到 → 记到后补单上、待审核；审核前不算已到
+            flow["PI-LATE-1"] = (inst, [a_form, a_late])
+            rc = intake.recheck_flows()
+            self.assertGreaterEqual(rc["checked"], 1)
+            self.assertEqual((rc["new"], rc["linked"]), (1, 1))
+            b = by_num(num(35002))
+            self.assertEqual((b["later_id"], b["review"], b["origin"]), (lid, "pending", "attachment"))
+            self.assertEqual(b["flags_json"]["lateFlow"], {"at": "2099-01-01 10:00:00", "after": "2026-10-12 13:51:00", "by": "first"})
+            v = inv.item_view(b)
+            self.assertEqual((v["selfPending"], v["fromFlow"]), (True, True))
+            l = S.later_get(e, lid)
+            self.assertEqual((float(l["received_amount"] or 0), l["status"]), (0.0, "open"))
+            lv = self.books._lv(l)
+            self.assertEqual((lv["selfCount"], lv["flowCount"], lv["selfAmount"]), (1, 1, 600.0))
+            a = by_num(num(35001))
+            self.assertEqual((a["later_id"], a["review"]), (None, "draft"))                      # 表单里那张没被动
+            # 刚看过的单 60 分钟内不再看（不白打钉钉接口）
+            self.assertEqual(intake.recheck_flows()["checked"], 0)
+            # 重算票面不丢「初审后才到」的标记
+            self.assertIn("lateFlow", inv.refresh_item(b["id"])["flags_json"])
+            # 进了发票审核：会计在待审核里搜得到，审核通过 → 这才算已到、后补单收齐
+            q = self.ok(self.get("/api/inv/audit/queue?tab=pending&q=" + num(35002), "acct"))
+            self.assertIn(fid, [r["id"] for r in q["rows"]])
+            r = self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [b["id"]]}))
+            self.assertEqual(r["items"][0]["review"], "approved")
+            l = S.later_get(e, lid)
+            self.assertEqual((float(l["received_amount"]), l["status"]), (600.0, "done"))
+            # ④ 老票补分：以前就取进来、当时初审还没过的票（没标记、停在付款单名下）→ 后补单上点一次就分过去
+            n2 = dict(norm, instId="PI-LATE-2", businessId="202610139900000000036", amount=500.0)
+            S.folder_upsert_from_approval(e, self._norm(**n2), "recv", "later")
+            fid2 = S.folder_by_inst(e, "PI-LATE-2")["id"]
+            flow["PI-LATE-2"] = ({"operation_records": ops[:1], "tasks": []}, [a_old])          # 那时初审人还没审
+            S.folder_update(e, fid2, attach_status="pending")
+            inv.worker_step()
+            old = next(i for i in S.folder_items(e, fid2) if i.get("number") == num(35003))
+            self.assertEqual((old["later_id"], old["review"], (old["flags_json"] or {}).get("lateFlow")), (None, "draft", None))
+            lid2 = self.later_row(inst_id="PI-LATE-2", folder_id=fid2, payee_name=f["seller"], pay_amount=500, expect_amount=500)
+            flow["PI-LATE-2"] = (inst, [a_old])                                                # 现在看：初审早过了，这张是之后才发的
+            j = self.ok(self.post("/api/inv/later/%d/flow-check" % lid2, "recv2"))
+            self.assertEqual((j["new"], j["linked"], j["later"]["selfCount"], j["later"]["flowCount"]), (0, 1, 1, 1))
+            self.assertIn("已记到后补单上", j["msg"])
+            old = self.item(old["id"])
+            self.assertEqual((old["later_id"], old["review"]), (lid2, "pending"))
+            # 没有没收齐的后补单 → 不硬挂：票留在付款单名下，只标着「初审后才到」
+            n3 = dict(norm, instId="PI-LATE-3", businessId="202610139900000000037", amount=600.0)
+            S.folder_upsert_from_approval(e, self._norm(**n3), "recv", "later")
+            fid3 = S.folder_by_inst(e, "PI-LATE-3")["id"]
+            blobs["F-LATE3"] = einv_xml(num(35004), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 566.04, 33.96, 600)
+            flow["PI-LATE-3"] = (inst, [dict(a_late, fileId="F-LATE3")])
+            S.folder_update(e, fid3, attach_status="pending")
+            inv.worker_step()
+            lone = next(i for i in S.folder_items(e, fid3) if i.get("number") == num(35004))
+            self.assertEqual((lone["later_id"], lone["review"], bool(lone["flags_json"].get("lateFlow"))), (None, "draft", True))
+            self.assertFalse(inv.self_pending(lone))
+        # 新建后补单会排队再看一次流程（后台线程取走）
+        inv.queue_recheck(fid3)
+        self.assertIn(fid3, inv._RECHECK_Q)
+        inv._RECHECK_Q.discard(fid3)
+        self.ok(self.post("/api/inv/settings", "cfg", {"settings": {"intake": {"firstReviewers": []}}}))
+
+    def test_36_gap_does_not_count_waiting_later_invoice_twice(self):
+        """金额核对：后补票已经交来、还在等确认时，票已经算进专票了，后补单那头不能再算它「还没到」——
+        线上 2026-10-13 一张 1,322 的单（申请人登记了后补单、又自己把票传上来）报出假差额 −1,322。号码、单号是编的。"""
+        inv, S, e = self.inv, self.S, self.e
+        f = self.tip.FAKE
+        S.folder_upsert_from_approval(e, self._norm(instId="PI-GAP-1", businessId="202610149900000000036", applicant="申请人壬",
+                                                    applicantUid="dt-gap", payeeName=f["seller"], amount=600.0), "recv", "later")
+        fo = S.folder_by_inst(e, "PI-GAP-1")
+        fid = fo["id"]
+        lid = self.later_row(inst_id="PI-GAP-1", folder_id=fid, payee_name=f["seller"], pay_amount=600, expect_amount=600)
+
+        def gap():
+            return inv.folder_gap(S.folder_get(e, fid), S.folder_items(e, fid), inv.folder_laters(e, S.folder_get(e, fid)))
+
+        def bill(n, total, **kw):
+            cols = dict(folder_id=fid, kind="invoice", inv_type="special", origin="self", later_id=lid, review="pending", number=num(n),
+                        total=total, amount=round(total / 1.06, 2), tax=round(total - total / 1.06, 2), proc_status="done",
+                        buyer_name=self.OUR, buyer_tax_id=self.OUR_TID, seller_name=f["seller"], created_by="申请人壬")
+            cols.update(kw)
+            return S.item_insert(e, **cols)
+        # 还没交票：后补 600 没到，平
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [0.0, 600.0, 0.0, 0.0])
+        # 申请人自己传来 200（等确认）：票算进专票 200，后补还没到只剩 400，仍然平；后补单本身的「已到」不变（审核通过才算）
+        a = bill(36001, 200)
+        self.books._later_recalc(lid)
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [200.0, 400.0, 200.0, 0.0])
+        l = S.later_get(e, lid)
+        self.assertEqual((float(l["received_amount"] or 0), inv.later_left(l)), (0.0, 600.0))
+        self.assertEqual(inv.later_row_view(l, S.folder_items(e, fid))["waiting"], 200.0)
+        self.assertEqual(inv.later_row_view(l)["waiting"], 0.0)
+        # 剩下 400 也传来了（钉钉流程里后到的那种）：整张单平，后补「还没到」是 0，不再报票比付款多
+        b = bill(36002, 400, origin="attachment", flags_json={"lateFlow": {"at": "2099-01-01 10:00:00", "after": "2026-10-12 13:51:00", "by": "first"}})
+        self.books._later_recalc(lid)
+        g = gap()
+        self.assertEqual([g[k] for k in ("special", "later", "laterWait", "gap")], [600.0, 0.0, 600.0, 0.0])
+        self.assertFalse(inv.gap_off(g))
+        # 交多了（多传一张 100）：等确认的最多顶掉后补单还没到的 600，多出来的照实报「票比付款多 100」
+        c = bill(36003, 100)
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [700.0, 0.0, 600.0, -100.0])
+        S.item_update(e, c, status="removed")
+        # 审核通过一张：这张转成「已到」，等确认的少了它，两头加起来还是平
+        with patch.object(inv, "notify_dt", MagicMock(return_value={"sent": True, "msg": "已发送"})):
+            self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [a]}))
+            l = S.later_get(e, lid)
+            self.assertEqual((float(l["received_amount"]), l["status"]), (200.0, "partial"))
+            self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [600.0, 0.0, 400.0, 0.0])
+            self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [b]}))
+        l = S.later_get(e, lid)
+        self.assertEqual((float(l["received_amount"]), l["status"]), (600.0, "done"))
+        self.assertEqual([gap()[k] for k in ("special", "later", "laterWait", "gap")], [600.0, 0.0, 0.0, 0.0])
+        # 接收人自己扫到的票（当场就算已到）不受影响：没有「等确认」，不会被多减
+        S.folder_upsert_from_approval(e, self._norm(instId="PI-GAP-2", businessId="202610149900000000037", applicant="申请人壬",
+                                                    applicantUid="dt-gap", payeeName=f["seller"], amount=500.0), "recv", "later")
+        fo2 = S.folder_by_inst(e, "PI-GAP-2")
+        lid2 = self.later_row(inst_id="PI-GAP-2", folder_id=fo2["id"], payee_name=f["seller"], pay_amount=500, expect_amount=500)
+        S.item_insert(e, folder_id=fo2["id"], kind="invoice", inv_type="special", origin="scanner", later_id=lid2, review="pending",
+                      number=num(36004), total=300, amount=283.02, tax=16.98, proc_status="done", created_by="接收人乙")
+        self.books._later_recalc(lid2)
+        g2 = inv.folder_gap(fo2, S.folder_items(e, fo2["id"]), inv.folder_laters(e, fo2))
+        self.assertEqual([g2[k] for k in ("special", "later", "laterWait", "gap")], [300.0, 200.0, 0.0, 0.0])
+
+    def test_37_later_invoice_auto_transfer_voucher(self):
+        """后补票审核通过后系统自己做「暂估转待认证」（用户 2026-10-14 定）：到金蝶找这张付款单当时的费用凭证（供应商往来贷方＝付款金额、
+        挂同一家供应商），发票税额＝账上暂估就新建 借待认证／贷暂估 的凭证并提交；默认演练不写金蝶，真做只有主管理员能开；
+        对不上、找到多张、做到一半中断的不自动做；金蝶里已有人做了、物流请款单、原凭证没有暂估的不重复做。金蝶全是假的，号码是编的。"""
+        inv, S, e, L3 = self.inv, self.S, self.e, self.l3
+        from routers import logistics_voucher as LVR
+        from routers import invoice_vouchers as iv
+        seller = self.tip.FAKE["seller"]
+        HEAD = {k: "" for _, k in LVR._F}
+        books, heads, calls = {}, [], {"save": [], "submit": []}
+
+        def row(vno, acct, name, dr=0.0, cr=0.0, expl="", sup=True, **kw):
+            r = dict(HEAD, **{"号": vno, "摘要": expl, "科目": acct, "科目名": name, "借": dr, "贷": cr})
+            if sup:
+                r.update({"供应商码": "S001", "供应商": seller})
+            r.update(kw)
+            return r
+
+        def voucher(vno, gross, tax, expl):
+            books[vno] = [row(vno, "6601.05", "快递费", dr=round(gross - tax, 2), expl=expl, sup=False, **{"部门码": "D01", "费用码": "F01"})]
+            if tax:
+                books[vno].append(row(vno, "2221.01.07", "暂估进项税", dr=tax, expl=expl))
+            books[vno].append(row(vno, "2241.02", "供应商往来", cr=gross, expl=expl))
+            heads.append((vno, gross))
+            L3._CACHE.clear()
+
+        def q(s_, conf, form, fields, filt, order=""):
+            if "FCREDIT=" in filt:
+                amt = float(filt.split("FCREDIT=")[1])
+                return [dict(books[v][-1], **{"年": 2026, "期": 9}) for v, g in heads if abs(g - amt) < 0.005]
+            return books.get(filt.split("FVOUCHERGROUPNO='")[1].split("'")[0], [])
+
+        def save(model, s_=None, conf=None):
+            calls["save"].append(model)
+            return {"id": 9000 + len(calls["save"]), "billno": "PZ%d" % len(calls["save"])}
+
+        def mk(tag, amount, tax, n):
+            S.folder_upsert_from_approval(e, self._norm(instId="PI-L3-" + tag, businessId="20260923172100039%04d" % n, applicant="申请人癸",
+                                                        applicantUid="dt-l3", payeeName=seller, amount=amount), "recv", "later")
+            fo = S.folder_by_inst(e, "PI-L3-" + tag)
+            lid = self.later_row(inst_id=fo["inst_id"], folder_id=fo["id"], business_id=fo["business_id"], company=self.OUR,
+                                 payee_name=seller, pay_amount=amount, expect_amount=amount)
+            iid = S.item_insert(e, folder_id=fo["id"], kind="invoice", inv_type="special", origin="self", later_id=lid, review="pending",
+                                number=num(37000 + n), total=amount, amount=round(amount - tax, 2), tax=tax, tax_rate="1%", proc_status="done",
+                                buyer_name=self.OUR, buyer_tax_id=self.OUR_TID, seller_name=seller, created_by="申请人癸")
+            self.books._later_recalc(lid)
+            return fo["id"], lid, iid
+
+        def approve(fid, iid):
+            self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [iid]}))
+
+        sent = MagicMock(return_value={"sent": True, "msg": "已发送"})
+        booked = {"rows": []}
+
+        def told():                 # 「没自动做」的钉钉提醒发了几条（后补单收齐给申请人的「已签收」不算）
+            return sum(1 for c in sent.call_args_list if "没自动做" in c[0][1])
+        with patch.object(LVR.kc, "_query", q), patch.object(LVR, "_kd", lambda: (None, {})), \
+                patch.object(LVR.kc, "login", lambda s_=None, conf=None: (None, {})), patch.object(LVR.kc, "save_voucher", save), \
+                patch.object(LVR.kc, "view_voucher", lambda vid, s_=None, conf=None: {"exists": True, "vno": str(vid - 8770), "status": "A"}), \
+                patch.object(LVR.kc, "submit_bill", lambda form, ids, s_=None, conf=None: calls["submit"].append(ids)), \
+                patch.object(LVR, "_xred_date", lambda book, d, s_, conf: ("2026-10-14", 2026, 10)), \
+                patch.object(iv, "fetch_rows", lambda numbers: list(booked["rows"])), \
+                patch.object(self.db, "list_orgs", lambda: [{"full_name": self.OUR, "book_code": "101"}]), \
+                patch.object(inv, "notify_dt", sent):
+            # ① 默认是演练：审核前只能看打算怎么做；审核通过后排上队，演练不写金蝶
+            self.assertEqual(L3.cfg()["mode"], "dry")
+            fa, la, ia = mk("A", 1322.0, 13.09, 1)
+            voucher("196", 1322.0, 13.09, "禾享提起支付新加坡样品运费")
+            self.assertEqual(L3.run_one(la)["status"], "wait")
+            self.assertEqual(self.get("/api/inv/later/%d/voucher-plan" % la, "viewer").status_code, 403)
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
+            self.assertEqual((v["mode"], v["ready"], v["plan"]["kind"], v["plan"]["taxInv"], v["plan"]["taxEst"], v["plan"]["src"]),
+                             ("dry", False, "exact", 13.09, 13.09, ["2026-09-196"]))
+            self.assertEqual([(x["dc"], x["acct"], x["amount"]) for x in v["lines"]], [("借", "2221.01.06", 13.09), ("贷", "2221.01.07", 13.09)])
+            self.assertTrue(v["lines"][0]["expl"].startswith(num(37001) + "核销9/196#"), v["lines"][0]["expl"])
+            self.assertEqual(v["lines"][1]["supplier"], seller)
+            approve(fa, ia)
+            self.assertIn(la, L3._Q)
+            L3.drain()
+            st = L3.state_of(la)
+            self.assertEqual(st["status"], "dry")
+            self.assertIn("演练（没写金蝶）", st["msg"])
+            self.assertEqual(calls["save"], [])
+            # 演练不打扰人：对不上的只把原因记在后补票上，不发钉钉
+            fz, lz, iz = mk("Z", 4000.0, 226.42, 9)
+            voucher("990", 4000.0, 40.0, "壬提起支付服务费")
+            approve(fz, iz)
+            L3.drain()
+            self.assertEqual((L3.state_of(lz)["status"], L3.state_of(lz)["kind"], told()), ("manual", "diff", 0))
+            # ② 开关：切真做只有主管理员能点。不翻旧账：切之前审核通过的票，定时那一轮不自动补做；人在弹窗里点「现在做」才做
+            self.assertEqual(self.post("/api/inv/later-voucher/config", "cfg", {"mode": "x"}).status_code, 400)
+            self.assertEqual(self.post("/api/inv/later-voucher/config", "cfg", {"mode": "on"}).status_code, 403)
+            self.db.set_setting(L3.CFG_KEY, {"mode": "on", "by": "boss", "at": "2099-01-01 00:00:00"}, "boss")      # 开关是「以后」才开的
+            L3.run_due()
+            self.assertEqual((L3.state_of(la)["status"], calls["save"]), ("old", []))
+            self.assertEqual(L3.run_due(), 0)
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-run" % la, "recv2").status_code, 403)
+            r = self.ok(self.post("/api/inv/later/%d/voucher-run" % la, "acct"))
+            self.assertEqual((r["status"], r["state"]["vno"]), ("done", "231"))
+            self.assertEqual(len(calls["save"]), 1)
+            self.db.set_setting(L3.CFG_KEY, {"mode": "dry"}, "boss")
+            self.assertEqual(self.ok(self.post("/api/inv/later-voucher/config", "boss", {"mode": "on"}))["mode"], "on")   # 现在起开：下面审的都自动做
+            m = calls["save"][0]
+            self.assertEqual((m["FACCOUNTBOOKID"], m["FDate"], m["FYear"], m["FPeriod"]), ({"FNumber": "101"}, "2026-10-14", 2026, 10))
+            self.assertEqual([(x["FACCOUNTID"]["FNumber"], x["FDEBIT"], x["FCREDIT"]) for x in m["FEntity"]],
+                             [("2221.01.06", 13.09, 0.0), ("2221.01.07", 0.0, 13.09)])
+            self.assertEqual(m["FEntity"][1]["FDetailID"], {"FDETAILID__FFLEX4": {"FNumber": "S001"}})
+            self.assertNotIn("FDetailID", m["FEntity"][0])
+            self.assertEqual(calls["submit"], [9001])
+            st = L3.state_of(la)
+            self.assertEqual((st["status"], st["vno"], st["submitted"], st["vyear"], st["vperiod"]), ("done", "231", True, 2026, 10))
+            bk = self.item(ia)["flags_json"]["_bookkeeping"]
+            self.assertEqual((bk["status"], bk["vouchers"]), ("booked", [{"book": self.OUR, "period": "2026-10", "number": "记-231"}]))
+            L3.run_due()
+            L3.run_one(la)
+            self.assertEqual(len(calls["save"]), 1)                                     # 做过了不重复建
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-source" % la, "acct", {"picks": []}).status_code, 400)
+            # ③ 对不上（票面税额 ≠ 账上暂估）：不自动做，写明差多少，提醒一次
+            fb, lb, ib = mk("B", 2000.0, 113.21, 2)
+            voucher("300", 2000.0, 20.0, "某某提起支付服务费")
+            approve(fb, ib)
+            L3.drain()
+            st = L3.state_of(lb)
+            self.assertEqual((st["status"], st["kind"]), ("manual", "diff"))
+            self.assertIn("发票税额 113.21 ≠ 账上暂估进项税 20.00", st["msg"])
+            self.assertEqual(told(), 1)
+            L3._put(lb, status="")
+            L3.run_one(lb)
+            self.assertEqual(told(), 1)                                                 # 同一个原因不重复提醒
+            # ④ 找到两张都对得上：要审核人选；选定后「现在做」
+            fc, lc, ic = mk("C", 500.0, 5.0, 3)
+            voucher("401", 500.0, 5.0, "甲提起支付")
+            voucher("402", 500.0, 5.0, "乙提起支付")
+            approve(fc, ic)
+            L3.drain()
+            self.assertEqual(L3.state_of(lc)["kind"], "multi")
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % lc, "acct"))
+            self.assertEqual((v["plan"]["kind"], len(v["plan"]["cands"])), ("multi", 2))
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-source" % lc, "recv2", {"picks": ["2026-09-402"]}).status_code, 403)
+            v = self.ok(self.post("/api/inv/later/%d/voucher-source" % lc, "acct", {"picks": ["2026-09-402"]}))
+            self.assertEqual((v["plan"]["kind"], v["plan"]["src"], [c["picked"] for c in v["plan"]["cands"]]), ("exact", ["2026-09-402"], [False, True]))
+            r = self.ok(self.post("/api/inv/later/%d/voucher-run" % lc, "acct"))
+            self.assertEqual((r["status"], r["state"]["status"], len(calls["save"])), ("done", "done", 2))
+            self.assertIn("9/402#", calls["save"][1]["FEntity"][1]["FEXPLANATION"])
+            # ⑤ 物流请款单不归这里；原凭证没有暂估的不用做；上次做到一半的不重复建；金蝶里已有人做了的不再做
+            fd, ld, idd = mk("D", 800.0, 8.0, 4)
+            voucher("450", 800.0, 8.0, "丁提起支付")
+            l3_lines = [{"block": "核销", "expl": num(37004) + "核销9/450#丁提起支付", "acct": "2221.01.06", "acct_name": "待认证进项税额", "dr": 8.0, "cr": 0.0, "dims": {}},
+                        {"block": "核销", "expl": "核销9/450#丁提起支付", "acct": "2221.01.07", "acct_name": "暂估进项税", "dr": 0.0, "cr": 8.0, "dims": {}}]
+            logi = {"cfg": {"mode": "on", "kinds": ["later"]}, "l3": {"ok": True, "lines": l3_lines, "tax": 8.0, "redo": 0, "gross_diff": 0.0, "msg": ""}}
+            with patch.object(L3, "_is_logistics", lambda i: True), patch.object(LVR, "_auto_cfg", lambda: logi["cfg"]), \
+                    patch.object(LVR, "_preview_data", lambda inst: ({"later3": logi["l3"]}, 200)):
+                # 物流请款单：这一栏要把「付款做账」那条线的打算说清楚，不能只说"这里不做"
+                p = L3.plan(ld)
+                self.assertEqual((p["kind"], p["ok"]), ("logistics", False))
+                self.assertIn("付款凭证还没做", p["why"])
+                self.db.set_setting(LVR._POSTED_KEY, {"PI-L3-D": {"vno": "391", "tax_later": True}}, "test")
+                # 开关是真做：物流请款单的后补票也由发票后补单这边做（用户 2026-10-14「付款凭证已经做完了，不可能在付款那条线转待认证」），
+                # 分录按付款做账那条线的算法；那条线定时那一轮对登记了后补单的请款单让开
+                v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % ld, "acct"))
+                self.assertEqual((v["plan"]["kind"], v["plan"]["by"], v["plan"]["ok"], [(x["dc"], x["acct"], x["amount"]) for x in v["lines"]]),
+                                 ("logistics", "later", True, [("借", "2221.01.06", 8.0), ("贷", "2221.01.07", 8.0)]))
+                for w in ("由发票后补单这边做", "这边马上建凭证", "对得上，转待认证税额 8.00"):
+                    self.assertIn(w, v["plan"]["why"])
+                self.assertTrue(LVR._later3_elsewhere())
+                logi["l3"] = {"ok": False, "lines": [], "msg": "发票税额和挂着的暂估进项税对不上"}
+                p = L3.plan(ld)
+                self.assertEqual((p["ok"], "现在不会自动做" in p["why"]), (False, True))
+                logi["l3"] = {"ok": True, "lines": l3_lines, "tax": 8.0, "redo": 0, "gross_diff": 0.0, "msg": ""}
+                posts = []
+
+                def fake_post_later(inst, user):
+                    posts.append((inst, user))
+                    self.db.set_setting(LVR._POSTED_KEY, {inst: {"vno": "391", "tax_later": True, "later3": {
+                        "vid": 7001, "vno": "402", "date": "2026-10-14", "book": self.OUR, "tax": 8.0, "submitted": True, "by": user}}}, "test")
+                    return ["暂估转待认证凭证 记-402 已建"]
+                with patch.object(LVR, "_post_later", fake_post_later):
+                    approve(fd, idd)
+                    L3.drain()
+                    st = L3.state_of(ld)
+                    self.assertEqual((st["status"], st["kind"], st["vno"], st["vyear"], st["vperiod"], posts), ("done", "logistics", "402", 2026, 10, [("PI-L3-D", "系统自动")]))
+                    self.assertEqual(self.item(idd)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-402"}])
+                    L3.run_one(ld)
+                    L3.run_due()
+                    self.assertEqual(len(posts), 1)                                     # 做过了不重复做
+                self.assertIn("已经建好了，记-402", L3.plan(ld)["why"])
+                # 开关不是真做：不接管，那条线自己做；这边只把它的打算亮出来
+                self.db.set_setting(L3.CFG_KEY, {"mode": "dry"}, "boss")
+                self.db.set_setting(LVR._POSTED_KEY, {"PI-L3-D": {"vno": "391", "tax_later": True}}, "test")
+                p = L3.plan(ld)
+                self.assertEqual((p["by"], p["ok"], "由「付款做账」那条线做" in p["why"], "那边下一轮" in p["why"]), ("logistics", True, True, True))
+                self.assertFalse(LVR._later3_elsewhere())
+                logi["cfg"] = {"mode": "dry", "kinds": ["later"]}                       # 那边也没开真做：要人去付款做账页点
+                p = L3.plan(ld)
+                self.assertEqual((p["ok"], "手动点" in p["why"]), (False, True))
+                self.db.set_setting(L3.CFG_KEY, {"mode": "on", "by": "boss", "at": "2026-10-01 00:00:00"}, "boss")
+            self.db.set_setting(LVR._POSTED_KEY, {}, "test")
+            fe, le, ie = mk("E", 300.0, 3.0, 5)
+            voucher("500", 300.0, 0, "戊提起支付")
+            approve(fe, ie)
+            L3.drain()
+            self.assertEqual((L3.state_of(le)["status"], "没有暂估进项税" in L3.state_of(le)["msg"]), ("none", True))
+            ff, lf, i_f = mk("F", 900.0, 9.0, 6)
+            voucher("600", 900.0, 9.0, "己提起支付")
+            L3._put(lf, status="posting")
+            approve(ff, i_f)
+            L3.drain()
+            self.assertEqual((L3.state_of(lf)["status"], L3.state_of(lf)["kind"]), ("manual", "half"))
+            fg, lg, ig = mk("G", 700.0, 7.0, 7)
+            voucher("700", 700.0, 7.0, "庚提起支付")
+            booked["rows"] = [{"book": self.OUR, "year": 2026, "month": 10, "group": "记", "number": "88", "summary": num(37007) + "核销9/700#庚提起支付"}]
+            approve(fg, ig)
+            L3.drain()
+            self.assertEqual((L3.state_of(lg)["status"], L3.state_of(lg)["kind"]), ("done", "byhand"))
+            self.assertEqual(self.item(ig)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-88"}])
+            self.assertEqual(len(calls["save"]), 2)                                     # 这四种都没有新建凭证
+            # ⑥ 关掉以后什么都不做
+            self.ok(self.post("/api/inv/later-voucher/config", "boss", {"mode": "off"}))
+            self.assertEqual(L3.run_one(lb)["status"], "skip")
+            self.assertEqual(L3.run_due(), 0)
+        self.db.set_setting(L3.CFG_KEY, {"mode": "dry"}, "test")
+
+    def test_38_item_checks_for_audit_dialog(self):
+        """审核弹窗「系统核对」（用户 2026-10-14：「比如购买方税号已查验，销方税号与库里一致」）：系统替人核过的结论一行一句——
+        购买方对抬头清单、销售方对销方档案（第几次来票／新销方／名称变了）、收款方、金额、查重、来源、税局查验。号码、公司是编的。"""
+        inv, S, e = self.inv, self.S, self.e
+        f = self.tip.FAKE
+        st = inv.get_settings()
+        folder = {"id": 0, "payee_name": f["seller"], "company": self.OUR}
+        tid = self.tip._uscc("91440300MA38CHK01")          # 这条用例自己的销方税号：别的用例没用过，档案从零开始
+        base = dict(folder_id=None, kind="invoice", inv_type="special", origin="upload", review="pending", proc_status="done",
+                    buyer_name=self.OUR, buyer_tax_id=self.OUR_TID, seller_name=f["seller"], seller_tax_id=tid,
+                    amount=283.02, tax=16.98, total=300, tax_rate="6%", field_src_json={"number": {"src": "xml"}})
+        fo = self.ok(self.post("/api/inv/folder/manual", "intern", {"title": "系统核对测试", "amount": 300, "company": self.OUR}))["folder"]
+        a = S.item_insert(e, **dict(base, folder_id=fo["id"], number=num(38001)))
+        S.seller_seen(e, tid, f["seller"], "2026-10-01", a)
+
+        def checks(iid, fd=folder):
+            return {c["key"]: c for c in inv.item_checks(e, self.item(iid), fd, st)}
+        c = checks(a)
+        self.assertEqual([c[k]["tone"] for k in ("buyer", "payee", "amount", "dup", "source", "verify")], ["ok", "ok", "ok", "ok", "ok", "todo"])
+        self.assertEqual(c["buyer"]["text"], "名称、税号都和本公司抬头清单一致")
+        self.assertIn("电子原件", c["source"]["text"])
+        self.assertEqual((c["seller"]["tone"], "新销方" in c["seller"]["text"]), ("info", True))      # 第一次来票
+        b = S.item_insert(e, **dict(base, folder_id=fo["id"], number=num(38002)))
+        self.assertEqual(checks(b)["seller"]["tone"], "ok")
+        self.assertIn("和销方档案一致 · 这家第 2 次来票", checks(b)["seller"]["text"])
+        # 有问题的：购方税号不在清单、销方名称和档案不一样、开票的不是收款方、金额加不上、重复、税局清单里没有、拍照识别还有待核
+        bad = S.item_insert(e, **dict(base, folder_id=fo["id"], number=num(38003), buyer_tax_id=self.OTHER_TID, seller_name="另一个名字有限公司",
+                                      amount=280, tax=16.98, total=300, verify="yellow", field_src_json={"number": {"src": "ocr"}},
+                                      pending_json=["sellerName", "amount"],
+                                      flags_json={"dup": {"kind": "opening", "source": "期初导入"}, "sellerMismatch": {"seller": "另一个名字有限公司", "payee": f["seller"]}}))
+        c = checks(bad)
+        self.assertEqual([c[k]["tone"] for k in ("buyer", "seller", "payee", "amount", "dup", "source", "verify")],
+                         ["warn", "warn", "warn", "warn", "err", "warn", "warn"])
+        self.assertIn("不在清单里", c["buyer"]["text"])
+        self.assertIn("销方档案里的名称是「%s」" % f["seller"], c["seller"]["text"])
+        self.assertIn("差 3.02", c["amount"]["text"])
+        self.assertIn("2 个字段要你对着图核一下", c["source"]["text"])
+        # 收据不出核对；票夹详情接口里每张票带 checks
+        r = S.item_insert(e, folder_id=fo["id"], kind="receipt", origin="upload", review="pending", proc_status="done", total=50)
+        self.assertEqual(inv.item_checks(e, self.item(r), folder, st), [])
+        d = self.ok(self.get("/api/inv/folder/%d" % fo["id"], "acct"))
+        got = {i["id"]: i["checks"] for i in d["items"]}
+        self.assertEqual(got[r], [])
+        self.assertEqual([x["label"] for x in got[a]], ["购买方", "销售方", "金额", "查重", "来源", "税局查验"])    # 手工票夹没有收款方，不出那一行
+
+    def test_99_reset_trial_data(self):
+        """清空试运行数据（名字排最后跑：它会把前面用例攒的数据清掉）。只有主管理员能点、要手打「清零」；
+        先留底再清，原件挪进留底目录不删；后补单和它挂的票夹（连同里面的票、文件、经办记录）整体保留；
+        清完钉钉自动接入的起始日改成指定那天、下一轮整段重扫。人名、单号、发票都是编的。"""
+        inv, S, e, rs = self.inv, self.S, self.e, self.reset
+        f = self.tip.FAKE
+        url = "/api/inv/admin/reset"
+        # 一个要被清掉的票夹：带一张电子票原件
+        fo = self.ok(self.post("/api/inv/folder/manual", "intern", {"title": "清零测试票夹", "amount": 300, "company": self.OUR}))["folder"]
+        x = einv_xml(num(99001), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 283.02, 16.98, 300)
+        up = self.ok(self.upload("/api/inv/desk/upload", "intern", [("清零测试.xml", x, "application/xml")]))
+        gone_item = up["results"][0]["item"]["id"]
+        gone_file = S.item_get(e, gone_item)["file_id"]
+        gone_path = inv.abs_path(S.file_get(e, gone_file)["orig_path"])
+        self.assertTrue(os.path.isfile(gone_path))
+        # 一张要留下的后补单：挂着票夹、收到过一张电子票
+        S.folder_upsert_from_approval(e, self._norm(instId="PI-RESET-KEEP", businessId="202610139900000000001", applicant="申请人庚",
+                                                    applicantUid="dt-keep", payeeName=f["seller"], amount=600.0), "recv", "later")
+        kf = S.folder_by_inst(e, "PI-RESET-KEEP")["id"]
+        lid = self.later_row(inst_id="PI-RESET-KEEP", folder_id=kf, payee_name=f["seller"], pay_amount=600, expect_amount=600)
+        x2 = einv_xml(num(99002), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 283.02, 16.98, 300)
+        with patch.object(inv, "notify_dt", MagicMock(return_value={"sent": True, "msg": "已发送"})):
+            kept = self.ok(self.upload("/api/inv/later/%d/receive-upload" % lid, "recv2", [("留下的票.xml", x2, "application/xml")]))
+        kept_item = kept["results"][0]["item"]["id"]
+        kept_path = inv.abs_path(S.file_get(e, S.item_get(e, kept_item)["file_id"])["orig_path"])
+        with e.connect() as cx:
+            n_later = len(cx.execute(select(S.LATER.c.id)).scalars().all())
+            later_items = set(cx.execute(select(S.ITEM.c.id).where(S.ITEM.c.later_id.isnot(None))).scalars())
+            n_opening = len(cx.execute(select(S.OPENING.c.id)).scalars().all())
+        # 权限：没登录 / 有设置权限但不是主管理员 / 主管理员
+        self.assertEqual(self.c.get(url).status_code, 401)
+        self.assertEqual(self.get(url, "acct").status_code, 403)
+        r = self.get(url, "cfg")
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("主管理员", r.json()["msg"])
+        self.assertEqual(self.post(url, "cfg", {"phrase": "清零", "since": "2026-09-01"}).status_code, 403)
+        pv = self.ok(self.get(url, "boss"))
+        self.assertEqual((pv["phrase"], pv["busy"], pv["keep"]["laters"]), ("清零", [], n_later))
+        self.assertGreaterEqual(pv["clear"]["folders"], 1)             # 单独跑这一条时只有上面造的那一个
+        self.assertGreaterEqual(pv["clear"]["invoices"], 1)
+        # 没打确认字样 / 没填日期 / 日期不对：不清
+        since = (date.today() - timedelta(days=30)).isoformat()
+        for body, word in (({"phrase": "", "since": since}, "清零"), ({"phrase": "删除", "since": since}, "清零"),
+                           ({"phrase": "清零"}, "从哪天起"), ({"phrase": "清零", "since": "上个月"}, "从哪天起"),
+                           ({"phrase": "清零", "since": (date.today() + timedelta(days=1)).isoformat()}, "不能晚于今天"),
+                           ({"phrase": "清零", "since": (date.today() - timedelta(days=200)).isoformat()}, "最多只能往前取")):
+            r = self.post(url, "boss", body)
+            self.assertEqual(r.status_code, 400, body)
+            self.assertIn(word, r.json()["msg"])
+        # 还有票夹在拉附件：先不清
+        S.folder_update(e, fo["id"], attach_status="running")
+        r = self.post(url, "boss", {"phrase": "清零", "since": since})
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("正在拉钉钉附件", r.json()["msg"])
+        S.folder_update(e, fo["id"], attach_status="done")
+        self.assertTrue(os.path.isfile(gone_path))                      # 前面几次都没动东西
+        self.assertIsNotNone(S.item_get(e, gone_item))
+        self.db.set_setting(rs.intake.STATE_KEY, {"since": "2026-09-09", "waiting": {"PI-W": "2026-10-01"}, "skip": {},
+                                                   "last": {"at": "x"}}, "test")
+        j = self.ok(self.post(url, "boss", {"phrase": "清零", "since": since}))
+        self.assertEqual((j["cleared"]["folders"], j["cleared"]["invoices"], j["kept"]["laters"], j["since"], j["fileErrors"]),
+                         (pv["clear"]["folders"], pv["clear"]["invoices"], n_later, since, []))
+        # 清掉的：行没了，原件挪进留底目录（不是删）
+        self.assertIsNone(S.item_get(e, gone_item))
+        self.assertIsNone(S.folder_get(e, fo["id"]))
+        self.assertFalse(os.path.exists(gone_path))
+        root = os.path.join(inv.UPLOAD_DIR, *j["archive"].split("/")[1:])
+        rel = os.path.relpath(gone_path, os.path.realpath(inv.UPLOAD_DIR))
+        self.assertTrue(os.path.isfile(os.path.join(root, "files", rel)), rel)
+        import gzip
+        with gzip.open(os.path.join(root, "rows.json.gz"), "rb") as fh:
+            dump = json.loads(fh.read().decode("utf-8"))
+        self.assertEqual(len(dump["tables"]["inv_folder"]), pv["clear"]["folders"])
+        self.assertEqual(len(dump["tables"]["inv_item"]), pv["clear"]["invoices"] + pv["clear"]["others"])
+        self.assertIn(num(99001), [r_["number"] for r_ in dump["tables"]["inv_item"]])
+        self.assertEqual(dump["meta"]["since"], since)
+        # 留下的：后补单、它挂的票夹、收到的票和原件、经办记录、期初
+        with e.connect() as cx:
+            self.assertEqual(len(cx.execute(select(S.LATER.c.id)).scalars().all()), n_later)
+            self.assertEqual(set(cx.execute(select(S.ITEM.c.id).where(S.ITEM.c.later_id.isnot(None))).scalars()), later_items)
+            keep_f = set(cx.execute(select(S.LATER.c.folder_id).where(S.LATER.c.folder_id.isnot(None))).scalars())
+            keep_f |= set(cx.execute(select(S.ITEM.c.folder_id).where(S.ITEM.c.later_id.isnot(None))).scalars())
+            self.assertEqual(set(cx.execute(select(S.FOLDER.c.id)).scalars()), keep_f - {None})
+            left = cx.execute(select(S.ITEM.c.id, S.ITEM.c.folder_id, S.ITEM.c.later_id)).all()
+            self.assertTrue(all(r_[2] is not None or r_[1] in keep_f for r_ in left), left)
+            self.assertEqual(len(cx.execute(select(S.OPENING.c.id)).scalars().all()), n_opening)
+            self.assertEqual(len(cx.execute(select(S.TAXLIST.c.id)).scalars().all()), 0)
+            orphan = cx.execute(select(S.FILE.c.id).where(S.FILE.c.folder_id.isnot(None), S.FILE.c.folder_id.notin_(keep_f))).all()
+            self.assertEqual(orphan, [])
+        self.assertTrue(os.path.isfile(kept_path))
+        d = self.ok(self.get("/api/inv/later/%d" % lid, "recv2"))
+        self.assertEqual((d["later"]["id"], [i["id"] for i in d["items"]]), (lid, [kept_item]))
+        self.assertGreater(len(d["logs"]), 0)
+        # 钉钉自动接入：起始日改了，下一轮整段重扫；还在审批中的单子照样跟着
+        self.assertEqual(inv.get_settings()["intake"]["since"], since)
+        st = rs.intake._load_state()
+        self.assertEqual((st["since"], st["waiting"]), ("", {"PI-W": "2026-10-01"}))
+        # 再看一眼：没有可清的了；清完照常能收票、进台账
+        pv2 = self.ok(self.get(url, "boss"))
+        self.assertEqual((pv2["clear"]["folders"], pv2["clear"]["invoices"], pv2["clear"]["files"], pv2["since"]), (0, 0, 0, since))
+        a, _ = self.make_item(num(99003), 106, "31", "20240402", dict(amount=100, tax=6, total=106, buyer_name=self.OUR,
+                                                                      buyer_tax_id=self.OUR_TID))
+        led = self.ok(self.get("/api/inv/ledger?from=2024-04-01&to=2024-04-30", "viewer"))
+        self.assertEqual([r_["id"] for r_ in led["rows"]], [a])
 
 if __name__ == "__main__":
     unittest.main()

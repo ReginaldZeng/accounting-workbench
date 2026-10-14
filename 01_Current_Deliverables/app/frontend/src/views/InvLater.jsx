@@ -1,5 +1,9 @@
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| 详情底部加「去钉钉找发票」；系统从钉钉流程里取到、记到后补单上的票和申请人自己传的一样标「待确认」，文字改成「交来」
 // [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 申请人传上来的发票：徽标、详情提示条和底部按钮「确认收到」
 // [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.916（后补单详情重排版）| 详情上半部分从 22 个字段的四列小格子改成：金额一排＋到票进度＋「收款方与发票」「付款单」两张卡＋通栏事由（按编号断行，长的先收起）
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.947（发票管家·新建后补单重排版）| 「新建后补单（财务代填）」弹窗重排：
+//   找到付款单后上面一行收款方＋付款金额，下面「付款单 / 收款方」两张小卡，事由单独一块（长的先收起）；表单两栏对齐，预计到票日期加快捷日期。
+//   详情里备注那段的样式改名（原来和提示条重名，把全页的黄条/绿条挤得贴边）。
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票后补池页：列表筛选（我接收的/全部＋状态＋搜索）、财务代填新建后补单、收到（扫码/上传/先标记）、催一下、详情、修改、关闭、导出欠票清单、「设置」页签
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 页头加「业务自助登记入口」（网址＋二维码，申请人自己登记发票后补）
 // [Change Log] Date: 2026-10-05 | Author: Claude / c | Version: V2.741 | 页头加「以某人身份预览」（管理员输入钉钉姓名，看这个人能选哪些单，核对审批模板配得对不对）
@@ -11,7 +15,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLaterList, invLater, invLaterResolve, invLaterCreate, invLaterDocs, invLaterReceive,
-  invLaterReceiveUpload, invLaterMark, invLaterConfirmSelf, invLaterRemind, invLaterUpdate, invLaterClose, invLaterExportUrl, invSLink, invSPreview,
+  invLaterReceiveUpload, invLaterMark, invLaterConfirmSelf, invLaterFlowCheck, invLaterRemind, invLaterUpdate, invLaterClose, invLaterExportUrl, invSLink, invSPreview,
 } from '../api.js'
 import { Modal, useToast, ScanInput, FileDrop, CameraPanel, ThumbStrip, InvViewer, StatusBadges, money, fmtTime } from './invShared.jsx'
 import InvSettings from './InvSettings.jsx'
@@ -96,7 +100,9 @@ function LaterBadges({ l }) {
     <Tag tone={st.tone}>{st.label}</Tag>
     {l?.overdue && isLive(l) && <Tag tone="err">超期</Tag>}
     {num(l?.unregisteredAmount) > 0 && <Tag tone="warn" title="点过「先标记收到」，发票号码还没扫进来">已收未登记 {money(l.unregisteredAmount)}</Tag>}
-    {num(l?.selfCount) > 0 && isLive(l) && <Tag tone="info" title="申请人自己把发票传上来了，等财务核对后点「确认收到」才算已到">申请人已传 {money(l.selfAmount)} 待确认</Tag>}
+    {num(l?.selfCount) > 0 && isLive(l) && (num(l.flowCount) > 0
+      ? <Tag tone="info" title="申请人把发票交来了（发在钉钉流程里被系统取到的，或自己传上来的）：财务点「确认收到」或在发票审核里审核通过，才算已到">{num(l.flowCount) >= num(l.selfCount) ? '钉钉流程里到了' : '申请人已交'} {money(l.selfAmount)} 待确认</Tag>
+      : <Tag tone="info" title="申请人自己把发票传上来了，等财务核对后点「确认收到」才算已到">申请人已传 {money(l.selfAmount)} 待确认</Tag>)}
     {sm && <Tag tone="err" title={smTip}>销方不符</Tag>}
   </span>
 }
@@ -272,10 +278,6 @@ function ReceiveModal({ later, onClose, onChanged }) {
 
 // ───────────────────────── 详情 ─────────────────────────
 
-function KV({ k, children }) {
-  return <div className="inv-lt-kv"><span>{k}</span><div>{children || <span className="inv-muted">—</span>}</div></div>
-}
-
 // 详情卡片里的一行：左边字段名，右边内容（空的写「—」）
 function Row({ k, children }) {
   return <div className="inv-lt-row"><span>{k}</span><div>{children || <span className="inv-muted">—</span>}</div></div>
@@ -347,6 +349,13 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     try { const r = await invLaterConfirmSelf(id); flash?.(r?.msg || '已确认收到', 'ok'); onChanged?.(); load() }
     catch (e) { flash?.('没确认上：' + errText(e), 'err') } finally { setConfirming(false) }
   }
+  // 现在就去这张付款单的钉钉流程里找发票（系统平时每小时自己去看一次，这个按钮是不想等的时候点）
+  const [finding, setFinding] = useState(false)
+  const findInFlow = async () => {
+    setFinding(true)
+    try { const r = await invLaterFlowCheck(id); flash?.(r?.msg || '看过了', r?.linked ? 'ok' : 'info'); onChanged?.(); load() }
+    catch (e) { flash?.('没看成：' + errText(e), 'err') } finally { setFinding(false) }
+  }
 
   const live = isLive(l)
   const left = remainingOf(l)
@@ -356,7 +365,9 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
   const footer = <>
     {remindRes && <span className={'inv-lt-inline ' + (remindRes.ok ? 'ok' : 'err')}>{remindRes.text}</span>}
     {l && can.receive && live && num(l.selfCount) > 0 && <button type="button" className="btn-pri" disabled={confirming} onClick={confirmSelf}
-      title="申请人自己传上来的发票：核对无误、纸质的也收到后点这里，才算已到">{confirming ? '正在确认…' : `确认收到申请人传的 ${l.selfCount} 张`}</button>}
+      title="申请人交来的发票（自己传的，或发在钉钉流程里的）：核对无误、纸质的也收到后点这里，才算已到">{confirming ? '正在确认…' : `确认收到申请人${num(l.flowCount) > 0 ? '交来' : '传'}的 ${l.selfCount} 张`}</button>}
+    {l && can.receive && live && l.instId && <button type="button" className="btn" disabled={finding} onClick={findInFlow}
+      title="现在就去这张付款单的钉钉流程里找发票（表单附件和评论区都看）。财务初审通过后才到的发票，记到这张后补单上、进发票审核。系统平时每小时自己去看一次">{finding ? '正在找…' : '去钉钉找发票'}</button>}
     {l && can.receive && live && <button type="button" className="btn" disabled={reminding} onClick={remind}>{reminding ? '发送中…' : '催一下'}</button>}
     {l && can.receive && l.status !== 'closed' && <button type="button" className="btn" onClick={() => onEdit(l)}>修改</button>}
     {l && can.receive && live && <button type="button" className="btn" onClick={() => onCloseLater(l)}>关闭此单</button>}
@@ -370,7 +381,9 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     {l && <div className="inv-lt-detail">
       <div className="inv-lt-dhead"><LaterBadges l={l} /></div>
       {num(l.selfCount) > 0 && live && <div className="inv-lt-selfbar">
-        <span>申请人已经传上来 <b>{l.selfCount}</b> 张发票（<b className="inv-num">{money(l.selfAmount)}</b>），在下面「收到的票」里。核对无误、纸质的也收到后点确认，才算已到。</span>
+        {num(l.flowCount) > 0
+          ? <span>申请人已经交来 <b>{l.selfCount}</b> 张发票（<b className="inv-num">{money(l.selfAmount)}</b>），其中 {l.flowCount} 张是系统从钉钉流程里取到的（财务初审后才发的），在下面「收到的票」里，也在发票审核的待审核里。核对无误、纸质的也收到后点确认，或在发票审核里审核通过，才算已到。</span>
+          : <span>申请人已经传上来 <b>{l.selfCount}</b> 张发票（<b className="inv-num">{money(l.selfAmount)}</b>），在下面「收到的票」里。核对无误、纸质的也收到后点确认，才算已到。</span>}
         {can.receive && <button type="button" className="btn-pri" disabled={confirming} onClick={confirmSelf}>{confirming ? '正在确认…' : '确认收到'}</button>}
       </div>}
       <div className="inv-lt-nums">
@@ -415,7 +428,7 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
       </section>
       {l.note && <section className="inv-lt-card">
         <h5>备注</h5>
-        <p className="inv-lt-note">{l.note}</p>
+        <p className="inv-lt-memo">{l.note}</p>
       </section>}
 
       <h4 className="inv-lt-h">收到的票（{items.length}）</h4>
@@ -431,7 +444,7 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
             {cur.date && <span>{cur.date}</span>}
             {cur.sellerName && <span>销方 {cur.sellerName}</span>}
             <b className="inv-num">{money(cur.total)}</b>
-            {cur.selfPending && <Tag tone="info">申请人上传 · 待确认</Tag>}
+            {cur.selfPending && <Tag tone="info">{cur.fromFlow ? '钉钉流程里取到 · 待确认' : '申请人上传 · 待确认'}</Tag>}
             <StatusBadges item={cur} />
           </div>}
         </div>
@@ -528,18 +541,44 @@ function CloseModal({ later, onClose, onSaved }) {
 
 // ───────────────────────── 新建后补单（财务代填） ─────────────────────────
 
+// 预计到票日期的几个快捷选项（本地日期，不走 UTC，免得半夜差一天）
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+const QUICK_DATES = [
+  ['7 天后', () => { const d = new Date(); d.setDate(d.getDate() + 7); return ymd(d) }],
+  ['15 天后', () => { const d = new Date(); d.setDate(d.getDate() + 15); return ymd(d) }],
+  ['本月底', () => { const d = new Date(); return ymd(new Date(d.getFullYear(), d.getMonth() + 1, 0)) }],
+  ['下月底', () => { const d = new Date(); return ymd(new Date(d.getFullYear(), d.getMonth() + 2, 0)) }],
+]
+
+// 找到付款单后的那张卡：和详情弹窗同一套——上面一行收款方＋付款金额，下面「付款单 / 收款方」两张小卡，事由单独一块
 function PrefillCard({ p, onOpenExisting }) {
-  return <div className="inv-lt-pre">
-    <div className="inv-lt-kvs">
-      <KV k="审批单">{[p.template, p.businessId].filter(Boolean).join(' · ')}</KV>
-      <KV k="申请人">{[p.applicant, p.dept].filter(Boolean).join(' · ')}</KV>
-      <KV k="公司主体">{p.company}</KV>
-      <KV k="收款方">{p.payee?.name}</KV>
-      <KV k="开户行">{p.payee?.bank}</KV>
-      <KV k="银行账号"><span className="inv-num">{p.payee?.account}</span></KV>
-      <KV k="付款金额"><b className="inv-num">{money(p.amount)}</b></KV>
-      <KV k="ERP 单号"><span className="inv-num">{p.erpNo}</span></KV>
-      <KV k="事由">{txt(p.reason)}</KV>
+  const erp = txt(p.erpNo)
+  return <div className="inv-lt-pre2">
+    <div className="inv-lt-pre2-h">
+      <div className="inv-lt-pre2-who">
+        <b>{p.payee?.name || '付款单上没读到收款方'}</b>
+        <span>{[p.template, p.businessId].filter(Boolean).join(' · ') || '—'}</span>
+      </div>
+      <div className="inv-lt-pre2-amt"><span>付款金额</span><b className="inv-num">{money(p.amount)}</b></div>
+    </div>
+    <div className="inv-lt-cards">
+      <div className="inv-lt-card">
+        <h5>付款单</h5>
+        <Row k="申请人">{p.applicant}</Row>
+        <Row k="部门">{p.dept}</Row>
+        <Row k="公司主体">{p.company}</Row>
+        <Row k="ERP 单号">{erp && erp !== '无' ? <span className="inv-num">{erp}</span> : null}</Row>
+      </div>
+      <div className="inv-lt-card">
+        <h5>收款方</h5>
+        <Row k="户名">{p.payee?.name}</Row>
+        <Row k="开户行">{p.payee?.bank}</Row>
+        <Row k="银行账号">{p.payee?.account ? <span className="inv-num">{p.payee.account}</span> : null}</Row>
+      </div>
+    </div>
+    <div className="inv-lt-card">
+      <h5>事由</h5>
+      <Reason text={txt(p.reason)} />
     </div>
     {p.existingLaterId && <div className="inv-lt-note warn">
       这张付款单已经登记过后补单（#{p.existingLaterId}），
@@ -606,7 +645,7 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
   }
 
   const noRecv = !(receivers || []).length
-  return <Modal title="新建后补单（财务代填）" onClose={onClose} width={820}
+  return <Modal title="新建后补单（财务代填）" onClose={onClose} width={880}
     footer={pre ? <>
       {err._ && <span className="inv-lt-inline err">{err._}</span>}
       <button type="button" className="btn" onClick={onClose}>取消</button>
@@ -621,9 +660,9 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
 
     {pre && <>
       <div className="inv-lt-step"><span>2</span>填后补信息</div>
-      <div className="inv-lt-form">
+      <div className="inv-lt-form two">
         <Field label="发票种类">
-          <div className="inv-lt-seg">
+          <div className="inv-lt-seg wide">
             {Object.entries(KIND_LABEL).map(([k, v]) => <button type="button" key={k} className={f.invKind === k ? 'on' : ''} onClick={() => set('invKind', k)}>{v}</button>)}
           </div>
         </Field>
@@ -635,19 +674,20 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
               {TAX_RATES.map(x => <option key={x} value={x}>{x}</option>)}
             </select>}
         </Field>
-        <Field label="预计到票日期" err={err.expectDate}>
-          <input type="date" className="inv-in" value={f.expectDate} onChange={e => set('expectDate', e.target.value)} />
-        </Field>
         <Field label="预计到票金额" err={err.expectAmount} hint="默认等于付款金额，分批到票可改小">
           <input className="inv-in inv-num" inputMode="decimal" value={f.expectAmount} onChange={e => set('expectAmount', e.target.value)} />
         </Field>
-        <Field label="财务接收人" wide err={err.receiver}>
+        <Field label="预计到票日期" err={err.expectDate}>
+          <input type="date" className="inv-in" value={f.expectDate} onChange={e => set('expectDate', e.target.value)} />
+          <div className="inv-lt-qd">{QUICK_DATES.map(([t, fn]) => <button type="button" key={t} onClick={() => set('expectDate', fn())}>{t}</button>)}</div>
+        </Field>
+        <Field label="财务接收人" err={err.receiver} hint={noRecv ? undefined : '登记后他会收到钉钉消息'}>
           <ReceiverSelect receivers={receivers} value={f.receiver} onChange={v => set('receiver', v)} />
           {noRecv && <span className="inv-lt-fh">还没有设置财务接收人。{canConfig
             ? <button type="button" className="inv-lt-lkbtn" onClick={onGoSettings}>去「设置 → 财务人员名单」勾选接收人</button>
             : '请管理员在「设置 → 财务人员名单」里勾选接收人。'}</span>}
         </Field>
-        <Field label="备注" wide><textarea className="inv-in inv-lt-ta" value={f.note} onChange={e => set('note', e.target.value)} placeholder="选填" /></Field>
+        <Field label="备注（选填）"><textarea className="inv-in inv-lt-ta" value={f.note} onChange={e => set('note', e.target.value)} placeholder="比如：供应商说月底统一开票" /></Field>
         <Field label="资料（选填）" wide>
           <FileDrop onFiles={fs => setFiles(prev => [...prev, ...fs])} disabled={busy}>
             <span className="inv-drop-tx">合同、对账单、供应商承诺函等：拖到这里，或<b>点击选择</b></span>

@@ -5,6 +5,11 @@
 #   500 张就是 3.6 万次)。改成：①每天一次全量——已对上的按它记下的凭证号成批核实(几次调用)，还没对上的才逐张查；
 #   ②夜里 22 点到 7 点不跑；③白天每轮只问金蝶「上一轮以来新建/改过哪些凭证」(1～2 次调用，和发票张数无关)，拿回来在本地和发票号比；
 #   ④这种查法哪天不行了，退回逐张查「还没对上的」，一小时最多一次。审核页上人点的「刷新」(sync_once)一个字没动，照旧立即逐张查。
+# [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.946（发票管家·扫票报凭证号）
+# Description: 用户定：扫一下纸质发票，系统报出它在金蝶哪张凭证里（纸质发票是原始凭证，贴票/装订时用）；入口放在「其它 › 凭证装订」的扫码里
+#   （routers/logistics_voucher._scan_invoice 调这里的 _scan ＋ bind_view），发票台账不放。POST /api/inv/vouchers/scan {code} 留作接口：
+#   发票二维码或直接敲发票号码 → 先看发票管家里已经对上的凭证；没对上、或这张票压根没在发票管家登记过，拿发票号去金蝶摘要里现查一次
+#   （你们的凭证摘要以发票号开头）。回凭证号和一句给页面念出来的话（say）。只查不写金蝶；查到新对上的顺手记到那张票上。
 import re
 import threading
 from datetime import datetime, timedelta
@@ -12,6 +17,7 @@ from fastapi import APIRouter, Request
 from sqlalchemy import select, update
 from starlette.concurrency import run_in_threadpool
 from routers import invoice as inv
+from kernels import invoice_parse as ip
 from kernels import invoice_store as S
 
 router = APIRouter()
@@ -228,6 +234,130 @@ async def refresh(request: Request):
     if iid is not None:
         result["item"] = inv.item_view(S.item_get(inv.E(), iid))
     return result
+
+REVIEW_CN = {"draft": "还在收票、没送审", "pending": "已送审、还没审核", "approved": "已审核", "returned": "被退回了", "void": "已作废"}
+
+
+def _loose_vouchers(number, rows):
+    """发票管家里没登记过这张票（不知道购方是谁）时：摘要里有这个发票号的凭证都算，不比账簿。"""
+    pattern = re.compile(r"(?<!\d)" + re.escape(number) + r"(?!\d)")
+    out = []
+    for row in rows:
+        if not pattern.search(str(row.get("summary") or "")):
+            continue
+        try:
+            period = "%04d-%02d" % (int(row.get("year")), int(row.get("month")))
+        except (ValueError, TypeError):
+            continue
+        no = str(row.get("number") or "")
+        v = {"book": str(row.get("book") or ""), "period": period, "number": str(row.get("group") or "") + "-" + no}
+        if no and v not in out:
+            out.append(v)
+    return sorted(out, key=lambda v: (v["book"], v["period"], v["number"]))
+
+
+def _say(vouchers):
+    """给页面念出来的话：「9 月，记 230 号」。几张凭证都念；一张没有就说没找到。"""
+    def one(v):
+        m = re.fullmatch(r"\d{4}-(\d{2})", v.get("period") or "")
+        g, _, n = (v.get("number") or "").partition("-")
+        return "%s%s %s 号" % ("%d 月，" % int(m.group(1)) if m else "", g or "记", n)
+    if not vouchers:
+        return "没找到凭证"
+    if len(vouchers) == 1:
+        return one(vouchers[0])
+    return "有 %d 张凭证：" % len(vouchers) + "；".join(one(v) for v in vouchers[:4])
+
+
+def _scan(text):
+    """扫发票查凭证号 → 响应 dict。action：found 找到了 / none 没找到 / notInvoice 扫的不是发票。"""
+    raw = str(text or "").strip()
+    c = ip.classify_code(raw)
+    number = code = ""
+    if c["kind"] == "invoice_qr":
+        q = ip.parse_invoice_qr(c["value"]) or ip.parse_invoice_qr(raw) or {}
+        number, code = str(q.get("number") or ""), str(q.get("code") or "")
+        if not number:
+            return {"ok": True, "action": "notInvoice", "say": "读不出发票号码", "msg": "二维码读不出发票号码，可以直接敲发票号码再按回车"}
+    elif c["kind"] in ("approval_link", "business_id"):
+        return {"ok": True, "action": "notInvoice", "say": "这是审批单", "msg": "这是审批单的码：请扫发票上的二维码"}
+    else:
+        digits = re.sub(r"\s+", "", raw)
+        if not re.fullmatch(r"\d{8,20}", digits):
+            return {"ok": True, "action": "notInvoice", "say": "这不是发票", "msg": "这不是发票二维码；也可以直接敲发票号码（8～20 位数字）再按回车"}
+        number = digits
+    I = S.ITEM.c
+    with inv.E().connect() as cx:
+        items = [S._row(r) for r in cx.execute(select(S.ITEM).where(
+            I.number == number, I.kind == "invoice", S._item_active(), S._not_void()).order_by(I.id))]
+    if code:
+        items = [i for i in items if not i.get("code") or i.get("code") == code] or items
+    vouchers, note = [], ""
+    for it in items:
+        for v in (_bk(it).get("vouchers") or []):
+            if v not in vouchers:
+                vouchers.append(v)
+    if not vouchers:               # 发票管家里还没对上（或没登记过这张票）：去金蝶现查一次
+        try:
+            rows = fetch_rows([number])
+            if items:
+                _sync_items(items, rows)
+                for it in items:
+                    for v in match_vouchers(it, rows):
+                        if v not in vouchers:
+                            vouchers.append(v)
+            if not vouchers:
+                vouchers = _loose_vouchers(number, rows)
+        except Exception as ex:
+            note = "金蝶现在查不了（%s），只能告诉你发票管家里记着的" % str(ex)[:80]
+    out = {"ok": True, "number": number, "inLedger": bool(items), "vouchers": vouchers, "say": _say(vouchers)}
+    if items:
+        it = items[0]
+        f = S.folder_get(inv.E(), it.get("folder_id")) if it.get("folder_id") else None
+        out["item"] = {"id": it["id"], "sellerName": it.get("seller_name") or "", "buyerName": it.get("buyer_name") or "",
+                       "total": it.get("total"), "tax": it.get("tax"), "date": it.get("issue_date") or "",
+                       "review": it.get("review") or "", "reviewText": REVIEW_CN.get(it.get("review") or "", ""),
+                       "paper": bool(it.get("paper")), "folderTitle": (f or {}).get("title") or "",
+                       "businessId": (f or {}).get("business_id") or "", "applicant": (f or {}).get("applicant") or ""}
+    if vouchers:
+        out["action"] = "found"
+        out["msg"] = "、".join("%s %s %s" % (v["book"], v["period"], v["number"]) for v in vouchers)
+    else:
+        out["action"] = "none"
+        why = ("发票管家里有这张票（%s），但金蝶里还没有摘要带这个发票号的凭证：可能还没做账" % out["item"]["reviewText"] if items
+               else "发票管家里没有登记这张票，金蝶里也没有摘要带这个发票号的凭证")
+        out["msg"] = note or why
+    if note and vouchers:
+        out["msg"] += "；" + note
+    return out
+
+
+def bind_view(r, short_of=None):
+    """把 _scan 的结果换成「凭证装订」扫码页认的样子（和扫付款单出来的是同一套字段：主体简称、凭证号、凭证月份）。
+    short_of＝{账簿全称: 主体简称}。扫的不是发票 → ok False、msg 说明。"""
+    if r.get("action") == "notInvoice" or not r.get("number"):
+        return {"ok": False, "msg": r.get("msg") or "这不是发票二维码"}
+    it = r.get("item") or {}
+    vs = [{"subject": (short_of or {}).get(v.get("book")) or v.get("book") or "", "month": str(v.get("period") or "")[:7],
+           "vno": re.sub(r"^记-?", "", str(v.get("number") or "")), "what": "这张发票所在的凭证", "src": "金蝶已有"}
+          for v in r.get("vouchers") or []]
+    return {"ok": True, "is_invoice": True, "inst": "发票:" + r["number"], "kind": "发票", "subject": vs[0]["subject"] if vs else "",
+            "payee": it.get("sellerName") or "", "amount": it.get("total"), "bid": it.get("businessId") or "", "vouchers": vs,
+            "state": "" if vs else "这张发票还没做账", "msg": r.get("msg") or "",
+            "invoice": {"number": r["number"], "inLedger": bool(r.get("inLedger")), "sellerName": it.get("sellerName") or "",
+                        "total": it.get("total"), "tax": it.get("tax"), "reviewText": it.get("reviewText") or "",
+                        "paper": bool(it.get("paper")), "folderTitle": it.get("folderTitle") or ""}}
+
+
+@router.post("/api/inv/vouchers/scan")
+async def voucher_scan(request: Request):
+    """扫发票，报凭证号。body：{code: 发票二维码原文 或 发票号码}。发票管家任一页面的人都能用（只查不写金蝶）。"""
+    u, bad = inv.need(request, None)
+    if bad:
+        return bad
+    body = await inv.body_json(request)
+    return await run_in_threadpool(_scan, str(body.get("code") or "")[:2000])
+
 
 def start_timer():
     from core import db

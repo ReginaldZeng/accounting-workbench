@@ -1,4 +1,8 @@
 # [Change Log]
+# Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排） | item_checks：系统替人核过的结论一行一句（购买方和抬头清单、销售方和销方档案、收款方、金额、查重、来源、税局查验），票夹详情里每张发票带 checks
+# Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证） | 后补票审核通过后排队做「暂估转待认证」（later_voucher_kick，实现在 routers/invoice_later_voucher.py）；后台线程顺带取队
+# Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍） | folder_gap：已经交来、还在等确认的后补票（申请人自己传的、钉钉流程里后到的）已算进专票/普票，后补单那头不再算它「还没到」；later_row_view 带 waiting
+# Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单） | first_review：财务初审过没过（设置里的财务初审人→接入审批人→发票管家整单通过）；初审通过后才发到评论区的发票标 lateFlow，link_late 记到没收齐的后补单上并送审；flow_recheck 再看一次流程（定时/后补单上手动）
 # Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | self_pending：申请人自己传到后补单上、财务还没确认的票；后补单视图带 selfCount/selfAmount，票视图带 selfPending
 # Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 发票管家·核心路由（B1）——权限闸（页面准入点 AND 动作点）、设置、文件落盘与取图、进票流水线
@@ -28,7 +32,7 @@ from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, FileResponse
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from starlette.concurrency import run_in_threadpool
 
 from core import JSONResponse, _current_user, db
@@ -94,7 +98,7 @@ USER_ORIGINS = ("upload", "camera", "phone", "scanner")   # 人手送进来的�
 OPEN_STATUSES = ("collecting", "returned")          # 收票工作台/手机只能往这两种状态的票夹里放票
 # 重算时要保留的标记（其余 flags 每次按字段重算）：原始码串、识别提示、已审票后到文件不一致、同票文件不一致、人手改机读字段、改票种
 STICKY_FLAGS = ("_qrRaw", "_warnings", "_region", "_splitDone", "_audOk", "_doubt", "postApprovalMismatch", "fileMismatch",
-                "manualOverride", "kindChanged", "selfOk")
+                "manualOverride", "kindChanged", "selfOk", "lateFlow")
 SYSTEM_USER = "系统"                                 # 后台线程拉下来的附件记在"系统"名下（不算打开票夹那个人登记的）
 PAIR_ACTIVE_S = 120                                 # 手机 120 秒内来过＝正在用（电脑端据此快轮询）
 _DUP_LOCK = threading.RLock()                       # 查重"查＋插"必须原子（两个人同时扫同一张票只能一个算正主）；可重入：合并路径里还要重算
@@ -290,7 +294,9 @@ DEFAULT_SETTINGS = {
     # 审票分工（用户 2026-10-13 定）：每位接入审批人一行 {dtUserid, dtName, since}，since＝这个人的启用日——只有「提交日」在这天
     # 当天及以后的单，才因为走到他的节点而接进来、记在他名下；留空＝还没启用（单经过他不触发接入）。接入审批人名单同时就是审票分工表。
     # 外层的 since 是老的全局起始日：现在只用来给「还没有启用日这一栏的老设置」当初值，扫描不再看它（免得两个日期打架）。
-    "intake": {"approvers": [], "since": "2026-09-01"},
+    # firstReviewers＝财务初审人（Owner 2026-10-13 定）：钉钉流程里的发票，在他点同意之前就有的算这张单的正常票，
+    # 之后才发出来的算后补票（记到后补单上再进审核）。空＝按接入审批人那一步算。见 first_review()
+    "intake": {"approvers": [], "firstReviewers": [], "since": "2026-09-01"},
 }
 
 
@@ -393,6 +399,15 @@ def normalize_settings(raw, base=None, strict=True):
             bad("钉钉自动接入设置格式不对")
         else:
             cur = base.get("intake") or {}
+            def _people(key):
+                got, seen = [], set()
+                for p in r.get(key, cur.get(key)) or []:
+                    uid = _s((p or {}).get("dtUserid"), 64) if isinstance(p, dict) else ""
+                    if uid and uid not in seen:
+                        seen.add(uid)
+                        got.append({"dtUserid": uid, "dtName": _s(p.get("dtName"), 50)})
+                return got
+            frs = _people("firstReviewers")
             since = _s(r.get("since", cur.get("since")), 10)
             try:
                 datetime.strptime(since, "%Y-%m-%d")
@@ -421,7 +436,7 @@ def normalize_settings(raw, base=None, strict=True):
                         bad("%s 的启用日要写成 2026-09-01 这样的日期（还没启用就留空）" % (_s(p.get("dtName"), 50) or "接入审批人"))
                         ps = _s((old.get(uid) or {}).get("since"), 10)
                 aps.append({"dtUserid": uid, "dtName": _s(p.get("dtName"), 50), "since": ps})
-            out["intake"] = {"approvers": aps, "since": since}
+            out["intake"] = {"approvers": aps, "firstReviewers": frs, "since": since}
     return out
 
 
@@ -1124,7 +1139,7 @@ def item_view(it, idx=None, mobile=False):
          "voidBy": it.get("void_by") or "", "voidAt": it.get("void_at") or "", "voidNote": it.get("void_note") or "",
          "status": it.get("status") or "active", "page": int(it.get("page") or 0), "dupKey": it.get("dup_key") or "",
          "createdBy": it.get("created_by") or "", "createdAt": it.get("created_at") or "", "updatedAt": it.get("updated_at") or "",
-         "selfPending": self_pending(it),
+         "selfPending": self_pending(it), "fromFlow": bool((it.get("flags_json") or {}).get("lateFlow")),
          "file": file_view(f, mobile, int(it.get("page") or 0)), "paperFile": file_view(pf, mobile)}
     for k, col in FIELD_COLS:
         v[k] = it.get(col)
@@ -1140,9 +1155,11 @@ def item_views(items, mobile=False):
 
 def self_pending(it):
     """申请人自己传到后补单上的票（origin=self），财务还没确认 → True：不算进"已到"。
+    财务初审通过后才从钉钉流程里取到、记到后补单上的票（flags.lateFlow）同样对待：也是申请人交来的电子件。
     算财务确认的三种：财务点了「确认收到」、财务自己扫到/传了同一张票（这两种记 flags.selfOk）、这张票审核通过。"""
-    return bool(it) and it.get("origin") == "self" and it.get("review") != "approved" \
-        and not ((it.get("flags_json") or {}).get("selfOk"))
+    fl = (it or {}).get("flags_json") or {}
+    return bool(it) and (it.get("origin") == "self" or bool(fl.get("lateFlow") and it.get("later_id"))) \
+        and it.get("review") != "approved" and not fl.get("selfOk")
 
 
 def _share(it):
@@ -1193,10 +1210,19 @@ def later_left(l):
     return round(max(0.0, float(base) - float(l.get("received_amount") or 0) - float(l.get("unregistered_amount") or 0)), 2)
 
 
-def later_row_view(l):
-    """审核页「发票后补单」列表的一行。"""
+def later_waiting(l, items):
+    """这张后补单上已经交来、还在等确认的票的金额（申请人自己传的、钉钉流程里后到的；审核通过或接收人确认后才算已到）。
+    不超过这张后补单还没到的金额。重复票不算。"""
+    w = sum(_share(i) for i in (items or []) if i.get("later_id") == l.get("id") and i.get("status") != "removed"
+            and i.get("review") != "void" and i.get("kind") in ("invoice", "receipt")
+            and not (i.get("flags_json") or {}).get("dup") and self_pending(i))
+    return round(min(later_left(l), w), 2)
+
+
+def later_row_view(l, items=None):
+    """审核页「发票后补单」列表的一行。items＝这张单的票（给了才算得出 waiting：已交来、等确认的金额）。"""
     exp = l.get("expect_amount") if l.get("expect_amount") is not None else l.get("pay_amount")
-    return {"id": l["id"], "filedBy": l.get("filed_by") or "", "filedAt": l.get("created_at") or "",
+    return {"id": l["id"], "filedBy": l.get("filed_by") or "", "filedAt": l.get("created_at") or "", "waiting": later_waiting(l, items),
             "expectAmount": _money_val(exp), "receivedAmount": _money_val(l.get("received_amount")) or 0.0,
             "unregisteredAmount": _money_val(l.get("unregistered_amount")) or 0.0, "left": later_left(l),
             "expectDate": l.get("expect_date") or "", "receiverName": l.get("receiver_name") or l.get("receiver") or "",
@@ -1206,18 +1232,21 @@ def later_row_view(l):
 
 def folder_gap(folder, items, laters):
     """金额核对：差额＝付款金额 −（专票 ＋ 普票 ＋ 发票后补单还没到的）。正数＝票比付款少，负数＝票比付款多。
-    专票＝增值税专用发票（含电子专票）；普票＝其余发票和收据。拆分票按本单分摊额。付款金额没有（手工票夹没填）→ gap=None。"""
+    专票＝增值税专用发票（含电子专票）；普票＝其余发票和收据。拆分票按本单分摊额。付款金额没有（手工票夹没填）→ gap=None。
+    已经交来、还在等确认的后补票（申请人自己传的、钉钉流程里后到的）：票已经算进专票/普票了，后补单那头就不能再算它「还没到」，
+    否则同一笔钱算两遍、平的单子报出一笔假差额（线上实例 2026-10-13：1,322 的单报差额 −1,322）。这部分金额单列在 laterWait。"""
     act = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"
            and i.get("kind") in ("invoice", "receipt")]
     sp = [i for i in act if i.get("kind") == "invoice" and i.get("inv_type") == "special"]
     nm = [i for i in act if not (i.get("kind") == "invoice" and i.get("inv_type") == "special")]
     s_sp = round(sum(_share(i) for i in sp), 2)
     s_nm = round(sum(_share(i) for i in nm), 2)
-    left = round(sum(later_left(l) for l in (laters or [])), 2)
+    wait = round(sum(later_waiting(l, act) for l in (laters or [])), 2)
+    left = round(sum(later_left(l) for l in (laters or [])) - wait, 2)
     pay = (folder or {}).get("amount")
     gap = None if pay is None else round(float(pay) - s_sp - s_nm - left, 2)
     return {"pay": _money_val(pay), "special": s_sp, "specialN": len(sp), "normal": s_nm, "normalN": len(nm),
-            "later": left, "gap": gap}
+            "later": left, "laterWait": wait, "gap": gap}
 
 
 def gap_msg(g):
@@ -1334,6 +1363,7 @@ def later_view(l, items=None, today=None):
             "daysLeft": days, "lastRemindAt": l.get("last_remind_at") or "", "remindCount": int(l.get("remind_count") or 0),
             "note": l.get("note") or "", "sellerMismatch": bool(mism),
             "selfCount": len(mine), "selfAmount": round(sum(_share(i) for i in mine), 2),
+            "flowCount": len([i for i in mine if (i.get("flags_json") or {}).get("lateFlow")]),   # 其中从钉钉流程里取到的
             "closedBy": l.get("closed_by") or "", "closedAt": l.get("closed_at") or "", "closeNote": l.get("close_note") or "",
             "createdAt": l.get("created_at") or "", "updatedAt": l.get("updated_at") or ""}
 
@@ -1781,6 +1811,99 @@ def _register_doc(folder, f, d, origin, user, later_id=None, paper=False, review
     det.update(log_extra or {})
     log(user, "登记重复票" if dup else "登记票据", folder["id"], iid, later_id, det)
     return _res(name, action, msg, itemId=iid, folderId=folder["id"])
+
+
+def _seller_times(e, tax_id):
+    """这个税号的销方一共来过几张发票（没移除、没作废的）。"""
+    with e.connect() as cx:
+        return int(cx.execute(select(func.count()).select_from(S.ITEM).where(
+            S.ITEM.c.seller_tax_id == tax_id, S.ITEM.c.kind == "invoice", S._item_active(),
+            func.coalesce(S.ITEM.c.review, "") != "void")).scalar() or 0)
+
+
+def item_checks(e, it, folder, st):
+    """审核弹窗「系统核对」：系统替人核过什么、结论是什么，一行一句 → [{key, label, tone, text, sub}]。
+    tone：ok 正常 / warn 要看一眼 / err 有问题 / info 提示 / todo 还没核。只对发票出；只读、不改任何东西。
+    （用户 2026-10-14：「比如购买方税号已查验，销方税号与库里一致」——电子原件的票原来只显示「原件」，看不到系统核了什么。）"""
+    if (it or {}).get("kind") != "invoice":
+        return []
+    fl = it.get("flags_json") or {}
+    out = []
+
+    def add(key, label, tone, text, sub=""):
+        out.append({"key": key, "label": label, "tone": tone, "text": text, "sub": sub})
+    comps = (st or {}).get("company") or []
+    names = {ip.normalize_name(c.get("name") or "") for c in comps if c.get("name")}
+    tids = {(c.get("taxId") or "").upper() for c in comps if c.get("taxId")}
+    bn, bt = str(it.get("buyer_name") or "").strip(), str(it.get("buyer_tax_id") or "").strip().upper()
+    who = "　".join(x for x in (bn, bt) if x)
+    if fl.get("buyerNotCompany"):
+        add("buyer", "购买方", "err", "抬头不是本公司任何一个主体", who)
+    elif fl.get("buyerMismatch"):
+        bm = fl["buyerMismatch"] if isinstance(fl["buyerMismatch"], dict) else {}
+        add("buyer", "购买方", "err", "发票抬头和这张单的公司主体不是同一个", "发票：%s；这张单：%s" % (bm.get("buyer") or bn or "—", bm.get("expected") or "—"))
+    elif not bn and not bt:
+        add("buyer", "购买方", "todo", "票面上没读到购买方")
+    elif ip.normalize_name(bn) in names and bt in tids:
+        add("buyer", "购买方", "ok", "名称、税号都和本公司抬头清单一致", who)
+    elif ip.normalize_name(bn) in names:
+        add("buyer", "购买方", "warn" if bt else "ok", ("名称和本公司抬头清单一致，但税号 %s 不在清单里" % bt) if bt else "名称和本公司抬头清单一致（票面没有购方税号）", who)
+    else:
+        add("buyer", "购买方", "warn", "购买方不在本公司抬头清单里", who)
+    sn, stid = str(it.get("seller_name") or "").strip(), str(it.get("seller_tax_id") or "").strip().upper()
+    who = "　".join(x for x in (sn, stid) if x)
+    if not stid:
+        add("seller", "销售方", "todo" if not sn else "warn", "票面上没读到销方税号", sn)
+    else:
+        arch = S.seller_get(e, stid) or {}
+        n = _seller_times(e, stid)
+        if arch.get("check_result") == "命中":
+            add("seller", "销售方", "err", "销方核查有记录：%s" % (arch.get("check_note") or "命中"), who)
+        elif arch.get("name") and sn and ip.normalize_name(arch["name"]) != ip.normalize_name(sn):
+            add("seller", "销售方", "warn", "同一个税号，销方档案里的名称是「%s」，这张票写的不一样" % arch["name"], who)
+        elif not (len(stid) == 18 and ip.uscc_ok(stid)):
+            add("seller", "销售方", "warn", "销方税号的校验位不对，可能识别错了", who)
+        elif n <= 1:
+            add("seller", "销售方", "info", "新销方：第一次收到这家的票，已建销方档案", who)
+        else:
+            add("seller", "销售方", "ok", "税号、名称和销方档案一致 · 这家第 %d 次来票" % n, who)
+    payee = str((folder or {}).get("payee_name") or "").strip()
+    if fl.get("sellerMismatch"):
+        sm = fl["sellerMismatch"] if isinstance(fl["sellerMismatch"], dict) else {}
+        add("payee", "收款方", "warn", "开票的和付款单的收款方不是同一家——钱付给了一家，票是另一家开的",
+            "发票销方：%s；收款方：%s" % (sm.get("seller") or sn or "—", sm.get("payee") or payee or "—"))
+    elif payee and sn:
+        add("payee", "收款方", "ok", "开票的就是付款单的收款方")
+    a, t, tt = it.get("amount"), it.get("tax"), it.get("total")
+    if a is not None and t is not None and tt is not None:
+        calc = "%s ＋ %s ＝ %s" % (_money_str(a), _money_str(t), _money_str(float(a) + float(t)))
+        if abs(float(a) + float(t) - float(tt)) <= 0.011:
+            add("amount", "金额", "ok", "金额＋税额＝价税合计" + ((" · 税率 %s" % it["tax_rate"]) if it.get("tax_rate") else ""), calc)
+        else:
+            add("amount", "金额", "warn", "金额＋税额 ≠ 价税合计 %s（差 %s）" % (_money_str(tt), _money_str(abs(float(a) + float(t) - float(tt)))), calc)
+    else:
+        add("amount", "金额", "todo", "金额、税额、价税合计没读全，要对着票面补")
+    if fl.get("dup"):
+        add("dup", "查重", "err", _dup_msg(fl["dup"]) if isinstance(fl["dup"], dict) else "重复票：这张票在别处已经有了")
+    else:
+        add("dup", "查重", "ok", "这张票没在别的单上出现过" + ("；票总管清单里已有（抵扣勾选归票总管）" if it.get("deduct_status") == "other" else ""))
+    src = ((it.get("field_src_json") or {}).get("number") or {}).get("src") or ""
+    pend = len(it.get("pending_json") or [])
+    if src in ("pdf", "ofd", "xml", "taxpack", "taxlist"):
+        add("source", "来源", "ok", "电子原件：号码、金额直接读自原件，不是拍照识别的", ("还有 %d 个字段要你核" % pend) if pend else "")
+    elif src == "qr":
+        add("source", "来源", "ok", "号码、金额读自发票二维码", ("其余 %d 个字段是照片识别的，要你对着图核" % pend) if pend else "")
+    elif src == "manual":
+        add("source", "来源", "info", "号码是人手录的/改过的", ("还有 %d 个字段要你核" % pend) if pend else "")
+    else:
+        add("source", "来源", "warn" if pend else "info", "照片识别的" + ("：%d 个字段要你对着图核一下" % pend if pend else "，字段都核过了"))
+    vf = {"green": ("ok", "税局清单里有这张票，状态正常"), "red": ("err", "税局清单显示这张票已作废或红冲"),
+          "yellow": ("warn", "税局清单里没有这张票：可能还没上传、抬头税号填错，需核实"), "gray": ("info", "税局清单覆盖不到这种票")}.get(it.get("verify") or "")
+    if vf:
+        add("verify", "税局查验", vf[0], vf[1], it.get("verify_note") or "")
+    else:
+        add("verify", "税局查验", "todo", "还没和税局清单对过（导入税局清单后自动对）")
+    return out
 
 
 def _field_diffs(ex, d):
@@ -2296,10 +2419,25 @@ def worker_step(max_items=3):
         if S.folder_claim_attach(e, f["id"]):
             done += 1
             try:
-                _pull_attachments(f["id"])
+                with _FLOW_LOCK:
+                    _pull_attachments(f["id"])
             except Exception as ex:
                 _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
                 S.folder_update(e, f["id"], attach_status="failed", attach_msg=("拉附件出错：%s" % ex)[:400])
+    with _RECHECK_Q_LOCK:
+        again = sorted(_RECHECK_Q)[:2]
+        _RECHECK_Q.difference_update(again)
+    for fid in again:
+        done += 1
+        try:
+            flow_recheck(fid, manual=True)       # 正在拉附件的会回 busy：那一轮拉完自己会记后补单，不用再排
+        except Exception:
+            _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
+    try:                                         # 后补票审核通过后排队的「暂估转待认证」
+        from routers import invoice_later_voucher as L3
+        done += L3.drain(2)
+    except Exception:
+        _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
     for it in S.items_pending_proc(e, limit=max_items):
         if S.item_claim(e, it["id"]):
             done += 1
@@ -2315,7 +2453,7 @@ def worker_step(max_items=3):
 _POISON_MSG = "上次处理它时服务中断（可能文件过大或损坏），已跳过：请到钉钉下载核对后手工拖进来"
 
 
-def _pull_one(e, fid, dtid, label, name, origin, fetch, fails, budget=None):
+def _pull_one(e, fid, dtid, label, name, origin, fetch, fails, budget=None, late=None):
     """拉一个审批附件/图片并进票。拉之前落一行"正在拉"占位（按钉钉文件号），处理完删掉；
     进程在处理它时被杀（超大/损坏文件）→ 占位留下，下次拉到它直接跳过并报原因，其余附件照拉。"""
     ex = S.file_by_dt(e, fid, dtid)
@@ -2324,6 +2462,8 @@ def _pull_one(e, fid, dtid, label, name, origin, fetch, fails, budget=None):
             if ex.get("status") == "pulling":
                 S.file_update(e, ex["id"], status="poison")
             fails.append("%s：%s" % (label, _POISON_MSG))
+        if late:
+            _mark_late_file(e, fid, dtid, late)      # 以前就取进来的：补标「初审后才到」
         return
     dl = fetch()
     if not dl.get("ok"):
@@ -2338,6 +2478,8 @@ def _pull_one(e, fid, dtid, label, name, origin, fetch, fails, budget=None):
             S.file_delete(e, mark)
         except Exception:
             pass
+    if late:
+        _mark_late(e, [r.get("itemId") for r in rs if r.get("action") in ("item", "other", "dup") and r.get("itemId")], late)
     for r in rs:
         if r.get("action") == "error":
             fails.append("%s：%s" % (label if origin == "photo_field" else (r.get("name") or label), r.get("msg")))
@@ -2361,13 +2503,14 @@ def _pull_attachments(fid):
     atts, photos = n.get("attachments") or [], n.get("photos") or []
     fails = []
     budget = {"left": MAX_TOTAL}          # 这张单所有附件里的压缩包解开总量共用一份额度
+    fr = first_review(g["inst"], f)       # 财务初审过没过：之后才发到评论区的发票算后补票
     for a in atts:
         dtid = str(a.get("fileId") or "")[:64]
         if not dtid:
             continue
         nm = a.get("fileName") or "附件"
         _pull_one(e, fid, dtid, nm, nm, "attachment",
-                  lambda a=a: idt.download_attachment(f["inst_id"], a, g["inst"]), fails, budget)
+                  lambda a=a: idt.download_attachment(f["inst_id"], a, g["inst"]), fails, budget, late=_late_info(a, fr))
     for i, url in enumerate(photos):
         dtid = "ph:" + hashlib.sha1(str(url).encode("utf-8")).hexdigest()
         _pull_one(e, fid, dtid, "图片%d" % (i + 1), "审批图片%d.jpg" % (i + 1), "photo_field",
@@ -2380,6 +2523,159 @@ def _pull_attachments(fid):
     S.folder_update(e, fid, attach_status="failed" if fails else "done", attach_msg=msg[:400], attach_tries=0)
     log(SYSTEM_USER, "拉取附件", fid, detail={"msg": msg, "fails": fails[:20]})
     audit(SYSTEM_USER, "拉取附件", f.get("title") or ("票夹#%d" % fid), msg)
+    link_late(fid)
+
+
+# ───────────────────────── 财务初审这条线：流程里的发票算正常票还是后补票 ─────────────────────────
+# Owner 2026-10-13：发票只有发票管家一个家。钉钉流程里的发票，财务初审还没过就有的＝这张单的正常票（票齐了进发票审核）；
+# 初审已经过了才发出来的（多半在评论区）＝后补票，记到这张单的后补单上再进发票审核。不该有"取到了、停在收票中等人提交"。
+_FLOW_LOCK = threading.Lock()        # 同一时间只让一个线程去钉钉流程里取文件（拉附件 / 再看一次不能撞在一起）
+_RECHECK_Q = set()                   # 等后台线程「再看一次钉钉流程」的票夹
+_RECHECK_Q_LOCK = threading.Lock()
+
+
+def first_review(inst, folder=None, settings=None):
+    """这张钉钉单的财务初审过了没有 → {passed, at, by}。纯判断、不联网。
+    先找设置里的「财务初审人」（intake.firstReviewers，by=first）；这张单的流程没经过他们，就看「接入审批人」
+    （intake.approvers，by=approver）；都没经过 → 看发票管家里这张付款单是不是已经整单通过（by=audit）。
+    经过了的：他名下还有待办（退回后又转回他）＝没过；否则取他最后一次点同意的时间（退回重审过的以最后一次为准）。"""
+    cfg = ((settings or get_settings()).get("intake") or {})
+    inst = inst if isinstance(inst, dict) else {}
+    ops = [o for o in inst.get("operation_records") or [] if isinstance(o, dict)]
+    tasks = [t for t in inst.get("tasks") or [] if isinstance(t, dict)]
+    for key, by in (("firstReviewers", "first"), ("approvers", "approver")):
+        uids = {str(p.get("dtUserid") or "") for p in cfg.get(key) or [] if isinstance(p, dict)} - {""}
+        if not uids:
+            continue
+        agreed = [str(o.get("date") or "")[:19] for o in ops if str(o.get("userid") or "") in uids
+                  and str(o.get("operation_type") or "").upper().startswith("EXECUTE_TASK")
+                  and str(o.get("operation_result") or "").upper() == "AGREE"]
+        if any(str(t.get("userid") or "") in uids and str(t.get("task_status") or "").upper() in ("NEW", "RUNNING")
+               for t in tasks):
+            return {"passed": False, "at": "", "by": by}
+        if agreed:
+            return {"passed": True, "at": max(agreed), "by": by}
+    f = folder or {}
+    if f.get("status") == "approved" and f.get("reviewed_at"):
+        return {"passed": True, "at": str(f["reviewed_at"])[:19], "by": "audit"}
+    return {"passed": False, "at": "", "by": ""}
+
+
+def _late_info(att, fr):
+    """流程里的这份文件是不是财务初审通过之后才放进来的 → 是则 {at, after, by}，否则 None。
+    表单里的附件是提交时带的，一律不算；评论区的看它发出来的时间（钉钉给到秒）。"""
+    a = att or {}
+    at = str(a.get("at") or "")[:19]
+    if a.get("source") != "dingtalk_comment" or not at or not (fr or {}).get("passed") or not fr.get("at"):
+        return None
+    return {"at": at, "after": fr["at"], "by": fr.get("by") or ""} if at > fr["at"] else None
+
+
+def _mark_late(e, item_ids, late):
+    """这些票是财务初审通过后才从钉钉流程里取到的：记在票上（flags.lateFlow，重算不丢），供记后补单、页面标注用。→ 新标了几张。"""
+    n = 0
+    for iid in item_ids or []:
+        it = S.item_get(e, iid)
+        if not it or (it.get("flags_json") or {}).get("lateFlow"):
+            continue
+        fl = dict(it.get("flags_json") or {})
+        fl["lateFlow"] = dict(late)
+        S.item_update(e, iid, flags_json=fl)
+        n += 1
+    return n
+
+
+def _mark_late_file(e, fid, dtid, late):
+    """以前就取进来的钉钉文件（按钉钉文件号找）上的票，补标「初审后才到」。"""
+    fids = {x["id"] for x in S.files_of_folder(e, fid, include_removed=True) if str(x.get("dt_file_id") or "") == str(dtid)}
+    if not fids:
+        return 0
+    return _mark_late(e, [i["id"] for i in S.folder_items(e, fid)
+                          if i.get("file_id") in fids and i.get("origin") == "attachment"], late)
+
+
+def link_late(fid):
+    """票夹里「财务初审通过后才从钉钉流程取到」的发票/收据，记到这张付款单没收齐的后补单上并送审（待审核）→ 记上了几张。
+    没有没收齐的后补单就不动（票留在付款单名下，页面上标着「初审后才到」）。记上去的票和申请人自己上传的一样：
+    审核通过（或接收人点「确认收到」）才算已到（self_pending）。会重算后补单（可能发钉钉）：只在线程里调。"""
+    e = E()
+    f = S.folder_get(e, fid)
+    if not f:
+        return 0
+    l = S.later_open_for_folders(e, [f]).get(fid)
+    if not l:
+        return 0
+    n = 0
+    for it in S.folder_items(e, fid):
+        fl = it.get("flags_json") or {}
+        if not fl.get("lateFlow") or it.get("later_id") or it.get("kind") not in ("invoice", "receipt") \
+                or it.get("review") == "void" or fl.get("dup"):
+            continue
+        upd = {"later_id": l["id"]}
+        if (it.get("review") or "draft") == "draft":
+            upd["review"] = "pending"
+        S.item_update(e, it["id"], **upd)
+        log(SYSTEM_USER, "流程里后到的发票记到后补单", fid, it["id"], l["id"],
+            {"number": it.get("number") or "", "at": (fl.get("lateFlow") or {}).get("at") or "",
+             "after": (fl.get("lateFlow") or {}).get("after") or ""})
+        n += 1
+    if n:
+        _later_sync([l["id"]])
+    return n
+
+
+def flow_recheck(fid, manual=False, since=None, user=SYSTEM_USER):
+    """再去钉钉流程里看一眼这张单 → {ok, msg, new, linked, fails, firstReview}（看不成 {ok:False, msg, busy?}）。
+    ① 流程里新出现的文件取进来：manual＝没取过的都取；定时＝只取 since 之后发到评论区的（免得每轮都去下取不动的大文件）；
+    ② 按财务初审那条线把初审通过后才到的票标上（含以前取进来的老票）；③ 付款单有没收齐的后补单 → 记上去并送审（link_late）。
+    要联网、可能发钉钉：只在线程里调。"""
+    e = E()
+    f = S.folder_get(e, fid)
+    if not f or not f.get("inst_id"):
+        return {"ok": False, "msg": "这张单不是从钉钉审批来的，没有流程可看"}
+    if f.get("attach_status") in ("pending", "running"):
+        return {"ok": False, "busy": True, "msg": "正在取这张单的附件，过一会儿再点"}
+    if not _FLOW_LOCK.acquire(timeout=20 if manual else 0.1):
+        return {"ok": False, "busy": True, "msg": "系统正在取别的单的附件，过一会儿再点"}
+    try:
+        g = idt.get_instance(f["inst_id"])
+        if not g.get("ok"):
+            return {"ok": False, "msg": g.get("msg") or "钉钉审批单没取到"}
+        n = idt.normalize_instance(g["inst"], f["inst_id"], get_settings().get("templates") or [])
+        fr = first_review(g["inst"], f)
+        fails, budget, new = [], {"left": MAX_TOTAL}, 0
+        for a in n.get("attachments") or []:
+            dtid = str(a.get("fileId") or "")[:64]
+            if not dtid:
+                continue
+            if not S.file_by_dt(e, fid, dtid):
+                at = str(a.get("at") or "")[:19]
+                if not manual and (a.get("source") != "dingtalk_comment" or not at or (since and at <= str(since)[:19])):
+                    continue
+                new += 1
+            nm = a.get("fileName") or "附件"
+            _pull_one(e, fid, dtid, nm, nm, "attachment",
+                      lambda a=a: idt.download_attachment(f["inst_id"], a, g["inst"]), fails, budget, late=_late_info(a, fr))
+    finally:
+        _FLOW_LOCK.release()
+    linked = link_late(fid)
+    if new or linked:
+        log(user, "再看钉钉流程", fid, detail={"new": new, "linked": linked, "fails": fails[:10], "firstReview": fr})
+    if linked:
+        msg = "钉钉流程里有 %d 张财务初审后才到的发票，已记到后补单上、进了发票审核" % linked
+    elif new:
+        msg = "钉钉流程里新取到 %d 个文件；里面要是有初审后才到的发票，识别完会自己记到后补单上" % new
+    else:
+        msg = "钉钉流程里没有新的文件"
+    return {"ok": True, "msg": msg, "new": new, "linked": linked, "fails": fails, "firstReview": fr}
+
+
+def queue_recheck(fid):
+    """排队让后台线程再看一次这张单的钉钉流程（新建后补单时用：付款单早就在发票管家里了，流程里可能已经有后到的票）。"""
+    if fid:
+        with _RECHECK_Q_LOCK:
+            _RECHECK_Q.add(int(fid))
+        wake()
 
 
 # 同一份多页 PDF/OFD 的几张票只解析、渲染一次（后台单线程逐张识别，缓存按文件 id＋内容哈希，5 分钟或换了别的文件就丢）
@@ -2487,6 +2783,8 @@ def _process_item(iid):
     it2 = refresh_item(iid)
     log("系统", "识别完成", it2["folder_id"], iid, it2.get("later_id"),
         {"kind": it2.get("kind"), "number": it2.get("number") or "", "pending": it2.get("pending_json") or []})
+    if (it2.get("flags_json") or {}).get("lateFlow") and not it2.get("later_id"):
+        link_late(it2["folder_id"])
     if doc.get("extraDocs") and not split_before:
         _register_split(cur, doc["extraDocs"])
     route_folder(cur.get("folder_id"), SYSTEM_USER)        # 抬头是识别出来的：识别完再看要不要分到别家主体的票夹
@@ -3042,6 +3340,7 @@ def _submit_sync(u, fid):
         S.item_update(e, it["id"], review="pending", **({"flags_json": fl} if stale else {}))
     n = len(todo)
     S.folder_update(e, fid, status="submitted", submitted_by=u["name"], submitted_at=ts)
+    apply_other_marks(fid)           # 送审前：票号在票总管清单里的自动记上「票总管已有」，审核时看到的就是勾好的
     log(u, "提交审核", fid, detail={"items": n, "warnings": [w["msg"] for w in warnings]})
     audit(u, "提交票夹", f.get("title") or ("票夹#%d" % fid), "%d 张票送审%s" % (n, ("；提示：" + "；".join(w["msg"] for w in warnings)) if warnings else ""))
     f = S.folder_get(e, fid)
@@ -3093,12 +3392,14 @@ async def folder_detail(fid: int, request: Request):
         # 审核页从链接直接打开票夹时也要看到异常清单（不依赖它是否在当前队列页里）
         fv["anomalies"], fv["clean"] = folder_anomalies(f, items, "pending")
         laters = folder_laters(e, f)
-        fv["laters"] = [later_row_view(l) for l in laters]
+        fv["laters"] = [later_row_view(l, items) for l in laters]
         fv["gap"] = folder_gap(f, items, laters)
         # 留痕：票夹级的＋这夹里每张票（含已移除的）自己的，按 itemId/laterId 可筛单张票的历史
         ids = [i["id"] for i in S.folder_items(e, fid, include_removed=True)]
         logs = S.logs_of(e, folder_id=fid, item_ids=ids, limit=300)
-        return {"ok": True, "folder": fv, "items": item_views(items), "logs": [log_view(r) for r in logs]}
+        st = get_settings()
+        views = [dict(v, checks=item_checks(e, it, f, st)) for v, it in zip(item_views(items), items)]
+        return {"ok": True, "folder": fv, "items": views, "logs": [log_view(r) for r in logs]}
     out = await run_in_threadpool(run)
     return out if out else err("票夹不存在", 404)
 
@@ -3936,15 +4237,35 @@ def _self_review_msg(u, folder, what="审核"):
     return "这个票夹里有你自己登记的票，不能自己审，请换一位会计%s" % what
 
 
-def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=None, gap_note=""):
+# 过渡期：按票总管清单给票记「票总管已有」的函数由 routers.invoice_books 导入时登记（这里不能反过来 import 它）
+_OTHER_APPLY = []
+
+
+def apply_other_marks(folder_id=None):
+    """票号在票总管清单里的票自动记上「票总管已有」（提交审核、审核通过前各做一次；出勾选清单前也会做）。失败不挡正事。"""
+    for fn in list(_OTHER_APPLY):
+        try:
+            fn(folder_id)
+        except Exception as ex:
+            print("[发票管家] 按票总管清单记号失败：%s" % ex)
+
+
+def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=None, gap_note="", partial=False):
     """审核通过票夹里待审的票 → (ok, http状态, msg, extra)。逐张通过与批量通过共用。
     item_ids：审核人页面上看到的待审票 id（逐张通过时必给）——只通过这些；审核期间票夹里又进了新的待审票 →
     409 {newItems}，让他刷新后再审（没看过的票不能被一起通过）。批量通过不给（只过"干净"的票夹）。
     重复票/识别中的票、同号票已在别的单审核通过的，拦下（extra.blockers）；提交人或登记人不能审自己（主管理员放行并标自审）；
     可否抵扣：decisions {"<itemId>": {"deductible": bool}}，没给的按系统建议（yes→可抵、no→不可、空→不判）。
+    审核＝纸质票已收到（用户 2026-10-13 定）：通过的发票/收据，纸质件还没记到的一并记为已到。
+    过渡期：decisions 里还可以带 otherSystem（bool）——这张票票总管那边已经有了、抵扣勾选归票总管做：记 deduct_status=other，
+    出税局勾选清单时不带；明确给 false 且原来是 other 的改回空。已标注/已勾选的不动；没给这个键的也不动。
     票夹已提交却一张待审的票都没有（后补单没票就关了、票被作废……）→ 允许直接把票夹记为已审核，不再卡在队列里。
-    审票分工：先过 audit_gate——未分派的要先认领；归别人的只有「审核分派」权限的人能直接审（留痕标 forOther）。"""
+    partial=True＝审一张过一张（用户 2026-10-13 定）：只通过 item_ids 里这几张，票当场进台账；票夹里别的待审票不动、也不算"进了新票"；
+    差额这时不拦（单张票先过，差额等整单结的时候再说明）。通过后这张单待审的发票/收据一张不剩、金额核对差额又为 0 →
+    顺手把整单结掉（剩下待审的非发票附件一并通过、票夹记已审核），extra.folderDone=True；否则票夹留在待审核里。
+    审票分工：先过 audit_gate——没指派上的要先认领；归别人的只有「审核分派」权限的人能直接审（留痕标 forOther）。"""
     e = E()
+    apply_other_marks(folder["id"])
     items = S.folder_items(e, folder["id"])
     pend = [i for i in items if i.get("review") == "pending"]
     gate = audit_gate(u, folder, pend=pend)
@@ -3953,11 +4274,16 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
     if item_ids is not None:
         seen = {int(x) for x in item_ids if _int_or_none(x)}
         new = [i["id"] for i in pend if i["id"] not in seen]
-        if new:
+        if new and not partial:
             return False, 409, "审核期间这个票夹又进了新票，请刷新后再审", {"newItems": new}
         pend = [i for i in pend if i["id"] in seen]
     if not pend:
+        if partial:
+            return False, 400, "勾的票不在待审核状态（可能已经审过了），请刷新后再看", {}
         if folder.get("status") == "submitted":
+            if gap_note:                 # 票都逐张审过了、整单有差额：结单时写的差额说明照样记下
+                g0 = folder_gap(folder, items, folder_laters(e, folder))
+                note = ("差额说明（%s）：%s" % (_money_str(g0["gap"]), gap_note)) + (("；" + note) if note else "")
             return _approve_empty_folder(u, folder, note, batch)
         return False, 400, "这个票夹没有待审核的票", {}
     self_rev, blocked = self_blocked(u, folder, pend)
@@ -3965,10 +4291,10 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
         return False, 403, _self_review_msg(u, folder), {}
     doubts = [i for i in pend if (i.get("flags_json") or {}).get("_doubt")]
     if doubts:
-        m = "有 %d 张记了疑问：请提交退回，或先清掉疑问" % len(doubts)
+        m = ("有 %d 张记了存疑：先清掉存疑才能审核通过" if partial else "有 %d 张记了疑问：请提交退回，或先清掉疑问") % len(doubts)
         return False, 400, m, {"blockers": [{"code": "doubt", "itemIds": [i["id"] for i in doubts], "msg": m}]}
     g = folder_gap(folder, items, folder_laters(e, folder))
-    if gap_off(g):
+    if gap_off(g) and not partial:
         # 付款金额 −（专票＋普票＋后补）≠ 0：逐张审要写差额说明（批量通过本来就只过没异常的票夹）
         if not gap_note:
             return False, 400, "%s：要写差额说明才能通过" % gap_msg(g), {"code": "gapNote", "gap": g}
@@ -3990,26 +4316,81 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
     decisions = decisions if isinstance(decisions, dict) else {}
     ts = now_s()
     note = _s(note, 500)
+    n_other = 0
+    papers = []
     for it in pend:
         dec = decisions.get(str(it["id"])) or {}
         ded = dec.get("deductible") if isinstance(dec, dict) else None
         if it.get("kind") != "invoice":
             dv = None
         elif ded is None:
-            dv = {"yes": 1, "no": 0}.get(it.get("deduct_suggest") or "")
+            # 这次没带判定：单张审核时已经存过的沿用，没存过的才按系统建议
+            dv = it["deductible"] if it.get("deductible") is not None else {"yes": 1, "no": 0}.get(it.get("deduct_suggest") or "")
         else:
             dv = 1 if _b(ded) else 0
+        upd = {}
+        if it.get("kind") == "invoice" and isinstance(dec, dict) and "otherSystem" in dec:
+            cur = it.get("deduct_status") or ""
+            if _b(dec.get("otherSystem")) and cur == "":
+                upd["deduct_status"] = "other"
+                S.other_set_off(e, it.get("dup_key"), 0)
+            elif not _b(dec.get("otherSystem")) and cur == "other":
+                upd["deduct_status"] = ""
+                S.other_set_off(e, it.get("dup_key"), 1)     # 审核人取消了系统按清单记的号：以后不再自动记这张
+            if (upd.get("deduct_status", cur)) == "other":
+                n_other += 1
+        if it.get("kind") in ("invoice", "receipt") and not it.get("paper"):
+            upd["paper"] = 1                 # 审核＝纸质票已收到（用户 2026-10-13 定）
+            papers.append(it)
         S.item_update(e, it["id"], review="approved", review_by=u["name"], review_at=ts, review_note=note,
-                      self_review=1 if self_rev else 0, deductible=dv)
-    fu = {"reviewed_by": u["name"], "reviewed_at": ts, "review_note": note, "self_review": 1 if self_rev else 0}
-    if folder.get("status") == "submitted":
-        fu["status"] = "approved"
-    S.folder_update(e, folder["id"], **fu)
-    act = "审核·自审" if self_rev else ("批量审核通过" if batch else "审核通过")
+                      self_review=1 if self_rev else 0, deductible=dv, **upd)
+    done = True
+    if partial:
+        # 这几张过了以后，这张单还有没有待审的发票/收据？没有了、金额又对得上 → 整单结掉（剩下待审的非发票附件跟着过）
+        left = [i for i in S.folder_items(e, folder["id"]) if i.get("review") == "pending"]
+        done = (folder.get("status") == "submitted" and not gap_off(g)
+                and not [i for i in left if i.get("kind") in ("invoice", "receipt")])
+        if done:
+            for it in left:
+                S.item_update(e, it["id"], review="approved", review_by=u["name"], review_at=ts, review_note=note,
+                              self_review=1 if self_rev else 0)
+    if done:
+        fu = {"reviewed_by": u["name"], "reviewed_at": ts, "review_note": note, "self_review": 1 if self_rev else 0}
+        if folder.get("status") == "submitted":
+            fu["status"] = "approved"
+        S.folder_update(e, folder["id"], **fu)
+    act = "审核·自审" if self_rev else ("批量审核通过" if batch else "审核通过（逐张）" if partial else "审核通过")
     det = {"items": len(pend), "note": note, "selfReview": self_rev, **_owner_tag(u, folder)}
+    if partial:
+        det["numbers"] = [i.get("number") or "" for i in pend][:20]
+        det["folderDone"] = done              # 这几张过完，整单是不是也结了
+    if n_other:
+        det["otherSystem"] = n_other          # 其中几张记了「票总管已有」
+    if papers:
+        det["paper"] = len(papers)            # 其中几张的纸质件是这次审核时记为已到的
     log(u, act, folder["id"], detail=det)
+    for it in papers:
+        log(u, "纸质件到件（审核时确认）", folder["id"], it["id"], it.get("later_id"), {"number": it.get("number"), "via": "审核通过"})
+    if partial:
+        for it in pend:                       # 每张票自己的留痕里也看得到是哪次过的
+            log(u, "审核通过", folder["id"], it["id"], it.get("later_id"), {"via": "逐张", "selfReview": self_rev})
     audit(u, act, folder.get("title") or ("票夹#%d" % folder["id"]), det)
-    return True, 200, "已通过 %d 张" % len(pend), {"selfReview": self_rev}
+    # 等确认的后补票（申请人自己传的、钉钉流程里后到的）审核通过＝财务确认收到：后补单这就重算已到金额，不用等下次兜底自愈
+    _later_sync([it.get("later_id") for it in pend if it.get("later_id")])
+    later_voucher_kick([it.get("later_id") for it in pend if it.get("later_id")])
+    return True, 200, "已通过 %d 张" % len(pend), {"selfReview": self_rev, "folderDone": done}
+
+
+def later_voucher_kick(lids):
+    """后补票审核通过了：排队让后台线程去做「暂估转待认证」凭证（routers/invoice_later_voucher；开关关着、没收齐的它自己会跳过）。"""
+    ids = [x for x in (lids or []) if x]
+    if not ids:
+        return
+    try:
+        from routers import invoice_later_voucher as L3
+        L3.kick(ids)
+    except Exception as ex:
+        print("[发票管家] 后补票转待认证没排上队：%s" % ex)
 
 
 def _approve_empty_folder(u, folder, note, batch):
@@ -4296,6 +4677,43 @@ async def audit_approve(request: Request):
     return await run_in_threadpool(run)
 
 
+def _audit_items_approve_sync(u, body):
+    """审一张过一张：勾的这几张当场审核通过、进台账 → 响应 dict 或错误响应。待核字段一并确认（同弹窗里原来的「核对无误」）。"""
+    e = E()
+    f = S.folder_get(e, _int_or_none(body.get("folderId")))
+    if not f:
+        return err("票夹不存在", 404)
+    ids = body.get("itemIds") if isinstance(body.get("itemIds"), list) else []
+    want = {int(x) for x in ids if _int_or_none(x)}
+    if not want:
+        return err("先勾上要审核的票", 400)
+    for it in S.folder_items(e, f["id"]):
+        if it["id"] in want and it.get("review") == "pending" and it.get("pending_json"):
+            _, bad = _item_update_sync(u, it["id"], {"confirm": "all"})
+            if bad:
+                return bad
+    ok, status, msg, extra = approve_folder(u, f, body.get("decisions"), "", item_ids=sorted(want), partial=True)
+    if not ok:
+        return err(msg, status, **extra)
+    f = S.folder_get(e, f["id"])
+    items = S.folder_items(e, f["id"])
+    done = bool(extra.get("folderDone"))
+    return {"ok": True, "msg": msg + ("；这张单的票都审核通过了、金额一致，整单已通过" if done else "，已进台账"),
+            "folder": folder_view(f, items), "items": item_views([i for i in items if i["id"] in want]),
+            "folderDone": done, "selfReview": extra.get("selfReview", False)}
+
+
+@router.post("/api/inv/audit/items/approve")
+async def audit_items_approve(request: Request):
+    """审一张过一张（用户 2026-10-13 定）。body：{folderId, itemIds:[这次勾的票], decisions?{"<id>": {deductible, otherSystem}}}。
+    只通过这几张，票当场进台账；这张单待审的发票/收据都过完、金额核对差额又为 0 时整单一起结掉（folderDone）。"""
+    u, bad = need(request, ENTER_AUDIT, CAP_AUDIT)
+    if bad:
+        return bad
+    body = await body_json(request)
+    return await run_in_threadpool(_audit_items_approve_sync, u, body)
+
+
 def _audit_batch_sync(u, ids, note):
     done, skipped = [], []
     e = E()
@@ -4328,8 +4746,11 @@ async def audit_batch(request: Request):
     return await run_in_threadpool(_audit_batch_sync, u, ids, _s(body.get("note"), 500))
 
 
-def _audit_mark_sync(u, iid, mark, text):
-    """审核弹窗里单张票：ok＝这张核对无误（待核字段一并确认、记已核）；doubt＝记疑问（整单提交时退回）；clear＝清掉标记。"""
+def _audit_mark_sync(u, iid, mark, text, dec=None):
+    """单张票（审核弹窗里、或已收发票表上直接点）：ok＝这张核对无误（待核字段一并确认、记已核）；doubt＝记疑问（整单提交时退回）；clear＝清掉标记。
+    用户 2026-10-13 定：审核＝纸质票已收到——ok 时顺手把纸质件记为已到（原来没到的才记，留痕写明是审核时确认的）。
+    dec＝ok 时页面上这张票勾的 {deductible, otherSystem}：当场存下来（只审其中一两张、过几天再回来接着审，勾的不会丢）；
+    没带的键不动。整单通过时仍可再改。"""
     e = E()
     it = S.item_get(e, iid)
     folder = S.folder_get(e, (it or {}).get("folder_id")) if it else None
@@ -4350,15 +4771,30 @@ def _audit_mark_sync(u, iid, mark, text):
         fl["_audOk"] = {"by": u["name"], "at": now_s()}
     elif mark == "doubt":
         fl["_doubt"] = {"text": text, "by": u["name"], "at": now_s()}
-    S.item_update(e, iid, flags_json=fl)
+    got_paper = mark == "ok" and it.get("kind") in ("invoice", "receipt") and not it.get("paper")
+    upd = {"paper": 1} if got_paper else {}
+    if mark == "ok" and it.get("kind") == "invoice" and isinstance(dec, dict):
+        if dec.get("deductible") is not None:
+            upd["deductible"] = 1 if _b(dec.get("deductible")) else 0
+        if "otherSystem" in dec:
+            cur = it.get("deduct_status") or ""
+            if _b(dec.get("otherSystem")) and cur == "":
+                upd["deduct_status"] = "other"
+                S.other_set_off(e, it.get("dup_key"), 0)
+            elif not _b(dec.get("otherSystem")) and cur == "other":
+                upd["deduct_status"] = ""
+                S.other_set_off(e, it.get("dup_key"), 1)     # 审核人取消了系统按清单记的号：以后不再自动记这张
+    S.item_update(e, iid, flags_json=fl, **upd)
     act = {"ok": "审核·本张核对无误", "doubt": "审核·记疑问", "clear": "审核·清掉标记"}[mark]
     log(u, act, it["folder_id"], iid, it.get("later_id"), {"text": text} if text else {})
+    if got_paper:
+        log(u, "纸质件到件（审核时确认）", it["folder_id"], iid, it.get("later_id"), {"number": it.get("number"), "via": "审核"})
     return {"ok": True, "item": item_view(S.item_get(e, iid))}, None
 
 
 @router.post("/api/inv/audit/item/{iid}/mark")
 async def audit_item_mark(iid: int, request: Request):
-    """body：{mark: ok|doubt|clear, text?}。疑问必须写内容。"""
+    """body：{mark: ok|doubt|clear, text?, deductible?, otherSystem?}。疑问必须写内容；ok 时可带这张票勾的「可抵扣」「票总管」，当场存下。"""
     u, bad = need(request, ENTER_AUDIT, CAP_AUDIT)
     if bad:
         return bad
@@ -4369,7 +4805,8 @@ async def audit_item_mark(iid: int, request: Request):
         return err("mark 只能是 ok / doubt / clear", 400)
     if mark == "doubt" and not text:
         return err("写一下疑问是什么，退回时提交人才知道改哪", 400)
-    out, bad = await run_in_threadpool(_audit_mark_sync, u, iid, mark, text)
+    dec = {k: body[k] for k in ("deductible", "otherSystem") if k in body}
+    out, bad = await run_in_threadpool(_audit_mark_sync, u, iid, mark, text, dec)
     return bad if bad else out
 
 

@@ -119,7 +119,7 @@ ITEM = Table(
     Column("flags_json", JT()),
     Column("deduct_suggest", String(12), default=""), Column("deduct_reason", String(200)),
     Column("deductible", Integer),                    # 会计判定：1 可抵/0 不可抵/NULL 未判
-    Column("deduct_status", String(12), default=""),  # ''/marked/checked
+    Column("deduct_status", String(12), default=""),  # ''/marked/checked/other（other＝票总管已有，勾选归票总管）
     Column("verify", String(8), default=""),          # ''/green/red/yellow/gray
     Column("verify_at", String(20)), Column("verify_note", String(200)),
     Column("split", Integer, default=0), Column("alloc", MONEY()),
@@ -283,6 +283,19 @@ CHECK_HIT = Table(
     Column("detail", JT()),
     UniqueConstraint("check_id", "item_id", name="uq_inv_check_hit"),
     Index("ix_inv_check_hit_check", "check_id"),
+)
+
+# 过渡期：票总管那边已经有的票（用户把票总管导出的清单传进来，系统记住）。发票管家里票号对得上的票自动记「票总管已有」
+# （deduct_status=other：抵扣勾选归票总管做）。和期初（inv_opening）不是一回事：期初里有＝重复票要拦，这里有＝两边并行、不算重复。
+OTHER = Table(
+    "inv_other", md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("dup_key", String(64), nullable=False),
+    Column("code", String(20)), Column("number", String(24)),
+    Column("issue_date", String(10)), Column("total", MONEY()), Column("seller_name", String(200)),
+    Column("off", Integer, default=0),                # 1＝有人手工取消过这张票的记号：以后不再自动记
+    Column("file_name", String(255)), Column("imported_by", String(50)), Column("imported_at", String(20)),
+    UniqueConstraint("dup_key", name="uq_inv_other_key"),
 )
 
 TABLES = tuple(md.tables.values())
@@ -841,6 +854,59 @@ def items_of_later(e, later_id, include_removed=False):
 
 # ───────────────────────── 期初 inv_opening ─────────────────────────
 
+def other_add_many(e, rows, file_name, user):
+    """票总管清单入库：rows=[{dup_key, code, number, issue_date, total, seller_name}]；查重键已在库里的跳过。→ 新记住几张。"""
+    ts, seen, todo = now_s(), set(), []
+    for r in rows or []:
+        k = r.get("dup_key")
+        if k and k not in seen:
+            seen.add(k)
+            todo.append(r)
+    if not todo:
+        return 0
+    keys = [r["dup_key"] for r in todo]
+    have = set()
+    with e.begin() as cx:
+        for i in range(0, len(keys), 500):
+            have.update(cx.execute(select(OTHER.c.dup_key).where(OTHER.c.dup_key.in_(keys[i:i + 500]))).scalars())
+        new = [dict(dup_key=r["dup_key"], code=(r.get("code") or "")[:20], number=(r.get("number") or "")[:24],
+                    issue_date=(r.get("issue_date") or "")[:10] or None, total=r.get("total"),
+                    seller_name=(r.get("seller_name") or "")[:200], off=0, file_name=(file_name or "")[:255],
+                    imported_by=user, imported_at=ts) for r in todo if r["dup_key"] not in have]
+        for i in range(0, len(new), 500):
+            cx.execute(insert(OTHER), new[i:i + 500])
+    return len(new)
+
+
+def other_stats(e):
+    """票总管清单现在记住了多少 → {count, lastAt, lastBy, lastFile}。"""
+    with e.connect() as cx:
+        n = cx.execute(select(func.count()).select_from(OTHER)).scalar() or 0
+        last = cx.execute(select(OTHER.c.imported_at, OTHER.c.imported_by, OTHER.c.file_name).order_by(OTHER.c.id.desc()).limit(1)).first()
+    return {"count": int(n), "lastAt": last[0] if last else "", "lastBy": last[1] if last else "", "lastFile": last[2] if last else ""}
+
+
+def other_set_off(e, dup_key, off):
+    """有人手工取消（off=1）/ 重新记上（off=0）某张票的「票总管已有」：清单里有这张才用得上；取消过的以后不再自动记。"""
+    if not dup_key:
+        return
+    with e.begin() as cx:
+        cx.execute(update(OTHER).where(OTHER.c.dup_key == dup_key).values(off=1 if off else 0))
+
+
+def other_unmarked_items(e, folder_id=None):
+    """票号在票总管清单里（没被手工取消过）、自己还没有任何勾选记号的有效发票 → [{id, folder_id, later_id, number}]。
+    会计已经判了不可抵扣的不算（那种票在台账上该显示"不可抵扣"，记号对它没意义）。folder_id 给了就只看这个票夹。"""
+    c = ITEM.c
+    conds = [c.kind == "invoice", _item_active(), _not_void(), func.coalesce(c.deduct_status, "") == "",
+             or_(c.deductible.is_(None), c.deductible == 1),
+             c.dup_key.in_(select(OTHER.c.dup_key).where(func.coalesce(OTHER.c.off, 0) == 0))]
+    if folder_id is not None:
+        conds.append(c.folder_id == int(folder_id))
+    with e.connect() as cx:
+        return [dict(r) for r in cx.execute(select(c.id, c.folder_id, c.later_id, c.number).where(*conds).order_by(c.id)).mappings()]
+
+
 def opening_match(e, dup_key):
     if not dup_key:
         return None
@@ -1270,6 +1336,8 @@ def _ledger_conds(filters):
         conds.append(func.coalesce(ITEM.c.deduct_status, "").in_(("marked", "checked")))
     elif dd == "checked":
         conds.append(ITEM.c.deduct_status == "checked")
+    elif dd == "other":              # 过渡期：这张票的抵扣勾选归票总管那边做
+        conds.append(ITEM.c.deduct_status == "other")
     booked = g("booked")
     book_status = func.coalesce(func.replace(func.json_extract(ITEM.c.flags_json, "$.\"_bookkeeping\".status"), '"', ''), "unknown")
     if booked in ("booked", "unbooked", "unknown"):

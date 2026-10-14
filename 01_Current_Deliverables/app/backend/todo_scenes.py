@@ -280,8 +280,43 @@ def fix_manual_close(it, by, vno):
     return ts.finish(it["id"], by, "处理人确认已在金蝶改好（%s）" % (p["manual_vno"] or "没填凭证号"))
 
 
+# ============ ⑤ 发票后补「暂估转待认证」凭证待审：一张后补单一条（发票管家 V2.950） ============
+LATER3_KEY = "inv_later3"                      # 与 routers/invoice_later_voucher.STATE_KEY 同一个设置键
+
+
+def later_voucher_touch(lid, rec, later, origin=""):
+    """后补票的转待认证凭证写入金蝶后调。提交成功 → 挂审核人；没提交上 → 挂回去金蝶手动提交。"""
+    ok = bool(rec.get("submitted"))
+    title = "后补转待认证 · 记-%s　%s" % (rec.get("vno") or "?", (later or {}).get("payee_name") or "")
+    try:
+        amt = "税额 %s" % format(float(rec.get("tax") or 0), ",.2f")
+    except (TypeError, ValueError):
+        amt = ""
+    sub = " · ".join(x for x in [rec.get("book") or "", "后补单 #%s" % lid, amt] if x)
+    ym = ("%d-%02d" % (int(rec["vyear"]), int(rec["vperiod"]))) if rec.get("vyear") and rec.get("vperiod") else ""
+    return ts.open_item("inv_later_audit", str(lid), title, sub=sub, origin=origin,
+                        holder="scene" if ok else "origin",
+                        state="已提交，等审核" if ok else "保存了，没提交上",
+                        warn="" if ok else "请到金蝶手动提交，提交后才会转给审核人",
+                        payload={"later": str(lid), "vid": rec.get("vid"), "vno": rec.get("vno"), "ym": ym})
+
+
+def _check_later_voucher(it, s, conf):
+    rec = (db.get_setting(LATER3_KEY, None) or {}).get(it["ref"])
+    if not rec or not rec.get("vid"):
+        return {"status": "withdrawn", "how": "这张的做账记录已不在，待办自动撤回"}
+    st = _voucher_status(rec.get("vid"), s, conf)
+    if st == "C":
+        return {"status": "done", "how": "金蝶里凭证 记-%s 已审核，自动销账" % (rec.get("vno") or "")}
+    if st is None:
+        return {"status": "open", "holder": "origin", "state": "金蝶里已找不到",
+                "warn": "金蝶里已找不到这张凭证 记-%s（可能被人删了），请到金蝶看一下" % (rec.get("vno") or "")}
+    return ({"status": "open", "holder": "scene", "state": "已提交，等审核", "warn": ""} if st == "B" else
+            {"status": "open", "holder": "origin", "state": "保存了，没提交上", "warn": "请到金蝶手动提交，提交后才会转给审核人"})
+
+
 CHECKERS = {"fx_audit": _check_fx, "logi_accrual_audit": _check_accrual,
-            "logi_voucher_audit": _check_voucher, "logi_fix": _check_fix}
+            "logi_voucher_audit": _check_voucher, "logi_fix": _check_fix, "inv_later_audit": _check_later_voucher}
 
 
 # ============ 核对一轮 ============

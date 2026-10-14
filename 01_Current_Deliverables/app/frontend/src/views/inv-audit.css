@@ -73,14 +73,6 @@
 .inv-au-note.warn{ color:var(--amber); background:var(--amber-bg); border-color:var(--amber-line); }
 
 /* 可抵扣/不可抵扣 二选一 */
-.inv-au-seg{ display:inline-flex; flex:0 0 auto; border:1px solid var(--line-strong); border-radius:7px; overflow:hidden; background:var(--bg); }
-.inv-au-seg button{ height:26px; padding:0 10px; border:none; background:transparent; color:var(--ink-2); font-size:12px; cursor:pointer; font-family:inherit; }
-.inv-au-seg button + button{ border-left:1px solid var(--line-strong); }
-.inv-au-seg button:hover:not(:disabled){ background:var(--bg-sub); color:var(--ink); }
-.inv-au-seg button.on.yes{ background:var(--green-bg); color:var(--green); font-weight:600; }
-.inv-au-seg button.on.no{ background:var(--gray-bg); color:var(--ink); font-weight:600; }
-.inv-au-seg.off button{ cursor:not-allowed; }
-.inv-au-seg.off button:not(.on){ opacity:.55; }
 
 /* 票面明细 */
 
@@ -161,10 +153,31 @@
 .inv-au-bar > i{ display:block; height:100%; background:var(--blue); }
 
 .inv-au-dlg-h{ display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; font-size:14px; }
+/* 标题那一层撑满，右边那组（两个勾＋存疑/删除/审核）才能靠到最右、紧挨着关闭的 × */
+.inv-mtitle:has(> .inv-au-dlg-h){ flex:1 1 auto; min-width:0; }
 .inv-au-dlg-st{ font-size:12px; font-weight:500; }
 .inv-au-who{ font-size:12px; font-weight:400; color:var(--ink-2); background:var(--bg-sub); border:1px solid var(--line); border-radius:6px; padding:2px 8px; }
 .inv-au-who b{ color:var(--ink); }
 .inv-au-nav{ display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:400; color:var(--ink-3); }
+/* 已收发票表里直接勾「票总管」「可抵扣」：点勾不打开弹窗 */
+.inv-au-tck{ white-space:nowrap; }
+.inv-au-tck label{ display:inline-flex; align-items:center; gap:6px; cursor:pointer; padding:2px 0; }
+.inv-au-tck input{ margin:0; width:15px; height:15px; accent-color:var(--accent); cursor:pointer; }
+/* 已收发票表上勾选了一起审核：每行最左一个选择框（表头是全选），右上「审核所选」 */
+.inv-au-sel{ width:34px; text-align:center; }
+.inv-au-sel label{ display:flex; align-items:center; justify-content:center; padding:4px; margin:-4px; cursor:pointer; }
+.inv-au-sel input{ margin:0; width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
+.inv-au-tbl tr.sel td{ background:var(--accent-soft); }
+.btn.inv-au-allok{ height:28px; padding:0 12px; font-size:12.5px; }
+/* 弹窗右上角：□票总管 □可抵扣 两个勾，挨着 存疑 / 删除 / 审核 */
+.inv-au-hcks{ display:inline-flex; align-items:center; gap:6px; font-weight:400; }
+.inv-au-hck{ display:inline-flex; align-items:center; gap:5px; height:30px; padding:0 10px; border:1px solid var(--line-strong); border-radius:7px;
+  background:var(--bg); color:var(--ink-2); font-size:12.5px; cursor:pointer; user-select:none; white-space:nowrap; }
+.inv-au-hck input{ margin:0; accent-color:var(--accent); }
+.inv-au-hck:hover{ border-color:var(--accent); }
+.inv-au-hck.on{ color:var(--ink); border-color:var(--blue-line); background:var(--blue-bg); font-weight:600; }
+.inv-au-hck.on.yes{ color:var(--green); border-color:var(--green-line); background:var(--green-bg); }
+.inv-au-hck:has(input:disabled){ opacity:.6; cursor:not-allowed; }
 .inv-au-btn-q{ color:var(--amber); border-color:var(--amber-line); }
 .inv-au-btn-del{ color:var(--red); border-color:var(--red-line); }
 .inv-au-dlg{ display:grid; grid-template-columns:minmax(0, 1.15fr) minmax(0, 1fr); gap:14px; align-items:start; }
@@ -183,6 +196,8 @@
 .inv-au-dedrow b{ font-size:16px; }
 .inv-au-dedrow b.yes{ color:var(--green); }
 .inv-au-dedrow b.no{ color:var(--ink-3); text-decoration:line-through; }
+/* 过渡期「票总管已有」：单张弹窗里的一行勾选 + 已收发票表里的小记号 */
+.inv-au-oth{ margin-left:6px; }
 .inv-au-dlg-lines{ margin-top:14px; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
 .inv-au-lines2{ width:100%; min-width:720px; border-collapse:collapse; font-size:12.5px; }
 .inv-au-lines2 th, .inv-au-lines2 td{ padding:6px 8px; border-top:1px solid var(--line); text-align:left; }
@@ -209,6 +224,46 @@
 .inv-au-ask ul{ margin:0; padding-left:18px; }
 .inv-au-ask.err{ border-color:var(--red-line); background:var(--red-bg); }
 .inv-au-ask.err b{ color:var(--red); }
+/* 单张弹窗重排（样机第 3 版）：左 发票图＋系统核对；右 票面＋这张票要办的事 */
+.inv-au-dlg .inv-au-dlg-view{ position:static; display:grid; gap:12px; align-content:start; }
+.inv-au-card{ border:1px solid var(--line); border-radius:10px; padding:0 12px 10px; display:grid; gap:8px; min-width:0; }
+.inv-au-card > h3{ margin:0 -12px; padding:8px 12px; font-size:13px; display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+  border-bottom:1px solid var(--line); background:var(--bg-sub); border-radius:10px 10px 0 0; }
+.inv-au-card > h3 small{ font-weight:400; color:var(--ink-3); font-size:12px; }
+.inv-au-chk{ display:grid; grid-template-columns:20px 64px minmax(0,1fr); gap:0 8px; align-items:start; font-size:13px; padding:2px 0; }
+.inv-au-chk i{ font-style:normal; width:18px; height:18px; border-radius:50%; display:grid; place-items:center; font-size:11px; font-weight:700; margin-top:2px;
+  background:var(--green-bg); color:var(--green); }
+.inv-au-chk.warn i{ background:var(--amber-bg); color:var(--amber); }
+.inv-au-chk.err i{ background:var(--red-bg); color:var(--red); }
+.inv-au-chk.todo i{ background:var(--bg-rail); color:var(--ink-3); }
+.inv-au-chk.info i{ background:var(--blue-bg); color:var(--blue); }
+.inv-au-chk .k{ color:var(--ink-2); }
+.inv-au-chk .v b{ font-weight:500; }
+.inv-au-chk.warn .v b{ color:var(--amber); } .inv-au-chk.err .v b{ color:var(--red); } .inv-au-chk.todo .v b{ color:var(--ink-2); font-weight:400; }
+.inv-au-chk .v span{ display:block; color:var(--ink-3); font-size:12px; word-break:break-all; }
+/* 票面：两栏紧凑；不是待核的字段平时不画输入框的边（像字一样），点进去才出框 */
+.inv-au-fields .inv-fp{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:0 14px; grid-auto-flow:dense; }
+.inv-au-fields .inv-fp > :not(.inv-fp-row){ grid-column:1 / -1; }
+.inv-au-fields .inv-fp-row[data-k="typeLabel"], .inv-au-fields .inv-fp-row[data-k="number"], .inv-au-fields .inv-fp-row[data-k="buyerName"],
+.inv-au-fields .inv-fp-row[data-k="sellerName"], .inv-au-fields .inv-fp-row[data-k="category"], .inv-au-fields .inv-fp-row[data-k="remark"],
+.inv-au-fields .inv-fp-row[data-k="buyerTaxId"], .inv-au-fields .inv-fp-row[data-k="sellerTaxId"]{ grid-column:1 / -1; }
+.inv-au-fields .inv-fp-row:not(.pend):not(.dirty) .inv-in:not(:focus):not(:hover){ border-color:transparent; background:transparent; }
+.inv-au-fields .inv-fp-why{ display:none; }
+/* 这张票要办的事：三样压在一张卡里 */
+.inv-au-jobs > .inv-au-l3{ margin:0; }
+@media (max-width:1100px){ .inv-au-fields .inv-fp{ grid-template-columns:1fr; } }
+/* 后补票「核销暂估」（暂估转待认证） */
+.inv-au-l3{ border:1px solid var(--line); border-left:3px solid var(--line); border-radius:8px; padding:10px 12px; margin:10px 0; display:grid; gap:6px; font-size:13px; }
+.inv-au-l3.ok{ border-left-color:var(--green); }
+.inv-au-l3.bad{ border-left-color:var(--amber); }
+.inv-au-l3h{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.inv-au-l3ok{ color:var(--ink); }
+.inv-au-l3bad{ color:var(--red); }
+.inv-au-l3t{ width:100%; border-collapse:collapse; }
+.inv-au-l3t th{ text-align:left; font-weight:500; color:var(--ink-3); padding:3px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+.inv-au-l3t td{ padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+.inv-au-l3t .num{ text-align:right; white-space:nowrap; }
+.inv-au-l3l{ display:grid; gap:2px; padding:6px 8px; background:var(--bg-sub); border-radius:6px; }
 @media (max-width:1100px){
   .inv-au-dlg{ grid-template-columns:1fr; }
   .inv-au-dlg-view{ position:static; }

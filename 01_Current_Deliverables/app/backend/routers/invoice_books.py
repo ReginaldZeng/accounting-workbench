@@ -1,4 +1,6 @@
 # [Change Log]
+# Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单） | 新建后补单后排队再看一次钉钉流程；后补单上「去钉钉流程里找发票」（POST /api/inv/later/{lid}/flow-check）
+# Date: 2026-10-13 | Author: Claude / c | Version: V2.944（发票管家·票总管已有） | 过渡期和票总管不重复勾选：票上加「票总管已有」记号（deduct_status=other）——传票总管清单（POST /api/inv/other/import，存 inv_other）后按票号自动记（other_apply：送审/审核通过前/出清单前各对一次），审核时可勾/取消，台账里可补记/取消（POST /api/inv/item/{id}/other-system）；有记号的出勾选清单不带、方式二不替它标「是」
 # Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 申请人传的票（来源 self）财务确认前不算已到：_counted 排除、确认接口 confirm-self、财务扫到同一张也算确认、够数了不催申请人
 # Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 发票管家·台账与后补池路由（B2）——发票台账（查询/导出/作废）、税局对账（清单四色验真＋文件包补全）、
@@ -464,6 +466,8 @@ def _void_sync(u, iid, note):
         msg += "；这张票已在税局勾选抵扣，记得在税局做进项税额转出"
     elif it.get("deduct_status") == "marked":
         msg += "；这张票已标注勾选，如已导入税局请撤销勾选"
+    elif it.get("deduct_status") == "other":
+        msg += "；这张票记的是「票总管已有」，如票总管那边已在税局勾选请撤销勾选"
     if settled == "approved":
         msg += "；票夹里没有待审的票了，已自动记为已审核"
     elif settled == "collecting":
@@ -1145,6 +1149,8 @@ def _deduct_run(name, data, user):
         x = appr[0]
         if any(a.get("verify") == "red" for a in appr):
             return "否", "税局显示已作废/全额红冲"
+        if any(a.get("deduct_status") == "other" for a in cands):
+            return None, "记的是「票总管已有」：由票总管那份去勾，这里不替它标"
         ded = x.get("deductible")
         if ded == 1 or (ded is None and x.get("deduct_suggest") == "yes"):
             yes_ids.extend(a["id"] for a in appr)
@@ -1238,6 +1244,218 @@ async def deduct_download(request: Request):
     return _xlsx(data, "抵扣勾选_已标注_%s.xlsx" % _stamp(), "deduct_marked_%s.xlsx" % _stamp())
 
 
+# ── 过渡期：票总管已有的票 ──
+# 用户 2026-10-13 定：过渡期票总管、发票管家并行，同一张票两边都录了的，抵扣勾选归票总管做，发票管家出勾选清单时不带。
+# 票上的记号＝deduct_status=other（「票总管已有」）。三个来源：① 把票总管导出的清单传进来，系统记住（inv_other），
+# 票号对得上的自动记——现在已有的马上记，以后接进来的（含钉钉自动接入的）送审时、审核通过前、出勾选清单前各对一次；
+# ② 审核时人工勾 / 取消；③ 台账详情里补记 / 取消。人工取消过的（inv_other.off=1）不再自动记。
+OTHER_LIST_CAP = 300                  # 导入结果里「两边都有」的票最多列这么多张
+OTHER_STATE_CN = {                    # 两边都有的票，在发票管家这边是什么情况
+    "new": "这次记上「票总管已有」",
+    "flagged": "之前就记了「票总管已有」",
+    "marked": "之前已从这边出过勾选清单，请核一下",
+    "checked": "税局已显示勾选过",
+    "notDeduct": "这边判的是不抵扣，没记",
+    "off": "有人手工取消过记号，没再记",
+}
+
+
+def _other_parse(name, data):
+    """票总管导出的清单（勾选清单或发票清单都行）→ ({"rows"[入库用], "count" 文件行数, "buyers"{购方税号}, "warnings"[]}, None)
+    或 (None, 中文原因)。只认发票号码（老票加代码），不看它每行勾的是「是」还是「否」：清单里有，就当这张票票总管那边有。"""
+    res = ie.parse_taxlist(data, name)
+    if not res.get("ok"):
+        alt = ie.parse_opening(data, name)
+        if not alt.get("ok"):
+            return None, res.get("msg") or alt.get("msg") or "清单读不出来"
+        res = alt
+    rows, seen, buyers, lost, nokey = [], set(), set(), 0, 0
+    for r in res.get("rows") or []:
+        if r.get("numberLost"):
+            lost += 1
+            continue
+        k = ip.dup_key(r.get("code"), r.get("number"), r.get("date"), r.get("total"))
+        if not k:
+            nokey += 1
+            continue
+        if r.get("buyerTaxId"):
+            buyers.add(str(r["buyerTaxId"]).strip().upper())
+        if k in seen:
+            continue
+        seen.add(k)
+        rows.append({"dup_key": k, "code": r.get("code") or "", "number": r.get("number") or "", "issue_date": r.get("date") or "",
+                     "total": _f(r.get("total")), "seller_name": r.get("sellerName") or ""})
+    if not rows:
+        return None, "这份清单里一个能比对的发票号码都没读到" + ("（号码被 Excel 截断了：请把号码列设成文本重新导出）" if lost else "")
+    warns = []
+    if lost:
+        warns.append("有 %d 行发票号码被 Excel 截断了（超过 15 位存成了数字），这几行没记进去——请把号码列设成文本重新导出再传一次" % lost)
+    if nokey:
+        warns.append("有 %d 行只有号码、没有发票代码，没记进去" % nokey)
+    return {"rows": rows, "count": len(res.get("rows") or []), "buyers": buyers, "warnings": warns}, None
+
+
+def other_apply(folder_id=None, user=None):
+    """票号在票总管清单里、自己还没有任何勾选记号的票 → 记上「票总管已有」并留痕。→ 这次记了几张。
+    folder_id 给了就只管这个票夹。幂等：已有记号的、人工取消过的、会计判了不抵扣的都不动。"""
+    e = E()
+    rows = S.other_unmarked_items(e, folder_id)
+    if not rows:
+        return 0
+    c = S.ITEM.c
+    ts = inv.now_s()
+    changed = []
+    with e.begin() as cx:
+        for ch in _chunks([r["id"] for r in rows]):
+            hit = set(cx.execute(select(c.id).where(c.id.in_(ch), func.coalesce(c.deduct_status, "") == "")).scalars())
+            if hit:
+                cx.execute(update(S.ITEM).where(c.id.in_(sorted(hit))).values(deduct_status="other", updated_at=ts))
+                changed += [r for r in rows if r["id"] in hit]
+    _log_many([{"user": user or inv.SYSTEM_USER, "action": "记为票总管已有", "folder_id": r["folder_id"], "item_id": r["id"],
+                "later_id": r["later_id"], "detail": {"number": r.get("number") or "", "by": "票总管清单"}} for r in changed])
+    return len(changed)
+
+
+if other_apply not in inv._OTHER_APPLY:      # 送审、审核通过前由 routers.invoice 回调（它不能反过来 import 这个模块）
+    inv._OTHER_APPLY.append(other_apply)
+
+
+def _other_import_run(name, data, user):
+    parsed, msg = _other_parse(name, data)
+    if msg:
+        return None, msg
+    e = E()
+    keys = [r["dup_key"] for r in parsed["rows"]]
+    c = S.ITEM.c
+    groups = {}
+    with e.connect() as cx:
+        for ch in _chunks(keys):
+            for r in cx.execute(select(c.id, c.dup_key, c.number, c.issue_date, c.seller_name, c.total, c.tax, c.review, c.deductible,
+                                       c.deduct_status).where(c.kind == "invoice", _active(), _not_void(), c.dup_key.in_(ch))
+                                .order_by(c.id)).mappings():
+                groups.setdefault(r["dup_key"], []).append(dict(r))
+        off = set()
+        for ch in _chunks(keys):
+            off.update(cx.execute(select(S.OTHER.c.dup_key).where(S.OTHER.c.dup_key.in_(ch), S.OTHER.c.off == 1)).scalars())
+    both = []
+    for k, its in groups.items():
+        st = {(a.get("deduct_status") or "") for a in its}
+        appr = [a for a in its if a.get("review") == "approved"]
+        x = (appr or its)[0]
+        if "checked" in st:
+            state = "checked"
+        elif "other" in st:
+            state = "flagged"
+        elif "marked" in st:
+            state = "marked"
+        elif all(a.get("deductible") == 0 for a in its):
+            state = "notDeduct"
+        elif k in off:
+            state = "off"
+        else:
+            state = "new"
+        both.append({"number": (x.get("number") or "").strip(), "date": x.get("issue_date") or "", "sellerName": x.get("seller_name") or "",
+                     "total": _f(x.get("total")), "tax": _f(x.get("tax")), "state": state, "stateLabel": OTHER_STATE_CN[state],
+                     "approved": bool(appr)})
+    order = {k: i for i, k in enumerate(("marked", "notDeduct", "off", "new", "flagged", "checked"))}
+    both.sort(key=lambda b: (order[b["state"]], b["date"], b["number"]))
+    added = S.other_add_many(e, parsed["rows"], name, user)
+    marked = other_apply(None, user)
+    warns = list(parsed["warnings"])
+    ours = _ours(inv.get_settings())[0]
+    if ours and parsed["buyers"] and not (parsed["buyers"] & ours):
+        warns.insert(0, "这份清单的购买方税号是 %s，不在本公司抬头清单里——多半传错了文件" % "、".join(sorted(parsed["buyers"])))
+    stats = S.other_stats(e)
+    return {"ok": True, "file": name, "rows": parsed["count"], "keys": len(keys), "added": added, "total": stats["count"],
+            "both": len(both), "marked": marked, "warnings": warns, "stats": stats,
+            "counts": {k: sum(1 for b in both if b["state"] == k) for k in OTHER_STATE_CN},
+            "list": both[:OTHER_LIST_CAP]}, None
+
+
+def _other_status():
+    e = E()
+    c = S.ITEM.c
+    with e.connect() as cx:
+        n = cx.execute(select(func.count(func.distinct(func.coalesce(c.dup_key, c.id)))).where(
+            c.kind == "invoice", _active(), _not_void(), c.deduct_status == "other")).scalar() or 0
+    return {"ok": True, "marked": int(n), **S.other_stats(e)}
+
+
+@router.get("/api/inv/other")
+async def other_status(request: Request):
+    """票总管清单现在记住了多少张、台账里有多少张票带着「票总管已有」的记号。"""
+    u, bad = need(request, ENTER_LEDGER)
+    if bad:
+        return bad
+    return await run_in_threadpool(_other_status)
+
+
+@router.post("/api/inv/other/import")
+async def other_import(request: Request):
+    """传一份票总管导出的清单（表单字段 file）：系统记住，票号对得上的票马上记上「票总管已有」，以后接进来的也自动记。"""
+    u, bad = need(request, ENTER_LEDGER, CAP_DEDUCT)
+    if bad:
+        return bad
+    f, bad = await _one_upload(request)
+    if bad:
+        return bad
+    name, data = f
+    res, msg = await run_in_threadpool(_other_import_run, name, data, u["name"])
+    if msg:
+        return err("票总管清单没读出来：" + msg, 400)
+    inv.audit(u, "导入票总管清单", name, "清单 %d 张（新记住 %d 张，累计 %d 张）；发票管家里也有 %d 张，这次记上「票总管已有」%d 张" % (
+        res["keys"], res["added"], res["total"], res["both"], res["marked"]))
+    return res
+
+
+def _other_system_sync(u, iid, on):
+    """台账里事后补记 / 取消「票总管已有」。一张票拆到几张单上的（同一个查重键）一起改。
+    税局已显示勾选过的不让改（已经勾了，记不记都一样）；取消只取消「票总管已有」，不动"已标注勾选"。
+    取消过的票，以后不再按票总管清单自动记（inv_other.off=1）；重新记上就恢复。"""
+    e = E()
+    it = S.item_get(e, iid)
+    if not it or it.get("kind") != "invoice" or (it.get("status") or "") == "removed":
+        return None, ("没有这张票", 404)
+    if (it.get("review") or "") == "void":
+        return None, ("这张票已作废", 400)
+    c = S.ITEM.c
+    conds = [c.kind == "invoice", _active(), _not_void()]
+    conds.append(c.dup_key == it["dup_key"] if it.get("dup_key") else c.id == iid)
+    with e.connect() as cx:
+        rows = [dict(r) for r in cx.execute(select(c.id, c.folder_id, c.later_id, c.deduct_status).where(*conds)).mappings()]
+    if any((r["deduct_status"] or "") == "checked" for r in rows):
+        return None, ("税局已显示这张票勾选过了，不用再改", 400)
+    if on:
+        ids = [r["id"] for r in rows if (r["deduct_status"] or "") != "other"]
+        new, act = "other", "记为票总管已有"
+    else:
+        ids = [r["id"] for r in rows if (r["deduct_status"] or "") == "other"]
+        new, act = "", "取消票总管已有"
+    S.other_set_off(e, it.get("dup_key"), 0 if on else 1)
+    if ids:
+        with e.begin() as cx:
+            cx.execute(update(S.ITEM).where(c.id.in_(ids)).values(deduct_status=new, updated_at=inv.now_s()))
+        hit = {r["id"]: r for r in rows}
+        _log_many([{"user": u["name"], "action": act, "folder_id": hit[i]["folder_id"], "item_id": i,
+                    "later_id": hit[i]["later_id"], "detail": {"number": it.get("number") or "", "by": "台账"}} for i in ids])
+        inv.audit(u, act, "票#%d %s" % (iid, it.get("number") or ""), "共 %d 行" % len(ids))
+    msg = ("已记为「票总管已有」：出税局勾选清单时不带这张" if on else "已取消：这张票重新按发票管家这边出勾选清单")
+    return {"ok": True, "msg": msg, "changed": len(ids), "item": inv.item_view(S.item_get(e, iid))}, None
+
+
+@router.post("/api/inv/item/{iid}/other-system")
+async def item_other_system(iid: int, request: Request):
+    """过渡期：台账里把一张票记为 / 取消「票总管已有」（抵扣勾选归票总管做，发票管家出勾选清单不带）。body：{on: bool}。"""
+    u, bad = need(request, ENTER_LEDGER, CAP_DEDUCT)
+    if bad:
+        return bad
+    body = await inv.body_json(request)
+    res, bad = await run_in_threadpool(_other_system_sync, u, iid, inv._b(body.get("on")))
+    if bad:
+        return err(bad[0], bad[1])
+    return res
+
+
 # ── 直接从台账出税局勾选清单（不用先去税局导未勾选清单）──
 # 格式照业务方 2026-10-10 给的实物《增值税发票勾选抵扣(默认)_20261010.xlsx》（ie.export_tax_tick）。
 # 「金额」列的口径照实物（用户 2026-10-10 定：专票写含税）：专票等发票写价税合计；航空行程单写不含税；
@@ -1252,6 +1470,7 @@ _TICK_TYPES = {
     "flight": ("电子发票(航空运输电子客票行程单)",) * 2,
 }
 TICK_SKIP_CN = [                      # 没进清单的可抵扣票：页面按这个顺序把原因和张数列出来
+    ("inOther", "票总管已有（由票总管那边去勾，这份不带）"),
     ("notApproved", "还没审核通过（审核后才会进清单）"),
     ("marked", "之前已经导出/标注过（要再出一次就勾「之前导出过的也带上」）"),
     ("checked", "税局已显示勾选过"),
@@ -1279,11 +1498,13 @@ def _can_deduct(x):
 
 def _tick_collect(f):
     """台账里该去税局勾选的票 → (rows, skipped{原因: 张数}, buyers[{taxId,name,count}])。
-    进清单：审核通过＋可抵扣＋没作废＋税局没显示作废/红冲＋税局还没显示已勾选；之前导出/标注过的默认不带（f.marked 才带）。
+    进清单：审核通过＋可抵扣＋没作废＋税局没显示作废/红冲＋税局还没显示已勾选；之前导出/标注过的默认不带（f.marked 才带）；
+    记了「票总管已有」的不带（先按票总管清单把该记的记上，再筛）。
     f：subject 购方税号（税局按纳税人分别导入，一次出一家）、date_from/date_to 开票日期、marked。
     一张票拆到几张单上（同一个查重键多行）只出一行，金额按票面、不按分摊额。buyers 不受 subject 筛选影响（给页面做下拉）。
     行里的 amount＝「金额」列要写的数（口径见上面的说明：专票等价税合计、行程单不含税）。"""
     e = E()
+    other_apply()
     c = S.ITEM.c
     cols = [c.id, c.dup_key, c.number, c.code, c.issue_date, c.inv_type, c.qr_type, c.amount, c.tax, c.total,
             c.buyer_name, c.buyer_tax_id, c.seller_name, c.seller_tax_id, c.review, c.deductible, c.deduct_suggest,
@@ -1320,6 +1541,8 @@ def _tick_collect(f):
             why = "checked"
         elif not (x.get("number") or "").strip():
             why = "noNumber"
+        elif any(a.get("deduct_status") == "other" for a in its):      # 票总管已有：勾选归票总管做
+            why = "inOther"
         marked = any(a.get("deduct_status") == "marked" for a in appr)
         if not why and marked and not f.get("marked"):
             why = "marked"
@@ -2172,6 +2395,7 @@ def _later_create_sync(u, body, via="proxy", self_uid=None):
             receiver_name=person.get("dtName") or person["account"], filed_by=u["name"],
             filed_uid=self_uid or inv.dt_uid_of(u["name"], st), filed_via=via, note=inv._s(body.get("note"), 500))
     l = S.later_get(e, lid)
+    inv.queue_recheck(fid)      # 流程里可能已经有财务初审后才到的发票：后台看一眼，有就记到这张后补单上、进发票审核
     sent = inv.notify_dt([person.get("dtUserid")], _assign_text(l))
     notified, nmsg = _notify_outcome(sent)
     det = {"businessId": l.get("business_id") or "", "payee": l.get("payee_name") or "", "expectDate": exp_date,
@@ -2426,6 +2650,26 @@ async def later_confirm_self(lid: int, request: Request):
     if not out:
         return err("这张后补单没有等确认的发票（可能别人刚确认过）", 400)
     return {"ok": True, "msg": "已确认收到 %d 张" % out[0], "later": out[1]}
+
+
+@router.post("/api/inv/later/{lid}/flow-check")
+async def later_flow_check(lid: int, request: Request):
+    """后补单上「去钉钉流程里找发票」：现在就去看这张付款单的钉钉流程（表单附件＋评论区），
+    财务初审通过后才到的发票记到这张后补单上、进发票审核（系统平时也会定时去看，这个按钮是不想等的时候点）。"""
+    u, bad = need(request, ENTER_LATER, CAP_RECEIVE)
+    if bad:
+        return bad
+    l, bad = _later_get_or_404(lid)
+    if bad:
+        return bad
+    g = _later_writable(l)
+    if g:
+        return g
+    r = await run_in_threadpool(inv.flow_recheck, l.get("folder_id"), True, None, u["name"])
+    if not r.get("ok"):
+        return err(r.get("msg") or "没看成，过一会儿再点", 409 if r.get("busy") else 400)
+    return {"ok": True, "msg": r["msg"], "new": r.get("new") or 0, "linked": r.get("linked") or 0,
+            "later": _lv(S.later_get(E(), lid))}
 
 
 def _mark_sync(u, l, lid, amt, note):

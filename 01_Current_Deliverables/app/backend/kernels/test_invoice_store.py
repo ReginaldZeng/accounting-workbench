@@ -45,7 +45,8 @@ class Base(unittest.TestCase):
 class SchemaTests(unittest.TestCase):
     def test_twelve_tables_on_own_metadata(self):
         names = sorted(t.name for t in s.TABLES)
-        self.assertEqual(len(names), 14)          # V2.621 加 inv_self；对纸质票加 inv_check / inv_check_hit
+        self.assertEqual(len(names), 15)          # V2.621 加 inv_self（业务同事自助登记的验证码/会话）；对纸质票加 inv_check / inv_check_hit；V2.944 加 inv_other（票总管清单）
+        self.assertIn("inv_other", names)
         self.assertTrue(all(n.startswith("inv_") for n in names))
         self.assertIs(s.TABLES[0].metadata, s.md)
 

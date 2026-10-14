@@ -153,7 +153,7 @@ class InvoiceApiTests(unittest.TestCase):
                 self.c.post("/api/inv/audit/claim", json={"folderId": fid}, headers=self.H(user))
 
     def post(self, url, user, body=None, **kw):
-        if self.AUTO_CLAIM and re.match(r"/api/inv/(audit/(approve|return|batch|item/)|item/)", url):
+        if self.AUTO_CLAIM and re.match(r"/api/inv/(audit/(approve|return|batch|items?/)|item/)", url):
             self._claim_for(user, url, body or {})
         if self.AUTO_CLAIM and url in ("/api/inv/folder/manual", "/api/inv/desk/scan") and "auditor" not in (body or {}):
             body = dict(body or {}, auditor="acct")      # 老用例：建票夹（含扫付款单建的）一律指定 acct 来审（建的时候必须指派清楚）
@@ -1509,7 +1509,8 @@ class InvoiceApiTests(unittest.TestCase):
         r = self.post("/api/inv/settings", "boss", {"settings": {"intake": {
             "approvers": [{"dtUserid": "boss-dt", "dtName": "老板"}, {"dtUserid": "boss-dt"}], "since": "2026-09-01"}}})
         self.assertEqual(r.json()["settings"]["intake"],      # 没单独给启用日的人：沿用这次一起给的起始日
-                         {"approvers": [{"dtUserid": "boss-dt", "dtName": "老板", "since": "2026-09-01"}], "since": "2026-09-01"})
+                         {"approvers": [{"dtUserid": "boss-dt", "dtName": "老板", "since": "2026-09-01"}],
+                          "firstReviewers": [], "since": "2026-09-01"})
         from datetime import datetime as _dt, timedelta as _td
         ct = (_dt.now() - _td(days=1)).strftime("%Y-%m-%d %H:%M:%S")     # 跳过记录只留几天：用近日的单子
         insts = {
@@ -1892,6 +1893,15 @@ class InvoiceApiTests(unittest.TestCase):
                 f2 = self.S.folder_get(inv.E(), made[1])
                 self.assertEqual((f2["inst_id"], f2["owner_uid"], f2["owner_name"]), ("PI-OWN-B", "u-b", "乙"))
                 self.assertEqual(self.S.folder_get(inv.E(), made[0])["owner_uid"], "u-a")
+                # 清空试运行数据以后：从指定那天起整段重列一遍；比最早的启用日还早的那一段不多接；只重列这一轮
+                for redo, start in (("2026-09-15", "2026-10-01"), ("2026-10-05", "2026-10-05")):
+                    st = ii._load_state()
+                    st["rescanFrom"] = redo
+                    self.db.set_setting(ii.STATE_KEY, st, "test")
+                    r = ii.scan_once("测试")
+                    self.assertEqual((r["full"], r["from"]), (True, start))
+                    self.assertNotIn("rescanFrom", ii._load_state())
+                self.assertFalse(ii.scan_once("测试")["full"])
             # 一位都没启用 → 不扫，并说清楚原因
             self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": [{"dtUserid": "u-b", "dtName": "乙", "since": ""}]}}})
             r = ii.scan_once("测试")

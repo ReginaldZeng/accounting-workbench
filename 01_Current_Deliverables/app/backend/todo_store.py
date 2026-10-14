@@ -60,7 +60,9 @@ SCENES = {
     "logi_fix": {"label": "计提更正待办", "role": "计提更正处理人", "kind": "do", "where": "wb", "place": "付款做账",
                  "nav": "logisticsvoucher", "kd": False, "manual": True},
 }
-SCENE_ORDER = ["fx_audit", "logi_accrual_audit", "logi_voucher_audit", "logi_fix"]
+SCENES["inv_later_audit"] = {"label": "后补票转待认证凭证待审", "role": "后补转待认证凭证审核人", "kind": "rev", "where": "kd",
+                             "place": "总账凭证", "nav": "invaudit", "kd": True, "manual": False}     # 发票管家（V2.950）
+SCENE_ORDER = ["fx_audit", "logi_accrual_audit", "logi_voucher_audit", "inv_later_audit", "logi_fix"]
 
 
 def _now():

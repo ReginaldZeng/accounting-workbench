@@ -5123,6 +5123,12 @@ app.include_router(invoice_self.router)
 # 发票管家·钉钉自动接入（V2.736）：审批流走到接入审批人节点的单子自动建票夹；模块导入即起 20 分钟定时线程（SQLite 库不起）
 from routers import invoice_intake
 app.include_router(invoice_intake.router)
+# 发票管家·清空试运行数据（V2.943）：主管理员在设置 › 高级里点；先留底再清，后补单保留
+from routers import invoice_reset
+app.include_router(invoice_reset.router)
+# 发票管家·后补票自动转待认证（V2.950）：后补单的票审核通过后系统在后台做「暂估转待认证」凭证；关/演练/真做三档，默认演练
+from routers import invoice_later_voucher
+app.include_router(invoice_later_voucher.router)
 # 发票管家·月末纸质件查验（V2.740）：按审核通过月份列票、扫发票码记纸质件已到、导出未到清单
 
 # V2.746 发票凭证主动/定时同步

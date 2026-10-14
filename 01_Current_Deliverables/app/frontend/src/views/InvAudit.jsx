@@ -1,5 +1,20 @@
 import { Bookkeeping } from './InvLedger.jsx'
 import { invPaperMark } from '../api.js'
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.953（后补票转待认证·物流单也由后补单这边做）| 「核销暂估」：物流请款单在开关＝真做时也归这边做，徽标和「现在做」按钮跟着显示
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排）| 单张弹窗按样机第 3 版重排：左边 发票图＋「系统核对」（一行一句结论），右边「票面」（两栏紧凑）＋「这张票要办的事」（纸质票／转待认证／金蝶凭证）
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）| 物流请款单的后补票：这一栏写明付款做账那条线会怎么做、列出它的分录；颜色按「会不会自动做」
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）| 单张弹窗里，后补票多一栏「核销暂估」：系统到金蝶找到的原凭证、对不对得上、打算怎么做；多张时在这里选；可以点「现在做」
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍）| 后补票已经交来、等审核的那部分不再算「还没到」：金额核对下面说明一句，后补单那一行写「已交来 x 待审核」
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| 已收发票表里，财务初审后才到的票在号码后面标「后补·初审后到」
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.945（发票管家·审核弹窗右上角）| 用户定：单张弹窗右上角依次放 □票总管（默认不勾）
+//   □可抵扣（默认按系统建议，专票是勾上的）、存疑（原「有疑问」）、删除、审核（原「提交」）；下面只留一行说明，不用再滚到底去点。
+//   一张付款单里多张发票：已收发票表上勾选要审的票（每行最左一个选择框、表头全选），点右上「审核所选」一次审完，不用一张张点开；
+//   审核＝纸质票已收到（后端记）。
+//   表里每行也能直接勾「票总管」「可抵扣」（和弹窗右上角是同一组勾）；底部「提交」改叫「整单通过」（和单张的「审核」分清楚）。
+//   审一张过一张（用户定）：勾的票点「审核所选」、或弹窗右上角点「审核」＝这几张当场审核通过、进台账（POST /api/inv/audit/items/approve）；
+//   这张单的发票都过完、金额核对差额为 0 时后端顺手把整单结掉；有差额的留着，等人点底部「整单通过」写差额说明。
+// [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.944（发票管家·票总管已有）| 过渡期：单张核对弹窗里加「票总管已有」的勾
+//   （勾了＝这张票的抵扣勾选归票总管做，发票管家出税局勾选清单时不带）；已收发票表里带这个记号；提交时随 decisions.otherSystem 一起送。
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 发票审核：左队列（待审核/已退回/已通过＋搜索＋无异常批量通过）＋右票夹（抬头卡/缩略条/看图器点字段框位置/字段核对/逐张可否抵扣/异常/留痕/通过·退回）
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 通过时带上看过的待审票 itemIds（审核期间进了新票→后端 409，提示后重读票夹）；
 //   改了票面字段后没手动改判的票，可否抵扣跟着新建议走；票夹级异常用票夹详情自带的（深链打开也有）；拦截项按 itemIds 出「第 N 张」；留痕可只看当前这张票。
@@ -10,8 +25,8 @@ import { invPaperMark } from '../api.js'
 // 权限：按 invConfig().can.auditAct 决定能不能动手（后端同样拦）；没开时照样能看，按钮置灰并说明找管理员开。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invAuditQueue, invAuditBatch, invAuditApprove, invAuditReturn, invAuditMark,
-  invFolder, invItemUpdate, invItemRotate, invItemRemove,
+  invConfig, invAuditQueue, invAuditBatch, invAuditApprove, invAuditItemsApprove, invAuditReturn, invAuditMark,
+  invFolder, invItemUpdate, invItemRotate, invItemRemove, invLaterVoucherPlan, invLaterVoucherSource, invLaterVoucherRun,
 } from '../api.js'
 import {
   money, fmtTime, useToast, usePoll, Modal, StatusBadges, itemBadges, InvViewer, FieldPanel,
@@ -253,7 +268,7 @@ const TYPE_SHORT = {
 // 核对表只列发票和收据（非发票附件另列一行）；作废、移除的不算
 const isBill = it => !!it && (it.kind === 'invoice' || it.kind === 'receipt') && it.review !== 'void' && it.status !== 'removed'
 // 这一轮还没核的票：待审、没点过「提交」
-const needCheck = it => isBill(it) && it.review === 'pending' && !it.auditOk
+const needCheck = it => isBill(it) && it.review === 'pending'
 const shareOf = it => num(it.split ? (it.alloc ?? it.total) : it.total) ?? num(it.amount) ?? 0
 const typeShort = it => (it.kind === 'receipt' ? '收据' : (TYPE_SHORT[it.invType] || it.typeLabel || '发票'))
 const r2 = v => Math.round(v * 100) / 100
@@ -306,6 +321,7 @@ function AuditHeader({ folder }) {
         </> : <span className="inv-muted">没取到金额核对</span>}
       </div>
       {g && gap === null && <div className="inv-muted">这张单没有付款金额（手工票夹没填），不做差额核对</div>}
+      {g && num(g.laterWait) > 0 && <div className="inv-muted">发票后补单里有 {money(g.laterWait)} 的票已经交来、在下面等你审核，已经算在发票里了，后补单这边不再算「还没到」。</div>}
       {off && <div className="inv-au-focus">有差额 {money(Math.abs(gap))}（{gap > 0 ? '票比付款少' : '票比付款多'}），重点关注：提交时要写明差额原因</div>}
       {reason ? <div className={'inv-au-why' + (open || !long ? ' open' : '')}>事由：{reason}
         {long && <button type="button" className="inv-lk inv-au-lkb" onClick={() => setOpen(o => !o)}>{open ? '收起' : '展开'}</button>}</div> : null}
@@ -320,6 +336,7 @@ function CheckCell({ it }) {
 }
 
 function StateCell({ it }) {
+  if (it.review === 'approved') return <span className="inv-au-st-ok" title={`${it.reviewBy || ''} ${it.reviewAt ? fmtTime(it.reviewAt) : ''}`.trim() || undefined}>✓ 已审核</span>
   if (it.review !== 'pending') return <span className="inv-muted">{ITEM_REVIEW[it.review] || ''}</span>
   if (it.doubt) return <span className="inv-au-st-q" title={it.doubt.text}>有疑问</span>
   if (it.auditOk) return <span className="inv-au-st-ok" title={`${it.auditOk.by || ''} ${it.auditOk.at ? fmtTime(it.auditOk.at) : ''}`}>✓ 已核</span>
@@ -330,6 +347,11 @@ function StateCell({ it }) {
 function dedOf(it, decisions) {
   if (it.kind !== 'invoice') return null
   return needsDecision(it) ? !!decisions[it.id] : !!it.deductible
+}
+// 「票总管已有」：还没审的票看审核人这次勾没勾（没动过就看票上原来的记号），审过的看票上的记号
+function otherOf(it, others) {
+  if (!it || it.kind !== 'invoice') return false
+  return needsDecision(it) && others && (it.id in others) ? !!others[it.id] : it.deductStatus === 'other'
 }
 
 // 发票号码：显示全＋一键复制（会计要复制去金蝶做账）。自带「已复制」反馈，点它不打开核对弹窗。
@@ -351,54 +373,88 @@ function CopyNum({ text }) {
   return <button type="button" className={'inv-au-copy' + (done ? ' done' : '')} title="复制发票号码" onClick={copy}>{done ? '已复制' : '复制'}</button>
 }
 
-function InvoiceTable({ items, decisions, orderOf, onOpen }) {
+// 这张票系统核对有没有要人看的问题（和「系统核对」那一格同一个判定）
+const checkBad = it => itemBadges(it).some(b => CHECK_KEYS.has(b.key) && (b.tone === 'err' || b.tone === 'warn'))
+
+function InvoiceTable({ items, decisions, others: marks, orderOf, onOpen, canAudit, auditBusy, onAudit, setDecision, setOther }) {
   const bills = items.filter(isBill)
+  // 还没审、也没记疑问的票可以勾选了一起审。「全选」只选系统核对正常的；系统核对有问题的要人单独勾上才审（免得顺手带过去）
+  const todo = bills.filter(it => needCheck(it) && !it.doubt)
+  const quick = todo.filter(it => !checkBad(it))
+  const [sel, setSel] = useState(() => new Set())
+  const todoKey = todo.map(it => it.id).join(',')
+  useEffect(() => { setSel(s => new Set([...s].filter(id => todo.some(it => it.id === id)))) }, [todoKey])   // 审过的、不在这张单里的自动取消勾选
+  const picked = todo.filter(it => sel.has(it.id))
+  const allOn = quick.length > 0 && quick.every(it => sel.has(it.id))
+  const pick = (id, v) => setSel(s => { const n = new Set(s); if (v) n.add(id); else n.delete(id); return n })
+  const pickAll = v => setSel(s => { const n = new Set(s); quick.forEach(it => { if (v) n.add(it.id); else n.delete(it.id) }); return n })
   const others = items.filter(it => it.kind === 'other' && it.status !== 'removed')
   const sum = k => r2(bills.reduce((s, it) => s + (num(it[k]) || 0), 0))
   const ded = r2(bills.reduce((s, it) => s + (dedOf(it, decisions) ? (num(it.tax) || 0) : 0), 0))
-  const nOk = bills.filter(it => it.review === 'pending' && it.auditOk).length
+  const nOk = bills.filter(it => it.review === 'approved').length
   const nPend = bills.filter(it => it.review === 'pending').length
   const nQ = bills.filter(it => it.review === 'pending' && it.doubt).length
   return (
     <section className="inv-au-sec">
       <div className="inv-au-sec-h">
         <b>已收发票</b>
-        <span className="inv-muted">{bills.length} 张{nPend ? ` · 已核 ${nOk}/${nPend}` : ''}{nQ ? ` · 有疑问 ${nQ}` : ''}</span>
+        <span className="inv-muted">{bills.length} 张{nPend || nOk ? ` · 已审核 ${nOk}/${nOk + nPend}` : ''}{nQ ? ` · 存疑 ${nQ}` : ''}</span>
         <span className="inv-au-grow" />
-        <span className="inv-muted inv-au-kbd">点一行打开核对 · 弹窗里 ← → 换票、Enter 提交这张</span>
+        <span className="inv-muted inv-au-kbd">点一行打开核对 · 弹窗里 ← → 换票、Enter 审核这张</span>
+        {canAudit && todo.length > 0 && <>
+          {todo.length > quick.length && <span className="inv-muted">系统核对有问题的 {todo.length - quick.length} 张「全选」不带，要审得单独勾</span>}
+          <button type="button" className="btn primary inv-au-allok" disabled={auditBusy || !picked.length}
+            title={picked.length ? '勾上的票当场审核通过、进台账（同时记为纸质票已收到）' : '先在下面勾上要审核的票（表头的框是全选）'}
+            onClick={() => onAudit(picked.map(it => it.id))}>{auditBusy ? '正在审核…' : picked.length ? `审核所选（${picked.length}）` : '审核所选'}</button>
+        </>}
       </div>
       {!bills.length ? <div className="inv-au-empty">这张单还没有发票</div> : <div className="inv-au-tw">
         <table className="inv-au-tbl">
           <thead><tr>
+            <th className="inv-au-sel">{canAudit && quick.length > 0 &&
+              <input type="checkbox" checked={allOn} disabled={auditBusy} onChange={e => pickAll(e.target.checked)}
+                title="全选（只选系统核对正常的）" aria-label="全选" />}</th>
             <th>#</th><th>票种</th><th>销方</th><th>发票号码</th>
             <th className="num">价税合计</th><th className="num">税额</th><th>项目 · 税率</th>
-            <th>系统核对</th><th>状态</th><th>可抵扣</th><th />
+            <th>系统核对</th><th>状态</th><th title="这张票票总管那边已经录了：抵扣勾选归票总管做，发票管家出税局勾选清单时不带">票总管</th><th>可抵扣</th><th />
           </tr></thead>
           <tbody>{bills.map(it => {
             const d = dedOf(it, decisions)
-            return <tr key={it.id} tabIndex={0} className={it.doubt ? 'q' : ''} onClick={() => onOpen(it.id)}
-              onKeyDown={e => { if (e.key === 'Enter') onOpen(it.id) }}>
+            const tick = canAudit && needsDecision(it)          // 还没审过的票，表里直接能勾「票总管」「可抵扣」
+            const can = canAudit && needCheck(it) && !it.doubt     // 还没审、也没记存疑：可以勾上一起审
+            return <tr key={it.id} tabIndex={0} className={(it.doubt ? 'q' : '') + (sel.has(it.id) ? ' sel' : '')} onClick={() => onOpen(it.id)}
+              onKeyDown={e => { if (e.key === 'Enter' && e.target === e.currentTarget) onOpen(it.id) }}>
+              <td className="inv-au-sel" onClick={can ? e => e.stopPropagation() : undefined}>{can &&
+                <label><input type="checkbox" checked={sel.has(it.id)} disabled={auditBusy} onChange={e => pick(it.id, e.target.checked)}
+                  aria-label={`选第 ${orderOf(it.id)} 张`} /></label>}</td>
               <td className="inv-num">{orderOf(it.id)}</td>
               <td className={it.invType === 'special' ? '' : 'inv-au-nsp'}>{typeShort(it)}</td>
               <td className="inv-au-seller" title={it.sellerName || ''}>{it.sellerName || '—'}</td>
               <td className="inv-au-numcell" title={it.date || ''}>{it.number
-                ? <span className="inv-au-nowrap2"><span className="inv-num inv-au-fullno" onClick={e => e.stopPropagation()}>{it.number}</span><CopyNum text={it.number} /></span>
+                ? <span className="inv-au-nowrap2"><span className="inv-num inv-au-fullno" onClick={e => e.stopPropagation()}>{it.number}</span><CopyNum text={it.number} />
+                  {it.fromFlow && <span className="inv-badge info" style={{ marginLeft: 6 }}
+                    title={'财务初审通过后才发到钉钉流程里的票，按后补票处理' + (it.laterId ? `：已记到后补单 #${it.laterId}，审核通过就算已到` : '：这张单现在没有没收齐的后补单')}>后补·初审后到</span>}</span>
                 : '—'}</td>
               <td className="num"><b>{money(shareOf(it))}</b>{it.split ? <span className="inv-muted" title={'票面 ' + money(it.total)}>（分摊）</span> : null}</td>
               <td className="num">{money(it.tax)}</td>
               <td className="inv-au-cat" title={it.category || ''}>{(it.category || '—').replace(/^.*\*/, '')}{it.taxRate ? ' ' + it.taxRate : ''}</td>
               <td><CheckCell it={it} /></td>
               <td><StateCell it={it} /></td>
-              <td>{d === null ? <span className="inv-muted">—</span> : d
-                ? <span className="inv-au-dd yes">可抵 <b className="inv-num">{money(it.tax)}</b></span>
-                : <span className="inv-au-dd no">不可抵</span>}</td>
+              <td className="inv-au-tck" onClick={tick ? e => e.stopPropagation() : undefined}>{it.kind !== 'invoice' ? <span className="inv-muted">—</span> : tick
+                ? <label title="这张票票总管那边已经录了：抵扣勾选归票总管做，发票管家出税局勾选清单时不带这张">
+                  <input type="checkbox" checked={otherOf(it, marks)} onChange={e => setOther(it.id, e.target.checked)} aria-label={`第 ${orderOf(it.id)} 张：票总管`} /></label>
+                : otherOf(it, marks) ? <span className="inv-badge info inv-au-oth" title="抵扣勾选归票总管做，发票管家出勾选清单时不带这张">票总管已有</span> : null}</td>
+              <td className="inv-au-tck" onClick={tick && d !== null ? e => e.stopPropagation() : undefined}>{d === null ? <span className="inv-muted">—</span> : tick
+                ? <label><input type="checkbox" checked={!!d} onChange={e => setDecision(it.id, e.target.checked)} aria-label={`第 ${orderOf(it.id)} 张：可抵扣`} />
+                  {d ? <span className="inv-au-dd yes">可抵 <b className="inv-num">{money(it.tax)}</b></span> : <span className="inv-au-dd no">不可抵</span>}</label>
+                : d ? <span className="inv-au-dd yes">可抵 <b className="inv-num">{money(it.tax)}</b></span> : <span className="inv-au-dd no">不可抵</span>}</td>
               <td className="inv-au-open" title="打开核对">›</td>
             </tr>
           })}</tbody>
           <tfoot><tr>
-            <td /><td colSpan={3}>合计 {bills.length} 张</td>
+            <td /><td /><td colSpan={3}>合计 {bills.length} 张</td>
             <td className="num">{money(r2(bills.reduce((s, it) => s + shareOf(it), 0)))}</td><td className="num">{money(sum('tax'))}</td>
-            <td colSpan={3} /><td className="inv-au-dd yes">可抵 <b className="inv-num">{money(ded)}</b></td><td />
+            <td colSpan={4} /><td className="inv-au-dd yes">可抵 <b className="inv-num">{money(ded)}</b></td><td />
           </tr></tfoot>
         </table>
       </div>}
@@ -431,11 +487,13 @@ function LaterTable({ laters }) {
               <td>{l.filedBy || '—'}{l.filedAt ? <span className="inv-muted"> · {fmtTime(l.filedAt)}</span> : null}</td>
               <td className="num">{money(l.expectAmount)}</td>
               <td className="num">{money(got)}</td>
-              <td className="num"><b className={num(l.left) ? 'inv-au-lt' : ''}>{money(l.left)}</b></td>
+              <td className="num"><b className={num(l.left) - num(l.waiting) > 0.005 ? 'inv-au-lt' : ''}>{money(Math.max(0, num(l.left) - num(l.waiting)))}</b>
+                {num(l.waiting) > 0 && <div className="inv-muted" title="申请人已经把票交来（自己传的，或发在钉钉流程里的），就是上面已收发票里待审的票；你审核通过才算已到">已交来 {money(l.waiting)} 待审核</div>}</td>
               <td><i className="inv-au-bar"><i style={{ width: pct + '%' }} /></i> {pct}%</td>
               <td className="inv-num">{l.expectDate || '—'}</td>
               <td>{l.receiverName || '—'}</td>
-              <td><span className={'inv-badge ' + (l.status === 'done' ? 'ok' : l.status === 'closed' ? 'mute' : 'info')}>{l.statusText || l.status}</span>
+              <td><span className={'inv-badge ' + (l.status === 'done' ? 'ok' : l.status === 'closed' ? 'mute' : 'info')}>
+                {num(l.waiting) > 0 && num(l.left) - num(l.waiting) <= 0.005 && l.status !== 'done' && l.status !== 'closed' ? '票已交来·待审核' : (l.statusText || l.status)}</span>
                 {l.remindCount ? <span className="inv-muted"> 已催 {l.remindCount} 次</span> : null}</td>
             </tr>
           })}</tbody>
@@ -443,15 +501,6 @@ function LaterTable({ laters }) {
       </div>}
     </section>
   )
-}
-
-function DeductToggle({ value, onChange, disabled }) {
-  return <span className={'inv-au-seg' + (disabled ? ' off' : '')} role="radiogroup" aria-label="可否抵扣">
-    <button type="button" role="radio" aria-checked={value === true} className={value === true ? 'on yes' : ''}
-      disabled={disabled} onClick={e => { e.stopPropagation(); onChange(true) }}>可抵扣</button>
-    <button type="button" role="radio" aria-checked={value === false} className={value === false ? 'on no' : ''}
-      disabled={disabled} onClick={e => { e.stopPropagation(); onChange(false) }}>不可抵扣</button>
-  </span>
 }
 
 function LinesTable({ lines }) {
@@ -469,7 +518,7 @@ function LinesTable({ lines }) {
 
 const DOUBT_QUICK = ['抬头不对', '金额和付款对不上', '不是这张单的票', '图片看不清', '项目不能报销']
 
-// 点一张票弹出来：左看图（旋转、缩放、拖动），右基础信息（系统已核的写依据）；右上 提交 / 有疑问 / 删除；下方本张明细
+// 点一张票弹出来：左看图（旋转、缩放、拖动），右基础信息（系统已核的写依据）；右上 □票总管 □可抵扣 / 存疑 / 删除 / 审核；下方本张明细
 function ReceiptRecord({ item, editable, onRecorded }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -479,12 +528,90 @@ function ReceiptRecord({ item, editable, onRecorded }) {
     catch (e) { setError(e.message || '接收失败') } finally { setBusy(false) }
   }
   return <div className="inv-au-dedrow"><b>纸质票：{item.paper ? '已收到' : '未收到'}</b>
-    {!item.paper && editable && <button type="button" className="btn" disabled={busy} onClick={mark}>{busy ? '保存中…' : '已收到纸质票'}</button>}
+    {!item.paper && editable && <span className="inv-muted">点「审核」就记为已收到</span>}
+    {!item.paper && editable && <button type="button" className="btn" disabled={busy} onClick={mark}>{busy ? '保存中…' : '先记已收到'}</button>}
     {error && <span role="alert">{error}</span>}
   </div>
 }
 
-function ItemDialog({ item, order, total, editable, decision, setDecision, logs, onClose, onPrev, onNext,
+// 「系统核对」：系统替你核过什么、结论是什么，一行一句（后端 item_checks 给）。有问题的排最前。放在发票图下面。
+const CHK_ORDER = { err: 0, warn: 1, todo: 3, info: 2, ok: 2 }
+const CHK_MARK = { ok: '✓', info: 'i', warn: '!', err: '✕', todo: '–' }
+function ItemChecks({ item }) {
+  const list = Array.isArray(item.checks) ? item.checks : []
+  const rows = list.map((c, i) => [c, i]).sort((x, y) => (CHK_ORDER[x[0].tone] ?? 2) - (CHK_ORDER[y[0].tone] ?? 2) || x[1] - y[1]).map(x => x[0])
+  const n = t => list.filter(c => c.tone === t).length
+  const bad = n('err') + n('warn')
+  return <section className="inv-au-card inv-au-chks">
+    <h3>系统核对
+      {bad > 0 ? <span className="inv-badge warn">{bad} 项要看</span> : list.length > 0 ? <span className="inv-badge ok">都正常</span> : null}
+      {n('todo') > 0 && <span className="inv-badge mute">{n('todo')} 项没核</span>}
+      <small>系统替你核过的，看结论就行</small></h3>
+    <StatusBadges item={item} />
+    {Array.isArray(item.warnings) && item.warnings.length > 0 && <ul className="inv-au-warns">{item.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>}
+    {rows.map(c => <div key={c.key} className={'inv-au-chk ' + c.tone}>
+      <i aria-hidden="true">{CHK_MARK[c.tone] || '·'}</i>
+      <span className="k">{c.label}</span>
+      <div className="v"><b>{c.text}</b>{c.sub ? <span>{c.sub}</span> : null}</div>
+    </div>)}
+    {!rows.length && item.kind === 'receipt' && <div className="inv-muted">收据不做系统核对，对着图看金额和抬头。</div>}
+  </section>
+}
+
+// 后补票「核销暂估」：这张票审核通过、后补单收齐后，系统要做「暂估转待认证」凭证——先把它到金蝶找到的原凭证亮出来。
+// 对得上的不用管；找到几张的在这里选；对不上、找不到的写明原因（系统不自动做）。开关（关／演练／真做）在发票管家设置里。
+function LaterVoucher({ laterId }) {
+  const [d, setD] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(() => {
+    setErr('')
+    invLaterVoucherPlan(laterId).then(setD).catch(e => setErr(e.message || String(e)))
+  }, [laterId])
+  useEffect(() => { setD(null); load() }, [load])
+  const act = async (fn) => {
+    setBusy(true); setErr('')
+    try { const r = await fn(); setD(x => ({ ...(x || {}), ...r })) } catch (e) { setErr(e.message || String(e)) } finally { setBusy(false) }
+  }
+  if (!d && !err) return <div className="inv-au-l3"><b>核销暂估</b> <span className="inv-muted">正在到金蝶找这张付款单当时的凭证…</span></div>
+  if (!d) return <div className="inv-au-l3 bad"><b>核销暂估</b> <span className="inv-au-l3bad">没读出来：{err}</span> <button type="button" className="inv-lk" onClick={load}>重试</button></div>
+  const p = d.plan || {}, st = d.state || {}
+  const done = st.status === 'done'
+  const good = done || !!p.ok
+  return <div className={'inv-au-l3 ' + (good ? 'ok' : 'bad')}>
+    <div className="inv-au-l3h">
+      <b>核销暂估</b>
+      <span className="inv-muted">后补票：审核通过、后补单收齐后，系统做「暂估转待认证」凭证</span>
+      {p.kind === 'logistics' && p.by !== 'later'
+        ? <span className="inv-badge mute" title="物流请款单的转待认证不归发票管家的开关管，由「付款做账」页的自动做账开关管">物流请款单 · 付款做账那边做</span>
+        : <span className={'inv-badge ' + (d.mode === 'on' ? 'ok' : 'mute')} title="开关在发票管家设置里：关＝不做；演练＝只算、不写金蝶；真做＝往金蝶新建凭证并提交（不审核）">自动转待认证：{d.modeText}</span>}
+    </div>
+    <div className={good ? 'inv-au-l3ok' : 'inv-au-l3bad'}>{done ? st.msg : p.why}</div>
+    {!done && (p.cands || []).length > 0 && <table className="inv-au-l3t">
+      <thead><tr><th /><th>原凭证</th><th>摘要</th><th className="num">供应商往来</th><th className="num">暂估进项税</th></tr></thead>
+      <tbody>{p.cands.map(c => <tr key={c.key}>
+        <td><input type="radio" name={'l3-' + laterId} aria-label={`核销 ${c.year}年${c.month}月 记-${c.vno}`} checked={(p.src || []).includes(c.key)}
+          disabled={busy || !c.tax} onChange={() => act(() => invLaterVoucherSource(laterId, [c.key]))} /></td>
+        <td className="inv-num">{c.year}年{c.month}月 记-{c.vno}</td>
+        <td>{c.expl}</td>
+        <td className="num inv-num">{money(c.gross)}</td>
+        <td className="num inv-num">{c.tax ? money(c.tax) : (c.tax06 ? '当时已挂待认证' : '没有暂估')}</td>
+      </tr>)}</tbody>
+    </table>}
+    {!done && (d.lines || []).length > 0 && <div className="inv-au-l3l">
+      {d.lines.map((x, i) => <div key={i}><b>{x.dc}</b> <span className="inv-num">{x.acct}</span> {x.acctName} <b className="inv-num">{money(x.amount)}</b>
+        <span className="inv-muted">　{x.supplier ? x.supplier + '｜' : ''}{x.expl}</span></div>)}
+    </div>}
+    {!done && st.status && st.msg && st.msg !== p.why && <div className="inv-muted">上一次：{st.msg}</div>}
+    {err && <div className="inv-au-l3bad">{err}</div>}
+    {!done && d.ready && d.mode !== 'off' && (p.kind !== 'logistics' || p.by === 'later') && p.kind !== 'none' && <div>
+      <button type="button" className="btn" disabled={busy} onClick={() => act(() => invLaterVoucherRun(laterId))}
+        title={d.mode === 'on' ? '不等后台，现在就往金蝶新建这张凭证并提交（不审核）' : '演练：只算一遍、把打算怎么做记下来，不写金蝶'}>{busy ? '正在做…' : (d.mode === 'on' ? '现在做' : '现在演练一次')}</button>
+    </div>}
+  </div>
+}
+
+function ItemDialog({ item, order, total, editable, decision, setDecision, other, setOther, logs, onClose, onPrev, onNext,
   onMarkOk, onDoubt, onClearDoubt, onRemove, onSave, onRotate, onRecorded }) {
   const [mode, setMode] = useState('')       // '' | 'doubt' | 'del'
   const [text, setText] = useState('')
@@ -501,10 +628,10 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, logs,
   }
   const ok = () => {
     if (!editable || !isBillItem) return
-    if (dirty.current) { setErr('字段改了还没保存：先点「保存」，再提交这张'); return }
+    if (dirty.current) { setErr('字段改了还没保存：先点「保存」，再点右上角「审核」'); return }
     run(onMarkOk)
   }
-  // ← → 换票，Enter 提交这张；人在打字、或在写疑问/确认删除时不抢
+  // ← → 换票，Enter 审核这张；人在打字、或在写疑问/确认删除时不抢
   useEffect(() => {
     const onKey = (e) => {
       if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || mode) return
@@ -520,6 +647,7 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, logs,
   const who = item.createdBy === '系统' || !item.createdBy ? '系统' : item.createdBy
   const via = ORIGIN_CN[item.origin] || item.origin || ''
   const myLogs = (Array.isArray(logs) ? logs : []).filter(l => l && l.itemId === item.id)
+  const dedTip = (item.deductSuggest === 'yes' ? '系统建议可抵扣' : item.deductSuggest === 'no' ? '系统建议不可抵扣' : '系统没给建议') + (item.deductReason ? '：' + item.deductReason : '')
   const title = <div className="inv-au-dlg-h">
     <b>第 {order} 张 · {item.kind === 'other' ? '非发票附件' : typeShort(item)}{isBillItem ? ' · ' + money(shareOf(item)) : ''}</b>
     <span className="inv-au-dlg-st"><StateCell it={item} /></span>
@@ -530,17 +658,29 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, logs,
       <button type="button" className="inv-ib" disabled={!onNext} onClick={onNext} title="下一张（→）">›</button>
     </span>
     <span className="inv-au-grow" />
+    {item.kind === 'invoice' && (needsDecision(item)
+      ? <span className="inv-au-hcks">
+        <label className={'inv-au-hck' + (other ? ' on' : '')} title="这张票票总管那边已经录了：抵扣勾选归票总管做，发票管家出税局勾选清单时不带这张">
+          <input type="checkbox" checked={!!other} disabled={!editable || busy} onChange={e => setOther(e.target.checked)} />票总管</label>
+        <label className={'inv-au-hck' + (decision ? ' on yes' : '')} title={dedTip}>
+          <input type="checkbox" checked={!!decision} disabled={!editable || busy} onChange={e => setDecision(e.target.checked)} />可抵扣</label>
+      </span>
+      : <span className="inv-au-hcks ro">
+        {item.deductStatus === 'other' && <span className="inv-badge info">票总管已有</span>}
+        <span className={'inv-badge ' + (item.deductible ? 'ok' : 'mute')}>{item.deductible ? '可抵扣' : '不可抵扣'}</span>
+      </span>)}
     {editable && isBillItem && <>
-      <button type="button" className="btn inv-au-btn-q" disabled={busy} onClick={() => setMode(m => (m === 'doubt' ? '' : 'doubt'))}>有疑问</button>
+      <button type="button" className="btn inv-au-btn-q" disabled={busy} onClick={() => setMode(m => (m === 'doubt' ? '' : 'doubt'))} title="这张有疑问：写下来，整单提交时一起退回收票台">存疑</button>
       <button type="button" className="btn inv-au-btn-del" disabled={busy} onClick={() => setMode(m => (m === 'del' ? '' : 'del'))}>删除</button>
-      <button type="button" className="btn primary" disabled={busy} onClick={ok} title="这张核对无误（Enter）">提交</button>
+      <button type="button" className="btn primary" disabled={busy} onClick={ok} title="这张核对无误（Enter）">审核</button>
     </>}
   </div>
   return (
     <Modal title={title} onClose={onClose} width={1280}>
       <div className="inv-au-dlg">
         <div className="inv-au-dlg-view">
-          <InvViewer item={item} activeField={activeField} height={520} onRotate={editable ? onRotate : undefined} />
+          <InvViewer item={item} activeField={activeField} height={440} onRotate={editable ? onRotate : undefined} />
+          {item.kind !== 'other' && <ItemChecks item={item} />}
         </div>
         <div className="inv-au-dlg-side">
           {err && <div className="inv-au-err">{err}</div>}
@@ -567,23 +707,26 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, logs,
             <span className="inv-muted">{item.doubt.by} {item.doubt.at ? fmtTime(item.doubt.at) : ''}</span>
             {editable && <span className="inv-au-row-end"><button type="button" className="btn" disabled={busy} onClick={() => run(onClearDoubt)}>清掉疑问</button></span>}
           </div>}
-          <StatusBadges item={item} />
-          {Array.isArray(item.warnings) && item.warnings.length > 0 && <ul className="inv-au-warns">{item.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>}
           {item.kind === 'other'
-            ? <div className="inv-au-note">这是附件（合同、清单、水单、行程单等），只留存不入台账，不用核字段。</div>
+            ? <><StatusBadges item={item} /><div className="inv-au-note">这是附件（合同、清单、水单、行程单等），只留存不入台账，不用核字段。</div></>
             : <>
-              <div className="inv-muted inv-au-tip">点一行字段，左边图上框出它的位置。二维码读的、系统已核的不用再看，黄色「待核」的看一眼。</div>
-              <ReceiptRecord item={item} editable={editable} onRecorded={onRecorded} />
-              <Bookkeeping key={item.id} row={item} canEdit={editable} onSaved={onRecorded} />
-              <FieldPanel item={item} editable={editable} activeField={activeField} onFieldFocus={setActiveField}
-                onSave={onSave} hideConfirm onDirtyChange={d => { dirty.current = d }} />
+              <section className="inv-au-card inv-au-fields">
+                <h3>票面<small>点一行，左边图上框出它的位置。读自原件、系统已核的不用再看，黄色「待核」的看一眼</small></h3>
+                <FieldPanel item={item} editable={editable} activeField={activeField} onFieldFocus={setActiveField}
+                  onSave={onSave} hideConfirm onDirtyChange={d => { dirty.current = d }} />
+              </section>
+              <section className="inv-au-card inv-au-jobs">
+                <h3>这张票要办的事</h3>
+                <ReceiptRecord item={item} editable={editable} onRecorded={onRecorded} />
+                {item.kind === 'invoice' && item.laterId ? <LaterVoucher key={'l3-' + item.id} laterId={item.laterId} /> : null}
+                <Bookkeeping key={item.id} row={item} canEdit={editable} onSaved={onRecorded} />
+              </section>
               {item.kind === 'invoice' && <div className="inv-au-dedrow">
-                <span>本张可抵扣进项税 <b className={'inv-num ' + (decision ? 'yes' : 'no')}>{money(item.tax)}</b></span>
-                <span className="inv-muted">{item.deductSuggest === 'yes' ? '建议可抵扣' : item.deductSuggest === 'no' ? '建议不可抵扣' : '系统没给建议'}{item.deductReason ? '：' + item.deductReason : ''}</span>
+                <span>本张可抵扣进项税 <b className={'inv-num ' + ((needsDecision(item) ? decision : item.deductible) ? 'yes' : 'no')}>{money(item.tax)}</b></span>
+                <span className="inv-muted">{dedTip}</span>
+                {(needsDecision(item) ? other : item.deductStatus === 'other') && <span className="inv-badge info" title="抵扣勾选归票总管做，发票管家出税局勾选清单时不带这张">票总管已有：出勾选清单不带</span>}
                 <span className="inv-au-grow" />
-                {needsDecision(item)
-                  ? <DeductToggle value={decision} disabled={!editable} onChange={setDecision} />
-                  : <span className="inv-muted">{item.deductible ? '已定：可抵扣' : '已定：不可抵扣'}</span>}
+                <span className="inv-muted">在右上角勾选</span>
               </div>}
             </>}
         </div>
@@ -602,7 +745,7 @@ function ItemDialog({ item, order, total, editable, decision, setDecision, logs,
 
 const GAP_QUICK = ['餐补/补贴，不需要发票', '发票多开，按付款金额入账', '付款抹零']
 
-// 底部固定：进度一行＋「提交」。有疑问 → 提交＝退回（带上疑问）；有没核的 → 先提示；有差额 → 写说明才能提交
+// 底部固定：进度一行＋「整单通过」（这张付款单审核通过，票进台账）。有存疑 → 按钮变成整单退回（带上疑问）；有没核的 → 先提示；有差额 → 写说明才能通过
 function SubmitBar({ folder, items, decisions, canAct, actionable, busy, err, blockers, selfWarn, orderOf, onOpen,
   onApprove, onReturn }) {
   const [ask, setAsk] = useState(null)       // null | 'doubt' | 'unchecked' | 'gap'
@@ -610,8 +753,9 @@ function SubmitBar({ folder, items, decisions, canAct, actionable, busy, err, bl
   useEffect(() => { setAsk(null); setGapNote('') }, [folder?.id])
   const bills = items.filter(isBill)
   const pend = bills.filter(it => it.review === 'pending')
+  const passed = bills.filter(it => it.review === 'approved')
   const doubts = pend.filter(it => it.doubt)
-  const unchecked = pend.filter(it => !it.auditOk && !it.doubt)
+  const unchecked = pend.filter(it => !it.doubt)
   const g = folder?.gap
   const gap = g ? num(g.gap) : null
   const off = gap !== null && Math.abs(gap) > 0.005
@@ -629,17 +773,21 @@ function SubmitBar({ folder, items, decisions, canAct, actionable, busy, err, bl
     <div className="inv-au-bar2">
       <div className="inv-au-bar2-row">
         <span className="inv-au-bar2-sum">
-          <span>已核 <b className="inv-num">{pend.length - unchecked.length - doubts.length}/{pend.length}</b> 张</span>
-          {unchecked.length > 0 && <span className="warn">还有 <b>{unchecked.length}</b> 张没核</span>}
+          <span>已审核 <b className="inv-num">{passed.length}/{passed.length + pend.length}</b> 张</span>
+          {unchecked.length > 0 && <span className="warn">还有 <b>{unchecked.length}</b> 张没审</span>}
           {doubts.length > 0 && <span className="err">有疑问 <b>{doubts.length}</b> 张</span>}
           <span>差额 <b className={'inv-num ' + (off ? 'err' : 'ok')}>{gap === null ? '—' : off ? money(gap) : '0.00'}</b></span>
           <span>可抵扣进项税 <b className="inv-num inv-au-acc">{money(ded)}</b></span>
+          {canAct && actionable && unchecked.length > 0 && !doubts.length && gap !== null && !off &&
+            <span className="inv-muted">金额一致：票都审核完，这张单自动整单通过</span>}
+          {canAct && actionable && !unchecked.length && !doubts.length && off &&
+            <span className="warn">票都审核了，但金额有差额：点右边「整单通过」写差额说明</span>}
         </span>
         {!canAct && <span className="inv-au-hint">{NO_PERM_HINT}，现在只能查看</span>}
         {canAct && !actionable && <span className="inv-au-hint">这张单现在没有要审的票（已审完或已退回收票台）</span>}
         {canAct && actionable && selfWarn && <span className="inv-au-hint warn">{selfWarn}</span>}
         <button type="button" className="btn primary inv-au-submit" disabled={disabled} onClick={() => step(0)}>
-          {busy ? '正在处理…' : doubts.length ? `提交（退回 ${doubts.length} 个疑问）` : '提交'}
+          {busy ? '正在处理…' : doubts.length ? `整单退回（${doubts.length} 张存疑）` : '整单通过'}
         </button>
       </div>
       {(err || (blockers && blockers.length > 0)) && <div className="inv-au-err">
@@ -652,7 +800,7 @@ function SubmitBar({ folder, items, decisions, canAct, actionable, busy, err, bl
         })}</ul>}
       </div>}
       {ask === 'doubt' && <div className="inv-au-ask warn">
-        <b>有 {doubts.length} 张记了疑问，提交会把整张单退回收票台，带上这些疑问：</b>
+        <b>有 {doubts.length} 张记了存疑，这张单会整张退回收票台，带上这些疑问：</b>
         <ul>{doubts.map(it => <li key={it.id}>第 {orderOf(it.id)} 张（{money(shareOf(it))}）：{it.doubt.text}
           <button type="button" className="inv-lk inv-au-lkb" onClick={() => onOpen(it.id)}>去看</button></li>)}</ul>
         <span className="inv-au-row-end">
@@ -661,23 +809,23 @@ function SubmitBar({ folder, items, decisions, canAct, actionable, busy, err, bl
         </span>
       </div>}
       {ask === 'unchecked' && <div className="inv-au-ask warn">
-        <b>还有 {unchecked.length} 张没打开核对：{unchecked.slice(0, 8).map(it => `第 ${orderOf(it.id)} 张`).join('、')}{unchecked.length > 8 ? '…' : ''}</b>
+        <b>还有 {unchecked.length} 张没审核：{unchecked.slice(0, 8).map(it => `第 ${orderOf(it.id)} 张`).join('、')}{unchecked.length > 8 ? '…' : ''}</b>
         <span className="inv-au-row-end">
           <button type="button" className="btn" onClick={() => { setAsk(null); onOpen(unchecked[0].id) }}>去核第 {orderOf(unchecked[0].id)} 张</button>
-          <button type="button" className="btn primary" disabled={busy} onClick={() => step(2)}>不逐张看了，仍然提交</button>
+          <button type="button" className="btn primary" disabled={busy} onClick={() => step(2)}>不逐张看了，仍然整单通过</button>
         </span>
       </div>}
       {ask === 'gap' && <div className="inv-au-ask err">
-        <b>有差额 {money(gap)}：付款 {money(g.pay)} −（专票 {money(g.special)} ＋ 普票 {money(g.normal)} ＋ 后补 {money(g.later)}），写明原因才能提交；不合理就退回收票台</b>
+        <b>有差额 {money(gap)}：付款 {money(g.pay)} −（专票 {money(g.special)} ＋ 普票 {money(g.normal)} ＋ 后补 {money(g.later)}），写明原因才能通过；不合理就退回收票台</b>
         <span className="inv-au-quick">{GAP_QUICK.map(q => <button type="button" key={q} onClick={() => setGapNote(q)}>{q}</button>)}</span>
         <textarea className="inv-au-ta" rows={2} autoFocus value={gapNote} maxLength={300} placeholder="差额说明（必填，会留痕）"
           onChange={e => setGapNote(e.target.value)} />
         <span className="inv-au-row-end">
-          <button type="button" className="btn" onClick={() => setAsk(null)}>先不提交</button>
+          <button type="button" className="btn" onClick={() => setAsk(null)}>先不通过</button>
           <button type="button" className="btn inv-au-btn-del" disabled={busy || !gapNote.trim()}
             onClick={() => { setAsk(null); onReturn('差额 ' + money(gap) + '：' + gapNote.trim()) }}>退回收票台</button>
           <button type="button" className="btn primary" disabled={busy || !gapNote.trim()}
-            onClick={() => { setAsk(null); onApprove(gapNote.trim()) }}>确认差额并提交</button>
+            onClick={() => { setAsk(null); onApprove(gapNote.trim()) }}>确认差额并通过</button>
         </span>
       </div>}
     </div>
@@ -716,7 +864,9 @@ export default function InvAudit({ user }) {
   const [dErr, setDErr] = useState('')
   const [dlgId, setDlgId] = useState(null)
   const [decisions, setDecisions] = useState({})
+  const [others, setOthers] = useState({})          // 审核人这次亲手勾/取消的「票总管已有」：{票 id: 是否}；没动过的票不在里面
   const [actBusy, setActBusy] = useState(false)
+  const [auditBusy, setAuditBusy] = useState(false)   // 已收发票表上直接点「审核 / 全部审核」时
   const [actErr, setActErr] = useState('')
   const [blockers, setBlockers] = useState(null)
   const [lastRes, setLastRes] = useState(null)      // 上一次通过/退回的结果（切到下一个票夹后仍显示，自审在这里打标）
@@ -791,7 +941,7 @@ export default function InvAudit({ user }) {
       setDetail({ folder: r?.folder || null, items, logs: r?.logs || [] })
       setDErr('')
       // 抵扣判定：会计亲手点过的保留（刷新不冲掉），没点过的和新票用"已定值或系统建议"（建议随票面改动会变）
-      if (!keep) touched.current = new Set()
+      if (!keep) { touched.current = new Set(); setOthers({}) }
       setDecisions(prev => mergeDecisions(keep ? prev : {}, items, touched.current))
       if (keep) setDlgId(cur => (cur !== null && items.some(it => it.id === cur) ? cur : null))
       else setDlgId(null)
@@ -832,14 +982,58 @@ export default function InvAudit({ user }) {
     refreshQuiet()
   }
   // 弹窗「提交」：这张核对无误 → 跳到下一张还没核的（没有了就关弹窗）
+  // 单张「审核」时把这张票勾的「可抵扣」「票总管」一起送去存下：只审其中一两张、离开页面再回来，勾的还在
+  // 审一张过一张：这几张票当场审核通过、进台账（带上各自勾的「可抵扣」「票总管」）。→ 'done' 整单也结了 / 'ok' 这几张过了 / '' 没成
+  const passItems = async (ids) => {
+    const dec = {}
+    ids.forEach(id => {
+      const it = items.find(x => x.id === id)
+      if (!it || !needsDecision(it)) return
+      dec[String(id)] = { deductible: !!decisions[id] }
+      if (id in others) dec[String(id)].otherSystem = !!others[id]       // 只送亲手动过的；没动过的后端保持系统记的不动
+    })
+    setActErr(''); setBlockers(null)
+    const r = await invAuditItemsApprove({ folderId: folder.id, itemIds: ids, decisions: dec })
+    if (!r || r.ok === false || r.detail) {
+      const d = r && (r.msg || r.detail)
+      setActErr('没审核成：' + (typeof d === 'string' && d ? d : '服务端没说原因，请稍后再试'))
+      setBlockers(Array.isArray(r?.blockers) ? r.blockers : null)
+      return ''
+    }
+    ;(r.items || []).forEach(replaceItem)
+    if (r.folderDone) {
+      const f = r.folder || folder
+      setLastRes({ kind: 'ok', name: nameOf(f), selfReview: !!(f.selfReview || r.selfReview), id: f.id, auto: true })
+      flash('票都审核通过了、金额一致：这张单已整单通过' + (r.selfReview ? '（自审，已留痕）' : ''), 'ok')
+      setDlgId(null)
+      await moveNext(folder.id)
+      return 'done'
+    }
+    return 'ok'
+  }
+  // 弹窗右上角「审核」：这张当场通过 → 跳到下一张还没审的（没有了就关弹窗）
   const onMarkOk = async () => {
     const id = dlgItem.id
-    const r = await invAuditMark(id, { mark: 'ok' })
-    replaceItem(r?.item)
-    const rest = items.filter(it => it.id !== id && needCheck(it))
+    const res = await passItems([id])
+    if (!res) throw new Error('这张没审核成，原因见页面底部')
+    if (res === 'done') return
+    const rest = items.filter(it => it.id !== id && needCheck(it) && !it.doubt)
     const next = rest.find(it => items.indexOf(it) > dlgIdx) || rest[0]
-    flash(`第 ${orderOf(id)} 张已核${next ? '，下一张' : '，全部核完'}`, 'ok')
+    flash(`第 ${orderOf(id)} 张已审核通过，进台账了${next ? '，下一张' : ''}`, 'ok')
     setDlgId(next ? next.id : null)
+    refreshQuiet()
+  }
+  // 已收发票表上勾了点「审核所选」：勾的这几张一次送去审核通过
+  const auditMany = async (ids) => {
+    if (!ids.length || auditBusy || !folder) return
+    setAuditBusy(true)
+    let res = ''
+    try {
+      res = await passItems(ids)
+      if (res === 'ok') flash(`${ids.length} 张已审核通过，进台账了`, 'ok')
+    } catch (e) {
+      setActErr('没审核成：' + errText(e))
+    } finally { setAuditBusy(false); if (res !== 'done') refreshQuiet() }   // 整单结了已经跳到下一张单，不再重读这一张
   }
   const onDoubt = async (text) => {
     const r = await invAuditMark(dlgItem.id, { mark: 'doubt', text })
@@ -892,7 +1086,10 @@ export default function InvAudit({ user }) {
   const approve = async (gapNote) => {
     if (!folder || actBusy) return
     const dec = {}
-    items.filter(needsDecision).forEach(it => { dec[String(it.id)] = { deductible: !!decisions[it.id] } })
+    items.filter(needsDecision).forEach(it => {
+      dec[String(it.id)] = { deductible: !!decisions[it.id] }
+      if (it.id in others) dec[String(it.id)].otherSystem = !!others[it.id]     // 只送亲手动过的；没动过的后端保持原样
+    })
     // 只通过眼前这批待审的票：审核期间后补池又收进来的票，后端会回 409 让人先看
     const itemIds = pendingItemIds(items)
     setActBusy(true); setActErr(''); setBlockers(null)
@@ -908,7 +1105,7 @@ export default function InvAudit({ user }) {
       }
       if (!r || r.ok === false || r.detail) {
         const d = r && (r.msg || r.detail)
-        setActErr('没能提交：' + (typeof d === 'string' && d ? d : '服务端没说原因，请稍后再试'))
+        setActErr('没能通过：' + (typeof d === 'string' && d ? d : '服务端没说原因，请稍后再试'))
         setBlockers(Array.isArray(r?.blockers) ? r.blockers : null)
         if (r && r.code === 'gapNote') await loadDetail(folder.id, { keep: true })   // 差额口径变了（后补单刚到票等）：重读
         return
@@ -918,7 +1115,7 @@ export default function InvAudit({ user }) {
       flash(f.selfReview ? '已通过（自审，已留痕）' : '已通过', 'ok')
       await moveNext(folder.id)
     } catch (e) {
-      setActErr('没能提交：' + errText(e))
+      setActErr('没能通过：' + errText(e))
     } finally { setActBusy(false) }
   }
 
@@ -953,7 +1150,7 @@ export default function InvAudit({ user }) {
 
   // 自己提交的票夹：提前提示（后端最终判定；主管理员可自审并留痕）
   const selfWarn = folder && me.name && folder.submittedBy === me.name
-    ? (me.isSuper ? '这张单是你提交的，主管理员可以自审，提交后标「自审」' : '这张单是你提交的——提交人不能审核自己提交的单，请交给其他会计审')
+    ? (me.isSuper ? '这张单是你送审的，主管理员可以自审，通过后标「自审」' : '这张单是你提交的——提交人不能审核自己提交的单，请交给其他会计审')
     : ''
 
   const changeTab = (t) => {
@@ -967,7 +1164,7 @@ export default function InvAudit({ user }) {
       <div className="head">
         <div>
           <div className="h-title">发票审核</div>
-          <div className="h-sub">收票工作台提交的单子在这里复核：先看金额核对，再逐张打开核对（系统已核的不用再看），最后点底部「提交」。没有异常的单子可以批量通过。</div>
+          <div className="h-sub">收票工作台提交的单子在这里复核：先看金额核对，再逐张打开核对（系统已核的不用再看），勾上要审的票点「审核所选」（或点开一张点右上角「审核」）：审一张过一张，当场进台账；票都审完、金额一致，这张单自动整单通过。有差额或存疑的，点底部处理。</div>
         </div>
         <div className="inv-au-hacts">
           {cfg && !canAct && <span className="inv-badge mute" title="可以查看，不能通过/退回">{NO_PERM_HINT}</span>}
@@ -977,7 +1174,7 @@ export default function InvAudit({ user }) {
       <div className="body">
         {cfgErr && <div className="banner err">没取到发票管家的权限设置：{cfgErr}。可以先看队列，提交等按钮会不可用。</div>}
         {lastRes && <div className={'inv-au-last ' + lastRes.kind}>
-          <span className={'inv-badge ' + (lastRes.kind === 'ok' ? 'ok' : 'warn')}>{lastRes.kind === 'ok' ? '已通过' : '已退回'}</span>
+          <span className={'inv-badge ' + (lastRes.kind === 'ok' ? 'ok' : 'warn')}>{lastRes.kind === 'ok' ? (lastRes.auto ? '票都审核完，已整单通过' : '已通过') : '已退回'}</span>
           {lastRes.selfReview && <span className="inv-badge warn" title="主管理员审核了自己提交的票夹，已留痕">自审</span>}
           <span>{lastRes.name}</span>
           {lastRes.kind === 'ret' && lastRes.note ? <span className="inv-muted">原因：{lastRes.note}</span> : null}
@@ -998,7 +1195,9 @@ export default function InvAudit({ user }) {
               <button type="button" className="btn" onClick={() => loadDetail(selId)}>重试</button></div>}
             {selId && folder && <>
               <AuditHeader folder={folder} />
-              <InvoiceTable items={items} decisions={decisions} orderOf={orderOf} onOpen={setDlgId} />
+              <InvoiceTable items={items} decisions={decisions} others={others} orderOf={orderOf} onOpen={setDlgId}
+                canAudit={canAct && actionable} auditBusy={auditBusy} onAudit={auditMany}
+                setDecision={setDecision} setOther={(id, v) => setOthers(o => ({ ...o, [id]: !!v }))} />
               <LaterTable laters={folder.laters} />
               <SubmitBar folder={folder} items={items} decisions={decisions} canAct={canAct} actionable={actionable}
                 busy={actBusy} err={actErr} blockers={blockers} selfWarn={selfWarn} orderOf={orderOf} onOpen={setDlgId}
@@ -1008,7 +1207,8 @@ export default function InvAudit({ user }) {
         </div>
       </div>
       {dlgItem && <ItemDialog item={dlgItem} order={dlgIdx + 1} total={items.length} editable={dlgEditable}
-        decision={decisions[dlgItem.id]} setDecision={v => setDecision(dlgItem.id, v)} logs={detail?.logs}
+        decision={decisions[dlgItem.id]} setDecision={v => setDecision(dlgItem.id, v)}
+        other={otherOf(dlgItem, others)} setOther={v => setOthers(o => ({ ...o, [dlgItem.id]: !!v }))} logs={detail?.logs}
         onClose={() => setDlgId(null)}
         onPrev={dlgIdx > 0 ? () => step(-1) : undefined} onNext={dlgIdx < items.length - 1 ? () => step(1) : undefined}
         onMarkOk={onMarkOk} onDoubt={onDoubt} onClearDoubt={onClearDoubt} onRemove={onRemove} onSave={onSave} onRotate={onRotate} onRecorded={r => { setDetail(d => ({ ...d, items: d.items.map(it => it.id === r.item.id ? { ...it, ...r.item } : it) })) }} />}
