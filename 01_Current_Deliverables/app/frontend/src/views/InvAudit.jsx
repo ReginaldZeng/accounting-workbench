@@ -219,7 +219,7 @@ function BatchResult({ res, titleOf: liveTitle, onClose, onPick }) {
 
 function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loading, err, page, setPage,
   selId, onPick, checked, setChecked, canAct, onBatch, batchBusy, batchErr, batchRes, setBatchRes,
-  mineOnly }) {
+  mineOnly, searching }) {
   const rows = queue?.rows || []
   const total = queue?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -250,7 +250,11 @@ function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loa
         {err && <div className="inv-au-err">队列没取到：{err}</div>}
         {loading && !rows.length && <div className="loading">正在取审核队列…</div>}
         {!loading && !err && !rows.length && <div className="inv-au-empty">
-          {qInput ? '没搜到符合的票夹，换个关键字试试' : tab === 'pending' ? (mineOnly ? '你名下暂时没有要审的' : '暂时没有要审的票夹') : tab === 'returned' ? '没有被退回的票夹' : '还没有审核通过的票夹'}
+          {searching ? <>这个页签里没搜到
+            {TABS.filter(t => t.key !== tab && counts[t.key] > 0).map(t => <button key={t.key} type="button" className="inv-au-elsewhere" onClick={() => onTab(t.key)}>
+              「{t.label}」里有 {counts[t.key]} 个 →</button>)}
+            {!TABS.some(t => t.key !== tab && counts[t.key] > 0) && '，三个页签里都没有；换个条件试试'}</>
+          : qInput ? '没搜到符合的票夹，换个关键字试试' : tab === 'pending' ? (mineOnly ? '你名下暂时没有要审的' : '暂时没有要审的票夹') : tab === 'returned' ? '没有被退回的票夹' : '还没有审核通过的票夹'}
         </div>}
         {rows.map(r => <QueueRow key={r.id} row={r} tab={tab} on={r.id === selId} checked={checked.has(r.id)}
           canCheck={canAct} onPick={onPick} onCheck={toggle} />)}
@@ -984,13 +988,14 @@ export default function InvAudit({ user }) {
 
   // 各页签数量（不带搜索词；失败不打扰，只是不显示数字）
   const loadCounts = useCallback(() => {
+    const sc = ((q || amt) && !boss) ? 'all' : scope       // 和列表同一个范围：搜的时候各页签里各有几个
     TABS.forEach(t => {
-      invAuditQueue({ tab: t.key, page: 1, size: 1, scope, source: src, amount: amt })
+      invAuditQueue({ tab: t.key, page: 1, size: 1, scope: sc, source: src, amount: amt, q })
         .then(r => setCounts(c => ({ ...c, [t.key]: r?.total ?? 0 })))
         .catch(() => { /* 数字取不到不影响审核 */ })
     })
     invAuditBacklog().then(r => setBacklog(r || null)).catch(() => { /* 卡片上的数字取不到不影响审核 */ })
-  }, [scope, src, amt])
+  }, [scope, src, amt, q, boss])
 
   const loadQueue = useCallback(async (opt = {}) => {
     const t = opt.tab ?? tab, qq = opt.q ?? q, pg = opt.page ?? page
@@ -1004,7 +1009,7 @@ export default function InvAudit({ user }) {
       const data = { total: r?.total ?? 0, rows: Array.isArray(r?.rows) ? r.rows : [] }
       setQueue(data)
       setRefreshed(nowHM())
-      if (!qq) setCounts(c => ({ ...c, [t]: data.total }))
+      setCounts(c => ({ ...c, [t]: data.total }))
       // 勾选只保留仍在列表里、且仍无异常的
       setChecked(s => new Set([...s].filter(id => data.rows.some(x => x.id === id && x.clean && x.owner?.canAct))))
       return data
@@ -1363,12 +1368,13 @@ export default function InvAudit({ user }) {
           </label>
           <label className="inv-au-search">搜索
             <input type="text" value={qInput} placeholder="单号、标题、申请人、收款方、发票号码"
-              onChange={e => setQInput(e.target.value)}
+              onChange={e => { setQInput(e.target.value); if (!e.target.value.trim() && q) doSearch('') }}
+              onBlur={() => { if (qInput.trim() !== q) doSearch(qInput) }}
               onKeyDown={e => { if (e.key === 'Enter') doSearch(qInput); if (e.key === 'Escape' && qInput) { setQInput(''); doSearch('') } }} />
           </label>
           <label className="inv-au-amt">发票金额
             <input type="text" inputMode="decimal" value={amtInput} placeholder="例 3151.50"
-              onChange={e => setAmtInput(e.target.value)}
+              onChange={e => { setAmtInput(e.target.value); if (!e.target.value.trim() && amt) applyAmt('') }}
               onKeyDown={e => { if (e.key === 'Enter') applyAmt(amtInput); if (e.key === 'Escape' && amtInput) { setAmtInput(''); applyAmt('') } }}
               onBlur={() => applyAmt(amtInput)} title="价税合计或不含税金额对得上的票所在的单；回车查" />
           </label>
@@ -1383,7 +1389,7 @@ export default function InvAudit({ user }) {
             queue={queue} loading={qLoading} err={qErr} page={page} setPage={setPage}
             selId={selId} onPick={setSelId} checked={checked} setChecked={setChecked} canAct={canAct}
             onBatch={runBatch} batchBusy={batchBusy} batchErr={batchErr} batchRes={batchRes} setBatchRes={setBatchRes}
-            mineOnly={scope === 'mine' && !q && !src && !amt} />
+            mineOnly={scope === 'mine' && !q && !src && !amt} searching={!!(q || amt)} />
 
           <main className="inv-au-d">
             {!selId && <div className="inv-au-blank">{qLoading ? '正在取审核队列…' : '在左边点一张单开始审核'}</div>}
