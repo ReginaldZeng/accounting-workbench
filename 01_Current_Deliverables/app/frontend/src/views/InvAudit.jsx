@@ -1,5 +1,6 @@
 import { Bookkeeping } from './InvLedger.jsx'
 import { invPaperMark } from '../api.js'
+// [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.955（后补票转待认证·撤回重做）| 「核销暂估」：系统建好的凭证旁加「撤回重做」（还没审核的才撤得掉）
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.953（后补票转待认证·物流单也由后补单这边做）| 「核销暂估」：物流请款单在开关＝真做时也归这边做，徽标和「现在做」按钮跟着显示
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排）| 单张弹窗按样机第 3 版重排：左边 发票图＋「系统核对」（一行一句结论），右边「票面」（两栏紧凑）＋「这张票要办的事」（纸质票／转待认证／金蝶凭证）
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）| 物流请款单的后补票：这一栏写明付款做账那条线会怎么做、列出它的分录；颜色按「会不会自动做」
@@ -26,7 +27,7 @@ import { invPaperMark } from '../api.js'
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invAuditQueue, invAuditBatch, invAuditApprove, invAuditItemsApprove, invAuditReturn, invAuditMark,
-  invFolder, invItemUpdate, invItemRotate, invItemRemove, invLaterVoucherPlan, invLaterVoucherSource, invLaterVoucherRun,
+  invFolder, invItemUpdate, invItemRotate, invItemRemove, invLaterVoucherPlan, invLaterVoucherSource, invLaterVoucherRun, invLaterVoucherRedo,
 } from '../api.js'
 import {
   money, fmtTime, useToast, usePoll, Modal, StatusBadges, itemBadges, InvViewer, FieldPanel,
@@ -604,6 +605,12 @@ function LaterVoucher({ laterId }) {
     </div>}
     {!done && st.status && st.msg && st.msg !== p.why && <div className="inv-muted">上一次：{st.msg}</div>}
     {err && <div className="inv-au-l3bad">{err}</div>}
+    {done && d.canRedo && <div>
+      <button type="button" className="btn" disabled={busy}
+        title="这张凭证不对（比如规则改了）时用：系统把金蝶里这张还没审核的凭证撤销提交并删除，再按现在的规则重建一张。已经审核的撤不了"
+        onClick={() => { if (window.confirm(`系统会把金蝶里这张还没审核的凭证（记-${st.vno}）撤销提交并删除，再按现在的规则重建一张，凭证号可能会变。确定吗？`)) act(() => invLaterVoucherRedo(laterId)) }}>
+        {busy ? '正在撤回重做…' : '撤回重做'}</button>
+    </div>}
     {!done && d.ready && d.mode !== 'off' && (p.kind !== 'logistics' || p.by === 'later') && p.kind !== 'none' && <div>
       <button type="button" className="btn" disabled={busy} onClick={() => act(() => invLaterVoucherRun(laterId))}
         title={d.mode === 'on' ? '不等后台，现在就往金蝶新建这张凭证并提交（不审核）' : '演练：只算一遍、把打算怎么做记下来，不写金蝶'}>{busy ? '正在做…' : (d.mode === 'on' ? '现在做' : '现在演练一次')}</button>
