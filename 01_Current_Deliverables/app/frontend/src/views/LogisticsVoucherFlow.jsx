@@ -28,9 +28,13 @@ const invOk = r => !!(r.later_ok || r.inv_state === 'ok')
 const invParts = r => {
   const by = {}
   ;(r.invs || []).forEach(([t, st]) => { const k = t + '|' + st; by[k] = (by[k] || 0) + 1 })
-  return Object.entries(by).map(([k, n]) => { const [t, st] = k.split('|'); return { txt: t + (n > 1 ? ` ${n} 张` : '') + revCn(st), ok: st === 'approved' } })
+  return Object.entries(by).map(([k, n]) => { const [t, st] = k.split('|'); return { txt: t + (n > 1 ? ` ${n} 张` : '') + revCn(st), ok: st === 'approved', st, n } })
 }
 const invPlain = r => invParts(r).map(x => x.txt).join('、')
+// V2.961(用户看禾享那一行「已收 1 张 / 专票已审核」：「这里应该是后补单已审核？红字」)：这张单当初是没票先付款、登记了发票后补单的，
+// 票是后来经后补单到的——收票那一格要看得出来，不能和当场带票的写成一样。later_state 只有做付款凭证时走了发票后补的才有。
+const viaLater = r => !!r.later_state
+const laterTxt = x => '后补单' + (x.n > 1 ? ` ${x.n} 张` : '') + revCn(x.st)
 const periodOf = r => {                                              // 凭证所在期间：金蝶读到的优先，其次做账记录里记的，最后按付款日
   const v = r.vinfo || {}, p = r.posted || {}
   const y = v.year || p.vyear, m = v.period || p.vperiod || p.vmonth
@@ -110,7 +114,9 @@ export function FlowTable({ rows, loading, plans, sel, setSel, canBatch, onSteps
               : <Cell kind="stop" ic="!" main="还没复核" grey={r.period ? '到账单复核台登记，或标本主体通过' : '请款单还没认出是哪个月的账单'} />
           // ② 收票：灰字＝票种＋发票管家审核状态
           const parts = invParts(r)
-          const grey2 = parts.length ? parts.map((x, i) => <React.Fragment key={i}>{i > 0 && '、'}{x.ok ? x.txt : <span className="w">{x.txt}</span>}</React.Fragment>) : null
+          const grey2 = !parts.length ? null
+            : viaLater(r) ? parts.map((x, i) => <React.Fragment key={i}>{i > 0 && '、'}<span className={x.ok ? 'lt' : 'w'} title={x.txt + '（发票后补单到的票）'}>{laterTxt(x)}</span></React.Fragment>)
+              : parts.map((x, i) => <React.Fragment key={i}>{i > 0 && '、'}{x.ok ? x.txt : <span className="w">{x.txt}</span>}</React.Fragment>)
           const main2 = `已收 ${(r.invs || []).length} 张`
           const c2 = r.later_ok ? <Cell kind="later" ic="补" main="票后到" grey="发票后补已确认" />
             : !(r.invs || []).length ? ((after(2) || done) ? <Cell kind="wait" ic="○" main="没票" grey={r.later_slip ? `已登记后补单 #${r.later_slip.id}，待确认` : ''} />
@@ -155,7 +161,7 @@ function buildSteps(r, d) {
   const g1 = !!r.review, g2 = invOk(r), g3 = !!r.paid
   const G = [
     { ok: g1, t: '① 账单复核', d: g1 ? (r.review.how === 'month' ? `整月登记 ${md(r.review.at)}` : `本主体通过 ${md(r.review.at)} ${r.review.by || ''}`) : done ? '做账时没复核（那时还没有这道闸）' : '整月没登记，这个主体也没标通过' },
-    { ok: g2, t: '② 收票', d: r.later_ok ? '发票后补已确认：先付款，票到了再转税' : (r.invs || []).length ? `已收 ${r.invs.length} 张，${invPlain(r)}` + (r.inv_state === 'diff' ? `；合计 ${money(r.inv_total)} 和请款对不上` : '') : '票夹里没票' },
+    { ok: g2, t: '② 收票', d: r.later_ok ? '发票后补已确认：先付款，票到了再转税' : (r.invs || []).length ? `已收 ${r.invs.length} 张，${invPlain(r)}${viaLater(r) ? '（发票后补单到的票）' : ''}` + (r.inv_state === 'diff' ? `；合计 ${money(r.inv_total)} 和请款对不上` : '') : '票夹里没票' },
     { ok: g3, t: '③ 付款', d: g3 ? `已付款 ${r.paid}` + (r.fkd ? `，付款单 ${r.fkd}` : r.paid_voucher ? `，金蝶已记 ${r.paid_voucher}` : '，付款单还是暂存') : '金蝶还没有付款单' },
   ]
   const A = []
@@ -267,7 +273,7 @@ export const FLOW_CSS = `
 .lv .lvf-t td.sj{white-space:nowrap}.lv .lvf-t td.sj .per{font-size:11.5px}
 .lv .lvf-t td.acc .a{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:1px;min-height:36px}
 .lv .lvf-t td.acc .g{color:var(--ink-3);font-size:11.5px;line-height:1.4;white-space:nowrap}
-.lv .lvf-t .w{color:var(--amber);font-weight:600}
+.lv .lvf-t .w{color:var(--amber);font-weight:600}.lv .lvf-t .lt{color:var(--red);font-weight:600}
 .lv .lvf-t td.stopcell{background:color-mix(in srgb,var(--amber-bg) 55%,var(--bg))}
 .lv .fc{display:flex;gap:8px;align-items:center;min-height:36px}
 .lv .fc .ic{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;font-size:12px;font-weight:700;line-height:1}
