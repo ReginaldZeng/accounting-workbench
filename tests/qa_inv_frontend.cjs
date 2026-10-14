@@ -1322,6 +1322,23 @@ test('V2.975 台账：筛选条先列 主体/开票月份/做账月份/票种/�
   await ctx.close()
 })
 
+test('V2.976 台账「抵扣」栏胶囊：已标注勾选绿色、票总管已有蓝色、普票红色，别的照旧写字', async (browser, B) => {
+  const st = { rows: [inv({ id: 311, review: 'approved', deductStatus: 'marked', deductible: true, folder: { id: 30 }, folderId: 30 }),
+    inv({ id: 312, review: 'approved', deductStatus: 'other', deductible: true, folder: { id: 30 }, folderId: 30 }),
+    inv({ id: 313, review: 'approved', invType: 'normal', noBook: true, deductible: false, folder: { id: 30 }, folderId: 30 }),
+    inv({ id: 314, review: 'approved', deductible: true, folder: { id: 30 }, folderId: 30 })], logs: [] }
+  const { page, ctx } = await open(browser, B, ledgerApi(st))
+  await mount(page, 'InvLedger', { user: { name: '测试会计' } })
+  await page.locator('.inv-lg-tbl').waitFor()
+  const rows = page.locator('.inv-lg-tbl tbody tr')
+  assert.equal(await rows.nth(0).locator('.inv-pill.ok', { hasText: '已标注勾选' }).count(), 1)
+  assert.equal(await rows.nth(1).locator('.inv-pill.info', { hasText: '票总管已有' }).count(), 1)
+  assert.equal(await rows.nth(2).locator('.inv-pill.err', { hasText: '普票' }).count(), 1)
+  assert.equal(await rows.nth(3).locator('.inv-pill').count(), 0)
+  assert.match(await rows.nth(3).innerText(), /可抵扣/)
+  await ctx.close()
+})
+
 const ledgerRow = (o) => inv({ id: 301, review: 'approved', deductStatus: 'checked', folder: { id: 30, title: '付款单丙' }, folderId: 30, ...o })
 const LEDGER_LOGS = [{ id: 2, ts: '2026-09-24 10:00:00', user: '李会计', action: '改票面字段', detail: { note: '改了税额' }, itemId: 301 },
   { id: 1, ts: '2026-09-24 09:00:00', user: '王收票', action: '提交审核', detail: {}, itemId: null }]

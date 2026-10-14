@@ -68,6 +68,14 @@ function deductText(it) {
   if (it?.deductible === false || it?.deductible === 0) return '不可抵扣'
   return '未判定'
 }
+// 台账「抵扣」那一栏的胶囊（V2.976，用户 2026-10-14 定）：已标注勾选 / 已勾选 绿色，票总管已有 蓝色，普票（不入账的）红色；别的照旧写字
+function DeductPill({ it }) {
+  const t = deductText(it)
+  if (it?.deductStatus === 'checked' || it?.deductStatus === 'marked') return <span className="inv-pill ok">{t}</span>
+  if (it?.deductStatus === 'other') return <span className="inv-pill info">{t}</span>
+  if (it?.noBook) return <span className="inv-pill err" title="普票：不入账、不认证">普票</span>
+  return <span>{t}</span>
+}
 // 后端的「识别到的列」可能给字符串数组（'发票号码 ← 数电票号码'），也可能给 {字段: 表头}
 function mappingLines(m) {
   if (!m) return []
@@ -218,7 +226,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid, checked, onChe
                 <td className="num">{money(r.tax)}</td>
                 <td className="num">{money(r.total)}</td>
                 <td><VerifyBadge v={r.verify} note={r.verifyNote} /></td>
-                <td className="inv-lg-nowrap">{deductText(r)}</td>
+                <td className="inv-lg-nowrap"><DeductPill it={r} /></td>
                 <td className="inv-lg-nowrap">{fBiz(f) ? <span className="mono">{fBiz(f)}</span> : <span>{f.title || '—'}</span>}
                   {f.applicant ? <span className="inv-lg-sub">{f.applicant}</span> : null}</td>
                 <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}{r.reviewBy && r.folder?.ownerName && r.folder.ownerName !== r.reviewBy ? ' · 归' + r.folder.ownerName : ''}</span></td>
