@@ -649,6 +649,7 @@ export const invLaterMark = (id, body) => jp(`/api/inv/later/${id}/mark`, body) 
 export const invLaterVoucherPlan = (id) => j(`/api/inv/later/${id}/voucher-plan`)
 export const invLaterVoucherSource = (id, picks) => jp(`/api/inv/later/${id}/voucher-source`, { picks })
 export const invLaterVoucherRun = (id) => jp(`/api/inv/later/${id}/voucher-run`)
+export const invLaterVoucherRedo = (id) => jp(`/api/inv/later/${id}/voucher-redo`)     // 撤回重做：金蝶里那张还没审核的撤销提交并删除，按现在的规则重建
 export const invLaterVoucherConfig = () => j('/api/inv/later-voucher/config')
 export const invLaterVoucherConfigSet = (mode) => jp('/api/inv/later-voucher/config', { mode })
 export const invLaterFlowCheck = (id) => jp(`/api/inv/later/${id}/flow-check`)         // 现在就去这张付款单的钉钉流程里找发票（财务初审后才到的记到后补单、进审核）

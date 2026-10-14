@@ -2166,15 +2166,17 @@ class InvoiceBooksApiTests(unittest.TestCase):
             r.update(kw)
             return r
 
-        def voucher(vno, gross, tax, expl):
+        def voucher(vno, gross, tax, expl, tax_sup=True):
             books[vno] = [row(vno, "6601.05", "快递费", dr=round(gross - tax, 2), expl=expl, sup=False, **{"部门码": "D01", "费用码": "F01"})]
             if tax:
-                books[vno].append(row(vno, "2221.01.07", "暂估进项税", dr=tax, expl=expl))
+                books[vno].append(row(vno, "2221.01.07", "暂估进项税", dr=tax, expl=expl, sup=tax_sup))
             books[vno].append(row(vno, "2241.02", "供应商往来", cr=gross, expl=expl))
             heads.append((vno, gross))
             L3._CACHE.clear()
 
         def q(s_, conf, form, fields, filt, order=""):
+            if "FVOUCHERID=" in filt:                   # 这张凭证是谁、什么时候审核的
+                return [{"审核人": "审核人甲", "审核时间": "2026-10-14T10:15:22.92"}]
             if "FCREDIT=" in filt:
                 amt = float(filt.split("FCREDIT=")[1])
                 return [dict(books[v][-1], **{"年": 2026, "期": 9}) for v, g in heads if abs(g - amt) < 0.005]
@@ -2201,12 +2203,16 @@ class InvoiceBooksApiTests(unittest.TestCase):
 
         sent = MagicMock(return_value={"sent": True, "msg": "已发送"})
         booked = {"rows": []}
+        gone = {"deleted": set(), "unsub": [], "status": {}}
 
         def told():                 # 「没自动做」的钉钉提醒发了几条（后补单收齐给申请人的「已签收」不算）
             return sum(1 for c in sent.call_args_list if "没自动做" in c[0][1])
         with patch.object(LVR.kc, "_query", q), patch.object(LVR, "_kd", lambda: (None, {})), \
                 patch.object(LVR.kc, "login", lambda s_=None, conf=None: (None, {})), patch.object(LVR.kc, "save_voucher", save), \
-                patch.object(LVR.kc, "view_voucher", lambda vid, s_=None, conf=None: {"exists": True, "vno": str(vid - 8770), "status": "A"}), \
+                patch.object(LVR.kc, "view_voucher", lambda vid, s_=None, conf=None: {
+                    "exists": vid not in gone["deleted"], "vno": str(vid - 8770), "status": gone["status"].get(vid, "B")}), \
+                patch.object(LVR.kc, "unsubmit_bill", lambda form, ids, s_=None, conf=None: gone["unsub"].append(ids)), \
+                patch.object(LVR.kc, "delete_vouchers", lambda ids, s_=None, conf=None: gone["deleted"].add(ids)), \
                 patch.object(LVR.kc, "submit_bill", lambda form, ids, s_=None, conf=None: calls["submit"].append(ids)), \
                 patch.object(LVR, "_xred_date", lambda book, d, s_, conf: ("2026-10-14", 2026, 10)), \
                 patch.object(iv, "fetch_rows", lambda numbers: list(booked["rows"])), \
@@ -2224,8 +2230,12 @@ class InvoiceBooksApiTests(unittest.TestCase):
             self.assertEqual([(x["dc"], x["acct"], x["amount"]) for x in v["lines"]], [("借", "2221.01.06", 13.09), ("贷", "2221.01.07", 13.09)])
             self.assertTrue(v["lines"][0]["expl"].startswith(num(37001) + "核销9/196#"), v["lines"][0]["expl"])
             self.assertEqual(v["lines"][1]["supplier"], seller)
+            S.item_insert(e, folder_id=fa, kind="other", origin="attachment", review="draft", proc_status="done")     # 付款单上的附件（草稿）
             approve(fa, ia)
             self.assertIn(la, L3._Q)
+            # 后补票审完，付款单还在收票中、附件是草稿：「已通过」里要搜得到（线上审完三个页签都搜不到，没法回来点「撤回重做」）；待审核里没有了
+            self.assertIn(fa, [r["id"] for r in self.ok(self.get("/api/inv/audit/queue?tab=done&q=" + num(37001), "acct"))["rows"]])
+            self.assertNotIn(fa, [r["id"] for r in self.ok(self.get("/api/inv/audit/queue?tab=pending&q=" + num(37001), "acct"))["rows"]])
             L3.drain()
             st = L3.state_of(la)
             self.assertEqual(st["status"], "dry")
@@ -2265,6 +2275,33 @@ class InvoiceBooksApiTests(unittest.TestCase):
             L3.run_one(la)
             self.assertEqual(len(calls["save"]), 1)                                     # 做过了不重复建
             self.assertEqual(self.post("/api/inv/later/%d/voucher-source" % la, "acct", {"picks": []}).status_code, 400)
+            # 撤回重做（用户 2026-10-14：系统建的那张不对，他在金蝶里改不了）：已审核的不撤；没审核的撤销提交→删除→按现在的规则重建，票上的凭证号换成新的
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-redo" % la, "recv2").status_code, 403)
+            gone["status"][9001] = "C"
+            r = self.post("/api/inv/later/%d/voucher-redo" % la, "acct")
+            self.assertEqual((r.status_code, "已经审核了" in r.json()["msg"], gone["deleted"], len(calls["save"])), (400, True, set(), 1))
+            gone["status"][9001] = "B"
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
+            self.assertTrue(v["canRedo"])
+            r = self.ok(self.post("/api/inv/later/%d/voucher-redo" % la, "acct"))
+            self.assertEqual((r["status"], r["withdrawn"], gone["unsub"], gone["deleted"], len(calls["save"])), ("done", "记-231", [9001], {9001}, 2))
+            self.assertEqual((r["state"]["vno"], r["state"]["redoOf"]), ("232", "记-231"))
+            self.assertEqual(self.item(ia)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-232"}])
+            self.assertEqual(self.post("/api/inv/later/%d/voucher-redo" % 999999, "acct").status_code, 404)
+            # 这一栏跟着金蝶走（用户在金蝶审核了，弹窗里还写「等人在金蝶审核」、还摆着撤回重做）：已提交→等审核、可撤回；
+            # 已审核→写「金蝶里已审核」、不给撤回重做，并记下来以后不再问金蝶
+            L3._LIVE.clear()
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
+            self.assertEqual((v["voucherStatus"], v["canRedo"], "记-232" in v["state"]["msg"], "等人在金蝶审核" in v["state"]["msg"]), ("B", True, True, True))
+            gone["status"][9002] = "C"
+            L3._LIVE.clear()
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
+            self.assertEqual((v["voucherStatus"], v["canRedo"], "金蝶里已审核" in v["state"]["msg"], "等人" in v["state"]["msg"]), ("C", False, True, False))
+            self.assertTrue(L3.state_of(la)["audited"])
+            self.assertIn("金蝶里已审核（审核人甲 10-14 10:15）", v["state"]["msg"])           # 谁、什么时候审核的也带出来
+            self.assertEqual((v["state"]["auditedBy"], v["state"]["auditedAt"]), ("审核人甲", "2026-10-14 10:15"))
+            gone["status"][9002] = "B"                                                   # 记下来了：不再去问金蝶
+            self.assertEqual(self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))["voucherStatus"], "C")
             # ③ 对不上（票面税额 ≠ 账上暂估）：不自动做，写明差多少，提醒一次
             fb, lb, ib = mk("B", 2000.0, 113.21, 2)
             voucher("300", 2000.0, 20.0, "某某提起支付服务费")
@@ -2290,8 +2327,19 @@ class InvoiceBooksApiTests(unittest.TestCase):
             v = self.ok(self.post("/api/inv/later/%d/voucher-source" % lc, "acct", {"picks": ["2026-09-402"]}))
             self.assertEqual((v["plan"]["kind"], v["plan"]["src"], [c["picked"] for c in v["plan"]["cands"]]), ("exact", ["2026-09-402"], [False, True]))
             r = self.ok(self.post("/api/inv/later/%d/voucher-run" % lc, "acct"))
-            self.assertEqual((r["status"], r["state"]["status"], len(calls["save"])), ("done", "done", 2))
-            self.assertIn("9/402#", calls["save"][1]["FEntity"][1]["FEXPLANATION"])
+            self.assertEqual((r["status"], r["state"]["status"], len(calls["save"])), ("done", "done", 3))
+            self.assertIn("9/402#", calls["save"][2]["FEntity"][1]["FEXPLANATION"])
+            # 暂估进项税那一行一定挂供应商：原凭证的暂估行当时没挂（线上 2026-10-14 禾享 9月记-196 就是这样，建出来的贷方没有维度，
+            # 用户「不太对，暂估是有维度的」）→ 用同一张凭证供应商往来行上的那家，并在计划里提醒原凭证也补上
+            fh, lh, ih = mk("H", 660.0, 6.6, 8)
+            voucher("480", 660.0, 6.6, "辛提起支付", tax_sup=False)
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % lh, "acct"))
+            self.assertEqual((v["plan"]["kind"], v["lines"][1]["supplier"]), ("exact", seller))
+            self.assertIn("暂估那一行当时没挂供应商", v["plan"]["why"])
+            approve(fh, ih)
+            L3.drain()
+            self.assertEqual((L3.state_of(lh)["status"], len(calls["save"])), ("done", 4))
+            self.assertEqual(calls["save"][3]["FEntity"][1]["FDetailID"], {"FDETAILID__FFLEX4": {"FNumber": "S001"}})
             # ⑤ 物流请款单不归这里；原凭证没有暂估的不用做；上次做到一半的不重复建；金蝶里已有人做了的不再做
             fd, ld, idd = mk("D", 800.0, 8.0, 4)
             voucher("450", 800.0, 8.0, "丁提起支付")
@@ -2363,7 +2411,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
             L3.drain()
             self.assertEqual((L3.state_of(lg)["status"], L3.state_of(lg)["kind"]), ("done", "byhand"))
             self.assertEqual(self.item(ig)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-88"}])
-            self.assertEqual(len(calls["save"]), 2)                                     # 这四种都没有新建凭证
+            self.assertEqual(len(calls["save"]), 4)                                     # 这四种都没有新建凭证
             # ⑥ 关掉以后什么都不做
             self.ok(self.post("/api/inv/later-voucher/config", "boss", {"mode": "off"}))
             self.assertEqual(L3.run_one(lb)["status"], "skip")

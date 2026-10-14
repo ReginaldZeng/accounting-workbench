@@ -1,3 +1,11 @@
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.959（核销暂估·写上谁什么时候审核的）
+# Description: 用户「是不是也能获取到谁什么时候审核的？」——金蝶凭证上有审核人（FCHECKERID）和审核时间（FAUDITDATE），实测能取。看到已审核时一并取下来记在后补单上，这一栏写「金蝶里已审核（谁 月-日 时:分）」。取不到就只写已审核。
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.958（核销暂估·跟着金蝶写已审核）
+# Description: 用户在金蝶审核了 记-8，弹窗里还写着「已提交、等人在金蝶审核」、还摆着「撤回重做」。改成打开这一栏时到金蝶看一眼这张凭证现在的状态（_live：2 分钟缓存；看到已审核就记下来，以后不再问）：已审核 → 写「金蝶里已审核」、不给撤回重做；金蝶里找不到了 → 照实说、可以重做。
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.955（后补票转待认证·撤回重做）
+# Description: Owner 2026-10-14：系统建的 10月记-8 贷方没挂供应商，他在金蝶里改不了，问「是我删掉还是？」→ 加「撤回重做」：系统把自己建的、还没审核的那张撤销提交并删除，再按现在的规则重建一张（POST /api/inv/later/{lid}/voucher-redo）。已审核的不撤；金蝶里撤不掉、删不掉就原样留着、什么都不改。
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.954（暂估进项税挂供应商）
+# Description: 贷暂估进项税那一行一定挂供应商（内核 _sup_src）；原凭证的暂估行当时没挂的，计划里写明并提醒把原凭证也补上。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.953（后补票转待认证·物流单也由后补单这边做）
 # Description: Owner 2026-10-14：「因为这个是后补，我们的付款凭证已经做完了，所以不可能在付款那条线转待认证」——物流请款单的后补票，转待认证也由发票后补单这边触发（审核通过、后补单收齐马上做，不等付款做账 20 分钟一轮）。开关＝真做时接管；分录和保存仍调付款做账那条线的 _post_later（同一把锁、同一份做账记录，那边记了 later3 就不会重复建），不另写一套算法。开关不是真做时不接管，维持那边自己做。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）
@@ -230,8 +238,12 @@ def plan(lid):
     dr, cr = LV.balance(lines)
     if not lines or abs(dr - cr) >= 0.005 or abs(d) >= 0.005:
         return dict(out, kind="diff", why="按发票和原凭证拼出来的分录借贷不平（借 %s／贷 %s），要人工处理" % (inv._money_str(dr), inv._money_str(cr)))
+    bare = [v for v in src if LV.tax_line_bare(v)]
+    note = ("。注意：原凭证 %s 的暂估那一行当时没挂供应商，这次转出按供应商往来那一行的供应商挂；原凭证那一行最好也补上，不然按供应商看这个科目的余额对不平"
+            % "、".join(_ref(v) for v in bare)) if bare else ""
     return dict(out, ok=True, kind="exact", lines=lines,
-                why="发票税额和账上暂估进项税都是 %s，对得上：借待认证进项税额／贷暂估进项税（核销 %s）" % (inv._money_str(it), "、".join(_ref(v) for v in src)))
+                why="发票税额和账上暂估进项税都是 %s，对得上：借待认证进项税额／贷暂估进项税（核销 %s）%s" % (
+                    inv._money_str(it), "、".join(_ref(v) for v in src), note))
 
 
 def _logistics_plan(inst):
@@ -559,6 +571,53 @@ def run_due(limit=10):
 
 # ───────────────────────── 接口 ─────────────────────────
 
+_LIVE = {}                            # 凭证内码 → (金蝶里的状态, 时间)
+
+
+def _live(lid, st):
+    """系统建好的那张凭证，金蝶里现在什么样 → 'C' 已审核 / 'B' 已提交 / 'A'·'D' 没提交 / 'gone' 找不到了 / '' 没看成（金蝶连不上）。
+    看到已审核就记在这张后补单上（审核了的不会再变回来，以后不用再问金蝶）；别的状态 2 分钟内不重复问。只读。"""
+    vid = st.get("vid")
+    if not vid:
+        return ""
+    if st.get("audited"):
+        if not st.get("auditedBy"):                 # 早先只记了「已审核」、没记是谁：补一次
+            _audit_who(lid, vid)
+        return "C"
+    hit = _LIVE.get(vid)
+    if hit and time.time() - hit[1] < 120:
+        return hit[0]
+    try:
+        info = _lvr().kc.view_voucher(vid)
+    except Exception:
+        return ""
+    now = "gone" if not info.get("exists") else str(info.get("status") or "")
+    _LIVE[vid] = (now, time.time())
+    if now == "C":
+        _put(lid, audited=True, auditedSeenAt=inv.now_s())
+        _audit_who(lid, vid)
+    return now
+
+
+def _audit_who(lid, vid):
+    """金蝶里这张凭证是谁、什么时候审核的 → 记在后补单上（auditedBy / auditedAt）。只读；取不到就不记，下次再试（2 分钟内不重复问）。"""
+    k = ("who", vid)
+    hit = _LIVE.get(k)
+    if hit and time.time() - hit[1] < 120:
+        return
+    _LIVE[k] = ("", time.time())
+    try:
+        LVR = _lvr()
+        s, conf = LVR._kd()
+        rows = LVR.kc._query(s, conf, "GL_VOUCHER", [("FCHECKERID.FName", "审核人"), ("FAUDITDATE", "审核时间")], "FVOUCHERID=%d" % int(vid))
+    except Exception:
+        return
+    r = rows[0] if rows else {}
+    who, at = str(r.get("审核人") or "").strip(), str(r.get("审核时间") or "").replace("T", " ")[:16]
+    if who or at:
+        _put(lid, auditedBy=who, auditedAt=at)
+
+
 def _view(lid):
     l = S.later_get(inv.E(), lid)
     if not l:
@@ -569,9 +628,20 @@ def _view(lid):
     lines = [{"dc": "借" if x["dr"] else "贷", "acct": x["acct"], "acctName": x.get("acct_name") or "", "amount": x["dr"] or x["cr"],
               "expl": x["expl"], "supplier": (x.get("dims") or {}).get("sup_name") or ""} for x in p.get("lines") or []]
     st = state_of(lid)
-    return {"ok": True, "laterId": lid, "mode": cfg()["mode"], "modeText": MODE_CN[cfg()["mode"]], "ready": ready,
+    live = ""
+    if st.get("status") == "done" and st.get("vid") and st.get("vno"):
+        live = _live(lid, st)
+        st = state_of(lid) if live == "C" else st       # 刚取到的审核人、审核时间
+        who = "（%s）" % " ".join(x for x in (st.get("auditedBy") or "", (st.get("auditedAt") or "")[5:]) if x) if (st.get("auditedBy") or st.get("auditedAt")) else ""
+        tail = {"C": "金蝶里已审核" + who, "B": "已提交、等人在金蝶审核", "gone": "但金蝶里已经找不到这张凭证了（可能被人删了）：可以点「撤回重做」重建"}.get(
+            live, ("已保存、还没提交上，请到金蝶手动提交" if live in ("A", "D") else ("已提交、等人在金蝶审核" if st.get("submitted", True) else "已保存、还没提交上")))
+        st["msg"] = "已新建暂估转待认证凭证 %s %s年%s月 记-%s（%s），%s" % (
+            st.get("book") or "", st.get("vyear") or "", st.get("vperiod") or "", st["vno"], st.get("date") or "", tail)
+    return {"ok": True, "laterId": lid, "mode": cfg()["mode"], "modeText": MODE_CN[cfg()["mode"]], "ready": ready, "voucherStatus": live,
             "plan": {k: p.get(k) for k in ("ok", "kind", "why", "book", "cands", "src", "taxInv", "taxEst", "by")}, "lines": lines,
-            "state": {k: st.get(k) for k in ("status", "kind", "msg", "vno", "vyear", "vperiod", "book", "date", "at", "by", "submitted", "picks")}}
+            "state": {k: st.get(k) for k in ("status", "kind", "msg", "vno", "vyear", "vperiod", "book", "date", "at", "by", "submitted", "picks", "redoOf",
+                                             "auditedBy", "auditedAt")},
+            "canRedo": st.get("status") == "done" and bool(st.get("vid")) and st.get("kind") in ("exact", "logistics") and live != "C"}
 
 
 @router.get("/api/inv/later/{lid}/voucher-plan")
@@ -627,6 +697,68 @@ async def later_voucher_run(lid: int, request: Request):
     if r.get("view") is None:
         return inv.err("后补单不存在", 404)
     return {"ok": True, "status": r.get("status"), "msg": r.get("msg") or "", **{k: r["view"][k] for k in ("mode", "modeText", "ready", "plan", "lines", "state")}}
+
+
+def _redo(lid, u):
+    """撤回重做 → (响应 dict, 状态码)。只撤系统自己建的、金蝶里还没审核的那张；撤销提交/删除任何一步不成 → 原样留着、什么都不改。"""
+    import busy
+    st = state_of(lid)
+    l = S.later_get(inv.E(), lid)
+    if not l:
+        return {"ok": False, "msg": "后补单不存在"}, 404
+    if st.get("status") != "done" or not st.get("vid") or st.get("kind") not in ("exact", "logistics"):
+        return {"ok": False, "msg": "这张后补单没有系统建的转待认证凭证，没什么可撤回的"}, 400
+    LVR = _lvr()
+    kc = LVR.kc
+    vid, vno = st["vid"], st.get("vno") or ""
+    try:
+        with busy.hold("发票后补·撤回重做暂估转待认证凭证"):
+            s, conf = kc.login()
+            info = kc.view_voucher(vid, s, conf)
+            if info.get("exists"):
+                if str(info.get("status") or "") == "C":
+                    return {"ok": False, "msg": "金蝶里凭证 记-%s 已经审核了，系统不撤回已审核的凭证；要改请先在金蝶反审核" % vno}, 400
+                if str(info.get("status") or "") == "B":
+                    kc.unsubmit_bill("GL_VOUCHER", vid, s, conf)
+                kc.delete_vouchers(vid, s, conf)
+    except busy.Draining as ex:
+        return {"ok": False, "msg": str(ex)}, 409
+    except Exception as ex:
+        return {"ok": False, "msg": "金蝶里没撤掉 记-%s：%s。凭证原样留着，系统这边什么都没改" % (vno, str(ex)[:200])}, 400
+    one = {"book": st.get("book") or "", "period": "%04d-%02d" % (int(st.get("vyear") or 0), int(st.get("vperiod") or 0)), "number": "记-%s" % vno}
+    for i in _bills(lid):
+        fl = dict((S.item_get(inv.E(), i["id"]) or {}).get("flags_json") or {})
+        bk = fl.get("_bookkeeping") or {}
+        if one in (bk.get("vouchers") or []):
+            vs = [v for v in bk["vouchers"] if v != one]
+            fl["_bookkeeping"] = dict(bk, vouchers=vs, status="booked" if vs else "unknown", at=inv.now_s())
+            S.item_update(inv.E(), i["id"], flags_json=fl)
+    if st.get("kind") == "logistics":               # 付款做账那边的做账记录里也去掉这张，不然它以为已经转过了
+        posted = dict(db.get_setting(LVR._POSTED_KEY, None) or {})
+        rec = dict(posted.get(l.get("inst_id")) or {})
+        if (rec.get("later3") or {}).get("vid") == vid:
+            rec.pop("later3", None)
+            posted[l.get("inst_id")] = rec
+            db.set_setting(LVR._POSTED_KEY, posted, u["name"])
+    _LIVE.pop(vid, None)
+    _put(lid, status="", kind="", msg="", vid=None, vno="", audited=False, auditedBy="", auditedAt="",
+         redoOf="记-%s" % vno, redoBy=u["name"], redoAt=inv.now_s(), told="")
+    inv.log(u, "撤回重做暂估转待认证凭证", l.get("folder_id"), None, lid, {"withdrawn": "记-%s" % vno})
+    inv.audit(u, "发票后补-撤回重做转待认证凭证", "记-%s" % vno, "后补单#%s %s：金蝶里已撤销提交并删除，接着重建" % (lid, l.get("payee_name") or ""))
+    r = run_one(lid, u, manual=True)
+    v = _view(lid) or {}
+    return {"ok": True, "status": r.get("status"), "withdrawn": "记-%s" % vno,
+            "msg": "金蝶里的 记-%s 已撤回删除；%s" % (vno, r.get("msg") or ""), **{k: v.get(k) for k in ("mode", "modeText", "ready", "plan", "lines", "state")}}, 200
+
+
+@router.post("/api/inv/later/{lid}/voucher-redo")
+async def later_voucher_redo(lid: int, request: Request):
+    """「撤回重做」：系统建的转待认证凭证不对（比如规则改了），把金蝶里那张还没审核的撤销提交并删除，再按现在的规则重建一张。"""
+    u, bad = inv.need(request, inv.ENTER_AUDIT, inv.CAP_AUDIT)
+    if bad:
+        return bad
+    out, code = await run_in_threadpool(_redo, lid, u)
+    return out if code == 200 else inv.err(out.get("msg") or "没撤成", code)
 
 
 @router.get("/api/inv/later-voucher/config")

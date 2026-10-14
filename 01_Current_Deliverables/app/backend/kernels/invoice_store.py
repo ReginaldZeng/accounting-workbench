@@ -1383,15 +1383,21 @@ def _counts(items):
 def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None):
     """审核队列 → (total, rows)。
     owner 不给＝不分人；{"none": True}＝只看未分派的；{"accounts": [...], "uids": [...]}＝只看归这位的。
-    pending＝有待审票（review=pending）或票夹已提交；returned＝票夹被退回；done＝票全部通过/作废且至少一张通过。
+    pending＝有待审票（review=pending）或票夹已提交；returned＝票夹被退回；done＝发票/收据全部通过或作废且至少一张通过（附件不看）、没有待审的、不在等整单通过。
     每行＝票夹 dict ＋ counts{pending_items, invoices, dup, unchecked, others}（统计不含作废票）。
     排序：pending 先到先审（提交时间正序）；returned/done 最近的在前。"""
     if tab == "returned":
         conds = [FOLDER.c.status == "returned"]
         order = [func.coalesce(FOLDER.c.reviewed_at, FOLDER.c.updated_at).desc(), FOLDER.c.id.desc()]
     elif tab == "done":
-        conds = [not_(_item_exists(lambda t: func.coalesce(t.c.review, "").not_in(("approved", "void")))),
-                 _item_exists(lambda t: t.c.review == "approved")]
+        # V2.956（已通过页签找不到后补票审过的单）：只看发票/收据审没审完，不看非发票附件——后补票审核通过后，付款单还在「收票中」、
+        #   上面的附件是草稿，原来按「所有东西都通过」算就哪个页签都不出现了（线上 2026-10-14 禾享那张，审完三个页签都搜不到）。
+        #   还在等整单通过的（已提交）、还有待审东西的，留在「待审核」，不在这里重复出现。
+        bill = lambda t: t.c.kind.in_(("invoice", "receipt"))
+        conds = [FOLDER.c.status != "submitted",
+                 not_(_item_exists(lambda t: and_(bill(t), func.coalesce(t.c.review, "").not_in(("approved", "void"))))),
+                 not_(_item_exists(lambda t: t.c.review == "pending")),
+                 _item_exists(lambda t: and_(bill(t), t.c.review == "approved"))]
         order = [func.coalesce(FOLDER.c.reviewed_at, FOLDER.c.updated_at).desc(), FOLDER.c.id.desc()]
     else:
         conds = [_audit_pending_cond()]

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-14 | Author: Claude / c | Version: V2.954（暂估进项税挂供应商）
+# Description: 贷 2221.01.07 暂估进项税那一行一定挂供应商：原凭证的暂估行自己挂了就用它的；它没挂（当时录的人漏了）就用同一张凭证
+#   供应商往来行上的那家（_sup_src）。原来只要有暂估行就照抄它的维度，它是空的就建出一行没有维度的暂估——
+#   线上实例 2026-10-14：深圳星期零 10月记-8（禾享 13.09），用户「不太对，暂估是有维度的」；原凭证 9月记-196 的暂估行当时就没挂。
 # Date: 2026-10-02 | Author: Claude Opus 5.5 | Version: V2.749
 # Description: 【物流·付款做账】纯函数（不连金蝶/库，便于单测）：一张物流请款单 → 合成一张凭证
 #   红冲 → 更正 → 核销(暂估转待认证) → 支付（用户 2026-10-01 定顺序与写法）。
@@ -78,6 +82,21 @@ def acc_voucher(vno, lines, year, month):
             "lines": lines, "exp_lines": exp, "tax_line": taxl[0] if taxl else None, "ap_line": apl[0] if apl else None,
             # 做这张的时候就有票、税直接挂了待认证的(禾享 5月记-155)：没有暂估要转，付款时只做支付
             "tax06": r2(sum(l["dr"] for l in lines if str(l.get("acct", "")).startswith("2221.01.06") and l.get("dr")))}
+
+
+def _sup_src(v):
+    """暂估进项税那一行挂哪家供应商：原凭证的暂估行自己挂了就用它的；它没挂（当时录的人漏了）就用同一张凭证供应商往来行上的那家。
+    暂估进项税是按供应商看余额的科目，这一行不能没有维度。"""
+    tl, al = (v or {}).get("tax_line") or {}, (v or {}).get("ap_line") or {}
+    if tl.get("sup_code"):
+        return tl
+    return dict(tl, sup_code=al.get("sup_code") or "", sup_name=al.get("sup_name") or "")
+
+
+def tax_line_bare(v):
+    """原凭证有暂估行、但那一行当时没挂供应商 → True（页面上要告诉人：这边转出去挂了供应商，原凭证那一行最好也补上，不然按供应商看余额对不平）。"""
+    tl = (v or {}).get("tax_line") or {}
+    return bool(tl) and not tl.get("sup_code")
 
 
 def ref_of(v, pay_year):
@@ -297,7 +316,7 @@ def renewed(v, new, ref):
     expl = v["expl"]
     lines = [dict({k: e.get(k) or "" for k in EXP_DIMS}, acct=e["acct"], acct_name=e.get("acct_name") or "", dr=r2(e["dr"]), cr=0.0, expl=expl)
              for e in new.get("exp") or []]
-    tl, al = v.get("tax_line") or v.get("ap_line") or {}, v.get("ap_line") or {}
+    tl, al = _sup_src(v), v.get("ap_line") or {}
     tax = r2(new.get("tax") or 0)
     if tax:
         lines.append(dict({k: tl.get(k) or "" for k in ("sup_code", "sup_name")}, acct="2221.01.07", acct_name="暂估进项税", dr=tax, cr=0.0, expl=expl))
@@ -452,7 +471,7 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
             amt = r2(net - acc) if i == len(exps) - 1 else r2(net * ws[i] / base)
             acc = r2(acc + amt)
             out.append(_ln("更正", e, l["acct"], l["acct_name"], dr=amt, src=l, keep=EXP_DIMS))
-        tl = v["tax_line"] or v["ap_line"] or {}
+        tl = _sup_src(v)
         if tax:                                  # 更正到 0%(普票不抵扣)不出 0 金额的税行
             out.append(_ln("更正", e, "2221.01.07", "暂估进项税", dr=tax, src=tl, keep=("sup_code", "sup_name")))
         out.append(_ln("更正", e, "2241.02", "供应商往来", cr=gross, src=v["ap_line"], keep=SUP_DIMS))
@@ -479,12 +498,12 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     for v in sorted(vouchers, key=lambda x: (x["year"], x["month"], x["vno"])):
         t = v["_new"]["tax"] if (v in renew or v in parts) else v["tax"]
         if t and not ctx.get("tax_later"):       # 发票后补：这张不转暂估税，等发票到了另做
-            out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
+            out.append(_ln("核销", hx_desc, "2221.01.07", "暂估进项税", cr=t, src=_sup_src(v), keep=("sup_code", "sup_name")))
         ct = (v.get("_new") or {}).get("carry_tax") or 0
         if abs(ct) >= 0.005 and not ctx.get("tax_later"):      # 发票税额和正确金额的税差的那一点(V2.896)：多收月贷方、扣回月贷方红字
             cg = pl["per"][v["vno"]]["carry"]
             note = ("（供应商多收%.2f元等后面月份账单扣回，随票多认证的进项税）" % -cg) if cg < 0 else ("（本月账单扣回以前多收的%.2f元，本月发票少开的进项税）" % cg)
-            out.append(_ln("核销", hx_desc + note, "2221.01.07", "暂估进项税", cr=ct, src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
+            out.append(_ln("核销", hx_desc + note, "2221.01.07", "暂估进项税", cr=ct, src=_sup_src(v), keep=("sup_code", "sup_name")))
     # 支付
     if ctx.get("paid"):
         pe = "%s提起支付%s%s%s" % (ctx.get("applicant") or "", sup, mc, items)
@@ -521,7 +540,7 @@ def later_lines(vouchers, invoices, pay_year, supplier):
         it += float(i.get("tax") or 0)
     for v in vs:
         if v["tax"]:
-            out.append(_ln("核销", desc, "2221.01.07", "暂估进项税", cr=v["tax"], src=v["tax_line"] or v["ap_line"], keep=("sup_code", "sup_name")))
+            out.append(_ln("核销", desc, "2221.01.07", "暂估进项税", cr=v["tax"], src=_sup_src(v), keep=("sup_code", "sup_name")))
             at += v["tax"]
     d = r2(it - at)
     if abs(d) >= 0.005 and vs:
