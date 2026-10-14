@@ -1172,6 +1172,7 @@ test('F3/C3 勾「含作废」只多要作废票（review=withvoid），不再�
   const { page, ctx, calls } = await open(browser, B, ledgerApi(st))
   await mount(page, 'InvLedger', { user: { name: '测试会计' } })
   await page.locator('.inv-lg-tbl').waitFor()
+  await page.getByRole('button', { name: '更多条件' }).click()          // V2.975 起「含作废」收在更多条件里
   await page.getByLabel('含作废').check()
   await page.waitForFunction(() => true)
   await sleep(700)
@@ -1278,6 +1279,46 @@ test('普票不入账：台账「做账 / 凭证」那一栏写「普票不入�
   assert.match(await rows.nth(0).innerText(), /普票不入账/)
   assert.doesNotMatch(await rows.nth(0).innerText(), /暂未匹配/)
   assert.match(await rows.nth(1).innerText(), /暂未匹配/)
+  await ctx.close()
+})
+
+test('V2.975 台账：筛选条先列 主体/开票月份/做账月份/票种/抵扣/做账/销方/审核人，别的收在「更多条件」；勾选几张，那一行变绿只算勾上的（含可抵扣税额）', async (browser, B) => {
+  const st = { rows: [inv({ id: 301, review: 'approved', deductible: true, tax: 11.5, total: 100, folder: { id: 30 }, folderId: 30 }),
+    inv({ id: 302, review: 'approved', deductible: false, tax: 3, total: 50, number: '26442000000000000302', folder: { id: 30 }, folderId: 30 })], logs: [] }
+  const base = ledgerApi(st)
+  const api = (c) => {
+    if (c.path === '/api/inv/ledger') return { ok: true, total: 2, sum: { amount: 135.5, tax: 14.5, total: 150, deductTax: 11.5 }, rows: st.rows, subjects: ['深圳市星期九食品科技有限公司'], reviewers: ['黄春艳', '曾禹锡'] }
+    return base(c)
+  }
+  const { page, ctx, calls } = await open(browser, B, api)
+  await mount(page, 'InvLedger', { user: { name: '测试会计' } })
+  await page.locator('.inv-lg-tbl').waitFor()
+  const labels = await page.locator('.inv-lg-fbar > label').evaluateAll(ls => ls.map(l => l.childNodes[0].textContent.trim()))
+  assert.deepEqual(labels.slice(0, 9), ['主体', '开票月份', '做账月份', '票种', '抵扣', '做账', '销方', '审核人', '搜索'])
+  assert.equal(await page.getByLabel('开票日期从').count(), 0, '开票日期收在更多条件里')
+  await page.getByRole('button', { name: '更多条件' }).click()
+  await page.getByLabel('开票日期从').waitFor()
+  // 审核人、做账月份带进请求
+  await page.getByLabel('审核人').selectOption('黄春艳')
+  await page.getByLabel('做账月份').fill('2026-09')
+  await sleep(500)
+  const last = calls.filter(c => c.path === '/api/inv/ledger').pop()
+  assert.equal(last.query.reviewer, '黄春艳')
+  assert.equal(last.query.bookMonth, '2026-09')
+  // 没勾：当前条件合计带可抵扣税额
+  await page.locator('.inv-lg-overview', { hasText: '可抵扣税额' }).waitFor()
+  // 勾一张：那一行变绿，只算勾上的
+  await page.getByLabel('勾选 26442000000000000302').check()
+  const bar = page.locator('.inv-lg-checked')
+  await bar.waitFor()
+  assert.match(await bar.innerText(), /已勾选\s*1\s*张/)
+  assert.match(await bar.innerText(), /价税合计\s*50\.00/)
+  assert.match(await bar.innerText(), /可抵扣税额\s*0\.00/)
+  await page.getByLabel('勾选这一页').check()
+  assert.match(await bar.innerText(), /已勾选\s*2\s*张/)
+  assert.match(await bar.innerText(), /可抵扣税额\s*11\.50/)
+  await bar.getByRole('button', { name: '清掉勾选' }).click()
+  assert.equal(await page.locator('.inv-lg-checked').count(), 0)
   await ctx.close()
 })
 

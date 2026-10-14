@@ -93,11 +93,14 @@ function NoPerm({ what }) {
 
 // ───────────────────────── 页签 1：台账查询 ─────────────────────────
 
-const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', booked: '', subject: '', month: '', paper: '', other: '', withVoid: false }
+const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', booked: '', subject: '', month: '', paper: '', other: '', bookMonth: '', reviewer: '', withVoid: false }
+// 收在「更多条件」里的（V2.975：用户定常用的是 主体/开票月份/做账月份/票种/抵扣/做账/销方/审核人）
+const MORE_KEYS = ['from', 'to', 'verify', 'other', 'paper', 'withVoid']
 // 台账只放审核通过的票；勾「含作废」＝已通过＋已作废（withvoid）。后端的 'all'（连草稿/待审都算）只给内部用，这页不发。
 export const toParams = f => ({
   from: f.from, to: f.to, q: f.q.trim(), invType: f.invType, verify: f.verify, deduct: f.deduct,
-  seller: f.seller.trim(), booked: f.booked, subject: f.subject, month: f.month, paper: f.paper, other: f.other || '', review: f.withVoid ? 'withvoid' : '',
+  seller: f.seller.trim(), booked: f.booked, subject: f.subject, month: f.month, paper: f.paper, other: f.other || '',
+  bookMonth: f.bookMonth || '', reviewer: f.reviewer || '', review: f.withVoid ? 'withvoid' : '',
 })
 // 作废提示里带着税务动作（进项税额转出 / 撤销勾选）时要留在页面上，不能 2 秒就消失
 export const voidNeedsTaxAction = msg => /转出|撤销/.test(String(msg || ''))
@@ -119,29 +122,20 @@ function logBrief(d) {
   return t ? String(t).slice(0, 80) : ''
 }
 
-function FilterBar({ f, setF, exportUrl, total, subjects, refresh, refreshing, refreshLabel }) {
+function FilterBar({ f, setF, exportUrl, total, subjects, reviewers, refresh, refreshing, refreshLabel }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
   const dirty = Object.keys(EMPTY_FILTER).some(k => f[k] !== EMPTY_FILTER[k])
+  const moreOn = MORE_KEYS.some(k => f[k] !== EMPTY_FILTER[k])
+  const [more, setMore] = useState(moreOn)
   return (
     <div className="fbar inv-lg-fbar">
       <label>主体<select value={f.subject} onChange={e => set('subject', e.target.value)}><option value="">全部主体</option>{(subjects || []).map(x => <option key={x} value={x}>{x}</option>)}</select></label>
       <label>开票月份<input type="month" value={f.month} onChange={e => setF(p => ({ ...p, month: e.target.value, from: '', to: '' }))} /></label>
-      <label>开票日期
-        <input type="date" value={f.from} onChange={e => setF(p => ({ ...p, from: e.target.value, month: '' }))} aria-label="开票日期从" />
-        <span className="muted">至</span>
-        <input type="date" value={f.to} onChange={e => setF(p => ({ ...p, to: e.target.value, month: '' }))} aria-label="开票日期到" />
-      </label>
-      <label>搜索<input type="text" value={f.q} onChange={e => set('q', e.target.value)} placeholder="发票号码 / 审批单号 / 申请人" /></label>
-      <label>销方<input type="text" value={f.seller} onChange={e => set('seller', e.target.value)} placeholder="名称或税号" className="inv-lg-short" /></label>
+      <label title="系统在金蝶对上的凭证在这个月（认证跟着做账月走）">做账月份<input type="month" value={f.bookMonth} onChange={e => set('bookMonth', e.target.value)} aria-label="做账月份" /></label>
       <label>票种
         <select value={f.invType} onChange={e => set('invType', e.target.value)}>
           <option value="">全部</option>
           {Object.entries(INV_TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-      </label>
-      <label>验真
-        <select value={f.verify} onChange={e => set('verify', e.target.value)}>
-          {VERIFY_OPTS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
       </label>
       <label>抵扣
@@ -149,25 +143,59 @@ function FilterBar({ f, setF, exportUrl, total, subjects, refresh, refreshing, r
           {DEDUCT_OPTS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
       </label>
-      <label>票总管<select value={f.other} onChange={e => set('other', e.target.value)} title="过渡期：这张票是不是票总管那边也有（记了「票总管已有」或在传过的票总管清单里）">
-        <option value="">全部</option><option value="yes">在票总管</option><option value="no">不在票总管</option></select></label>
       <label>做账<select value={f.booked} onChange={e => set('booked', e.target.value)}><option value="">全部</option><option value="unknown">未匹配 / 待刷新</option><option value="unbooked">未做账</option><option value="booked">已做账</option></select></label>
-      <label>纸质票<select value={f.paper} onChange={e => set('paper', e.target.value)}><option value="">全部</option><option value="received">已收到</option><option value="missing">未收到</option></select></label>
-      <label className="inv-lg-ck"><input type="checkbox" checked={f.withVoid} onChange={e => set('withVoid', e.target.checked)} />含作废</label>
+      <label>销方<input type="text" value={f.seller} onChange={e => set('seller', e.target.value)} placeholder="名称或税号" className="inv-lg-short" /></label>
+      <label>审核人<select value={f.reviewer} onChange={e => set('reviewer', e.target.value)} aria-label="审核人"><option value="">全部</option>{(reviewers || []).map(x => <option key={x} value={x}>{x}</option>)}</select></label>
+      <label>搜索<input type="text" value={f.q} onChange={e => set('q', e.target.value)} placeholder="发票号码 / 审批单号 / 申请人" /></label>
+      <button type="button" className={'inv-lk inv-lg-more' + (moreOn ? ' on' : '')} onClick={() => setMore(x => !x)} aria-expanded={more}>
+        {more ? '收起更多条件' : '更多条件' + (moreOn ? '（有在用的）' : '')}</button>
+      {more && <>
+        <label>开票日期
+          <input type="date" value={f.from} onChange={e => setF(p => ({ ...p, from: e.target.value, month: '' }))} aria-label="开票日期从" />
+          <span className="muted">至</span>
+          <input type="date" value={f.to} onChange={e => setF(p => ({ ...p, to: e.target.value, month: '' }))} aria-label="开票日期到" />
+        </label>
+        <label>验真
+          <select value={f.verify} onChange={e => set('verify', e.target.value)}>
+            {VERIFY_OPTS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+        </label>
+        <label>票总管<select value={f.other} onChange={e => set('other', e.target.value)} title="过渡期：这张票是不是票总管那边也有（记了「票总管已有」或在传过的票总管清单里）">
+          <option value="">全部</option><option value="yes">在票总管</option><option value="no">不在票总管</option></select></label>
+        <label>纸质票<select value={f.paper} onChange={e => set('paper', e.target.value)}><option value="">全部</option><option value="received">已收到</option><option value="missing">未收到</option></select></label>
+        <label className="inv-lg-ck"><input type="checkbox" checked={f.withVoid} onChange={e => set('withVoid', e.target.checked)} />含作废</label>
+      </>}
       {dirty && <button type="button" className="btn" onClick={() => setF(EMPTY_FILTER)}>清空条件</button>}
       <span className="inv-lg-grow" />
       {refresh && <button className="btn" disabled={refreshing} onClick={refresh}
-        title="后台去金蝶按发票号找凭证：已经对上的成批核实，没对上的一张张查；查的时候台账照常用">{refreshLabel || '刷新全部金蝶凭证'}</button>}
+        title="去金蝶按发票号找凭证：一次查一批，十几秒；查的时候台账照常用">{refreshLabel || '刷新全部金蝶凭证'}</button>}
       <a className="btn" href={exportUrl} title={total ? `按当前条件导出 ${total} 张` : '按当前条件导出'}>导出 Excel</a>
     </div>
   )
 }
 
-function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
+// 勾了几张：这一行变绿，只算勾上的（V2.975）。作废的不能勾；拆分票按本单分摊额算（和下面合计一个口径）
+function CheckedBar({ rows, onClear }) {
+  const share = r => (r.split && r.alloc != null && r.total) ? r.alloc / r.total : 1
+  const sum = k => rows.reduce((a, r) => a + (Number(r[k]) || 0) * share(r), 0)
+  const ded = rows.reduce((a, r) => a + ((r.deductible === true || r.deductible === 1) ? (Number(r.tax) || 0) * share(r) : 0), 0)
+  return <div className="inv-lg-overview inv-lg-checked" role="status">
+    <span>已勾选 <b>{rows.length}</b> 张</span>
+    <span>价税合计 <b>{money(sum('total'))}</b></span>
+    <span>税额 <b>{money(sum('tax'))}</b></span>
+    <span title="会计判了可抵扣的票的税额（铁路客票票面没有税额，不在里面）">可抵扣税额 <b>{money(ded)}</b></span>
+    <button type="button" className="inv-lk" onClick={onClear}>清掉勾选</button>
+  </div>
+}
+
+function LedgerTable({ rows, sum, total, selId, onPick, withVoid, checked, onCheck, onCheckAll }) {
+  const pageIds = rows.filter(r => r.review !== 'void').map(r => r.id)
+  const allOn = pageIds.length > 0 && pageIds.every(id => checked.has(id))
   return (
     <div className="tbl-wrap">
       <table className="inv-lg-tbl">
         <thead><tr>
+          <th className="inv-lg-ckcol"><input type="checkbox" checked={allOn} aria-label="勾选这一页" onChange={e => onCheckAll(rows.filter(r => r.review !== 'void'), e.target.checked)} /></th>
           <th>开票日期</th><th>主体</th><th>票种</th><th>发票号码</th><th>销方</th>
           <th className="num">金额</th><th className="num">税额</th><th className="num">价税合计</th>
           <th>验真</th><th>抵扣</th><th>审批单</th><th>登记 / 审核</th><th>纸质票</th><th>做账 / 凭证</th>
@@ -177,8 +205,10 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
             const f = r.folder || {}
             const isVoid = r.review === 'void'
             return (
-              <tr key={r.id} className={'row' + (r.id === selId ? ' on' : '') + (isVoid ? ' void' : '')} tabIndex={0}
+              <tr key={r.id} className={'row' + (r.id === selId ? ' on' : '') + (isVoid ? ' void' : '') + (checked.has(r.id) ? ' ck' : '')} tabIndex={0}
                 onClick={() => onPick(r)} onKeyDown={e => { if (e.key === 'Enter') onPick(r) }}>
+                <td className="inv-lg-ckcol" onClick={e => e.stopPropagation()}>
+                  {!isVoid && <input type="checkbox" checked={checked.has(r.id)} aria-label={'勾选 ' + (r.number || '')} onChange={e => onCheck(r, e.target.checked)} />}</td>
                 <td className="mono">{r.date || '—'}</td>
                 <td className="inv-lg-buyer" title={[r.buyerName, r.buyerTaxId].filter(Boolean).join('　') || undefined}>{r.buyerName || '未识别主体'}</td>
                 <td className="inv-lg-type" title={typeText(r)}>{typeShort(r)}{isVoid && <span className="inv-badge err inv-lg-ml">已作废</span>}</td>
@@ -203,7 +233,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
         </tbody>
         {rows.length > 0 && (
           <tfoot><tr className="inv-lg-sum">
-            <td colSpan={5}>合计（当前条件共 {total} 张{withVoid ? '；作废的票只列出来，不计入合计' : '，不含作废'}）</td>
+            <td colSpan={6}>合计（当前条件共 {total} 张{withVoid ? '；作废的票只列出来，不计入合计' : '，不含作废'}）</td>
             <td className="num">{money(sum?.amount)}</td>
             <td className="num">{money(sum?.tax)}</td>
             <td className="num">{money(sum?.total)}</td>
@@ -412,9 +442,15 @@ function QueryTab({ can, flash }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [sel, setSel] = useState(null)
+  // 勾选几张看合计（V2.975）：跨页记着，条件一改就清掉；作废的不能勾
+  const [checked, setChecked] = useState(() => new Map())
+  const onCheck = (r, on) => setChecked(m => { const n = new Map(m); if (on) n.set(r.id, r); else n.delete(r.id); return n })
+  const onCheckAll = (rs, on) => setChecked(m => { const n = new Map(m); rs.forEach(r => { if (on) n.set(r.id, r); else n.delete(r.id) }); return n })
   const [voidNote, setVoidNote] = useState('')  // 作废后要去税局做的动作（转出/撤销勾选）：常驻，人点了才收起
   const seq = useRef(0)                         // 只认最后一次请求的结果（连打筛选时旧请求晚到会覆盖新结果）
   const params = toParams(f)
+  const paramKey = JSON.stringify(params)
+  useEffect(() => { setChecked(new Map()) }, [paramKey])
   const key = JSON.stringify(params)
 
   const load = useCallback(async (p) => {
@@ -423,7 +459,7 @@ function QueryTab({ can, flash }) {
     try {
       const r = await invLedger({ ...JSON.parse(key), page: p, size: PAGE_SIZE })
       if (my !== seq.current) return
-      setData({ total: n0(r?.total), sum: r?.sum || {}, rows: asList(r?.rows), subjects: asList(r?.subjects) })
+      setData({ total: n0(r?.total), sum: r?.sum || {}, rows: asList(r?.rows), subjects: asList(r?.subjects), reviewers: asList(r?.reviewers) })
     } catch (e) {
       if (my === seq.current) setErr(errText(e))
     } finally {
@@ -469,9 +505,13 @@ function QueryTab({ can, flash }) {
 
   return (
     <>
-      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects}
+      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects} reviewers={data?.reviewers}
         refreshing={!!(job && job.running)} refreshLabel={refreshLabel} refresh={can.auditAct ? startRefresh : undefined} />
-      {data && <div className="inv-lg-overview"><span>当前条件 <b>{data.total}</b> 张</span><span>价税合计 <b>{money(data.sum.total)}</b></span><span>税额 <b>{money(data.sum.tax)}</b></span><span className="inv-muted">未匹配凭证不代表未做账；金额合计不含作废票。</span></div>}
+      {data && (checked.size > 0
+        ? <CheckedBar rows={[...checked.values()]} onClear={() => setChecked(new Map())} />
+        : <div className="inv-lg-overview"><span>当前条件 <b>{data.total}</b> 张</span><span>价税合计 <b>{money(data.sum.total)}</b></span><span>税额 <b>{money(data.sum.tax)}</b></span>
+          <span title="会计判了可抵扣的票的税额（铁路客票票面没有税额，不在里面）">可抵扣税额 <b>{money(data.sum.deductTax)}</b></span>
+          <span className="inv-muted">勾选几张，这一行变绿、只算勾上的；未匹配凭证不代表未做账；金额合计不含作废票。</span></div>)}
 
       {voidNote && <div className="inv-lg-warn inv-lg-voidnote" role="alert">
         <span>{voidNote}</span>
@@ -484,7 +524,8 @@ function QueryTab({ can, flash }) {
           {data && rows.length === 0 && !busy && (
             <div className="inv-lg-empty">没有符合条件的票。只有审核通过的票才会进台账{f.withVoid ? '，换个条件再试试。' : '；要看作废的票，勾上「含作废」。'}</div>
           )}
-          {rows.length > 0 && <LedgerTable rows={rows} sum={data.sum} total={data.total} selId={sel?.id} onPick={setSel} withVoid={f.withVoid} />}
+          {rows.length > 0 && <LedgerTable rows={rows} sum={data.sum} total={data.total} selId={sel?.id} onPick={setSel} withVoid={f.withVoid}
+            checked={checked} onCheck={onCheck} onCheckAll={onCheckAll} />}
           {data && <Pager page={page} total={data.total} onPage={goPage} busy={busy} />}
           {busy && data && <div className="inv-muted inv-lg-busy"><span className="inv-spin" /> 正在刷新…</div>}
         </div>

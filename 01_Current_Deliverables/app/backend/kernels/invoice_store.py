@@ -1267,13 +1267,14 @@ def ledger_query(e, filters, page=1, size=50):
     cols = [FOLDER.c[c].label("f__" + c) for c in _LEDGER_FOLDER_COLS]
     with e.connect() as cx:
         total = cx.execute(select(func.count()).select_from(src).where(*conds)).scalar_one()
-        s_amount, s_tax, s_total = cx.execute(select(func.sum(_split_scaled(ITEM.c.amount)),
-                                                     func.sum(_split_scaled(ITEM.c.tax)), func.sum(_split_share()))
-                                              .select_from(src).where(*sum_conds)).one()
+        s_amount, s_tax, s_total, s_ded = cx.execute(select(func.sum(_split_scaled(ITEM.c.amount)),
+                                                            func.sum(_split_scaled(ITEM.c.tax)), func.sum(_split_share()),
+                                                            func.sum(case((ITEM.c.deductible == 1, _split_scaled(ITEM.c.tax)), else_=0)))
+                                                     .select_from(src).where(*sum_conds)).one()
         rows = [_split_prefixed(_row(r), "f__", "folder") for r in cx.execute(
             select(ITEM, *cols).select_from(src).where(*conds)
             .order_by(ITEM.c.issue_date.desc(), ITEM.c.id.desc()).offset(off).limit(size))]
-    return total, {"amount": _f(s_amount), "tax": _f(s_tax), "total": _f(s_total)}, rows
+    return total, {"amount": _f(s_amount), "tax": _f(s_tax), "total": _f(s_total), "deductTax": _f(s_ded) or 0.0}, rows
 
 
 def ledger_iter(e, filters, cap=100000, chunk=500):
@@ -1353,6 +1354,13 @@ def _ledger_conds(filters):
         conds.append(book_status == booked)
         if booked == "unknown":          # 普票不入账，不算「未匹配 / 待刷新」
             conds.append(not_(no_book_cond()))
+    bm = g("book_month", "bookMonth")    # 做账月份：系统在金蝶对上的凭证在这个月（一张票挂几个月的凭证，哪个月都算）
+    if bm and re.fullmatch(r"\d{4}-\d{2}", bm):
+        fj = func.coalesce(ITEM.c.flags_json, "")
+        conds.append(or_(fj.like('%%"period": "%s%%' % bm), fj.like('%%"period":"%s%%' % bm)))
+    rv = g("reviewer")                   # 审核人：谁审核通过的
+    if rv:
+        conds.append(ITEM.c.review_by == rv)
     oth = g("other")                     # 票总管：在不在票总管那边（记了「票总管已有」，或票号在传过的票总管清单里且没被人取消）
     if oth in ("yes", "no"):
         in_other = or_(ITEM.c.deduct_status == "other",

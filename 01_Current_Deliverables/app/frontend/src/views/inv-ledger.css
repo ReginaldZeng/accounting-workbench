@@ -192,3 +192,9 @@
 .inv-lg-tl-h .inv-muted{ font-weight:400; }
 .inv-lg-tl-acts{ display:flex; gap:12px; align-items:center; }
 .inv-lg-cross{ font-style:normal; font-weight:500; font-size:11px; margin-left:6px; padding:0 6px; border-radius:999px; border:1px solid var(--amber-line); background:var(--amber-bg); color:var(--amber); }
+.inv-lg-checked{ background:var(--green-bg); border-color:var(--green-line); color:var(--green); }
+.inv-lg-checked b{ color:var(--green); }
+.inv-lg-ckcol{ width:28px; text-align:center; }
+.inv-lg-tbl tr.ck td{ background:var(--green-bg); }
+.inv-lg-more{ align-self:center; white-space:nowrap; }
+.inv-lg-more.on{ font-weight:600; }

@@ -1808,6 +1808,22 @@ class InvoiceBooksApiTests(unittest.TestCase):
         book(a, "2023-04", 3); book(b, "2023-04", 1); book(c, "2023-03", 7)
         url, rng = "/api/inv/deduct/tick/prepare", {"from": "2023-03-01", "to": "2023-04-30", "subject": TID}
         self.assertEqual(self.post(url, "acct", dict(rng, bookMonth="6月")).status_code, 400)
+        # V2.975 台账筛选「做账月份」「审核人」＋合计里的可抵扣税额
+        lg = lambda qs: self.ok(self.get("/api/inv/ledger?size=500&" + qs, "acct"))
+        ids4 = {r["id"] for r in lg("bookMonth=2023-04")["rows"]}
+        self.assertTrue({a, b} <= ids4)
+        self.assertNotIn(c, ids4)
+        self.assertNotIn(d, ids4)
+        self.assertEqual(self.get("/api/inv/ledger?bookMonth=4月", "acct").status_code, 400)
+        j3 = lg("bookMonth=2023-03")
+        self.assertIn(c, {r["id"] for r in j3["rows"]})
+        rv = self.item(a)["review_by"]
+        jr = lg("reviewer=" + rv)
+        self.assertIn(rv, jr["reviewers"])
+        self.assertIn(a, {r["id"] for r in jr["rows"]})
+        self.assertEqual({r["id"] for r in lg("reviewer=没有这个人")["rows"]}, set())
+        self.assertIn("deductTax", j3["sum"])
+        self.assertGreater(j3["sum"]["deductTax"], 0)
         # 不筛做账月份：照旧四张都进
         self.assertEqual(self.ok(self.post(url, "acct", rng))["summary"]["rows"], 4)
         # 4 月的清单：a、b 进；c 是别的月做账的、d 还没做账，各写一条原因

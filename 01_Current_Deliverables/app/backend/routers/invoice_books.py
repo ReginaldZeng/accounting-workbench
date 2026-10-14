@@ -261,12 +261,13 @@ def _tmp_meta(token, kind):
 def _ledger_filters(qp):
     """查询参数 → (store.ledger_query 的 filters, 错误原因)。日期统一成 YYYY-MM-DD。"""
     f = {}
-    for k in ("q", "invType", "verify", "deduct", "seller", "kind", "booked", "subject", "month", "paper", "other"):
+    for k in ("q", "invType", "verify", "deduct", "seller", "kind", "booked", "subject", "month", "paper", "other", "bookMonth", "reviewer"):
         v = inv._s(qp.get(k), 100)
         if v:
             f[k] = v
-    if f.get("month") and not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", f["month"]):
-        return None, "月份格式不正确（YYYY-MM）"
+    for k in ("month", "bookMonth"):
+        if f.get(k) and not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", f[k]):
+            return None, "月份格式不正确（YYYY-MM）"
     if f.get("paper") and f["paper"] not in ("received", "missing"):
         return None, "纸质票状态不正确"
     for k in ("from", "to"):
@@ -357,7 +358,8 @@ def _ledger_page(filters, page, size):
         v["folder"] = _folder_brief(r.get("folder"))
     with E().connect() as cx:
         subjects = [x for x in cx.execute(select(S.ITEM.c.buyer_name).where(S._item_active(), S.ITEM.c.review.in_(("approved", "void")), S.ITEM.c.buyer_name.isnot(None), S.ITEM.c.buyer_name != "").distinct().order_by(S.ITEM.c.buyer_name)).scalars()]
-    return total, sums, views, subjects
+        reviewers = [x for x in cx.execute(select(S.ITEM.c.review_by).where(S._item_active(), S.ITEM.c.review.in_(("approved", "void")), S.ITEM.c.review_by.isnot(None), S.ITEM.c.review_by != "").distinct().order_by(S.ITEM.c.review_by)).scalars()]
+    return total, sums, views, subjects, reviewers
 
 
 def _bookkeeping_body(body):
@@ -414,8 +416,8 @@ async def ledger_list(request: Request):
     if msg:
         return err(msg, 400)
     page, size = _page_args(request, 50, 500)
-    total, sums, views, subjects = await run_in_threadpool(_ledger_page, filters, page, size)
-    return {"ok": True, "total": total, "sum": sums, "rows": views, "page": page, "size": size, "subjects": subjects}
+    total, sums, views, subjects, reviewers = await run_in_threadpool(_ledger_page, filters, page, size)
+    return {"ok": True, "total": total, "sum": sums, "rows": views, "page": page, "size": size, "subjects": subjects, "reviewers": reviewers}
 
 
 @router.get("/api/inv/ledger/export")
