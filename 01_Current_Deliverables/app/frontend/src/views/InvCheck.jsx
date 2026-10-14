@@ -6,7 +6,8 @@
 // 手机扫的记到同一次点验上：这里每 2 秒重读一次，手机扫到的那一行跟着变绿。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invCheckStart, invCheckCurrent, invCheckGet, invCheckScan, invCheckMark, invCheckClose, invCheckExportUrl, invAuditItemsApprove,
+  invCheckStart, invCheckStartList, invCheckCurrent, invCheckGet, invCheckScan, invCheckMark, invCheckClose, invCheckExportUrl, invAuditItemsApprove,
+  invTickLists,
 } from '../api.js'
 import { money, fmtTime, usePoll, Modal, ScanInput } from './invShared.jsx'
 import './inv-check.css'
@@ -31,28 +32,72 @@ function beep(ok) {
   } catch { /* 没声音不影响点验 */ }
 }
 
+// 念出来（整理纸质票时不用看屏幕）：确认 / 重复 / 9 月的 / 还没做账 / 没有这张。浏览器不给念就只有提示音
+function speak(text) {
+  try {
+    if (!text || !window.speechSynthesis || !window.SpeechSynthesisUtterance) return
+    const u = new window.SpeechSynthesisUtterance(text)
+    u.lang = 'zh-CN'; u.rate = 1.3
+    window.speechSynthesis.cancel(); window.speechSynthesis.speak(u)
+  } catch { /* 念不了不影响点验 */ }
+}
+
 // ───────────────────────── 开始：勾要对的票夹 ─────────────────────────
 
 function CheckStart({ candidates, preset, entry, onClose, onStarted }) {
   const rows = candidates || []
+  // 两种对法：选票夹（这几个票夹里的票）/ 选一份认证清单（这个月要认证的票，按凭证排）
+  const [mode, setMode] = useState(rows.length ? 'folders' : 'list')
+  const [lists, setLists] = useState(null)
+  const [listId, setListId] = useState(null)
+  useEffect(() => {
+    let live = true
+    invTickLists().then(r => { if (live) { const l = Array.isArray(r?.rows) ? r.rows : []; setLists(l); if (l.length) setListId(x => x || l[0].id) } }).catch(() => { if (live) setLists([]) })
+    return () => { live = false }
+  }, [])
   const [sel, setSel] = useState(() => new Set((preset && preset.length ? preset : rows.map(r => r.id)).filter(id => rows.some(r => r.id === id))))
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const all = rows.length > 0 && sel.size === rows.length
   const toggle = (id, v) => setSel(s => { const n = new Set(s); if (v) n.add(id); else n.delete(id); return n })
   const go = async () => {
+    if (mode === 'list') {
+      if (!listId) { setErr('先选一份认证清单'); return }
+      setBusy(true); setErr('')
+      try { onStarted(await invCheckStartList(listId, entry)) } catch (e) { setErr(errText(e)); setBusy(false) }
+      return
+    }
     if (!sel.size) { setErr('先勾上要对的票夹'); return }
     setBusy(true); setErr('')
     try { onStarted(await invCheckStart([...sel], entry)) } catch (e) { setErr(errText(e)); setBusy(false) }
   }
   return (
-    <Modal title="对纸质票：选要对的票夹" onClose={onClose} width={620}
+    <Modal title="对纸质票：选要对的范围" onClose={onClose} width={620}
       footer={<>
-        <span className="inv-muted">已选 {sel.size} 个</span>
+        <span className="inv-muted">{mode === 'list' ? '' : `已选 ${sel.size} 个`}</span>
         <button type="button" className="btn" onClick={onClose}>取消</button>
-        <button type="button" className="btn primary" disabled={busy || !sel.size} onClick={go}>{busy ? '正在开始…' : '开始对'}</button>
+        <button type="button" className="btn primary" disabled={busy || (mode === 'list' ? !listId : !sel.size)} onClick={go}>{busy ? '正在开始…' : '开始对'}</button>
       </>}>
-      <div className="inv-ck-start">
+      <div className="inv-ck-modes" role="tablist">
+        <button type="button" role="tab" aria-selected={mode === 'folders'} className={mode === 'folders' ? 'on' : ''} onClick={() => { setMode('folders'); setErr('') }}>选票夹</button>
+        <button type="button" role="tab" aria-selected={mode === 'list'} className={mode === 'list' ? 'on' : ''} onClick={() => { setMode('list'); setErr('') }}>选认证清单（按做账月份）</button>
+      </div>
+      {mode === 'list' && <div className="inv-ck-start">
+        <div className="inv-muted">对着一份导出过的认证清单过纸质票：清单里的念「确认」；不在清单里的会念它是哪个月做账的（「9 月的」）或「还没做账」，好分到那个月那一摞。
+          清单在 发票台账 › 抵扣勾选 › 方式一 导出。</div>
+        {lists === null ? <div className="inv-ck-empty">正在取清单…</div>
+          : !lists.length ? <div className="inv-ck-empty">还没有导出过认证清单。先到 发票台账 › 抵扣勾选 › 方式一，选做账月份导出一份。</div>
+          : <div className="inv-ck-pick">
+            {lists.map(l => <label key={l.id} className={'inv-ck-pickrow' + (listId === l.id ? ' on' : '')}>
+              <input type="radio" name="inv-ck-list" checked={listId === l.id} onChange={() => setListId(l.id)} />
+              <span className="inv-ck-pt" title={l.name}>{l.name}</span>
+              <span className="inv-muted">{l.by} · {fmtTime(l.at)}</span>
+              <b className="inv-num">{l.rows} 张</b>
+            </label>)}
+          </div>}
+        {err && <div className="inv-ck-err">{err}</div>}
+      </div>}
+      {mode === 'folders' && <div className="inv-ck-start">
         <div className="inv-muted">勾上要对的票夹，然后把手上的纸质票连续扫一遍（电脑扫码枪、手机都行）。扫到的那一行变绿；不在这些票夹里的票只提醒，不登记。
           {entry === 'audit' ? '这里列的是左边队列里现在看得到的票夹。' : '这里列的是你最近经手的票夹。'}</div>
         {!rows.length ? <div className="inv-ck-empty">现在没有可以对的票夹。</div> : <>
@@ -67,7 +112,7 @@ function CheckStart({ candidates, preset, entry, onClose, onStarted }) {
           </div>
         </>}
         {err && <div className="inv-ck-err">{err}</div>}
-      </div>
+      </div>}
     </Modal>
   )
 }
@@ -89,6 +134,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
   const onScan = async (code) => {
     try {
       const r = (await invCheckScan(cid, code)) || {}
+      speak(r.say)
       if (r.result === 'ok') { beep(true); setAlertMsg(null); setFlashId(r.item && r.item.id) }
       else if (r.result === 'dup') { beep(false); setAlertMsg({ tone: 'warn', text: r.msg || '这张扫过了' }); setFlashId(r.item && r.item.id) }
       else { beep(false); setAlertMsg({ tone: r.result === 'unknown' || r.result === 'closed' ? 'warn' : 'err', text: r.msg || '没对上' }) }
@@ -138,7 +184,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
   const pct = st.total ? Math.round(st.hit * 100 / st.total) : 0
   const lastStr = (v.strangers || []).slice(-3).reverse()
   return (
-    <Modal title="对纸质票" onClose={onClose} width={1080}
+    <Modal title={v.check.listName ? '对纸质票 · ' + v.check.listName : '对纸质票'} onClose={onClose} width={1080}
       footer={<>
         <span className="inv-muted">{open ? '关掉这个窗口不会结束点验：再点「对纸质票」可以接着对。' : `这次点验已经收了（${fmtTime(v.check.closedAt)}）。`}</span>
         <a className="btn" href={invCheckExportUrl(cid, 'missing')}>导出没扫到的</a>
@@ -149,7 +195,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
       </>}>
       <div className="inv-ck">
         <div className="inv-ck-bar">
-          <span>选中 <b>{v.folders.length}</b> 个票夹 · 共 <b>{st.total}</b> 张票</span>
+          <span>{v.check.listId ? <>这份清单共 <b>{st.total}</b> 张票，按凭证排</> : <>选中 <b>{v.folders.length}</b> 个票夹 · 共 <b>{st.total}</b> 张票</>}</span>
           <span className="inv-ck-prog"><i style={{ width: pct + '%' }} /></span>
           <b className="inv-num inv-ck-num">扫到 {st.hit} / {st.total}</b>
           <button type="button" className="btn" onClick={() => setOnlyMiss(x => !x)}>{onlyMiss ? '看全部' : `只看没扫到的（${st.left}）`}</button>
@@ -165,18 +211,19 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
         </div>}
         <div className="inv-ck-scroll">
           <table className="inv-ck-tbl">
-            <thead><tr><th style={{ width: 34 }} /><th>发票号码</th><th>销方</th><th className="r">价税合计</th><th>票种</th><th>扫到的时间 / 谁扫的</th><th style={{ width: 70 }} /></tr></thead>
+            <thead><tr><th style={{ width: 34 }} /><th>凭证</th><th>发票号码</th><th>销方</th><th className="r">价税合计</th><th>票种</th><th>扫到的时间 / 谁扫的</th><th style={{ width: 70 }} /></tr></thead>
             <tbody>
               {v.folders.map(f => {
                 const list = v.items.filter(i => i.folderId === f.id)
                 const show = list.filter(i => !onlyMiss || !i.hit)
                 if (!show.length) return null
                 return <React.Fragment key={f.id}>
-                  <tr className="grp"><td colSpan={7}>{f.payee || f.title || ('票夹 #' + f.id)} · {money(f.amount)}
+                  <tr className="grp"><td colSpan={8}>{f.isList ? f.title : <>{f.payee || f.title || ('票夹 #' + f.id)} · {money(f.amount)}</>}
                     {SRC_CN[f.source] ? ' · ' + SRC_CN[f.source] : ''}{f.ownerName ? ' · 归' + f.ownerName : ''}
                     <span className="inv-ck-cnt">{f.hit} / {f.total}</span></td></tr>
                   {show.map(i => <tr key={i.id} id={'inv-ck-row-' + i.id} className={(i.hit ? 'hit' : '') + (flashId === i.id ? ' flash' : '')}>
                     <td>{i.hit ? '✓' : ''}</td>
+                    <td className="inv-ck-vno">{i.voucher || <span className="inv-muted">还没做账</span>}</td>
                     <td className="inv-num">{i.number || '（没有号码）'}</td>
                     <td>{i.sellerName}</td>
                     <td className="inv-num r">{money(i.total)}</td>
@@ -187,13 +234,15 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
                   </tr>)}
                 </React.Fragment>
               })}
-              {!v.items.length && <tr><td colSpan={7} className="inv-ck-empty">选中的票夹里没有发票。</td></tr>}
+              {!v.items.length && <tr><td colSpan={8} className="inv-ck-empty">{v.check.listId ? '这份清单里的票都不在了。' : '选中的票夹里没有发票。'}</td></tr>}
             </tbody>
           </table>
         </div>
         {lastStr.length > 0 && <div className="inv-ck-str">
           <b>扫到过 {v.stats.strangers} 张不相干的票</b>（没有登记，也没有挪）：
-          {lastStr.map((x, i) => <div key={i}>{x.kind === 'other'
+          {lastStr.map((x, i) => <div key={i}>{x.kind === 'other' && v.check.listId
+            ? `不在这份清单里：${x.number || ''} · ${money(x.total)} · ${x.bookMonth ? x.bookMonth + ' 做账的（' + (x.voucher || '') + '）' : '还没做账'}`
+            : x.kind === 'other'
             ? `不在选中的票夹里：${x.number || ''} · ${money(x.total)} · 在「${x.payee || x.folderTitle || '票夹 #' + x.folderId}」里${x.ownerName ? '（归' + x.ownerName + '审）' : ''}`
             : `系统里没有这张票：${x.number || ''}${x.total !== null && x.total !== undefined ? ' · ' + money(x.total) : ''}（要先收票）`}</div>)}
         </div>}
@@ -205,16 +254,29 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
 // ───────────────────────── 入口按钮（收票工作台、发票审核共用） ─────────────────────────
 
 /** candidates＝可以对的票夹 [{id,title,payee,amount,owner,invoices}]；preset＝默认勾上的 id；entry＝desk|audit；canAudit＝有没有审核权限 */
-export default function PaperCheckButton({ candidates, preset, entry, canAudit, onChanged }) {
+export default function PaperCheckButton({ candidates, preset, entry, canAudit, onChanged, listId, label }) {
   const [cur, setCur] = useState(null)        // 正在对的那一次（接着对）
   const [starting, setStarting] = useState(false)
   const [view, setView] = useState(null)
+  const [lerr, setLerr] = useState('')
   const mounted = useRef(true)
   const look = useCallback(() => {
     invCheckCurrent().then(r => { if (mounted.current) setCur(r && r.check ? r : null) }).catch(() => { /* 取不到不影响别的 */ })
   }, [])
   useEffect(() => { mounted.current = true; look(); return () => { mounted.current = false } }, [look])
   const close = () => { setView(null); look() }
+  // 给了 listId（发票台账里某一份认证清单那一行的按钮）：点了直接对着这份清单开始，不用再选
+  if (listId) {
+    const go = async () => {
+      setLerr('')
+      try { const r = (cur && cur.check.listId === listId) ? cur : await invCheckStartList(listId, entry); setCur(r); setView(r) } catch (e) { setLerr(errText(e)) }
+    }
+    return <>
+      <button type="button" className="inv-ck-lk" onClick={go}>{cur && cur.check.listId === listId ? `接着对（${cur.stats.hit}/${cur.stats.total}）` : (label || '对纸质票')}</button>
+      {lerr && <span className="inv-ck-err"> {lerr}</span>}
+      {view && <CheckPanel first={view} entry={entry} canAudit={canAudit} onClose={close} onChanged={onChanged} />}
+    </>
+  }
   return <>
     <button type="button" className="btn" onClick={() => (cur ? setView(cur) : setStarting(true))}
       title="选中几个票夹，把手上的纸质票连续扫一遍，看是不是一样">

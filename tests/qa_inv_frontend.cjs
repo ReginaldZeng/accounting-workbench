@@ -897,7 +897,7 @@ test('对纸质票（电脑）：勾票夹开始 → 扫码枪扫到的那一行
   const { page, ctx } = await open(browser, B, api)
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
   await page.getByRole('button', { name: '对纸质票', exact: true }).click()
-  const start = page.locator('.inv-modal', { hasText: '选要对的票夹' })
+  const start = page.locator('.inv-modal', { hasText: '选要对的范围' })
   await start.locator('.inv-ck-pickrow').first().waitFor()
   assert.equal(await start.locator('.inv-ck-pickrow input:checked').count(), 1, '默认把列表里的票夹都勾上')
   await start.getByRole('button', { name: '开始对' }).click()
@@ -964,6 +964,90 @@ test('对纸质票（手机）：电脑上在对时出现「连续扫纸质票�
   assert.deepEqual(await page.evaluate(() => window.__said), ['确认', '重复', '不在这里'])
   assert.deepEqual(calls.filter(c => c.path === '/api/inv/m/check/scan').map(c => c.body.code), ['C-OK', 'C-OK', 'C-OTHER'])
   assert.match(await page.locator('.inv-ph-chk-h').innerText(), /已扫到 1 \/ 5/)
+  await ctx.close()
+})
+
+test('对纸质票·选认证清单：对着一份清单开始，按凭证排；清单里的念「确认」，别的月做账的念「9 月的」并写明是哪张凭证', async (browser, B) => {
+  const st = auditSt(OWN_ME)
+  const items = [
+    { id: 201, folderId: 0, kind: 'invoice', typeLabel: '专票', number: 'N201', sellerName: '销方甲', total: 100, review: 'approved', voucher: '深圳星期零-10-1#', bookMonth: '2026-10', hit: null },
+    { id: 202, folderId: 0, kind: 'invoice', typeLabel: '专票', number: 'N202', sellerName: '销方乙', total: 200, review: 'approved', voucher: '深圳星期零-10-8#', bookMonth: '2026-10', hit: null },
+  ]
+  const ck = { started: null, strangers: [] }
+  const view = () => {
+    const hit = items.filter(i => i.hit).length
+    return { ok: true, check: ck.started ? { id: 9, open: true, by: '测试会计', at: '2026-10-31 09:00:00', closedAt: '', entry: 'audit', listId: 5, listName: '深圳星期零 2026-10 认证清单' } : null,
+      folders: [{ id: 0, title: '深圳星期零 2026-10 认证清单', isList: true, total: items.length, hit }], items, strangers: ck.strangers,
+      stats: { total: items.length, hit, left: items.length - hit, strangers: ck.strangers.length } }
+  }
+  const base = auditApi(st)
+  const api = (c) => {
+    if (c.path === '/api/inv/ticklists') return { ok: true, rows: [{ id: 5, name: '深圳星期零 2026-10 认证清单', rows: 2, bookMonth: '2026-10', by: '测试会计', at: '2026-10-31 08:50:00', tax: 30 }] }
+    if (c.path === '/api/inv/check/current') return ck.started ? view() : { ok: true, check: null }
+    if (c.path === '/api/inv/check/start') { ck.started = c.body; return view() }
+    if (c.path === '/api/inv/check/9') return view()
+    if (c.path === '/api/inv/check/9/scan') {
+      if (c.body.code === 'N202') { items[1].hit = { at: '2026-10-31 09:01:00', by: '测试会计', via: 'scanner', viaLabel: '扫码枪' }; return { ok: true, result: 'ok', say: '确认', msg: '对上了：N202', item: items[1] } }
+      ck.strangers.push({ kind: 'other', number: 'N900', total: 66, bookMonth: '2026-09', voucher: '深圳星期零-9-230#' })
+      return { ok: true, result: 'other', say: '9 月的', msg: '不在这份清单里：N900 这张是 2026-09 做账的（深圳星期零-9-230#）。没有登记，也没有挪' }
+    }
+    return base(c)
+  }
+  const init = () => {
+    window.__said = []
+    window.SpeechSynthesisUtterance = function (t) { this.text = t }
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { cancel() {}, speak(u) { window.__said.push(u.text) } } })
+  }
+  const { page, ctx } = await open(browser, B, api, { init })
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.getByRole('button', { name: '对纸质票', exact: true }).click()
+  const start = page.locator('.inv-modal', { hasText: '选要对的范围' })
+  await start.getByRole('tab', { name: '选认证清单（按做账月份）' }).click()
+  await start.locator('.inv-ck-pickrow', { hasText: '深圳星期零 2026-10 认证清单' }).waitFor()
+  await start.getByRole('button', { name: '开始对' }).click()
+  const dlg = page.locator('.inv-modal').filter({ has: page.locator('.inv-ck') })
+  await dlg.getByText('对纸质票 · 深圳星期零 2026-10 认证清单').waitFor()
+  assert.deepEqual(ck.started, { listId: 5, entry: 'audit' })
+  assert.match(await dlg.locator('#inv-ck-row-201').innerText(), /深圳星期零-10-1#/, '每行写着凭证')
+  const scan = async (code) => { const box = dlg.locator('.inv-ck-scan input'); await box.fill(code); await box.press('Enter') }
+  await scan('N202')
+  await dlg.locator('#inv-ck-row-202.hit').waitFor()
+  await scan('N900')
+  await dlg.locator('.inv-ck-alert.err', { hasText: '2026-09 做账的' }).waitFor()
+  await dlg.locator('.inv-ck-str', { hasText: '深圳星期零-9-230#' }).waitFor()
+  assert.deepEqual(await page.evaluate(() => window.__said), ['确认', '9 月的'], '电脑上也念出来')
+  await ctx.close()
+})
+
+test('抵扣勾选·方式一：清单按做账月份出（请求里带 bookMonth）；预览写凭证；导出过的认证清单列出来、能重新下载、能对纸质票', async (browser, B) => {
+  const st = { rows: [], logs: [] }
+  const posts = []
+  const base = ledgerApi(st)
+  const api = (c) => {
+    if (c.path === '/api/inv/deduct/tick/prepare') {
+      posts.push(c.body)
+      return { ok: true, token: 'TOK', buyers: [{ taxId: '91440300X', name: '深圳市星期零食品科技有限公司', count: 1 }],
+        summary: { rows: 1, tax: 13.09, amount: 1322, byType: [], warned: 0, marked: 0, skipped: [{ key: 'unbooked', label: '还没做账（系统在金蝶没找到这张票的凭证）', count: 2 }, { key: 'otherMonth', label: '不是这个月做账的（是别的月份的凭证）', count: 1 }] },
+        preview: [{ number: '26952000004308149266', date: '2026-09-28', sellerName: '深圳市禾享国际物流有限公司', taxType: '电子发票(增值税专用发票)', amount: 1322, tax: 13.09, buyerTaxId: '91440300X', marked: false, warn: '', bookMonth: '2026-10', voucher: '深圳星期零-10-8#' }] }
+    }
+    if (c.path === '/api/inv/ticklists') return { ok: true, rows: [{ id: 5, name: '深圳星期零 2026-10 认证清单', rows: 12, bookMonth: '2026-10', by: '测试会计', at: '2026-10-31 08:50:00', tax: 300 }] }
+    if (c.path === '/api/inv/check/current') return { ok: true, check: null }
+    if (c.path === '/api/inv/other') return { ok: true, count: 0 }
+    return base(c)
+  }
+  const { page, ctx } = await open(browser, B, api)
+  await mount(page, 'InvLedger', { user: { name: '测试会计' } })
+  await page.getByRole('tab', { name: '抵扣勾选' }).click()
+  const sec = page.locator('.inv-lg-sec', { hasText: '方式一' })
+  await sec.locator('input[type=month]').fill('2026-10')
+  await sec.getByRole('button', { name: '生成清单' }).click()
+  await sec.getByText('深圳星期零-10-8#').waitFor()
+  assert.equal(posts[0].bookMonth, '2026-10')
+  await sec.locator('.inv-lg-warn', { hasText: '还没做账' }).waitFor()
+  const tl = sec.locator('.inv-lg-tl')
+  await tl.getByText('深圳星期零 2026-10 认证清单').waitFor()
+  assert.equal(await tl.locator('a', { hasText: '重新下载' }).getAttribute('href'), '/api/inv/ticklists/5/download')
+  assert.equal(await tl.getByRole('button', { name: '对纸质票' }).count(), 1)
   await ctx.close()
 })
 

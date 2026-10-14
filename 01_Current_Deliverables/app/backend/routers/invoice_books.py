@@ -1238,10 +1238,84 @@ async def deduct_download(request: Request):
     except OSError:
         return err("文件已过期（只保留 2 小时），请重新拖一次", 400)
     n = await run_in_threadpool(_mark_items, meta.get("yes") or [], u["name"], meta.get("name") or "")
+    if meta.get("tick") and not meta.get("listId"):       # 第一次下载：存成一份认证清单（以后能翻出来、能重新下载、能对着它对纸质票）
+        try:
+            meta["listId"] = await run_in_threadpool(ticklist_save, meta, data, u["name"])
+            _tmp_write(_tmp_path(token, ".json"), json.dumps(meta, ensure_ascii=False).encode("utf-8"))
+        except Exception as ex:                           # 存不上不挡下载
+            print("[发票管家] 认证清单没存上：%s" % ex)
     inv.audit(u, "下载抵扣勾选标注件", meta.get("name") or "", "标「是」%d 张，本次记为已标注 %d 张" % (len(meta.get("yes") or []), n))
     if meta.get("tick"):             # 直接从台账出的税局勾选清单：文件名照税局那份的叫法
         return _xlsx(data, "增值税发票勾选抵扣_%s.xlsx" % _stamp(), "vat_tick_%s.xlsx" % _stamp())
     return _xlsx(data, "抵扣勾选_已标注_%s.xlsx" % _stamp(), "deduct_marked_%s.xlsx" % _stamp())
+
+
+# ── 认证清单：每次从台账导出的税局勾选清单存一份 ──
+# 用户 2026-10-14 定：月末导出一份 Excel，纸质票对着这份清单过一遍。所以每次导出都记下来（inv_batch.kind=ticklist）：
+# 哪个月做账的、哪家主体、哪几张票、谁什么时候导的；原样的 Excel 留一份（inv_uploads/_ticklists/<id>.xlsx，不在取图接口认的路径里）。
+TICKLIST_KIND = "ticklist"
+
+
+def _ticklist_file(bid):
+    d = os.path.join(inv.UPLOAD_DIR, "_ticklists")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "%d.xlsx" % int(bid))
+
+
+def ticklist_name(meta):
+    """清单的名字：孝感星期九 2026-10 认证清单（没筛做账月份的写开票日期范围）。"""
+    who = inv.org_short(meta.get("subjectName")) or meta.get("subjectName") or meta.get("subject") or "全部主体"
+    if meta.get("bookMonth"):
+        return "%s %s 认证清单" % (who, meta["bookMonth"])
+    rng = "%s~%s" % (meta.get("dateFrom") or "不限", meta.get("dateTo") or "不限")
+    return "%s 认证清单（没按做账月份，开票 %s）" % (who, rng)
+
+
+def ticklist_save(meta, data, user):
+    ids = sorted(set(int(i) for i in meta.get("yes") or []))
+    summary = {"bookMonth": meta.get("bookMonth") or "", "subject": meta.get("subject") or "", "subjectName": meta.get("subjectName") or "",
+               "dateFrom": meta.get("dateFrom") or "", "dateTo": meta.get("dateTo") or "", "itemIds": ids,
+               "tax": (meta.get("summary") or {}).get("tax"), "amount": (meta.get("summary") or {}).get("amount")}
+    rows = (meta.get("summary") or {}).get("rows") or len(ids)
+    bid = S.batch_insert(E(), TICKLIST_KIND, ticklist_name(meta), rows, summary, user)
+    with open(_ticklist_file(bid), "wb") as fh:
+        fh.write(data)
+    inv.audit(user, "存认证清单", ticklist_name(meta), "清单#%d，%d 张" % (bid, rows))
+    return bid
+
+
+def ticklist_view(b):
+    sm = b.get("summary_json") if isinstance(b.get("summary_json"), dict) else {}
+    return {"id": b["id"], "name": b.get("name") or "", "rows": int(b.get("rows") or 0), "bookMonth": sm.get("bookMonth") or "",
+            "subject": sm.get("subject") or "", "subjectName": sm.get("subjectName") or "", "tax": sm.get("tax"),
+            "by": b.get("created_by") or "", "at": b.get("created_at") or "", "items": len(sm.get("itemIds") or [])}
+
+
+@router.get("/api/inv/ticklists")
+async def ticklists(request: Request):
+    """导出过的认证清单（最近 60 份）。发票台账的抵扣勾选页、对纸质票选清单时都用。"""
+    u, bad = inv.need(request, (ENTER_LEDGER, inv.ENTER_DESK, inv.ENTER_AUDIT))
+    if bad:
+        return bad
+    rows = await run_in_threadpool(S.batches_list, E(), TICKLIST_KIND, 60)
+    return {"ok": True, "rows": [ticklist_view(b) for b in rows]}
+
+
+@router.get("/api/inv/ticklists/{bid}/download")
+async def ticklist_download(bid: int, request: Request):
+    u, bad = need(request, ENTER_LEDGER, CAP_DEDUCT)
+    if bad:
+        return bad
+    b = S.batch_get(E(), bid)
+    if not b or b.get("kind") != TICKLIST_KIND:
+        return err("没有这份认证清单", 404)
+    try:
+        with open(_ticklist_file(bid), "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return err("这份清单的文件找不到了，请重新导出一次", 404)
+    tag = re.sub(r"[^0-9A-Za-z]", "", (b.get("created_at") or ""))[:12]
+    return _xlsx(data, "增值税发票勾选抵扣_%s.xlsx" % tag, "vat_tick_%s.xlsx" % tag)
 
 
 # ── 过渡期：票总管已有的票 ──
@@ -1477,6 +1551,8 @@ TICK_SKIP_CN = [                      # 没进清单的可抵扣票：页面按�
     ("red", "税局显示已作废/全额红冲"),
     ("partialRed", "部分红冲：有效抵扣税额以税局为准，请用下面「在税局清单上标注」的办法"),
     ("noNumber", "没有发票号码"),
+    ("unbooked", "还没做账（系统在金蝶没找到这张票的凭证：做了账、摘要里带完整发票号，下一轮同步后就会进）"),
+    ("otherMonth", "不是这个月做账的（是别的月份的凭证）"),
 ]
 
 
@@ -1500,7 +1576,9 @@ def _tick_collect(f):
     """台账里该去税局勾选的票 → (rows, skipped{原因: 张数}, buyers[{taxId,name,count}])。
     进清单：审核通过＋可抵扣＋没作废＋税局没显示作废/红冲＋税局还没显示已勾选；之前导出/标注过的默认不带（f.marked 才带）；
     记了「票总管已有」的不带（先按票总管清单把该记的记上，再筛）。
-    f：subject 购方税号（税局按纳税人分别导入，一次出一家）、date_from/date_to 开票日期、marked。
+    f：subject 购方税号（税局按纳税人分别导入，一次出一家）、date_from/date_to 开票日期、marked、
+    book_month 做账月份 'YYYY-MM'（用户 2026-10-14 定：认证跟着做账月走——9 月开、10 月才做账的票进 10 月的清单；
+    给了就只带凭证在这个月的票，还没做账的、别的月做账的不进，各算一条原因）。
     一张票拆到几张单上（同一个查重键多行）只出一行，金额按票面、不按分摊额。buyers 不受 subject 筛选影响（给页面做下拉）。
     行里的 amount＝「金额」列要写的数（口径见上面的说明：专票等价税合计、行程单不含税）。"""
     e = E()
@@ -1508,7 +1586,7 @@ def _tick_collect(f):
     c = S.ITEM.c
     cols = [c.id, c.dup_key, c.number, c.code, c.issue_date, c.inv_type, c.qr_type, c.amount, c.tax, c.total,
             c.buyer_name, c.buyer_tax_id, c.seller_name, c.seller_tax_id, c.review, c.deductible, c.deduct_suggest,
-            c.deduct_status, c.verify, c.verify_note]
+            c.deduct_status, c.verify, c.verify_note, c.flags_json]
     conds = [c.kind == "invoice", _active(), _not_void()]
     if f.get("date_from"):
         conds.append(c.issue_date >= f["date_from"])
@@ -1517,7 +1595,8 @@ def _tick_collect(f):
     groups = {}
     with e.connect() as cx:
         for r in cx.execute(select(*cols).where(*conds).order_by(c.id)).mappings():
-            groups.setdefault(r["dup_key"] or ("#%d" % r["id"]), []).append(dict(r))
+            groups.setdefault(r["dup_key"] or ("#%d" % r["id"]), []).append(S._row(r))
+    want_month = str(f.get("book_month") or "")
     comps = inv.get_settings().get("company") or []
     ours = _ours({"company": comps})
     by_name = {ip.normalize_name(x.get("name")): str(x.get("taxId") or "").strip().upper() for x in comps if x.get("name")}
@@ -1546,6 +1625,13 @@ def _tick_collect(f):
         marked = any(a.get("deduct_status") == "marked" for a in appr)
         if not why and marked and not f.get("marked"):
             why = "marked"
+        months = sorted(m for m in (inv.book_month_of(a) for a in appr) if m)
+        book_month = months[0] if months else ""
+        if not why and want_month:
+            if not book_month:
+                why = "unbooked"
+            elif book_month != want_month:
+                why = "otherMonth"
         if not why:
             b = buyers.setdefault(tid, {"taxId": tid, "name": x.get("buyer_name") or "", "count": 0})
             b["count"] += 1
@@ -1573,7 +1659,8 @@ def _tick_collect(f):
                      "date": x.get("issue_date") or "", "amount": money, "tax": tax, "buyerTaxId": tid,
                      "buyerName": x.get("buyer_name") or "", "sellerName": x.get("seller_name") or "",
                      "sellerTaxId": (x.get("seller_tax_id") or "").strip().upper(), "taxType": tax_tick_type(x),
-                     "marked": marked, "warn": "；".join(warn)})
+                     "marked": marked, "warn": "；".join(warn), "bookMonth": book_month,
+                     "voucher": "、".join(v for a in appr[:1] for v in inv.voucher_labels_of(a))})
     rows.sort(key=lambda r: (r["date"], r["number"]))
     return rows, skipped, sorted(buyers.values(), key=lambda b: (-b["count"], b["taxId"]))
 
@@ -1590,7 +1677,8 @@ def _tick_run(f, user):
                "warned": sum(1 for r in rows if r["warn"]), "marked": sum(1 for r in rows if r["marked"]),
                "skipped": [{"key": k, "label": cn, "count": skipped[k]} for k, cn in TICK_SKIP_CN if skipped.get(k)]}
     res = {"ok": True, "summary": summary, "buyers": buyers, "token": "",
-           "preview": [{k: r[k] for k in ("number", "date", "sellerName", "taxType", "amount", "tax", "buyerTaxId", "marked", "warn")}
+           "preview": [{k: r[k] for k in ("number", "date", "sellerName", "taxType", "amount", "tax", "buyerTaxId", "marked", "warn",
+                                         "bookMonth", "voucher")}
                        for r in rows[:TICK_PREVIEW]]}
     if not rows:
         return res
@@ -1598,7 +1686,11 @@ def _tick_run(f, user):
     token = secrets.token_urlsafe(16)
     name = "台账直接导出勾选清单（%s）" % (f.get("subject") or "全部主体")
     meta = {"kind": "deduct", "tick": True, "user": user, "name": name, "created": time.time(),
-            "yes": sorted({i for r in rows for i in r["ids"]}), "summary": summary}
+            "yes": sorted({i for r in rows for i in r["ids"]}), "summary": summary,
+            # 下载时存成一份「认证清单」用：哪个月、哪家、按什么筛的
+            "bookMonth": f.get("book_month") or "", "subject": f.get("subject") or "",
+            "subjectName": next((b["name"] for b in buyers if b["taxId"] == (f.get("subject") or "")), ""),
+            "dateFrom": f.get("date_from") or "", "dateTo": f.get("date_to") or ""}
     _tmp_write(_tmp_path(token, ".xlsx"), ie.export_tax_tick(rows))
     _tmp_write(_tmp_path(token, ".json"), json.dumps(meta, ensure_ascii=False).encode("utf-8"))
     res.update(token=token, expiresAt=(datetime.now() + timedelta(seconds=TMP_TTL)).strftime("%Y-%m-%d %H:%M:%S"))
@@ -1617,10 +1709,14 @@ async def deduct_tick_prepare(request: Request):
              "date_from": inv._norm_date(body.get("from")), "date_to": inv._norm_date(body.get("to"))}
     except ValueError:
         return err("开票日期写得不对，请按 2026-09-01 这样填", 400)
+    bm = inv._s(body.get("bookMonth"), 7)
+    if bm and not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", bm):
+        return err("做账月份写得不对，请按 2026-10 这样填", 400)
+    f["book_month"] = bm
     res = await run_in_threadpool(_tick_run, f, u["name"])
     s = res["summary"]
-    inv.audit(u, "生成税局勾选清单", f["subject"] or "全部主体", "%d 张，税额 %s；开票日期 %s ~ %s；没进清单：%s" % (
-        s["rows"], inv._money_str(s["tax"]), f["date_from"] or "不限", f["date_to"] or "不限",
+    inv.audit(u, "生成税局勾选清单", f["subject"] or "全部主体", "%d 张，税额 %s；做账月份 %s；开票日期 %s ~ %s；没进清单：%s" % (
+        s["rows"], inv._money_str(s["tax"]), f["book_month"] or "不限", f["date_from"] or "不限", f["date_to"] or "不限",
         "、".join("%s %d" % (x["label"].split("（")[0].split("：")[0], x["count"]) for x in s["skipped"]) or "无"))
     return res
 

@@ -272,6 +272,7 @@ CHECK = Table(
     Column("created_by", String(50)), Column("created_at", String(20)), Column("closed_at", String(20)),
     Column("entry", String(8)),                       # desk 收票工作台进来的 / audit 发票审核进来的
     Column("folder_ids", JT()),                       # 选中的票夹 id，逗号分隔（纯文本；MySQL 下不用裸 TEXT）
+    Column("list_id", Integer),                       # 对着哪一份认证清单（inv_batch.kind=ticklist）；按票夹对的为空
     Index("ix_inv_check_by", "created_by"),
 )
 CHECK_HIT = Table(
@@ -320,7 +321,8 @@ def now_s():
 # 表建好以后才加的栏：create_all 只建不改，老库靠这里补（全是可空栏，不动老数据；回退旧代码时多出来的栏没人读，不碍事）
 ADDED_COLUMNS = {"inv_folder": (("owner_uid", "VARCHAR(64)"), ("owner_account", "VARCHAR(50)"), ("owner_name", "VARCHAR(50)"),
                                 ("owner_at", "VARCHAR(20)"), ("owner_by", "VARCHAR(50)"), ("owner_via", "VARCHAR(12)"),
-                                ("bill_month", "VARCHAR(6)"), ("batch_way", "VARCHAR(8)"), ("auto_split", "INTEGER"))}
+                                ("bill_month", "VARCHAR(6)"), ("batch_way", "VARCHAR(8)"), ("auto_split", "INTEGER")),
+                 "inv_check": (("list_id", "INTEGER"),)}
 
 
 def ensure_columns(e):
@@ -1423,13 +1425,14 @@ def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None, sources=N
 
 # ───────────────────────── 对纸质票 ─────────────────────────
 
-def check_create(e, user, folder_ids, entry):
-    """开一次点验：这个人原来没收的点验顺手收掉（一个人同时只有一次在对，手机扫的才知道记到哪一次）。→ id"""
+def check_create(e, user, folder_ids, entry, list_id=None):
+    """开一次点验：这个人原来没收的点验顺手收掉（一个人同时只有一次在对，手机扫的才知道记到哪一次）。→ id
+    list_id 给了＝对着一份认证清单对（票的范围看清单，不看票夹）。"""
     ts = now_s()
     with e.begin() as cx:
         cx.execute(update(CHECK).where(CHECK.c.created_by == user, CHECK.c.closed_at.is_(None)).values(closed_at=ts))
-    return _insert(e, CHECK, dict(created_by=user, created_at=ts, entry=(entry or "")[:8],
-                                  folder_ids=",".join(str(int(i)) for i in folder_ids)))
+    return _insert(e, CHECK, dict(created_by=user, created_at=ts, entry=(entry or "")[:8], list_id=list_id,
+                                  folder_ids=",".join(str(int(i)) for i in folder_ids or [])))
 
 
 def _check_row(r):

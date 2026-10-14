@@ -21,6 +21,36 @@ router = APIRouter()
 BILL_KINDS = ("invoice", "receipt")
 MAX_FOLDERS = 300
 SAY = {"ok": "确认", "dup": "重复", "other": "不在这里", "none": "没有这张", "unknown": "不是发票码"}
+TICKLIST_KIND = "ticklist"
+
+
+def _list_of(ck):
+    """这次点验对着的认证清单（没有 → None）。"""
+    if not ck.get("list_id"):
+        return None
+    b = S.batch_get(inv.E(), ck["list_id"])
+    return b if b and b.get("kind") == TICKLIST_KIND else None
+
+
+def _list_items(b):
+    """认证清单里的票（没作废、没移除的）→ [行]，按凭证、号码排：纸质票按凭证顺序码放。"""
+    sm = b.get("summary_json") if isinstance(b.get("summary_json"), dict) else {}
+    rows = [i for i in S.items_get(inv.E(), [int(x) for x in sm.get("itemIds") or []]).values()
+            if i.get("kind") in BILL_KINDS and i.get("status") != "removed" and i.get("review") != "void"]
+    return sorted(rows, key=lambda i: (inv.book_month_of(i) or "9999", _vno(i), i.get("number") or ""))
+
+
+def _vno(it):
+    """排序用的凭证号（数字在前）。"""
+    fl = it.get("flags_json") if isinstance(it.get("flags_json"), dict) else {}
+    vs = (fl.get("_bookkeeping") or {}).get("vouchers") or []
+    m = re.search(r"(\d+)$", str((vs[0] if vs else {}).get("number") or ""))
+    return int(m.group(1)) if m else 10 ** 9
+
+
+def _month_say(ym):
+    """'2026-09' → 「9 月的」（给人念的：这张票是哪个月做账的）。"""
+    return "%d 月的" % int(ym[5:7]) if re.fullmatch(r"\d{4}-\d{2}", ym or "") else ""
 VIA_CN = {"scanner": "扫码枪", "phone": "手机", "manual": "手工勾"}
 EXPORT_COLUMNS = ["票夹", "收款方", "审批编号", "归谁审", "票种", "发票代码", "发票号码", "开票日期", "销方名称", "价税合计",
                   "这次点验", "扫到的时间", "谁扫的"]
@@ -63,7 +93,8 @@ def _item_view(it, hit=None):
     v = {"id": it["id"], "folderId": it.get("folder_id"), "kind": it.get("kind"), "typeLabel": _type_label(it),
          "code": it.get("code") or "", "number": it.get("number") or "", "date": it.get("issue_date") or "",
          "sellerName": it.get("seller_name") or "", "total": inv._money_val(it.get("total")), "paper": bool(it.get("paper")),
-         "review": it.get("review") or "draft", "hasQr": it.get("kind") == "invoice" and bool(it.get("number")), "hit": None}
+         "review": it.get("review") or "draft", "hasQr": it.get("kind") == "invoice" and bool(it.get("number")), "hit": None,
+         "voucher": "、".join(inv.voucher_labels_of(it)), "bookMonth": inv.book_month_of(it)}
     if hit:
         v["hit"] = {"at": hit.get("ts") or "", "by": hit.get("user") or "", "via": hit.get("via") or "",
                     "viaLabel": VIA_CN.get(hit.get("via") or "", hit.get("via") or "")}
@@ -72,25 +103,45 @@ def _item_view(it, hit=None):
 
 def view(ck):
     """一次点验的全貌 → 页面要的：选中的票夹（各扫到几张）、每张票扫没扫到、扫到的不相干的票、合计。"""
-    folders = _folders(ck["folder_ids"])
-    by = _items([f["id"] for f in folders])
     hits = S.check_hits(inv.E(), ck["id"])
     hit_of = {h["item_id"]: h for h in hits if h.get("kind") == "hit" and h.get("item_id")}
     fv, iv = [], []
-    for f in folders:
-        rows = by.get(f["id"], [])
+    lst = _list_of(ck)
+    if lst:
+        # 对着一份认证清单：不按票夹分组，整份清单一组，按凭证顺序排（每行写着凭证）
+        rows = _list_items(lst)
         got = sum(1 for i in rows if i["id"] in hit_of)
-        fv.append({"id": f["id"], "title": f.get("title") or "", "payee": f.get("payee_name") or "", "businessId": f.get("business_id") or "",
-                   "amount": f.get("amount"), "source": f.get("source") or "", "company": f.get("company") or "",
-                   "ownerName": f.get("owner_name") or "", "status": f.get("status") or "", "total": len(rows), "hit": got})
-        iv += [_item_view(i, hit_of.get(i["id"])) for i in rows]
+        fv.append({"id": 0, "title": lst.get("name") or "认证清单", "payee": "", "businessId": "", "amount": None, "source": "",
+                   "company": "", "ownerName": "", "status": "", "total": len(rows), "hit": got, "isList": True})
+        iv = [dict(_item_view(i, hit_of.get(i["id"])), folderId=0, realFolderId=i.get("folder_id")) for i in rows]
+    else:
+        folders = _folders(ck["folder_ids"])
+        by = _items([f["id"] for f in folders])
+        for f in folders:
+            rows = by.get(f["id"], [])
+            got = sum(1 for i in rows if i["id"] in hit_of)
+            fv.append({"id": f["id"], "title": f.get("title") or "", "payee": f.get("payee_name") or "", "businessId": f.get("business_id") or "",
+                       "amount": f.get("amount"), "source": f.get("source") or "", "company": f.get("company") or "",
+                       "ownerName": f.get("owner_name") or "", "status": f.get("status") or "", "total": len(rows), "hit": got})
+            iv += [_item_view(i, hit_of.get(i["id"])) for i in rows]
     strangers = [{"kind": h["kind"], "at": h.get("ts") or "", "by": h.get("user") or "", "via": h.get("via") or "",
                   **(h.get("detail") if isinstance(h.get("detail"), dict) else {})} for h in hits if h.get("kind") in ("other", "none")]
     n = sum(1 for i in iv if i["hit"])
     return {"ok": True, "check": {"id": ck["id"], "by": ck.get("created_by") or "", "at": ck.get("created_at") or "",
-                                  "closedAt": ck.get("closed_at") or "", "entry": ck.get("entry") or "", "open": not ck.get("closed_at")},
+                                  "closedAt": ck.get("closed_at") or "", "entry": ck.get("entry") or "", "open": not ck.get("closed_at"),
+                                  "listId": (lst or {}).get("id"), "listName": (lst or {}).get("name") or ""},
             "folders": fv, "items": iv, "strangers": strangers[-50:],
             "stats": {"total": len(iv), "hit": n, "left": len(iv) - n, "strangers": len(strangers)}}
+
+
+def start_list(u, list_id, entry):
+    """对着一份认证清单开一次点验。"""
+    b = S.batch_get(inv.E(), list_id) if list_id else None
+    if not b or b.get("kind") != TICKLIST_KIND:
+        return None, inv.err("没有这份认证清单", 404)
+    cid = S.check_create(inv.E(), u["name"], [], entry if entry in ("desk", "audit", "ledger") else "", list_id=b["id"])
+    inv.audit(u, "对纸质票·开始", "点验#%d" % cid, "认证清单「%s」%d 张" % (b.get("name") or "", int(b.get("rows") or 0)))
+    return view(S.check_get(inv.E(), cid)), None
 
 
 def start(u, folder_ids, entry):
@@ -133,7 +184,12 @@ def scan(u, ck, text, via="scanner"):
     number, total = q["number"], inv._money_val(q.get("total"))
     found = _find(q.get("code") or "", number)
     hit_ids = {h["item_id"] for h in S.check_hits(e, ck["id"]) if h.get("kind") == "hit"}
-    inside = [i for i in found if i.get("folder_id") in ck["folder_ids"]]
+    lst = _list_of(ck)
+    if lst:
+        in_list = {i["id"] for i in _list_items(lst)}
+        inside = [i for i in found if i["id"] in in_list]
+    else:
+        inside = [i for i in found if i.get("folder_id") in ck["folder_ids"]]
     if inside:
         it = next((i for i in inside if i["id"] not in hit_ids), inside[0])
         new = S.check_hit_add(e, ck["id"], it["id"], name, via)
@@ -150,22 +206,40 @@ def scan(u, ck, text, via="scanner"):
         det = {"number": number, "total": inv._money_val(it.get("total")), "sellerName": it.get("seller_name") or "",
                "folderId": f.get("id"), "folderTitle": f.get("title") or "", "payee": f.get("payee_name") or "",
                "ownerName": f.get("owner_name") or ""}
-        S.check_hit_add(e, ck["id"], None, name, via, kind="other", detail=det)
-        where = "「%s」" % (det["payee"] or det["folderTitle"] or ("票夹 #%s" % det["folderId"]))
-        out = {"ok": True, "result": "other", "stranger": dict(det, kind="other"),
-               "msg": "不在选中的票夹里：%s 这张在%s里%s。没有登记，也没有挪" % (
-                   number, where, ("（归%s审）" % det["ownerName"]) if det["ownerName"] else "")}
+        if lst:
+            # 对着认证清单：不在这份清单里的，说清它是哪个月做账的——整理纸质票时好分到那个月那一摞
+            bm = inv.book_month_of(it)
+            det.update(bookMonth=bm, voucher="、".join(inv.voucher_labels_of(it)))
+            S.check_hit_add(e, ck["id"], None, name, via, kind="other", detail=det)
+            if bm:
+                say, why = _month_say(bm), "是 %s 做账的（%s）" % (bm, det["voucher"])
+            elif it.get("review") != "approved":
+                say, why = "还没审核", "还没审核通过，没到认证这一步"
+            else:
+                say, why = "还没做账", "还没做账（系统在金蝶没找到它的凭证）"
+            out = {"ok": True, "result": "other", "stranger": dict(det, kind="other"), "say": say,
+                   "msg": "不在这份清单里：%s 这张%s。没有登记，也没有挪" % (number, why)}
+        else:
+            S.check_hit_add(e, ck["id"], None, name, via, kind="other", detail=det)
+            where = "「%s」" % (det["payee"] or det["folderTitle"] or ("票夹 #%s" % det["folderId"]))
+            out = {"ok": True, "result": "other", "stranger": dict(det, kind="other"),
+                   "msg": "不在选中的票夹里：%s 这张在%s里%s。没有登记，也没有挪" % (
+                       number, where, ("（归%s审）" % det["ownerName"]) if det["ownerName"] else "")}
     else:
         det = {"number": number, "total": total}
         S.check_hit_add(e, ck["id"], None, name, via, kind="none", detail=det)
         out = {"ok": True, "result": "none", "stranger": dict(det, kind="none"),
                "msg": "系统里没有这张票：%s%s。要先收票（放进对应的付款单，或新建票夹）。没有登记" % (
                    number, (" · %s" % inv._money_str(total)) if total is not None else "")}
-    out["say"] = SAY[out["result"]]
+    out.setdefault("say", SAY[out["result"]])
     hits = [h for h in S.check_hits(e, ck["id"])]
-    by = _items(ck["folder_ids"])
-    tot = sum(len(v) for v in by.values())
-    live = {i["id"] for v in by.values() for i in v}
+    if lst:
+        live = {i["id"] for i in _list_items(lst)}
+        tot = len(live)
+    else:
+        by = _items(ck["folder_ids"])
+        tot = sum(len(v) for v in by.values())
+        live = {i["id"] for v in by.values() for i in v}
     n = len({h["item_id"] for h in hits if h.get("kind") == "hit" and h.get("item_id") in live})
     out["stats"] = {"total": tot, "hit": n, "left": tot - n}
     return out
@@ -177,8 +251,10 @@ def mark(u, ck, item_id, on):
     if ck.get("closed_at"):
         return None, inv.err("这次点验已经收了", 400)
     it = S.item_get(e, item_id) if item_id else None
-    if not it or it.get("folder_id") not in ck["folder_ids"] or it.get("kind") not in BILL_KINDS or it.get("status") == "removed":
-        return None, inv.err("这张票不在选中的票夹里", 400)
+    lst = _list_of(ck)
+    inside = bool(it) and ((it["id"] in {i["id"] for i in _list_items(lst)}) if lst else (it.get("folder_id") in ck["folder_ids"]))
+    if not it or not inside or it.get("kind") not in BILL_KINDS or it.get("status") == "removed":
+        return None, inv.err("这张票不在这份清单里" if lst else "这张票不在选中的票夹里", 400)
     if on:
         if S.check_hit_add(e, ck["id"], it["id"], inv._uname(u), "manual") and not it.get("paper"):
             S.item_update(e, it["id"], paper=1)
@@ -208,7 +284,7 @@ def export(ck, only):
 
 
 # ───────────────────────── 接口（电脑） ─────────────────────────
-GATES = (inv.ENTER_DESK, inv.ENTER_AUDIT)
+GATES = (inv.ENTER_DESK, inv.ENTER_AUDIT, inv.ENTER_LEDGER)
 
 
 @router.post("/api/inv/check/start")
@@ -218,7 +294,10 @@ async def check_start(request: Request):
     if bad:
         return bad
     body = await inv.body_json(request)
-    out, bad = await run_in_threadpool(start, u, body.get("folderIds"), body.get("entry"))
+    if body.get("listId"):           # 对着一份认证清单
+        out, bad = await run_in_threadpool(start_list, u, inv._int_or_none(body.get("listId")), body.get("entry"))
+    else:
+        out, bad = await run_in_threadpool(start, u, body.get("folderIds"), body.get("entry"))
     return bad if bad else out
 
 

@@ -611,6 +611,10 @@ export const invAuditClaim = (folderId) => jp('/api/inv/audit/claim', { folderId
 export const invAuditAssign = (body) => jp('/api/inv/audit/assign', body)             // body={folderId, to: 工作台账号, reason: 必填}
 // 对纸质票：选中几个票夹开一次点验，电脑扫码枪/手机连续扫，扫到的记到这一次上
 export const invCheckStart = (folderIds, entry) => jp('/api/inv/check/start', { folderIds, entry })
+export const invCheckStartList = (listId, entry) => jp('/api/inv/check/start', { listId, entry })     // 对着一份认证清单对
+// 认证清单：每次从台账导出的税局勾选清单存一份（哪个月做账的、哪家、几张、谁什么时候导的）
+export const invTickLists = () => j('/api/inv/ticklists')
+export const invTickListUrl = (id) => `/api/inv/ticklists/${id}/download`
 export const invCheckCurrent = () => j('/api/inv/check/current')
 export const invCheckGet = (id) => j(`/api/inv/check/${id}`)
 export const invCheckScan = (id, code) => jp(`/api/inv/check/${id}/scan`, { code })

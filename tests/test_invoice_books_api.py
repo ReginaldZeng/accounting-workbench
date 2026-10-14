@@ -1670,6 +1670,72 @@ class InvoiceBooksApiTests(unittest.TestCase):
             if old is not None:
                 os.environ["INV_DRY_SEND"] = old
 
+    def test_39_ticklist_by_book_month_and_paper_check(self):
+        """认证跟着做账月走（用户 2026-10-14 定）：清单按做账月份出——3 月开、4 月才做账的票进 4 月的清单；还没做账的、别的月做账的不进。
+        每次导出存成一份认证清单（能翻出来、能重新下载）；对纸质票可以对着一份清单：清单里的念「确认」，别的月做账的念「几月的」，
+        还没做账的念「还没做账」。开票日期放在 2023-03/04（别的用例不用），号码、税号都是编的。"""
+        OUR, TID = self.OUR, self.OUR_TID
+        face = dict(amount=100, tax=6, total=106, buyer_name=OUR, buyer_tax_id=TID, seller_name="做账月销方", seller_tax_id="91tick0b")
+
+        def book(iid, period, no):
+            fl = dict(self.item(iid)["flags_json"] or {})
+            fl["_bookkeeping"] = {"status": "booked", "source": "kingdee", "vouchers": [{"book": OUR, "period": period, "number": "记-%d" % no}]}
+            self.S.item_update(self.e, iid, flags_json=fl)
+        a, _ = self.make_item(num(39001), 106, "31", "20230310", face)          # 3 月开、4 月做账（记-3）
+        b, _ = self.make_item(num(39002), 106, "31", "20230402", face)          # 4 月开、4 月做账（记-1）
+        c, _ = self.make_item(num(39003), 106, "31", "20230320", face)          # 3 月开、3 月做账
+        d, _ = self.make_item(num(39004), 106, "31", "20230405", face)          # 还没做账
+        book(a, "2023-04", 3); book(b, "2023-04", 1); book(c, "2023-03", 7)
+        url, rng = "/api/inv/deduct/tick/prepare", {"from": "2023-03-01", "to": "2023-04-30", "subject": TID}
+        self.assertEqual(self.post(url, "acct", dict(rng, bookMonth="6月")).status_code, 400)
+        # 不筛做账月份：照旧四张都进
+        self.assertEqual(self.ok(self.post(url, "acct", rng))["summary"]["rows"], 4)
+        # 4 月的清单：a、b 进；c 是别的月做账的、d 还没做账，各写一条原因
+        j = self.ok(self.post(url, "acct", dict(rng, bookMonth="2023-04")))
+        self.assertEqual(sorted(x["number"] for x in j["preview"]), [num(39001), num(39002)])
+        self.assertEqual({x["key"]: x["count"] for x in j["summary"]["skipped"]}, {"unbooked": 1, "otherMonth": 1})
+        pv = {x["number"]: x for x in j["preview"]}
+        self.assertEqual(pv[num(39001)]["bookMonth"], "2023-04")
+        self.assertTrue(pv[num(39001)]["voucher"].endswith("-3#"), pv[num(39001)]["voucher"])
+        # 下载＝存成一份认证清单；同一份再下一次不重复存
+        n0 = len(self.ok(self.get("/api/inv/ticklists", "acct"))["rows"])
+        for _ in range(2):
+            r = self.get("/api/inv/deduct/download?token=%s" % j["token"], "acct")
+            self.assertEqual((r.status_code, r.content[:2]), (200, b"PK"), r.text[:200])
+        lists = self.ok(self.get("/api/inv/ticklists", "acct"))["rows"]
+        self.assertEqual(len(lists), n0 + 1)
+        lst = lists[0]
+        self.assertEqual((lst["bookMonth"], lst["rows"], lst["items"], lst["by"], lst["subject"]), ("2023-04", 2, 2, "acct", TID))
+        self.assertIn("2023-04 认证清单", lst["name"])
+        r = self.get("/api/inv/ticklists/%d/download" % lst["id"], "acct")
+        self.assertEqual((r.status_code, r.content[:2]), (200, b"PK"))
+        self.assertEqual(self.get("/api/inv/ticklists/%d/download" % lst["id"], "viewer").status_code, 403)
+        self.assertEqual(self.get("/api/inv/ticklists/999999/download", "acct").status_code, 404)
+        # 对着这份清单对纸质票
+        sys.modules.pop("routers.invoice_check", None)
+        from routers import invoice_check as ck_
+        u = {"name": "acct"}
+        v, bad = ck_.start_list(u, lst["id"], "ledger")
+        self.assertIsNone(bad)
+        self.assertEqual((v["check"]["listId"], v["check"]["listName"], v["folders"][0]["isList"], v["stats"]["total"]), (lst["id"], lst["name"], True, 2))
+        self.assertEqual([i["id"] for i in v["items"]], [b, a])               # 按凭证号排：记-1 在记-3 前面
+        self.assertTrue(v["items"][0]["voucher"].endswith("-1#"))
+        ck = self.S.check_get(self.e, v["check"]["id"])
+        r = ck_.scan(u, ck, qr(num(39001), 106, "31", "20230310"), "scanner")
+        self.assertEqual((r["result"], r["say"], r["stats"]), ("ok", "确认", {"total": 2, "hit": 1, "left": 1}))
+        r = ck_.scan(u, ck, qr(num(39003), 106, "31", "20230320"), "phone")   # 3 月做账的：念「3 月的」
+        self.assertEqual((r["result"], r["say"]), ("other", "3 月的"))
+        self.assertIn("2023-03 做账的", r["msg"])
+        r = ck_.scan(u, ck, qr(num(39004), 106, "31", "20230405"), "phone")   # 还没做账
+        self.assertEqual((r["result"], r["say"]), ("other", "还没做账"))
+        r = ck_.scan(u, ck, qr(num(39099), 106, "31", "20230405"), "phone")
+        self.assertEqual((r["result"], r["say"]), ("none", "没有这张"))
+        out, bad = ck_.mark(u, ck, c, True)                                    # 不在清单里的不能手工勾
+        self.assertIsNotNone(bad)
+        v2 = ck_.view(self.S.check_get(self.e, ck["id"]))
+        self.assertEqual((v2["stats"]["hit"], v2["stats"]["strangers"], [x.get("bookMonth") for x in v2["strangers"][:2]]), (1, 3, ["2023-03", ""]))
+        sys.modules.pop("routers.invoice_check", None)
+
     def test_27_tax_tick_type(self):
         """票种的税局写法：有二维码票种代码就用官方名（半角括号），没有就按票种＋是不是数电票推。"""
         t = self.books.tax_tick_type

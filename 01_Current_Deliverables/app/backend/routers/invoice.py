@@ -677,6 +677,24 @@ def voucher_label(v, today=None):
     return "-".join(x for x in (short, mon, no) if x) + "#"
 
 
+def book_month_of(it):
+    """这张票是哪个月做账的 → 'YYYY-MM'；还没做账（系统在金蝶没找到它的凭证）→ ''。
+    看系统按发票号到金蝶匹配到的凭证（flags_json._bookkeeping.vouchers）；匹配到几张的取最早的那个月——进项税第一次入账的月份。"""
+    fl = (it or {}).get("flags_json") if isinstance((it or {}).get("flags_json"), dict) else {}
+    bk = fl.get("_bookkeeping") or {}
+    if bk.get("status") != "booked":
+        return ""
+    ms = sorted(str(v.get("period") or "")[:7] for v in bk.get("vouchers") or [] if isinstance(v, dict) and re.fullmatch(r"\d{4}-\d{2}", str(v.get("period") or "")[:7]))
+    return ms[0] if ms else ""
+
+
+def voucher_labels_of(it):
+    """这张票挂的凭证的短写法列表（深圳星期零-10-8#），按月份先后。"""
+    fl = (it or {}).get("flags_json") if isinstance((it or {}).get("flags_json"), dict) else {}
+    vs = [v for v in ((fl.get("_bookkeeping") or {}).get("vouchers") or []) if isinstance(v, dict)]
+    return [voucher_label(v) for v in sorted(vs, key=lambda v: (str(v.get("period") or ""), str(v.get("number") or "")))]
+
+
 def org_short(company):
     """公司主体全称 → 基础数据「主体档案」里的简称（孝感星期九、深圳星期零……）；对不上就原样用全称。
     读主数据，不写死哪家叫什么：先按全称/简称/别名对；档案里没填全称的，看简称是不是全称去掉「市/省」后的开头。"""

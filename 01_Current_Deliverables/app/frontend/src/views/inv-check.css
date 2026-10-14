@@ -32,3 +32,9 @@
 .inv-ck-lk{ border:0; background:none; padding:0; font:inherit; font-size:12px; color:var(--accent); cursor:pointer; }
 .inv-ck-lk:hover{ text-decoration:underline; }
 .inv-ck-str{ padding:8px 12px; border:1px solid var(--line); border-radius:9px; background:var(--bg-rail); line-height:1.7; }
+
+/* 开始弹窗的两种对法；凭证那一栏 */
+.inv-ck-modes{ display:inline-flex; border:1px solid var(--line-strong); border-radius:8px; overflow:hidden; margin-bottom:10px; }
+.inv-ck-modes button{ border:0; background:var(--bg); color:var(--ink-2); font:inherit; font-size:12.5px; padding:6px 14px; cursor:pointer; }
+.inv-ck-modes button.on{ background:var(--accent); color:#fff; }
+.inv-ck-vno{ white-space:nowrap; font-weight:600; font-variant-numeric:tabular-nums; }

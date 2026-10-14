@@ -14,11 +14,12 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invItemOtherSystem, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
-  invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invOther, invOtherImport,
+  invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invOther, invOtherImport, invTickLists, invTickListUrl,
   invSellers, invSellerCheck,
   invOpeningPreview, invOpeningCommit, invOpeningStats,
 } from '../api.js'
 import { Modal, InvViewer, FieldPanel, StatusBadges, FileDrop, useToast, money, fmtTime } from './invShared.jsx'
+import PaperCheckButton from './InvCheck.jsx'
 import './inv-ledger.css'
 
 // ───────────────────────── 小工具 ─────────────────────────
@@ -189,7 +190,8 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
                 <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}{r.reviewBy && r.folder?.ownerName && r.folder.ownerName !== r.reviewBy ? ' · 归' + r.folder.ownerName : ''}</span></td>
                 <td><span className={'inv-badge ' + (r.paper ? 'ok' : 'warn')}>{r.paper ? '已收到' : '未收到'}</span></td>
                 <td>{voucherTexts(r).length
-                  ? voucherTexts(r).map((t, i) => <span key={i} className="inv-lg-vno" title={voucherFull(r.bookkeeping.vouchers[i])}>{t}</span>)
+                  ? voucherTexts(r).map((t, i) => <span key={i} className="inv-lg-vno" title={voucherFull(r.bookkeeping.vouchers[i])}>{t}
+                    {i === 0 && crossMonth(r) ? <em className="inv-lg-cross" title={`开票是 ${String(r.date || '').slice(0, 7)}，做账在 ${crossMonth(r)}：认证跟着做账月走`}>跨月</em> : null}</span>)
                   : bookText(r.bookkeeping)}</td>
               </tr>
             )
@@ -258,6 +260,12 @@ const voucherTexts = row => {
   const vs = (row && row.bookkeeping && row.bookkeeping.vouchers) || []
   if (Array.isArray(row && row.voucherLabels) && row.voucherLabels.length === vs.length) return row.voucherLabels
   return vs.map(v => `${v.book}-${Number(String(v.period || '').slice(5)) || v.period}-${String(v.number || '').replace(/^记-?/, '')}#`)
+}
+// 开票月和做账月不一样的票 → 做账月份（'2026-10'）；一样或没做账 → ''
+const crossMonth = row => {
+  const ps = ((row && row.bookkeeping && row.bookkeeping.vouchers) || []).map(v => String(v.period || '').slice(0, 7)).filter(Boolean).sort()
+  const im = String((row && row.date) || '').slice(0, 7)
+  return ps.length && im && ps[0] !== im ? ps[0] : ''
 }
 const bookText = bk => bk?.source === 'kingdee' ? (bk.status === 'booked' ? '已匹配凭证' : '暂未匹配') : ({ booked: '已做账', unbooked: '未做账' }[bk?.status] || '尚未刷新')
 export function Bookkeeping({ row, canEdit, onSaved }) {
@@ -725,7 +733,38 @@ function OtherList({ can }) {
   )
 }
 
-const TICK_EMPTY = { subject: '', from: '', to: '', marked: false }
+const TICK_EMPTY = { subject: '', bookMonth: '', from: '', to: '', marked: false }
+const curMonth = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
+
+// 导出过的认证清单：能重新下载，能对着它对纸质票
+function TickLists({ can, tick }) {
+  const [rows, setRows] = useState(null)
+  useEffect(() => { let live = true; invTickLists().then(r => { if (live) setRows(asList(r?.rows)) }).catch(() => { if (live) setRows([]) }); return () => { live = false } }, [tick])
+  if (!rows || !rows.length) return null
+  return (
+    <div className="inv-lg-tl">
+      <div className="inv-lg-tl-h">导出过的认证清单<span className="inv-muted">　纸质票对着清单过一遍：清单里的念「确认」，别的月做账的念「几月的」</span></div>
+      <div className="tbl-wrap inv-lg-mini">
+        <table>
+          <thead><tr><th>清单</th><th>做账月份</th><th className="num">张数</th><th className="num">税额</th><th>谁导的</th><th></th></tr></thead>
+          <tbody>{rows.map(r => (
+            <tr key={r.id}>
+              <td>{r.name}</td>
+              <td className="inv-lg-nowrap">{r.bookMonth || <span className="inv-muted">没按做账月份</span>}</td>
+              <td className="num">{n0(r.rows)}</td>
+              <td className="num">{money(r.tax)}</td>
+              <td className="inv-lg-nowrap">{r.by} · {fmtTime(r.at)}</td>
+              <td className="inv-lg-nowrap inv-lg-tl-acts">
+                {can.deduct && <a className="inv-lk" href={invTickListUrl(r.id)}>重新下载</a>}
+                <PaperCheckButton entry="ledger" canAudit={false} listId={r.id} label="对纸质票" />
+              </td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
 
 // 方式一：直接从台账出税局勾选清单（不用先去税局导未勾选清单）。先生成看预览，核对后下载；下载才把票记为「已标注勾选」。
 function TickExport({ can }) {
@@ -735,6 +774,7 @@ function TickExport({ can }) {
   const [res, setRes] = useState(null)
   const [buyers, setBuyers] = useState([])
   const [ok, setOk] = useState(false)
+  const [tick, setTick] = useState(0)        // 下载过一次 → 下面「导出过的认证清单」重读
   // 条件一改，下面的预览就不是这个条件的了：收起来，免得拿旧清单去下载
   const set = (k, v) => { setF(p => ({ ...p, [k]: v })); setRes(null); setOk(false); setErr('') }
   const go = async () => {
@@ -752,7 +792,7 @@ function TickExport({ can }) {
     <section className="inv-lg-sec">
       <div className="inv-lg-sec-h">方式一：直接从台账出勾选清单（不用先去税局导清单）</div>
       <ol className="inv-lg-steps">
-        <li>选购方主体和开票日期，点 <b>生成清单</b>：台账里 <b>审核通过＋可抵扣＋还没勾选过</b> 的票都列出来；记了<b>「票总管已有」</b>的票不带（见上面一块）；</li>
+        <li>选购方主体和<b>做账月份</b>，点 <b>生成清单</b>：这个月做了账的、<b>审核通过＋可抵扣＋还没勾选过</b> 的票都列出来（认证跟着做账月走：上个月开、这个月才做账的票进这个月；还没做账的不进）；记了<b>「票总管已有」</b>的票不带（见上面一块）；</li>
         <li>对着预览核一遍，下载。文件就是电子税务局 <b>清单导入勾选</b> 要的格式，每张都标了「是」；「金额」一列专票写<b>价税合计（含税）</b>，机票行程单写不含税，火车票票面没有税额的留空；</li>
         <li>回电子税务局导入；<b>提交勾选</b> 和 <b>统计确认</b> 仍由人在税局里点，系统不替你提交。</li>
       </ol>
@@ -763,6 +803,10 @@ function TickExport({ can }) {
               <option value="">全部主体</option>
               {buyers.map(b => <option key={b.taxId || '-'} value={b.taxId}>{(b.name || '没读到抬头') + (b.taxId ? `（${b.taxId}）` : '')}</option>)}
             </select>
+          </label>
+          <label>做账月份
+            <input type="month" className="inv-lg-month" value={f.bookMonth} onChange={e => set('bookMonth', e.target.value)} aria-label="做账月份" />
+            {!f.bookMonth && <button type="button" className="inv-lk" onClick={() => set('bookMonth', curMonth())}>本月</button>}
           </label>
           <label>开票日期
             <input type="date" value={f.from} onChange={e => set('from', e.target.value)} aria-label="开票日期从" />
@@ -791,11 +835,12 @@ function TickExport({ can }) {
           {prev.length > 0 && (
             <div className="tbl-wrap inv-lg-mini">
               <table>
-                <thead><tr><th>发票号码</th><th>开票日期</th><th>销方</th><th>票种</th><th className="num">金额</th><th className="num">税额</th><th>购方税号</th><th>备注</th></tr></thead>
+                <thead><tr><th>发票号码</th><th>开票日期</th><th>凭证</th><th>销方</th><th>票种</th><th className="num">金额</th><th className="num">税额</th><th>购方税号</th><th>备注</th></tr></thead>
                 <tbody>{prev.map(p => (
                   <tr key={p.number}>
                     <td className="mono">{p.number}</td>
                     <td className="inv-lg-nowrap">{p.date || '—'}</td>
+                    <td className="inv-lg-nowrap">{p.voucher || <span className="inv-muted">还没做账</span>}</td>
                     <td><div className="inv-lg-seller" title={p.sellerName || undefined}>{p.sellerName || '—'}</div></td>
                     <td className="inv-lg-nowrap">{p.taxType}</td>
                     <td className="num">{money(p.amount)}</td>
@@ -813,13 +858,14 @@ function TickExport({ can }) {
               <label className="inv-lg-ck big"><input type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} />我已核对上面的清单</label>
               <div className="inv-lg-row">
                 <a className={'btn primary' + (ok ? '' : ' inv-lg-off')} href={ok ? invDeductDownloadUrl(res.token) : undefined}
-                  aria-disabled={!ok} onClick={e => { if (!ok) e.preventDefault() }}>下载勾选清单</a>
-                <span className="inv-muted">下载后这些票记为「已标注勾选」，下次默认不再带出来。去税局「清单导入勾选」导入，再人工 <b>提交勾选</b>、<b>统计确认</b>。</span>
+                  aria-disabled={!ok} onClick={e => { if (!ok) e.preventDefault(); else setTimeout(() => setTick(t => t + 1), 1500) }}>下载勾选清单</a>
+                <span className="inv-muted">下载后这些票记为「已标注勾选」，下次默认不再带出来；这份清单会存下来（见下面），纸质票可以对着它过一遍。去税局「清单导入勾选」导入，再人工 <b>提交勾选</b>、<b>统计确认</b>。</span>
               </div>
             </>
           )}
         </>
       )}
+      <TickLists can={can} tick={tick} />
     </section>
   )
 }
