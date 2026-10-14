@@ -88,6 +88,10 @@ function speak(text, ok) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const CHK_TONE = { ok: 'ok', dup: 'warn', other: 'err', none: 'err', unknown: 'warn', closed: 'warn' }
+// 连续扫的间隔（扫完一张停多久再开扫码框）：四档，记在这部手机上（V2.973）
+const CHK_GAPS = [500, 1000, 2000, 3000]
+const CHK_GAP_KEY = 'inv-ph-chk-gap'
+const readGap = () => { try { const v = Number(localStorage.getItem(CHK_GAP_KEY)); return CHK_GAPS.includes(v) ? v : 500 } catch { return 500 } }
 const isCancel = e => /cancel|取消/i.test(String((e && (e.errorMessage || e.message)) || '')) || (e && String(e.errorCode) === '300001')
 
 // ───────────────────────── 缩略图（要带令牌头，不能直接 <img src>） ─────────────────────────
@@ -373,6 +377,9 @@ export default function InvPhone() {
   }
 
   // 对纸质票·连续扫：扫一张 → 记到电脑上那一次点验 → 念结果 → 马上再开扫码框；点扫码框的取消就停
+  const [gap, setGap] = useState(readGap)
+  const gapRef = useRef(gap); gapRef.current = gap
+  const pickGap = (v) => { setGap(v); try { localStorage.setItem(CHK_GAP_KEY, String(v)) } catch { /* 记不住就这一次 */ } }
   const stopCheck = () => { checkingRef.current = false; setChecking(false) }
   const checkLoop = async () => {
     if (checkingRef.current) return
@@ -400,7 +407,7 @@ export default function InvPhone() {
         setChkLast({ tone: CHK_TONE[r.result] || 'warn', big: sh.big || r.say || r.msg || '', sub: sh.small || r.msg || '' })
         if (r.stats) setChk(c => (c ? { ...c, stats: { ...c.stats, ...r.stats } } : c))
         if (r.result === 'closed') break
-        await sleep(ok ? 500 : 1300)        // 不对的多停一下，让人看一眼原因
+        await sleep(ok ? gapRef.current : Math.max(gapRef.current, 1300))        // 间隔按选的；不对的至少停 1.3 秒，让人看一眼原因
       }
     } catch (e) {
       setChkLast({ tone: 'warn', big: '扫码用不了', sub: (e && (e.errorMessage || e.message)) || '' })
@@ -465,7 +472,9 @@ export default function InvPhone() {
           {checking
             ? <button type="button" className="inv-ph-big stop" onClick={stopCheck}>停</button>
             : <button type="button" className="inv-ph-big chk" disabled={!!busy} onClick={checkLoop}>连续扫纸质票</button>}
-          <div className="inv-ph-hint">对准发票左上角的码。扫到会念出来：确认 / 重复 / 不在这里 / 没有这张。点扫码框的「取消」就停。</div>
+          <div className="inv-ph-gap" role="group" aria-label="扫码间隔">扫完一张停
+            {CHK_GAPS.map(g => <button key={g} type="button" className={gap === g ? 'on' : ''} onClick={() => pickGap(g)}>{g / 1000} 秒</button>)}</div>
+          <div className="inv-ph-hint">对准发票左上角的码。对上的「嘀」一声；别的念出来：重复 / 几月的 / 别的主体 / 没有这张。点扫码框的「取消」就停。</div>
         </div>
       )}
       {scanFallback && (

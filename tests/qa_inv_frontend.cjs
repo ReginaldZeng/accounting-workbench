@@ -980,6 +980,11 @@ test('对纸质票（手机）：电脑上在对时出现「连续扫纸质票�
   await page.locator('.inv-ph-chk-last.err', { hasText: '不在这里' }).waitFor({ timeout: 8000 })
   await page.getByRole('button', { name: '连续扫纸质票' }).waitFor({ timeout: 8000 })      // 第四次点了取消：自己停下来
   assert.deepEqual(await page.evaluate(() => window.__said), ['重复', '不在这里'])
+  // V2.973 扫码间隔四档，选了记在这部手机上
+  assert.equal(await page.locator('.inv-ph-gap button').count(), 4)
+  await page.locator('.inv-ph-gap button', { hasText: '2 秒' }).click()
+  assert.equal(await page.evaluate(() => localStorage.getItem('inv-ph-chk-gap')), '2000')
+  assert.match(await page.locator('.inv-ph-gap button.on').innerText(), /2 秒/)
   assert.deepEqual(await page.evaluate(() => window.__rates), [1, 1], '1 倍速')
   assert.deepEqual(calls.filter(c => c.path === '/api/inv/m/check/scan').map(c => c.body.code), ['C-OK', 'C-OK', 'C-OTHER'])
   assert.match(await page.locator('.inv-ph-chk-h').innerText(), /已扫到 1 \/ 5/)

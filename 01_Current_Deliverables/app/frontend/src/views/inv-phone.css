@@ -72,3 +72,6 @@
 .inv-ph-chk-last.ok b{ color:var(--green); } .inv-ph-chk-last.err b{ color:var(--red); } .inv-ph-chk-last.warn b{ color:var(--amber); }
 .inv-ph-big.chk{ background:var(--green); color:#fff; border:0; }
 .inv-ph-big.stop{ background:var(--red); color:#fff; border:0; }
+.inv-ph-gap{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:13px; color:var(--ink-2); }
+.inv-ph-gap button{ min-width:52px; height:32px; padding:0 10px; border-radius:16px; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink-2); font-size:13px; font-family:inherit; }
+.inv-ph-gap button.on{ border-color:var(--blue); background:var(--blue); color:#fff; font-weight:600; }
