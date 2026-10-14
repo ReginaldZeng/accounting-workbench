@@ -1309,6 +1309,9 @@ test('V2.975 台账：筛选条先列 主体/开票月份/做账月份/票种/�
   await page.locator('.inv-lg-overview', { hasText: '可抵扣税额' }).waitFor()
   // 勾一张：那一行变绿，只算勾上的
   await page.getByLabel('勾选 26442000000000000302').check()
+  // 勾上的那一行还是表格行（V2.979：原来行上挂了 .ck，被全站 .ck{display:flex} 拆成一块块的，整张表乱掉）
+  const disp = await page.locator('.inv-lg-tbl tbody tr').nth(1).evaluate(el => getComputedStyle(el).display)
+  assert.equal(disp, 'table-row')
   const bar = page.locator('.inv-lg-checked')
   await bar.waitFor()
   assert.match(await bar.innerText(), /已勾选\s*1\s*张/)

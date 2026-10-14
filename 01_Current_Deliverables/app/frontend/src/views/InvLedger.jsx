@@ -213,7 +213,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid, checked, onChe
             const f = r.folder || {}
             const isVoid = r.review === 'void'
             return (
-              <tr key={r.id} className={'row' + (r.id === selId ? ' on' : '') + (isVoid ? ' void' : '') + (checked.has(r.id) ? ' ck' : '')} tabIndex={0}
+              <tr key={r.id} className={'row' + (r.id === selId ? ' on' : '') + (isVoid ? ' void' : '') + (checked.has(r.id) ? ' inv-lg-ckrow' : '')} tabIndex={0}
                 onClick={() => onPick(r)} onKeyDown={e => { if (e.key === 'Enter') onPick(r) }}>
                 <td className="inv-lg-ckcol" onClick={e => e.stopPropagation()}>
                   {!isVoid && <input type="checkbox" checked={checked.has(r.id)} aria-label={'勾选 ' + (r.number || '')} onChange={e => onCheck(r, e.target.checked)} />}</td>
