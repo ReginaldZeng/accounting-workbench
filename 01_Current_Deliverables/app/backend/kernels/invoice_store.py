@@ -58,6 +58,15 @@ FOLDER = Table(
     Column("submitted_by", String(50)), Column("submitted_at", String(20)),
     Column("reviewed_by", String(50)), Column("reviewed_at", String(20)),
     Column("review_note", String(500)), Column("self_review", Integer, default=0),
+    # 归谁审（审票分工，用户 2026-10-13 定）：和上面「实际谁审的」（reviewed_by）是两样东西，分开存。
+    # 自动接入的记钉钉身份（owner_uid：单最先走到哪位已启用的接入审批人）；认领/转交的记工作台账号（owner_account，
+    # 这个账号认过钉钉的话 owner_uid 一并记上）。两栏都空＝未分派，要先点「我来审」。老库缺这几栏由 ensure_columns 补。
+    Column("owner_uid", String(64)), Column("owner_account", String(50)), Column("owner_name", String(50)),
+    Column("owner_at", String(20)), Column("owner_by", String(50)),
+    Column("owner_via", String(12)),                  # intake 自动接入 / claim 认领 / transfer 转交 / backfill 存量回填
+    # 没有付款单的票夹（收票台新建的）：开票年月 YYYYMM、方式 batch/single、是不是「主体待定」的收票口（auto_split=1：
+    # 放进来的票按抬头自动分到各主体自己的票夹，company 为空）。老的手工票夹这几栏都是空。
+    Column("bill_month", String(6)), Column("batch_way", String(8)), Column("auto_split", Integer),
     UniqueConstraint("inst_id", name="uq_inv_folder_inst"),
     Index("ix_inv_folder_biz", "business_id"),
     Index("ix_inv_folder_status", "status"),
@@ -253,6 +262,29 @@ SELF = Table(
     Index("ix_inv_self_uid", "dt_userid"),
 )
 
+# 对纸质票（用户 2026-10-14 定）：选中一堆票夹，把手上的纸质票连续扫一遍，看和这些票夹里的是不是一样。
+# 一次点验一行（inv_check）；扫到的每张一行（inv_check_hit，kind=hit）；扫到不在选中票夹里的 / 系统里没有的也各记一行
+# （kind=other / none，item_id 可空）。「扫到」按这一次点验单独记——不能只看 inv_item.paper：审核时就记了纸质件已到，
+# 月末再对会一上来全是"到了"。
+CHECK = Table(
+    "inv_check", md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("created_by", String(50)), Column("created_at", String(20)), Column("closed_at", String(20)),
+    Column("entry", String(8)),                       # desk 收票工作台进来的 / audit 发票审核进来的
+    Column("folder_ids", JT()),                       # 选中的票夹 id，逗号分隔（纯文本；MySQL 下不用裸 TEXT）
+    Index("ix_inv_check_by", "created_by"),
+)
+CHECK_HIT = Table(
+    "inv_check_hit", md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("check_id", Integer, nullable=False), Column("item_id", Integer),
+    Column("kind", String(8)),                        # hit 扫到了 / other 在别的票夹里 / none 系统里没有
+    Column("ts", String(20)), Column("user", String(50)), Column("via", String(10)),   # scanner 扫码枪 / phone 手机 / manual 手工勾
+    Column("detail", JT()),
+    UniqueConstraint("check_id", "item_id", name="uq_inv_check_hit"),
+    Index("ix_inv_check_hit_check", "check_id"),
+)
+
 TABLES = tuple(md.tables.values())
 
 # JSON 列（写入 dumps / 读出 loads）及读出时的默认值；reason 是长文本不在此列
@@ -270,6 +302,29 @@ LEDGER_REVIEWS = ("approved", "withvoid", "void", "pending", "draft", "returned"
 
 def now_s():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# 表建好以后才加的栏：create_all 只建不改，老库靠这里补（全是可空栏，不动老数据；回退旧代码时多出来的栏没人读，不碍事）
+ADDED_COLUMNS = {"inv_folder": (("owner_uid", "VARCHAR(64)"), ("owner_account", "VARCHAR(50)"), ("owner_name", "VARCHAR(50)"),
+                                ("owner_at", "VARCHAR(20)"), ("owner_by", "VARCHAR(50)"), ("owner_via", "VARCHAR(12)"),
+                                ("bill_month", "VARCHAR(6)"), ("batch_way", "VARCHAR(8)"), ("auto_split", "INTEGER"))}
+
+
+def ensure_columns(e):
+    """老库缺栏时补上（SQLite/MySQL 都行）→ 这次补了哪些 ['inv_folder.owner_uid', ...]。表还没建（全新库）就跳过。"""
+    from sqlalchemy import inspect, text
+    done = []
+    insp = inspect(e)
+    for tbl, cols in ADDED_COLUMNS.items():
+        if not insp.has_table(tbl):
+            continue
+        have = {c["name"] for c in insp.get_columns(tbl)}
+        with e.begin() as cx:
+            for name, typ in cols:
+                if name not in have:
+                    cx.execute(text("ALTER TABLE %s ADD COLUMN %s %s" % (tbl, name, typ)))
+                    done.append("%s.%s" % (tbl, name))
+    return done
 
 
 def _load_json(name, raw):
@@ -493,15 +548,96 @@ def folder_upsert_from_approval(e, f, user, source="scan"):
         return _refresh()
 
 
-def folder_create_manual(e, title, amount, company, user):
+def folder_create_manual(e, title, amount, company, user, **extra):
     ts = now_s()
     return _insert(e, FOLDER, dict(inst_id=None, title=title or "手工票夹", amount=amount, company=company or "",
                                    status="collecting", source="manual", attach_status="none",
-                                   created_by=user, created_at=ts, updated_at=ts))
+                                   created_by=user, created_at=ts, updated_at=ts, **extra))
+
+
+def batch_folders(e, month, way, owner_uid, owner_account):
+    """同一批（同一位审核会计、同一个开票年月、同一种方式）还在收票的没有付款单的票夹 → 行列表（按 id）。"""
+    c = FOLDER.c
+    conds = [c.source == "manual", c.bill_month == month, c.batch_way == way, c.status.in_(("collecting", "returned")),
+             func.coalesce(c.owner_uid, "") == (owner_uid or ""), func.coalesce(c.owner_account, "") == (owner_account or "")]
+    return _all(e, select(FOLDER).where(*conds).order_by(c.id))
+
+
+def items_move(e, item_ids, file_ids, to_folder):
+    """把几张票连同它们的文件挪到另一个票夹（按抬头分主体用）。一个事务：要么都挪要么都不动。"""
+    item_ids, file_ids = [int(i) for i in item_ids or []], [int(i) for i in file_ids or []]
+    ts = now_s()
+    with e.begin() as cx:
+        if item_ids:
+            cx.execute(update(ITEM).where(ITEM.c.id.in_(item_ids)).values(folder_id=int(to_folder), updated_at=ts))
+        cond = []
+        if file_ids:
+            cond.append(FILE.c.id.in_(file_ids))
+        if item_ids:
+            cond.append(FILE.c.item_id.in_(item_ids))
+        if cond:
+            cx.execute(update(FILE).where(or_(*cond)).values(folder_id=int(to_folder)))
 
 
 def folder_update(e, id_, **cols):
     return _update(e, FOLDER, id_, cols)
+
+
+def folders_named(e, base):
+    """名字是 base、或 base 后面带「-序号」的票夹 → [{id, title, status, source}]（按 id）。给票夹起名排序号用。"""
+    c = FOLDER.c
+    esc = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with e.connect() as cx:
+        rows = cx.execute(select(c.id, c.title, c.status, c.source)
+                          .where(or_(c.title == base, c.title.like(esc + "-%", escape="\\"))).order_by(c.id)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def _owner_blank():
+    return and_(func.coalesce(FOLDER.c.owner_uid, "") == "", func.coalesce(FOLDER.c.owner_account, "") == "")
+
+
+def _owner_is(accounts=(), uids=()):
+    """票夹归这些工作台账号 / 钉钉身份里的某一个。两样都没给 → 恒假。"""
+    conds = []
+    accounts, uids = [a for a in accounts or () if a], [x for x in uids or () if x]
+    if accounts:
+        conds.append(FOLDER.c.owner_account.in_(accounts))
+    if uids:
+        conds.append(FOLDER.c.owner_uid.in_(uids))
+    return or_(*conds) if conds else (FOLDER.c.id < 0)
+
+
+def folder_owner_set(e, id_, uid="", account="", name="", by="", via="", expect=None):
+    """记「归谁审」→ 记上了 True / 没记上 False。
+    expect=None：只在还没人名下时记（认领、自动接入；两个人同时点「我来审」只有一个记得上）；
+    expect=(原 owner_uid, 原 owner_account)：只在还归原来那位时改（转交；转的这会儿被别人先动了就不改）。"""
+    if expect is None:
+        cond = _owner_blank()
+    else:
+        cond = and_(func.coalesce(FOLDER.c.owner_uid, "") == (expect[0] or ""),
+                    func.coalesce(FOLDER.c.owner_account, "") == (expect[1] or ""))
+    ts = now_s()
+    with e.begin() as cx:
+        r = cx.execute(update(FOLDER).where(FOLDER.c.id == int(id_), cond).values(
+            owner_uid=(uid or None), owner_account=(account or None), owner_name=(name or "")[:50],
+            owner_at=ts, owner_by=(by or "")[:50], owner_via=(via or "")[:12], updated_at=ts))
+        return r.rowcount == 1
+
+
+def _audit_pending_cond():
+    return or_(FOLDER.c.status == "submitted", _item_exists(lambda t: t.c.review == "pending"))
+
+
+def audit_pending_owners(e):
+    """待审核的票夹各归谁、等了多久 → [{id, owner_uid, owner_account, owner_name, since}]（since＝提交时间，没有就取最近更新）。
+    审核页的「各人名下积压」用；待审的票夹本来就不多，取回来在外面按人归拢。"""
+    c = FOLDER.c
+    with e.connect() as cx:
+        rows = cx.execute(select(c.id, c.owner_uid, c.owner_account, c.owner_name,
+                                 func.coalesce(c.submitted_at, c.updated_at).label("since"))
+                          .where(_audit_pending_cond())).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def folders_recent(e, user, limit=10):
@@ -1027,7 +1163,7 @@ def laters_due_for_remind(e, today, before_days, every_days):
 
 # ───────────────────────── 台账 / 审核队列 ─────────────────────────
 
-_LEDGER_FOLDER_COLS = ("id", "business_id", "title", "applicant", "template", "dept", "payee_name")
+_LEDGER_FOLDER_COLS = ("id", "business_id", "title", "applicant", "template", "dept", "payee_name", "owner_name")
 
 
 def _split_share(t=ITEM):
@@ -1176,8 +1312,9 @@ def _counts(items):
     return c
 
 
-def audit_queue(e, tab="pending", q=None, page=1, size=30):
+def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None):
     """审核队列 → (total, rows)。
+    owner 不给＝不分人；{"none": True}＝只看未分派的；{"accounts": [...], "uids": [...]}＝只看归这位的。
     pending＝有待审票（review=pending）或票夹已提交；returned＝票夹被退回；done＝票全部通过/作废且至少一张通过。
     每行＝票夹 dict ＋ counts{pending_items, invoices, dup, unchecked, others}（统计不含作废票）。
     排序：pending 先到先审（提交时间正序）；returned/done 最近的在前。"""
@@ -1189,8 +1326,10 @@ def audit_queue(e, tab="pending", q=None, page=1, size=30):
                  _item_exists(lambda t: t.c.review == "approved")]
         order = [func.coalesce(FOLDER.c.reviewed_at, FOLDER.c.updated_at).desc(), FOLDER.c.id.desc()]
     else:
-        conds = [or_(FOLDER.c.status == "submitted", _item_exists(lambda t: t.c.review == "pending"))]
+        conds = [_audit_pending_cond()]
         order = [func.coalesce(FOLDER.c.submitted_at, FOLDER.c.updated_at), FOLDER.c.id]
+    if owner:
+        conds.append(_owner_blank() if owner.get("none") else _owner_is(owner.get("accounts"), owner.get("uids")))
     q = (q or "").strip()
     if q:
         conds.append(or_(_like(FOLDER.c.business_id, q), _like(FOLDER.c.title, q), _like(FOLDER.c.applicant, q),
@@ -1204,6 +1343,61 @@ def audit_queue(e, tab="pending", q=None, page=1, size=30):
     for r in rows:
         r["counts"] = _counts(by.get(r["id"], []))
     return total, rows
+
+
+# ───────────────────────── 对纸质票 ─────────────────────────
+
+def check_create(e, user, folder_ids, entry):
+    """开一次点验：这个人原来没收的点验顺手收掉（一个人同时只有一次在对，手机扫的才知道记到哪一次）。→ id"""
+    ts = now_s()
+    with e.begin() as cx:
+        cx.execute(update(CHECK).where(CHECK.c.created_by == user, CHECK.c.closed_at.is_(None)).values(closed_at=ts))
+    return _insert(e, CHECK, dict(created_by=user, created_at=ts, entry=(entry or "")[:8],
+                                  folder_ids=",".join(str(int(i)) for i in folder_ids)))
+
+
+def _check_row(r):
+    d = _row(r)
+    if d:
+        d["folder_ids"] = [int(x) for x in str(d.get("folder_ids") or "").split(",") if x.strip().isdigit()]
+    return d
+
+
+def check_get(e, id_):
+    with e.connect() as cx:
+        return _check_row(cx.execute(select(CHECK).where(CHECK.c.id == int(id_))).first())
+
+
+def check_current(e, user):
+    """这个人正在对的那一次（没有 → None）。"""
+    with e.connect() as cx:
+        return _check_row(cx.execute(select(CHECK).where(CHECK.c.created_by == user, CHECK.c.closed_at.is_(None))
+                                     .order_by(CHECK.c.id.desc())).first())
+
+
+def check_close(e, id_):
+    with e.begin() as cx:
+        cx.execute(update(CHECK).where(CHECK.c.id == int(id_), CHECK.c.closed_at.is_(None)).values(closed_at=now_s()))
+
+
+def check_hits(e, id_):
+    return _all(e, select(CHECK_HIT).where(CHECK_HIT.c.check_id == int(id_)).order_by(CHECK_HIT.c.id))
+
+
+def check_hit_add(e, id_, item_id, user, via, kind="hit", detail=None):
+    """记一笔 → True；这张票这一次已经扫过（唯一约束）→ False。kind=other/none 的不挂票（item_id 空），每次都记。"""
+    try:
+        _insert(e, CHECK_HIT, dict(check_id=int(id_), item_id=item_id, kind=kind, ts=now_s(), user=user, via=(via or "")[:10],
+                                   detail=detail))
+        return True
+    except IntegrityError:
+        return False
+
+
+def check_hit_remove(e, id_, item_id):
+    with e.begin() as cx:
+        return cx.execute(delete(CHECK_HIT).where(CHECK_HIT.c.check_id == int(id_), CHECK_HIT.c.item_id == int(item_id),
+                                                  CHECK_HIT.c.kind == "hit")).rowcount
 
 
 # ───────────────────────── 批次 / 税局清单 ─────────────────────────

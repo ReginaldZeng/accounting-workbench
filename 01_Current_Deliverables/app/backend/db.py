@@ -711,6 +711,12 @@ from kernels.logistics_review_store import TABLES as _lr_tables
 for _table in _lr_tables:
     _table.to_metadata(_md)
 _md.create_all(_engine)
+# 发票管家：表建好以后才加的栏（票夹「归谁审」那几栏），老库在这里补；补不上不挡启动（接口读写那几栏时会报出来）
+try:
+    from kernels.invoice_store import ensure_columns as _inv_ensure_columns
+    _inv_ensure_columns(_engine)
+except Exception as _ex:
+    print("[发票管家] 补库表栏失败：%s" % _ex)
 
 # 细粒度权限能力清单 —— 代码持有的**静态**注册表：加一条动作权限只改这里，账号页按 ws/group 自动渲染。
 # ⚠ 别直接读这个常量做判权/存盘——那会漏掉菜单树派生的准入点（kind="nav"，见下方 cap_meta()）。
@@ -845,6 +851,10 @@ CAP_META_STATIC = [
     {"key": "inv_deduct", "label": "发票管家·税局对账/抵扣勾选/新销方核查", "ws": "accounting",
      "group": "发票管家", "tier": "act", "mod": "invledger"},
     {"key": "inv_audit", "label": "发票管家·审核（通过/退回/判定可否抵扣）", "ws": "accounting",
+     "group": "发票管家", "sensitive": True, "tier": "act", "mod": "invaudit"},
+    # 审票分工（用户 2026-10-13 定）：发票审核按人分，这个点＝看全部人名下的积压＋转交别人名下的＋直接审别人名下的
+    # （实际谁审的照记）。敏感：默认谁都不给；主管理员恒有、核算子管理员恒有（user_can / sub_admin_caps）。
+    {"key": "inv_assign", "label": "发票管家·审核分派（看全部人名下积压/转交/直接审别人名下的）", "ws": "accounting",
      "group": "发票管家", "sensitive": True, "tier": "act", "mod": "invaudit"},
     {"key": "inv_unbind", "label": "发票管家·作废/解绑改挂", "ws": "accounting",
      "group": "发票管家", "sensitive": True, "tier": "act", "mod": "invledger"},

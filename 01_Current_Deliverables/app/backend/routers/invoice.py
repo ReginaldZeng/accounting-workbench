@@ -53,9 +53,11 @@ CAP_DEDUCT = "inv_deduct"
 CAP_UNBIND = "inv_unbind"
 CAP_OPENING = "inv_opening"
 CAP_CONFIG = "inv_config"
+CAP_ASSIGN = "inv_assign"            # 审票分工：看全部人名下的积压＋转交别人名下的＋直接审别人名下的（实际谁审的照记）
 GATE_LABEL = {ENTER_DESK: "收票工作台", ENTER_LATER: "发票后补池", ENTER_AUDIT: "发票审核", ENTER_LEDGER: "发票台账"}
 CAP_LABEL = {CAP_INTAKE: "收票（建票夹/登记/提交）", CAP_RECEIVE: "后补收票", CAP_AUDIT: "发票审核（通过/退回）",
-             CAP_DEDUCT: "税局对账/抵扣勾选", CAP_UNBIND: "作废/解绑", CAP_OPENING: "期初导入", CAP_CONFIG: "发票管家设置"}
+             CAP_DEDUCT: "税局对账/抵扣勾选", CAP_UNBIND: "作废/解绑", CAP_OPENING: "期初导入", CAP_CONFIG: "发票管家设置",
+             CAP_ASSIGN: "审核分派（转交/看全部积压/审别人名下的）"}
 
 # ───────────────────────── 目录 / 上限 ─────────────────────────
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -284,7 +286,10 @@ DEFAULT_SETTINGS = {
     "portalUrl": "",
     "corpId": "",
     # 钉钉自动接入（V2.736，Owner 2026-10-01 定）：上面这些模板的审批单，审批流走到 approvers 里某人节点的自动建票夹拉票。
-    # approvers 空＝不扫；since＝只看这天起提交的单（定为 9/1 往前补）。扫描在 routers/invoice_intake.py
+    # approvers 空＝不扫。扫描在 routers/invoice_intake.py。
+    # 审票分工（用户 2026-10-13 定）：每位接入审批人一行 {dtUserid, dtName, since}，since＝这个人的启用日——只有「提交日」在这天
+    # 当天及以后的单，才因为走到他的节点而接进来、记在他名下；留空＝还没启用（单经过他不触发接入）。接入审批人名单同时就是审票分工表。
+    # 外层的 since 是老的全局起始日：现在只用来给「还没有启用日这一栏的老设置」当初值，扫描不再看它（免得两个日期打架）。
     "intake": {"approvers": [], "since": "2026-09-01"},
 }
 
@@ -388,18 +393,34 @@ def normalize_settings(raw, base=None, strict=True):
             bad("钉钉自动接入设置格式不对")
         else:
             cur = base.get("intake") or {}
-            aps, seen = [], set()
-            for p in r.get("approvers", cur.get("approvers")) or []:
-                uid = _s((p or {}).get("dtUserid"), 64) if isinstance(p, dict) else ""
-                if uid and uid not in seen:
-                    seen.add(uid)
-                    aps.append({"dtUserid": uid, "dtName": _s(p.get("dtName"), 50)})
             since = _s(r.get("since", cur.get("since")), 10)
             try:
                 datetime.strptime(since, "%Y-%m-%d")
             except ValueError:
                 bad("自动接入的起始日要写成 2026-09-01 这样的日期")
                 since = cur.get("since") or DEFAULT_SETTINGS["intake"]["since"]
+            # 老设置里的人没有启用日这一栏：沿用他原来就在用的启用日（库里已有的那一行），再没有才用老的全局起始日
+            # ——升级前后他接哪些单不变。明确给了空串＝还没启用。
+            old = {p.get("dtUserid"): p for p in cur.get("approvers") or [] if isinstance(p, dict)}
+            aps, seen = [], set()
+            for p in r.get("approvers", cur.get("approvers")) or []:
+                uid = _s((p or {}).get("dtUserid"), 64) if isinstance(p, dict) else ""
+                if not uid or uid in seen:
+                    continue
+                seen.add(uid)
+                if "since" in p:
+                    ps = _s(p.get("since"), 10)
+                elif "since" in (old.get(uid) or {}):
+                    ps = _s(old[uid].get("since"), 10)
+                else:
+                    ps = since
+                if ps:
+                    try:
+                        ps = _norm_date(ps) or ""
+                    except ValueError:
+                        bad("%s 的启用日要写成 2026-09-01 这样的日期（还没启用就留空）" % (_s(p.get("dtName"), 50) or "接入审批人"))
+                        ps = _s((old.get(uid) or {}).get("since"), 10)
+                aps.append({"dtUserid": uid, "dtName": _s(p.get("dtName"), 50), "since": ps})
             out["intake"] = {"approvers": aps, "since": since}
     return out
 
@@ -443,6 +464,344 @@ def dt_uid_of(account, settings=None):
     """工作台账号 → 设置里绑定的钉钉 userid（没绑返回 ''）。"""
     p = person_of(account, settings)
     return (p or {}).get("dtUserid") or ""
+
+
+# ───────────────────────── 审票分工：归谁审 ─────────────────────────
+# 票夹上「归谁审」（owner_*）和「实际谁审的」（reviewed_by / 每张票的 review_by）分开存。
+# 自动接入的票夹记的是钉钉身份（那位会计可能还没有工作台账号）；判「是不是我的」时现对：账号认的钉钉身份
+# （钉钉免登记在账号上的＋发票管家设置「财务人员」里绑的）对得上就算，所以人后来才开账号也接得上，不用回头改数据。
+
+def _acct_uids(account, settings=None):
+    """工作台账号 → 它认的钉钉身份（集合，可能空）。"""
+    out = set()
+    try:
+        row = db.get_user(account) if account else None
+    except Exception:
+        row = None
+    if row and row.get("dt_userid"):
+        out.add(str(row["dt_userid"]))
+    x = dt_uid_of(account, settings)
+    if x:
+        out.add(x)
+    return out
+
+
+def _acct_of_uid(uid, settings=None):
+    """钉钉身份 → 工作台账号名（钉钉免登认过的优先，其次设置里绑的）；对不上 → ''。"""
+    if not uid:
+        return ""
+    try:
+        r = db.user_by_dt(uid)
+    except Exception:
+        r = None
+    if r:
+        return r["name"]
+    st = settings or get_settings()
+    return next((p.get("account") or "" for p in st.get("people") or [] if p.get("dtUserid") == uid), "")
+
+
+def _acct_can_audit(account):
+    """这个账号现在能不能做发票审核（在用、开了发票审核页、有审核权限）。"""
+    try:
+        row = db.get_user(account) if account else None
+    except Exception:
+        row = None
+    if not row or str(row.get("active", 1)) == "0":
+        return False
+    return can(row, ENTER_AUDIT, CAP_AUDIT)
+
+
+def owner_of(f, settings=None):
+    """票夹归谁审 → {assigned, name, account, uid}；account＝对得上的工作台账号（对不上为空）。"""
+    uid, acc = (f or {}).get("owner_uid") or "", (f or {}).get("owner_account") or ""
+    if not uid and not acc:
+        return {"assigned": False, "name": "", "account": "", "uid": ""}
+    acc = acc or _acct_of_uid(uid, settings)
+    return {"assigned": True, "name": f.get("owner_name") or acc or "（没记名字）", "account": acc, "uid": uid}
+
+
+def is_owner(u, f, settings=None):
+    """这张票夹是不是归这个人审。"""
+    uid, acc = (f or {}).get("owner_uid") or "", (f or {}).get("owner_account") or ""
+    if acc and acc == _uname(u):
+        return True
+    return bool(uid) and uid in _acct_uids(_uname(u), settings)
+
+
+def can_assign(u):
+    return can(u, ENTER_AUDIT, CAP_ASSIGN)
+
+
+def audit_gate(u, folder, what="审核", pend=()):
+    """审票分工的闸：这张单这个人能不能审/退回/改 → None 放行，或 (http 状态, 说明)。
+    归别人的只有「审核分派」权限的人能直接审，别人只读。没指派上的（老数据、建的时候找不到人）谁都要先认领或由管理员指派
+    （防两个人同时审一张）——正常建的票夹建的时候就指派清楚了，见 assign_new_folder。pend 留着不用（老调用方还在传）。"""
+    o = owner_of(folder)
+    if not o["assigned"]:
+        return 403, "这张单还没指派给谁审：先点「我来审」归到你名下，或请管理员指派，再%s" % what
+    if is_owner(u, folder) or can_assign(u):
+        return None
+    return 403, "这张单归%s审，你只能看；要你来%s，请%s本人或管理员转交给你" % (o["name"], what, o["name"])
+
+
+def owner_view(u, f, settings=None, memo=None):
+    """前端用的「归谁审」→ {assigned, name, mine, canAct, note, at, by, via}。
+    canAct＝这个人现在能不能动这张（自己名下的，或有「审核分派」权限）；note＝归的那位现在审不了的原因（没账号/没开通）。
+    memo：同一次请求里多张票夹共用的小缓存（免得一页 30 行各查几遍账号表）。"""
+    memo = memo if memo is not None else {}
+    st = settings or get_settings()
+    uid, acc = (f or {}).get("owner_uid") or "", (f or {}).get("owner_account") or ""
+    if not uid and not acc:
+        return {"assigned": False, "name": "", "mine": False, "canAct": False, "note": "", "at": "", "by": "", "via": ""}
+    if "boss" not in memo:
+        memo["boss"] = can_assign(u)
+        memo["myUids"] = _acct_uids(_uname(u), st)
+    if not acc:
+        k = ("acct", uid)
+        if k not in memo:
+            memo[k] = _acct_of_uid(uid, st)
+        acc = memo[k]
+    mine = (acc == _uname(u)) or (bool(uid) and uid in memo["myUids"])
+    note = ""
+    if not mine:
+        if not acc:
+            note = "这位还没有工作台账号"
+        else:
+            k = ("can", acc)
+            if k not in memo:
+                memo[k] = _acct_can_audit(acc)
+            if not memo[k]:
+                note = "这位还没开通发票审核"
+    return {"assigned": True, "name": f.get("owner_name") or acc or "（没记名字）", "mine": mine,
+            "canAct": bool(mine or memo["boss"]), "note": note,
+            "at": f.get("owner_at") or "", "by": f.get("owner_by") or "", "via": f.get("owner_via") or ""}
+
+
+def enabled_approvers(cfg):
+    """设置里已启用（填了启用日）的接入审批人 → [{dtUserid, dtName, since}]。没填启用日的等于不在名单里。"""
+    return [a for a in (cfg or {}).get("approvers") or [] if a.get("dtUserid") and a.get("since")]
+
+
+def first_owner(inst, approvers):
+    """这张审批单归哪位接入审批人 → 那一行设置，或 None（还没走到任何一位对它已启用的）。
+    按钉钉 tasks 的先后（任务生成时间，同时生成的按钉钉给的顺序）找最先走到的那位；
+    「对这张单已启用」＝单的提交日 ≥ 这位的启用日（提交日读不出来的单按已启用算，免得漏接）。纯函数，供单测。"""
+    by = {a["dtUserid"]: a for a in approvers or [] if a.get("dtUserid") and a.get("since")}
+    if not by:
+        return None
+    day = str((inst or {}).get("create_time") or "")[:10]
+    tasks = [(str((t or {}).get("create_time") or ""), n, t or {}) for n, t in enumerate((inst or {}).get("tasks") or [])]
+    for _, _, t in sorted(tasks, key=lambda x: (x[0] == "", x[0], x[1])):
+        a = by.get(str(t.get("userid") or ""))
+        if a and (not day or day >= a["since"]):
+            return a
+    return None
+
+
+def pick_owner(inst=None, creator="", pick=""):
+    """新建票夹该归谁审（用户 2026-10-13 定：建了票夹一定是指派清楚的）→ (要写的几栏, "") 或 (None, 指派不上的原因)。
+    ① 有付款单（钉钉审批单）的：审批流最先走到、且已启用的接入审批人；
+    ② 建的人指定的审核会计（实习生扫的要指定；要是能做发票审核的账号）；
+    ③ 建的人自己能做发票审核 → 归他自己（会计自己建、自己扫的自己审）。"""
+    if isinstance(inst, dict):
+        a = first_owner(inst, enabled_approvers(get_settings().get("intake") or {}))
+        if a:
+            return dict(uid=a["dtUserid"], account="", name=a.get("dtName") or "", by=SYSTEM_USER, via="intake"), ""
+    pick = _s(pick, 50)
+    if pick:
+        if not _acct_can_audit(pick):
+            return None, "「%s」现在做不了发票审核（没有这个账号、已停用或没开通发票审核），换一位审核会计" % pick
+        return _owner_cols_for(pick, creator or pick, "pick"), ""
+    if creator and creator != SYSTEM_USER and _acct_can_audit(creator):
+        return _owner_cols_for(creator, creator, "self"), ""
+    return None, "这张单还没定归谁审：请指定一位审核会计"
+
+
+def assign_new_folder(fid, inst=None, creator="", pick="", cols=None):
+    """把刚建的票夹记到该审的人名下（已经有人名下的不动）→ 归属人的名字，或 ''（指派不上：留给管理员指派）。"""
+    if cols is None:
+        cols, _why = pick_owner(inst, creator, pick)
+    if not cols:
+        return ""
+    if S.folder_owner_set(E(), fid, **cols):
+        why = {"intake": "钉钉审批流最先走到这位", "pick": "建票夹时指定", "self": "自己建的，归自己审"}.get(cols["via"], "")
+        log(cols.get("by") or SYSTEM_USER, "归谁审", fid, detail={"to": cols["name"], "why": why})
+        return cols["name"]
+    return ""
+
+
+def org_short(company):
+    """公司主体全称 → 基础数据「主体档案」里的简称（孝感星期九、深圳星期零……）；对不上就原样用全称。
+    读主数据，不写死哪家叫什么：先按全称/简称/别名对；档案里没填全称的，看简称是不是全称去掉「市/省」后的开头。"""
+    name = _s(company, 200)
+    if not name:
+        return ""
+    try:
+        orgs = [o for o in db.list_orgs() if o.get("short_name")]
+    except Exception:
+        orgs = []
+    nn = ip.normalize_name(name)
+    for o in orgs:
+        if name == o["short_name"] or name in (o.get("aliases") or []) or (o.get("full_name") and ip.normalize_name(o["full_name"]) == nn):
+            return o["short_name"]
+    plain = re.sub(r"[省市]", "", name)
+    hits = [o["short_name"] for o in orgs if plain.startswith(o["short_name"])]
+    return hits[0] if len(hits) == 1 else name
+
+
+MANUAL_WAYS = {"batch": "批量手工", "single": "单张手工"}
+HOLD_LABEL = "主体待定"            # 选「自动识别」时先建的收票口：票放进来按抬头分走，读不出抬头的留在这里等人定
+
+
+def manual_folder_name(company, auditor_name, month, way):
+    """没有付款单的票夹的名字（用户 2026-10-13 定的写法）：主体简称-审核会计-开票年月＋进项认证（批量手工/单张手工）。
+    例：孝感星期九-陈梓华-202608进项认证（批量手工）。序号（-1 -2 -3）由 name_manual_folder 接着排。"""
+    return "%s-%s-%s进项认证（%s）" % (org_short(company) if company else HOLD_LABEL, auditor_name, month, MANUAL_WAYS[way])
+
+
+def name_manual_folder(company, auditor_name, month, way):
+    """→ (名字, 可以接着用的已有票夹 id 或 None)。
+    批量（月末一次性）：同一家主体、同一位会计、同一个开票月份只用一个——还在收票的直接接着用；已经提交/审完的再建就排 -2、-3。
+    单张：每次都新建，从 -1 起排号。"""
+    base = manual_folder_name(company, auditor_name, month, way)
+    rows = S.folders_named(E(), base)
+    nums = []
+    for r in rows:
+        tail = (r.get("title") or "")[len(base):]
+        if tail == "":
+            nums.append(1)
+        elif re.fullmatch(r"-\d{1,4}", tail):
+            nums.append(int(tail[1:]))
+    if way == "batch":
+        live = next((r for r in rows if r.get("status") in ("collecting", "returned") and r.get("source") == "manual"), None)
+        if live:
+            return live["title"], live["id"]
+        return (base if not nums else "%s-%d" % (base, max(nums) + 1)), None
+    return "%s-%d" % (base, (max(nums) if nums else 0) + 1), None
+
+
+def item_company(it, st=None):
+    """这张发票的抬头是本公司哪一家 → (公司全称 或 "", 说得清吗)。
+    税号对得上优先，其次名称；抬头和税号都没读出来 → ("", False)＝还说不清；读出来了但不是本公司 → ("", True)。"""
+    st = st or get_settings()
+    tid = (it.get("buyer_tax_id") or "").upper()
+    nb = ip.normalize_name(it.get("buyer_name") or "")
+    if not tid and not nb:
+        return "", False
+    for c in st.get("company") or []:
+        if (tid and (c.get("taxId") or "").upper() == tid) or (nb and c.get("name") and ip.normalize_name(c["name"]) == nb):
+            return c["name"], True
+    return "", True
+
+
+def _sibling_folder(src, company, user):
+    """同一批里这家主体的票夹：有还在收票的就用它，没有就建一个（归属、开票年月、方式照抄）→ 行。"""
+    e = E()
+    for f in S.batch_folders(e, src["bill_month"], src["batch_way"], src.get("owner_uid"), src.get("owner_account")):
+        if f.get("company") == company and f["id"] != src["id"]:
+            return f
+    title, _ = name_manual_folder(company, src.get("owner_name") or "", src["bill_month"], src["batch_way"])
+    fid = S.folder_create_manual(e, title, None, company, _uname(user), bill_month=src["bill_month"], batch_way=src["batch_way"],
+                                 auto_split=0)
+    S.folder_owner_set(e, fid, uid=src.get("owner_uid") or "", account=src.get("owner_account") or "",
+                       name=src.get("owner_name") or "", by=SYSTEM_USER, via=src.get("owner_via") or "pick")
+    log(SYSTEM_USER, "按抬头分主体·建票夹", fid, detail={"title": title, "from": src.get("title") or ""})
+    return S.folder_get(e, fid)
+
+
+def route_folder(folder_id, user=SYSTEM_USER, force=None):
+    """没有付款单的票夹：把抬头是另一家主体的票挪到那家自己的票夹（用户 2026-10-13 定：主体要分开，系统按抬头自动识别）。
+    → [{itemId, number, company, toId, toTitle}]（这次挪走的）。出错不抛（不能因为分主体把收票打断）。
+    只动：新写法建的（bill_month 有值）、还在收票的票夹里，还没提交的发票。按文件成组挪——同一个文件里的几张票要一起走
+    （图片跟着文件走）；一个文件里有两家主体的票、或者还有票在识别 → 这个文件先不动。
+    force={itemId: 公司全称}：人手定的主体（抬头读不出来时），优先于识别结果。"""
+    try:
+        return _route_folder(folder_id, user, force or {})
+    except Exception as ex:
+        _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
+        print("[发票管家] 按抬头分主体出错：%s" % ex)
+        return []
+
+
+def _route_folder(folder_id, user, force):
+    e = E()
+    src = S.folder_get(e, folder_id) if folder_id else None
+    if not src or src.get("source") != "manual" or not src.get("bill_month") or src.get("status") not in ("collecting", "returned"):
+        return []
+    st = get_settings()
+    items = [i for i in S.folder_items(e, src["id"]) if i.get("review") in (None, "", "draft", "returned")]
+    groups = {}
+    for it in items:
+        groups.setdefault(("f", it["file_id"]) if it.get("file_id") else ("i", it["id"]), []).append(it)
+    moved = []
+    for key, grp in groups.items():
+        invs = [i for i in grp if i.get("kind") == "invoice"]
+        if not invs or any(i.get("proc_status") in ("pending", "running") for i in grp):
+            continue
+        cos = set()
+        for i in invs:
+            co = force.get(i["id"]) or item_company(i, st)[0]
+            cos.add(co)
+        if len(cos) != 1:
+            continue                      # 一个文件里两家主体的票（或有的读不出）：不拆文件，留在原处等人处理
+        co = cos.pop()
+        if not co or co == (src.get("company") or ""):
+            continue
+        dst = _sibling_folder(src, co, user)
+        S.items_move(e, [i["id"] for i in grp], [key[1]] if key[0] == "f" else [], dst["id"])
+        for i in grp:
+            refresh_item(i["id"], st, user=user)          # 抬头校验、查重按新票夹重算
+            if i.get("kind") != "invoice":
+                continue
+            det = {"number": i.get("number") or "", "company": co, "from": src.get("title") or "", "to": dst.get("title") or "",
+                   "how": "人手定的" if force.get(i["id"]) else "按抬头"}
+            log(user, "按抬头分主体", dst["id"], i["id"], detail=det)
+            log(user, "按抬头分主体·挪走", src["id"], detail=det)
+            moved.append({"itemId": i["id"], "number": i.get("number") or "", "company": co, "toId": dst["id"],
+                          "toTitle": dst.get("title") or ""})
+    return moved
+
+
+def _route_results(folder_id, results, user):
+    """收票结果里补一句「这张是哪家的，已放到哪个票夹」。"""
+    moved = {m["itemId"]: m for m in route_folder(folder_id, user)}
+    for r in results or []:
+        m = moved.get(r.get("itemId"))
+        if m:
+            r["folderId"], r["movedTo"] = m["toId"], {"id": m["toId"], "title": m["toTitle"], "company": m["company"]}
+            r["msg"] = (r.get("msg") or "") + "；抬头是%s，已放到「%s」" % (org_short(m["company"]), m["toTitle"])
+    return results
+
+
+def batch_brief(f):
+    """没有付款单的票夹（新写法）在页面上要的：开票年月、方式、是不是主体待定的收票口、同一批的其它票夹（各有几张票）。"""
+    if not f or not f.get("bill_month"):
+        return None
+    e = E()
+    sibs = [x for x in S.batch_folders(e, f["bill_month"], f.get("batch_way"), f.get("owner_uid"), f.get("owner_account"))
+            if x["id"] != f["id"]]
+    by = S.items_of_folders(e, [x["id"] for x in sibs]) if sibs else {}
+    return {"month": f["bill_month"], "way": f.get("batch_way") or "batch", "hold": bool(f.get("auto_split")) and not f.get("company"),
+            "siblings": [{"id": x["id"], "title": x.get("title") or "", "company": x.get("company") or "",
+                          "hold": bool(x.get("auto_split")) and not x.get("company"),
+                          "invoices": len([i for i in by.get(x["id"], []) if i.get("kind") == "invoice" and i.get("review") != "void"])}
+                         for x in sibs]}
+
+
+def self_blocked(u, folder, pend):
+    """这个人审这张单算不算「审自己的、要拦」。自己提交/登记的票本来不能自己审；
+    用户 2026-10-13 定放开一种：这张单本来就归他审（会计自己建、自己把纸质票扫进自己名下的付款单）——放行，留痕标「自审」。
+    主管理员照旧放行。→ (是不是自审, 要不要拦)"""
+    sr = _self_review(u, folder, pend)
+    return sr, bool(sr and not db.is_super(u) and not is_owner(u, folder))
+
+
+def _owner_tag(u, folder):
+    """留痕里带上「归谁审」：归别人、由这个人审的（管理员直接审别人名下的）标 forOther，日志上看得出「归甲、实际由乙审」。"""
+    o = owner_of(folder)
+    if not o["assigned"]:
+        return {}
+    return {"owner": o["name"], "forOther": True} if not is_owner(u, folder) else {"owner": o["name"]}
 
 
 def template_cfg(name, settings=None):
@@ -916,6 +1275,8 @@ def folder_view(f, items=None, mobile=False, settings=None, with_form=False, lat
          "submittedBy": f.get("submitted_by") or "", "submittedAt": f.get("submitted_at") or "",
          "reviewedBy": f.get("reviewed_by") or "", "reviewedAt": f.get("reviewed_at") or "",
          "reviewNote": f.get("review_note") or "", "selfReview": bool(f.get("self_review")),
+         "ownerName": f.get("owner_name") or "", "ownerAssigned": bool(f.get("owner_uid") or f.get("owner_account")),
+         "batch": batch_brief(f),
          "allowLater": bool(cfg and cfg.get("allowLater")),
          "later": later_brief(f, e, later), "stats": folder_stats(f, items)}
     # 黄牌「无票、未登记后补」只给允许后补的付款类模板（报销不亮：纸票常后放、餐补本就没票）；附件还在拉时先不亮（票可能马上就到）
@@ -1569,7 +1930,7 @@ def _merge_same(e, ex, f, d, origin, user, paper, name, log_extra, frozen=False)
 
 
 def _switch_to_approval(link, user, name):
-    r = open_approval_folder(link, _uname(user))
+    r = open_approval_folder(link, _uname(user), need_owner=True)      # 指派不上就不建：让他回收票台扫这张单并指定审核会计
     if not r.get("ok"):
         return _res(name, "error", r.get("msg") or "审批单打不开")
     fo = r["folder"]
@@ -1605,8 +1966,9 @@ def ingest_bytes(folder_id, name, data, origin, user, later_id=None, role="origi
     budget：压缩包解开总量的额度 {"left": 字节}，一次上传请求/一次拉附件共用一份（调用方建，不给就本次单算 MAX_TOTAL）——
     防几个 KB 的压缩炸弹一包一包地撑满磁盘。磁盘快满（StoreRefused）→ 回 action=error，不抛。"""
     try:
-        return _ingest_bytes(folder_id, name, data, origin, user, later_id, role, dt_file_id, review, allow_switch,
-                             log_extra, _depth, budget if budget is not None else {"left": MAX_TOTAL})
+        rs = _ingest_bytes(folder_id, name, data, origin, user, later_id, role, dt_file_id, review, allow_switch,
+                           log_extra, _depth, budget if budget is not None else {"left": MAX_TOTAL})
+        return _route_results(folder_id, rs, user) if (folder_id and not _depth and not later_id) else rs
     except StoreRefused as ex:
         return [_res(_clean_name(name), "error", str(ex))]
 
@@ -1804,7 +2166,7 @@ def ingest_qr(folder_id, code_text, user, origin="scanner", later_id=None, revie
     r = _register_doc(folder, None, d, origin, user, later_id, True, review, log_extra, "扫码")
     if r.get("action") == "item":
         r["msg"] += "；明细等电子原件或税局文件包补全"
-    return r
+    return r                             # 二维码里没有抬头：分不了主体，留在原处（主体待定的收票口里要人定一下）
 
 
 # ───────────────────────── 审批单 ─────────────────────────
@@ -1877,17 +2239,27 @@ def _corp_from_server(link):
     return bool(host_ok and not self_carried)
 
 
-def open_approval_folder(code=None, user="", refresh=False, source="scan", inst_id=None, inst=None):
+def open_approval_folder(code=None, user="", refresh=False, source="scan", inst_id=None, inst=None,
+                         auditor="", need_owner=False):
     """扫到的审批码/编号（或实例号）→ 建或刷新票夹；新建或 refresh=True 时排队拉附件并唤醒后台线程。
-    → {ok, msg, folder(行), created}；失败 {ok:False, msg}。不改当前票夹（调用方自己 desk_set）。"""
+    → {ok, msg, folder(行), created}；失败 {ok:False, msg}。不改当前票夹（调用方自己 desk_set）。
+    新建的票夹当场指派归谁审（pick_owner：审批流走到的接入审批人 → auditor 指定的 → 建的人自己）。
+    need_owner=True（收票台扫付款单）：指派不上就不建，回 {ok:False, code:"needAuditor"} 让他指定一位审核会计再扫。"""
     r = resolve_approval(code, inst_id=inst_id, inst=inst)
     if not r.get("ok"):
         return r
     n = r["norm"]
     e = E()
     existed = S.folder_by_inst(e, n["instId"])
+    own_cols = None
+    if existed is None:
+        own_cols, why = pick_owner(r.get("inst"), _uname(user), auditor)
+        if not own_cols and need_owner:
+            return {"ok": False, "code": "needAuditor", "msg": "这张付款单还没走到（已启用的）接入审批人，%s" % why.replace("这张单还没定归谁审：", "")}
     fid = S.folder_upsert_from_approval(e, n, user, source=source)
     created = existed is None
+    if created and own_cols:
+        assign_new_folder(fid, cols=own_cols)
     if created or refresh:
         if n.get("hasAttachments"):
             S.folder_update(e, fid, attach_status="pending", attach_msg="正在拉取审批单附件…")
@@ -2117,6 +2489,7 @@ def _process_item(iid):
         {"kind": it2.get("kind"), "number": it2.get("number") or "", "pending": it2.get("pending_json") or []})
     if doc.get("extraDocs") and not split_before:
         _register_split(cur, doc["extraDocs"])
+    route_folder(cur.get("folder_id"), SYSTEM_USER)        # 抬头是识别出来的：识别完再看要不要分到别家主体的票夹
 
 
 def _register_split(cur, docs):
@@ -2246,7 +2619,7 @@ async def inv_config(request: Request):
                     "intake": c(ENTER_DESK, CAP_INTAKE), "receive": c(ENTER_LATER, CAP_RECEIVE),
                     "auditAct": c(ENTER_AUDIT, CAP_AUDIT), "deduct": c(ENTER_LEDGER, CAP_DEDUCT),
                     "unbind": c(ENTER_LEDGER, CAP_UNBIND), "opening": c(ENTER_LEDGER, CAP_OPENING),
-                    "config": c(None, CAP_CONFIG)},
+                    "config": c(None, CAP_CONFIG), "assign": c(ENTER_AUDIT, CAP_ASSIGN)},
             "me": {"name": u["name"], "isSuper": db.is_super(u)},
             "receivers": [{"account": p["account"], "dtName": p.get("dtName") or ""} for p in st["people"] if p.get("receiver")],
             "settings": {"company": st["company"], "templates": [t["name"] for t in st["templates"]],
@@ -2348,9 +2721,13 @@ async def desk_get(request: Request):
     return await run_in_threadpool(_desk_state, u["name"])     # 1.5 秒一轮询：查库放线程池，不占住事件循环
 
 
-def _scan_approval_sync(user, value, mobile):
-    r = open_approval_folder(value, user)
+def _scan_approval_sync(user, value, mobile, auditor=""):
+    r = open_approval_folder(value, user, auditor=auditor, need_owner=True)
     if not r.get("ok"):
+        if r.get("code") == "needAuditor":
+            # 手机上没有选人的地方：让他到电脑收票台扫
+            msg = r["msg"] + ("（手机上选不了人，请到电脑的收票工作台扫这张单）" if mobile else "")
+            return err(msg, 400, code="needAuditor"), None
         return None, r.get("msg") or "审批单打不开"
     e = E()
     f = r["folder"]
@@ -2374,14 +2751,14 @@ def _scan_invoice_sync(user, value, origin, mobile, log_extra):
             "folder": folder_view(S.folder_get(e, folder["id"]), mobile=mobile)}
 
 
-async def _do_scan(user, code, origin, mobile=False, log_extra=None):
+async def _do_scan(user, code, origin, mobile=False, log_extra=None, auditor=""):
     """扫码枪/手机扫到的一串字 → 分辨是审批单还是发票并处理（电脑端与手机端共用；取单/登记/出视图都在线程池里做）。"""
     code = str(code or "").strip()
     if not code:
         return err("没收到扫码内容", 400)
     c = ip.classify_code(code)
     if c["kind"] in ("approval_link", "business_id"):
-        out, msg = await run_in_threadpool(_scan_approval_sync, user, c["value"], mobile)
+        out, msg = await run_in_threadpool(_scan_approval_sync, user, c["value"], mobile, auditor)
         return out if out else err(msg, 400)
     if c["kind"] == "invoice_qr":
         return await run_in_threadpool(_scan_invoice_sync, user, c["value"], origin, mobile, log_extra)
@@ -2397,7 +2774,7 @@ async def desk_scan(request: Request):
     if bad:
         return bad
     body = await body_json(request)
-    return await _do_scan(u["name"], body.get("code"), "scanner")
+    return await _do_scan(u["name"], body.get("code"), "scanner", auditor=_s(body.get("auditor"), 50))
 
 
 @router.post("/api/inv/desk/open")
@@ -2495,8 +2872,34 @@ async def folder_manual(request: Request):
         return err("单据金额格式不对：%s" % _s(body.get("amount"), 40), 400)
     st = get_settings()
     company = _s(body.get("company"), 120) or (st["company"][0]["name"] if len(st["company"]) == 1 else "")
+    # 建了票夹一定是指派清楚的：指定了审核会计就归他；没指定、自己能审的归自己；实习生建的必须指定
+    own_cols, why = pick_owner(None, u["name"], body.get("auditor"))
+    if not own_cols:
+        return err(why, 400, code="needAuditor")
     e = E()
-    fid = S.folder_create_manual(e, title, amount, company, u["name"])
+    if body.get("month") not in (None, ""):
+        # 新写法（用户 2026-10-13 定）：名字系统起＝主体简称-审核会计-开票年月＋进项认证（方式）；一个票夹只装一家主体
+        m = re.fullmatch(r"(20\d{2})[-/.年]?(0[1-9]|1[0-2])月?", _s(body.get("month"), 10))
+        if not m:
+            return err("开票月份要写成 2026-08 这样", 400)
+        way = body.get("way") if body.get("way") in MANUAL_WAYS else "batch"
+        auto = _s(body.get("company"), 120) == "auto"
+        if auto:
+            company = ""                 # 主体待定：票放进来按抬头分到各主体自己的票夹
+        elif not company or company not in [c["name"] for c in st["company"]]:
+            return err("选一下是哪家公司主体的票（或选「自动识别」按发票抬头分）：一个票夹只装一家的", 400, code="needCompany")
+        ym = m.group(1) + m.group(2)
+        extra = {"bill_month": ym, "batch_way": way, "auto_split": 1 if auto else 0}
+        title, reuse = name_manual_folder(company, own_cols["name"], ym, way)
+        if reuse:
+            f = S.folder_get(e, reuse)
+            if is_owner({"name": own_cols["account"]}, f) or (own_cols["uid"] and own_cols["uid"] == f.get("owner_uid")):
+                S.desk_set(e, u["name"], reuse)
+                log(u, "打开票夹", reuse, detail={"title": title, "why": "这个月这家主体的批量票夹已经有了，接着用"})
+                return {"ok": True, "reused": True, "msg": "「%s」已经有了，还在收票：接着往里放" % title,
+                        "folder": folder_view(f)}
+    fid = S.folder_create_manual(e, title, amount, company, u["name"], **(extra if body.get("month") not in (None, "") else {}))
+    assign_new_folder(fid, cols=own_cols)
     S.desk_set(e, u["name"], fid)
     log(u, "建手工票夹", fid, detail={"title": title, "amount": _money_str(amount) if amount is not None else ""})
     audit(u, "建手工票夹", title, "票夹#%d" % fid)
@@ -2552,6 +2955,17 @@ def submit_check(folder, items, settings=None):
     st = settings or get_settings()
     act = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"]
     blockers, warnings = [], []
+    if folder.get("bill_month"):
+        bills = [i for i in act if i.get("kind") in ("invoice", "receipt")]
+        if not folder.get("company") and act:
+            blockers.append({"code": "noCompany", "itemIds": [i["id"] for i in act],
+                             "msg": "这里是「主体待定」的收票口，还有 %d 张没分出是哪家主体的票：点开定一下是哪家（或移除），分走以后到各主体自己的票夹里提交" % len(act)})
+        ym = folder["bill_month"]
+        off = [i for i in bills if (i.get("issue_date") or "")[:7].replace("-", "") not in ("", ym)]
+        if off:
+            warnings.append({"code": "monthDiff", "itemIds": [i["id"] for i in off],
+                             "msg": "有 %d 张不是 %s 年 %s 月开的票（%s），确认一下要不要放在这个月" % (
+                                 len(off), ym[:4], ym[4:], "、".join((i.get("number") or "#%d" % i["id"]) for i in off[:5]))})
     dups = [i for i in act if (i.get("flags_json") or {}).get("dup")]
     if dups:
         blockers.append({"code": "dup", "itemIds": [i["id"] for i in dups],
@@ -2706,10 +3120,15 @@ def item_guard(u, it, folder):
         if can(u, ENTER_DESK, CAP_INTAKE) or (it.get("later_id") and can(u, ENTER_LATER, CAP_RECEIVE)):
             return None
         return err("无「收票」权限：请管理员开通收票工作台的收票权限", 403)
+    gate = None
     if can(u, ENTER_AUDIT, CAP_AUDIT):
-        return None
+        gate = audit_gate(u, folder, "改") if folder else None
+        if not gate:
+            return None
     if (folder or {}).get("status") not in ("submitted", "approved") and it.get("later_id") and can(u, ENTER_LATER, CAP_RECEIVE):
         return None
+    if gate:
+        return err(gate[1], gate[0])
     return err("这张票已提交审核，只有审核人能改（需要「发票审核」权限）", 403)
 
 
@@ -2852,6 +3271,8 @@ def _item_update_sync(u, iid, body):
     upd["pending_json"] = pend
     S.item_update(e, iid, **upd)
     it2 = refresh_item(iid, user=u["name"])
+    if {"buyerName", "buyerTaxId"} & set(changes) and route_folder(it2.get("folder_id"), u["name"]):
+        it2 = S.item_get(e, it2["id"]) or it2              # 人手补了抬头：该分到别家主体的票夹就分过去
     det = {"changes": {k: [str(a) if a is not None else "", str(b) if b is not None else ""] for k, (a, b) in changes.items()
                        if k != "lines"}, "confirmed": confirmed}
     if "lines" in changes:
@@ -2898,6 +3319,41 @@ def _item_remove_sync(u, iid, note, guard=True):
     if settled:
         out["msg"] = "已移除；票夹里没有待审的票了，票夹已改为「%s」" % STATUS_CN.get(settled, settled)
     return out, None
+
+
+def _item_company_sync(u, iid, company):
+    e = E()
+    it = S.item_get(e, iid)
+    folder = S.folder_get(e, (it or {}).get("folder_id")) if it else None
+    g = item_guard(u, it, folder)
+    if g:
+        return None, g
+    if not folder or not folder.get("bill_month") or folder.get("source") != "manual":
+        return None, err("这张票在付款单的票夹里，主体以付款单为准，不用另外定", 400)
+    if company not in [c["name"] for c in get_settings()["company"]]:
+        return None, err("选一下是哪家公司主体", 400)
+    if it.get("kind") != "invoice":
+        return None, err("只有发票要定主体", 400)
+    if company == (folder.get("company") or ""):
+        return {"ok": True, "msg": "这张票本来就在这家主体的票夹里", "item": item_view(it), "moved": None}, None
+    sib = [x for x in S.folder_items(e, folder["id"]) if it.get("file_id") and x.get("file_id") == it["file_id"] and x.get("kind") == "invoice"] or [it]
+    moved = route_folder(folder["id"], u["name"], force={x["id"]: company for x in sib})
+    hit = next((m for m in moved if m["itemId"] == iid), None)
+    if not hit:
+        return None, err("没挪成：这张票还在识别，或者同一个文件里别的票是另一家主体的（要拆开分别上传）", 400)
+    return {"ok": True, "msg": "已放到「%s」" % hit["toTitle"], "item": item_view(S.item_get(e, iid)),
+            "moved": {"id": hit["toId"], "title": hit["toTitle"]}}, None
+
+
+@router.post("/api/inv/item/{iid}/company")
+async def item_set_company(iid: int, request: Request):
+    """body：{company: 公司全称}。没有付款单的票夹里，抬头读不出来的发票由人定是哪家主体 → 挪到那家自己的票夹。"""
+    u, bad = need(request)
+    if bad:
+        return bad
+    body = await body_json(request)
+    out, bad = await run_in_threadpool(_item_company_sync, u, iid, _s(body.get("company"), 120))
+    return bad if bad else out
 
 
 @router.post("/api/inv/item/{iid}/remove")
@@ -3486,10 +3942,14 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
     409 {newItems}，让他刷新后再审（没看过的票不能被一起通过）。批量通过不给（只过"干净"的票夹）。
     重复票/识别中的票、同号票已在别的单审核通过的，拦下（extra.blockers）；提交人或登记人不能审自己（主管理员放行并标自审）；
     可否抵扣：decisions {"<itemId>": {"deductible": bool}}，没给的按系统建议（yes→可抵、no→不可、空→不判）。
-    票夹已提交却一张待审的票都没有（后补单没票就关了、票被作废……）→ 允许直接把票夹记为已审核，不再卡在队列里。"""
+    票夹已提交却一张待审的票都没有（后补单没票就关了、票被作废……）→ 允许直接把票夹记为已审核，不再卡在队列里。
+    审票分工：先过 audit_gate——未分派的要先认领；归别人的只有「审核分派」权限的人能直接审（留痕标 forOther）。"""
     e = E()
     items = S.folder_items(e, folder["id"])
     pend = [i for i in items if i.get("review") == "pending"]
+    gate = audit_gate(u, folder, pend=pend)
+    if gate:
+        return False, gate[0], gate[1], {"code": "owner"}
     if item_ids is not None:
         seen = {int(x) for x in item_ids if _int_or_none(x)}
         new = [i["id"] for i in pend if i["id"] not in seen]
@@ -3500,8 +3960,8 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
         if folder.get("status") == "submitted":
             return _approve_empty_folder(u, folder, note, batch)
         return False, 400, "这个票夹没有待审核的票", {}
-    self_rev = _self_review(u, folder, pend)
-    if self_rev and not db.is_super(u):
+    self_rev, blocked = self_blocked(u, folder, pend)
+    if blocked:
         return False, 403, _self_review_msg(u, folder), {}
     doubts = [i for i in pend if (i.get("flags_json") or {}).get("_doubt")]
     if doubts:
@@ -3546,7 +4006,7 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
         fu["status"] = "approved"
     S.folder_update(e, folder["id"], **fu)
     act = "审核·自审" if self_rev else ("批量审核通过" if batch else "审核通过")
-    det = {"items": len(pend), "note": note, "selfReview": self_rev}
+    det = {"items": len(pend), "note": note, "selfReview": self_rev, **_owner_tag(u, folder)}
     log(u, act, folder["id"], detail=det)
     audit(u, act, folder.get("title") or ("票夹#%d" % folder["id"]), det)
     return True, 200, "已通过 %d 张" % len(pend), {"selfReview": self_rev}
@@ -3555,24 +4015,40 @@ def approve_folder(u, folder, decisions=None, note="", batch=False, item_ids=Non
 def _approve_empty_folder(u, folder, note, batch):
     """票夹已提交、却一张待审的票都没有（后补单没票就关了、票被作废……）→ 直接把票夹记为已审核，不再卡在审核队列里。"""
     self_rev = folder.get("submitted_by") == u["name"]
-    if self_rev and not db.is_super(u):
+    if self_rev and not db.is_super(u) and not is_owner(u, folder):
         return False, 403, "提交人不能审核自己提交的票夹，请换一位会计审核", {}
     ts = now_s()
     note = _s(note, 500)
     S.folder_update(E(), folder["id"], status="approved", reviewed_by=u["name"], reviewed_at=ts, review_note=note,
                     self_review=1 if self_rev else 0)
-    det = {"items": 0, "note": note, "selfReview": self_rev, "batch": bool(batch)}
+    det = {"items": 0, "note": note, "selfReview": self_rev, "batch": bool(batch), **_owner_tag(u, folder)}
     log(u, "审核通过（没有待审的票）", folder["id"], detail=det)
     audit(u, "审核通过（没有待审的票）", folder.get("title") or ("票夹#%d" % folder["id"]), det)
     return True, 200, "这张单没有待审核的票，票夹已记为已审核", {"selfReview": self_rev}
 
 
-def _audit_queue_sync(u, tab, q, page, size):
+def _owner_filter(u, scope, st):
+    """审核队列「看谁名下的」→ 交给 S.audit_queue 的 owner 条件（None＝不分人）。
+    mine＝归我的；none＝未分派；all＝全部（别人名下的只读，由每行的 owner.canAct 管）；
+    其余＝某一位的（_owner_key 给的钥匙，只有「审核分派」权限的人用得上，别人给了也按 all 处理——反正只读）。"""
+    if scope == "mine":
+        return {"accounts": [u["name"]], "uids": sorted(_acct_uids(u["name"], st))}
+    if scope == "none":
+        return {"none": True}
+    if scope and scope != "all":
+        hit = next((g for g in _backlog_groups(st) if g["key"] == scope), None)
+        if hit:
+            return {"accounts": hit["_accounts"], "uids": hit["_uids"]}
+    return None
+
+
+def _audit_queue_sync(u, tab, q, page, size, scope="all"):
     e = E()
-    total, rows = S.audit_queue(e, tab=tab, q=q, page=page, size=size)
+    st = get_settings()
+    total, rows = S.audit_queue(e, tab=tab, q=q, page=page, size=size, owner=_owner_filter(u, scope, st))
     by = S.items_of_folders(e, [r["id"] for r in rows])
     lm = S.later_open_for_folders(e, rows)
-    st = get_settings()
+    memo = {}
     out = []
     for r in rows:
         items = by.get(r["id"], [])
@@ -3582,9 +4058,205 @@ def _audit_queue_sync(u, tab, q, page, size):
         v.update(pendingItems=c.get("pending_items", 0), anomalies=anomalies, clean=clean,
                  counts={"pendingItems": c.get("pending_items", 0), "invoices": c.get("invoices", 0),
                          "dup": c.get("dup", 0), "unchecked": c.get("unchecked", 0), "others": c.get("others", 0)},
-                 mine=_self_review(u, r, [i for i in items if i.get("review") == "pending"]))
+                 mine=self_blocked(u, r, [i for i in items if i.get("review") == "pending"])[1],
+                 owner=owner_view(u, r, st, memo))
         out.append(v)
-    return {"ok": True, "total": total, "rows": out}
+    return {"ok": True, "total": total, "rows": out, "scope": scope}
+
+
+# ── 审票分工：各人名下积压 / 认领 / 转交 ──
+
+def _owner_key(account, uid):
+    """一位「归谁审」的人在页面上的钥匙：有工作台账号的用账号；只有钉钉身份的用它的短摘要（钉钉内部编号不外露）。"""
+    return ("a:" + account) if account else ("d:" + hashlib.sha1(str(uid).encode("utf-8")).hexdigest()[:12])
+
+
+def _backlog_groups(st=None):
+    """待审核的票夹按「归谁审」归拢 → [{key, name, account, count, oldest, _accounts, _uids}]，未分派的不在里面。
+    同一个人既有按钉钉身份记的（自动接入）、又有按账号记的（认领/转交来的），归成一行。"""
+    st = st or get_settings()
+    acct_of, groups = {}, {}
+    for r in S.audit_pending_owners(E()):
+        uid, acc = r.get("owner_uid") or "", r.get("owner_account") or ""
+        if not uid and not acc:
+            continue
+        if not acc:
+            if uid not in acct_of:
+                acct_of[uid] = _acct_of_uid(uid, st)
+            acc = acct_of[uid]
+        k = _owner_key(acc, uid)
+        g = groups.setdefault(k, {"key": k, "name": "", "account": acc, "count": 0, "oldest": "", "_accounts": set(), "_uids": set()})
+        g["count"] += 1
+        g["name"] = g["name"] or r.get("owner_name") or acc
+        since = str(r.get("since") or "")
+        if since and (not g["oldest"] or since < g["oldest"]):
+            g["oldest"] = since
+        if r.get("owner_account"):
+            g["_accounts"].add(r["owner_account"])
+        if uid:
+            g["_uids"].add(uid)
+    out = []
+    for g in groups.values():
+        if g["account"]:
+            g["_accounts"].add(g["account"])
+        g["_accounts"], g["_uids"] = sorted(g["_accounts"]), sorted(g["_uids"])
+        out.append(g)
+    return out
+
+
+def _wait_days(since, today=None):
+    try:
+        d0 = datetime.strptime(str(since)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return max(0, ((today or datetime.now().date()) - d0).days)
+
+
+def _audit_backlog_sync(u):
+    """各人名下待审几张、最久等了几天（有人请假、该转交了一眼看得出）。
+    有「审核分派」权限的看全部人；别人只看得到自己名下和未分派两个数。"""
+    st = get_settings()
+    boss = can_assign(u)
+    mine_acc, mine_uids = u["name"], _acct_uids(u["name"], st)
+    people = []
+    for g in _backlog_groups(st):
+        mine = g["account"] == mine_acc or bool(set(g["_uids"]) & mine_uids)
+        if not (boss or mine):
+            continue
+        note = ""
+        if not g["account"]:
+            note = "这位还没有工作台账号"
+        elif not _acct_can_audit(g["account"]):
+            note = "这位还没开通发票审核"
+        people.append({"key": g["key"], "name": g["name"], "mine": mine, "count": g["count"], "oldest": g["oldest"],
+                       "days": _wait_days(g["oldest"]), "note": note})
+    people.sort(key=lambda p: (not p["mine"], -(p["days"] or 0), -p["count"], p["name"]))
+    rows = S.audit_pending_owners(E())
+    free = [r for r in rows if not (r.get("owner_uid") or r.get("owner_account"))]
+    oldest = min([str(r.get("since") or "") for r in free if r.get("since")] or [""])
+    return {"ok": True, "canAssign": boss, "people": people,
+            "unassigned": {"count": len(free), "oldest": oldest, "days": _wait_days(oldest) if oldest else None},
+            "total": len(rows)}
+
+
+@router.get("/api/inv/audit/backlog")
+async def audit_backlog(request: Request):
+    u, bad = need(request, ENTER_AUDIT)
+    if bad:
+        return bad
+    return await run_in_threadpool(_audit_backlog_sync, u)
+
+
+def _audit_people_sync():
+    """能做发票审核的账号（转交给谁的下拉用）→ [{account, name}]。"""
+    out = []
+    for row in db.list_users():
+        if str(row.get("active", 1)) == "0":
+            continue
+        if can(row, ENTER_AUDIT, CAP_AUDIT):
+            out.append({"account": row["name"], "name": row.get("dt_name") or row["name"]})
+    return {"ok": True, "people": out}
+
+
+@router.get("/api/inv/audit/people")
+async def audit_people(request: Request):
+    u, bad = need(request, ENTER_AUDIT, CAP_AUDIT)
+    if bad:
+        return bad
+    return await run_in_threadpool(_audit_people_sync)
+
+
+def _owner_cols_for(account, by, via):
+    """把票夹记到某个工作台账号名下要写的几栏。"""
+    row = db.get_user(account) or {}
+    uids = sorted(_acct_uids(account))
+    return dict(uid=(str(row.get("dt_userid") or "") or (uids[0] if uids else "")), account=account,
+                name=row.get("dt_name") or account, by=by, via=via)
+
+
+def _audit_claim_sync(u, fid):
+    """「我来审」：还没指派上的票夹（老数据、建的时候找不到人）归到我名下。两个人同时点只有一个成。"""
+    e = E()
+    f = S.folder_get(e, fid)
+    if not f:
+        return None, err("票夹不存在", 404)
+    o = owner_of(f)
+    if o["assigned"]:
+        if is_owner(u, f):
+            return {"ok": True, "msg": "这张单本来就在你名下", "folder": folder_view(f), "owner": owner_view(u, f)}, None
+        return None, err("这张单已经归%s审了" % o["name"], 409)
+    if not S.folder_owner_set(e, fid, **_owner_cols_for(u["name"], u["name"], "claim")):
+        f = S.folder_get(e, fid)
+        return None, err("刚被%s认领了，换一张吧" % (owner_of(f)["name"] or "别人"), 409)
+    f = S.folder_get(e, fid)
+    title = f.get("title") or f.get("business_id") or ("票夹#%d" % fid)
+    log(u, "认领审核", fid, detail={"to": f.get("owner_name")})
+    audit(u, "认领审核", title, {"folder": fid})
+    return {"ok": True, "msg": "已归到你名下", "folder": folder_view(f), "owner": owner_view(u, f)}, None
+
+
+@router.post("/api/inv/audit/claim")
+async def audit_claim(request: Request):
+    """body：{folderId}。未分派的票夹归到我名下。"""
+    u, bad = need(request, ENTER_AUDIT, CAP_AUDIT)
+    if bad:
+        return bad
+    body = await body_json(request)
+    fid = _int_or_none(body.get("folderId"))
+    if not fid:
+        return err("票夹不存在", 404)
+    out, bad = await run_in_threadpool(_audit_claim_sync, u, fid)
+    return bad if bad else out
+
+
+def _audit_assign_sync(u, fid, to, reason):
+    """转交：本人能把自己名下的转给别人；有「审核分派」权限的能转任何人名下的（含把未分派的派给某人）。
+    接收人要是能做发票审核的账号；原因必填；留痕记谁转的、从谁到谁、为什么。已审核完的票夹不转。"""
+    e = E()
+    f = S.folder_get(e, fid)
+    if not f:
+        return None, err("票夹不存在", 404)
+    if f.get("status") == "approved" and not [i for i in S.folder_items(e, fid) if i.get("review") == "pending"]:
+        return None, err("这张单已经审核完了，不用转交", 400)
+    o = owner_of(f)
+    boss = can_assign(u)
+    if not boss:
+        if not o["assigned"]:
+            return None, err("这张单还没人认领：要审就点「我来审」；派给别人要「审核分派」权限", 403)
+        if not is_owner(u, f):
+            return None, err("这张单归%s审，只有%s本人或管理员能转交" % (o["name"], o["name"]), 403)
+    if not _acct_can_audit(to):
+        return None, err("「%s」现在做不了发票审核（没有这个账号、已停用或没开通发票审核），换一位，或先请管理员给他开通" % to, 400)
+    cols = _owner_cols_for(to, u["name"], "transfer")
+    if o["assigned"] and (f.get("owner_account") == to or (cols["uid"] and cols["uid"] == f.get("owner_uid"))):
+        return None, err("这张单本来就归%s审" % o["name"], 400)
+    if not S.folder_owner_set(e, fid, expect=(f.get("owner_uid") or "", f.get("owner_account") or ""), **cols):
+        return None, err("转交的这会儿这张单被别人动过了，请刷新后再看", 409)
+    f = S.folder_get(e, fid)
+    title = f.get("title") or f.get("business_id") or ("票夹#%d" % fid)
+    det = {"from": o["name"] or "未分派", "to": f.get("owner_name") or to, "reason": reason, "by": u["name"]}
+    log(u, "转交审核", fid, detail=det)
+    audit(u, "转交审核", title, det)
+    return {"ok": True, "msg": "已转给%s" % (f.get("owner_name") or to), "folder": folder_view(f), "owner": owner_view(u, f)}, None
+
+
+@router.post("/api/inv/audit/assign")
+async def audit_assign(request: Request):
+    """body：{folderId, to: 接收人的工作台账号, reason: 为什么转（必填）}。"""
+    u, bad = need(request, ENTER_AUDIT, CAP_AUDIT)
+    if bad:
+        return bad
+    body = await body_json(request)
+    fid = _int_or_none(body.get("folderId"))
+    to, reason = _s(body.get("to"), 50), _s(body.get("reason"), 200)
+    if not fid:
+        return err("票夹不存在", 404)
+    if not to:
+        return err("选一下转给谁", 400)
+    if not reason:
+        return err("写一下为什么转交（请假、换岗……），以后查得到", 400)
+    out, bad = await run_in_threadpool(_audit_assign_sync, u, fid, to, reason)
+    return bad if bad else out
 
 
 @router.get("/api/inv/audit/queue")
@@ -3594,7 +4266,8 @@ async def audit_queue(request: Request):
         return bad
     qp = request.query_params
     tab = qp.get("tab") if qp.get("tab") in ("pending", "returned", "done") else "pending"
-    return await run_in_threadpool(_audit_queue_sync, u, tab, qp.get("q"), qp.get("page") or 1, qp.get("size") or 30)
+    scope = _s(qp.get("scope"), 60) or "all"     # 老页面不带：照旧看全部（别人名下的每行自己标只读）
+    return await run_in_threadpool(_audit_queue_sync, u, tab, qp.get("q"), qp.get("page") or 1, qp.get("size") or 30, scope)
 
 
 @router.post("/api/inv/audit/approve")
@@ -3711,8 +4384,11 @@ def _audit_return_sync(u, fid, note):
     pend = [i for i in items if i.get("review") == "pending"]
     if not pend and f.get("status") != "submitted":
         return None, err("这个票夹没有待审核的票，不用退回", 400)
-    self_rev = _self_review(u, f, pend)
-    if self_rev and not db.is_super(u):
+    gate = audit_gate(u, f, "处理", pend)
+    if gate:
+        return None, err(gate[1], gate[0], code="owner")
+    self_rev, blocked = self_blocked(u, f, pend)
+    if blocked:
         return None, err(_self_review_msg(u, f, "处理"), 403)
     ts = now_s()
     for it in pend:
@@ -3726,7 +4402,8 @@ def _audit_return_sync(u, fid, note):
         title, note, portal_link("/#/invdesk?folder=%d" % f["id"]))
     sent = notify_dt([dt_uid_of(target)] if target else [], text)
     act = "退回·自审" if self_rev else "审核退回"
-    det = {"items": len(pend), "note": note, "notify": target, "sent": bool(sent.get("sent")), "sendMsg": sent.get("msg")}
+    det = {"items": len(pend), "note": note, "notify": target, "sent": bool(sent.get("sent")), "sendMsg": sent.get("msg"),
+           **_owner_tag(u, f)}
     log(u, act, f["id"], detail=det)
     audit(u, act, title, det)
     return {"ok": True, "folder": folder_view(S.folder_get(e, f["id"])), "notify": sent}, None

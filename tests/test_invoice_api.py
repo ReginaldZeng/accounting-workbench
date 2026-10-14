@@ -138,7 +138,25 @@ class InvoiceApiTests(unittest.TestCase):
             h["x-test-perms"] = json.dumps(perms)
         return h
 
+    # 老用例不关心审票分工：做审核动作前，替这个人把还没人名下的票夹先认领了（分工本身在专门的用例里测，那里把它关掉）
+    AUTO_CLAIM = True
+
+    def _claim_for(self, user, url, body):
+        ids = [body.get("folderId")] + list(body.get("folderIds") or [])
+        m = re.match(r"/api/inv/(?:audit/)?item/(\d+)/", url)
+        if m:
+            it = self.S.item_get(self.db._engine, int(m.group(1))) or {}
+            if it.get("review") == "pending":
+                ids.append(it.get("folder_id"))
+        for fid in ids:
+            if isinstance(fid, int):
+                self.c.post("/api/inv/audit/claim", json={"folderId": fid}, headers=self.H(user))
+
     def post(self, url, user, body=None, **kw):
+        if self.AUTO_CLAIM and re.match(r"/api/inv/(audit/(approve|return|batch|item/)|item/)", url):
+            self._claim_for(user, url, body or {})
+        if self.AUTO_CLAIM and url in ("/api/inv/folder/manual", "/api/inv/desk/scan") and "auditor" not in (body or {}):
+            body = dict(body or {}, auditor="acct")      # 老用例：建票夹（含扫付款单建的）一律指定 acct 来审（建的时候必须指派清楚）
         return self.c.post(url, json=body if body is not None else {}, headers=self.H(user), **kw)
 
     def get(self, url, user):
@@ -325,7 +343,7 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual(self.post("/api/inv/folder/%d/submit" % m["id"], "maker").status_code, 200)
         r = self.post("/api/inv/audit/approve", "maker", {"folderId": m["id"], "itemIds": [it["id"]]})
         self.assertEqual(r.status_code, 403)
-        self.assertIn("提交人不能审核自己提交的票夹", r.json()["msg"])
+        self.assertIn("归acct审", r.json()["msg"])            # 建的时候指定了 acct 审：提交人自己审不了
         q = self.get("/api/inv/audit/queue?tab=pending", "acct").json()
         row = [x for x in q["rows"] if x["id"] == m["id"]][0]
         self.assertTrue(row["clean"], row["anomalies"])
@@ -788,8 +806,14 @@ class InvoiceApiTests(unittest.TestCase):
                       total=50000, review="pending", created_by="maker")
         r = self._approve(fo["id"], "maker")
         self.assertEqual(r.status_code, 403, r.text)
+        self.assertIn("归acct审", r.json()["msg"])
+        # 有「审核分派」权限的人能审别人名下的，但里面有他自己登记的票就不行（这张单不归他）
+        self._mk_user("lead", ["enter_accounting", "enter:invaudit", "inv_audit", "inv_assign"])
+        S.item_update(e, self._pending_ids(fo["id"])[-1], created_by="lead")
+        r = self._approve(fo["id"], "lead")
+        self.assertEqual(r.status_code, 403, r.text)
         self.assertIn("自己登记的票", r.json()["msg"])
-        q = self.get("/api/inv/audit/queue?tab=pending", "maker").json()
+        q = self.get("/api/inv/audit/queue?tab=pending&size=200", "lead").json()
         self.assertTrue([x for x in q["rows"] if x["id"] == fo["id"]][0]["mine"])
         r = self._approve(fo["id"], "acct")
         self.assertEqual(r.status_code, 200, r.text)
@@ -1484,8 +1508,8 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400, r.text)
         r = self.post("/api/inv/settings", "boss", {"settings": {"intake": {
             "approvers": [{"dtUserid": "boss-dt", "dtName": "老板"}, {"dtUserid": "boss-dt"}], "since": "2026-09-01"}}})
-        self.assertEqual(r.json()["settings"]["intake"], {"approvers": [{"dtUserid": "boss-dt", "dtName": "老板"}],
-                                                          "since": "2026-09-01"})
+        self.assertEqual(r.json()["settings"]["intake"],      # 没单独给启用日的人：沿用这次一起给的起始日
+                         {"approvers": [{"dtUserid": "boss-dt", "dtName": "老板", "since": "2026-09-01"}], "since": "2026-09-01"})
         from datetime import datetime as _dt, timedelta as _td
         ct = (_dt.now() - _td(days=1)).strftime("%Y-%m-%d %H:%M:%S")     # 跳过记录只留几天：用近日的单子
         insts = {
@@ -1589,6 +1613,642 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertTrue(data[:2] == b"PK")
         sys.modules.pop("routers.invoice_paper", None)
+
+    # ── 审票分工（用户 2026-10-13 定）：发票审核按人分 ──
+    def _mk_user(self, name, perms, dt=None):
+        db = self.db
+        if not db.get_user(name):
+            db.create_user(name, "x-test-pwd", grp="核算组", perms={k: True for k in perms})
+            ok, msg = db.change_own_pwd(name, "x-test-pwd", "x-test-pwd-2")
+            assert ok, msg
+        if dt:
+            db.bind_user_dt(name, dt, name)
+
+    def _pending_folder(self, title, amount, n, by="intern", auditor="acct", unassigned=False):
+        r = self.post("/api/inv/folder/manual", by, {"title": title, "amount": str(amount), "company": self.tip.FAKE["buyer"],
+                                                     "auditor": auditor})
+        self.assertEqual(r.status_code, 200, r.text)
+        fo = r.json()["folder"]
+        it = self.post("/api/inv/desk/scan", by, {"code": qr(self.N(n), amount)}).json()["item"]
+        self.assertEqual(self.post("/api/inv/folder/%d/submit" % fo["id"], by).status_code, 200)
+        if unassigned:          # 老数据 / 建的时候找不到人的：没有归属
+            self.S.folder_update(self.db._engine, fo["id"], owner_uid=None, owner_account=None, owner_name=None, owner_via=None)
+        return fo["id"], it["id"]
+
+    def _qrow(self, user, fid, scope="all"):
+        q = self.get("/api/inv/audit/queue?tab=pending&size=200&scope=%s" % scope, user).json()
+        return next((x for x in q["rows"] if x["id"] == fid), None)
+
+    def test_48_audit_by_owner_claim_transfer(self):
+        """没指派上的（老数据）要先认领（两人同时点只成一个）；普通会计只能审自己名下的，别人的只读；本人和有「审核分派」权限的人能转交
+        （原因必填、留痕）；有这个权限的人能直接审别人名下的，「归谁审」和「实际谁审的」分开记。"""
+        AUD = ["enter_accounting", "enter:invaudit", "inv_audit"]
+        self._mk_user("acct2", AUD)
+        self._mk_user("lead", AUD + ["inv_assign"])
+        self.AUTO_CLAIM = False
+        try:
+            S, e = self.S, self.db._engine
+            cfg = self.get("/api/inv/config", "lead").json()["can"]
+            self.assertTrue(cfg["assign"])
+            self.assertFalse(self.get("/api/inv/config", "acct").json()["can"]["assign"])
+            fid, iid = self._pending_folder("分工-未分派", 48, 4801, unassigned=True)
+            body = {"folderId": fid, "itemIds": [iid]}
+            # 未分派：谁都要先认领——普通会计、有分派权限的人都一样；后端拦，不只是藏按钮
+            for who in ("acct", "lead"):
+                r = self.post("/api/inv/audit/approve", who, body)
+                self.assertEqual(r.status_code, 403, r.text)
+                self.assertIn("还没指派给谁审", r.json()["msg"])
+            self.assertEqual(self.post("/api/inv/audit/return", "acct", {"folderId": fid, "note": "x"}).status_code, 403)
+            self.assertEqual(self.post("/api/inv/audit/item/%d/mark" % iid, "acct", {"mark": "ok"}).status_code, 403)
+            self.assertEqual(self.post("/api/inv/item/%d/update" % iid, "acct", {"fields": {"remark": "x"}}).status_code, 403)
+            row = self._qrow("acct", fid)
+            self.assertEqual((row["owner"]["assigned"], row["owner"]["canAct"]), (False, False))
+            self.assertIsNotNone(self._qrow("acct", fid, "none"))
+            self.assertIsNone(self._qrow("acct", fid, "mine"))
+            # 没有审核权限的人不能认领
+            self.assertEqual(self.post("/api/inv/audit/claim", "intern", {"folderId": fid}).status_code, 403)
+            mfid, _ = self._pending_folder("分工-另一张没指派上的", 49, 4802, by="maker", unassigned=True)
+            # 认领：先到先得
+            r = self.post("/api/inv/audit/claim", "acct", {"folderId": fid})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertTrue(r.json()["owner"]["mine"])
+            r = self.post("/api/inv/audit/claim", "acct2", {"folderId": fid})
+            self.assertEqual(r.status_code, 409, r.text)
+            self.assertIn("已经归acct审", r.json()["msg"])
+            self.assertFalse(S.folder_owner_set(e, fid, account="acct2", name="acct2", by="acct2", via="claim"))   # 库这一层也只让一个人记上
+            f = S.folder_get(e, fid)
+            self.assertEqual((f["owner_account"], f["owner_via"], f["owner_by"]), ("acct", "claim", "acct"))
+            # 别人名下的：看得到、只读，接口同样拦
+            row = self._qrow("acct2", fid)
+            self.assertEqual((row["owner"]["name"], row["owner"]["mine"], row["owner"]["canAct"]), ("acct", False, False))
+            self.assertIsNone(self._qrow("acct2", fid, "mine"))
+            self.assertIsNotNone(self._qrow("acct", fid, "mine"))
+            self.assertEqual(self.get("/api/inv/folder/%d" % fid, "acct2").status_code, 200)       # 打得开
+            for url, b in (("/api/inv/audit/approve", body), ("/api/inv/audit/return", {"folderId": fid, "note": "x"}),
+                           ("/api/inv/audit/item/%d/mark" % iid, {"mark": "ok"}),
+                           ("/api/inv/item/%d/update" % iid, {"fields": {"remark": "x"}})):
+                r = self.post(url, "acct2", b)
+                self.assertEqual(r.status_code, 403, url + r.text)
+                self.assertIn("归acct审", r.json()["msg"])
+            r = self.post("/api/inv/audit/batch", "acct2", {"folderIds": [fid]})
+            self.assertEqual(r.json()["done"], [])
+            self.assertIn("归acct审", r.json()["skipped"][0]["reason"])
+            # 转交：不是本人、又没有分派权限的转不了；原因必填；接收人要能做发票审核
+            r = self.post("/api/inv/audit/assign", "acct2", {"folderId": fid, "to": "acct2", "reason": "我来"})
+            self.assertEqual(r.status_code, 403, r.text)
+            self.assertEqual(self.post("/api/inv/audit/assign", "acct", {"folderId": fid, "to": "acct2"}).status_code, 400)
+            r = self.post("/api/inv/audit/assign", "acct", {"folderId": fid, "to": "intern", "reason": "请假"})
+            self.assertEqual(r.status_code, 400, r.text)
+            self.assertIn("做不了发票审核", r.json()["msg"])
+            self.assertEqual(self.post("/api/inv/audit/assign", "acct", {"folderId": fid, "to": "acct", "reason": "x"}).status_code, 400)
+            r = self.post("/api/inv/audit/assign", "acct", {"folderId": fid, "to": "acct2", "reason": "下周请假"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["owner"]["name"], "acct2")
+            lg = [x for x in self.items(fid)["logs"] if x["action"] == "转交审核"][0]
+            self.assertEqual((lg["user"], lg["detail"]["from"], lg["detail"]["to"], lg["detail"]["reason"]),
+                             ("acct", "acct", "acct2", "下周请假"))
+            # 转完，原来那位审不了了
+            r = self.post("/api/inv/audit/approve", "acct", body)
+            self.assertEqual(r.status_code, 403, r.text)
+            self.assertIn("归acct2审", r.json()["msg"])
+            # 有「审核分派」权限的人：能转任何人名下的，也能不转、直接审——归谁审不变，实际谁审的另记
+            r = self.post("/api/inv/audit/assign", "lead", {"folderId": fid, "to": "acct", "reason": "acct2 临时有事"})
+            self.assertEqual(r.status_code, 200, r.text)
+            row = self._qrow("lead", fid)
+            self.assertEqual((row["owner"]["name"], row["owner"]["mine"], row["owner"]["canAct"]), ("acct", False, True))
+            r = self.post("/api/inv/audit/approve", "lead", body)
+            self.assertEqual(r.status_code, 200, r.text)
+            fv = r.json()["folder"]
+            self.assertEqual((fv["status"], fv["ownerName"], fv["reviewedBy"]), ("approved", "acct", "lead"))
+            self.assertEqual(self._item(iid)["review_by"], "lead")
+            lg = [x for x in self.items(fid)["logs"] if x["action"] == "审核通过"][0]
+            self.assertEqual((lg["user"], lg["detail"]["owner"], lg["detail"]["forOther"]), ("lead", "acct", True))
+            self.assertEqual(self.post("/api/inv/audit/assign", "lead", {"folderId": fid, "to": "acct2", "reason": "x"}).status_code, 400)   # 审完的不转
+            # 本人审自己名下的：留痕不标代审
+            f2, i2 = self._pending_folder("分工-本人审", 50, 4803, unassigned=True)
+            self.assertEqual(self.post("/api/inv/audit/claim", "acct2", {"folderId": f2}).status_code, 200)
+            self.assertEqual(self.post("/api/inv/audit/approve", "acct2", {"folderId": f2, "itemIds": [i2]}).status_code, 200)
+            lg = [x for x in self.items(f2)["logs"] if x["action"] == "审核通过"][0]
+            self.assertEqual((lg["detail"]["owner"], lg["detail"].get("forOther")), ("acct2", None))
+            # 有分派权限的人可以把未分派的直接派给某位
+            r = self.post("/api/inv/audit/assign", "acct", {"folderId": mfid, "to": "acct2", "reason": "x"})
+            self.assertEqual(r.status_code, 403, r.text)
+            r = self.post("/api/inv/audit/assign", "lead", {"folderId": mfid, "to": "acct2", "reason": "派给 acct2"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(S.folder_get(e, mfid)["owner_via"], "transfer")
+            # 转交给谁的下拉：只列能做发票审核的账号
+            ppl = [p["account"] for p in self.get("/api/inv/audit/people", "acct").json()["people"]]
+            self.assertTrue({"acct", "acct2", "lead", "maker"} <= set(ppl))
+            self.assertNotIn("intern", ppl)
+            self.assertNotIn("nogate", ppl)
+        finally:
+            self.AUTO_CLAIM = True
+
+    def test_49_audit_backlog_and_dingtalk_owner(self):
+        """自动接入记的是钉钉身份：账号认了这个钉钉身份就是「归我的」；那位还没有账号/没开通审核的写明，由有权限的人转交或直接审。
+        各人名下积压：有「审核分派」权限的看全部人，别人只看自己和未分派。"""
+        AUD = ["enter_accounting", "enter:invaudit", "inv_audit"]
+        self._mk_user("acct3", AUD, dt="dt-acct3")
+        self._mk_user("lead", AUD + ["inv_assign"])
+        self._mk_user("noaudit", ["enter_accounting"], dt="dt-noaudit")
+        self.AUTO_CLAIM = False
+        try:
+            S, e, inv = self.S, self.db._engine, self.inv
+            fa, ia = self._pending_folder("积压-归acct3", 51, 4901, unassigned=True)
+            fb, _ = self._pending_folder("积压-还没账号的人", 52, 4902, unassigned=True)
+            fc, _ = self._pending_folder("积压-没开通审核的人", 53, 4903, unassigned=True)
+            fd, _ = self._pending_folder("积压-未分派", 54, 4904, unassigned=True)
+            self.assertTrue(S.folder_owner_set(e, fa, uid="dt-acct3", name="会计三", by="系统", via="intake"))
+            self.assertTrue(S.folder_owner_set(e, fb, uid="dt-ghost", name="刘某", by="系统", via="intake"))
+            self.assertTrue(S.folder_owner_set(e, fc, uid="dt-noaudit", name="陈某", by="系统", via="intake"))
+            S.folder_update(e, fb, submitted_at="2026-01-01 09:00:00")
+            self.assertFalse(S.folder_owner_set(e, fa, uid="dt-x", name="别人", by="系统", via="intake"))      # 已有人名下的，自动接入不改
+            # 账号认的钉钉身份对得上 → 归我的，能审；留痕记的是工作台账号
+            row = self._qrow("acct3", fa, "mine")
+            self.assertEqual((row["owner"]["name"], row["owner"]["mine"], row["owner"]["canAct"]), ("会计三", True, True))
+            self.assertIsNone(self._qrow("acct3", fb, "mine"))
+            # 归的那位现在审不了：写明原因，不悄悄掉回公共队列
+            self.assertEqual(self._qrow("acct3", fb)["owner"]["note"], "这位还没有工作台账号")
+            self.assertEqual(self._qrow("acct3", fc)["owner"]["note"], "这位还没开通发票审核")
+            self.assertEqual(self.post("/api/inv/audit/claim", "acct3", {"folderId": fb}).status_code, 409)
+            r = self.post("/api/inv/audit/approve", "acct3", {"folderId": fb, "itemIds": self._pending_ids(fb)})
+            self.assertEqual(r.status_code, 403, r.text)
+            # 积压：有分派权限的看全部人
+            b = self.get("/api/inv/audit/backlog", "lead").json()
+            self.assertTrue(b["canAssign"])
+            by = {p["name"]: p for p in b["people"]}
+            self.assertEqual((by["会计三"]["count"], by["会计三"]["note"]), (1, ""))
+            self.assertEqual((by["刘某"]["count"], by["刘某"]["note"], by["刘某"]["oldest"][:10]), (1, "这位还没有工作台账号", "2026-01-01"))
+            self.assertGreater(by["刘某"]["days"], 200)
+            self.assertEqual(by["陈某"]["note"], "这位还没开通发票审核")
+            self.assertGreaterEqual(b["unassigned"]["count"], 1)
+            self.assertNotIn("dt-", json.dumps(b, ensure_ascii=False))                     # 钉钉内部编号不外露
+            # 按人看：点某位的积压 → 队列只剩他的
+            q = self.get("/api/inv/audit/queue?tab=pending&size=200&scope=%s" % by["刘某"]["key"], "lead").json()
+            self.assertEqual([x["id"] for x in q["rows"]], [fb])
+            # 普通会计只看得到自己名下和未分派两个数
+            b2 = self.get("/api/inv/audit/backlog", "acct3").json()
+            self.assertFalse(b2["canAssign"])
+            self.assertEqual([p["name"] for p in b2["people"]], ["会计三"])
+            self.assertTrue(b2["people"][0]["mine"])
+            self.assertEqual(b2["unassigned"]["count"], b["unassigned"]["count"])
+            # 有分派权限的人把没账号那位名下的转给能审的人
+            r = self.post("/api/inv/audit/assign", "lead", {"folderId": fb, "to": "acct3", "reason": "刘某还没开账号"})
+            self.assertEqual(r.status_code, 200, r.text)
+            f = S.folder_get(e, fb)
+            self.assertEqual((f["owner_account"], f["owner_uid"], f["owner_name"]), ("acct3", "dt-acct3", "acct3"))
+            self.assertIsNotNone(self._qrow("acct3", fb, "mine"))
+            b3 = {p["name"]: p for p in self.get("/api/inv/audit/backlog", "lead").json()["people"]}
+            self.assertNotIn("刘某", b3)
+            self.assertEqual(b3["会计三"]["count"], 2)                                   # 按钉钉身份记的＋按账号记的，归成一行
+        finally:
+            self.AUTO_CLAIM = True
+
+    def test_50_intake_per_approver_since(self):
+        """每位接入审批人带自己的启用日：只接提交日在他启用日当天及以后的单；没启用的等于不在名单里；
+        经过几位的归最先走到、且对这张单已启用的那位；改了谁的启用日只从他的启用日起重列。"""
+        inv = self.inv
+        sys.modules.pop("routers.invoice_intake", None)
+        from routers import invoice_intake as ii
+        A = {"dtUserid": "u-a", "dtName": "甲", "since": "2026-09-01"}
+        B = {"dtUserid": "u-b", "dtName": "乙", "since": "2026-10-15"}
+        C = {"dtUserid": "u-c", "dtName": "丙", "since": ""}
+        t = lambda uid, at: {"userid": uid, "create_time": at}
+        fo = lambda ct, tasks: ii.first_owner({"create_time": ct, "tasks": tasks}, [A, B, C])
+        self.assertEqual(ii.enabled_approvers({"approvers": [A, B, C]}), [A, B])
+        # 启用日以后提交、先走到乙 → 归乙；同一张单后来又到甲也不改
+        self.assertIs(fo("2026-10-20 09:00:00", [t("u-b", "2026-10-20 10:00:00"), t("u-a", "2026-10-21 10:00:00")]), B)
+        # 钉钉给的顺序乱了也按任务生成时间算先后
+        self.assertIs(fo("2026-10-20 09:00:00", [t("u-a", "2026-10-21 10:00:00"), t("u-b", "2026-10-20 10:00:00")]), B)
+        # 乙启用日以前提交的：经过乙不算，等走到甲才归甲；只到过乙 → 还没人接
+        self.assertIs(fo("2026-10-01 09:00:00", [t("u-b", "2026-10-02 10:00:00"), t("u-a", "2026-10-03 10:00:00")]), A)
+        self.assertIsNone(fo("2026-10-01 09:00:00", [t("u-b", "2026-10-02 10:00:00")]))
+        self.assertIs(fo("2026-10-15 00:00:01", [t("u-b", "2026-10-15 10:00:00")]), B)       # 启用日当天提交的算
+        # 没启用的人（丙）等于不在名单里
+        self.assertIsNone(fo("2026-10-20 09:00:00", [t("u-c", "2026-10-20 10:00:00")]))
+        self.assertIsNone(ii.first_owner({"tasks": [t("u-a", "")]}, [C]))
+        # 设置：每人一行带启用日；坏日期拒存；老设置（没有启用日这一栏）沿用全局起始日
+        old = self.db.get_setting("inv_config", None)
+        try:
+            raw = dict(old, intake={"approvers": [{"dtUserid": "u-a", "dtName": "甲"}], "since": "2026-09-09"})
+            self.db.set_setting("inv_config", raw, "test")
+            self.assertEqual(inv.get_settings()["intake"]["approvers"], [{"dtUserid": "u-a", "dtName": "甲", "since": "2026-09-09"}])
+            r = self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": [
+                {"dtUserid": "u-a", "dtName": "甲", "since": "9月1号"}]}}})
+            self.assertEqual(r.status_code, 400, r.text)
+            self.assertIn("启用日", r.json()["msg"])
+            r = self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": [
+                {"dtUserid": "u-a", "dtName": "甲"}, {"dtUserid": "u-b", "dtName": "乙", "since": ""},
+                {"dtUserid": "u-c", "dtName": "丙", "since": "2026/10/15"}]}}})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["settings"]["intake"]["approvers"], [
+                {"dtUserid": "u-a", "dtName": "甲", "since": "2026-09-09"},      # 没带启用日：沿用他原来的
+                {"dtUserid": "u-b", "dtName": "乙", "since": ""},                # 明确留空＝还没启用
+                {"dtUserid": "u-c", "dtName": "丙", "since": "2026-10-15"}])
+            # 扫描：乙没启用 → 只到过乙的单接着等，不建票夹；归属记在最先走到的那位（钉钉身份）名下
+            from datetime import datetime as _dt, timedelta as _td
+            ct = (_dt.now() - _td(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": [
+                {"dtUserid": "u-a", "dtName": "甲", "since": ct[:10]}, {"dtUserid": "u-b", "dtName": "乙", "since": ""}]}}})
+            insts = {
+                "PI-OWN-A": {"status": "RUNNING", "create_time": ct, "business_id": "202610120000000000001",
+                             "tasks": [t("u-b", ct), t("u-a", ct)]},
+                "PI-OWN-B": {"status": "RUNNING", "create_time": ct, "business_id": "202610120000000000002", "tasks": [t("u-b", ct)]},
+            }
+            self.db.set_setting(ii.STATE_KEY, {}, "test")
+            made = []
+
+            def opened(**kw):
+                norm = {"instId": kw["inst_id"], "businessId": kw["inst"]["business_id"], "template": "付款申请（公对公）",
+                        "title": "分工接入 " + kw["inst_id"], "approvalStatus": "RUNNING", "attachments": [], "photos": [],
+                        "hasAttachments": False}
+                with patch.object(inv.idt, "normalize_instance", MagicMock(return_value=norm)):
+                    r = real_open(**kw)
+                made.append(r["folder"]["id"])
+                return r
+            real_open = inv.open_approval_folder
+            oapi = lambda conf, path, body, timeout=20: {"errcode": 0, "process_instance": insts[body["process_instance_id"]]}
+            lst = MagicMock(return_value=(list(insts), ""))
+            with patch.object(ii.idt, "_load_conf", MagicMock(return_value={"x": 1})), \
+                    patch.object(ii.idt, "_process_code", MagicMock(return_value=("PROC-1", ""))), \
+                    patch.object(ii.idt, "_list_ids", lst), patch.object(ii.idt, "_oapi", oapi), \
+                    patch.object(ii.inv, "open_approval_folder", opened):
+                r = ii.scan_once("测试")
+                self.assertTrue(r["ok"], r)
+                self.assertEqual((r["full"], r["created"], r["waiting"]), (True, 1, 1))
+                f = self.S.folder_get(inv.E(), made[0])
+                self.assertEqual((f["inst_id"], f["owner_uid"], f["owner_name"], f["owner_via"], f["owner_account"]),
+                                 ("PI-OWN-A", "u-a", "甲", "intake", None))
+                self.assertIn("归谁审", [x["action"] for x in self.items(made[0])["logs"]])
+                # 没人改启用日：下一轮只列最近几天
+                r = ii.scan_once("测试")
+                self.assertEqual((r["full"], r["created"]), (False, 0))
+                # 乙填了启用日 → 从乙的启用日起重列一遍；等着的那张归乙；甲已有的票夹不动
+                self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": [
+                    {"dtUserid": "u-a", "dtName": "甲", "since": ct[:10]}, {"dtUserid": "u-b", "dtName": "乙", "since": "2026-10-01"}]}}})
+                lst.reset_mock()
+                r = ii.scan_once("测试")
+                self.assertEqual((r["full"], r["from"], r["created"], r["waiting"]), (True, "2026-10-01", 1, 0))
+                f2 = self.S.folder_get(inv.E(), made[1])
+                self.assertEqual((f2["inst_id"], f2["owner_uid"], f2["owner_name"]), ("PI-OWN-B", "u-b", "乙"))
+                self.assertEqual(self.S.folder_get(inv.E(), made[0])["owner_uid"], "u-a")
+            # 一位都没启用 → 不扫，并说清楚原因
+            self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": [{"dtUserid": "u-b", "dtName": "乙", "since": ""}]}}})
+            r = ii.scan_once("测试")
+            self.assertFalse(r["ok"])
+            self.assertIn("还没填启用日", r["msg"])
+        finally:
+            self.db.set_setting("inv_config", old, "test")
+            sys.modules.pop("routers.invoice_intake", None)
+
+    def test_52_folder_is_assigned_when_created(self):
+        """建了票夹一定是指派清楚的（用户 2026-10-13 定）：实习生建的要指定审核会计；会计自己建的归自己审——
+        自己建、自己扫、自己审放行，留痕标自审；有付款单的按审批流找最先走到、已启用的接入审批人。"""
+        inv, S, e = self.inv, self.S, self.db._engine
+        self.AUTO_CLAIM = False
+        old = self.db.get_setting("inv_config", None)
+        try:
+            body = {"title": "指派-实习生建", "amount": "60", "company": self.tip.FAKE["buyer"]}
+            # 实习生（自己审不了）：不指定不让建；指定的人要能做发票审核
+            r = self.post("/api/inv/folder/manual", "intern", body)
+            self.assertEqual((r.status_code, r.json().get("code")), (400, "needAuditor"), r.text)
+            self.assertIn("指定一位审核会计", r.json()["msg"])
+            r = self.post("/api/inv/folder/manual", "intern", dict(body, auditor="viewer"))
+            self.assertEqual(r.status_code, 400, r.text)
+            self.assertIn("做不了发票审核", r.json()["msg"])
+            r = self.post("/api/inv/folder/manual", "intern", dict(body, auditor="acct"))
+            self.assertEqual(r.status_code, 200, r.text)
+            fid = r.json()["folder"]["id"]
+            f = S.folder_get(e, fid)
+            self.assertEqual((f["owner_account"], f["owner_via"], f["owner_by"]), ("acct", "pick", "intern"))
+            self.assertEqual(r.json()["folder"]["ownerName"], "acct")
+            self.assertIn("归谁审", [x["action"] for x in self.items(fid)["logs"]])
+            # 会计自己建：不用指定，归自己；自己扫、自己提交、自己审 → 放行，标自审
+            r = self.post("/api/inv/folder/manual", "maker", dict(body, title="指派-会计自己建", amount="61"))
+            self.assertEqual(r.status_code, 200, r.text)
+            mid = r.json()["folder"]["id"]
+            self.assertEqual((S.folder_get(e, mid)["owner_account"], S.folder_get(e, mid)["owner_via"]), ("maker", "self"))
+            it = self.post("/api/inv/desk/scan", "maker", {"code": qr(self.N(5201), 61)}).json()["item"]
+            self.assertEqual(self.post("/api/inv/folder/%d/submit" % mid, "maker").status_code, 200)
+            row = self._qrow("maker", mid, "mine")
+            self.assertEqual((row["owner"]["mine"], row["mine"]), (True, False))            # 归我的；不算「自己的不能审」
+            r = self.post("/api/inv/audit/approve", "maker", {"folderId": mid, "itemIds": [it["id"]]})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertTrue(r.json()["selfReview"])
+            fv = r.json()["folder"]
+            self.assertEqual((fv["status"], fv["ownerName"], fv["reviewedBy"], fv["selfReview"]), ("approved", "maker", "maker", True))
+            self.assertIn("审核·自审", [x["action"] for x in self.items(mid)["logs"]])
+            # 会计建的也可以指定别人审：那就归别人，自己审不了
+            r = self.post("/api/inv/folder/manual", "maker", dict(body, title="指派-会计建给别人审", auditor="acct"))
+            self.assertEqual(S.folder_get(e, r.json()["folder"]["id"])["owner_account"], "acct")
+            # 有付款单的：收票台扫付款单建票夹，按审批流找人；找不到（没走到已启用的接入审批人）→ 实习生要指定，会计归自己
+            ct = "2026-10-12 09:00:00"
+            self.post("/api/inv/settings", "boss", {"settings": {"intake": {"approvers": [
+                {"dtUserid": "dt-flow", "dtName": "流程会计", "since": "2026-10-01"},
+                {"dtUserid": "dt-off", "dtName": "没启用的", "since": ""}]}}})
+
+            def scan(user, iid, tasks, auditor=None):
+                norm = {"instId": iid, "businessId": "2026101200000000" + iid[-5:], "template": "付款申请（公对公）",
+                        "title": "扫付款单 " + iid, "approvalStatus": "RUNNING", "attachments": [], "photos": [], "hasAttachments": False}
+                raw = {"create_time": ct, "tasks": tasks}
+                b = {"code": "https://aflow.dingtalk.com/qr/" + iid}
+                if auditor:
+                    b["auditor"] = auditor
+                with patch.object(inv.idt, "resolve_link", MagicMock(return_value={"ok": True, "procInstId": iid, "msg": ""})), \
+                        patch.object(inv.idt, "get_instance", MagicMock(return_value={"ok": True, "inst": raw, "msg": ""})), \
+                        patch.object(inv.idt, "normalize_instance", MagicMock(return_value=norm)):
+                    return self.post("/api/inv/desk/scan", user, b)
+            t = lambda uid: {"userid": uid, "create_time": ct}
+            r = scan("intern", "PI-AS-00001", [t("dt-off"), t("dt-flow")])
+            self.assertEqual(r.status_code, 200, r.text)
+            f = S.folder_by_inst(e, "PI-AS-00001")
+            self.assertEqual((f["owner_uid"], f["owner_name"], f["owner_via"], f["source"]), ("dt-flow", "流程会计", "intake", "scan"))
+            r = scan("intern", "PI-AS-00002", [t("dt-off")])                # 只到过没启用的人
+            self.assertEqual((r.status_code, r.json().get("code")), (400, "needAuditor"), r.text)
+            self.assertIsNone(S.folder_by_inst(e, "PI-AS-00002"))           # 没指派清楚就不建
+            r = scan("intern", "PI-AS-00002", [t("dt-off")], auditor="acct")
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual((S.folder_by_inst(e, "PI-AS-00002")["owner_account"], S.folder_by_inst(e, "PI-AS-00002")["owner_via"]), ("acct", "pick"))
+            r = scan("maker", "PI-AS-00003", [])                            # 会计自己扫：归自己
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual((S.folder_by_inst(e, "PI-AS-00003")["owner_account"], S.folder_by_inst(e, "PI-AS-00003")["owner_via"]), ("maker", "self"))
+            # 再扫一遍已有的票夹：归属不变（哪怕这次指定了别人）
+            r = scan("intern", "PI-AS-00001", [t("dt-flow")], auditor="acct")
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(S.folder_by_inst(e, "PI-AS-00001")["owner_uid"], "dt-flow")
+            # 会计把纸质票扫进自己名下的付款单：自己登记的票自己审，放行
+            self._mk_user("flowacct", ["enter_accounting", "enter:invdesk", "inv_intake", "enter:invaudit", "inv_audit"], dt="dt-flow")
+            f1 = S.folder_by_inst(e, "PI-AS-00001")
+            self.post("/api/inv/desk/open", "flowacct", {"folderId": f1["id"]})
+            it2 = self.post("/api/inv/desk/scan", "flowacct", {"code": qr(self.N(5202), 88)}).json()["item"]
+            S.item_update(e, it2["id"], review="pending")
+            S.folder_update(e, f1["id"], status="submitted", submitted_by="系统", amount=88)
+            r = self.post("/api/inv/audit/approve", "flowacct", {"folderId": f1["id"], "itemIds": [it2["id"]], "gapNote": "测试"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertTrue(r.json()["selfReview"])
+        finally:
+            self.AUTO_CLAIM = True
+            self.db.set_setting("inv_config", old, "test")
+
+    def test_53_manual_folder_name(self):
+        """没有付款单的票夹：名字系统起＝主体简称-审核会计-开票年月＋进项认证（批量手工/单张手工）；一个票夹只装一家主体；
+        批量的同一家、同一位会计、同一个月只用一个（还在收票就接着用，交了再建排 -2）；单张的每次新建，从 -1 排号。"""
+        inv, S, e, db = self.inv, self.S, self.db._engine, self.db
+        self.AUTO_CLAIM = False
+        old = db.get_setting("inv_config", None)
+        try:
+            XG, SZ = "孝感市星期九食品科技有限公司", "深圳市星期零食品科技有限公司"
+            db.set_setting("inv_config", dict(old, company=[{"name": XG, "taxId": "91420900MA4F00NK81"},
+                                                            {"name": SZ, "taxId": "91440300MA5EHQAR7X"}]), "test")
+            db.seed_orgs()
+            # 简称读基础数据「主体档案」（档案里没填全称也认得出）；档案里没有的公司原样用全称
+            self.assertEqual((inv.org_short(XG), inv.org_short(SZ)), ("孝感星期九", "深圳星期零"))
+            self.assertEqual(inv.org_short("别的什么有限公司"), "别的什么有限公司")
+            self.assertEqual(inv.manual_folder_name(XG, "陈梓华", "202608", "batch"), "孝感星期九-陈梓华-202608进项认证（批量手工）")
+            mk = lambda user, **kw: self.post("/api/inv/folder/manual", user, dict({"month": "2026-08", "company": XG}, **kw))
+            # 主体必选（一个票夹只装一家）；月份写错不收；实习生照样要指定审核会计
+            self.assertEqual(mk("maker", company="").json().get("code"), "needCompany")
+            self.assertEqual(mk("maker", company="别家公司").status_code, 400)
+            self.assertEqual(mk("maker", month="8月").status_code, 400)
+            self.assertEqual(mk("intern").json().get("code"), "needAuditor")
+            # 会计自己建：归自己，名字里是他
+            r = mk("maker")
+            self.assertEqual(r.status_code, 200, r.text)
+            f1 = r.json()["folder"]
+            self.assertEqual((f1["title"], f1["company"], f1["ownerName"]), ("孝感星期九-maker-202608进项认证（批量手工）", XG, "maker"))
+            # 同一家、同一位、同一个月的批量票夹还在收票：再建＝接着用，不多建
+            r = mk("maker")
+            self.assertEqual((r.json()["reused"], r.json()["folder"]["id"]), (True, f1["id"]))
+            # 实习生建、指定同一位会计：也是接着用同一个
+            r = mk("intern", auditor="maker")
+            self.assertEqual((r.json().get("reused"), r.json()["folder"]["id"]), (True, f1["id"]))
+            # 另一家主体、另一个月、另一位会计：各建各的
+            self.assertEqual(mk("maker", company=SZ).json()["folder"]["title"], "深圳星期零-maker-202608进项认证（批量手工）")
+            self.assertEqual(mk("maker", month="202609").json()["folder"]["title"], "孝感星期九-maker-202609进项认证（批量手工）")
+            self.assertEqual(mk("intern", auditor="acct").json()["folder"]["title"], "孝感星期九-acct-202608进项认证（批量手工）")
+            # 交上去以后再建：排 -2
+            S.folder_update(e, f1["id"], status="submitted")
+            r = mk("maker")
+            self.assertEqual((r.json().get("reused"), r.json()["folder"]["title"]), (None, "孝感星期九-maker-202608进项认证（批量手工）-2"))
+            # 单张：每次新建，-1 -2 -3
+            got = [mk("maker", way="single").json()["folder"]["title"] for _ in range(3)]
+            self.assertEqual(got, ["孝感星期九-maker-202608进项认证（单张手工）-%d" % n for n in (1, 2, 3)])
+            # 转交以后名字不跟着改
+            fid = mk("maker", month="2026-07").json()["folder"]["id"]
+            self.post("/api/inv/desk/scan", "maker", {"code": qr(self.N(5301), 10)})
+            self.assertEqual(self.post("/api/inv/audit/assign", "maker", {"folderId": fid, "to": "acct", "reason": "换人"}).status_code, 200)
+            f = S.folder_get(e, fid)
+            self.assertEqual((f["title"], f["owner_account"]), ("孝感星期九-maker-202607进项认证（批量手工）", "acct"))
+            # 老页面（不带开票月份）照旧：自己填名字
+            r = self.post("/api/inv/folder/manual", "maker", {"title": "老写法"})
+            self.assertEqual(r.json()["folder"]["title"], "老写法")
+        finally:
+            self.AUTO_CLAIM = True
+            db.set_setting("inv_config", old, "test")
+
+    @unittest.skipUnless(HAS_IMG, "缺 PyMuPDF/opencv/Pillow")
+    def test_54_auto_split_by_company(self):
+        """主体要分开（用户 2026-10-13 定）：选「自动识别」先建「主体待定」的收票口，票放进来按抬头分到各主体自己的票夹
+        （一家一个，归属/开票年月照抄）；抬头读不出的留在收票口，由人定；选了某一家的票夹里放进别家的票，也自动挪过去；
+        开票月份不一样只提醒不拦；老的手工票夹、付款单的票夹不动。"""
+        inv, S, e, db, tip = self.inv, self.S, self.db._engine, self.db, self.tip
+        A = tip.FAKE["buyer"]
+        B, B_TID = "测试丁方食品有限公司", "91420900MA4TESTB0X"
+        self.AUTO_CLAIM = False
+        old = db.get_setting("inv_config", None)
+        try:
+            db.set_setting("inv_config", dict(old, company=[{"name": A, "taxId": tip.FAKE["buyer_tid"]}, {"name": B, "taxId": B_TID}]), "test")
+
+            def pdf(n, buyer=A, tid=None, date="2026-05-10"):
+                v = dict(tip.FAKE, number=self.N(n), buyer=buyer, buyer_tid=tid or tip.FAKE["buyer_tid"], date=date,
+                         date_cn="%s年%s月%s日" % tuple(date.split("-")))
+                return tip.build_pdf(tip._page_items_digital("split", v=v), qr=qr(v["number"], v["total"], date=date.replace("-", "")))
+
+            def up(user, n, **kw):
+                r = self.upload(user, "票%d.pdf" % n, pdf(n, **kw), "application/pdf")
+                self.assertEqual(r.status_code, 200, r.text)
+                return r.json()["results"][0]
+            mk = lambda user, **kw: self.post("/api/inv/folder/manual", user, dict({"month": "2026-05", "company": "auto"}, **kw))
+            # 自动识别：先建「主体待定」的收票口
+            r = mk("maker")
+            self.assertEqual(r.status_code, 200, r.text)
+            hold = r.json()["folder"]
+            self.assertEqual((hold["title"], hold["company"], hold["batch"]["hold"]), ("主体待定-maker-202605进项认证（批量手工）", "", True))
+            self.assertEqual(mk("maker").json()["folder"]["id"], hold["id"])               # 再点一次：接着用，不多建
+            # 甲方抬头的票 → 甲方自己的票夹（当场建）；丁方的 → 丁方的；再来一张甲方的 → 还是那个甲方票夹
+            r1 = up("maker", 5401)
+            self.assertEqual(r1["action"], "item", r1)
+            fa = S.folder_get(e, r1["folderId"])
+            self.assertEqual((fa["title"], fa["company"], fa["owner_account"], fa["bill_month"], fa["batch_way"], fa["source"]),
+                             ("%s-maker-202605进项认证（批量手工）" % A, A, "maker", "202605", "batch", "manual"))
+            self.assertIn("已放到「%s」" % fa["title"], r1["msg"])
+            self.assertEqual(r1["movedTo"]["id"], fa["id"])
+            r2 = up("maker", 5402, buyer=B, tid=B_TID)
+            fb = S.folder_get(e, r2["folderId"])
+            self.assertEqual((fb["company"], fb["id"] != fa["id"]), (B, True))
+            self.assertEqual(up("maker", 5403)["folderId"], fa["id"])
+            # 票和它的文件一起过去了：甲方票夹里看得到图
+            det = self.items(fa["id"], "maker")
+            self.assertEqual(sorted(i["number"] for i in det["items"]), [self.N(5401), self.N(5403)])
+            self.assertTrue(all(S.file_get(e, i["file_id"])["folder_id"] == fa["id"] for i in S.folder_items(e, fa["id"])))
+            self.assertFalse([i for i in det["items"] if (i.get("flags") or {}).get("buyerMismatch")])
+            self.assertIn("按抬头分主体", [x["action"] for x in det["logs"]])
+            # 收票口空了；页面上能看到这一批分出去的票夹各有几张
+            hv = self.items(hold["id"], "maker")
+            self.assertEqual(hv["items"], [])
+            self.assertEqual({(x["company"], x["invoices"]) for x in hv["folder"]["batch"]["siblings"]}, {(A, 2), (B, 1)})
+            # 抬头读不出来的（扫码枪扫的二维码里没有抬头）：留在收票口，提交不了；人定了是哪家 → 挪过去
+            it = self.post("/api/inv/desk/scan", "maker", {"code": qr(self.N(5404), 30)}).json()
+            self.assertEqual(self._item(it["item"]["id"])["folder_id"], hold["id"])
+            r = self.post("/api/inv/folder/%d/submit" % hold["id"], "maker")
+            self.assertEqual(r.status_code, 400, r.text)
+            self.assertIn("没分出是哪家主体", r.json()["msg"])
+            self.assertEqual(self.post("/api/inv/item/%d/company" % it["item"]["id"], "maker", {"company": "别家"}).status_code, 400)
+            r = self.post("/api/inv/item/%d/company" % it["item"]["id"], "maker", {"company": B})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual((r.json()["moved"]["id"], self._item(it["item"]["id"])["folder_id"]), (fb["id"], fb["id"]))
+            # 直接选了某一家：建的就是这家的（已经有了就接着用）；放进别家的票，自动挪到别家
+            r = mk("maker", company=B)
+            self.assertEqual((r.json().get("reused"), r.json()["folder"]["id"]), (True, fb["id"]))
+            r5 = up("maker", 5405)                                   # 现在开着的是丁方票夹，放进来一张甲方的
+            self.assertEqual(r5["folderId"], fa["id"])
+            # 不是本公司抬头的：不挪，照旧标红
+            r6 = up("maker", 5406, buyer="外面的公司有限公司", tid="91110000MA00ZZZZ9X")
+            self.assertEqual(r6["folderId"], fb["id"])
+            self.assertTrue((self._item(r6["itemId"])["flags_json"] or {}).get("buyerNotCompany"))
+            # 另一位会计、另一个月：各是各的一批，不串
+            r = mk("intern", auditor="acct")
+            self.assertNotEqual(r.json()["folder"]["id"], hold["id"])
+            r7 = up("intern", 5407)
+            fa2 = S.folder_get(e, r7["folderId"])
+            self.assertEqual((fa2["company"], fa2["owner_account"], fa2["id"] != fa["id"]), (A, "acct", True))
+            # 开票月份不一样：提醒，不拦
+            S.desk_set(e, "maker", fa["id"])
+            blockers, warnings = inv.submit_check(S.folder_get(e, fa["id"]), S.folder_items(e, fa["id"]))
+            self.assertNotIn("monthDiff", [w["code"] for w in warnings])
+            self.post("/api/inv/desk/open", "maker", {"folderId": fa["id"]})
+            r8 = up("maker", 5408, date="2026-04-15")
+            self.assertEqual(r8["folderId"], fa["id"])
+            blockers, warnings = inv.submit_check(S.folder_get(e, fa["id"]), S.folder_items(e, fa["id"]))
+            w = [x for x in warnings if x["code"] == "monthDiff"]
+            self.assertEqual((len(w), w[0]["itemIds"]), (1, [r8["itemId"]]))
+            self.assertNotIn("noCompany", [b["code"] for b in blockers])
+            # 老的手工票夹（不带开票月份）不动：抬头对不上照旧只标红
+            lg = self.post("/api/inv/folder/manual", "maker", {"title": "老写法", "company": B}).json()["folder"]
+            r9 = up("maker", 5409)
+            self.assertEqual(r9["folderId"], lg["id"])
+            self.assertTrue((self._item(r9["itemId"])["flags_json"] or {}).get("buyerMismatch"))
+        finally:
+            self.AUTO_CLAIM = True
+            db.set_setting("inv_config", old, "test")
+
+    def test_55_paper_check_against_selected_folders(self):
+        """对纸质票（用户 2026-10-14 定）：选中几个票夹开一次点验，连续扫——在选中票夹里的记「扫到」（按这一次单独记，不看纸质件已到），
+        重复扫不重复算；别的票夹里的 / 系统里没有的只提醒，不登记也不挪；没二维码的手工勾；电脑和手机扫的记到同一次。"""
+        inv, S, e = self.inv, self.S, self.db._engine
+        sys.modules.pop("routers.invoice_check", None)
+        from routers import invoice_check as ck_
+        app = FastAPI()
+        app.include_router(ck_.router)
+        c = TestClient(app)
+        post = lambda url, user, body=None: c.post(url, json=body or {}, headers=self.H(user))
+        get = lambda url, user: c.get(url, headers=self.H(user))
+        try:
+            def folder(title, nums):
+                fo = self.manual("intern", title, str(10 * len(nums)))
+                ids = [self.scan("intern", qr(self.N(n), 10))["item"]["id"] for n in nums]
+                return fo["id"], ids
+            f1, (a1, a2) = folder("点验-票夹一", (5501, 5502))
+            f2, (b1,) = folder("点验-票夹二", (5503,))
+            f3, (x1,) = folder("点验-没选中的", (5504,))
+            S.item_update(e, a1, paper=0)
+            self.assertEqual(post("/api/inv/check/start", "nogate", {"folderIds": [f1]}).status_code, 403)
+            self.assertEqual(post("/api/inv/check/start", "acct", {"folderIds": []}).status_code, 400)
+            r = post("/api/inv/check/start", "acct", {"folderIds": [f1, f2, f1, 999999], "entry": "audit"})
+            self.assertEqual(r.status_code, 200, r.text)
+            v = r.json()
+            cid = v["check"]["id"]
+            self.assertEqual(([f["id"] for f in v["folders"]], v["stats"]), ([f1, f2], {"total": 3, "hit": 0, "left": 3, "strangers": 0}))
+            self.assertTrue(all(i["hit"] is None for i in v["items"]))          # 纸质件早就记了已到的，这一次也是没扫到
+            # 扫到选中票夹里的 → 确认；原来没记纸质件的顺手记上
+            r = post("/api/inv/check/%d/scan" % cid, "acct", {"code": qr(self.N(5501), 10)}).json()
+            self.assertEqual((r["result"], r["say"], r["item"]["id"], r["item"]["hit"]["via"], r["stats"]),
+                             ("ok", "确认", a1, "scanner", {"total": 3, "hit": 1, "left": 2}))
+            self.assertTrue(self._item(a1)["paper"])
+            self.assertIn("纸质件到件（对纸质票）", [x["action"] for x in self.items(f1)["logs"]])
+            # 同一张再扫 → 重复，不重复算
+            r = post("/api/inv/check/%d/scan" % cid, "acct", {"code": qr(self.N(5501), 10)}).json()
+            self.assertEqual((r["result"], r["say"], r["stats"]["hit"]), ("dup", "重复", 1))
+            # 别的票夹里的 → 不在这里：只提醒，不登记不挪
+            r = post("/api/inv/check/%d/scan" % cid, "acct", {"code": qr(self.N(5504), 10)}).json()
+            self.assertEqual((r["result"], r["say"], r["stranger"]["folderId"]), ("other", "不在这里", f3))
+            self.assertIn("点验-没选中的", r["msg"])
+            self.assertEqual(self._item(x1)["folder_id"], f3)
+            # 系统里没有的 → 没有这张：不登记
+            n_items = len(S.folder_items(e, f1)) + len(S.folder_items(e, f2))
+            r = post("/api/inv/check/%d/scan" % cid, "acct", {"code": qr(self.N(5599), 77)}).json()
+            self.assertEqual((r["result"], r["say"]), ("none", "没有这张"))
+            self.assertEqual(len(S.folder_items(e, f1)) + len(S.folder_items(e, f2)), n_items)
+            self.assertEqual(post("/api/inv/check/%d/scan" % cid, "acct", {"code": "随便一串字"}).json()["result"], "unknown")
+            # 手机扫的记到同一次
+            ck = S.check_current(e, "acct")
+            self.assertEqual(ck["id"], cid)
+            r = ck_.scan({"name": "acct"}, ck, qr(self.N(5502), 10), "phone")
+            self.assertEqual((r["result"], r["item"]["hit"]["viaLabel"], r["stats"]["hit"]), ("ok", "手机", 2))
+            # 没有二维码的：手工勾 / 取消
+            r = post("/api/inv/check/%d/mark" % cid, "acct", {"itemId": b1, "on": True})
+            self.assertEqual((r.status_code, r.json()["item"]["hit"]["via"]), (200, "manual"))
+            self.assertEqual(post("/api/inv/check/%d/mark" % cid, "acct", {"itemId": x1}).status_code, 400)      # 不在选中的票夹里
+            self.assertIsNone(post("/api/inv/check/%d/mark" % cid, "acct", {"itemId": b1, "on": False}).json()["item"]["hit"])
+            # 全貌：哪几行扫到了、不相干的票、各票夹扫到几张
+            v = get("/api/inv/check/%d" % cid, "acct").json()
+            self.assertEqual({i["id"]: bool(i["hit"]) for i in v["items"]}, {a1: True, a2: True, b1: False})
+            self.assertEqual(v["stats"], {"total": 3, "hit": 2, "left": 1, "strangers": 2})
+            self.assertEqual([(f["id"], f["hit"], f["total"]) for f in v["folders"]], [(f1, 2, 2), (f2, 0, 1)])
+            self.assertEqual([x["kind"] for x in v["strangers"]], ["other", "none"])
+            self.assertEqual(get("/api/inv/check/current", "acct").json()["check"]["id"], cid)
+            # 别人开的点验看不到、扫不进
+            self.assertEqual(get("/api/inv/check/%d" % cid, "maker").status_code, 404)
+            self.assertEqual(post("/api/inv/check/%d/scan" % cid, "maker", {"code": qr(self.N(5503), 10)}).status_code, 404)
+            # 导出没扫到的
+            r = get("/api/inv/check/%d/export" % cid, "acct")
+            self.assertEqual((r.status_code, r.content[:2]), (200, b"PK"))
+            self.assertEqual(ck_.export(S.check_get(e, cid), "missing")[1], 1)
+            self.assertEqual(ck_.export(S.check_get(e, cid), "all")[1], 3)
+            # 再开一次：上一次自动收掉，往旧的里扫不进
+            cid2 = post("/api/inv/check/start", "acct", {"folderIds": [f2]}).json()["check"]["id"]
+            self.assertNotEqual(cid2, cid)
+            self.assertTrue(S.check_get(e, cid)["closed_at"])
+            r = post("/api/inv/check/%d/scan" % cid, "acct", {"code": qr(self.N(5503), 10)}).json()
+            self.assertEqual((r["ok"], r["result"]), (False, "closed"))
+            r = post("/api/inv/check/%d/close" % cid2, "acct").json()
+            self.assertFalse(r["check"]["open"])
+            self.assertIsNone(get("/api/inv/check/current", "acct").json()["check"])
+        finally:
+            c.close()
+            sys.modules.pop("routers.invoice_check", None)
+
+    def test_51_old_database_gets_owner_columns(self):
+        """老库的票夹表没有「归谁审」那几栏：启动时补上，老数据不动；补过再跑一遍不出错。"""
+        from sqlalchemy import create_engine, text, inspect
+        S = self.S
+        p = Path(self.tmp.name) / "old.sqlite"
+        eng = create_engine("sqlite:///" + p.as_posix())
+        try:
+            with eng.begin() as cx:
+                cx.execute(text("CREATE TABLE inv_folder (id INTEGER PRIMARY KEY, title VARCHAR(200), status VARCHAR(16), reviewed_by VARCHAR(50))"))
+                cx.execute(text("INSERT INTO inv_folder (id, title, status, reviewed_by) VALUES (1, '老票夹', 'approved', '甲')"))
+            added = S.ensure_columns(eng)
+            self.assertEqual(sorted(added), sorted("inv_folder." + c for c, _ in S.ADDED_COLUMNS["inv_folder"]))
+            self.assertEqual(S.ensure_columns(eng), [])
+            cols = {c["name"] for c in inspect(eng).get_columns("inv_folder")}
+            self.assertTrue({"owner_uid", "owner_account", "owner_name", "owner_at", "owner_by", "owner_via"} <= cols)
+            with eng.connect() as cx:
+                self.assertEqual(tuple(cx.execute(text("SELECT title, reviewed_by, owner_uid FROM inv_folder")).first()), ("老票夹", "甲", None))
+        finally:
+            eng.dispose()
+        self.assertEqual(S.ensure_columns(create_engine("sqlite://")), [])       # 全新库（表还没建）：跳过
+
 
 if __name__ == "__main__":
     unittest.main()

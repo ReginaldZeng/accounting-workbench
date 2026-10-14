@@ -5132,6 +5132,10 @@ app.include_router(invoice_vouchers.router)
 from routers import invoice_paper
 app.include_router(invoice_paper.router)
 
+# 发票管家·对纸质票（选中一堆票夹，把纸质票连续扫一遍看是不是一样；电脑扫码枪和手机都能扫）
+from routers import invoice_check
+app.include_router(invoice_check.router)
+
 from routers import logistics_review   # V2.632 物流账单复核（核价×核量→归一态；pilot 迅鸽）
 app.include_router(logistics_review.router)
 from routers import bp_logistics_feed   # V2.785 BP 工作台读物流账单（内部只读口 /api/internal/bp-logistics-lines，出库费用归属用）

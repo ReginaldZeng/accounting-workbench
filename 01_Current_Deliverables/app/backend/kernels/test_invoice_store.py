@@ -45,7 +45,7 @@ class Base(unittest.TestCase):
 class SchemaTests(unittest.TestCase):
     def test_twelve_tables_on_own_metadata(self):
         names = sorted(t.name for t in s.TABLES)
-        self.assertEqual(len(names), 12)          # V2.621 加 inv_self（业务同事自助登记的验证码/会话）
+        self.assertEqual(len(names), 14)          # V2.621 加 inv_self；对纸质票加 inv_check / inv_check_hit
         self.assertTrue(all(n.startswith("inv_") for n in names))
         self.assertIs(s.TABLES[0].metadata, s.md)
 
@@ -518,7 +518,7 @@ class LedgerAuditTests(Base):
         self.assertEqual(rows[0]["folder"]["business_id"], "BA")
         self.assertEqual(rows[0]["folder"]["payee_name"], "供应商乙")
         self.assertEqual(set(rows[0]["folder"]), {"id", "business_id", "title", "applicant", "template", "dept",
-                                                  "payee_name"})
+                                                  "payee_name", "owner_name"})
         # review=all：含作废/待审，但合计不含作废
         total, sums, _ = s.ledger_query(self.e, {"review": "all"}, 1, 50)
         self.assertEqual(total, 6)

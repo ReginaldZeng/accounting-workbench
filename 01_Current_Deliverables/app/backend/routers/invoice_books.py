@@ -155,7 +155,8 @@ def _folder_brief(f):
         return None
     return {"id": f.get("id"), "businessId": f.get("business_id") or "", "title": f.get("title") or "",
             "applicant": f.get("applicant") or "", "template": f.get("template") or "", "dept": f.get("dept") or "",
-            "payee": {"name": f.get("payee_name") or ""}}
+            "payee": {"name": f.get("payee_name") or ""},
+            "ownerName": f.get("owner_name") or ""}      # 归谁审（实际谁审的在票上：reviewBy）
 
 
 def _folders_map(e, ids):
@@ -1907,12 +1908,24 @@ def _later_tpl_msg(tpl):
             "（如确需登记，请管理员在设置 › 审批模板里把它设为「允许后补」）" % (tpl or "未知模板"))
 
 
-def _folder_for_later(n, user):
-    """付款单 → 票夹 id（没有就建，来源记 later；新建且审批单有附件就排队拉附件，和收票工作台扫单一致）。"""
+def _folder_for_later(n, user, inst=None, receiver=""):
+    """付款单 → 票夹 id（没有就建，来源记 later；新建且审批单有附件就排队拉附件，和收票工作台扫单一致）。
+    新建的当场指派归谁审：审批流走到的接入审批人 → 后补单的接收人 → 登记的人自己（能做发票审核的话）；都不行就留给管理员指派。"""
     e = E()
     existed = S.folder_by_inst(e, n["instId"])
     fid = S.folder_upsert_from_approval(e, n, user, source="later")
     if existed is None:
+        try:
+            if not isinstance(inst, dict):
+                g = inv.idt.get_instance(n["instId"])
+                inst = g.get("inst") if g.get("ok") else None
+            cols, _ = inv.pick_owner(inst, user, "")
+            if not cols and receiver and inv._acct_can_audit(receiver):
+                cols = inv._owner_cols_for(receiver, user, "pick")
+            if cols:
+                inv.assign_new_folder(fid, cols=cols)
+        except Exception as ex:      # 指派不上不挡登记后补单：票夹留给管理员指派
+            print("[发票管家] 后补单票夹指派归属失败：%s" % ex)
         if n.get("hasAttachments"):
             S.folder_update(e, fid, attach_status="pending", attach_msg="正在拉取审批单附件…")
             inv.wake()
@@ -2148,7 +2161,7 @@ def _later_create_sync(u, body, via="proxy", self_uid=None):
         if ex:
             return None, err("这张付款单已经登记过后补单（#%d），还没收齐：到原单上点「收到」就行；确需重登请先关闭原单" % ex["id"],
                              400, existingLaterId=ex["id"])
-        fid = _folder_for_later(n, u["name"]) if from_dt else S.folder_by_inst(e, iid)["id"]
+        fid = _folder_for_later(n, u["name"], receiver=person["account"]) if from_dt else S.folder_by_inst(e, iid)["id"]
         lid = S.later_insert(
             e, folder_id=fid, inst_id=iid, business_id=n.get("businessId") or "", template=n.get("template") or "",
             applicant=n.get("applicant") or "", applicant_uid=n.get("applicantUid") or "", dept=n.get("dept") or "",

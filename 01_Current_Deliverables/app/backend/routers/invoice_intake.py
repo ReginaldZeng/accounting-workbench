@@ -10,6 +10,11 @@
 #   财务补传后在收票台提交，审核才看得全。「齐全」＝提交检查（submit_check）既不拦也没有任何提示：附件拉全、票都识别完、
 #   没重复票、有发票且付款金额−专票−普票−后补未到＝0。每 2 分钟看一次（auto_submit_ready），提交人记「系统」。
 #   收票台「钉钉接入」列表每行带「为什么还留在这」（why）。
+# [Change Log] Date: 2026-10-13 | Author: Claude Opus 5.5 | Version: V-draft（发票管家·审票分工）
+# Description: 用户 2026-10-13 定：发票审核按人分。①每位接入审批人带自己的启用日（设置 intake.approvers[].since，留空＝还没启用）：
+#   只有「提交日」在这个人启用日当天及以后的单，才因为走到他的节点而接进来；②票夹记在「最先走到、且对这张单已启用」的那位名下
+#   （inv_folder.owner_*，按钉钉 tasks 的先后）；③老的全局起始日不再参与判断；谁的启用日改了，只从他的启用日起重列一遍
+#   （别人不受影响：已有票夹的单不会再建）。切换期四位会计还在用票总管时启用日留空，单不会往他们名下堆。
 import threading
 import time
 import traceback
@@ -43,6 +48,11 @@ def reached(inst, uids):
     （待他审 NEW/RUNNING、他审过 COMPLETED、或签被别人先审了 CANCELED 都算）。纯函数，供单测。"""
     uids = set(uids or ())
     return bool(uids) and any(str((t or {}).get("userid") or "") in uids for t in (inst or {}).get("tasks") or [])
+
+
+# 找「归哪位接入审批人」的两个函数在 routers/invoice.py（收票台扫付款单、后补单、物流对账建票夹时也用同一条规矩）
+enabled_approvers = inv.enabled_approvers
+first_owner = inv.first_owner
 
 
 def dead(inst):
@@ -131,9 +141,11 @@ def _scan(trigger):
     t0 = time.time()
     st = inv.get_settings()
     cfg = st.get("intake") or {}
-    uids = [a["dtUserid"] for a in cfg.get("approvers") or [] if a.get("dtUserid")]
-    if not uids:
+    if not [a for a in cfg.get("approvers") or [] if a.get("dtUserid")]:
         return {"ok": False, "msg": "还没设接入审批人：在发票管家设置 › 钉钉自动接入里加人"}
+    aps = enabled_approvers(cfg)
+    if not aps:
+        return {"ok": False, "msg": "接入审批人都还没填启用日：在发票管家设置 › 钉钉自动接入里，给开始用发票管家的人填上启用日"}
     tpls = [t["name"] for t in st.get("templates") or [] if t.get("name")]
     if not tpls:
         return {"ok": False, "msg": "还没设审批模板"}
@@ -141,9 +153,16 @@ def _scan(trigger):
     if not conf:
         return {"ok": False, "msg": "未配置钉钉（conf.ini [dingtalk]）"}
     state = _load_state()
-    since = cfg.get("since") or "2026-09-01"
+    since_by = {a["dtUserid"]: a["since"] for a in aps}
+    floor = min(since_by.values())                      # 最早的启用日：比它还早提交的单谁都不接
+    prev = state.get("sinceBy")
+    if not isinstance(prev, dict):
+        # 升级前的状态只有一个全局起始日：当时名单里的人都按它算（升级这一下不触发整段重列）
+        prev = {u: state.get("since") for u in since_by} if state.get("last") else {}
+    changed = [u for u, d in since_by.items() if prev.get(u) != d]     # 新启用的、或改了启用日的人
     now = datetime.now(idt.CN_TZ)
-    full = state.get("since") != since or not state.get("last")      # 首扫/改了起始日：从起始日整段列
+    full = bool(changed) or not state.get("last")       # 首扫/有人的启用日变了：从受影响那几位里最早的启用日起整段列
+    since = min(since_by[u] for u in changed) if changed else floor
     start = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=idt.CN_TZ)
     if not full:
         start = max(start, now - timedelta(days=RECENT_DAYS))
@@ -183,14 +202,15 @@ def _scan(trigger):
             n_fail += 1
             continue
         ct = _ct(x)
-        if ct[:10] and ct[:10] < since:              # waiting 里留着的、起始日往后挪了的
+        if ct[:10] and ct[:10] < floor:              # waiting 里留着的、启用日往后挪了的
             waiting.pop(iid, None)
             continue
+        owner = None if dead(x) else first_owner(x, aps)
         if dead(x):
             waiting.pop(iid, None)
             skip[iid] = ct
             n_skip += 1
-        elif reached(x, uids):
+        elif owner:
             r = inv.open_approval_folder(user=inv.SYSTEM_USER, source=SOURCE, inst_id=iid, inst=x)
             if r.get("ok"):
                 waiting.pop(iid, None)
@@ -203,14 +223,15 @@ def _scan(trigger):
         elif str(x.get("status") or "").upper() == "RUNNING":
             waiting[iid] = ct
             n_wait += 1
-        else:                                         # 审完了也没走到接入审批人
+        else:                                         # 审完了也没走到（对它已启用的）接入审批人
             waiting.pop(iid, None)
             skip[iid] = ct
             n_skip += 1
     cut = (now - timedelta(days=SKIP_KEEP_DAYS)).strftime("%Y-%m-%d")
     state["skip"] = {k: v for k, v in skip.items() if str(v)[:10] >= cut}
     state["waiting"] = waiting
-    state["since"] = since
+    state["since"] = floor
+    state["sinceBy"] = since_by
     last = {"at": inv.now_s(), "trigger": trigger, "full": full, "from": start.strftime("%Y-%m-%d"),
             "listed": len(ids), "fetched": len(todo), "created": n_new, "waiting": len(waiting), "skipped": n_skip,
             "failed": n_fail, "notes": "；".join(notes)[:400], "fails": fails[:10], "sec": round(time.time() - t0, 1)}
@@ -283,9 +304,11 @@ def _loop():
     while True:
         try:
             import worker_store      # 数字员工办公室·发票接收员：每圈报到；真接了单 / 出了错才记一笔（只写张数和钉钉单号）
-            has_cfg = bool((inv.get_settings().get("intake") or {}).get("approvers"))
+            icfg = inv.get_settings().get("intake") or {}
+            has_cfg = bool(enabled_approvers(icfg))
             per = EVERY_MIN * 60 // TICK_S           # 每 per 圈整扫一次钉钉；报到时顺带说离下一次整扫还有多久
-            worker_store.beat("inv_intake", off="" if has_cfg else "还没设接入审批人", next_in=(per - n % per) * TICK_S)
+            off = "" if has_cfg else ("接入审批人都还没填启用日" if icfg.get("approvers") else "还没设接入审批人")
+            worker_store.beat("inv_intake", off=off, next_in=(per - n % per) * TICK_S)
             if n % per == 0:
                 if has_cfg:
                     r = scan_once("定时") or {}

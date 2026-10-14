@@ -7,6 +7,7 @@
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -186,7 +187,25 @@ class InvoiceBooksApiTests(unittest.TestCase):
     def H(self, user):
         return {"x-test-user": user}
 
+    # 老用例不关心审票分工：做审核动作前，替这个人把还没人名下的票夹先认领了（分工本身在专门的用例里测，那里把它关掉）
+    AUTO_CLAIM = True
+
+    def _claim_for(self, user, url, body):
+        ids = [body.get("folderId")] + list(body.get("folderIds") or [])
+        m = re.match(r"/api/inv/(?:audit/)?item/(\d+)/", url)
+        if m:
+            it = self.S.item_get(self.db._engine, int(m.group(1))) or {}
+            if it.get("review") == "pending":
+                ids.append(it.get("folder_id"))
+        for fid in ids:
+            if isinstance(fid, int):
+                self.c.post("/api/inv/audit/claim", json={"folderId": fid}, headers=self.H(user))
+
     def post(self, url, user, body=None):
+        if self.AUTO_CLAIM and re.match(r"/api/inv/(audit/(approve|return|batch|item/)|item/)", url):
+            self._claim_for(user, url, body or {})
+        if self.AUTO_CLAIM and url in ("/api/inv/folder/manual", "/api/inv/desk/scan") and "auditor" not in (body or {}):
+            body = dict(body or {}, auditor="acct")      # 老用例：建票夹（含扫付款单建的）一律指定 acct 来审（建的时候必须指派清楚）
         return self.c.post(url, json=body if body is not None else {}, headers=self.H(user))
 
     def get(self, url, user):

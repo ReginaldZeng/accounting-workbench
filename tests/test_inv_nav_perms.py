@@ -18,7 +18,7 @@ sys.path.insert(0, str(BACKEND))
 INV_MODS = {"invdesk", "invlater", "invaudit", "invledger"}
 INV_CAPS = {"inv_intake": ("invdesk", False), "inv_receive": ("invlater", False), "inv_deduct": ("invledger", False),
             "inv_audit": ("invaudit", True), "inv_unbind": ("invledger", True), "inv_opening": ("invledger", True),
-            "inv_config": ("invlater", True)}
+            "inv_config": ("invlater", True), "inv_assign": ("invaudit", True)}
 
 
 def _literals(src, names):
