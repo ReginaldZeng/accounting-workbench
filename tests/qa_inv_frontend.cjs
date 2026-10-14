@@ -1084,6 +1084,61 @@ test('F3/C3 勾「含作废」只多要作废票（review=withvoid），不再�
   await ctx.close()
 })
 
+test('V2.966 刷新全部金蝶凭证：后台跑，按钮显示进度、再点不报错、查完提示，不再写「台账没读出来」', async (browser, B) => {
+  const st = { rows: [inv({ id: 301, review: 'approved', folder: { id: 30 }, folderId: 30 })], logs: [] }
+  const job = { running: false, total: 0, checked: 0, matched: 0, changed: 0, error: '' }
+  let posts = 0
+  const base = ledgerApi(st)
+  const api = (c) => {
+    if (c.path === '/api/inv/vouchers/refresh' && c.method === 'POST') {
+      posts++
+      if (!job.running) Object.assign(job, { running: true, total: 30, checked: 12 })
+      return { ok: true, msg: '', job: { ...job } }
+    }
+    if (c.path === '/api/inv/vouchers/refresh') return { ok: true, job: { ...job } }
+    return base(c)
+  }
+  const { page, ctx, calls } = await open(browser, B, api)
+  await mount(page, 'InvLedger', { user: { name: '测试会计' } })
+  await page.locator('.inv-lg-tbl').waitFor()
+  await page.getByRole('button', { name: '刷新全部金蝶凭证' }).click()
+  await page.getByRole('button', { name: '正在查金蝶 12/30' }).waitFor()
+  assert.equal(await page.getByRole('button', { name: /正在查金蝶/ }).isDisabled(), true)
+  const before = calls.filter(c => c.path === '/api/inv/ledger').length
+  Object.assign(job, { checked: 20 })
+  await page.getByRole('button', { name: '正在查金蝶 20/30' }).waitFor({ timeout: 5000 })
+  assert.ok(calls.filter(c => c.path === '/api/inv/ledger').length > before, '查到新的就重读这一页')
+  Object.assign(job, { running: false, checked: 30, matched: 25, changed: 3 })
+  await page.getByText('30 张里对上 25 张，这次有变化的 3 张').waitFor({ timeout: 5000 })
+  await page.getByRole('button', { name: '刷新全部金蝶凭证' }).waitFor()
+  assert.equal(posts, 1)
+  assert.equal(await page.getByText('台账没读出来').count(), 0)
+  await ctx.close()
+})
+
+test('V2.966 刷新全部：定时同步正占着 → 提示等一下（不当成台账读不出来）；打开页面时后台正在跑就接着显示进度', async (browser, B) => {
+  const st = { rows: [inv({ id: 301, review: 'approved', folder: { id: 30 }, folderId: 30 })], logs: [] }
+  const base = ledgerApi(st)
+  let running = false
+  const api = (c) => {
+    if (c.path === '/api/inv/vouchers/refresh' && c.method === 'POST') return { ok: false, msg: '系统自己的定时同步正在查金蝶，一两分钟后再点', job: { running: false } }
+    if (c.path === '/api/inv/vouchers/refresh') return { ok: true, job: { running, total: 8, checked: 3 } }
+    return base(c)
+  }
+  let r = await open(browser, B, api)
+  await mount(r.page, 'InvLedger', { user: { name: '测试会计' } })
+  await r.page.locator('.inv-lg-tbl').waitFor()
+  await r.page.getByRole('button', { name: '刷新全部金蝶凭证' }).click()
+  await r.page.getByText('定时同步正在查金蝶').waitFor()
+  assert.equal(await r.page.getByText('台账没读出来').count(), 0)
+  await r.ctx.close()
+  running = true
+  r = await open(browser, B, api)
+  await mount(r.page, 'InvLedger', { user: { name: '测试会计' } })
+  await r.page.getByRole('button', { name: '正在查金蝶 3/8' }).waitFor()
+  await r.ctx.close()
+})
+
 const ledgerRow = (o) => inv({ id: 301, review: 'approved', deductStatus: 'checked', folder: { id: 30, title: '付款单丙' }, folderId: 30, ...o })
 const LEDGER_LOGS = [{ id: 2, ts: '2026-09-24 10:00:00', user: '李会计', action: '改票面字段', detail: { note: '改了税额' }, itemId: 301 },
   { id: 1, ts: '2026-09-24 09:00:00', user: '王收票', action: '提交审核', detail: {}, itemId: null }]

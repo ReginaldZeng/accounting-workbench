@@ -12,7 +12,7 @@
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invItemOtherSystem, invFolder,
+  invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invVouchersJob, invItemVoid, invItemOtherSystem, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
   invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invOther, invOtherImport, invTickLists, invTickListUrl,
   invSellers, invSellerCheck,
@@ -118,7 +118,7 @@ function logBrief(d) {
   return t ? String(t).slice(0, 80) : ''
 }
 
-function FilterBar({ f, setF, exportUrl, total, subjects, refresh, refreshing }) {
+function FilterBar({ f, setF, exportUrl, total, subjects, refresh, refreshing, refreshLabel }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }))
   const dirty = Object.keys(EMPTY_FILTER).some(k => f[k] !== EMPTY_FILTER[k])
   return (
@@ -153,7 +153,8 @@ function FilterBar({ f, setF, exportUrl, total, subjects, refresh, refreshing })
       <label className="inv-lg-ck"><input type="checkbox" checked={f.withVoid} onChange={e => set('withVoid', e.target.checked)} />含作废</label>
       {dirty && <button type="button" className="btn" onClick={() => setF(EMPTY_FILTER)}>清空条件</button>}
       <span className="inv-lg-grow" />
-      {refresh && <button className="btn" disabled={refreshing} onClick={refresh}>{refreshing ? '刷新中…' : '刷新全部金蝶凭证'}</button>}
+      {refresh && <button className="btn" disabled={refreshing} onClick={refresh}
+        title="后台去金蝶按发票号找凭证：已经对上的成批核实，没对上的一张张查；查的时候台账照常用">{refreshLabel || '刷新全部金蝶凭证'}</button>}
       <a className="btn" href={exportUrl} title={total ? `按当前条件导出 ${total} 张` : '按当前条件导出'}>导出 Excel</a>
     </div>
   )
@@ -445,13 +446,41 @@ function QueryTab({ can, flash }) {
   const rows = data?.rows || []
   const exportUrl = invLedgerExportUrl(params)
 
+  // 「刷新全部金蝶凭证」在后台跑（V2.966）：这里每 2 秒看一次进度，查到新的就重读这一页，查完说一声
+  const [job, setJob] = useState(null)
+  const jobSeen = useRef(-1)
+  useEffect(() => { invVouchersJob().then(r => setJob(r?.job || null)).catch(() => { /* 看不到进度不影响台账 */ }) }, [])
+  useEffect(() => {
+    if (!job || !job.running) return undefined
+    const t = setInterval(async () => {
+      try {
+        const r = await invVouchersJob()
+        const j = r?.job
+        if (!j) return
+        if (j.checked !== jobSeen.current) { jobSeen.current = j.checked; load(page) }
+        if (!j.running) {
+          if (j.error) flash(j.error, 'err')
+          else flash(`金蝶凭证查完了：${j.total} 张里对上 ${j.matched} 张，这次有变化的 ${j.changed} 张`, 'ok')
+          load(page)
+        }
+        setJob(j)
+      } catch { /* 下一轮再看 */ }
+    }, 2000)
+    return () => clearInterval(t)
+  }, [job && job.running, page, load])
+  const startRefresh = async () => {
+    try {
+      const r = await invVouchersRefresh()
+      if (r && r.job) { jobSeen.current = -1; setJob(r.job) }
+      if (r && !r.ok && r.msg) flash(r.msg, 'err')
+    } catch (e) { flash('没开始刷新：' + errText(e), 'err') }
+  }
+  const refreshLabel = job && job.running ? `正在查金蝶 ${job.checked}/${job.total || '…'}` : '刷新全部金蝶凭证'
+
   return (
     <>
-      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects} refreshing={busy} refresh={can.auditAct ? async () => {
-        setBusy(true); setErr('')
-        try { const r = await invVouchersRefresh(); if (!r.ok) throw new Error(r.msg); flash(`匹配 ${r.matched} 张，更新 ${r.changed} 张`); await load(page) }
-        catch (e) { setErr(errText(e)) } finally { setBusy(false) }
-      } : undefined} />
+      <FilterBar f={f} setF={setF} exportUrl={exportUrl} total={data?.total} subjects={data?.subjects}
+        refreshing={!!(job && job.running)} refreshLabel={refreshLabel} refresh={can.auditAct ? startRefresh : undefined} />
       {data && <div className="inv-lg-overview"><span>当前条件 <b>{data.total}</b> 张</span><span>价税合计 <b>{money(data.sum.total)}</b></span><span>税额 <b>{money(data.sum.tax)}</b></span><span className="inv-muted">未匹配凭证不代表未做账；金额合计不含作废票。</span></div>}
 
       {voidNote && <div className="inv-lg-warn inv-lg-voidnote" role="alert">

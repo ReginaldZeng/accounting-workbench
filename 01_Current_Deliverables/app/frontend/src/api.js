@@ -760,4 +760,5 @@ export const invSQrCreate = () => invSJ('/api/inv/s/login/qr', '', {})
 export const invSQrCheck = ticket => invSJ('/api/inv/s/login/qr/check', '', { ticket })
 export const invSQrApprove = (token, scan, confirm = false) => invSJ('/api/inv/s/login/qr/approve', token, { scan, confirm })
 
-export const invVouchersRefresh = (itemId) => jp('/api/inv/vouchers/refresh', itemId ? { itemId } : {})
+export const invVouchersRefresh = (itemId) => jp('/api/inv/vouchers/refresh', itemId ? { itemId } : {})   // 不带 itemId＝刷新全部：后台跑，回 {ok, msg, job}
+export const invVouchersJob = () => j('/api/inv/vouchers/refresh')     // 「刷新全部」的进度 {job:{running,total,checked,matched,changed,...}}

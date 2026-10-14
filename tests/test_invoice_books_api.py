@@ -398,7 +398,9 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(log["mod"], [])
         # 同一天后面的轮次：只查最近改过的凭证，不再逐张查；b 的凭证出现了就对上，a 不受影响
         r = run(_dt(2026, 10, 9, 9, 20), mod=[row(num(9742), 32)])
-        self.assertEqual((r["how"], log["rows"], bk(b).get("status"), bk(a).get("status")), ("inc", [], "booked", "booked"))
+        # 已经查过的 a、b 不再逐张查（别的用例留下的「从没查过」的票会被顺手查掉，那是 V2.966 新加的，不算）
+        self.assertFalse(any(num(9741) in x or num(9742) in x for x in log["rows"]))
+        self.assertEqual((r["how"], bk(b).get("status"), bk(a).get("status")), ("inc", "booked", "booked"))
         self.assertEqual(log["mod"], ["2026-10-09 08:50:00"])            # 从上一轮往回多看 10 分钟
         r = run(_dt(2026, 10, 9, 9, 40), mod=[])                         # 没有新凭证：什么都不动(不会把已对上的改回未知)
         self.assertEqual((r["changed"], bk(a).get("status"), bk(b).get("status")), (0, "booked", "booked"))
@@ -416,6 +418,68 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertNotIn(num(9741), log["rows"][0])
         r = run(_dt(2026, 10, 10, 9, 40), mod=RuntimeError("字段不支持"), rows=[])
         self.assertEqual((r["how"], log["rows"]), ("wait", []))
+
+    def test_vouchers_refresh_all_runs_in_background(self):
+        """V2.966：「刷新全部金蝶凭证」后台跑、带进度：已对上的成批核实，只逐张查没对上的；查完一张就落库；
+        正在跑时再点只回进度不报错；定时同步正占着时让人等一下；定时那一轮顺手查「从没查过」的票（有上限）。"""
+        import time as _t
+        from datetime import datetime as _dt
+        V = self.vouchers
+        a, _ = self.make_item(num(9661), 100, fields={"buyer_name": "测试公司"})
+        b, _ = self.make_item(num(9662), 200, fields={"buyer_name": "测试公司"})
+        row = lambda n, no: {"book": "测试公司会计账簿", "year": 2026, "month": 10, "group": "记", "number": no, "summary": "转待认证 发票" + n}
+        bk = lambda i: self.item(i)["flags_json"].get("_bookkeeping") or {}
+        fl = dict(self.item(a)["flags_json"] or {})
+        fl["_bookkeeping"] = {"status": "booked", "source": "kingdee", "vouchers": [{"book": "测试公司会计账簿", "period": "2026-10", "number": "记-31"}]}
+        self.S.item_update(self.e, a, flags_json=fl)
+        asked, gate = [], __import__("threading").Event()
+
+        def rows_of(numbers):
+            asked.extend(numbers)
+            gate.wait(5)
+            return [row(num(9662), 44)] if num(9662) in numbers else []
+        url = "/api/inv/vouchers/refresh"
+        self.assertEqual(self.get(url, "viewer").status_code, 200)            # 进度谁都能看（有台账页就行）
+        with patch.object(V, "fetch_by_vouchers", return_value=[row(num(9661), 31)]), patch.object(V, "fetch_rows", side_effect=rows_of):
+            r = self.ok(self.post(url, "acct", {}))
+            self.assertTrue(r["job"]["running"])
+            r2 = self.ok(self.post(url, "acct", {}))                          # 正在跑：回进度，不报错
+            self.assertTrue(r2["job"]["running"])
+            gate.set()
+            for _ in range(100):
+                if not self.ok(self.get(url, "acct"))["job"]["running"]:
+                    break
+                _t.sleep(0.05)
+        j = self.ok(self.get(url, "acct"))["job"]
+        self.assertFalse(j["running"])
+        self.assertEqual((j["by"], j["error"]), ("acct", ""))
+        self.assertGreaterEqual(j["verified"], 1)                             # a 是成批核实的，没逐张搜
+        self.assertNotIn(num(9661), asked)
+        self.assertIn(num(9662), asked)
+        self.assertEqual(j["checked"], j["total"])
+        self.assertEqual((bk(a).get("status"), bk(b).get("status"), bk(b)["vouchers"][0]["number"]), ("booked", "booked", "记-44"))
+        # 定时同步正占着：让人等一下
+        V._LOCK.acquire()
+        try:
+            r = self.post(url, "acct", {}).json()
+            self.assertFalse(r["ok"])
+            self.assertIn("定时同步正在查金蝶", r["msg"])
+        finally:
+            V._LOCK.release()
+        # 单张刷新照旧当场查
+        with patch.object(V, "fetch_rows", return_value=[row(num(9662), 45)]):
+            self.assertEqual(self.ok(self.post(url, "acct", {"itemId": b}))["changed"], 1)
+        # 定时增量那一轮：顺手查从没查过的票，每轮有上限
+        c, _ = self.make_item(num(9663), 300, fields={"buyer_name": "测试公司"})
+        self.assertEqual(bk(c), {})
+        self.db.set_setting(V._STATE_KEY, {"last_full": "2026-10-14", "last_inc": "2026-10-14 09:00:00"})
+        seen = []
+        with patch.object(V, "fetch_modified", return_value=[]), patch.object(V, "fetch_rows", side_effect=lambda ns: seen.append(list(ns)) or [row(num(9663), 50)]):
+            r = V.timer_round(_dt(2026, 10, 14, 9, 20))
+        self.assertEqual(r["how"], "inc")
+        self.assertTrue(seen and len(seen[0]) <= V.NEW_PER_ROUND)
+        if num(9663) in seen[0]:
+            self.assertEqual(bk(c).get("status"), "booked")
 
     def test_audit_records_paper_and_voucher_before_approval(self):
         iid, _ = self.make_item(num(9745), 321, approve=False)

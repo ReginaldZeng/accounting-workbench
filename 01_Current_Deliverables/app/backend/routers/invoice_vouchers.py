@@ -10,6 +10,11 @@
 #   （routers/logistics_voucher._scan_invoice 调这里的 _scan ＋ bind_view），发票台账不放。POST /api/inv/vouchers/scan {code} 留作接口：
 #   发票二维码或直接敲发票号码 → 先看发票管家里已经对上的凭证；没对上、或这张票压根没在发票管家登记过，拿发票号去金蝶摘要里现查一次
 #   （你们的凭证摘要以发票号开头）。回凭证号和一句给页面念出来的话（say）。只查不写金蝶；查到新对上的顺手记到那张票上。
+# [Change Log] Date: 2026-10-14 | Author: Claude Opus 5.5 | Version: V2.966（发票管家·刷新金蝶凭证提速）
+# Description: 用户 2026-10-14 嫌「刷新全部金蝶凭证」太久（30 张票跑了 249 秒：一张票一次「摘要里包含号码」的查询，金蝶这种查法慢，一张 8 秒多），
+#   中途再点一下还被报成「台账没读出来」。改：①「刷新全部」放到后台跑，页面看进度（查了几张/一共几张），查到一张那张就落库，
+#   再点只告诉进度不报错；②已经对上凭证的票按记下的凭证号成批核实（几次调用），只有没对上的才逐张搜（和每天早上的全量一个做法）；
+#   ③定时那一轮顺手把「从没查过」的票查掉（每轮最多 NEW_PER_ROUND 张），新进台账的票不用等到第二天早上。单张的「刷新」照旧当场查。
 import re
 import threading
 from datetime import datetime, timedelta
@@ -103,6 +108,59 @@ def _active_items(item_id=None):
 
 def _numbers(items):
     return sorted({str(i.get("number") or "").strip() for i in items if re.fullmatch(r"\d{8,20}", str(i.get("number") or "").strip())})
+
+
+# ── 人点的「刷新全部」：后台跑、带进度 ──
+_JOB = {"running": False, "total": 0, "checked": 0, "verified": 0, "queried": 0, "toQuery": 0, "matched": 0, "changed": 0,
+        "by": "", "startedAt": "", "finishedAt": "", "error": ""}
+NEW_PER_ROUND = 10                   # 定时每一轮最多顺手查几张「从没查过」的票（一张一次查询，免得一轮拖太久、吃额度）
+
+
+def job_status():
+    return dict(_JOB)
+
+
+def _run_job():
+    """后台线程里跑：先成批核实已对上的，再一张张查没对上的；每查完一张就落库、更新进度。出错停下，已查的照样算数。"""
+    try:
+        items = _active_items()
+        kd = [i for i in items if _bk(i).get("status") == "booked" and _bk(i).get("source") == "kingdee" and _bk(i).get("vouchers")]
+        rows_v = fetch_by_vouchers([v for i in kd for v in _bk(i)["vouchers"]]) if kd else []
+        still = [i for i in kd if match_vouchers(i, rows_v)]
+        ch, mt = _sync_items(still, rows_v)
+        _JOB.update(verified=len(still), checked=len(still), matched=mt, changed=ch)
+        rest = [i for i in items if i["id"] not in {x["id"] for x in still}]
+        by_no = {}
+        for i in rest:
+            n = str(i.get("number") or "").strip()
+            if re.fullmatch(r"\d{8,20}", n):
+                by_no.setdefault(n, []).append(i)
+        _JOB.update(toQuery=len(by_no), total=len(still) + len(rest))
+        for no, its in sorted(by_no.items()):
+            rows = fetch_rows([no])                      # 一个号码一次查询（金蝶摘要模糊查，一次一个才不超时）
+            ch, mt = _sync_items(its, rows)
+            _JOB["queried"] += 1
+            _JOB["checked"] += len(its)
+            _JOB["matched"] += mt
+            _JOB["changed"] += ch
+        _JOB["checked"] = _JOB["total"]                  # 没有号码的票查不了，也算过了
+    except Exception as e:
+        _JOB["error"] = "金蝶查询出错，已查的照样记下了：%s" % str(e)[:160]
+    finally:
+        _JOB.update(running=False, finishedAt=inv.now_s())
+        _LOCK.release()
+
+
+def start_job(user):
+    """开始一轮「刷新全部」→ (状态, 中文原因或 '')。已经在跑 → 回进度；定时同步正占着 → 让人等一下。"""
+    if _JOB["running"]:
+        return job_status(), ""
+    if not _LOCK.acquire(blocking=False):
+        return job_status(), "系统自己的定时同步正在查金蝶，一两分钟后再点"
+    _JOB.update(running=True, total=0, checked=0, verified=0, queried=0, toQuery=0, matched=0, changed=0,
+                by=inv._uname(user), startedAt=inv.now_s(), finishedAt="", error="")
+    threading.Thread(target=_run_job, name="inv-vouchers-refresh", daemon=True).start()
+    return job_status(), ""
 
 
 def sync_once(item_id=None):
@@ -213,7 +271,13 @@ def timer_round(now=None):
         changed, matched = _sync_items(items, rows, merge=True)
         st["last_inc"] = stamp
         db.set_setting(_STATE_KEY, st)
-        return {"ok": True, "how": "inc", "total": len(items), "matched": matched, "changed": changed, "rows": len(rows)}
+        # 新进台账、从没查过的票（清零重接、刚审核过的……）：只问「最近改过的凭证」问不到它们挂的老凭证，这里顺手逐张查掉，每轮有个上限
+        fresh = [i for i in items if not _bk(i)][:NEW_PER_ROUND]
+        nos = _numbers(fresh)
+        if nos:
+            c2, m2 = _sync_items(fresh, fetch_rows(nos))
+            changed, matched = changed + c2, matched + m2
+        return {"ok": True, "how": "inc", "total": len(items), "matched": matched, "changed": changed, "rows": len(rows), "fresh": len(nos)}
     finally:
         _LOCK.release()
 
@@ -227,6 +291,9 @@ async def refresh(request: Request):
     iid = body.get("itemId")
     if iid is not None and (type(iid) is not int or iid <= 0):
         return inv.err("票据编号不正确", 400)
+    if iid is None:                  # 刷新全部：后台跑，页面拿进度（GET /api/inv/vouchers/refresh）
+        st, why = start_job(u)
+        return {"ok": not why, "msg": why, "job": st}
     try:
         result = await run_in_threadpool(sync_once, iid)
     except Exception:
@@ -234,6 +301,14 @@ async def refresh(request: Request):
     if iid is not None:
         result["item"] = inv.item_view(S.item_get(inv.E(), iid))
     return result
+
+@router.get("/api/inv/vouchers/refresh")
+async def refresh_status(request: Request):
+    """「刷新全部」的进度：running、total、checked、matched、changed、startedAt、finishedAt、by、error。"""
+    u, bad = inv.need_any(request, [(inv.ENTER_LEDGER, None), (inv.ENTER_AUDIT, None)])
+    if bad:
+        return bad
+    return {"ok": True, "job": job_status()}
 
 REVIEW_CN = {"draft": "还在收票、没送审", "pending": "已送审、还没审核", "approved": "已审核", "returned": "被退回了", "void": "已作废"}
 
