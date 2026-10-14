@@ -19,7 +19,7 @@ import re
 import threading
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request
-from sqlalchemy import select, update
+from sqlalchemy import select, update, or_
 from starlette.concurrency import run_in_threadpool
 from routers import invoice as inv
 from kernels import invoice_parse as ip
@@ -99,7 +99,8 @@ def _sync_items(items, rows, merge=False):
 
 
 def _active_items(item_id=None):
-    cond = [S._item_active(), S.ITEM.c.review.in_(("pending", "approved")), S.ITEM.c.kind == "invoice"]
+    cond = [S._item_active(), S.ITEM.c.review.in_(("pending", "approved")), S.ITEM.c.kind == "invoice",
+            or_(S.ITEM.c.inv_type.is_(None), S.ITEM.c.inv_type != "normal")]      # 普票不入账（inv.no_book），不去金蝶找
     if item_id is not None:
         cond.append(S.ITEM.c.id == item_id)
     with inv.E().connect() as cx:
@@ -393,13 +394,15 @@ def _scan(text):
                        "total": it.get("total"), "tax": it.get("tax"), "date": it.get("issue_date") or "",
                        "review": it.get("review") or "", "reviewText": REVIEW_CN.get(it.get("review") or "", ""),
                        "paper": bool(it.get("paper")), "folderTitle": (f or {}).get("title") or "",
-                       "businessId": (f or {}).get("business_id") or "", "applicant": (f or {}).get("applicant") or ""}
+                       "businessId": (f or {}).get("business_id") or "", "applicant": (f or {}).get("applicant") or "",
+                       "noBook": inv.no_book(it)}
     if vouchers:
         out["action"] = "found"
         out["msg"] = "、".join("%s %s %s" % (v["book"], v["period"], v["number"]) for v in vouchers)
     else:
         out["action"] = "none"
-        why = ("发票管家里有这张票（%s），但金蝶里还没有摘要带这个发票号的凭证：可能还没做账" % out["item"]["reviewText"] if items
+        why = ("这是普票，不入账、不认证：金蝶里不会有摘要带这个发票号的凭证" if items and out["item"]["noBook"]
+               else "发票管家里有这张票（%s），但金蝶里还没有摘要带这个发票号的凭证：可能还没做账" % out["item"]["reviewText"] if items
                else "发票管家里没有登记这张票，金蝶里也没有摘要带这个发票号的凭证")
         out["msg"] = note or why
     if note and vouchers:
@@ -418,7 +421,7 @@ def bind_view(r, short_of=None):
           for v in r.get("vouchers") or []]
     return {"ok": True, "is_invoice": True, "inst": "发票:" + r["number"], "kind": "发票", "subject": vs[0]["subject"] if vs else "",
             "payee": it.get("sellerName") or "", "amount": it.get("total"), "bid": it.get("businessId") or "", "vouchers": vs,
-            "state": "" if vs else "这张发票还没做账", "msg": r.get("msg") or "",
+            "state": "" if vs else ("普票不入账" if it.get("noBook") else "这张发票还没做账"), "msg": r.get("msg") or "",
             "invoice": {"number": r["number"], "inLedger": bool(r.get("inLedger")), "sellerName": it.get("sellerName") or "",
                         "total": it.get("total"), "tax": it.get("tax"), "reviewText": it.get("reviewText") or "",
                         "paper": bool(it.get("paper")), "folderTitle": it.get("folderTitle") or ""}}

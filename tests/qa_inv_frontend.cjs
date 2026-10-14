@@ -1139,6 +1139,19 @@ test('V2.966 刷新全部：定时同步正占着 → 提示等一下（不当�
   await r.ctx.close()
 })
 
+test('普票不入账：台账「做账 / 凭证」那一栏写「普票不入账」，不写「暂未匹配」', async (browser, B) => {
+  const st = { rows: [inv({ id: 301, review: 'approved', invType: 'normal', noBook: true, bookkeeping: { source: 'kingdee', status: 'unknown' }, folder: { id: 30 }, folderId: 30 }),
+    inv({ id: 302, review: 'approved', bookkeeping: { source: 'kingdee', status: 'unknown' }, folder: { id: 30 }, folderId: 30 })], logs: [] }
+  const { page, ctx } = await open(browser, B, ledgerApi(st))
+  await mount(page, 'InvLedger', { user: { name: '测试会计' } })
+  await page.locator('.inv-lg-tbl').waitFor()
+  const rows = page.locator('.inv-lg-tbl tbody tr')
+  assert.match(await rows.nth(0).innerText(), /普票不入账/)
+  assert.doesNotMatch(await rows.nth(0).innerText(), /暂未匹配/)
+  assert.match(await rows.nth(1).innerText(), /暂未匹配/)
+  await ctx.close()
+})
+
 const ledgerRow = (o) => inv({ id: 301, review: 'approved', deductStatus: 'checked', folder: { id: 30, title: '付款单丙' }, folderId: 30, ...o })
 const LEDGER_LOGS = [{ id: 2, ts: '2026-09-24 10:00:00', user: '李会计', action: '改票面字段', detail: { note: '改了税额' }, itemId: 301 },
   { id: 1, ts: '2026-09-24 09:00:00', user: '王收票', action: '提交审核', detail: {}, itemId: null }]

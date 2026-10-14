@@ -481,6 +481,22 @@ class InvoiceBooksApiTests(unittest.TestCase):
         if num(9663) in seen[0]:
             self.assertEqual(bk(c).get("status"), "booked")
 
+    def test_normal_invoice_not_booked(self):
+        """普票不入账：刷新金蝶凭证不去查普票；台账那一栏写「普票不入账」（noBook），「未匹配 / 待刷新」筛选里不算它；导出写「普票不入账」。"""
+        V = self.vouchers
+        a, _ = self.make_item(num(9671), 100, fields={"buyer_name": "测试公司", "inv_type": "normal"})
+        b, _ = self.make_item(num(9672), 200, fields={"buyer_name": "测试公司"})
+        self.assertNotIn(a, {i["id"] for i in V._active_items()})
+        self.assertIn(b, {i["id"] for i in V._active_items()})
+        rows = {r["id"]: r for r in self.ok(self.get("/api/inv/ledger?size=200&q=" + num(9671), "acct"))["rows"]}
+        self.assertTrue(rows[a]["noBook"])
+        unk = {r["id"] for r in self.ok(self.get("/api/inv/ledger?size=200&booked=unknown", "acct"))["rows"]}
+        self.assertNotIn(a, unk)
+        self.assertIn(b, unk)
+        it = self.item(a)
+        it["folder"] = {}
+        self.assertIn("普票不入账", self.books._ledger_row_values(it))
+
     def test_audit_records_paper_and_voucher_before_approval(self):
         iid, _ = self.make_item(num(9745), 321, approve=False)
         self.assertEqual(self.post("/api/inv/paper/mark", "viewer", {"itemId": iid, "paper": True}).status_code, 403)

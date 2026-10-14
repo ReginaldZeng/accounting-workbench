@@ -1344,6 +1344,8 @@ def _ledger_conds(filters):
     book_status = func.coalesce(func.replace(func.json_extract(ITEM.c.flags_json, "$.\"_bookkeeping\".status"), '"', ''), "unknown")
     if booked in ("booked", "unbooked", "unknown"):
         conds.append(book_status == booked)
+        if booked == "unknown":          # 普票不入账，不算「未匹配 / 待刷新」
+            conds.append(not_(and_(ITEM.c.kind == "invoice", func.coalesce(ITEM.c.inv_type, "") == "normal")))
     s = g("seller")
     if s:
         conds.append(or_(_like(ITEM.c.seller_name, s), _like(ITEM.c.seller_tax_id, s)))

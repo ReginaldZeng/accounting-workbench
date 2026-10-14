@@ -1,0 +1,28 @@
+# V-draft 发票管家：普票写「普票不入账」（未上线）
+
+- 日期：2026-10-14
+- 作者：Claude Opus 5.5
+- 起因：用户 2026-10-14：「普票的应该是不入账的，所以应该是『普票不入账』之类的字眼」。普票不做进项认证，金蝶里不会有「转待认证 发票号」的凭证，原来台账写「暂未匹配」、对纸质票写「还没做账」，看着像漏做账。
+- 线上实查（只读）：现有台账里普票 1 张、从没对上过凭证；专票 24 张对上、5 张没对上。
+
+## 改了什么
+
+1. 台账「做账 / 凭证」那一栏、点开后的「金蝶做账凭证」框：普票写 **普票不入账**，不显示「刷新」按钮，说明写「普票不做进项认证，金蝶里不会有这张票的凭证，系统不去找」。
+2. 台账筛选「做账：未匹配 / 待刷新」不再算普票。
+3. 台账导出「做账状态」列：普票写「普票不入账」。
+4. 「刷新全部金蝶凭证」和定时同步不再去金蝶查普票（省时间、省接口次数）。
+5. 对纸质票：票夹里的普票那一行写「普票不入账」；对着认证清单扫到普票（不在清单里）念 **「普票」**，提示「是普票，不入账、不认证」。
+6. 凭证装订扫发票：扫到普票、金蝶没凭证时写「普票不入账」（原来是「这张发票还没做账」），语音同样。
+
+判定：发票类、票种＝普票（inv_type＝normal）。电子行程单、铁路、通行费等其它票种不变。
+
+## 涉及文件
+
+- 后端：`routers/invoice.py`（`no_book`、票的视图带 `noBook`）、`routers/invoice_vouchers.py`、`routers/invoice_books.py`、`routers/invoice_check.py`、`kernels/invoice_store.py`
+- 前端：`views/InvLedger.jsx`、`views/InvCheck.jsx`、`views/LogisticsVoucher.jsx`
+- 测试：`tests/test_invoice_books_api.py`（test_normal_invoice_not_booked）、`tests/qa_inv_frontend.cjs`（1 条）
+
+## 验证
+
+- `tests.test_invoice_books_api` 48 条全过；`tests.test_invoice_api` 只剩原有的 test_09_pairing；`kernels.test_invoice_store` 只剩原有的 test_ledger_iter_streams_same_rows_without_json（未改代码上同样失败）。
+- 页面回归 55 条过 52 条，没过的 3 条是「自助登记」老用例（main 上本来就红）；新加的 1 条过。

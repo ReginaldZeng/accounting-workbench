@@ -66,6 +66,9 @@ const KIND_ORDER = ['hx', 'tail', 'redo', 'part', 'later', 'subj', 'manual', 'no
 const BLOCK_CLS = { 红冲: 'b-red', 更正: 'b-fix', 核销: 'b-hx', 支付: 'b-pay' }
 const MODE = { hx: ['核销', 'ok'], rate: ['红冲+更正', 'bad'], fix: ['红冲+更正', 'bad'], move: ['补提到本主体', 'bad'] }
 
+// 扫到的票没凭证：普票本来就不入账（后端 state 写明），别的才是「还没做账」
+const noVoucherText = r => (r && r.state === '普票不入账') ? '普票不入账' : '还没做账'
+
 function dimText(d) {
   if (!d) return ''
   const cn = (c, n) => [c, n].filter(Boolean).join(' ')
@@ -438,7 +441,7 @@ export function useScan(after) {
       if (r.ok) {
         if (!dup) setHist(h => [{ ...r, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) }, ...h])
         const a = (r.vouchers || [])[0]
-        speak(a ? `${dup ? '重复，' : ''}${a.subject}，记 ${a.vno}` : '还没做账')
+        speak(a ? `${dup ? '重复，' : ''}${a.subject}，记 ${a.vno}` : noVoucherText(r))
       } else speak('没查到')
       return r
     }).catch(e => { const r = { ok: false, msg: e.message }; setCur(r); return r })
@@ -451,7 +454,7 @@ export function useScan(after) {
     if (f) run(shrinkPhoto(f).then(voucherScanPhoto))
   }
   const bySubj = {}
-  hist.forEach(h => { const k = (h.vouchers || [])[0] ? h.vouchers[0].subject : '还没做账'; bySubj[k] = (bySubj[k] || 0) + 1 })
+  hist.forEach(h => { const k = (h.vouchers || [])[0] ? h.vouchers[0].subject : noVoucherText(h); bySubj[k] = (bySubj[k] || 0) + 1 })
   return { v, setV, cur, setCur, busy, hist, setHist, say, setSay, run, go, shot, bySubj }
 }
 
@@ -533,7 +536,7 @@ export function VoucherScanPage({ user }) {
       <div className="vs-list">
         {S.hist.map((h, i) => { const x = (h.vouchers || [])[0]; return <div key={h.inst} className="vs-row" onClick={() => S.setCur({ ...h, dup: false })}>
           <span className={'vs-bar2 tone-' + tone(x ? x.subject : h.subject)} />
-          <div className="l"><b>{x ? '记-' + x.vno : '还没做账'}</b><span>{x ? `${x.subject} · ${x.month ? Number(String(x.month).slice(5)) + '月' : ''}${(x.operator || x.maker) ? ' · ' + (x.operator || x.maker) : ''}` : h.subject || ''}</span></div>
+          <div className="l"><b>{x ? '记-' + x.vno : noVoucherText(h)}</b><span>{x ? `${x.subject} · ${x.month ? Number(String(x.month).slice(5)) + '月' : ''}${(x.operator || x.maker) ? ' · ' + (x.operator || x.maker) : ''}` : h.subject || ''}</span></div>
           <div className="r"><span>{h.payee}</span><b>{money(h.amount)}</b></div></div> })}
         {!S.hist.length && <div className="vs-none">还没扫。扫过的会排在这里，按主体计数。</div>}
       </div>

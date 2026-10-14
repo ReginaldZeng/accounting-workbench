@@ -94,7 +94,7 @@ def _item_view(it, hit=None):
          "code": it.get("code") or "", "number": it.get("number") or "", "date": it.get("issue_date") or "",
          "sellerName": it.get("seller_name") or "", "total": inv._money_val(it.get("total")), "paper": bool(it.get("paper")),
          "review": it.get("review") or "draft", "hasQr": it.get("kind") == "invoice" and bool(it.get("number")), "hit": None,
-         "voucher": "、".join(inv.voucher_labels_of(it)), "bookMonth": inv.book_month_of(it)}
+         "voucher": "、".join(inv.voucher_labels_of(it)), "bookMonth": inv.book_month_of(it), "noBook": inv.no_book(it)}
     if hit:
         v["hit"] = {"at": hit.get("ts") or "", "by": hit.get("user") or "", "via": hit.get("via") or "",
                     "viaLabel": VIA_CN.get(hit.get("via") or "", hit.get("via") or "")}
@@ -209,9 +209,11 @@ def scan(u, ck, text, via="scanner"):
         if lst:
             # 对着认证清单：不在这份清单里的，说清它是哪个月做账的——整理纸质票时好分到那个月那一摞
             bm = inv.book_month_of(it)
-            det.update(bookMonth=bm, voucher="、".join(inv.voucher_labels_of(it)))
+            det.update(bookMonth=bm, voucher="、".join(inv.voucher_labels_of(it)), noBook=inv.no_book(it))
             S.check_hit_add(e, ck["id"], None, name, via, kind="other", detail=det)
-            if bm:
+            if det["noBook"]:
+                say, why = "普票", "是普票，不入账、不认证"
+            elif bm:
                 say, why = _month_say(bm), "是 %s 做账的（%s）" % (bm, det["voucher"])
             elif it.get("review") != "approved":
                 say, why = "还没审核", "还没审核通过，没到认证这一步"

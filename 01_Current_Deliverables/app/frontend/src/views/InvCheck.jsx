@@ -223,7 +223,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
                     <span className="inv-ck-cnt">{f.hit} / {f.total}</span></td></tr>
                   {show.map(i => <tr key={i.id} id={'inv-ck-row-' + i.id} className={(i.hit ? 'hit' : '') + (flashId === i.id ? ' flash' : '')}>
                     <td>{i.hit ? '✓' : ''}</td>
-                    <td className="inv-ck-vno">{i.voucher || <span className="inv-muted">还没做账</span>}</td>
+                    <td className="inv-ck-vno">{i.voucher || <span className="inv-muted">{i.noBook ? '普票不入账' : '还没做账'}</span>}</td>
                     <td className="inv-num">{i.number || '（没有号码）'}</td>
                     <td>{i.sellerName}</td>
                     <td className="inv-num r">{money(i.total)}</td>
@@ -241,7 +241,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
         {lastStr.length > 0 && <div className="inv-ck-str">
           <b>扫到过 {v.stats.strangers} 张不相干的票</b>（没有登记，也没有挪）：
           {lastStr.map((x, i) => <div key={i}>{x.kind === 'other' && v.check.listId
-            ? `不在这份清单里：${x.number || ''} · ${money(x.total)} · ${x.bookMonth ? x.bookMonth + ' 做账的（' + (x.voucher || '') + '）' : '还没做账'}`
+            ? `不在这份清单里：${x.number || ''} · ${money(x.total)} · ${x.noBook ? '普票，不入账' : x.bookMonth ? x.bookMonth + ' 做账的（' + (x.voucher || '') + '）' : '还没做账'}`
             : x.kind === 'other'
             ? `不在选中的票夹里：${x.number || ''} · ${money(x.total)} · 在「${x.payee || x.folderTitle || '票夹 #' + x.folderId}」里${x.ownerName ? '（归' + x.ownerName + '审）' : ''}`
             : `系统里没有这张票：${x.number || ''}${x.total !== null && x.total !== undefined ? ' · ' + money(x.total) : ''}（要先收票）`}</div>)}

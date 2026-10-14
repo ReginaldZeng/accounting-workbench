@@ -303,7 +303,7 @@ def _ledger_row_values(r):
             r.get("created_by"), r.get("created_at"), r.get("review_by"), r.get("review_at"),
             ie.ORIGIN_LABELS.get(r.get("origin") or "", r.get("origin")),
             REVIEW_CN.get(r.get("review") or "", r.get("review") or ""), r.get("alloc") if split else None,
-            {"booked": "已做账", "unbooked": "未做账"}.get(bk.get("status"), "未确认"),
+            "普票不入账" if inv.no_book(r) else {"booked": "已做账", "unbooked": "未做账"}.get(bk.get("status"), "未确认"),
             "；".join("%s · %s · %s" % (v["book"], v["period"], v["number"]) for v in bk.get("vouchers", [])),
             bk.get("by"), bk.get("at"), "已收到" if r.get("paper") else "未收到"]
 

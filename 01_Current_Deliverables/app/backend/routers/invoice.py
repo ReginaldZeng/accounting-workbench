@@ -688,6 +688,11 @@ def book_month_of(it):
     return ms[0] if ms else ""
 
 
+def no_book(it):
+    """普票不入账：普票不做进项认证，金蝶里不会有「转待认证 发票号」的凭证——台账写「普票不入账」，刷新金蝶凭证也不去查它。"""
+    return (it or {}).get("kind") == "invoice" and (it or {}).get("inv_type") == "normal"
+
+
 def voucher_labels_of(it):
     """这张票挂的凭证的短写法列表（深圳星期零-10-8#），按月份先后。"""
     fl = (it or {}).get("flags_json") if isinstance((it or {}).get("flags_json"), dict) else {}
@@ -1174,7 +1179,7 @@ def item_view(it, idx=None, mobile=False):
          "pending": it.get("pending_json") or [], "procStatus": it.get("proc_status") or "done",
          "procError": it.get("proc_error") or "", "paper": bool(it.get("paper")),
          "flags": {k: x for k, x in fl.items() if not str(k).startswith("_")},
-         "bookkeeping": fl.get("_bookkeeping") or {},
+         "bookkeeping": fl.get("_bookkeeping") or {}, "noBook": no_book(it),
          # 凭证的短写法（台账「做账 / 凭证」那一栏直接显示）：和 bookkeeping.vouchers 一一对应
          "voucherLabels": [voucher_label(v) for v in ((fl.get("_bookkeeping") or {}).get("vouchers") or []) if isinstance(v, dict)],
          "warnings": list(fl.get("_warnings") or []), "region": fl.get("_region"),

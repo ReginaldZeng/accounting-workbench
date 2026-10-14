@@ -193,7 +193,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
                 <td>{voucherTexts(r).length
                   ? voucherTexts(r).map((t, i) => <span key={i} className="inv-lg-vno" title={voucherFull(r.bookkeeping.vouchers[i])}>{t}
                     {i === 0 && crossMonth(r) ? <em className="inv-lg-cross" title={`开票是 ${String(r.date || '').slice(0, 7)}，做账在 ${crossMonth(r)}：认证跟着做账月走`}>跨月</em> : null}</span>)
-                  : bookText(r.bookkeeping)}</td>
+                  : r.noBook ? <span className="inv-muted">普票不入账</span> : bookText(r.bookkeeping)}</td>
               </tr>
             )
           })}
@@ -279,7 +279,7 @@ export function Bookkeeping({ row, canEdit, onSaved }) {
     catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
   }
   const texts = voucherTexts(row)
-  const state = bk.source === 'kingdee' ? (bk.status === 'booked' ? '' : '暂未匹配到凭证') : '待刷新核实'
+  const state = row.noBook ? '普票不入账' : bk.source === 'kingdee' ? (bk.status === 'booked' ? '' : '暂未匹配到凭证') : '待刷新核实'
   return <section className="inv-lg-box inv-lg-bk">
     <div className="inv-lg-bk-h">
       <span className="inv-lg-box-h">金蝶做账凭证</span>
@@ -287,9 +287,10 @@ export function Bookkeeping({ row, canEdit, onSaved }) {
         ? texts.map((t, i) => <b key={i} className="inv-lg-vno" title={voucherFull(bk.vouchers[i])}>{t}</b>)
         : <span>{state || '暂未匹配到凭证'}</span>}
       <span className="inv-lg-bk-grow" />
-      {canEdit && <button type="button" className="inv-lg-bk-btn" disabled={busy} onClick={refresh}>{busy ? '查询金蝶中…' : '刷新'}</button>}
+      {canEdit && !row.noBook && <button type="button" className="inv-lg-bk-btn" disabled={busy} onClick={refresh}>{busy ? '查询金蝶中…' : '刷新'}</button>}
     </div>
-    <p className="inv-muted inv-lg-bk-note">{bk.at ? fmtTime(bk.at) + ' 更新 · ' : ''}按发票号和购方账簿到金蝶找，每 20 分钟同步一次</p>
+    <p className="inv-muted inv-lg-bk-note">{row.noBook ? '普票不做进项认证，金蝶里不会有这张票的凭证，系统不去找'
+      : (bk.at ? fmtTime(bk.at) + ' 更新 · ' : '') + '按发票号和购方账簿到金蝶找，每 20 分钟同步一次'}</p>
     {msg && <p role="status" className="inv-lg-bk-note">{msg}</p>}
   </section>
 }
