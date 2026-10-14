@@ -1,3 +1,5 @@
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.959（核销暂估·写上谁什么时候审核的）
+# Description: 用户「是不是也能获取到谁什么时候审核的？」——金蝶凭证上有审核人（FCHECKERID）和审核时间（FAUDITDATE），实测能取。看到已审核时一并取下来记在后补单上，这一栏写「金蝶里已审核（谁 月-日 时:分）」。取不到就只写已审核。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.958（核销暂估·跟着金蝶写已审核）
 # Description: 用户在金蝶审核了 记-8，弹窗里还写着「已提交、等人在金蝶审核」、还摆着「撤回重做」。改成打开这一栏时到金蝶看一眼这张凭证现在的状态（_live：2 分钟缓存；看到已审核就记下来，以后不再问）：已审核 → 写「金蝶里已审核」、不给撤回重做；金蝶里找不到了 → 照实说、可以重做。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.955（后补票转待认证·撤回重做）
@@ -579,6 +581,8 @@ def _live(lid, st):
     if not vid:
         return ""
     if st.get("audited"):
+        if not st.get("auditedBy"):                 # 早先只记了「已审核」、没记是谁：补一次
+            _audit_who(lid, vid)
         return "C"
     hit = _LIVE.get(vid)
     if hit and time.time() - hit[1] < 120:
@@ -591,7 +595,27 @@ def _live(lid, st):
     _LIVE[vid] = (now, time.time())
     if now == "C":
         _put(lid, audited=True, auditedSeenAt=inv.now_s())
+        _audit_who(lid, vid)
     return now
+
+
+def _audit_who(lid, vid):
+    """金蝶里这张凭证是谁、什么时候审核的 → 记在后补单上（auditedBy / auditedAt）。只读；取不到就不记，下次再试（2 分钟内不重复问）。"""
+    k = ("who", vid)
+    hit = _LIVE.get(k)
+    if hit and time.time() - hit[1] < 120:
+        return
+    _LIVE[k] = ("", time.time())
+    try:
+        LVR = _lvr()
+        s, conf = LVR._kd()
+        rows = LVR.kc._query(s, conf, "GL_VOUCHER", [("FCHECKERID.FName", "审核人"), ("FAUDITDATE", "审核时间")], "FVOUCHERID=%d" % int(vid))
+    except Exception:
+        return
+    r = rows[0] if rows else {}
+    who, at = str(r.get("审核人") or "").strip(), str(r.get("审核时间") or "").replace("T", " ")[:16]
+    if who or at:
+        _put(lid, auditedBy=who, auditedAt=at)
 
 
 def _view(lid):
@@ -607,13 +631,16 @@ def _view(lid):
     live = ""
     if st.get("status") == "done" and st.get("vid") and st.get("vno"):
         live = _live(lid, st)
-        tail = {"C": "金蝶里已审核", "B": "已提交、等人在金蝶审核", "gone": "但金蝶里已经找不到这张凭证了（可能被人删了）：可以点「撤回重做」重建"}.get(
+        st = state_of(lid) if live == "C" else st       # 刚取到的审核人、审核时间
+        who = "（%s）" % " ".join(x for x in (st.get("auditedBy") or "", (st.get("auditedAt") or "")[5:]) if x) if (st.get("auditedBy") or st.get("auditedAt")) else ""
+        tail = {"C": "金蝶里已审核" + who, "B": "已提交、等人在金蝶审核", "gone": "但金蝶里已经找不到这张凭证了（可能被人删了）：可以点「撤回重做」重建"}.get(
             live, ("已保存、还没提交上，请到金蝶手动提交" if live in ("A", "D") else ("已提交、等人在金蝶审核" if st.get("submitted", True) else "已保存、还没提交上")))
         st["msg"] = "已新建暂估转待认证凭证 %s %s年%s月 记-%s（%s），%s" % (
             st.get("book") or "", st.get("vyear") or "", st.get("vperiod") or "", st["vno"], st.get("date") or "", tail)
     return {"ok": True, "laterId": lid, "mode": cfg()["mode"], "modeText": MODE_CN[cfg()["mode"]], "ready": ready, "voucherStatus": live,
             "plan": {k: p.get(k) for k in ("ok", "kind", "why", "book", "cands", "src", "taxInv", "taxEst", "by")}, "lines": lines,
-            "state": {k: st.get(k) for k in ("status", "kind", "msg", "vno", "vyear", "vperiod", "book", "date", "at", "by", "submitted", "picks", "redoOf")},
+            "state": {k: st.get(k) for k in ("status", "kind", "msg", "vno", "vyear", "vperiod", "book", "date", "at", "by", "submitted", "picks", "redoOf",
+                                             "auditedBy", "auditedAt")},
             "canRedo": st.get("status") == "done" and bool(st.get("vid")) and st.get("kind") in ("exact", "logistics") and live != "C"}
 
 
@@ -714,7 +741,8 @@ def _redo(lid, u):
             posted[l.get("inst_id")] = rec
             db.set_setting(LVR._POSTED_KEY, posted, u["name"])
     _LIVE.pop(vid, None)
-    _put(lid, status="", kind="", msg="", vid=None, vno="", audited=False, redoOf="记-%s" % vno, redoBy=u["name"], redoAt=inv.now_s(), told="")
+    _put(lid, status="", kind="", msg="", vid=None, vno="", audited=False, auditedBy="", auditedAt="",
+         redoOf="记-%s" % vno, redoBy=u["name"], redoAt=inv.now_s(), told="")
     inv.log(u, "撤回重做暂估转待认证凭证", l.get("folder_id"), None, lid, {"withdrawn": "记-%s" % vno})
     inv.audit(u, "发票后补-撤回重做转待认证凭证", "记-%s" % vno, "后补单#%s %s：金蝶里已撤销提交并删除，接着重建" % (lid, l.get("payee_name") or ""))
     r = run_one(lid, u, manual=True)

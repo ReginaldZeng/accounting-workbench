@@ -2156,6 +2156,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
             L3._CACHE.clear()
 
         def q(s_, conf, form, fields, filt, order=""):
+            if "FVOUCHERID=" in filt:                   # 这张凭证是谁、什么时候审核的
+                return [{"审核人": "审核人甲", "审核时间": "2026-10-14T10:15:22.92"}]
             if "FCREDIT=" in filt:
                 amt = float(filt.split("FCREDIT=")[1])
                 return [dict(books[v][-1], **{"年": 2026, "期": 9}) for v, g in heads if abs(g - amt) < 0.005]
@@ -2277,6 +2279,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
             v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))
             self.assertEqual((v["voucherStatus"], v["canRedo"], "金蝶里已审核" in v["state"]["msg"], "等人" in v["state"]["msg"]), ("C", False, True, False))
             self.assertTrue(L3.state_of(la)["audited"])
+            self.assertIn("金蝶里已审核（审核人甲 10-14 10:15）", v["state"]["msg"])           # 谁、什么时候审核的也带出来
+            self.assertEqual((v["state"]["auditedBy"], v["state"]["auditedAt"]), ("审核人甲", "2026-10-14 10:15"))
             gone["status"][9002] = "B"                                                   # 记下来了：不再去问金蝶
             self.assertEqual(self.ok(self.get("/api/inv/later/%d/voucher-plan" % la, "acct"))["voucherStatus"], "C")
             # ③ 对不上（票面税额 ≠ 账上暂估）：不自动做，写明差多少，提醒一次
