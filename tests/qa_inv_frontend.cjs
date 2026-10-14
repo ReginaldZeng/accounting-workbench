@@ -296,11 +296,20 @@ test('收票台：有差额（付款−专票−普票−后补≠0）提交前�
   await ctx.close()
 })
 
+// 审票分工：夹具里的票夹默认「归我审」（老用例不关心分工）；用例自己给了 owner 的照它的
+const OWN_ME = { assigned: true, name: '测试会计', mine: true, canAct: true, note: '', via: 'intake', at: '2026-09-25 09:00:00', by: '系统' }
 function auditApi(st) {
   return (c) => {
-    if (c.path === '/api/inv/config') return cfg()
-    if (c.path === '/api/inv/audit/queue') return { ok: true, total: st.queue.length, rows: st.queue }
-    if (c.path === `/api/inv/folder/${st.folder.id}`) { st.folderGets = (st.folderGets || 0) + 1; return { ok: true, folder: st.folder, items: st.items, logs: st.logs || [] } }
+    if (c.path === '/api/inv/config') return cfg(st.can || {})
+    if (c.path === '/api/inv/audit/queue') {
+      st.scopes = (st.scopes || []).concat([(c.query && c.query.scope) || ''])
+      return { ok: true, total: st.queue.length, rows: st.queue.map(r => ({ owner: OWN_ME, ...r })) }
+    }
+    if (c.path === '/api/inv/audit/backlog') return st.backlog || { ok: true, canAssign: false, people: [{ key: 'a:测试会计', name: '测试会计', mine: true, count: st.queue.length, oldest: '2026-09-20 10:00:00', days: 5, note: '' }], unassigned: { count: 0, oldest: '', days: null }, total: st.queue.length }
+    if (c.path === '/api/inv/audit/people') return { ok: true, people: [{ account: '测试会计', name: '测试会计' }, { account: '李四', name: '李四' }, { account: '王五', name: '王五' }], me: '测试会计', meCanAudit: true }
+    if (c.path === '/api/inv/audit/claim') return st.onClaim(c)
+    if (c.path === '/api/inv/audit/assign') return st.onAssign(c)
+    if (c.path === `/api/inv/folder/${st.folder.id}`) { st.folderGets = (st.folderGets || 0) + 1; return { ok: true, folder: { owner: OWN_ME, ...st.folder }, items: st.items, logs: st.logs || [] } }
     if (/^\/api\/inv\/item\/\d+\/update$/.test(c.path)) return st.onUpdate(c)
     const mk = c.path.match(/^\/api\/inv\/audit\/item\/(\d+)\/mark$/)
     if (mk) {
@@ -619,6 +628,192 @@ test('审核改版：没有后补单时写「没有发票后补单」', async (b
   const { page, ctx } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
   await page.getByText('没有发票后补单').waitFor()
+  await ctx.close()
+})
+
+// ── 审票分工（发票审核按人分） ──
+const auditSt = (owner, extra = {}) => {
+  const st = {
+    folder: { id: 10, status: 'submitted', source: 'dingtalk', title: '报销单甲', businessId: '20260101000000000010', amount: 100, gap: GAP0(100), laters: [], owner },
+    items: [inv({ id: 101 })], logs: [], ...extra,
+  }
+  st.queue = [{ id: 10, source: 'dingtalk', title: '报销单甲', amount: 100, anomalies: [], clean: true, stats: { invoices: 1 }, owner }]
+  st.onApprove = () => ({ ok: true, folder: { ...st.folder, status: 'approved' } })
+  return st
+}
+
+test('审票分工：别人名下的单只能看——写明归谁审，没有审核/退回按钮；默认只看归我的，搜的时候才连别人的一起搜', async (browser, B) => {
+  const other = { assigned: true, name: '李四', mine: false, canAct: false, note: '', via: 'intake', at: '2026-09-25 09:00:00' }
+  const st = auditSt(other)
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-owner.other', { hasText: '归李四审，你只能看' }).waitFor()
+  assert.equal(await page.locator('.inv-au-row .inv-au-own', { hasText: '归李四' }).count(), 1, '队列每行写归谁')
+  assert.equal(await page.locator('.inv-au-row .inv-au-src', { hasText: '钉钉接入' }).count(), 1, '队列每行写来源')
+  await page.locator('.inv-au-kv2', { hasText: '来源' }).waitFor()
+  assert.equal(await page.locator('.inv-au-owner').getByRole('button').count(), 0, '普通会计对别人名下的单没有转交按钮')
+  assert.equal(await page.locator('.inv-au-row-ck input').count(), 0, '别人名下的不能勾批量通过')
+  assert.equal(await page.locator('.inv-au-tbl tbody input[type=checkbox]:not([disabled])').count(), 0, '已收发票表上不能勾选审核')
+  assert.equal(await page.getByText('全部（只有管理员看得到）').count(), 0, '普通会计没有「全部」这张卡')
+  await page.locator('.inv-au-kpis .kpi', { hasText: '归我审' }).waitFor()
+  assert.deepEqual([...new Set(st.scopes)], ['mine'], '不搜的时候只取归我的')
+  await page.locator('.inv-au-search input').fill('报销')
+  await page.locator('.inv-au-search input').press('Enter')
+  await page.waitForFunction(() => true)
+  await sleep(300)
+  assert.equal(st.scopes[st.scopes.length - 1], 'all', '搜的时候别人名下的也搜得到（只读）')
+  assert.equal(n(calls, c => /audit\/(approve|return|items)/.test(c.path)), 0)
+  await ctx.close()
+})
+
+test('审票分工：没指派上的先点「我来审」；归我的可以转交，原因必填', async (browser, B) => {
+  const none = { assigned: false, name: '', mine: false, canAct: false, note: '' }
+  const st = auditSt(none)
+  st.onClaim = () => { st.folder = { ...st.folder, owner: { ...OWN_ME, via: 'claim' } }; st.queue = st.queue.map(r => ({ ...r, owner: st.folder.owner })); return { ok: true, msg: '已归到你名下' } }
+  st.onAssign = (c) => { st.assigned = c.body; st.queue = []; return { ok: true, msg: '已转给李四' } }
+  const { page, ctx, calls } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-owner.none', { hasText: '没指派上' }).waitFor()
+  assert.equal(await page.locator('.inv-au-owner').getByRole('button', { name: '派给别人…' }).count(), 0, '普通会计不能派给别人')
+  await page.locator('.inv-au-owner').getByRole('button', { name: '我来审' }).click()
+  await page.locator('.inv-au-owner.mine', { hasText: '测试会计（你）' }).waitFor()
+  assert.equal(n(calls, c => c.path === '/api/inv/audit/claim' && c.body.folderId === 10), 1)
+  // 转交：不写原因不让转
+  await page.locator('.inv-au-owner').getByRole('button', { name: '转交…' }).click()
+  const dlg = page.locator('.inv-modal', { hasText: '转交审核' })
+  await dlg.locator('select').selectOption('李四')
+  await dlg.getByRole('button', { name: '转交', exact: true }).click()
+  await dlg.getByText('写一下为什么转交', { exact: false }).waitFor()
+  assert.equal(n(calls, c => c.path === '/api/inv/audit/assign'), 0)
+  assert.equal(await dlg.locator('select option', { hasText: '测试会计' }).count(), 0, '下拉里不列现在归的那位')
+  await dlg.locator('textarea').fill('下周请假')
+  await dlg.getByRole('button', { name: '转交', exact: true }).click()
+  await page.waitForFunction(() => !document.querySelector('.inv-modal'))
+  assert.deepEqual(st.assigned, { folderId: 10, to: '李四', reason: '下周请假' })
+  await ctx.close()
+})
+
+test('审票分工：有「审核分派」权限的人——多一张「全部」卡片、能按人看、别人名下的可以直接审也可以转交', async (browser, B) => {
+  const other = { assigned: true, name: '李四', mine: false, canAct: true, note: '这位还没开通发票审核', via: 'intake', at: '2026-09-25 09:00:00' }
+  const st = auditSt(other, { can: { assign: true } })
+  st.backlog = { ok: true, canAssign: true, people: [{ key: 'a:李四', name: '李四', mine: false, count: 3, oldest: '2026-09-10 10:00:00', days: 15, note: '这位还没开通发票审核' }],
+    unassigned: { count: 2, oldest: '2026-09-01 10:00:00', days: 24 }, total: 5 }
+  const { page, ctx } = await open(browser, B, auditApi(st))
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.locator('.inv-au-kpis .kpi', { hasText: '全部（只有管理员看得到）' }).waitFor()
+  await page.locator('.inv-au-kpis .kpi.prio', { hasText: '没指派上' }).waitFor()
+  assert.equal(await page.locator('.inv-au-who').count(), 0, '看「归我审」时不出按人看的下拉')
+  await page.locator('.inv-au-kpis .kpi', { hasText: '全部（只有管理员看得到）' }).click()
+  await page.locator('.inv-au-who').waitFor()
+  assert.match(await page.locator('.inv-au-who').innerText(), /李四（3 张 · 最久等了 15 天）/)
+  await page.locator('.inv-au-who').selectOption('a:李四')
+  await sleep(300)
+  assert.equal(st.scopes[st.scopes.length - 1], 'a:李四', '按人看：队列只取这一位的')
+  await page.locator('.inv-au-row').first().click()
+  await page.locator('.inv-au-owner.other', { hasText: '可以直接审' }).waitFor()
+  await page.locator('.inv-au-owner .inv-badge', { hasText: '这位还没开通发票审核' }).waitFor()
+  assert.equal(await page.locator('.inv-au-owner').getByRole('button', { name: '转交…' }).count(), 1)
+  assert.ok(await page.locator('.inv-au-tbl tbody input[type=checkbox]:not([disabled])').count() > 0, '别人名下的，管理员能勾选审核')
+  await ctx.close()
+})
+
+test('收票台新建票夹：会计默认归自己、实习生必须选审核会计；名字系统起；扫到没定归谁审的付款单让人选一位再建', async (browser, B) => {
+  const mk = (meCanAudit) => {
+    const state = { can: {}, posts: [] }
+    const base = deskApi(state)
+    const api = (c) => {
+      if (c.path === '/api/inv/config') return { ...cfg(), settings: { company: [{ name: '孝感市星期九食品科技有限公司' }, { name: '深圳市星期零食品科技有限公司' }], templates: [], laterTemplates: [], remind: {} } }
+      if (c.path === '/api/inv/audit/people') return { ok: true, people: [{ account: '陈梓华', name: '陈梓华' }, { account: '李志鹏', name: '李志鹏' }], me: meCanAudit ? '陈梓华' : '实习生甲', meCanAudit }
+      if (c.path === '/api/inv/folder/manual') {
+        const b = c.body
+        const co = b.company === 'auto' ? '主体待定' : b.company.replace(/[省市]/g, '').slice(0, 5)
+        const name = `${co}-${b.auditor}-${b.month.replace('-', '')}进项认证（${b.way === 'single' ? '单张手工' : '批量手工'}）`
+        if (b.dry) return { ok: true, dry: true, title: name, reuse: false, names: b.company === 'auto' ? [name, name.replace('主体待定', '孝感星期九'), name.replace('主体待定', '深圳星期零')] : [name] }
+        state.posts.push(b)
+        return { ok: true, folder: { id: 77, title: name, status: 'collecting', stats: {} } }
+      }
+      if (c.path === '/api/inv/desk/scan') {
+        state.scans = (state.scans || []).concat([c.body])
+        if (!c.body.auditor) return { __status: 400, ok: false, code: 'needAuditor', msg: '这张付款单还没走到（已启用的）接入审批人，请指定一位审核会计' }
+        return { ok: true, action: 'folder', msg: '已打开票夹', folder: { id: 78, title: '付款单', status: 'collecting', stats: {} }, items: [] }
+      }
+      return base(c)
+    }
+    return { state, api }
+  }
+  // 会计：默认已经选好自己，名字跟着选的变
+  let { state, api } = mk(true)
+  let { page, ctx } = await open(browser, B, api)
+  await mount(page, 'InvDesk', { user: { name: '陈梓华' } })
+  await page.getByRole('button', { name: '新建票夹' }).first().click()
+  let dlg = page.locator('.inv-modal', { hasText: '新建票夹' })
+  await dlg.locator('.inv-dk-name', { hasText: '先选公司主体' }).waitFor()
+  assert.equal(await dlg.locator('select').first().inputValue(), '陈梓华')
+  assert.equal(await dlg.locator('select option', { hasText: '自动识别' }).count(), 0, '按抬头自动分主体的入口等下一批页面做好再放出来')
+  await dlg.getByRole('button', { name: '建票夹' }).click()
+  await dlg.getByText('选一下是哪家公司主体的票', { exact: false }).waitFor()
+  await dlg.locator('input[type=month]').fill('2026-08')
+  await dlg.locator('select').nth(1).selectOption('孝感市星期九食品科技有限公司')
+  await dlg.locator('.inv-dk-name', { hasText: '孝感星期九-陈梓华-202608进项认证（批量手工）' }).waitFor()
+  await dlg.getByRole('button', { name: '建票夹' }).click()
+  await page.waitForFunction(() => !document.querySelector('.inv-modal'))
+  assert.deepEqual(state.posts[0], { month: '2026-08', company: '孝感市星期九食品科技有限公司', way: 'batch', auditor: '陈梓华' })
+  await ctx.close()
+  // 实习生：没有默认，不选建不了
+  ;({ state, api } = mk(false))
+  ;({ page, ctx } = await open(browser, B, api))
+  await mount(page, 'InvDesk', { user: { name: '实习生甲' } })
+  await page.getByRole('button', { name: '新建票夹' }).first().click()
+  dlg = page.locator('.inv-modal', { hasText: '新建票夹' })
+  await dlg.locator('select option', { hasText: '请选一位审核会计' }).waitFor({ state: 'attached' })
+  assert.equal(await dlg.locator('select').first().inputValue(), '')
+  await dlg.getByRole('button', { name: '建票夹' }).click()
+  await dlg.getByText('选一位审核会计', { exact: false }).last().waitFor()
+  assert.equal(state.posts.length, 0, '没选审核会计不发请求')
+  await dlg.locator('select').first().selectOption('李志鹏')
+  await dlg.locator('select').nth(1).selectOption('深圳市星期零食品科技有限公司')
+  await dlg.getByRole('button', { name: '建票夹' }).click()
+  await page.waitForFunction(() => !document.querySelector('.inv-modal'))
+  assert.equal(state.posts[0].auditor, '李志鹏')
+  assert.equal(state.posts[0].company, '深圳市星期零食品科技有限公司')
+  // 扫一张没定归谁审的付款单：弹窗选一位，带着再扫
+  await page.locator('.inv-scan input, input[placeholder*="扫审批单"]').first().fill('202609201716000443127')
+  await page.locator('.inv-scan input, input[placeholder*="扫审批单"]').first().press('Enter')
+  const pick = page.locator('.inv-modal', { hasText: '这张付款单归谁审' })
+  await pick.waitFor()
+  await pick.locator('select').selectOption('陈梓华')
+  await pick.getByRole('button', { name: '建票夹' }).click()
+  await page.waitForFunction(() => !document.querySelector('.inv-modal'))
+  assert.deepEqual(state.scans.map(x => x.auditor || ''), ['', '陈梓华'])
+  await ctx.close()
+})
+
+test('设置：接入审批人每人一行、带自己的启用日；留空＝还没启用；保存时一起带上', async (browser, B) => {
+  const settings = {
+    people: [], company: [{ name: '合成测试有限公司', taxId: '91440300MA5DXXXXX1' }], templates: [],
+    remind: { enabled: true, beforeDays: 3, everyDays: 7, hour: 10 }, blockNoInvoice: false, portalUrl: '',
+    intake: { approvers: [{ dtUserid: 'u1', dtName: '曾某', since: '2026-09-09' }, { dtUserid: 'u2', dtName: '李某', since: '' }], firstReviewers: [], since: '2026-09-09' },
+  }
+  let saved = null
+  const api = (c) => {
+    if (c.path === '/api/inv/settings' && c.method === 'GET') return { ok: true, settings }
+    if (c.path === '/api/inv/settings' && c.method === 'POST') { saved = c.body.settings; return { ok: true, settings: saved } }
+    if (c.path === '/api/inv/intake') return { ok: true, last: null, waiting: 0 }
+    return { ok: true }
+  }
+  const { page, ctx } = await open(browser, B, api)
+  await mount(page, 'InvSettings', { user: { name: '管理员' } })
+  const rows = page.locator('.inv-set-aps tbody tr')
+  await rows.first().waitFor()
+  assert.equal(await rows.count(), 2)
+  assert.match(await rows.nth(0).innerText(), /曾某[\s\S]*已启用 · 只接 2026-09-09 当天及以后提交的单/)
+  assert.match(await rows.nth(1).innerText(), /李某[\s\S]*还没启用 · 单经过这位不接/)
+  assert.equal(await page.getByText('从这天提交的单子起').count(), 0, '全局起始日不再单独出现')
+  await rows.nth(0).locator('input[type=date]').fill('2026-09-01')
+  await page.getByRole('button', { name: '保存', exact: true }).last().click()
+  await page.waitForFunction(() => true)
+  await sleep(400)
+  assert.deepEqual(saved && saved.intake.approvers, [{ dtUserid: 'u1', dtName: '曾某', since: '2026-09-01' }, { dtUserid: 'u2', dtName: '李某', since: '' }])
   await ctx.close()
 })
 

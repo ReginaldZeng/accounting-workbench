@@ -26,6 +26,7 @@ import { invPaperMark } from '../api.js'
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invAuditQueue, invAuditBatch, invAuditApprove, invAuditItemsApprove, invAuditReturn, invAuditMark,
+  invAuditBacklog, invAuditPeople, invAuditClaim, invAuditAssign,
   invFolder, invItemUpdate, invItemRotate, invItemRemove, invLaterVoucherPlan, invLaterVoucherSource, invLaterVoucherRun,
 } from '../api.js'
 import {
@@ -45,6 +46,14 @@ const FOLDER_ST = { collecting: '收票中', submitted: '待审核', approved: '
 const ITEM_REVIEW = { draft: '未提交', pending: '待审', approved: '已通过', returned: '已退回', void: '已作废' }
 const KIND_RANK = { invoice: 0, receipt: 1, other: 2 }
 const NO_PERM_HINT = '审核权限需要管理员单独开通'
+// 票夹是从哪条路进来的（收票台不分扫码和手工——用户 2026-10-13 定）
+const SRC_CN = { dingtalk: '钉钉接入', scan: '收票台', manual: '收票台', later: '后补单', logistics: '物流对账' }
+const srcOf = f => SRC_CN[f?.source] || ''
+// 归谁审那几个字：没指派上 / 归我 / 归某某
+const ownText = o => (!o || !o.assigned) ? '没指派上' : o.mine ? '归我' : '归' + (o.name || '别人')
+const ownCls = o => (!o || !o.assigned) ? 'none' : o.mine ? 'mine' : ''
+const VIA_CN = { intake: '钉钉审批流最先走到这位', pick: '建票夹时指定', self: '自己建的，归自己审', claim: '认领的', transfer: '转交来的', backfill: '按审批流补记' }
+const nowHM = () => { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') }
 
 const num = v => {
   if (v === null || v === undefined || v === '') return null
@@ -148,7 +157,7 @@ function QueueRow({ row, tab, on, checked, canCheck, onPick, onCheck }) {
     <div className={'inv-au-row' + (on ? ' on' : '')} onClick={() => onPick(row.id)} role="button" tabIndex={0}
       onKeyDown={e => { if (e.key === 'Enter') onPick(row.id) }}>
       <div className="inv-au-row-ck" onClick={e => e.stopPropagation()}>
-        {tab === 'pending' && clean && canCheck
+        {tab === 'pending' && clean && canCheck && row.owner?.canAct
           ? <input type="checkbox" checked={checked} onChange={e => onCheck(row.id, e.target.checked)} title="没有异常，可以批量通过" />
           : <span className="inv-au-ck-ph" />}
       </div>
@@ -159,15 +168,19 @@ function QueueRow({ row, tab, on, checked, canCheck, onPick, onCheck }) {
         </div>
         <div className="inv-au-row-sub">
           {row.template && row.title ? <span>{row.template}</span> : null}
-          <span className="inv-num">{row.businessId || (row.source === 'manual' ? '手工票夹' : '—')}</span>
+          <span className="inv-num">{row.businessId || (row.source === 'manual' ? '没有付款单' : '—')}</span>
           <span>{row.applicant || '—'}</span>
           <span>{invoices !== null ? `${invoices} 张票` : ''}</span>
         </div>
         <div className="inv-au-row-b">
+          {tab !== 'done' && <span className={'inv-au-own ' + ownCls(row.owner)} title={row.owner?.note || ''}>{ownText(row.owner)}</span>}
+          {srcOf(row) && <span className="inv-au-src">{srcOf(row)}</span>}
           {tab === 'pending' && clean && <span className="inv-badge ok">无异常</span>}
           <AnomalyBadges list={row.anomalies} />
           {tab === 'returned' && row.reviewNote && <span className="inv-au-row-note" title={row.reviewNote}>退回：{row.reviewNote}</span>}
           {tab === 'done' && <span className="inv-muted">{row.reviewedBy || ''} {row.reviewedAt ? fmtTime(row.reviewedAt) : ''}</span>}
+          {tab === 'done' && row.owner?.assigned && row.reviewedBy && row.owner.name !== row.reviewedBy && !row.owner.mine
+            ? <span className="inv-au-own" title={`这张单归${row.owner.name}审，实际由${row.reviewedBy}审的`}>归{row.owner.name}</span> : null}
           {row.selfReview ? <span className="inv-badge warn" title="主管理员审核了自己提交的票夹">自审</span> : null}
           <span className="inv-au-grow" />
           {tab === 'pending' && <span className="inv-muted">{fmtTime(row.submittedAt || row.updatedAt || row.createdAt)}</span>}
@@ -202,11 +215,12 @@ function BatchResult({ res, titleOf: liveTitle, onClose, onPick }) {
 }
 
 function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loading, err, page, setPage,
-  selId, onPick, checked, setChecked, canAct, onBatch, batchBusy, batchErr, batchRes, setBatchRes }) {
+  selId, onPick, checked, setChecked, canAct, onBatch, batchBusy, batchErr, batchRes, setBatchRes,
+  scope, onScope, who, mineOnly }) {
   const rows = queue?.rows || []
   const total = queue?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
-  const cleanIds = rows.filter(r => r.clean).map(r => r.id)
+  const cleanIds = rows.filter(r => r.clean && r.owner?.canAct).map(r => r.id)
   const nChecked = cleanIds.filter(id => checked.has(id)).length
   const allOn = cleanIds.length > 0 && nChecked === cleanIds.length
   const titleOf = (id) => {
@@ -222,6 +236,11 @@ function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loa
           onChange={e => setQInput(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') onSearch(qInput) ; if (e.key === 'Escape' && qInput) { setQInput(''); onSearch('') } }} />
       </div>
+      {who && <select className="inv-in inv-au-who" value={who.some(p => p.key === scope) ? scope : 'all'} onChange={e => onScope(e.target.value)}
+        title="只看某一位名下的">
+        <option value="all">归谁审：所有人</option>
+        {who.map(p => <option key={p.key} value={p.key}>{p.name}（{p.count} 张{p.days !== null && p.days !== undefined ? ` · 最久等了 ${p.days} 天` : ''}）{p.note ? ' · ' + p.note : ''}</option>)}
+      </select>}
       {tab === 'pending' && canAct && cleanIds.length > 0 && (
         <div className="inv-au-batch">
           <label className="inv-au-ckall"><input type="checkbox" checked={allOn}
@@ -238,7 +257,7 @@ function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loa
         {err && <div className="inv-au-err">队列没取到：{err}</div>}
         {loading && !rows.length && <div className="loading">正在取审核队列…</div>}
         {!loading && !err && !rows.length && <div className="inv-au-empty">
-          {qInput ? '没搜到符合的票夹，换个关键字试试' : tab === 'pending' ? '暂时没有要审的票夹' : tab === 'returned' ? '没有被退回的票夹' : '还没有审核通过的票夹'}
+          {qInput ? '没搜到符合的票夹，换个关键字试试' : tab === 'pending' ? (mineOnly ? '你名下暂时没有要审的' : '暂时没有要审的票夹') : tab === 'returned' ? '没有被退回的票夹' : '还没有审核通过的票夹'}
         </div>}
         {rows.map(r => <QueueRow key={r.id} row={r} tab={tab} on={r.id === selId} checked={checked.has(r.id)}
           canCheck={canAct} onPick={onPick} onCheck={toggle} />)}
@@ -279,7 +298,81 @@ function Fig({ label, v, cls }) {
   return <span className={'inv-au-fig ' + (cls || '')}><span>{label}</span><b className="inv-num">{v}</b></span>
 }
 
-function AuditHeader({ folder }) {
+// 归谁审那一条：我的 → 可以转交；没指派上 → 我来审（管理员还能派给别人）；别人的 → 只读，管理员可以直接审、也可以转交
+function OwnerBar({ folder, me, canAct, boss, busy, onClaim, onAssign }) {
+  const o = folder?.owner
+  if (!o) return null
+  const open = folder.status !== 'approved'
+  const why = VIA_CN[o.via] || ''
+  if (!o.assigned) {
+    return <div className="inv-au-owner none">
+      <b>没指派上</b><span>这张单建的时候没定下归谁审（多半是老数据）。</span><span className="inv-au-grow" />
+      {canAct && <button type="button" className="btn primary" disabled={busy} onClick={onClaim}>我来审</button>}
+      {boss && <button type="button" className="btn" disabled={busy} onClick={onAssign}>派给别人…</button>}
+    </div>
+  }
+  if (o.mine) {
+    return <div className="inv-au-owner mine">
+      <span>归谁审 <b>{o.name}（你）</b></span>
+      <span className="inv-muted">{why}{o.at ? ' · ' + fmtTime(o.at) : ''}</span><span className="inv-au-grow" />
+      {canAct && open && <button type="button" className="btn" disabled={busy} onClick={onAssign}>转交…</button>}
+    </div>
+  }
+  return <div className="inv-au-owner other">
+    {boss && canAct
+      ? <><span>归谁审 <b>{o.name}</b></span><span>你有「审核分派」权限：可以直接审，会记成「归{o.name}，由{me || '你'}审」。</span></>
+      : <><b>归{o.name}审，你只能看</b><span>要你来审，请{o.name}本人或管理员转交给你。</span></>}
+    {o.note ? <span className="inv-badge warn">{o.note}</span> : null}
+    <span className="inv-au-grow" />
+    {boss && open && <button type="button" className="btn" disabled={busy} onClick={onAssign}>转交…</button>}
+  </div>
+}
+
+// 转交弹窗：转给谁（只列能做发票审核的人）＋为什么（必填）
+function AssignDialog({ folder, onClose, onDone }) {
+  const [people, setPeople] = useState(null)
+  const [to, setTo] = useState('')
+  const [why, setWhy] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const o = folder?.owner || {}
+  useEffect(() => {
+    let live = true
+    invAuditPeople().then(r => { if (live) setPeople(Array.isArray(r?.people) ? r.people : []) })
+      .catch(e => { if (live) { setPeople([]); setErr('没取到能审核的人：' + errText(e)) } })
+    return () => { live = false }
+  }, [])
+  const list = (people || []).filter(p => !(o.assigned && p.name === o.name))
+  const go = async () => {
+    if (!to) { setErr('选一下转给谁'); return }
+    if (!why.trim()) { setErr('写一下为什么转交（请假、换岗……），以后查得到'); return }
+    setBusy(true); setErr('')
+    try { const r = await invAuditAssign({ folderId: folder.id, to, reason: why.trim().slice(0, 200) }); await onDone(r) }
+    catch (e) { setErr(errText(e)); setBusy(false) }
+  }
+  return (
+    <Modal title="转交审核" onClose={onClose} width={460}
+      footer={<>
+        <button type="button" className="btn" onClick={onClose}>取消</button>
+        <button type="button" className="btn primary" disabled={busy} onClick={go}>{busy ? '转交中…' : '转交'}</button>
+      </>}>
+      <div className="inv-au-assign">
+        <div className="inv-muted">{folder.title || folder.template || '票夹'} · {money(folder.amount)} · 现在{o.assigned ? '归' + o.name : '没指派上'}</div>
+        <label><span>转给谁（只列能做发票审核的人）</span>
+          <select className="inv-in" value={to} onChange={e => { setTo(e.target.value); setErr('') }}>
+            <option value="">{people === null ? '正在取名单…' : '请选一位'}</option>
+            {list.map(p => <option key={p.account} value={p.account}>{p.name}</option>)}
+          </select></label>
+        <label><span>为什么转（必填，以后查得到）</span>
+          <textarea className="inv-in" rows={3} value={why} placeholder="例：下周请假 / 这家供应商一直是春艳在对"
+            onChange={e => { setWhy(e.target.value); setErr('') }} /></label>
+        {err && <div className="inv-au-err">{err}</div>}
+      </div>
+    </Modal>
+  )
+}
+
+function AuditHeader({ folder, owner }) {
   const f = folder || {}
   const payee = f.payee || {}
   const g = f.gap || null
@@ -293,18 +386,21 @@ function AuditHeader({ folder }) {
       <div className="inv-au-hd2-t">
         <b>{f.title || f.template || '（无标题）'}</b>
         {f.businessId ? <span className="inv-num inv-au-bid">（{f.businessId}）</span>
-          : f.source === 'manual' ? <span className="inv-muted">（手工票夹）</span> : null}
+          : f.source === 'manual' ? <span className="inv-muted">（没有付款单）</span> : null}
         <span className={'inv-au-st ' + (f.status || '')}>{FOLDER_ST[f.status] || f.status || '—'}</span>
         {f.selfReview ? <span className="inv-badge warn" title="主管理员审核了自己提交的票夹">自审</span> : null}
       </div>
       <div className="inv-au-kv2">
+        {srcOf(f) ? <span>来源 <b>{srcOf(f)}</b></span> : null}
         <span>类型 <b>{f.template || '—'}</b></span>
         <span>申请人 <b>{f.applicant || '—'}</b>{f.dept ? <span className="inv-muted"> · {f.dept}</span> : null}</span>
         <span>公司主体 <b>{f.company || '—'}</b></span>
         {payee.name ? <span>收款方 <b>{payee.name}</b>{(payee.bank || payee.account) ? <span className="inv-muted"> · {payee.bank || ''} {payee.account || ''}</span> : null}</span> : null}
         <span>提交 <b>{f.submittedBy || '—'}</b>{f.submittedAt ? <span className="inv-muted"> · {fmtTime(f.submittedAt)}</span> : null}</span>
-        {f.reviewedBy ? <span>审核 <b>{f.reviewedBy}</b><span className="inv-muted"> · {fmtTime(f.reviewedAt)}</span></span> : null}
+        {f.reviewedBy ? <span>审核 <b>{f.reviewedBy}</b><span className="inv-muted"> · {fmtTime(f.reviewedAt)}</span>
+          {f.owner?.assigned && f.ownerName && f.ownerName !== f.reviewedBy && !f.owner.mine ? <span className="inv-au-own" title="这张单归这位审，实际是上面那位审的">归{f.ownerName}</span> : null}</span> : null}
       </div>
+      {owner}
       {f.reviewNote ? <div className="inv-au-rnote">{f.status === 'returned' ? '退回原因' : '审核备注'}：{f.reviewNote}</div> : null}
       <div className="inv-au-money" title="差额＝付款金额 −（专票＋普票＋发票后补单还没到的）">
         <span className="inv-au-money-t">金额核对</span>
@@ -840,7 +936,14 @@ export default function InvAudit({ user }) {
   const [cfgErr, setCfgErr] = useState('')
   const can = cfg?.can || {}
   const canAct = !!can.auditAct
+  const boss = !!can.assign              // 有「审核分派」权限：看得到全部、能转交任何人名下的、能直接审别人名下的
   const me = cfg?.me || { name: user?.name || user?.username || '', isSuper: user?.role === 'admin' }
+  // 看谁名下的：mine 归我审（默认）/ all 全部（只有管理员有这张卡）/ none 没指派上 / 某一位的钥匙
+  const [scope, setScope] = useState('mine')
+  const [backlog, setBacklog] = useState(null)
+  const [assignFor, setAssignFor] = useState(null)
+  const [ownBusy, setOwnBusy] = useState(false)
+  const [refreshed, setRefreshed] = useState('')
 
   // 队列
   const [tab, setTab] = useState('pending')
@@ -882,30 +985,34 @@ export default function InvAudit({ user }) {
   // 各页签数量（不带搜索词；失败不打扰，只是不显示数字）
   const loadCounts = useCallback(() => {
     TABS.forEach(t => {
-      invAuditQueue({ tab: t.key, page: 1, size: 1 })
+      invAuditQueue({ tab: t.key, page: 1, size: 1, scope })
         .then(r => setCounts(c => ({ ...c, [t.key]: r?.total ?? 0 })))
         .catch(() => { /* 数字取不到不影响审核 */ })
     })
-  }, [])
+    invAuditBacklog().then(r => setBacklog(r || null)).catch(() => { /* 卡片上的数字取不到不影响审核 */ })
+  }, [scope])
 
   const loadQueue = useCallback(async (opt = {}) => {
     const t = opt.tab ?? tab, qq = opt.q ?? q, pg = opt.page ?? page
     const my = ++qReq.current
     setQLoading(true); setQErr('')
     try {
-      const r = await invAuditQueue({ tab: t, q: qq, page: pg, size: PAGE_SIZE })
+      // 普通会计搜的时候别人名下的也搜得到（只读）；不搜就只看自己名下的
+      const sc = opt.scope ?? ((qq && !boss) ? 'all' : scope)
+      const r = await invAuditQueue({ tab: t, q: qq, page: pg, size: PAGE_SIZE, scope: sc })
       if (my !== qReq.current) return null
       const data = { total: r?.total ?? 0, rows: Array.isArray(r?.rows) ? r.rows : [] }
       setQueue(data)
+      setRefreshed(nowHM())
       if (!qq) setCounts(c => ({ ...c, [t]: data.total }))
       // 勾选只保留仍在列表里、且仍无异常的
-      setChecked(s => new Set([...s].filter(id => data.rows.some(x => x.id === id && x.clean))))
+      setChecked(s => new Set([...s].filter(id => data.rows.some(x => x.id === id && x.clean && x.owner?.canAct))))
       return data
     } catch (e) {
       if (my === qReq.current) setQErr(errText(e))
       return null
     } finally { if (my === qReq.current) setQLoading(false) }
-  }, [tab, q, page])
+  }, [tab, q, page, scope, boss])
 
   useEffect(() => { loadCounts() }, [loadCounts])
   // 换页签/搜索/翻页 → 重取；没选中票夹时自动打开第一个（深链进来的除外）
@@ -917,7 +1024,7 @@ export default function InvAudit({ user }) {
       setSelId(cur => (cur !== null && cur !== undefined) ? cur : (d.rows[0]?.id ?? null))
     })
     return () => { live = false }
-  }, [tab, q, page])
+  }, [tab, q, page, scope, boss])
 
   // 深链 #/invaudit?folder=ID：只消费一次，然后把地址收回 #/invaudit（刷新不重放）
   useEffect(() => {
@@ -959,13 +1066,15 @@ export default function InvAudit({ user }) {
   const folder = detail?.folder || null
   const orderOf = useCallback(id => items.findIndex(it => it.id === id) + 1, [items])
   const actionable = isActionable(folder, items)
+  // 这张单我现在能不能审：有审核权限，而且这张单归我（或我有「审核分派」权限）。后端另有闸，这里只管按钮亮不亮
+  const canHere = canAct && !!folder?.owner?.canAct
   const busyItems = items.some(it => it.procStatus === 'pending' || it.procStatus === 'running')
   // 有票还在识别时，每 3 秒刷一下这个票夹（识别完自动停）
   usePoll(() => loadDetail(selId, { keep: true }), !!selId && busyItems, 3000)
 
   const dlgItem = items.find(it => it.id === dlgId) || null
   const dlgIdx = dlgItem ? items.indexOf(dlgItem) : -1
-  const dlgEditable = !!dlgItem && canAct && actionable && dlgItem.review === 'pending'
+  const dlgEditable = !!dlgItem && canHere && actionable && dlgItem.review === 'pending'
 
   const replaceItem = (it) => {
     if (!it || !it.id) return
@@ -1150,8 +1259,37 @@ export default function InvAudit({ user }) {
 
   // 自己提交的票夹：提前提示（后端最终判定；主管理员可自审并留痕）
   const selfWarn = folder && me.name && folder.submittedBy === me.name
-    ? (me.isSuper ? '这张单是你送审的，主管理员可以自审，通过后标「自审」' : '这张单是你提交的——提交人不能审核自己提交的单，请交给其他会计审')
+    ? (folder.owner?.mine ? '这张单是你自己建、自己送审的，归你审：通过后标「自审」'
+      : me.isSuper ? '这张单是你送审的，主管理员可以自审，通过后标「自审」' : '这张单是你提交的——不归你审的单，提交人不能自己审，请交给其他会计审')
     : ''
+
+  // 我来审（没指派上的归到我名下；两个人同时点只成一个）
+  const doClaim = async () => {
+    if (!folder || ownBusy) return
+    setOwnBusy(true)
+    try {
+      const r = await invAuditClaim(folder.id)
+      flash(r?.msg || '已归到你名下', 'ok')
+      await loadDetail(folder.id, { keep: true })
+      loadQueue(); loadCounts()
+    } catch (e) { flash('没认领成：' + errText(e), 'err'); loadDetail(folder.id, { keep: true }) } finally { setOwnBusy(false) }
+  }
+  // 转交成了：这张单多半不在我眼前这份队列里了 → 重取队列，还在就留在这张，不在就跳下一张
+  const afterAssign = async (r) => {
+    const id = assignFor?.id
+    setAssignFor(null)
+    flash(r?.msg || '已转交', 'ok')
+    loadCounts()
+    const d = await loadQueue()
+    if (id && d && d.rows.some(x => x.id === id)) loadDetail(id, { keep: true })
+    else if (id) await moveNext(id)
+  }
+  const changeScope = (sc) => {
+    if (sc === scope) return
+    setScope(sc); setPage(1); setSelId(null); setChecked(new Set()); setBatchRes(null); setBatchErr('')
+  }
+  const mineStat = (backlog?.people || []).filter(p => p.mine).reduce((a, p) => ({ n: a.n + p.count, d: Math.max(a.d, p.days || 0) }), { n: 0, d: 0 })
+  const who = boss && scope !== 'mine' && scope !== 'none' ? (backlog?.people || []) : null
 
   const changeTab = (t) => {
     if (t === tab) return
@@ -1161,14 +1299,17 @@ export default function InvAudit({ user }) {
 
   return (
     <div>
-      <div className="head">
-        <div>
+      <div className="head inv-au-head">
+        <div className="inv-au-hleft">
           <div className="h-title">发票审核</div>
-          <div className="h-sub">收票工作台提交的单子在这里复核：先看金额核对，再逐张打开核对（系统已核的不用再看），勾上要审的票点「审核所选」（或点开一张点右上角「审核」）：审一张过一张，当场进台账；票都审完、金额一致，这张单自动整单通过。有差额或存疑的，点底部处理。</div>
+          <div className="h-sub">归你审的单在这里复核：先看金额核对，再勾上要审的票点「审核所选」（或点开一张点右上角「审核」），审一张过一张；票都审完、金额一致，整单自动通过。别人名下的搜得到、能打开看，只读。</div>
         </div>
-        <div className="inv-au-hacts">
-          {cfg && !canAct && <span className="inv-badge mute" title="可以查看，不能通过/退回">{NO_PERM_HINT}</span>}
-          <button type="button" className="btn" disabled={qLoading} onClick={() => { loadQueue(); loadCounts(); if (selId) loadDetail(selId, { keep: true }) }}>刷新</button>
+        <div className="inv-au-hright">
+          <div className="inv-au-hacts">
+            {cfg && !canAct && <span className="inv-badge mute" title="可以查看，不能通过/退回">{NO_PERM_HINT}</span>}
+            <button type="button" className="btn" disabled={qLoading} onClick={() => { loadQueue(); loadCounts(); if (selId) loadDetail(selId, { keep: true }) }}>刷新</button>
+          </div>
+          {refreshed && <div className="h-sub inv-au-refreshed">{me.name ? me.name + ' 于 ' : ''}{refreshed} 刷新</div>}
         </div>
       </div>
       <div className="body">
@@ -1182,11 +1323,29 @@ export default function InvAudit({ user }) {
           <button type="button" className="inv-lk inv-au-lkb" onClick={() => setSelId(lastRes.id)}>再看一眼</button>
           <button type="button" className="inv-x" onClick={() => setLastRes(null)} aria-label="收起">×</button>
         </div>}
+        <div className="kpis inv-au-kpis">
+          <button type="button" className={'kpi slice' + (scope === 'mine' ? ' on' : '')} onClick={() => changeScope('mine')}>
+            <span className="kl">归我审</span>
+            <span className="kv">{backlog ? mineStat.n : '—'}<span className="kt"> 张</span></span>
+            <span className="inv-au-ks">{backlog && mineStat.n ? `最久等了 ${mineStat.d} 天` : '没有积压'}</span>
+          </button>
+          {boss && <button type="button" className={'kpi slice' + (scope !== 'mine' && scope !== 'none' ? ' on' : '')} onClick={() => changeScope('all')}>
+            <span className="kl">全部（只有管理员看得到）</span>
+            <span className="kv">{backlog ? backlog.total : '—'}<span className="kt"> 张</span></span>
+            <span className="inv-au-ks">所有人名下待审的</span>
+          </button>}
+          {boss && backlog?.unassigned?.count > 0 && <button type="button" className={'kpi slice prio' + (scope === 'none' ? ' on' : '')} onClick={() => changeScope('none')}>
+            <span className="kl">没指派上（要你派给某位）</span>
+            <span className="kv">{backlog.unassigned.count}<span className="kt"> 张</span></span>
+            <span className="inv-au-ks">{backlog.unassigned.days !== null && backlog.unassigned.days !== undefined ? `最久等了 ${backlog.unassigned.days} 天` : ''}</span>
+          </button>}
+        </div>
         <div className="inv-au">
           <QueuePane tab={tab} onTab={changeTab} counts={counts} qInput={qInput} setQInput={setQInput} onSearch={doSearch}
             queue={queue} loading={qLoading} err={qErr} page={page} setPage={setPage}
             selId={selId} onPick={setSelId} checked={checked} setChecked={setChecked} canAct={canAct}
-            onBatch={runBatch} batchBusy={batchBusy} batchErr={batchErr} batchRes={batchRes} setBatchRes={setBatchRes} />
+            onBatch={runBatch} batchBusy={batchBusy} batchErr={batchErr} batchRes={batchRes} setBatchRes={setBatchRes}
+            scope={scope} onScope={changeScope} who={who} mineOnly={scope === 'mine' && !q} />
 
           <main className="inv-au-d">
             {!selId && <div className="inv-au-blank">{qLoading ? '正在取审核队列…' : '在左边点一张单开始审核'}</div>}
@@ -1194,12 +1353,13 @@ export default function InvAudit({ user }) {
             {selId && dErr && <div className="banner err">没打开：{dErr}
               <button type="button" className="btn" onClick={() => loadDetail(selId)}>重试</button></div>}
             {selId && folder && <>
-              <AuditHeader folder={folder} />
+              <AuditHeader folder={folder} owner={<OwnerBar folder={folder} me={me.name} canAct={canAct} boss={boss} busy={ownBusy}
+                onClaim={doClaim} onAssign={() => setAssignFor(folder)} />} />
               <InvoiceTable items={items} decisions={decisions} others={others} orderOf={orderOf} onOpen={setDlgId}
-                canAudit={canAct && actionable} auditBusy={auditBusy} onAudit={auditMany}
+                canAudit={canHere && actionable} auditBusy={auditBusy} onAudit={auditMany}
                 setDecision={setDecision} setOther={(id, v) => setOthers(o => ({ ...o, [id]: !!v }))} />
               <LaterTable laters={folder.laters} />
-              <SubmitBar folder={folder} items={items} decisions={decisions} canAct={canAct} actionable={actionable}
+              <SubmitBar folder={folder} items={items} decisions={decisions} canAct={canHere} actionable={actionable}
                 busy={actBusy} err={actErr} blockers={blockers} selfWarn={selfWarn} orderOf={orderOf} onOpen={setDlgId}
                 onApprove={approve} onReturn={doReturn} />
             </>}
@@ -1212,6 +1372,7 @@ export default function InvAudit({ user }) {
         onClose={() => setDlgId(null)}
         onPrev={dlgIdx > 0 ? () => step(-1) : undefined} onNext={dlgIdx < items.length - 1 ? () => step(1) : undefined}
         onMarkOk={onMarkOk} onDoubt={onDoubt} onClearDoubt={onClearDoubt} onRemove={onRemove} onSave={onSave} onRotate={onRotate} onRecorded={r => { setDetail(d => ({ ...d, items: d.items.map(it => it.id === r.item.id ? { ...it, ...r.item } : it) })) }} />}
+      {assignFor && <AssignDialog folder={assignFor} onClose={() => setAssignFor(null)} onDone={afterAssign} />}
       {toast}
     </div>
   )

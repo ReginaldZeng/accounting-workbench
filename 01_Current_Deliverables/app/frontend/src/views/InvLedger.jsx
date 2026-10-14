@@ -186,7 +186,7 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
                 <td className="inv-lg-nowrap">{deductText(r)}</td>
                 <td className="inv-lg-nowrap">{fBiz(f) ? <span className="mono">{fBiz(f)}</span> : <span>{f.title || '—'}</span>}
                   {f.applicant ? <span className="inv-lg-sub">{f.applicant}</span> : null}</td>
-                <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}</span></td>
+                <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}{r.reviewBy && r.folder?.ownerName && r.folder.ownerName !== r.reviewBy ? ' · 归' + r.folder.ownerName : ''}</span></td>
                 <td><span className={'inv-badge ' + (r.paper ? 'ok' : 'warn')}>{r.paper ? '已收到' : '未收到'}</span></td>
                 <td>{bookText(r.bookkeeping)}{(r.bookkeeping?.vouchers || []).map((v, i) => <span key={i} className="inv-lg-sub">{v.book} · {v.period} · {v.number}</span>)}</td>
               </tr>
@@ -350,6 +350,7 @@ function DetailPanel({ row, can, onClose, onVoided, onBooked }) {
         <div className="inv-lg-box-h">留痕</div>
         <div className="inv-lg-kv"><span>登记</span><b>{first(row.createdBy, '—')} · {fmtTime(row.createdAt)}</b></div>
         <div className="inv-lg-kv"><span>审核</span><b>{row.reviewBy ? `${row.reviewBy} · ${fmtTime(row.reviewAt)}` : '未审核'}{row.selfReview ? '（自审）' : ''}</b></div>
+        {row.folder?.ownerName ? <div className="inv-lg-kv"><span>归谁审</span><b>{row.folder.ownerName}{row.reviewBy && row.folder.ownerName !== row.reviewBy ? `（实际由 ${row.reviewBy} 审）` : ''}</b></div> : null}
         {row.reviewNote && <div className="inv-lg-kv"><span>{isVoid ? '作废原因' : '审核备注'}</span><b>{row.reviewNote}</b></div>}
         <div className="inv-lg-kv"><span>抵扣</span><b>{deductText(row)}{row.deductReason ? '（' + row.deductReason + '）' : ''}</b></div>
         {row.verifyNote && <div className="inv-lg-kv"><span>验真说明</span><b>{row.verifyNote}</b></div>}

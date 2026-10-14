@@ -10,7 +10,7 @@
 //   手机连着但闲着、或配对码已生成还没扫上 → 10 秒；其余时候不轮询，每次操作后刷新一次。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invDesk, invDeskAuto, invScan, invOpenFolder, invCloseFolder, invUpload, invManualFolder, invRefreshFolder,
+  invConfig, invDesk, invDeskAuto, invScan, invOpenFolder, invCloseFolder, invUpload, invManualFolder, invRefreshFolder, invAuditPeople,
   invSubmitFolder, invItemUpdate, invItemRemove, invItemSplit, invItemRotate, invItemReprocess,
 } from '../api.js'
 import {
@@ -214,7 +214,7 @@ function AttachLine({ folder, canEdit, onRefresh, refreshing, refreshErr }) {
   else if (st === 'failed') body = <span className="inv-dk-att err">附件没拉下来：{folder.attachMsg || '原因未知'}</span>
   else if (st === 'done') body = <span className="inv-dk-att ok">附件已拉取{folder.attachMsg ? '：' + folder.attachMsg : ''}</span>
   else if (folder.instId) body = <span className="inv-dk-att">这张单没有附件</span>
-  else body = <span className="inv-dk-att">手工票夹（没有钉钉审批单）</span>
+  else body = <span className="inv-dk-att">没有付款单的票夹</span>
   return (
     <div className="inv-dk-attline">
       {body}
@@ -564,44 +564,127 @@ function ItemModal({ items, id, canEdit, onClose, onPick, reload, flash }) {
   )
 }
 
-// ───────────────────────── 手工票夹弹窗 ─────────────────────────
+// ───────────────────────── 新建票夹弹窗（没有付款单的票） ─────────────────────────
 
+// 能做发票审核的人（建票夹时选「审核会计」用）→ {people, me, meCanAudit}；取不到回空名单
+function useAuditors() {
+  const [au, setAu] = useState(null)
+  useEffect(() => {
+    let live = true
+    invAuditPeople().then(r => { if (live) setAu({ people: Array.isArray(r?.people) ? r.people : [], me: r?.me || '', meCanAudit: !!r?.meCanAudit }) })
+      .catch(() => { if (live) setAu({ people: [], me: '', meCanAudit: false }) })
+    return () => { live = false }
+  }, [])
+  return au
+}
+// 「自动识别：按抬头分主体」的入口：后端已经能分，但收票台上「看这一批分到了哪几个票夹、给读不出抬头的票定主体」的页面在下一批做，
+// 那之前先不放这个选项（建的时候直接选一家；放进别家的票，系统照样会自动挪到别家的票夹，并在收票结果里说明）。
+const AUTO_SPLIT_UI = false
+const thisMonth = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
+
+// 新建票夹（没有付款单的票：电子票、扫描件）。建了票夹一定是指派清楚的：会计建的默认归自己，实习生建的必须选一位审核会计。
+// 名字系统起＝主体简称-审核会计-开票年月＋进项认证（批量手工/单张手工）；一个票夹只装一家主体，选「自动识别」就按每张票的抬头分开放。
 function ManualModal({ companies, onClose, onDone }) {
-  const [title, setTitle] = useState('')
-  const [amount, setAmount] = useState('')
-  const [company, setCompany] = useState('')
+  const au = useAuditors()
+  const [auditor, setAuditor] = useState(null)        // null＝还没动过（会计默认自己）
+  const [month, setMonth] = useState(thisMonth)
+  const [company, setCompany] = useState(AUTO_SPLIT_UI ? 'auto' : '')
+  const [way, setWay] = useState('batch')
+  const [names, setNames] = useState(null)
+  const [reuse, setReuse] = useState(false)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const list = (companies || []).map(c => (typeof c === 'string' ? c : c && c.name)).filter(Boolean)
+  const who = auditor !== null ? auditor : (au && au.meCanAudit ? au.me : '')
+  const body = { month, company, way, auditor: who || undefined }
+  // 随选随看名字（只看不建）
+  useEffect(() => {
+    if (!au || !who || !company || !/^\d{4}-\d{2}$/.test(month)) { setNames(null); return undefined }
+    let live = true
+    invManualFolder({ ...body, dry: true })
+      .then(r => { if (live) { setNames(Array.isArray(r?.names) ? r.names : null); setReuse(!!r?.reuse) } })
+      .catch(() => { if (live) setNames(null) })
+    return () => { live = false }
+  }, [au, who, month, company, way])
   const go = async () => {
-    const t = title.trim()
-    if (!t) { setErr('写一下这是什么单（例：9 月快递费、某某出差报销）'); return }
-    let a
-    const s = amount.replace(/[,，\s¥￥]/g, '')
-    if (s) { a = Number(s); if (!Number.isFinite(a)) { setErr('单据金额要填数字，不知道可以空着'); return } }
+    if (!who) { setErr('选一位审核会计：建了票夹一定要定下归谁审'); return }
+    if (!/^\d{4}-\d{2}$/.test(month)) { setErr('选一下开票月份'); return }
+    if (!company) { setErr('选一下是哪家公司主体的票：一个票夹只装一家的'); return }
     setBusy(true); setErr('')
     try {
-      const r = await invManualFolder({ title: t, amount: s ? Math.round(a * 100) / 100 : undefined, company: company || undefined })
-      await onDone(r && r.folder)
+      const r = await invManualFolder(body)
+      await onDone(r && r.folder, r)
     } catch (e) { setErr(e.message || String(e)); setBusy(false) }
   }
+  const auto = company === 'auto'
   return (
-    <Modal title="手工票夹" onClose={onClose} width={480}
+    <Modal title="新建票夹" onClose={onClose} width={480}
       footer={<>
         <button type="button" className="btn" onClick={onClose}>取消</button>
-        <button type="button" className="btn primary" disabled={busy} onClick={go}>{busy ? '建票夹中…' : '建票夹'}</button>
+        <button type="button" className="btn primary" disabled={busy || !au} onClick={go}>{busy ? '建票夹中…' : '建票夹'}</button>
       </>}>
       <div className="inv-dk-form">
-        <div className="inv-muted">没有钉钉审批单（或审批单扫不出来）时，先建一个手工票夹把票收进来。</div>
-        <label><span>这是什么单</span><input className="inv-in" autoFocus value={title} onChange={e => { setTitle(e.target.value); setErr('') }} placeholder="例：9 月快递费" /></label>
-        <label><span>单据金额（可空）</span><input className="inv-in" value={amount} inputMode="decimal" onChange={e => { setAmount(e.target.value); setErr('') }} /></label>
-        <label><span>公司主体（可空）</span>
-          <select className="inv-dk-sel" value={company} onChange={e => setCompany(e.target.value)}>
-            <option value="">不指定</option>
+        <div className="inv-muted">有电子票或扫描件、但没有付款单的票，建一个票夹装起来（单张，或月末一次性批量）。有付款单的直接扫付款单。</div>
+        <label><span>审核会计 <b className="inv-dk-req">*</b></span>
+          <select className="inv-dk-sel" value={who} onChange={e => { setAuditor(e.target.value); setErr('') }} disabled={!au}>
+            {!(au && au.meCanAudit) && <option value="">{au ? '请选一位审核会计' : '正在取名单…'}</option>}
+            {(au ? au.people : []).map(p => <option key={p.account} value={p.account}>{p.name}{p.account === au.me ? '（我自己）' : ''}</option>)}
+          </select>
+          <span className="inv-muted">{au && au.meCanAudit ? '默认归自己审；要别人审就改一下。' : '不选建不了。只列能做发票审核的人。'}</span>
+        </label>
+        <label><span>开票月份 <b className="inv-dk-req">*</b></span>
+          <input type="month" className="inv-in" value={month} onChange={e => { setMonth(e.target.value); setErr('') }} />
+          <span className="inv-muted">这批发票是几月开的。放进来的票不是这个月开的，提交时会提醒一下，不拦。</span>
+        </label>
+        <label><span>公司主体 <b className="inv-dk-req">*</b></span>
+          <select className="inv-dk-sel" value={company} onChange={e => { setCompany(e.target.value); setErr('') }}>
+            {AUTO_SPLIT_UI ? <option value="auto">自动识别：按每张发票的抬头分开放（推荐）</option> : <option value="">请选一家</option>}
             {list.map(n => <option key={n} value={n}>{n}</option>)}
           </select>
+          {auto ? <span className="inv-muted">建好后往里放票，系统按抬头自动分到各主体自己的票夹；抬头读不出来的留在这里，等你定是哪家。</span>
+            : <span className="inv-muted">一个票夹只装一家的票。放进来的票抬头是另一家的，系统会自动挪到另一家的票夹，并告诉你挪到哪了。</span>}
         </label>
+        <label><span>方式</span>
+          <select className="inv-dk-sel" value={way} onChange={e => setWay(e.target.value)}>
+            <option value="batch">批量（月末一次性）</option>
+            <option value="single">单张</option>
+          </select>
+        </label>
+        <div className="inv-dk-name">
+          <div className="inv-muted">票夹名字（系统自己起）</div>
+          {!who ? <div className="inv-muted">先选审核会计</div>
+            : !company ? <div className="inv-muted">先选公司主体</div>
+            : !names ? <div className="inv-muted">…</div>
+            : auto ? <>
+              <div><b>{names[0]}</b><span className="inv-muted">　← 先建这个收票口</span></div>
+              {names.slice(1).map(n => <div key={n} className="inv-muted">{n}</div>)}
+              <div className="inv-muted">下面几个是分出去以后的票夹：哪家有票才建哪家的。</div>
+            </> : <div><b>{names[0]}</b>{reuse ? <span className="inv-muted">　已经有了、还在收票：接着往里放</span> : null}</div>}
+        </div>
         {err && <div className="inv-dk-err-in">{err}</div>}
+      </div>
+    </Modal>
+  )
+}
+
+// 扫了一张系统还没接进来的付款单、又按审批流找不到归谁审：让人选一位审核会计再建
+function AuditorPick({ msg, onClose, onPick }) {
+  const au = useAuditors()
+  const [to, setTo] = useState('')
+  return (
+    <Modal title="这张付款单归谁审" onClose={onClose} width={440}
+      footer={<>
+        <button type="button" className="btn" onClick={onClose}>先不建</button>
+        <button type="button" className="btn primary" disabled={!to} onClick={() => onPick(to)}>建票夹</button>
+      </>}>
+      <div className="inv-dk-form">
+        <div className="inv-muted">{msg || '这张付款单还没走到（已启用的）接入审批人。'}建票夹前要定下归谁审。</div>
+        <label><span>审核会计</span>
+          <select className="inv-dk-sel" value={to} onChange={e => setTo(e.target.value)} disabled={!au} autoFocus>
+            <option value="">{au ? '请选一位审核会计' : '正在取名单…'}</option>
+            {(au ? au.people : []).map(p => <option key={p.account} value={p.account}>{p.name}</option>)}
+          </select>
+        </label>
       </div>
     </Modal>
   )
@@ -619,7 +702,7 @@ function EmptyFolder({ canEdit, onManual, lastSubmitted, onReopen }) {
       {canEdit ? <>
         <div className="inv-dk-emptyfolder-big">扫一下审批单二维码，开始一个票夹</div>
         <div className="inv-muted">用扫码枪扫钉钉审批单上的二维码（或手机「扫审批单」）；系统会自动把附件里的电子票拉进来。</div>
-        <button type="button" className="btn" onClick={onManual}>没有审批单？建一个手工票夹</button>
+        <button type="button" className="btn" onClick={onManual}>没有付款单？新建票夹</button>
       </> : <>
         <div className="inv-dk-emptyfolder-big">在左边「我的票夹」里点一个票夹查看</div>
         <div className="inv-muted">你现在只有查看权限：能看票夹里的票和核对情况，不能收票、改字段或提交。</div>
@@ -639,6 +722,7 @@ export default function InvDesk({ user }) {
   const [setOpen, setSetOpen] = useState(false)
   const [paperMode, setPaperMode] = useState(false)   // V2.740 月末纸质件查验
   const [manualOpen, setManualOpen] = useState(false)
+  const [needAud, setNeedAud] = useState(null)       // {code, msg}：扫的付款单要先指定审核会计
   const [detailId, setDetailId] = useState(null)
   const [scanBusy, setScanBusy] = useState(false)
   const [scanRes, setScanRes] = useState(null)
@@ -700,10 +784,10 @@ export default function InvDesk({ user }) {
 
   const alarmNow = () => { beepError(); setAlarm(n => n + 1) }
 
-  const onScan = async (code) => {
+  const onScan = async (code, auditor) => {
     setScanBusy(true)
     try {
-      const r = (await invScan(code)) || {}
+      const r = (await invScan(code, auditor)) || {}
       const act = r.action
       if (act === 'folder') {
         const f = r.folder || {}
@@ -718,7 +802,10 @@ export default function InvDesk({ user }) {
       else setScanRes({ tone: 'warn', text: r.msg || '认不出这个码：请扫钉钉审批单或发票上的二维码' })
       await loadDesk()
     } catch (e) {
-      setScanRes({ tone: 'err', text: '扫码没成功：' + (e.message || e) })
+      if (e && e.code === 'needAuditor' && !auditor) {       // 这张付款单归谁审还没定：弹窗让他选一位，选完带着再扫一遍
+        setNeedAud({ code, msg: e.message || '' })
+        setScanRes({ tone: 'warn', text: '这张付款单还没定归谁审：选一位审核会计' })
+      } else setScanRes({ tone: 'err', text: '扫码没成功：' + (e.message || e) })
     } finally { setScanBusy(false) }
   }
 
@@ -776,12 +863,12 @@ export default function InvDesk({ user }) {
       await loadDesk()
     } catch (e) { setSubmitRes({ msg: '提交没成功：' + (e.message || e), blockers: [] }) } finally { setSubmitting(false) }
   }
-  const onManualDone = async (f) => {
+  const onManualDone = async (f, r) => {
     setManualOpen(false)
     // 后端建完一般已设为当前票夹；再开一次兜底（幂等）
     if (f && f.id) { try { await invOpenFolder(f.id) } catch { /* 下面刷新会看到结果 */ } }
     setLastSubmitted(null)
-    flash('手工票夹已建好', 'ok')
+    flash((r && r.reused && r.msg) || ('票夹已建好：' + ((f && f.title) || '')), 'ok')
     await loadDesk()
   }
   const onAuto = v => { setAuto(v); saveAuto(v) }
@@ -796,7 +883,7 @@ export default function InvDesk({ user }) {
           title={[pair.device, pair.active === false && pair.lastSeen ? '手机最近一次在线 ' + fmtTime(pair.lastSeen) : ''].filter(Boolean).join(' · ')}>
           手机已连上{pair.dtName ? '：' + pair.dtName : ''}{pair.active === false ? '（没在用）' : ''}</span>}
         {can.intake && <button type="button" className="btn" onClick={() => setPairOpen(true)}>手机当相机</button>}
-        {can.intake && <button type="button" className="btn" onClick={() => setManualOpen(true)}>手工票夹</button>}
+        {can.intake && <button type="button" className="btn" onClick={() => setManualOpen(true)}>新建票夹</button>}
         {can.config && <button type="button" className="btn" onClick={() => setSetOpen(true)}>设置</button>}
       </div>
     </div>
@@ -815,7 +902,7 @@ export default function InvDesk({ user }) {
       <div className="body">
         {cfgErr && <div className="banner err">权限和设置没读到：{cfgErr}<button type="button" className="btn" onClick={loadCfg}>重试</button></div>}
         {cfg && !can.intake && <div className="banner info">你现在只能看，不能收票：在左边「我的票夹」里点开票夹可以查看。拍照、登记、提交需要管理员给你开「收票」权限。</div>}
-        {cfg && cfg.dingtalk === false && <div className="banner info">系统还没接通钉钉：扫审批单开不了票夹，可以先用「手工票夹」收票。</div>}
+        {cfg && cfg.dingtalk === false && <div className="banner info">系统还没接通钉钉：扫审批单开不了票夹，可以先用「新建票夹」收票。</div>}
         <ScanStrip onScan={onScan} disabled={!can.intake} busy={scanBusy} res={scanRes} pair={pair} />
         {deskErr && <div className="banner err">票夹没刷新出来：{deskErr}<button type="button" className="btn" onClick={loadDesk}>重试</button></div>}
         <div className="inv-dk-cols">
@@ -850,6 +937,8 @@ export default function InvDesk({ user }) {
         onPick={setDetailId} reload={loadDesk} flash={flash} />}
       {pairOpen && <PairModal pairState={pair} onClose={() => { setPairOpen(false); loadDesk() }} />}
       {manualOpen && <ManualModal companies={cfg && cfg.settings && cfg.settings.company} onClose={() => setManualOpen(false)} onDone={onManualDone} />}
+      {needAud && <AuditorPick msg={needAud.msg} onClose={() => setNeedAud(null)}
+        onPick={(to) => { const c = needAud.code; setNeedAud(null); onScan(c, to) }} />}
       {setOpen && <Modal title="发票管家设置" width={1040} onClose={() => { setSetOpen(false); loadCfg() }}>
         <InvSettings user={user} />
       </Modal>}

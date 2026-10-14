@@ -289,3 +289,9 @@
   border:1px solid var(--blue-line); border-radius:10px; background:var(--blue-bg); color:var(--ink); font-size:13px; line-height:1.6; }
 .inv-lt-selfbar > span{ flex:1 1 320px; }
 .inv-lt-selfbar b{ color:var(--blue); }
+
+/* 设置 › 钉钉自动接入：接入审批人每人一行，带自己的启用日 */
+.inv-set-aps{ width:100%; border-collapse:collapse; font-size:12.5px; }
+.inv-set-aps th{ text-align:left; font-weight:600; font-size:12px; color:var(--ink-2); background:var(--bg-rail); padding:7px 10px; border-bottom:1px solid var(--line); }
+.inv-set-aps td{ padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:middle; }
+.inv-set-aps th:nth-child(1){ width:150px; } .inv-set-aps th:nth-child(2){ width:230px; } .inv-set-aps th:last-child{ width:40px; }

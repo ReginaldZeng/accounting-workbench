@@ -3189,6 +3189,9 @@ async def folder_manual(request: Request):
         ym = m.group(1) + m.group(2)
         extra = {"bill_month": ym, "batch_way": way, "auto_split": 1 if auto else 0}
         title, reuse = name_manual_folder(company, own_cols["name"], ym, way)
+        if _b(body.get("dry")):          # 只看名字，不建：弹窗里随选随显示
+            names = [title] if not auto else [title] + [manual_folder_name(c["name"], own_cols["name"], ym, way) for c in st["company"]]
+            return {"ok": True, "dry": True, "title": title, "reuse": bool(reuse), "names": names, "auditor": own_cols["name"]}
         if reuse:
             f = S.folder_get(e, reuse)
             if is_owner({"name": own_cols["account"]}, f) or (own_cols["uid"] and own_cols["uid"] == f.get("owner_uid")):
@@ -3394,6 +3397,7 @@ async def folder_detail(fid: int, request: Request):
         laters = folder_laters(e, f)
         fv["laters"] = [later_row_view(l, items) for l in laters]
         fv["gap"] = folder_gap(f, items, laters)
+        fv["owner"] = owner_view(u, f)        # 归谁审、是不是我的、我现在能不能审（审核页据此亮/灰按钮；后端另有闸）
         # 留痕：票夹级的＋这夹里每张票（含已移除的）自己的，按 itemId/laterId 可筛单张票的历史
         ids = [i["id"] for i in S.folder_items(e, fid, include_removed=True)]
         logs = S.logs_of(e, folder_id=fid, item_ids=ids, limit=300)
@@ -4541,10 +4545,13 @@ def _audit_people_sync():
 
 @router.get("/api/inv/audit/people")
 async def audit_people(request: Request):
-    u, bad = need(request, ENTER_AUDIT, CAP_AUDIT)
+    """能做发票审核的账号。转交给谁、收票台建票夹时选「审核会计」都用这一份——发票管家任一页面进得去就能取
+    （实习生只有收票工作台）。只有姓名，没有别的。"""
+    u, bad = need(request)
     if bad:
         return bad
-    return await run_in_threadpool(_audit_people_sync)
+    out = await run_in_threadpool(_audit_people_sync)
+    return dict(out, me=u["name"], meCanAudit=can(u, ENTER_AUDIT, CAP_AUDIT))
 
 
 def _owner_cols_for(account, by, via):

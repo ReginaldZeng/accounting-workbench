@@ -268,3 +268,26 @@
   .inv-au-dlg{ grid-template-columns:1fr; }
   .inv-au-dlg-view{ position:static; }
 }
+
+/* ── 审票分工（按人分）：归我审/全部 卡片、每行的归谁和来源、单据头归谁审那一条、转交弹窗 ── */
+.inv-au-hright{ display:flex; flex-direction:column; align-items:flex-end; gap:2px; }
+.inv-au-refreshed{ margin-top:2px; }
+.inv-au-kpis{ margin-bottom:12px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }
+.inv-au-kpis .kpi{ text-align:left; font:inherit; color:inherit; cursor:pointer; }
+.inv-au-ks{ font-size:11.5px; color:var(--ink-3); }
+.inv-au-own{ font-size:11px; padding:1px 7px; border-radius:999px; border:1px solid var(--line-strong); color:var(--ink-2); white-space:nowrap; margin-left:2px; }
+.inv-au-own.mine{ border-color:var(--green-line); background:var(--green-bg); color:var(--green); }
+.inv-au-own.none{ border-color:var(--blue-line); background:var(--blue-bg); color:var(--blue); }
+.inv-au-src{ font-size:11px; padding:1px 7px; border-radius:999px; background:var(--gray-bg); color:var(--gray); white-space:nowrap; }
+.inv-au-who{ margin:0 10px 8px; width:calc(100% - 20px); }
+.inv-au-owner{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; padding:8px 12px; border-radius:9px;
+  border:1px solid var(--line); background:var(--bg-rail); font-size:12.5px; }
+.inv-au-owner.mine{ border-color:var(--green-line); background:var(--green-bg); }
+.inv-au-owner.other{ border-color:var(--amber-line); background:var(--amber-bg); }
+.inv-au-owner.none{ border-color:var(--blue-line); background:var(--blue-bg); }
+.inv-au-assign{ display:flex; flex-direction:column; gap:12px; }
+.inv-au-assign label{ display:flex; flex-direction:column; gap:5px; font-size:12px; color:var(--ink-2); }
+.inv-au-assign textarea{ height:auto; padding:7px 9px; resize:vertical; font-family:inherit; }
+.inv-au-head{ flex-wrap:nowrap; }
+.inv-au-hleft{ flex:1 1 0; min-width:0; }
+.inv-au-hright{ flex:0 0 auto; }

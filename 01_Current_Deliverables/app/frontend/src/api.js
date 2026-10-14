@@ -7,10 +7,11 @@
 const j = async (url, opt) => {
   const r = await fetch(url, { cache: 'no-store', ...opt })
   if (!r.ok) {
-    let m = ''
-    try { const b = await r.json(); const _d = b && (b.msg || b.detail); m = typeof _d === 'string' ? _d : _d ? JSON.stringify(_d) : '' } catch { /* 无 JSON 体 */ }
+    let m = '', code = ''
+    try { const b = await r.json(); const _d = b && (b.msg || b.detail); m = typeof _d === 'string' ? _d : _d ? JSON.stringify(_d) : ''; code = (b && typeof b.code === 'string') ? b.code : '' } catch { /* 无 JSON 体 */ }
     const err = new Error(m || (url + ' ' + r.status))
     err.status = r.status   // 附带状态码（发票管家手机页据此分辨"过期/不是本人"）；只加属性，不影响既有页面
+    if (code) err.code = code   // 后端给的原因代号（如 needAuditor＝要先指定审核会计）；只加属性
     throw err
   }
   return r.json()
@@ -570,7 +571,7 @@ export const invPaperList = (month) => j('/api/inv/paper?month=' + encodeURIComp
 export const invPaperScan = (code) => jp('/api/inv/paper/scan', { code })
 export const invPaperMark = (itemId, paper) => jp('/api/inv/paper/mark', { itemId, paper })
 export const invPaperExportUrl = (month, only) => '/api/inv/paper/export?month=' + encodeURIComponent(month) + (only ? '&only=' + only : '')
-export const invScan = (code) => jp('/api/inv/desk/scan', { code })
+export const invScan = (code, auditor) => jp('/api/inv/desk/scan', auditor ? { code, auditor } : { code })   // auditor＝扫一张系统还没接进来的付款单时指定的审核会计
 export const invOpenFolder = (folderId) => jp('/api/inv/desk/open', { folderId })
 export const invCloseFolder = () => jp('/api/inv/desk/close')
 export const invUpload = (files, opts = {}) => invPost('/api/inv/desk/upload', invFd(files, 'files', { origin: opts.origin || 'upload', folderId: opts.folderId }))
@@ -601,6 +602,11 @@ export const invAuditItemsApprove = (body) => invJpSoft('/api/inv/audit/items/ap
 export const invAuditBatch = (folderIds) => jp('/api/inv/audit/batch', { folderIds })
 export const invAuditMark = (id, body) => jp(`/api/inv/audit/item/${id}/mark`, body)   // body={mark:'ok'|'doubt'|'clear', text?}
 export const invAuditReturn = (body) => jp('/api/inv/audit/return', body)             // body={folderId, note}
+// 审票分工：队列带 scope（mine 归我审 / all 全部 / none 没指派上 / 某一位的钥匙）；各人名下积压；能做发票审核的人；认领；转交
+export const invAuditBacklog = () => j('/api/inv/audit/backlog')
+export const invAuditPeople = () => j('/api/inv/audit/people')
+export const invAuditClaim = (folderId) => jp('/api/inv/audit/claim', { folderId })
+export const invAuditAssign = (body) => jp('/api/inv/audit/assign', body)             // body={folderId, to: 工作台账号, reason: 必填}
 // 发票台账
 export const invLedger = (params) => j(invWithQs('/api/inv/ledger', params))
 export const invLedgerExportUrl = (params) => invWithQs('/api/inv/ledger/export', params)

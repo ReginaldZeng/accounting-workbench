@@ -44,7 +44,8 @@ function toDraft(s) {
     blockNoInvoice: !!src.blockNoInvoice,
     portalUrl: str(src.portalUrl),
     intake: {
-      approvers: (Array.isArray(ik.approvers) ? ik.approvers : []).map(a => ({ dtUserid: str(a?.dtUserid), dtName: str(a?.dtName) })),
+      // 每位接入审批人带自己的启用日（留空＝还没启用）；老数据没有这一栏的，后端已按原来的起始日补上
+      approvers: (Array.isArray(ik.approvers) ? ik.approvers : []).map(a => ({ dtUserid: str(a?.dtUserid), dtName: str(a?.dtName), since: str(a?.since) })),
       firstReviewers: (Array.isArray(ik.firstReviewers) ? ik.firstReviewers : []).map(a => ({ dtUserid: str(a?.dtUserid), dtName: str(a?.dtName) })),
       since: str(ik.since || '2026-09-01'),
     },
@@ -66,7 +67,7 @@ function toPayload(d, raw) {
     },
     blockNoInvoice: !!d.blockNoInvoice,
     portalUrl: d.portalUrl.trim(),
-    intake: { approvers: d.intake.approvers, firstReviewers: d.intake.firstReviewers, since: d.intake.since.trim() },
+    intake: { approvers: d.intake.approvers.map(a => ({ ...a, since: str(a.since).trim() })), firstReviewers: d.intake.firstReviewers, since: d.intake.since.trim() },
   }
 }
 // 比较有没有改动：不看 _k（每次载入都会重新编号）
@@ -131,7 +132,9 @@ export function validate(d) {
   if (!intIn(d.remind.everyDays, e0, e1)) errors['remind.everyDays'] = `填 ${e0}～${e1} 的整数`
   if (!intIn(d.remind.hour, h0, h1)) errors['remind.hour'] = `填 ${h0}～${h1} 的整点`
   const u = d.portalUrl.trim()
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.intake.since.trim())) errors['intake.since'] = '请选一个日期'
+  d.intake.approvers.forEach(a => {
+    if (str(a.since).trim() && !/^\d{4}-\d{2}-\d{2}$/.test(str(a.since).trim())) errors['intake.since'] = `${a.dtName || '接入审批人'} 的启用日请选一个日期（还没启用就留空）`
+  })
   if (u && !/^https?:\/\/[^\s/]+/i.test(u)) errors.portalUrl = '要以 http:// 或 https:// 开头的完整网址，例如 http://111.229.72.116'
   return { errors, warns }
 }
@@ -243,6 +246,7 @@ function TemplateSection({ rows, setRows, errors, warns }) {
 // ───────────────────────── ④ 钉钉自动接入 ─────────────────────────
 
 const INTAKE_DESC = '设置里③那些模板的审批单，审批流一走到下面这几位的节点，系统就自动建票夹、拉附件、识别发票，不用再扫审批码。'
+  + '单走到谁的节点，票夹就归谁审；一张单经过几位的，归最先走到、且已启用的那位。'
   + '还没走到的单子系统会一直跟着，走到了再接；撤回、被拒的不接。每 20 分钟扫一轮。'
 
 function IntakeSection({ v, set, dirty, errors }) {
@@ -267,8 +271,10 @@ function IntakeSection({ v, set, dirty, errors }) {
     if (!p) return
     if (v.approvers.some(a => a.dtUserid === p.userid)) { setAddErr(`${p.name} 已经在里面了`); return }
     setAddErr('')
-    set({ ...v, approvers: [...v.approvers, { dtUserid: p.userid, dtName: p.name }] })
+    set({ ...v, approvers: [...v.approvers, { dtUserid: p.userid, dtName: p.name, since: '' }] })   // 新加的人先留空：等他开始用发票管家那天再填
   }
+  const setSince = (uid, d) => set({ ...v, approvers: v.approvers.map(a => (a.dtUserid === uid ? { ...a, since: d } : a)) })
+  const enabled = v.approvers.filter(a => a.since)
   const scan = async () => {
     setBusy(true); setMsg(null)
     try {
@@ -279,17 +285,29 @@ function IntakeSection({ v, set, dirty, errors }) {
   }
   const last = st && st.last
   return <Section title="④ 钉钉自动接入" sub={INTAKE_DESC}
-    extra={<button type="button" className="btn" onClick={scan} disabled={busy || dirty || !v.approvers.length}
-      title={dirty ? '先保存设置再扫' : (!v.approvers.length ? '先加接入审批人' : '')}>{busy ? '正在扫…' : '立即扫一次'}</button>}>
-    <div className="inv-set-add">
-      <span className="inv-set-addl">接入审批人</span>
-      {v.approvers.map(a => <span key={a.dtUserid} className="inv-badge">{a.dtName || a.dtUserid}
-        <button type="button" className="inv-set-del" style={{ marginLeft: 6 }}
-          onClick={() => set({ ...v, approvers: v.approvers.filter(x => x.dtUserid !== a.dtUserid) })}>×</button></span>)}
-      <PersonPicker value={null} onChange={add} placeholder="打名字，从钉钉通讯录里搜" />
+    extra={<button type="button" className="btn" onClick={scan} disabled={busy || dirty || !enabled.length}
+      title={dirty ? '先保存设置再扫' : (!v.approvers.length ? '先加接入审批人' : !enabled.length ? '先给开始用发票管家的人填上启用日' : '')}>{busy ? '正在扫…' : '立即扫一次'}</button>}>
+    <div className="inv-set-addl" style={{ marginBottom: 6 }}>接入审批人（同时就是审票分工表）</div>
+    {!!v.approvers.length && <table className="inv-set-aps">
+      <thead><tr><th>接入审批人</th><th>启用日</th><th>现在的情况</th><th></th></tr></thead>
+      <tbody>{v.approvers.map(a => <tr key={a.dtUserid}>
+        <td><b>{a.dtName || a.dtUserid}</b></td>
+        <td><input type="date" className="inv-in inv-num" style={{ width: 160 }} value={a.since || ''} onChange={e => setSince(a.dtUserid, e.target.value)} />
+          {!a.since && <span className="inv-muted" style={{ marginLeft: 6 }}>留空</span>}</td>
+        <td>{a.since ? <>已启用 · 只接 {a.since} 当天及以后提交的单</> : <span className="inv-muted">还没启用 · 单经过这位不接</span>}</td>
+        <td><button type="button" className="inv-set-del" title="从名单里拿掉"
+          onClick={() => set({ ...v, approvers: v.approvers.filter(x => x.dtUserid !== a.dtUserid) })}>×</button></td>
+      </tr>)}</tbody>
+    </table>}
+    <div className="inv-set-add" style={{ marginTop: 8 }}>
+      <PersonPicker value={null} onChange={add} placeholder="打名字，从钉钉通讯录里搜，加一位接入审批人" />
     </div>
     {addErr && <div className="inv-lt-fe">{addErr}</div>}
+    <Msg err={errors['intake.since']} />
+    <div className="inv-set-ss">只有<b>提交日</b>在启用日当天及以后的单才接进来、记在这位名下。启用日留空＝还没启用，单经过他不接
+      （还在用票总管的同事先留空，等他切过来那天再填）。改了谁的启用日，只从他的启用日起重新找一遍他的单，别人不受影响。</div>
     {!v.approvers.length && <div className="inv-set-warn">还没加人：自动接入不会运行，仍可在收票台手工扫审批码。</div>}
+    {!!v.approvers.length && !enabled.length && <div className="inv-set-warn">名单里的人都还没填启用日：自动接入不会运行。</div>}
     <div className="inv-set-add" style={{ marginTop: 10 }}>
       <span className="inv-set-addl">财务初审人</span>
       {firsts.map(a => <span key={a.dtUserid} className="inv-badge">{a.dtName || a.dtUserid}
@@ -301,11 +319,6 @@ function IntakeSection({ v, set, dirty, errors }) {
     <div className="inv-set-ss">钉钉流程里的发票按财务初审分：初审人点同意之前就有的，算这张单的正常发票；之后才发到流程里的（多半在评论区），算后补票，
       系统记到这张单的后补单上、再进发票审核。可以加多位；一张单的流程没经过这里的人，就按上面接入审批人那一步算。
       {!firsts.length && ' 现在还没加人：都按接入审批人那一步算。'}</div>
-    <div className="inv-set-add" style={{ marginTop: 10 }}>
-      <span className="inv-set-addl">从这天提交的单子起</span>
-      <input type="date" className="inv-in inv-num" style={{ width: 170 }} value={v.since} onChange={e => set({ ...v, since: e.target.value })} />
-      <Msg err={errors['intake.since']} />
-    </div>
     <div className="inv-set-ss" style={{ marginTop: 10 }}>
       {stErr ? <>扫描情况没读出来：{stErr}</>
         : !st ? '正在读扫描情况…'
@@ -468,7 +481,8 @@ function ResetSection({ dirty, onDone }) {
         <span>起重新接。</span>
       </div>
       <div className="inv-set-ss">这一天以后提交、已经走到接入审批人的审批单，会被系统自动重新拉进来（已有票夹的不会重复拉），
-        票要重新审核。几分钟后到收票工作台看。钉钉最多只能往前取 {pv.maxDays || 119} 天。</div>
+        票要重新审核。几分钟后到收票工作台看。钉钉最多只能往前取 {pv.maxDays || 119} 天。
+        <b>各人的启用日不会跟着改</b>：比某位启用日还早提交的单照旧不接——要他从更早的日子接，先在上面④把他的启用日改早、保存，再来清。</div>
       {blockers.map((b, i) => <div key={i} className="inv-set-warn">现在还不能清：{b}。</div>)}
       {nothing && !done && <div className="inv-set-ss">现在没有可清的数据。</div>}
       <div className="inv-set-line inv-set-rsline">
