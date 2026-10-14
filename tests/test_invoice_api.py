@@ -1276,7 +1276,17 @@ class InvoiceApiTests(unittest.TestCase):
         d = self.get("/api/inv/desk", "intern").json()
         self.assertIn(fo["id"], [f["id"] for f in d["mine"]])
         self.assertTrue(all(f["status"] in ("collecting", "returned") for f in d["mine"]))
-        self.assertTrue(all(f["status"] not in ("collecting", "returned") for f in d["recentDone"]))
+        # V2.983 挂的后补单都办完了（完成 / 关闭）：票夹还停在收票中也不算「还没交」，挪到「最近看过的」
+        from sqlalchemy import insert as _ins
+        with self.db._engine.begin() as cx:
+            cx.execute(_ins(self.S.LATER).values(folder_id=fo["id"], status="done", created_at="2026-10-14 00:00:00"))
+        d = self.get("/api/inv/desk", "intern").json()
+        self.assertNotIn(fo["id"], [f["id"] for f in d["mine"]])
+        self.assertIn(fo["id"], [f["id"] for f in d["recentDone"]])
+        with self.db._engine.begin() as cx:
+            cx.execute(_ins(self.S.LATER).values(folder_id=fo["id"], status="open", created_at="2026-10-14 00:00:01"))
+        d = self.get("/api/inv/desk", "intern").json()
+        self.assertIn(fo["id"], [f["id"] for f in d["mine"]])                  # 还有在等票的后补单：照旧算没交完
 
     def test_39b_reprocess_archive_attachment(self):
         """V2.972：以前拆不开、记成「非发票附件」的压缩包，点「重新识别」＝拆开、里面的文件逐个进票夹；再点不重复登记。"""

@@ -515,7 +515,7 @@ class LedgerAuditTests(Base):
         total, sums, rows = s.ledger_query(self.e, {}, 1, 50)
         self.assertEqual(total, 4)                                 # 默认只看已审核，移除的不出现
         self.assertEqual([r["id"] for r in rows], [ids["a2"], ids["r1"], ids["a1"], ids["b1"]])
-        self.assertEqual(sums, {"amount": 360.5, "tax": 16.03, "total": 376.53})
+        self.assertEqual(sums, {"amount": 360.5, "tax": 16.03, "total": 376.53, "deductTax": 13.0})     # V2.977 合计多给可抵扣税额（会计判了可抵扣的税额）
         self.assertEqual(rows[0]["folder"]["business_id"], "BA")
         self.assertEqual(rows[0]["folder"]["payee_name"], "供应商乙")
         self.assertEqual(set(rows[0]["folder"]), {"id", "business_id", "title", "applicant", "template", "dept",
@@ -548,7 +548,7 @@ class LedgerAuditTests(Base):
         total, _, rows = s.ledger_query(self.e, {}, 2, 3)
         self.assertEqual((total, [r["id"] for r in rows]), (4, [ids["b1"]]))
         total, sums, rows = s.ledger_query(self.e, {"q": "查无此票"}, 1, 50)
-        self.assertEqual((total, sums, rows), (0, {"amount": 0.0, "tax": 0.0, "total": 0.0}, []))
+        self.assertEqual((total, sums, rows), (0, {"amount": 0.0, "tax": 0.0, "total": 0.0, "deductTax": 0.0}, []))
 
     def test_ledger_iter_streams_same_rows_without_json(self):
         """robustness/db P3：导出用的流式取数与分页查询同筛选同顺序，不带 JSON 大列，带 share（拆分按分摊额）。"""

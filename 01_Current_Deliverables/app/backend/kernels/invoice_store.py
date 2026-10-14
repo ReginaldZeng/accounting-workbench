@@ -655,6 +655,14 @@ def audit_pending_owners(e):
     return [dict(r) for r in rows]
 
 
+def _later_finished():
+    """票夹的活已经在后补池里做完了（V2.983）：挂的后补单都已完成 / 关闭（至少一张，且没有还在等票的）。
+    这种票夹一般从没点过「提交」、状态还停在收票中——收票台「我还没交的」「钉钉接入·票不齐」不该再列它。"""
+    fin = select(LATER.c.folder_id).where(LATER.c.folder_id.isnot(None), LATER.c.status.in_(("done", "closed")))
+    act = select(LATER.c.folder_id).where(LATER.c.folder_id.isnot(None), LATER.c.status.in_(_ACTIVE_LATER))
+    return and_(FOLDER.c.id.in_(fin), not_(FOLDER.c.id.in_(act)))
+
+
 def folders_recent(e, user, limit=10, which=""):
     """我建的或我最近打开的票夹；还在收票/被退回的排前面，其次按最近打开/创建时间。
     which='open' 只要还在收票/被退回的（「我还没交的」）；'done' 只要已经交了的（「最近看过的」）；空＝都要（老用法）。"""
@@ -665,8 +673,9 @@ def folders_recent(e, user, limit=10, which=""):
     cond = [or_(FOLDER.c.created_by == user, FOLDER.c.opened_by == user)]
     if which == "open":
         cond.append(is_open)
+        cond.append(not_(_later_finished()))
     elif which == "done":
-        cond.append(not_(is_open))
+        cond.append(or_(not_(is_open), _later_finished()))      # 后补单都办完的也算交了（V2.983）
     stmt = (select(FOLDER).where(*cond)
             .order_by(order_open, func.coalesce(FOLDER.c.opened_at, FOLDER.c.created_at).desc(), FOLDER.c.id.desc())
             .limit(max(1, int(limit or 10))))
@@ -676,7 +685,7 @@ def folders_recent(e, user, limit=10, which=""):
 def folders_auto_open(e, source="dingtalk", limit=300):
     """系统自动接入（source）、还在收票/被退回的票夹，新建的在前 → (rows, 总数)。V2.737：自动建的票夹记在"系统"名下，
     「我的票夹」看不到，收票工作台单列一块。"""
-    cond = and_(FOLDER.c.source == source, FOLDER.c.status.in_(("collecting", "returned")))
+    cond = and_(FOLDER.c.source == source, FOLDER.c.status.in_(("collecting", "returned")), not_(_later_finished()))
     with e.connect() as cx:
         total = cx.execute(select(func.count()).select_from(FOLDER).where(cond)).scalar() or 0
     rows = _all(e, select(FOLDER).where(cond).order_by(FOLDER.c.id.desc()).limit(max(1, int(limit or 300))))
