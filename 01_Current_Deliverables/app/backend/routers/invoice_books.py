@@ -1721,6 +1721,40 @@ async def deduct_tick_prepare(request: Request):
     return res
 
 
+def _tick_options(book_month):
+    """方式一的主体下拉（V2.969，用户 2026-10-14：主体、期间要好选，不用再指定开票日期）：
+    设置里的本公司抬头一家一行（简称取基础数据「主体档案」），带上这个做账月份能进清单的张数；票上有、设置里没有的购方也列出来。"""
+    rows, _skipped, buyers = _tick_collect({"book_month": book_month})
+    cnt = {b["taxId"]: b["count"] for b in buyers}
+    out, seen = [], set()
+    for c in inv.get_settings().get("company") or []:
+        tid = str(c.get("taxId") or "").strip().upper()
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        out.append({"taxId": tid, "name": c.get("name") or "", "short": inv.org_short(c.get("name")) or c.get("name") or "",
+                    "count": cnt.get(tid, 0)})
+    for b in buyers:
+        if b["taxId"] not in seen:
+            seen.add(b["taxId"])
+            out.append({"taxId": b["taxId"], "name": b["name"], "short": inv.org_short(b["name"]) or b["name"] or "没读到抬头",
+                        "count": b["count"], "notOurs": True})
+    return out
+
+
+@router.get("/api/inv/deduct/tick/options")
+async def deduct_tick_options(request: Request):
+    """方式一的主体下拉：?bookMonth=2026-10 → {subjects:[{taxId,name,short,count,notOurs?}], total}。count＝这个月能进清单的张数。"""
+    u, bad = need(request, ENTER_LEDGER, CAP_DEDUCT)
+    if bad:
+        return bad
+    bm = inv._s(request.query_params.get("bookMonth"), 7)
+    if bm and not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", bm):
+        return err("做账月份写得不对，请按 2026-10 这样填", 400)
+    subs = await run_in_threadpool(_tick_options, bm)
+    return {"ok": True, "bookMonth": bm, "subjects": subs, "total": sum(x["count"] for x in subs)}
+
+
 # ═══════════════════════════ 新销方核查 ═══════════════════════════
 
 def _seller_view(r):

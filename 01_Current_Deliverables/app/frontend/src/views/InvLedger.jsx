@@ -7,14 +7,14 @@
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.942（发票管家·台账表格被挤）| 台账查询点开一行（右侧详情打开）后「主体」被挤成一个字一行：
 //   整张表不折行，主体/销方/票种太长用省略号、鼠标停上去看全称＋税号；详情开着时名称列和留白收窄，1920 宽刚好不用横向滚动。
 // [Change Log] Date: 2026-10-10 | Author: Claude / c | Version: V2.914（发票管家·税局勾选清单）| 抵扣勾选页签加「方式一：直接从台账出勾选清单」
-//   （选购方主体/开票日期→生成→预览→核对后下载，文件是税局「清单导入勾选」的格式）；原来的拖税局清单标注改叫「方式二」。
+//   （选做账月份/购方主体→生成→预览→核对后下载；V2.969 起不再按开票日期筛，文件是税局「清单导入勾选」的格式）；原来的拖税局清单标注改叫「方式二」。
 // 接口契约见 docs/20260923_发票管家/发票管家_技术方案 §5.2「发票台账」。后端与本页同时开发：凡契约没写死的字段一律可选链+默认值兜底。
 // 权限：按钮显隐看 invConfig().can.*（deduct/unbind/opening/audit），真正的闸在后端；被拒时把后端原因贴在按钮旁边。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLedger, invLedgerExportUrl, invVouchersRefresh, invItemVoid, invItemOtherSystem, invFolder,
   invTaxlistImport, invTaxlistReport, invTaxpackImport,
-  invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invOther, invOtherImport, invTickLists, invTickListUrl,
+  invDeductPrepare, invDeductDownloadUrl, invDeductTickPrepare, invDeductTickOptions, invOther, invOtherImport, invTickLists, invTickListUrl,
   invSellers, invSellerCheck,
   invOpeningPreview, invOpeningCommit, invOpeningStats,
 } from '../api.js'
@@ -750,8 +750,11 @@ function OtherList({ can }) {
   )
 }
 
-const TICK_EMPTY = { subject: '', bookMonth: '', from: '', to: '', marked: false }
 const curMonth = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
+const addMonth = (m, n) => { const [y, mm] = m.split('-').map(Number); const d = new Date(y, mm - 1 + n, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
+// 默认做账月份（V2.969）：15 号前多半在勾上个月的（申报期），之后勾本月的
+const defMonth = () => new Date().getDate() <= 15 ? addMonth(curMonth(), -1) : curMonth()
+const tickEmpty = () => ({ subject: '', bookMonth: defMonth(), marked: false })
 
 // 导出过的认证清单：能重新下载，能对着它对纸质票
 function TickLists({ can, tick }) {
@@ -785,11 +788,11 @@ function TickLists({ can, tick }) {
 
 // 方式一：直接从台账出税局勾选清单（不用先去税局导未勾选清单）。先生成看预览，核对后下载；下载才把票记为「已标注勾选」。
 function TickExport({ can }) {
-  const [f, setF] = useState(TICK_EMPTY)
+  const [f, setF] = useState(tickEmpty)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [res, setRes] = useState(null)
-  const [buyers, setBuyers] = useState([])
+  const [subs, setSubs] = useState(null)     // 主体下拉：本公司抬头＋这个做账月份能勾几张（V2.969）
   const [ok, setOk] = useState(false)
   const [tick, setTick] = useState(0)        // 下载过一次 → 下面「导出过的认证清单」重读
   // 条件一改，下面的预览就不是这个条件的了：收起来，免得拿旧清单去下载
@@ -798,9 +801,24 @@ function TickExport({ can }) {
     setBusy(true); setErr(''); setRes(null); setOk(false)
     try {
       const r = await invDeductTickPrepare(f)
-      setRes(r); setBuyers(asList(r?.buyers))
+      setRes(r)
     } catch (e) { setErr(errText(e)) } finally { setBusy(false) }
   }
+  useEffect(() => {
+    if (!can.deduct) return undefined
+    let live = true
+    setSubs(null)
+    invDeductTickOptions(f.bookMonth).then(r => {
+      if (!live) return
+      const xs = asList(r?.subjects)
+      setSubs(xs)
+      // 只有一家这个月有票要勾 → 直接选上它
+      const has = xs.filter(x => n0(x.count) > 0)
+      setF(p => (!p.subject && has.length === 1) ? { ...p, subject: has[0].taxId } : p)
+    }).catch(() => { if (live) setSubs([]) })
+    return () => { live = false }
+  }, [f.bookMonth, tick, can.deduct])
+  const subLabel = x => `${x.short || x.name || '没读到抬头'}　${n0(x.count)} 张` + (x.notOurs ? '（不是本公司抬头）' : '')
   const s = res?.summary || {}
   const prev = asList(res?.preview)
   const skipped = asList(s.skipped)
@@ -815,23 +833,19 @@ function TickExport({ can }) {
       </ol>
       {can.deduct ? (
         <div className="fbar inv-lg-fbar">
+          <label>做账月份
+            <input type="month" className="inv-lg-month" value={f.bookMonth} onChange={e => set('bookMonth', e.target.value || defMonth())} aria-label="做账月份" />
+            {[['上月', addMonth(curMonth(), -1)], ['本月', curMonth()]].map(([t, m]) =>
+              <button key={t} type="button" className={'inv-lg-mbtn' + (f.bookMonth === m ? ' on' : '')} onClick={() => set('bookMonth', m)}>{t}</button>)}
+          </label>
           <label>购方主体
-            <select value={f.subject} onChange={e => set('subject', e.target.value)}>
-              <option value="">全部主体</option>
-              {buyers.map(b => <option key={b.taxId || '-'} value={b.taxId}>{(b.name || '没读到抬头') + (b.taxId ? `（${b.taxId}）` : '')}</option>)}
+            <select value={f.subject} onChange={e => set('subject', e.target.value)} aria-label="购方主体">
+              <option value="">{subs === null ? '正在数…' : '选主体（税局一家一份）'}</option>
+              {(subs || []).map(x => <option key={x.taxId || '-'} value={x.taxId}>{subLabel(x)}</option>)}
             </select>
           </label>
-          <label>做账月份
-            <input type="month" className="inv-lg-month" value={f.bookMonth} onChange={e => set('bookMonth', e.target.value)} aria-label="做账月份" />
-            {!f.bookMonth && <button type="button" className="inv-lk" onClick={() => set('bookMonth', curMonth())}>本月</button>}
-          </label>
-          <label>开票日期
-            <input type="date" value={f.from} onChange={e => set('from', e.target.value)} aria-label="开票日期从" />
-            <span className="muted">至</span>
-            <input type="date" value={f.to} onChange={e => set('to', e.target.value)} aria-label="开票日期到" />
-          </label>
           <label className="inv-lg-ck"><input type="checkbox" checked={f.marked} onChange={e => set('marked', e.target.checked)} />之前导出过的也带上</label>
-          <button type="button" className="btn primary" onClick={go} disabled={busy}>{busy ? <><span className="inv-spin" /> 正在生成…</> : '生成清单'}</button>
+          <button type="button" className="btn primary" onClick={go} disabled={busy || !f.subject} title={f.subject ? '' : '先选购方主体：税局按纳税人分别导入，一家出一份'}>{busy ? <><span className="inv-spin" /> 正在生成…</> : '生成清单'}</button>
         </div>
       ) : <NoPerm what="抵扣勾选" />}
       <ErrLine msg={err && '清单没生成出来：' + err} />

@@ -631,6 +631,7 @@ export const invDeductPrepare = (file) => invPost('/api/inv/deduct/prepare', inv
 export const invDeductDownloadUrl = (token) => invWithQs('/api/inv/deduct/download', { token })
 // 直接从台账出税局勾选清单：params={subject 购方税号, from, to 开票日期, marked 之前导出过的也带上}；回预览＋下载凭证，下载同上（下载才记"已标注勾选"）
 export const invDeductTickPrepare = (params) => jp('/api/inv/deduct/tick/prepare', params)
+export const invDeductTickOptions = (bookMonth) => j('/api/inv/deduct/tick/options?bookMonth=' + encodeURIComponent(bookMonth || ''))   // 方式一的主体下拉（带这个月能勾几张）
 // 过渡期：票总管已有的票。invOther＝系统现在记住了多少张、台账里多少张带着记号；invOtherImport＝传一份票总管导出的清单，
 // 回 {rows, added, total, both, marked, counts, list[两边都有的票], warnings}（票号对得上的票当场记上「票总管已有」）
 export const invOther = () => j('/api/inv/other')

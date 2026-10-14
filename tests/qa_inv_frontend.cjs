@@ -1036,11 +1036,17 @@ test('对纸质票·选认证清单：对着一份清单开始，按凭证排；
   await ctx.close()
 })
 
-test('抵扣勾选·方式一：清单按做账月份出（请求里带 bookMonth）；预览写凭证；导出过的认证清单列出来、能重新下载、能对纸质票', async (browser, B) => {
+test('抵扣勾选·方式一：做账月份有默认值＋上月/本月；主体下拉列本公司抬头（简称＋这个月几张），只有一家有票就自动选上；不用开票日期；预览写凭证；导出过的认证清单能重新下载、能对纸质票', async (browser, B) => {
   const st = { rows: [], logs: [] }
   const posts = []
+  const opts = []
   const base = ledgerApi(st)
   const api = (c) => {
+    if (c.path === '/api/inv/deduct/tick/options') {
+      opts.push(c.query.bookMonth)
+      return { ok: true, subjects: [{ taxId: '91440300X', name: '深圳市星期零食品科技有限公司', short: '深圳星期零', count: c.query.bookMonth === '2026-10' ? 1 : 0 },
+        { taxId: '91420900Y', name: '孝感市星期九食品科技有限公司', short: '孝感星期九', count: 0 }] }
+    }
     if (c.path === '/api/inv/deduct/tick/prepare') {
       posts.push(c.body)
       return { ok: true, token: 'TOK', buyers: [{ taxId: '91440300X', name: '深圳市星期零食品科技有限公司', count: 1 }],
@@ -1056,15 +1062,29 @@ test('抵扣勾选·方式一：清单按做账月份出（请求里带 bookMont
   await mount(page, 'InvLedger', { user: { name: '测试会计' } })
   await page.getByRole('tab', { name: '抵扣勾选' }).click()
   const sec = page.locator('.inv-lg-sec', { hasText: '方式一' })
+  assert.match(await sec.locator('input[type=month]').inputValue(), /^20\d\d-\d\d$/, '做账月份有默认值')
+  assert.equal(await sec.getByLabel('开票日期从').count(), 0, '不再要开票日期')
+  await sec.getByRole('button', { name: '上月' }).waitFor()
+  await sec.getByRole('button', { name: '本月' }).waitFor()
   await sec.locator('input[type=month]').fill('2026-10')
+  const sel = sec.getByLabel('购方主体')
+  await page.waitForFunction(() => /深圳星期零\s*1 张/.test(document.querySelector('select[aria-label=购方主体]').textContent))
+  assert.match(await sel.innerText(), /孝感星期九\s*0 张/)
+  await page.waitForFunction(() => document.querySelector('select[aria-label=购方主体]').value === '91440300X')
+  assert.ok(opts.includes('2026-10'))
   await sec.getByRole('button', { name: '生成清单' }).click()
   await sec.getByText('深圳星期零-10-8#').waitFor()
   assert.equal(posts[0].bookMonth, '2026-10')
+  assert.equal(posts[0].subject, '91440300X')
+  assert.ok(!('from' in posts[0]) && !('to' in posts[0]), '不带开票日期')
   await sec.locator('.inv-lg-warn', { hasText: '还没做账' }).waitFor()
   const tl = sec.locator('.inv-lg-tl')
   await tl.getByText('深圳星期零 2026-10 认证清单').waitFor()
   assert.equal(await tl.locator('a', { hasText: '重新下载' }).getAttribute('href'), '/api/inv/ticklists/5/download')
   assert.equal(await tl.getByRole('button', { name: '对纸质票' }).count(), 1)
+  // 没选主体不能生成
+  await sel.selectOption('')
+  assert.equal(await sec.getByRole('button', { name: '生成清单' }).isDisabled(), true)
   await ctx.close()
 })
 

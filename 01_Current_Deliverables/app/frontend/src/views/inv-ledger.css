@@ -184,6 +184,9 @@
 
 /* 导出认证清单：做账月份、导出过的清单；台账里跨月的票 */
 .inv-lg-month{ height:30px; border-radius:7px; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); font-size:12.5px; padding:0 8px; font-family:inherit; }
+.inv-lg-mbtn{ height:26px; padding:0 9px; border-radius:6px; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink-2); font-size:12px; cursor:pointer; font-family:inherit; }
+.inv-lg-mbtn:hover{ border-color:var(--accent); color:var(--accent); }
+.inv-lg-mbtn.on{ background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:600; }
 .inv-lg-tl{ margin-top:14px; }
 .inv-lg-tl-h{ font-size:12.5px; font-weight:600; margin-bottom:6px; }
 .inv-lg-tl-h .inv-muted{ font-weight:400; }

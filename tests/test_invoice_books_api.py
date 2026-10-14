@@ -1778,6 +1778,18 @@ class InvoiceBooksApiTests(unittest.TestCase):
         pv = {x["number"]: x for x in j["preview"]}
         self.assertEqual(pv[num(39001)]["bookMonth"], "2023-04")
         self.assertTrue(pv[num(39001)]["voucher"].endswith("-3#"), pv[num(39001)]["voucher"])
+        # V2.969 主体下拉：本公司抬头一家一行＋这个做账月份能进清单几张（不用开票日期）
+        ou = self.ok(self.get("/api/inv/deduct/tick/options?bookMonth=2023-04", "acct"))
+        sub = {x["taxId"]: x for x in ou["subjects"]}
+        self.assertIn(TID, sub)
+        self.assertGreaterEqual(sub[TID]["count"], 2)
+        self.assertTrue(sub[TID]["short"])
+        self.assertEqual(ou["total"], sum(x["count"] for x in ou["subjects"]))
+        self.assertEqual(self.get("/api/inv/deduct/tick/options?bookMonth=6月", "acct").status_code, 400)
+        self.assertEqual(self.get("/api/inv/deduct/tick/options?bookMonth=2023-04", "viewer").status_code, 403)
+        # 不带开票日期也能按做账月份出
+        j2 = self.ok(self.post(url, "acct", {"subject": TID, "bookMonth": "2023-04"}))
+        self.assertTrue({num(39001), num(39002)} <= {x["number"] for x in j2["preview"]})
         # 下载＝存成一份认证清单；同一份再下一次不重复存
         n0 = len(self.ok(self.get("/api/inv/ticklists", "acct"))["rows"])
         for _ in range(2):
