@@ -1382,8 +1382,9 @@ def _counts(items):
     return c
 
 
-def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None, sources=None):
+def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None, sources=None, amount=None):
     """审核队列 → (total, rows)。sources 给了就只看这几种来源的票夹（inv_folder.source）。
+    amount 给了＝只看里面有一张票的价税合计或不含税金额等于它的票夹（差 1 分以内）：拿着纸质票找它在哪张单上。
     owner 不给＝不分人；{"none": True}＝只看未分派的；{"accounts": [...], "uids": [...]}＝只看归这位的。
     pending＝有待审票（review=pending）或票夹已提交；returned＝票夹被退回；done＝发票/收据全部通过或作废且至少一张通过（附件不看）、没有待审的、不在等整单通过。
     每行＝票夹 dict ＋ counts{pending_items, invoices, dup, unchecked, others}（统计不含作废票）。
@@ -1408,6 +1409,9 @@ def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None, sources=N
         conds.append(_owner_blank() if owner.get("none") else _owner_is(owner.get("accounts"), owner.get("uids")))
     if sources:
         conds.append(FOLDER.c.source.in_(list(sources)))
+    if amount is not None:
+        a = Decimal(str(amount))
+        conds.append(_item_exists(lambda t: or_(func.abs(t.c.total - a) < Decimal("0.006"), func.abs(t.c.amount - a) < Decimal("0.006"))))
     q = (q or "").strip()
     if q:
         conds.append(or_(_like(FOLDER.c.business_id, q), _like(FOLDER.c.title, q), _like(FOLDER.c.applicant, q),

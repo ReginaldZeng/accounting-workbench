@@ -937,6 +937,8 @@ export default function InvAudit({ user }) {
   const me = cfg?.me || { name: user?.name || user?.username || '', isSuper: user?.role === 'admin' }
   // 看谁名下的：mine 归我审（默认）/ all 全部（只有管理员有这张卡）/ none 没指派上 / 某一位的钥匙
   const [scope, setScope] = useState('mine')
+  const [amtInput, setAmtInput] = useState('')   // 发票金额：拿着纸质票找它在哪张单上
+  const [amt, setAmt] = useState('')
   const [src, setSrc] = useState('')            // 来源：'' 全部 / dingtalk 钉钉接入 / desk 收票台 / later 后补单 / logistics 物流对账
   const [backlog, setBacklog] = useState(null)
   const [assignFor, setAssignFor] = useState(null)
@@ -983,12 +985,12 @@ export default function InvAudit({ user }) {
   // 各页签数量（不带搜索词；失败不打扰，只是不显示数字）
   const loadCounts = useCallback(() => {
     TABS.forEach(t => {
-      invAuditQueue({ tab: t.key, page: 1, size: 1, scope, source: src })
+      invAuditQueue({ tab: t.key, page: 1, size: 1, scope, source: src, amount: amt })
         .then(r => setCounts(c => ({ ...c, [t.key]: r?.total ?? 0 })))
         .catch(() => { /* 数字取不到不影响审核 */ })
     })
     invAuditBacklog().then(r => setBacklog(r || null)).catch(() => { /* 卡片上的数字取不到不影响审核 */ })
-  }, [scope, src])
+  }, [scope, src, amt])
 
   const loadQueue = useCallback(async (opt = {}) => {
     const t = opt.tab ?? tab, qq = opt.q ?? q, pg = opt.page ?? page
@@ -996,8 +998,8 @@ export default function InvAudit({ user }) {
     setQLoading(true); setQErr('')
     try {
       // 普通会计搜的时候别人名下的也搜得到（只读）；不搜就只看自己名下的
-      const sc = opt.scope ?? ((qq && !boss) ? 'all' : scope)
-      const r = await invAuditQueue({ tab: t, q: qq, page: pg, size: PAGE_SIZE, scope: sc, source: src })
+      const sc = opt.scope ?? (((qq || amt) && !boss) ? 'all' : scope)
+      const r = await invAuditQueue({ tab: t, q: qq, page: pg, size: PAGE_SIZE, scope: sc, source: src, amount: amt })
       if (my !== qReq.current) return null
       const data = { total: r?.total ?? 0, rows: Array.isArray(r?.rows) ? r.rows : [] }
       setQueue(data)
@@ -1010,7 +1012,7 @@ export default function InvAudit({ user }) {
       if (my === qReq.current) setQErr(errText(e))
       return null
     } finally { if (my === qReq.current) setQLoading(false) }
-  }, [tab, q, page, scope, boss, src])
+  }, [tab, q, page, scope, boss, src, amt])
 
   useEffect(() => { loadCounts() }, [loadCounts])
   // 换页签/搜索/翻页 → 重取；没选中票夹时自动打开第一个（深链进来的除外）
@@ -1022,7 +1024,7 @@ export default function InvAudit({ user }) {
       setSelId(cur => (cur !== null && cur !== undefined) ? cur : (d.rows[0]?.id ?? null))
     })
     return () => { live = false }
-  }, [tab, q, page, scope, boss, src])
+  }, [tab, q, page, scope, boss, src, amt])
 
   // 深链 #/invaudit?folder=ID：只消费一次，然后把地址收回 #/invaudit（刷新不重放）
   useEffect(() => {
@@ -1287,6 +1289,14 @@ export default function InvAudit({ user }) {
     setScope(sc); setPage(1); setSelId(null); setChecked(new Set()); setBatchRes(null); setBatchErr('')
   }
   const mineStat = (backlog?.people || []).filter(p => p.mine).reduce((a, p) => ({ n: a.n + p.count, d: Math.max(a.d, p.days || 0) }), { n: 0, d: 0 })
+  // 发票金额：回车才查（去掉逗号、¥；认不出的数字不查）
+  const applyAmt = (v) => {
+    const t = String(v || '').replace(/[,，\s¥￥元]/g, '')
+    const ok = t === '' || (/^\d+(\.\d{1,2})?$/.test(t))
+    if (!ok) return
+    if (t === amt) return
+    setAmt(t); setPage(1); setSelId(null); setChecked(new Set())
+  }
   const changeSrc = (v) => { if (v === src) return; setSrc(v); setPage(1); setSelId(null); setChecked(new Set()) }
   // 筛选条右边那句：现在看的这一拨里最久的等了几天
   const otherPeople = (backlog?.people || []).filter(p => !p.mine)
@@ -1356,7 +1366,13 @@ export default function InvAudit({ user }) {
               onChange={e => setQInput(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') doSearch(qInput); if (e.key === 'Escape' && qInput) { setQInput(''); doSearch('') } }} />
           </label>
-          {q && <button type="button" className="inv-ck-lk" onClick={() => { setQInput(''); doSearch('') }}>清掉搜索</button>}
+          <label className="inv-au-amt">发票金额
+            <input type="text" inputMode="decimal" value={amtInput} placeholder="例 3151.50"
+              onChange={e => setAmtInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') applyAmt(amtInput); if (e.key === 'Escape' && amtInput) { setAmtInput(''); applyAmt('') } }}
+              onBlur={() => applyAmt(amtInput)} title="价税合计或不含税金额对得上的票所在的单；回车查" />
+          </label>
+          {(q || amt) && <button type="button" className="inv-ck-lk" onClick={() => { setQInput(''); doSearch(''); setAmtInput(''); applyAmt('') }}>清掉搜索</button>}
           <span className="inv-au-grow" />
           {boss && backlog?.unassigned?.count > 0 && scope !== 'none' && <button type="button" className="inv-au-fwarn" onClick={() => changeScope('none')}>
             有 {backlog.unassigned.count} 张没指派上</button>}
@@ -1367,7 +1383,7 @@ export default function InvAudit({ user }) {
             queue={queue} loading={qLoading} err={qErr} page={page} setPage={setPage}
             selId={selId} onPick={setSelId} checked={checked} setChecked={setChecked} canAct={canAct}
             onBatch={runBatch} batchBusy={batchBusy} batchErr={batchErr} batchRes={batchRes} setBatchRes={setBatchRes}
-            mineOnly={scope === 'mine' && !q && !src} />
+            mineOnly={scope === 'mine' && !q && !src && !amt} />
 
           <main className="inv-au-d">
             {!selId && <div className="inv-au-blank">{qLoading ? '正在取审核队列…' : '在左边点一张单开始审核'}</div>}

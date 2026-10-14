@@ -2273,6 +2273,14 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertEqual(got("logistics"), {ids["logistics"]})
         self.assertEqual(got(""), set(ids.values()))
         self.assertEqual(got("乱写的"), set(ids.values()))          # 不认识的来源＝不筛
+        # 发票金额：价税合计或不含税金额对得上的票所在的单（差 1 分以内）；认不出的金额当没填
+        S.item_update(e, self.S.folder_items(e, ids["later"])[0]["id"], total=3151.5, amount=2973.11)
+        amt = lambda a: {r["id"] for r in self.get("/api/inv/audit/queue?tab=pending&size=200&scope=all&amount=" + a, "acct").json()["rows"]} & set(ids.values())
+        self.assertEqual(amt("3151.50"), {ids["later"]})
+        self.assertEqual(amt("2973.11"), {ids["later"]})
+        self.assertEqual(amt("3,151.5"), {ids["later"]})
+        self.assertEqual(amt("3151.52"), set())
+        self.assertEqual(amt("不是数"), set(ids.values()))
 
     def test_51_old_database_gets_owner_columns(self):
         """老库的票夹表没有「归谁审」那几栏：启动时补上，老数据不动；补过再跑一遍不出错。"""

@@ -304,6 +304,7 @@ function auditApi(st) {
     if (c.path === '/api/inv/audit/queue') {
       st.scopes = (st.scopes || []).concat([(c.query && c.query.scope) || ''])
       st.sources = (st.sources || []).concat([(c.query && c.query.source) || ''])
+      st.amounts = (st.amounts || []).concat([(c.query && c.query.amount) || ''])
       return { ok: true, total: st.queue.length, rows: st.queue.map(r => ({ owner: OWN_ME, ...r })) }
     }
     if (c.path === '/api/inv/audit/backlog') return st.backlog || { ok: true, canAssign: false, people: [{ key: 'a:测试会计', name: '测试会计', mine: true, count: st.queue.length, oldest: '2026-09-20 10:00:00', days: 5, note: '' }], unassigned: { count: 0, oldest: '', days: null }, total: st.queue.length }
@@ -713,6 +714,12 @@ test('审票分工：有「审核分派」权限的人——多一张「全部�
   await page.locator('.inv-au-fbar select').nth(1).selectOption('dingtalk')
   await sleep(300)
   assert.equal(st.sources[st.sources.length - 1], 'dingtalk')
+  // 发票金额：回车才查，逗号去掉
+  const amtBox = page.locator('.inv-au-amt input')
+  await amtBox.fill('3,151.50')
+  await amtBox.press('Enter')
+  await sleep(300)
+  assert.equal(st.amounts[st.amounts.length - 1], '3151.50')
   await scopeSel.selectOption('a:李四')
   await sleep(300)
   assert.equal(st.scopes[st.scopes.length - 1], 'a:李四', '按人看：队列只取这一位的')

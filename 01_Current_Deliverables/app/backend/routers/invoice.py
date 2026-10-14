@@ -4480,11 +4480,11 @@ def _owner_filter(u, scope, st):
 AUDIT_SOURCES = {"dingtalk": ("dingtalk",), "desk": ("scan", "manual"), "later": ("later",), "logistics": ("logistics",)}
 
 
-def _audit_queue_sync(u, tab, q, page, size, scope="all", source=""):
+def _audit_queue_sync(u, tab, q, page, size, scope="all", source="", amount=None):
     e = E()
     st = get_settings()
     total, rows = S.audit_queue(e, tab=tab, q=q, page=page, size=size, owner=_owner_filter(u, scope, st),
-                                sources=AUDIT_SOURCES.get(source))
+                                sources=AUDIT_SOURCES.get(source), amount=amount)
     by = S.items_of_folders(e, [r["id"] for r in rows])
     lm = S.later_open_for_folders(e, rows)
     memo = {}
@@ -4709,8 +4709,12 @@ async def audit_queue(request: Request):
     qp = request.query_params
     tab = qp.get("tab") if qp.get("tab") in ("pending", "returned", "done") else "pending"
     scope = _s(qp.get("scope"), 60) or "all"     # 老页面不带：照旧看全部（别人名下的每行自己标只读）
+    try:
+        amount = S.money(qp.get("amount")) if qp.get("amount") not in (None, "") else None    # 发票金额：认不出的当没填
+    except ValueError:
+        amount = None
     return await run_in_threadpool(_audit_queue_sync, u, tab, qp.get("q"), qp.get("page") or 1, qp.get("size") or 30, scope,
-                                   _s(qp.get("source"), 12))
+                                   _s(qp.get("source"), 12), amount)
 
 
 @router.post("/api/inv/audit/approve")
