@@ -1,0 +1,34 @@
+/* 发票管家 · 对纸质票（InvCheck.jsx）：选票夹 → 连续扫 → 扫到的那一行变绿 */
+.inv-ck-start{ display:flex; flex-direction:column; gap:10px; font-size:12.5px; }
+.inv-ck-all{ display:flex; align-items:center; gap:6px; font-weight:600; }
+.inv-ck-pick{ max-height:340px; overflow:auto; border:1px solid var(--line); border-radius:9px; }
+.inv-ck-pickrow{ display:flex; align-items:center; gap:10px; padding:7px 10px; border-bottom:1px solid var(--line); cursor:pointer; }
+.inv-ck-pickrow:last-child{ border-bottom:0; }
+.inv-ck-pickrow.on{ background:var(--accent-soft); }
+.inv-ck-pt{ flex:1 1 0; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-ck-empty{ padding:22px; text-align:center; color:var(--ink-3); }
+.inv-ck-err{ color:var(--red); font-size:12px; }
+
+.inv-ck{ display:flex; flex-direction:column; gap:10px; font-size:12.5px; }
+.inv-ck-bar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.inv-ck-prog{ flex:1 1 180px; height:8px; border-radius:99px; background:var(--gray-bg); overflow:hidden; }
+.inv-ck-prog i{ display:block; height:100%; background:var(--green); transition:width .25s; }
+.inv-ck-num{ font-size:14px; }
+.inv-ck-alert{ display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:9px 12px; border-radius:9px; border:1px solid var(--red-line); background:var(--red-bg); color:var(--red); }
+.inv-ck-alert.warn{ border-color:var(--amber-line); background:var(--amber-bg); color:var(--amber); }
+.inv-ck-alert.ok{ border-color:var(--green-line); background:var(--green-bg); color:var(--green); }
+.inv-ck-alert .inv-x{ margin-left:auto; }
+.inv-ck-scroll{ max-height:min(52vh, 520px); overflow:auto; border:1px solid var(--line); border-radius:10px; }
+.inv-ck-tbl{ width:100%; border-collapse:collapse; }
+.inv-ck-tbl th{ position:sticky; top:0; z-index:1; text-align:left; font-weight:600; font-size:12px; color:var(--ink-2); background:var(--bg-rail); padding:7px 10px; border-bottom:1px solid var(--line); }
+.inv-ck-tbl td{ padding:7px 10px; border-bottom:1px solid var(--line); }
+.inv-ck-tbl .r{ text-align:right; }
+.inv-ck-tbl tr.grp td{ background:var(--bg-sub); font-weight:600; color:var(--ink-2); font-size:12px; }
+.inv-ck-cnt{ float:right; font-weight:400; }
+.inv-ck-tbl tr.hit td{ background:var(--green-bg); }
+.inv-ck-tbl tr.hit td:first-child{ box-shadow:inset 3px 0 0 var(--green); color:var(--green); font-weight:700; }
+.inv-ck-tbl tr.flash td{ animation:inv-ck-flash 1.1s; }
+@keyframes inv-ck-flash{ 0%{ background:#b9e8cf; } 100%{ background:var(--green-bg); } }
+.inv-ck-lk{ border:0; background:none; padding:0; font:inherit; font-size:12px; color:var(--accent); cursor:pointer; }
+.inv-ck-lk:hover{ text-decoration:underline; }
+.inv-ck-str{ padding:8px 12px; border:1px solid var(--line); border-radius:9px; background:var(--bg-rail); line-height:1.7; }

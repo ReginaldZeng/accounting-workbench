@@ -5,7 +5,7 @@
 // 令牌只从地址里读一次就收进 sessionStorage 并把地址改回 #/invpair——免得令牌留在浏览记录/截图里。
 // 配对（m/bind）成功时后端回一个新的会话令牌 session：从此所有调用都用它，二维码里的那个令牌当场失效。
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { invMHello, invMBind, invMState, invMScan, invMUpload, invMJsConfig } from '../api.js'
+import { invMHello, invMBind, invMState, invMScan, invMUpload, invMJsConfig, invMCheck, invMCheckScan } from '../api.js'
 import { inDingTalk, getAuthCode, ddConfig, ddCall } from './ddBridge.js'
 import { money, usePoll, StatusBadges } from './invShared.jsx'
 import './inv-phone.css'
@@ -57,6 +57,22 @@ function ddScan() {
   if (!fn) return Promise.reject(new Error('当前环境不能调钉钉扫码'))
   return ddCall(fn, { type: 'qrCode' }, x => (x && (x.text || x.content || x.result)) || '')
 }
+// 念出来（对纸质票连续扫时不用看屏幕）：能念就念；念不了（有的钉钉版本不给）退成震动——对上了短震一下，不对的长震两下
+function speak(text, ok) {
+  let said = false
+  try {
+    if (window.speechSynthesis && window.SpeechSynthesisUtterance && text) {
+      const u = new window.SpeechSynthesisUtterance(text)
+      u.lang = 'zh-CN'; u.rate = 1.25
+      window.speechSynthesis.cancel(); window.speechSynthesis.speak(u)
+      said = true
+    }
+  } catch { /* 念不了就震 */ }
+  try { if (navigator.vibrate) navigator.vibrate(ok ? 60 : [180, 90, 180]) } catch { /* 震不了就只看屏幕 */ }
+  return said
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+const CHK_TONE = { ok: 'ok', dup: 'warn', other: 'err', none: 'err', unknown: 'warn', closed: 'warn' }
 const isCancel = e => /cancel|取消/i.test(String((e && (e.errorMessage || e.message)) || '')) || (e && String(e.errorCode) === '300001')
 
 // ───────────────────────── 缩略图（要带令牌头，不能直接 <img src>） ─────────────────────────
@@ -214,6 +230,11 @@ export default function InvPhone() {
   const [attempt, setAttempt] = useState(0)
   const scanPhoto = useRef(null)
   const invPhoto = useRef(null)
+  // 对纸质票：电脑上正在对的那一次（没有 → null）、是不是正在连续扫、上一张扫出来的结果
+  const [chk, setChk] = useState(null)
+  const [checking, setChecking] = useState(false)
+  const [chkLast, setChkLast] = useState(null)
+  const checkingRef = useRef(false)
 
   const expire = useCallback(() => { setPhase('expired') }, [])
 
@@ -291,6 +312,11 @@ export default function InvPhone() {
     }
   }, [expire])
   usePoll(loadState, phase === 'ready', 2000)
+  // 电脑那边有没有在对纸质票：5 秒看一次（连续扫的时候每扫一张都会带回最新的数，不用另外看）
+  const loadCheck = useCallback(async () => {
+    try { const r = await invMCheck(tokRef.current); setChk(r && r.check ? r : null) } catch { /* 看不到不影响收票 */ }
+  }, [])
+  usePoll(loadCheck, phase === 'ready' && !checking, 5000)
   // 钩子必须在下面各种"提前返回"之前调用
   const items = useMemo(() => (st && Array.isArray(st.items) ? st.items.slice(0, 12) : []), [st])
   const thumbs = useThumbs(token, items)
@@ -329,6 +355,39 @@ export default function InvPhone() {
       if (list.length === 1 && !looksExpired(e)) showResult(list[0], e.message)
       else handleErr(e, '上传')
     } finally { setBusy('') }
+  }
+
+  // 对纸质票·连续扫：扫一张 → 记到电脑上那一次点验 → 念结果 → 马上再开扫码框；点扫码框的取消就停
+  const stopCheck = () => { checkingRef.current = false; setChecking(false) }
+  const checkLoop = async () => {
+    if (checkingRef.current) return
+    if (!inDingTalk()) { setChkLast({ tone: 'warn', big: '请用钉钉打开', sub: '连续扫要用钉钉的「扫一扫」' }); return }
+    checkingRef.current = true; setChecking(true); setChkLast(null)
+    try {
+      await ddSetup(tokRef.current)
+      while (checkingRef.current) {
+        let text = ''
+        try { text = await ddScan() } catch (e) {
+          if (!isCancel(e)) setChkLast({ tone: 'warn', big: '扫码用不了', sub: (e && (e.errorMessage || e.message)) || '' })
+          break
+        }
+        if (!text) continue
+        let r
+        try { r = (await invMCheckScan(tokRef.current, text)) || {} } catch (e) {
+          if (looksExpired(e)) { expire(); break }
+          setChkLast({ tone: 'err', big: '没记上', sub: e.message || String(e) }); speak('没记上', false)
+          await sleep(900); continue
+        }
+        const ok = r.result === 'ok'
+        speak(r.say || (ok ? '确认' : '不对'), ok)
+        setChkLast({ tone: CHK_TONE[r.result] || 'warn', big: r.say || r.msg || '', sub: r.msg || '' })
+        if (r.stats) setChk(c => (c ? { ...c, stats: { ...c.stats, ...r.stats } } : c))
+        if (r.result === 'closed') break
+        await sleep(ok ? 500 : 1300)        // 不对的多停一下，让人看一眼原因
+      }
+    } catch (e) {
+      setChkLast({ tone: 'warn', big: '扫码用不了', sub: (e && (e.errorMessage || e.message)) || '' })
+    } finally { stopCheck(); loadCheck() }
   }
 
   const scanApproval = async () => {
@@ -380,6 +439,18 @@ export default function InvPhone() {
         <button type="button" className="inv-ph-big shoot" disabled={!!busy} onClick={() => invPhoto.current && invPhoto.current.click()}>拍发票</button>
       </div>
       {st && !folder && <div className="inv-ph-hint">拍发票前先扫审批单，票才知道放进哪张单</div>}
+      {chk && chk.check && (
+        <div className="inv-ph-chk">
+          <div className="inv-ph-chk-h">电脑上正在对纸质票<span>已扫到 {chk.stats ? chk.stats.hit : 0} / {chk.stats ? chk.stats.total : 0}</span></div>
+          {chkLast && <div className={'inv-ph-chk-last ' + chkLast.tone} role="status">
+            <b>{chkLast.big}</b>{chkLast.sub && chkLast.sub !== chkLast.big ? <span>{chkLast.sub}</span> : null}
+          </div>}
+          {checking
+            ? <button type="button" className="inv-ph-big stop" onClick={stopCheck}>停</button>
+            : <button type="button" className="inv-ph-big chk" disabled={!!busy} onClick={checkLoop}>连续扫纸质票</button>}
+          <div className="inv-ph-hint">对准发票左上角的码。扫到会念出来：确认 / 重复 / 不在这里 / 没有这张。点扫码框的「取消」就停。</div>
+        </div>
+      )}
       {scanFallback && (
         <div className="inv-ph-fb">
           钉钉扫码暂时用不了{typeof scanFallback === 'string' ? `（${scanFallback}）` : ''}，改成拍照读码：对准审批单上的二维码拍一张。

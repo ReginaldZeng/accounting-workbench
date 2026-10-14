@@ -855,6 +855,111 @@ test('设置：接入审批人每人一行、带自己的启用日；留空＝�
   await ctx.close()
 })
 
+// ── 对纸质票 ──
+test('对纸质票（电脑）：勾票夹开始 → 扫码枪扫到的那一行变绿、手机扫到的跟着变绿；不相干的票红字提醒；扫完「审核扫到的」', async (browser, B) => {
+  const st = auditSt(OWN_ME)
+  const items = [
+    { id: 101, folderId: 10, kind: 'invoice', typeLabel: '专票', number: 'N101', sellerName: '销方甲', total: 100, review: 'pending', hit: null },
+    { id: 102, folderId: 10, kind: 'invoice', typeLabel: '专票', number: 'N102', sellerName: '销方乙', total: 200, review: 'pending', hit: null },
+    { id: 103, folderId: 10, kind: 'receipt', typeLabel: '收据', number: '', sellerName: '销方丙', total: 30, review: 'pending', hit: null },
+  ]
+  const ck = { open: false, strangers: [], approved: [] }
+  const view = () => {
+    const hit = items.filter(i => i.hit).length
+    return { ok: true, check: ck.open ? { id: 7, open: !ck.closed, by: '测试会计', at: '2026-10-14 09:00:00', closedAt: ck.closed ? '2026-10-14 09:30:00' : '', entry: 'audit' } : null,
+      folders: [{ id: 10, title: '报销单甲', payee: '武汉某某公司', amount: 330, source: 'dingtalk', ownerName: '测试会计', total: items.length, hit }],
+      items, strangers: ck.strangers, stats: { total: items.length, hit, left: items.length - hit, strangers: ck.strangers.length } }
+  }
+  const hitIt = (id, via) => { const it = items.find(i => i.id === id); it.hit = { at: '2026-10-14 09:10:00', by: '测试会计', via, viaLabel: via === 'phone' ? '手机' : via === 'manual' ? '手工勾' : '扫码枪' }; return it }
+  const base = auditApi(st)
+  const api = (c) => {
+    if (c.path === '/api/inv/check/current') return ck.open && !ck.closed ? view() : { ok: true, check: null }
+    if (c.path === '/api/inv/check/start') { ck.open = true; ck.started = c.body; return view() }
+    if (c.path === '/api/inv/check/7') return view()
+    if (c.path === '/api/inv/check/7/scan') {
+      const code = c.body.code
+      if (code === 'N101') { const dup = !!items[0].hit; const it = hitIt(101, 'scanner'); return { ok: true, result: dup ? 'dup' : 'ok', say: dup ? '重复' : '确认', msg: dup ? '这张扫过了：N101' : '对上了：N101', item: it } }
+      if (code === 'OTHER') { ck.strangers.push({ kind: 'other', number: 'N999', total: 55, folderId: 99, payee: '别的收款方', ownerName: '李四' }); return { ok: true, result: 'other', say: '不在这里', msg: '不在选中的票夹里：N999 这张在「别的收款方」里（归李四审）。没有登记，也没有挪' } }
+      return { ok: true, result: 'none', say: '没有这张', msg: '系统里没有这张票' }
+    }
+    if (c.path === '/api/inv/check/7/mark') { const it = items.find(i => i.id === c.body.itemId); if (c.body.on) hitIt(it.id, 'manual'); else it.hit = null; return { ok: true, item: it } }
+    if (c.path === '/api/inv/check/7/close') { ck.closed = true; return view() }
+    if (c.path === '/api/inv/audit/items/approve') { ck.approved.push(c.body); items.forEach(i => { if (c.body.itemIds.includes(i.id)) i.review = 'approved' }); return { ok: true, items: [], folder: st.folder, folderDone: false } }
+    return base(c)
+  }
+  const { page, ctx } = await open(browser, B, api)
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.getByRole('button', { name: '对纸质票', exact: true }).click()
+  const start = page.locator('.inv-modal', { hasText: '选要对的票夹' })
+  await start.locator('.inv-ck-pickrow').first().waitFor()
+  assert.equal(await start.locator('.inv-ck-pickrow input:checked').count(), 1, '默认把列表里的票夹都勾上')
+  await start.getByRole('button', { name: '开始对' }).click()
+  const dlg = page.locator('.inv-modal').filter({ has: page.locator('.inv-ck') })
+  await dlg.getByText('扫到 0 / 3').waitFor()
+  assert.deepEqual(ck.started, { folderIds: [10], entry: 'audit' })
+  assert.equal(await dlg.locator('.inv-ck-tbl tr.hit').count(), 0, '一开始都没扫到（白的）')
+  const scan = async (code) => { const box = dlg.locator('.inv-ck-scan input'); await box.fill(code); await box.press('Enter') }
+  await scan('N101')
+  await dlg.locator('#inv-ck-row-101.hit').waitFor()
+  await dlg.getByText('扫到 1 / 3').waitFor()
+  await scan('N101')
+  await dlg.locator('.inv-ck-alert.warn', { hasText: '这张扫过了' }).waitFor()
+  await scan('OTHER')
+  await dlg.locator('.inv-ck-alert.err', { hasText: '不在选中的票夹里' }).waitFor()
+  await dlg.locator('.inv-ck-str', { hasText: '别的收款方' }).waitFor()
+  // 手机那边扫到一张：这里不用动，跟着变绿
+  hitIt(102, 'phone')
+  await dlg.locator('#inv-ck-row-102.hit').waitFor({ timeout: 6000 })
+  assert.match(await dlg.locator('#inv-ck-row-102').innerText(), /手机/)
+  // 没有二维码的收据：手工勾
+  await dlg.locator('#inv-ck-row-103').getByRole('button', { name: '手工勾' }).click()
+  await dlg.locator('#inv-ck-row-103.hit').waitFor()
+  await dlg.getByText('扫到 3 / 3').waitFor()
+  // 审核扫到的：按票夹送去审核通过
+  await dlg.getByRole('button', { name: '审核扫到的（3）' }).click()
+  await dlg.locator('.inv-ck-alert.ok', { hasText: '已审核通过 3 张' }).waitFor()
+  assert.deepEqual(ck.approved.map(b => [b.folderId, b.itemIds.slice().sort()]), [[10, [101, 102, 103]]])
+  await dlg.getByRole('button', { name: '对完了，收' }).click()
+  await dlg.getByText('这次点验已经收了', { exact: false }).waitFor()
+  await ctx.close()
+})
+
+test('对纸质票（手机）：电脑上在对时出现「连续扫纸质票」；扫一张念一声（确认／重复／不在这里），点取消就停', async (browser, B) => {
+  const init = () => {
+    window.__said = []; window.__ddScans = 0; window.__ddCfg = null
+    window.SpeechSynthesisUtterance = function (t) { this.text = t }
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { cancel() {}, speak(u) { window.__said.push(u.text) } } })
+    const codes = ['C-OK', 'C-OK', 'C-OTHER']
+    window.dd = {
+      config: c => { window.__ddCfg = c }, ready: cb => setTimeout(cb, 10), error: () => {},
+      runtime: { permission: { requestAuthCode: o => o.onSuccess({ code: 'AUTH1' }) } },
+      biz: { util: { scan: o => { const code = codes[window.__ddScans++]; setTimeout(() => (code ? o.onSuccess({ text: code }) : o.onFail({ errorCode: '300001', errorMessage: 'user cancel' })), 10) } } },
+    }
+  }
+  const seen = []
+  const base = ddPhoneApi(() => ({ ok: true, agentId: '123', corpId: 'dingFAKE', timeStamp: '1700000000000', nonceStr: 'n1', signature: 'sig1' }))
+  const api = async (c) => {
+    if (c.path === '/api/inv/m/check') return { ok: true, check: { id: 7, open: true }, stats: { total: 5, hit: seen.filter(x => x === 'ok').length, left: 5 }, folders: 2 }
+    if (c.path === '/api/inv/m/check/scan') {
+      const code = c.body.code
+      const r = code === 'C-OTHER' ? 'other' : seen.includes('ok') ? 'dup' : 'ok'
+      seen.push(r)
+      return { ok: true, result: r, say: { ok: '确认', dup: '重复', other: '不在这里' }[r], msg: { ok: '对上了：N1', dup: '这张扫过了：N1', other: '不在选中的票夹里：N9' }[r], stats: { total: 5, hit: 1, left: 4 } }
+    }
+    return base(c)
+  }
+  const { page, ctx, calls } = await open(browser, B, api, { hash: '#/invpair?t=SESS9', ua: DD_UA, init })
+  await mount(page, 'InvPhone')
+  await page.locator('.inv-ph-chk', { hasText: '电脑上正在对纸质票' }).waitFor({ timeout: 8000 })
+  await page.getByRole('button', { name: '连续扫纸质票' }).click()
+  await page.locator('.inv-ph-chk-last.err', { hasText: '不在这里' }).waitFor({ timeout: 8000 })
+  await page.getByRole('button', { name: '连续扫纸质票' }).waitFor({ timeout: 8000 })      // 第四次点了取消：自己停下来
+  assert.deepEqual(await page.evaluate(() => window.__said), ['确认', '重复', '不在这里'])
+  assert.deepEqual(calls.filter(c => c.path === '/api/inv/m/check/scan').map(c => c.body.code), ['C-OK', 'C-OK', 'C-OTHER'])
+  assert.match(await page.locator('.inv-ph-chk-h').innerText(), /已扫到 1 \/ 5/)
+  await ctx.close()
+})
+
 function ledgerApi(st) {
   return (c) => {
     if (c.path === '/api/inv/config') return cfg()

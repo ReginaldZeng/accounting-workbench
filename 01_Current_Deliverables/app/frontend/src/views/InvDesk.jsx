@@ -19,6 +19,7 @@ import {
 } from './invShared.jsx'
 import InvSettings from './InvSettings.jsx'
 import InvPaper from './InvPaper.jsx'
+import PaperCheckButton from './InvCheck.jsx'
 import './inv-desk.css'
 
 // ───────────────────────── 常量与小工具 ─────────────────────────
@@ -932,6 +933,10 @@ export default function InvDesk({ user }) {
       <div><div className="h-title">{paperMode ? '月末纸质件查验' : '收票工作台'}</div>
         <div className="h-sub">{paperMode ? '按审核通过的月份，扫纸质发票二维码记到件，导出没到的去催' : '扫审批单 → 放发票 → 提交'}</div></div>
       <div className="inv-dk-actions">
+        {!paperMode && <PaperCheckButton entry="desk" canAudit={false}
+          candidates={[folder, ...((desk && desk.recent) || [])].filter((f, i, a) => f && a.findIndex(x => x && x.id === f.id) === i)
+            .map(f => ({ id: f.id, title: f.title, payee: (f.payee && f.payee.name) || '', amount: f.amount, owner: f.ownerName || '', invoices: f.stats ? f.stats.invoices : null }))}
+          preset={folder ? [folder.id] : []} onChanged={loadDesk} />}
         <button type="button" className={paperMode ? 'btn-pri' : 'btn'} onClick={() => setPaperMode(v => !v)}>{paperMode ? '← 回到收票' : '月末纸质件查验'}</button>
         {pair && pair.bound && <span className={'inv-badge ' + (pair.active === false ? 'mute' : 'ok')}
           title={[pair.device, pair.active === false && pair.lastSeen ? '手机最近一次在线 ' + fmtTime(pair.lastSeen) : ''].filter(Boolean).join(' · ')}>

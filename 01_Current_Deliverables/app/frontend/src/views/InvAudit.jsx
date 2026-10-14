@@ -32,6 +32,7 @@ import {
 import {
   money, fmtTime, useToast, usePoll, Modal, StatusBadges, itemBadges, InvViewer, FieldPanel,
 } from './invShared.jsx'
+import PaperCheckButton from './InvCheck.jsx'
 import './inv-audit.css'
 
 // ───────────────────────── 常量与小工具 ─────────────────────────
@@ -1307,6 +1308,11 @@ export default function InvAudit({ user }) {
         <div className="inv-au-hright">
           <div className="inv-au-hacts">
             {cfg && !canAct && <span className="inv-badge mute" title="可以查看，不能通过/退回">{NO_PERM_HINT}</span>}
+            <PaperCheckButton entry="audit" canAudit={canAct}
+              candidates={(queue?.rows || []).map(r => ({ id: r.id, title: r.title, payee: (r.payee && r.payee.name) || '', amount: r.amount,
+                owner: r.owner && r.owner.assigned ? (r.owner.mine ? '我' : r.owner.name) : '', invoices: statOf(r, 'invoices') }))}
+              preset={checked.size ? [...checked] : []}
+              onChanged={() => { loadQueue(); loadCounts(); if (selId) loadDetail(selId, { keep: true }) }} />
             <button type="button" className="btn" disabled={qLoading} onClick={() => { loadQueue(); loadCounts(); if (selId) loadDetail(selId, { keep: true }) }}>刷新</button>
           </div>
           {refreshed && <div className="h-sub inv-au-refreshed">{me.name ? me.name + ' 于 ' : ''}{refreshed} 刷新</div>}

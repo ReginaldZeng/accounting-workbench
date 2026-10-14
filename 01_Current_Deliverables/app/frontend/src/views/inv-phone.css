@@ -61,3 +61,14 @@
 .inv-ph-item-amt{ font-size:13px; font-weight:700; font-family:var(--font-mono); font-variant-numeric:tabular-nums; }
 .inv-ph-item .inv-badges{ gap:3px; }
 .inv-ph-item .inv-badge{ font-size:10.5px; padding:2px 5px; }
+
+/* 对纸质票·手机连续扫 */
+.inv-ph-chk{ display:flex; flex-direction:column; gap:10px; padding:12px; border:1px solid var(--blue-line); border-radius:14px; background:var(--blue-bg); }
+.inv-ph-chk-h{ display:flex; justify-content:space-between; align-items:baseline; font-size:15px; font-weight:700; }
+.inv-ph-chk-h span{ font-size:14px; font-weight:600; font-variant-numeric:tabular-nums; }
+.inv-ph-chk-last{ display:flex; flex-direction:column; gap:4px; align-items:center; text-align:center; padding:14px 10px; border-radius:12px; background:var(--bg); }
+.inv-ph-chk-last b{ font-size:30px; line-height:1.2; }
+.inv-ph-chk-last span{ font-size:13px; color:var(--ink-2); }
+.inv-ph-chk-last.ok b{ color:var(--green); } .inv-ph-chk-last.err b{ color:var(--red); } .inv-ph-chk-last.warn b{ color:var(--amber); }
+.inv-ph-big.chk{ background:var(--green); color:#fff; border:0; }
+.inv-ph-big.stop{ background:var(--red); color:#fff; border:0; }

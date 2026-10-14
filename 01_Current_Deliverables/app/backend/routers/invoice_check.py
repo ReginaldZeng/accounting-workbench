@@ -63,7 +63,7 @@ def _item_view(it, hit=None):
     v = {"id": it["id"], "folderId": it.get("folder_id"), "kind": it.get("kind"), "typeLabel": _type_label(it),
          "code": it.get("code") or "", "number": it.get("number") or "", "date": it.get("issue_date") or "",
          "sellerName": it.get("seller_name") or "", "total": inv._money_val(it.get("total")), "paper": bool(it.get("paper")),
-         "hit": None}
+         "review": it.get("review") or "draft", "hasQr": it.get("kind") == "invoice" and bool(it.get("number")), "hit": None}
     if hit:
         v["hit"] = {"at": hit.get("ts") or "", "by": hit.get("user") or "", "via": hit.get("via") or "",
                     "viaLabel": VIA_CN.get(hit.get("via") or "", hit.get("via") or "")}
