@@ -2147,10 +2147,10 @@ class InvoiceBooksApiTests(unittest.TestCase):
             r.update(kw)
             return r
 
-        def voucher(vno, gross, tax, expl):
+        def voucher(vno, gross, tax, expl, tax_sup=True):
             books[vno] = [row(vno, "6601.05", "快递费", dr=round(gross - tax, 2), expl=expl, sup=False, **{"部门码": "D01", "费用码": "F01"})]
             if tax:
-                books[vno].append(row(vno, "2221.01.07", "暂估进项税", dr=tax, expl=expl))
+                books[vno].append(row(vno, "2221.01.07", "暂估进项税", dr=tax, expl=expl, sup=tax_sup))
             books[vno].append(row(vno, "2241.02", "供应商往来", cr=gross, expl=expl))
             heads.append((vno, gross))
             L3._CACHE.clear()
@@ -2273,6 +2273,17 @@ class InvoiceBooksApiTests(unittest.TestCase):
             r = self.ok(self.post("/api/inv/later/%d/voucher-run" % lc, "acct"))
             self.assertEqual((r["status"], r["state"]["status"], len(calls["save"])), ("done", "done", 2))
             self.assertIn("9/402#", calls["save"][1]["FEntity"][1]["FEXPLANATION"])
+            # 暂估进项税那一行一定挂供应商：原凭证的暂估行当时没挂（线上 2026-10-14 禾享 9月记-196 就是这样，建出来的贷方没有维度，
+            # 用户「不太对，暂估是有维度的」）→ 用同一张凭证供应商往来行上的那家，并在计划里提醒原凭证也补上
+            fh, lh, ih = mk("H", 660.0, 6.6, 8)
+            voucher("480", 660.0, 6.6, "辛提起支付", tax_sup=False)
+            v = self.ok(self.get("/api/inv/later/%d/voucher-plan" % lh, "acct"))
+            self.assertEqual((v["plan"]["kind"], v["lines"][1]["supplier"]), ("exact", seller))
+            self.assertIn("暂估那一行当时没挂供应商", v["plan"]["why"])
+            approve(fh, ih)
+            L3.drain()
+            self.assertEqual((L3.state_of(lh)["status"], len(calls["save"])), ("done", 3))
+            self.assertEqual(calls["save"][2]["FEntity"][1]["FDetailID"], {"FDETAILID__FFLEX4": {"FNumber": "S001"}})
             # ⑤ 物流请款单不归这里；原凭证没有暂估的不用做；上次做到一半的不重复建；金蝶里已有人做了的不再做
             fd, ld, idd = mk("D", 800.0, 8.0, 4)
             voucher("450", 800.0, 8.0, "丁提起支付")
@@ -2344,7 +2355,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
             L3.drain()
             self.assertEqual((L3.state_of(lg)["status"], L3.state_of(lg)["kind"]), ("done", "byhand"))
             self.assertEqual(self.item(ig)["flags_json"]["_bookkeeping"]["vouchers"], [{"book": self.OUR, "period": "2026-10", "number": "记-88"}])
-            self.assertEqual(len(calls["save"]), 2)                                     # 这四种都没有新建凭证
+            self.assertEqual(len(calls["save"]), 3)                                     # 这四种都没有新建凭证
             # ⑥ 关掉以后什么都不做
             self.ok(self.post("/api/inv/later-voucher/config", "boss", {"mode": "off"}))
             self.assertEqual(L3.run_one(lb)["status"], "skip")

@@ -1,3 +1,5 @@
+# [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.954（暂估进项税挂供应商）
+# Description: 贷暂估进项税那一行一定挂供应商（内核 _sup_src）；原凭证的暂估行当时没挂的，计划里写明并提醒把原凭证也补上。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.953（后补票转待认证·物流单也由后补单这边做）
 # Description: Owner 2026-10-14：「因为这个是后补，我们的付款凭证已经做完了，所以不可能在付款那条线转待认证」——物流请款单的后补票，转待认证也由发票后补单这边触发（审核通过、后补单收齐马上做，不等付款做账 20 分钟一轮）。开关＝真做时接管；分录和保存仍调付款做账那条线的 _post_later（同一把锁、同一份做账记录，那边记了 later3 就不会重复建），不另写一套算法。开关不是真做时不接管，维持那边自己做。
 # [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.951（核销暂估·物流请款单说清楚谁来做）
@@ -230,8 +232,12 @@ def plan(lid):
     dr, cr = LV.balance(lines)
     if not lines or abs(dr - cr) >= 0.005 or abs(d) >= 0.005:
         return dict(out, kind="diff", why="按发票和原凭证拼出来的分录借贷不平（借 %s／贷 %s），要人工处理" % (inv._money_str(dr), inv._money_str(cr)))
+    bare = [v for v in src if LV.tax_line_bare(v)]
+    note = ("。注意：原凭证 %s 的暂估那一行当时没挂供应商，这次转出按供应商往来那一行的供应商挂；原凭证那一行最好也补上，不然按供应商看这个科目的余额对不平"
+            % "、".join(_ref(v) for v in bare)) if bare else ""
     return dict(out, ok=True, kind="exact", lines=lines,
-                why="发票税额和账上暂估进项税都是 %s，对得上：借待认证进项税额／贷暂估进项税（核销 %s）" % (inv._money_str(it), "、".join(_ref(v) for v in src)))
+                why="发票税额和账上暂估进项税都是 %s，对得上：借待认证进项税额／贷暂估进项税（核销 %s）%s" % (
+                    inv._money_str(it), "、".join(_ref(v) for v in src), note))
 
 
 def _logistics_plan(inst):
