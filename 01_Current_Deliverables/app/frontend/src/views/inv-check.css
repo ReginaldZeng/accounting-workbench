@@ -38,3 +38,9 @@
 .inv-ck-modes button{ border:0; background:var(--bg); color:var(--ink-2); font:inherit; font-size:12.5px; padding:6px 14px; cursor:pointer; }
 .inv-ck-modes button.on{ background:var(--accent); color:#fff; }
 .inv-ck-vno{ white-space:nowrap; font-weight:600; font-variant-numeric:tabular-nums; }
+.inv-ck-phone{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:9px; border:1px dashed var(--line-strong); background:var(--bg-sub); color:var(--ink-2); font-size:12.5px; }
+.inv-ck-phone.on{ border-style:solid; border-color:var(--green-line); background:var(--green-bg); }
+.inv-ck-phone-i{ font-size:18px; }
+.inv-ck-phone-t{ flex:1 1 auto; min-width:0; }
+.inv-ck-phone-t b{ color:var(--ink); }
+.inv-ck-phone-t b.ok{ color:var(--green); }

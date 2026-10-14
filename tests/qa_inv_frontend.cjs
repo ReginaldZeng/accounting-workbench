@@ -1088,6 +1088,42 @@ test('抵扣勾选·方式一：做账月份有默认值＋上月/本月；主�
   await ctx.close()
 })
 
+test('V2.970 对纸质票·用手机扫：弹窗里写清手机连没连上；没连 → 「手机配对」当场出配对码；连上了 → 写「手机已连上」和怎么扫', async (browser, B) => {
+  const st = auditSt(OWN_ME)
+  const items = [{ id: 201, folderId: 0, kind: 'invoice', typeLabel: '专票', number: 'N201', sellerName: '销方甲', total: 100, review: 'approved', voucher: '深圳星期零-10-1#', bookMonth: '2026-10', hit: null }]
+  const ph = { phone: null }
+  let pairs = 0
+  const view = () => ({ ok: true, check: { id: 9, open: true, by: '测试会计', at: '2026-10-31 09:00:00', closedAt: '', entry: 'audit', listId: 5, listName: '深圳星期零 2026-10 认证清单' },
+    folders: [{ id: 0, title: '深圳星期零 2026-10 认证清单', isList: true, total: 1, hit: 0 }], items, strangers: [],
+    stats: { total: 1, hit: 0, left: 1, strangers: 0 }, phone: ph.phone, canPair: true })
+  const base = auditApi(st)
+  const api = (c) => {
+    if (c.path === '/api/inv/ticklists') return { ok: true, rows: [{ id: 5, name: '深圳星期零 2026-10 认证清单', rows: 1, bookMonth: '2026-10', by: '测试会计', at: '2026-10-31 08:50:00', tax: 30 }] }
+    if (c.path === '/api/inv/check/current') return view()
+    if (c.path === '/api/inv/check/9') return view()
+    if (c.path === '/api/inv/pair') { pairs++; return { ok: true, pair: { id: 3, expiresIn: 600 }, url: 'http://x/#/invpair?t=abc', qr: '' } }
+    return base(c)
+  }
+  const { page, ctx } = await open(browser, B, api)
+  await mount(page, 'InvAudit', { user: { name: '测试会计' } })
+  await page.getByRole('button', { name: '对纸质票', exact: true }).click()
+  const dlg = page.locator('.inv-modal').filter({ has: page.locator('.inv-ck') })
+  const strip = dlg.locator('.inv-ck-phone')
+  await strip.getByText('用手机扫').waitFor()
+  assert.match(await strip.innerText(), /连续扫纸质票/)
+  await strip.getByRole('button', { name: '手机配对' }).click()
+  await page.locator('.inv-modal', { hasText: '手机当相机' }).getByText('等待手机用钉钉扫码').waitFor()
+  assert.equal(pairs, 1)
+  ph.phone = { id: 3, bound: true, active: true, dtName: '曾禹锡' }
+  await page.locator('.inv-modal', { hasText: '手机当相机' }).getByText('已连接').waitFor({ timeout: 5000 })
+  await page.locator('.inv-modal', { hasText: '手机当相机' }).getByRole('button', { name: '好了' }).click()
+  await strip.getByText('手机已连上').waitFor()
+  assert.match(await strip.innerText(), /曾禹锡/)
+  ph.phone = { id: 3, bound: true, active: false, dtName: '曾禹锡' }
+  await strip.getByText(/现在没打开/).waitFor({ timeout: 5000 })
+  await ctx.close()
+})
+
 function ledgerApi(st) {
   return (c) => {
     if (c.path === '/api/inv/config') return cfg()

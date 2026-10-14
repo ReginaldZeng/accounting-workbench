@@ -289,6 +289,15 @@ def export(ck, only):
 GATES = (inv.ENTER_DESK, inv.ENTER_AUDIT, inv.ENTER_LEDGER)
 
 
+def _with_phone(u, v):
+    """V2.970：对纸质票弹窗里直接看手机连没连上（用户 2026-10-14 问「这个咋用手机扫」——原来要先去收票工作台配对，弹窗里没说）。
+    phone＝收票工作台那套手机配对的状态（{bound, active, dtName, ...}，没配过是 null）；canPair＝能不能在这里生成配对码（收票工作台＋收票权限）。"""
+    if isinstance(v, dict) and v.get("check"):
+        v["phone"] = inv._pair_state(u["name"])
+        v["canPair"] = inv.can(u, inv.ENTER_DESK, inv.CAP_INTAKE)
+    return v
+
+
 @router.post("/api/inv/check/start")
 async def check_start(request: Request):
     """body：{folderIds:[...], entry: desk|audit}。开一次点验（这个人原来没收的那次顺手收掉）。"""
@@ -312,7 +321,7 @@ async def check_current(request: Request):
 
     def run():
         ck = S.check_current(inv.E(), u["name"])
-        return view(ck) if ck else {"ok": True, "check": None}
+        return _with_phone(u, view(ck)) if ck else {"ok": True, "check": None}
     return await run_in_threadpool(run)
 
 
@@ -324,7 +333,7 @@ async def check_get(cid: int, request: Request):
     ck, bad = _mine(u, cid)
     if bad:
         return bad
-    return await run_in_threadpool(view, ck)
+    return await run_in_threadpool(lambda: _with_phone(u, view(ck)))
 
 
 @router.post("/api/inv/check/{cid}/scan")

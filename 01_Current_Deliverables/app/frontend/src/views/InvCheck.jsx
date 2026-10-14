@@ -9,7 +9,7 @@ import {
   invCheckStart, invCheckStartList, invCheckCurrent, invCheckGet, invCheckScan, invCheckMark, invCheckClose, invCheckExportUrl, invAuditItemsApprove,
   invTickLists,
 } from '../api.js'
-import { money, fmtTime, usePoll, Modal, ScanInput } from './invShared.jsx'
+import { money, fmtTime, usePoll, Modal, ScanInput, PairModal } from './invShared.jsx'
 import './inv-check.css'
 
 const errText = (e) => (e && (e.message || e.msg)) || String(e || '未知原因')
@@ -117,6 +117,25 @@ function CheckStart({ candidates, preset, entry, onClose, onStarted }) {
   )
 }
 
+// ───────────────────────── 手机扫（V2.970） ─────────────────────────
+// 用户 2026-10-14 问「这个咋用手机扫」：手机用的是收票工作台那套配对（手机钉钉扫配对码 → 手机页面上点「连续扫纸质票」），
+// 原来弹窗里一句没提。这里直接写清连没连上，没连就当场给配对码（PairModal，状态跟着点验每 2 秒重读）。
+function PhoneStrip({ phone, canPair }) {
+  const [pairOpen, setPairOpen] = useState(false)
+  const bound = !!(phone && phone.bound)
+  const steps = '手机上点「连续扫纸质票」，一张接一张扫：扫到的这里跟着变绿，手机会念出来（确认／重复／几月的／没有这张）'
+  let body
+  if (bound && phone.active) body = <><b className="ok">手机已连上</b>{phone.dtName ? `（${phone.dtName}）` : ''}：{steps}</>
+  else if (bound) body = <><b>手机配过{phone.dtName ? `（${phone.dtName}）` : ''}，现在没打开</b>：在手机钉钉里重新打开那个页面（不用重新配对），{steps}</>
+  else body = <><b>用手机扫：</b>{canPair ? '点右边「手机配对」，用手机钉钉的「扫一扫」扫配对码；连上后' : '要先有「收票工作台」权限才能配手机（找管理员开），或者用扫码枪；连上后'}{steps}</>
+  return <div className={'inv-ck-phone' + (bound && phone.active ? ' on' : '')}>
+    <span className="inv-ck-phone-i" aria-hidden="true">📱</span>
+    <span className="inv-ck-phone-t">{body}</span>
+    {canPair && <button type="button" className="btn" onClick={() => setPairOpen(true)}>{bound ? '换手机 / 看状态' : '手机配对'}</button>}
+    {pairOpen && <PairModal pairState={phone} onClose={() => setPairOpen(false)} />}
+  </div>
+}
+
 // ───────────────────────── 点验中：连续扫，扫到的那一行变绿 ─────────────────────────
 
 function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
@@ -203,6 +222,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
         {open && <div className="inv-ck-scan">
           <ScanInput keepFocus onScan={onScan} placeholder="用扫码枪连续扫发票左上角的二维码…（手机扫的也会记到这里）" />
         </div>}
+        {open && <PhoneStrip phone={v.phone} canPair={!!v.canPair} />}
         {alertMsg && <div className={'inv-ck-alert ' + alertMsg.tone} role="alert">{alertMsg.text}
           <button type="button" className="inv-x" onClick={() => setAlertMsg(null)} aria-label="收起">×</button></div>}
         {done && <div className={'inv-ck-alert ' + (done.bad.length ? 'warn' : 'ok')}>

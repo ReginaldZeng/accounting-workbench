@@ -2217,6 +2217,10 @@ class InvoiceApiTests(unittest.TestCase):
             self.assertEqual([(f["id"], f["hit"], f["total"]) for f in v["folders"]], [(f1, 2, 2), (f2, 0, 1)])
             self.assertEqual([x["kind"] for x in v["strangers"]], ["other", "none"])
             self.assertEqual(get("/api/inv/check/current", "acct").json()["check"]["id"], cid)
+            # V2.970：弹窗里看手机连没连上（收票工作台那套配对）；没配过是 null，能不能当场配看收票权限
+            self.assertIn("phone", v)
+            self.assertIn("canPair", v)
+            self.assertEqual("phone" in get("/api/inv/check/current", "acct").json(), True)
             # 别人开的点验看不到、扫不进
             self.assertEqual(get("/api/inv/check/%d" % cid, "maker").status_code, 404)
             self.assertEqual(post("/api/inv/check/%d/scan" % cid, "maker", {"code": qr(self.N(5503), 10)}).status_code, 404)
