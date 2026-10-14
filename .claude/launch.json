@@ -131,16 +131,6 @@
         "D:\\0 Claude 数据\\03 财务核算工作台\\.claude\\worktrees\\invoice-manager-export-35530d\\01_Current_Deliverables\\docs\\20261012_钉钉入口二选一\\prototype"
       ],
       "port": 8144
-    },
-    {
-      "name": "wt-inv-by-owner",
-      "runtimeExecutable": "python",
-      "runtimeArgs": [
-        "C:/Users/94899/AppData/Local/Temp/claude/D--0-Claude----03----------claude-worktrees-relaxed-swirles-190e82/aaf57301-dd28-47a3-a738-13c00c76c4de/scratchpad/devserver.py",
-        "D:/0 Claude 数据/03 财务核算工作台/.claude/worktrees/relaxed-swirles-190e82/01_Current_Deliverables/app/backend",
-        "8137"
-      ],
-      "port": 8137
     }
   ]
-}
+}
