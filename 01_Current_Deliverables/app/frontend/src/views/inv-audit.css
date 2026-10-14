@@ -306,3 +306,10 @@
 .inv-au-head{ flex-wrap:nowrap; }
 .inv-au-hleft{ flex:1 1 0; min-width:0; }
 .inv-au-hright{ flex:0 0 auto; }
+
+/* 顶上的筛选条（归谁审 / 来源 / 搜索）：用全站共用的 .fbar，这里只补几处 */
+.inv-au-fbar{ margin-bottom:12px; }
+.inv-au-fbar .inv-au-search input[type=text]{ width:300px; max-width:340px; }
+.inv-au-scope-me{ color:var(--ink); font-size:12.5px; }
+.inv-au-fsum{ font-size:12px; color:var(--ink-2); white-space:nowrap; }
+.inv-au-fwarn{ font:inherit; font-size:12px; padding:3px 10px; border-radius:999px; cursor:pointer; border:1px solid var(--red-line); background:var(--red-bg); color:var(--red); }

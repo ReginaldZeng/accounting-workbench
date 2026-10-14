@@ -645,16 +645,45 @@ def assign_new_folder(fid, inst=None, creator="", pick="", cols=None):
     return ""
 
 
+_ORGS = {"at": 0.0, "rows": []}
+
+
+def _orgs_cached():
+    """基础数据「主体档案」（有简称的那些）。一分钟内不重读：台账一页几十行都要查简称。"""
+    if time.time() - _ORGS["at"] > 60:
+        try:
+            _ORGS["rows"] = [o for o in db.list_orgs() if o.get("short_name")]
+        except Exception:
+            _ORGS["rows"] = []
+        _ORGS["at"] = time.time()
+    return _ORGS["rows"]
+
+
+def voucher_label(v, today=None):
+    """凭证的短写法（用户 2026-10-14 定）：主体简称-月-凭证号#，例「深圳星期零-10-9#」。
+    不是今年的凭证带上年份（深圳星期零-2025-12-9#）；不是「记」字的带上字（收3#）。v＝{book 账簿全称, period 'YYYY-MM', number '记-9'}。"""
+    v = v or {}
+    short = org_short(v.get("book")) or _s(v.get("book"), 60)
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})", _s(v.get("period"), 10))
+    if m:
+        year = (today or datetime.now()).year
+        mon = ("%s-%d" % (m.group(1), int(m.group(2)))) if int(m.group(1)) != year else str(int(m.group(2)))
+    else:
+        mon = _s(v.get("period"), 10)
+    g, _, n = _s(v.get("number"), 30).partition("-")
+    if not n:
+        g, n = "", g
+    no = ("" if g in ("记", "") else g) + n
+    return "-".join(x for x in (short, mon, no) if x) + "#"
+
+
 def org_short(company):
     """公司主体全称 → 基础数据「主体档案」里的简称（孝感星期九、深圳星期零……）；对不上就原样用全称。
     读主数据，不写死哪家叫什么：先按全称/简称/别名对；档案里没填全称的，看简称是不是全称去掉「市/省」后的开头。"""
     name = _s(company, 200)
     if not name:
         return ""
-    try:
-        orgs = [o for o in db.list_orgs() if o.get("short_name")]
-    except Exception:
-        orgs = []
+    orgs = _orgs_cached()
     nn = ip.normalize_name(name)
     for o in orgs:
         if name == o["short_name"] or name in (o.get("aliases") or []) or (o.get("full_name") and ip.normalize_name(o["full_name"]) == nn):
@@ -1128,6 +1157,8 @@ def item_view(it, idx=None, mobile=False):
          "procError": it.get("proc_error") or "", "paper": bool(it.get("paper")),
          "flags": {k: x for k, x in fl.items() if not str(k).startswith("_")},
          "bookkeeping": fl.get("_bookkeeping") or {},
+         # 凭证的短写法（台账「做账 / 凭证」那一栏直接显示）：和 bookkeeping.vouchers 一一对应
+         "voucherLabels": [voucher_label(v) for v in ((fl.get("_bookkeeping") or {}).get("vouchers") or []) if isinstance(v, dict)],
          "warnings": list(fl.get("_warnings") or []), "region": fl.get("_region"),
          "auditOk": fl.get("_audOk"), "doubt": fl.get("_doubt"),
          "deductSuggest": it.get("deduct_suggest") or "", "deductReason": it.get("deduct_reason") or "",
@@ -4427,10 +4458,15 @@ def _owner_filter(u, scope, st):
     return None
 
 
-def _audit_queue_sync(u, tab, q, page, size, scope="all"):
+# 审核页「来源」筛选：页面上的叫法 → 库里的 source（收票台＝扫付款单建的＋新建票夹建的，不分开）
+AUDIT_SOURCES = {"dingtalk": ("dingtalk",), "desk": ("scan", "manual"), "later": ("later",), "logistics": ("logistics",)}
+
+
+def _audit_queue_sync(u, tab, q, page, size, scope="all", source=""):
     e = E()
     st = get_settings()
-    total, rows = S.audit_queue(e, tab=tab, q=q, page=page, size=size, owner=_owner_filter(u, scope, st))
+    total, rows = S.audit_queue(e, tab=tab, q=q, page=page, size=size, owner=_owner_filter(u, scope, st),
+                                sources=AUDIT_SOURCES.get(source))
     by = S.items_of_folders(e, [r["id"] for r in rows])
     lm = S.later_open_for_folders(e, rows)
     memo = {}
@@ -4655,7 +4691,8 @@ async def audit_queue(request: Request):
     qp = request.query_params
     tab = qp.get("tab") if qp.get("tab") in ("pending", "returned", "done") else "pending"
     scope = _s(qp.get("scope"), 60) or "all"     # 老页面不带：照旧看全部（别人名下的每行自己标只读）
-    return await run_in_threadpool(_audit_queue_sync, u, tab, qp.get("q"), qp.get("page") or 1, qp.get("size") or 30, scope)
+    return await run_in_threadpool(_audit_queue_sync, u, tab, qp.get("q"), qp.get("page") or 1, qp.get("size") or 30, scope,
+                                   _s(qp.get("source"), 12))
 
 
 @router.post("/api/inv/audit/approve")

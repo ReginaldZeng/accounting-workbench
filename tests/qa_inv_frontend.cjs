@@ -303,6 +303,7 @@ function auditApi(st) {
     if (c.path === '/api/inv/config') return cfg(st.can || {})
     if (c.path === '/api/inv/audit/queue') {
       st.scopes = (st.scopes || []).concat([(c.query && c.query.scope) || ''])
+      st.sources = (st.sources || []).concat([(c.query && c.query.source) || ''])
       return { ok: true, total: st.queue.length, rows: st.queue.map(r => ({ owner: OWN_ME, ...r })) }
     }
     if (c.path === '/api/inv/audit/backlog') return st.backlog || { ok: true, canAssign: false, people: [{ key: 'a:测试会计', name: '测试会计', mine: true, count: st.queue.length, oldest: '2026-09-20 10:00:00', days: 5, note: '' }], unassigned: { count: 0, oldest: '', days: null }, total: st.queue.length }
@@ -654,8 +655,9 @@ test('审票分工：别人名下的单只能看——写明归谁审，没有�
   assert.equal(await page.locator('.inv-au-owner').getByRole('button').count(), 0, '普通会计对别人名下的单没有转交按钮')
   assert.equal(await page.locator('.inv-au-row-ck input').count(), 0, '别人名下的不能勾批量通过')
   assert.equal(await page.locator('.inv-au-tbl tbody input[type=checkbox]:not([disabled])').count(), 0, '已收发票表上不能勾选审核')
-  assert.equal(await page.getByText('全部（只有管理员看得到）').count(), 0, '普通会计没有「全部」这张卡')
-  await page.locator('.inv-au-kpis .kpi', { hasText: '归我审' }).waitFor()
+  await page.locator('.inv-au-fbar', { hasText: '归我审' }).waitFor()
+  assert.equal(await page.locator('.inv-au-scope').count(), 0, '普通会计没有「归谁审」的下拉（只有归我审）')
+  assert.equal(await page.locator('.inv-au-kpis').count(), 0, '顶上不再是大卡片')
   assert.deepEqual([...new Set(st.scopes)], ['mine'], '不搜的时候只取归我的')
   await page.locator('.inv-au-search input').fill('报销')
   await page.locator('.inv-au-search input').press('Enter')
@@ -700,13 +702,18 @@ test('审票分工：有「审核分派」权限的人——多一张「全部�
     unassigned: { count: 2, oldest: '2026-09-01 10:00:00', days: 24 }, total: 5 }
   const { page, ctx } = await open(browser, B, auditApi(st))
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.locator('.inv-au-kpis .kpi', { hasText: '全部（只有管理员看得到）' }).waitFor()
-  await page.locator('.inv-au-kpis .kpi.prio', { hasText: '没指派上' }).waitFor()
-  assert.equal(await page.locator('.inv-au-who').count(), 0, '看「归我审」时不出按人看的下拉')
-  await page.locator('.inv-au-kpis .kpi', { hasText: '全部（只有管理员看得到）' }).click()
-  await page.locator('.inv-au-who').waitFor()
-  assert.match(await page.locator('.inv-au-who').innerText(), /李四（3 张 · 最久等了 15 天）/)
-  await page.locator('.inv-au-who').selectOption('a:李四')
+  const scopeSel = page.locator('.inv-au-fbar .inv-au-scope')
+  await scopeSel.waitFor()
+  assert.match(await scopeSel.innerText(), /归我审[\s\S]*全部（5）[\s\S]*没指派上（2）[\s\S]*李四（3 张 · 最久等了 15 天）/)
+  await page.locator('.inv-au-fwarn', { hasText: '有 2 张没指派上' }).waitFor()
+  await scopeSel.selectOption('all')
+  await sleep(300)
+  assert.equal(st.scopes[st.scopes.length - 1], 'all')
+  // 来源也能筛
+  await page.locator('.inv-au-fbar select').nth(1).selectOption('dingtalk')
+  await sleep(300)
+  assert.equal(st.sources[st.sources.length - 1], 'dingtalk')
+  await scopeSel.selectOption('a:李四')
   await sleep(300)
   assert.equal(st.scopes[st.scopes.length - 1], 'a:李四', '按人看：队列只取这一位的')
   await page.locator('.inv-au-row').first().click()
@@ -997,6 +1004,24 @@ test('F10/C7 台账详情「留痕」按 log.itemId 列出这张票自己的记�
   await page.locator('.inv-lg-tbl tbody tr').first().click()
   await page.locator('.inv-lg-side').getByText('改票面字段', { exact: false }).waitFor({ timeout: 3000 })
   assert.equal(await page.locator('.inv-lg-side').getByText('提交审核').count(), 0, '票夹级日志不往单张票里塞')
+  await ctx.close()
+})
+
+test('台账「做账 / 凭证」直接写凭证的短写法（主体简称-月-号#）；详情里「金蝶做账凭证」同样写法、压成一行', async (browser, B) => {
+  const bk = { status: 'booked', source: 'kingdee', at: '2026-10-14 10:20:00', vouchers: [{ book: '深圳市星期零食品科技有限公司', period: '2026-10', number: '记-8' }] }
+  const st = { rows: [ledgerRow({ bookkeeping: bk, voucherLabels: ['深圳星期零-10-8#'] }), ledgerRow({ id: 902, number: '26442000000000000902', bookkeeping: { status: 'unbooked', source: 'kingdee', vouchers: [] }, voucherLabels: [] })], logs: [] }
+  const { page, ctx } = await open(browser, B, ledgerApi(st))
+  await mount(page, 'InvLedger', { user: { name: '测试会计' } })
+  const rows = page.locator('.inv-lg-tbl tbody tr')
+  await rows.first().locator('.inv-lg-vno', { hasText: '深圳星期零-10-8#' }).waitFor()
+  assert.equal(await rows.first().getByText('已匹配凭证').count(), 0, '不再写「已匹配凭证」，直接写凭证')
+  assert.equal(await rows.first().locator('.inv-lg-vno').getAttribute('title'), '深圳市星期零食品科技有限公司 · 2026-10 · 记-8', '鼠标停上去看全称')
+  assert.match(await rows.nth(1).innerText(), /暂未匹配/)
+  await rows.first().click()
+  const box = page.locator('.inv-lg-bk')
+  await box.locator('.inv-lg-vno', { hasText: '深圳星期零-10-8#' }).waitFor()
+  assert.equal(await box.getByText('已匹配到凭证').count(), 0)
+  assert.equal(await box.getByRole('button', { name: '刷新' }).count(), 1)
   await ctx.close()
 })
 

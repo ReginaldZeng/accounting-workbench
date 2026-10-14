@@ -219,7 +219,7 @@ function BatchResult({ res, titleOf: liveTitle, onClose, onPick }) {
 
 function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loading, err, page, setPage,
   selId, onPick, checked, setChecked, canAct, onBatch, batchBusy, batchErr, batchRes, setBatchRes,
-  scope, onScope, who, mineOnly }) {
+  mineOnly }) {
   const rows = queue?.rows || []
   const total = queue?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -234,16 +234,6 @@ function QueuePane({ tab, onTab, counts, qInput, setQInput, onSearch, queue, loa
   return (
     <aside className="inv-au-q">
       <QueueTabs tab={tab} counts={counts} onTab={onTab} />
-      <div className="inv-au-search">
-        <input className="inv-in" value={qInput} placeholder="搜单号、标题、申请人、收款方、发票号码"
-          onChange={e => setQInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') onSearch(qInput) ; if (e.key === 'Escape' && qInput) { setQInput(''); onSearch('') } }} />
-      </div>
-      {who && <select className="inv-in inv-au-who" value={who.some(p => p.key === scope) ? scope : 'all'} onChange={e => onScope(e.target.value)}
-        title="只看某一位名下的">
-        <option value="all">归谁审：所有人</option>
-        {who.map(p => <option key={p.key} value={p.key}>{p.name}（{p.count} 张{p.days !== null && p.days !== undefined ? ` · 最久等了 ${p.days} 天` : ''}）{p.note ? ' · ' + p.note : ''}</option>)}
-      </select>}
       {tab === 'pending' && canAct && cleanIds.length > 0 && (
         <div className="inv-au-batch">
           <label className="inv-au-ckall"><input type="checkbox" checked={allOn}
@@ -947,6 +937,7 @@ export default function InvAudit({ user }) {
   const me = cfg?.me || { name: user?.name || user?.username || '', isSuper: user?.role === 'admin' }
   // 看谁名下的：mine 归我审（默认）/ all 全部（只有管理员有这张卡）/ none 没指派上 / 某一位的钥匙
   const [scope, setScope] = useState('mine')
+  const [src, setSrc] = useState('')            // 来源：'' 全部 / dingtalk 钉钉接入 / desk 收票台 / later 后补单 / logistics 物流对账
   const [backlog, setBacklog] = useState(null)
   const [assignFor, setAssignFor] = useState(null)
   const [ownBusy, setOwnBusy] = useState(false)
@@ -992,12 +983,12 @@ export default function InvAudit({ user }) {
   // 各页签数量（不带搜索词；失败不打扰，只是不显示数字）
   const loadCounts = useCallback(() => {
     TABS.forEach(t => {
-      invAuditQueue({ tab: t.key, page: 1, size: 1, scope })
+      invAuditQueue({ tab: t.key, page: 1, size: 1, scope, source: src })
         .then(r => setCounts(c => ({ ...c, [t.key]: r?.total ?? 0 })))
         .catch(() => { /* 数字取不到不影响审核 */ })
     })
     invAuditBacklog().then(r => setBacklog(r || null)).catch(() => { /* 卡片上的数字取不到不影响审核 */ })
-  }, [scope])
+  }, [scope, src])
 
   const loadQueue = useCallback(async (opt = {}) => {
     const t = opt.tab ?? tab, qq = opt.q ?? q, pg = opt.page ?? page
@@ -1006,7 +997,7 @@ export default function InvAudit({ user }) {
     try {
       // 普通会计搜的时候别人名下的也搜得到（只读）；不搜就只看自己名下的
       const sc = opt.scope ?? ((qq && !boss) ? 'all' : scope)
-      const r = await invAuditQueue({ tab: t, q: qq, page: pg, size: PAGE_SIZE, scope: sc })
+      const r = await invAuditQueue({ tab: t, q: qq, page: pg, size: PAGE_SIZE, scope: sc, source: src })
       if (my !== qReq.current) return null
       const data = { total: r?.total ?? 0, rows: Array.isArray(r?.rows) ? r.rows : [] }
       setQueue(data)
@@ -1019,7 +1010,7 @@ export default function InvAudit({ user }) {
       if (my === qReq.current) setQErr(errText(e))
       return null
     } finally { if (my === qReq.current) setQLoading(false) }
-  }, [tab, q, page, scope, boss])
+  }, [tab, q, page, scope, boss, src])
 
   useEffect(() => { loadCounts() }, [loadCounts])
   // 换页签/搜索/翻页 → 重取；没选中票夹时自动打开第一个（深链进来的除外）
@@ -1031,7 +1022,7 @@ export default function InvAudit({ user }) {
       setSelId(cur => (cur !== null && cur !== undefined) ? cur : (d.rows[0]?.id ?? null))
     })
     return () => { live = false }
-  }, [tab, q, page, scope, boss])
+  }, [tab, q, page, scope, boss, src])
 
   // 深链 #/invaudit?folder=ID：只消费一次，然后把地址收回 #/invaudit（刷新不重放）
   useEffect(() => {
@@ -1296,7 +1287,13 @@ export default function InvAudit({ user }) {
     setScope(sc); setPage(1); setSelId(null); setChecked(new Set()); setBatchRes(null); setBatchErr('')
   }
   const mineStat = (backlog?.people || []).filter(p => p.mine).reduce((a, p) => ({ n: a.n + p.count, d: Math.max(a.d, p.days || 0) }), { n: 0, d: 0 })
-  const who = boss && scope !== 'mine' && scope !== 'none' ? (backlog?.people || []) : null
+  const changeSrc = (v) => { if (v === src) return; setSrc(v); setPage(1); setSelId(null); setChecked(new Set()) }
+  // 筛选条右边那句：现在看的这一拨里最久的等了几天
+  const otherPeople = (backlog?.people || []).filter(p => !p.mine)
+  const picked = otherPeople.find(p => p.key === scope)
+  const waitDays = !backlog ? null : scope === 'mine' ? (mineStat.n ? mineStat.d : null)
+    : scope === 'none' ? (backlog.unassigned?.days ?? null) : picked ? (picked.days ?? null)
+      : Math.max(mineStat.n ? mineStat.d : 0, backlog.unassigned?.days || 0, ...otherPeople.map(p => p.days || 0))
 
   const changeTab = (t) => {
     if (t === tab) return
@@ -1335,29 +1332,42 @@ export default function InvAudit({ user }) {
           <button type="button" className="inv-lk inv-au-lkb" onClick={() => setSelId(lastRes.id)}>再看一眼</button>
           <button type="button" className="inv-x" onClick={() => setLastRes(null)} aria-label="收起">×</button>
         </div>}
-        <div className="kpis inv-au-kpis">
-          <button type="button" className={'kpi slice' + (scope === 'mine' ? ' on' : '')} onClick={() => changeScope('mine')}>
-            <span className="kl">归我审</span>
-            <span className="kv">{backlog ? mineStat.n : '—'}<span className="kt"> 张</span></span>
-            <span className="inv-au-ks">{backlog && mineStat.n ? `最久等了 ${mineStat.d} 天` : '没有积压'}</span>
-          </button>
-          {boss && <button type="button" className={'kpi slice' + (scope !== 'mine' && scope !== 'none' ? ' on' : '')} onClick={() => changeScope('all')}>
-            <span className="kl">全部（只有管理员看得到）</span>
-            <span className="kv">{backlog ? backlog.total : '—'}<span className="kt"> 张</span></span>
-            <span className="inv-au-ks">所有人名下待审的</span>
-          </button>}
-          {boss && backlog?.unassigned?.count > 0 && <button type="button" className={'kpi slice prio' + (scope === 'none' ? ' on' : '')} onClick={() => changeScope('none')}>
-            <span className="kl">没指派上（要你派给某位）</span>
-            <span className="kv">{backlog.unassigned.count}<span className="kt"> 张</span></span>
-            <span className="inv-au-ks">{backlog.unassigned.days !== null && backlog.unassigned.days !== undefined ? `最久等了 ${backlog.unassigned.days} 天` : ''}</span>
-          </button>}
+        <div className="fbar inv-au-fbar">
+          <label>归谁审
+            {boss ? <select className="inv-au-scope" value={scope} onChange={e => changeScope(e.target.value)}>
+              <option value="mine">归我审{backlog ? `（${mineStat.n}）` : ''}</option>
+              <option value="all">全部{backlog ? `（${backlog.total}）` : ''}</option>
+              {backlog?.unassigned?.count > 0 && <option value="none">没指派上（{backlog.unassigned.count}）—— 要你派给某位</option>}
+              {otherPeople.map(p => <option key={p.key} value={p.key}>{p.name}（{p.count} 张{p.days !== null && p.days !== undefined ? ` · 最久等了 ${p.days} 天` : ''}）{p.note ? ' · ' + p.note : ''}</option>)}
+            </select>
+              : <b className="inv-au-scope-me">归我审{backlog ? `（${mineStat.n}）` : ''}</b>}
+          </label>
+          <label>来源
+            <select value={src} onChange={e => changeSrc(e.target.value)}>
+              <option value="">全部来源</option>
+              <option value="dingtalk">钉钉接入</option>
+              <option value="desk">收票台</option>
+              <option value="later">后补单</option>
+              <option value="logistics">物流对账</option>
+            </select>
+          </label>
+          <label className="inv-au-search">搜索
+            <input type="text" value={qInput} placeholder="单号、标题、申请人、收款方、发票号码"
+              onChange={e => setQInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') doSearch(qInput); if (e.key === 'Escape' && qInput) { setQInput(''); doSearch('') } }} />
+          </label>
+          {q && <button type="button" className="inv-ck-lk" onClick={() => { setQInput(''); doSearch('') }}>清掉搜索</button>}
+          <span className="inv-au-grow" />
+          {boss && backlog?.unassigned?.count > 0 && scope !== 'none' && <button type="button" className="inv-au-fwarn" onClick={() => changeScope('none')}>
+            有 {backlog.unassigned.count} 张没指派上</button>}
+          <span className="inv-au-fsum">{qLoading && !queue ? '' : `这里共 ${queue?.total ?? 0} 个`}{waitDays !== null && waitDays !== undefined && tab === 'pending' ? ` · 最久等了 ${waitDays} 天` : ''}</span>
         </div>
         <div className="inv-au">
           <QueuePane tab={tab} onTab={changeTab} counts={counts} qInput={qInput} setQInput={setQInput} onSearch={doSearch}
             queue={queue} loading={qLoading} err={qErr} page={page} setPage={setPage}
             selId={selId} onPick={setSelId} checked={checked} setChecked={setChecked} canAct={canAct}
             onBatch={runBatch} batchBusy={batchBusy} batchErr={batchErr} batchRes={batchRes} setBatchRes={setBatchRes}
-            scope={scope} onScope={changeScope} who={who} mineOnly={scope === 'mine' && !q} />
+            mineOnly={scope === 'mine' && !q && !src} />
 
           <main className="inv-au-d">
             {!selId && <div className="inv-au-blank">{qLoading ? '正在取审核队列…' : '在左边点一张单开始审核'}</div>}

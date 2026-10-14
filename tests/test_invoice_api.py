@@ -2238,6 +2238,42 @@ class InvoiceApiTests(unittest.TestCase):
             c.close()
             sys.modules.pop("routers.invoice_check", None)
 
+    def test_56_voucher_short_label(self):
+        """凭证的短写法（用户 2026-10-14 定）：主体简称-月-凭证号#；不是今年的带年份，不是「记」字的带字；简称读基础数据。"""
+        from datetime import datetime as _dt
+        inv = self.inv
+        self.db.seed_orgs()
+        inv._ORGS["at"] = 0
+        lab = lambda book, period, number: inv.voucher_label({"book": book, "period": period, "number": number}, today=_dt(2026, 10, 14))
+        self.assertEqual(lab("深圳市星期零食品科技有限公司", "2026-10", "记-9"), "深圳星期零-10-9#")
+        self.assertEqual(lab("孝感市星期九食品科技有限公司", "2026-09", "记-230"), "孝感星期九-9-230#")
+        self.assertEqual(lab("深圳市星期零食品科技有限公司", "2025-12", "记-3"), "深圳星期零-2025-12-3#")
+        self.assertEqual(lab("深圳市星期零食品科技有限公司", "2026-10", "收-4"), "深圳星期零-10-收4#")
+        self.assertEqual(lab("没在主体档案里的公司", "2026-10", "记-1"), "没在主体档案里的公司-10-1#")
+        fo = self.manual("intern", "凭证短写法", "10")
+        it = self.scan("intern", qr(self.N(5601), 10))["item"]
+        fl = dict(self._item(it["id"])["flags_json"] or {})
+        fl["_bookkeeping"] = {"status": "booked", "source": "kingdee", "vouchers": [{"book": "深圳市星期零食品科技有限公司", "period": "%d-10" % _dt.now().year, "number": "记-8"}]}
+        self.S.item_update(self.db._engine, it["id"], flags_json=fl)
+        v = [i for i in self.items(fo["id"])["items"] if i["id"] == it["id"]][0]
+        self.assertEqual((v["voucherLabels"], len(v["bookkeeping"]["vouchers"])), (["深圳星期零-10-8#"], 1))
+
+    def test_57_audit_queue_source_filter(self):
+        """审核页筛选条的「来源」：钉钉接入 / 收票台（扫付款单建的＋新建票夹建的）/ 后补单 / 物流对账。"""
+        S, e = self.S, self.db._engine
+        ids = {}
+        for src in ("dingtalk", "scan", "manual", "later", "logistics"):
+            fid, _ = self._pending_folder("来源-" + src, 10, 5700 + len(ids))
+            S.folder_update(e, fid, source=src)
+            ids[src] = fid
+        got = lambda source: {r["id"] for r in self.get("/api/inv/audit/queue?tab=pending&size=200&scope=all&source=" + source, "acct").json()["rows"]} & set(ids.values())
+        self.assertEqual(got("dingtalk"), {ids["dingtalk"]})
+        self.assertEqual(got("desk"), {ids["scan"], ids["manual"]})
+        self.assertEqual(got("later"), {ids["later"]})
+        self.assertEqual(got("logistics"), {ids["logistics"]})
+        self.assertEqual(got(""), set(ids.values()))
+        self.assertEqual(got("乱写的"), set(ids.values()))          # 不认识的来源＝不筛
+
     def test_51_old_database_gets_owner_columns(self):
         """老库的票夹表没有「归谁审」那几栏：启动时补上，老数据不动；补过再跑一遍不出错。"""
         from sqlalchemy import create_engine, text, inspect

@@ -1380,8 +1380,8 @@ def _counts(items):
     return c
 
 
-def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None):
-    """审核队列 → (total, rows)。
+def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None, sources=None):
+    """审核队列 → (total, rows)。sources 给了就只看这几种来源的票夹（inv_folder.source）。
     owner 不给＝不分人；{"none": True}＝只看未分派的；{"accounts": [...], "uids": [...]}＝只看归这位的。
     pending＝有待审票（review=pending）或票夹已提交；returned＝票夹被退回；done＝发票/收据全部通过或作废且至少一张通过（附件不看）、没有待审的、不在等整单通过。
     每行＝票夹 dict ＋ counts{pending_items, invoices, dup, unchecked, others}（统计不含作废票）。
@@ -1404,6 +1404,8 @@ def audit_queue(e, tab="pending", q=None, page=1, size=30, owner=None):
         order = [func.coalesce(FOLDER.c.submitted_at, FOLDER.c.updated_at), FOLDER.c.id]
     if owner:
         conds.append(_owner_blank() if owner.get("none") else _owner_is(owner.get("accounts"), owner.get("uids")))
+    if sources:
+        conds.append(FOLDER.c.source.in_(list(sources)))
     q = (q or "").strip()
     if q:
         conds.append(or_(_like(FOLDER.c.business_id, q), _like(FOLDER.c.title, q), _like(FOLDER.c.applicant, q),

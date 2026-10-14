@@ -188,7 +188,9 @@ function LedgerTable({ rows, sum, total, selId, onPick, withVoid }) {
                   {f.applicant ? <span className="inv-lg-sub">{f.applicant}</span> : null}</td>
                 <td className="inv-lg-nowrap">{r.createdBy || '—'}<span className="inv-lg-sub">{r.reviewBy ? '审 ' + r.reviewBy : '未审'}{r.reviewBy && r.folder?.ownerName && r.folder.ownerName !== r.reviewBy ? ' · 归' + r.folder.ownerName : ''}</span></td>
                 <td><span className={'inv-badge ' + (r.paper ? 'ok' : 'warn')}>{r.paper ? '已收到' : '未收到'}</span></td>
-                <td>{bookText(r.bookkeeping)}{(r.bookkeeping?.vouchers || []).map((v, i) => <span key={i} className="inv-lg-sub">{v.book} · {v.period} · {v.number}</span>)}</td>
+                <td>{voucherTexts(r).length
+                  ? voucherTexts(r).map((t, i) => <span key={i} className="inv-lg-vno" title={voucherFull(r.bookkeeping.vouchers[i])}>{t}</span>)
+                  : bookText(r.bookkeeping)}</td>
               </tr>
             )
           })}
@@ -250,6 +252,13 @@ function VoidModal({ item, onClose, onDone }) {
   )
 }
 
+// 凭证的短写法：主体简称-月-凭证号#（后端按基础数据的简称给好了 voucherLabels；老数据没有就现拼，主体用账簿全称）
+const voucherFull = v => (v ? `${v.book} · ${v.period} · ${v.number}` : '')
+const voucherTexts = row => {
+  const vs = (row && row.bookkeeping && row.bookkeeping.vouchers) || []
+  if (Array.isArray(row && row.voucherLabels) && row.voucherLabels.length === vs.length) return row.voucherLabels
+  return vs.map(v => `${v.book}-${Number(String(v.period || '').slice(5)) || v.period}-${String(v.number || '').replace(/^记-?/, '')}#`)
+}
 const bookText = bk => bk?.source === 'kingdee' ? (bk.status === 'booked' ? '已匹配凭证' : '暂未匹配') : ({ booked: '已做账', unbooked: '未做账' }[bk?.status] || '尚未刷新')
 export function Bookkeeping({ row, canEdit, onSaved }) {
   const bk = row.bookkeeping || {}
@@ -260,12 +269,19 @@ export function Bookkeeping({ row, canEdit, onSaved }) {
     try { const r = await invVouchersRefresh(row.id); if (!r.ok) throw new Error(r.msg); onSaved(r); setMsg(r.matched ? `已匹配凭证，更新 ${r.changed} 张票` : '暂未匹配到凭证') }
     catch (e) { setMsg(errText(e)) } finally { setBusy(false) }
   }
-  return <section className="inv-lg-box"><div className="inv-lg-box-h">金蝶做账凭证</div>
-    <p>{bk.source === 'kingdee' ? (bk.status === 'booked' ? '已匹配到凭证' : '暂未匹配到凭证') : '待刷新核实'}</p>
-    {(bk.vouchers || []).map((v, i) => <p key={i}>{v.book} · {v.period} · {v.number}</p>)}
-    {canEdit && <button className="btn" disabled={busy} onClick={refresh}>{busy ? '查询金蝶中…' : '刷新凭证'}</button>}
-    {bk.at && <p className="inv-muted">记录更新：{fmtTime(bk.at)}</p>}
-    <p className="inv-muted">按摘要完整发票号、购方账簿匹配；每20分钟同步，变化才更新。</p><p role="status">{msg}</p>
+  const texts = voucherTexts(row)
+  const state = bk.source === 'kingdee' ? (bk.status === 'booked' ? '' : '暂未匹配到凭证') : '待刷新核实'
+  return <section className="inv-lg-box inv-lg-bk">
+    <div className="inv-lg-bk-h">
+      <span className="inv-lg-box-h">金蝶做账凭证</span>
+      {texts.length
+        ? texts.map((t, i) => <b key={i} className="inv-lg-vno" title={voucherFull(bk.vouchers[i])}>{t}</b>)
+        : <span>{state || '暂未匹配到凭证'}</span>}
+      <span className="inv-lg-bk-grow" />
+      {canEdit && <button type="button" className="inv-lg-bk-btn" disabled={busy} onClick={refresh}>{busy ? '查询金蝶中…' : '刷新'}</button>}
+    </div>
+    <p className="inv-muted inv-lg-bk-note">{bk.at ? fmtTime(bk.at) + ' 更新 · ' : ''}按发票号和购方账簿到金蝶找，每 20 分钟同步一次</p>
+    {msg && <p role="status" className="inv-lg-bk-note">{msg}</p>}
   </section>
 }
 
