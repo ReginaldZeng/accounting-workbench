@@ -75,3 +75,6 @@
 .inv-ph-gap{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:13px; color:var(--ink-2); }
 .inv-ph-gap button{ min-width:52px; height:32px; padding:0 10px; border-radius:16px; border:1px solid var(--line-strong); background:var(--bg); color:var(--ink-2); font-size:13px; font-family:inherit; }
 .inv-ph-gap button.on{ border-color:var(--blue); background:var(--blue); color:#fff; font-weight:600; }
+.inv-ph-gap-in{ display:inline-flex; align-items:center; gap:4px; height:32px; padding:0 8px; border-radius:16px; border:1px solid var(--line-strong); background:var(--bg); }
+.inv-ph-gap-in.on{ border-color:var(--blue); }
+.inv-ph-gap-in input{ width:48px; height:24px; border:0; outline:0; background:transparent; font-size:14px; text-align:center; font-family:inherit; color:var(--ink); }

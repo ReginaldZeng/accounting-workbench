@@ -981,10 +981,20 @@ test('对纸质票（手机）：电脑上在对时出现「连续扫纸质票�
   await page.getByRole('button', { name: '连续扫纸质票' }).waitFor({ timeout: 8000 })      // 第四次点了取消：自己停下来
   assert.deepEqual(await page.evaluate(() => window.__said), ['重复', '不在这里'])
   // V2.973 扫码间隔四档，选了记在这部手机上
-  assert.equal(await page.locator('.inv-ph-gap button').count(), 4)
-  await page.locator('.inv-ph-gap button', { hasText: '2 秒' }).click()
-  assert.equal(await page.evaluate(() => localStorage.getItem('inv-ph-chk-gap')), '2000')
-  assert.match(await page.locator('.inv-ph-gap button.on').innerText(), /2 秒/)
+  assert.equal(await page.locator('.inv-ph-gap button').count(), 6)          // 0.5/1/2/3/5/10 秒
+  await page.locator('.inv-ph-gap button', { hasText: '10 秒' }).click()
+  assert.equal(await page.evaluate(() => localStorage.getItem('inv-ph-chk-gap')), '10000')
+  assert.match(await page.locator('.inv-ph-gap button.on').innerText(), /10 秒/)
+  // 自己填：7 秒；填乱的不认，回到原来的
+  const gin = page.getByLabel('自己填间隔秒数')
+  await gin.fill('7')
+  await gin.press('Enter')
+  assert.equal(await page.evaluate(() => localStorage.getItem('inv-ph-chk-gap')), '7000')
+  assert.equal(await page.locator('.inv-ph-gap button.on').count(), 0)
+  await gin.fill('99')
+  await gin.press('Enter')
+  assert.equal(await page.evaluate(() => localStorage.getItem('inv-ph-chk-gap')), '7000')
+  assert.equal(await gin.inputValue(), '7')
   assert.deepEqual(await page.evaluate(() => window.__rates), [1, 1], '1 倍速')
   assert.deepEqual(calls.filter(c => c.path === '/api/inv/m/check/scan').map(c => c.body.code), ['C-OK', 'C-OK', 'C-OTHER'])
   assert.match(await page.locator('.inv-ph-chk-h').innerText(), /已扫到 1 \/ 5/)

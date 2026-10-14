@@ -22,14 +22,14 @@
 
 ## 手机连续扫的间隔可选
 
-用户 2026-10-14：「扫码间隔是不是可以设置间隔」。手机连续扫纸质票时，原来扫完一张写死停 0.5 秒（对上）/ 1.3 秒（不对）再开钉钉扫码框；现在卡片里「扫完一张停 0.5 秒 / 1 秒 / 2 秒 / 3 秒」四档，记在这部手机上（下次打开还是这档）；不对的至少停 1.3 秒让人看一眼原因。电脑扫码枪是扣一下扳机扫一张，不需要间隔。顺手把手机上的说明改成现在的念法（对上的嘀一声，别的念出来）。
+用户 2026-10-14：「扫码间隔是不是可以设置间隔」。手机连续扫纸质票时，原来扫完一张写死停 0.5 秒（对上）/ 1.3 秒（不对）再开钉钉扫码框；现在卡片里「扫完一张停 0.5 / 1 / 2 / 3 / 5 / 10 秒」六档一点就选，另有「自己填」框填任意秒数（0.5～30 秒，按半秒取整；填乱的不认）——用户追问「可以自定义吗，5s 或者 10s」；选的记在这部手机上（下次打开还是这档）；不对的至少停 1.3 秒让人看一眼原因。电脑扫码枪是扣一下扳机扫一张，不需要间隔。顺手把手机上的说明改成现在的念法（对上的嘀一声，别的念出来）。
 
 ## 涉及文件
 
 - 后端：`routers/invoice_vouchers.py`（`fetch_rows` 加 `since`、`_since`、`BULK_MIN`；后台任务、全量、定时都改调一次）
 - 对纸质票：`routers/invoice_check.py`（`restart`、接口）、`frontend/src/api.js`（`invCheckRestart`）、`frontend/src/views/InvCheck.jsx`（「从头再对」按钮）
 - 手机：`frontend/src/views/InvPhone.jsx`（`CHK_GAPS`、间隔按钮）、`frontend/src/views/inv-phone.css`
-- 测试：`tests/test_invoice_books_api.py`（`test_fetch_rows_bulk_query`；几处假的 fetch_rows 加 since 参数；从头再对：清零、旧的收掉、纸质件不撤、别人不能重开）、`tests/qa_inv_frontend.cjs`（点「从头再对」后扫到 0；手机间隔四档、选了记住）
+- 测试：`tests/test_invoice_books_api.py`（`test_fetch_rows_bulk_query`；几处假的 fetch_rows 加 since 参数；从头再对：清零、旧的收掉、纸质件不撤、别人不能重开）、`tests/qa_inv_frontend.cjs`（点「从头再对」后扫到 0；手机间隔六档＋自己填、选了记住、填乱的不认）
 
 ## 验证
 
