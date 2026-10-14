@@ -948,11 +948,12 @@ test('对纸质票（电脑）：勾票夹开始 → 扫码枪扫到的那一行
   await ctx.close()
 })
 
-test('对纸质票（手机）：电脑上在对时出现「连续扫纸质票」；扫一张念一声（确认／重复／不在这里），点取消就停', async (browser, B) => {
+test('对纸质票（手机）：电脑上在对时出现「连续扫纸质票」；对上的只嘀一声不念，别的按 1 倍速念（重复／不在这里），点取消就停', async (browser, B) => {
   const init = () => {
     window.__said = []; window.__ddScans = 0; window.__ddCfg = null
     window.SpeechSynthesisUtterance = function (t) { this.text = t }
-    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { cancel() {}, speak(u) { window.__said.push(u.text) } } })
+    window.__rates = []
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { cancel() {}, speak(u) { window.__said.push(u.text); window.__rates.push(u.rate) } } })
     const codes = ['C-OK', 'C-OK', 'C-OTHER']
     window.dd = {
       config: c => { window.__ddCfg = c }, ready: cb => setTimeout(cb, 10), error: () => {},
@@ -978,13 +979,14 @@ test('对纸质票（手机）：电脑上在对时出现「连续扫纸质票�
   await page.getByRole('button', { name: '连续扫纸质票' }).click()
   await page.locator('.inv-ph-chk-last.err', { hasText: '不在这里' }).waitFor({ timeout: 8000 })
   await page.getByRole('button', { name: '连续扫纸质票' }).waitFor({ timeout: 8000 })      // 第四次点了取消：自己停下来
-  assert.deepEqual(await page.evaluate(() => window.__said), ['确认', '重复', '不在这里'])
+  assert.deepEqual(await page.evaluate(() => window.__said), ['重复', '不在这里'])
+  assert.deepEqual(await page.evaluate(() => window.__rates), [1, 1], '1 倍速')
   assert.deepEqual(calls.filter(c => c.path === '/api/inv/m/check/scan').map(c => c.body.code), ['C-OK', 'C-OK', 'C-OTHER'])
   assert.match(await page.locator('.inv-ph-chk-h').innerText(), /已扫到 1 \/ 5/)
   await ctx.close()
 })
 
-test('对纸质票·选认证清单：对着一份清单开始，按凭证排；清单里的念「确认」，别的月做账的念「9 月的」并写明是哪张凭证', async (browser, B) => {
+test('对纸质票·选认证清单：对着一份清单开始，按凭证排；清单里的只嘀一声＋正中绿卡「这一批」，别的月做账的念「9 月」＋橙卡，下一张扫到卡片就换', async (browser, B) => {
   const st = auditSt(OWN_ME)
   const items = [
     { id: 201, folderId: 0, kind: 'invoice', typeLabel: '专票', number: 'N201', sellerName: '销方甲', total: 100, review: 'approved', voucher: '深圳星期零-10-1#', bookMonth: '2026-10', hit: null },
@@ -1004,16 +1006,17 @@ test('对纸质票·选认证清单：对着一份清单开始，按凭证排；
     if (c.path === '/api/inv/check/start') { ck.started = c.body; return view() }
     if (c.path === '/api/inv/check/9') return view()
     if (c.path === '/api/inv/check/9/scan') {
-      if (c.body.code === 'N202') { items[1].hit = { at: '2026-10-31 09:01:00', by: '测试会计', via: 'scanner', viaLabel: '扫码枪' }; return { ok: true, result: 'ok', say: '确认', msg: '对上了：N202', item: items[1] } }
+      if (c.body.code === 'N202') { items[1].hit = { at: '2026-10-31 09:01:00', by: '测试会计', via: 'scanner', viaLabel: '扫码枪' }; return { ok: true, result: 'ok', say: '确认', msg: '对上了：N202', item: items[1], show: { tone: 'ok', big: '这一批', small: '销方乙 N202' } } }
       ck.strangers.push({ kind: 'other', number: 'N900', total: 66, bookMonth: '2026-09', voucher: '深圳星期零-9-230#' })
-      return { ok: true, result: 'other', say: '9 月的', msg: '不在这份清单里：N900 这张是 2026-09 做账的（深圳星期零-9-230#）。没有登记，也没有挪' }
+      return { ok: true, result: 'other', say: '9 月', msg: '不在这份清单里：N900 这张是 2026-09 做账的（深圳星期零-9-230#）。没有登记，也没有挪', show: { tone: 'other', big: '9 月', small: '是 2026-09 做账的' } }
     }
     return base(c)
   }
   const init = () => {
     window.__said = []
     window.SpeechSynthesisUtterance = function (t) { this.text = t }
-    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { cancel() {}, speak(u) { window.__said.push(u.text) } } })
+    window.__rates = []
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: { cancel() {}, speak(u) { window.__said.push(u.text); window.__rates.push(u.rate) } } })
   }
   const { page, ctx } = await open(browser, B, api, { init })
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
@@ -1029,10 +1032,19 @@ test('对纸质票·选认证清单：对着一份清单开始，按凭证排；
   const scan = async (code) => { const box = dlg.locator('.inv-ck-scan input'); await box.fill(code); await box.press('Enter') }
   await scan('N202')
   await dlg.locator('#inv-ck-row-202.hit').waitFor()
+  await page.locator('.inv-ck-card.ok', { hasText: '这一批' }).waitFor()
+  const cb = await page.locator('.inv-ck-card').boundingBox()
+  const vp = page.viewportSize()
+  assert.ok(Math.abs(cb.x + cb.width / 2 - vp.width / 2) < 40, '卡片在窗口正中')
   await scan('N900')
+  await page.locator('.inv-ck-card.other', { hasText: '9 月' }).waitFor()
+  assert.equal(await page.locator('.inv-ck-card').count(), 1, '扫到下一张，上一张卡片就换掉')
+  await page.locator('.inv-ck-card').click()
+  assert.equal(await page.locator('.inv-ck-card').count(), 0, '点一下关掉')
   await dlg.locator('.inv-ck-alert.err', { hasText: '2026-09 做账的' }).waitFor()
   await dlg.locator('.inv-ck-str', { hasText: '深圳星期零-9-230#' }).waitFor()
-  assert.deepEqual(await page.evaluate(() => window.__said), ['确认', '9 月的'], '电脑上也念出来')
+  assert.deepEqual(await page.evaluate(() => window.__said), ['9 月'], '对上的只嘀不念，别的念出来')
+  assert.deepEqual(await page.evaluate(() => window.__rates), [1], '1 倍速')
   await ctx.close()
 })
 

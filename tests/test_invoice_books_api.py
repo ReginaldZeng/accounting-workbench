@@ -1816,17 +1816,35 @@ class InvoiceBooksApiTests(unittest.TestCase):
         ck = self.S.check_get(self.e, v["check"]["id"])
         r = ck_.scan(u, ck, qr(num(39001), 106, "31", "20230310"), "scanner")
         self.assertEqual((r["result"], r["say"], r["stats"]), ("ok", "确认", {"total": 2, "hit": 1, "left": 1}))
-        r = ck_.scan(u, ck, qr(num(39003), 106, "31", "20230320"), "phone")   # 3 月做账的：念「3 月的」
-        self.assertEqual((r["result"], r["say"]), ("other", "3 月的"))
+        self.assertEqual((r["show"]["tone"], r["show"]["big"]), ("ok", "这一批"))           # V2.971 电脑上的大卡片
+        r = ck_.scan(u, ck, qr(num(39003), 106, "31", "20230320"), "phone")   # 同主体、3 月做账的：念「3 月」
+        self.assertEqual((r["result"], r["say"], r["show"]["big"]), ("other", "3 月", "3 月"))
         self.assertIn("2023-03 做账的", r["msg"])
         r = ck_.scan(u, ck, qr(num(39004), 106, "31", "20230405"), "phone")   # 还没做账
-        self.assertEqual((r["result"], r["say"]), ("other", "还没做账"))
+        self.assertEqual((r["result"], r["say"]), ("other", "没做账"))
         r = ck_.scan(u, ck, qr(num(39099), 106, "31", "20230405"), "phone")
-        self.assertEqual((r["result"], r["say"]), ("none", "没有这张"))
+        self.assertEqual((r["result"], r["say"], r["show"]["tone"]), ("none", "没有这张", "bad"))
+        # V2.971 先判主体：别的主体的票，就算同一个月做账也念「主体，几月」
+        oth, _ = self.make_item(num(39005), 106, "31", "20230402", dict(face, buyer_name="测试别家主体有限公司", buyer_tax_id="91OTHERSUBJ0X"))
+        book(oth, "2023-04", 9)
+        r = ck_.scan(u, ck, qr(num(39005), 106, "31", "20230402"), "phone")
+        self.assertEqual(r["result"], "other")
+        self.assertTrue(r["say"].endswith("，4 月"), r["say"])
+        self.assertIn("不是这个主体", r["msg"])
+        # 同主体同月、但没进这份清单（之前导出过）→ 说原因
+        sm, _ = self.make_item(num(39006), 106, "31", "20230403", face)
+        book(sm, "2023-04", 11)
+        self.S.item_update(self.e, sm, deduct_status="marked")
+        r = ck_.scan(u, ck, qr(num(39006), 106, "31", "20230403"), "phone")
+        self.assertEqual((r["result"], r["say"]), ("other", "导出过"))
+        self.S.item_update(self.e, sm, deduct_status=None)
+        r = ck_.scan(u, ck, qr(num(39006), 106, "31", "20230403"), "phone")
+        self.assertEqual((r["result"], r["say"]), ("other", "不在清单"))
         out, bad = ck_.mark(u, ck, c, True)                                    # 不在清单里的不能手工勾
         self.assertIsNotNone(bad)
         v2 = ck_.view(self.S.check_get(self.e, ck["id"]))
-        self.assertEqual((v2["stats"]["hit"], v2["stats"]["strangers"], [x.get("bookMonth") for x in v2["strangers"][:2]]), (1, 3, ["2023-03", ""]))
+        self.assertEqual((v2["stats"]["hit"], v2["stats"]["strangers"], [x.get("bookMonth") for x in v2["strangers"][:2]]), (1, 6, ["2023-03", ""]))
+        self.assertEqual((v2["last"]["show"]["big"], v2["last"]["viaLabel"]), ("不在清单", "手机"))   # 电脑上据此弹手机扫的那张
         sys.modules.pop("routers.invoice_check", None)
 
     def test_27_tax_tick_type(self):

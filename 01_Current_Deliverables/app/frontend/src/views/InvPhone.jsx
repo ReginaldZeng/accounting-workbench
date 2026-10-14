@@ -57,13 +57,28 @@ function ddScan() {
   if (!fn) return Promise.reject(new Error('当前环境不能调钉钉扫码'))
   return ddCall(fn, { type: 'qrCode' }, x => (x && (x.text || x.content || x.result)) || '')
 }
+// 对上了只「嘀」一声不念字（V2.971，用户 2026-10-14 定：一批里大多数是对上的，只念例外，扫得快）
+function beepOk() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext
+    if (!AC) return false
+    const ctx = beepOk.ctx || (beepOk.ctx = new AC())
+    if (ctx.state === 'suspended' && ctx.resume) ctx.resume()
+    const o = ctx.createOscillator(), g = ctx.createGain()
+    o.frequency.value = 1040; o.connect(g); g.connect(ctx.destination)
+    g.gain.setValueAtTime(0.15, ctx.currentTime); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14)
+    o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.14)
+    return true
+  } catch { return false }
+}
 // 念出来（对纸质票连续扫时不用看屏幕）：能念就念；念不了（有的钉钉版本不给）退成震动——对上了短震一下，不对的长震两下
+// 语速 1 倍（用户 2026-10-14 定）
 function speak(text, ok) {
   let said = false
   try {
     if (window.speechSynthesis && window.SpeechSynthesisUtterance && text) {
       const u = new window.SpeechSynthesisUtterance(text)
-      u.lang = 'zh-CN'; u.rate = 1.25
+      u.lang = 'zh-CN'; u.rate = 1
       window.speechSynthesis.cancel(); window.speechSynthesis.speak(u)
       said = true
     }
@@ -379,8 +394,10 @@ export default function InvPhone() {
           await sleep(900); continue
         }
         const ok = r.result === 'ok'
-        speak(r.say || (ok ? '确认' : '不对'), ok)
-        setChkLast({ tone: CHK_TONE[r.result] || 'warn', big: r.say || r.msg || '', sub: r.msg || '' })
+        if (ok) { if (!beepOk()) speak('确认', true); else { try { if (navigator.vibrate) navigator.vibrate(60) } catch { /* 不支持震动 */ } } }
+        else speak(r.say || '不对', false)
+        const sh = r.show || {}
+        setChkLast({ tone: CHK_TONE[r.result] || 'warn', big: sh.big || r.say || r.msg || '', sub: sh.small || r.msg || '' })
         if (r.stats) setChk(c => (c ? { ...c, stats: { ...c.stats, ...r.stats } } : c))
         if (r.result === 'closed') break
         await sleep(ok ? 500 : 1300)        // 不对的多停一下，让人看一眼原因

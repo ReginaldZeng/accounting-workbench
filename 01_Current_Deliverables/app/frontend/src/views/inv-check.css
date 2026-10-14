@@ -44,3 +44,32 @@
 .inv-ck-phone-t{ flex:1 1 auto; min-width:0; }
 .inv-ck-phone-t b{ color:var(--ink); }
 .inv-ck-phone-t b.ok{ color:var(--green); }
+
+/* 扫一张弹一张的大卡片（V2.971）：窗口正中，下一张扫到就换；点一下关 */
+.inv-ck-card-wrap{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; z-index:1200; }
+.inv-ck-card{ pointer-events:auto; cursor:pointer; min-width:300px; max-width:min(560px, calc(100vw - 32px)); padding:26px 34px 22px; border-radius:20px;
+  background:var(--bg); border:2px solid var(--line); box-shadow:0 22px 60px rgba(20,24,40,.24); text-align:center; display:flex; flex-direction:column; align-items:center; gap:8px;
+  animation:inv-ck-in .26s cubic-bezier(.2,.9,.3,1.3); }
+.inv-ck-card-ic{ position:relative; width:76px; height:76px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:40px; font-weight:800; color:#fff; }
+.inv-ck-card-big{ font-size:38px; font-weight:800; line-height:1.2; letter-spacing:1px; }
+.inv-ck-card-small{ font-size:14px; color:var(--ink-2); }
+.inv-ck-card-via{ font-size:12px; color:var(--ink-3); }
+.inv-ck-card.ok{ border-color:var(--green-line); }
+.inv-ck-card.ok .inv-ck-card-ic{ background:var(--green); }
+.inv-ck-card.ok .inv-ck-card-ic::after{ content:""; position:absolute; inset:0; border-radius:50%; border:4px solid var(--green); animation:inv-ck-ring .7s ease-out forwards; }
+.inv-ck-card.ok .inv-ck-card-big{ color:var(--green); }
+.inv-ck-card.dup{ border-color:var(--amber-line); animation:inv-ck-in .26s cubic-bezier(.2,.9,.3,1.3), inv-ck-wobble .5s .26s; }
+.inv-ck-card.dup .inv-ck-card-ic{ background:var(--amber); }
+.inv-ck-card.dup .inv-ck-card-big{ color:var(--amber); }
+.inv-ck-card.other{ border-color:#f0a35c; animation:inv-ck-slide .3s cubic-bezier(.2,.9,.3,1.2); }
+.inv-ck-card.other .inv-ck-card-ic{ background:#e8822e; }
+.inv-ck-card.other .inv-ck-card-big{ color:#d26a12; }
+.inv-ck-card.bad{ border-color:var(--red-line); animation:inv-ck-in .2s ease-out, inv-ck-shake .45s .2s; }
+.inv-ck-card.bad .inv-ck-card-ic{ background:var(--red); }
+.inv-ck-card.bad .inv-ck-card-big{ color:var(--red); }
+@keyframes inv-ck-in{ from{ opacity:0; transform:scale(.7); } to{ opacity:1; transform:none; } }
+@keyframes inv-ck-slide{ from{ opacity:0; transform:translateX(60px); } to{ opacity:1; transform:none; } }
+@keyframes inv-ck-ring{ from{ transform:scale(1); opacity:.8; } to{ transform:scale(1.9); opacity:0; } }
+@keyframes inv-ck-wobble{ 0%,100%{ transform:rotate(0); } 25%{ transform:rotate(-3deg); } 75%{ transform:rotate(3deg); } }
+@keyframes inv-ck-shake{ 0%,100%{ transform:translateX(0); } 20%,60%{ transform:translateX(-10px); } 40%,80%{ transform:translateX(10px); } }
+@media (prefers-reduced-motion: reduce){ .inv-ck-card, .inv-ck-card.ok .inv-ck-card-ic::after{ animation:none !important; } }

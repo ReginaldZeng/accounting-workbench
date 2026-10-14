@@ -20,7 +20,9 @@ from routers import invoice as inv
 router = APIRouter()
 BILL_KINDS = ("invoice", "receipt")
 MAX_FOLDERS = 300
-SAY = {"ok": "确认", "dup": "重复", "other": "不在这里", "none": "没有这张", "unknown": "不是发票码"}
+SAY = {"ok": "确认", "dup": "重复", "other": "不在这里", "none": "没有这张", "unknown": "不是发票"}
+# 电脑上扫一张弹一张大卡片（V2.971）：tone 定颜色和动画，big 是大字（就是念的那句或「这一批」），small 是小字说明
+TONE = {"ok": "ok", "dup": "dup", "other": "other", "none": "bad", "unknown": "bad", "closed": "bad"}
 TICKLIST_KIND = "ticklist"
 
 
@@ -49,8 +51,61 @@ def _vno(it):
 
 
 def _month_say(ym):
-    """'2026-09' → 「9 月的」（给人念的：这张票是哪个月做账的）。"""
-    return "%d 月的" % int(ym[5:7]) if re.fullmatch(r"\d{4}-\d{2}", ym or "") else ""
+    """'2026-09' → 「9 月」（给人念的：这张票是哪个月做账的）。"""
+    return "%d 月" % int(ym[5:7]) if re.fullmatch(r"\d{4}-\d{2}", ym or "") else ""
+
+
+def _buyer_tid(it):
+    """票的购方税号；票面没读到、抬头又正是本公司某一家 → 用设置里那家的税号（同出勾选清单的口径）。"""
+    tid = str(it.get("buyer_tax_id") or "").strip().upper()
+    if tid:
+        return tid
+    nn = ip.normalize_name(it.get("buyer_name"))
+    for c in inv.get_settings().get("company") or []:
+        if c.get("name") and ip.normalize_name(c["name"]) == nn:
+            return str(c.get("taxId") or "").strip().upper()
+    return ""
+
+
+def list_verdict(lst, it):
+    """对着认证清单扫到一张「不在这份清单里」的票 → (念的话, 小字说明)。用户 2026-10-14 定的顺序：
+    先判主体（别的主体念「孝感星期九，10 月」）→ 普票 → 别的月（念「9 月」）→ 没审核 / 没做账 → 同主体同月却没进清单的原因。"""
+    from routers import invoice_books as BK
+    sm = lst.get("summary_json") if isinstance(lst.get("summary_json"), dict) else {}
+    want_sub = str(sm.get("subject") or "").strip().upper()
+    want_month = str(sm.get("bookMonth") or "")
+    bm = inv.book_month_of(it)
+    vch = "、".join(inv.voucher_labels_of(it))
+    tid = _buyer_tid(it)
+    if want_sub and tid and tid != want_sub:
+        short = inv.org_short(it.get("buyer_name")) or it.get("buyer_name") or "别的主体"
+        if inv.no_book(it):
+            tail, why = "普票", "普票，不入账"
+        elif bm:
+            tail, why = _month_say(bm), "%s 做账（%s）" % (bm, vch)
+        elif it.get("review") != "approved":
+            tail, why = "没审核", "还没审核通过"
+        else:
+            tail, why = "没做账", "还没做账"
+        return "%s，%s" % (short, tail), "不是这个主体：购方是%s，%s" % (it.get("buyer_name") or short, why)
+    if inv.no_book(it):
+        return "普票", "普票不入账、不认证"
+    if bm and want_month and bm != want_month:
+        return _month_say(bm), "是 %s 做账的（%s）" % (bm, vch)
+    if it.get("review") != "approved":
+        return "没审核", "还没审核通过，没到认证这一步"
+    if not bm:
+        return "没做账", "还没做账（系统在金蝶没找到它的凭证）"
+    ds = it.get("deduct_status") or ""
+    if ds == "checked":
+        return "勾过了", "税局显示已经勾选过"
+    if ds == "marked":
+        return "导出过", "之前导出的清单里已经有它"
+    if ds == "other":
+        return "票总管", "票总管已有，勾选归票总管那边做"
+    if not BK._can_deduct(it):
+        return "不抵扣", "这张判的是不可抵扣"
+    return "不在清单", "同主体同月份，但不在这份清单里（可能是清单导出后才做的账）"
 VIA_CN = {"scanner": "扫码枪", "phone": "手机", "manual": "手工勾"}
 EXPORT_COLUMNS = ["票夹", "收款方", "审批编号", "归谁审", "票种", "发票代码", "发票号码", "开票日期", "销方名称", "价税合计",
                   "这次点验", "扫到的时间", "谁扫的"]
@@ -130,7 +185,7 @@ def view(ck):
     return {"ok": True, "check": {"id": ck["id"], "by": ck.get("created_by") or "", "at": ck.get("created_at") or "",
                                   "closedAt": ck.get("closed_at") or "", "entry": ck.get("entry") or "", "open": not ck.get("closed_at"),
                                   "listId": (lst or {}).get("id"), "listName": (lst or {}).get("name") or ""},
-            "folders": fv, "items": iv, "strangers": strangers[-50:],
+            "folders": fv, "items": iv, "strangers": strangers[-50:], "last": _last(ck, lst, hits, iv),
             "stats": {"total": len(iv), "hit": n, "left": len(iv) - n, "strangers": len(strangers)}}
 
 
@@ -207,18 +262,12 @@ def scan(u, ck, text, via="scanner"):
                "folderId": f.get("id"), "folderTitle": f.get("title") or "", "payee": f.get("payee_name") or "",
                "ownerName": f.get("owner_name") or ""}
         if lst:
-            # 对着认证清单：不在这份清单里的，说清它是哪个月做账的——整理纸质票时好分到那个月那一摞
+            # 对着认证清单：不在这份清单里的，念它该放哪一摞（别的主体 / 别的月 / 原因）
             bm = inv.book_month_of(it)
-            det.update(bookMonth=bm, voucher="、".join(inv.voucher_labels_of(it)), noBook=inv.no_book(it))
+            say, why = list_verdict(lst, it)
+            det.update(bookMonth=bm, voucher="、".join(inv.voucher_labels_of(it)), noBook=inv.no_book(it),
+                       buyerName=it.get("buyer_name") or "", say=say, why=why)
             S.check_hit_add(e, ck["id"], None, name, via, kind="other", detail=det)
-            if det["noBook"]:
-                say, why = "普票", "是普票，不入账、不认证"
-            elif bm:
-                say, why = _month_say(bm), "是 %s 做账的（%s）" % (bm, det["voucher"])
-            elif it.get("review") != "approved":
-                say, why = "还没审核", "还没审核通过，没到认证这一步"
-            else:
-                say, why = "还没做账", "还没做账（系统在金蝶没找到它的凭证）"
             out = {"ok": True, "result": "other", "stranger": dict(det, kind="other"), "say": say,
                    "msg": "不在这份清单里：%s 这张%s。没有登记，也没有挪" % (number, why)}
         else:
@@ -234,6 +283,7 @@ def scan(u, ck, text, via="scanner"):
                "msg": "系统里没有这张票：%s%s。要先收票（放进对应的付款单，或新建票夹）。没有登记" % (
                    number, (" · %s" % inv._money_str(total)) if total is not None else "")}
     out.setdefault("say", SAY[out["result"]])
+    out["show"] = _show(out["result"], out["say"], out.get("item"), out.get("stranger"), number, bool(lst))
     hits = [h for h in S.check_hits(e, ck["id"])]
     if lst:
         live = {i["id"] for i in _list_items(lst)}
@@ -245,6 +295,37 @@ def scan(u, ck, text, via="scanner"):
     n = len({h["item_id"] for h in hits if h.get("kind") == "hit" and h.get("item_id") in live})
     out["stats"] = {"total": tot, "hit": n, "left": tot - n}
     return out
+
+
+def _show(result, say, item=None, stranger=None, number="", is_list=False):
+    """电脑上的大卡片：{tone, big, small}。对上了大字写「这一批」/「对上了」，别的就是念的那句。"""
+    it = item or {}
+    st = stranger or {}
+    num = number or it.get("number") or st.get("number") or ""
+    tail = num[-8:] if num else ""
+    if result == "ok":
+        return {"tone": "ok", "big": "这一批" if is_list else "对上了", "small": "%s %s" % (it.get("sellerName") or "", tail)}
+    if result == "dup":
+        return {"tone": "dup", "big": "重复", "small": "这张刚才扫过了 %s" % tail}
+    if result == "other":
+        return {"tone": "other", "big": say or "不在这里", "small": (st.get("why") or st.get("payee") or st.get("folderTitle") or "") + (" · %s" % tail if tail else "")}
+    if result == "none":
+        return {"tone": "bad", "big": "没有这张", "small": "系统里没有 %s，要先收票" % tail}
+    return {"tone": "bad", "big": say or "不是发票", "small": "扫发票左上角的二维码"}
+
+
+def _last(ck, lst, hits, iv):
+    """最近扫的那一张（电脑上据此弹卡片：手机扫的也弹）→ {id, at, via, show}。"""
+    if not hits:
+        return None
+    h = hits[-1]
+    if h.get("kind") == "hit":
+        it = next((i for i in iv if i["id"] == h.get("item_id")), {})
+        show = _show("ok", "", it, None, "", bool(lst))
+    else:
+        d = h.get("detail") if isinstance(h.get("detail"), dict) else {}
+        show = _show(h.get("kind"), d.get("say") or SAY.get(h.get("kind"), ""), None, d, d.get("number") or "", bool(lst))
+    return {"id": h.get("id"), "at": h.get("ts") or "", "via": h.get("via") or "", "viaLabel": VIA_CN.get(h.get("via") or "", ""), "show": show}
 
 
 def mark(u, ck, item_id, on):

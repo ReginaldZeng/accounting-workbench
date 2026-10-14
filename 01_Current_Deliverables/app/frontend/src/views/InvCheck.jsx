@@ -32,12 +32,13 @@ function beep(ok) {
   } catch { /* 没声音不影响点验 */ }
 }
 
-// 念出来（整理纸质票时不用看屏幕）：确认 / 重复 / 9 月的 / 还没做账 / 没有这张。浏览器不给念就只有提示音
+// 念出来（整理纸质票时不用看屏幕）：对上的只「嘀」不念；别的念该放哪一摞——孝感星期九，10 月 / 9 月 / 普票 / 没做账 / 重复 / 没有这张。
+// 语速 1 倍（用户 2026-10-14 定）。浏览器不给念就只有提示音
 function speak(text) {
   try {
     if (!text || !window.speechSynthesis || !window.SpeechSynthesisUtterance) return
     const u = new window.SpeechSynthesisUtterance(text)
-    u.lang = 'zh-CN'; u.rate = 1.3
+    u.lang = 'zh-CN'; u.rate = 1
     window.speechSynthesis.cancel(); window.speechSynthesis.speak(u)
   } catch { /* 念不了不影响点验 */ }
 }
@@ -136,6 +137,24 @@ function PhoneStrip({ phone, canPair }) {
   </div>
 }
 
+// ───────────────────────── 扫一张弹一张的大卡片（V2.971） ─────────────────────────
+// 用户 2026-10-14：「扫描时候电脑可以有动画吗，扫描到下一张自动关闭」。窗口正中一张大卡片：对上了绿色打勾＋外圈扩散，
+// 重复黄色晃一下，别的主体/别的月橙色滑进来，没有这张红色抖一下；下一张扫到就换成下一张（key 换了就重放动画），点一下也能关。
+// 手机扫的也弹（看点验的 last 变了没有）。
+const CARD_ICON = { ok: '✓', dup: '↻', other: '➜', bad: '✕' }
+function ScanCard({ card, onClose }) {
+  if (!card || !card.show) return null
+  const sh = card.show
+  return <div className="inv-ck-card-wrap" role="status" aria-live="assertive">
+    <div key={card.key} className={'inv-ck-card ' + (sh.tone || 'bad')} onClick={onClose} title="点一下关掉">
+      <div className="inv-ck-card-ic"><span>{CARD_ICON[sh.tone] || '!'}</span></div>
+      <div className="inv-ck-card-big">{sh.big}</div>
+      {sh.small && <div className="inv-ck-card-small">{sh.small}</div>}
+      {card.viaLabel && <div className="inv-ck-card-via">{card.viaLabel}扫的</div>}
+    </div>
+  </div>
+}
+
 // ───────────────────────── 点验中：连续扫，扫到的那一行变绿 ─────────────────────────
 
 function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
@@ -145,20 +164,33 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
   const [onlyMiss, setOnlyMiss] = useState(false)
   const [busy, setBusy] = useState('')
   const [done, setDone] = useState(null)               // 「审核扫到的」的结果
+  const [card, setCard] = useState(null)               // 正中的大卡片（扫到下一张就换）
+  const lastSeen = useRef(first && first.last ? first.last.id : null)
   const cid = v.check.id
   const open = !!v.check.open
-  const reload = useCallback(async () => { const r = await invCheckGet(cid); if (r && r.check) setV(r) }, [cid])
+  const reload = useCallback(async () => {
+    const r = await invCheckGet(cid)
+    if (r && r.check) {
+      setV(r)
+      // 手机扫到新的一张 → 电脑上也弹卡片（电脑自己扫的在 onScan 里已经弹过）
+      const l = r.last
+      if (lastSeen.current === '__pending') { if (l) lastSeen.current = l.id }          // 电脑刚扫的那张，卡片已经弹了
+      else if (l && l.id !== lastSeen.current) { lastSeen.current = l.id; setCard({ key: 'p' + l.id, show: l.show, viaLabel: l.via === 'phone' ? '手机' : '' }) }
+    }
+    return r
+  }, [cid])
   usePoll(reload, open, 2000)        // 手机扫到的那一行跟着变绿
 
   const onScan = async (code) => {
     try {
       const r = (await invCheckScan(cid, code)) || {}
-      speak(r.say)
-      if (r.result === 'ok') { beep(true); setAlertMsg(null); setFlashId(r.item && r.item.id) }
-      else if (r.result === 'dup') { beep(false); setAlertMsg({ tone: 'warn', text: r.msg || '这张扫过了' }); setFlashId(r.item && r.item.id) }
-      else { beep(false); setAlertMsg({ tone: r.result === 'unknown' || r.result === 'closed' ? 'warn' : 'err', text: r.msg || '没对上' }) }
-      await reload()
-    } catch (e) { beep(false); setAlertMsg({ tone: 'err', text: '没扫成：' + errText(e) }) }
+      if (r.result === 'ok') { beep(true); setAlertMsg(null); setFlashId(r.item && r.item.id) }     // 对上了只嘀一声，不念
+      else if (r.result === 'dup') { beep(false); speak(r.say); setAlertMsg({ tone: 'warn', text: r.msg || '这张扫过了' }); setFlashId(r.item && r.item.id) }
+      else { beep(false); speak(r.say); setAlertMsg({ tone: r.result === 'unknown' || r.result === 'closed' ? 'warn' : 'err', text: r.msg || '没对上' }) }
+      if (r.show) { lastSeen.current = '__pending'; setCard({ key: 's' + Date.now(), show: r.show }) }
+      const r2 = await invCheckGet(cid)
+      if (r2 && r2.check) { setV(r2); lastSeen.current = r2.last ? r2.last.id : null }
+    } catch (e) { beep(false); setAlertMsg({ tone: 'err', text: '没扫成：' + errText(e) }); setCard({ key: 'e' + Date.now(), show: { tone: 'bad', big: '没扫成', small: errText(e) } }) }
   }
   useEffect(() => {
     if (!flashId) return undefined
@@ -223,6 +255,7 @@ function CheckPanel({ first, entry, canAudit, onClose, onChanged }) {
           <ScanInput keepFocus onScan={onScan} placeholder="用扫码枪连续扫发票左上角的二维码…（手机扫的也会记到这里）" />
         </div>}
         {open && <PhoneStrip phone={v.phone} canPair={!!v.canPair} />}
+        {open && <ScanCard card={card} onClose={() => setCard(null)} />}
         {alertMsg && <div className={'inv-ck-alert ' + alertMsg.tone} role="alert">{alertMsg.text}
           <button type="button" className="inv-x" onClick={() => setAlertMsg(null)} aria-label="收起">×</button></div>}
         {done && <div className={'inv-ck-alert ' + (done.bad.length ? 'warn' : 'ok')}>
