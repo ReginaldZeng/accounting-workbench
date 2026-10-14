@@ -5499,6 +5499,31 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
             ranges.append((doc_start, rownum - 1))
             recs.append({"s": doc_start, "e": rownum - 1, "x0": x0, "xs": xs, "n": n, "d0": d0,
                          "uni": same_unit and len({(y.get("chk") or {}).get("kind") for y in xs}) == 1 and len({y.get("state") for y in xs}) == 1})
+        # V2.981(用户：导出的复核明细里深圳星期零加起来 75,265，复核表和请款单是 75,093.68)：账单上没有单号的行
+        #   (极鲜达山姆页的托盘丢失扣款 −171.76、恒茂按天收的冷藏车…)不进逐单核对，复核明细原来不列，按主体一加就和账单对不上。
+        #   现在排在最后、一行一条：单据号写「（账单上没有单号）」，费用分项、账单计入金额照账单，备注写原账单上的说明和在哪一页；不核量价。
+        _used = {y.get("lid") for xs_ in _byd.values() for y in xs_}
+        with db._engine.connect() as c:
+            _nod = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail") &
+                ((BL.c.doc_no == "") | BL.c.doc_no.is_(None) | (BL.c.doc_no == "无单据"))).order_by(BL.c.id)).mappings().all()]
+        _nfill = PatternFill("solid", fgColor="F3F3F3")
+        for b in _nod:
+            if b["id"] in _used or not round(float(b.get("amount") or 0), 2):      # 金额是 0 的(迅鸽钱记在费用项汇总行上)不列，免得一片空行
+                continue
+            try:
+                _sf = json.loads(b.get("sub_fees") or "{}") or {}
+            except Exception:
+                _sf = {}
+            _v = {"subject": _eff_subject(b), "carrier": carrier, "fee_item": _eff_fee(b), "bizline": b.get("bizline"),
+                  "doc_no": "（账单上没有单号）", "_cs": b.get("carrier_sub"), "_amt": round(float(b["amount"]), 2), "_cw": b.get("charge_wt"),
+                  "note": "　".join(x for x in [str(b.get("note") or ""), "原账单「%s」页" % b["src_sheet"] if b.get("src_sheet") else "", "不逐单核量价"] if x)}
+            for fk, fv in _sf.items():
+                _v["_fee:" + fk] = fv
+            for k, ci in col_of_key.items():
+                cell = ws2.cell(row=rownum, column=ci, value=_v.get(k))
+                cell.fill = _nfill
+            rownum += 1
         # —— 核对用公式算(V2.898)：只给「一张单一行账单、状态是一致/数量不符」的写；每条公式写之前先按同一个算法算一遍，和系统的数对得上才写 ——
         CL = {k: get_column_letter(ci) for k, ci in col_of_key.items()}
         n_formula = 0
