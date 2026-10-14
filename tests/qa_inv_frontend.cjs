@@ -217,7 +217,7 @@ test('F5 已连着手机时打开「手机当相机」只看状态、不生成�
 function deskApi(state) {
   return (c) => {
     if (c.path === '/api/inv/config') return cfg(state.can || {})
-    if (c.path === '/api/inv/desk') return { ok: true, folder: state.folder || null, items: state.items || [], recent: state.recent || [], pair: state.pair || null }
+    if (c.path === '/api/inv/desk') return { ok: true, folder: state.folder || null, items: state.items || [], recent: state.recent || [], mine: state.mine, recentDone: state.recentDone, pair: state.pair || null }
     if (c.path === '/api/inv/desk/open') { state.folder = state.openFolder; state.items = state.openItems || []; return { ok: true, folder: state.folder, items: state.items } }
     if (c.path === '/api/inv/desk/close') { state.folder = null; state.items = []; return { ok: true } }
     if (c.path.endsWith('/submit')) return state.submit
@@ -266,13 +266,14 @@ test('F8 提交被拦：按 itemIds 给「去看这张」并能打开那张票',
   await ctx.close()
 })
 
-test('F14/C6 只有查看权限：能打开「我的票夹」里的单子看（只读，标「只能看」），也能收起', async (browser, B) => {
+test('F14/C6 只有查看权限：能打开「最近看过的」里的单子看（只读，标「只能看」），也能收起', async (browser, B) => {
   const state = {
     can: { intake: false }, pair: null, recent: [{ id: 40, title: '查看用票夹', status: 'submitted', amount: 50 }],
     openFolder: { id: 40, status: 'submitted', title: '查看用票夹', amount: 50, stats: {} }, openItems: [inv({ id: 401 })],
   }
   const { page, ctx, calls } = await open(browser, B, deskApi(state))
   await mount(page, 'InvDesk', { user: { name: '只读' } })
+  await page.getByRole('button', { name: /最近看过的/ }).click()        // V2.981：已交的票夹收在「最近看过的」里
   await page.getByRole('button', { name: /查看用票夹/ }).click()
   await page.locator('.inv-dk-fhead').waitFor()
   assert.equal(n(calls, c => c.path === '/api/inv/desk/open' && c.body && c.body.folderId === 40), 1)
@@ -280,8 +281,27 @@ test('F14/C6 只有查看权限：能打开「我的票夹」里的单子看（�
   assert.equal(await page.getByRole('button', { name: '选文件' }).count(), 0, '只读不能往里放票')
   assert.equal(await page.getByRole('button', { name: '提交', exact: true }).count(), 0, '只读不能提交')
   await page.getByRole('button', { name: '收起', exact: true }).click()
-  await page.getByText('在左边「我的票夹」里点一个票夹查看').waitFor({ timeout: 3000 })
+  await page.getByText('在左边点一个票夹查看（已经交了的在「最近看过的」里）').waitFor({ timeout: 3000 })
   assert.equal(n(calls, c => c.path === '/api/inv/desk/close'), 1)
+  await ctx.close()
+})
+
+test('V2.981 收票台左栏：上面「我还没交的」只列收票中 / 被退回的（带张数），已交的收在「最近看过的」里、点开才列', async (browser, B) => {
+  const state = {
+    pair: null, recent: [],
+    mine: [{ id: 51, title: '还在收票的单', status: 'collecting', amount: 10 }, { id: 52, title: '被退回的单', status: 'returned', amount: 20 }],
+    recentDone: [{ id: 53, title: '审完的单', status: 'approved', amount: 30 }],
+  }
+  const { page, ctx } = await open(browser, B, deskApi(state))
+  await mount(page, 'InvDesk', { user: { name: '测试会计' } })
+  const card = page.locator('.inv-dk-card', { hasText: '我还没交的' })
+  await card.waitFor()
+  assert.match(await card.locator('.inv-dk-card-h').innerText(), /我还没交的\s*2/)
+  assert.equal(await card.getByRole('button', { name: /还在收票的单/ }).count(), 1)
+  assert.equal(await card.getByRole('button', { name: /被退回的单/ }).count(), 1)
+  assert.equal(await card.getByRole('button', { name: /审完的单/ }).count(), 0, '已交的默认收起')
+  await card.getByRole('button', { name: /最近看过的 1 张/ }).click()
+  assert.equal(await card.getByRole('button', { name: /审完的单/ }).count(), 1)
   await ctx.close()
 })
 

@@ -655,12 +655,19 @@ def audit_pending_owners(e):
     return [dict(r) for r in rows]
 
 
-def folders_recent(e, user, limit=10):
-    """我建的或我最近打开的票夹；还在收票/被退回的排前面，其次按最近打开/创建时间。"""
+def folders_recent(e, user, limit=10, which=""):
+    """我建的或我最近打开的票夹；还在收票/被退回的排前面，其次按最近打开/创建时间。
+    which='open' 只要还在收票/被退回的（「我还没交的」）；'done' 只要已经交了的（「最近看过的」）；空＝都要（老用法）。"""
     if not user:
         return []
-    order_open = case((FOLDER.c.status.in_(("collecting", "returned")), 0), else_=1)
-    stmt = (select(FOLDER).where(or_(FOLDER.c.created_by == user, FOLDER.c.opened_by == user))
+    is_open = FOLDER.c.status.in_(("collecting", "returned"))
+    order_open = case((is_open, 0), else_=1)
+    cond = [or_(FOLDER.c.created_by == user, FOLDER.c.opened_by == user)]
+    if which == "open":
+        cond.append(is_open)
+    elif which == "done":
+        cond.append(not_(is_open))
+    stmt = (select(FOLDER).where(*cond)
             .order_by(order_open, func.coalesce(FOLDER.c.opened_at, FOLDER.c.created_at).desc(), FOLDER.c.id.desc())
             .limit(max(1, int(limit or 10))))
     return _all(e, stmt)

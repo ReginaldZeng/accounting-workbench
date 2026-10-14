@@ -1270,6 +1270,14 @@ class InvoiceApiTests(unittest.TestCase):
         finally:
             inv.save_settings({"corpId": keep}, "test")
 
+    def test_39c_desk_mine_and_done(self):
+        """V2.981 收票台左栏：mine＝我名下还在收票 / 被退回的；recentDone＝已经交了的（不混在一起）。"""
+        fo = self.manual("intern", "V2981-还在收票")
+        d = self.get("/api/inv/desk", "intern").json()
+        self.assertIn(fo["id"], [f["id"] for f in d["mine"]])
+        self.assertTrue(all(f["status"] in ("collecting", "returned") for f in d["mine"]))
+        self.assertTrue(all(f["status"] not in ("collecting", "returned") for f in d["recentDone"]))
+
     def test_39b_reprocess_archive_attachment(self):
         """V2.972：以前拆不开、记成「非发票附件」的压缩包，点「重新识别」＝拆开、里面的文件逐个进票夹；再点不重复登记。"""
         import io

@@ -3062,11 +3062,14 @@ def _desk_state(user):
     folder = S.folder_get(e, fid) if fid else None
     items = S.folder_items(e, folder["id"]) if folder else []
     recent = S.folders_recent(e, user, limit=10)
+    mine = S.folders_recent(e, user, limit=100, which="open")        # 左栏「我还没交的」（V2.981）
+    done = S.folders_recent(e, user, limit=10, which="done")         # 左栏「最近看过的」
     fv = folder_view(folder, items, settings=st) if folder else None
     if fv is not None:
         fv["gap"] = folder_gap(folder, items, folder_laters(e, folder))     # 底部金额核对（付款−专票−普票−后补）
     return {"ok": True, "folder": fv, "items": item_views(items),
-            "recent": folder_views(recent, settings=st), "pair": _pair_state(user)}
+            "recent": folder_views(recent, settings=st), "mine": folder_views(mine, settings=st),
+            "recentDone": folder_views(done, settings=st), "pair": _pair_state(user)}
 
 
 @router.get("/api/inv/desk")

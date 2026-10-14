@@ -126,32 +126,46 @@ function ScanStrip({ onScan, disabled, busy, res, pair }) {
   )
 }
 
-// ───────────────────────── 左栏：我的票夹 ─────────────────────────
+// ───────────────────────── 左栏：我还没交的 / 最近看过的（V2.981） ─────────────────────────
+// 原来一块「我的票夹」＝最近经手的 10 张，审核通过的也混在里面，看着像「没提交的」。拆开：上面只列我名下还在收票 / 被退回的（要我接着处理），
+// 下面「最近看过的」是已经交了 / 审完的，默认收起。
 
-function RecentFolders({ rows, currentId, onOpen, busyId, err }) {
+function FolderRows({ rows, currentId, onOpen, busyId }) {
+  return <div className="inv-dk-recent">
+    {rows.map(f => {
+      const st = FOLDER_ST[f.status] || ['mute', f.status || '—']
+      return (
+        <button type="button" key={f.id} className={'inv-dk-rec' + (f.id === currentId ? ' on' : '')}
+          disabled={busyId === f.id} onClick={() => onOpen(f.id)}>
+          <span className="inv-dk-rec-t">{f.title || f.businessId || ('票夹 #' + f.id)}</span>
+          <span className="inv-dk-rec-m">
+            <span className={'inv-badge ' + st[0]}>{st[1]}</span>
+            <span>{f.applicant || '—'}</span>
+            <span className="inv-num">{money(f.amount)}</span>
+            {f.stats && <span>{f.stats.invoices || 0} 张票</span>}
+          </span>
+        </button>
+      )
+    })}
+  </div>
+}
+
+function RecentFolders({ mine, done, currentId, onOpen, busyId, err }) {
+  const [showDone, setShowDone] = useState(false)
+  const open = mine || []
+  const seen = done || []
   return (
     <div className="inv-dk-card">
-      <div className="inv-dk-card-h">我的票夹<span className="inv-muted">最近经手的单</span></div>
+      <div className="inv-dk-card-h">我还没交的<b className="inv-dk-cnt">{open.length}</b><span className="inv-muted">还在收票 / 被退回，要接着处理</span></div>
       {err && <div className="inv-dk-err">{err}</div>}
-      {!rows || !rows.length
-        ? <div className="inv-dk-empty-s">还没有经手过的票夹</div>
-        : <div className="inv-dk-recent">
-          {rows.map(f => {
-            const st = FOLDER_ST[f.status] || ['mute', f.status || '—']
-            return (
-              <button type="button" key={f.id} className={'inv-dk-rec' + (f.id === currentId ? ' on' : '')}
-                disabled={busyId === f.id} onClick={() => onOpen(f.id)}>
-                <span className="inv-dk-rec-t">{f.title || f.businessId || ('票夹 #' + f.id)}</span>
-                <span className="inv-dk-rec-m">
-                  <span className={'inv-badge ' + st[0]}>{st[1]}</span>
-                  <span>{f.applicant || '—'}</span>
-                  <span className="inv-num">{money(f.amount)}</span>
-                  {f.stats && <span>{f.stats.invoices || 0} 张票</span>}
-                </span>
-              </button>
-            )
-          })}
-        </div>}
+      {open.length
+        ? <FolderRows rows={open} currentId={currentId} onOpen={onOpen} busyId={busyId} />
+        : <div className="inv-dk-empty-s">没有要接着处理的票夹</div>}
+      {seen.length > 0 && <>
+        <button type="button" className="inv-dk-more" onClick={() => setShowDone(x => !x)} aria-expanded={showDone}>
+          {showDone ? '▾' : '▸'} 最近看过的 {seen.length} 张<span className="inv-muted">已提交 / 已审完</span></button>
+        {showDone && <FolderRows rows={seen} currentId={currentId} onOpen={onOpen} busyId={busyId} />}
+      </>}
     </div>
   )
 }
@@ -764,7 +778,7 @@ function EmptyFolder({ canEdit, onManual, lastSubmitted, onReopen }) {
         <div className="inv-muted">用扫码枪扫钉钉审批单上的二维码（或手机「扫审批单」）；系统会自动把附件里的电子票拉进来。</div>
         <button type="button" className="btn" onClick={onManual}>没有付款单？新建票夹</button>
       </> : <>
-        <div className="inv-dk-emptyfolder-big">在左边「我的票夹」里点一个票夹查看</div>
+        <div className="inv-dk-emptyfolder-big">在左边点一个票夹查看（已经交了的在「最近看过的」里）</div>
         <div className="inv-muted">你现在只有查看权限：能看票夹里的票和核对情况，不能收票、改字段或提交。</div>
       </>}
     </div>
@@ -965,7 +979,7 @@ export default function InvDesk({ user }) {
       {header}
       <div className="body">
         {cfgErr && <div className="banner err">权限和设置没读到：{cfgErr}<button type="button" className="btn" onClick={loadCfg}>重试</button></div>}
-        {cfg && !can.intake && <div className="banner info">你现在只能看，不能收票：在左边「我的票夹」里点开票夹可以查看。拍照、登记、提交需要管理员给你开「收票」权限。</div>}
+        {cfg && !can.intake && <div className="banner info">你现在只能看，不能收票：在左边的票夹列表里点开可以查看。拍照、登记、提交需要管理员给你开「收票」权限。</div>}
         {cfg && cfg.dingtalk === false && <div className="banner info">系统还没接通钉钉：扫审批单开不了票夹，可以先用「新建票夹」收票。</div>}
         <ScanStrip onScan={onScan} disabled={!can.intake} busy={scanBusy} res={scanRes} pair={pair} />
         {deskErr && <div className="banner err">票夹没刷新出来：{deskErr}<button type="button" className="btn" onClick={loadDesk}>重试</button></div>}
@@ -973,7 +987,9 @@ export default function InvDesk({ user }) {
           <div className="inv-dk-left">
             {can.intake && <CameraPanel auto={auto} onAutoChange={onAuto} disabled={!canEdit} height={270}
               onCapture={blob => upload([blob], 'camera')} />}
-            <RecentFolders rows={desk && desk.recent} currentId={fid} onOpen={openFolder} busyId={openBusy} err={openErr} />
+            <RecentFolders mine={desk && (desk.mine || (desk.recent || []).filter(f => f.status === 'collecting' || f.status === 'returned'))}
+              done={desk && (desk.recentDone || (desk.recent || []).filter(f => f.status !== 'collecting' && f.status !== 'returned'))}
+              currentId={fid} onOpen={openFolder} busyId={openBusy} err={openErr} />
             <AutoFolders currentId={fid} onOpen={openFolder} busyId={openBusy} />
           </div>
           <div className="inv-dk-right">
