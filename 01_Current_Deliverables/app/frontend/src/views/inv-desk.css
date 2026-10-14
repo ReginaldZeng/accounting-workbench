@@ -207,3 +207,16 @@
 /* 新建票夹弹窗：必填星号、系统起的名字 */
 .inv-dk-req{ color:var(--red); font-weight:600; }
 .inv-dk-name{ border:1px dashed var(--line-strong); border-radius:9px; padding:9px 11px; background:var(--bg-rail); font-size:12.5px; line-height:1.7; }
+
+/* 没有付款单的票夹：这一批分到了哪几个票夹（BatchLine）、主体待定的票由人定是哪家（HoldPick） */
+.inv-dk-batch{ margin-top:8px; padding:8px 12px; border:1px solid var(--line); border-radius:9px; background:var(--bg-rail); font-size:12.5px; line-height:1.7; }
+.inv-dk-batch.hold{ border-color:var(--blue-line); background:var(--blue-bg); }
+.inv-dk-batch-sibs{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:4px; }
+.inv-dk-batch-sib{ display:inline-flex; align-items:center; gap:6px; font:inherit; font-size:12px; padding:3px 10px; border-radius:999px; cursor:pointer;
+  border:1px solid var(--line-strong); background:var(--bg); color:var(--ink); max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.inv-dk-batch-sib:hover{ border-color:var(--accent); }
+.inv-dk-batch-sib b{ color:var(--ink-2); font-weight:600; }
+.inv-dk-hold{ margin:10px 0 0; padding:10px 12px; border:1px solid var(--amber-line); border-radius:9px; background:var(--amber-bg); font-size:12.5px; }
+.inv-dk-hold-h{ display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; margin-bottom:6px; }
+.inv-dk-hold-row{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:6px 0; border-top:1px solid var(--amber-line); }
+.inv-dk-hold-seller{ max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-2); }

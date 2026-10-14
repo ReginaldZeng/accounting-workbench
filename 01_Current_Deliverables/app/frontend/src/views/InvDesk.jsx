@@ -10,7 +10,7 @@
 //   手机连着但闲着、或配对码已生成还没扫上 → 10 秒；其余时候不轮询，每次操作后刷新一次。
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
-  invConfig, invDesk, invDeskAuto, invScan, invOpenFolder, invCloseFolder, invUpload, invManualFolder, invRefreshFolder, invAuditPeople,
+  invConfig, invDesk, invDeskAuto, invScan, invOpenFolder, invCloseFolder, invUpload, invManualFolder, invRefreshFolder, invAuditPeople, invItemCompany,
   invSubmitFolder, invItemUpdate, invItemRemove, invItemSplit, invItemRotate, invItemReprocess,
 } from '../api.js'
 import {
@@ -242,7 +242,59 @@ function LaterLine({ folder }) {
   return null
 }
 
-function FolderHead({ folder, canEdit, viewOnly, onRefresh, refreshing, refreshErr, onClose, closing }) {
+// 没有付款单的票夹：同一批（同一位审核会计、同一个开票月份）分到了哪几个票夹、各有几张，点一下就打开那一个
+function BatchLine({ folder, onOpen }) {
+  const b = folder.batch
+  if (!b) return null
+  const ym = b.month ? b.month.slice(0, 4) + ' 年 ' + Number(b.month.slice(4)) + ' 月' : ''
+  const sibs = Array.isArray(b.siblings) ? b.siblings : []
+  return (
+    <div className={'inv-dk-batch' + (b.hold ? ' hold' : '')}>
+      {b.hold
+        ? <div><b>这里是「主体待定」的收票口。</b>放进来的票，系统按抬头自动分到各主体自己的票夹；留在这里的是抬头读不出来的，在下面点一下是哪家。这里不用提交——分走以后到各主体的票夹里提交。</div>
+        : <div>开票月份 <b>{ym}</b> · {b.way === 'single' ? '单张' : '批量'}。这个票夹只装「{folder.company || '这一家'}」的票；放进别家的票，系统会自动挪到别家的票夹。</div>}
+      {sibs.length > 0 && <div className="inv-dk-batch-sibs">
+        <span className="inv-muted">这一批的其它票夹：</span>
+        {sibs.map(x => <button type="button" key={x.id} className="inv-dk-batch-sib" onClick={() => onOpen && onOpen(x.id)} title={x.title}>
+          {x.hold ? '主体待定（收票口）' : (x.company || x.title)}<b className="inv-num">{x.invoices} 张</b></button>)}
+      </div>}
+    </div>
+  )
+}
+
+// 「主体待定」的收票口里：抬头读不出来的发票，人点一下是哪家 → 挪到那家自己的票夹
+function HoldPick({ folder, items, companies, canEdit, onDone }) {
+  const [busy, setBusy] = useState(null)
+  const [err, setErr] = useState('')
+  if (!(folder.batch && folder.batch.hold)) return null
+  const list = items.filter(i => i.kind === 'invoice' && i.review !== 'void')
+  if (!list.length) return null
+  const names = (companies || []).map(c => (typeof c === 'string' ? c : c && c.name)).filter(Boolean)
+  const pick = async (it, co) => {
+    setBusy(it.id); setErr('')
+    try { const r = await invItemCompany(it.id, co); await onDone((r && r.msg) || '已放到这家的票夹') }
+    catch (e) { setErr((it.number || '这张票') + '：' + (e.message || e)) } finally { setBusy(null) }
+  }
+  return (
+    <div className="inv-dk-hold">
+      <div className="inv-dk-hold-h"><b>还有 {list.length} 张没分出是哪家的票</b><span className="inv-muted">抬头读不出来（扫码枪扫的二维码里没有抬头，或没识别出来）。点一下是哪家：</span></div>
+      {list.map(it => (
+        <div key={it.id} className="inv-dk-hold-row">
+          <span className="inv-num">{it.number || '（没有号码）'}</span>
+          <span className="inv-dk-hold-seller" title={it.sellerName || ''}>{it.sellerName || ''}</span>
+          <b className="inv-num">{money(it.total)}</b>
+          <span className="inv-dk-grow" />
+          {isBusyItem(it) ? <span className="inv-muted">识别中，识别完会自动分</span>
+            : canEdit ? names.map(co => <button type="button" key={co} className="btn" disabled={busy === it.id} onClick={() => pick(it, co)}>{co}</button>)
+            : <span className="inv-muted">要有收票权限的人来定</span>}
+        </div>
+      ))}
+      {err && <div className="inv-dk-err-in">{err}</div>}
+    </div>
+  )
+}
+
+function FolderHead({ folder, canEdit, viewOnly, onRefresh, refreshing, refreshErr, onClose, closing, onOpenFolder }) {
   const st = FOLDER_ST[folder.status] || ['mute', folder.status || '—']
   const payee = folder.payee || {}
   const appr = [APPROVAL_ST[folder.approvalStatus] || folder.approvalStatus, APPROVAL_RES[folder.approvalResult] || folder.approvalResult].filter(Boolean).join(' · ')
@@ -264,13 +316,14 @@ function FolderHead({ folder, canEdit, viewOnly, onRefresh, refreshing, refreshE
         <div><span>审批类型</span><b>{folder.template || '—'}</b></div>
         <div><span>审批编号</span><b className="inv-num">{folder.businessId || '—'}</b></div>
         <div><span>申请人</span><b>{folder.applicant || '—'}{folder.dept ? <em> · {folder.dept}</em> : null}</b></div>
-        <div><span>公司主体</span><b>{folder.company || '—'}</b></div>
+        <div><span>公司主体</span><b>{folder.company || (folder.batch && folder.batch.hold ? '主体待定（收票口）' : '—')}</b></div>
         <div className="wide"><span>收款方</span><b>{payee.name || '—'}{payee.bank ? <em> · {payee.bank}</em> : null}{payee.account ? <em className="inv-num"> · {maskAccount(payee.account)}</em> : null}</b></div>
         <div><span>单据金额</span><b className="inv-num inv-dk-amt">{money(folder.amount)}</b></div>
         <div><span>审批状态</span><b>{appr || '—'}</b></div>
       </div>
       <AttachLine folder={folder} canEdit={canEdit} onRefresh={onRefresh} refreshing={refreshing} refreshErr={refreshErr} />
       <LaterLine folder={folder} />
+      <BatchLine folder={folder} onOpen={onOpenFolder} />
       {folder.status === 'returned' && (
         <div className="inv-dk-returned">
           <b>会计退回了这张单</b>
@@ -398,7 +451,8 @@ function FolderFoot({ folder, items, canEdit, onSubmit, submitting, submitRes, o
   const amt = num(folder.amount)
   const diff = Number.isFinite(num(s.diff)) ? num(s.diff) : (Number.isFinite(amt) ? sum - amt : NaN)
   const off = Number.isFinite(diff) && Math.abs(diff) > 0.005
-  const canSubmit = canEdit && (folder.status === 'collecting' || folder.status === 'returned')
+  const hold = !!(folder.batch && folder.batch.hold)     // 「主体待定」的收票口：不提交，票分走以后到各主体的票夹里提交
+  const canSubmit = canEdit && !hold && (folder.status === 'collecting' || folder.status === 'returned')
   const blockers = submitRes && Array.isArray(submitRes.blockers) ? submitRes.blockers : []
   return (
     <div className="inv-dk-foot">
@@ -577,9 +631,9 @@ function useAuditors() {
   }, [])
   return au
 }
-// 「自动识别：按抬头分主体」的入口：后端已经能分，但收票台上「看这一批分到了哪几个票夹、给读不出抬头的票定主体」的页面在下一批做，
-// 那之前先不放这个选项（建的时候直接选一家；放进别家的票，系统照样会自动挪到别家的票夹，并在收票结果里说明）。
-const AUTO_SPLIT_UI = false
+// 「自动识别：按抬头分主体」的入口（第 2 批页面做好后放出来）：先建「主体待定」的收票口，票放进来按抬头分到各主体自己的票夹；
+// 这一批分到了哪几个票夹看 BatchLine，读不出抬头的票在 HoldPick 里由人定是哪家。
+const AUTO_SPLIT_UI = true
 const thisMonth = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') }
 
 // 新建票夹（没有付款单的票：电子票、扫描件）。建了票夹一定是指派清楚的：会计建的默认归自己，实习生建的必须选一位审核会计。
@@ -922,7 +976,9 @@ export default function InvDesk({ user }) {
                   <div className="inv-dk-folder" onClick={e => e.stopPropagation()}
                     onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation() }}>
                     <FolderHead folder={folder} canEdit={canEdit} viewOnly={!can.intake} onRefresh={refresh} refreshing={refreshing} refreshErr={refreshErr}
-                      onClose={closeFolder} closing={closing} />
+                      onClose={closeFolder} closing={closing} onOpenFolder={openFolder} />
+                    <HoldPick folder={folder} items={items} companies={cfg && cfg.settings && cfg.settings.company} canEdit={canEdit}
+                      onDone={async (msg) => { flash(msg, 'ok'); await loadDesk() }} />
                     <ItemList items={items} canEdit={canEdit} onOpen={setDetailId} onFiles={fs => upload(fs, 'upload')}
                       upBusy={upBusy > 0} receipt={receipt} onReceiptClose={() => { clearTimeout(receiptTimer.current); setReceipt(null) }} />
                     <FolderFoot folder={folder} items={items} canEdit={canEdit} onSubmit={submit} submitting={submitting}

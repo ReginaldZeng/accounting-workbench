@@ -581,6 +581,8 @@ export const invSubmitFolder = (id) => invJpSoft(`/api/inv/folder/${id}/submit`)
 export const invFolder = (id) => j(`/api/inv/folder/${id}`)
 export const invItemUpdate = (id, body) => jp(`/api/inv/item/${id}/update`, body)      // body={fields:{…}, confirm:[field]|'all'}
 export const invItemRemove = (id) => jp(`/api/inv/item/${id}/remove`)
+// 没有付款单的票夹里，抬头读不出来的发票由人定是哪家主体 → 挪到那家自己的票夹。回 {msg, moved:{id,title}}
+export const invItemCompany = (id, company) => jp(`/api/inv/item/${id}/company`, { company })
 export const invItemSplit = (id, body) => jp(`/api/inv/item/${id}/split`, body)        // body={split, alloc}
 export const invItemRotate = (id, rotation) => jp(`/api/inv/item/${id}/rotate`, { rotation })
 export const invItemReprocess = (id) => jp(`/api/inv/item/${id}/reprocess`)

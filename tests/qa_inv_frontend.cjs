@@ -747,11 +747,10 @@ test('收票台新建票夹：会计默认归自己、实习生必须选审核�
   await mount(page, 'InvDesk', { user: { name: '陈梓华' } })
   await page.getByRole('button', { name: '新建票夹' }).first().click()
   let dlg = page.locator('.inv-modal', { hasText: '新建票夹' })
-  await dlg.locator('.inv-dk-name', { hasText: '先选公司主体' }).waitFor()
+  await dlg.locator('.inv-dk-name', { hasText: '主体待定-陈梓华-' }).waitFor()      // 默认「自动识别」：先建主体待定的收票口
+  await dlg.locator('.inv-dk-name', { hasText: '孝感星期九-陈梓华-' }).waitFor()    // 也列出分出去以后各主体的票夹名
   assert.equal(await dlg.locator('select').first().inputValue(), '陈梓华')
-  assert.equal(await dlg.locator('select option', { hasText: '自动识别' }).count(), 0, '按抬头自动分主体的入口等下一批页面做好再放出来')
-  await dlg.getByRole('button', { name: '建票夹' }).click()
-  await dlg.getByText('选一下是哪家公司主体的票', { exact: false }).waitFor()
+  assert.equal(await dlg.locator('select').nth(1).inputValue(), 'auto')
   await dlg.locator('input[type=month]').fill('2026-08')
   await dlg.locator('select').nth(1).selectOption('孝感市星期九食品科技有限公司')
   await dlg.locator('.inv-dk-name', { hasText: '孝感星期九-陈梓华-202608进项认证（批量手工）' }).waitFor()
@@ -771,11 +770,10 @@ test('收票台新建票夹：会计默认归自己、实习生必须选审核�
   await dlg.getByText('选一位审核会计', { exact: false }).last().waitFor()
   assert.equal(state.posts.length, 0, '没选审核会计不发请求')
   await dlg.locator('select').first().selectOption('李志鹏')
-  await dlg.locator('select').nth(1).selectOption('深圳市星期零食品科技有限公司')
   await dlg.getByRole('button', { name: '建票夹' }).click()
   await page.waitForFunction(() => !document.querySelector('.inv-modal'))
   assert.equal(state.posts[0].auditor, '李志鹏')
-  assert.equal(state.posts[0].company, '深圳市星期零食品科技有限公司')
+  assert.equal(state.posts[0].company, 'auto', '默认按抬头自动分主体')
   // 扫一张没定归谁审的付款单：弹窗选一位，带着再扫
   await page.locator('.inv-scan input, input[placeholder*="扫审批单"]').first().fill('202609201716000443127')
   await page.locator('.inv-scan input, input[placeholder*="扫审批单"]').first().press('Enter')
@@ -785,6 +783,46 @@ test('收票台新建票夹：会计默认归自己、实习生必须选审核�
   await pick.getByRole('button', { name: '建票夹' }).click()
   await page.waitForFunction(() => !document.querySelector('.inv-modal'))
   assert.deepEqual(state.scans.map(x => x.auditor || ''), ['', '陈梓华'])
+  await ctx.close()
+})
+
+test('按抬头分主体：收票口里看得到这一批分到了哪几个票夹；读不出抬头的票点一下是哪家就挪过去；收票口不用提交', async (browser, B) => {
+  const XG = '孝感市星期九食品科技有限公司', SZ = '深圳市星期零食品科技有限公司'
+  const state = {
+    can: {},
+    folder: { id: 50, status: 'collecting', source: 'manual', title: '主体待定-陈梓华-202608进项认证（批量手工）', company: '', stats: {},
+      batch: { month: '202608', way: 'batch', hold: true, siblings: [{ id: 51, title: '孝感星期九-陈梓华-202608进项认证（批量手工）', company: XG, hold: false, invoices: 3 }] } },
+    items: [inv({ id: 501, review: 'draft', number: '26442000000000000501', sellerName: '读不出抬头的销方' })],
+    openFolder: { id: 51, status: 'collecting', source: 'manual', title: '孝感星期九-陈梓华-202608进项认证（批量手工）', company: XG, stats: {},
+      batch: { month: '202608', way: 'batch', hold: false, siblings: [{ id: 50, title: '主体待定-陈梓华-202608进项认证（批量手工）', company: '', hold: true, invoices: 0 }] } },
+    openItems: [],
+  }
+  const base = deskApi(state)
+  const picked = []
+  const api = (c) => {
+    if (c.path === '/api/inv/config') return { ...cfg(), settings: { company: [{ name: XG }, { name: SZ }], templates: [], laterTemplates: [], remind: {} } }
+    if (c.path === '/api/inv/item/501/company') {
+      picked.push(c.body)
+      state.items = []
+      return { ok: true, msg: '已放到「深圳星期零-陈梓华-202608进项认证（批量手工）」', moved: { id: 52, title: '深圳星期零-陈梓华-202608进项认证（批量手工）' } }
+    }
+    return base(c)
+  }
+  const { page, ctx, calls } = await open(browser, B, api)
+  await mount(page, 'InvDesk', { user: { name: '陈梓华' } })
+  await page.locator('.inv-dk-batch.hold', { hasText: '这里是「主体待定」的收票口' }).waitFor()
+  await page.locator('.inv-dk-batch-sib', { hasText: XG }).waitFor()
+  assert.match(await page.locator('.inv-dk-batch-sib', { hasText: XG }).innerText(), /3 张/)
+  const hold = page.locator('.inv-dk-hold')
+  await hold.getByText('还有 1 张没分出是哪家的票').waitFor()
+  assert.equal(await page.getByRole('button', { name: '提交', exact: true }).count(), 0, '收票口不用提交')
+  await hold.getByRole('button', { name: SZ }).click()
+  await page.waitForFunction(() => !document.querySelector('.inv-dk-hold'))
+  assert.deepEqual(picked, [{ company: SZ }])
+  // 点这一批的另一个票夹：直接打开它；那边是一家主体的票夹，写明只装这一家的
+  await page.locator('.inv-dk-batch-sib', { hasText: XG }).click()
+  await page.locator('.inv-dk-batch', { hasText: '这个票夹只装' }).waitFor()
+  assert.equal(n(calls, c => c.path === '/api/inv/desk/open' && c.body.folderId === 51), 1)
   await ctx.close()
 })
 
