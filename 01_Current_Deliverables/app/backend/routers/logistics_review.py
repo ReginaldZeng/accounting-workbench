@@ -5642,6 +5642,12 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 title = ("原账单-" + sh.get("name", ""))[:31]
                 ws3 = wb.create_sheet(title)
                 hdr = list(sh.get("header", []))
+                # V2.976(用户看极鲜达原账单页右边：「这个是不是重复了，左边也是复核的？」)：早先手工备这份数据时，原账单右边隔一个空列
+                #   接了一组老的复核列(复核结论、关联业务单号、账单计费重量、金蝶重量、差异、单位运费、销售额、费比、本行账单金额…)，
+                #   数是当时的、和右边「系统复核」打架(同一张单老的写差 −79.95 千克，系统复核写 0)。从那个空列起整段不要，只留原账单本身。
+                cut = next((i for i, h in enumerate(hdr) if h == "复核结论" and i > 0 and hdr[i - 1] in ("", None)), None)
+                if cut is not None:
+                    hdr = hdr[:cut - 1]
                 base_n = len(hdr)
                 ws3.append(hdr + addcols)
                 for j in range(len(addcols)):   # 仅追加列表头配色，原始表头不动(保留原格式)
@@ -5650,6 +5656,8 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                 ki = sh.get("kidx")
                 rn = 1
                 for row in sh.get("rows", []):
+                    if cut is not None:
+                        row = list(row)[:cut - 1]
                     rn += 1
                     # 一格多单号(换行/区间)按首单号匹配，与中间表 doc_no 用"+"连的首段一致
                     no = re.split(r"[\n\-+]", str(row[ki]))[0].strip() if (ki is not None and ki < len(row) and row[ki] not in (None, "")) else ""
