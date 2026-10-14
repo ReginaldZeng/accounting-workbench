@@ -374,7 +374,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         log = {"rows": [], "byv": [], "mod": []}
 
         def mk(key, ret):
-            def f(arg):
+            def f(arg, since=""):
                 log[key].append(arg)
                 if isinstance(ret, Exception):
                     raise ret
@@ -419,6 +419,32 @@ class InvoiceBooksApiTests(unittest.TestCase):
         r = run(_dt(2026, 10, 10, 9, 40), mod=RuntimeError("字段不支持"), rows=[])
         self.assertEqual((r["how"], log["rows"]), ("wait", []))
 
+    def test_fetch_rows_bulk_query(self):
+        """V2.973：20 位数电号码一次查「摘要里带这两位开头的 20 位数字」（带期间下限），本地挑出含这些号码的行；老式号码照旧一个一次。"""
+        import types
+        V = self.vouchers
+        calls = []
+        n1, n2, n3 = "26329116565000301244", "26422000002552095516", "25442000000000000001"
+        data = [{"summary": "火车票 " + n1}, {"summary": "住宿 " + n2}, {"summary": "别人的 26999999999999999999"}, {"summary": "去年的 " + n3}]
+
+        def q(s, conf, form, fields, filt, order):
+            calls.append(filt)
+            if "like '%12345678%'" in filt:
+                return [{"summary": "老票 12345678"}]
+            return [r for r in data if ("like '%26[0-9]" in filt and "26" in r["summary"]) or ("like '%25[0-9]" in filt and n3 in r["summary"])]
+        fake = types.SimpleNamespace(login=lambda: (None, None), _query=q)
+        with patch.dict(sys.modules, {"kingdee_client": fake}):
+            rows = V.fetch_rows([n1, n2, n3, "12345678"], since="2026-07")
+        self.assertEqual(sorted(r["summary"] for r in rows), sorted(["火车票 " + n1, "住宿 " + n2, "去年的 " + n3, "老票 12345678"]))
+        self.assertEqual(len(calls), 3)                                        # 26 开头一次、25 开头一次、8 位老号码一次
+        self.assertTrue(all("FPeriod >= 7" in c for c in calls[:2]), calls)
+        with patch.dict(sys.modules, {"kingdee_client": fake}):
+            calls.clear()
+            V.fetch_rows([n1])                                                 # 只有 1 张：照旧按号码查
+        self.assertEqual(calls, ["(FEXPLANATION like '%%%s%%')" % n1])
+        self.assertEqual(V._since([{"issue_date": "2026-09-10"}, {"issue_date": "2026-07-15"}]), "2026-07")
+        self.assertEqual(V._since([{"issue_date": "2026-09-10"}, {"issue_date": None}]), "")
+
     def test_vouchers_refresh_all_runs_in_background(self):
         """V2.966：「刷新全部金蝶凭证」后台跑、带进度：已对上的成批核实，只逐张查没对上的；查完一张就落库；
         正在跑时再点只回进度不报错；定时同步正占着时让人等一下；定时那一轮顺手查「从没查过」的票（有上限）。"""
@@ -434,7 +460,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.S.item_update(self.e, a, flags_json=fl)
         asked, gate = [], __import__("threading").Event()
 
-        def rows_of(numbers):
+        def rows_of(numbers, since=""):
             asked.extend(numbers)
             gate.wait(5)
             return [row(num(9662), 44)] if num(9662) in numbers else []
@@ -475,7 +501,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(bk(c), {})
         self.db.set_setting(V._STATE_KEY, {"last_full": "2026-10-14", "last_inc": "2026-10-14 09:00:00"})
         seen = []
-        with patch.object(V, "fetch_modified", return_value=[]), patch.object(V, "fetch_rows", side_effect=lambda ns: seen.append(list(ns)) or [row(num(9663), 50)]):
+        with patch.object(V, "fetch_modified", return_value=[]), patch.object(V, "fetch_rows", side_effect=lambda ns, since="": seen.append(list(ns)) or [row(num(9663), 50)]):
             r = V.timer_round(_dt(2026, 10, 14, 9, 20))
         self.assertEqual(r["how"], "inc")
         self.assertTrue(seen and len(seen[0]) <= V.NEW_PER_ROUND)
@@ -2407,7 +2433,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
                 patch.object(LVR.kc, "delete_vouchers", lambda ids, s_=None, conf=None: gone["deleted"].add(ids)), \
                 patch.object(LVR.kc, "submit_bill", lambda form, ids, s_=None, conf=None: calls["submit"].append(ids)), \
                 patch.object(LVR, "_xred_date", lambda book, d, s_, conf: ("2026-10-14", 2026, 10)), \
-                patch.object(iv, "fetch_rows", lambda numbers: list(booked["rows"])), \
+                patch.object(iv, "fetch_rows", lambda numbers, since="": list(booked["rows"])), \
                 patch.object(self.db, "list_orgs", lambda: [{"full_name": self.OUR, "book_code": "101"}]), \
                 patch.object(inv, "notify_dt", sent):
             # ① 默认是演练：审核前只能看打算怎么做；审核通过后排上队，演练不写金蝶

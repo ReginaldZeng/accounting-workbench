@@ -54,16 +54,42 @@ def match_vouchers(item, rows):
             out.append(v)
     return sorted(out, key=lambda v: (v["book"], v["period"], v["number"]))
 
-def fetch_rows(numbers):
+BULK_MIN = 2                         # 要查的 20 位数电号码有这么多张以上才走「一次拉全部」（1 张就逐张查，一样快）
+
+
+def _since(items):
+    """这批票里最早的开票月份 'YYYY-MM'（凭证不会早于开票月）；有票没有开票日期 → ''（不限期间）。"""
+    ms = [str(i.get("issue_date") or "")[:7] for i in items or []]
+    return "" if not ms or any(not re.fullmatch(r"\d{4}-\d{2}", m) for m in ms) else min(ms)
+
+
+def fetch_rows(numbers, since=""):
+    """这些发票号在金蝶里挂在哪些凭证分录上（摘要里含号码）→ 分录行。
+    「摘要里含某个号码」金蝶一次要 ~10 秒，几个同时发也是排队；所以 20 位数电号码（按头两位分组）一次查「摘要里带这两位开头的 20 位数字」
+    （since 给了就只看那个月以来的期间），拉回来在本地挑出含这些号码的行——一次 ~10 秒查完一批。别的号码（老式 8 位）照旧一个号码一次。"""
     import kingdee_client as kc
     s, conf = kc.login()
     fields = [("FAccountBookID.FName", "book"), ("FYear", "year"), ("FPeriod", "month"),
               ("FVOUCHERGROUPID.FName", "group"), ("FVOUCHERGROUPNO", "number"), ("FEXPLANATION", "summary")]
+    order = "FAccountBookID,FYear,FPeriod,FVOUCHERGROUPNO,FEntity_FEntrySeq"
+    nums = sorted({str(n).strip() for n in numbers or [] if str(n).strip()})
+    twenty = [n for n in nums if re.fullmatch(r"\d{20}", n)]
+    single = [n for n in nums if n not in twenty] if len(twenty) >= BULK_MIN else nums
     rows = []
-    # ponytail: 单号查询避免金蝶多条件摘要扫描超时；发票量大时改接有索引的关联字段。
-    for number in numbers:
+    if len(twenty) >= BULK_MIN:
+        per = ""
+        if re.fullmatch(r"\d{4}-\d{2}", since or ""):
+            y, m = int(since[:4]), int(since[5:7])
+            per = "(FYear > %d or (FYear = %d and FPeriod >= %d)) and " % (y, y, m)
+        want = set(twenty)
+        for pre in sorted({n[:2] for n in twenty}):
+            filt = "(%sFEXPLANATION like '%%%s%s%%')" % (per, pre, "[0-9]" * 18)
+            for r in kc._query(s, conf, "GL_VOUCHER", fields, filt, order):
+                if any(n in str(r.get("summary") or "") for n in want):
+                    rows.append(r)
+    for number in single:
         filt = "FEXPLANATION like '%%%s%%'" % number
-        rows.extend(kc._query(s, conf, "GL_VOUCHER", fields, "(" + filt + ")", "FAccountBookID,FYear,FPeriod,FVOUCHERGROUPNO,FEntity_FEntrySeq"))
+        rows.extend(kc._query(s, conf, "GL_VOUCHER", fields, "(" + filt + ")", order))
     return rows
 
 def _sync_items(items, rows, merge=False):
@@ -115,7 +141,7 @@ def _numbers(items):
 _JOB = {"running": False, "total": 0, "checked": 0, "verified": 0, "queried": 0, "toQuery": 0, "matched": 0, "changed": 0,
         "ledgerN": 0, "auditN": 0, "by": "", "startedAt": "", "finishedAt": "", "error": ""}
 # total＝审核通过的（台账里能看到的）＋还在审核的（对纸质票、审核页也要知道凭证），普票不查；ledgerN / auditN 是这两块各几张
-NEW_PER_ROUND = 10                   # 定时每一轮最多顺手查几张「从没查过」的票（一张一次查询，免得一轮拖太久、吃额度）
+NEW_PER_ROUND = 200                  # 定时每一轮最多顺手查几张「从没查过」的票（V2.973 起一批一次查询；上限只防一轮拖太久）
 
 
 def job_status():
@@ -140,11 +166,11 @@ def _run_job():
             if re.fullmatch(r"\d{8,20}", n):
                 by_no.setdefault(n, []).append(i)
         _JOB.update(toQuery=len(by_no), total=len(still) + len(rest))
-        for no, its in sorted(by_no.items()):
-            rows = fetch_rows([no])                      # 一个号码一次查询（金蝶摘要模糊查，一次一个才不超时）
-            ch, mt = _sync_items(its, rows)
-            _JOB["queried"] += 1
-            _JOB["checked"] += len(its)
+        todo = [i for its in by_no.values() for i in its]
+        if todo:                                         # V2.973：一次拉回这批号码挂的凭证（20 位数电号码一批 ~10 秒），本地对
+            rows = fetch_rows(sorted(by_no), since=_since(todo))
+            ch, mt = _sync_items(todo, rows)
+            _JOB["queried"] = len(by_no)
             _JOB["matched"] += mt
             _JOB["changed"] += ch
         _JOB["checked"] = _JOB["total"]                  # 没有号码的票查不了，也算过了
@@ -174,7 +200,7 @@ def sync_once(item_id=None):
     try:
         items = _active_items(item_id)
         numbers = _numbers(items)
-        rows = fetch_rows(numbers) if numbers else []  # 任一查询失败即中止，旧记录不变。
+        rows = fetch_rows(numbers, since=_since(items)) if numbers else []  # 任一查询失败即中止，旧记录不变。
         changed, matched = _sync_items(items, rows)
         return {"ok": True, "total": len(items), "matched": matched, "changed": changed}
     finally:
@@ -231,7 +257,7 @@ def _full_round(items):
     rows_v = fetch_by_vouchers([v for i in kd for v in _bk(i)["vouchers"]]) if kd else []
     still = {i["id"] for i in kd if match_vouchers(i, rows_v)}
     numbers = _numbers([i for i in items if i["id"] not in still])
-    rows_n = fetch_rows(numbers) if numbers else []
+    rows_n = fetch_rows(numbers, since=_since([i for i in items if i["id"] not in still])) if numbers else []
     changed, matched = _sync_items(items, rows_v + rows_n)
     return {"ok": True, "how": "full", "total": len(items), "matched": matched, "changed": changed, "verified": len(still), "queried": len(numbers)}
 
@@ -267,7 +293,7 @@ def timer_round(now=None):
                 return {"ok": True, "how": "wait", "err": str(e)[:160]}
             todo = [i for i in items if _bk(i).get("status") != "booked"]
             numbers = _numbers(todo)
-            rows = fetch_rows(numbers) if numbers else []
+            rows = fetch_rows(numbers, since=_since(todo)) if numbers else []
             changed, matched = _sync_items(todo, rows)
             st["last_fallback"] = now.timestamp()
             db.set_setting(_STATE_KEY, st)
@@ -276,10 +302,10 @@ def timer_round(now=None):
         st["last_inc"] = stamp
         db.set_setting(_STATE_KEY, st)
         # 新进台账、从没查过的票（清零重接、刚审核过的……）：只问「最近改过的凭证」问不到它们挂的老凭证，这里顺手逐张查掉，每轮有个上限
-        fresh = [i for i in items if not _bk(i)][:NEW_PER_ROUND]
+        fresh = [i for i in items if not _bk(i)][:NEW_PER_ROUND]     # V2.973 起一批一次查询，上限只是防一轮拖太久
         nos = _numbers(fresh)
         if nos:
-            c2, m2 = _sync_items(fresh, fetch_rows(nos))
+            c2, m2 = _sync_items(fresh, fetch_rows(nos, since=_since(fresh)))
             changed, matched = changed + c2, matched + m2
         return {"ok": True, "how": "inc", "total": len(items), "matched": matched, "changed": changed, "rows": len(rows), "fresh": len(nos)}
     finally:
