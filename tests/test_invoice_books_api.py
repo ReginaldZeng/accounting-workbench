@@ -1835,7 +1835,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
             r = self.get("/api/inv/deduct/download?token=%s" % j["token"], "acct")
             self.assertEqual((r.status_code, r.content[:2]), (200, b"PK"), r.text[:200])
         from urllib.parse import quote as _q
-        self.assertIn(_q("增值税发票勾选认证-202304-acct.xlsx"), r.headers.get("content-disposition", ""))     # V2.972 文件名
+        self.assertIn(_q("增值税发票勾选认证-%s-202304-acct.xlsx" % (self.inv.org_short(OUR) or OUR)), r.headers.get("content-disposition", ""))     # 文件名：主体简称-做账月份-导出人
         lists = self.ok(self.get("/api/inv/ticklists", "acct"))["rows"]
         self.assertEqual(len(lists), n0 + 1)
         lst = lists[0]

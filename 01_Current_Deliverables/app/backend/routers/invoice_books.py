@@ -1246,7 +1246,7 @@ async def deduct_download(request: Request):
             print("[发票管家] 认证清单没存上：%s" % ex)
     inv.audit(u, "下载抵扣勾选标注件", meta.get("name") or "", "标「是」%d 张，本次记为已标注 %d 张" % (len(meta.get("yes") or []), n))
     if meta.get("tick"):             # 直接从台账出的税局勾选清单：文件名照税局那份的叫法
-        return _xlsx(data, *tick_file_name(meta.get("bookMonth"), u["name"], _stamp()))
+        return _xlsx(data, *tick_file_name(meta.get("bookMonth"), u["name"], _stamp(), meta.get("subjectName") or ""))
     return _xlsx(data, "抵扣勾选_已标注_%s.xlsx" % _stamp(), "deduct_marked_%s.xlsx" % _stamp())
 
 
@@ -1262,12 +1262,15 @@ def _ticklist_file(bid):
     return os.path.join(d, "%d.xlsx" % int(bid))
 
 
-def tick_file_name(book_month, who, fallback):
-    """税局勾选清单下载的文件名（用户 2026-10-14 定）：增值税发票勾选认证-202609-曾禹锡.xlsx＝做账月份-导出人。
+def tick_file_name(book_month, who, fallback, subject_name=""):
+    """税局勾选清单下载的文件名（用户 2026-10-14 定，同日追加主体）：增值税发票勾选认证-深圳星期九-202609-曾禹锡.xlsx＝主体简称-做账月份-导出人。
+    主体简称取基础数据「主体档案」（对不上用全称）；没主体的（老清单「全部主体」）不写这一段。
     没按做账月份出的（老清单）月份位置用 fallback（日期）。→ (中文名, 英文备用名)。"""
+    bad = r'[\\/:*?"<>|\s]'
     ym = re.sub(r"\D", "", book_month or "")[:6] or fallback
-    w = re.sub(r'[\\/:*?"<>|\s]', "", who or "") or "未知"
-    return "增值税发票勾选认证-%s-%s.xlsx" % (ym, w), "vat_tick_%s.xlsx" % ym
+    w = re.sub(bad, "", who or "") or "未知"
+    sub = re.sub(bad, "", inv.org_short(subject_name) or subject_name or "") if subject_name else ""
+    return "增值税发票勾选认证-%s%s-%s.xlsx" % ((sub + "-") if sub else "", ym, w), "vat_tick_%s.xlsx" % ym
 
 
 def ticklist_name(meta):
@@ -1324,7 +1327,7 @@ async def ticklist_download(bid: int, request: Request):
         return err("这份清单的文件找不到了，请重新导出一次", 404)
     tag = re.sub(r"[^0-9A-Za-z]", "", (b.get("created_at") or ""))[:12]
     sm = b.get("summary_json") if isinstance(b.get("summary_json"), dict) else {}
-    return _xlsx(data, *tick_file_name(sm.get("bookMonth"), b.get("created_by"), tag))
+    return _xlsx(data, *tick_file_name(sm.get("bookMonth"), b.get("created_by"), tag, sm.get("subjectName") or ""))
 
 
 # ── 过渡期：票总管已有的票 ──
