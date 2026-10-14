@@ -1378,6 +1378,22 @@ def _nb(box, W, H):
     return [f(x0, W), f(y0, H), f(x1, W), f(y1, H)]
 
 
+def _label_after(toks, labels):
+    """「标签：值」→ (值, 框)。值和标签在同一个文字块里就截冒号后面那段；不在就取同一行紧挨着的右边那块。没有 → (None, None)。"""
+    for lab in labels:
+        for t in toks:
+            if lab not in t.c:
+                continue
+            rest = t.c.split(lab, 1)[1].lstrip(":：")
+            if rest:
+                return rest, t.box
+            right = [u for u in toks if u is not t and u.x0 >= t.x1 - 2 and abs(u.cy - t.cy) < max(t.h, 1) * 0.7]
+            if right:
+                u = min(right, key=lambda u: u.x0)
+                return u.c.lstrip(":："), u.box
+    return None, None
+
+
 def fields_from_tokens(tokens, width, height, src, page=0):
     """按位置把一页的文字块解析成票面字段（PDF 文字层、OCR 框、OFD 文字对象共用）。
     tokens=[{"text", "box": [x0,y0,x1,y1]（与 width/height 同一坐标系，y 向下）}]。
@@ -1696,6 +1712,21 @@ def fields_from_tokens(tokens, width, height, src, page=0):
     put("buyerTaxId", bt, btb)
     put("sellerName", sn, snb)
     put("sellerTaxId", st, stb)
+
+    # —— 铁路电子客票（V2.972）：版式和普通发票不一样——没有销售方栏，购买方写成「购买方名称：…」「统一社会信用代码：…」。
+    #    按普通发票的左右两栏去找会把车站名、税务局印章当成购买方/销方（用户 2026-10-14 扫的一叠车票全读错）。
+    alltxt = "".join(t.c for t in toks)
+    if inv_type == "train" or "铁路电子客票" in alltxt or "电子客票号" in alltxt:
+        for k in ("buyerName", "buyerTaxId", "sellerName", "sellerTaxId"):
+            d[k] = None
+            fs.pop(k, None)
+        bn, bnb = _label_after(toks, ("购买方名称", "购买方"))
+        bt, btb = _label_after(toks, ("统一社会信用代码", "纳税人识别号"))
+        if bt:
+            m = re.search(r"[0-9A-Z]{15,20}", bt.upper())
+            bt = m.group(0) if m else None
+        put("buyerName", bn, bnb)
+        put("buyerTaxId", bt, btb)
 
     # —— 备注 ——
     rk = _vlabel(toks, ("备注",))

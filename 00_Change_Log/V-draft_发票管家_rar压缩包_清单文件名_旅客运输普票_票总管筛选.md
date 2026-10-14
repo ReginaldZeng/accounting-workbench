@@ -17,11 +17,13 @@
 5. **标签按会计定的写**：会计判过的写「可抵扣」/「不可抵扣」，没判的才写系统的「建议可抵扣」（原来判了不可抵扣还挂着「建议可抵扣」）。
 6. **台账筛选加「票总管」**：全部 / 在票总管 / 不在票总管。在＝记了「票总管已有」，或票号在传过的票总管清单里（没被人取消）。导出 Excel 跟着筛。
 
+7. **铁路电子客票的购买方认对了**：用户 2026-10-14 给了一份扫描 PDF（16 页，11 张铁路电子客票＋5 张酒店专票，横着扫的）问能不能识别。本机用发票管家的识别内核试：16 张的二维码都读到（号码、日期、金额），专票 OCR 后销方、购方、税号、金额、税额、税率都齐（1 张购方税号没读到，留给人核）；**铁路客票原来把车站名（太仓站）、税务局印章（国家税务总局）读成了购买方/销方**——铁路客票没有销售方栏，购买方写成「购买方名称：…」「统一社会信用代码：…」。加了铁路客票专门的读法：按这两个标签取购买方和税号，销方留空。改后 11 张全部读成「深圳市星期九食品科技有限公司 / 91440300MA5FN19Y34」。
+
 ## 涉及文件
 
-- 后端：`kernels/invoice_parse.py`（rar/7z 识别、`_ext_list`/`_ext_extract`、`walk_ext`）、`routers/invoice.py`（`no_book` 加旅客运输、`_reingest_archive`、重新识别遇压缩包＝拆开）、`kernels/invoice_store.py`（`no_book_cond`、台账 `other` 筛选）、`routers/invoice_vouchers.py`、`routers/invoice_books.py`（`tick_file_name`、筛选参数）
+- 后端：`kernels/invoice_parse.py`（rar/7z 识别、`_ext_list`/`_ext_extract`、`walk_ext`；铁路客票 `_label_after`）、`routers/invoice.py`（`no_book` 加旅客运输、`_reingest_archive`、重新识别遇压缩包＝拆开）、`kernels/invoice_store.py`（`no_book_cond`、台账 `other` 筛选）、`routers/invoice_vouchers.py`、`routers/invoice_books.py`（`tick_file_name`、筛选参数）
 - 前端：`views/InvDesk.jsx`（拆开压缩包认票）、`views/InvLedger.jsx`（票总管筛选）、`views/invShared.jsx`（抵扣标签）
-- 测试：`kernels/test_invoice_parse.py`（rar/7z，假工具）、`tests/test_invoice_api.py`（补拆压缩包、不重复登记）、`tests/test_invoice_books_api.py`（文件名、旅客运输普票、票总管筛选）、`tests/qa_inv_frontend.cjs`（修 V2.970 用例偶发找不到按钮：点验已开着时按钮写「接着对」）
+- 测试：`kernels/test_invoice_parse.py`（rar/7z，假工具；铁路客票购买方）、`tests/test_invoice_api.py`（补拆压缩包、不重复登记）、`tests/test_invoice_books_api.py`（文件名、旅客运输普票、票总管筛选）、`tests/qa_inv_frontend.cjs`（修 V2.970 用例偶发找不到按钮：点验已开着时按钮写「接着对」）
 
 ## 验证
 

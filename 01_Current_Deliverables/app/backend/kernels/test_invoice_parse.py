@@ -474,6 +474,21 @@ class TestSniffZip(unittest.TestCase):
         self.assertEqual(list(files), [])
         self.assertTrue(any("解开后再传" in w for w in files.warnings), files.warnings)
 
+    def test_train_ticket_buyer_from_label(self):
+        """V2.972：铁路电子客票没有销售方栏，购买方写成「购买方名称：…」「统一社会信用代码：…」——
+        不能按普通发票两栏去找（会把车站名、税务局印章读成购买方/销方）。"""
+        def T(text, x0, y0, x1, y1):
+            return {"text": text, "box": [x0, y0, x1, y1]}
+        toks = [T("电子发票（铁路电子客票）", 300, 40, 700, 80), T("发票号码:26329116565000301244", 40, 100, 400, 120),
+                T("开票日期:2026年09月10日", 700, 100, 980, 120), T("太仓站", 120, 180, 220, 220), T("上海虹桥站", 700, 180, 840, 220),
+                T("国家税务总局", 420, 60, 560, 90), T("票价:￥25.00", 40, 300, 240, 330),
+                T("购买方名称:深圳市测试食品科技有限公司", 40, 420, 520, 450), T("统一社会信用代码:91440300MA5TEST01X", 600, 420, 980, 450)]
+        d = ip.fields_from_tokens(toks, 1000, 600, "ocr")
+        self.assertEqual(d["invType"], "train")
+        self.assertEqual(d["buyerName"], "深圳市测试食品科技有限公司")
+        self.assertEqual(d["buyerTaxId"], "91440300MA5TEST01X")
+        self.assertIsNone(d["sellerName"])
+
     def test_unpack_limits(self):
         lvl3 = self._zip([("deep.pdf", b"%PDF-1.4")])
         lvl2 = self._zip([("l3.zip", lvl3)])
