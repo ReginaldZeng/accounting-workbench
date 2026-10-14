@@ -1270,6 +1270,33 @@ class InvoiceApiTests(unittest.TestCase):
         finally:
             inv.save_settings({"corpId": keep}, "test")
 
+    def test_39b_reprocess_archive_attachment(self):
+        """V2.972：以前拆不开、记成「非发票附件」的压缩包，点「重新识别」＝拆开、里面的文件逐个进票夹；再点不重复登记。"""
+        import io
+        import zipfile
+        inv, S, e = self.inv, self.S, self.db._engine
+        fo = self.manual("intern", "V2972-压缩包附件")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("8月/说明.txt", b"note-39b")
+            z.writestr("8月/另一份.txt", b"note-39b-2")
+        data = buf.getvalue()
+        real = inv.ip.sniff_type
+        with patch.object(inv.ip, "sniff_type", side_effect=lambda n, d: "other" if n.endswith(".zip") else real(n, d)):
+            rs = inv.ingest_bytes(fo["id"], "8月电商货拉拉.zip", data, "attachment", "intern")
+        self.assertEqual([r["action"] for r in rs], ["other"])
+        iid = rs[0]["itemId"]
+        n0 = len(S.folder_items(e, fo["id"]))
+        r = self.post("/api/inv/item/%d/reprocess" % iid, "intern")
+        self.assertEqual(r.status_code, 200, r.text)
+        j = r.json()
+        self.assertTrue(j["archive"])
+        self.assertIn("拆开了", j["msg"])
+        self.assertEqual(len(S.folder_items(e, fo["id"])), n0 + 2)
+        j2 = self.post("/api/inv/item/%d/reprocess" % iid, "intern").json()          # 再点一次：不重复登记
+        self.assertIn("之前拆过", j2["msg"])
+        self.assertEqual(len(S.folder_items(e, fo["id"])), n0 + 2)
+
     def test_39_zip_budget_and_disk_floor(self):
         """SEC-6：一次请求/一次拉附件里的压缩包解开总量共用一份额度；磁盘快满就不落文件（回中文错误、不留半截行）。"""
         import io

@@ -497,6 +497,19 @@ class InvoiceBooksApiTests(unittest.TestCase):
         it = self.item(a)
         it["folder"] = {}
         self.assertIn("普票不入账", self.books._ledger_row_values(it))
+        # V2.972：旅客运输服务普票（货拉拉那种）会计判了不可抵扣 → 也算普票不入账；判了可抵扣的照旧去金蝶找
+        t, _ = self.make_item(num(9673), 300, fields={"buyer_name": "测试公司", "inv_type": "travel", "deductible": 0})
+        self.assertNotIn(t, {i["id"] for i in V._active_items()})
+        self.assertTrue(self.ok(self.get("/api/inv/ledger?size=200&q=" + num(9673), "acct"))["rows"][0]["noBook"])
+        self.S.item_update(self.e, t, deductible=1)
+        self.assertIn(t, {i["id"] for i in V._active_items()})
+        # 台账筛选「票总管」：记了「票总管已有」的算在
+        self.S.item_update(self.e, b, deduct_status="other")
+        yes = {r["id"] for r in self.ok(self.get("/api/inv/ledger?size=500&other=yes", "acct"))["rows"]}
+        no = {r["id"] for r in self.ok(self.get("/api/inv/ledger?size=500&other=no", "acct"))["rows"]}
+        self.assertIn(b, yes)
+        self.assertNotIn(b, no)
+        self.assertIn(t, no)
 
     def test_audit_records_paper_and_voucher_before_approval(self):
         iid, _ = self.make_item(num(9745), 321, approve=False)
@@ -1536,7 +1549,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(self.get("/api/inv/deduct/download?token=%s" % j["token"], "viewer").status_code, 403)
         r = self.get("/api/inv/deduct/download?token=%s" % j["token"], "acct")
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertIn(quote("增值税发票勾选抵扣_"), r.headers["content-disposition"])
+        self.assertIn(quote("增值税发票勾选认证-"), r.headers["content-disposition"])          # V2.972 文件名：增值税发票勾选认证-做账月份-导出人
         from openpyxl import load_workbook
         ws = load_workbook(io.BytesIO(r.content))["invoices"]
         vals = [[x or "" for x in row] for row in ws.values]
@@ -1795,6 +1808,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
         for _ in range(2):
             r = self.get("/api/inv/deduct/download?token=%s" % j["token"], "acct")
             self.assertEqual((r.status_code, r.content[:2]), (200, b"PK"), r.text[:200])
+        from urllib.parse import quote as _q
+        self.assertIn(_q("增值税发票勾选认证-202304-acct.xlsx"), r.headers.get("content-disposition", ""))     # V2.972 文件名
         lists = self.ok(self.get("/api/inv/ticklists", "acct"))["rows"]
         self.assertEqual(len(lists), n0 + 1)
         lst = lists[0]

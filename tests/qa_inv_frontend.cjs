@@ -1118,7 +1118,8 @@ test('V2.970 对纸质票·用手机扫：弹窗里写清手机连没连上；�
   }
   const { page, ctx } = await open(browser, B, api)
   await mount(page, 'InvAudit', { user: { name: '测试会计' } })
-  await page.getByRole('button', { name: '对纸质票', exact: true }).click()
+  // 点验已经开着时按钮写「接着对（0/1）」：两种都认（原来只认「对纸质票」，接口回得快时偶尔找不到按钮）
+  await page.getByRole('button', { name: /^(对纸质票|接着对)/ }).first().click()
   const dlg = page.locator('.inv-modal').filter({ has: page.locator('.inv-ck') })
   const strip = dlg.locator('.inv-ck-phone')
   await strip.getByText('用手机扫').waitFor()

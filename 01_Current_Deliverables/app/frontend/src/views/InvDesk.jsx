@@ -578,19 +578,24 @@ function ItemModal({ items, id, canEdit, onClose, onPick, reload, flash }) {
   const viewH = Math.max(360, Math.min(620, (window.innerHeight || 800) - 230))
   const run = async (key, fn, okText) => {
     setBusy(key); setActErr('')
-    try { await fn(); if (okText) flash(okText, 'ok'); await reload(); return true } catch (e) { setActErr(e.message || String(e)); return false } finally { setBusy('') }
+    try { const r = await fn(); const t = typeof okText === 'function' ? okText(r) : okText; if (t) flash(t, 'ok'); await reload(); return true } catch (e) { setActErr(e.message || String(e)); return false } finally { setBusy('') }
   }
   const remove = () => {
     if (!window.confirm('把这张票从票夹里移除？移除后不算进这张单，操作会留痕。')) return
     run('remove', () => invItemRemove(item.id), '已移除').then(ok => { if (ok) onClose() })   // 失败时留在弹窗里看原因
   }
   const title = `第 ${idx + 1} 张 · ${item.kind === 'other' ? '非发票附件' : (item.typeLabel || '票据')}${item.number ? ' · ' + item.number : ''}`
+  // V2.972：没拆开的压缩包（rar / 7z / zip）——给「拆开压缩包认票」
+  const isArchive = item.kind === 'other' && /\.(rar|7z|zip)$/i.test((item.file && item.file.name) || '')
   return (
     <Modal title={title} onClose={onClose} width={1180}
       footer={<>
         {actErr && <span className="inv-dk-err-in inv-dk-foot-err">{actErr}</span>}
-        {editable && <button type="button" className="btn" disabled={!!busy || !item.file} onClick={() => run('re', () => invItemReprocess(item.id), '已重新送去识别，几秒后刷新')}
-          title={item.file ? '重新读一遍这张票（识别失败或读错时用）' : '只有二维码信息，没有图片可识别'}>{busy === 're' ? '提交中…' : '重新识别'}</button>}
+        {editable && (isArchive
+          ? <button type="button" className="btn primary" disabled={!!busy} onClick={() => run('re', () => invItemReprocess(item.id), r => (r && r.msg) || '压缩包拆开了')}
+              title="把压缩包拆开，里面的发票逐张登记进这个票夹（压缩包原件照样留着）">{busy === 're' ? '正在拆…' : '拆开压缩包认票'}</button>
+          : <button type="button" className="btn" disabled={!!busy || !item.file} onClick={() => run('re', () => invItemReprocess(item.id), '已重新送去识别，几秒后刷新')}
+              title={item.file ? '重新读一遍这张票（识别失败或读错时用）' : '只有二维码信息，没有图片可识别'}>{busy === 're' ? '提交中…' : '重新识别'}</button>)}
         {editable && <button type="button" className="btn inv-dk-danger" disabled={!!busy} onClick={remove}>{busy === 'remove' ? '移除中…' : '移除'}</button>}
         <button type="button" className="btn primary" onClick={onClose}>关闭</button>
       </>}>

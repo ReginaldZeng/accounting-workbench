@@ -690,7 +690,11 @@ def book_month_of(it):
 
 def no_book(it):
     """普票不入账：普票不做进项认证，金蝶里不会有「转待认证 发票号」的凭证——台账写「普票不入账」，刷新金蝶凭证也不去查它。"""
-    return (it or {}).get("kind") == "invoice" and (it or {}).get("inv_type") == "normal"
+    # V2.972：旅客运输服务（电子发票·普通发票）会计判了不可抵扣的也算——用户 2026-10-14「这些是普票啊」（货拉拉的票）
+    it = it or {}
+    if it.get("kind") != "invoice":
+        return False
+    return it.get("inv_type") == "normal" or (it.get("inv_type") == "travel" and it.get("deductible") in (0, False))
 
 
 def voucher_labels_of(it):
@@ -3792,6 +3796,23 @@ async def item_rotate(iid: int, request: Request):
     return {"ok": True, "item": item_view(S.item_get(e, iid))}
 
 
+def _reingest_archive(folder, it, data, user):
+    """V2.972：以前拆不开、被当成「非发票附件」的压缩包（rar / 7z，或当时坏了的 zip）→ 重新拆开，里面的文件逐个进这个票夹。
+    压缩包本身那一行照旧留着（原件可下载）；里面同一份文件再拆一次会被「已放进来过」挡掉，点几次都不会重复登记。→ (结果列表, 中文小结)。"""
+    files = ip.unpack_zip(data, max_total=MAX_TOTAL)
+    out = [_res(it.get("number") or "压缩包", "error", w) for w in (getattr(files, "warnings", None) or [])]
+    if not files:
+        return out, "压缩包里没有能用的文件" + ("：" + "；".join(getattr(files, "warnings", None) or []) if getattr(files, "warnings", None) else "")
+    budget = {"left": MAX_TOTAL - sum(len(b) for _n, b in files)}
+    for n, b in files:
+        out.extend(ingest_bytes(folder["id"], n, b, it.get("origin") or "attachment", user, _depth=1, budget=budget))
+    _route_results(folder["id"], out, user)
+    got = sum(1 for r in out if r.get("action") == "item")
+    same = sum(1 for r in out if r.get("action") == "same")
+    msg = "压缩包拆开了：%d 个文件，新登记 %d 张" % (len(files), got) + ("，%d 个之前拆过" % same if same else "")
+    return out, msg
+
+
 @router.post("/api/inv/item/{iid}/reprocess")
 async def item_reprocess(iid: int, request: Request):
     u, bad = need(request)
@@ -3805,6 +3826,14 @@ async def item_reprocess(iid: int, request: Request):
         return g
     if not it.get("file_id"):
         return err("只有二维码、没有图片的票不用重新识别", 400)
+    f = S.file_get(e, it["file_id"]) if it.get("kind") == "other" else None
+    head = read_file_bytes(f) if f else None
+    if head and ip.sniff_type(f.get("name") or "", head) == "zip":       # 压缩包：拆开认票，不是重新 OCR
+        rs, msg = await run_in_threadpool(_reingest_archive, folder, it, head, u["name"])
+        log(u, "拆开压缩包认票", it["folder_id"], iid, it.get("later_id"), {"file": f.get("name") or "", "msg": msg})
+        audit(u, "拆开压缩包认票", "票夹#%d %s" % (it["folder_id"], f.get("name") or ""), msg)
+        await run_in_threadpool(attach_views, rs)
+        return {"ok": True, "archive": True, "msg": msg, "results": rs, "item": item_view(S.item_get(e, iid))}
     S.item_update(e, iid, proc_status="pending", proc_tries=0, proc_error="")
     wake()
     log(u, "重新识别", it["folder_id"], iid, it.get("later_id"))

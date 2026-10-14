@@ -437,6 +437,43 @@ class TestSniffZip(unittest.TestCase):
         files2, warns = ip.unpack_zip_ex(buf.getvalue())
         self.assertEqual(sorted(n for n, _ in files2), sorted(names))
 
+    def test_unpack_rar_7z_via_unar(self):
+        """V2.972：rar / 7z 认成压缩包；借 lsar 列目录、unar 解开（这里用假工具）：加密的、超大的、往外跳目录的都跳过，套娃 zip 照拆。"""
+        import os
+        from unittest import mock
+        rar = b"Rar!\x1a\x07\x01\x00" + b"x" * 200
+        self.assertEqual(ip.sniff_type("8月电商货拉拉.rar", rar), "zip")
+        self.assertEqual(ip.sniff_type("a.7z", b"7z\xbc\xaf\x27\x1c" + b"x" * 50), "zip")
+        inner = self._zip([("里层发票.pdf", b"%PDF-1.4 inner")])
+        content = {"8月/发票1.pdf": b"%PDF-1.4 one", "8月/支付记录.jpg": b"\xff\xd8\xff jpg", "8月/套娃.zip": inner,
+                   "8月/加密.pdf": b"%PDF-1.4 enc", "8月/大文件.pdf": b"%PDF" + b"x" * 3000, "../逃出去.pdf": b"%PDF-1.4 bad"}
+        entries = [{"index": i, "name": n, "size": len(b), "packed": len(b), "dir": False, "enc": n.endswith("加密.pdf")}
+                   for i, (n, b) in enumerate(content.items())] + [{"index": 99, "name": "8月", "size": 0, "packed": 0, "dir": True, "enc": False}]
+
+        def fake_extract(path, outdir, indexes):
+            for x in entries:
+                if x["index"] in indexes and not x["dir"]:
+                    parts = [p for p in x["name"].split("/") if p not in ("..", ".")]
+                    fp = os.path.join(outdir, *parts)
+                    os.makedirs(os.path.dirname(fp), exist_ok=True)
+                    with open(fp, "wb") as fh:
+                        fh.write(content[x["name"]])
+        with mock.patch.object(ip, "_ext_list", return_value=entries), mock.patch.object(ip, "_ext_extract", side_effect=fake_extract):
+            files = ip.unpack_zip(rar, max_file=2000)
+        got = dict(files)
+        self.assertEqual(got.get("8月/发票1.pdf"), b"%PDF-1.4 one")
+        self.assertIn("8月/支付记录.jpg", got)
+        self.assertIn("8月/套娃.zip/里层发票.pdf", got)
+        self.assertNotIn("8月/加密.pdf", got)
+        self.assertNotIn("8月/大文件.pdf", got)
+        self.assertTrue(any("密码" in w for w in files.warnings), files.warnings)
+        self.assertTrue(any("大文件" in w for w in files.warnings), files.warnings)
+        # 服务器上没装工具：提示解开后再传，不报错
+        with mock.patch.object(ip, "_unar_tools", return_value=(None, None)):
+            files = ip.unpack_zip(rar)
+        self.assertEqual(list(files), [])
+        self.assertTrue(any("解开后再传" in w for w in files.warnings), files.warnings)
+
     def test_unpack_limits(self):
         lvl3 = self._zip([("deep.pdf", b"%PDF-1.4")])
         lvl2 = self._zip([("l3.zip", lvl3)])

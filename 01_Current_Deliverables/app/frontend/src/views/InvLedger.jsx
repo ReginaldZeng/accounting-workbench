@@ -93,11 +93,11 @@ function NoPerm({ what }) {
 
 // ───────────────────────── 页签 1：台账查询 ─────────────────────────
 
-const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', booked: '', subject: '', month: '', paper: '', withVoid: false }
+const EMPTY_FILTER = { from: '', to: '', q: '', invType: '', verify: '', deduct: '', seller: '', booked: '', subject: '', month: '', paper: '', other: '', withVoid: false }
 // 台账只放审核通过的票；勾「含作废」＝已通过＋已作废（withvoid）。后端的 'all'（连草稿/待审都算）只给内部用，这页不发。
 export const toParams = f => ({
   from: f.from, to: f.to, q: f.q.trim(), invType: f.invType, verify: f.verify, deduct: f.deduct,
-  seller: f.seller.trim(), booked: f.booked, subject: f.subject, month: f.month, paper: f.paper, review: f.withVoid ? 'withvoid' : '',
+  seller: f.seller.trim(), booked: f.booked, subject: f.subject, month: f.month, paper: f.paper, other: f.other || '', review: f.withVoid ? 'withvoid' : '',
 })
 // 作废提示里带着税务动作（进项税额转出 / 撤销勾选）时要留在页面上，不能 2 秒就消失
 export const voidNeedsTaxAction = msg => /转出|撤销/.test(String(msg || ''))
@@ -149,6 +149,8 @@ function FilterBar({ f, setF, exportUrl, total, subjects, refresh, refreshing, r
           {DEDUCT_OPTS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
       </label>
+      <label>票总管<select value={f.other} onChange={e => set('other', e.target.value)} title="过渡期：这张票是不是票总管那边也有（记了「票总管已有」或在传过的票总管清单里）">
+        <option value="">全部</option><option value="yes">在票总管</option><option value="no">不在票总管</option></select></label>
       <label>做账<select value={f.booked} onChange={e => set('booked', e.target.value)}><option value="">全部</option><option value="unknown">未匹配 / 待刷新</option><option value="unbooked">未做账</option><option value="booked">已做账</option></select></label>
       <label>纸质票<select value={f.paper} onChange={e => set('paper', e.target.value)}><option value="">全部</option><option value="received">已收到</option><option value="missing">未收到</option></select></label>
       <label className="inv-lg-ck"><input type="checkbox" checked={f.withVoid} onChange={e => set('withVoid', e.target.checked)} />含作废</label>

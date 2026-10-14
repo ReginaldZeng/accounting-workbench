@@ -1245,6 +1245,13 @@ def _split_scaled(col, t=ITEM):
                  col * t.c.alloc / t.c.total), else_=col)
 
 
+def no_book_cond(t=None):
+    """「普票不入账」的票（同 routers.invoice.no_book）：增值税普通发票；旅客运输服务普票会计判了不可抵扣的也算。"""
+    t = ITEM if t is None else t
+    it = func.coalesce(t.c.inv_type, "")
+    return and_(t.c.kind == "invoice", or_(it == "normal", and_(it == "travel", t.c.deductible == 0)))
+
+
 def ledger_query(e, filters, page=1, size=50):
     """发票台账 → (total, sums{amount,tax,total}, rows)。
     filters 键：q（号码/销方/申请人/审批编号/票夹标题）、date_from/date_to（开票日期）、inv_type、verify（''或'unset'＝未验）、
@@ -1345,7 +1352,12 @@ def _ledger_conds(filters):
     if booked in ("booked", "unbooked", "unknown"):
         conds.append(book_status == booked)
         if booked == "unknown":          # 普票不入账，不算「未匹配 / 待刷新」
-            conds.append(not_(and_(ITEM.c.kind == "invoice", func.coalesce(ITEM.c.inv_type, "") == "normal")))
+            conds.append(not_(no_book_cond()))
+    oth = g("other")                     # 票总管：在不在票总管那边（记了「票总管已有」，或票号在传过的票总管清单里且没被人取消）
+    if oth in ("yes", "no"):
+        in_other = or_(ITEM.c.deduct_status == "other",
+                       ITEM.c.dup_key.in_(select(OTHER.c.dup_key).where(func.coalesce(OTHER.c.off, 0) == 0)))
+        conds.append(in_other if oth == "yes" else not_(in_other))
     s = g("seller")
     if s:
         conds.append(or_(_like(ITEM.c.seller_name, s), _like(ITEM.c.seller_tax_id, s)))

@@ -21,7 +21,11 @@ import re
 import codecs
 import math
 import time
+import json
+import shutil
 import zipfile
+import tempfile
+import subprocess
 import threading
 import posixpath
 import datetime
@@ -344,7 +348,8 @@ def normalize_name(s):
 # ---------------------------------------------------------------------------
 # 3. 文件类型嗅探 / 压缩包
 # ---------------------------------------------------------------------------
-_EXT_TYPES = {"pdf": "pdf", "ofd": "ofd", "xml": "xml", "zip": "zip", "xlsx": "excel", "xls": "excel",
+# rar / 7z 也归「zip」（＝压缩包，交给 unpack_zip 拆）：调用方只认 "zip" 这一个压缩包类型
+_EXT_TYPES = {"pdf": "pdf", "ofd": "ofd", "xml": "xml", "zip": "zip", "rar": "zip", "7z": "zip", "xlsx": "excel", "xls": "excel",
               "xlsm": "excel", "et": "excel", "jpg": "image", "jpeg": "image", "png": "image",
               "bmp": "image", "webp": "image", "gif": "image", "tif": "image", "tiff": "image",
               "heic": "image", "heif": "image"}
@@ -382,12 +387,27 @@ def _open_zip(data):
     return zipfile.ZipFile(bio)
 
 
+_RAR_MAGIC = (b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")
+_7Z_MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+
+def _ext_archive(head):
+    """文件头是 rar / 7z → 'rar' / '7z'；别的 → ''。"""
+    if head.startswith(_RAR_MAGIC):
+        return "rar"
+    if head.startswith(_7Z_MAGIC):
+        return "7z"
+    return ""
+
+
 def sniff_type(name, data):
-    """先看文件头魔数，再看扩展名。OFD 本质是 zip，里面有 OFD.xml。"""
+    """先看文件头魔数，再看扩展名。OFD 本质是 zip，里面有 OFD.xml。rar / 7z 也回 "zip"（压缩包）。"""
     head = bytes(data[:2048]) if data else b""
     ext = os.path.splitext(name or "")[1].lower().lstrip(".")
     if b"%PDF-" in head[:1024]:
         return "pdf"
+    if _ext_archive(head):
+        return "zip"
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
         try:
             with _open_zip(data) as z:
@@ -447,6 +467,49 @@ def _mb_text(n):
     return ("%d" % (n // _MB)) if n >= _MB else ("%.2f" % (n / float(_MB)))
 
 
+# ---- rar / 7z：借服务器上的 The Unarchiver（lsar 列目录、unar 解开）。没装就提示解开后再传 ----
+_UNAR_TIMEOUT = 60
+
+
+def _unar_tools():
+    """(lsar 路径, unar 路径)；有一个找不到 → (None, None)。"""
+    ls, un = shutil.which("lsar"), shutil.which("unar")
+    return (ls, un) if ls and un else (None, None)
+
+
+def _ext_list(path):
+    """lsar -j 列目录 → [{index, name, size, packed, dir, enc}]；列不出来抛 ValueError（中文）。"""
+    ls, _un = _unar_tools()
+    if not ls:
+        raise ValueError("服务器上没有解 rar / 7z 的工具，请把压缩包解开后再传")
+    try:
+        cp = subprocess.run([ls, "-j", path], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=_UNAR_TIMEOUT)
+        js = json.loads(cp.stdout.decode("utf-8", "replace") or "{}")
+    except subprocess.TimeoutExpired:
+        raise ValueError("压缩包列目录超时，没有展开")
+    except Exception:
+        raise ValueError("压缩包损坏，打不开")
+    out = []
+    for x in js.get("lsarContents") or []:
+        out.append({"index": int(x.get("XADIndex", len(out))), "name": str(x.get("XADFileName") or ""),
+                    "size": int(x.get("XADFileSize") or 0), "packed": int(x.get("XADCompressedSize") or 0),
+                    "dir": bool(x.get("XADIsDirectory")), "enc": bool(x.get("XADIsEncrypted"))})
+    return out
+
+
+def _ext_extract(path, outdir, indexes):
+    """unar 把指定条目解到 outdir（不另套一层目录、不问密码）；失败抛 ValueError。"""
+    _ls, un = _unar_tools()
+    if not un:
+        raise ValueError("服务器上没有解 rar / 7z 的工具，请把压缩包解开后再传")
+    cmd = [un, "-q", "-f", "-D", "-p", "", "-o", outdir, path, "-i"] + [str(i) for i in indexes]
+    try:
+        subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=_UNAR_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise ValueError("压缩包解开超时，没有处理完")
+
+
 def unpack_zip_ex(data, max_depth=2, max_total=200 * 1024 * 1024, max_file=25 * 1024 * 1024, max_count=500):
     """解开压缩包（含套娃）→ (files, warnings)。files=[(相对路径名, bytes)]，套娃里的文件名
     带上外层包名前缀（"外层.zip/里面/发票.pdf"），分隔符统一 "/"。跳过 __MACOSX、.DS_Store、目录；
@@ -464,7 +527,92 @@ def unpack_zip_ex(data, max_depth=2, max_total=200 * 1024 * 1024, max_file=25 * 
         else:
             state["hidden"] += 1
 
+    def take(b, base, full, depth):
+        """解出来的一个文件：套娃压缩包往里拆，别的收下。"""
+        if sniff_type(base, b) == "zip":
+            if depth < max_depth:
+                walk(b, full + "/", depth + 1)
+            else:
+                warn("压缩包套了超过 %d 层，里层没有展开：%s" % (max_depth, full))
+            return
+        files.append((full, b))
+
+    def walk_ext(blob, prefix, depth):
+        """rar / 7z：先列目录按自报大小把关，再把要的条目一次解到临时目录逐个读。"""
+        tmp = tempfile.mkdtemp(prefix="inv_unar_")
+        try:
+            src = os.path.join(tmp, "in.bin")
+            with open(src, "wb") as fh:
+                fh.write(blob)
+            try:
+                entries = _ext_list(src)
+            except ValueError as e:
+                warn(("%s：%s" % (e, prefix.rstrip("/"))) if prefix else str(e))
+                return
+            want, planned = [], 0
+            for x in entries:
+                name = x["name"].replace("\\", "/")
+                parts = [p for p in name.split("/") if p and p not in (".", "..")]
+                if x["dir"] or not parts:
+                    continue
+                state["seen"] += 1
+                if state["seen"] > max_count * 4:
+                    warn("压缩包里文件超过 %d 个，后面的文件没有处理" % max_count)
+                    state["stop"] = True
+                    break
+                base = parts[-1]
+                if "__MACOSX" in parts or base in (".DS_Store", "Thumbs.db", "desktop.ini") or base.startswith("._"):
+                    continue
+                full = prefix + "/".join(parts)
+                if x["enc"]:
+                    warn("文件加了密码，跳过：" + full)
+                    continue
+                if x["size"] > max_file:
+                    warn("单个文件超过 %dMB，跳过：%s" % (max_file // _MB, full))
+                    continue
+                packed = max(min(x["packed"] or len(blob), len(blob)), 1)
+                if x["size"] > _ZIP_RATIO_MIN and x["size"] > _ZIP_MAX_RATIO * packed:
+                    warn("文件压缩得异常小（解开后是压缩前的 %d 倍以上，疑似恶意压缩包），跳过：%s" % (_ZIP_MAX_RATIO, full))
+                    continue
+                if state["total"] + planned + x["size"] > limit:
+                    warn("压缩包解开后超过 %sMB，后面的文件没有处理" % _mb_text(limit))
+                    state["stop"] = True
+                    break
+                if len(files) + len(want) >= max_count:
+                    warn("压缩包里文件超过 %d 个，后面的文件没有处理" % max_count)
+                    state["stop"] = True
+                    break
+                planned += x["size"]
+                want.append((x, parts, base, full))
+            if not want:
+                return
+            out = os.path.join(tmp, "out")
+            os.makedirs(out, exist_ok=True)
+            try:
+                _ext_extract(src, out, [w[0]["index"] for w in want])
+            except ValueError as e:
+                warn(("%s：%s" % (e, prefix.rstrip("/"))) if prefix else str(e))
+                return
+            root = os.path.realpath(out)
+            for x, parts, base, full in want:
+                fp = os.path.realpath(os.path.join(out, *parts))
+                if not fp.startswith(root + os.sep) or not os.path.isfile(fp):
+                    warn("解压失败，跳过：" + full)
+                    continue
+                if os.path.getsize(fp) > max_file:
+                    warn("单个文件超过 %dMB，跳过：%s" % (max_file // _MB, full))
+                    continue
+                with open(fp, "rb") as fh:
+                    b = fh.read()
+                state["total"] += len(b)
+                take(b, base, full, depth)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def walk(blob, prefix, depth):
+        if _ext_archive(bytes(blob[:16])):
+            walk_ext(blob, prefix, depth)
+            return
         try:
             zf = _open_zip(blob)
         except _ZipTooBig as e:
@@ -519,13 +667,7 @@ def unpack_zip_ex(data, max_depth=2, max_total=200 * 1024 * 1024, max_file=25 * 
                     warn("单个文件超过 %dMB，跳过：%s" % (max_file // _MB, full))
                     continue
                 state["total"] += len(b)
-                if sniff_type(base, b) == "zip":
-                    if depth < max_depth:
-                        walk(b, full + "/", depth + 1)
-                    else:
-                        warn("压缩包套了超过 %d 层，里层没有展开：%s" % (max_depth, full))
-                    continue
-                files.append((full, b))
+                take(b, base, full, depth)
 
     walk(data, "", 1)
     if state["hidden"]:

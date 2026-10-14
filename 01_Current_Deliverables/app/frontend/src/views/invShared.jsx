@@ -221,7 +221,10 @@ export function itemBadges(it) {
     const [tone, label, tip] = _VERIFY[it.verify]
     out.push({ key: 'verify', label, tone, tip: it.verifyNote || tip })
   }
-  if (it.deductSuggest === 'yes') out.push({ key: 'deduct', label: '建议可抵扣', tone: 'ok', tip: it.deductReason || '按票种和项目类别给的建议，会计定' })
+  // 会计定过的写会计定的（V2.972：判了不可抵扣的旅客运输普票还写「建议可抵扣」，看着像要抵）；没定的才写系统建议
+  if (it.deductible === false || it.deductible === 0) out.push({ key: 'deduct', label: '不可抵扣', tone: 'mute', tip: '会计已判不可抵扣' })
+  else if (it.deductible === true || it.deductible === 1) out.push({ key: 'deduct', label: '可抵扣', tone: 'ok', tip: '会计已判可抵扣' })
+  else if (it.deductSuggest === 'yes') out.push({ key: 'deduct', label: '建议可抵扣', tone: 'ok', tip: it.deductReason || '按票种和项目类别给的建议，会计定' })
   return out
 }
 

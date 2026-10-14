@@ -19,7 +19,7 @@ import re
 import threading
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Request
-from sqlalchemy import select, update, or_
+from sqlalchemy import select, update, or_, not_
 from starlette.concurrency import run_in_threadpool
 from routers import invoice as inv
 from kernels import invoice_parse as ip
@@ -100,7 +100,7 @@ def _sync_items(items, rows, merge=False):
 
 def _active_items(item_id=None):
     cond = [S._item_active(), S.ITEM.c.review.in_(("pending", "approved")), S.ITEM.c.kind == "invoice",
-            or_(S.ITEM.c.inv_type.is_(None), S.ITEM.c.inv_type != "normal")]      # 普票不入账（inv.no_book），不去金蝶找
+            not_(S.no_book_cond())]      # 普票不入账（inv.no_book），不去金蝶找
     if item_id is not None:
         cond.append(S.ITEM.c.id == item_id)
     with inv.E().connect() as cx:
