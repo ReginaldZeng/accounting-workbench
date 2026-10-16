@@ -140,6 +140,23 @@ class Classify(unittest.TestCase):
         bc = lc.bill_class("孝感星期九", "仓储费-小料")
         self.assertEqual(bc["a"]["acc"], "6601")
 
+    def test_find_dups(self):
+        """两家都收运输费→标；一家运输一家装卸→不标；同家同单两行运输费→标。"""
+        rows = [{"carrier": "极鲜达", "period": "2026-08", "doc_no": "XSCKD216325", "fee_item": "运输费", "amount": 400},
+                {"carrier": "顺丰冷运", "period": "2026-08", "doc_no": "XSCKD216325", "fee_item": "冷运运费", "amount": 1223.2},
+                {"carrier": "天鹰物流", "period": "2026-08", "doc_no": "XSCKD216325", "fee_item": "装货费", "amount": 14.8},
+                {"carrier": "极鲜达", "period": "2026-08", "doc_no": "XSCKD216331", "fee_item": "运输费", "amount": 300},
+                {"carrier": "天鹰物流", "period": "2026-08", "doc_no": "XSCKD216331", "fee_item": "装货费", "amount": 10.9},
+                {"carrier": "丰源", "period": "2026-09", "doc_no": "FBDR075947", "fee_item": "出库运费", "amount": 650},
+                {"carrier": "丰源", "period": "2026-09", "doc_no": "FBDR075947", "fee_item": "出库运费", "amount": 650}]
+        d = lc.find_dups("极鲜达", rows)
+        self.assertEqual(list(d), ["XSCKD216325"])
+        self.assertEqual([x["carrier"] for x in d["XSCKD216325"]["others"]], ["顺丰冷运"])
+        self.assertEqual(lc.find_dups("丰源", rows)["FBDR075947"]["same"], [650, 650])
+        diff_car = [{"carrier": "极鲜达", "period": "2026-08", "doc_no": "FBDR075338", "fee_item": "运输费", "amount": 900},
+                    {"carrier": "极鲜达", "period": "2026-08", "doc_no": "FBDR075338", "fee_item": "运输费", "amount": 1300}]
+        self.assertEqual(lc.find_dups("极鲜达", diff_car), {})
+
     def test_merge_cfg_keeps_defaults(self):
         c = lc.merge_cfg({"stock_rules": [], "bogus": 1})
         self.assertEqual(c["stock_rules"], [])

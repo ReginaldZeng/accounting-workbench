@@ -373,7 +373,7 @@ def classify(docs_in, kd, groups_of, accr_entries, cfg, short=lambda x: x, carri
                 sc = dict(unk="几张单归类不一样", how=[h for s in scs for h in s["how"]], a=None, fee="", biz="", subj="", subj_note="", rule=None)
             bc = bill_class(d.get("subject"), d.get("annot"), sc.get("rule"), wh)
         v, txt, diff = compare(bc, sc)
-        work.append(dict(key=d["key"], amount=float(d.get("amount") or 0), bc=bc, sc=sc, v=v, txt=txt, diff=diff))
+        work.append(dict(key=d["key"], amount=float(d.get("amount") or 0), bc=bc, sc=sc, v=v, txt=txt, diff=diff, annot=d.get("annot") or ""))
     tab = crosscheck(work, accr_entries)
     out = []
     for w in work:
@@ -381,10 +381,42 @@ def classify(docs_in, kd, groups_of, accr_entries, cfg, short=lambda x: x, carri
         out.append(dict(key=w["key"], v=w["v"], txt=w["txt"], diff=w["diff"], sys=aname(sc.get("a")), sys_d=adesc(sc.get("a")),
                         bill=aname(bc.get("a")), bill_d=adesc(bc.get("a")), how=[h for h in sc.get("how") or [] if h],
                         subj_note=sc.get("subj_note") or "", unk=sc.get("unk") or "", acc_miss=w["acc_miss"], hint=w["hint"],
-                        amount=round(w["amount"], 2)))
+                        amount=round(w["amount"], 2), annot=w["annot"]))
     counts = {v: sum(1 for x in out if x["v"] == v) for v in SEV}
     amounts = {v: round(sum(x["amount"] for x in out if x["v"] == v), 2) for v in SEV}
     has_accr = any(x["accr"] for x in tab)
     return dict(docs=out, tab=tab, counts=counts, amounts=amounts, accr_ok=has_accr,
                 accr_note="" if has_accr else "本月计提一条也没取到（可能还没计提，或者金蝶没连上），计提这一环先不判",
                 accr_total=round(sum(float(e.get("amt") or 0) for e in accr_entries or [] if str(e.get("subject") or "") != "—"), 2))
+
+
+# ---------------- 怀疑重复收费(用户 2026-10-14 定：同一张单两家都收运输费、或同一家同一张单收了两趟才标；服务范围不同的不算)
+#   同一家：两行金额一模一样才算(包天包趟一车一行、车型不同金额不同，是正常的)
+NON_TRANSPORT_KW = ("卸", "装", "仓储", "冷藏", "处置", "保费", "提货", "送货", "退仓", "调配")
+
+
+def find_dups(carrier, rows, kw=NON_TRANSPORT_KW):
+    """rows：本月和上个月所有承运商的逐单明细 [{carrier, period, doc_no, fee_item, amount}]。
+    → {单号: {"others": [{carrier, period, fee_item, amount}], "same": [金额…]}}，只列本承运商有运输费、又撞上的单。"""
+    def tr(r):
+        f = str(r.get("fee_item") or "")
+        return float(r.get("amount") or 0) > 0.005 and not any(k in f for k in kw)
+    by = collections.defaultdict(list)
+    for r in rows:
+        d = str(r.get("doc_no") or "").split("+")[0].strip()
+        if d and d != "无单据" and tr(r):
+            by[d].append(r)
+    out = {}
+    for d, rs in by.items():
+        mine = [r for r in rs if r.get("carrier") == carrier]
+        if not mine:
+            continue
+        others = [r for r in rs if r.get("carrier") != carrier]
+        # 同家同单几行：包天包趟一车一行、车型不同金额就不同，是正常的；只有金额一模一样的两行才可疑(丰源 FBDR075947 两趟各 650)
+        amts = collections.Counter(round(float(r.get("amount") or 0), 2) for r in mine)
+        twin = any(n > 1 for n in amts.values())
+        if others or twin:
+            out[d] = {"others": [{"carrier": r["carrier"], "period": r.get("period"), "fee_item": r.get("fee_item") or "",
+                                  "amount": round(float(r.get("amount") or 0), 2)} for r in others],
+                      "same": [round(float(r.get("amount") or 0), 2) for r in mine] if twin else []}
+    return out

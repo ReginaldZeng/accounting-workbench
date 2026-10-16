@@ -6,6 +6,8 @@
 #   GET  /api/logistics-review/classify        一家一个月：每张单的归类结论 + 和计提对照表(30 分钟缓存，fresh=1 重取)
 #   GET  /api/logistics-review/classify-rules  对照表设置(物料分组→业务线、看不出业务线的分组、调拨仓库规则)
 #   POST /api/logistics-review/classify-rules  保存设置(存 settings 键 logi_cls_rules)；空 body.cfg = 恢复默认
+#   GET  /api/logistics-review/dups            本家本月怀疑重复收费的单(本月+上月所有承运商的运输费里撞单号)
+#   POST /api/logistics-review/dup-ok          标「不是重复」/撤销(存 settings 键 logi_dup_ok)
 import time
 
 from fastapi import APIRouter, Request
@@ -189,3 +191,54 @@ async def classify_rules_save(request: Request):
     for k in [k for k in list(LR._ACCR_CACHE) if isinstance(k, tuple) and k and k[0] == "cls"]:
         LR._ACCR_CACHE.pop(k, None)       # 各家各月的归类结果按新规则重算
     return {"ok": True, "cfg": _cfg()}
+
+
+# ---------------- 怀疑重复收费
+_DUP_OK_KEY = "logi_dup_ok"
+
+
+def _prev_period(p):
+    y, m = int(p[:4]), int(p[5:7])
+    return "%04d-%02d" % (y - 1, 12) if m == 1 else "%04d-%02d" % (y, m - 1)
+
+
+@router.get("/api/logistics-review/dups")
+def dups(request: Request, carrier: str = "", period: str = ""):
+    if not LR._perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not carrier or len(period) < 7:
+        return JSONResponse({"ok": False, "msg": "要带承运商和账期"}, status_code=400)
+    BL = LR.BL
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL.c.carrier, BL.c.period, BL.c.doc_no, BL.c.fee_item, BL.c.amount).where(
+            (BL.c.grain == "detail") & (BL.c.period.in_((period, _prev_period(period)))))).mappings().all()]
+    mine = [r for r in rows if not (r["carrier"] == carrier and r["period"] != period)]   # 本家只看本月
+    found = lc.find_dups(carrier, mine)
+    oks = db.get_setting(_DUP_OK_KEY, None) or {}
+    for d, x in found.items():
+        x["ok"] = oks.get("%s|%s|%s" % (carrier, period, d))
+    return {"ok": True, "carrier": carrier, "period": period, "docs": found,
+            "rule": "同一张单本月或上月有别家也收了运输费、或本家同一张单有两行金额一样的运输费；装卸、仓储、冷藏、保费、提货送货这些不算运输费"}
+
+
+@router.post("/api/logistics-review/dup-ok")
+async def dup_ok(request: Request):
+    u = LR._perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period, doc = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("doc") or "").strip()
+    if not (carrier and period and doc):
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期/单号"}, status_code=400)
+    lk = LR._locked(carrier, period)
+    if lk:
+        return lk
+    allm = dict(db.get_setting(_DUP_OK_KEY, None) or {})
+    k = "%s|%s|%s" % (carrier, period, doc)
+    if b.get("ok"):
+        allm[k] = {"by": LR._uname(u), "at": time.strftime("%Y-%m-%d %H:%M"), "reason": str(b.get("reason") or "")[:200]}
+    else:
+        allm.pop(k, None)
+    db.set_setting(_DUP_OK_KEY, allm, LR._uname(u))
+    db.audit(LR._uname(u), "物流复核-重复收费", "%s %s" % (carrier, period), "%s %s" % (doc, "不是重复" if b.get("ok") else "撤销"))
+    return {"ok": True, "item": allm.get(k)}

@@ -14,6 +14,8 @@ import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty,
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import { voucherLater, voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
+import { reviewClassify, reviewDups, reviewDupOk } from '../api.js'
+import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -747,6 +749,35 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewResult(carrier, period, group, page, q, dfilt).then(setD).catch(e => setMsg(e.message))
   }, [carrier, period, group, page, q, dfilt])
   useEffect(() => { load() }, [load])
+  // V2.986 第②步改版：单据在 1500 张以内的承运商(后端整家现算、缓存着)，一次取全部单据，7 张卡筛选、翻页在页面上做；
+  //   迅鸽这种几千张的(ex_all 为空)照旧按页取。归类(③)、怀疑重复收费另外两个接口取。
+  const full = !!(d && d.by_box && d.ex_all != null)
+  const [allD, setAllD] = useState(null)
+  const [kcard, setKcard] = useState(null)        // 选中的卡片 nock/ok/qty/amt/cls/dup
+  const [cpg, setCpg] = useState(1)               // 全量模式下的页码(页面上翻)
+  const [dlgK, setDlgK] = useState(null)          // 弹窗打开的那一行(dkey)
+  const [clsR, setClsR] = useState(null)          // {map:{单号:归类}, err}
+  const [dupR, setDupR] = useState(null)          // {单号: {others, same, ok}}
+  useEffect(() => {
+    if (step !== 'docs' || !full) { setAllD(null); return }
+    let alive = true
+    reviewResult(carrier, period, 'all', 1, q, dfilt, 5000).then(r => { if (alive) setAllD(r) }).catch(() => { if (alive) setAllD(null) })
+    return () => { alive = false }
+  }, [d, step, full])
+  const loadCls = (fresh = false) => reviewClassify(carrier, period, fresh)
+    .then(r => setClsR(r.ok ? { map: Object.fromEntries((r.docs || []).map(x => [x.key, x])), accr_note: r.accr_note } : { map: {}, err: r.msg || '归类没取到' }))
+    .catch(e => setClsR({ map: {}, err: e.message }))
+  const loadDups = () => reviewDups(carrier, period).then(r => setDupR(r.docs || {})).catch(() => setDupR({}))
+  useEffect(() => {
+    setClsR(null); setDupR(null); setKcard(null); setCpg(1); setDlgK(null)
+    if (step !== 'docs' || mode !== 'detail') return
+    loadCls(); loadDups()
+  }, [step, carrier, period, mode])
+  const onDupOk = (no, ok) => {
+    let reason = ''
+    if (ok) { reason = window.prompt(`${no} 不是重复收费？写一句原因（如：天鹰只装卸、确实分两车）`, ''); if (reason === null) return }
+    reviewDupOk(carrier, period, no, ok, (reason || '').trim()).then(() => { flash(ok ? `${no} 已标不是重复` : '已撤销'); loadDups() }).catch(e => flash('没记上：' + e.message))
+  }
   // 逐笔：等主表 d 到了再拉（避免与逐单取数并发争用金蝶会话把主表拖住）；后端带缓存
   const applyL = r => { setL(r); setPts(r.points || ''); setPtsSaved(r.points || '') }
   useEffect(() => {
@@ -821,7 +852,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   // 逐单手改归类(主体/费用类型)→存账单侧覆盖列→逐笔复核按新归类重算
   const saveClass = (doc_no, patch) => {
     reviewDocClassify(carrier, period, doc_no, patch)
-      .then(() => { load(); refetchL(); flash('已改归类，逐笔复核重算') })
+      .then(() => { load(); refetchL(); loadCls(); flash('已改归类，逐笔复核重算') })
       .catch(e => flash('归类保存失败：' + e.message))
   }
   // 待下月扣回(V2.894)：这张单确认是供应商多收了，这个月账单发票不改，等后面月份账单扣回——登记在这里，后面月份会提醒去核
@@ -943,8 +974,14 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   }
   const c = (d && d.counts) || {}
   const dc = (d && d.by_box && d.doc_counts) || null        // 逐单按真实核对结果的计数（物料模板承运商）
-  const toggle = no => setOpen(o => ({ ...o, [no]: !o[no] }))
-  const docs = (d && d.docs) || []
+  const cmap = (clsR && clsR.map) || {}
+  const CPS = 50
+  const fdocs = full && allD ? (allD.docs || []).filter(x => !kcard || KPRED[kcard](x, cmap, dupR || {})) : null   // 全量模式：卡片筛过的整张清单
+  const docs = fdocs ? fdocs.slice((cpg - 1) * CPS, cpg * CPS) : ((d && d.docs) || [])
+  const kk = x => (x.lid != null ? 'l' + x.lid : `${x.doc_no || ''}|${x.subject}|${x.fee_item}|${x.doc_fee}`)   // 弹窗认行用(跨页也稳)
+  const dlist = fdocs || docs
+  const dlgI = dlgK ? dlist.findIndex(x => kk(x) === dlgK) : -1
+  const dlgX = dlgI >= 0 ? dlist[dlgI] : null
   // 勾选/展开按账单行认(lid)：同一张调拨单账单上常有几行(按车次收费)，按单号认会把几行并成一行、漏算运费。快照存统计要用的量，翻页不丢
   // 逐单页主体/费用类型/产品线带金蝶编码，和第①步逐笔计提同一套(后端 codes，用户 2026-10-01「产品线应该和外面对齐」)
   const cds = (d && d.codes) || {}
@@ -981,8 +1018,6 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewDocConfirm(carrier, period, nos, on).then(r => { flash(on ? `已确认 ${r.n} 张单据` : `已取消确认 ${r.n} 张`); setSel({}); load() })
       .catch(e => flash('操作失败：' + e.message)).finally(() => setBusy(''))
   }
-  const allOpen = docs.length > 0 && docs.every((x, i) => open[dkey(x, i)])
-  const setAll = v => setOpen(v ? Object.fromEntries(docs.map((x, i) => [dkey(x, i), true])) : {})
   const lrows = (L && L.rows) || []
   // 归类下拉(V2.788)：主体＝固定三家(总览表头那三家)＋本家账单里出现过的；费用类型＝规范六类。原来是带提示的输入框，只会提示当前那个值，选不到别的主体
   const subjOpts = [...new Set([...((ov && ov.subjects) || []), ...lrows.filter(r => r.kind !== 'gtotal').map(r => r.subject)].filter(Boolean))]
@@ -1236,6 +1271,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv table.mini{font-size:12.5px}.lrv table.mini th{background:#FAFBFC}.lrv table.mini td,.lrv table.mini th{padding:5px 10px}
       .lrv table.mini tr.pack td{color:#8A96A2}
       @media(max-width:900px){.lrv .verdict{grid-template-columns:1fr 1fr}.lrv .sumstrip{grid-template-columns:1fr 1fr}}
+      ${LDD_CSS}
       `}</style>
 
       <div className="head">
@@ -1536,7 +1572,14 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {dfilt && dfilt.from === 'lines' && <div className="dfilt">只看：<b>{dfilt.label}</b>（从逐笔计提复核点进来）
             <button className="btn sm" onClick={clearDfilt}>✕ 看全部单据</button>
             <button className="btn sm" onClick={() => setStep('lines')}>‹ 回逐笔计提复核</button></div>}
-          {d && d.by_box && dc && <div className="dq">
+          {full && allD && <DocCards docs={allD.docs || []} cls={cmap} dups={dupR || {}} totalBill={d.total_bill} cur={kcard} clsErr={clsR && clsR.err}
+            nodoc={((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)}
+            onPick={k => { setKcard(k); setCpg(1) }} />}
+          {full && allD && (kcard || (clsR && (clsR.err || clsR.accr_note))) && <div className="adjnote">
+            {kcard && <>只看：<b>{KNAME[kcard]}</b>（{nDocs(fdocs || [])} 张）<button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setKcard(null); setCpg(1) }}>看全部</button>　</>}
+            {clsR && clsR.err && <span className="diffbad">归类没取到：{clsR.err}　<button className="lnk" onClick={() => loadCls(true)}>重取</button></span>}
+            {clsR && !clsR.err && clsR.accr_note && <span className="dim">{clsR.accr_note}　<button className="lnk" onClick={() => loadCls(true)}>重取</button></span>}</div>}
+          {d && d.by_box && dc && !(full && allD) && <div className="dq">
             {DOC_Q.map(g =>
               <button key={g.f} className={'dqchip ' + g.cls + (g.f === group ? ' on' : '')} title={g.dd}
                 onClick={() => { setGroup(g.f); setPage(1); setOpen({}) }}>{g.n}<b>{dc[g.k] || 0}</b></button>)}
@@ -1544,8 +1587,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <span className="dim" style={{ fontSize: 12 }}>账单合计 <b className="mono" style={{ color: 'var(--accent)', fontSize: 13 }}>{money(d.total_bill)}</b></span>
           </div>}
           <div className="toolbar">
-            <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{d ? d.detail_total : 0}</b> {d && d.by_box ? (d.detail_docs != null && d.detail_docs !== d.detail_total ? <>行 · <b>{d.detail_docs}</b> 张单据</> : '张单据') : '行'}</span>
-            {d && d.by_box && docs.length > 0 && <button className="btn sm" onClick={() => setAll(!allOpen)}>{allOpen ? '全部收起' : '全部展开'}</button>}
+            {fdocs ? <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{nDocs(fdocs)}</b> 张单据{fdocs.length !== nDocs(fdocs) ? `（账单 ${fdocs.length} 行）` : ''}{kcard ? ` · ${KNAME[kcard]}` : ''}</span>
+              : <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{d ? d.detail_total : 0}</b> {d && d.by_box ? (d.detail_docs != null && d.detail_docs !== d.detail_total ? <>行 · <b>{d.detail_docs}</b> 张单据</> : '张单据') : '行'}</span>}
             {d && d.by_box && d.facets && <>
               {[['fsub', 'subject', '全部主体'], ['ffee', 'fee', '全部费用类型'], ['fbiz', 'biz', '全部产品线']].map(([k, fk, all]) => {
                 const cur = (dfilt && dfilt[k]) || ''
@@ -1621,13 +1664,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   <th className="ck"><input type="checkbox" title="全选本页" checked={pageAllOn}
                     ref={el => { if (el) el.indeterminate = !pageAllOn && pageSomeOn }} onChange={togglePage} /></th>
                   <th></th><th>单据号</th><th>主体 · 费用类型</th><th>产品线</th><th>往来（客户/仓库）</th>
-                  <th className="num">账单量 <small>/ 金蝶</small></th><th className="num">换算系数</th><th>核对结论</th>
+                  <th className="num">账单量 <small>/ 金蝶</small></th><th className="num">换算系数</th><th>核对结论</th><th>③ 归类</th>
                   <th className="num">运费</th><th className="num">单位运费<small>元/kg</small></th><th className="num">费比<small> / 销售额</small></th><th>备注</th>
                 </tr></thead>
                 <tbody>
                   {docs.map((x, i) => {
                     const rk = dkey(x, i)
-                    const isO = !!open[rk]
                     const on = !!sel[dkey(x, i)]
                     const cf = x.confirmed
                     const [pl, pc] = STATE_PILL[x.state] || [null, 'neu']
@@ -1638,13 +1680,14 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     const qd = x.q_diff
                     const ps = x.parties || []
                     return [
-                      <tr key={rk + '|r'} className={'drow st-' + x.state + (isO ? ' open' : '') + (cf ? ' rowok' : '') + (on ? ' rowsel' : '')} onClick={() => toggle(rk)}>
+                      <tr key={rk + '|r'} className={'drow st-' + x.state + (dlgK === kk(x) ? ' ldd-cur' : '') + (cf ? ' rowok' : '') + (on ? ' rowsel' : '')} onClick={() => setDlgK(kk(x))} title="点开看这张单的明细">
                         <td className="ck" onClick={e => e.stopPropagation()}><input type="checkbox" checked={on} onChange={() => toggleSel(x, i)} /></td>
-                        <td className="caret">{isO ? '▾' : '▸'}</td>
+                        <td className="caret">›</td>
                         <td><span className="mono">{x.doc_no || '—'}</span><span className="sub">{x.n_mat ? `${x.n_mat} 个物料` : (x.doc_no ? '金蝶无此单据' : '无单据')}</span></td>
                         <td><Cd c={cdBook(x.subject)} />{x.subject}<span className="sub">{(() => { const f = cdFee(x.subject, x.fee_item); return f ? <><Cd c={f[0]} />{f[1]}</> : x.fee_item })()}</span>
-                          {x.fee_chk === 'diff' && <span className="sub fchk bad" title="物流部填的费用类型和系统按金蝶单据判的不一样，请双方核对">物流部填 {x.fee_fill} ≠ 系统判 {x.fee_sys}</span>}
-                          {x.fee_chk === 'nofill' && <span className="sub fchk" title="规范第4列「费用类型」每行必填">物流部未填 · 系统判 {x.fee_sys}</span>}
+                          {/* V2.986：「物流部填 ≠ 系统判」(V2.735 只比费用类型)由「③ 归类」一列接替(比到主体/业务线/计提列)，这里不再重复写；全量模式外(迅鸽)照旧显示 */}
+                          {!fdocs && x.fee_chk === 'diff' && <span className="sub fchk bad" title="物流部填的费用类型和系统按金蝶单据判的不一样，请双方核对">物流部填 {x.fee_fill} ≠ 系统判 {x.fee_sys}</span>}
+                          {!fdocs && x.fee_chk === 'nofill' && <span className="sub fchk" title="规范第4列「费用类型」每行必填">物流部未填 · 系统判 {x.fee_sys}</span>}
                           {/* V2.918(用户「这个原因也是好奇怪」)：人工定的原因原来每一行都整句写出来，一家几百行全是同一句话——改成只标「人工定 · 有原因」，原因放悬停；点开这一行还能看到全文 */}
                           {(x.subj_ovr || x.fee_chk === 'manual' || x.ovr_reason) && <span className="sub fchk man hov"
                             title={'这张单的归类是人工定的（特批等），以人工定的为准，不再和系统判的比。' + (x.ovr_reason ? '\n原因：' + x.ovr_reason : '')}>
@@ -1662,7 +1705,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                             {x.suggest && x.state === 'qtydiff' && <span className="sub sugg" title={x.suggest.txt + '。点「采纳」就把这一张改成这种核法并重判；不点不会改'}>
                               建议{x.suggest.mode === 'box' ? '按箱数核' : '按重量核'}：{x.suggest.txt}
                               {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={e => { e.stopPropagation(); saveMode(x.doc_no, x.suggest.mode) }}>采纳</button>}</span>}
-                            {x.trip && <span className={'sub' + (x.trip.verdict === 'ok' ? '' : ' diffbad')} title={x.trip.msg}>{x.trip.msg}</span>}</>}</td>
+                            {x.trip && <span className={'sub' + (x.trip.verdict === 'ok' ? '' : ' diffbad')} title={x.trip.msg}>{x.trip.msg}</span>}</>}
+                          {dupR && dupR[x.doc_no] && !dupR[x.doc_no].ok && <span className="sub diffbad" title="同一张单别家也收了运输费、或本家收了不止一行运输费；点开这张单看明细">怀疑重复收费</span>}</td>
+                        <td><ClsCell c={x.doc_no ? cmap[x.doc_no] : null} onOpen={() => setDlgK(kk(x))} /></td>
                         <td className="num">{money(x.doc_fee)}{x.trips > 1 && <span className="sub" title="同一单号账单上有几行(包天包趟一车一行)，单位运费/费比按本单合计算">共 {x.trips} 行 · 合计 {money(x.doc_fee_all)}</span>}
                           {x.sub_fees && Object.keys(x.sub_fees).filter(k => typeof x.sub_fees[k] === 'number').length > 1 &&
                             <span className="sub" title={'费用构成：' + Object.entries(x.sub_fees).map(([k, v]) => `${k} ${typeof v === 'number' ? money(v) : v}`).join('，')}>
@@ -1671,71 +1716,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td className="num">{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null && <span className="sub">{money(x.sales)}</span>}</td>
                         <td onClick={e => e.stopPropagation()}><input className="noteinp" disabled={locked} defaultValue={x.note || ''} key={rk + '|n|' + (x.note || '')} placeholder="备注…"
                           onBlur={e => { const v = e.target.value.trim(); if (v !== (x.note || '')) saveNote(x.doc_no, v) }} /></td>
-                      </tr>,
-                      isO && <tr key={rk + '|x'} className="xrow"><td colSpan="13">
-                        <div className="xpanel">
-                          {x.doc_no && <div className="xcls">
-                            <span className="dim">归类</span>
-                            <label>主体 <select className="clsinp" disabled={locked} value={x.subject || ''}
-                              onChange={e => saveClass(x.doc_no, { subject: e.target.value })}>
-                              {withCur(subjOpts, x.subject).map(s => <option key={s} value={s}>{s}{s === x.subj_bill ? '（账单原值）' : ''}</option>)}</select></label>
-                            <label>费用类型 <select className="clsinp" disabled={locked} value={x.fee_item || ''}
-                              onChange={e => saveClass(x.doc_no, { fee_item: e.target.value })}>
-                              {withCur(FEE_CANON, x.fee_item).map(s => <option key={s} value={s}>{s}{s === x.fee_sys ? '（系统判）' : ''}</option>)}</select></label>
-                            <label>原因 <input className="clsinp wide" disabled={locked} defaultValue={x.ovr_reason || ''} key={'r' + x.doc_no + (x.ovr_reason || '')}
-                              placeholder="特批/调整的原因，如：经××特批，由深圳星期零承担"
-                              onBlur={e => { const v = e.target.value.trim(); if (v !== (x.ovr_reason || '')) saveClass(x.doc_no, { reason: v }) }} /></label>
-                            {(x.subj_ovr || x.fee_ovr || x.ovr_reason) && !locked &&
-                              <button className="lk" title="清掉人工定的主体、费用类型和原因，回到账单原来的归类" onClick={() => saveClass(x.doc_no, { restore: true })}>恢复账单原值</button>}
-                            <span className="dim" style={{ fontSize: 11.5 }}>选完即保存，逐笔复核按新归类重算{x.subj_ovr || x.fee_ovr ? '；重新导入账单也会保留' : ''}</span>
-                          </div>}
-                          {x.doc_no && x.can_mode && <div className="xcls">
-                            <span className="dim">核对方式</span>
-                            <label><select className="clsinp" disabled={locked} value={x.force_mode || ''} onChange={e => saveMode(x.doc_no, e.target.value)}>
-                              <option value="">系统自动</option>
-                              <option value="weight" disabled={!x.can_weight}>按重量核：账单重量 对 金蝶重量{x.can_weight ? '' : '（账单这行没写重量）'}</option>
-                              <option value="box" disabled={!x.can_box}>按箱数核：账单件数 对 金蝶箱数{x.can_box ? '' : '（账单这行没写件数）'}</option>
-                            </select></label>
-                            <span className="dim" style={{ fontSize: 11.5 }}>只改这一张单拿什么比，尺子不变；选完即保存、重判，结论里会写明是谁哪天指定的。这家的常规在上面「按托 ⚙」「毛重比 ⚙」里设</span>
-                          </div>}
-                          {x.doc_no && (() => { const it = carryOf(x.doc_no), f = carryForm[x.doc_no] || {}
-                            return <div className="xcls">
-                              <span className="dim">多收扣回</span>
-                              {it ? <><span>已登记：供应商多收 <b>{money(it.amount)}</b> 元（含税），等后面月份账单扣回　<span className="dim">{it.reason} · {it.by} {String(it.at || '').slice(0, 10)}</span></span>
-                                {it.done ? <span className="st diffok">　✓ {it.done.period} 账单已扣回</span> : (!locked && <button className="lk" onClick={() => delCarry(it)}>撤销</button>)}</>
-                                : <><label>多收 <input className="clsinp" style={{ width: 90, textAlign: 'right' }} disabled={locked} placeholder="含税金额" value={f.amount || ''}
-                                    onChange={e => setCarryForm(o => ({ ...o, [x.doc_no]: { ...f, amount: e.target.value } }))} /> 元</label>
-                                  <label>原因 <input className="clsinp wide" disabled={locked} placeholder="多收了什么、和谁确认的，如：多算 7 件，物流部已和供应商确认" value={f.reason || ''}
-                                    onChange={e => setCarryForm(o => ({ ...o, [x.doc_no]: { ...f, reason: e.target.value } }))} /></label>
-                                  <button className="btn sm" disabled={locked || !String(f.amount || '').trim() || !String(f.reason || '').trim()} onClick={() => addCarry(x.doc_no)}>登记待扣回</button>
-                                  <span className="dim" style={{ fontSize: 11.5 }}>确认是供应商多收、这个月账单发票不改时用：登记后这张单算已确认，后面月份打开这家会提醒去核账单有没有扣回</span></>}
-                            </div> })()}
-                          {x.sub_fees && <div className="xfee"><span className="dim">费用构成</span>
-                            {Object.entries(x.sub_fees).map(([k, v]) => <span key={k} className="tag">{k} {typeof v === 'number' ? money(v) : v}</span>)}
-                            <b className="mono">= {money(x.doc_fee)}</b></div>}
-                          {x.n_mat > 0 ? <table className="mini">
-                            <thead><tr><th>物料编码</th><th>物料名称</th><th>规格</th><th>往来</th><th className="num">基本单位数量</th><th className="num">金蝶数量</th>
-                              <th className="num">核对量<small>{x.kd_unit}</small></th><th className="num">分摊运费</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th></tr></thead>
-                            <tbody>{x.materials.map((m, i) =>
-                              <tr key={i} className={m.is_pack ? 'pack' : ''}>
-                                <td className="mono">{m.code || '—'}</td>
-                                <td>{m.name}{m.is_pack && <span className="tag">包材·不摊运费</span>}</td>
-                                <td className="spec" title="金蝶物料档案里的规格；按箱数核、按体积核时，每箱数量就是从这里读的">{m.spec || <span className="dim">—</span>}</td>
-                                <td>{m.party || <span className="dim">—</span>}</td>
-                                <td className="num">{num(m.base_kg)}<small className="u">{m.kg_unit}</small>
-                                  {m.kg_eq != null && <span className="sub" title={`单位换算：1${m.kg_unit}＝${m.kg_per}千克`}>折 {num(m.kg_eq)} 千克</span>}
-                                  {m.unit_gap && <span className="sub diffbad">没填单位换算，未计入</span>}</td>
-                                <td className="num">{num(m.base_qty)}<small className="u">{m.base_unit}</small>
-                                  {m.box_n != null && m.out_unit !== '箱' && <span className="sub" title="金蝶出库数量 ÷ 规格里的每箱数量">{num(m.out_qty)}{m.out_unit} ÷ {num(m.box_div)} ＝ {num(m.box_n)} 箱</span>}</td>
-                                <td className="num">{num(m.kd)}{x.chk && x.chk.kind === 'boxwt' && m.box_kg != null && m.box_n != null && <span className="sub" title="金蝶箱数 × 每箱计费千克（在「单位换算·箱规·每箱计费重量」里填的）">{num(m.box_n)} 箱 × {m.box_kg}</span>}{m.bw_gap && <span className="sub diffbad">没填每箱计费重量</span>}{m.vol_per != null && m.box_n != null && <span className="sub" title="箱数 × 每箱折多少千克（箱子体积 × 每方千克数）">{num(m.box_n)} 箱 × {m.vol_per}</span>}{m.pack_used != null && <span className="sub" title={`规格折出来是 ${m.pack_spec}/箱，这张按备选箱规算才和账单对上`}>按 {m.pack_used}{m.base_unit}/箱</span>}</td>
-                                <td className="num">{money(m.fee)}</td>
-                                <td className="num">{m.unit_fee == null ? '—' : m.unit_fee}</td>
-                                <td className="num">{m.sales == null ? '—' : money(m.sales)}</td>
-                                <td className="num">{m.ratio == null ? '—' : (m.ratio * 100).toFixed(2) + '%'}</td>
-                              </tr>)}</tbody>
-                          </table> : <div className="dim" style={{ padding: '10px 12px', fontSize: 12.5 }}>{x.doc_no ? '金蝶里没找到这张单据的物料（单号填错 / 未审核 / 拆单后缀），核对账单登记的金蝶单号。' : '账单里的调整行（无单据），只登记不核量。'}</div>}
-                        </div>
-                      </td></tr>
+                      </tr>
                     ]
                   })}
                 </tbody>
@@ -1753,11 +1734,21 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                 <td><span className={'pill ' + cl}>{nm}</span></td></tr>
             })}</tbody>
           </table></div>}
-          {d && d.detail_total > d.size && <div className="toolbar">
+          {fdocs ? (fdocs.length > CPS && <div className="toolbar">
+            <button className="btn" disabled={cpg <= 1} onClick={() => setCpg(cpg - 1)}>‹ 上一页</button>
+            <span style={{ fontSize: 12.5 }}>第 {cpg} / {Math.ceil(fdocs.length / CPS)} 页</span>
+            <button className="btn" disabled={cpg >= Math.ceil(fdocs.length / CPS)} onClick={() => setCpg(cpg + 1)}>下一页 ›</button>
+          </div>) : (d && d.detail_total > d.size && <div className="toolbar">
             <button className="btn" disabled={page <= 1} onClick={() => setPage(page - 1)}>‹ 上一页</button>
             <span style={{ fontSize: 12.5 }}>第 {page} / {Math.ceil(d.detail_total / d.size)} 页</span>
             <button className="btn" disabled={page >= Math.ceil(d.detail_total / d.size)} onClick={() => setPage(page + 1)}>下一页 ›</button>
-          </div>}
+          </div>)}
+          {dlgX && <DocDialog x={dlgX} c={dlgX.doc_no ? cmap[dlgX.doc_no] : null} dup={dlgX.doc_no && dupR ? dupR[dlgX.doc_no] : null}
+            pos={dlgI + 1} total={dlist.length} locked={locked}
+            onPrev={dlgI > 0 ? () => setDlgK(kk(dlist[dlgI - 1])) : null}
+            onNext={dlgI < dlist.length - 1 ? () => setDlgK(kk(dlist[dlgI + 1])) : null}
+            onClose={() => setDlgK(null)}
+            ctx={{ saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, withCur, onDupOk }} />}
         </div>
         <div className="navbar">
           <button className="btn" onClick={() => goStep('lines')}>‹ 上一步：逐笔计提复核</button>

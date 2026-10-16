@@ -703,8 +703,8 @@ export const invSLaterInvoiceRemove = (token, id, iid) => invSJ(`/api/inv/s/late
 export const invSLink = () => j('/api/inv/s/link')
 export const invSPreview = (name, days = 60, pick) => j('/api/inv/s/preview?name=' + encodeURIComponent(name) + '&days=' + days + (pick === undefined || pick === null ? '' : '&pick=' + pick))
 // [Change Log] Date:2026-09-26 Author:Claude Opus 4.8 Version:V2.633 物流账单复核（核价×核量→归一态；pilot 迅鸽）
-export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '', filt = null) =>
-  j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${period}&group=${group}&page=${page}&q=${encodeURIComponent(q)}` +
+export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '', filt = null, size = 0) =>
+  j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${period}&group=${group}&page=${page}&q=${encodeURIComponent(q)}` + (size ? `&size=${size}` : '') +
     (filt ? `&fsub=${encodeURIComponent(filt.fsub || '')}&ffee=${encodeURIComponent(filt.ffee || '')}&fbiz=${encodeURIComponent(filt.fbiz || '')}` : ''))
 export const reviewSpec = (carrier) => j(`/api/logistics-review/spec?carrier=${encodeURIComponent(carrier)}`)
 export const reviewPriceCard = (carrier) => j(`/api/logistics-review/price-card?carrier=${encodeURIComponent(carrier)}`)
@@ -741,6 +741,12 @@ export const reviewInvoices = (carrier, period) => j(`/api/logistics-review/invo
 export const reviewUnitKg = (carrier, period) => j(`/api/logistics-review/unit-kg?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewUnitKgSet = (items, packs, boxkg, carrier) => j('/api/logistics-review/unit-kg', { method: 'POST', body: JSON.stringify({ items, packs: packs || [], boxkg: boxkg || [], carrier: carrier || '' }) })
 export const reviewWtRange = (carrier, lo, hi) => j('/api/logistics-review/wt-range', { method: 'POST', body: JSON.stringify({ carrier, lo, hi }) })
+// [Change Log] Date:2026-10-16 Author:Claude Opus 5.5 Version:V2.986 费用归类（第③轴）＋怀疑重复收费
+export const reviewClassify = (carrier, period, fresh = false) => j(`/api/logistics-review/classify?carrier=${encodeURIComponent(carrier)}&period=${period}${fresh ? '&fresh=1' : ''}`)
+export const reviewClassifyRules = () => j('/api/logistics-review/classify-rules')
+export const reviewClassifyRulesSave = cfg => j('/api/logistics-review/classify-rules', { method: 'POST', body: JSON.stringify({ cfg }) })
+export const reviewDups = (carrier, period) => j(`/api/logistics-review/dups?carrier=${encodeURIComponent(carrier)}&period=${period}`)
+export const reviewDupOk = (carrier, period, doc, ok, reason = '') => j('/api/logistics-review/dup-ok', { method: 'POST', body: JSON.stringify({ carrier, period, doc, ok, reason }) })
 export const reviewDocMode = (carrier, period, doc_no, mode) => j('/api/logistics-review/doc-mode', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, mode } : { carrier, period, doc_no, mode }) })
 export const reviewCarryAdj = body => j('/api/logistics-review/carry-adj', { method: 'POST', body: JSON.stringify(body) })
 export const reviewCarrySettle = body => j('/api/logistics-review/carry-settle', { method: 'POST', body: JSON.stringify(body) })
