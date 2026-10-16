@@ -3860,7 +3860,7 @@ _ACCR_CACHE = {}   # (carrier,period) / ("lines",carrier,period) -> (result, Non
 
 def _bust(carrier, period):
     """归类/备注/登记/重解析/接金蝶 → 该承运商该月的 逐笔、结论、逐单视图 缓存作废。"""
-    for k in ((carrier, period), ("lines", carrier, period), ("view", carrier, period)):
+    for k in ((carrier, period), ("lines", carrier, period), ("view", carrier, period), ("cls", carrier, period)):
         _ACCR_CACHE.pop(k, None)
 
 
