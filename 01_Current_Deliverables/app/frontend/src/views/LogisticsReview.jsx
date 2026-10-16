@@ -14,8 +14,8 @@ import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty,
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import { voucherLater, voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
-import { reviewClassify, reviewDups, reviewDupOk } from '../api.js'
-import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
+import { reviewClassify, reviewDups, reviewDupOk, reviewClassifyRules, reviewClassifyRulesSave } from '../api.js'
+import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -758,6 +758,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [dlgK, setDlgK] = useState(null)          // 弹窗打开的那一行(dkey)
   const [clsR, setClsR] = useState(null)          // {map:{单号:归类}, err}
   const [dupR, setDupR] = useState(null)          // {单号: {others, same, ok}}
+  const [ruleDlg, setRuleDlg] = useState(null)    // 'rules' 归类规则 / 'accr' 和本月计提对照 / 'dup' 重复收费口径
   useEffect(() => {
     if (step !== 'docs' || !full) { setAllD(null); return }
     let alive = true
@@ -765,7 +766,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     return () => { alive = false }
   }, [d, step, full])
   const loadCls = (fresh = false) => reviewClassify(carrier, period, fresh)
-    .then(r => setClsR(r.ok ? { map: Object.fromEntries((r.docs || []).map(x => [x.key, x])), accr_note: r.accr_note } : { map: {}, err: r.msg || '归类没取到' }))
+    .then(r => setClsR(r.ok ? { map: Object.fromEntries((r.docs || []).map(x => [x.key, x])), accr_note: r.accr_note, tab: r.tab || [], accr_total: r.accr_total } : { map: {}, err: r.msg || '归类没取到' }))
     .catch(e => setClsR({ map: {}, err: e.message }))
   const loadDups = () => reviewDups(carrier, period).then(r => setDupR(r.docs || {})).catch(() => setDupR({}))
   useEffect(() => {
@@ -1575,6 +1576,16 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {full && allD && <DocCards docs={allD.docs || []} cls={cmap} dups={dupR || {}} totalBill={d.total_bill} cur={kcard} clsErr={clsR && clsR.err}
             nodoc={((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)}
             onPick={k => { setKcard(k); setCpg(1) }} />}
+          {d && d.by_box && <div className="ldd-rules">
+            <button className="ldd-rule-btn" onClick={editWt} title="按重量核量时，账单重量÷金蝶净重 落在这个范围内算一致（换算系数区间）。一家一档，各月通用">⚙ <b>换算系数区间</b>{d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认 ±2%'}</button>
+            <button className="ldd-rule-btn" onClick={() => setRuleDlg('rules')}>⚙ <b>归类规则</b>按单据类型、物料分组推</button>
+            <button className="ldd-rule-btn" disabled={!clsR || !clsR.tab} onClick={() => setRuleDlg('accr')}>ⓘ <b>和本月计提对照</b>{clsR && clsR.accr_total != null ? '计提 ' + money(clsR.accr_total) : '取数中…'}</button>
+            <button className="ldd-rule-btn" onClick={() => setRuleDlg('dup')}>ⓘ <b>重复收费</b>只比运输费，服务不同不算</button>
+          </div>}
+          {ruleDlg === 'rules' && <RulesDialog load={reviewClassifyRules} save={reviewClassifyRulesSave} locked={false}
+            onSaved={() => { loadCls(true); flash('归类规则已保存，按新规则重算') }} onClose={() => setRuleDlg(null)} />}
+          {ruleDlg === 'accr' && clsR && <AccrTabDialog tab={clsR.tab} carrier={carrier} period={period} onClose={() => setRuleDlg(null)} />}
+          {ruleDlg === 'dup' && <DupRuleDialog onClose={() => setRuleDlg(null)} />}
           {full && allD && (kcard || (clsR && (clsR.err || clsR.accr_note))) && <div className="adjnote">
             {kcard && <>只看：<b>{KNAME[kcard]}</b>（{nDocs(fdocs || [])} 张）<button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setKcard(null); setCpg(1) }}>看全部</button>　</>}
             {clsR && clsR.err && <span className="diffbad">归类没取到：{clsR.err}　<button className="lnk" onClick={() => loadCls(true)}>重取</button></span>}
@@ -1659,63 +1670,42 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               ? <>没有待核单据 ✓　<button className="btn sm" onClick={() => { setGroup('all'); setPage(1) }}>看全部单据</button></>
               : '没有符合条件的单据'}</div>
             : <div className="tw">
-              <table className="dtbl">
+              <table className="dtbl ldd-tbl">
                 <thead><tr>
                   <th className="ck"><input type="checkbox" title="全选本页" checked={pageAllOn}
                     ref={el => { if (el) el.indeterminate = !pageAllOn && pageSomeOn }} onChange={togglePage} /></th>
-                  <th></th><th>单据号</th><th>主体 · 费用类型</th><th>产品线</th><th>往来（客户/仓库）</th>
-                  <th className="num">账单量 <small>/ 金蝶</small></th><th className="num">换算系数</th><th>核对结论</th><th>③ 归类</th>
-                  <th className="num">运费</th><th className="num">单位运费<small>元/kg</small></th><th className="num">费比<small> / 销售额</small></th><th>备注</th>
+                  <th></th><th>金蝶单号</th><th>结论</th><th className="num">差额</th><th>往来 · 主体</th>
+                  <th>① 量</th><th>② 价</th><th>③ 归类</th><th className="num">账单金额</th><th className="num">复核金额</th>
                 </tr></thead>
                 <tbody>
                   {docs.map((x, i) => {
+                    // V2.987(用户 10-17「样机更清晰，执行」)：照样机一行回答 这张单怎么了(结论＋差额)/量/价/记到哪；产品线、换算系数、单位运费、费比、备注挪进弹窗
                     const rk = dkey(x, i)
                     const on = !!sel[dkey(x, i)]
                     const cf = x.confirmed
-                    const [pl, pc] = STATE_PILL[x.state] || [null, 'neu']
-                    // 结论那一格只放短句(V2.917，用户「这个变得emm」)：太长的截掉、全文放悬停，这一列再给个最小宽度——免得被一长串说明挤成一个字一行
-                    const mfull = x.mode_short || x.mode_cn || ''
-                    const mtxt = mfull.length > 44 ? mfull.slice(0, 42) + '…' : mfull
-                    const mtip = x.mode_tip || (mfull.length > 44 ? mfull : '')
-                    const qd = x.q_diff
+                    const j = judge(x)
                     const ps = x.parties || []
+                    const dupOn = dupR && dupR[x.doc_no] && !dupR[x.doc_no].ok
                     return [
                       <tr key={rk + '|r'} className={'drow st-' + x.state + (dlgK === kk(x) ? ' ldd-cur' : '') + (cf ? ' rowok' : '') + (on ? ' rowsel' : '')} onClick={() => setDlgK(kk(x))} title="点开看这张单的明细">
                         <td className="ck" onClick={e => e.stopPropagation()}><input type="checkbox" checked={on} onChange={() => toggleSel(x, i)} /></td>
                         <td className="caret">›</td>
-                        <td><span className="mono">{x.doc_no || '—'}</span><span className="sub">{x.n_mat ? `${x.n_mat} 个物料` : (x.doc_no ? '金蝶无此单据' : '无单据')}</span></td>
-                        <td><Cd c={cdBook(x.subject)} />{x.subject}<span className="sub">{(() => { const f = cdFee(x.subject, x.fee_item); return f ? <><Cd c={f[0]} />{f[1]}</> : x.fee_item })()}</span>
-                          {/* V2.986：「物流部填 ≠ 系统判」(V2.735 只比费用类型)由「③ 归类」一列接替(比到主体/业务线/计提列)，这里不再重复写；全量模式外(迅鸽)照旧显示 */}
-                          {!fdocs && x.fee_chk === 'diff' && <span className="sub fchk bad" title="物流部填的费用类型和系统按金蝶单据判的不一样，请双方核对">物流部填 {x.fee_fill} ≠ 系统判 {x.fee_sys}</span>}
-                          {!fdocs && x.fee_chk === 'nofill' && <span className="sub fchk" title="规范第4列「费用类型」每行必填">物流部未填 · 系统判 {x.fee_sys}</span>}
-                          {/* V2.918(用户「这个原因也是好奇怪」)：人工定的原因原来每一行都整句写出来，一家几百行全是同一句话——改成只标「人工定 · 有原因」，原因放悬停；点开这一行还能看到全文 */}
+                        <td><span className="mono">{x.doc_no || '（未标单号）'}</span><span className="sub">{x.trips > 1 ? `账单 ${x.trips} 行 · ` : ''}{x.n_mat ? `${x.n_mat} 个物料` : (x.doc_no ? '金蝶无此单据' : '无单据')}</span></td>
+                        <td className="concl"><span className={'pill ' + V_PILL[j.v]}>{j.v}</span>
+                          {cf && <span className="pill ok" style={{ marginLeft: 4 }} title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span>}
+                          {dupOn && <span className="pill bad" style={{ marginLeft: 4 }} title="同一张单别家也收了运输费、或本家同单两行金额一样；点开看">重复收费?</span>}
+                          <span className="ldd-why" title={j.why}>{j.why}</span>
+                          {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}
                           {(x.subj_ovr || x.fee_chk === 'manual' || x.ovr_reason) && <span className="sub fchk man hov"
-                            title={'这张单的归类是人工定的（特批等），以人工定的为准，不再和系统判的比。' + (x.ovr_reason ? '\n原因：' + x.ovr_reason : '')}>
-                            人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.fee_chk === 'manual' && x.fee_sys && x.fee_sys !== x.fee_ovr ? ` · 系统判 ${x.fee_sys}` : ''}{x.ovr_reason ? ' · 有原因' : ''}</span>}</td>
-                        <td>{x.bizline ? <><Cd c={cdBiz(x.bizline)} />{x.bizline}</> : <span className="dim">—</span>}</td>
-                        <td className="party" title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</td>
-                        <td className="num">{num(x.bill_amt)}<small className="u">{x.bill_unit}</small>
-                          <span className="sub">金蝶 {num(x.kd_sum)}{x.kd_unit}{qd != null && !isZero(qd) && <span className={x.state === 'qtydiff' ? 'diffbad' : ''}> · 差{qd > 0 ? '+' : ''}{num(qd)}</span>}</span></td>
-                        <td className="num">{x.conv == null ? '—' : x.conv}</td>
-                        <td className="concl">{cf
-                          ? <><span className="pill ok" title={`确认人 ${cf.by}　${cf.at}`}>✓ 已确认</span><span className={'sub' + (mtip ? ' tip' : '')} title={mtip || undefined}>{pl || mtxt} · {cf.by}</span>
-                            {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}</>
-                          : <><span className={'pill ' + pc} title={!pl && mtip ? mtip : undefined}>{pl || mtxt}</span>{pl && <span className={'sub' + (mtip ? ' tip' : '')} title={mtip || undefined}>{mtxt}</span>}
-                            {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}
-                            {x.suggest && x.state === 'qtydiff' && <span className="sub sugg" title={x.suggest.txt + '。点「采纳」就把这一张改成这种核法并重判；不点不会改'}>
-                              建议{x.suggest.mode === 'box' ? '按箱数核' : '按重量核'}：{x.suggest.txt}
-                              {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={e => { e.stopPropagation(); saveMode(x.doc_no, x.suggest.mode) }}>采纳</button>}</span>}
-                            {x.trip && <span className={'sub' + (x.trip.verdict === 'ok' ? '' : ' diffbad')} title={x.trip.msg}>{x.trip.msg}</span>}</>}
-                          {dupR && dupR[x.doc_no] && !dupR[x.doc_no].ok && <span className="sub diffbad" title="同一张单别家也收了运输费、或本家收了不止一行运输费；点开这张单看明细">怀疑重复收费</span>}</td>
+                            title={'这张单的归类是人工定的（特批等），以人工定的为准。' + (x.ovr_reason ? '\n原因：' + x.ovr_reason : '')}>人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.ovr_reason ? ' · 有原因' : ''}</span>}</td>
+                        <td className="num"><DiffCell j={j} /></td>
+                        <td className="party"><span title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</span>
+                          <span className="sub"><Cd c={cdBook(x.subject)} />{x.subject} · {x.fee_item}{x.bizline ? ' · ' + x.bizline : ''}</span></td>
+                        <td><Cell2 top={j.q.top} sub={j.q.sub} k={j.q.k} title={x.mode_tip || x.mode_cn} /></td>
+                        <td><Cell2 top={j.p.top} sub={j.p.sub} k={j.p.k} /></td>
                         <td><ClsCell c={x.doc_no ? cmap[x.doc_no] : null} onOpen={() => setDlgK(kk(x))} /></td>
-                        <td className="num">{money(x.doc_fee)}{x.trips > 1 && <span className="sub" title="同一单号账单上有几行(包天包趟一车一行)，单位运费/费比按本单合计算">共 {x.trips} 行 · 合计 {money(x.doc_fee_all)}</span>}
-                          {x.sub_fees && Object.keys(x.sub_fees).filter(k => typeof x.sub_fees[k] === 'number').length > 1 &&
-                            <span className="sub" title={'费用构成：' + Object.entries(x.sub_fees).map(([k, v]) => `${k} ${typeof v === 'number' ? money(v) : v}`).join('，')}>
-                              {Object.entries(x.sub_fees).filter(([, v]) => typeof v === 'number' && v).map(([k, v]) => `${k.replace('快递费', '快递').replace('操作费', '操作')} ${v}`).join(' + ')}</span>}</td>
-                        <td className="num">{x.unit_fee == null ? '—' : x.unit_fee}</td>
-                        <td className="num">{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null && <span className="sub">{money(x.sales)}</span>}</td>
-                        <td onClick={e => e.stopPropagation()}><input className="noteinp" disabled={locked} defaultValue={x.note || ''} key={rk + '|n|' + (x.note || '')} placeholder="备注…"
-                          onBlur={e => { const v = e.target.value.trim(); if (v !== (x.note || '')) saveNote(x.doc_no, v) }} /></td>
+                        <td className="num">{money(x.doc_fee)}</td>
+                        <td className="num">{j.rv == null ? <span className="dim">—</span> : money(j.rv)}</td>
                       </tr>
                     ]
                   })}
