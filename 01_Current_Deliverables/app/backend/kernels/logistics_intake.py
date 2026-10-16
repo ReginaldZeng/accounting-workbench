@@ -210,6 +210,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
     parts = {nm: [c for c in (find_col(hdr, x) for x in cols) if c is not None] for nm, cols in (sp.get("fee_parts") or {}).items()}
     c_box = find_col(hdr, sp["box_col"]) if sp.get("box_col") else None
     c_dk = find_col(hdr, sp["dedupe_col"]) if sp.get("dedupe_col") else None   # 跨 sheet 去重键(运单号)
+    c_tot = find_col(hdr, sp["total_col"]) if sp.get("total_col") else None    # 账单自己的应付合计列(配了以它为准)
     c_dim = find_col(hdr, sp["dim_col"]) if sp.get("dim_col") else None        # 箱子尺寸写在哪一列(按体积计费的行才有)
     # row_re={"col": 列名, "re": 正则}：只收该列对得上的行(易风达运输页只收「序号」是数字的行，表底合计/开票信息/透视小计都不收，V2.764)
     # part_col：分项名取这一列的值(顺丰一个运单拆 运费/保费/签回单 几行，按「服务」列记分项)；
@@ -270,6 +271,14 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
                 sub["箱子"] = bp if bp is not None else 0.0
                 sub["箱型"] = _s(r[c_box]) + ("" if bp is not None else "(单价未识别)")   # 文字，不参与求和
             base = sum(v for v in sub.values() if isinstance(v, (int, float)))
+        # total_col：账单自己的应付合计列(V2.987，跨越 9 月新加了 夜间取货费/退仓费/资源调配费 三列、取数说明只认老列名，悄悄少读 81 元)。
+        #   配了就以它为准；拆项加起来对不上的差额记「其他费用（未拆）」，钱不丢、页面看得见，再去补取数说明
+        if c_tot is not None and c_tot < len(r) and _f(r[c_tot]) is not None:
+            tot = round(_f(r[c_tot]), int(sp.get("amount_dp", 2)))
+            if base is None or abs(tot - base) >= 0.005:
+                if parts and base is not None:
+                    sub["其他费用（未拆）"] = round(tot - base, 2)
+                base = tot
         if c_dim is not None and c_dim < len(r) and DIM_RE.match(_s(r[c_dim])):
             sub["箱子尺寸"] = re.sub(r"\s+", "", _s(r[c_dim]))      # 文字，不参与求和；复核台据此按体积复算计重
         row = {

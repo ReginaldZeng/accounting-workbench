@@ -86,5 +86,40 @@ class DimCol(unittest.TestCase):
         self.assertTrue(li.DIM_RE.match(sf["XSCKD000003"]["箱子尺寸"]))
 
 
+class TotalCol(unittest.TestCase):
+    """V2.987 跨越 9 月：账单新加了 夜间取货费/退仓费/资源调配费 三列，取数说明只认老列名，拆项求和悄悄少读 81 元。
+    配了 total_col(账单自己的应付合计)就以它为准，对不上的差额记「其他费用（未拆）」。合成数据。"""
+
+    def _bill(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "帐单-深圳星期零"
+        ws.append(["合成"])
+        ws.append(["金蝶单号", "折后运费", "保费", "退仓费", "应付金额\n（元）"])
+        ws.append(["CGRK000001", 54.78, 2, 60, 116.78])
+        ws.append(["QTCK000002", 89.6, 2, 0, 91.6])
+        bio = io.BytesIO()
+        wb.save(bio)
+        return bio.getvalue()
+
+    def _spec(self, **kw):
+        sp = {"name": "深圳星期零|孝感星期九", "role": "detail", "header_row": 2, "doc_col": "金蝶单号",
+              "fee_parts": {"运费": ["折后运费"], "保费": ["保费"]}}
+        sp.update(kw)
+        return {"carrier": "合成", "period": "2026-09", "sheets": [sp]}
+
+    def test_without_total_drops_new_column(self):
+        got = {r["doc_no"]: r for r in li.parse_bill(self._spec(), self._bill())["detail"]}
+        self.assertEqual(got["CGRK000001"]["amount"], 56.78)            # 老行为：新列没进拆项就丢了
+
+    def test_total_col_keeps_money_and_shows_gap(self):
+        import json as _j
+        got = {r["doc_no"]: r for r in li.parse_bill(self._spec(total_col="应付金额*"), self._bill())["detail"]}
+        self.assertEqual(got["CGRK000001"]["amount"], 116.78)
+        self.assertEqual(_j.loads(got["CGRK000001"]["sub_fees"])["其他费用（未拆）"], 60.0)
+        self.assertNotIn("其他费用（未拆）", _j.loads(got["QTCK000002"]["sub_fees"]))
+        self.assertEqual(got["QTCK000002"]["amount"], 91.6)
+
+
 if __name__ == "__main__":
     unittest.main()
