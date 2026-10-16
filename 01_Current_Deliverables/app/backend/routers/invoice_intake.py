@@ -1,3 +1,4 @@
+# 修复 2026-10-16：物流先建票夹继续跟踪节点，补分派后按完整性检查自动送审。
 # [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）
 # Description: Owner 2026-10-13：还欠票的单子（有没收齐后补单的付款单、自动接入还在收票的票夹）每轮顺带再去钉钉流程里看一眼
 #   （recheck_flows：同一张单至少隔 60 分钟、一轮最多 30 张、只取上次看过之后发到评论区的新文件）；财务初审通过后才到的发票
@@ -38,7 +39,7 @@ router = APIRouter()
 
 STATE_KEY = "inv_intake_state"
 SOURCE = "dingtalk"
-AUTO_SUBMIT_SOURCES = (SOURCE, "later")   # 票齐了自己进审核的票夹来源：钉钉自动接入的、后补登记时系统建的
+AUTO_SUBMIT_SOURCES = (SOURCE, "later", "logistics")   # 票齐了自己进审核的票夹来源：钉钉自动接入的、后补登记时系统建的
 RECHECK_KEY = "inv_flow_recheck"         # {票夹 id: 上次去钉钉流程里看的时间}
 RECHECK_MIN = 60                         # 同一张单最少隔多少分钟再看一次
 RECHECK_MAX = 30                         # 一轮最多看几张（一张一次钉钉接口）
@@ -85,6 +86,8 @@ def _load_state():
 
 def ready_check(folder, items):
     """自动接入的票夹票据齐全吗 → (齐全?, 不齐的原因)。齐全＝提交检查既不拦也没提示、有发票/收据、付款金额有值。"""
+    if folder.get("source") == "logistics" and not (folder.get("owner_uid") or folder.get("owner_account")):
+        return False, "等待审批流到达已启用的接入审批人节点并分派"
     if folder.get("attach_status") in ("pending", "running", "none", None):
         return False, "附件还在拉"
     act = [i for i in items if i.get("status") != "removed" and i.get("review") != "void"]
@@ -164,7 +167,12 @@ def _folder_insts(ids):
     ids = list(ids)
     with inv.E().connect() as c:
         for i in range(0, len(ids), 500):
-            out |= {r[0] for r in c.execute(select(S.FOLDER.c.inst_id).where(S.FOLDER.c.inst_id.in_(ids[i:i + 500])))}
+            # 物流先建的未分派票夹仍须跟踪 OA 节点，不能当成已完成接入。
+            for r in c.execute(select(S.FOLDER).where(S.FOLDER.c.inst_id.in_(ids[i:i + 500]))).mappings():
+                retry = (r["source"] == "logistics" and r["status"] == "collecting"
+                         and not (r["owner_uid"] or r["owner_account"]))
+                if not retry:
+                    out.add(r["inst_id"])
     return out
 
 

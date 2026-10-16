@@ -1627,6 +1627,45 @@ class InvoiceApiTests(unittest.TestCase):
         self.assertFalse(ii.scan_once("测试")["ok"])
         sys.modules.pop("routers.invoice_intake", None)
 
+    def test_logistics_intake_reuses_and_assigns_existing_folder(self):
+        from routers import invoice_intake as ii
+        inv, S = self.inv, self.S
+        norm = {"instId": "PI-LOGISTICS-FIX", "businessId": "202610151718000001187",
+                "template": "付款申请（公对公）", "title": "物流入口回归", "amount": 453,
+                "attachments": [], "photos": [], "hasAttachments": False}
+        fid = S.folder_upsert_from_approval(inv.E(), norm, "系统", source="logistics")
+        S.folder_update(inv.E(), fid, attach_status="done")
+        f = S.folder_get(inv.E(), fid)
+        self.assertNotIn(norm["instId"], ii._folder_insts([norm["instId"]]))
+        self.assertFalse(ii.ready_check(f, [])[0])
+        cols = dict(uid="boss-dt", account="", name="老板", by="系统", via="intake")
+        with patch.object(inv, "resolve_approval", return_value={"ok": True, "norm": norm, "inst": {}}), \
+                patch.object(inv, "pick_owner", return_value=(cols, "")):
+            r = inv.open_approval_folder(user="系统", source="dingtalk", inst_id=norm["instId"])
+        self.assertFalse(r["created"])
+        self.assertEqual(r["folder"]["id"], fid)
+        self.assertEqual(r["folder"]["source"], "logistics")
+        self.assertEqual(r["folder"]["owner_uid"], "boss-dt")
+        self.assertIn(norm["instId"], ii._folder_insts([norm["instId"]]))
+        bill = [{"kind": "invoice", "status": "active", "review": "draft"}]
+        with patch.object(inv, "submit_check", return_value=([], [])):
+            self.assertEqual(ii.ready_check(r["folder"], bill), (True, ""))
+        with patch.object(inv, "submit_check", return_value=([], [{"msg": "金额不齐"}])):
+            self.assertEqual(ii.ready_check(r["folder"], bill), (False, "金额不齐"))
+        sub = MagicMock(return_value=({"ok": True}, None))
+        with patch.object(ii, "ready_check", return_value=(True, "")), patch.object(inv, "_submit_sync", sub):
+            ii.auto_submit_ready()
+        self.assertIn(fid, [call.args[1] for call in sub.call_args_list])
+        # 已有人名下的票夹保持原归属；退回的不能再次自动提交。
+        with patch.object(inv, "resolve_approval", return_value={"ok": True, "norm": norm, "inst": {}}), \
+                patch.object(inv, "pick_owner", side_effect=AssertionError("不能重分派")):
+            inv.open_approval_folder(user="系统", inst_id=norm["instId"])
+        S.folder_update(inv.E(), fid, status="returned")
+        sub.reset_mock()
+        with patch.object(ii, "ready_check", return_value=(True, "")), patch.object(inv, "_submit_sync", sub):
+            ii.auto_submit_ready()
+        self.assertNotIn(fid, [call.args[1] for call in sub.call_args_list])
+
     def test_47_paper_month_check(self):
         """V2.740 月末纸质件查验：按审核通过月份列票；扫发票码按号码找到就记纸质件已到（不用开票夹）；手工勾/撤；导出未到。"""
         inv, S = self.inv, self.S

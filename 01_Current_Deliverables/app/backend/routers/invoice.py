@@ -2515,13 +2515,13 @@ def open_approval_folder(code=None, user="", refresh=False, source="scan", inst_
     e = E()
     existed = S.folder_by_inst(e, n["instId"])
     own_cols = None
-    if existed is None:
+    if existed is None or not (existed.get("owner_uid") or existed.get("owner_account")):
         own_cols, why = pick_owner(r.get("inst"), _uname(user), auditor)
         if not own_cols and need_owner:
             return {"ok": False, "code": "needAuditor", "msg": "这张付款单还没走到（已启用的）接入审批人，%s" % why.replace("这张单还没定归谁审：", "")}
     fid = S.folder_upsert_from_approval(e, n, user, source=source)
     created = existed is None
-    if created and own_cols:
+    if own_cols:
         assign_new_folder(fid, cols=own_cols)
     if created or refresh:
         if n.get("hasAttachments"):
