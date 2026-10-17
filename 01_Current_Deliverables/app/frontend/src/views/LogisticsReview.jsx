@@ -878,6 +878,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .then(() => { load(); flash(mode ? `${doc_no} 已改成${mode === 'weight' ? '按重量' : '按箱数'}核，已重判` : `${doc_no} 已交回系统自动判断`) })
       .catch(e => flash('核对方式保存失败：' + e.message))
   }
+  // 勾选的一批一起改归类 / 写备注(V2.987，用户 10-17「是不是还可以加一个批量修改」)：选完在栏里填原因再确定，不直接生效
+  const [bulk, setBulk] = useState(null)          // {kind:'subject'|'fee_item'|'restore'|'note', value, text}
+  const doBulk = nos => {
+    const b = bulk
+    if (!b || !nos.length) return
+    const go = b.kind === 'note' ? reviewDocNote(carrier, period, nos, (b.text || '').trim())
+      : reviewDocClassify(carrier, period, nos, b.kind === 'restore' ? { restore: true } : { [b.kind]: b.value, reason: (b.text || '').trim() })
+    go.then(r => {
+      flash(b.kind === 'note' ? `已给 ${r.n || nos.length} 张单写备注` : b.kind === 'restore' ? `已把 ${r.n || nos.length} 张单恢复成账单原值` : `已把 ${r.n || nos.length} 张单的${b.kind === 'subject' ? '主体' : '费用类型'}改成「${b.value}」，逐笔复核重算`)
+      setBulk(null); setSel({}); load(); if (b.kind !== 'note') { refetchL(); loadCls() }
+    }).catch(e => flash('批量修改失败：' + e.message))
+  }
   // 勾选的一批一起改核对方式(V2.886)
   const saveModeMany = (nos, v) => {
     const mode = v === 'auto' ? '' : v
@@ -1010,7 +1022,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       toConfirm: [...new Set(selList.filter(x => x.doc_no && !x.confirmed).map(x => x.doc_no))], toUndo: [...new Set(selList.filter(x => x.doc_no && x.confirmed).map(x => x.doc_no))],
       nConfirmRows: selList.filter(x => x.doc_no && !x.confirmed).length, nUndoRows: selList.filter(x => x.doc_no && x.confirmed).length,
       nNoDoc: selList.filter(x => !x.doc_no).length,
-      modeNos: [...new Set(selList.filter(x => x.doc_no && x.can_mode).map(x => x.doc_no))] }      // 能改核对方式的(V2.886 批量)
+      modeNos: [...new Set(selList.filter(x => x.doc_no && x.can_mode).map(x => x.doc_no))],      // 能改核对方式的(V2.886 批量)
+      docNos: [...new Set(selList.filter(x => x.doc_no).map(x => x.doc_no))] }      // 能改核对方式的(V2.886 批量)
   })()
   useEffect(() => { setSel({}) }, [carrier, period])
   const doConfirm = (nos, on) => {
@@ -1643,7 +1656,25 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               <option value="box">按箱数核：账单件数 对 金蝶箱数</option>
               <option value="weight">按重量核：账单重量 对 金蝶重量</option>
               <option value="auto">交回系统自动</option></select>}
-            <button className="btn sm" onClick={() => setSel({})}>清空选择</button>
+            {selStat.docNos.length > 0 && !locked && <select className="clsinp" value="" title="把勾选的这些单一起改主体（存成人工定，账单原值留着、可恢复）"
+              onChange={e => { const v = e.target.value; e.target.value = ''; if (v) setBulk(v === '__restore' ? { kind: 'restore' } : { kind: 'subject', value: v, text: '' }) }}>
+              <option value="">改主体（{selStat.docNos.length} 张）…</option>
+              {subjOpts.map(x => <option key={x} value={x}>{x}</option>)}
+              <option value="__restore">恢复账单原值（主体、费用类型都恢复）</option></select>}
+            {selStat.docNos.length > 0 && !locked && <select className="clsinp" value="" title="把勾选的这些单一起改费用类型"
+              onChange={e => { const v = e.target.value; e.target.value = ''; if (v) setBulk({ kind: 'fee_item', value: v, text: '' }) }}>
+              <option value="">改费用类型（{selStat.docNos.length} 张）…</option>
+              {FEE_CANON.map(x => <option key={x} value={x}>{x}</option>)}</select>}
+            {selStat.docNos.length > 0 && !locked && <button className="btn sm" onClick={() => setBulk({ kind: 'note', text: '' })}>写备注（{selStat.docNos.length} 张）</button>}
+            <button className="btn sm" onClick={() => { setSel({}); setBulk(null) }}>清空选择</button>
+            {bulk && selStat.docNos.length > 0 && <div className="ldd-bulk">
+              <b>{bulk.kind === 'note' ? `给 ${selStat.docNos.length} 张单写备注` : bulk.kind === 'restore' ? `把 ${selStat.docNos.length} 张单恢复成账单原值（主体、费用类型、原因都清掉）` : `把 ${selStat.docNos.length} 张单的${bulk.kind === 'subject' ? '主体' : '费用类型'}改成「${bulk.value}」`}</b>
+              {bulk.kind !== 'restore' && <input className="clsinp wide" autoFocus value={bulk.text || ''} placeholder={bulk.kind === 'note' ? '备注内容（会覆盖这些单原来的备注）' : '原因（会留痕），如：经××特批，由深圳星期零承担'}
+                onChange={e => setBulk(o => ({ ...o, text: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') doBulk(selStat.docNos) }} />}
+              <button className="btn sm pri" disabled={bulk.kind === 'note' ? false : (bulk.kind !== 'restore' && !(bulk.text || '').trim())} onClick={() => doBulk(selStat.docNos)}>确定</button>
+              <button className="btn sm" onClick={() => setBulk(null)}>取消</button>
+              {bulk.kind !== 'note' && bulk.kind !== 'restore' && <small className="dim">改归类要写原因；改完逐笔计提复核和③归类都会按新归类重算</small>}
+            </div>}
             {selStat.nNoDoc > 0 && <small className="dim" style={{ width: '100%' }}>其中 {selStat.nNoDoc} 张无单据的调整行只参与统计，不打确认。</small>}
           </div>}
           {d && d.suggest_docs && ((d.suggest_docs.box || []).length + (d.suggest_docs.weight || []).length) > 0 && <div className="adjnote">

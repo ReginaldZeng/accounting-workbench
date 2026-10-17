@@ -3911,16 +3911,18 @@ async def review_doc_note(request: Request):
     b = await request.json()
     carrier, period, doc_no = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("doc_no") or "").strip()
     note = (b.get("note") or "").strip()
-    if not carrier or not doc_no:
+    nos = [str(x).strip() for x in (b.get("doc_nos") or []) if str(x).strip()] or ([doc_no] if doc_no else [])   # V2.987 勾选一批一起写
+    if not carrier or not nos:
         return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
     lk = _locked(carrier, period)
     if lk:
         return lk
     with db._engine.begin() as c:
-        c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
-                  (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(note=note))
+        for no in nos:
+            c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
+                      (func.substr(BL.c.doc_no, 1, len(no)) == no)).values(note=note))
     _ACCR_CACHE.pop(("view", carrier, period), None)   # 逐单视图带备注，作废；逐笔不受影响
-    return {"ok": True}
+    return {"ok": True, "n": len(nos)}
 
 
 @router.post("/api/logistics-review/doc-classify")
@@ -3936,7 +3938,8 @@ async def review_doc_classify(request: Request):
     carrier = (b.get("carrier") or "").strip()
     period = (b.get("period") or "").strip()
     doc_no = (b.get("doc_no") or "").strip()
-    if not carrier or not doc_no:
+    nos = [str(x).strip() for x in (b.get("doc_nos") or []) if str(x).strip()] or ([doc_no] if doc_no else [])   # V2.987 勾选一批一起改
+    if not carrier or not nos:
         return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
     vals = {}
     if b.get("restore"):
@@ -3956,13 +3959,14 @@ async def review_doc_classify(request: Request):
     if lk:
         return lk
     with db._engine.begin() as c:
-        c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
-                  (func.substr(BL.c.doc_no, 1, len(doc_no)) == doc_no)).values(**vals))
+        for no in nos:
+            c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
+                      (func.substr(BL.c.doc_no, 1, len(no)) == no)).values(**vals))
     _bust(carrier, period)   # 归类变了 → 逐笔/结论缓存作废，重算
     CN = {"subj_ovr": "主体", "fee_ovr": "费用类型", "ovr_reason": "原因"}
-    db.audit(_uname(u), "物流复核-改归类", "%s %s %s" % (carrier, period, doc_no),
+    db.audit(_uname(u), "物流复核-改归类", "%s %s %s" % (carrier, period, "、".join(nos) if len(nos) <= 20 else "%s 等 %d 张" % ("、".join(nos[:20]), len(nos))),
              "恢复账单原值" if b.get("restore") else "；".join("%s→%s" % (CN[k], v or "（清空）") for k, v in vals.items()))
-    return {"ok": True}
+    return {"ok": True, "n": len(nos)}
 
 
 @router.post("/api/logistics-review/subject-mark")

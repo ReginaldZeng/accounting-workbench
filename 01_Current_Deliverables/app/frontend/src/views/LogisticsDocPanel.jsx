@@ -561,6 +561,8 @@ export const LDD_CSS = `
 .lrv details.ldd-fold>summary h3{display:inline;margin:0;font-size:12.5px;color:var(--accent);font-weight:600}
 .lrv details.ldd-fold>summary h3::before{content:"▸ "}.lrv details.ldd-fold[open]>summary h3::before{content:"▾ "}
 .lrv .ldd-opbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.lrv .ldd-bulk{flex-basis:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 10px;margin-top:4px;background:#FCF6EC;border:1px solid #E6CFA6;border-radius:8px;font-size:12.5px}
+.lrv .ldd-bulk .clsinp.wide{min-width:320px}
 .lrv .ldd-opbar .btn.on{border-color:var(--accent);color:var(--accent);background:#F5FAFC}
 .lrv .ldd-dots{width:100%;height:auto;display:block}
 .lrv .ldd-legend{font-size:11.5px;color:#8A96A2;display:flex;gap:4px;align-items:center;flex-wrap:wrap}
