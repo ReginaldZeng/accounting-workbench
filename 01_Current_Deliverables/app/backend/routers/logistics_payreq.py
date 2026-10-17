@@ -697,7 +697,8 @@ def _inv_block(r, me):
     from kernels import logistics_voucher as LV
     st = lpq.status_view({**r, "cur": json.loads(r.get("cur_json") or "[]")}, me)
     out = {"inst": r["inst_id"], "bid": r.get("business_id"), "subject": r.get("subject"), "amount": r.get("amount"),
-           "applicant": r.get("applicant"), "st": st, "folder": r.get("folder_id"), "invoices": [], "rates": [], "msgs": []}
+           "applicant": r.get("applicant"), "st": st, "folder": r.get("folder_id"), "invoices": [], "rates": [], "msgs": [],
+           "payee": r.get("payee") or "", "subject_full": r.get("subject_full") or "", "at": r.get("create_time") or ""}   # 第④步发票审核核销方/购方(V2.989)
     try:
         d, code = LVR._preview_data(r["inst_id"])
     except Exception as e:

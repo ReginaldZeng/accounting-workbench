@@ -273,7 +273,7 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
                   <span className="nd"><span className="h">本月计提</span>{c.acc_miss ? <>没有「{c.sys}」这一列 <Mk k="bad" /></> : <>有「{c.sys}」这一列 <Mk k="ok" /></>}</span>
                   <span className="acct">{c.sys_d}</span>
                   {c.v === '标注不对' && <span className="todo">要改：物流部标注改成「{c.sys}」{c.acc_miss ? `；本月计提多半跟着标注记在「${c.bill}」，到第①步登记计提更正 ${money(c.amount)}` : '；本月计提已经有这一列，计提不用动'}</span>}
-                  {c.v === '计提记错' && <span className="todo">要改：本月计提没有「{c.sys}」，到第①步登记计提更正 {money(c.amount)}</span>}
+                  {c.v === '计提记错' && <span className="todo">要改：本月计提没有「{c.sys}」，到第②步登记计提更正 {money(c.amount)}</span>}
                   {c.v === '归类一致' && c.txt && <span className="acct">{c.txt}</span>}</>}
               {(c.how || []).length > 0 && <details className="ldd-how"><summary>怎么推的</summary><ul>{c.how.map((h, i) => <li key={i}>{h}</li>)}</ul>{c.subj_note && <div>{c.subj_note}</div>}</details>}
             </div>}
@@ -348,7 +348,7 @@ export function AccrTabDialog({ tab, carrier, period, onClose }) {
         <td className="num">{sg(x.d_sys)}</td></tr>)}</tbody>
       <tfoot><tr><td>合计</td><td className="num">{money(sum('accr'))}</td><td className="num">{money(sum('by_bill'))}</td><td className="num">{money(sum('by_sys'))}</td><td className="num">{sg(sum('by_sys') - sum('accr'))}</td></tr></tfoot>
     </table></div>
-    <p className="ldd-p dim">「判不了」的单按物流部标注放。计提和账单合计的差是估算差，归第①步管。张数按账单行数。</p>
+    <p className="ldd-p dim">「判不了」的单按物流部标注放。计提和账单合计的差是估算差，归第②步管。张数按账单行数。</p>
   </Dlg>
 }
 

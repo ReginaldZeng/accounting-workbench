@@ -121,5 +121,73 @@ class TotalCol(unittest.TestCase):
         self.assertEqual(got["QTCK000002"]["amount"], 91.6)
 
 
+class SheetReport(unittest.TestCase):
+    """V2.989 复核台第①步「读全没有」：算钱的列加起来对账单自己的合计列。合成数据(仿跨越 9 月新加退仓费那一页)。"""
+
+    def _bill(self, with_total=True):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "帐单-深圳星期零"
+        ws.append(["合成"])
+        ws.append(["序号", "金蝶单号", "计费重量（公斤）", "运单运费", "折后运费", "保费", "退仓费"] + (["应付金额\n（元）"] if with_total else []))
+        ws.append([1, "CGRK000001", 30, 78.26, 54.78, 2, 60] + ([116.78] if with_total else []))
+        ws.append([2, "QTCK000002", 50, 128, 89.6, 2, 0] + ([91.6] if with_total else []))
+        ws.append(["合计", None, 80, 206.26, 144.38, 4, 60] + ([208.38] if with_total else []))
+        ws2 = wb.create_sheet("Sheet1")
+        ws2.append(["透视"])
+        bio = io.BytesIO()
+        wb.save(bio)
+        return bio.getvalue()
+
+    def _spec(self, **kw):
+        sp = {"name": "深圳星期零|孝感星期九", "role": "detail", "header_row": 2, "doc_col": "金蝶单号", "wt_col": "计费重量（公斤）", "summary_marker": "合计",
+              "fee_parts": {"运费": ["折后运费"], "保费": ["保费"]}}
+        sp.update(kw)
+        return {"carrier": "合成", "sheets": [sp]}
+
+    def test_missing_column_shows_gap(self):
+        r = li.sheet_report(self._spec(), self._bill(), "2026-09")
+        s = r["sheets"][0]
+        self.assertEqual(s["verdict"], "gap")
+        self.assertEqual(s["total"]["how"], "guess")                 # 没配合计列：按表头认出「应付金额」只拿来比
+        self.assertEqual(s["total"]["sum"], 208.38)                   # 合计行不算进去
+        self.assertEqual(s["gap"], -60.0)
+        self.assertEqual([u["name"] for u in s["unread"]], ["运单运费", "退仓费"])
+        self.assertEqual(r["sheets"][1]["verdict"], "skip")
+        self.assertEqual(r["verdict"], "gap")
+
+    def test_all_columns_ok(self):
+        r = li.sheet_report(self._spec(fee_parts={"运费": ["折后运费"], "保费": ["保费"], "退仓费": ["退仓费"]}), self._bill(), "2026-09")
+        s = r["sheets"][0]
+        self.assertEqual((s["verdict"], s["amount"], s["n"]), ("ok", 208.38, 2))
+        self.assertNotIn("计费重量（公斤）", [u["name"] for u in s["unread"] + s["others"]])   # 用到的列不算没读
+        self.assertEqual(r["verdict"], "ok")
+
+    def test_total_col_keeps_money_but_flags_unsplit(self):
+        s = li.sheet_report(self._spec(total_col="应付金额*"), self._bill(), "2026-09")["sheets"][0]
+        self.assertEqual(s["verdict"], "unsplit")
+        self.assertEqual((s["amount"], s["unsplit"]), (208.38, 60.0))
+
+    def test_single_amount_col_is_its_own_total(self):
+        s = li.sheet_report(self._spec(fee_parts=None, amount_col="应付金额*"), self._bill(), "2026-09")["sheets"][0]
+        self.assertEqual((s["verdict"], s["total"]["how"], s["amount"]), ("ok", "self", 208.38))
+
+    def test_no_total_but_unread_fee(self):
+        s = li.sheet_report(self._spec(), self._bill(with_total=False), "2026-09")["sheets"][0]
+        self.assertEqual(s["verdict"], "maybe")
+        self.assertIn("退仓费", [u["name"] for u in s["unread"]])
+
+    def test_rows_merged_into_one_doc_still_counted(self):
+        """天鹰：一张单拆几行，解析时并成一行(只剩首行行号)。续行的钱也要加进来比，不能报对不上。"""
+        s = li.sheet_report(dict(SPEC), _book(), "2026-08")["sheets"][0]
+        self.assertEqual(s["verdict"], "ok")
+        self.assertEqual(s["total"]["sum"], s["amount"])
+
+    def test_configured_column_missing_this_month(self):
+        s = li.sheet_report(self._spec(fee_parts={"运费": ["折后运费"], "保费": ["保费"], "退仓费": ["退仓费"], "回单费": ["回单费"]}), self._bill(), "2026-09")["sheets"][0]
+        self.assertEqual([m["name"] for m in s["money"] if not m["found"]], ["回单费"])
+        self.assertEqual(s["verdict"], "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

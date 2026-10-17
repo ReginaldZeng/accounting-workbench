@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
+# V2.989：sheet_report 数据接入检查——每页算钱的列加起来对账单自己的合计列，看读全没有(复核台第①步)
 # V2.761：读老格式 .xls(xlrd)；列名 * 结尾按前缀认；wt_scale 账单重量换千克(链盟接入)
 # V2.766：part_col 分项名取列值；wt_once_col 同一运单重量只算一次(顺丰冷运取数说明修复)
 # V2.765：src_from_sheets 份名取表名(多文件各算一份)；amount_dp 金额小数位(天鹰接入)
@@ -570,3 +571,161 @@ def parse_bill(spec, data):
             r["bizline"] = biz
     return {"detail": detail, "accrual": accrual, "skipped": skipped, "carrier": carrier, "period": period,
             "bill_src": owner}
+
+
+# ---------- 数据接入检查：账单读全没有(V2.988，复核台第①步) ----------
+# 用户 2026-10-17 定复核台四步(①数据接入 ②逐笔计提 ③逐单核价核量 ④发票审核)。第①步要回答「这份账单读全了没有」：
+#   每页把算钱的那几列(amount_col/amount_cols/fee_parts)在读进来的行上加起来，和账单自己的合计列比。
+#   合计列＝取数说明配的 total_col；没配、又是几列相加算钱的，按表头认一个像合计的列(应付/合计/总运费…)只拿来比。
+#   跨越 9 月就是这么漏的：账单新加三列，取数说明只认老列名，悄悄少读 81 元。
+_TOTAL_HINT = re.compile(r"应付|合计|总运费|总金额|总费用|费用合计|总计|含税金额")
+_FEE_HINT = re.compile(r"费|金额|运费")
+_NOT_FEE = re.compile(r"重量|公斤|kg|KG|件数|折扣|%|单价|费率|体积|方数")
+_SUM_ROW = re.compile(r"^\s*(合\s*计|总\s*计|小\s*计|汇\s*总)")
+_SUM_CELL = re.compile(r"^\s*(合\s*计|总\s*计|小\s*计|汇\s*总)\s*[:：]?\s*$")
+_NOT_NUM = re.compile(r"序号|区号|电话|手机|号码|编号|日期|时间|邮编")
+
+
+def _spec_cols(sp):
+    """取数说明里点了名的列 → (算钱的列名[], 其它用到的列名[])。"""
+    money = []
+    if sp.get("amount_cols"):
+        money += list(sp["amount_cols"])
+    elif sp.get("amount_col"):
+        money.append(sp["amount_col"])
+    for cols in (sp.get("fee_parts") or {}).values():
+        money += list(cols)
+    other = []
+    for k in ("doc_col", "qty_col", "wt_col", "annot_col", "fee_col", "prov_col", "carrier_sub_col", "box_col", "dedupe_col", "dim_col", "part_col", "wt_once_col"):
+        v = sp.get(k)
+        if v:
+            other += v if isinstance(v, list) and not (len(v) == 2 and isinstance(v[1], int)) else [v[0] if isinstance(v, list) else v]
+    sub = sp.get("subject")
+    if isinstance(sub, dict) and sub.get("column"):
+        other.append(sub["column"])
+    return list(dict.fromkeys(money)), other
+
+
+def sheet_report(spec, data, period=""):
+    """按取数说明把一份账单每页「读了哪些列、钱对不对得上」列出来(只读，不落库)。
+    → {sheets:[{sheet, role, n, docs, amount, money:[{name, sum, found}], total:{name, sum, how}|None,
+                parts_sum, gap, unsplit, verdict, unread:[{name, sum}], others:[{name, sum}]}],
+       amount(去重后), n, dup_rows, verdict}
+    verdict：ok 读全了 / unsplit 合计兜底了、但有没拆开的钱 / gap 和账单合计对不上 / maybe 有没读的费用列、又没合计可比 / nocheck 没合计可比 / skip 没配 / accrual 汇总页"""
+    wb = open_book(data)
+    mg = merged_rows(data)
+    carrier = spec.get("carrier", "")
+    mon = str(int(period[5:7])) if len(period) >= 7 and period[5:7].isdigit() else ""
+    boxp = box_prices_from(wb, spec) if any(c.get("box_col") for c in spec.get("sheets", [])) else {}
+    out = []
+    for ws in wb.worksheets:
+        sp = None
+        for cand in spec.get("sheets", []):
+            if match_sheet(cand["name"].replace("{m}", mon) if mon else cand["name"], ws.title):
+                sp = cand
+                break
+        if sp is None or sp.get("role") == "ignore":
+            out.append({"sheet": ws.title, "role": "skip", "verdict": "skip"})
+            continue
+        if sp.get("role") != "detail":
+            got = parse_accrual_sheet(sp, ws, period, carrier)
+            out.append({"sheet": ws.title, "role": sp.get("role"), "verdict": "accrual", "n": len(got),
+                        "amount": round(sum(float(r.get("amount") or 0) for r in got), 2)})
+            continue
+        rows = parse_detail_sheet(sp, ws, period, carrier, boxp, mg.get(ws.title))
+        raw = []
+        for i, r in enumerate(ws.iter_rows(values_only=True)):
+            raw.append(r)
+            if i > 20000:
+                break
+        hr = int(sp.get("header_row", 1)) - 1
+        hdr = [_s(x) for x in raw[hr]] if hr < len(raw) else []
+        # 加哪些行：读进来的第一行到最后一行，再往下接着的续行(一张单拆几行、解析时并成一行的，天鹰)，碰到空行或合计行停；中间的合计/空行不算
+        sc = int(sp.get("summary_cols", 2))
+        rre = sp.get("row_re")
+        c_rre = find_col(hdr, rre["col"]) if rre else None
+        # 合计行：前几格写着合计/总计…，或哪一格整格就是「合计」，或者不合取数说明的行规则(天鹰合计行「产品名称」是空的)
+        is_sum = lambda rr: (any(_SUM_ROW.search(_s(x)) or (sp.get("summary_marker") and sp["summary_marker"] in _s(x)) for x in rr[:sc])
+                             or any(_SUM_CELL.match(_s(x)) for x in rr)
+                             or (c_rre is not None and not re.match(rre["re"], _s(rr[c_rre]) if c_rre < len(rr) else "")))
+        is_blank = lambda rr: not any(x not in (None, "") for x in rr)
+        src = sorted({r["src_row"] for r in rows if r.get("src_row")})
+        keep = []
+        if src:
+            hi = src[-1]
+            while hi < len(raw) and not is_blank(raw[hi]) and not is_sum(raw[hi]):
+                hi += 1
+            keep = [ri for ri in range(src[0], hi + 1) if ri - 1 < len(raw) and not is_blank(raw[ri - 1]) and not is_sum(raw[ri - 1])]
+
+        def col_sum(ci):
+            v = 0.0
+            for ri in keep:
+                rr = raw[ri - 1] if ri - 1 < len(raw) else ()
+                if ci < len(rr):
+                    x = _f(rr[ci])
+                    if x is not None and not isinstance(rr[ci], bool):
+                        v += x
+            return round(v, 2)
+
+        mnames, onames = _spec_cols(sp)
+        money, used = [], set()
+        for nm in mnames:
+            ci = find_col(hdr, nm)
+            money.append({"name": nm.rstrip("*") if ci is None else hdr[ci].replace("\n", ""), "sum": col_sum(ci) if ci is not None else 0.0, "found": ci is not None})
+            if ci is not None:
+                used.add(ci)
+        for nm in onames:
+            ci = find_col_nth(hdr, nm) if isinstance(nm, list) else find_col(hdr, nm)
+            if ci is not None:
+                used.add(ci)
+        parts_sum = round(sum(m["sum"] for m in money if m["found"]), 2)
+        total = None
+        ct = find_col(hdr, sp["total_col"]) if sp.get("total_col") else None
+        if ct is not None:
+            total = {"name": hdr[ct].replace("\n", ""), "sum": col_sum(ct), "how": "spec"}
+            used.add(ct)
+        elif len([m for m in money if m["found"]]) == 1 and not sp.get("fee_parts"):
+            total = {"name": money[0]["name"] if money else "", "sum": parts_sum, "how": "self"}     # 直接读账单的合计列：本身就是合计
+        else:
+            for ci, h in enumerate(hdr):
+                if ci in used or not h or not _TOTAL_HINT.search(h):
+                    continue
+                s_ = col_sum(ci)
+                if s_:
+                    total = {"name": h.replace("\n", ""), "sum": s_, "how": "guess"}
+                    used.add(ci)
+                    break
+        unread, others = [], []
+        for ci, h in enumerate(hdr):
+            if ci in used or not h or _NOT_NUM.search(h):
+                continue
+            s_ = col_sum(ci)
+            if not s_:
+                continue
+            (unread if _FEE_HINT.search(h) and not _NOT_FEE.search(h) else others).append({"name": h.replace("\n", ""), "sum": s_})
+        amount = round(sum(float(r.get("amount") or 0) for r in rows), 2)
+        unsplit = 0.0
+        for r in rows:
+            try:
+                unsplit += float((json.loads(r.get("sub_fees") or "{}") or {}).get("其他费用（未拆）") or 0)
+            except Exception:
+                pass
+        unsplit = round(unsplit, 2)
+        gap = round(parts_sum - total["sum"], 2) if total else None
+        if total and total["how"] == "spec":
+            verdict = "unsplit" if abs(unsplit) >= 0.01 or abs(amount - total["sum"]) >= 0.01 else "ok"
+        elif total:
+            verdict = "ok" if abs(amount - total["sum"]) < 0.01 else "gap"
+            gap = round(amount - total["sum"], 2)
+        else:
+            verdict = "maybe" if unread else "nocheck"
+        out.append({"sheet": ws.title, "role": "detail", "n": len(rows), "docs": len({r.get("doc_no") for r in rows if r.get("doc_no")}),
+                    "amount": amount, "money": money, "total": total, "parts_sum": parts_sum, "gap": gap, "unsplit": unsplit,
+                    "verdict": verdict, "unread": unread, "others": others, "header_row": hr + 1})
+    full = parse_bill(dict(spec, period=period), data)
+    n_pre = sum(x.get("n") or 0 for x in out if x["role"] == "detail")
+    rank = {"gap": 4, "maybe": 3, "unsplit": 2, "nocheck": 1, "ok": 0}
+    vs = [x["verdict"] for x in out if x["role"] == "detail"]
+    return {"sheets": out, "n": len(full["detail"]), "amount": round(sum(float(r.get("amount") or 0) for r in full["detail"]), 2),
+            "accrual": round(sum(float(r.get("amount") or 0) for r in full["accrual"]), 2), "dup_rows": max(0, n_pre - len(full["detail"])),
+            "bill_src": full.get("bill_src") or "", "verdict": max(vs, key=lambda v: rank.get(v, 0)) if vs else "nocheck"}

@@ -751,7 +751,8 @@ def import_bill(carrier, period, data, operator, origin="手工上传", fname=""
                 vals["created_at"] = _now()
                 c.execute(insert(BL).values(**vals))
     db.audit(operator, "物流复核-解析账单", "%s %s" % (carrier, period),
-             "%s：明细 %d 行 / 计提 %d 行 / 跳过 %d 表" % (origin, len(res["detail"]), len(res["accrual"]), len(res["skipped"])))
+             "%s：明细 %d 行 / 计提 %d 行 / 跳过 %d 表；明细合计 %.2f" % (origin, len(res["detail"]), len(res["accrual"]), len(res["skipped"]),
+                                                         sum(float(r.get("amount") or 0) for r in res["detail"])))     # 合计(V2.989)：第①步解析记录看得出每次读了多少钱
     _bust(carrier, period)   # 账单重解析 → 逐笔/逐单视图缓存作废
     _save_raw_bill(carrier, period, src, data, operator, origin, fname)
     with db._engine.connect() as c:   # 本月现有几份账单(按货主)：汇总行合计，没有汇总行用明细合计

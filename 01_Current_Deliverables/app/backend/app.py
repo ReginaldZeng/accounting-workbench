@@ -5146,6 +5146,8 @@ from routers import logistics_review   # V2.632 物流账单复核（核价×核
 app.include_router(logistics_review.router)
 from routers import logistics_classify   # V2.986 物流账单复核·费用归类（第③轴：按金蝶推应记哪一行，对标注、对计提）
 app.include_router(logistics_classify.router)
+from routers import logistics_intake_check   # V2.989 物流账单复核·第①步数据接入（账单读全没有、各家接入概况、用原件重新解析）
+app.include_router(logistics_intake_check.router)
 from routers import bp_logistics_feed   # V2.785 BP 工作台读物流账单（内部只读口 /api/internal/bp-logistics-lines，出库费用归属用）
 app.include_router(bp_logistics_feed.router)
 from routers import bp_actual_cost_feed   # V2.795 BP 工作台读产品全成本（内部只读口 /api/internal/bp-actual-cost，STEP6 现金流用）
