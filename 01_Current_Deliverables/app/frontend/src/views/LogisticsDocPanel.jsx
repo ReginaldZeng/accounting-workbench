@@ -325,6 +325,67 @@ export function AccrTabDialog({ tab, carrier, period, onClose }) {
   </Dlg>
 }
 
+// ---------- 换算系数区间（照样机：分布点图 + 系统建议 + 改了当场看影响） ----------
+export function coefOf(x) { return x.chk && x.chk.kind === 'weight' && x.kd_sum > 0 && x.bill_amt != null ? x.bill_amt / x.kd_sum : null }
+function suggestRange(vals) {
+  if (!vals.length) return [1, 1]
+  const vs = [...vals].sort((a, b) => a - b)
+  if (vs.filter(v => Math.abs(v - 1) < 0.0005).length >= 0.6 * vs.length) return [1, 1]
+  const k = Math.max(0, Math.ceil(0.8 * vs.length) - 1)
+  return [1, Math.round(Math.ceil(vs[k] / 0.05 - 1e-9) * 0.05 * 100) / 100]
+}
+function DotPlot({ vals, lo, hi }) {
+  const W = 560, H = 54, x0 = Math.min(0.9, ...vals, lo), x1 = Math.max(Math.min(3, Math.max(...vals, hi) + 0.1), x0 + 0.4)
+  const X = v => 12 + (Math.min(Math.max(v, x0), x1) - x0) / (x1 - x0) * (W - 24)
+  const cnt = {}
+  const step = (x1 - x0) > 1.2 ? 0.5 : 0.1, ticks = []
+  for (let t = Math.ceil(x0 / step) * step; t <= x1 + 1e-9; t += step) ticks.push(Math.round(t * 100) / 100)
+  return <svg viewBox={`0 0 ${W} ${H}`} className="ldd-dots" role="img" aria-label="换算系数分布">
+    <line x1="12" x2={W - 12} y1="34" y2="34" stroke="#DCE2E7" />
+    <rect x={X(lo)} y="8" width={Math.max(3, X(hi) - X(lo))} height="24" fill="#E3F2EA" stroke="#2E7D57" strokeWidth="1" />
+    {vals.map((v, i) => { const k = v.toFixed(2); cnt[k] = (cnt[k] || 0) + 1; const bad = v > hi + 1e-9 || v < lo - 1e-9
+      return <circle key={i} cx={X(v)} cy={30 - Math.min(cnt[k] - 1, 6) * 3.5} r="3.4" fill={bad ? (v > hi ? '#B23B2E' : '#2C6BCF') : '#2E7D57'} opacity=".85"><title>{v.toFixed(3)}</title></circle> })}
+    {ticks.map(t => <g key={t}><line x1={X(t)} x2={X(t)} y1="34" y2="38" stroke="#8A96A2" /><text x={X(t)} y="50" fontSize="10" textAnchor="middle" fill="#8A96A2">{t.toFixed(1)}</text></g>)}
+  </svg>
+}
+export function RangeDialog({ docs, rng, carrier, onSave, onClose, locked }) {
+  const wd = docs.filter(x => coefOf(x) != null)
+  const vals = wd.map(coefOf)
+  const sug = suggestRange(vals)
+  const [lo, setLo] = useState(String((rng ? rng[0] : sug[0]).toFixed(2))), [hi, setHi] = useState(String((rng ? rng[1] : sug[1]).toFixed(2)))
+  const [busy, setBusy] = useState(false)
+  const L = parseFloat(lo), H = parseFloat(hi), ok = isFinite(L) && isFinite(H) && L > 0 && L <= H && H <= 5
+  const live = ok ? wd.reduce((a, x) => {
+    const c = coefOf(x), b = x.bill_amt, k = x.kd_sum, per = b ? (x.doc_fee || 0) / b : 0
+    if (c > H + 1e-9) { a.over++; a.overAmt += (b - k * H) * per; a.overKg += b - k * H }
+    else if (c < L - 1e-9) { a.under++; a.underAmt += (b - k * L) * per }
+    else a.inn++
+    return a
+  }, { over: 0, overAmt: 0, overKg: 0, under: 0, underAmt: 0, inn: 0 }) : null
+  return <Dlg title={`换算系数区间 · ${carrier}`} onClose={onClose}>
+    <p className="ldd-p">按重量收钱的单：<b>换算系数 ＝ 账单计费重量 ÷ 金蝶净重</b>。落在区间内算量对；超出上限的，只把超出的那部分重量算多收；低于下限的算少报。快运、快递过磅含包装，一般上限放到 1.1～1.2；零担按净重计费，区间 1.00。</p>
+    {vals.length ? <>
+      <DotPlot vals={vals} lo={ok ? L : 1} hi={ok ? H : 1} />
+      <div className="ldd-legend"><i className="g" />区间内　<i className="r" />超出上限　<i className="b" />低于下限　· 本月按重量核的 {nDocs(wd)} 张单</div>
+    </> : <div className="ldd-none">这家这个月没有按重量核的单（都是按箱数 / 按件数 / 包天包趟核的），换算系数区间用不上。</div>}
+    <div className="ldd-row ldd-rng">
+      <label>下限 <input className="clsinp" style={{ width: 70 }} value={lo} disabled={locked} onChange={e => setLo(e.target.value)} inputMode="decimal" /></label>
+      <label>上限 <input className="clsinp" style={{ width: 70 }} value={hi} disabled={locked} onChange={e => setHi(e.target.value)} inputMode="decimal" /></label>
+      <span className="dim">系统建议 {sug[0].toFixed(2)}{sug[1] !== sug[0] ? '～' + sug[1].toFixed(2) : ''}（六成以上正好 1.000 就是 1.00；否则上限取八成单子落得进的数）{!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setLo(sug[0].toFixed(2)); setHi(sug[1].toFixed(2)) }}>用建议值</button>}</span>
+    </div>
+    {!ok ? <div className="ldd-bad">下限、上限要填数字，下限不能大于上限。</div>
+      : live && <div className="ldd-live">按这个区间：<b>区间内 {live.inn} 张</b>　<b className="ldd-bad">超出 {live.over} 张 · 多报 {num(live.overKg)} 千克 · 多收 +{money(live.overAmt)}</b>　<b className="ldd-low">低于 {live.under} 张 · {money(live.underAmt)}</b>
+        <span className="dim">（多收＝超出部分重量 × 账单单价；单价由账单金额 ÷ 账单量倒推）</span></div>}
+    <div className="ldd-store">区间存在这家承运商的基础设置里（一家一档、各月通用），谁什么时候改的有日志。保存后整页按新区间重核。</div>
+    <div className="ldd-foot2">
+      {!locked && rng && <button className="btn sm" disabled={busy} onClick={() => { setBusy(true); onSave('', '').finally(() => setBusy(false)) }}>恢复默认（差 2% 以内算一致）</button>}
+      <span className="sp" />
+      <button className="btn sm" onClick={onClose}>关闭</button>
+      {!locked && <button className="btn sm pri" disabled={!ok || busy} onClick={() => { setBusy(true); onSave(L.toFixed(2), H.toFixed(2)).finally(() => setBusy(false)) }}>{busy ? '保存中…' : '保存并重核'}</button>}
+    </div>
+  </Dlg>
+}
+
 export function DupRuleDialog({ onClose }) {
   return <Dlg title="怀疑重复收费 · 怎么判" onClose={onClose}>
     <ul className="ldd-ul">
@@ -464,5 +525,13 @@ export const LDD_CSS = `
 .lrv .ldd-ul{margin:0;padding-left:1.2em;display:grid;gap:4px;font-size:12.5px;color:#1B2733}
 .lrv .ldd-row label{display:flex;gap:8px;align-items:center;font-size:12.5px;color:#5E6B78}
 .lrv tr.drow.ldd-cur td{background:#F5FAFC}
+.lrv .ldd-dots{width:100%;height:auto;display:block}
+.lrv .ldd-legend{font-size:11.5px;color:#8A96A2;display:flex;gap:4px;align-items:center;flex-wrap:wrap}
+.lrv .ldd-legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 2px 0 8px}.lrv .ldd-legend i.g{background:#2E7D57}.lrv .ldd-legend i.r{background:#B23B2E}.lrv .ldd-legend i.b{background:#2C6BCF}
+.lrv .ldd-rng{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.lrv .ldd-live{font-size:12.5px;background:#EEF4F7;border-radius:8px;padding:8px 10px;display:flex;gap:6px 14px;flex-wrap:wrap}
+.lrv .ldd-store{font-size:12px;color:#5E6B78;border-left:3px solid var(--accent);padding:6px 10px;background:#F5F7F8;border-radius:0 7px 7px 0}
+.lrv .ldd-tbl td.ldd-n{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
+.lrv .ldd-tbl td.ldd-s{white-space:nowrap;color:#5E6B78;font-size:12px}
 .lrv .dtbl.ldd-tbl td{vertical-align:top}
 `

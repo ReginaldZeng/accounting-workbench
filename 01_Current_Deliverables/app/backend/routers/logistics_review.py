@@ -3371,7 +3371,8 @@ def _box_docs(rsub, carrier):
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
                 "lid": r.get("id"),    # 账单行ID：同一单号账单上可能有多行(按车次收费)，页面勾选/展开按行认
                 "bw": is_bw, "bw_lack": bw_lack, "bill_cnt": (billcnt or None), "suggest": sugg, "vol": vol, "chk": chk, "mode_short": mode_short, "mode_tip": mode_tip, "force_mode": fm.get("mode") or "", "can_mode": _rev != "qty" and bool(d0), "can_weight": can_wt, "can_box": can_box,   # 逐单指定核对方式(V2.885)
-                "sub_fees": _subfees(r.get("sub_fees"))}   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
+                "sub_fees": _subfees(r.get("sub_fees")),   # 费用构成(快递费/操作费/箱子+箱型、运费/加班…)，页面展示
+                "carrier_sub": str(r.get("carrier_sub") or "").strip()}   # 运输方式(隔日达/次日达/整车车型…)，第②步表格一列(V2.987)
         mrows = []
         kgbase = 0.0
         if not lines:

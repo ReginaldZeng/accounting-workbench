@@ -15,7 +15,7 @@ import PeriodPicker from '../components/PeriodPicker.jsx'
 import { voucherLater, voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
 import { reviewClassify, reviewDups, reviewDupOk, reviewClassifyRules, reviewClassifyRulesSave } from '../api.js'
-import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
+import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog, RangeDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -1577,7 +1577,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             nodoc={((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)}
             onPick={k => { setKcard(k); setCpg(1) }} />}
           {d && d.by_box && <div className="ldd-rules">
-            <button className="ldd-rule-btn" onClick={editWt} title="按重量核量时，账单重量÷金蝶净重 落在这个范围内算一致（换算系数区间）。一家一档，各月通用">⚙ <b>换算系数区间</b>{d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认 ±2%'}</button>
+            <button className="ldd-rule-btn" onClick={() => setRuleDlg('range')} title="按重量核的单：账单计费重量 ÷ 金蝶净重 落在区间内算量对，超出上限的部分算多收">⚙ <b>换算系数区间</b>{d.wt_range ? `${Number(d.wt_range[0]).toFixed(2)}–${Number(d.wt_range[1]).toFixed(2)}` : '默认 差 2% 以内'}</button>
             <button className="ldd-rule-btn" onClick={() => setRuleDlg('rules')}>⚙ <b>归类规则</b>按单据类型、物料分组推</button>
             <button className="ldd-rule-btn" disabled={!clsR || !clsR.tab} onClick={() => setRuleDlg('accr')}>ⓘ <b>和本月计提对照</b>{clsR && clsR.accr_total != null ? '计提 ' + money(clsR.accr_total) : '取数中…'}</button>
             <button className="ldd-rule-btn" onClick={() => setRuleDlg('dup')}>ⓘ <b>重复收费</b>只比运输费，服务不同不算</button>
@@ -1586,6 +1586,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             onSaved={() => { loadCls(true); flash('归类规则已保存，按新规则重算') }} onClose={() => setRuleDlg(null)} />}
           {ruleDlg === 'accr' && clsR && <AccrTabDialog tab={clsR.tab} carrier={carrier} period={period} onClose={() => setRuleDlg(null)} />}
           {ruleDlg === 'dup' && <DupRuleDialog onClose={() => setRuleDlg(null)} />}
+          {ruleDlg === 'range' && <RangeDialog docs={(allD && allD.docs) || docs} rng={d && d.wt_range} carrier={carrier} locked={false} onClose={() => setRuleDlg(null)}
+            onSave={(lo, hi) => reviewWtRange(carrier, lo, hi).then(() => { flash(lo ? `换算系数区间已保存 ${lo}–${hi}，整页按新区间重核` : '已恢复默认（差 2% 以内算一致）'); setRuleDlg(null); load() }).catch(e => flash('保存失败：' + e.message))} />}
           {full && allD && (kcard || (clsR && (clsR.err || clsR.accr_note))) && <div className="adjnote">
             {kcard && <>只看：<b>{KNAME[kcard]}</b>（{nDocs(fdocs || [])} 张）<button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setKcard(null); setCpg(1) }}>看全部</button>　</>}
             {clsR && clsR.err && <span className="diffbad">归类没取到：{clsR.err}　<button className="lnk" onClick={() => loadCls(true)}>重取</button></span>}
@@ -1611,8 +1613,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               {dfilt && <button className="btn sm" onClick={() => { setDfilt(null); setPage(1); setOpen({}) }}>清空筛选</button>}
             </>}
             <div style={{ flex: 1 }} />
-            {d && d.by_box && <button className="btn sm" onClick={editWt} title="按重量核量时，账单重量÷金蝶净重 落在这个范围内算一致。快递/快运含包装、抛重，一般 1～2；整车用默认（差 2% 以内）。一家一档，各月通用">
-              毛重比 {d.wt_range ? `${d.wt_range[0]}～${d.wt_range[1]}` : '默认±2%'} ⚙</button>}
+            {/* V2.987：毛重比＝换算系数区间，入口挪到卡片下面那排(照样机，带分布图和影响预览)，这里不再重复 */}
             {d && d.by_box && <button className="btn sm" onClick={editPallet} title="有的线路按托收费，账单上的计费重量是「托数 × 每托千克数」，不是货的真实重量。填了以后，计费重量是半托整数倍的单改按箱数核（账单件数 对 金蝶箱数）。一家一档，各月通用">
               按托 {d.pallet_kg ? `${d.pallet_kg} 千克/托${d.pallet_box ? ' · ' + d.pallet_box + ' 箱/托' : ''}` : '未设'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={editVol} title="有的货按体积收费（抛重）：账单计重＝件数 × 箱子体积 × 每方千克数，不是货的净重。账单行带了箱子尺寸的，系统按这里填的数复算计重，件数仍和金蝶箱数比。一家一档，各月通用">
@@ -1674,8 +1675,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                 <thead><tr>
                   <th className="ck"><input type="checkbox" title="全选本页" checked={pageAllOn}
                     ref={el => { if (el) el.indeterminate = !pageAllOn && pageSomeOn }} onChange={togglePage} /></th>
-                  <th></th><th>金蝶单号</th><th>结论</th><th className="num">差额</th><th>往来 · 主体</th>
-                  <th>① 量</th><th>② 价</th><th>③ 归类</th><th className="num">账单金额</th><th className="num">复核金额</th>
+                  <th></th><th>金蝶单号</th><th>结论</th><th className="num">差额</th><th>往来 · 主体</th><th>运输方式</th>
+                  <th>① 量</th><th>金蝶基本单位</th><th>② 价</th><th>③ 归类</th><th className="num">账单金额</th><th className="num">复核金额</th>
+                  <th className="num">单位运费<small> 元/kg</small></th><th className="num">销售额</th><th className="num">费比</th>
                 </tr></thead>
                 <tbody>
                   {docs.map((x, i) => {
@@ -1701,11 +1703,16 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                         <td className="num"><DiffCell j={j} /></td>
                         <td className="party"><span title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</span>
                           <span className="sub"><Cd c={cdBook(x.subject)} />{x.subject} · {x.fee_item}{x.bizline ? ' · ' + x.bizline : ''}</span></td>
+                        <td className="ldd-s">{x.carrier_sub || <span className="dim">—</span>}</td>
                         <td><Cell2 top={j.q.top} sub={j.q.sub} k={j.q.k} title={x.mode_tip || x.mode_cn} /></td>
+                        <td className="ldd-s" title="金蝶物料的基本计量单位（包材不算）">{[...new Set((x.materials || []).filter(m => !m.is_pack).map(m => m.kg_unit).filter(Boolean))].join(' / ') || <span className="dim">—</span>}</td>
                         <td><Cell2 top={j.p.top} sub={j.p.sub} k={j.p.k} /></td>
                         <td><ClsCell c={x.doc_no ? cmap[x.doc_no] : null} onOpen={() => setDlgK(kk(x))} /></td>
                         <td className="num">{money(x.doc_fee)}</td>
-                        <td className="num">{j.rv == null ? <span className="dim">—</span> : money(j.rv)}</td>
+                        <td className="num">{j.rv == null ? <span className="ldd-tbd">待定</span> : money(j.rv)}</td>
+                        <td className="ldd-n">{x.unit_fee == null ? <span className="dim">—</span> : x.unit_fee}</td>
+                        <td className="ldd-n">{x.sales == null ? <span className="dim">—</span> : money(x.sales)}</td>
+                        <td className="ldd-n">{x.ratio == null ? <span className="dim">—</span> : (x.ratio * 100).toFixed(2) + '%'}</td>
                       </tr>
                     ]
                   })}
