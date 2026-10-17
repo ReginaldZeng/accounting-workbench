@@ -32,9 +32,11 @@ export function judge(x) {
     const rg = x.chk && x.chk.kind === 'weight' && x.chk.rng ? x.chk.rng : null
     const b = x.bill_amt || 0, k = x.kd_sum || 0
     const d = rg ? (b > k * rg[1] ? b - k * rg[1] : b < k * rg[0] ? b - k * rg[0] : 0) : b - k
-    const sub = rg ? `系数 ${x.conv != null ? x.conv : num(b / k, 3)} ${d > 0 ? '超出' : '低于'} ${rg[0]}～${rg[1]}；账单 ${num(b)} / 金蝶 ${num(k)} ${u}` : `账单 ${num(b)} / 金蝶 ${num(k)} ${u}`
-    q = { top: `${d >= 0 ? '多报' : '少报'} ${num(Math.abs(d))} ${u}`, sub, k: d >= 0 ? 'bad' : 'low', d: r2(d) }
-  } else q = { top: u === '箱' ? '箱数对上' : u === '千克' ? '重量对上' : '量对上', sub: `账单 ${num(x.bill_amt)} / 金蝶 ${num(x.kd_sum)} ${u}` + (x.conv != null && x.conv !== 1 ? ` · 系数 ${x.conv}` : ''), k: 'ok' }
+    const cf = x.conv != null ? x.conv : num(b / k, 3)
+    const sub = rg ? `系数 ${cf} ${d > 0 ? '超出' : '低于'} ${rg[0]}～${rg[1]}；账单 ${num(b)} / 金蝶 ${num(k)} ${u}` : `账单 ${num(b)} / 金蝶 ${num(k)} ${u}`
+    q = { top: `${d >= 0 ? '多报' : '少报'} ${num(Math.abs(d))} ${u}`, sub, short: `${num(b)} / ${num(k)} ${u}` + (rg ? ` · 系数 ${cf}` : ''), k: d >= 0 ? 'bad' : 'low', d: r2(d) }
+  } else q = { top: u === '箱' ? '箱数对上' : u === '千克' ? '重量对上' : '量对上', sub: `账单 ${num(x.bill_amt)} / 金蝶 ${num(x.kd_sum)} ${u}` + (x.conv != null && x.conv !== 1 ? ` · 系数 ${x.conv}` : ''),
+    short: `${num(x.bill_amt)} / ${num(x.kd_sum)} ${u}` + (x.conv != null && x.conv !== 1 ? ` · 系数 ${x.conv}` : ''), k: 'ok' }
   // ② 价
   let p, pd = null
   const tgt = Object.keys(sf).find(k => !['标准', '公式', '核价差', '箱型'].includes(k) && typeof sf[k] === 'number')
@@ -50,7 +52,7 @@ export function judge(x) {
     p = '核价差' in sf
       ? { top: `和公式对不上 · ${money(sf[tgt])}`, sub: `${sf['公式'] || '按公式'} ＝ ${money(sf['标准'])}`, k: pd != null && pd < 0 ? 'low' : 'bad' }
       : { top: '按公式对上', sub: `${sf['公式'] || '按公式'} ＝ ${money(sf['标准'])}`, k: 'ok' }
-  } else p = { top: '价没依据', sub: '没有合同价可比（价的依据库还没做）', k: 'tbd' }
+  } else p = { top: '价没依据', sub: '没有合同价可比（价的依据库还没做）', short: '无合同价可比', k: 'tbd' }
   // 钱：差额＝量差折钱（账单金额 ÷ 账单量 倒推单价）＋价差
   let diff = null
   if (q.d != null && x.bill_amt) diff = r2(q.d * fee / x.bill_amt)
@@ -126,8 +128,8 @@ export function DocCards({ docs, cls, dups, totalBill, nodoc = [], cur, onPick, 
 
 // ---------- 表格单元格 ----------
 const QK_CLS = { ok: '', bad: 'ldd-bad', low: 'ldd-low', miss: 'ldd-orange', na: 'dim', tbd: 'ldd-q' }
-export function Cell2({ top, sub, k, title }) {
-  return <div className="ldd-c2"><span className={QK_CLS[k] || ''}>{top}</span><small title={title || sub}>{sub}</small></div>
+export function Cell2({ top, sub, short, k, title }) {
+  return <div className="ldd-c2"><span className={QK_CLS[k] || ''}>{top}</span><small title={[sub, title].filter(Boolean).join('\n')}>{short || sub}</small></div>
 }
 export function ClsCell({ c, onOpen }) {
   if (!c) return <span className="dim">—</span>
@@ -474,13 +476,13 @@ export const LDD_CSS = `
 .lrv .ldd-rule-btn{border:1px solid #DCE2E7;background:#fff;border-radius:999px;padding:3px 11px;font:inherit;font-size:12px;color:#5E6B78;cursor:pointer;display:inline-flex;gap:5px;align-items:center}
 .lrv .ldd-rule-btn b{color:#1B2733;font-weight:600}.lrv .ldd-rule-btn:hover{border-color:var(--accent);color:var(--accent)}
 .lrv .pill.blue{background:#E1ECF7;color:#2C6BCF}.lrv .pill.orange{background:#FBE9DD;color:#B4501D}
-.lrv .ldd-c2{display:flex;flex-direction:column;gap:1px;min-width:120px;max-width:200px}
+.lrv .ldd-c2{display:flex;flex-direction:column;gap:1px;min-width:100px;max-width:160px}
 .lrv .ldd-c2>span{font-size:12.5px;font-weight:500;white-space:nowrap}.lrv .ldd-c2>small{font-size:11px;color:#8A96A2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lrv .ldd-cls{display:flex;flex-direction:column;gap:2px;align-items:flex-start;min-width:140px;max-width:210px}
+.lrv .ldd-cls{display:flex;flex-direction:column;gap:2px;align-items:flex-start;min-width:120px;max-width:160px}
 .lrv .ldd-cls .pill{white-space:nowrap}.lrv .ldd-diff{font-size:10.5px;color:var(--bad);margin-left:4px}
-.lrv .ldd-lk{border:0;background:none;padding:0;font:inherit;font-size:11px;color:#8A96A2;cursor:pointer;text-align:left;max-width:210px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lrv .ldd-lk{border:0;background:none;padding:0;font:inherit;font-size:11px;color:#8A96A2;cursor:pointer;text-align:left;max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lrv .ldd-lk:hover{color:var(--accent);text-decoration:underline}
-.lrv .ldd-why{display:block;font-size:11px;color:#8A96A2;margin-top:2px;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lrv .ldd-why{display:block;font-size:11px;color:#8A96A2;margin-top:2px;max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lrv .ldd-tbd{color:var(--warn);font-size:12px}
 .lrv .ldd-mask{position:fixed;inset:0;background:rgba(10,20,30,.42);z-index:60;display:flex;align-items:flex-start;justify-content:center;padding:5vh 16px 16px;overflow-y:auto}
 .lrv .ldd-dlg{background:#fff;color:#1B2733;border-radius:12px;box-shadow:0 10px 40px rgba(20,30,40,.25);width:min(1180px,100%);display:grid;grid-template-rows:auto 1fr auto;max-height:90vh}
@@ -534,4 +536,7 @@ export const LDD_CSS = `
 .lrv .ldd-tbl td.ldd-n{white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
 .lrv .ldd-tbl td.ldd-s{white-space:nowrap;color:#5E6B78;font-size:12px}
 .lrv .dtbl.ldd-tbl td{vertical-align:top}
+.lrv .dtbl.ldd-tbl td.concl{min-width:0;max-width:170px}
+.lrv .dtbl.ldd-tbl td.party{max-width:160px}.lrv .dtbl.ldd-tbl td.party>span,.lrv .dtbl.ldd-tbl td.party .sub{display:block;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrv .dtbl.ldd-tbl th{white-space:nowrap}
 `
