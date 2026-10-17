@@ -155,6 +155,9 @@ function Mk({ k }) {
 }
 
 export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, locked, ctx }) {
+  const [ops, setOps] = useState({})     // 处理区：点哪个按钮展开哪个(改归类/核对方式/多收扣回/备注)
+  const xk = x ? (x.lid != null ? x.lid : x.doc_no) : null
+  useEffect(() => { setOps({}) }, [xk])
   useEffect(() => {
     const h = e => {
       if (e.key === 'Escape') onClose()
@@ -170,22 +173,34 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
   const { saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, withCur, onDupOk } = ctx
   const j = judge(x)
   const dupOn = dup && !dup.ok
-  const todo = x.confirmed ? '' : TODO_TXT[j.v]
-  const ctodo = !c ? '' : c.v === '归类一致' ? '归类没问题。' : c.v === '判不了' ? '归类系统判不了，按物流部标注放（见「记到哪」）。' : '归类有问题，见「记到哪」。'
-  const sf = Object.entries(x.sub_fees || {}).filter(([k, v]) => typeof v === 'number' && v && !['标准', '核价差'].includes(k))
-  const it = carryOf(x.doc_no), f = carryForm[x.doc_no] || {}
   const ps = x.parties || []
+  const it = carryOf(x.doc_no), f = carryForm[x.doc_no] || {}
+  // 按费用项拆行(V2.987，用户 10-17「这一页怎么做清楚一点」)：运费按计费量算单价，保费/退仓费这类按票，各自一行 量 × 价 ＝ 金额
+  const sfe = Object.entries(x.sub_fees || {}).filter(([k, v]) => typeof v === 'number' && v && !['标准', '核价差'].includes(k))
+  const mainK = sfe.find(([k]) => k === '运费') ? '运费' : (sfe.length ? sfe.reduce((a, b) => (b[1] > a[1] ? b : a))[0] : null)
+  const items = sfe.length ? sfe.map(([k, v]) => ({ name: k, amt: v, main: k === mainK })) : [{ name: x.fee_item || '运费', amt: x.doc_fee, main: true }]
+  const noBasis = j.p.k === 'tbd'
+  const badItems = noBasis ? items.map(i => i.name) : []
+  const head = j.v === '价待确认' ? `${badItems.join('、') || '运费'}没有合同价可比`
+    : j.v === '量核不了' ? (x.state === 'miss' ? '金蝶里查不到这张单' : j.q.sub)
+      : j.v === '只核了价' ? '账单上没标金蝶单号'
+        : j.v === '一致' ? '量、价都对上' : j.why
+  const todo = x.confirmed ? '' : TODO_TXT[j.v]
+  const ctodo = !c ? '' : c.v === '归类一致' ? '归类没问题。' : c.v === '判不了' ? `归类判不了（${(c.unk || '').replace(/，.*$/, '')}），按标注放。` : `归类：${c.txt}。`
+  const showCarry = !!it || j.v === '多收'
+  const opBtn = (k, label, on = true) => on && <button key={k} className={'btn sm' + (ops[k] ? ' on' : '')} onClick={() => setOps(o => ({ ...o, [k]: !o[k] }))}>{label}{ops[k] ? ' ▴' : ' ▾'}</button>
   return <div className="ldd-mask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
     <div className="ldd-dlg" role="dialog" aria-modal="true" aria-label={'单据 ' + (x.doc_no || '')}>
       <header>
-        <h2><span className="mono">{x.doc_no || '（无单号）'}</span>　·　{ps[0] || '—'}　·　{x.subject}　·　账单 {money(x.doc_fee)}</h2>
+        <h2><span className="mono">{x.doc_no || '（无单号）'}</span>　·　{ps[0] || '—'}　·　{x.subject}{x.carrier_sub ? '　·　' + x.carrier_sub : ''}</h2>
+        <span className="ldd-hamt">账单 <b>{money(x.doc_fee)}</b></span>
         <button className="ldd-x" aria-label="关闭" onClick={onClose}>×</button>
       </header>
       <div className="ldd-body">
         <div className={'ldd-vbar ' + (V_PILL[j.v] || 'neu')}>
-          <div className="l1"><b>{j.v}</b>{j.diff != null && !isZero(j.diff) ? (j.diff > 0 ? ` +${money(j.diff)}　` : ` −${money(-j.diff)}　`) : ''}{j.why}
+          <div className="l1"><b>{j.v}{j.diff != null && !isZero(j.diff) ? (j.diff > 0 ? ` +${money(j.diff)}` : ` −${money(-j.diff)}`) : ''}</b>{head}
             {x.confirmed && <span className="pill ok" style={{ marginLeft: 8 }}>✓ {x.confirmed.by} {x.confirmed.at || ''} 已确认</span>}</div>
-          {(todo || ctodo) && <div className="l2">{todo && <><b>要做：</b>{todo}。</>}{ctodo}</div>}
+          {(todo || ctodo) && <div className="l2">{todo && <><b>要做：</b>{todo}。</>}　{ctodo}</div>}
           {x.suggest && x.state === 'qtydiff' && <div className="l2">建议{x.suggest.mode === 'box' ? '按箱数核' : '按重量核'}：{x.suggest.txt}
             {!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => saveMode(x.doc_no, x.suggest.mode)}>采纳</button>}</div>}
           {dup && <div className="l3"><b className={dupOn ? 'ldd-bad' : ''}>{dupOn ? '怀疑重复收费' : '已标不是重复'}</b>
@@ -196,44 +211,53 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
 
         <section className="ldd-sec"><h3>钱 ＝ 量 × 价</h3>
           <div className="ldd-tw"><table className="ldd-calc">
-            <thead><tr><th>账单</th><th>① 量（和金蝶比）</th><th>② 价</th><th className="num">账单金额</th><th className="num">复核金额</th><th className="num">差额</th></tr></thead>
-            <tbody><tr>
-              <td><span className="f">{num(x.bill_amt)} {x.bill_unit}{x.bill_amt ? <span className="op"> × </span> : ''}{x.bill_amt ? num(x.doc_fee / x.bill_amt, 4) : ''}{x.bill_amt ? <span className="op"> ＝ </span> : ''}<b>{money(x.doc_fee)}</b></span>
-                {sf.length > 1 && <span className="sub">{sf.map(([k, v]) => `${k} ${money(v)}`).join(' ＋ ')}</span>}
-                {x.bill_amt ? <span className="sub">单价＝账单金额 ÷ 账单量（账单没写单价，倒推的）</span> : null}
-                {x.trips > 1 && <span className="sub">这张单账单上 {x.trips} 行，合计 {money(x.doc_fee_all)}</span>}</td>
-              <td><span className="f"><span className={QK_CLS[j.q.k]}>{j.q.top}</span> <Mk k={j.q.k} /></span><span className="sub">{j.q.sub}</span>
-                {x.mode_cn && x.mode_cn !== j.q.sub && <span className="sub">{x.mode_cn}</span>}</td>
-              <td><span className="f"><span className={QK_CLS[j.p.k]}>{j.p.top}</span> <Mk k={j.p.k} /></span><span className="sub">{j.p.sub}</span></td>
-              <td className="num">{money(x.doc_fee)}</td>
-              <td className="num">{j.rv == null ? <span className="dim">—</span> : money(j.rv)}</td>
-              <td className="num"><DiffCell j={j} /></td>
-            </tr></tbody></table></div>
-          <div className="ldd-facts">
-            <span><i>产品线</i>{x.bizline || '—'}</span><span><i>费用类型</i>{x.fee_item || '—'}</span>
-            <span><i>往来</i>{ps.join('、') || '—'}</span>
-            <span><i>单位运费</i>{x.unit_fee == null ? '—' : x.unit_fee + ' 元/kg'}</span>
-            <span><i>费比</i>{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null ? `（销售额 ${money(x.sales)}）` : ''}</span>
-          </div></section>
+            <thead><tr><th>费用项</th><th>账单：量 × 价 ＝ 金额</th><th>① 量（和金蝶比）</th><th>② 价</th><th className="num">金额</th></tr></thead>
+            <tbody>{items.map(i => {
+              const per = i.main && x.bill_amt ? i.amt / x.bill_amt : null
+              return <tr key={i.name}>
+                <td className="fee">{i.name}<small>{i.main ? (x.mode_short || (x.bill_unit ? '按' + x.bill_unit : '')) : '按票'}</small></td>
+                <td><span className="f">{i.main && x.bill_amt
+                  ? <>{num(x.bill_amt)} {x.bill_unit}<span className="op"> × </span>{num(per, 4)}<span className="op"> ＝ </span><b>{money(i.amt)}</b></>
+                  : <>1 票<span className="op"> × </span>{num(i.amt)}<span className="op"> ＝ </span><b>{money(i.amt)}</b></>}</span>
+                  {i.main && x.bill_amt ? <span className="sub">单价＝{i.name} ÷ 计费量（账单没写单价）</span> : null}</td>
+                <td>{i.main ? <><span className="f"><span className={QK_CLS[j.q.k]}>{j.q.top}</span> <Mk k={j.q.k} /></span><span className="sub">{j.q.sub}</span></>
+                  : <span className="f dim">按票，不核量 <Mk k="na" /></span>}</td>
+                <td>{i.main || !noBasis ? <><span className="f"><span className={QK_CLS[j.p.k]}>{j.p.top}</span> <Mk k={j.p.k} /></span><span className="sub">{j.p.short || j.p.sub}</span></>
+                  : <><span className="f"><span className="ldd-q">价没依据</span> <Mk k="tbd" /></span><span className="sub">无合同价可比</span></>}</td>
+                <td className="num">{money(i.amt)}</td></tr>
+            })}</tbody>
+            <tfoot><tr><td colSpan="4">
+              <span className="ldd-sum">账单 <b>{money(x.doc_fee)}</b>　→　复核 <b>{j.rv == null ? '待定' : money(j.rv)}</b>　差额 <DiffCell j={j} /></span>
+              {j.v === '价待确认' && <span className="dim">　（价确认前，复核金额暂按账单）</span>}
+              {j.v === '量核不了' && <span className="dim">　（量核不了，复核金额待定）</span>}
+              {x.trips > 1 && <span className="dim">　这张单账单上 {x.trips} 行，合计 {money(x.doc_fee_all)}</span>}</td>
+              <td className="num"><b>{money(x.doc_fee)}</b></td></tr></tfoot>
+          </table></div></section>
 
-        <section className="ldd-sec"><h3>金蝶出库明细 · 复核的量从这里来（只读）</h3>
+        <section className="ldd-sec ldd-kv">
+          <span><i>这张单</i></span>
+          <span><i>产品线</i>{x.bizline || '—'}</span><span><i>费用类型</i>{x.fee_item || '—'}</span>
+          <span><i>往来</i>{ps.join('、') || '—'}</span>
+          <span><i>单位运费</i>{x.unit_fee == null ? '—' : x.unit_fee + ' 元/kg'}</span>
+          <span><i>费比</i>{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null ? `（销售额 ${money(x.sales)}）` : ''}</span>
+        </section>
+
+        <details className="ldd-sec ldd-fold" open={['bad', 'low', 'miss'].includes(j.q.k)}>
+          <summary><h3>金蝶出库明细（{x.n_mat || 0} 行物料 · 合计 {num(x.kd_sum)} {x.kd_unit}）· 复核的量从这里来</h3></summary>
           {x.n_mat > 0 ? <div className="ldd-tw"><table className="mini">
-            <thead><tr><th>物料编码</th><th>物料名称</th><th>规格</th><th>往来</th><th className="num">基本单位数量</th><th className="num">金蝶数量</th>
-              <th className="num">核对量<small>{x.kd_unit}</small></th><th className="num">分摊运费</th><th className="num">销售额</th></tr></thead>
+            <thead><tr><th>物料编码</th><th>物料名称</th><th>规格</th><th className="num">基本单位数量</th><th className="num">核对量<small>{x.kd_unit}</small></th><th className="num">分摊运费</th><th className="num">销售额</th></tr></thead>
             <tbody>{x.materials.map((m, i) => <tr key={i} className={m.is_pack ? 'pack' : ''}>
               <td className="mono">{m.code || '—'}</td>
               <td>{m.name}{m.is_pack && <span className="tag">包材·不计</span>}</td>
               <td className="spec">{m.spec || <span className="dim">—</span>}</td>
-              <td>{m.party || <span className="dim">—</span>}</td>
-              <td className="num">{num(m.base_kg)}<small className="u">{m.kg_unit}</small>{m.kg_eq != null && <span className="sub">折 {num(m.kg_eq)} 千克</span>}{m.unit_gap && <span className="sub diffbad">没填单位换算，未计入</span>}</td>
-              <td className="num">{num(m.base_qty)}<small className="u">{m.base_unit}</small>{m.box_n != null && m.out_unit !== '箱' && <span className="sub">{num(m.out_qty)}{m.out_unit} ÷ {num(m.box_div)} ＝ {num(m.box_n)} 箱</span>}</td>
+              <td className="num">{num(m.base_kg)}<small className="u">{m.kg_unit}</small>{m.kg_eq != null && <span className="sub">折 {num(m.kg_eq)} 千克</span>}{m.unit_gap && <span className="sub diffbad">没填单位换算，未计入</span>}
+                {m.box_n != null && m.out_unit !== '箱' && <span className="sub">{num(m.out_qty)}{m.out_unit} ÷ {num(m.box_div)} ＝ {num(m.box_n)} 箱</span>}</td>
               <td className="num">{num(m.kd)}{m.vol_per != null && m.box_n != null && <span className="sub">{num(m.box_n)} 箱 × {m.vol_per}</span>}{m.bw_gap && <span className="sub diffbad">没填每箱计费重量</span>}</td>
               <td className="num">{money(m.fee)}</td>
               <td className="num">{m.sales == null ? '—' : money(m.sales)}</td></tr>)}
-              <tr className="ldd-tot"><td colSpan="6">合计（不含包材）</td><td className="num"><b>{num(x.kd_sum)} {x.kd_unit}</b></td><td className="num">{money(x.doc_fee)}</td><td className="num">{x.sales == null ? '—' : money(x.sales)}</td></tr>
             </tbody></table></div>
             : <div className="ldd-none">{x.doc_no ? '金蝶里没找到这张单据的物料（单号填错 / 未审核 / 拆单后缀），核对账单登记的金蝶单号。' : '账单里的调整行（无单据），只登记不核量。'}</div>}
-        </section>
+        </details>
 
         <section className="ldd-sec"><h3>记到哪</h3>
           {!c ? <div className="ldd-none">归类还在取（要读金蝶单据头和物料分组），或者这张单没有金蝶单号。</div>
@@ -255,9 +279,10 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
             </div>}
         </section>
 
-        {x.doc_no && <section className="ldd-sec ldd-ops"><h3>处理</h3>
-          <div className="xcls">
-            <span className="dim">归类</span>
+        {x.doc_no && <section className="ldd-sec ldd-ops">
+          <div className="ldd-opbar">{opBtn('cls', '改归类')}{opBtn('mode', '改核对方式', x.can_mode)}{opBtn('carry', it ? '多收扣回（已登记）' : '登记多收扣回', showCarry)}{opBtn('note', x.note ? '备注：' + (x.note.length > 16 ? x.note.slice(0, 15) + '…' : x.note) : '写备注')}
+            {(x.subj_ovr || x.fee_ovr || x.ovr_reason || x.force_mode) && <span className="dim">　这张单有人工改过的设置</span>}</div>
+          {ops.cls && <div className="xcls">
             <label>主体 <select className="clsinp" disabled={locked} value={x.subject || ''} onChange={e => saveClass(x.doc_no, { subject: e.target.value })}>
               {withCur(subjOpts, x.subject).map(s => <option key={s} value={s}>{s}{s === x.subj_bill ? '（账单原值）' : ''}</option>)}</select></label>
             <label>费用类型 <select className="clsinp" disabled={locked} value={x.fee_item || ''} onChange={e => saveClass(x.doc_no, { fee_item: e.target.value })}>
@@ -265,14 +290,14 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
             <label>原因 <input className="clsinp wide" disabled={locked} defaultValue={x.ovr_reason || ''} key={'r' + x.doc_no + (x.ovr_reason || '')}
               placeholder="特批/调整的原因" onBlur={e => { const v = e.target.value.trim(); if (v !== (x.ovr_reason || '')) saveClass(x.doc_no, { reason: v }) }} /></label>
             {(x.subj_ovr || x.fee_ovr || x.ovr_reason) && !locked && <button className="lk" onClick={() => saveClass(x.doc_no, { restore: true })}>恢复账单原值</button>}
-          </div>
-          {x.can_mode && <div className="xcls"><span className="dim">核对方式</span>
-            <label><select className="clsinp" disabled={locked} value={x.force_mode || ''} onChange={e => saveMode(x.doc_no, e.target.value)}>
+          </div>}
+          {ops.mode && x.can_mode && <div className="xcls">
+            <label>核对方式 <select className="clsinp" disabled={locked} value={x.force_mode || ''} onChange={e => saveMode(x.doc_no, e.target.value)}>
               <option value="">系统自动</option>
               <option value="weight" disabled={!x.can_weight}>按重量核：账单重量 对 金蝶重量{x.can_weight ? '' : '（账单这行没写重量）'}</option>
               <option value="box" disabled={!x.can_box}>按箱数核：账单件数 对 金蝶箱数{x.can_box ? '' : '（账单这行没写件数）'}</option>
             </select></label></div>}
-          <div className="xcls"><span className="dim">多收扣回</span>
+          {ops.carry && showCarry && <div className="xcls">
             {it ? <><span>已登记：供应商多收 <b>{money(it.amount)}</b> 元（含税），等后面月份账单扣回　<span className="dim">{it.reason} · {it.by} {String(it.at || '').slice(0, 10)}</span></span>
               {it.done ? <span className="diffok">　✓ {it.done.period} 账单已扣回</span> : (!locked && <button className="lk" onClick={() => delCarry(it)}>撤销</button>)}</>
               : <><label>多收 <input className="clsinp" style={{ width: 90, textAlign: 'right' }} disabled={locked} placeholder={j.diff > 0 ? String(j.diff) : '含税金额'} value={f.amount || ''}
@@ -280,10 +305,10 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
                 <label>原因 <input className="clsinp wide" disabled={locked} placeholder="多收了什么、和谁确认的" value={f.reason || ''}
                   onChange={e => setCarryForm(o => ({ ...o, [x.doc_no]: { ...f, reason: e.target.value } }))} /></label>
                 <button className="btn sm" disabled={locked || !String(f.amount || '').trim() || !String(f.reason || '').trim()} onClick={() => addCarry(x.doc_no)}>登记待扣回</button></>}
-          </div>
-          <div className="xcls"><span className="dim">备注</span>
-            <input className="clsinp wide" disabled={locked} defaultValue={x.note || ''} key={'n' + x.doc_no + (x.note || '')} placeholder="备注…"
-              onBlur={e => { const v = e.target.value.trim(); if (v !== (x.note || '')) saveNote(x.doc_no, v) }} /></div>
+          </div>}
+          {ops.note && <div className="xcls">
+            <input className="clsinp wide" style={{ width: '100%' }} disabled={locked} defaultValue={x.note || ''} key={'n' + x.doc_no + (x.note || '')} placeholder="备注…"
+              onBlur={e => { const v = e.target.value.trim(); if (v !== (x.note || '')) saveNote(x.doc_no, v) }} /></div>}
         </section>}
       </div>
       <footer className="ldd-foot">
@@ -527,6 +552,16 @@ export const LDD_CSS = `
 .lrv .ldd-ul{margin:0;padding-left:1.2em;display:grid;gap:4px;font-size:12.5px;color:#1B2733}
 .lrv .ldd-row label{display:flex;gap:8px;align-items:center;font-size:12.5px;color:#5E6B78}
 .lrv tr.drow.ldd-cur td{background:#F5FAFC}
+.lrv .ldd-hamt{font-size:13px;color:#5E6B78;white-space:nowrap}.lrv .ldd-hamt b{font-size:15px;color:#1B2733;font-variant-numeric:tabular-nums}
+.lrv .ldd-calc tfoot td{border-bottom:0;border-top:1px solid #DCE2E7;padding-top:9px}.lrv .ldd-sum b{font-variant-numeric:tabular-nums}
+.lrv .ldd-calc td.fee small{display:block;font-size:11px;color:#8A96A2}
+.lrv .ldd-kv{display:flex;flex-wrap:wrap;gap:4px 18px;font-size:12.5px;background:#F5F7F8;border-radius:8px;padding:8px 12px}
+.lrv .ldd-kv i{font-style:normal;color:#8A96A2;margin-right:6px}.lrv .ldd-kv>span:first-child i{color:#1B2733;font-weight:600}
+.lrv details.ldd-fold>summary{cursor:pointer;list-style:none}.lrv details.ldd-fold>summary::-webkit-details-marker{display:none}
+.lrv details.ldd-fold>summary h3{display:inline;margin:0;font-size:12.5px;color:var(--accent);font-weight:600}
+.lrv details.ldd-fold>summary h3::before{content:"▸ "}.lrv details.ldd-fold[open]>summary h3::before{content:"▾ "}
+.lrv .ldd-opbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.lrv .ldd-opbar .btn.on{border-color:var(--accent);color:var(--accent);background:#F5FAFC}
 .lrv .ldd-dots{width:100%;height:auto;display:block}
 .lrv .ldd-legend{font-size:11.5px;color:#8A96A2;display:flex;gap:4px;align-items:center;flex-wrap:wrap}
 .lrv .ldd-legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 2px 0 8px}.lrv .ldd-legend i.g{background:#2E7D57}.lrv .ldd-legend i.r{background:#B23B2E}.lrv .ldd-legend i.b{background:#2C6BCF}
