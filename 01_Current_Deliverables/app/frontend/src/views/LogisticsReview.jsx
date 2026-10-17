@@ -1676,8 +1676,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   <th className="ck"><input type="checkbox" title="全选本页" checked={pageAllOn}
                     ref={el => { if (el) el.indeterminate = !pageAllOn && pageSomeOn }} onChange={togglePage} /></th>
                   <th></th><th>金蝶单号</th><th>结论</th><th className="num">差额</th><th>往来 · 主体</th><th>运输方式</th>
-                  <th>① 量</th><th>金蝶基本单位</th><th>② 价</th><th>③ 归类</th><th className="num">账单金额</th><th className="num">复核金额</th>
-                  <th className="num">单位运费<small> 元/kg</small></th><th className="num">销售额</th><th className="num">费比</th>
+                  <th>① 量</th><th>② 价</th><th>③ 归类</th><th className="num">账单金额</th><th className="num">复核金额</th>
+                  <th className="num">金蝶基本数量</th><th>金蝶基本单位</th><th className="num">单位运费<small> 元/kg</small></th><th className="num">销售额</th><th className="num">费比</th>
                 </tr></thead>
                 <tbody>
                   {docs.map((x, i) => {
@@ -1705,11 +1705,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           <span className="sub"><Cd c={cdBook(x.subject)} />{x.subject} · {x.fee_item}{x.bizline ? ' · ' + x.bizline : ''}</span></td>
                         <td className="ldd-s">{x.carrier_sub || <span className="dim">—</span>}</td>
                         <td><Cell2 top={j.q.top} sub={j.q.sub} k={j.q.k} title={x.mode_tip || x.mode_cn} /></td>
-                        <td className="ldd-s" title="金蝶物料的基本计量单位（包材不算）">{[...new Set((x.materials || []).filter(m => !m.is_pack).map(m => m.kg_unit).filter(Boolean))].join(' / ') || <span className="dim">—</span>}</td>
                         <td><Cell2 top={j.p.top} sub={j.p.sub} k={j.p.k} /></td>
                         <td><ClsCell c={x.doc_no ? cmap[x.doc_no] : null} onOpen={() => setDlgK(kk(x))} /></td>
                         <td className="num">{money(x.doc_fee)}</td>
                         <td className="num">{j.rv == null ? <span className="ldd-tbd">待定</span> : money(j.rv)}</td>
+                        {(() => {   // 金蝶基本数量/单位：这张单金蝶物料按基本单位合计(包材不算)；混了几种单位的分开写(V2.987，用户 10-17 要)
+                          const bu = {}
+                          const ms0 = (x.materials || []).filter(m => m.kg_unit), goods = ms0.filter(m => !m.is_pack)
+                          ;(goods.length ? goods : ms0).forEach(m => { bu[m.kg_unit] = (bu[m.kg_unit] || 0) + (Number(m.base_kg) || 0) })   // 全是包材的单(采购包装袋)就算包材
+                          const us = Object.keys(bu)
+                          return [<td key="bq" className="ldd-n">{us.length ? us.map(u => num(bu[u])).join(' / ') : <span className="dim">—</span>}</td>,
+                            <td key="bu" className="ldd-s">{us.length ? us.join(' / ') : <span className="dim">—</span>}</td>]
+                        })()}
                         <td className="ldd-n">{x.unit_fee == null ? <span className="dim">—</span> : x.unit_fee}</td>
                         <td className="ldd-n">{x.sales == null ? <span className="dim">—</span> : money(x.sales)}</td>
                         <td className="ldd-n">{x.ratio == null ? <span className="dim">—</span> : (x.ratio * 100).toFixed(2) + '%'}</td>
