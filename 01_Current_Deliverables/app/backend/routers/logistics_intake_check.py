@@ -11,7 +11,7 @@ import json
 import threading
 
 from fastapi import APIRouter, Request
-from sqlalchemy import select, update, text
+from sqlalchemy import select, update, delete, insert, text
 
 from core import JSONResponse, db
 from kernels import logistics_intake as intake
@@ -25,7 +25,9 @@ _REP_LOCK = threading.Lock()
 
 
 def _spec_sha(spec):
-    return hashlib.sha256(json.dumps(spec or {}, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    s = dict(spec or {})
+    s.pop("period", None)      # 账期是请求级塞进来的，不属于取数说明内容
+    return hashlib.sha256(json.dumps(s, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
 def _how(spec):
@@ -52,16 +54,67 @@ def _raws(carrier, period, with_data=False):
         return [dict(r) for r in c.execute(select(*cols).where((BR.c.carrier == carrier) & (BR.c.period == period)).order_by(BR.c.id)).mappings().all()]
 
 
+def _report_db_get(raw_id, sha):
+    try:
+        with db._engine.connect() as c:
+            row = c.execute(select(store.intake_reports.c.report_json).where(
+                (store.intake_reports.c.raw_id == raw_id) & (store.intake_reports.c.spec_sha == sha))).first()
+        return json.loads(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _report_db_put(raw_id, sha, rep):
+    """同一原件只留一份报告（按 raw_id 覆盖），取数说明变了 sha 也变、覆盖成新口径。"""
+    try:
+        from datetime import datetime
+        with db._engine.begin() as c:
+            c.execute(delete(store.intake_reports).where(store.intake_reports.c.raw_id == raw_id))
+            c.execute(insert(store.intake_reports).values(raw_id=raw_id, spec_sha=sha,
+                        report_json=json.dumps(rep, ensure_ascii=False), updated_at=datetime.now().strftime("%Y-%m-%d %H:%M")))
+    except Exception:
+        pass
+
+
+def warm_report(carrier, period, src, spec, data):
+    """导入/重解析成功后顺手把核对报告算好落库（V2.991）：第①步打开直接读库，不用现算。
+    src 对不上（还没存进 bill_raw）就静默跳过，首次打开页面时兜底算。"""
+    try:
+        with db._engine.connect() as c:
+            rid = c.execute(select(BR.c.id).where((BR.c.carrier == carrier) & (BR.c.period == period) &
+                        ((BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))
+                        ).order_by(BR.c.id.desc())).scalar()
+        if not rid:
+            return
+        try:
+            rep = intake.sheet_report(dict(spec), bytes(data), period)
+        except Exception as e:
+            rep = {"err": "按现在的取数说明解析不了：%s" % str(e)[:120], "sheets": [], "verdict": "err"}
+        _report_db_put(rid, _spec_sha(spec), rep)
+        with _REP_LOCK:                     # 内存缓存也暖上
+            if len(_REP) > 300:
+                _REP.clear()
+            _REP[(carrier, period, src or "", "", _spec_sha(spec))] = rep
+    except Exception:
+        pass
+
+
 def _report(carrier, period, raw, spec):
-    k = (carrier, period, raw.get("bill_src") or "", raw.get("sha256") or "", _spec_sha(spec))
+    sha = _spec_sha(spec)
+    k = (carrier, period, raw.get("bill_src") or "", raw.get("sha256") or "", sha)
     with _REP_LOCK:
         hit = _REP.get(k)
     if hit is not None:
         return hit
-    try:
-        rep = intake.sheet_report(dict(spec), bytes(raw["data"]), period)
-    except Exception as e:
-        rep = {"err": "按现在的取数说明解析不了：%s" % str(e)[:120], "sheets": [], "verdict": "err"}
+    rid = raw.get("id")
+    rep = _report_db_get(rid, sha) if rid else None
+    if rep is None:
+        try:
+            rep = intake.sheet_report(dict(spec), bytes(raw["data"]), period)
+        except Exception as e:
+            rep = {"err": "按现在的取数说明解析不了：%s" % str(e)[:120], "sheets": [], "verdict": "err"}
+        if rid:
+            _report_db_put(rid, sha, rep)
     with _REP_LOCK:
         if len(_REP) > 300:
             _REP.clear()

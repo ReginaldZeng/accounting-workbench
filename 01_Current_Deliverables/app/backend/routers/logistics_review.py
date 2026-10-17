@@ -756,6 +756,11 @@ def import_bill(carrier, period, data, operator, origin="手工上传", fname=""
                                                          sum(float(r.get("amount") or 0) for r in res["detail"])))     # 合计(V2.989)：第①步解析记录看得出每次读了多少钱
     _bust(carrier, period)   # 账单重解析 → 逐笔/逐单视图缓存作废
     _save_raw_bill(carrier, period, src, data, operator, origin, fname)
+    try:                     # V2.991：顺手把第①步「每页核对」报告算好落库，页面打开直接读库（延读 import 防循环）
+        from routers import logistics_intake_check as _lic
+        _lic.warm_report(carrier, period, src, spec, data)
+    except Exception:
+        pass
     with db._engine.connect() as c:   # 本月现有几份账单(按货主)：汇总行合计，没有汇总行用明细合计
         srcs = {}
         for r in c.execute(select(BL.c.bill_src, BL.c.grain, func.count(), func.sum(BL.c.amount)).where(

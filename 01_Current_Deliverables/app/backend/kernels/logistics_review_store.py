@@ -241,8 +241,19 @@ bind_scan = Table(
     Column("adj_by", String(40)), Column("adj_at", String(20)),      # 计提更正单最近一次是谁、什么时候打的
 )
 
+# 第①步「每页核对报告」落库(V2.991)：账单导入时就地算好存这里，页面打开直接读库（不再每次现算 openpyxl）。
+# 键 = 原件行 × 取数说明sha；取数说明变了打开页面只重算这一家、覆盖回库。
+intake_reports = Table(
+    "logistics_intake_reports", _md,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("raw_id", Integer, index=True),          # logistics_bill_raw.id
+    Column("spec_sha", String(16)),                 # 取数说明 sha（_spec_sha，16位）
+    Column("report_json", Text),                    # sheet_report 结果 JSON
+    Column("updated_at", String(20)),
+)
+
 TABLES = [bill_lines, price_card, intake_spec, review_sign, review_line_note, review_carrier_pts, review_line_fix, review_doc_ok, review_subj,
-          payreq, payreq_file, bill_raw, bind_scan]
+          payreq, payreq_file, bill_raw, bind_scan, intake_reports]
 
 # 迅鸽取数说明（pilot 种子）：一家一条，sheet 清单。角色 accrual=计提口径(月结) / detail=对账口径(逐单) / ignore=价目表。
 _XUNGE_SPEC = {

@@ -1865,7 +1865,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </details>
       </>)}
       {step === 'sign' && !regRow && (<>
-        <InvAuditPanel inv3={inv3} billOf={billOfSubj} />
+        <InvAuditPanel inv3={inv3} billOf={billOfSubj} locked={locked} flash={flash} onChanged={reloadInv3} />
         {/* V2.922(用户「别的物流账单也可以这样吗」)：有账单的承运商也一张请款单一张清单——计提凭证 / 和请款比 / 发票·后补 / 做账 */}
         {((inv3 && inv3.blocks) || []).filter(b => !b.err).map(b => <FeeVoucherCard key={b.inst} noFee v={{ inst: b.inst, bid: b.bid, subject: b.subject, amount: b.amount, st: b.st }}
           accr={1} dim={null} locked={locked} onDone={() => {}} blk={b} onLater={confirmLater} bill={billOfSubj(b.subject)} />)}
