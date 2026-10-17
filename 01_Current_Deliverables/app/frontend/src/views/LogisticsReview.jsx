@@ -1677,7 +1677,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     ref={el => { if (el) el.indeterminate = !pageAllOn && pageSomeOn }} onChange={togglePage} /></th>
                   <th></th><th>金蝶单号</th><th>结论</th><th className="num">差额</th><th>往来 · 主体</th><th>运输方式</th>
                   <th>① 量</th><th>② 价</th><th>③ 归类</th><th className="num">账单金额</th><th className="num">复核金额</th>
-                  <th className="num">金蝶基本数量</th><th className="num">单位运费</th><th className="num">销售额</th><th className="num">费比</th>
+                  <th className="num">金蝶基本数量</th><th className="num">单位运费</th><th className="num">费比<small> · 销售额</small></th>
                 </tr></thead>
                 <tbody>
                   {docs.map((x, i) => {
@@ -1717,8 +1717,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           return <td className="ldd-n" title="金蝶物料按基本单位合计（包材不算）">{us.length ? us.map(u => num(bu[u]) + ' ' + u).join(' / ') : <span className="dim">—</span>}</td>
                         })()}
                         <td className="ldd-n">{x.unit_fee == null ? <span className="dim">—</span> : <>{x.unit_fee}<small className="dim"> 元/kg</small></>}</td>
-                        <td className="ldd-n">{x.sales == null ? <span className="dim">—</span> : money(x.sales)}</td>
-                        <td className="ldd-n">{x.ratio == null ? <span className="dim">—</span> : (x.ratio * 100).toFixed(2) + '%'}</td>
+                        <td className="ldd-n">{x.ratio == null ? <span className="dim">—</span> : (x.ratio * 100).toFixed(2) + '%'}
+                          {x.sales != null && <span className="sub">{money(x.sales)}</span>}</td>
                       </tr>
                     ]
                   })}
