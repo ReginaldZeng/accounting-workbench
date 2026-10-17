@@ -298,7 +298,7 @@ class TestPostResume(unittest.TestCase):
         res = R._post(INST, "曾禹锡")
         self.assert_done_once(res)
         self.assertEqual((self.kd.n("Save", "GL_VOUCHER"), self.kd.n("Submit", "GL_VOUCHER")), (1, 1))
-        self.assertIn("只补了系统里的做账记录", res["steps"][-1])
+        self.assertTrue(any("只补了系统里的做账记录" in x for x in res["steps"]), res["steps"])     # V2.926 起后面还跟一行现金流量
 
     def test_every_single_cut_point_recovers(self):
         """穷举：流程里每一次发给金蝶的调用，分别在「发出前」「回来后」掐断一次，再点都要做完且只做一遍。"""
