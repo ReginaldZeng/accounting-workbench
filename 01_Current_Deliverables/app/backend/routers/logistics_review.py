@@ -22,6 +22,7 @@ from kernels import logistics_review_store as store
 from kernels import logistics_price as lp
 from kernels import logistics_review as lr
 from kernels import logistics_intake as intake
+from kernels import logistics_kuayue as lky
 from kernels import logistics_recon as lrc
 
 router = APIRouter()
@@ -3543,6 +3544,35 @@ def _box_docs(rsub, carrier):
                     if _others:
                         x["mode_cn"] += "（和 %s 是同一笔调拨，合起来比）" % "、".join(_others)
                     x["conv"] = round(kd / bsum, 3) if bsum else None
+    # —— 官网计价(V2.990，跨越)：价三样(公式重算＝原价 / 原价×折扣＝折后 / 折后＋附加＝应付) + 起重优先的量判定 ——
+    # 内核在 kernels/logistics_kuayue(单测 16 项，2026-09 真单 11 单基准)；系数区间用承运商毛重比设置，没配走默认 0.95–1.20(建议值待业务确认)。
+    for x in docs:
+        _raw = (x.get("sub_fees") or {}).get(lky.KY_SUBKEY)
+        if not _raw:
+            continue
+        try:
+            _d = json.loads(_raw)
+        except Exception:
+            continue
+        if not isinstance(_d, dict) or not _d:
+            continue
+        _rng = (x.get("chk") or {}).get("rng") or None
+        _p = lky.price_check(_d)
+        _q = lky.qty_check(_d, x.get("kd_sum"), _rng[0] if _rng else None, _rng[1] if _rng else None,
+                           kd_miss=(x.get("state") == "miss"))
+        _v = lky.verdict(_p, _q)
+        x["ky"] = dict(_d, ok_f=_p["ok_f"], ok_d=_p["ok_d"], ok_p=_p["ok_p"], price_ok=_p["ok_all"],
+                       orig_calc=_p["orig_calc"], net_calc=_p["net_calc"], pay_calc=_p["pay_calc"],
+                       bads=_p["bads"], p_diff_amt=_p["diff_amt"],
+                       q_label=_q["label"], q_top=_q["top"], q_sub=_q["sub"],
+                       diff_kg=_q["diff_kg"], diff_amt=_q["diff_amt"], conv=_q["conv"],
+                       verdict=_v["verdict"], why=_v["why"], diff=_v["diff"],
+                       lo=_rng[0] if _rng else lky.KY_DEFAULT_LO, hi=_rng[1] if _rng else lky.KY_DEFAULT_HI,
+                       rng_default=not bool(_rng), kd_sum=x.get("kd_sum"))
+        x["state"] = ("ok" if _v["verdict"] == "一致"
+                      else "info" if _v["verdict"] == "只核了价"
+                      else "price" if not _p["ok_all"] else "qtydiff")
+        x["mode_cn"] = "官网计价 · " + (_q["label"] if _q["label"] != "量对" else "按计费重量核")
     for x in docs:
         x.pop("_kdd", None)
         x.pop("_kda", None)
@@ -5007,6 +5037,28 @@ def _xl_rowof(maps, src_sheet, src_row, doc_no, amount, used):
     return None
 
 
+def _xl_ky_cols(mp, ri):
+    """官网计价(跨越)这一行账单的相关格子 → {'orig','disc','sur':[列],'pay'} / None。
+    按表头文字认列：运单运费(原价)/折扣/应付金额 + 四个附加费列(夜间取货费/保费/退仓费/资源调配费)。"""
+    row = mp["rows"].get(ri) or {}
+
+    def _find(*keys):
+        for h, cs in mp["hdr"].items():
+            if any(k in h for k in keys):
+                for c in cs:
+                    if _xl_num(row.get(c)) is not None:
+                        return c
+        return None
+
+    orig, disc, pay = _find("运单运费"), _find("折扣"), _find("应付金额")
+    if orig is None or pay is None:
+        return None
+    sur = [c for h, cs in mp["hdr"].items()
+           if any(k in h for k in ("夜间取货费", "保费", "退仓费", "资源调配费"))
+           for c in cs if _xl_num(row.get(c)) not in (None, 0)]
+    return {"orig": orig, "disc": disc, "sur": sur, "pay": pay}
+
+
 def _xl_unit_price(mp, ri):
     """这一行账单自己写的 单价×计费量＝哪一项金额 → (量的列, 单价的列, 金额的列) / None。只认表头带「单价」的列；量从件数/重量那些列里找；
     金额要等于 量×单价(差 1 分以内)，有几格都相等的取单价右边最近的那格。"""
@@ -5091,7 +5143,40 @@ def _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets
         std = amt = None
         tol, sys_bad, sys_note = 0.014, False, ""
         A = lambda cj: "%s%d" % (GL(cj), ri)
-        if sp:
+        _kyraw = ysf.get(lky.KY_SUBKEY)
+        if _kyraw:
+            # 官网计价(V2.990，跨越)：标准＝原价×折扣%＋附加费，格子全在原账单上。规矩：先按格子复算、和系统记的对得上才写公式。
+            try:
+                _kyd = json.loads(_kyraw) or {}
+            except Exception:
+                _kyd = {}
+            _kyc = _xl_ky_cols(mp, ri)
+            if _kyd and _kyc:
+                _ov = _xl_num(row.get(_kyc["orig"]))
+                _pv = _xl_num(row.get(_kyc["pay"]))
+                _dv = _xl_num(row.get(_kyc["disc"])) if _kyc["disc"] is not None else (_kyd.get("disc") or lky.KY_DEFAULT_DISC)
+                try:
+                    _dv = float(_dv)
+                except (TypeError, ValueError):
+                    _dv = lky.KY_DEFAULT_DISC
+                if _dv is not None and 0 < _dv <= 1:
+                    _dv = _dv * 100
+                _sv = round(sum((_xl_num(row.get(c)) or 0.0) for c in _kyc["sur"]), 2)
+                if _ov is not None and _pv is not None:
+                    _std0 = round(round(_ov * _dv / 100, 2) + _sv, 2)
+                    _pc = lky.price_check(_kyd)
+                    if abs(_std0 - float(_pc.get("pay_calc") or _std0)) <= 0.005:
+                        _dref = ("%g/100" % _dv) if _kyc["disc"] is None else A(_kyc["disc"])
+                        _sref = "+".join(A(c) for c in _kyc["sur"]) or "0"
+                        expr = "ROUND(ROUND(%s*%s,2)+%s,2)" % (A(_kyc["orig"]), _dref, _sref)
+                        acol, std, amt = _kyc["pay"], _std0, _pv
+                        basis = "官网计价：原价×折扣%＋附加费＝应付（照账单公式核三样，原价合理性不评判）"
+                        tol = 0.014
+                        sys_bad = not _pc["ok_all"]
+            if not expr:
+                ws.cell(row=ri, column=c0 + 3, value="官网计价这一行按原账单的格子复算和系统记的对不上（账单改过了？），不写公式")
+                n += 1
+        elif sp:
             cal = sp["calc"]
             hr = mp["rows"].get(int(sp.get("header_row", 1))) or {}
             hdr = [intake._s(hr.get(cj)) for cj in range(1, (max(hr) if hr else 0) + 1)]
@@ -5138,7 +5223,7 @@ def _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets
                 ws.cell(row=ri, column=c0 + 2, value="核价不符" if sys_bad else "一致")
             ws.cell(row=ri, column=c0 + 3, value=basis)
             n += 4
-        elif _xl_num(r.get("amount")):
+        elif _xl_num(r.get("amount")) and not _kyraw:
             ws.cell(row=ri, column=c0 + 3, value="这一行没有写单价（一口价、起步价之类），系统里也没有合同价，核不了价")
             n += 1
     # —— 量：每张单的第一行，指回「复核明细」 ——
@@ -5800,7 +5885,41 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
                     row = mp["rows"][ri]
                     sp = next((sh for sh in spec_sheets if sh.get("calc") and intake.match_sheet((sh["name"].replace("{m}", mon) if mon else sh["name"]), mt[0] or "")), None)
                     tp = y.get("trip") or {}
-                    if sp:                                   # ① 取数说明里定了算法
+                    if ysf.get(lky.KY_SUBKEY):               # ⓪ 官网计价(跨越)：原价×折扣%＋附加费＝应付，格子全在原账单页
+                        try:
+                            _kyd = json.loads(ysf[lky.KY_SUBKEY]) or {}
+                        except Exception:
+                            _kyd = {}
+                        _kyc = _xl_ky_cols(mp, ri)
+                        if not _kyd or not _kyc:
+                            why = "官网计价这一行在原账单页缺格子（运单运费/应付金额），不写公式"
+                            break
+                        _ov = _xl_num(row.get(_kyc["orig"]))
+                        _pv = _xl_num(row.get(_kyc["pay"]))
+                        _dv = _xl_num(row.get(_kyc["disc"])) if _kyc["disc"] is not None else (_kyd.get("disc") or lky.KY_DEFAULT_DISC)
+                        try:
+                            _dv = float(_dv)
+                        except (TypeError, ValueError):
+                            _dv = lky.KY_DEFAULT_DISC
+                        if 0 < _dv <= 1:
+                            _dv = _dv * 100
+                        _sv = round(sum((_xl_num(row.get(c)) or 0.0) for c in _kyc["sur"]), 2)
+                        _pc = lky.price_check(_kyd)
+                        _std0 = round(round(_ov * _dv / 100, 2) + _sv, 2) if _ov is not None else None
+                        if _ov is None or _pv is None or _std0 is None or abs(_std0 - float(_pc.get("pay_calc") or _std0)) > 0.005:
+                            why = "按原账单的格子复算出来和系统的标准不一样，不写公式"
+                            break
+                        _dref = ("%g/100" % _dv) if _kyc["disc"] is None else _xl_ref(mp["title"], ri, _kyc["disc"])
+                        _sref = "+".join(_xl_ref(mp["title"], ri, c) for c in _kyc["sur"]) or "0"
+                        terms.append("ROUND(ROUND(%s*%s,2)+%s,2)" % (_xl_ref(mp["title"], ri, _kyc["orig"]), _dref, _sref))
+                        arefs.append(_xl_ref(mp["title"], ri, _kyc["pay"]))
+                        std_tot += float(_pc.get("pay_calc") or _std0)
+                        amt_tot += _pv
+                        basis = "官网计价：原价×折扣%＋附加费＝应付（照账单公式核三样，原价合理性不评判）"
+                        kinds.add("ky")
+                        if not _pc["ok_all"]:
+                            sysbad = "y"
+                    elif sp:                                   # ① 取数说明里定了算法
                         cal = sp["calc"]
                         hrow = int(sp.get("header_row", 1))
                         hr = mp["rows"].get(hrow) or {}

@@ -13,6 +13,8 @@
 import re
 import json
 
+from kernels.logistics_kuayue import KY_SUBKEY
+
 
 def _s(v):
     return "" if v is None else str(v).strip()
@@ -213,6 +215,13 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
     c_dk = find_col(hdr, sp["dedupe_col"]) if sp.get("dedupe_col") else None   # 跨 sheet 去重键(运单号)
     c_tot = find_col(hdr, sp["total_col"]) if sp.get("total_col") else None    # 账单自己的应付合计列(配了以它为准)
     c_dim = find_col(hdr, sp["dim_col"]) if sp.get("dim_col") else None        # 箱子尺寸写在哪一列(按体积计费的行才有)
+    # 官网计价(V2.990，跨越)：账单自带 运费公式/原价/折扣/折后/附加费/应付/起重/计费重量/实际重量，原样收进
+    # sub_fees["跨越计价"](JSON 字符串)——核价核量由 kernels/logistics_kuayue 在复核时算，解析层只存数。
+    kyp = sp.get("kyprice") or {}
+    c_ky = {f: (find_col(hdr, kyp[f]) if kyp.get(f) else None)
+            for f in ("formula_col", "orig_col", "disc_col", "net_col", "bw_col", "aw_col",
+                      "minwt_col", "pay_col", "note_col")}
+    c_ky["sur_cols"] = [find_col(hdr, n) for n in (kyp.get("sur_cols") or [])]
     # row_re={"col": 列名, "re": 正则}：只收该列对得上的行(易风达运输页只收「序号」是数字的行，表底合计/开票信息/透视小计都不收，V2.764)
     # part_col：分项名取这一列的值(顺丰一个运单拆 运费/保费/签回单 几行，按「服务」列记分项)；
     # wt_once_col：同一运单(该列值相同)的几行重量、件数只算一次，并单时才不会把计费重量加三遍(V2.766)
@@ -282,6 +291,19 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
                 base = tot
         if c_dim is not None and c_dim < len(r) and DIM_RE.match(_s(r[c_dim])):
             sub["箱子尺寸"] = re.sub(r"\s+", "", _s(r[c_dim]))      # 文字，不参与求和；复核台据此按体积复算计重
+        if kyp and (c_ky["formula_col"] is not None or c_ky["orig_col"] is not None):
+            # 官网计价原样字段(V2.990，跨越)：收进 sub_fees["跨越计价"](JSON 字符串，非数字、不进费用归类/求和)，
+            # 核价核量(logistics_kuayue)在复核现算——和「标准/公式/核价差」的恒茂式存法并列、互不干扰。
+            def _kc(cf):
+                return _f(r[cf]) if (cf is not None and cf < len(r)) else None
+            _kraw = {"formula": (_s(r[c_ky["formula_col"]]) if c_ky["formula_col"] is not None and c_ky["formula_col"] < len(r) else ""),
+                     "orig": _kc(c_ky["orig_col"]), "disc": _kc(c_ky["disc_col"]), "net": _kc(c_ky["net_col"]),
+                     "bw": _kc(c_ky["bw_col"]), "aw": _kc(c_ky["aw_col"]), "minwt": _kc(c_ky["minwt_col"]),
+                     "pay": _kc(c_ky["pay_col"]),
+                     "sur": round(sum((_kc(cs) or 0.0) for cs in c_ky["sur_cols"] if cs is not None and cs < len(r)), 2),
+                     "note": (_s(r[c_ky["note_col"]]) if c_ky["note_col"] is not None and c_ky["note_col"] < len(r) else "")}
+            if _kraw["formula"] or _kraw["orig"] is not None:
+                sub[KY_SUBKEY] = json.dumps({k: v for k, v in _kraw.items() if v not in ("", None)}, ensure_ascii=False)
         row = {
             "period": period, "carrier": carrier, "grain": "detail",
             "subject": _subject(sp.get("subject"), r, hdr),

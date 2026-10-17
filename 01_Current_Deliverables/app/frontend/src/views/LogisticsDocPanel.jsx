@@ -5,7 +5,9 @@
 //   · ClsCell：「③ 归类」一格
 //   · DocDialog：点一张单弹窗：结论 → 钱＝量×价 → 金蝶出库明细 → 记到哪 → 处理
 //   · RulesDialog / AccrTabDialog / DupRuleDialog：归类规则（可改）、和本月计提对照、重复收费口径
-// 「价」现在只有包天包趟报价、恒茂这类按公式核的有依据；其余是「价待确认」，等「价的依据库」那一步补
+// 「价」现在只有包天包趟报价、恒茂这类按公式核的有依据；其余是「价待确认」，等「价的依据库」那一步补。
+// V2.990：跨越官网计价——后端 kernels/logistics_kuayue 算好价三样(公式/折扣/应付)+起重优先的量判定，
+//   每张单带 x.ky 全字段；judge 走 kyJudge，弹窗多一块「计价拆解」。原价合理性不评判。
 import React, { useEffect, useState } from 'react'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -18,7 +20,33 @@ const CLS_TODO = new Set(['标注不对', '计提记错'])
 export const V_PILL = { 多收: 'bad', 少收: 'blue', 价待确认: 'warn', 量核不了: 'orange', 只核了价: 'neu', 一致: 'ok' }
 
 // ---------- 一张单怎么判（量 → 价 → 钱） ----------
+// 跨越官网计价(V2.990)：后端 kernels/logistics_kuayue 已算好价三样/量/结论，x.ky 带全字段，这里只做呈现
+function kyJudge(x) {
+  const k = x.ky, fee = x.doc_fee || 0
+  let q
+  if (k.q_label === '量核不了·退回') q = { top: '退回运输·口径不可比', sub: k.q_sub, k: 'miss' }
+  else if (k.q_label === '量核不了') q = { top: k.q_top || '金蝶无重量', sub: k.q_sub, k: 'miss' }
+  else if (k.q_label === '量核不了·体积重') q = { top: '体积重计费', sub: k.q_sub, k: 'na' }
+  else if (k.q_label === '按最低计费') q = { top: `按最低计费 ${num(k.minwt, 0)} kg`, sub: k.q_sub, k: 'ok' }
+  else if (k.q_label === '多报') q = { top: `多报 ${num(k.diff_kg, 3)} kg`, sub: k.q_sub, k: 'bad' }
+  else if (k.q_label === '少报') q = { top: `少报 ${num(-k.diff_kg, 3)} kg`, sub: k.q_sub, k: 'low' }
+  else q = { top: `账单 ${num(k.bw, 3)} / 金蝶 ${num(k.kd_sum, 3)} kg`, k: 'ok',
+    sub: k.q_sub + (k.rng_default ? `（系数区间 ${k.lo}–${k.hi} 为建议值，待业务确认）` : '') }
+  let p
+  if (k.price_ok) {
+    p = { top: `公式对 · 折扣 ${k.disc}% · 应付勾稽`, k: 'ok',
+      sub: `公式重算 ${money(k.orig_calc)} = 原价${k.minfee != null ? `（最低收费 ${num(k.minfee, 0)} 取整取大）` : ''}；折后 ${money(k.net)}；+附加 ${money(k.sur)} = 应付` }
+  } else {
+    p = { top: (k.bads && k.bads[0]) || '账单计价有误', k: (k.p_diff_amt || 0) > 0 ? 'bad' : 'low',
+      sub: (k.bads || []).slice(1).join('；') || '账单三样对不上' }
+  }
+  const v = k.verdict, diff = k.diff == null ? null : r2(k.diff)
+  const rv = v === '量核不了' || (v === '多收' && diff == null) ? null : r2(fee - (diff || 0))
+  return { v, diff, rv, q, p, why: k.why }
+}
+
 export function judge(x) {
+  if (x.ky) return kyJudge(x)
   const sf = x.sub_fees || {}, fee = x.doc_fee || 0, u = x.kd_unit || x.bill_unit || ''
   // ① 量
   let q
@@ -182,8 +210,8 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
   const noBasis = j.p.k === 'tbd'
   const badItems = noBasis ? items.map(i => i.name) : []
   const head = j.v === '价待确认' ? `${badItems.join('、') || '运费'}没有合同价可比`
-    : j.v === '量核不了' ? (x.state === 'miss' ? '金蝶里查不到这张单' : j.q.sub)
-      : j.v === '只核了价' ? '账单上没标金蝶单号'
+    : j.v === '量核不了' ? (x.state === 'miss' && !x.ky ? '金蝶里查不到这张单' : j.q.sub)
+      : j.v === '只核了价' ? (x.ky ? j.why : '账单上没标金蝶单号')
         : j.v === '一致' ? '量、价都对上' : j.why
   const todo = x.confirmed ? '' : TODO_TXT[j.v]
   const ctodo = !c ? '' : c.v === '归类一致' ? '归类没问题。' : c.v === '判不了' ? `归类判不了（${(c.unk || '').replace(/，.*$/, '')}），按标注放。` : `归类：${c.txt}。`
@@ -233,6 +261,33 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
               {x.trips > 1 && <span className="dim">　这张单账单上 {x.trips} 行，合计 {money(x.doc_fee_all)}</span>}</td>
               <td className="num"><b>{money(x.doc_fee)}</b></td></tr></tfoot>
           </table></div></section>
+
+        {x.ky && <section className="ldd-sec"><h3>计价拆解 · 官网三样（原价合理性不评判，只核账单自己算得对不对）</h3>
+          <div className="ldd-tw"><table className="ldd-calc">
+            <thead><tr><th>步骤</th><th>账单写的</th><th>复核重算</th><th /></tr></thead>
+            <tbody>
+              <tr><td className="fee">① 运费公式<small>{x.ky.formula}</small></td>
+                <td><span className="f">原价 {money(x.ky.orig)}</span></td>
+                <td><span className="f">公式重算 {x.ky.orig_calc == null ? '—' : money(x.ky.orig_calc)}</span>
+                  {x.ky.minfee != null && <span className="sub">先四舍五入取整，再和最低收费 {num(x.ky.minfee, 0)} 取大</span>}</td>
+                <td><Mk k={x.ky.ok_f ? 'ok' : x.ky.ok_f == null ? 'na' : 'bad'} /></td></tr>
+              <tr><td className="fee">② 折扣</td>
+                <td><span className="f">折后 {money(x.ky.net)}</span></td>
+                <td><span className="f">原价 × {x.ky.disc}% ＝ {x.ky.net_calc == null ? '—' : money(x.ky.net_calc)}</span></td>
+                <td><Mk k={x.ky.ok_d ? 'ok' : x.ky.ok_d == null ? 'na' : 'bad'} /></td></tr>
+              <tr><td className="fee">③ 附加费<small>夜间取货 / 保费 / 退仓 / 资源调配</small></td>
+                <td><span className="f">应付 {money(x.ky.pay)}</span><span className="sub">附加合计 {money(x.ky.sur)}</span></td>
+                <td><span className="f">折后 ＋ 附加 {money(x.ky.sur)} ＝ {x.ky.pay_calc == null ? '—' : money(x.ky.pay_calc)}</span></td>
+                <td><Mk k={x.ky.ok_p ? 'ok' : x.ky.ok_p == null ? 'na' : 'bad'} /></td></tr>
+              <tr><td className="fee">量 · 起重</td>
+                <td><span className="f">实际 {num(x.ky.aw, 3)} / 计费 {num(x.ky.bw, 3)} kg</span></td>
+                <td><span className="f">起重（最低计费）{num(x.ky.minwt, 0)} kg{x.ky.q_label === '按最低计费' ? ' · 本单按最低收费 ✓' : ''}</span>
+                  {x.ky.rng_default && <span className="sub">系数区间 {x.ky.lo}–{x.ky.hi} 为建议值，待业务确认（上面「换算系数区间」可改）</span>}</td>
+                <td><Mk k={x.ky.q_label === '量对' || x.ky.q_label === '按最低计费' ? 'ok'
+                  : x.ky.q_label === '量核不了·体积重' ? 'na'
+                    : x.ky.q_label && x.ky.q_label.startsWith('量核不了') ? 'miss'
+                      : x.ky.q_label === '多报' ? 'bad' : x.ky.q_label === '少报' ? 'low' : 'na'} /></td></tr>
+            </tbody></table></div></section>}
 
         <section className="ldd-sec ldd-kv">
           <span><i>这张单</i></span>
