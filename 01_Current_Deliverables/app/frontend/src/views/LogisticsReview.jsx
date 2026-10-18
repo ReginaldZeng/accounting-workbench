@@ -751,10 +751,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     setPage(1); setOpen({})
   }
 
-  const loadIk = () => { setIk(null); return reviewIntake(carrier, period).then(setIk).catch(e => setIk({ err: e.message })) }
+  // 防串单：切承运商/账期后，旧请求的慢响应（迅鸽五千单要算几秒）不许盖掉新页面（V2.992 用户截到「页头跨越9月、
+  // 表格却是迅鸽8月」——跨越11行毫秒级先到、迅鸽大响应后到把旧数据盖了上去）。序号对不上就丢弃。
+  const _reqSeq = useRef(0)
+  const loadIk = () => {
+    const seq = ++_reqSeq.current
+    setIk(null)
+    return reviewIntake(carrier, period).then(r => { if (seq === _reqSeq.current) setIk(r) }).catch(e => { if (seq === _reqSeq.current) setIk({ err: e.message }) })
+  }
   useEffect(() => { if (mode === 'detail' && carrier) loadIk() }, [carrier, period, mode])
   const load = useCallback(() => {
-    reviewResult(carrier, period, group, page, q, dfilt).then(setD).catch(e => setMsg(e.message))
+    const seq = ++_reqSeq.current
+    reviewResult(carrier, period, group, page, q, dfilt).then(r => { if (seq === _reqSeq.current) setD(r) }).catch(e => { if (seq === _reqSeq.current) setMsg(e.message) })
   }, [carrier, period, group, page, q, dfilt])
   useEffect(() => { load() }, [load])
   // V2.986 第②步改版：单据在 1500 张以内的承运商(后端整家现算、缓存着)，一次取全部单据，7 张卡筛选、翻页在页面上做；
