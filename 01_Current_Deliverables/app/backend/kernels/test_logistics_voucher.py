@@ -452,6 +452,21 @@ class T(unittest.TestCase):
         self.assertEqual(V.plan([v], inv_p, amts={"386": {"gross": 545.00, "part": True}}, carry={"386": [{"gross": -10.00}]})["status"], "manual")
         self.assertEqual(V.plan([v], inv, carry={"999": [{"gross": -10.00}]})["per"]["386"]["mode"], "hx")     # 登记在别的凭证上的不影响这张
 
+    def test_carry_amt_carries_mode0_for_auto_guard(self):
+        """V2.993 自动做账护栏的契约：复核台登记的多收待扣回把 hx/tail 顶成 amt 时，per 里带 mode0(hx/tail)+carry——
+        付款做账的自动轮据此认定「金额更正来自复核台登记＝人已确认」，不再拦；系统按发票/请款金额猜的 amt 没有这对标记，照拦。"""
+        v = acc("386", "计提%s8月线下零售出库运费" % SUP, "6601", "销售费用", 1000.00, 90.00, 1090, D6601_OUT)
+        inv = [{"number": "26420000000000000001", "rate": "9%", "gross": 1090.00, "tax": 90.00}]
+        p = V.plan([v], inv, carry={"386": [{"gross": -109.00}]})["per"]["386"]
+        self.assertEqual((p["mode"], p["mode0"]), ("amt", "hx"))
+        self.assertTrue(p.get("carry"))
+        # 系统猜的应为金额(amts)叠上登记的扣回：mode0 是 amt 不是 hx/tail，护栏不认作「复核台确认过」，仍要人点
+        # （plan 先按 amts 对发票平账、再落扣回，所以发票按 981 开）
+        inv3 = [{"number": "26420000000000000004", "rate": "9%", "gross": 981.00, "tax": 81.00}]
+        p2 = V.plan([v], inv3, amts={"386": {"gross": 981.00}}, carry={"386": [{"gross": -10.00}]})["per"]["386"]
+        self.assertEqual((p2["mode"], p2["mode0"]), ("amt", "amt"))
+        self.assertTrue(p2.get("carry"))
+
 
 class TestResume(unittest.TestCase):
     """V2.908 做到一半接着做：样本＝2026-10-10 被重启掐断的那张(顺丰冷运·深圳星期九 622.00，付款单 FKD00008357)。"""

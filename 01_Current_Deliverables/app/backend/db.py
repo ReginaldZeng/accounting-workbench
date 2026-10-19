@@ -1903,6 +1903,22 @@ def _ensure_logi_supplier_wt_cols():
 _ensure_logi_supplier_wt_cols()
 
 
+def _ensure_review_subj_cols():
+    """V2.993 按主体复核结论加 diff_verdict 列；老库补列（create_all 不改既有表，同款兜底）。"""
+    from sqlalchemy import text as _text
+    with _engine.begin() as c:
+        cols = [r[1] for r in c.execute(_text("PRAGMA table_info(logistics_review_subj)")).fetchall()] \
+            if DB_URL.startswith("sqlite") else \
+            [r[0] for r in c.execute(_text(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='logistics_review_subj' AND TABLE_SCHEMA=DATABASE()")).fetchall()]
+        if not cols or "diff_verdict" in cols:
+            return
+        c.execute(_text("ALTER TABLE logistics_review_subj ADD COLUMN diff_verdict VARCHAR(20)"))
+
+
+_ensure_review_subj_cols()
+
+
 def _ensure_ec_shop_map_cols():
     """V2.250 建的 ec_shop_map 无 alipay_acct 列时补上（create_all 不改既有表，同上款兜底）。"""
     from sqlalchemy import text as _text

@@ -13,7 +13,7 @@
 //   → ③ 确认通过 → 登记已复核(整月一家一次，登记后锁当月归类/备注) → 导出复核表
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第③步·发票与暂估(V2.768)
-import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewVolKg, reviewDocMode, reviewCarryAdj, reviewCarrySettle, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
+import { reviewResult, reviewImportPriceCard, reviewParseBill, reviewKingdeeQty, reviewPalletKg, reviewVolKg, reviewDocMode, reviewCarryAdj, reviewCarrySettle, reviewOverview, reviewExportUrl, reviewDocNote, reviewDocClassify, reviewDocConfirm, reviewSubjectMark, reviewSubjVerdict, reviewPayreqScan, reviewPayreqPull, reviewPayreqAssign, reviewPayreqExclude, reviewPayreqFileUrl, reviewLines, reviewLineNote, reviewLineFix, reviewDimOptions, reviewCarrierPointsSet, reviewSign, reviewUnsign, reviewWtRange, reviewInvoices } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import { voucherLater, voucherFeeDraft, voucherFeePost, voucherPick, reviewScope, reviewScopeSet, reviewUnitKg, reviewUnitKgSet, reviewBills, reviewBillDelete, voucherPlans, voucherPreview } from '../api.js'
 import { printAdjust } from './LogisticsVoucher.jsx'
@@ -233,6 +233,47 @@ function UnitKgDlg({ carrier, period, onClose, onSaved, flash }) {
             {bad.length + pbad.length + bbad.length > 0 && <span className="diffbad" style={{ fontSize: 12.5 }}>有 {bad.length + pbad.length + bbad.length} 格不是数字</span>}
           </div>
         </>}
+      </div>
+    </div>
+  )
+}
+
+// V2.993(用户 2026-10-19「金额更正不应该在付款做账页确认，应该在审核账单时就确认了」)：
+//   主体通过了但「计提 − 复核应付」还有差（⚠ 需更正）时，点差异徽标（或标通过时自己弹出来）确认差异怎么办。
+//   确认成「计提多了」的：付款做账的自动轮当作人已确认应为金额，按发票/请款金额红冲更正时不再拦，下一轮自己做。
+function DiffVerdictDlg({ carrier, period, subject, diff, dv, onDone, onClose }) {
+  const [busy, setBusy] = useState('')
+  const [err, setErr] = useState('')
+  const save = v => {
+    setBusy(v || 'clear'); setErr('')
+    reviewSubjVerdict(carrier, period, subject, v)
+      .then(() => { onDone && onDone(v) })
+      .catch(e => setErr(e.message)).finally(() => setBusy(''))
+  }
+  const DV = {
+    fix: ['计提多了，按复核后金额红冲更正', '复核数才是对的：做账时系统自动把多计的差额红冲更正（原计提整笔红冲、按发票/请款金额重提再核销），不用再到付款做账页逐张确认。'],
+    keep: ['账单没错，差异另外处理', '计提不动、不随做账自动更正：到付款做账页逐张看（部分核销 / 红冲更正由人定）。'],
+  }
+  return (
+    <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="fxdlg" style={{ width: 'min(560px,100%)' }} role="dialog" aria-label="差异怎么办">
+        <div className="fxhead"><b>{subject} · 计提与复核应付差 {money(diff)}</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div className="fxsub">账单核过了，计提和复核应付还有差 <b style={{ color: '#B23B2E' }}>{money(diff)}</b>。这个差异怎么办？确认一句，做账就照着做，不用再到付款做账页逐张点。
+          {dv && <div style={{ marginTop: 4 }}>现在记的是：<b>{DV[dv] ? DV[dv][0] : dv}</b></div>}</div>
+        {err && <div className="fxwarn">{err}</div>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
+          {Object.entries(DV).map(([k, [lb, sub]]) =>
+            <button key={k} className={'btn' + (dv === k ? ' pri' : '')} disabled={!!busy} style={{ textAlign: 'left', padding: '8px 12px' }}
+              onClick={() => dv === k ? onClose() : save(k)}>
+              {busy === k ? '保存中…' : lb}{dv === k ? '（现在选的）' : ''}
+              <div className="dim" style={{ fontSize: 12, fontWeight: 400, marginTop: 2 }}>{sub}</div>
+            </button>)}
+        </div>
+        <div className="fxbtns">
+          {dv && <button className="btn" disabled={!!busy} onClick={() => save('')}>{busy === 'clear' ? '保存中…' : '撤销确认（回到“要人确认”）'}</button>}
+          <span style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose}>关闭</button>
+        </div>
       </div>
     </div>
   )
@@ -936,13 +977,26 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       })
       .catch(e => flash('更正保存失败：' + e.message))
   }
-  // 按主体标复核结论：通过 / 有疑问(写一句疑问)；只改组头，不重读金蝶
-  const markSubj = (subject, status, note = '') => {
+  // 按主体标复核结论：通过 / 有疑问(写一句疑问)；只改组头，不重读金蝶。
+  // V2.993：标通过时这个主体还有差异(diff≠0)的，标完马上弹「差异怎么办」——复核时顺手确认，付款做账的自动轮就认，不用再到那边逐张点
+  const markSubj = (subject, status, note = '', diff = 0) => {
     reviewSubjectMark(carrier, period, subject, status, note).then(() => {
       setL(l => l && ({ ...l, rows: l.rows.map(x => (x.kind === 'gtotal' && x.subject === subject
-        ? { ...x, mark: status ? { status, note, by: '我', at: '' } : null } : x)) }))
+        ? { ...x, mark: status ? { status, note, by: '我', at: '', dv: '' } : null } : x)) }))
       flash(status === 'ok' ? `${subject} 已标通过` : status === 'question' ? `${subject} 已标有疑问` : `${subject} 已撤销标记`)
+      if (status === 'ok' && Math.abs(diff) >= 0.01) setVd({ carrier, period, subject, diff, dv: '', from: 'detail' })
     }).catch(e => flash('标记失败：' + e.message))
+  }
+  // 「差异怎么办」确认(V2.993)：总表 ⚠需更正 / 第②步 ⚠计提差 点开。确认完总表、逐笔两处标记都换新
+  const [vd, setVd] = useState(null)           // {carrier, period, subject, diff, dv, from: 'ov'|'detail'}
+  const saveVerdict = v => {
+    const cur = vd
+    setVd(null)
+    flash(v === 'fix' ? `${cur.subject} 已确认：计提多了，按复核后金额红冲更正——做账自动做，不用再到付款做账页点`
+      : v === 'keep' ? `${cur.subject} 已记：账单没错，差异另外处理` : `${cur.subject} 已撤销差异确认`)
+    if (cur.from === 'ov') reloadOv()
+    else setL(l => l && ({ ...l, rows: l.rows.map(x => (x.kind === 'gtotal' && x.subject === cur.subject && x.mark
+      ? { ...x, mark: { ...x.mark, dv: v } } : x)) }))
   }
   const askSubj = (subject, old) => {
     const v = window.prompt(`${subject} 还有什么疑问？（会显示在总表上）`, old || '')
@@ -1022,7 +1076,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             : <>{isZero(ivt - amt) ? <span style={{ color: 'var(--ok)' }}>✓ 票面对上</span> : <span style={{ color: 'var(--bad)' }}>发票差 {money(ivt - amt)}</span>}
               <div className="dim" style={{ fontSize: 11.5 }}>发票管家 {nRev}/{iv.length} 审核</div></>}</td>
           <td style={{ whiteSpace: 'nowrap' }}>{mk && mk.status === 'ok' ? <><span className="pill ok">已通过</span>{!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => markSubj(g.subject, '')}>撤销</button>}</>
-            : !locked && <button className="btn sm okb" onClick={() => markSubj(g.subject, 'ok')}>本主体通过</button>}</td>
+            : !locked && <button className="btn sm okb" onClick={() => markSubj(g.subject, 'ok', '', g.diff)}>本主体通过</button>}</td>
         </tr>
       })}</tbody></table></div>
   }
@@ -1399,8 +1453,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                   {ov.subjects.map(s => {
                     const cc = (r.cells && r.cells[s]) || { accr: 0, paid: 0, diff: 0 }
                     const mk = cc.mark, fix = mk && mk.status === 'ok' && Math.abs(cc.diff || 0) >= 0.01
-                    const mc = mk ? (fix ? ' mkfix' : mk.status === 'ok' ? ' mkok' : ' mkq') : ''
-                    const mt = mk ? (fix ? `${s} 已通过，但计提与复核应付差 ${money(cc.diff)}，计提有误，需红冲更正（${mk.by}）`
+                    const mc = mk ? (fix && mk.dv !== 'fix' ? ' mkfix' : mk.status === 'ok' ? ' mkok' : ' mkq') : ''
+                    const mt = mk ? (fix ? (mk.dv === 'fix' ? `${s} 已通过，计提差 ${money(cc.diff)} 已确认：计提多了，按复核后金额红冲更正（${mk.by} ${mk.at}）——付款做账自动更正，不用再逐张点；点徽标可改`
+                      : mk.dv === 'keep' ? `${s} 已通过，计提差 ${money(cc.diff)} 已记：账单没错，差异另外处理（${mk.by} ${mk.at}）；点徽标可改`
+                      : `${s} 已通过，但计提与复核应付差 ${money(cc.diff)}，计提有误，需红冲更正（${mk.by}）——点徽标确认差异怎么办，确认后做账自动更正`)
                       : mk.status === 'ok' ? `${s} 已通过 · ${mk.by} ${mk.at}` : `${s} 有疑问：${mk.note || ''}（${mk.by}）`) : undefined
                     return [
                       <td key={s + 'a'} className={'num' + mc} title={mt}>{cc.accr ? money(cc.accr) : ''}
@@ -1408,7 +1464,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           {x.dir === 'in' ? `含 ${Number(String(x.month).slice(5))} 月 记-${x.vno} ${money(x.amt)}${x.direct ? '（直接做账）' : ''}` : `已减 记-${x.vno} ${money(x.amt)} → ${Number(String(x.month).slice(5))} 月账单`}</div>)}</td>,
                       <td key={s + 'p'} className={'num paid' + mc} title={mt}>{cc.paid ? money(cc.paid) : ''}{cc.reqs && <div><DtChip reqs={cc.reqs} onOpen={setPr} /></div>}</td>,
                       <td key={s + 'd'} className={'num ' + (cc.diff > 0.01 ? 'diffpos' : cc.diff < -0.01 ? 'diffneg' : '') + mc} title={mt}>
-                        {mk && <span className={'mkdot ' + (fix ? 'fix' : mk.status)}>{fix ? '⚠ 需更正' : mk.status === 'ok' ? '✓' : '?'}</span>}{cc.diff ? money(cc.diff) : ''}</td>
+                        {mk && (fix
+                          ? <button className={'mkdot lnk ' + (mk.dv === 'fix' ? 'ok' : mk.dv === 'keep' ? 'question' : 'fix')} style={{ fontSize: 11 }}
+                              onClick={() => setVd({ carrier: r.short || r.carrier, period, subject: s, diff: cc.diff, dv: mk.dv || '', from: 'ov' })}>
+                              {mk.dv === 'fix' ? '✓ 已确认更正' : mk.dv === 'keep' ? '差异另说' : '⚠ 需更正'}</button>
+                          : <span className={'mkdot ' + mk.status}>{mk.status === 'ok' ? '✓' : '?'}</span>)}{cc.diff ? money(cc.diff) : ''}</td>
                     ]
                   })}
                   <td className="ovst">{(() => {
@@ -1429,11 +1489,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           </table></div>
           {pr && <PayReqDlg key={pr.inst} v={pr} onClose={() => setPr(null)} onChanged={reloadOv} flash={flash} />}
           {scopeDlg && <ScopeDlg onClose={() => setScopeDlg(false)} onSaved={() => { loadScopeSum(); refreshOv() }} flash={flash} />}
-          <div className="ovfoot">付款(复核)下的小标＝钉钉请款单进度（待谁审批 / 已通过·待付款 / 已付款＝金蝶出现付款单），点开看节点和附件。承运商＝金蝶全称。计提＝2241 本期贷方；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径）；差异＝计提−复核应付。复核状态＝该承运商本月是否已「确认通过并登记」。只有已配取数说明的承运商可「开始复核」。</div>
+          {vd && <DiffVerdictDlg {...vd} onClose={() => setVd(null)} onDone={saveVerdict} />}
+          <div className="ovfoot">付款(复核)下的小标＝钉钉请款单进度（待谁审批 / 已通过·待付款 / 已付款＝金蝶出现付款单），点开看节点和附件。承运商＝金蝶全称。计提＝2241 本期贷方；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径）；差异＝计提−复核应付。差异上的「⚠ 需更正」点开确认差异怎么办——确认「计提多了」的，付款做账自动红冲更正，不用再逐张点。复核状态＝该承运商本月是否已「确认通过并登记」。只有已配取数说明的承运商可「开始复核」。</div>
         </div>
       )}
 
       {mode === 'detail' && (<>
+      {vd && <DiffVerdictDlg {...vd} onClose={() => setVd(null)} onDone={saveVerdict} />}
       <div className="steps">
         {STEPS.map(([k, name], i) =>
           <button key={k} className={'stepbtn' + (k === step ? ' on' : '') + (i < stepIdx ? ' done' : '')} onClick={() => goStep(k)}>
@@ -1510,11 +1572,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       <td className="gsub">{(() => {
                         const mk = h.mark
                         if (mk && mk.status === 'ok') return <span className="smk ok" title={`${mk.by} ${mk.at}`}>✓ 本主体通过 · {mk.by}
-                          {!isZero(h.diff) && <span className="smkfix" title="账单核过了，计提与账单还有差，说明计提记错，需红冲更正">⚠ 计提差 {dtxt(h.diff)}，需红冲更正</span>}
+                          {!isZero(h.diff) && <button className="lnk smkfix" style={{ fontSize: 12 }} title={mk.dv === 'fix' ? '已确认：计提多了，按复核后金额红冲更正——付款做账自动更正，不用再逐张点；点开可改' : mk.dv === 'keep' ? '已记：账单没错，差异另外处理；点开可改' : '账单核过了，计提与账单还有差，说明计提记错，需红冲更正；点开确认差异怎么办（确认后做账自动更正）'}
+                            onClick={() => setVd({ carrier, period, subject: h.subject, diff: h.diff, dv: mk.dv || '', from: 'detail' })}>
+                            {mk.dv === 'fix' ? '✓ 计提差已确认更正' : mk.dv === 'keep' ? '· 差异另说' : `⚠ 计提差 ${dtxt(h.diff)}，需红冲更正`}</button>}
                           {!locked && <button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button>}</span>
                         if (mk && mk.status === 'question') return <span className="smk q" title={`${mk.by} ${mk.at}`}>? 有疑问：{mk.note || '（未写）'}
-                          {!locked && <><button className="lnk" onClick={() => askSubj(h.subject, mk.note)}>改</button><button className="lnk" onClick={() => markSubj(h.subject, 'ok')}>改为通过</button><button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button></>}</span>
-                        return !locked && <span className="smkbtns"><button className="btn sm okb" title="这个主体的账单没问题了：标通过以后，这个主体的请款单就可以做账，不用等别的主体、也不用等整月登记" onClick={() => markSubj(h.subject, 'ok')}>✓ 本主体通过</button>
+                          {!locked && <><button className="lnk" onClick={() => askSubj(h.subject, mk.note)}>改</button><button className="lnk" onClick={() => markSubj(h.subject, 'ok', '', h.diff)}>改为通过</button><button className="lnk" onClick={() => markSubj(h.subject, '')}>撤销</button></>}</span>
+                        return !locked && <span className="smkbtns"><button className="btn sm okb" title="这个主体的账单没问题了：标通过以后，这个主体的请款单就可以做账，不用等别的主体、也不用等整月登记" onClick={() => markSubj(h.subject, 'ok', '', h.diff)}>✓ 本主体通过</button>
                           <button className="btn sm" onClick={() => askSubj(h.subject, '')}>? 有疑问</button></span>
                       })()}</td>
                     </tr>,

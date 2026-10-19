@@ -25,6 +25,7 @@ from kernels import logistics_voucher as LV
 router = APIRouter()
 PR = store.payreq
 FX = store.review_line_fix
+SJ = store.review_subj          # 按主体复核结论：diff_verdict=fix ＝ 复核时确认过「计提多了按复核后金额红冲更正」(V2.993)
 _OVR_KEY = "logi_voucher_paper_ok"          # {inst_id: {by, at}} 纸质件没到、手动放行做账
 _POSTED_KEY = "logi_voucher_posted"         # {inst_id: {bill_no, vid, vno, book, at, by}} 已写入金蝶
 _FEE_KEY = "logi_voucher_fee"               # {inst_id: {vid, vno, year, month, date, book, by, at, …}} 审核时由系统生成的费用凭证(V2.835)
@@ -155,11 +156,11 @@ def _reviewed(carrier, period, subject=None):
         SG, SJ = store.review_sign, store.review_subj
         with db._engine.connect() as c:
             sg = c.execute(select(SG.c.carrier, SG.c.period, SG.c.reviewer, SG.c.signed_at).where(SG.c.status == "signed")).all()
-            sj = c.execute(select(SJ.c.carrier, SJ.c.period, SJ.c.subject, SJ.c.updated_by, SJ.c.updated_at).where(SJ.c.status == "ok")).all()
+            sj = c.execute(select(SJ.c.carrier, SJ.c.period, SJ.c.subject, SJ.c.updated_by, SJ.c.updated_at, SJ.c.diff_verdict).where(SJ.c.status == "ok")).all()
         _RS_CACHE["set"] = {(a, b) for a, b, _w, _t in sg}
-        _RS_CACHE["subj"] = {(a, b, s_) for a, b, s_, _w, _t in sj}
-        info = {(a, b, s_): {"how": "subj", "by": w or "", "at": t or ""} for a, b, s_, w, t in sj}
-        info.update({(a, b, None): {"how": "month", "by": w or "", "at": t or ""} for a, b, w, t in sg})
+        _RS_CACHE["subj"] = {(a, b, s_) for a, b, s_, _w, _t, _v in sj}
+        info = {(a, b, s_): {"how": "subj", "by": w or "", "at": t or "", "dv": v or ""} for a, b, s_, w, t, v in sj}
+        info.update({(a, b, None): {"how": "month", "by": w or "", "at": t or "", "dv": ""} for a, b, w, t in sg})
         _RS_CACHE["info"] = info
         _RS_CACHE["ts"] = time.time()
     if not (carrier and period):
@@ -172,6 +173,17 @@ def _review_info(carrier, period, subject):
     if not _reviewed(carrier, period, subject):
         return None
     return _RS_CACHE["info"].get((carrier, period, None)) or _RS_CACHE["info"].get((carrier, period, subject))
+
+
+def _diff_fix_confirmed(carrier, period, subject):
+    """复核台标「本主体通过」时确认过「计提多了，按复核后金额红冲更正」→ {by, at} / None（V2.993，用户 2026-10-19
+    「这个不应该在付款做账页做，应该在审核账单时就确认了」）。这个确认就是人在复核时给的应为金额结论，
+    自动做账认它——和本页点过「选择核销哪些计提」同等效力。跟 _reviewed 共用 15 秒缓存。"""
+    if not (carrier and period and subject):
+        return None
+    _reviewed(carrier, period, subject)          # 确保缓存是热的
+    mk = _RS_CACHE["info"].get((carrier, period, subject))
+    return {"by": mk["by"], "at": mk["at"]} if mk and mk.get("dv") == "fix" else None
 
 
 def _inv_state(r, invs):
@@ -1082,7 +1094,10 @@ def _preview_data(inst, self_vno=None, _nest=False):
                              "、".join("%d/%s# %.2f" % (c["month"], c["vno"], c["gross"]) for c in sug))
             else:
                 amts[v0["vno"]] = {"gross": inv_tot}
-                notes.append("计提 %.2f 和发票 %.2f 差 %+.2f：按红冲处理——原计提整笔红冲，按发票金额重新计提后核销" % (v0["gross"], inv_tot, inv_tot - v0["gross"]))
+                cf = _diff_fix_confirmed(r.get("carrier"), r.get("period"), r.get("subject"))
+                notes.append("计提 %.2f 和发票 %.2f 差 %+.2f：按红冲处理——原计提整笔红冲，按发票金额重新计提后核销%s" % (
+                    v0["gross"], inv_tot, inv_tot - v0["gross"],
+                    "（复核台已确认计提有误、按复核后金额更正：%s %s）" % (cf["by"], cf["at"]) if cf else ""))
     carry, cnotes, cbad = _carries(r, vouchers) if vouchers else ({}, [], "")      # 复核台登记的多收待扣回 / 本月扣回(V2.896)
     notes += cnotes
     pl = LV.plan(vouchers, inv_in, fixes, amts, carry) if (vouchers and inv_in) else \
@@ -1125,8 +1140,11 @@ def _preview_data(inst, self_vno=None, _nest=False):
             g0 = LV.eff_gross(v0, fixes.get(v0["vno"]))
             if abs(g0 - amt_req) > 0.004 and abs(g0 - v0["gross"]) < 0.005:
                 a2[v0["vno"]] = {"gross": amt_req}
-                notes.append("%s %.2f 和请款 %.2f 差 %+.2f：按红冲处理——原%s整笔红冲，按请款金额重新计提（发票后补，税按原税率暂估）" % (
-                    "费用凭证" if v0.get("direct") else "计提", v0["gross"], amt_req, amt_req - v0["gross"], "费用凭证" if v0.get("direct") else "计提"))
+                cf = _diff_fix_confirmed(r.get("carrier"), r.get("period"), r.get("subject"))
+                notes.append("%s %.2f 和请款 %.2f 差 %+.2f：按红冲处理——原%s整笔红冲，按请款金额重新计提（发票后补，税按原税率暂估）%s" % (
+                    "费用凭证" if v0.get("direct") else "计提", v0["gross"], amt_req, amt_req - v0["gross"],
+                    "费用凭证" if v0.get("direct") else "计提",
+                    "（复核台已确认计提有误、按复核后金额更正：%s %s）" % (cf["by"], cf["at"]) if cf else ""))
         pl2 = LV.plan_later(vouchers, fixes, a2)
         g_eff = round(sum(float(p.get("gross") or 0) for p in pl2["per"].values()), 2) if pl2["status"] == "ok" else None
         if pl2["status"] != "ok":
@@ -2010,8 +2028,15 @@ def _auto_ok(d, cfg):
         return False, "%s，要人工" % (KIND_CN.get(k) or k or "做账类型认不出")
     if k not in cfg["kinds"]:
         return False, "「%s」没放进自动范围" % KIND_CN[k]
-    if any(a.get("mode") == "amt" for a in d.get("accruals") or []) and not d.get("picked"):
-        return False, "计提的金额要更正（系统默认按发票或请款金额），金额更正留给人点；人确认过应为金额的才自动做"
+    # V2.993：金额更正要人确认过应为金额才自动做。「人确认过」有三条路，任一即可：
+    #   ① 本页点过「选择核销哪些计提」填了本次按多少(picked)；
+    #   ② 复核台标「本主体通过」时确认过「计提多了，按复核后金额红冲更正」(diff_verdict=fix)——审核账单时就确认了，不用再到本页点；
+    #   ③ 计提的更改是复核台登记的多收待扣回/本月扣回顶出来的(carry，登记本身就是人确认；mode0 是 hx/tail 被顶成 amt 的才算，
+    #      系统猜的 amt 叠了扣回的不算，仍要 ① 或 ②)。
+    amt_needs = [a for a in (d.get("accruals") or [])
+                 if a.get("mode") == "amt" and not (a.get("carry") and a.get("mode0") in ("hx", "tail"))]
+    if amt_needs and not d.get("picked") and not _diff_fix_confirmed(req.get("carrier"), req.get("period"), req.get("subject")):
+        return False, "计提的金额要更正（系统默认按发票或请款金额），金额更正留给人确认；复核台主体通过时确认过、或本页点过「选择核销哪些计提」的才自动做"
     if not str(req.get("bill_id") or "").isdigit():
         return False, "没有金蝶付款单（或这笔付款已经记过支付凭证）"
     if not req.get("bank"):
@@ -2035,7 +2060,10 @@ def _auto_fp(cfg, cands, l3=None):
     laters = db.get_setting(_LATER_KEY, None) or {}
     with db._engine.connect() as c:
         fx = c.execute(text("select count(*), coalesce(max(updated_at), '') from %s" % FX.name)).first()
+        dv = c.execute(text("select carrier, period, subject, diff_verdict, coalesce(updated_at, '') from %s"
+                            " where coalesce(diff_verdict, '') <> ''" % SJ.name)).all()
     body = {"cfg": {k: cfg.get(k) for k in ("mode", "kinds", "cap", "max_round")}, "fx": [int(fx[0] or 0), str(fx[1] or "")],
+            "dv": sorted([tuple(str(x) for x in row) for row in dv]),                    # 复核台「差异怎么办」的确认变了，够条件的张数就变(V2.993)
             "carry": db.get_setting(_CARRY_KEY, None) or {},        # 复核台登记的多收待扣回变了，凭证也会变(V2.896)
             "l3": sorted(l3 or []),                                 # 发票后补等发票的那几张：票到没到、审没审(V2.919)
             "c": [[r["inst_id"], str(r.get("kd_paid") or ""), str(r.get("amount")), str(r.get("period")), str(r.get("subject_full")),

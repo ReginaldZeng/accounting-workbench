@@ -35,13 +35,14 @@ SJ = store.review_subj       # 按主体复核结论(通过/有疑问)
 
 
 def _subj_marks(period, carrier=None):
-    """{(承运商, 主体): {status, note, by, at}}"""
+    """{(承运商, 主体): {status, note, by, at, dv}}"""
     q = select(SJ).where(SJ.c.period == period)
     if carrier:
         q = q.where(SJ.c.carrier == carrier)
     with db._engine.connect() as c:
         return {(r["carrier"], r["subject"]): {"status": r["status"], "note": r["note"] or "", "by": r["updated_by"] or "",
-                                              "at": r["updated_at"] or ""} for r in c.execute(q).mappings().all()}
+                                              "at": r["updated_at"] or "", "dv": r["diff_verdict"] or ""}
+                for r in c.execute(q).mappings().all()}
 
 
 def _doc_ok(carrier, period):
@@ -4007,14 +4008,16 @@ async def review_doc_classify(request: Request):
 
 @router.post("/api/logistics-review/subject-mark")
 async def review_subject_mark(request: Request):
-    """按主体标复核结论：status=ok 通过 / question 有疑问(note 写疑问) / 空=撤销。已登记复核的月份不可改。"""
+    """按主体标复核结论：status=ok 通过 / question 有疑问(note 写疑问) / 空=撤销。已登记复核的月份不可改。
+    diff_verdict(V2.993)：标通过的同时可以顺手确认「差异怎么办」——fix=计提多了按复核后金额红冲更正 / keep=账单没错差异另说。"""
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     b = await request.json()
     carrier, period, subj = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("subject") or "").strip()
     st, note = (b.get("status") or "").strip(), (b.get("note") or "").strip()
-    if not carrier or not period or not subj or st not in ("", "ok", "question"):
+    dv = (b.get("diff_verdict") or "").strip()
+    if not carrier or not period or not subj or st not in ("", "ok", "question") or dv not in ("", "fix", "keep"):
         return JSONResponse({"ok": False, "msg": "参数不对"}, status_code=400)
     lk = _locked(carrier, period)
     if lk:
@@ -4023,12 +4026,42 @@ async def review_subject_mark(request: Request):
         c.execute(delete(SJ).where((SJ.c.carrier == carrier) & (SJ.c.period == period) & (SJ.c.subject == subj)))
         if st:
             c.execute(insert(SJ).values(carrier=carrier, period=period, subject=subj, status=st, note=note,
+                                        diff_verdict=dv if st == "ok" else "",
                                         updated_by=_uname(u), updated_at=_now()))
     k = ("lines", carrier, period)
     if k in _ACCR_CACHE:                     # 只改组头标记，不重读金蝶
         for r in _ACCR_CACHE[k][0].get("rows", []):
             if r.get("kind") == "gtotal" and r.get("subject") == subj:
-                r["mark"] = {"status": st, "note": note, "by": _uname(u), "at": _now()} if st else None
+                r["mark"] = {"status": st, "note": note, "by": _uname(u), "at": _now(), "dv": dv if st == "ok" else ""} if st else None
+    return {"ok": True}
+
+
+@router.post("/api/logistics-review/subject-diff-verdict")
+async def review_subject_diff_verdict(request: Request):
+    """主体通过以后补登记/改「差异怎么办」(V2.993，用户 2026-10-19「这个不应该在付款做账页做，应该在审核账单时就确认了」)：
+    fix=计提多了按复核后金额红冲更正 / keep=账单没错差异另说 / 空=撤销确认。
+    不改复核结论、不动账单，只告诉付款做账这个差异怎么处理——已登记复核的月份也能补登记。
+    确认成 fix 的：自动做账按发票/请款金额红冲更正时当作人已确认，不再拦。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period, subj = (b.get("carrier") or "").strip(), (b.get("period") or "").strip(), (b.get("subject") or "").strip()
+    verdict = (b.get("verdict") or "").strip()
+    if not carrier or not period or not subj or verdict not in ("", "fix", "keep"):
+        return JSONResponse({"ok": False, "msg": "参数不对"}, status_code=400)
+    with db._engine.begin() as c:
+        n = c.execute(update(SJ).where((SJ.c.carrier == carrier) & (SJ.c.period == period) & (SJ.c.subject == subj))
+                      .values(diff_verdict=verdict, updated_by=_uname(u), updated_at=_now())).rowcount
+    if not n:
+        return JSONResponse({"ok": False, "msg": "这个主体还没标通过，先标「本主体通过」再确认差异怎么处理"}, status_code=400)
+    db.audit(_uname(u), "物流复核-差异结论", "%s %s %s" % (carrier, period, subj),
+             {"": "撤销差异确认", "fix": "计提多了，按复核后金额红冲更正", "keep": "账单没错，差异另外处理"}[verdict])
+    k = ("lines", carrier, period)
+    if k in _ACCR_CACHE:                     # 同 subject-mark：只改组头标记
+        for r in _ACCR_CACHE[k][0].get("rows", []):
+            if r.get("kind") == "gtotal" and r.get("subject") == subj and r.get("mark"):
+                r["mark"]["dv"] = verdict
     return {"ok": True}
 
 

@@ -158,6 +158,8 @@ review_subj = Table(
     Column("subject", String(30)),
     Column("status", String(12)),
     Column("note", Text),
+    Column("diff_verdict", String(20)),      # 差异结论(V2.993)：空 / fix=计提多了按复核后金额红冲更正 / keep=账单没错差异另说。
+                                             # 标「本主体通过」时顺手确认，付款做账的自动轮认 fix＝人已确认应为金额
     Column("updated_by", String(50)),
     Column("updated_at", String(20)),
 )

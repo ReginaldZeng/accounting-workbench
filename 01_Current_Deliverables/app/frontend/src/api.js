@@ -725,7 +725,8 @@ export const reviewPayreqFileUrl = (inst, fid) => `/api/logistics-review/payreq/
 export const reviewOverview = (period, fresh = false) => j(`/api/logistics-review/overview?period=${period}${fresh ? '&fresh=1' : ''}`)
 export const reviewExportUrl = (carrier, period) => `/api/logistics-review/export?carrier=${encodeURIComponent(carrier)}&period=${period}`
 export const reviewDocNote = (carrier, period, doc_no, note) => j('/api/logistics-review/doc-note', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, note } : { carrier, period, doc_no, note }) })
-export const reviewSubjectMark = (carrier, period, subject, status, note = '') => j('/api/logistics-review/subject-mark', { method: 'POST', body: JSON.stringify({ carrier, period, subject, status, note }) })
+export const reviewSubjectMark = (carrier, period, subject, status, note = '', diff_verdict = '') => j('/api/logistics-review/subject-mark', { method: 'POST', body: JSON.stringify({ carrier, period, subject, status, note, diff_verdict }) })
+export const reviewSubjVerdict = (carrier, period, subject, verdict) => j('/api/logistics-review/subject-diff-verdict', { method: 'POST', body: JSON.stringify({ carrier, period, subject, verdict }) })
 export const reviewDocConfirm = (carrier, period, doc_nos, on = true) => j('/api/logistics-review/doc-confirm', { method: 'POST', body: JSON.stringify({ carrier, period, doc_nos, on }) })
 export const reviewDocClassify = (carrier, period, doc_no, patch) => j('/api/logistics-review/doc-classify', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, ...patch } : { carrier, period, doc_no, ...patch }) })
 export const reviewAccrual = (carrier, period) => j(`/api/logistics-review/accrual?carrier=${encodeURIComponent(carrier)}&period=${period}`)
