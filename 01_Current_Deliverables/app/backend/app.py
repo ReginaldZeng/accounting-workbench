@@ -877,6 +877,7 @@ _SEC_KEYS = {s["key"] for s in NAV_SECTIONS}
 # cap=xxx → 复用一个**已存在的**动作点当准入点（不自动生成 enter:<key>）
 # default = 未设过时的初始状态，如实反映当前进度
 NAV_MODULES = [
+    {"key": "voucherreview", "label": "凭证审核", "sec": "gl", "order": 30, "default": "已上线"},
     # ── 报表板块（V2.240 按业务方定的新结构重排）──
     # 两个二级都是**纯分组**：财务报表、源单列表本身不进页面，内容全在三级里（业务方定）。
     # 撤下的旧三级：科目余额(sbal)、序时账簿(journal)——业务方定「直接删掉」，两个 key 就此退出菜单树，
@@ -5085,6 +5086,10 @@ def orgs_delete(body: dict, request: Request):
 from routers import (logistics_accrual, archive, fxrate, logistics_recon, cost_ledger,
                      rptexport, report_dashboard, ec, llm_hub, temp_attendance, bom_quote, syslog)
 
+from routers import voucher_review
+voucher_review.module_open = lambda: _nav_state().get("voucherreview", {}).get("可进入", False)
+app.include_router(voucher_review.router)
+app.add_event_handler("startup", voucher_review.vr.recover_interrupted)
 app.include_router(logistics_accrual.router)
 app.include_router(archive.router)
 app.include_router(fxrate.router)

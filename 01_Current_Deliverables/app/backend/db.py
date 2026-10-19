@@ -733,6 +733,8 @@ except Exception as _ex:
 #   ⚠ mod 不是可有可无的注释：账号页第③栏「只显示他进得去的菜单的动作」全靠它。以前这里只有 group
 #     (一个和菜单树毫无关联的自由字符串)，导致「上传科目余额表」挂在**银行对账**下，而科目余额早已搬去报表模块。
 CAP_META_STATIC = [
+    {"key": "voucher_audit", "label": "审核总账凭证", "ws": "accounting", "group": "凭证审核", "tier": "act", "mod": "voucherreview", "sensitive": True},
+    {"key": "voucher_unaudit", "label": "反审核工作台凭证", "ws": "accounting", "group": "凭证审核", "tier": "act", "mod": "voucherreview", "sensitive": True},
     # ── 核算工作台 ──
     {"key": "enter_accounting", "label": "进入核算工作台", "ws": "accounting", "kind": "enter"},
     {"key": "manage_accounting", "label": "管理核算工作台账号", "ws": "accounting", "kind": "manage", "sensitive": True},

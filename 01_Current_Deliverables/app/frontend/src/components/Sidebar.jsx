@@ -46,6 +46,7 @@ const IC = {
   settings: S(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8 2 2 0 1 1-2.8 2.8 1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 0 1-4 0 1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3 2 2 0 1 1-2.8-2.8 1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 0 1 0-4 1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8 2 2 0 1 1 2.8-2.8 1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 0 1 4 0 1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3 2 2 0 1 1 2.8 2.8 1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></>),
 }
 const ICON_BY_KEY = {
+  voucherreview: IC.archive,
   periodclose: IC.month, bankrecon: IC.bank, reconcile: IC.reconcile, fundboard: IC.fund, ledger: IC.ledger,
   wealth: IC.wealth, logisticsrecon: IC.logistics, logistics: IC.logistics, logisticspay: IC.reconcile, logisticscost: IC.sbal, logisticsvoucher: IC.ledger,
   ecom: IC.ecom, ecommonth: IC.month, ecomsettle: IC.reconcile, ecombase: IC.basicdata,

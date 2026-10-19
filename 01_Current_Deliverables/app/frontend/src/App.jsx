@@ -26,6 +26,7 @@ import ResultExport from './views/ResultExport.jsx'
 import Settings from './views/Settings.jsx'
 import BasicData from './views/BasicData.jsx'
 import Archive from './views/Archive.jsx'
+import VoucherReview from './views/VoucherReview.jsx'
 import VoucherBind from './views/VoucherBind.jsx'
 import FxRate from './views/FxRate.jsx'
 import RptExport from './views/RptExport.jsx'
@@ -164,7 +165,7 @@ export default function App() {
     <div className="shell">
       <Sidebar view={view} onSelect={setView} source={cfg.source} user={user} onLogout={logout} onHome={backToPortal}
         closed={!!cfg['封存']?.['已封存']} mods={mods} navDef={navDef} ver={cfg['版本']} todoN={todos?.counts?.mine || 0}
-        focusSection={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ar' : INV_VIEWS.includes(view) ? 'inv' : ''}
+        focusSection={view === 'voucherreview' ? 'gl' : ['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ar' : INV_VIEWS.includes(view) ? 'inv' : ''}
         focusParent={['ecommonth', 'ecomsettle', 'ecombase'].includes(view) ? 'ecom' : ''} />
       <main className="main">
         {/* 模块未开放时，正停在该页的人不该继续看到旧内容（四部曲三个子视图都算「银行对账」这个模块） */}
@@ -221,6 +222,7 @@ export default function App() {
         {view === 'bomstd' && canView('bomstd') && <BomPrice user={user} mode="std" />}
         {view === 'bomconfig' && canView('bomconfig') && <BomPrice user={user} mode="config" />}
         {view === 'tempattboard' && canView('tempattboard') && <TempAttBoard user={user} />}
+        {view === 'voucherreview' && canView('voucherreview') && <VoucherReview user={user} cfg={cfg} />}
         {view === 'archive' && canView('archive') && <Archive user={user} />}
         {view === 'vbind' && canView('vbind') && <VoucherBind user={user} />}
         {view === 'basicdata' && canView('basicdata') && <BasicData user={user} />}
@@ -260,7 +262,7 @@ export default function App() {
 //   临工线：'tempatt' 同样升为纯分组父项，换成 'tempattrev'/'tempattboard'（V2.318）
 // 三个被摘掉的 key（sbal / costledger / ecom）都已不对应任何页面——留着的话，
 // 万一有人把它配成可进入，会去找一个不存在的视图而不是走占位页。
-const CODED_VIEWS = new Set(['reconcile', 'ledger', 'wealth', 'fxrate', 'periodclose', 'fundboard',
+const CODED_VIEWS = new Set(['voucherreview','reconcile', 'ledger', 'wealth', 'fxrate', 'periodclose', 'fundboard',
   'rptexport', 'rptdash', 'fisbal',
   'logistics', 'logibase', 'logiupload', 'logisticspay', 'logisticscost', 'logisticsvoucher',
   'clexport', 'cldash', 'clwh', 'fullcost', 'bomdraft', 'bomstd', 'bomconfig',
