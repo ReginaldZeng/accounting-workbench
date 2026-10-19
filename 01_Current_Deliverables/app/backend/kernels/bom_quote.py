@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-10-19 | Author: Codex | Version: V2.995 | CP括号配对与商品版费用差异。
 # [Change Log]
 # Date: 2026-09-02 | Author: Claude / c | Version: V-draft(BOM报价审核)
 # Description: 【BOM报价审核】内核——星期九「成本核算样表」解析器 + 台账口径（含税五分项）+ 归组键 + 重排版导出。
@@ -580,13 +581,18 @@ def net_weight_from_spec(pack_spec):
     return round(v, 4) if v > 0 else None
 
 
+def canonical_cp(value):
+    """CP 身份比较统一空白、括号与大小写；保留全部版本后缀。"""
+    return re.sub(r"\s+", "", norm(value)).translate(str.maketrans("（）", "()")).upper()
+
+
 def product_key(rec):
     """产品身份键（业务方 2026-09-04 定：**CP 码就是产品身份**，改口径）：
     有 CP 码 → 「产品名|CP码」——不同 CP（变体如印刷袋 …-2 / 空白袋 …、或改配方跳号）**各自成产品、各自定稿入库**，
     互不顶替；**同 CP** 才是同产品的版本链（如同一核算表重算/替换）。CP 码为空 → 退回「产品名|客户」（同名双产品靠客户分）。
     ⚠ 旧记录存的是老键(名+客户)；改键后**新入账/重连才走新键**，两者不互成版本——现存撞车单需重新立项/重连一次。"""
     pn = norm(rec.get("productName"))
-    cp = norm(rec.get("cpCode"))
+    cp = canonical_cp(rec.get("cpCode"))
     if cp:
         return pn + "|" + cp
     return pn + "|" + norm(rec.get("customer"))
@@ -1385,7 +1391,7 @@ def _pair_goods(base_mats, goods_mats):
     return pairs
 
 
-def diff_goods(base_mats, goods_mats):
+def diff_goods(base_mats, goods_mats, base_summary=None, goods_summary=None):
     """成本会计商品版 vs 采购商务版 的**价/税**差异（商品版可能调过单价或税率）。逐料按 _pair_goods 对齐。
     返回 {rows:[{matCode,matName,field,from,to}], hasDiff, count}。无差异→hasDiff=False（静默过，不弹确认闸）。"""
     rows = []
@@ -1399,6 +1405,12 @@ def diff_goods(base_mats, goods_mats):
             if abs(float(a) - float(b)) > 1e-9:
                 rows.append({"matCode": norm(m.get("matCode")), "matName": norm(m.get("matName")),
                              "field": field, "fieldLabel": la, "from": a, "to": b})
+    if base_summary is not None and goods_summary is not None:
+        bf, gf = fee_from_summary(base_summary), fee_from_summary(goods_summary)
+        for key, label in (("mfg", "加工费"), ("load", "装卸费"), ("adm", "管理费")):
+            if abs(bf[key] - gf[key]) > 1e-9:
+                rows.append({"matCode": "", "matName": "费用", "field": "fee_" + key,
+                             "fieldLabel": label + "（含税元/kg）", "from": bf[key], "to": gf[key]})
     return {"rows": rows, "hasDiff": bool(rows), "count": len(rows)}
 
 

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-10-19 | Author: Codex | Version: V2.995 | CP括号配对与商品版费用差异。
 # [Change Log]
 # Date: 2026-09-02 | Author: Claude / c | Version: V-draft(BOM报价审核)
 # Description: 【BOM报价审核】路由——这条工具线在后端的唯一落点（改这条线只动本文件，不碰 app.py）。
@@ -13,6 +14,7 @@
 import hashlib
 import json
 import os
+import math
 import re
 import threading
 import shutil
@@ -545,9 +547,9 @@ def _stage_files(files, approval_no, source_type):
     # 说明财务复核出问题改了数 → **入账以财务复核为准**（台账=财务版），商务输出降为「采购原始」差异参考挂在旁边、不单独入账。
     # 财务复核==商品版是同一个财务版（商品版只是脱敏形态），故商品版随后配到财务复核底稿、diff 应为空。
     for f in [p for p in parsed if p.get("origin") == "finance"]:
-        fcp = bq.norm(f["rec"].get("cpCode"))
+        fcp = bq.canonical_cp(f["rec"].get("cpCode"))
         raw = next((p for p in parsed if p is not f and p.get("origin") == "procurement"
-                    and ((bq.norm(p["rec"].get("cpCode")) == fcp) if fcp else (p["productKey"] == f["productKey"]))), None)
+                    and ((bq.canonical_cp(p["rec"].get("cpCode")) == fcp) if fcp else (p["productKey"] == f["productKey"]))), None)
         if raw:
             rc = raw["comp"]
             f["rawProcurement"] = {"srcLabel": raw.get("srcLabel") or "成本核算表（商务输出）",
@@ -561,10 +563,10 @@ def _stage_files(files, approval_no, source_type):
     # V2.457：**先按 CP 码配**（CP＝身份，V2.425），再退身份键(名|CP)。实证 240399：商务版 CP04107901 页头被写成「…-J-半成品」、
     # 商品版写「…-半成品」，按 名|CP 配不上 → 商品版被当成第 4 个产品单独入账（缺三列、来源方成本会计商品版）。
     for g in goods:
-        gcp = bq.norm(g["rec"].get("cpCode"))
+        gcp = bq.canonical_cp(g["rec"].get("cpCode"))
         base = None
         if gcp:
-            base = next((p for p in parsed if "goods" not in p and bq.norm(p["rec"].get("cpCode")) == gcp), None)
+            base = next((p for p in parsed if "goods" not in p and bq.canonical_cp(p["rec"].get("cpCode")) == gcp), None)
             if base and base["productKey"] != g["productKey"]:
                 warnings.append("%s 商务版页头产品名「%s」与商品版「%s」不一致，已按 CP 码配对；请研发/采购统一产品名称"
                                 % (gcp, (base["rec"].get("productName") or "").strip(), (g["rec"].get("productName") or "").strip()))
@@ -588,7 +590,7 @@ def _stage_files(files, approval_no, source_type):
         it["semi"] = bq.is_semi(rec.get("cpCode"))
         it["channel"] = _default_channel(rec)
         g = it.get("goods")
-        it["goodsDiff"] = bq.diff_goods(rec.get("materials"), g["rec"].get("materials")) if g else None
+        it["goodsDiff"] = bq.diff_goods(rec.get("materials"), g["rec"].get("materials"), rec.get("summary"), g["rec"].get("summary")) if g else None
         # 上游链路：本品用到的半成品/复配料若**自身勾稽不平（或它的更上游不平）**，本品的投入价就来自一张算错的表 → 连带拦截。
         # ⚠ **传导式**（审查 H2）：复配料C不平 → 半成品S(自身平但用了C) → 成品P(自身平但用了S)，三级全拦。
         #   实证 251965：成品自身六项全平却用了不平半成品/复配料的价，成本少算 5.7%、整单少 8882 元。
@@ -926,11 +928,14 @@ def _group_roster(src, entries, booked_views, exclude_pks=None, group_id=None, a
         return booked_views
     # 排除本组已入账的；也排除**本审批下别的组**已入账的——同一采购核算表文件被拆到多组时（如样例种子按产品分组），
     # 否则会把别组入账成功的产品误报成「未入账」。
-    booked_pk = {v["productKey"] for v in booked_views} | set(exclude_pks or ())
+    def normalized_key(key):
+        name, sep, code = str(key or "").rpartition("|")
+        return name + sep + bq.canonical_cp(code) if sep else str(key or "")
+    booked_pk = {normalized_key(v["productKey"]) for v in booked_views} | {normalized_key(k) for k in (exclude_pks or ())}
     extra = []
     for rec in recs:
         pk = bq.product_key(rec)
-        if pk in booked_pk:
+        if normalized_key(pk) in booked_pk:
             continue
         comp = bq.compose(rec)
         ups = bq.upstream_refs(rec, recs)
@@ -1655,6 +1660,8 @@ def _book_staged(prev, sid, idxs, u, historical=False):
     for it in prev["records"]:
         by_wb.setdefault(it.get("stagedFile"), []).append(it)
     gid_of = {wb: _group_id(src, appno, _workbook_anchor(recs)) for wb, recs in by_wb.items()}
+    # 同一OA同一产品只能通过“更新源表”新增修订，重新立项不重复生成商务/商品两组。
+    existing = [e for e in db.bom_list_entries(src) if appno and e.get("approval_no") == appno]
     booked, skipped, rejected, booked_gids = [], [], [], set()
     for it in prev["records"]:
         if it["idx"] not in idxs:
@@ -1670,6 +1677,12 @@ def _book_staged(prev, sid, idxs, u, historical=False):
             rejected.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"),
                              "reason": "上游「%s」勾稽不平，其成本未经确认；本品用了它的价，连带不予入账" % "、".join(it["blockedBy"]),
                              "blockedBy": it["blockedBy"]})
+            continue
+        same = next((e for e in existing if bq.canonical_cp(e.get("cp_code")) == bq.canonical_cp(rec.get("cpCode"))
+                     and (bq.canonical_cp(rec.get("cpCode")) or e.get("product_key") == bq.product_key(rec))), None)
+        if same:
+            skipped.append({"productName": (rec.get("productName") or "").strip(), "cpCode": rec.get("cpCode"),
+                            "reason": "本OA已有第 %d 号记录；重新立项不重复入账，修改请用更新源表" % same["id"]})
             continue
         dup = db.bom_find_dup(src, it["numFp"])
         if dup:
@@ -2912,7 +2925,7 @@ async def bom_apply_goods(request: Request):
     if not gv:
         return JSONResponse({"ok": False, "msg": "本记录没有成本会计商品版可采纳。"}, status_code=400)
     if not (gv.get("diff") or {}).get("hasDiff"):
-        return JSONResponse({"ok": False, "msg": "商品版与商务版价/税一致，无需采纳。"}, status_code=400)
+        return JSONResponse({"ok": False, "msg": "商品版与商务版材料价、税率及费用一致，无需采纳。"}, status_code=400)
     merged, changed = [], 0
     inv_rules = _invoice_rules()
     for m, g in bq._pair_goods(e.get("materials") or [], gv.get("materials") or []):
@@ -2933,8 +2946,22 @@ async def bom_apply_goods(request: Request):
     mat_sub = round(sum((x.get("costExcl") or 0) for x in merged if x.get("seg") == "原料"), 4)
     pack_sub = round(sum((x.get("costExcl") or 0) for x in merged if x.get("seg") == "包材"), 4)
     rec = {**_rec_from_entry(e), "materials": merged, "matSubtotal": mat_sub, "packSubtotal": pack_sub}
+    fee = _fee_of(e)
+    # 只采纳差异中明确列出的费用，保留其它人工确认的参数。
+    for row in (gv.get("diff") or {}).get("rows") or []:
+        field = row.get("field")
+        if field not in ("fee_mfg", "fee_load", "fee_adm"):
+            continue
+        key, value = field[4:], row.get("to")
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            return JSONResponse({"ok": False, "msg": "商品版费用无效，请重新抓取核对。"}, status_code=400)
+        if abs(fee[key] - value) > 1e-9:
+            db.bom_add_audit(e["id"], u["name"], row.get("fieldLabel") or field, fee[key], value)
+            fee[key] = value
+            changed += 1
     fields = {"materials": merged, "mat_subtotal_excl": mat_sub, "pack_subtotal_excl": pack_sub,
-              "full_cost_incl": bq.compose(rec, _fee_of(e))["full"]}
+              **{"fee_" + k: v for k, v in fee.items()},
+              "full_cost_incl": bq.compose(rec, fee)["full"]}
     gv2 = dict(gv); gv2["applied"] = True
     fields["goods_version"] = gv2
     rs = dict(e.get("review_steps") or {})
@@ -2946,7 +2973,7 @@ async def bom_apply_goods(request: Request):
     db.bom_update_entry(e["id"], fields)
     if reset:
         db.bom_add_audit(e["id"], u["name"], "采纳商品版·审核态失效", reset, "需重新初审/终审")
-    db.audit(u["name"], "bom_apply_goods", target=str(e["id"]), detail="采纳商品版 %d 项价/税" % changed)
+    db.audit(u["name"], "bom_apply_goods", target=str(e["id"]), detail="采纳商品版 %d 项材料价/税及费用" % changed)
     finals = db.bom_finals(_src())
     return {"ok": True, "changed": changed, "reviewReset": reset, "entry": _entry_view(db.bom_get_entry(e["id"]), finals)}
 

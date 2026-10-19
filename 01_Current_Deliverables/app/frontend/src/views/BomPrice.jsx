@@ -1,4 +1,5 @@
 // [Change Log] Date:2026-09-02 Author:Claude/c Version:V-draft(BOM报价审核)
+// [Change Log] Date: 2026-10-19 | Author: Codex | Version: V2.995 | 商品版费用差异提示。
 // 【BOM报价审核】前端：钉钉「BOM表报价」审批附件→解析→复核→定稿→BP消费。
 // 三视图（台账列表 / 采购核算表详情 / 版本对比）+ 手工入账弹窗。样机布局与交互照搬，皮肤换本项目令牌。
 // 含税五分项口径（元/kg），涨跌红▲绿▼（中国财务惯例），编辑态改费用参数保存留痕。
@@ -1221,7 +1222,7 @@ function Detail({ entry, all, cfg, mode, onBack, onOpen, onCompare, onChanged, o
   }
   const applyGoods = async () => {
     try { const r = await bomApplyGoods(entry.id); if (!r.ok) return flash(r.msg || '采纳失败')
-      flash(`已采纳商品版 ${r.changed} 项价/税调整并留痕`); await onChanged() }
+      flash(`已采纳商品版 ${r.changed} 项材料价、税率或费用调整并留痕`); await onChanged() }
     catch (e) { flash('采纳失败：' + e.message) }
   }
   const updateBom = async (files) => {
@@ -1922,10 +1923,10 @@ function GoodsSection({ entry, isStd, canAudit, onApply }) {
       <div style={{ padding: '12px 14px' }}>
         {!gv.hasDiff
           ? <div className="banner" style={{ background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)' }}>
-            ✓ 商品版与商务版底稿的价/税<b>完全一致</b>，成本会计未调整——仅作留档，无需采纳。</div>
+            ✓ 商品版与商务版底稿的材料价、税率及费用<b>完全一致</b>——仅作留档，无需采纳。</div>
           : <>
             <div className="banner" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-line)', marginBottom: 10 }}>
-              ⚠ 成本会计商品版对 <b>{gv.diffCount}</b> 处价/税做了调整（相对采购商务版底稿）。核对下表，确认后采纳——覆盖到底稿、重算成本、逐项留痕。</div>
+              ⚠ 成本会计商品版对 <b>{gv.diffCount}</b> 处材料价、税率或费用做了调整（相对采购商务版底稿）。核对下表，确认后采纳——覆盖到底稿、重算成本、逐项留痕。</div>
             <div className="tbl-wrap" style={{ border: 'none' }}><table><thead><tr>
               <th className="th">物料</th><th className="th">字段</th>
               <th className="th" style={{ textAlign: 'right' }}>商务版（采购）</th>
@@ -1939,7 +1940,7 @@ function GoodsSection({ entry, isStd, canAudit, onApply }) {
             {gv.applied
               ? <div className="banner" style={{ background: 'var(--green-bg)', color: 'var(--green)', border: '1px solid var(--green-line)', marginTop: 10 }}>✓ 已采纳商品版调整（底稿已按上表覆盖，见右栏变更记录）。</div>
               : (!isStd && canAudit && <div style={{ marginTop: 10, textAlign: 'right' }}>
-                <button className="btn-pri" onClick={onApply}>采纳商品版 {gv.diffCount} 项价/税调整</button></div>)}
+                <button className="btn-pri" onClick={onApply}>采纳商品版 {gv.diffCount} 项材料价、税率或费用调整</button></div>)}
           </>}
       </div>
     </div>
