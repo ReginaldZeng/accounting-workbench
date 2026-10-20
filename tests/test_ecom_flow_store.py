@@ -25,15 +25,23 @@ names={'ec_flow_accounts','ec_flow_files','ec_flow_rows','ec_flow_origins','ec_f
 for node in tree.body:
     if isinstance(node,ast.Assign) and isinstance(node.targets[0],ast.Name) and node.targets[0].id in names:
         exec(compile(ast.Module(body=[node],type_ignores=[]),'actual-schema','exec'),namespace)
+# ec_flow_matches 在 db.py 里由 kernels.ec_documents 导入（非赋值节点，上面 AST 抓不到），直接同源取
+from kernels.ec_documents import ec_flow_matches as _ec_flow_matches
+namespace['ec_flow_matches']=_ec_flow_matches.to_metadata(namespace['_md']);names=names|{'ec_flow_matches'}
 settings={}
 fake=types.SimpleNamespace(**{name:namespace[name] for name in names},audit=lambda *a,**k:None,
     get_setting=lambda key,default=None:settings.get(key,default),
     set_setting=lambda key,value,operator='':settings.__setitem__(key,value))
 fake._engine=sa.create_engine('sqlite://')
 namespace['_md'].create_all(fake._engine)
+_core_prev=sys.modules.get('core')
 sys.modules['core']=types.SimpleNamespace(db=fake,_require_perm=lambda *a,**k:{'name':'test'})
 sys.modules['routers.ec_workbench']=types.SimpleNamespace(_lock=threading.RLock(),_cache={},require=lambda *a,**k:{'name':'test'},shops=lambda:[],check_shop=lambda x:{},check_period=lambda x:None,ec=types.SimpleNamespace(es=es,_now=lambda:'2026-09-11 00:00:00'))
 from routers import ec_flow_ledger as module
+# 桩只服务于上面的导入；留在 sys.modules 里会让后收集的测试 from core import 拿到这个 SimpleNamespace
+if _core_prev is None:sys.modules.pop('core',None)
+else:sys.modules['core']=_core_prev
+sys.modules.pop('routers.ec_workbench',None)
 
 
 def file(serial='s1',amount=1.81,extra='first'):
