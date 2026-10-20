@@ -1,3 +1,11 @@
+// [Change Log] Date:2026-10-20 Author:Claude / c Version:V2.996（上版 V2.329）
+// V2.996：门户首页加手机扫描入口灯（业务方 2026-10-20：手机端主要就是扫描，要放在首页顺手够到），两盏并排——
+//   ①「手机扫一扫」(紫)：有发票收票权限可见（口径同收票台「手机当相机」），整页跳 #/invpair 收票扫描页
+//     （拍发票上传 / 扫审批单看自动做账进度）；当天配对过的手机直接开扫，没配对/过期停在原提示页引导去电脑配对
+//     （配对码一次性的安全设计不变）。
+//   ②「扫单查凭证」(青)：凭证装订扫码口径（voucher_scan / enter:vbind / logistics_upload），整页跳 #/vscan 手机页
+//     （扫付款单/发票二维码出主体和凭证号；走工作台登录，钉钉里自动免登）。
+//   手机上（≤840px）入口灯排最前、整行宽。
 // [Change Log] Date:2026-08-20 Author:Claude/Reginald Zeng Version:V2.329（上版 V2.328）
 // V2.329：状态改四档并与工作台真实进度挂钩（业务方定）：已上线(ok·闪烁绿灯) / 人工并行(par·琥珀) /
 //   开发中(beta·蓝) / 敬请期待(soon·灰)。DB 键沿用 ok/beta/soon 不迁移，新增 par。
@@ -112,6 +120,21 @@ const CSS = `
 .pt-airdy.wait .t b{color:#FBE8B0}
 .pt-airdy.ro{cursor:default}
 .pt-airdy.ro:hover{filter:none}
+/* V2.996：手机扫一扫入口灯（紫系实色，区别于状态灯；手机上排最前、整行宽） */
+.pt-scan{display:flex;align-items:center;gap:12px;flex:none;padding:11px 16px;border-radius:13px;cursor:pointer;
+  background:linear-gradient(180deg,rgba(124,92,255,.18),rgba(124,92,255,.05));
+  border:1px solid rgba(124,92,255,.45);box-shadow:0 0 26px rgba(124,92,255,.16);transition:filter var(--tr)}
+.pt-scan:hover{filter:brightness(1.14)}
+.pt-scan .ic{width:30px;height:30px;flex:none;border-radius:9px;display:grid;place-items:center;color:#E4DDFF;
+  background:rgba(124,92,255,.24);border:1px solid rgba(124,92,255,.42)}
+.pt-scan .t b{font-size:13px;font-weight:800;display:block;color:#E9E2FF}
+.pt-scan .t span{font-size:10.5px;color:var(--ink3);letter-spacing:.5px}
+.pt-scan .v{margin-left:4px;padding-left:13px;border-left:1px solid rgba(255,255,255,.12);font-size:11px;color:var(--ink3)}
+/* 凭证装订·扫单查凭证（青色系，和收票扫描的紫色区分开） */
+.pt-scan.vb{background:linear-gradient(180deg,rgba(63,224,200,.14),rgba(63,224,200,.04));
+  border-color:rgba(63,224,200,.4);box-shadow:0 0 26px rgba(63,224,200,.12)}
+.pt-scan.vb .ic{color:#CFFDF6;background:rgba(63,224,200,.18);border-color:rgba(63,224,200,.38)}
+.pt-scan.vb .t b{color:#D8FBF3}
 .pt-mchip{display:flex;align-items:center;gap:12px;flex:none;padding:11px 16px;border-radius:13px;cursor:pointer;transition:filter var(--tr);
   background:linear-gradient(180deg,rgba(52,211,153,.10),rgba(52,211,153,.03));border:1px solid rgba(52,211,153,.32);box-shadow:0 0 26px rgba(52,211,153,.10)}
 .pt-mchip:hover{filter:brightness(1.12)}
@@ -213,7 +236,8 @@ const CSS = `
 .pt-empty{padding:44px 0;text-align:center;color:var(--ink3);font-size:12.5px;letter-spacing:.5px}
 .pt-more{margin-top:34px;text-align:center;color:var(--ink3);font-size:11.5px;letter-spacing:1.5px}
 @media(max-width:1180px){.pt-mine{grid-template-columns:1fr 1fr}.pt-mine .pt-mcard.blankcard{grid-column:1/-1}}
-@media(max-width:840px){.pt-mine{grid-template-columns:1fr}.pt-nav{display:none}.pt-search{width:170px}.pt-hero h1{font-size:20px}}
+@media(max-width:840px){.pt-mine{grid-template-columns:1fr}.pt-nav{display:none}.pt-search{width:170px}.pt-hero h1{font-size:20px}
+  .pt-scan{order:-1;flex:1 1 100%;padding:14px 16px}}
 /* 门户内占位页（使用指南） */
 .pt-ph{padding:60px 34px;text-align:center}
 .pt-ph .box{max-width:520px;margin:40px auto;padding:44px;border:1px dashed var(--line2);border-radius:18px;background:rgba(255,255,255,.02)}
@@ -233,6 +257,9 @@ const IcLock = () => (
 )
 const IcSearch = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.5" y2="16.5" /></svg>
+)
+const IcScan = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><line x1="4" y1="12" x2="20" y2="12" /></svg>
 )
 
 export default function Portal({ user, onEnter }) {
@@ -266,6 +293,15 @@ export default function Portal({ user, onEnter }) {
   // 数字员工办公室入口（V2.796）：门户首页一个状态灯，点了进办公室。只读件数和状态，取不到就不显示。
   const [officeStat, setOfficeStat] = useState(null)
   useEffect(() => { getOfficeRoster().then(r => setOfficeStat(r.kpi)).catch(() => {}) }, [])
+  // 手机扫一扫入口（V2.996）：有发票收票权限的账号可见（口径同收票台「手机当相机」）。
+  // 整页跳 #/invpair：main.jsx 按地址分流到手机扫描页，不走工作台登录——当天配对过的手机直接开扫；
+  // 没配对/会话过期的由扫描页提示去电脑收票台点「手机当相机」（配对码一次性的设计不变）。
+  const canScan = isAdmin || !!(user?.perms && (user.perms['enter:invdesk'] || user.perms.inv_intake || user.perms.inv_receive))
+  const goScan = () => { window.location.hash = '#/invpair'; window.location.reload() }
+  // 凭证装订·扫单查凭证入口（V2.996）：口径同装订页扫码接口（voucher_scan / enter:vbind / logistics_upload）。
+  // 整页跳 #/vscan 手机单页：钉钉里扫付款单或发票上的二维码 → 出主体和凭证号（走工作台登录，钉钉里自动免登）。
+  const canVScan = isAdmin || !!(user?.perms && (user.perms.voucher_scan || user.perms['enter:vbind'] || user.perms.logistics_upload))
+  const goVScan = () => { window.location.hash = '#/vscan'; window.location.reload() }
 
   // 工具目录：搜索（顶栏输入框，Ctrl+K 唤起）+ 组别/状态筛选（V2.325）
   const [q, setQ] = useState('')
@@ -351,6 +387,28 @@ export default function Portal({ user, onEnter }) {
               <p>有权限的工作台一键进入；下方工具目录可搜索、可筛选。其他组的工具可浏览，进入需相应权限。</p>
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+            {canScan && (
+              <div className="pt-scan" onClick={goScan}
+                title="手机扫描：拍发票上传、扫审批单看自动做账进度。当天配对过的手机直接开扫；没配对会引导在电脑收票台点一次「手机当相机」。">
+                <div className="ic"><IcScan /></div>
+                <div className="t">
+                  <b>手机扫一扫</b>
+                  <span>拍发票 · 扫审批单看进度</span>
+                </div>
+                <div className="v">扫描 ›</div>
+              </div>
+            )}
+            {canVScan && (
+              <div className="pt-scan vb" onClick={goVScan}
+                title="凭证装订：扫纸质付款单或发票上的二维码，出主体和凭证号（钉钉里可连续扫、念出凭证号）。">
+                <div className="ic"><IcScan /></div>
+                <div className="t">
+                  <b>扫单查凭证</b>
+                  <span>凭证装订 · 付款单/发票出凭证号</span>
+                </div>
+                <div className="v">扫描 ›</div>
+              </div>
+            )}
             <div className={'pt-airdy' + (aiReady ? '' : ' wait') + (canModel ? '' : ' ro')}
               onClick={canModel ? () => setTab('model') : undefined}
               title={canModel ? '前往模型配置' : undefined}>
