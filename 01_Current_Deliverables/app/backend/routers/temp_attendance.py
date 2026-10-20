@@ -2687,6 +2687,42 @@ async def tempatt_export(request: Request):
                     headers={"Content-Disposition": "attachment; filename=temp_attendance_review.xlsx"})
 
 
+@router.post('/api/tempatt/export-detail')
+async def tempatt_export_detail(request: Request):
+    """核实用明细（无需结算确认），沿用原接口权限、原表和认定口径。"""
+    user = _require_perm(request, CAP)
+    if not user:
+        return JSONResponse({'ok': False, 'msg': '无临时工考勤权限'}, status_code=403)
+    from kernels.temp_attendance_export import export_xlsx
+    try:
+        form = await request.form()
+        scope = json.loads(str(form.get('scope') or '{}'))
+        if not isinstance(scope, dict):
+            raise ValueError('导出范围格式错误')
+        for field in ('agencies', 'people'):
+            if not isinstance(scope.get(field, []), list) or not all(isinstance(x, str) for x in scope.get(field, [])):
+                raise ValueError('导出对象格式错误')
+        summary, punch, params, rates, month, _ = await _read_two(request)
+        if summary and punch:
+            res = _run(summary, punch, params, rates, month)
+        else:
+            res, _ = _load_period(month)
+            if not res:
+                raise ValueError('请接入数据或选择已核期次')
+            _, punch = _period_files(month)
+        month = res.get('month') or month
+        _apply_acks(res, month)
+        parsed = ta.parse_punch(punch) if punch else None
+        data = export_xlsx(res, month, scope.get('mode', 'all'), scope.get('agencies'), scope.get('people'), parsed)
+        db.audit(user['name'], '临时工考勤-核对表导出', month, scope.get('mode', 'all'))
+        return Response(content=data, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        headers={'Content-Disposition': 'attachment; filename=temp_attendance_detail.xlsx'})
+    except (ValueError, TypeError, KeyError) as e:
+        return JSONResponse({'ok': False, 'msg': f'导出失败：{e}'}, status_code=400)
+    except Exception:
+        return JSONResponse({'ok': False, 'msg': '核对表导出失败，请检查本期期次和原表是否完整'}, status_code=500)
+
+
 # ==================== 临工看板：全年工资结构 ====================
 @router.post("/api/tempatt/structure")
 async def tempatt_structure(request: Request):

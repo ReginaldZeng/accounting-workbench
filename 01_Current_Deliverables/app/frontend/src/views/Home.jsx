@@ -17,6 +17,7 @@
 // [Change Log] Date:2026-09-06 Author:Claude/Reginald Zeng Version:V2.500
 // V2.500（业务方：首页只留真的工具）：基础数据/基础资料/基础设置/系统设置这类维表·配置叶子不进首页（侧栏仍可达），计数同口径。
 import React, { useEffect, useState } from 'react'
+import { visibleAt } from '../navCatalog.js'
 import { navIcon, LOCK_ICON } from '../components/Sidebar.jsx'
 import { submitAccessRequest, getMyAccessRequests, checkTodo, closeTodo, voidTodo } from '../api.js'
 import '../home.css'
@@ -88,7 +89,7 @@ export default function Home({ user, navDef, mods, onNav, todos, onTodos }) {
   const isOn = m => !mods || mods[m.key]?.['可进入'] !== false
   const statusOf = k => mods?.[k]?.status || ''
   const leavesOf = secKey => modules
-    .filter(m => m.sec === secKey && !m.group_only && !isConfigLeaf(m) && statusOf(m.key) !== '隐藏' && m.key !== 'ecomsettle')
+    .filter(m => m.sec === secKey && !m.group_only && visibleAt(m, mods?.[m.key], 'home') && statusOf(m.key) !== '隐藏' && m.key !== 'ecomsettle')
     .sort((a, b) => (a.order || 0) - (b.order || 0))
   const groups = sections.map(s => ({ key: s.key, label: s.label, kids: leavesOf(s.key) })).filter(g => g.kids.length)
   const leaves = groups.flatMap(g => g.kids)

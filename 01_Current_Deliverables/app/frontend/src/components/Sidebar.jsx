@@ -13,6 +13,7 @@
 // 收起态＝76px 图标轨（状态圆点 + 悬停飞出子菜单）。数据仍由后端 navDef 驱动（单一真相源）。
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import '../sidebar.css'
+import { stageOf, visibleAt } from '../navCatalog.js'
 
 const S = (d, sw = 1.75) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">{d}</svg>
 const IC = {
@@ -73,7 +74,7 @@ const RED = 'var(--red)', RED_BG = 'var(--red-bg)'                 // 验收台�
 const pillC = bg => (bg.red ? RED : bg.teal ? TEAL : bg.violet ? VIOLET : AMBER)
 const pillBG = bg => (bg.red ? RED_BG : bg.teal ? TEAL_BG : bg.violet ? VIOLET_BG : AMBER_BG)
 // V2.175：4字状态在窄行会把模块名挤成省略号——侧栏行内用缩写（悬停见全名；飞出菜单/设置页仍全名）
-const PILL_SHORT = { '人工并行': '并行', '测试验证': '测试', '开发中·仅你可见': '在建' }
+const PILL_SHORT = { '开发中·仅你可见': '开发中' }
 
 // ── 双色调（V-draft）──────────────────────────────────────────
 // 三档：跟随系统(auto,默认) / 浅色 / 深色。存 localStorage fw_theme（按人按浏览器记）。
@@ -118,7 +119,7 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   const on = k => !mods || mods[k]?.['可进入'] !== false
   const stat = k => mods?.[k]?.status || ''
   // Legacy settlement deep links still resolve, but the duplicated menu is consolidated.
-  const allMods = (navDef?.modules || []).filter(m => m.key !== 'ecomsettle')
+  const allMods = (navDef?.modules || []).filter(m => visibleAt(m, mods?.[m.key], 'sidebar'))
   // 岗位标签：后端存的是 key（改名不丢绑定），显示要翻成中文名
   const postLabel = {}; (navDef?.posts || []).forEach(p => { postLabel[p.key] = p.label })
   const posts = k => (mods?.[k]?.posts || []).map(p => postLabel[p] || p)
@@ -140,14 +141,13 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
   const itemsOf = s => allMods.filter(m => m.sec === s.key && !subOf[m.key] && canSee(m) && shown(m))
   const badgeOf = it => {
     if (it.key === 'periodclose' && closed) return { t: '已封存', pill: true }
-    if (!on(it.key)) return { t: stat(it.key) || '未开放', pill: false }   // 未开放：灰字
+    if (!on(it.key)) return { t: stageOf(stat(it.key)).label, pill: false }   // 未开放：灰字
     const s = stat(it.key)
-    if (s === '待验收') return { t: '待验收', pill: true }
-    if (s === '人工并行') return { t: '人工并行', pill: true, teal: true }
-    if (s === '测试验证') return { t: '测试验证', pill: true, violet: true }
+    if (s === '待验收' || s === '人工并行') return { t: '并行试运行', pill: true }
+    if (s === '测试验证') return { t: '测试中', pill: true, violet: true }
     // 「开发中」只有 dev_users 名单里的人进得来——给显眼标记，免得拿它当已上线的东西讲（V2.242）
     if (s === '开发中') return { t: '开发中·仅你可见', pill: true }
-    if (s === '引擎正常') return { t: '引擎正常', live: true }
+    if (s === '引擎正常') return { t: '已验收', live: true }
     return null
   }
 
@@ -214,7 +214,7 @@ export default function Sidebar({ view, onSelect, source, user, onLogout, onHome
     if (!bg && !ps.length) return null
     return <span className="tail fx">
       {ps.map(p => <span key={p} className="pill" style={{ color: 'var(--accent)', background: 'var(--accent-soft)' }}>{p}</span>)}
-      {bg && (bg.live ? <span className="nav-live-dot" title="引擎正常" />
+      {bg && (bg.live ? <span className="nav-live-dot" title="已验收" style={{ animation: 'none' }} />
         : bg.pill ? <span className="pill" title={bg.t} style={{ color: pillC(bg), background: pillBG(bg) }}>{PILL_SHORT[bg.t] || bg.t}</span>
           : <span title={bg.t} style={{ fontSize: 10.5, color: 'var(--ink-3)' }}>{bg.t}</span>)}
     </span>

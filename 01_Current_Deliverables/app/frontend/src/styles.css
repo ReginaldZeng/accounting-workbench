@@ -414,6 +414,15 @@ html[data-theme=dark] .ta-board{
 .tempatt .ta-filter .tot{margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);
   font-size:12.5px; color:var(--ink-2);}
 .tempatt .ta-filter .tot b{color:var(--ink);}
+.tempatt .ta-filter.ta-filter-compact{background:var(--bg-sub);border:1px solid var(--line);padding:14px 16px;margin-bottom:12px;}
+.tempatt .ta-filter-compact .row{gap:12px;}
+.tempatt .ta-filter-compact input:not([type=checkbox]){min-width:240px;}
+.tempatt .ta-filter-compact .ta-filter-inline-status{border:0;padding:0;display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.tempatt .ta-filter-compact .cnt{padding-bottom:7px;white-space:nowrap;}
+.ta-export-dialog{box-sizing:border-box;width:min(860px,calc(100vw - 40px));max-height:85vh;overflow:auto;padding:24px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--ink);box-shadow:0 18px 70px #172d4933;}
+.ta-export-dialog::backdrop{background:rgba(15,23,42,.38);}
+.ta-export-heading,.ta-export-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.ta-export-actions{justify-content:flex-end;position:sticky;bottom:-24px;padding:14px 0;background:var(--bg);border-top:1px solid var(--line);}
 .tempatt .ta-filter .tot b.big{font-size:14px;}
 
 /* 两层表头：上层是分组带，下层才是字段名。分组之间用重线切开 */

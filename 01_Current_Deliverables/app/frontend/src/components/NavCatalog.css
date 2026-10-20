@@ -1,0 +1,13 @@
+/* [Change Log] Date: 2026-09-12 | Author: Codex | Version: V2.564 */
+.nc{min-width:0}.nc h2{font-size:16px;margin:0}.nc p{font-size:12px;color:var(--ink-2);line-height:1.7;margin:7px 0 12px}
+.nc-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}.nc-toolbar>div:first-child{margin-right:auto}
+.nc input:not([type=checkbox]),.nc select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line-strong);border-radius:6px;padding:6px 8px;min-width:0;max-width:100%;height:34px}
+.nc-toolbar>input{width:260px}.nc-form{padding:14px;background:var(--bg-sub);border:1px solid var(--line);border-radius:10px;margin-bottom:14px}.nc-form>strong{display:block;margin-bottom:12px}.nc-form>.btn{margin-right:8px}
+.nc-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px}.nc-table{table-layout:fixed;width:100%;min-width:1545px;border-collapse:collapse;font-size:12px}
+.nc-table th,.nc-table td{padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:middle;text-align:left;overflow-wrap:anywhere}
+.nc-table thead th{background:var(--bg-rail);color:var(--ink-2);font-weight:600;white-space:nowrap}.nc-group th{background:var(--bg-sub);font-size:13px}.nc-group span{margin-left:8px;font-weight:400;color:var(--ink-2)}
+.nc-code{display:block;width:200px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;background:none;border:0;color:var(--ink-2);font:12px ui-monospace,Consolas,monospace;padding:0;cursor:copy}
+.nc-table td>input,.nc-table td>select{width:100%}.nc-child{padding-left:10px}.nc-table small{color:var(--ink-2)}.nc-stage{display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap}
+.nc-editing{background:var(--accent-soft)}.nc-places{display:flex;flex-direction:column;gap:6px}.nc label{display:flex;align-items:center;gap:5px;white-space:nowrap}.nc input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;margin:0}
+.nc-actions{display:flex;gap:5px}.nc-actions .btn{font-size:12px;padding:0 9px;height:30px;white-space:nowrap}.nc-delete{color:var(--red)}.nc-error{padding:10px 12px;color:var(--red);background:var(--red-bg);margin-bottom:12px;border-radius:8px}
+.nc-posts summary{cursor:pointer}.nc-posts>div{display:flex;flex-direction:column;gap:8px;margin-top:10px;max-height:200px;overflow-y:auto}.nc :focus-visible{outline:2px solid var(--accent);outline-offset:2px}

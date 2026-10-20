@@ -13,24 +13,17 @@ import { tempattParams, tempattReview, tempattExportUrl,
   tempattAdjSign, tempattAdjSignSet, tempattAdjSignUndo } from '../api'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 
-// 九步（V2.388 起）：先看结果（②），再调口径/登记合同价（③），
-// **结算风险单独一页（④）**——它比工时偏离更要紧，6 月有 71 项，
-// 原来挂在「逐人核对」页顶会把那一页整个压住，往下翻半天见不到逐人表。
-// 认定台账不再单独占一步——「谁放过了什么」就在结算风险页里，长期认定也折在那儿展开。
+// 六步主导航；逐人/逐日/风险在第四步切换，成本汇总归第六步。
 const STEPS = [
-  { k: 'import', n: '数据接入', d: '上传人力上报汇总表 · 打卡时刻表' },
-  { k: 'overview', n: '核对总览', d: '工时对不对 · 钱对不对 · 总量与差额' },
-  { k: 'rule', n: '口径与单价', d: '取整/扣减/弹性 · 合同价 vs 人力实际' },
-  { k: 'risk', n: '结算风险', d: '同名重复计费 · 归属不符 · 在此认定' },
-  { k: 'people', n: '逐人核对', d: '一人一行 · 工时与应付' },
-  { k: 'daily', n: '逐日明细', d: '每个出勤日的打卡与重算' },
-  { k: 'adj', n: '合同外调整', d: '奖 / 罚 / 蒸练补贴 · 逐笔' },
-  { k: 'concl', n: '复核结论', d: '请款金额 vs 按合同价应付' },
-  { k: 'cost', n: '用工成本汇总', d: '按派遣方 × 车间 · 导出报告' },
+  { k: 'import', n: '数据接入', d: '上报表 · 钉钉打卡 · 历史期次' },
+  { k: 'rule', n: '口径与单价', d: '工时规则 · 服务方合同价' },
+  { k: 'overview', n: '核对总览', d: '工时 · 金额 · 风险汇总' },
+  { k: 'people', n: '明细核对', d: '归属 · 重名 · 逐人 · 逐日' },
+  { k: 'adj', n: '合同外调整', d: '奖罚 · 补贴 · 核对确认' },
+  { k: 'concl', n: '复核结论', d: '确认结论 · 成本汇总 · 正式报告' },
 ]
-// 步号从 STEPS 现算，别在文案里写死。原来「去第④步逐人核对」这句里的 ④ 是手敲的，
-// 中间插过一步之后逐人核对已经是第⑤步，那行字就一直指错地方。
-const stepNo = k => '①②③④⑤⑥⑦⑧⑨⑩'[STEPS.findIndex(x => x.k === k)] || ''
+const mainStep = k => ['people', 'daily', 'risk', 'names', 'export'].includes(k) ? 'people' : k === 'cost' ? 'concl' : k
+const stepNo = k => '①②③④⑤⑥'[STEPS.findIndex(x => x.k === mainStep(k))] || ''
 
 const BAND = {
   ok: { label: '✓ 与口径一致', color: '#6b7280', bg: 'transparent' },
@@ -59,15 +52,31 @@ const BAND = {
 //    弹层若只跟着卡片走，⑤步一点按钮就没地方填理由了。
 // 「本期结果」相关的条幅按用途分两套，别一刀切（2026-08-22 两轮修正）：
 //   · 读自留档条 ＝ 提示「你看的是留档、要改就点重跑」，③必须留：那颗按钮正是改完参数要点的。
-const ARCHIVE_STEPS = ['rule', 'overview', 'people', 'daily', 'adj', 'concl', 'cost']
-const RISK_CARD_STEPS = ['risk']                // 风险卡（含长期认定清单）挂在哪一步
-const ACK_STEPS = ['risk', 'daily']             // 认定弹窗可以从哪几步唤起
+const ARCHIVE_STEPS = ['rule', 'overview', 'people', 'daily', 'adj', 'concl', 'cost', 'export']
+const RISK_CARD_STEPS = ['risk', 'names']                // 风险卡（含长期认定清单）挂在哪一步
+const ACK_STEPS = ['risk', 'names', 'daily']             // 认定弹窗可以从哪几步唤起
 const h1 = n => Number(n || 0).toLocaleString('zh-CN', { maximumFractionDigits: 1 })
 const y0 = n => '¥' + Number(n || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
 const hm = m => `${String(Math.floor((m || 0) / 60)).padStart(2, '0')}:${String((m || 0) % 60).padStart(2, '0')}`
 
 export default function TempAttendance() {
   const [step, setStep] = useState('import')
+  const [exportOpen, setExportOpen] = useState(false)
+  const exportDialog = useRef(null)
+  const exportTrigger = useRef(null)
+  useEffect(() => {
+    const dialog = exportDialog.current
+    if (exportOpen && dialog && !dialog.open) dialog.showModal()
+    return () => {
+      if (dialog?.open) dialog.close()
+      if (exportOpen) exportTrigger.current?.focus()
+    }
+  }, [exportOpen])
+  const activeStep = mainStep(step)
+  const [exportMode, setExportMode] = useState('all')
+  const [exportAgencies, setExportAgencies] = useState([])
+  const [exportPeople, setExportPeople] = useState([])
+  const [exportSearch, setExportSearch] = useState('')
   const [meta, setMeta] = useState(null)
   const [params, setParams] = useState(null)
   const [summary, setSummary] = useState(null)
@@ -87,6 +96,7 @@ export default function TempAttendance() {
     const d = new Date()
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
   })
+  useEffect(() => { setExportAgencies([]); setExportPeople([]); setExportSearch(''); setExportOpen(false) }, [month])
   const [saveMsg, setSaveMsg] = useState('')
   const [pgRow, setPgRow] = useState({ page: 1, size: 100 })
   const [pgPpl, setPgPpl] = useState({ page: 1, size: 100 })
@@ -105,7 +115,7 @@ export default function TempAttendance() {
   const [delAsk, setDelAsk] = useState('')         // 正在二次确认删除的月份
   const [pgPer, setPgPer] = useState({ page: 1, size: 50 })   // 与 Pager 的每页选项对齐
   const [ledger, setLedger] = useState(null)   // 认定清单（长期认定折在结算风险卡里展开）
-  const [ruTab, setRuTab] = useState('check')  // 第③步页签：check=对比 / contract=合同价
+  const [ruTab, setRuTab] = useState('check')  // 第②步页签：check=对比 / contract=合同价
   const [contract, setContract] = useState(null)
   const [cForm, setCForm] = useState({ 派遣方: '', 岗位: '', 生效日: '', 失效日: '', 备注: '',
     dw: '', dm: '', nw: '', nm: '' })          // 合同价新增/编辑一行
@@ -203,7 +213,7 @@ export default function TempAttendance() {
       const r = await tempattSignoffSet({ month, 指纹: signFp,
         摘要: `请款合计 ${y0(se0.表上合计)}，结论 ${se0.结论 || '—'}` })
       if (!r.ok) return setErr(r.msg || '确认失败')
-      setSignoff(r.记录 || null); setErr(''); setStep('cost')
+      setSignoff(r.记录 || null); setErr(''); setStep('concl')
     } finally { setBusy(false) }
   }
   const undoSign = async () => {
@@ -308,7 +318,7 @@ export default function TempAttendance() {
       const wasPick = ackAsk.类型 === '同名指认'
       setAckAsk(null); setAckWhy(''); setAckLong(false)
       // 同名指认改的是「这个人是钉钉哪一个」→ 影响 compute 定人，必须重跑才生效（reloadCur 只重贴认定、不重算）
-      if (wasPick) { await rerun(); setStep('risk') } else { await reloadCur() }
+      if (wasPick) { await rerun(); setStep('names') } else { await reloadCur() }
       loadLedger()
     } catch (e) { setErr(String(e)) } finally { setBusy(false) }
   }
@@ -463,13 +473,30 @@ export default function TempAttendance() {
     } catch (e) { setErr(String(e)) } finally { setBusy(false) }
   }
 
+  const exportPersonKey = p => JSON.stringify(['姓名', '归属', '部门', '岗位'].map(k => String(p[k] || '')))
+  const exportSelected = (res?.people || []).filter(p => exportMode === 'all' ||
+    (exportMode === 'agency' ? exportAgencies.includes(p.归属) : exportPeople.includes(exportPersonKey(p))))
+  const doDetailExport = async () => {
+    setBusy(true); setErr('')
+    try {
+      const fd = exportForm()
+      fd.append('scope', JSON.stringify({ mode: exportMode, agencies: exportAgencies, people: exportPeople }))
+      const r = await fetch('/api/tempatt/export-detail', { method: 'POST', body: fd })
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.msg || '导出失败') }
+      const url = URL.createObjectURL(await r.blob())
+      const a = document.createElement('a'); a.href = url
+      a.download = `临时工逐日核对表_${month}_${{ all: '全量', agency: '按服务方', person: '按人员' }[exportMode]}.xlsx`
+      a.click(); setExportOpen(false); setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (e) { setErr(String(e.message || e)) } finally { setBusy(false) }
+  }
+
   const st = res?.stats
   const has = !!st
   // 「仅不一致」＝**真要查的那两档**：打卡撑不起上报、报了工时却没打卡。
   // ◇未计工时 / ◇白夜混合 是中性档，不该混进来（否则 6 月一点就是 1,271 行）
   // 先按「派遣方/部门/姓名」筛一遍（df）——KPI 卡片和表格都在这个子集上算，卡片跟着筛选联动
   const _dfMatch = r => (!df.dept || r.部门 === df.dept) && (!df.agency || r.归属 === df.agency)
-    && (!df.name || String(r.姓名 || '').includes(df.name.trim()))
+    && (!df.name || [r.姓名, r.手机号, r.手机尾号].some(v => String(v || '').includes(df.name.trim())))
   const dfRows = (res?.rows || []).filter(_dfMatch)
   // 「只看异常」＝撑不起上报 + 报了工时无打卡 + 同名待指认（都是要处理的），比原来的「仅不一致」多带待指认
   const _isBad = c => ['over_out', 'hard', 'ambig'].includes(c)
@@ -575,6 +602,12 @@ export default function TempAttendance() {
     .sort((a, b) => (b.要紧 ? 1 : 0) - (a.要紧 ? 1 : 0))   // 要紧的排前面
   const riskAcked = riskAll.filter(x => x.已认定)
   const standing = ledger?.长期 || []
+  const riskTitle = step === 'names' ? '重名确认' : '派遣归属不符'
+  const inRiskTab = x => step === 'names' ? ['同名', '打卡重名', '同名指认'].includes(x.类型) : x.类型 === '归属不符'
+  const tabRiskOpen = riskOpen.filter(inRiskTab)
+  const tabRiskAcked = riskAcked.filter(inRiskTab)
+  const tabStanding = standing.filter(inRiskTab)
+
   // 本期原表还在库里就能重跑——不依赖「读自留档」那张卡：现场刚跑完一次，想改合同价再看也得有入口
   const canRerun = !!month && periods.some(p => p.月份 === month && p.可重跑)
 
@@ -616,21 +649,19 @@ export default function TempAttendance() {
       {/* 步骤条兼作导航：没核对过之前只有第①步可点 */}
       <div className="steps">
         {STEPS.map((s, i) => {
-          const done = has && STEPS.findIndex(x => x.k === step) > i
-          const cur = step === s.k
+          const done = has && STEPS.findIndex(x => x.k === activeStep) > i
+          const cur = activeStep === s.k
           // ③口径与单价不依赖本期结果：成本会计登记合同价不需要先跑一期
           // 签字闸门链：⑦奖惩确认 → ⑧复核结论才开；⑧确认无误 → ⑨用工成本才开
           // ⑨用工成本要**两道都签**：撤销⑦会让⑧重新上锁，⑨也得跟着锁上，否则⑦撤了⑨还开着（复查揪出）
-          const lockMsg = (s.k === 'concl' && has && !adjSignOk) ? `需先在第${stepNo('adj')}步确认奖惩已核对`
-            : (s.k === 'cost' && has && !adjSignOk) ? `需先在第${stepNo('adj')}步确认奖惩已核对`
-            : (s.k === 'cost' && has && !signOk) ? `需先在第${stepNo('concl')}步确认无误` : ''
+          const lockMsg = s.k === 'concl' && has && !adjSignOk ? `需先在第${stepNo('adj')}步确认奖惩已核对` : ''
           const locked = !!lockMsg
           const clickable = (['import', 'rule'].includes(s.k) || has) && !locked
           return (
             <div key={s.k} className={'step' + (cur ? ' cur' : '') + (done ? ' done' : '') + (locked ? ' locked' : '')}
               style={{ cursor: clickable ? 'pointer' : 'default' }}
               title={lockMsg}
-              onClick={() => clickable && setStep(s.k)}>
+              onClick={() => clickable && setStep(s.k === 'people' ? 'risk' : s.k)}>
               <div className="num">{locked ? '🔒' : done ? '✓' : i + 1}</div>
               <div><div className="sn">{s.n}</div>
                 <div className="sd">{lockMsg || s.d}</div></div>
@@ -640,31 +671,82 @@ export default function TempAttendance() {
       </div>
 
       <div className="body">
+        {activeStep === 'people' && has && <div className="card" style={{ padding: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div role="tablist" aria-label="明细核对视图" style={{ display: 'flex', gap: 8 }}>
+            {[['risk', '派遣归属不符'], ['names', '重名确认'], ['people', '逐人核对'], ['daily', '逐日核对']].map(([k, name]) =>
+              <button key={k} role="tab" aria-selected={step === k} className={'btn' + (step === k ? ' primary' : '')} onClick={() => setStep(k)}>{name}</button>)}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginLeft: 'auto' }}>
+            <button className="btn" disabled={busy || !canRerun}
+              title={!canRerun ? '本期原表不可用，请到数据接入重新上传后核对'
+                : [archive ? `本期上次核对：${archive.跑批时间 || ''} · ${archive.跑批人 || ''}` : '',
+                  '使用本期留存的原表，按当前口径与合同价重新核对'].filter(Boolean).join('\n')}
+              onClick={rerun}>{busy ? '处理中…' : '按新参数重跑'}</button>
+            <button ref={exportTrigger} className="btn" aria-haspopup="dialog" onClick={() => setExportOpen(true)}>导出核对表 Excel</button>
+          </div>
+        </div>}
+        {activeStep === 'people' && exportOpen && <dialog ref={exportDialog} className="ta-export-dialog" aria-labelledby="ta-export-title"
+          onCancel={e => { e.preventDefault(); if (!busy) setExportOpen(false) }}>
+          <div className="ta-export-heading">
+            <h3 id="ta-export-title" style={{ margin: 0 }}>核对表导出 · {month}</h3>
+            <button className="btn" aria-label="关闭导出弹窗" disabled={busy} onClick={() => setExportOpen(false)}>×</button>
+          </div>
+          {err && <div role="alert" className="warn" style={{ marginTop: 12 }}>{err}</div>}
+          <p className="note">发给人力集中核实：服务方汇总 → 逐人汇总 → 全员逐日核对。问题日高亮，末列留「人力备注」供回填。</p>
+          {!has ? <button className="btn" onClick={() => setStep('import')}>先接入数据或选择已核期次</button> : <>
+            <div style={{ display: 'flex', gap: 16, margin: '20px 0' }}>
+              {[['all', '全量导出'], ['agency', '按服务方导出'], ['person', '按人员导出']].map(([v, label]) =>
+                <label key={v}><input type="radio" name="ta-export-mode" checked={exportMode === v} onChange={() => setExportMode(v)} /> {label}</label>)}
+            </div>
+            {exportMode !== 'all' && <input aria-label="搜索导出对象" placeholder="搜索服务方、姓名或部门" value={exportSearch} onChange={e => setExportSearch(e.target.value)} style={{ width: 320, marginBottom: 12 }} />}
+            {exportMode === 'agency' && <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 16 }}>
+              {[...new Set((res.people || []).map(p => p.归属))].sort().filter(a => String(a).includes(exportSearch)).map(a =>
+                <label key={a}><input type="checkbox" checked={exportAgencies.includes(a)} onChange={e => setExportAgencies(old => e.target.checked ? [...old, a] : old.filter(v => v !== a))} /> {a || '未填服务方'}</label>)}
+            </div>}
+            {exportMode === 'person' && <div style={{ maxHeight: 300, overflow: 'auto', border: '1px solid var(--line)', padding: 12, marginBottom: 16 }}>
+              {(res.people || []).filter(p => [p.姓名,p.归属,p.部门].join(' ').includes(exportSearch)).map((p,i) => {
+                const k = exportPersonKey(p)
+                return <label key={k+i} style={{ display: 'block', padding: 5 }}><input type="checkbox" checked={exportPeople.includes(k)} onChange={e => setExportPeople(old => e.target.checked ? [...old, k] : old.filter(v => v !== k))} /> {p.姓名} · {p.归属} · {p.部门} · {p.岗位} · {p.班型}</label>
+              })}
+            </div>}
+            <div style={{ background: '#f3f5fb', padding: 16, marginBottom: 16 }}>
+              已选 {exportSelected.length} 条人员结算记录，{new Set(exportSelected.map(p => p.归属)).size} 家服务方，预计至少 {exportSelected.length * (new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate() + 2)} 行逐日明细。每条记录列全本月及前后各1天。
+              <div className="note" style={{ marginTop: 8 }}>逐日列：姓名、手机号、归属方、日期、周、班次、上班卡、无效卡、下班卡、计算工时（未扣减）、扣减、重算计薪工时、上报工时、差异、计薪单价、管理费、应发薪资、应发管理费、合计、核对结果、人力备注。</div>
+            </div>
+            <p className="note">金额按上报工时 × 合同价，奖惩在汇总表单列；合同缺价留空。仅有手机尾号时明确标注，不补造完整号码。边界原始卡集中列在上班卡列作参考，不代表已切班、不重复计薪。未确认结果可用于核实，不能视作最终结算。</p>
+            <div className="ta-export-actions">
+              <button className="btn" disabled={busy} onClick={() => setExportOpen(false)}>取消</button>
+              <button className="btn primary" disabled={busy || !exportSelected.length} onClick={doDetailExport}>{busy ? '正在导出…' : '导出核对工作簿 Excel'}</button>
+            </div>
+          </>}
+        </dialog>}
+
+
         {/* 结算风险：同名跨派遣方 / 同名重复行 / 归属与打卡不符。
             这几条不是工时问题，是【钱被重复付】的问题，比少记严重得多，故置顶。 */}
         {/* 结算风险单独一页后，没有风险时也得给个明确交代——空白页看着像没加载出来 */}
         {has && RISK_CARD_STEPS.includes(step)
-          && !(riskOpen.length > 0 || riskAcked.length > 0 || standing.length > 0) &&
+          && !(tabRiskOpen.length > 0 || tabRiskAcked.length > 0 || tabStanding.length > 0 || (step === 'names' && st?.待指认人数 > 0) || (step === 'risk' && st?.归属无法核对人数 > 0)) &&
           <div className="card" style={{ padding: 22, lineHeight: 2 }}>
-            <b style={{ color: '#15803d' }}>✓ 本期没有结算风险</b>
+            <b style={{ color: '#15803d' }}>✓ {step === 'names' ? '本期没有需确认的重名' : '本期没有派遣归属不符发现'}</b>
             <div className="note">
-              这一页查两件事：<b>同名多行</b>（同一个人可能被重复计费）和<b>归属与打卡不符</b>
-              （结算挂在甲派遣方、打卡部门却写着乙）。两样都没查出来。
-              <br />它们比工时偏离更要紧——工时差一点是钱多付一点，这两样是<b>整个人的钱可能付错对象或付两遍</b>。
+              {step === 'names'
+                ? '核实同名是否为同一人、重复结算行是否合理。重名本身不代表重复计费。'
+                : '核对结算派遣方与钉钉归属；区分另一家派遣方和浮动组、外围等内部调配名目。'}
             </div>
           </div>}
-        {has && RISK_CARD_STEPS.includes(step) && (riskOpen.length > 0 || riskAcked.length > 0 || standing.length > 0) &&
-          <div className={'card ta-risk' + (riskOpen.length ? '' : ' clear')}>
+        {has && RISK_CARD_STEPS.includes(step) && (tabRiskOpen.length > 0 || tabRiskAcked.length > 0 || tabStanding.length > 0 || (step === 'risk' && st?.归属无法核对人数 > 0)) &&
+          <div className={'card ta-risk' + (tabRiskOpen.length ? '' : ' clear')}>
             <b className="hd">
-              {riskOpen.length
-                ? `结算风险（比工时偏离更要紧，先看这里）· ${riskOpen.length} 项待认`
-                : riskAcked.length ? '结算风险：本期全部已认定无误' : '结算风险：本期没有新发现'}
+              {tabRiskOpen.length
+                ? `${riskTitle} · ${tabRiskOpen.length} 项待认`
+                : tabRiskAcked.length ? `${riskTitle}：本期全部已认定无误` : `${riskTitle}：本期没有新发现`}
             </b>
             {/* 没查成的人必须报出来，不写这一句，条数变少会被当成情况变好了。
                 ⚠ 只说事实（打卡表这几行没写部门），**别替它编原因**——
                 原来这里断言「用钉钉取数时离职的人查不到部门」，后来证明钉钉侧查得到，
                 而没部门的恰恰是人力导出那张表，等于把因果说反了（V2.378 修）。 */}
-            {st?.归属无法核对人数 > 0 && (() => {
+            {step === 'risk' && st?.归属无法核对人数 > 0 && (() => {
               const 名单 = [...new Set(st.归属无法核对名单 || [])]
               return <div className="warn" style={{ fontSize: 12, lineHeight: 1.9, margin: '2px 0 8px' }}>
                 ⚠ 另有 <b>{名单.length}</b> 人（{st.归属无法核对人数} 行）的「归属与打卡不符」<b>这一项没查</b>
@@ -675,27 +757,27 @@ export default function TempAttendance() {
               </div>
             })()}
 
-            {riskOpen.map((x, i) => <RiskRow key={'o' + i} x={x} onAck={askAck} busy={busy} />)}
+            {tabRiskOpen.map((x, i) => <RiskRow key={'o' + i} x={x} onAck={askAck} busy={busy} />)}
 
-            {riskAcked.length > 0 && <div className="acked">
+            {tabRiskAcked.length > 0 && <div className="acked">
               <button className="btn link" onClick={() => setAckOpen(v => !v)}>
-                {ackOpen ? '收起' : '展开'}已认定无误 {riskAcked.length} 项
+                {ackOpen ? '收起' : '展开'}已认定无误 {tabRiskAcked.length} 项
               </button>
               <span className="note">　认定不是删除——这些条目仍在，记着谁、什么时候、因为什么认的。</span>
-              {ackOpen && riskAcked.map((x, i) => <RiskRow key={'a' + i} x={x} acked onUndo={doUndo} busy={busy} />)}
+              {ackOpen && tabRiskAcked.map((x, i) => <RiskRow key={'a' + i} x={x} acked onUndo={doUndo} busy={busy} />)}
             </div>}
 
             {/* 长期认定：每期都压住提示，却只在那期恰好又冒出同一条时才露面。
                 万一那个人离职、那条风险不再出现，它就永远躺在库里一直生效——必须有个地方能看全。
                 早先单独做成一步「认定台账」，2026-08-22 需求方拍板删掉那一步，清单折到这里。 */}
-            {standing.length > 0 && <div className="acked">
+            {tabStanding.length > 0 && <div className="acked">
               <button className="btn link" onClick={() => setStandOpen(v => !v)}>
-                {standOpen ? '收起' : '展开'}长期认定 {standing.length} 条（跨期一直生效）
+                {standOpen ? '收起' : '展开'}长期认定 {tabStanding.length} 条（跨期一直生效）
               </button>
               <span className="note">　它们每一期都会压住对应提示；情况变了记得回来撤销。</span>
               {standOpen && <div className="wrap" style={{ marginTop: 8 }}><table className="tbl">
                 <thead><tr><th>类型</th><th>对象</th><th>理由</th><th>认定人</th><th>认定时间</th><th>已生效</th><th></th></tr></thead>
-                <tbody>{standing.map((x, i) => {
+                <tbody>{tabStanding.map((x, i) => {
                   const stale = x.距今天数 != null && x.距今天数 > (ledger?.复核提示天数 || 180)
                   return <tr key={i} style={{ background: stale ? '#fffbe6' : '' }}>
                     <td>{x.类型}</td><td><b>{x.键}</b></td>
@@ -710,14 +792,14 @@ export default function TempAttendance() {
               </table></div>}
             </div>}
 
-            <div className="foot">
+            {step === 'names' && <div className="foot">
               同名是<b>姓名归一之后</b>的同名：公司本来就用后缀区分同名者（张博G / 张博J），是归一把后缀抹掉才撞到一起的。
               工具只指认并给判据，是不是同一个人由人来认。认定不是删除——条目仍在，记着谁、什么时候、因为什么认的。
-            </div>
+            </div>}
           </div>}
 
         {/* 同名待指认在这一页（④结算风险）处理：所有「定人」都在结算风险页，不在取数/总览页。 */}
-        {has && RISK_CARD_STEPS.includes(step) && st?.待指认人数 > 0 &&
+        {has && step === 'names' && st?.待指认人数 > 0 &&
           <AmbigTable rows={st.待人工指认 || []} n={st.待指认人数} busy={busy} onPick={(nm, c) => askAck({
             类型: '同名指认', 键: nm, 尾号: c.手机尾号, 部门: c.部门, 可长期: true,
             标题: `认定 ${nm} = 尾号 ${c.手机尾号}`,
@@ -772,12 +854,12 @@ export default function TempAttendance() {
           <b>⚠ 这一期留档是旧版规则算的（没有合同价核对）</b>，结论一律按「待核」显示，不能当真。
           {archive?.可重跑 ? '点下方「按当前参数重跑」就会按现行规则重算。' : '原表已过留存期，请回第①步重新上传。'}
         </div>}
-        {!archive && has && canRerun && ARCHIVE_STEPS.includes(step) && <div className="card ta-archive">
+        {activeStep !== 'people' && !archive && has && canRerun && ARCHIVE_STEPS.includes(step) && <div className="card ta-archive">
           改了口径或合同价要看新结果，点
           <button className="btn" style={{ margin: '0 6px' }} onClick={rerun} disabled={busy}>
             {busy ? '重跑中…' : '按当前参数重跑'}</button>（用的是本期留档的原表，不必重新上传）。
         </div>}
-        {archive && ARCHIVE_STEPS.includes(step) && <div className="card ta-archive">
+        {activeStep !== 'people' && archive && ARCHIVE_STEPS.includes(step) && <div className="card ta-archive">
           <b>本期结果读自留档</b>　{archive.月份}　·　{archive.跑批时间} 由 {archive.跑批人} 跑批
           {(archive.跑批次数 || 1) > 1 && <>（第 {archive.跑批次数} 次）</>}　·　没有重新上传。
           {archive.可重跑
@@ -797,8 +879,8 @@ export default function TempAttendance() {
               量上报工时与打卡口径的偏离、复核各家派遣方的请款金额、扫结算风险。
               <b>全程只读，不往金蝶写任何东西，也不产生凭证。</b></p>
             <p><b>怎么走</b>：本页上传两张表（打卡表也可点下方「⇩ 从钉钉取打卡」直接取）→ 点「开始核对」→
-              顺着上方<b>九步</b>看过去，<b>报告在第⑨步导出</b>。其中⑦合同外调整、⑧复核结论各要点一下「确认」，
-              下一步才打开。以前核过的月份，直接切到右边「历史复核结果」点开，<b>不用重新上传</b>。</p>
+              顺着上方<b>六步</b>核对：先在②设口径与单价，再看③总览、④明细。<b>核实用表在④导出，正式报告在⑥导出</b>。其中⑤合同外调整、⑥复核结论各要点一下「确认」，
+              确认后开放相应结论和正式报告。以前核过的月份，直接切到右边「历史复核结果」点开，<b>不用重新上传</b>。</p>
             <div className="hd2">五件要先知道的</div>
             <ul>
               <li><b>这不是重算工资。</b> 上报工时并不是按打卡算出来的——同一打卡跨度档内上报值能出现
@@ -810,7 +892,7 @@ export default function TempAttendance() {
                 <b className="warn">只有整期净多记超弹性＝公司整期多付钱，才是必查的一档。</b></li>
               <li><b>结算风险比工时偏离要紧。</b> 同名挂在两家派遣方、同名重复行、结算归属与打卡部门不符——
                 这三项排在工时偏离<b>前面</b>看。工具只指认并给判据，<b>是不是同一个人由人来认</b>。</li>
-              <li><b>合同价由成本会计登记，工具不猜。</b> 第③步「合同价（成本会计维护）」是单价的唯一来源，
+              <li><b>合同价由成本会计登记，工具不猜。</b> 第②步「合同价（成本会计维护）」是单价的唯一来源，
                 按行带生效期。<b className="warn">没登记的派遣方／岗位，应付算不出来，结论是「待核」——不是正常。</b>
                 汇总表表头写的计价规则是人力自己写的，只作参考，不当基准。</li>
               <li><b>结果按期留档。</b> 复核结论长期保存，选月份就能回看；
@@ -986,7 +1068,7 @@ export default function TempAttendance() {
           </div>
 
           {/* 总览分两块：上面「工时对不对」（四档判定），下面「钱对不对」（单价/自查/奖罚）。
-              早先这一页只有四档，单价不符只在状态条露一枚胶囊、要点进第③步才看得到——
+              早先这一页只有四档，单价不符只在状态条露一枚胶囊、要点进第②步才看得到——
               使用者 2026-08-22：「这一块是不是要把单价不符的也放进来」。是。总览不总览钱，就不叫总览。 */}
           <div className="ov-hd">一、工时对不对　<span className="note">人力上报 vs 打卡逐日重算　·　{st.人数} 人 / {st.比对人日} 人日</span></div>
           <div className="card" style={{ padding: 0, marginBottom: 14 }}>
@@ -1033,7 +1115,7 @@ export default function TempAttendance() {
 
           {/* 同名待指认的「定人」挪到第④步结算风险页处理（所有认定都在那儿）；总览只留一句指路，不在这处理。 */}
           {st.待指认人数 > 0 && <div className="warn" style={{ marginTop: 8, fontSize: 12.5, lineHeight: 1.9 }}>
-            ◇ <b>{st.待指认人数} 人</b>同名待指认（都在打卡、部门也分不清的真两可）——到<b>第④步「结算风险」</b>页按钉钉部门定人。
+            ◇ <b>{st.待指认人数} 人</b>同名待指认（都在打卡、部门也分不清的真两可）——到<b>第④步「明细核对 → 重名确认」</b>按钉钉部门定人。
           </div>}
 
           {(st.白夜混合人数 > 0 || st.未匹配人数 > 0 || (st.打卡表重名 || []).length > 0) &&
@@ -1123,25 +1205,26 @@ export default function TempAttendance() {
 
         {/* ⑤ 逐日明细 */}
         {step === 'daily' && has && <>
-          <PeopleFilter people={res.rows || []} pf={df}
+          <PeopleFilter people={res.rows || []} pf={df} compact
+                        shownPeople={new Set(rows.map(r => `${r.姓名}|${r.手机号 || r.手机尾号 || ''}`)).size}
                         on={v => { setDf(v); setPgRow(x => ({ ...x, page: 1 })) }}
+                        extraActive={filter !== 'all'}
+                        onClear={() => { setDf({ dept: '', agency: '', name: '' }); pickFilter('all') }}
                         shown={rows.length} total={(res.rows || []).length} unit="人日"
-                        extra={[['all', '全部'], ['issue', '⚠只看异常'], ['over_out', '⚠撑不起上报'],
+                        extra={[['all', '全部'], ['issue', '需核实'], ['over_out', '撑不起上报'],
                                 ['hard', '⚠报了工时无打卡'], ['ambig', '◇同名待指认'], ['unbilled', '◇未计工时'],
-                                ['thin', '△仅1次卡'], ['mixed', '◇白夜混合'], ['ok', '✓撑得住']]
+                                ['thin', '仅一次卡'], ['mixed', '◇白夜混合'], ['ok', '正常']]
                           .filter(([k]) => k === 'all' || k === 'issue' || (bandCount[k] || 0) > 0)
                           .map(([k, l]) =>
                             <button key={k} className={'btn' + (filter === k ? ' primary' : '')}
+                              aria-pressed={filter === k} title={k === 'ok' ? '打卡工时撑得住上报；不代表单价、归属等全部核实通过' : undefined}
                               onClick={() => pickFilter(k)}>
                               {l} <b style={{ opacity: .75 }}>{bandCount[k] || 0}</b>
                             </button>)} />
-          <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.9, marginBottom: 10 }}>
-            「金额」＝ <b>差异 × 单价</b>。这里的单价是<b>该人结算表上实际套用的含管理费单价</b>（公司就是按它付的，
-            所以多记 1 小时就多付这么多）；结算表没有单价列时才退到合同价，来源悬停可见。
-            {单价不符者.size > 0 && <span style={{ color: '#b91c1c', fontWeight: 600 }}>
+          {单价不符者.size > 0 && <div className="warn" style={{ fontSize: 12, marginBottom: 10 }}>
               　⚠ 其中 {单价不符者.size} 人的单价与合同价对不上（单价列标红）——他们这些天的金额是<b>按错的价</b>算出来的，
-              先到<b>第③步</b>把单价定了再看这一列。</span>}
-          </div>
+              先到<b>第②步</b>把单价定了再看这一列。
+          </div>}
           {/* 批量确认：撑不起上报/待查这些异常常常同一个原因（例：一批夜班跨零点、打卡属实），
               逐行点、逐行抄同一句理由没意义。勾一批、一句理由，跟⑦合同外调整一个做法。 */}
           {dailySel.length > 0 && <div className="ta-batch">
@@ -1180,7 +1263,7 @@ export default function TempAttendance() {
                 <th title="重算 ＝ 跨度（下班−上班）按 0.5 小时【向下取整】，再扣规则扣减（白班1h / 夜班0.5h）。这是量偏离的尺子，不是重发工资——付款仍以人力上报为准。">
                   重算 <span style={{ color: '#b45309', fontWeight: 800 }}>!</span></th>
                 <th>差异</th>
-                <th>单价</th><th>金额</th><th>判定</th><th></th>
+                <th>单价</th><th title="偏离金额＝差异×含管理费单价，仅供核对，不是应发薪资。优先取结算表实际单价，没有时取合同价；上报为0的中性日金额影响记0。单价来源可在单价列悬停查看。">偏离金额 ⓘ</th><th>判定</th><th></th>
               </tr></thead>
               <tbody>{page(rows, pgRow).map((r, i) => (
                 <tr key={i} style={{ background: BAND[r.档]?.bg }}>
@@ -1237,7 +1320,7 @@ export default function TempAttendance() {
           nextName={`第${stepNo('concl')}步 复核结论`} />}
 
         {/* ⑧ 复核结论：要等⑦合同外调整确认后才开 */}
-        {step === 'concl' && has && !adjSignOk && <div className="card" style={{ padding: 24, lineHeight: 2 }}>
+        {activeStep === 'concl' && has && !adjSignOk && <div className="card" style={{ padding: 24, lineHeight: 2 }}>
           <b>🔒 复核结论要等第{stepNo('adj')}步「合同外调整」确认后才开</b>
           <div className="note" style={{ marginTop: 6 }}>
             {adjSign
@@ -1249,11 +1332,11 @@ export default function TempAttendance() {
             去第{stepNo('adj')}步合同外调整 →
           </button>
         </div>}
-        {step === 'concl' && has && adjSignOk && <>
+        {activeStep === 'concl' && has && adjSignOk && <>
           <Conclusion res={res} st={st} month={month} />
           <SignOff rec={signoff} ok={signOk} month={month} busy={busy}
             总={res?.settle?.合计 || {}} onSign={doSign} onUndo={undoSign}
-            stepName={`第${stepNo('cost')}步 用工成本汇总`} />
+            stepName="本页下方的用工成本汇总与正式报告" />
         </>}
 
         {/* ⑨ 用工成本汇总：没确认之前不给看。
@@ -1261,31 +1344,18 @@ export default function TempAttendance() {
             这一页的数是要往上报的，签了字再出来。 */}
         {/* ⑨ 要⑦⑧两道都签。撤销⑦会让⑧失效但 signoff 仍在库里(signOk 可能仍 true)，
             所以这里显式再判 adjSignOk——上游任一未签都锁，先把用户送回缺的那一步。 */}
-        {step === 'cost' && has && !adjSignOk && <div className="card" style={{ padding: 24, lineHeight: 2 }}>
-          <b>🔒 用工成本汇总要先在第{stepNo('adj')}步确认奖惩</b>
-          <div className="note" style={{ marginTop: 6 }}>
-            上游的第{stepNo('adj')}步「合同外调整」还没确认（或撤销后奖惩数据变了）。
-            这一页的数是要往上报的，得先把奖惩认过、再把复核结论确认，才出。
-          </div>
-          <button className="btn primary" style={{ marginTop: 12 }} onClick={() => setStep('adj')}>
-            去第{stepNo('adj')}步合同外调整 →
-          </button>
-        </div>}
-        {step === 'cost' && has && adjSignOk && !signOk && <div className="card" style={{ padding: 24, lineHeight: 2 }}>
+        {activeStep === 'concl' && has && adjSignOk && !signOk && <div className="card" style={{ padding: 24, lineHeight: 2 }}>
           <b>🔒 用工成本汇总要等复核结论确认后才出</b>
           <div className="note" style={{ marginTop: 6 }}>
             {signoff
               ? <>本期确认过一次（{signoff.确认人}　{signoff.时间}），<b>但之后结果变了</b>
                   ——重跑过或改了口径/合同价，那枚确认已经作废。请回第{stepNo('concl')}步重新看过再确认。</>
               : <>这一页的数（各家用工成本、平均元/h）是要发群里、往上报的。
-                  请先回第{stepNo('concl')}步把复核结论看完，点「确认无误」。</>}
+                  请在本页上方把复核结论看完，点「确认无误」。</>}
           </div>
-          <button className="btn primary" style={{ marginTop: 12 }} onClick={() => setStep('concl')}>
-            去第{stepNo('concl')}步复核结论 →
-          </button>
         </div>}
 
-        {step === 'cost' && has && signOk && adjSignOk && <>
+        {activeStep === 'concl' && has && signOk && adjSignOk && <>
           <CostNote c={res?.用工成本} month={month} />
           <div className="card" style={{ padding: 20 }}>
             <div style={{ fontWeight: 600, marginBottom: 10 }}>导出《临时工考勤核对报告》</div>
@@ -1403,7 +1473,7 @@ function Conclusion({ res, st, month }) {
         每家派遣方、每条业务线本期该付多少。<b>主列是结算表的金额，也就是各家请款单上的数</b>；
         右侧「按合同价应付」是把尺子——上报工时 × 成本会计登记的合同价——用来量人力有没有按合同的价算，
         <b>本身不是要付的钱</b>。（2026-08-19 实测：五家的请款金额与本表结算列逐家分毫不差。）
-        工资与管理费分开列，合同里本就是两条。工时偏离另在第④⑤步看，两者不混在一起。
+        工资与管理费分开列，合同里本就是两条。工时偏离另在第④步「明细核对」看，两者不混在一起。
         结论三态：<b>正常</b>＝各项都对得上；<b className="warn">异常</b>＝有任何一项对不上；
         <b style={{ color: '#92400e' }}>待核</b>＝没发现问题，但合同价没登记、应付没法核。
       </div>
@@ -1426,7 +1496,7 @@ function Conclusion({ res, st, month }) {
                   （工资 {y0(t.表上工资)} ＋ 管理费 {y0(t.表上管理费)}），按派遣方分 {(se.派遣方小计 || []).length} 笔。
                   结算表内部自洽（金额＝工时×表上单价、勾稽平），
                   <b>但 {(t.待核派遣方 || []).join('、') || '部分派遣方'} 的合同价没登记，应付无法按合同价核对</b>——
-                  这部分是「待核」，不是「正常」。请成本会计到第③步「合同价（成本会计维护）」登记后点「按当前参数重跑」。
+                  这部分是「待核」，不是「正常」。请成本会计到第②步「合同价（成本会计维护）」登记后点「按当前参数重跑」。
                   {(t.异常派遣方 || []).length > 0 &&
                     <b className="warn">　⚠ {t.异常派遣方.join('、')} 另有需要说明的事项，见下表「结论」列。</b>}</span>
               : <span className="ok">✓ 本期应付合计 <b className="big">{y0(t.表上合计)}</b>
@@ -1517,7 +1587,7 @@ function Conclusion({ res, st, month }) {
       <div className="foot">
         「结算表应付」＝ 人力汇总表右侧金额列原样带出，一个字没改，就是各家请款单的金额。<br />
         「按合同价应付」＝ 上报白班工时 × 白班合同价 ＋ 上报夜班工时 × 夜班合同价，工资与管理费分开算；
-        合同价取「派遣方 × 岗位 × 班次」，来自第③步成本会计登记的合同价登记表，<b>没登记的格子留空、结论「待核」</b>。
+        合同价取「派遣方 × 岗位 × 班次」，来自第②步成本会计登记的合同价登记表，<b>没登记的格子留空、结论「待核」</b>。
         它只用来验人力有没有按合同的价算，<b>不含补贴/奖/罚</b>，所以两列有这类调整时本就该差一截，
         差额在「补贴/奖/罚」列里看得见，逐笔明细在第{stepNo('adj')}步。<br />
         <b>本工具只读不写账，不产生凭证</b>，实际付款以人力上报的汇总表与合同为准。
@@ -1547,7 +1617,7 @@ function SignOff({ rec, ok, month, busy, 总, onSign, onUndo, stepName }) {
     <div className="note">
       {摘要}。<br />
       确认的是<b>上面这张复核结论表</b>：各家请款金额、按合同价应付、偏差与结论都看过了。
-      确认之后才出{stepName}——那一页的数是要发群里、往上报的。
+      确认之后才出{stepName}——这部分的数是要发群里、往上报的。
       {rec && <><br /><span className="warn">本期在 {rec.时间} 由 {rec.确认人} 确认过一次，
         但之后结果变了（重跑或改了口径/合同价），那枚确认已作废，需要重新确认。</span></>}
     </div>
@@ -1787,7 +1857,7 @@ function RiskRow({ x, acked, onAck, onUndo, busy }) {
   )
 }
 
-/* 合同价 vs 人力实际计价。第③步最该回答的问题：**人力到底有没有按合同的价算。**
+/* 合同价 vs 人力实际计价。第②步最该回答的问题：**人力到底有没有按合同的价算。**
    ⚠ 合同价取的是**本工具里成本会计维护的那张表**，不是汇总表表头解析出来的——
       表头那段是人力自己写的，拿它当基准就成了人力跟自己比，永远一致，核对白做。 */
 function RateCheck({ c, has, rates }) {
@@ -2084,16 +2154,16 @@ function ContractRows({ c, month, busy, form, setForm, onSave, onDel, delRow, se
    逐人多一个「只看异常」；逐日不显示应付合计（那是逐人才有的口径），改显示条数。
    unit 是计数单位：逐人是「人」，逐日是「人日」。 */
 function PeopleFilter({ people, pf, on, shown, total, sum, showBad, unit = '人', extra,
-                        extraActive, onClear }) {
+                        extraActive, onClear, compact = false, shownPeople }) {
   const uniq = k => [...new Set(people.map(p => p[k]).filter(Boolean))].sort()
   const on1 = (k, v) => on({ ...pf, [k]: v })
   // extraActive/onClear 给「本组件之外还有筛选」的页面用（第⑦步的级别/项目/只看未确认）——
   // 不接进来的话，那几个筛选一开，计数行还写「共 14 笔」，清空筛选也清不掉它们
   const active = pf.dept || pf.agency || pf.name || pf.bad || extraActive
   return (
-    <div className="card ta-filter">
+    <div className={'card ta-filter' + (compact ? ' ta-filter-compact' : '')}>
       <div className="row">
-        <label>归属（派遣方）
+        <label>{compact ? '归属方' : '归属（派遣方）'}
           <select value={pf.agency} onChange={e => on1('agency', e.target.value)}>
             <option value="">全部</option>
             {uniq('归属').map(v => <option key={v} value={v}>{v}</option>)}
@@ -2105,8 +2175,8 @@ function PeopleFilter({ people, pf, on, shown, total, sum, showBad, unit = '人'
             {uniq('部门').map(v => <option key={v} value={v}>{v}</option>)}
           </select>
         </label>
-        <label>姓名
-          <input value={pf.name} placeholder="输入即筛，支持部分匹配"
+        <label>{compact ? '姓名 / 手机号' : '姓名'}
+          <input value={pf.name} placeholder={compact ? '搜索姓名、手机号或尾号' : '输入即筛，支持部分匹配'}
                  onChange={e => on1('name', e.target.value)} />
         </label>
         {showBad && <label className={'scope' + (pf.bad ? ' on' : '')}
@@ -2114,11 +2184,15 @@ function PeopleFilter({ people, pf, on, shown, total, sum, showBad, unit = '人'
           <input type="checkbox" checked={!!pf.bad} onChange={e => on1('bad', e.target.checked)} />
           <span>只看异常</span>
         </label>}
-        {active && <button className="btn"
+        {(active || compact) && <button className="btn" disabled={!active}
           onClick={() => onClear ? onClear()
             : on({ dept: '', agency: '', name: '', ...(showBad ? { bad: false } : {}) })}>清空筛选</button>}
-        {extra && <span className="bands">{extra}</span>}
-        <span className="cnt">{active ? `筛出 ${shown} / ${total} ${unit}` : `共 ${total} ${unit}`}</span>
+        {!compact && extra && <span className="bands">{extra}</span>}
+        {!compact && <span className="cnt">{active ? `筛出 ${shown} / ${total} ${unit}` : `共 ${total} ${unit}`}</span>}
+        {compact && <>
+          <div className="bands ta-filter-inline-status" role="group" aria-label="工时核对状态">{extra}</div>
+          <span className="cnt">共 {shownPeople || 0} 人 · {shown} 人日{active ? ` / 全部 ${total} 人日` : ''}</span>
+        </>}
       </div>
       {/* 分隔符要写在同一行的末尾——写在下一行开头会被 JSX 的行首空白裁掉，实测少了一个「　」 */}
       {sum && <div className="tot">
@@ -2333,7 +2407,7 @@ function DupReview({ rec, merged }) {
     </div>
     <div style={{ marginTop: 4 }}>
       {待定.length
-        ? <span className="warn">⚠ {待定.length} 组是不同的人撞名、且都在打卡，工具不猜——<b>到第④步「结算风险」页按钉钉部门定人</b>，不在这页处理。
+        ? <span className="warn">⚠ {待定.length} 组是不同的人撞名、且都在打卡，工具不猜——<b>到第④步「明细核对 → 重名确认」按钉钉部门定人</b>，不在这页处理。
           这里只是取数底稿，展开可先核一眼。</span>
         : <span>其余都一眼能定（同一人多账号／对方当月 0 打卡），已自动定人，无需人工。</span>}
       <span style={{ color: 'var(--ink-3)' }}>　同一份底稿也在打卡表的第二页里，可打印存档。</span>
@@ -2520,8 +2594,8 @@ function Kpi({ title, v, sub, tone }) {
 
 /* 「钱对不对」——总览里与四档判定并列的另一半。
    四项各自回答一句话，点进去能到能处理它的那一步：
-     单价与合同价不符  → 人力用的价和合同不一样，是真要查的（第③步逐格看）
-     合同价缺档        → 没登记就没法核，是「待核」不是「正常」（第③步去登记）
+     单价与合同价不符  → 人力用的价和合同不一样，是真要查的（第②步逐格看）
+     合同价缺档        → 没登记就没法核，是「待核」不是「正常」（第②步去登记）
      结算表自查        → 表自己内部对不对得上：金额＝工时×表上单价、勾稽平（第⑦步看明细）
      奖罚/补贴异常     → 全表唯一没有对照源的钱，只验符号和占比（第⑦步看明细）
    ⚠ 这四项的数取自后端 stats，与第③⑦步、导出报告同源，不在页面上另算一套。 */
@@ -2552,7 +2626,7 @@ function MoneyOverview({ st, res, go, riskOpen, riskAcked }) {
         : '本期没有同名重复、也没有结算归属与打卡部门不符。',
       // ⚠ 认定这些风险的按钮/弹层只在④结算风险页（RISK_CARD_STEPS=['risk']），不在⑤逐人核对。
       //   早先写成 'people' 会把点「N 项待认」的人送到⑤——那里根本没有风险卡可认（复查 V2.402 揪出）。
-      to: 'risk', toName: `去第${stepNo('risk')}步结算风险 →`,
+      to: (st.归属与打卡不符 || []).some(x => !x.已认定) ? 'risk' : 'names', toName: `去第${stepNo('risk')}步确认归属 / 重名 →`,
     },
     {
       k: 'rate', lv: (bad.格 || 多价) ? 'bad' : miss.格 ? 'wait' : okc.格 ? 'ok' : 'na',
@@ -2638,3 +2712,5 @@ function Band({ b, n, h, m, note }) {
     <td style={{ color: 'var(--ink-3)' }}>{note}</td>
   </tr>
 }
+
+
