@@ -61,6 +61,15 @@ export const getLlmHubAudit = (days = 7, onlyErrors = false) => j(`/api/llm-hub/
 export const savePortalTool = (b) => jp('/api/portal/tools/save', b)
 export const deletePortalTool = (b) => jp('/api/portal/tools/delete', b)
 export const resetPortalTools = () => jp('/api/portal/tools/reset-defaults', {})
+export const getLandscape = () => j('/api/portal/landscape')                    // V2.514 系统架构
+export const saveLandscape = (b) => jp('/api/portal/landscape/save', b)
+export const resetLandscape = () => jp('/api/portal/landscape/reset', {})
+export const getLandscapeDiagramStatus = () => j('/api/portal/landscape/diagram/status')
+export const uploadLandscapeDiagram = (slot, file) => {           // V2.514 架构图上传（multipart）
+  const fd = new FormData(); fd.append('slot', slot); fd.append('file', file)
+  return fetch('/api/portal/landscape/diagram/upload', { method: 'POST', body: fd, credentials: 'same-origin' })
+    .then(r => r.json()).catch(() => ({ ok: false, msg: '上传失败' }))
+}
 export const apiChangePwd = (b) => jp('/api/change-pwd', b)
 export const getDataSources = () => j('/api/data-sources')
 export const syncDataSources = () => j('/api/data-sources/sync', {method:'POST'})

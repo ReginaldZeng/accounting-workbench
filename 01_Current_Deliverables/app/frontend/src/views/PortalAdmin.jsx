@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react'
 import PersonSearchAdd from '../components/PersonSearchAdd.jsx'
 import { getPortalTools, savePortalTool, deletePortalTool, resetPortalTools, getMachines, setMachineAlertRecipients, setMachineResultRecipients, testMachineNotify, getDingtalkRoster } from '../api.js'
+import PortalLandscapeAdmin from './PortalLandscapeAdmin.jsx'   // V2.514 系统架构维护
 
 const LANES = [{ key: 'accounting', label: '财务核算组' }, { key: 'bp', label: '财务分析组 · BP' }, { key: 'legal', label: '法务部' }]
 const LANE_LABEL = { accounting: '财务核算组', bp: '财务分析组 · BP', legal: '法务部' }
@@ -91,7 +92,7 @@ export default function PortalAdmin({ onChange }) {
   const [tools, setTools] = useState([])
   const [sel, setSel] = useState(null)      // 编辑中的 {..} 或 null
   const [msg, setMsg] = useState(null)
-  const [view, setView] = useState('tools')  // 门户管理两块：'tools' 工具卡片 / 'machines' 取件机监控
+  const [view, setView] = useState('tools')  // 门户管理三块：'tools' 工具卡片 / 'machines' 取件机监控 / 'landscape' 系统架构（V2.514）
   const load = () => getPortalTools().then(r => setTools(r.tools || [])).catch(() => {})
   useEffect(() => { load() }, [])
   const flash = (ok, t) => { setMsg({ ok, t }); setTimeout(() => setMsg(null), 2400) }
@@ -129,8 +130,10 @@ export default function PortalAdmin({ onChange }) {
       <div className="pa-seg">
         <button className={'pa-segbtn' + (view === 'tools' ? ' on' : '')} onClick={() => setView('tools')}>工具卡片</button>
         <button className={'pa-segbtn' + (view === 'machines' ? ' on' : '')} onClick={() => setView('machines')}>取件机监控</button>
+        <button className={'pa-segbtn' + (view === 'landscape' ? ' on' : '')} onClick={() => setView('landscape')}>系统架构</button>
       </div>
 
+      {view === 'landscape' && <PortalLandscapeAdmin />}
       {view === 'machines' && <MachineMonitor />}
       {view === 'tools' && (
       <div className="pa-cols">

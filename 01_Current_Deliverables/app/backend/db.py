@@ -976,6 +976,12 @@ CAP_META_STATIC = [
     #   _caps_for_ui 对无 mod 的 nav 点原样透传、排第②栏末尾，账号页在「平台」区块渲染。
     {"key": "model_config", "label": "模型配置（大模型接入/密钥/网关）", "ws": "platform", "group": "门户",
      "sensitive": True, "tier": "nav"},
+    # V2.514「系统架构」：页面本身人人可看（对内介绍用），此码管两件事——①页内「技术细节」区块；
+    # ②架构图发哪个槽位（有此码发含服务器地址端口的完整版，没有只发对外脱敏版）。
+    # 库名、存储量、隧道端口这类运维信息，不该给全部登录账号看。同 model_config：ws="platform"
+    # 天然使子管理员既不恒有、也授不出；sensitive 再挡住 _backfill_missing_perms 自动补发。
+    {"key": "landscape_tech", "label": "系统架构·完整版与技术细节（服务器地址/端口/库名）", "ws": "platform", "group": "门户",
+     "sensitive": True, "tier": "nav"},
 ]
 # ---------------- 菜单准入点（kind="nav"）：跟着菜单树自动生成 ----------------
 # 为什么要动态：菜单树可在系统设置里自建（一级增二级、二级增三级），总不能每加一个菜单就改一次代码。
@@ -3386,6 +3392,107 @@ def reset_portal_tools_defaults():
         save_portal_tool(row)
     kept = [n for n in existing if n not in default_names]
     return {"added": added, "updated": updated, "kept": kept}
+
+
+# ==================== 系统架构（V2.514） ====================
+# 门户「系统架构」页**文字部分**的数据源。图本身不在这里——它是上传的 HTML，落在
+# backend/landscape_pages/{full,public}.html，取图与发哪一份见 app.api_portal_landscape_diagram。
+# 这里存的是那张图**不回答**的东西：一句话结论、几条发现、建议顺序，以及补充系统清单
+# （尤其是那张图只画了财务侧、没画的商务线）。存 app_settings 一条 JSON（键 landscape），
+# 在「门户管理 › 系统架构」里编辑，保存后门户即时生效，不用改代码不用发版。
+#
+# nodes 只用于渲染门户上的「技术细节」表（作为架构图的补充清单），不再对应任何图上坐标。
+# status：ok=在跑 / par=人工并行 / beta=开发中 / soon=规划中 / empty=空壳 / weak=脆弱 / ext=外部系统
+# tech：**仅持有 landscape_tech 权限的人可见**，服务端剥离，见 app.api_portal_landscape。
+LANDSCAPE_KEY = "landscape"
+LANDSCAPE_DEFAULTS = {
+    "title": "系统架构",
+    "standfirst": "上半是部署架构图（可切换视图 / 透镜 / 路径 / 地图）；下半是图不回答的部分——我们卡在哪、下一步该动哪里。图由「门户管理 › 系统架构」上传更新，文字在同一处编辑。",
+    "verdict": "系统不算多，问题不在数量——在于「成本」这一个概念同时活在多个互不相通的地方，"
+               "其中一处还得靠解析 Excel 附件才能拿到数。集成的第一刀应该切在这里。",
+    "nodes": [
+        # ── 源头（外部系统，不判状态）──
+        {"key": "starblend", "name": "星源智配 StarBlend", "sub": "研发 · 配方与 BOM", "status": "ext", "ver": "", "tech": ""},
+        {"key": "proto", "name": "AI 打样终端", "sub": "手工样记录", "status": "ext", "ver": "", "tech": ""},
+        {"key": "jde", "name": "JDE", "sub": "物料主数据", "status": "ext", "ver": "", "tech": ""},
+        {"key": "dingtalk", "name": "钉钉", "sub": "审批 · 打卡 · 通知", "status": "ext", "ver": "", "tech": ""},
+        {"key": "kingdee", "name": "金蝶", "sub": "总账 · 报表", "status": "ext", "ver": "", "tech": ""},
+        # ── 自建 · 商务线 ──
+        {"key": "starbridge", "name": "星桥智联", "sub": "NPI 流程 · 免构建前端", "status": "ok", "ver": "一期闭环",
+         "tech": "Flask 3 + Vue 3 免构建 · 1,973 条测试 · MySQL npi_platform"},
+        {"key": "bomprice", "name": "BOM 价管系统", "sub": "BOM 与成本模型", "status": "par", "ver": "Demo",
+         "tech": "Flask 3.1.1 + 手写 SQL · 36 表设计稿仅落 5 表 3 API · MySQL bom_price_system"},
+        {"key": "salesquote", "name": "销售报价接单", "sub": "尚未开工", "status": "empty", "ver": "", "tech": "0 文件"},
+        # ── 自建 · 风控中心 AI 赋能中台 ──
+        {"key": "acc", "name": "财务核算工作台", "sub": "对账 · 计提 · 成本 · 考勤 · 归档", "status": "ok", "ver": "V2.997",
+         "tech": "FastAPI + React/Vite · SQLite workbench.db · PyMuPDF + 离线 OCR"},
+        {"key": "bp", "name": "财务BP工作台", "sub": "驾驶舱 · 预算 · 定价 · AI 问数", "status": "ok", "ver": "",
+         "tech": "FastAPI + SQLAlchemy 2 · SQLite bp_workbench.db · 经 /bp/ 反向代理接入门户"},
+        {"key": "legal", "name": "法务工作台", "sub": "AI 合同预审 · 数字员工办公室", "status": "soon", "ver": "规划中",
+         "tech": "待与法务部确认后开放；确认书 v1.0 未签"},
+        {"key": "pricer", "name": "定价测算员", "sub": "读审批 → 取成本 → 出测算单", "status": "ok", "ver": "",
+         "tech": "Python 数字员工 · 钉钉只读客户端 · 解析 Excel 附件建成本台账"},
+        # ── 底座 ──
+        {"key": "gateway", "name": "AI 网关", "sub": "统一转发 · 按人记账 · 额度硬闸", "status": "ok", "ver": "V2.302+",
+         "tech": "独立进程独立端口 8020（勿与核算 8000 同进程：GIL）· OpenAI 兼容 · "
+                 "DeepSeek / Kimi / 智谱GLM / 阿里百炼 · 凭证可即时吊销 · gateway.db 不进部署包"},
+        # ── 存储 ──
+        {"key": "mysql", "name": "云 MySQL", "sub": "商务线两个库", "status": "ext", "ver": "",
+         "tech": "腾讯云 MySQL 5.7.44 · npi_platform / bom_price_system · SSH 隧道 13306"},
+        {"key": "sqlite", "name": "本机 SQLite", "sub": "财务线各库", "status": "ext", "ver": "",
+         "tech": "workbench.db / bp_workbench.db（约 208 MB）/ gateway.db · 未进备份体系，是笔到期的债"},
+        {"key": "dtdata", "name": "钉钉审批数据", "sub": "不落本地库", "status": "ext", "ver": "", "tech": ""},
+        {"key": "excel", "name": "Excel 附件", "sub": "事实上的成本源", "status": "weak", "ver": "",
+         "tech": "定价测算员经 cost_ledger.py 解析「BOM表报价」附件现攒台账——上游没有结构化成本真源"},
+    ],
+    "findings": [
+        {"tag": "最刺眼的一条", "alert": True, "title": "「成本」同时活在多个地方",
+         "body": "BOM 价管系统设计了成本表但从未执行；定价测算员靠解析 Excel 附件现攒台账；"
+                 "财务核算工作台有独立的存货成本台账工具线；星桥智联的成本核算节点目前只是附件。"
+                 "四处都在回答「这个东西成本多少」，没有一处能互相印证。"},
+        {"tag": "发现 · 存储", "alert": False, "title": "财务线仍在本机 SQLite",
+         "body": "本机躺着多个 SQLite 库，其中最大的已到两百多 MB。本机库意味着不进备份体系、"
+                 "换机器就断、多人没法并发。迁云是计划内的事，只是还没做。"},
+        {"tag": "发现 · 技术栈", "alert": False, "title": "三套栈，各有各的道理",
+         "body": "FastAPI + React（财务两件套）、Flask + 手写 SQL（BOM 价管）、Flask + Vue3 免构建（星桥智联）。"
+                 "分裂本身不致命——但如果目标是集成，就得承认：栈不统一时能共享的只有数据，不是代码。"},
+        {"tag": "发现 · 好消息", "alert": False, "title": "集成外壳已经建过一次",
+         "body": "风控中心 AI 赋能中台已经把财务侧三个工作台聚在一个门户、一套账号、一套分级授权之下，"
+                 "并已建成统一 AI 网关。做业务集成不需要从零发明模式——缺的是把商务侧也接进同一个壳。"},
+    ],
+    "steps": [
+        {"title": "结构化成本结果层",
+         "body": "星桥智联的报价成本节点，把结果层十几个字段入库。验证信号很硬：定价测算员立刻不用再解析 Excel 附件。"},
+        {"title": "把「客户」提升为公司级主数据",
+         "body": "现在客户信息散在各系统各存一份。定价测算员已经在攒「客户 × 物料 × 结算价」，那是主数据的雏形。"},
+        {"title": "客户 360 视图",
+         "body": "点开一个客户看到名下所有 BOM 版本、历次报价、送样反馈、中标与订单。前两步做完数据就都在了。"},
+        {"title": "本机 SQLite 迁云",
+         "body": "该进备份体系了。与上面三步无依赖，可以并行。"},
+        {"title": "真 CRM 功能再评估",
+         "body": "商机漏斗、拜访记录、市场活动——这些才是会把平台撑爆的部分，等前面跑顺再判断哪些真的需要。"},
+    ],
+    "note": "事实来自各系统的 README、requirements、变更台账与目录实测扫描。未覆盖：星源智配 / AI打样终端 / "
+            "JDE / 金蝶的内部实现（不在本机）；以及各系统的实际使用率——「在跑」指代码在运行，不代表业务方在用。",
+}
+
+
+def get_landscape():
+    """系统架构页的文字数据。**没设过就回种子**，故首次打开页面即有内容，不用先去门户管理填一遍。"""
+    d = get_setting(LANDSCAPE_KEY)
+    if not isinstance(d, dict) or not d.get("nodes"):
+        return json.loads(json.dumps(LANDSCAPE_DEFAULTS))     # 深拷贝，别让调用方改到常量
+    return d
+
+
+def save_landscape(obj, operator=""):
+    set_setting(LANDSCAPE_KEY, obj, operator=operator)
+
+
+def reset_landscape(operator=""):
+    """恢复出厂：把全景数据刷回代码里的种子（人点按钮才跑）。"""
+    set_setting(LANDSCAPE_KEY, LANDSCAPE_DEFAULTS, operator=operator)
+    return json.loads(json.dumps(LANDSCAPE_DEFAULTS))
 
 
 # ==================== 月结批次 / 期间封存 ====================

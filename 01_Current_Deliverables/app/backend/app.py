@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-09-12 | Author: Codex | Version: V2.564
+# Description: Inline catalog metadata, independent display channels and stable menu layout insertion.
 # [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 新增一级板块「发票管家」及四个二级（收票工作台/发票后补池/发票审核/发票台账，默认开发中）、岗位模板种子与一次性并入 DB 模板、
 #              登录门加手机配对例外（/api/inv/m/ + X-Inv-Pair 一次性令牌）、注册 routers/invoice 与 routers/invoice_books。
@@ -22,11 +24,11 @@ import re
 import base64
 import urllib.parse
 from io import BytesIO
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File, Form   # V2.514 架构图上传
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
 
 from kernels import balance_dashboard as bd
 from kernels import reconcile as rc
@@ -44,6 +46,7 @@ import kingdee_client as kc
 import db
 import mailer
 import notifier
+from nav_layout import numbered_modules, layout_patch
 import ops   # V2.489 运维观测埋点（请求日志/并发/慢接口/在线用户）——自包含，见 ops.py
 
 # ── 共享内核（V2.172 从本文件拆出；见 core.py 头部说明）──
@@ -543,6 +546,147 @@ def api_portal_tools_reset(request: Request):
     return {"ok": True, **r}
 
 
+# ---------------- 系统架构（V2.514） ----------------
+def _can_landscape_tech(u):
+    """能不能看「技术细节」（库名/体积/端口）。主管理员恒有；其余看 landscape_tech 权限点。
+    ⚠ 必须走 db.user_can——_current_user 返回的是 DB 原始行，其 perms 是**序列化字符串**，
+    不是 _user_public 里那个已 parse 的字典；直接 .get 会 500（普通账号才会踩到，
+    主管理员被 is_super 短路掉，测的时候容易漏）。"""
+    return bool(u) and db.user_can(u, "landscape_tech")
+
+
+@app.get("/api/portal/landscape")
+def api_portal_landscape(request: Request):
+    """系统架构页的文字数据（已登录即可读）。
+    ⚠ 无 landscape_tech 权限时**在服务端就把 tech 字段摘掉**——不能只靠前端不渲染：
+    那些是库名、存储量、SSH 隧道端口，翻一下网络请求就拿到了（模型配置那个码只挡前端，
+    因为它挡的是入口不是数据；这里挡的是数据本身，必须服务端来）。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "请先登录"}, status_code=401)
+    data = db.get_landscape()
+    tech = _can_landscape_tech(u)
+    if not tech:
+        data = {**data, "nodes": [{k: v for k, v in n.items() if k != "tech"}
+                                  for n in (data.get("nodes") or [])]}
+    return {"ok": True, "landscape": data, "tech": tech}
+
+
+@app.post("/api/portal/landscape/save")
+def api_portal_landscape_save(body: dict, request: Request):
+    """保存全景数据（仅主管理员）。前端整份提交，这里只做最低限度校验：nodes 必须是列表。
+    ⚠ 无 landscape_tech 的人本来就拿不到 tech 字段，若让他保存会把 tech 整片抹掉——
+    故保存权限只给主管理员（恒有 tech），不放给一般管理员。"""
+    adm = _admin(request)
+    if not adm:
+        return JSONResponse({"ok": False, "msg": "需主管理员"}, status_code=403)
+    if not isinstance(body.get("nodes"), list):
+        return {"ok": False, "msg": "数据格式不对：缺 nodes"}
+    db.save_landscape(body, operator=adm["name"])
+    db.audit(adm["name"], "系统架构-保存", "门户", f"节点 {len(body['nodes'])} 个")
+    return {"ok": True}
+
+
+_LSC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "landscape_pages")
+_LSC_SLOTS = {"full": "full.html", "public": "public.html"}
+
+
+def _lsc_path(slot):
+    """架构图 HTML 的落地路径。slot 只认白名单里的两个，杜绝路径穿越。"""
+    fn = _LSC_SLOTS.get(str(slot or "").strip())
+    return os.path.join(_LSC_DIR, fn) if fn else None
+
+
+@app.get("/api/portal/landscape/diagram")
+def api_portal_landscape_diagram(request: Request, slot: str = ""):
+    """把架构图 HTML 原样吐出来给 iframe 嵌。
+    **服务器 IP、端口这些是烤死在 HTML 里的**，没法按人剥字段，只能按人决定给哪一份：
+      · 有 landscape_tech → 默认给 full（完整版）
+      · 没有            → 只能拿到 public（脱敏版）；脱敏版还没上传时给一段占位提示，
+                          **绝不回退到 full**（回退就等于没做权限）。"""
+    u = _current_user(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "请先登录"}, status_code=401)
+    want = (slot or "").strip() or ("full" if _can_landscape_tech(u) else "public")
+    if want == "full" and not _can_landscape_tech(u):
+        want = "public"
+    p = _lsc_path(want)
+    if p and os.path.exists(p):
+        return FileResponse(p, media_type="text/html; charset=utf-8")
+    tip = ("对外脱敏版尚未上传。<br>请主管理员在「门户管理 › 系统架构」上传一份"
+           "去掉服务器地址与端口的导出件。" if want == "public" else "架构图尚未上传。")
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8>"
+        "<div style=\"font:14px/1.9 'Microsoft YaHei',sans-serif;color:#8B84AD;"
+        "padding:48px;text-align:center\">" + tip + "</div>", status_code=200)
+
+
+async def _landscape_upload_impl(request: Request, slot: str = Form(""), file: UploadFile = File(...)):
+    """上传/替换某个槽位的架构图（仅主管理员）。你们那套工具重新导出后传上来即可，不用发版。
+    只收 .html；大小上限 8MB（现况约 0.7MB，留足余量又不至于被塞进一个几十兆的东西）。"""
+    adm = _admin(request)
+    if not adm:
+        return JSONResponse({"ok": False, "msg": "需主管理员"}, status_code=403)
+    p = _lsc_path(slot)
+    if not p:
+        return {"ok": False, "msg": "槽位只能是 full 或 public"}
+    if not str(file.filename or "").lower().endswith((".html", ".htm")):
+        return {"ok": False, "msg": "只收 .html 文件"}
+    data = await file.read()
+    if len(data) > 8 * 1024 * 1024:
+        return {"ok": False, "msg": "文件超过 8MB"}
+    if b"<" not in data[:2048]:
+        return {"ok": False, "msg": "看着不像 HTML，没有保存"}
+    os.makedirs(_LSC_DIR, exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(data)
+    db.audit(adm["name"], "系统架构-上传图", slot, f"{file.filename} · {len(data)//1024} KB")
+    return {"ok": True, "bytes": len(data)}
+
+
+try:
+    import multipart as _mp  # noqa: F401  （python-multipart）
+    _HAS_MULTIPART = True
+except ImportError:
+    _HAS_MULTIPART = False
+
+if _HAS_MULTIPART:
+    app.post("/api/portal/landscape/diagram/upload")(_landscape_upload_impl)
+else:
+    # 服务器缺 python-multipart 时只降级上传功能，不让整个 app 起不来
+    @app.post("/api/portal/landscape/diagram/upload")
+    async def _landscape_upload_unavailable():
+        return JSONResponse({"ok": False, "msg": "服务器缺 python-multipart，装上并重启后即可上传"}, status_code=503)
+
+
+@app.get("/api/portal/landscape/diagram/status")
+def api_portal_landscape_diagram_status(request: Request):
+    """两个槽位各自有没有货、多大、什么时候传的——给门户管理页显示。"""
+    if not _current_user(request):
+        return JSONResponse({"ok": False, "msg": "请先登录"}, status_code=401)
+    out = {}
+    for slot in _LSC_SLOTS:
+        p = _lsc_path(slot)
+        if p and os.path.exists(p):
+            st = os.stat(p)
+            out[slot] = {"exists": True, "kb": round(st.st_size / 1024),
+                         "at": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")}
+        else:
+            out[slot] = {"exists": False}
+    return {"ok": True, "slots": out}
+
+
+@app.post("/api/portal/landscape/reset")
+def api_portal_landscape_reset(request: Request):
+    """恢复出厂：刷回代码里的种子。人点按钮才跑，不在启动时静默覆盖已维护的内容。"""
+    adm = _admin(request)
+    if not adm:
+        return JSONResponse({"ok": False, "msg": "需主管理员"}, status_code=403)
+    data = db.reset_landscape(operator=adm["name"])
+    db.audit(adm["name"], "系统架构-恢复出厂", "门户")
+    return {"ok": True, "landscape": data, "tech": True}
+
+
 def _scoped_target(request, name):
     """取 (adm, target)；校验当前管理员能否管理 target。返回 (adm, target, err_resp)。"""
     adm = _acct_admin(request)
@@ -870,6 +1014,18 @@ NAV_SECTIONS = [
     {"key": "common", "label": "通用", "order": 999, "bottom": True},
 ]
 _SEC_KEYS = {s["key"] for s in NAV_SECTIONS}
+
+# V2.564: descriptive names are defaults only; administrator labels keep precedence.
+NAV_LABELS = {
+    'rptdash': '核算报表看板', 'rptexport': '核算报表导出', 'srcexport': '业务源单导出',
+    'reconcile': '银行流水对账', 'fxrate': '月度汇率维护', 'wealth': '理财业务对账',
+    'fundboard': '账户资金看板', 'ledger': '银行账户台账', 'periodclose': '月结进度看板',
+    'logibase': '物流基础资料', 'logiupload': '物流账单导入', 'logistics': '物流费用计提',
+    'logisticspay': '物流账单核对', 'clexport': '存货台账导出', 'cldash': '存货结构看板',
+    'clwh': '存货基础资料', 'bomdraft': '成本待办复核', 'tempattrev': '临时工工时复核',
+    'tempattboard': '临时用工看板', 'revledger': '收入台账查询', 'custrecon': '客户往来对账',
+    'archive': '会计凭证归档',
+}
 
 # ── 二级 / 三级 ──
 # group_only=True → 纯分组父项（点了展开，不直接进入，不设准入点）
@@ -1205,23 +1361,29 @@ def _all_modules():
             o = ovr.get(m["key"]) if isinstance(ovr.get(m["key"]), dict) else {}
             sec = str(o.get("sec") or m["sec"])
             mods.append({**m, "builtin": True,
-                         "label": str(o.get("label") or m["label"])[:20],
+                         "label": str(o.get("label") or NAV_LABELS.get(m['key'], m["label"]))[:20],
                          "sec": sec if sec in sec_keys else m["sec"],
                          "parent": o.get("parent", m.get("parent")) or None,
                          "order": int(o.get("order", m.get("order", 500)))})
         for m in _user_modules():
             mods.append({**m, "default": "开发中", "builtin": False})
+        # V2.564: display overrides also apply to custom entries; preserve original permission identity.
+        for m in mods:
+            o = ovr.get(m['key']) or {}
+            for field in ('label', 'sec', 'parent', 'order', 'show_home', 'show_sidebar', 'description'):
+                if field in o:
+                    m[field] = o[field]
         # 父项被挪走/删了 → 子项别成孤儿（会整棵消失）：认不出的 parent 一律置空，降级成二级
         keys = {m["key"] for m in mods}
         by_key = {m["key"]: m for m in mods}
         for m in mods:
             if m.get("parent") and m["parent"] not in keys:
                 m["parent"] = None
-            m["cap"] = _enter_cap(m, by_key)   # 准入点算好一起发：前端别自己拼 "enter:"+key，拼错＝静默放行
+            m["cap"] = (ovr.get(m['key']) or {}).get('fixed_cap', _enter_cap(m, by_key))
             # act ＝ 组内第二道门（V2.142）：第三种节点的子项，进组后见不见还要看这个动作点。
             # 前端 canEnter = 授了 cap AND（无 act 或授了 act）。
             m["act"] = m.get("act_cap") or None
-        return sorted(mods, key=lambda m: (m["sec"], m["order"], m["label"]))
+        return numbered_modules(mods, _all_sections())
     return _nav_cached("modules", build)
 
 
@@ -1415,10 +1577,10 @@ def _nav_one(m, saved, post_keys, dev_ok=False):
     st = raw if raw in NAV_STATUSES else _nav_norm(m.get("default", "引擎正常"))
     if m.get("always"):
         st = "引擎正常"
-    # 只有「引擎正常」能挂岗位；岗位被删掉后，挂在模块上的那条自动消失（读时按名单过滤）。
+    # 各交付阶段均可挂服务岗位；已删除岗位在读取时按名单过滤。
     # V2.52 起挂的是岗位 key，老数据里的中文名按别名表平移（改名不再丢标签，见 D11）。
     posts = []
-    if st == "引擎正常":
+    if not m.get('always'):
         for p in (s.get("posts") or []):
             k = _POST_ALIAS.get(p, p) if isinstance(p, str) else None
             if k in post_keys and k not in posts:
@@ -1881,7 +2043,7 @@ def nav_modules_save(body: dict, request: Request):
             cur = st.get(m["key"]) or {}
             raw = _nav_norm(cur.get("status"))          # V2.173：旧前端缓存可能还发旧值，存时也平移
             status = raw if raw in NAV_STATUSES else _nav_norm(m.get("default", "引擎正常"))
-            posts = [p for p in (cur.get("posts") or []) if p in pk] if status == "引擎正常" else []
+            posts = [p for p in (cur.get("posts") or []) if p in pk]
             new[m["key"]] = {"status": status, "posts": posts}
         db.set_setting(_NAV_KEY, new, u["name"])
         _nav_cache_clear()
@@ -1935,23 +2097,48 @@ def nav_module_move(body: dict, request: Request):
         if not lb:
             return {"ok": False, "msg": "名称不能为空"}
         patch["label"] = lb
-    if not patch:
+    if 'description' in body:
+        patch['description'] = str(body['description'] or '').strip()[:120]
+    # V2.564: validate the entire editable row before saving; layout handles sibling insertion.
+    changes = {}
+    if 'layout' in body:
+        try:
+            changes = layout_patch(_all_modules(), _all_sections(), key, body['layout'])
+        except ValueError as exc:
+            return {'ok': False, 'msg': str(exc)}
+        patch.update(changes.pop(key))
+    for field in ('show_home', 'show_sidebar'):
+        if field in body:
+            if not isinstance(body[field], bool):
+                return {'ok': False, 'msg': '展示位置必须为勾选值'}
+            patch[field] = body[field]
+    if m.get('always') and (changes or any(f in patch for f in ('sec', 'parent', 'order', 'show_sidebar'))):
+        return {'ok': False, 'msg': '平台固定入口不能移动或隐藏菜单'}
+    saved_state = db.get_setting(_NAV_KEY, {}) or {}
+    row_state = dict(saved_state.get(key) or {}) if isinstance(saved_state.get(key), dict) else {}
+    if 'status' in body:
+        status = _nav_norm(body['status'])
+        if status not in NAV_STATUSES or status == '隐藏':
+            return {'ok': False, 'msg': '请选择有效交付阶段；隐藏请使用展示位置'}
+        row_state['status'] = status
+    if 'posts' in body:
+        if not isinstance(body['posts'], list) or any(p not in _post_keys() for p in body['posts']):
+            return {'ok': False, 'msg': '服务岗位无效，请刷新名单'}
+        row_state['posts'] = list(dict.fromkeys(body['posts']))
+    if not patch and 'status' not in body and 'posts' not in body:
         return {"ok": False, "msg": "没有要改的内容"}
-
-    if m.get("builtin"):
-        ovr = db.get_setting(_MOD_OVR_KEY, {}) or {}
-        cur = ovr.get(key) if isinstance(ovr.get(key), dict) else {}
-        ovr[key] = {**cur, **patch}
-        db.set_setting(_MOD_OVR_KEY, ovr, u["name"])
-    else:
-        umods = _user_modules()
-        for x in umods:
-            if x["key"] == key:
-                x.update(patch)
-        db.set_setting(_UMOD_KEY, umods, u["name"])
+    # Commit validated metadata while retaining existing overrides and permission identities.
+    ovr = db.get_setting(_MOD_OVR_KEY, {}) or {}
+    changes[key] = {**patch, 'fixed_cap': m.get('cap')}
+    for changed_key, values in changes.items():
+        ovr[changed_key] = {**(ovr.get(changed_key) or {}), **values}
+    db.set_setting(_MOD_OVR_KEY, ovr, u['name'])
+    if not m.get('always') and ('status' in body or 'posts' in body):
+        saved_state[key] = row_state
+        db.set_setting(_NAV_KEY, saved_state, u['name'])
     _nav_cache_clear()
-    db.audit(u["name"], "菜单位置调整", key,
-             "、".join("%s=%s" % (k, v) for k, v in patch.items())[:200])
+    db.audit(u["name"], "功能目录调整", key,
+             "、".join("%s=%s" % (k, v) for k, v in {**patch, **row_state}.items())[:300])
     return {"ok": True, "modules": _all_modules(), "sections": _all_sections(), "state": _nav_state(can_enter_dev(u))}
 
 
@@ -2035,10 +2222,13 @@ def nav_module_add(body: dict, request: Request):
         sec = pm["sec"]
     if sec not in {s["key"] for s in _all_sections()}:
         return {"ok": False, "msg": "要先选一个一级板块"}
+    siblings = [m for m in _all_modules() if m['sec'] == sec and m.get('parent') == parent]
     try:
-        order = max(0, min(9999, int(body.get("order") or 500)))
-    except Exception:
-        order = 500
+        order = int(body['order']) if 'order' in body else max((m['order'] for m in siblings), default=0) + 10
+        if order < 0:
+            raise ValueError()
+    except (TypeError, ValueError):
+        return {'ok': False, 'msg': '排序必须为非负整数'}
     umods.append({"key": key, "label": label[:20], "sec": sec, "parent": parent, "order": order})
     db.set_setting(_UMOD_KEY, umods, u["name"])
     # 初始状态写进状态表（非「设置」类，可存）
@@ -2070,6 +2260,10 @@ def nav_module_del(body: dict, request: Request):
     if key in saved:
         del saved[key]
         db.set_setting(_NAV_KEY, saved, u["name"])
+    ovr = db.get_setting(_MOD_OVR_KEY, {}) or {}
+    if key in ovr:
+        del ovr[key]
+        db.set_setting(_MOD_OVR_KEY, ovr, u['name'])
     _nav_cache_clear()      # 菜单没了，它的准入点也跟着退休
     db.audit(u["name"], "导航模块删除", key)
     return {"ok": True, "modules": _all_modules(), "sections": _all_sections(), "state": _nav_state(can_enter_dev(u))}

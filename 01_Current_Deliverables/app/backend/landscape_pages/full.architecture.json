@@ -1,0 +1,530 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "财务 AI 中台 · 系统架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "login-perms",
+        "label": "登录与权限",
+        "focus": [
+          "users",
+          "nginx",
+          "acct",
+          "bp"
+        ],
+        "note": "身份只在核算门户产生，Nginx 反代时剥离伪造头、按角色注入 X-BP-*，BP 服务端按权限点放行。"
+      },
+      {
+        "id": "data-fetch",
+        "label": "取数链路",
+        "focus": [
+          "bp",
+          "kingdee",
+          "wdt",
+          "ecom",
+          "sentinel"
+        ],
+        "note": "金蝶已直连；旺店通沙箱已打通等买断；电商平台开放平台在规划。"
+      },
+      {
+        "id": "ai-path",
+        "label": "AI 链路",
+        "focus": [
+          "acct",
+          "bp",
+          "gateway",
+          "deepseek"
+        ],
+        "note": "两台模型调用全经 AI 网关：内部凭证、日额度、按台×人记审计账；P1 已验证、待切流。"
+      },
+      {
+        "id": "dingtalk-agents",
+        "label": "钉钉与代理",
+        "focus": [
+          "sentinel",
+          "acct",
+          "dingtalk",
+          "agent_it",
+          "workers"
+        ],
+        "note": "值守推送、审批附件、考勤取数、IT 的钉钉 CLI 代理都汇到钉钉这一个通道。"
+      },
+      {
+        "id": "full-landscape",
+        "label": "功能全景",
+        "focus": [
+          "users",
+          "nginx",
+          "acct",
+          "bp",
+          "legal",
+          "sentinel",
+          "gateway",
+          "deepseek",
+          "kingdee",
+          "wdt",
+          "ecom",
+          "dingtalk",
+          "agent_it",
+          "workers"
+        ],
+        "note": "节点角标三态：已上线 / 开发中 / 规划中；虚线为未切流链路，实线加粗为已上线主干。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "users",
+      "type": "external",
+      "label": "使用者",
+      "sublabel": "财务部 · 管理层",
+      "pos": [
+        20,
+        256
+      ],
+      "size": [
+        122,
+        62
+      ]
+    },
+    {
+      "id": "nginx",
+      "type": "security",
+      "label": "Nginx + 登录门户",
+      "sublabel": "auth_request · 注入权限头",
+      "pos": [
+        200,
+        256
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线"
+    },
+    {
+      "id": "acct",
+      "type": "backend",
+      "label": "财务核算工作台",
+      "sublabel": "对账·台账·BOM·考勤",
+      "pos": [
+        390,
+        156
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线"
+    },
+    {
+      "id": "bp",
+      "type": "backend",
+      "label": "财务BP工作台",
+      "sublabel": "报表·定价·驾驶舱·问数",
+      "pos": [
+        390,
+        374
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线"
+    },
+    {
+      "id": "legal",
+      "type": "backend",
+      "label": "法务工作台",
+      "sublabel": "占位 · 待与法务部确认",
+      "pos": [
+        390,
+        60
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "规划中"
+    },
+    {
+      "id": "sentinel",
+      "type": "backend",
+      "label": "定时任务",
+      "sublabel": "值守 9:00 · 看门狗",
+      "pos": [
+        580,
+        60
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线"
+    },
+    {
+      "id": "gateway",
+      "type": "security",
+      "label": "AI 网关",
+      "sublabel": ":8020 · 配额 · 审计账",
+      "pos": [
+        580,
+        256
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "P1 已验·待切流"
+    },
+    {
+      "id": "deepseek",
+      "type": "external",
+      "label": "DeepSeek API",
+      "sublabel": "v4-flash / v4-pro",
+      "pos": [
+        780,
+        256
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线"
+    },
+    {
+      "id": "kingdee",
+      "type": "external",
+      "label": "金蝶云星空",
+      "sublabel": "序时账 · 应收单 · 成本",
+      "pos": [
+        954,
+        256
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线·只读"
+    },
+    {
+      "id": "wdt",
+      "type": "external",
+      "label": "旺店通开放平台",
+      "sublabel": "订单 · 库存 · 委外",
+      "pos": [
+        780,
+        374
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "接入中"
+    },
+    {
+      "id": "ecom",
+      "type": "external",
+      "label": "电商平台开放平台",
+      "sublabel": "抖店 · 千川 · 淘宝 · 京东",
+      "pos": [
+        954,
+        374
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "规划中"
+    },
+    {
+      "id": "dingtalk",
+      "type": "external",
+      "label": "钉钉开放平台",
+      "sublabel": "机器人 · 审批 · 考勤 · dws",
+      "pos": [
+        1150,
+        60
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线"
+    },
+    {
+      "id": "agent_it",
+      "type": "external",
+      "label": "钉钉 CLI 代理",
+      "sublabel": "Claude Code + dws",
+      "pos": [
+        1150,
+        256
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "已上线"
+    },
+    {
+      "id": "workers",
+      "type": "external",
+      "label": "数字员工办公室",
+      "sublabel": "费用审核员 · 定价测算员",
+      "pos": [
+        1150,
+        374
+      ],
+      "size": [
+        150,
+        62
+      ],
+      "tag": "原型·开发中"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "腾讯云服务器 111.229.72.116 · 宝塔 + Nginx",
+      "wraps": [
+        "nginx",
+        "acct",
+        "bp",
+        "legal",
+        "sentinel",
+        "gateway"
+      ],
+      "pad": 12
+    },
+    {
+      "kind": "security-group",
+      "label": "登录后 · 权限点 + 审计账",
+      "wraps": [
+        "acct",
+        "bp",
+        "gateway"
+      ],
+      "pad": 8
+    },
+    {
+      "kind": "region",
+      "label": "外部系统",
+      "wraps": [
+        "deepseek",
+        "kingdee",
+        "wdt",
+        "ecom"
+      ],
+      "pad": 8
+    },
+    {
+      "kind": "region",
+      "label": "钉钉生态 · IT 代理与数字员工",
+      "wraps": [
+        "dingtalk",
+        "agent_it",
+        "workers"
+      ],
+      "pad": 24
+    }
+  ],
+  "connections": [
+    {
+      "from": "users",
+      "to": "nginx",
+      "label": "HTTPS 登录",
+      "variant": "emphasis",
+      "labelAt": [
+        171,
+        286
+      ],
+      "route": "straight"
+    },
+    {
+      "from": "nginx",
+      "to": "acct",
+      "label": "门户 · 核算",
+      "variant": "emphasis",
+      "route": "orthogonal-h"
+    },
+    {
+      "from": "nginx",
+      "to": "bp",
+      "label": "/bp/ 反代 · 透传权限头",
+      "variant": "emphasis",
+      "route": "orthogonal-h",
+      "labelAt": [
+        370,
+        368
+      ]
+    },
+    {
+      "from": "acct",
+      "to": "bp",
+      "label": "bp-authz 签发权限",
+      "variant": "dashed",
+      "route": "straight",
+      "labelAt": [
+        465,
+        296
+      ]
+    },
+    {
+      "from": "bp",
+      "to": "kingdee",
+      "label": "直连取数 · kingdee:fetch",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "labelAt": [
+        700,
+        362
+      ]
+    },
+    {
+      "from": "bp",
+      "to": "gateway",
+      "label": "AI 实验室 · 问数",
+      "variant": "dashed",
+      "labelAt": [
+        560,
+        326
+      ]
+    },
+    {
+      "from": "acct",
+      "to": "gateway",
+      "label": "模型配置 · 审计聚合",
+      "variant": "dashed"
+    },
+    {
+      "from": "gateway",
+      "to": "deepseek",
+      "label": "OpenAI 兼容转发",
+      "variant": "dashed",
+      "route": "straight",
+      "labelAt": [
+        760,
+        332
+      ]
+    },
+    {
+      "from": "sentinel",
+      "to": "dingtalk",
+      "label": "风控AI 推送",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          655,
+          26
+        ],
+        [
+          1225,
+          26
+        ]
+      ]
+    },
+    {
+      "from": "acct",
+      "to": "dingtalk",
+      "label": "通知 · 考勤取数",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "agent_it",
+      "to": "dingtalk",
+      "label": "群消息 ⇄ 文件",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "straight"
+    },
+    {
+      "from": "workers",
+      "to": "dingtalk",
+      "label": "审批附件 → 测算单",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "right",
+      "via": [
+        [
+          1312,
+          405
+        ],
+        [
+          1312,
+          91
+        ]
+      ]
+    },
+    {
+      "from": "bp",
+      "to": "wdt",
+      "label": "订单 · 库存（接入中）",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "bp",
+      "to": "ecom",
+      "label": "订单 · 推广（规划）",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "已上线",
+      "items": [
+        "银行对账：含理财、资金看板、报表取件机",
+        "成本台账、物流计提与对账",
+        "临时工考勤、BOM 报价审核",
+        "汇率、报表导出、凭证归档",
+        "门户与权限中枢；金蝶 + 钉钉接入"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "开发中",
+      "items": [
+        "AI 网关 P1 已验证，待切流",
+        "电商工作台、旺店通接入",
+        "产品全成本复算",
+        "数字员工原型：费用审核员、定价测算员",
+        "凭证稽核探索"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "规划中",
+      "items": [
+        "法务工作台与 AI 合同预审",
+        "数字员工正式版、凭证装订",
+        "电商收入线剩余项",
+        "物流四期：钉钉付款",
+        "AI 网关 P2 / P3"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "边界与铁律",
+      "items": [
+        "身份只在登录门户产生，X-BP-* 服务端注入",
+        "取金蝶受权限点控制，其他部门只看板",
+        "模型调用全经 AI 网关并记审计账",
+        "BP 对金蝶、千川只读，不写回",
+        "代理只挂只读工具，不碰生产写操作"
+      ]
+    }
+  ]
+}
