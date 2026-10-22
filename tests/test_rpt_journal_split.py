@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1] / "01_Current_Deliverables/app/backend"
@@ -105,6 +106,42 @@ class JournalSortOrderTests(unittest.TestCase):
             self.assertEqual(got, [k[2] for k in expect])
         finally:
             os.remove(path)
+
+
+class DiskGuardTests(unittest.TestCase):
+    """V2.1000 磁盘防护：预检报人话 + 泄漏 spool 兜底清理。"""
+
+    def test_check_disk_raises_plain_message_when_short(self):
+        usage = type("U", (), {"free": 100})()                       # 只剩 100 字节
+        with unittest.mock.patch.object(rx.shutil, "disk_usage", return_value=usage):
+            with self.assertRaises(RuntimeError) as cm:
+                rx._check_disk(10000, tempfile.gettempdir())
+        self.assertIn("磁盘空间不足", str(cm.exception))
+
+    def test_check_disk_passes_when_enough(self):
+        usage = type("U", (), {"free": 10**12})()
+        with unittest.mock.patch.object(rx.shutil, "disk_usage", return_value=usage):
+            rx._check_disk(10000, tempfile.gettempdir())             # 不抛即过
+
+    def test_clean_stale_spools_only_deletes_old_openpyxl_files(self):
+        d = tempfile.mkdtemp()
+        try:
+            old = os.path.join(d, "openpyxl.old")
+            new = os.path.join(d, "openpyxl.new")
+            other = os.path.join(d, "keep.txt")
+            for f in (old, new, other):
+                open(f, "w").write("x")
+            os.utime(old, (0, 0))                                    # 1970 年，必算陈旧
+            with unittest.mock.patch.object(rx.tempfile, "gettempdir", return_value=d):
+                freed = rx._clean_stale_spools(max_age=1800)
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(os.path.exists(new))
+            self.assertTrue(os.path.exists(other))
+            self.assertEqual(freed, 1)
+        finally:
+            for f in os.listdir(d):
+                os.remove(os.path.join(d, f))
+            os.rmdir(d)
 
 
 if __name__ == "__main__":

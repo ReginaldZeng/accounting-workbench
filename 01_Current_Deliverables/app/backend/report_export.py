@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-22 | Author: Kimi / Reginald Zeng | Version: V2.1000
+# Description: 磁盘防护：写盘前预检（spool ~700B/行 + 成品 ~200B/行，不足直接报「磁盘不足」）、
+#              失败/取消时清 openpyxl spool 泄漏、任务开始时清 30 分钟前的历史泄漏、
+#              排序库在存盘前先删。起因：107 号 2026-09（302 万行）在 98% 满的 40G 盘上 Errno 28，
+#              且一次失败泄漏 957M+790M spool 无人清理。
+# [Change Log]
 # Date: 2026-10-22 | Author: Kimi / Reginald Zeng | Version: V2.999
 # Description: 序时簿百万行改造：① 每 100 万数据行自动分表页（序时账簿 / 序时账簿_2 …）——
 #              Excel 单表硬上限 1,048,576 行，107 号 2026-09 几百万行时单表页必炸；
@@ -23,6 +29,10 @@
 #   直接落值最稳，也不需要在服务器上装 LibreOffice 去重算。
 import os
 import re
+import glob
+import shutil
+import tempfile
+import time
 
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
@@ -184,6 +194,57 @@ def _write_journal(wb, rows, total, progress=None):
 # 序时簿单个表页最多多少数据行。Excel 硬上限 1,048,576（含表头行），留足余量取整 100 万。
 JOURNAL_SHEET_MAX = 1000000
 
+# V2.1000 磁盘防护：107 号 2026-09（302 万行）在 98% 满的 40G 服务器盘上跑出 [Errno 28]。
+# 写盘阶段的磁盘账本（302 万行实测）：排序库 1.2G（此时已在盘上）+ openpyxl 临时 XML ~1.8G
+# （约 650B/行——只写模式每个表页一个 spool 文件，存盘时才并入 zip）+ 成品 zip ~0.3G（约 100B/行）。
+# 两件事：① 写盘前预检，不够就直接报「磁盘不足」，不要写到一半才炸 Errno 28；
+#         ② 失败/取消时 openpyxl 的 spool 文件会泄漏（它自己不管异常路径），这里兜底清掉。
+_JOURNAL_SPOOL_B = 700        # 临时目录每行预估字节（spool XML 实测 ~650B，上浮取整）
+_JOURNAL_ZIP_B = 200          # 落地目录每行预估字节（成品 xlsx 压缩后 ~100B，上浮取整）
+
+
+def _clean_stale_spools(max_age=1800):
+    """清临时目录里泄漏的 openpyxl spool 文件（默认 30 分钟前的），返回清掉的字节数。
+    2026-10-22 服务器实测：一次导出失败泄漏 957M+790M 两个 spool，直接把 98% 满的盘顶穿。
+    导出是串行的（_JOB 单任务锁），30 分钟前的 spool 不可能还属于在跑的导出。"""
+    freed = 0
+    for f in glob.glob(os.path.join(tempfile.gettempdir(), "openpyxl.*")):
+        try:
+            if time.time() - os.path.getmtime(f) > max_age:
+                freed += os.path.getsize(f)
+                os.remove(f)
+        except OSError:
+            pass
+    return freed
+
+
+def _check_disk(nj, out_dir):
+    """写盘前预检：临时目录要放得下 spool（~700B/行），落地目录要放得下成品（~200B/行）。
+    不够就直接报人话——别写到一半炸 Errno 28，还留一地残骸。"""
+    need_t, free_t = nj * _JOURNAL_SPOOL_B, shutil.disk_usage(tempfile.gettempdir()).free
+    if free_t < need_t:
+        raise RuntimeError("磁盘空间不足：序时账簿 %d 行，写 Excel 的临时文件预计要 %.1fG，"
+                           "临时目录（%s）所在盘只剩 %.1fG。请清理服务器磁盘"
+                           "（如 /www/backup 旧备份）或给云盘扩容后重导。"
+                           % (nj, need_t / 2**30, tempfile.gettempdir(), free_t / 2**30))
+    need_o, free_o = nj * _JOURNAL_ZIP_B, shutil.disk_usage(out_dir).free
+    if free_o < need_o:
+        raise RuntimeError("磁盘空间不足：序时账簿 %d 行，成品文件预计 %.1fG，"
+                           "落地目录（%s）所在盘只剩 %.1fG。请清理后重导。"
+                           % (nj, need_o / 2**30, out_dir, free_o / 2**30))
+
+
+def _drop_wb_spools(wb):
+    """失败/取消现场清理：把 wb 各表页的 spool 文件删掉（openpyxl 异常路径不删，见上）。"""
+    for ws in getattr(wb, "_sheets", []):
+        f = getattr(getattr(ws, "_writer", None), "_fileobj", None)
+        try:
+            name = f.name
+            f.close()
+            os.remove(name)
+        except Exception:
+            pass
+
 
 _BAD_FN = re.compile(r'[\\/:*?"<>|]')
 
@@ -220,6 +281,7 @@ def export_one(year, period, rpt, out_dir, s=None, conf=None, progress=None):
     progress(阶段, 行数, 总行数)：逐阶段回报给页面（取三大报表→科目余额→序时账簿→写 Excel→存盘）；
     回调里抛异常＝中止（报表导出的「取消」就是这么实现的）。"""
     p = progress or (lambda *a: None)
+    _clean_stale_spools()                    # V2.1000：先清历史泄漏的 spool，别让残骸越攒越多
     p("取三大报表", 0, 0)
     sheets = kc.fetch_fin_report_sheets(rpt["rid"], s, conf)
     cur = rpt.get("cur") or "人民币"
@@ -231,10 +293,15 @@ def export_one(year, period, rpt, out_dir, s=None, conf=None, progress=None):
     db_path, nj = kc.journal_to_temp(year, period, rpt["org"], s=s, conf=conf,
                                      on_page=lambda n: p("取序时账簿", n, 0))
     it = kc.iter_journal_temp(db_path)
+    wb = None
     try:
+        _check_disk(nj, out_dir)             # V2.1000：写盘前预检，不够就报人话，不炸 Errno 28
         p("写入 Excel", 0, nj)
         wb = build_workbook(year, period, rpt, sheets, subject, it, nj, cur,
                             progress=lambda n: p("写入 Excel", n, nj))
+        it.close()
+        os.remove(db_path)                   # 行已读完，排序库先删——存盘时 zip 不再与库挤同一块盘
+        db_path = None
         mdir = os.path.join(out_dir, month_dir(year, period))
         os.makedirs(mdir, exist_ok=True)
         path = os.path.join(mdir, file_name(year, period, rpt["org"], rpt["org_name"]))
@@ -247,9 +314,14 @@ def export_one(year, period, rpt, out_dir, s=None, conf=None, progress=None):
         wb.save(tmp)
         os.replace(tmp, path)
         return path, {"三大报表": len(sheets), "科目余额": len(subject), "序时账簿": nj}
+    except Exception:
+        if wb is not None:
+            _drop_wb_spools(wb)              # 失败/取消：openpyxl 不删 spool，我们删
+        raise
     finally:
         it.close()                                  # 关闭生成器 → 释放 SQLite 连接（Windows 上占着文件删不掉）
-        try:
-            os.remove(db_path)
-        except OSError:
-            pass
+        if db_path:
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
