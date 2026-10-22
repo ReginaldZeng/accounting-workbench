@@ -1,4 +1,9 @@
 # -*- coding: utf-8 -*-
+# [Change Log]
+# Date: 2026-10-22 | Author: Kimi / Reginald Zeng | Version: V2.999
+# Description: 报表导出·序时簿改流式：fetch_journal_full（整本攒内存排序，几百万行必 OOM）
+#              替换为 journal_to_temp（分页直写临时 SQLite + 索引排序，内存恒定）+
+#              iter_journal_temp（按「凭证号+分录行号+内码」流式产出）。排序口径逐行不变。
 # [Change Log] 2026-10-02 | Codex | V-draft | Cost-report pagination and read-only full-cost source snapshot
 # [Change Log]
 # Date: 2026-08-01 | Author: Claude / c | Version: V2.158
@@ -26,6 +31,7 @@ import json
 import time
 import atexit
 import sqlite3
+import tempfile
 import datetime
 import threading
 import base64
@@ -2196,9 +2202,18 @@ def _kd_date(v):
     return "%s/%d/%d" % (d[0], int(d[1]), int(d[2])) if len(d) == 3 and d[0] else str(v or "")
 
 
-def fetch_journal_full(year, period, book, s=None, conf=None, on_page=None):
-    """整本序时账簿（全科目）→ JOURNAL_COLS 那 14 列。单主体单月实测约 2.4 万行，故按 PAGE_SIZE 翻页。
-    on_page(已取行数)：每取完一页回调一次——报表导出拿它报「已取 xx 万行」、查取消（回调里抛异常即中止）。"""
+def journal_to_temp(year, period, book, s=None, conf=None, on_page=None):
+    """整本序时账簿（全科目）取数 → 临时 SQLite 库，返回 (库路径, 总行数)。产出的 14 列见 JOURNAL_COLS。
+    on_page(已取行数)：每取完一页回调一次——报表导出拿它报「已取 xx 万行」、查取消（回调里抛异常即中止）。
+    临时库的删除由调用方负责（export_one 的 finally）；iter_journal_temp() 负责按序时簿口径流式读出。
+
+    V2.999 为什么落成临时库：原来把整本全攒进内存 list 再排序（见下）。107 号 2026-09 几百万行时
+    每行约 1KB 的 Python 对象开销就是几个 G，服务器总共 3.6G——MemoryError 或整机 OOM 杀进程，
+    导出连续失败。现在每页 5000 行直接 executemany 进临时库，内存恒定与总量无关；
+    排序挪到 SQLite 索引上（iter_journal_temp 的 ORDER BY 与原来的 Python 元组序逐项等价）。
+    排序键拆列的等价论证：_sort_num 返回 (0, 数字) 或 (1, 文本)，拆成 flag/num/str 三列后
+    ORDER BY flag, num, str —— flag 先分胜负（0<1 与元组序一致）；同 flag=0 时 str 全 NULL、
+    由 num 定序；同 flag=1 时 num 全 NULL、由 str 定序。永远不会跨类型比较，与元组序逐行一致。"""
     s, conf = login(s, conf) if s is None else (s, conf or load_conf())
     head = ["FAccountBookID.FName", "FDate", "FPERIOD", "FVOUCHERGROUPID.FName", "FVOUCHERGROUPNO",
             "FEXPLANATION", "FACCOUNTID.FNumber", "FACCOUNTID.FName"]
@@ -2230,31 +2245,74 @@ def fetch_journal_full(year, period, book, s=None, conf=None, on_page=None):
     q = {"FormId": "GL_VOUCHER", "FieldKeys": ",".join(fields),
          "OrderString": "FEntity_FEntryId", "TopRowCount": 0, "StartRow": 0, "Limit": JOURNAL_PAGE}
     dim_order = fetch_account_dim_order(s, conf)[0]
-    keyed, last = [], 0
-    n = len(fields)
-    nf = 2 * len(FLEX_DIMS)
-    while True:
-        q["FilterString"] = base + " and FEntity_FEntryId>%d" % last
-        d = _post(s, conf, QUERY_SVC, [json.dumps(q, ensure_ascii=False)]).json()
-        if isinstance(d, dict) or (d and isinstance(d[0], list) and d[0] and isinstance(d[0][0], dict)):
-            raise KingdeeError("序时账簿取数失败：%s" % json.dumps(d, ensure_ascii=False)[:300])
-        for r in d:
-            rr = _unwrap_row(r, n)
-            eid, vno, seq, rr = int(rr[0]), rr[1], rr[2], rr[3:]
-            h = [_cell(x) for x in rr[:8]]
-            t = rr[8 + nf:]
-            keyed.append(((_sort_num(vno), _sort_num(seq), eid),
-                          [h[0], _kd_date(h[1]), h[2], h[3], h[4], h[5], h[6], h[7],
-                           _flex_inline(rr[8:8 + nf], dim_order.get(h[6])),
-                           _rpt_num(t[0]) or None, _rpt_num(t[1]) or None,
-                           _cell(t[2]), _cell(t[3]), _cell(t[4])]))
-            last = eid
-        if on_page:
-            on_page(len(keyed))
-        if len(d) < JOURNAL_PAGE:
-            break
-    keyed.sort(key=lambda x: x[0])
-    return [r for _, r in keyed]
+    fd, path = tempfile.mkstemp(prefix="rpt_journal_", suffix=".db")
+    os.close(fd)
+    try:
+        db = sqlite3.connect(path)
+        # 一次性临时库：关掉日志/同步换写入速度——反正写完建完索引就只读，崩了重取就是
+        db.execute("PRAGMA journal_mode=OFF")
+        db.execute("PRAGMA synchronous=OFF")
+        db.execute("CREATE TABLE j (vflag INT, vnum INT, vstr TEXT,"
+                   " sflag INT, snum INT, sstr TEXT, eid INT,"
+                   " %s)" % ", ".join("c%d" % i for i in range(1, len(JOURNAL_COLS) + 1)))
+        last, total = 0, 0
+        n = len(fields)
+        nf = 2 * len(FLEX_DIMS)
+        while True:
+            q["FilterString"] = base + " and FEntity_FEntryId>%d" % last
+            d = _post(s, conf, QUERY_SVC, [json.dumps(q, ensure_ascii=False)]).json()
+            if isinstance(d, dict) or (d and isinstance(d[0], list) and d[0] and isinstance(d[0][0], dict)):
+                raise KingdeeError("序时账簿取数失败：%s" % json.dumps(d, ensure_ascii=False)[:300])
+            page = []
+            for r in d:
+                rr = _unwrap_row(r, n)
+                eid, vno, seq, rr = int(rr[0]), rr[1], rr[2], rr[3:]
+                h = [_cell(x) for x in rr[:8]]
+                t = rr[8 + nf:]
+                vk, sk = _sort_num(vno), _sort_num(seq)
+                page.append((vk[0], vk[1] if vk[0] == 0 else None, vk[1] if vk[0] else None,
+                             sk[0], sk[1] if sk[0] == 0 else None, sk[1] if sk[0] else None, eid,
+                             *[h[0], _kd_date(h[1]), h[2], h[3], h[4], h[5], h[6], h[7],
+                               _flex_inline(rr[8:8 + nf], dim_order.get(h[6])),
+                               _rpt_num(t[0]) or None, _rpt_num(t[1]) or None,
+                               _cell(t[2]), _cell(t[3]), _cell(t[4])]))
+                last = eid
+            db.executemany("INSERT INTO j VALUES (%s)" % ",".join("?" * (7 + len(JOURNAL_COLS))), page)
+            db.commit()
+            total += len(page)
+            if on_page:
+                on_page(total)
+            if len(d) < JOURNAL_PAGE:
+                break
+        db.execute("CREATE INDEX idx_j ON j (vflag, vnum, vstr, sflag, snum, sstr, eid)")
+        db.commit()
+        db.close()
+        return path, total
+    except BaseException:
+        # 取到一半被中止（取消/金蝶报错/内存）也要把临时库删掉，别在服务器上留垃圾
+        try:
+            db.close()
+        except Exception:
+            pass
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+
+
+def iter_journal_temp(db_path):
+    """把 journal_to_temp 的临时库按【凭证号 → 分录行号 → 内码】逐行产出（14 列 list）。
+    sqlite3 游标是懒加载的，几百万行也不占内存。生成器关闭（或耗尽）时释放连接——
+    之后调用方才能删掉库文件（Windows 上文件被占用时删不掉）。"""
+    db = sqlite3.connect(db_path)
+    try:
+        cur = db.execute("SELECT %s FROM j ORDER BY vflag, vnum, vstr, sflag, snum, sstr, eid"
+                         % ", ".join("c%d" % i for i in range(1, len(JOURNAL_COLS) + 1)))
+        for row in cur:
+            yield list(row)
+    finally:
+        db.close()
 
 
 JOURNAL_PAGE = 5000

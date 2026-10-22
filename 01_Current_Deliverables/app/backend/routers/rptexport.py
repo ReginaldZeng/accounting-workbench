@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-22 | Author: Kimi / Reginald Zeng | Version: V2.999
+# Description: 回执邮件补一句「序时账簿超 100 万行自动分表页」。进度/取消/取件/删除逻辑不变。
+# [Change Log]
 # Date: 2026-08-07 | Author: Claude / c | Version: V2.241
 # Description: 【报表导出】路由。一个主体一个文件、五个表页（三大报表+科目余额+序时账簿），
 #              从金蝶直取、整形、落到指定目录。本文件是这条工具线在后端的唯一落点。
@@ -152,7 +155,8 @@ def _mail_body(year, period, out_dir, files, errors, started, finished, share=No
 <th style="padding:4px 10px;text-align:left;border-bottom:2px solid #ddd">文件</th>
 <th style="padding:4px 10px;text-align:right;border-bottom:2px solid #ddd">科目余额</th>
 <th style="padding:4px 10px;text-align:right;border-bottom:2px solid #ddd">序时账簿</th></tr>%s</table>
-<p style="color:#888;font-size:12px">每个文件五个表页：资产负债表 · 利润表 · 现金流量表 · 科目余额 · 序时账簿。
+<p style="color:#888;font-size:12px">每个文件五个表页：资产负债表 · 利润表 · 现金流量表 · 科目余额 · 序时账簿
+（序时账簿超过 100 万行时自动分表页：序时账簿、序时账簿_2 …，内容按凭证号顺序连贯）。
 数据自金蝶直取（只读不写），境外主体按本位币（美元）出。<br>
 开始 %s · 结束 %s · 由财务核算工作台「报表板块 › 报表导出」自动发出。</p></div>"""
     html = html % (year, period, ok, len(files),

@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-22 | Author: Kimi / Reginald Zeng | Version: V2.999
+# Description: 序时簿百万行改造：① 每 100 万数据行自动分表页（序时账簿 / 序时账簿_2 …）——
+#              Excel 单表硬上限 1,048,576 行，107 号 2026-09 几百万行时单表页必炸；
+#              ② 序时簿改接迭代器（kingdee_client.journal_to_temp + iter_journal_temp），
+#              取数不再整本读进内存，临时 SQLite 库用完即删。版式与进度/取消语义不变。
+# [Change Log]
 # Date: 2026-08-07 | Author: Claude / c | Version: V2.241
 # Description: 报表导出·工作簿组装。一个主体一个文件，五个表页：
 #              资产负债表 / 利润表 / 现金流量表（来自 KDS_Report）+ 科目余额 / 序时账簿（来自 GL_BALANCE / GL_VOUCHER）。
@@ -141,21 +147,42 @@ def _write_subject(wb, rows, book_name, year, period, cur):
     return ws
 
 
-def _write_journal(wb, rows, progress=None):
-    """序时账簿：一行表头 + 明细。两万多行——冻结表头并挂自动筛选，否则根本没法用。
-    progress(已写行数)：每 2 万行回调一次（42 万行要写三四分钟，页面上得看得到在动）。"""
-    ws = wb.create_sheet("序时账簿")
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = "A1:%s%d" % (_gl(len(kc.JOURNAL_COLS)), len(rows) + 1)
-    _widths(ws, "序时账簿")
-    ws.append([_c(ws, t, F_LGR_B, center=True) for t in kc.JOURNAL_COLS])
-    for i, row in enumerate(rows, start=1):
-        ws.append([_c(ws, None if v == "" else v, F_LGR,
-                      FMT4 if ci in (10, 11) else ("#,##0" if ci == 3 else None))
-                   for ci, v in enumerate(row, start=1)])
-        if progress and i % 20000 == 0:
-            progress(i)
-    return ws
+def _write_journal(wb, rows, total, progress=None):
+    """序时账簿：一行表头 + 明细，rows 是迭代器（V2.999，见下）、total 是总行数（取数阶段结束时已知）。
+    冻结表头并挂自动筛选，否则根本没法用。
+    progress(已写行数)：每 2 万行回调一次（42 万行要写三四分钟，页面上得看得到在动）。
+
+    V2.999 分表页：Excel 单表硬上限 1,048,576 行，107 号 2026-09 几百万行时单表页必炸
+    （连续两次导出失败的根因之一）。每写满 JOURNAL_SHEET_MAX 行新开一个表页：
+    序时账簿 / 序时账簿_2 / …，各自独立表头、冻结、筛选、列宽。
+    只写模式下冻结/筛选/列宽必须在 append 行之前设好——total 已知，所以每个表页的
+    筛选范围在写行前就能精确算出来，和单表页时代一模一样。"""
+    it = iter(rows)
+    written, sheet_no = 0, 0
+    while True:
+        remain = total - written
+        if remain <= 0 and sheet_no:
+            break
+        cap = min(remain, JOURNAL_SHEET_MAX) if remain > 0 else 0
+        sheet_no += 1
+        ws = wb.create_sheet("序时账簿" if sheet_no == 1 else "序时账簿_%d" % sheet_no)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = "A1:%s%d" % (_gl(len(kc.JOURNAL_COLS)), cap + 1)
+        _widths(ws, "序时账簿")
+        ws.append([_c(ws, t, F_LGR_B, center=True) for t in kc.JOURNAL_COLS])
+        for _ in range(cap):
+            row = next(it)
+            ws.append([_c(ws, None if v == "" else v, F_LGR,
+                          FMT4 if ci in (10, 11) else ("#,##0" if ci == 3 else None))
+                       for ci, v in enumerate(row, start=1)])
+            written += 1
+            if progress and written % 20000 == 0:
+                progress(written)
+    return written
+
+
+# 序时簿单个表页最多多少数据行。Excel 硬上限 1,048,576（含表头行），留足余量取整 100 万。
+JOURNAL_SHEET_MAX = 1000000
 
 
 _BAD_FN = re.compile(r'[\\/:*?"<>|]')
@@ -175,15 +202,16 @@ def file_name(year, period, org, org_name):
     return "%d年%02d期_%s_%s_财务报表.xlsx" % (year, int(period), org, _BAD_FN.sub("_", org_name or ""))
 
 
-def build_workbook(year, period, rpt, sheets, subject_rows, journal_rows, cur, progress=None):
+def build_workbook(year, period, rpt, sheets, subject_rows, journal_rows, journal_total, cur, progress=None):
     """组装一个主体的工作簿。表页顺序＝三大报表在前、两张账表在后（业务方口径：
-    "三大报表，和科目余额表，序时账簿"），**不用金蝶那个 资产负债表→序时簿→科目余额→利润表→现金流量表 的怪序。**"""
+    "三大报表，和科目余额表，序时账簿"），**不用金蝶那个 资产负债表→序时簿→科目余额→利润表→现金流量表 的怪序。**
+    journal_rows 是迭代器（序时簿超 100 万行会分多个表页，见 _write_journal）、journal_total 是总行数。"""
     wb = Workbook(write_only=True)                        # 只写模式：没有默认空表页，不用再 remove
     for name in kc.FIN_RPT_SHEETS:                        # 资产负债表 / 利润表 / 现金流量表
         if name in sheets:
             _write_fin_sheet(wb, name, sheets[name])
     _write_subject(wb, subject_rows, rpt["org_name"], year, period, cur)
-    _write_journal(wb, journal_rows, progress)
+    _write_journal(wb, journal_rows, journal_total, progress)
     return wb
 
 
@@ -198,21 +226,30 @@ def export_one(year, period, rpt, out_dir, s=None, conf=None, progress=None):
     p("取科目余额", 0, 0)
     subject = kc.fetch_subject_balance_full(year, period, rpt["org"], cur=cur, s=s, conf=conf)
     p("取序时账簿", 0, 0)
-    journal = kc.fetch_journal_full(year, period, rpt["org"], s=s, conf=conf,
-                                    on_page=lambda n: p("取序时账簿", n, 0))
-    nj = len(journal)
-    p("写入 Excel", 0, nj)
-    wb = build_workbook(year, period, rpt, sheets, subject, journal, cur,
-                        progress=lambda n: p("写入 Excel", n, nj))
-    mdir = os.path.join(out_dir, month_dir(year, period))
-    os.makedirs(mdir, exist_ok=True)
-    path = os.path.join(mdir, file_name(year, period, rpt["org"], rpt["org_name"]))
-    # 先写临时文件、再原子改名，**不要直接 wb.save(目标路径)**：
-    # 取件机每分钟来扫一次，openpyxl 往目标路径写的那几秒里文件是残缺的——
-    # 正好被扫到就会取走半个 Excel。改名是原子操作，外界要么看到旧的、要么看到完整的新的，
-    # 没有中间态。同名覆盖＝重导即更新，不留新旧两份让人猜哪个准。
-    tmp = path + ".part"
-    p("存盘", nj, nj)
-    wb.save(tmp)
-    os.replace(tmp, path)
-    return path, {"三大报表": len(sheets), "科目余额": len(subject), "序时账簿": len(journal)}
+    # V2.999：序时簿不再整本读进内存（107 号 2026-09 几百万行必 OOM），
+    # 分页直写临时 SQLite，建索引后流式读出直写 Excel；临时库无论如何都要删掉。
+    db_path, nj = kc.journal_to_temp(year, period, rpt["org"], s=s, conf=conf,
+                                     on_page=lambda n: p("取序时账簿", n, 0))
+    it = kc.iter_journal_temp(db_path)
+    try:
+        p("写入 Excel", 0, nj)
+        wb = build_workbook(year, period, rpt, sheets, subject, it, nj, cur,
+                            progress=lambda n: p("写入 Excel", n, nj))
+        mdir = os.path.join(out_dir, month_dir(year, period))
+        os.makedirs(mdir, exist_ok=True)
+        path = os.path.join(mdir, file_name(year, period, rpt["org"], rpt["org_name"]))
+        # 先写临时文件、再原子改名，**不要直接 wb.save(目标路径)**：
+        # 取件机每分钟来扫一次，openpyxl 往目标路径写的那几秒里文件是残缺的——
+        # 正好被扫到就会取走半个 Excel。改名是原子操作，外界要么看到旧的、要么看到完整的新的，
+        # 没有中间态。同名覆盖＝重导即更新，不留新旧两份让人猜哪个准。
+        tmp = path + ".part"
+        p("存盘", nj, nj)
+        wb.save(tmp)
+        os.replace(tmp, path)
+        return path, {"三大报表": len(sheets), "科目余额": len(subject), "序时账簿": nj}
+    finally:
+        it.close()                                  # 关闭生成器 → 释放 SQLite 连接（Windows 上占着文件删不掉）
+        try:
+            os.remove(db_path)
+        except OSError:
+            pass
