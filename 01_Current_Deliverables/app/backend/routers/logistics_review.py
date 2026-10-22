@@ -3465,16 +3465,14 @@ def _box_docs(rsub, carrier):
                      "n_mat": len(lines), "q_diff": round(bill_amt - kd_sum, 2) if (kd_sum and not is_trip) else None,
                      "trip": trip,
                      "materials": mrows})
-    # 账单公式核价(恒茂冷藏费=天数×计费数量×单价、处置费=吨重×19.4)：差超 1 分标「核价不符」，一致的注明算法
+    # 账单公式核价(恒茂冷藏费=天数×计费数量×单价、处置费=吨重×19.4、天鹰=吨数×18.5)：差超 1 分标「核价不符」。
+    # 结论不再塞进 trip——trip 只表示真·包天包趟(_trip_check)；以前把公式结论也写进 trip，前端就把这些行
+    # 显示成「按趟收钱，不比金蝶量」「报价里没有这个车型」(天鹰 9 月因此满屏误标)，还把真·包天包趟行的报价核对结论盖掉。
+    # 价的展示走前端 sub_fees「标准/公式」分支(按公式对上/和公式对不上)，核不了的量该比金蝶照旧比。
     for x in docs:
         sf = x.get("sub_fees") or {}
-        if "标准" in sf:
-            tgt = next((k for k in sf if k not in ("标准", "公式", "核价差") and isinstance(sf[k], (int, float))), "金额")
-            if "核价差" in sf:
-                x["state"], x["mode_cn"] = "price", "核价不符"
-                x["trip"] = {"verdict": "diff", "msg": "%s %s ≠ %s %s" % (tgt, _fmt_amt(sf[tgt]), sf.get("公式") or "标准", _fmt_amt(sf["标准"]))}
-            else:
-                x["trip"] = {"verdict": "ok", "msg": "%s = %s ✓" % (sf.get("公式") or "按公式", _fmt_amt(sf["标准"]))}
+        if "标准" in sf and "核价差" in sf:
+            x["state"], x["mode_cn"] = "price", "核价不符"
     # 同一单号账单上有多行(包天包趟一车一行 / 恒茂一张调拨单拆几个批次)：每行注明本单共几行、合计运费；单位运费/费比按本单合计运费算；
     # 按件数/箱核的，拿本单几行账单量之和比金蝶(不再单行比整单)
     # V2.866(恒茂 8 月)：同一笔调拨，账单上有几行写的是调入单号(FBDR075386)、有一行写成了调出单号(FBDC075377)——金蝶调入单的「源单号」就是那张调出单。
