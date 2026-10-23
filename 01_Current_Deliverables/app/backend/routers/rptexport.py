@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-23 | Author: Kimi / Reginald Zeng | Version: V2.1001
+# Description: 下载接口支持 Range 断点续传（206）——配套取件机 pull_reports.py 流式续传改造，
+#              解决 216M 大文件在窄带宽下整下被任务计划强杀、无限重试的问题。
+# [Change Log]
 # Date: 2026-10-22 | Author: Kimi / Reginald Zeng | Version: V2.999
 # Description: 回执邮件补一句「序时账簿超 100 万行自动分表页」。进度/取消/取件/删除逻辑不变。
 # [Change Log]
@@ -21,7 +25,8 @@ import mailer
 import notifier
 import report_export as rx
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from urllib.parse import quote as _quote
 
 from core import JSONResponse, _require_perm, db, datetime, pull_token, pull_token_ok
 
@@ -429,14 +434,42 @@ def rptexport_period_status(request: Request, year: int = 0):
 
 @router.get("/api/rptexport/download")
 def rptexport_download(request: Request, name: str = ""):
-    """下载一个导出文件。name 收【月份目录/文件名】或裸文件名，必须真在落地目录里。"""
+    """下载一个导出文件。name 收【月份目录/文件名】或裸文件名，必须真在落地目录里。
+    V2.1001：支持 Range 断点续传（206）——107 号 2026-09 导出 216M，取件机在窄带宽下
+    整文件下载会超时被任务计划强杀、无限重试；有 Range 才能一轮轮接力下完。"""
     if not _pull_ok(request):
         return JSONResponse({"ok": False, "msg": "需要「报表导出」权限或正确的取件令牌"}, status_code=403)
     p = _safe_path(name)
     if not p:
         return JSONResponse({"ok": False, "msg": "文件不存在或文件名不合法"}, status_code=404)
+    size = os.path.getsize(p)
+    start = _parse_range(request.headers.get("range"), size)
+    if start:
+        def _gen():
+            with open(p, "rb") as f:
+                f.seek(start)
+                while True:
+                    chunk = f.read(262144)
+                    if not chunk:
+                        break
+                    yield chunk
+        return StreamingResponse(_gen(), status_code=206,
+                                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                 headers={"Content-Range": "bytes %d-%d/%d" % (start, size - 1, size),
+                                          "Content-Length": str(size - start), "Accept-Ranges": "bytes",
+                                          "Content-Disposition": "attachment; filename*=utf-8''%s"
+                                                                 % _quote(os.path.basename(p))})
     return FileResponse(p, filename=os.path.basename(p),
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def _parse_range(h, size):
+    """解析 `Range: bytes=start-`（取件机只发这一种）。返回起点；不带/不合法/越界 → None（整文件）。"""
+    m = re.match(r"bytes=(\d+)-\s*$", str(h or ""))
+    if not m:
+        return None
+    start = int(m.group(1))
+    return start if 0 < start < size else None
 
 
 _SYNC_KEY = "rpt_export_sync"     # 取件机回报的最近一次同步结果

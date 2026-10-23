@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-23 | Author: Kimi / Reginald Zeng | Version: V2.1001
+# Description: 下载改流式+断点续传（fetch_resume）：整读内存改分块落 .part，中断下轮从断点续。
+#              起因：107 号 2026-09 报表 216M，窄带宽+任务计划 5 分钟强杀下整文件下载无限空转，
+#              取件机回报中断触发停机告警（机器其实活着，卡在下载）。配套服务端 Range 支持（rptexport.py）。
+# [Change Log]
 # Date: 2026-08-07 | Author: Claude / c | Version: V2.241
 # Description: 报表取件机——跑在【公司内网一台常开电脑】上，定时把云端工作台导好的报表
 #              拉回来、放进共享盘。
@@ -23,7 +28,6 @@ import re
 import shutil
 import socket
 import sys
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -78,6 +82,32 @@ def api(cfg, path, query=None, data=None, binary=False):
         return r.read() if binary else json.loads(r.read().decode("utf-8"))
 
 
+def fetch_resume(cfg, rel, dst, size):
+    """流式下载 + 断点续传（V2.1001）：落到 dst 旁边的 .part，下多少存多少。
+    这轮被任务计划强杀/网络掐断都不怕——下轮从断点接着下（Range 头），文件再大也能接力完；
+    服务器不支持 Range（旧版）时回退整文件重下，行为同旧版。
+    旧版把整文件读进内存再写盘：216M 的报表在窄带宽 + 任务 5 分钟强杀下永远下不完
+    （2026-10-23 实测：取件机每 5 分钟从头下 107 号报表，无限空转、回报中断、触发停机告警）。"""
+    part = dst + ".part"
+    url = cfg["base"] + "/api/rptexport/download?" + urllib.parse.urlencode({"name": rel})
+    while True:
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        if have > size:
+            os.remove(part)                       # 服务器端重导过、文件变样：作废重来
+            have = 0
+        if have == size:
+            return part
+        req = urllib.request.Request(url)
+        req.add_header("X-Pull-Token", cfg["token"])
+        if have:
+            req.add_header("Range", "bytes=%d-" % have)
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as r:
+            # 206=续传成功接着写；200=服务器不认 Range，从头整下（覆盖写）
+            mode = "ab" if (have and r.status == 206) else "wb"
+            with open(part, mode) as w:
+                shutil.copyfileobj(r, w, 262144)  # 分块落盘，内存只占一个块
+
+
 def main():
     cfg = load_cfg()
     if not os.path.isdir(cfg["dest"]):
@@ -125,19 +155,12 @@ def main():
             skipped += 1
             continue
         try:
-            blob = api(cfg, "/api/rptexport/download", {"name": rel}, binary=True)
-            if len(blob) != f["size"]:
-                # 不是下载坏了——是服务器上这个文件正在被重导覆盖：/files 报的是取清单那一刻的大小。
-                # 不写盘也不记成失败（记失败会在页面刷一片红字吓人）；state 没更新，下轮自然重取。
-                retry.append(rel)
-                continue
             sub = os.path.dirname(dst)                   # 按月建子目录，与服务器结构一致
             os.makedirs(sub, exist_ok=True)
-            # 先落临时文件再原子改名——别让同事在共享盘上看到写了一半的 Excel
-            fd, tmp = tempfile.mkstemp(dir=sub, suffix=".part")
-            with os.fdopen(fd, "wb") as w:
-                w.write(blob)
-            shutil.move(tmp, dst)
+            # 流式续传落 .part，下完原子改名——别让同事在共享盘上看到写了一半的 Excel；
+            # 这轮没下完（被掐断/断网），.part 留着，下轮从断点续（fetch_resume）
+            part = fetch_resume(cfg, rel, dst, f["size"])
+            shutil.move(part, dst)
             state[rel] = stamp
             copied.append(rel)
         except Exception as e:
