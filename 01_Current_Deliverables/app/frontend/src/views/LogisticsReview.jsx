@@ -1747,7 +1747,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               按体积 {d.vol_kg ? `${d.vol_kg} 千克/方` : '未设'} ⚙</button>}
             {d && d.by_box && <button className="btn sm" onClick={() => setUnitDlg(true)} title="金蝶按升、按个计量的物料（牛奶、稀奶油、内袋），填每 1 升/个 折多少千克，才能和账单的千克比。按物料存，各家各月共用。">
               单位换算·箱规{d.bw_gap && d.bw_gap.on ? '·每箱计费重量' : ''}{((d.unit_gap && d.unit_gap.n_mat) || 0) + ((d.bw_gap && d.bw_gap.n_mat) || 0) > 0 ? <b className="diffbad"> {((d.unit_gap && d.unit_gap.n_mat) || 0) + ((d.bw_gap && d.bw_gap.n_mat) || 0)} 种没填</b> : ''} ⚙</button>}
-            <button className="btn sm" onClick={() => setBillDlg(true)} title="看这家这月现在解析着哪几份账单（谁传的、什么时候），替换、删除或新增一份">上传账单解析</button>
+            {/* 账单上传/替换/删除已挪到第①步「数据接入」（V2.1001，用户：和第③步重复了） */}
             <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee} title="重新从金蝶取出库单物料，刷新核量">{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
             <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
             <input type="search" placeholder="搜单号/客户/物料" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
@@ -1802,7 +1802,6 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             这些单的金蝶重量没算全，多半会挂在「数量不符」。<button className="lnk" onClick={() => setUnitDlg(true)}>去填单位换算</button></div>}
           {d && d.bw_gap && d.bw_gap.n_mat > 0 && <div className="adjnote">这家有按<b>吨重</b>收费的页：账单吨重＝箱数 × 每箱多少千克（含包装）。有 <b>{d.bw_gap.n_mat}</b> 种物料还没填「每箱计费重量」，涉及 <b>{d.bw_gap.n_doc}</b> 张单——
             这些单先拿金蝶净重比，会挂在「数量不符」。<button className="lnk" onClick={() => setUnitDlg(true)}>去填每箱计费重量</button></div>}
-          {billDlg && <BillsDlg carrier={carrier} period={period} onClose={() => setBillDlg(false)} onChanged={() => { setGroup('ex'); setPage(1); load(); refetchL() }} flash={flash} />}
           {unitDlg && <UnitKgDlg carrier={carrier} period={period} onClose={() => setUnitDlg(false)} onSaved={() => { load(); refetchL() }} flash={flash} />}
           {(() => {     // 没有金蝶单号的账单行：不列成单据，只留一行数。金额为 0 的(迅鸽逐单表里不带钱的仓储行，钱在汇总行)不提
             const nd = ((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)
