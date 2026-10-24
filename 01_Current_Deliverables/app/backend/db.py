@@ -1927,6 +1927,26 @@ def _ensure_review_subj_cols():
 _ensure_review_subj_cols()
 
 
+def _ensure_bill_raw_index():
+    """V2.1002 账单原件表补 (carrier, period) 索引：第①步数据接入按家按月查原件，原来无索引、
+    MySQL 全表扫（连 blob 一起过，天鹰 8 期实测 3.5s）。新库由 store 表定义的 Index 带建，这里兜老库。"""
+    from sqlalchemy import text as _text
+    try:
+        with _engine.begin() as c:
+            if DB_URL.startswith("sqlite"):
+                c.execute(_text("CREATE INDEX IF NOT EXISTS idx_bill_raw_cp ON logistics_bill_raw(carrier, period)"))
+            else:
+                have = [r[0] for r in c.execute(_text(
+                    "SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_NAME='logistics_bill_raw' AND TABLE_SCHEMA=DATABASE()")).fetchall()]
+                if "idx_bill_raw_cp" not in have:
+                    c.execute(_text("ALTER TABLE logistics_bill_raw ADD INDEX idx_bill_raw_cp (carrier, period)"))
+    except Exception:
+        pass
+
+
+_ensure_bill_raw_index()
+
+
 def _ensure_ec_shop_map_cols():
     """V2.250 建的 ec_shop_map 无 alipay_acct 列时补上（create_all 不改既有表，同上款兜底）。"""
     from sqlalchemy import text as _text

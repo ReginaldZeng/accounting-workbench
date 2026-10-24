@@ -9,7 +9,7 @@
 #   ③ logistics_intake_spec  取数说明——一家承运商一条 spec_json：哪些 sheet 算费用、每张表列名/汇总/单据/数量列/费用项翻译。
 #      通用解析器按它认列（按列名不按序号），加一家配一张，不改代码。
 # 复核链路：上传→通用解析(按 intake_spec)→bill_lines(detail+accrual)→核价(price_card)+核量(金蝶数量)→归一态→计提行(复用 logistics_bills)。
-from sqlalchemy import Table, Column, Integer, String, Float, Text, MetaData, LargeBinary, insert, select
+from sqlalchemy import Table, Column, Integer, String, Float, Text, MetaData, LargeBinary, Index, insert, select
 
 _md = MetaData()
 
@@ -228,6 +228,7 @@ bill_raw = Table(
     Column("data", LargeBinary(2 ** 32 - 1)),
     Column("created_by", String(40)),
     Column("created_at", String(20)),
+    Index("idx_bill_raw_cp", "carrier", "period"),   # V2.1002：原来无索引，MySQL 按家按月查原件全表扫（连 blob），第①步实测 3.5s
 )
 
 # 凭证装订(V2.850)：纸质付款单扫过没有、计提更正单打过没有。一张审批单一行。

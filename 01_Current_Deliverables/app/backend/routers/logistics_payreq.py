@@ -787,6 +787,11 @@ def _scheduler():
                 _lv.auto_round("定时")
             except Exception as e:
                 worker_store.record("voucher_auto", ok=False, summary="自动做账这一轮出错", error=str(e))
+            try:                      # 总表金蝶 2241 缓存预热(V2.1002)：每圈把本月的重取一遍，打开总表基本永远命中热缓存，不用干等金蝶
+                from routers import logistics_review as _lr
+                _lr._ov_kd_rows(time.strftime("%Y-%m"), fresh=True)
+            except Exception:
+                pass
             if r.get("new") or r.get("failed") or r.get("err"):
                 bad = r.get("failed") or r.get("err")
                 worker_store.record("payreq", n=r.get("new") or 0, ok=not bad, summary="已接入 %d 张请款单" % (r.get("new") or 0), refs=r.get("newIds"),

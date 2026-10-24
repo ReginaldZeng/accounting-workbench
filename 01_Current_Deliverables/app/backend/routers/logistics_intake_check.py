@@ -100,6 +100,9 @@ def warm_report(carrier, period, src, spec, data):
 
 
 def _report(carrier, period, raw, spec):
+    """一份账单的核对报告：内存 → 落库 → 现算三层。V2.1002：只有要现算才单点取原件 blob——
+    原来列表查询就把全部原件 blob 读出来（天鹰 8 期 5 份 9.9MB，实测每次打开第①步 3.5s），
+    缓存明明命中也白读；且 bill_raw 无 (carrier,period) 索引，MySQL 全表扫整月的 blob。"""
     sha = _spec_sha(spec)
     k = (carrier, period, raw.get("bill_src") or "", raw.get("sha256") or "", sha)
     with _REP_LOCK:
@@ -109,8 +112,13 @@ def _report(carrier, period, raw, spec):
     rid = raw.get("id")
     rep = _report_db_get(rid, sha) if rid else None
     if rep is None:
+        data = raw.get("data")
+        if data is None and rid:
+            with db._engine.connect() as c:
+                data = c.execute(select(BR.c.data).where(BR.c.id == rid)).scalar()
         try:
-            rep = intake.sheet_report(dict(spec), bytes(raw["data"]), period)
+            rep = intake.sheet_report(dict(spec), bytes(data), period) if data else \
+                {"err": "没取到原件", "sheets": [], "verdict": "nocheck"}
         except Exception as e:
             rep = {"err": "按现在的取数说明解析不了：%s" % str(e)[:120], "sheets": [], "verdict": "err"}
         if rid:
@@ -146,10 +154,10 @@ def _history(carrier, period):
 def intake_view(carrier, period):
     spec = LR._load_spec(carrier) or {}
     how, tot = _how(spec)
-    raws = _raws(carrier, period, with_data=bool(spec))
+    raws = _raws(carrier, period)        # 不取 blob（V2.1002）：报告缓存命中的不需要原件，没命中的在 _report 里单点取
     files = []
     for r in raws:
-        rep = _report(carrier, period, r, spec) if spec and r.get("data") else None
+        rep = _report(carrier, period, r, spec) if spec else None
         files.append({"id": r["id"], "src": r.get("bill_src") or "", "name": r.get("name") or "", "origin": r.get("origin") or "",
                       "size": r.get("size"), "by": r.get("created_by") or "", "at": str(r.get("created_at") or "")[:16], "report": rep})
     bills = LR._bill_sources(carrier, period)
@@ -196,10 +204,10 @@ def overview(period):
         how, tot = _how(spec) if spec else ("没有取数说明", False)
         reqs = _payreqs(ca, period)
         bills = LR._bill_sources(ca, period)
-        raws = _raws(ca, period, with_data=bool(spec))
+        raws = _raws(ca, period)         # 同上：不取 blob
         if not spec and not reqs and not raws and not bills:
             continue          # 没取数说明、这个月也什么都没有的(撤回的请款单留下的名字)，不列
-        reps = [_report(ca, period, r, spec) for r in raws if spec and r.get("data")]
+        reps = [_report(ca, period, r, spec) for r in raws if spec]
         bill_total = round(sum(b["amount"] for b in bills), 2) if bills else None
         req_total = round(sum(float(q.get("amount") or 0) for q in reqs), 2) if reqs else None
         vs = [r.get("verdict") for r in reps]

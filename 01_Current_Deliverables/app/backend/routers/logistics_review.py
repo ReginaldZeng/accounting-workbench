@@ -141,8 +141,33 @@ def review_carriers(request: Request, period: str = ""):
 _SUBJECTS = ["深圳星期零", "深圳星期九", "孝感星期九"]   # 固定三列（其余账簿归「其它」不单列）
 
 
+_OV_TTL = 1800       # 金蝶 2241 缓存有效期 30 分钟
+_OV_FAIL_TTL = 120   # 取数失败短路 2 分钟：原来失败不留痕，金蝶一抖动，每开一次总表就全量重打一遍
+_OV_REFRESHING = set()   # 正在后台刷新的账期(防重)
+_OV_FAIL_AT = {}         # ck → 上次取数失败时间
+
+
+def _ov_refresh_async(period):
+    """缓存过期但旧数据还在：后台线程重取，这次请求先用旧的（V2.1002 总表提速——原来过期就干等一次全月凭证查询）。"""
+    import threading
+    if period in _OV_REFRESHING:
+        return
+    _OV_REFRESHING.add(period)
+
+    def _run():
+        try:
+            _ov_kd_rows(period, fresh=True)
+        finally:
+            _OV_REFRESHING.discard(period)
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _ov_kd_rows(period, fresh=False):
-    """金蝶本期 2241 凭证行(总表与请款单认月份共用，按账期缓存 30 分钟) → (rows, fetched_at, cached)。"""
+    """金蝶本期 2241 凭证行(总表与请款单认月份共用，按账期缓存 30 分钟) → (rows, fetched_at, cached)。
+
+    V2.1002：过期但有旧数据 → 先返旧数据、后台刷新（stale-while-revalidate），cached 返 "stale"，
+    前端在「金蝶数据取于 ××」后补一句「后台刷新中」。真正的冷启动(从没取过这期)才同步等金蝶。
+    """
     import time as _t
     y, m = period.split("-")[:2]
     # 供应商维度(FFLEX4)：名称用金蝶全称、带编码(原来从摘要截名，截在「供应链/物流」不全)，V2.725
@@ -150,15 +175,23 @@ def _ov_kd_rows(period, fresh=False):
                                            ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商")]
     ck = ("ov2", period)
     cc = _ACCR_CACHE.get(ck)
-    if cc and not fresh and _t.time() - cc[2] < 1800:
-        return cc[0], cc[1], True
+    now = _t.time()
+    if cc and not fresh:
+        if now - cc[2] < _OV_TTL:
+            return cc[0], cc[1], True
+        _ov_refresh_async(period)
+        return cc[0], cc[1], "stale"
+    if not fresh and now - _OV_FAIL_AT.get(ck, 0) < _OV_FAIL_TTL:
+        return [], None, False            # 刚失败过：别立刻再打金蝶
     rows = []
     try:
         s, conf = kc.login()
         rows = kc._query(s, conf, "GL_VOUCHER", fields,
                          "FAccountID.FNumber like '2241%%' and FYear=%d and FPeriod=%d" % (int(y), int(m)))
+        _OV_FAIL_AT.pop(ck, None)
     except Exception:
         rows = []
+        _OV_FAIL_AT[ck] = now
     fetched_at = _now()
     if rows:
         _ACCR_CACHE[ck] = (rows, fetched_at, _t.time())

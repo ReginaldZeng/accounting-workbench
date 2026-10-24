@@ -1404,7 +1404,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <div style={{ flex: 1 }} />
             <button className="lnk" style={{ fontSize: 12 }} title="系统按金蝶供应商档案的「供应商分组」认物流商，点开看 / 改" onClick={() => setScopeDlg(true)}>
               物流范围：{scopeSum ? <>金蝶分组「{scopeSum.names.join('、') || '未设置'}」{scopeSum.n} 家{scopeSum.stale ? '（金蝶没读到，用的旧名单）' : ''}</> : '读取中…'}</button>
-            {ov && ov.fetched_at && <span className="ovsub" title="金蝶计提数据缓存30分钟；复核状态、账单应付每次现算">金蝶数据取于 {ov.fetched_at.slice(5)}</span>}
+            {ov && ov.fetched_at && <span className="ovsub" title="金蝶计提数据缓存30分钟，过期先显示旧数、后台自动刷新；复核状态、账单应付每次现算">金蝶数据取于 {ov.fetched_at.slice(5)}{ov.cached === 'stale' ? '（后台刷新中）' : ''}</span>}
             <button className="btn sm" disabled={ovBusy} onClick={refreshOv} title="重新从金蝶读取计提">{ovBusy ? '刷新中…' : '刷新'}</button>
             <input type="search" placeholder="搜承运商/编码" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 130 }} />
           </div>
