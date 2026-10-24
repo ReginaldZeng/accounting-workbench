@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
-# Description: 【物流账单复核】路由。V2.1004 新增四步 readiness 统一判定并接入 /sign；金蝶取数失败显式报错且不缓存。
+# Date: 2026-10-24 | Author: Kimi | Version: V2.1006
+# Description: 【物流账单复核】路由。四步 readiness 统一登记；V2.1006 逐单与归类共享金蝶物料缓存，强制刷新与修改可正确失效。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
@@ -10,6 +10,7 @@ import json
 import re
 import calendar
 import time
+import threading
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Response
@@ -1137,9 +1138,22 @@ _DOC_MAT_FIELDS = {
 }
 
 
-def _fetch_doc_materials(s, conf, docs_by_form):
-    """按 单据前缀→form 分组，查金蝶物料明细。返回 {单号: [{编码,名称,基本数量,基本单位,往来,销售额}]}。只读，缺列降级。
-    同一前缀可能对应几种单据(XQLCK 既有销售出库也有其他出库、FBDR 调入/调出)：首选单据查不到的，按 _FORM_BY_PREFIX 依次再试(V2.718)。"""
+_DOC_MAT_CACHE = {}
+_DOC_MAT_LOCK = threading.RLock()
+
+
+def _doc_mat_key(docs_by_form):
+    return tuple(sorted((form, tuple(sorted(str(d) for d in docs))) for form, docs in docs_by_form.items()))
+
+
+def _fetch_doc_materials(s, conf, docs_by_form, fresh=False):
+    """按单据组读取金蝶物料；逐单与归类共享10分钟缓存，fresh绕过，_bust统一失效。最多保留32组，避免多账期无限增长。"""
+    key = _doc_mat_key(docs_by_form)
+    if not fresh:
+        with _DOC_MAT_LOCK:
+            cached = _DOC_MAT_CACHE.get(key)
+            if cached and time.time() - cached[1] < 600:
+                return cached[0]
     out = _fetch_doc_materials_once(s, conf, docs_by_form)
     tried = {f: set(str(d) for d in ds) for f, ds in docs_by_form.items()}
     left = {str(d) for ds in docs_by_form.values() for d in ds if str(d) not in out}
@@ -1157,6 +1171,10 @@ def _fetch_doc_materials(s, conf, docs_by_form):
             tried.setdefault(f, set()).update(ds)
         out.update(_fetch_doc_materials_once(s, conf, nxt))
         left = {d for d in left if d not in out}
+    with _DOC_MAT_LOCK:
+        _DOC_MAT_CACHE[key] = (out, time.time())
+        while len(_DOC_MAT_CACHE) > 32:
+            _DOC_MAT_CACHE.pop(next(iter(_DOC_MAT_CACHE)))
     return out
 
 
@@ -3940,6 +3958,8 @@ def _bust(carrier, period):
     """归类/备注/登记/重解析/接金蝶 → 该承运商该月的 逐笔、结论、逐单视图 缓存作废。"""
     for k in ((carrier, period), ("lines", carrier, period), ("view", carrier, period), ("cls", carrier, period)):
         _ACCR_CACHE.pop(k, None)
+    with _DOC_MAT_LOCK:
+        _DOC_MAT_CACHE.clear()
 
 
 def _signed(carrier, period):

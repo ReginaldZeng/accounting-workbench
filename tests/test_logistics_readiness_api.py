@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
-# Description: 物流 readiness/sign 与金蝶异常传播接口测试；全部使用合成数据和桩，不连接真实数据库、金蝶或钉钉。
+# Date: 2026-10-24 | Author: Kimi | Version: V2.1006
+# Description: 物流 readiness/sign、异常传播与物料共享缓存测试；全部使用合成数据和桩，不连接真实数据库、金蝶或钉钉。
 import asyncio
 import json
 import sys
@@ -190,6 +190,36 @@ class FailureTests(unittest.TestCase):
         self.assertEqual(out.status_code, 502)
         self.assertIn("物料", json.loads(out.body)["msg"])
         self.assertNotIn(("view", "丰源", "2026-09"), self.lr._ACCR_CACHE)
+
+
+class MaterialCacheTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def setUp(self):
+        self.lr._ACCR_CACHE.clear()
+        self.lr._DOC_MAT_CACHE.clear()
+
+    def test_shared_material_cache_fresh_and_bust(self):
+        calls = []
+
+        def query(session, conf, form, fields, condition):
+            calls.append((form, condition))
+            return [{"单号": "XSCKD1", "编码": "M1", "基本数量": 2}]
+
+        docs = {"SAL_OUTSTOCK": {"XSCKD1"}}
+        with patch.object(self.lr.kc, "_query", side_effect=query):
+            first = self.lr._fetch_doc_materials(object(), {}, docs)
+            second = self.lr._fetch_doc_materials(object(), {}, docs)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(first, second)
+            self.lr._fetch_doc_materials(object(), {}, docs, fresh=True)
+            self.assertEqual(len(calls), 2)
+            self.lr._bust("丰源", "2026-09")
+            self.assertEqual(len(self.lr._DOC_MAT_CACHE), 0)
+            self.lr._fetch_doc_materials(object(), {}, docs)
+            self.assertEqual(len(calls), 3)
 
 
 if __name__ == "__main__":

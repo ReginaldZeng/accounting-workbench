@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
-# Description: 物流账单复核·费用归类（第③轴）接口。V2.1004 计提故障不再折叠为空，供 readiness 明确判错。
+# Date: 2026-10-24 | Author: Kimi | Version: V2.1006
+# Description: 物流账单复核·费用归类接口。计提故障显式报错；V2.1006 fresh传递物料缓存绕过，与逐单共享取数结果。
 #   原说明：只读金蝶，单据头(销售组织/领料部门/需求组织/调入组织)＋物料档案分组；
 #   计提取 logistics_review._accr_entries(本月逐笔计提)。判定逻辑在 kernels/logistics_classify.py。
 #   GET  /api/logistics-review/classify        一家一个月：每张单的归类结论 + 和计提对照表(30 分钟缓存，fresh=1 重取)
@@ -78,7 +78,7 @@ def _bill_docs(carrier, period):
     return list(by.values())
 
 
-def _build(carrier, period):
+def _build(carrier, period, fresh=False):
     docs = _bill_docs(carrier, period)
     if len(docs) > LR._FULL_DOCS:
         return {"ok": False, "msg": "%s 本月 %d 张单，超过 %d 张的先不整家判归类（要拉的金蝶太多）" % (carrier, len(docs), LR._FULL_DOCS)}
@@ -90,7 +90,7 @@ def _build(carrier, period):
     kd, groups, accr = {}, {}, []
     if by_form:
         s, conf = kc.login()
-        mats = LR._fetch_doc_materials(s, conf, by_form)          # 首选单据查不到会换下一种再试
+        mats = LR._fetch_doc_materials(s, conf, by_form, fresh=fresh)
         real = {}
         for n, ms in mats.items():
             real.setdefault(ms[0].get("_form"), set()).add(n)
@@ -124,7 +124,7 @@ def classify(request: Request, carrier: str = "", period: str = "", fresh: int =
     if cc and not fresh and time.time() - cc[2] < (_TTL if cc[0].get("accr_ok") else 300):   # 计提没取到的只缓存 5 分钟
         return cc[0]
     try:
-        res = _build(carrier, period)
+        res = _build(carrier, period, fresh=bool(fresh))
     except Exception as e:
         return JSONResponse({"ok": False, "msg": "取金蝶失败：%s" % str(e)[:200]}, status_code=502)
     if res.get("ok"):
