@@ -795,10 +795,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   // 防串单：切承运商/账期后，旧请求的慢响应（迅鸽五千单要算几秒）不许盖掉新页面（V2.992 用户截到「页头跨越9月、
   // 表格却是迅鸽8月」——跨越11行毫秒级先到、迅鸽大响应后到把旧数据盖了上去）。序号对不上就丢弃。
   const _reqSeq = useRef(0)
+  const _ikSeq = useRef(0)     // 第①步用自己的序号(V2.1003)：原来和 load() 共用 _reqSeq，进一家时 loadIk 先取号、load 后取号，
+                               // ik 响应回来序号已对不上 → 永远被丢弃、第①步永远转圈（慢只是表象，这才是"读不出来"的根）
   const loadIk = () => {
-    const seq = ++_reqSeq.current
+    const seq = ++_ikSeq.current
     setIk(null)
-    return reviewIntake(carrier, period).then(r => { if (seq === _reqSeq.current) setIk(r) }).catch(e => { if (seq === _reqSeq.current) setIk({ err: e.message }) })
+    return reviewIntake(carrier, period).then(r => { if (seq === _ikSeq.current) setIk(r) }).catch(e => { if (seq === _ikSeq.current) setIk({ err: e.message }) })
   }
   useEffect(() => { if (mode === 'detail' && carrier) loadIk() }, [carrier, period, mode])
   const load = useCallback(() => {
