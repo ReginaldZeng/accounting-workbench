@@ -122,7 +122,7 @@ export function FlowTable({ rows, loading, plans, sel, setSel, canBatch, onSteps
           const c2 = byLater(r) ? <Cell kind="later" ic="补" main="票后到" title={`凭发票后补单${done ? '做的账' : '放行'}：${laterWho(r)}${nInv ? `；后来到的票：${invPlain(r)}` : '；发票还没到'}`}
             grey={<><span className="lt">后补单已审核</span>{nInv > 0 && <> · 票已到 {nInv} 张{invPend && <span className="w">，待审核</span>}</>}</>} />
             : !(r.invs || []).length ? ((after(2) || done) ? <Cell kind="wait" ic="○" main="没票" grey={r.later_slip ? `已登记后补单 #${r.later_slip.id}，待确认` : ''} />
-              : <Cell kind="stop" ic="!" main="没票" grey={r.later_slip ? `已登记后补单 #${r.later_slip.id}，到复核台第③步确认` : '票夹里还没有发票'} />)
+              : <Cell kind="stop" ic="!" main="没票" grey={r.later_slip ? `已登记后补单 #${r.later_slip.id}，到复核台第④步确认` : '票夹里还没有发票'} />)
               : r.inv_state === 'ok' ? <Cell kind="ok" ic="✓" main={main2} grey={grey2} />
                 : r.inv_state === 'diff' ? ((after(2) || done) ? <Cell kind="wait" ic="○" main={main2} grey={`合计 ${money(r.inv_total)} ≠ 请款`} /> : <Cell kind="stop" ic="!" main="发票≠请款" grey={`发票合计 ${money(r.inv_total)}`} />)
                   : (after(2) || done) ? <Cell kind="pend" ic={<Dots />} main={main2} grey={grey2} />

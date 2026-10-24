@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.730
-# Description: 【物流复核·钉钉请款单接入】用户 2026-10-01 定：自动扫钉钉「付款申请（公对公）」**全模板**(不是谁的待办)，
+# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
+# Description: 【物流复核·钉钉请款单接入】V2.1004 发票块补充后补确认，供四步 readiness 与 /sign 共用。
+#   原说明：用户 2026-10-01 定自动扫钉钉「付款申请（公对公）」**全模板**(不是谁的待办)，
 #   收款方是金蝶「物流运输服务…」供应商的留下(其余直接丢、不入库)，落到总表 承运商×主体×月份 一格，显示钉钉节点进度：
 #   已提交/待谁审批/待我审批/已通过·待付款/已付款(金蝶出现付款单＝已付款)。
 #   上线后提交的单(auto=1)：发票自动进发票管家(建票夹拉附件)；表单里的账单 xlsx 自动进复核台(这家这月还没账单才导，
@@ -711,6 +712,7 @@ def _inv_block(r, me):
     out.update(invoices=invs, folder=d["req"].get("folder") or out["folder"], kind=d.get("kind"), kind_cn=_KIND_CN.get(d.get("kind"), ""),
                kind_text=d.get("kind_text"), msgs=[m for m in (d.get("plan") or {}).get("msgs") or [] if m != d.get("kind_text")],
                paid=d["req"].get("paid"), posted=d["req"].get("posted"), pay_status=d["req"].get("status"),
+               later=d["req"].get("later"), later_slip=d["req"].get("later_slip"),
                accruals=[{k: a.get(k) for k in ("vno", "month", "fee", "biz", "gross", "tax", "rate", "mode", "new_rate", "why")} for a in accs])
     # 按税率并排：计提(含税/暂估税) vs 发票(含税/税额)；不能抵扣的票算 0 税率
     g = {}

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-09-28 | Author: Claude Opus 4.8 | Version: V2.676
-# Description: 【物流账单复核】路由（新工具线在后端的落点）。复核=核价(合同价格卡)×核量(金蝶数量)→归一态，接计提。
+# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
+# Description: 【物流账单复核】路由。V2.1004 新增四步 readiness 统一判定并接入 /sign；金蝶取数失败显式报错且不缓存。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
@@ -24,6 +24,7 @@ from kernels import logistics_review as lr
 from kernels import logistics_intake as intake
 from kernels import logistics_kuayue as lky
 from kernels import logistics_recon as lrc
+from kernels import logistics_readiness as lready
 
 router = APIRouter()
 BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
@@ -1174,7 +1175,9 @@ def _fetch_doc_materials_once(s, conf, docs_by_form):
                 try:
                     rr = kc._query(s, conf, form, cols, "FBillNo in (%s)" % inlist)
                     break
-                except Exception:
+                except Exception as e:
+                    if len(cols) == 1:
+                        raise RuntimeError("金蝶查询%s物料失败：%s" % (form, str(e)[:160])) from e
                     cols = cols[:-1]
             for r in rr:
                 no = r.get("单号")
@@ -2279,8 +2282,8 @@ def _accr_entries_raw(carrier, period, carrier_full=None):
                           ("FDetailID.FFLEX5.FNumber", "部门码"), ("FDetailID.FF100010.FNumber", "产品分类码"),
                           ("FDetailID.FF100006.FNumber", "产品项目码"),
                           ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商")], cf)
-    except Exception:
-        return {"entries": [], "adj": [], "prior": [], "suppliers": []}
+    except Exception as e:
+        raise RuntimeError("金蝶读取逐笔计提失败：%s" % str(e)[:200]) from e
     orgs = db.list_orgs() or []
     b2s = {o.get("full_name"): o.get("short_name") for o in orgs if o.get("full_name")}
     fee_by_v, tax_by_v, ents, adj, prior = {}, {}, [], [], {}
@@ -3015,8 +3018,8 @@ def _box_docs(rsub, carrier):
         try:
             s2, conf2 = kc.login()
             mats = _fetch_doc_materials(s2, conf2, by_form)
-        except Exception:
-            mats = {}
+        except Exception as e:
+            raise RuntimeError("金蝶读取单据物料失败：%s" % str(e)[:200]) from e
     # 短驳(包天包趟)价目：承运商配置 spec_json.shuttle_prices=[{car,unit(天/趟),price}]，如极鲜达《仓储收费标准(星期零)》短驳运输
     _sp = _load_spec(carrier) or {}
     pmap = {(_car_norm(x.get("car")), x.get("unit")): float(x.get("price") or 0) for x in (_sp.get("shuttle_prices") or [])}
@@ -3768,7 +3771,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             if cc and _t.time() - cc[2] < 600:
                 pool = cc[0]
             else:
-                pool = _box_docs(rows_all, carrier)
+                try:
+                    pool = _box_docs(rows_all, carrier)
+                except Exception as e:
+                    return JSONResponse({"ok": False, "msg": str(e)[:240]}, status_code=502)
                 _ACCR_CACHE[ck] = (pool, None, _t.time())
             for x in pool:                    # 缓存里的单据每次重挂确认态
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
@@ -3801,7 +3807,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             bw_gap = {"n_mat": len(_bg), "n_doc": len({d for ds in _bg.values() for d in ds}), "on": any(x.get("bw") for x in pool)}
         else:
             ex_all, unit_gap, ex_docs, sugg_docs, bw_gap = None, None, None, None, None
-            pool = _box_docs(sl, carrier)
+            try:
+                pool = _box_docs(sl, carrier)
+            except Exception as e:
+                return JSONResponse({"ok": False, "msg": str(e)[:240]}, status_code=502)
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
             dc = {"miss": counts.get("miss", 0), "qtydiff": counts.get("qtydiff", 0),
@@ -3954,6 +3963,18 @@ def _uname(u):
         return ""
 
 
+def _cached_lines(request, carrier, period):
+    import time as _t
+    k = ("lines", carrier, period)
+    c = _ACCR_CACHE.get(k)
+    if c and _t.time() - c[2] < 1800:
+        return c[0]
+    res = _build_lines(request, carrier, period)
+    if res.get("ok"):
+        _ACCR_CACHE[k] = (res, None, _t.time())
+    return res
+
+
 @router.get("/api/logistics-review/lines")
 @router.get("/api/logistics-review/accrual")
 def review_lines(request: Request, carrier: str = "", period: str = ""):
@@ -3961,13 +3982,13 @@ def review_lines(request: Request, carrier: str = "", period: str = ""):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     import time as _t
-    k = ("lines", carrier, period)
-    c = _ACCR_CACHE.get(k)
-    if c and _t.time() - c[2] < 1800:
-        return {**c[0], "cached": True}
-    res = _build_lines(request, carrier, period)
-    _ACCR_CACHE[k] = (res, None, _t.time())
-    return res
+    cc = _ACCR_CACHE.get(("lines", carrier, period))
+    cached = bool(cc and _t.time() - cc[2] < 1800)
+    try:
+        res = _cached_lines(request, carrier, period)
+    except Exception as e:
+        return JSONResponse({"ok": False, "msg": str(e)[:240]}, status_code=502)
+    return {**res, "cached": cached}
 
 
 @router.post("/api/logistics-review/doc-note")
@@ -4744,6 +4765,93 @@ async def review_carrier_points(request: Request):
     return {"ok": True}
 
 
+def _register_readiness(request, carrier, period):
+    ov = review_overview(request, period=period)
+    if isinstance(ov, JSONResponse) or not ov.get("ok"):
+        return {"error": "登记制总表取数失败"}, 0.0
+    cells, req_total = [], 0.0
+    for row in ov.get("rows") or []:
+        if row.get("short") != carrier:
+            continue
+        for subject, cell in (row.get("cells") or {}).items():
+            live = [v for v in (cell.get("reqs") or []) if (v.get("st") or {}).get("key") != "void"]
+            accr = round(float(cell.get("accr") or 0), 2)
+            if not live and not accr:
+                continue
+            req = round(sum(float(v.get("amount") or 0) for v in live), 2)
+            req_total += req
+            cells.append({"subject": subject, "accr": accr, "req": req, "diff": round(accr - req, 2),
+                          "has_accr": abs(accr) >= 0.005, "has_req": bool(live)})
+    return {"cells": cells}, round(req_total, 2)
+
+
+def _collect_readiness(request, carrier, period, note=""):
+    from routers import logistics_intake_check as LIC
+    from routers import logistics_payreq as LPQ
+    from routers import logistics_classify as LCLS
+    register = carrier in _register_carriers()
+    signed = _signed(carrier, period)
+    intake_data = lines_data = docs_data = sign_data = None
+    L, reg, req_total = None, None, 0.0
+    if register:
+        intake_data = docs_data = {}
+        try:
+            reg, req_total = _register_readiness(request, carrier, period)
+        except Exception as e:
+            reg = {"error": "登记制汇总取数失败：%s" % str(e)[:180]}
+        lines_data = reg
+    else:
+        try:
+            intake_data = LIC.intake_view(carrier, period)
+        except Exception as e:
+            intake_data = {"error": "数据接入取数失败：%s" % str(e)[:180]}
+        try:
+            L = _cached_lines(request, carrier, period)
+            lines_data = L
+        except Exception as e:
+            lines_data = {"error": str(e)[:240]}
+        try:
+            res = review_result(request, carrier=carrier, period=period, group="all", page=1, size=1000000, q="")
+            if isinstance(res, JSONResponse) or not res.get("ok"):
+                msg = res.get("msg") if isinstance(res, dict) else "逐单核价核量取数失败"
+                docs_data = {"error": msg or "逐单核价核量取数失败"}
+            else:
+                docs = res.get("docs") or []
+                cls = LCLS.classify(request, carrier=carrier, period=period) if docs else {"docs": []}
+                if isinstance(cls, JSONResponse) or not cls.get("ok"):
+                    msg = cls.get("msg") if isinstance(cls, dict) else "归类取数失败"
+                    docs_data = {"error": msg or "归类取数失败"}
+                else:
+                    dup = LCLS.dups(request, carrier=carrier, period=period)
+                    docs_data = {"docs": docs, "classify": {x["key"]: x for x in cls.get("docs") or []},
+                                 "dups": dup.get("docs") or {}}
+        except Exception as e:
+            docs_data = {"error": "逐单/归类/重复取数失败：%s" % str(e)[:180]}
+    try:
+        sign_data = {"blocks": LPQ.inv_blocks(carrier, period)}
+    except Exception as e:
+        sign_data = {"error": "发票审核取数失败：%s" % str(e)[:180]}
+    try:
+        carry = _carry_block(carrier, period)
+    except Exception as e:
+        carry = []
+        sign_data = {"error": "历史扣回读取失败：%s" % str(e)[:180]}
+    result = lready.evaluate(carrier, period, "register" if register else "normal", intake_data, lines_data,
+                             docs_data, sign_data, note=note, carry=carry, signed=dict(signed) if signed else None)
+    return result, L, {"req_total": req_total}
+
+
+@router.get("/api/logistics-review/readiness")
+async def review_readiness(request: Request, carrier: str = "", period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not carrier or not period:
+        return JSONResponse({"ok": False, "msg": "缺承运商/账期"}, status_code=400)
+    from starlette.concurrency import run_in_threadpool
+    result, _L, _reg = await run_in_threadpool(_collect_readiness, request, carrier, period, "")
+    return result
+
+
 @router.post("/api/logistics-review/sign")
 async def review_sign_month(request: Request):
     """确认通过→登记已复核：整月一家一次，存复核人/时间/结论快照；登记后当月归类与备注锁定，总表显示已复核。"""
@@ -4756,18 +4864,14 @@ async def review_sign_month(request: Request):
         return JSONResponse({"ok": False, "msg": "缺承运商/账期"}, status_code=400)
     if _signed(carrier, period):
         return JSONResponse({"ok": False, "msg": "本月已登记，无需重复"}, status_code=409)
-    _cb = _carry_block(carrier, period)
-    if _cb:      # 以前月份登记的「待后面账单扣回」，这个月还没核到、也没写说明(V2.894)
-        return JSONResponse({"ok": False, "msg": "还有 %d 笔以前月份多收、等账单扣回的没着落：%s。在页面顶上核到了打勾，这个月没扣的写明原因，再登记。" % (
-            len(_cb), "；".join(_cb[:5]))}, status_code=409)
-    L = _build_lines(request, carrier, period)
-    snap = {k: L.get(k) for k in ("accr_total", "bill_total", "diff_total", "n_unexplained", "bill_src")}
-    if carrier in _register_carriers():      # 登记制：快照里记请款合计(没有账单合计)
-        PRT = store.payreq
-        with db._engine.connect() as c:
-            rq = c.execute(select(PRT.c.amount, PRT.c.excluded, PRT.c.dt_status, PRT.c.dt_result).where(
-                (PRT.c.carrier == carrier) & (PRT.c.period == period))).all()
-        snap.update(mode="register", req_total=round(sum(float(a or 0) for a, ex, st, rs in rq if not ex and st != "TERMINATED" and rs != "refuse"), 2))
+    readiness, L, reg = _collect_readiness(request, carrier, period, note)
+    if not readiness["can_sign"]:
+        return JSONResponse({"ok": False, "msg": "复核条件还没齐：%s" % "；".join(readiness["blockers"][:5]),
+                             "blockers": readiness["blockers"], "steps": readiness["steps"]}, status_code=409)
+    snap = {k: L.get(k) for k in ("accr_total", "bill_total", "diff_total", "n_unexplained", "bill_src")} if L else {}
+    snap.update(mode=readiness["mode"], readiness={"can_sign": readiness["can_sign"], "steps": readiness["steps"]})
+    if readiness["mode"] == "register":
+        snap["req_total"] = reg["req_total"]
     rec = dict(carrier=carrier, period=period, status="signed", reviewer=_uname(u), signed_at=_now(), note=note,
                snap_json=json.dumps(snap, ensure_ascii=False))
     with db._engine.begin() as c:

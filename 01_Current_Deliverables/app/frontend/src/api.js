@@ -757,6 +757,7 @@ export const reviewClassifyRules = () => j('/api/logistics-review/classify-rules
 export const reviewClassifyRulesSave = cfg => j('/api/logistics-review/classify-rules', { method: 'POST', body: JSON.stringify({ cfg }) })
 // [Change Log] Date:2026-10-17 Author:Claude Opus 5.5 Version:V2.989 复核台第①步数据接入（读全没有、各家接入、用原件重新解析）
 export const reviewIntake = (carrier, period) => j(`/api/logistics-review/intake?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
+export const reviewReadiness = (carrier, period) => j(`/api/logistics-review/readiness?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewIntakeOverview = period => j(`/api/logistics-review/intake-overview?period=${encodeURIComponent(period)}`)
 export const reviewReparse = (carrier, period, src) => j('/api/logistics-review/reparse', { method: 'POST', body: JSON.stringify({ carrier, period, src: src || '' }) })
 export const reviewDups = (carrier, period) => j(`/api/logistics-review/dups?carrier=${encodeURIComponent(carrier)}&period=${period}`)

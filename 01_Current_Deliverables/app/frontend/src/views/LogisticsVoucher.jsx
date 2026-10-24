@@ -291,7 +291,7 @@ function mergedSheet(short, ps) {
 }
 
 // 计提更正单：先在本页弹出预览，人看一眼再点「确认打印」(V2.852，用户「如果有更正单，再点击保存的时候就跳出来打印提醒…我们只需要点击确认打印，还有预览」)。
-// 用户说的「保存」是复核台第③步的「确认通过并登记已复核」(登记完去钉钉批 OA)——自动弹在那一步(V2.853)，不在付款做账的「保存到金蝶」。
+// 用户说的「保存」是复核台第④步的「确认通过并登记已复核」(登记完去钉钉批 OA)——自动弹在那一步(V2.853)，不在付款做账的「保存到金蝶」。
 // 原来是另开一个窗口直接调打印(会被浏览器拦弹窗，也看不到预览)。ds 可以是数组或 Promise；opt.remind＝顶上那句提醒(保存到金蝶后自动弹出时用)。
 // 点「确认打印」后浏览器还会弹一次系统自己的打印框(选打印机)，网页绕不过去——要连这一下也省，得给这台电脑的浏览器加「静默打印」启动参数。
 export function printAdjust(ds, title, opt = {}) {
@@ -1136,7 +1136,7 @@ export default function LogisticsVoucher() {
   const [pf, setPf] = useState('')              // 账单月筛选，空=全部
   const [sf, setSf] = useState('')              // 四步表上面五个数的筛选：'' 全部 / 0 可以做账 / 1 2 3 卡在哪一步 / 9 已做账
   const [steps, setSteps] = useState(null)      // 「做账步骤」弹窗开着的那张请款单
-  // V2.920(用户「不是在付款做账点，是在账单审核点」)：发票后补的确认挪到账单复核台第③步，这里只写去哪确认
+  // V2.920(用户「不是在付款做账点，是在账单审核点」)：发票后补的确认挪到账单复核台第④步，这里只写去哪确认
   // 付款单往来单位编码选错(V2.925，用户「这个路凯的，我们可以直接调整付款单编码吗」)：人点一下，系统把金蝶付款单的往来单位、收款单位改对——不提交不审核，后面照常做账
   const fixPaycode = r => {
     const w = r.paywarn || {}
@@ -1145,7 +1145,7 @@ export default function LogisticsVoucher() {
   }
   const noInvCell = r => !r.period ? <span className="dim">未认账单月</span>
     : r.later ? <span className="warn kt">已确认发票后补 · 只做支付</span>
-      : r.later_slip ? <span className="warn kt" title="发票管家里登记了后补单。到「账单复核台」这家这月的第③步「确认与登记」里点「确认发票后补」，确认之后系统自动只做支付">已登记后补单 #{r.later_slip.id} · 待账单审核确认</span>
+      : r.later_slip ? <span className="warn kt" title="发票管家里登记了后补单。到「账单复核台」这家这月的第④步「确认与登记」里点「确认发票后补」，确认之后系统自动只做支付">已登记后补单 #{r.later_slip.id} · 待账单审核确认</span>
         : <span className="dim">票夹没有发票</span>
   const load = () => { setBusyLoad(true); return voucherList().then(r => {
     const rs = r.rows || []

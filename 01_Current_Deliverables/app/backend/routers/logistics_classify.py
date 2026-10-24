@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-16 | Author: Claude Opus 5.5 | Version: V2.986
-# Description: 物流账单复核·费用归类（第③轴）接口。只读金蝶：单据头(销售组织/领料部门/需求组织/调入组织)＋物料档案分组；
+# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
+# Description: 物流账单复核·费用归类（第③轴）接口。V2.1004 计提故障不再折叠为空，供 readiness 明确判错。
+#   原说明：只读金蝶，单据头(销售组织/领料部门/需求组织/调入组织)＋物料档案分组；
 #   计提取 logistics_review._accr_entries(本月逐笔计提)。判定逻辑在 kernels/logistics_classify.py。
 #   GET  /api/logistics-review/classify        一家一个月：每张单的归类结论 + 和计提对照表(30 分钟缓存，fresh=1 重取)
 #   GET  /api/logistics-review/classify-rules  对照表设置(物料分组→业务线、看不出业务线的分组、调拨仓库规则)
@@ -100,10 +101,7 @@ def _build(carrier, period):
             codes.update(cs)
             kd[n] = {"form": ms[0].get("_form"), "head": heads.get(n, {}), "party": ms[0].get("往来") or "", "codes": cs}
         groups = {k: v.get("grp", "") for k, v in (kc.fetch_material_attrs(codes, s, conf) or {}).items()}
-    try:
-        accr = (LR._accr_entries(carrier, period, LR._carrier_full(carrier)) or {}).get("entries") or []
-    except Exception:
-        accr = []
+    accr = (LR._accr_entries(carrier, period, LR._carrier_full(carrier)) or {}).get("entries") or []
     orgs = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or []) if o.get("full_name")}
     res = lc.classify(docs, kd, groups, accr, _cfg(), lambda x: orgs.get(x, x), carrier)
     man = {d["key"]: d["manual"] for d in docs if d["manual"]}
