@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1006
-# Description: 物流 readiness/sign、异常传播与物料共享缓存测试；全部使用合成数据和桩，不连接真实数据库、金蝶或钉钉。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1007
+# Description: 物流 readiness/sign、承运商设置、主体回填、异常传播与共享缓存测试；全部使用合成数据和桩。
 import asyncio
 import json
 import sys
@@ -72,7 +72,18 @@ class _Request:
 
 def _load_module():
     engine = _Engine()
-    db = types.SimpleNamespace(_engine=engine)
+    db = types.SimpleNamespace(_engine=engine, settings={}, orgs=[{"full_name": "深圳市星期零食品科技有限公司", "short_name": "深圳星期零", "book_code": "100"},
+                                                                       {"full_name": "深圳市星期九食品科技有限公司", "short_name": "深圳星期九", "book_code": "101"}],
+                               suppliers=[{"short": "甲", "full": "甲方物流", "wt_lo": None, "wt_hi": None}])
+    db.get_setting = lambda key, default=None: json.loads(json.dumps(db.settings.get(key, default)))
+    db.set_setting = lambda key, value, *args: db.settings.__setitem__(key, json.loads(json.dumps(value)))
+    db.list_orgs = lambda: db.orgs
+    db.list_logi_suppliers = lambda: db.suppliers
+
+    def save_supplier(value, _user):
+        db.suppliers[0].update(value)
+    db.save_logi_supplier = save_supplier
+    db.audit = lambda *args: None
     core = types.ModuleType("core")
     core.JSONResponse = JSONResponse
     core._require_perm = lambda *_: {"name": "测试"}
@@ -145,6 +156,145 @@ class ReadinessApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(total, 100)
         self.assertEqual(data["cells"][0]["diff"], 0)
         self.assertTrue(data["cells"][0]["has_accr"])
+
+
+class ReviewSettingsTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def setUp(self):
+        self.lr.db.settings.clear()
+        self.lr._ACCR_CACHE.clear()
+
+    async def test_defaults_save_and_preserve_other_settings(self):
+        default = self.lr.review_settings_read(_Request(), "甲")
+        self.assertTrue(default["qty_enabled"])
+        self.assertTrue(default["price_enabled"])
+        self.assertEqual(default["scheme"], "")
+        self.lr.db.settings[self.lr._REVIEW_SCOPE_KEY] = {"乙": {"qty_enabled": False, "price_enabled": True}}
+        self.lr.db.settings[self.lr._VOL_KG_KEY] = {"乙": 250}
+        out = await self.lr.review_settings_save(_Request({"carrier": "甲", "qty_enabled": False, "price_enabled": True,
+                                                           "scheme": "volume", "vol_kg": 333.33, "wt_range": [0.9, 1.2],
+                                                           "default_subject": "深圳星期零"}))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["scheme"], "volume")
+        self.assertEqual(out["vol_kg"], 333.33)
+        self.assertEqual(out["wt_range"], [0.9, 1.2])
+        self.assertEqual(self.lr.db.settings[self.lr._REVIEW_SCOPE_KEY]["乙"]["qty_enabled"], False)
+        self.assertEqual(self.lr.db.settings[self.lr._VOL_KG_KEY]["乙"], 250)
+        out = await self.lr.review_settings_save(_Request({"carrier": "甲", "scheme": "box"}))
+        self.assertEqual(out["vol_kg"], 333.33)
+
+    async def test_validation(self):
+        cases = [
+            {"carrier": "甲", "qty_enabled": False, "price_enabled": False},
+            {"carrier": "甲", "scheme": "bad"},
+            {"carrier": "甲", "scheme": "volume", "vol_kg": None},
+            {"carrier": "甲", "scheme": "pallet", "pallet_kg": 650, "pallet_box": None},
+            {"carrier": "甲", "default_subject": "不存在"},
+            {"carrier": "甲", "wt_range": [1.2, 0.9]},
+        ]
+        for body in cases:
+            with self.subTest(body=body):
+                out = await self.lr.review_settings_save(_Request(body))
+                self.assertIsInstance(out, JSONResponse)
+                self.assertEqual(out.status_code, 400)
+        self.assertNotIn(self.lr._REVIEW_SCOPE_KEY, self.lr.db.settings)
+
+
+class SubjectBackfillTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def test_kingdee_default_and_manual_precedence(self):
+        rows = [{"doc_no": "XSCKD1", "subject": ""}, {"doc_no": "CGRK1", "subject": ""},
+                {"doc_no": "FBDR1", "subject": ""}, {"doc_no": "QTCK1", "subject": ""},
+                {"doc_no": "XSCKD2", "subject": "深圳星期九"}, {"doc_no": "XSCKD3", "subject": "", "subj_ovr": "深圳星期九"}]
+        mats = {no: [{"_form": form, "往来": "甲仓→乙仓"}] for no, form in
+                (("XSCKD1", "SAL_OUTSTOCK"), ("CGRK1", "STK_InStock"), ("FBDR1", "STK_TransferIn"), ("QTCK1", "STK_MisDelivery"))}
+        heads = {"XSCKD1": {"销售组织": "深圳市星期零食品科技有限公司"}, "CGRK1": {"需求组织": "深圳星期九"},
+                 "FBDR1": {"调入组织": "深圳星期零"}, "QTCK1": {"库存组织": "深圳星期零"}}
+        with patch.object(self.lr, "_review_scope", return_value=({"default_subject": "深圳星期九"}, True)), \
+             patch.object(self.lr, "_fetch_doc_heads", return_value=heads):
+            self.lr._backfill_subjects(rows, "甲", mats=mats, session=(object(), {}))
+        self.assertEqual(self.lr._eff_subject(rows[0]), "深圳星期零")
+        self.assertEqual(rows[0]["_subject_source"], "kingdee")
+        self.assertEqual(self.lr._eff_subject(rows[1]), "深圳星期九")
+        self.assertEqual(self.lr._eff_subject(rows[2]), "深圳星期零")
+        self.assertEqual(self.lr._eff_subject(rows[3]), "深圳星期九")
+        self.assertEqual(rows[3]["_subject_source"], "supplier_default")
+        self.assertEqual(rows[3]["subject"], "")
+        self.assertEqual(self.lr._eff_subject(rows[4]), "深圳星期九")
+        self.assertEqual(self.lr._eff_subject(rows[5]), "深圳星期九")
+        with patch.object(self.lr, "_review_scope", return_value=({"default_subject": ""}, True)), \
+             patch.object(self.lr, "_fetch_doc_heads", return_value=heads):
+            other = {"doc_no": "QTCK1", "subject": ""}
+            self.lr._backfill_subjects([other], "甲", mats=mats, session=(object(), {}))
+        self.assertEqual(self.lr._eff_subject(other), "")
+        self.assertTrue(other["_subject_pending"])
+
+
+class SchemeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def test_volume_missing_dimensions_cannot_pass_by_net_weight(self):
+        row = {"doc_no": "XSCKD1", "subject": "深圳星期零", "qty": 1, "charge_wt": 10,
+               "amount": 10, "unit": "千克", "sub_fees": "{}", "fee": "销售出库费用"}
+        mats = {"XSCKD1": [{"_form": "SAL_OUTSTOCK", "编码": "M1", "名称": "货品", "基本数量": 10,
+                            "基本单位": "千克", "数量件": 10, "计价单位": "袋", "规格": "10袋/箱"}]}
+        scope = {"qty_enabled": True, "price_enabled": True, "scheme": "volume", "default_subject": ""}
+        with patch.object(self.lr, "_review_scope", return_value=(scope, True)), \
+             patch.object(self.lr, "_fetch_doc_materials", return_value=mats), \
+             patch.object(self.lr, "_load_spec", return_value={}), \
+             patch.object(self.lr, "_vol_kg", return_value=333.33):
+            docs = self.lr._box_docs([row], "甲")
+        self.assertEqual(docs[0]["state"], "qtydiff")
+        self.assertIn("箱子尺寸", docs[0]["mode_cn"])
+        self.assertTrue(docs[0]["qty_enabled"])
+
+    def test_volume_and_pallet_use_configured_algorithms(self):
+        base = {"doc_no": "XSCKD1", "subject": "深圳星期零", "qty": 10, "amount": 10,
+                "unit": "千克", "fee": "销售出库费用"}
+        mats = {"XSCKD1": [{"_form": "SAL_OUTSTOCK", "编码": "M1", "名称": "货品", "基本数量": 1,
+                            "基本单位": "千克", "数量件": 100, "计价单位": "袋", "规格": "10袋/箱"}]}
+        vol_row = dict(base, charge_wt=10, sub_fees=json.dumps({"箱子尺寸": "10×10×10"}, ensure_ascii=False))
+        vol_scope = {"qty_enabled": True, "price_enabled": True, "scheme": "volume", "default_subject": ""}
+        with patch.object(self.lr, "_review_scope", return_value=(vol_scope, True)), \
+             patch.object(self.lr, "_fetch_doc_materials", return_value=mats), \
+             patch.object(self.lr, "_load_spec", return_value={}), \
+             patch.object(self.lr, "_vol_kg", return_value=1000):
+            vol_doc = self.lr._box_docs([vol_row], "甲")[0]
+        self.assertEqual(vol_doc["state"], "ok")
+        self.assertEqual(vol_doc["chk"]["kind"], "vol")
+        pal_row = dict(base, charge_wt=650, sub_fees="{}")
+        pal_scope = dict(vol_scope, scheme="pallet")
+        with patch.object(self.lr, "_review_scope", return_value=(pal_scope, True)), \
+             patch.object(self.lr, "_fetch_doc_materials", return_value=mats), \
+             patch.object(self.lr, "_load_spec", return_value={}), \
+             patch.object(self.lr, "_pallet_kg", return_value=650), \
+             patch.object(self.lr, "_pallet_box", return_value=10):
+            pal_doc = self.lr._box_docs([pal_row], "甲")[0]
+        self.assertEqual(pal_doc["state"], "ok")
+        self.assertEqual(pal_doc["chk"]["kind"], "pallet")
+
+    def test_pallet_missing_rule_cannot_pass_by_net_weight(self):
+        row = {"doc_no": "XSCKD1", "subject": "深圳星期零", "qty": 10, "charge_wt": 650,
+               "amount": 10, "unit": "千克", "sub_fees": "{}", "fee": "销售出库费用"}
+        mats = {"XSCKD1": [{"_form": "SAL_OUTSTOCK", "编码": "M1", "名称": "货品", "基本数量": 650,
+                            "基本单位": "千克", "数量件": 100, "计价单位": "袋", "规格": "10袋/箱"}]}
+        scope = {"qty_enabled": True, "price_enabled": True, "scheme": "pallet", "default_subject": ""}
+        with patch.object(self.lr, "_review_scope", return_value=(scope, True)), \
+             patch.object(self.lr, "_fetch_doc_materials", return_value=mats), \
+             patch.object(self.lr, "_load_spec", return_value={}), \
+             patch.object(self.lr, "_pallet_kg", return_value=650), \
+             patch.object(self.lr, "_pallet_box", return_value=0):
+            doc = self.lr._box_docs([row], "甲")[0]
+        self.assertEqual(doc["state"], "qtydiff")
+        self.assertIn("按托核不了", doc["mode_cn"])
 
 
 class FailureTests(unittest.TestCase):

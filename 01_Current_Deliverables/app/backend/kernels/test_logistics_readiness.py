@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
-# Description: 物流四步 readiness 纯函数分支测试：普通/登记制、人工确认、后补、名称规范化、历史扣回与取数故障。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1007
+# Description: 物流四步 readiness 纯函数分支测试：普通/登记制、核量核价独立开关、人工确认、后补与取数故障。
 import unittest
 
 from kernels import logistics_readiness as rd
@@ -75,6 +75,30 @@ class ReadinessTests(unittest.TestCase):
         f["docs"]["docs"][0]["state"] = "ok"
         f["docs"]["docs"][0]["sub_fees"] = {}
         self.assertIn("价格无依据", self.evaluate(f)["steps"]["docs"]["blockers"][0])
+
+    def test_qty_and_price_switches_are_independent(self):
+        f = fixture()
+        doc = f["docs"]["docs"][0]
+        doc.update(state="qtydiff", sub_fees={}, qty_enabled=False, price_enabled=True)
+        blockers = self.evaluate(f)["steps"]["docs"]["blockers"]
+        self.assertEqual(len(blockers), 1)
+        self.assertIn("价格", blockers[0])
+        doc.update(qty_enabled=True, price_enabled=False)
+        blockers = self.evaluate(f)["steps"]["docs"]["blockers"]
+        self.assertEqual(len(blockers), 1)
+        self.assertIn("数量", blockers[0])
+        doc.update(qty_enabled=False, price_enabled=True, sub_fees={"标准": 100}, fee_chk="diff")
+        f["docs"]["classify"]["XSCKD1"]["v"] = "判不了"
+        f["docs"]["dups"] = {"XSCKD1": {"same": [100, 100]}}
+        blockers = self.evaluate(f)["steps"]["docs"]["blockers"]
+        self.assertEqual(len(blockers), 3)
+        self.assertFalse(any("数量" in x or "价格" in x for x in blockers))
+        doc.update(qty_enabled=False, price_enabled=False)
+        step = self.evaluate(f)["steps"]["docs"]
+        self.assertEqual(step["status"], "error")
+        f["docs"]["docs"] = []
+        f["docs"]["settings"] = {"qty_enabled": False, "price_enabled": False}
+        self.assertEqual(self.evaluate(f)["steps"]["docs"]["status"], "error")
 
     def test_invoice_amount_review_names_and_paper(self):
         f = fixture()

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1006
-# Description: 【物流账单复核】路由。四步 readiness 统一登记；V2.1006 逐单与归类共享金蝶物料缓存，强制刷新与修改可正确失效。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1007
+# Description: 【物流账单复核】路由。V2.1007 承运商核量/核价设置、配置化核量与共享主体回填；四步 readiness 统一登记。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
@@ -90,6 +90,134 @@ def _load_card(carrier):
     with db._engine.connect() as c:
         rows = c.execute(select(PC).where(PC.c.carrier == carrier)).mappings().all()
     return lp.load_card([dict(r) for r in rows]), len(rows)
+
+
+_REVIEW_SCOPE_KEY = "logi_review_scope"
+_SCHEMES = ("", "weight", "volume", "pallet", "box")
+
+
+def _review_scope(carrier):
+    saved = db.get_setting(_REVIEW_SCOPE_KEY, None) or {}
+    raw = saved.get(carrier)
+    configured = isinstance(raw, dict)
+    raw = raw if configured else {}
+    return {"qty_enabled": raw.get("qty_enabled", True) is not False,
+            "price_enabled": raw.get("price_enabled", True) is not False,
+            "scheme": raw.get("scheme") if raw.get("scheme") in _SCHEMES else "",
+            "default_subject": str(raw.get("default_subject") or "").strip()}, configured
+
+
+def _review_settings(carrier):
+    scope, _configured = _review_scope(carrier)
+    wt = _wt_range(carrier)
+    return {"ok": True, "carrier": carrier, **scope, "wt_range": list(wt) if wt else None,
+            "pallet_kg": _pallet_kg(carrier) or None, "pallet_box": _pallet_box(carrier) or None,
+            "vol_kg": _vol_kg(carrier) or None,
+            "subjects": [{"code": str(o.get("book_code") or ""), "name": str(o.get("short_name") or "")}
+                         for o in (db.list_orgs() or []) if o.get("short_name")]}
+
+
+def _clear_carrier_caches(carrier):
+    for key in [k for k in list(_ACCR_CACHE) if isinstance(k, tuple) and carrier in k]:
+        _ACCR_CACHE.pop(key, None)
+
+
+def _positive(value, label, required=False):
+    if value in (None, ""):
+        if required:
+            raise ValueError(label + "必须大于 0")
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(label + "要填数字") from exc
+    if number != number or number in (float("inf"), float("-inf")) or number < 0 or (required and number <= 0):
+        raise ValueError(label + ("必须大于 0" if required else "不能小于 0"))
+    return number or None
+
+
+@router.get("/api/logistics-review/settings")
+def review_settings_read(request: Request, carrier: str = "迅鸽"):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    return _review_settings(carrier)
+
+
+@router.post("/api/logistics-review/settings")
+async def review_settings_save(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "请求格式错误"}, status_code=400)
+    carrier = str(body.get("carrier") or "").strip()
+    if not carrier:
+        return JSONResponse({"ok": False, "msg": "缺承运商"}, status_code=400)
+    current, _configured = _review_scope(carrier)
+    merged = dict(current)
+    for key in ("qty_enabled", "price_enabled"):
+        if key in body:
+            if not isinstance(body[key], bool):
+                return JSONResponse({"ok": False, "msg": key + " 只能是 true/false"}, status_code=400)
+            merged[key] = body[key]
+    if not merged["qty_enabled"] and not merged["price_enabled"]:
+        return JSONResponse({"ok": False, "msg": "核量、核价至少启用一项"}, status_code=400)
+    scheme = str(body.get("scheme", merged["scheme"]) or "").strip()
+    if scheme not in _SCHEMES:
+        return JSONResponse({"ok": False, "msg": "scheme 只能是空、weight、volume、pallet、box"}, status_code=400)
+    merged["scheme"] = scheme
+    default_subject = str(body.get("default_subject", merged["default_subject"]) or "").strip()
+    subjects = {str(o.get("short_name") or "").strip() for o in (db.list_orgs() or [])}
+    if default_subject and default_subject not in subjects:
+        return JSONResponse({"ok": False, "msg": "default_subject 必须是组织简称"}, status_code=400)
+    merged["default_subject"] = default_subject
+    try:
+        vol_kg = _positive(body.get("vol_kg", _vol_kg(carrier)), "每方千克数", scheme == "volume")
+        pallet_kg = _positive(body.get("pallet_kg", _pallet_kg(carrier)), "每托千克数", scheme == "pallet")
+        pallet_box = _positive(body.get("pallet_box", _pallet_box(carrier)), "每托箱数", scheme == "pallet")
+        wt_range = body.get("wt_range", "unchanged")
+        if wt_range != "unchanged" and wt_range not in (None, "", []):
+            if not isinstance(wt_range, (list, tuple)) or len(wt_range) != 2:
+                raise ValueError("wt_range 要是 [下限, 上限] 或 null")
+            lo = _positive(wt_range[0], "毛重比下限", True)
+            hi = _positive(wt_range[1], "毛重比上限", True)
+            if lo > hi:
+                raise ValueError("毛重比下限不能大于上限")
+            wt_range = [lo, hi]
+        else:
+            wt_range = None if wt_range != "unchanged" else "unchanged"
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
+    sup = None
+    if wt_range != "unchanged":
+        sup = next((x for x in (db.list_logi_suppliers() or []) if x.get("short") == carrier), None)
+        if not sup:
+            return JSONResponse({"ok": False, "msg": "供应商档案里没有「%s」，先建档再配毛重比" % carrier}, status_code=400)
+    all_scope = dict(db.get_setting(_REVIEW_SCOPE_KEY, None) or {})
+    all_scope[carrier] = merged
+    db.set_setting(_REVIEW_SCOPE_KEY, all_scope, _uname(u))
+    for key, setting_key, value in (("vol_kg", _VOL_KG_KEY, vol_kg), ("pallet_kg", _PALLET_KG_KEY, pallet_kg),
+                                    ("pallet_box", _PALLET_BOX_KEY, pallet_box)):
+        values = dict(db.get_setting(setting_key, None) or {})
+        if value is None:
+            values.pop(carrier, None)
+        else:
+            values[carrier] = value
+        db.set_setting(setting_key, values, _uname(u))
+    if wt_range != "unchanged":
+        try:
+            db.save_logi_supplier({"short": sup["short"], "full": sup.get("full"), "kd_code": sup.get("kd_code"),
+                                   "channel": sup.get("channel"), "note": sup.get("note"),
+                                   "wt_lo": wt_range[0] if wt_range else None, "wt_hi": wt_range[1] if wt_range else None}, _uname(u))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "msg": str(exc)}, status_code=400)
+    _clear_carrier_caches(carrier)
+    db.audit(_uname(u), "物流复核-承运商设置", carrier,
+             "核量 %s / 核价 %s / %s / 默认主体 %s" % ("开" if merged["qty_enabled"] else "关",
+                                                    "开" if merged["price_enabled"] else "关", scheme or "旧默认", default_subject or "空"))
+    return _review_settings(carrier)
 
 
 # ---------- 取数说明 ----------
@@ -1319,9 +1447,77 @@ def _short_subject(s):
     return _ORG_MAP["m"].get(s, s)
 
 
+_DOC_HEAD_CACHE = {}
+
+
+def _fetch_doc_heads(s, conf, by_form, fresh=False):
+    key = _doc_mat_key(by_form)
+    hit = _DOC_HEAD_CACHE.get(key)
+    if hit and not fresh and time.time() - hit[1] < 600:
+        return hit[0]
+    from routers import logistics_classify as lcls
+    out = lcls._fetch_heads(s, conf, by_form)
+    _DOC_HEAD_CACHE[key] = (out, time.time())
+    while len(_DOC_HEAD_CACHE) > 32:
+        _DOC_HEAD_CACHE.pop(next(iter(_DOC_HEAD_CACHE)))
+    return out
+
+
+def _backfill_subjects(rows, carrier, mats=None, session=None, fresh=False):
+    """只补「原主体空且无人工作废」的行；其他出库不看库存组织，只用承运商默认主体。"""
+    candidates = [r for r in rows if not str(r.get("subject") or "").strip()
+                  and not str(r.get("subj_ovr") or "").strip()
+                  and (r.get("doc_no") or "").split("+")[0].strip() not in ("", "无单据")]
+    if not candidates:
+        return rows
+    default = _review_scope(carrier)[0]["default_subject"]
+    by_form = {}
+    for r in candidates:
+        for no in (r.get("doc_no") or "").split("+"):
+            no = no.strip()
+            if not no or no == "无单据":
+                continue
+            pre = "".join(ch for ch in no if ch.isalpha())
+            by_form.setdefault((_FORM_BY_PREFIX.get(pre) or ["SAL_OUTSTOCK"])[0], set()).add(no)
+    if mats is None:
+        s, conf = kc.login()
+        mats = _fetch_doc_materials(s, conf, by_form, fresh=fresh) if by_form else {}
+    else:
+        s, conf = session if session else (None, None)
+    real = {}
+    for no, lines in mats.items():
+        if lines:
+            real.setdefault(lines[0].get("_form"), set()).add(no)
+    heads = _fetch_doc_heads(s, conf, real, fresh=fresh) if real else {}
+    from kernels import logistics_classify as lc
+    resolved = {}
+    for no, lines in mats.items():
+        if not lines:
+            continue
+        form = lines[0].get("_form")
+        if form == "STK_MisDelivery":
+            if default:
+                resolved[no] = (default, "supplier_default")
+            continue
+        party = lines[0].get("往来") or ""
+        sc = lc.sys_class(form, heads.get(no) or {}, [], party, "", lc.DEFAULT_CFG, _short_subject)
+        if sc.get("subj"):
+            resolved[no] = (sc["subj"], "kingdee")
+    for r in candidates:
+        found = [resolved[no.strip()] for no in (r.get("doc_no") or "").split("+") if no.strip() in resolved]
+        subjects = {x[0] for x in found}
+        if len(subjects) == 1:
+            r["_subject_auto"] = found[0][0]
+            r["_subject_source"] = "supplier_default" if all(x[1] == "supplier_default" for x in found) else "kingdee"
+        else:
+            r["_subject_pending"] = True
+    return rows
+
+
 def _eff_subject(r):
-    """账单主体：人工覆盖(subj_ovr) 优先，否则原 subject；再全称→简称归一。"""
-    return _short_subject(str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip())
+    """人工覆盖 > 账单原主体 > 金蝶/承运商默认回填；原值与覆盖值不改写。"""
+    return _short_subject(str(r.get("subj_ovr") or "").strip() or str(r.get("subject") or "").strip()
+                          or str(r.get("_subject_auto") or "").strip())
 
 
 _CANON_FEES = {"入库运费", "出库运费", "退货运费", "仓储费", "研发外购", "搬运费"}
@@ -2180,6 +2376,7 @@ def _build_recon(request, carrier, period):
         allrows = [dict(r) for r in c.execute(select(
             BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
+    _backfill_subjects(allrows, carrier)
     acc_rows = [r for r in allrows if r.get("grain") == "accrual" and (r.get("amount") or 0)]
     brows = acc_rows if acc_rows else [r for r in allrows if r.get("grain") == "detail"]
     bill_src = "accrual" if acc_rows else "detail"
@@ -2408,6 +2605,7 @@ def _build_lines(request, carrier, period):
             (LN.c.carrier == carrier) & (LN.c.period == period))).all()}
         pts = c.execute(select(CP.c.points).where(CP.c.carrier == carrier)).scalar() or ""
         sg = c.execute(select(SG).where((SG.c.carrier == carrier) & (SG.c.period == period) & (SG.c.status == "signed"))).mappings().first()
+    _backfill_subjects(allrows, carrier)
     acc_rows = [r for r in allrows if r.get("grain") == "accrual" and (r.get("amount") or 0)]
     brows = acc_rows if acc_rows else [r for r in allrows if r.get("grain") == "detail"]
     bill_src = "accrual" if acc_rows else "detail"
@@ -2568,6 +2766,9 @@ def _build_lines(request, carrier, period):
         if b:
             b["xsubj_in"] = {"from": e["subject"], "vno": e["vno"], "amt": round(e["amt"], 2)}
             h["bill_at"] = h["to"]
+    for row in rows:
+        if not str(row.get("subject") or "").strip():
+            row["subject_pending"] = True
     n_unexpl = sum(1 for r in rows if r.get("kind") != "gtotal" and r.get("diff") is not None
                    and abs(r["diff"]) >= 0.01 and not (r.get("note") or "").strip() and not r.get("xsubj") and not r.get("xsubj_in"))
     return _attach_xsubj(_attach_fixes({"ok": True, "carrier": carrier, "period": period, "bill_src": bill_src, "rows": rows,
@@ -3021,9 +3222,10 @@ def _wt_range(carrier):
 
 def _box_docs(rsub, carrier):
     """统一物料模板·单据视图：账单每张单据一条 doc（materials=金蝶物料明细，运费按货品kg摊、剔包材）。
-    核量三口径：weight=账单重量vs金蝶kg / qty=账单件vs金蝶件(剔包装) / box=有账单重量按重量，否则账单件vs金蝶箱(规格箱规)。
-    doc.state：miss 金蝶查无 / qtydiff 数量不符·待核 / info 打托·包车免核·无单据调整(仅提示) / ok 一致。"""
-    _rev = "weight" if carrier in _WEIGHT_CARRIERS else ("qty" if carrier in _QTY_CARRIERS else "box")
+    核量：weight=重量 / qty=件数 / box=旧自动箱规；显式 volume/pallet 严格按体积重/托计重，缺参标核不了，不降级。
+    doc.state：miss 金蝶查无 / qtydiff 数量不符或缺参·待核 / info 打托·包车免核·无单据调整(仅提示) / ok 一致。"""
+    scope = _review_scope(carrier)[0]
+    _rev = scope["scheme"] or ("weight" if carrier in _WEIGHT_CARRIERS else ("qty" if carrier in _QTY_CARRIERS else "box"))
     by_form = {}
     for r in rsub:
         # V2.864：一格里写了两张单号的(天鹰「CGRK179615/CGRK179614」一车卸两张入库单)，金蝶量要把几张都加上；原来只取第一张，账单 11 吨对金蝶 8.275 吨
@@ -3038,6 +3240,7 @@ def _box_docs(rsub, carrier):
             mats = _fetch_doc_materials(s2, conf2, by_form)
         except Exception as e:
             raise RuntimeError("金蝶读取单据物料失败：%s" % str(e)[:200]) from e
+    _backfill_subjects(rsub, carrier, mats=mats, session=(locals().get("s2"), locals().get("conf2")))
     # 短驳(包天包趟)价目：承运商配置 spec_json.shuttle_prices=[{car,unit(天/趟),price}]，如极鲜达《仓储收费标准(星期零)》短驳运输
     _sp = _load_spec(carrier) or {}
     pmap = {(_car_norm(x.get("car")), x.get("unit")): float(x.get("price") or 0) for x in (_sp.get("shuttle_prices") or [])}
@@ -3094,7 +3297,7 @@ def _box_docs(rsub, carrier):
         _mon = str(int(_mon)) if _mon.isdigit() else ""
         is_bw = bool(_bw_pat and chg_wt and billcnt and not wt_from_qty and _rev != "qty" and d0
                      and any(intake.match_sheet(p.replace("{m}", _mon) if _mon else p, str(r.get("src_sheet") or "")) for p in _bw_pat))
-        use_weight = (_rev == "weight") or (_rev == "box" and chg_wt)
+        use_weight = (_rev in ("weight", "volume", "pallet")) or (_rev == "box" and chg_wt)
         # 人工指定这一张单怎么核(V2.885)：只换「拿什么比」。指定的那种比不了(账单这行没有重量/件数)就不听，照系统的办法并写明
         can_wt = bool(chg_wt)
         can_box = bool(billcnt) and not wt_from_qty and _u0 not in ("天", "趟") and _u0 not in lr._NOQTY_UNITS     # 账单量是天/趟/方/板的不是件数
@@ -3109,7 +3312,7 @@ def _box_docs(rsub, carrier):
             fnote = " · 人工指定%s核（%s %s）" % (_DOC_MODE_CN[fmode], fm.get("by") or "", str(fm.get("at") or "")[:10])
         # 按体积计费(V2.888)：账单这一行带了箱子尺寸的，计重是抛重(件数×每件体积×每方千克数)——按箱数核，不比重量；人工指定了的听人的
         vol = None
-        _dm = intake.DIM_RE.match(str((_subfees(r.get("sub_fees")) or {}).get("箱子尺寸") or "")) if _rev != "qty" else None
+        _dm = intake.DIM_RE.match(str((_subfees(r.get("sub_fees")) or {}).get("箱子尺寸") or "")) if _rev not in ("qty", "pallet") else None
         if _dm and chg_wt and billcnt and not wt_from_qty:
             _vl, _vw, _vh = (float(x) for x in _dm.groups())
             _v1 = _vl * _vw * _vh / 1e6               # 每件多少方(尺寸按厘米)
@@ -3123,8 +3326,8 @@ def _box_docs(rsub, carrier):
         # 按托计费(V2.883)：计费重量正好是半托的整数倍、账单又写了件数的——金蝶箱数和账单件数一件不差就按箱数核，不比重量；
         #   箱数对不上的照旧按重量核(会判不符)，并写明箱数各是多少，不替它遮。
         pal_n, pal_note, pal_wt = None, "", None
-        if pal_kg and not fmode and not vol and use_weight and _rev == "box" and not wt_from_qty and chg_wt and billcnt and lines \
-                and abs(chg_wt / (pal_kg / 2.0) - round(chg_wt / (pal_kg / 2.0))) < 1e-6:
+        if pal_kg and not fmode and not vol and use_weight and _rev in ("box", "pallet") and not wt_from_qty and chg_wt and billcnt and lines \
+                and (_rev == "pallet" or abs(chg_wt / (pal_kg / 2.0) - round(chg_wt / (pal_kg / 2.0))) < 1e-6):
             _bx = 0.0
             for m in lines:
                 _br = _box_div(m)
@@ -3135,14 +3338,14 @@ def _box_docs(rsub, carrier):
             _kw = sum(_m_kg(m, uk) for m in lines)
             _wok = (wt_rng[0] - 1e-9 <= chg_wt / _kw <= wt_rng[1] + 1e-9) if (wt_rng and _kw) else bool(_kw and abs(chg_wt - _kw) <= max(1.0, 0.02 * _kw))
             _pmiss = _kd_boxes(lines)[1]
-            if _wok:
-                pass                 # 重量本来就对得上的(碰巧是半托的整数倍)照旧按重量核
+            if _wok and _rev != "pallet":
+                pass                 # 旧自动模式：净重碰巧对得上仍按净重；显式按托配置不降级
             elif pal_box and not _pmiss and _bx:
                 # 核计重(V2.895)：金蝶箱数 ÷ 每托箱数，不足半托按半托算，× 每托千克数 ＝ 应该的计重，和账单计重比
                 _h = _bx / pal_box * 2.0
                 _tn = (int(_h) + (1 if _h - int(_h) > 1e-9 else 0)) / 2.0
                 pal_wt = {"boxes": round(_bx, 2), "raw": round(_bx / pal_box, 2), "tuo": _tn, "kg": round(_tn * pal_kg, 2)}
-            elif abs(_bx - billcnt) < 0.01:
+            elif _rev != "pallet" and abs(_bx - billcnt) < 0.01:
                 use_weight, pal_n = False, round(chg_wt / pal_kg, 2)
             else:
                 pal_note = " · 计费重量像按托(%s 托)，但箱数对不上：账单 %s 件、金蝶 %s 箱" % (_fmt_amt(chg_wt / pal_kg), _fmt_amt(billcnt), _fmt_amt(round(_bx, 2)))
@@ -3223,7 +3426,33 @@ def _box_docs(rsub, carrier):
                     bw_lack = "账单的吨重是按箱折的（这一行每箱 %g 千克），%s还没填每箱计费重量，金蝶折不成同口径的吨重，先拿金蝶净重比" % (
                         round(chg_wt / billcnt, 3), "、".join(dict.fromkeys(_lack)))
                     mode_cn += " · " + bw_lack
-            if box_wt:
+            scheme_gap = ""
+            if _rev == "volume":
+                missing = []
+                if not chg_wt:
+                    missing.append("账单计重")
+                if not billcnt:
+                    missing.append("账单件数")
+                if not _dm:
+                    missing.append("箱子尺寸")
+                if not vol_kg:
+                    missing.append("每方千克系数")
+                if not vol_wt:
+                    missing.append("完整箱规")
+                if missing:
+                    scheme_gap = "按体积核不了：缺" + "、".join(missing)
+            elif _rev == "pallet" and not pal_wt:
+                missing = []
+                if not pal_kg or not pal_box:
+                    missing.append("每托千克数/每托箱数")
+                if not chg_wt or not billcnt:
+                    missing.append("账单计重/件数")
+                if not lines or _kd_boxes(lines)[1]:
+                    missing.append("完整箱规")
+                scheme_gap = "按托核不了：缺" + "、".join(missing or "可复算的金蝶箱数")
+            if scheme_gap:
+                mode_cn, cnt_state = scheme_gap, "qtydiff"
+            elif box_wt:
                 cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= 0.05) else "qtydiff"      # 箱数 × 每箱计费千克，两边同一个算法，应当分毫不差
             elif vol_wt or pal_wt:
                 cnt_state = "ok" if (kd_sum and abs(wbase - kd_sum) <= max(0.05, 0.005 * kd_sum)) else "qtydiff"      # 两边同一把尺子，箱数相等就该分毫不差
@@ -3427,6 +3656,9 @@ def _box_docs(rsub, carrier):
                 "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                 "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
                 "note": r.get("note") or "", "bbiz": _bill_biz(r),
+                "qty_enabled": scope["qty_enabled"], "price_enabled": scope["price_enabled"],
+                "subject_source": r.get("_subject_source") or "", "subject_pending": bool(r.get("_subject_pending")),
+                "_scheme_gap": locals().get("scheme_gap", ""),
                 # 人工归类(V2.788)：账单原主体、主体有没有被人工改、人工定的费用类型、原因——页面据此标「特批」、可恢复账单原值
                 "subj_bill": _short_subject(str(r.get("subject") or "").strip()),
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
@@ -3551,7 +3783,7 @@ def _box_docs(rsub, carrier):
                 if x.get("sales"):
                     x["ratio"] = round(tot / x["sales"], 4)
             # 一张单拆几行批次(恒茂入库)：单行比整单会被误判成打托/包车，先把几行账单量加起来再比金蝶
-            if all(x.get("kd_sum") for x in xs) and not any(str(x.get("mode_cn", "")).startswith("包天") or x.get("state") == "price" for x in xs)                     and len({x.get("bill_unit") for x in xs}) == 1 and all(x.get("bill_amt") for x in xs):
+            if all(x.get("kd_sum") for x in xs) and not any(str(x.get("mode_cn", "")).startswith("包天") or x.get("state") == "price" or x.get("_scheme_gap") for x in xs)                     and len({x.get("bill_unit") for x in xs}) == 1 and all(x.get("bill_amt") for x in xs):
                 bsum = round(sum(float(x.get("bill_amt") or 0) for x in xs), 2)
                 # 几行写的单号不全一样(首行只写一张、后面几行写「A+B」)：金蝶量按这几行提到的全部单号算一次(V2.866；原来只拿首行的，恒茂 CGRK182049 账单 1,015 箱对 778 箱)
                 _un = {}
@@ -3635,6 +3867,7 @@ def _box_docs(rsub, carrier):
         x.pop("_kdd", None)
         x.pop("_kda", None)
         x.pop("_kall", None)
+        x.pop("_scheme_gap", None)
     return docs
 
 
@@ -3681,6 +3914,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     card, ncard = _load_card(carrier)
+    settings = _review_settings(carrier)
+    _scope = _review_scope(carrier)[0]
     accr_lines, accr_total = [], 0.0   # 计提对账走单独异步接口 /accrual，不拖慢主表
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
@@ -3773,8 +4008,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
     page = max(1, int(page))
     sl = filt if q_on else filt[(page - 1) * size: page * size]   # 搜索不分页(结果集小)，全量取物料后按全字段筛
     # 统一物料模板：按重量(顺丰/天鹰)/按件数箱(丰源)/快递件数(迅鸽)共用同一分支
-    _rev = "weight" if carrier in _WEIGHT_CARRIERS else ("qty" if carrier in _QTY_CARRIERS else "box")
-    by_box = (carrier in _BOX_CARRIERS) or (carrier in _WEIGHT_CARRIERS) or (carrier in _QTY_CARRIERS)
+    _rev = _scope["scheme"] or ("weight" if carrier in _WEIGHT_CARRIERS else ("qty" if carrier in _QTY_CARRIERS else "box"))
+    by_box = bool(_scope["scheme"]) or (carrier in _BOX_CARRIERS) or (carrier in _WEIGHT_CARRIERS) or (carrier in _QTY_CARRIERS)
     if by_box:
         import time as _t
         # 小承运商(≤300单)：全量出单据视图、缓存10分钟，按真实核对结果筛/计数/翻页，不用每次翻页都拉金蝶；
@@ -3869,7 +4104,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         else:
             dtot, docs = (len(pool) if q_on else len(filt)), pool
         view = [m for x in docs for m in x["materials"]]
-        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
+        return {"ok": True, "carrier": carrier, "period": period, "settings": settings, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
@@ -3932,14 +4167,14 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                              "bill_qty": bqty, "bill_unit": "千克",
                              "sales": round(sales, 2) if sales is not None else None,
                              "ratio": round(fline / sales, 4) if sales else None})
-        return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
+        return {"ok": True, "carrier": carrier, "period": period, "settings": settings, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
                 "by_weight": True, "material": True, "detail_total": len(filt), "detail": view,
                 "page": page, "size": size}
     view = [{k: r.get(k) for k in ("doc_no", "carrier_sub", "prov", "charge_wt", "qty", "kd_qty",
              "amount", "base_amount", "std_amount", "price_diff", "price_state", "qty_diff",
              "qty_state", "tier", "verdict", "fee_item")} for r in sl]
-    return {"ok": True, "carrier": carrier, "period": period, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
+    return {"ok": True, "carrier": carrier, "period": period, "settings": settings, "price_card_rows": ncard, "codes": _code_maps(request, carrier, period),
             "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts, "accr_lines": accr_lines, "accr_total": accr_total,
             "by_weight": by_weight, "detail_total": len(filt), "detail": view, "page": page, "size": size}
 
@@ -3960,6 +4195,7 @@ def _bust(carrier, period):
         _ACCR_CACHE.pop(k, None)
     with _DOC_MAT_LOCK:
         _DOC_MAT_CACHE.clear()
+        _DOC_HEAD_CACHE.clear()
 
 
 def _signed(carrier, period):

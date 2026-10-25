@@ -759,6 +759,8 @@ export const reviewClassifyRulesSave = cfg => j('/api/logistics-review/classify-
 export const reviewIntake = (carrier, period) => j(`/api/logistics-review/intake?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewReadiness = (carrier, period) => j(`/api/logistics-review/readiness?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewIntakeOverview = period => j(`/api/logistics-review/intake-overview?period=${encodeURIComponent(period)}`)
+export const reviewSettingsGet = carrier => j(`/api/logistics-review/settings?carrier=${encodeURIComponent(carrier)}`)
+export const reviewSettingsSet = body => j('/api/logistics-review/settings', { method: 'POST', body: JSON.stringify(body) })
 export const reviewReparse = (carrier, period, src) => j('/api/logistics-review/reparse', { method: 'POST', body: JSON.stringify({ carrier, period, src: src || '' }) })
 export const reviewDups = (carrier, period) => j(`/api/logistics-review/dups?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 export const reviewDupOk = (carrier, period, doc, ok, reason = '') => j('/api/logistics-review/dup-ok', { method: 'POST', body: JSON.stringify({ carrier, period, doc, ok, reason }) })

@@ -1,5 +1,6 @@
-// [Change Log] Date:2026-10-24 Author:Kimi Version:V2.1005
+// [Change Log] Date:2026-10-25 Author:Kimi Version:V2.1007
 // 四步复核台：①数据接入 ②逐单核价核量 ③逐笔计提 ④发票审核与登记。先确认账单，再比较计提。
+// V2.1007：承运商复核设置弹窗（核量/核价、方案、主体缺失）；未启用轴明确显示未核，不冒充无误。
 // 步骤条与登记使用后端 readiness 真实结论；④为请款单队列＋单张审票，修改后刷新统一状态。
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import LogisticsInvCompare from './LogisticsInvCompare.jsx'   // 第④步·发票与暂估高级对照
@@ -9,7 +10,7 @@ import { voucherLater, voucherFeeDraft, voucherFeePost, voucherPick, reviewScope
 import { printAdjust } from './LogisticsVoucher.jsx'
 import { reviewClassify, reviewDups, reviewDupOk, reviewClassifyRules, reviewClassifyRulesSave } from '../api.js'
 import { IntakeStep, InvAuditPanel, IK_V, IK_CSS } from './LogisticsIntake.jsx'   // V2.989 第①步数据接入 + 第④步发票审核
-import { reviewIntake, reviewReadiness } from '../api.js'
+import { reviewIntake, reviewReadiness, reviewSettingsGet, reviewSettingsSet } from '../api.js'
 import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog, RangeDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -117,6 +118,54 @@ function BillsDlg({ carrier, period, onClose, onChanged, flash }) {
       </div>
     </div>
   )
+}
+
+function ReviewSettingsDlg({ carrier, onClose, onSaved, onUnitKg }) {
+  const [f, setF] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    reviewSettingsGet(carrier).then(r => setF({ ...r, wt_lo: r.wt_range ? String(r.wt_range[0]) : '', wt_hi: r.wt_range ? String(r.wt_range[1]) : '',
+      vol_kg: r.vol_kg || '', pallet_kg: r.pallet_kg || '', pallet_box: r.pallet_box || '' })).catch(e => setErr(e.message))
+  }, [carrier])
+  const set = (k, v) => setF(o => ({ ...o, [k]: v }))
+  const save = () => {
+    if (!f.qty_enabled && !f.price_enabled) { setErr('核量、核价至少启用一项'); return }
+    setBusy(true); setErr('')
+    reviewSettingsSet({ carrier, qty_enabled: f.qty_enabled, price_enabled: f.price_enabled, scheme: f.scheme,
+      default_subject: f.default_subject || '', vol_kg: String(f.vol_kg), pallet_kg: String(f.pallet_kg), pallet_box: String(f.pallet_box),
+      wt_range: f.scheme === 'weight' && f.wt_lo && f.wt_hi ? [f.wt_lo, f.wt_hi] : null })
+      .then(r => { onSaved(r); onClose() }).catch(e => setErr(e.message)).finally(() => setBusy(false))
+  }
+  return <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+    <div className="fxdlg" style={{ width: 'min(680px,100%)' }} role="dialog" aria-modal="true" aria-label={`复核设置 · ${carrier}`}>
+      <div className="fxhead"><b>复核设置 · {carrier}</b><span className="sp" /><button className="fxx" aria-label="关闭" onClick={onClose}>✕</button></div>
+      {!f && !err && <div className="fxsub">读取承运商设置…</div>}
+      {err && <div className="fxwarn">{err}</div>}
+      {f && <>
+        <div className="fxamt"><b>复核范围</b><span className="dim" style={{ fontSize: 12 }}>全票生效，至少启用一项</span></div>
+        <div className="fxsub" style={{ display: 'flex', gap: 24 }}>
+          <label><input type="checkbox" checked={f.qty_enabled} onChange={e => set('qty_enabled', e.target.checked)} /> 核量</label>
+          <label><input type="checkbox" checked={f.price_enabled} onChange={e => set('price_enabled', e.target.checked)} /> 核价</label>
+        </div>
+        <div className="fxamt"><b>核对方案</b></div>
+        <div className="fxsub"><select value={f.scheme} onChange={e => set('scheme', e.target.value)}>
+          <option value="">按系统原有规则</option><option value="weight">按重量</option><option value="volume">按体积</option><option value="pallet">按托数</option><option value="box">按箱数</option>
+        </select></div>
+        {f.scheme === 'weight' && <div className="fxsub">毛重比区间 <input style={{ width: 80 }} value={f.wt_lo} onChange={e => set('wt_lo', e.target.value)} /> 至 <input style={{ width: 80 }} value={f.wt_hi} onChange={e => set('wt_hi', e.target.value)} /> <span className="dim">留空恢复默认</span></div>}
+        {f.scheme === 'volume' && <div className="fxsub">每方折千克 <input style={{ width: 100 }} value={f.vol_kg} onChange={e => set('vol_kg', e.target.value)} /> kg/m³ <span className="dim">体积计费必须填写</span></div>}
+        {f.scheme === 'pallet' && <div className="fxsub">每托 <input style={{ width: 90 }} value={f.pallet_kg} onChange={e => set('pallet_kg', e.target.value)} /> 千克 · 每托 <input style={{ width: 70 }} value={f.pallet_box} onChange={e => set('pallet_box', e.target.value)} /> 箱 <span className="dim">按托数必须两项都填</span></div>}
+        <div className="fxsub"><button className="lnk" onClick={onUnitKg}>单位换算与箱规设置（按物料）</button></div>
+        <div className="fxamt"><b>主体缺失时</b></div>
+        <div className="fxsub">销售出库、采购和调拨优先用金蝶组织回填；其他出库不能用库存组织猜主体。没有可靠组织时，使用下面的默认主体；不选则仍需人工指定。</div>
+        <div className="fxsub"><select value={f.default_subject || ''} onChange={e => set('default_subject', e.target.value)}>
+          <option value="">其他出库需人工指定主体</option>
+          {(f.subjects || []).map(x => <option key={x.code} value={x.name}>{x.code} {x.name}</option>)}
+        </select></div>
+        <div className="fxbtns"><button className="btn pri" disabled={busy} onClick={save}>{busy ? '保存中…' : '保存设置并重算'}</button><button className="btn" onClick={onClose}>取消</button></div>
+      </>}
+    </div>
+  </div>
 }
 
 function UnitKgDlg({ carrier, period, onClose, onSaved, flash }) {
@@ -734,6 +783,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [pr, setPr] = useState(null)             // 打开的钉钉请款单
   const [scopeDlg, setScopeDlg] = useState(false) // 「哪些供应商算物流」弹窗
   const [unitDlg, setUnitDlg] = useState(false)   // 「单位换算」弹窗(升/个 折千克)
+  const [settingsDlg, setSettingsDlg] = useState(false) // 承运商复核设置
   const [billDlg, setBillDlg] = useState(false)   // 「账单」弹窗(现在解析着哪几份、替换、删除、新增)
   const [scopeSum, setScopeSum] = useState(null)  // 总表头上那句：金蝶分组「…」N 家
   const loadScopeSum = () => reviewScope().then(r => setScopeSum({ n: r.n, names: (r.groups || []).filter(g => g.on).map(g => g.name || g.code), stale: r.stale })).catch(() => {})
@@ -1728,7 +1778,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             nodoc={((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)}
             onPick={k => { setKcard(k); setCpg(1) }} />}
           {d && d.by_box && <div className="ldd-rules">
-            <button className="ldd-rule-btn" onClick={() => setRuleDlg('range')} title="按重量核的单：账单计费重量 ÷ 金蝶净重 落在区间内算量对，超出上限的部分算多收">⚙ <b>换算系数区间</b>{d.wt_range ? `${Number(d.wt_range[0]).toFixed(2)}–${Number(d.wt_range[1]).toFixed(2)}` : '默认 差 2% 以内'}</button>
+            <button className="ldd-rule-btn" onClick={() => setSettingsDlg(true)} title="设置本承运商的核量、核价、核对方案及主体缺失规则">⚙ <b>复核设置</b>{d.settings ? `${d.settings.qty_enabled ? '核量' : '未核量'} · ${d.settings.price_enabled ? '核价' : '未核价'}${d.settings.scheme ? ' · ' + ({ weight: '按重量', volume: '按体积', pallet: '按托数', box: '按箱数' }[d.settings.scheme] || '') : ''}` : ''}</button>
             <button className="ldd-rule-btn" onClick={() => setRuleDlg('rules')}>⚙ <b>归类规则</b>按单据类型、物料分组推</button>
             <button className="ldd-rule-btn" disabled={!clsR || !clsR.tab} onClick={() => setRuleDlg('accr')}>ⓘ <b>和本月计提对照</b>{clsR && clsR.accr_total != null ? '计提 ' + money(clsR.accr_total) : '取数中…'}</button>
             <button className="ldd-rule-btn" onClick={() => setRuleDlg('dup')}>ⓘ <b>重复收费</b>只比运输费，服务不同不算</button>
@@ -1739,6 +1789,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {ruleDlg === 'dup' && <DupRuleDialog onClose={() => setRuleDlg(null)} />}
           {ruleDlg === 'range' && <RangeDialog docs={(allD && allD.docs) || docs} rng={d && d.wt_range} carrier={carrier} locked={false} onClose={() => setRuleDlg(null)}
             onSave={(lo, hi) => reviewWtRange(carrier, lo, hi).then(() => { flash(lo ? `换算系数区间已保存 ${lo}–${hi}，整页按新区间重核` : '已恢复默认（差 2% 以内算一致）'); setRuleDlg(null); reloadDocs() }).catch(e => flash('保存失败：' + e.message))} />}
+          {settingsDlg && <ReviewSettingsDlg carrier={carrier} onClose={() => setSettingsDlg(false)} onUnitKg={() => setUnitDlg(true)}
+            onSaved={() => { flash('复核设置已保存，按新设置重算'); reloadDocs(); refetchL() }} />}
           {full && allD && (kcard || (clsR && (clsR.err || clsR.accr_note))) && <div className="adjnote">
             {kcard && <>只看：<b>{KNAME[kcard]}</b>（{nDocs(fdocs || [])} 张）<button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setKcard(null); setCpg(1) }}>看全部</button>　</>}
             {clsR && clsR.err && <span className="diffbad">归类没取到：{clsR.err}　<button className="lnk" onClick={() => loadCls(true)}>重取</button></span>}
@@ -1764,14 +1816,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               {dfilt && <button className="btn sm" onClick={() => { setDfilt(null); setPage(1); setOpen({}) }}>清空筛选</button>}
             </>}
             <div style={{ flex: 1 }} />
-            {/* V2.987：毛重比＝换算系数区间，入口挪到卡片下面那排(照样机，带分布图和影响预览)，这里不再重复 */}
-            {d && d.by_box && <button className="btn sm" onClick={editPallet} title="有的线路按托收费，账单上的计费重量是「托数 × 每托千克数」，不是货的真实重量。填了以后，计费重量是半托整数倍的单改按箱数核（账单件数 对 金蝶箱数）。一家一档，各月通用">
-              按托 {d.pallet_kg ? `${d.pallet_kg} 千克/托${d.pallet_box ? ' · ' + d.pallet_box + ' 箱/托' : ''}` : '未设'} ⚙</button>}
-            {d && d.by_box && <button className="btn sm" onClick={editVol} title="有的货按体积收费（抛重）：账单计重＝件数 × 箱子体积 × 每方千克数，不是货的净重。账单行带了箱子尺寸的，系统按这里填的数复算计重，件数仍和金蝶箱数比。一家一档，各月通用">
-              按体积 {d.vol_kg ? `${d.vol_kg} 千克/方` : '未设'} ⚙</button>}
-            {d && d.by_box && <button className="btn sm" onClick={() => setUnitDlg(true)} title="金蝶按升、按个计量的物料（牛奶、稀奶油、内袋），填每 1 升/个 折多少千克，才能和账单的千克比。按物料存，各家各月共用。">
-              单位换算·箱规{d.bw_gap && d.bw_gap.on ? '·每箱计费重量' : ''}{((d.unit_gap && d.unit_gap.n_mat) || 0) + ((d.bw_gap && d.bw_gap.n_mat) || 0) > 0 ? <b className="diffbad"> {((d.unit_gap && d.unit_gap.n_mat) || 0) + ((d.bw_gap && d.bw_gap.n_mat) || 0)} 种没填</b> : ''} ⚙</button>}
-            {/* 账单上传/替换/删除已挪到第①步「数据接入」（V2.1001，用户：和第③步重复了） */}
+            {/* 按托、按体积、毛重比和单位换算统一在「复核设置」中维护。 */}
             <button className="btn sm" disabled={busy === 'kd'} onClick={kingdee} title="重新从金蝶取出库单物料，刷新核量">{busy === 'kd' ? '金蝶取数中…' : '接金蝶核量'}</button>
             <label className="btn sm">导入价格卡<input type="file" accept=".xlsx,.xls" hidden onChange={onFile(reviewImportPriceCard, carrier)} /></label>
             <input type="search" placeholder="搜单号/客户/物料" value={q} onChange={e => { setQ(e.target.value); setPage(1) }} />
@@ -1870,7 +1915,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                             title={'这张单的归类是人工定的（特批等），以人工定的为准。' + (x.ovr_reason ? '\n原因：' + x.ovr_reason : '')}>人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.ovr_reason ? ' · 有原因' : ''}</span>}</td>
                         <td className="num"><DiffCell j={j} /></td>
                         <td className="party"><span title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</span>
-                          <span className="sub"><Cd c={cdBook(x.subject)} />{x.subject} · {x.fee_item}{x.bizline ? ' · ' + x.bizline : ''}</span></td>
+                          <span className="sub"><Cd c={cdBook(x.subject)} />{x.subject} · {x.fee_item}{x.bizline ? ' · ' + x.bizline : ''}</span>
+                          {x.subject_source && <span className="sub dim">{x.subject_source === 'kingdee' ? '金蝶组织回填' : '供应商默认主体'}</span>}
+                          {x.subject_pending && <span className="sub diffbad">主体待人工指定</span>}</td>
                         <td className="ldd-s">{x.carrier_sub || <span className="dim">—</span>}</td>
                         <td><Cell2 top={j.q.top} sub={j.q.sub} short={j.q.short} k={j.q.k} title={x.mode_tip || x.mode_cn} /></td>
                         <td><Cell2 top={j.p.top} sub={j.p.sub} short={j.p.short} k={j.p.k} /></td>

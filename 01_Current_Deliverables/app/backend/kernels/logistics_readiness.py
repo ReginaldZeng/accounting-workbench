@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1004
-# Description: 物流账单复核四步就绪判定纯函数。只消费各步现有结果，不查库、不连金蝶；GET readiness 与登记复核共用。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1007
+# Description: 物流账单复核四步就绪判定纯函数。V2.1007 逐单核量/核价双轴独立开关；不查库、不连金蝶。
 import re
 
 
@@ -106,14 +106,19 @@ def _docs_step(data):
     docs = data.get("docs") or []
     classes = data.get("classify") or {}
     dups = data.get("dups") or {}
+    settings = data.get("settings") or {}
+    if settings.get("qty_enabled", True) is False and settings.get("price_enabled", True) is False:
+        return _step("逐单核价核量设置错误", blockers=["核量、核价不能同时关闭"], error=True)
     blockers = []
     for doc in docs:
         if doc.get("confirmed"):
             continue
         no = doc.get("doc_no") or "未标单号"
-        if doc.get("state") not in ("ok", "info"):
+        if doc.get("qty_enabled", True) is False and doc.get("price_enabled", True) is False:
+            return _step("逐单核价核量设置错误", blockers=["%s 核量、核价不能同时关闭" % no], error=True)
+        if doc.get("qty_enabled", True) is not False and doc.get("state") not in ("ok", "info"):
             blockers.append("%s 数量未系统通过，需人工确认" % no)
-        if not _price_passed(doc):
+        if doc.get("price_enabled", True) is not False and not _price_passed(doc):
             blockers.append("%s 价格无依据或未系统通过，需人工确认" % no)
         if doc.get("fee_chk") not in ("ok", "na"):
             blockers.append("%s 费用类型未通过，需人工确认" % no)

@@ -17,7 +17,7 @@ const r2 = v => Math.round(v * 100) / 100
 
 export const CLS_PILL = { 归类一致: 'ok', 标注不对: 'bad', 计提记错: 'warn', 判不了: 'neu' }
 const CLS_TODO = new Set(['标注不对', '计提记错'])
-export const V_PILL = { 多收: 'bad', 少收: 'blue', 价待确认: 'warn', 量核不了: 'orange', 只核了价: 'neu', 一致: 'ok' }
+export const V_PILL = { 多收: 'bad', 少收: 'blue', 价待确认: 'warn', 量核不了: 'orange', 只核了价: 'neu', 未核量: 'neu', 未核价: 'neu', 一致: 'ok' }
 
 // ---------- 一张单怎么判（量 → 价 → 钱） ----------
 // 跨越官网计价(V2.990)：后端 kernels/logistics_kuayue 已算好价三样/量/结论，x.ky 带全字段，这里只做呈现
@@ -46,6 +46,20 @@ function kyJudge(x) {
 }
 
 export function judge(x) {
+  if (x.qty_enabled === false) {
+    const other = judge({ ...x, state: 'ok', kd_sum: x.bill_amt, chk: null, ky: null })
+    other.q = { top: '未核量', sub: '复核设置已关闭核量，仅核价', k: 'na' }
+    other.v = '未核量'
+    other.why = '复核设置已关闭核量，仅核价'
+    return other
+  }
+  if (x.price_enabled === false) {
+    const other = judge({ ...x, sub_fees: {}, trip: null, ky: null })
+    other.p = { top: '未核价', sub: '复核设置已关闭核价，仅核量', k: 'na' }
+    other.v = '未核价'
+    other.why = '复核设置已关闭核价，仅核量'
+    return other
+  }
   if (x.ky) return kyJudge(x)
   const sf = x.sub_fees || {}, fee = x.doc_fee || 0, u = x.kd_unit || x.bill_unit || ''
   // ① 量

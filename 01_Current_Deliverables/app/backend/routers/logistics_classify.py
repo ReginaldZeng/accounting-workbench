@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-24 | Author: Kimi | Version: V2.1006
-# Description: 物流账单复核·费用归类接口。计提故障显式报错；V2.1006 fresh传递物料缓存绕过，与逐单共享取数结果。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1007
+# Description: 物流账单复核·费用归类接口。V2.1007 与逐单/逐笔共享主体回填和单头缓存；计提故障显式报错。
 #   原说明：只读金蝶，单据头(销售组织/领料部门/需求组织/调入组织)＋物料档案分组；
 #   计提取 logistics_review._accr_entries(本月逐笔计提)。判定逻辑在 kernels/logistics_classify.py。
 #   GET  /api/logistics-review/classify        一家一个月：每张单的归类结论 + 和计提对照表(30 分钟缓存，fresh=1 重取)
@@ -58,12 +58,13 @@ def _fetch_heads(s, conf, by_form):
     return out
 
 
-def _bill_docs(carrier, period):
+def _bill_docs(carrier, period, fresh=False):
     """中间表逐单明细 → 一张单一条(几行账单合并金额)。没有金蝶单号的行(仓储费、搬运费…)第②步本来就不列，这里也不判。"""
     BL = LR.BL
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+    LR._backfill_subjects(rows, carrier, fresh=fresh)
     by = {}
     for r in rows:
         d0 = (r.get("doc_no") or "").split("+")[0].strip()
@@ -79,7 +80,7 @@ def _bill_docs(carrier, period):
 
 
 def _build(carrier, period, fresh=False):
-    docs = _bill_docs(carrier, period)
+    docs = _bill_docs(carrier, period, fresh=fresh)
     if len(docs) > LR._FULL_DOCS:
         return {"ok": False, "msg": "%s 本月 %d 张单，超过 %d 张的先不整家判归类（要拉的金蝶太多）" % (carrier, len(docs), LR._FULL_DOCS)}
     by_form = {}
@@ -94,7 +95,7 @@ def _build(carrier, period, fresh=False):
         real = {}
         for n, ms in mats.items():
             real.setdefault(ms[0].get("_form"), set()).add(n)
-        heads = _fetch_heads(s, conf, real)
+        heads = LR._fetch_doc_heads(s, conf, real, fresh=fresh)
         codes = set()
         for n, ms in mats.items():
             cs = [str(m.get("编码") or "") for m in ms if m.get("编码")]
