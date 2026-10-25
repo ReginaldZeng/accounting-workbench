@@ -1,4 +1,5 @@
-// [Change Log] Date:2026-10-17 Author:Claude Opus 5.5 Version:V2.987
+// [Change Log] Date:2026-10-25 Author:Kimi Version:V2.1008
+// V2.1008：关闭核量或核价后的判定递归显式解除对应开关，修复逐单弹窗白屏。
 // 账单复核台第②步·逐单核对改版（照 2026-10-16 样机定版，10-17 用户「样机更清晰，执行」对齐样机）：
 //   · judge(x)：每张单的结论（多收/少收/价待确认/量核不了/只核了价/一致）、差额、复核金额，以及 ①量 ②价 两格的一句话＋依据——表格、卡片、弹窗共用这一套
 //   · DocCards：一行 7 张数字卡（用户 10-16 定），点卡片筛单
@@ -47,14 +48,14 @@ function kyJudge(x) {
 
 export function judge(x) {
   if (x.qty_enabled === false) {
-    const other = judge({ ...x, state: 'ok', kd_sum: x.bill_amt, chk: null, ky: null })
+    const other = judge({ ...x, qty_enabled: true, state: 'ok', kd_sum: x.bill_amt, chk: null, ky: null })
     other.q = { top: '未核量', sub: '复核设置已关闭核量，仅核价', k: 'na' }
     other.v = '未核量'
     other.why = '复核设置已关闭核量，仅核价'
     return other
   }
   if (x.price_enabled === false) {
-    const other = judge({ ...x, sub_fees: {}, trip: null, ky: null })
+    const other = judge({ ...x, price_enabled: true, sub_fees: {}, trip: null, ky: null })
     other.p = { top: '未核价', sub: '复核设置已关闭核价，仅核量', k: 'na' }
     other.v = '未核价'
     other.why = '复核设置已关闭核价，仅核量'
