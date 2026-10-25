@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1012
-# Description: 【物流账单复核】路由。V2.1012 恒茂外仓冷藏与入库处置统一归入入库运费。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1013
+# Description: 【物流账单复核】路由。V2.1013 逐笔计提查询带承运商，恒茂外仓归口完整生效。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
@@ -2601,7 +2601,7 @@ def _build_lines(request, carrier, period):
                 e["mbiz"] = _b
     with db._engine.connect() as c:
         allrows = [dict(r) for r in c.execute(select(
-            BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
+            BL.c.carrier, BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
         notes = {r[0]: (r[1] or "") for r in c.execute(select(LN.c.line_key, LN.c.note).where(
             (LN.c.carrier == carrier) & (LN.c.period == period))).all()}
