@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1011
-# Description: 物流标准复核表按原账单合并单元格整单核量；同单费用汇总，右侧数量列同步合并。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1012
+# Description: 恒茂标准表按外仓口径统一入库运费；同单整单核量，原账单保留供应商原始费用名。
 from copy import copy
 from io import BytesIO
 import json
@@ -204,6 +204,8 @@ def _build_doc_sheet(wb, carrier, period, res, lines, bills, source_rows):
         x = dict(x0)
         x["doc_fee"] = total_fee
         x["sub_fees"] = sf
+        if carrier == "恒茂":
+            x["fee_item"] = "入库运费"
         if no_doc:
             bill_qty = b.get("qty")
         else:
@@ -233,7 +235,7 @@ def _build_doc_sheet(wb, carrier, period, res, lines, bills, source_rows):
                 "来源sheet页": src_sheet, "源行号": ",".join(str(v) for v in src_rows), "父费用行ID": "" if mi == 1 else fee_id,
                 "费用行ID": fee_id if mi == 1 else "%s-M%d" % (fee_id, mi), "核对方案": scheme,
                 "核对字段": check_field, "计费标准": sf.get("公式") or price_std, "单据类型": _doc_type(no),
-                "单据编码": no if not no_doc else "无单据", "费用类型": x0.get("fee_item") or b.get("fee_item"),
+                "单据编码": no if not no_doc else "无单据", "费用类型": x.get("fee_item") or b.get("fee_item"),
                 "物料分组": "/".join(v for v in material_groups if v),
                 "物料编码": m.get("code") or "", "物料名称": m.get("name") or "", "规格": m.get("spec") or "",
                 "基本数量": m.get("base_kg"), "基本单位": m.get("kg_unit") or "", "销售额": m.get("sales"),

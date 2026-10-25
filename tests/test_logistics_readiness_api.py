@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1009
-# Description: 物流 readiness/sign、承运商设置、主体回填、导出缓存、异常传播与共享缓存测试；全部使用合成数据和桩。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1012
+# Description: 物流 readiness/sign、外仓费用归口、主体回填、导出缓存与共享缓存测试；全部使用合成数据和桩。
 import asyncio
 import json
 import sys
@@ -394,6 +394,18 @@ class ExportCacheTests(unittest.TestCase):
         self.assertEqual(out.status_code, 200)
         wb = load_workbook(BytesIO(out.body), read_only=True)
         self.assertEqual(wb.sheetnames, ["复核表", "复核明细"])
+
+
+class FeeClassificationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def test_hengmao_cold_storage_is_inbound_but_manual_override_wins(self):
+        self.assertEqual(self.lr._eff_fee({"carrier": "恒茂", "fee_item": "冷藏费", "annot": "小料原料", "doc_no": "无单据"}), "入库运费")
+        self.assertEqual(self.lr._eff_fee({"carrier": "恒茂", "fee_item": "入库处置费", "annot": "仓储费-小料", "doc_no": "FBDR1"}), "入库运费")
+        self.assertEqual(self.lr._eff_fee({"carrier": "恒茂", "fee_item": "冷藏费", "annot": "仓储费-小料", "fee_ovr": "仓储费"}), "仓储费")
+        self.assertEqual(self.lr._eff_fee({"carrier": "甲", "fee_item": "其他", "annot": "仓储费-小料", "doc_no": "无单据"}), "仓储费")
 
 
 if __name__ == "__main__":

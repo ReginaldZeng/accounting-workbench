@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1011
-# Description: 【物流账单复核】路由。V2.1011 恒茂标准表按原账单合并单元格整单核量。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1012
+# Description: 【物流账单复核】路由。V2.1012 恒茂外仓冷藏与入库处置统一归入入库运费。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
@@ -1533,6 +1533,8 @@ def _eff_fee(r):
         fo = _fee_norm(r["fee_ovr"])
         if fo in _CANON_FEES:      # 手改值不在规范类里(如把业务线"TOC"填进了费用类型)当作没填
             return fo
+    if r.get("carrier") == "恒茂" and (r.get("fee_item") in ("冷藏费", "入库处置费") or "仓储" in str(r.get("annot") or "")):
+        return "入库运费"         # 工厂外仓：供应商的冷藏/仓储是入库环节费用，不是我司销售仓储费
     fn = _fee_norm(r.get("fee_item"))
     if fn in _CANON_FEES:
         return fn

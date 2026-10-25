@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1011
-# Description: 物流标准复核表结构、同单汇总、合并单元格、金额勾稽和原账单链接测试；使用合成数据。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1012
+# Description: 恒茂标准表结构、外仓入库归口、同单汇总、合并单元格和原账单链接测试；使用合成数据。
 import json
 import sys
 import unittest
@@ -58,6 +58,7 @@ class StandardExportTests(unittest.TestCase):
         self.assertEqual(sum(ws.cell(r, C["账单金额"]).value or 0 for r in range(5, 8)), 78.37)
         self.assertEqual(sum(ws.cell(r, C["标准金额"]).value or 0 for r in range(5, 8)), 78.36)
         self.assertEqual(ws.cell(7, C["数量结论"]).value, "不适用·无运输单据")
+        self.assertEqual(ws.cell(7, C["费用类型"]).value, "入库运费")
         self.assertEqual(ws.cell(7, C["物料名称"]).value, "测试物料")
         self.assertTrue(ws.cell(6, C["父费用行ID"]).value)
         self.assertIn("0.01", wb["01复核说明书"]["D8"].value)
