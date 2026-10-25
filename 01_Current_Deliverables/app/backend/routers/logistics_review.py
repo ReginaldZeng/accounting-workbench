@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1007
-# Description: 【物流账单复核】路由。V2.1007 承运商核量/核价设置、配置化核量与共享主体回填；四步 readiness 统一登记。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1009
+# Description: 【物流账单复核】路由。V2.1009 导出复用逐笔缓存，避免重复读取金蝶。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
@@ -5701,7 +5701,7 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     HFONT = Font(bold=True, color="FFFFFF"); HFILL = PatternFill("solid", fgColor="1F6E8C")
     wb = Workbook()
     # sheet1 复核表（可直接打印）：逐笔计提为主线 主体/费用类型/产品线/产品类型/部门/凭证号/计提含税/税率/账单/差异/差异解释
-    L = _build_lines(request, carrier, period)
+    L = _cached_lines(request, carrier, period)
     ws = wb.active; ws.title = "复核表"
     acc_t = L.get("accr_total") or 0
     bill_t = L.get("bill_total") or 0

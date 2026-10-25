@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1007
-# Description: 物流 readiness/sign、承运商设置、主体回填、异常传播与共享缓存测试；全部使用合成数据和桩。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1009
+# Description: 物流 readiness/sign、承运商设置、主体回填、导出缓存、异常传播与共享缓存测试；全部使用合成数据和桩。
 import asyncio
 import json
 import sys
@@ -370,6 +370,30 @@ class MaterialCacheTests(unittest.TestCase):
             self.assertEqual(len(self.lr._DOC_MAT_CACHE), 0)
             self.lr._fetch_doc_materials(object(), {}, docs)
             self.assertEqual(len(calls), 3)
+
+
+class ExportCacheTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def test_export_reuses_lines_cache_instead_of_rebuilding(self):
+        from io import BytesIO
+        from openpyxl import load_workbook
+        lines = {"ok": True, "rows": [], "fixes": [], "suppliers": []}
+        payreq = types.ModuleType("routers.logistics_payreq")
+        payreq.inv_blocks = lambda carrier, period: []
+        with patch.object(self.lr, "_perm", return_value={"name": "测试"}), \
+             patch.object(self.lr, "review_result", return_value={"material": False, "detail": []}), \
+             patch.object(self.lr, "_cached_lines", return_value=lines) as cached, \
+             patch.object(self.lr, "_build_lines", side_effect=AssertionError("导出不得绕过缓存重算")), \
+             patch.object(self.lr, "_raw_json_exists", return_value=True), \
+             patch.dict(sys.modules, {"routers.logistics_payreq": payreq}):
+            out = self.lr.review_export(_Request(), carrier="甲", period="2026-09")
+        cached.assert_called_once()
+        self.assertEqual(out.status_code, 200)
+        wb = load_workbook(BytesIO(out.body), read_only=True)
+        self.assertEqual(wb.sheetnames, ["复核表", "复核明细"])
 
 
 if __name__ == "__main__":
