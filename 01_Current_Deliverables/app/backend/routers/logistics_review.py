@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1009
-# Description: 【物流账单复核】路由。V2.1009 导出复用逐笔缓存，避免重复读取金蝶。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1010
+# Description: 【物流账单复核】路由。V2.1010 恒茂导出四段式标准复核表；其它承运商保留原导出。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。
@@ -5687,7 +5687,7 @@ def _xl_raw_review(wb, ws2, maps, carrier, period, recs, col_of_key, spec_sheets
 
 @router.get("/api/logistics-review/export")
 def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
-    """导出该承运商本月复核结果 xlsx：费用项汇总 + 逐单/物料级复核明细（按重量承运商=物料级17列）。"""
+    """导出复核结果；恒茂用四段式标准表，其它承运商暂沿用费用汇总与复核明细。"""
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     res = review_result(request, carrier=carrier, period=period, group="all", page=1, size=1000000, q="")
@@ -5702,6 +5702,17 @@ def review_export(request: Request, carrier: str = "迅鸽", period: str = ""):
     wb = Workbook()
     # sheet1 复核表（可直接打印）：逐笔计提为主线 主体/费用类型/产品线/产品类型/部门/凭证号/计提含税/税率/账单/差异/差异解释
     L = _cached_lines(request, carrier, period)
+    if carrier == "恒茂" and res.get("material"):
+        from routers.logistics_standard_export import build_standard_workbook
+        with db._engine.connect() as c:
+            bills = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail")).order_by(BL.c.id)).mappings().all()]
+        standard = build_standard_workbook(carrier, period, res, L, bills, _raw_bill_files(carrier, period))
+        bio = BytesIO(); standard.save(bio)
+        fn = "%s_%s_物流账单复核表.xlsx" % (carrier, period)
+        return Response(content=bio.getvalue(),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": "attachment; filename*=UTF-8''%s" % quote(fn)})
     ws = wb.active; ws.title = "复核表"
     acc_t = L.get("accr_total") or 0
     bill_t = L.get("bill_total") or 0
