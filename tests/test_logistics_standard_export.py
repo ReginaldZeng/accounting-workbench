@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1010
-# Description: 物流标准复核表结构、金额勾稽、无单据费用和原账单链接测试；使用合成数据。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1011
+# Description: 物流标准复核表结构、同单汇总、合并单元格、金额勾稽和原账单链接测试；使用合成数据。
 import json
 import sys
 import unittest
@@ -71,6 +71,39 @@ class StandardExportTests(unittest.TestCase):
         wb.save(bio)
         reopened = load_workbook(BytesIO(bio.getvalue()), data_only=False)
         self.assertEqual(reopened.sheetnames, wb.sheetnames)
+
+    def test_same_doc_is_compared_once_and_raw_quantity_cells_merge(self):
+        bills = [
+            {"id": 1, "doc_no": "FBDR1", "subject": "孝感星期九", "fee_item": "入库处置费", "amount": 20.17,
+             "qty": 10, "charge_wt": 10, "src_sheet": "入库", "src_row": 3, "annot": "小料", "sub_fees": '{"标准": 20.17}'},
+            {"id": 3, "doc_no": "FBDR1", "subject": "孝感星期九", "fee_item": "入库处置费", "amount": 10,
+             "qty": 20, "charge_wt": 20, "src_sheet": "入库", "src_row": 4, "annot": "小料", "sub_fees": '{"标准": 10}'},
+        ]
+        materials = [{"code": "M1", "name": "物料一", "base_kg": 10, "kg_unit": "千克", "kd": 10, "fee": 20.17},
+                     {"code": "M2", "name": "物料二", "base_kg": 20, "kg_unit": "千克", "kd": 20, "fee": 10}]
+        docs = []
+        for b in bills:
+            docs.append(dict(b, lid=b["id"], doc_fee=b["amount"], bill_amt=30, doc_bill_all=30, bill_unit="千克",
+                             kd_sum=30, kd_unit="千克", state="ok", chk={"kind": "weight"}, materials=materials,
+                             sub_fees=json.loads(b["sub_fees"])))
+        res = {"total_bill": 30.17, "settings": {"qty_enabled": True, "price_enabled": True, "subjects": []},
+               "codes": {}, "docs": docs}
+        lines = {"accr_total": 30.17, "bill_total": 30.17, "diff_total": 0, "rows": []}
+        raw = load_workbook(BytesIO(self.make_raw()[0][1]))
+        raw["入库"].append([2, "入库", "测试物料二", "20袋/箱", ""])
+        bio = BytesIO()
+        raw.save(bio)
+        wb = build_standard_workbook("恒茂", "2026-09", res, lines, bills, [("测试账单.xlsx", bio.getvalue())])
+        ws = wb["02单据运费"]
+        self.assertEqual(ws.max_row, 6)
+        self.assertEqual(ws.cell(5, C["账单数量"]).value, 30)
+        self.assertEqual(ws.cell(5, C["账单金额"]).value, 30.17)
+        self.assertEqual(ws.cell(5, C["标准金额"]).value, 30.17)
+        self.assertIn("AC5-SUM(AA5:AA6)", ws.cell(5, C["数量差异"]).value)
+        merged = {str(r) for r in wb["原账单-入库"].merged_cells.ranges}
+        self.assertIn("G3:G4", merged)
+        self.assertIn("H3:H4", merged)
+        self.assertIn("I3:I4", merged)
 
 
 if __name__ == "__main__":

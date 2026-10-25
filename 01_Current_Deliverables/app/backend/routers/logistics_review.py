@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1010
-# Description: 【物流账单复核】路由。V2.1010 恒茂导出四段式标准复核表；其它承运商保留原导出。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1011
+# Description: 【物流账单复核】路由。V2.1011 恒茂标准表按原账单合并单元格整单核量。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
 #   算法在 kernels/logistics_price + logistics_review + logistics_intake；表在 kernels/logistics_review_store；金蝶只读走 kingdee_client。
 #   pilot=迅鸽（取数说明已种子，价格卡导《附件二》，核量取 XQLCK 出库数量）。计提行=复用 logistics_bills 聚合，另接。

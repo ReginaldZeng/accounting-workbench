@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-25 | Author: Kimi | Version: V2.1010
-# Description: 物流账单标准复核表：说明书、单据运费、计提对账单、原始账单；只呈现已有复核结果。
+# Date: 2026-10-25 | Author: Kimi | Version: V2.1011
+# Description: 物流标准复核表按原账单合并单元格整单核量；同单费用汇总，右侧数量列同步合并。
 from copy import copy
 from io import BytesIO
 import json
@@ -161,30 +161,58 @@ def _dimension_map(lines, res):
 
 def _build_doc_sheet(wb, carrier, period, res, lines, bills, source_rows):
     ws = _new_sheet(wb, "02单据运费", "单据运费复核",
-                    "一行为一个物料或一个无单据费用批次；单据维度与金额结论可合并，不同产品分行。未核、缺参和不适用均明确写明。",
+                    "同一金蝶单先汇总账单数量，再与金蝶整单数量比较；多物料逐行展开，无单据费用按原批次保留。",
                     DOC_HEADERS, DOC_WIDTHS)
     docs = {x.get("lid"): x for x in res.get("docs", [])}
     dimension = _dimension_map(lines, res)
+    grouped = {}
+    work = []
+    for b in bills:
+        no = (b.get("doc_no") or "").split("+")[0]
+        if not no or no == "无单据":
+            work.append([b])
+        else:
+            if no not in grouped:
+                grouped[no] = []
+                work.append(grouped[no])
+            grouped[no].append(b)
     rowno = 5
     links = {}
     qty_enabled = res.get("settings", {}).get("qty_enabled", True)
     price_enabled = res.get("settings", {}).get("price_enabled", True)
-    for b in bills:
+    for group in work:
+        b = group[0]
         lid = b.get("id")
-        src_sheet, src_row = b.get("src_sheet") or "", b.get("src_row")
-        original = source_rows.get((src_sheet, src_row), {})
+        src_sheet = b.get("src_sheet") or ""
+        src_rows = [x.get("src_row") for x in group]
+        originals = [source_rows.get((x.get("src_sheet") or "", x.get("src_row")), {}) for x in group]
+        original = originals[0]
         no = (b.get("doc_no") or "").split("+")[0]
         no_doc = not no or no == "无单据"
-        x = docs.get(lid) or {
+        candidates = [docs.get(x.get("id")) for x in group if docs.get(x.get("id"))]
+        x0 = max(candidates, key=lambda v: (len(v.get("materials") or []), float(v.get("doc_fee") or 0))) if candidates else {
             "lid": lid, "doc_no": "" if no_doc else no, "subject": b.get("subject"), "fee_item": b.get("fee_item"),
             "bizline": b.get("bizline") or ("原料" if "原料" in str(b.get("annot") or "") else "小料"),
-            "doc_fee": b.get("amount"), "bill_amt": b.get("charge_wt") if b.get("charge_wt") is not None else b.get("qty"),
-            "bill_unit": "千克" if b.get("charge_wt") is not None else b.get("unit"), "materials": [],
-            "sub_fees": _json(b.get("sub_fees")), "state": "info", "mode_cn": "无运输单据，按原账单批次核价",
+            "doc_fee": b.get("amount"), "bill_unit": "千克" if b.get("charge_wt") is not None else b.get("unit"), "materials": [],
+            "state": "info", "mode_cn": "无运输单据，按原账单批次核价",
         }
-        sf = x.get("sub_fees") or _json(b.get("sub_fees"))
+        total_fee = round(sum(float(x.get("amount") or 0) for x in group), 2)
+        sfs = [_json(x.get("sub_fees")) for x in group]
+        standard = round(sum(float(sf["标准"]) for sf in sfs), 2) if all(sf.get("标准") is not None for sf in sfs) else None
+        formulas = list(dict.fromkeys(str(sf.get("公式") or "") for sf in sfs if sf.get("公式")))
+        sf = {"标准": standard, "公式": "；".join(formulas)}
+        x = dict(x0)
+        x["doc_fee"] = total_fee
+        x["sub_fees"] = sf
+        if no_doc:
+            bill_qty = b.get("qty")
+        else:
+            bill_qty = x0.get("doc_bill_all")
+            if bill_qty is None:
+                bill_qty = round(sum(float(x.get("charge_wt") if x.get("charge_wt") is not None else (x.get("qty") or 0)) for x in group), 4)
+        x["bill_amt"] = bill_qty
         fee_id = "HM-%s-%05d" % (period.replace("-", ""), int(lid))
-        materials = x.get("materials") or []
+        materials = x0.get("materials") or []
         if no_doc or not materials:
             materials = [{
                 "code": "", "name": original.get("商品名称") or b.get("fee_item"), "spec": original.get("规格") or "",
@@ -192,6 +220,9 @@ def _build_doc_sheet(wb, carrier, period, res, lines, bills, source_rows):
             }]
         start = rowno
         scheme, check_field, price_std = _scheme(x, no_doc)
+        material_groups = list(dict.fromkeys("原料" if "原料" in str(v.get("annot") or "") else str(v.get("bizline") or x0.get("bizline") or "") for v in group))
+        notes = list(dict.fromkeys(str(v) for v in [x0.get("mode_short") or x0.get("mode_cn")] +
+                                    [o.get("备注") for o in originals] + [v.get("note") for v in group] if v))
         for mi, m in enumerate(materials, 1):
             rr = rowno
             rowno += 1
@@ -199,28 +230,27 @@ def _build_doc_sheet(wb, carrier, period, res, lines, bills, source_rows):
             values = {k: "" for k in DOC_HEADERS}
             values.update({
                 "主体": dim["subject"], "科目": dim["acct"], "部门": dim["dept"], "产品线": dim["biz"], "产品项目": dim["proj"],
-                "来源sheet页": src_sheet, "源行号": src_row, "父费用行ID": "" if mi == 1 else fee_id,
+                "来源sheet页": src_sheet, "源行号": ",".join(str(v) for v in src_rows), "父费用行ID": "" if mi == 1 else fee_id,
                 "费用行ID": fee_id if mi == 1 else "%s-M%d" % (fee_id, mi), "核对方案": scheme,
                 "核对字段": check_field, "计费标准": sf.get("公式") or price_std, "单据类型": _doc_type(no),
-                "单据编码": no if not no_doc else "无单据", "费用类型": x.get("fee_item") or b.get("fee_item"),
-                "物料分组": "原料" if "原料" in str(b.get("annot") or "") else (x.get("bizline") or ""),
+                "单据编码": no if not no_doc else "无单据", "费用类型": x0.get("fee_item") or b.get("fee_item"),
+                "物料分组": "/".join(v for v in material_groups if v),
                 "物料编码": m.get("code") or "", "物料名称": m.get("name") or "", "规格": m.get("spec") or "",
                 "基本数量": m.get("base_kg"), "基本单位": m.get("kg_unit") or "", "销售额": m.get("sales"),
                 "长": "", "宽": "", "高": "", "单位换算系数": m.get("box_div") or m.get("kg_per"),
                 "折合计价数量": m.get("kd") if qty_enabled and not no_doc else None,
-                "折合计价单位": x.get("kd_unit") or "", "账单数量": x.get("bill_amt") if mi == 1 and not no_doc else (b.get("qty") if no_doc else None),
-                "计费标准数量": (b.get("charge_wt") if b.get("charge_wt") is not None else b.get("qty")) if mi == 1 else None,
-                "数量结论": ("未核量" if not qty_enabled else "不适用·无运输单据" if no_doc else "待补每箱计费重量" if x.get("bw_lack") else
-                           "一致" if x.get("state") == "ok" else "金蝶查无" if x.get("state") == "miss" else "数量不符" if x.get("state") == "qtydiff" else "待确认"),
-                "账单金额": b.get("amount") if mi == 1 else None,
-                "标准金额": sf.get("标准") if mi == 1 and price_enabled else None,
-                "单位费用": (round(float(m.get("fee")) / float(m.get("base_kg")), 6)
+                "折合计价单位": x0.get("kd_unit") or "", "账单数量": bill_qty if mi == 1 else None,
+                "计费标准数量": bill_qty if mi == 1 else None,
+                "数量结论": ("未核量" if not qty_enabled else "不适用·无运输单据" if no_doc else "待补每箱计费重量" if x0.get("bw_lack") else
+                           "一致" if x0.get("state") == "ok" else "金蝶查无" if x0.get("state") == "miss" else "数量不符" if x0.get("state") == "qtydiff" else "待确认"),
+                "账单金额": total_fee if mi == 1 else None, "标准金额": standard if mi == 1 and price_enabled else None,
+                "单位费用": (round(float(m.get("fee")) * total_fee / float(x0.get("doc_fee") or total_fee) / float(m.get("base_kg")), 6)
                            if m.get("fee") is not None and m.get("base_kg") and str(m.get("kg_unit") or "").lower() in ("千克", "kg") else "不适用"),
-                "费比": m.get("ratio"), "备注": "；".join(str(v) for v in [x.get("mode_short") or x.get("mode_cn"), original.get("备注"), b.get("note")] if v),
+                "费比": m.get("ratio"), "备注": "；".join(notes),
             })
             if not price_enabled:
                 values["备注"] = "未核价；" + values["备注"]
-            chk = x.get("chk") or {}
+            chk = x0.get("chk") or {}
             if chk.get("kind") == "vol" and chk.get("lwh"):
                 values["长"], values["宽"], values["高"] = chk["lwh"]
             for header, value in values.items():
@@ -237,7 +267,12 @@ def _build_doc_sheet(wb, carrier, period, res, lines, bills, source_rows):
                     ws.cell(rr, C["金额差异"], "=IF(OR(%s%d=\"\",%s%d=\"\"),\"\",%s%d-%s%d)" % (
                         CL["账单金额"], rr, CL["标准金额"], rr, CL["账单金额"], rr, CL["标准金额"], rr))
         end = rowno - 1
-        links[(src_sheet, src_row)] = {"first": start, "last": end, "fee_id": fee_id}
+        for source_b, source_sf in zip(group, sfs):
+            amount_diff = round(float(source_b.get("amount") or 0) - float(source_sf["标准"]), 2) if source_sf.get("标准") is not None else None
+            links[(source_b.get("src_sheet") or "", source_b.get("src_row"))] = {
+                "first": start, "last": end, "fee_id": fee_id, "doc_no": no,
+                "standard": source_sf.get("标准"), "amount_diff": amount_diff,
+            }
         if end > start:
             merge_headers = DOC_HEADERS[:7] + DOC_HEADERS[9:15] + DOC_HEADERS[28:]
             for header in merge_headers:
@@ -390,8 +425,7 @@ def _append_raw_review(ws, source, links):
                 "=SUM('02单据运费'!%s%d:%s%d)" % (CL["折合计价数量"], first_row, CL["折合计价数量"], last_row),
                 "='02单据运费'!%s%d" % (CL["数量差异"], first_row),
                 "='02单据运费'!%s%d" % (CL["数量结论"], first_row),
-                "='02单据运费'!%s%d" % (CL["标准金额"], first_row),
-                "='02单据运费'!%s%d" % (CL["金额差异"], first_row),
+                link["standard"], link["amount_diff"],
                 "='02单据运费'!%s%d" % (CL["备注"], first_row)]
         for offset, value in enumerate(refs):
             cell = ws.cell(src_row, first + offset, value)
@@ -400,6 +434,21 @@ def _append_raw_review(ws, source, links):
             cell.alignment = Alignment(vertical="center", wrap_text=True)
             if offset in (1, 2, 4, 5):
                 cell.number_format = "#,##0.00;[Red]-#,##0.00"
+    runs = []
+    for src_row in sorted(sheet_rows):
+        link = sheet_rows[src_row]
+        if not link["doc_no"]:
+            continue
+        if runs and runs[-1][0] == link["doc_no"] and runs[-1][2] == src_row - 1:
+            runs[-1][2] = src_row
+        else:
+            runs.append([link["doc_no"], src_row, src_row])
+    for _doc_no, start, end in runs:
+        if end <= start:
+            continue
+        for ci in (first, first + 1, first + 2, first + 3):
+            ws.merge_cells(start_row=start, start_column=ci, end_row=end, end_column=ci)
+            ws.cell(start, ci).alignment = Alignment(vertical="center", wrap_text=True)
 
 
 def build_standard_workbook(carrier, period, res, lines, bills, raw_files):
