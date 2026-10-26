@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-10-26 Author:Kimi Code Version:V-draft 逐单运费 V1 批次上传、预览、确认、撤回、恢复与原件下载接口。
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 末尾追加「发票管家」接口块（invXxx 具名导出 + 手机端 X-Inv-Pair 令牌头）
 // [Change Log] Date:2026-09-10 Author:Codex Version:V2.555 业务分流及应收检查筛选接口。
 // [Change Log] Date:2026-07-03 Author:Claude/c Version:V1.1  前端 API 封装（加 reconcile/sync + 4位金额格式）
@@ -784,6 +785,32 @@ export const reviewOutstockFreight = (p) => j('/api/logistics-review/outstock-fr
 export const reviewDocFreight = (period, mode = 'other', q = '', page = 1, carrier = '', ffee = '') => j(`/api/logistics-review/doc-freight?period=${period}&mode=${mode}&q=${encodeURIComponent(q)}&page=${page}&carrier=${encodeURIComponent(carrier)}&ffee=${encodeURIComponent(ffee)}`)
 export const reviewRegisterTemplateUrl = () => '/api/logistics-review/register/template'
 export const reviewRegisterImport = (period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/register/import?period=${period}`, { method: 'POST', body: fd }) }
+
+// 逐单运费 V1：写操作即便回 HTTP 200，也把 {ok:false,msg} 当作失败交给页面展示。
+const freightV1Base = '/api/logistics-freight/v1'
+const freightV1Write = async (url, options) => {
+  const body = await j(url, options)
+  if (body && body.ok === false) throw new Error(body.msg || body.detail || '操作失败')
+  return body
+}
+const freightV1Post = (url, body = {}) => freightV1Write(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+export const logisticsFreightV1Batches = period => j(`${freightV1Base}/batches?period=${encodeURIComponent(period || '')}`)
+export const logisticsFreightV1Batch = id => j(`${freightV1Base}/batches/${encodeURIComponent(id)}`)
+export const logisticsFreightV1Carriers = () => j(`${freightV1Base}/carriers`)
+export const logisticsFreightV1BulkSupplement = (batchIds, carrier) => freightV1Post(`${freightV1Base}/bulk-supplement`, { batch_ids: batchIds, carrier })
+export const logisticsFreightV1Preview = (files, options = {}) => {
+  const fd = new FormData()
+  ;(Array.isArray(files) ? files : Array.from(files || [])).forEach(file => file && fd.append('files', file, file.name))
+  ;['period', 'carrier', 'subject', 'biz_line', 'operation', 'replace_id'].forEach(key => {
+    if (options[key] !== undefined && options[key] !== null && options[key] !== '') fd.append(key, String(options[key]))
+  })
+  return freightV1Write(`${freightV1Base}/preview`, { method: 'POST', body: fd })
+}
+export const logisticsFreightV1Update = (id, body) => freightV1Post(`${freightV1Base}/batches/${encodeURIComponent(id)}`, body)
+export const logisticsFreightV1Confirm = (id, allowOverlap = false) => freightV1Post(`${freightV1Base}/batches/${encodeURIComponent(id)}/confirm`, { allow_overlap: !!allowOverlap })
+export const logisticsFreightV1Withdraw = (id, reason) => freightV1Post(`${freightV1Base}/batches/${encodeURIComponent(id)}/withdraw`, { reason })
+export const logisticsFreightV1Restore = id => freightV1Post(`${freightV1Base}/batches/${encodeURIComponent(id)}/restore`, {})
+export const logisticsFreightV1FileUrl = id => `${freightV1Base}/batches/${encodeURIComponent(id)}/file`
 
 export const invSQrCreate = () => invSJ('/api/inv/s/login/qr', '', {})
 export const invSQrCheck = ticket => invSJ('/api/inv/s/login/qr/check', '', { ticket })

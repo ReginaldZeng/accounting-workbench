@@ -1,5 +1,6 @@
+// [Change Log] Date:2026-10-26 Author:Kimi Code Version:V-draft 增加物流表 V1 页签，保留销售出库和其他单据。
 // [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.645
-// 单据运费：两 tab（销售出库 / 其他单据登记制）统一为同一套物料级字段。
+// 单据运费：销售出库 / 物流表 V1 / 其他单据。
 // 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
 // V2.773：第一个 tab 从「销售出库」改成「账单复核（已登记）」——某家某月在复核台登记已复核后，逐单运费自动进来(所有单据类型)；
@@ -11,6 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, reviewDocFreight, reviewRegisterImport, reviewRegisterTemplateUrl } from '../api.js'
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import LogisticsOutstockFreight from './LogisticsOutstockFreight.jsx'   // 销售出库单全量 × 运费(V2.774)
+import LogisticsV1Upload from './LogisticsV1Upload.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const qtyfmt = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 3 }))
@@ -33,7 +35,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const fileRef = useRef(null)
 
   const load = useCallback(() => {
-    if (tab === 'out') return                    // 销售出库单页签自己取数
+    if (tab !== 'other') return                 // 销售出库、物流表 V1 各自取数
     setData(null); setSel(new Set())
     reviewDocFreight(period, tab, q, page).then(setData).catch(() => setData({ rows: [], count: 0, total: 0, doc_count: 0, pages: 1 }))
   }, [period, tab, q, page])
@@ -135,6 +137,8 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       <div className="tabs">
         <button className={'tab' + (tab === 'out' ? ' on' : '')} onClick={() => setTab('out')}>
           <div className="t">销售出库单</div><div className="s">本月全部销售出库单、退货单（剔除内部交易）· 每张单的运费</div></button>
+        <button className={'tab' + (tab === 'v1' ? ' on' : '')} onClick={() => setTab('v1')}>
+          <div className="t">物流表 V1</div><div className="s">多文件上传 · 独立预览勾稽 · 确认后进入有效 V1</div></button>
         <button className={'tab' + (tab === 'other' ? ' on' : '')} onClick={() => setTab('other')}>
           <div className="t">其他单据</div><div className="s">其他出库 / 采购入库 / 调拨等 · 账单里的 ＋ 手工登记的</div></button>
       </div>
@@ -142,8 +146,9 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       {msg && <div className="msg">{msg}</div>}
 
       {tab === 'out' && <LogisticsOutstockFreight period={period} />}
+      {tab === 'v1' && <LogisticsV1Upload period={period} />}
 
-      {tab !== 'out' && <div className="stats">
+      {tab === 'other' && <div className="stats">
         <div className="stat accent"><div className="v">{data ? data.doc_count : '—'}</div><div className="l">单据张数</div></div>
         <div className="stat accent"><div className="v">{data ? data.count : '—'}</div><div className="l">物料明细行</div></div>
         <div className="stat ok"><div className="v">{data ? money(data.total) : '—'}</div><div className="l">运费合计（元·含税）</div></div>
@@ -155,8 +160,9 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
           账单里的 <b>{data.other_stat.bill_ok.n + data.other_stat.bill_pending.n}</b> 张
           （已复核 {data.other_stat.bill_ok.n} 张 {money(data.other_stat.bill_ok.amount)}
           {data.other_stat.bill_pending.n > 0 && <span style={{ color: 'var(--warn)' }}> · 待复核 {data.other_stat.bill_pending.n} 张 {money(data.other_stat.bill_pending.amount)}</span>}）
+          ＋ 物流表 V1 的 <b>{data.other_stat.v1 ? data.other_stat.v1.n : 0}</b> 张 {money(data.other_stat.v1 ? data.other_stat.v1.amount : 0)}
           ＋ 手工登记的 <b>{data.other_stat.reg.n}</b> 张 {money(data.other_stat.reg.amount)}。
-          <span style={{ color: '#8A96A2' }}>账单里的随复核台导入自动出现；没有账单的（货拉拉报销等）在下面登记。</span>
+          <span style={{ color: '#8A96A2' }}>当前有 V2 取 V2，否则取 V1；待复核账单不重复计入。没有账单的（货拉拉报销等）在下面登记。</span>
         </div>
       )}
 
@@ -188,7 +194,7 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
         </div>
       )}
 
-      {tab !== 'out' && <div className="card">
+      {tab === 'other' && <div className="card">
         <h3 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span>其他单据 · 物料级运费明细
             {data ? `　${data.doc_count} 张单据 · 运费合计 ${money(data.total)} 元` : ''}</span>
@@ -249,12 +255,12 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
                     <td rowSpan={span}>{r.bizline || <span className="note">—</span>}</td>
                     <td rowSpan={span} className="docno">
                       <span className="dn">{r.doc_no}</span>
-                      {tab === 'other' && <span className="dnsub" style={{ color: r.src === '账单' ? (r.signed ? 'var(--ok)' : 'var(--warn)') : '#8A96A2' }}>
-                        {r.src === '账单' ? (r.signed ? '账单 · 已复核' : '账单 · 待复核') : '手工登记'}</span>}
+                      {tab === 'other' && <span className="dnsub" style={{ color: r.src === 'V1' ? '#1F6E8C' : r.src === '账单' ? (r.signed ? 'var(--ok)' : 'var(--warn)') : '#8A96A2' }}>
+                        {r.src === 'V1' ? '物流表 · V1 暂报' : r.src === '账单' ? (r.signed ? '账单 · V2 已复核' : '账单 · 待复核') : '手工登记'}</span>}
                       {multi && <span className="dnsub">共 {span} 个物料 · 整单 {money(docFee)}</span>}
                     </td>
                   </>}
-                  {tab === 'other' && r.src !== '账单'
+                  {tab === 'other' && r.src !== '账单' && r.src !== 'V1'
                     ? (first && <td rowSpan={span}>{r.party || <span className="note">—</span>}</td>)
                     : <td>{r.party || <span className="note">—</span>}</td>}
                   <td style={{ fontFamily: 'ui-monospace', fontSize: 12 }}>{r.code || <span className="note">—</span>}</td>

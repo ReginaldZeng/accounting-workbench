@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-10-26 Author:Kimi Code Version:V-draft 增加 V1/V2/差异/未提交筛选，版本金额放合计与展开来源区，兼容旧字段。
 // [Change Log] Date: 2026-10-03 | Author: Claude Opus 5.5 | Version: V2.774
 // Description: 【单据运费·销售出库单】金蝶当月全部销售出库单为底，各家账单的逐单运费按单号挂上去——没挂到运费的也列出来。
 //   用户：「需要列出来所有的出库单，支持筛选……我需要知道这个月每一笔出库单的运费是多少（除去内部交易的部分）」。
@@ -21,6 +22,9 @@ const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { mini
 const pctfmt = n => (n == null ? '—' : (Number(n) * 100).toFixed(2) + '%')
 const qty = n => Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 3 })
 const STATES = [['', '全部'], ['has', '有运费'], ['none', '没有运费'], ['ldonly', '只有装卸费、没有运费'], ['nofee', '什么费用都没有'], ['pending', '有待复核的费用'], ['ok', '费用都已复核']]
+const VERSIONS = [['v1', 'V1 物流表'], ['v2', 'V2 账单复核'], ['diff', 'V1 / V2 有差异'], ['unsubmitted', 'V1 未提交']]
+const unsubmitted = r => r.unsubmitted === true || r.effective_version === 'unsubmitted' || r.version_status === 'unsubmitted'
+const hasVersion = r => ['v1_amount', 'v2_amount', 'effective_version', 'version_diff'].some(k => r[k] !== undefined && r[k] !== null)
 // 表头：[排序键, 列名, 是否数字列]。点表头排序，再点一次反过来；数字列第一次点是从大到小
 const COLS = [['org', '销售组织'], ['date', '日期'], ['no', '出库单号'], ['brand', '品牌'], ['customer', '客户'], ['stock', '发货仓库'], ['addr', '收货地址'], ['btype', '类型'],
   ['kg', '数量', 1], ['amount', '销售额', 1], ['fee_tr', '运费', 1], ['fee_ld', '装卸费', 1], ['fee_ot', '其他', 1], ['fee', '合计', 1], ['ratio', '费比', 1], ['carrier', '承运商']]
@@ -47,7 +51,7 @@ function Orphan({ o }) {
 }
 
 export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQInput, onFresh, busy }) {
-  const filtered = !!(f.org || f.btype || f.carrier || f.state || f.q || f.brand || f.stock)
+  const filtered = !!(f.org || f.btype || f.carrier || f.state || f.q || f.brand || f.stock || f.version)
   const S = d ? (filtered ? d.cur : d.all) : null
   const sel = (k, opts, all) => <select value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value, page: 1 })}>
     <option value="">{all}</option>{opts.map(o => Array.isArray(o) ? <option key={o[0]} value={o[0]}>{o[1]}</option> : <option key={o} value={o}>{o}</option>)}</select>
@@ -62,7 +66,9 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
           {S && S.n_none > 0 && <div className="s">没运费的：只有装卸费 {S.n_ldonly} 张 · 什么费用都没有 {S.n_nofee} 张 · 销售额 {money(S.amount_none)}</div>}</div></div>
         <div className="st ok"><div className="v">{S ? money(S.fee) : '—'}</div><div className="l">物流费用合计（含税）
           {S && <div className="s">运费 {money(S.fee_tr)} · 装卸费 {money(S.fee_ld)}{S.fee_ot ? ` · 其他 ${money(S.fee_ot)}` : ''}</div>}
-          {S && <div className="s">已复核 {money(S.fee_ok)}{S.fee_pending ? <span className="warn"> · 待复核 {money(S.fee_pending)}</span> : ''}</div>}</div></div>
+          {S && <div className="s">已复核 {money(S.fee_ok)}{S.fee_pending ? <span className="warn"> · 待复核 {money(S.fee_pending)}</span> : ''}</div>}
+          {S && (S.v1_amount != null || S.v2_amount != null) && <div className="s lof-version">V1 {money(S.v1_amount)} · V2 {money(S.v2_amount)} · 差异 {money(S.version_diff)}</div>}
+          {S && S.n_unsubmitted != null && <div className="s">V1 未提交 {S.n_unsubmitted} 张（不等同于零费用）</div>}</div></div>
         <div className="st"><div className="v">{S ? pctfmt(S.ratio) : '—'}</div><div className="l">费比（费用合计 ÷ 销售额）
           {S && <div className="s">销售额 {money(S.amount)}（价税合计{S.n_ret > 0 ? '，已减退货' : ''}）</div>}</div></div>
       </div>
@@ -76,8 +82,9 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
         {d && sel('stock', d.facets.stocks || [], '全部发货仓库')}
         {d && sel('carrier', d.facets.carriers, '全部承运商')}
         {sel('state', STATES.slice(1), '运费：全部')}
+        {sel('version', VERSIONS, '版本：全部')}
         <label className="ck"><input type="checkbox" checked={!!f.internal} onChange={e => setF({ ...f, internal: e.target.checked ? 1 : 0, page: 1 })} />含内部交易</label>
-        {filtered && <button className="btn" onClick={() => { setQInput(''); setF({ ...f, org: '', btype: '', carrier: '', state: '', q: '', brand: '', stock: '', page: 1 }) }}>清空筛选</button>}
+        {filtered && <button className="btn" onClick={() => { setQInput(''); setF({ ...f, org: '', btype: '', carrier: '', state: '', q: '', brand: '', stock: '', version: '', page: 1 }) }}>清空筛选</button>}
         <span style={{ flex: 1 }} />
         {d && <span className="dim" title="出库单数据取一次就存下来，进页面直接读；金蝶那边有新单或改单，点「刷新金蝶」重取">金蝶取数于 {d.fetched_at}
           {d.stale_days >= 1 && <span className="warn">（{d.stale_days} 天前）</span>}</span>}
@@ -116,9 +123,10 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
                 <td className="num">{zero(r.fee_tr) ? (r.kind === 'ret' ? <span className="z">—</span> : <span className="warn">没有运费</span>) : money(r.fee_tr)}</td>
                 <td className="num">{zero(r.fee_ld) ? <span className="z">—</span> : money(r.fee_ld)}</td>
                 <td className="num">{zero(r.fee_ot) ? <span className="z">—</span> : money(r.fee_ot)}</td>
-                <td className="num" title={r.fee_pending ? `其中待复核 ${money(r.fee_pending)}` : '都已复核'}>{zero(r.fee) ? <span className="z">—</span> : <b className={r.fee_pending ? 'warn' : ''}>{money(r.fee)}</b>}</td>
+                <td className="num" title={unsubmitted(r) ? 'V1 尚未提交，不代表零费用' : hasVersion(r) ? `V1 ${money(r.v1_amount)} · V2 ${money(r.v2_amount)} · 差异 ${money(r.version_diff)} · 生效 ${r.effective_version || '旧版'}` : r.fee_pending ? `其中待复核 ${money(r.fee_pending)}` : '都已复核'}>
+                  {unsubmitted(r) ? <span className="warn">未提交</span> : zero(r.fee) ? (hasVersion(r) ? <span className="z">0.00</span> : <span className="z">—</span>) : <b className={r.fee_pending || !zero(r.version_diff) ? 'warn' : ''}>{money(r.fee)}</b>}</td>
                 <td className="num">{pctfmt(r.ratio)}</td>
-                <td className="ell" title={r.carriers.map(x => `${x.carrier} ${money(x.amount)}（${x.period}${x.signed ? '' : '·待复核'}）`).join('\n')}>
+                <td className="ell" title={r.carriers.map(x => `${x.carrier} ${money(x.amount)}（${x.period} · ${x.version === 'v1' ? 'V1 暂报' : x.version === 'pending' ? '待复核' : 'V2 已复核'}）`).join('\n')}>
                   {r.carriers.length ? r.carriers.map((x, i) => <span key={i}>{i > 0 && '、'}{x.carrier}</span>) : <span className="z">—</span>}</td>
               </tr>
               {isOpen && <tr className="sub"><td></td><td colSpan="16">
@@ -132,8 +140,12 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
                       <td className="num">{money(x.amount)}</td><td className="num">{r.fee ? money(fl) : '—'}</td>
                       <td className="num">{r.fee && x.baseqty > 0 ? (fl / x.baseqty).toFixed(4) : '—'}</td></tr>
                   })}</tbody></table>
+                {hasVersion(r) && <div className="src lof-version-detail">
+                  版本金额：V1 <b>{unsubmitted(r) ? '未提交' : money(r.v1_amount)}</b>　·　V2 <b>{money(r.v2_amount)}</b>　·　差异 <b className={!zero(r.version_diff) ? 'warn' : ''}>{money(r.version_diff)}</b>　·　当前生效 <b>{unsubmitted(r) ? '未提交' : String(r.effective_version || '旧版').toUpperCase()}</b>
+                  {Array.isArray(r.version_sources) && r.version_sources.length > 0 && <div>来源批次：{r.version_sources.map((x, i) => <span key={i}>{i > 0 && '　·　'}{x.version || x.effective_version || '—'} / {x.filename || x.file_name || x.batch_id || x.id || '—'}（{money(x.amount)}）</span>)}</div>}
+                </div>}
                 {r.carriers.length > 0 && <div className="src">费用来源：{r.carriers.map((x, i) => <span key={i}>{i > 0 && '　·　'}<b style={{ fontWeight: 600 }}>{x.carrier}</b>
-                  {[['运费', x.tr], ['装卸费', x.ld], ['其他', x.ot]].filter(([, v]) => !zero(v)).map(([n, v]) => ` ${n} ${money(v)}`).join('，')}（{x.period} 账单，{x.signed ? '已复核' : <span className="warn">待复核</span>}）</span>)}</div>}
+                  {[['运费', x.tr], ['装卸费', x.ld], ['其他', x.ot]].filter(([, v]) => !zero(v)).map(([n, v]) => ` ${n} ${money(v)}`).join('，')}（{x.period}，{x.version === 'v1' ? 'V1 暂报' : x.version === 'pending' ? <span className="warn">待复核</span> : 'V2 已复核'}）</span>)}</div>}
               </td></tr>}
             </React.Fragment>
           })}
@@ -150,7 +162,7 @@ export function OutstockView({ d, f, setF, open, toggle, onSearch, qInput, setQI
 
 export default function LogisticsOutstockFreight({ period }) {
   const [d, setD] = useState(null)
-  const [f, setF] = useState({ internal: 0, q: '', org: '', btype: '', carrier: '', state: '', brand: '', stock: '', sort: 'date', dir: 'asc', page: 1 })
+  const [f, setF] = useState({ internal: 0, q: '', org: '', btype: '', carrier: '', state: '', brand: '', stock: '', version: '', sort: 'date', dir: 'asc', page: 1 })
   const [qInput, setQInput] = useState('')
   const [open, setOpen] = useState(() => new Set())
   const [busy, setBusy] = useState(false)

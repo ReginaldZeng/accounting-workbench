@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-10-26 | Author: Kimi Code | Version: V-draft
+# Description: 注册逐单运费 V1 独立批次 API。
 # [Change Log] Date: 2026-09-12 | Author: Codex | Version: V2.564
 # Description: Inline catalog metadata, independent display channels and stable menu layout insertion.
 # [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
@@ -5341,6 +5343,8 @@ app.include_router(invoice_paper.router)
 from routers import invoice_check
 app.include_router(invoice_check.router)
 
+from routers import logistics_freight_v1   # V-draft 逐单运费 V1 独立批次
+app.include_router(logistics_freight_v1.router)
 from routers import logistics_review   # V2.632 物流账单复核（核价×核量→归一态；pilot 迅鸽）
 app.include_router(logistics_review.router)
 from routers import logistics_classify   # V2.986 物流账单复核·费用归类（第③轴：按金蝶推应记哪一行，对标注、对计提）

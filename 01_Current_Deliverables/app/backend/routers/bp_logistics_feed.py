@@ -78,3 +78,46 @@ def bp_logistics_lines(request: Request, period: str = ""):
         signs = [dict(r) for r in c.execute(select(SG).where(SG.c.period == period)).mappings().all()]
     return build_feed(period, bl, signs, db.list_logi_suppliers() or [], db.list_tax_rates() or [],
                       lrv._eff_subject, lrv._eff_fee, lrv._line_buckets)
+
+
+@router.get("/api/internal/bp-doc-freight")
+def bp_doc_freight(request: Request, period: str = ""):
+    """BP 当前有效逐单费用：按费用归属月取数；旧 bp-logistics-lines 账单视图保持不变。"""
+    if not bom_quote.internal_token_ok(request):
+        return JSONResponse({"ok": False, "msg": "仅限内部调用"}, status_code=401)
+    if not period or len(period) != 7:
+        return JSONResponse({"ok": False, "msg": "缺账期（YYYY-MM）"}, status_code=400)
+    from kernels import logistics_doc_freight as ldf
+    resolved = ldf.load_resolved(db._engine, period, lrv._line_buckets, lrv._eff_subject, lrv._eff_fee)
+    bucket_of = {"运费": "tr", "装卸费": "ld"}
+    output = []
+    for entry in sorted(resolved.values(), key=lambda x: (x["doc_no"], x["carrier"], x["fee_type"])):
+        if not entry["has_effective"]:
+            continue
+        bucket = bucket_of.get(entry["fee_type"], "ot")
+        line = {"docNo": entry["doc_no"], "docNos": [entry["doc_no"]], "carrier": entry["carrier"],
+                "feeType": entry["fee_type"], "feeItem": "、".join(entry["fee_items"]),
+                "subject": "、".join(entry["subjects"]), "bizLine": "、".join(entry["biz_lines"]),
+                "tr": 0.0, "ld": 0.0, "ot": 0.0,
+                "v1Amount": round(entry["v1"], 2) if entry["has_v1"] else None,
+                "v2Amount": round(entry["v2"], 2) if entry["has_v2"] else None,
+                "effectiveAmount": round(entry["effective"], 2),
+                "effectiveVersion": entry["effective_version"],
+                "versionDiff": round(entry["difference"], 2) if entry["difference"] is not None else None,
+                "pendingAmount": round(entry["pending"], 2), "sources": entry["sources"]}
+        line[bucket] = line["effectiveAmount"]
+        output.append(line)
+    v1_total = sum(x["v1Amount"] or 0 for x in output)
+    v2_total = sum(x["v2Amount"] or 0 for x in output)
+    effective_total = sum(x["effectiveAmount"] for x in output)
+    has_v1 = any(x["v1Amount"] is not None for x in output)
+    has_v2 = any(x["v2Amount"] is not None for x in output)
+    differences = [x["difference"] for x in resolved.values() if x["difference"] is not None and x["has_effective"]]
+    return {"ok": True, "period": period, "periodMode": "fee_period",
+            "publishAsOf": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": {"lineCount": len(output), "docCount": len({x["docNo"] for x in output}),
+                        "v1Amount": round(v1_total, 2), "v2Amount": round(v2_total, 2),
+                        "effectiveAmount": round(effective_total, 2),
+                        "versionDiff": round(sum(differences), 2) if differences else None,
+                        "effectiveVersion": "mixed" if has_v1 and has_v2 else ("v2" if has_v2 else "v1")},
+            "lines": output}

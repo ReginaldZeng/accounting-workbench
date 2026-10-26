@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# [Change Log] Date: 2026-10-26 | Author: Kimi Code | Version: V-draft
+# Description: 注册逐单运费 V1 三表与敏感写权限。
 # [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 挂入 kernels/invoice_store 的 11 张 inv_ 新表（create_all 只建不改）；CAP_META_STATIC 加 7 个发票管家动作点（4 个敏感）。
 # [Change Log]
@@ -710,6 +712,9 @@ for _table in _inv_tables:
 from kernels.logistics_review_store import TABLES as _lr_tables
 for _table in _lr_tables:
     _table.to_metadata(_md)
+from kernels.logistics_freight_v1_store import TABLES as _lfv1_tables
+for _table in _lfv1_tables:
+    _table.to_metadata(_md)
 _md.create_all(_engine)
 # 发票管家：表建好以后才加的栏（票夹「归谁审」那几栏），老库在这里补；补不上不挡启动（接口读写那几栏时会报出来）
 try:
@@ -753,6 +758,8 @@ CAP_META_STATIC = [
     {"key": "close_period", "label": "月结看板·封存本期", "ws": "accounting", "group": "银行对账", "sensitive": True,
      "tier": "act", "mod": "periodclose"},
     {"key": "logistics_upload", "label": "上传物流计提表·维护税率", "ws": "accounting", "group": "物流计提", "tier": "act", "mod": "logistics"},
+    {"key": "logistics_freight_write", "label": "逐单运费V1·预览/确认/替换/撤回/恢复", "ws": "accounting",
+     "group": "物流计提", "sensitive": True, "tier": "act", "mod": "logisticscost"},
     {"key": "logistics_post", "label": "物流计提·一键录入金蝶", "ws": "accounting", "group": "物流计提", "sensitive": True,
      "tier": "act", "mod": "logistics"},
     # V2.848(用户 2026-10-06「实习生我可以给账号」「实习生扫码知道是哪个凭证，标注一下就好」)：装订的同事只要这一项——
