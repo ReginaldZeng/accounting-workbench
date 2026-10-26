@@ -291,22 +291,24 @@ function DiffVerdictDlg({ carrier, period, subject, diff, dv, onDone, onClose })
       .catch(e => setErr(e.message)).finally(() => setBusy(''))
   }
   const DV = {
-    fix: ['计提多了，按复核后金额红冲更正', '复核数才是对的：做账时系统自动把多计的差额红冲更正（原计提整笔红冲、按发票/请款金额重提再核销），不用再到付款做账页逐张确认。'],
-    keep: ['账单没错，差异另外处理', '计提不动、不随做账自动更正：到付款做账页逐张看（部分核销 / 红冲更正由人定）。'],
+    fix: ['按复核金额更正', '计提多了：系统按复核后的应付金额红冲并重提，后续自动处理，不用逐张点。'],
+    keep: ['保留计提，差异另行处理', '不自动更正；付款做账时由人工逐张决定部分核销或红冲。'],
   }
   return (
     <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="fxdlg" style={{ width: 'min(560px,100%)' }} role="dialog" aria-label="差异怎么办">
-        <div className="fxhead"><b>{subject} · 计提与复核应付差 {money(diff)}</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
-        <div className="fxsub">账单核过了，计提和复核应付还有差 <b style={{ color: '#B23B2E' }}>{money(diff)}</b>。这个差异怎么办？确认一句，做账就照着做，不用再到付款做账页逐张点。
-          {dv && <div style={{ marginTop: 4 }}>现在记的是：<b>{DV[dv] ? DV[dv][0] : dv}</b></div>}</div>
+      <div className="fxdlg" style={{ width: 'min(680px,100%)' }} role="dialog" aria-label="差异怎么办">
+        <div className="fxhead"><b>{subject} · 差异处理</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
+        <div style={{ margin: '12px 0', padding: '12px 14px', borderRadius: 8, background: '#FFF5E3', color: '#8A570D', fontSize: 14 }}>
+          计提与复核应付相差 <b style={{ fontSize: 20 }}>¥ {money(diff)}</b><div style={{ marginTop: 4 }}>请选择后续怎么处理。{dv && <span> 当前：{DV[dv][0]}</span>}</div>
+        </div>
         {err && <div className="fxwarn">{err}</div>}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(240px,1fr))', gap: 10, margin: '12px 0' }}>
           {Object.entries(DV).map(([k, [lb, sub]]) =>
-            <button key={k} className={'btn' + (dv === k ? ' pri' : '')} disabled={!!busy} style={{ textAlign: 'left', padding: '8px 12px' }}
+            <button key={k} type="button" data-dv={k} aria-pressed={dv === k} className={'btn' + (dv === k ? ' pri' : '')} disabled={!!busy}
+              style={{ textAlign: 'left', padding: '13px 14px', height: 'auto', minHeight: 92, whiteSpace: 'normal', lineHeight: 1.55, border: dv === k ? undefined : '1px solid #D7E1E7' }}
               onClick={() => dv === k ? onClose() : save(k)}>
-              {busy === k ? '保存中…' : lb}{dv === k ? '（现在选的）' : ''}
-              <div className="dim" style={{ fontSize: 12, fontWeight: 400, marginTop: 2 }}>{sub}</div>
+              <div style={{ fontSize: 15, fontWeight: 650, marginBottom: 5 }}>{busy === k ? '保存中…' : lb}{dv === k ? '（当前选择）' : ''}</div>
+              <div style={{ fontSize: 12.5, fontWeight: 400, color: dv === k ? 'inherit' : '#5E6B78' }}>{sub}</div>
             </button>)}
         </div>
         <div className="fxbtns">

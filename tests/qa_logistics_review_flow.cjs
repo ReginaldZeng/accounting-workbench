@@ -268,6 +268,22 @@ async function lineTasks(browser, B) {
   } catch (e) { throw new Error(e.message + '\nPAGE:\n' + await page.locator('body').innerText()) } finally { await ctx.close() }
 }
 
+async function diffDialog(browser, B) {
+  const { page, ctx, errors } = await open(browser, B, { taskData: true, fail: {} })
+  try {
+    await step(page, '逐笔计提复核')
+    await page.getByRole('button', { name: /本主体通过/ }).first().click()
+    const dlg = page.getByRole('dialog', { name: '差异怎么办' })
+    await dlg.waitFor()
+    assert.equal(await dlg.locator('[data-dv]').count(), 2)
+    assert.match(await dlg.innerText(), /按复核金额更正[\s\S]*保留计提，差异另行处理/)
+    assert.equal(await dlg.evaluate(el => el.scrollWidth <= el.clientWidth), true, '差异方案卡不能横向溢出')
+    await dlg.locator('[data-dv="fix"]').click()
+    await dlg.waitFor({ state: 'detached' })
+    assert.deepEqual(errors, [])
+  } finally { await ctx.close() }
+}
+
 async function main() {
   const B = bundle()
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
@@ -277,6 +293,7 @@ async function main() {
     ['接入/逐笔/readiness/发票均可重试且失败禁登记', stepRetries],
     ['逐单任务组502恢复、去重、重叠排除confirmed及二级卡片', docTasks],
     ['逐笔lineTask筛选与bill_span重算、组头全量合计', lineTasks],
+    ['差异处理方案卡不溢出且可选择', diffDialog],
   ]
   const results = []
   try {
