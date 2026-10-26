@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入）| 断言审核后只能后补单上传、页面无流程补票按钮、历史徽标保留
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 发票管家前端回归（浏览器夹具）
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 加申请人自助登记（#/invself）5 条：验证码登录→登记、重名、钉钉免登、手机配对先鉴权再免登、后补池入口
 // 只用合成数据：接口全部在浏览器里拦截回假数据，不连后端、不发钉钉、不碰生产。
@@ -902,6 +903,8 @@ test('设置：接入审批人每人一行、带自己的启用日；留空＝�
   assert.match(await rows.nth(0).innerText(), /曾某[\s\S]*已启用 · 只接 2026-09-09 当天及以后提交的单/)
   assert.match(await rows.nth(1).innerText(), /李某[\s\S]*还没启用 · 单经过这位不接/)
   assert.equal(await page.getByText('从这天提交的单子起').count(), 0, '全局起始日不再单独出现')
+  await page.getByText('审核前可在钉钉补发票或登记后补，二者之一合格才审核', { exact: false }).waitFor()
+  await page.getByText('审核后不再接入钉钉流程新增内容，后补票只能由申请人通过发票后补单上传、财务确认。', { exact: false }).waitFor()
   await rows.nth(0).locator('input[type=date]').fill('2026-09-01')
   await page.getByRole('button', { name: '保存', exact: true }).last().click()
   await page.waitForFunction(() => true)
@@ -1640,37 +1643,32 @@ test('申请人上传发票：传完弹 5 秒提醒（如果为专票打印 2 �
   await ctx.close()
 })
 
-test('后补单详情：钉钉流程里取到的发票（财务初审后才到）标出来、也是待确认；「去钉钉找发票」能点', async (browser, B) => {
+test('后补单详情：不显示「去钉钉找发票」，历史钉钉流程票徽标保留', async (browser, B) => {
   const base = { id: 7, instId: 'PI-QA-LATE', status: 'open', payee: { name: '合成物流' }, payAmount: 600, expectAmount: 600, receivedAmount: 0, unregisteredAmount: 0,
     remaining: 600, expectDate: '2026-10-20', invKind: 'special', receiverName: '财务甲', reason: '运费' }
   const late = { at: '2026-10-13 10:19:00', after: '2026-10-12 13:51:00', by: 'first' }
-  const st = { later: { ...base, selfCount: 0, selfAmount: 0, flowCount: 0 }, items: [] }
+  const st = {
+    later: { ...base, selfCount: 1, selfAmount: 600, flowCount: 1 },
+    items: [inv({ id: 41, origin: 'attachment', selfPending: true, fromFlow: true, laterId: 7, total: 600, flags: { lateFlow: late } })],
+  }
   const api = c => {
     if (c.path === '/api/inv/config') return cfg()
     if (c.path === '/api/inv/later') return { ok: true, total: 1, rows: [st.later] }
     if (c.path === '/api/inv/later/7') return { ok: true, later: st.later, items: st.items, docs: [], logs: [] }
-    if (c.path === '/api/inv/later/7/flow-check') {
-      st.later = { ...base, selfCount: 1, selfAmount: 600, flowCount: 1 }
-      st.items = [inv({ id: 41, origin: 'attachment', selfPending: true, fromFlow: true, laterId: 7, total: 600, flags: { lateFlow: late } })]
-      return { ok: true, msg: '钉钉流程里有 1 张财务初审后才到的发票，已记到后补单上、进了发票审核', new: 1, linked: 1, later: st.later }
-    }
     return { ok: true }
   }
   const { page, ctx, calls, errors } = await open(browser, B, api, { hash: '#/invlater?id=7' })
   await mount(page, 'InvLater', { user: { name: '测试会计' } })
-  const btn = page.locator('.inv-modal').getByRole('button', { name: '去钉钉找发票' })
-  await btn.waitFor({ timeout: 4000 })
-  assert.equal(await page.locator('.inv-lt-selfbar').count(), 0, '还没取到票时不出提示条')
-  await btn.click()
   const bar = page.locator('.inv-lt-selfbar')
   await bar.waitFor({ timeout: 4000 })
-  assert.equal(calls.filter(c => c.path === '/api/inv/later/7/flow-check' && c.method === 'POST').length, 1)
+  assert.equal(await page.locator('.inv-modal').getByRole('button', { name: '去钉钉找发票' }).count(), 0, '初审后不再提供流程补票入口')
+  assert.equal(calls.filter(c => c.path === '/api/inv/later/7/flow-check').length, 0, '页面不再调用 flow-check')
   const t = await bar.textContent()
   assert.ok(t.includes('申请人已经交来 1 张发票（600.00）') && t.includes('其中 1 张是系统从钉钉流程里取到的'), t)
   assert.ok(await page.locator('.inv-modal .inv-badge', { hasText: '钉钉流程里到了 600.00 待确认' }).first().isVisible())
   assert.ok(await page.locator('.inv-lt-cur .inv-badge', { hasText: '钉钉流程里取到 · 待确认' }).isVisible())
   assert.ok(await page.locator('.inv-lt-cur .inv-badge', { hasText: '初审后才到' }).isVisible())
-  assert.equal((await page.locator('.inv-lt-nums > div').nth(2).locator('b').textContent()), '0.00', '审核/确认前不算已到')
+  assert.equal((await page.locator('.inv-lt-nums > div').nth(2).locator('b').textContent()), '0.00', '历史票仍须审核/确认后才算已到')
   assert.deepEqual(errors, [])
   await ctx.close()
 })

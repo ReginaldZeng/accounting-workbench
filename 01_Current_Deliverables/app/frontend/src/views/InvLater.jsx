@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入）| 后补详情移除「去钉钉找发票」按钮及调用；初审后只能由申请人从后补单上传、财务确认
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| 详情底部加「去钉钉找发票」；系统从钉钉流程里取到、记到后补单上的票和申请人自己传的一样标「待确认」，文字改成「交来」
 // [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 申请人传上来的发票：徽标、详情提示条和底部按钮「确认收到」
 // [Change Log] Date: 2026-10-12 | Author: Claude / c | Version: V2.916（后补单详情重排版）| 详情上半部分从 22 个字段的四列小格子改成：金额一排＋到票进度＋「收款方与发票」「付款单」两张卡＋通栏事由（按编号断行，长的先收起）
@@ -15,7 +16,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLaterList, invLater, invLaterResolve, invLaterCreate, invLaterDocs, invLaterReceive,
-  invLaterReceiveUpload, invLaterMark, invLaterConfirmSelf, invLaterFlowCheck, invLaterRemind, invLaterUpdate, invLaterClose, invLaterDelete, invLaterRestore, invLaterExportUrl, invSLink, invSPreview,
+  invLaterReceiveUpload, invLaterMark, invLaterConfirmSelf, invLaterRemind, invLaterUpdate, invLaterClose, invLaterDelete, invLaterRestore, invLaterExportUrl, invSLink, invSPreview,
 } from '../api.js'
 import { Modal, useToast, ScanInput, FileDrop, CameraPanel, ThumbStrip, InvViewer, StatusBadges, money, fmtTime } from './invShared.jsx'
 import InvSettings from './InvSettings.jsx'
@@ -350,14 +351,6 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     try { const r = await invLaterConfirmSelf(id); flash?.(r?.msg || '已确认收到', 'ok'); onChanged?.(); load() }
     catch (e) { flash?.('没确认上：' + errText(e), 'err') } finally { setConfirming(false) }
   }
-  // 现在就去这张付款单的钉钉流程里找发票（系统平时每小时自己去看一次，这个按钮是不想等的时候点）
-  const [finding, setFinding] = useState(false)
-  const findInFlow = async () => {
-    setFinding(true)
-    try { const r = await invLaterFlowCheck(id); flash?.(r?.msg || '看过了', r?.linked ? 'ok' : 'info'); onChanged?.(); load() }
-    catch (e) { flash?.('没看成：' + errText(e), 'err') } finally { setFinding(false) }
-  }
-
   const deleted = l?.status === 'deleted'
   const live = isLive(l)
   const left = remainingOf(l)
@@ -368,8 +361,6 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     {remindRes && <span className={'inv-lt-inline ' + (remindRes.ok ? 'ok' : 'err')}>{remindRes.text}</span>}
     {l && can.receive && live && num(l.selfCount) > 0 && <button type="button" className="btn-pri" disabled={confirming} onClick={confirmSelf}
       title="申请人交来的发票（自己传的，或发在钉钉流程里的）：核对无误、纸质的也收到后点这里，才算已到">{confirming ? '正在确认…' : `确认收到申请人${num(l.flowCount) > 0 ? '交来' : '传'}的 ${l.selfCount} 张`}</button>}
-    {l && can.receive && live && l.instId && <button type="button" className="btn" disabled={finding} onClick={findInFlow}
-      title="现在就去这张付款单的钉钉流程里找发票（表单附件和评论区都看）。财务初审通过后才到的发票，记到这张后补单上、进发票审核。系统平时每小时自己去看一次">{finding ? '正在找…' : '去钉钉找发票'}</button>}
     {l && can.receive && live && <button type="button" className="btn" disabled={reminding} onClick={remind}>{reminding ? '发送中…' : '催一下'}</button>}
     {l && can.receive && !deleted && l.status !== 'closed' && <button type="button" className="btn" onClick={() => onEdit(l)}>修改</button>}
     {l && can.receive && live && <button type="button" className="btn" onClick={() => onCloseLater(l)}>关闭此单</button>}

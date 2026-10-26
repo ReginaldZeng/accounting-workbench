@@ -1,4 +1,6 @@
 # [Change Log]
+# Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入）
+# Description: test_35 覆盖初审后自动和手动回扫都不下载不关联不送审、初审前附件及手动补票照常；历史票不删；申请人上传确认回归保留。
 # Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）
 # Description: 发票管家台账与后补池路由（routers/invoice_books.py）接口测试：临时 SQLite + 临时上传目录，只挂两个发票路由到裸 FastAPI，
 #   core 用桩（x-test-user 头＝登录名，真账号真权限走 db.user_can）。全部合成数据（税局清单/抵扣清单/期初清单用 openpyxl 现造，
@@ -893,6 +895,9 @@ class InvoiceBooksApiTests(unittest.TestCase):
                 self.assertIn(word, r.json()["msg"])
             self.assertEqual(sent.call_count, 0)
             j = self.ok(self.post("/api/inv/later/create", "recv", body))
+            with patch.object(inv, "flow_recheck") as recheck:
+                inv.worker_step()
+                recheck.assert_not_called()                 # 财务代填建后补单不排队自动回扫
             lid = j["later"]["id"]
             self.assertEqual((j["later"]["status"], j["later"]["receiver"], j["later"]["filedBy"], j["later"]["filedVia"]),
                              ("open", "recv2", "recv", "proxy"))
@@ -1477,6 +1482,9 @@ class InvoiceBooksApiTests(unittest.TestCase):
             self.assertIn("别人", r.json()["msg"])
         with patch.object(books, "_cached_norm", MagicMock(return_value=norm)), patch.object(inv, "notify_dt", sent):
             j = self.ok(self.c.post("/api/inv/s/later", json=body, headers=H))
+        with patch.object(inv, "flow_recheck") as recheck:
+            inv.worker_step()
+            recheck.assert_not_called()                     # 申请人自助建后补单也不排队自动回扫
         lid = j["later"]["id"]
         self.assertEqual((j["later"]["filedBy"], j["later"]["filedVia"], j["later"]["receiver"]), ("申请人丙", "self", "recv"))
         self.assertEqual(j["later"]["taxRate"], "3%")                         # 3 → 3%
@@ -2252,10 +2260,9 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual((bv["ok"], bv["vouchers"], bv["state"]), (True, [], "这张发票还没做账"))
         self.assertEqual(V.bind_view(V._scan("随便打的字"))["ok"], False)
 
-    def test_35_late_invoice_in_dingtalk_flow_goes_to_later(self):
-        """财务初审这条线（用户 2026-10-13 定）：钉钉流程里的发票，财务初审人点同意之前就有的算这张单的正常票；
-        之后才发到评论区的算后补票——记到这张单没收齐的后补单上、进发票审核，审核通过才算已到。
-        以前就取进来、当时没分的老票，再看一次流程时补分。人名、单号、发票都是编的。"""
+    def test_35_after_first_review_flow_content_is_closed(self):
+        """表单和初审前评论附件照常接入；初审后自动和手动回扫都不下载、不关联、不送审。
+        初审前手动补票保留；历史 lateFlow 不被自动关联或删除；后补只能申请人上传、财务确认。数据均为合成。"""
         inv, S, e = self.inv, self.S, self.e
         from routers import invoice_intake as intake
         f = self.tip.FAKE
@@ -2281,8 +2288,8 @@ class InvoiceBooksApiTests(unittest.TestCase):
                          {"passed": True, "at": "2026-10-05 10:00:00", "by": "audit"})
         self.assertEqual(inv._late_info({"source": "dingtalk_comment", "at": "2099-01-01 10:00:00"}, fr),
                          {"at": "2099-01-01 10:00:00", "after": "2026-10-12 13:51:00", "by": "first"})
-        self.assertIsNone(inv._late_info({"source": "dingtalk_comment", "at": "2026-10-11 10:00:00"}, fr))   # 初审前发的
-        self.assertIsNone(inv._late_info({"source": "dingtalk_form", "at": "2099-01-01 10:00:00"}, fr))      # 表单里带的
+        self.assertIsNone(inv._late_info({"source": "dingtalk_comment", "at": "2026-10-11 10:00:00"}, fr))
+        self.assertIsNone(inv._late_info({"source": "dingtalk_form", "at": "2099-01-01 10:00:00"}, fr))
         # ② 设置里存财务初审人：去重，接入审批人和起始日不动
         before = self.ok(self.get("/api/inv/settings", "cfg"))["settings"]["intake"]
         self.ok(self.post("/api/inv/settings", "cfg", {"settings": {"intake": {
@@ -2290,7 +2297,7 @@ class InvoiceBooksApiTests(unittest.TestCase):
         got = self.ok(self.get("/api/inv/settings", "cfg"))["settings"]["intake"]
         self.assertEqual(got["firstReviewers"], [{"dtUserid": "dt-first", "dtName": "初审甲"}])
         self.assertEqual((got["approvers"], got["since"]), (before["approvers"], before["since"]))
-        # ③ 一张付款单 900：表单里带 300 的票（初审前就有），后补单等 600；初审通过后评论区来了那张 600 的
+        # ③ 同一张单同时有表单票、初审前评论票和初审后评论票：前两类自动接入，后一类跳过
         norm = dict(instId="PI-LATE-1", businessId="202610139900000000035", applicant="申请人辛", applicantUid="dt-late",
                     payeeName=f["seller"], amount=900.0, hasAttachments=True)
         S.folder_upsert_from_approval(e, self._norm(**norm), "recv", "later")
@@ -2298,11 +2305,13 @@ class InvoiceBooksApiTests(unittest.TestCase):
         lid = self.later_row(inst_id="PI-LATE-1", folder_id=fid, payee_name=f["seller"], pay_amount=900, expect_amount=600)
         blobs = {"F-FORM": einv_xml(num(35001), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 283.02, 16.98, 300),
                  "F-LATE": einv_xml(num(35002), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 566.04, 33.96, 600),
-                 "F-OLD": einv_xml(num(35003), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 471.70, 28.30, 500)}
+                 "F-OLD": einv_xml(num(35003), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 471.70, 28.30, 500),
+                 "F-PRE": einv_xml(num(35005), f["seller"], f["seller_tid"], f["buyer"], f["buyer_tid"], 94.34, 5.66, 100)}
         a_form = {"fileId": "F-FORM", "fileName": "表单里的票.xml", "source": "dingtalk_form"}
-        a_late = {"fileId": "F-LATE", "fileName": "评论区的票.xml", "source": "dingtalk_comment", "at": "2099-01-01 10:00:00"}
+        a_late = {"fileId": "F-LATE", "fileName": "初审后评论票.xml", "source": "dingtalk_comment", "at": "2099-01-01 10:00:00"}
+        a_pre = {"fileId": "F-PRE", "fileName": "初审前评论票.xml", "source": "dingtalk_comment", "at": "2026-10-11 10:00:00"}
         a_old = {"fileId": "F-OLD", "fileName": "早先取过的票.xml", "source": "dingtalk_comment", "at": "2099-01-01 10:00:00"}
-        flow = {"PI-LATE-1": (inst, [a_form])}
+        flow = {"PI-LATE-1": (inst, [a_form, a_late, a_pre])}
 
         def fake_get(iid):
             return {"ok": True, "inst": dict(flow.get(str(iid), ({}, []))[0], _iid=str(iid)), "msg": ""}
@@ -2312,66 +2321,62 @@ class InvoiceBooksApiTests(unittest.TestCase):
 
         def by_num(n):
             return next(i for i in S.folder_items(e, fid) if i.get("number") == n)
+        dl = MagicMock(side_effect=lambda i, a, x=None: {"ok": True, "bytes": blobs[a["fileId"]], "via": "", "msg": ""})
         with patch.object(inv.idt, "get_instance", MagicMock(side_effect=fake_get)), \
                 patch.object(inv.idt, "normalize_instance", MagicMock(side_effect=fake_norm)), \
-                patch.object(inv.idt, "download_attachment", MagicMock(side_effect=lambda i, a, x=None: {
-                    "ok": True, "bytes": blobs[a["fileId"]], "via": "", "msg": ""})), \
+                patch.object(inv.idt, "download_attachment", dl), \
                 patch.object(inv, "notify_dt", MagicMock(return_value={"sent": True, "msg": "已发送"})), \
                 patch.object(intake, "RECHECK_MAX", 10000):
-            # 头一回取附件：只有表单里那张 → 正常票，不沾后补单
             S.folder_update(e, fid, attach_status="pending")
             inv.worker_step()
-            a = by_num(num(35001))
-            self.assertEqual((a["later_id"], a["review"], (a["flags_json"] or {}).get("lateFlow")), (None, "draft", None))
-            # 后补单上手动「去钉钉流程里找发票」：没有新东西；没权限的点不了
-            self.assertEqual(self.post("/api/inv/later/%d/flow-check" % lid, "viewer").status_code, 403)
-            j = self.ok(self.post("/api/inv/later/%d/flow-check" % lid, "recv2"))
-            self.assertEqual((j["new"], j["linked"]), (0, 0))
-            self.assertIn("没有新的文件", j["msg"])
-            # 评论区来了一张：定时那一轮取到 → 记到后补单上、待审核；审核前不算已到
-            flow["PI-LATE-1"] = (inst, [a_form, a_late])
+            self.assertEqual([c.args[1]["fileId"] for c in dl.call_args_list], ["F-FORM", "F-PRE"])
+            self.assertEqual(sorted(i["number"] for i in S.folder_items(e, fid) if i.get("number")), [num(35001), num(35005)])
+            for number in (num(35001), num(35005)):
+                a = by_num(number)
+                self.assertEqual((a["later_id"], a["review"], (a["flags_json"] or {}).get("lateFlow")), (None, "draft", None))
+            self.assertIn("初审后评论附件 1 个未自动接入", S.folder_get(e, fid)["attach_msg"])
+            # 定时回扫：初审已通过，直接返回；不下载、不关联，现有正常票不动
+            dl.reset_mock()
             rc = intake.recheck_flows()
             self.assertGreaterEqual(rc["checked"], 1)
-            self.assertEqual((rc["new"], rc["linked"]), (1, 1))
-            b = by_num(num(35002))
-            self.assertEqual((b["later_id"], b["review"], b["origin"]), (lid, "pending", "attachment"))
-            self.assertEqual(b["flags_json"]["lateFlow"], {"at": "2099-01-01 10:00:00", "after": "2026-10-12 13:51:00", "by": "first"})
-            v = inv.item_view(b)
-            self.assertEqual((v["selfPending"], v["fromFlow"]), (True, True))
+            self.assertEqual((rc["new"], rc["linked"]), (0, 0))
+            dl.assert_not_called()
+            self.assertNotIn(num(35002), [i.get("number") for i in S.folder_items(e, fid)])
+            self.assertEqual(intake.recheck_flows()["checked"], 0)       # 同一张单 60 分钟内不重复看
+            # 初审后手动兼容接口同样拒绝：不下载、不关联、不送审，只能走申请人上传和财务确认
+            self.assertEqual(self.post("/api/inv/later/%d/flow-check" % lid, "viewer").status_code, 403)
+            r = self.post("/api/inv/later/%d/flow-check" % lid, "recv2")
+            self.assertEqual(r.status_code, 400, r.text)
+            self.assertEqual(r.json()["msg"], "初审后流程新增内容不再接入，请通过发票后补单上传")
+            dl.assert_not_called()
+            self.assertNotIn(num(35002), [i.get("number") for i in S.folder_items(e, fid)])
             l = S.later_get(e, lid)
             self.assertEqual((float(l["received_amount"] or 0), l["status"]), (0.0, "open"))
             lv = self.books._lv(l)
-            self.assertEqual((lv["selfCount"], lv["flowCount"], lv["selfAmount"]), (1, 1, 600.0))
-            a = by_num(num(35001))
-            self.assertEqual((a["later_id"], a["review"]), (None, "draft"))                      # 表单里那张没被动
-            # 刚看过的单 60 分钟内不再看（不白打钉钉接口）
-            self.assertEqual(intake.recheck_flows()["checked"], 0)
-            # 重算票面不丢「初审后才到」的标记
-            self.assertIn("lateFlow", inv.refresh_item(b["id"])["flags_json"])
-            # 进了发票审核：会计在待审核里搜得到，审核通过 → 这才算已到、后补单收齐
-            q = self.ok(self.get("/api/inv/audit/queue?tab=pending&q=" + num(35002), "acct"))
-            self.assertIn(fid, [r["id"] for r in q["rows"]])
-            r = self.ok(self.post("/api/inv/audit/items/approve", "acct", {"folderId": fid, "itemIds": [b["id"]]}))
-            self.assertEqual(r["items"][0]["review"], "approved")
-            l = S.later_get(e, lid)
-            self.assertEqual((float(l["received_amount"]), l["status"]), (600.0, "done"))
-            # ④ 老票补分：以前就取进来、当时初审还没过的票（没标记、停在付款单名下）→ 后补单上点一次就分过去
+            self.assertEqual((lv["selfCount"], lv["flowCount"], lv["selfAmount"]), (0, 0, 0.0))
+            # ④ 初审前手动补票仍可下载；初审通过后，即使只是已下载老票的兼容回扫也不再关联
             n2 = dict(norm, instId="PI-LATE-2", businessId="202610139900000000036", amount=500.0)
             S.folder_upsert_from_approval(e, self._norm(**n2), "recv", "later")
             fid2 = S.folder_by_inst(e, "PI-LATE-2")["id"]
-            flow["PI-LATE-2"] = ({"operation_records": ops[:1], "tasks": []}, [a_old])          # 那时初审人还没审
-            S.folder_update(e, fid2, attach_status="pending")
-            inv.worker_step()
+            flow["PI-LATE-2"] = ({"operation_records": ops[:1], "tasks": []}, [a_old])
+            S.folder_update(e, fid2, attach_status="done")
+            dl.reset_mock()
+            before_manual = inv.flow_recheck(fid2, manual=True, user="recv2")
+            self.assertTrue(before_manual["ok"])
+            self.assertEqual((before_manual["new"], before_manual["linked"]), (1, 0))
+            self.assertEqual([c.args[1]["fileId"] for c in dl.call_args_list], ["F-OLD"])
             old = next(i for i in S.folder_items(e, fid2) if i.get("number") == num(35003))
             self.assertEqual((old["later_id"], old["review"], (old["flags_json"] or {}).get("lateFlow")), (None, "draft", None))
             lid2 = self.later_row(inst_id="PI-LATE-2", folder_id=fid2, payee_name=f["seller"], pay_amount=500, expect_amount=500)
-            flow["PI-LATE-2"] = (inst, [a_old])                                                # 现在看：初审早过了，这张是之后才发的
-            j = self.ok(self.post("/api/inv/later/%d/flow-check" % lid2, "recv2"))
-            self.assertEqual((j["new"], j["linked"], j["later"]["selfCount"], j["later"]["flowCount"]), (0, 1, 1, 1))
-            self.assertIn("已记到后补单上", j["msg"])
+            flow["PI-LATE-2"] = (inst, [a_old])
+            dl.reset_mock()
+            r = self.post("/api/inv/later/%d/flow-check" % lid2, "recv2")
+            self.assertEqual(r.status_code, 400, r.text)
+            self.assertEqual(r.json()["msg"], "初审后流程新增内容不再接入，请通过发票后补单上传")
+            dl.assert_not_called()
             old = self.item(old["id"])
-            self.assertEqual((old["later_id"], old["review"]), (lid2, "pending"))
-            # 没有没收齐的后补单 → 不硬挂：票留在付款单名下，只标着「初审后才到」
+            self.assertEqual((old["later_id"], old["review"], (old["flags_json"] or {}).get("lateFlow")), (None, "draft", None))
+            # 历史 lateFlow 数据保留；初审后手动和自动回扫都不会重新关联或送审
             n3 = dict(norm, instId="PI-LATE-3", businessId="202610139900000000037", amount=600.0)
             S.folder_upsert_from_approval(e, self._norm(**n3), "recv", "later")
             fid3 = S.folder_by_inst(e, "PI-LATE-3")["id"]
@@ -2379,13 +2384,28 @@ class InvoiceBooksApiTests(unittest.TestCase):
             flow["PI-LATE-3"] = (inst, [dict(a_late, fileId="F-LATE3")])
             S.folder_update(e, fid3, attach_status="pending")
             inv.worker_step()
-            lone = next(i for i in S.folder_items(e, fid3) if i.get("number") == num(35004))
+            self.assertNotIn(num(35004), [i.get("number") for i in S.folder_items(e, fid3)])
+            lone_id = S.item_insert(e, folder_id=fid3, kind="invoice", origin="attachment", number=num(35004), total=600,
+                                    review="draft", created_by=inv.SYSTEM_USER,
+                                    flags_json={"lateFlow": {"at": "2026-10-13 10:19:00", "after": "2026-10-12 13:51:00", "by": "first"}})
+            lone = S.item_get(e, lone_id)
             self.assertEqual((lone["later_id"], lone["review"], bool(lone["flags_json"].get("lateFlow"))), (None, "draft", True))
             self.assertFalse(inv.self_pending(lone))
-        # 新建后补单会排队再看一次流程（后台线程取走）
-        inv.queue_recheck(fid3)
-        self.assertIn(fid3, inv._RECHECK_Q)
-        inv._RECHECK_Q.discard(fid3)
+            self.later_row(inst_id="PI-LATE-3", folder_id=fid3, payee_name=f["seller"], pay_amount=600, expect_amount=600)
+            dl.reset_mock()
+            manual_after = inv.flow_recheck(fid3, manual=True, user="recv2")
+            self.assertFalse(manual_after["ok"])
+            self.assertEqual((manual_after["new"], manual_after["linked"]), (0, 0))
+            self.assertEqual(manual_after["msg"], "初审后流程新增内容不再接入，请通过发票后补单上传")
+            dl.assert_not_called()
+            rc3 = intake.recheck_flows()
+            self.assertGreaterEqual(rc3["checked"], 1)
+            self.assertEqual((rc3["new"], rc3["linked"]), (0, 0))
+            dl.assert_not_called()
+            lone = self.item(lone["id"])
+            self.assertEqual((lone["later_id"], lone["review"], bool(lone["flags_json"].get("lateFlow"))), (None, "draft", True))
+        self.assertFalse(hasattr(inv, "queue_recheck"))
+        self.assertFalse(hasattr(inv, "_RECHECK_Q"))
         self.ok(self.post("/api/inv/settings", "cfg", {"settings": {"intake": {"firstReviewers": []}}}))
 
     def test_36_gap_does_not_count_waiting_later_invoice_twice(self):

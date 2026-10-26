@@ -668,7 +668,6 @@ export const invLaterVoucherRun = (id) => jp(`/api/inv/later/${id}/voucher-run`)
 export const invLaterVoucherRedo = (id) => jp(`/api/inv/later/${id}/voucher-redo`)     // 撤回重做：金蝶里那张还没审核的撤销提交并删除，按现在的规则重建
 export const invLaterVoucherConfig = () => j('/api/inv/later-voucher/config')
 export const invLaterVoucherConfigSet = (mode) => jp('/api/inv/later-voucher/config', { mode })
-export const invLaterFlowCheck = (id) => jp(`/api/inv/later/${id}/flow-check`)         // 现在就去这张付款单的钉钉流程里找发票（财务初审后才到的记到后补单、进审核）
 export const invLaterConfirmSelf = (id) => jp(`/api/inv/later/${id}/confirm-self`)     // 申请人自己传上来的发票，财务确认收到（之后才算已到）
 export const invLaterRemind = (id) => jp(`/api/inv/later/${id}/remind`)
 export const invLaterUpdate = (id, body) => jp(`/api/inv/later/${id}/update`, body)

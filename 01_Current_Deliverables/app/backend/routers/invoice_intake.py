@@ -1,8 +1,9 @@
+# [Change Log] Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入）
+# Description: 定时回扫在财务初审通过后直接返回，不下载、不关联后补或送审；初审前接入和票齐自动送审不变。
 # 修复 2026-10-16：物流先建票夹继续跟踪节点，补分派后按完整性检查自动送审。
 # [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）
-# Description: Owner 2026-10-13：还欠票的单子（有没收齐后补单的付款单、自动接入还在收票的票夹）每轮顺带再去钉钉流程里看一眼
-#   （recheck_flows：同一张单至少隔 60 分钟、一轮最多 30 张、只取上次看过之后发到评论区的新文件）；财务初审通过后才到的发票
-#   记到后补单上进审核（invoice.flow_recheck / link_late）。后补登记建的票夹（source=later）票齐了也自己进审核。
+# Description: V2.948 历史行为：还欠票的单子每轮回扫评论区并自动关联初审后票；2026-10-26 起该自动部分停用，
+#   只保留初审前评论附件接入和票齐自动送审；初审后流程新增内容不再接入，后补只能由申请人从后补单上传、财务确认。
 # [Change Log] Date: 2026-10-01 | Author: Claude Opus 5.5 | Version: V2.736（发票管家·钉钉自动接入）
 # Description: Owner 2026-10-01 定：发票管家要集成全公司进项票，先接钉钉；只接「审批流走到接入审批人节点」的单子
 #   （审批单 tasks 里有他的 userid）。模板＝设置里的审批模板（付款申请（公对公）、费用报销），起始日 9/1 往前补。
@@ -127,9 +128,9 @@ def auto_submit_ready(refs=None):
 
 
 def recheck_flows(refs=None, now=None):
-    """还欠票的单子再去钉钉流程里找新发票 → {checked, new, linked}。
+    """还欠票的单子再去钉钉流程里看初审前评论附件 → {checked, new, linked}。
     范围：有没收齐后补单的付款单 ＋ 自动接入、还在收票的票夹。同一张单至少隔 RECHECK_MIN 分钟，一轮最多 RECHECK_MAX 张
-    （最久没看的先看）；只取上次看过之后发到评论区的新文件。refs 传列表 → 放进这轮记上后补单的钉钉审批编号。"""
+    （最久没看的先看）；财务初审通过后直接返回，不下载、不关联后补或送审，linked 保留在返回结构中且为 0。"""
     e = inv.E()
     with e.connect() as c:
         ids = {r[0] for r in c.execute(select(S.LATER.c.folder_id).where(S.LATER.c.status.in_(("open", "partial"))))}
@@ -365,11 +366,7 @@ def _loop():
             off = "" if has_cfg else ("接入审批人都还没填启用日" if icfg.get("approvers") else "还没设接入审批人")
             worker_store.beat("inv_intake", off=off, next_in=(per - n % per) * TICK_S)
             if n % per == 0:
-                ids2 = []
-                rc = recheck_flows(ids2)              # 还欠票的单子：再去钉钉流程里找新发票（不用设接入审批人也看）
-                if rc.get("linked"):
-                    worker_store.record("inv_intake", n=rc["linked"], refs=ids2,
-                                        summary="钉钉流程里后到的发票 %d 张，已记到后补单、进审核" % rc["linked"])
+                recheck_flows()                       # 只接初审前评论附件；初审后评论票不自动下载或关联
                 try:                                   # 后补票「暂估转待认证」的定时兜底（排队漏了的、开关刚切到真做的）
                     from routers import invoice_later_voucher as L3
                     L3.run_due()

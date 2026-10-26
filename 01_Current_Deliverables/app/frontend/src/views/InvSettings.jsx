@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入）| 设置说明改为初审后评论票不自动接入，后补由申请人上传、财务确认
 // [Change Log] Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证）| 加「后补票自动转待认证」开关：关／演练／真做（真做只有主管理员能开）
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单）| ④ 钉钉自动接入里加「财务初审人」：他点同意之后才发到流程里的发票算后补票
 // [Change Log] Date: 2026-10-13 | Author: Claude / c | Version: V2.943（发票管家·清空试运行数据）| 最下面加「⑧ 清空试运行数据」：只有主管理员看得到
@@ -316,8 +317,8 @@ function IntakeSection({ v, set, dirty, errors }) {
       <PersonPicker value={null} onChange={addFirst} placeholder="打名字，从钉钉通讯录里搜" />
     </div>
     {frErr && <div className="inv-lt-fe">{frErr}</div>}
-    <div className="inv-set-ss">钉钉流程里的发票按财务初审分：初审人点同意之前就有的，算这张单的正常发票；之后才发到流程里的（多半在评论区），算后补票，
-      系统记到这张单的后补单上、再进发票审核。可以加多位；一张单的流程没经过这里的人，就按上面接入审批人那一步算。
+    <div className="inv-set-ss">审核前可在钉钉补发票或登记后补，二者之一合格才审核；表单附件和初审前已有的评论附件照常接入。
+      审核后不再接入钉钉流程新增内容，后补票只能由申请人通过发票后补单上传、财务确认。可以加多位初审人；一张单的流程没经过这里的人，就按上面接入审批人那一步算。
       {!firsts.length && ' 现在还没加人：都按接入审批人那一步算。'}</div>
     <div className="inv-set-ss" style={{ marginTop: 10 }}>
       {stErr ? <>扫描情况没读出来：{stErr}</>

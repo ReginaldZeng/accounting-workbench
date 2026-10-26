@@ -1,4 +1,5 @@
 # [Change Log]
+# Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入） | 财务代填和申请人自助建后补单后都不再排队回扫；手动 flow-check 仅限初审前，初审后拒绝，后补只能由申请人上传、财务确认
 # Date: 2026-10-13 | Author: Claude / c | Version: V2.948（钉钉流程里后到的发票走后补单） | 新建后补单后排队再看一次钉钉流程；后补单上「去钉钉流程里找发票」（POST /api/inv/later/{lid}/flow-check）
 # Date: 2026-10-13 | Author: Claude / c | Version: V2.944（发票管家·票总管已有） | 过渡期和票总管不重复勾选：票上加「票总管已有」记号（deduct_status=other）——传票总管清单（POST /api/inv/other/import，存 inv_other）后按票号自动记（other_apply：送审/审核通过前/出清单前各对一次），审核时可勾/取消，台账里可补记/取消（POST /api/inv/item/{id}/other-system）；有记号的出勾选清单不带、方式二不替它标「是」
 # Date: 2026-10-12 | Author: Claude / c | Version: V2.923（申请人上传发票到后补单） | 申请人传的票（来源 self）财务确认前不算已到：_counted 排除、确认接口 confirm-self、财务扫到同一张也算确认、够数了不催申请人
@@ -2626,7 +2627,6 @@ def _later_create_sync(u, body, via="proxy", self_uid=None):
             receiver_name=person.get("dtName") or person["account"], filed_by=u["name"],
             filed_uid=self_uid or inv.dt_uid_of(u["name"], st), filed_via=via, note=inv._s(body.get("note"), 500))
     l = S.later_get(e, lid)
-    inv.queue_recheck(fid)      # 流程里可能已经有财务初审后才到的发票：后台看一眼，有就记到这张后补单上、进发票审核
     sent = inv.notify_dt([person.get("dtUserid")], _assign_text(l))
     notified, nmsg = _notify_outcome(sent)
     det = {"businessId": l.get("business_id") or "", "payee": l.get("payee_name") or "", "expectDate": exp_date,
@@ -2887,8 +2887,8 @@ async def later_confirm_self(lid: int, request: Request):
 
 @router.post("/api/inv/later/{lid}/flow-check")
 async def later_flow_check(lid: int, request: Request):
-    """后补单上「去钉钉流程里找发票」：现在就去看这张付款单的钉钉流程（表单附件＋评论区），
-    财务初审通过后才到的发票记到这张后补单上、进发票审核（系统平时也会定时去看，这个按钮是不想等的时候点）。"""
+    """兼容初审前手动补票；初审后拒绝，钉钉流程新增内容不再下载、关联或送审。
+    初审后的后补票只能由申请人通过发票后补单上传，财务确认收到。"""
     u, bad = need(request, ENTER_LATER, CAP_RECEIVE)
     if bad:
         return bad

@@ -1,4 +1,5 @@
 # [Change Log]
+# Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入） | 初审后自动和手动流程回扫都不下载、不关联、不送审；建后补单不排队回扫；后补只能由申请人从后补单上传、财务确认
 # Date: 2026-10-14 | Author: Claude / c | Version: V2.952（发票审核·单张弹窗重排） | item_checks：系统替人核过的结论一行一句（购买方和抬头清单、销售方和销方档案、收款方、金额、查重、来源、税局查验），票夹详情里每张发票带 checks
 # Date: 2026-10-14 | Author: Claude / c | Version: V2.950（发票管家·后补票自动转待认证） | 后补票审核通过后排队做「暂估转待认证」（later_voucher_kick，实现在 routers/invoice_later_voucher.py）；后台线程顺带取队
 # Date: 2026-10-14 | Author: Claude / c | Version: V2.949（金额核对·等确认的后补票不算两遍） | folder_gap：已经交来、还在等确认的后补票（申请人自己传的、钉钉流程里后到的）已算进专票/普票，后补单那头不再算它「还没到」；later_row_view 带 waiting
@@ -2566,15 +2567,6 @@ def worker_step(max_items=3):
             except Exception as ex:
                 _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
                 S.folder_update(e, f["id"], attach_status="failed", attach_msg=("拉附件出错：%s" % ex)[:400])
-    with _RECHECK_Q_LOCK:
-        again = sorted(_RECHECK_Q)[:2]
-        _RECHECK_Q.difference_update(again)
-    for fid in again:
-        done += 1
-        try:
-            flow_recheck(fid, manual=True)       # 正在拉附件的会回 busy：那一轮拉完自己会记后补单，不用再排
-        except Exception:
-            _WORKER_STATE["lastError"] = traceback.format_exc()[-2000:]
     try:                                         # 后补票审核通过后排队的「暂估转待认证」
         from routers import invoice_later_voucher as L3
         done += L3.drain(2)
@@ -2628,7 +2620,7 @@ def _pull_one(e, fid, dtid, label, name, origin, fetch, fails, budget=None, late
 
 
 def _pull_attachments(fid):
-    """拉一张审批单的附件与「图片」栏 → 逐个进票（已拉过的按钉钉文件号跳过，人工移除的也不再拉回）。
+    """自动拉一张审批单的附件与「图片」栏；表单和初审前评论附件照常，初审后新增评论附件不下载、不关联。
     拉下来的票记在"系统"名下（不是打开票夹的那个人登记的——审核时不算他自审）。拉完领取次数清零。"""
     e = E()
     f = S.folder_get(e, fid)
@@ -2645,14 +2637,18 @@ def _pull_attachments(fid):
     atts, photos = n.get("attachments") or [], n.get("photos") or []
     fails = []
     budget = {"left": MAX_TOTAL}          # 这张单所有附件里的压缩包解开总量共用一份额度
-    fr = first_review(g["inst"], f)       # 财务初审过没过：之后才发到评论区的发票算后补票
+    fr = first_review(g["inst"], f)
+    skipped = 0
     for a in atts:
         dtid = str(a.get("fileId") or "")[:64]
         if not dtid:
             continue
+        if _late_info(a, fr):
+            skipped += 1
+            continue
         nm = a.get("fileName") or "附件"
         _pull_one(e, fid, dtid, nm, nm, "attachment",
-                  lambda a=a: idt.download_attachment(f["inst_id"], a, g["inst"]), fails, budget, late=_late_info(a, fr))
+                  lambda a=a: idt.download_attachment(f["inst_id"], a, g["inst"]), fails, budget)
     for i, url in enumerate(photos):
         dtid = "ph:" + hashlib.sha1(str(url).encode("utf-8")).hexdigest()
         _pull_one(e, fid, dtid, "图片%d" % (i + 1), "审批图片%d.jpg" % (i + 1), "photo_field",
@@ -2660,20 +2656,18 @@ def _pull_attachments(fid):
     items = S.folder_items(e, fid)
     n_inv = len([x for x in items if x.get("kind") == "invoice" and x.get("origin") in ("attachment", "photo_field")])
     msg = "附件 %d 个" % len(atts) + ("，图片 %d 张" % len(photos) if photos else "") + "，发票 %d 张" % n_inv
+    if skipped:
+        msg += "；初审后评论附件 %d 个未自动接入" % skipped
     if fails:
         msg += "；%d 个没拉下来（%s），可点「刷新」重试或手工拖进来" % (len(fails), "；".join(fails))
     S.folder_update(e, fid, attach_status="failed" if fails else "done", attach_msg=msg[:400], attach_tries=0)
-    log(SYSTEM_USER, "拉取附件", fid, detail={"msg": msg, "fails": fails[:20]})
+    log(SYSTEM_USER, "拉取附件", fid, detail={"msg": msg, "fails": fails[:20], "skippedAfterFirstReview": skipped})
     audit(SYSTEM_USER, "拉取附件", f.get("title") or ("票夹#%d" % fid), msg)
-    link_late(fid)
 
 
 # ───────────────────────── 财务初审这条线：流程里的发票算正常票还是后补票 ─────────────────────────
-# Owner 2026-10-13：发票只有发票管家一个家。钉钉流程里的发票，财务初审还没过就有的＝这张单的正常票（票齐了进发票审核）；
-# 初审已经过了才发出来的（多半在评论区）＝后补票，记到这张单的后补单上再进发票审核。不该有"取到了、停在收票中等人提交"。
+# 表单和初审前评论附件照常接入；初审后自动和手动回扫都不接入流程新增内容，后补只能由申请人上传、财务确认。
 _FLOW_LOCK = threading.Lock()        # 同一时间只让一个线程去钉钉流程里取文件（拉附件 / 再看一次不能撞在一起）
-_RECHECK_Q = set()                   # 等后台线程「再看一次钉钉流程」的票夹
-_RECHECK_Q_LOCK = threading.Lock()
 
 
 def first_review(inst, folder=None, settings=None):
@@ -2737,8 +2731,8 @@ def _mark_late_file(e, fid, dtid, late):
 
 
 def link_late(fid):
-    """票夹里「财务初审通过后才从钉钉流程取到」的发票/收据，记到这张付款单没收齐的后补单上并送审（待审核）→ 记上了几张。
-    没有没收齐的后补单就不动（票留在付款单名下，页面上标着「初审后才到」）。记上去的票和申请人自己上传的一样：
+    """初审前手动流程查找或历史票处理时，把带 lateFlow 的发票/收据记到后补单并送审 → 记上了几张。
+    初审后的自动和手动 flow_recheck 都不调用；没有没收齐的后补单就不动。记上去的票和申请人上传的一样：
     审核通过（或接收人点「确认收到」）才算已到（self_pending）。会重算后补单（可能发钉钉）：只在线程里调。"""
     e = E()
     f = S.folder_get(e, fid)
@@ -2767,10 +2761,10 @@ def link_late(fid):
 
 
 def flow_recheck(fid, manual=False, since=None, user=SYSTEM_USER):
-    """再去钉钉流程里看一眼这张单 → {ok, msg, new, linked, fails, firstReview}（看不成 {ok:False, msg, busy?}）。
-    ① 流程里新出现的文件取进来：manual＝没取过的都取；定时＝只取 since 之后发到评论区的（免得每轮都去下取不动的大文件）；
-    ② 按财务初审那条线把初审通过后才到的票标上（含以前取进来的老票）；③ 付款单有没收齐的后补单 → 记上去并送审（link_late）。
-    要联网、可能发钉钉：只在线程里调。"""
+    """再看钉钉流程 → {ok, msg, new, linked, fails, firstReview}（看不成 {ok:False, msg, busy?}）。
+    manual=True 仅用于初审前手动补票；manual=False 只接初审前评论附件。
+    first_review.passed 时两种路径都直接返回，不下载、不关联、不送审；初审后只能由申请人从后补单上传、财务确认。
+    要联网、初审前手动查找可能发钉钉：只在线程里调。"""
     e = E()
     f = S.folder_get(e, fid)
     if not f or not f.get("inst_id"):
@@ -2783,8 +2777,11 @@ def flow_recheck(fid, manual=False, since=None, user=SYSTEM_USER):
         g = idt.get_instance(f["inst_id"])
         if not g.get("ok"):
             return {"ok": False, "msg": g.get("msg") or "钉钉审批单没取到"}
-        n = idt.normalize_instance(g["inst"], f["inst_id"], get_settings().get("templates") or [])
         fr = first_review(g["inst"], f)
+        if fr.get("passed"):
+            return {"ok": not manual, "msg": "初审后流程新增内容不再接入，请通过发票后补单上传",
+                    "new": 0, "linked": 0, "fails": [], "firstReview": fr}
+        n = idt.normalize_instance(g["inst"], f["inst_id"], get_settings().get("templates") or [])
         fails, budget, new = [], {"left": MAX_TOTAL}, 0
         for a in n.get("attachments") or []:
             dtid = str(a.get("fileId") or "")[:64]
@@ -2800,24 +2797,16 @@ def flow_recheck(fid, manual=False, since=None, user=SYSTEM_USER):
                       lambda a=a: idt.download_attachment(f["inst_id"], a, g["inst"]), fails, budget, late=_late_info(a, fr))
     finally:
         _FLOW_LOCK.release()
-    linked = link_late(fid)
+    linked = link_late(fid) if manual else 0
     if new or linked:
         log(user, "再看钉钉流程", fid, detail={"new": new, "linked": linked, "fails": fails[:10], "firstReview": fr})
     if linked:
-        msg = "钉钉流程里有 %d 张财务初审后才到的发票，已记到后补单上、进了发票审核" % linked
+        msg = "钉钉流程里有 %d 张发票已记到后补单上、进了发票审核" % linked
     elif new:
-        msg = "钉钉流程里新取到 %d 个文件；里面要是有初审后才到的发票，识别完会自己记到后补单上" % new
+        msg = "钉钉流程里新取到 %d 个文件" % new
     else:
         msg = "钉钉流程里没有新的文件"
     return {"ok": True, "msg": msg, "new": new, "linked": linked, "fails": fails, "firstReview": fr}
-
-
-def queue_recheck(fid):
-    """排队让后台线程再看一次这张单的钉钉流程（新建后补单时用：付款单早就在发票管家里了，流程里可能已经有后到的票）。"""
-    if fid:
-        with _RECHECK_Q_LOCK:
-            _RECHECK_Q.add(int(fid))
-        wake()
 
 
 # 同一份多页 PDF/OFD 的几张票只解析、渲染一次（后台单线程逐张识别，缓存按文件 id＋内容哈希，5 分钟或换了别的文件就丢）
