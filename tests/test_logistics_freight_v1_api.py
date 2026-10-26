@@ -191,15 +191,6 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(line["carrier"], "到付")
         self.assertEqual(draft["summary"]["status"], "ready")
 
-    def test_subject_is_optional_not_a_release_blocker(self):
-        response = self.client.post("/api/logistics-freight/v1/preview",
-                                    data={"period": "2026-09"},
-                                    files={"files": ("天鹰.xlsx", workbook(carrier="天鹰"), "application/octet-stream")})
-        draft = response.json()["batches"][0]
-        self.assertEqual(draft["summary"]["status"], "ready")
-        self.assertFalse(any(x["code"] == "missing_subject" for x in draft["issues"]))
-        self.assertEqual(draft["lines"][0]["subject"], "")
-
     def test_unique_keyword_normalizes_before_draft_is_saved(self):
         response = self.client.post("/api/logistics-freight/v1/preview",
                                     data={"period": "2026-09", "subject": "孝感星期九"},

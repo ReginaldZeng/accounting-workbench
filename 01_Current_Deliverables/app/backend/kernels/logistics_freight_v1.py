@@ -277,6 +277,7 @@ def _parse_sheet(sheet, context, issues):
         biz_line = biz_line or str(context.get("biz_line") or "").strip() or _default_biz_line(sheet, kind)
         fee_type = str(context.get("fee_type") or "").strip() or _fee_type(kind)
         for field, value, code, label in (("carrier", carrier, "missing_carrier", "承运商"),
+                                          ("subject", subject, "missing_subject", "主体"),
                                           ("fee_type", fee_type, "missing_fee_type", "费用类型")):
             if not value:
                 _issue(issues, "error", code, "缺" + label, sheet.name, r + 1, doc_no)
