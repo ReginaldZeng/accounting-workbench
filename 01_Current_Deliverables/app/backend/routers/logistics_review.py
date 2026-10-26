@@ -53,7 +53,7 @@ def _doc_ok(carrier, period):
         return {r[0]: {"by": r[1] or "", "at": r[2] or ""} for r in c.execute(select(
             DK.c.doc_no, DK.c.confirmed_by, DK.c.confirmed_at).where((DK.c.carrier == carrier) & (DK.c.period == period))).all()}
 
-_DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "annot_source", "fee", "bizline",
+_DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "fee", "bizline",
                 "fee_item", "qty", "unit", "amount", "carrier_sub", "prov", "charge_wt",
                 "sub_fees", "src_sheet", "src_row", "note")
 
@@ -452,8 +452,7 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
     # 本月付款（按复核结果）：本月已复核账单应付合计，按承运商×主体（权责发生制·同期间比，非金蝶跨月现金借方）
     with db._engine.connect() as c:
         specs = {r[0] for r in c.execute(select(SP.c.carrier)).all()}
-        brs = [dict(r) for r in c.execute(select(BL.c.carrier, BL.c.grain, BL.c.subject, BL.c.subj_ovr, BL.c.amount,
-                                                   BL.c.bill_src, BL.c.src_sheet).where(
+        brs = [dict(r) for r in c.execute(select(BL.c.carrier, BL.c.grain, BL.c.subject, BL.c.subj_ovr, BL.c.amount).where(
             (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
         signed = {r["carrier"]: {"reviewer": r["reviewer"], "signed_at": r["signed_at"]} for r in c.execute(
             select(SG).where((SG.c.period == period) & (SG.c.status == "signed"))).mappings().all()}
@@ -467,8 +466,12 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
                 prog.setdefault(cr, {})[k] = int(n)
     # 账单应付与逐笔复核同口径：有费用项汇总行(迅鸽)用汇总行，否则逐单；主体走覆盖列+全称→简称(极鲜达账单写全称)
     has_acc = {r["carrier"] for r in brs if r["grain"] == "accrual" and (r["amount"] or 0)}
-    billrows = [r for r in brs if (r["grain"] == "accrual") == (r["carrier"] in has_acc)]
-    billmap = intake.sheet_round_groups(billrows, lambda r: (_eff_subject(r), str(r["carrier"])))
+    billmap = {}
+    for r in brs:
+        if (r["grain"] == "accrual") != (r["carrier"] in has_acc):
+            continue
+        k = (_eff_subject(r), str(r["carrier"]))
+        billmap[k] = round(billmap.get(k, 0.0) + float(r["amount"] or 0), 2)
     smarks = _subj_marks(period)
     out = {}
     for key, (cf, scode) in carriers.items():
@@ -577,8 +580,8 @@ def _bill_sources(carrier, period):
     → [{src, n_detail, n_accrual, amount, n_doc, n_nodoc, file, origin, by, at}]。
     上传人/时间/原文件名：先看导入时存的原件记录(V2.843 起才有)；没有的，去操作日志里找同一分钟、明细行数对得上的那条「解析账单」；再没有就只给账单行的导入时间。"""
     with db._engine.connect() as c:
-        rows = [dict(r) for r in c.execute(select(BL.c.bill_src, BL.c.grain, BL.c.amount, BL.c.doc_no, BL.c.src_sheet, BL.c.created_at).where(
-            (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register")))).mappings().all()]
+        rows = c.execute(select(BL.c.bill_src, BL.c.grain, BL.c.amount, BL.c.doc_no, BL.c.created_at).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register")))).all()
         raws = c.execute(select(BR.c.bill_src, BR.c.name, BR.c.origin, BR.c.created_by, BR.c.created_at, BR.c.size).where(
             (BR.c.carrier == carrier) & (BR.c.period == period)).order_by(BR.c.id)).all()
         try:
@@ -587,27 +590,26 @@ def _bill_sources(carrier, period):
         except Exception:
             logs = []
     g = {}
-    for r in rows:
-        k = r.get("bill_src") or ""
-        x = g.setdefault(k, {"src": k, "n_detail": 0, "n_accrual": 0, "rows_d": [], "rows_a": [], "docs": set(), "n_nodoc": 0, "at": ""})
-        if r.get("grain") == "accrual":
+    for src, grain, amt, doc, at in rows:
+        k = src or ""
+        x = g.setdefault(k, {"src": k, "n_detail": 0, "n_accrual": 0, "amt_d": 0.0, "amt_a": 0.0, "docs": set(), "n_nodoc": 0, "at": ""})
+        if grain == "accrual":
             x["n_accrual"] += 1
-            x["rows_a"].append(r)
+            x["amt_a"] += float(amt or 0)
         else:
             x["n_detail"] += 1
-            x["rows_d"].append(r)
-            d0 = (r.get("doc_no") or "").split("+")[0]
+            x["amt_d"] += float(amt or 0)
+            d0 = (doc or "").split("+")[0]
             if d0 and d0 != "无单据":
                 x["docs"].add(d0)
             else:
                 x["n_nodoc"] += 1
-        x["at"] = max(x["at"], str(r.get("created_at") or ""))
+        x["at"] = max(x["at"], str(at or ""))
     rawby = {(r[0] or ""): r for r in raws}
     out = []
     for k, x in sorted(g.items()):
         it = {"src": k, "n_detail": x["n_detail"], "n_accrual": x["n_accrual"], "n_doc": len(x["docs"]), "n_nodoc": x["n_nodoc"],
-              "amount": intake.sheet_round_sum(x["rows_a"] if x["n_accrual"] else x["rows_d"]),
-              "at": x["at"][:16], "by": "", "file": "", "origin": "", "size": None}
+              "amount": round(x["amt_a"] if x["n_accrual"] else x["amt_d"], 2), "at": x["at"][:16], "by": "", "file": "", "origin": "", "size": None}
         rw = rawby.get(k)
         if rw:
             it.update(file=rw[1] or "", origin=rw[2] or "", by=rw[3] or "", at=str(rw[4] or it["at"])[:16], size=rw[5])
@@ -915,7 +917,7 @@ def import_bill(carrier, period, data, operator, origin="手工上传", fname=""
                 c.execute(insert(BL).values(**vals))
     db.audit(operator, "物流复核-解析账单", "%s %s" % (carrier, period),
              "%s：明细 %d 行 / 计提 %d 行 / 跳过 %d 表；明细合计 %.2f" % (origin, len(res["detail"]), len(res["accrual"]), len(res["skipped"]),
-                                                         intake.sheet_round_sum(res["detail"])))     # 合计(V2.989)：第①步解析记录看得出每次读了多少钱
+                                                         sum(float(r.get("amount") or 0) for r in res["detail"])))     # 合计(V2.989)：第①步解析记录看得出每次读了多少钱
     _bust(carrier, period)   # 账单重解析 → 逐笔/逐单视图缓存作废
     _save_raw_bill(carrier, period, src, data, operator, origin, fname)
     try:                     # V2.991：顺手把第①步「每页核对」报告算好落库，页面打开直接读库（延读 import 防循环）
@@ -925,13 +927,12 @@ def import_bill(carrier, period, data, operator, origin="手工上传", fname=""
         pass
     with db._engine.connect() as c:   # 本月现有几份账单(按货主)：汇总行合计，没有汇总行用明细合计
         srcs = {}
-        saved = [dict(r) for r in c.execute(select(BL.c.bill_src, BL.c.grain, BL.c.amount, BL.c.src_sheet).where(
-                (BL.c.carrier == carrier) & (BL.c.period == period))).mappings().all()]
-        for r in saved:
-            d = srcs.setdefault(r.get("bill_src") or "（未标货主）", {})
-            d.setdefault(r["grain"], []).append(r)
-    sources = [{"src": k, "amount": intake.sheet_round_sum(v.get("accrual") or v.get("detail") or []),
-                "n_detail": len(v.get("detail") or []), "n_accrual": len(v.get("accrual") or [])} for k, v in sorted(srcs.items())]
+        for r in c.execute(select(BL.c.bill_src, BL.c.grain, func.count(), func.sum(BL.c.amount)).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period)).group_by(BL.c.bill_src, BL.c.grain)).all():
+            d = srcs.setdefault(r[0] or "（未标货主）", {})
+            d[r[1]] = (int(r[2]), round(float(r[3] or 0), 2))
+    sources = [{"src": k, "amount": (v.get("accrual") or v.get("detail") or (0, 0))[1],
+                "n_detail": (v.get("detail") or (0, 0))[0], "n_accrual": (v.get("accrual") or (0, 0))[0]} for k, v in sorted(srcs.items())]
     return {"ok": True, "bill_src": src, "detail": len(res["detail"]), "accrual": len(res["accrual"]),
             "skipped": res["skipped"], "sources": sources}
 
@@ -1090,8 +1091,7 @@ async def review_register_add(request: Request):
             batch_id="register|%s|%s" % (carrier, period), period=period, carrier=carrier,
             grain="detail", review_mode="register", subject=(b.get("subject") or "").strip(),
             doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
-            annot=(b.get("annot") or "").strip(), annot_source="manual" if (b.get("annot") or "").strip() else "none",
-            fee_item=(b.get("fee_item") or "运费").strip(),
+            annot=(b.get("annot") or "").strip(), fee_item=(b.get("fee_item") or "运费").strip(),
             amount=amount, unit=(b.get("unit") or "").strip(), note=note, created_at=_now()))
     db.audit(u["name"], "物流复核-登记单据运费", "%s %s" % (carrier, period), "%s %.2f元" % (doc_no or "无单号", amount))
     return {"ok": True}
@@ -1215,8 +1215,7 @@ async def review_register_import(request: Request, period: str = ""):
                 batch_id="register|%s|%s" % (carrier, per), period=per, carrier=carrier,
                 grain="detail", review_mode="register", subject=get(r, "subject"),
                 doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
-                annot=get(r, "bizline"), annot_source="manual" if get(r, "bizline") else "none",
-                fee_item=get(r, "fee_item") or "运费",
+                annot=get(r, "bizline"), fee_item=get(r, "fee_item") or "运费",
                 amount=amount, unit="", note=_reg_note(get(r, "dept"), "", date, get(r, "note")), created_at=_now()))
             added += 1
     db.audit(u["name"], "物流复核-导入单据运费", period or "多期", "新增 %d 行 / 跳过 %d 行" % (added, skipped))
@@ -1864,20 +1863,30 @@ def _bp_mapping(fresh=False):
     combo, mat, err = {}, {}, ""
     try:
         with urllib.request.urlopen(db.BP_API_BASE + "/api/master/mapping", timeout=8) as r:
-            rows = json.loads(r.read().decode("utf-8"))
-        for m in rows or []:
-            if str(m.get("status") or "") == "已停用":
+            payload = json.loads(r.read().decode("utf-8"))
+        if isinstance(payload, dict):
+            rows = next((payload[k] for k in ("rows", "items", "data", "list", "results", "records") if isinstance(payload.get(k), list)), [])
+        else:
+            rows = payload
+        if not isinstance(rows, list):
+            raise ValueError("映射接口返回结构不是明细数组")
+        for m in rows:
+            if not isinstance(m, dict) or str(m.get("status") or "") == "已停用":
                 continue
-            mc, cn = str(m.get("materialCode") or "").strip(), str(m.get("customerName") or "").strip()
+            mc = str(m.get("materialCode") or m.get("material_code") or m.get("code") or "").strip()
+            cn = str(m.get("customerName") or m.get("customer_name") or m.get("customer") or "").strip()
             if not mc:
                 continue
-            v = {"brand": m.get("brand") or "", "bu": m.get("businessUnit") or "", "division": m.get("division") or "",
-                 "series": m.get("productSeries") or "", "team": m.get("salesTeam") or ""}
+            v = {"brand": m.get("brand") or m.get("brandName") or m.get("brand_name") or "",
+                 "bu": m.get("businessUnit") or m.get("business_unit") or "", "division": m.get("division") or "",
+                 "series": m.get("productSeries") or m.get("product_series") or "", "team": m.get("salesTeam") or m.get("sales_team") or ""}
             if cn:
                 combo.setdefault((cn, mc), v)
             mat.setdefault(mc, v)
+        if not mat:
+            err = "BP 客户物料映射表为空或未启用，品牌暂时显示不了"
     except Exception as e:
-        err = "BP 工作台取不到客户物料映射表（%s），品牌暂时显示不了" % str(e)[:80]
+        err = "BP 工作台取不到客户物料映射表（%s），品牌暂时显示不了" % str(e)[:120]
     if not err:
         _BPMAP_CACHE["m"] = (time.time(), combo, mat, err)
     return combo, mat, err
@@ -2387,14 +2396,16 @@ def _build_recon(request, carrier, period):
     # 没有汇总行才按逐单明细(detail)汇总**——与顶栏 total_bill 同口径；逐单只是支撑，像迅鸽的操作费/物料费没有逐单。
     with db._engine.connect() as c:
         allrows = [dict(r) for r in c.execute(select(
-            BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr,
-            BL.c.bill_src, BL.c.src_sheet).where(
+            BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
     _backfill_subjects(allrows, carrier)
     acc_rows = [r for r in allrows if r.get("grain") == "accrual" and (r.get("amount") or 0)]
     brows = acc_rows if acc_rows else [r for r in allrows if r.get("grain") == "detail"]
     bill_src = "accrual" if acc_rows else "detail"
-    bill_by = intake.sheet_round_groups(brows, lambda r: (_eff_subject(r), _eff_fee(r)))
+    bill_by = {}
+    for r in brows:
+        k = (_eff_subject(r), _eff_fee(r))
+        bill_by[k] = bill_by.get(k, 0.0) + float(r.get("amount") or 0)
     # 销售额(费比)：需金蝶物料，仅逐单不多(≤400)时取，避免迅鸽这类几千单拖垮(按 detail 单数判，别被5条汇总行骗)
     sales_by = {}
     n_detail = sum(1 for r in allrows if r.get("grain") == "detail")
@@ -2610,8 +2621,7 @@ def _build_lines(request, carrier, period):
                 e["mbiz"] = _b
     with db._engine.connect() as c:
         allrows = [dict(r) for r in c.execute(select(
-            BL.c.carrier, BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount,
-            BL.c.subj_ovr, BL.c.fee_ovr, BL.c.bill_src, BL.c.src_sheet).where(
+            BL.c.carrier, BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount, BL.c.subj_ovr, BL.c.fee_ovr).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
         notes = {r[0]: (r[1] or "") for r in c.execute(select(LN.c.line_key, LN.c.note).where(
             (LN.c.carrier == carrier) & (LN.c.period == period))).all()}
@@ -2628,27 +2638,30 @@ def _build_lines(request, carrier, period):
     for e in ents:
         _fa.setdefault(e.get("subject"), set()).add(e.get("fee_norm"))
     _ret_fold = {s for s, fs in _fa.items() if "出库运费" in fs and "退货运费" not in fs}
-    def _bill3_key(r):
+    bill3, ret3 = {}, {}
+    for r in brows:
         k = (_eff_subject(r), _eff_fee(r), _bill_biz(r))
-        return (k[0], "出库运费", k[2]) if k[1] == "退货运费" and k[0] in _ret_fold else k
-
-    bill3 = intake.sheet_round_groups(brows, _bill3_key)
-    ret3 = intake.sheet_round_groups([r for r in brows if _eff_fee(r) == "退货运费" and _eff_subject(r) in _ret_fold], _bill3_key)
+        if k[1] == "退货运费" and k[0] in _ret_fold:
+            k = (k[0], "出库运费", k[2])
+            ret3[k] = ret3.get(k, 0.0) + float(r.get("amount") or 0)
+        bill3[k] = bill3.get(k, 0.0) + float(r.get("amount") or 0)
     # 可逐单：每个账单归口里，有多少金额是带金蝶单号的逐单明细撑着的(无单据/只有月结汇总行的只能按汇总核)
-    detrows = [r for r in allrows if r.get("grain") == "detail" and (r.get("doc_no") or "").strip() not in ("", "无单据")]
-    pinrows = []
-    for r in detrows:
-        no = r["doc_no"].strip()
+    det3, pin3 = {}, {}
+    for r in allrows:
+        if r.get("grain") != "detail":
+            continue
+        no = (r.get("doc_no") or "").strip()
+        if not no or no == "无单据":
+            continue
+        d = det3.setdefault((_eff_subject(r), _eff_fee(r), _bill_biz(r)), {"docs": set(), "amt": 0.0})
+        d["docs"].add(no)
+        d["amt"] += float(r.get("amount") or 0)
+        # 其中是采购入库单(原料入库)的部分：部门口径只对这部分下结论(调拨单的小料该挂哪个部门没人定过，不乱报)
         _pre = "".join(ch for ch in no.split("+")[0] if ch.isalpha())
         if (_FORM_BY_PREFIX.get(_pre) or [""])[0] == "STK_InStock":
-            pinrows.append(r)
-    det_key = lambda r: (_eff_subject(r), _eff_fee(r), _bill_biz(r))
-    det3 = {k: {"docs": set(), "amt": v} for k, v in intake.sheet_round_groups(detrows, det_key).items()}
-    pin3 = {k: {"docs": set(), "amt": v} for k, v in intake.sheet_round_groups(pinrows, det_key).items()}
-    for r in detrows:
-        det3[det_key(r)]["docs"].add(r["doc_no"].strip())
-    for r in pinrows:
-        pin3[det_key(r)]["docs"].add(r["doc_no"].strip())
+            pi = pin3.setdefault((_eff_subject(r), _eff_fee(r), _bill_biz(r)), {"docs": set(), "amt": 0.0})
+            pi["docs"].add(no)
+            pi["amt"] += float(r.get("amount") or 0)
 
     def _od(keys, bill):
         # fbiz：产品线集合用 | 连，空产品线记 "-"，第②步按同一口径筛单据
@@ -3947,7 +3960,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             r["verdict"] = lr.verdict(r.get("price_state"), r["qty_state"])
     summary = lr.summarize(rows)
     counts = lr.verdict_counts(rows)
-    total_bill = intake.sheet_round_sum(accr) or intake.sheet_round_sum(rows)
+    total_bill = round(sum((a.get("amount") or 0) for a in accr) or sum((r.get("amount") or 0) for r in rows), 2)
 
     qs = (q or "").strip()
     q_on = bool(qs)
