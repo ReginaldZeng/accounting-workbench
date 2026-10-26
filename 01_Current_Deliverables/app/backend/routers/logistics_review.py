@@ -53,7 +53,7 @@ def _doc_ok(carrier, period):
         return {r[0]: {"by": r[1] or "", "at": r[2] or ""} for r in c.execute(select(
             DK.c.doc_no, DK.c.confirmed_by, DK.c.confirmed_at).where((DK.c.carrier == carrier) & (DK.c.period == period))).all()}
 
-_DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "fee", "bizline",
+_DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "annot_source", "fee", "bizline",
                 "fee_item", "qty", "unit", "amount", "carrier_sub", "prov", "charge_wt",
                 "sub_fees", "src_sheet", "src_row", "note")
 
@@ -1112,7 +1112,8 @@ async def review_register_add(request: Request):
             batch_id="register|%s|%s" % (carrier, period), period=period, carrier=carrier,
             grain="detail", review_mode="register", subject=(b.get("subject") or "").strip(),
             doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
-            annot=(b.get("annot") or "").strip(), fee_item=(b.get("fee_item") or "运费").strip(),
+            annot=(b.get("annot") or "").strip(), annot_source="manual" if (b.get("annot") or "").strip() else "none",
+            fee_item=(b.get("fee_item") or "运费").strip(),
             amount=amount, unit=(b.get("unit") or "").strip(), note=note, created_at=_now()))
     db.audit(u["name"], "物流复核-登记单据运费", "%s %s" % (carrier, period), "%s %.2f元" % (doc_no or "无单号", amount))
     return {"ok": True}
@@ -1236,7 +1237,8 @@ async def review_register_import(request: Request, period: str = ""):
                 batch_id="register|%s|%s" % (carrier, per), period=per, carrier=carrier,
                 grain="detail", review_mode="register", subject=get(r, "subject"),
                 doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
-                annot=get(r, "bizline"), fee_item=get(r, "fee_item") or "运费",
+                annot=get(r, "bizline"), annot_source="manual" if get(r, "bizline") else "none",
+                fee_item=get(r, "fee_item") or "运费",
                 amount=amount, unit="", note=_reg_note(get(r, "dept"), "", date, get(r, "note")), created_at=_now()))
             added += 1
     db.audit(u["name"], "物流复核-导入单据运费", period or "多期", "新增 %d 行 / 跳过 %d 行" % (added, skipped))
@@ -2481,7 +2483,7 @@ def _bill_biz(r):
     return _BIZ_ALIAS.get(b, b)
 
 
-def _accr_entries(carrier, period, carrier_full=None):
+def _accr_entries_uncached(carrier, period, carrier_full=None):
     """逐笔计提(按跨月核销调整后)：本期的计提分录，加上别的月份、被本期账单选定核销的(标 xm=计提月)，
     去掉本期被别的月份账单选走的(列在 xmoved 里提示)。"""
     got = _accr_entries_raw(carrier, period, carrier_full)
@@ -2513,6 +2515,25 @@ def _accr_entries(carrier, period, carrier_full=None):
                     ents.append(dict(e, xm=x["accr"], key=e["key"] + "|" + x["accr"]))
     ents.sort(key=lambda e: (e["subject"], e["fee_norm"], e["biz"], e["proj"], e["vno"]))
     return dict(got, entries=ents, xmoved=moved)
+
+
+_ENTRIES_LOCK = threading.Lock()
+
+
+def _accr_entries(carrier, period, carrier_full=None):
+    import time as _t
+    key = ("entries", carrier, period, carrier_full or "")
+    now = _t.time()
+    cached = _ACCR_CACHE.get(key)
+    if cached and now - cached[2] < 1800:
+        return cached[0]
+    with _ENTRIES_LOCK:
+        cached = _ACCR_CACHE.get(key)
+        if cached and _t.time() - cached[2] < 1800:
+            return cached[0]
+        result = _accr_entries_uncached(carrier, period, carrier_full)
+        _ACCR_CACHE[key] = (result, None, _t.time())
+        return result
 
 
 def _accr_entries_raw(carrier, period, carrier_full=None):
@@ -4230,8 +4251,10 @@ _ACCR_CACHE = {}   # (carrier,period) / ("lines",carrier,period) -> (result, Non
 
 def _bust(carrier, period):
     """归类/备注/登记/重解析/接金蝶 → 该承运商该月的 逐笔、结论、逐单视图 缓存作废。"""
-    for k in ((carrier, period), ("lines", carrier, period), ("view", carrier, period), ("cls", carrier, period)):
-        _ACCR_CACHE.pop(k, None)
+    for k in list(_ACCR_CACHE):
+        if k in ((carrier, period), ("lines", carrier, period), ("view", carrier, period), ("cls", carrier, period)) \
+                or (isinstance(k, tuple) and k[:3] == ("entries", carrier, period)):
+            _ACCR_CACHE.pop(k, None)
     with _DOC_MAT_LOCK:
         _DOC_MAT_CACHE.clear()
         _DOC_HEAD_CACHE.clear()

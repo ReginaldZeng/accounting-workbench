@@ -428,6 +428,33 @@ class MaterialCacheTests(unittest.TestCase):
             self.assertEqual(len(calls), 3)
 
 
+class EntriesCacheTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def setUp(self):
+        self.lr._ACCR_CACHE.clear()
+
+    def test_entries_cache_reuses_result_and_bust_invalidates(self):
+        calls = []
+
+        def uncached(carrier, period, carrier_full=None):
+            calls.append((carrier, period, carrier_full))
+            return {"entries": [], "adj": [], "prior": []}
+
+        with patch.object(self.lr, "_accr_entries_uncached", side_effect=uncached):
+            first = self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司")
+            second = self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司")
+            self.assertEqual(first, second)
+            self.assertEqual(len(calls), 1)
+            self.lr._accr_entries("天鹰物流", "2026-08", "其他全称")
+            self.assertEqual(len(calls), 2)
+            self.lr._bust("天鹰物流", "2026-08")
+            self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司")
+            self.assertEqual(len(calls), 3)
+
+
 class ExportCacheTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
