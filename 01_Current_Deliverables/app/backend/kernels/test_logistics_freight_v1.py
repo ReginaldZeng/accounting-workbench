@@ -195,6 +195,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(store.batches.c.status.type.length, 12)
         self.assertEqual(str(store.lines.c.amount.type), "NUMERIC(18, 6)")
 
+    def test_ensure_columns_adds_preview_fields_to_old_database(self):
+        from sqlalchemy import inspect, text
+        with self.engine.begin() as cx:
+            cx.execute(text("DROP TABLE logistics_freight_v1_line"))
+            cx.execute(text("CREATE TABLE logistics_freight_v1_line (id INTEGER PRIMARY KEY)"))
+        store.ensure_columns(self.engine)
+        names = {x["name"] for x in inspect(self.engine).get_columns("logistics_freight_v1_line")}
+        self.assertTrue({"brand", "customer", "sales_amount_tax", "quantity_unit"}.issubset(names))
+
 
 if __name__ == "__main__":
     unittest.main()

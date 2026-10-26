@@ -106,7 +106,10 @@ def _header(sheet):
         "doc_date": ("装货日期", "卸货日期", "日期"),
         "material_code": ("物料编码",),
         "material_name": ("产品名称", "物料名称"),
-        "quantity": ("吨数(T)", "吨数"),
+        "customer": ("客户", "客户名称"),
+        "sales_amount_tax": ("价税合计（本位币）", "价税合计"),
+        "quantity": ("销售基本数量", "吨数(T)", "实发数量", "数量(箱）", "数量（KG）", "数量（千克）", "吨数"),
+        "quantity_unit": ("库存单位", "基本单位"),
         "biz_line": ("业务线", "物料分组", "简称"),
     }
     best = None
@@ -291,13 +294,25 @@ def _parse_sheet(sheet, context, issues):
                 quantity = _number(_cell(sheet, r, columns["quantity"])[0])
             except (InvalidOperation, ValueError):
                 _issue(issues, "warning", "invalid_quantity", "吨数不是可识别数字", sheet.name, r + 1, doc_no)
+        sales_amount = None
+        if "sales_amount_tax" in columns:
+            try:
+                sales_amount = _number(_cell(sheet, r, columns["sales_amount_tax"])[0])
+            except (InvalidOperation, ValueError):
+                _issue(issues, "warning", "invalid_sales_amount", "销售额不是可识别数字", sheet.name, r + 1, doc_no)
+        quantity_unit = _text(_cell(sheet, r, columns["quantity_unit"])[0]) if "quantity_unit" in columns else ""
+        if not quantity_unit and "quantity" in columns:
+            heading = _norm(sheet.rows[header_row][columns["quantity"]])
+            quantity_unit = "t" if "吨数" in heading else ("kg" if "kg" in heading or "千克" in heading else ("箱" if "箱" in heading else ""))
         output.append({
             "doc_no": doc_no, "carrier": carrier, "subject": subject, "biz_line": biz_line,
             "fee_type": fee_type, "amount": _money(amount),
             "doc_date": (_text(_cell(sheet, r, columns["doc_date"])[0]) if "doc_date" in columns else current["doc_date"]),
             "material_code": (_text(_cell(sheet, r, columns["material_code"])[0]) if "material_code" in columns else ""),
             "material_name": (_text(_cell(sheet, r, columns["material_name"])[0]) if "material_name" in columns else ""),
-            "quantity": (_money(quantity) if quantity is not None else None),
+            "customer": (_text(_cell(sheet, r, columns["customer"])[0]) if "customer" in columns else ""),
+            "sales_amount_tax": (_money(sales_amount) if sales_amount is not None else None),
+            "quantity": (_money(quantity) if quantity is not None else None), "quantity_unit": quantity_unit,
             "sheet": sheet.name, "row": r + 1, "raw": _raw(sheet, header_row, r),
             "merged_range": ";".join(dict.fromkeys(merged_ranges)),
         })
@@ -369,8 +384,8 @@ def normalize_carrier_name(value, catalog):
     text = _norm(raw)
     if not text:
         return {"status": "missing", "carrier": "", "raw": raw, "candidates": []}
-    if "自提" in text:
-        return {"status": "exact", "carrier": "自提", "raw": raw, "candidates": []}
+    if "自提" in text or "到付" in text:
+        return {"status": "exact", "carrier": "自提" if "自提" in text else "到付", "raw": raw, "candidates": []}
     exact = {}
     for item in catalog:
         name = _text(item.get("name") or item.get("short"))

@@ -25,13 +25,15 @@ sys.path.insert(0, str(BACKEND))
 from kernels import logistics_freight_v1_store as store
 
 
-def workbook(doc="D1", amount=10, marker="有效", carrier=None):
+def workbook(doc="D1", amount=10, marker="有效", carrier=None, rich=False):
     wb = Workbook()
     ws = wb.active
     ws.title = "销售成品装货明细"
     ws.append(["标题"])
-    ws.append(["含税金额（18.5元/吨）", "物料编码", "金蝶单据编号"] + (["物流商"] if carrier else []))
-    ws.append([amount, "M1", doc if marker == "有效" else None] + ([carrier] if carrier else []))
+    extra = ["客户", "价税合计", "销售基本数量", "库存单位"] if rich else []
+    ws.append(["含税金额（18.5元/吨）", "物料编码", "金蝶单据编号"] + (["物流商"] if carrier else []) + extra)
+    ws.append([amount, "M1", doc if marker == "有效" else None] + ([carrier] if carrier else []) +
+              (["客户甲", 1000, 2, "袋"] if rich else []))
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -47,7 +49,9 @@ class ApiTests(unittest.TestCase):
         core.JSONResponse = __import__("fastapi.responses", fromlist=["JSONResponse"]).JSONResponse
         core.db = fake_db
         core._require_perm = lambda _request, cap: ({"name": "测试员"} if cap in fake_db.permissions else None)
-        with patch.dict(sys.modules, {"core": core}):
+        review = types.ModuleType("routers.logistics_review")
+        review._bp_mapping = lambda: ({("客户甲", "M1"): {"brand": "品牌甲"}}, {}, "")
+        with patch.dict(sys.modules, {"core": core, "routers.logistics_review": review}):
             from routers import logistics_freight_v1
         cls.router_module = logistics_freight_v1
         cls.fake_db = fake_db
@@ -157,6 +161,20 @@ class ApiTests(unittest.TestCase):
         detail = self.client.get("/api/logistics-freight/v1/batches/%d" % replacement["id"]).json()["batch"]
         self.assertEqual(detail["lines"][0]["doc_no"], "NEW")
         self.assertEqual(detail["lines"][0]["raw"]["金蝶单据编号"], "NEW")
+
+    def test_preview_business_fields_and_collect_on_delivery(self):
+        response = self.client.post("/api/logistics-freight/v1/preview",
+                                    data={"period": "2026-09", "subject": "孝感星期九"},
+                                    files={"files": ("9月销售.xlsx", workbook(carrier="到付", rich=True), "application/octet-stream")})
+        draft = response.json()["batches"][0]
+        line = draft["lines"][0]
+        self.assertEqual(line["brand"], "品牌甲")
+        self.assertEqual(line["customer"], "客户甲")
+        self.assertEqual(line["sales_amount_tax"], "1000.00")
+        self.assertEqual(line["quantity"], "2.000000")
+        self.assertEqual(line["quantity_unit"], "袋")
+        self.assertEqual(line["carrier"], "到付")
+        self.assertEqual(draft["summary"]["status"], "ready")
 
     def test_unique_keyword_normalizes_before_draft_is_saved(self):
         response = self.client.post("/api/logistics-freight/v1/preview",

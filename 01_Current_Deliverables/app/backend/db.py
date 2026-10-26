@@ -716,6 +716,11 @@ from kernels.logistics_freight_v1_store import TABLES as _lfv1_tables
 for _table in _lfv1_tables:
     _table.to_metadata(_md)
 _md.create_all(_engine)
+try:
+    from kernels.logistics_freight_v1_store import ensure_columns as _lfv1_ensure_columns
+    _lfv1_ensure_columns(_engine)
+except Exception as _ex:
+    print("[逐单运费V1] 补库表栏失败：%s" % _ex)
 # 发票管家：表建好以后才加的栏（票夹「归谁审」那几栏），老库在这里补；补不上不挡启动（接口读写那几栏时会报出来）
 try:
     from kernels.invoice_store import ensure_columns as _inv_ensure_columns

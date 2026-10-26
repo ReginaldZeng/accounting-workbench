@@ -9,6 +9,8 @@ import {
 } from '../api.js'
 
 const money = n => n == null || n === '' ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const fee4 = n => n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 4, maximumFractionDigits: 4 })
+const percent = n => n == null ? '—' : (Number(n) * 100).toFixed(2) + '%'
 const STATUS = { preview: '待确认', pending: '待确认', draft: '待确认', uploaded: '待确认', confirmed: '已生效', effective: '已生效', active: '已生效', withdrawn: '已撤回', cancelled: '已取消', canceled: '已取消', blocked: '有阻断', failed: '解析失败' }
 const SUBJECTS = ['深圳星期零', '深圳星期九', '孝感星期九']
 const asList = value => Array.isArray(value) ? value : value == null ? [] : [value]
@@ -69,11 +71,22 @@ function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose,
   useEffect(() => { setMeta(initialMeta()) }, [batch.id, batch.carrier, batch.subject, batch.biz_line, batch.lines])
   const docRows = Object.values(lines.reduce((acc, line) => {
     const key = [line.doc_no, line.carrier, line.fee_type, line.subject].join('|')
-    if (!acc[key]) acc[key] = { ...line, amount: 0, sourceRows: [] }
+    if (!acc[key]) acc[key] = { ...line, amount: 0, sales_amount_tax: 0, quantity: 0, brands: new Set(), units: new Set(), sourceRows: [] }
     acc[key].amount += Number(line.amount || 0)
+    acc[key].sales_amount_tax += Number(line.sales_amount_tax || 0)
+    acc[key].quantity += Number(line.quantity || 0)
+    if (line.brand) acc[key].brands.add(line.brand)
+    if (line.quantity_unit) acc[key].units.add(line.quantity_unit)
+    if (!acc[key].customer && line.customer) acc[key].customer = line.customer
     acc[key].sourceRows.push(`${line.sheet || ''} 第${line.row || '—'}行`)
     return acc
-  }, {}))
+  }, {})).map(row => ({
+    ...row,
+    brand: row.brands.size ? [...row.brands].join('、') : '未映射',
+    quantity_unit: row.units.size === 1 ? [...row.units][0] : (row.units.size ? '多单位' : ''),
+    unit_fee: row.quantity ? row.amount / row.quantity : null,
+    ratio: row.sales_amount_tax ? row.amount / row.sales_amount_tax : null,
+  }))
 
   return <div className="lv1-preview">
     <div className="lv1-preview-head">
@@ -97,11 +110,12 @@ function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose,
     </div>
     {categories.length > 0 && <div className="lv1-categories">分类金额：{categories.map(([name, value]) => <span key={name}>{name} <b>{money(value)}</b></span>)}</div>}
     {docRows.length > 0 && <div className="lv1-doc-preview"><table>
-      <thead><tr><th>单据号</th><th>日期</th><th>承运商</th><th>费用类型</th><th>费用主体</th><th className="num">金额（元）</th><th>来源</th></tr></thead>
+      <thead><tr><th>单据号</th><th>品牌</th><th>客户名称</th><th className="num">销售额（元）</th><th>承运商</th><th className="num">金额（元）</th><th className="num">单位费用</th><th className="num">费比</th></tr></thead>
       <tbody>{docRows.slice(0, 10).map((row, i) => <tr key={i} className={!row.carrier || !row.subject ? 'missing' : ''}>
-        <td>{row.doc_no || '缺单号'}</td><td>{row.doc_date || '—'}</td><td>{row.carrier || <b className="bad">待补充</b>}</td>
-        <td>{row.fee_type || '—'}</td><td>{row.subject || <b className="bad">待补充</b>}</td><td className="num">{money(row.amount)}</td>
-        <td title={row.sourceRows.join('\n')}>{row.sourceRows[0]}{row.sourceRows.length > 1 ? ` 等${row.sourceRows.length}行` : ''}</td>
+        <td>{row.doc_no || '缺单号'}</td><td>{row.brand}</td><td>{row.customer || '—'}</td>
+        <td className="num">{money(row.sales_amount_tax)}</td><td>{row.carrier || <b className="bad">待补充</b>}</td>
+        <td className="num">{money(row.amount)}</td><td className="num" title={row.quantity_unit ? `按 ${row.quantity_unit} 计算` : ''}>{fee4(row.unit_fee)}</td>
+        <td className="num">{percent(row.ratio)}</td>
       </tr>)}</tbody>
     </table>{docRows.length > 10 && <div className="lv1-doc-more">前 10 组，共 {docRows.length} 组逐单费用；确认前请结合下方异常检查。</div>}</div>}
     <div className="lv1-checks">

@@ -64,7 +64,11 @@ lines = Table(
     Column("doc_date", String(30)),
     Column("material_code", String(80)),
     Column("material_name", String(240)),
+    Column("brand", String(120)),
+    Column("customer", String(240)),
+    Column("sales_amount_tax", Numeric(18, 2)),
     Column("quantity", Numeric(18, 6)),
+    Column("quantity_unit", String(30)),
     Column("sheet", String(120), nullable=False),
     Column("row_number", Integer, nullable=False),
     Column("raw_json", Text().with_variant(LONGTEXT(), "mysql")),
@@ -149,7 +153,7 @@ def get_batch(engine, batch_id, with_lines=True):
 
 def _line_dict(row):
     out = dict(row)
-    for key in ("amount", "quantity"):
+    for key in ("amount", "quantity", "sales_amount_tax"):
         if out.get(key) is not None:
             out[key] = format(out[key], "f")
     out["row"] = out.pop("row_number")
@@ -197,7 +201,10 @@ def create_draft(engine, filename, content, parsed, operator, operation="new", r
                 amount=_decimal(line.get("amount")), doc_date=str(line.get("doc_date") or "")[:30],
                 material_code=str(line.get("material_code") or "")[:80],
                 material_name=str(line.get("material_name") or "")[:240],
+                brand=str(line.get("brand") or "")[:120], customer=str(line.get("customer") or "")[:240],
+                sales_amount_tax=(_decimal(line.get("sales_amount_tax")) if line.get("sales_amount_tax") not in (None, "") else None),
                 quantity=(_decimal(line.get("quantity")) if line.get("quantity") not in (None, "") else None),
+                quantity_unit=str(line.get("quantity_unit") or "")[:30],
                 sheet=str(line.get("sheet") or "")[:120], row_number=int(line.get("row") or 0),
                 raw_json=_json(line.get("raw") or {}), merged_range=str(line.get("merged_range") or "")[:500],
             ))
@@ -386,3 +393,14 @@ def override_period(engine, batch_id):
         cx.execute(update(batches).where(batches.c.id == int(batch_id)).values(
             summary_json=_json(summary), issues_json=_json(issues)))
     return get_batch(engine, batch_id)
+
+
+def ensure_columns(engine):
+    from sqlalchemy import inspect, text
+    wanted = {"brand": "VARCHAR(120)", "customer": "VARCHAR(240)",
+              "sales_amount_tax": "NUMERIC(18, 2)", "quantity_unit": "VARCHAR(30)"}
+    existing = {x["name"] for x in inspect(engine).get_columns(lines.name)}
+    with engine.begin() as cx:
+        for name, ddl in wanted.items():
+            if name not in existing:
+                cx.execute(text("ALTER TABLE %s ADD COLUMN %s %s" % (lines.name, name, ddl)))

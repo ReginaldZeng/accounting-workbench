@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from core import JSONResponse, _require_perm, db
 from kernels import logistics_freight_v1 as parser
 from kernels import logistics_freight_v1_store as store
+from routers import logistics_review as lrv
 
 router = APIRouter(prefix="/api/logistics-freight/v1", tags=["logistics-freight-v1"])
 
@@ -30,6 +31,20 @@ def _forbidden():
 def _error(exc):
     return JSONResponse({"ok": False, "msg": str(exc), **exc.payload},
                         status_code=getattr(exc, "status_code", 409))
+
+
+def _enrich_brand(parsed, combo, matmap, bp_err):
+    for line in parsed.get("lines") or []:
+        customer = str(line.get("customer") or "").strip()
+        code = str(line.get("material_code") or "").strip()
+        mapped = combo.get((customer, code)) or matmap.get(code) or {}
+        line["brand"] = mapped.get("brand") or ""
+    if bp_err:
+        parsed.setdefault("issues", []).append({"severity": "warning", "code": "brand_mapping_unavailable",
+                                               "message": bp_err, "sheet": "", "row": 0, "doc_no": ""})
+        parsed["summary"]["warning_count"] = int(parsed["summary"].get("warning_count") or 0) + 1
+        parsed["summary"]["issue_count"] = int(parsed["summary"].get("issue_count") or 0) + 1
+    return parsed
 
 
 def _with_overlaps(batch, operation="new", replace_id=None):
@@ -102,6 +117,7 @@ async def preview(request: Request):
                for x in (db.list_logi_suppliers() or []) if x.get("short")]
     if context["carrier"] and all(x["name"] != context["carrier"] for x in catalog):
         catalog.append({"name": context["carrier"], "full_name": ""})
+    combo, matmap, bp_err = lrv._bp_mapping()
     output = []
     for upload in uploads:
         filename = str(upload.filename or "未命名.xlsx")
@@ -110,6 +126,7 @@ async def preview(request: Request):
             parsed = parser.parse_workbook(content, filename, context)
             parsed = parser.validate_parsed_period(parsed, filename, period)
             parsed = parser.normalize_parsed_carriers(parsed, catalog)
+            parsed = _enrich_brand(parsed, combo, matmap, bp_err)
         except Exception as exc:
             parsed = {"summary": {"status": "failed", "line_count": 0, "doc_count": 0,
                                   "total_amount": "0", "error_count": 1},
