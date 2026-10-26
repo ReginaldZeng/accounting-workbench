@@ -9,7 +9,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   invSQrCreate, invSQrCheck, invSQrApprove, invSHello, invSLoginDd, invSLoginLookup, invSLoginSend, invSLoginVerify, invSLogout,
-  invSPayments, invSReceivers, invSLaterCreate, invSLaters, invSLaterDocs, invSLaterInvoices, invSLaterInvoiceList, invSLaterInvoiceRemove,
+  invSPayments, invSReceivers, invSLaterCreate, invSLaters, invSLaterDocs, invSLaterInvoices, invSLaterInvoiceList, invSLaterInvoiceRemove, invSLaterDelete, invSLaterRestore,
 } from '../api.js'
 import { inDingTalk, getAuthCode } from './ddBridge.js'
 import { goWorkbench } from './ddLogin.js'
@@ -28,7 +28,7 @@ import qrIcon from '../assets/inv-login/qr.svg'
 const TOKEN_KEY = 'inv_self_t'
 const KIND_LABEL = { special: '专票', normal: '普票', receipt: '收据' }
 const TAX_RATES = ['13%', '9%', '6%', '5%', '3%', '1%', '0%', '免税', '不征税']
-const ST_LABEL = { open: '待到票', partial: '部分到票', done: '已收齐', closed: '已关闭' }
+const ST_LABEL = { open: '待到票', partial: '部分到票', done: '已收齐', closed: '已关闭', deleted: '已删除' }
 const errText = e => e?.message || e?.errorMessage || JSON.stringify(e || '未知错误')
 const loadTok = () => { try { return sessionStorage.getItem(TOKEN_KEY) || '' } catch { return '' } }
 const saveTok = t => { try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY) } catch { /* 存不了就只在本页用 */ } }
@@ -398,10 +398,11 @@ function Form({ token, pay, receivers, onBack, onDone }) {
 const LIVE = l => l.status === 'open' || l.status === 'partial'
 const MINE_CATS = [
   ['owe', '我还欠的票', l => LIVE(l)],
-  ['all', '全部', () => true],
+  ['all', '全部', l => l.status !== 'deleted'],
   ['done', '财务已收齐', l => l.status === 'done'],
   ['late', '已超期', l => LIVE(l) && l.overdue],
   ['closed', '已关闭', l => l.status === 'closed'],
+  ['deleted', '已删除', l => l.status === 'deleted'],
 ]
 const laterText = l => [l.id, '#' + l.id, l.businessId, l.payee?.name, l.receiverName, l.expectDate, (l.createdAt || '').slice(0, 10),
   money(l.expectAmount), l.expectAmount, ST_LABEL[l.status], l.note].join(' ').toLowerCase().replace(/,/g, '')
@@ -432,7 +433,7 @@ export function PrintTip({ receiver, count, onClose }) {
   </div>
 }
 
-function MyLaters({ token, rows: all, onReload }) {
+function MyLaters({ token, rows: all, onReload, onChanged }) {
   const [busy, setBusy] = useState(0)
   const [note, setNote] = useState('')
   const [q, setQ] = useState('')
@@ -450,6 +451,18 @@ function MyLaters({ token, rows: all, onReload }) {
     if (!window.confirm(`确定删除这张发票${t.number ? '（号码 ' + t.number + '）' : ''}吗？删掉后要重新上传。`)) return
     try { await invSLaterInvoiceRemove(token, l.id, t.id); setNote(`后补单 #${l.id} 已删除一张发票`); showTickets(l.id); onReload() }
     catch (e) { setNote('没删掉：' + errText(e)); showTickets(l.id) }
+  }
+  const remove = async l => {
+    if (!window.confirm(`确定删除后补单 #${l.id} 吗？\n删除后可在已删除中找到并恢复，发票和资料不会清除`)) return
+    setBusy(l.id); setNote('')
+    try { await invSLaterDelete(token, l.id); setNote(`后补单 #${l.id} 已删除，可在「已删除」中恢复`); setOpen(0); onChanged?.() }
+    catch (e) { setNote('没删掉：' + errText(e)) } finally { setBusy(0) }
+  }
+  const restore = async l => {
+    if (!window.confirm(`确定恢复后补单 #${l.id} 吗？`)) return
+    setBusy(l.id); setNote('')
+    try { await invSLaterRestore(token, l.id); setNote(`后补单 #${l.id} 已恢复`); onChanged?.() }
+    catch (e) { setNote('没恢复：' + errText(e)) } finally { setBusy(0) }
   }
   const ticketState = t => (t.dup ? '重复票，不算数' : ['pending', 'running'].includes(t.procStatus) ? '正在识别…'
     : t.kind === 'other' ? '没认出是发票' : t.pending ? '等财务确认' : t.mine ? '财务已确认' : '财务已收到')
@@ -509,14 +522,19 @@ function MyLaters({ token, rows: all, onReload }) {
           <td>{l.receiverName}</td>
           <td className={'st-' + l.status}>{l.status === 'done' ? '财务已收齐' : (ST_LABEL[l.status] || l.status)}
             {live && num(l.selfAmount) > 0 && <div className="inv-sf-sub2 inv-sf-wait2">已上传 {money(l.selfAmount)}，等财务确认</div>}
+            {l.status === 'deleted' && <div className="inv-sf-sub2">{[l.deletedBy && `删除人 ${l.deletedBy}`, l.deletedAt && `删除时间 ${l.deletedAt}`].filter(Boolean).join(' · ')}</div>}
             {has && <button type="button" className="inv-sf-link inv-sf-seetk" onClick={() => (open === l.id ? setOpen(0) : showTickets(l.id))}>{open === l.id ? '收起发票' : '看传了哪些发票'}</button>}</td>
           <td>{l.filedVia === 'self' ? '自己' : '财务代填'}<div className="inv-sf-sub2">{(l.createdAt || '').slice(0, 10)}</div></td>
-          <td>{live && <div className="inv-sf-acts">
-            <label className={'inv-sf-upl pri' + (busy === -l.id ? ' busy' : '')}>{busy === -l.id ? '识别中…' : '上传发票'}
-              <input type="file" multiple accept=".pdf,.ofd,.xml,.zip,image/*" disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; upInv(l, fs) }} /></label>
-            <label className={'inv-sf-upl' + (busy === l.id ? ' busy' : '')}>{busy === l.id ? '上传中…' : '补传资料'}
-              <input type="file" multiple disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; up(l, fs) }} /></label>
-          </div>}</td>
+          <td><div className="inv-sf-acts">
+            {live && <>
+              <label className={'inv-sf-upl pri' + (busy === -l.id ? ' busy' : '')}>{busy === -l.id ? '识别中…' : '上传发票'}
+                <input type="file" multiple accept=".pdf,.ofd,.xml,.zip,image/*" disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; upInv(l, fs) }} /></label>
+              <label className={'inv-sf-upl' + (busy === l.id ? ' busy' : '')}>{busy === l.id ? '上传中…' : '补传资料'}
+                <input type="file" multiple disabled={!!busy} onChange={e => { const fs = Array.from(e.target.files || []); e.target.value = ''; up(l, fs) }} /></label>
+            </>}
+            {l.canDelete && <button type="button" className="inv-sf-link" disabled={busy === l.id} onClick={() => (l.status === 'deleted' ? restore(l) : remove(l))}>
+              {busy === l.id ? '处理中…' : l.status === 'deleted' ? '恢复' : '删除后补单'}</button>}
+          </div></td>
         </tr>
         {open === l.id && <tr className="inv-sf-tk"><td colSpan={11}>
           {tickets === null && <span className="inv-sf-sub2">正在取这张单上的发票…</span>}
@@ -526,9 +544,9 @@ function MyLaters({ token, rows: all, onReload }) {
             <span>{t.typeLabel || (t.kind === 'receipt' ? '收据' : '')}</span>
             <b className="inv-num">{t.total === null || t.total === undefined ? '' : money(t.total)}</b>
             <em className={t.pending && t.kind !== 'other' && !t.dup ? 'wait' : ''}>{ticketState(t)}</em>
-            {t.canRemove
+            {t.canRemove && l.status !== 'deleted'
               ? <button type="button" className="inv-sf-link del" onClick={() => removeTicket(l, t)}>删除</button>
-              : t.mine && <i title="财务已经确认收到，不能再删；确实传错了请联系财务">不能删了</i>}
+              : t.mine && <i title={l.status === 'deleted' ? '后补单已删除，恢复后才能修改发票' : '财务已经确认收到，不能再删；确实传错了请联系财务'}>不能删了</i>}
           </li>)}</ul>}
         </td></tr>}
         </React.Fragment>
@@ -643,7 +661,7 @@ export default function InvSelf() {
         <Form token={tok} pay={pick} receivers={recv} onBack={() => setPick(null)}
           onDone={m => { setFlash(m); setPick(null); setTab('mine'); loadLaters(); loadPays(true) }} />
       </section>}
-      {tab === 'mine' && <section className="inv-sf-sec"><MyLaters token={tok} rows={laters} onReload={loadLaters} /></section>}
+      {tab === 'mine' && <section className="inv-sf-sec"><MyLaters token={tok} rows={laters} onReload={loadLaters} onChanged={() => { loadLaters(); loadPays() }} /></section>}
       {!pick && <ToWorkbench />}
     </>}
   </div>

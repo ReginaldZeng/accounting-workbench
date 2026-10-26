@@ -1445,14 +1445,130 @@ test('F7 设置：名单里没绑工作台账号的人挡保存并在行内说�
 function laterApi(st) {
   return (c) => {
     if (c.path === '/api/inv/config') return cfg()
-    if (c.path === '/api/inv/later') return { ok: true, total: st.rows.length, rows: st.rows }
+    if (c.path === '/api/inv/later') {
+      const rows = st.rows.filter(l => c.query.status === 'deleted' ? l.status === 'deleted' : l.status !== 'deleted')
+      return { ok: true, total: rows.length, rows }
+    }
     if (c.path === '/api/inv/later/resolve') return { ok: true, prefill: { instId: 'inst-1', amount: 500, payee: { name: '供应商甲' }, template: '付款申请（公对公）', businessId: '202609240099' } }
     if (c.path === '/api/inv/later/create') return st.create
-    if (/^\/api\/inv\/later\/\d+$/.test(c.path)) return { ok: true, later: st.rows[0] || { id: 7, status: 'open' }, items: [], docs: [], logs: [] }
+    const act = c.path.match(/^\/api\/inv\/later\/(\d+)\/(delete|restore)$/)
+    if (act) return (act[2] === 'delete' ? st.onDelete : st.onRestore)?.(c) || { ok: true }
+    const detail = c.path.match(/^\/api\/inv\/later\/(\d+)$/)
+    if (detail) return { ok: true, later: st.rows.find(l => l.id === Number(detail[1])) || { id: Number(detail[1]), status: 'open' }, items: [], docs: [], logs: [] }
     if (/receive-upload$/.test(c.path)) return { ok: true, results: [{ name: 'camera.jpg', action: 'item', msg: '已登记' }], later: st.rows[0] }
     return { ok: true }
   }
 }
+
+test('后补单可恢复删除：非本人无按钮、已关闭单可删、全部排除已删除、详情只读并恢复刷新', async (browser, B) => {
+  const mk = (id, status, name, canDelete) => ({ id, status, canDelete, payee: { name }, payAmount: 100, expectAmount: 100,
+    receivedAmount: 0, unregisteredAmount: 0, remaining: 100, expectDate: '2026-10-20', receiverName: '财务甲' })
+  const st = { rows: [mk(41, 'closed', '已关闭可删', true), mk(42, 'open', '非本人后补单', false),
+    mk(43, 'deleted', '已删除供应商', true)] }
+  Object.assign(st.rows[2], { deletedBy: '测试会计', deletedAt: '2026-10-26 10:20:00' })
+  st.onDelete = c => {
+    const id = Number(c.path.split('/')[4])
+    st.rows = st.rows.map(l => l.id === id ? { ...l, status: 'deleted', deletedBy: '测试会计', deletedAt: '2026-10-26 10:30:00' } : l)
+    return { ok: true }
+  }
+  st.onRestore = c => {
+    const id = Number(c.path.split('/')[4])
+    st.rows = st.rows.map(l => l.id === id ? { ...l, status: 'open', deletedBy: '', deletedAt: '' } : l)
+    return { ok: true }
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, laterApi(st))
+  await mount(page, 'InvLater', { user: { name: '测试会计' } })
+  await page.locator('.inv-lt-tbl tbody tr').first().waitFor()
+  assert.equal(await page.locator('.inv-lt-tbl tbody tr').count(), 2, '默认全部不列已删除')
+  const other = page.locator('.inv-lt-tbl tbody tr', { hasText: '非本人后补单' })
+  assert.equal(await other.getByRole('button', { name: '删除', exact: true }).count(), 0, 'canDelete=false 不能显示删除')
+  const closed = page.locator('.inv-lt-tbl tbody tr', { hasText: '已关闭可删' })
+  assert.equal(await closed.getByRole('button', { name: '修改', exact: true }).count(), 0)
+  await closed.getByRole('button', { name: '删除', exact: true }).click()
+  const confirm = page.locator('.inv-modal', { hasText: '删除后补单 #41' })
+  await confirm.getByText('删除后可在已删除中找到并恢复，发票和资料不会清除', { exact: true }).waitFor()
+  assert.equal(await confirm.locator('input, textarea').count(), 0, '删除不要密钥和原因')
+  await confirm.getByRole('button', { name: '确定删除' }).click()
+  await closed.waitFor({ state: 'detached' })
+  const del = calls.find(c => c.path === '/api/inv/later/41/delete')
+  assert.ok(del && del.method === 'POST')
+  assert.deepEqual(del.body, {})
+
+  await page.getByRole('button', { name: '已删除', exact: true }).click()
+  const deleted = page.locator('.inv-lt-tbl tbody tr', { hasText: '已删除供应商' })
+  await deleted.waitFor()
+  assert.equal(await deleted.getByRole('button', { name: '修改', exact: true }).count(), 0)
+  await deleted.getByRole('button', { name: '详情', exact: true }).click()
+  const detail = page.locator('.inv-modal', { hasText: '后补单 #43' })
+  await detail.getByText('删除人 测试会计', { exact: false }).waitFor()
+  assert.ok(await detail.getByText('删除时间 10-26 10:20', { exact: false }).isVisible())
+  for (const name of ['修改', '收到', '催一下', '关闭此单']) assert.equal(await detail.getByRole('button', { name, exact: true }).count(), 0)
+  assert.equal(await detail.locator('input[type=file]').count(), 0, '已删除详情不能上传资料')
+  await detail.getByRole('button', { name: '恢复', exact: true }).click()
+  await detail.getByRole('button', { name: '修改', exact: true }).waitFor({ timeout: 4000 })
+  const restore = calls.find(c => c.path === '/api/inv/later/43/restore')
+  assert.ok(restore && restore.method === 'POST')
+  assert.deepEqual(restore.body, {})
+  assert.ok(calls.filter(c => c.path === '/api/inv/later/43').length >= 2, '恢复后重新读取详情')
+  await deleted.waitFor({ state: 'detached' })
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('后补单可恢复删除：自助已删除不可上传，删除恢复走自助令牌并刷新付款单', async (browser, B) => {
+  const mk = (id, status, name, canDelete) => ({ id, status, canDelete, businessId: 'SELF-' + id, payee: { name }, expectAmount: 100,
+    receivedAmount: 0, unregisteredAmount: 0, remaining: 100, expectDate: '2026-10-20', receiverName: '财务甲', filedVia: 'self', createdAt: '2026-10-20 09:00:00' })
+  const st = {
+    me: { name: '申请人甲', dept: '公司-采购部', via: 'code' },
+    pays: [{ procInstId: 'PI-SELF', businessId: 'SELF-51', title: '合成付款单', template: '付款申请', amount: 100, laterId: 51 }],
+    laters: [mk(51, 'open', '自助可删', true), mk(52, 'deleted', '自助已删除', true), mk(53, 'deleted', '非本人已删除', false)],
+  }
+  Object.assign(st.laters[1], { deletedBy: '申请人甲', deletedAt: '2026-10-26 11:00:00' })
+  const base = selfApi(st)
+  const api = c => {
+    const act = c.path.match(/^\/api\/inv\/s\/later\/(\d+)\/(delete|restore)$/)
+    if (act) {
+      const id = Number(act[1]), deleted = act[2] === 'delete'
+      st.laters = st.laters.map(l => l.id === id ? { ...l, status: deleted ? 'deleted' : 'open', deletedBy: deleted ? '申请人甲' : '', deletedAt: deleted ? '2026-10-26 11:10:00' : '' } : l)
+      st.pays = st.pays.map(p => ({ ...p, laterId: deleted ? null : id }))
+      return { ok: true }
+    }
+    return base(c)
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, api, { hash: '#/invself', init: () => { sessionStorage.setItem('inv_self_t', 'SELF-TOK') } })
+  await mount(page, 'InvSelf')
+  await page.getByRole('button', { name: /我的后补单/ }).click()
+  await page.locator('.inv-sf-tbl tbody tr').first().waitFor()
+  assert.equal(await page.locator('.inv-sf-tbl tbody tr').count(), 1, '默认欠票分类不列已删除')
+  await page.getByRole('button', { name: /^全部（/ }).click()
+  assert.equal(await page.locator('.inv-sf-tbl tbody tr').count(), 1, '自助全部也排除已删除')
+  const beforePays = calls.filter(c => c.path === '/api/inv/s/payments').length
+  await page.getByRole('button', { name: '删除后补单', exact: true }).click()
+  await page.getByRole('button', { name: '已删除（3）', exact: true }).waitFor()
+  assert.ok(calls.filter(c => c.path === '/api/inv/s/payments').length > beforePays, '删除后刷新付款单')
+  await page.getByRole('button', { name: '已删除（3）', exact: true }).click()
+  assert.equal(await page.locator('.inv-sf-tbl input[type=file]').count(), 0, '已删除单不能上传发票或资料')
+  const own = page.locator('.inv-sf-tbl tbody tr', { hasText: '自助已删除' })
+  assert.ok(await own.getByText('删除人 申请人甲', { exact: false }).isVisible())
+  assert.ok(await own.getByText('删除时间 2026-10-26 11:00:00', { exact: false }).isVisible())
+  const other = page.locator('.inv-sf-tbl tbody tr', { hasText: '非本人已删除' })
+  assert.equal(await other.getByRole('button', { name: '恢复', exact: true }).count(), 0)
+  const restoreBeforePays = calls.filter(c => c.path === '/api/inv/s/payments').length
+  await own.getByRole('button', { name: '恢复', exact: true }).click()
+  await own.waitFor({ state: 'detached' })
+  assert.ok(calls.filter(c => c.path === '/api/inv/s/payments').length > restoreBeforePays, '恢复后刷新付款单')
+  for (const path of ['/api/inv/s/later/51/delete', '/api/inv/s/later/52/restore']) {
+    const call = calls.find(c => c.path === path)
+    assert.ok(call && call.method === 'POST')
+    assert.deepEqual(call.body, {})
+    assert.equal(call.headers['x-inv-self'], 'SELF-TOK')
+  }
+  await page.getByRole('button', { name: /^全部（/ }).click()
+  const restored = page.locator('.inv-sf-tbl tbody tr', { hasText: '自助已删除' })
+  await restored.locator('label.inv-sf-upl.pri input[type=file]').waitFor()
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
 
 test('申请人上传发票：传完弹 5 秒提醒（如果为专票打印 2 张、普票 1 张，张数红字）；关掉后能看到传了哪些，传错的能删、财务确认过的不能删', async (browser, B) => {
   const later = { id: 5, status: 'open', businessId: '202610120001', payee: { name: '合成物流' }, expectAmount: 600, receivedAmount: 0, unregisteredAmount: 0,

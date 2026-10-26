@@ -15,7 +15,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   invConfig, invLaterList, invLater, invLaterResolve, invLaterCreate, invLaterDocs, invLaterReceive,
-  invLaterReceiveUpload, invLaterMark, invLaterConfirmSelf, invLaterFlowCheck, invLaterRemind, invLaterUpdate, invLaterClose, invLaterExportUrl, invSLink, invSPreview,
+  invLaterReceiveUpload, invLaterMark, invLaterConfirmSelf, invLaterFlowCheck, invLaterRemind, invLaterUpdate, invLaterClose, invLaterDelete, invLaterRestore, invLaterExportUrl, invSLink, invSPreview,
 } from '../api.js'
 import { Modal, useToast, ScanInput, FileDrop, CameraPanel, ThumbStrip, InvViewer, StatusBadges, money, fmtTime } from './invShared.jsx'
 import InvSettings from './InvSettings.jsx'
@@ -29,8 +29,9 @@ const STATUS_META = {
   partial: { label: '部分到票', tone: 'warn' },
   done: { label: '已收齐', tone: 'ok' },
   closed: { label: '已关闭', tone: 'mute' },
+  deleted: { label: '已删除', tone: 'mute' },
 }
-const STATUS_CHIPS = [['open', '待收'], ['partial', '部分到票'], ['overdue', '超期'], ['done', '已收齐'], ['closed', '已关闭'], ['all', '全部']]
+const STATUS_CHIPS = [['open', '待收'], ['partial', '部分到票'], ['overdue', '超期'], ['done', '已收齐'], ['closed', '已关闭'], ['deleted', '已删除'], ['all', '全部']]
 const PAGE_SIZE = 50
 const UPLOAD_ACCEPT = '.pdf,.ofd,.xml,.zip,image/*'
 const TAX_RATES = ['13%', '9%', '6%', '5%', '3%', '1%', '0%', '免税', '不征税']
@@ -309,7 +310,7 @@ function logDetail(d) {
   return txt(d)
 }
 
-function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLater, onChanged, rev, flash }) {
+function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLater, onDelete, onRestore, onChanged, rev, flash }) {
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
   const [act, setAct] = useState(null)
@@ -357,6 +358,7 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     catch (e) { flash?.('没看成：' + errText(e), 'err') } finally { setFinding(false) }
   }
 
+  const deleted = l?.status === 'deleted'
   const live = isLive(l)
   const left = remainingOf(l)
   const due = dueInfo(l)
@@ -369,9 +371,10 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     {l && can.receive && live && l.instId && <button type="button" className="btn" disabled={finding} onClick={findInFlow}
       title="现在就去这张付款单的钉钉流程里找发票（表单附件和评论区都看）。财务初审通过后才到的发票，记到这张后补单上、进发票审核。系统平时每小时自己去看一次">{finding ? '正在找…' : '去钉钉找发票'}</button>}
     {l && can.receive && live && <button type="button" className="btn" disabled={reminding} onClick={remind}>{reminding ? '发送中…' : '催一下'}</button>}
-    {l && can.receive && l.status !== 'closed' && <button type="button" className="btn" onClick={() => onEdit(l)}>修改</button>}
+    {l && can.receive && !deleted && l.status !== 'closed' && <button type="button" className="btn" onClick={() => onEdit(l)}>修改</button>}
     {l && can.receive && live && <button type="button" className="btn" onClick={() => onCloseLater(l)}>关闭此单</button>}
     {l && can.receive && live && <button type="button" className="btn-pri" onClick={() => onReceive(l)}>收到</button>}
+    {l && l.canDelete && <button type="button" className="btn" onClick={() => deleted ? onRestore(l) : onDelete(l)}>{deleted ? '恢复' : '删除'}</button>}
     <button type="button" className="btn" onClick={onClose}>关闭窗口</button>
   </>
 
@@ -380,6 +383,7 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
     {!data && !err && <div className="loading">正在打开后补单…</div>}
     {l && <div className="inv-lt-detail">
       <div className="inv-lt-dhead"><LaterBadges l={l} /></div>
+      {deleted && <div className="inv-lt-note warn">已删除{l.deletedBy ? ` · 删除人 ${l.deletedBy}` : ''}{l.deletedAt ? ` · 删除时间 ${fmtTime(l.deletedAt)}` : ''}。发票和资料仍保留；恢复后才能修改、收票或上传。</div>}
       {num(l.selfCount) > 0 && live && <div className="inv-lt-selfbar">
         {num(l.flowCount) > 0
           ? <span>申请人已经交来 <b>{l.selfCount}</b> 张发票（<b className="inv-num">{money(l.selfAmount)}</b>），其中 {l.flowCount} 张是系统从钉钉流程里取到的（财务初审后才发的），在下面「收到的票」里，也在发票审核的待审核里。核对无误、纸质的也收到后点确认，或在发票审核里审核通过，才算已到。</span>
@@ -461,7 +465,7 @@ function DetailModal({ id, can, onClose, onReceive, onRemind, onEdit, onCloseLat
         })}
       </ul>}
       {!docs.length && <div className="inv-muted">没有上传资料。</div>}
-      {can.receive && <FileDrop onFiles={upDocs} disabled={docBusy} className="inv-lt-docdrop">
+      {can.receive && !deleted && <FileDrop onFiles={upDocs} disabled={docBusy} className="inv-lt-docdrop">
         <span className="inv-drop-tx">{docBusy ? <><span className="inv-spin" /> 正在上传…</> : <>补传资料（合同、对账单等）：拖到这里，或<b>点击选择</b></>}</span>
       </FileDrop>}
       {docErr && <div className="inv-lt-fe">{docErr}</div>}
@@ -536,6 +540,23 @@ function CloseModal({ later, onClose, onSaved }) {
     <Field label="关闭原因" wide err={err}>
       <textarea className="inv-in inv-lt-ta" autoFocus value={note} onChange={e => setNote(e.target.value)} placeholder="例如：供应商已退款，不再开票" />
     </Field>
+  </Modal>
+}
+
+function DeleteModal({ later, onClose, onSaved }) {
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const go = async () => {
+    setBusy(true); setErr('')
+    try { await invLaterDelete(later.id); onSaved?.() } catch (e) { setErr('没删除：' + errText(e)); setBusy(false) }
+  }
+  return <Modal title={`删除后补单 #${later?.id}`} onClose={onClose} width={520}
+    footer={<>
+      {err && <span className="inv-lt-inline err">{err}</span>}
+      <button type="button" className="btn" onClick={onClose} disabled={busy}>取消</button>
+      <button type="button" className="btn-pri" onClick={go} disabled={busy}>{busy ? '删除中…' : '确定删除'}</button>
+    </>}>
+    <div className="inv-lt-note warn">删除后可在已删除中找到并恢复，发票和资料不会清除</div>
   </Modal>
 }
 
@@ -708,8 +729,9 @@ function CreateModal({ receivers, me, canConfig, onClose, onCreated, onOpenExist
 
 // ───────────────────────── 列表 ─────────────────────────
 
-function LaterRow({ l, can, onDetail, onReceive, onRemind, onEdit, onClose, remind }) {
+function LaterRow({ l, can, onDetail, onReceive, onRemind, onEdit, onClose, onDelete, onRestore, remind }) {
   const live = isLive(l)
+  const deleted = l.status === 'deleted'
   const rest = remainingOf(l)
   const hot = live && (l.overdue || (typeof l.daysLeft === 'number' && l.daysLeft < 0))
   return <tr className={hot ? 'inv-lt-hot' : ''}>
@@ -735,8 +757,9 @@ function LaterRow({ l, can, onDetail, onReceive, onRemind, onEdit, onClose, remi
         {can.receive && live && <button type="button" className="inv-lt-a pri" onClick={() => onReceive(l)}>收到</button>}
         {can.receive && live && <button type="button" className="inv-lt-a" disabled={remind?.busy} onClick={() => onRemind(l)}>{remind?.busy ? '发送中…' : '催一下'}</button>}
         <button type="button" className="inv-lt-a" onClick={() => onDetail(l.id)}>详情</button>
-        {can.receive && l.status !== 'closed' && <button type="button" className="inv-lt-a" onClick={() => onEdit(l)}>修改</button>}
+        {can.receive && !deleted && l.status !== 'closed' && <button type="button" className="inv-lt-a" onClick={() => onEdit(l)}>修改</button>}
         {can.receive && live && <button type="button" className="inv-lt-a" onClick={() => onClose(l)}>关闭</button>}
+        {l.canDelete && <button type="button" className="inv-lt-a" onClick={() => deleted ? onRestore(l) : onDelete(l)}>{deleted ? '恢复' : '删除'}</button>}
       </div>
       {remind?.text && <div className={'inv-lt-inline ' + (remind.ok ? 'ok' : 'err')}>{remind.text}</div>}
     </td>
@@ -767,6 +790,7 @@ function LaterPool({ cfg, cfgErr, can, me, flash, onGoSettings, creating, setCre
   const [recv, setRecv] = useState(null)
   const [edit, setEdit] = useState(null)
   const [closing, setClosing] = useState(null)
+  const [deleting, setDeleting] = useState(null)
   const [reminds, setReminds] = useState({})
   const [notice, setNotice] = useState(null)     // 新建后补单后要人注意的事（接收人没收到钉钉消息等）
   const seq = useRef(0)
@@ -815,8 +839,15 @@ function LaterPool({ cfg, cfgErr, can, me, flash, onGoSettings, creating, setCre
     return res
   }
 
-  const rows = data?.rows || []
-  const total = data?.total ?? rows.length
+  const restore = async l => {
+    if (!window.confirm(`确定恢复后补单 #${l.id} 吗？`)) return
+    try { await invLaterRestore(l.id); flash('后补单已恢复', 'ok'); refresh() }
+    catch (e) { flash('没恢复：' + errText(e), 'err') }
+  }
+
+  const allRows = data?.rows || []
+  const rows = status === 'deleted' ? allRows : allRows.filter(l => l.status !== 'deleted')
+  const total = Math.max(rows.length, (data?.total ?? rows.length) - (allRows.length - rows.length))
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
   return <>
@@ -848,7 +879,7 @@ function LaterPool({ cfg, cfgErr, can, me, flash, onGoSettings, creating, setCre
           <th>票种</th><th>接收人</th><th>申请人</th><th>状态</th><th>操作</th>
         </tr></thead>
         <tbody>{rows.map(l => <LaterRow key={l.id} l={l} can={can} remind={reminds[l.id]}
-          onDetail={setDetailId} onReceive={setRecv} onRemind={remind} onEdit={setEdit} onClose={setClosing} />)}</tbody>
+          onDetail={setDetailId} onReceive={setRecv} onRemind={remind} onEdit={setEdit} onClose={setClosing} onDelete={setDeleting} onRestore={restore} />)}</tbody>
       </table>
     </div>}
     {data && total > 0 && <div className="inv-lt-pager">
@@ -861,12 +892,14 @@ function LaterPool({ cfg, cfgErr, can, me, flash, onGoSettings, creating, setCre
     </div>}
 
     {detailId && <DetailModal id={detailId} can={can} rev={detailRev} flash={flash} onClose={() => setDetailId(null)}
-      onReceive={setRecv} onRemind={remind} onEdit={setEdit} onCloseLater={setClosing} onChanged={() => setRev(x => x + 1)} />}
+      onReceive={setRecv} onRemind={remind} onEdit={setEdit} onCloseLater={setClosing} onDelete={setDeleting} onRestore={restore} onChanged={() => setRev(x => x + 1)} />}
     {recv && <ReceiveModal later={recv} onClose={() => { setRecv(null); refresh() }} onChanged={() => setRev(x => x + 1)} />}
     {edit && <EditModal later={edit} receivers={receivers} onClose={() => setEdit(null)}
       onSaved={() => { setEdit(null); flash('已保存', 'ok'); refresh() }} />}
     {closing && <CloseModal later={closing} onClose={() => setClosing(null)}
       onSaved={() => { setClosing(null); flash('后补单已关闭', 'ok'); refresh() }} />}
+    {deleting && <DeleteModal later={deleting} onClose={() => setDeleting(null)}
+      onSaved={() => { setDeleting(null); setDetailId(null); flash('后补单已删除，可在「已删除」中恢复', 'ok'); refresh() }} />}
     {creating && <CreateModal receivers={receivers} me={me} canConfig={!!can.config}
       onClose={() => setCreating(false)}
       onOpenExisting={id => { setCreating(false); setDetailId(id) }}

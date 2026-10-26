@@ -93,6 +93,17 @@ class SchemaTests(unittest.TestCase):
                 size = sum((getattr(c.type, "length", None) or 4) * 4 for c in ix.columns)
                 self.assertLess(size, 3072, ix.name)
 
+    def test_later_recycle_columns_added_to_old_database(self):
+        from sqlalchemy import inspect, text
+        e = create_engine("sqlite://")
+        with e.begin() as cx:
+            cx.execute(text("create table inv_later (id integer primary key, status varchar(12))"))
+        added = s.ensure_columns(e)
+        self.assertEqual(set(added), {"inv_later.deleted_from", "inv_later.deleted_at", "inv_later.deleted_by"})
+        self.assertEqual(s.ensure_columns(e), [])
+        self.assertTrue({"deleted_from", "deleted_at", "deleted_by"} <= {c["name"] for c in inspect(e).get_columns("inv_later")})
+        e.dispose()
+
 
 class HelperTests(Base):
     def test_dup_key_and_money(self):
@@ -459,6 +470,23 @@ class LaterTests(Base):
         self.assertEqual(s.later_list(self.e, q="100%", today=TODAY)[0], 0)  # % 不当通配符
         total, rows = s.later_list(self.e, page=2, size=2, today=TODAY)
         self.assertEqual((total, [r["id"] for r in rows]), (5, [b, d]))
+
+    def test_deleted_later_only_in_recycle_bin(self):
+        keep = self.mk("2026-09-30", inst_id="RECYCLE", applicant_uid="u1", filed_uid="u1")
+        gone = self.mk("2026-09-20", inst_id="RECYCLE", applicant_uid="u1", filed_uid="u1",
+                       status="deleted", deleted_from="partial", deleted_at="2026-09-24 10:00:00", deleted_by="会计乙")
+        self.assertEqual(s.later_list(self.e, today=TODAY)[0], 1)
+        self.assertEqual(s.later_list(self.e, status="all", today=TODAY)[0], 1)
+        total, rows = s.later_list(self.e, status="deleted", today=TODAY)
+        self.assertEqual((total, [r["id"] for r in rows]), (1, [gone]))
+        self.assertEqual(rows[0]["deleted_from"], "partial")
+        self.assertFalse(rows[0]["overdue"])
+        self.assertEqual(s.later_latest_by_inst(self.e, "RECYCLE")["id"], keep)
+        self.assertEqual([r["id"] for r in s.laters_by_inst(self.e, "RECYCLE")], [keep])
+        self.assertEqual([r["id"] for r in s.laters_of_person(self.e, "u1")], [keep])
+        self.assertEqual([r["id"] for r in s.laters_of_person(self.e, "u1", status="all")], [gone, keep])
+        self.assertEqual([r["id"] for r in s.laters_of_person(self.e, "u1", status="deleted")], [gone])
+        self.assertNotIn(gone, [r["id"] for r in s.laters_due_for_remind(self.e, TODAY, 3, 7)])
 
     def test_remind_math(self):
         soon_new = self.mk("2026-09-26")                           # 还有 2 天，没提醒过 → 提醒

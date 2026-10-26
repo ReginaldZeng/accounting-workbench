@@ -2764,6 +2764,106 @@ class InvoiceBooksApiTests(unittest.TestCase):
         self.assertEqual(got[r], [])
         self.assertEqual([x["label"] for x in got[a]], ["购买方", "销售方", "金额", "查重", "来源", "税局查验"])    # 手工票夹没有收款方，不出那一行
 
+    def test_40_later_recycle_bin_preserves_data_and_blocks_writes(self):
+        inv, S, e = self.inv, self.S, self.e
+        marker = "回收站测试供应商"
+        fid = S.folder_create_manual(e, "后补回收站资料", 500, self.OUR, "recv")
+        lid = self.later_row(folder_id=fid, inst_id="", business_id="RECYCLE-40", payee_name=marker)
+        rel = "2026-10/1/40001_o.pdf"
+        path = inv.abs_path(rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        Path(path).write_bytes(b"%PDF-1.4 recycle test")
+        file_id = S.file_insert(e, folder_id=fid, role="doc", origin="later", name="合同.pdf", orig_path=rel, sha256="recycle-40")
+        item_id = S.item_insert(e, folder_id=fid, file_id=file_id, kind="other", origin="later", later_id=lid,
+                                type_label="合同", review="approved", created_by="recv")
+        S.file_update(e, file_id, item_id=item_id)
+        inv.log("recv", "回收站测试留痕", fid, item_id, lid, {"keep": True})
+        self.l3._put(lid, status="manual", msg="做账记录保留")
+        self.l3._Q.add(lid)
+
+        rows = self.ok(self.get("/api/inv/later?scope=all&q=" + marker, "recv"))["rows"]
+        self.assertEqual([(r["id"], r["canDelete"]) for r in rows], [(lid, True)])
+        self.assertFalse(self.ok(self.get("/api/inv/later?scope=all&q=" + marker, "recv2"))["rows"][0]["canDelete"])
+        for user in ("recv2", "boss"):
+            self.assertEqual(self.post("/api/inv/later/%d/delete" % lid, user).status_code, 403)
+            self.assertEqual(S.later_get(e, lid)["status"], "open")
+        deleted = self.ok(self.post("/api/inv/later/%d/delete" % lid, "recv"))["later"]
+        self.assertEqual((deleted["status"], deleted["deletedFrom"], deleted["deletedBy"]), ("deleted", "open", "recv"))
+        self.assertTrue(deleted["deletedAt"])
+        self.assertNotIn(lid, self.l3._Q)
+        self.assertEqual(self.l3.state_of(lid)["msg"], "做账记录保留")
+        self.assertEqual(self.ok(self.get("/api/inv/later?scope=all&q=" + marker, "recv"))["total"], 0)
+        self.assertEqual(self.ok(self.get("/api/inv/later?scope=all&status=all&q=" + marker, "recv"))["total"], 0)
+        bin_rows = self.ok(self.get("/api/inv/later?scope=all&status=deleted&q=" + marker, "recv"))["rows"]
+        self.assertEqual([r["id"] for r in bin_rows], [lid])
+        self.assertTrue(bin_rows[0]["canDelete"])
+        self.assertEqual(self.ok(self.get("/api/inv/later/%d" % lid, "recv"))["later"]["status"], "deleted")
+
+        blocked = [
+            self.post("/api/inv/later/%d/update" % lid, "recv", {"expectAmount": 600}),
+            self.post("/api/inv/later/%d/remind" % lid, "recv"),
+            self.post("/api/inv/later/%d/mark" % lid, "recv", {"amount": 1}),
+            self.post("/api/inv/later/%d/receive" % lid, "recv", {"code": qr(num(40001), 500)}),
+            self.upload("/api/inv/later/%d/docs" % lid, "recv", [("合同.pdf", b"pdf", "application/pdf")], "files"),
+            self.upload("/api/inv/later/%d/receive-upload" % lid, "recv", [("票.xml", b"xml", "application/xml")], "files"),
+            self.post("/api/inv/later/%d/voucher-source" % lid, "acct", {"picks": []}),
+            self.post("/api/inv/later/%d/voucher-run" % lid, "acct"),
+            self.post("/api/inv/later/%d/voucher-redo" % lid, "acct"),
+        ]
+        self.assertTrue(all(r.status_code == 400 for r in blocked), [(r.status_code, r.text) for r in blocked])
+        self.assertEqual(self.l3.run_one(lid)["status"], "skip")
+        self.assertEqual(S.later_get(e, lid)["status"], "deleted")
+        self.assertEqual(self.l3.state_of(lid)["msg"], "做账记录保留")
+        self.assertIsNotNone(S.item_get(e, item_id))
+        self.assertIsNotNone(S.file_get(e, file_id))
+        self.assertTrue(os.path.isfile(path))
+
+        restored = self.ok(self.post("/api/inv/later/%d/restore" % lid, "recv"))["later"]
+        self.assertEqual((restored["status"], restored["deletedAt"], restored["deletedBy"]), ("open", "", ""))
+        self.assertEqual(self.ok(self.get("/api/inv/later?scope=all&q=" + marker, "recv"))["total"], 1)
+        detail = self.ok(self.get("/api/inv/later/%d" % lid, "recv"))
+        self.assertEqual([d["itemId"] for d in detail["docs"]], [item_id])
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue({"删除后补单", "恢复后补单", "回收站测试留痕"} <= {x["action"] for x in detail["logs"]})
+
+        for st in ("open", "partial", "done", "closed"):
+            x = self.later_row(folder_id=fid, inst_id="", business_id="RECYCLE-40-" + st, payee_name=marker + st, status=st)
+            out = self.ok(self.post("/api/inv/later/%d/delete" % x, "recv"))["later"]
+            self.assertEqual((out["status"], out["deletedFrom"]), ("deleted", st))
+        for st in ("done", "closed"):
+            x = self.later_row(folder_id=fid, inst_id="", business_id="RECYCLE-41-" + st, payee_name=marker + st,
+                               status=st, unregistered_amount=500 if st == "done" else 0)
+            self.ok(self.post("/api/inv/later/%d/delete" % x, "recv"))
+            out = self.ok(self.post("/api/inv/later/%d/restore" % x, "recv"))["later"]
+            self.assertEqual(out["status"], st)
+
+    def test_41_self_later_recycle_bin_requires_actual_registrar(self):
+        S, sf = self.S, self.sf
+        uid, other = "dt-recycle-self", "dt-recycle-other"
+        H = {"X-Inv-Self": sf._new_session(uid, "自助登记人", "测试部", "dingtalk", "test")}
+        HO = {"X-Inv-Self": sf._new_session(other, "另一位申请人", "测试部", "dingtalk", "test")}
+        lid = self.later_row(inst_id="", business_id="SELF-RECYCLE-41", applicant_uid=uid,
+                             filed_by="recv", filed_uid=uid, filed_via="self", payee_name="自助回收站")
+        self.assertEqual(self.post("/api/inv/later/%d/delete" % lid, "recv").status_code, 403)
+        proxy = self.later_row(inst_id="", business_id="SELF-PROXY-41", applicant_uid=uid,
+                               filed_by="recv", filed_uid=uid, filed_via="proxy", payee_name="代填不能自助删")
+        rows = self.ok(self.c.get("/api/inv/s/laters", headers=H))["rows"]
+        by_id = {r["id"]: r for r in rows}
+        self.assertTrue(by_id[lid]["canDelete"])
+        self.assertFalse(by_id[proxy]["canDelete"])
+        self.assertEqual(self.c.post("/api/inv/s/later/%d/delete" % proxy, json={}, headers=H).status_code, 403)
+        self.assertEqual(self.c.post("/api/inv/s/later/%d/delete" % lid, json={}, headers=HO).status_code, 404)
+        out = self.ok(self.c.post("/api/inv/s/later/%d/delete" % lid, json={}, headers=H))["later"]
+        self.assertEqual((out["status"], out["deletedFrom"]), ("deleted", "open"))
+        self.assertNotIn(lid, [r["id"] for r in self.ok(self.c.get("/api/inv/s/laters", headers=H))["rows"]])
+        self.assertIn(lid, [r["id"] for r in self.ok(self.c.get("/api/inv/s/laters?status=all", headers=H))["rows"]])
+        recycled = self.ok(self.c.get("/api/inv/s/laters?status=deleted", headers=H))["rows"]
+        self.assertEqual([(r["id"], r["canDelete"]) for r in recycled], [(lid, True)])
+        self.assertEqual(self.c.post("/api/inv/s/later/%d/restore" % lid, json={}, headers=HO).status_code, 404)
+        out = self.ok(self.c.post("/api/inv/s/later/%d/restore" % lid, json={}, headers=H))["later"]
+        self.assertEqual(out["status"], "open")
+        self.assertEqual(S.later_get(self.e, proxy)["status"], "open")
+
     def test_99_reset_trial_data(self):
         """清空试运行数据（名字排最后跑：它会把前面用例攒的数据清掉）。只有主管理员能点、要手打「清零」；
         先留底再清，原件挪进留底目录不删；后补单和它挂的票夹（连同里面的票、文件、经办记录）整体保留；

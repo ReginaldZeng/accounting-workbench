@@ -179,6 +179,8 @@ def plan(lid):
     out = {"ok": False, "kind": "", "why": "", "book": "", "cands": [], "src": [], "lines": [], "taxInv": 0.0, "taxEst": 0.0}
     if not l:
         return dict(out, kind="gone", why="后补单不存在")
+    if l.get("status") == "deleted":
+        return dict(out, kind="deleted", why="后补单已删除，请先从回收站恢复")
     if _is_logistics(l.get("inst_id")):
         return dict(out, **_logistics_plan(l.get("inst_id")))
     folder = S.folder_get(e, l.get("folder_id")) or {}
@@ -412,6 +414,8 @@ def run_one(lid, user=None, manual=False):
     l = S.later_get(e, lid)
     if not l:
         return {"ok": False, "status": "skip", "msg": "后补单不存在"}
+    if l.get("status") == "deleted":
+        return {"ok": False, "status": "skip", "msg": "后补单已删除，请先从回收站恢复"}
     bills = _bills(lid)
     if (l.get("status") or "") != "done" or not bills or any(i.get("review") != "approved" for i in bills):
         return {"ok": False, "status": "wait", "msg": "要等后补单收齐、上面的票都审核通过"}
@@ -641,7 +645,8 @@ def _view(lid):
             "plan": {k: p.get(k) for k in ("ok", "kind", "why", "book", "cands", "src", "taxInv", "taxEst", "by")}, "lines": lines,
             "state": {k: st.get(k) for k in ("status", "kind", "msg", "vno", "vyear", "vperiod", "book", "date", "at", "by", "submitted", "picks", "redoOf",
                                              "auditedBy", "auditedAt")},
-            "canRedo": st.get("status") == "done" and bool(st.get("vid")) and st.get("kind") in ("exact", "logistics") and live != "C"}
+            "canRedo": l.get("status") != "deleted" and st.get("status") == "done" and bool(st.get("vid"))
+                       and st.get("kind") in ("exact", "logistics") and live != "C"}
 
 
 @router.get("/api/inv/later/{lid}/voucher-plan")
@@ -666,8 +671,11 @@ async def later_voucher_source(lid: int, request: Request):
     picks = [str(x)[:40] for x in (body.get("picks") or []) if x][:CAND_MAX]
 
     def run():
-        if not S.later_get(inv.E(), lid):
+        l = S.later_get(inv.E(), lid)
+        if not l:
             return None
+        if l.get("status") == "deleted":
+            return "deleted"
         if state_of(lid).get("status") in ("done", "posting"):
             return "done"
         _put(lid, picks=picks, pickedBy=u["name"], pickedAt=inv.now_s(), status="", msg="", told="")
@@ -676,6 +684,8 @@ async def later_voucher_source(lid: int, request: Request):
     v = await run_in_threadpool(run)
     if v is None:
         return inv.err("后补单不存在", 404)
+    if v == "deleted":
+        return inv.err("后补单已删除，请先从回收站恢复", 400)
     if v == "done":
         return inv.err("这张后补单的转待认证凭证已经建过了，不能再改核销哪张", 400)
     return v
@@ -689,11 +699,16 @@ async def later_voucher_run(lid: int, request: Request):
         return bad
 
     def run():
+        l = S.later_get(inv.E(), lid)
+        if l and l.get("status") == "deleted":
+            return {"deleted": True}
         if state_of(lid).get("status") in ("manual", "dry", "old"):
             _put(lid, status="", told="")
         r = run_one(lid, u, manual=True)
         return dict(r, view=_view(lid))
     r = await run_in_threadpool(run)
+    if r.get("deleted"):
+        return inv.err("后补单已删除，请先从回收站恢复", 400)
     if r.get("view") is None:
         return inv.err("后补单不存在", 404)
     return {"ok": True, "status": r.get("status"), "msg": r.get("msg") or "", **{k: r["view"][k] for k in ("mode", "modeText", "ready", "plan", "lines", "state")}}
@@ -706,6 +721,8 @@ def _redo(lid, u):
     l = S.later_get(inv.E(), lid)
     if not l:
         return {"ok": False, "msg": "后补单不存在"}, 404
+    if l.get("status") == "deleted":
+        return {"ok": False, "msg": "后补单已删除，请先从回收站恢复"}, 400
     if st.get("status") != "done" or not st.get("vid") or st.get("kind") not in ("exact", "logistics"):
         return {"ok": False, "msg": "这张后补单没有系统建的转待认证凭证，没什么可撤回的"}, 400
     LVR = _lvr()

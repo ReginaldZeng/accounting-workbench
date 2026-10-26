@@ -1327,7 +1327,7 @@ def folder_stats(folder, items):
             "pendingReview": len([i for i in act if i.get("review") == "pending"])}
 
 
-LATER_ST_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐", "closed": "已关闭"}
+LATER_ST_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐", "closed": "已关闭", "deleted": "已删除"}
 
 
 def folder_laters(e, folder):
@@ -1336,12 +1336,13 @@ def folder_laters(e, folder):
         return []
     rows = S.laters_by_inst(e, folder.get("inst_id")) if folder.get("inst_id") else []
     ids = {r["id"] for r in rows}
-    rows += [r for r in S._all(e, select(S.LATER).where(S.LATER.c.folder_id == folder["id"])) if r["id"] not in ids]
+    rows += [r for r in S._all(e, select(S.LATER).where(S.LATER.c.folder_id == folder["id"], S.LATER.c.status != "deleted"))
+             if r["id"] not in ids]
     return sorted(rows, key=lambda r: -r["id"])
 
 
 def later_left(l):
-    """后补单还没到的金额（与后补池同口径：预计补票（没填按付款金额）− 已登记到票 − 已收未登记）；已收齐/已关闭算 0。"""
+    """后补单还没到的金额（与后补池同口径：预计补票（没填按付款金额）− 已登记到票 − 已收未登记）；已收齐/已关闭/已删除算 0。"""
     if (l.get("status") or "open") not in ("open", "partial"):
         return 0.0
     base = l.get("expect_amount") if l.get("expect_amount") is not None else l.get("pay_amount")
@@ -1505,6 +1506,7 @@ def later_view(l, items=None, today=None):
             "selfCount": len(mine), "selfAmount": round(sum(_share(i) for i in mine), 2),
             "flowCount": len([i for i in mine if (i.get("flags_json") or {}).get("lateFlow")]),   # 其中从钉钉流程里取到的
             "closedBy": l.get("closed_by") or "", "closedAt": l.get("closed_at") or "", "closeNote": l.get("close_note") or "",
+            "deletedFrom": l.get("deleted_from") or "", "deletedAt": l.get("deleted_at") or "", "deletedBy": l.get("deleted_by") or "",
             "createdAt": l.get("created_at") or "", "updatedAt": l.get("updated_at") or ""}
 
 

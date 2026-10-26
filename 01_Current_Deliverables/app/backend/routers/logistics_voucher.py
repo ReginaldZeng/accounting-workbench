@@ -578,12 +578,12 @@ _LATER_ST_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐"
 
 
 def _later_slip(inst):
-    """发票管家里这张请款单的后补单(没关闭的最新一张) → {id, status, status_cn, expect_date, expect_amount, received_amount, inv_kind, filed_by} / None。
+    """发票管家里这张请款单的后补单(没关闭、没删除的最新一张) → {id, status, status_cn, expect_date, expect_amount, received_amount, inv_kind, filed_by} / None。
     V2.833(用户 2026-10-06「要在发票后补单登记了才行」)：没票先做付款凭证，以登记了后补单为前提——只是漏传发票的不放行。只读。"""
     try:
         with db._engine.connect() as c:
             r = c.execute(text("select id, status, expect_date, expect_amount, received_amount, inv_kind, tax_rate, filed_by, applicant, note "
-                               "from inv_later where inst_id=:i and coalesce(status,'open')<>'closed' order by id desc limit 1"), {"i": inst}).mappings().first()
+                               "from inv_later where inst_id=:i and coalesce(status,'open') not in ('closed','deleted') order by id desc limit 1"), {"i": inst}).mappings().first()
     except Exception:
         return None
     if not r:

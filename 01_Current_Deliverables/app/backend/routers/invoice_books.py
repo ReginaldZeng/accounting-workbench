@@ -57,7 +57,7 @@ LEDGER_REVIEWS = S.LEDGER_REVIEWS
 LEDGER_EXTRA_COLUMNS = ["审核状态", "本单分摊额", "做账状态", "凭证信息", "做账确认人", "做账确认时间", "纸质票"]   # 导出在票面列后加两列：含作废时看得出哪行作废；拆分票看得出本单算多少
 REVIEW_CN = {"approved": "已审核", "void": "已作废", "pending": "待审核", "draft": "收票中", "returned": "已退回"}
 LATER_ACTIVE = ("open", "partial")
-LATER_STATUSES = ("open", "partial", "done", "closed", "overdue")
+LATER_STATUSES = ("open", "partial", "done", "closed", "deleted", "overdue")
 LATER_KIND_CN = {"special": "专票", "normal": "普票", "receipt": "收据"}
 LATER_TAX_RATES = ("13%", "9%", "6%", "5%", "3%", "1%", "0%", "免税", "不征税")
 
@@ -75,7 +75,7 @@ def norm_tax_rate(v):
         x *= 100
     r = ("%g" % round(x, 2)) + "%"
     return r if r in LATER_TAX_RATES else ""
-LATER_STATUS_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐", "closed": "已关闭"}
+LATER_STATUS_CN = {"open": "待收", "partial": "部分到票", "done": "已收齐", "closed": "已关闭", "deleted": "已删除"}
 SELLER_RESULTS = ("未查", "无记录", "命中")
 MSG_HEAD = "【核算工作台·发票管家】"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{16,64}$")
@@ -2217,7 +2217,7 @@ def _notify_done(l, user):
 
 
 def _later_recalc(lid, user="系统"):
-    """按挂在后补单上的票重算"已到金额"与状态（open/partial/done；closed 不动状态）→ 最新行。
+    """按挂在后补单上的票重算"已到金额"与状态（open/partial/done；closed 不动状态，deleted 不重算）→ 最新行。
     新登记的票先冲掉"已收到、号码未登记"（标黄）那部分：那多半就是补扫的同一张票。
     由未收齐变成收齐时发"已签收"通知（锁内判定，只发一次）。票在锁内现取：用锁外取的旧快照会把刚收的票算丢。
     这是后补单重算的唯一入口：收票/上传/标记/作废在本模块调，移除/改票/拆分/识别完成/重复标记变化由 routers/invoice
@@ -2228,6 +2228,8 @@ def _later_recalc(lid, user="系统"):
         l = S.later_get(e, lid)
         if not l:
             return None
+        if l.get("status") == "deleted":
+            return l
         its = S.items_of_later(e, lid)
         rec = round(sum(inv._share(i) for i in _counted(its)), 2)
         old = float(l.get("received_amount") or 0)
@@ -2307,7 +2309,7 @@ def _later_views(rows, recalc=True):
     out = []
     for r in rows:
         its = by.get(r["id"], [])
-        if recalc and r.get("status") != "closed":
+        if recalc and r.get("status") not in ("closed", "deleted"):
             r = _later_recalc(r["id"], "系统") or r
         out.append(inv.later_view(r, [i for i in its if i.get("kind") in ("invoice", "receipt")]))
     return out
@@ -2439,6 +2441,10 @@ def _later_get_or_404(lid):
     return l, None
 
 
+def _can_delete_later(l, u):
+    return bool(l and u and l.get("filed_via") == "proxy" and l.get("filed_by") == u.get("name"))
+
+
 @router.get("/api/inv/later")
 async def later_list(request: Request):
     u, bad = need(request, ENTER_LATER)
@@ -2450,7 +2456,7 @@ async def later_list(request: Request):
     if status in ("", "all"):
         status = None
     elif status not in LATER_STATUSES:
-        return err("状态只能是：待收 open / 部分到票 partial / 已收齐 done / 已关闭 closed / 超期 overdue / 全部 all", 400)
+        return err("状态只能是：待收 open / 部分到票 partial / 已收齐 done / 已关闭 closed / 已删除 deleted / 超期 overdue / 全部 all", 400)
     page, size = _page_args(request, 50, 500)
     q = inv._s(qp.get("q"), 100)
 
@@ -2459,7 +2465,10 @@ async def later_list(request: Request):
         _later_heal()
         total, rows = S.later_list(E(), scope_user=u["name"] if scope == "mine" else None, status=status,
                                    q=q, page=page, size=size)
-        return total, _later_views(rows, recalc=False)
+        views = _later_views(rows, recalc=False)
+        for l, v in zip(rows, views):
+            v["canDelete"] = _can_delete_later(l, u)
+        return total, views
     total, views = await run_in_threadpool(run)
     return {"ok": True, "total": total, "rows": views, "page": page, "size": size}
 
@@ -2504,7 +2513,9 @@ async def later_detail(lid: int, request: Request):
         l = _later_recalc(lid, "系统") or l
         items = S.items_of_later(e, lid)
         tickets = [i for i in items if not _is_doc(i)]
-        return {"ok": True, "later": inv.later_view(l, [i for i in tickets if i.get("kind") in ("invoice", "receipt")]),
+        lv = inv.later_view(l, [i for i in tickets if i.get("kind") in ("invoice", "receipt")])
+        lv["canDelete"] = _can_delete_later(l, u)
+        return {"ok": True, "later": lv,
                 "items": inv.item_views(tickets), "docs": _later_docs(e, items),
                 "logs": [inv.log_view(r) for r in S.logs_of(e, later_id=lid, limit=200)]}
     return await run_in_threadpool(run)
@@ -2642,6 +2653,8 @@ async def later_create(request: Request):
 
 
 def _later_writable(l, allow_done=True):
+    if l.get("status") == "deleted":
+        return err("这张后补单已删除，请先从回收站恢复", 400)
     if l.get("status") == "closed":
         return err("这张后补单已关闭，不能再操作", 400)
     if not allow_done and l.get("status") == "done":
@@ -3012,6 +3025,8 @@ async def later_update(lid: int, request: Request):
     l, bad = _later_get_or_404(lid)
     if bad:
         return bad
+    if l.get("status") == "deleted":
+        return err("这张后补单已删除，请先从回收站恢复", 400)
     if l.get("status") == "closed":
         return err("这张后补单已关闭，不能再改", 400)
     body = await inv.body_json(request)
@@ -3095,6 +3110,87 @@ async def later_close(lid: int, request: Request):
     inv.log(u, "关闭后补单", l.get("folder_id"), None, lid, det)
     inv.audit(u, "关闭后补单", "后补单#%d %s" % (lid, l.get("payee_name") or ""), det)
     return {"ok": True, "msg": "已关闭，不再催票", "later": _lv(S.later_get(E(), lid))}
+
+
+def _later_delete_restore_sync(l, lid, u, restore=False):
+    """登记人删除/恢复后补单。票、资料、文件和做账记录都保留，只切换后补单状态。"""
+    e = E()
+    with _LATER_LOCK:
+        cur = S.later_get(e, lid)
+        if not cur:
+            return None, err("后补单不存在", 404)
+        if restore:
+            if cur.get("status") != "deleted":
+                return None, err("这张后补单不在回收站，不能恢复", 400)
+            old = cur.get("deleted_from") or "open"
+            if old not in ("open", "partial", "done", "closed"):
+                return None, err("这张后补单删除前的状态不完整，不能自动恢复", 400)
+            S.later_update(e, lid, status=old, deleted_from=None, deleted_at=None, deleted_by=None)
+        else:
+            if cur.get("status") == "deleted":
+                return None, err("这张后补单已在回收站", 400)
+            old = cur.get("status") or "open"
+            S.later_update(e, lid, status="deleted", deleted_from=old, deleted_at=inv.now_s(), deleted_by=inv._uname(u))
+        cur = S.later_get(e, lid)
+    from routers import invoice_later_voucher as l3
+    import todo_store
+    if restore:
+        if old != "closed":
+            cur = _later_recalc(lid, inv._uname(u)) or cur
+        if cur.get("status") == "done":
+            l3.kick([lid])
+        rec = l3.state_of(lid)
+        if rec.get("status") == "done" and rec.get("vid"):
+            try:
+                import todo_scenes
+                todo_scenes.later_voucher_touch(lid, rec, cur, inv._uname(u))
+            except Exception as ex:
+                print("[发票管家] 恢复后补单的凭证待办没记上：%s" % ex)
+    else:
+        with l3._Q_LOCK:
+            l3._Q.discard(int(lid))
+        todo_store.safe_withdraw("inv_later_audit", str(lid), "发票后补单已删除，凭证审核待办自动撤回")
+    act = "恢复后补单" if restore else "删除后补单"
+    det = {"from": "deleted" if restore else old, "to": cur.get("status"), "deletedFrom": old}
+    inv.log(u, act, l.get("folder_id"), None, lid, det)
+    inv.audit(u, act, "后补单#%d %s" % (lid, l.get("payee_name") or ""), det)
+    return cur, None
+
+
+@router.post("/api/inv/later/{lid}/delete")
+async def later_delete(lid: int, request: Request):
+    u, bad = need(request, ENTER_LATER, CAP_RECEIVE)
+    if bad:
+        return bad
+    l, bad = _later_get_or_404(lid)
+    if bad:
+        return bad
+    if not _can_delete_later(l, u):
+        return err("只有登记人本人可以删除这张后补单", 403)
+    cur, bad = await run_in_threadpool(_later_delete_restore_sync, l, lid, u, False)
+    if bad:
+        return bad
+    lv = _lv(cur)
+    lv["canDelete"] = True
+    return {"ok": True, "msg": "已移到回收站，可随时恢复", "later": lv}
+
+
+@router.post("/api/inv/later/{lid}/restore")
+async def later_restore(lid: int, request: Request):
+    u, bad = need(request, ENTER_LATER, CAP_RECEIVE)
+    if bad:
+        return bad
+    l, bad = _later_get_or_404(lid)
+    if bad:
+        return bad
+    if not _can_delete_later(l, u):
+        return err("只有登记人本人可以恢复这张后补单", 403)
+    cur, bad = await run_in_threadpool(_later_delete_restore_sync, l, lid, u, True)
+    if bad:
+        return bad
+    lv = _lv(cur)
+    lv["canDelete"] = True
+    return {"ok": True, "msg": "已恢复", "later": lv}
 
 
 # ═══════════════════════════ 催票线程 ═══════════════════════════

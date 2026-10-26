@@ -167,8 +167,9 @@ LATER = Table(
     Column("receiver", String(50)), Column("receiver_uid", String(64)), Column("receiver_name", String(50)),
     Column("filed_by", String(50)), Column("filed_uid", String(64)), Column("filed_via", String(12)),
     Column("note", String(500)),
-    Column("status", String(12), default="open"),    # open/partial/done/closed
+    Column("status", String(12), default="open"),    # open/partial/done/closed/deleted
     Column("closed_by", String(50)), Column("closed_at", String(20)), Column("close_note", String(500)),
+    Column("deleted_from", String(12)), Column("deleted_at", String(20)), Column("deleted_by", String(50)),
     Column("last_remind_at", String(20)), Column("remind_count", Integer, default=0),
     Column("created_at", String(20)), Column("updated_at", String(20)),
     Index("ix_inv_later_folder", "folder_id"),
@@ -322,7 +323,8 @@ def now_s():
 ADDED_COLUMNS = {"inv_folder": (("owner_uid", "VARCHAR(64)"), ("owner_account", "VARCHAR(50)"), ("owner_name", "VARCHAR(50)"),
                                 ("owner_at", "VARCHAR(20)"), ("owner_by", "VARCHAR(50)"), ("owner_via", "VARCHAR(12)"),
                                 ("bill_month", "VARCHAR(6)"), ("batch_way", "VARCHAR(8)"), ("auto_split", "INTEGER")),
-                 "inv_check": (("list_id", "INTEGER"),)}
+                 "inv_check": (("list_id", "INTEGER"),),
+                 "inv_later": (("deleted_from", "VARCHAR(12)"), ("deleted_at", "VARCHAR(20)"), ("deleted_by", "VARCHAR(50)"))}
 
 
 def ensure_columns(e):
@@ -656,9 +658,9 @@ def audit_pending_owners(e):
 
 
 def _later_finished():
-    """票夹的活已经在后补池里做完了（V2.983）：挂的后补单都已完成 / 关闭（至少一张，且没有还在等票的）。
+    """票夹的活已经在后补池里做完了（V2.983）：挂的后补单都已完成 / 关闭 / 删除（至少一张，且没有还在等票的）。
     这种票夹一般从没点过「提交」、状态还停在收票中——收票台「我还没交的」「钉钉接入·票不齐」不该再列它。"""
-    fin = select(LATER.c.folder_id).where(LATER.c.folder_id.isnot(None), LATER.c.status.in_(("done", "closed")))
+    fin = select(LATER.c.folder_id).where(LATER.c.folder_id.isnot(None), LATER.c.status.in_(("done", "closed", "deleted")))
     act = select(LATER.c.folder_id).where(LATER.c.folder_id.isnot(None), LATER.c.status.in_(_ACTIVE_LATER))
     return and_(FOLDER.c.id.in_(fin), not_(FOLDER.c.id.in_(act)))
 
@@ -1110,11 +1112,13 @@ def _later_decorate(row, today):
 
 
 def later_list(e, scope_user=None, status=None, q=None, page=1, size=50, today=None):
-    """后补池列表 → (total, rows)。scope_user：接收人或代填人是他；status：open/partial/done/closed，
-    'overdue'＝未收齐且预计日早于今天，None/'all'＝全部；q 搜收款方/审批编号/申请人/事由/ERP 单号。
+    """后补池列表 → (total, rows)。scope_user：接收人或代填人是他；status：open/partial/done/closed/deleted，
+    'overdue'＝未收齐且预计日早于今天，None/'all'＝全部未删除；q 搜收款方/审批编号/申请人/事由/ERP 单号。
     每行附 days_left（预计日−今天）与 overdue。未收齐的排前、按预计日由近到远。"""
     today = today or date.today().isoformat()
     conds = []
+    if status != "deleted":
+        conds.append(func.coalesce(LATER.c.status, "open") != "deleted")
     if scope_user:
         conds.append(or_(LATER.c.receiver == scope_user, LATER.c.filed_by == scope_user))
     if status == "overdue":
@@ -1147,12 +1151,12 @@ def later_open_by_inst(e, inst_id):
 
 
 def later_latest_by_inst(e, inst_id):
-    """这张审批单最新一条没关闭的后补单（待收/部分到票/已收齐都算）——自助登记页判断「登记过没有」用：
-    已收齐的也算登记过，免得收齐后又显示成「未登记」让人重登；关闭（作废）的不算。"""
+    """这张审批单最新一条没关闭、没删除的后补单（待收/部分到票/已收齐都算）——自助登记页判断「登记过没有」用：
+    已收齐的也算登记过，免得收齐后又显示成「未登记」让人重登；关闭（作废）和回收站里的不算。"""
     if not inst_id:
         return None
     with e.connect() as cx:
-        return _row(cx.execute(select(LATER).where(LATER.c.inst_id == inst_id, LATER.c.status != "closed")
+        return _row(cx.execute(select(LATER).where(LATER.c.inst_id == inst_id, LATER.c.status.not_in(("closed", "deleted")))
                                .order_by(LATER.c.id.desc())).first())
 
 
@@ -1205,18 +1209,22 @@ def self_purge(e, now):
         return cx.execute(delete(SELF).where(SELF.c.expires_at < now)).rowcount
 
 
-def laters_of_person(e, dt_userid, limit=50):
-    """某人（钉钉 userid）的发票后补单：他是付款单申请人，或是他自己登记的。新的在前。"""
+def laters_of_person(e, dt_userid, limit=50, status=None):
+    """某人（钉钉 userid）的发票后补单：他是付款单申请人，或是他自己登记的。新的在前；默认不含回收站。"""
     if not dt_userid:
         return []
-    return _all(e, select(LATER).where(or_(LATER.c.applicant_uid == dt_userid, LATER.c.filed_uid == dt_userid))
-                .order_by(LATER.c.id.desc()).limit(int(limit)))
+    cond = or_(LATER.c.applicant_uid == dt_userid, LATER.c.filed_uid == dt_userid)
+    if status == "deleted":
+        cond = and_(cond, LATER.c.status == "deleted")
+    elif status != "all":
+        cond = and_(cond, func.coalesce(LATER.c.status, "open") != "deleted")
+    return _all(e, select(LATER).where(cond).order_by(LATER.c.id.desc()).limit(int(limit)))
 
 
 def laters_by_inst(e, inst_id):
     if not inst_id:
         return []
-    return _all(e, select(LATER).where(LATER.c.inst_id == inst_id).order_by(LATER.c.id.desc()))
+    return _all(e, select(LATER).where(LATER.c.inst_id == inst_id, LATER.c.status != "deleted").order_by(LATER.c.id.desc()))
 
 
 def laters_due_for_remind(e, today, before_days, every_days):

@@ -480,9 +480,53 @@ async def s_laters(request: Request):
     if bad:
         return bad
 
+    status = request.query_params.get("status") or ""
+    if status not in ("", "all", "deleted"):
+        return err("自助后补单状态只能是全部 all 或已删除 deleted", 400)
+
     def run():
-        return {"ok": True, "rows": [books._lv(l) for l in S.laters_of_person(E(), me["dt_userid"], limit=300)]}
+        rows = []
+        for l in S.laters_of_person(E(), me["dt_userid"], limit=300, status=status):
+            lv = books._lv(l)
+            lv["canDelete"] = l.get("filed_via") == "self" and l.get("filed_uid") == me["dt_userid"]
+            rows.append(lv)
+        return {"ok": True, "rows": rows}
     return await run_in_threadpool(run)
+
+
+def _self_delete_restore_sync(me, l, lid, restore):
+    if l.get("filed_via") != "self" or l.get("filed_uid") != me["dt_userid"]:
+        return None, err("只有自助登记人本人可以删除或恢复这张后补单", 403)
+    cur, bad = books._later_delete_restore_sync(l, lid, _actor(me), restore)
+    if bad:
+        return None, bad
+    lv = books._lv(cur)
+    lv["canDelete"] = True
+    return {"ok": True, "msg": "已恢复" if restore else "已移到回收站，可随时恢复", "later": lv}, None
+
+
+@router.post("/api/inv/s/later/{lid}/delete")
+async def s_later_delete(lid: int, request: Request):
+    me, bad = _need(request)
+    if bad:
+        return bad
+    l, bad = _mine(me, lid)
+    if bad:
+        return bad
+    out, bad = await run_in_threadpool(_self_delete_restore_sync, me, l, lid, False)
+    return bad if bad else out
+
+
+@router.post("/api/inv/s/later/{lid}/restore")
+async def s_later_restore(lid: int, request: Request):
+    me, bad = _need(request)
+    if bad:
+        return bad
+    l, bad = _mine(me, lid)
+    if bad:
+        return bad
+    out, bad = await run_in_threadpool(_self_delete_restore_sync, me, l, lid, True)
+    return bad if bad else out
 
 
 @router.post("/api/inv/s/later/{lid}/docs")
@@ -571,6 +615,9 @@ async def s_later_invoice_remove(lid: int, iid: int, request: Request):
     l, bad = _mine(me, lid)
     if bad:
         return bad
+    g = books._later_writable(l)
+    if g:
+        return g
 
     def run():
         it = S.item_get(E(), iid)

@@ -1016,7 +1016,7 @@ ORIGIN_LABELS = {
     "upload": "上传", "taxpack": "税局文件包", "later": "后补收票", "scanner": "扫码枪", "self": "申请人上传",
 }
 INV_KIND_LABELS = {"special": "专票", "normal": "普票", "receipt": "收据"}
-LATER_STATUS_LABELS = {"open": "未到票", "partial": "部分到票", "done": "已收齐", "closed": "已关闭"}
+LATER_STATUS_LABELS = {"open": "未到票", "partial": "部分到票", "done": "已收齐", "closed": "已关闭", "deleted": "已删除"}
 FILED_VIA_LABELS = {"proxy": "财务代填", "self": "本人填报"}
 
 # 台账列：(表头, 取值函数, 类型 money/text/general, 列宽)
