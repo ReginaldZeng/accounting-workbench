@@ -133,6 +133,26 @@ export const KPRED = {
 }
 export const KNAME = { nock: '核不了的单', ok: '复核无误', qty: '数量有误', amt: '金额有误', cls: '分类有误', dup: '怀疑重复收费' }
 export const nDocs = list => new Set(list.map(x => x.doc_no || 'l' + x.lid)).size   // 张数按单号去重(一张调拨单账单上常有几行)
+export const uniqueDocs = list => [...new Map((list || []).map((x, i) => [x.doc_no || 'l' + (x.lid != null ? x.lid : i), x])).values()]
+export const DOC_TASKS = [
+  { k: 'qty', n: '数量不符', dd: '账单数量与金蝶数量不一致；已确认单据不再列入' },
+  { k: 'info', n: '资料不足', dd: '金蝶查无或没有可核数量；与数量不符分开处理' },
+  { k: 'cls', n: '归类待确认', dd: '标注不对、计提记错及判不了，均需要人工确认' },
+  { k: 'fee', n: '费用类型不一致', dd: '账单费用类型与系统判定不一致' },
+  { k: 'amt', n: '金额 / 价格', dd: '金额或价格与报价、公式不一致' },
+  { k: 'dup', n: '重复收费待确认', dd: '重复收费检查尚未排除；已确认单据不再列入' },
+]
+export function docTaskMatch(x, task, cls = {}, dups = {}) {
+  if (!x || x.confirmed) return false
+  const c = cls[x.doc_no]
+  if (task === 'qty') return KPRED.qty(x, cls, dups)
+  if (task === 'info') return x.state === 'miss' || judge(x).q.k === 'miss'
+  if (task === 'cls') return !!c && ['标注不对', '计提记错', '判不了'].includes(c.v)
+  if (task === 'fee') return x.state === 'feediff'
+  if (task === 'amt') return KPRED.amt(x, cls, dups)
+  if (task === 'dup') return KPRED.dup(x, cls, dups)
+  return false
+}
 
 export function DocCards({ docs, cls, dups, totalBill, nodoc = [], cur, onPick, clsErr }) {
   const nodocSum = nodoc.reduce((t, x) => t + Math.max(0, x.amount || 0), 0)       // 没单号的行；扣款是负数，不算进分母

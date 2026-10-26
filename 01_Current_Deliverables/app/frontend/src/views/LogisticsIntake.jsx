@@ -56,7 +56,7 @@ export const IK_CSS = `
 .lrv .lik-chk{margin:10px 15px 12px;padding:9px 11px;border-radius:8px;background:#FFFAEF;border:1px solid #EDD9AE;font-size:12.5px;line-height:1.55}.lrv .lik-chk.done{background:#F0F8F3;border-color:#BFDCCB}.lrv .lik-chk>div{display:flex;align-items:flex-start;gap:7px;min-width:0}.lrv .lik-chk .x{display:block;color:#788591;overflow-wrap:anywhere}.lrv .lik-chk .badtext{color:#B83232}.lrv .lik-mk{font-weight:700;flex:none}.lrv .lik-mk.ok{color:var(--ok)}.lrv .lik-mk.bad{color:var(--bad)}.lrv .lik-mk.warn{color:var(--warn)}
 .lrv .lik-later{margin:12px 15px 0;border:1px dashed #EDD9AE;background:#FDF9F0;border-radius:8px;padding:10px 13px;display:grid;gap:6px;font-size:12.5px}.lrv .lik-later.done{border-style:solid;border-color:#BFDCCB;background:#F2F9F4}.lrv .lik-later .lr-h{display:flex;align-items:center;gap:8px;font-weight:600;flex-wrap:wrap}.lrv .lik-later .lr-h .sp{flex:1}.lrv .lik-later .lr-meta{color:#5E6B78;overflow-wrap:anywhere}
 .lrv .lia-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:9px 14px;border-top:1px solid #E6EBEF;white-space:nowrap;font-size:12.5px;color:#5E6B78}.lrv .lia-summary b{color:#273642;font-variant-numeric:tabular-nums}.lrv .lia-work{display:grid;grid-template-columns:270px minmax(0,1fr);border:1px solid #DCE2E7;border-radius:10px;background:#fff;overflow:hidden;min-height:380px}
-.lrv .lia-queue{border-right:1px solid #DCE2E7;background:#FAFBFC;min-width:0}.lrv .lia-qtools{padding:10px;border-bottom:1px solid #E6EBEF;display:grid;gap:7px}.lrv .lia-qtools input{width:100%;box-sizing:border-box}.lrv .lia-qfilter{display:flex;gap:5px}.lrv .lia-qfilter button{flex:1}
+.lrv .lia-queue{border-right:1px solid #DCE2E7;background:#FAFBFC;min-width:0}.lrv .lia-qtools{padding:10px;border-bottom:1px solid #E6EBEF;display:grid;gap:7px}.lrv .lia-qtools input{width:100%;box-sizing:border-box}.lrv .lia-qfilter{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.lrv .lia-qfilter button{min-width:0;padding-left:5px;padding-right:5px;white-space:nowrap}
 .lrv .lia-qlist{max-height:650px;overflow:auto}.lrv .lia-qitem{display:grid;width:100%;text-align:left;gap:4px;padding:11px 12px;border:0;border-bottom:1px solid #E6EBEF;background:transparent;cursor:pointer;color:inherit;transition:background .15s}
 .lrv .lia-qitem:hover{background:#F0F5F8}.lrv .lia-qitem.on{background:#EAF2F7;box-shadow:inset 3px 0 var(--accent)}.lrv .lia-qitem .qt{display:flex;justify-content:space-between;gap:8px;font-weight:650}.lrv .lia-qitem .qt>span{min-width:0;overflow-wrap:anywhere}.lrv .lia-qitem .qs{display:flex;justify-content:space-between;gap:6px;color:#5E6B78;font-size:11.5px}.lrv .lia-qitem .qn{color:#99600F}
 .lrv .lia-detail{min-width:0}.lrv .lia-detail .lik-req{border:0;border-radius:0;margin:0}.lrv .lia-voucher{border-top:1px solid #E6EBEF;padding:10px 14px}.lrv .lia-voucher>summary{cursor:pointer;font-weight:650;font-size:12.5px}.lrv .lia-viewload{padding:40px 15px;text-align:center;color:#5E6B78}.lrv .lia-viewerr{padding:25px 15px;color:#B83232;overflow-wrap:anywhere}
@@ -106,12 +106,12 @@ function Overview({ period }) {
   </details>
 }
 
-export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged, onNext }) {
+export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged, onNext, onRetry }) {
   const [more, setMore] = useState({})
   const [busy, setBusy] = useState('')
   const [onlyBad, setOnlyBad] = useState(false)
   if (!data) return <div className="card"><div className="ovempty">读账单原件、按取数说明检查中…</div></div>
-  if (data.err) return <div className="card"><div className="fxwarn" style={{ margin: 15 }}>{data.err}</div></div>
+  if (data.err) return <div className="card"><div className="fxwarn" style={{ margin: 15 }}>{data.err} <button className="btn sm" onClick={onRetry}>重试</button></div></div>
   const files = data.files || [], reps = files.map(f => f.report).filter(Boolean)
   const totSheets = reps.flatMap(r => (r.sheets || []).filter(s => s.role === 'detail' && s.total))
   const dupRows = reps.reduce((a, r) => a + (r.dup_rows || 0), 0)
@@ -183,19 +183,38 @@ function blockFacts(b, bill) {
   return { iv, amountOk, sellerOk, buyerOk, allRev, laterOk, issues, ready: issues.length === 0 }
 }
 
-export function InvAuditPanel({ inv3, billOf, onChanged, flash, locked, onLater, voucherFor }) {
-  const [busy, setBusy] = useState(''), [query, setQuery] = useState(''), [onlyTodo, setOnlyTodo] = useState(false), [selected, setSelected] = useState(''), [view, setView] = useState(null)
+export function InvAuditPanel({ inv3, billOf, onChanged, flash, locked, onLater, voucherFor, onRetry }) {
+  const [busy, setBusy] = useState(''), [query, setQuery] = useState(''), [queueFilter, setQueueFilter] = useState('all'), [selected, setSelected] = useState(''), [view, setView] = useState(null)
   const approving = useRef(new Set())
-  const bs = ((inv3 && inv3.blocks) || []).filter(b => !b.err)
+  const byInst = new Map()
+  for (const raw of ((inv3 && inv3.blocks) || []).filter(b => !b.err)) {
+    let b = byInst.get(raw.inst)
+    if (!b) { b = { ...raw, invoices: [] }; byInst.set(raw.inst, b) }
+    const seen = new Set(b.invoices.map(i => i.id != null ? 'id:' + i.id : 'no:' + (i.number || '')))
+    for (const i of raw.invoices || []) {
+      const k = i.id != null ? 'id:' + i.id : 'no:' + (i.number || '')
+      if (!seen.has(k)) { b.invoices.push(i); seen.add(k) }
+    }
+    b.later = !!(b.later || raw.later)
+    b.later_slip = b.later_slip || raw.later_slip
+    if (b.invoices.every(i => typeof i.gross === 'number')) b.inv_total = b.invoices.reduce((s, i) => s + i.gross, 0)
+  }
+  const bs = [...byInst.values()]
   const facts = Object.fromEntries(bs.map(b => [b.inst, blockFacts(b, billOf(b.subject))]))
-  const visible = bs.filter(b => (!onlyTodo || !facts[b.inst].ready) && (!query || `${b.subject}${b.bid}${b.payee}`.toLowerCase().includes(query.toLowerCase()))).sort((a, b) => Number(facts[a.inst].ready) - Number(facts[b.inst].ready))
+  const matchQueue = b => queueFilter === 'all' || (queueFilter === 'todo' ? !facts[b.inst].ready : queueFilter === 'invoice' ? !facts[b.inst].ready && facts[b.inst].iv.length > 0 : !facts[b.inst].ready && facts[b.inst].iv.length === 0)
+  const visible = bs.filter(b => matchQueue(b) && (!query || `${b.subject}${b.bid}${b.payee}`.toLowerCase().includes(query.toLowerCase()))).sort((a, b) => Number(facts[a.inst].ready) - Number(facts[b.inst].ready))
   const current = visible.find(b => b.inst === selected) || visible[0]
   useEffect(() => { if (current && current.inst !== selected) setSelected(current.inst) }, [current && current.inst])
   if (!inv3) return <div className="card"><div className="ovempty">读请款单和发票管家中…</div></div>
-  if (inv3.err) return <div className="card"><div className="fxwarn" style={{ margin: 15 }}>{inv3.err}</div></div>
+  if (inv3.err) return <div className="card"><div className="fxwarn" style={{ margin: 15 }}>{inv3.err} <button className="btn sm" onClick={onRetry}>重试</button></div></div>
   if (!bs.length) return <div className="card"><div className="ovempty">这家这月还没有钉钉请款单</div></div>
   const invs = bs.flatMap(b => b.invoices || []), nRev = invs.filter(i => i.review === 'approved').length
   const todo = bs.filter(b => !facts[b.inst].ready).length, allReady = todo === 0
+  const queueCounts = {
+    all: bs.length, todo,
+    invoice: bs.filter(b => !facts[b.inst].ready && facts[b.inst].iv.length > 0).length,
+    noinvoice: bs.filter(b => !facts[b.inst].ready && facts[b.inst].iv.length === 0).length,
+  }
   const approve = async (b, i) => {
     const f = facts[b.inst]
     if (locked || busy || approving.current.has(i.id)) return false
@@ -226,7 +245,7 @@ export function InvAuditPanel({ inv3, billOf, onChanged, flash, locked, onLater,
   return <>
     <div className="lik-verdict"><div className="vb"><span className={'vbadge ' + (allReady ? 'ok' : 'warn')}><span className="dot" />{allReady ? '发票核对完成' : `${todo} 张请款单待处理`}</span><span className="vsub">逐单核对金额、销购方和审核状态；无票须确认后补</span></div><div className="lia-summary"><span>待处理 <b>{todo}</b> 单</span><span>已审 <b>{nRev} / {invs.length}</b></span></div></div>
     <div className="lia-work">
-      <aside className="lia-queue"><div className="lia-qtools"><input type="search" aria-label="搜索请款单" placeholder="搜主体 / 请款单号" value={query} onChange={e => setQuery(e.target.value)} /><div className="lia-qfilter"><button className={'btn sm' + (!onlyTodo ? ' pri' : '')} onClick={() => setOnlyTodo(false)}>全部 {bs.length}</button><button className={'btn sm' + (onlyTodo ? ' pri' : '')} onClick={() => setOnlyTodo(true)}>待处理 {todo}</button></div></div><div className="lia-qlist">{visible.map(b => { const f = facts[b.inst], status = f.ready ? '✓ 已完成' : f.iv.length ? '待审' : '无票待确认'; return <button key={b.inst} className={'lia-qitem' + (current && current.inst === b.inst ? ' on' : '')} onClick={() => setSelected(b.inst)}><span className="qt"><span>{b.subject}</span><span className="mono">{money(b.amount)}</span></span><span className="qs"><span className={f.ready ? 'diffok' : 'qn'}>{status}</span><span>{f.iv.length ? `${f.iv.filter(i => i.review === 'approved').length}/${f.iv.length} 已审` : b.later ? '后补已确认' : '无票'}</span></span></button>})}{!visible.length && <div className="lik-empty">没有符合条件的请款单</div>}</div></aside>
+      <aside className="lia-queue"><div className="lia-qtools"><input type="search" aria-label="搜索请款单" placeholder="搜主体 / 请款单号" value={query} onChange={e => setQuery(e.target.value)} /><div className="lia-qfilter">{[['all', '全部'], ['todo', '全部待办'], ['invoice', '有票待审'], ['noinvoice', '无票待确认']].map(([k, label]) => <button key={k} data-queue-filter={k} className={'btn sm' + (queueFilter === k ? ' pri' : '')} onClick={() => setQueueFilter(k)}>{label} {queueCounts[k]}</button>)}</div></div><div className="lia-qlist">{visible.map(b => { const f = facts[b.inst], status = f.ready ? '✓ 已完成' : f.iv.length ? '有票待审' : b.later_slip ? '后补待确认' : '后补未登记'; return <button key={b.inst} className={'lia-qitem' + (current && current.inst === b.inst ? ' on' : '')} onClick={() => setSelected(b.inst)}><span className="qt"><span>{b.subject}</span><span className="mono">{money(b.amount)}</span></span><span className="qs"><span className={f.ready ? 'diffok' : 'qn'}>{status}</span><span>{f.iv.length ? `${f.iv.filter(i => i.review === 'approved').length}/${f.iv.length} 已审` : b.later ? '后补已确认' : b.later_slip ? '已登记，待确认' : '未登记后补'}</span></span></button>})}{!visible.length && <div className="lik-empty">没有符合条件的请款单</div>}</div></aside>
       <section className="lia-detail">{current && (() => { const b = current, f = facts[b.inst], bill = billOf(b.subject), slip = b.later_slip
         const amountDiffs = []
         if (f.iv.length && !isZero((b.inv_total || 0) - (b.amount || 0))) amountDiffs.push(`发票－请款 ${money((b.inv_total || 0) - (b.amount || 0))}`)

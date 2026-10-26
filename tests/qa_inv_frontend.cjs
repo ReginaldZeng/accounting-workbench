@@ -2266,11 +2266,41 @@ test('LIA7 未审核即未收到，不再有独立纸质票登记或撤销', asy
   await ctx.close()
 })
 
+test('LIA8 队列按inst和多票去重；全部待办/有票/无票筛选区分未登记与待确认', async (browser, B) => {
+  const blocks = [
+    iaBlock({ invoices: [iaItem({ gross: 50 })] }),
+    iaBlock({ invoices: [iaItem({ id: 502, number: 'INV-502', gross: 50 })] }),
+    iaBlock({ inst: 'IA-WAIT', subject: '无票主体', invoices: [], inv_total: 0, later_slip: { id: 31, filed_by: '登记人乙' } }),
+    iaBlock({ inst: 'IA-NONE', subject: '未登记主体', invoices: [], inv_total: 0, later_slip: null }),
+    iaBlock({ inst: 'IA-DONE', subject: '完成主体', subject_full: '合成主体全称', invoices: [iaItem({ id: 503, review: 'approved' })], later: false }),
+  ]
+  const { page, ctx, errors } = await open(browser, B, () => ({ ok: true }))
+  await mount(page, 'InvAuditHarness', { inv3: iaData(blocks), bills: { ...iaBills, 完成主体: 100 } })
+  await page.locator('.lia-invoice').first().waitFor()
+  assert.equal(await page.locator('.lia-qitem').count(), 4, '两个IA-1块必须合成一单')
+  assert.equal(await page.locator('.lia-invoice').count(), 2, '同一inst的两张票都保留且不重复')
+  assert.match(await page.locator('.lik-trio').innerText(), /100\.00/, '多票合计按去重后的发票计算')
+  await page.locator('[data-queue-filter="invoice"]').click()
+  assert.equal(await page.locator('.lia-qitem').count(), 1)
+  assert.match(await page.locator('.lia-qitem').innerText(), /有票待审[\s\S]*0\/2 已审/)
+  await page.locator('[data-queue-filter="noinvoice"]').click()
+  assert.equal(await page.locator('.lia-qitem').count(), 2)
+  assert.equal(await page.locator('.lia-qitem', { hasText: '后补待确认' }).count(), 1)
+  assert.equal(await page.locator('.lia-qitem', { hasText: '后补未登记' }).count(), 1)
+  await page.locator('[data-queue-filter="todo"]').click()
+  assert.equal(await page.locator('.lia-qitem').count(), 3, '全部待办不含已完成单')
+  assert.equal(await page.locator('.lia-qitem', { hasText: '完成主体' }).count(), 0)
+  await page.locator('[data-queue-filter="all"]').click()
+  assert.equal(await page.locator('.lia-qitem').count(), 4)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
 // ───────────────────────── 跑 ─────────────────────────
 
 ;(async () => {
   const B = await bundle()
-  const browser = await chromium.launch({ headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] })
+  const browser = await chromium.launch({ headless: true, channel: 'chrome', args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] })
   const results = []
   for (const t of TESTS) {
     if (ONLY.length && !ONLY.some(k => t.name.includes(k))) continue

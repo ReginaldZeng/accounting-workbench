@@ -11,7 +11,7 @@ import { printAdjust } from './LogisticsVoucher.jsx'
 import { reviewClassify, reviewDups, reviewDupOk, reviewClassifyRules, reviewClassifyRulesSave } from '../api.js'
 import { IntakeStep, InvAuditPanel, IK_V, IK_CSS } from './LogisticsIntake.jsx'   // V2.989 第①步数据接入 + 第④步发票审核
 import { reviewIntake, reviewReadiness, reviewSettingsGet, reviewSettingsSet } from '../api.js'
-import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog, RangeDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
+import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, uniqueDocs, DOC_TASKS, docTaskMatch, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog, RangeDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -461,6 +461,28 @@ function toGroups(rows) {
   if (cur.length) out.push({ head: null, lines: cur })
   return out
 }
+function lineUnexplained(r) {
+  const bad = r.bill != null && r.diff != null && !isZero(r.diff)
+  const dw = r.dept_warn && !r.dept_warn.fixed && !(r.note || '').trim()
+  return (bad && !(r.note || '').trim() && !r.fix_from && !r.fix_cover && !r.xsubj && !r.xsubj_in) || !!dw
+}
+function respanLines(lines, original) {
+  const anchors = Object.fromEntries(original.filter(r => r.bill != null).map(r => [r.anc || r.key, r]))
+  const counts = {}, seen = new Set()
+  for (const r of lines) {
+    const k = r.anc || r.key
+    if (anchors[k]) counts[k] = (counts[k] || 0) + 1
+  }
+  return lines.map(r => {
+    const k = r.anc || r.key, a = anchors[k]
+    if (!a) return r
+    if (!seen.has(k)) {
+      seen.add(k)
+      return { ...r, anc: k, bill: a.bill, diff: a.diff, od: a.od, level: a.level, bill_span: counts[k], _taskAnchor: r.bill != null, _taskUnexpl: lineUnexplained(r) }
+    }
+    return { ...r, bill: null, diff: null, od: null, bill_span: 1 }
+  })
+}
 
 // 计提更正：应改为(空=不变)的一句话。值存「编码 名称」(改账按编码找，用户 2026-09-30 定)
 const FIX_F = [['to_acct', '科目', 'acct'], ['to_fee', '费用项目', 'fee'], ['to_dept', '部门', 'dept'], ['to_biz', '产品分类', 'biz'], ['to_proj', '产品项目', 'proj']]
@@ -756,17 +778,17 @@ function FixEditor({ at, rows, period, onSave, onCancel }) {
 const GATE_CSS = `
 .lrv .lrg{border:1px solid #DCE2E7;border-radius:10px;background:#fff;margin-bottom:12px;overflow:hidden}.lrv .lrg-head{display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid #E6EBEF;flex-wrap:wrap}.lrv .lrg-head h3{margin:0;font-size:14px}.lrv .lrg-head .sp{flex:1}
 .lrv .lrg-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}.lrv .lrg-step{border:0;border-right:1px solid #E6EBEF;background:#fff;padding:10px 14px;text-align:left;cursor:pointer;color:inherit;transition:background .15s}.lrv .lrg-step:last-child{border-right:0}.lrv .lrg-step:hover{background:#F5F8FA}.lrv .lrg-step small{display:block;color:#788591;font-size:11.5px;margin-bottom:3px}.lrv .lrg-step b{font-size:12.5px}.lrv .lrg-step.ok b{color:#18784C}.lrv .lrg-step.pending b{color:#99600F}.lrv .lrg-step.error b{color:#B83232}
-.lrv .lrg-foot{display:flex;align-items:flex-start;gap:12px;padding:11px 14px;border-top:1px solid #E6EBEF;background:#FAFBFC}.lrv .lrg-blockers{flex:1;font-size:12px;color:#5E6B78;line-height:1.55}.lrv .lrg-blockers ul{margin:4px 0 0;padding-left:18px}.lrv .lrg-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.lrv .lrg-foot{display:flex;align-items:flex-start;gap:12px;padding:11px 14px;border-top:1px solid #E6EBEF;background:#FAFBFC}.lrv .lrg-blockers{flex:1;font-size:12px;color:#5E6B78;line-height:1.55}.lrv .lrg-blockers ul{margin:4px 0 0;padding-left:18px}.lrv .lrg-details{margin-top:5px}.lrv .lrg-details summary{cursor:pointer;color:#1F6E8C}.lrv .lrg-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 @media(max-width:760px){.lrv .lrg-steps{grid-template-columns:1fr 1fr}.lrv .lrg-step:nth-child(2){border-right:0}.lrv .lrg-foot{flex-direction:column}.lrv .lrg-actions{justify-content:flex-start}}
 `
 
-function ReviewGate({ R, L, locked, busy, onSign, onUnsign, onStep, exportUrl }) {
+function ReviewGate({ R, L, locked, busy, onSign, onUnsign, onStep, onRetry, exportUrl }) {
   const names = { intake: '数据接入', docs: '逐单核价核量', lines: '逐笔计提', sign: '发票审核' }
   const steps = (R && R.steps) || {}
   const blockers = (R && R.blockers) || []
   return <div className="lrg"><div className="lrg-head"><h3>复核登记</h3><span className="dim" style={{ fontSize: 12 }}>四步都有结论后，才能锁定本月复核</span><span className="sp" />{locked && <span className="pill ok">已登记 · {L.signed.reviewer} · {L.signed.signed_at}</span>}</div>
     <div className="lrg-steps">{Object.entries(names).map(([k, name], i) => { const s = steps[k]; return <button key={k} className={'lrg-step ' + (s ? s.status : '')} onClick={() => onStep(k)}><small>第 {i + 1} 步 · {name}</small><b>{!R ? '检查中…' : R.err ? '检查失败' : !s ? '待检查' : s.status === 'ok' ? `✓ ${s.label}` : s.status === 'error' ? '取数失败' : `${s.blockers.length} 项待处理`}</b></button> })}</div>
-    <div className="lrg-foot"><div className="lrg-blockers">{R && R.err ? R.err : locked ? '本月已登记；需要修改归类或备注时，先撤销登记。' : R && R.can_sign ? '四步核对均已完成，可以登记。登记后当月归类与备注锁定。' : <>{R ? '暂不能登记，请先处理：' : '正在汇总四步结果…'}{blockers.length > 0 && <ul>{blockers.slice(0, 6).map((x, i) => <li key={i}>{x}</li>)}{blockers.length > 6 && <li>另有 {blockers.length - 6} 项，请到对应步骤查看</li>}</ul>}</>}</div><div className="lrg-actions"><a className="btn" href={exportUrl}>导出复核表</a>{locked ? <button className="btn" disabled={busy === 'sign'} onClick={onUnsign}>撤销登记</button> : <button className="btn pri" disabled={busy === 'sign' || !R || !R.can_sign} title={R && !R.can_sign ? '还有未完成的复核事项' : '确认通过并登记'} onClick={onSign}>{busy === 'sign' ? '登记中…' : '确认通过并登记已复核'}</button>}</div></div>
+    <div className="lrg-foot"><div className="lrg-blockers">{R && R.err ? R.err : locked ? '本月已登记；需要修改归类或备注时，先撤销登记。' : R && R.can_sign ? '四步核对均已完成，可以登记。登记后当月归类与备注锁定。' : <>{R ? `暂不能登记：还有 ${blockers.length} 项待处理，请先点上方对应步骤。` : '正在汇总四步结果…'}{blockers.length > 0 && <details className="lrg-details"><summary>查看待处理明细（{blockers.length}）</summary><ul>{blockers.map((x, i) => <li key={i}>{x}</li>)}</ul></details>}</>}</div><div className="lrg-actions">{R && R.err && <button className="btn" onClick={onRetry}>重新检查</button>}<a className="btn" href={exportUrl}>导出复核表</a>{locked ? <button className="btn" disabled={busy === 'sign'} onClick={onUnsign}>撤销登记</button> : <button className="btn pri" disabled={busy === 'sign' || !R || !R.can_sign} title={R && !R.can_sign ? '还有未完成的复核事项' : '确认通过并登记'} onClick={onSign}>{busy === 'sign' ? '登记中…' : '确认通过并登记已复核'}</button>}</div></div>
   </div>
 }
 
@@ -776,7 +798,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [group, setGroup] = useState('ex')
   const [page, setPage] = useState(1)
   const [q, setQ] = useState('')
+  const [docTask, setDocTask] = useState('')
+  const [lineTask, setLineTask] = useState('')
   const [d, setD] = useState(null)
+  const [docErr, setDocErr] = useState('')
+  const [docLoading, setDocLoading] = useState(false)
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
   const [supq, setSupq] = useState('')
@@ -799,23 +825,32 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [mode, setMode] = useState('overview')   // overview 总表 / detail 单承运商四步流
   const [step, setStep] = useState('intake')     // intake / lines / docs / sign(④发票审核＋确认与登记)
   const [ik, setIk] = useState(null)            // 第①步数据接入(读全没有)，步骤条要显示结论，进一家就取
+  const contextKey = `${carrier}|${period}`
+  const contextRef = useRef(contextKey)
+  contextRef.current = contextKey
   // 第④步·发票与暂估：进入本步后再读取钉钉请款单、发票管家与金蝶暂估。
   const [inv3, setInv3] = useState(null)
-  useEffect(() => {
-    if (step !== 'sign' || !carrier || !period) return
+  const _invSeq = useRef(0)
+  const reloadInv3 = useCallback(() => {
+    const seq = ++_invSeq.current, key = contextKey
     setInv3(null)
-    let off = false
-    reviewInvoices(carrier, period).then(r => { if (!off) setInv3(r) }).catch(e => { if (!off) setInv3({ err: e.message, blocks: [] }) })
-    return () => { off = true }
-  }, [step, carrier, period])
+    return reviewInvoices(carrier, period).then(r => { if (seq === _invSeq.current && contextRef.current === key) setInv3(r) })
+      .catch(e => { if (seq === _invSeq.current && contextRef.current === key) setInv3({ err: e.message, blocks: [] }) })
+  }, [carrier, period, contextKey])
+  useEffect(() => {
+    ++_reqSeq.current; ++_ikSeq.current; ++_lineSeq.current; ++_readySeq.current; ++_invSeq.current; ++_allSeq.current; ++_clsSeq.current; ++_dupSeq.current
+    setD(null); setL(null); setIk(null); setR(null); setInv3(null); setAllD(null); setClsR(null); setDupR(null)
+    setDocErr(''); setDocLoading(mode === 'detail'); setMsg(''); setDocTask(''); setLineTask('')
+  }, [carrier, period, mode])
+  useEffect(() => { if (mode === 'detail' && step === 'sign' && carrier && period) reloadInv3() }, [mode, step, carrier, period, reloadInv3])
   const [R, setR] = useState(null)
   const _readySeq = useRef(0)
   const loadReadiness = useCallback(() => {
-    const seq = ++_readySeq.current
-    return reviewReadiness(carrier, period).then(r => { if (seq === _readySeq.current) setR(r); return r })
-      .catch(e => { if (seq === _readySeq.current) setR({ err: e.message, steps: {}, blockers: [e.message], can_sign: false }) })
-  }, [carrier, period])
-  useEffect(() => { if (mode === 'detail') setR(null) }, [mode, loadReadiness])
+    const seq = ++_readySeq.current, key = contextKey
+    setR(null)
+    return reviewReadiness(carrier, period).then(r => { if (seq === _readySeq.current && contextRef.current === key) setR(r); return r })
+      .catch(e => { if (seq === _readySeq.current && contextRef.current === key) setR({ err: e.message, steps: {}, blockers: [e.message], can_sign: false }) })
+  }, [carrier, period, contextKey])
   const [ov, setOv] = useState(null)
   const [L, setL] = useState(null)               // 逐笔计提复核结果（异步，金蝶慢）
   const [pts, setPts] = useState('')             // 供应商复核要点（编辑中）
@@ -863,16 +898,23 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const _reqSeq = useRef(0)
   const _ikSeq = useRef(0)     // 第①步用自己的序号(V2.1003)：原来和 load() 共用 _reqSeq，进一家时 loadIk 先取号、load 后取号，
                                // ik 响应回来序号已对不上 → 永远被丢弃、第①步永远转圈（慢只是表象，这才是"读不出来"的根）
+  const _lineSeq = useRef(0)
   const loadIk = () => {
-    const seq = ++_ikSeq.current
+    const seq = ++_ikSeq.current, key = contextKey
     setIk(null)
-    return reviewIntake(carrier, period).then(r => { if (seq === _ikSeq.current) setIk(r) }).catch(e => { if (seq === _ikSeq.current) setIk({ err: e.message }) })
+    return reviewIntake(carrier, period).then(r => { if (seq === _ikSeq.current && contextRef.current === key) setIk(r) })
+      .catch(e => { if (seq === _ikSeq.current && contextRef.current === key) setIk({ err: e.message }) })
   }
   useEffect(() => { if (mode === 'detail' && carrier) loadIk() }, [carrier, period, mode])
   const load = useCallback(() => {
-    const seq = ++_reqSeq.current
-    reviewResult(carrier, period, group, page, q, dfilt).then(r => { if (seq === _reqSeq.current) setD(r) }).catch(e => { if (seq === _reqSeq.current) { setD({ err: e.message, docs: [] }); setMsg('逐单取数失败：' + e.message) } })
-  }, [carrier, period, group, page, q, dfilt])
+    const seq = ++_reqSeq.current, key = contextKey
+    setDocLoading(true); setDocErr('')
+    return reviewResult(carrier, period, group, page, q, dfilt).then(r => {
+      if (seq === _reqSeq.current && contextRef.current === key) { setD(r); setDocErr('') }
+    }).catch(e => {
+      if (seq === _reqSeq.current && contextRef.current === key) { setD({ err: e.message, docs: [] }); setDocErr(e.message) }
+    }).finally(() => { if (seq === _reqSeq.current && contextRef.current === key) setDocLoading(false) })
+  }, [carrier, period, group, page, q, dfilt, contextKey])
   useEffect(() => { load() }, [load])
   // V2.986 第②步改版：单据在 1500 张以内的承运商(后端整家现算、缓存着)，一次取全部单据，7 张卡筛选、翻页在页面上做；
   //   迅鸽这种几千张的(ex_all 为空)照旧按页取。归类(③)、怀疑重复收费另外两个接口取。
@@ -884,18 +926,29 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [clsR, setClsR] = useState(null)          // {map:{单号:归类}, err}
   const [dupR, setDupR] = useState(null)          // {单号: {others, same, ok}}
   const [ruleDlg, setRuleDlg] = useState(null)    // 'rules' 归类规则 / 'accr' 和本月计提对照 / 'dup' 重复收费口径
+  const _allSeq = useRef(0), _clsSeq = useRef(0), _dupSeq = useRef(0)
   useEffect(() => {
+    const seq = ++_allSeq.current, key = contextKey
     if (step !== 'docs' || !full) { setAllD(null); return }
-    let alive = true
-    reviewResult(carrier, period, 'all', 1, q, dfilt, 5000).then(r => { if (alive) setAllD(r) }).catch(() => { if (alive) setAllD(null) })
-    return () => { alive = false }
+    reviewResult(carrier, period, 'all', 1, q, dfilt, 5000).then(r => { if (seq === _allSeq.current && contextRef.current === key) setAllD(r) })
+      .catch(() => { if (seq === _allSeq.current && contextRef.current === key) setAllD(null) })
+    return () => { if (seq === _allSeq.current) ++_allSeq.current }
   }, [d, step, full])
-  const loadCls = (fresh = false) => reviewClassify(carrier, period, fresh)
-    .then(r => setClsR(r.ok ? { map: Object.fromEntries((r.docs || []).map(x => [x.key, x])), accr_note: r.accr_note, tab: r.tab || [], accr_total: r.accr_total } : { map: {}, err: r.msg || '归类没取到' }))
-    .catch(e => setClsR({ map: {}, err: e.message }))
-  const loadDups = () => reviewDups(carrier, period).then(r => setDupR(r.docs || {})).catch(() => setDupR({}))
+  const loadCls = (fresh = false) => {
+    const seq = ++_clsSeq.current, key = contextKey
+    setClsR(null)
+    return reviewClassify(carrier, period, fresh)
+      .then(r => { if (seq === _clsSeq.current && contextRef.current === key) setClsR(r.ok ? { map: Object.fromEntries((r.docs || []).map(x => [x.key, x])), accr_note: r.accr_note, tab: r.tab || [], accr_total: r.accr_total } : { map: {}, err: r.msg || '归类没取到' }) })
+      .catch(e => { if (seq === _clsSeq.current && contextRef.current === key) setClsR({ map: {}, err: e.message }) })
+  }
+  const loadDups = () => {
+    const seq = ++_dupSeq.current, key = contextKey
+    setDupR(null)
+    return reviewDups(carrier, period).then(r => { if (seq === _dupSeq.current && contextRef.current === key) setDupR(r.docs || {}) })
+      .catch(() => { if (seq === _dupSeq.current && contextRef.current === key) setDupR({}) })
+  }
   useEffect(() => {
-    setClsR(null); setDupR(null); setKcard(null); setCpg(1); setDlgK(null)
+    setClsR(null); setDupR(null); setKcard(null); setDocTask(''); setCpg(1); setDlgK(null)
     if (step !== 'docs' || mode !== 'detail') return
     loadCls(); loadDups()
   }, [step, carrier, period, mode])
@@ -906,15 +959,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   }
   // 逐笔：等主表 d 到了再拉（避免与逐单取数并发争用金蝶会话把主表拖住）；后端带缓存
   const applyL = r => { setL(r); setPts(r.points || ''); setPtsSaved(r.points || '') }
+  const loadL = useCallback(() => {
+    const seq = ++_lineSeq.current, key = contextKey
+    setL(null)
+    return reviewLines(carrier, period).then(r => { if (seq === _lineSeq.current && contextRef.current === key) applyL(r) })
+      .catch(e => { if (seq === _lineSeq.current && contextRef.current === key) setL({ ...EMPTY_L, err: e.message }) })
+  }, [carrier, period, contextKey])
   useEffect(() => {
-    if (mode !== 'detail' || !carrier || !d) return
-    let alive = true; setL(null)
-    const t = setTimeout(() => {
-      reviewLines(carrier, period).then(r => { if (alive) applyL(r) }).catch(e => { if (alive) setL({ ...EMPTY_L, err: e.message }) })
-    }, 300)
-    return () => { alive = false; clearTimeout(t) }
-  }, [carrier, period, mode, d && d.carrier])
-  useEffect(() => { if (mode === 'detail' && d && L) loadReadiness() }, [mode, d && d.carrier, L, loadReadiness])
+    if (mode !== 'detail' || !carrier || !d || d.err) return
+    const t = setTimeout(loadL, 300)
+    return () => clearTimeout(t)
+  }, [carrier, period, mode, d && d.carrier, d && d.err, loadL])
+  useEffect(() => { if (mode === 'detail' && d && !d.err && L) loadReadiness() }, [mode, d && d.carrier, d && d.err, L, loadReadiness])
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 6000) }
   // 钉钉请款单：重读总表(不重取金蝶，弹窗跟着换新数据) / 手动扫一轮
   const reloadOv = () => reviewOverview(period).then(r => {
@@ -936,7 +992,6 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     const f = DT_F.find(x => x[0] === ovf)
     return f ? !!f[3](r) : r.status === ovf
   }
-  const refetchL = () => { setL(null); reviewLines(carrier, period).then(applyL).catch(e => setL({ ...EMPTY_L, err: e.message })) }
   const reloadDocs = () => { load(); loadReadiness() }
   const onFile = (fn, ...args) => e => {
     const f = e.target.files && e.target.files[0]; e.target.value = ''
@@ -946,7 +1001,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       ? `已解析「${r.bill_src || '账单'}」：明细 ${r.detail} 行、汇总 ${r.accrual} 行${r.skipped && r.skipped.length ? `（跳过 ${r.skipped.length} 张价目/明细表）` : ''}。` +
         `本月现有账单 ${r.sources.length} 份：` + r.sources.map(x => `${x.src} ${money(x.amount)}`).join('；') + '。'
       : JSON.stringify(r))
-    setBusy(fn.name); fn(...args, f).then(r => { flash(say(r)); setGroup('ex'); setPage(1); load(); refetchL() })
+    setBusy(fn.name); fn(...args, f).then(r => { flash(say(r)); setGroup('ex'); setPage(1); load(); loadL() })
       .catch(e => flash('失败：' + e.message)).finally(() => setBusy(''))
   }
   const kingdee = () => { setBusy('kd'); reviewKingdeeQty(carrier, period).then(r => { flash(`金蝶出库单 ${r.kd_docs} 单，回填 ${r.filled} 行`); reloadDocs() }).catch(e => flash('失败：' + e.message)).finally(() => setBusy('')) }
@@ -980,7 +1035,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   // 逐单手改归类(主体/费用类型)→存账单侧覆盖列→逐笔复核按新归类重算
   const saveClass = (doc_no, patch) => {
     reviewDocClassify(carrier, period, doc_no, patch)
-      .then(() => { load(); refetchL(); loadCls(); flash('已改归类，逐笔复核重算') })
+      .then(() => { load(); loadL(); loadCls(); flash('已改归类，逐笔复核重算') })
       .catch(e => flash('归类保存失败：' + e.message))
   }
   // 待下月扣回(V2.894)：这张单确认是供应商多收了，这个月账单发票不改，等后面月份账单扣回——登记在这里，后面月份会提醒去核
@@ -1014,7 +1069,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       : reviewDocClassify(carrier, period, nos, b.kind === 'restore' ? { restore: true } : { [b.kind]: b.value, reason: (b.text || '').trim() })
     go.then(r => {
       flash(b.kind === 'note' ? `已给 ${r.n || nos.length} 张单写备注` : b.kind === 'restore' ? `已把 ${r.n || nos.length} 张单恢复成账单原值` : `已把 ${r.n || nos.length} 张单的${b.kind === 'subject' ? '主体' : '费用类型'}改成「${b.value}」，逐笔复核重算`)
-      setBulk(null); setSel({}); load(); if (b.kind !== 'note') { refetchL(); loadCls() }
+      setBulk(null); setSel({}); load(); if (b.kind !== 'note') { loadL(); loadCls() }
     }).catch(e => flash('批量修改失败：' + e.message))
   }
   // 勾选的一批一起改核对方式(V2.886)
@@ -1090,7 +1145,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       note = window.prompt(`确认发票后补：${carrier} ${b.subject} ${money(b.amount)}\n\n发票管家里已登记后补单 #${sl.id}（${sl.status_cn || ''}${sl.expect_date ? '，预计 ' + sl.expect_date + ' 到' : ''}${sl.filed_by ? '，' + sl.filed_by + ' 登记' : ''}）。\n确认之后：\n· 这张请款单付了款，系统自动做付款凭证，只做支付（借供应商往来 / 贷银行存款），暂估进项税先挂着；\n· 发票到了、在发票管家审核通过、税额对得上，系统再自动建「暂估转待认证」凭证。\n\n备注（可改，会留痕）：`, `后补单 #${sl.id}${sl.expect_date ? '，预计 ' + sl.expect_date + ' 到' : ''}`)
       if (note === null) return
     } else if (!window.confirm(`撤销「已确认发票后补」：${carrier} ${b.subject} ${money(b.amount)}\n撤销后这张请款单要等发票到了才能做账。确定？`)) return
-    voucherLater(b.inst, on, note).then(() => reviewInvoices(carrier, period)).then(r => { setInv3(r); loadReadiness() }).catch(e => alert(e.message))
+    voucherLater(b.inst, on, note).then(() => reloadInv3()).then(() => loadReadiness()).catch(e => alert(e.message))
   }
   const remindAdj = () => (inv3 && !inv3.err ? Promise.resolve(inv3) : reviewInvoices(carrier, period)).then(r => {
     const xs = (r.blocks || []).filter(b => ADJ_KINDS.includes(b.kind))
@@ -1099,11 +1154,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   }).catch(() => {})
   const doSign = () => {
     if (!window.confirm(`确认 ${carrier} ${period} 复核通过并登记？登记后当月的归类与备注将锁定（可撤销）。`)) return
-    setBusy('sign'); reviewSign(carrier, period).then(() => { flash('已登记复核'); refetchL(); remindAdj() }).catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
+    setBusy('sign'); reviewSign(carrier, period).then(() => { flash('已登记复核'); loadL(); remindAdj() }).catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
   }
   const doUnsign = () => {
     if (!window.confirm('撤销本月复核登记？撤销后才能修改归类/备注。')) return
-    setBusy('sign'); reviewUnsign(carrier, period).then(() => { flash('已撤销登记'); refetchL() }).catch(e => flash('撤销失败：' + e.message)).finally(() => setBusy(''))
+    setBusy('sign'); reviewUnsign(carrier, period).then(() => { flash('已撤销登记'); loadL() }).catch(e => flash('撤销失败：' + e.message)).finally(() => setBusy(''))
   }
 
   const locked = !!(L && L.signed)
@@ -1116,21 +1171,20 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     const n = ((inv3 && inv3.blocks) || []).filter(x => !x.err && x.subject === sj).length
     return g && g.bill != null && n === 1 ? g.bill : null
   }
-  const reloadInv3 = () => reviewInvoices(carrier, period).then(setInv3).catch(() => {})
   const regNoLater = ((inv3 && inv3.blocks) || []).filter(b => !(b.invoices || []).length && !b.posted && !b.later).length     // 没票、发票后补也没确认的请款单
   const regReqs = regCells.flatMap(([, x]) => (x.reqs || []).filter(v => v.st && v.st.key !== 'void').map(v => ({ v, accr: x.accr || 0 })))
   const regLineBlockers = R && R.steps && R.steps.lines ? R.steps.lines.blockers.filter(x => !x.includes('登记时必须填写 note')) : []
-  const regReady = R && R.steps && R.steps.sign.status === 'ok' && regLineBlockers.length === 0
+  const regReady = R && R.steps && R.steps.sign && R.steps.sign.status === 'ok' && regLineBlockers.length === 0
   useEffect(() => { if (regRow && !feeDim) loadDimOpt().then(x => setFeeDim(x || { ok: false })) }, [!!regRow])
   const regSign = () => {
     if (regBad && !regNote.trim()) { flash('计提和请款有差异，要写原因才能登记'); return }
     if (!window.confirm(`确认 ${carrier} ${period} 复核通过并登记？（登记制：不逐单核价核量）`)) return
-    setBusy('sign'); reviewSign(carrier, period, regNote.trim() || '登记制：计提与请款一致').then(() => { flash('已登记复核'); refetchL(); refreshOv(); remindAdj() })
+    setBusy('sign'); reviewSign(carrier, period, regNote.trim() || '登记制：计提与请款一致').then(() => { flash('已登记复核'); loadL(); refreshOv(); remindAdj() })
       .catch(e => flash('登记失败：' + e.message)).finally(() => setBusy(''))
   }
   const regUnsign = () => {
     if (!window.confirm(`撤销 ${carrier} ${period} 的登记？`)) return
-    setBusy('sign'); reviewUnsign(carrier, period).then(() => { flash('已撤销登记'); refetchL(); refreshOv() }).catch(e => flash('撤销失败：' + e.message)).finally(() => setBusy(''))
+    setBusy('sign'); reviewUnsign(carrier, period).then(() => { flash('已撤销登记'); loadL(); refreshOv() }).catch(e => flash('撤销失败：' + e.message)).finally(() => setBusy(''))
   }
   // 按主体一览：②逐单、③计提、④发票；主体通过结论在第③步维护。
   const SubjSum = () => {
@@ -1161,7 +1215,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const dc = (d && d.by_box && d.doc_counts) || null        // 逐单按真实核对结果的计数（物料模板承运商）
   const cmap = (clsR && clsR.map) || {}
   const CPS = 50
-  const fdocs = full && allD ? (allD.docs || []).filter(x => !kcard || KPRED[kcard](x, cmap, dupR || {})) : null   // 全量模式：卡片筛过的整张清单
+  const taskDocs = full && allD ? uniqueDocs(allD.docs || []) : []
+  const docTaskCounts = Object.fromEntries(DOC_TASKS.map(t => [t.k, taskDocs.filter(x => docTaskMatch(x, t.k, cmap, dupR || {})).length]))
+  const fdocs = full && allD ? (docTask ? taskDocs.filter(x => docTaskMatch(x, docTask, cmap, dupR || {})) : (allD.docs || [])).filter(x => !kcard || KPRED[kcard](x, cmap, dupR || {})) : null
   const docs = fdocs ? fdocs.slice((cpg - 1) * CPS, cpg * CPS) : ((d && d.docs) || [])
   const kk = x => (x.lid != null ? 'l' + x.lid : `${x.doc_no || ''}|${x.subject}|${x.fee_item}|${x.doc_fee}`)   // 弹窗认行用(跨页也稳)
   const dlist = fdocs || docs
@@ -1217,7 +1273,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     { f: 'pass', sw: 'ok', n: '两轴均通过', dd: '单价＝合同 且 金蝶匹配', c: c.pass || 0, u: '笔' },
   ]
   const goStep = k => setStep(k)
-  const groups = toGroups(lrows)
+  const baseGroups = toGroups(lrows)
+  const groups = !lineTask ? baseGroups : baseGroups.flatMap(g => {
+    if (lineTask === 'subject') return g.head && (!g.head.mark || g.head.mark.status !== 'ok') ? [g] : []
+    const pred = lineTask === 'unexpl' ? lineUnexplained : r => r.kind === 'accr' && !!r.fix
+    const lines = g.lines.filter(pred)
+    return lines.length ? [{ ...g, lines: respanLines(lines, g.lines) }] : []
+  })
+  const lineTaskCounts = {
+    unexpl: L ? (L.n_unexplained || 0) : 0,
+    fixes: L && L.fixes ? L.fixes.length : 0,
+    subject: new Set(lrows.filter(r => r.kind === 'gtotal' && (!r.mark || r.mark.status !== 'ok')).map(r => r.subject)).size,
+  }
   // 同一账单金额(合并格)下的几笔共用一个差异：锚点行键 → 差异，让每一行都能标「平」(用户 2026-09-30：平也按行看)
   const ancDiff = {}
   for (const x of lrows || []) if (x.bill != null) ancDiff[x.anc || x.key] = x.diff
@@ -1285,6 +1352,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv .qchip .sw{width:9px;height:9px;border-radius:3px}.lrv .sw.ok{background:var(--ok)}.lrv .sw.warn{background:var(--warn)}.lrv .sw.neu{background:var(--neu)}
       .lrv .qchip .qn{color:#1B2733}.lrv .qchip .qc{font-family:ui-monospace,monospace;font-size:15px}.lrv .qchip small{color:#8A96A2}
       .lrv .qchip.warn.on{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn) inset;background:#FCF6EC}
+      .lrv .lrv-taskbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:9px 12px;border-bottom:1px solid #E1E7EC;background:#FAFBFC;color:#5E6B78;font-size:12px}
+      .lrv .lrv-tasktitle{font-weight:700;color:#273642;margin-right:3px}.lrv .lrv-task{display:inline-flex;align-items:center;gap:6px;border:1px solid #D5DEE4;background:#fff;color:#344553;border-radius:7px;padding:5px 9px;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+      .lrv .lrv-task b{font-family:ui-monospace,Consolas,monospace;color:#99600F}.lrv .lrv-task.on{border-color:var(--accent);background:#EAF3F7;box-shadow:inset 0 0 0 1px var(--accent);color:#164F66;font-weight:650}.lrv .lrv-task.on b{color:#164F66}
+      .lrv .lrv-tasknote{color:#788591;font-size:11.5px;margin-left:auto}.lrv .lrv-taskdegraded{line-height:1.55}.lrv .lrv-taskdegraded b{color:#273642;flex:none}
       .lrv .mtbl td[rowspan]{vertical-align:middle;background:#FBFCFD}
       .lrv .mtbl tr.band td{background:#F6F9FA}.lrv .mtbl tr.band td[rowspan]{background:#EEF4F6}
       .lrv .mtbl tr.docstart td{border-top:2px solid #CBD5DC}
@@ -1458,6 +1529,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .lrv table.mini{font-size:12.5px}.lrv table.mini th{background:#FAFBFC}.lrv table.mini td,.lrv table.mini th{padding:5px 10px}
       .lrv table.mini tr.pack td{color:#8A96A2}
       @media(max-width:900px){.lrv .verdict{grid-template-columns:1fr 1fr}.lrv .sumstrip{grid-template-columns:1fr 1fr}}
+      @media(max-width:520px){.lrv .lrv-taskbar{padding:8px;gap:5px}.lrv .lrv-tasktitle{width:100%}.lrv .lrv-tasknote{width:100%;margin-left:0;line-height:1.45}.lrv .lrv-task{padding:4px 7px;font-size:11.5px}.lrv .stepbtn{padding:9px 10px;gap:6px}.lrv .stepbtn .st{font-size:11px}.lrv .sumstrip{gap:6px}.lrv .tile{padding:9px 10px}.lrv .tile .v{font-size:17px}}
       ${LDD_CSS}
       ${IK_CSS}
       ${GATE_CSS}
@@ -1596,8 +1668,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
 
       {step === 'intake' && (<>
         <IntakeStep data={ik} period={period} locked={locked ? '本月已登记复核，撤销登记后才能换账单' : ''} flash={flash} onOpenBills={src => setBillDlg(src ? { src } : {})}
-          onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); refetchL() }} onNext={() => goStep('docs')} />
-        {billDlg && <BillsDlg carrier={carrier} period={period} initialReplace={billDlg.src || ''} onClose={() => setBillDlg(false)} onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); refetchL() }} flash={flash} />}
+          onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); loadL() }} onNext={() => goStep('docs')} onRetry={loadIk} />
+        {billDlg && <BillsDlg carrier={carrier} period={period} initialReplace={billDlg.src || ''} onClose={() => setBillDlg(false)} onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); loadL() }} flash={flash} />}
       </>)}
       {step === 'lines' && (<>
         {L && !L.err && (
@@ -1624,9 +1696,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </div>
 
         <div className="card">
-          <h3>逐笔计提复核 <span className="dim">· 按主体分组，组头即小计；每笔下方小字是费用类型；有差异的行请写差异解释</span></h3>
+          <h3>逐笔计提复核 <span className="dim">· 按主体分组；任务只筛明细，组头与底部合计不受筛选影响</span></h3>
+          {L && !L.err && <div className="lrv-taskbar lrv-line-tasks" aria-label="逐笔任务组">
+            <span className="lrv-tasktitle">动作任务组</span>
+            <button className={'lrv-task' + (!lineTask ? ' on' : '')} onClick={() => setLineTask('')}>全部明细</button>
+            {[['unexpl', '差异未解释'], ['fixes', '已登记更正'], ['subject', '主体待确认']].map(([k, label]) => <button key={k} data-line-task={k} className={'lrv-task' + (lineTask === k ? ' on' : '')} onClick={() => setLineTask(lineTask === k ? '' : k)}>{label}<b>{lineTaskCounts[k]}</b></button>)}
+            <span className="lrv-tasknote">组头小计与合计仍为原始全量</span>
+          </div>}
           {L === null && <div className="ovempty">读金蝶计提分录中…</div>}
-          {L && L.err && <div className="msg" style={{ margin: 12 }}>逐笔取数失败：{L.err}</div>}
+          {L && L.err && <div className="msg" style={{ margin: 12 }}>逐笔取数失败：{L.err} <button className="btn sm" onClick={loadL}>重试</button></div>}
           {L && !L.err && (
             <div className="tw"><table className="mtbl ltbl">
               <thead><tr>
@@ -1658,10 +1736,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     </tr>,
                     ...lines.flatMap(r => {
                       const anchor = r.bill != null
-                      const bad = anchor && r.diff != null && !isZero(r.diff)
+                      const bad = r._taskAnchor === false ? false : anchor && r.diff != null && !isZero(r.diff)
                       // V2.879 部门挂错(金额对得上也要更正)：小料的入库运费按口径挂茶饮小料部，这笔计提挂的是别的部门
                       const dw = r.dept_warn && !r.dept_warn.fixed && !(r.note || '').trim() ? r.dept_warn : null
-                      const unexpl = (bad && !(r.note || '').trim() && !r.fix_from && !r.fix_cover && !r.xsubj && !r.xsubj_in) || !!dw
+                      const unexpl = r._taskUnexpl == null ? lineUnexplained(r) : r._taskUnexpl
                       // V2.858 账单有、计提无(用户「计提的时候全都归集在了零售…应该是电商，所以计提数肯定是0」)：钱其实计提在同主体别的行里——
                       //   找那笔多出来的计提(差异为正、最接近这行金额的)，点一下就带着「只改其中 X、产品分类改成这一行的」去登记更正
                       const src = r.kind === 'bill_only' && bad && !r.fix_from && !r.xsubj_in ? lines.filter(x => x.kind === 'accr' && !x.fix && x.bill != null && x.diff > 0.004 && x.amt > r.bill + 0.004)
@@ -1761,7 +1839,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       </>)}
 
       {step === 'docs' && (<>
-        {d && d.err && <div className="fxwarn" style={{ marginBottom: 12 }}>金蝶或账单取数失败：{d.err} <button className="lnk" onClick={load}>重试</button></div>}
+        {docErr && <div className="fxwarn" style={{ marginBottom: 12 }}>金蝶或账单取数失败：{docErr} <button className="btn sm" disabled={docLoading} onClick={load}>{docLoading ? '重试中…' : '重试'}</button></div>}
+        {docLoading && d && !d.err && <div className="fxsub" role="status" style={{ marginBottom: 12 }}>正在按当前筛选重新取数，现有结果暂时保留…</div>}
         {!(d && d.by_box) && !d?.err && <div className="qbar">
           <span className="qbar-sum"><b>{d ? money(d.total_bill) : '—'}</b> 元 账单合计</span>
           <span className="qbar-lb">· 待处理（点一个筛下方明细）</span>
@@ -1775,6 +1854,15 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {dfilt && dfilt.from === 'lines' && <div className="dfilt">只看：<b>{dfilt.label}</b>（从逐笔计提复核点进来）
             <button className="btn sm" onClick={clearDfilt}>✕ 看全部单据</button>
             <button className="btn sm" onClick={() => setStep('lines')}>‹ 回逐笔计提复核</button></div>}
+          {d && !d.err && (!full || !allD) && <div className="lrv-taskbar lrv-taskdegraded"><b>动作任务组</b><span>{full ? '正在读取全量单据、归类与重复检查…' : '当前为分页取数：请用现有待办 / 状态筛选查看当前待办；未取得全量清单，不显示全月任务数。'}</span></div>}
+          {full && allD && <div className="lrv-taskbar" aria-label="逐单任务组">
+            <span className="lrv-tasktitle">动作任务组</span>
+            {clsR && !clsR.err && dupR ? <>
+              <button className={'lrv-task' + (!docTask ? ' on' : '')} onClick={() => { setDocTask(''); setCpg(1) }}>全部单据</button>
+              {DOC_TASKS.map(t => <button key={t.k} data-doc-task={t.k} className={'lrv-task' + (docTask === t.k ? ' on' : '')} title={t.dd} onClick={() => { setDocTask(docTask === t.k ? '' : t.k); setKcard(null); setCpg(1); setDlgK(null) }}>{t.n}<b>{docTaskCounts[t.k]}</b></button>)}
+              <span className="lrv-tasknote">按单号去重 · 排除已确认 · 各组可重叠，不相加</span>
+            </> : <span className="lrv-tasknote">任务组等待归类与重复检查完成；下方现有卡片仍可使用。</span>}
+          </div>}
           {full && allD && <DocCards docs={allD.docs || []} cls={cmap} dups={dupR || {}} totalBill={d.total_bill} cur={kcard} clsErr={clsR && clsR.err}
             nodoc={((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)}
             onPick={k => { setKcard(k); setCpg(1) }} />}
@@ -1791,9 +1879,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {ruleDlg === 'range' && <RangeDialog docs={(allD && allD.docs) || docs} rng={d && d.wt_range} carrier={carrier} locked={false} onClose={() => setRuleDlg(null)}
             onSave={(lo, hi) => reviewWtRange(carrier, lo, hi).then(() => { flash(lo ? `换算系数区间已保存 ${lo}–${hi}，整页按新区间重核` : '已恢复默认（差 2% 以内算一致）'); setRuleDlg(null); reloadDocs() }).catch(e => flash('保存失败：' + e.message))} />}
           {settingsDlg && <ReviewSettingsDlg carrier={carrier} onClose={() => setSettingsDlg(false)} onUnitKg={() => setUnitDlg(true)}
-            onSaved={() => { flash('复核设置已保存，按新设置重算'); reloadDocs(); refetchL() }} />}
-          {full && allD && (kcard || (clsR && (clsR.err || clsR.accr_note))) && <div className="adjnote">
-            {kcard && <>只看：<b>{KNAME[kcard]}</b>（{nDocs(fdocs || [])} 张）<button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setKcard(null); setCpg(1) }}>看全部</button>　</>}
+            onSaved={() => { flash('复核设置已保存，按新设置重算'); reloadDocs(); loadL() }} />}
+          {full && allD && (docTask || kcard || (clsR && (clsR.err || clsR.accr_note))) && <div className="adjnote">
+            {docTask && <>任务：<b>{(DOC_TASKS.find(t => t.k === docTask) || {}).n}</b>（{nDocs(fdocs || [])} 张）<button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setDocTask(''); setCpg(1) }}>清除任务</button>　</>}
+            {kcard && <>二级卡片：<b>{KNAME[kcard]}</b><button className="lnk" style={{ marginLeft: 6 }} onClick={() => { setKcard(null); setCpg(1) }}>清除卡片</button>　</>}
             {clsR && clsR.err && <span className="diffbad">归类没取到：{clsR.err}　<button className="lnk" onClick={() => loadCls(true)}>重取</button></span>}
             {clsR && !clsR.err && clsR.accr_note && <span className="dim">{clsR.accr_note}　<button className="lnk" onClick={() => loadCls(true)}>重取</button></span>}</div>}
           {d && d.by_box && dc && !(full && allD) && <div className="dq">
@@ -1804,7 +1893,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <span className="dim" style={{ fontSize: 12 }}>账单合计 <b className="mono" style={{ color: 'var(--accent)', fontSize: 13 }}>{money(d.total_bill)}</b></span>
           </div>}
           <div className="toolbar">
-            {fdocs ? <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{nDocs(fdocs)}</b> 张单据{fdocs.length !== nDocs(fdocs) ? `（账单 ${fdocs.length} 行）` : ''}{kcard ? ` · ${KNAME[kcard]}` : ''}</span>
+            {fdocs ? <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{nDocs(fdocs)}</b> 张单据{fdocs.length !== nDocs(fdocs) ? `（账单 ${fdocs.length} 行）` : ''}{docTask ? ` · ${(DOC_TASKS.find(t => t.k === docTask) || {}).n}` : ''}{kcard ? ` · ${KNAME[kcard]}` : ''}</span>
               : <span style={{ fontSize: 12.5, color: '#5E6B78' }}>共 <b>{d ? d.detail_total : 0}</b> {d && d.by_box ? (d.detail_docs != null && d.detail_docs !== d.detail_total ? <>行 · <b>{d.detail_docs}</b> 张单据</> : '张单据') : '行'}</span>}
             {d && d.by_box && d.facets && <>
               {[['fsub', 'subject', '全部主体'], ['ffee', 'fee', '全部费用类型'], ['fbiz', 'biz', '全部产品线']].map(([k, fk, all]) => {
@@ -1872,7 +1961,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             这些单的金蝶重量没算全，多半会挂在「数量不符」。<button className="lnk" onClick={() => setUnitDlg(true)}>去填单位换算</button></div>}
           {d && d.bw_gap && d.bw_gap.n_mat > 0 && <div className="adjnote">这家有按<b>吨重</b>收费的页：账单吨重＝箱数 × 每箱多少千克（含包装）。有 <b>{d.bw_gap.n_mat}</b> 种物料还没填「每箱计费重量」，涉及 <b>{d.bw_gap.n_doc}</b> 张单——
             这些单先拿金蝶净重比，会挂在「数量不符」。<button className="lnk" onClick={() => setUnitDlg(true)}>去填每箱计费重量</button></div>}
-          {unitDlg && <UnitKgDlg carrier={carrier} period={period} onClose={() => setUnitDlg(false)} onSaved={() => { load(); refetchL() }} flash={flash} />}
+          {unitDlg && <UnitKgDlg carrier={carrier} period={period} onClose={() => setUnitDlg(false)} onSaved={() => { load(); loadL() }} flash={flash} />}
           {(() => {     // 没有金蝶单号的账单行：不列成单据，只留一行数。金额为 0 的(迅鸽逐单表里不带钱的仓储行，钱在汇总行)不提
             const nd = ((d && d.nodoc) || []).filter(x => Math.abs(x.amount || 0) >= 0.005)
             return nd.length > 0 && <div className="adjnote">另有 <b>{nd.length}</b> 笔没有金蝶单号、不逐单（合计 {money(nd.reduce((s, x) => s + (x.amount || 0), 0))}）：
@@ -1881,7 +1970,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           })()}
           {d === null && <div className="ovempty">读账单与金蝶出库单中…</div>}
           {d && d.by_box && (docs.length === 0
-            ? <div className="ovempty">{group === 'ex' && !q
+            ? <div className="ovempty">{docTask ? '这个任务组没有待处理单据 ✓' : group === 'ex' && !q
               ? <>没有待核单据 ✓　<button className="btn sm" onClick={() => { setGroup('all'); setPage(1) }}>看全部单据</button></>
               : '没有符合条件的单据'}</div>
             : <div className="tw">
@@ -1976,6 +2065,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       </>)}
 
       {step === 'sign' && regRow && (<>
+        {inv3 && inv3.err && <div className="fxwarn" style={{ marginBottom: 12 }}>发票取数失败：{inv3.err} <button className="btn sm" onClick={reloadInv3}>重试</button></div>}
         {regReqs.map(({ v, accr }) => <FeeVoucherCard key={v.inst} v={v} accr={accr} dim={feeDim} locked={locked} onDone={() => { refreshOv(); reloadInv3(); loadReadiness() }}
           blk={((inv3 && inv3.blocks) || []).find(x => x.inst === v.inst)} onLater={confirmLater} />)}
         <div className="card">
@@ -2009,8 +2099,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </details>
       </>)}
       {step === 'sign' && !regRow && (<>
-        <ReviewGate R={R} L={L || {}} locked={locked} busy={busy} onSign={doSign} onUnsign={doUnsign} onStep={goStep} exportUrl={reviewExportUrl(carrier, period)} />
-        <InvAuditPanel inv3={inv3} billOf={billOfSubj} locked={locked} flash={flash} onChanged={() => { reloadInv3(); loadReadiness() }} onLater={confirmLater}
+        <ReviewGate R={R} L={L || {}} locked={locked} busy={busy} onSign={doSign} onUnsign={doUnsign} onStep={goStep} onRetry={loadReadiness} exportUrl={reviewExportUrl(carrier, period)} />
+        <InvAuditPanel inv3={inv3} billOf={billOfSubj} locked={locked} flash={flash} onChanged={() => { reloadInv3(); loadReadiness() }} onLater={confirmLater} onRetry={reloadInv3}
           voucherFor={b => <FeeVoucherCard key={b.inst} noFee v={{ inst: b.inst, bid: b.bid, subject: b.subject, amount: b.amount, st: b.st }} accr={1} dim={null} locked={locked} onDone={() => {}} blk={b} onLater={confirmLater} bill={billOfSubj(b.subject)} />} />
         <details className="card">
           <summary style={{ cursor: 'pointer', padding: '12px 15px', fontWeight: 650 }}>发票与暂估高级对照 <span className="dim" style={{ fontWeight: 400, fontSize: 12 }}>按计提凭证、税率查看账单与发票差异</span></summary>

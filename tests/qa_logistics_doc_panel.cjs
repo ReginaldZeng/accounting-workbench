@@ -20,7 +20,7 @@ esbuild.buildSync({
   nodePaths: [path.join(FE, 'node_modules')],
 })
 
-const { judge } = require(out)
+const { judge, docTaskMatch, uniqueDocs } = require(out)
 const doc = {
   lid: 1,
   doc_no: 'XSCKD1',
@@ -43,6 +43,17 @@ const noPrice = judge({ ...doc, qty_enabled: true, price_enabled: false })
 assert.equal(noPrice.v, '未核价')
 assert.equal(noPrice.p.top, '未核价')
 assert.equal(noPrice.q.top, '重量对上')
+
+const overlap = { ...doc, state: 'qtydiff', kd_sum: 0.5, sub_fees: { 运费: 21, 标准: 20, 核价差: 1 } }
+const overlapCls = { XSCKD1: { v: '判不了' } }, overlapDups = { XSCKD1: { same: [21, 21] } }
+for (const task of ['qty', 'amt', 'cls', 'dup']) assert.equal(docTaskMatch(overlap, task, overlapCls, overlapDups), true, `同一单可重叠进入 ${task}`)
+assert.equal(uniqueDocs([overlap, { ...overlap, lid: 2 }]).length, 1, '任务按doc_no去重')
+for (const task of ['qty', 'info', 'cls', 'fee', 'amt', 'dup']) {
+  assert.equal(docTaskMatch({ ...overlap, confirmed: { by: '测试' } }, task, { ...overlapCls, XSCKD1: { v: '标注不对' } }, overlapDups), false, `confirmed不得进入 ${task}`)
+}
+assert.equal(docTaskMatch({ ...doc, state: 'miss' }, 'info'), true)
+assert.equal(docTaskMatch({ ...doc, state: 'miss' }, 'qty'), false, '金蝶查无单列资料不足')
+assert.equal(docTaskMatch({ ...doc, state: 'feediff' }, 'fee'), true)
 
 const entry = path.join(path.dirname(out), 'entry.jsx')
 const browserOut = path.join(path.dirname(out), 'entry.js')
