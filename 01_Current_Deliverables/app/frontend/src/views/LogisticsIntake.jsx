@@ -3,7 +3,7 @@
 // [Change Log] Date:2026-10-24 Author:Kimi Version:V2.1004
 // ① 数据接入改为“金额勾稽＋待办＋每页核对”；④ 改为请款单队列＋单张审票，金额/销购方/审核/后补统一形成结论。
 import React, { useEffect, useRef, useState } from 'react'
-import { reviewIntakeOverview, reviewReparse, invAuditItemsApprove, invFolder } from '../api.js'
+import { reviewIntakeOverview, reviewReparse, reviewRawUrl, invAuditItemsApprove, invFolder } from '../api.js'
 import { Modal, InvViewer } from './invShared.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -18,10 +18,10 @@ export const IK_V = {
 const ROLE_CN = { bill: '账单', stamp: '盖章版', invoice: '发票', review: '审核留档' }
 
 export const IK_CSS = `
-.lrv .lik-files{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;padding:12px 15px}
-.lrv .lik-file{border:1px solid #DCE2E7;border-radius:8px;padding:10px 12px;display:grid;gap:3px;min-width:0;background:#fff}
-.lrv .lik-file .h{font-size:11.5px;color:#788591}.lrv .lik-file .t{font-weight:600;word-break:break-all}.lrv .lik-file .s{font-size:12px;color:#5E6B78;word-break:break-all}
-.lrv .lik-file .a{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+.lrv .lik-rawwrap{margin:0 15px 10px;max-width:calc(100% - 30px);overflow-x:auto;border:1px solid #E1E7EC;border-radius:8px}
+.lrv .lik-raw{width:100%;min-width:900px;border-collapse:collapse;font-size:12px;background:#fff}.lrv .lik-raw th{padding:6px 9px;text-align:left;background:#F7F9FA;color:#5E6B78;font-weight:600;white-space:nowrap}.lrv .lik-raw td{padding:7px 9px;border-top:1px solid #E6EBEF;vertical-align:top}
+.lrv .lik-raw .lik-rawname{min-width:250px;overflow-wrap:anywhere;word-break:break-word}.lrv .lik-raw .lik-rawsrc{font-weight:650;margin-bottom:2px}.lrv .lik-raw .lik-rawfile{color:#5E6B78}.lrv .lik-raw .num{white-space:nowrap;font-variant-numeric:tabular-nums}.lrv .lik-raw .lik-rawops{white-space:nowrap}.lrv .lik-raw .lik-rawops>*{margin:0 4px 3px 0}
+.lrv .lik-reqfiles{display:flex;align-items:baseline;gap:5px 12px;flex-wrap:wrap;margin:0 15px 12px;padding:7px 10px;background:#F7F9FA;border-radius:7px;color:#5E6B78;font-size:12px}.lrv .lik-reqfiles b{color:#3D4A57}
 .lrv .lik-hist{padding:4px 15px 12px;display:grid}
 .lrv .lik-hist>div{display:grid;grid-template-columns:118px 90px minmax(0,1fr);gap:10px;padding:6px 0;border-bottom:1px dotted #E6EBEF;font-size:12.5px}
 .lrv .lik-hist>div:last-child{border-bottom:0}.lrv .lik-hist .d{color:#788591;font-family:ui-monospace,Consolas,monospace;font-size:12px}
@@ -46,8 +46,7 @@ export const IK_CSS = `
 .lrv .lik-issues{display:flex;gap:8px;align-items:flex-start;padding:10px 14px;margin-bottom:12px;border:1px solid #EDD9AE;background:#FFFAEF;border-radius:9px;font-size:12.5px;line-height:1.6}
 .lrv .lik-issues.ok{border-color:#BFDCCB;background:#F0F8F3}.lrv .lik-issues b{white-space:nowrap}.lrv .lik-issues ul{margin:0;padding-left:18px}.lrv .lik-issues.ok span{flex:1}
 .lrv .lik-section{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.lrv .lik-section .sp{flex:1}.lrv .lik-section small{font-weight:400;color:#788591}
-.lrv .lik-srcgrid{display:grid;grid-template-columns:1fr 1fr;gap:0}.lrv .lik-srcgrid>section{min-width:0}.lrv .lik-srcgrid>section+section{border-left:1px solid #E6EBEF}
-.lrv .lik-srctitle{padding:10px 15px 0;font-size:12px;font-weight:700;color:#4A5763}.lrv .lik-empty{padding:18px 15px;color:#788591;font-size:12.5px}
+.lrv .lik-srctitle{padding:10px 15px 8px;font-size:12px;font-weight:700;color:#4A5763}.lrv .lik-empty{padding:12px 15px;color:#788591;font-size:12.5px}
 .lrv .lik-req{border:1px solid #DCE2E7;border-radius:10px;background:#fff;overflow:hidden;margin-bottom:12px}.lrv .lik-req .ih{display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap;padding:10px 15px;border-bottom:1px solid #E6EBEF}
 .lrv .lik-req .ih h4{margin:0;font-size:14px}.lrv .lik-req .ih .sp{flex:1}.lrv .lik-req .ihmeta{display:flex;gap:6px 14px;flex-wrap:wrap;color:#5E6B78;font-size:12px}.lrv .lik-req .ihmeta span{overflow-wrap:anywhere}.lrv .lik-trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid #E6EBEF;border-radius:8px;overflow:hidden;margin:12px 15px 0}
 .lrv .lik-trio>div{padding:7px 12px;display:flex;align-items:baseline;gap:7px;border-right:1px solid #E6EBEF;min-width:0}.lrv .lik-trio>div:last-child{border-right:0}.lrv .lik-trio .h{font-size:11.5px;color:#788591;white-space:nowrap}
@@ -61,7 +60,7 @@ export const IK_CSS = `
 .lrv .lia-qlist{max-height:650px;overflow:auto}.lrv .lia-qitem{display:grid;width:100%;text-align:left;gap:4px;padding:11px 12px;border:0;border-bottom:1px solid #E6EBEF;background:transparent;cursor:pointer;color:inherit;transition:background .15s}
 .lrv .lia-qitem:hover{background:#F0F5F8}.lrv .lia-qitem.on{background:#EAF2F7;box-shadow:inset 3px 0 var(--accent)}.lrv .lia-qitem .qt{display:flex;justify-content:space-between;gap:8px;font-weight:650}.lrv .lia-qitem .qt>span{min-width:0;overflow-wrap:anywhere}.lrv .lia-qitem .qs{display:flex;justify-content:space-between;gap:6px;color:#5E6B78;font-size:11.5px}.lrv .lia-qitem .qn{color:#99600F}
 .lrv .lia-detail{min-width:0}.lrv .lia-detail .lik-req{border:0;border-radius:0;margin:0}.lrv .lia-voucher{border-top:1px solid #E6EBEF;padding:10px 14px}.lrv .lia-voucher>summary{cursor:pointer;font-weight:650;font-size:12.5px}.lrv .lia-viewload{padding:40px 15px;text-align:center;color:#5E6B78}.lrv .lia-viewerr{padding:25px 15px;color:#B83232;overflow-wrap:anywhere}
-@media(max-width:900px){.lrv .lia-work{grid-template-columns:220px minmax(0,1fr)}.lrv .lia-invoice{grid-template-columns:minmax(130px,1fr) minmax(95px,.8fr) auto}.lrv .lia-invoice .iamt{grid-row:2}.lrv .lia-invoice .iact{grid-column:2/-1;grid-row:2}.lrv .lik-srcgrid{grid-template-columns:1fr}.lrv .lik-srcgrid>section+section{border-left:0;border-top:1px solid #E6EBEF}}
+@media(max-width:900px){.lrv .lia-work{grid-template-columns:220px minmax(0,1fr)}.lrv .lia-invoice{grid-template-columns:minmax(130px,1fr) minmax(95px,.8fr) auto}.lrv .lia-invoice .iamt{grid-row:2}.lrv .lia-invoice .iact{grid-column:2/-1;grid-row:2}}
 @media(max-width:700px){.lrv .vflow{grid-template-columns:1fr}.lrv .vlink{padding:8px 0}.lrv .vlink::before{display:none}.lrv .lia-work{grid-template-columns:1fr}.lrv .lia-queue{border-right:0;border-bottom:1px solid #DCE2E7}.lrv .lia-qlist{max-height:220px}.lrv .lia-summary{gap:8px;padding:8px 10px;font-size:11.5px}.lrv .lik-trio{margin-left:10px;margin-right:10px}.lrv .lik-trio>div{padding:7px;display:grid;gap:2px}.lrv .lik-invwrap{padding-left:10px;padding-right:10px}.lrv .lia-invoice{grid-template-columns:minmax(0,1fr) auto;padding:9px 10px;gap:5px 10px}.lrv .lia-invoice .itp{grid-row:2}.lrv .lia-invoice .iamt{grid-row:2;text-align:right}.lrv .lia-invoice .iact{grid-column:1/-1;grid-row:3;justify-content:flex-start}.lrv .lik-chk{margin-left:10px;margin-right:10px}.lrv .lik-later{margin-left:10px;margin-right:10px}.lrv .lik-hist>div{grid-template-columns:1fr}}
 `
 
@@ -133,6 +132,7 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
     reviewReparse(data.carrier, period, f.src).then(r => { flash(`已重新解析：明细 ${r.detail} 行，合计 ${money(r.before)} → ${money(r.after)}${r.notes ? `，备注写回 ${r.notes} 张` : ''}`); onChanged() }).catch(e => flash('重新解析失败：' + e.message)).finally(() => setBusy(''))
   }
   const reqByRole = {}; (data.req_files || []).forEach(f => { (reqByRole[f.role || 'other'] = reqByRole[f.role || 'other'] || []).push(f) })
+  const billBySrc = Object.fromEntries((data.bills || []).map(b => [b.src || '', b]))
   const sheetRows = files.filter(f => f.report).flatMap(f => (f.report.sheets || []).map((s, i) => ({ f, s, i, bad: !['ok', 'skip', 'accrual'].includes(s.verdict) }))).sort((a, b) => Number(b.bad) - Number(a.bad)).filter(x => !onlyBad || x.bad)
   return <>
     <div className="lik-verdict">
@@ -148,10 +148,12 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
     {!data.register && <div className={'lik-issues' + (ready ? ' ok' : '')}>{ready ? <><b>✓ 可以进入逐笔复核</b><span>账单解析、原件合计与请款金额均已核对。后续修改账单会重新计算本步骤状态。</span></> : <><b>待处理 {issues.length} 项</b><ul>{issues.map((x, i) => <li key={i}>{x}</li>)}</ul></>}</div>}
     <div className="card">
       <h3 className="lik-section">文件与来源 <small>原始凭据和附件独立核对</small></h3>
-      <div className="lik-srcgrid">
-        <section><div className="lik-srctitle">账单原件 · {files.length} 份</div>{files.length ? <div className="lik-files" style={{ gridTemplateColumns: '1fr' }}>{files.map(f => <div key={f.id} className="lik-file"><span className="h">{f.src || '账单'}</span><span className="t">{f.name || '（没记文件名）'}</span><span className="s">{kb(f.size)} · {f.by || '没记录'} {f.at}</span><span className="a"><button className="btn sm" disabled={!!locked || !!busy} onClick={() => reparse(f)}>{busy === 're' + f.id ? '解析中…' : '用原件重新解析'}</button></span></div>)}</div> : <div className="lik-empty">{data.register ? '登记制无需上传账单。' : data.has_spec ? '还没有账单原件，可手工上传或等待钉钉附件自动接入。' : '先配置取数说明，再上传账单。'}</div>}</section>
-        <section><div className="lik-srctitle">钉钉请款单附件 · {(data.req_files || []).length} 份</div>{Object.keys(reqByRole).length ? <div className="lik-files" style={{ gridTemplateColumns: '1fr' }}><div className="lik-file"><span className="t">{Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join(' · ')}</span><span className="s">随请款单自动接入，无需重复上传。</span></div></div> : <div className="lik-empty">当前请款单没有附件。</div>}</section>
-      </div>
+      <div className="lik-srctitle">账单原件 · {files.length} 份</div>
+      {files.length ? <div className="lik-rawwrap"><table className="lik-raw"><thead><tr><th>账单份名 / 原文件名</th><th className="num">解析金额</th><th>来源 / 操作人</th><th>解析时间</th><th className="num">大小</th><th>操作</th></tr></thead><tbody>{files.map(f => {
+        const name = f.name || '（没记文件名）', bill = billBySrc[f.src || '']
+        return <tr key={f.id}><td className="lik-rawname"><div className="lik-rawsrc">{f.src || '账单'}</div><div className="lik-rawfile" title={name}>{name}</div></td><td className="num">{bill ? money(bill.amount) : '—'}</td><td>{f.origin || '没记录'}<div className="dim">{f.by || '没记录'}</div></td><td>{f.at || '—'}</td><td className="num">{kb(f.size) || '—'}</td><td className="lik-rawops"><a className="btn sm" href={reviewRawUrl(data.carrier, period, f.src)} target="_blank" rel="noopener">下载原件</a><button className="btn sm" disabled={!!locked || !!busy} title={locked || '用新文件替换这一份，其他账单不动'} onClick={() => onOpenBills(f.src)}>替换</button><button className="btn sm" disabled={!!locked || !!busy} title={locked || '用保存的原件按当前取数说明重新解析'} onClick={() => reparse(f)}>{busy === 're' + f.id ? '解析中…' : '重新解析'}</button></td></tr>
+      })}</tbody></table></div> : <div className="lik-empty">{data.register ? '登记制无需上传账单。' : data.has_spec ? '还没有账单原件，可手工上传或等待钉钉附件自动接入。' : '先配置取数说明，再上传账单。'}</div>}
+      <div className="lik-reqfiles"><b>钉钉请款单附件 · {(data.req_files || []).length} 份</b><span>{Object.keys(reqByRole).length ? `${Object.keys(reqByRole).length} 类：${Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join(' · ')}` : '当前请款单没有附件'}</span><span>随请款单自动接入，无需重复上传。</span></div>
       {(data.history || []).length > 0 && <div style={{ padding: '0 15px 12px' }}><details><summary className="lik-lbl" style={{ cursor: 'pointer' }}>解析记录 · {data.history.length} 条</summary><div className="lik-hist">{data.history.slice(0, 8).map((h, i) => <div key={i}><span className="d">{h.at}</span><span>{h.by}</span><span>{h.action.replace('物流复核-', '')}：{h.detail}</span></div>)}</div></details></div>}
     </div>
     <div className="card">

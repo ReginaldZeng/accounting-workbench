@@ -57,7 +57,7 @@ function DtChip({ reqs, onOpen }) {
 //   系统只给两个参考(规格里自己写的比重、这家账单实际是按多少折的)，点一下才采用，不替人定。可以写分数：0.445/200。
 // 账单弹窗(V2.871，用户 2026-10-08「点击上传账单解析，跳出弹窗，当前解析的是那几份，上传人和时间，替换按钮，删除按钮」)：
 //   先看清楚这家这月现在解析着哪几份，再决定是替换哪一份、删哪一份、还是新增一份——原来一点按钮就直接选文件，传完才知道换掉了谁。
-function BillsDlg({ carrier, period, onClose, onChanged, flash }) {
+function BillsDlg({ carrier, period, initialReplace = '', onClose, onChanged, flash }) {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState('')
@@ -65,6 +65,7 @@ function BillsDlg({ carrier, period, onClose, onChanged, flash }) {
   const want = useRef(null)          // 这次选文件是要干什么：{mode:'add'} / {mode:'replace', src}
   const load = () => reviewBills(carrier, period).then(setD).catch(e => setErr(e.message))
   useEffect(() => { load() }, [])
+  useEffect(() => { if (d && initialReplace) pick({ mode: 'replace', src: initialReplace }) }, [d, initialReplace])
   const nm = s => s || '（未标份名）'
   const pick = w => { want.current = w; setErr(''); fileRef.current && fileRef.current.click() }
   const send = (f, w, force) => {
@@ -1594,9 +1595,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         </div>)}</div>}
 
       {step === 'intake' && (<>
-        <IntakeStep data={ik} period={period} locked={locked ? '本月已登记复核，撤销登记后才能换账单' : ''} flash={flash} onOpenBills={() => setBillDlg(true)}
+        <IntakeStep data={ik} period={period} locked={locked ? '本月已登记复核，撤销登记后才能换账单' : ''} flash={flash} onOpenBills={src => setBillDlg(src ? { src } : {})}
           onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); refetchL() }} onNext={() => goStep('docs')} />
-        {billDlg && <BillsDlg carrier={carrier} period={period} onClose={() => setBillDlg(false)} onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); refetchL() }} flash={flash} />}
+        {billDlg && <BillsDlg carrier={carrier} period={period} initialReplace={billDlg.src || ''} onClose={() => setBillDlg(false)} onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); refetchL() }} flash={flash} />}
       </>)}
       {step === 'lines' && (<>
         {L && !L.err && (

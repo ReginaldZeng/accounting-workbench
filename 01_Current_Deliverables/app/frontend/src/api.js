@@ -766,6 +766,7 @@ export const reviewIntakeOverview = period => j(`/api/logistics-review/intake-ov
 export const reviewSettingsGet = carrier => j(`/api/logistics-review/settings?carrier=${encodeURIComponent(carrier)}`)
 export const reviewSettingsSet = body => j('/api/logistics-review/settings', { method: 'POST', body: JSON.stringify(body) })
 export const reviewReparse = (carrier, period, src) => j('/api/logistics-review/reparse', { method: 'POST', body: JSON.stringify({ carrier, period, src: src || '' }) })
+export const reviewRawUrl = (carrier, period, src) => `/api/logistics-review/raw?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}&src=${encodeURIComponent(src || '')}`
 export const reviewDups = (carrier, period) => j(`/api/logistics-review/dups?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 export const reviewDupOk = (carrier, period, doc, ok, reason = '') => j('/api/logistics-review/dup-ok', { method: 'POST', body: JSON.stringify({ carrier, period, doc, ok, reason }) })
 export const reviewDocMode = (carrier, period, doc_no, mode) => j('/api/logistics-review/doc-mode', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, mode } : { carrier, period, doc_no, mode }) })

@@ -160,6 +160,60 @@ class ReadinessApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["cells"][0]["has_accr"])
 
 
+class RawDownloadApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def setUp(self):
+        from sqlalchemy import create_engine
+        self.old_engine = self.lr.db._engine
+        self.db_engine = create_engine("sqlite:///:memory:")
+        self.lr.BR.create(self.db_engine)
+        self.lr.db._engine = self.db_engine
+        with self.db_engine.begin() as c:
+            for src, name, data in (
+                ("线上", "旧账单.xlsx", b"old-xlsx"),
+                ("线上", "2026年9月 线上&零售 最新账单.xlsx", b"new-xlsx"),
+                ("旧版", "旧格式账单.xls", b"legacy-xls"),
+            ):
+                c.execute(self.lr.BR.insert().values(carrier="甲", period="2026-09", bill_src=src, name=name, data=data, size=len(data)))
+            c.execute(self.lr.BR.insert().values(carrier="乙", period="2026-09", bill_src="线上", name="别家.xlsx", data=b"other-carrier"))
+            c.execute(self.lr.BR.insert().values(carrier="甲", period="2026-08", bill_src="线上", name="别期.xlsx", data=b"other-period"))
+
+    def tearDown(self):
+        self.lr.db._engine = self.old_engine
+        self.db_engine.dispose()
+
+    def test_latest_excel_content_and_original_filename(self):
+        with patch.object(self.lr, "_perm", return_value={"name": "测试"}):
+            out = self.lr.review_raw(_Request(), carrier="甲", period="2026-09", src="线上")
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(out.body, b"new-xlsx")
+        self.assertEqual(out.media_type, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        from urllib.parse import quote
+        self.assertIn("filename*=UTF-8''" + quote("2026年9月 线上&零售 最新账单.xlsx", safe=""), out.headers["content-disposition"])
+        with patch.object(self.lr, "_perm", return_value={"name": "测试"}):
+            old = self.lr.review_raw(_Request(), carrier="甲", period="2026-09", src="旧版")
+        self.assertEqual(old.body, b"legacy-xls")
+        self.assertEqual(old.media_type, "application/vnd.ms-excel")
+        self.assertIn(quote("旧格式账单.xls", safe=""), old.headers["content-disposition"])
+
+    def test_permission_denied(self):
+        with patch.object(self.lr, "_perm", return_value=None):
+            out = self.lr.review_raw(_Request(), carrier="甲", period="2026-09", src="线上")
+        self.assertIsInstance(out, JSONResponse)
+        self.assertEqual(out.status_code, 403)
+
+    def test_cross_scope_and_missing_src_are_404(self):
+        with patch.object(self.lr, "_perm", return_value={"name": "测试"}):
+            for carrier, period, src in (("乙", "2026-09", "旧版"), ("甲", "2026-08", "旧版"), ("甲", "2026-09", "不存在")):
+                with self.subTest(carrier=carrier, period=period, src=src):
+                    out = self.lr.review_raw(_Request(), carrier=carrier, period=period, src=src)
+                    self.assertIsInstance(out, JSONResponse)
+                    self.assertEqual(out.status_code, 404)
+
+
 class ReviewSettingsTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):

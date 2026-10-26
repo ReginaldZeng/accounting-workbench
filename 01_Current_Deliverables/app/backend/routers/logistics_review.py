@@ -53,7 +53,7 @@ def _doc_ok(carrier, period):
         return {r[0]: {"by": r[1] or "", "at": r[2] or ""} for r in c.execute(select(
             DK.c.doc_no, DK.c.confirmed_by, DK.c.confirmed_at).where((DK.c.carrier == carrier) & (DK.c.period == period))).all()}
 
-_DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "annot_source", "fee", "bizline",
+_DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "fee", "bizline",
                 "fee_item", "qty", "unit", "amount", "carrier_sub", "prov", "charge_wt",
                 "sub_fees", "src_sheet", "src_row", "note")
 
@@ -633,6 +633,28 @@ def review_bills(request: Request, carrier: str = "", period: str = ""):
             "register": spec.get("review_mode") == "register"}
 
 
+@router.get("/api/logistics-review/raw")
+def review_raw(request: Request, carrier: str = "", period: str = "", src: str = ""):
+    """只读下载这家这月这一份最新保存的 Excel 账单原件。"""
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    scope = (BR.c.carrier == carrier) & (BR.c.period == period) & (
+        (BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))
+    with db._engine.connect() as c:
+        row = c.execute(select(BR.c.name, BR.c.data).where(scope).order_by(BR.c.id.desc()).limit(1)).mappings().first()
+    if not row or not row["data"]:
+        return JSONResponse({"ok": False, "msg": "没有找到这份账单原件"}, status_code=404)
+    name = str(row["name"] or "").replace("\\", "/").split("/")[-1].replace("\r", "").replace("\n", "")
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in ("xlsx", "xls"):
+        return JSONResponse({"ok": False, "msg": "这份原件不是可下载的 Excel 文件"}, status_code=404)
+    from urllib.parse import quote
+    media_type = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx"
+                  else "application/vnd.ms-excel")
+    disposition = "attachment; filename=bill.%s; filename*=UTF-8''%s" % (ext, quote(name, safe=""))
+    return Response(content=bytes(row["data"]), media_type=media_type, headers={"Content-Disposition": disposition})
+
+
 @router.post("/api/logistics-review/bill-delete")
 async def review_bill_delete(request: Request):
     """删掉这家这月的某一份账单(账单行＋存下的原件)。已登记复核的月份不许删。留操作日志(行数、金额)。"""
@@ -1090,8 +1112,7 @@ async def review_register_add(request: Request):
             batch_id="register|%s|%s" % (carrier, period), period=period, carrier=carrier,
             grain="detail", review_mode="register", subject=(b.get("subject") or "").strip(),
             doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
-            annot=(b.get("annot") or "").strip(), annot_source="manual" if (b.get("annot") or "").strip() else "none",
-            fee_item=(b.get("fee_item") or "运费").strip(),
+            annot=(b.get("annot") or "").strip(), fee_item=(b.get("fee_item") or "运费").strip(),
             amount=amount, unit=(b.get("unit") or "").strip(), note=note, created_at=_now()))
     db.audit(u["name"], "物流复核-登记单据运费", "%s %s" % (carrier, period), "%s %.2f元" % (doc_no or "无单号", amount))
     return {"ok": True}
@@ -1215,8 +1236,7 @@ async def review_register_import(request: Request, period: str = ""):
                 batch_id="register|%s|%s" % (carrier, per), period=per, carrier=carrier,
                 grain="detail", review_mode="register", subject=get(r, "subject"),
                 doc_no="+".join([p for p in re.split(r"[+/,，、;；\s]+", doc_no) if p]) if doc_no else "",
-                annot=get(r, "bizline"), annot_source="manual" if get(r, "bizline") else "none",
-                fee_item=get(r, "fee_item") or "运费",
+                annot=get(r, "bizline"), fee_item=get(r, "fee_item") or "运费",
                 amount=amount, unit="", note=_reg_note(get(r, "dept"), "", date, get(r, "note")), created_at=_now()))
             added += 1
     db.audit(u["name"], "物流复核-导入单据运费", period or "多期", "新增 %d 行 / 跳过 %d 行" % (added, skipped))

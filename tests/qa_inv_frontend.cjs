@@ -37,7 +37,7 @@ import InvSettings from '%SRC%/views/InvSettings.jsx'
 import InvPhone from '%SRC%/views/InvPhone.jsx'
 import InvSelf from '%SRC%/views/InvSelf.jsx'
 import InvVoucherJob from '%SRC%/views/InvVoucherJob.jsx'
-import { InvAuditPanel, IK_CSS } from '%SRC%/views/LogisticsIntake.jsx'
+import { IntakeStep, InvAuditPanel, IK_CSS } from '%SRC%/views/LogisticsIntake.jsx'
 import '%SRC%/styles.css'
 
 function ViewerSwitch({ items }) {
@@ -85,7 +85,12 @@ function InvAuditHarness(p) {
   return <div className="lrv"><style>{IK_CSS}</style><InvAuditPanel inv3={inv3} billOf={subject => p.bills[subject]} locked={p.locked}
     flash={text => window.__iaEvents.flashes.push(text)} onChanged={() => { window.__iaEvents.changed += 1 }} onLater={onLater} /></div>
 }
-const VIEWS = { LedgerShell, ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf, InvAuditHarness }
+function IntakeHarness(p) {
+  if (!window.__ikEvents) window.__ikEvents = { changed: 0, flashes: [] }
+  return <div className="lrv"><style>{IK_CSS}</style><IntakeStep {...p}
+    flash={text => window.__ikEvents.flashes.push(text)} onOpenBills={src => { window.__ikReplace = src || '' }} onChanged={() => { window.__ikEvents.changed += 1 }} /></div>
+}
+const VIEWS = { LedgerShell, ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf, InvAuditHarness, IntakeHarness }
 window.__mount = (name, props) => {
   const root = createRoot(document.getElementById('root'))
   root.render(React.createElement(VIEWS[name], props || {}))
@@ -2076,7 +2081,68 @@ test('后补池：管理员「以某人身份预览」整页查某人能选哪�
   await ctx.close()
 })
 
-// ───────────────────────── 物流复核 · 第4步发票审核 ─────────────────────────
+// ───────────────────────── 物流复核 · 数据接入与第4步发票审核 ─────────────────────────
+
+const ikLongName = '2026年9月华东区线上零售与线下仓配运费结算明细_含调拨退货附加费及超长客户项目代号ABCDEFGHIJKLMN.xlsx'
+const ikData = () => {
+  const srcs = ['线上&零售', '仓配', '调拨', '退货', '附加费']
+  const amounts = [12345.67, 2000, 300.5, 40, 5.25]
+  return {
+    ok: true, carrier: '合成物流', has_spec: true, verdict: 'ok', bill_total: amounts.reduce((a, b) => a + b, 0), req_total: 14691.42, diff: 0,
+    bills: srcs.map((src, i) => ({ src, amount: amounts[i], n_doc: 1 })), payreqs: [{ inst: 'IK-1' }],
+    files: srcs.map((src, i) => ({ id: i + 1, src, name: i === 0 ? ikLongName : `${src}账单.xlsx`, amount: 999999, origin: i % 2 ? '手工上传' : '钉钉自动接入', by: `操作人${i + 1}`, at: `2026-10-26 10:0${i}`, size: 2048 * (i + 1), report: { sheets: [] } })),
+    req_files: [{ role: 'bill' }, { role: 'stamp' }, { role: 'invoice' }, { role: 'invoice' }], history: [],
+  }
+}
+
+test('LIK1 数据接入5份原件紧凑列表：长名/金额/下载/重解析/锁定/390px', async (browser, B) => {
+  const data = ikData()
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const api = async c => {
+    if (c.path === '/api/logistics-review/reparse') { await gate; return { ok: true, detail: 8, before: 12345.67, after: 12345.67, notes: 0 } }
+    return { ok: true }
+  }
+  let r = await open(browser, B, api)
+  await mount(r.page, 'IntakeHarness', { data, period: '2026-09', locked: '' })
+  const rows = r.page.locator('.lik-raw tbody tr')
+  await rows.first().waitFor()
+  assert.equal(await rows.count(), 5)
+  assert.equal(await r.page.locator('.lik-srcgrid, .lik-files, .lik-file').count(), 0, '不再渲染原件卡片和双栏')
+  assert.equal(await rows.nth(0).locator('.lik-rawfile').getAttribute('title'), ikLongName)
+  assert.match(await rows.nth(0).locator('.num').first().innerText(), /12,345\.67/)
+  assert.match(await rows.nth(4).innerText(), /5\.25/, '金额必须取 data.bills，不取文件对象里的干扰金额')
+  const href = `/api/logistics-review/raw?carrier=${encodeURIComponent('合成物流')}&period=2026-09&src=${encodeURIComponent('线上&零售')}`
+  const dl = rows.nth(0).getByRole('link', { name: '下载原件' })
+  assert.equal(await dl.getAttribute('href'), href)
+  assert.equal(await dl.getAttribute('target'), '_blank')
+  assert.equal(await dl.getAttribute('rel'), 'noopener')
+  assert.match(await r.page.locator('.lik-reqfiles').innerText(), /4 份[\s\S]*3 类[\s\S]*发票 2[\s\S]*自动接入/)
+  await rows.nth(0).getByRole('button', { name: '替换', exact: true }).click()
+  assert.equal(await r.page.evaluate(() => window.__ikReplace), '线上&零售', '替换必须带当前份名')
+  await rows.nth(0).getByRole('button', { name: '重新解析' }).click()
+  await r.page.getByRole('button', { name: '解析中…' }).waitFor()
+  assert.equal(await r.page.locator('.lik-raw tbody button:disabled').count(), 10, 'busy 时五份都防重复解析')
+  release()
+  await r.page.waitForFunction(() => window.__ikEvents.changed === 1)
+  assert.ok(r.calls.some(c => c.path === '/api/logistics-review/reparse' && c.body.src === '线上&零售'))
+  await r.page.setViewportSize({ width: 390, height: 844 })
+  const size = await r.page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, width: innerWidth,
+    table: document.querySelector('.lik-rawwrap').scrollWidth, client: document.querySelector('.lik-rawwrap').clientWidth }))
+  assert.ok(size.scroll <= size.width, `390px 页面横溢：${JSON.stringify(size)}`)
+  assert.ok(size.table > size.client, '宽表格应在组件内部滚动')
+  assert.deepEqual(r.errors, [])
+  await r.ctx.close()
+
+  r = await open(browser, B, () => ({ ok: true }))
+  await mount(r.page, 'IntakeHarness', { data: ikData(), period: '2026-09', locked: '本月已锁定' })
+  await r.page.locator('.lik-raw tbody tr').first().waitFor()
+  assert.equal(await r.page.locator('.lik-raw tbody button:disabled').count(), 10, 'locked 禁用全部重新解析')
+  assert.equal(await r.page.getByRole('link', { name: '下载原件' }).count(), 5, '锁定仍允许下载只读原件')
+  assert.equal(r.calls.filter(c => c.path === '/api/logistics-review/reparse').length, 0)
+  assert.deepEqual(r.errors, [])
+  await r.ctx.close()
+})
 
 const iaItem = (o = {}) => ({ id: 501, number: 'INV-501', type_short: '专用发票', gross: 100, seller: '合成物流', buyer: '合成主体全称', paper: true, review: 'pending', ...o })
 const iaBlock = (o = {}) => ({ inst: 'IA-1', subject: '合成主体', subject_full: '合成主体全称', bid: 'BID-IA-1', applicant: '申请人甲', payee: '合成物流', amount: 100, inv_total: 100, inv_tax: 6, folder: 73, invoices: [iaItem()], later: false, ...o })
