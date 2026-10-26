@@ -36,6 +36,7 @@ import InvSettings from '%SRC%/views/InvSettings.jsx'
 import InvPhone from '%SRC%/views/InvPhone.jsx'
 import InvSelf from '%SRC%/views/InvSelf.jsx'
 import InvVoucherJob from '%SRC%/views/InvVoucherJob.jsx'
+import { InvAuditPanel, IK_CSS } from '%SRC%/views/LogisticsIntake.jsx'
 import '%SRC%/styles.css'
 
 function ViewerSwitch({ items }) {
@@ -73,7 +74,17 @@ function LedgerShell(p) {
     <InvVoucherJob enabled />
   </div>
 }
-const VIEWS = { LedgerShell, ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf }
+function InvAuditHarness(p) {
+  const [inv3, setInv3] = useState(p.inv3)
+  if (!window.__iaEvents) window.__iaEvents = { changed: 0, flashes: [], later: [] }
+  const onLater = (b, on) => {
+    window.__iaEvents.later.push({ inst: b.inst, on })
+    setInv3(old => ({ ...old, blocks: old.blocks.map(x => x.inst === b.inst ? { ...x, later: on } : x) }))
+  }
+  return <div className="lrv"><style>{IK_CSS}</style><InvAuditPanel inv3={inv3} billOf={subject => p.bills[subject]} locked={p.locked}
+    flash={text => window.__iaEvents.flashes.push(text)} onChanged={() => { window.__iaEvents.changed += 1 }} onLater={onLater} /></div>
+}
+const VIEWS = { LedgerShell, ViewerSwitch, StickyModal, ScanHarness, PairHarness, InvDesk, InvAudit, InvLedger, InvLater, InvSettings, InvPhone, InvSelf, InvAuditHarness }
 window.__mount = (name, props) => {
   const root = createRoot(document.getElementById('root'))
   root.render(React.createElement(VIEWS[name], props || {}))
@@ -2064,6 +2075,130 @@ test('后补池：管理员「以某人身份预览」整页查某人能选哪�
   await page.getByPlaceholder('钉钉上的姓名').fill('重名')
   await page.getByRole('button', { name: '查询', exact: true }).click()
   await page.getByRole('button', { name: '公司-B部' }).waitFor({ timeout: 4000 })
+  await ctx.close()
+})
+
+// ───────────────────────── 物流复核 · 第4步发票审核 ─────────────────────────
+
+const iaItem = (o = {}) => ({ id: 501, number: 'INV-501', type_short: '专用发票', gross: 100, seller: '合成物流', buyer: '合成主体全称', paper: true, review: 'pending', ...o })
+const iaBlock = (o = {}) => ({ inst: 'IA-1', subject: '合成主体', subject_full: '合成主体全称', bid: 'BID-IA-1', applicant: '申请人甲', payee: '合成物流', amount: 100, inv_total: 100, inv_tax: 6, folder: 73, invoices: [iaItem()], later: false, ...o })
+const iaData = blocks => ({ ok: true, req_total: blocks.reduce((a, b) => a + b.amount, 0), inv_total: blocks.reduce((a, b) => a + (b.inv_total || 0), 0), blocks })
+const iaBills = { 合成主体: 100, 无票主体: 100, 未登记主体: 100, 锁定后补: 100 }
+
+test('LIA1 看票按本单folder和本票id取完整item；弹窗审核失败不关、成功才关并刷新', async (browser, B) => {
+  let rejected = false
+  const api = c => {
+    if (c.path === '/api/inv/folder/73') return { ok: true, folder: { id: 73 }, items: [inv({ id: 999, number: 'WRONG' }), inv({ id: 501, number: 'INV-501', file: { preview: ['/img/ia-501.png'], thumb: '/img/ia-501.png', orig: '/api/inv/file/501' } })] }
+    if (c.path === '/api/inv/audit/items/approve') {
+      if (!rejected) { rejected = true; return { ok: false, msg: '合成审核拒绝' } }
+      return { ok: true, folderDone: false }
+    }
+    return { ok: true }
+  }
+  const { page, ctx, calls, errors } = await open(browser, B, api)
+  await mount(page, 'InvAuditHarness', { inv3: iaData([iaBlock({ invoices: [iaItem({ paper: false })] })]), bills: iaBills })
+  await page.locator('.lia-invoice').waitFor()
+  assert.equal(await page.locator('.lik-invwrap table').count(), 0, '有票区不再渲染宽表格')
+  assert.match(await page.getByRole('link', { name: '完整发票审核' }).getAttribute('href'), /^#\/invaudit\?folder=73$/)
+  await page.getByRole('button', { name: '看发票' }).click()
+  await page.locator('.inv-modal .inv-vw-wrap img').waitFor()
+  assert.match(await page.locator('.inv-modal .inv-vw-wrap img').getAttribute('src'), /ia-501\.png$/)
+  assert.equal(calls.filter(c => c.path.startsWith('/api/inv/folder/')).length, 1)
+  const footerApprove = page.locator('.inv-mfoot').getByRole('button', { name: '审核通过' })
+  await footerApprove.click()
+  await page.waitForFunction(() => window.__iaEvents.flashes.some(x => x.includes('合成审核拒绝')))
+  assert.equal(await page.locator('.inv-modal').count(), 1, '审核失败不能误关弹窗')
+  await footerApprove.click()
+  await page.waitForFunction(() => !document.querySelector('.inv-modal'))
+  const approvals = calls.filter(c => c.path === '/api/inv/audit/items/approve')
+  assert.equal(approvals.length, 2)
+  assert.deepEqual(approvals[1].body, { folderId: 73, itemIds: [501] })
+  assert.equal(await page.evaluate(() => window.__iaEvents.changed), 1, '只有成功审核触发onChanged')
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('LIA2 金额差及销购方异常清楚展示并禁用审核', async (browser, B) => {
+  const block = iaBlock({ inv_total: 120, invoices: [iaItem({ gross: 120, seller: '错误销方', buyer: '错误购方' })] })
+  const { page, ctx, calls, errors } = await open(browser, B, () => ({ ok: true }))
+  await mount(page, 'InvAuditHarness', { inv3: iaData([block]), bills: { ...iaBills, 合成主体: 90 } })
+  await page.getByText('发票－请款 20.00', { exact: false }).waitFor()
+  await page.getByText('账单－请款 -10.00', { exact: false }).waitFor()
+  await page.getByText('销方异常：错误销方 ≠ 收款方 合成物流', { exact: false }).waitFor()
+  await page.getByText('购方异常：错误购方 ≠ 请款主体 合成主体全称', { exact: false }).waitFor()
+  assert.equal(await page.getByRole('button', { name: '审核通过' }).isDisabled(), true)
+  assert.equal(calls.filter(c => c.path === '/api/inv/audit/items/approve').length, 0)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('LIA3 无票后补可确认和撤销；未登记单给后补池入口', async (browser, B) => {
+  const blocks = [iaBlock({ inst: 'IA-L1', subject: '无票主体', invoices: [], inv_total: 0, later_slip: { id: 31, filed_by: '登记人乙', expect_date: '2026-11-01' } }), iaBlock({ inst: 'IA-L2', subject: '未登记主体', invoices: [], inv_total: 0, later_slip: null })]
+  const { page, ctx, errors } = await open(browser, B, () => ({ ok: true }))
+  await mount(page, 'InvAuditHarness', { inv3: iaData(blocks), bills: iaBills })
+  await page.getByText('后补单 #31 · 登记人 登记人乙 · 预计到票 2026-11-01', { exact: false }).waitFor()
+  await page.getByRole('button', { name: '确认发票后补' }).click()
+  await page.getByText('✓ 发票后补已确认', { exact: false }).waitFor()
+  await page.getByRole('button', { name: '撤销确认' }).click()
+  await page.getByRole('button', { name: '确认发票后补' }).waitFor()
+  assert.deepEqual(await page.evaluate(() => window.__iaEvents.later), [{ inst: 'IA-L1', on: true }, { inst: 'IA-L1', on: false }])
+  await page.locator('.lia-qitem', { hasText: '未登记主体' }).click()
+  assert.equal(await page.getByRole('link', { name: '打开后补池' }).getAttribute('href'), '#/invlater')
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('LIA4 locked同时禁用审核和后补操作', async (browser, B) => {
+  const blocks = [iaBlock({ invoices: [iaItem({ paper: false })] }), iaBlock({ inst: 'IA-L4', subject: '锁定后补', invoices: [], inv_total: 0, later_slip: { id: 44, filed_by: '登记人丙', expect_date: '2026-11-02' } })]
+  const { page, ctx, calls, errors } = await open(browser, B, () => ({ ok: true }))
+  await mount(page, 'InvAuditHarness', { inv3: iaData(blocks), bills: iaBills, locked: '本月已锁定' })
+  await page.locator('.lia-invoice').waitFor()
+  assert.equal(await page.getByRole('button', { name: '审核通过' }).isDisabled(), true)
+  await page.locator('.lia-qitem', { hasText: '锁定后补' }).click()
+  assert.equal(await page.getByRole('button', { name: '确认发票后补' }).isDisabled(), true)
+  assert.equal(calls.filter(c => c.path === '/api/inv/audit/items/approve').length, 0)
+  assert.deepEqual(await page.evaluate(() => window.__iaEvents.later), [])
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('LIA5 390px窄屏不横向溢出，看票按钮保持可见可聚焦', async (browser, B) => {
+  const { page, ctx, errors } = await open(browser, B, c => c.path === '/api/inv/folder/73' ? { ok: true, items: [inv({ id: 501, file: { preview: ['/img/narrow.png'] } })] } : { ok: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mount(page, 'InvAuditHarness', { inv3: iaData([iaBlock()]), bills: iaBills })
+  const view = page.getByRole('button', { name: '看发票' })
+  await view.waitFor()
+  assert.ok(await view.isVisible())
+  await view.focus()
+  assert.equal(await view.evaluate(el => document.activeElement === el), true)
+  const size = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, width: window.innerWidth }))
+  assert.ok(size.scroll <= size.width, `窄屏横向溢出：scrollWidth=${size.scroll}, innerWidth=${size.width}`)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('LIA6 已完成请款单仍保留发票卡片和看票入口，已审核即已收到', async (browser, B) => {
+  const { page, ctx, errors } = await open(browser, B, () => ({ ok: true }))
+  await mount(page, 'InvAuditHarness', { inv3: iaData([iaBlock({ invoices: [iaItem({ review: 'approved', paper: false })] })]), bills: iaBills })
+  await page.getByText('已完成：金额、销购方与发票审核均通过').waitFor()
+  assert.ok(await page.locator('.lia-invoice').isVisible())
+  assert.ok(await page.getByRole('button', { name: '看发票' }).isVisible())
+  assert.ok(await page.getByText('已审核', { exact: true }).isVisible())
+  assert.equal(await page.getByText('未收到', { exact: true }).count(), 0)
+  assert.equal(await page.getByRole('button', { name: '审核通过', exact: true }).count(), 0)
+  assert.deepEqual(errors, [])
+  await ctx.close()
+})
+
+test('LIA7 未审核即未收到，不再有独立纸质票登记或撤销', async (browser, B) => {
+  const { page, ctx, calls, errors } = await open(browser, B, () => ({ ok: true }))
+  await mount(page, 'InvAuditHarness', { inv3: iaData([iaBlock({ invoices: [iaItem({ paper: true })] })]), bills: iaBills })
+  await page.getByText('未收到', { exact: true }).waitFor()
+  assert.equal(await page.getByRole('button', { name: '纸质票登记', exact: true }).count(), 0)
+  assert.equal(await page.getByRole('button', { name: '撤销收到', exact: true }).count(), 0)
+  assert.equal(await page.getByRole('button', { name: '审核通过', exact: true }).isDisabled(), false)
+  assert.equal(calls.filter(c => c.path === '/api/inv/paper/mark').length, 0)
+  assert.deepEqual(errors, [])
   await ctx.close()
 })
 
