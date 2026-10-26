@@ -56,8 +56,8 @@ const ctx = {
   FEE_CANON: ['出库运费'], withCur: (a, x) => a.includes(x) ? a : [x, ...a], onDupOk() {},
 }
 const root = createRoot(document.getElementById('root'))
-window.__mount = x => root.render(React.createElement(DocDialog, {
-  x, c: null, dup: null, pos: 1, total: 1, onPrev: null, onNext: null,
+window.__mount = (x, c = null) => root.render(React.createElement(DocDialog, {
+  x, c, dup: null, pos: 1, total: 1, onPrev: null, onNext: null,
   onClose() {}, locked: false, ctx,
 }))
 `)
@@ -69,7 +69,7 @@ esbuild.buildSync({
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'C:/Users/94899/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')
 
 async function main() {
-  const browser = await chromium.launch({ headless: true, channel: 'msedge' })
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   try {
     const page = await browser.newPage()
     const errors = []
@@ -90,8 +90,21 @@ async function main() {
       await page.locator('.ldd-dlg').waitFor()
       assert.match(await page.locator('.ldd-vbar').innerText(), new RegExp(expected))
     }
+    for (const [source, label] of [
+      ['raw', '物流原文'], ['default', '系统默认（取数说明）'], ['none', '未标注'],
+      ['manual', '人工登记'], [null, '历史标注·来源未记录'],
+    ]) {
+      await page.evaluate(({ d, source }) => window.__mount(d, {
+        v: '归类一致', sys: '深圳星期零 · 零售', sys_d: '', annot: '销售单-零售其他', annot_source: source,
+        bill: '深圳星期零 · 零售', bill_d: '', diff: [], acc_miss: false, hint: '', txt: '', unk: '', how: [], amount: 21,
+      }), { d: doc, source })
+      const text = await page.locator('.ldd-chain').innerText()
+      assert.match(text, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+      assert.doesNotMatch(text, /物流部标注/)
+      if (source === 'default' || source === 'none') assert.doesNotMatch(text, /要改/)
+    }
     assert.deepEqual(errors, [])
-    console.log('物流逐单回归通过：双轴、仅核价、仅核量的判定与真实弹窗渲染均正常')
+    console.log('物流逐单回归通过：双轴、仅核价、仅核量及五种标注来源文案的真实 Chrome 弹窗渲染均正常')
   } finally {
     await browser.close()
   }

@@ -22,12 +22,14 @@ router = APIRouter()
 BL, BR, SP, PR = LR.BL, LR.BR, LR.SP, store.payreq
 _REP = {}                   # {(承运商, 账期, 份名, 原件sha, 取数说明sha): 报告}
 _REP_LOCK = threading.Lock()
+_REPORT_ALGORITHM = "sheet-round-v1"
 
 
 def _spec_sha(spec):
     s = dict(spec or {})
     s.pop("period", None)      # 账期是请求级塞进来的，不属于取数说明内容
-    return hashlib.sha256(json.dumps(s, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    payload = {"algorithm": _REPORT_ALGORITHM, "spec": s}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
 def _how(spec):
@@ -250,8 +252,9 @@ def reparse(carrier, period, src, operator):
         return JSONResponse({"ok": False, "msg": "这一份账单没存原件（V2.843 之前导入的没存），请重新上传"}, status_code=404)
     raw = raws[-1]
     with db._engine.connect() as c:
-        old = [dict(r) for r in c.execute(select(BL.c.doc_no, BL.c.note, BL.c.amount, BL.c.grain).where(LR._src_scope(carrier, period, src))).mappings().all()]
-    before = round(sum(float(r["amount"] or 0) for r in old if r["grain"] == "detail"), 2)
+        old = [dict(r) for r in c.execute(select(BL.c.doc_no, BL.c.note, BL.c.amount, BL.c.grain, BL.c.bill_src, BL.c.src_sheet).where(
+            LR._src_scope(carrier, period, src))).mappings().all()]
+    before = intake.sheet_round_sum([r for r in old if r["grain"] == "detail"])
     notes = {}
     for r in old:
         if r.get("doc_no") and (r.get("note") or "").strip():
@@ -264,8 +267,9 @@ def reparse(carrier, period, src, operator):
             for dno, nt in notes.items():
                 c.execute(update(BL).where(LR._src_scope(carrier, period, (res.get("bill_src") or "").strip()) & (BL.c.doc_no == dno)).values(note=nt))
     with db._engine.connect() as c:
-        after = round(sum(float(r[0] or 0) for r in c.execute(select(BL.c.amount).where(
-            LR._src_scope(carrier, period, (res.get("bill_src") or "").strip()) & (BL.c.grain == "detail"))).all()), 2)
+        after_rows = [dict(r) for r in c.execute(select(BL.c.amount, BL.c.bill_src, BL.c.src_sheet).where(
+            LR._src_scope(carrier, period, (res.get("bill_src") or "").strip()) & (BL.c.grain == "detail"))).mappings().all()]
+        after = intake.sheet_round_sum(after_rows)
     db.audit(operator, "物流复核-用原件重新解析", "%s %s" % (carrier, period),
              "「%s」%s：明细 %d 行，合计 %.2f → %.2f；备注写回 %d 张" % (src or "（未标份名）", raw.get("name") or "", res.get("detail") or 0, before, after, len(notes)))
     LR._bust(carrier, period)

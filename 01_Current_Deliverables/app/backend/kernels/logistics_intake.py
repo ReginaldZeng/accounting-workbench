@@ -27,6 +27,25 @@ def _f(v):
         return None
 
 
+def sheet_round_sum(rows, group_key=None):
+    """账单金额按 (可选业务分组, bill_src, 物理src_sheet) 汇总到分，再加各小计。"""
+    buckets = {}
+    for r in rows:
+        biz = group_key(r) if callable(group_key) else (r.get(group_key) if group_key else None)
+        k = (biz, r.get("bill_src") or "", r.get("src_sheet") or "")
+        buckets[k] = buckets.get(k, 0.0) + float(r.get("amount") or 0)
+    return round(sum(round(v, 2) for v in buckets.values()), 2)
+
+
+def sheet_round_groups(rows, group_key):
+    """各业务分组分别按物理 sheet 取整；各组之和与 sheet_round_sum(..., group_key) 一致。"""
+    groups = {}
+    for r in rows:
+        k = group_key(r) if callable(group_key) else r.get(group_key)
+        groups.setdefault(k, []).append(r)
+    return {k: sheet_round_sum(rs, group_key) for k, rs in groups.items()}
+
+
 def match_sheet(spec_name, real_name):
     """spec 里的 name 支持精确、前缀 * 通配、和 | 分隔的正则关键词。"""
     if spec_name == real_name:
@@ -304,11 +323,12 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
                      "note": (_s(r[c_ky["note_col"]]) if c_ky["note_col"] is not None and c_ky["note_col"] < len(r) else "")}
             if _kraw["formula"] or _kraw["orig"] is not None:
                 sub[KY_SUBKEY] = json.dumps({k: v for k, v in _kraw.items() if v not in ("", None)}, ensure_ascii=False)
+        annot, annot_source = _annot_of(sp, r, c_annot)
         row = {
             "period": period, "carrier": carrier, "grain": "detail",
             "subject": _subject(sp.get("subject"), r, hdr),
             "doc_no": "+".join(split_nos(doc)) if doc and doc != "无单据" else doc,
-            "annot": _annot_of(sp, r, c_annot), "fee_item": sp.get("fee_item", ""),
+            "annot": annot, "annot_source": annot_source, "fee_item": sp.get("fee_item", ""),
             "fee": _s(r[c_fee]) if c_fee is not None and c_fee < len(r) else "",
             "qty": _f(r[c_qty]) if c_qty is not None and c_qty < len(r) else None,
             "unit": sp.get("qty_unit", ""),
@@ -397,12 +417,13 @@ def _merge_doc(rows):
 
 
 def _annot_of(sp, r, c_annot):
-    """标注：spec.annot_col 取该列(可配 annot_map 改写、annot_fmt 套模板如 仓储费-{})，否则用固定 annot。"""
+    """→ (标注, 来源)。原列非空即 raw（含 map/fmt 后）；缺列或空白才回退取数说明。"""
     if c_annot is None or c_annot >= len(r) or not _s(r[c_annot]):
-        return sp.get("annot", "")
+        annot = sp.get("annot", "")
+        return annot, "default" if annot else "none"
     v = _s(r[c_annot])
     v = (sp.get("annot_map") or {}).get(v, v)
-    return sp.get("annot_fmt", "{}").format(v)
+    return sp.get("annot_fmt", "{}").format(v), "raw"
 
 
 def _is_idx(v):
@@ -447,7 +468,7 @@ def parse_accrual_sheet(sp, ws, period, carrier):
                             amt, qty = jn[-1], (max(jn[:-1], default=None) if len(jn) > 1 else None)
                         break
             out.append({"period": period, "carrier": carrier, "grain": "accrual", "subject": subj,
-                        "doc_no": "", "annot": fee_map[label], "fee_item": label,
+                        "doc_no": "", "annot": fee_map[label], "annot_source": "default", "fee_item": label,
                         "qty": qty, "unit": "", "amount": amt, "src_sheet": ws.title, "src_row": ri + 1})
             continue
         # 表格常从 B 列起(A 列空)：按每行第一个非空格判断段头/序号
@@ -463,7 +484,7 @@ def parse_accrual_sheet(sp, ws, period, carrier):
             if not name or not nums or not nums[-1]:
                 continue
             out.append({"period": period, "carrier": carrier, "grain": "accrual", "subject": subj,
-                        "doc_no": "", "annot": dflt, "fee_item": name,
+                        "doc_no": "", "annot": dflt, "annot_source": "default", "fee_item": name,
                         "qty": (max(nums[:-1]) if len(nums) > 1 else None), "unit": "", "amount": nums[-1],
                         "src_sheet": ws.title, "src_row": ri + 1})
     return out
@@ -748,6 +769,6 @@ def sheet_report(spec, data, period=""):
     n_pre = sum(x.get("n") or 0 for x in out if x["role"] == "detail")
     rank = {"gap": 4, "maybe": 3, "unsplit": 2, "nocheck": 1, "ok": 0}
     vs = [x["verdict"] for x in out if x["role"] == "detail"]
-    return {"sheets": out, "n": len(full["detail"]), "amount": round(sum(float(r.get("amount") or 0) for r in full["detail"]), 2),
-            "accrual": round(sum(float(r.get("amount") or 0) for r in full["accrual"]), 2), "dup_rows": max(0, n_pre - len(full["detail"])),
+    return {"sheets": out, "n": len(full["detail"]), "amount": sheet_round_sum(full["detail"]),
+            "accrual": sheet_round_sum(full["accrual"]), "dup_rows": max(0, n_pre - len(full["detail"])),
             "bill_src": full.get("bill_src") or "", "verdict": max(vs, key=lambda v: rank.get(v, 0)) if vs else "nocheck"}

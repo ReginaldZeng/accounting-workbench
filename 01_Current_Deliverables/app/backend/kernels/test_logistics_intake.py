@@ -121,6 +121,76 @@ class TotalCol(unittest.TestCase):
         self.assertEqual(got["QTCK000002"]["amount"], 91.6)
 
 
+class AnnotSource(unittest.TestCase):
+    def _detail_book(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "明细"
+        ws.append(["金蝶单号", "金额", "标注"])
+        ws.append(["XSCKD1", 1.234567, "原词"])
+        ws.append(["XSCKD2", 2.345678, " "])
+        bio = io.BytesIO()
+        wb.save(bio)
+        return bio.getvalue()
+
+    def _spec(self, **kw):
+        sp = {"name": "明细", "role": "detail", "doc_col": "金蝶单号", "amount_col": "金额", "amount_dp": 6,
+              "annot_col": "标注", "annot_map": {"原词": "映射"}, "annot_fmt": "仓储费-{}"}
+        sp.update(kw)
+        return {"carrier": "合成", "period": "2026-09", "sheets": [sp]}
+
+    def test_raw_default_none_and_amount_dp(self):
+        got = li.parse_bill(self._spec(annot="采购入库-植物肉"), self._detail_book())["detail"]
+        self.assertEqual((got[0]["annot"], got[0]["annot_source"]), ("仓储费-映射", "raw"))
+        self.assertEqual((got[1]["annot"], got[1]["annot_source"]), ("采购入库-植物肉", "default"))
+        self.assertEqual(got[0]["amount"], 1.234567)
+        self.assertEqual(got[1]["amount"], 2.345678)
+        no_default = li.parse_bill(self._spec(annot_fmt="{}"), self._detail_book())["detail"]
+        self.assertEqual((no_default[1]["annot"], no_default[1]["annot_source"]), ("", "none"))
+        no_column = li.parse_bill(self._spec(annot_col=None), self._detail_book())["detail"]
+        self.assertEqual(no_column[0]["annot_source"], "none")
+
+    def test_accrual_fee_map_and_default_annot_are_default(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "汇总"
+        ws.append(["快递费", 2, 10])
+        ws.append([1, "卸货", 3, 20])
+        sp = {"fee_map": {"快递费": "销售出库单-电商"}, "default_annot": "销售出库单-电商"}
+        got = li.parse_accrual_sheet(sp, ws, "2026-09", "合成")
+        self.assertEqual([r["annot_source"] for r in got], ["default", "default"])
+
+
+class SheetRoundedTotal(unittest.TestCase):
+    def test_real_four_sheet_tail_difference(self):
+        amounts = [("蜜雪", 18222.50), ("植物肉", 547.779711), ("小料", 23384.9028), ("分步", 286.114155)]
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        sheets = []
+        for name, amount in amounts:
+            ws = wb.create_sheet(name)
+            ws.append(["金蝶单号", "金额"])
+            ws.append(["无单据", amount])
+            sheets.append({"name": name, "role": "detail", "doc_col": "金蝶单号", "amount_col": "金额", "amount_dp": 6})
+        bio = io.BytesIO()
+        wb.save(bio)
+        spec = {"carrier": "天鹰物流", "period": "2026-09", "sheets": sheets}
+        full = li.parse_bill(spec, bio.getvalue())
+        self.assertEqual([r["amount"] for r in full["detail"]], [x[1] for x in amounts])
+        self.assertEqual(round(sum(x[1] for x in amounts), 2), 42441.30)
+        self.assertEqual(li.sheet_round_sum(full["detail"]), 42441.29)
+        self.assertEqual(li.sheet_report(spec, bio.getvalue(), "2026-09")["amount"], 42441.29)
+        grouped = li.sheet_round_groups(full["detail"], lambda r: "同一业务")
+        self.assertEqual(grouped, {"同一业务": 42441.29})
+        self.assertEqual(round(sum(grouped.values()), 2), li.sheet_round_sum(full["detail"], lambda r: "同一业务"))
+
+    def test_blank_src_sheet_is_a_physical_bucket(self):
+        rows = [{"amount": 0.004, "src_sheet": ""}, {"amount": 0.004, "src_sheet": None}]
+        self.assertEqual(li.sheet_round_sum(rows), 0.01)
+        rows[1]["src_sheet"] = "另一页"
+        self.assertEqual(li.sheet_round_sum(rows), 0.0)
+
+
 class SheetReport(unittest.TestCase):
     """V2.989 复核台第①步「读全没有」：算钱的列加起来对账单自己的合计列。合成数据(仿跨越 9 月新加退仓费那一页)。"""
 

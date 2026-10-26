@@ -6,6 +6,7 @@
 #   给中间表 detail 行配 价格卡 + 金蝶数量 → 标准费/核价差/核价态 + 核量差/核量态 → 归一态。accrual 行按费用项汇总供计提。
 #   实证：迅鸽 2026-08 逐单，核价 5706/5711 一致·0 多收；核量按件 5116/5458 一致、342 不符、260 金蝶查无（2026-09-26 验）。
 from kernels import logistics_price as lp
+from kernels import logistics_intake as intake
 
 # 归一态：pass 两轴过 / price 多收 / gap 价卡缺 / free 账单未收(我方有利) / qty 数量存疑
 _TOL = 0.01
@@ -97,13 +98,13 @@ def review_details(rows, card, kd_qty_map, exact=False):
 def summarize(rows):
     """费用项汇总（核价×核量）+ 归一态计数。rows=复核后的 detail 行。"""
     fees = {}
+    bills = intake.sheet_round_groups(rows, lambda r: r.get("fee_item") or "其它")
     for r in rows:
         fi = r.get("fee_item") or "其它"
         f = fees.setdefault(fi, {"fee_item": fi, "bill": 0.0, "std": 0.0, "std_known": False,
                                  "n": 0, "price_ok": 0, "over": 0, "gap": 0, "free": 0,
                                  "qty_ok": 0, "qtydiff": 0, "miss": 0})
         f["n"] += 1
-        f["bill"] += r.get("amount") or 0
         if r.get("std_amount") is not None:
             f["std"] += r["std_amount"]
             f["std_known"] = True
@@ -115,7 +116,7 @@ def summarize(rows):
                 f[k] += 1
     out = []
     for f in fees.values():
-        f["bill"] = round(f["bill"], 2)
+        f["bill"] = bills[f["fee_item"]]
         f["std"] = round(f["std"], 2) if f["std_known"] else None
         f["diff"] = round(f["bill"] - f["std"], 2) if f["std"] is not None else None
         out.append(f)

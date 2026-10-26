@@ -17,6 +17,8 @@ const isZero = d => d != null && Math.abs(d) < 0.01
 const r2 = v => Math.round(v * 100) / 100
 
 export const CLS_PILL = { 归类一致: 'ok', 标注不对: 'bad', 计提记错: 'warn', 判不了: 'neu' }
+export const ANNOT_SOURCE = { raw: '物流原文', default: '系统默认（取数说明）', none: '未标注', manual: '人工登记' }
+export const annotSourceText = source => Object.prototype.hasOwnProperty.call(ANNOT_SOURCE, source) ? ANNOT_SOURCE[source] : '历史标注·来源未记录'
 const CLS_TODO = new Set(['标注不对', '计提记错'])
 export const V_PILL = { 多收: 'bad', 少收: 'blue', 价待确认: 'warn', 量核不了: 'orange', 只核了价: 'neu', 未核量: 'neu', 未核价: 'neu', 一致: 'ok' }
 
@@ -334,15 +336,15 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
             : <div className={'ldd-chain' + (CLS_TODO.has(c.v) ? ' bad' : '')}>
               {c.v === '判不了'
                 ? <><span className="nd"><span className="h">金蝶推</span><b className="ldd-q">判不了</b> <Mk k="tbd" /></span><span className="ar">→</span>
-                  <span className="nd"><span className="h">认物流部标注</span><b>{c.annot || '（没标）'}</b>{c.bill ? ' → ' + c.bill : ''}</span>
+                  <span className="nd"><span className="h">账单侧归类 · {annotSourceText(c.annot_source)}</span><b>{c.annot || '（没标）'}</b>{c.bill ? ' → ' + c.bill : ''}</span>
                   <span className="acct">原因：{c.unk}</span></>
                 : <><span className="nd"><span className="h">金蝶推</span><b>{c.sys}</b> <Mk k="ok" /></span>
                   <span className={'ar' + (c.v === '标注不对' ? ' bad' : '')}>{c.v === '标注不对' ? '≠' : '＝'}</span>
-                  <span className="nd"><span className="h">物流部标注</span><b>{c.annot || '（没标）'}</b>{c.v === '标注不对' ? <> → {c.bill} <Mk k="bad" /></> : <> <Mk k="ok" /></>}</span>
+                  <span className="nd"><span className="h">账单侧归类 · {annotSourceText(c.annot_source)}</span><b>{c.annot || '（没标）'}</b>{c.v === '标注不对' ? <> → {c.bill} <Mk k="bad" /></> : <> <Mk k="ok" /></>}</span>
                   <span className={'ar' + (c.acc_miss ? ' bad' : '')}>→</span>
                   <span className="nd"><span className="h">本月计提</span>{c.acc_miss ? <>没有「{c.sys}」这一列 <Mk k="bad" /></> : <>有「{c.sys}」这一列 <Mk k="ok" /></>}</span>
                   <span className="acct">{c.sys_d}</span>
-                  {c.v === '标注不对' && <span className="todo">要改：物流部标注改成「{c.sys}」{c.acc_miss ? `；本月计提多半跟着标注记在「${c.bill}」，到第③步登记计提更正 ${money(c.amount)}` : '；本月计提已经有这一列，计提不用动'}</span>}
+                  {c.v === '标注不对' && <span className="todo">要改：账单侧归类改成「{c.sys}」{c.acc_miss ? `；本月计提多半跟着标注记在「${c.bill}」，到第③步登记计提更正 ${money(c.amount)}` : '；本月计提已经有这一列，计提不用动'}</span>}
                   {c.v === '计提记错' && <span className="todo">要改：本月计提没有「{c.sys}」，到第③步登记计提更正 {money(c.amount)}</span>}
                   {c.v === '归类一致' && c.txt && <span className="acct">{c.txt}</span>}</>}
               {(c.how || []).length > 0 && <details className="ldd-how"><summary>怎么推的</summary><ul>{c.how.map((h, i) => <li key={i}>{h}</li>)}</ul>{c.subj_note && <div>{c.subj_note}</div>}</details>}
@@ -410,7 +412,7 @@ export function AccrTabDialog({ tab, carrier, period, onClose }) {
   return <Dlg title={`和本月计提对照 · ${carrier} ${period}`} onClose={onClose} wide>
     <p className="ldd-p">同一家、同一个月，按计提的列（凭证行）加总。「账单 · 按系统判」那一列和计提差得多、又不是金额估算差的（标黄），就是计提归错了列——到第③步登记计提更正。</p>
     <div className="ldd-tw"><table className="ldd-ctab">
-      <thead><tr><th>计提列（凭证行）</th><th className="num">本月计提</th><th className="num">账单 · 按物流部标注</th><th className="num">账单 · 按系统判</th><th className="num">系统 − 计提</th></tr></thead>
+      <thead><tr><th>计提列（凭证行）</th><th className="num">本月计提</th><th className="num">账单 · 按账单侧归类</th><th className="num">账单 · 按系统判</th><th className="num">系统 − 计提</th></tr></thead>
       <tbody>{T.map((x, i) => <tr key={i} className={x.hot ? 'hot' : ''}><td>{x.name}<div className="d">{x.desc}</div></td>
         <td className="num">{x.accr ? money(x.accr) : <span className="dim">—</span>}</td>
         <td className="num">{x.by_bill ? <>{money(x.by_bill)} <span className="d">{x.n_bill} 张</span></> : <span className="dim">—</span>}</td>
@@ -418,7 +420,7 @@ export function AccrTabDialog({ tab, carrier, period, onClose }) {
         <td className="num">{sg(x.d_sys)}</td></tr>)}</tbody>
       <tfoot><tr><td>合计</td><td className="num">{money(sum('accr'))}</td><td className="num">{money(sum('by_bill'))}</td><td className="num">{money(sum('by_sys'))}</td><td className="num">{sg(sum('by_sys') - sum('accr'))}</td></tr></tfoot>
     </table></div>
-    <p className="ldd-p dim">「判不了」的单按物流部标注放。计提和账单合计的差是估算差，归第③步管。张数按账单行数。</p>
+    <p className="ldd-p dim">「判不了」的单按账单侧归类放。计提和账单合计的差是估算差，归第③步管。张数按账单行数。</p>
   </Dlg>
 }
 
@@ -504,11 +506,11 @@ export function RulesDialog({ load, save, onClose, onSaved, locked }) {
   const gb = Object.entries(c.group_biz), ow = Object.entries(c.outside_wh || {})
   const doSave = cfg => { setBusy(true); setErr(''); save(cfg).then(r => { setR(o => ({ ...o, cfg: r.cfg, customized: !!cfg })); onSaved() }).catch(e => setErr(e.message)).finally(() => setBusy(false)) }
   return <Dlg title="归类规则" onClose={onClose} wide>
-    <p className="ldd-p">每张单按金蝶单据推「应记哪一行」，再和物流部标注、本月计提比。比的是凭证上落哪一行：主体＋科目＋部门＋费用项目＋产品分类。改了这里，各家各月的归类马上按新规则重算。{R.customized ? '（现在用的是改过的规则）' : '（现在用的是默认规则）'}</p>
+    <p className="ldd-p">每张单按金蝶单据推「应记哪一行」，再和账单侧归类、本月计提比。比的是凭证上落哪一行：主体＋科目＋部门＋费用项目＋产品分类。改了这里，各家各月的归类马上按新规则重算。{R.customized ? '（现在用的是改过的规则）' : '（现在用的是默认规则）'}</p>
     <div className="ldd-rule"><h4>主体、费用类型（固定口径）</h4>
       <ul className="ldd-ul">
         <li>销售出库单 → 出库运费，主体看<b>销售组织</b>；销售退货单按出库运费。</li>
-        <li>其他出库单 → 领料部门是研发中心算<b>研发外购</b>，其余出库运费；主体<b>金蝶判不了</b>（都开在孝感库存组织下），认物流部填的。</li>
+        <li>其他出库单 → 领料部门是研发中心算<b>研发外购</b>，其余出库运费；主体<b>金蝶判不了</b>（都开在孝感库存组织下），认账单填的主体。</li>
         <li>采购入库 / 退料 → 入库运费，主体看需求组织；分步式调拨 → 入库运费，主体看调入组织（下面的仓库规则可以改）。</li>
         <li>孝感入库记哪一列：小料→小料入库(5101 茶饮小料部)；植物肉→孝感工厂入库(5101 仓储物流部)；鲜食→山姆鲜食入库(6401)；零售→零售入库(6401)。</li>
       </ul></div>

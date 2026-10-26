@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.responses import JSONResponse
+from sqlalchemy.sql import compiler as _sqla_compiler
+from sqlalchemy.sql import operators as _sqla_operators
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "01_Current_Deliverables" / "app" / "backend"
@@ -394,6 +396,106 @@ class ExportCacheTests(unittest.TestCase):
         self.assertEqual(out.status_code, 200)
         wb = load_workbook(BytesIO(out.body), read_only=True)
         self.assertEqual(wb.sheetnames, ["复核表", "复核明细"])
+
+
+class SheetRoundingApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def setUp(self):
+        from sqlalchemy import create_engine
+        from kernels import logistics_review_store as store
+        self.old_engine = self.lr.db._engine
+        self.engine = create_engine("sqlite:///:memory:")
+        store._md.create_all(self.engine)
+        self.lr.db._engine = self.engine
+        amounts = [("蜜雪", 18222.50), ("植物肉", 547.779711), ("小料", 23384.9028), ("分步", 286.114155)]
+        with self.engine.begin() as c:
+            for sheet, amount in amounts:
+                c.execute(self.lr.BL.insert().values(
+                    period="2026-09", carrier="甲", grain="detail", subject="深圳星期零", doc_no="无单据",
+                    fee_item="入库运费", annot="采购入库-植物肉", annot_source="default", bizline="植物肉",
+                    amount=amount, bill_src="天鹰", src_sheet=sheet))
+
+    def tearDown(self):
+        self.lr.db._engine = self.old_engine
+        self.engine.dispose()
+
+    def _lines(self):
+        entry = {"subject": "深圳星期零", "fee_norm": "入库运费", "fee": "入库运费", "amt": 42441.29,
+                 "biz": "植物肉", "key": "记-1|深圳星期零", "vno": "记-1", "book_code": "100"}
+        got = {"entries": [entry], "adj": [], "prior": []}
+        with patch.object(self.lr, "_accr_entries", return_value=got), \
+             patch.object(self.lr, "_dept_biz_rules", return_value=({}, {})), \
+             patch.object(self.lr, "_backfill_subjects", lambda *args, **kwargs: None), \
+             patch.object(self.lr, "_xsubj_hints", return_value={}), \
+             patch.object(self.lr, "_subj_marks", return_value={}):
+            return self.lr._build_lines(_Request(), "甲", "2026-09")
+
+    def test_build_lines_totals_and_readiness_share_sheet_rounding(self):
+        out = self._lines()
+        self.assertEqual(round(18222.50 + 547.779711 + 23384.9028 + 286.114155, 2), 42441.30)
+        self.assertEqual(out["bill_total"], 42441.29)
+        totals = [r for r in out["rows"] if r.get("kind") == "gtotal"]
+        self.assertEqual(len(totals), 1)
+        self.assertEqual(totals[0]["bill"], 42441.29)
+        self.assertEqual(totals[0]["diff"], 0)
+        self.assertEqual(out["diff_total"], 0)
+        totals[0]["mark"] = {"status": "ok", "dv": ""}
+        step = self.lr.lready.evaluate("甲", "2026-09", lines=out)["steps"]["lines"]
+        self.assertEqual(step["status"], "ok")
+
+    def test_bills_api_uses_sheet_rounded_amount(self):
+        with patch.object(self.lr, "_perm", return_value={"name": "测试"}), \
+             patch.object(self.lr, "_signed", return_value=None), patch.object(self.lr, "_load_spec", return_value={}):
+            out = self.lr.review_bills(_Request(), "甲", "2026-09")
+        self.assertEqual(out["bills"][0]["amount"], 42441.29)
+        self.assertEqual(out["bills"][0]["n_detail"], 4)
+
+    def test_report_cache_key_contains_algorithm_version(self):
+        core = types.ModuleType("core")
+        core.JSONResponse = JSONResponse
+        core._require_perm = lambda *_: {"name": "测试"}
+        core.db = self.lr.db
+        with patch.dict(sys.modules, {"core": core, "routers.logistics_review": self.lr}):
+            from routers import logistics_intake_check as lic
+            spec = {"sheets": []}
+            old = lic._spec_sha(spec)
+            with patch.object(lic, "_REPORT_ALGORITHM", "sheet-round-v2"):
+                self.assertNotEqual(lic._spec_sha(spec), old)
+
+    def test_classify_merge_keeps_annot_and_source_from_same_row(self):
+        with self.engine.begin() as c:
+            for source, annot in (("default", "销售单-植物肉"), ("raw", "销售单-小料")):
+                c.execute(self.lr.BL.insert().values(period="2026-09", carrier="甲", grain="detail", subject="深圳星期零",
+                                                     doc_no="XSCKD1", annot=annot, annot_source=source, amount=1,
+                                                     bill_src="天鹰", src_sheet="明细"))
+        core = types.ModuleType("core")
+        core.JSONResponse = JSONResponse
+        core.db = self.lr.db
+        kc = types.ModuleType("kingdee_client")
+        with patch.dict(sys.modules, {"core": core, "kingdee_client": kc, "routers.logistics_review": self.lr}):
+            from routers import logistics_classify as lcr
+            with patch.object(self.lr, "_backfill_subjects", lambda *args, **kwargs: None):
+                docs = lcr._bill_docs("甲", "2026-09")
+        self.assertEqual(len(docs), 1)
+        self.assertIn((docs[0]["annot"], docs[0]["annot_source"]),
+                      {("销售单-植物肉", "default"), ("销售单-小料", "raw")})
+
+    def test_migrate_adds_annot_source_to_old_bill_lines(self):
+        from sqlalchemy import create_engine, text
+        from kernels import logistics_review_store as store
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as c:
+                c.execute(text("CREATE TABLE logistics_bill_lines (id INTEGER PRIMARY KEY)"))
+            store.migrate_cols(engine)
+            with engine.connect() as c:
+                cols = {r[1] for r in c.execute(text("PRAGMA table_info(logistics_bill_lines)")).all()}
+            self.assertIn("annot_source", cols)
+        finally:
+            engine.dispose()
 
 
 class FeeClassificationTests(unittest.TestCase):

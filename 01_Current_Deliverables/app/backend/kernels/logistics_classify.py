@@ -244,9 +244,11 @@ def sys_class(form, head, groups, party, bill_subj, cfg, short=lambda x: x, wh=N
 
 
 def compare(bc, sc):
-    """→ (结论, 一句话, 差在哪[])。只比 标注 vs 系统；计提那一环在 crosscheck 里补。"""
+    """→ (结论, 一句话, 差在哪[])。raw/NULL 照旧比；default/none 以金蝶为准，金蝶判不了才用账单侧兜底。"""
     if sc.get("unk") or not sc.get("a"):
-        return V_UNK, "%s，认物流部标注「%s」" % (sc.get("unk") or "判不了", aname(bc.get("a")) or bc.get("raw") or "空"), []
+        return V_UNK, "%s，认账单侧归类「%s」" % (sc.get("unk") or "判不了", aname(bc.get("a")) or bc.get("raw") or "空"), []
+    if bc.get("annot_source") in ("default", "none"):
+        return V_OK, "账单侧未人工标注，按金蝶判", []
     note = []
     if not bc.get("biz") and sc.get("biz") and bc.get("fee"):
         b2 = acct(bc["subj"], bc["fee"], sc["biz"], bc.get("col"))
@@ -372,8 +374,10 @@ def classify(docs_in, kd, groups_of, accr_entries, cfg, short=lambda x: x, carri
             if any(akey(s.get("a")) != akey(sc.get("a")) or s.get("unk") for s in scs[1:]):
                 sc = dict(unk="几张单归类不一样", how=[h for s in scs for h in s["how"]], a=None, fee="", biz="", subj="", subj_note="", rule=None)
             bc = bill_class(d.get("subject"), d.get("annot"), sc.get("rule"), wh)
+        bc["annot_source"] = d.get("annot_source")
         v, txt, diff = compare(bc, sc)
-        work.append(dict(key=d["key"], amount=float(d.get("amount") or 0), bc=bc, sc=sc, v=v, txt=txt, diff=diff, annot=d.get("annot") or ""))
+        work.append(dict(key=d["key"], amount=float(d.get("amount") or 0), bc=bc, sc=sc, v=v, txt=txt, diff=diff,
+                         annot=d.get("annot") or "", annot_source=d.get("annot_source")))
     tab = crosscheck(work, accr_entries)
     out = []
     for w in work:
@@ -381,7 +385,7 @@ def classify(docs_in, kd, groups_of, accr_entries, cfg, short=lambda x: x, carri
         out.append(dict(key=w["key"], v=w["v"], txt=w["txt"], diff=w["diff"], sys=aname(sc.get("a")), sys_d=adesc(sc.get("a")),
                         bill=aname(bc.get("a")), bill_d=adesc(bc.get("a")), how=[h for h in sc.get("how") or [] if h],
                         subj_note=sc.get("subj_note") or "", unk=sc.get("unk") or "", acc_miss=w["acc_miss"], hint=w["hint"],
-                        amount=round(w["amount"], 2), annot=w["annot"]))
+                        amount=round(w["amount"], 2), annot=w["annot"], annot_source=w["annot_source"]))
     counts = {v: sum(1 for x in out if x["v"] == v) for v in SEV}
     amounts = {v: round(sum(x["amount"] for x in out if x["v"] == v), 2) for v in SEV}
     has_accr = any(x["accr"] for x in tab)

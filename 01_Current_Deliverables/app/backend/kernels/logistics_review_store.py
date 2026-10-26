@@ -24,6 +24,7 @@ bill_lines = Table(
     Column("subject", String(30)),         # 费用主体简称
     Column("doc_no", String(300)),         # 金蝶单号（一行多单以 + 连接；物流部一格写7单/27单区间，80字不够，加宽到300）
     Column("annot", String(60)),           # 费用标注（规范词表）
+    Column("annot_source", String(12)),    # raw 原列 / default 取数说明 / none 未标 / manual 人工；NULL=历史未记录
     Column("fee", String(40)),             # 翻译后费用归属
     Column("bizline", String(40)),         # 业务线
     Column("fee_item", String(40)),        # 承运商费用项原名（快递费/操作费/仓储费…）
@@ -322,7 +323,7 @@ def migrate_cols(engine):
     from sqlalchemy import text
     drv = engine.url.drivername
     need = [("review_mode", "VARCHAR(10)"), ("subj_ovr", "VARCHAR(30)"), ("fee_ovr", "VARCHAR(40)"), ("bill_src", "VARCHAR(120)"),
-            ("ovr_reason", "VARCHAR(200)")]
+            ("ovr_reason", "VARCHAR(200)"), ("annot_source", "VARCHAR(12)")]
     with engine.begin() as c:
         if "mysql" in drv:
             have = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "

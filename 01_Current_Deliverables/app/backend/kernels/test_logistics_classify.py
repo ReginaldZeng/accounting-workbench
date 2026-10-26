@@ -22,6 +22,25 @@ def accr(subj, acct, dept, fee, biz_code, amt):
 
 
 class Classify(unittest.TestCase):
+    def test_annot_source_default_raw_and_history_null(self):
+        kd = {"XSCKD1": {"form": "SAL_OUTSTOCK", "head": {"销售组织": "深圳市星期零食品科技有限公司"}, "codes": ["M2"]}}
+        for source, expected in (("raw", lc.V_BILL), (None, lc.V_BILL), ("default", lc.V_OK), ("none", lc.V_OK)):
+            with self.subTest(source=source):
+                doc = {"key": "XSCKD1", "docs": ["XSCKD1"], "subject": "孝感星期九", "annot": "销售单-零售其他",
+                       "annot_source": source, "amount": 630.72}
+                d = run(doc, kd, {"M2": "零售其他"})["docs"][0]
+                self.assertEqual(d["v"], expected)
+                self.assertEqual(d["annot_source"], source)
+                self.assertEqual(d["sys"], "深圳星期零 · 零售")
+
+    def test_default_source_falls_back_when_kingdee_cannot_classify(self):
+        doc = {"key": "CGRK1", "docs": ["CGRK1"], "subject": "孝感星期九", "annot": "采购入库-植物肉",
+               "annot_source": "default", "amount": 10}
+        kd = {"CGRK1": {"form": "STK_InStock", "head": {"需求组织": XG}, "codes": ["M7"]}}
+        d = run(doc, kd, {"M7": "原料"})["docs"][0]
+        self.assertEqual(d["v"], lc.V_UNK)
+        self.assertIn("孝感工厂入库", d["txt"])
+
     def test_rd_sample_labelled_as_sample(self):
         """跨越 QTCK011740：领料部门是研发中心，物流部标「样品单-小料」，计提也跟着记在小料 → 标注不对、提示计提没有研发这一列。"""
         r = run({"key": "QTCK011740", "docs": ["QTCK011740"], "subject": "深圳星期零", "annot": "样品单-小料", "amount": 111.34},

@@ -70,10 +70,14 @@ def _bill_docs(carrier, period, fresh=False):
         d0 = (r.get("doc_no") or "").split("+")[0].strip()
         if not d0 or d0 == "无单据":
             continue
-        x = by.setdefault(d0, {"key": d0, "docs": [d0], "subject": LR._eff_subject(r), "annot": "", "amount": 0.0, "manual": ""})
+        x = by.setdefault(d0, {"key": d0, "docs": [d0], "subject": LR._eff_subject(r), "annot": "", "annot_source": None,
+                               "amount": 0.0, "manual": ""})
         x["amount"] += float(r.get("amount") or 0)
         if not x["annot"] and (r.get("annot") or "").strip():
             x["annot"] = r["annot"].strip()
+            x["annot_source"] = r.get("annot_source")
+        elif x["annot_source"] is None and r.get("annot_source") is not None:
+            x["annot_source"] = r["annot_source"]
         if r.get("fee_ovr") and not x["manual"]:
             x["manual"] = str(r["fee_ovr"])
     return list(by.values())
