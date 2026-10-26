@@ -121,7 +121,10 @@ def _batch_dict(row, detail=None):
         return None
     out = dict(row)
     out["summary"] = _loads(out.pop("summary_json", None), {})
-    out["issues"] = _loads(out.pop("issues_json", None), [])
+    out["issues"] = [x for x in _loads(out.pop("issues_json", None), []) if x.get("code") != "missing_subject"]
+    errors = [x for x in out["issues"] if x.get("severity") == "error"]
+    out["summary"].update(status="blocked" if errors else "ready", issue_count=len(out["issues"]),
+                          error_count=len(errors), warning_count=sum(x.get("severity") == "warning" for x in out["issues"]))
     if detail is not None:
         out["lines"] = detail
     return out
@@ -248,7 +251,7 @@ def confirm_batch(engine, batch_id, operator, allow_overlap=False):
             raise BatchError("批次不存在", status_code=404)
         if row["status"] != "draft":
             raise BatchError("只有 draft 批次可以确认")
-        issues = _loads(row["issues_json"], [])
+        issues = _batch_dict(row)["issues"]
         blockers = [x for x in issues if x.get("severity") == "error"]
         if blockers:
             raise BatchError("批次有阻断问题，不能确认", issues=blockers)

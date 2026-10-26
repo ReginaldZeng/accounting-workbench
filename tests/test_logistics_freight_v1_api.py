@@ -14,7 +14,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, update
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "app" / "backend"
@@ -199,6 +199,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(draft["summary"]["status"], "ready")
         self.assertFalse(any(x["code"] == "missing_subject" for x in draft["issues"]))
         self.assertEqual(draft["lines"][0]["subject"], "")
+
+    def test_legacy_missing_subject_issue_is_ignored_on_read(self):
+        draft = self.preview().json()["batches"][0]
+        with self.engine.begin() as cx:
+            cx.execute(update(store.batches).where(store.batches.c.id == draft["id"]).values(
+                summary_json='{"status":"blocked"}',
+                issues_json='[{"severity":"error","code":"missing_subject","message":"缺主体"}]'))
+        detail = self.client.get("/api/logistics-freight/v1/batches/%d" % draft["id"]).json()["batch"]
+        self.assertEqual(detail["summary"]["status"], "ready")
+        self.assertEqual(detail["issues"], [])
+        confirmed = self.client.post("/api/logistics-freight/v1/batches/%d/confirm" % draft["id"], json={})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
 
     def test_unique_keyword_normalizes_before_draft_is_saved(self):
         response = self.client.post("/api/logistics-freight/v1/preview",
