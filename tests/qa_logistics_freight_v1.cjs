@@ -71,6 +71,10 @@ async function main() {
       { id: 8, filename: '新表A.xlsx', status: 'draft', summary: { status: 'ready' }, valid_rows: 2, doc_count: 2, amount: 20, original_amount: 20, recalculated_amount: 20 },
       { id: 9, filename: '新表B.xlsx', status: 'draft', summary: { status: 'ready' }, valid_rows: 1, doc_count: 1, amount: 10, original_amount: 10, recalculated_amount: 10 },
     ]
+    newFiles[0].lines = Array.from({ length: 60 }, (_, i) => ({
+      doc_no: `D${String(i + 1).padStart(4, '0')}`, carrier: '天鹰', fee_type: '运费', subject: '', amount: 0,
+      sales_amount_tax: 100, quantity: 1, quantity_unit: '袋', brand: '品牌甲', customer: '客户甲', sheet: '其他', row: i + 2,
+    }))
     let uploaded = false
     await page.route('http://localhost:9/**', async route => {
       const request = route.request()
@@ -129,6 +133,11 @@ async function main() {
     await newARow.getByRole('button', { name: '预览', exact: true }).click()
     const supplementPreview = page.getByRole('dialog', { name: '逐单明细预览与确认' })
     await supplementPreview.waitFor()
+    await supplementPreview.getByRole('button', { name: '下一页', exact: true }).click()
+    assert.match(await supplementPreview.innerText(), /D0051/)
+    await supplementPreview.getByPlaceholder('搜单号 \/ 客户 \/ 品牌 \/ 承运商').fill('D0059')
+    assert.match(await supplementPreview.innerText(), /D0059/)
+    assert.match(await supplementPreview.innerText(), /共 1 组逐单费用/)
     await supplementPreview.getByPlaceholder('天鹰等表没有供应商时在这里补').fill('天鹰')
     await supplementPreview.getByRole('button', { name: '保存补充并重新校验' }).click()
     await page.getByText('补充信息已保存，已重新校验', { exact: true }).waitFor()
