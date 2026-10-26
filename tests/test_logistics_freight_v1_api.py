@@ -162,6 +162,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(detail["lines"][0]["doc_no"], "NEW")
         self.assertEqual(detail["lines"][0]["raw"]["金蝶单据编号"], "NEW")
 
+    def test_draft_can_be_replaced_deleted_and_restored(self):
+        base = self.preview(doc="OLD").json()["batches"][0]
+        replacement = self.preview(doc="NEW", operation="replace", replace_id=base["id"]).json()["batches"][0]
+        response = self.client.post("/api/logistics-freight/v1/batches/%d/confirm" % replacement["id"], json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(store.get_batch(self.engine, base["id"], False)["status"], "replaced")
+        self.assertEqual(store.get_batch(self.engine, replacement["id"], False)["status"], "active")
+        response = self.client.post("/api/logistics-freight/v1/batches/%d/withdraw" % replacement["id"],
+                                    json={"reason": "删除待确认文件"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["batch"]["status"], "withdrawn")
+        response = self.client.post("/api/logistics-freight/v1/batches/%d/restore" % replacement["id"], json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["batch"]["status"], "active")
+
     def test_preview_business_fields_and_collect_on_delivery(self):
         response = self.client.post("/api/logistics-freight/v1/preview",
                                     data={"period": "2026-09", "subject": "孝感星期九"},

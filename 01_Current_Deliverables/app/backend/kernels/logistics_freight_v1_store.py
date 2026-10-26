@@ -179,8 +179,8 @@ def create_draft(engine, filename, content, parsed, operator, operation="new", r
     with engine.begin() as cx:
         if replace_id is not None:
             old = cx.execute(select(batches.c.status).where(batches.c.id == replace_id)).first()
-            if not old or old[0] != "active":
-                raise BatchError("被替换批次不存在或已不是 active", status_code=404)
+            if not old or old[0] not in ("active", "draft"):
+                raise BatchError("被替换批次不存在或当前不是待确认/已生效状态", status_code=404)
         bid = cx.execute(insert(batches).values(
             status=status, filename=str(filename or "未命名")[:240], operation=operation,
             period=str(parsed.get("period") or "")[:7], replace_id=replace_id, carrier=str(parsed.get("carrier") or "")[:120],
@@ -255,7 +255,7 @@ def confirm_batch(engine, batch_id, operator, allow_overlap=False):
         replace_id = row["replace_id"] if row["operation"] == "replace" else None
         if replace_id:
             old = cx.execute(select(batches.c.status).where(batches.c.id == int(replace_id))).first()
-            if not old or old[0] != "active":
+            if not old or old[0] not in ("active", "draft"):
                 raise BatchError("被替换批次已变化，请重新 preview", status_code=409)
         hits = _overlap_in_conn(cx, batch_id, [replace_id] if replace_id else [])
         if hits and not allow_overlap:
@@ -267,7 +267,7 @@ def confirm_batch(engine, batch_id, operator, allow_overlap=False):
             raise BatchError("批次状态已变化，请刷新")
         if replace_id:
             changed = cx.execute(update(batches).where(
-                (batches.c.id == int(replace_id)) & (batches.c.status == "active")
+                (batches.c.id == int(replace_id)) & (batches.c.status.in_(["active", "draft"]))
             ).values(status="replaced", replaced_by=int(batch_id))).rowcount
             if changed != 1:
                 raise BatchError("替换旧批次失败，事务已回滚")
@@ -281,12 +281,12 @@ def withdraw_batch(engine, batch_id, operator, reason):
     now = _now()
     with engine.begin() as cx:
         changed = cx.execute(update(batches).where(
-            (batches.c.id == int(batch_id)) & (batches.c.status == "active")
+            (batches.c.id == int(batch_id)) & (batches.c.status.in_(["active", "draft"]))
         ).values(status="withdrawn", withdrawn_by=str(operator or "")[:50], withdrawn_at=now,
                  withdraw_reason=reason[:500])).rowcount
         if changed != 1:
             exists = cx.execute(select(batches.c.id).where(batches.c.id == int(batch_id))).first()
-            raise BatchError("批次不存在" if not exists else "只有 active 批次可以撤回",
+            raise BatchError("批次不存在" if not exists else "只有待确认或已生效批次可以删除/撤回",
                              status_code=404 if not exists else 409)
     return get_batch(engine, batch_id)
 

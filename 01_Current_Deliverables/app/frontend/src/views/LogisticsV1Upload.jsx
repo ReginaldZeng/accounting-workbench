@@ -316,8 +316,9 @@ export default function LogisticsV1Upload({ period }) {
             <td>{categories.length ? categories.map(([name, value]) => <span key={name} style={{ marginRight: 9 }}>{name} <b>{money(value)}</b></span>) : money(field(batch, ['amount', 'total_amount'], null))}</td>
             <td><div className="actions">
               <button className="btn" disabled={!!working} onClick={() => preview(batch)}>{working === 'preview' ? '加载中…' : '预览'}</button>
-              {effective && <button className="btn" disabled={!!working} onClick={() => openReplace(batch)}>替换</button>}
+              {(effective || status === 'draft') && <button className="btn" disabled={!!working} onClick={() => openReplace(batch)}>替换</button>}
               {effective && <button className="btn danger" disabled={!!working} onClick={() => { setWithdraw(batch); setReason('') }}>撤回</button>}
+              {status === 'draft' && <button className="btn danger" disabled={!!working} onClick={() => { setWithdraw(batch); setReason('') }}>删除</button>}
               {withdrawn && <button className="btn" disabled={!!working} onClick={() => mutate(batch, 'restore', logisticsFreightV1Restore)}>{working === 'restore' ? '恢复中…' : '恢复'}</button>}
               <a className="btn" href={logisticsFreightV1FileUrl(batch.id ?? batch.batch_id)}>原件下载</a>
             </div></td>

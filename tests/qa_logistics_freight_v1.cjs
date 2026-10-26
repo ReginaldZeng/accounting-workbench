@@ -144,6 +144,8 @@ async function main() {
     assert.deepEqual(calls.bulk, [{ batch_ids: ['8', '9'], carrier: '天鹰' }])
 
     const firstRow = page.locator('.lv1-table tbody > tr').filter({ hasText: '跨越十月.xlsx' }).first()
+    assert.equal(await firstRow.getByRole('button', { name: '替换', exact: true }).isVisible(), true)
+    assert.equal(await firstRow.getByRole('button', { name: '删除', exact: true }).isVisible(), true)
     await firstRow.getByRole('button', { name: '预览', exact: true }).click()
     const overlapPreview = page.locator('.lv1-preview').filter({ hasText: 'XSCKD001 与批次 9 重叠' })
     await overlapPreview.waitFor()
