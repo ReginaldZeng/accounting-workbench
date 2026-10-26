@@ -87,6 +87,17 @@ function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose,
     unit_fee: row.quantity ? row.amount / row.quantity : null,
     ratio: row.sales_amount_tax ? row.amount / row.sales_amount_tax : null,
   }))
+  const [docPage, setDocPage] = useState(1)
+  const [docQuery, setDocQuery] = useState('')
+  useEffect(() => { setDocPage(1); setDocQuery('') }, [batch.id])
+  const filteredDocRows = docRows.filter(row => {
+    const q = docQuery.trim().toLowerCase()
+    return !q || [row.doc_no, row.customer, row.brand, row.carrier].some(v => String(v || '').toLowerCase().includes(q))
+  })
+  const docPageSize = 50
+  const docPageCount = Math.max(1, Math.ceil(filteredDocRows.length / docPageSize))
+  const currentDocPage = Math.min(docPage, docPageCount)
+  const pageDocRows = filteredDocRows.slice((currentDocPage - 1) * docPageSize, currentDocPage * docPageSize)
 
   return <div className="lv1-preview">
     <div className="lv1-preview-head">
@@ -96,7 +107,7 @@ function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose,
     {canAction && <div className="lv1-supplement">
       <div className="lv1-supplement-title"><b>补充归属</b><span>只填原表空缺，不覆盖表内已有的物流商 / 主体</span></div>
       <label>承运商<input list="lv1-carrier-catalog" value={meta.carrier} onChange={e => setMeta({ ...meta, carrier: e.target.value })} placeholder="天鹰等表没有供应商时在这里补" /></label>
-      <label>费用主体<select value={meta.subject} onChange={e => setMeta({ ...meta, subject: e.target.value })}>{SUBJECTS.map(x => <option key={x}>{x}</option>)}</select></label>
+      <label>费用主体（可选）<select value={meta.subject} onChange={e => setMeta({ ...meta, subject: e.target.value })}>{SUBJECTS.map(x => <option key={x}>{x}</option>)}</select></label>
       <label>业务线<input value={meta.biz_line} onChange={e => setMeta({ ...meta, biz_line: e.target.value })} placeholder="如：植物肉 / 小料" /></label>
       <button className="btn" disabled={!!busy || !(meta.carrier || meta.subject || meta.biz_line)} onClick={() => onSupplement(meta)}>{busy === 'supplement' ? '保存中…' : '保存补充并重新校验'}</button>
     </div>}
@@ -109,15 +120,19 @@ function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose,
       <div className={Math.abs(Number(diff) || 0) >= 0.005 ? 'bad' : ''}><b>{money(diff)}</b><span>重算－原表</span></div>
     </div>
     {categories.length > 0 && <div className="lv1-categories">分类金额：{categories.map(([name, value]) => <span key={name}>{name} <b>{money(value)}</b></span>)}</div>}
-    {docRows.length > 0 && <div className="lv1-doc-preview"><table>
+    {docRows.length > 0 && <div className="lv1-doc-preview">
+      <div className="lv1-doc-tools"><input value={docQuery} onChange={e => { setDocQuery(e.target.value); setDocPage(1) }} placeholder="搜单号 / 客户 / 品牌 / 承运商" /><span>共 {filteredDocRows.length} 组逐单费用</span></div>
+      <table>
       <thead><tr><th>单据号</th><th>品牌</th><th>客户名称</th><th className="num">销售额（元）</th><th>承运商</th><th className="num">金额（元）</th><th className="num">单位费用</th><th className="num">费比</th></tr></thead>
-      <tbody>{docRows.slice(0, 10).map((row, i) => <tr key={i} className={!row.carrier || !row.subject ? 'missing' : ''}>
+      <tbody>{pageDocRows.map((row, i) => <tr key={i} className={!row.carrier ? 'missing' : ''}>
         <td>{row.doc_no || '缺单号'}</td><td>{row.brand}</td><td>{row.customer || '—'}</td>
         <td className="num">{money(row.sales_amount_tax)}</td><td>{row.carrier || <b className="bad">待补充</b>}</td>
         <td className="num">{money(row.amount)}</td><td className="num" title={row.quantity_unit ? `按 ${row.quantity_unit} 计算` : ''}>{fee4(row.unit_fee)}</td>
         <td className="num">{percent(row.ratio)}</td>
       </tr>)}</tbody>
-    </table>{docRows.length > 10 && <div className="lv1-doc-more">前 10 组，共 {docRows.length} 组逐单费用；确认前请结合下方异常检查。</div>}</div>}
+      </table>
+      <div className="lv1-doc-more"><button className="btn" disabled={currentDocPage <= 1} onClick={() => setDocPage(currentDocPage - 1)}>上一页</button><span>第 {currentDocPage} / {docPageCount} 页 · 每页 {docPageSize} 组</span><button className="btn" disabled={currentDocPage >= docPageCount} onClick={() => setDocPage(currentDocPage + 1)}>下一页</button></div>
+    </div>}
     <div className="lv1-checks">
       <section className={nonOverlapErrors.length || explicitBlock || explicitCannotConfirm ? 'bad' : ''}>
         <h4>异常 / 阻断（{exceptions.length + nonOverlapErrors.length}）</h4>
@@ -275,7 +290,7 @@ export default function LogisticsV1Upload({ period }) {
       .lv1 .notice{padding:9px 12px;border-radius:8px;margin-bottom:10px;line-height:1.6}.lv1 .notice.error{background:#FEF1EF;border:1px solid #F0C7C0;color:#A53125}.lv1 .notice.ok{background:#EEF8F1;border:1px solid #CBE4D3;color:#256445}
       .lv1-table{width:100%;border-collapse:collapse}.lv1 th{background:#F5F7F8;color:#7A8792;font-size:11px;text-align:left;padding:8px 10px;border-bottom:1px solid #DCE2E7;white-space:nowrap}.lv1 td{padding:9px 10px;border-bottom:1px solid #EDF0F2;vertical-align:middle}.lv1 td.num{text-align:right;font-variant-numeric:tabular-nums}.lv1 .filename{font-weight:600;max-width:280px;overflow-wrap:anywhere}.lv1 .meta{display:block;color:#8A96A2;font-size:11px;margin-top:3px}.lv1 .status{display:inline-block;border-radius:999px;padding:2px 8px;background:#E8F1F5;color:#1F6E8C;font-size:11px}.lv1 .status.off{background:#EEF0F2;color:#6F7B85}.lv1 .actions{display:flex;gap:5px;flex-wrap:wrap}.lv1 .actions .btn{padding:4px 8px;font-size:12px}.lv1 .actions a{text-decoration:none}.lv1 .danger{color:#A53125!important}.lv1 .empty{text-align:center;color:#8A96A2;padding:24px!important}
       .lv1-preview{background:#F8FAFB;border-top:1px solid #DCE2E7;padding:14px 16px}.lv1-preview-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.lv1-preview-head span{color:#8A96A2}.lv1-mini-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}.lv1-mini-stats>div{background:#fff;border:1px solid #E1E7EA;border-radius:8px;padding:9px 11px}.lv1-mini-stats b{display:block;font-size:16px;font-variant-numeric:tabular-nums}.lv1-mini-stats span{display:block;color:#8A96A2;font-size:11px;margin-top:3px}.lv1-categories{display:flex;gap:14px;flex-wrap:wrap;background:#EEF4F6;border-radius:7px;padding:8px 11px;margin-top:10px;color:#52616D}.lv1-checks{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.lv1-checks section{background:#fff;border:1px solid #E1E7EA;border-radius:8px;padding:9px 12px}.lv1-checks section.bad{border-color:#E6B4AC}.lv1-checks section.warn{border-color:#E7CB97}.lv1-checks h4{font-size:12px;margin:0 0 5px}.lv1-checks p{color:#7B8892;margin:4px 0}.lv1-checks ul{margin:4px 0;padding-left:20px;max-height:140px;overflow:auto}.lv1-checks li{margin:3px 0;overflow-wrap:anywhere}.lv1 .allow{display:flex;gap:6px;align-items:center;color:#8A5A13;margin-top:7px}.lv1-confirmbar{display:flex;align-items:center;gap:12px;margin-top:12px}.lv1-confirmbar span{flex:1}.lv1 .bad{color:#B23B2E!important}.lv1 .ok{color:#2E7D57!important}
-      .lv1-supplement{display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:10px;align-items:end;background:#FFFDF6;border:1px solid #EADFC6;border-radius:8px;padding:10px 12px;margin-bottom:10px}.lv1-supplement-title{grid-column:1/-1;display:flex;gap:12px;align-items:center}.lv1-supplement-title span{font-size:11px;color:#8A96A2}.lv1-supplement label{font-size:11px;color:#5E6B78;display:flex;flex-direction:column;gap:4px}.lv1-doc-preview{margin-top:10px;background:#fff;border:1px solid #E1E7EA;border-radius:8px;overflow:auto}.lv1-doc-preview table{width:100%;border-collapse:collapse;min-width:900px}.lv1-doc-preview td{font-size:12px;white-space:nowrap}.lv1-doc-preview tr.missing td{background:#FFF9F0}.lv1-doc-more{padding:7px 10px;color:#8A96A2;font-size:11px;border-top:1px solid #EDF0F2}
+      .lv1-supplement{display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:10px;align-items:end;background:#FFFDF6;border:1px solid #EADFC6;border-radius:8px;padding:10px 12px;margin-bottom:10px}.lv1-supplement-title{grid-column:1/-1;display:flex;gap:12px;align-items:center}.lv1-supplement-title span{font-size:11px;color:#8A96A2}.lv1-supplement label{font-size:11px;color:#5E6B78;display:flex;flex-direction:column;gap:4px}.lv1-doc-preview{margin-top:10px;background:#fff;border:1px solid #E1E7EA;border-radius:8px;overflow:auto}.lv1-doc-preview table{width:100%;border-collapse:collapse;min-width:900px}.lv1-doc-preview td{font-size:12px;white-space:nowrap}.lv1-doc-preview tr.missing td{background:#FFF9F0}.lv1-doc-more{padding:7px 10px;color:#8A96A2;font-size:11px;border-top:1px solid #EDF0F2;display:flex;gap:10px;align-items:center;justify-content:center}.lv1-doc-tools{display:flex;gap:12px;align-items:center;padding:8px 10px;border-bottom:1px solid #EDF0F2}.lv1-doc-tools input{width:280px;max-width:60%}.lv1-doc-tools span{color:#8A96A2;font-size:11px}
       .lv1-notes{margin-top:10px;background:#F1F5F6;border-radius:8px;padding:8px 12px;color:#5E6B78}.lv1-notes summary{cursor:pointer;font-size:12px}.lv1-notes ul{max-height:140px;overflow:auto;margin:6px 0;padding-left:20px;font-size:11.5px}
       .lv1-mask{position:fixed;inset:0;background:rgba(18,31,40,.42);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}.lv1-dialog{width:480px;background:#fff;border-radius:12px;padding:20px;box-shadow:0 16px 50px rgba(0,0,0,.2)}.lv1-dialog h3{margin:0 0 8px}.lv1-dialog p{color:#687681;line-height:1.6}.lv1-dialog textarea{width:100%;min-height:90px;resize:vertical;border:1px solid #DCE2E7;border-radius:7px;padding:8px;font:inherit}.lv1-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
       .lv1-preview-dialog{width:min(1500px,96vw);max-height:92vh;overflow:auto;padding:0}.lv1-preview-dialog .lv1-preview{border:0;border-radius:12px}.lv1-preview-dialog .lv1-preview-head{position:sticky;top:0;z-index:3;background:#F8FAFB;padding:4px 0 10px}.lv1-preview-dialog .lv1-confirmbar{position:sticky;bottom:0;background:#F8FAFB;padding:10px 0 2px;border-top:1px solid #DCE2E7}.lv1-bulkbar{display:flex;gap:10px;align-items:center;padding:10px 15px;background:#F5F9FA;border-bottom:1px solid #DCE2E7}.lv1-bulkbar span{color:#5E6B78;font-size:12px}.lv1-bulk-choice{display:flex;flex-direction:column;gap:10px;margin:12px 0}.lv1-bulk-choice select,.lv1-bulk-choice input{width:100%}.lv1-catalog-note{font-size:11px;color:#8A96A2}
