@@ -368,3 +368,21 @@ def supplement_many(engine, batch_ids, carrier):
             cx.execute(update(batches).where(batches.c.id == bid).values(
                 summary_json=_json(summary), issues_json=_json(issues)))
     return [get_batch(engine, bid) for bid in ids]
+
+
+def override_period(engine, batch_id):
+    with engine.begin() as cx:
+        row = cx.execute(select(batches).where(batches.c.id == int(batch_id))).mappings().first()
+        if not row:
+            raise BatchError("批次不存在", status_code=404)
+        if row["status"] != "draft":
+            raise BatchError("只有待确认草稿可以确认跨期")
+        issues = [x for x in _loads(row["issues_json"], []) if x.get("code") != "period_mismatch"]
+        summary = _loads(row["summary_json"], {})
+        errors = [x for x in issues if x.get("severity") == "error"]
+        summary.update(status="blocked" if errors else "ready", issue_count=len(issues),
+                       error_count=len(errors), warning_count=sum(x.get("severity") == "warning" for x in issues),
+                       period_override=True)
+        cx.execute(update(batches).where(batches.c.id == int(batch_id)).values(
+            summary_json=_json(summary), issues_json=_json(issues)))
+    return get_batch(engine, batch_id)

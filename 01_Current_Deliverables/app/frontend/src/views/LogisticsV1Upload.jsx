@@ -35,7 +35,7 @@ const categoriesOf = value => {
   return Object.entries(value || {})
 }
 
-function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose }) {
+function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose, onPeriodOverride }) {
   const [allowOverlap, setAllowOverlap] = useState(false)
   const p = batch.preview || {}
   const validRows = field(batch, ['line_count', 'valid_rows', 'valid_row_count', 'valid_count'], 0)
@@ -110,6 +110,9 @@ function BatchPreview({ batch, busy, onConfirm, onCancel, onSupplement, onClose 
           {[...nonOverlapErrors, ...exceptions].map((x, i) => <li key={i}>{issueText(x)}</li>)}
           {(explicitBlock || explicitCannotConfirm) && !nonOverlapErrors.length && <li>后端标记当前批次不可确认，请检查预览明细</li>}
         </ul>}
+        {canAction && allIssues.some(x => x && x.code === 'period_mismatch') && <button className="btn" disabled={!!busy} onClick={onPeriodOverride}>
+          {busy === 'period_override' ? '确认中…' : `确属跨期，仍按 ${batch.period} 继续`}
+        </button>}
       </section>
       <section className={overlaps.length ? 'warn' : ''}>
         <h4>单据重叠（{overlaps.length}）</h4>
@@ -219,7 +222,7 @@ export default function LogisticsV1Upload({ period }) {
         setBatches(old => old.map(x => String(x.id ?? x.batch_id) === id ? { ...x, ...updated } : x))
         setPreviews(old => old[id] ? { ...old, [id]: { ...old[id], ...updated } } : old)
       }
-      setMsg({ confirm: '已确认并进入有效 V1', withdraw: '批次已撤回', restore: '批次已恢复', cancel: '预览已取消，未写入有效 V1', supplement: '补充信息已保存，已重新校验' }[action] || '操作完成')
+      setMsg({ confirm: '已确认并进入有效 V1', withdraw: '批次已撤回', restore: '批次已恢复', cancel: '预览已取消，未写入有效 V1', supplement: '补充信息已保存，已重新校验', period_override: '已确认跨期并重新校验' }[action] || '操作完成')
       if (action === 'cancel') {
         setPreviews(old => { const n = { ...old }; delete n[id]; return n })
         setBatches(old => old.filter(x => String(x.id ?? x.batch_id) !== id))
@@ -228,7 +231,7 @@ export default function LogisticsV1Upload({ period }) {
       if (action === 'confirm' || action === 'cancel') setActivePreview(null)
       if (action === 'withdraw') { setWithdraw(null); setReason('') }
       load()
-    } catch (e) { setError(`${{ confirm: '确认', withdraw: '撤回', restore: '恢复', cancel: '取消', supplement: '保存补充' }[action] || '操作'}失败：${e.message}`) } finally { setBusyKey(id, '') }
+    } catch (e) { setError(`${{ confirm: '确认', withdraw: '撤回', restore: '恢复', cancel: '取消', supplement: '保存补充', period_override: '跨期确认' }[action] || '操作'}失败：${e.message}`) } finally { setBusyKey(id, '') }
   }
   const openReplace = batch => { setReplaceId(String(batch.id ?? batch.batch_id)); if (replaceRef.current) replaceRef.current.click() }
   const statusOf = b => STATUS[String(b.status || 'preview').toLowerCase()] || b.status || '待确认'
@@ -312,6 +315,7 @@ export default function LogisticsV1Upload({ period }) {
           onClose={() => setActivePreview(null)}
           onConfirm={allow => mutate(previews[activePreview], 'confirm', bid => logisticsFreightV1Confirm(bid, allow))}
           onSupplement={meta => mutate(previews[activePreview], 'supplement', bid => logisticsFreightV1Update(bid, { operation: 'supplement', ...meta }))}
+          onPeriodOverride={() => mutate(previews[activePreview], 'period_override', bid => logisticsFreightV1Update(bid, { operation: 'period_override' }))}
           onCancel={() => mutate(previews[activePreview], 'cancel', bid => logisticsFreightV1Update(bid, { operation: 'cancel' }))} />
       </div>
     </div>}

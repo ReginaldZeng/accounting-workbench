@@ -204,6 +204,22 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 409)
         self.assertEqual(store.get_batch(self.engine, ids[1], False)["carrier"], "天鹰")
 
+    def test_wrong_period_is_blocked_until_explicit_override(self):
+        response = self.client.post("/api/logistics-freight/v1/preview",
+                                    data={"period": "2026-08", "subject": "孝感星期九"},
+                                    files={"files": ("9月份天鹰.xlsx", workbook(carrier="天鹰"), "application/octet-stream")})
+        draft = response.json()["batches"][0]
+        self.assertEqual(draft["summary"]["status"], "blocked")
+        self.assertTrue(any(x["code"] == "period_mismatch" for x in draft["issues"]))
+        rejected = self.client.post("/api/logistics-freight/v1/batches/%d/confirm" % draft["id"], json={})
+        self.assertEqual(rejected.status_code, 409)
+        response = self.client.post("/api/logistics-freight/v1/batches/%d" % draft["id"],
+                                    json={"operation": "period_override"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["batch"]["summary"]["status"], "ready")
+        confirmed = self.client.post("/api/logistics-freight/v1/batches/%d/confirm" % draft["id"], json={})
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+
     def test_cancel_draft_and_period_filter(self):
         draft = self.preview().json()["batches"][0]
         self.assertEqual(draft["period"], "2026-09")

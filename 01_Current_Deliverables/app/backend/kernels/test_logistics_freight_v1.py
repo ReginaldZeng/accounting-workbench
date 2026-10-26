@@ -162,6 +162,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed["issues"][0]["raw_carrier"], "跨越物流公司")
         self.assertEqual(parsed["issues"][1]["code"], "unknown_carrier")
 
+    def test_filename_and_document_period_mismatch(self):
+        parsed = {"summary": {}, "issues": [], "lines": [{"doc_no": "D1", "doc_date": "46267"}]}
+        freight.validate_parsed_period(parsed, "9月份天鹰明细.xlsx", "2026-08")
+        issue = parsed["issues"][0]
+        self.assertEqual(issue["code"], "period_mismatch")
+        self.assertIn("2026-08", issue["message"])
+        self.assertIn("2026-09", issue["message"])
+        self.assertEqual(parsed["summary"]["status"], "blocked")
+        parsed = {"summary": {}, "issues": [], "lines": [{"doc_no": "D1", "doc_date": "2026-09-30"}]}
+        freight.validate_parsed_period(parsed, "9月份天鹰明细.xlsx", "2026-09")
+        self.assertEqual(parsed["summary"]["status"], "ready")
+
 
 class StoreTests(unittest.TestCase):
     def setUp(self):

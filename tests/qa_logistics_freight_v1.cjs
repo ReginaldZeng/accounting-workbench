@@ -42,7 +42,7 @@ const batches = [
   { id: 4, filename: '已生效批次.xlsx', template: '旧版模板', status: 'confirmed', doc_count: 3, row_count: 8, amount: 500, uploaded_by: '管理员', created_at: '2026-10-25 09:00' },
 ]
 const details = {
-  1: { ...batches[0], summary: { status: 'ready' }, valid_rows: 4, original_amount: 120, recalculated_amount: 120, reconciliation_diff: 0, issues: [], overlaps: [{ code: 'overlap', doc_no: 'XSCKD001', msg: 'XSCKD001 与批次 9 重叠' }] },
+  1: { ...batches[0], period: '2026-10', summary: { status: 'blocked' }, valid_rows: 4, original_amount: 120, recalculated_amount: 120, reconciliation_diff: 0, issues: [{ severity: 'error', code: 'period_mismatch', msg: '当前选择 2026-10，文件属于 2026-09' }], overlaps: [{ code: 'overlap', doc_no: 'XSCKD001', msg: 'XSCKD001 与批次 9 重叠' }] },
   2: { ...batches[1], summary: { status: 'blocked' }, valid_rows: 1, original_amount: 30, recalculated_amount: 28, reconciliation_diff: 2, issues: [{ severity: 'error', msg: '原表与重算相差 2 元' }, { severity: 'warning', msg: '第 8 行缺少费用类型' }] },
 }
 const stats = { n: 3, n_out: 3, n_ret: 0, n_has: 1, n_none: 2, n_ldonly: 0, n_nofee: 0, fee: 120, fee_tr: 120, fee_ld: 0, fee_ot: 0, fee_ok: 120, fee_pending: 0, amount: 1000, ratio: .12, amount_none: 0, v1_amount: 100, v2_amount: 200, version_diff: -100, n_unsubmitted: 1 }
@@ -145,6 +145,9 @@ async function main() {
     const overlapPreview = page.locator('.lv1-preview').filter({ hasText: 'XSCKD001 与批次 9 重叠' })
     await overlapPreview.waitFor()
     assert.match(await overlapPreview.innerText(), /有效行[\s\S]*重算－原表/)
+    await overlapPreview.getByRole('button', { name: '确属跨期，仍按 2026-10 继续' }).click()
+    await page.getByText('已确认跨期并重新校验', { exact: true }).waitFor()
+    assert.equal(calls.supplement[1].operation, 'period_override')
     const overlapConfirm = overlapPreview.getByRole('button', { name: '确认此文件' })
     assert.equal(await overlapConfirm.isDisabled(), true)
     await overlapPreview.getByRole('checkbox').check()

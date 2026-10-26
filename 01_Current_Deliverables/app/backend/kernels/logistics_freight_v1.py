@@ -424,3 +424,56 @@ def normalize_parsed_carriers(parsed, catalog):
                    issue_count=len(issues), error_count=sum(x.get("severity") == "error" for x in issues),
                    warning_count=sum(x.get("severity") == "warning" for x in issues))
     return parsed
+
+
+def _filename_period(filename, selected_period):
+    name = _text(filename)
+    match = re.search(r"(20\d{2})[年._-]?(\d{1,2})月", name)
+    if match:
+        return "%s-%02d" % (match.group(1), int(match.group(2)))
+    match = re.search(r"(?<!\d)(1[0-2]|0?[1-9])月(?:份)?", name)
+    if match and re.match(r"^20\d{2}-", selected_period or ""):
+        return "%s-%02d" % (selected_period[:4], int(match.group(1)))
+    return ""
+
+
+def _date_period(value):
+    text = _text(value)
+    match = re.match(r"^(20\d{2})-(\d{2})-", text)
+    if match:
+        return "%s-%s" % (match.group(1), match.group(2))
+    match = re.match(r"^(20\d{2})年(\d{1,2})月", text)
+    if match:
+        return "%s-%02d" % (match.group(1), int(match.group(2)))
+    if re.fullmatch(r"\d+(?:\.0)?", text):
+        number = int(float(text))
+        if 20000 <= number <= 80000:
+            from openpyxl.utils.datetime import from_excel
+            return from_excel(number).strftime("%Y-%m")
+    return ""
+
+
+def validate_parsed_period(parsed, filename, selected_period):
+    issues = parsed.setdefault("issues", [])
+    mismatches = []
+    file_period = _filename_period(filename, selected_period)
+    if file_period and file_period != selected_period:
+        mismatches.append("文件名识别为 %s" % file_period)
+    row_periods = {}
+    for line in parsed.get("lines") or []:
+        period = _date_period(line.get("doc_date"))
+        if period and period != selected_period:
+            row_periods.setdefault(period, []).append(line.get("doc_no"))
+    for period, docs in sorted(row_periods.items()):
+        mismatches.append("%d 行单据日期属于 %s（如 %s）" % (len(docs), period, docs[0] or "未标单号"))
+    if mismatches:
+        _issue(issues, "error", "period_mismatch",
+               "账期不一致：当前选择 %s；%s。传错期间请取消批次后重选；确属跨期须人工确认后继续。" %
+               (selected_period, "；".join(mismatches)), "", 0, selected_period=selected_period,
+               file_period=file_period, detail_periods=sorted(row_periods))
+    summary = parsed.get("summary") or {}
+    parsed["summary"] = summary
+    summary.update(status="blocked" if any(x.get("severity") == "error" for x in issues) else "ready",
+                   issue_count=len(issues), error_count=sum(x.get("severity") == "error" for x in issues),
+                   warning_count=sum(x.get("severity") == "warning" for x in issues))
+    return parsed

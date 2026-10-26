@@ -108,6 +108,7 @@ async def preview(request: Request):
         content = await upload.read()
         try:
             parsed = parser.parse_workbook(content, filename, context)
+            parsed = parser.validate_parsed_period(parsed, filename, period)
             parsed = parser.normalize_parsed_carriers(parsed, catalog)
         except Exception as exc:
             parsed = {"summary": {"status": "failed", "line_count": 0, "doc_count": 0,
@@ -147,18 +148,21 @@ async def batch_update(batch_id: int, request: Request):
     except Exception:
         body = {}
     operation = body.get("operation")
-    if operation not in ("cancel", "supplement"):
-        return JSONResponse({"ok": False, "msg": "仅支持 operation=cancel/supplement"}, status_code=400)
+    if operation not in ("cancel", "supplement", "period_override"):
+        return JSONResponse({"ok": False, "msg": "仅支持 operation=cancel/supplement/period_override"}, status_code=400)
     try:
         if operation == "supplement":
             batch = store.supplement_draft(db._engine, batch_id, body.get("carrier"),
                                            body.get("subject"), body.get("biz_line"))
+        elif operation == "period_override":
+            batch = store.override_period(db._engine, batch_id)
         else:
             batch = store.cancel_draft(db._engine, batch_id, user["name"])
     except store.BatchError as exc:
         return _error(exc)
-    db.audit(user["name"], "逐单运费V1-" + ("补充草稿信息" if operation == "supplement" else "取消预览"),
-             str(batch_id), "补充承运商/主体/业务线" if operation == "supplement" else "取消草稿，不影响有效 V1")
+    action = {"supplement": "补充草稿信息", "period_override": "确认跨期", "cancel": "取消预览"}[operation]
+    detail = {"supplement": "补充承运商/主体/业务线", "period_override": "人工确认账期不一致仍继续", "cancel": "取消草稿，不影响有效 V1"}[operation]
+    db.audit(user["name"], "逐单运费V1-" + action, str(batch_id), detail)
     return {"ok": True, "batch": _with_overlaps(batch, batch.get("operation"), batch.get("replace_id"))}
 
 
