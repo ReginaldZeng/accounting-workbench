@@ -369,6 +369,8 @@ def normalize_carrier_name(value, catalog):
     text = _norm(raw)
     if not text:
         return {"status": "missing", "carrier": "", "raw": raw, "candidates": []}
+    if "自提" in text:
+        return {"status": "exact", "carrier": "自提", "raw": raw, "candidates": []}
     exact = {}
     for item in catalog:
         name = _text(item.get("name") or item.get("short"))

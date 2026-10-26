@@ -149,6 +149,8 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(unknown["status"], "unknown")
         generic = freight.normalize_carrier_name("物流", catalog)
         self.assertEqual(generic["status"], "unknown")
+        pickup = freight.normalize_carrier_name("客户自提", catalog)
+        self.assertEqual((pickup["status"], pickup["carrier"]), ("exact", "自提"))
 
     def test_normalize_parsed_preserves_raw_and_blocks_unknown(self):
         parsed = {"carrier": "", "summary": {}, "issues": [], "lines": [

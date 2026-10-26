@@ -43,7 +43,7 @@ const batches = [
 ]
 const details = {
   1: { ...batches[0], period: '2026-10', summary: { status: 'blocked' }, valid_rows: 4, original_amount: 120, recalculated_amount: 120, reconciliation_diff: 0, issues: [{ severity: 'error', code: 'period_mismatch', msg: '当前选择 2026-10，文件属于 2026-09' }], overlaps: [{ code: 'overlap', doc_no: 'XSCKD001', msg: 'XSCKD001 与批次 9 重叠' }] },
-  2: { ...batches[1], summary: { status: 'blocked' }, valid_rows: 1, original_amount: 30, recalculated_amount: 28, reconciliation_diff: 2, issues: [{ severity: 'error', msg: '原表与重算相差 2 元' }, { severity: 'warning', msg: '第 8 行缺少费用类型' }] },
+  2: { ...batches[1], summary: { status: 'blocked' }, valid_rows: 1, original_amount: 30, recalculated_amount: 28, reconciliation_diff: 2, issues: [{ severity: 'error', msg: '原表与重算相差 2 元' }, { severity: 'warning', msg: '第 8 行缺少费用类型' }, { severity: 'info', code: 'carrier_normalized', msg: '链盟4.2 → 链盟' }] },
 }
 const stats = { n: 3, n_out: 3, n_ret: 0, n_has: 1, n_none: 2, n_ldonly: 0, n_nofee: 0, fee: 120, fee_tr: 120, fee_ld: 0, fee_ot: 0, fee_ok: 120, fee_pending: 0, amount: 1000, ratio: .12, amount_none: 0, v1_amount: 100, v2_amount: 200, version_diff: -100, n_unsubmitted: 1 }
 const outstockRow = (no, extra) => ({ no, org: '深圳星期零', date: '2026-10-01', brand: '星期零', customer: '客户甲', stock: '成品仓', addr: '深圳', btype: '销售出库单', kind: 'out', qty_txt: '1 件', amount: 100, fee_tr: 0, fee_ld: 0, fee_ot: 0, fee: 0, ratio: 0, lines: [], carriers: [], ...extra })
@@ -161,6 +161,8 @@ async function main() {
     const blockedPreview = page.locator('.lv1-preview').filter({ hasText: '原表与重算相差 2 元' })
     await blockedPreview.waitFor()
     assert.match(await blockedPreview.innerText(), /第 8 行缺少费用类型/)
+    assert.match(await blockedPreview.innerText(), /异常 \/ 阻断（2）/)
+    assert.match(await blockedPreview.innerText(), /物流商识别记录（1）· 仅提示，不算异常/)
     assert.equal(await blockedPreview.getByRole('button', { name: '确认此文件' }).isDisabled(), true)
     await blockedPreview.getByRole('button', { name: '收起', exact: true }).click()
 
