@@ -388,7 +388,7 @@ def _split_code(v):
     return (p[0], p[1] if len(p) > 1 else "")
 
 
-def split_part(f, v, line_net, base_net):
+def split_part(f, v, line_net, base_net, rate):
     """计提更正填了「只改其中一部分(含税)」→ 这一部分占这条费用行的不含税额；没填 / 填得不对(≤0、不小于这一行) → 0(整笔改)。"""
     try:
         x = float(str(f.get("split_amt") or "").replace(",", ""))
@@ -397,7 +397,7 @@ def split_part(f, v, line_net, base_net):
     line_gross = float(v["gross"]) * line_net / (base_net or 1.0)          # 这一行对应的含税额(一张计提几行费用时按不含税额占比)
     if x <= 0.004 or x >= line_gross - 0.004 or line_gross <= 0:
         return 0.0
-    return line_net * x / line_gross
+    return split_gross(x, rate)[0]
 
 
 _CLEAR = ("（清空）", "(清空)")
@@ -454,22 +454,26 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
         exps = [dict(l) for l in v["exp_lines"]]
         ws = [float(l["dr"] or 0) for l in v["exp_lines"]]          # 各费用行按原记账的不含税额分摊新的不含税额
         base = sum(ws) or 1.0
+        absolute = set()
         for f in fx:
             sn = f.get("snap") or {}
             for i, l in enumerate(exps):
                 if l.get("acct") == sn.get("acct") and (l.get("fee_code") or "") == (sn.get("fee_code") or "") and \
                         (l.get("dept_code") or "") == (sn.get("dept_code") or "") and (l.get("biz_code") or "") == (sn.get("biz_code") or ""):
-                    part = split_part(f, v, ws[i], base)
+                    line_gross = float(v["gross"]) * ws[i] / base
+                    part = split_part(f, v, ws[i], base, p["new_rate"])
                     if part:                     # 只改其中一部分(V2.855)：这一行拆成两行——拆出去的按「应改为」记，剩下的维度不动
                         exps[i:i + 1] = [l, _apply_fix(l, f)]
-                        ws[i:i + 1] = [ws[i] - part, part]
+                        ws[i:i + 1] = [r2(split_gross(line_gross, p["new_rate"])[0] - part), part]
+                        absolute.add(i + 1)
                     else:
                         exps[i] = _apply_fix(l, f)
                     break
-        acc = 0.0
-        for i, l in enumerate(exps):
-            amt = r2(net - acc) if i == len(exps) - 1 else r2(net * ws[i] / base)
-            acc = r2(acc + amt)
+        amts = [ws[i] if i in absolute else r2(net * ws[i] / base) for i in range(len(exps))]
+        tail = next((i for i in range(len(exps) - 1, -1, -1) if i not in absolute), len(exps) - 1)
+        if amts:
+            amts[tail] = r2(amts[tail] + net - sum(amts))
+        for l, amt in zip(exps, amts):
             out.append(_ln("更正", e, l["acct"], l["acct_name"], dr=amt, src=l, keep=EXP_DIMS))
         tl = _sup_src(v)
         if tax:                                  # 更正到 0%(普票不抵扣)不出 0 金额的税行

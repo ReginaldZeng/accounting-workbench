@@ -357,6 +357,15 @@ class T(unittest.TestCase):
         self.assertTrue(all(l["dims"].get("dept_code") == "0011401" and l["dims"].get("fee") == "出库运费" for l in fixl))
         self.assertEqual(round(sum(l["dr"] for l in ls if l["block"] == "更正"), 2), 4117.46)
         self.assertEqual(round(sum(l["dr"] - l["cr"] for l in ls), 2), 0)
+        changed_pl = {"status": "ok", "per": {"389": dict(pl["per"]["389"], gross=41607.40)}, "tails": {}}
+        changed = V.build(ctx, [v], inv, changed_pl, fx)
+        self.assertEqual([(l["dims"].get("biz"), l["dr"]) for l in changed if l["block"] == "更正" and l["acct"] == "6601"],
+                         [("零售", 36841.65), ("电商", 1330.28)], "更正总额后，含税拆分额不能再次按新净额比例放大")
+        changed_pl6 = {"status": "ok", "per": {"389": dict(pl["per"]["389"], gross=18222.50, new_rate=0.06)}, "tails": {}}
+        changed6 = V.build(ctx, [v], inv, changed_pl6, fx)
+        self.assertEqual([(l["dims"].get("biz"), l["dr"]) for l in changed6 if l["block"] == "更正" and l["acct"] == "6601"],
+                         [("零售", 15823.12), ("电商", 1367.92)])
+        self.assertEqual([l["dr"] for l in changed6 if l["block"] == "更正" and l["acct"] == "2221.01.07"], [1031.46])
         # 不填 / 填得不小于整笔 → 还是整笔改
         fx2 = {"389": [dict(fx["389"][0], split_amt="4117.46")]}
         ls2 = V.build(ctx, [v], inv, V.plan([v], inv, fx2), fx2)
