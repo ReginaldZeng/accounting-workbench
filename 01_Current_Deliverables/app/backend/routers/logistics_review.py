@@ -4737,7 +4737,7 @@ def review_dim_options(request: Request):
                 seen[code] = name
         return [{"code": k, "name": v} for k, v in sorted(seen.items())]
     CN = [("FNumber", "c"), ("FName", "n")]
-    out["acct"] = pairs(q("BD_Account", CN, "FNumber in ('5101','5301','6401','6402','6601','6602','6603','6711')"))
+    out["acct"] = pairs(q("BD_Account", CN, "FNumber in ('5101','5301','6401','6402','6601','6602','6603','6604','6711')"))
     out["fee"] = pairs(q("BD_Expense", CN, "FNumber like 'FYXM%'"))
     out["dept"] = pairs(q("BD_Department", CN, "FNumber like '%'"))
     ad = q("BOS_ASSISTANTDATA_DETAIL", [("FNumber", "c"), ("FDataValue", "n"), ("FId.FNumber", "t")], "FId.FNumber in ('CPFL','CPXM')")
