@@ -323,6 +323,8 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
                      "note": (_s(r[c_ky["note_col"]]) if c_ky["note_col"] is not None and c_ky["note_col"] < len(r) else "")}
             if _kraw["formula"] or _kraw["orig"] is not None:
                 sub[KY_SUBKEY] = json.dumps({k: v for k, v in _kraw.items() if v not in ("", None)}, ensure_ascii=False)
+        if sp.get("skip_zero") and base == 0:
+            continue
         annot, annot_source = _annot_of(sp, r, c_annot)
         row = {
             "period": period, "carrier": carrier, "grain": "detail",
