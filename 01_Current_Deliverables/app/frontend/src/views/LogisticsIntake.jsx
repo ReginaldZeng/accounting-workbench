@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1032
+// 数据接入按主体分别展示请款合计与账单差额，多主体不再显示承运商混合勾稽金额。
 // [Change Log] Date:2026-10-26 Author:Kimi Version:V-draft
 // ④ 发票审核精简为单行进度、紧凑金额与发票卡片；票夹只读看票及弹窗审核复用原审核逻辑。
 // [Change Log] Date:2026-10-24 Author:Kimi Version:V2.1004
@@ -43,6 +45,7 @@ export const IK_CSS = `
 .lrv .vnode.money{border-color:#C9D8F8;background:#F7FAFF}.lrv .vnode.money .v{color:var(--accent)}
 .lrv .vlink{display:flex;align-items:center;justify-content:center;color:#18784C;font-size:11px;position:relative;white-space:nowrap}
 .lrv .vlink::before{content:"";position:absolute;top:50%;left:4px;right:4px;border-top:2px solid currentColor;opacity:.3}.lrv .vlink span{position:relative;background:#fff;padding:2px 4px;border-radius:4px}.lrv .vlink.bad{color:#B83232}
+.lrv .lik-subjrecs{margin:0 14px 12px}.lrv .lik-subjrecs table{min-width:650px}
 .lrv .lik-issues{display:flex;gap:8px;align-items:flex-start;padding:10px 14px;margin-bottom:12px;border:1px solid #EDD9AE;background:#FFFAEF;border-radius:9px;font-size:12.5px;line-height:1.6}
 .lrv .lik-issues.ok{border-color:#BFDCCB;background:#F0F8F3}.lrv .lik-issues b{white-space:nowrap}.lrv .lik-issues ul{margin:0;padding-left:18px}.lrv .lik-issues.ok span{flex:1}
 .lrv .lik-section{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.lrv .lik-section .sp{flex:1}.lrv .lik-section small{font-weight:400;color:#788591}
@@ -99,9 +102,9 @@ function Overview({ period }) {
     <summary>{period} 各家接入情况<small>异常优先，展开查看</small></summary>
     {open && <>{!d && <div className="ovempty">读取中…</div>}{d && d.err && <div className="fxwarn" style={{ margin: '0 15px 12px' }}>{d.err}</div>}{d && !d.err && <div className="tw"><table className="ovtable">
       <thead><tr><th>承运商</th><th className="num">请款单</th><th className="num">账单原件</th><th className="num">读出来的</th><th className="num">和请款单差</th><th>钱怎么取</th><th>结论</th></tr></thead>
-      <tbody>{[...rows].sort((a, b) => ord(a) - ord(b) || a.carrier.localeCompare(b.carrier, 'zh')).map(r => { const [lb, cl] = IK_V[r.status] || [r.status, 'neu']; return <tr key={r.carrier}>
-        <td className="ovcar">{r.carrier}</td><td className="num">{r.n_req ? `${r.n_req} 张 · ${money(r.req_total)}` : <span className="dim">还没来</span>}</td><td className="num">{r.n_raw ? `${r.n_raw} 份` : <span className="dim">—</span>}</td><td className="num mono">{r.bill_total != null ? money(r.bill_total) : '—'}</td>
-        <td className={'num mono ' + (r.diff == null ? '' : isZero(r.diff) ? 'diffneg' : 'diffpos')}>{r.diff == null ? '—' : isZero(r.diff) ? '0' : money(r.diff)}</td><td style={{ fontSize: 12 }}>{r.how}</td><td><span className={'pill ' + cl}>{lb}</span></td></tr> })}</tbody>
+      <tbody>{[...rows].sort((a, b) => ord(a) - ord(b) || a.carrier.localeCompare(b.carrier, 'zh')).map(r => { const [lb, cl] = IK_V[r.status] || [r.status, 'neu'], rs = r.subject_recons || [], multi = rs.length > 1; return <tr key={r.carrier}>
+        <td className="ovcar">{r.carrier}</td><td className="num">{multi ? rs.map(s => <div key={s.subject}>{s.subject} {s.n_req} 张 · {money(s.req_total)}</div>) : r.n_req ? `${r.n_req} 张 · ${money(r.req_total)}` : <span className="dim">还没来</span>}</td><td className="num">{r.n_raw ? `${r.n_raw} 份` : <span className="dim">—</span>}</td><td className="num mono">{multi ? rs.map(s => <div key={s.subject}>{s.subject} {money(s.bill_total)}</div>) : r.bill_total != null ? money(r.bill_total) : '—'}</td>
+        <td className={'num mono ' + (!multi && r.diff != null ? isZero(r.diff) ? 'diffneg' : 'diffpos' : '')}>{multi ? rs.map(s => <div key={s.subject} className={s.diff == null ? '' : isZero(s.diff) ? 'diffneg' : 'diffpos'}>{s.subject} {s.diff == null ? '—' : isZero(s.diff) ? '0' : money(s.diff)}</div>) : r.diff == null ? '—' : isZero(r.diff) ? '0' : money(r.diff)}</td><td style={{ fontSize: 12 }}>{r.how}</td><td><span className={'pill ' + cl}>{lb}</span></td></tr> })}</tbody>
     </table></div>}{d && !d.err && <div className="ovfoot">「读出来的」＝复核台现存账单金额；「结论」＝按当前取数说明重新核对原件。<button className="lnk" onClick={load}>重读</button></div>}</>}
   </details>
 }
@@ -118,13 +121,20 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
   const billSelfTotal = totSheets.length && !dupRows && reps.every(r => (r.sheets || []).filter(s => s.role === 'detail').every(s => s.total)) ? totSheets.reduce((a, s) => a + s.total.sum, 0) : null
   const [vl, vc] = IK_V[data.verdict] || ['', 'neu']
   const nDocs = (data.bills || []).reduce((a, b) => a + (b.n_doc || 0), 0)
-  const link1 = billSelfTotal == null ? null : isZero(data.bill_total - billSelfTotal), link2 = data.diff == null ? null : isZero(data.diff)
+  const recons = data.subject_recons || [], multiRecon = recons.length > 1, primary = recons.length === 1 ? recons[0] : null
+  const reqDiff = primary ? primary.diff : data.diff, reqTotal = primary ? primary.req_total : data.req_total
+  const link1 = billSelfTotal == null ? null : isZero(data.bill_total - billSelfTotal)
+  const link2 = recons.length ? (recons.some(r => r.diff != null && !isZero(r.diff)) ? false : recons.every(r => r.diff != null) ? true : null) : data.diff == null ? null : isZero(data.diff)
   const issues = []
   if (!data.has_spec) issues.push('尚未配置取数说明，请先完成承运商取数配置')
   if (!(data.bills || []).length) issues.push('尚未解析账单，请上传账单或检查钉钉附件')
   if (data.verdict !== 'ok') issues.push(`原件核对：${vl || '尚未形成结论'}`)
   if (link1 === false) issues.push(`解析金额与账单原件合计相差 ${money(Math.abs(data.bill_total - billSelfTotal))}`)
-  if (link2 !== true) issues.push(data.diff == null ? '账单与请款单暂时无法核对' : `账单与请款单相差 ${money(Math.abs(data.diff))}`)
+  if (recons.length) recons.forEach(r => {
+    if (r.diff == null) issues.push(`${r.subject}：${r.req_total == null ? '有账单，但没有请款单' : '有请款单，但没有解析到该主体账单'}`)
+    else if (!isZero(r.diff)) issues.push(`${r.subject}：账单与请款单相差 ${money(Math.abs(r.diff))}`)
+  })
+  else if (link2 !== true) issues.push(data.diff == null ? '账单与请款单暂时无法核对' : `账单与请款单相差 ${money(Math.abs(data.diff))}`)
   const ready = data.register || issues.length === 0
   const reparse = f => {
     if (!window.confirm(`用存的原件「${f.name || f.src || '账单'}」按现在的取数说明重新解析一遍？\n\n人工改过的主体/费用类型、写过的备注按单号保留；逐笔、逐单的结论会跟着重算。`)) return
@@ -141,9 +151,12 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
         <div className="vnode"><span className="h">账单原件</span><span className="v">{files.length} 份</span><span className="s">{(data.bills || []).length ? `已解析 ${(data.bills || []).length} 份 · ${nDocs} 张单` : '还没有可核对原件'}</span></div>
         <div className={'vlink' + (link1 === false ? ' bad' : '')}><span>{link1 == null ? '待核对' : link1 ? '✓ 一致' : `✕ 差 ${money(Math.abs(data.bill_total - billSelfTotal))}`}</span></div>
         <div className="vnode money"><span className="h">解析入账金额</span><span className="v">{(data.bills || []).length ? money(data.bill_total) : '—'}</span><span className="s">按取数说明拆分费用</span></div>
-        <div className={'vlink' + (link2 === false ? ' bad' : '')}><span>{link2 == null ? '待核对' : link2 ? '✓ 差 0' : `✕ 差 ${money(Math.abs(data.diff))}`}</span></div>
-        <div className="vnode"><span className="h">请款单（钉钉）</span><span className="v">{data.req_total != null && (data.payreqs || []).length ? money(data.req_total) : '—'}</span><span className="s">{(data.payreqs || []).length} 张{Object.keys(reqByRole).length ? ' · ' + Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join('、') : ''}</span></div>
+        <div className={'vlink' + (link2 === false ? ' bad' : '')}><span>{multiRecon ? (link2 == null ? '按主体待核' : link2 ? '✓ 各主体一致' : '✕ 按主体有差异') : link2 == null ? '待核对' : link2 ? '✓ 差 0' : `✕ 差 ${money(Math.abs(reqDiff))}`}</span></div>
+        <div className="vnode"><span className="h">请款单（钉钉）</span><span className="v">{multiRecon ? `${recons.length} 个主体` : reqTotal != null && (data.payreqs || []).length ? money(reqTotal) : '—'}</span><span className="s">{(data.payreqs || []).length} 张{Object.keys(reqByRole).length ? ' · ' + Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join('、') : ''}</span></div>
       </div>
+      {multiRecon && <div className="tw lik-subjrecs"><table className="fxtbl"><thead><tr><th>主体</th><th className="num">解析入账金额</th><th className="num">请款单</th><th className="num">差</th><th>结论</th></tr></thead><tbody>{recons.map(r => <tr key={r.subject}>
+        <td><b>{r.subject}</b></td><td className="num mono">{r.bill_total == null ? '—' : money(r.bill_total)}</td><td className="num mono">{r.req_total == null ? '—' : <>{money(r.req_total)}<span className="dim"> · {r.n_req} 张</span></>}</td>
+        <td className={'num mono ' + (r.diff == null ? '' : isZero(r.diff) ? 'diffneg' : 'diffpos')}>{r.diff == null ? '—' : isZero(r.diff) ? '0' : money(r.diff)}</td><td>{r.diff == null ? <span className="pill neu">待核对</span> : isZero(r.diff) ? <span className="pill ok">一致</span> : <span className="pill bad">金额不符</span>}</td></tr>)}</tbody></table></div>}
     </div>
     {!data.register && <div className={'lik-issues' + (ready ? ' ok' : '')}>{ready ? <><b>✓ 可以进入逐笔复核</b><span>账单解析、原件合计与请款金额均已核对。后续修改账单会重新计算本步骤状态。</span></> : <><b>待处理 {issues.length} 项</b><ul>{issues.map((x, i) => <li key={i}>{x}</li>)}</ul></>}</div>}
     <div className="card">

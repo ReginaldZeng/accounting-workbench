@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-30 | Author: Kimi | Version: V2.1033
+# Description: 逐单改归类增加业务线人工覆盖，贯通保存、重导保留、逐笔配对与恢复原值。
 # Date: 2026-10-25 | Author: Kimi | Version: V2.1013
 # Description: 【物流账单复核】路由。V2.1013 逐笔计提查询带承运商，恒茂外仓归口完整生效。
 #   端点：取数说明读 / 导入合同价格卡 / 价格卡读 / 上传账单解析落中间表 / 接金蝶回填数量 / 出复核结果(费用项汇总+逐单)。
@@ -725,9 +727,9 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
                     nm(new_src), nm(src), nm(new_src), nm(src))}, status_code=412)
             if new_src != src:        # 表名变了：旧的那份要删；人工改过的归类先记下，导完按单号带过去
                 with db._engine.begin() as c:
-                    for o in c.execute(select(BL.c.doc_no, BL.c.subj_ovr, BL.c.fee_ovr, BL.c.ovr_reason).where(_src_scope(carrier, period, src))).all():
-                        if o[0] and (o[1] or o[2] or o[3]):
-                            keep.setdefault(o[0], (o[1], o[2], o[3]))
+                    for o in c.execute(select(BL.c.doc_no, BL.c.subj_ovr, BL.c.fee_ovr, BL.c.biz_ovr, BL.c.ovr_reason).where(_src_scope(carrier, period, src))).all():
+                        if o[0] and (o[1] or o[2] or o[3] or o[4]):
+                            keep.setdefault(o[0], (o[1], o[2], o[3], o[4]))
                     c.execute(delete(BL).where(_src_scope(carrier, period, src)))
                     c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) &
                                                ((BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))))
@@ -737,8 +739,8 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
         return JSONResponse(r, status_code=400)
     if keep:
         with db._engine.begin() as c:
-            for dno, (so, fo, rs) in keep.items():
-                c.execute(update(BL).where(_src_scope(carrier, period, (r.get("bill_src") or "").strip()) & (BL.c.doc_no == dno)).values(subj_ovr=so, fee_ovr=fo, ovr_reason=rs))
+            for dno, (so, fo, bo, rs) in keep.items():
+                c.execute(update(BL).where(_src_scope(carrier, period, (r.get("bill_src") or "").strip()) & (BL.c.doc_no == dno)).values(subj_ovr=so, fee_ovr=fo, biz_ovr=bo, ovr_reason=rs))
         _bust(carrier, period)
     if dropped:
         db.audit(u["name"], "物流复核-删除账单", "%s %s" % (carrier, period), "替换时表名变了，旧的那份「%s」一并删掉：明细 %d 行 / 汇总 %d 行，金额 %.2f；换成「%s」" % (
@@ -919,17 +921,17 @@ def import_bill(carrier, period, data, operator, origin="手工上传", fname=""
         scope = (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register"))
         if src:
             scope = scope & ((BL.c.bill_src == src) | (BL.c.bill_src.is_(None)) | (BL.c.bill_src == ""))
-        # V2.788：人工改过的归类(特批主体/费用类型+原因)按单号带到新导入的行上——原来重导一次就全没了(顺丰冷运 8 月因此一直不敢重导)
+        # 人工改过的归类(主体/费用类型/业务线+原因)按单号带到新导入的行上，重导不清掉人工调整。
         keep = {}
-        for o in c.execute(select(BL.c.doc_no, BL.c.subj_ovr, BL.c.fee_ovr, BL.c.ovr_reason).where(scope)).all():
-            if o[0] and (o[1] or o[2] or o[3]):
-                keep.setdefault(o[0], (o[1], o[2], o[3]))
+        for o in c.execute(select(BL.c.doc_no, BL.c.subj_ovr, BL.c.fee_ovr, BL.c.biz_ovr, BL.c.ovr_reason).where(scope)).all():
+            if o[0] and (o[1] or o[2] or o[3] or o[4]):
+                keep.setdefault(o[0], (o[1], o[2], o[3], o[4]))
         c.execute(delete(BL).where(scope))
         for grain in ("detail", "accrual"):
             for r in res[grain]:
                 vals = {k: r.get(k) for k in _DETAIL_KEYS}
                 if r.get("doc_no") in keep:
-                    vals["subj_ovr"], vals["fee_ovr"], vals["ovr_reason"] = keep[r.get("doc_no")]
+                    vals["subj_ovr"], vals["fee_ovr"], vals["biz_ovr"], vals["ovr_reason"] = keep[r.get("doc_no")]
                 vals["bill_src"] = src or None
                 vals["batch_id"] = batch
                 vals["review_mode"] = "audit"
@@ -2470,10 +2472,10 @@ _BIZ_ALIAS = {"其他零售": "零售", "零售其他": "零售", "山姆零售"
 
 
 def _bill_biz(r):
-    """账单侧产品线：bizline 列(账单登记/手改)优先，否则从费用标注 annot 的业务线段解析(销售单-小料→小料)，
+    """账单侧产品线：人工覆盖 biz_ovr 优先，其次 bizline 列，否则从费用标注 annot 的业务线段解析(销售单-小料→小料)，
     研发费用TOB/TOC→TO B/TO C；同义归一(其他零售/山姆零售→零售)。取不到返回空串→该笔只能按组配。"""
     a = str(r.get("annot") or "").strip()
-    b = str(r.get("bizline") or "").strip() or _bizline_of(a)
+    b = str(r.get("biz_ovr") or "").strip() or str(r.get("bizline") or "").strip() or _bizline_of(a)
     if not b:
         u = a.upper().replace(" ", "")
         if u.endswith("TOB"):
@@ -2662,7 +2664,7 @@ def _build_lines(request, carrier, period):
     with db._engine.connect() as c:
         allrows = [dict(r) for r in c.execute(select(
             BL.c.carrier, BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount,
-            BL.c.subj_ovr, BL.c.fee_ovr, BL.c.bill_src, BL.c.src_sheet).where(
+            BL.c.subj_ovr, BL.c.fee_ovr, BL.c.biz_ovr, BL.c.bill_src, BL.c.src_sheet).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
         notes = {r[0]: (r[1] or "") for r in c.execute(select(LN.c.line_key, LN.c.note).where(
             (LN.c.carrier == carrier) & (LN.c.period == period))).all()}
@@ -3340,7 +3342,7 @@ def _box_docs(rsub, carrier):
         lines = [m for _dx, m in pairs]
         billcnt = float(r.get("qty") or 0)
         fee = float(r.get("amount") or 0)
-        biz = r.get("bizline") or _bizline_of(r.get("annot"))
+        biz = _bill_biz(r)
         is_trip, trip = False, None
         try:
             chg_wt = float(r.get("charge_wt")) if r.get("charge_wt") not in (None, "") else None
@@ -3715,11 +3717,12 @@ def _box_docs(rsub, carrier):
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
                 "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
                 "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
-                "note": r.get("note") or "", "bbiz": _bill_biz(r),
+                "note": r.get("note") or "", "bbiz": biz, "biz_bill": _bill_biz({**r, "biz_ovr": ""}),
+                "biz_ovr": str(r.get("biz_ovr") or "").strip(),
                 "qty_enabled": scope["qty_enabled"], "price_enabled": scope["price_enabled"],
                 "subject_source": r.get("_subject_source") or "", "subject_pending": bool(r.get("_subject_pending")),
                 "_scheme_gap": locals().get("scheme_gap", ""),
-                # 人工归类(V2.788)：账单原主体、主体有没有被人工改、人工定的费用类型、原因——页面据此标「特批」、可恢复账单原值
+                # 人工归类：保留账单原主体/业务线，页面据此标「特批」、可恢复账单原值
                 "subj_bill": _short_subject(str(r.get("subject") or "").strip()),
                 "subj_ovr": bool(str(r.get("subj_ovr") or "").strip()) and _eff_subject(r) != _short_subject(str(r.get("subject") or "").strip()),
                 "fee_ovr": _fee_ovr(r), "ovr_reason": r.get("ovr_reason") or "",
@@ -4193,7 +4196,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             lines = mats.get(d0) or []
             chg = float(r.get("charge_wt") or 0)
             fee = float(r.get("amount") or 0)
-            biz = r.get("bizline") or _bizline_of(r.get("annot"))   # 优先用中间表已存业务线
+            biz = _bill_biz(r)   # 优先用中间表已存业务线
             kgs = []
             for m in lines:
                 u = str(m.get("基本单位") or "")
@@ -4334,7 +4337,7 @@ async def review_doc_note(request: Request):
 
 @router.post("/api/logistics-review/doc-classify")
 async def review_doc_classify(request: Request):
-    """复核台逐单手动改归类：改该单据的账单侧【主体/费用类型】，复核结论按新归类重算(缓存作废)。
+    """复核台逐单手动改归类：改该单据的账单侧【主体/费用类型/业务线】，复核结论按新归类重算(缓存作废)。
     用于把账单错配的行拨到对的计提组(如账单调拨费对不上计提、主体串号)，让逐组差异对平。
     V2.788(用户「特批调整到星期零的要怎么处理…就是主体和费用类型」)：加 reason(原因，留痕) 和 restore(恢复账单原值)；
     费用类型只收规范类(原来填别的会被悄悄当成没填)；改动进操作日志。"""
@@ -4350,7 +4353,7 @@ async def review_doc_classify(request: Request):
         return JSONResponse({"ok": False, "msg": "缺承运商/单据号"}, status_code=400)
     vals = {}
     if b.get("restore"):
-        vals = {"subj_ovr": None, "fee_ovr": None, "ovr_reason": None}
+        vals = {"subj_ovr": None, "fee_ovr": None, "biz_ovr": None, "ovr_reason": None}
     if b.get("subject") is not None:
         vals["subj_ovr"] = (b.get("subject") or "").strip() or None   # 存覆盖列，不动原 subject；空=清覆盖
     if b.get("fee_item") is not None:
@@ -4358,6 +4361,11 @@ async def review_doc_classify(request: Request):
         if fv and _fee_norm(fv) not in _CANON_FEES:
             return JSONResponse({"ok": False, "msg": "费用类型只能选：出库运费 / 入库运费 / 退货运费 / 仓储费 / 研发外购 / 搬运费"}, status_code=400)
         vals["fee_ovr"] = fv or None
+    if b.get("bizline") is not None:
+        bv = (b.get("bizline") or "").strip()
+        if len(bv) > 40:
+            return JSONResponse({"ok": False, "msg": "业务线不能超过 40 个字"}, status_code=400)
+        vals["biz_ovr"] = bv or None
     if b.get("reason") is not None:
         vals["ovr_reason"] = (b.get("reason") or "").strip()[:200] or None
     if not vals:
@@ -4370,7 +4378,7 @@ async def review_doc_classify(request: Request):
             c.execute(update(BL).where((BL.c.carrier == carrier) & (BL.c.period == period) &
                       (func.substr(BL.c.doc_no, 1, len(no)) == no)).values(**vals))
     _bust(carrier, period)   # 归类变了 → 逐笔/结论缓存作废，重算
-    CN = {"subj_ovr": "主体", "fee_ovr": "费用类型", "ovr_reason": "原因"}
+    CN = {"subj_ovr": "主体", "fee_ovr": "费用类型", "biz_ovr": "业务线", "ovr_reason": "原因"}
     db.audit(_uname(u), "物流复核-改归类", "%s %s %s" % (carrier, period, "、".join(nos) if len(nos) <= 20 else "%s 等 %d 张" % ("、".join(nos[:20]), len(nos))),
              "恢复账单原值" if b.get("restore") else "；".join("%s→%s" % (CN[k], v or "（清空）") for k, v in vals.items()))
     return {"ok": True, "n": len(nos)}

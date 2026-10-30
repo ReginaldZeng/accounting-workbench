@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-30 | Author: Kimi | Version: V2.1033
+# Description: 增加业务线人工覆盖优先级、旧库迁移、保存及恢复接口回归。
 # Date: 2026-10-25 | Author: Kimi | Version: V2.1012
 # Description: 物流 readiness/sign、外仓费用归口、主体回填、导出缓存与共享缓存测试；全部使用合成数据和桩。
 import asyncio
@@ -589,6 +591,55 @@ class FeeClassificationTests(unittest.TestCase):
         self.assertEqual(self.lr._eff_fee({"carrier": "恒茂", "fee_item": "入库处置费", "annot": "仓储费-小料", "doc_no": "FBDR1"}), "入库运费")
         self.assertEqual(self.lr._eff_fee({"carrier": "恒茂", "fee_item": "冷藏费", "annot": "仓储费-小料", "fee_ovr": "仓储费"}), "仓储费")
         self.assertEqual(self.lr._eff_fee({"carrier": "甲", "fee_item": "其他", "annot": "仓储费-小料", "doc_no": "无单据"}), "仓储费")
+
+
+class BizlineOverrideTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+
+    def setUp(self):
+        self.lr._ACCR_CACHE.clear()
+        self.engine.rows = []
+
+    def test_manual_bizline_precedes_bill_and_annotation(self):
+        row = {"bizline": "鲜食", "annot": "销售出库单-小料", "biz_ovr": "其他零售"}
+        self.assertEqual(self.lr._bill_biz(row), "零售")
+        row["biz_ovr"] = ""
+        self.assertEqual(self.lr._bill_biz(row), "鲜食")
+        row["bizline"] = ""
+        self.assertEqual(self.lr._bill_biz(row), "小料")
+
+    def test_old_bill_lines_gain_bizline_override_column(self):
+        from sqlalchemy import create_engine, text
+        from kernels import logistics_review_store as store
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as c:
+                c.execute(text("CREATE TABLE logistics_bill_lines (id INTEGER PRIMARY KEY)"))
+            store.migrate_cols(engine)
+            with engine.connect() as c:
+                cols = {r[1] for r in c.execute(text("PRAGMA table_info(logistics_bill_lines)")).all()}
+            self.assertIn("biz_ovr", cols)
+        finally:
+            engine.dispose()
+
+    async def test_doc_classify_saves_and_restores_bizline_override(self):
+        with patch.object(self.lr, "_locked", return_value=None):
+            out = await self.lr.review_doc_classify(_Request({"carrier": "甲", "period": "2026-09", "doc_no": "XSCKD1",
+                                                               "bizline": "植物肉", "reason": "特批调整"}))
+        self.assertEqual(out, {"ok": True, "n": 1})
+        params = self.engine.connections[-1].writes[-1].compile().params
+        self.assertEqual(params["biz_ovr"], "植物肉")
+        self.assertEqual(params["ovr_reason"], "特批调整")
+
+        with patch.object(self.lr, "_locked", return_value=None):
+            out = await self.lr.review_doc_classify(_Request({"carrier": "甲", "period": "2026-09", "doc_no": "XSCKD1",
+                                                               "restore": True}))
+        self.assertEqual(out, {"ok": True, "n": 1})
+        params = self.engine.connections[-1].writes[-1].compile().params
+        for key in ("subj_ovr", "fee_ovr", "biz_ovr", "ovr_reason"):
+            self.assertIsNone(params[key])
 
 
 if __name__ == "__main__":

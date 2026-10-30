@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1033
+// 单据弹窗改归类增加业务线下拉，展示生效业务线并支持恢复账单原值。
 // [Change Log] Date:2026-10-25 Author:Kimi Version:V2.1008
 // V2.1008：关闭核量或核价后的判定递归显式解除对应开关，修复逐单弹窗白屏。
 // 账单复核台第②步·逐单核对改版（照 2026-10-16 样机定版，10-17 用户「样机更清晰，执行」对齐样机）：
@@ -235,7 +237,7 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
     return () => document.removeEventListener('keydown', h)
   }, [onPrev, onNext, onClose])
   if (!x) return null
-  const { saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, withCur, onDupOk } = ctx
+  const { saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, bizOpts = [], withCur, onDupOk } = ctx
   const j = judge(x)
   const dupOn = dup && !dup.ok
   const ps = x.parties || []
@@ -328,7 +330,7 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
 
         <section className="ldd-sec ldd-kv">
           <span><i>这张单</i></span>
-          <span><i>产品线</i>{x.bizline || '—'}</span><span><i>费用类型</i>{x.fee_item || '—'}</span>
+          <span><i>业务线</i>{x.bbiz || x.bizline || '—'}</span><span><i>费用类型</i>{x.fee_item || '—'}</span>
           <span><i>往来</i>{ps.join('、') || '—'}</span>
           <span><i>单位运费</i>{x.unit_fee == null ? '—' : x.unit_fee + ' 元/kg'}</span>
           <span><i>费比</i>{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null ? `（销售额 ${money(x.sales)}）` : ''}</span>
@@ -373,15 +375,17 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
 
         {x.doc_no && <section className="ldd-sec ldd-ops">
           <div className="ldd-opbar">{opBtn('cls', '改归类')}{opBtn('mode', '改核对方式', x.can_mode)}{opBtn('carry', it ? '多收扣回（已登记）' : '登记多收扣回', showCarry)}{opBtn('note', x.note ? '备注：' + (x.note.length > 16 ? x.note.slice(0, 15) + '…' : x.note) : '写备注')}
-            {(x.subj_ovr || x.fee_ovr || x.ovr_reason || x.force_mode) && <span className="dim">　这张单有人工改过的设置</span>}</div>
+            {(x.subj_ovr || x.fee_ovr || x.biz_ovr || x.ovr_reason || x.force_mode) && <span className="dim">　这张单有人工改过的设置</span>}</div>
           {ops.cls && <div className="xcls">
             <label>主体 <select className="clsinp" disabled={locked} value={x.subject || ''} onChange={e => saveClass(x.doc_no, { subject: e.target.value })}>
               {withCur(subjOpts, x.subject).map(s => <option key={s} value={s}>{s}{s === x.subj_bill ? '（账单原值）' : ''}</option>)}</select></label>
             <label>费用类型 <select className="clsinp" disabled={locked} value={x.fee_item || ''} onChange={e => saveClass(x.doc_no, { fee_item: e.target.value })}>
               {withCur(FEE_CANON, x.fee_item).map(s => <option key={s} value={s}>{s}{s === x.fee_sys ? '（系统判）' : ''}</option>)}</select></label>
+            <label>业务线 <select className="clsinp" aria-label="业务线" disabled={locked} value={x.bbiz || ''} onChange={e => saveClass(x.doc_no, { bizline: e.target.value })}>
+              {withCur(bizOpts, x.bbiz).map(s => <option key={s} value={s}>{s}{s === x.biz_bill ? '（账单原值）' : ''}</option>)}</select></label>
             <label>原因 <input className="clsinp wide" disabled={locked} defaultValue={x.ovr_reason || ''} key={'r' + x.doc_no + (x.ovr_reason || '')}
               placeholder="特批/调整的原因" onBlur={e => { const v = e.target.value.trim(); if (v !== (x.ovr_reason || '')) saveClass(x.doc_no, { reason: v }) }} /></label>
-            {(x.subj_ovr || x.fee_ovr || x.ovr_reason) && !locked && <button className="lk" onClick={() => saveClass(x.doc_no, { restore: true })}>恢复账单原值</button>}
+            {(x.subj_ovr || x.fee_ovr || x.biz_ovr || x.ovr_reason) && !locked && <button className="lk" onClick={() => saveClass(x.doc_no, { restore: true })}>恢复账单原值</button>}
           </div>}
           {ops.mode && x.can_mode && <div className="xcls">
             <label>核对方式 <select className="clsinp" disabled={locked} value={x.force_mode || ''} onChange={e => saveMode(x.doc_no, e.target.value)}>

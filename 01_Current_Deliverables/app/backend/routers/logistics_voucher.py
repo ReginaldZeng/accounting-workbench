@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-30 | Author: Kimi | Version: V2.1033
+# Description: 多收扣回按生效后的人工业务线覆盖匹配计提。
 # Date: 2026-10-02 | Author: Claude Opus 5.5 | Version: V2.749
 # Description: 【应付板块 › 物流对账 › 付款做账】一张物流请款单 → 一张合成凭证预览（红冲 → 更正 → 核销 → 支付），**第一版只预览不写金蝶**。
 #   数据：请款单(logistics_payreq，钉钉) / 发票(发票管家票夹，按审批实例号认，谁建的票夹都算) / 计提凭证(金蝶本期 2241 贷方挂该供应商、
@@ -846,7 +848,7 @@ def _carries(r, vouchers):
     for kind, x in [("out", x) for x in outs] + [("in", x) for x in ins]:
         no, amt = str(x.get("doc_no") or ""), float(x.get("amount") or 0)
         with db._engine.connect() as c:
-            br = [dict(b) for b in c.execute(select(BL.c.subject, BL.c.subj_ovr, BL.c.doc_no, BL.c.fee_item, BL.c.fee_ovr, BL.c.annot, BL.c.bizline).where(
+            br = [dict(b) for b in c.execute(select(BL.c.subject, BL.c.subj_ovr, BL.c.doc_no, BL.c.fee_item, BL.c.fee_ovr, BL.c.annot, BL.c.bizline, BL.c.biz_ovr).where(
                 (BL.c.carrier == r.get("carrier")) & (BL.c.period == x.get("from_period")) & (BL.c.grain == "detail") & (BL.c.doc_no.like(no + "%")))).mappings().all()]
         br = [b for b in br if (b.get("doc_no") or "").split("+")[0] == no]
         if not br:

@@ -1,3 +1,4 @@
+// [Change Log] Date: 2026-10-30 | Author: Kimi | Version: V2.1032（物流数据接入·按主体勾稽）| 断言星期零/星期九请款分别汇总且不显示混合差额
 // [Change Log] Date: 2026-10-26 | Author: Kimi Code | Version: V-draft（发票管家·初审后钉钉评论票不再自动接入）| 断言审核后只能后补单上传、页面无流程补票按钮、历史徽标保留
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家·审查修复）| 发票管家前端回归（浏览器夹具）
 // [Change Log] Date: 2026-09-25 | Author: Claude / c | Version: V2.621 | 加申请人自助登记（#/invself）5 条：验证码登录→登记、重名、钉钉免登、手机配对先鉴权再免登、后补池入口
@@ -2140,6 +2141,35 @@ test('LIK1 数据接入5份原件紧凑列表：长名/金额/下载/重解析/�
   assert.equal(await r.page.locator('.lik-raw tbody button:disabled').count(), 10, 'locked 禁用全部重新解析')
   assert.equal(await r.page.getByRole('link', { name: '下载原件' }).count(), 5, '锁定仍允许下载只读原件')
   assert.equal(r.calls.filter(c => c.path === '/api/logistics-review/reparse').length, 0)
+  assert.deepEqual(r.errors, [])
+  await r.ctx.close()
+})
+
+test('LIK2 多主体请款分别汇总勾稽，不显示承运商混合总额', async (browser, B) => {
+  const data = {
+    ...ikData(), bill_total: 156982.01, req_total: 147264.76, diff: 9717.25,
+    payreqs: [
+      { inst: 'XG-1', subject: '星期零', amount: 139849.68 }, { inst: 'XG-2', subject: '星期零', amount: 224.08 },
+      { inst: 'XG-3', subject: '星期九', amount: 6471 }, { inst: 'XG-4', subject: '星期九', amount: 720 },
+    ],
+    subject_recons: [
+      { subject: '星期零', bill_total: 156982.01, req_total: 140073.76, diff: 16908.25, n_req: 2 },
+      { subject: '星期九', bill_total: null, req_total: 7191, diff: null, n_req: 2 },
+    ],
+  }
+  const r = await open(browser, B, () => ({ ok: true }))
+  await mount(r.page, 'IntakeHarness', { data, period: '2026-09', locked: '' })
+  const rows = r.page.locator('.lik-subjrecs tbody tr')
+  await rows.first().waitFor()
+  assert.equal(await rows.count(), 2)
+  assert.match(await rows.nth(0).innerText(), /星期零[\s\S]*156,982\.01[\s\S]*140,073\.76[\s\S]*2 张[\s\S]*16,908\.25/)
+  assert.match(await rows.nth(1).innerText(), /星期九[\s\S]*7,191\.00[\s\S]*2 张[\s\S]*待核对/)
+  assert.equal(await r.page.locator('.vflow .vnode').last().locator('.v').innerText(), '2 个主体')
+  assert.ok(!(await r.page.locator('.lik-verdict').innerText()).includes('147,264.76'), '混合总额不能再用于接入勾稽')
+  const issues = await r.page.locator('.lik-issues').innerText()
+  assert.match(issues, /星期零：账单与请款单相差 16,908\.25/)
+  assert.match(issues, /星期九：有请款单，但没有解析到该主体账单/)
+  assert.ok(!issues.includes('9,717.25'), '待处理提示也不能用混合差额')
   assert.deepEqual(r.errors, [])
   await r.ctx.close()
 })

@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1033
+// 逐单改归类增加业务线维度，复用产品分类与本期账单选项，人工标记及恢复原值同步覆盖业务线。
 // [Change Log] Date:2026-10-25 Author:Kimi Version:V2.1007
 // 四步复核台：①数据接入 ②逐单核价核量 ③逐笔计提 ④发票审核与登记。先确认账单，再比较计提。
 // V2.1007：承运商复核设置弹窗（核量/核价、方案、主体缺失）；未启用轴明确显示未核，不冒充无误。
@@ -1034,7 +1036,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     reviewVolKg(carrier, v.trim()).then(() => { flash(v.trim() ? `已保存：每方 ${v.trim()} 千克，按新口径重判` : '已取消按体积复算'); reloadDocs() }).catch(e => flash('保存失败：' + e.message))
   }
   const saveNote = (doc_no, note) => { reviewDocNote(carrier, period, doc_no, note).catch(e => flash('备注保存失败：' + e.message)) }
-  // 逐单手改归类(主体/费用类型)→存账单侧覆盖列→逐笔复核按新归类重算
+  // 逐单手改归类(主体/费用类型/业务线)→存账单侧覆盖列→逐笔复核按新归类重算
   const saveClass = (doc_no, patch) => {
     reviewDocClassify(carrier, period, doc_no, patch)
       .then(() => { load(); loadL(); loadCls(); flash('已改归类，逐笔复核重算') })
@@ -1263,9 +1265,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       .catch(e => flash('操作失败：' + e.message)).finally(() => setBusy(''))
   }
   const lrows = (L && L.rows) || []
-  // 归类下拉(V2.788)：主体＝固定三家(总览表头那三家)＋本家账单里出现过的；费用类型＝规范六类。原来是带提示的输入框，只会提示当前那个值，选不到别的主体
+  // 归类下拉：主体＝总览主体＋本家计提主体；费用类型＝规范六类；业务线＝产品分类编码表＋本期账单业务线。
   const subjOpts = [...new Set([...((ov && ov.subjects) || []), ...lrows.filter(r => r.kind !== 'gtotal').map(r => r.subject)].filter(Boolean))]
   const FEE_CANON = ['出库运费', '入库运费', '退货运费', '仓储费', '研发外购', '搬运费']
+  const bizOpts = [...new Set([...Object.keys(cds.biz || {}), ...(((d && d.facets && d.facets.biz) || []).map(x => x[0]))].filter(Boolean))]
   const withCur = (arr, cur) => (cur && !arr.includes(cur) ? [cur, ...arr] : arr)
   const QUEUE = [
     { f: 'miss', sw: 'warn', n: '核量 · 金蝶查无出库单', dd: '账单单号在金蝶未匹配（拆单后缀/未审核）', c: c.miss || 0, u: '笔' },
@@ -1935,7 +1938,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
               onChange={e => { const v = e.target.value; e.target.value = ''; if (v) setBulk(v === '__restore' ? { kind: 'restore' } : { kind: 'subject', value: v, text: '' }) }}>
               <option value="">改主体（{selStat.docNos.length} 张）…</option>
               {subjOpts.map(x => <option key={x} value={x}>{x}</option>)}
-              <option value="__restore">恢复账单原值（主体、费用类型都恢复）</option></select>}
+              <option value="__restore">恢复账单原值（主体、费用类型、业务线都恢复）</option></select>}
             {selStat.docNos.length > 0 && !locked && <select className="clsinp" value="" title="把勾选的这些单一起改费用类型"
               onChange={e => { const v = e.target.value; e.target.value = ''; if (v) setBulk({ kind: 'fee_item', value: v, text: '' }) }}>
               <option value="">改费用类型（{selStat.docNos.length} 张）…</option>
@@ -1943,7 +1946,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             {selStat.docNos.length > 0 && !locked && <button className="btn sm" onClick={() => setBulk({ kind: 'note', text: '' })}>写备注（{selStat.docNos.length} 张）</button>}
             <button className="btn sm" onClick={() => { setSel({}); setBulk(null) }}>清空选择</button>
             {bulk && selStat.docNos.length > 0 && <div className="ldd-bulk">
-              <b>{bulk.kind === 'note' ? `给 ${selStat.docNos.length} 张单写备注` : bulk.kind === 'restore' ? `把 ${selStat.docNos.length} 张单恢复成账单原值（主体、费用类型、原因都清掉）` : `把 ${selStat.docNos.length} 张单的${bulk.kind === 'subject' ? '主体' : '费用类型'}改成「${bulk.value}」`}</b>
+              <b>{bulk.kind === 'note' ? `给 ${selStat.docNos.length} 张单写备注` : bulk.kind === 'restore' ? `把 ${selStat.docNos.length} 张单恢复成账单原值（主体、费用类型、业务线、原因都清掉）` : `把 ${selStat.docNos.length} 张单的${bulk.kind === 'subject' ? '主体' : '费用类型'}改成「${bulk.value}」`}</b>
               {bulk.kind !== 'restore' && <input className="clsinp wide" autoFocus value={bulk.text || ''} placeholder={bulk.kind === 'note' ? '备注内容（会覆盖这些单原来的备注）' : '原因（会留痕），如：经××特批，由深圳星期零承担'}
                 onChange={e => setBulk(o => ({ ...o, text: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') doBulk(selStat.docNos) }} />}
               <button className="btn sm pri" disabled={bulk.kind === 'note' ? false : (bulk.kind !== 'restore' && !(bulk.text || '').trim())} onClick={() => doBulk(selStat.docNos)}>确定</button>
@@ -2003,8 +2006,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                           {dupOn && <span className="pill bad" style={{ marginLeft: 4 }} title="同一张单别家也收了运输费、或本家同单两行金额一样；点开看">重复收费?</span>}
                           <span className="ldd-why" title={j.why}>{j.why}</span>
                           {carryOf(x.doc_no) && <span className="sub" style={{ color: '#6B4E00' }} title={carryOf(x.doc_no).reason}>待后面月份账单扣回 {money(carryOf(x.doc_no).amount)} 元</span>}
-                          {(x.subj_ovr || x.fee_chk === 'manual' || x.ovr_reason) && <span className="sub fchk man hov"
-                            title={'这张单的归类是人工定的（特批等），以人工定的为准。' + (x.ovr_reason ? '\n原因：' + x.ovr_reason : '')}>人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.ovr_reason ? ' · 有原因' : ''}</span>}</td>
+                          {(x.subj_ovr || x.fee_chk === 'manual' || x.biz_ovr || x.ovr_reason) && <span className="sub fchk man hov"
+                            title={'这张单的归类是人工定的（特批等），以人工定的为准。' + (x.ovr_reason ? '\n原因：' + x.ovr_reason : '')}>人工定{x.subj_ovr ? ` · 主体账单原为 ${x.subj_bill}` : ''}{x.biz_ovr ? ` · 业务线账单原为 ${x.biz_bill || '空'}` : ''}{x.ovr_reason ? ' · 有原因' : ''}</span>}</td>
                         <td className="num"><DiffCell j={j} /></td>
                         <td className="party"><span title={ps.join('\n')}>{ps[0] || <span className="dim">—</span>}{ps.length > 1 && <span className="tag">+{ps.length - 1}</span>}</span>
                           <span className="sub"><Cd c={cdBook(x.subject)} />{x.subject} · {x.fee_item}{x.bizline ? ' · ' + x.bizline : ''}</span>
@@ -2058,7 +2061,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             onPrev={dlgI > 0 ? () => setDlgK(kk(dlist[dlgI - 1])) : null}
             onNext={dlgI < dlist.length - 1 ? () => setDlgK(kk(dlist[dlgI + 1])) : null}
             onClose={() => setDlgK(null)}
-            ctx={{ saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, withCur, onDupOk }} />}
+            ctx={{ saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, bizOpts, withCur, onDupOk }} />}
         </div>
         <div className="navbar">
           <button className="btn" onClick={() => goStep('intake')}>‹ 上一步：数据接入</button>

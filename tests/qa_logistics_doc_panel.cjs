@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1033 增加业务线下拉保存与恢复账单原值的浏览器回归
 'use strict'
 const path = require('path')
 const fs = require('fs')
@@ -61,10 +62,11 @@ fs.writeFileSync(entry, `
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { DocDialog } from '${path.join(FE, 'src', 'views', 'LogisticsDocPanel.jsx').replace(/\\/g, '/')}'
+window.__classPatches = []
 const ctx = {
-  saveClass() {}, saveMode() {}, saveNote() {}, doConfirm() {}, carryOf() { return null },
+  saveClass(docNo, patch) { window.__classPatches.push({ docNo, patch }) }, saveMode() {}, saveNote() {}, doConfirm() {}, carryOf() { return null },
   carryForm: {}, setCarryForm() {}, addCarry() {}, delCarry() {}, subjOpts: ['深圳星期零'],
-  FEE_CANON: ['出库运费'], withCur: (a, x) => a.includes(x) ? a : [x, ...a], onDupOk() {},
+  FEE_CANON: ['出库运费'], bizOpts: ['植物肉', '零售'], withCur: (a, x) => a.includes(x) ? a : [x, ...a], onDupOk() {},
 }
 const root = createRoot(document.getElementById('root'))
 window.__mount = (x, c = null) => root.render(React.createElement(DocDialog, {
@@ -114,8 +116,17 @@ async function main() {
       assert.doesNotMatch(text, /物流部标注/)
       if (source === 'default' || source === 'none') assert.doesNotMatch(text, /要改/)
     }
+    await page.evaluate(d => window.__mount(d), { ...doc, subject: '深圳星期零', fee_item: '出库运费', bbiz: '植物肉', biz_bill: '植物肉' })
+    await page.getByRole('button', { name: /^改归类/ }).click()
+    const bizSelect = page.getByLabel('业务线', { exact: true })
+    assert.equal(await bizSelect.inputValue(), '植物肉')
+    await bizSelect.selectOption('零售')
+    assert.deepEqual(await page.evaluate(() => window.__classPatches.at(-1)), { docNo: 'XSCKD1', patch: { bizline: '零售' } })
+    await page.evaluate(d => window.__mount(d), { ...doc, subject: '深圳星期零', fee_item: '出库运费', bbiz: '零售', biz_bill: '植物肉', biz_ovr: '零售', ovr_reason: '特批' })
+    await page.getByRole('button', { name: '恢复账单原值', exact: true }).click()
+    assert.deepEqual(await page.evaluate(() => window.__classPatches.at(-1)), { docNo: 'XSCKD1', patch: { restore: true } })
     assert.deepEqual(errors, [])
-    console.log('物流逐单回归通过：双轴、仅核价、仅核量及五种标注来源文案的真实 Chrome 弹窗渲染均正常')
+    console.log('物流逐单回归通过：双轴、标注来源、业务线调整及恢复账单原值的真实 Chrome 弹窗渲染均正常')
   } finally {
     await browser.close()
   }

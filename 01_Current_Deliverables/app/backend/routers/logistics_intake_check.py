@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-30 | Author: Kimi | Version: V2.1032
+# Description: 数据接入请款与账单按主体分别汇总勾稽，不再把同承运商的星期零、星期九请款合并比较。
 # Date: 2026-10-17 | Author: Claude Opus 5.5 | Version: V2.989
 # Description: 物流账单复核台·第①步「数据接入」接口(用户 2026-10-17 定复核台四步：①数据接入 ②逐笔计提 ③逐单核价核量 ④发票审核)。
-#   GET  /api/logistics-review/intake           一家一个月：账单原件从哪来、解析记录、每页读了哪些列·钱和账单合计对不对得上、请款单合计
+#   GET  /api/logistics-review/intake           一家一个月：账单原件从哪来、解析记录、每页读了哪些列·钱和账单合计对不对得上、按主体请款合计
 #   GET  /api/logistics-review/intake-overview  一个月各家：请款单、原件、读出来的、和请款单差、钱怎么取、读全没有
 #   POST /api/logistics-review/reparse          用存的原件按现在的取数说明再解析一遍(人工改的归类、备注保留；已登记复核的月份不许)
 #   检查逻辑在 kernels/logistics_intake.sheet_report(只读、不落库)。报告按 原件sha×取数说明 缓存，原件或取数说明一变就重算。
@@ -142,6 +144,42 @@ def _payreqs(carrier, period):
             and str(r.get("dt_result") or "").lower() != "refuse"]
 
 
+def _subject_reconciliations(bill_rows, reqs):
+    by_src = {}
+    for r in bill_rows:
+        src = r.get("bill_src") or ""
+        grain = "accrual" if r.get("grain") == "accrual" else "detail"
+        by_src.setdefault(src, {"detail": [], "accrual": []})[grain].append(r)
+    selected = []
+    for rows in by_src.values():
+        selected.extend(rows["accrual"] or rows["detail"])
+    bill_by = intake.sheet_round_groups(selected, LR._eff_subject) if selected else {}
+    req_by = {}
+    for q in reqs:
+        subject = LR._short_subject(str(q.get("subject") or "").strip())
+        x = req_by.setdefault(subject, {"amount": 0.0, "n_req": 0})
+        x["amount"] += float(q.get("amount") or 0)
+        x["n_req"] += 1
+    out = []
+    for subject in sorted(set(bill_by) | set(req_by)):
+        bill_total = bill_by.get(subject)
+        req = req_by.get(subject)
+        req_total = round(req["amount"], 2) if req else None
+        out.append({"subject": subject or "未标主体", "bill_total": bill_total, "req_total": req_total,
+                    "diff": round(bill_total - req_total, 2) if bill_total is not None and req_total is not None else None,
+                    "n_req": req["n_req"] if req else 0})
+    return out
+
+
+def _subject_recons(carrier, period, reqs):
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL.c.bill_src, BL.c.grain, BL.c.subject, BL.c.subj_ovr,
+                                                  BL.c.amount, BL.c.src_sheet).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) &
+            ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register")))).mappings().all()]
+    return _subject_reconciliations(rows, reqs)
+
+
 def _history(carrier, period):
     try:
         with db._engine.connect() as c:
@@ -180,6 +218,7 @@ def intake_view(carrier, period):
             "payreqs": [{"inst": q["inst_id"], "bid": q.get("business_id"), "subject": q.get("subject"), "amount": q.get("amount"),
                          "applicant": q.get("applicant"), "at": q.get("create_time"), "bill_state": q.get("bill_state"), "bill_msg": q.get("bill_msg")} for q in reqs],
             "req_files": req_files, "req_total": req_total, "diff": round(bill_total - req_total, 2) if reqs and bills else None,
+            "subject_recons": _subject_recons(carrier, period, reqs),
             "verdict": max(vs, key=lambda v: rank.get(v, 0)) if vs else ("nobill" if not bills else "noraw"),
             "history": _history(carrier, period),
             "locked": ("本月已登记复核（%s %s）" % (sg.get("reviewer") or "", sg.get("signed_at") or "")) if sg else ""}
@@ -227,6 +266,7 @@ def overview(period):
         rows.append({"carrier": ca, "how": how, "total_col": tot, "multi": len([s for s in spec.get("sheets") or [] if s.get("role") == "detail"]),
                      "n_req": len(reqs), "req_total": req_total, "n_raw": len(raws), "bill_total": bill_total,
                      "diff": round(bill_total - req_total, 2) if bill_total is not None and req_total is not None else None,
+                     "subject_recons": _subject_recons(ca, period, reqs),
                      "status": st, "risky": bool(spec) and not tot and any(
                          s.get("fee_parts") or len(s.get("amount_cols") or []) > 1 for s in spec.get("sheets") or [] if s.get("role") == "detail")})
     return {"ok": True, "period": period, "rows": rows}

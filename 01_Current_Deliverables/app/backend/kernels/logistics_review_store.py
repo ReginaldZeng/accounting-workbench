@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-10-30 | Author: Kimi | Version: V2.1033
+# Description: 账单行增加 biz_ovr 业务线人工覆盖列，旧库幂等补列，保留原业务线。
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
 # Description: 【物流账单复核】三张新表（自带 MetaData，由 db.py to_metadata 挂进来，create_all 只建不改）：
 #   ① logistics_bill_lines  中间表——一行=一条账单明细，双粒度：grain='detail'(对账/逐单,带单号) / 'accrual'(计提,按费用项汇总)。
@@ -48,6 +50,7 @@ bill_lines = Table(
     Column("note", Text),
     Column("subj_ovr", String(30)),        # 复核台人工改归类：主体覆盖(非空时生效，不动原 subject)
     Column("fee_ovr", String(40)),         # 复核台人工改归类：费用类型覆盖(非空时生效，不动原 fee_item/单号推断)
+    Column("biz_ovr", String(40)),         # 复核台人工改归类：业务线覆盖(非空时生效，不动原 bizline/标注推断)
     Column("ovr_reason", String(200)),     # 人工改归类的原因(特批由哪个主体承担等，V2.788)：留痕，页面显示在该单下面
     Column("bill_src", String(120)),       # 账单份(货主)：一家一月可有几份账单(迅鸽 starfield/kikiherb)，上传只替换同一份
     Column("created_at", String(20)),
@@ -322,8 +325,8 @@ def migrate_cols(engine):
     """给已建的 logistics_bill_lines 补新列（create_all 只建不改）。MySQL/SQLite 兼容，缺列才补。"""
     from sqlalchemy import text
     drv = engine.url.drivername
-    need = [("review_mode", "VARCHAR(10)"), ("subj_ovr", "VARCHAR(30)"), ("fee_ovr", "VARCHAR(40)"), ("bill_src", "VARCHAR(120)"),
-            ("ovr_reason", "VARCHAR(200)"), ("annot_source", "VARCHAR(12)")]
+    need = [("review_mode", "VARCHAR(10)"), ("subj_ovr", "VARCHAR(30)"), ("fee_ovr", "VARCHAR(40)"), ("biz_ovr", "VARCHAR(40)"),
+            ("bill_src", "VARCHAR(120)"), ("ovr_reason", "VARCHAR(200)"), ("annot_source", "VARCHAR(12)")]
     with engine.begin() as c:
         if "mysql" in drv:
             have = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
