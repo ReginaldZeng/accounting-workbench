@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-30 | Author: Kimi | Version: V2.1033
+# Date: 2026-10-30 | Author: Kimi | Version: V2.1034
+# Description: 第③步逐笔行显示账单归属主体、业务线和人工调整原因，并回归业务线精确/按组配对。
+# Date: 2026-10-30 | Author: Kimi | Version: V-draft
 # Description: 逐单改归类增加业务线人工覆盖，贯通保存、重导保留、逐笔配对与恢复原值。
 # Date: 2026-10-25 | Author: Kimi | Version: V2.1013
 # Description: 【物流账单复核】路由。V2.1013 逐笔计提查询带承运商，恒茂外仓归口完整生效。
@@ -2664,7 +2666,7 @@ def _build_lines(request, carrier, period):
     with db._engine.connect() as c:
         allrows = [dict(r) for r in c.execute(select(
             BL.c.carrier, BL.c.grain, BL.c.subject, BL.c.doc_no, BL.c.fee_item, BL.c.annot, BL.c.bizline, BL.c.amount,
-            BL.c.subj_ovr, BL.c.fee_ovr, BL.c.biz_ovr, BL.c.bill_src, BL.c.src_sheet).where(
+            BL.c.subj_ovr, BL.c.fee_ovr, BL.c.biz_ovr, BL.c.ovr_reason, BL.c.bill_src, BL.c.src_sheet).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain.in_(("accrual", "detail"))))).mappings().all()]
         notes = {r[0]: (r[1] or "") for r in c.execute(select(LN.c.line_key, LN.c.note).where(
             (LN.c.carrier == carrier) & (LN.c.period == period))).all()}
@@ -2686,6 +2688,21 @@ def _build_lines(request, carrier, period):
         return (k[0], "出库运费", k[2]) if k[1] == "退货运费" and k[0] in _ret_fold else k
 
     bill3 = intake.sheet_round_groups(brows, _bill3_key)
+    bill3_manual = {}
+    for r in brows:
+        item = {}
+        if str(r.get("subj_ovr") or "").strip():
+            item["subject"] = _eff_subject(r)
+        if str(r.get("fee_ovr") or "").strip():
+            item["fee"] = _eff_fee(r)
+        if str(r.get("biz_ovr") or "").strip():
+            item["biz"] = _bill_biz(r)
+        if not item:
+            continue
+        item["reason"] = str(r.get("ovr_reason") or "").strip()
+        k = _bill3_key(r)
+        if item not in bill3_manual.setdefault(k, []):
+            bill3_manual[k].append(item)
     ret3 = intake.sheet_round_groups([r for r in brows if _eff_fee(r) == "退货运费" and _eff_subject(r) in _ret_fold], _bill3_key)
     # 可逐单：每个账单归口里，有多少金额是带金蝶单号的逐单明细撑着的(无单据/只有月结汇总行的只能按汇总核)
     detrows = [r for r in allrows if r.get("grain") == "detail" and (r.get("doc_no") or "").strip() not in ("", "无单据")]
@@ -2800,6 +2817,11 @@ def _build_lines(request, carrier, period):
             if x.get("bill") is None:
                 continue
             _ks = [(s, f, x.get("mbiz") or x["biz"])] if x.get("level") == "biz" else rkeys
+            x["bill_subject"] = "、".join(sorted({k[0] for k in _ks}))
+            x["bill_biz"] = "、".join(sorted({k[2] for k in _ks if k[2]}))
+            manual = [m for k in _ks for m in bill3_manual.get(k, [])]
+            if manual:
+                x["bill_manual"] = manual
             x["od"] = _od(_ks, x["bill"])
             _ri = round(sum(ret3.get(k, 0.0) for k in _ks), 2)
             if _ri:
@@ -4745,7 +4767,7 @@ def review_dim_options(request: Request):
                 seen[code] = name
         return [{"code": k, "name": v} for k, v in sorted(seen.items())]
     CN = [("FNumber", "c"), ("FName", "n")]
-    out["acct"] = pairs(q("BD_Account", CN, "FNumber in ('5101','5301','6401','6402','6601','6602','6603','6604','6711')"))
+    out["acct"] = pairs(q("BD_Account", CN, "FNumber in ('5101','5301','6401','6402','6601','6602','6603','6711')"))
     out["fee"] = pairs(q("BD_Expense", CN, "FNumber like 'FYXM%'"))
     out["dept"] = pairs(q("BD_Department", CN, "FNumber like '%'"))
     ad = q("BOS_ASSISTANTDATA_DETAIL", [("FNumber", "c"), ("FDataValue", "n"), ("FId.FNumber", "t")], "FId.FNumber in ('CPFL','CPXM')")

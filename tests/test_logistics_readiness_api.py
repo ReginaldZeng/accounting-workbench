@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-30 | Author: Kimi | Version: V2.1033
+# Date: 2026-10-30 | Author: Kimi | Version: V2.1034
+# Description: 增加业务线精确/按组配对、账单归属及人工调整信息回归。
+# Date: 2026-10-30 | Author: Kimi | Version: V-draft
 # Description: 增加业务线人工覆盖优先级、旧库迁移、保存及恢复接口回归。
 # Date: 2026-10-25 | Author: Kimi | Version: V2.1012
 # Description: 物流 readiness/sign、外仓费用归口、主体回填、导出缓存与共享缓存测试；全部使用合成数据和桩。
@@ -528,6 +530,38 @@ class SheetRoundingApiTests(unittest.TestCase):
         totals[0]["mark"] = {"status": "ok", "dv": ""}
         step = self.lr.lready.evaluate("甲", "2026-09", lines=out)["steps"]["lines"]
         self.assertEqual(step["status"], "ok")
+
+    def test_biz_override_pairing_and_bill_assignment_are_visible(self):
+        with self.engine.begin() as c:
+            c.execute(self.lr.BL.update().where(self.lr.BL.c.src_sheet == "植物肉").values(
+                biz_ovr="小料", ovr_reason="特批调整业务线"))
+
+        def build(entries):
+            got = {"entries": entries, "adj": [], "prior": []}
+            with patch.object(self.lr, "_accr_entries", return_value=got), \
+                 patch.object(self.lr, "_dept_biz_rules", return_value=({}, {})), \
+                 patch.object(self.lr, "_backfill_subjects", lambda *args, **kwargs: None), \
+                 patch.object(self.lr, "_xsubj_hints", return_value={}), \
+                 patch.object(self.lr, "_subj_marks", return_value={}):
+                return self.lr._build_lines(_Request(), "甲", "2026-09")
+
+        plant = {"subject": "深圳星期零", "fee_norm": "入库运费", "fee": "入库运费", "amt": 42441.29,
+                 "biz": "植物肉", "key": "记-1|深圳星期零", "vno": "记-1", "book_code": "100"}
+        fallback = self._lines()
+        row = next(r for r in fallback["rows"] if r.get("bill_biz") == "小料")
+        self.assertEqual(row["level"], "group")
+        self.assertEqual(row["bill_subject"], "深圳星期零")
+        self.assertEqual(row["bill_manual"], [{"biz": "小料", "reason": "特批调整业务线"}])
+
+        plant["amt"] = 41893.51
+        small = {"subject": "深圳星期零", "fee_norm": "入库运费", "fee": "入库运费", "amt": 547.78,
+                 "biz": "小料", "key": "记-2|深圳星期零", "vno": "记-2", "book_code": "100"}
+        exact = build([plant, small])
+        row = next(r for r in exact["rows"] if r.get("bill_biz") == "小料")
+        self.assertEqual(row["level"], "biz")
+        self.assertEqual(row["bill"], 547.78)
+        self.assertEqual(row["bill_subject"], "深圳星期零")
+        self.assertEqual(row["bill_manual"][0]["biz"], "小料")
 
     def test_bills_api_uses_sheet_rounded_amount(self):
         with patch.object(self.lr, "_perm", return_value={"name": "测试"}), \

@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1034 第③步账单归属主体、业务线及人工调整标记回归
 'use strict'
 const path = require('path')
 const fs = require('fs')
@@ -73,7 +74,8 @@ const taskLinesData = period => {
   const fix = { key: 'A2', to_dept: 'D01 应改部门', snap: { vno: 'V-A2', amt_net: 20 }, live: true }
   return {
     ok: true, carrier: '合成物流', period, rows: [
-      { kind: 'accr', key: 'A1', anc: 'A1', subject: '主体甲', fee_type: '出库运费', fee: '出库运费', vno: 'V-A1', amt: 10, bill: 40, diff: 10, bill_span: 2 },
+      { kind: 'accr', key: 'A1', anc: 'A1', subject: '主体甲', fee_type: '出库运费', fee: '出库运费', vno: 'V-A1', amt: 10, bill: 40, diff: 10, bill_span: 2,
+        bill_subject: '主体甲', bill_biz: '植物肉', bill_manual: [{ subject: '主体甲', biz: '植物肉', reason: '特批调整' }] },
       { kind: 'accr', key: 'A2', anc: 'A1', subject: '主体甲', fee_type: '出库运费', fee: '出库运费', vno: 'V-A2', amt: 20, bill: null, diff: null, fix },
       { kind: 'accr', key: 'A3', subject: '主体甲', fee_type: '仓储费', fee: '仓储费', vno: 'V-A3', amt: 10, bill: 10, diff: 0, bill_span: 1 },
       { kind: 'gtotal', key: 'G-A', subject: '主体甲', amt: 40, bill: 50, diff: 10 },
@@ -244,6 +246,9 @@ async function lineTasks(browser, B) {
   try {
     await step(page, '逐笔计提复核')
     await page.getByText('V-A1', { exact: true }).waitFor()
+    const a1 = page.locator('.ltbl tbody tr').filter({ hasText: 'V-A1' })
+    assert.match(await a1.innerText(), /账单归属：主体甲 · 植物肉/)
+    assert.match(await a1.getByText('人工调', { exact: true }).getAttribute('title'), /主体→主体甲；业务线→植物肉；原因：特批调整/)
     assert.equal(await page.locator('[data-line-task="unexpl"] b').innerText(), '1')
     assert.equal(await page.locator('[data-line-task="fixes"] b').innerText(), '1')
     assert.equal(await page.locator('[data-line-task="subject"] b').innerText(), '1')

@@ -1,4 +1,6 @@
-// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1033
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1034
+// 第③步显示账单归属主体、业务线及人工调整标记，按组配对也保留真实账单业务线。
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V-draft
 // 逐单改归类增加业务线维度，复用产品分类与本期账单选项，人工标记及恢复原值同步覆盖业务线。
 // [Change Log] Date:2026-10-25 Author:Kimi Version:V2.1007
 // 四步复核台：①数据接入 ②逐单核价核量 ③逐笔计提 ④发票审核与登记。先确认账单，再比较计提。
@@ -1753,7 +1755,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                       const flat = gdiff != null && isZero(gdiff)
                       // 第一行=费用项目(FYXM编码+金蝶名称)；小字=产品分类 · 产品项目 · 部门，都带金蝶编码(用户 2026-09-30)
                       const bizEl = (r.biz || '').startsWith('（') ? <span className="dim">无产品分类{r.mbiz ? <span title="凭证上没有产品分类；按计提口径，这个部门的这类费用是这个业务线的，配账单时按它配">（按部门认作 {r.mbiz}）</span> : ''}</span> : <><Cd c={r.biz_code} />{r.biz}</>
-                      const subline = [<>{bizEl}{r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}{r.ret_in ? <span className="dim" title="账单标注规范附表 H：销售退货单按销售出库费用。金蝶这个主体没有单独计提退货运费，账单的退货运费并进出库运费一起比"> (账单含退货运费 {money(r.ret_in)})</span> : null}</>,
+                      const billManualTitle = (r.bill_manual || []).map(m => [
+                        m.subject && `主体→${m.subject}`, m.fee && `费用类型→${m.fee}`, m.biz && `业务线→${m.biz}`, m.reason && `原因：${m.reason}`,
+                      ].filter(Boolean).join('；')).join('\n')
+                      const subline = [<>{bizEl}{r.bill_subject ? <span className="dim">（账单归属：{r.bill_subject} · {r.bill_biz || '无业务线'}）</span> : r.bill_biz && <span className="dim"> (账单:{r.bill_biz})</span>}{billManualTitle && <span className="tag" title={billManualTitle}>人工调</span>}{r.ret_in ? <span className="dim" title="账单标注规范附表 H：销售退货单按销售出库费用。金蝶这个主体没有单独计提退货运费，账单的退货运费并进出库运费一起比"> (账单含退货运费 {money(r.ret_in)})</span> : null}</>,
                         r.proj && <><Cd c={r.proj_code} />{r.proj}</>, r.dept && <><Cd c={r.dept_code} />{r.dept}</>]
                         .filter(Boolean).map((x, i) => <React.Fragment key={i}>{i > 0 && ' · '}{x}</React.Fragment>)
                       const accr = r.kind === 'accr'
