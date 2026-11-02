@@ -707,10 +707,11 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
     fname = getattr(request.state, "upload_name", "") or ""
     src = (src or "").strip()
     keep, dropped = {}, None
+    bill_subject = intake.bill_subject_from_src(src) if mode == "replace" else ""
     if mode in ("add", "replace"):
         sp2 = dict(spec, period=period)
         try:
-            pre = intake.parse_bill(sp2, data)
+            pre = intake.scope_bill_subject(intake.parse_bill(sp2, data), bill_subject)
         except Exception:
             return JSONResponse({"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}, status_code=400)
         if not pre.get("detail") and not pre.get("accrual"):
@@ -736,7 +737,8 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
                     c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) &
                                                ((BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))))
                 dropped = have[src]
-    r = import_bill(carrier, period, data, u["name"], origin=("手工上传·替换" if mode == "replace" else "手工上传"), fname=fname)
+    r = import_bill(carrier, period, data, u["name"], origin=("手工上传·替换" if mode == "replace" else "手工上传"), fname=fname,
+                    bill_subject=bill_subject)
     if not r.get("ok"):
         return JSONResponse(r, status_code=400)
     if keep:
@@ -906,14 +908,14 @@ def _attach_raw_sheets(wb, files):
     return added
 
 
-def import_bill(carrier, period, data, operator, origin="手工上传", fname=""):
+def import_bill(carrier, period, data, operator, origin="手工上传", fname="", bill_subject=""):
     """解析一份账单落 bill_lines（上传页与钉钉请款单自动导入共用）→ {ok, bill_src, detail, accrual, skipped, sources} / {ok:False,msg}。"""
     spec = _load_spec(carrier)
     if not spec:
         return {"ok": False, "msg": "该承运商还没配取数说明"}
     spec["period"] = period
     try:
-        res = intake.parse_bill(spec, data)
+        res = intake.scope_bill_subject(intake.parse_bill(spec, data), bill_subject)
     except Exception:
         return {"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}
     batch = "%s|%s|%s" % (carrier, period, datetime.now().strftime("%Y%m%d%H%M%S"))

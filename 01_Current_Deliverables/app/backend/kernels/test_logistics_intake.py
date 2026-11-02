@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-02 | Author: Kimi | Version: V2.1035
+# Description: 覆盖多主体同名隔离、完全重复工作表和表底合计漏算回归。
 # Date: 2026-10-08 | Author: Claude Opus 5.5 | Version: V2.864
 # Description: 物流账单取数(logistics_intake)单测——单号列合并单元格：合并块下半截沿用首行单号(不看这行写没写日期序号)。合成数据。
 import io
@@ -257,6 +259,54 @@ class SheetReport(unittest.TestCase):
         s = li.sheet_report(self._spec(fee_parts={"运费": ["折后运费"], "保费": ["保费"], "退仓费": ["退仓费"], "回单费": ["回单费"]}), self._bill(), "2026-09")["sheets"][0]
         self.assertEqual([m["name"] for m in s["money"] if not m["found"]], ["回单费"])
         self.assertEqual(s["verdict"], "ok")
+
+
+class SubjectScopedBill(unittest.TestCase):
+    def test_same_source_is_isolated_by_subject(self):
+        res = {"bill_src": "小料装货明细", "detail": [{"doc_no": "XS1", "subject": "深圳星期零"}], "accrual": []}
+        xg = li.scope_bill_subject(res, "孝感星期九")
+        sz = li.scope_bill_subject(res, "深圳星期零")
+        self.assertEqual(xg["bill_src"], "【孝感星期九】小料装货明细")
+        self.assertEqual(sz["bill_src"], "【深圳星期零】小料装货明细")
+        self.assertNotEqual(xg["bill_src"], sz["bill_src"])
+        self.assertEqual(xg["detail"][0]["subject"], "孝感星期九")
+        self.assertEqual(res["detail"][0]["subject"], "深圳星期零")
+        self.assertEqual(li.bill_subject_from_src(xg["bill_src"]), "孝感星期九")
+        self.assertEqual(li.bill_subject_from_src("小料装货明细"), "")
+
+
+class DuplicateAndTotalRow(unittest.TestCase):
+    def _book(self, duplicate=False, total=3):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "小料装货明细"
+        for sh in ([ws] if not duplicate else [ws, wb.create_sheet("小料装货明细 (2)")]):
+            sh.append(["金蝶单号", "金额", "汇总"])
+            sh.append(["XS1", 1, None])
+            sh.append(["XS2", 2, None])
+            sh.append(["合计", total, None])
+        bio = io.BytesIO()
+        wb.save(bio)
+        return bio.getvalue()
+
+    def _spec(self):
+        return {"carrier": "天鹰物流", "period": "2026-09", "src_from_sheets": True, "sheets": [{
+            "name": "小料装货明细*", "role": "detail", "doc_col": "金蝶单号", "amount_col": "金额",
+            "summary_marker": "合计", "summary_cols": 1}]}
+
+    def test_exact_duplicate_sheet_counted_once_but_reported(self):
+        data = self._book(duplicate=True)
+        full = li.parse_bill(self._spec(), data)
+        self.assertEqual(len(full["detail"]), 2)
+        self.assertEqual(li.sheet_round_sum(full["detail"]), 3)
+        self.assertEqual(full["duplicates"], [{"sheet": "小料装货明细 (2)", "duplicate_of": "小料装货明细"}])
+        report = li.sheet_report(self._spec(), data, "2026-09")
+        self.assertEqual((report["amount"], report["dup_rows"], report["verdict"]), (3, 2, "gap"))
+
+    def test_total_row_formula_shortfall_is_gap(self):
+        report = li.sheet_report(self._spec(), self._book(total=2), "2026-09")
+        sheet = report["sheets"][0]
+        self.assertEqual((sheet["amount"], sheet["total"]["sum"], sheet["gap"], sheet["verdict"]), (3, 2, 1, "gap"))
 
 
 if __name__ == "__main__":

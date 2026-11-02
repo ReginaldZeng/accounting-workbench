@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-02 | Author: Kimi | Version: V2.1035
+# Description: 钉钉多文件账单按请款主体隔离同名份名，避免不同主体互相判重和覆盖。
 # Date: 2026-10-24 | Author: Kimi | Version: V2.1004
 # Description: 【物流复核·钉钉请款单接入】V2.1004 发票块补充后补确认，供四步 readiness 与 /sign 共用。
 #   原说明：用户 2026-10-01 定自动扫钉钉「付款申请（公对公）」**全模板**(不是谁的待办)，
@@ -433,7 +435,7 @@ def _import_multi(r, bills, operator, force=False):
         with db._engine.connect() as c:
             data = c.execute(select(PF.c.data).where((PF.c.inst_id == r["inst_id"]) & (PF.c.file_id == str(b["fileId"])))).scalar()
         try:
-            pre = intake.parse_bill(spec, data)
+            pre = intake.scope_bill_subject(intake.parse_bill(spec, data), r.get("subject"))
         except Exception:
             fail.append(b.get("fileName"))
             continue
@@ -447,7 +449,7 @@ def _import_multi(r, bills, operator, force=False):
             kept.append(src or b.get("fileName"))
             continue
         res = LR.import_bill(carrier, period, data, operator, origin="钉钉请款单 %s「%s」" % (r.get("business_id"), b.get("fileName")),
-                             fname=b.get("fileName") or "")
+                             fname=b.get("fileName") or "", bill_subject=r.get("subject"))
         if not res.get("ok"):
             fail.append(b.get("fileName"))
             continue

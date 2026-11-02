@@ -299,7 +299,8 @@ def reparse(carrier, period, src, operator):
     for r in old:
         if r.get("doc_no") and (r.get("note") or "").strip():
             notes.setdefault(r["doc_no"], r["note"])
-    res = LR.import_bill(carrier, period, bytes(raw["data"]), operator, origin="用存的原件重新解析", fname=raw.get("name") or "")
+    res = LR.import_bill(carrier, period, bytes(raw["data"]), operator, origin="用存的原件重新解析", fname=raw.get("name") or "",
+                         bill_subject=intake.bill_subject_from_src(src))
     if not res.get("ok"):
         return JSONResponse(res, status_code=400)
     if notes:

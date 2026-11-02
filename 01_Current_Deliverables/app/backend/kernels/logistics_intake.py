@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-02 | Author: Kimi | Version: V2.1035
+# Description: 多文件账单按主体隔离份名；完全重复工作表只计一次并报异常；单金额列表底合计与明细交叉校验。
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
 # V2.989：sheet_report 数据接入检查——每页算钱的列加起来对账单自己的合计列，看读全没有(复核台第①步)
 # V2.761：读老格式 .xls(xlrd)；列名 * 结尾按前缀认；wt_scale 账单重量换千克(链盟接入)
@@ -545,6 +547,28 @@ def open_book(data):
     return openpyxl.load_workbook(src, read_only=True, data_only=True)
 
 
+def scope_bill_subject(res, subject):
+    sub = _s(subject)
+    if not sub:
+        return res
+    out = dict(res)
+    src = _s(out.get("bill_src"))
+    out["bill_src"] = "【%s】%s" % (sub, src) if src else "【%s】" % sub
+    for grain in ("detail", "accrual"):
+        out[grain] = [dict(r, subject=sub) for r in out.get(grain) or []]
+    return out
+
+
+def bill_subject_from_src(src):
+    m = re.match(r"^【([^】]+)】", _s(src))
+    return m.group(1).strip() if m else ""
+
+
+def _sheet_fingerprint(rows):
+    return json.dumps([{k: v for k, v in r.items() if k not in ("src_sheet", "src_row")} for r in rows],
+                      ensure_ascii=False, sort_keys=True, default=str)
+
+
 def parse_bill(spec, data):
     """按取数说明解析整本账单 xlsx/xls → {'detail':[...], 'accrual':[...], 'skipped':[表名], 'period':...}。
     data=bytes 或路径。period 从 spec 传入或调用方补。"""
@@ -552,7 +576,8 @@ def parse_bill(spec, data):
     mg = merged_rows(data)
     carrier = spec.get("carrier", "")
     period = spec.get("period", "")
-    detail, accrual, skipped = [], [], []
+    detail, accrual, skipped, duplicates = [], [], [], []
+    seen_sheets = {}
     boxp = box_prices_from(wb, spec) if any(c.get("box_col") for c in spec.get("sheets", [])) else {}
     per_row = []     # (sheet spec, 该表 detail 行)：per_row_fees 要等汇总页单价
     # 表名里的 {m} 换成账期月份(易风达一本表留着历月的页：只认「{m}月运输」「{m}月仓储费」，V2.764)
@@ -568,6 +593,13 @@ def parse_bill(spec, data):
             continue
         if sp["role"] == "detail":
             got = parse_detail_sheet(sp, ws, period, carrier, boxp, mg.get(ws.title))
+            fp = _sheet_fingerprint(got)
+            if got and fp in seen_sheets:
+                duplicates.append({"sheet": ws.title, "duplicate_of": seen_sheets[fp]})
+                skipped.append(ws.title)
+                continue
+            if got:
+                seen_sheets[fp] = ws.title
             detail += got
             if sp.get("per_row_fees"):
                 per_row.append((sp, got))
@@ -614,8 +646,8 @@ def parse_bill(spec, data):
         r["bill_src"] = owner
         if biz and not r.get("bizline"):
             r["bizline"] = biz
-    return {"detail": detail, "accrual": accrual, "skipped": skipped, "carrier": carrier, "period": period,
-            "bill_src": owner}
+    return {"detail": detail, "accrual": accrual, "skipped": skipped, "duplicates": duplicates,
+            "carrier": carrier, "period": period, "bill_src": owner}
 
 
 # ---------- 数据接入检查：账单读全没有(V2.988，复核台第①步) ----------
@@ -730,7 +762,18 @@ def sheet_report(spec, data, period=""):
             total = {"name": hdr[ct].replace("\n", ""), "sum": col_sum(ct), "how": "spec"}
             used.add(ct)
         elif len([m for m in money if m["found"]]) == 1 and not sp.get("fee_parts"):
-            total = {"name": money[0]["name"] if money else "", "sum": parts_sum, "how": "self"}     # 直接读账单的合计列：本身就是合计
+            total_sum = parts_sum
+            ac = find_col(hdr, sp["amount_col"]) if sp.get("amount_col") else \
+                (find_col(hdr, sp["amount_cols"][0]) if sp.get("amount_cols") else None)
+            if ac is not None:
+                for rr in reversed(raw[hr + 1:]):
+                    if not is_sum(rr):
+                        continue
+                    v = _f(rr[ac]) if ac < len(rr) else None
+                    if v is not None:
+                        total_sum = round(v, 2)
+                    break
+            total = {"name": money[0]["name"] if money else "", "sum": total_sum, "how": "self"}
         else:
             for ci, h in enumerate(hdr):
                 if ci in used or not h or not _TOTAL_HINT.search(h):
@@ -771,6 +814,9 @@ def sheet_report(spec, data, period=""):
     n_pre = sum(x.get("n") or 0 for x in out if x["role"] == "detail")
     rank = {"gap": 4, "maybe": 3, "unsplit": 2, "nocheck": 1, "ok": 0}
     vs = [x["verdict"] for x in out if x["role"] == "detail"]
+    verdict = max(vs, key=lambda v: rank.get(v, 0)) if vs else "nocheck"
+    if full.get("duplicates"):
+        verdict = "gap"
     return {"sheets": out, "n": len(full["detail"]), "amount": sheet_round_sum(full["detail"]),
             "accrual": sheet_round_sum(full["accrual"]), "dup_rows": max(0, n_pre - len(full["detail"])),
-            "bill_src": full.get("bill_src") or "", "verdict": max(vs, key=lambda v: rank.get(v, 0)) if vs else "nocheck"}
+            "duplicates": full.get("duplicates") or [], "bill_src": full.get("bill_src") or "", "verdict": verdict}
