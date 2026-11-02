@@ -1,3 +1,5 @@
+// [Change Log] Date:2026-11-02 Author:Kimi Version:V2.1036
+// 数据接入差异首次自动弹窗说明原因，可从待处理区或主体差额重新打开；只读提示，不自动确认。
 // [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1032
 // 数据接入按主体分别展示请款合计与账单差额，多主体不再显示承运商混合勾稽金额。
 // [Change Log] Date:2026-10-26 Author:Kimi Version:V-draft
@@ -63,7 +65,13 @@ export const IK_CSS = `
 .lrv .lia-qlist{max-height:650px;overflow:auto}.lrv .lia-qitem{display:grid;width:100%;text-align:left;gap:4px;padding:11px 12px;border:0;border-bottom:1px solid #E6EBEF;background:transparent;cursor:pointer;color:inherit;transition:background .15s}
 .lrv .lia-qitem:hover{background:#F0F5F8}.lrv .lia-qitem.on{background:#EAF2F7;box-shadow:inset 3px 0 var(--accent)}.lrv .lia-qitem .qt{display:flex;justify-content:space-between;gap:8px;font-weight:650}.lrv .lia-qitem .qt>span{min-width:0;overflow-wrap:anywhere}.lrv .lia-qitem .qs{display:flex;justify-content:space-between;gap:6px;color:#5E6B78;font-size:11.5px}.lrv .lia-qitem .qn{color:#99600F}
 .lrv .lia-detail{min-width:0}.lrv .lia-detail .lik-req{border:0;border-radius:0;margin:0}.lrv .lia-voucher{border-top:1px solid #E6EBEF;padding:10px 14px}.lrv .lia-voucher>summary{cursor:pointer;font-weight:650;font-size:12.5px}.lrv .lia-viewload{padding:40px 15px;text-align:center;color:#5E6B78}.lrv .lia-viewerr{padding:25px 15px;color:#B83232;overflow-wrap:anywhere}
+.lrv .lik-diffbtn{cursor:pointer;font:inherit}.lrv .lik-issue-open{margin-left:auto;flex:none}
+.lrv .lik-diff{display:grid;gap:13px;font-size:13px;line-height:1.6}.lrv .lik-diff-intro{display:grid;gap:3px;padding:10px 12px;border-left:3px solid var(--warn);background:var(--amber-bg);border-radius:0 8px 8px 0}.lrv .lik-diff-intro span{color:var(--ink-2)}
+.lrv .lik-diff-table{overflow-x:auto;border:1px solid var(--line);border-radius:8px}.lrv .lik-diff-table table{width:100%;border-collapse:collapse}.lrv .lik-diff-table th,.lrv .lik-diff-table td{padding:8px 10px;border-bottom:1px solid var(--line)}.lrv .lik-diff-table tr:last-child td{border-bottom:0}
+.lrv .lik-diff-subtitle{margin:2px 0 -5px;font-size:13.5px}.lrv .lik-diff-reasons{display:grid;gap:8px}.lrv .lik-diff-reason{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg-sub)}
+.lrv .lik-diff-reason>div{min-width:0}.lrv .lik-diff-reason p{margin:4px 0;color:var(--ink-2)}.lrv .lik-diff-reason small{display:block;color:var(--ink-3);overflow-wrap:anywhere}.lrv .lik-diff-reason>a{flex:none}.lrv .lik-diff-footnote{color:var(--ink-3);font-size:12px}
 @media(max-width:900px){.lrv .lia-work{grid-template-columns:220px minmax(0,1fr)}.lrv .lia-invoice{grid-template-columns:minmax(130px,1fr) minmax(95px,.8fr) auto}.lrv .lia-invoice .iamt{grid-row:2}.lrv .lia-invoice .iact{grid-column:2/-1;grid-row:2}}
+@media(max-width:700px){.lrv .lik-issue-open{width:100%;min-height:40px;margin:4px 0 0}.lrv .lik-diff-reason{display:grid}.lrv .lik-diff-reason>a{width:100%;min-height:40px;text-align:center}.lrv .lik-diff-table th,.lrv .lik-diff-table td{padding:7px 8px;white-space:nowrap}}
 @media(max-width:700px){.lrv .vflow{grid-template-columns:1fr}.lrv .vlink{padding:8px 0}.lrv .vlink::before{display:none}.lrv .lia-work{grid-template-columns:1fr}.lrv .lia-queue{border-right:0;border-bottom:1px solid #DCE2E7}.lrv .lia-qlist{max-height:220px}.lrv .lia-summary{gap:8px;padding:8px 10px;font-size:11.5px}.lrv .lik-trio{margin-left:10px;margin-right:10px}.lrv .lik-trio>div{padding:7px;display:grid;gap:2px}.lrv .lik-invwrap{padding-left:10px;padding-right:10px}.lrv .lia-invoice{grid-template-columns:minmax(0,1fr) auto;padding:9px 10px;gap:5px 10px}.lrv .lia-invoice .itp{grid-row:2}.lrv .lia-invoice .iamt{grid-row:2;text-align:right}.lrv .lia-invoice .iact{grid-column:1/-1;grid-row:3;justify-content:flex-start}.lrv .lik-chk{margin-left:10px;margin-right:10px}.lrv .lik-later{margin-left:10px;margin-right:10px}.lrv .lik-hist>div{grid-template-columns:1fr}}
 `
 
@@ -92,6 +100,37 @@ function sheetSay(s) {
   return ''
 }
 
+function intakeIssueFacts(data) {
+  const subjects = (data.subject_recons || []).filter(r => r.diff != null && !isZero(r.diff))
+  if (!subjects.length && data.diff != null && !isZero(data.diff)) subjects.push({ subject: data.carrier, bill_total: data.bill_total, req_total: data.req_total, diff: data.diff })
+  const reasons = []
+  ;(data.files || []).forEach(f => {
+    const rep = f.report || {}
+    ;(rep.duplicates || []).forEach(d => reasons.push({ kind: 'duplicate', file: f, sheet: d.sheet, duplicateOf: d.duplicate_of }))
+    ;(rep.sheets || []).filter(s => s.verdict === 'gap' && s.total && Math.abs(s.gap || 0) >= 0.01).forEach(s => reasons.push({ kind: 'gap', file: f, sheet: s.sheet, amount: s.amount, total: s.total.sum, gap: s.gap }))
+  })
+  const signature = subjects.length || reasons.length ? JSON.stringify({ subjects: subjects.map(r => [r.subject, r.bill_total, r.req_total, r.diff]), reasons: reasons.map(r => [r.kind, r.sheet, r.amount, r.total, r.gap]) }) : ''
+  return { subjects, reasons, signature }
+}
+
+function IntakeIssueModal({ data, period, facts, onClose }) {
+  return <Modal title="账单与请款金额不符" onClose={onClose} width={780} footer={<button className="btn pri" onClick={onClose}>知道了</button>}>
+    <div className="lik-diff">
+      <div className="lik-diff-intro"><b>{data.carrier} · {period}</b><span>系统按账单明细读取的金额与钉钉请款不一致，请先核对以下原因。</span></div>
+      {!!facts.subjects.length && <div className="lik-diff-table"><table className="fxtbl"><thead><tr><th>主体</th><th className="num">系统账单</th><th className="num">请款金额</th><th className="num">差额</th></tr></thead><tbody>{facts.subjects.map(r => <tr key={r.subject}><td><b>{r.subject}</b></td><td className="num mono">{money(r.bill_total)}</td><td className="num mono">{money(r.req_total)}</td><td className="num mono diffpos">{r.diff > 0 ? '+' : '−'}{money(Math.abs(r.diff))}</td></tr>)}</tbody></table></div>}
+      <h3 className="lik-diff-subtitle">检测到的原因</h3>
+      <div className="lik-diff-reasons">{facts.reasons.map((r, i) => <div className="lik-diff-reason" key={r.kind + r.sheet + i}>
+        <div><b>{r.kind === 'duplicate' ? `发现完全重复工作表「${r.sheet}」` : `工作表「${r.sheet}」明细与表底合计不一致`}</b>
+          <p>{r.kind === 'duplicate' ? `与「${r.duplicateOf}」内容相同，系统已只计一次。请删除重复页后再复核，避免其他版本重复计费。` : `系统读取 ${money(r.amount)}，表底合计 ${money(r.total)}，相差 ${money(Math.abs(r.gap))}。请检查表底合计公式是否覆盖全部明细行。`}</p>
+          <small>{r.file.name || r.file.src || '账单原件'}</small></div>
+        <a className="btn sm" href={reviewRawUrl(data.carrier, period, r.file.src)} target="_blank" rel="noopener">下载原件</a>
+      </div>)}</div>
+      {!facts.reasons.length && <div className="lik-diff-reason"><div><b>当前账单与请款口径不一致</b><p>请检查是否漏传账单、替换了错误版本，或请款中存在未体现在账单里的调整。</p></div></div>}
+      <div className="lik-diff-footnote">这里只说明差异，不会自动确认、修改请款或登记已复核。</div>
+    </div>
+  </Modal>
+}
+
 function Overview({ period }) {
   const [d, setD] = useState(null)
   const [open, setOpen] = useState(false)
@@ -113,6 +152,17 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
   const [more, setMore] = useState({})
   const [busy, setBusy] = useState('')
   const [onlyBad, setOnlyBad] = useState(false)
+  const [issueOpen, setIssueOpen] = useState(false)
+  const issueFacts = data && !data.err ? intakeIssueFacts(data) : { subjects: [], reasons: [], signature: '' }
+  useEffect(() => {
+    if (!data || data.err || data.register || !issueFacts.signature) return
+    const key = `lik-intake-issue:${data.carrier}:${period}:${issueFacts.signature}`
+    try {
+      if (window.sessionStorage.getItem(key)) return
+      window.sessionStorage.setItem(key, '1')
+    } catch { /* 会话存储不可用时仍提示，但不写持久标记 */ }
+    setIssueOpen(true)
+  }, [data, period, issueFacts.signature])
   if (!data) return <div className="card"><div className="ovempty">读账单原件、按取数说明检查中…</div></div>
   if (data.err) return <div className="card"><div className="fxwarn" style={{ margin: 15 }}>{data.err} <button className="btn sm" onClick={onRetry}>重试</button></div></div>
   const files = data.files || [], reps = files.map(f => f.report).filter(Boolean)
@@ -156,9 +206,9 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
       </div>
       {multiRecon && <div className="tw lik-subjrecs"><table className="fxtbl"><thead><tr><th>主体</th><th className="num">解析入账金额</th><th className="num">请款单</th><th className="num">差</th><th>结论</th></tr></thead><tbody>{recons.map(r => <tr key={r.subject}>
         <td><b>{r.subject}</b></td><td className="num mono">{r.bill_total == null ? '—' : money(r.bill_total)}</td><td className="num mono">{r.req_total == null ? '—' : <>{money(r.req_total)}<span className="dim"> · {r.n_req} 张</span></>}</td>
-        <td className={'num mono ' + (r.diff == null ? '' : isZero(r.diff) ? 'diffneg' : 'diffpos')}>{r.diff == null ? '—' : isZero(r.diff) ? '0' : money(r.diff)}</td><td>{r.diff == null ? <span className="pill neu">待核对</span> : isZero(r.diff) ? <span className="pill ok">一致</span> : <span className="pill bad">金额不符</span>}</td></tr>)}</tbody></table></div>}
+        <td className={'num mono ' + (r.diff == null ? '' : isZero(r.diff) ? 'diffneg' : 'diffpos')}>{r.diff == null ? '—' : isZero(r.diff) ? '0' : money(r.diff)}</td><td>{r.diff == null ? <span className="pill neu">待核对</span> : isZero(r.diff) ? <span className="pill ok">一致</span> : <button className="pill bad lik-diffbtn" onClick={() => setIssueOpen(true)}>金额不符</button>}</td></tr>)}</tbody></table></div>}
     </div>
-    {!data.register && <div className={'lik-issues' + (ready ? ' ok' : '')}>{ready ? <><b>✓ 可以进入逐笔复核</b><span>账单解析、原件合计与请款金额均已核对。后续修改账单会重新计算本步骤状态。</span></> : <><b>待处理 {issues.length} 项</b><ul>{issues.map((x, i) => <li key={i}>{x}</li>)}</ul></>}</div>}
+    {!data.register && <div className={'lik-issues' + (ready ? ' ok' : '')}>{ready ? <><b>✓ 可以进入逐笔复核</b><span>账单解析、原件合计与请款金额均已核对。后续修改账单会重新计算本步骤状态。</span></> : <><b>待处理 {issues.length} 项</b><ul>{issues.map((x, i) => <li key={i}>{x}</li>)}</ul>{issueFacts.signature && <button className="btn sm lik-issue-open" onClick={() => setIssueOpen(true)}>查看差异原因</button>}</>}</div>}
     <div className="card">
       <h3 className="lik-section">文件与来源 <small>原始凭据和附件独立核对</small></h3>
       <div className="lik-srctitle">账单原件 · {files.length} 份</div>
@@ -179,6 +229,7 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
       {reps.length > 0 && <details style={{ margin: '0 15px 12px' }}><summary className="lik-lbl" style={{ cursor: 'pointer' }}>查看判定口径</summary><div className="lik-note" style={{ margin: '6px 0 0' }}>每页把算钱列与账单自己的合计列相比。取数说明配置合计列时，差额记为「其他费用（未拆）」，但仍需补配置后才算复核完成。</div></details>}
     </div>
     <Overview period={period} /><div className="navbar"><span /><button className="btn pri" onClick={onNext}>下一步：逐单核价核量 ›</button></div>
+    {issueOpen && <IntakeIssueModal data={data} period={period} facts={issueFacts} onClose={() => setIssueOpen(false)} />}
   </>
 }
 

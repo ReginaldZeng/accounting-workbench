@@ -93,6 +93,14 @@ const readinessData = {
   ok: true, can_sign: true, blockers: [],
   steps: Object.fromEntries(['intake', 'docs', 'lines', 'sign'].map(k => [k, { status: 'ok', label: '已完成', blockers: [] }])),
 }
+const issueIntakeData = {
+  ...intakeData, verdict: 'gap', bill_total: 37339.15, req_total: 35997.42, diff: 1341.73,
+  subject_recons: [{ subject: '孝感星期九', bill_total: 31435.06, req_total: 31009.08, diff: 425.98, n_req: 1 }],
+  files: [{ id: 1, src: '【孝感星期九】原辅料', name: '9月份原辅料装卸货费用明细.xlsx', report: {
+    duplicates: [{ sheet: '小料装货明细 (2)', duplicate_of: '小料装货明细' }],
+    sheets: [{ sheet: '小料卸货明细 (2)', role: 'detail', verdict: 'gap', amount: 17751.45, total: { sum: 17325.49, how: 'self' }, gap: 425.96 }],
+  } }],
+}
 
 async function open(browser, B, state) {
   const ctx = await browser.newContext()
@@ -117,7 +125,7 @@ async function open(browser, B, state) {
       else body = state.taskData ? taskResultData(period) : resultData(period)
     } else if (p === '/api/logistics-review/intake') {
       if (fail('intake')) { status = 502; body = { ok: false, msg: '合成接入502' } }
-      else body = intakeData
+      else body = state.issueData ? issueIntakeData : intakeData
     } else if (p === '/api/logistics-review/lines') {
       if (period === '2026-09' && state.holdOldLines) await state.holdOldLines
       if (fail('lines')) { status = 502; body = { ok: false, msg: '合成逐笔502' } }
@@ -289,6 +297,27 @@ async function diffDialog(browser, B) {
   } finally { await ctx.close() }
 }
 
+async function intakeIssueDialog(browser, B) {
+  const { page, ctx, errors } = await open(browser, B, { issueData: true, fail: {} })
+  try {
+    const dlg = page.getByRole('dialog', { name: '账单与请款金额不符' })
+    await dlg.waitFor()
+    const text = await dlg.innerText()
+    assert.match(text, /孝感星期九[\s\S]*31,435\.06[\s\S]*31,009\.08[\s\S]*425\.98/)
+    assert.match(text, /完全重复工作表「小料装货明细 \(2\)」/)
+    assert.match(text, /小料卸货明细 \(2\)[\s\S]*17,751\.45[\s\S]*17,325\.49[\s\S]*425\.96/)
+    assert.match(text, /检查表底合计公式是否覆盖全部明细行/)
+    await dlg.getByRole('button', { name: '知道了' }).click()
+    await dlg.waitFor({ state: 'detached' })
+    await page.getByRole('button', { name: '查看差异原因' }).click()
+    await dlg.waitFor()
+    await page.setViewportSize({ width: 390, height: 844 })
+    assert.equal(await dlg.evaluate(el => el.scrollWidth <= el.clientWidth), true, '差异原因弹窗不能横向溢出')
+    assert.equal(await dlg.locator('.lik-diff-reason').evaluateAll(nodes => nodes.every(el => el.scrollWidth <= el.clientWidth)), true, '原因卡片不能横向溢出')
+    assert.deepEqual(errors, [])
+  } catch (e) { throw new Error(e.message + '\nPAGE:\n' + await page.locator('body').innerText()) } finally { await ctx.close() }
+}
+
 async function main() {
   const B = bundle()
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
@@ -299,6 +328,7 @@ async function main() {
     ['逐单任务组502恢复、去重、重叠排除confirmed及二级卡片', docTasks],
     ['逐笔lineTask筛选与bill_span重算、组头全量合计', lineTasks],
     ['差异处理方案卡不溢出且可选择', diffDialog],
+    ['接入差异自动弹窗说明原因且可重开', intakeIssueDialog],
   ]
   const results = []
   try {
