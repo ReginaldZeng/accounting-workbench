@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-03 | Author: Kimi | Version: V2.1038
+# Description: 天趟单位优先按包天包趟核价，不被同行重量抢先切到重量核量。
 # Date: 2026-11-03 | Author: Kimi | Version: V2.1037
 # Description: 取数说明支持权限内保存 sheets，保留承运商报价和其他配置。
 # Date: 2026-10-30 | Author: Kimi | Version: V2.1034
@@ -3414,7 +3416,7 @@ def _box_docs(rsub, carrier):
         _mon = str(int(_mon)) if _mon.isdigit() else ""
         is_bw = bool(_bw_pat and chg_wt and billcnt and not wt_from_qty and _rev != "qty" and d0
                      and any(intake.match_sheet(p.replace("{m}", _mon) if _mon else p, str(r.get("src_sheet") or "")) for p in _bw_pat))
-        use_weight = (_rev in ("weight", "volume", "pallet")) or (_rev == "box" and chg_wt)
+        use_weight = _u0 not in ("天", "趟") and ((_rev in ("weight", "volume", "pallet")) or (_rev == "box" and chg_wt))
         # 人工指定这一张单怎么核(V2.885)：只换「拿什么比」。指定的那种比不了(账单这行没有重量/件数)就不听，照系统的办法并写明
         can_wt = bool(chg_wt)
         can_box = bool(billcnt) and not wt_from_qty and _u0 not in ("天", "趟") and _u0 not in lr._NOQTY_UNITS     # 账单量是天/趟/方/板的不是件数
