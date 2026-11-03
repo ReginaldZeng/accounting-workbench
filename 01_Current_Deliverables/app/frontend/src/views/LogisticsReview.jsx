@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-03 Author:Kimi Version:V2.1037 账单弹窗支持查看和保存逐页取数说明，保留报价配置。
 // [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1034
 // 第③步显示账单归属主体、业务线及人工调整标记，按组配对也保留真实账单业务线。
 // [Change Log] Date:2026-10-30 Author:Kimi Version:V-draft
@@ -14,7 +15,7 @@ import { voucherLater, voucherFeeDraft, voucherFeePost, voucherPick, reviewScope
 import { printAdjust } from './LogisticsVoucher.jsx'
 import { reviewClassify, reviewDups, reviewDupOk, reviewClassifyRules, reviewClassifyRulesSave } from '../api.js'
 import { IntakeStep, InvAuditPanel, IK_V, IK_CSS } from './LogisticsIntake.jsx'   // V2.989 第①步数据接入 + 第④步发票审核
-import { reviewIntake, reviewReadiness, reviewSettingsGet, reviewSettingsSet } from '../api.js'
+import { reviewIntake, reviewReadiness, reviewSettingsGet, reviewSettingsSet, reviewSpec, reviewSpecSave } from '../api.js'
 import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, uniqueDocs, DOC_TASKS, docTaskMatch, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog, RangeDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -65,6 +66,8 @@ function BillsDlg({ carrier, period, initialReplace = '', onClose, onChanged, fl
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState('')
+  const [specOpen, setSpecOpen] = useState(false)
+  const [specText, setSpecText] = useState('')
   const fileRef = useRef(null)
   const want = useRef(null)          // 这次选文件是要干什么：{mode:'add'} / {mode:'replace', src}
   const load = () => reviewBills(carrier, period).then(setD).catch(e => setErr(e.message))
@@ -84,6 +87,18 @@ function BillsDlg({ carrier, period, initialReplace = '', onClose, onChanged, fl
     if (!window.confirm(`删除「${nm(x.src)}」这一份账单？\n\n明细 ${x.n_detail} 行${x.n_accrual ? `、汇总 ${x.n_accrual} 行` : ''}，金额 ${money(x.amount)}。\n删掉以后这一份的账单行就没有了，核对结论跟着重算；这一份里人工改过的归类也一起没了。要恢复只能重新上传原文件。`)) return
     setBusy('del' + x.src); setErr('')
     reviewBillDelete(carrier, period, x.src).then(() => { flash(`已删除「${nm(x.src)}」`); load(); onChanged && onChanged() }).catch(e => setErr(e.message)).finally(() => setBusy(''))
+  }
+  const openSpec = () => {
+    setErr(''); setSpecOpen(true); setSpecText('')
+    reviewSpec(carrier).then(r => setSpecText(JSON.stringify((r.spec || {}).sheets || [], null, 2))).catch(e => setErr(e.message))
+  }
+  const saveSpec = () => {
+    let sheets
+    try { sheets = JSON.parse(specText) } catch (e) { setErr('取数说明不是有效的 JSON：' + e.message); return }
+    setBusy('spec'); setErr('')
+    reviewSpecSave(carrier, sheets).then(r => {
+      setSpecOpen(false); flash(`已保存 ${carrier} 的 ${((r.spec || {}).sheets || []).length} 页取数说明`); load(); onChanged && onChanged()
+    }).catch(e => setErr(e.message)).finally(() => setBusy(''))
   }
   const bills = (d && d.bills) || []
   const tot = bills.reduce((s, x) => s + (x.amount || 0), 0)
@@ -113,9 +128,17 @@ function BillsDlg({ carrier, period, initialReplace = '', onClose, onChanged, fl
                 <button className="btn sm" disabled={off} style={{ color: '#B3261E' }} onClick={() => del(x)}>{busy === 'del' + x.src ? '删除中…' : '删除'}</button></td></tr>)}
               <tr><td className="num"><b>合计 {bills.length} 份</b></td><td></td><td className="num mono"><b>{money(tot)}</b></td><td colSpan="2"></td></tr></tbody></table>
             : <div className="fxsub">这家这月还没有解析过账单。</div>}
+          {specOpen && <div style={{ margin: '12px 0' }}>
+            <div className="fxsub">逐页取数说明（JSON 数组）。只保存这里的 sheets，报价和其他设置不变；保存后到第①步用原件重新解析。</div>
+            <textarea aria-label="逐页取数说明" value={specText} onChange={e => setSpecText(e.target.value)} placeholder="读取取数说明中…"
+              style={{ width: '100%', minHeight: 360, boxSizing: 'border-box', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 }} />
+            <div className="fxbtns"><button className="btn pri" disabled={off || !specText} onClick={saveSpec}>{busy === 'spec' ? '保存中…' : '保存取数说明'}</button>
+              <button className="btn" disabled={off} onClick={() => setSpecOpen(false)}>收起</button></div>
+          </div>}
           <input ref={fileRef} type="file" accept=".xlsx,.xls" hidden onChange={onFile} />
           <div className="fxbtns">
             <button className="btn pri" disabled={off || !d.has_spec} onClick={() => pick({ mode: 'add' })}>{busy === 'add' ? '解析中…' : bills.length ? '上传新的一份' : '上传账单'}</button>
+            <button className="btn" disabled={off} onClick={openSpec}>取数说明</button>
             <button className="btn" onClick={onClose}>关闭</button>
             <span className="dim" style={{ fontSize: 12 }}>一次传一个文件（.xlsx / .xls）。新文件和已有的某一份同名时，会先问你是不是要替换。</span>
           </div>

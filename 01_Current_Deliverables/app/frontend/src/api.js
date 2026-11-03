@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-03 Author:Kimi Version:V2.1037 物流取数说明 sheets 保存接口。
 // [Change Log] Date:2026-10-26 Author:Kimi Code Version:V-draft 逐单运费 V1 批次上传、预览、确认、撤回、恢复与原件下载接口。
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 末尾追加「发票管家」接口块（invXxx 具名导出 + 手机端 X-Inv-Pair 令牌头）
 // [Change Log] Date:2026-09-10 Author:Codex Version:V2.555 业务分流及应收检查筛选接口。
@@ -720,6 +721,7 @@ export const reviewResult = (carrier, period, group = 'ex', page = 1, q = '', fi
   j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${period}&group=${group}&page=${page}&q=${encodeURIComponent(q)}` + (size ? `&size=${size}` : '') +
     (filt ? `&fsub=${encodeURIComponent(filt.fsub || '')}&ffee=${encodeURIComponent(filt.ffee || '')}&fbiz=${encodeURIComponent(filt.fbiz || '')}` : ''))
 export const reviewSpec = (carrier) => j(`/api/logistics-review/spec?carrier=${encodeURIComponent(carrier)}`)
+export const reviewSpecSave = (carrier, sheets) => j('/api/logistics-review/spec', { method: 'POST', body: JSON.stringify({ carrier, sheets }) })
 export const reviewPriceCard = (carrier) => j(`/api/logistics-review/price-card?carrier=${encodeURIComponent(carrier)}`)
 export const reviewImportPriceCard = (carrier, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/price-card/import?carrier=${encodeURIComponent(carrier)}`, { method: 'POST', body: fd }) }
 export const reviewParseBill = (carrier, period, file, opt = {}) => { const fd = new FormData(); fd.append('file', file)

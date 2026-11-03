@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-03 | Author: Kimi | Version: V2.1037
+# Description: 取数说明支持权限内保存 sheets，保留承运商报价和其他配置。
 # Date: 2026-10-30 | Author: Kimi | Version: V2.1034
 # Description: 第③步逐笔行显示账单归属主体、业务线和人工调整原因，并回归业务线精确/按组配对。
 # Date: 2026-10-30 | Author: Kimi | Version: V-draft
@@ -230,6 +232,35 @@ def review_spec(request: Request, carrier: str = "迅鸽"):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     return {"ok": True, "carrier": carrier, "spec": _load_spec(carrier)}
+
+
+@router.post("/api/logistics-review/spec")
+async def review_spec_save(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "msg": "请求格式错误"}, status_code=400)
+    carrier = str(body.get("carrier") or "").strip()
+    sheets = body.get("sheets")
+    if not carrier:
+        return JSONResponse({"ok": False, "msg": "缺承运商"}, status_code=400)
+    if not isinstance(sheets, list) or not all(isinstance(s, dict) and str(s.get("name") or "").strip()
+                                               and s.get("role") in ("detail", "accrual", "ignore") for s in sheets):
+        return JSONResponse({"ok": False, "msg": "取数说明要是工作表数组，每页至少有 name 和正确的 role"}, status_code=400)
+    spec = _load_spec(carrier) or {"carrier": carrier}
+    before = len(spec.get("sheets") or [])
+    spec["carrier"] = carrier
+    spec["sheets"] = sheets
+    with db._engine.begin() as c:
+        c.execute(delete(SP).where(SP.c.carrier == carrier))
+        c.execute(insert(SP).values(carrier=carrier, spec_json=json.dumps(spec, ensure_ascii=False),
+                                    updated_by=_uname(u), updated_at=_now()))
+    _clear_carrier_caches(carrier)
+    db.audit(_uname(u), "物流复核-保存取数说明", carrier, "逐页规则 %d → %d 页；报价与其他设置保留" % (before, len(sheets)))
+    return {"ok": True, "carrier": carrier, "spec": spec}
 
 
 # ---------- 本月有计提的承运商（金蝶 2241 供应商往来·计提凭证汇总）----------

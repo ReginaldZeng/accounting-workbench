@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-03 | Author: Kimi | Version: V2.1037
+# Description: 覆盖外仓逐行天趟单位和运费装卸费双金额列核对。
 # Date: 2026-11-02 | Author: Kimi | Version: V2.1035
 # Description: 覆盖多主体同名隔离、完全重复工作表和表底合计漏算回归。
 # Date: 2026-10-08 | Author: Claude Opus 5.5 | Version: V2.864
@@ -121,6 +123,30 @@ class TotalCol(unittest.TestCase):
         self.assertEqual(_j.loads(got["CGRK000001"]["sub_fees"])["其他费用（未拆）"], 60.0)
         self.assertNotIn("其他费用（未拆）", _j.loads(got["QTCK000002"]["sub_fees"]))
         self.assertEqual(got["QTCK000002"]["amount"], 91.6)
+
+
+class UnitColAndTotalCols(unittest.TestCase):
+    def test_outer_warehouse_units_and_two_amount_columns(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "5.外仓"
+        ws.append(["合成外仓账单"])
+        ws.append(["短驳运费", None, None, None, "装卸费"])
+        ws.append(["金蝶单号", "数量", "单位", "运费", "合计"])
+        ws.append(["FBDR000001", 1, "天", 900, None])
+        ws.append(["ZJDB000001", 2, "趟", 520, 60])
+        ws.append(["合计", None, None, 1420, 60])
+        bio = io.BytesIO()
+        wb.save(bio)
+        spec = {"carrier": "极鲜达", "period": "2026-09", "sheets": [{
+            "name": "5.外仓", "role": "detail", "header_row": 3, "doc_col": "金蝶单号", "qty_col": "数量", "unit_col": "单位",
+            "amount_cols": ["运费", "合计"], "total_cols": ["运费", "合计"], "fee_parts": {"短驳运费": ["运费"], "装卸费": ["合计"]},
+            "summary_marker": "合计"}]}
+        got = li.parse_bill(spec, bio.getvalue())["detail"]
+        self.assertEqual([(r["unit"], r["amount"]) for r in got], [("天", 900), ("趟", 580)])
+        report = li.sheet_report(spec, bio.getvalue(), "2026-09")
+        self.assertEqual((report["verdict"], report["amount"]), ("ok", 1480))
+        self.assertEqual(report["sheets"][0]["total"], {"name": "运费＋合计", "sum": 1480, "how": "spec"})
 
 
 class AnnotSource(unittest.TestCase):

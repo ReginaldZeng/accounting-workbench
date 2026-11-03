@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-03 | Author: Kimi | Version: V2.1037
+# Description: 接入摘要把 total_cols 多金额列识别为已配置合计核对。
 # Date: 2026-10-30 | Author: Kimi | Version: V2.1032
 # Description: 数据接入请款与账单按主体分别汇总勾稽，不再把同承运商的星期零、星期九请款合并比较。
 # Date: 2026-10-17 | Author: Claude Opus 5.5 | Version: V2.989
@@ -46,7 +48,7 @@ def _how(spec):
                                               else "直接读账单的金额列" if (s.get("amount_col") or s.get("amount_cols")) else "没写算钱的列")
         if k not in kinds:
             kinds.append(k)
-    tot = any(s.get("total_col") for s in det)
+    tot = any(s.get("total_col") or s.get("total_cols") for s in det)
     return "、".join(kinds) + ("＋合计兜底" if tot else ""), tot
 
 

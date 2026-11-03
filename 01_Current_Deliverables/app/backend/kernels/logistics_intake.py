@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-03 | Author: Kimi | Version: V2.1037
+# Description: 取数说明支持逐行单位列和多金额列合计核对，接入极鲜达外仓包天包趟与装卸费。
 # Date: 2026-11-02 | Author: Kimi | Version: V2.1035
 # Description: 多文件账单按主体隔离份名；完全重复工作表只计一次并报异常；单金额列表底合计与明细交叉校验。
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
@@ -228,6 +230,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
              ([find_col(hdr, sp["amount_col"])] if sp.get("amount_col") else [])
     c_amts = [c for c in c_amts if c is not None]
     c_qty = find_col(hdr, sp["qty_col"]) if sp.get("qty_col") else None
+    c_unit = find_col(hdr, sp["unit_col"]) if sp.get("unit_col") else None
     c_wt = find_col(hdr, sp["wt_col"]) if sp.get("wt_col") else None
     c_prov = find_col(hdr, sp["prov_col"]) if sp.get("prov_col") else None
     c_cs = find_col(hdr, sp["carrier_sub_col"]) if sp.get("carrier_sub_col") else None
@@ -335,7 +338,7 @@ def parse_detail_sheet(sp, ws, period, carrier, box_prices=None, merged=None):
             "annot": annot, "annot_source": annot_source, "fee_item": sp.get("fee_item", ""),
             "fee": _s(r[c_fee]) if c_fee is not None and c_fee < len(r) else "",
             "qty": _f(r[c_qty]) if c_qty is not None and c_qty < len(r) else None,
-            "unit": sp.get("qty_unit", ""),
+            "unit": (_s(r[c_unit]) if c_unit is not None and c_unit < len(r) and _s(r[c_unit]) else sp.get("qty_unit", "")),
             # amount_dp：金额留几位小数(默认 2)。天鹰逐行是 吨×18.5 的长小数、供应商只在合计处取整，逐行先取整合计会差几分
             "amount": round(base, int(sp.get("amount_dp", 2))) if base is not None else None,
             "base_amount": round(_f(r[c_amts[0]]) or 0, 2) if c_amts else None,
@@ -673,7 +676,7 @@ def _spec_cols(sp):
     for cols in (sp.get("fee_parts") or {}).values():
         money += list(cols)
     other = []
-    for k in ("doc_col", "qty_col", "wt_col", "annot_col", "fee_col", "prov_col", "carrier_sub_col", "box_col", "dedupe_col", "dim_col", "part_col", "wt_once_col"):
+    for k in ("doc_col", "qty_col", "unit_col", "wt_col", "annot_col", "fee_col", "prov_col", "carrier_sub_col", "box_col", "dedupe_col", "dim_col", "part_col", "wt_once_col"):
         v = sp.get(k)
         if v:
             other += v if isinstance(v, list) and not (len(v) == 2 and isinstance(v[1], int)) else [v[0] if isinstance(v, list) else v]
@@ -758,9 +761,15 @@ def sheet_report(spec, data, period=""):
         parts_sum = round(sum(m["sum"] for m in money if m["found"]), 2)
         total = None
         ct = find_col(hdr, sp["total_col"]) if sp.get("total_col") else None
+        cts = [find_col(hdr, nm) for nm in (sp.get("total_cols") or [])]
+        cts = [ci for ci in cts if ci is not None]
         if ct is not None:
             total = {"name": hdr[ct].replace("\n", ""), "sum": col_sum(ct), "how": "spec"}
             used.add(ct)
+        elif cts:
+            total = {"name": "＋".join(hdr[ci].replace("\n", "") for ci in cts),
+                     "sum": round(sum(col_sum(ci) for ci in cts), 2), "how": "spec"}
+            used.update(cts)
         elif len([m for m in money if m["found"]]) == 1 and not sp.get("fee_parts"):
             total_sum = parts_sum
             ac = find_col(hdr, sp["amount_col"]) if sp.get("amount_col") else \
