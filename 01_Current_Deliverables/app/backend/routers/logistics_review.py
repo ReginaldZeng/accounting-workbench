@@ -5041,7 +5041,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows_all
                                  if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
         if not fresh:
-            _derive_documents(carrier, period, required_forms)
+            refresh_report = _derive_documents(carrier, period, required_forms)
+            refresh_errors = refresh_report["errors"]
         snapshot_pool, snapshot_missing, snapshot_sources = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
         if not snapshot_sources and cc:
             snapshot_pool = cc[0]
@@ -5049,7 +5050,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         snapshot_at = max((x.get("at") or "" for x in snapshot_sources.values()), default="")
         if not snapshot_sources and required_forms:
             return {"ok": True, "needs_refresh": snapshot_missing or required_forms, "docs": [], "detail_total": 0,
-                    "total_bill": total_bill, "warning": "尚未从金蝶取数，请人工刷新或上传补核附件", "refresh_errors": refresh_errors}
+                    "total_bill": total_bill, "warning": "尚未从金蝶取数，请人工刷新或上传补核附件", "refresh_errors": refresh_errors,
+                    "refreshed": refresh_report["refreshed"] if refresh_report else []}
         if full:
             pool = snapshot_pool
             for x in pool:                    # 缓存里的单据每次重挂确认态
