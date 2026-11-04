@@ -207,5 +207,67 @@ class SnapshotBoundaryTests(unittest.TestCase):
         self.assertEqual(out["docs"][0]["key"], "XSCKD1")
 
 
+class InvoiceSnapshotTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.lr, cls.engine = _load_module()
+        from routers import logistics_payreq as payreq
+        from routers import logistics_voucher as voucher
+        cls.payreq = payreq
+        cls.voucher = voucher
+        cls.req = {"inst_id": "P1", "business_id": "B1", "subject": "深圳星期零", "subject_full": "深圳市星期零食品科技有限公司",
+                   "amount": 100, "applicant": "测试", "cur_json": "[]", "folder_id": 1, "payee": "丰源", "create_time": "2026-10-01"}
+
+    def setUp(self):
+        self.engine.rows = [[self.req]]
+        self.invoice = {"id": 1, "number": "INV1", "gross": 100, "net": 90, "tax": 10, "rate": "9%", "deduct": True,
+                        "seller": "丰源", "buyer": "星期零", "review": "pending"}
+
+    def test_default_without_snapshot_never_builds_preview(self):
+        with patch.object(self.payreq, "db", self.lr.db), patch.object(self.voucher, "db", self.lr.db), \
+             patch.object(self.payreq.lpq, "status_view", return_value={}), \
+             patch.object(self.voucher, "_invoices", return_value=({"id": 1}, [self.invoice])), \
+             patch.object(self.payreq, "_inv_block", side_effect=AssertionError("默认发票对照不得实时构建")), \
+             patch.object(self.lr.db, "get_period_input", create=True, return_value=None):
+            out = self.payreq.inv_blocks("丰源", "2026-09")
+        self.assertTrue(out[0]["needs_refresh"])
+        self.assertEqual(out[0]["invoices"][0]["number"], "INV1")
+        self.assertEqual(out[0]["inv_total"], 100)
+
+    def test_cached_preview_keeps_current_invoice_review(self):
+        cached = {"inst": "P1", "invoices": [self.invoice], "inv_total": 100, "inv_tax": 10, "accruals": []}
+        rec = {"payload": {"blocks": [cached], "refreshed_at": "2026-11-04 12:00"}, "updated_at": "2026-11-04 12:00"}
+        current = dict(self.invoice, review="approved")
+        with patch.object(self.payreq, "db", self.lr.db), patch.object(self.voucher, "db", self.lr.db), \
+             patch.object(self.voucher, "_invoices", return_value=({"id": 1}, [current])), \
+             patch.object(self.payreq, "_inv_block", side_effect=AssertionError("读取快照不得重建")), \
+             patch.object(self.lr.db, "get_period_input", create=True, return_value=rec):
+            out = self.payreq.inv_blocks("丰源", "2026-09")
+        self.assertEqual(out[0]["invoices"][0]["review"], "approved")
+        self.assertEqual(out[0]["cached_at"], "2026-11-04 12:00")
+
+    def test_changed_invoice_requires_refresh(self):
+        cached = {"inst": "P1", "invoices": [self.invoice], "inv_total": 100, "inv_tax": 10}
+        rec = {"payload": {"blocks": [cached]}, "updated_at": "2026-11-04 12:00"}
+        current = dict(self.invoice, gross=101)
+        with patch.object(self.payreq, "db", self.lr.db), patch.object(self.voucher, "db", self.lr.db), \
+             patch.object(self.payreq.lpq, "status_view", return_value={}), \
+             patch.object(self.voucher, "_invoices", return_value=({"id": 1}, [current])), \
+             patch.object(self.lr.db, "get_period_input", create=True, return_value=rec):
+            out = self.payreq.inv_blocks("丰源", "2026-09")
+        self.assertTrue(out[0]["needs_refresh"])
+        self.assertIn("已变化", out[0]["err"])
+
+    def test_manual_refresh_writes_invoice_snapshot(self):
+        writes = []
+        with patch.object(self.payreq, "db", self.lr.db), \
+             patch.object(self.payreq, "_inv_block", return_value={"inst": "P1", "invoices": []}), \
+             patch.object(self.lr.db, "set_period_input", create=True, side_effect=lambda *args: writes.append(args)):
+            out = self.payreq.inv_blocks("丰源", "2026-09", fresh=True)
+        self.assertEqual(out[0]["inst"], "P1")
+        self.assertEqual(writes[0][0], "logistics_review:丰源")
+        self.assertEqual(writes[0][3], "invoice_previews")
+
+
 if __name__ == "__main__":
     unittest.main()

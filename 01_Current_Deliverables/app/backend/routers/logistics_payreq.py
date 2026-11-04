@@ -738,14 +738,71 @@ def _inv_block(r, me):
     return out
 
 
-def inv_blocks(carrier, period, me=""):
-    """这家这月每张钉钉请款单(撤回/拒绝/已排除的不算)的「发票对暂估」结论。第③步页面和导出复核结果(V2.843)共用。只读，要读金蝶。"""
+def _invoice_reqs(carrier, period):
     with db._engine.connect() as c:
         reqs = [dict(r) for r in c.execute(select(PR).where((PR.c.carrier == carrier) & (PR.c.period == period))).mappings().all()]
     reqs = [r for r in reqs if not r.get("excluded") and str(r.get("dt_status") or "").upper() != "TERMINATED"
             and str(r.get("dt_result") or "").lower() != "refuse"]
-    reqs.sort(key=lambda r: (r.get("subject") or "", r.get("create_time") or ""))
-    return [_inv_block(r, me) for r in reqs]
+    return sorted(reqs, key=lambda r: (r.get("subject") or "", r.get("create_time") or ""))
+
+
+def _invoice_fingerprint(invoices):
+    keys = ("number", "gross", "net", "tax", "rate", "deduct", "seller", "buyer")
+    return json.dumps([{k: x.get(k) for k in keys} for x in invoices], ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _invoice_waiting(r, me, current=None, message="发票与计提对照待取数，请人工刷新"):
+    from routers import logistics_voucher as LVR
+    st = lpq.status_view({**r, "cur": json.loads(r.get("cur_json") or "[]")}, me)
+    folder, invoices = current if current is not None else LVR._invoices(r["inst_id"])
+    return {"inst": r["inst_id"], "bid": r.get("business_id"), "subject": r.get("subject"), "amount": r.get("amount"),
+            "applicant": r.get("applicant"), "st": st, "folder": (folder or {}).get("id") or r.get("folder_id"),
+            "invoices": invoices, "rates": [], "msgs": [], "payee": r.get("payee") or "",
+            "subject_full": r.get("subject_full") or "", "at": r.get("create_time") or "",
+            "inv_total": round(sum(float(x.get("gross") or 0) for x in invoices), 2),
+            "inv_tax": round(sum(float(x.get("tax") or 0) for x in invoices if x.get("deduct") is not False), 2),
+            "needs_refresh": True, "err": message}
+
+
+def inv_blocks(carrier, period, me="", fresh=False):
+    """默认读 PGSQL 对照快照和本地实时发票；fresh=True 才重新读取金蝶。"""
+    from routers import logistics_review as LR
+    from routers import logistics_voucher as LVR
+    reqs = _invoice_reqs(carrier, period)
+    source = LR._docs_snapshot_source(carrier)
+    if fresh:
+        blocks = [_inv_block(r, me) for r in reqs]
+        refreshed_at = _now()
+        db.set_period_input(source, int(period[:4]), int(period[5:7]), "invoice_previews",
+                            {"blocks": blocks, "refreshed_at": refreshed_at}, {"n": len(blocks)}, "系统")
+        return blocks
+    try:
+        rec = db.get_period_input(source, int(period[:4]), int(period[5:7]), "invoice_previews")
+        cached = (rec or {}).get("payload") or {}
+        cached_blocks = cached.get("blocks") if isinstance(cached.get("blocks"), list) else None
+    except Exception:
+        cached_blocks = None
+    if cached_blocks is None:
+        return [_invoice_waiting(r, me) for r in reqs]
+    by_inst = {x.get("inst"): x for x in cached_blocks}
+    out = []
+    for r in reqs:
+        block = by_inst.get(r["inst_id"])
+        if not block:
+            out.append(_invoice_waiting(r, me))
+            continue
+        current = LVR._invoices(r["inst_id"])
+        folder, invoices = current
+        old_invoices = block.get("invoices") or []
+        if _invoice_fingerprint(old_invoices) != _invoice_fingerprint(invoices):
+            out.append(_invoice_waiting(r, me, current=current, message="发票内容已变化，请人工刷新发票与计提对照"))
+            continue
+        item = dict(block, invoices=invoices, folder=(folder or {}).get("id") or block.get("folder"))
+        item["inv_total"] = round(sum(float(x.get("gross") or 0) for x in invoices), 2)
+        item["inv_tax"] = round(sum(float(x.get("tax") or 0) for x in invoices if x.get("deduct") is not False), 2)
+        item["cached_at"] = rec.get("updated_at") or cached.get("refreshed_at") or ""
+        out.append(item)
+    return out
 
 
 @router.get("/api/logistics-review/invoices")

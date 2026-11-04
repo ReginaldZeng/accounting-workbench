@@ -4730,10 +4730,15 @@ def _cached_lines(request, carrier, period, fresh=False):
     return res
 
 
+def _refresh_invoice_snapshots(request, carrier, period):
+    from routers import logistics_payreq as LPQ
+    return LPQ.inv_blocks(carrier, period, LPQ._me_uid(_perm(request)), fresh=True)
+
+
 @router.get("/api/logistics-review/lines")
 @router.get("/api/logistics-review/accrual")
 def review_lines(request: Request, carrier: str = "", period: str = "", fresh: bool = False):
-    """默认只读快照；fresh=1 是人工刷新金蝶计提分录的入口。"""
+    """默认只读快照；fresh=1 人工刷新计提分录及发票对照。"""
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     if fresh:
@@ -4744,6 +4749,11 @@ def review_lines(request: Request, carrier: str = "", period: str = "", fresh: b
     cached = bool(cc and not fresh)
     try:
         res = _cached_lines(request, carrier, period, fresh=fresh)
+        if fresh:
+            try:
+                _refresh_invoice_snapshots(request, carrier, period)
+            except Exception as e:
+                res["invoice_refresh_error"] = str(e)[:240]
     except Exception as e:
         return JSONResponse({"ok": False, "msg": str(e)[:240]}, status_code=502)
     return {**res, "cached": cached}

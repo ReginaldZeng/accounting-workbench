@@ -1004,7 +1004,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     if (force) setBusy('line-refresh')
     return reviewLines(carrier, period, force).then(r => {
       if (seq === _lineSeq.current && contextRef.current === key) applyL(r)
-      if (force) flash('已人工刷新计提分录并写入 PGSQL，本页按新快照重算')
+      if (force) flash(r.invoice_refresh_error ? `计提分录已刷新；发票对照刷新失败：${r.invoice_refresh_error}` : '已人工刷新计提分录及发票对照并写入 PGSQL，本页按新快照重算')
     }).catch(e => { if (seq === _lineSeq.current && contextRef.current === key) setL({ ...EMPTY_L, err: e.message }) })
       .finally(() => { if (force) setBusy('') })
   }, [carrier, period, contextKey])
