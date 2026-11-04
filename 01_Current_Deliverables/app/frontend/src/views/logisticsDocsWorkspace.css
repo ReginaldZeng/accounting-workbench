@@ -1,0 +1,66 @@
+/* [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1047 十二列逐单工作区与只读行内明细。 */
+.lrx .ldx{min-width:0;max-width:100%;overflow-x:clip;overflow-wrap:anywhere}
+.lrx .ldx button,.lrx .ldx input,.lrx .ldx select,.lrx .ldx summary{font:inherit}
+.lrx .ldx button:focus-visible,.lrx .ldx input:focus-visible,.lrx .ldx select:focus-visible,.lrx .ldx summary:focus-visible{outline:3px solid rgba(37,99,235,.32);outline-offset:2px}
+.lrx .ldx button:disabled{cursor:not-allowed;opacity:.45}
+.lrx .ldx .lrx-btn,.lrx .ldx .lrx-seg button,.lrx .ldx input,.lrx .ldx select{min-height:44px}
+.lrx .ldx-toolbar{align-items:flex-start}
+.lrx .ldx-toolbar .lrx-seg{max-width:100%;flex-wrap:wrap}
+.lrx .ldx-toolbar .lrx-seg button{white-space:nowrap}
+.lrx .ldx-panel{min-width:0}
+.lrx .ldx-source-filter{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 12px;background:#edf5f8;border-bottom:1px solid #c4d9e5;color:#35566b;font-size:12px}
+.lrx .ldx-source-filter>div{display:flex;gap:6px;flex-wrap:wrap}
+.lrx .ldx-scope-note{padding:10px 12px;background:#fff4d8;border-bottom:1px solid #ead29b;color:#76501a;font-size:12px;line-height:1.6}
+.lrx .ldx-filter-grid{display:grid;grid-template-columns:minmax(170px,1.3fr) repeat(5,minmax(112px,.85fr)) auto;gap:8px;align-items:end;padding:12px;border-bottom:1px solid var(--line);background:#f8fafc}
+.lrx .ldx-filter-grid label{display:block;min-width:0;color:#465f72;font-size:11px}
+.lrx .ldx-filter-grid input,.lrx .ldx-filter-grid select{display:block;width:100%;min-width:0;margin-top:4px;border:1px solid #bacbd6;border-radius:5px;padding:8px;background:#fff;color:var(--ink)}
+.lrx .ldx-clear{width:100%;white-space:nowrap}
+.lrx .ldx-table-scroll{max-width:100%;overflow-x:auto;overscroll-behavior-inline:contain;-webkit-overflow-scrolling:touch}
+.lrx .ldx-table{min-width:1460px;table-layout:auto}
+.lrx .ldx-table th:first-child{min-width:190px}
+.lrx .ldx-table th:nth-child(4){min-width:125px}
+.lrx .ldx-table th:nth-child(5){min-width:120px}
+.lrx .ldx-table th:last-child{min-width:92px}
+.lrx .ldx-table td{vertical-align:middle}
+.lrx .ldx-table .lrx-cell-meta{max-width:240px;white-space:normal;line-height:1.45}
+.lrx .ldx-row-pending td{background:#fffdf6}
+.lrx .ldx-row-confirmed td{background:#fbfffc}
+.lrx .ldx-row-nodoc td{background:#f7f9fb;color:#53697a}
+.lrx .ldx-doc-no{display:block;color:var(--navy);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}
+.lrx .ldx-row-actions{display:flex;align-items:center;gap:2px;white-space:nowrap}
+.lrx .ldx-diff-pos{color:var(--red);font-weight:650}
+.lrx .ldx-diff-neg{color:#2c6bcf;font-weight:650}
+.lrx .ldx-warning{color:var(--amber)}
+.lrx .ldx-pagination{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+.lrx .ldx-expanded-row td{padding:0;background:#f6f9fb}
+.lrx .ldx-expanded-row:hover td{background:#f6f9fb}
+.lrx .ldx-inline{min-width:0;padding:16px;display:grid;gap:16px}
+.lrx .ldx-inline-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;background:#fff;border-left:3px solid var(--teal);border-radius:0 7px 7px 0}
+.lrx .ldx-inline-head>div{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
+.lrx .ldx-inline-head b{color:var(--navy);font-size:14px}
+.lrx .ldx-inline-head span{color:var(--muted);font-size:12px}
+.lrx .ldx-judge-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.lrx .ldx-judge-grid>section{min-width:0;padding:11px 12px;background:#fff;border:1px solid var(--line);border-radius:7px}
+.lrx .ldx-inline h4{margin:0 0 7px;color:#53697a;font-size:12px}
+.lrx .ldx-inline h4>span{margin-left:7px;color:var(--muted);font-size:11px;font-weight:400}
+.lrx .ldx .ldd-c2{min-width:0;max-width:none}
+.lrx .ldx .ldd-c2>span,.lrx .ldx .ldd-c2>small{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.45}
+.lrx .ldx-inline-section{min-width:0}
+.lrx .ldx-inline-scroll{max-width:100%;overflow-x:auto;background:#fff;border:1px solid var(--line);border-radius:7px}
+.lrx .ldx-inline-scroll .lrx-table{background:#fff}
+.lrx .ldx-inline-scroll .lrx-table tfoot td{padding:10px;border-top:1px solid var(--line);background:#f5f8fa;font-weight:650;text-align:right}
+.lrx .ldx-fee-table{min-width:420px}
+.lrx .ldx-material-table{min-width:1050px}
+.lrx .ldx-material-name{display:block;margin-top:2px;font-weight:500}
+.lrx .ldx-readonly-empty{padding:12px;border:1px dashed var(--line);border-radius:7px;background:#fff;color:var(--muted);font-size:12px}
+.lrx .ldx-classification{display:flex;align-items:flex-start;flex-direction:column;gap:6px;padding:11px 12px;background:#fff;border:1px solid var(--line);border-radius:7px;font-size:12px}
+.lrx .ldx-classification>div{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.lrx .ldx-advanced{margin:0 24px 14px}
+.lrx .ldx-advanced>summary{min-height:44px}
+.lrx .ldx-advanced-body{min-width:0}
+.lrx .ldx-advanced-body>.card{margin:0;border:0;border-radius:0}
+@media(max-width:1200px){.lrx .ldx-filter-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.lrx .ldx-judge-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.lrx .ldx-filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.lrx .ldx-inline{padding:12px}.lrx .ldx-inline-head{align-items:flex-start;flex-direction:column}.lrx .ldx-inline-head .lrx-btn{width:100%}.lrx .ldx-pagination .lrx-spacer{display:none}.lrx .ldx-pagination>span:first-child{width:100%}}
+@media(max-width:600px){.lrx .ldx-advanced{margin-left:12px;margin-right:12px}.lrx .ldx-toolbar .lrx-spacer{display:none}.lrx .ldx-toolbar>.lrx-btn{width:100%}.lrx .ldx-toolbar .lrx-seg{width:100%}.lrx .ldx-toolbar .lrx-seg button{flex:1;padding-left:7px;padding-right:7px}.lrx .ldx-source-filter{align-items:flex-start;flex-direction:column}.lrx .ldx-source-filter>div{width:100%}.lrx .ldx-source-filter .lrx-btn{flex:1}}
+@media(max-width:480px){.lrx .ldx-filter-grid{grid-template-columns:1fr;padding:10px}.lrx .ldx-judge-grid{grid-template-columns:1fr}.lrx .ldx-pagination .lrx-btn{flex:1}.lrx .ldx-inline{padding:10px}.lrx .ldx-inline-head>div{align-items:flex-start;flex-direction:column;gap:3px}}
+@media(prefers-reduced-motion:reduce){.lrx .ldx *{scroll-behavior:auto!important;transition:none!important}}

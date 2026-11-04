@@ -1,11 +1,11 @@
-// [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1046 物流复核台共享四步布局与真实指标卡
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1047 物流复核台共享四步布局与真实指标卡
 import React from 'react'
 import './logisticsReviewRedesign.css'
 
-export function ReviewHeader({ carrier, period, steps, activeStep, onStep, onBack, actions }) {
+export function ReviewHeader({ carrier, title, steps = [], activeStep, onStep, onBack, actions }) {
   return <header className="lrx-top">
-    <div className="lrx-brand"><div><h1>物流账单复核台 · {carrier}</h1><p>数据接入 → 逐单核价核量 → 逐笔计提复核 → 发票审核·登记已复核</p></div><div className="lrx-actions">{onBack && <button className="lrx-btn ghost" onClick={onBack}>‹ 返回总表</button>}{actions}</div></div>
-    <nav className="lrx-steps" aria-label="复核步骤">{steps.map((step, index) => <button key={step.key} className={'lrx-step' + (activeStep === step.key ? ' active' : '')} data-review-step={step.key} onClick={() => onStep(step.key)}><i>{step.done ? '✓' : index + 1}</i><span>{step.name}<small className={step.tone || ''}>{step.label}</small></span></button>)}</nav>
+    <div className="lrx-brand"><div><h1>{title || `物流账单复核台 · ${carrier}`}</h1><p>数据接入 → 逐单核价核量 → 逐笔计提复核 → 发票审核·登记已复核</p></div><div className="lrx-actions">{onBack && <button className="lrx-btn ghost" onClick={onBack}>‹ 返回总表</button>}{actions}</div></div>
+    {steps.length > 0 && <nav className="lrx-steps" aria-label="复核步骤">{steps.map((step, index) => <button key={step.key} className={'lrx-step' + (activeStep === step.key ? ' active' : '')} data-review-step={step.key} onClick={() => onStep(step.key)}><i>{step.done ? '✓' : index + 1}</i><span>{step.name}<small className={step.tone || ''}>{step.label}</small></span></button>)}</nav>}
   </header>
 }
 

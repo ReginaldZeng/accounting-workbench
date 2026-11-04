@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1047 总表与四步内容区整页重构，旧主界面退出默认路径。
 // [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1046 四步共享布局、准备做账维度及响应式重构，保留正式接口与原更正流程。
 // [Change Log] Date:2026-11-04 Author:Kimi Version:V-draft 极鲜达上传弹窗明确人工加工后的 A–J 标准逐笔账单。
 // [Change Log] Date:2026-11-03 Author:Kimi Version:V2.1037 账单弹窗支持查看和保存逐页取数说明，保留报价配置。
@@ -21,6 +22,7 @@ import { reviewIntake, reviewReadiness, reviewSettingsGet, reviewSettingsSet, re
 import { DocCards, ClsCell, DocDialog, KPRED, KNAME, LDD_CSS, nDocs, uniqueDocs, DOC_TASKS, docTaskMatch, judge, Cell2, DiffCell, V_PILL, RulesDialog, AccrTabDialog, DupRuleDialog, RangeDialog } from './LogisticsDocPanel.jsx'   // V2.986 第②步改版：7 张卡 + ③归类 + 单据弹窗
 import { ReviewHeader, ReviewMetrics, ReviewNotice, BottomNav } from './LogisticsReviewLayout.jsx'
 import PreparedDimensions from './PreparedDimensions.jsx'
+import LogisticsDocsWorkspace from './LogisticsDocsWorkspace.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const pct = r => (r == null ? '—' : (Number(r) * 100).toFixed(r * 100 % 1 ? 1 : 0) + '%')
@@ -1330,7 +1332,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   })
 
   return (
-    <div className={'lrv' + (mode === 'detail' ? ' lrx' : '')}>
+    <div className="lrv lrx">
       <style>{`
       .lrv{--ok:#2E7D57;--warn:#B06A12;--bad:#B23B2E;--neu:#5E6B78;--accent:#1F6E8C;--soft:#E1EEF3;font-size:14px}
       .lrv .head{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-bottom:14px}
@@ -1575,12 +1577,18 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       ${GATE_CSS}
       `}</style>
 
-      {mode === 'overview' ? <div className="head"><PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} /></div> : <ReviewHeader carrier={carrier} period={period} activeStep={step} onStep={goStep} onBack={() => setMode('overview')}
+      {mode === 'overview' ? <ReviewHeader title="物流账单复核台" actions={<PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />} /> : <ReviewHeader carrier={carrier} activeStep={step} onStep={goStep} onBack={() => setMode('overview')}
         steps={reviewSteps}
         actions={<><a className="lrx-btn primary" href={reviewExportUrl(carrier, period)}>导出复核表</a><PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} /></>} />}
 
-      {mode === 'overview' && (
-        <div className="card" style={{ marginTop: 12 }}>
+      {mode === 'overview' && (<>
+        <ReviewMetrics items={[
+          { label: '本月承运商', value: ov ? (ov.rows || []).length : '读取中…', note: `${period} · 有物流计提` },
+          { label: '已登记', value: ov ? (ov.rows || []).filter(row => row.status === 'signed').length : '—', note: '本月复核已锁定', tone: 'ok' },
+          { label: '账单已就绪', value: ov ? (ov.rows || []).filter(row => row.status === 'billed').length : '—', note: '可进入四步复核' },
+          { label: '待我审批', value: ov && ov.payreq ? (ov.payreq.mine || []).length : '—', note: '钉钉请款单', tone: ov && ov.payreq && (ov.payreq.mine || []).length ? 'warn' : 'ok' },
+        ]} />
+        <div className="card">
           <div className="ovhead">
             <div><b>本月有计提的承运商</b>　计提 vs 付款（金蝶 2241 供应商往来，按主体拆）　<span className="ovsub">点「开始复核」进四步流</span></div>
             <div style={{ flex: 1 }} />
@@ -1674,29 +1682,29 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           {vd && <DiffVerdictDlg {...vd} onClose={() => setVd(null)} onDone={saveVerdict} />}
           <div className="ovfoot">付款(复核)下的小标＝钉钉请款单进度（待谁审批 / 已通过·待付款 / 已付款＝金蝶出现付款单），点开看节点和附件。承运商＝金蝶全称。计提＝2241 本期贷方；付款(复核)＝本月该承运商账单复核后应付合计（同期间口径）；差异＝计提−复核应付。差异上的「⚠ 需更正」点开确认差异怎么办——确认「计提多了」的，付款做账自动红冲更正，不用再逐张点。复核状态＝该承运商本月是否已「确认通过并登记」。只有已配取数说明的承运商可「开始复核」。</div>
         </div>
-      )}
+      </>)}
 
       {mode === 'detail' && (<>
       {vd && <DiffVerdictDlg {...vd} onClose={() => setVd(null)} onDone={saveVerdict} />}
       {msg && <ReviewNotice>{msg}</ReviewNotice>}
       {regRow && step !== 'sign' && <div className="msg">登记制：这家没有可逐单核的账单，第①②③步基本是空的——直接到第④步核对、做费用凭证、登记。　<button className="btn sm" onClick={() => goStep('sign')}>去第④步</button></div>}
-      {locked && <div className="lock">🔒 本月已登记复核 · {L.signed.reviewer} · {L.signed.signed_at}　归类与备注已锁定，要修改请先在第④步最底下撤销登记。</div>}
-      {d && d.carry && (d.carry.in || []).length > 0 && <div className="carrybar">
-        <b>以前月份多收、等账单扣回的 {d.carry.in.length} 笔</b><span className="dim">　核对这个月的账单里有没有扣回来；没着落的不能登记复核</span>
+      {locked && <div className="lock"><b>本月已登记复核</b> · {L.signed.reviewer} · {L.signed.signed_at}　归类与备注已锁定，要修改请先在第④步最底下撤销登记。</div>}
+      {d && d.carry && (d.carry.in || []).length > 0 && <details className="carrybar lrx-carry">
+        <summary>以前月份多收、等账单扣回的 {d.carry.in.length} 笔 <span className="dim">· 展开核对，没着落的不能登记复核</span></summary>
         {d.carry.in.map(it => <div key={it.id} className={'ci' + (it.need ? ' need' : '')}>
           <span className="mono">{it.from_period} {it.doc_no}</span>　多收 <b>{money(it.amount)}</b> 元（含税）　<span className="dim">{it.reason} · {it.by} {String(it.at || '').slice(0, 10)}</span>
           {it.done ? <span className="st diffok">　✓ 这个月账单已扣回 · {it.done.by}{it.done.note ? ' · ' + it.done.note : ''}{!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => settleCarry(it, 'undo')}>取消</button>}</span>
             : it.skip ? <span className="dim">　这个月没扣：{it.skip}（下个月接着提醒）{!locked && <button className="lnk" style={{ marginLeft: 6 }} onClick={() => settleCarry(it, 'unskip')}>取消</button>}</span>
               : <>{it.hint && <span className="hint">　{it.hint}</span>}{!locked && <><button className="btn sm okb" style={{ marginLeft: 8 }} onClick={() => settleCarry(it, 'done')}>✓ 这个月账单已扣回</button>
                 <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => settleCarry(it, 'skip')}>这个月没扣…</button></>}</>}
-        </div>)}</div>}
+        </div>)}</details>}
 
       {step === 'intake' && (<>
         <ReviewMetrics items={[
-          { label: '标准逐笔金额', value: money(ik && ik.bill_total), note: '按当前有效账单汇总' },
-          { label: '标准取数文件', value: ik ? `${(ik.files || []).length} 份` : '读取中…', note: ik && ik.bills ? `已解析 ${(ik.bills || []).length} 份` : '等待数据接入' },
-          { label: '逐笔行 / 单据', value: ik && ik.bills ? `${(ik.bills || []).reduce((n, b) => n + (b.n_detail || 0), 0)} / ${(ik.bills || []).reduce((n, b) => n + (b.n_doc || 0), 0)}` : '—', note: '标准账单与金蝶单号' },
-          { label: '接入待处理', value: R && R.steps && R.steps.intake ? R.steps.intake.blockers.length : '—', note: '以 readiness 为准', tone: R && R.steps && R.steps.intake && R.steps.intake.blockers.length ? 'warn' : 'ok' },
+          { label: '标准逐笔行', value: ik && ik.bills ? (ik.bills || []).reduce((n, b) => n + (b.n_detail || 0), 0) : '读取中…', note: '只读人工加工后的 A–J 列' },
+          { label: '账单金额', value: money(ik && ik.bill_total), note: '按当前有效账单汇总' },
+          { label: '计费页', value: ik ? (ik.files || []).reduce((n, file) => n + ((file.report && file.report.sheets) || []).filter(sheet => sheet.role === 'detail').length, 0) : '读取中…', note: '不含说明与汇总页' },
+          { label: '当前文件状态', value: ik ? ((ik.bills || []).length ? '已上传' : '未上传') : '读取中…', note: ik ? `${(ik.files || []).length} 份取数文件 · ${(ik.bills || []).length} 份已解析` : '等待数据接入', tone: ik && !(ik.bills || []).length ? 'warn' : 'ok' },
         ]} />
         <ReviewNotice><b>先人工加工，再上传</b><span>系统只读取固定 A–J 标准逐笔列；原始附件仅作追溯，不参与自动识别。</span></ReviewNotice>
         <IntakeStep data={ik} period={period} locked={locked ? '本月已登记复核，撤销登记后才能换账单' : ''} flash={flash} onOpenBills={src => setBillDlg(src ? { src } : {})}
@@ -1711,12 +1719,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           { label: '未解释差异', value: L.n_unexplained || 0, note: '有差异、还没写解释（笔）', tone: L.n_unexplained ? 'warn' : 'ok' },
         ]} />}
 
-        <div className="card">
-          <h3>复核要点 <span className="dim">· {carrier} 这家怎么核（按重量还是件数、哪些费用不逐单）</span><span className="sp" />
+        <details className="card lrx-detail-toggle"><summary>复核要点与核对口径 <small>{carrier} · 默认收起</small></summary><div className="card lrx-nested-card">
+          <h3>复核要点 <span className="dim">· 按重量还是件数、哪些费用不逐单</span><span className="sp" />
             {!ptsEdit && <button className="btn sm" onClick={() => setPtsEdit(true)}>编辑</button>}</h3>
           {!ptsEdit
-            ? <div className="ptsbar"><span className="pin">📌</span>
-              <div className={'ptxt' + (ptsSaved ? '' : ' empty')} onClick={() => { if (!ptsSaved) setPtsEdit(true) }}>{ptsSaved || '还没写，点此填写'}</div></div>
+            ? <div className="ptsbar"><div className={'ptxt' + (ptsSaved ? '' : ' empty')} onClick={() => { if (!ptsSaved) setPtsEdit(true) }}>{ptsSaved || '还没写，点此填写'}</div></div>
             : <div style={{ padding: '10px 15px' }}>
               <textarea className="pts" autoFocus value={pts} onChange={e => setPts(e.target.value)} placeholder={`${carrier} 的复核要点…`} />
               <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>
@@ -1724,10 +1731,10 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                 <button className="btn sm pri" disabled={pts === ptsSaved} onClick={savePts}>保存</button>
               </div>
             </div>}
-        </div>
+        </div></details>
 
-        {L && !L.err && <PreparedDimensions groups={groups} period={period} locked={locked} onSource={goDocs} onEdit={setFixAt} />}
-        <details className="card lrx-detail-toggle" open><summary>当前计提 <small>金蝶原分录 · 点击展开或收起</small></summary>
+        {L && !L.err && <PreparedDimensions groups={groups} period={period} locked={locked} onSource={goDocs} onEdit={setFixAt} onMark={markSubj} />}
+        <details className="card lrx-detail-toggle"><summary>当前计提 <small>金蝶原分录 · 点击展开或收起</small></summary>
         <div className="card">
           <h3>逐笔计提复核 <span className="dim">· 按主体分组；任务只筛明细，组头与底部合计不受筛选影响</span></h3>
           {L && !L.err && <div className="lrv-taskbar lrv-line-tasks" aria-label="逐笔任务组">
@@ -1877,13 +1884,16 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       {step === 'docs' && (<>
         {d && <ReviewMetrics items={[
           { label: '全部账单金额', value: money(d.total_bill), note: `${carrier} ${period}` },
-          { label: '当前筛选金额', value: money(fdocs ? fdocs.reduce((total, row) => total + Number(row.doc_fee || 0), 0) : d.total_bill), note: `${fdocs ? nDocs(fdocs) : d.detail_total} 张单据` },
-          { label: '数量异常 / 缺参', value: d.doc_counts ? (d.doc_counts.qtydiff || 0) + (d.doc_counts.miss || 0) : '—', note: '逐单核对数量与箱规', tone: d.doc_counts && (d.doc_counts.qtydiff || d.doc_counts.miss) ? 'warn' : 'ok' },
-          { label: '待处理单据', value: d.doc_counts ? d.doc_counts.ex : '—', note: '确认后进入做账维度', tone: d.doc_counts && d.doc_counts.ex ? 'warn' : 'ok' },
+          { label: '当前筛选金额', value: money(fdocs ? fdocs.reduce((total, row) => total + Number(row.doc_fee || 0), 0) : d.total_bill), note: `${fdocs ? nDocs(fdocs) : (d.detail_total ?? docs.length)} 张单据` },
+          { label: '金蝶物料已接入', value: `${(full && allD ? allD.docs || [] : docs).filter(row => (row.n_mat || 0) > 0).length} / ${full && allD ? d.detail_total : docs.length}`, note: full && allD ? `${(allD.docs || []).filter(row => !(row.n_mat || 0)).length} 行查无 · ${((d.nodoc || []).length)} 行无单号` : '当前已取列表', tone: 'warn' },
+          { label: '待确认逐笔行', value: (full && allD ? allD.docs || [] : docs).filter(row => !row.confirmed).length + ((d.nodoc || []).length), note: '确认后形成做账依据', tone: 'warn' },
         ]} />}
         <ReviewNotice><b>先核清单据，再整理做账维度</b><span>数量看折合过程，价格看费用构成；无合同价的只标无法核价，不倒算标准。</span></ReviewNotice>
         {docErr && <div className="fxwarn" style={{ marginBottom: 12 }}>金蝶或账单取数失败：{docErr} <button className="btn sm" disabled={docLoading} onClick={load}>{docLoading ? '重试中…' : '重试'}</button></div>}
         {docLoading && d && !d.err && <div className="fxsub" role="status" style={{ marginBottom: 12 }}>正在按当前筛选重新取数，现有结果暂时保留…</div>}
+        <LogisticsDocsWorkspace d={d} allD={allD} full={full} docs={docs} q={q} dfilt={dfilt} cls={cmap}
+          onQuery={value => { setQ(value); setPage(1) }} onFacet={setFacet} onClearFilters={() => { clearDfilt(); setQ('') }} onBackLines={() => goStep('lines')}
+          locked={locked} busy={busy} onOpen={row => setDlgK(kk(row))} onConfirm={doConfirm} page={page} onPage={setPage} advanced={<>
         {!(d && d.by_box) && !d?.err && <div className="qbar">
           <span className="qbar-sum"><b>{d ? money(d.total_bill) : '—'}</b> 元 账单合计</span>
           <span className="qbar-lb">· 待处理（点一个筛下方明细）</span>
@@ -2094,13 +2104,13 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <span style={{ fontSize: 12.5 }}>第 {page} / {Math.ceil(d.detail_total / d.size)} 页</span>
             <button className="btn" disabled={page >= Math.ceil(d.detail_total / d.size)} onClick={() => setPage(page + 1)}>下一页 ›</button>
           </div>)}
+        </div></>} />
           {dlgX && <DocDialog x={dlgX} c={dlgX.doc_no ? cmap[dlgX.doc_no] : null} dup={dlgX.doc_no && dupR ? dupR[dlgX.doc_no] : null}
             pos={dlgI + 1} total={dlist.length} locked={locked}
             onPrev={dlgI > 0 ? () => setDlgK(kk(dlist[dlgI - 1])) : null}
             onNext={dlgI < dlist.length - 1 ? () => setDlgK(kk(dlist[dlgI + 1])) : null}
             onClose={() => setDlgK(null)}
             ctx={{ saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, bizOpts, withCur, onDupOk }} />}
-        </div>
         <BottomNav info={fdocs ? `${nDocs(fdocs)} 张单据 · 金额 ${money(fdocs.reduce((total, row) => total + Number(row.doc_fee || 0), 0))}` : '读取逐单结果中…'} previous={{ label: '‹ 上一步：数据接入', onClick: () => goStep('intake') }} next={{ label: '下一步：整理做账维度', onClick: () => goStep('lines') }} />
       </>)}
 
@@ -2149,12 +2159,14 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         <ReviewGate R={R} L={L || {}} locked={locked} busy={busy} onSign={doSign} onUnsign={doUnsign} onStep={goStep} onRetry={loadReadiness} exportUrl={reviewExportUrl(carrier, period)} />
         <InvAuditPanel inv3={inv3} billOf={billOfSubj} locked={locked} flash={flash} onChanged={() => { reloadInv3(); loadReadiness() }} onLater={confirmLater} onRetry={reloadInv3}
           voucherFor={b => <FeeVoucherCard key={b.inst} noFee v={{ inst: b.inst, bid: b.bid, subject: b.subject, amount: b.amount, st: b.st }} accr={1} dim={null} locked={locked} onDone={() => {}} blk={b} onLater={confirmLater} bill={billOfSubj(b.subject)} />} />
-        <details className="card">
-          <summary style={{ cursor: 'pointer', padding: '12px 15px', fontWeight: 650 }}>发票与暂估高级对照 <span className="dim" style={{ fontWeight: 400, fontSize: 12 }}>按计提凭证、税率查看账单与发票差异</span></summary>
-          <div className="toolbar">{adjBlocks.length > 0 && <button className="btn sm" onClick={() => printAdj(adjBlocks.map(b => b.inst), `计提更正单 ${carrier} ${period}`)}>打印计提更正单（{adjBlocks.length} 张请款单）</button>}<span style={{ flex: 1 }} /><a href="#/logisticsvoucher" target="_blank" rel="noopener">付款做账 ↗</a></div>
-          <LogisticsInvCompare data={inv3} lines={L} />
+        <details className="card lrx-detail-toggle"><summary>做账与高级对照 <small>发票暂估、费用凭证和主体结论</small></summary>
+          <details className="card lrx-nested-card">
+            <summary style={{ cursor: 'pointer', padding: '12px 15px', fontWeight: 650 }}>发票与暂估高级对照 <span className="dim" style={{ fontWeight: 400, fontSize: 12 }}>按计提凭证、税率查看账单与发票差异</span></summary>
+            <div className="toolbar">{adjBlocks.length > 0 && <button className="btn sm" onClick={() => printAdj(adjBlocks.map(b => b.inst), `计提更正单 ${carrier} ${period}`)}>打印计提更正单（{adjBlocks.length} 张请款单）</button>}<span style={{ flex: 1 }} /><a href="#/logisticsvoucher" target="_blank" rel="noopener">付款做账 ↗</a></div>
+            <LogisticsInvCompare data={inv3} lines={L} />
+          </details>
+          <div className="card lrx-nested-card"><h3>按主体复核结论</h3>{L && <SubjSum />}{L === null && <div className="ovempty">读逐笔结果中…</div>}</div>
         </details>
-        <div className="card"><h3>按主体复核结论</h3>{L && <SubjSum />}{L === null && <div className="ovempty">读逐笔结果中…</div>}</div>
         <BottomNav info={inv3 ? `${(inv3.blocks || []).length} 张请款单 · 正式接口数据，不自动登记` : '读取发票与请款中…'} previous={{ label: '‹ 上一步：逐笔计提复核', onClick: () => goStep('lines') }} />
       </>)}
       </>)}

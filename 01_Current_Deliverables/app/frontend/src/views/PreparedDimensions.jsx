@@ -1,4 +1,4 @@
-// [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1046 准备做账维度按主体分组并追溯逐单来源
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1047 准备做账维度按主体分组并追溯逐单来源
 import React, { useMemo, useState } from 'react'
 import { ReviewPanel } from './LogisticsReviewLayout.jsx'
 
@@ -18,7 +18,7 @@ function sourceButton(row, onSource) {
   return <button className="lrx-btn subtle" title="去第②步查看这组真实单据" onClick={() => onSource(od)}>{label}</button>
 }
 
-export default function PreparedDimensions({ groups, period, locked, onSource, onEdit }) {
+export default function PreparedDimensions({ groups, period, locked, onSource, onEdit, onMark }) {
   const [active, setActive] = useState('')
   const [filter, setFilter] = useState('all')
   const subjects = useMemo(() => groups.map((group, index) => {
@@ -51,6 +51,7 @@ export default function PreparedDimensions({ groups, period, locked, onSource, o
             const state = subject.pending ? '主体待确认' : '主体已通过'
             return <tr key={row.key} data-prepared-row={row.key}><td><b>{subjectName}</b><span className="lrx-cell-meta">{period}</span></td><td><b>{labels(matched, 'fee_code', 'fee', row.fee_type)}</b><span className="lrx-cell-meta">{shared ? `合并 ${matched.length} 笔计提` : matched[0].vno || '账单有、计提无'}</span></td><td>{row.fee_type || '—'}</td><td>{row.biz_code && !row.bill_biz ? <span className="lrx-code">{row.biz_code} </span> : ''}{biz}</td><td>{labels(matched, 'proj_code', 'proj')}</td><td>{labels(matched, 'dept_code', 'dept')}</td><td>{labels(matched, 'acct', 'acct_name')}</td><td className="num"><b>{money(row.bill)}</b><span className="lrx-cell-meta">复核账单 · 含税</span></td><td>{taxRates.length === 1 ? `${Number(taxRates[0]) * 100}%` : taxRates.length ? '多税率' : '—'}</td><td>{sourceButton(row, onSource)}</td><td><span className={'lrx-tag ' + (subject.pending ? 'pending' : 'ok')}>{state}</span>{row.fix && <span className="lrx-cell-meta">已登记更正</span>}</td><td>{!locked && row.kind === 'accr' && !shared ? <button className="lrx-btn subtle" onClick={() => onEdit({ key: row.key })}>调整 / 拆分</button> : <span className="lrx-muted">{shared ? '见下方逐笔' : locked ? '已锁定' : '见下方处理'}</span>}</td></tr>
           }) : <tr><td colSpan="12" className="lrx-empty">本主体没有可展示的账单匹配组</td></tr>}</tbody></table></div>}
+          {open && <div className="lrx-group-foot"><span className="lrx-muted">{subject.rows.length} 个账单匹配组 · 来源逐行可追</span><span className="lrx-spacer" />{subject.pending ? <button className="lrx-btn primary" data-subject-confirm={head.subject} disabled={locked || !head.subject} onClick={() => onMark(head.subject, 'ok', '', head.diff || 0)}>确认本主体维度</button> : <button className="lrx-btn" data-subject-confirm={head.subject} disabled={locked} onClick={() => onMark(head.subject, '')}>撤销主体确认</button>}</div>}
         </section>
       })}</div>
     </ReviewPanel>

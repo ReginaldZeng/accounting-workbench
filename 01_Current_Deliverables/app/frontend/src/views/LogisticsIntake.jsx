@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1047 第①步双文件卡与逐页勾稽、第④步纵向请款卡整页重构。
 // [Change Log] Date:2026-11-04 Author:Kimi Version:V-draft 极鲜达增加 A–J 说明及独立原始附件管理，其他承运商不变。
 // [Change Log] Date:2026-11-02 Author:Kimi Version:V2.1036
 // 数据接入差异首次自动弹窗说明原因，可从待处理区或主体差额重新打开；只读提示，不自动确认。
@@ -10,6 +11,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { reviewIntakeOverview, reviewReparse, reviewRawUrl, invAuditItemsApprove, invFolder, reviewOriginalFiles, reviewOriginalUpload, reviewOriginalDelete, reviewOriginalUrl } from '../api.js'
 import { Modal, InvViewer } from './invShared.jsx'
+import { BottomNav } from './LogisticsReviewLayout.jsx'
+import './logisticsIntakeRedesign.css'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const isZero = d => d != null && Math.abs(d) < 0.01
@@ -156,18 +159,25 @@ const STANDARD_COLUMNS = [
 ]
 
 function StandardBillGuide() {
-  return <details className="card lik-ov"><summary>A–J 标准逐笔账单 <small>人工加工后上传；原始账单不自动识别</small></summary>
-    <div className="lik-rawwrap"><table className="lik-raw"><thead><tr><th>列</th><th>字段</th><th>用途</th></tr></thead><tbody>{STANDARD_COLUMNS.map(([col, name, use]) => <tr key={col}><td><b>{col}</b></td><td>{name}</td><td>{use}</td></tr>)}</tbody></table></div>
-    <div className="lik-note">有费用拆分时必须满足 G = H + I；B 列多单号由系统统一关联金蝶。标准块可独立放置，也可追加在原明细后面。</div>
-  </details>
+  return <section className="lrx-panel lir-schema">
+    <div className="lrx-panel-head"><div><h2>A–J 固定取数列</h2><small>人工加工时逐行填写；B 列多单号支持中英文逗号、分号</small></div></div>
+    <div className="lir-schema-grid">{STANDARD_COLUMNS.map(([col, name, use]) => <div className="lir-schema-cell" key={col}><b>{col}</b><span>{name}</span><small>{use}</small></div>)}</div>
+    <div className="lir-footnote">有费用拆分时 G = H + I；E 只取供应商数量，金蝶数量仅用于后续核对。标准块可独立放置，也可追加在原明细后面。</div>
+  </section>
 }
 
 function OriginalFiles({ carrier, period, locked, flash }) {
   const [files, setFiles] = useState([])
   const [busy, setBusy] = useState('')
   const [replaceId, setReplaceId] = useState(0)
+  const [state, setState] = useState('loading')
+  const [error, setError] = useState('')
   const input = useRef(null)
-  const load = () => reviewOriginalFiles(carrier, period).then(r => setFiles(r.files || [])).catch(e => flash('原始附件读取失败：' + e.message))
+  const load = async () => {
+    setState('loading'); setError('')
+    try { const r = await reviewOriginalFiles(carrier, period); setFiles(r.files || []); setState('ready') }
+    catch (e) { setState('error'); setError(e.message || String(e)); flash('原始附件读取失败：' + e.message) }
+  }
   useEffect(() => { setFiles([]); load() }, [carrier, period])
   const pick = id => { setReplaceId(id || 0); if (input.current) input.current.click() }
   const upload = async e => {
@@ -187,11 +197,20 @@ function OriginalFiles({ carrier, period, locked, flash }) {
     try { await reviewOriginalDelete(carrier, period, file.id); flash('原始附件已删除'); await load() }
     catch (err) { flash('删除失败：' + err.message) } finally { setBusy('') }
   }
-  return <div style={{ margin: '0 15px 12px' }}>
-    <div className="lik-section"><b>供应商原始账单 · 仅追溯</b><span className="dim">可选附件，不参与 A–J 取数</span><span className="sp" /><button className="btn sm" disabled={!!locked || !!busy} onClick={() => pick(0)}>{files.length ? '新增附件' : '上传原始附件'}</button></div>
+  return <article className="lir-file-card" aria-busy={state === 'loading'}>
+    <div className="lir-file-kind">供应商原始账单 · 可选附件</div>
+    <div className="lir-file-title"><h3>{state === 'ready' && files.length ? `${files.length} 份原始附件` : '原始附件'}</h3>{state === 'ready' && <span className={'lrx-tag ' + (files.length ? 'ok' : '')}>{files.length ? '已留档' : '未上传'}</span>}</div>
+    <p>只用于留档追溯，系统不解析此文件，也不与标准逐笔账单混用。</p>
     <input ref={input} type="file" accept=".xlsx,.xls,.pdf" hidden onChange={upload} />
-    {files.length > 0 && <div className="lik-rawwrap" style={{ margin: '8px 0 0', maxWidth: '100%' }}><table className="lik-raw"><thead><tr><th>文件名</th><th>上传人 / 时间</th><th className="num">大小</th><th>操作</th></tr></thead><tbody>{files.map(file => <tr key={file.id}><td className="lik-rawname">{file.name}</td><td>{file.by || '—'}<div className="dim">{file.at || '—'}</div></td><td className="num">{kb(file.size)}</td><td className="lik-rawops"><a className="btn sm" href={reviewOriginalUrl(file.id)} target="_blank" rel="noopener">下载</a><button className="btn sm" disabled={!!locked || !!busy} onClick={() => pick(file.id)}>替换</button><button className="btn sm" disabled={!!locked || !!busy} onClick={() => del(file)}>{busy === 'del' + file.id ? '删除中…' : '删除'}</button></td></tr>)}</tbody></table></div>}
-  </div>
+    {state === 'loading' && <div className="lir-file-empty" role="status">正在读取原始附件…</div>}
+    {state === 'error' && <div className="lir-file-error" role="alert">原始附件读取失败：{error}<button className="lrx-btn" onClick={load}>重试</button></div>}
+    {state === 'ready' && !files.length && <div className="lir-file-empty">当前没有原始附件，可按需上传。</div>}
+    {state === 'ready' && files.length > 0 && <div className="lir-source-list">{files.map(file => <div className="lir-source" key={file.id}>
+      <div className="lir-source-main"><b title={file.name}>{file.name}</b><span>{file.by || '—'} · {file.at || '—'}{file.size != null ? ` · ${kb(file.size)}` : ''}</span></div>
+      <div className="lir-source-actions"><a className="lrx-btn" href={reviewOriginalUrl(file.id)} target="_blank" rel="noopener">下载</a><button className="lrx-btn" disabled={!!locked || !!busy} onClick={() => pick(file.id)}>替换</button><button className="lrx-btn danger" disabled={!!locked || !!busy} onClick={() => del(file)}>{busy === 'del' + file.id ? '删除中…' : '删除'}</button></div>
+    </div>)}</div>}
+    <div className="lir-file-actions"><button className="lrx-btn" disabled={!!locked || !!busy} onClick={() => pick(0)}>{busy === 'upload' ? '上传中…' : files.length ? '新增原始附件' : '上传原始附件'}</button></div>
+  </article>
 }
 
 export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged, onNext, onRetry }) {
@@ -209,16 +228,16 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
     } catch { /* 会话存储不可用时仍提示，但不写持久标记 */ }
     setIssueOpen(true)
   }, [data, period, issueFacts.signature])
-  if (!data) return <div className="card"><div className="ovempty">读账单原件、按取数说明检查中…</div></div>
-  if (data.err) return <div className="card"><div className="fxwarn" style={{ margin: 15 }}>{data.err} <button className="btn sm" onClick={onRetry}>重试</button></div></div>
+  if (!data) return <section className="lrx-panel"><div className="lrx-empty" role="status">读账单原件、按取数说明检查中…</div></section>
+  if (data.err) return <section className="lrx-panel"><div className="lir-page-error" role="alert">{data.err}<button className="lrx-btn" onClick={onRetry}>重试</button></div></section>
   const files = data.files || [], reps = files.map(f => f.report).filter(Boolean)
   const totSheets = reps.flatMap(r => (r.sheets || []).filter(s => s.role === 'detail' && s.total))
   const dupRows = reps.reduce((a, r) => a + (r.dup_rows || 0), 0)
   const billSelfTotal = totSheets.length && !dupRows && reps.every(r => (r.sheets || []).filter(s => s.role === 'detail').every(s => s.total)) ? totSheets.reduce((a, s) => a + s.total.sum, 0) : null
-  const [vl, vc] = IK_V[data.verdict] || ['', 'neu']
+  const [vl] = IK_V[data.verdict] || ['', 'neu']
   const nDocs = (data.bills || []).reduce((a, b) => a + (b.n_doc || 0), 0)
-  const recons = data.subject_recons || [], multiRecon = recons.length > 1, primary = recons.length === 1 ? recons[0] : null
-  const reqDiff = primary ? primary.diff : data.diff, reqTotal = primary ? primary.req_total : data.req_total
+  const nDetails = (data.bills || []).reduce((a, b) => a + (b.n_detail || 0), 0)
+  const recons = data.subject_recons || []
   const link1 = billSelfTotal == null ? null : isZero(data.bill_total - billSelfTotal)
   const link2 = recons.length ? (recons.some(r => r.diff != null && !isZero(r.diff)) ? false : recons.every(r => r.diff != null) ? true : null) : data.diff == null ? null : isZero(data.diff)
   const issues = []
@@ -239,44 +258,59 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
   }
   const reqByRole = {}; (data.req_files || []).forEach(f => { (reqByRole[f.role || 'other'] = reqByRole[f.role || 'other'] || []).push(f) })
   const billBySrc = Object.fromEntries((data.bills || []).map(b => [b.src || '', b]))
-  const sheetRows = files.filter(f => f.report).flatMap(f => (f.report.sheets || []).map((s, i) => ({ f, s, i, bad: !['ok', 'skip', 'accrual'].includes(s.verdict) }))).sort((a, b) => Number(b.bad) - Number(a.bad)).filter(x => !onlyBad || x.bad)
+  const detailRows = files.filter(f => f.report).flatMap(f => (f.report.sheets || []).map((s, i) => ({ f, s, i, bad: s.verdict !== 'ok' }))).filter(x => x.s.role === 'detail')
+  const sheetRows = [...detailRows].sort((a, b) => Number(b.bad) - Number(a.bad)).filter(x => !onlyBad || x.bad)
+  const readTotal = detailRows.length && detailRows.every(({ s }) => s.amount != null) ? detailRows.reduce((sum, { s }) => sum + Number(s.amount), 0) : null
+  const sheetBillTotal = detailRows.length && !dupRows && detailRows.every(({ s }) => s.total) ? detailRows.reduce((sum, { s }) => sum + Number(s.total.sum), 0) : null
+  const sheetReady = detailRows.length > 0 && !dupRows && detailRows.every(({ s }) => s.verdict === 'ok')
   return <>
-    <div className="lik-verdict">
-      <div className="vb"><span className={'vbadge ' + (ready ? 'ok' : vc === 'neu' ? 'warn' : vc)}><span className="dot" />{data.register ? '登记制 · 无需接入账单' : ready ? '接入完成 · 金额已勾稽' : `接入待处理 · ${issues.length} 项`}</span><span className="vsub">先确认账单读全，再确认账单与请款一致</span><span className="sp" /><button className="btn sm" disabled={!!locked || !data.has_spec} title={locked || '上传、替换或删除账单'} onClick={onOpenBills}>上传 / 替换 / 删除账单</button></div>
-      <div className="vflow">
-        <div className="vnode"><span className="h">账单原件</span><span className="v">{files.length} 份</span><span className="s">{(data.bills || []).length ? `已解析 ${(data.bills || []).length} 份 · ${nDocs} 张单` : '还没有可核对原件'}</span></div>
-        <div className={'vlink' + (link1 === false ? ' bad' : '')}><span>{link1 == null ? '待核对' : link1 ? '✓ 一致' : `✕ 差 ${money(Math.abs(data.bill_total - billSelfTotal))}`}</span></div>
-        <div className="vnode money"><span className="h">解析入账金额</span><span className="v">{(data.bills || []).length ? money(data.bill_total) : '—'}</span><span className="s">按取数说明拆分费用</span></div>
-        <div className={'vlink' + (link2 === false ? ' bad' : '')}><span>{multiRecon ? (link2 == null ? '按主体待核' : link2 ? '✓ 各主体一致' : '✕ 按主体有差异') : link2 == null ? '待核对' : link2 ? '✓ 差 0' : `✕ 差 ${money(Math.abs(reqDiff))}`}</span></div>
-        <div className="vnode"><span className="h">请款单（钉钉）</span><span className="v">{multiRecon ? `${recons.length} 个主体` : reqTotal != null && (data.payreqs || []).length ? money(reqTotal) : '—'}</span><span className="s">{(data.payreqs || []).length} 张{Object.keys(reqByRole).length ? ' · ' + Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join('、') : ''}</span></div>
+    <section className="lrx-panel lir-files">
+      <div className="lrx-panel-head"><div><h2>文件与来源</h2><small>标准账单是取数依据；原始附件只作独立留档追溯</small></div><span className={'lrx-tag ' + (data.register ? 'info' : ready ? 'ok' : 'pending')}>{data.register ? '登记制无需标准账单' : ready ? '接入已核对' : `待处理 ${issues.length} 项`}</span></div>
+      <div className="lir-file-grid">
+        <article className="lir-file-card">
+          <div className="lir-file-kind">标准逐笔账单 · 必需</div>
+          <div className="lir-file-title"><h3>{files.length ? `${files.length} 份标准账单` : '标准逐笔账单'}</h3><span className={'lrx-tag ' + ((data.bills || []).length ? 'ok' : 'pending')}>{(data.bills || []).length ? `已解析 ${(data.bills || []).length} 份` : '未形成解析结果'}</span></div>
+          <p>{(data.bills || []).length ? `${nDetails} 行逐笔 · ${nDocs} 张单 · 读取金额 ${money(data.bill_total)}` : '上传人工加工后的 A–J 标准账单，系统不会从原始附件猜测取数。'}</p>
+          {!files.length && <div className="lir-file-empty">{data.register ? '登记制无需上传标准账单。' : data.has_spec ? '当前没有标准账单，可手工上传或等待钉钉附件自动接入。' : '尚未配置取数说明，暂不能上传解析。'}</div>}
+          {files.length > 0 && <div className="lir-source-list">{files.map(f => {
+            const name = f.name || '（没记文件名）', bill = billBySrc[f.src || '']
+            return <div className="lir-source" key={f.id}>
+              <div className="lir-source-main"><b title={name}>{name}</b><span>{f.src || '账单'} · {f.origin || '来源未记录'} · {f.by || '操作人未记录'}</span><span>{f.at || '时间未记录'}{f.size != null ? ` · ${kb(f.size)}` : ''}{bill ? ` · 解析金额 ${money(bill.amount)}` : ' · 尚未关联解析结果'}</span></div>
+              <div className="lir-source-actions"><a className="lrx-btn" href={reviewRawUrl(data.carrier, period, f.src)} target="_blank" rel="noopener">下载</a><button className="lrx-btn" disabled={!!locked || !!busy} title={locked || '用新文件替换这一份，其他账单不动'} onClick={() => onOpenBills(f.src)}>替换</button><button className="lrx-btn" disabled={!!locked || !!busy} title={locked || '用保存的原件按当前取数说明重新解析'} onClick={() => reparse(f)}>{busy === 're' + f.id ? '解析中…' : '重新解析'}</button></div>
+            </div>
+          })}</div>}
+          <div className="lir-file-actions"><button className="lrx-btn primary" disabled={!!locked || !data.has_spec} title={locked || (!data.has_spec ? '请先配置取数说明' : '上传、替换或删除标准账单')} onClick={onOpenBills}>上传 / 替换 / 删除标准账单</button></div>
+        </article>
+        <OriginalFiles carrier={data.carrier} period={period} locked={locked} flash={flash} />
       </div>
-      {multiRecon && <div className="tw lik-subjrecs"><table className="fxtbl"><thead><tr><th>主体</th><th className="num">解析入账金额</th><th className="num">请款单</th><th className="num">差</th><th>结论</th></tr></thead><tbody>{recons.map(r => <tr key={r.subject}>
-        <td><b>{r.subject}</b></td><td className="num mono">{r.bill_total == null ? '—' : money(r.bill_total)}</td><td className="num mono">{r.req_total == null ? '—' : <>{money(r.req_total)}<span className="dim"> · {r.n_req} 张</span></>}</td>
-        <td className={'num mono ' + (r.diff == null ? '' : isZero(r.diff) ? 'diffneg' : 'diffpos')}>{r.diff == null ? '—' : isZero(r.diff) ? '0' : money(r.diff)}</td><td>{r.diff == null ? <span className="pill neu">待核对</span> : isZero(r.diff) ? <span className="pill ok">一致</span> : <button className="pill bad lik-diffbtn" onClick={() => setIssueOpen(true)}>金额不符</button>}</td></tr>)}</tbody></table></div>}
-    </div>
-    {!data.register && <div className={'lik-issues' + (ready ? ' ok' : '')}>{ready ? <><b>✓ 可以进入逐笔复核</b><span>账单解析、原件合计与请款金额均已核对。后续修改账单会重新计算本步骤状态。</span></> : <><b>待处理 {issues.length} 项</b><ul>{issues.map((x, i) => <li key={i}>{x}</li>)}</ul>{issueFacts.signature && <button className="btn sm lik-issue-open" onClick={() => setIssueOpen(true)}>查看差异原因</button>}</>}</div>}
-    <div className="card">
-      <h3 className="lik-section">文件与来源 <small>原始凭据和附件独立核对</small></h3>
-      <div className="lik-srctitle">账单原件 · {files.length} 份</div>
-      {files.length ? <div className="lik-rawwrap"><table className="lik-raw"><thead><tr><th>账单份名 / 原文件名</th><th className="num">解析金额</th><th>来源 / 操作人</th><th>解析时间</th><th className="num">大小</th><th>操作</th></tr></thead><tbody>{files.map(f => {
-        const name = f.name || '（没记文件名）', bill = billBySrc[f.src || '']
-        return <tr key={f.id}><td className="lik-rawname"><div className="lik-rawsrc">{f.src || '账单'}</div><div className="lik-rawfile" title={name}>{name}</div></td><td className="num">{bill ? money(bill.amount) : '—'}</td><td>{f.origin || '没记录'}<div className="dim">{f.by || '没记录'}</div></td><td>{f.at || '—'}</td><td className="num">{kb(f.size) || '—'}</td><td className="lik-rawops"><a className="btn sm" href={reviewRawUrl(data.carrier, period, f.src)} target="_blank" rel="noopener">下载原件</a><button className="btn sm" disabled={!!locked || !!busy} title={locked || '用新文件替换这一份，其他账单不动'} onClick={() => onOpenBills(f.src)}>替换</button><button className="btn sm" disabled={!!locked || !!busy} title={locked || '用保存的原件按当前取数说明重新解析'} onClick={() => reparse(f)}>{busy === 're' + f.id ? '解析中…' : '重新解析'}</button></td></tr>
-      })}</tbody></table></div> : <div className="lik-empty">{data.register ? '登记制无需上传账单。' : data.has_spec ? '还没有账单原件，可手工上传或等待钉钉附件自动接入。' : '先配置取数说明，再上传账单。'}</div>}
-      {data.carrier === '极鲜达' && <OriginalFiles carrier={data.carrier} period={period} locked={locked} flash={flash} />}
-      <div className="lik-reqfiles"><b>钉钉请款单附件 · {(data.req_files || []).length} 份</b><span>{Object.keys(reqByRole).length ? `${Object.keys(reqByRole).length} 类：${Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join(' · ')}` : '当前请款单没有附件'}</span><span>随请款单自动接入，无需重复上传。</span></div>
-      {(data.history || []).length > 0 && <div style={{ padding: '0 15px 12px' }}><details><summary className="lik-lbl" style={{ cursor: 'pointer' }}>解析记录 · {data.history.length} 条</summary><div className="lik-hist">{data.history.slice(0, 8).map((h, i) => <div key={i}><span className="d">{h.at}</span><span>{h.by}</span><span>{h.action.replace('物流复核-', '')}：{h.detail}</span></div>)}</div></details></div>}
-    </div>
-    {data.carrier === '极鲜达' && <StandardBillGuide />}
-    <div className="card">
-      <h3 className="lik-section">每页核对 <small>异常工作表优先，展开可查看取数列</small><span className="sp" /><button className={'btn sm' + (onlyBad ? ' pri' : '')} onClick={() => setOnlyBad(!onlyBad)}>{onlyBad ? '查看全部' : '只看异常'}</button></h3>
-      {reps.length === 0 && <div className="ovempty">没有原件可查</div>}{reps.length > 0 && sheetRows.length === 0 && <div className="ovempty">没有异常工作表 ✓</div>}
-      {sheetRows.length > 0 && <div className="tw"><table className="fxtbl" style={{ minWidth: 760 }}><thead><tr><th>工作表</th><th className="num">单数</th><th className="num">读出来的</th><th className="num">账单合计</th><th className="num">差</th><th>结论</th><th></th></tr></thead><tbody>{sheetRows.map(({ f, s, i }) => {
-        const k = f.id + '|' + i, [lb, cl] = IK_V[s.verdict] || [s.verdict, 'neu'], diff = s.total ? s.amount - s.total.sum : null
-        return <React.Fragment key={k}><tr><td><b>{s.sheet}</b>{files.length > 1 && <div className="dim" style={{ fontSize: 11.5 }}>{f.name || f.src}</div>}</td><td className="num">{s.role === 'detail' ? s.docs : s.n || '—'}</td><td className="num mono">{s.amount != null ? money(s.amount) : '—'}</td><td className="num mono">{s.total ? money(s.total.sum) : '—'}</td><td className={'num mono ' + (diff == null ? '' : isZero(diff) && !s.unsplit ? 'diffneg' : 'diffpos')}>{s.verdict === 'unsplit' ? money(s.unsplit) : diff == null ? '—' : isZero(diff) ? '0' : money(diff)}</td><td><span className={'pill ' + cl}>{lb}</span><div className="dim" style={{ fontSize: 11.5 }}>{sheetSay(s)}</div></td><td>{s.role === 'detail' && <button className="lnk" aria-expanded={!!more[k]} onClick={() => setMore(o => ({ ...o, [k]: !o[k] }))}>{more[k] ? '收起' : '看列'}</button>}</td></tr>{more[k] && <tr className="lik-more"><td colSpan="7"><Chips s={s} /></td></tr>}</React.Fragment>
-      })}</tbody></table></div>}
-      {reps.length > 0 && <details style={{ margin: '0 15px 12px' }}><summary className="lik-lbl" style={{ cursor: 'pointer' }}>查看判定口径</summary><div className="lik-note" style={{ margin: '6px 0 0' }}>每页把算钱列与账单自己的合计列相比。取数说明配置合计列时，差额记为「其他费用（未拆）」，但仍需补配置后才算复核完成。</div></details>}
-    </div>
-    <Overview period={period} /><div className="navbar"><span /><button className="btn pri" onClick={onNext}>下一步：逐单核价核量 ›</button></div>
+    </section>
+
+    <section className="lrx-panel lir-recon">
+      <div className="lrx-panel-head"><div><h2>逐页金额勾稽</h2><small>仅列计费明细页；说明页与汇总页不重复计入</small></div><div className="lrx-panel-actions"><span className={'lrx-tag ' + (sheetReady ? 'ok' : detailRows.some(x => x.bad) || dupRows ? 'bad' : 'pending')}>{sheetReady ? `合计 ${money(readTotal)}` : dupRows ? `发现 ${dupRows} 行重复` : '逐页待核对'}</span><button className={'lrx-btn' + (onlyBad ? ' primary' : '')} disabled={!detailRows.length} onClick={() => setOnlyBad(!onlyBad)}>{onlyBad ? '查看全部' : '只看异常'}</button></div></div>
+      {!reps.length && <div className="lrx-empty">没有可勾稽的标准账单解析报告</div>}
+      {reps.length > 0 && !detailRows.length && <div className="lrx-empty">解析报告中没有计费明细页</div>}
+      {detailRows.length > 0 && !sheetRows.length && <div className="lrx-empty">当前筛选下没有异常计费页</div>}
+      {sheetRows.length > 0 && <div className="lir-table-scroll"><table className="lrx-table lir-recon-table"><thead><tr><th>计费页</th><th className="num">逐笔行</th><th className="num">读取金额</th><th className="num">账单金额</th><th>结论</th></tr></thead><tbody>{sheetRows.map(({ f, s, i }) => {
+        const k = f.id + '|' + i, [lb, cl] = IK_V[s.verdict] || [s.verdict, 'neu']
+        return <React.Fragment key={k}><tr><td><b>{s.sheet}</b>{files.length > 1 && <span className="lrx-cell-meta">{f.name || f.src}</span>}</td><td className="num">{s.n != null ? s.n : '—'}</td><td className="num">{s.amount != null ? money(s.amount) : '—'}</td><td className="num">{s.total ? money(s.total.sum) : '—'}</td><td><span className={'lrx-tag ' + (cl === 'ok' ? 'ok' : cl === 'bad' ? 'bad' : cl === 'warn' ? 'pending' : '')}>{lb}</span>{sheetSay(s) && <span className="lrx-cell-meta">{sheetSay(s)}</span>}<button className="lrx-btn subtle lir-columns-toggle" aria-expanded={!!more[k]} onClick={() => setMore(o => ({ ...o, [k]: !o[k] }))}>{more[k] ? '收起取数列' : '查看取数列'}</button></td></tr>{more[k] && <tr className="lik-more"><td colSpan="5"><Chips s={s} /></td></tr>}</React.Fragment>
+      })}</tbody><tfoot><tr><td>合计</td><td className="num">{detailRows.reduce((sum, { s }) => sum + Number(s.n || 0), 0)}</td><td className="num">{money(readTotal)}</td><td className="num">{money(sheetBillTotal)}</td><td><span className={'lrx-tag ' + (sheetReady ? 'ok' : 'pending')}>{sheetReady ? '一致' : '待处理'}</span></td></tr></tfoot></table></div>}
+      <div className="lir-footnote">合计按接口返回的未舍入金额汇总后显示两位小数；有重复行或缺账单合计时不补造总额。</div>
+    </section>
+
+    <StandardBillGuide />
+
+    <details className="lrx-panel lir-aux"><summary><span>主体勾稽与差异原因</span><small>{data.register ? '登记制无需账单勾稽' : ready ? '当前未发现待处理差异' : `${issues.length} 项待处理`}</small></summary><div className="lir-aux-body">
+      {!data.register && (ready ? <p>当前账单解析、原件合计与请款金额未发现待处理项；后续替换账单会重新计算。</p> : <ul className="lir-issue-list">{issues.map((x, i) => <li key={i}>{x}</li>)}</ul>)}
+      {issueFacts.signature && <button className="lrx-btn" onClick={() => setIssueOpen(true)}>查看差异原因</button>}
+      {recons.length > 0 && <div className="lir-table-scroll"><table className="lrx-table lir-subject-table"><thead><tr><th>主体</th><th className="num">解析入账金额</th><th className="num">请款单</th><th className="num">差额</th><th>结论</th></tr></thead><tbody>{recons.map(r => <tr key={r.subject}><td><b>{r.subject}</b></td><td className="num">{money(r.bill_total)}</td><td className="num">{r.req_total == null ? '—' : <>{money(r.req_total)}<span className="lrx-cell-meta">{r.n_req} 张</span></>}</td><td className="num">{r.diff == null ? '—' : isZero(r.diff) ? '0.00' : money(r.diff)}</td><td>{r.diff == null ? <span className="lrx-tag pending">待核对</span> : isZero(r.diff) ? <span className="lrx-tag ok">一致</span> : <button className="lrx-btn" onClick={() => setIssueOpen(true)}>金额不符</button>}</td></tr>)}</tbody></table></div>}
+    </div></details>
+
+    <details className="lrx-panel lir-aux"><summary><span>钉钉附件与解析记录</span><small>请款附件 {(data.req_files || []).length} 份 · 历史 {(data.history || []).length} 条</small></summary><div className="lir-aux-body">
+      <div className="lir-request-files"><b>钉钉请款单附件</b><span>{Object.keys(reqByRole).length ? Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join(' · ') : '当前请款单没有附件'}</span><span>随请款单自动接入，无需重复上传。</span></div>
+      {(data.history || []).length > 0 ? <div className="lik-hist">{data.history.slice(0, 8).map((h, i) => <div key={i}><span className="d">{h.at}</span><span>{h.by}</span><span>{h.action.replace('物流复核-', '')}：{h.detail}</span></div>)}</div> : <p>暂无解析操作记录。</p>}
+    </div></details>
+    <Overview period={period} />
+    <BottomNav info={data.register ? '登记制无需标准账单' : ready ? '标准账单与金额勾稽已完成' : `接入待处理 ${issues.length} 项 · 以当前真实读取结果为准`} next={{ label: '下一步：逐单核价核量 ›', onClick: onNext }} />
     {issueOpen && <IntakeIssueModal data={data} period={period} facts={issueFacts} onClose={() => setIssueOpen(false)} />}
   </>
 }
@@ -296,7 +330,7 @@ function blockFacts(b, bill) {
 }
 
 export function InvAuditPanel({ inv3, billOf, onChanged, flash, locked, onLater, voucherFor, onRetry }) {
-  const [busy, setBusy] = useState(''), [query, setQuery] = useState(''), [queueFilter, setQueueFilter] = useState('all'), [selected, setSelected] = useState(''), [view, setView] = useState(null)
+  const [busy, setBusy] = useState(''), [query, setQuery] = useState(''), [queueFilter, setQueueFilter] = useState('all'), [view, setView] = useState(null)
   const approving = useRef(new Set())
   const byInst = new Map()
   for (const raw of ((inv3 && inv3.blocks) || []).filter(b => !b.err)) {
@@ -315,11 +349,9 @@ export function InvAuditPanel({ inv3, billOf, onChanged, flash, locked, onLater,
   const facts = Object.fromEntries(bs.map(b => [b.inst, blockFacts(b, billOf(b.subject))]))
   const matchQueue = b => queueFilter === 'all' || (queueFilter === 'todo' ? !facts[b.inst].ready : queueFilter === 'invoice' ? !facts[b.inst].ready && facts[b.inst].iv.length > 0 : !facts[b.inst].ready && facts[b.inst].iv.length === 0)
   const visible = bs.filter(b => matchQueue(b) && (!query || `${b.subject}${b.bid}${b.payee}`.toLowerCase().includes(query.toLowerCase()))).sort((a, b) => Number(facts[a.inst].ready) - Number(facts[b.inst].ready))
-  const current = visible.find(b => b.inst === selected) || visible[0]
-  useEffect(() => { if (current && current.inst !== selected) setSelected(current.inst) }, [current && current.inst])
-  if (!inv3) return <div className="card"><div className="ovempty">读请款单和发票管家中…</div></div>
-  if (inv3.err) return <div className="card"><div className="fxwarn" style={{ margin: 15 }}>{inv3.err} <button className="btn sm" onClick={onRetry}>重试</button></div></div>
-  if (!bs.length) return <div className="card"><div className="ovempty">这家这月还没有钉钉请款单</div></div>
+  if (!inv3) return <section className="lrx-panel"><div className="lrx-empty" role="status">读请款单和发票管家中…</div></section>
+  if (inv3.err) return <section className="lrx-panel"><div className="lir-page-error" role="alert">{inv3.err}<button className="lrx-btn" onClick={onRetry}>重试</button></div></section>
+  if (!bs.length) return <section className="lrx-panel"><div className="lrx-empty">这家这月还没有钉钉请款单</div></section>
   const invs = bs.flatMap(b => b.invoices || []), nRev = invs.filter(i => i.review === 'approved').length
   const todo = bs.filter(b => !facts[b.inst].ready).length, allReady = todo === 0
   const queueCounts = {
@@ -352,28 +384,43 @@ export function InvAuditPanel({ inv3, billOf, onChanged, flash, locked, onLater,
       setView(v => v && v.key === key ? { ...v, item, loading: false } : v)
     } catch (e) { setView(v => v && v.key === key ? { ...v, loading: false, error: e.message || String(e) } : v) }
   }
-  const mk = v => v == null ? <span className="lik-mk">·</span> : v ? <span className="lik-mk ok">✓</span> : <span className="lik-mk bad">✕</span>
-  const approveButton = (b, i, f) => i.review === 'pending' && <button className="btn sm pri" disabled={!!locked || !!busy || !f.amountOk || !f.sellerOk || !f.buyerOk} title={locked || (!f.amountOk || !f.sellerOk || !f.buyerOk ? '先解决金额或销购方异常' : '审核通过即确认收到')} onClick={async () => { if (await approve(b, i)) setView(v => v && v.summary.id === i.id ? null : v) }}>{busy === 'a' + i.id ? '审核中…' : '审核通过'}</button>
+  const approveButton = (b, i, f) => i.review === 'pending' && <button className="lrx-btn primary" disabled={!!locked || !!busy || !f.amountOk || !f.sellerOk || !f.buyerOk} title={locked || (!f.amountOk || !f.sellerOk || !f.buyerOk ? '先解决金额或销购方异常' : '审核通过即确认收到')} onClick={async () => { if (await approve(b, i)) setView(v => v && v.summary.id === i.id ? null : v) }}>{busy === 'a' + i.id ? '审核中…' : '审核通过'}</button>
   return <>
-    <div className="lik-verdict"><div className="vb"><span className={'vbadge ' + (allReady ? 'ok' : 'warn')}><span className="dot" />{allReady ? '发票核对完成' : `${todo} 张请款单待处理`}</span><span className="vsub">逐单核对金额、销购方和审核状态；无票须确认后补</span></div><div className="lia-summary"><span>待处理 <b>{todo}</b> 单</span><span>已审 <b>{nRev} / {invs.length}</b></span></div></div>
-    <div className="lia-work">
-      <aside className="lia-queue"><div className="lia-qtools"><input type="search" aria-label="搜索请款单" placeholder="搜主体 / 请款单号" value={query} onChange={e => setQuery(e.target.value)} /><div className="lia-qfilter">{[['all', '全部'], ['todo', '全部待办'], ['invoice', '有票待审'], ['noinvoice', '无票待确认']].map(([k, label]) => <button key={k} data-queue-filter={k} className={'btn sm' + (queueFilter === k ? ' pri' : '')} onClick={() => setQueueFilter(k)}>{label} {queueCounts[k]}</button>)}</div></div><div className="lia-qlist">{visible.map(b => { const f = facts[b.inst], status = f.ready ? '✓ 已完成' : f.iv.length ? '有票待审' : b.later_slip ? '后补待确认' : '后补未登记'; return <button key={b.inst} className={'lia-qitem' + (current && current.inst === b.inst ? ' on' : '')} onClick={() => setSelected(b.inst)}><span className="qt"><span>{b.subject}</span><span className="mono">{money(b.amount)}</span></span><span className="qs"><span className={f.ready ? 'diffok' : 'qn'}>{status}</span><span>{f.iv.length ? `${f.iv.filter(i => i.review === 'approved').length}/${f.iv.length} 已审` : b.later ? '后补已确认' : b.later_slip ? '已登记，待确认' : '未登记后补'}</span></span></button>})}{!visible.length && <div className="lik-empty">没有符合条件的请款单</div>}</div></aside>
-      <section className="lia-detail">{current && (() => { const b = current, f = facts[b.inst], bill = billOf(b.subject), slip = b.later_slip
+    <section className="lrx-panel lir-invoices">
+      <div className="lrx-panel-head"><div><h2>请款单与发票</h2><small>逐单核对金额、销购方和审核状态；无票须确认后补</small></div><span className={'lrx-tag ' + (allReady ? 'ok' : 'pending')}>{allReady ? '发票核对完成' : `${todo} 张请款单待处理`}</span></div>
+      <div className="lir-invoice-tools">
+        <label className="lir-search"><span>搜索请款单</span><input type="search" aria-label="搜索请款单" placeholder="输入主体、请款单号或收款方" value={query} onChange={e => setQuery(e.target.value)} /></label>
+        <div className="lir-status-filters" aria-label="请款单状态筛选">{[['all', '全部'], ['todo', '全部待办'], ['invoice', '有票待审'], ['noinvoice', '无票待确认']].map(([k, label]) => <button key={k} data-queue-filter={k} aria-pressed={queueFilter === k} className={'lrx-btn' + (queueFilter === k ? ' primary' : '')} onClick={() => setQueueFilter(k)}>{label} <b>{queueCounts[k]}</b></button>)}</div>
+        <div className="lir-invoice-counts"><span>待处理 <b>{todo}</b> 单</span><span>发票已审 <b>{nRev} / {invs.length}</b></span></div>
+      </div>
+      {!visible.length && <div className="lrx-empty">没有符合当前搜索与状态筛选的请款单</div>}
+      <div className="lir-request-list">{visible.map(b => {
+        const f = facts[b.inst], bill = billOf(b.subject), slip = b.later_slip
         const amountDiffs = []
         if (f.iv.length && !isZero((b.inv_total || 0) - (b.amount || 0))) amountDiffs.push(`发票－请款 ${money((b.inv_total || 0) - (b.amount || 0))}`)
         if (f.iv.length && bill != null && !isZero(bill - (b.amount || 0))) amountDiffs.push(`账单－请款 ${money(bill - (b.amount || 0))}`)
         const pending = f.issues.map(x => x === '账单 / 请款 / 发票金额未对平' ? `金额异常${amountDiffs.length ? '：' + amountDiffs.join('；') : ''}` : x)
-        return <>
-        <div className="lik-req"><div className="ih"><h4>{b.subject}</h4><span className={'pill ' + (f.ready ? 'ok' : 'warn')}>{f.ready ? '已完成' : '待处理'}</span><span className="sp" /><div className="ihmeta"><span>请款金额 <b className="mono">{money(b.amount)}</b></span><span>申请人 {b.applicant || '—'}</span><span>单号 {b.bid}</span></div>{b.folder && <a className="btn sm" href={`#/invaudit?folder=${encodeURIComponent(b.folder)}`} target="_blank" rel="noopener">完整发票审核 ↗</a>}</div>
-          <div className="lik-trio"><div><span className="h">账单</span><span className="v">{bill != null ? money(bill) : '—'}</span></div><div><span className="h">请款</span><span className="v">{money(b.amount)}</span></div><div><span className="h">发票</span><span className={'v' + (f.iv.length ? '' : ' warnv')}>{f.iv.length ? money(b.inv_total) : '无票'}</span></div></div>
-          {f.iv.length > 0 && <div className="lik-invwrap">{f.iv.map(i => { const sellerBad = norm(i.seller) !== norm(b.payee), buyerBad = norm(i.buyer) !== norm(b.subject_full); return <div className="lia-invoice" key={i.id}><span className="ino mono">{i.number || i.id}</span><span className="itp">{i.type_short || i.type || '发票'}{i.deduct === false ? '（不抵扣）' : ''}</span><span className="iamt">￥{money(i.gross)}</span><span className="iact"><button className="btn sm" disabled={!!view?.loading} onClick={() => viewInvoice(b, i)}>{view?.loading && view.summary.id === i.id ? '读取中…' : '看发票'}</button>{i.review !== 'approved' && <span className="lik-mk">未收到</span>}{approveButton(b, i, f)}{i.review === 'approved' && <span className="pill ok">已审核</span>}</span>{sellerBad && <span className="ierr">销方异常：{i.seller || '—'} ≠ 收款方 {b.payee || '—'}</span>}{buyerBad && <span className="ierr">购方异常：{i.buyer || '—'} ≠ 请款主体 {b.subject_full || b.subject}</span>}</div> })}</div>}
-          {!f.iv.length && <div className={'lik-later' + (b.later ? ' done' : '')}><div className="lr-h"><span>{b.later ? '✓ 发票后补已确认' : slip ? '后补单已登记，待财务确认' : '尚未登记发票后补'}</span><span className="sp" />{!b.later && slip && onLater && <button className="btn sm pri" disabled={!!locked} onClick={() => onLater(b, true)}>确认发票后补</button>}{b.later && onLater && <button className="btn sm" disabled={!!locked} onClick={() => onLater(b, false)}>撤销确认</button>}{!b.later && !slip && <a className="btn sm pri" href="#/invlater">打开后补池</a>}</div><div className="lr-meta">{slip ? `后补单 #${slip.id} · 登记人 ${slip.filed_by || '—'} · 预计到票 ${slip.expect_date || '—'}` : '业务登记后，财务在这里确认；也可到后补池查看。'}</div></div>}
-          <div className={'lik-chk' + (f.ready ? ' done' : '')}><div>{mk(f.ready)}<span>{f.ready ? (f.iv.length ? '已完成：金额、销购方与发票审核均通过' : '已完成：无票后补已确认') : `待办：${pending.join('；')}`}</span></div></div>
-        </div>
-        {voucherFor && <details className="lia-voucher"><summary>做账与后补处理</summary><div style={{ paddingTop: 10 }}>{voucherFor(b)}</div></details>}
-      </> })()}</section>
-    </div>
-    {view && <Modal title={`发票 ${view.summary.number || view.summary.id}`} onClose={() => setView(null)} width={1040} footer={<><button className="btn sm" onClick={() => setView(null)}>关闭</button>{view.item && approveButton(view.b, view.summary, facts[view.b.inst])}</>}>
+        const checks = [
+          { label: '金额', ok: f.iv.length ? f.amountOk : null, text: f.iv.length ? f.amountOk ? '账单、请款、发票对平' : '金额未对平' : '无票，待后补结论' },
+          { label: '销方', ok: f.iv.length ? f.sellerOk : null, text: f.iv.length ? f.sellerOk ? '与请款收款方一致' : '与请款收款方不一致' : '无票暂不判断' },
+          { label: '购方', ok: f.iv.length ? f.buyerOk : null, text: f.iv.length ? f.buyerOk ? '与请款主体一致' : '与请款主体不一致' : '无票暂不判断' },
+          { label: '审核 / 后补', ok: f.iv.length ? f.allRev : f.laterOk, text: f.iv.length ? f.allRev ? '发票已全部审核' : '仍有发票待审核' : f.laterOk ? '发票后补已确认' : slip ? '后补单待确认' : '后补未登记' },
+        ]
+        return <article className="lir-request" key={b.inst} data-inst={b.inst}>
+          <div className="lir-request-head"><div><h3>{b.subject}</h3><div className="lir-request-meta"><span>申请人 {b.applicant || '—'}</span><span>单号 <span className="lrx-code">{b.bid}</span></span><span>收款方 {b.payee || '—'}</span></div></div><span className={'lrx-tag ' + (f.ready ? 'ok' : 'pending')}>{f.ready ? '已完成' : '待处理'}</span>{b.folder && <a className="lrx-btn" href={`#/invaudit?folder=${encodeURIComponent(b.folder)}`} target="_blank" rel="noopener">完整发票审核 ↗</a>}</div>
+          <div className="lir-request-amounts"><div><span>账单金额</span><b>{bill != null ? money(bill) : '—'}</b></div><div><span>请款金额</span><b>{money(b.amount)}</b></div><div><span>发票价税合计</span><b className={f.iv.length ? '' : 'pending'}>{f.iv.length ? money(b.inv_total) : '无票'}</b></div></div>
+          <div className="lir-check-grid">{checks.map(check => <div className={'lir-check ' + (check.ok == null ? '' : check.ok ? 'ok' : 'bad')} key={check.label}><span>{check.label}</span><b>{check.ok == null ? '待补充资料' : check.ok ? '通过' : '未通过'}</b><small>{check.text}</small></div>)}</div>
+          {f.iv.length > 0 && <div className="lir-invoice-list">{f.iv.map(i => {
+            const sellerBad = norm(i.seller) !== norm(b.payee), buyerBad = norm(i.buyer) !== norm(b.subject_full)
+            return <div className="lir-invoice" key={i.id != null ? i.id : i.number}><div className="lir-invoice-id"><b className="lrx-code">{i.number || i.id}</b><span>{i.type_short || i.type || '发票'}{i.deduct === false ? '（不抵扣）' : ''}</span></div><b className="lir-invoice-amount">￥{money(i.gross)}</b><div className="lir-invoice-actions"><button className="lrx-btn" disabled={!!view?.loading} onClick={() => viewInvoice(b, i)}>{view?.loading && view.summary.id === i.id ? '读取中…' : '看发票'}</button>{approveButton(b, i, f)}{i.review === 'approved' ? <span className="lrx-tag ok">已审核</span> : <span className="lrx-tag pending">待审核</span>}</div>{sellerBad && <div className="lir-invoice-error">销方异常：{i.seller || '—'} ≠ 收款方 {b.payee || '—'}</div>}{buyerBad && <div className="lir-invoice-error">购方异常：{i.buyer || '—'} ≠ 请款主体 {b.subject_full || b.subject}</div>}</div>
+          })}</div>}
+          {!f.iv.length && <div className={'lir-later' + (b.later ? ' done' : '')}><div><b>{b.later ? '发票后补已确认' : slip ? '后补单已登记，待财务确认' : '尚未登记发票后补'}</b><span>{slip ? `后补单 #${slip.id} · 登记人 ${slip.filed_by || '—'} · 预计到票 ${slip.expect_date || '—'}` : '业务登记后，财务在这里确认；也可到后补池查看。'}</span></div><div className="lir-later-actions">{!b.later && slip && onLater && <button className="lrx-btn primary" disabled={!!locked} onClick={() => onLater(b, true)}>确认发票后补</button>}{b.later && onLater && <button className="lrx-btn" disabled={!!locked} onClick={() => onLater(b, false)}>撤销后补确认</button>}{!b.later && !slip && <a className="lrx-btn primary" href="#/invlater">打开后补池</a>}</div></div>}
+          <div className={'lir-request-conclusion' + (f.ready ? ' done' : '')}>{f.ready ? (f.iv.length ? '已完成：金额、销购方与发票审核均通过。' : '已完成：无票后补已确认。') : `待办：${pending.join('；')}`}</div>
+          {voucherFor && <details className="lir-voucher"><summary>高级做账与后补处理</summary><div>{voucherFor(b)}</div></details>}
+        </article>
+      })}</div>
+    </section>
+    {view && <Modal title={`发票 ${view.summary.number || view.summary.id}`} onClose={() => setView(null)} width={1040} footer={<><button className="lrx-btn" onClick={() => setView(null)}>关闭</button>{view.item && approveButton(view.b, view.summary, facts[view.b.inst])}</>}>
       {view.loading && <div className="lia-viewload" role="status">正在读取发票…</div>}{view.error && <div className="lia-viewerr" role="alert">发票读取失败：{view.error}</div>}{view.item && <InvViewer item={view.item} height={520} />}
     </Modal>}
   </>

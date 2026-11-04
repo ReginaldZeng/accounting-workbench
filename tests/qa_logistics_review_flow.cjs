@@ -110,7 +110,7 @@ async function open(browser, B, state) {
   page.on('dialog', d => d.accept())
   await page.route(ORIGIN + '/**', async route => {
     const req = route.request(), u = new URL(req.url())
-    if (u.pathname === '/') return route.fulfill({ contentType: 'text/html', body: '<div id="root"></div><script src="/entry.js"></script>' })
+    if (u.pathname === '/') return route.fulfill({ contentType: 'text/html', body: '<div id="root"></div><link rel="stylesheet" href="/entry.css"><script src="/entry.js"></script>' })
     if (u.pathname === '/entry.js') return route.fulfill({ contentType: 'application/javascript', body: B.js })
     if (u.pathname === '/entry.css') return route.fulfill({ contentType: 'text/css', body: B.css })
     if (!u.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' })
@@ -146,6 +146,14 @@ async function open(browser, B, state) {
 }
 
 const step = (page, name) => page.locator('.lrx-steps .lrx-step').filter({ hasText: name }).click()
+const openAccr = async page => {
+  const fold = page.locator('.lrx-detail-toggle').filter({ hasText: '当前计提 金蝶原分录' })
+  if (await fold.getAttribute('open') === null) await fold.locator(':scope > summary').click()
+}
+const openDocsAdvanced = async page => {
+  const fold = page.locator('.ldx-advanced')
+  if (await fold.getAttribute('open') === null) await fold.locator(':scope > summary').click()
+}
 const count = (calls, path, period) => calls.filter(c => c.path === path && (!period || c.period === period)).length
 
 async function resultRetry(browser, B) {
@@ -153,14 +161,15 @@ async function resultRetry(browser, B) {
   const { page, ctx, calls, errors } = await open(browser, B, state)
   try {
     await step(page, '逐单核价核量')
-    await page.getByText('合成逐单502', { exact: false }).waitFor()
+    await page.locator('.fxwarn').getByText('合成逐单502', { exact: false }).waitFor()
     assert.equal(await page.locator('.msg').filter({ hasText: '逐单取数失败' }).count(), 0, '逐单错误不能挂到顶部瞬时消息')
     await sleep(500)
     assert.equal(count(calls, '/api/logistics-review/lines'), 0, 'd.err 不能启动逐笔加载')
     await page.locator('.fxwarn').filter({ hasText: '合成逐单502' }).getByRole('button', { name: '重试' }).click()
-    await page.getByText('合成逐单502', { exact: false }).waitFor({ state: 'detached' })
+    await page.locator('.fxwarn').getByText('合成逐单502', { exact: false }).waitFor({ state: 'detached' })
     await page.getByText('10.00', { exact: true }).first().waitFor()
     assert.equal(count(calls, '/api/logistics-review/result'), 3)
+    await openDocsAdvanced(page)
     await page.locator('.lrv-taskdegraded', { hasText: '不显示全月任务数' }).waitFor()
     assert.equal(await page.locator('[data-doc-task]').count(), 0, '无全量数据不得伪造任务数')
     assert.deepEqual(errors, [])
@@ -176,6 +185,7 @@ async function staleLines(browser, B) {
     assert.equal(count(calls, '/api/logistics-review/lines', '2026-09'), 1, '旧账期逐笔请求应已开始')
     await page.evaluate(() => window.__setPeriod(2026, 10))
     await step(page, '逐笔计提复核')
+    await openAccr(page)
     await page.locator('.ltbl').getByText('V-2026-10', { exact: true }).waitFor()
     release()
     await sleep(300)
@@ -190,11 +200,12 @@ async function stepRetries(browser, B) {
   const { page, ctx, errors } = await open(browser, B, state)
   try {
     await page.getByText('合成接入502', { exact: false }).waitFor()
-    await page.locator('.fxwarn').filter({ hasText: '合成接入502' }).getByRole('button', { name: '重试' }).click()
+    await page.getByRole('button', { name: '重试', exact: true }).first().click()
     assert.equal(await page.getByText('合成接入502', { exact: false }).count(), 0, '接入重试开始时清掉旧错误')
-    await page.getByText('接入完成 · 金额已勾稽', { exact: false }).waitFor()
+    await page.getByText('文件与来源', { exact: false }).first().waitFor()
 
     await step(page, '逐笔计提复核')
+    await openAccr(page)
     await page.getByText('合成逐笔502', { exact: false }).waitFor()
     await page.locator('.msg').filter({ hasText: '合成逐笔502' }).getByRole('button', { name: '重试' }).click()
     assert.equal(await page.getByText('合成逐笔502', { exact: false }).count(), 0, '逐笔重试不能保留旧错误')
@@ -209,7 +220,7 @@ async function stepRetries(browser, B) {
     await page.getByText('四步核对均已完成，可以登记。', { exact: false }).waitFor()
 
     await page.getByText('合成发票502', { exact: false }).first().waitFor()
-    await page.locator('.fxwarn').filter({ hasText: '合成发票502' }).getByRole('button', { name: '重试' }).click()
+    await page.getByRole('button', { name: '重试', exact: true }).click()
     assert.equal(await page.getByText('合成发票502', { exact: false }).count(), 0, '发票重试不能保留旧错误或旧发票')
     await page.getByText('这家这月还没有钉钉请款单', { exact: true }).waitFor()
     assert.equal(await sign.isDisabled(), false)
@@ -223,6 +234,7 @@ async function docTasks(browser, B) {
   try {
     await step(page, '逐单核价核量')
     await page.locator('.fxwarn').filter({ hasText: '合成逐单502' }).getByRole('button', { name: '重试' }).click()
+    await openDocsAdvanced(page)
     await page.locator('[data-doc-task="qty"]').waitFor()
     const expected = { qty: '1', info: '1', cls: '2', fee: '1', amt: '1', dup: '2' }
     for (const [k, n] of Object.entries(expected)) assert.equal(await page.locator(`[data-doc-task="${k}"] b`).innerText(), n, `${k}任务数：502恢复后按doc_no去重并排除confirmed`)
@@ -232,7 +244,7 @@ async function docTasks(browser, B) {
     assert.equal(await page.locator('.ldd-kpi.on').count(), 0, '选任务时清掉原普通卡片')
     assert.equal(await page.locator('.ldd-tbl tbody tr.drow').count(), 1, 'Q1两行只显示一次')
     assert.match(await page.locator('.ldd-tbl tbody').innerText(), /Q1/)
-    assert.equal(await page.getByText('X1', { exact: true }).count(), 0, 'confirmed不进入任务')
+    assert.equal(await page.locator('.ldd-tbl').getByText('X1', { exact: true }).count(), 0, 'confirmed不进入高级任务表；新全部逐笔表仍可查看已确认')
     await page.locator('.ldd-kpi').filter({ hasText: '怀疑重复收费' }).click()
     assert.equal(await page.locator('.ldd-tbl tbody tr.drow').count(), 1, 'kcard可作为任务上的二级筛选')
     assert.equal(await page.locator('.ldd-kpi.on').count(), 1)
@@ -253,6 +265,7 @@ async function lineTasks(browser, B) {
   const rows = page.locator('.ltbl tbody tr:not(.ghead):not(.total)')
   try {
     await step(page, '逐笔计提复核')
+    await openAccr(page)
     await page.locator('.ltbl').getByText('V-A1', { exact: true }).waitFor()
     const a1 = page.locator('.ltbl tbody tr').filter({ hasText: 'V-A1' })
     assert.match(await a1.innerText(), /账单归属：主体甲 · 植物肉/)
@@ -285,6 +298,7 @@ async function diffDialog(browser, B) {
   const { page, ctx, errors } = await open(browser, B, { taskData: true, fail: {} })
   try {
     await step(page, '逐笔计提复核')
+    await openAccr(page)
     await page.getByRole('button', { name: /本主体通过/ }).first().click()
     const dlg = page.getByRole('dialog', { name: '差异怎么办' })
     await dlg.waitFor()
@@ -309,6 +323,7 @@ async function intakeIssueDialog(browser, B) {
     assert.match(text, /检查表底合计公式是否覆盖全部明细行/)
     await dlg.getByRole('button', { name: '知道了' }).click()
     await dlg.waitFor({ state: 'detached' })
+    await page.getByText('主体勾稽与差异原因', { exact: false }).click()
     await page.getByRole('button', { name: '查看差异原因' }).click()
     await dlg.waitFor()
     await page.setViewportSize({ width: 390, height: 844 })
