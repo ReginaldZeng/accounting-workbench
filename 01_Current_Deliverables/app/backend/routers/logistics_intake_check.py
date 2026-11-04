@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-04 | Author: Kimi | Version: V-draft
+# Description: 极鲜达数据接入按 A–J 标准结果逐页核对，原始附件不参与取数报告。
 # Date: 2026-11-03 | Author: Kimi | Version: V2.1037
 # Description: 接入摘要把 total_cols 多金额列识别为已配置合计核对。
 # Date: 2026-10-30 | Author: Kimi | Version: V2.1032
@@ -20,6 +22,7 @@ from sqlalchemy import select, update, delete, insert, text
 from core import JSONResponse, db
 from kernels import logistics_intake as intake
 from kernels import logistics_review_store as store
+from kernels import logistics_standard_intake as stdintake
 from routers import logistics_review as LR
 
 router = APIRouter()
@@ -52,12 +55,20 @@ def _how(spec):
     return "、".join(kinds) + ("＋合计兜底" if tot else ""), tot
 
 
+def _sheet_report_any(spec, data, period):
+    if (spec.get("carrier") or "") == "极鲜达":
+        standard = stdintake.standard_sheet_report(spec, data, period)
+        if standard is not None:
+            return standard
+    return intake.sheet_report(spec, data, period)
+
+
 def _raws(carrier, period, with_data=False):
     cols = [BR.c.id, BR.c.bill_src, BR.c.name, BR.c.origin, BR.c.sha256, BR.c.size, BR.c.created_by, BR.c.created_at]
     if with_data:
         cols.append(BR.c.data)
     with db._engine.connect() as c:
-        return [dict(r) for r in c.execute(select(*cols).where((BR.c.carrier == carrier) & (BR.c.period == period)).order_by(BR.c.id)).mappings().all()]
+        return [dict(r) for r in c.execute(select(*cols).where((BR.c.carrier == carrier) & (BR.c.period == period) & LR._RAW_STANDARD).order_by(BR.c.id)).mappings().all()]
 
 
 def _report_db_get(raw_id, sha):
@@ -93,7 +104,7 @@ def warm_report(carrier, period, src, spec, data):
         if not rid:
             return
         try:
-            rep = intake.sheet_report(dict(spec), bytes(data), period)
+            rep = _sheet_report_any(dict(spec), bytes(data), period)
         except Exception as e:
             rep = {"err": "按现在的取数说明解析不了：%s" % str(e)[:120], "sheets": [], "verdict": "err"}
         _report_db_put(rid, _spec_sha(spec), rep)
@@ -123,7 +134,7 @@ def _report(carrier, period, raw, spec):
             with db._engine.connect() as c:
                 data = c.execute(select(BR.c.data).where(BR.c.id == rid)).scalar()
         try:
-            rep = intake.sheet_report(dict(spec), bytes(data), period) if data else \
+            rep = _sheet_report_any(dict(spec), bytes(data), period) if data else \
                 {"err": "没取到原件", "sheets": [], "verdict": "nocheck"}
         except Exception as e:
             rep = {"err": "按现在的取数说明解析不了：%s" % str(e)[:120], "sheets": [], "verdict": "err"}

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-04 | Author: Kimi | Version: V-draft
+# Description: 极鲜达 A–J 标准账单接入、数量标准核量、标准文件与原始附件分离及灰度替换。
 # Date: 2026-11-03 | Author: Kimi | Version: V2.1038
 # Description: 天趟单位优先按包天包趟核价，不被同行重量抢先切到重量核量。
 # Date: 2026-11-03 | Author: Kimi | Version: V2.1037
@@ -34,10 +36,12 @@ from kernels import logistics_intake as intake
 from kernels import logistics_kuayue as lky
 from kernels import logistics_recon as lrc
 from kernels import logistics_readiness as lready
+from kernels import logistics_standard_intake as stdintake
 
 router = APIRouter()
 BL, PC, SP = store.bill_lines, store.price_card, store.intake_spec
 BR = store.bill_raw            # 账单原件(V2.843)
+_RAW_STANDARD = (BR.c.role.is_(None)) | (BR.c.role == "standard")
 SG, LN, CP = store.review_sign, store.review_line_note, store.review_carrier_pts   # 复核登记 / 逐笔差异解释 / 供应商复核要点
 FX = store.review_line_fix   # 计提更正(只登记应改为什么，打印交专人去金蝶改)
 DK = store.review_doc_ok     # 逐单已确认(复核人核过没问题的单据)
@@ -62,8 +66,16 @@ def _doc_ok(carrier, period):
             DK.c.doc_no, DK.c.confirmed_by, DK.c.confirmed_at).where((DK.c.carrier == carrier) & (DK.c.period == period))).all()}
 
 _DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "annot_source", "fee", "bizline",
-                "fee_item", "qty", "unit", "amount", "carrier_sub", "prov", "charge_wt",
+                "fee_item", "qty", "unit", "qty_standard", "amount", "carrier_sub", "prov", "charge_wt",
                 "sub_fees", "src_sheet", "src_row", "note")
+
+
+def _parse_bill_any(spec, data):
+    if (spec.get("carrier") or "") == "极鲜达":
+        standard = stdintake.parse_standard_bill(spec, data)
+        if standard is not None:
+            return standard
+    return intake.parse_bill(spec, data)
 
 
 def _now():
@@ -617,7 +629,7 @@ def _bill_sources(carrier, period):
         rows = [dict(r) for r in c.execute(select(BL.c.bill_src, BL.c.grain, BL.c.amount, BL.c.doc_no, BL.c.src_sheet, BL.c.created_at).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & ((BL.c.review_mode.is_(None)) | (BL.c.review_mode != "register")))).mappings().all()]
         raws = c.execute(select(BR.c.bill_src, BR.c.name, BR.c.origin, BR.c.created_by, BR.c.created_at, BR.c.size).where(
-            (BR.c.carrier == carrier) & (BR.c.period == period)).order_by(BR.c.id)).all()
+            (BR.c.carrier == carrier) & (BR.c.period == period) & _RAW_STANDARD).order_by(BR.c.id)).all()
         try:
             logs = c.execute(text("select ts, operator, detail from audit_log where action='物流复核-解析账单' and target=:t order by id desc limit 200"),
                              {"t": "%s %s" % (carrier, period)}).all()
@@ -675,7 +687,7 @@ def review_raw(request: Request, carrier: str = "", period: str = "", src: str =
     """只读下载这家这月这一份最新保存的 Excel 账单原件。"""
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
-    scope = (BR.c.carrier == carrier) & (BR.c.period == period) & (
+    scope = (BR.c.carrier == carrier) & (BR.c.period == period) & _RAW_STANDARD & (
         (BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))
     with db._engine.connect() as c:
         row = c.execute(select(BR.c.name, BR.c.data).where(scope).order_by(BR.c.id.desc()).limit(1)).mappings().first()
@@ -690,6 +702,84 @@ def review_raw(request: Request, carrier: str = "", period: str = "", src: str =
                   else "application/vnd.ms-excel")
     disposition = "attachment; filename=bill.%s; filename*=UTF-8''%s" % (ext, quote(name, safe=""))
     return Response(content=bytes(row["data"]), media_type=media_type, headers={"Content-Disposition": disposition})
+
+
+@router.get("/api/logistics-review/original-attachments")
+def review_original_attachments(request: Request, carrier: str = "", period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    scope = (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "original")
+    with db._engine.connect() as c:
+        rows = c.execute(select(BR.c.id, BR.c.name, BR.c.size, BR.c.created_by, BR.c.created_at).where(scope).order_by(BR.c.id.desc())).mappings().all()
+    return {"ok": True, "files": [{"id": r["id"], "name": r["name"], "size": r["size"], "by": r["created_by"], "at": r["created_at"]} for r in rows]}
+
+
+@router.post("/api/logistics-review/original-attachment")
+async def review_original_attachment(request: Request, carrier: str = "", period: str = "", replace_id: int = 0):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    data = await _read_upload(request)
+    if not data:
+        return JSONResponse({"ok": False, "msg": "未收到文件"}, status_code=400)
+    import hashlib
+    name = (getattr(request.state, "upload_name", "") or "原始账单附件")[:200]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in ("xlsx", "xls", "pdf"):
+        return JSONResponse({"ok": False, "msg": "原始附件只支持 .xlsx / .xls / .pdf"}, status_code=400)
+    with db._engine.begin() as c:
+        scope = (BR.c.id == (replace_id or 0)) & (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "original")
+        vals = dict(carrier=carrier, period=period, bill_src="", name=name, origin="人工上传·原始追溯附件",
+                    sha256=hashlib.sha256(data).hexdigest(), size=len(data), data=data,
+                    created_by=_uname(u), created_at=_now(), role="original")
+        if replace_id:
+            changed = c.execute(update(BR).where(scope).values(**vals)).rowcount
+            if not changed:
+                return JSONResponse({"ok": False, "msg": "附件不存在或已被删除，请刷新"}, status_code=404)
+            file_id = replace_id
+        else:
+            file_id = c.execute(insert(BR).values(**vals)).inserted_primary_key[0]
+    db.audit(_uname(u), "物流复核-原始附件替换" if replace_id else "物流复核-原始附件上传", "%s %s" % (carrier, period), "%s · %d bytes" % (name, len(data)))
+    return {"ok": True, "id": file_id, "name": name, "size": len(data)}
+
+
+@router.post("/api/logistics-review/original-attachment-delete")
+async def review_original_attachment_delete(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    body = await request.json()
+    carrier, period, file_id = body.get("carrier") or "", body.get("period") or "", int(body.get("id") or 0)
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    with db._engine.begin() as c:
+        row = c.execute(select(BR.c.name).where((BR.c.id == file_id) & (BR.c.carrier == carrier) &
+                        (BR.c.period == period) & (BR.c.role == "original"))).first()
+        if not row:
+            return JSONResponse({"ok": False, "msg": "附件不存在或已被删除"}, status_code=404)
+        c.execute(delete(BR).where((BR.c.id == file_id) & (BR.c.role == "original")))
+    db.audit(_uname(u), "物流复核-原始附件删除", "%s %s" % (carrier, period), row[0] or str(file_id))
+    return {"ok": True, "deleted": file_id}
+
+
+@router.get("/api/logistics-review/original-attachment-download")
+def review_original_attachment_download(request: Request, id: int = 0):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    with db._engine.connect() as c:
+        row = c.execute(select(BR.c.name, BR.c.data).where((BR.c.id == id) & (BR.c.role == "original"))).mappings().first()
+    if not row or not row["data"]:
+        return JSONResponse({"ok": False, "msg": "附件不存在"}, status_code=404)
+    from urllib.parse import quote
+    name = str(row["name"] or "原始附件.xlsx").replace("\\", "/").split("/")[-1].replace("\r", "").replace("\n", "")
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else "xlsx"
+    media_type = "application/pdf" if ext == "pdf" else ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if ext == "xlsx" else "application/vnd.ms-excel")
+    return Response(content=bytes(row["data"]), media_type=media_type,
+                    headers={"Content-Disposition": "attachment; filename=attachment.%s; filename*=UTF-8''%s" % (ext, quote(name, safe=""))})
 
 
 @router.post("/api/logistics-review/bill-delete")
@@ -710,7 +800,7 @@ async def review_bill_delete(request: Request):
         return JSONResponse({"ok": False, "msg": "没有这一份账单（可能已经被删或被替换了），刷新看看"}, status_code=404)
     with db._engine.begin() as c:
         n = c.execute(delete(BL).where(_src_scope(carrier, period, src))).rowcount
-        c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) &
+        c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) & _RAW_STANDARD &
                                    ((BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))))
     db.audit(_uname(u), "物流复核-删除账单", "%s %s" % (carrier, period),
              "「%s」：明细 %d 行 / 汇总 %d 行，金额 %.2f；原文件 %s（%s %s 导入）" % (src or "（未标份名）", old["n_detail"], old["n_accrual"], old["amount"],
@@ -744,7 +834,7 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
     if mode in ("add", "replace"):
         sp2 = dict(spec, period=period)
         try:
-            pre = intake.scope_bill_subject(intake.parse_bill(sp2, data), bill_subject)
+            pre = intake.scope_bill_subject(_parse_bill_any(sp2, data), bill_subject)
         except Exception:
             return JSONResponse({"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}, status_code=400)
         if not pre.get("detail") and not pre.get("accrual"):
@@ -767,7 +857,7 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
                         if o[0] and (o[1] or o[2] or o[3] or o[4]):
                             keep.setdefault(o[0], (o[1], o[2], o[3], o[4]))
                     c.execute(delete(BL).where(_src_scope(carrier, period, src)))
-                    c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) &
+                    c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) & _RAW_STANDARD &
                                                ((BR.c.bill_src == src) if src else ((BR.c.bill_src.is_(None)) | (BR.c.bill_src == "")))))
                 dropped = have[src]
     r = import_bill(carrier, period, data, u["name"], origin=("手工上传·替换" if mode == "replace" else "手工上传"), fname=fname,
@@ -793,12 +883,12 @@ def _save_raw_bill(carrier, period, src, data, operator, origin, fname):
     try:
         data = bytes(data)
         with db._engine.begin() as c:
-            scope = (BR.c.carrier == carrier) & (BR.c.period == period)
+            scope = (BR.c.carrier == carrier) & (BR.c.period == period) & _RAW_STANDARD
             if src:      # 一家一月几份账单：只换同一份(没标份的旧件一并换)，和 bill_lines 的替换范围一致
                 scope = scope & ((BR.c.bill_src == src) | (BR.c.bill_src.is_(None)) | (BR.c.bill_src == ""))
             c.execute(delete(BR).where(scope))
             c.execute(insert(BR).values(carrier=carrier, period=period, bill_src=src or "", name=(fname or "")[:200], origin=(origin or "")[:200],
-                                        sha256=hashlib.sha256(data).hexdigest(), size=len(data), data=data, created_by=operator, created_at=_now()))
+                                        sha256=hashlib.sha256(data).hexdigest(), size=len(data), data=data, created_by=operator, created_at=_now(), role="standard"))
     except Exception:
         pass
 
@@ -820,7 +910,7 @@ def _same_bill(carrier, period, sha, data):
             spec = _load_spec(carrier)
             if spec and spec.get("sheets"):
                 spec["period"] = period
-                got = sorted((r.get("src_sheet") or "", int(r.get("src_row") or 0), round(float(r.get("amount") or 0), 2)) for r in intake.parse_bill(spec, data).get("detail") or [])
+                got = sorted((r.get("src_sheet") or "", int(r.get("src_row") or 0), round(float(r.get("amount") or 0), 2)) for r in _parse_bill_any(spec, data).get("detail") or [])
                 ok = got == have
         except Exception:
             ok = False
@@ -834,7 +924,7 @@ def _raw_bill_files(carrier, period):
     try:
         with db._engine.connect() as c:
             for n, sha, data in c.execute(select(BR.c.name, BR.c.sha256, BR.c.data).where(
-                    (BR.c.carrier == carrier) & (BR.c.period == period)).order_by(BR.c.id)).all():
+                    (BR.c.carrier == carrier) & (BR.c.period == period) & _RAW_STANDARD).order_by(BR.c.id)).all():
                 if data and sha not in seen:
                     seen.add(sha); out.append((n or "", bytes(data)))
     except Exception:
@@ -948,7 +1038,7 @@ def import_bill(carrier, period, data, operator, origin="手工上传", fname=""
         return {"ok": False, "msg": "该承运商还没配取数说明"}
     spec["period"] = period
     try:
-        res = intake.scope_bill_subject(intake.parse_bill(spec, data), bill_subject)
+        res = intake.scope_bill_subject(_parse_bill_any(spec, data), bill_subject)
     except Exception:
         return {"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}
     batch = "%s|%s|%s" % (carrier, period, datetime.now().strftime("%Y%m%d%H%M%S"))
@@ -3405,6 +3495,9 @@ def _box_docs(rsub, carrier):
             chg_wt = float(r.get("charge_wt")) if r.get("charge_wt") not in (None, "") else None
         except (TypeError, ValueError):
             chg_wt = None
+        qty_std = str(r.get("qty_standard") or "").strip()
+        if qty_std == "按托" and chg_wt is None and pal_kg and billcnt:
+            chg_wt = billcnt * pal_kg
         # V2.866(用户看恒茂 8 月出库装卸「账单 15 吨、金蝶 1,500 箱、换算系数 100、整车包车·免核」)：账单量的单位就是吨/千克的，
         #   它本身就是重量——折成千克按重量核(15 吨＝15,000 千克，金蝶正好 15,000 千克)，不要拿「吨数」去比「箱数」。
         wt_from_qty = ""
@@ -3422,6 +3515,10 @@ def _box_docs(rsub, carrier):
         can_box = bool(billcnt) and not wt_from_qty and _u0 not in ("天", "趟") and _u0 not in lr._NOQTY_UNITS     # 账单量是天/趟/方/板的不是件数
         fm = (dmode.get((str(r.get("period") or ""), d0)) or {}) if d0 else {}
         fmode, fnote = fm.get("mode"), ""
+        if not fmode and qty_std == "按重量":
+            fmode = "weight"
+        elif not fmode and qty_std in ("按箱数", "按件数"):
+            fmode = "box"
         if fmode == "weight" and not can_wt:
             fmode, fnote = None, " · 指定了按重量核，但账单这一行没有重量，仍按系统的办法"
         elif fmode == "box" and not can_box:
@@ -3429,6 +3526,8 @@ def _box_docs(rsub, carrier):
         elif fmode:
             use_weight = (fmode == "weight")
             fnote = " · 人工指定%s核（%s %s）" % (_DOC_MODE_CN[fmode], fm.get("by") or "", str(fm.get("at") or "")[:10])
+        if qty_std and not fm.get("mode"):
+            fnote = " · 账单数量标准：%s" % qty_std
         # 按体积计费(V2.888)：账单这一行带了箱子尺寸的，计重是抛重(件数×每件体积×每方千克数)——按箱数核，不比重量；人工指定了的听人的
         vol = None
         _dm = intake.DIM_RE.match(str((_subfees(r.get("sub_fees")) or {}).get("箱子尺寸") or "")) if _rev not in ("qty", "pallet") else None
@@ -3457,7 +3556,7 @@ def _box_docs(rsub, carrier):
             _kw = sum(_m_kg(m, uk) for m in lines)
             _wok = (wt_rng[0] - 1e-9 <= chg_wt / _kw <= wt_rng[1] + 1e-9) if (wt_rng and _kw) else bool(_kw and abs(chg_wt - _kw) <= max(1.0, 0.02 * _kw))
             _pmiss = _kd_boxes(lines)[1]
-            if _wok and _rev != "pallet":
+            if _wok and _rev != "pallet" and qty_std != "按托":
                 pass                 # 旧自动模式：净重碰巧对得上仍按净重；显式按托配置不降级
             elif pal_box and not _pmiss and _bx:
                 # 核计重(V2.895)：金蝶箱数 ÷ 每托箱数，不足半托按半托算，× 每托千克数 ＝ 应该的计重，和账单计重比
@@ -3653,7 +3752,7 @@ def _box_docs(rsub, carrier):
             ratio_tuo = (kd_sum / billcnt) if billcnt else 0
             # 调拨(分布式调出)按包天包趟计费：一张单可能跑几车、账单一车一行 → 核不了量；有车型/天趟/价目时按报价核价(用户 2026-09-30)
             tu = str(r.get("unit") or "").replace("元/", "").strip()
-            is_trip = tu in ("天", "趟") or ((not billcnt) and (d0.upper().startswith("FBDR") or "调拨" in str(r.get("annot") or "")))
+            is_trip = qty_std == "按车" or tu in ("天", "趟") or ((not billcnt) and (d0.upper().startswith("FBDR") or "调拨" in str(r.get("annot") or "")))
             trip = _trip_check(r, tu, billcnt, fee, pmap) if is_trip else None
             decided = True     # V2.866：上面几种一旦判定就不再往下走(原来 if 链断成两截，「免核量」会被下面的打托/包车/待核盖掉)
             if is_trip and trip and trip["verdict"] == "ok":
@@ -3771,9 +3870,15 @@ def _box_docs(rsub, carrier):
             chk = {"kind": "box", "tol": 0.005}
         if not d0:
             mode_cn, cnt_state = "无单据·账单调整", "na"   # 如托盘丢失扣款：只登记不核量
+        elif qty_std in ("按单", "免核"):
+            mode_cn, cnt_state = "%s·只登记不核量" % qty_std, "na"
+        elif qty_std == "按托" and not pal_wt:
+            mode_cn, cnt_state = "按托核不了：缺托规或完整金蝶箱规", "qtydiff"
+        elif qty_std == "按体积" and not vol:
+            mode_cn, cnt_state = "按体积核不了：缺尺寸或每方千克系数", "qtydiff"
         base = {"subject": _eff_subject(r), "carrier": carrier, "fee_item": _eff_fee(r),
                 "bizline": biz, "doc_no": d0, "bill_amt": round(bill_amt, 2), "bill_unit": bill_unit,
-                "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state,
+                "kd_sum": kd_sum, "kd_unit": kd_unit, "mode_cn": mode_cn, "conv": conv, "qty_state": cnt_state, "qty_standard": qty_std,
                 "note": r.get("note") or "", "bbiz": biz, "biz_bill": _bill_biz({**r, "biz_ovr": ""}),
                 "biz_ovr": str(r.get("biz_ovr") or "").strip(),
                 "qty_enabled": scope["qty_enabled"], "price_enabled": scope["price_enabled"],

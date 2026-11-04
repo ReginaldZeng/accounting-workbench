@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V-draft 极鲜达增加 A–J 说明及独立原始附件管理，其他承运商不变。
 // [Change Log] Date:2026-11-02 Author:Kimi Version:V2.1036
 // 数据接入差异首次自动弹窗说明原因，可从待处理区或主体差额重新打开；只读提示，不自动确认。
 // [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1032
@@ -7,7 +8,7 @@
 // [Change Log] Date:2026-10-24 Author:Kimi Version:V2.1004
 // ① 数据接入改为“金额勾稽＋待办＋每页核对”；④ 改为请款单队列＋单张审票，金额/销购方/审核/后补统一形成结论。
 import React, { useEffect, useRef, useState } from 'react'
-import { reviewIntakeOverview, reviewReparse, reviewRawUrl, invAuditItemsApprove, invFolder } from '../api.js'
+import { reviewIntakeOverview, reviewReparse, reviewRawUrl, invAuditItemsApprove, invFolder, reviewOriginalFiles, reviewOriginalUpload, reviewOriginalDelete, reviewOriginalUrl } from '../api.js'
 import { Modal, InvViewer } from './invShared.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -148,6 +149,51 @@ function Overview({ period }) {
   </details>
 }
 
+const STANDARD_COLUMNS = [
+  ['A', '主体', '确定计入哪个公司'], ['B', '金蝶系统单据编号', '多个单号用逗号或分号分隔'], ['C', '费用类型', '出库、入库、研发外购等'],
+  ['D', '数量计算标准', '重量、件数、箱数、体积、托、单、车或免核'], ['E', '账单数量', '只取供应商数量，不倒算'], ['F', '数量单位', 'kg、件、箱、托、单、车等'],
+  ['G', '费用总额', '本行实际账单金额'], ['H', '费用拆分1', '运费'], ['I', '费用拆分2', '附加费'], ['J', '备注', '补充说明，可选'],
+]
+
+function StandardBillGuide() {
+  return <details className="card lik-ov"><summary>A–J 标准逐笔账单 <small>人工加工后上传；原始账单不自动识别</small></summary>
+    <div className="lik-rawwrap"><table className="lik-raw"><thead><tr><th>列</th><th>字段</th><th>用途</th></tr></thead><tbody>{STANDARD_COLUMNS.map(([col, name, use]) => <tr key={col}><td><b>{col}</b></td><td>{name}</td><td>{use}</td></tr>)}</tbody></table></div>
+    <div className="lik-note">有费用拆分时必须满足 G = H + I；B 列多单号由系统统一关联金蝶。标准块可独立放置，也可追加在原明细后面。</div>
+  </details>
+}
+
+function OriginalFiles({ carrier, period, locked, flash }) {
+  const [files, setFiles] = useState([])
+  const [busy, setBusy] = useState('')
+  const [replaceId, setReplaceId] = useState(0)
+  const input = useRef(null)
+  const load = () => reviewOriginalFiles(carrier, period).then(r => setFiles(r.files || [])).catch(e => flash('原始附件读取失败：' + e.message))
+  useEffect(() => { setFiles([]); load() }, [carrier, period])
+  const pick = id => { setReplaceId(id || 0); if (input.current) input.current.click() }
+  const upload = async e => {
+    const file = e.target.files && e.target.files[0]
+    e.target.value = ''
+    if (!file) return
+    setBusy('upload')
+    try {
+      await reviewOriginalUpload(carrier, period, file, replaceId)
+      flash(replaceId ? '原始附件已替换，不参与取数' : '原始附件已上传，不参与取数')
+      await load()
+    } catch (err) { flash('原始附件上传失败：' + err.message) } finally { setBusy(''); setReplaceId(0) }
+  }
+  const del = async file => {
+    if (!window.confirm(`删除原始附件「${file.name}」？只删除追溯附件，不影响标准账单和复核结果。`)) return
+    setBusy('del' + file.id)
+    try { await reviewOriginalDelete(carrier, period, file.id); flash('原始附件已删除'); await load() }
+    catch (err) { flash('删除失败：' + err.message) } finally { setBusy('') }
+  }
+  return <div style={{ margin: '0 15px 12px' }}>
+    <div className="lik-section"><b>供应商原始账单 · 仅追溯</b><span className="dim">可选附件，不参与 A–J 取数</span><span className="sp" /><button className="btn sm" disabled={!!locked || !!busy} onClick={() => pick(0)}>{files.length ? '新增附件' : '上传原始附件'}</button></div>
+    <input ref={input} type="file" accept=".xlsx,.xls,.pdf" hidden onChange={upload} />
+    {files.length > 0 && <div className="lik-rawwrap" style={{ margin: '8px 0 0', maxWidth: '100%' }}><table className="lik-raw"><thead><tr><th>文件名</th><th>上传人 / 时间</th><th className="num">大小</th><th>操作</th></tr></thead><tbody>{files.map(file => <tr key={file.id}><td className="lik-rawname">{file.name}</td><td>{file.by || '—'}<div className="dim">{file.at || '—'}</div></td><td className="num">{kb(file.size)}</td><td className="lik-rawops"><a className="btn sm" href={reviewOriginalUrl(file.id)} target="_blank" rel="noopener">下载</a><button className="btn sm" disabled={!!locked || !!busy} onClick={() => pick(file.id)}>替换</button><button className="btn sm" disabled={!!locked || !!busy} onClick={() => del(file)}>{busy === 'del' + file.id ? '删除中…' : '删除'}</button></td></tr>)}</tbody></table></div>}
+  </div>
+}
+
 export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged, onNext, onRetry }) {
   const [more, setMore] = useState({})
   const [busy, setBusy] = useState('')
@@ -216,9 +262,11 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
         const name = f.name || '（没记文件名）', bill = billBySrc[f.src || '']
         return <tr key={f.id}><td className="lik-rawname"><div className="lik-rawsrc">{f.src || '账单'}</div><div className="lik-rawfile" title={name}>{name}</div></td><td className="num">{bill ? money(bill.amount) : '—'}</td><td>{f.origin || '没记录'}<div className="dim">{f.by || '没记录'}</div></td><td>{f.at || '—'}</td><td className="num">{kb(f.size) || '—'}</td><td className="lik-rawops"><a className="btn sm" href={reviewRawUrl(data.carrier, period, f.src)} target="_blank" rel="noopener">下载原件</a><button className="btn sm" disabled={!!locked || !!busy} title={locked || '用新文件替换这一份，其他账单不动'} onClick={() => onOpenBills(f.src)}>替换</button><button className="btn sm" disabled={!!locked || !!busy} title={locked || '用保存的原件按当前取数说明重新解析'} onClick={() => reparse(f)}>{busy === 're' + f.id ? '解析中…' : '重新解析'}</button></td></tr>
       })}</tbody></table></div> : <div className="lik-empty">{data.register ? '登记制无需上传账单。' : data.has_spec ? '还没有账单原件，可手工上传或等待钉钉附件自动接入。' : '先配置取数说明，再上传账单。'}</div>}
+      {data.carrier === '极鲜达' && <OriginalFiles carrier={data.carrier} period={period} locked={locked} flash={flash} />}
       <div className="lik-reqfiles"><b>钉钉请款单附件 · {(data.req_files || []).length} 份</b><span>{Object.keys(reqByRole).length ? `${Object.keys(reqByRole).length} 类：${Object.entries(reqByRole).map(([k, xs]) => `${ROLE_CN[k] || '其他'} ${xs.length}`).join(' · ')}` : '当前请款单没有附件'}</span><span>随请款单自动接入，无需重复上传。</span></div>
       {(data.history || []).length > 0 && <div style={{ padding: '0 15px 12px' }}><details><summary className="lik-lbl" style={{ cursor: 'pointer' }}>解析记录 · {data.history.length} 条</summary><div className="lik-hist">{data.history.slice(0, 8).map((h, i) => <div key={i}><span className="d">{h.at}</span><span>{h.by}</span><span>{h.action.replace('物流复核-', '')}：{h.detail}</span></div>)}</div></details></div>}
     </div>
+    {data.carrier === '极鲜达' && <StandardBillGuide />}
     <div className="card">
       <h3 className="lik-section">每页核对 <small>异常工作表优先，展开可查看取数列</small><span className="sp" /><button className={'btn sm' + (onlyBad ? ' pri' : '')} onClick={() => setOnlyBad(!onlyBad)}>{onlyBad ? '查看全部' : '只看异常'}</button></h3>
       {reps.length === 0 && <div className="ovempty">没有原件可查</div>}{reps.length > 0 && sheetRows.length === 0 && <div className="ovempty">没有异常工作表 ✓</div>}

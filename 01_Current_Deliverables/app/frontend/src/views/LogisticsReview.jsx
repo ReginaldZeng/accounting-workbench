@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V-draft 极鲜达上传弹窗明确人工加工后的 A–J 标准逐笔账单。
 // [Change Log] Date:2026-11-03 Author:Kimi Version:V2.1037 账单弹窗支持查看和保存逐页取数说明，保留报价配置。
 // [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1034
 // 第③步显示账单归属主体、业务线及人工调整标记，按组配对也保留真实账单业务线。
@@ -103,12 +104,14 @@ function BillsDlg({ carrier, period, initialReplace = '', onClose, onChanged, fl
   const bills = (d && d.bills) || []
   const tot = bills.reduce((s, x) => s + (x.amount || 0), 0)
   const off = !!busy || !!(d && d.locked)
+  const standard = carrier === '极鲜达'
   return (
     <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
       <div className="fxdlg" style={{ width: 'min(1000px,100%)' }} role="dialog" aria-label="账单">
         <div className="fxhead"><b>{carrier} {period} 的账单</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
-        <div className="fxsub">下面是这家这月<b>现在解析着的账单</b>，一份一行（一个文件里几张表算一份，份名＝表名）。「替换」只换那一份，别的不动；
-          人工改过的归类按单号带到新账单上。请款金额不会跟着变，账单金额改了要留意两边的差。</div>
+        <div className="fxsub">{standard ? <>请上传<b>人工加工后的 A–J 标准逐笔账单</b>，系统按固定表头取数，不自动识别供应商自由格式。「替换」只换当前这一份，原始追溯附件不受影响；
+          人工改过的归类按单号保留。请款金额不会跟着变，账单金额改了要留意两边的差。</> : <>下面是这家这月<b>现在解析着的账单</b>，一份一行（一个文件里几张表算一份，份名＝表名）。「替换」只换那一份，别的不动；
+          人工改过的归类按单号带到新账单上。请款金额不会跟着变，账单金额改了要留意两边的差。</>}</div>
         {err && <div className="fxwarn">{err}</div>}
         {d && d.locked && <div className="fxwarn">{d.locked}</div>}
         {d && !d.has_spec && <div className="fxwarn">这家还没配取数说明，账单解析不了。</div>}

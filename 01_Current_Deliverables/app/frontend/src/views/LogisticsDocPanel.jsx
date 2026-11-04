@@ -1,4 +1,5 @@
-// [Change Log] Date:2026-10-30 Author:Kimi Version:V2.1033
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V-draft 中央弹窗显示数量标准，约束移动端弹窗与物料折叠区宽度。
+// [Change Log] Date:2026-10-30 Author:Kimi Version:V-draft
 // 单据弹窗改归类增加业务线下拉，展示生效业务线并支持恢复账单原值。
 // [Change Log] Date:2026-10-25 Author:Kimi Version:V2.1008
 // V2.1008：关闭核量或核价后的判定递归显式解除对应开关，修复逐单弹窗白屏。
@@ -331,6 +332,7 @@ export function DocDialog({ x, c, dup, pos, total, onPrev, onNext, onClose, lock
         <section className="ldd-sec ldd-kv">
           <span><i>这张单</i></span>
           <span><i>业务线</i>{x.bbiz || x.bizline || '—'}</span><span><i>费用类型</i>{x.fee_item || '—'}</span>
+          <span><i>数量标准</i>{x.qty_standard || x.mode_short || '系统判定'}</span>
           <span><i>往来</i>{ps.join('、') || '—'}</span>
           <span><i>单位运费</i>{x.unit_fee == null ? '—' : x.unit_fee + ' 元/kg'}</span>
           <span><i>费比</i>{x.ratio == null ? '—' : (x.ratio * 100).toFixed(2) + '%'}{x.sales != null ? `（销售额 ${money(x.sales)}）` : ''}</span>
@@ -672,4 +674,5 @@ export const LDD_CSS = `
 .lrv .dtbl.ldd-tbl td.concl{min-width:0;max-width:170px}
 .lrv .dtbl.ldd-tbl td.party{max-width:160px}.lrv .dtbl.ldd-tbl td.party>span,.lrv .dtbl.ldd-tbl td.party .sub{display:block;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lrv .dtbl.ldd-tbl th{white-space:nowrap}
+@media(max-width:600px){.lrv .ldd-mask{padding:8px}.lrv .ldd-dlg{min-width:0;max-width:100%;grid-template-columns:minmax(0,1fr)}.lrv .ldd-body{min-width:0;grid-template-columns:minmax(0,1fr);padding:12px}.lrv .ldd-sec,.lrv .ldd-vbar{min-width:0;max-width:100%}.lrv .ldd-tw{min-width:0;max-width:100%}.lrv details.ldd-fold{min-width:0;max-width:100%;overflow:hidden}.lrv .ldd-dlg header{padding:11px 12px}.lrv .ldd-hamt{white-space:normal}.lrv .ldd-foot{padding:10px 12px}}
 `

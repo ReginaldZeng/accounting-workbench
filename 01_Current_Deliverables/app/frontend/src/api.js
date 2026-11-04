@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-04 Author:Kimi Version:V-draft 原始附件独立上传、替换、删除与下载接口。
 // [Change Log] Date:2026-11-03 Author:Kimi Version:V2.1037 物流取数说明 sheets 保存接口。
 // [Change Log] Date:2026-10-26 Author:Kimi Code Version:V-draft 逐单运费 V1 批次上传、预览、确认、撤回、恢复与原件下载接口。
 // [Change Log] Date: 2026-09-24 | Author: Claude / c | Version: V-draft（发票管家）| 末尾追加「发票管家」接口块（invXxx 具名导出 + 手机端 X-Inv-Pair 令牌头）
@@ -729,6 +730,10 @@ export const reviewParseBill = (carrier, period, file, opt = {}) => { const fd =
   return j(`/api/logistics-review/parse?${q}`, { method: 'POST', body: fd }) }
 export const reviewBills = (carrier, period) => j(`/api/logistics-review/bills?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
 export const reviewBillDelete = (carrier, period, src) => j('/api/logistics-review/bill-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ carrier, period, src }) })
+export const reviewOriginalFiles = (carrier, period) => j(`/api/logistics-review/original-attachments?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`)
+export const reviewOriginalUpload = (carrier, period, file, replaceId = 0) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/original-attachment?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}&replace_id=${replaceId || 0}`, { method: 'POST', body: fd }) }
+export const reviewOriginalDelete = (carrier, period, id) => j('/api/logistics-review/original-attachment-delete', { method: 'POST', body: JSON.stringify({ carrier, period, id }) })
+export const reviewOriginalUrl = id => `/api/logistics-review/original-attachment-download?id=${encodeURIComponent(id)}`
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 
 export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)

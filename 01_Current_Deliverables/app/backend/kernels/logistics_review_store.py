@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
-# Date: 2026-10-30 | Author: Kimi | Version: V2.1033
+# Date: 2026-11-04 | Author: Kimi | Version: V-draft
+# Description: 增加 qty_standard 与原件 role 字段及幂等迁移，支持标准账单和原始附件分离。
+# Date: 2026-10-30 | Author: Kimi | Version: V-draft
 # Description: 账单行增加 biz_ovr 业务线人工覆盖列，旧库幂等补列，保留原业务线。
 # Date: 2026-09-26 | Author: Claude Opus 4.8 | Version: V2.632
 # Description: 【物流账单复核】三张新表（自带 MetaData，由 db.py to_metadata 挂进来，create_all 只建不改）：
@@ -32,6 +34,7 @@ bill_lines = Table(
     Column("fee_item", String(40)),        # 承运商费用项原名（快递费/操作费/仓储费…）
     Column("qty", Float(53)),                  # 账单数量
     Column("unit", String(12)),            # 数量单位
+    Column("qty_standard", String(12)),    # A–J 标准账单的数量计算标准（按重量/箱/车/天/趟/托等）
     Column("amount", Float(53)),               # 含税金额（元）
     Column("carrier_sub", String(40)),     # 快递公司/子类（快递核价用：圆通/中通…）
     Column("prov", String(20)),            # 目的省（快递核价用）
@@ -232,6 +235,7 @@ bill_raw = Table(
     Column("data", LargeBinary(2 ** 32 - 1)),
     Column("created_by", String(40)),
     Column("created_at", String(20)),
+    Column("role", String(12), default="standard"),  # standard=取数文件；original=仅追溯附件
     Index("idx_bill_raw_cp", "carrier", "period"),   # V2.1002：原来无索引，MySQL 按家按月查原件全表扫（连 blob），第①步实测 3.5s
 )
 
@@ -326,7 +330,7 @@ def migrate_cols(engine):
     from sqlalchemy import text
     drv = engine.url.drivername
     need = [("review_mode", "VARCHAR(10)"), ("subj_ovr", "VARCHAR(30)"), ("fee_ovr", "VARCHAR(40)"), ("biz_ovr", "VARCHAR(40)"),
-            ("bill_src", "VARCHAR(120)"), ("ovr_reason", "VARCHAR(200)"), ("annot_source", "VARCHAR(12)")]
+            ("bill_src", "VARCHAR(120)"), ("ovr_reason", "VARCHAR(200)"), ("annot_source", "VARCHAR(12)"), ("qty_standard", "VARCHAR(12)")]
     with engine.begin() as c:
         if "mysql" in drv:
             have = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
@@ -336,6 +340,13 @@ def migrate_cols(engine):
         for col, typ in need:
             if col not in have:
                 c.execute(text("ALTER TABLE logistics_bill_lines ADD COLUMN %s %s" % (col, typ)))
+        if "mysql" in drv:
+            rhave = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                                                  "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='logistics_bill_raw'")).fetchall()}
+        else:
+            rhave = {r[1] for r in c.execute(text("PRAGMA table_info(logistics_bill_raw)")).fetchall()}
+        if rhave and "role" not in rhave:
+            c.execute(text("ALTER TABLE logistics_bill_raw ADD COLUMN role VARCHAR(12) DEFAULT 'standard'"))
         # 计提更正「只改其中一部分」(V2.855)
         if "mysql" in drv:
             fhave = {r[0] for r in c.execute(text("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
