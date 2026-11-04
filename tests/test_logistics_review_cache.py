@@ -80,7 +80,8 @@ class ReviewDocsCacheTests(unittest.TestCase):
              patch.object(self.lr, "_derive_documents", return_value={"refreshed": [], "errors": {}}) as derive, \
              patch.object(self.lr, "_docs_snapshot_merged", return_value=([self.doc], [], {"SAL_OUTSTOCK": {"at": "2026-11-05 02:00", "source": "kingdee"}})):
             out = self.lr.review_result(_Request(), carrier="丰源", period="2026-09", group="all")
-        derive.assert_called_once_with("丰源", "2026-09", ["SAL_OUTSTOCK"])
+        self.assertEqual(derive.call_args.args[:3], ("丰源", "2026-09", ["SAL_OUTSTOCK"]))
+        self.assertIsInstance(derive.call_args.kwargs.get("fingerprints"), dict)
         self.assertEqual(out["docs"][0]["doc_no"], "XSCKD1")
 
     def test_fingerprint_covers_bill_and_review_settings(self):

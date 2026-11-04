@@ -4213,11 +4213,12 @@ def _kd_material_subset(period, form, doc_nos):
     return rec, {no: materials[no] for no in doc_nos if no in materials}
 
 
-def _derive_documents(carrier, period, forms):
+def _derive_documents(carrier, period, forms, fingerprints=None):
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
-    fingerprints = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
+    if fingerprints is None:
+        fingerprints = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
     locked = bool(_signed(carrier, period))
     refreshed, errors, checks = [], {}, []
     for form in forms:
@@ -4272,12 +4273,12 @@ def _refresh_classify_snapshot(carrier, period):
     return LCLS.refresh_snapshot(carrier, period)
 
 
-def _refresh_documents(carrier, period, forms):
+def _refresh_documents(carrier, period, forms, fingerprints=None):
     forms = [f for f in dict.fromkeys(forms or list(_DOC_TYPES)) if f in _DOC_TYPES]
     if not forms:
         raise ValueError("至少要选择一种单据类型")
     public = _kd_refresh_public(period, forms)
-    derived = _derive_documents(carrier, period, forms)
+    derived = _derive_documents(carrier, period, forms, fingerprints=fingerprints)
     return {"refreshed": derived["refreshed"], "errors": {**public["errors"], **derived["errors"]},
             "fingerprint": derived["fingerprint"], "public": public}
 
@@ -5039,7 +5040,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             lk = _locked(carrier, period)
             if lk:
                 return lk
-            report = _refresh_documents(carrier, period, [f for f in forms.split(",") if f in _DOC_TYPES] or list(_DOC_TYPES))
+            report = _refresh_documents(carrier, period, [f for f in forms.split(",") if f in _DOC_TYPES] or list(_DOC_TYPES), fingerprints=fingerprint)
             refresh_report = report
             refresh_errors = report["errors"]
             if refresh_errors and not report["refreshed"]:
@@ -5048,7 +5049,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows_all
                                  if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
         if not fresh:
-            refresh_report = _derive_documents(carrier, period, required_forms)
+            refresh_report = _derive_documents(carrier, period, required_forms, fingerprints=fingerprint)
             refresh_errors = refresh_report["errors"]
         snapshot_pool, snapshot_missing, snapshot_sources = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
         if not snapshot_sources and cc:
