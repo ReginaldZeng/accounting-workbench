@@ -5040,7 +5040,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             cc = _ACCR_CACHE.get(ck)
         required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows_all
                                  if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
-        if not fresh and any(_kd_snapshot_read(period, form) for form in required_forms):
+        if not fresh:
             _derive_documents(carrier, period, required_forms)
         snapshot_pool, snapshot_missing, snapshot_sources = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
         if not snapshot_sources and cc:

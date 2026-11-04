@@ -70,6 +70,19 @@ class ReviewDocsCacheTests(unittest.TestCase):
         self.assertEqual(out["docs"][0]["doc_no"], "XSCKD1")
         self.assertIn("SAL_OUTSTOCK", refresh.call_args.args[2])
 
+    def test_public_only_snapshot_triggers_derive(self):
+        with patch.object(self.lr, "_perm", return_value={"name": "测试"}), \
+             patch.object(self.lr, "_load_card", return_value=({}, 0)), \
+             patch.object(self.lr, "_doc_ok", return_value={}), \
+             patch.object(self.lr, "_code_maps", return_value={}), \
+             patch.object(self.lr, "_load_spec", return_value={}), \
+             patch.object(self.lr, "_kd_snapshot_read", return_value=None), \
+             patch.object(self.lr, "_derive_documents", return_value={"refreshed": [], "errors": {}}) as derive, \
+             patch.object(self.lr, "_docs_snapshot_merged", return_value=([self.doc], [], {"SAL_OUTSTOCK": {"at": "2026-11-05 02:00", "source": "kingdee"}})):
+            out = self.lr.review_result(_Request(), carrier="丰源", period="2026-09", group="all")
+        derive.assert_called_once_with("丰源", "2026-09", ["SAL_OUTSTOCK"])
+        self.assertEqual(out["docs"][0]["doc_no"], "XSCKD1")
+
     def test_fingerprint_covers_bill_and_review_settings(self):
         rows = [{"id": 1, "amount": 10}]
         first = self.lr._docs_fingerprint(rows, {}, {"scheme": "weight"}, {})
