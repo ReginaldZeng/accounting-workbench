@@ -50,6 +50,9 @@ class _Result:
     def all(self):
         return self.rows
 
+    def first(self):
+        return self.rows[0] if self.rows else None
+
 
 class _Engine:
     def __init__(self):

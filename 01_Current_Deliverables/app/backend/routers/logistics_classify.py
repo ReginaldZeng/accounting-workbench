@@ -58,13 +58,16 @@ def _fetch_heads(s, conf, by_form):
     return out
 
 
-def _bill_docs(carrier, period, fresh=False):
-    """中间表逐单明细 → 一张单一条(几行账单合并金额)。没有金蝶单号的行(仓储费、搬运费…)第②步本来就不列，这里也不判。"""
+def _bill_docs(carrier, period, fresh=False, mats=None):
+    """中间表逐单明细 → 一张单一条；公共物料存在时主体回填不访问金蝶。"""
     BL = LR.BL
     with db._engine.connect() as c:
         rows = [dict(r) for r in c.execute(select(BL).where(
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
-    LR._backfill_subjects(rows, carrier, fresh=fresh)
+    if mats is None:
+        LR._backfill_subjects(rows, carrier, fresh=fresh)
+    else:
+        LR._backfill_subjects(rows, carrier, mats=mats, allow_api=False)
     by = {}
     for r in rows:
         d0 = (r.get("doc_no") or "").split("+")[0].strip()
@@ -86,35 +89,32 @@ def _bill_docs(carrier, period, fresh=False):
 def _build(carrier, period, fresh=False):
     docs = _bill_docs(carrier, period, fresh=fresh)
     if len(docs) > LR._FULL_DOCS:
-        return {"ok": False, "msg": "%s 本月 %d 张单，超过 %d 张的先不整家判归类（要拉的金蝶太多）" % (carrier, len(docs), LR._FULL_DOCS)}
+        return {"ok": False, "msg": "%s 本月 %d 张单，超过 %d 张的先不整家判归类" % (carrier, len(docs), LR._FULL_DOCS)}
     by_form = {}
     for d in docs:
         for n in d["docs"]:
             pre = "".join(ch for ch in n if ch.isalpha())
             by_form.setdefault((LR._FORM_BY_PREFIX.get(pre) or ["SAL_OUTSTOCK"])[0], set()).add(n)
-    kd, groups, accr = {}, {}, []
-    if by_form:
-        s, conf = kc.login()
-        mats = LR._fetch_doc_materials(s, conf, by_form, fresh=fresh)
-        real = {}
-        for n, ms in mats.items():
-            real.setdefault(ms[0].get("_form"), set()).add(n)
-        heads = LR._fetch_doc_heads(s, conf, real, fresh=fresh)
-        codes = set()
-        for n, ms in mats.items():
-            cs = [str(m.get("编码") or "") for m in ms if m.get("编码")]
-            codes.update(cs)
-            kd[n] = {"form": ms[0].get("_form"), "head": heads.get(n, {}), "party": ms[0].get("往来") or "", "codes": cs}
-        groups = {k: v.get("grp", "") for k, v in (kc.fetch_material_attrs(codes, s, conf) or {}).items()}
+    shared = LR._kd_shared_materials(period, list(by_form))
+    if shared["missing"] or (by_form and not shared["versions"]):
+        raise RuntimeError("公共金蝶快照待取数：%s" % "、".join(shared["missing"] or list(by_form)))
+    mats, heads, groups = shared["materials"], shared["heads"], shared["groups"]
+    docs = _bill_docs(carrier, period, fresh=fresh, mats=mats)
+    kd, accr = {}, []
+    for n, ms in mats.items():
+        if not ms:
+            continue
+        cs = [str(m.get("编码") or "") for m in ms if m.get("编码")]
+        kd[n] = {"form": ms[0].get("_form"), "head": heads.get(n, {}), "party": ms[0].get("往来") or "", "codes": cs}
     accr = (LR._accr_entries(carrier, period, LR._carrier_full(carrier)) or {}).get("entries") or []
     orgs = {o.get("full_name"): o.get("short_name") for o in (db.list_orgs() or []) if o.get("full_name")}
     res = lc.classify(docs, kd, groups, accr, _cfg(), lambda x: orgs.get(x, x), carrier)
     man = {d["key"]: d["manual"] for d in docs if d["manual"]}
     for x in res["docs"]:
         if x["key"] in man:
-            x["manual"] = man[x["key"]]     # 人工定过费用类型的(V2.788 特批)，页面上标出来，结论照常给
+            x["manual"] = man[x["key"]]
     res.update(ok=True, carrier=carrier, period=period, n_docs=len(docs), kd_missing=sorted(set(n for d in docs for n in d["docs"]) - set(kd)),
-               built_at=time.strftime("%Y-%m-%d %H:%M"))
+               material_versions=shared["versions"], built_at=time.strftime("%Y-%m-%d %H:%M"))
     return res
 
 
@@ -125,11 +125,15 @@ def _snapshot_fingerprint(carrier, period):
         rows = [dict(r) for r in c.execute(select(LR.BL).where(
             (LR.BL.c.carrier == carrier) & (LR.BL.c.period == period) & (LR.BL.c.grain == "detail"))).mappings().all()]
     entries = LR._accr_entries(carrier, period, LR._carrier_full(carrier)) or {}
-    raw = json.dumps({"rows": rows, "entries": entries.get("entries") or [], "cfg": _cfg()}, ensure_ascii=False, sort_keys=True, default=str)
+    forms = sorted({LR._doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows if r.get("doc_no")})
+    versions = LR._kd_shared_materials(period, forms)["versions"]
+    raw = json.dumps({"rows": rows, "entries": entries.get("entries") or [], "cfg": _cfg(), "material_versions": versions}, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def refresh_snapshot(carrier, period):
+    if LR._signed(carrier, period):
+        raise RuntimeError("本月已登记复核，撤销登记后才能重建归类快照")
     res = _build(carrier, period, fresh=True)
     if not res.get("ok"):
         raise RuntimeError(res.get("msg") or "归类快照生成失败")
@@ -163,7 +167,12 @@ def classify(request: Request, carrier: str = "", period: str = "", fresh: int =
                 return res
         except Exception:
             pass
-        return {"ok": False, "msg": "归类快照待取数，请在数据接入页人工刷新金蝶单据", "needs_refresh": True, "docs": []}
+        if any(LR._kd_snapshot_read(period, form) for form in LR._DOC_TYPES):
+            try:
+                return refresh_snapshot(carrier, period)
+            except Exception as e:
+                return {"ok": False, "msg": str(e)[:200], "needs_refresh": True, "docs": []}
+        return {"ok": False, "msg": "归类快照待取数，请在单据运费的金蝶数据页人工刷新或上传补核附件", "needs_refresh": True, "docs": []}
     try:
         return refresh_snapshot(carrier, period)
     except Exception as e:

@@ -739,6 +739,12 @@ export const reviewFallbackTemplateUrl = (carrier, period) => `/api/logistics-re
 export const reviewFallbackDownloadUrl = id => `/api/logistics-review/material-fallback-download?id=${encodeURIComponent(id)}`
 export const reviewFallbackUpload = (carrier, period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/material-fallback?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`, { method: 'POST', body: fd }) }
 export const reviewRefreshDocs = (carrier, period, forms = []) => j(`/api/logistics-review/result?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}&group=all&page=1&size=5000&fresh=1&forms=${encodeURIComponent(forms.join(','))}`)
+export const kingdeeDataStatus = period => j(`/api/logistics-review/kingdee-data/status?period=${encodeURIComponent(period)}`)
+export const kingdeeDataRefresh = (period, forms) => jp('/api/logistics-review/kingdee-data/refresh', { period, forms })
+export const kingdeeDataTemplateUrl = period => `/api/logistics-review/kingdee-data/template?period=${encodeURIComponent(period)}`
+export const kingdeeDataUpload = (period, file) => { const fd = new FormData(); fd.append('file', file); return j(`/api/logistics-review/kingdee-data/fallback?period=${encodeURIComponent(period)}`, { method: 'POST', body: fd }) }
+export const kingdeeDataDownloadUrl = id => `/api/logistics-review/kingdee-data/download?id=${encodeURIComponent(id)}`
+export const kingdeeDataDocuments = (period, forms, q = '', page = 1, size = 25) => j(`/api/logistics-review/kingdee-data/documents?period=${encodeURIComponent(period)}&forms=${encodeURIComponent(forms.join(','))}&q=${encodeURIComponent(q)}&page=${page}&size=${size}`)
 export const reviewKingdeeQty = (carrier, period) => jp(`/api/logistics-review/kingdee-qty?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 
 export const reviewCarriers = (period) => j(`/api/logistics-review/carriers?period=${period}`)
@@ -754,6 +760,7 @@ export const reviewSubjectMark = (carrier, period, subject, status, note = '', d
 export const reviewSubjVerdict = (carrier, period, subject, verdict) => j('/api/logistics-review/subject-diff-verdict', { method: 'POST', body: JSON.stringify({ carrier, period, subject, verdict }) })
 export const reviewDocConfirm = (carrier, period, doc_nos, on = true) => j('/api/logistics-review/doc-confirm', { method: 'POST', body: JSON.stringify({ carrier, period, doc_nos, on }) })
 export const reviewDocClassify = (carrier, period, doc_no, patch) => j('/api/logistics-review/doc-classify', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, ...patch } : { carrier, period, doc_no, ...patch }) })
+export const reviewDocFees = (carrier, period, lid, values, restore = false) => j('/api/logistics-review/doc-fees', { method: 'POST', body: JSON.stringify({ carrier, period, lid, ...values, restore }) })
 export const reviewAccrual = (carrier, period) => j(`/api/logistics-review/accrual?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 // 复核台三步流（V2.690）：逐笔计提复核 / 差异解释 / 供应商复核要点 / 整月登记与撤销
 export const reviewLines = (carrier, period, fresh = false) => j(`/api/logistics-review/lines?carrier=${encodeURIComponent(carrier)}&period=${period}${fresh ? '&fresh=1' : ''}`)
@@ -779,6 +786,7 @@ export const reviewSettingsGet = carrier => j(`/api/logistics-review/settings?ca
 export const reviewSettingsSet = body => j('/api/logistics-review/settings', { method: 'POST', body: JSON.stringify(body) })
 export const reviewReparse = (carrier, period, src) => j('/api/logistics-review/reparse', { method: 'POST', body: JSON.stringify({ carrier, period, src: src || '' }) })
 export const reviewRawUrl = (carrier, period, src) => `/api/logistics-review/raw?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}&src=${encodeURIComponent(src || '')}`
+export const reviewStandardBillUrl = (carrier, period) => `/api/logistics-review/standard-bill?carrier=${encodeURIComponent(carrier)}&period=${encodeURIComponent(period)}`
 export const reviewDups = (carrier, period) => j(`/api/logistics-review/dups?carrier=${encodeURIComponent(carrier)}&period=${period}`)
 export const reviewDupOk = (carrier, period, doc, ok, reason = '') => j('/api/logistics-review/dup-ok', { method: 'POST', body: JSON.stringify({ carrier, period, doc, ok, reason }) })
 export const reviewDocMode = (carrier, period, doc_no, mode) => j('/api/logistics-review/doc-mode', { method: 'POST', body: JSON.stringify(Array.isArray(doc_no) ? { carrier, period, doc_nos: doc_no, mode } : { carrier, period, doc_no, mode }) })

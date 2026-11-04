@@ -5285,7 +5285,7 @@ from routers import (logistics_accrual, archive, fxrate, logistics_recon, cost_l
 from routers import voucher_review
 voucher_review.module_open = lambda: _nav_state().get("voucherreview", {}).get("可进入", False)
 app.include_router(voucher_review.router)
-app.add_event_handler("startup", voucher_review.vr.recover_interrupted)
+app.router.add_event_handler("startup", voucher_review.vr.recover_interrupted)
 app.include_router(logistics_accrual.router)
 app.include_router(archive.router)
 app.include_router(fxrate.router)

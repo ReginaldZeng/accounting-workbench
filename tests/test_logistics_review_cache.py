@@ -55,20 +55,20 @@ class ReviewDocsCacheTests(unittest.TestCase):
         self.assertIn("人工刷新", out["warning"])
 
     def test_successful_refresh_writes_snapshot(self):
-        writes = []
+        report = {"refreshed": [{"form": "SAL_OUTSTOCK", "n": 1}], "errors": {}, "fingerprint": "fp"}
         with patch.object(self.lr, "_perm", return_value={"name": "测试"}), \
              patch.object(self.lr, "_load_card", return_value=({}, 0)), \
              patch.object(self.lr, "_doc_ok", return_value={}), \
              patch.object(self.lr, "_code_maps", return_value={}), \
              patch.object(self.lr, "_load_spec", return_value={}), \
              patch.object(self.lr, "_locked", return_value=None), \
-             patch.object(self.lr, "_refresh_classify_snapshot", return_value={"ok": True}), \
-             patch.object(self.lr, "_box_docs", return_value=[self.doc]), \
-             patch.object(self.lr.db, "set_period_input", create=True, side_effect=lambda *args: writes.append(args)):
+             patch.object(self.lr, "_refresh_documents", return_value=report) as refresh, \
+             patch.object(self.lr, "_docs_snapshot_merged", return_value=([self.doc], [], {"SAL_OUTSTOCK": {"at": "2026-11-04 12:00", "source": "kingdee"}})):
             out = self.lr.review_result(_Request(), carrier="丰源", period="2026-09", group="all", fresh=True)
         self.assertTrue(out["ok"])
         self.assertNotIn("stale", out)
-        self.assertTrue(writes)
+        self.assertEqual(out["docs"][0]["doc_no"], "XSCKD1")
+        self.assertIn("SAL_OUTSTOCK", refresh.call_args.args[2])
 
     def test_fingerprint_covers_bill_and_review_settings(self):
         rows = [{"id": 1, "amount": 10}]

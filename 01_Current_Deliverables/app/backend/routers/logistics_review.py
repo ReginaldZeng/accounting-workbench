@@ -71,10 +71,9 @@ _DETAIL_KEYS = ("period", "carrier", "grain", "subject", "doc_no", "annot", "ann
 
 
 def _parse_bill_any(spec, data):
-    if (spec.get("carrier") or "") == "极鲜达":
-        standard = stdintake.parse_standard_bill(spec, data)
-        if standard is not None:
-            return standard
+    standard = stdintake.parse_standard_bill(spec, data)
+    if standard is not None:
+        return standard
     return intake.parse_bill(spec, data)
 
 
@@ -1407,6 +1406,12 @@ _DOC_MAT_FIELDS = {
     "SAL_RETURNSTOCK": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
                         ("FBaseunitQty", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FRetcustId.FName", "往来"),
                         ("FRealQty", "数量件"), ("FUnitID.FName", "计价单位")],
+    "PUR_MRB": [("FBillNo", "单号"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
+                ("FBASEUNITQTY", "基本数量"), ("FBaseUnitId.FName", "基本单位"), ("FSupplierId.FName", "往来"),
+                ("FMaterialId.FSpecification", "规格"), ("FRealQty", "数量件"), ("FUnitId.FName", "计价单位")],
+    "PUR_PurchaseOrder": [("FBillNo", "单号"), ("FDate", "日期"), ("FMaterialId.FNumber", "编码"), ("FMaterialId.FName", "名称"),
+                          ("FQty", "基本数量"), ("FUnitId.FName", "基本单位"), ("FSupplierId.FName", "往来"), ("FAllAmount", "销售额"),
+                          ("FMaterialId.FSpecification", "规格"), ("FQty", "数量件"), ("FUnitId.FName", "计价单位"), ("FPurchaseOrgId.FName", "采购组织")],
 }
 
 
@@ -1481,7 +1486,7 @@ def _fetch_doc_materials_once(s, conf, docs_by_form):
                     "基本数量": r.get("基本数量"), "基本单位": r.get("基本单位"),
                     "往来": lai, "销售额": r.get("销售额"),
                     "规格": r.get("规格"), "数量件": r.get("数量件"), "计价单位": r.get("计价单位"), "源单号": r.get("源单号"),
-                    "_form": form})
+                    "日期": str(r.get("日期") or "")[:10], "采购组织": r.get("采购组织") or "", "_form": form})
     return out
 
 
@@ -2130,7 +2135,7 @@ def _month_outstock(period, fresh=False, operator=""):
 #   ld 装卸费＝装货/卸货/装卸/搬运/上楼；ot 其他＝仓储、冷藏、处置、操作费、箱子(包材)、退货服务费。
 #   先看账单行的分项(sub_fees 的每个数字项)，分项加起来不够金额的差额、以及没有分项的行，按该行费用名(fee_item)归类。
 _LD_KW = ("装货", "卸货", "装卸", "搬运", "上楼")
-_OT_KW = ("仓储", "冷藏", "处置", "操作费", "箱子", "包材", "物料", "退货服务")
+_OT_KW = ("仓储", "冷藏", "处置", "操作费", "箱子", "包材", "物料", "退货服务", "其他费用")
 _SUB_SKIP = ("标准", "核价差", "公式", "箱型")
 
 
@@ -2165,7 +2170,7 @@ def _line_buckets(amount, fee_item, sub_fees):
 def _outstock_freight(period):
     """出库月视图共用当前有效费用：同费用键有 V2 取 V2，否则取 V1；待复核只提示。"""
     from kernels import logistics_doc_freight as ldf
-    resolved = ldf.load_resolved(db._engine, "", _line_buckets, _eff_subject, _eff_fee)
+    resolved = ldf.load_resolved(db._engine, period, _line_buckets, _eff_subject, _eff_fee)
     return ldf.document_view(resolved)
 
 
@@ -4150,7 +4155,12 @@ def _docs_fingerprint(rows, card, settings, spec):
 
 _DOC_TYPES = {
     "SAL_OUTSTOCK": "销售出库单",
+    "SAL_RETURNSTOCK": "销售退货单",
     "STK_MisDelivery": "其它出库单",
+    "STK_InStock": "采购入库单",
+    "PUR_MRB": "采购退料单",
+    "PUR_PurchaseOrder": "采购订单",
+    "STK_TransferIn": "分布式调入单",
     "STK_TransferOut": "分布式调出单",
 }
 
@@ -4185,10 +4195,48 @@ def _docs_snapshot_read(carrier, period, fingerprint, form=""):
     return None
 
 
-def _docs_snapshot_write(carrier, period, fingerprint, docs, form="", source="kingdee"):
+def _docs_snapshot_write(carrier, period, fingerprint, docs, form="", source="kingdee", material_version=""):
     kind = "docs" + ((":" + form) if form else "")
     db.set_period_input(_docs_snapshot_source(carrier), int(period[:4]), int(period[5:7]), kind,
-                        {"fingerprint": fingerprint, "docs": docs, "source": source, "refreshed_at": _now()}, {"n": len(docs), "source": source}, "系统")
+                        {"fingerprint": fingerprint, "docs": docs, "source": source, "material_version": material_version,
+                         "refreshed_at": _now()}, {"n": len(docs), "source": source}, "系统")
+
+
+def _kd_material_subset(period, form, doc_nos):
+    rec = _kd_snapshot_read(period, form)
+    if not rec:
+        return None, {}
+    materials = rec["payload"]["materials"]
+    return rec, {no: materials[no] for no in doc_nos if no in materials}
+
+
+def _derive_documents(carrier, period, forms):
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+    fingerprints = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
+    locked = bool(_signed(carrier, period))
+    refreshed, errors = [], {}
+    for form in forms:
+        subrows = [r for r in rows if _doc_form(r.get("doc_no")) == form]
+        old = _docs_snapshot_read(carrier, period, fingerprints[form], form)
+        nos = {str(r.get("doc_no") or "").split("+")[0] for r in subrows if r.get("doc_no")}
+        public, materials = _kd_material_subset(period, form, nos)
+        if locked or (old and (not public or old["payload"].get("material_version") == public["payload"]["material_version"])):
+            continue
+        if not public:
+            continue
+        try:
+            docs = _box_docs(subrows, carrier, materials_override=materials)
+            version = public["payload"]["material_version"]
+            _docs_snapshot_write(carrier, period, fingerprints[form], docs, form,
+                                 source=public["payload"].get("source") or "kingdee", material_version=version)
+            refreshed.append({"form": form, "label": _DOC_TYPES[form], "n": len(docs), "version": version})
+        except Exception as e:
+            errors[form] = str(e)[:200]
+    if refreshed:
+        _bust(carrier, period)
+    return {"refreshed": refreshed, "errors": errors, "fingerprint": fingerprints["legacy"]}
 
 
 def _docs_snapshot_merged(carrier, period, fingerprint, forms=None):
@@ -4221,29 +4269,314 @@ def _refresh_documents(carrier, period, forms):
     forms = [f for f in dict.fromkeys(forms or list(_DOC_TYPES)) if f in _DOC_TYPES]
     if not forms:
         raise ValueError("至少要选择一种单据类型")
+    public = _kd_refresh_public(period, forms)
+    derived = _derive_documents(carrier, period, forms)
+    return {"refreshed": derived["refreshed"], "errors": {**public["errors"], **derived["errors"]},
+            "fingerprint": derived["fingerprint"], "public": public}
+
+
+_KD_HEAD_FIELDS = ("销售组织", "库存组织", "部门", "需求组织", "调入组织", "调出组织")
+_KD_SHARED_ROLE = "kingdee_fallback_shared"
+
+
+def _kd_bill_doc_forms(period):
     with db._engine.connect() as c:
-        rows = [dict(r) for r in c.execute(select(BL).where(
-            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
-    card, _ = _load_card(carrier)
-    fingerprints = _docs_fingerprints(rows, card, _review_settings(carrier), _load_spec(carrier) or {})
+        values = c.execute(select(BL.c.doc_no).where((BL.c.period == period) & (BL.c.grain == "detail"))).all()
+    values = [r[0] for r in values]
+    values = [value for value in values if value]
+    out = {form: set() for form in _DOC_TYPES}
+    for value in values:
+        for no in str(value).split("+"):
+            no = no.strip()
+            if no and no != "无单据":
+                out[_doc_form(no)].add(no)
+    return out
+
+
+def _kd_version(materials, heads=None, groups=None):
+    import hashlib
+    raw = json.dumps({"materials": materials, "heads": heads or {}, "groups": groups or {}}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _kd_snapshot_read(period, form):
+    try:
+        rec = db.get_period_input("kingdee", int(period[:4]), int(period[5:7]), "kd:materials:" + form)
+        payload = (rec or {}).get("payload") or {}
+        if isinstance(payload.get("materials"), dict) and payload.get("material_version"):
+            return rec
+    except Exception:
+        pass
+    return None
+
+
+def _kd_shared_materials(period, forms):
+    materials, heads, groups, versions, missing = {}, {}, {}, {}, []
+    for form in forms:
+        rec = _kd_snapshot_read(period, form)
+        if not rec:
+            missing.append(form)
+            continue
+        payload = rec["payload"]
+        materials.update(payload["materials"])
+        heads.update(payload.get("heads") or {})
+        groups.update(payload.get("groups") or {})
+        versions[form] = payload["material_version"]
+    return {"materials": materials, "heads": heads, "groups": groups, "versions": versions, "missing": missing}
+
+
+def _kd_snapshot_write(period, form, materials, heads=None, groups=None, source="kingdee", operator="系统"):
+    heads, groups = heads or {}, groups or {}
+    version = _kd_version(materials, heads, groups)
+    refreshed_at = _now()
+    db.set_period_input("kingdee", int(period[:4]), int(period[5:7]), "kd:materials:" + form,
+                        {"materials": materials, "heads": heads, "groups": groups, "material_version": version,
+                         "source": source, "refreshed_at": refreshed_at, "doc_count": len(materials)},
+                        {"n": len(materials), "source": source, "version": version}, operator or "系统")
+    return version
+
+
+def _kd_public_status(period):
+    required = _kd_bill_doc_forms(period)
+    sources, missing = {}, []
+    for form in _DOC_TYPES:
+        rec = _kd_snapshot_read(period, form)
+        if rec:
+            payload = rec["payload"]
+            sources[form] = {"at": rec.get("updated_at") or payload.get("refreshed_at") or "", "by": rec.get("updated_by") or "",
+                             "source": payload.get("source") or "kingdee", "version": payload.get("material_version"),
+                             "docs": payload.get("doc_count", len(payload["materials"]))}
+        elif required[form]:
+            missing.append(form)
+    with db._engine.connect() as c:
+        files = c.execute(select(BR.c.id, BR.c.name, BR.c.size, BR.c.created_by, BR.c.created_at).where(
+            (BR.c.carrier == "") & (BR.c.period == period) & (BR.c.role == _KD_SHARED_ROLE)).order_by(BR.c.id.desc())).mappings().all()
+    return {"required": sorted(form for form, nos in required.items() if nos),
+            "required_docs": {form: len(nos) for form, nos in required.items()},
+            "docs": sum(x["docs"] for x in sources.values()), "missing": missing, "sources": sources,
+            "files": [{"id": r["id"], "name": r["name"], "size": r["size"], "by": r["created_by"], "at": r["created_at"]} for r in files]}
+
+
+def _kd_fetch_purchase_orders(s, conf, period):
+    y, m = int(period[:4]), int(period[5:7])
+    nxt = "%04d-%02d-01" % ((y + 1, 1) if m == 12 else (y, m + 1))
+    form = "PUR_PurchaseOrder"
+    cols = list(_DOC_MAT_FIELDS[form])
+    while True:
+        try:
+            rr = kc._query(s, conf, form, cols,
+                           "FDate>='%s-01' and FDate<'%s' and FDocumentStatus='C'" % (period, nxt))
+            break
+        except Exception:
+            if len(cols) <= 4:
+                raise
+            cols = cols[:-1]
+    out = {}
+    for r in rr:
+        no = str(r.get("单号") or "")
+        if no:
+            out.setdefault(no, []).append({"编码": r.get("编码"), "名称": r.get("名称"),
+                "基本数量": r.get("基本数量"), "基本单位": r.get("基本单位"), "往来": r.get("往来"),
+                "销售额": r.get("销售额"), "规格": r.get("规格"), "数量件": r.get("数量件"),
+                "计价单位": r.get("计价单位"), "日期": str(r.get("日期") or "")[:10],
+                "采购组织": r.get("采购组织") or "", "_form": form})
+    return out
+
+
+def _kd_refresh_public(period, forms, operator="系统"):
+    forms = [f for f in dict.fromkeys(forms or list(_DOC_TYPES)) if f in _DOC_TYPES]
+    if not forms:
+        raise ValueError("至少要选择一种单据类型")
+    required = _kd_bill_doc_forms(period)
     refreshed, errors = [], {}
+    try:
+        s, conf = kc.login()
+    except Exception as e:
+        return {"refreshed": refreshed, "errors": {form: str(e)[:200] for form in forms}}
     for form in forms:
         try:
-            subrows = [r for r in rows if _doc_form(r.get("doc_no")) == form]
-            docs = _box_docs(subrows, carrier)
-            _docs_snapshot_write(carrier, period, fingerprints[form], docs, form)
-            refreshed.append({"form": form, "label": _DOC_TYPES[form], "n": len(docs)})
+            if form == "PUR_PurchaseOrder":
+                mats = _kd_fetch_purchase_orders(s, conf, period)
+            else:
+                nos = required.get(form) or set()
+                mats = _fetch_doc_materials(s, conf, {form: nos}) if nos else {}
+                mats = {no: [m for m in lines if m.get("_form") == form] for no, lines in mats.items()
+                        if any(m.get("_form") == form for m in lines)}
+            heads = _fetch_doc_heads(s, conf, {form: set(mats)}) if mats else {}
+            codes = {str(m.get("编码") or "") for lines in mats.values() for m in lines if m.get("编码")}
+            attrs = kc.fetch_material_attrs(codes, s, conf) if codes else {}
+            groups = {code: (value or {}).get("grp", "") for code, value in attrs.items()}
+            version = _kd_snapshot_write(period, form, mats, heads, groups, operator=operator)
+            refreshed.append({"form": form, "label": _DOC_TYPES[form], "n": len(mats), "version": version})
         except Exception as e:
             errors[form] = str(e)[:200]
-    if refreshed:
-        try:
-            _refresh_classify_snapshot(carrier, period)
-        except Exception as e:
-            errors["classify"] = str(e)[:200]
-        _bust(carrier, period)
-        merged, _, _ = _docs_snapshot_merged(carrier, period, fingerprints)
-        _ACCR_CACHE[("view", carrier, period)] = (merged, fingerprints["legacy"], time.time())
-    return {"refreshed": refreshed, "errors": errors, "fingerprint": fingerprints["legacy"]}
+    return {"refreshed": refreshed, "errors": errors}
+
+
+def _kd_documents(period, forms, q="", page=1, size=25):
+    forms = [f for f in forms if f in _DOC_TYPES] or list(_DOC_TYPES)
+    q = str(q or "").strip().lower()
+    try:
+        freight = _outstock_freight(period)
+    except Exception:
+        freight = {}
+    rows, sources, missing = [], {}, []
+    for form in forms:
+        rec = _kd_snapshot_read(period, form)
+        if not rec:
+            missing.append(form)
+            continue
+        payload = rec["payload"]
+        heads, groups = payload.get("heads") or {}, payload.get("groups") or {}
+        sources[form] = {"at": rec.get("updated_at") or payload.get("refreshed_at") or "",
+                         "by": rec.get("updated_by") or "", "source": payload.get("source") or "kingdee"}
+        for no, lines in payload["materials"].items():
+            party = next((str(m.get("往来") or "") for m in lines if m.get("往来")), "")
+            head = heads.get(no) or {}
+            first = lines[0] if lines else {}
+            subject = next((str(head.get(k) or first.get("采购组织") or "") for k in
+                            ("销售组织", "库存组织", "需求组织", "调入组织", "采购组织")
+                            if head.get(k) or first.get("采购组织")), "")
+            qtys = [abs(float(m.get("基本数量") or 0)) for m in lines]
+            total_qty = sum(qtys)
+            f = freight.get(no) or {}
+            parts = f.get("parts") or {}
+            bill_parts = sorted(parts.items()) if parts else [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
+            for part_key, fees in bill_parts:
+                carrier = part_key[0]
+                for i, m in enumerate(lines):
+                    code, name = str(m.get("编码") or ""), str(m.get("名称") or "")
+                    text = " ".join([no, party, subject, carrier, code, name]).lower()
+                    if q and q not in text:
+                        continue
+                    share = (qtys[i] / total_qty) if total_qty else (1.0 / len(lines) if lines else 0.0)
+                    tr = round(float(fees.get("tr") or 0) * share, 2) if carrier else None
+                    ld = round(float(fees.get("ld") or 0) * share, 2) if carrier else None
+                    total = round(tr + ld, 2) if carrier else None
+                    sales = float(m.get("销售额") or 0)
+                    base_qty = float(m.get("基本数量") or 0)
+                    rows.append({"row_key": "|".join([form, no, *part_key, str(i)]), "doc_no": no, "form": form,
+                                 "form_label": _DOC_TYPES[form], "subject": subject, "party": party,
+                                 "material_group": groups.get(code) or "", "code": code, "name": name,
+                                 "base_qty": base_qty, "base_unit": m.get("基本单位") or "", "sales": round(sales, 2),
+                                 "carrier": carrier, "fee_tr": tr, "fee_ld": ld, "fee": total,
+                                 "unit_fee": round(total / abs(base_qty), 4) if carrier and base_qty else None,
+                                 "ratio": round(total / sales, 4) if carrier and sales else None,
+                                 "date": m.get("日期") or "", "org": m.get("采购组织") or "",
+                                 "materials": lines, "n_materials": len(lines),
+                                 "snapshot_at": sources[form]["at"], "snapshot_by": sources[form]["by"], "source": sources[form]["source"]})
+    rows.sort(key=lambda x: (x["date"], x["doc_no"], x["carrier"], x["code"]), reverse=True)
+    page, size = max(1, int(page)), min(200, max(1, int(size)))
+    return {"rows": rows[(page - 1) * size:page * size], "total": len(rows), "page": page, "size": size,
+            "pages": max(1, (len(rows) + size - 1) // size), "sources": sources, "missing": missing}
+
+
+@router.get("/api/logistics-review/kingdee-data/documents")
+def review_kingdee_data_documents(request: Request, period: str = "", forms: str = "", q: str = "", page: int = 1, size: int = 25):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not period or "-" not in period:
+        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
+    selected = [f for f in forms.split(",") if f in _DOC_TYPES] or list(_DOC_TYPES)
+    return {"ok": True, "period": period, **_kd_documents(period, selected, q=q, page=page, size=size)}
+
+
+@router.get("/api/logistics-review/kingdee-data/status")
+def review_kingdee_data_status(request: Request, period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if not period or "-" not in period:
+        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
+    return {"ok": True, "period": period, **_kd_public_status(period)}
+
+
+@router.post("/api/logistics-review/kingdee-data/refresh")
+async def review_kingdee_data_refresh(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    period = str(b.get("period") or "")
+    if not period or "-" not in period:
+        return JSONResponse({"ok": False, "msg": "缺账期"}, status_code=400)
+    report = _kd_refresh_public(period, b.get("forms") or list(_DOC_TYPES), operator=_uname(u))
+    db.audit(_uname(u), "物流复核-公共金蝶刷新", period, "；".join("%s %d 单" % (x["label"], x["n"]) for x in report["refreshed"]))
+    return {"ok": not report["errors"] or bool(report["refreshed"]), **report,
+            "msg": "部分类型刷新失败，其他快照保留" if report["errors"] else "已写入公共快照"}
+
+
+@router.get("/api/logistics-review/kingdee-data/template")
+def review_kingdee_data_template(request: Request, period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from openpyxl import Workbook
+    from io import BytesIO
+    from urllib.parse import quote
+    required = _kd_bill_doc_forms(period)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "公共金蝶补核附件"
+    ws.append(_FALLBACK_HEADERS + ["物料分组"] + list(_KD_HEAD_FIELDS))
+    for form in _DOC_TYPES:
+        for no in sorted(required[form]):
+            ws.append([no])
+    ws.freeze_panes = "A2"
+    for i, width in enumerate([24, 18, 34, 14, 14, 28, 14, 28, 14, 14, 24, 20, 22, 22, 22, 22, 22, 22], 1):
+        ws.column_dimensions[chr(64 + i)].width = width
+    bio = BytesIO()
+    wb.save(bio)
+    filename = quote(f"{period}_公共金蝶补核附件模板.xlsx")
+    return Response(content=bio.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
+
+
+@router.post("/api/logistics-review/kingdee-data/fallback")
+async def review_kingdee_data_fallback(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    period = request.query_params.get("period", "")
+    data = await _read_upload(request)
+    name = str(getattr(request.state, "upload_name", "") or "公共金蝶补核附件.xlsx")[:200]
+    if not name.lower().endswith(".xlsx"):
+        return JSONResponse({"ok": False, "msg": "只支持 .xlsx"}, status_code=400)
+    if len(data) > 20 * 1024 * 1024:
+        return JSONResponse({"ok": False, "msg": "附件不能超过 20MB"}, status_code=400)
+    try:
+        grouped, _ = _fallback_materials(data)
+        required = _kd_bill_doc_forms(period)
+        bill_nos = set().union(*required.values())
+        unknown = sorted({no for items in grouped.values() for no in items if no not in bill_nos})
+        refreshed = []
+        for form, materials in grouped.items():
+            heads = {no: {key: lines[0].get(key) for key in _KD_HEAD_FIELDS if lines[0].get(key) not in (None, "")}
+                     for no, lines in materials.items()}
+            groups = {str(m.get("编码") or ""): m.get("物料分组") or "" for lines in materials.values() for m in lines if m.get("编码")}
+            version = _kd_snapshot_write(period, form, materials, heads, groups, source="manual_attachment", operator=_uname(u))
+            refreshed.append({"form": form, "label": _DOC_TYPES[form], "n": len(materials), "version": version})
+        with db._engine.begin() as c:
+            import hashlib
+            c.execute(delete(BR).where((BR.c.carrier == "") & (BR.c.period == period) & (BR.c.role == _KD_SHARED_ROLE)))
+            c.execute(insert(BR).values(carrier="", period=period, bill_src="", name=name, origin="公共人工金蝶补核附件",
+                                        sha256=hashlib.sha256(data).hexdigest(), size=len(data), data=data,
+                                        created_by=_uname(u), created_at=_now(), role=_KD_SHARED_ROLE))
+        db.audit(_uname(u), "物流复核-公共金蝶补核附件", period, "；".join("%s %d 单" % (x["label"], x["n"]) for x in refreshed))
+        return {"ok": True, "refreshed": refreshed, "unknown": unknown, "cached_at": _now(), "source": "manual_attachment"}
+    except ValueError as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+
+
+@router.get("/api/logistics-review/kingdee-data/download")
+def review_kingdee_data_download(request: Request, id: int = 0):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from urllib.parse import quote
+    with db._engine.connect() as c:
+        row = c.execute(select(BR.c.name, BR.c.data).where((BR.c.id == id) & (BR.c.role == _KD_SHARED_ROLE))).mappings().first()
+    if not row or not row["data"]:
+        return JSONResponse({"ok": False, "msg": "附件不存在"}, status_code=404)
+    return Response(content=bytes(row["data"]), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(row["name"] or "公共金蝶补核附件.xlsx")})
 
 
 _FALLBACK_HEADERS = ["单号", "编码", "名称", "基本数量", "基本单位", "往来", "销售额", "规格", "数量件", "计价单位", "源单号"]
@@ -4261,7 +4594,7 @@ def _fallback_materials(data):
     missing = [x for x in ("单号", "编码", "基本数量", "基本单位") if x not in headers]
     if missing:
         raise ValueError("缺少必需列：" + "、".join(missing))
-    idx = {name: headers.index(name) for name in _FALLBACK_HEADERS if name in headers}
+    idx = {name: headers.index(name) for name in _FALLBACK_HEADERS + ["物料分组"] + list(_KD_HEAD_FIELDS) if name in headers}
     materials, unknown = {}, set()
     for rn, values in enumerate(rows[1:], 2):
         no = str(values[idx["单号"]] or "").strip()
@@ -4281,7 +4614,8 @@ def _fallback_materials(data):
             "基本数量": qty, "基本单位": values[idx["基本单位"]] if "基本单位" in idx else "",
             "往来": values[idx["往来"]] if "往来" in idx else "", "销售额": values[idx["销售额"]] if "销售额" in idx else None,
             "规格": values[idx["规格"]] if "规格" in idx else "", "数量件": values[idx["数量件"]] if "数量件" in idx else None,
-            "计价单位": values[idx["计价单位"]] if "计价单位" in idx else "", "源单号": values[idx["源单号"]] if "源单号" in idx else "", "_form": form})
+            "计价单位": values[idx["计价单位"]] if "计价单位" in idx else "", "源单号": values[idx["源单号"]] if "源单号" in idx else "", "_form": form,
+            **{key: values[idx[key]] if key in idx else "" for key in ["物料分组"] + list(_KD_HEAD_FIELDS)}})
     if not materials:
         raise ValueError("附件没有有效物料行")
     return materials, unknown
@@ -4384,6 +4718,197 @@ def review_material_fallback_download(request: Request, id: int = 0):
         return JSONResponse({"ok": False, "msg": "附件不存在"}, status_code=404)
     return Response(content=bytes(row["data"]), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(row["name"] or "金蝶补核附件.xlsx")})
+
+
+def _standard_qty(row):
+    existing = str(row.get("qty_standard") or "").strip()
+    if existing:
+        return existing
+    unit = str(row.get("unit") or "").replace("元/", "").strip().lower()
+    if unit in ("吨", "t", "千克", "kg", "公斤"):
+        return "按重量"
+    if unit in ("箱", "盒", "包"):
+        return "按箱数"
+    if unit in ("件", "袋", "个"):
+        return "按件数"
+    if unit in ("方", "立方米", "m³"):
+        return "按体积"
+    if unit == "托":
+        return "按托"
+    if unit == "单":
+        return "按单"
+    if unit == "车":
+        return "按车"
+    if unit == "天":
+        return "按天"
+    if unit == "趟":
+        return "按趟"
+    return "免核"
+
+
+def _standard_bill_rows(carrier, period):
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail")).order_by(BL.c.id)).mappings().all()]
+    out = []
+    for r in rows:
+        if r.get("amount") is None:
+            continue
+        buckets = _line_buckets(r.get("amount"), r.get("fee_item"), r.get("sub_fees"))
+        try:
+            original_split = json.loads(r.get("sub_fees") or "{}")
+        except Exception:
+            original_split = {}
+        if "附加费" in original_split and not any(k in original_split for k in ("装卸费", "其他费用")):
+            freight = float(original_split.get("运费") or 0)
+            surcharge = float(original_split.get("附加费") or 0)
+        else:
+            freight = buckets["tr"]
+            surcharge = buckets["ld"] + buckets["ot"]
+        out.append([_eff_subject(r), r.get("doc_no") or "无金蝶单号", _eff_fee(r), _standard_qty(r),
+                    r.get("qty") if r.get("qty") is not None else r.get("charge_wt"), r.get("unit") or "千克",
+                    float(r["amount"]), freight, surcharge, r.get("note") or ""])
+    return out
+
+
+@router.get("/api/logistics-review/standard-bill")
+def review_standard_bill(request: Request, carrier: str = "", period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from io import BytesIO
+    from urllib.parse import quote
+    rows = _standard_bill_rows(carrier, period)
+    if not rows:
+        return JSONResponse({"ok": False, "msg": "本期没有可生成标准账单的逐笔行"}, status_code=409)
+    wb = Workbook()
+    wb.properties.title = f"{carrier} {period} 新版标准账单"
+    wb.properties.subject = f"{carrier} {period} A-J 标准逐笔账单"
+    wb.properties.description = "严格 A-J 十列；G=H+I；不代表已完成复核登记"
+    ws = wb.active
+    ws.title = "标准逐笔"
+    headers = ["主体", "金蝶系统单据编号", "费用类型", "数量计算标准", "账单数量", "数量单位", "费用总额", "费用拆分1\n运费", "费用拆分2\n附加费", "备注"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F4E78")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for values in rows:
+        ws.append(values)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = "A1:J1"
+    for col, width in zip("ABCDEFGHIJ", [24, 24, 14, 16, 14, 12, 14, 16, 16, 32]):
+        ws.column_dimensions[col].width = width
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    bio = BytesIO()
+    wb.save(bio)
+    filename = quote(f"{carrier}_{period}_新版标准账单.xlsx")
+    return Response(content=bio.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
+
+
+def _review_material_rows(carrier, period, docs):
+    try:
+        freight = _outstock_freight(period)
+    except Exception:
+        freight = {}
+    shared = _kd_shared_materials(period, list(_DOC_TYPES))
+    heads, groups = shared["heads"], shared["groups"]
+    out = []
+    for doc in docs or []:
+        no = doc.get("doc_no") or ""
+        if not no:
+            continue
+        lines = doc.get("materials") or []
+        qtys = [abs(float(m.get("base_kg") if m.get("base_kg") is not None else (m.get("base_qty") or 0))) for m in lines]
+        total_qty = sum(qtys)
+        parts = (freight.get(no) or {}).get("parts") or {}
+        bill_parts = sorted(parts.items()) if parts else [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
+        head = heads.get(no) or {}
+        subject = next((str(head.get(k) or "") for k in ("销售组织", "库存组织", "需求组织", "调入组织", "采购组织") if head.get(k)), doc.get("subject") or "")
+        for part_key, fees in bill_parts:
+            part_carrier = part_key[0]
+            for i, m in enumerate(lines):
+                share = (qtys[i] / total_qty) if total_qty else (1.0 / len(lines) if lines else 0.0)
+                tr = round(float(fees.get("tr") or 0) * share, 2) if part_carrier else None
+                ld = round(float(fees.get("ld") or 0) * share, 2) if part_carrier else None
+                total = round(tr + ld, 2) if part_carrier else None
+                base_qty = qtys[i]
+                sales = float(m.get("sales") or 0)
+                code = str(m.get("code") or "")
+                out.append({"row_key": "|".join([str(doc.get("lid") or no), *part_key, str(i)]), "doc_no": no,
+                            "form": _doc_form(no), "form_label": _DOC_TYPES.get(_doc_form(no), _doc_form(no)),
+                            "subject": subject, "party": m.get("party") or "、".join(doc.get("parties") or []), "fee_item": doc.get("fee_item") or "",
+                            "material_group": groups.get(code) or m.get("group") or "", "code": code, "name": m.get("name") or "",
+                            "base_qty": base_qty, "base_unit": m.get("kg_unit") or m.get("base_unit") or m.get("out_unit") or "",
+                            "sales": round(sales, 2), "carrier": part_carrier, "fee_tr": tr, "fee_ld": ld, "fee": total,
+                            "unit_fee": round(total / base_qty, 4) if part_carrier and base_qty else None,
+                            "ratio": round(total / sales, 4) if part_carrier and sales else None,
+                            "date": m.get("date") or "", "org": m.get("采购组织") or "", "snapshot_at": "", "snapshot_by": ""})
+    return out
+
+
+@router.post("/api/logistics-review/doc-fees")
+async def review_doc_fees(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    carrier, period = (b.get("carrier") or "").strip(), (b.get("period") or "").strip()
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    try:
+        lid = int(b.get("lid") or 0)
+    except (TypeError, ValueError):
+        lid = 0
+    if not lid:
+        return JSONResponse({"ok": False, "msg": "缺账单行"}, status_code=400)
+    with db._engine.connect() as c:
+        row = c.execute(select(BL).where((BL.c.id == lid) & (BL.c.carrier == carrier) & (BL.c.period == period))).mappings().first()
+    if not row:
+        return JSONResponse({"ok": False, "msg": "账单行不存在"}, status_code=404)
+    old = dict(row)
+    original = old.get("sub_fees") or "{}"
+    if b.get("restore"):
+        try:
+            saved = json.loads(original)
+            original = saved.get("__original_sub_fees") or original
+            amount = float(saved.get("__original_amount") if saved.get("__original_amount") is not None else old["amount"])
+        except Exception:
+            amount = float(old["amount"] or 0)
+        sub_fees = original
+    else:
+        values = []
+        for key in ("fee_tr", "fee_ld", "fee_other"):
+            try:
+                value = float(b.get(key) or 0)
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "msg": "费用必须为数值"}, status_code=400)
+            import math
+            if not math.isfinite(value):
+                return JSONResponse({"ok": False, "msg": "费用必须为有限数值"}, status_code=400)
+            values.append(value)
+        tr, ld, other = values
+        amount = round(tr + ld + other, 2)
+        try:
+            meta = json.loads(original)
+        except Exception:
+            meta = {}
+        meta.setdefault("__original_sub_fees", original)
+        meta.setdefault("__original_amount", old["amount"])
+        meta["运费"], meta["装卸费"], meta["其他费用"] = tr, ld, other
+        sub_fees = json.dumps(meta, ensure_ascii=False)
+    with db._engine.begin() as c:
+        c.execute(update(BL).where(BL.c.id == lid).values(amount=amount, sub_fees=sub_fees))
+    _bust(carrier, period)
+    derived = _derive_documents(carrier, period, sorted(_DOC_TYPES))
+    db.audit(_uname(u), "物流复核-恢复费用拆分" if b.get("restore") else "物流复核-调整费用拆分", "%s %s %s" % (carrier, period, old.get("doc_no") or lid),
+             "原金额 %s → 新金额 %s" % (old.get("amount"), amount))
+    return {"ok": True, "amount": amount, "derived": derived}
 
 
 @router.get("/api/logistics-review/result")
@@ -4515,6 +5040,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             cc = _ACCR_CACHE.get(ck)
         required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows_all
                                  if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
+        if not fresh and any(_kd_snapshot_read(period, form) for form in required_forms):
+            _derive_documents(carrier, period, required_forms)
         snapshot_pool, snapshot_missing, snapshot_sources = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
         if not snapshot_sources and cc:
             snapshot_pool = cc[0]
@@ -4602,6 +5129,7 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "total_bill": total_bill, "summary": summary, "accrual": accr, "counts": counts,
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
+                "material_rows": _review_material_rows(carrier, period, docs),
                 "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "pallet_box": _pallet_box(carrier) or None, "vol_kg": _vol_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "bw_gap": bw_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs,
                 "carry": _carry_view(carrier, period, rows + accr), "cached_at": snapshot_at, "snapshot_sources": snapshot_sources,
                 "needs_refresh": snapshot_missing, "refresh_errors": refresh_errors,

@@ -1,6 +1,6 @@
 // [Change Log] Date:2026-10-26 Author:Kimi Code Version:V-draft 增加物流表 V1 页签，保留销售出库和其他单据。
 // [Change Log] Date:2026-09-28 Author:Claude Opus 4.8 Version:V2.645
-// 单据运费：销售出库 / 物流表 V1 / 其他单据。
+// 单据运费：公共金蝶数据 / 销售出库 / 物流表 V1 / 其他单据。
 // 一行 = 单据的一个物料行；运费按基本数量在单据内摊到物料，单位运费=摊得运费/基本数量，费比=运费/销售额（有则显）。
 // 列：费用主体｜费用类型｜业务线｜单据号｜客户/需求部门｜物料编码｜物料名称｜基本单位数量｜基本单位｜运费｜单位运费｜费比。
 // V2.773：第一个 tab 从「销售出库」改成「账单复核（已登记）」——某家某月在复核台登记已复核后，逐单运费自动进来(所有单据类型)；
@@ -13,6 +13,7 @@ import { reviewRegisterAdd, reviewRegisterDelete, reviewRegisterKingdeeCheck, re
 import PeriodPicker from '../components/PeriodPicker.jsx'
 import LogisticsOutstockFreight from './LogisticsOutstockFreight.jsx'   // 销售出库单全量 × 运费(V2.774)
 import LogisticsV1Upload from './LogisticsV1Upload.jsx'
+import KingdeeDataCenter from './KingdeeDataCenter.jsx'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const qtyfmt = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 3 }))
@@ -23,7 +24,7 @@ const BLANK = { carrier: '货拉拉', doc_no: '', amount: '', subject: '孝感�
 
 export default function LogisticsDocFreight({ cfg, onPeriod }) {
   const period = `${cfg.year}-${String(cfg.period).padStart(2, '0')}`
-  const [tab, setTab] = useState('out')         // out 销售出库单、退货单(金蝶全量 × 费用) / other 其他单据(账单里的非销售单据 + 手工登记)
+  const [tab, setTab] = useState('kd')          // kd 公共金蝶数据 / out 销售出库 / v1 物流表 / other 其他单据
   const [data, setData] = useState(null)
   const [f, setF] = useState(BLANK)
   const [busy, setBusy] = useState('')
@@ -84,10 +85,9 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
       .ldf{--ok:#2E7D57;--warn:#B06A12;--bad:#B23B2E;--neu:#5E6B78;--accent:#1F6E8C;--soft:#E1EEF3;font-size:14px}
       .ldf .head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
       .ldf .h-title{font-size:18px;font-weight:700}.ldf .h-sub{color:#5E6B78;font-size:12.5px;margin-top:2px}
-      .ldf .tabs{display:flex;gap:10px;margin-bottom:12px}
-      .ldf .tab{border:1px solid #DCE2E7;background:#fff;border-radius:10px;padding:12px 18px;cursor:pointer;text-align:left;min-width:220px}
-      .ldf .tab.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset;background:#F5FAFC}
-      .ldf .tab .t{font-weight:700;font-size:14px}.ldf .tab .s{font-size:11.5px;color:#8A96A2;margin-top:2px}
+      .ldf .tabs{display:flex;gap:2px;margin-bottom:12px;max-width:100%;overflow-x:auto;border-bottom:1px solid #DCE2E7}
+      .ldf .tab{border:0;border-bottom:2px solid transparent;background:transparent;padding:8px 14px;cursor:pointer;text-align:left;flex:0 0 auto;color:#5E6B78;font:inherit}
+      .ldf .tab.on{border-bottom-color:var(--accent);color:var(--accent);font-weight:650;background:#F5FAFC}
       .ldf .card{background:#fff;border:1px solid #DCE2E7;border-radius:12px;overflow:hidden;margin-bottom:12px}
       .ldf .card h3{margin:0;padding:11px 15px;font-size:13px;border-bottom:1px solid #DCE2E7;color:#5E6B78}
       .ldf .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}
@@ -134,19 +134,9 @@ export default function LogisticsDocFreight({ cfg, onPeriod }) {
         <PeriodPicker year={cfg.year} period={cfg.period} onChange={onPeriod} status={cfg['数据状态']} />
       </div>
 
-      <div className="tabs">
-        <button className={'tab' + (tab === 'out' ? ' on' : '')} onClick={() => setTab('out')}>
-          <div className="t">销售出库单</div><div className="s">本月全部销售出库单、退货单（剔除内部交易）· 每张单的运费</div></button>
-        <button className={'tab' + (tab === 'v1' ? ' on' : '')} onClick={() => setTab('v1')}>
-          <div className="t">物流表 V1</div><div className="s">多文件上传 · 独立预览勾稽 · 确认后进入有效 V1</div></button>
-        <button className={'tab' + (tab === 'other' ? ' on' : '')} onClick={() => setTab('other')}>
-          <div className="t">其他单据</div><div className="s">其他出库 / 采购入库 / 调拨等 · 账单里的 ＋ 手工登记的</div></button>
-      </div>
+      {tab === 'kd' ? <KingdeeDataCenter period={period} flash={flash} /> : <LogisticsV1Upload period={period} />}
 
       {msg && <div className="msg">{msg}</div>}
-
-      {tab === 'out' && <LogisticsOutstockFreight period={period} />}
-      {tab === 'v1' && <LogisticsV1Upload period={period} />}
 
       {tab === 'other' && <div className="stats">
         <div className="stat accent"><div className="v">{data ? data.doc_count : '—'}</div><div className="l">单据张数</div></div>

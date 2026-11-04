@@ -1036,6 +1036,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     return f ? !!f[3](r) : r.status === ovf
   }
   const reloadDocs = () => { load(); loadReadiness() }
+  useEffect(() => {
+    const refresh = () => { reloadDocs(); loadL() }
+    window.addEventListener('logistics-docs-refresh', refresh)
+    return () => window.removeEventListener('logistics-docs-refresh', refresh)
+  }, [load, loadL, loadReadiness])
   const onFile = (fn, ...args) => e => {
     const f = e.target.files && e.target.files[0]; e.target.value = ''
     if (!f) return

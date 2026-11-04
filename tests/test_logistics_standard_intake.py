@@ -153,6 +153,12 @@ class IndependentStandardWorkbook(unittest.TestCase):
         self.assertEqual(round(sum(row["amount"] for row in result["detail"]), 2), 0.01)
         self.assertEqual(report["amount"], 0.0)
 
+    def test_blank_total_is_derived_from_split(self):
+        row = _row(**{"费用总额": None, "费用拆分1\n运费": 6.5, "费用拆分2\n附加费": 3.5})
+        result = lsi.parse_standard_bill(self.spec, _workbook([row]))
+        self.assertEqual(result["detail"][0]["amount"], 10)
+        self.assertEqual(json.loads(result["detail"][0]["sub_fees"]), {"运费": 6.5, "附加费": 3.5})
+
     def test_original_total_column_is_checked(self):
         data = _workbook([_row(), _row(**{"金蝶系统单据编号": "XS2"})], original_total=True)
         sheet = lsi.standard_sheet_report(self.spec, data, "2026-10")["sheets"][0]
@@ -163,7 +169,7 @@ class IndependentStandardWorkbook(unittest.TestCase):
         cases = {
             "unknown_standard": _row(**{"数量计算标准": "按未知"}),
             "missing_unit": _row(**{"数量单位": None}),
-            "missing_amount": _row(**{"费用总额": None}),
+            "missing_amount": _row(**{"费用总额": None, "费用拆分1\n运费": None, "费用拆分2\n附加费": None}),
             "invalid_amount": _row(**{"费用总额": "不是数值"}),
             "split_mismatch": _row(**{"费用拆分2\n附加费": 2}),
         }

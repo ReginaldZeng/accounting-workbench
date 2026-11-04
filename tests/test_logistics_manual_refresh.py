@@ -22,21 +22,15 @@ class ManualRefreshTests(unittest.TestCase):
         ], [], []]
 
     def test_partial_refresh_writes_only_selected_partition(self):
-        calls, writes = [], []
-        def fake_box(rows, _carrier):
-            calls.append([r["doc_no"] for r in rows])
-            return [{"doc_no": rows[0]["doc_no"], "state": "ok", "materials": []}]
-        with patch.object(self.lr, "_load_card", return_value=({}, 0)), \
-             patch.object(self.lr, "_load_spec", return_value={}), \
-             patch.object(self.lr, "_box_docs", side_effect=fake_box), \
-             patch.object(self.lr, "_refresh_classify_snapshot", return_value={"ok": True}), \
-             patch.object(self.lr, "_bust"), \
-             patch.object(self.lr.db, "set_period_input", create=True, side_effect=lambda *args: writes.append(args)), \
-             patch.object(self.lr.db, "get_period_input", create=True, return_value=None):
+        public = {"refreshed": [{"form": "SAL_OUTSTOCK", "n": 1}], "errors": {}}
+        derived = {"refreshed": [{"form": "SAL_OUTSTOCK", "n": 1}], "errors": {}, "fingerprint": "fp"}
+        with patch.object(self.lr, "_kd_refresh_public", return_value=public) as refresh, \
+             patch.object(self.lr, "_derive_documents", return_value=derived) as derive:
             result = self.lr._refresh_documents("丰源", "2026-09", ["SAL_OUTSTOCK"])
-        self.assertEqual(calls, [["XSCKD1"]])
+        self.assertEqual(refresh.call_args.args[1], ["SAL_OUTSTOCK"])
+        self.assertEqual(derive.call_args.args[2], ["SAL_OUTSTOCK"])
         self.assertEqual(result["refreshed"][0]["form"], "SAL_OUTSTOCK")
-        self.assertEqual([args[3] for args in writes], ["docs:SAL_OUTSTOCK"])
+        self.assertEqual(result["public"], public)
 
     def test_fallback_xlsx_and_material_override_never_login_kingdee(self):
         wb = Workbook()

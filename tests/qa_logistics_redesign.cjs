@@ -39,8 +39,12 @@ const rows = [
     od: { n: 1, ratio: .5, fsub: '主体乙', ffee: '出库运费', fbiz: '鲜食', blabel: '鲜食' } },
   { kind: 'gtotal', key: 'GB', subject: '主体乙', book_code: '102', amt: 20, bill: 20, diff: 0, mark: { status: 'ok', by: '已核人' } },
 ]
+const materialRows = [
+  { row_key: 'm1', subject: '主体甲', form_label: '销售出库单', doc_no: 'Q1', party: '客户甲', fee_item: '出库运费', material_group: '植物肉', code: 'M1', name: '真实物料', base_qty: 6, base_unit: '千克', sales: 100, carrier: '合成物流', fee_tr: 6, fee_ld: 3, unit_fee: 1.5, ratio: .09 },
+  { row_key: 'm2', subject: '主体甲', form_label: '销售出库单', doc_no: 'Q1', party: '客户甲', fee_item: '出库运费', material_group: '小料', code: 'M2', name: '调味小料', base_qty: 4, base_unit: '千克', sales: 50, carrier: '合成物流', fee_tr: 4, fee_ld: 2, unit_fee: 1.5, ratio: .12 },
+]
 const result = { ok: true, carrier: '合成物流', period: '2026-09', counts: {}, doc_counts: { ex: 2, qtydiff: 1, miss: 1 }, total_bill: 81,
-  detail_total: 1, detail_docs: 1, size: 50, detail: [], docs: [doc], ex_all: [], nodoc: [{ subject: '主体甲', fee_item: '仓储费', amount: 5, biz: '小料' }], by_box: true, codes: {}, facets: { subject: [['主体甲', 1]], fee: [['出库运费', 1]], biz: [['植物肉', 1]] } }
+  detail_total: 1, detail_docs: 1, size: 50, detail: [], docs: [doc], material_rows: materialRows, ex_all: [], nodoc: [{ subject: '主体甲', fee_item: '仓储费', amount: 5, biz: '小料' }], by_box: true, codes: {}, facets: { subject: [['主体甲', 1]], fee: [['出库运费', 1]], biz: [['植物肉', 1]] } }
 const readiness = { ok: true, can_sign: true, blockers: [], steps: Object.fromEntries(['intake', 'docs', 'lines', 'sign'].map(k => [k, { status: 'ok', label: '已完成', blockers: [] }])) }
 
 async function open(browser, B, resultOverride = null) {
@@ -67,6 +71,10 @@ async function open(browser, B, resultOverride = null) {
       invoices: [{ id: 1, number: 'INV1', seller: '合成物流', buyer: '主体甲公司', gross: 70, review: 'approved' }] }] }
     else if (p === '/api/logistics-review/classify') body = { ok: true, docs: [{ key: 'Q1', v: '归类一致', sys: '主体甲 · 植物肉', txt: '归类一致' }], tab: [] }
     else if (p === '/api/logistics-review/dups') body = { ok: true, docs: {} }
+    else if (p === '/api/logistics-review/doc-fees') {
+      const payload = JSON.parse(route.request().postData() || '{}')
+      body = { ok: true, amount: payload.restore ? 10 : Number(payload.fee_tr || 0) + Number(payload.fee_ld || 0) + Number(payload.fee_other || 0), derived: { refreshed: [], errors: {} } }
+    }
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) })
   })
   await page.goto(ORIGIN + '/')
@@ -115,30 +123,8 @@ async function main() {
     await page.getByText('供应商原始账单', { exact: false }).first().waitFor()
     await page.getByText('逐页金额勾稽', { exact: false }).first().waitFor()
     await page.getByText('A–J 固定取数列', { exact: false }).first().waitFor()
-    await page.getByText('金蝶取数与补核', { exact: true }).waitFor()
-    assert.match(await page.locator('.lrx-kd-panel').innerText(), /默认只读 PGSQL/)
-    await page.getByLabel('其它出库单', { exact: true }).uncheck()
-    await page.getByLabel('分布式调出单', { exact: true }).uncheck()
-    let refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/logistics-review/result' && new URL(r.url()).searchParams.get('fresh') === '1')
-    await page.getByRole('button', { name: '刷新所选类型（1）', exact: true }).click()
-    await refreshed
-    let refreshCall = calls.filter(call => call.path === '/api/logistics-review/result' && call.query.fresh === '1').at(-1)
-    assert.equal(refreshCall.query.fresh, '1')
-    assert.equal(refreshCall.query.forms, 'SAL_OUTSTOCK')
-    refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/logistics-review/result' && new URL(r.url()).searchParams.get('fresh') === '1')
-    await page.getByRole('button', { name: '刷新全部类型', exact: true }).click()
-    await refreshed
-    refreshCall = calls.filter(call => call.path === '/api/logistics-review/result' && call.query.fresh === '1').at(-1)
-    assert.equal(refreshCall.query.forms, 'SAL_OUTSTOCK,STK_MisDelivery,STK_TransferOut')
-    const choosing = page.waitForEvent('filechooser')
-    await page.getByRole('button', { name: '上传金蝶补核附件', exact: true }).click()
-    const chooser = await choosing
-    await chooser.setFiles({ name: '九月金蝶补核.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: Buffer.from('xlsx-test') })
-    await page.waitForTimeout(300)
-    const uploadCall = calls.filter(call => call.path === '/api/logistics-review/material-fallback').at(-1)
-    assert.ok(uploadCall, `补核上传未发出请求：${JSON.stringify(calls.slice(-8))}`)
-    assert.equal(uploadCall.method, 'POST')
-    assert.match(uploadCall.body, /filename="九月金蝶补核\.xlsx"/)
+    assert.equal(await page.locator('.lrx-kd-panel').count(), 0, '物流商页面不再出现专属取数上传面板')
+    assert.equal(calls.filter(call => call.path.includes('material-fallback')).length, 0, '物流商页面不得调用专属补核接口')
     await noOverflow(page, '1440px 数据接入')
 
     await step(page, 'docs')
@@ -149,6 +135,20 @@ async function main() {
     assert.match(await page.locator('.ldx-table tbody tr.ldx-row').first().innerText(), /植物肉/, '空 bbiz 不得遮蔽 bizline')
     assert.match(await metric(page, '金蝶物料已接入').innerText(), /1 \/ 1/)
     assert.match(await metric(page, '待确认逐笔行').innerText(), /2/)
+    await page.getByRole('button', { name: '物料费用', exact: true }).click()
+    await page.locator('.ldx-fee-view').waitFor()
+    assert.equal(await page.locator('.ldx-fee-view thead th').count(), 15)
+    assert.equal(await page.locator('.ldx-fee-view tbody tr').count(), 2, '一单两个物料分别展示')
+    assert.equal(await page.getByRole('button', { name: /确认本页/ }).count(), 0, '物料视图不重复提供单据确认')
+    assert.match(await page.locator('.ldx-fee-view tbody').innerText(), /植物肉[\s\S]*6[\s\S]*100\.00[\s\S]*6\.00[\s\S]*3\.00[\s\S]*1\.50[\s\S]*9\.00%/)
+    await page.getByLabel('物料分类筛选', { exact: true }).selectOption('小料')
+    assert.equal(await page.locator('.ldx-fee-view tbody tr').count(), 1)
+    assert.match(await page.locator('.ldx-fee-view tbody').innerText(), /调味小料/)
+    await page.getByRole('button', { name: '清除筛选', exact: true }).click()
+    assert.equal(await page.locator('.ldx-fee-view tbody tr').count(), 2)
+    await page.getByRole('button', { name: '单据视图', exact: true }).click()
+    assert.equal(await page.locator('.ldx-table thead th').count(), 12)
+    assert.equal(await page.getByRole('button', { name: '确认本页（1）', exact: true }).count(), 1, '两个物料仍只确认一张单')
     await page.locator('.ldx-table').getByRole('button', { name: '明细', exact: true }).first().click()
     const dialog = page.getByRole('dialog', { name: '单据 Q1' })
     await dialog.waitFor()
@@ -161,6 +161,26 @@ async function main() {
     await page.getByRole('button', { name: '展开明细', exact: true }).click()
     await page.locator('.ldx-table').getByRole('button', { name: '展开', exact: true }).first().click()
     await page.getByText('真实物料', { exact: true }).waitFor()
+    await page.getByLabel('运输费用', { exact: true }).fill('7')
+    await page.getByLabel('装卸费用', { exact: true }).fill('2')
+    await page.getByLabel('其他费用', { exact: true }).fill('1')
+    let resultCalls = calls.filter(call => call.path === '/api/logistics-review/result').length
+    let feeResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/logistics-review/doc-fees')
+    await page.getByRole('button', { name: '保存拆分', exact: true }).click()
+    await feeResponse
+    let feeCall = calls.filter(call => call.path === '/api/logistics-review/doc-fees').at(-1)
+    assert.deepEqual(JSON.parse(feeCall.body), { carrier: '合成物流', period: '2026-09', lid: 1, fee_tr: 7, fee_ld: 2, fee_other: 1, restore: false })
+    await page.waitForTimeout(150)
+    assert.ok(calls.filter(call => call.path === '/api/logistics-review/result').length > resultCalls, '保存后自动刷新单据与物料')
+    assert.ok(calls.some(call => call.path === '/api/logistics-review/lines'), '保存后自动刷新逐笔计提')
+    resultCalls = calls.filter(call => call.path === '/api/logistics-review/result').length
+    feeResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/logistics-review/doc-fees')
+    await page.getByRole('button', { name: '恢复账单原值', exact: true }).click()
+    await feeResponse
+    feeCall = calls.filter(call => call.path === '/api/logistics-review/doc-fees').at(-1)
+    assert.equal(JSON.parse(feeCall.body).restore, true)
+    await page.waitForTimeout(150)
+    assert.ok(calls.filter(call => call.path === '/api/logistics-review/result').length > resultCalls, '恢复后同样自动刷新')
     await page.getByRole('button', { name: '打开完整处理', exact: true }).click()
     await dialog.waitFor()
     await dialog.getByRole('button', { name: '关闭', exact: true }).last().click()

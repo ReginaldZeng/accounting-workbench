@@ -127,12 +127,16 @@ def _parse_sheet(ws, period, carrier, bill_src):
         if standard not in _QTY_STANDARDS:
             _error(ws.title, src_row, "未知数量计算标准%s" % standard)
         qty = _number(qty_raw, "账单数量", ws.title, src_row)
-        amount = _number(amount_raw, "费用总额", ws.title, src_row, required=True)
+        amount = _number(amount_raw, "费用总额", ws.title, src_row)
         has_split = bool(_s(freight_raw) or _s(surcharge_raw))
         freight = _number(freight_raw, "费用拆分1（运费）", ws.title, src_row)
         surcharge = _number(surcharge_raw, "费用拆分2（附加费）", ws.title, src_row)
         freight = 0.0 if freight is None else freight
         surcharge = 0.0 if surcharge is None else surcharge
+        if amount is None:
+            if not has_split:
+                _error(ws.title, src_row, "费用总额不能为空")
+            amount = freight + surcharge
         if has_split and abs(amount - freight - surcharge) > 0.005:
             _error(ws.title, src_row, "费用拆分不满足G=H+I：费用总额%s，运费%s，附加费%s" % (
                 amount, freight, surcharge))

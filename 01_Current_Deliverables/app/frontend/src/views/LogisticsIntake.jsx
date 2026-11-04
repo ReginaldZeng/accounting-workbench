@@ -9,10 +9,9 @@
 // [Change Log] Date:2026-10-24 Author:Kimi Version:V2.1004
 // ① 数据接入改为“金额勾稽＋待办＋每页核对”；④ 改为请款单队列＋单张审票，金额/销购方/审核/后补统一形成结论。
 import React, { useEffect, useRef, useState } from 'react'
-import { reviewIntakeOverview, reviewReparse, reviewRawUrl, invAuditItemsApprove, invFolder, reviewOriginalFiles, reviewOriginalUpload, reviewOriginalDelete, reviewOriginalUrl } from '../api.js'
+import { reviewIntakeOverview, reviewReparse, reviewRawUrl, reviewStandardBillUrl, invAuditItemsApprove, invFolder, reviewOriginalFiles, reviewOriginalUpload, reviewOriginalDelete, reviewOriginalUrl } from '../api.js'
 import { Modal, InvViewer } from './invShared.jsx'
 import { BottomNav } from './LogisticsReviewLayout.jsx'
-import KingdeeDataPanel from './KingdeeDataPanel.jsx'
 import './logisticsIntakeRedesign.css'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -280,13 +279,11 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
               <div className="lir-source-actions"><a className="lrx-btn" href={reviewRawUrl(data.carrier, period, f.src)} target="_blank" rel="noopener">下载</a><button className="lrx-btn" disabled={!!locked || !!busy} title={locked || '用新文件替换这一份，其他账单不动'} onClick={() => onOpenBills(f.src)}>替换</button><button className="lrx-btn" disabled={!!locked || !!busy} title={locked || '用保存的原件按当前取数说明重新解析'} onClick={() => reparse(f)}>{busy === 're' + f.id ? '解析中…' : '重新解析'}</button></div>
             </div>
           })}</div>}
-          <div className="lir-file-actions"><button className="lrx-btn primary" disabled={!!locked || !data.has_spec} title={locked || (!data.has_spec ? '请先配置取数说明' : '上传、替换或删除标准账单')} onClick={onOpenBills}>上传 / 替换 / 删除标准账单</button></div>
+          <div className="lir-file-actions"><button className="lrx-btn primary" disabled={!!locked || !data.has_spec} title={locked || (!data.has_spec ? '请先配置取数说明' : '上传、替换或删除标准账单')} onClick={onOpenBills}>上传 / 替换 / 删除标准账单</button>{(data.bills || []).length > 0 && <a className="lrx-btn" href={reviewStandardBillUrl(data.carrier, period)} target="_blank" rel="noopener" title="按当前账单与人工费用修正重新生成，严格保持 A–J 十列">导出当前 A–J</a>}</div>
         </article>
         <OriginalFiles carrier={data.carrier} period={period} locked={locked} flash={flash} />
       </div>
     </section>
-
-    <KingdeeDataPanel carrier={data.carrier} period={period} locked={locked} onChanged={onChanged} flash={flash} />
 
     <section className="lrx-panel lir-recon">
       <div className="lrx-panel-head"><div><h2>逐页金额勾稽</h2><small>仅列计费明细页；说明页与汇总页不重复计入</small></div><div className="lrx-panel-actions"><span className={'lrx-tag ' + (sheetReady ? 'ok' : detailRows.some(x => x.bad) || dupRows ? 'bad' : 'pending')}>{sheetReady ? `合计 ${money(readTotal)}` : dupRows ? `发现 ${dupRows} 行重复` : '逐页待核对'}</span><button className={'lrx-btn' + (onlyBad ? ' primary' : '')} disabled={!detailRows.length} onClick={() => setOnlyBad(!onlyBad)}>{onlyBad ? '查看全部' : '只看异常'}</button></div></div>

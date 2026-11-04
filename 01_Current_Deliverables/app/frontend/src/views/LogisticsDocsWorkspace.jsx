@@ -1,6 +1,7 @@
 // [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1047 第②步十二列逐单工作区，支持全量与服务端分页两种口径。
 import React, { Fragment, useEffect, useMemo, useState } from 'react'
 import { annotSourceText, Cell2, DiffCell, judge } from './LogisticsDocPanel.jsx'
+import { reviewDocFees } from '../api.js'
 import './logisticsDocsWorkspace.css'
 
 const PAGE_SIZE = 50
@@ -116,11 +117,68 @@ function ClassificationSummary({ value }) {
   </div>
 }
 
-function InlineDetail({ row, result, classification, onOpen }) {
+const pct = value => value == null || !Number.isFinite(Number(value)) ? '—' : (Number(value) * 100).toFixed(2) + '%'
+
+function MaterialFeeTable({ rows }) {
+  const [page, setPage] = useState(1)
+  const [filters, setFilters] = useState({ query: '', subject: '', fee: '', group: '', carrier: '' })
+  const options = key => [...new Set((rows || []).map(row => row[key]).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'))
+  const filtered = useMemo(() => (rows || []).filter(row => {
+    if (filters.subject && row.subject !== filters.subject) return false
+    if (filters.fee && row.fee_item !== filters.fee) return false
+    if (filters.group && row.material_group !== filters.group) return false
+    if (filters.carrier && row.carrier !== filters.carrier) return false
+    const needle = filters.query.trim().toLowerCase()
+    return !needle || [row.doc_no, row.party, row.code, row.name, row.carrier, row.material_group].filter(Boolean).join(' ').toLowerCase().includes(needle)
+  }), [rows, filters])
+  useEffect(() => { setPage(1) }, [filters, rows])
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const visiblePage = Math.min(page, pages)
+  const current = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE)
+  const change = (key, value) => setFilters(old => ({ ...old, [key]: value }))
+  const clear = () => setFilters({ query: '', subject: '', fee: '', group: '', carrier: '' })
+  return <section className="lrx-panel ldx-panel">
+    <div className="ldx-material-note">每行一个物料及对应账单来源；运输与装卸按基本数量分摊，未挂账显示“—”。确认和金额汇总仍按原账单行。</div>
+    <div className="ldx-filter-grid ldx-material-filters">
+      <label>单号 / 往来 / 物料<input aria-label="物料费用关键字" type="search" value={filters.query} placeholder="输入单号、客户、编码或名称" onChange={event => change('query', event.target.value)} /></label>
+      <label>主体<select aria-label="物料主体" value={filters.subject} onChange={event => change('subject', event.target.value)}><option value="">全部主体</option>{options('subject').map(value => <option key={value}>{value}</option>)}</select></label>
+      <label>费用类型<select aria-label="物料费用类型" value={filters.fee} onChange={event => change('fee', event.target.value)}><option value="">全部费用类型</option>{options('fee_item').map(value => <option key={value}>{value}</option>)}</select></label>
+      <label>物料分类<select aria-label="物料分类筛选" value={filters.group} onChange={event => change('group', event.target.value)}><option value="">全部物料分类</option>{options('material_group').map(value => <option key={value}>{value}</option>)}</select></label>
+      <label>承运商<select aria-label="物料承运商" value={filters.carrier} onChange={event => change('carrier', event.target.value)}><option value="">全部承运商</option>{options('carrier').map(value => <option key={value}>{value}</option>)}</select></label>
+      <button type="button" className="lrx-btn ldx-clear" onClick={clear}>清除筛选</button>
+    </div>
+    <div className="lrx-table-scroll ldx-table-scroll"><table className="lrx-table ldx-table ldx-fee-view"><thead><tr><th>主体</th><th>类型</th><th>单号</th><th>往来 / 领用部门</th><th>物料分类</th><th>物料编码</th><th>物料名称</th><th className="num">基本数量</th><th>基本数量单位</th><th className="num">销售额</th><th>承运商</th><th className="num">运输费用</th><th className="num">装卸费用</th><th className="num">合计单位费用</th><th className="num">费比</th></tr></thead>
+      <tbody>{current.length ? current.map(row => <tr key={row.row_key}><td>{text(row.subject)}</td><td>{text(row.form_label)}</td><td className="lrx-code">{text(row.doc_no)}</td><td>{text(row.party)}{row.org && <span className="lrx-cell-meta">{row.org}</span>}</td><td>{text(row.material_group)}</td><td className="lrx-code">{text(row.code)}</td><td>{text(row.name)}</td><td className="num">{num(row.base_qty)}</td><td>{text(row.base_unit)}</td><td className="num">{money(row.sales)}</td><td>{text(row.carrier)}</td><td className="num">{money(row.fee_tr)}</td><td className="num">{money(row.fee_ld)}</td><td className="num">{money(row.unit_fee)}</td><td className="num">{pct(row.ratio)}</td></tr>) : <tr><td colSpan="15" className="lrx-empty">当前筛选下没有物料费用行</td></tr>}</tbody></table></div>
+    <div className="ldx-pagination"><span>共 {filtered.length} 条物料 · 第 {visiblePage}/{pages} 页</span><span className="lrx-spacer" /><button type="button" className="lrx-btn" disabled={visiblePage <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>上一页</button><button type="button" className="lrx-btn" disabled={visiblePage >= pages} onClick={() => setPage(p => Math.min(pages, p + 1))}>下一页</button></div>
+  </section>
+}
+
+function FeeEditor({ row, carrier, period, locked, onChanged }) {
+  const sf = row.sub_fees || {}, handling = /装|卸|搬运/.test(row.fee_item || '')
+  const initial = () => ({ fee_tr: sf['运费'] ?? (handling ? 0 : row.doc_fee || 0), fee_ld: sf['装卸费'] ?? (handling ? row.doc_fee || 0 : 0), fee_other: sf['其他费用'] ?? 0 })
+  const [form, setForm] = useState(initial), [busy, setBusy] = useState(''), [msg, setMsg] = useState('')
+  useEffect(() => { setForm(initial()); setMsg('') }, [row.lid, row.doc_fee, sf['运费'], sf['装卸费'], sf['其他费用']])
+  const save = async restore => {
+    setBusy(restore ? 'restore' : 'save'); setMsg('')
+    try {
+      const result = await reviewDocFees(carrier, period || '', row.lid, form, restore)
+      setMsg(`已${restore ? '恢复账单原值' : '保存并重新派生'}，合计 ${money(result.amount)}`)
+      onChanged?.(result)
+    } catch (e) { setMsg(e.message) } finally { setBusy('') }
+  }
+  const change = (key, value) => setForm(old => ({ ...old, [key]: value === '' ? 0 : Number(value) }))
+  const total = Number(form.fee_tr || 0) + Number(form.fee_ld || 0) + Number(form.fee_other || 0)
+  return <section className="ldx-inline-section"><h4>费用拆分 <span>原账单行 · 保存后重算</span></h4><div className="ldx-fee-editor">
+    {['fee_tr', 'fee_ld', 'fee_other'].map((key, index) => <label key={key}>{['运输费用', '装卸费用', '其他费用'][index]}<input type="number" step="0.01" disabled={locked || !!busy} value={form[key]} onChange={e => change(key, e.target.value)} /></label>)}
+    <div><b>合计 {money(total)}</b><span className="lrx-cell-meta">G = H + I</span></div>
+    <div className="ldx-row-actions"><button type="button" className="lrx-btn primary" disabled={locked || !!busy || !row.lid} onClick={() => save(false)}>{busy === 'save' ? '保存中…' : '保存拆分'}</button><button type="button" className="lrx-btn" disabled={locked || !!busy || !row.lid} onClick={() => save(true)}>{busy === 'restore' ? '恢复中…' : '恢复账单原值'}</button></div>
+    {msg && <span className="lrx-cell-meta">{msg}</span>}
+  </div></section>
+}
+
+function InlineDetail({ row, result, classification, onOpen, onChanged, carrier, period, locked }) {
   const materials = row.materials || []
   const hasMaterials = Number(row.n_mat || 0) > 0 || materials.some(material => material.code)
-  const fees = Object.entries(row.sub_fees || {}).filter(([name, value]) => typeof value === 'number' && value && !['标准', '核价差'].includes(name))
-  const feeRows = fees.length ? fees : [[row.fee_item || '费用', row.doc_fee]]
   return <div className="ldx-inline">
     <div className="ldx-inline-head"><div><b>{text(result.v)}</b><span>{text(result.why)}</span></div><button type="button" className="lrx-btn primary" onClick={() => onOpen?.(row)}>打开完整处理</button></div>
     <div className="ldx-judge-grid">
@@ -129,7 +187,7 @@ function InlineDetail({ row, result, classification, onOpen }) {
       <section><h4>复核差额</h4><DiffCell j={result} /><span className="lrx-cell-meta">复核金额：{result.rv == null ? '待定' : money(result.rv)}</span></section>
       <section><h4>数量标准</h4><b>{text(standardOf(row))}</b><span className="lrx-cell-meta">{text(row.bill_unit)} · 账单数量 {num(row.bill_amt)}</span></section>
     </div>
-    <section className="ldx-inline-section"><h4>费用拆分</h4><div className="ldx-inline-scroll"><table className="lrx-table ldx-fee-table"><thead><tr><th>费用项</th><th className="num">账单金额</th></tr></thead><tbody>{feeRows.map(([name, value]) => <tr key={name}><td>{text(name)}</td><td className="num">{money(value)}</td></tr>)}</tbody><tfoot><tr><td>账单合计</td><td className="num">{money(row.doc_fee)}</td></tr></tfoot></table></div></section>
+    <FeeEditor row={row} carrier={carrier} period={period} locked={locked} onChanged={onChanged} />
     <section className="ldx-inline-section"><h4>金蝶物料 <span>{hasMaterials ? `${materials.length} 行 · 只读 WebAPI 结果` : '查无可展示物料'}</span></h4>
       {hasMaterials ? <div className="ldx-inline-scroll"><table className="lrx-table ldx-material-table"><thead><tr><th>物料编码 / 名称</th><th>规格</th><th className="num">基本单位数量</th><th className="num">核对量</th><th>折合信息</th><th className="num">分摊运费</th><th className="num">销售额</th></tr></thead><tbody>{materials.map((material, index) => <tr key={`${material.code || 'material'}-${index}`}>
         <td><span className="lrx-code">{text(material.code)}</span><b className="ldx-material-name">{text(material.name)}</b>{material.is_pack && <span className="lrx-cell-meta">包材 · 不计核对量</span>}</td>
@@ -166,6 +224,8 @@ export default function LogisticsDocsWorkspace({
   const fullMode = Boolean(full && allD && Array.isArray(allD.docs))
   const serverPage = Math.max(1, Number(page) || Number(d?.page) || 1)
   const currentDocs = d?.by_box === false ? legacyDocsOf(d?.detail) : Array.isArray(docsProp) ? docsProp : (d?.docs || [])
+  const materialRows = fullMode ? (allD.material_rows || []) : (d?.material_rows || [])
+  const [dataView, setDataView] = useState('docs')
   const [segment, setSegment] = useState('all')
   const [view, setView] = useState('modal')
   const [query, setQuery] = useState(q || '')
@@ -269,6 +329,7 @@ export default function LogisticsDocsWorkspace({
 
   return <div className="ldx">
     <div className="lrx-toolbar ldx-toolbar">
+      <div className="lrx-seg" aria-label="数据视图"><button type="button" aria-pressed={dataView === 'docs'} className={dataView === 'docs' ? 'active' : ''} onClick={() => setDataView('docs')}>单据视图</button><button type="button" aria-pressed={dataView === 'material'} className={dataView === 'material' ? 'active' : ''} onClick={() => setDataView('material')}>物料费用</button></div>
       <div className="lrx-seg" aria-label="逐单任务">
         <button type="button" aria-pressed={segment === 'all'} className={segment === 'all' ? 'active' : ''} onClick={() => changeSegment('all')}>全部逐笔 <b>{counts.all}</b></button>
         <button type="button" aria-pressed={segment === 'pending'} className={segment === 'pending' ? 'active' : ''} onClick={() => changeSegment('pending')}>待确认 <b>{counts.pending}</b></button>
@@ -279,10 +340,10 @@ export default function LogisticsDocsWorkspace({
         <button type="button" aria-pressed={view === 'inline'} className={view === 'inline' ? 'active' : ''} onClick={() => changeView('inline')}>展开明细</button>
       </div>
       <span className="lrx-spacer" />
-      <button type="button" className="lrx-btn" disabled={locked || isBusy || !confirmNos.length} onClick={() => onConfirm?.(confirmNos, true)}>{confirming ? '确认中…' : `确认本页${confirmNos.length ? `（${confirmNos.length}）` : ''}`}</button>
+      {dataView === 'docs' && <button type="button" className="lrx-btn" disabled={locked || isBusy || !confirmNos.length} onClick={() => onConfirm?.(confirmNos, true)}>{confirming ? '确认中…' : `确认本页${confirmNos.length ? `（${confirmNos.length}）` : ''}`}</button>}
     </div>
 
-    <section className="lrx-panel ldx-panel">
+    {dataView === 'docs' ? <section className="lrx-panel ldx-panel">
       {(dfilt && (dfilt.from || sourceLabel)) && <div className="ldx-source-filter"><span>来源回跳筛选：<b>{text(sourceLabel)}</b>{dfilt.from === 'lines' && '（来自逐笔计提复核）'}</span><div>{onBackLines && <button type="button" className="lrx-btn subtle" onClick={onBackLines}>‹ 回逐笔计提复核</button>}<button type="button" className="lrx-btn subtle" onClick={clearFilters}>清除筛选</button></div></div>}
       {!fullMode && <div className="ldx-scope-note" role="note">{full ? '全量清单尚未取到，当前仅展示父级已取列表。' : '服务端分页：关键字、主体、费用类型和产品分类由后端查询。'}分段、数量标准和确认状态只筛选当前已取列表，不代表全月数量；无单号费用在“全部逐笔”第 1 页或“无金蝶单号”分段查看。</div>}
       <div className="ldx-filter-grid">
@@ -323,13 +384,13 @@ export default function LogisticsDocsWorkspace({
                 <td>{noDoc ? <><span className="lrx-tag info">无单号 · 只读</span><span className="lrx-cell-meta">不参与单据确认</span></> : <><span className={'lrx-tag ' + (row.confirmed ? 'ok' : 'pending')}>{row.confirmed ? '已确认' : '待确认'}</span><span className="lrx-cell-meta" title={row.confirmed ? `${row.confirmed.by || ''} ${row.confirmed.at || ''}` : result.why}>{result.v}</span></>}</td>
                 <td>{noDoc ? <span className="lrx-muted">—</span> : <div className="ldx-row-actions">{view === 'modal' && <button type="button" className="lrx-btn subtle" onClick={() => onOpen?.(row)}>处理</button>}<button type="button" className="lrx-btn subtle" disabled={locked || isBusy} onClick={() => onConfirm?.([row.doc_no], !row.confirmed)}>{row.confirmed ? '撤销' : '确认'}</button></div>}</td>
               </tr>
-              {isExpanded && <tr className="ldx-expanded-row"><td colSpan="12"><InlineDetail row={row} result={result} classification={cls?.[row.doc_no] || row.classification || row.cls} onOpen={onOpen} /></td></tr>}
+              {isExpanded && <tr className="ldx-expanded-row"><td colSpan="12"><InlineDetail row={row} result={result} classification={cls?.[row.doc_no] || row.classification || row.cls} onOpen={onOpen} onChanged={() => { window.dispatchEvent(new CustomEvent('logistics-docs-refresh')) }} carrier={d?.carrier} period={d?.period} locked={locked} /></td></tr>}
             </Fragment>
           }) : <tr><td colSpan="12" className="lrx-empty">{!d && !fullMode ? '读取逐单结果中…' : d?.err || '当前筛选下没有逐笔行'}</td></tr>}</tbody>
         </table>
       </div>
       <div className="ldx-pagination"><span>{paginatedLocally ? `${filteredRows.length} 行 · 每页 ${PAGE_SIZE} 行 · 第 ${visiblePage}/${pageCount} 页` : `服务端共 ${serverTotal} 行 · 当前可见 ${pageRows.length} 行 · 第 ${visiblePage}/${pageCount} 页`}</span><span className="lrx-spacer" /><button type="button" className="lrx-btn" disabled={visiblePage <= 1 || isBusy} onClick={() => goPage(visiblePage - 1)}>上一页</button><button type="button" className="lrx-btn" disabled={visiblePage >= pageCount || isBusy} onClick={() => goPage(visiblePage + 1)}>下一页</button></div>
-    </section>
+    </section> : <MaterialFeeTable rows={materialRows} />}
 
     {advanced != null && advanced !== false && <details className="lrx-panel lrx-detail-toggle ldx-advanced"><summary>高级功能 <small>规则、批量操作与旧版核对入口</small></summary><div className="ldx-advanced-body">{advanced}</div></details>}
   </div>
