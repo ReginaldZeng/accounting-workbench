@@ -145,7 +145,7 @@ async function open(browser, B, state) {
   return { page, ctx, calls, errors }
 }
 
-const step = (page, name) => page.locator('.steps .stepbtn').filter({ hasText: name }).click()
+const step = (page, name) => page.locator('.lrx-steps .lrx-step').filter({ hasText: name }).click()
 const count = (calls, path, period) => calls.filter(c => c.path === path && (!period || c.period === period)).length
 
 async function resultRetry(browser, B) {
@@ -176,11 +176,11 @@ async function staleLines(browser, B) {
     assert.equal(count(calls, '/api/logistics-review/lines', '2026-09'), 1, '旧账期逐笔请求应已开始')
     await page.evaluate(() => window.__setPeriod(2026, 10))
     await step(page, '逐笔计提复核')
-    await page.getByText('V-2026-10', { exact: true }).waitFor()
+    await page.locator('.ltbl').getByText('V-2026-10', { exact: true }).waitFor()
     release()
     await sleep(300)
-    assert.equal(await page.getByText('V-2026-09', { exact: true }).count(), 0, '旧账期慢响应不能覆盖新账期')
-    assert.equal(await page.getByText('V-2026-10', { exact: true }).count(), 1)
+    assert.equal(await page.locator('.ltbl').getByText('V-2026-09', { exact: true }).count(), 0, '旧账期慢响应不能覆盖新账期')
+    assert.equal(await page.locator('.ltbl').getByText('V-2026-10', { exact: true }).count(), 1)
     assert.deepEqual(errors, [])
   } finally { release(); await ctx.close() }
 }
@@ -198,7 +198,7 @@ async function stepRetries(browser, B) {
     await page.getByText('合成逐笔502', { exact: false }).waitFor()
     await page.locator('.msg').filter({ hasText: '合成逐笔502' }).getByRole('button', { name: '重试' }).click()
     assert.equal(await page.getByText('合成逐笔502', { exact: false }).count(), 0, '逐笔重试不能保留旧错误')
-    await page.getByText('V-2026-09', { exact: true }).waitFor()
+    await page.locator('.ltbl').getByText('V-2026-09', { exact: true }).waitFor()
 
     await step(page, '发票审核')
     await page.getByText('合成检查502', { exact: false }).waitFor()
@@ -253,7 +253,7 @@ async function lineTasks(browser, B) {
   const rows = page.locator('.ltbl tbody tr:not(.ghead):not(.total)')
   try {
     await step(page, '逐笔计提复核')
-    await page.getByText('V-A1', { exact: true }).waitFor()
+    await page.locator('.ltbl').getByText('V-A1', { exact: true }).waitFor()
     const a1 = page.locator('.ltbl tbody tr').filter({ hasText: 'V-A1' })
     assert.match(await a1.innerText(), /账单归属：主体甲 · 植物肉/)
     assert.match(await a1.getByText('人工调', { exact: true }).getAttribute('title'), /主体→主体甲；业务线→植物肉；原因：特批调整/)
@@ -262,19 +262,19 @@ async function lineTasks(browser, B) {
     assert.equal(await page.locator('[data-line-task="subject"] b').innerText(), '1')
     await page.locator('[data-line-task="fixes"]').click()
     assert.equal(await rows.count(), 1)
-    await page.getByText('V-A2', { exact: true }).waitFor()
-    assert.equal(await page.getByText('V-A1', { exact: true }).count(), 0)
+    await page.locator('.ltbl').getByText('V-A2', { exact: true }).waitFor()
+    assert.equal(await page.locator('.ltbl').getByText('V-A1', { exact: true }).count(), 0)
     assert.equal(await rows.first().locator('td[rowspan="1"]').count(), 3, '非锚点更正行筛出后提升为锚点，三列rowspan均为1')
     assert.match(await rows.first().innerText(), /40\.00/, '提升后的锚点保留原账单金额')
     assert.match(await page.locator('.ltbl tr.ghead').innerText(), /40\.00[\s\S]*50\.00[\s\S]*10\.00/, '组头合计不随筛选重算')
     await page.locator('[data-line-task="unexpl"]').click()
     assert.equal(await rows.count(), 1)
-    await page.getByText('V-A1', { exact: true }).waitFor()
+    await page.locator('.ltbl').getByText('V-A1', { exact: true }).waitFor()
     assert.equal(await rows.first().locator('td[rowspan="1"]').count(), 3)
     await page.locator('[data-line-task="subject"]').click()
     assert.equal(await rows.count(), 3, '主体任务保留该主体的全部明细')
     assert.equal(await page.locator('.ltbl tr.ghead').count(), 1)
-    assert.equal(await page.getByText('V-B1', { exact: true }).count(), 0)
+    assert.equal(await page.locator('.ltbl').getByText('V-B1', { exact: true }).count(), 0)
     assert.equal(await rows.first().locator('td[rowspan="2"]').count(), 3, '主体筛选保留原合并组跨度')
     assert.match(await page.locator('.lrv-line-tasks').innerText(), /合计仍为原始全量/)
     assert.deepEqual(errors, [])
