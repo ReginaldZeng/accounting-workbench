@@ -4216,12 +4216,16 @@ def _derive_documents(carrier, period, forms):
             (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
     fingerprints = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
     locked = bool(_signed(carrier, period))
-    refreshed, errors = [], {}
+    refreshed, errors, checks = [], {}, []
     for form in forms:
         subrows = [r for r in rows if _doc_form(r.get("doc_no")) == form]
         old = _docs_snapshot_read(carrier, period, fingerprints[form], form)
         nos = {str(r.get("doc_no") or "").split("+")[0] for r in subrows if r.get("doc_no")}
         public, materials = _kd_material_subset(period, form, nos)
+        checks.append({"form": form, "rows": len(subrows), "locked": locked, "public": bool(public),
+                       "public_docs": len((public or {}).get("payload", {}).get("materials") or {}),
+                       "old": bool(old), "old_version": (old or {}).get("payload", {}).get("material_version"),
+                       "public_version": (public or {}).get("payload", {}).get("material_version")})
         if locked or (old and (not public or old["payload"].get("material_version") == public["payload"]["material_version"])):
             continue
         if not public:
@@ -4236,7 +4240,7 @@ def _derive_documents(carrier, period, forms):
             errors[form] = str(e)[:200]
     if refreshed:
         _bust(carrier, period)
-    return {"refreshed": refreshed, "errors": errors, "fingerprint": fingerprints["legacy"]}
+    return {"refreshed": refreshed, "errors": errors, "fingerprint": fingerprints["legacy"], "checks": checks}
 
 
 def _docs_snapshot_merged(carrier, period, fingerprint, forms=None):
@@ -5051,7 +5055,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         if not snapshot_sources and required_forms:
             return {"ok": True, "needs_refresh": snapshot_missing or required_forms, "docs": [], "detail_total": 0,
                     "total_bill": total_bill, "warning": "尚未从金蝶取数，请人工刷新或上传补核附件", "refresh_errors": refresh_errors,
-                    "refreshed": refresh_report["refreshed"] if refresh_report else []}
+                    "refreshed": refresh_report["refreshed"] if refresh_report else [],
+                    "derive_checks": refresh_report.get("checks", []) if refresh_report else []}
         if full:
             pool = snapshot_pool
             for x in pool:                    # 缓存里的单据每次重挂确认态
