@@ -9,26 +9,31 @@ const money = value => value == null || value === '' || !Number.isFinite(Number(
 const num = (value, digits = 3) => value == null || value === '' || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString('zh-CN', { maximumFractionDigits: digits })
 const text = value => value == null || String(value).trim() === '' ? '—' : String(value)
 const standardOf = row => row.qty_standard || row.mode_short || ''
-const productOf = row => row.bbiz || row.bizline || row.biz_bill || ''
+const productOf = (row, classification) => {
+  const original = row.bbiz || row.bizline || row.biz_bill
+  if (original) return original
+  const derived = classification && (classification.bill || classification.sys)
+  return derived ? derived.split(' · ').slice(1).join(' · ') : ''
+}
 const facetsOf = dfilt => ({ fsub: dfilt?.fsub || '', ffee: dfilt?.ffee || '', fbiz: dfilt?.fbiz || '' })
 
-function searchText(row) {
+function searchText(row, classification) {
   return [
-    row.doc_no, row.subject, row.fee_item, productOf(row), row.note, row.mode_cn, row.mode_short,
+    row.doc_no, row.subject, row.fee_item, productOf(row, classification), row.note, row.mode_cn, row.mode_short,
     ...(row.parties || []),
     ...(row.materials || []).flatMap(material => [material.name, material.code, material.party]),
   ].filter(Boolean).join(' ').toLowerCase()
 }
 
-function matchesFacet(row, key, value) {
+function matchesFacet(row, key, value, classification) {
   if (!value) return true
   if (key === 'fsub') return (row.subject || '') === value
   if (key === 'ffee') return (row.fee_item || '') === value
   const selected = value.split('|').map(item => item === '-' ? '' : item)
-  return selected.includes(String(productOf(row) || ''))
+  return selected.includes(String(productOf(row, classification) || ''))
 }
 
-function facetOptions(rows, key, serverFacets, current) {
+function facetOptions(rows, key, serverFacets, current, cls = {}) {
   const field = { fsub: 'subject', ffee: 'fee', fbiz: 'biz' }[key]
   const counts = new Map()
   if (serverFacets) {
@@ -36,7 +41,7 @@ function facetOptions(rows, key, serverFacets, current) {
   } else {
     rows.forEach(({ row, noDoc }) => {
       if (noDoc) return
-      const raw = key === 'fbiz' ? productOf(row) : key === 'fsub' ? row.subject : row.fee_item
+      const raw = key === 'fbiz' ? productOf(row, cls[row.doc_no]) : key === 'fsub' ? row.subject : row.fee_item
       const value = key === 'fbiz' ? (raw || '-') : (raw || '')
       counts.set(value, (counts.get(value) || 0) + 1)
     })
@@ -185,18 +190,18 @@ export default function LogisticsDocsWorkspace({
   const optionRows = fullMode ? fetchedRows : wrapDocs(currentDocs, false, serverPage)
   const subjectOptions = useMemo(() => facetOptions(optionRows, 'fsub', fullMode ? null : d?.facets?.subject, activeFacets.fsub), [optionRows, fullMode, d?.facets, activeFacets.fsub])
   const feeOptions = useMemo(() => facetOptions(optionRows, 'ffee', fullMode ? null : d?.facets?.fee, activeFacets.ffee), [optionRows, fullMode, d?.facets, activeFacets.ffee])
-  const bizOptions = useMemo(() => facetOptions(optionRows, 'fbiz', fullMode ? null : d?.facets?.biz, activeFacets.fbiz), [optionRows, fullMode, d?.facets, activeFacets.fbiz])
+  const bizOptions = useMemo(() => facetOptions(optionRows, 'fbiz', fullMode ? null : d?.facets?.biz, activeFacets.fbiz, cls), [optionRows, fullMode, d?.facets, activeFacets.fbiz, cls])
   const standardOptions = useMemo(() => [...new Set(fetchedRows.map(({ row }) => standardOf(row)).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN')), [fetchedRows])
 
   const filteredBeforeSegment = useMemo(() => fetchedRows.filter(item => {
     const { row, noDoc } = item
     const needle = query.trim().toLowerCase()
-    if ((fullMode || noDoc) && needle && !searchText(row).includes(needle)) return false
-    if (fullMode && !Object.keys(EMPTY_FACETS).every(key => matchesFacet(row, key, activeFacets[key]))) return false
+    if ((fullMode || noDoc) && needle && !searchText(row, cls[row.doc_no]).includes(needle)) return false
+    if (fullMode && !Object.keys(EMPTY_FACETS).every(key => matchesFacet(row, key, activeFacets[key], cls[row.doc_no]))) return false
     if (standard && standardOf(row) !== standard) return false
     if (status && (noDoc || (status === 'confirmed') !== Boolean(row.confirmed))) return false
     return true
-  }), [fetchedRows, fullMode, query, activeFacets.fsub, activeFacets.ffee, activeFacets.fbiz, standard, status])
+  }), [fetchedRows, fullMode, query, activeFacets.fsub, activeFacets.ffee, activeFacets.fbiz, standard, status, cls])
 
   const counts = useMemo(() => ({
     all: filteredBeforeSegment.length,
@@ -308,7 +313,7 @@ export default function LogisticsDocsWorkspace({
                 <td><b className="ldx-doc-no">{noDoc ? '无金蝶单号' : text(row.doc_no)}</b><span className="lrx-cell-meta">{noDoc ? text(row.note) : text(parties)}{!noDoc && row.trips > 1 ? ` · 账单 ${row.trips} 行` : ''}</span></td>
                 <td>{text(row.subject)}{row.subject_pending && <span className="lrx-cell-meta ldx-warning">主体待指定</span>}</td>
                 <td>{text(row.fee_item)}</td>
-                <td>{text(productOf(row))}{row.biz_ovr && <span className="lrx-cell-meta">人工归类{row.biz_bill ? ` · 账单原值 ${row.biz_bill || '空'}` : ''}</span>}</td>
+                <td>{text(productOf(row, cls?.[row.doc_no] || row.classification || row.cls))}{row.biz_ovr && <span className="lrx-cell-meta">人工归类{row.biz_bill ? ` · 账单原值 ${row.biz_bill || '空'}` : ''}</span>}</td>
                 <td>{text(standardOf(row))}</td>
                 <td className="num">{num(row.bill_amt)} {row.bill_unit || ''}</td>
                 <td>{noDoc ? '—' : row.kd_sum != null && Number.isFinite(Number(row.kd_sum)) ? <>{num(row.kd_sum)} {row.kd_unit || ''}<span className="lrx-cell-meta">{Number(row.n_mat || 0)} 行物料</span></> : <><span className={row.state === 'miss' ? 'ldx-warning' : ''}>{row.state === 'miss' ? '查无' : '—'}</span><span className="lrx-cell-meta">{text(result.q.top)}</span></>}</td>

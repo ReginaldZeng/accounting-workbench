@@ -26,7 +26,7 @@ createRoot(document.getElementById('root')).render(<LogisticsReview cfg={{year:2
 
 const doc = { lid: 1, doc_no: 'Q1', doc_fee: 10, bill_amt: 10, bill_unit: '千克', kd_sum: 10, kd_unit: '千克', state: 'ok',
   qty_standard: '按重量', sub_fees: { 运费: 10 }, materials: [{ code: 'M1', name: '真实物料', kd: 10, base_kg: 10, kg_unit: '千克', fee: 10 }], n_mat: 1,
-  subject: '主体甲', fee_item: '出库运费', parties: ['客户甲'], bbiz: '', bizline: '植物肉', can_mode: true, can_weight: true }
+  subject: '主体甲', fee_item: '出库运费', parties: ['客户甲'], bbiz: '', bizline: '', can_mode: true, can_weight: true }
 const rows = [
   { kind: 'accr', key: 'A1', anc: 'A1', subject: '主体甲', book_code: '101', fee_type: '出库运费', fee: '出库运费', fee_code: 'F001', vno: 'V-A1', amt: 20, bill: 40, diff: 0, bill_span: 2,
     bill_subject: '主体甲', bill_biz: '植物肉', biz: '小料', biz_code: 'CP01', proj: '项目甲', proj_code: 'P01', dept: '物流部', dept_code: 'D01', acct: '6601', acct_name: '销售费用', tax_rate: .09,
