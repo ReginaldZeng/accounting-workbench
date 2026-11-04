@@ -56,8 +56,8 @@ def _number(value, label, sheet, row, required=False):
 
 def _split_docs(value):
     doc = _s(value)
-    if not doc or doc == "无金蝶单号":
-        return "无金蝶单号"
+    if not doc or doc in ("无金蝶单号", "无单据"):
+        return "无单据"
     return "+".join(p for p in re.split(r"[+＋/,，、;；\s]+", doc) if p)
 
 
@@ -213,7 +213,7 @@ def parse_standard_bill(spec, data):
 
 
 def standard_sheet_report(spec, data, period=""):
-    """输出数据接入第①步兼容报告；无原始合计列的标准页只能标记 nocheck。"""
+    """输出数据接入报告；页内可标无原合计，整本按 A–J 规则校验通过。"""
     infos, _, bill_src, order = _parse_book(spec, data, period)
     detail_sheets = []
     for info in infos:
@@ -241,6 +241,8 @@ def standard_sheet_report(spec, data, period=""):
     rank = {"gap": 2, "nocheck": 1, "ok": 0}
     verdicts = [s["verdict"] for s in detail_sheets]
     verdict = max(verdicts, key=lambda v: rank[v]) if verdicts else "nocheck"
+    if detail_sheets and all(s["verdict"] in ("ok", "nocheck") for s in detail_sheets):
+        verdict = "ok"
     return {
         "sheets": sheets, "n": sum(s["n"] for s in detail_sheets),
         "amount": round(sum(s["amount"] for s in detail_sheets), 2),

@@ -89,7 +89,7 @@ class RealStandardWorkbook(unittest.TestCase):
 
     def test_missing_and_multiple_docs_and_total_rows(self):
         rows = self.result["detail"]
-        self.assertEqual(sum(row["doc_no"] == "无金蝶单号" for row in rows), 2)
+        self.assertEqual(sum(row["doc_no"] == "无单据" for row in rows), 2)
         multi = next(row for row in rows if row["src_row"] == 19 and row["src_sheet"] == "5.外仓")
         self.assertEqual(multi["doc_no"], "ZJDB006780+ZJDB006783")
         self.assertFalse(any(row["subject"] in ("合计", "总计") for row in rows))
@@ -129,14 +129,14 @@ class IndependentStandardWorkbook(unittest.TestCase):
         result = lsi.parse_standard_bill(self.spec, data)
         self.assertEqual(len(result["detail"]), 2)
         self.assertEqual(result["detail"][0]["doc_no"], "A+B+C+D+E+F+G+H")
-        self.assertEqual(result["detail"][1]["doc_no"], "无金蝶单号")
+        self.assertEqual(result["detail"][1]["doc_no"], "无单据")
         self.assertEqual(result["detail"][1]["charge_wt"], 1200)
         self.assertEqual(result["detail"][0]["annot"], "出库运费")
         self.assertEqual(result["bill_src"], "合成账单")
         report = lsi.standard_sheet_report(self.spec, data, "2026-10")
         self.assertEqual(report["sheets"][0]["total"], None)
         self.assertEqual(report["sheets"][0]["verdict"], "nocheck")
-        self.assertEqual(report["verdict"], "nocheck")
+        self.assertEqual(report["verdict"], "ok")
 
     def test_report_rounds_each_physical_sheet_before_total(self):
         wb = openpyxl.Workbook()

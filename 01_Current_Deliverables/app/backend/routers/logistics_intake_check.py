@@ -56,10 +56,9 @@ def _how(spec):
 
 
 def _sheet_report_any(spec, data, period):
-    if (spec.get("carrier") or "") == "极鲜达":
-        standard = stdintake.standard_sheet_report(spec, data, period)
-        if standard is not None:
-            return standard
+    standard = stdintake.standard_sheet_report(spec, data, period)
+    if standard is not None and any(sheet.get("role") == "detail" for sheet in standard.get("sheets") or []):
+        return standard
     return intake.sheet_report(spec, data, period)
 
 
