@@ -26,7 +26,7 @@ createRoot(document.getElementById('root')).render(<LogisticsReview cfg={{year:2
 
 const doc = { lid: 1, doc_no: 'Q1', doc_fee: 10, bill_amt: 10, bill_unit: '千克', kd_sum: 10, kd_unit: '千克', state: 'ok',
   qty_standard: '按重量', sub_fees: { 运费: 10 }, materials: [{ code: 'M1', name: '真实物料', kd: 10, base_kg: 10, kg_unit: '千克', fee: 10 }], n_mat: 1,
-  subject: '主体甲', fee_item: '出库运费', parties: ['客户甲'], bbiz: '植物肉', bizline: '植物肉', can_mode: true, can_weight: true }
+  subject: '主体甲', fee_item: '出库运费', parties: ['客户甲'], bbiz: '', bizline: '植物肉', can_mode: true, can_weight: true }
 const rows = [
   { kind: 'accr', key: 'A1', anc: 'A1', subject: '主体甲', book_code: '101', fee_type: '出库运费', fee: '出库运费', fee_code: 'F001', vno: 'V-A1', amt: 20, bill: 40, diff: 0, bill_span: 2,
     bill_subject: '主体甲', bill_biz: '植物肉', biz: '小料', biz_code: 'CP01', proj: '项目甲', proj_code: 'P01', dept: '物流部', dept_code: 'D01', acct: '6601', acct_name: '销售费用', tax_rate: .09,
@@ -120,6 +120,8 @@ async function main() {
     await page.locator('.ldx-table tbody tr.ldx-row').first().waitFor()
     assert.equal(await page.locator('.ldx-table thead th').count(), 12, '默认使用样机十二列逐单表')
     assert.match(await metric(page, '全部账单金额').innerText(), /81\.00/)
+    assert.match(await metric(page, '当前筛选金额').innerText(), /81\.00/, '未筛选时使用后端总额而非前端浮点求和')
+    assert.match(await page.locator('.ldx-table tbody tr.ldx-row').first().innerText(), /植物肉/, '空 bbiz 不得遮蔽 bizline')
     assert.match(await metric(page, '金蝶物料已接入').innerText(), /1 \/ 1/)
     assert.match(await metric(page, '待确认逐笔行').innerText(), /2/)
     await page.locator('.ldx-table').getByRole('button', { name: '明细', exact: true }).first().click()
@@ -145,12 +147,16 @@ async function main() {
     await page.getByRole('button', { name: /全部逐笔 2/ }).click()
     await page.getByLabel('单号 / 客户', { exact: true }).fill('Q1')
     assert.equal(await page.locator('.ldx-table tbody tr.ldx-row').count(), 1)
+    await metric(page, '当前筛选金额').filter({ hasText: '10.00' }).waitFor()
+    assert.match(await metric(page, '当前筛选金额').innerText(), /10\.00/, '筛选金额跟随新工作区')
     for (const [label, value] of [['主体', '主体甲'], ['费用类型', '出库运费'], ['产品分类', '植物肉'], ['数量标准', '按重量'], ['确认状态', 'pending']]) {
       await page.getByLabel(label, { exact: true }).selectOption(value)
       assert.equal(await page.locator('.ldx-table tbody tr.ldx-row').count(), 1, `${label}筛选`)
     }
     await page.getByRole('button', { name: '清除筛选', exact: true }).click()
     assert.equal(await page.locator('.ldx-table tbody tr.ldx-row').count(), 2)
+    await metric(page, '当前筛选金额').filter({ hasText: '81.00' }).waitFor()
+    assert.match(await metric(page, '当前筛选金额').innerText(), /81\.00/, '清除筛选后恢复后端总额')
     const confirmBefore = calls.length
     await page.getByRole('button', { name: '确认本页（1）', exact: true }).click()
     await page.waitForTimeout(100)

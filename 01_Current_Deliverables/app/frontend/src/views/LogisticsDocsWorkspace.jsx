@@ -9,7 +9,7 @@ const money = value => value == null || value === '' || !Number.isFinite(Number(
 const num = (value, digits = 3) => value == null || value === '' || !Number.isFinite(Number(value)) ? '—' : Number(value).toLocaleString('zh-CN', { maximumFractionDigits: digits })
 const text = value => value == null || String(value).trim() === '' ? '—' : String(value)
 const standardOf = row => row.qty_standard || row.mode_short || ''
-const productOf = row => row.bbiz ?? row.bizline ?? row.biz_bill ?? ''
+const productOf = row => row.bbiz || row.bizline || row.biz_bill || ''
 const facetsOf = dfilt => ({ fsub: dfilt?.fsub || '', ffee: dfilt?.ffee || '', fbiz: dfilt?.fbiz || '' })
 
 function searchText(row) {
@@ -155,6 +155,7 @@ export default function LogisticsDocsWorkspace({
   advanced,
   page = 1,
   onPage,
+  onSummary,
   cls = {},
 }) {
   const fullMode = Boolean(full && allD && Array.isArray(allD.docs))
@@ -218,6 +219,11 @@ export default function LogisticsDocsWorkspace({
   const pageRows = paginatedLocally ? filteredRows.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE) : filteredRows
   const confirmNos = [...new Set(pageRows.filter(item => !item.noDoc && !item.row.confirmed && item.row.doc_no).map(item => item.row.doc_no))]
   const sourceLabel = dfilt?.label || [dfilt?.fsub, dfilt?.ffee, dfilt?.fbiz].filter(Boolean).join(' · ')
+  const summaryAmount = filteredRows.reduce((total, item) => total + (Number(item.row.doc_fee) || 0), 0)
+  const summaryKey = `${fullMode}|${segment}|${filteredRows.length}|${summaryAmount.toFixed(2)}`
+  useEffect(() => {
+    onSummary?.({ rows: filteredRows.length, amount: summaryAmount, unfiltered: fullMode && segment === 'all' && filteredRows.length === fetchedRows.length })
+  }, [summaryKey, onSummary])
 
   const resetLocalPage = () => setLocalPage(1)
   const changeQuery = value => {

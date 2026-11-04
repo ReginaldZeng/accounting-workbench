@@ -835,6 +835,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [group, setGroup] = useState('ex')
   const [page, setPage] = useState(1)
   const [q, setQ] = useState('')
+  const [docViewSummary, setDocViewSummary] = useState(null)
   const [docTask, setDocTask] = useState('')
   const [lineTask, setLineTask] = useState('')
   const [d, setD] = useState(null)
@@ -877,7 +878,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   useEffect(() => {
     ++_reqSeq.current; ++_ikSeq.current; ++_lineSeq.current; ++_readySeq.current; ++_invSeq.current; ++_allSeq.current; ++_clsSeq.current; ++_dupSeq.current
     setD(null); setL(null); setIk(null); setR(null); setInv3(null); setAllD(null); setClsR(null); setDupR(null)
-    setDocErr(''); setDocLoading(mode === 'detail'); setMsg(''); setDocTask(''); setLineTask('')
+    setDocErr(''); setDocLoading(mode === 'detail'); setMsg(''); setDocTask(''); setLineTask(''); setDocViewSummary(null)
   }, [carrier, period, mode])
   useEffect(() => { if (mode === 'detail' && step === 'sign' && carrier && period) reloadInv3() }, [mode, step, carrier, period, reloadInv3])
   const [R, setR] = useState(null)
@@ -1884,8 +1885,8 @@ export default function LogisticsReview({ cfg, onPeriod }) {
       {step === 'docs' && (<>
         {d && <ReviewMetrics items={[
           { label: '全部账单金额', value: money(d.total_bill), note: `${carrier} ${period}` },
-          { label: '当前筛选金额', value: money(fdocs ? fdocs.reduce((total, row) => total + Number(row.doc_fee || 0), 0) : d.total_bill), note: `${fdocs ? nDocs(fdocs) : (d.detail_total ?? docs.length)} 张单据` },
-          { label: '金蝶物料已接入', value: `${(full && allD ? allD.docs || [] : docs).filter(row => (row.n_mat || 0) > 0).length} / ${full && allD ? d.detail_total : docs.length}`, note: full && allD ? `${(allD.docs || []).filter(row => !(row.n_mat || 0)).length} 行查无 · ${((d.nodoc || []).length)} 行无单号` : '当前已取列表', tone: 'warn' },
+          { label: '当前筛选金额', value: money(docViewSummary ? (docViewSummary.unfiltered ? d.total_bill : docViewSummary.amount) : (fdocs ? fdocs.reduce((total, row) => total + Number(row.doc_fee || 0), 0) : d.total_bill)), note: `${docViewSummary ? docViewSummary.rows : (fdocs ? nDocs(fdocs) : (d.detail_total ?? docs.length))} 逐笔行` },
+          { label: '金蝶物料已接入', value: `${(full && allD ? allD.docs || [] : docs).filter(row => (row.n_mat || 0) > 0).length} / ${full && allD ? (allD.docs || []).length : (d.detail_total ?? docs.length)}`, note: full && allD ? `${(allD.docs || []).filter(row => !(row.n_mat || 0)).length} 行查无 · ${((d.nodoc || []).length)} 行无单号` : '当前已取列表', tone: 'warn' },
           { label: '待确认逐笔行', value: (full && allD ? allD.docs || [] : docs).filter(row => !row.confirmed).length + ((d.nodoc || []).length), note: '确认后形成做账依据', tone: 'warn' },
         ]} />}
         <ReviewNotice><b>先核清单据，再整理做账维度</b><span>数量看折合过程，价格看费用构成；无合同价的只标无法核价，不倒算标准。</span></ReviewNotice>
@@ -1893,7 +1894,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         {docLoading && d && !d.err && <div className="fxsub" role="status" style={{ marginBottom: 12 }}>正在按当前筛选重新取数，现有结果暂时保留…</div>}
         <LogisticsDocsWorkspace d={d} allD={allD} full={full} docs={docs} q={q} dfilt={dfilt} cls={cmap}
           onQuery={value => { setQ(value); setPage(1) }} onFacet={setFacet} onClearFilters={() => { clearDfilt(); setQ('') }} onBackLines={() => goStep('lines')}
-          locked={locked} busy={busy} onOpen={row => setDlgK(kk(row))} onConfirm={doConfirm} page={page} onPage={setPage} advanced={<>
+          locked={locked} busy={busy} onOpen={row => setDlgK(kk(row))} onConfirm={doConfirm} page={page} onPage={setPage} onSummary={setDocViewSummary} advanced={<>
         {!(d && d.by_box) && !d?.err && <div className="qbar">
           <span className="qbar-sum"><b>{d ? money(d.total_bill) : '—'}</b> 元 账单合计</span>
           <span className="qbar-lb">· 待处理（点一个筛下方明细）</span>
@@ -2111,7 +2112,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             onNext={dlgI < dlist.length - 1 ? () => setDlgK(kk(dlist[dlgI + 1])) : null}
             onClose={() => setDlgK(null)}
             ctx={{ saveClass, saveMode, saveNote, doConfirm, carryOf, carryForm, setCarryForm, addCarry, delCarry, subjOpts, FEE_CANON, bizOpts, withCur, onDupOk }} />}
-        <BottomNav info={fdocs ? `${nDocs(fdocs)} 张单据 · 金额 ${money(fdocs.reduce((total, row) => total + Number(row.doc_fee || 0), 0))}` : '读取逐单结果中…'} previous={{ label: '‹ 上一步：数据接入', onClick: () => goStep('intake') }} next={{ label: '下一步：整理做账维度', onClick: () => goStep('lines') }} />
+        <BottomNav info={docViewSummary ? `${docViewSummary.rows} 逐笔行 · 金额 ${money(docViewSummary.unfiltered ? d.total_bill : docViewSummary.amount)}` : (fdocs ? `${nDocs(fdocs)} 张单据 · 金额 ${money(fdocs.reduce((total, row) => total + Number(row.doc_fee || 0), 0))}` : '读取逐单结果中…')} previous={{ label: '‹ 上一步：数据接入', onClick: () => goStep('intake') }} next={{ label: '下一步：整理做账维度', onClick: () => goStep('lines') }} />
       </>)}
 
       {step === 'sign' && regRow && (<>
