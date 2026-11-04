@@ -145,7 +145,7 @@ class PublicDocumentListTests(unittest.TestCase):
             "PO2": [{"编码": "M3", "名称": "鲜食", "基本数量": 1, "基本单位": "箱", "销售额": 80, "往来": "供应商乙"}]},
             "heads": {"PO1": {"销售组织": "深圳"}}, "groups": {"M1": "植物肉", "M2": "小料"},
             "source": "manual_attachment", "material_version": "v1"}, "updated_at": "2026-11-04 12:00", "updated_by": "测试"}
-        freight = {"PO1": {"parts": {("承运商甲", "2026-09", True, "v2"): {"tr": 100, "ld": 20, "ot": 0}}}}
+        freight = {"PO1": {"parts": {("承运商甲", "2026-09", True, "v2"): {"tr": 100, "ld": 20, "ot": 0}, ("重复物流", "2026-09", False, "pending"): {"tr": 100, "ld": 20, "ot": 0}}}}
         with patch.object(self.lr.db, "get_period_input", create=True, return_value=rec), \
              patch.object(self.lr, "_outstock_freight", return_value=freight):
             out = self.lr._kd_documents("2026-09", ["PUR_PurchaseOrder"], q="", page=1, size=10)
@@ -225,7 +225,7 @@ class StandardBillAndFeeEditTests(unittest.TestCase):
         docs = [{"lid": 7, "doc_no": "XSCKD1", "subject": "深圳星期零", "parties": ["客户甲"], "materials": [
             {"code": "M1", "name": "植物肉", "base_kg": 2, "kg_unit": "千克", "sales": 100},
             {"code": "M2", "name": "小料", "base_kg": 3, "kg_unit": "千克", "sales": 50}]}]
-        freight = {"XSCKD1": {"parts": {("链盟", "2026-09", "signed", "v2"): {"tr": 100, "ld": 20, "ot": 0}}}}
+        freight = {"XSCKD1": {"parts": {("链盟", "2026-09", "signed", "v2"): {"tr": 100, "ld": 20, "ot": 0}, ("重复物流", "2026-09", False, "pending"): {"tr": 100, "ld": 20, "ot": 0}}}}
         shared = {"heads": {"XSCKD1": {"销售组织": "深圳"}}, "groups": {"M1": "植物肉", "M2": "小料"}}
         with patch.object(self.lr, "_outstock_freight", return_value=freight), \
              patch.object(self.lr, "_kd_shared_materials", return_value=shared):

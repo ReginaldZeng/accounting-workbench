@@ -4449,7 +4449,9 @@ def _kd_documents(period, forms, q="", page=1, size=25):
             total_qty = sum(qtys)
             f = freight.get(no) or {}
             parts = f.get("parts") or {}
-            bill_parts = sorted(parts.items()) if parts else [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
+            bill_parts = sorted((key, fees) for key, fees in parts.items() if key[3] != "pending") if parts else []
+            if not bill_parts:
+                bill_parts = [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
             for part_key, fees in bill_parts:
                 carrier = part_key[0]
                 for i, m in enumerate(lines):
@@ -4834,7 +4836,9 @@ def _review_material_rows(carrier, period, docs):
         qtys = [abs(float(m.get("base_kg") if m.get("base_kg") is not None else (m.get("base_qty") or 0))) for m in lines]
         total_qty = sum(qtys)
         parts = (freight.get(no) or {}).get("parts") or {}
-        bill_parts = sorted(parts.items()) if parts else [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
+        bill_parts = sorted((key, fees) for key, fees in parts.items() if key[3] != "pending") if parts else []
+        if not bill_parts:
+            bill_parts = [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
         head = heads.get(no) or {}
         subject = next((str(head.get(k) or "") for k in ("销售组织", "库存组织", "需求组织", "调入组织", "采购组织") if head.get(k)), doc.get("subject") or "")
         for part_key, fees in bill_parts:
