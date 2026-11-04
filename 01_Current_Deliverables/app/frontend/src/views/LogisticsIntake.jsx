@@ -12,6 +12,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { reviewIntakeOverview, reviewReparse, reviewRawUrl, invAuditItemsApprove, invFolder, reviewOriginalFiles, reviewOriginalUpload, reviewOriginalDelete, reviewOriginalUrl } from '../api.js'
 import { Modal, InvViewer } from './invShared.jsx'
 import { BottomNav } from './LogisticsReviewLayout.jsx'
+import KingdeeDataPanel from './KingdeeDataPanel.jsx'
 import './logisticsIntakeRedesign.css'
 
 const money = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
@@ -284,6 +285,8 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
         <OriginalFiles carrier={data.carrier} period={period} locked={locked} flash={flash} />
       </div>
     </section>
+
+    <KingdeeDataPanel carrier={data.carrier} period={period} locked={locked} onChanged={onChanged} flash={flash} />
 
     <section className="lrx-panel lir-recon">
       <div className="lrx-panel-head"><div><h2>逐页金额勾稽</h2><small>仅列计费明细页；说明页与汇总页不重复计入</small></div><div className="lrx-panel-actions"><span className={'lrx-tag ' + (sheetReady ? 'ok' : detailRows.some(x => x.bad) || dupRows ? 'bad' : 'pending')}>{sheetReady ? `合计 ${money(readTotal)}` : dupRows ? `发现 ${dupRows} 行重复` : '逐页待核对'}</span><button className={'lrx-btn' + (onlyBad ? ' primary' : '')} disabled={!detailRows.length} onClick={() => setOnlyBad(!onlyBad)}>{onlyBad ? '查看全部' : '只看异常'}</button></div></div>

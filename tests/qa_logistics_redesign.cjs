@@ -53,10 +53,11 @@ async function open(browser, B, resultOverride = null) {
     if (p === '/entry.js') return route.fulfill({ contentType: 'application/javascript', body: B.js })
     if (p === '/entry.css') return route.fulfill({ contentType: 'text/css', body: B.css })
     if (!p.startsWith('/api/')) return route.fulfill({ status: 404, body: '' })
-    calls.push({ path: p, query: Object.fromEntries(u.searchParams) })
+    calls.push({ path: p, query: Object.fromEntries(u.searchParams), method: route.request().method(), body: route.request().postData() || '' })
     let body = { ok: true }
     if (p === '/api/logistics-review/overview') body = { ok: true, period: '2026-09', subjects: ['主体甲', '主体乙'], rows: [{ code: 'C1', carrier: '合成物流', short: '合成物流', has_spec: true, status: 'billed', cells: {}, progress: {} }] }
     else if (p === '/api/logistics-review/scope') body = { ok: true, n: 0, groups: [] }
+    else if (p === '/api/logistics-review/material-fallback-files') body = { ok: true, docs: 1, missing: ['STK_TransferOut'], sources: { SAL_OUTSTOCK: { at: '2026-11-04 12:00', source: 'kingdee' }, STK_MisDelivery: { at: '2026-11-04 12:10', source: 'manual_attachment' } }, files: [{ id: 9, name: '金蝶补核附件.xlsx', by: '测试', at: '2026-11-04 12:10' }] }
     else if (p === '/api/logistics-review/result') body = resultOverride ? { ...result, ...resultOverride } : result
     else if (p === '/api/logistics-review/intake') body = { ok: true, carrier: '合成物流', has_spec: true, verdict: 'ok', bill_total: 81, req_total: 81, diff: 0,
       bills: [{ src: '标准账单', amount: 81, n_detail: 8, n_doc: 7 }], payreqs: [], files: [{ id: 1, src: '标准账单', name: '标准账单.xlsx', report: { sheets: [{ sheet: '计费页1', role: 'detail', n: 8, amount: 81, verdict: 'ok', total: { sum: 81, how: 'self' }, money: [] }], duplicates: [] } }], req_files: [], history: [] }
@@ -114,6 +115,30 @@ async function main() {
     await page.getByText('供应商原始账单', { exact: false }).first().waitFor()
     await page.getByText('逐页金额勾稽', { exact: false }).first().waitFor()
     await page.getByText('A–J 固定取数列', { exact: false }).first().waitFor()
+    await page.getByText('金蝶取数与补核', { exact: true }).waitFor()
+    assert.match(await page.locator('.lrx-kd-panel').innerText(), /默认只读 PGSQL/)
+    await page.getByLabel('其它出库单', { exact: true }).uncheck()
+    await page.getByLabel('分布式调出单', { exact: true }).uncheck()
+    let refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/logistics-review/result' && new URL(r.url()).searchParams.get('fresh') === '1')
+    await page.getByRole('button', { name: '刷新所选类型（1）', exact: true }).click()
+    await refreshed
+    let refreshCall = calls.filter(call => call.path === '/api/logistics-review/result' && call.query.fresh === '1').at(-1)
+    assert.equal(refreshCall.query.fresh, '1')
+    assert.equal(refreshCall.query.forms, 'SAL_OUTSTOCK')
+    refreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/logistics-review/result' && new URL(r.url()).searchParams.get('fresh') === '1')
+    await page.getByRole('button', { name: '刷新全部类型', exact: true }).click()
+    await refreshed
+    refreshCall = calls.filter(call => call.path === '/api/logistics-review/result' && call.query.fresh === '1').at(-1)
+    assert.equal(refreshCall.query.forms, 'SAL_OUTSTOCK,STK_MisDelivery,STK_TransferOut')
+    const choosing = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: '上传金蝶补核附件', exact: true }).click()
+    const chooser = await choosing
+    await chooser.setFiles({ name: '九月金蝶补核.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: Buffer.from('xlsx-test') })
+    await page.waitForTimeout(300)
+    const uploadCall = calls.filter(call => call.path === '/api/logistics-review/material-fallback').at(-1)
+    assert.ok(uploadCall, `补核上传未发出请求：${JSON.stringify(calls.slice(-8))}`)
+    assert.equal(uploadCall.method, 'POST')
+    assert.match(uploadCall.body, /filename="九月金蝶补核\.xlsx"/)
     await noOverflow(page, '1440px 数据接入')
 
     await step(page, 'docs')
@@ -172,6 +197,11 @@ async function main() {
     assert.equal(await fold.getAttribute('open'), null, '当前计提默认收起，不再与准备做账双主表并列')
     await fold.locator(':scope > summary').click()
     assert.equal(await fold.getAttribute('open'), '')
+    assert.ok(calls.filter(call => call.path === '/api/logistics-review/lines').every(call => !call.query.fresh), '打开逐笔页不得自动刷新金蝶')
+    const lineRefreshed = page.waitForResponse(r => new URL(r.url()).pathname === '/api/logistics-review/lines' && new URL(r.url()).searchParams.get('fresh') === '1')
+    await fold.getByRole('button', { name: '刷新计提', exact: true }).click()
+    await lineRefreshed
+    assert.ok(calls.some(call => call.path === '/api/logistics-review/lines' && call.query.fresh === '1'), '人工刷新计提必须显式带 fresh=1')
     await fold.locator(':scope > summary').click()
     assert.equal(await fold.getAttribute('open'), null)
     await page.locator('[data-prepared-row="A3"]').getByRole('button', { name: '调整 / 拆分' }).click()

@@ -4,7 +4,7 @@
 # Description: 物流账单复核·费用归类接口。V2.1007 与逐单/逐笔共享主体回填和单头缓存；计提故障显式报错。
 #   原说明：只读金蝶，单据头(销售组织/领料部门/需求组织/调入组织)＋物料档案分组；
 #   计提取 logistics_review._accr_entries(本月逐笔计提)。判定逻辑在 kernels/logistics_classify.py。
-#   GET  /api/logistics-review/classify        一家一个月：每张单的归类结论 + 和计提对照表(30 分钟缓存，fresh=1 重取)
+#   GET  /api/logistics-review/classify        一家一个月：默认读 PGSQL 归类快照，fresh=1 人工重取并写入快照
 #   GET  /api/logistics-review/classify-rules  对照表设置(物料分组→业务线、看不出业务线的分组、调拨仓库规则)
 #   POST /api/logistics-review/classify-rules  保存设置(存 settings 键 logi_cls_rules)；空 body.cfg = 恢复默认
 #   GET  /api/logistics-review/dups            本家本月怀疑重复收费的单(本月+上月所有承运商的运输费里撞单号)
@@ -118,6 +118,30 @@ def _build(carrier, period, fresh=False):
     return res
 
 
+def _snapshot_fingerprint(carrier, period):
+    import hashlib
+    import json
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(LR.BL).where(
+            (LR.BL.c.carrier == carrier) & (LR.BL.c.period == period) & (LR.BL.c.grain == "detail"))).mappings().all()]
+    entries = LR._accr_entries(carrier, period, LR._carrier_full(carrier)) or {}
+    raw = json.dumps({"rows": rows, "entries": entries.get("entries") or [], "cfg": _cfg()}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def refresh_snapshot(carrier, period):
+    res = _build(carrier, period, fresh=True)
+    if not res.get("ok"):
+        raise RuntimeError(res.get("msg") or "归类快照生成失败")
+    refreshed_at = time.strftime("%Y-%m-%d %H:%M")
+    fingerprint = _snapshot_fingerprint(carrier, period)
+    res = dict(res, cached_at=refreshed_at, needs_refresh=False)
+    db.set_period_input(LR._docs_snapshot_source(carrier), int(period[:4]), int(period[5:7]), "classify",
+                        {"result": res, "fingerprint": fingerprint, "refreshed_at": refreshed_at}, {"n": len(res.get("docs") or [])}, "系统")
+    LR._ACCR_CACHE[("cls", carrier, period)] = (res, fingerprint, time.time())
+    return res
+
+
 @router.get("/api/logistics-review/classify")
 def classify(request: Request, carrier: str = "", period: str = "", fresh: int = 0):
     if not LR._perm(request):
@@ -126,15 +150,24 @@ def classify(request: Request, carrier: str = "", period: str = "", fresh: int =
         return JSONResponse({"ok": False, "msg": "要带承运商和账期"}, status_code=400)
     k = ("cls", carrier, period)
     cc = LR._ACCR_CACHE.get(k)
-    if cc and not fresh and time.time() - cc[2] < (_TTL if cc[0].get("accr_ok") else 300):   # 计提没取到的只缓存 5 分钟
+    fingerprint = None if fresh else _snapshot_fingerprint(carrier, period)
+    if cc and not fresh and cc[1] == fingerprint:
         return cc[0]
+    if not fresh:
+        try:
+            rec = db.get_period_input(LR._docs_snapshot_source(carrier), int(period[:4]), int(period[5:7]), "classify")
+            payload = (rec or {}).get("payload") or {}
+            if payload.get("fingerprint") == fingerprint and isinstance(payload.get("result"), dict):
+                res = dict(payload["result"], cached_at=rec.get("updated_at") or payload.get("refreshed_at") or "", needs_refresh=False)
+                LR._ACCR_CACHE[k] = (res, fingerprint, time.time())
+                return res
+        except Exception:
+            pass
+        return {"ok": False, "msg": "归类快照待取数，请在数据接入页人工刷新金蝶单据", "needs_refresh": True, "docs": []}
     try:
-        res = _build(carrier, period, fresh=bool(fresh))
+        return refresh_snapshot(carrier, period)
     except Exception as e:
         return JSONResponse({"ok": False, "msg": "取金蝶失败：%s" % str(e)[:200]}, status_code=502)
-    if res.get("ok"):
-        LR._ACCR_CACHE[k] = (res, None, time.time())
-    return res
 
 
 @router.get("/api/logistics-review/classify-rules")

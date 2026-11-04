@@ -45,6 +45,8 @@ def _normal_lines_step(data):
     if err:
         return _step("逐笔计提取数失败", blockers=[err], error=True)
     data = data or {}
+    if data.get("needs_refresh"):
+        return _step("逐笔计提待人工取数", blockers=["尚未读取金蝶计提分录，请人工刷新后再复核"])
     rows = data.get("rows") or []
     blockers = []
     if data.get("n_unexplained"):
@@ -103,6 +105,8 @@ def _docs_step(data):
     if err:
         return _step("逐单核价核量取数失败", blockers=[err], error=True)
     data = data or {}
+    if data.get("needs_refresh"):
+        return _step("逐单数据待人工取数", blockers=["以下单据类型待人工刷新或上传补核附件：%s" % "、".join(data["needs_refresh"])])
     docs = data.get("docs") or []
     classes = data.get("classify") or {}
     dups = data.get("dups") or {}

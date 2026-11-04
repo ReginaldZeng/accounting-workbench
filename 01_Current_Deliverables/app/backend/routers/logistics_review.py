@@ -283,10 +283,11 @@ def review_carriers(request: Request, period: str = ""):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
     accr = {}
+    fetched_at = None
     if period and "-" in period:
-        y, m = period.split("-")[:2]
         try:
-            accr = lrc.accrued_by_carrier(kc.fetch_gl_voucher(int(y), int(m), prefix="2241"))
+            rows, fetched_at, _cached = _ov_kd_rows(period)
+            accr = lrc.accrued_by_carrier(rows)
         except Exception:
             accr = {}
     sup = db.list_logi_suppliers() or []
@@ -313,67 +314,58 @@ def review_carriers(request: Request, period: str = ""):
         if sc not in listed:
             out.append({"short": sc, "full": "", "accrued": None, "has_spec": True})
     out.sort(key=lambda x: (-(x["accrued"] or -1), x["short"]))
-    return {"ok": True, "period": period, "carriers": out, "kd_ok": bool(accr)}
+    return {"ok": True, "period": period, "carriers": out, "kd_ok": bool(accr), "fetched_at": fetched_at,
+            "needs_refresh": fetched_at is None}
 
 
 # ---------- 第一页总览：承运商 × 主体 的 计提/付款/差异（金蝶 2241）----------
 _SUBJECTS = ["深圳星期零", "深圳星期九", "孝感星期九"]   # 固定三列（其余账簿归「其它」不单列）
+_OV_KIND = "gl_voucher_2241"
 
 
-_OV_TTL = 1800       # 金蝶 2241 缓存有效期 30 分钟
-_OV_FAIL_TTL = 120   # 取数失败短路 2 分钟：原来失败不留痕，金蝶一抖动，每开一次总表就全量重打一遍
-_OV_REFRESHING = set()   # 正在后台刷新的账期(防重)
-_OV_FAIL_AT = {}         # ck → 上次取数失败时间
-
-
-def _ov_refresh_async(period):
-    """缓存过期但旧数据还在：后台线程重取，这次请求先用旧的（V2.1002 总表提速——原来过期就干等一次全月凭证查询）。"""
-    import threading
-    if period in _OV_REFRESHING:
-        return
-    _OV_REFRESHING.add(period)
-
-    def _run():
-        try:
-            _ov_kd_rows(period, fresh=True)
-        finally:
-            _OV_REFRESHING.discard(period)
-    threading.Thread(target=_run, daemon=True).start()
+def _ov_snapshot(period):
+    try:
+        rec = db.get_period_input("kingdee", int(period[:4]), int(period[5:7]), _OV_KIND)
+        payload = (rec or {}).get("payload") or {}
+        if isinstance(payload.get("rows"), list):
+            return rec
+    except Exception:
+        pass
+    return None
 
 
 def _ov_kd_rows(period, fresh=False):
-    """金蝶本期 2241 凭证行(总表与请款单认月份共用，按账期缓存 30 分钟) → (rows, fetched_at, cached)。
-
-    V2.1002：过期但有旧数据 → 先返旧数据、后台刷新（stale-while-revalidate），cached 返 "stale"，
-    前端在「金蝶数据取于 ××」后补一句「后台刷新中」。真正的冷启动(从没取过这期)才同步等金蝶。
-    """
+    """默认只读 PGSQL；fresh=True 是人工刷新入口，失败沿用旧快照。"""
     import time as _t
     y, m = period.split("-")[:2]
-    # 供应商维度(FFLEX4)：名称用金蝶全称、带编码(原来从摘要截名，截在「供应链/物流」不全)，V2.725
-    fields = list(kc.GL_VOUCHER_FIELDS) + [("FACCOUNTBOOKID.FName", "账簿"),
-                                           ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商")]
     ck = ("ov2", period)
     cc = _ACCR_CACHE.get(ck)
-    now = _t.time()
     if cc and not fresh:
-        if now - cc[2] < _OV_TTL:
-            return cc[0], cc[1], True
-        _ov_refresh_async(period)
-        return cc[0], cc[1], "stale"
-    if not fresh and now - _OV_FAIL_AT.get(ck, 0) < _OV_FAIL_TTL:
-        return [], None, False            # 刚失败过：别立刻再打金蝶
-    rows = []
+        return cc[0], cc[1], True
+    snap = _ov_snapshot(period)
+    if snap and not fresh:
+        rows = snap["payload"]["rows"]
+        fetched_at = snap.get("updated_at") or snap["payload"].get("refreshed_at") or ""
+        _ACCR_CACHE[ck] = (rows, fetched_at, _t.time())
+        return rows, fetched_at, True
+    if not fresh:
+        return [], None, False
+    fields = list(kc.GL_VOUCHER_FIELDS) + [("FACCOUNTBOOKID.FName", "账簿"),
+                                           ("FDetailID.FFLEX4.FNumber", "供应商码"), ("FDetailID.FFLEX4.FName", "供应商")]
     try:
         s, conf = kc.login()
         rows = kc._query(s, conf, "GL_VOUCHER", fields,
                          "FAccountID.FNumber like '2241%%' and FYear=%d and FPeriod=%d" % (int(y), int(m)))
-        _OV_FAIL_AT.pop(ck, None)
     except Exception:
-        rows = []
-        _OV_FAIL_AT[ck] = now
+        if cc:
+            return cc[0], cc[1], "stale"
+        if snap:
+            return snap["payload"]["rows"], snap.get("updated_at") or snap["payload"].get("refreshed_at") or "", "stale"
+        return [], None, False
     fetched_at = _now()
-    if rows:
-        _ACCR_CACHE[ck] = (rows, fetched_at, _t.time())
+    _ACCR_CACHE[ck] = (rows, fetched_at, _t.time())
+    db.set_period_input("kingdee", int(y), int(m), _OV_KIND, {"rows": rows, "refreshed_at": fetched_at},
+                        {"n": len(rows), "desc": "物流复核总表 2241 计提凭证，人工刷新"}, "系统")
     return rows, fetched_at, False
 
 
@@ -479,7 +471,7 @@ def _register_carriers():
 
 @router.get("/api/logistics-review/overview")
 def review_overview(request: Request, period: str = "", fresh: int = 0):
-    """总表。金蝶 2241 凭证按账期缓存 30 分钟(fresh=1 强制重取)；账单应付与复核状态每次从本库现算(便宜、改了即时)。"""
+    """总表。金蝶 2241 默认读 PGSQL 快照，fresh=1 人工重取；账单应付与复核状态每次从本库现算。"""
     u = _perm(request)
     if not u:
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
@@ -580,8 +572,8 @@ def review_overview(request: Request, period: str = "", fresh: int = 0):
     except Exception:
         pass
     rowlist = sorted(rowlist, key=_natkey)
-    return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": bool(rows),
-            "fetched_at": fetched_at, "cached": cached, "payreq": payreq}
+    return {"ok": True, "period": period, "subjects": _SUBJECTS, "rows": rowlist, "kd_ok": fetched_at is not None,
+            "fetched_at": fetched_at, "cached": cached, "needs_refresh": fetched_at is None, "payreq": payreq}
 
 
 # ---------- 价格卡：导入合同价目表 / 读 ----------
@@ -1615,7 +1607,7 @@ def _fetch_doc_heads(s, conf, by_form, fresh=False):
     return out
 
 
-def _backfill_subjects(rows, carrier, mats=None, session=None, fresh=False):
+def _backfill_subjects(rows, carrier, mats=None, session=None, fresh=False, allow_api=True):
     """只补「原主体空且无人工作废」的行；其他出库不看库存组织，只用承运商默认主体。"""
     candidates = [r for r in rows if not str(r.get("subject") or "").strip()
                   and not str(r.get("subj_ovr") or "").strip()
@@ -1640,7 +1632,7 @@ def _backfill_subjects(rows, carrier, mats=None, session=None, fresh=False):
     for no, lines in mats.items():
         if lines:
             real.setdefault(lines[0].get("_form"), set()).add(no)
-    heads = _fetch_doc_heads(s, conf, real, fresh=fresh) if real else {}
+    heads = _fetch_doc_heads(s, conf, real, fresh=fresh) if real and allow_api else {}
     from kernels import logistics_classify as lc
     resolved = {}
     for no, lines in mats.items():
@@ -2649,18 +2641,30 @@ def _accr_entries_uncached(carrier, period, carrier_full=None):
 _ENTRIES_LOCK = threading.Lock()
 
 
-def _accr_entries(carrier, period, carrier_full=None):
+def _accr_entries(carrier, period, carrier_full=None, fresh=False):
+    """默认读内存或 PGSQL 分录快照；只有 fresh=True 才访问金蝶。"""
     import time as _t
     key = ("entries", carrier, period, carrier_full or "")
-    now = _t.time()
     cached = _ACCR_CACHE.get(key)
-    if cached and now - cached[2] < 1800:
+    if cached and not fresh:
         return cached[0]
+    if not fresh:
+        try:
+            rec = db.get_period_input(_docs_snapshot_source(carrier), int(period[:4]), int(period[5:7]), "entries")
+            payload = (rec or {}).get("payload") or {}
+            if isinstance(payload.get("result"), dict):
+                result = dict(payload["result"], cached_at=rec.get("updated_at") or payload.get("refreshed_at") or "", needs_refresh=False)
+                _ACCR_CACHE[key] = (result, None, _t.time())
+                return result
+        except Exception:
+            pass
+        return {"entries": [], "adj": [], "prior": [], "suppliers": [], "needs_refresh": True, "cached_at": ""}
     with _ENTRIES_LOCK:
-        cached = _ACCR_CACHE.get(key)
-        if cached and _t.time() - cached[2] < 1800:
-            return cached[0]
         result = _accr_entries_uncached(carrier, period, carrier_full)
+        refreshed_at = _now()
+        result = dict(result, cached_at=refreshed_at, needs_refresh=False)
+        db.set_period_input(_docs_snapshot_source(carrier), int(period[:4]), int(period[5:7]), "entries",
+                            {"result": result, "refreshed_at": refreshed_at}, {"n": len(result.get("entries") or [])}, "系统")
         _ACCR_CACHE[key] = (result, None, _t.time())
         return result
 
@@ -2775,11 +2779,11 @@ def _dept_biz_rules():
     return impl, want
 
 
-def _build_lines(request, carrier, period):
+def _build_lines(request, carrier, period, fresh=False):
     """逐笔计提复核（第二页主表）：以计提分录为主线每笔一行，**按主体分组**(组头=主体小计，用户 2026-09-30 定)；
     组内账单先按 费用类型×产品线 配到笔(level=biz)，配不到的退回按 费用类型 挂该段首笔(level=group)；账单有计提无的单独成行。
     账单侧优先费用项汇总行(accrual)，无则逐单(detail)。差异＝计提含税−账单。附：差异解释/上期更正/供应商复核要点/登记状态。"""
-    got = _accr_entries(carrier, period, _carrier_full(carrier))
+    got = _accr_entries(carrier, period, _carrier_full(carrier), fresh=fresh)
     ents, adj, prior = got["entries"], got["adj"], got.get("prior") or []
     # 凭证上没有产品分类的计提(入库运费记 5101)：按部门认它是哪个业务线的，配账单时用(mbiz)；凭证本身的产品分类不改
     _impl, _want = _dept_biz_rules()
@@ -2797,7 +2801,13 @@ def _build_lines(request, carrier, period):
             (LN.c.carrier == carrier) & (LN.c.period == period))).all()}
         pts = c.execute(select(CP.c.points).where(CP.c.carrier == carrier)).scalar() or ""
         sg = c.execute(select(SG).where((SG.c.carrier == carrier) & (SG.c.period == period) & (SG.c.status == "signed"))).mappings().first()
-    _backfill_subjects(allrows, carrier)
+    snapshot_mats = {}
+    for form in _DOC_TYPES:
+        rec = _docs_snapshot_read(carrier, period, None, form)
+        for doc in ((rec or {}).get("payload") or {}).get("docs") or []:
+            snapshot_mats[doc.get("doc_no")] = [{"_form": form, "往来": m.get("party") or ""}
+                                                  for m in doc.get("materials") or [] if m.get("code")]
+    _backfill_subjects(allrows, carrier, mats=snapshot_mats, allow_api=False)
     acc_rows = [r for r in allrows if r.get("grain") == "accrual" and (r.get("amount") or 0)]
     brows = acc_rows if acc_rows else [r for r in allrows if r.get("grain") == "detail"]
     bill_src = "accrual" if acc_rows else "detail"
@@ -2988,6 +2998,7 @@ def _build_lines(request, carrier, period):
             "od_total": (lambda a: {"amt": a, "ratio": round(max(0.0, min(1.0, a / btot)), 4) if btot > 0 else 0.0})(
                 round(sum(det3[k]["amt"] for k in bill3 if k in det3), 2)),
             "points": pts, "signed": (dict(sg) if sg else None), "n_unexplained": n_unexpl,
+            "needs_refresh": bool(got.get("needs_refresh")), "cached_at": got.get("cached_at") or "",
             "suppliers": got.get("suppliers") or []}, carrier, period), carrier, period)
 
 
@@ -3429,7 +3440,7 @@ def _wt_range(carrier):
     return (float(sup["wt_lo"]), float(sup["wt_hi"])) if sup.get("wt_lo") and sup.get("wt_hi") else None
 
 
-def _box_docs(rsub, carrier):
+def _box_docs(rsub, carrier, materials_override=None):
     """统一物料模板·单据视图：账单每张单据一条 doc（materials=金蝶物料明细，运费按货品kg摊、剔包材）。
     核量：weight=重量 / qty=件数 / box=旧自动箱规；显式 volume/pallet 严格按体积重/托计重，缺参标核不了，不降级。
     doc.state：miss 金蝶查无 / qtydiff 数量不符或缺参·待核 / info 打托·包车免核·无单据调整(仅提示) / ok 一致。"""
@@ -3442,14 +3453,14 @@ def _box_docs(rsub, carrier):
             pre = "".join(ch for ch in dx if ch.isalpha())
             for form in _FORM_BY_PREFIX.get(pre, ["SAL_OUTSTOCK"])[:1]:
                 by_form.setdefault(form, set()).add(dx)
-    mats = {}
-    if by_form:
+    mats = materials_override if materials_override is not None else {}
+    if by_form and materials_override is None:
         try:
             s2, conf2 = kc.login()
             mats = _fetch_doc_materials(s2, conf2, by_form)
         except Exception as e:
             raise RuntimeError("金蝶读取单据物料失败：%s" % str(e)[:200]) from e
-    _backfill_subjects(rsub, carrier, mats=mats, session=(locals().get("s2"), locals().get("conf2")))
+    _backfill_subjects(rsub, carrier, mats=mats, session=(locals().get("s2"), locals().get("conf2")), allow_api=materials_override is None)
     # 短驳(包天包趟)价目：承运商配置 spec_json.shuttle_prices=[{car,unit(天/趟),price}]，如极鲜达《仓储收费标准(星期零)》短驳运输
     _sp = _load_spec(carrier) or {}
     pmap = {(_car_norm(x.get("car")), x.get("unit")): float(x.get("price") or 0) for x in (_sp.get("shuttle_prices") or [])}
@@ -4131,10 +4142,254 @@ def _code_maps(request, carrier, period):
 _FULL_DOCS = 1500      # 单据数在这以内的承运商：第②步整家逐张现算(取金蝶物料)再筛选/计数；超过的只算当前页、计数用中间表
 
 
+def _docs_fingerprint(rows, card, settings, spec):
+    import hashlib
+    raw = json.dumps({"rows": rows, "card": card, "settings": settings, "spec": spec}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+_DOC_TYPES = {
+    "SAL_OUTSTOCK": "销售出库单",
+    "STK_MisDelivery": "其它出库单",
+    "STK_TransferOut": "分布式调出单",
+}
+
+
+def _doc_form(doc_no):
+    pre = "".join(ch for ch in str(doc_no or "") if ch.isalpha())
+    return (_FORM_BY_PREFIX.get(pre) or ["SAL_OUTSTOCK"])[0]
+
+
+def _docs_snapshot_source(carrier):
+    return "logistics_review:" + carrier
+
+
+def _docs_fingerprints(rows, card, settings, spec):
+    out = {"legacy": _docs_fingerprint(rows, card, settings, spec)}
+    for form in _DOC_TYPES:
+        subrows = [r for r in rows if _doc_form(r.get("doc_no")) == form]
+        out[form] = _docs_fingerprint(subrows, card, settings, spec)
+    return out
+
+
+def _docs_snapshot_read(carrier, period, fingerprint, form=""):
+    kind = "docs" + ((":" + form) if form else "")
+    for source in (_docs_snapshot_source(carrier), "logistics_review"):
+        try:
+            rec = db.get_period_input(source, int(period[:4]), int(period[5:7]), kind)
+            payload = (rec or {}).get("payload") or {}
+            if (fingerprint is None or payload.get("fingerprint") == fingerprint) and isinstance(payload.get("docs"), list):
+                return rec
+        except Exception:
+            continue
+    return None
+
+
+def _docs_snapshot_write(carrier, period, fingerprint, docs, form="", source="kingdee"):
+    kind = "docs" + ((":" + form) if form else "")
+    db.set_period_input(_docs_snapshot_source(carrier), int(period[:4]), int(period[5:7]), kind,
+                        {"fingerprint": fingerprint, "docs": docs, "source": source, "refreshed_at": _now()}, {"n": len(docs), "source": source}, "系统")
+
+
+def _docs_snapshot_merged(carrier, period, fingerprint, forms=None):
+    docs, missing, sources = [], [], {}
+    partitioned = isinstance(fingerprint, dict)
+    for form in (list(_DOC_TYPES) if forms is None else forms):
+        fp = fingerprint.get(form) if partitioned else fingerprint
+        rec = _docs_snapshot_read(carrier, period, fp, form)
+        if not rec:
+            missing.append(form)
+            continue
+        docs.extend(rec["payload"]["docs"])
+        sources[form] = {"at": rec.get("updated_at") or rec["payload"].get("refreshed_at") or "", "source": rec["payload"].get("source") or "kingdee"}
+    if not sources:
+        fp = fingerprint.get("legacy") if partitioned else fingerprint
+        rec = _docs_snapshot_read(carrier, period, fp)
+        if rec:
+            docs.extend(rec["payload"]["docs"])
+            missing = []
+            sources["legacy"] = {"at": rec.get("updated_at") or "", "source": rec["payload"].get("source") or "kingdee"}
+    return docs, missing, sources
+
+
+def _refresh_classify_snapshot(carrier, period):
+    from routers import logistics_classify as LCLS
+    return LCLS.refresh_snapshot(carrier, period)
+
+
+def _refresh_documents(carrier, period, forms):
+    forms = [f for f in dict.fromkeys(forms or list(_DOC_TYPES)) if f in _DOC_TYPES]
+    if not forms:
+        raise ValueError("至少要选择一种单据类型")
+    with db._engine.connect() as c:
+        rows = [dict(r) for r in c.execute(select(BL).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+    card, _ = _load_card(carrier)
+    fingerprints = _docs_fingerprints(rows, card, _review_settings(carrier), _load_spec(carrier) or {})
+    refreshed, errors = [], {}
+    for form in forms:
+        try:
+            subrows = [r for r in rows if _doc_form(r.get("doc_no")) == form]
+            docs = _box_docs(subrows, carrier)
+            _docs_snapshot_write(carrier, period, fingerprints[form], docs, form)
+            refreshed.append({"form": form, "label": _DOC_TYPES[form], "n": len(docs)})
+        except Exception as e:
+            errors[form] = str(e)[:200]
+    if refreshed:
+        try:
+            _refresh_classify_snapshot(carrier, period)
+        except Exception as e:
+            errors["classify"] = str(e)[:200]
+        _bust(carrier, period)
+        merged, _, _ = _docs_snapshot_merged(carrier, period, fingerprints)
+        _ACCR_CACHE[("view", carrier, period)] = (merged, fingerprints["legacy"], time.time())
+    return {"refreshed": refreshed, "errors": errors, "fingerprint": fingerprints["legacy"]}
+
+
+_FALLBACK_HEADERS = ["单号", "编码", "名称", "基本数量", "基本单位", "往来", "销售额", "规格", "数量件", "计价单位", "源单号"]
+
+
+def _fallback_materials(data):
+    from openpyxl import load_workbook
+    from io import BytesIO
+    wb = load_workbook(BytesIO(data), read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise ValueError("附件是空的")
+    headers = [str(x or "").strip() for x in rows[0]]
+    missing = [x for x in ("单号", "编码", "基本数量", "基本单位") if x not in headers]
+    if missing:
+        raise ValueError("缺少必需列：" + "、".join(missing))
+    idx = {name: headers.index(name) for name in _FALLBACK_HEADERS if name in headers}
+    materials, unknown = {}, set()
+    for rn, values in enumerate(rows[1:], 2):
+        no = str(values[idx["单号"]] or "").strip()
+        if not no:
+            continue
+        code = values[idx["编码"]]
+        qty = values[idx["基本数量"]]
+        if qty in (None, ""):
+            raise ValueError("第 %d 行基本数量为空" % rn)
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            raise ValueError("第 %d 行基本数量不是数字" % rn)
+        form = _doc_form(no)
+        materials.setdefault(form, {}).setdefault(no, []).append({
+            "编码": code, "名称": values[idx["名称"]] if "名称" in idx else "",
+            "基本数量": qty, "基本单位": values[idx["基本单位"]] if "基本单位" in idx else "",
+            "往来": values[idx["往来"]] if "往来" in idx else "", "销售额": values[idx["销售额"]] if "销售额" in idx else None,
+            "规格": values[idx["规格"]] if "规格" in idx else "", "数量件": values[idx["数量件"]] if "数量件" in idx else None,
+            "计价单位": values[idx["计价单位"]] if "计价单位" in idx else "", "源单号": values[idx["源单号"]] if "源单号" in idx else "", "_form": form})
+    if not materials:
+        raise ValueError("附件没有有效物料行")
+    return materials, unknown
+
+
+@router.get("/api/logistics-review/material-fallback-template")
+def review_material_fallback_template(request: Request, carrier: str = "", period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from openpyxl import Workbook
+    from io import BytesIO
+    from urllib.parse import quote
+    with db._engine.connect() as c:
+        nos = sorted({r[0] for r in c.execute(select(BL.c.doc_no).where(
+            (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).all() if r[0]})
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "金蝶补核附件"
+    ws.append(_FALLBACK_HEADERS)
+    for no in nos:
+        ws.append([no])
+    ws.freeze_panes = "A2"
+    widths = [24, 18, 34, 14, 14, 28, 14, 28, 14, 14, 24]
+    for i, width in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = width
+    bio = BytesIO()
+    wb.save(bio)
+    filename = quote(f"{carrier}_{period}_金蝶补核附件模板.xlsx")
+    return Response(content=bio.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
+
+
+@router.get("/api/logistics-review/material-fallback-files")
+def review_material_fallback_files(request: Request, carrier: str = "", period: str = ""):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    rows = [dict(r) for r in db._engine.connect().execute(select(BL).where(
+        (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+    fingerprint = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
+    required = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows
+                       if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
+    docs, missing, sources = _docs_snapshot_merged(carrier, period, fingerprint, forms=required)
+    with db._engine.connect() as c:
+        files = c.execute(select(BR.c.id, BR.c.name, BR.c.size, BR.c.created_by, BR.c.created_at).where(
+            (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "kingdee_fallback")).order_by(BR.c.id.desc())).mappings().all()
+    return {"ok": True, "docs": len(docs), "missing": missing, "required": required, "sources": sources,
+            "files": [{"id": r["id"], "name": r["name"], "size": r["size"], "by": r["created_by"], "at": r["created_at"]} for r in files]}
+
+
+@router.post("/api/logistics-review/material-fallback")
+async def review_material_fallback(request: Request):
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    carrier, period = request.query_params.get("carrier", ""), request.query_params.get("period", "")
+    lk = _locked(carrier, period)
+    if lk:
+        return lk
+    data = await _read_upload(request)
+    name = str(getattr(request.state, "upload_name", "") or "金蝶补核附件.xlsx")[:200]
+    if not name.lower().endswith(".xlsx"):
+        return JSONResponse({"ok": False, "msg": "只支持 .xlsx"}, status_code=400)
+    if len(data) > 20 * 1024 * 1024:
+        return JSONResponse({"ok": False, "msg": "附件不能超过 20MB"}, status_code=400)
+    try:
+        grouped, unknown = _fallback_materials(data)
+        with db._engine.connect() as c:
+            rows = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail"))).mappings().all()]
+        bill_nos = {str(r.get("doc_no") or "") for r in rows}
+        unknown = {no for _, items in grouped.items() for no in items if no not in bill_nos}
+        fingerprint = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
+        refreshed = []
+        for form, materials in grouped.items():
+            subrows = [r for r in rows if _doc_form(r.get("doc_no")) == form]
+            docs = _box_docs(subrows, carrier, materials_override=materials)
+            _docs_snapshot_write(carrier, period, fingerprint[form], docs, form, source="manual_attachment")
+            refreshed.append({"form": form, "label": _DOC_TYPES[form], "n": len(docs)})
+        with db._engine.begin() as c:
+            import hashlib
+            c.execute(delete(BR).where((BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "kingdee_fallback")))
+            c.execute(insert(BR).values(carrier=carrier, period=period, bill_src="", name=name, origin="人工金蝶补核附件",
+                                        sha256=hashlib.sha256(data).hexdigest(), size=len(data), data=data,
+                                        created_by=_uname(u), created_at=_now(), role="kingdee_fallback"))
+        _bust(carrier, period)
+        db.audit(_uname(u), "物流复核-金蝶补核附件", "%s %s" % (carrier, period), "；".join("%s %d 单" % (x["label"], x["n"]) for x in refreshed))
+        return {"ok": True, "refreshed": refreshed, "unknown": sorted(unknown), "cached_at": _now(), "source": "manual_attachment"}
+    except ValueError as e:
+        return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
+
+
+@router.get("/api/logistics-review/material-fallback-download")
+def review_material_fallback_download(request: Request, id: int = 0):
+    if not _perm(request):
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    from urllib.parse import quote
+    with db._engine.connect() as c:
+        row = c.execute(select(BR.c.name, BR.c.data).where((BR.c.id == id) & (BR.c.role == "kingdee_fallback"))).mappings().first()
+    if not row or not row["data"]:
+        return JSONResponse({"ok": False, "msg": "附件不存在"}, status_code=404)
+    return Response(content=bytes(row["data"]), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(row["name"] or "金蝶补核附件.xlsx")})
+
+
 @router.get("/api/logistics-review/result")
 def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                   group: str = "ex", page: int = 1, size: int = 50, q: str = "",
-                  fsub: str = "", ffee: str = "", fbiz: str = ""):
+                  fsub: str = "", ffee: str = "", fbiz: str = "", fresh: bool = False, forms: str = ""):
     # fsub/ffee/fbiz：从第①步「可逐单」点进来时只看这一组(主体/费用类型/产品线，口径同逐笔复核的账单归口)
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
@@ -4243,17 +4498,33 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
         #   (账单「箱数」直接比金蝶「千克」，2,300 箱 对 23,000 千克 → 全判不符)，而表里每张是按计费重量现算的(真不符只有 56 张)。
         #   线提到 1500：天鹰全量现算实测 3.8 秒、缓存 10 分钟；只有迅鸽(五千多张)还走大承运商那条路，它按件数核、中间表口径本来就对。
         full = len({(r.get("doc_no") or "").split("+")[0] for r in rows_all}) <= _FULL_DOCS
-        if full:
-            ck = ("view", carrier, period)
+        ck = ("view", carrier, period)
+        cc = _ACCR_CACHE.get(ck)
+        fingerprint = _docs_fingerprints(rows_all, card, settings, _load_spec(carrier) or {})
+        snapshot_sources, snapshot_missing, refresh_errors = {}, [], {}
+        refresh_report = None
+        if fresh:
+            lk = _locked(carrier, period)
+            if lk:
+                return lk
+            report = _refresh_documents(carrier, period, [f for f in forms.split(",") if f in _DOC_TYPES] or list(_DOC_TYPES))
+            refresh_report = report
+            refresh_errors = report["errors"]
+            if refresh_errors and not report["refreshed"]:
+                return JSONResponse({"ok": False, "msg": "金蝶刷新失败，已保留现有快照", "errors": refresh_errors}, status_code=502)
             cc = _ACCR_CACHE.get(ck)
-            if cc and _t.time() - cc[2] < 600:
-                pool = cc[0]
-            else:
-                try:
-                    pool = _box_docs(rows_all, carrier)
-                except Exception as e:
-                    return JSONResponse({"ok": False, "msg": str(e)[:240]}, status_code=502)
-                _ACCR_CACHE[ck] = (pool, None, _t.time())
+        required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows_all
+                                 if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
+        snapshot_pool, snapshot_missing, snapshot_sources = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
+        if not snapshot_sources and cc:
+            snapshot_pool = cc[0]
+            snapshot_sources = {"view": {"at": datetime.fromtimestamp(cc[2]).strftime("%Y-%m-%d %H:%M"), "source": "kingdee"}}
+        snapshot_at = max((x.get("at") or "" for x in snapshot_sources.values()), default="")
+        if not snapshot_sources and required_forms:
+            return {"ok": True, "needs_refresh": snapshot_missing or required_forms, "docs": [], "detail_total": 0,
+                    "total_bill": total_bill, "warning": "尚未从金蝶取数，请人工刷新或上传补核附件", "refresh_errors": refresh_errors}
+        if full:
+            pool = snapshot_pool
             for x in pool:                    # 缓存里的单据每次重挂确认态
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
             pool = [x for x in pool if x["doc_no"]]      # 无单据的不列(见 _nd)；缓存里那份不动
@@ -4285,10 +4556,8 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
             bw_gap = {"n_mat": len(_bg), "n_doc": len({d for ds in _bg.values() for d in ds}), "on": any(x.get("bw") for x in pool)}
         else:
             ex_all, unit_gap, ex_docs, sugg_docs, bw_gap = None, None, None, None, None
-            try:
-                pool = _box_docs(sl, carrier)
-            except Exception as e:
-                return JSONResponse({"ok": False, "msg": str(e)[:240]}, status_code=502)
+            allowed = {d0_of(r) for r in sl}
+            pool = [x for x in snapshot_pool if x.get("doc_no") in allowed]
             for x in pool:
                 x["confirmed"] = conf.get(x["doc_no"]) if x["doc_no"] else None
             dc = {"miss": counts.get("miss", 0), "qtydiff": counts.get("qtydiff", 0),
@@ -4334,7 +4603,10 @@ def review_result(request: Request, carrier: str = "迅鸽", period: str = "",
                 "accr_lines": accr_lines, "accr_total": accr_total, "doc_counts": dc,
                 "by_box": True, "material": True, "detail_total": dtot, "docs": docs, "detail": view,
                 "page": page, "size": size, "facets": facets, "ex_all": ex_all, "wt_range": _wt_range(carrier), "pallet_kg": _pallet_kg(carrier) or None, "pallet_box": _pallet_box(carrier) or None, "vol_kg": _vol_kg(carrier) or None, "nodoc": nodoc, "unit_gap": unit_gap, "bw_gap": bw_gap, "ex_docs": ex_docs, "detail_docs": dtot_docs, "suggest_docs": sugg_docs,
-                "carry": _carry_view(carrier, period, rows + accr)}
+                "carry": _carry_view(carrier, period, rows + accr), "cached_at": snapshot_at, "snapshot_sources": snapshot_sources,
+                "needs_refresh": snapshot_missing, "refresh_errors": refresh_errors,
+                "refreshed": refresh_report["refreshed"] if refresh_report else [],
+                **({"warning": "部分类型刷新失败，其他类型保留原快照"} if refresh_errors else {})}
     if by_weight:
         # 物料级：每单拆金蝶物料，运费/账单重量按金蝶基本单位重量摊；换算系数＝账单计费重量÷金蝶重量(毛重比)
         by_form = {}
@@ -4446,13 +4718,13 @@ def _uname(u):
         return ""
 
 
-def _cached_lines(request, carrier, period):
+def _cached_lines(request, carrier, period, fresh=False):
     import time as _t
     k = ("lines", carrier, period)
     c = _ACCR_CACHE.get(k)
-    if c and _t.time() - c[2] < 1800:
+    if c and not fresh:
         return c[0]
-    res = _build_lines(request, carrier, period)
+    res = _build_lines(request, carrier, period, fresh=fresh)
     if res.get("ok"):
         _ACCR_CACHE[k] = (res, None, _t.time())
     return res
@@ -4460,15 +4732,18 @@ def _cached_lines(request, carrier, period):
 
 @router.get("/api/logistics-review/lines")
 @router.get("/api/logistics-review/accrual")
-def review_lines(request: Request, carrier: str = "", period: str = ""):
-    """第二页·逐笔计提复核（老地址 /accrual 也指到这里）。金蝶查询慢，30分钟缓存；改归类/备注/登记会作废缓存。"""
+def review_lines(request: Request, carrier: str = "", period: str = "", fresh: bool = False):
+    """默认只读快照；fresh=1 是人工刷新金蝶计提分录的入口。"""
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
-    import time as _t
+    if fresh:
+        lk = _locked(carrier, period)
+        if lk:
+            return lk
     cc = _ACCR_CACHE.get(("lines", carrier, period))
-    cached = bool(cc and _t.time() - cc[2] < 1800)
+    cached = bool(cc and not fresh)
     try:
-        res = _cached_lines(request, carrier, period)
+        res = _cached_lines(request, carrier, period, fresh=fresh)
     except Exception as e:
         return JSONResponse({"ok": False, "msg": str(e)[:240]}, status_code=502)
     return {**res, "cached": cached}
@@ -5312,7 +5587,7 @@ def _collect_readiness(request, carrier, period, note=""):
                 else:
                     dup = LCLS.dups(request, carrier=carrier, period=period)
                     docs_data = {"docs": docs, "classify": {x["key"]: x for x in cls.get("docs") or []},
-                                 "dups": dup.get("docs") or {}}
+                                 "dups": dup.get("docs") or {}, "needs_refresh": res.get("needs_refresh") or []}
         except Exception as e:
             docs_data = {"error": "逐单/归类/重复取数失败：%s" % str(e)[:180]}
     try:

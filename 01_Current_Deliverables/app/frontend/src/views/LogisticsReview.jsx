@@ -895,7 +895,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   const [ptsSaved, setPtsSaved] = useState('')   // 已保存值
   const [ptsEdit, setPtsEdit] = useState(false)  // 要点是否展开编辑
 
-  // 总表：承运商 × 主体 计提/付款/差异 + 复核状态。金蝶部分后端缓存30分；返回总表时同账期不清空，后台静默刷新复核状态
+  // 总表：承运商 × 主体 计提/付款/差异 + 复核状态。默认读 PGSQL 快照；同账期保留页面，复核状态现算
   useEffect(() => {
     if (mode !== 'overview') return
     let alive = true
@@ -948,7 +948,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     const seq = ++_reqSeq.current, key = contextKey
     setDocLoading(true); setDocErr('')
     return reviewResult(carrier, period, group, page, q, dfilt).then(r => {
-      if (seq === _reqSeq.current && contextRef.current === key) { setD(r); setDocErr('') }
+      if (seq === _reqSeq.current && contextRef.current === key) { setD(r); setDocErr(r.warning || '') }
     }).catch(e => {
       if (seq === _reqSeq.current && contextRef.current === key) { setD({ err: e.message, docs: [] }); setDocErr(e.message) }
     }).finally(() => { if (seq === _reqSeq.current && contextRef.current === key) setDocLoading(false) })
@@ -969,7 +969,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
     const seq = ++_allSeq.current, key = contextKey
     if (step !== 'docs' || !full) { setAllD(null); return }
     reviewResult(carrier, period, 'all', 1, q, dfilt, 5000).then(r => { if (seq === _allSeq.current && contextRef.current === key) setAllD(r) })
-      .catch(() => { if (seq === _allSeq.current && contextRef.current === key) setAllD(null) })
+      .catch(() => { if (seq === _allSeq.current && contextRef.current === key) setAllD(d && d.warning ? d : null) })
     return () => { if (seq === _allSeq.current) ++_allSeq.current }
   }, [d, step, full])
   const loadCls = (fresh = false) => {
@@ -997,11 +997,16 @@ export default function LogisticsReview({ cfg, onPeriod }) {
   }
   // 逐笔：等主表 d 到了再拉（避免与逐单取数并发争用金蝶会话把主表拖住）；后端带缓存
   const applyL = r => { setL(r); setPts(r.points || ''); setPtsSaved(r.points || '') }
-  const loadL = useCallback(() => {
+  const loadL = useCallback((fresh = false) => {
+    const force = fresh === true
     const seq = ++_lineSeq.current, key = contextKey
-    setL(null)
-    return reviewLines(carrier, period).then(r => { if (seq === _lineSeq.current && contextRef.current === key) applyL(r) })
-      .catch(e => { if (seq === _lineSeq.current && contextRef.current === key) setL({ ...EMPTY_L, err: e.message }) })
+    if (!force) setL(null)
+    if (force) setBusy('line-refresh')
+    return reviewLines(carrier, period, force).then(r => {
+      if (seq === _lineSeq.current && contextRef.current === key) applyL(r)
+      if (force) flash('已人工刷新计提分录并写入 PGSQL，本页按新快照重算')
+    }).catch(e => { if (seq === _lineSeq.current && contextRef.current === key) setL({ ...EMPTY_L, err: e.message }) })
+      .finally(() => { if (force) setBusy('') })
   }, [carrier, period, contextKey])
   useEffect(() => {
     if (mode !== 'detail' || !carrier || !d || d.err) return
@@ -1595,7 +1600,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             <div style={{ flex: 1 }} />
             <button className="lnk" style={{ fontSize: 12 }} title="系统按金蝶供应商档案的「供应商分组」认物流商，点开看 / 改" onClick={() => setScopeDlg(true)}>
               物流范围：{scopeSum ? <>金蝶分组「{scopeSum.names.join('、') || '未设置'}」{scopeSum.n} 家{scopeSum.stale ? '（金蝶没读到，用的旧名单）' : ''}</> : '读取中…'}</button>
-            {ov && ov.fetched_at && <span className="ovsub" title="金蝶计提数据缓存30分钟，过期先显示旧数、后台自动刷新；复核状态、账单应付每次现算">金蝶数据取于 {ov.fetched_at.slice(5)}{ov.cached === 'stale' ? '（后台刷新中）' : ''}</span>}
+            {ov && ov.fetched_at && <span className="ovsub" title="默认只读 PGSQL 快照，不自动刷新；复核状态、账单应付每次现算">金蝶数据取于 {ov.fetched_at.slice(5)}{ov.cached === 'stale' ? '（本次刷新失败，沿用快照）' : ''}</span>}
             <button className="btn sm" disabled={ovBusy} onClick={refreshOv} title="重新从金蝶读取计提">{ovBusy ? '刷新中…' : '刷新'}</button>
             <input type="search" placeholder="搜承运商/编码" value={supq} onChange={e => setSupq(e.target.value)} style={{ width: 130 }} />
           </div>
@@ -1675,7 +1680,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
                     ? <button className="btn pri" title="登记制：没有可逐单核的账单，进去直接到第④步——核对计提（不计提的在那里做费用凭证）和请款，再登记" onClick={() => enterReview(r.short || r.carrier, 'sign')}>开始复核</button>
                     : <button className="btn pri" disabled={!r.has_spec} title={r.has_spec ? '进入四步复核' : '该承运商未配取数说明'} onClick={() => enterReview(r.short || r.carrier)}>开始复核</button>}</td>
                 </tr>)}
-              {ov && ov.rows && !ov.rows.length && <tr><td colSpan="12" className="ovempty">本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）</td></tr>}
+              {ov && ov.rows && !ov.rows.length && <tr><td colSpan="12" className="ovempty">{ov.needs_refresh ? '金蝶计提待取数：请点击右上角“刷新”人工读取，未取数前不按零计提处理。' : '本月金蝶暂无物流计提（2241 供应商往来无「计提…运费/仓储费」贷方）'}</td></tr>}
             </tbody>
           </table></div>
           {pr && <PayReqDlg key={pr.inst} v={pr} onClose={() => setPr(null)} onChanged={reloadOv} flash={flash} />}
@@ -1713,8 +1718,9 @@ export default function LogisticsReview({ cfg, onPeriod }) {
         {billDlg && <BillsDlg carrier={carrier} period={period} initialReplace={billDlg.src || ''} onClose={() => setBillDlg(false)} onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); loadL() }} flash={flash} />}
       </>)}
       {step === 'lines' && (<>
-        {L && !L.err && <ReviewMetrics items={[
-          { label: '当前计提（含税）', value: money(L.accr_total), note: '金蝶原分录' },
+        {L && !L.err && L.needs_refresh && <ReviewNotice><b>金蝶计提待取数</b><span>当前没有可用分录快照，暂不计算计提与差异，也不会按 0 元处理。</span><button className="lrx-btn primary" disabled={!!locked || busy === 'line-refresh'} onClick={() => loadL(true)}>{busy === 'line-refresh' ? '刷新中…' : '人工刷新计提'}</button></ReviewNotice>}
+        {L && !L.err && !L.needs_refresh && <ReviewMetrics items={[
+          { label: '当前计提（含税）', value: money(L.accr_total), note: `金蝶原分录${L.cached_at ? ` · 取于 ${L.cached_at}` : ''}` },
           { label: '准备做账金额', value: money(L.bill_total), note: `按复核后维度汇总${L.od_total ? ` · 可逐单 ${Math.round(L.od_total.ratio * 100)}%` : ''}` },
           { label: '差异（计提 − 账单）', value: dtxt(L.diff_total), note: '总额对平仍需核维度', tone: isZero(L.diff_total) ? 'ok' : 'bad' },
           { label: '未解释差异', value: L.n_unexplained || 0, note: '有差异、还没写解释（笔）', tone: L.n_unexplained ? 'warn' : 'ok' },
@@ -1734,11 +1740,11 @@ export default function LogisticsReview({ cfg, onPeriod }) {
             </div>}
         </div></details>
 
-        {L && !L.err && <PreparedDimensions groups={groups} period={period} locked={locked} onSource={goDocs} onEdit={setFixAt} onMark={markSubj} />}
+        {L && !L.err && !L.needs_refresh && <PreparedDimensions groups={groups} period={period} locked={locked} onSource={goDocs} onEdit={setFixAt} onMark={markSubj} />}
         <details className="card lrx-detail-toggle"><summary>当前计提 <small>金蝶原分录 · 点击展开或收起</small></summary>
         <div className="card">
-          <h3>逐笔计提复核 <span className="dim">· 按主体分组；任务只筛明细，组头与底部合计不受筛选影响</span></h3>
-          {L && !L.err && <div className="lrv-taskbar lrv-line-tasks" aria-label="逐笔任务组">
+          <h3>逐笔计提复核 <span className="dim">· 按主体分组；任务只筛明细，组头与底部合计不受筛选影响</span><span className="sp" /><button className="btn sm" disabled={!!locked || busy === 'line-refresh'} onClick={() => loadL(true)} title="人工重新读取金蝶计提分录并写入 PGSQL">{busy === 'line-refresh' ? '刷新中…' : '刷新计提'}</button></h3>
+          {L && !L.err && !L.needs_refresh && <div className="lrv-taskbar lrv-line-tasks" aria-label="逐笔任务组">
             <span className="lrv-tasktitle">动作任务组</span>
             <button className={'lrv-task' + (!lineTask ? ' on' : '')} onClick={() => setLineTask('')}>全部明细</button>
             {[['unexpl', '差异未解释'], ['fixes', '已登记更正'], ['subject', '主体待确认']].map(([k, label]) => <button key={k} data-line-task={k} className={'lrv-task' + (lineTask === k ? ' on' : '')} onClick={() => setLineTask(lineTask === k ? '' : k)}>{label}<b>{lineTaskCounts[k]}</b></button>)}
@@ -1746,7 +1752,7 @@ export default function LogisticsReview({ cfg, onPeriod }) {
           </div>}
           {L === null && <div className="ovempty">读金蝶计提分录中…</div>}
           {L && L.err && <div className="msg" style={{ margin: 12 }}>逐笔取数失败：{L.err} <button className="btn sm" onClick={loadL}>重试</button></div>}
-          {L && !L.err && (
+          {L && !L.err && !L.needs_refresh && (
             <div className="tw"><table className="mtbl ltbl">
               <thead><tr>
                 <th>费用项目 <small className="dim">/ 产品分类 · 产品项目 · 部门（均带金蝶编码）</small></th><th>凭证号</th>

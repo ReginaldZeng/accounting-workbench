@@ -123,6 +123,7 @@ async function open(browser, B, state) {
     else if (p === '/api/logistics-review/result') {
       if (fail('result')) { status = 502; body = { ok: false, msg: '合成逐单502' } }
       else body = state.taskData ? taskResultData(period) : resultData(period)
+      if (state.staleData) body = { ...body, stale: true, cached_at: '2026-11-04 12:00', warning: '金蝶暂时无法刷新，当前显示最近成功缓存（2026-11-04 12:00）：WebAPI限流' }
     } else if (p === '/api/logistics-review/intake') {
       if (fail('intake')) { status = 502; body = { ok: false, msg: '合成接入502' } }
       else body = state.issueData ? issueIntakeData : intakeData
@@ -174,6 +175,18 @@ async function resultRetry(browser, B) {
     assert.equal(await page.locator('[data-doc-task]').count(), 0, '无全量数据不得伪造任务数')
     assert.deepEqual(errors, [])
   } catch (e) { throw new Error(e.message + '\nPAGE:\n' + await page.locator('body').innerText()) } finally { await ctx.close() }
+}
+
+async function staleDocs(browser, B) {
+  const { page, ctx, errors } = await open(browser, B, { taskData: true, staleData: true, fail: {} })
+  try {
+    await step(page, '逐单核价核量')
+    await page.locator('.ldx-table tbody tr.ldx-row').first().waitFor()
+    assert.equal(await page.locator('.ldx-table tbody tr.ldx-row').count(), 8, '缓存警告不能清空逐单列表')
+    assert.match(await page.locator('.fxwarn').innerText(), /最近成功缓存[\s\S]*WebAPI限流/)
+    assert.match(await page.locator('.lrx-bottom-info').innerText(), /81\.00/)
+    assert.deepEqual(errors, [])
+  } finally { await ctx.close() }
 }
 
 async function staleLines(browser, B) {
@@ -338,6 +351,7 @@ async function main() {
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const tests = [
     ['首次逐单502后重试成功且不启动错误逐笔', resultRetry],
+    ['金蝶限流时保留最近成功逐单与缓存提示', staleDocs],
     ['旧账期逐笔慢响应不覆盖新账期', staleLines],
     ['接入/逐笔/readiness/发票均可重试且失败禁登记', stepRetries],
     ['逐单任务组502恢复、去重、重叠排除confirmed及二级卡片', docTasks],

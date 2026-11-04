@@ -3,7 +3,7 @@
 # Date: 2026-10-06 | Author: Claude Opus 5.5 | Version: V2.846
 # Description: 【物流·哪些供应商算物流】用户问「你是怎么知道哪些是物流的」「不应该写死吧，应该读金蝶的供应商列表之类的」。
 #   原来四处都认编码前缀「物流运输服务」(钉钉请款单认收款方、金蝶付款单、支付凭证、复核台总表的计提)。
-#   现在改成读金蝶供应商档案(BD_Supplier)的「供应商分组」：哪几个分组算物流存在设置里、页面上勾，名单从金蝶现读(缓存 12 小时)。
+#   现在改成读金蝶供应商档案(BD_Supplier)的「供应商分组」：哪几个分组算物流存在设置里、页面上勾；默认读已存名单，人工刷新才访问金蝶。
 #   第一次没有设置时，按「已有请款单的供应商 + 工作台物流供应商档案里的金蝶编码」现在在金蝶哪个分组来定(不写死分组名)。
 #   不走物流计提的排除规则(办公室快递月结、湖北顺丰速运各部门快递费)也挪进同一份设置，页面上维护。
 #   金蝶读不到时用上一次存下的名单，不会因为金蝶一时不通就把物流商全认丢。
@@ -83,20 +83,22 @@ def _init_scope():
     return sc
 
 
-def get_scope():
+def get_scope(refresh=False):
     sc = db.get_setting(KEY, None)
     if not sc or not sc.get("groups"):
-        _load()
+        if refresh:
+            _load()
         sc = _init_scope() or sc or {"groups": [], "excl_kw": _SEED_EXCL_KW, "excl_payee": _SEED_EXCL_PAYEE}
     return sc
 
 
-def data(force=False):
-    """→ {groups, codes:set, name2code, code2name, at, stale, err}。codes＝范围内分组的全部金蝶供应商编码。"""
+def data(force=False, refresh=False):
+    """默认读已存名单；force=True 或 refresh=True 才访问金蝶。"""
     if not force and _DATA["val"] is not None and time.time() - _DATA["t"] < 60:
         return _DATA["val"]
-    _load(force)
-    sc = get_scope()
+    if force or refresh:
+        _load(force)
+    sc = get_scope(refresh=force or refresh)
     gs = set(sc.get("groups") or [])
     if _MEM["sups"] is not None:
         inscope = [(c, n, g) for c, (n, g) in _MEM["sups"].items() if g in gs]

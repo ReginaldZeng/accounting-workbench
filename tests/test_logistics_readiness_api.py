@@ -102,6 +102,9 @@ def _load_module():
     todo.fix_touch = lambda *args: None
     with patch.dict(sys.modules, {"core": core, "kingdee_client": kc, "todo_scenes": todo}):
         from routers import logistics_review as lr
+    lr.db = db
+    lr.kc = kc
+    lr._require_perm = core._require_perm
     return lr, engine
 
 
@@ -389,16 +392,18 @@ class FailureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "金蝶查询SAL_OUTSTOCK物料失败"):
                 self.lr._box_docs([row], "丰源")
 
-    def test_result_material_failure_is_502_and_not_cached(self):
+    def test_result_without_snapshot_requires_manual_refresh(self):
         self.engine.rows = [[{"id": 1, "doc_no": "XSCKD1", "grain": "detail", "amount": 10, "qty": 1}], [], []]
         with patch.object(self.lr, "_perm", return_value={"name": "测试"}), \
              patch.object(self.lr, "_load_card", return_value=({}, 0)), \
              patch.object(self.lr, "_doc_ok", return_value={}), \
              patch.object(self.lr, "_code_maps", return_value={}), \
+             patch.object(self.lr, "_load_spec", return_value={}), \
              patch.object(self.lr, "_box_docs", side_effect=RuntimeError("金蝶读取单据物料失败")):
             out = self.lr.review_result(_Request(), carrier="丰源", period="2026-09", group="all")
-        self.assertEqual(out.status_code, 502)
-        self.assertIn("物料", json.loads(out.body)["msg"])
+        out = json.loads(out.body) if hasattr(out, "body") else out
+        self.assertTrue(out["needs_refresh"])
+        self.assertEqual(out["docs"], [])
         self.assertNotIn(("view", "丰源", "2026-09"), self.lr._ACCR_CACHE)
 
 
@@ -447,16 +452,25 @@ class EntriesCacheTests(unittest.TestCase):
             calls.append((carrier, period, carrier_full))
             return {"entries": [], "adj": [], "prior": []}
 
-        with patch.object(self.lr, "_accr_entries_uncached", side_effect=uncached):
-            first = self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司")
+        with patch.object(self.lr, "_accr_entries_uncached", side_effect=uncached), \
+             patch.object(self.lr.db, "get_period_input", create=True, return_value=None), \
+             patch.object(self.lr.db, "set_period_input", create=True):
+            first = self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司", fresh=True)
             second = self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司")
             self.assertEqual(first, second)
             self.assertEqual(len(calls), 1)
-            self.lr._accr_entries("天鹰物流", "2026-08", "其他全称")
+            self.lr._accr_entries("天鹰物流", "2026-08", "其他全称", fresh=True)
             self.assertEqual(len(calls), 2)
             self.lr._bust("天鹰物流", "2026-08")
-            self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司")
+            self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司", fresh=True)
             self.assertEqual(len(calls), 3)
+
+    def test_entries_default_read_never_calls_kingdee(self):
+        with patch.object(self.lr, "_accr_entries_uncached", side_effect=AssertionError("默认读取不得访问金蝶")), \
+             patch.object(self.lr.db, "get_period_input", create=True, return_value=None):
+            out = self.lr._accr_entries("天鹰物流", "2026-08", "湖北天鹰物流有限公司")
+        self.assertTrue(out["needs_refresh"])
+        self.assertEqual(out["entries"], [])
 
 
 class ExportCacheTests(unittest.TestCase):
@@ -594,7 +608,8 @@ class SheetRoundingApiTests(unittest.TestCase):
         kc = types.ModuleType("kingdee_client")
         with patch.dict(sys.modules, {"core": core, "kingdee_client": kc, "routers.logistics_review": self.lr}):
             from routers import logistics_classify as lcr
-            with patch.object(self.lr, "_backfill_subjects", lambda *args, **kwargs: None):
+            with patch.object(lcr, "db", self.lr.db), patch.object(lcr, "LR", self.lr), \
+                 patch.object(self.lr, "_backfill_subjects", lambda *args, **kwargs: None):
                 docs = lcr._bill_docs("甲", "2026-09")
         self.assertEqual(len(docs), 1)
         self.assertIn((docs[0]["annot"], docs[0]["annot_source"]),
@@ -663,7 +678,8 @@ class BizlineOverrideTests(unittest.IsolatedAsyncioTestCase):
             out = await self.lr.review_doc_classify(_Request({"carrier": "甲", "period": "2026-09", "doc_no": "XSCKD1",
                                                                "bizline": "植物肉", "reason": "特批调整"}))
         self.assertEqual(out, {"ok": True, "n": 1})
-        params = self.engine.connections[-1].writes[-1].compile().params
+        writes = [stmt for conn in self.engine.connections for stmt in conn.writes]
+        params = writes[-1].compile().params
         self.assertEqual(params["biz_ovr"], "植物肉")
         self.assertEqual(params["ovr_reason"], "特批调整")
 
@@ -671,7 +687,8 @@ class BizlineOverrideTests(unittest.IsolatedAsyncioTestCase):
             out = await self.lr.review_doc_classify(_Request({"carrier": "甲", "period": "2026-09", "doc_no": "XSCKD1",
                                                                "restore": True}))
         self.assertEqual(out, {"ok": True, "n": 1})
-        params = self.engine.connections[-1].writes[-1].compile().params
+        writes = [stmt for conn in self.engine.connections for stmt in conn.writes]
+        params = writes[-1].compile().params
         for key in ("subj_ovr", "fee_ovr", "biz_ovr", "ovr_reason"):
             self.assertIsNone(params[key])
 
