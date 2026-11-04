@@ -200,6 +200,20 @@ class SnapshotBoundaryTests(unittest.TestCase):
         self.assertEqual(out["cached_at"], "2026-11-04 12:00")
         self.assertEqual(out["docs"][0]["key"], "XSCKD1")
 
+    def test_classify_public_only_builds_snapshot(self):
+        from routers import logistics_classify as classify
+        from tests.test_logistics_readiness_api import _Request
+        with patch.object(classify, "db", self.lr.db), \
+             patch.object(classify, "LR", self.lr), \
+             patch.object(classify, "_snapshot_fingerprint", return_value="new"), \
+             patch.object(classify, "refresh_snapshot", return_value={"ok": True, "docs": [{"key": "XSCKD1"}]}) as refresh, \
+             patch.object(self.lr.db, "get_period_input", create=True, return_value=None), \
+             patch.object(self.lr, "_kd_snapshot_read", return_value=None):
+            out = classify.classify(_Request(), carrier="丰源", period="2026-09")
+        refresh.assert_called_once_with("丰源", "2026-09")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["docs"][0]["key"], "XSCKD1")
+
 
 class InvoiceSnapshotTests(unittest.TestCase):
     @classmethod

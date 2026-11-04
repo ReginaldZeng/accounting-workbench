@@ -167,12 +167,10 @@ def classify(request: Request, carrier: str = "", period: str = "", fresh: int =
                 return res
         except Exception:
             pass
-        if any(LR._kd_snapshot_read(period, form) for form in LR._DOC_TYPES):
-            try:
-                return refresh_snapshot(carrier, period)
-            except Exception as e:
-                return {"ok": False, "msg": str(e)[:200], "needs_refresh": True, "docs": []}
-        return {"ok": False, "msg": "归类快照待取数，请在单据运费的金蝶数据页人工刷新或上传补核附件", "needs_refresh": True, "docs": []}
+        try:
+            return refresh_snapshot(carrier, period)
+        except Exception as e:
+            return {"ok": False, "msg": str(e)[:200], "needs_refresh": True, "docs": []}
     try:
         return refresh_snapshot(carrier, period)
     except Exception as e:
