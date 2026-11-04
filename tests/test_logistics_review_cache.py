@@ -91,6 +91,12 @@ class ReviewDocsCacheTests(unittest.TestCase):
         self.assertNotEqual(first, self.lr._docs_fingerprint(rows, {"price": 1}, {"scheme": "weight"}, {}))
         self.assertNotEqual(first, self.lr._docs_fingerprint(rows, {}, {"scheme": "weight"}, {"formula": "new"}))
 
+    def test_fingerprint_is_independent_of_row_order(self):
+        rows = [{"id": 2, "doc_no": "XS2", "amount": 20}, {"id": 1, "doc_no": "XS1", "amount": 10}]
+        settings = {"scheme": "weight", "subjects": [{"code": "102"}, {"code": "101"}]}
+        first = self.lr._docs_fingerprint(rows, {}, settings, {})
+        self.assertEqual(first, self.lr._docs_fingerprint(list(reversed(rows)), {}, {"scheme": "weight", "subjects": list(reversed(settings["subjects"]))}, {}))
+
 
 if __name__ == "__main__":
     unittest.main()

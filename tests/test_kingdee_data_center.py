@@ -145,7 +145,7 @@ class PublicDocumentListTests(unittest.TestCase):
             "PO2": [{"编码": "M3", "名称": "鲜食", "基本数量": 1, "基本单位": "箱", "销售额": 80, "往来": "供应商乙"}]},
             "heads": {"PO1": {"销售组织": "深圳"}}, "groups": {"M1": "植物肉", "M2": "小料"},
             "source": "manual_attachment", "material_version": "v1"}, "updated_at": "2026-11-04 12:00", "updated_by": "测试"}
-        freight = {"PO1": {"parts": {("承运商甲", "2026-09", "signed", "v2"): {"tr": 100, "ld": 20, "ot": 0}}}}
+        freight = {"PO1": {"parts": {("承运商甲", "2026-09", True, "v2"): {"tr": 100, "ld": 20, "ot": 0}}}}
         with patch.object(self.lr.db, "get_period_input", create=True, return_value=rec), \
              patch.object(self.lr, "_outstock_freight", return_value=freight):
             out = self.lr._kd_documents("2026-09", ["PUR_PurchaseOrder"], q="", page=1, size=10)

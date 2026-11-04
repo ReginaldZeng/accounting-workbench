@@ -4149,7 +4149,10 @@ _FULL_DOCS = 1500      # 单据数在这以内的承运商：第②步整家逐�
 
 def _docs_fingerprint(rows, card, settings, spec):
     import hashlib
-    raw = json.dumps({"rows": rows, "card": card, "settings": settings, "spec": spec}, ensure_ascii=False, sort_keys=True, default=str)
+    ordered_rows = sorted(rows, key=lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True, default=str))
+    if isinstance(settings, dict) and isinstance(settings.get("subjects"), list):
+        settings = {**settings, "subjects": sorted(settings["subjects"], key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))}
+    raw = json.dumps({"rows": ordered_rows, "card": card, "settings": settings, "spec": spec}, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -4459,7 +4462,7 @@ def _kd_documents(period, forms, q="", page=1, size=25):
                     total = round(tr + ld, 2) if carrier else None
                     sales = float(m.get("销售额") or 0)
                     base_qty = float(m.get("基本数量") or 0)
-                    rows.append({"row_key": "|".join([form, no, *part_key, str(i)]), "doc_no": no, "form": form,
+                    rows.append({"row_key": "|".join([form, no, *map(str, part_key), str(i)]), "doc_no": no, "form": form,
                                  "form_label": _DOC_TYPES[form], "subject": subject, "party": party,
                                  "material_group": groups.get(code) or "", "code": code, "name": name,
                                  "base_qty": base_qty, "base_unit": m.get("基本单位") or "", "sales": round(sales, 2),
@@ -4843,7 +4846,7 @@ def _review_material_rows(carrier, period, docs):
                 base_qty = qtys[i]
                 sales = float(m.get("sales") or 0)
                 code = str(m.get("code") or "")
-                out.append({"row_key": "|".join([str(doc.get("lid") or no), *part_key, str(i)]), "doc_no": no,
+                out.append({"row_key": "|".join([str(doc.get("lid") or no), *map(str, part_key), str(i)]), "doc_no": no,
                             "form": _doc_form(no), "form_label": _DOC_TYPES.get(_doc_form(no), _doc_form(no)),
                             "subject": subject, "party": m.get("party") or "、".join(doc.get("parties") or []), "fee_item": doc.get("fee_item") or "",
                             "material_group": groups.get(code) or m.get("group") or "", "code": code, "name": m.get("name") or "",
