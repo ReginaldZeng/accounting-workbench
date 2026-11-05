@@ -4802,7 +4802,20 @@ def review_standard_bill(request: Request, carrier: str = "", period: str = "", 
                 (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "original")).order_by(BR.c.id.desc()).limit(1)).mappings().first()
         if not rows:
             return JSONResponse({"ok": False, "msg": "本期没有可生成系统复核表的逐笔行"}, status_code=409)
-        fingerprint = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
+        card = _load_card(carrier)[0]
+        kdmap = {(r.get("doc_no") or "").split("+")[0]: r["kd_qty"] for r in rows if r.get("kd_qty") is not None}
+        own = {r.get("id"): r.get("kd_qty") for r in rows}
+        nrow = {}
+        for r in rows:
+            first_doc = (r.get("doc_no") or "").split("+")[0]
+            nrow[first_doc] = nrow.get(first_doc, 0) + 1
+        lr.review_details(rows, card, kdmap, carrier in _QTY_CARRIERS)
+        for r in rows:
+            first_doc = (r.get("doc_no") or "").split("+")[0]
+            if nrow.get(first_doc, 0) > 1 and own.get(r.get("id")) is not None and r.get("review_mode") != "register":
+                r["kd_qty"], r["qty_diff"], r["qty_state"] = lr.qty_check(r, own[r.get("id")], carrier in _QTY_CARRIERS)
+                r["verdict"] = lr.verdict(r.get("price_state"), r["qty_state"])
+        fingerprint = _docs_fingerprints(rows, card, _review_settings(carrier), _load_spec(carrier) or {})
         required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows
                                  if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
         documents, _, _ = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
