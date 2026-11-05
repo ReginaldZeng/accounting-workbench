@@ -99,6 +99,7 @@ function sheetSay(s) {
   if (s.verdict === 'gap') return `读出来的比账单合计${s.gap < 0 ? '少' : '多'} ${money(Math.abs(s.gap))}`
   if (s.verdict === 'maybe') return '没有合计列可比，有像是钱的列没读进来'
   if (s.verdict === 'nocheck') return '账单这页没有合计列可比'
+  if (s.verdict === 'source') return '首页已取数，本页仅作原始追溯'
   if (s.verdict === 'skip') return '取数说明没配这页'
   if (s.verdict === 'accrual') return `汇总页（按费用项）${s.n} 行`
   return ''
@@ -155,14 +156,14 @@ function Overview({ period }) {
 const STANDARD_COLUMNS = [
   ['A', '主体', '确定计入哪个公司'], ['B', '金蝶系统单据编号', '多个单号用逗号或分号分隔'], ['C', '费用类型', '出库、入库、研发外购等'],
   ['D', '数量计算标准', '重量、件数、箱数、体积、托、单、车或免核'], ['E', '账单数量', '只取供应商数量，不倒算'], ['F', '数量单位', 'kg、件、箱、托、单、车等'],
-  ['G', '费用总额', '本行实际账单金额'], ['H', '费用拆分1', '运费'], ['I', '费用拆分2', '附加费'], ['J', '备注', '补充说明，可选'],
+  ['G', '费用总额', '本行实际账单金额'], ['H…', '动态费用列', '运费、送货费、卸货费等，可增删或换序'], ['末列', '备注', '放在全部费用列之后，可选填'],
 ]
 
 function StandardBillGuide() {
   return <section className="lrx-panel lir-schema">
-    <div className="lrx-panel-head"><div><h2>A–J 固定取数列</h2><small>人工加工时逐行填写；B 列多单号支持中英文逗号、分号</small></div></div>
+    <div className="lrx-panel-head"><div><h2>固定业务列＋动态费用列</h2><small>A–G 固定；H 起费用列不限数量，备注放最后；旧 A–J 继续兼容</small></div></div>
     <div className="lir-schema-grid">{STANDARD_COLUMNS.map(([col, name, use]) => <div className="lir-schema-cell" key={col}><b>{col}</b><span>{name}</span><small>{use}</small></div>)}</div>
-    <div className="lir-footnote">有费用拆分时 G = H + I；E 只取供应商数量，金蝶数量仅用于后续核对。标准块可独立放置，也可追加在原明细后面。</div>
+    <div className="lir-footnote">G = H 至备注前全部费用列之和；空费用按 0，费用表头不能为空或重复。首页为「标准逐笔」时只读取首页，其余原始页仅作追溯。</div>
   </section>
 }
 
@@ -270,7 +271,7 @@ export function IntakeStep({ data, period, locked, flash, onOpenBills, onChanged
         <article className="lir-file-card">
           <div className="lir-file-kind">标准逐笔账单 · 必需</div>
           <div className="lir-file-title"><h3>{files.length ? `${files.length} 份标准账单` : '标准逐笔账单'}</h3><span className={'lrx-tag ' + ((data.bills || []).length ? 'ok' : 'pending')}>{(data.bills || []).length ? `已解析 ${(data.bills || []).length} 份` : '未形成解析结果'}</span></div>
-          <p>{(data.bills || []).length ? `${nDetails} 行逐笔 · ${nDocs} 张单 · 读取金额 ${money(data.bill_total)}` : '上传人工加工后的 A–J 标准账单，系统不会从原始附件猜测取数。'}</p>
+          <p>{(data.bills || []).length ? `${nDetails} 行逐笔 · ${nDocs} 张单 · 读取金额 ${money(data.bill_total)}` : '上传人工加工后的标准账单：A–G 固定、费用列动态、备注最后；旧 A–J 继续兼容。'}</p>
           {!files.length && <div className="lir-file-empty">{data.register ? '登记制无需上传标准账单。' : data.has_spec ? '当前没有标准账单，可手工上传或等待钉钉附件自动接入。' : '尚未配置取数说明，暂不能上传解析。'}</div>}
           {files.length > 0 && <div className="lir-source-list">{files.map(f => {
             const name = f.name || '（没记文件名）', bill = billBySrc[f.src || '']

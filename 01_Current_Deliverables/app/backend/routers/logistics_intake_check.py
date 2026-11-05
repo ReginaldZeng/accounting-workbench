@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-05 | Author: Kimi | Version: V2.1054
+# Description: 数据接入报告支持动态费用列；首页标准逐笔之外的原始页仅作追溯。
 # Date: 2026-11-04 | Author: Kimi | Version: V-draft
 # Description: 极鲜达数据接入按 A–J 标准结果逐页核对，原始附件不参与取数报告。
 # Date: 2026-11-03 | Author: Kimi | Version: V2.1037
@@ -29,7 +31,7 @@ router = APIRouter()
 BL, BR, SP, PR = LR.BL, LR.BR, LR.SP, store.payreq
 _REP = {}                   # {(承运商, 账期, 份名, 原件sha, 取数说明sha): 报告}
 _REP_LOCK = threading.Lock()
-_REPORT_ALGORITHM = "sheet-round-v2-aj-nocheck-ok"
+_REPORT_ALGORITHM = "sheet-round-v3-dynamic-fees"
 
 
 def _spec_sha(spec):

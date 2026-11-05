@@ -826,6 +826,8 @@ async def review_parse(request: Request, carrier: str = "迅鸽", period: str = 
         sp2 = dict(spec, period=period)
         try:
             pre = intake.scope_bill_subject(_parse_bill_any(sp2, data), bill_subject)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "msg": str(e)}, status_code=400)
         except Exception:
             return JSONResponse({"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}, status_code=400)
         if not pre.get("detail") and not pre.get("accrual"):
@@ -1030,6 +1032,8 @@ def import_bill(carrier, period, data, operator, origin="手工上传", fname=""
     spec["period"] = period
     try:
         res = intake.scope_bill_subject(_parse_bill_any(spec, data), bill_subject)
+    except ValueError as e:
+        return {"ok": False, "msg": str(e)}
     except Exception:
         return {"ok": False, "msg": "账单解析失败，请核对取数说明与账单格式"}
     batch = "%s|%s|%s" % (carrier, period, datetime.now().strftime("%Y%m%d%H%M%S"))

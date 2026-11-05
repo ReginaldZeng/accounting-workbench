@@ -1,3 +1,4 @@
+// [Change Log] Date:2026-11-05 Author:Kimi Version:V2.1054 上传解析支持动态费用列，保留旧A-J并避免首页与原始页重复取数。
 // [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1047 总表与四步内容区整页重构，旧主界面退出默认路径。
 // [Change Log] Date:2026-11-04 Author:Kimi Version:V2.1046 四步共享布局、准备做账维度及响应式重构，保留正式接口与原更正流程。
 // [Change Log] Date:2026-11-04 Author:Kimi Version:V-draft 极鲜达上传弹窗明确人工加工后的 A–J 标准逐笔账单。
@@ -114,7 +115,7 @@ function BillsDlg({ carrier, period, initialReplace = '', onClose, onChanged, fl
     <div className="fxmask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
       <div className="fxdlg" style={{ width: 'min(1000px,100%)' }} role="dialog" aria-label="账单">
         <div className="fxhead"><b>{carrier} {period} 的账单</b><span className="sp" /><button className="fxx" onClick={onClose} aria-label="关闭">✕</button></div>
-        <div className="fxsub">{standard ? <>请上传<b>人工加工后的 A–J 标准逐笔账单</b>，系统按固定表头取数，不自动识别供应商自由格式。「替换」只换当前这一份，原始追溯附件不受影响；
+        <div className="fxsub">{standard ? <>请上传<b>人工加工后的标准逐笔账单</b>：A–G 固定，H 起费用列可增删或换序，备注放最后；旧 A–J 继续兼容。「替换」只换当前这一份，原始追溯附件不受影响；
           人工改过的归类按单号保留。请款金额不会跟着变，账单金额改了要留意两边的差。</> : <>下面是这家这月<b>现在解析着的账单</b>，一份一行（一个文件里几张表算一份，份名＝表名）。「替换」只换那一份，别的不动；
           人工改过的归类按单号带到新账单上。请款金额不会跟着变，账单金额改了要留意两边的差。</>}</div>
         {err && <div className="fxwarn">{err}</div>}
@@ -1712,12 +1713,12 @@ export default function LogisticsReview({ cfg, onPeriod }) {
 
       {step === 'intake' && (<>
         <ReviewMetrics items={[
-          { label: '标准逐笔行', value: ik && ik.bills ? (ik.bills || []).reduce((n, b) => n + (b.n_detail || 0), 0) : '读取中…', note: '只读人工加工后的 A–J 列' },
+          { label: '标准逐笔行', value: ik && ik.bills ? (ik.bills || []).reduce((n, b) => n + (b.n_detail || 0), 0) : '读取中…', note: 'A–G 固定＋动态费用列' },
           { label: '账单金额', value: money(ik && ik.bill_total), note: '按当前有效账单汇总' },
           { label: '计费页', value: ik ? (ik.files || []).reduce((n, file) => n + ((file.report && file.report.sheets) || []).filter(sheet => sheet.role === 'detail').length, 0) : '读取中…', note: '不含说明与汇总页' },
           { label: '当前文件状态', value: ik ? ((ik.bills || []).length ? '已上传' : '未上传') : '读取中…', note: ik ? `${(ik.files || []).length} 份取数文件 · ${(ik.bills || []).length} 份已解析` : '等待数据接入', tone: ik && !(ik.bills || []).length ? 'warn' : 'ok' },
         ]} />
-        <ReviewNotice><b>先人工加工，再上传</b><span>系统只读取固定 A–J 标准逐笔列；原始附件仅作追溯，不参与自动识别。</span></ReviewNotice>
+        <ReviewNotice><b>先人工加工，再上传</b><span>A–G 固定，H 起费用列不限数量，备注放最后；旧 A–J 继续兼容。首页为标准逐笔时，其余原始页仅作追溯。</span></ReviewNotice>
         <IntakeStep data={ik} period={period} locked={locked ? '本月已登记复核，撤销登记后才能换账单' : ''} flash={flash} onOpenBills={src => setBillDlg(src ? { src } : {})}
           onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); loadL() }} onNext={() => goStep('docs')} onRetry={loadIk} />
         {billDlg && <BillsDlg carrier={carrier} period={period} initialReplace={billDlg.src || ''} onClose={() => setBillDlg(false)} onChanged={() => { loadIk(); setGroup('ex'); setPage(1); load(); loadL() }} flash={flash} />}
