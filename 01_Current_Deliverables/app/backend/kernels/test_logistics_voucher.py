@@ -557,6 +557,30 @@ class CashflowSplit(unittest.TestCase):
         self.assertEqual((why, [(x["name"], x["amount"]) for x in rows]), ("", [("成本运费", 700.0)]))
 
 
+class OverinvoiceLines(unittest.TestCase):
+    def test_chain_supplier_overinvoice(self):
+        e = "计提东莞市链盟供应链有限公司9月线下出库-装卸费运费"
+        v = acc("586", e, "6601", "销售费用", 20132.41, 1207.94, 21340.35, D6601_OUT)
+        ls = V.overinvoice_lines([v], "586", 0.10, 0.01, "供应商确认多开，不补付")
+        self.assertEqual([l["block"] for l in ls], ["多开票调整"] * 3)
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in ls],
+                         [("2241.02", 0.10, 0), ("6601", 0, 0.09), ("2221.01.04", 0, 0.01)])
+        self.assertEqual(ls[0]["dims"]["sup_code"], "物流运输服务027")
+        self.assertEqual(ls[1]["dims"]["fee"], "出库运费")
+        self.assertEqual(ls[1]["dims"]["biz"], "小料")
+        self.assertEqual(V.balance(ls), (0.10, 0.10))
+        self.assertIn("不补付", ls[0]["expl"])
+
+    def test_rejects_invalid_overinvoice(self):
+        v = vouchers()[0]
+        with self.assertRaises(ValueError):
+            V.overinvoice_lines([v], "不存在", 0.10, 0.01, "x")
+        with self.assertRaises(ValueError):
+            V.overinvoice_lines([v], v["vno"], 0.10, 0.20, "x")
+        with self.assertRaises(ValueError):
+            V.overinvoice_lines([v], v["vno"], 0, 0, "x")
+
+
 class NoticeText(unittest.TestCase):
     """V2.910 自动做账做完的提醒话术。"""
     HX = {"subject": "深圳星期零", "payee": "上海顺丰冷运", "amount": 17630.95, "kind": "hx", "text": "计提与发票一致，只核销", "vno": "330", "done": True}

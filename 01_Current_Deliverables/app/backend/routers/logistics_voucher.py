@@ -33,6 +33,7 @@ _POSTED_KEY = "logi_voucher_posted"         # {inst_id: {bill_no, vid, vno, book
 _FEE_KEY = "logi_voucher_fee"               # {inst_id: {vid, vno, year, month, date, book, by, at, …}} 审核时由系统生成的费用凭证(V2.835)
 _LATER_KEY = "logi_voucher_later"           # {inst_id: {by, at, note}} 人工确认「发票后补，先做付款凭证」(V2.832)
 _PICK_KEY = "logi_voucher_pick"             # {inst_id: {picks: [{year, month, vno}], by, at}} 人工选定这张请款单核销哪几张计提(V2.817)
+_OVERINVOICE_KEY = "logi_voucher_overinvoice"  # {inst_id: {vno, gross, tax, memo, by, at}} 供应商多开发票、确认不补付
 _ACC_CACHE = {}
 # V2.876 省金蝶调用(每天上限 50,000 次；V2.875 的计数显示：定时扫请款单那个线程一轮 125 次、一天 9,000 次，其中一半是重复登录)：
 #   ① 只读取数一分钟内共用一次登录(按线程，各用各的会话)；② 付款单的日期和银行账号、原主体红冲了没有，查过的 10 分钟内不重查(和计提凭证的缓存一样长)；真写金蝶前全部清掉现读。
@@ -188,13 +189,30 @@ def _diff_fix_confirmed(carrier, period, subject):
     return {"by": mk["by"], "at": mk["at"]} if mk and mk.get("dv") == "fix" else None
 
 
+def _overinvoice(inst):
+    """这张请款单已登记的「供应商多开发票、确认不补付」；金额不完整的不当有效结论。"""
+    rec = (db.get_setting(_OVERINVOICE_KEY, None) or {}).get(inst)
+    if not isinstance(rec, dict):
+        return None
+    try:
+        gross, tax = LV.r2(rec.get("gross")), LV.r2(rec.get("tax"))
+    except (TypeError, ValueError):
+        return None
+    net = LV.r2(gross - tax)
+    if gross < 0.005 or tax < 0 or net < 0.005 or not str(rec.get("memo") or "").strip():
+        return None
+    return dict(rec, gross=gross, tax=tax, net=net)
+
+
 def _inv_state(r, invs):
-    """② 收票过没过 → ok 过了 / none 没票 / diff 发票合计≠请款 / wait 票收到了、发票管家还没审核通过。
-    V2.936(用户 2026-10-13「发票审核才算」)：原来票夹里有票、合计等于请款就算；现在每张票都要在发票管家审核通过。"""
+    """② 收票过没过；多开发票不补付登记只能解释金额差，不能跳过发票审核。"""
     if not invs:
         return "none"
-    if abs(round(sum(i["gross"] for i in invs), 2) - float(r.get("amount") or 0)) >= 0.005:
-        return "diff"
+    gap = LV.r2(sum(i["gross"] for i in invs) - float(r.get("amount") or 0))
+    if abs(gap) >= 0.005:
+        oi = _overinvoice(r.get("inst_id"))
+        if gap < 0 or not oi or abs(oi["gross"] - gap) >= 0.005:
+            return "diff"
     return "ok" if all((i.get("review") or "") == "approved" for i in invs) else "wait"
 
 
@@ -274,8 +292,13 @@ def _cf_plan(d):
     newf = {str(a["vno"]): "、".join(dict.fromkeys(_s(e.get("fee") or e.get("acct_name")) for e in a["new"]["exp"]))
             for a in d.get("adjust") or [] if a.get("mode") != "xout" and (a.get("new") or {}).get("exp")}
     newf = {k: v for k, v in newf.items() if v and v != oldf(next(a for a in d["adjust"] if str(a["vno"]) == k))}
-    acc = [{"fee": newf.get(str(a["vno"])) or a.get("fee"), "expl": "" if newf.get(str(a["vno"])) else a.get("expl"),
+    acc = [{"vno": str(a["vno"]), "fee": newf.get(str(a["vno"])) or a.get("fee"), "expl": "" if newf.get(str(a["vno"])) else a.get("expl"),
             "gross": float(a["gross_new"]) if a.get("gross_new") is not None else newg.get(str(a["vno"]), float(a.get("gross") or 0))} for a in d.get("accruals") or []]
+    oi = d.get("overinvoice")
+    if oi:
+        hit = next((a for a in acc if str(a.get("vno")) == str(oi.get("vno"))), None)
+        if hit:
+            hit["gross"] = LV.r2(hit["gross"] - float(oi["gross"]))
     return LV.cashflow_split(acc, (d.get("req") or {}).get("amount"), _cf_rules())
 
 
@@ -1200,6 +1223,22 @@ def _preview_data(inst, self_vno=None, _nest=False):
         for v, to, bid in xout:
             notes.append("本主体的 记-%s %.2f 记错了主体（发票、请款单是%s的，审批 %s）：在这张付款凭证里一起整笔红冲，%s在它自己的付款凭证里补提" % (
                 v["vno"], v["gross"], to, bid, to))
+    over = _overinvoice(inst) if pl["status"] == "ok" else None
+    if over:
+        target = next((v for v in vouchers if str(v["vno"]) == str(over.get("vno"))), None)
+        gap = LV.r2(inv_tot - float(r.get("amount") or 0))
+        if not target or abs(gap - over["gross"]) >= 0.005:
+            pl = dict(pl, status="manual", msgs=list(pl["msgs"]) + ["多开发票不补付的登记金额或目标计提已经和这次核销对不上，要撤销后重新登记"])
+            lines, over = [], None
+        else:
+            try:
+                adj = LV.overinvoice_lines(vouchers, over["vno"], over["gross"], over["tax"], over["memo"])
+                lines = [l for l in lines if l["block"] != "支付"] + adj + [l for l in lines if l["block"] == "支付"]
+                notes.append("供应商多开发票 %.2f，确认不补付：冲减费用 %.2f、进项税额转出 %.2f（%s）" % (
+                    over["gross"], over["net"], over["tax"], over["memo"]))
+            except ValueError as e:
+                pl = dict(pl, status="manual", msgs=list(pl["msgs"]) + [str(e)])
+                lines, over = [], None
     dr, cr = LV.balance(lines)
     msgs = list(notes) + list(pl["msgs"])
     half = (db.get_setting(_PENDING_KEY, None) or {}).get(inst)
@@ -1284,6 +1323,7 @@ def _preview_data(inst, self_vno=None, _nest=False):
                                 "paper_ovr": ovr.get(inst), "status": st, "posted": (db.get_setting(_POSTED_KEY, None) or {}).get(inst),
                                 "bill_id": pi.get("bill_id") or "", "paywarn": paywarn, "later": later, "pay_only": pay_only, "later_slip": slip},
             "later3": later3,
+            "overinvoice": over,
             "carry": [dict(x, vno=k) for k, xs in carry.items() for x in xs] if pl["status"] == "ok" else [],      # 这张凭证里带上的多收待扣回/本月扣回
             "invoices": invs,
             "accruals": [{"vno": v["vno"], "month": v["month"], "expl": v["expl"], "gross": v["gross"], "net": v["net"], "tax": v["tax"], "rate": v["rate"],
@@ -1457,6 +1497,52 @@ async def plans(request: Request):
                 out[inst] = {"kind": "err", "text": str(e)[:120]}
         return out
     return {"ok": True, "plans": await run_in_threadpool(run)}
+
+
+@router.post("/api/logistics-voucher/overinvoice")
+async def overinvoice(request: Request):
+    """登记/撤销「供应商多开发票、确认不补付」；只解释发票与请款差，不跳过发票审核。"""
+    u = _perm(request)
+    if not u:
+        return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    b = await request.json()
+    inst = str(b.get("inst") or "")
+    if inst in (db.get_setting(_POSTED_KEY, None) or {}):
+        return JSONResponse({"ok": False, "msg": "这张已经写过金蝶，不能再改多开发票处理"}, status_code=400)
+    records = dict(db.get_setting(_OVERINVOICE_KEY, None) or {})
+    if not b.get("on", True):
+        records.pop(inst, None)
+        db.set_setting(_OVERINVOICE_KEY, records, u["name"])
+        db.audit(u["name"], "物流付款做账-撤销多开发票不补付", inst, "")
+        return {"ok": True}
+    memo = str(b.get("memo") or "").strip()[:200]
+    if not memo:
+        return JSONResponse({"ok": False, "msg": "要填写供应商确认多开、无需补付的依据"}, status_code=400)
+    try:
+        vno, gross, tax = str(b.get("vno") or ""), LV.r2(b.get("gross")), LV.r2(b.get("tax"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "msg": "含税差和进项税额转出要填数字"}, status_code=400)
+    net = LV.r2(gross - tax)
+    if not vno or gross < 0.005 or tax < 0 or net < 0.005:
+        return JSONResponse({"ok": False, "msg": "含税差、进项税额转出和费用差金额不对"}, status_code=400)
+    with db._engine.connect() as c:
+        r = c.execute(select(PR).where(PR.c.inst_id == inst)).mappings().first()
+    if not r:
+        return JSONResponse({"ok": False, "msg": "没有这张请款单"}, status_code=404)
+    _, invs = _invoices(inst)
+    gap = LV.r2(sum(i["gross"] for i in invs) - float(r["amount"] or 0))
+    if gap < 0.005 or abs(gap - gross) >= 0.005:
+        return JSONResponse({"ok": False, "msg": "含税差必须正好等于发票合计减请款金额（当前 %.2f）" % gap}, status_code=400)
+    d, code = _preview_data(inst)
+    if code != 200:
+        return JSONResponse({"ok": False, "msg": d.get("msg") or "读不到计提"}, status_code=code)
+    if not any(str(a.get("vno")) == vno for a in d.get("accruals") or []):
+        return JSONResponse({"ok": False, "msg": "目标计提不在本次核销范围，请先选择核销哪些计提"}, status_code=400)
+    records[inst] = {"vno": vno, "gross": gross, "tax": tax, "memo": memo, "by": u["name"], "at": _now()}
+    db.set_setting(_OVERINVOICE_KEY, records, u["name"])
+    db.audit(u["name"], "物流付款做账-供应商多开发票不补付", inst,
+             "记-%s；含税差 %.2f；冲减费用 %.2f；进项税额转出 %.2f；%s" % (vno, gross, net, tax, memo))
+    return {"ok": True}
 
 
 @router.post("/api/logistics-voucher/paper-override")
@@ -1672,7 +1758,7 @@ def _post_amend(inst, user, req, pb, fid, vid, s, conf, steps, found=None):
     # 有了凭证号，核销摘要里引用本凭证的 □ 直接填上
     d2, _ = _preview_data(inst, self_vno=vno)
     lines = d2["voucher"]["lines"]
-    add = [l for l in lines if l["block"] in ("红冲", "更正", "核销")]
+    add = [l for l in lines if l["block"] in ("红冲", "更正", "核销", "多开票调整")]
     pay_expl = next((l["expl"] for l in lines if l["block"] == "支付"), None)
     if d2["plan"]["status"] != "ok" or pay_expl is None:
         return {"ok": False, "msg": "付款单 %s 已审核、凭证 记-%s 已生成，但重新算分录时计提和发票对不上了，没补，请人工处理" % (pb["单号"], vno), "steps": steps, "vno": vno}
@@ -1692,7 +1778,8 @@ def _post_amend(inst, user, req, pb, fid, vid, s, conf, steps, found=None):
             "xout": d2.get("xout") or [],                     # 顺带红冲的「记错主体」计提(V2.862)：做完账再看这张、补打更正单时按这个出
             "n_adjust": len(d2.get("adjust") or []),          # 有几笔计提更正(装订时要附更正单；扫码查凭证用)
             "carry_out": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "out"],     # 这张按正确金额重提、没进费用的「多收待扣回」(V2.896)：扣回那个月据此才加回
-            "carry_in": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "in"]}
+            "carry_in": [x["id"] for x in d2.get("carry") or [] if x.get("kind") == "in"],
+            "overinvoice": d2.get("overinvoice")}
     # 这张凭证合进了复核台登记的哪几笔计提更正（与 _preview_data 同口径：只算挂在这次用到的计提凭证上的）
     try:
         used = {a["vno"] for a in d2.get("accruals") or [] if not a.get("from")}      # 别的主体拿过来补提的(V2.798)不算：凭证号是那边账簿的

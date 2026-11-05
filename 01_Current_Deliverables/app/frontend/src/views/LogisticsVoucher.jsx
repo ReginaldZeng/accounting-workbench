@@ -16,7 +16,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 // V2.809 自动做账(用户「系统自动看看有没有付款单，有的话，自动执行做账」「红冲更正后，也可以做」)：页面上一条「自动做账」栏——
 //   档位 关/演练/真做、范围、单笔上限、每轮张数；上一轮会做/不做哪几张及原因；可手动跑一轮。演练只算不写金蝶。
 import { voucherList, voucherPreview, voucherPaperOverride, voucherPlans, voucherPost, voucherPostXred, voucherScan, voucherScanPhoto, voucherDdConfig,
-  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherCashflowFix, voucherCashflowRules, voucherCashflowRulesSet, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater } from '../api.js'
+  voucherAuto, voucherAutoSet, voucherAutoRun, voucherAutoNotifyTest, voucherAutoProgress, voucherFixPaycode, voucherCashflowFix, voucherCashflowRules, voucherCashflowRulesSet, voucherAccrualCands, voucherPick, voucherLater, voucherPostLater, voucherOverinvoice } from '../api.js'
 import { inDingTalk, loadDd, ddConfig, ddCall } from './ddBridge.js'
 // V2.936 总表换成「四步」的表(账单复核 → 收票 → 付款 → 做账，一张请款单一行)：画法和「卡在哪一步」在 LogisticsVoucherFlow.jsx
 import { FlowTiles, FlowTable, StepsDlg, FLOW_CSS, FLOW_KPI, flowKey, flowHay } from './LogisticsVoucherFlow.jsx'
@@ -920,7 +920,9 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
 ` : ''}计提更正单按主体出：两个主体各一张，各附各的。` : ''}${(d?.xout || []).length ? `
 
 ⚠ 本主体有计提记错了主体：${d.xout.map(x => `记-${x.vno} ${money(x.gross)}（应是${x.to}的）`).join('、')}。
-这张付款凭证里一起整笔红冲，${[...new Set(d.xout.map(x => x.to))].join('、')}在它自己的付款凭证里补提。` : ''}
+这张付款凭证里一起整笔红冲，${[...new Set(d.xout.map(x => x.to))].join('、')}在它自己的付款凭证里补提。` : ''}${d?.overinvoice ? `
+
+⚠ 供应商多开发票、确认不补付：借供应商往来 ${money(d.overinvoice.gross)}，贷费用 ${money(d.overinvoice.net)}、贷进项税额转出 ${money(d.overinvoice.tax)}。` : ''}
 
 确定？`)) return
     setPosting({ busy: true })
@@ -935,10 +937,32 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
     voucherPostXred(inst).then(r => { setXmsg({ ok: true, text: (r.steps || []).join(' → ') }); load(); onChanged() })
       .catch(e => setXmsg({ ok: false, text: e.message })).finally(() => setXbusy(false))
   }
+  const [oiForm, setOiForm] = useState(null)
+  const [oiBusy, setOiBusy] = useState(false)
+  const openOi = () => {
+    const old = d?.overinvoice
+    const gross = r2((d?.invoices || []).reduce((s, i) => s + (i.gross || 0), 0) - (d?.req?.amount || 0))
+    const tax = r2((d?.invoices || []).reduce((s, i) => s + (i.tax || 0), 0) - (d?.accruals || []).reduce((s, a) => s + (a.tax || 0), 0))
+    setOiForm(old ? { ...old } : {
+      vno: (d?.accruals || []).find(a => a.mode === 'amt')?.vno || d?.accruals?.[0]?.vno || '',
+      gross, tax: Math.max(0, tax), memo: '供应商确认发票多开，按实际支付，多开部分不再补付。'
+    })
+  }
+  const saveOi = () => {
+    setOiBusy(true)
+    voucherOverinvoice(inst, true, oiForm).then(() => { setOiForm(null); load(); onChanged() })
+      .catch(e => alert(e.message)).finally(() => setOiBusy(false))
+  }
+  const removeOi = () => {
+    if (!window.confirm('撤销「供应商多开发票、确认不补付」？撤销后发票与请款仍会按原差额拦截。')) return
+    setOiBusy(true)
+    voucherOverinvoice(inst, false).then(() => { load(); onChanged() }).catch(e => alert(e.message)).finally(() => setOiBusy(false))
+  }
   const lines = d?.voucher?.lines || []
   const rc = d ? rateCheck(d.accruals, d.invoices) : []
   const accSum = k => r2((d?.accruals || []).reduce((s, a) => s + (a[k] || 0), 0))
   const invSum = k => r2((d?.invoices || []).reduce((s, i) => s + (i[k] || 0), 0))
+  const invGap = d ? r2(invSum('gross') - (d.req.amount || 0)) : 0
   return (
     <div className="lv-mask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
       <div className="lv-dlg" role="dialog" aria-label="付款做账">
@@ -1055,6 +1079,24 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
             </tbody>
           </table>
 
+          {(invGap >= 0.005 || d.overinvoice) && <div className="lv-msg warn">
+            <b>供应商多开发票、确认不补付</b>
+            {d.overinvoice ? <span>　记-{d.overinvoice.vno}：含税差 {money(d.overinvoice.gross)}＝冲减费用 {money(d.overinvoice.net)}＋进项税额转出 {money(d.overinvoice.tax)}；{d.overinvoice.memo}（{d.overinvoice.by} {d.overinvoice.at}）</span>
+              : <span>　发票比实际请款多 {money(invGap)}，确认多开部分不再补付后，按费用差和进项税额转出分别调整。</span>}
+            {!d.req.posted && !oiForm && <button className="btn sm" style={{ marginLeft: 8 }} disabled={oiBusy} onClick={openOi}>{d.overinvoice ? '修改处理' : '登记处理'}</button>}
+            {!d.req.posted && d.overinvoice && !oiForm && <button className="lnk" disabled={oiBusy} onClick={removeOi}>撤销</button>}
+          </div>}
+          {oiForm && <div className="lv-msg warn" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10, alignItems: 'end' }}>
+            <label>落到哪张计提<br /><select aria-label="多开发票目标计提" value={oiForm.vno} onChange={e => setOiForm({ ...oiForm, vno: e.target.value })}>
+              {d.accruals.map(a => <option key={a.vno} value={a.vno}>{a.month}/{a.vno}# · {a.fee || '出库运费'}</option>)}</select></label>
+            <label>多开含税差<br /><input aria-label="多开含税差" type="number" step="0.01" value={oiForm.gross} onChange={e => setOiForm({ ...oiForm, gross: e.target.value })} /></label>
+            <label>进项税额转出<br /><input aria-label="进项税额转出" type="number" step="0.01" value={oiForm.tax} onChange={e => setOiForm({ ...oiForm, tax: e.target.value })} /></label>
+            <div>冲减费用<br /><b>{money(r2((Number(oiForm.gross) || 0) - (Number(oiForm.tax) || 0)))}</b></div>
+            <label style={{ gridColumn: '1/-1' }}>供应商确认依据<br /><textarea aria-label="供应商确认依据" rows="2" value={oiForm.memo} onChange={e => setOiForm({ ...oiForm, memo: e.target.value })} /></label>
+            <div><button className="btn btn-pri" disabled={oiBusy || !oiForm.memo?.trim()} onClick={saveOi}>{oiBusy ? '保存中…' : '保存处理'}</button>
+              <button className="btn" disabled={oiBusy} onClick={() => setOiForm(null)}>取消</button></div>
+          </div>}
+
           <div className="lv-sec">④ 凭证预览 <span className="dim">{d.voucher.book} · {d.voucher.date} · 写入时并进金蝶付款单自动生成的那张凭证（支付两行在前），核销摘要里的 □ 填该凭证号</span>
             <span style={{ flex: 1 }} />
             {!d.req.posted && d.plan.status === 'ok' && (d.req.status === 'ready'
@@ -1071,7 +1113,7 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
                 lines.forEach((l, i) => {
                   if (l.block !== blk) {
                     blk = l.block; base = ''
-                    out.push(<tr key={'h' + i} className={'blk ' + BLOCK_CLS[l.block]}><td colSpan="6">{{ 红冲: '一、红冲', 更正: (d.xbook || []).length ? '二、更正（补提到本主体）' : '二、更正', 核销: '三、核销（暂估转待认证）', 支付: '四、支付' }[l.block]}</td></tr>)
+                    out.push(<tr key={'h' + i} className={'blk ' + BLOCK_CLS[l.block]}><td colSpan="6">{{ 红冲: '一、红冲', 更正: (d.xbook || []).length ? '二、更正（补提到本主体）' : '二、更正', 核销: '三、核销（暂估转待认证）', 多开票调整: '四、多开发票调整（确认不补付）', 支付: d.overinvoice ? '五、支付' : '四、支付' }[l.block]}</td></tr>)
                   }
                   // 同一块里摘要相同写「同上」；核销待认证行＝发票号 + 共同摘要
                   const m = l.expl.match(/^(\d{8,20})(核销.*)$/)

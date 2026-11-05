@@ -175,6 +175,7 @@ export const voucherPreview = inst => j('/api/logistics-voucher/preview?inst=' +
 export const voucherPlans = insts => j('/api/logistics-voucher/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ insts }) })
 export const voucherPost = inst => j('/api/logistics-voucher/post', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst }) })
 export const voucherPostXred = inst => j('/api/logistics-voucher/post-xred', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst }) })
+export const voucherOverinvoice = (inst, on, data = {}) => j('/api/logistics-voucher/overinvoice', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inst, on, ...data }) })
 // 扫付款单二维码查凭证：查不到也回 200(ok:false+msg)，不抛错
 export const voucherScan = code => j('/api/logistics-voucher/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
 // 凭证装订(V2.850)：这个凭证月份已有凭证号的纸质单扫过没有 / 取一张请款单的计提更正单内容(顺带记下谁打的)
