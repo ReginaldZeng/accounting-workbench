@@ -526,30 +526,15 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
 
 
 def overinvoice_lines(vouchers, vno, gross, tax, memo):
-    """供应商多开发票、确认不补付：冲掉多开的往来、费用和进项税。"""
-    v = next((x for x in vouchers if str(x.get("vno")) == str(vno)), None)
-    if not v:
+    """供应商多开发票、确认不补付：原费用和往来不动，只转出多开的进项税。"""
+    if not any(str(x.get("vno")) == str(vno) for x in vouchers):
         raise ValueError("多开发票调整要落在本次核销的一张计提上")
     gross, tax = r2(gross), r2(tax)
-    net = r2(gross - tax)
-    if gross < 0.005 or tax < 0 or net < 0.005:
-        raise ValueError("多开发票的含税差、税额和费用差金额不对")
-    expl = "供应商多开发票%.2f元，确认不补付：冲减费用%.2f元、进项税额转出%.2f元（%s）" % (gross, net, tax, str(memo or "").strip())
-    out = [_ln("多开票调整", expl, "2241.02", "供应商往来", dr=gross, src=v.get("ap_line"), keep=SUP_DIMS)]
-    exps = v.get("exp_lines") or []
-    if not exps:
-        raise ValueError("这张计提没有费用行，不能做多开发票调整")
-    ws = [float(l.get("dr") or 0) for l in exps]
-    base = sum(ws)
-    if base <= 0:
-        raise ValueError("这张计提的费用金额不对，不能做多开发票调整")
-    amts = [r2(net * w / base) for w in ws]
-    amts[-1] = r2(amts[-1] + net - sum(amts))
-    for l, amt in zip(exps, amts):
-        out.append(_ln("多开票调整", expl, l["acct"], l["acct_name"], cr=amt, src=l, keep=EXP_DIMS))
-    if tax:
-        out.append(_ln("多开票调整", expl, "2221.01.04", "进项税额转出", cr=tax))
-    return out
+    if gross < 0.005 or tax < 0 or gross - tax < 0.004:
+        raise ValueError("多开发票的含税差和进项税额转出金额不对")
+    expl = "供应商多开发票%.2f元，确认不补付：原费用和供应商往来不变，进项税额转出%.2f元（%s）" % (
+        gross, tax, str(memo or "").strip())
+    return [_ln("多开票调整", expl, "2221.01.04", "进项税额转出", cr=tax)] if tax else []
 
 
 def later_lines(vouchers, invoices, pay_year, supplier):

@@ -562,14 +562,30 @@ class OverinvoiceLines(unittest.TestCase):
         e = "计提东莞市链盟供应链有限公司9月线下出库-装卸费运费"
         v = acc("586", e, "6601", "销售费用", 20132.41, 1207.94, 21340.35, D6601_OUT)
         ls = V.overinvoice_lines([v], "586", 0.10, 0.01, "供应商确认多开，不补付")
-        self.assertEqual([l["block"] for l in ls], ["多开票调整"] * 3)
-        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in ls],
-                         [("2241.02", 0.10, 0), ("6601", 0, 0.09), ("2221.01.04", 0, 0.01)])
-        self.assertEqual(ls[0]["dims"]["sup_code"], "物流运输服务027")
-        self.assertEqual(ls[1]["dims"]["fee"], "出库运费")
-        self.assertEqual(ls[1]["dims"]["biz"], "小料")
-        self.assertEqual(V.balance(ls), (0.10, 0.10))
-        self.assertIn("不补付", ls[0]["expl"])
+        self.assertEqual([l["block"] for l in ls], ["多开票调整"])
+        self.assertEqual([(l["acct"], l["dr"], l["cr"]) for l in ls], [("2221.01.04", 0, 0.01)])
+        self.assertFalse([l for l in ls if l["acct"] in ("2241.02", "6601")])
+        self.assertEqual(V.balance(ls), (0, 0.01))
+        self.assertIn("原费用和供应商往来不变", ls[0]["expl"])
+
+    def test_chain_original_accrual_only_tax_transfer(self):
+        vs = [acc("584", "计提链盟9月入库运费", "5101", "制造费用", 25321.10, 2278.90, 27600.00, D5101_IN),
+              acc("585", "计提链盟9月出库运费", "6601", "销售费用", 194695.41, 17522.59, 212218.00, D6601_OUT),
+              acc("586", "计提链盟9月卸货费", "6601", "销售费用", 20132.41, 1207.94, 21340.35, D6601_OUT)]
+        actual = [{"number": "26442000011833506871", "rate": "9%", "gross": 239818.00, "tax": 19801.49},
+                  {"number": "26442000011833713841", "rate": "6%", "gross": 21340.45, "tax": 1207.95}]
+        planned = [dict(actual[0]), dict(actual[1], gross=21340.35, tax=1207.94)]
+        pl = V.plan(vs, planned)
+        self.assertEqual(pl["status"], "ok", pl["msgs"])
+        self.assertEqual({p["mode"] for p in pl["per"].values()}, {"hx"})
+        ls = V.build(dict(CTX, pay_amount=261158.35), vs, planned, pl)
+        for l in ls:
+            if l["block"] == "核销" and l["acct"] == "2221.01.06" and l["expl"].startswith(actual[1]["number"]):
+                l["dr"] = V.r2(l["dr"] + 0.01)
+        ls += V.overinvoice_lines(vs, "586", 0.10, 0.01, "供应商确认多开，不补付")
+        self.assertFalse([l for l in ls if l["block"] in ("红冲", "更正")])
+        self.assertEqual([l["dr"] for l in ls if l["acct"] == "2221.01.06"], [19801.49, 1207.95])
+        self.assertEqual(V.balance(ls), (282167.79, 282167.79))
 
     def test_rejects_invalid_overinvoice(self):
         v = vouchers()[0]

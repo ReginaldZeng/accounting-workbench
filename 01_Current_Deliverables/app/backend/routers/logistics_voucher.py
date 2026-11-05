@@ -294,11 +294,6 @@ def _cf_plan(d):
     newf = {k: v for k, v in newf.items() if v and v != oldf(next(a for a in d["adjust"] if str(a["vno"]) == k))}
     acc = [{"vno": str(a["vno"]), "fee": newf.get(str(a["vno"])) or a.get("fee"), "expl": "" if newf.get(str(a["vno"])) else a.get("expl"),
             "gross": float(a["gross_new"]) if a.get("gross_new") is not None else newg.get(str(a["vno"]), float(a.get("gross") or 0))} for a in d.get("accruals") or []]
-    oi = d.get("overinvoice")
-    if oi:
-        hit = next((a for a in acc if str(a.get("vno")) == str(oi.get("vno"))), None)
-        if hit:
-            hit["gross"] = LV.r2(hit["gross"] - float(oi["gross"]))
     return LV.cashflow_split(acc, (d.get("req") or {}).get("amount"), _cf_rules())
 
 
@@ -1097,13 +1092,16 @@ def _preview_data(inst, self_vno=None, _nest=False):
     #   每张计提「应为」多少——人在「选择核销哪些计提」里填了的用填的(可选部分核销+说明)；没填、且只有一张计提的，默认按发票金额红冲更正；
     #   几张计提对一张发票的，系统定不了各该多少，仍判人工并提示去填。
     posted_rec = (db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}
+    over = _overinvoice(inst)
     amts = {}
     if picked:
         for p in picked.get("picks") or []:
             if p.get("to_gross") not in (None, ""):
                 amts[str(p["vno"])] = {"gross": float(p["to_gross"]), "part": bool(picked.get("part")), "memo": picked.get("memo") or ""}
+    if over:
+        amts.pop(str(over["vno"]), None)       # 多开发票不补付：原计提直接核销，不先按发票全额重做费用和往来
     # 发票后补、付款凭证已经只做了支付的(tax_later)：发票是后来到的，不拿它回头改付款凭证的应为金额——发票和账上对不上的，在到票那张凭证里红冲更正
-    if not amts and inv_in and len(vouchers) == 1 and not vouchers[0].get("from") and not posted_rec.get("tax_later"):
+    if not over and not amts and inv_in and len(vouchers) == 1 and not vouchers[0].get("from") and not posted_rec.get("tax_later"):
         v0 = vouchers[0]
         g0 = LV.eff_gross(v0, fixes.get(v0["vno"]))
         if abs(g0 - inv_tot) > 0.004 and abs(g0 - v0["gross"]) < 0.005:
@@ -1125,7 +1123,17 @@ def _preview_data(inst, self_vno=None, _nest=False):
                     "（复核台已确认计提有误、按复核后金额更正：%s %s）" % (cf["by"], cf["at"]) if cf else ""))
     carry, cnotes, cbad = _carries(r, vouchers) if vouchers else ({}, [], "")      # 复核台登记的多收待扣回 / 本月扣回(V2.896)
     notes += cnotes
-    pl = LV.plan(vouchers, inv_in, fixes, amts, carry) if (vouchers and inv_in) else \
+    inv_plan, over_invoice = inv_in, None
+    if over:
+        target = next((v for v in vouchers if str(v["vno"]) == str(over["vno"])), None)
+        gap = LV.r2(inv_tot - float(r.get("amount") or 0))
+        hit = next((i for i in reversed(inv_in) if target and LV.rate_of(i.get("rate")) == target["rate"]), None)
+        if target and hit and abs(gap - over["gross"]) < 0.005:
+            over_invoice = hit
+            inv_plan = [dict(i) for i in inv_in]
+            hit["gross"] = LV.r2(hit["gross"] - over["gross"])
+            hit["tax"] = LV.r2(hit["tax"] - over["tax"])
+    pl = LV.plan(vouchers, inv_plan, fixes, amts, carry) if (vouchers and inv_plan) else \
         {"status": "manual", "msgs": ["金蝶本期没找到这家的计提凭证" if not vouchers else "票夹里还没有发票"], "per": {}, "tails": {}}
     if cbad and pl["status"] == "ok":
         pl = {"status": "manual", "per": pl["per"], "tails": {}, "msgs": pl["msgs"] + [cbad + "，要人工处理"]}
@@ -1189,7 +1197,7 @@ def _preview_data(inst, self_vno=None, _nest=False):
     ctx = {"supplier": r.get("payee") or "", "applicant": r.get("applicant") or "", "pay_year": int(pay_date[:4]),
            "pay_month": int(pay_date[5:7]), "pay_amount": float(r.get("amount") or 0), "bank": bank,
            "paid": bool(pi) and not pi.get("voucher"), "self_vno": self_vno, "tax_later": bool(pay_only)}
-    lines = LV.build(ctx, vouchers, [] if pay_only else inv_in, pl, fixes) if pl["status"] == "ok" else []
+    lines = LV.build(ctx, vouchers, [] if pay_only else inv_plan, pl, fixes) if pl["status"] == "ok" else []
     xout = []          # [(计提凭证, 应归主体简称, 那张请款单的审批编号)]
     xkept = ((db.get_setting(_POSTED_KEY, None) or {}).get(inst) or {}).get("xout")
     if not _nest and lines and xkept:
@@ -1223,19 +1231,22 @@ def _preview_data(inst, self_vno=None, _nest=False):
         for v, to, bid in xout:
             notes.append("本主体的 记-%s %.2f 记错了主体（发票、请款单是%s的，审批 %s）：在这张付款凭证里一起整笔红冲，%s在它自己的付款凭证里补提" % (
                 v["vno"], v["gross"], to, bid, to))
-    over = _overinvoice(inst) if pl["status"] == "ok" else None
+    over = over if pl["status"] == "ok" else None
     if over:
         target = next((v for v in vouchers if str(v["vno"]) == str(over.get("vno"))), None)
         gap = LV.r2(inv_tot - float(r.get("amount") or 0))
-        if not target or abs(gap - over["gross"]) >= 0.005:
+        if not target or not over_invoice or abs(gap - over["gross"]) >= 0.005:
             pl = dict(pl, status="manual", msgs=list(pl["msgs"]) + ["多开发票不补付的登记金额或目标计提已经和这次核销对不上，要撤销后重新登记"])
             lines, over = [], None
         else:
             try:
+                for l in lines:
+                    if l["block"] == "核销" and l["acct"] == "2221.01.06" and l["expl"].startswith(str(over_invoice["number"])):
+                        l["dr"] = LV.r2(l["dr"] + over["tax"])
                 adj = LV.overinvoice_lines(vouchers, over["vno"], over["gross"], over["tax"], over["memo"])
                 lines = [l for l in lines if l["block"] != "支付"] + adj + [l for l in lines if l["block"] == "支付"]
-                notes.append("供应商多开发票 %.2f，确认不补付：冲减费用 %.2f、进项税额转出 %.2f（%s）" % (
-                    over["gross"], over["net"], over["tax"], over["memo"]))
+                notes.append("供应商多开发票 %.2f，确认不补付：原费用和供应商往来不变，进项税额转出 %.2f（%s）" % (
+                    over["gross"], over["tax"], over["memo"]))
             except ValueError as e:
                 pl = dict(pl, status="manual", msgs=list(pl["msgs"]) + [str(e)])
                 lines, over = [], None
@@ -1264,6 +1275,8 @@ def _preview_data(inst, self_vno=None, _nest=False):
         st = "paycode"
         msgs.insert(0, paywarn["text"])
     kind, ktext = _kind(vouchers, notes, pl)
+    if over and kind == "hx":
+        ktext = "按原计提核销；供应商多开发票 %.2f 不补付，进项税额转出 %.2f" % (over["gross"], over["tax"])
     if xout and kind in ("hx", "tail", "redo"):
         xt = "另红冲 %s（记错主体，应是%s的）" % ("、".join("记-%s %.2f" % (v["vno"], v["gross"]) for v, _to, _bid in xout), "、".join(dict.fromkeys(to for _v, to, _bid in xout)))
         kind, ktext = "redo", (ktext + "；" + xt) if kind != "hx" else ("本主体的计提与发票一致；" + xt)

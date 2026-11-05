@@ -922,7 +922,7 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
 ⚠ 本主体有计提记错了主体：${d.xout.map(x => `记-${x.vno} ${money(x.gross)}（应是${x.to}的）`).join('、')}。
 这张付款凭证里一起整笔红冲，${[...new Set(d.xout.map(x => x.to))].join('、')}在它自己的付款凭证里补提。` : ''}${d?.overinvoice ? `
 
-⚠ 供应商多开发票、确认不补付：借供应商往来 ${money(d.overinvoice.gross)}，贷费用 ${money(d.overinvoice.net)}、贷进项税额转出 ${money(d.overinvoice.tax)}。` : ''}
+⚠ 供应商多开发票、确认不补付：原销售费用和供应商往来不变，仅贷进项税额转出 ${money(d.overinvoice.tax)}。` : ''}
 
 确定？`)) return
     setPosting({ busy: true })
@@ -1081,8 +1081,8 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
 
           {(invGap >= 0.005 || d.overinvoice) && <div className="lv-msg warn">
             <b>供应商多开发票、确认不补付</b>
-            {d.overinvoice ? <span>　记-{d.overinvoice.vno}：含税差 {money(d.overinvoice.gross)}＝冲减费用 {money(d.overinvoice.net)}＋进项税额转出 {money(d.overinvoice.tax)}；{d.overinvoice.memo}（{d.overinvoice.by} {d.overinvoice.at}）</span>
-              : <span>　发票比实际请款多 {money(invGap)}，确认多开部分不再补付后，按费用差和进项税额转出分别调整。</span>}
+            {d.overinvoice ? <span>　记-{d.overinvoice.vno}：多开含税差 {money(d.overinvoice.gross)}，进项税额转出 {money(d.overinvoice.tax)}；原销售费用和供应商往来不变。{d.overinvoice.memo}（{d.overinvoice.by} {d.overinvoice.at}）</span>
+              : <span>　发票比实际请款多 {money(invGap)}，确认多开部分不再补付后，原销售费用和供应商往来不变，只转出多开的进项税。</span>}
             {!d.req.posted && !oiForm && <button className="btn sm" style={{ marginLeft: 8 }} disabled={oiBusy} onClick={openOi}>{d.overinvoice ? '修改处理' : '登记处理'}</button>}
             {!d.req.posted && d.overinvoice && !oiForm && <button className="lnk" disabled={oiBusy} onClick={removeOi}>撤销</button>}
           </div>}
@@ -1091,7 +1091,6 @@ ${d.xbook.some(x => !x.via && !x.reversed) ? `④ 系统在${d.xbook.filter(x =>
               {d.accruals.map(a => <option key={a.vno} value={a.vno}>{a.month}/{a.vno}# · {a.fee || '出库运费'}</option>)}</select></label>
             <label>多开含税差<br /><input aria-label="多开含税差" type="number" step="0.01" value={oiForm.gross} onChange={e => setOiForm({ ...oiForm, gross: e.target.value })} /></label>
             <label>进项税额转出<br /><input aria-label="进项税额转出" type="number" step="0.01" value={oiForm.tax} onChange={e => setOiForm({ ...oiForm, tax: e.target.value })} /></label>
-            <div>冲减费用<br /><b>{money(r2((Number(oiForm.gross) || 0) - (Number(oiForm.tax) || 0)))}</b></div>
             <label style={{ gridColumn: '1/-1' }}>供应商确认依据<br /><textarea aria-label="供应商确认依据" rows="2" value={oiForm.memo} onChange={e => setOiForm({ ...oiForm, memo: e.target.value })} /></label>
             <div><button className="btn btn-pri" disabled={oiBusy || !oiForm.memo?.trim()} onClick={saveOi}>{oiBusy ? '保存中…' : '保存处理'}</button>
               <button className="btn" disabled={oiBusy} onClick={() => setOiForm(null)}>取消</button></div>
