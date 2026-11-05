@@ -29,7 +29,7 @@ router = APIRouter()
 BL, BR, SP, PR = LR.BL, LR.BR, LR.SP, store.payreq
 _REP = {}                   # {(承运商, 账期, 份名, 原件sha, 取数说明sha): 报告}
 _REP_LOCK = threading.Lock()
-_REPORT_ALGORITHM = "sheet-round-v1"
+_REPORT_ALGORITHM = "sheet-round-v2-aj-nocheck-ok"
 
 
 def _spec_sha(spec):
