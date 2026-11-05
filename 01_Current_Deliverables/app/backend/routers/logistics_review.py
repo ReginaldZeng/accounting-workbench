@@ -4900,8 +4900,9 @@ def _review_material_rows(carrier, period, docs, include_pending=False):
         qtys = [abs(float(m.get("base_kg") if m.get("base_kg") is not None else (m.get("base_qty") or 0))) for m in lines]
         total_qty = sum(qtys)
         parts = (freight.get(no) or {}).get("parts") or {}
+        has_effective = any(key[0] == carrier and key[3] != "pending" for key in parts)
         bill_parts = sorted((key, fees) for key, fees in parts.items()
-                            if key[3] != "pending" or (include_pending and key[0] == carrier)) if parts else []
+                            if key[3] != "pending" or (include_pending and key[0] == carrier and not has_effective)) if parts else []
         if not bill_parts:
             bill_parts = [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
         head = heads.get(no) or {}

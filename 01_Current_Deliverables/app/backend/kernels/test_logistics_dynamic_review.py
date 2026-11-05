@@ -145,6 +145,14 @@ class DynamicReviewTests(unittest.TestCase):
         pending = next(row for row in export_rows if row["carrier"] == "极鲜达")
         self.assertEqual((pending["fee_tr"], pending["fee_ld"]), (100, 20))
 
+        freight["QTCK011653"]["parts"][("极鲜达", "2026-09", True, "v1")] = {"tr": 80, "ld": 10, "ot": 0}
+        with patch.object(router, "_outstock_freight", return_value=freight), \
+             patch.object(router, "_kd_shared_materials", return_value={"heads": {}, "groups": {}}):
+            effective_rows = router._review_material_rows("极鲜达", "2026-09", [doc], include_pending=True)
+        current = [row for row in effective_rows if row["carrier"] == "极鲜达"]
+        self.assertEqual(len(current), 1)
+        self.assertEqual((current[0]["fee_tr"], current[0]["fee_ld"]), (80, 10))
+
 
 if __name__ == "__main__":
     unittest.main()
