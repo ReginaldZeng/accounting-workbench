@@ -128,14 +128,15 @@ def _standard_layout(ws, header_row):
     return None
 
 
-def enrich_detail_sheets(wb, documents, confirmations, carrier, period):
+def enrich_detail_sheets(wb, documents, confirmations, carrier, period, values_wb=None):
     enriched_sheets = []
     enriched_rows = 0
     checks = Counter()
     for ws in wb.worksheets:
         if ws.title == "标准逐笔" or ws.title.endswith("列表"):
             continue
-        _, info = stdintake._parse_sheet(ws, period, carrier, "")
+        value_ws = values_wb[ws.title] if values_wb is not None and ws.title in values_wb.sheetnames else ws
+        _, info = stdintake._parse_sheet(value_ws, period, carrier, "", convert_weight=False)
         if info is None:
             continue
         layout = _standard_layout(ws, info["header_row"])
@@ -207,7 +208,13 @@ def build_workbook(rows, documents, confirmations, bucket_fn, subject_fn, fee_fn
                    carrier, period, source=None, material_rows=None, form_labels=None):
     fee_names, output, checks = build_rows(rows, documents, confirmations, bucket_fn, subject_fn, fee_fn, qty_standard_fn)
     headers = BASE_HEADERS + fee_names + ["备注"]
-    wb = load_workbook(source) if source is not None else Workbook()
+    source_bytes = source.read() if hasattr(source, "read") else source
+    source_ref = BytesIO(source_bytes) if isinstance(source_bytes, (bytes, bytearray)) else source
+    wb = load_workbook(source_ref) if source is not None else Workbook()
+    if source is not None:
+        if isinstance(source_bytes, (bytes, bytearray)):
+            source_ref.seek(0)
+        values_wb = load_workbook(source_ref, data_only=True, read_only=True)
     if source is not None and "标准逐笔" in wb.sheetnames:
         del wb["标准逐笔"]
     ws = wb.create_sheet("标准逐笔", 0) if source is not None else wb.active
@@ -230,7 +237,10 @@ def build_workbook(rows, documents, confirmations, bucket_fn, subject_fn, fee_fn
     ws.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(headers)), max(1, ws.max_row))
     for index, width in enumerate([30, 26, 16, 16, 14, 12, 14] + [16] * len(fee_names) + [32], 1):
         ws.column_dimensions[get_column_letter(index)].width = width
-    enriched_sheets, enriched_rows, detail_checks = enrich_detail_sheets(wb, documents, confirmations, carrier, period)
+    enriched_sheets, enriched_rows, detail_checks = enrich_detail_sheets(
+        wb, documents, confirmations, carrier, period, values_wb if source is not None else None)
+    if source is not None:
+        values_wb.close()
     document_sheets = add_document_sheets(wb, material_rows or [], form_labels or {}, carrier)
     bio = BytesIO()
     wb.save(bio)

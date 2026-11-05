@@ -119,7 +119,7 @@ def _charge_weight(standard, qty, unit, sheet, row):
     return round(qty * factor, 6)
 
 
-def _parse_sheet(ws, period, carrier, bill_src):
+def _parse_sheet(ws, period, carrier, bill_src, convert_weight=True):
     start = None
     header_row = None
     header = None
@@ -182,7 +182,7 @@ def _parse_sheet(ws, period, carrier, bill_src):
             "subject": _s(subject), "doc_no": _split_docs(doc),
             "annot": _s(fee), "fee": _s(fee), "fee_item": _s(fee),
             "qty": qty, "unit": unit, "amount": amount,
-            "charge_wt": _charge_weight(standard, qty, unit, ws.title, src_row),
+            "charge_wt": _charge_weight(standard, qty, unit, ws.title, src_row) if convert_weight else None,
             "qty_standard": standard,
             "sub_fees": json.dumps(sub_fees, ensure_ascii=False),
             "src_sheet": ws.title, "src_row": src_row, "note": _s(note),
