@@ -17,6 +17,8 @@ LEGACY_SHEETS = ["复核表", "复核明细"]
 AJ_SHEET = "标准逐笔"
 AJ_HEADERS = ["主体", "金蝶系统单据编号", "费用类型", "数量计算标准", "账单数量", "数量单位", "费用总额", "费用拆分1", "费用拆分2", "备注"]
 AN_HEADERS = ["主体", "金蝶系统单据编号", "费用类型", "数量计算标准", "账单数量", "数量单位", "费用总额", "运费", "送货/入仓费", "提货费", "卸货费", "上楼费", "其他", "备注"]
+BASE_HEADERS = AJ_HEADERS[:7]
+REVIEW_TAIL = ["账单备注", "金蝶数量", "check", "复核备注"]
 
 
 def text(value):
@@ -159,8 +161,60 @@ def check_standard_an(ws, errors):
             "upstairs": round(totals[5], 2), "other": round(totals[6], 2)}
 
 
+def check_dynamic(ws, errors, review=False):
+    headers = [text(cell.value).replace("\n", "") for cell in ws[1]]
+    while headers and not headers[-1]:
+        headers.pop()
+    note_names = ["账单备注"] if review else ["备注", "账单备注"]
+    note_col = next((index for index, value in enumerate(headers) if value in note_names), None)
+    if note_col is None or note_col <= 7:
+        errors.append(f"{AJ_SHEET} 动态费用表缺少正确的备注列和费用列")
+        return None
+    if review and headers[note_col:] != REVIEW_TAIL:
+        errors.append(f"{AJ_SHEET} 复核表尾部必须为：{'、'.join(REVIEW_TAIL)}")
+        return None
+    fee_names = headers[7:note_col]
+    if any(not name for name in fee_names) or len(set(fee_names)) != len(fee_names):
+        errors.append(f"{AJ_SHEET} 动态费用列表头不能为空或重复：{fee_names}")
+        return None
+    fee_sums = [0.0] * len(fee_names)
+    bill = 0.0
+    count = 0
+    for row in range(2, ws.max_row + 1):
+        values = [ws.cell(row, col).value for col in range(1, len(headers) + 1)]
+        if not any(text(value) for value in values):
+            continue
+        count += 1
+        for col, name in ((1, "主体"), (2, "金蝶系统单据编号"), (3, "费用类型"), (4, "数量计算标准"), (6, "数量单位")):
+            if not text(values[col - 1]):
+                errors.append(f"{AJ_SHEET}!{ws.cell(row, col).coordinate} {name}不能为空")
+        if values[4] not in (None, "") and number(values[4]) is None:
+            errors.append(f"{AJ_SHEET}!E{row} 账单数量必须是数值")
+        amounts = [number(values[col]) if values[col] not in (None, "") else 0.0 for col in range(6, note_col)]
+        if any(value is None for value in amounts):
+            errors.append(f"{AJ_SHEET}!G{row} 费用总额及动态费用列必须是数值或留空")
+            continue
+        if abs(amounts[0] - sum(amounts[1:])) > 0.01:
+            errors.append(f"{AJ_SHEET}!G{row} 费用总额不等于全部动态费用列合计：{amounts[0]} ≠ {sum(amounts[1:]):.2f}")
+        bill += amounts[0]
+        for index, value in enumerate(amounts[1:]):
+            fee_sums[index] += value
+        if review:
+            kd, check = values[note_col + 1], values[note_col + 2]
+            if kd not in (None, "") and number(kd) is None:
+                errors.append(f"{AJ_SHEET}!{ws.cell(row, note_col + 2).coordinate} 金蝶数量必须是数值或留空")
+            if not text(check):
+                errors.append(f"{AJ_SHEET}!{ws.cell(row, note_col + 3).coordinate} check不能为空")
+    if not count:
+        errors.append(f"{AJ_SHEET} 没有逐笔数据")
+    return {"rows": count, "bill": round(bill, 2),
+            "fees": {name: round(value, 2) for name, value in zip(fee_names, fee_sums)}}
+
+
 def business_status(wb, profile):
-    if profile in ("standard-aj", "standard-an"):
+    if profile == "standard-review":
+        return "系统复核导出（不代表已登记复核）"
+    if profile in ("standard-aj", "standard-an", "standard-dynamic"):
         return "标准账单（不代表已复核）"
     if profile == "standard":
         cell = find_cell(wb["01复核说明书"], "八、提交结论")
@@ -172,7 +226,7 @@ def business_status(wb, profile):
 
 
 def is_final(status, profile):
-    if profile in ("standard-aj", "standard-an"):
+    if profile in ("standard-aj", "standard-an", "standard-dynamic", "standard-review"):
         return False
     if profile == "standard":
         return status.startswith("复核完成") and "草稿" not in status
@@ -238,8 +292,17 @@ def audit(path, carrier="", period="", require_final=False):
     names = wb.sheetnames
     result["sheets"] = names
     if names and names[0] == AJ_SHEET:
-        actual = [text(wb[AJ_SHEET].cell(1, col).value).replace("\n", "") for col in range(1, 15)]
-        profile = "standard-an" if actual == AN_HEADERS else "standard-aj"
+        ws = wb[AJ_SHEET]
+        actual = [text(ws.cell(1, col).value).replace("\n", "") for col in range(1, 15)]
+        headers = [text(cell.value).replace("\n", "") for cell in ws[1]]
+        while headers and not headers[-1]:
+            headers.pop()
+        if actual == AN_HEADERS:
+            profile = "standard-an"
+        elif headers[:7] == BASE_HEADERS and any(value in ("备注", "账单备注") for value in headers[7:]):
+            profile = "standard-review" if len(headers) >= 10 and headers[-4:] == REVIEW_TAIL else "standard-dynamic"
+        else:
+            profile = "standard-aj"
         expected = [AJ_SHEET]
     elif all(name in names for name in STANDARD_SHEETS):
         profile = "standard"
@@ -248,7 +311,7 @@ def audit(path, carrier="", period="", require_final=False):
         profile = "legacy"
         expected = LEGACY_SHEETS
     else:
-        errors.append("无法识别工作簿：需要严格 A-J 或 A-N 标准逐笔、恒茂四段式页签，或现有复核表/复核明细页签")
+        errors.append("无法识别工作簿：需要标准逐笔、恒茂四段式页签，或现有复核表/复核明细页签")
         return result
     result["profile"] = profile
     if names[:len(expected)] != expected:
@@ -263,6 +326,8 @@ def audit(path, carrier="", period="", require_final=False):
         totals = check_standard_an(wb[AJ_SHEET], errors)
     elif profile == "standard-aj":
         totals = check_standard_aj(wb[AJ_SHEET], errors)
+    elif profile in ("standard-dynamic", "standard-review"):
+        totals = check_dynamic(wb[AJ_SHEET], errors, review=(profile == "standard-review"))
     elif profile == "standard":
         totals = check_totals(wb["03计提对账单"], 4, ["计提差异(计提-账单)"], errors)
         required_headers = ["费用行ID", "核对方案", "单据编码", "账单金额", "标准金额", "金额差异"]
@@ -285,9 +350,9 @@ def audit(path, carrier="", period="", require_final=False):
     result["formula_cells"] = formula_count
     errors.extend("公式/单元格错误：" + item for item in formula_errors)
     errors.extend("公式缓存错误：" + item for item in cached_errors)
-    if profile not in ("standard-aj", "standard-an") and not any(name.startswith("原账单-") for name in names):
+    if profile not in ("standard-aj", "standard-an", "standard-dynamic", "standard-review") and not any(name.startswith("原账单-") for name in names):
         warnings.append("未附原账单页；如系统应具备原件，请回导出链路核查")
-    if profile == "standard-an" and len(names) == 1:
+    if profile in ("standard-an", "standard-dynamic", "standard-review") and len(names) == 1:
         warnings.append("未附原账单页；如系统应具备原件，请回导出链路核查")
     calculation = getattr(wb, "calculation", None)
     if formula_count and calculation is not None and getattr(calculation, "calcMode", None) not in (None, "auto"):
@@ -309,6 +374,9 @@ def print_human(result):
             print(f"逐笔：{totals['rows']} 行；费用总额 {totals['bill']:,.2f}；运费 {totals['freight']:,.2f}；送货/入仓费 {totals['delivery']:,.2f}；提货费 {totals['pickup']:,.2f}；卸货费 {totals['unload']:,.2f}；上楼费 {totals['upstairs']:,.2f}；其他 {totals['other']:,.2f}")
         elif result.get("profile") == "standard-aj":
             print(f"逐笔：{totals['rows']} 行；费用总额 {totals['bill']:,.2f}；运费 {totals['freight']:,.2f}；附加费 {totals['surcharge']:,.2f}")
+        elif result.get("profile") in ("standard-dynamic", "standard-review"):
+            fees = "；".join(f"{name} {value:,.2f}" for name, value in totals["fees"].items())
+            print(f"逐笔：{totals['rows']} 行；费用总额 {totals['bill']:,.2f}；{fees}")
         else:
             print(f"合计：计提 {totals['accrual']:,.2f}；账单 {totals['bill']:,.2f}；差异 {totals['difference']:,.2f}")
     for item in result["errors"]:

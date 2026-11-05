@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # [Change Log]
+# Date: 2026-11-05 | Author: Kimi | Version: V2.1055
+# Description: 系统复核导出的金蝶数量、check、复核备注在回传时忽略，不参与动态费用取数。
 # Date: 2026-11-05 | Author: Kimi | Version: V2.1054
 # Description: 支持 A-G 固定业务字段、动态费用列和末列备注；兼容 A-J，首页标准逐笔存在时只读首页。
 # Date: 2026-11-04 | Author: Kimi | Version: V-draft
@@ -75,9 +77,13 @@ def _check_headers(header, start, sheet, row):
     if legacy:
         return {"fee_cols": [start + 7, start + 8], "fee_names": ["运费", "附加费"],
                 "note_col": start + 9, "legacy": True}
-    note_col = next((col for col in range(start + 7, len(header)) if _h(header[col]) == "备注"), None)
+    note_col = next((col for col in range(start + 7, len(header)) if _h(header[col]) in ("备注", "账单备注")), None)
     if note_col is None:
         _error(sheet, row, "动态费用列之后必须有备注列")
+    if _h(header[note_col]) == "账单备注":
+        trailing = [_h(value) for value in header[note_col + 1:] if _h(value)]
+        if trailing not in ([], ["金蝶数量", "check", "复核备注"]):
+            _error(sheet, row, "账单备注之后只能是金蝶数量、check、复核备注三列系统复核结果")
     if note_col == start + 7:
         _error(sheet, row, "费用总额与备注之间至少需要一列费用拆分")
     fee_cols = list(range(start + 7, note_col))
@@ -86,7 +92,7 @@ def _check_headers(header, start, sheet, row):
         name = _h(header[col])
         if not name:
             _error(sheet, row, "第%d个费用列表头不能为空" % index)
-        if name in _STANDARD_HEADERS or name == "备注":
+        if name in _STANDARD_HEADERS or name in ("备注", "账单备注"):
             _error(sheet, row, "费用列名称不能与固定业务字段重复：%s" % name)
         if name in fee_names:
             _error(sheet, row, "费用列表头重复：%s" % name)

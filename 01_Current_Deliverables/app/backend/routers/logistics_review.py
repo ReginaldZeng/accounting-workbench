@@ -4789,8 +4789,29 @@ def _standard_bill_rows(carrier, period):
 def review_standard_bill(request: Request, carrier: str = "", period: str = "", format: str = "aj"):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
-    if format not in ("aj", "an"):
-        return JSONResponse({"ok": False, "msg": "format 只能是 aj 或 an"}, status_code=400)
+    if format not in ("aj", "an", "review"):
+        return JSONResponse({"ok": False, "msg": "format 只能是 aj、an 或 review"}, status_code=400)
+    if format == "review":
+        from kernels import logistics_dynamic_review as dre
+        from io import BytesIO
+        from urllib.parse import quote
+        with db._engine.connect() as c:
+            rows = [dict(r) for r in c.execute(select(BL).where(
+                (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail")).order_by(BL.c.id)).mappings().all()]
+            raw = c.execute(select(BR.c.name, BR.c.data).where(
+                (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "original")).order_by(BR.c.id.desc()).limit(1)).mappings().first()
+        if not rows:
+            return JSONResponse({"ok": False, "msg": "本期没有可生成系统复核表的逐笔行"}, status_code=409)
+        fingerprint = _docs_fingerprints(rows, _load_card(carrier)[0], _review_settings(carrier), _load_spec(carrier) or {})
+        required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows
+                                 if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
+        documents, _, _ = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
+        data, _ = dre.build_workbook(rows, documents, _doc_ok(carrier, period), _line_buckets,
+                                     _eff_subject, _eff_fee, _standard_qty, carrier, period,
+                                     BytesIO(raw["data"]) if raw and raw.get("data") else None)
+        filename = quote(f"{carrier}_{period}_动态费用系统复核表.xlsx")
+        return Response(content=data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
     if format == "an":
         from kernels import logistics_an_bill as anb
         from io import BytesIO
