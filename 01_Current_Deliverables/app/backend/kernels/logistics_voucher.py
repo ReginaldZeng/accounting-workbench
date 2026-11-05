@@ -525,15 +525,15 @@ def build(ctx, vouchers, invoices, pl, fixes=None):
     return out
 
 
-def overinvoice_lines(vouchers, vno, gross, tax, memo):
+def overinvoice_lines(vouchers, vno, gross, tax, memo, number=""):
     """供应商多开发票、确认不补付：原费用和往来不动，只转出多开的进项税。"""
     if not any(str(x.get("vno")) == str(vno) for x in vouchers):
         raise ValueError("多开发票调整要落在本次核销的一张计提上")
     gross, tax = r2(gross), r2(tax)
     if gross < 0.005 or tax < 0 or gross - tax < 0.004:
         raise ValueError("多开发票的含税差和进项税额转出金额不对")
-    expl = "供应商多开发票%.2f元，确认不补付：原费用和供应商往来不变，进项税额转出%.2f元（%s）" % (
-        gross, tax, str(memo or "").strip())
+    expl = "%s供应商多开发票%.2f元，确认不补付：原费用和供应商往来不变，进项税额转出%.2f元（%s）" % (
+        str(number or ""), gross, tax, str(memo or "").strip())
     return [_ln("多开票调整", expl, "2221.01.04", "进项税额转出", cr=tax)] if tax else []
 
 

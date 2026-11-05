@@ -1243,7 +1243,7 @@ def _preview_data(inst, self_vno=None, _nest=False):
                 for l in lines:
                     if l["block"] == "核销" and l["acct"] == "2221.01.06" and l["expl"].startswith(str(over_invoice["number"])):
                         l["dr"] = LV.r2(l["dr"] + over["tax"])
-                adj = LV.overinvoice_lines(vouchers, over["vno"], over["gross"], over["tax"], over["memo"])
+                adj = LV.overinvoice_lines(vouchers, over["vno"], over["gross"], over["tax"], over["memo"], over_invoice["number"])
                 lines = [l for l in lines if l["block"] != "支付"] + adj + [l for l in lines if l["block"] == "支付"]
                 notes.append("供应商多开发票 %.2f，确认不补付：原费用和供应商往来不变，进项税额转出 %.2f（%s）" % (
                     over["gross"], over["tax"], over["memo"]))
