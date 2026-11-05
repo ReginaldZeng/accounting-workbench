@@ -4782,9 +4782,27 @@ def _standard_bill_rows(carrier, period):
 
 
 @router.get("/api/logistics-review/standard-bill")
-def review_standard_bill(request: Request, carrier: str = "", period: str = ""):
+def review_standard_bill(request: Request, carrier: str = "", period: str = "", format: str = "aj"):
     if not _perm(request):
         return JSONResponse({"ok": False, "msg": "无权限"}, status_code=403)
+    if format not in ("aj", "an"):
+        return JSONResponse({"ok": False, "msg": "format 只能是 aj 或 an"}, status_code=400)
+    if format == "an":
+        from kernels import logistics_an_bill as anb
+        from io import BytesIO
+        from urllib.parse import quote
+        with db._engine.connect() as c:
+            raw = c.execute(select(BR.c.name, BR.c.data).where(
+                (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "original")).order_by(BR.c.id.desc()).limit(1)).mappings().first()
+        if not raw or not raw.get("data"):
+            return JSONResponse({"ok": False, "msg": "本期没有带费用明细列的原始附件，不能拆分 A-N 费用"}, status_code=409)
+        try:
+            data, _ = anb.convert_to_xlsx(BytesIO(raw["data"]), carrier, period)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "msg": str(e)}, status_code=409)
+        filename = quote(f"{carrier}_{period}_A-N标准逐笔账单.xlsx")
+        return Response(content=data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from io import BytesIO
