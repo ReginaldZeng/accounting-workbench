@@ -80,10 +80,10 @@ def _check_headers(header, start, sheet, row):
     note_col = next((col for col in range(start + 7, len(header)) if _h(header[col]) in ("备注", "账单备注")), None)
     if note_col is None:
         _error(sheet, row, "动态费用列之后必须有备注列")
-    if _h(header[note_col]) == "账单备注":
-        trailing = [_h(value) for value in header[note_col + 1:] if _h(value)]
-        if trailing not in ([], ["金蝶数量", "check", "复核备注"]):
-            _error(sheet, row, "账单备注之后只能是金蝶数量、check、复核备注三列系统复核结果")
+    trailing = [_h(value) for value in header[note_col + 1:] if _h(value)]
+    review_tails = (["金蝶数量", "check", "复核备注"], ["金蝶数量", "差异", "毛重比", "单位运费", "备注"])
+    if trailing not in ([], *review_tails):
+        _error(sheet, row, "备注之后只能是旧三列或新五列系统复核结果")
     if note_col == start + 7:
         _error(sheet, row, "费用总额与备注之间至少需要一列费用拆分")
     fee_cols = list(range(start + 7, note_col))

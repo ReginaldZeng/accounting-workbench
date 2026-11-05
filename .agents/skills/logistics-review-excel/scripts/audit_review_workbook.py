@@ -19,6 +19,8 @@ AJ_HEADERS = ["主体", "金蝶系统单据编号", "费用类型", "数量计�
 AN_HEADERS = ["主体", "金蝶系统单据编号", "费用类型", "数量计算标准", "账单数量", "数量单位", "费用总额", "运费", "送货/入仓费", "提货费", "卸货费", "上楼费", "其他", "备注"]
 BASE_HEADERS = AJ_HEADERS[:7]
 REVIEW_TAIL = ["账单备注", "金蝶数量", "check", "复核备注"]
+DETAIL_REVIEW_HEADERS = ["金蝶数量", "差异", "毛重比", "单位运费", "备注"]
+MATERIAL_HEADERS = ["主体", "类型", "单号", "往来/领用部门", "物料分类", "物料编码", "物料名称", "基本数量", "基本数量单位", "销售额", "承运商", "运输费用", "装卸费用", "合计单位费用", "费比"]
 
 
 def text(value):
@@ -211,6 +213,36 @@ def check_dynamic(ws, errors, review=False):
             "fees": {name: round(value, 2) for name, value in zip(fee_names, fee_sums)}}
 
 
+def check_review_details(wb, errors):
+    lists = [ws for ws in wb.worksheets if ws.title.endswith("列表")]
+    if not lists:
+        errors.append("系统复核表缺少各类型单据列表")
+    for ws in lists:
+        headers = [text(cell.value).replace("\n", "") for cell in ws[1]]
+        while headers and not headers[-1]:
+            headers.pop()
+        if headers != MATERIAL_HEADERS:
+            errors.append(f"{ws.title} 单据列表表头不符合约定")
+    found = False
+    for ws in wb.worksheets:
+        if ws.title == AJ_SHEET or ws.title.endswith("列表"):
+            continue
+        for row in range(1, min(ws.max_row, 10) + 1):
+            headers = [text(ws.cell(row, col).value).replace("\n", "") for col in range(1, ws.max_column + 1)]
+            for col in range(len(headers) - len(DETAIL_REVIEW_HEADERS) + 1):
+                if headers[col:col + len(DETAIL_REVIEW_HEADERS)] != DETAIL_REVIEW_HEADERS:
+                    continue
+                found = True
+                for data_row in range(row + 1, ws.max_row + 1):
+                    for offset in range(4):
+                        value = ws.cell(data_row, col + offset + 1).value
+                        if value not in (None, "") and number(value) is None:
+                            errors.append(f"{ws.title}!{ws.cell(data_row, col + offset + 1).coordinate} 复核数值必须是数值或留空")
+                break
+    if not found:
+        errors.append("原始明细页未找到金蝶数量、差异、毛重比、单位运费、备注五列")
+
+
 def business_status(wb, profile):
     if profile == "standard-review":
         return "系统复核导出（不代表已登记复核）"
@@ -300,7 +332,9 @@ def audit(path, carrier="", period="", require_final=False):
         if actual == AN_HEADERS:
             profile = "standard-an"
         elif headers[:7] == BASE_HEADERS and any(value in ("备注", "账单备注") for value in headers[7:]):
-            profile = "standard-review" if len(headers) >= 10 and headers[-4:] == REVIEW_TAIL else "standard-dynamic"
+            has_lists = any(name.endswith("列表") for name in names)
+            has_review = (len(headers) >= 10 and headers[-4:] == REVIEW_TAIL) or headers[-6:] == ["备注"] + DETAIL_REVIEW_HEADERS
+            profile = "standard-review" if has_review or has_lists else "standard-dynamic"
         else:
             profile = "standard-aj"
         expected = [AJ_SHEET]
@@ -327,7 +361,10 @@ def audit(path, carrier="", period="", require_final=False):
     elif profile == "standard-aj":
         totals = check_standard_aj(wb[AJ_SHEET], errors)
     elif profile in ("standard-dynamic", "standard-review"):
-        totals = check_dynamic(wb[AJ_SHEET], errors, review=(profile == "standard-review"))
+        old_review = profile == "standard-review" and headers[-4:] == REVIEW_TAIL
+        totals = check_dynamic(wb[AJ_SHEET], errors, review=old_review)
+        if profile == "standard-review" and not old_review:
+            check_review_details(wb, errors)
     elif profile == "standard":
         totals = check_totals(wb["03计提对账单"], 4, ["计提差异(计提-账单)"], errors)
         required_headers = ["费用行ID", "核对方案", "单据编码", "账单金额", "标准金额", "金额差异"]

@@ -4798,7 +4798,9 @@ def review_standard_bill(request: Request, carrier: str = "", period: str = "", 
         with db._engine.connect() as c:
             rows = [dict(r) for r in c.execute(select(BL).where(
                 (BL.c.carrier == carrier) & (BL.c.period == period) & (BL.c.grain == "detail")).order_by(BL.c.id)).mappings().all()]
-            raw = c.execute(select(BR.c.name, BR.c.data).where(
+            standard_raw = c.execute(select(BR.c.name, BR.c.data).where(
+                (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "standard")).order_by(BR.c.id.desc()).limit(1)).mappings().first()
+            original_raw = c.execute(select(BR.c.name, BR.c.data).where(
                 (BR.c.carrier == carrier) & (BR.c.period == period) & (BR.c.role == "original")).order_by(BR.c.id.desc()).limit(1)).mappings().first()
         if not rows:
             return JSONResponse({"ok": False, "msg": "本期没有可生成系统复核表的逐笔行"}, status_code=409)
@@ -4819,9 +4821,15 @@ def review_standard_bill(request: Request, carrier: str = "", period: str = "", 
         required_forms = sorted({_doc_form((r.get("doc_no") or "").split("+")[0]) for r in rows
                                  if (r.get("doc_no") or "").split("+")[0] not in ("", "无单据")})
         documents, _, _ = _docs_snapshot_merged(carrier, period, fingerprint, forms=required_forms)
+        standard_data = standard_raw["data"] if standard_raw and standard_raw.get("data") else None
+        original_data = original_raw["data"] if original_raw and original_raw.get("data") else None
+        source_data = standard_data if dre.has_detail_source(standard_data) else original_data
+        if not dre.has_detail_source(source_data):
+            source_data = standard_data or original_data
+        material_rows = _review_material_rows(carrier, period, documents)
         data, _ = dre.build_workbook(rows, documents, _doc_ok(carrier, period), _line_buckets,
                                      _eff_subject, _eff_fee, _standard_qty, carrier, period,
-                                     BytesIO(raw["data"]) if raw and raw.get("data") else None)
+                                     BytesIO(source_data) if source_data else None, material_rows, _DOC_TYPES)
         filename = quote(f"{carrier}_{period}_动态费用系统复核表.xlsx")
         return Response(content=data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
