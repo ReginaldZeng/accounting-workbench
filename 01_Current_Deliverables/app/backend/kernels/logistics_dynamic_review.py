@@ -148,6 +148,9 @@ def enrich_detail_sheets(wb, documents, confirmations, carrier, period, values_w
             cell.fill = PatternFill("solid", fgColor="FFF200")
             cell.font = Font(bold=True, color="000000")
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for row_number in range(info["header_row"] + 1, ws.max_row + 1):
+            for offset in range(len(REVIEW_HEADERS)):
+                ws.cell(row_number, header_col + offset).value = None
         for row in info["rows"]:
             doc = _match_document(row, documents)
             confirmed = confirmations.get(str((doc or {}).get("doc_no") or str(row.get("doc_no") or "").split("+")[0]))

@@ -47,6 +47,8 @@ class DynamicReviewTests(unittest.TestCase):
         values = ["深圳市星期零食品科技有限公司", "XS1", "出库运费", "按重量", 4000, "kg", 3030, 2600, 430, "供应商原备注"]
         for offset, value in enumerate(values, 3):
             ws.cell(3, offset, value)
+        ws.cell(3, 14, "=1/0")
+        ws.cell(4, 13, "=1/0")
         bio = BytesIO()
         wb.save(bio)
         bio.seek(0)
@@ -64,6 +66,8 @@ class DynamicReviewTests(unittest.TestCase):
         self.assertEqual([wb["1.深圳星期零"].cell(3, col).value for col in range(13, 17)], [4000, 0, 1, 0.7575])
         self.assertIn("人工确认：曾禹锡", wb["1.深圳星期零"].cell(3, 17).value)
         self.assertTrue(wb["1.深圳星期零"].cell(2, 13).fill.fgColor.rgb.endswith("FFF200"))
+        self.assertTrue(all(wb["1.深圳星期零"].cell(r, c).data_type != "f"
+                            for r in (3, 4) for c in range(13, 18)))
         home_headers = [cell.value for cell in wb["标准逐笔"][1]]
         self.assertEqual(home_headers[-1], "备注")
         self.assertNotIn("金蝶数量", home_headers)
@@ -120,6 +124,26 @@ class DynamicReviewTests(unittest.TestCase):
         wb.save(bio)
         with self.assertRaisesRegex(ValueError, "系统复核结果"):
             intake.parse_standard_bill({"carrier": "极鲜达", "period": "2026-09"}, bio.getvalue())
+
+    def test_pending_current_carrier_is_included_in_document_lists(self):
+        from unittest.mock import patch
+        from routers import logistics_review as router
+
+        doc = {"doc_no": "QTCK011653", "subject": "深圳星期零", "fee_item": "出库运费",
+               "materials": [{"base_kg": 100, "base_qty": 100, "base_unit": "千克", "sales": 1000,
+                              "code": "3001", "name": "物料", "party": "领用部门"}]}
+        freight = {"QTCK011653": {"parts": {
+            ("极鲜达", "2026-09", False, "pending"): {"tr": 100, "ld": 20, "ot": 0},
+            ("天鹰物流", "2026-09", True, "v1"): {"tr": 50, "ld": 0, "ot": 0},
+        }}}
+        with patch.object(router, "_outstock_freight", return_value=freight), \
+             patch.object(router, "_kd_shared_materials", return_value={"heads": {}, "groups": {}}):
+            default_rows = router._review_material_rows("极鲜达", "2026-09", [doc])
+            export_rows = router._review_material_rows("极鲜达", "2026-09", [doc], include_pending=True)
+        self.assertEqual({row["carrier"] for row in default_rows}, {"天鹰物流"})
+        self.assertEqual({row["carrier"] for row in export_rows}, {"极鲜达", "天鹰物流"})
+        pending = next(row for row in export_rows if row["carrier"] == "极鲜达")
+        self.assertEqual((pending["fee_tr"], pending["fee_ld"]), (100, 20))
 
 
 if __name__ == "__main__":

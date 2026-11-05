@@ -4826,7 +4826,7 @@ def review_standard_bill(request: Request, carrier: str = "", period: str = "", 
         source_data = standard_data if dre.has_detail_source(standard_data) else original_data
         if not dre.has_detail_source(source_data):
             source_data = standard_data or original_data
-        material_rows = _review_material_rows(carrier, period, documents)
+        material_rows = _review_material_rows(carrier, period, documents, include_pending=True)
         data, _ = dre.build_workbook(rows, documents, _doc_ok(carrier, period), _line_buckets,
                                      _eff_subject, _eff_fee, _standard_qty, carrier, period,
                                      BytesIO(source_data) if source_data else None, material_rows, _DOC_TYPES)
@@ -4884,7 +4884,7 @@ def review_standard_bill(request: Request, carrier: str = "", period: str = "", 
                     headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"})
 
 
-def _review_material_rows(carrier, period, docs):
+def _review_material_rows(carrier, period, docs, include_pending=False):
     try:
         freight = _outstock_freight(period)
     except Exception:
@@ -4900,7 +4900,8 @@ def _review_material_rows(carrier, period, docs):
         qtys = [abs(float(m.get("base_kg") if m.get("base_kg") is not None else (m.get("base_qty") or 0))) for m in lines]
         total_qty = sum(qtys)
         parts = (freight.get(no) or {}).get("parts") or {}
-        bill_parts = sorted((key, fees) for key, fees in parts.items() if key[3] != "pending") if parts else []
+        bill_parts = sorted((key, fees) for key, fees in parts.items()
+                            if key[3] != "pending" or (include_pending and key[0] == carrier)) if parts else []
         if not bill_parts:
             bill_parts = [(("", "", "", ""), {"tr": 0.0, "ld": 0.0, "ot": 0.0})]
         head = heads.get(no) or {}
